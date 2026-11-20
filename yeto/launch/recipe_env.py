@@ -53,11 +53,14 @@ def declared(args: Any) -> dict[str, Any] | None:
 
 
 def user_env(args: Any) -> dict[str, str]:
-    """What the launch sets itself for every island: ``--island-env`` then ``--modal-env``."""
-    from .modal_islands import parse_modal_env
-
-    return {**parse_modal_env(getattr(args, "island_env", None) or [], flag="--island-env"),
-            **parse_modal_env(getattr(args, "modal_env", None) or [])}
+    """What the launch sets itself for every island: ``--island-env`` then ``--modal-env``
+    (a malformed item is skipped here: ``modal_islands.parse_modal_env`` refuses it)."""
+    out: dict[str, str] = {}
+    for item in (*(getattr(args, "island_env", None) or ()), *(getattr(args, "modal_env", None) or ())):
+        key, sep, value = str(item).partition("=")
+        if sep and key:
+            out[key] = value
+    return out
 
 
 def island_defaults(iargs: Any, taken: Mapping[str, str] | None = None) -> dict[str, str]:

@@ -229,13 +229,7 @@ def _env_settings(args) -> dict[str, str]:
 
     env = {k: v for k, v in os.environ.items()
            if k in ("YETO_MILES_TRAIN_EXTRA_ARGV", "PYTORCH_CUDA_ALLOC_CONF")}
-    try:
-        env.update(effective_env(args))
-    except ValueError:  # a malformed KEY=VALUE: the launch refuses it elsewhere
-        for item in getattr(args, "modal_env", None) or ():
-            key, sep, value = str(item).partition("=")
-            if sep:
-                env[key] = value
+    env.update(effective_env(args))
     return env
 
 
