@@ -258,9 +258,9 @@ def test_ascend_pool_defaults_to_vllm_ascend():
 # --- fix1115 F08 ----------------------------------------------------------------
 def test_platform_cuda_takes_the_recipe_default_image():
     args = SimpleNamespace(training_mode="rl", rl_backend="miles", rl_model_recipe="kimi_k31",
-                           tuning="full", rl_image=miles_pins.MILES_K31_FULL_IMAGE,
+                           tuning="full", rl_image=miles_pins.MILES_K31_NEXT9_IMAGE,
                            rl_island_engine=["1:platform=cuda"])
-    assert island_engine.island_args(args, 1, 2).rl_image == miles_pins.MILES_K31_FULL_IMAGE
+    assert island_engine.island_args(args, 1, 2).rl_image == miles_pins.MILES_K31_NEXT9_IMAGE
     args.rl_model_recipe, args.tuning = None, None
     assert island_engine.island_args(args, 1, 2).rl_image == miles_pins.default_rl_image()
 
@@ -274,7 +274,7 @@ def test_platform_without_a_pinned_row_asks_for_an_image():
 
 def test_platform_only_keeping_the_run_image_passes_release():
     args = SimpleNamespace(training_mode="rl", rl_backend="miles", rl_model_recipe="kimi_k31",
-                           tuning="full", rl_image=miles_pins.MILES_K31_FULL_IMAGE,
+                           tuning="full", rl_image=miles_pins.MILES_K31_NEXT9_IMAGE,
                            rl_code_pack="release", rl_island_engine=["1:platform=cuda"])
     island_engine.check(args, 2)
     # a platform default that differs from the run-wide image is still refused
@@ -285,6 +285,7 @@ def test_platform_only_keeping_the_run_image_passes_release():
 
 def test_infer_backend_from_the_image():
     assert island_engine.infer_backend(miles_pins.MILES_K31_FULL_IMAGE) == "miles"
+    assert island_engine.infer_backend(miles_pins.MILES_K31_NEXT9_IMAGE) == "miles"
     assert island_engine.infer_backend(miles_pins.MILES_NEXT_IMAGE) == "miles"
     assert island_engine.infer_backend(verl_pins.VERL_IMAGE) == "verl"
     assert island_engine.infer_backend(verl_pins.VERL_MEGATRON_IMAGE) == "verl"

@@ -703,10 +703,10 @@ MILES_PORTS_V1_IMAGE = pinned_image(
 # fork's author-metadata normalization.
 MILES_K31_IMAGE = pinned_image(
     "yeto-miles-k31", "028e505de58552e6ede8926c8bf8ab8451e8e749cfc35afc1eb70e8d362c65b3")
-# The Kimi-K3.1 full-parameter (partial-experts) trainer image: the default
-# --rl-image of --rl-model-recipe kimi_k31 --tuning full (the LoRA form and every
-# other recipe keep MILES_K31_IMAGE). Same registry rule; the digest is fixed. Tag
+# The FULL_E full-parameter (partial-experts) trainer image, the --tuning full default
+# before MILES_K31_NEXT9_IMAGE. Same registry rule; the digest is fixed. Tag
 # k31-aa6b6ff-35708f7: the FULL_E image sha256:2de5d796... plus the same .git-only layer.
+# Kept for runs still pinned to it.
 MILES_K31_FULL_IMAGE = pinned_image(
     "yeto-miles-k31", "fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325")
 # The former full image 2de5d796 (pre-rewrite .git, FULL_E 1f29e430) with only its yeto
@@ -718,10 +718,19 @@ MILES_K31_FULL_IMAGE = pinned_image(
 # docker/miles-ports/make_layer.py resolve_same_layer_whiteouts now writes): the same
 # files, the same Miles; every other layer, the labels and the entrypoint are unchanged.
 # Tag k31-1f29e43-35708f7-overlayfix. Kept for runs still pinned to the former full
-# image; the overlay-safe repack of the current full image fa70fe28 follows the trainer
-# image rebuild.
+# image.
 MILES_K31_FULL_OVERLAYFIX_IMAGE = pinned_image(
     "yeto-miles-k31", "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14")
+# The Kimi-K3.1 full-parameter (partial-experts) trainer image: the default --rl-image of
+# --rl-model-recipe kimi_k31 --tuning full (the LoRA form and every other recipe keep
+# MILES_K31_IMAGE: next9 was measured on the full-parameter form only). Miles
+# MILES_K31_NEXT9_COMMIT (FULL_E + the trainer MFU work behind env switches that default
+# off, so with no switch set it trains FULL_E's math) on the overlay-safe base: pulls and
+# runs on Modal and on overlay2 / containerd-snapshotter bare-metal nodes as it is. Tag
+# k31-f61eb35-35708f7-a1-overlayfix; same registry rule, the digest is fixed. The MFU
+# switches are not injected by yeto: docs/KIMI_K31_ASYNC_RL_GUIDE.md lists them.
+MILES_K31_NEXT9_IMAGE = pinned_image(
+    "yeto-miles-k31", "3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225")
 MILES_NEXT_IMAGE = MILES_K31_IMAGE
 # image digest -> the Miles commit inside it, when it is not MILES_NEXT_COMMIT: the island
 # checks its checkout against this commit (--miles-commit) instead of the default pin
@@ -739,8 +748,8 @@ IMAGE_MILES_COMMITS: dict[str, str] = {
 }
 # digest of an image an overlay applier rejects -> the digest of the same image with the
 # offending layer repacked (same files, same Miles commit). The legacy pair of the former
-# full image; the repack of the current full image fa70fe28 follows the trainer image
-# rebuild, so the full-image default has no overlay-safe variant until then.
+# full image; the full-image default MILES_K31_NEXT9_IMAGE is overlay-safe as built, and
+# the previous full image fa70fe28 has no repack.
 OVERLAY_SAFE_DIGESTS: dict[str, str] = {
     "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b":
         "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14",
@@ -789,9 +798,9 @@ def default_rl_image(*, recipe: str | None = None, tuning: str | None = None) ->
     --rl-image-private; see yeto.launcher.registry_login_for. The packages
     are private until they are opened: pass credentials as docs/CLOUDS.md
     ("Default container images") describes. ``recipe="kimi_k31"`` with
-    ``tuning="full"`` selects :data:`MILES_K31_FULL_IMAGE`.
+    ``tuning="full"`` selects :data:`MILES_K31_NEXT9_IMAGE`.
     """
 
     if recipe == "kimi_k31" and tuning == "full":
-        return MILES_K31_FULL_IMAGE
+        return MILES_K31_NEXT9_IMAGE
     return MILES_NEXT_IMAGE

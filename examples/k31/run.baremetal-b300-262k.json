@@ -30,7 +30,7 @@
       "--rl-node-inventory",
       "<inventory.b300-6x8-baremetal.yaml>",
       "--rl-image",
-      "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14",
+      "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225",
       "--island-env",
       "NCCL_RAS_ENABLE=0",
       "--island-env",

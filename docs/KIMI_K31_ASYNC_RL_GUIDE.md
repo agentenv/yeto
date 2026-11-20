@@ -2500,16 +2500,25 @@ listed, `pool-stop` again.
 Use this image for the full-parameter recipe:
 
 ```
-docker:ghcr.io/agentenv/yeto-miles-k31@sha256:fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325
+docker:ghcr.io/agentenv/yeto-miles-k31@sha256:3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225
 ```
 
 It is the default `--rl-image` for `--rl-model-recipe kimi_k31 --tuning full`
-(`MILES_K31_FULL_IMAGE` in `yeto/rl/adapters/miles/pins.py`). It is also the
-image the trainer ran in the validated Modal end-to-end run. It carries Miles
-`k31/integ-trainer` `aa6b6ff5f7`. Recommended practice: pin this digest
-explicitly in `trainer.argv`
-(`--rl-image docker:ghcr.io/agentenv/yeto-miles-k31@sha256:fa70fe28...`, the
+(`MILES_K31_NEXT9_IMAGE` in `yeto/rl/adapters/miles/pins.py`, tag
+`k31-f61eb35-35708f7-a1-overlayfix`). It carries Miles `k31/integ-next9`
+`f61eb35d`: the `k31/integ-trainer` changes plus the trainer MFU work, each
+behind an environment switch that defaults off (section 9.1.1). With no switch
+set it trains the same math as the previous full image. Its layers are
+overlay-safe, so the same image runs on Modal and on bare-metal ssh nodes
+(overlay2 and the containerd snapshotter). Recommended practice: pin this
+digest explicitly in `trainer.argv`
+(`--rl-image docker:ghcr.io/agentenv/yeto-miles-k31@sha256:3a0c5445...`, the
 full value above) so the run does not depend on a default.
+
+The previous full-parameter default,
+`yeto-miles-k31@sha256:fa70fe28...` (`MILES_K31_FULL_IMAGE`, Miles
+`k31/integ-trainer` `aa6b6ff5f7`), is the image the validated Modal
+end-to-end run used. It stays pinned for runs that name it.
 
 The image `yeto-miles-k31@sha256:028e505d...` (`MILES_K31_IMAGE`) is for the
 LoRA recipe.
@@ -2527,6 +2536,54 @@ pin. For a private registry, add `--rl-image-private` with
 
 The island checks its Miles checkout against the commit recorded for the
 image digest (`IMAGE_MILES_COMMITS` in `pins.py`).
+
+#### 9.1.1 Trainer MFU switches (next9)
+
+yeto does not set these switches; each one defaults off in Miles. To turn
+them on, pass each `KEY=VALUE` to the trainer island with `--modal-env`
+(Modal) or `--island-env` (ssh). A value you pass wins over anything else.
+
+| Variable | Value | What it does |
+|---|---|---|
+| `MILES_K31_INDEXER_TP_SPLIT` | `1` | DSA indexer split across the TP group |
+| `MILES_K31_INDEXER_RECOMPUTE_CACHE` | `1` | Recompute reuses the indexer top-k of the forward pass (128 MiB per DSA layer and microbatch at 131k tokens per rank) |
+| `MILES_K31_KDA_CP_RELAYOUT_V2` | `1` | KDA CP relayout v2 |
+| `MILES_K31_MLA_CP_GATHER_V2` | `1` | MLA CP gather v2 |
+| `MILES_K31_KDA_SAVE_INTERMEDIATES` | `1` | KDA backward keeps its intermediates instead of recomputing them (about 3.6 GiB at 131k tokens) |
+| `MILES_K31_MXFP4_LUT_DEQUANT` | `1` | MXFP4 lookup-table dequant |
+| `MILES_K31_MXFP4_REDEQUANT_BACKWARD` | `1` | Frozen MXFP4 experts dequantized again in backward instead of kept |
+| `MILES_K31_MXFP4_BATCHED_DEQUANT` | `1` | Batched MXFP4 dequant |
+| `MILES_K31_MXFP4_TRITON_DEQUANT` | `1` | Triton MXFP4 dequant |
+| `MILES_K31_MXFP4_QAT_NO_SYNC` | `1` | MXFP4 QAT on-grid test without a host sync |
+| `MILES_K3_SITU_TRITON` | `1` | Triton SiTU kernel |
+| `MILES_K3_SITU_PROBS_FUSED` | `1` | SiTU router probabilities fused into the experts |
+| `MILES_K3_ATTN_RES_FUSED` | `1` | Fused attention-residual aggregation (about 1 ulp) |
+| `MILES_K31_ROUTER_GEMM` | `tf32` | Router gating GEMM in TF32 instead of the FP32 SIMT path (not bit-identical) |
+| `MILES_K31_DSA_QUERY_SPLIT` | `64` | DSA query split (not bit-identical in the KV gradient) |
+| `MILES_K31_CHUNK_SORT_MAP_TORCH` | `1` | Chunk sort map in torch |
+| `MILES_K31_KDA_CP_RELAYOUT_A2A` | `1` | KDA CP relayout as one all-to-all |
+| `MILES_K31_KDA_SP_RELAYOUT_FUSED` | `1` | KDA SP relayout fused (not bit-identical in the gradient) |
+| `MILES_K31_KDA_CORE_RELAYOUT_OVERLAP` | `1` | KDA core relayout overlapped with compute |
+| `MILES_K31_KDA_OUT_PROJ_RS_CHUNKS` | `4` | KDA output projection reduce-scatter in 4 chunks |
+| `MILES_K31_KDA_FLA_CP_BLOCK` | `32` | fla KDA CP block size |
+| `MILES_K3_MOE_A2A_OVERLAP` | `1` | MoE expert-parallel all-to-all overlapped in forward |
+| `MILES_K3_MOE_A2A_OVERLAP_BWD` | `1` | The same in backward |
+| `MILES_SC_TOPK_PREP` | `1` | Score-centering top-k candidates prepared once per step |
+| `MILES_SC_LOGPROB_LEAN` | `1` | Leaner score-centering selected log-probs |
+| `MILES_CP_RESPONSE_VIEW` | `1` | CP response view in the logit processors |
+
+What was measured with all of them on: two 16-layer and 33-layer slices of
+K3.1-Pro (PP1 x TP8 x CP2, 262k, 2 x 8 B300 on Modal, 6 steps). Miles
+reported 8.8-9.1% MFU on the 16-layer slice (5.1% on the baseline before this work), and
+the two slices fit a full-model estimate of about 15.7% for PP3 x TP8 x CP2 x
+EP16. Loss, policy loss, KL and log-probs were bit-identical to the run
+without the newest switches; the gradient norm differed by at most 5e-6
+(summation order).
+
+Why they are not on by default: no full 93-layer PP3 run has used them yet,
+and stage 0 of the 262k layout has only a few GiB of memory headroom
+([K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md)). Turn them on after a
+short run on your own layout shows stage-0 memory within the limit.
 
 ### 9.2 Sampler image (vLLM ROCm)
 

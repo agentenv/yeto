@@ -332,7 +332,7 @@
     },
     "sampler_image_pin": "yeto.rl.sampler_pins:VLLM_SAMPLER_IMAGE_ROCM",
     "status": "verified",
-    "trainer_image_pin": "yeto.rl.adapters.miles.pins:MILES_K31_FULL_IMAGE"
+    "trainer_image_pin": "yeto.rl.adapters.miles.pins:MILES_K31_NEXT9_IMAGE"
    },
    "budget": {
     "usd": "<usd>",
@@ -431,7 +431,7 @@
    "sampler_image": "yeto.rl.sampler_pins:VLLM_SAMPLER_IMAGE_ROCM",
    "status": "verified",
    "trainer": "miles",
-   "trainer_image": "yeto.rl.adapters.miles.pins:MILES_K31_FULL_IMAGE"
+   "trainer_image": "yeto.rl.adapters.miles.pins:MILES_K31_NEXT9_IMAGE"
   },
   "rejected": [
    [
