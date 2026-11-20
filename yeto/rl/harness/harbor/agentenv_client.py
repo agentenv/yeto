@@ -47,6 +47,11 @@ SDK_SANDBOX_URL_ENV = "E2B_SANDBOX_URL"
 # REST (the SDK has no cold-start method); default is prebuilt templates.
 COLD_START_ENV = "YETO_AGENTENV_COLD_START"
 REQUEST_TIMEOUT_ENV = "YETO_AGENTENV_REQUEST_TIMEOUT_S"
+# Cold-start root disk (sparse). Task images converted to overlaybd can report a
+# base virtual size of 64 GiB; the gateway's default diskSizeMB (8 GiB) is then
+# refused ("smaller than base virtual size; shrinking is disabled").
+DISK_SIZE_MB_ENV = "YETO_AGENTENV_DISK_SIZE_MB"
+DEFAULT_DISK_SIZE_MB = 131072
 
 # Account caps.  AgentENV has no published fixed cap (TODO(verify on hardware):
 # confirm the cluster's real concurrency/rate limits and tune these defaults;
@@ -104,10 +109,41 @@ class AgentenvClient(Protocol):
     # def list_sandboxes(self, metadata: dict[str, str]) -> list[str]
 
 
+API_KEY_FILE_ENV = "AGENTENV_API_KEY_FILE"  # a 0600 file: AGENTENV_API_KEY=... (env-file) or the bare key
+
+
+def key_from_text(text: str) -> str | None:
+    """The key in an env-file (``AGENTENV_API_KEY=`` / ``E2B_API_KEY=``, ``export`` and quotes
+    allowed) or a file holding only the key; None when there is none. Never logged."""
+    bare: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        name, sep, value = line.partition("=")
+        if sep:
+            if name.strip() in (API_KEY_ENV, SDK_API_KEY_ENV):
+                value = value.strip().strip("'\"")
+                if value:
+                    return value
+            continue
+        bare.append(line)
+    return bare[0] if len(bare) == 1 and " " not in bare[0] else None
+
+
 def load_token() -> str:
     token = os.environ.get(API_KEY_ENV) or os.environ.get(SDK_API_KEY_ENV)
+    if not token and (path := os.environ.get(API_KEY_FILE_ENV, "").strip()):
+        try:
+            token = key_from_text(open(path).read())
+        except OSError as error:
+            raise AgentenvError(f"{API_KEY_FILE_ENV}={path}: {type(error).__name__}") from None
+        if not token:
+            raise AgentenvError(f"{API_KEY_FILE_ENV}={path} holds no {API_KEY_ENV}= line or bare key")
     if not token:
-        raise AgentenvError(f"no {API_KEY_ENV} (or {SDK_API_KEY_ENV}) in the environment")
+        raise AgentenvError(f"no {API_KEY_ENV} (or {SDK_API_KEY_ENV}, {API_KEY_FILE_ENV}) in the environment")
     return token
 
 
@@ -217,7 +253,10 @@ class SdkAgentenvClient:
         base = self._api_url
         if not base:
             raise AgentenvError("cold start needs AGENTENV_API_URL (the control-plane base URL)")
-        body: dict[str, object] = {"image": image, "timeout": ttl_seconds}
+        body: dict[str, object] = {"image": image, "timeout": ttl_seconds,
+                                   "cpuCount": int(os.environ.get("YETO_AGENTENV_CPU_COUNT", "2")),
+                                   "memoryMB": int(os.environ.get("YETO_AGENTENV_MEMORY_MB", "4096")),
+                                   "diskSizeMB": int(os.environ.get(DISK_SIZE_MB_ENV, DEFAULT_DISK_SIZE_MB))}
         if metadata:
             body["metadata"] = metadata
         if env:
@@ -312,8 +351,12 @@ class SdkAgentenvClient:
 
     def start_command(self, sandbox_id: str, command: str, *, cwd: str | None,
                       env: dict[str, str] | None, user: str | int | None) -> int:
+        # timeout=0: the e2b background stream defaults to 60s total; the sandbox
+        # layer enforces timeouts/cancel itself (it kills the command), so the
+        # stream must not cap long agent (2400s) / verifier (300s) runs.
         handle = self._box(sandbox_id).commands.run(
-            command, background=True, cwd=cwd, envs=env or None, user=_sdk_user(user))
+            command, background=True, cwd=cwd, envs=env or None, user=_sdk_user(user),
+            timeout=0)
         pid = int(handle.pid)
         self._handles[(sandbox_id, pid)] = handle
         return pid

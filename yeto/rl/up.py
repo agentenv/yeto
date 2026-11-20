@@ -38,6 +38,9 @@ Run config (JSON; paths may use ``~``)::
      "preflight": {"commands": [["python", "check.py"]]},
      "sandbox": {"envs": "<envs.json>", "docker_host": "ssh://<sandbox host>", "max_run_containers": 40,
                  "max_containers_per_sampler": 20},  # the alert line: the larger of the two
+     # AgentENV microVMs: "sandbox": {"provider": "agentenv"} (no docker host: no sandbox
+     # prepare / status / teardown, no container count; the sampler spec's agentic.setup
+     # names the gateway)
      # several sandbox hosts: "docker_host": ["ssh://h1", "ssh://h2"], or "envs" (every host
      # of the envs file); the containers of the run are counted and removed on each
      "pool": {"config": "<pool.json>", "interval_s": 30},
@@ -291,7 +294,14 @@ def _check_run_sections(cfg: dict[str, Any]) -> None:
     _string_list(tr, "trainer", "progress_paths")
     if tr.get("usd_per_h") is not None:
         _number(tr, "trainer", "usd_per_h")
-    sb = _section(cfg, "sandbox", {"envs", "docker_host", "max_run_containers", "max_containers_per_sampler"})
+    sb = _section(cfg, "sandbox", {"envs", "docker_host", "max_run_containers", "max_containers_per_sampler",
+                                   "provider"})
+    provider = sb.get("provider", SANDBOX_REMOTE_DOCKER)
+    if provider not in SANDBOX_PROVIDERS:
+        raise ValueError(f"run config: sandbox.provider must be one of {list(SANDBOX_PROVIDERS)} (got {provider!r})")
+    if provider == SANDBOX_AGENTENV and sb.get("docker_host"):
+        raise ValueError("run config: sandbox.docker_host is for remote-docker; AgentENV microVMs have no docker "
+                         "host (drop it with sandbox.provider agentenv)")
     for key in ("max_run_containers", "max_containers_per_sampler"):
         if sb.get(key) is not None:
             _number(sb, "sandbox", key)
@@ -311,6 +321,11 @@ def _check_run_sections(cfg: dict[str, Any]) -> None:
         raise ValueError(f"run config: preflight.commands must be a list of argv lists (got {commands!r})")
 
 
+# sandbox.provider: remote-docker (default; ``yeto sandbox`` prepares the docker hosts of sandbox.envs)
+# or agentenv (E2B-compatible microVMs: nothing to prepare, the sampler's agentic.setup carries the gateway)
+SANDBOX_REMOTE_DOCKER = "remote-docker"
+SANDBOX_AGENTENV = "agentenv"
+SANDBOX_PROVIDERS = (SANDBOX_REMOTE_DOCKER, SANDBOX_AGENTENV)
 ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit"}
 CONTROLLERS = ("subprocess", "in_process")
 
@@ -618,7 +633,11 @@ class Run:
 
     @property
     def envs(self) -> str | None:
+        """The docker-host envs file ``yeto sandbox`` drives; None for agentenv (no docker host:
+        no sandbox status / prepare / teardown)."""
         sb = self.cfg.get("sandbox") or {}
+        if sb.get("provider", SANDBOX_REMOTE_DOCKER) == SANDBOX_AGENTENV:
+            return None
         return os.path.expanduser(sb["envs"]) if sb.get("envs") else None
 
     # -- steps
