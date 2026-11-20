@@ -440,15 +440,62 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
         raise SamplerSpecError(str(error)) from error
 
 
+CHECKPOINT_ENCODER = Path("encoding") / "encoding.py"  # DeepSeek-V4.1's prompt encoder
+
+
+def _has_chat_template(tokenizer_dir: Path) -> bool:
+    """Whether the tokenizer directory carries a chat template (a ``chat_template``
+    in ``tokenizer_config.json`` or a ``chat_template.jinja`` / ``.json`` file)."""
+    if (tokenizer_dir / "chat_template.jinja").is_file() or (tokenizer_dir / "chat_template.json").is_file():
+        return True
+    try:
+        config = json.loads((tokenizer_dir / "tokenizer_config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(isinstance(config, dict) and config.get("chat_template"))
+
+
+def checkpoint_encoder_renderer(encoder: Path, *, template_kwargs: Mapping[str, Any] | None = None
+                                ) -> Callable[[Any], str]:
+    """A renderer of the checkpoint's own ``encode_messages`` (``chat_renderer``)."""
+    import importlib.util  # noqa: PLC0415
+
+    spec = importlib.util.spec_from_file_location(f"_yeto_checkpoint_encoding_{abs(hash(str(encoder)))}", encoder)
+    if spec is None or spec.loader is None:
+        raise SamplerSpecError(f"{encoder}: not a loadable Python file")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    encode = getattr(module, "encode_messages", None)
+    if not callable(encode):
+        raise SamplerSpecError(f"{encoder}: no encode_messages")
+    kwargs = {"thinking_mode": "thinking", **dict(template_kwargs or {})}
+
+    def render(messages: Any) -> str:
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+        return str(encode(list(messages), **kwargs))
+
+    return render
+
+
 def chat_renderer(tokenizer_dir: str | Path, *, remote_code: bool = False,
                   template_kwargs: Mapping[str, Any] | None = None, tokenizer: Any = None) -> Callable[[Any], str]:
     """``template_kwargs``: extra chat template variables (``prompts.chat_template_kwargs``,
-    e.g. Kimi-K3.1's ``{"thinking_effort": "low"}``)."""
+    e.g. Kimi-K3.1's ``{"thinking_effort": "low"}``).
+
+    A checkpoint without a chat template that ships its prompt encoder as
+    ``encoding/encoding.py`` with ``encode_messages`` (DeepSeek-V4.1; vLLM's
+    ``deepseek_v41`` tokenizer mode encodes with the same code) is rendered with it:
+    ``template_kwargs`` go to ``encode_messages`` (``thinking_mode`` defaults to
+    ``"thinking"``; ``reasoning_effort`` as the encoder takes it)."""
+    extra = dict(template_kwargs or {})
+    encoder = Path(tokenizer_dir) / CHECKPOINT_ENCODER
+    if tokenizer is None and encoder.is_file() and not _has_chat_template(Path(tokenizer_dir)):
+        return checkpoint_encoder_renderer(encoder, template_kwargs=extra)
     if tokenizer is None:
         from transformers import AutoTokenizer  # noqa: PLC0415 - only the chat format needs it
 
         tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir), trust_remote_code=remote_code)
-    extra = dict(template_kwargs or {})
 
     def render(messages: Any) -> str:
         if isinstance(messages, str):

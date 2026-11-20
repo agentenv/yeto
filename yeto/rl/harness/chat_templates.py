@@ -19,6 +19,14 @@ Registered templates:
 * ``qwen3``: the Qwen3 hermes tool-call format; the small CPU stand-in;
 * ``qwen3_2507``: Qwen3-4B-Instruct-2507 (non-thinking Qwen3, hermes JSON tool
   calls, no reasoning block); the Codex system messages are merged into one;
+* ``deepseek_v41``: DeepSeek-V4.1 (no HF chat template): rendered by the
+  checkpoint's own ``encoding/encoding.py`` ``encode_messages`` (what vLLM's
+  ``deepseek_v41`` tokenizer mode runs: tools on the first system message, one
+  inserted when there is none; ``thinking`` / ``reasoning_effort`` /
+  ``drop_thinking`` template kwargs), tokenized with ``add_special_tokens=False``;
+  DSML tool calls (``<\uff5cDSML\uff5c invoke name=...>``) parsed by :func:`parse_deepseek_v41`.
+  Reasoning of every turn after the last real user turn is kept (tool-result
+  turns do not count, and any conversation with tools keeps all of it);
 * ``qwen38``: Qwen3.8 (Qwen3.5 family) XML tool calls (``<tool_call><function=name>
   <parameter=k>v</parameter></function></tool_call>``), thinking kept in every
   turn (``preserve_thinking``). Load with the checkpoint's tokenizer
@@ -211,6 +219,46 @@ def parse_kimi_k3(text: str, *, thinking: bool = True) -> Message:
     return _assistant(content, reasoning, calls)
 
 
+_DS_EOS = "<\uff5cend\u2581of\u2581sentence\uff5c>"
+_DS_DSML = "\uff5cDSML\uff5c"
+_DS_CALLS = f"\n\n<{_DS_DSML} calls>"
+_DS_INVOKE = re.compile(rf'<{_DS_DSML} invoke name="(.*?)">\n(.*?)</{_DS_DSML} invoke>', re.S)
+_DS_PARAM = re.compile(rf'<{_DS_DSML} parameter name="(.*?)" string="(true|false)">(.*?)</{_DS_DSML} parameter>', re.S)
+
+
+def _ds_value(raw: str, is_string: str) -> Any:
+    if is_string == "true":
+        return raw
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def parse_deepseek_v41(text: str, *, thinking: bool = True) -> Message:
+    """DeepSeek-V4.1 output after the ``<\uff5cAssistant\uff5c><think>`` generation prompt
+    (``thinking=False``: after ``</think>``): reasoning up to ``</think>``, the
+    content, then DSML tool calls in a ``\\n\\n<\uff5cDSML\uff5c calls>`` block. Reasoning and
+    content are kept byte for byte (the encoder renders them raw)."""
+    reasoning: str | None = None
+    rest = text
+    if thinking:
+        if "</think>" not in text:
+            return _assistant("", text, [])  # cut inside the reasoning
+        reasoning, rest = text.split("</think>", 1)
+    if rest.endswith(_DS_EOS):
+        rest = rest[: -len(_DS_EOS)]
+    content, sep, block = rest.partition(_DS_CALLS)
+    calls = []
+    if sep:
+        for index, match in enumerate(_DS_INVOKE.finditer(block)):
+            arguments = {name: _ds_value(value, flag) for name, flag, value in _DS_PARAM.findall(match.group(2))}
+            calls.append(_tool_call(_call_id(text, index), match.group(1), arguments))
+        if block.count(f"<{_DS_DSML} invoke ") != len(calls):
+            raise TemplateError(f"DeepSeek-V4.1 tool call is not DSML: {block[:80]!r}")
+    return _assistant(content, reasoning, calls)
+
+
 # ---------------------------------------------------------------------- registry
 @dataclass(frozen=True)
 class TemplateSpec:
@@ -245,6 +293,9 @@ class TemplateSpec:
     # control tokens, message text as plain BPE even where it spells a marker):
     # ids come from the rendering's segments, never from re-encoding its text
     segment_encoding: bool = False
+    # the checkpoint ships its prompt encoder instead of a chat template (DeepSeek-V4.1
+    # ``encoding/encoding.py``, relative to the tokenizer directory): it renders every turn
+    checkpoint_encoder: str | None = None
 
 
 TEMPLATES: dict[str, TemplateSpec] = {}
@@ -285,6 +336,13 @@ register_template(TemplateSpec(
     stop_tokens=("<|end_of_msg|>",), template_kwargs={"thinking": True}, thinking_kwarg="thinking",
     verified="Kimi-K3.1-Pro@d9e99b07 tokenizer (CPU alignment test)",
     needs_remote_code=True, raw_arguments=True, segment_encoding=True))
+register_template(TemplateSpec(
+    # DeepSeek-V4.1-Flash: the checkpoint's encoding/encoding.py (as vLLM's deepseek_v41
+    # tokenizer mode); reasoning_effort high is the encoder's default
+    name="deepseek_v41", tokenizer="deepseek-ai/DeepSeek-V4.1-Flash-1017", parser=parse_deepseek_v41,
+    stop_tokens=(_DS_EOS,), template_kwargs={"thinking": True, "reasoning_effort": "high"},
+    thinking_kwarg="thinking", checkpoint_encoder="encoding/encoding.py",
+    verified="DeepSeek-V4.1-Flash-1017 tokenizer + encoding.py vs vLLM 0.32.1rc1.dev36 /tokenize (MI355X)"))
 register_template(TemplateSpec(
     name="nemotron3", tokenizer="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", parser=parse_qwen38,
     stop_tokens=("<|im_end|>",),
@@ -382,12 +440,65 @@ class ChatTemplate:
 
         if self.spec.segment_encoding:
             return self._render_segments(messages, tools=tools, add_generation_prompt=add_generation_prompt)
+        if self.spec.checkpoint_encoder:
+            return self._render_encoder(messages, tools=tools, add_generation_prompt=add_generation_prompt)
         try:
             return self.tokenizer.apply_chat_template(
                 self._ready(messages), tools=list(tools) if tools else None, tokenize=False,
                 add_generation_prompt=add_generation_prompt, **dict(self.spec.template_kwargs))
         except jinja2.TemplateError as exc:  # raise_exception(...): the template refuses the conversation
             raise TemplateError(f"{self.spec.name} template refused the conversation: {exc}") from exc
+
+    def _encoder(self) -> Any:
+        """The checkpoint's prompt encoder module (``spec.checkpoint_encoder`` under the
+        tokenizer directory), loaded once."""
+        module = getattr(self, "_encoder_module", None)
+        if module is None:
+            import importlib.util
+            from pathlib import Path
+
+            path = Path(str(getattr(self.tokenizer, "name_or_path", ""))) / str(self.spec.checkpoint_encoder)
+            if not path.is_file():
+                raise TemplateError(f"{self.spec.name}: no prompt encoder at {path} (load the template with the "
+                                    "checkpoint's tokenizer directory)")
+            loader = importlib.util.spec_from_file_location(f"_yeto_{self.spec.name}_encoding", path)
+            if loader is None or loader.loader is None:
+                raise TemplateError(f"{self.spec.name}: {path} is not a Python module")
+            module = importlib.util.module_from_spec(loader)
+            loader.loader.exec_module(module)
+            self._encoder_module = module
+        return module
+
+    def _render_encoder(self, messages: Sequence[Message], *, tools: Sequence[Message] | None,
+                        add_generation_prompt: bool) -> str:
+        """Render with the checkpoint's ``encode_messages`` (vLLM's deepseek_v41 tokenizer
+        mode: tools on the first system message, one inserted when there is none)."""
+        conversation = [dict(m) for m in self._ready(messages)]
+        for message in conversation:
+            if "reasoning" in message and "reasoning_content" not in message:
+                message["reasoning_content"] = message.pop("reasoning")
+            if isinstance(message.get("content"), list):
+                message["content"] = "\n\n".join(str(b.get("text", "")) for b in message["content"]
+                                                  if b.get("type") in ("text", "input_text", "output_text"))
+        if tools:
+            system = next((m for m in conversation if m.get("role") == "system"), None)
+            if system is None:
+                system = {"role": "system", "content": ""}
+                conversation.insert(0, system)
+            system["tools"] = list(tools)
+        kwargs = dict(self.spec.template_kwargs)
+        thinking = bool(kwargs.pop("thinking", True))
+        try:
+            text = self._encoder().encode_messages(conversation, thinking_mode="thinking" if thinking else "chat",
+                                                   drop_thinking=bool(kwargs.pop("drop_thinking", True)),
+                                                   reasoning_effort=kwargs.pop("reasoning_effort", None))
+        except (ValueError, TypeError, KeyError, AssertionError, NotImplementedError) as exc:
+            raise TemplateError(f"{self.spec.name} encoder refused the conversation: {exc}") from exc
+        if not add_generation_prompt:  # the encoder always opens the next assistant turn after a user turn
+            for suffix in ("<\uff5cAssistant\uff5c><think>", "<\uff5cAssistant\uff5c></think>"):
+                if text.endswith(suffix) and conversation and conversation[-1].get("role") != "assistant":
+                    return text[: -len(suffix)]
+        return str(text)
 
     def _ready(self, messages: Sequence[Message]) -> list[Message]:
         ready = [dict(m) for m in messages] if self.spec.raw_arguments else _render_ready(messages)

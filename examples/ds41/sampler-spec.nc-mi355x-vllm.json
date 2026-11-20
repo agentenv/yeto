@@ -1,0 +1,91 @@
+{
+  "_comment": [
+    "Engine sampler spec of one National Compute MI355X node (8 x MI355X, vLLM ROCm, TP8) for a",
+    "DeepSeek-V4.1-Flash-1017 async GRPO run (FP8 dense + MXFP4 experts checkpoint, about 510 GB).",
+    "Image: the recipe's AgentX MI355X image vllm/vllm-openai-rocm:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f",
+    "(GET /version 0.32.1rc1.dev36+ge68efc685); its server interpreter is python3 and yeto goes on PYTHONPATH.",
+    "Engine: vllm-server with model_preset ds41-mi355x (vLLM's DeepSeek-V4.1-Flash recipe for MI355X: MXFP4",
+    "sparse indexer, block size 128, AITER MoE, breakable CUDA graphs, Gluon sparse MLA, deepseek_v41",
+    "tokenizer / tool / reasoning parsers; no DSpark, no mono decode, no INT4 quick-reduce, Engram tables",
+    "resident). In-place reload is refused by the preset (reload_weights leaves NaN log-probs on this image):",
+    "every release is served by a restart, about 3 min cold start from local NVMe. R3 (routed_experts) works",
+    "on this image (uint16 [T, 40, 6]); turn it on in rollout_fields when the trainer replays routing.",
+    "The checkpoint has no HF chat template: prompts.format chat renders with the checkpoint's",
+    "encoding/encoding.py (chat_template_kwargs go to encode_messages: thinking_mode, reasoning_effort).",
+    "Every value in angle brackets is a site value; the store and sampler_id are filled by the pool."
+  ],
+  "sampler_id": "<nc-node-id>",
+  "platform": "rocm",
+  "rollout_fields": {
+    "routed_experts": false,
+    "top_logprobs_num": 0,
+    "fp32_lm_head": false
+  },
+  "engine": {
+    "factory": "yeto.rl.adapters.sampler_engines.from_spec:build",
+    "adapter": "vllm-server",
+    "server": {
+      "base_dir": "/models/deepseek-v4.1-flash",
+      "port": 30000,
+      "python": "python3",
+      "card_model": "MI355X",
+      "device_family": "rocm",
+      "engine_version": "vllm-rocm@0.32.1rc1.dev36+ge68efc685",
+      "precision": "fp8",
+      "quant_scheme": "FP8_DENSE_MXFP4_EXPERTS",
+      "topology": "tp8",
+      "max_model_len": 65536,
+      "in_place_reload": false,
+      "start_timeout_s": 3600.0,
+      "extra_args": []
+    },
+    "options": {
+      "tp": 8,
+      "max_num_seqs": 64,
+      "model_preset": "ds41-mi355x",
+      "pin_version": "0.32.1rc1.dev36+ge68efc685"
+    }
+  },
+  "sampling": {
+    "max_tokens": 61440,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "n": 8
+  },
+  "num_rollouts": 1000000,
+  "max_prompt_tokens": 4096,
+  "base_version": 0,
+  "poll_s": 5.0,
+  "min_round_s": null,
+  "store": "/work/stage/<bucket>/runs/__RUN_PREFIX__",
+  "release_dir": "policy-releases",
+  "buffer_shards": [
+    "<buffer shard of this sampler>"
+  ],
+  "start_on_latest": true,
+  "reload_max_defer_s": 1800,
+  "max_backlog_groups": 16,
+  "max_consecutive_load_failures": 3,
+  "drop_zero_variance_groups": false,
+  "prompts": {
+    "path": "/work/sampler/prompts.jsonl",
+    "input_key": "Problem",
+    "label_key": "Answer",
+    "groups_per_round": 4,
+    "format": "chat",
+    "tokenizer": "/models/deepseek-v4.1-flash",
+    "chat_template_kwargs": {
+      "thinking_mode": "thinking"
+    }
+  },
+  "reward": "yeto.rl.math_reward:reward_func",
+  "reward_kind": "miles",
+  "checks": {
+    "expected_expert_matrices": null,
+    "allow_unverified_count": true,
+    "require_fixed_answers": false
+  },
+  "incarnation_lease": true,
+  "event_tape": "/work/sampler/events-__RUN_PREFIX__.jsonl"
+}
