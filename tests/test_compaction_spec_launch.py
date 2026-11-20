@@ -56,7 +56,7 @@ def test_every_key_reaches_the_config():
                                     "max_compactions": 0}, max_model_len=262144))
     assert (cfg.context_budget, cfg.t_comp, cfg.keep_recent_steps, cfg.max_compactions) == (262144, 10240, 0, 0)
     assert "context_budget 262144" in C.describe(cfg) and "at most 1 segments" in C.describe(cfg)
-    assert "max_compactions 0: the proxy never compacts" in C.describe(cfg)
+    assert "max_compactions 0: the proxy never compacts, but still ends a trial at context_budget" in C.describe(cfg)
 
 
 def test_max_turns_is_no_spec_key():
@@ -356,12 +356,48 @@ def _trainer(**algorithm):
 
 @pytest.mark.parametrize("algorithm", [
     {"advantage": {"estimator": "grpo"}},
-    {"advantage": {"estimator": "gspo"}},
     {"advantage": {"estimator": "grpo"}, "loss": {"variant": "score_centering"}},
     {"advantage_estimator": "grpo", "schema": "yeto-rl-algorithm-spec-v1"},
 ])
 def test_miles_with_a_grpo_family_estimator_may_compact(algorithm):
     check_grpo_compaction(_trainer(**algorithm), CFG)
+
+
+@pytest.mark.parametrize("name", sorted(p.name for p in GRPO_SPEC.parent.glob("algorithm-spec.*.json")))
+def test_the_k31_algorithm_specs_with_score_centering_tis_may_compact(name):
+    """The K3.1 recipe: an example spec + ``--rl-loss score_centering --rl-score-centering-is tis``,
+    resolved from the flags as the launch does (no prepared JSON)."""
+    from yeto.launch.harness_env import _launch_algorithm
+    from yeto.rl.up_consistency import trainer_args
+
+    args = trainer_args([
+        "--training-mode", "rl", "--model", "org/k31", "--data", "d", "--rl-algorithm-spec", str(GRPO_SPEC.parent / name), "--rl-loss", "score_centering",
+        "--rl-score-centering-is", "tis", "--rl-score-centering-tis-clip", "2.0"])
+
+    algorithm = _launch_algorithm(args)
+    assert algorithm is not None and algorithm["loss"]["variant"] == "score_centering"
+    check_grpo_compaction(args, CFG)
+    check_grpo_compaction(_trainer(**algorithm), CFG)  # the prepared JSON of the launch
+
+
+V2 = "yeto-rl-algorithm-spec-v2"
+
+
+@pytest.mark.parametrize(("algorithm", "match"), [
+    ({"advantage": {"estimator": "gspo"}}, "GRPO-family advantage estimator"),
+    ({"schema": V2, "loss": {"policy_loss_variant": "gmpo"}}, "gmpo"),
+    ({"schema": V2, "correction": {"method": "opsm", "opsm_delta": 0.1}}, "OPSM"),
+    ({"schema": V2, "correction": {"method": "tis", "ratio_mask": "mis", "level": "sequence",
+                                   "upper": 2.0, "lower": 0.0}}, "sequence weight would be per segment"),
+    ({"schema": V2, "correction": {"method": "tis", "veto": 1e-4, "upper": 2.0, "lower": 0.0}}, "veto"),
+    ({"loss": {"policy_loss_variant": "gmpo"}}, "gmpo"),  # v2 groups without a schema key
+])
+def test_per_sequence_algorithms_are_refused_with_compaction(algorithm, match):
+    """Sequence quantities (GSPO ratio, GMPO mean, OPSM mask, sequence MIS, veto) would be
+    taken per segment: refused by ``segment_weights.check_compaction_algorithm``."""
+    with pytest.raises(ValueError, match=match):
+        check_grpo_compaction(_trainer(**algorithm), CFG)
+    check_grpo_compaction(_trainer(**algorithm), None)  # no compaction: nothing to check
 
 
 def test_verl_is_refused_with_the_reason():
@@ -428,6 +464,53 @@ def test_run_up_preflight_shows_the_compaction_and_passes_a_grpo_trainer(setup, 
     assert "preflight: WARNING: agentic.compaction on a drain-mode sampler: the effective drain cut 600 s" in out
     assert "--rl-max-policy-age 2" in out and "release every version" in out
     assert "trial wall clock at 7200 s (the default)" in out
+
+
+def test_run_up_preflight_passes_the_k31_score_centering_tis_trainer(setup):  # noqa: F811
+    _compacting(setup)
+    setup.argv += ["--rl-algorithm-spec", str(GRPO_SPEC), "--rl-loss", "score_centering",
+                   "--rl-score-centering-is", "tis", "--rl-score-centering-tis-clip", "2.0",
+                   "--rl-max-policy-age", "2"]
+    run = setup.make()
+    assert run.consistency_problem() is None
+
+
+def test_run_up_preflight_refuses_a_per_sequence_algorithm_with_compaction(setup, tmp_path):  # noqa: F811
+    _compacting(setup)
+    spec = json.loads(GRPO_SPEC.read_text())
+    spec["advantage"]["estimator"] = "gspo"
+    (tmp_path / "gspo.json").write_text(json.dumps(spec))
+    setup.argv += ["--rl-algorithm-spec", str(tmp_path / "gspo.json"), "--rl-max-policy-age", "2"]
+    run = setup.make()
+    assert "advantage.estimator 'gspo'" in run.consistency_problem()
+    assert run.preflight() is False and run.calls == []
+
+
+def test_micro_batch_warning_is_per_cp_group():
+    """Miles packs --rl-max-tokens-per-gpu x CP tokens per micro batch: at CP2 the
+    per-GPU value is seq-len / CP, not seq-len (two 262k segments in one micro batch)."""
+    from yeto.rl.up_consistency import micro_batch_warning
+
+    def args(per_gpu, cp=2, seq=262144):
+        return SimpleNamespace(rl_max_tokens_per_gpu=per_gpu, context_parallel=cp, seq_len=seq)
+
+    assert micro_batch_warning(args(131072)) is None  # = seq-len / CP (the K3.1 262k layout)
+    assert micro_batch_warning(args(65536)) is None  # below: refused by the launch itself
+    assert micro_batch_warning(args(262144, cp=1)) is None
+    warning = micro_batch_warning(args(262144))
+    assert "262144 x CP 2 = 524288 tokens per micro batch > --seq-len 262144" in warning
+    assert "--seq-len / CP (131072)" in warning
+    assert micro_batch_warning(args(None)) is None and micro_batch_warning(None) is None
+
+
+def test_run_up_preflight_warns_on_a_micro_batch_wider_than_a_row(setup, capsys):  # noqa: F811
+    _compacting(setup)
+    setup.argv += ["--rl-algorithm-spec", str(GRPO_SPEC), "--rl-max-policy-age", "8", "--context-parallel", "2"]
+    run = setup.make()
+    assert run.consistency_problem() is None
+    run.preflight()
+    out = capsys.readouterr().out
+    assert "WARNING: --rl-max-tokens-per-gpu 32768 x CP 2 = 65536 tokens per micro batch > --seq-len 32768" in out
 
 
 def test_run_up_preflight_refuses_compaction_on_verl(setup):  # noqa: F811
@@ -588,9 +671,20 @@ def test_run_up_preflight_asks_the_trainer_row_for_the_engine_context(setup):  #
     _set(setup.argv, "--rollout-max-response-len", "262144")
     setup.spec["agentic"]["max_prompt_len"] = 16384
     assert setup.make().consistency_problem() is None
-    setup.spec["agentic"].pop("compaction")  # without compaction: the sum is the row, as before
-    assert "16384 + agentic.max_response_len 262144 = 278528 > the trainer's --seq-len 262144" in \
-        setup.make().consistency_problem()
+    # without compaction too: a trial ends at the engine context, so the row is at most max_model_len
+    setup.spec["agentic"].pop("compaction")
+    assert setup.make().consistency_problem() is None
+    _set(setup.argv, "--seq-len", "245760")
+    setup.spec["agentic"]["max_response_len"] = 245760
+    _set(setup.argv, "--rollout-max-response-len", "245760")
+    assert ("16384 + agentic.max_response_len 245760 = 262144 > the trainer's --seq-len 245760"
+            in setup.make().consistency_problem())
+    setup.spec["agentic"]["max_response_len"] = 262144
+    setup.spec["engine"]["server"]["max_model_len"] = 300000
+    _set(setup.argv, "--rollout-max-response-len", "262144")
+    _set(setup.argv, "--seq-len", "262144")
+    assert ("16384 + agentic.max_response_len 262144 = 278528 > the trainer's --seq-len 262144"
+            in setup.make().consistency_problem())
 
 
 def test_run_up_preflight_refuses_a_seq_len_of_context_budget(setup):  # noqa: F811

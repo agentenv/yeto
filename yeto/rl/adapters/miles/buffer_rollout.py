@@ -452,11 +452,24 @@ def segmented_round_problems(args: Any) -> list[str]:
     return problems
 
 
+def segment_row_width(meta: Any) -> tuple[int, str] | None:
+    """``(tokens, what)``: how wide one compaction segment's row can be. A segment can
+    grow past ``context_budget`` to the engine context (a large tool output after the last
+    step below the trigger, then the summary): the sampler's ``max_model_len`` when the
+    segment carries it, else (older samples) ``context_budget``. None: neither is known."""
+    for name in ("max_model_len", "context_budget"):
+        value = meta.get(name)
+        if type(value) is int and value > 0:
+            return value, ("the sampler's max_model_len" if name == "max_model_len" else "context budget")
+    return None
+
+
 def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[str, Any]]]]) -> None:
     """Refuse a round (its converted ``groups``) with multi-sample trials that Miles would
     not train one rollout per trial (:func:`segmented_round_problems`), or whose
-    compaction ``context_budget`` is more than this trainer's ``--seq-length`` (a segment
-    would not fit: its summary, at the end, would be cut). Then the sibling check of the
+    segments can be wider than this trainer's ``--seq-length`` (:func:`segment_row_width`:
+    the sampler's ``max_model_len``, else ``context_budget``; its summary, at the end,
+    would be cut). Then the sibling check of the
     loss side (``yeto.rl.algos.segment_weights.sibling_problems``) over all
     the round's samples. A round without such trials: nothing is checked."""
     every = groups
@@ -470,14 +483,16 @@ def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[s
             f"groups at buffer positions {positions[:8]} hold compacted trials (several samples "
             f"per trial); Miles trains them one rollout per trial only on its rollout-side DP schedule, "
             f"which this trainer does not use ({', '.join(problems)})")
-    budgets = [int(meta["context_budget"]) for _, group in groups for d in group
-               if (meta := compaction_meta(d)) is not None and isinstance(meta.get("context_budget"), int)]
+    widths = [segment_row_width(meta) for _, group in groups for d in group
+              if (meta := compaction_meta(d)) is not None]
+    widths = [w for w in widths if w is not None]
     seq_length = getattr(args, "seq_length", None)
-    if budgets and (not isinstance(seq_length, int) or seq_length < max(budgets)):
+    if widths and (not isinstance(seq_length, int) or seq_length < max(w for w, _ in widths)):
+        width, what = max(widths)
         raise SampleBufferRolloutError(
-            f"groups at buffer positions {positions[:8]} hold compaction segments of context budget "
-            f"{max(budgets)}; this trainer's --seq-length {seq_length} does not hold one (a segment "
-            "ends with its summary, which would be cut): raise --seq-len to the budget")
+            f"groups at buffer positions {positions[:8]} hold compaction segments that can reach {width} "
+            f"tokens ({what}); this trainer's --seq-length {seq_length} does not hold one (a segment "
+            f"ends with its summary, which would be cut): raise --seq-len to {width}")
     from yeto.rl.algos.segment_weights import sibling_problems  # noqa: PLC0415
 
     problems = sibling_problems([d for _, group in every for d in group])

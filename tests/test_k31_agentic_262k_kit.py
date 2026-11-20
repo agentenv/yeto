@@ -86,6 +86,12 @@ class Kit:
         self.run_file = tmp / "run.json"
         self.run_file.write_text(json.dumps(self.run))
         self.argv = [str(a) for a in self.run["trainer"]["argv"]]
+        # the placeholders the trainer parser types (an int, a spec it reads): without them the argv
+        # does not parse and up_consistency.problems has nothing to compare
+        for flag, value in (("--total-steps", "100"),
+                            ("--rl-algorithm-spec", str(K31 / "algorithm-spec.async-age12.json"))):
+            if flag in self.argv:
+                self.argv[self.argv.index(flag) + 1] = value
         self.agentic = self.spec["agentic"]
         self.options = self.spec["engine"]["options"]
         self.server = self.spec["engine"]["server"]
@@ -116,6 +122,7 @@ def test_the_sampler_spec_builds_its_engine(kit):
 
 
 def test_up_consistency_and_the_drain_check_are_clean(kit):
+    assert up_consistency.trainer_args(kit.argv) is not None  # the trainer / spec pair is compared
     assert up_consistency.problems(kit.run["store"], kit.argv, kit.pool) == []
     assert agentic_round.drain_timeout_warning(kit.spec) is None
 
@@ -127,8 +134,32 @@ def test_sampling_and_rollout_fields_match_the_trainer(kit):
 
 
 def test_context_budget_matches_trainer_and_engine(kit):
-    total = kit.agentic["max_prompt_len"] + kit.agentic["max_response_len"]
-    assert total == int(_flag(kit.argv, "--seq-len")) == kit.server["max_model_len"]
+    # a row is at most the engine context (a trial ends there): max_response_len is the engine
+    # context, as context compaction needs, and the trainer's rows hold it
+    assert kit.agentic["max_response_len"] == int(_flag(kit.argv, "--rollout-max-response-len")) \
+        == int(_flag(kit.argv, "--seq-len")) == kit.server["max_model_len"]
+    assert kit.agentic["max_prompt_len"] < kit.server["max_model_len"]
+
+
+def test_the_documented_compaction_block_passes_the_run_up_checks(kit, tmp_path):
+    """The compaction block the spec's comment documents (off by default) turns on with
+    these rows and trainer: no up_consistency problem, the summary turn fits."""
+    from yeto.rl import compaction
+
+    assert "compaction" not in kit.agentic  # off by default
+    raw = json.loads((K31 / "sampler-spec.nc-mi355x-vllm-agentic-262k.json").read_text())
+    line = next(c for c in raw["_comment"] if '"compaction"' in c)
+    block = json.loads("{" + line.strip() + "}")["compaction"]
+    assert block == {"context_budget": 245760, "t_comp": 10240, "keep_recent_steps": 2, "max_compactions": 3}
+    spec = {**kit.spec, "agentic": {**kit.agentic, "compaction": block}}
+    cfg = compaction.config_from_spec(spec)
+    headroom = cfg.check_summary_headroom(kit.server["max_model_len"], kit.agentic["turn_max_tokens"])
+    assert headroom == 13704 and cfg.context_budget + headroom == 259464
+    (tmp_path / "compacting.json").write_text(json.dumps(spec))
+    pool = {**kit.pool, "spec": str(tmp_path / "compacting.json")}
+    assert up_consistency.problems(kit.run["store"], kit.argv, pool) == []
+    # CP2 with --rl-max-tokens-per-gpu = seq-len / CP: no micro batch wider than one row
+    assert up_consistency.micro_batch_warning(up_consistency.trainer_args(kit.argv)) is None
 
 
 def test_engine_slots_and_drain_bounds(kit):
@@ -177,6 +208,6 @@ def test_agentic_262k_kit_keeps_the_measured_values(tmp_path, monkeypatch):
     assert kit.agentic["max_in_flight"] == 16
     # 2026-11-18 MI355X measurement: 262k context with R3 (DCP 1) fits the KV cache (~2.6M tokens).
     assert kit.server["max_model_len"] == 262144
-    # 2026-11-18 MI355X measurement: a full 245760-token response at 42.2 tok/s (16 streams) decodes
+    # 2026-11-18 MI355X measurement: a 245760-token response at 42.2 tok/s (16 streams) decodes
     # in about 5800 s, so the agent timeout stays at 2 h or more.
     assert kit.agentic["task_defaults"]["agent_timeout_s"] >= 7200

@@ -516,3 +516,45 @@ def test_the_segment_writers_samples_give_summary_tokens_and_retry_replays():
     off = _compacted_finished([(4, True, 2, None), (3, None, 0, None)], session="t-1")  # replay off
     s = compaction_stats(agentic_round.agentic_samples(ITEM, off, version=0, provenance={}, group_index=0, index=1))
     assert s["retry_replays"] is None and s["summary_tokens"] == 2
+
+
+def test_a_summary_cut_at_its_length_limit_ends_a_completed_segment():
+    """A non-final segment whose summary turn hit its max_tokens is a segment end, not a
+    truncated trial: status completed and finish_reason stop, the engine's reason kept in
+    summary_finish_reason; the last segment keeps its own finish_reason."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    finished = _compacted_finished([(4, False, 4, None), (4, True, 3, None), (3, None, 0, None)])
+    turn = {"policy_version": None, "policy_error": None}
+    reasons = ("length", "stop", "length")
+    parts = tuple(dataclasses.replace(p, turns=(SimpleNamespace(finish_reason=r, **turn),))
+                  for p, r in zip(finished.parts, reasons))
+    finished = dataclasses.replace(finished, parts=parts)
+    samples = agentic_round.agentic_samples(ITEM, finished, version=0, provenance={}, group_index=0, index=0)
+    meta = [s["metadata"] for s in samples]
+    assert [s["status"] for s in samples] == ["completed", "completed", "truncated"]
+    assert [m["finish_reason"] for m in meta] == ["stop", "stop", "length"]
+    assert [m.get("summary_finish_reason") for m in meta] == ["length", "stop", None]
+
+
+def test_the_segments_carry_the_engine_context_length_when_known():
+    from yeto.rl.contracts import validate_compaction_group
+
+    import dataclasses
+
+    finished = _compacted_finished([(4, True, 2, None), (3, None, 0, None)])
+    parts = (finished.parts[0], dataclasses.replace(finished.parts[1], kept_steps=0))
+    finished = dataclasses.replace(finished, parts=parts)
+    with_len = agentic_round.agentic_samples(ITEM, finished, version=0, provenance={}, group_index=0, index=0,
+                                             max_model_len=8192)
+    assert {s["metadata"]["compaction"]["max_model_len"] for s in with_len} == {8192}
+    validate_compaction_group(with_len)
+    with_len[0]["metadata"]["compaction"]["max_model_len"] = "8192"
+    with pytest.raises(ValueError, match="max_model_len must be a non-negative integer or null"):
+        validate_compaction_group(with_len)
+    without = agentic_round.agentic_samples(ITEM, finished, version=0, provenance={}, group_index=0, index=0)
+    assert all("max_model_len" not in s["metadata"]["compaction"] for s in without)
+    assert agentic_round.engine_max_model_len(SimpleNamespace(max_model_len=8192)) == 8192
+    assert agentic_round.engine_max_model_len(SimpleNamespace()) is None
+    assert agentic_round.engine_max_model_len(None) is None

@@ -216,7 +216,7 @@ COMPACTION_METADATA_SCHEMA = 1
 _COMPACTION_INT_FIELDS = ("segment_index", "num_segments", "context_budget",
                           "segment_tokens", "tokens_after")
 # optional (absent on older samples); None allowed where the contract writes null
-_COMPACTION_OPTIONAL_INT_FIELDS = ("summary_tokens", "retry_replays")
+_COMPACTION_OPTIONAL_INT_FIELDS = ("summary_tokens", "retry_replays", "max_model_len")
 _TRAINABLE_STATUSES = frozenset({"completed", "truncated"})
 
 

@@ -746,7 +746,7 @@ before.
 | `context_budget` | required | The context size C in tokens. Must be greater than `t_comp` and at most the engine context length (`engine.server.max_model_len`). |
 | `t_comp` | 10240 | A compaction starts when fewer than `t_comp` tokens of `context_budget` remain before the next model call. Integer >= 1. It must hold the summary turn: its `max_tokens` (`summary_max_tokens`, by default the smaller of `agentic.turn_max_tokens` and 4096) plus the summary request (bounded by one token per byte of the summary prompt plus 64). |
 | `keep_recent_steps` | 2 | How many recent steps (one assistant turn plus its tool results) the next segment keeps word for word. Lowered automatically when the rebuilt context would compact again at once. `0` keeps only the summary. Integer >= 0. |
-| `max_compactions` | 3 | Most compactions per trial, so at most `max_compactions + 1` segments. After the last one the trial runs until the context is full and its last segment is truncated. `0` turns compaction off in effect (the dry run says so). Integer >= 0. |
+| `max_compactions` | 3 | Most compactions per trial, so at most `max_compactions + 1` segments. After the last one the trial runs until the context is full and its last segment is truncated. `0` writes no summary, but it is not the same as leaving `agentic.compaction` out: every trial still ends (its one segment truncated) once its context reaches `context_budget`, not the engine's `max_model_len`, and the compaction launch checks still apply (the dry run says so). Remove the section to turn compaction off. Integer >= 0. |
 
 Optional keys: `summary_max_tokens`, `summary_prompt` and `resume_template`
 (the summary turn's length cap, the summary request and the resume message;
@@ -770,9 +770,10 @@ preflight refuse:
   is for an engine at `max_model_len` 262144 (rows of 262144). The K3.1 example
   trainer (`SEQ_LEN=16384`) is refused with compaction on; raise `--seq-len`,
   `--rollout-max-response-len` and `agentic.max_response_len` to at least
-  `max_model_len`. With compaction on, the trainer's `--seq-len` is compared
-  with `max_model_len` rather than `max_prompt_len + max_response_len` (a row
-  never exceeds the engine context). A spec that gives no
+  `max_model_len` (the 262k kit in section 3.7 already has these rows). The
+  trainer's `--seq-len` is compared with `max_prompt_len + max_response_len`
+  capped at `max_model_len` (a row never exceeds the engine context; this holds
+  with compaction off too). A spec that gives no
   `engine.server.max_model_len` is checked against `context_budget` instead,
   with a warning that this is not enough;
 - an agent that compacts its own history (`agentic.task_defaults.agent` other
@@ -783,8 +784,12 @@ preflight refuse:
 - a trainer that is not Miles with a GRPO-family estimator (see Limits);
 - a trainer that would split a round by sample count instead of training each
   trial as one rollout: without `--rl-max-tokens-per-gpu` (Miles dynamic batch
-  size; the K3.1 example trainer does not set it, add it with a value of at
-  least `--seq-len`), or with any of the Miles flags `--indep-dp`,
+  size; the K3.1 example trainer does not set it, add it as `--seq-len / CP`:
+  Miles packs `--rl-max-tokens-per-gpu x CP` tokens into one micro batch, so
+  `--rl-max-tokens-per-gpu --seq-len` at CP2 can put two full-length segments
+  in one micro batch and run out of memory; preflight warns when
+  `--rl-max-tokens-per-gpu x CP > --seq-len`, and the launch refuses
+  `< --seq-len`), or with any of the Miles flags `--indep-dp`,
   `--multi-lora`, `--multimodal-keys`, `--use-dynamic-global-batch-size`. Such a
   trainer would stop at the first compacted group.
 
@@ -917,8 +922,14 @@ evaluation: with compaction on, scores are not comparable to an uncompacted run.
   records (`counters`).
 - Every segment sample carries `metadata.compaction`: `trajectory_id`,
   `segment_index`, `num_segments`, `context_budget`, `summary_ok` (false when the
-  policy did not close a `<summary>` tag), `kept_steps`, `segment_tokens` and
-  `tokens_after`. Without `agentic.compaction` no sample has this key.
+  policy did not close a `<summary>` tag), `kept_steps`, `segment_tokens`,
+  `tokens_after` and, when the engine reports it, `max_model_len` (the trainer
+  stops on a round whose segments can be wider than its `--seq-len`: this
+  `max_model_len`, else `context_budget`). Without `agentic.compaction` no sample has this key. Every
+  segment but the last ends with its summary: `status: completed` and
+  `metadata.finish_reason: stop`, with the engine's finish reason of the summary
+  turn in `metadata.summary_finish_reason` (`length`: the summary hit its
+  `max_tokens`).
 - A high share of `summary_ok: false`, or of trials whose last segment is
   truncated after `max_compactions`, means the summaries are not doing their job:
   raise `context_budget` (up to `max_model_len`) or `max_compactions`. A high
@@ -972,7 +983,9 @@ DCP 8 without R3 (the AMD recipe) decodes at 43 tok/s per stream.
 | `agentic.max_in_flight` | 16 | See below. |
 | `rollout_fields` | `routed_experts` true, `top_logprobs_num` 128, `fp32_lm_head` true | R3 and the top-128 log-probs that `--rl-loss score_centering` trains on. |
 | `sampling.n` | 8 | Equals `--n-samples-per-prompt 8`. |
-| `agentic.max_prompt_len` / `max_response_len` | 16384 / 245760 | Sum 262144 = `--seq-len`; `max_response_len` = `--rollout-max-response-len`. |
+| `agentic.max_prompt_len` / `max_response_len` | 16384 / 262144 | `max_response_len` = `--rollout-max-response-len` = `--seq-len` = `max_model_len`: a row is at most the engine context (a trial ends there), and the same rows hold with context compaction on (section 3.6). |
+| `--rl-max-tokens-per-gpu` | 131072 | `--seq-len / CP` at CP2: one micro batch is one full-length row (section 3.6). |
+| `agentic.compaction` | off | To turn it on, add the validated block `{"context_budget": 245760, "t_comp": 10240, "keep_recent_steps": 2, "max_compactions": 3}` to `agentic` (the spec's `_comment` carries it). `context_budget` is at most 259464 here (`turn_max_tokens` 8192, default summary turn); 245760 leaves the summary turn 13704 tokens of headroom. Then read section 3.6 for the drain cut, the trial wall clock and the buffer group size. |
 | `task_defaults.agent_timeout_s` / `wall_clock_s` | 7200 / 7800 s | With 3600 / 4200 s most trials of a C=16 run were cut by the 1 h timeout (2026-11-17). At 42 tok/s a 2 h trial can still generate about 100k tokens with two thirds of its time in tools. |
 | `agentic.weight_switch` | `drain` | vLLM ROCm has no live update. |
 | `agentic.drain_timeout_s` / `reload_max_defer_s` | 1800 / 1800 s | See below. The cut is the smaller of the two, so they move together. |
@@ -1017,8 +1030,9 @@ measured p90 if it is longer.
    accepts them, so check `accounts` and `YETO_NC_ACCOUNTS` by hand.
 3. `sampling.n` equals `--n-samples-per-prompt`, and
    `rollout_fields.top_logprobs_num` equals `--rl-rollout-top-logprobs-num`.
-4. `agentic.max_prompt_len` + `agentic.max_response_len` equals `--seq-len`
-   262144, and `max_response_len` equals `--rollout-max-response-len`.
+4. `agentic.max_response_len` equals `--rollout-max-response-len`, `--seq-len`
+   and `max_model_len` (262144), and `--rl-max-tokens-per-gpu` is
+   `--seq-len / CP` (131072 at CP2).
 5. `expert_selection_sha256` in the spec is the sha256 of the trainer's
    `--rl-expert-selection` file.
 6. The `--rl-algorithm-spec` file has `execution.max_policy_staleness` >= the
@@ -2606,7 +2620,8 @@ summary. Where the two differ, that document applies.
 | 128 | 48 (6×8 B300) | PP3 x TP8 x CP2 x EP16, DP1, split 32/28/33 | 524k | Measured upper bound |
 
 The 128-expert layout needs `--rl-allow-cross-node-tp`,
-`--rl-max-tokens-per-gpu` = `seq-len / CP`, the stage-0 gradient hook in
+`--rl-max-tokens-per-gpu` = `seq-len / CP` (a micro batch is
+`--rl-max-tokens-per-gpu x CP` tokens: one full-length row), the stage-0 gradient hook in
 `YETO_MILES_TRAIN_EXTRA_ARGV` (plus the split flags for an uneven split such
 as 524k's 32/28/33), and
 `--rl-distributed-timeout-minutes 60`. See
