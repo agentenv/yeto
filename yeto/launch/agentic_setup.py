@@ -68,6 +68,27 @@ The sampler container then gets :meth:`AgenticSetup.container_env` (``HOME``,
 ``PATH``, ``DOCKER_HOST``, ``HARBOR_*`` directories, the proxy's public base and
 secret file) as an env file ahead of the operator's ``--agentic-env`` file, which
 still wins on every key it sets.
+
+AgentENV microVMs (``"provider": "agentenv"``, or ``task_defaults.provider``
+``agentenv``): there is no docker host, so ``sandbox``, ``tunnel`` and
+``docker_cli`` are refused and their steps do not run. The section is::
+
+    "setup": {
+      "provider": "agentenv",
+      "agentenv": {"gateway_url": "https://<gateway>",                       # required
+                   "sandbox_url": "https://<public data-plane gateway>",      # default: gateway_url
+                   "api_key": {"path": "<local env-file>"} | {"env": "<VAR>"},  # required
+                   "machine_type": "<type>", "max_sandboxes": 16, "pool": true},
+      "records_proxy": {"public_base": "https://<public records proxy base>"},
+      "tasks": {...}, "records_secret": "generate"
+    }
+
+Steps: ``layout``, ``harbor`` (plus the pinned ``e2b`` SDK), ``records_secret``,
+``tasks``, ``agentenv_key`` (the key file to ``<root>/home/agentenv.key``, 0600;
+the container reads it through ``AGENTENV_API_KEY_FILE``, so the key is in no env
+file and no dry-run line). The microVMs deny private egress: the records proxy
+must be reached over a public HTTPS base; a missing or placeholder
+``records_proxy.public_base`` is a warning in a dry run and a failure at setup.
 """
 
 from __future__ import annotations
@@ -104,8 +125,18 @@ COMPOSE_URL = "https://github.com/docker/compose/releases/download/v{v}/docker-c
 STORE_PREFIX = "store:"
 AWS_IMAGE = "amazon/aws-cli:latest"
 
+REMOTE_DOCKER = "remote-docker"
+AGENTENV = "agentenv"
+PROVIDERS = (REMOTE_DOCKER, AGENTENV)
+E2B_REQUIREMENT = "e2b==2.64.0"  # the SDK version the AgentENV adapter was verified with
+AGENTENV_KEY_FILE_ENV = "AGENTENV_API_KEY_FILE"  # yeto.rl.harness.harbor.agentenv_client.API_KEY_FILE_ENV
+PLACEHOLDER = re.compile(r"__TODO|<[^>]*>")
+
 _KEYS = {
-    "": {"root", "harbor", "docker_cli", "sandbox", "tunnel", "tasks", "records_secret"},
+    "": {"root", "harbor", "docker_cli", "sandbox", "tunnel", "tasks", "records_secret", "provider", "agentenv",
+         "records_proxy"},
+    "agentenv": {"gateway_url", "sandbox_url", "api_key", "machine_type", "max_sandboxes", "pool"},
+    "records_proxy": {"public_base"},
     "harbor": {"version", "commit", "keep"},
     "docker_cli": {"version", "compose_version"},
     "sandbox": {"docker_host", "alias", "key", "known_hosts"},
@@ -210,6 +241,23 @@ class TasksSpec:
 
 
 @dataclass(frozen=True)
+class AgentenvSpec:
+    """``agentic.setup.agentenv``: the AgentENV gateway the sampler's Harbor trials dial."""
+
+    gateway_url: str
+    sandbox_url: str
+    api_key: SecretRef
+    machine_type: str | None
+    max_sandboxes: int | None
+    pool: bool
+    records_public_base: str | None  # agentic.setup.records_proxy.public_base
+
+    @property
+    def records_placeholder(self) -> bool:
+        return not self.records_public_base or bool(PLACEHOLDER.search(self.records_public_base))
+
+
+@dataclass(frozen=True)
 class AgenticSetup:
     root: str
     harbor_version: str
@@ -217,12 +265,17 @@ class AgenticSetup:
     harbor_keep: tuple[str, ...]
     docker_cli_version: str
     compose_version: str
-    sandbox: SandboxAccess
+    sandbox: SandboxAccess | None  # None: provider agentenv (no docker host)
     tunnel: TunnelSpec | None
     tasks: TasksSpec | None
     records_secret: SecretRef | str | None
     notes: tuple[str, ...] = field(default=())
     sandbox_host: str | None = None  # the agentic.envs.hosts name of the sandbox host
+    agentenv: AgentenvSpec | None = None
+
+    @property
+    def provider(self) -> str:
+        return AGENTENV if self.agentenv is not None else REMOTE_DOCKER
 
     # -- container paths
     @property
@@ -241,13 +294,31 @@ class AgenticSetup:
     def tunnel_events(self) -> str:
         return f"{self.root}/events/tunnel.jsonl"
 
+    @property
+    def agentenv_key_file(self) -> str:
+        return f"{self.home}/agentenv.key"
+
     def container_env(self, *, python_bin: str = "/opt/runtime-venv/bin") -> dict[str, str]:
         """The sampler container's environment for this setup (an env file ahead of
         the operator's agentic env file). ``PYTHONPATH`` is :meth:`python_path`."""
-        env = {"HOME": self.home, "DOCKER_HOST": f"ssh://{self.sandbox.alias}",
+        env = {"HOME": self.home,
                "PATH": f"{self.root}/bin:{python_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-               "HARBOR_ENV_TYPE": "remote-docker", "HARBOR_TASKS_DIR": f"{self.root}/tasks",
+               "HARBOR_ENV_TYPE": self.provider, "HARBOR_TASKS_DIR": f"{self.root}/tasks",
                "HARBOR_TRIALS_DIR": f"{self.root}/trials"}
+        if self.sandbox is not None:
+            env["DOCKER_HOST"] = f"ssh://{self.sandbox.alias}"
+        if (a := self.agentenv) is not None:
+            # the key stays in its 0600 file on the node: never in an env file or a dry-run line
+            env.update({"E2B_API_URL": a.gateway_url, "AGENTENV_SANDBOX_URL": a.sandbox_url,
+                        "E2B_SANDBOX_URL": a.sandbox_url, AGENTENV_KEY_FILE_ENV: self.agentenv_key_file})
+            if a.machine_type:
+                env["HARBOR_ENV_KWARGS"] = json.dumps({"machine_type": a.machine_type})
+            if a.max_sandboxes:
+                env["HARBOR_MAX_SANDBOXES"] = json.dumps({AGENTENV: a.max_sandboxes})
+            if a.pool:
+                env["YETO_AGENTENV_POOL"] = "1"
+            if a.records_public_base:
+                env["YETO_RECORDS_PROXY_PUBLIC_BASE"] = a.records_public_base
         if self.records_secret is not None:
             env["YETO_RECORDS_PROXY_SECRET_FILE"] = self.secret_file
         if self.tunnel is not None:
@@ -357,6 +428,15 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
         if not _VERSION.match(v):
             raise ValueError(f"agentic.setup.{what} must be a pinned x.y.z version, got {v!r}")
 
+    provider = _provider(doc, agentic)
+    if provider == AGENTENV:
+        return _parse_agentenv(doc, root=root, version=version, commit=commit, keep=keep,
+                               cli_version=cli_version, compose=compose, local=local, ref=ref)
+    for key in ("agentenv", "records_proxy"):
+        if doc.get(key):
+            raise ValueError(f"agentic.setup.{key} is for provider agentenv (agentic.setup.provider is "
+                             f"{provider!r})")
+
     sb = _section(doc, "sandbox")
     envs_host = None
     if str(sb.get("docker_host") or "") == ENVS_DOCKER_HOST:
@@ -418,6 +498,88 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
     else:
         notes.append("no tunnel section: the sandboxes reach the records proxy some other way")
 
+    tasks = _tasks(doc, local)
+
+    secret: SecretRef | str | None = None
+    if "records_secret" in doc:
+        raw = doc["records_secret"]
+        secret = "generate" if raw == "generate" else ref(raw, "agentic.setup.records_secret")
+    elif tunnel is not None:
+        raise ValueError("agentic.setup: a tunnel makes the records proxy public; set records_secret "
+                         "(\"generate\", {\"path\"} or {\"env\"})")
+
+    return AgenticSetup(root=root, harbor_version=version, harbor_commit=commit, harbor_keep=keep,
+                        docker_cli_version=cli_version, compose_version=compose, sandbox=sandbox, tunnel=tunnel,
+                        tasks=tasks, records_secret=secret, notes=tuple(notes),
+                        sandbox_host=None if envs_host is None else envs_host.name)
+
+
+def _provider(doc: Mapping[str, Any], agentic: Mapping[str, Any]) -> str:
+    """``agentic.setup.provider``, else ``task_defaults.provider``, else remote-docker; the two must agree."""
+    declared = doc.get("provider")
+    defaults = (agentic.get("task_defaults") or {}).get("provider")
+    if declared is not None and declared not in PROVIDERS:
+        raise ValueError(f"agentic.setup.provider must be one of {list(PROVIDERS)}, got {declared!r}")
+    if defaults and defaults not in PROVIDERS:
+        raise ValueError(f"agentic.setup prepares {' or '.join(PROVIDERS)} sandboxes; task_defaults.provider "
+                         f"is {defaults!r}")
+    if declared and defaults and declared != defaults:
+        raise ValueError(f"agentic.setup.provider {declared!r} is not task_defaults.provider {defaults!r}")
+    return str(declared or defaults or REMOTE_DOCKER)
+
+
+def _url(value: Any, what: str) -> str:
+    text = str(value or "").strip().rstrip("/")
+    url = urlsplit(text)
+    if url.scheme not in ("http", "https") or not url.hostname or PLACEHOLDER.search(text):
+        raise ValueError(f"{what} must be an http(s) URL, got {value!r}")
+    return text
+
+
+def _parse_agentenv(doc: Mapping[str, Any], *, root: str, version: str, commit: str,
+                    keep: tuple[str, ...], cli_version: str, compose: str, local: Callable[[str], str],
+                    ref: Callable[[Any, str], SecretRef]) -> AgenticSetup:
+    """The ``agentic.setup`` of an AgentENV run: no docker host, no reverse tunnel."""
+    for key in ("sandbox", "tunnel", "docker_cli"):
+        if doc.get(key):
+            raise ValueError(f"agentic.setup.{key} is for remote-docker sandboxes; AgentENV microVMs have no "
+                             "docker host (drop it with provider agentenv)")
+    notes: list[str] = []
+    ae = _section(doc, "agentenv")
+    gateway = _url(ae.get("gateway_url"), "agentic.setup.agentenv.gateway_url")
+    sandbox_url = _url(ae.get("sandbox_url"), "agentic.setup.agentenv.sandbox_url") if ae.get("sandbox_url") \
+        else gateway
+    if "api_key" not in ae:
+        raise ValueError("agentic.setup.agentenv.api_key is required ({\"path\": <env-file>} or {\"env\": <VAR>})")
+    key = ref(ae["api_key"], "agentic.setup.agentenv.api_key")
+    cap = ae.get("max_sandboxes")
+    if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0):
+        raise ValueError(f"agentic.setup.agentenv.max_sandboxes must be a positive integer, got {cap!r}")
+    if not isinstance(ae.get("pool", False), bool):
+        raise ValueError("agentic.setup.agentenv.pool must be true or false")
+    public = _section(doc, "records_proxy").get("public_base")
+    spec = AgentenvSpec(gateway_url=gateway, sandbox_url=sandbox_url, api_key=key,
+                        machine_type=str(ae["machine_type"]) if ae.get("machine_type") else None,
+                        max_sandboxes=cap, pool=bool(ae.get("pool", False)),
+                        records_public_base=str(public).strip().rstrip("/") if public else None)
+    if spec.records_placeholder:
+        notes.append(f"WARNING: agentic.setup.records_proxy.public_base is {public!r}: the microVMs deny private "
+                     "egress, so trials cannot reach the records proxy and no trial is judged; set a public "
+                     "https base (the node setup refuses to start without one)")
+    elif urlsplit(spec.records_public_base).scheme != "https":
+        notes.append(f"records_proxy.public_base {spec.records_public_base} is not https: the records secret "
+                     "travels in the URL path in clear text")
+    if urlsplit(gateway).scheme != "https":
+        notes.append(f"agentenv.gateway_url {gateway} is plain http: the API key travels in clear text")
+    tasks = _tasks(doc, local)
+    raw = doc.get("records_secret", "generate")
+    secret = "generate" if raw == "generate" else ref(raw, "agentic.setup.records_secret")
+    return AgenticSetup(root=root, harbor_version=version, harbor_commit=commit, harbor_keep=keep,
+                        docker_cli_version=cli_version, compose_version=compose, sandbox=None, tunnel=None,
+                        tasks=tasks, records_secret=secret, notes=tuple(notes), agentenv=spec)
+
+
+def _tasks(doc: Mapping[str, Any], local: Callable[[str], str]) -> TasksSpec | None:
     tasks = None
     ts = _section(doc, "tasks")
     if ts:
@@ -441,22 +603,7 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
         elif not source[len(STORE_PREFIX):].strip("/"):
             raise ValueError("agentic.setup.tasks.source store: needs a prefix")
         tasks = TasksSpec(source=source, ids=tuple(ids))
-
-    secret: SecretRef | str | None = None
-    if "records_secret" in doc:
-        raw = doc["records_secret"]
-        secret = "generate" if raw == "generate" else ref(raw, "agentic.setup.records_secret")
-    elif tunnel is not None:
-        raise ValueError("agentic.setup: a tunnel makes the records proxy public; set records_secret "
-                         "(\"generate\", {\"path\"} or {\"env\"})")
-
-    provider = ((agentic.get("task_defaults") or {}).get("provider"))
-    if provider and provider != "remote-docker":
-        raise ValueError(f"agentic.setup prepares remote-docker sandboxes; task_defaults.provider is {provider!r}")
-    return AgenticSetup(root=root, harbor_version=version, harbor_commit=commit, harbor_keep=keep,
-                        docker_cli_version=cli_version, compose_version=compose, sandbox=sandbox, tunnel=tunnel,
-                        tasks=tasks, records_secret=secret, notes=tuple(notes),
-                        sandbox_host=None if envs_host is None else envs_host.name)
+    return tasks
 
 
 def _envs(spec: Mapping[str, Any], agentic: Mapping[str, Any]) -> Any:
@@ -504,11 +651,20 @@ def local_problems(setup: AgenticSetup, *, environ: Mapping[str, str] | None = N
     """What the launcher host is missing to run the setup (files, modes, variables)."""
     environ = os.environ if environ is None else environ
     out: list[str] = []
-    for what, r, private in (("sandbox.key", setup.sandbox.key, True),
-                             ("sandbox.known_hosts", setup.sandbox.known_hosts, False),
-                             ("tunnel.key", setup.tunnel.key if setup.tunnel else None, True)):
+    s = setup.sandbox
+    for what, r, private in (("sandbox.key", s.key if s else None, True),
+                             ("sandbox.known_hosts", s.known_hosts if s else None, False),
+                             ("tunnel.key", setup.tunnel.key if setup.tunnel else None, True),
+                             ("agentenv.api_key", setup.agentenv.api_key if setup.agentenv else None, True)):
         if r is not None and (p := r.problem(environ, private=private)):
             out.append(f"agentic.setup.{what}: {p}")
+        elif what == "agentenv.api_key" and r is not None:
+            try:
+                if not agentenv_key_of(r.read(environ)):
+                    out.append(f"agentic.setup.agentenv.api_key: {r.describe()} holds no AGENTENV_API_KEY= / "
+                               "E2B_API_KEY= line or bare key (value not shown)")
+            except (OSError, ValueError) as error:
+                out.append(f"agentic.setup.agentenv.api_key: {type(error).__name__} reading {r.describe()}")
     if isinstance(setup.records_secret, SecretRef):
         if p := setup.records_secret.problem(environ, private=True):
             out.append(f"agentic.setup.records_secret: {p}")
@@ -534,6 +690,14 @@ def local_problems(setup: AgenticSetup, *, environ: Mapping[str, str] | None = N
     return out
 
 
+def agentenv_key_of(text: str) -> str | None:
+    """:func:`yeto.rl.harness.harbor.agentenv_client.key_from_text` (imported lazily: the
+    launcher need not import the harness package)."""
+    from yeto.rl.harness.harbor.agentenv_client import key_from_text  # noqa: PLC0415
+
+    return key_from_text(text)
+
+
 def staged_by_sandbox_prepare(path: Path) -> bool:
     """``path`` lies under ``yeto sandbox prepare``'s default stage dir
     (``~/.yeto/sandbox/<run>/stage``): a first dry run of a new run comes before it exists."""
@@ -547,15 +711,22 @@ def staged_by_sandbox_prepare(path: Path) -> bool:
 
 def describe(setup: AgenticSetup) -> list[str]:
     """The plan, one line per step (``--dry-run``)."""
-    s, t = setup.sandbox, setup.tunnel
-    lines = [f"agentic setup under {setup.root} (node: <nvme>{setup.root})",
-             f"  docker_cli: docker {setup.docker_cli_version} + compose v{setup.compose_version} in {setup.root}/bin",
-             f"  harbor: {setup.harbor_version} @ {setup.harbor_commit[:12]} into {setup.site} "
-             f"(keep {list(setup.harbor_keep)})",
-             f"  sandbox: DOCKER_HOST=ssh://{s.alias} -> {s.user}@{s.host}:{s.port}"
-             + (f" (agentic.envs host {setup.sandbox_host})" if setup.sandbox_host else "")
-             + f", key {s.key.describe()}, "
-             f"known_hosts {s.known_hosts.describe() if s.known_hosts else 'accept-new'}"]
+    s, t, a = setup.sandbox, setup.tunnel, setup.agentenv
+    lines = [f"agentic setup under {setup.root} (node: <nvme>{setup.root}), provider {setup.provider}"]
+    if s is not None:
+        lines.append(f"  docker_cli: docker {setup.docker_cli_version} + compose v{setup.compose_version} in "
+                     f"{setup.root}/bin")
+    lines.append(f"  harbor: {setup.harbor_version} @ {setup.harbor_commit[:12]} into {setup.site} "
+                 f"(keep {list(setup.harbor_keep)})" + (f" + {E2B_REQUIREMENT}" if a else ""))
+    if s is not None:
+        lines.append(f"  sandbox: DOCKER_HOST=ssh://{s.alias} -> {s.user}@{s.host}:{s.port}"
+                     + (f" (agentic.envs host {setup.sandbox_host})" if setup.sandbox_host else "")
+                     + f", key {s.key.describe()}, "
+                     f"known_hosts {s.known_hosts.describe() if s.known_hosts else 'accept-new'}")
+    if a is not None:
+        lines.append(f"  agentenv: gateway {a.gateway_url}, data plane {a.sandbox_url}, key {a.api_key.describe()} "
+                     f"-> {setup.agentenv_key_file} (0600, ${AGENTENV_KEY_FILE_ENV}); no docker host, no tunnel")
+        lines.append(f"  records_proxy: public base {a.records_public_base or '-'}")
     if t:
         lines.append(f"  tunnel: -R {t.listen} -> 127.0.0.1:{t.target_port} via {t.user}@{t.host}:{t.port}, "
                      f"key {t.key.describe()}, container {TUNNEL_CONTAINER} (restart unless-stopped, "
@@ -710,6 +881,8 @@ try:
     raw = d.read_text("direct_url.json")
     out["commit"] = (json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
     import harbor, vllm  # noqa: F401  Harbor is imported in-process next to vLLM
+    for name in sys.argv[1:]:  # the provider's SDK (agentenv: e2b)
+        __import__(name)
     out["import"] = "ok"
 except Exception as error:  # noqa: BLE001
     out["error"] = f"{type(error).__name__}: {error}"[:400]
@@ -828,14 +1001,32 @@ class Provisioner:
         local = local_problems(self.setup, environ=self.environ)
         if local:
             raise self._fail("local", "; ".join(local))
+        a = self.setup.agentenv
+        if a is not None and a.records_placeholder:
+            raise self._fail("records_proxy", f"agentic.setup.records_proxy.public_base is "
+                                              f"{a.records_public_base!r}: AgentENV microVMs deny private egress, "
+                                              "so no trial could reach the records proxy; set the public https base")
         self.layout()
-        self.docker_cli()
+        if self.setup.sandbox is not None:  # agentenv: no docker host
+            self.docker_cli()
         self.harbor()
-        self.sandbox()
+        if self.setup.sandbox is not None:
+            self.sandbox()
         self.records_secret()
         self.tasks()
+        self.agentenv_key()
         self.tunnel()
         return dict(self.report)
+
+    def agentenv_key(self) -> None:
+        """The AgentENV API key file in ``<root>/home`` (0600): the sampler reads it through
+        ``AGENTENV_API_KEY_FILE``; the key is in no env file, no argv and no event."""
+        a = self.setup.agentenv
+        if a is None:
+            return
+        changed = self.node.put(a.api_key.read(self.environ), self.node.host(self.setup.agentenv_key_file))
+        self._done("agentenv_key", "changed" if changed else "ok", f"{a.api_key.describe()} -> "
+                                                                   f"{self.setup.agentenv_key_file}")
 
     # -- steps
     def layout(self) -> None:
@@ -881,7 +1072,8 @@ class Provisioner:
         self._done("docker_cli", "changed", f"docker {want[0]}, compose v{want[1]}")
 
     def _harbor_state(self) -> dict[str, Any]:
-        out = self.node.in_image(f"{shlex.quote(self.node.python)} -c {shlex.quote(HARBOR_CHECK)}",
+        extra = " e2b" if self.setup.agentenv is not None else ""
+        out = self.node.in_image(f"{shlex.quote(self.node.python)} -c {shlex.quote(HARBOR_CHECK)}{extra}",
                                  env=self._image_env(), timeout=600)
         for line in (out.stdout or "").splitlines():
             if line.startswith("YETO_SETUP_HARBOR "):
@@ -900,9 +1092,10 @@ class Provisioner:
         # the same commit's subdirectory in the same resolve
         dash = f"server-dashboard @ git+{HARBOR_REPO}@{self.setup.harbor_commit}#subdirectory=server-dashboard"
         py, site = shlex.quote(self.node.python), shlex.quote(self.setup.site)
+        sdk = f" {shlex.quote(E2B_REQUIREMENT)}" if self.setup.agentenv is not None else ""
         out = self.node.in_image(
             f"set -e; {py} -m pip install --quiet --disable-pip-version-check --upgrade --target {site} "
-            f"{shlex.quote(req)} {shlex.quote(dash)}; PYTHONPATH= {py} -c {shlex.quote(HARBOR_PRUNE)} {site} "
+            f"{shlex.quote(req)} {shlex.quote(dash)}{sdk}; PYTHONPATH= {py} -c {shlex.quote(HARBOR_PRUNE)} {site} "
             f"{shlex.quote(','.join(self.setup.harbor_keep))}", env=self._image_env(), timeout=1800)
         if out.returncode != 0:
             raise self._fail("harbor", f"pip install of Harbor {self.setup.harbor_version} into {self.setup.site} "

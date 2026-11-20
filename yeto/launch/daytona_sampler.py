@@ -529,7 +529,7 @@ def requirements_of(spec: Mapping[str, Any], *, gpus: int = 8, plan: DiskPlan | 
     server = (spec.get("engine") or {}).get("server") or {}
     hosts: list[str] = []
     setup = agentic_setup.parse(spec) if (spec.get("agentic") or {}).get("setup") else None
-    if setup is not None:
+    if setup is not None and setup.sandbox is not None:  # agentenv: no docker host to dial
         hosts.append(f"{setup.sandbox.host}:{setup.sandbox.port}")
         if setup.tunnel is not None:
             hosts.append(f"{setup.tunnel.host}:{setup.tunnel.port}")
