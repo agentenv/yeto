@@ -37,6 +37,7 @@ NOT_CONFIG = {
     "docker:docker.io/vllm/vllm-openai-rocm@sha256:": "an image reference, not a config",
     "MILES_SRC=<miles-fork-clone> SGLANG_SRC=<sglang-fork-clone> \\": "image build script, needs the fork clones",
     "# /etc/systemd/system/yeto-run-<run>.service": "systemd unit (its ExecStart yeto line is parsed below)",
+    "[launcher] kimi_k31 next9 trainer MFU switches:": "launcher output (tests/test_recipe_env_defaults.py)",
 }
 
 # Placeholder values for the guide's angle-bracket placeholders that must be numbers / ids.

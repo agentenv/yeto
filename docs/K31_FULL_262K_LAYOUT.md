@@ -103,8 +103,10 @@ docker:ghcr.io/agentenv/yeto-miles-k31@sha256:3a0c544558b67c587f460d1ab87c0c19fa
 
 It carries Miles `k31/integ-next9` `f61eb35d`: `k31/integ-trainer` (its commit
 before the fork's author-metadata rewrite, `1f29e43043`) plus the trainer MFU
-work behind switches that default off
-([KIMI_K31_ASYNC_RL_GUIDE.md](KIMI_K31_ASYNC_RL_GUIDE.md) section 9.1.1). It
+work behind environment switches. yeto turns the switches on by default for
+this image; `--rl-recipe-env-defaults off` turns them off
+([KIMI_K31_ASYNC_RL_GUIDE.md](KIMI_K31_ASYNC_RL_GUIDE.md) section 9.1.1 has the
+list and the rules). It
 contains every Miles change this layout depends on (hashes below are the
 rewritten ones; the same changes are in `1f29e43043`):
 
@@ -242,9 +244,15 @@ in GiB per stage.
   available. It requires a different layout (deeper PP or activation offload).
 - Optimizer CPU offload takes a noticeable share of short test steps. At
   production batch sizes it is estimated at 2-5% [estimate].
-- A tensor-parallel split of the DSA indexer exists in Miles
-  (`MILES_K31_INDEXER_TP_SPLIT=1`, off by default). It is not yet validated
-  for production.
+- The next9 trainer MFU switches (including the tensor-parallel split of the
+  DSA indexer, `MILES_K31_INDEXER_TP_SPLIT=1`) are on by default
+  ([KIMI_K31_ASYNC_RL_GUIDE.md](KIMI_K31_ASYNC_RL_GUIDE.md) section 9.1.1). No
+  full 93-layer PP3 run has used them yet. Two of them use more memory to save
+  compute: `MILES_K31_INDEXER_RECOMPUTE_CACHE` (about 2.6 GiB on stage 0 at
+  262k) and `MILES_K31_KDA_SAVE_INTERMEDIATES` (about 3.6 GiB). Others use
+  less: the 16-layer slice peaked 25 GiB lower with every switch on. The
+  launch-time estimate counts them, and puts the busiest stage of 31/31/31 at
+  about 143 GiB with the switches, against 158 GiB without them [estimate].
 
 **Recommended practice**
 
@@ -279,7 +287,9 @@ Run these in order and stop at the first failure.
 **If a stage runs out of memory**, adjust in this order:
 
 1. Identify the stage from the GPU in the error message.
-2. Stage 0: lower `MILES_K31_INDEXER_QUERY_CHUNK` (2048, 1024, 512) and
+2. Stage 0: set `MILES_K31_KDA_SAVE_INTERMEDIATES=0`, then
+   `MILES_K31_INDEXER_RECOMPUTE_CACHE=0` (`--modal-env` / `--island-env`; your
+   value wins over the default), lower `MILES_K31_INDEXER_QUERY_CHUNK` (2048, 1024, 512) and
    `MILES_K3_ATTN_RES_TOKEN_CHUNK` (4096, 2048, 1024), then move one layer off
    stage 0 (for example 31/30/32). Each layer is about 2.8 GiB.
 3. Stage 1 or 2: move a layer toward stage 0 if it has headroom, or lower the

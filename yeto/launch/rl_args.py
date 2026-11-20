@@ -1470,8 +1470,11 @@ def _prepare_rl_args(
     _apply_rl_outer_merge_options(args, num_islands=learners)
     syncer_shard_count(args)  # refuse --syncer-shards outside asynchronous rounds now
     _check_island_pool(args, num_islands=learners)
+    from . import recipe_env
     from .k31_checks import check_full_form
 
+    # the recipe's trainer environment defaults (one launch line; dry-run too)
+    args._recipe_env_defaults = recipe_env.report(args)
     args._kimi_k31_full = check_full_form(args, specs)  # selection validity + rough memory
     check_peer_recovery(args, clouds={spec.cloud for spec in specs})
     if args.spot:

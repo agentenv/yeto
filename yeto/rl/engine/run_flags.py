@@ -325,6 +325,15 @@ _MODEL = (
         default=None,
         help="immutable Hugging Face commit represented by --rollout-model",
     ),
+    cli_flag(
+        "--rl-recipe-env-defaults",
+        choices=("auto", "off"),
+        default="auto",
+        help="auto (default): the trainer island gets the environment defaults the "
+        "--rl-model-recipe declares for this launch (the backend's recipe_env role; the "
+        "launch prints which and how many); a value --island-env / --modal-env or an ssh: "
+        "inventory env sets wins. off: none",
+    ),
 )
 
 _REWARD = (

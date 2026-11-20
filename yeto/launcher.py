@@ -245,9 +245,14 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     iargs = sample_roles.island_args(iargs, m, rl_island_count(args))
     learner_id, island_learners = sample_roles.island_learner(args, m, num_learners, rl_island_count(args))
     task = task_factory(iargs, spec, learner_id, island_learners, syncer_addr)
+    from .launch import recipe_env
     from .launch.modal_islands import parse_island_env
 
-    io.apply_to_task(task, {**parse_island_env(args), **io.island_env(args, m, overrides),
+    explicit = {**parse_island_env(args), **io.island_env(args, m, overrides)}
+    # the recipe's declared trainer environment defaults; every explicit value wins
+    io.apply_to_task(task, recipe_env.island_defaults(
+        iargs, {**(getattr(task, "envs", None) or {}), **explicit}))
+    io.apply_to_task(task, {**explicit,
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {}),
                             **sample_roles.island_env(iargs),
                             **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None)),
@@ -1390,6 +1395,9 @@ def dry_run_plan(args) -> dict:
         # Kimi-K3.1 full form: the checked selection and a rough per-GPU memory budget
         **({"kimi_k31_full": args._kimi_k31_full}
            if getattr(args, "_kimi_k31_full", None) else {}),
+        # the recipe's trainer environment defaults (yeto.launch.recipe_env)
+        **({"recipe_env_defaults": args._recipe_env_defaults}
+           if getattr(args, "_recipe_env_defaults", None) else {}),
         # the trainer's model: source, problems, warnings (absent: --preflight-model off)
         **({"trainer_model": trainer_model} if trainer_model is not None else {}),
         "external_learners": external,

@@ -192,6 +192,7 @@ after the inventory `env`.
 | `YETO_RL_NAN_SKIP` | `max_consecutive=2,max_fraction=0.05,min_rounds=20` | A non-finite step becomes a counted skip. |
 | `YETO_MILES_TRAIN_EXTRA_ARGV` | `--log-probs-chunk-size 16384 --no-check-for-nan-in-loss-and-grad --custom-megatron-before-train-step-hook-path yeto.rl.adapters.miles.models.kimi_k31.first_stage_grad.before_train_step` | Log-prob chunking, NaN skip, the stage-0 gradient hook. No split flags: 93 layers split 31/31/31 by default (section 8). |
 | `PYTORCH_CUDA_ALLOC_CONF` | Not set by default; `expandable_segments:True` when memory is short (section 8) | |
+| The next9 trainer MFU switches | Set by default (section 5.1) | Not in the run config. A value you set here or in the inventory `env` wins. |
 | `NCCL_DEBUG`, `NCCL_DEBUG_SUBSYS` | `INFO`, `INIT,NET` for bring-up only | Shows which transport NCCL picked (section 12). yeto sets `NCCL_DEBUG=WARN` otherwise. |
 
 The variable `YETO_DEVICE_FAMILY` is refused in `env`: `device_family`
@@ -215,9 +216,14 @@ ghcr.io/agentenv/yeto-miles-k31@sha256:3a0c544558b67c587f460d1ab87c0c19fa1d578d5
 
 Put it in `--rl-image docker:<ref>` of the run config (it is also what an
 omitted `--rl-image` resolves to for `--rl-model-recipe kimi_k31 --tuning
-full`). It carries Miles `f61eb35d` (the trainer MFU work behind switches that
-default off; [KIMI_K31_ASYNC_RL_GUIDE.md](KIMI_K31_ASYNC_RL_GUIDE.md) section
-9.1.1) on the overlay-safe base, so no repack is needed.
+full`). It carries Miles `f61eb35d` (the trainer MFU work behind environment
+switches) on the overlay-safe base, so no repack is needed. yeto turns the MFU
+switches on by default for this image on the `ssh:` trainer island, so the
+run config does not list them. The list and the rules are in
+[KIMI_K31_ASYNC_RL_GUIDE.md](KIMI_K31_ASYNC_RL_GUIDE.md) section 9.1.1. A value
+you set with `--island-env` or in the inventory `env` wins over the default.
+`--rl-recipe-env-defaults off` turns all of them off. The launch and its
+dry run print one line that says how many switches are set.
 
 The repack of the former Modal default `2de5d796...`,
 `yeto-miles-k31@sha256:2abbbb00...`, holds the same files and the same Miles
@@ -378,7 +384,12 @@ observed to pass on a B300 without expandable segments is 166.3 GiB, so the
 headroom is about +9 GiB (median) to -1 GiB (conservative) [estimate]. This
 is tighter than the earlier 67 GiB estimate in
 [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#8-current-scope-and-recommended-practice),
-which did not model the per-layer recompute working set.
+which did not model the per-layer recompute working set. These numbers are
+without the next9 MFU switches. With the switches on (the default, section
+5.1), the launch-time estimate puts the busiest stage at about 143 GiB instead
+of 158 GiB: the switches save more memory in the per-layer working set than the
+indexer top-k cache and the saved KDA intermediates add [estimate]. No full
+93-layer run has used the switches yet.
 
 Watch the first step closely (section 11) and, if a stage runs short:
 
@@ -387,7 +398,10 @@ Watch the first step closely (section 11) and, if a stage runs short:
    budget rises to about 213 GiB [estimate]) and is accepted on this trainer
    (`--rl-sample-role trainer`, no engine, no `--offload-train`). It was on in
    the 524k measurement.
-2. **Chunk sizes** (stage 0 first): `MILES_K31_INDEXER_QUERY_CHUNK` 1024 to
+2. **Memory-for-compute switches** (stage 0 first): `--island-env
+   MILES_K31_KDA_SAVE_INTERMEDIATES=0`, then
+   `MILES_K31_INDEXER_RECOMPUTE_CACHE=0` (about 3.6 and 2.6 GiB at 262k).
+   **Chunk sizes**: `MILES_K31_INDEXER_QUERY_CHUNK` 1024 to
    512, `MILES_K3_ATTN_RES_TOKEN_CHUNK` 2048 to 1024.
 3. **Log-prob phase**: `--log-probs-chunk-size 4096` in
    `YETO_MILES_TRAIN_EXTRA_ARGV`.

@@ -223,13 +223,13 @@ def pipeline_split(num_layers: int, pp: int, first: int | None = None,
 
 
 def _env_settings(args) -> dict[str, str]:
-    """The island environment the launch sets (--modal-env K=V), over this process's."""
+    """The trainer environment the launch sets, over this process's: the recipe's
+    environment defaults (``recipe_env``), then --island-env, then --modal-env K=V."""
+    from .recipe_env import effective_env
+
     env = {k: v for k, v in os.environ.items()
            if k in ("YETO_MILES_TRAIN_EXTRA_ARGV", "PYTORCH_CUDA_ALLOC_CONF")}
-    for item in getattr(args, "modal_env", None) or ():
-        key, sep, value = str(item).partition("=")
-        if sep:
-            env[key] = value
+    env.update(effective_env(args))
     return env
 
 
@@ -294,11 +294,27 @@ def memory_estimate(args, *, num_trainable: int, moe_layers: int, gpu: str | Non
     offload = min(1.0, max(0.0, float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)))
     precision_aware = bool(getattr(args, "rl_precision_aware_optimizer", False))
     trainable_bytes = 2 + (2 if precision_aware else 4) + (6 if precision_aware else 12) * (1.0 - offload)
-    stages, a = [], 0
+    from ..rl.engine import backends
+
+    k31 = backends.module("kimi_k31_model", "miles")
+    switches = backends.module("kimi_k31_mfu_switches", "miles")
+    frozen_dequant = (k31.NUM_EXPERTS - num_trainable) / ep * k31.EXPERT_PARAMETERS * 2 / 1024 ** 3
+    stages, stage_terms, a = [], [], 0
     for s, layers in enumerate(split):
-        stages.append(stage_memory(a, a + layers, num_layers=num_layers, in_flight=pp - s,
-                                   tokens_per_gpu=tokens_per_gpu, tp=tp, ep=ep,
-                                   num_trainable=num_trainable, trainable_bytes=trainable_bytes))
+        stage = stage_memory(a, a + layers, num_layers=num_layers, in_flight=pp - s,
+                             tokens_per_gpu=tokens_per_gpu, tp=tp, ep=ep,
+                             num_trainable=num_trainable, trainable_bytes=trainable_bytes)
+        kinds = [_layer_kind(layer, num_layers) for layer in range(a, a + layers)]
+        # the next9 trainer switches the environment turns on (indexer cache, saved KDA
+        # intermediates, SiTU and frozen-expert copies no longer saved)
+        terms = switches.memory_terms_gib(
+            env, tokens_per_gpu=tokens_per_gpu, in_flight=pp - s, dsa_layers=kinds.count("mla"),
+            kda_layers=kinds.count("kda"), moe_layers=len(kinds) - kinds.count("dense"),
+            frozen_dequant_gib=frozen_dequant)
+        stage["switches"] = sum(terms.values())
+        stage["peak_alloc"] += stage["switches"]
+        stages.append(stage)
+        stage_terms.append(terms)
         a += layers
     busiest = max(range(len(stages)), key=lambda i: stages[i]["peak_alloc"])
     peak = stages[busiest]["peak_alloc"]
@@ -338,9 +354,6 @@ def memory_estimate(args, *, num_trainable: int, moe_layers: int, gpu: str | Non
         warnings.append(
             f"--seq-len {seq} with --context-parallel 1 keeps the whole sequence on every TP group; "
             "the checkpoint and working-set terms above grow linearly with it")
-    from ..rl.engine import backends
-
-    k31 = backends.module("kimi_k31_model", "miles")
     moe_on_busiest = sum(1 for layer in range(sum(split[:busiest]), sum(split[:busiest + 1]))
                          if _layer_kind(layer, num_layers) != "dense")
     host_optimizer = moe_on_busiest * num_trainable / ep * k31.EXPERT_PARAMETERS * (12 * offload) / 1024 ** 3
@@ -358,7 +371,9 @@ def memory_estimate(args, *, num_trainable: int, moe_layers: int, gpu: str | Non
         "capacity_gib": None if visible is None else rnd(visible),
         "budget_gib": None if budgets is None else {k: rnd(v) for k, v in budgets.items()},
         "expandable_segments": es_on,
-        "parts_gib": {k: rnd(stages[busiest][k]) for k in ("weights", "checkpoints", "transient", "residual")},
+        "parts_gib": {k: rnd(stages[busiest][k])
+                      for k in ("weights", "checkpoints", "transient", "residual", "switches")},
+        "mfu_switches_gib": {k: rnd(v) for k, v in stage_terms[busiest].items() if v},
         "assumptions": [
             "per_gpu_gib is the torch allocated peak of the busiest pipeline stage (not nvidia-smi: "
             "add the allocator's reserve and about 22 GiB of CUDA/NCCL)",
@@ -366,6 +381,9 @@ def memory_estimate(args, *, num_trainable: int, moe_layers: int, gpu: str | Non
             "the working set is linear in tokens per GPU (calibrated at TP4/TP8, 16384-32768 tokens)",
             "layer kinds follow the full K3.1 layout by index (a cut model's attention layers may differ)",
             "no activation offload, no CUDA graphs",
+            "next9 trainer switches: only the indexer top-k cache, the saved KDA intermediates, "
+            "the SiTU and frozen-expert copies are modelled (mfu_switches_gib); measured with "
+            "every switch on, the 16-layer slice peaked 25.3 GiB below the same layout without them",
         ],
         "warnings": warnings,
     }
