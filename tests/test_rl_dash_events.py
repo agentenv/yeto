@@ -87,6 +87,7 @@ def _samples():
 def test_batch_summary_quantiles_and_truncation():
     s = rmh.batch_summary(SimpleNamespace(), _samples())
     assert s["resp_len_mean"] == 25.0
+    assert s["resp_full_len_mean"] == 25.0  # no loss mask: the same tokens
     assert s["resp_len_p95"] == pytest.approx(38.5)  # numpy linear
     assert s["truncated_frac"] == 0.5
     assert (s["reward_p10"], s["reward_p50"], s["reward_p90"]) == (0.0, 0.5, 1.0)
@@ -96,6 +97,14 @@ def test_batch_summary_quantiles_and_truncation():
         x.advantage = a
     s = rmh.batch_summary(SimpleNamespace(), samples)
     assert s["adv_mean"] == 0.0 and s["adv_std"] == 1.0
+
+
+def test_batch_summary_full_length_includes_tool_tokens():
+    samples = _samples()
+    for x in samples:  # a multi-turn sample: half of its response is tool output
+        x.effective_response_length = x.response_length // 2
+    s = rmh.batch_summary(SimpleNamespace(), samples)
+    assert s["resp_len_mean"] == 12.5 and s["resp_full_len_mean"] == 25.0
 
 
 def test_batch_summary_opt_in_only(monkeypatch):

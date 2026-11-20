@@ -383,7 +383,7 @@ class EventTape:
 
 # fleet-dashboard 1.3: rollout batch summary keys copied into rl_round_trained.
 BATCH_SUMMARY_KEYS = (
-    "adv_mean", "adv_std", "resp_len_mean", "resp_len_p95", "truncated_frac",
+    "adv_mean", "adv_std", "resp_len_mean", "resp_len_p95", "resp_full_len_mean", "truncated_frac",
     "reward_p10", "reward_p50", "reward_p90",
 )
 

@@ -198,7 +198,10 @@ TRAIN_FIELDS = (
     ("loss", ("loss", "train_metrics.loss")),
     ("pg_loss", ("pg_loss", "train_metrics.pg_loss")),
     ("grad_norm", ("grad_norm",)),
-    ("kl", ("mean_kl", "train_metrics.ppo_kl", "train_metrics.kl_loss")),
+    # PPO KL and train-vs-rollout KL are different quantities: an async buffer round's
+    # ``mean_kl`` is its train_rollout_kl, so the explicit loss-dict keys come first.
+    ("ppo_kl", ("train_metrics.ppo_kl", "train_metrics.kl_loss", "mean_kl")),
+    ("train_rollout_kl", ("train_metrics.train_rollout_kl", "mismatch.train_rollout_kl")),
     ("entropy", ("train_metrics.entropy",)),
     ("clipfrac", ("clip_fraction", "train_metrics.pg_clipfrac")),
     ("lr", ("lr", "applied_lr")),

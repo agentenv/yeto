@@ -442,6 +442,9 @@ def batch_summary(args: Any, samples: Sequence[Any]) -> dict[str, float | None]:
         float(getattr(s, "effective_response_length", None) or getattr(s, "response_length", 0) or 0)
         for s in samples
     ]
+    # resp_len_* count the loss-mask tokens (what the model generated); a multi-turn
+    # sample's response_length also holds the tool / env tokens between its turns.
+    full = [float(getattr(s, "response_length", 0) or 0) for s in samples]
     rewards = [r for r in (_reward(args, s) for s in samples) if math.isfinite(r)]
     advs = [a for a in (_advantage(s) for s in samples) if a is not None]
     n = len(samples)
@@ -449,6 +452,7 @@ def batch_summary(args: Any, samples: Sequence[Any]) -> dict[str, float | None]:
         "adv_mean": statistics.fmean(advs) if advs else None,
         "adv_std": statistics.pstdev(advs) if advs else None,
         "resp_len_mean": statistics.fmean(lengths) if lengths else None,
+        "resp_full_len_mean": statistics.fmean(full) if full else None,
         "resp_len_p95": _quantile(lengths, 0.95),
         "truncated_frac": sum(_status(s) == "truncated" for s in samples) / n if n else None,
         "reward_p10": _quantile(rewards, 0.10),
