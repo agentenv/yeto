@@ -922,7 +922,11 @@ evaluation: with compaction on, scores are not comparable to an uncompacted run.
 - Every segment sample carries `metadata.compaction`: `trajectory_id`,
   `segment_index`, `num_segments`, `context_budget`, `summary_ok` (false when the
   policy did not close a `<summary>` tag), `kept_steps`, `segment_tokens` and
-  `tokens_after`. Without `agentic.compaction` no sample has this key.
+  `tokens_after`. Without `agentic.compaction` no sample has this key. Every
+  segment but the last ends with its summary: `status: completed` and
+  `metadata.finish_reason: stop`, with the engine's finish reason of the summary
+  turn in `metadata.summary_finish_reason` (`length`: the summary hit its
+  `max_tokens`).
 - A high share of `summary_ok: false`, or of trials whose last segment is
   truncated after `max_compactions`, means the summaries are not doing their job:
   raise `context_budget` (up to `max_model_len`) or `max_compactions`. A high

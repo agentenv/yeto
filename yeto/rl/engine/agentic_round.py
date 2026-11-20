@@ -270,7 +270,11 @@ def agentic_samples(item: PromptItem, finished: Any, *, version: int, provenance
                                 engine_meta=engine_meta)
         meta = sample["metadata"]
         if number < len(parts) - 1:  # it ended with its summary; the trial went on
+            # a summary cut at its max_tokens is still the segment's end, not a truncated trial:
+            # the engine's finish reason of the summary turn moves to summary_finish_reason
             sample["status"] = "completed"
+            meta["summary_finish_reason"] = meta["finish_reason"]
+            meta["finish_reason"] = FINISH_STOP
         elif _context_full(part.turns):  # full after the last compaction, or no room for a summary
             sample["status"], meta["finish_reason"] = "truncated", FINISH_LENGTH
         meta["compaction"] = {"schema": COMPACTION_SCHEMA, "trajectory_id": finished.trajectory.task.trajectory_id,
