@@ -2658,16 +2658,23 @@ def main(argv=None) -> None:
         model_path = snapshot_path(model, args.model_revision)  # store hit: local cache only
     rollout_model = resolve(args.rollout_model) if args.rollout_model else model
     if getattr(args, "rl_init_from_release_dir", None):
-        from yeto.rl.engine.init_from_release import island_model_path
+        from yeto.rl.engine.init_from_release import check_parameter_mode, init_adapter_dir, island_model_path
 
         # the trainer loads the release laid over the base (its node prepared it);
         # the release wiring checks the resumed numbering starts at it
         model_path, args.rl_init_release = island_model_path(args.rl_init_from_release_dir, model_path)
+        check_parameter_mode(args.rl_init_release, getattr(args, "parameter_mode", None))
         if args.rl_init_release is None:
             # --rl-round-cuts off, init_from_release --if-released: the store held no
             # release when the node prepared (the run's first start, from the base)
             print("[rl] --rl-round-cuts off: no policy release to continue from; starting "
                   f"from the base checkpoint {model_path}", flush=True)
+        elif init_adapter_dir(args.rl_init_release) is not None:
+            # a LoRA release: the base stays the model (trainer and engines), the
+            # adapter loads on top (_run_miles_island: --lora-adapter-path)
+            print(f"[rl] --rl-init-from-release: loading the LoRA adapter of {args.rl_init_release['path']} "
+                  f"(v{args.rl_init_release['version']}) from {init_adapter_dir(args.rl_init_release)} "
+                  f"over the base {model_path}", flush=True)
         else:
             rollout_model, rollout_model_path = None, model_path
             print(f"[rl] --rl-init-from-release: loading {args.rl_init_release['path']} "
@@ -2726,6 +2733,16 @@ def main(argv=None) -> None:
             tape_uploader.stop()
 
 
+def init_release_argv(args) -> list[str]:
+    """Miles flags of the loaded init release: ``--lora-adapter-path`` of a LoRA
+    release (the trainer restores the adapter over the base; a full release is the
+    model itself and needs none)."""
+    from yeto.rl.engine.init_from_release import init_adapter_dir
+
+    adapter = init_adapter_dir(getattr(args, "rl_init_release", None))
+    return [] if adapter is None else ["--lora-adapter-path", adapter]
+
+
 def _run_miles_island(args, model_path, rollout_model_path, prompt_path, eval_prompt_path, island_tasks) -> None:
     run_miles(
         args,
@@ -2736,6 +2753,7 @@ def _run_miles_island(args, model_path, rollout_model_path, prompt_path, eval_pr
         island_tasks=island_tasks,
         # --rl-single-island-no-sync: LocalOnlySync, no syncer connection.
         yeto_policy_sync=not getattr(args, "rl_single_island_no_sync", False),
+        extra_argv=init_release_argv(args),
     )
 
 

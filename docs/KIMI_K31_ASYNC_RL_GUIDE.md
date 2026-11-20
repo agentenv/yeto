@@ -1416,7 +1416,7 @@ over it the same way instead of failing at its start.
     has to be added by hand:
     - `yeto launch` (also a plain re-run of
       `examples/k31/launch-trainer-modal-b300.sh`): every trainer node of a
-      full-parameter trainer island runs
+      trainer island (full-parameter or LoRA) runs
       `python -m yeto.rl.engine.init_from_release --release latest --if-released`
       before its Ray starts. When the store holds a trained policy release it
       prepares the newest one and logs `adding --rl-init-from-release latest`;
@@ -1473,7 +1473,9 @@ over it the same way instead of failing at its start.
 - **From a policy release.** Add `--rl-init-from-release latest` (or
   `r<seq>-v<version>` / a version) to `trainer.argv`. The trainer loads that
   release instead of the base checkpoint, and version numbering continues
-  after it. Current scope: the optimizer state starts fresh on this path.
+  after it. A LoRA release holds only the adapter: the base checkpoint stays
+  the model and the adapter is restored on top (Miles `--lora-adapter-path`).
+  Current scope: the optimizer state starts fresh on this path.
 - **From the base, on an existing run.** When `yeto run up` restarts a trainer
   of a run that launched before, it adds
   `--rl-ledger-set-aside-before <now>`. A start from the base then moves the
