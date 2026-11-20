@@ -239,6 +239,10 @@ def test_launcher_builds_the_ssh_island_from_the_inventory():
     spec = island_spec_from_inventory(args, island, task)
     assert [n.name for n in spec.nodes] == ["ppu1", "ppu2"] and spec.addresses() == ["192.0.2.74", "192.0.2.75"]
     assert spec.env == {"A": "1", "B": "2"} and spec.run_script.endswith("echo run")
+    # sky.Task keeps secrets as SecretStr (str() is the mask): the node gets the value
+    from pydantic import SecretStr
+    secret_task = SimpleNamespace(**{**vars(task), "secrets": {"B": SecretStr("s3cr3t")}})
+    assert island_spec_from_inventory(args, island, secret_task).env["B"] == "s3cr3t"
     with pytest.raises(SshIslandError, match="3 node"):
         inventory_trainer_nodes(args, ClusterSpec(cloud="ssh", region=None, num_nodes=3, gpus_per_node=8, gpu="M890"))
     with pytest.raises(SshIslandError, match="workdir"):

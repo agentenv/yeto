@@ -94,6 +94,7 @@ from yeto.rl.engine.trainer_remote import island_env
 
 from ..gpu_spec import DEVICE_FAMILY_ENV
 from . import ssh_node_storage, ssh_trainer_ledger
+from .credentials import _secret_value
 from .node_inventory import InventoryError, Node
 from .topology import island_comm_env
 from .trainer_island import (
@@ -1241,7 +1242,8 @@ def island_spec_from_inventory(args: Any, island: Any, task: Any) -> SshTrainerS
     if remote:
         raise SshIslandError(f"the ssh: trainer island's task mounts {remote} from a bucket; SSH nodes "
                              "get local files only")
-    env = {k: str(v) for k, v in env.items() if v is not None}
+    # sky.Task keeps secrets as pydantic SecretStr, whose str() is the '**********' mask
+    env = {k: _secret_value(v) for k, v in env.items() if v is not None}
     nodes = inventory_trainer_nodes(args, island)
     from .ssh_weights import WeightsSyncError, weights_plan_from_args
 
