@@ -70,6 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import ssh_transport
 from .node_inventory import Node, load_inventory, nodes_by_name
 from .pool import status as island_status
 from .pool.provider import ProviderCaps
@@ -619,17 +620,20 @@ class SshSamplerPoolOps:
     # -- shell on a node
     def ssh(self, node: Node, command: str, *, timeout: float = 600, input: str | bytes | None = None,
             stdin: Any = None) -> Any:
-        argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", *node.ssh_options(), node.host, command]
+        route = [*node.ssh_options(), node.host]
+        argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", *ssh_transport.mux_options(route),
+                *route, command]
         if input is None and stdin is None:
             argv.insert(1, "-n")
         kw: dict[str, Any] = {"capture_output": True, "timeout": timeout, "check": False}
-        if stdin is not None:
+        if stdin is not None:  # a stream is read once: no retry
             kw = {"stdin": stdin, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "timeout": timeout,
                   "check": False}
-        else:
-            kw["text"] = not isinstance(input, bytes)
-            kw["input"] = input
-        return self._run(argv, **kw)
+            return self._run(argv, **kw)
+        kw["text"] = not isinstance(input, bytes)
+        kw["input"] = input
+        return ssh_transport.run_with_retry(self._run, argv, label=node.name, log=lambda line: print(line, flush=True),
+                                            **kw)
 
     def put(self, node: Node, text: str, remote: str, *, mode: str = "644") -> None:
         out = self.ssh(node, f"umask 077; cat > {shlex.quote(remote)}.tmp && chmod {mode} {shlex.quote(remote)}.tmp "
