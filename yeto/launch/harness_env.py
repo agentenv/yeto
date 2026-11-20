@@ -223,8 +223,26 @@ def check_compaction_launch(args, environ=None) -> None:
 # Estimators whose Miles reward normalization runs per rollout
 # (``train_data_conversion._normalize_rewards_by_rollout``): the segments of one
 # trial are one rollout and share its advantage.  ``score_centering`` runs on the
-# ``grpo`` estimator.
-GRPO_COMPACTION_ESTIMATORS = ("grpo", "gspo")
+# ``grpo`` estimator.  GSPO is not here: its sequence ratio would be taken per
+# segment, not per trial (``yeto.rl.algos.segment_weights``).
+GRPO_COMPACTION_ESTIMATORS = ("grpo",)
+
+
+def _algorithm_spec(algorithm: dict):
+    """``algorithm`` as an :class:`AlgorithmSpec` (a dict without ``schema`` that
+    names v2 groups is read as v2); None when it does not parse here (``yeto launch
+    --dry-run`` reports a bad spec)."""
+    from ..rl.engine.algorithm import ALGORITHM_SPEC_SCHEMA_V2, AlgorithmSpec, AlgorithmSpecError
+
+    payloads = [algorithm]
+    if "schema" not in algorithm:
+        payloads.append({**algorithm, "schema": ALGORITHM_SPEC_SCHEMA_V2})
+    for payload in payloads:
+        try:
+            return AlgorithmSpec.from_dict(payload)
+        except (AlgorithmSpecError, TypeError, ValueError):
+            continue
+    return None
 
 
 def _launch_algorithm(args) -> dict | None:
@@ -254,7 +272,10 @@ def check_grpo_compaction(args, compaction) -> None:
     A compacting sampler writes one sample per segment, all with the trial's
     reward; the trainer must normalize per trial and give every segment the
     trial's advantage. That is the Miles backend with a GRPO-family estimator
-    (:data:`GRPO_COMPACTION_ESTIMATORS`, ``--rl-loss score_centering`` included).
+    (:data:`GRPO_COMPACTION_ESTIMATORS`, ``--rl-loss score_centering`` included)
+    and no per-sample *sequence* quantity
+    (:func:`yeto.rl.algos.segment_weights.check_compaction_algorithm`: GSPO,
+    GMPO, OPSM, sequence-level MIS, the MIS veto, ...).
     Refused: verl (one sample is one token stream; its records proxy does not
     compact), any other backend, a critic estimator, and the PPO CompactionRL
     variants (their cross-segment GAE is not wired to these segments). Raises
@@ -288,3 +309,8 @@ def check_grpo_compaction(args, compaction) -> None:
             f"agentic.compaction needs a GRPO-family advantage estimator ({', '.join(GRPO_COMPACTION_ESTIMATORS)}: "
             f"normalized per trial, one advantage shared by the trial's segments); the trainer's spec has "
             f"advantage.estimator {estimator!r}")
+    spec = _algorithm_spec(algorithm)
+    if spec is not None:
+        from ..rl.algos.segment_weights import check_compaction_algorithm
+
+        check_compaction_algorithm(spec)  # AlgorithmSpecError is a ValueError

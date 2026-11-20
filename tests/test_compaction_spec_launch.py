@@ -356,12 +356,48 @@ def _trainer(**algorithm):
 
 @pytest.mark.parametrize("algorithm", [
     {"advantage": {"estimator": "grpo"}},
-    {"advantage": {"estimator": "gspo"}},
     {"advantage": {"estimator": "grpo"}, "loss": {"variant": "score_centering"}},
     {"advantage_estimator": "grpo", "schema": "yeto-rl-algorithm-spec-v1"},
 ])
 def test_miles_with_a_grpo_family_estimator_may_compact(algorithm):
     check_grpo_compaction(_trainer(**algorithm), CFG)
+
+
+@pytest.mark.parametrize("name", sorted(p.name for p in GRPO_SPEC.parent.glob("algorithm-spec.*.json")))
+def test_the_k31_algorithm_specs_with_score_centering_tis_may_compact(name):
+    """The K3.1 recipe: an example spec + ``--rl-loss score_centering --rl-score-centering-is tis``,
+    resolved from the flags as the launch does (no prepared JSON)."""
+    from yeto.launch.harness_env import _launch_algorithm
+    from yeto.rl.up_consistency import trainer_args
+
+    args = trainer_args([
+        "--training-mode", "rl", "--model", "org/k31", "--data", "d", "--rl-algorithm-spec", str(GRPO_SPEC.parent / name), "--rl-loss", "score_centering",
+        "--rl-score-centering-is", "tis", "--rl-score-centering-tis-clip", "2.0"])
+
+    algorithm = _launch_algorithm(args)
+    assert algorithm is not None and algorithm["loss"]["variant"] == "score_centering"
+    check_grpo_compaction(args, CFG)
+    check_grpo_compaction(_trainer(**algorithm), CFG)  # the prepared JSON of the launch
+
+
+V2 = "yeto-rl-algorithm-spec-v2"
+
+
+@pytest.mark.parametrize(("algorithm", "match"), [
+    ({"advantage": {"estimator": "gspo"}}, "GRPO-family advantage estimator"),
+    ({"schema": V2, "loss": {"policy_loss_variant": "gmpo"}}, "gmpo"),
+    ({"schema": V2, "correction": {"method": "opsm", "opsm_delta": 0.1}}, "OPSM"),
+    ({"schema": V2, "correction": {"method": "tis", "ratio_mask": "mis", "level": "sequence",
+                                   "upper": 2.0, "lower": 0.0}}, "sequence weight would be per segment"),
+    ({"schema": V2, "correction": {"method": "tis", "veto": 1e-4, "upper": 2.0, "lower": 0.0}}, "veto"),
+    ({"loss": {"policy_loss_variant": "gmpo"}}, "gmpo"),  # v2 groups without a schema key
+])
+def test_per_sequence_algorithms_are_refused_with_compaction(algorithm, match):
+    """Sequence quantities (GSPO ratio, GMPO mean, OPSM mask, sequence MIS, veto) would be
+    taken per segment: refused by ``segment_weights.check_compaction_algorithm``."""
+    with pytest.raises(ValueError, match=match):
+        check_grpo_compaction(_trainer(**algorithm), CFG)
+    check_grpo_compaction(_trainer(**algorithm), None)  # no compaction: nothing to check
 
 
 def test_verl_is_refused_with_the_reason():
@@ -428,6 +464,26 @@ def test_run_up_preflight_shows_the_compaction_and_passes_a_grpo_trainer(setup, 
     assert "preflight: WARNING: agentic.compaction on a drain-mode sampler: the effective drain cut 600 s" in out
     assert "--rl-max-policy-age 2" in out and "release every version" in out
     assert "trial wall clock at 7200 s (the default)" in out
+
+
+def test_run_up_preflight_passes_the_k31_score_centering_tis_trainer(setup):  # noqa: F811
+    _compacting(setup)
+    setup.argv += ["--rl-algorithm-spec", str(GRPO_SPEC), "--rl-loss", "score_centering",
+                   "--rl-score-centering-is", "tis", "--rl-score-centering-tis-clip", "2.0",
+                   "--rl-max-policy-age", "2"]
+    run = setup.make()
+    assert run.consistency_problem() is None
+
+
+def test_run_up_preflight_refuses_a_per_sequence_algorithm_with_compaction(setup, tmp_path):  # noqa: F811
+    _compacting(setup)
+    spec = json.loads(GRPO_SPEC.read_text())
+    spec["advantage"]["estimator"] = "gspo"
+    (tmp_path / "gspo.json").write_text(json.dumps(spec))
+    setup.argv += ["--rl-algorithm-spec", str(tmp_path / "gspo.json"), "--rl-max-policy-age", "2"]
+    run = setup.make()
+    assert "advantage.estimator 'gspo'" in run.consistency_problem()
+    assert run.preflight() is False and run.calls == []
 
 
 def test_run_up_preflight_refuses_compaction_on_verl(setup):  # noqa: F811
