@@ -102,7 +102,7 @@ def _k31_island_flags(args, selection_path: str | None = None) -> str:
     return out
 
 def init_release_if_released(args) -> bool:
-    """``--rl-round-cuts off`` on a full-parameter trainer island without
+    """``--rl-round-cuts off`` on a trainer island (full-parameter or LoRA) without
     ``--rl-init-from-release``: every node adds ``--rl-init-from-release latest``
     itself when the store holds a release (``init_from_release --if-released``,
     before its Ray starts), so a relaunch never trains base weights under the
@@ -112,7 +112,7 @@ def init_release_if_released(args) -> bool:
     from ..rl.engine.cut_interval import round_cuts_off
 
     return (round_cuts_off(args) and not getattr(args, "rl_init_from_release", None)
-            and str(getattr(args, "tuning", None) or "") == "full"
+            and str(getattr(args, "tuning", None) or "") in ("full", "lora")
             and str(getattr(args, "rl_sample_role", None) or "both") in ("both", "trainer"))
 
 

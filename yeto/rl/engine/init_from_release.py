@@ -21,6 +21,11 @@ record) beside it; the island entry takes that model directory (:func:`island_mo
 release wiring checks that the resumed numbering starts at that very release
 (:func:`check_resumed`).
 
+A LoRA release (``weights: lora``, an adapter directory) is not a model: the base
+checkpoint stays the trainer's model and the release's adapter is loaded on top
+(:func:`island_model_path` keeps the base, :func:`init_adapter_dir` names the
+adapter; the Miles island passes it as ``--lora-adapter-path``).
+
 Not restored: the optimizer state (fp32 master rebuilt from the loaded bf16
 weights, Adam moments and step from zero), the LR schedule position and the RNG.
 The reference model (``--ref-load``) is the release as well.
@@ -36,7 +41,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from .policy_release import PolicyRelease, PolicyReleaseStore, trained_releases
+from .policy_release import FULL, LORA, PolicyRelease, PolicyReleaseStore, trained_releases
 from .release_overlay import is_partial_release, overlay_release
 
 RECORD = "INIT_RELEASE.json"
@@ -150,6 +155,7 @@ def prepare(releases: PolicyReleaseStore, selector: str, base_dir: str | os.Path
         directory = Path(weights)
     record = {"path": release.path, "seq": int(release.seq), "version": int(release.version),
               "policy_hash": release.policy_hash, "model_dir": str(directory),
+              "weights": str(release.weights or FULL),
               "base_dir": str(Path(base_dir)), "partial": is_partial_release(release.manifest),
               "expert_selection_sha256": (release.manifest or {}).get("expert_selection_sha256")}
     (out / RECORD).write_text(json.dumps(record, indent=1, sort_keys=True))
@@ -228,10 +234,26 @@ def island_model_path(out_dir: str | os.PathLike[str],
     if not (out / RECORD).is_file() and (out / NO_RELEASE).is_file():
         return str(base_path), None
     record = read_record(out_dir)
+    if init_adapter_dir(record) is not None:
+        return str(base_path), record  # a LoRA release: the base stays the model
     if record["partial"] and Path(record["base_dir"]).resolve() != Path(base_path).resolve():
         raise InitFromReleaseError(f"{record['path']} was laid over {record['base_dir']}, "
                                    f"the island's base is {base_path}")
     return str(record["model_dir"]), record
+
+
+def init_adapter_dir(record: Mapping[str, Any] | None) -> str | None:
+    """The adapter directory of a LoRA release record (None: the base, or a full release)."""
+    if record is None or str(record.get("weights") or FULL) != LORA:
+        return None
+    return str(record["model_dir"])
+
+
+def check_parameter_mode(record: Mapping[str, Any] | None, parameter_mode: str | None) -> None:
+    """A LoRA release holds only an adapter: a full-parameter trainer cannot start from it."""
+    if init_adapter_dir(record) is not None and str(parameter_mode or "") == "full":
+        raise InitFromReleaseError(f"{record['path']} is a LoRA adapter release; a full-parameter trainer "
+                                   "cannot start from it")
 
 
 RELEASE_KEY = ("path", "seq", "version", "policy_hash")

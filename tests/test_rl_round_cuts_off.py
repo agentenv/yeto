@@ -265,7 +265,7 @@ def test_the_launcher_prepares_the_newest_release_on_every_off_trainer_node(_fak
     (dict(rl_round_cuts="off", tuning="full", rl_sample_role="trainer"), True),
     (dict(rl_round_cuts="off", tuning="full", rl_sample_role="both"), True),
     (dict(rl_round_cuts="off", tuning="full", rl_sample_role="sampler"), False),
-    (dict(rl_round_cuts="off", tuning="lora", rl_sample_role="trainer"), False),
+    (dict(rl_round_cuts="off", tuning="lora", rl_sample_role="trainer"), True),
     (dict(rl_round_cuts="off", tuning="full", rl_sample_role="trainer", rl_init_from_release="latest"), False),
     (dict(rl_round_cuts="auto", tuning="full", rl_sample_role="trainer"), False),
 ])
@@ -285,6 +285,57 @@ def _release_store(tmp_path, versions=()):
     for version in versions:
         releases.release(version, f"h{version}", lambda d: (d / "config.json").write_text("{}"))
     return releases
+
+
+def _write_adapter(d):
+    for name in ("adapter_config.json", "adapter_parametrization.json"):
+        (d / name).write_text("{}")
+    (d / "adapter_model.safetensors").write_bytes(b"\0" * 8)
+
+
+def test_a_lora_trainer_relaunch_prepares_the_newest_release_on_every_node(_fake_sky, _no_modal_listing):
+    """--rl-round-cuts off on a LoRA trainer: every relaunch (in-process or a new
+    yeto launch) continues from the store's newest LoRA release, as a full one does."""
+    run = str(_trainer_task(("--rl-round-cuts", "off", "--tuning", "lora")).run)
+    prepare = run.index("-m yeto.rl.engine.init_from_release --release latest")
+    assert "--if-released" in run[prepare:].split("\n", 1)[0]
+    learner = run.split("-m yeto.rl.adapters.miles.island_entry", 1)[1]
+    assert "--rl-init-from-release-dir ~/yeto-init-release" in learner and "--lora-r" in learner
+
+
+def test_a_lora_release_keeps_the_base_and_loads_the_adapter_on_top(tmp_path, capsys):
+    """A LoRA release is an adapter directory, not a model: the trainer's model stays
+    the base checkpoint (no config.json in the release) and Miles restores the
+    adapter with --lora-adapter-path."""
+    from yeto.rl.adapters.miles.island_entry import init_release_argv
+    from yeto.rl.engine.init_from_release import (InitFromReleaseError, check_parameter_mode,
+                                                  init_adapter_dir, island_model_path, prepare_if_released)
+    from yeto.rl.engine.policy_release import LORA
+
+    base, out = tmp_path / "base", tmp_path / "out"
+    base.mkdir()
+    releases = _release_store(tmp_path)
+    for version in (0, 1):
+        releases.release(version, f"h{version}", _write_adapter, weights=LORA)
+    record = prepare_if_released(releases, lambda: str(base), out)
+    assert record["path"] == "r2-v1" and record["weights"] == "lora"
+    model_path, loaded = island_model_path(out, base)
+    assert model_path == str(base) and loaded["version"] == 1
+    adapter = init_adapter_dir(loaded)
+    assert adapter is not None and (Path(adapter) / "adapter_model.safetensors").is_file()
+    assert not (Path(adapter) / "config.json").exists()
+    assert init_release_argv(SimpleNamespace(rl_init_release=loaded)) == ["--lora-adapter-path", adapter]
+    check_parameter_mode(loaded, "lora")
+    with pytest.raises(InitFromReleaseError, match="LoRA adapter release"):
+        check_parameter_mode(loaded, "full")
+    # a full release (and a record of an earlier yeto, without "weights") is the model itself
+    full = prepare_if_released(_release_store(tmp_path / "f", (1,)), lambda: str(base), tmp_path / "out-full")
+    assert full["weights"] == "full" and init_adapter_dir(full) is None
+    assert island_model_path(tmp_path / "out-full", base)[0] == full["model_dir"]
+    assert init_release_argv(SimpleNamespace(rl_init_release=full)) == []
+    assert init_adapter_dir({k: v for k, v in full.items() if k != "weights"}) is None
+    assert init_release_argv(SimpleNamespace(rl_init_release=None)) == []
+    check_parameter_mode(full, "full")
 
 
 def test_if_released_prepares_latest_or_marks_the_start_from_the_base(tmp_path, capsys):

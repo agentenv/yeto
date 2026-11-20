@@ -88,10 +88,11 @@ _MODEL = (
         "--rl-init-from-release",
         default=None,
         metavar="RELEASE",
-        help="full-parameter trainer relaunched over a store that holds releases: load the "
-        "store's highest release (latest, or its r<seq>-v<version> / version) instead of the "
-        "base checkpoint, optimizer state fresh; the numbering continues after it "
-        "(yeto.rl.engine.init_from_release). Every node downloads it before its Ray starts",
+        help="trainer relaunched over a store that holds releases: load the store's highest "
+        "release (latest, or its r<seq>-v<version> / version) instead of the base checkpoint "
+        "(a LoRA release: its adapter over the base), optimizer state fresh; the numbering "
+        "continues after it (yeto.rl.engine.init_from_release). Every node downloads it "
+        "before its Ray starts",
     ),
     island_flag("--rl-init-from-release-dir", default=None, metavar="DIR",
                 help="island side of --rl-init-from-release: the "
