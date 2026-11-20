@@ -32,7 +32,8 @@ MAIN_KEYS = {"group_index", "index", "label", "loss_mask", "metadata", "prompt",
 MAIN_META = {"agent", "agent_turns", "engine", "finish_reason", "prompt_id", "prompt_tokens_known", "provenance",
              "task_id", "trajectory_id", "weight_version"}
 COMPACTION_KEYS = {"schema", "trajectory_id", "segment_index", "num_segments", "context_budget", "summary_ok",
-                   "kept_steps", "segment_tokens", "tokens_after", "summary_tokens", "retry_replays"}
+                   "kept_steps", "segment_tokens", "tokens_after", "summary_tokens", "retry_replays",
+                   "max_model_len"}  # the engine's context length (the sim engine gives one)
 
 
 def scenario(name: str, **kw) -> sim.Scenario:
@@ -75,6 +76,7 @@ def check_trial_samples(r: sim.SimRun) -> None:
         assert {m["num_segments"] for m in metas} == {k} and {m["schema"] for m in metas} == {1}
         assert {m["trajectory_id"] for m in metas} == {t.trajectory_id}
         assert {m["context_budget"] for m in metas} == {cfg.context_budget}
+        assert {m["max_model_len"] for m in metas} == {r.scenario.max_model_len}
         trained = [sum(x["loss_mask"]) for x in t.samples]
         assert [m["segment_tokens"] for m in metas] == trained
         assert [m["tokens_after"] for m in metas] == [sum(trained[i + 1:]) for i in range(k)]
