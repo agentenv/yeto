@@ -90,6 +90,22 @@ def check_island_env(*, placement: str, env_pairs, tuning: str = "lora", sample_
                 "without --rl-offload-train")
 
 
+def check_train_extra_env(*, recipe: str | None, env_pairs) -> None:
+    """``YETO_MILES_TRAIN_EXTRA_ARGV`` among the island's ``KEY=VALUE`` environment options
+    (``--modal-env``) goes through the allow-list the island applies
+    (:func:`yeto.rl.adapters.miles.config.train_extra_argv`, the same function), here,
+    before any GPU starts (also under ``--dry-run``). k31-mfu16-x3 started a two-node
+    B300 island for a flag the island then refused (``MilesConfigError: flags not
+    allowed``) while the local dry run had passed."""
+    from yeto.rl.adapters.miles.config import TRAIN_EXTRA_ENV, train_extra_argv
+    from yeto.rl.engine.run_config import RECIPE_GENERIC
+
+    for item in env_pairs or ():
+        key, sep, value = str(item).partition("=")
+        if sep and key == TRAIN_EXTRA_ENV:
+            train_extra_argv(recipe or RECIPE_GENERIC, value)
+
+
 def _miles_pin_gap(first: str, feature: str, *, feature_name: str) -> str | None:
     """Why the pinned Miles lacks ``feature`` (registered as ``feature_name`` in
     the lineage tables, first carried by fork commit ``first`` on ports-v1);

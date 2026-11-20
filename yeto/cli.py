@@ -1352,11 +1352,15 @@ def cmd_launch(args) -> int:
         code = _resolve_auto_fleet(args)
         if code:
             return 0 if code == 2 else code  # user said no: clean exit
-    if "modal:" in str(args.gpu or "") and not getattr(args, "dry_run", False):
+    if "modal:" in str(args.gpu or ""):
         from .launch_preflight import modal_sdk_problem
 
         problem = modal_sdk_problem()  # the worker drives Modal through this interpreter
-        if problem is not None:
+        if problem is not None and getattr(args, "dry_run", False):
+            # the dry run reads Modal too, but a real launch stops here: say so now
+            print(f"[yeto] WARNING (dry run; a real launch stops here): --gpu {args.gpu}: {problem}",
+                  file=sys.stderr)
+        elif problem is not None:
             print(f"[yeto] --gpu {args.gpu}: {problem}", file=sys.stderr)
             return 1
     name = args.cluster_prefix

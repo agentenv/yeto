@@ -9,21 +9,34 @@ reader lists them in order). A replacement node is a new incarnation and simply
 adds its own prefix; nothing has to be started per node.
 
 Observation only: an upload failure is printed and retried with the next chunk;
-it never stops or slows the island (the thread is a daemon and the final flush
-at ``stop`` is bounded by one write).
+it never stops or slows the island (the thread is a daemon). The final drain at
+``stop`` uploads every complete line still on the tape, retrying a failed chunk
+under the same key (a retried chunk overwrites, never duplicates), and is bounded
+in wall time (:data:`FINAL_FLUSH_ENV`): one store write may block for minutes
+(botocore: a 60 s read timeout times 9 attempts). A SIGINT / SIGTERM that arrives
+during that drain on the main thread (a cluster teardown racing the last upload)
+is held and delivered again once the drain ends, so the last chunk is not cut
+off mid-request.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import signal
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 TAPES_PREFIX = "tapes"
 INTERVAL_ENV = "YETO_RL_TAPE_UPLOAD_S"
 DEFAULT_INTERVAL_S = 30.0
+FINAL_FLUSH_ENV = "YETO_RL_TAPE_FINAL_FLUSH_S"
+DEFAULT_FINAL_FLUSH_S = 30.0
+FINAL_RETRY_WAIT_S = 1.0
+HELD_SIGNALS = ("SIGINT", "SIGTERM")
 MAX_CHUNK_BYTES = 8 << 20
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -35,6 +48,47 @@ def safe_part(name: Any) -> str:
 
 def chunk_key(island: str, incarnation: str, seq: int) -> str:
     return f"{TAPES_PREFIX}/{safe_part(island)}/{safe_part(incarnation)}/{seq:08d}.jsonl"
+
+
+def final_flush_s(environ: Any = None) -> float:
+    """Wall-time budget of the final drain at :meth:`TapeUploader.stop`
+    (:data:`FINAL_FLUSH_ENV`, else :data:`DEFAULT_FINAL_FLUSH_S`; 0 = no drain)."""
+    env = os.environ if environ is None else environ
+    raw = env.get(FINAL_FLUSH_ENV)
+    value = float(raw) if raw not in (None, "") else DEFAULT_FINAL_FLUSH_S
+    return max(0.0, value)
+
+
+@contextlib.contextmanager
+def held_signals(names: Any = HELD_SIGNALS, *, log: Callable[[str], None] = print, signal_mod: Any = signal):
+    """Hold ``names`` (SIGINT / SIGTERM) for the block and deliver each one that
+    arrived again after it, with the previous handlers back in place. Only the main
+    thread can install a handler: elsewhere this is a no-op."""
+    if threading.current_thread() is not threading.main_thread():
+        yield []
+        return
+    arrived: list[int] = []
+    previous: dict[int, Any] = {}
+
+    def hold(num, _frame):
+        arrived.append(num)
+        log(f"[tape-upload] signal {num} held until the final tape upload ends")
+
+    for name in names:
+        num = getattr(signal_mod, name, None)
+        if num is None:
+            continue
+        try:
+            previous[num] = signal_mod.signal(num, hold)
+        except (ValueError, OSError):  # not settable here
+            continue
+    try:
+        yield arrived
+    finally:
+        for num, handler in previous.items():
+            signal_mod.signal(num, handler)
+        for num in dict.fromkeys(arrived):  # once each, in arrival order
+            signal_mod.raise_signal(num)
 
 
 def upload_interval_s(spec_value: Any = None, environ: Any = None) -> float | None:
@@ -104,11 +158,65 @@ class TapeUploader:
         self._thread.start()
         return self
 
-    def stop(self) -> None:
-        self._stop.set()
+    def pending_bytes(self) -> int:
+        """Bytes on the local tape not uploaded yet (0 when the tape is unreadable)."""
+        try:
+            return max(0, self.tape.stat().st_size - self.offset)
+        except OSError:
+            return 0
+
+    def _drain(self, deadline: float, clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
+        """Upload every complete line still on the tape, chunk by chunk; a failed
+        write is retried (same key) until ``deadline``."""
         if self._thread is not None:
-            self._thread.join(timeout=self.interval_s + 5)
-        self.flush()
+            self._thread.join(timeout=max(0.0, deadline - clock()))
+        while clock() < deadline:
+            failures = self.failures
+            if self.flush() > 0:
+                continue
+            if self.failures == failures:
+                return  # caught up (or only a torn last line is left)
+            sleep(min(FINAL_RETRY_WAIT_S, max(0.0, deadline - clock())))
+
+    def stop(self, timeout_s: float | None = None, *, clock: Callable[[], float] = time.monotonic,
+             sleep: Callable[[float], None] = time.sleep) -> bool:
+        """Stop the thread and drain the tape into the store within ``timeout_s``
+        (default :func:`final_flush_s`). The drain runs on its own daemon thread, so a
+        write that hangs past the budget is left behind, not waited for; SIGINT /
+        SIGTERM arriving meanwhile are held (:func:`held_signals`). Returns True when
+        the store has every complete line of the tape."""
+        self._stop.set()
+        budget = final_flush_s() if timeout_s is None else max(0.0, float(timeout_s))
+        deadline = clock() + budget
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                self._drain(deadline, clock, sleep)
+            finally:
+                done.set()
+
+        drain = threading.Thread(target=run, daemon=True, name="tape-upload-final")
+        with held_signals(log=self.log):
+            drain.start()
+            done.wait(budget + FINAL_RETRY_WAIT_S)
+        left = self.pending_bytes()
+        complete = done.is_set() and self._complete(left)
+        if not complete:
+            self.log(f"[tape-upload] {self.tape.name}: final upload incomplete after {budget:.0f} s: "
+                     f"{left} byte(s) not in the store (the local tape keeps them)")
+        return complete
+
+    def _complete(self, left: int) -> bool:
+        """Nothing but a torn last line (no newline yet) is left on the tape."""
+        if left == 0:
+            return True
+        try:
+            with open(self.tape, "rb") as fh:
+                fh.seek(self.offset)
+                return b"\n" not in fh.read(min(left, MAX_CHUNK_BYTES))
+        except OSError:
+            return False
 
 
 def store_objects(store: Any) -> Any:

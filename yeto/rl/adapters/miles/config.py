@@ -523,6 +523,23 @@ def _algorithm_filter(config, algorithm: AlgorithmSpec) -> str | None:
 
 
 def placement_request(config) -> PlacementRequest:
+    """The island's PlacementRequest; a refused trainer tp*cp group says whether TP itself or
+    only CP spans nodes (Megatron rank order tp-cp-ep-dp-pp)."""
+    try:
+        return _placement_request(config)
+    except ValueError as exc:
+        parallel = config.parallel
+        g = getattr(parallel, "island_gpus_per_node", None)
+        if "(tp*cp) group" not in str(exc) or not g:
+            raise
+        from yeto.rl.engine.multinode import tp_cp_node_note
+
+        note = tp_cp_node_note(int(parallel.tensor_parallel),
+                               int(getattr(parallel, "context_parallel", 1) or 1), int(g))
+        raise type(exc)(f"{exc}; {note}") from None
+
+
+def _placement_request(config) -> PlacementRequest:
     parallel = config.parallel
     trainer = parallel.actor_num_nodes * parallel.actor_num_gpus_per_node
     if parallel.colocated:
@@ -1463,6 +1480,10 @@ TRAIN_EXTRA_FLAGS = frozenset({
     # step window, Miles --profile-target); the trace goes to --tensorboard-dir
     "--use-pytorch-profiler", "--profile-step-start", "--profile-step-end", "--profile-ranks",
     "--profile-target", "--tensorboard-dir",
+    # what that profiler records: op input shapes / Python call stacks (Megatron
+    # common_config pytorch_profiler_collect_*, read by Miles profile_utils at 0938787d
+    # and 06b047ed); trace content only, not the step
+    "--pytorch-profiler-collect-shapes", "--pytorch-profiler-collect-callstack",
     # YETO_RL_NAN_SKIP: Megatron's DDP check raises on a NaN grad; off, Miles skips that optimizer step
     "--no-check-for-nan-in-loss-and-grad",
     # kimi_k31 first_stage_grad (PP stage 0 expert grads under full recompute on

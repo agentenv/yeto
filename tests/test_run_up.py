@@ -126,14 +126,47 @@ def _finder(present):
     return lambda name: object() if name in present else None
 
 
+def _sdk_problem(env, find, *, profile=False, system=None):
+    return launch_preflight.modal_sdk_problem(env, find, profile_disables=lambda: profile,
+                                              system_proxies=lambda: dict(system or {}))
+
+
 def test_modal_sdk_problem_checks_the_proxy_extra():
     find = _finder({"modal"})
-    assert launch_preflight.modal_sdk_problem({}, find) is None
-    msg = launch_preflight.modal_sdk_problem({"HTTPS_PROXY": "http://127.0.0.1:7897"}, find)
-    assert msg and "aiohttp_socks" in msg and "modal[api-proxy-support]==1.6.3" in msg
-    assert "ALL_PROXY" in launch_preflight.modal_sdk_problem({"ALL_PROXY": "socks5://h:1"}, find)
-    assert launch_preflight.modal_sdk_problem({"HTTPS_PROXY": "x"}, _finder({"modal", "aiohttp_socks"})) is None
-    assert "not importable" in launch_preflight.modal_sdk_problem({}, _finder(set()))
+    assert _sdk_problem({}, find) is None
+    msg = _sdk_problem({"HTTPS_PROXY": "http://127.0.0.1:7897"}, find)
+    assert msg and "aiohttp_socks and python_socks" in msg and "modal[api-proxy-support]==1.6.3" in msg
+    assert "ALL_PROXY" in _sdk_problem({"ALL_PROXY": "socks5://h:1"}, find)
+    assert _sdk_problem({"HTTPS_PROXY": "x"}, _finder({"modal", "aiohttp_socks", "python_socks"})) is None
+    assert "python_socks" in _sdk_problem({"HTTPS_PROXY": "x"}, _finder({"modal", "aiohttp_socks"}))
+    assert "not importable" in _sdk_problem({}, _finder(set()))
+
+
+@pytest.mark.parametrize("value, refused", [("1", False), ("true", False), ("0", True), ("", True),
+                                            ("False", True)])
+def test_modal_sdk_problem_honours_modal_disable_api_proxy(value, refused):
+    """mfu16 a0 attempt 1 (2026-11-18): MODAL_DISABLE_API_PROXY=1 makes the Modal client
+    connect directly, yet the check refused the launch for the shell's https_proxy."""
+    env = {"https_proxy": "http://127.0.0.1:7897", "all_proxy": "socks5://127.0.0.1:7897",
+           "MODAL_DISABLE_API_PROXY": value}
+    assert (_sdk_problem(env, _finder({"modal"})) is not None) is refused
+
+
+def test_modal_sdk_problem_reads_the_modal_profile_only_without_the_env_switch():
+    env = {"HTTPS_PROXY": "http://p:1"}
+    assert _sdk_problem(env, _finder({"modal"}), profile=True) is None
+    assert _sdk_problem({**env, "MODAL_DISABLE_API_PROXY": "0"}, _finder({"modal"}), profile=True)
+
+
+def test_modal_proxy_follows_urllib_precedence():
+    proxy = launch_preflight.modal_proxy
+    kw = dict(profile_disables=lambda: False, system_proxies=lambda: {"https": "http://sys:1"})
+    assert proxy({"HTTPS_PROXY": "a", "https_proxy": ""}, **kw) is None  # an empty lower-case one turns it off
+    assert proxy({"HTTPS_PROXY": "a", "https_proxy": "b"}, **kw) == "https_proxy"
+    assert proxy({"HTTP_PROXY": "a"}, **kw) is None  # TLS only uses https / all
+    assert proxy({"no_proxy": "localhost"}, **kw) is None  # env proxies set: the OS ones are not read
+    assert proxy({}, **kw) == "the system https proxy"  # macOS System Settings, as urllib
+    assert proxy({}, profile_disables=lambda: False, system_proxies=dict) is None
 
 
 def test_run_up_preflight_refuses_without_the_proxy_extra(make_run, monkeypatch):
@@ -641,3 +674,27 @@ def test_a_command_runs_when_its_log_cannot_be_written(make_run, tmp_path, read_
                      log="down.log", timeout=60)
     assert rc == 0 and marker.exists()
     assert not (run.dir / "down.log").exists()
+
+
+def test_dry_run_warns_where_a_real_modal_launch_stops(monkeypatch, capsys):
+    """The dry run used to skip the Modal SDK check, so a dry run passed and the paid
+    launch then stopped on it (mfu16 a0 attempt 1)."""
+    from types import SimpleNamespace
+
+    from yeto import cli
+
+    class Past(Exception):
+        pass
+
+    def past_the_check(name):
+        raise Past
+
+    monkeypatch.setattr(cli, "_fleet_args_error", lambda args: None)
+    monkeypatch.setattr(launch_preflight, "modal_sdk_problem", lambda: "HTTPS_PROXY is set ...")
+    monkeypatch.setattr(cli.runs, "load_run", past_the_check)
+    real = SimpleNamespace(cluster_prefix="x", gpu="modal:2x8xb300", dry_run=False)
+    assert cli.cmd_launch(real) == 1
+    assert "HTTPS_PROXY is set" in capsys.readouterr().err
+    with pytest.raises(Past):
+        cli.cmd_launch(SimpleNamespace(cluster_prefix="x", gpu="modal:2x8xb300", dry_run=True))
+    assert "WARNING (dry run; a real launch stops here)" in capsys.readouterr().err

@@ -876,6 +876,28 @@ def _warn_backend_device(args, specs) -> None:
               file=sys.stderr, flush=True)
 
 
+def _check_trainer_tp_cp_node(args, iargs, gpus_per_node: int, cross_tp: bool) -> None:
+    """Multi-node island: the trainer tp*cp group must fit and divide one node's
+    trainer GPUs unless ``--rl-allow-cross-node-tp`` (the learner's
+    PlacementRequest rule, rl-multinode-island Q1/Q3); the opt-in WARNs."""
+    from ..rl.engine.multinode import tp_cp_node_note
+
+    tp = int(iargs.tensor_parallel)
+    cp = int(getattr(args, "context_parallel", 1) or 1)
+    node_parallel = tp * cp
+    if node_parallel <= gpus_per_node and gpus_per_node % node_parallel == 0:
+        return
+    note = tp_cp_node_note(tp, cp, gpus_per_node)
+    if not cross_tp:
+        raise ValueError(f"RL TP*CP ({tp}x{cp}) must fit and divide one node's {gpus_per_node} trainer "
+                         "GPUs (rl-multinode-island Q1/Q3: TP stays inside a node by default; EP/PP "
+                         f"may span nodes); here {note}. --rl-allow-cross-node-tp or cfg "
+                         "parallel.allow_cross_node_tp lifts it")
+    # stderr: the stdout of `yeto launch --dry-run` is its JSON plan
+    print(f"[launcher] WARNING: --rl-allow-cross-node-tp: the trainer TP*CP group ({node_parallel}) "
+          f"spans nodes: {note}; journaled as topology.layout.cross_node_tp=1", file=sys.stderr)
+
+
 def _prepare_rl_args(
     args,
     *,
@@ -1064,6 +1086,11 @@ def _prepare_rl_args(
                       tuning=args.tuning,
                       sample_role=getattr(iargs, "rl_sample_role", None) or "both",
                       offload_train=bool(getattr(iargs, "rl_offload_train", False)))
+    # The trainer's extra Megatron flags: the island's own allow-list, applied here first
+    extra_env_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_train_extra_env", None)
+    if callable(extra_env_check):
+        extra_env_check(recipe=getattr(args, "rl_model_recipe", None),
+                        env_pairs=getattr(args, "modal_env", None) or ())
     # A backend without the Miles agentic wiring refuses its flags.
     agentic_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_agentic", None)
     if callable(agentic_check):
@@ -1221,17 +1248,9 @@ def _prepare_rl_args(
 
             require_min_nodes(spec, rl_min_nodes(iargs, spec))
             actor_nodes, actor = rl_trainer_shape(iargs, spec)
-            node_parallel = iargs.tensor_parallel * int(getattr(args, "context_parallel", 1) or 1)
             cross_tp, cross_engine = rl_cross_node_switches(args)
-            if spec.num_nodes > 1 and not cross_tp and (node_parallel > spec.gpus_per_node
-                                                        or spec.gpus_per_node % node_parallel):
-                raise ValueError("RL TP*CP must fit and divide one node (rl-multinode-island Q1/Q3: "
-                                 "TP stays inside a node by default; EP/PP may span nodes; "
-                                 "--rl-allow-cross-node-tp or cfg parallel.allow_cross_node_tp lifts it)")
-            if spec.num_nodes > 1 and cross_tp:
-                print("[launcher] WARNING: --rl-allow-cross-node-tp: the trainer TP*CP group "
-                      f"({node_parallel}) may span nodes (NCCL over the inter-node fabric); "
-                      "journaled as topology.layout.cross_node_tp=1")
+            if spec.num_nodes > 1:
+                _check_trainer_tp_cp_node(args, iargs, actor, cross_tp)
             if spec.num_nodes > 1 and cross_engine:
                 print("[launcher] WARNING: --rl-allow-cross-node-engine-tp: a rollout engine of "
                       f"{args.rollout_num_gpus_per_engine} GPUs may span whole nodes (sglang "
@@ -1242,6 +1261,10 @@ def _prepare_rl_args(
             # of the whole island; an engine larger than a node (sglang nnodes>1) needs the
             # explicit opt-in and must take whole nodes, before any cloud work.
             rl_colocated_engine_check(iargs, spec)
+            # The learner's PlacementRequest applies the trainer tp*cp node rule to a
+            # colocated island too; checked here so the dry run and the launcher refuse
+            # what the island would refuse only after boot (mfu16 PREFLIGHT, 2026-11-18).
+            _check_trainer_tp_cp_node(args, iargs, spec.gpus_per_node, rl_cross_node_switches(args)[0])
         if spec.total_gpus % model_parallel:
             raise ValueError(
                 "RL TP*PP must divide every island GPU world size"

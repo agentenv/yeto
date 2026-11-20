@@ -1045,9 +1045,9 @@ def island_model_path(model: str, revision: str | None) -> str:
             raise SystemExit(f"--model {model} is a local directory without config.json")
         print(f"[yeto-verl] model from this node: {local} (--model-revision {revision} not verified)", flush=True)
         return str(local)
-    from huggingface_hub import snapshot_download
+    from yeto.models import snapshot_path
 
-    return snapshot_download(model, revision=revision)
+    return snapshot_path(model, revision)  # store hit: local cache only
 
 
 def model_supports_gradient_checkpointing(model_path: str, *, trust_remote_code: bool = False) -> bool | None:

@@ -1731,10 +1731,12 @@ def island_layout_of(miles_args: Any, topology: Any, placement: Any = None) -> d
     layout["cross_node_tp"] = int(cross_tp)
     layout["cross_node_engine_tp"] = int(cross_engine)
     if cross_tp:
+        from yeto.rl.engine.multinode import tp_cp_node_note
+
         logging.getLogger(__name__).warning(
             "cross_node_tp=1: the trainer TP*CP group (tp=%s cp=%s) may span nodes "
-            "(--rl-allow-cross-node-tp); NCCL TP collectives cross the inter-node fabric",
-            layout["tp"], layout["cp"])
+            "(--rl-allow-cross-node-tp): %s", layout["tp"], layout["cp"],
+            tp_cp_node_note(layout["tp"] or 1, layout["cp"] or 1, layout["gpus_per_node"]))
     if cross_engine:
         logging.getLogger(__name__).warning(
             "cross_node_engine_tp=1: rollout engines may span whole nodes (sglang nnodes>1, "

@@ -221,3 +221,36 @@ def resolve_model_kind(model: str, requested: str = "auto") -> str:
     if requested != "auto":
         return requested
     return MODEL_KINDS.get(model, "causal-lm")
+
+
+# Set by the island's run script (launch/storage.py modal_volume_store_env /
+# model_store_env) after the model Volume's MANIFEST or the model store's
+# completion marker matched ``--model@--model-revision``; HF_HUB_CACHE then
+# points at a cache that already holds the whole snapshot.
+MODEL_STORE_HIT_ENV = "YETO_MODEL_STORE_HIT"
+
+
+def snapshot_path(repo_id: str, revision: str | None = None, *, environ=None, download=None) -> str:
+    """``snapshot_download(repo_id, revision)``, served from the local HF cache
+    alone when the island's model store already holds ``repo_id@revision``
+    (``YETO_MODEL_STORE_HIT``). A store-only checkpoint (no Hub repository, e.g.
+    a truncated ``yeto-local/...`` on the Modal model Volume) otherwise 404s on
+    the Hub tree listing that huggingface_hub does even for a cached commit-hash
+    snapshot (mfu16 a0, 2026-11-18: the worker node of a 2-node island exited
+    with ``Repository Not Found``), and a Hub repository costs every node a Hub
+    round trip it does not need. A store hit whose cache lacks the snapshot
+    falls back to the Hub path with a warning (the pre-fix behaviour)."""
+    import os
+
+    env = os.environ if environ is None else environ
+    if download is None:
+        from huggingface_hub import snapshot_download as download
+    if env.get(MODEL_STORE_HIT_ENV):
+        try:
+            return download(repo_id=repo_id, revision=revision, local_files_only=True)
+        except FileNotFoundError as exc:  # huggingface_hub LocalEntryNotFoundError
+            import sys
+
+            print(f"[yeto-model-store] WARNING: {MODEL_STORE_HIT_ENV} is set but the local cache "
+                  f"has no {repo_id}@{revision} ({exc}); asking the Hub", file=sys.stderr, flush=True)
+    return download(repo_id=repo_id, revision=revision)

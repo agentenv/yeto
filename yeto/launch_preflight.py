@@ -613,21 +613,82 @@ def check_policy_age_spec(args) -> None:
 
 MODAL_PROXY_ENVS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 MODAL_PROXY_INSTALL = "pip install 'modal[api-proxy-support]==1.6.3'"
+MODAL_DISABLE_PROXY_ENV = "MODAL_DISABLE_API_PROXY"
 
 
-def modal_sdk_problem(environ=None, find_spec=None) -> str | None:
-    """Why this Python cannot drive Modal (None: it can). The SDK must import; with
-    ``HTTPS_PROXY`` / ``ALL_PROXY`` set, Modal talks through the proxy and needs
-    ``aiohttp_socks`` too (the ``api-proxy-support`` extra), else the first call fails."""
+def _modal_truthy(value) -> bool:
+    """Modal's own boolean config rule (modal.config._to_boolean)."""
+    return str(value).lower() not in {"", "0", "false"}
+
+
+def _modal_profile_disables_proxy() -> bool:
+    """``disable_api_proxy`` of the active ``~/.modal.toml`` profile (env ignored)."""
+    try:
+        from modal.config import config  # noqa: PLC0415
+
+        return bool(config.get("disable_api_proxy", use_env=False))
+    except Exception:  # noqa: BLE001 - an old client without the setting, a broken toml
+        return False
+
+
+def _env_proxy(env, scheme: str) -> str | None:
+    """The ``<scheme>_proxy`` variable urllib.request.getproxies_environment would
+    use: a lower-case variable wins, an empty one turns the proxy off."""
+    lower, upper = f"{scheme}_proxy", f"{scheme.upper()}_PROXY"
+    if lower in env:
+        return lower if env[lower] else None
+    return upper if env.get(upper) else None
+
+
+def _system_proxies() -> dict:
+    """urllib's OS proxy settings, which it reads only when no ``*_proxy`` variable
+    is set (macOS System Settings, the Windows registry); {} elsewhere."""
+    import urllib.request  # noqa: PLC0415
+
+    reader = {"darwin": "getproxies_macosx_sysconf", "win32": "getproxies_registry"}.get(sys.platform)
+    try:
+        return dict(getattr(urllib.request, reader)()) if reader else {}
+    except Exception:  # noqa: BLE001 - unreadable settings: as urllib, no proxy
+        return {}
+
+
+def modal_proxy(environ=None, *, profile_disables=None, system_proxies=None) -> str | None:
+    """What Modal's client will proxy its TLS connections through (None: direct),
+    by the client's own rules (modal/_utils/proxy_support.get_proxy_url, modal
+    1.6.3): ``MODAL_DISABLE_API_PROXY`` (the environment, else the active
+    ``.modal.toml`` profile) turns proxying off; otherwise urllib's ``https``
+    then ``all`` proxy, from the environment or, with no ``*_proxy`` variable at
+    all, from the OS settings. Returns the variable's name or a description."""
+    env = os.environ if environ is None else environ
+    if MODAL_DISABLE_PROXY_ENV in env:
+        if _modal_truthy(env[MODAL_DISABLE_PROXY_ENV]):
+            return None
+    elif (profile_disables or _modal_profile_disables_proxy)():
+        return None
+    if any(k.lower().endswith("_proxy") and v for k, v in env.items()):
+        return _env_proxy(env, "https") or _env_proxy(env, "all")
+    proxies = (system_proxies or _system_proxies)()
+    return next((f"the system {k} proxy" for k in ("https", "all") if proxies.get(k)), None)
+
+
+def modal_sdk_problem(environ=None, find_spec=None, **proxy_kw) -> str | None:
+    """Why this Python cannot drive Modal (None: it can). The SDK must import; when
+    Modal's client will use a proxy (:func:`modal_proxy`: ``HTTPS_PROXY`` /
+    ``ALL_PROXY`` or a system proxy, unless ``MODAL_DISABLE_API_PROXY`` turns it
+    off) it needs ``aiohttp_socks`` and ``python_socks`` too (the
+    ``api-proxy-support`` extra), else the first call fails."""
     import importlib.util  # noqa: PLC0415
 
-    env = os.environ if environ is None else environ
     find = find_spec or importlib.util.find_spec
     if find("modal") is None:
         return (f"the Modal SDK is not importable by {sys.executable}: pip install 'yeto[modal]' "
                 "(or pip install modal)")
-    proxy = next((name for name in MODAL_PROXY_ENVS if env.get(name)), None)
-    if proxy is not None and find("aiohttp_socks") is None:
-        return (f"{proxy} is set, so Modal goes through the proxy and needs aiohttp_socks, which "
-                f"{sys.executable} cannot import: {MODAL_PROXY_INSTALL}")
+    proxy = modal_proxy(environ, **proxy_kw)
+    if proxy is None:
+        return None
+    missing = [m for m in ("aiohttp_socks", "python_socks") if find(m) is None]
+    if missing:
+        return (f"{proxy} is set, so Modal goes through the proxy and needs {' and '.join(missing)}, "
+                f"which {sys.executable} cannot import: {MODAL_PROXY_INSTALL} (or set "
+                f"{MODAL_DISABLE_PROXY_ENV}=1 when Modal is reachable without the proxy)")
     return None

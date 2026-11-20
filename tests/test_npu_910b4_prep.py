@@ -451,7 +451,7 @@ def test_island_takes_a_staged_model_directory(tmp_path, monkeypatch):
     (staged / "config.json").write_text("{}")
     assert island_entry.island_model_path(str(staged), "a" * 40) == str(staged)
     calls = []
-    fake = SimpleNamespace(snapshot_download=lambda model, revision=None: calls.append((model, revision)) or "/hub/x")
+    fake = SimpleNamespace(snapshot_download=lambda repo_id, revision=None: calls.append((repo_id, revision)) or "/hub/x")
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
     assert island_entry.island_model_path("org/repo", "b" * 40) == "/hub/x"
     assert calls == [("org/repo", "b" * 40)]

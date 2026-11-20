@@ -299,11 +299,10 @@ def base_path(model: str, revision: str | None) -> str:
 def _base_path(model: str, revision: str | None) -> str:
     if Path(model).expanduser().is_dir():
         return str(Path(model).expanduser().resolve())
-    from huggingface_hub import snapshot_download
+    from yeto.models import snapshot_path
 
     # a model store hit (storage.model_store_env) is the snapshot: the Hub is not asked
-    return snapshot_download(repo_id=model, revision=revision,
-                             local_files_only=bool(os.environ.get("YETO_MODEL_STORE_HIT")))
+    return snapshot_path(model, revision)  # store hit: local cache only
 
 
 def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None) -> int:

@@ -168,9 +168,9 @@ def add_launch_arguments(p) -> None:
                    "shutdown; default 15)")
     g.add_argument("--idle-stop-minutes", type=float, default=15.0,
                    help="stop the run this long after idle_warn if still idle (default 15)")
-    g.add_argument("--load-grace-minutes", type=float, default=45.0,
+    g.add_argument("--load-grace-minutes", type=float, default=None,
                    help="no idle verdict for this long after the start / a loading event (weight "
-                   "loading is silent; default 45)")
+                   "loading is silent; default 45, 90 for a Kimi-K3.1 --tuning full launch)")
     g.add_argument("--max-load-minutes", type=float, default=120.0,
                    help="loading events alone cannot exempt a run longer than this since its last "
                    "progress (default 120)")

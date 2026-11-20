@@ -510,19 +510,24 @@ def make_miles_island_task(
         prefetch = model_prefetch(model, args.model_revision)
     worker_model_fetch = ""
     if spec.num_nodes > 1 and not is_local_reference(model):
-        # Same call and cache as the learner's own snapshot_download on the
-        # head (python3 of the image; `huggingface-cli` is not on the run
-        # shell's PATH there), so the two nodes resolve the
-        # same snapshot directory.
+        # Same call and cache as the learner's own snapshot lookup on the head
+        # (yeto.models.snapshot_path through python3 of the image;
+        # `huggingface-cli` is not on the run shell's PATH there), so the two
+        # nodes resolve the same snapshot directory. On a model-store / model
+        # Volume hit (YETO_MODEL_STORE_HIT, exported by the store env of this
+        # run script on every node) it only checks the local cache: a
+        # store-only checkpoint has no Hub repository and the Hub lookup 404s
+        # (mfu16 a0, 2026-11-18: worker rank 1 exited "Repository Not Found").
         fetch_py = (
-            "from huggingface_hub import snapshot_download; "
-            f"print(snapshot_download(repo_id={model!r}, revision={args.model_revision!r}))"
+            "from yeto.models import snapshot_path; "
+            f"print(snapshot_path({model!r}, {args.model_revision!r}))"
         )
         # A model store hit (YETO_MODEL_STORE_HIT) is the snapshot itself: the
         # worker fetches nothing (a node-local store may hold only its pipeline
         # stages' files, which an online snapshot_download would complete from the Hub).
         worker_model_fetch = (
             '  [ -n "${YETO_MODEL_STORE_HIT:-}" ] || '
+            "PYTHONPATH=$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
             f"python3 -c {shlex.quote(fetch_py)} >/tmp/hf-prefetch-worker.log 2>&1 "
             "|| { echo '[yeto-island] worker could not fetch the model snapshot:' >&2; "
             "tail -5 /tmp/hf-prefetch-worker.log >&2; exit 1; }\n"

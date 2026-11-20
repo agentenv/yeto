@@ -260,8 +260,9 @@ def test_island_task_uses_a_local_store_and_the_worker_skips_its_fetch_on_a_hit(
     env = model_store_env("org/model", "a" * 40, STORE)
     assert env in task.setup and '[ -n "$YETO_MODEL_STORE_HIT" ] || (nohup sh -c ' in task.setup
     assert task.run.index(env) < task.run.index("set -e")
-    fetch = [line for line in task.run.splitlines() if '[ -n "${YETO_MODEL_STORE_HIT:-}" ] || python3 -c ' in line]
-    assert len(fetch) == 1 and "snapshot_download" in fetch[0]
+    fetch = [line for line in task.run.splitlines()
+             if '[ -n "${YETO_MODEL_STORE_HIT:-}" ] || PYTHONPATH=$HOME/sky_workdir' in line]
+    assert len(fetch) == 1 and "snapshot_path" in fetch[0]
     for hit, rc in (("1", 0), ("", 1)):  # PATH without python3: a fetch that runs fails the node
         done = subprocess.run(["/bin/bash", "-c", fetch[0]], check=False, capture_output=True, text=True,
                               env={"PATH": "/nonexistent", "YETO_MODEL_STORE_HIT": hit})
@@ -279,9 +280,11 @@ def test_model_fetches_stay_off_the_hub_on_a_store_hit(monkeypatch):
     assert init_from_release._base_path("org/model", REV) == "/hub/snap"
     monkeypatch.delenv("YETO_MODEL_STORE_HIT")
     init_from_release._base_path("org/model", REV)
-    assert [c["local_files_only"] for c in calls] == [True, False]
+    assert [c.get("local_files_only", False) for c in calls] == [True, False]
+    # the Miles learner's model fetch goes through the same store-aware lookup
+    # (yeto.models.snapshot_path: local cache only on a store hit)
     source = Path("yeto/rl/adapters/miles/island_entry.py").read_text()
-    assert 'local_files_only=bool(os.environ.get("YETO_MODEL_STORE_HIT"))' in source
+    assert "snapshot_path(model, args.model_revision)" in source
 
 
 def test_cli_flags_reach_the_launcher_args():

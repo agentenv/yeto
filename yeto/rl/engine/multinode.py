@@ -353,6 +353,19 @@ def engine_replica_delta_rejection(source_rollout: int, target_rollout: int,
     return None
 
 
+def tp_cp_node_note(tp: int, cp: int, gpus_per_node: int) -> str:
+    """What actually crosses nodes when the trainer tp*cp group does not fit one node.
+    Megatron's rank order (Miles initialize: ``tp-cp-ep-dp-pp``) makes every TP group
+    ``tp`` consecutive ranks, so TP stays inside a node whenever ``tp`` divides the
+    node; only the CP groups (rank i, i+tp, ...) then span nodes (the K3.1 layouts
+    TP8 x CP2 on 8-GPU nodes)."""
+    tp, cp, g = max(1, int(tp)), max(1, int(cp)), max(1, int(gpus_per_node))
+    if tp <= g and g % tp == 0:
+        return (f"every TP group (tp={tp}) stays inside a node; only the CP groups (cp={cp}) "
+                "span nodes (Megatron rank order tp-cp-ep-dp-pp)")
+    return f"the TP groups themselves (tp={tp}) span nodes ({g} GPUs per node)"
+
+
 def node_placement_rejection(slots: Mapping[str, Any], *, node_parallel: int | None = None,
                              model_parallel: int = 1, expert_parallel: int = 1,
                              gpus_per_engine: int | None = None,

@@ -1184,10 +1184,27 @@ def island_main(cfg_json: str) -> int:
     if sampler is not None:
         sampler.start()
     start_host_map_probe(env, rank, TAPE_SOURCE_DIR)
+    peers = None
+    if cfg.num_nodes > 1 and rank == 0:
+        try:
+            peers = PeerFailureRelay(port=peer_failure_port(env)).start()
+        except OSError as exc:  # the island still runs; a peer failure is then seen late
+            print(f"[modal-island] peer failure relay not started ({exc})", flush=True)
     try:
         with harbor_relay_tunnel(cfg, rank, env):
-            return _island_body(cfg, rank, ips, all_ips, env, tape)
+            return _island_body(cfg, rank, ips, all_ips, env, tape, peers=peers)
+    except Exception as exc:
+        if cfg.num_nodes > 1 and rank > 0 and ips:
+            # rank 0 holds the island's Modal call: without this it keeps starting
+            # (Ray head, placement group, model load) until an outside timeout
+            send_peer_failure(ips[0], peer_failure_port(env), rank, str(exc))
+        if peers is not None and peers.failure is not None \
+                and str(exc) != peers.failure_message(cfg.learner_id):
+            raise RuntimeError(peers.failure_message(cfg.learner_id)) from exc
+        raise
     finally:
+        if peers is not None:
+            peers.stop()
         if sampler is not None:
             sampler.stop()
         if stacks is not None:
@@ -1267,7 +1284,7 @@ def narrow_ephemeral_ports(path: str = EPHEMERAL_PORT_RANGE,
 
 
 def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dict,
-                 env: dict, tape: "TapeSync | None") -> int:
+                 env: dict, tape: "TapeSync | None", *, peers: "PeerFailureRelay | None" = None) -> int:
     try:
         names = visible_gpu_names()
     except (OSError, subprocess.SubprocessError) as exc:
@@ -1287,11 +1304,20 @@ def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dic
     if cfg.gpu_name:
         check_gpu_model(cfg.gpu_name, names, cfg.gpus_per_node)
     print(f"[modal-island {cfg.learner_id}] {narrow_ephemeral_ports()}", flush=True)
+
+    def peer_check() -> None:
+        if peers is not None and peers.failure is not None:
+            raise RuntimeError(peers.failure_message(cfg.learner_id))
+
     if cfg.setup_script:
+        peer_check()
         code = subprocess.call(container_command(cfg.setup_script), env=env)
+        peer_check()
         if code != 0:
             raise RuntimeError(f"island {cfg.learner_id} rank {rank} setup exited with {code}")
+    peer_check()
     code = run_island_script(container_command(cfg.run_script), env)
+    peer_check()
     if code != 0:
         raise RuntimeError(f"island {cfg.learner_id} rank {rank} exited with {code}")
     return code
@@ -1417,6 +1443,158 @@ def send_reclaim_to_rank0(host: str, port: int, num: int, rank: int, *, timeout_
     return False
 
 
+PEER_FAILURE_PORT_ENV = "YETO_PEER_FAILURE_PORT"
+PEER_FAILURE_PORT_DEFAULT = 29418
+PEER_FAILURE_GRACE_S = 15.0
+
+
+def peer_failure_port(env: dict) -> int:
+    return int(env.get(PEER_FAILURE_PORT_ENV) or PEER_FAILURE_PORT_DEFAULT)
+
+
+def child_pids(root: int, proc_root: str = "/proc") -> list[int]:
+    """Every live descendant of ``root`` (from ``/proc/<pid>/stat``; [] without /proc)."""
+    children: dict[int, list[int]] = {}
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"{proc_root}/{entry}/stat", encoding="utf-8", errors="replace") as fh:
+                ppid = int(fh.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+    out, stack = [], [root]
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            out.append(child)
+            stack.append(child)
+    return out
+
+
+def stop_children(*, grace_s: float = PEER_FAILURE_GRACE_S, pids=None, kill=None,
+                  sleep=time.sleep) -> list[int]:
+    """SIGTERM every descendant of this runner (the island's setup or run script and
+    the learner under it), SIGKILL what is left after ``grace_s``. Returns the pids
+    signalled first."""
+    import signal as _signal
+
+    pids = pids or (lambda: child_pids(os.getpid()))
+    kill = kill or os.kill
+    first = pids()
+    for sig in (_signal.SIGTERM, _signal.SIGKILL):
+        for pid in (first if sig == _signal.SIGTERM else pids()):
+            try:
+                kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if sig == _signal.SIGTERM and first:
+            deadline = time.monotonic() + grace_s
+            while time.monotonic() < deadline and pids():
+                sleep(0.5)
+    return first
+
+
+class PeerFailureRelay:
+    """On rank 0 of a multi-node island: a rank>0 runner whose setup or run script
+    failed reports it here (:func:`send_peer_failure`). The island's Modal call is
+    rank 0's, so without this rank 0 kept starting (Ray head, a placement group
+    waiting for the dead node's GPUs, the model load) until an outside timeout
+    (mfu16 a0, 2026-11-18: rank 1 exited at 13:20:45, the call ended only when the
+    app was stopped at 13:22:53; unguarded, the 2400 s Modal timeout). The first
+    report stops this runner's children (``stop``), so rank 0 fails at once and
+    raises with the peer's reason."""
+
+    def __init__(self, *, port: int, host: str = "0.0.0.0", stop=None) -> None:
+        self.host, self.port = host, port
+        self.stop_island = stop or stop_children
+        self.failure: dict | None = None
+        self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def start(self) -> "PeerFailureRelay":
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.listen(8)
+            sock.settimeout(0.5)
+        except BaseException:
+            sock.close()
+            raise
+        self._sock, self.port = sock, sock.getsockname()[1]
+        self._thread = threading.Thread(target=self._serve, name="peer-failure-relay", daemon=True)
+        self._thread.start()
+        print(f"[modal-island] peer failure relay listening on port {self.port}", flush=True)
+        return self
+
+    def failure_message(self, learner_id) -> str:
+        doc = self.failure or {}
+        return (f"island {learner_id} rank 0 stopped: peer rank {doc.get('rank')} failed: "
+                f"{doc.get('reason', '')}")
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self._sock.accept()
+            except (socket.timeout, OSError):
+                continue
+            with conn:
+                try:
+                    conn.settimeout(2.0)
+                    doc = json.loads(conn.makefile("r", encoding="utf-8").readline())
+                    record = {"rank": int(doc["rank"]), "reason": str(doc.get("reason", ""))[:2000]}
+                    conn.sendall(b"ok\n")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    print(f"[modal-island] peer failure relay: bad message ({exc})", flush=True)
+                    continue
+            with self._lock:
+                first = self.failure is None
+                if first:
+                    self.failure = record
+            print(f"[modal-island] peer rank {record['rank']} failed ({record['reason']}); "
+                  "stopping this node's island script", flush=True)
+            if first:
+                try:
+                    self.stop_island()
+                except Exception as exc:  # noqa: BLE001 - report, the relay thread must not die
+                    print(f"[modal-island] peer failure relay: stop failed ({exc})", flush=True)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sock is not None:
+            self._sock.close()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+
+def send_peer_failure(host: str, port: int, rank: int, reason: str, *, timeout_s: float = 2.0,
+                      attempts: int = 30, pause_s: float = 2.0, sleep=time.sleep) -> bool:
+    """A rank>0 runner reports its failure to rank 0's :class:`PeerFailureRelay`.
+    Retries for about a minute (rank 0's container may start later). True once acked."""
+    msg = (json.dumps({"rank": int(rank), "reason": str(reason)[:2000]}) + "\n").encode()
+    for attempt in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout=timeout_s) as conn:
+                conn.sendall(msg)
+                conn.settimeout(timeout_s)
+                if conn.recv(16).startswith(b"ok"):
+                    print(f"[modal-island] rank {rank} failure reported to rank 0 at {host}:{port}", flush=True)
+                    return True
+        except OSError as exc:
+            if attempt == attempts - 1:
+                print(f"[modal-island] rank {rank} failure not reported to rank 0 ({exc})", flush=True)
+                break
+        sleep(pause_s)
+    return False
+
+
 class ReclaimRelay:
     """On rank 0 of a multi-node island: accept reclaim messages from peer runners
     and hand each to ``on_reclaim(signal, rank)`` (which writes the local marker)."""
@@ -1466,6 +1644,37 @@ class ReclaimRelay:
             self._thread.join(timeout=2.0)
 
 
+STATUS_TRANSPORT_LIMIT_ENV = "YETO_MODAL_STATUS_TRANSPORT_POLLS"
+# Status polls in a row that may fail in the client's transport before the call
+# reads FAILED (the controller polls every --controller-poll s, default 30).
+STATUS_TRANSPORT_LIMIT = 10
+# Exception classes (by name, anywhere in the MRO) of the launcher's own link to
+# Modal: grpclib's StreamTerminatedError, modal.exception.ConnectionError /
+# ServiceError / ClientClosed, the builtin ConnectionError family, DNS failures.
+TRANSPORT_ERROR_NAMES = frozenset({"StreamTerminatedError", "ConnectionError", "ServiceError",
+                                   "ClientClosed", "gaierror"})
+TRANSPORT_GRPC_STATUSES = frozenset({"UNAVAILABLE", "DEADLINE_EXCEEDED"})
+
+
+def status_transport_limit(environ=None) -> int:
+    env = os.environ if environ is None else environ
+    raw = env.get(STATUS_TRANSPORT_LIMIT_ENV)
+    return max(1, int(raw)) if raw else STATUS_TRANSPORT_LIMIT
+
+
+def is_transport_error(exc: BaseException) -> bool:
+    """True for an error of the client's connection to Modal, not of the call."""
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    if names & TRANSPORT_ERROR_NAMES:
+        return True
+    status = getattr(exc, "status", None)
+    return "GRPCError" in names and getattr(status, "name", str(status)) in TRANSPORT_GRPC_STATUSES
+
+
+def _exc_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"[:300]
+
+
 class ModalOps:
     """The SDK surface the launcher uses, as one small class (tests
     substitute a fake). One instance per run/app."""
@@ -1476,6 +1685,9 @@ class ModalOps:
         self._functions: dict[str, object] = {}
         # the run's resource ledger (yeto.cost.ledger); None: $YETO_RESOURCE_LEDGER, if set
         self.ledger = None
+        # call id -> status polls in a row that failed in the client's own transport
+        self._transport_errors: dict[str, int] = {}
+        self._failure_logged: set[str] = set()
 
     # -- building --------------------------------------------------------------
 
@@ -1628,17 +1840,45 @@ class ModalOps:
         return str(call.object_id)
 
     def status(self, call_id: str) -> str:
-        """RUNNING | SUCCEEDED | FAILED for a call id."""
+        """RUNNING | SUCCEEDED | FAILED for a call id.
+
+        An error of this client's own connection to Modal (``StreamTerminatedError:
+        Connection lost``, ``modal.exception.ConnectionError``, gRPC UNAVAILABLE ...)
+        says nothing about the call: it reads RUNNING and the next poll asks again,
+        up to :data:`STATUS_TRANSPORT_LIMIT` polls in a row (then FAILED). Reading it
+        as FAILED let the launcher tear down an island whose learner had finalized
+        but was still uploading its last tape chunk (k31-mfu16-n1: the head was cut
+        off by the teardown SIGINT inside the final R2 put)."""
         modal = self._modal()
-        call = modal.FunctionCall.from_id(call_id)
+        errors = getattr(self, "_transport_errors", None)
+        if errors is None:
+            errors = self._transport_errors = {}
         try:
+            call = modal.FunctionCall.from_id(call_id)
             call.get(timeout=0)
         except TimeoutError:
+            errors.pop(call_id, None)
             return "RUNNING"
         except Exception as exc:  # noqa: BLE001 - any raised result is a failed island
             if type(exc).__name__ in ("TimeoutError", "OutputExpiredError") and "timeout" in str(exc).lower():
+                errors.pop(call_id, None)
                 return "RUNNING"
+            if is_transport_error(exc):
+                errors[call_id] = errors.get(call_id, 0) + 1
+                limit = status_transport_limit()
+                if errors[call_id] < limit:
+                    print(f"[modal] status of {call_id} unknown ({_exc_text(exc)}); "
+                          f"poll {errors[call_id]}/{limit}, asking again next poll", file=sys.stderr)
+                    return "RUNNING"
+            errors.pop(call_id, None)
+            logged = getattr(self, "_failure_logged", None)
+            if logged is None:
+                logged = self._failure_logged = set()
+            if call_id not in logged:
+                logged.add(call_id)
+                print(f"[modal] call {call_id} ended as FAILED: {_exc_text(exc)}", file=sys.stderr)
             return "FAILED"
+        errors.pop(call_id, None)
         return "SUCCEEDED"
 
     def cancel(self, call_id: str) -> None:

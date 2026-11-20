@@ -128,7 +128,7 @@ def test_island_task_model_store(monkeypatch):
     assert '[ -n "$YETO_MODEL_STORE_HIT" ] || (nohup sh -c ' in task.setup
     assert 'snapshot_download' in task.setup and 'huggingface-cli' not in task.setup
     # both ranks export it before the learner / worker snapshot fetch
-    assert task.run.index(env) < task.run.index("set -e") < task.run.index("snapshot_download")
+    assert task.run.index(env) < task.run.index("set -e") < task.run.index("snapshot_path")
     plain = _cli(["--gpu", "nebius:2x1xl40s@eu-north1"])
     _prepare_rl_args(plain)
     assert "yeto-model-store" not in _island_task(plain, monkeypatch).run
