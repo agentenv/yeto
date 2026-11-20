@@ -8,11 +8,11 @@ import pytest
 
 from yeto.rl.harness.chat_templates import TEMPLATES, ChatTemplate, TemplateError, parse_deepseek_v41
 
-EOS = "<｜end▁of▁sentence｜>"
-CALL = ('Running it.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="bash">\n'
-        '<｜DSML｜ parameter name="cmd" string="true">ls -la</｜DSML｜ parameter>\n'
-        '<｜DSML｜ parameter name="timeout" string="false">30</｜DSML｜ parameter>\n'
-        '</｜DSML｜ invoke>\n</｜DSML｜ calls>')
+EOS = "<\uff5cend\u2581of\u2581sentence\uff5c>"
+CALL = ('Running it.\n\n<\uff5cDSML\uff5c calls>\n<\uff5cDSML\uff5c invoke name="bash">\n'
+        '<\uff5cDSML\uff5c parameter name="cmd" string="true">ls -la</\uff5cDSML\uff5c parameter>\n'
+        '<\uff5cDSML\uff5c parameter name="timeout" string="false">30</\uff5cDSML\uff5c parameter>\n'
+        '</\uff5cDSML\uff5c invoke>\n</\uff5cDSML\uff5c calls>')
 
 # a stand-in of the checkpoint encoder: records what it gets, renders a simple form
 ENCODER = '''
@@ -25,7 +25,7 @@ def encode_messages(messages, thinking_mode, drop_thinking=True, reasoning_effor
     for m in messages:
         out += "<" + m["role"] + ">" + str(m.get("content") or "") + ("[tools]" if m.get("tools") else "")
     if messages[-1]["role"] != "assistant":
-        out += "<｜Assistant｜>" + ("<think>" if thinking_mode == "thinking" else "</think>")
+        out += "<\uff5cAssistant\uff5c>" + ("<think>" if thinking_mode == "thinking" else "</think>")
     return out
 '''
 
@@ -61,14 +61,14 @@ def test_parse_reasoning_content_and_dsml_calls():
     assert parse_deepseek_v41("2", thinking=False) == {"role": "assistant", "content": "2"}
     assert parse_deepseek_v41("r</think>done") == {"role": "assistant", "content": "done", "reasoning_content": "r"}
     with pytest.raises(TemplateError, match="not DSML"):
-        parse_deepseek_v41("r</think>x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=bash>\n</｜DSML｜ calls>")
+        parse_deepseek_v41("r</think>x\n\n<\uff5cDSML\uff5c calls>\n<\uff5cDSML\uff5c invoke name=bash>\n</\uff5cDSML\uff5c calls>")
 
 
 def test_render_through_the_checkpoint_encoder(tmp_path):
     template = _template(tmp_path)
     tools = [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
     text = template.render([{"role": "user", "content": "hi"}], tools=tools, add_generation_prompt=True)
-    assert text == "<bos><system>[tools]<user>hi<｜Assistant｜><think>"  # a system message carries the tools
+    assert text == "<bos><system>[tools]<user>hi<\uff5cAssistant\uff5c><think>"  # a system message carries the tools
     module = template._encoder()
     call = module.CALLS[-1]
     assert call["thinking_mode"] == "thinking" and call["reasoning_effort"] == "high" and call["drop_thinking"]

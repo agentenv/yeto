@@ -24,7 +24,7 @@ Registered templates:
   ``deepseek_v41`` tokenizer mode runs: tools on the first system message, one
   inserted when there is none; ``thinking`` / ``reasoning_effort`` /
   ``drop_thinking`` template kwargs), tokenized with ``add_special_tokens=False``;
-  DSML tool calls (``<｜DSML｜ invoke name=...>``) parsed by :func:`parse_deepseek_v41`.
+  DSML tool calls (``<\uff5cDSML\uff5c invoke name=...>``) parsed by :func:`parse_deepseek_v41`.
   Reasoning of every turn after the last real user turn is kept (tool-result
   turns do not count, and any conversation with tools keeps all of it);
 * ``qwen38``: Qwen3.8 (Qwen3.5 family) XML tool calls (``<tool_call><function=name>
@@ -219,8 +219,8 @@ def parse_kimi_k3(text: str, *, thinking: bool = True) -> Message:
     return _assistant(content, reasoning, calls)
 
 
-_DS_EOS = "<｜end▁of▁sentence｜>"
-_DS_DSML = "｜DSML｜"
+_DS_EOS = "<\uff5cend\u2581of\u2581sentence\uff5c>"
+_DS_DSML = "\uff5cDSML\uff5c"
 _DS_CALLS = f"\n\n<{_DS_DSML} calls>"
 _DS_INVOKE = re.compile(rf'<{_DS_DSML} invoke name="(.*?)">\n(.*?)</{_DS_DSML} invoke>', re.S)
 _DS_PARAM = re.compile(rf'<{_DS_DSML} parameter name="(.*?)" string="(true|false)">(.*?)</{_DS_DSML} parameter>', re.S)
@@ -236,9 +236,9 @@ def _ds_value(raw: str, is_string: str) -> Any:
 
 
 def parse_deepseek_v41(text: str, *, thinking: bool = True) -> Message:
-    """DeepSeek-V4.1 output after the ``<｜Assistant｜><think>`` generation prompt
+    """DeepSeek-V4.1 output after the ``<\uff5cAssistant\uff5c><think>`` generation prompt
     (``thinking=False``: after ``</think>``): reasoning up to ``</think>``, the
-    content, then DSML tool calls in a ``\\n\\n<｜DSML｜ calls>`` block. Reasoning and
+    content, then DSML tool calls in a ``\\n\\n<\uff5cDSML\uff5c calls>`` block. Reasoning and
     content are kept byte for byte (the encoder renders them raw)."""
     reasoning: str | None = None
     rest = text
@@ -495,7 +495,7 @@ class ChatTemplate:
         except (ValueError, TypeError, KeyError, AssertionError, NotImplementedError) as exc:
             raise TemplateError(f"{self.spec.name} encoder refused the conversation: {exc}") from exc
         if not add_generation_prompt:  # the encoder always opens the next assistant turn after a user turn
-            for suffix in ("<｜Assistant｜><think>", "<｜Assistant｜></think>"):
+            for suffix in ("<\uff5cAssistant\uff5c><think>", "<\uff5cAssistant\uff5c></think>"):
                 if text.endswith(suffix) and conversation and conversation[-1].get("role") != "assistant":
                     return text[: -len(suffix)]
         return str(text)
