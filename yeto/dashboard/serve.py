@@ -169,12 +169,16 @@ def serve(paths: list[str], *, reducer: Reducer, host: str = "127.0.0.1", port: 
           interval: float = 2.0, head: str | None = None, store: Any = None) -> int:
     check_loopback(host)
     state = DashboardState(reducer, paths, store=store)
-    n = state.poll()
+    # Bind the port before the first (potentially very slow) full reduce: a run
+    # store that already holds many tapes makes the first poll() take minutes,
+    # and serving would never come up. Serve immediately and let the follow
+    # thread's first poll fill the reducer in the background (the reducer is
+    # read under state.lock, so an empty/!partial view renders fine meanwhile).
     srv = make_server(state, host, port)
     stop = threading.Event()
     follow(state, stop, interval)
-    print(f"[dashboard] {len(state.sources)} tape(s), {n} record(s); serving "
-          f"http://{host}:{srv.server_address[1]}/ (read-only, GET only)", flush=True)
+    print(f"[dashboard] serving http://{host}:{srv.server_address[1]}/ (read-only, GET only); "
+          "first reduce runs in the background", flush=True)
     for s in state.sources:
         print(f"[dashboard]   source {s}", flush=True)
     print(f"[dashboard] from your laptop: {tunnel_hint(srv.server_address[1], head)}"
