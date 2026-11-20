@@ -17,6 +17,7 @@ from yeto.gpu_spec import ClusterSpec
 from yeto.launch.node_inventory import InventoryError, Node, parse_inventory
 from yeto.launch.ssh_trainer_island import (
     SshIslandError,
+    SshOps,
     SshTrainerSpec,
     container_name,
     inventory_trainer_nodes,
@@ -247,6 +248,121 @@ def test_launcher_builds_the_ssh_island_from_the_inventory():
         inventory_trainer_nodes(args, ClusterSpec(cloud="ssh", region=None, num_nodes=3, gpus_per_node=8, gpu="M890"))
     with pytest.raises(SshIslandError, match="workdir"):
         island_spec_from_inventory(SimpleNamespace(**{**vars(args), "rl_ssh_trainer_workdir": None}), island, task)
+
+
+def test_a_docker_trainer_container_gets_a_high_open_file_limit_unless_the_inventory_sets_one():
+    """dockerd's default nofile (often 1024) starves a multi-node raylet of sockets
+    ("Too many open files"); the island raises it unless docker_args name their own."""
+    from yeto.launch.ssh_trainer_island import NOFILE_ULIMIT, docker_argv
+
+    spec = SshTrainerSpec(nodes=(_node(),), run_id="r", workdir="/w", command=("x",))
+    argv = docker_argv(spec, 0, "c", [])
+    assert argv[argv.index(NOFILE_ULIMIT) - 1] == "--ulimit" and NOFILE_ULIMIT == "nofile=1048576:1048576"
+    for given in (("--ulimit", "nofile=65536:65536"), ("--ulimit=nofile=65536",)):
+        own = SshTrainerSpec(nodes=(_node(docker_args=("--device", "/dev/x", *given)),), run_id="r", workdir="/w",
+                             command=("x",))
+        argv = docker_argv(own, 0, "c", [])
+        assert NOFILE_ULIMIT not in argv and sum("nofile" in a for a in argv) == 1
+
+
+class _ScriptedSsh(SshOps):
+    """``SshOps.run`` over a scripted ``subprocess.run`` (the real retry path)."""
+
+    def __init__(self, monkeypatch, results):
+        import yeto.launch.ssh_trainer_island as island
+
+        self.calls, self.sleeps, self.retry_delays_s = [], [], (1.0, 3.0)
+        self.sleep = self.sleeps.append
+        results = list(results)
+
+        def fake_run(argv, **kw):
+            self.calls.append(argv)
+            rc, err = results.pop(0)
+            return subprocess.CompletedProcess(argv, rc, stdout="yeto-node-state state=running rc= container=c\n"
+                                               if rc == 0 else "", stderr=err)
+
+        monkeypatch.setattr(island.subprocess, "run", fake_run)
+
+
+DROPPED = (255, "Connection closed by 203.0.113.7 port 22\r\n")
+
+
+@pytest.mark.parametrize("err", [DROPPED[1], "Connection reset by 203.0.113.7 port 22",
+                                 "kex_exchange_identification: read: Connection reset by peer"])
+def test_ssh_retries_a_connection_the_node_dropped_before_a_session(monkeypatch, capsys, err):
+    ops = _ScriptedSsh(monkeypatch, [(255, err), (0, "")])
+    assert ops.run(_node(), "true").returncode == 0
+    assert len(ops.calls) == 2 and ops.sleeps == [1.0]
+    assert "ssh to ppu1" in capsys.readouterr().out
+
+
+def test_ssh_does_not_retry_other_failures_and_gives_up_after_the_delays(monkeypatch):
+    for result in [(1, "Connection closed by 203.0.113.7 port 22"),  # the remote command's own rc
+                   (255, "Permission denied (publickey)"),
+                   (255, "Connection to 203.0.113.7 closed by remote host.")]:  # dropped mid-session
+        ops = _ScriptedSsh(monkeypatch, [result])
+        assert ops.run(_node(), "true").returncode == result[0] and len(ops.calls) == 1 and ops.sleeps == []
+    ops = _ScriptedSsh(monkeypatch, [DROPPED] * 3)
+    assert ops.run(_node(), "true").returncode == 255 and len(ops.calls) == 3 and ops.sleeps == [1.0, 3.0]
+
+
+def test_a_dropped_connection_that_a_retry_gets_past_is_not_an_unreachable_check(monkeypatch, tmp_path):
+    """The resident watch counts "N checks in a row" from node_state; one dropped
+    connection per check must not make the node unreachable."""
+    from yeto.launch.ssh_trainer_island import SshTrainerIslands
+
+    ops = _ScriptedSsh(monkeypatch, [DROPPED, (0, "")] * 3)
+    spec = SshTrainerSpec(nodes=(_node(),), run_id="r", workdir="/w", command=("x",))
+    islands = SshTrainerIslands(spec, name="t", jobs_path=tmp_path / "j.json", ops=ops)
+    assert [islands.node_state(1, 0).state for _ in range(3)] == ["running"] * 3
+    ops = _ScriptedSsh(monkeypatch, [DROPPED] * 3)
+    assert SshTrainerIslands(spec, name="t", jobs_path=tmp_path / "j.json", ops=ops).node_state(1, 0) is None
+
+
+def test_ssh_reuses_one_connection_under_the_yeto_state_dir(monkeypatch, tmp_path):
+    from yeto.launch import ssh_transport
+
+    monkeypatch.delenv(ssh_transport.MUX_ENV, raising=False)
+    short = Path("/tmp") / f"yeto-t-{tmp_path.name[-8:]}"
+    monkeypatch.setenv(ssh_transport.CONTROL_DIR_ENV, str(short))
+    monkeypatch.setattr(ssh_transport, "_user_controls", {})
+    probes = []
+    monkeypatch.setattr(ssh_transport, "_probe_user_controls", lambda target: probes.append(target) or False)
+    try:
+        argv = SshOps().command(_node(proxy_jump="user@bastion"))
+        assert f"ControlPath={short}/%C" in argv and "ControlMaster=auto" in argv
+        assert "ControlPersist=10m" in argv and "ServerAliveInterval=30" in argv
+        assert argv.index("ControlMaster=auto") < argv.index("ppu1")  # options before the host
+        assert (short.stat().st_mode & 0o777) == 0o700
+        SshOps().command(_node(proxy_jump="user@bastion"))
+        assert probes == [("-o", "ProxyJump=user@bastion", "ppu1")]  # the user's config read once per route
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+    # the user's SSH configuration already multiplexes this host: nothing added
+    monkeypatch.setattr(ssh_transport, "_user_controls", {("ppu1",): True})
+    assert not any(a.startswith("Control") for a in SshOps().command(_node()))
+    monkeypatch.setenv(ssh_transport.MUX_ENV, "off")
+    monkeypatch.setattr(ssh_transport, "_user_controls", {})
+    assert not any(a.startswith("Control") for a in SshOps().command(_node()))
+
+
+def test_the_control_dir_falls_back_when_the_socket_path_would_be_too_long(monkeypatch, tmp_path):
+    from yeto.launch import ssh_transport
+
+    monkeypatch.setenv(ssh_transport.CONTROL_DIR_ENV, str(tmp_path / ("x" * 80)))
+    path = ssh_transport.control_dir()
+    assert len(str(path)) + 58 <= 100 and path.name.startswith("yeto-ssh-")
+
+
+def test_user_ssh_config_detection_reads_ssh_dash_g(monkeypatch):
+    from yeto.launch import ssh_transport
+
+    outputs = {"plain": "controlmaster false\ncontrolpersist no\n",
+               "muxed": "controlmaster auto\ncontrolpath ~/.ssh/cm-%C\n",
+               "path-only": "controlmaster false\ncontrolpath /tmp/s-%C\n"}
+    monkeypatch.setattr(ssh_transport.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 0, stdout=outputs[argv[-1]], stderr=""))
+    assert [ssh_transport._probe_user_controls([h]) for h in outputs] == [False, True, True]
 
 
 # ------------------------------------------------------------ gap 6: OSS through a relay

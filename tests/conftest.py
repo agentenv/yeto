@@ -143,6 +143,14 @@ def _no_real_model_preflight(monkeypatch):
 
 
 @_pytest.fixture(autouse=True)
+def _no_ssh_connection_reuse(monkeypatch):
+    """The launcher's ssh calls reuse a master connection (ssh_transport), which reads
+    the user's SSH configuration (``ssh -G``) and keeps sockets under ~/.yeto; unit
+    tests never open a real ssh. Tests of the transport clear the variable."""
+    monkeypatch.setenv("YETO_SSH_MUX", "off")
+
+
+@_pytest.fixture(autouse=True)
 def _fixed_thread_reading(monkeypatch):
     """launch-preflight-guards: launch() reads this user's thread count from
     /proc; unit tests must not depend on (or wait for) the host's threads.

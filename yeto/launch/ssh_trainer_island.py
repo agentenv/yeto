@@ -93,7 +93,7 @@ from yeto.rl.engine.trainer_lifecycle import CutRef
 from yeto.rl.engine.trainer_remote import island_env
 
 from ..gpu_spec import DEVICE_FAMILY_ENV
-from . import ssh_node_storage, ssh_trainer_ledger
+from . import ssh_node_storage, ssh_trainer_ledger, ssh_transport
 from .credentials import _secret_value
 from .node_inventory import InventoryError, Node
 from .topology import island_comm_env
@@ -124,7 +124,8 @@ def _overlay_safe_image(image: str) -> str | None:
         return None
 
 
-SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30")
+SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30",
+               "-o", "ServerAliveCountMax=4")
 # The remote command: the script comes on stdin. stdin moves to fd 3 and the login
 # shell starts on /dev/null, so a profile (/etc/profile.d, ~/.bash_profile) that reads
 # stdin cannot eat the script; the script then runs without fd 3.
@@ -142,12 +143,21 @@ CUDA_GPU_FLAGS = ("--gpus=", "--runtime=nvidia", "--device=nvidia.com/gpu")
 # inherits dockerd's limit, often 64 KiB, which --privileged does not lift).
 RDMA_DEVICE_FLAGS = ("--privileged", "--device=/dev/infiniband", "--volume=/dev/infiniband")
 MEMLOCK_FLAGS = ("--ulimit=memlock=-1", "--ulimit=memlock=unlimited")
+# The open-file limit of a trainer container: docker gives it dockerd's default (often
+# 1024), and a multi-node Ray raylet runs out of sockets at that ("Too many open
+# files"), its node is declared dead and the actors die. Added unless docker_args
+# set their own --ulimit nofile.
+NOFILE_ULIMIT = "nofile=1048576:1048576"
 CUDA_RDMA_DOCKER_ARGS = ("--gpus", "all", "--device", "/dev/infiniband", "--ulimit", "memlock=-1:-1",
                          "--ulimit", "stack=67108864", "--cap-add", "IPC_LOCK")
 
 
 class SshIslandError(RuntimeError):
     """The SSH trainer island cannot start or stop as asked."""
+
+
+class _TransientSsh(SshIslandError):
+    """An ``ssh`` the node dropped before the remote command ran (ssh_transport)."""
 
 
 @dataclass(frozen=True)
@@ -438,6 +448,8 @@ def docker_argv(spec: SshTrainerSpec, rank: int, name: str, env_names: Sequence[
     node = spec.nodes[rank]
     argv = ["docker", "run", "--rm", "--name", name, "--network", "host", "--ipc", "host",
             *spec.docker_args_of(node)]
+    if not any(f.startswith("--ulimit=nofile=") for f in _flag_forms(spec.docker_args_of(node))):
+        argv += ["--ulimit", NOFILE_ULIMIT]
     for host_path, container_path in sorted(node.mounts.items()):
         argv += ["-v", f"{host_path}:{container_path}"]
     argv += ssh_node_storage.docker_options(node, spec.run_id)
@@ -679,7 +691,13 @@ def kill_script(paths: Mapping[str, str], grace_s: int = KILL_GRACE_S, *, contai
 
 class SshOps:
     """The SSH calls (replaced in tests). ``run`` waits; ``start`` returns the
-    running ``ssh`` process with its stdout as a text pipe."""
+    running ``ssh`` process with its stdout as a text pipe. Every call reuses one
+    master connection per node, and ``run`` / ``fetch`` retry a connection the node
+    dropped before a session existed (:mod:`.ssh_transport`); a start streams its
+    output and is sent once."""
+
+    retry_delays_s: Sequence[float] = ssh_transport.RETRY_DELAYS_S
+    sleep: Callable[[float], None] = staticmethod(time.sleep)
 
     def command(self, node: Node) -> list[str]:
         """``ssh`` to ``node`` running the script it reads from stdin: a start script
@@ -687,15 +705,31 @@ class SshOps:
         end, a ``TimeoutExpired`` message). The remote bash reads the whole script
         before it runs, so nothing in it (or in a login profile) can consume the rest
         of it."""
-        return ["ssh", *SSH_OPTIONS, *node.ssh_options(), node.host, "bash", "-c", shlex.quote(READ_SCRIPT)]
+        route = [*node.ssh_options(), node.host]
+        return ["ssh", *SSH_OPTIONS, *ssh_transport.mux_options(route), *route, "bash", "-c",
+                shlex.quote(READ_SCRIPT)]
 
     def run(self, node: Node, script: str, *, timeout: float = 300.0) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(self.command(node), input=script, text=True, capture_output=True, timeout=timeout)
+        return ssh_transport.run_with_retry(
+            subprocess.run, self.command(node), delays=self.retry_delays_s, sleep=self.sleep,
+            log=lambda line: print(line, flush=True), label=node.name,
+            input=script, text=True, capture_output=True, timeout=timeout)
 
     def fetch(self, node: Node, script: str, target: Path, *, timeout: float) -> int:
         """Run ``script`` on ``node`` and extract the tar it writes to stdout under
         ``target`` (:func:`ssh_node_storage.extract_tar_stream`); the files written.
-        Raises on a failed or timed-out copy."""
+        Raises on a failed or timed-out copy; a dropped connection is retried."""
+        for delay in (*self.retry_delays_s, None):
+            try:
+                return self._fetch_once(node, script, target, timeout=timeout)
+            except _TransientSsh as error:
+                if delay is None:
+                    raise SshIslandError(str(error)) from None
+                print(f"[launcher] ssh to {node.name}: {error}; retrying in {delay:g} s", flush=True)
+                self.sleep(delay)
+        raise AssertionError("unreachable")
+
+    def _fetch_once(self, node: Node, script: str, target: Path, *, timeout: float) -> int:
         proc = subprocess.Popen(self.command(node), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
         timer = threading.Timer(float(timeout), proc.kill)
@@ -711,7 +745,10 @@ class SshOps:
             if proc.poll() is None:
                 proc.kill()
         if rc != 0:
-            raise SshIslandError(f"copy from {node.name} ended with rc {rc}: {err.strip()[-300:]}")
+            message = f"copy from {node.name} ended with rc {rc}: {err.strip()[-300:]}"
+            if count == 0 and ssh_transport.transient_failure(rc, err):
+                raise _TransientSsh(message)
+            raise SshIslandError(message)
         return count
 
     def start(self, node: Node, script: str) -> Any:
