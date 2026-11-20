@@ -115,7 +115,7 @@
       "--n-samples-per-prompt",
       "8",
       "--rollout-max-response-len",
-      "245760",
+      "262144",
       "--seq-len",
       "262144",
       "--rl-activation-recompute",

@@ -671,9 +671,20 @@ def test_run_up_preflight_asks_the_trainer_row_for_the_engine_context(setup):  #
     _set(setup.argv, "--rollout-max-response-len", "262144")
     setup.spec["agentic"]["max_prompt_len"] = 16384
     assert setup.make().consistency_problem() is None
-    setup.spec["agentic"].pop("compaction")  # without compaction: the sum is the row, as before
-    assert "16384 + agentic.max_response_len 262144 = 278528 > the trainer's --seq-len 262144" in \
-        setup.make().consistency_problem()
+    # without compaction too: a trial ends at the engine context, so the row is at most max_model_len
+    setup.spec["agentic"].pop("compaction")
+    assert setup.make().consistency_problem() is None
+    _set(setup.argv, "--seq-len", "245760")
+    setup.spec["agentic"]["max_response_len"] = 245760
+    _set(setup.argv, "--rollout-max-response-len", "245760")
+    assert ("16384 + agentic.max_response_len 245760 = 262144 > the trainer's --seq-len 245760"
+            in setup.make().consistency_problem())
+    setup.spec["agentic"]["max_response_len"] = 262144
+    setup.spec["engine"]["server"]["max_model_len"] = 300000
+    _set(setup.argv, "--rollout-max-response-len", "262144")
+    _set(setup.argv, "--seq-len", "262144")
+    assert ("16384 + agentic.max_response_len 262144 = 278528 > the trainer's --seq-len 262144"
+            in setup.make().consistency_problem())
 
 
 def test_run_up_preflight_refuses_a_seq_len_of_context_budget(setup):  # noqa: F811

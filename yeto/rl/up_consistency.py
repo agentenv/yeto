@@ -13,8 +13,9 @@ surface after the trainer island loaded its weights (a K3.1 B300 island: about
 * response width: spec ``agentic.max_response_len`` (or ``sampling.max_tokens``)
   vs trainer ``--rollout-max-response-len``: the buffer reader does not cut a
   longer response to the trainer's width;
-* row width (agentic specs): ``agentic.max_prompt_len`` + ``agentic.max_response_len``
-  vs the trainer's ``--seq-len`` (the memory plan of the island). A plain spec's
+* row width (agentic specs): ``agentic.max_prompt_len`` + ``agentic.max_response_len``,
+  at most the engine context length ``max_model_len`` (a trial ends there), vs the
+  trainer's ``--seq-len`` (the memory plan of the island). A plain spec's
   ``max_prompt_tokens`` cuts no prompt (only the engine capacity check reads it), so
   it bounds no row and is not compared;
 * routing replay (R3): a trainer with ``--use-rollout-routing-replay`` (always on
@@ -158,15 +159,18 @@ def length_problems(args: Any, spec: dict[str, Any]) -> list[str]:
     if not p_name.startswith("agentic."):
         return problems
     row = None if response is None or prompt is None else prompt + response
-    if row is not None and isinstance(spec.get("agentic"), dict) and spec["agentic"].get("compaction") is not None:
-        # a compacting spec: max_response_len is set to the engine context (a segment can grow to it), so the
-        # sum overstates the row, which is at most max_model_len (compaction_problem checks the trainer's)
-        limit = spec_max_model_len_of(spec)
-        row = row if limit is None else min(row, limit)
+    limit = spec_max_model_len_of(spec)
+    if row is not None and limit is not None:
+        # an agentic stream (first prompt + every turn after it) never outgrows the engine context: the
+        # records proxy ends the trial at max_model_len (context_full), with or without compaction. So
+        # max_response_len may be the engine context (as a compacting spec needs: compaction_problem
+        # checks the trainer's row against it) and the sum overstates the row
+        row = min(row, limit)
     if row is not None and seq and row > seq:
-        problems.append(f"the sampler spec's {p_name} {prompt} + {r_name} {response} = {prompt + response} > "
-                        f"the trainer's --seq-len {seq}: the island is planned for shorter rows than the "
-                        f"samplers write; raise --seq-len or lower the sampler caps")
+        capped = f" (capped at the engine context length max_model_len {limit})" if row < prompt + response else ""
+        problems.append(f"the sampler spec's {p_name} {prompt} + {r_name} {response} = {prompt + response}"
+                        f"{capped} > the trainer's --seq-len {seq}: the island is planned for shorter rows than "
+                        f"the samplers write; raise --seq-len or lower the sampler caps")
     return problems
 
 
