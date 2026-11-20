@@ -20,8 +20,12 @@ deals the hot ones round-robin (the ``i``-th heaviest at trainable index
 ``bitrev(i)``), the frozen ones are dealt by load in snake order and sorted
 within a rank. ``slot_order`` depends on the EP size; ``trainable`` does not,
 so changing EP re-derives ``slot_order`` from ``load`` and keeps
-``trainable_sha256``. ``sha256`` covers ``layers`` as a whole, as the
-interface requires.
+``trainable_sha256``. That is placement ``bitrev`` (the default).
+``--placement lpt`` instead balances every EP rank's total routed load by
+``load`` (LPT, trainable then frozen, then frozen swaps; recorded as
+``source.placement``): same trainable set and ``trainable_sha256``, a
+different ``slot_order`` and ``sha256``. ``sha256`` covers ``layers`` as a
+whole, as the interface requires.
 
 Inputs: group payloads of the sample buffer (``rollout_routed_experts``,
 ``uint16[T, L_moe, top_k]`` of original ids; S1), or routed-token counts of
@@ -76,6 +80,12 @@ METHOD_UNIFORM = "uniform"
 METHOD_RANDOM = "random"
 SYNTHETIC_METHODS = (METHOD_UNIFORM, METHOD_RANDOM)
 ROUTED_EXPERTS_FIELD = "rollout_routed_experts"
+# slot placement: "bitrev" (default) deals the hot trainable experts round-robin and the frozen ones in
+# snake order, each blind to the other half's load; "lpt" balances each EP rank's total routed load
+# (trainable first, then frozen on top, then pairwise frozen swaps). Recorded as source["placement"].
+PLACEMENT_BITREV = "bitrev"
+PLACEMENT_LPT = "lpt"
+PLACEMENTS = (PLACEMENT_BITREV, PLACEMENT_LPT)
 
 Counts = dict[int, list[int]]  # HF layer -> per-original-expert routed-token count
 
@@ -235,33 +245,126 @@ def _snake_assign(ids_by_load: Sequence[int], num_ranks: int) -> list[list[int]]
     return buckets
 
 
+def _lpt_fill(ids_by_load: Sequence[int], load: Sequence[int | float], capacity: int,
+              totals: list[float]) -> list[list[int]]:
+    """Longest-processing-time deal: each id (heaviest first) to the least-loaded rank with room."""
+
+    buckets: list[list[int]] = [[] for _ in totals]
+    for expert in ids_by_load:
+        rank = min((r for r in range(len(totals)) if len(buckets[r]) < capacity), key=lambda r: (totals[r], r))
+        buckets[rank].append(expert)
+        totals[rank] += float(load[expert])
+    return buckets
+
+
+def _refine_frozen_swaps(cold: list[list[int]], load: Sequence[int | float], totals: list[float],
+                         max_rounds: int) -> None:
+    """Swap one frozen expert of the most loaded rank with one of another rank while that lowers the pair's
+    max below the current max (in place). Each accepted swap strictly lowers the sorted load vector, so it
+    terminates; ``max_rounds`` only bounds the work."""
+
+    import bisect
+
+    for _ in range(max_rounds):
+        m = max(range(len(totals)), key=lambda r: (totals[r], -r))
+        best: tuple[float, int, int, int] | None = None  # (pair max after swap, rank, index in m, index in r)
+        for r in range(len(totals)):
+            gap = totals[m] - totals[r]
+            if r == m or gap <= 0:
+                continue
+            by_load = sorted(range(len(cold[r])), key=lambda j: (float(load[cold[r][j]]), cold[r][j]))
+            values = [float(load[cold[r][j]]) for j in by_load]
+            for i, a in enumerate(cold[m]):
+                # moving d = load[a] - load[b] from m to r: the pair max is max(tm - d, tr + d), best at d = gap/2
+                want = float(load[a]) - gap / 2
+                pos = bisect.bisect_left(values, want)
+                for q in (pos - 1, pos):
+                    if 0 <= q < len(values):
+                        d = float(load[a]) - values[q]
+                        if 0 < d < gap:
+                            after = max(totals[m] - d, totals[r] + d)
+                            if best is None or after < best[0] - 1e-9:
+                                best = (after, r, i, by_load[q])
+        if best is None or best[0] >= totals[m] - 1e-9:
+            return
+        _, r, i, j = best
+        a, b = cold[m][i], cold[r][j]
+        d = float(load[a]) - float(load[b])
+        cold[m][i], cold[r][j] = b, a
+        totals[m] -= d
+        totals[r] += d
+
+
+def lpt_trainable_order(trainable: Sequence[int], load: Sequence[int | float], ep_size: int) -> list[int]:
+    """Trainable index -> id for ``ep_size``: the trainable experts dealt by LPT so every rank's trainable
+    (wgrad) load is as even as the granularity allows; ranks sorted by id inside. Unlike ``trainable_order``
+    this depends on ``ep_size``; ``with_ep_size`` keeps it (contiguous chunks) so checkpoints still reshard."""
+
+    k = len(trainable)
+    if k % ep_size:
+        raise SelectionError(f"EP {ep_size} must divide {k} trainable")
+    by_load = sorted(trainable, key=lambda i: (-float(load[i]), i))
+    hot = _lpt_fill(by_load, load, k // ep_size, [0.0] * ep_size)
+    return [expert for rank in range(ep_size) for expert in sorted(hot[rank])]
+
+
 def slot_order(
     trainable: Sequence[int],
     *,
     num_experts: int,
     ep_size: int,
     load: Sequence[int | float] | None,
+    placement: str = PLACEMENT_BITREV,
+    hot_order: Sequence[int] | None = None,
 ) -> list[int]:
     """slot -> original id for one layer under ``ep_size``.
 
     Rank ``r`` owns slots ``[r*n_local, (r+1)*n_local)``; its first ``k_local``
     hold ``trainable_order[r*k_local:(r+1)*k_local]``, the rest the frozen
-    experts dealt by load (snake), sorted by id.
+    experts sorted by id. ``bitrev``: frozen experts dealt by load (snake).
+    ``lpt``: trainable by ``lpt_trainable_order`` (or ``hot_order``, a trainable
+    index order to keep), frozen by LPT on top of each rank's trainable load,
+    then pairwise frozen swaps; needs ``load``.
     """
 
     k = len(trainable)
     if num_experts % ep_size or k % ep_size:
         raise SelectionError(f"EP {ep_size} must divide {num_experts} experts and {k} trainable")
+    if placement not in PLACEMENTS:
+        raise SelectionError(f"placement must be one of {PLACEMENTS}, got {placement!r}")
     k_local = k // ep_size
-    hot = trainable_order(trainable, load)
-    frozen = sorted(set(range(num_experts)) - set(trainable),
-                    key=(lambda i: (-float(load[i]), i)) if load is not None else (lambda i: i))
-    cold = _snake_assign(frozen, ep_size)
+    if placement == PLACEMENT_BITREV:
+        if hot_order is not None:
+            raise SelectionError("hot_order is only for placement 'lpt'")
+        hot = trainable_order(trainable, load)
+        frozen = sorted(set(range(num_experts)) - set(trainable),
+                        key=(lambda i: (-float(load[i]), i)) if load is not None else (lambda i: i))
+        cold = _snake_assign(frozen, ep_size)
+    else:
+        if load is None:
+            raise SelectionError("placement 'lpt' needs the per-expert load")
+        if hot_order is None:
+            hot = lpt_trainable_order(trainable, load, ep_size)
+        else:
+            hot = [int(i) for i in hot_order]
+            if sorted(hot) != sorted(int(i) for i in trainable):
+                raise SelectionError("hot_order is not an order of the trainable set")
+        totals = [sum(float(load[i]) for i in hot[r * k_local:(r + 1) * k_local]) for r in range(ep_size)]
+        frozen = sorted(set(range(num_experts)) - set(trainable), key=lambda i: (-float(load[i]), i))
+        cold = _lpt_fill(frozen, load, (num_experts - k) // ep_size, totals)
+        _refine_frozen_swaps(cold, load, totals, max_rounds=4 * num_experts)
     return [
         expert
         for rank in range(ep_size)
         for expert in (hot[rank * k_local:(rank + 1) * k_local] + sorted(cold[rank]))
     ]
+
+
+def rank_loads(order: Sequence[int], load: Sequence[int | float], ep_size: int) -> list[float]:
+    """Routed load of each EP rank under a slot order."""
+
+    n_local = len(order) // ep_size
+    return [sum(float(load[i]) for i in order[r * n_local:(r + 1) * n_local]) for r in range(ep_size)]
 
 
 # --------------------------------------------------------------------------
@@ -290,6 +393,7 @@ class ExpertSelection:
         ep_size: int,
         source: Mapping[str, Any] | None = None,
         keep_load: bool = True,
+        placement: str = PLACEMENT_BITREV,
     ) -> "ExpertSelection":
         if not counts:
             raise SelectionError("no routing counts")
@@ -299,12 +403,14 @@ class ExpertSelection:
         (n,) = num_experts
         trainable = {layer: tuple(select_top_k(row, num_trainable)) for layer, row in counts.items()}
         orders = {
-            layer: tuple(slot_order(ids, num_experts=n, ep_size=ep_size, load=counts[layer]))
+            layer: tuple(slot_order(ids, num_experts=n, ep_size=ep_size, load=counts[layer], placement=placement))
             for layer, ids in trainable.items()
         }
         load = {layer: tuple(int(x) for x in row) for layer, row in counts.items()} if keep_load else None
         src = {"method": METHOD_ROUTING_FREQUENCY, **dict(source or {})}
         src.setdefault("tokens", 0)
+        if placement != PLACEMENT_BITREV:
+            src["placement"] = placement
         return cls(model, n, num_trainable, int(ep_size), trainable, orders, load, src)
 
     @classmethod
@@ -351,18 +457,57 @@ class ExpertSelection:
         source = {"method": mode, "tokens": 0, **({"seed": int(seed)} if mode == METHOD_RANDOM else {})}
         return cls(model, int(num_experts), int(num_trainable), int(ep_size), trainable, orders, None, source)
 
-    def with_ep_size(self, ep_size: int) -> "ExpertSelection":
-        """Same trainable set, ``slot_order`` re-derived for another EP."""
+    @property
+    def placement(self) -> str:
+        return str(self.source.get("placement", PLACEMENT_BITREV))
 
+    def trainable_index_order(self, layer: int) -> list[int]:
+        """Trainable index -> id (the checkpoint coordinate): every rank's trainable slots, concatenated."""
+
+        n_local, k_local = self.num_experts // self.ep_size, self.num_trainable // self.ep_size
+        order = self.slot_orders[layer]
+        return [order[r * n_local + j] for r in range(self.ep_size) for j in range(k_local)]
+
+    def with_ep_size(self, ep_size: int, placement: str | None = None) -> "ExpertSelection":
+        """Same trainable set, ``slot_order`` re-derived for another EP.
+
+        ``placement`` None keeps the document's. Re-deriving under the same placement keeps the trainable
+        index order (``bitrev`` is EP-independent by construction, ``lpt`` keeps the existing order), so a
+        checkpoint reshards; switching placement re-deals the trainable experts too (a new selection)."""
+
+        target = self.placement if placement is None else placement
+        if target not in PLACEMENTS:
+            raise SelectionError(f"placement must be one of {PLACEMENTS}, got {target!r}")
+        if target == PLACEMENT_LPT and self.load is None:
+            raise SelectionError("placement 'lpt' needs the selection's load")
+        keep = target == PLACEMENT_LPT and self.placement == PLACEMENT_LPT
         orders = {
             layer: tuple(slot_order(
                 ids, num_experts=self.num_experts, ep_size=int(ep_size),
                 load=self.load[layer] if self.load is not None else None,
+                placement=target, hot_order=self.trainable_index_order(layer) if keep else None,
             ))
             for layer, ids in self.trainable.items()
         }
+        source = {k: v for k, v in self.source.items() if k != "placement"}
+        if target != PLACEMENT_BITREV:
+            source["placement"] = target
         return ExpertSelection(self.model, self.num_experts, self.num_trainable, int(ep_size),
-                               self.trainable, orders, self.load, self.source)
+                               self.trainable, orders, self.load, source)
+
+    def ep_imbalance(self, counts: Counts | None = None) -> dict[str, float]:
+        """max/mean routed load over EP ranks per layer (``counts`` default: the stored load), and summary."""
+
+        counts = counts if counts is not None else (dict(self.load) if self.load is not None else None)
+        if counts is None:
+            raise SelectionError("ep_imbalance needs routing counts")
+        per = {}
+        for layer, order in self.slot_orders.items():
+            loads = rank_loads(order, counts[layer], self.ep_size)
+            mean = sum(loads) / len(loads)
+            per[str(layer)] = max(loads) / mean if mean else 1.0
+        vals = list(per.values())
+        return {"mean": sum(vals) / len(vals), "max": max(vals), "per_layer": per}
 
     # -- identity ---------------------------------------------------------
     def layers_json(self) -> dict[str, dict[str, list[int]]]:
@@ -567,6 +712,10 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0, help="with --mode random")
     p.add_argument("--prompts-sha256", default=None, help="identity of the prompt set the counts came from")
     p.add_argument("--no-load", action="store_true", help="omit the per-layer counts from the output")
+    p.add_argument("--placement", choices=PLACEMENTS, default=None,
+                   help="slot placement (default: bitrev; with --input the document's own). 'lpt' balances "
+                        "each EP rank's routed load (needs load); changes slot_order and sha256, keeps "
+                        "trainable_sha256")
     p.add_argument("--skip-layer-check", action="store_true",
                    help="do not require the layers to equal the registered model's MoE layers")
     p.add_argument("--output", "-o", metavar="JSON", help="where to write the selection")
@@ -598,7 +747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                           "layers": len(selection.trainable), "ep_size": selection.ep_size}))
         return 0
     if args.input:
-        selection = ExpertSelection.load_file(args.input).with_ep_size(args.ep_size)
+        selection = ExpertSelection.load_file(args.input).with_ep_size(args.ep_size, placement=args.placement)
     elif args.mode:
         selection = ExpertSelection.synthetic(
             args.mode, model=args.model, num_experts=args.num_experts, num_trainable=args.num_trainable,
@@ -624,7 +773,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _parser().error("one of --payload, --counts, --input, --mode or --validate is required")
         selection = ExpertSelection.from_counts(
             counts, model=args.model, num_trainable=args.num_trainable, ep_size=args.ep_size,
-            source=source, keep_load=not args.no_load,
+            source=source, keep_load=not args.no_load, placement=args.placement or PLACEMENT_BITREV,
         )
     if not args.skip_layer_check:
         _check_model_layers(selection, moe_layer_offset=args.moe_layer_offset)
@@ -640,6 +789,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         coverage = selection.coverage()
         summary["coverage_mean"] = round(coverage["mean"], 6)
         summary["coverage_min"] = round(coverage["min"], 6)
+        imbalance = selection.ep_imbalance()
+        summary["ep_imbalance_mean"] = round(imbalance["mean"], 6)
+        summary["ep_imbalance_max"] = round(imbalance["max"], 6)
     print(json.dumps(summary), file=sys.stderr)
     return 0
 

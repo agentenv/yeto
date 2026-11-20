@@ -407,3 +407,108 @@ def test_cli_refuses_wrong_layer_set_for_registered_model(tmp_path):
                      "--num-experts", "896", "--num-trainable", "128", "--ep-size", "8", "--output", str(out)]) == 0
     assert sel.main(["--model", "kimi_k31", "--mode", "random", "--seed", "1",
                      "--num-experts", "896", "--num-trainable", "128", "--ep-size", "8", "--output", str(out)]) == 0
+
+
+# -- lpt placement --------------------------------------------------------------
+
+
+def _assert_valid_slots(s):
+    n_local, k_local = N // s.ep_size, K // s.ep_size
+    for layer, order in s.slot_orders.items():
+        assert sorted(order) == list(range(N))
+        for rank in range(s.ep_size):
+            local = order[rank * n_local:(rank + 1) * n_local]
+            assert set(local[:k_local]) <= set(s.trainable[layer])
+            assert not set(local[k_local:]) & set(s.trainable[layer])
+            assert list(local[k_local:]) == sorted(local[k_local:])
+    sel.validate_document(s.to_json())
+
+
+def test_lpt_placement_keeps_trainable_and_balances_rank_load():
+    counts = _skewed_counts()
+    bitrev = sel.ExpertSelection.from_counts(counts, model="toy", num_trainable=K, ep_size=EP)
+    lpt = sel.ExpertSelection.from_counts(counts, model="toy", num_trainable=K, ep_size=EP, placement="lpt")
+    _assert_valid_slots(lpt)
+    assert lpt.trainable == bitrev.trainable and lpt.trainable_sha256 == bitrev.trainable_sha256
+    assert lpt.sha256 != bitrev.sha256
+    assert lpt.source["placement"] == "lpt" and "placement" not in bitrev.source
+    assert bitrev.placement == "bitrev" and lpt.placement == "lpt"
+    for layer in counts:
+        before = sel.rank_loads(bitrev.slot_orders[layer], counts[layer], EP)
+        after = sel.rank_loads(lpt.slot_orders[layer], counts[layer], EP)
+        assert sum(after) == sum(before)
+        assert max(after) <= max(before)
+        # LPT bound: the max rank exceeds the mean by at most one expert's load
+        assert max(after) - sum(after) / EP <= max(counts[layer]) + 1e-9
+    assert lpt.ep_imbalance()["mean"] < bitrev.ep_imbalance()["mean"]
+    # deterministic
+    again = sel.ExpertSelection.from_counts(counts, model="toy", num_trainable=K, ep_size=EP, placement="lpt")
+    assert again.sha256 == lpt.sha256
+
+
+def test_lpt_splits_a_rank_that_bitrev_overloads():
+    # a few hot frozen experts that snake order puts together on top of a hot trainable rank
+    load = [1] * N
+    trainable = list(range(K))
+    for i in trainable:
+        load[i] = 50
+    load[K] = load[K + 1] = 400  # two hot frozen experts
+    counts = {1: load}
+    lpt = sel.ExpertSelection.from_counts(counts, model="toy", num_trainable=K, ep_size=EP, placement="lpt")
+    loads = sel.rank_loads(lpt.slot_orders[1], load, EP)
+    owners = {lpt.slot_orders[1].index(K) // (N // EP), lpt.slot_orders[1].index(K + 1) // (N // EP)}
+    assert len(owners) == 2
+    assert max(loads) - min(loads) <= 400
+
+
+def test_lpt_with_ep_size_keeps_the_trainable_index_order_and_switching_re_deals():
+    counts = _skewed_counts(3)
+    lpt = sel.ExpertSelection.from_counts(counts, model="toy", num_trainable=K, ep_size=EP, placement="lpt")
+    for new_ep in (2, EP):
+        t = lpt.with_ep_size(new_ep)
+        _assert_valid_slots(t)
+        assert t.placement == "lpt" and t.trainable_sha256 == lpt.trainable_sha256
+        assert {layer: t.trainable_index_order(layer) for layer in counts} == \
+            {layer: lpt.trainable_index_order(layer) for layer in counts}
+    assert lpt.with_ep_size(EP).sha256 == lpt.sha256
+    # bitrev -> lpt on an existing document: same trainable set, new slots
+    bitrev = sel.ExpertSelection.from_counts(counts, model="toy", num_trainable=K, ep_size=EP)
+    converted = bitrev.with_ep_size(EP, placement="lpt")
+    assert converted.sha256 == lpt.sha256
+    back = converted.with_ep_size(EP, placement="bitrev")
+    assert back.sha256 == bitrev.sha256 and "placement" not in back.source
+    no_load = sel.ExpertSelection.from_counts(counts, model="toy", num_trainable=K, ep_size=EP, keep_load=False)
+    with pytest.raises(sel.SelectionError, match="needs the selection's load"):
+        no_load.with_ep_size(EP, placement="lpt")
+    with pytest.raises(sel.SelectionError, match="placement must be one of"):
+        bitrev.with_ep_size(EP, placement="snake")
+
+
+def test_lpt_needs_load_and_rejects_a_foreign_hot_order():
+    with pytest.raises(sel.SelectionError, match="needs the per-expert load"):
+        sel.slot_order(list(range(K)), num_experts=N, ep_size=EP, load=None, placement="lpt")
+    with pytest.raises(sel.SelectionError, match="not an order of the trainable set"):
+        sel.slot_order(list(range(K)), num_experts=N, ep_size=EP, load=[1] * N, placement="lpt",
+                       hot_order=list(range(1, K + 1)))
+    with pytest.raises(sel.SelectionError, match="only for placement 'lpt'"):
+        sel.slot_order(list(range(K)), num_experts=N, ep_size=EP, load=[1] * N, hot_order=list(range(K)))
+
+
+def test_cli_placement_lpt_from_counts_and_input(tmp_path, capsys):
+    counts_path = tmp_path / "counts.json"
+    counts_path.write_text(json.dumps({str(k): v for k, v in _skewed_counts().items()}))
+    base = ["--model", "toy", "--num-experts", str(N), "--num-trainable", str(K), "--ep-size", str(EP)]
+    a, b, c = tmp_path / "a.json", tmp_path / "b.json", tmp_path / "c.json"
+    assert sel.main(base + ["--counts", str(counts_path), "--output", str(a)]) == 0
+    assert sel.main(base + ["--counts", str(counts_path), "--placement", "lpt", "--output", str(b)]) == 0
+    assert sel.main(base + ["--input", str(a), "--placement", "lpt", "--output", str(c)]) == 0
+    summaries = [json.loads(line) for line in capsys.readouterr().err.strip().splitlines()]
+    da, db, dc = (json.loads(p.read_text()) for p in (a, b, c))
+    assert db["sha256"] == dc["sha256"] != da["sha256"]
+    assert db["trainable_sha256"] == da["trainable_sha256"]
+    assert db["source"]["placement"] == "lpt" and "placement" not in da["source"]
+    assert summaries[1]["ep_imbalance_mean"] < summaries[0]["ep_imbalance_mean"]
+    # --input without --placement keeps the document's placement
+    d = tmp_path / "d.json"
+    assert sel.main(base + ["--input", str(b), "--output", str(d)]) == 0
+    assert json.loads(d.read_text())["sha256"] == db["sha256"]
