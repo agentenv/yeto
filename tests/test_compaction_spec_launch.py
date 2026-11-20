@@ -486,6 +486,33 @@ def test_run_up_preflight_refuses_a_per_sequence_algorithm_with_compaction(setup
     assert run.preflight() is False and run.calls == []
 
 
+def test_micro_batch_warning_is_per_cp_group():
+    """Miles packs --rl-max-tokens-per-gpu x CP tokens per micro batch: at CP2 the
+    per-GPU value is seq-len / CP, not seq-len (two 262k segments in one micro batch)."""
+    from yeto.rl.up_consistency import micro_batch_warning
+
+    def args(per_gpu, cp=2, seq=262144):
+        return SimpleNamespace(rl_max_tokens_per_gpu=per_gpu, context_parallel=cp, seq_len=seq)
+
+    assert micro_batch_warning(args(131072)) is None  # = seq-len / CP (the K3.1 262k layout)
+    assert micro_batch_warning(args(65536)) is None  # below: refused by the launch itself
+    assert micro_batch_warning(args(262144, cp=1)) is None
+    warning = micro_batch_warning(args(262144))
+    assert "262144 x CP 2 = 524288 tokens per micro batch > --seq-len 262144" in warning
+    assert "--seq-len / CP (131072)" in warning
+    assert micro_batch_warning(args(None)) is None and micro_batch_warning(None) is None
+
+
+def test_run_up_preflight_warns_on_a_micro_batch_wider_than_a_row(setup, capsys):  # noqa: F811
+    _compacting(setup)
+    setup.argv += ["--rl-algorithm-spec", str(GRPO_SPEC), "--rl-max-policy-age", "8", "--context-parallel", "2"]
+    run = setup.make()
+    assert run.consistency_problem() is None
+    run.preflight()
+    out = capsys.readouterr().out
+    assert "WARNING: --rl-max-tokens-per-gpu 32768 x CP 2 = 65536 tokens per micro batch > --seq-len 32768" in out
+
+
 def test_run_up_preflight_refuses_compaction_on_verl(setup):  # noqa: F811
     _compacting(setup)
     setup.argv += ["--rl-backend", "verl"]

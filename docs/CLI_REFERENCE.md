@@ -565,7 +565,7 @@ injection and are omitted here.
 | `--rl-rollout-quant-tier` | `0` | rollout precision: `0` BF16; `1` FP8 FFN/routed-expert linears (quantized by the engine or the trainer, `--rl-rollout-quant-fp8-source`), KV cache stays BF16; `2` trainer-side FP8 W8A8 releases (needs `--rl-island-sample-role` and `--tuning full`); FP8-capable cards only |
 | `--rl-offload-train` | off | offload the trainer between colocated rollout steps (large multi-GPU LoRA) |
 | `--rl-activation-recompute` | off | Megatron full activation recompute |
-| `--rl-max-tokens-per-gpu` | — | dynamic batching token cap per micro batch |
+| `--rl-max-tokens-per-gpu` | — | dynamic batching token cap per GPU; one micro batch packs this x `--context-parallel` tokens, so set it to `--seq-len / CP` |
 | `--rl-dp-optimizer` | `auto` | full-parameter DP>1 optimizer: `auto`, `distributed`, `replicated` |
 | `--dry-run` | off | validate and print the resource request and learner commands as JSON; creates nothing |
 

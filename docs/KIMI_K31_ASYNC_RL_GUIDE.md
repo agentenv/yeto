@@ -783,8 +783,12 @@ preflight refuse:
 - a trainer that is not Miles with a GRPO-family estimator (see Limits);
 - a trainer that would split a round by sample count instead of training each
   trial as one rollout: without `--rl-max-tokens-per-gpu` (Miles dynamic batch
-  size; the K3.1 example trainer does not set it, add it with a value of at
-  least `--seq-len`), or with any of the Miles flags `--indep-dp`,
+  size; the K3.1 example trainer does not set it, add it as `--seq-len / CP`:
+  Miles packs `--rl-max-tokens-per-gpu x CP` tokens into one micro batch, so
+  `--rl-max-tokens-per-gpu --seq-len` at CP2 can put two full-length segments
+  in one micro batch and run out of memory; preflight warns when
+  `--rl-max-tokens-per-gpu x CP > --seq-len`, and the launch refuses
+  `< --seq-len`), or with any of the Miles flags `--indep-dp`,
   `--multi-lora`, `--multimodal-keys`, `--use-dynamic-global-batch-size`. Such a
   trainer would stop at the first compacted group.
 
@@ -2606,7 +2610,8 @@ summary. Where the two differ, that document applies.
 | 128 | 48 (6×8 B300) | PP3 x TP8 x CP2 x EP16, DP1, split 32/28/33 | 524k | Measured upper bound |
 
 The 128-expert layout needs `--rl-allow-cross-node-tp`,
-`--rl-max-tokens-per-gpu` = `seq-len / CP`, the stage-0 gradient hook in
+`--rl-max-tokens-per-gpu` = `seq-len / CP` (a micro batch is
+`--rl-max-tokens-per-gpu x CP` tokens: one full-length row), the stage-0 gradient hook in
 `YETO_MILES_TRAIN_EXTRA_ARGV` (plus the split flags for an uneven split such
 as 524k's 32/28/33), and
 `--rl-distributed-timeout-minutes 60`. See

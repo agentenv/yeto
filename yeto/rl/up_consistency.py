@@ -378,8 +378,32 @@ def compaction_lines(pool_cfg: dict[str, Any], trainer_argv: list[str] | None = 
 
     args = trainer_args(trainer_argv) if trainer_argv is not None else None
     _width, width_warning = segment_width(spec, cfg)
+    micro = micro_batch_warning(args)
     return [f"agentic.compaction {describe(cfg)}"] + [
-        f"WARNING: {w}" for w in [*([width_warning] if width_warning else []), *compaction_switch_warnings(spec, args)]]
+        f"WARNING: {w}" for w in [*([width_warning] if width_warning else []), *([micro] if micro else []),
+                                  *compaction_switch_warnings(spec, args)]]
+
+
+def micro_batch_warning(args: Any | None) -> str | None:
+    """A Miles micro batch (``--rl-max-tokens-per-gpu`` x CP tokens, packed over the CP
+    ranks: dp_schedule) wider than one ``--seq-len`` row: it can pack two full-length
+    rows (two segments of a compacted trial, say), more activation memory than one row
+    at ``--seq-len``, the shape the memory estimate and the 262k layouts are sized for.
+    None: no such trainer, or ``--rl-max-tokens-per-gpu`` x CP <= ``--seq-len``."""
+    if args is None or getattr(args, "rl_max_tokens_per_gpu", None) is None:
+        return None
+    try:
+        per_gpu = int(args.rl_max_tokens_per_gpu)
+        cp = max(1, int(getattr(args, "context_parallel", 1) or 1))
+        seq = int(getattr(args, "seq_len", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if seq <= 0 or per_gpu * cp <= seq:
+        return None
+    return (f"--rl-max-tokens-per-gpu {per_gpu} x CP {cp} = {per_gpu * cp} tokens per micro batch > --seq-len "
+            f"{seq}: Miles packs up to that many tokens into one micro batch, so it can hold more than one "
+            f"full-length row (two compaction segments) and run out of memory; set --rl-max-tokens-per-gpu "
+            f"to --seq-len / CP ({-(-seq // cp)})")
 
 
 def _group_tokens(spec: dict[str, Any]) -> int | None:
