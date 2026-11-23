@@ -11,6 +11,9 @@ No Megatron reference checkpoint either way (verl loads the HF model).
 
 from __future__ import annotations
 
+from yeto.rl.engine.selection import (DECOUPLED_SYNC_PRESET, FULL_PARAMETER_SYNC_PRESET, STRICT_AVG_SYNC_PRESET,
+                                      canonical_sync_preset)
+
 
 def resolve_ref_load(args, model_path) -> str:
     if getattr(args, "megatron_ref_load", None) is not None:
@@ -204,7 +207,7 @@ def check_eval(args) -> None:
 # over the verl ports, ``.decoupled_session``) on the synchronous colocated FSDP2
 # island; full parameters take the multi-fragment asynchronous session of the
 # full-parameter preset instead.
-ISLAND_SYNC_PRESETS = ("strict-avg", "decoupled", "full-parameter", "dense-full")
+ISLAND_SYNC_PRESETS = (STRICT_AVG_SYNC_PRESET, DECOUPLED_SYNC_PRESET, FULL_PARAMETER_SYNC_PRESET)
 
 
 def decoupled_problems(args) -> list[str]:
@@ -236,11 +239,11 @@ def check_sync_preset(args) -> None:
     ``parse_known_args``, and ran strict-avg against a decoupled syncer.)"""
     if getattr(args, "rl_single_island_no_sync", False):
         return
-    preset = getattr(args, "rl_sync_preset", None) or "strict-avg"
+    preset = canonical_sync_preset(getattr(args, "rl_sync_preset", None) or "strict-avg")
     if preset not in ISLAND_SYNC_PRESETS:
         raise ValueError(f"--rl-sync-preset {preset} is not run by the verl island (it runs "
                          + ", ".join(ISLAND_SYNC_PRESETS) + ")")
-    if preset == "decoupled":
+    if preset == DECOUPLED_SYNC_PRESET:
         problems = decoupled_problems(args)
         if problems:
             raise ValueError("--rl-sync-preset decoupled on the verl backend covers the synchronous "
@@ -251,11 +254,12 @@ def island_sync_preset_problem(preset: str | None, *, parameter_mode: str) -> st
     """Island side of :func:`check_sync_preset` (an island started without the launcher,
     or by an older one): why ``--sync-preset`` cannot run here, None when it can.
     None (the flag absent) keeps the island's own choice."""
+    preset = None if preset is None else canonical_sync_preset(preset)
     if preset is not None and preset not in ISLAND_SYNC_PRESETS:
         return f"--sync-preset {preset} is not run by the verl island (it runs " + ", ".join(ISLAND_SYNC_PRESETS) + ")"
-    if preset in ("full-parameter", "dense-full") and parameter_mode != "full":
+    if preset == FULL_PARAMETER_SYNC_PRESET and parameter_mode != "full":
         return f"--sync-preset {preset} needs --parameter-mode full"
-    if preset == "decoupled" and parameter_mode != "lora":
+    if preset == DECOUPLED_SYNC_PRESET and parameter_mode != "lora":
         return ("--sync-preset decoupled needs --parameter-mode lora (full parameters: --sync-preset "
                 "full-parameter --full-parameter-rounds async)")
     return None
