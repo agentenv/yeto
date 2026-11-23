@@ -344,3 +344,46 @@ def test_a_section_against_the_pool_config_is_refused(tmp_path, monkeypatch):
     cfg = {"pool": {"config": path}, "breakers": {"pool": {"start_timeout": {"limit_s": 1800}}}}
     with pytest.raises(ValueError, match="pool 'pool'.*start_timeout"):
         rollout_pools.resolve(cfg, tmp_path / "state")
+
+
+def test_the_pool_resolves_against_its_rendered_spec(tmp_path, monkeypatch):
+    """The pool's sampler.dispense replaces the spec's prompts.dispense: the two are read as
+    one rendered spec, never as two disagreeing knobs."""
+    monkeypatch.setattr("yeto.breakers.registry._DEFAULT", REG)
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"prompts": {"dispense": {"max_redo": 2, "lease_s": 900}}}))
+    path = _pool_file(tmp_path, spec=str(spec), sampler={"dispense": {"max_redo": 4, "lease_s": 900}})
+    sources = rollout_pools.pool_sources(json.loads(Path(path).read_text()))
+    assert sources.spec["prompts"]["dispense"]["max_redo"] == 4
+    cfg = {"pool": {"config": path}, "breakers": {"pool": {"crash_loop": {"action": "halt"}}}}
+    (ref,) = rollout_pools.resolve(cfg, tmp_path / "state")
+    assert json.loads(Path(ref.config).read_text())["sampler"]["dispense"]["max_redo"] == 4
+
+
+def test_the_pool_loop_prints_deprecated_knobs_once(tmp_path, monkeypatch):
+    class Resolved:
+        @staticmethod
+        def deprecations():
+            return ["pool elastic x is deprecated: write breakers.pool.y.z"]
+
+    seen = []
+    monkeypatch.setattr("yeto.breakers.resolve", lambda *a, **k: Resolved())
+    monkeypatch.setattr(nc_cli, "_log", seen.append)
+    nc_cli._print_breaker_deprecations({"target": 1, "shard_base": "k31"})
+    assert seen == ["breakers: pool elastic x is deprecated: write breakers.pool.y.z"]
+
+
+def test_an_unresolvable_pool_config_is_left_to_the_pool(monkeypatch):
+    def bad(*a, **k):
+        raise BreakerConfigError(["breakers.pool.nope: unknown entry"])
+
+    seen = []
+    monkeypatch.setattr("yeto.breakers.resolve", bad)
+    monkeypatch.setattr(nc_cli, "_log", seen.append)
+    nc_cli._print_breaker_deprecations({"target": 1})
+    assert len(seen) == 1 and seen[0].startswith("breakers: pool config not resolved")
+    seen.clear()
+    monkeypatch.undo()
+    monkeypatch.setattr(nc_cli, "_log", seen.append)
+    nc_cli._print_breaker_deprecations({"elastic": {"start_timeout_s": "soon"}})  # a conflict, not a crash
+    assert seen == []

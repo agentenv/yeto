@@ -1596,10 +1596,26 @@ def _pool_command(args: Any) -> int:
             return pool_run.downgrade_state_file(cfg, args.config, drop_owed_fences=args.drop_owed_fences)
         if args.cmd == "pool-stop":
             return pool_run.stop_pool(cfg, args.config, wait_s=args.wait)
+        _print_breaker_deprecations(cfg)
         if args.dry_run:
             return pool_run.dry_run(cfg, args.config)
         return pool_run.run_pool(cfg, args.config, interval=args.interval)
     return 2
+
+
+def _print_breaker_deprecations(cfg: dict[str, Any]) -> None:
+    """The pool loop's start: one line per deprecated breaker knob of the pool config (decision 9).
+    A knob that does not resolve is left to the pool's own checks, which name it."""
+    from yeto import breakers  # noqa: PLC0415
+    from yeto.launch.rollout.pools import POOL_LAYERS, pool_sources  # noqa: PLC0415
+
+    try:
+        resolved = breakers.resolve(pool_sources(cfg), layers=POOL_LAYERS, strict=False)
+    except (ValueError, KeyError) as error:
+        _log(f"breakers: pool config not resolved ({error}); the pool checks it")
+        return
+    for line in resolved.deprecations():
+        _log(f"breakers: {line}")
 
 
 _OVERRIDE_KEYS = ("data_slot", "drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens",

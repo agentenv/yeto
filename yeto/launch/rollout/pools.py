@@ -162,6 +162,24 @@ def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) 
     return PoolRef(name, target, interval, _number(entry, f"samplers[{i}]", "usd_per_h", None), data_path)
 
 
+def pool_sources(doc: dict[str, Any], run_config: dict[str, Any] | None = None) -> Any:
+    """The breaker sources one pool config shows: its top level, ``elastic``, ``sampler.dispense``
+    and the sampler spec as the pool renders it (the pool's ``sampler`` knobs laid over the spec
+    file: a raw spec next to the pool's dispense would read as two disagreeing knobs). The spec is
+    read only; ``run_config`` adds the run's ``breakers:`` section and its other surfaces."""
+    from yeto import breakers  # noqa: PLC0415
+    from yeto.rl.up_consistency import effective_spec  # noqa: PLC0415
+
+    surfaces = {"pool_config": doc, "pool_elastic": doc.get("elastic") or {},
+                "pool_dispense": (doc.get("sampler") or {}).get("dispense") or {}, "spec": effective_spec(doc)}
+    if run_config is None:
+        return breakers.Sources(**surfaces)
+    return breakers.Sources.from_run_config(run_config, **surfaces)
+
+
+POOL_LAYERS = ("pool", "sampler")  # the layers whose knobs a pool config holds
+
+
 def with_breakers(cfg: dict[str, Any], ref: PoolRef, state_dir: Path) -> PoolRef:
     """The pool with the run's ``breakers:`` section written into its native knobs (``elastic``,
     ``sampler.dispense``, the lease keys; ``breakers.pools.<name>`` before ``breakers.pool``):
@@ -172,19 +190,17 @@ def with_breakers(cfg: dict[str, Any], ref: PoolRef, state_dir: Path) -> PoolRef
     from yeto import breakers  # noqa: PLC0415
 
     doc = ref.load()
-    sampler = doc.get("sampler") or {}
-    elastic, dispense = doc.get("elastic") or {}, sampler.get("dispense") or {}
-    sources = breakers.Sources.from_run_config(cfg, pool_config=doc, pool_elastic=elastic, pool_dispense=dispense)
+    sources = pool_sources(doc, cfg)
     try:
-        resolved = breakers.resolve(sources, pool=ref.name, layers=("pool", "sampler"))
+        resolved = breakers.resolve(sources, pool=ref.name, layers=POOL_LAYERS)
         out = breakers.materialize(resolved, sources, surfaces=("pool_config", "pool_elastic", "pool_dispense"))
     except breakers.BreakerConfigError as error:
         raise ValueError(f"run config: pool {ref.name!r}: {error}") from None
     new = dict(out.pool_config if out.pool_config is not None else doc)
-    if out.pool_elastic is not None and out.pool_elastic != elastic:
+    if out.pool_elastic is not None and out.pool_elastic != sources.pool_elastic:
         new["elastic"] = out.pool_elastic
-    if out.pool_dispense is not None and out.pool_dispense != dispense:
-        new["sampler"] = dict(sampler, dispense=out.pool_dispense)
+    if out.pool_dispense is not None and out.pool_dispense != sources.pool_dispense:
+        new["sampler"] = dict(doc.get("sampler") or {}, dispense=out.pool_dispense)
     if new == doc:
         return ref
     path = state_dir / "pools" / f"{ref.name}.json"
