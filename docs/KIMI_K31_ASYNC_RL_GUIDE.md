@@ -2601,10 +2601,11 @@ implicit default, a redundant old knob or a dependency finding. Below the table
 come the switch groups, the dependency findings and any conflicts.
 
 With `--config`, `show` also reads the run's pool: its config file, its
-`elastic` and `sampler.dispense` sections, and the sampler spec as the pool
-merges it. A run with several pools needs `--pool NAME`. Without it the
-sampler, harness and pool rows show defaults, and a note under the table says
-so. `--spec FILE` reads that spec instead of the pool's. A spec with
+`elastic` and `sampler.dispense` sections, its `agentic_env_file`, and the
+sampler spec as the pool merges it. A run with several pools needs `--pool
+NAME`. Without it the sampler, harness and pool rows show defaults, and a note
+under the table says so. `--spec FILE` replaces only the pool's spec. The
+pool's knobs and env file are still read. A spec with
 `max_backlog_groups: "auto"` shows the cap `yeto run up` derives for it.
 
 Exit codes: `0` no error, `1` an error finding or a conflict, `2` bad input
