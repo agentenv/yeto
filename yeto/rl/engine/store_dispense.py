@@ -614,6 +614,7 @@ class StoreLedger:
         self.holder, self.incarnation = str(holder), str(incarnation)
         self.seed, self.passes = int(seed), int(passes)
         self.lease_s, self.max_redo = float(lease_s), int(max_redo)
+        self.plan_bytes: bytes | None = None  # plan.json as open() wrote or read it
         self.holdout_sha256 = holdout_sha256
         self.slots = slots or SlotMap(self.rows, seed=self.seed, passes=self.passes)
         self.limit = self.slots.size
@@ -655,10 +656,14 @@ class StoreLedger:
     def open(self) -> dict[str, Any]:
         """Create or check the plan (every sampler of the run agrees on it)."""
         mine = self.plan()
-        if self._create(self.key("plan.json"), json.dumps(mine, sort_keys=True).encode()):
+        body = json.dumps(mine, sort_keys=True).encode()
+        if self._create(self.key("plan.json"), body):
             self.lease_of_holder = None  # a plan of this version (module doc)
+            self.plan_bytes = body
             return mine
-        theirs = json.loads(self.objects.read(self.key("plan.json")) or b"{}")
+        raw = self.objects.read(self.key("plan.json"))
+        self.plan_bytes = raw  # the plan never changes: StoreDispensedPrompts.plan_id reads no more
+        theirs = json.loads(raw or b"{}")
         if theirs.get("version") in LEGACY_PLAN_VERSIONS:  # a run started by older code: continue it
             mine["version"] = theirs["version"]
         for name in ("version", "rows", "fingerprint", "seed", "passes", "streams", "holdout_sha256"):
@@ -1015,11 +1020,23 @@ class StoreDispensedPrompts:
         k31/written-group-not-redispensed (same name, same value)."""
         cached = getattr(self, "_plan_id", None)
         if cached is None:
-            raw = self.ledger.objects.read(self.ledger.key("plan.json"))
+            raw = getattr(self.ledger, "plan_bytes", None) or self.ledger.objects.read(self.ledger.key("plan.json"))
             if raw is None:
                 raise DispenseError(f"{self.ledger.key('plan.json')} is missing: the dispenser has no plan")
             cached = self._plan_id = f"{self.ledger.ns}:{hashlib.sha256(raw).hexdigest()[:16]}"
         return cached
+
+    def end_detail(self) -> dict[str, Any] | None:
+        """What the sampler's shard end record says when every slot is settled
+        (``FileSampleBuffer.mark_data_end(dispense=...)``): the plan its groups name
+        (``dispense_plan``), so the trainer's merger ends the shards no group of it
+        can reach any more. None when the plan does not read (a plain end record)."""
+        try:
+            plan = self.plan_id
+        except Exception as error:  # noqa: BLE001 - a plain end: the trainer waits for every shard's end
+            logger.warning("store dispenser: plan id not read for the end record: %r", error)
+            return None
+        return {"backend": BACKEND, "namespace": self.ledger.ns, "plan": plan, "slots": int(self.ledger.limit)}
 
     def recover(self, entries: Iterable[Any] = ()) -> dict[str, int]:
         """Restart: settle ``trained`` the slots this sampler's buffer ``entries``
@@ -1344,7 +1361,9 @@ class StoreDispensedPrompts:
                     self._next_scan = 0.0 if len(got) == asked else now + self.scan_s
                     return got
                 if ended and not self.holding():
-                    raise DispenseEnded("every task of the store dispenser is settled")
+                    error = DispenseEnded("every task of the store dispenser is settled")
+                    error.dispense = self.end_detail()  # type: ignore[attr-defined]
+                    raise error
                 self._next_scan = now + self._idle
                 # waiting for sandbox room is not an empty ledger: keep scanning at scan_s
                 self._idle = self.scan_s if want == 0 else min(self._idle * 2, self.max_scan_s)

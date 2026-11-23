@@ -90,3 +90,111 @@ def test_a_shard_not_named_is_never_merged(tmp_path):
         _write(FileSampleBuffer(objects, batch_size=1, index=shard_index(s)), s, n, 1, 2)
     buffer = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=["a"])
     assert buffer.shard_positions(len(buffer)) == {"a": 2}
+
+
+# -- the data end by the task dispenser (sample_buffer module doc)
+
+PLAN = "run/task-dispense:0123456789abcdef"
+END = {"backend": "store", "namespace": "run/task-dispense", "plan": PLAN, "slots": 4}
+
+
+def _write_planned(writer, shard, n, groups, plan=PLAN):
+    for _ in range(groups):
+        sid = f"{shard}-{n[shard]}"
+        n[shard] += 1
+        ref = writer.write_payload(sid, encode_group([{"index": n[shard], "shard": shard}]))
+        writer.append(SampleIndexEntry(sid, 1, ref, 8, float(next(_clock)),
+                                       sampler_round={"sampler": shard, "incarnation": "i", "rollout_id": 0,
+                                                      "dispense_position": n[shard], "dispense_plan": plan}))
+
+
+def _shards(objects, names):
+    return {s: FileSampleBuffer(objects, batch_size=1, index=shard_index(s)) for s in names}
+
+
+def test_the_dispenser_end_ends_the_data_when_some_expected_shards_never_ran(tmp_path):
+    """The real run: --rl-buffer-shards named four shards, two samplers ran and ended
+    on the settled dispenser; the trainer waited for the two shards no sampler took."""
+    objects = DirectoryObjectStore(tmp_path)
+    expected = ("s0", "s1", "s2", "s3")
+    writers = _shards(objects, ("s0", "s1"))
+    n = {"s0": 0, "s1": 0}
+    _write_planned(writers["s0"], "s0", n, 2)
+    _write_planned(writers["s1"], "s1", n, 2)
+    buffer = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=expected)
+    events = []
+    buffer.merge_events = lambda event, **f: events.append(f)
+    writers["s0"].mark_data_end(dispense=END)
+    writers["s1"].mark_data_end(dispense=END)
+    buffer.refresh()
+    assert not buffer.data_ended  # the pass that read the first such end: every shard is read once more
+    buffer.refresh()
+    assert buffer.data_ended and len(buffer) == 4
+    assert [e for e in events if e["reason"] == "data_end_by_dispenser"] == [
+        {"reason": "data_end_by_dispenser", "shards_not_ended": ["s2", "s3"], "plans": [PLAN]}]
+    # a restarted trainer reads the ended index
+    again = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=expected)
+    assert again.data_ended and len(again) == 4
+
+
+def test_a_sampler_that_stopped_without_its_end_does_not_hold_the_data_end(tmp_path):
+    objects = DirectoryObjectStore(tmp_path)
+    writers = _shards(objects, ("a", "b"))
+    n = {"a": 0, "b": 0}
+    _write_planned(writers["a"], "a", n, 1)
+    _write_planned(writers["b"], "b", n, 2)  # b's sampler died after its groups (their tasks settled)
+    writers["a"].mark_data_end(dispense=END)
+    buffer = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=("a", "b"))
+    buffer.refresh()
+    assert buffer.data_ended and len(buffer) == 3
+
+
+def test_a_shard_with_groups_of_another_source_keeps_the_data_going(tmp_path):
+    for other in ("run2/task-dispense:fedcba9876543210", None):
+        root = tmp_path / str(other is None)
+        objects = DirectoryObjectStore(root)
+        writers = _shards(objects, ("a", "b"))
+        n = {"a": 0, "b": 0}
+        _write_planned(writers["a"], "a", n, 1)
+        _write_planned(writers["b"], "b", n, 1, plan=other)  # another dispenser, or none
+        writers["a"].mark_data_end(dispense=END)
+        buffer = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=("a", "b"))
+        buffer.refresh()
+        buffer.refresh()
+        assert not buffer.data_ended
+        writers["b"].mark_data_end()  # b's own end
+        buffer.refresh()
+        assert buffer.data_ended and len(buffer) == 2
+
+
+def test_a_plain_end_record_never_ends_the_other_shards(tmp_path):
+    objects = DirectoryObjectStore(tmp_path)
+    writers = _shards(objects, ("a",))
+    n = {"a": 0}
+    _write_planned(writers["a"], "a", n, 1)
+    writers["a"].mark_data_end()  # num_rollouts done or a hand-off: no dispenser end
+    buffer = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=("a", "b"))
+    buffer.refresh()
+    buffer.refresh()
+    assert not buffer.data_ended
+
+
+def test_the_trainer_trains_the_last_short_batch_then_finds_the_end(tmp_path):
+    """After the dispenser end the reader returns what is left (a round short of
+    groups), then the buffer's end (SampleBufferExhausted: the driver ends FINISHED)."""
+    import pytest
+
+    from yeto.rl.engine.buffer_payload import SampleBufferExhausted
+
+    objects = DirectoryObjectStore(tmp_path)
+    writers = _shards(objects, ("s0",))
+    n = {"s0": 0}
+    _write_planned(writers["s0"], "s0", n, 5)
+    writers["s0"].mark_data_end(dispense=END)
+    reader = _reader(objects, ("s0", "s1"))
+    out, _ = reader.take(1, 3, current_version=1)
+    assert len(out) == 3
+    out, _ = reader.take(2, 3, current_version=1)
+    assert len(out) == 2  # the last two groups: trained, not dropped
+    with pytest.raises(SampleBufferExhausted):
+        reader.take(3, 3, current_version=1)

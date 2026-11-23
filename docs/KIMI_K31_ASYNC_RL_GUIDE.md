@@ -1672,6 +1672,23 @@ Recommended practice: run `down` when you finish. NC leases bill until their
 tickets are deleted. `pool-stop` alone releases only the NC nodes
 ([NC_POOL.md, Stopping a pool](NC_POOL.md#stopping-a-pool)).
 
+**When the data ends.** The trainer stops on its own when the dispenser has
+no tasks left:
+
+1. Every task is settled. Each sampler writes `rl_sampler_data_ended`, ends
+   its buffer shard and exits 0.
+2. The trainer reads every shard to its end. Shards that no sampler took do
+   not hold it back.
+3. It trains the groups that are left. The last short round is padded and
+   trained, not dropped.
+4. It publishes the last trained policy as a final release.
+5. It writes `rl_run_end` with `reason: "data_ended"` and exits 0
+   (`SUCCEEDED`). A run that reaches `--total-steps` first writes
+   `reason: "total_steps"`.
+
+A sampler that only stops (preempted, scaled down, restarted) does not end
+the data. Only a settled dispenser does.
+
 **When the trainer finishes.** A trainer that reaches `--rl-stop-after-rounds`
 ends with `finished: SUCCEEDED`, but the NC nodes and the sandboxes keep
 billing: the samplers wait for releases that no longer come. By default the
@@ -1899,6 +1916,17 @@ helps when it was on before the deletion.
 Do not delete records of tasks that are in flight, and do not delete the
 `claims/` records: the attempt numbers continue from them.
 
+**A new task set or more passes.** Use a new run prefix.
+
+- The prompt file, `passes`, `seed` and the hold-out list are fixed in the
+  dispenser plan. A sampler with other values refuses to start
+  (`dispense mismatch`).
+- After the data end the buffer is ended too. The trainer does not read past
+  it.
+- So start a new run: a new `sampler.dispense.namespace`, a new buffer and a
+  new trainer store. Do not edit `plan.json`. Do not reuse a namespace for
+  another task set.
+
 ### 5.9 Robustness behaviour of the samplers, trainer, store and pool
 
 This section lists what the samplers, the trainer, the object store client and
@@ -1946,6 +1974,7 @@ on the NC event tape they carry the `nc_elastic_` prefix.
 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is accepted on a full-parameter trainer island (`--rl-sample-role trainer`, no rollout engine); it is still refused on a colocated island with engines and on any island with `--rl-offload-train`, before any GPU starts. Measured: peak reserved memory 251 to 174 GiB on a 16-layer cut model, bit-identical loss, about 8 s more per step. | trainer env | launch check message | Set it for 1M or other tight layouts (section 3.5, section 10.4). |
 | **The incarnation gate fails closed and pauses training.** A shard's lease that cannot be read (timeout, 5xx, reset connection, cut-short body) is no verdict: the group is neither trained nor counted stale, and because the buffer is read in strict order every later group of every shard waits too. The round holds only the groups before it, and its committed watermark is that group's position. Nothing ends the wait but a readable lease or stopping the trainer. While a shard's reads fail, an older cached lease read does not answer. Details: section 5.1, "The gate fails closed, and pauses training". | none | trainer log (at most once a minute) `incarnation gate: training paused: lease of shard <X> unreadable since <T>`; metric `sample_buffer/lease_deferred_groups` | Fix the store access for that lease (`sample-buffer/leases/<shard>.json`). This is not starvation: the starvation monitor names it `trainer side: ... fail-closed pause` and does not stop the trainer for it. |
 | **The gate judges a round again right before it is trained.** A fence written while a take waited for later groups keeps an earlier selected group out: each chosen group's shard lease is read again (at most once per shard per second); a group fenced since its selection is dropped (counted stale, its task freed, and a group passed over for that task is judged again); from the first unreadable lease on, the groups wait as above. The same recheck runs in the verl buffer feed. | none | counted in the stale and `lease_deferred_groups` metrics | Nothing. |
+| **The trainer ends on the dispenser's data end.** A sampler that ends on a settled dispenser names the dispenser plan in its shard's end record. The trainer then ends the data even if some `--rl-buffer-shards` never wrote an end record, as long as those shards hold no groups or only groups of that plan. It trains the last short round, publishes a final release and exits 0. Before, it waited for the missing shards until `--rl-sample-wait-s`. Details: section 5.5 and [DISPENSER.md, When the data ends](DISPENSER.md#when-the-data-ends). | none | trainer log `the task dispenser settled every task`, merge event `data_end_by_dispenser`, `rl_buffer_exhausted`, `rl_run_end` (`reason`: `data_ended` or `total_steps`) | Nothing. |
 | The trainer trains only the first accepted group of each store-dispenser task; later groups of the same task (a sampler that wrote after its lease expired, a retire before settlement) are consumed and counted, not trained. | `YETO_SAMPLE_BUFFER_ONE_GROUP_PER_TASK` (on; `0` off) | `rl_buffer_duplicate_task_skipped`, `sample_buffer/duplicate_task_groups`, `duplicate_task` in `passed_over` | Occasional events: nothing (section 8). |
 | Staged release writer across restarts: a restarted trainer lists the release directories in the store (not only its local stage, which no longer holds earlier uploads), so it prunes the releases of earlier processes to the newest `keep` and removes a partial upload of a killed attempt before writing under the same `r<seq>-v<version>` name. `LATEST` is read again after that listing, so a release another writer published meanwhile is not taken for a partial upload. A partial directory at or above the new seq is pruned first and never takes a kept place. | release `keep` | - | Nothing. Before this change a restarted trainer left old releases in the bucket and could serve a mix of two uploads under one name. |
 | **Trainer scheduler restarts stop on a repeated crash.** A trained round resets the failure count only when it reaches a version no earlier incarnation of this loop trained. A trainer that crashes deterministically after the same cut (it restores the cut, retrains the same rounds, crashes again) now gives up after `--rl-trainer-max-failures` incarnations instead of restarting forever. | `--rl-trainer-max-failures` (3) | trainer journal `gave_up`, `TrainerLoopGaveUp` | Read the trainer log of the last incarnation; fix the cause, then `yeto run up` resumes from the newest cut. |

@@ -735,3 +735,13 @@ def test_a_new_incarnation_of_a_retired_holder_is_not_fenced_by_the_old_marker(t
     sd.retire(store, "run/dispense", "s0")  # no incarnation given: the ones holding claims
     new = _open(path, store, inc="i1", groups=2)
     assert new.poll(2) == ("items", [0, 1])
+
+
+def test_the_data_end_names_the_plan(tmp_path):
+    store = FakeObjects()
+    s = _open(_write(tmp_path, _rows(1)), store, groups=1)
+    s.written(0, _slots(s(0)))
+    with pytest.raises(DispenseEnded) as ended:
+        s(0)
+    assert ended.value.dispense == {"backend": "store", "namespace": "run/dispense", "plan": s.plan_id, "slots": 1}
+    assert s.plan_id.startswith("run/dispense:")

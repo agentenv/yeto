@@ -389,6 +389,7 @@ class SamplerLoop:
         """Generate rounds ``start .. num_rollouts - 1`` (no end for None: until
         ``should_stop``); returns the rounds generated."""
         done = self.rounds_done = 0
+        dispense_end = None  # the store dispenser settled every task (its plan: the shard's end record)
         rollout_ids = (itertools.count(int(start)) if self.num_rollouts is None
                        else range(int(start), self.num_rollouts))
         for rollout_id in rollout_ids:
@@ -406,7 +407,9 @@ class SamplerLoop:
                     raise
                 # the task dispenser settled every task: a normal end, not a failure
                 print(f"[engine-sampler] data ended: {error}", flush=True)
-                self.emit("rl_sampler_data_ended", rollout_id=rollout_id, rounds=done, detail=str(error)[:200])
+                dispense_end = getattr(error, "dispense", None)
+                self.emit("rl_sampler_data_ended", rollout_id=rollout_id, rounds=done, detail=str(error)[:200],
+                          **({"dispense": dispense_end} if dispense_end else {}))
                 break
             self._read("buffer", self.buffer.refresh)  # the round's groups are written; this only counts them
             generate_s = self.clock() - started
@@ -422,6 +425,9 @@ class SamplerLoop:
             with self.follower.generating(), self._live_refresh():
                 flush()
             self._read("buffer", self.buffer.refresh)
-        self.buffer.mark_data_end()
+        if dispense_end:  # the trainer's merger ends the shards no group of this plan can reach
+            self.buffer.mark_data_end(dispense=dispense_end)
+        else:
+            self.buffer.mark_data_end()
         self.emit("rl_sampler_data_end", rounds=done, buffer_end=len(self.buffer))
         return done

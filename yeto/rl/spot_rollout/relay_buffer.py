@@ -192,7 +192,7 @@ class RelaySampleBuffer:
     def one_commit(self) -> Iterator[None]:
         yield
 
-    def mark_data_end(self) -> None:
+    def mark_data_end(self, *, dispense: Any = None) -> None:
         """No data end on the relay: the trainers end with the syncer."""
 
     # reading (the loop's backlog and the resume point)

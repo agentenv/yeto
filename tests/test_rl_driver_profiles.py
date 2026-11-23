@@ -62,9 +62,10 @@ def _strip(events):
 
 
 NEW_EVENTS = {"rl_timeline_span", "rl_readiness", "rl_round_labels"}
-# Always emitted since the 1b/2a request (not observation events);
+# Always emitted since the 1b/2a request (not observation events), and
+# rl_run_end (the reason of a normal end) since the data-end change;
 # the R0 comparison removes exactly these events and nothing else.
-ACCOUNTING_EVENTS = {"rl_round_trained", "rl_round_wall"}
+ACCOUNTING_EVENTS = {"rl_round_trained", "rl_round_wall", "rl_run_end"}
 
 
 R0_TAPE = json.loads(

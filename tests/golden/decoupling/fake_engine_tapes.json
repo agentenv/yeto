@@ -1327,6 +1327,13 @@
     "time_unix": "<VOLATILE>"
    },
    {
+    "event": "rl_run_end",
+    "island_id": 0,
+    "reason": "stopped",
+    "rollout_id": 5,
+    "time_unix": "<VOLATILE>"
+   },
+   {
     "event": "rl_driver_phase",
     "island_id": 0,
     "phase": "finish",
@@ -1877,6 +1884,14 @@
     "time_unix": "<VOLATILE>"
    },
    {
+    "event": "rl_run_end",
+    "island_id": 0,
+    "num_rollout": 3,
+    "reason": "total_steps",
+    "rollout_id": 3,
+    "time_unix": "<VOLATILE>"
+   },
+   {
     "event": "rl_driver_phase",
     "island_id": 0,
     "phase": "finish",
@@ -2217,6 +2232,13 @@
     "rollout_id": 0,
     "rollout_seconds": "<VOLATILE>",
     "round_seconds": "<VOLATILE>",
+    "time_unix": "<VOLATILE>"
+   },
+   {
+    "event": "rl_run_end",
+    "island_id": 0,
+    "reason": "stopped",
+    "rollout_id": 1,
     "time_unix": "<VOLATILE>"
    },
    {
