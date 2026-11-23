@@ -31,7 +31,7 @@ def test_every_registered_entry_is_in_the_docs():
 
 
 # `<layer>.<word>` spellings in the guide's breaker section that name a file or a config key
-NOT_BREAKERS = {"run.json", "trainer.argv", "sampler.dispense"}
+NOT_BREAKERS = {"run.json", "trainer.argv", "sampler.dispense", "sampler.breakers"}
 
 
 def test_customer_guide_names_only_registered_entries():
