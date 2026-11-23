@@ -293,3 +293,15 @@ def test_an_older_launch_read_late_does_not_finish_or_rewind_the_newer_one():
     old, new = _launch("l0-modal-A", T0, finish=True), _launch("l0-modal-B", T0 + 1300, finish=True, pv0=20)
     cards = _cards(new + old, T0 + 2300)  # the newer folder read first
     assert cards["0"]["policy_version"] == 40
+
+
+def test_island_states_is_the_shared_rule():
+    recs = _launch("l0-modal-A", T0, finish=True) + _launch("l0-modal-B", T0 + 1300, finish=False)
+    r = Reducer(run="r")
+    for i, (src, rec) in enumerate(recs + _sampler_writing(T0 + 1400)):
+        r.feed(rec, source=src, offset=i)
+    st = r.island_states(T0 + 1400)
+    cards = {c["id"]: c["status"] for c in r.overview(now=T0 + 1400)["islands"]}
+    assert {k: v["status"] for k, v in st.items()} == cards
+    assert st["0"]["alive"] and st["0"]["starting"] and st["0"]["launch"] == "l0-modal-B"
+    assert st["s0"]["alive"] and st["s0"]["incarnation"] == "a1"

@@ -1493,6 +1493,24 @@ class Reducer:
                 isl["cpus"], isl["memory_gib"] = shape["cpus"], shape["memory_gib"]
                 isl["host_shape_source"] = "meta.json"
 
+    def island_states(self, now: float | None = None, *, live: bool = False) -> dict[str, dict]:
+        """Each island's state, one rule for every view (overview cards, Islands now, topology):
+        ``status`` (ok / waiting / starting / stale / stopped / left / lost / done / ...), ``alive``
+        (status in ALIVE_STATUSES), role, current launch and sampler incarnation, last event time.
+        A relaunched trainer is its new launch's state; a sampler is done only once its trainers
+        ended and it stopped writing groups (_island_card)."""
+        now = self.now(live) if now is None else now
+        out = {}
+        for iid in self.island_ids():
+            isl = self.islands[iid]
+            card = self._island_card(isl, now)
+            samp = self.async_.sampler.get(iid) or {}
+            out[iid] = {"status": card["status"], "alive": card["status"] in ALIVE_STATUSES,
+                        "role": card.get("role"), "starting": bool(card.get("starting")),
+                        "launch": isl.get("launch"), "incarnation": samp.get("incarnation"),
+                        "last_event_ts": isl.get("last_event_ts")}
+        return out
+
     def island_ids(self) -> list[str]:
         def key(i: str):
             return (0, int(i), "") if i.lstrip("-").isdigit() else (1, 0, i)
@@ -1606,6 +1624,8 @@ def _gpu_from_mem(mb: float | None) -> str | None:
 # island_leave reasons that end a run on purpose; a failed trainer (INFRA_FAILED ...)
 # is relaunched, so its samplers keep running and are not "done"
 CLEAN_LEAVE = frozenset({"STOPPED", "DONE", "FINISHED", "COMPLETED", "DRAINED"})
+# island statuses that mean the island is up (island_states / topology); everything else ended or is unknown
+ALIVE_STATUSES = frozenset({"ok", "waiting", "starting", "stale"})
 # a sampler that still writes groups this long after its trainers ended is running, not done
 SAMPLER_AFTER_TRAINERS_S = 300.0  # its last round in flight may finish a few minutes after
 

@@ -95,10 +95,10 @@ function chartTs(id,opts){
   // opts.extra: per-island series behind an aggregate, drawn when the legend toggle is open
   var xs0=opts.extra||[],xon=xs0.length&&(EXPAND[id]!=null?EXPAND[id]:!!opts.extraOpen);
   var ser=(opts.series||[]).concat(xon?xs0:[]).map(function(s){var all=(s.pts||[]).filter(function(p){return fin(p[0])&&fin(p[1])}).sort(function(a,b){return a[0]-b[0]});
-    return {name:s.name,color:s.color,dash:s.dash,width:s.width,dots:s.dots,band:s.band,legend:s.legend!==false,all:all,
+    return {name:s.name,color:s.color,dash:s.dash,width:s.width,dots:s.dots,band:s.band,empty:s.empty,legend:s.legend!==false,all:all,
     pts:all.filter(function(p){return p[0]>=t0&&p[0]<=t1})}});
   var leg='<div class="lg">'+ser.filter(function(s){return s.legend}).map(function(s){return s.pts.length?'<span><i style="background:'+s.color+'"></i>'+esc(s.name)+'</span>':
-    '<span class="nd"><i style="background:#4b4b52"></i>'+esc(s.name)+' (no data)</span>'}).join("")+
+    '<span class="nd"><i style="background:#4b4b52"></i>'+esc(s.name)+' ('+esc(s.empty||"no data")+')</span>'}).join("")+
     (opts.refs||[]).filter(function(r){return r.legend}).map(function(r){return '<span><i style="background:'+(r.color||GREY)+'"></i>'+esc(r.legend)+'</span>'}).join("")+
     (xs0.length?'<span class="lgx" role="button" tabindex="0">'+(xon?"\u25be hide ":"\u25b8 show ")+esc(opts.extraLabel||"each island")+' ('+xs0.length+')</span>':"")+'</div>';
   var any=ser.some(function(s){return s.pts.length});
@@ -524,7 +524,9 @@ function rlm(V){
     (unk.length?'<details class="ended"><summary class="ns">'+unk.length+' unrecognized tape(s)</summary><table class="nt">'+unk.map(unkRow).join("")+'</table></details>':"");
   // fleet charts
   $("rFleetH").textContent="Fleet over the last "+rangeLabel();
-  var ser=function(L,key,f){return L.map(function(c){return {name:c.label,color:c.color,pts:RR(c).map(function(r){return [r.ts,f?f(r):r[key]]})}})};
+  // a trainer point carries the launch that trained it (the newest launch started before it): a relaunch breaks the line
+  var lOf=function(c,t){var ls=(c.launches||[]).filter(function(x){return fin(x.first_ts)&&x.first_ts<=t}).sort(function(a,b){return a.first_ts-b.first_ts});return ls.length?ls[ls.length-1].launch:"-"};
+  var ser=function(L,key,f){return L.map(function(c){return {name:c.label,color:c.color,pts:RR(c).map(function(r){return [r.ts,f?f(r):r[key],lOf(c,r.ts)]})}})};
   var sser=function(key,f){return sps.map(function(c){return {name:c.label,color:c.color,dash:true,pts:SR(c).map(function(r){return [r.ts,f?f(r):r[key],r.incarnation]})}})};
   // sampler reward: group-weighted rolling mean over the last n groups (whole rounds, newest first);
   // each point keeps its own round's mean (.raw) for the tooltip
@@ -571,7 +573,7 @@ function rlm(V){
   fc("rfKl",mag({series:ser(trs,"kl_tr"),yfmt:f4}));fc("rfPkl",mag({series:ser(trs,"kl"),yfmt:f4}));
   fc("rfLp",mag({series:ser(trs,"logprob_diff"),yfmt:f4}));fc("rfTis",mag({series:ser(trs,"tis_clip",function(r){return fin(r.tis_clip)?r.tis_clip:r.is_clip}),yfmt:f4}));fc("rfGn",mag({series:ser(trs,"grad_norm"),yfmt:f3}));
   fc("rfLr",axs({series:ser(trs,"lr"),yfmt:function(v){return v.toExponential(2)}}));
-  fc("rfStep",{series:ser(trs,"step_s").concat(trs.map(function(c){return {name:c.label+" round",color:c.color,dash:true,legend:false,pts:RR(c).map(function(r){return [r.ts,r.round_s]})}})),yfmt:dur});
+  fc("rfStep",{series:ser(trs,"step_s").concat(trs.map(function(c){return {name:c.label+" round",color:c.color,dash:true,legend:false,pts:RR(c).map(function(r){return [r.ts,r.round_s,lOf(c,r.ts)]})}})),yfmt:dur});
   fc("rfTps",{kind:"stack",interp:600,series:ser(trs,"tok_s"),yfmt:k});
   var hbmPts=function(c){var ns=(X[c.id]||{}).node_series||{},n=Object.keys(ns)[0];return n?ns[n].map(function(p){return [p[0],p[1]]}):[]};
   var hs=spSeries("HBM",hbmPts);
@@ -585,20 +587,23 @@ function rlm(V){
   fc("rfAge",{series:trs.map(function(c){return {name:c.label+" trained groups",color:c.color,pts:((TR[c.id]||{}).rounds||[]).map(function(r){return [r.ts,ageMean(r)]})}}).concat(ls.series),extra:ls.extra,extraLabel:XL,
     yfmt:function(v){return v.toFixed(1)},yaxis:true,yint:true,y0:true,dots:true});
   var rsp=spSeries("resp",function(c){return SR(c).map(function(r){return [r.ts,r.resp_len_mean,r.incarnation]})},{suffix:" full",dash:true});
-  fc("rfResp",mag({series:trs.map(function(c){return {name:c.label+" generated (loss mask)",color:c.color,pts:RR(c).map(function(r){return [r.ts,r.resp_mean]})}})
-    .concat(trs.map(function(c){return {name:c.label+" full",color:c.color,dash:"1 3",pts:RR(c).map(function(r){return [r.ts,r.resp_full_mean]})}}).filter(function(x){return x.pts.some(function(p){return fin(p[1])})}))
+  fc("rfResp",mag({series:trs.map(function(c){return {name:c.label+" generated (loss mask)",color:c.color,pts:RR(c).map(function(r){return [r.ts,r.resp_mean,lOf(c,r.ts)]})}})
+    .concat(trs.map(function(c){return {name:c.label+" full",color:c.color,dash:"1 3",pts:RR(c).map(function(r){return [r.ts,r.resp_full_mean,lOf(c,r.ts)]})}}).filter(function(x){return x.pts.some(function(p){return fin(p[1])})}))
     .concat(rsp.series),extra:rsp.extra,extraLabel:XL,yfmt:k}));
-  var bls=sps.map(function(c){return {name:c.label+" reported",color:c.color,pts:((S[c.id]||{}).backlog||[]).map(function(p){return [p[0],p[1]]})}});
+  var bls=sps.map(function(c){return {name:c.label+" reported",color:c.color,pts:((S[c.id]||{}).backlog||[]).map(function(p){return [p[0],p[1]]}),empty:"never full in range"}}); // it reports only when its backlog is full
   fc("rfBl",{series:[{name:"backlog",color:PAL[3],pts:bl?bl.points.map(function(p){return [p[0],p[3]]}):[]}].concat(MANY?[]:bls),extra:MANY?bls:[],extraLabel:"each sampler's own count",yfmt:k,
     refs:caps.length?[{y:sum(caps),label:"caps "+sum(caps),legend:"sum of backlog caps",color:"#eab308"}]:[]});
   var rel=sps.map(function(c){return {name:c.label,color:c.color,pts:(A.releases||[]).map(function(x){var l=(x.loads||{})[c.id];return l&&!l.at_start?[l.loaded_at,l.latency_s]:null}).filter(Boolean)}});
   fc("rfRel",{dots:true,series:MANY?[{name:"all samplers",color:SC,pts:[].concat.apply([],rel.map(function(x){return x.pts}))}]:rel,extra:MANY?rel:[],extraLabel:XL,yfmt:dur});
   var tb=function(key){var o=[];trs.forEach(function(c){((TR[c.id]||{}).rounds||[]).forEach(function(r){if(fin(r.ts)&&r[key]>0)o.push([r.ts,r[key]])})});return o};
   var sb=function(key){var o=[];sps.forEach(function(c){SR(c).forEach(function(r){if(r[key]>0)o.push([r.ts,r[key]])})});return o};
+  // the source reports the count (zeros included) in range: an empty series is "0 so far", not "no data"
+  var tz=function(key){return trs.some(function(c){return ((TR[c.id]||{}).rounds||[]).some(function(r){return fin(r[key])&&inR(r.ts,t0,t1)})})?"0 so far":null};
+  var sz=function(key){return sps.some(function(c){return SR(c).some(function(r){return fin(r[key])&&inR(r.ts,t0,t1)})})?"0 so far":null};
   var zvs=sb("zero_variance_dropped").length?sb("zero_variance_dropped"):sb("zero_variance_seen"),zvt=[].concat.apply([],trs.map(zvT)).filter(function(p){return p[1]>0});
-  fc("rfDrop",{kind:"bars",series:[{name:"stale groups",color:PAL[3],pts:tb("stale_groups")},
+  fc("rfDrop",{kind:"bars",series:[{name:"stale groups",color:PAL[3],pts:tb("stale_groups"),empty:tz("stale_groups")},
     {name:zvs.length?"zero-variance groups (samplers, dropped)":"zero-variance groups (trainer, zero advantage)",color:PAL[5],pts:zvs.length?zvs:zvt},
-    {name:"truncated samples",color:PAL[1],pts:sb("truncated")},{name:"infra-dropped groups",color:PAL[8],pts:sb("dropped_groups")}],yfmt:function(v){return +v.toFixed(1)+""},yaxis:true,yint:true});
+    {name:"truncated samples",color:PAL[1],pts:sb("truncated"),empty:sz("truncated")},{name:"infra-dropped groups",color:PAL[8],pts:sb("dropped_groups"),empty:sz("dropped_groups")}],yfmt:function(v){return +v.toFixed(1)+""},yaxis:true,yint:true});
   foldEmpty(g,"rFleetNone");balanceGrid("rFleet",340,4);
   rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp);
 }
