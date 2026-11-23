@@ -1,9 +1,10 @@
-"""The verl backend refuses sync presets its island does not run.
+"""The verl backend runs the sync presets its island has a session for, and refuses the rest.
 
-Before this, ``yeto launch --rl-backend verl --rl-sync-preset decoupled`` started a
-decoupled syncer while every verl island dropped ``--sync-preset`` (``parse_known_args``)
-and ran strict-avg. Now the launcher refuses it (``run_config_rules.check_sync_preset``)
-and so does the island (``island_sync_preset_problem``). CPU only.
+Before ``run_config_rules.check_sync_preset``, ``yeto launch --rl-backend verl
+--rl-sync-preset decoupled`` started a decoupled syncer while every verl island dropped
+``--sync-preset`` (``parse_known_args``) and ran strict-avg. Decoupled LoRA now runs on
+the synchronous colocated FSDP2 island (``decoupled_session``); other shapes and unknown
+presets are refused by the launcher and by the island. CPU only.
 """
 from __future__ import annotations
 
@@ -33,10 +34,23 @@ def _prepared(*extra):
     return args
 
 
-def test_the_launcher_refuses_decoupled_lora_on_verl():
-    with pytest.raises(ValueError, match="not wired on the verl backend"):
-        _prepared("--rl-sync-preset", "decoupled", "--fragments", "2", "--pipeline", "2",
-                  "--local-rl-rounds-per-sync", "2")
+DECOUPLED = ("--rl-sync-preset", "decoupled", "--fragments", "2", "--pipeline", "2",
+             "--local-rl-rounds-per-sync", "2")
+
+
+def test_the_launcher_accepts_decoupled_lora_on_verl():
+    args = _prepared(*DECOUPLED)
+    assert args.rl_sync_preset == "decoupled" and args.rl_total_fragment_steps == args.total_steps * 2
+
+
+@pytest.mark.parametrize("extra, match", [
+    (("--rl-max-policy-age", "1", "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1"),
+     "--rl-max-policy-age 0|--rl-placement colocated"),
+    (("--tensor-parallel", "2"), "TP=PP=EP=CP=1|Megatron"),
+])
+def test_the_launcher_refuses_decoupled_shapes_the_island_does_not_cover(extra, match):
+    with pytest.raises(ValueError, match=match):
+        _prepared(*DECOUPLED, *extra)
 
 
 def test_the_launcher_still_accepts_strict_avg_on_verl():
@@ -50,10 +64,10 @@ def test_miles_has_no_such_rule():
 
 @pytest.mark.parametrize("preset, ok", [
     ("strict-avg", True), ("full-parameter", True), ("dense-full", True), (None, True),
-    ("decoupled", False), ("sao-streaming-full", False),
+    ("decoupled", True), ("sao-streaming-full", False),
 ])
 def test_the_rule_names_what_the_island_runs(preset, ok):
-    args = SimpleNamespace(rl_sync_preset=preset, rl_single_island_no_sync=False)
+    args = SimpleNamespace(rl_sync_preset=preset, rl_single_island_no_sync=False, tuning="lora")
     if ok:
         rules.check_sync_preset(args)
     else:
@@ -63,9 +77,9 @@ def test_the_rule_names_what_the_island_runs(preset, ok):
     rules.check_sync_preset(SimpleNamespace(rl_sync_preset=preset, rl_single_island_no_sync=True))
 
 
-def test_the_island_refuses_decoupled_before_any_work():
-    with pytest.raises(SystemExit, match="not wired on the verl backend"):
-        island_entry.main([*ISLAND, "--sync-preset", "decoupled"])
+def test_the_island_refuses_decoupled_full_parameters_before_any_work():
+    with pytest.raises(SystemExit, match="needs --parameter-mode lora"):
+        island_entry.main([*ISLAND, "--sync-preset", "decoupled", "--parameter-mode", "full"])
 
 
 def test_the_island_refuses_an_unknown_preset_and_a_mismatched_mode():
@@ -77,6 +91,7 @@ def test_the_island_refuses_an_unknown_preset_and_a_mismatched_mode():
 
 @pytest.mark.parametrize("preset, mode", [
     (None, "lora"), ("strict-avg", "lora"), ("full-parameter", "full"), ("dense-full", "full"),
+    ("decoupled", "lora"),
 ])
 def test_the_island_accepts_what_it_runs(preset, mode):
     assert rules.island_sync_preset_problem(preset, parameter_mode=mode) is None

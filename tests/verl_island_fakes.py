@@ -154,8 +154,9 @@ ISLAND_ARGV = ("--model", "m", "--model-revision", "a" * 40, "--data", "d", "--l
                "--inner-lr", "1", "--seq-len", "64", "--seed", "1", "--rl-single-island-no-sync")
 
 
-def run_island_entry(monkeypatch, tmp_path, *argv: str, stop: str = "fsdp_island_run"):
-    """Run ``verl.island_entry.main`` on ``ISLAND_ARGV + argv`` with the node work
+def run_island_entry(monkeypatch, tmp_path, *argv: str, stop: str = "fsdp_island_run",
+                     base: tuple[str, ...] = ISLAND_ARGV):
+    """Run ``verl.island_entry.main`` on ``base + argv`` (``ISLAND_ARGV``: a no-sync island) with the node work
     faked. Returns ``("refused", message)`` for a SystemExit, or ``(name, kwargs)``
     for the first call of ``stop``: ``fsdp_island_run`` (the island accepted the
     configuration and builds its FSDP2 run), ``refuse_unwired`` or ``eval_section``
@@ -194,7 +195,7 @@ def run_island_entry(monkeypatch, tmp_path, *argv: str, stop: str = "fsdp_island
     monkeypatch.setattr(eval_port, "refuse_unwired", reached("refuse_unwired"))
     monkeypatch.setattr(eval_port, "eval_section", reached("eval_section"))
     try:
-        island_entry.main([*ISLAND_ARGV, *argv])
+        island_entry.main([*base, *argv])
     except Reached as hit:
         return hit.name, (hit.args_, hit.kwargs)
     except SystemExit as error:
