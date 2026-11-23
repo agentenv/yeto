@@ -83,6 +83,12 @@ def _positive_int(provider, *names: str) -> int:
     return value
 
 
+def _selection_layout(path: str) -> str:
+    from . import backends
+
+    return backends.module("expert_selection", backends.DEFAULT_BACKEND).ExpertSelection.load_file(path).layout
+
+
 def _text(value: Any) -> str:
     return str(getattr(value, "value", value))
 
@@ -925,8 +931,13 @@ def resolve_rl_run_config(
             and args.lora_targets == "all-linear"):
         check_generic_expert_lora(provider, expert_parallel=expert_parallel)
     expert_selection = getattr(args, "rl_expert_selection", None) or None
-    if expert_selection is not None and recipe != RECIPE_KIMI_K31:
-        raise ValueError("--rl-expert-selection belongs to --rl-model-recipe kimi_k31")
+    if expert_selection is not None and recipe != RECIPE_KIMI_K31 and not (
+            recipe == RECIPE_GENERIC and parameter_mode == "full" and is_moe
+            and _selection_layout(expert_selection) == "in_place"):
+        # the generic recipe: partial experts of any MoE model from an in_place selection
+        # (adapters/miles/models/partial_experts/in_place.py); slot_order is the kimi_k31 form
+        raise ValueError("--rl-expert-selection belongs to --rl-model-recipe kimi_k31, or to --tuning full "
+                         "on a generic MoE model with an in_place selection")
     routed_expert_qat = getattr(args, "rl_routed_expert_qat", None) or None
     if routed_expert_qat is not None and recipe != RECIPE_KIMI_K31:
         raise ValueError("--rl-routed-expert-qat belongs to --rl-model-recipe kimi_k31")
@@ -1256,7 +1267,9 @@ def resolve_rl_run_config(
             gdn=gdn,
             transformer_impl=transformer_impl,
             model_flags=_recipe_model_flags(recipe_name, provider),
-            expert_selection=expert_selection,
+            # kimi_k31 only (Miles --partial-experts-selection); a generic partial-experts
+            # island freezes in its model-provider hook instead
+            expert_selection=expert_selection if recipe == RECIPE_KIMI_K31 else None,
             routed_expert_qat=routed_expert_qat,
         ),
         geometry=geometry,

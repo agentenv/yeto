@@ -73,6 +73,9 @@ def check_expert_selection(args) -> dict[str, Any] | None:
         raise ValueError(f"--rl-expert-selection {path}: no such file; {hint}") from None
     except (sel.SelectionError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"--rl-expert-selection {path} is not a valid selection: {exc}; {hint}") from None
+    if getattr(selection, "layout", "slot_order") != "slot_order":
+        raise ValueError(f"--rl-expert-selection {path} has layout {selection.layout!r}; the kimi_k31 recipe "
+                         f"permutes experts into EP slots and needs a slot_order selection; {hint}")
     if selection.model != k31.MODEL_TYPE:
         raise ValueError(f"--rl-expert-selection is for model {selection.model!r}, not {k31.MODEL_TYPE!r}")
     ep = int(getattr(args, "expert_parallel", 0) or 0)

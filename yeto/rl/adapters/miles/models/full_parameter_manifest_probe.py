@@ -20,6 +20,7 @@ from yeto.rl.local_learner import MATRIX_MERGES, ComponentIdentity, owner_affine
 from yeto.rl.adapters.miles.ext_args import ext_attr
 from yeto.rl.adapters.miles.revision import miles_execution_source_sha256
 from yeto.rl.adapters.miles.models.chunked_full_parameter import MilesChunkedFullParameterAdapter
+from yeto.rl.adapters.miles.models.partial_experts.in_place import subset_from_env as partial_experts_subset
 
 
 def _hardware_identity() -> dict[str, object]:
@@ -362,6 +363,8 @@ class MilesFullParameterManifestProbeSync:
             max_fragment_bytes=_MAX_FRAGMENT_BYTES,
             max_chunk_bytes=_MAX_CHUNK_BYTES,
             matrix_merge=self.matrix_merge,
+            # a partial-experts run: the island's selection (its environment)
+            expert_subset=partial_experts_subset(),
         )
         # The smallest count an island accepts for this merge: one fragment
         # per owner and, with rda, per merge group.

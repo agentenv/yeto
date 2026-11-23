@@ -88,6 +88,7 @@ class MilesFullParameterRoleStream(FullParameterRoleStream):
             max_fragment_bytes=self.config.max_fragment_bytes,
             max_chunk_bytes=self.config.max_chunk_bytes,
             matrix_merge=self.config.matrix_merge,
+            expert_subset=self.config.expert_subset,
             **(
                 {}
                 if self.config.shape_free is None
@@ -146,7 +147,7 @@ class MilesFullParameterRoleStream(FullParameterRoleStream):
         )
 
     async def _install_routed_token_counter(self, group, adapter) -> None:
-        if check_expert_partition(adapter.layout.specs) is None:
+        if check_expert_partition(adapter.layout.specs, subset=self.config.expert_subset) is None:
             raise ValueError(
                 f"{self.config.role}: expert token weights need a mixture-of-experts layout"
             )

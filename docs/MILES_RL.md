@@ -1199,6 +1199,45 @@ budget (`scripts/benchmark_rl.py --arms single,federated,decoupled` runs
 both). Held-out reward and pass@k must not regress beyond seed noise, and the
 invariants in the [Development Guide](#development-guide) must hold.
 
+## Partial routed experts (any MoE model)
+
+`--tuning full --rl-expert-selection FILE` with the generic recipe trains the
+routed experts an `in_place` selection names and freezes every other
+parameter (attention, dense MLPs, shared experts, routers, embeddings, MTP).
+It needs a full-parameter sync (`--rl-sync-preset full-parameter
+--rl-sync-full-parameter-rounds async`, or a no-sync island). Any MoE model
+the pinned Megatron-Bridge reads works; nothing is model-specific:
+
+- The selection keeps Megatron's expert order: EP rank `r` holds experts
+  `[r*n/ep, (r+1)*n/ep)` and trains `num_trainable/ep` of them in every MoE
+  layer, so no router permutation is needed. Build one from the checkpoint's
+  `config.json` (the expert count and the MoE layers come from
+  `yeto.rl.moe_geometry`):
+
+  ```bash
+  python -m yeto.rl.adapters.miles.models.partial_experts.selection \
+    --layout in_place --hf-config <checkpoint>/config.json \
+    --num-trainable 16 --ep-size 4 --mode uniform --output expert_selection.json
+  ```
+
+  `--mode random --seed N`, `--payload` (rollout routed experts) or
+  `--counts` (router counts) pick the experts instead; `--validate FILE`
+  checks a file.
+- The launcher checks the file, its EP size against `--expert-parallel` and,
+  when `config.json` is readable, the expert count and MoE layers. The island
+  checks the same against its Megatron-Bridge provider.
+- On every trainer rank a model-provider hook freezes each chunk before DDP
+  wraps it (`partial_experts/in_place.py`; experts must be individual
+  parameters, `NVTE_GROUPED_LINEAR_SINGLE_PARAM=0`, which the island sets).
+  The router's expert bias stays fixed (`--moe-router-bias-update-rate 0`).
+- Only the selected experts have FP32 masters, so Miles' full-parameter
+  export and the syncer fragments carry only them; the layout check requires
+  exactly that subset per layer. Each EP rank pushes its own experts.
+- Publication to the rollout engine is Miles' full `update_weights`.
+
+`--rl-model-recipe kimi_k31` keeps its own `slot_order` selections (below);
+the generic recipe refuses them, and the K3.1 recipe refuses `in_place` ones.
+
 ## Kimi-K3.1 trainable forms
 
 `--rl-model-recipe kimi_k31` trains one of two forms:
