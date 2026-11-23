@@ -24,6 +24,13 @@ if os.environ.get("YETO_DSV4_EXPERT_FULL_PORTS") == "1":
     install()
 
 
+if os.environ.get("YETO_PARTIAL_EXPERTS_SELECTION"):
+    # Generic partial experts (in-place selection): freeze all but the selected experts.
+    from yeto.rl.adapters.miles.models.partial_experts.in_place import install as _install_partial_experts
+
+    _install_partial_experts()
+
+
 if os.environ.get("YETO_SGLANG_MXFP4_INPLACE") == "1":
     # In-place reload of MXFP4 routed experts on SGLang's SM100 trtllm-gen path
     # (every SGLang process, including the spawned schedulers).

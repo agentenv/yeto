@@ -25,7 +25,7 @@ from yeto.rl.engine.shape_free_layout import (
     ShapeFreePlan,
     plan_shape_free_layout,
 )
-from yeto.rl.moe_layout import check_expert_partition, describe_topology
+from yeto.rl.moe_layout import ExpertSubset, check_expert_partition, describe_topology
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 
@@ -343,10 +343,13 @@ class MilesChunkedFullParameterAdapter:
         matrix_merge: str = "avg",
         layout_mode: str = LAYOUT_SHAPE_BOUND,
         granularity: Granularity | None = None,
+        expert_subset: ExpertSubset | None = None,
     ) -> tuple[MilesChunkedFullParameterAdapter, ReferencedPolicyCut]:
         """``layout_mode`` ``shape-free`` (``yeto.rl.engine.shape_free_layout``):
         the layout comes from global tensors, so islands of different TP/EP/DP
-        shapes share one session; ``granularity`` is its session constants."""
+        shapes share one session; ``granularity`` is its session constants.
+        ``expert_subset``: the routed experts a partial-experts run trains (the
+        only experts with masters)."""
 
         if layout_mode == LAYOUT_SHAPE_FREE:
             manifests, plan = await cls.shape_free_plan(
@@ -364,6 +367,7 @@ class MilesChunkedFullParameterAdapter:
                 manifests,
                 max_fragment_bytes=max_fragment_bytes,
                 max_chunk_bytes=max_chunk_bytes,
+                expert_subset=expert_subset,
             )
         elif layout_mode == LAYOUT_SHAPE_BOUND:
             manifests = tuple(
@@ -381,6 +385,7 @@ class MilesChunkedFullParameterAdapter:
                 max_chunk_bytes=max_chunk_bytes,
                 stream_role=stream_role,
                 matrix_merge=matrix_merge,
+                expert_subset=expert_subset,
             )
         else:
             raise ValueError(f"unknown full-parameter layout mode {layout_mode!r}")
@@ -437,6 +442,7 @@ class MilesChunkedFullParameterAdapter:
         max_chunk_bytes: int,
         stream_role: str | None = None,
         matrix_merge: str = "avg",
+        expert_subset: ExpertSubset | None = None,
     ) -> MilesChunkedFullParameterAdapter:
         from miles.backends.megatron_utils.full_parameter_state import (
             FullParameterFragmentPlan,
@@ -468,8 +474,9 @@ class MilesChunkedFullParameterAdapter:
         ):
             raise ValueError("Miles semantic fragment byte bound is invalid")
         # MoE: every expert must have exactly one owner (each EP rank pushes
-        # its own experts); a dense model passes through unchanged.
-        check_expert_partition(specs)
+        # its own experts); a dense model passes through unchanged. Partial
+        # experts: exactly the selected experts have masters.
+        check_expert_partition(specs, subset=expert_subset)
         # No full-parameter run trains a vision tower: the RL samples carry no
         # images, so a trainable tower would only decay. A Nemotron-H VL
         # checkpoint trains its language model (Miles builds no vision part).
@@ -597,6 +604,7 @@ class MilesChunkedFullParameterAdapter:
         *,
         max_fragment_bytes: int,
         max_chunk_bytes: int,
+        expert_subset: ExpertSubset | None = None,
     ) -> MilesChunkedFullParameterAdapter:
         """Owner plans of a shape-free layout: each fragment is read by its owner
         as flat segments of its local masters (``free_member_order``)."""
@@ -641,7 +649,7 @@ class MilesChunkedFullParameterAdapter:
         if sum(len(owner.fragments) for owner in plans) != plan.layout.fragments.num_fragments:
             raise RuntimeError("owner fragment plans do not cover the layout")
         # The same checks as the shape-bound layout, on the global units.
-        check_expert_partition(plan.layout.specs)
+        check_expert_partition(plan.layout.specs, subset=expert_subset)
         check_frozen_excluded(unit.parameter.name for unit in plan.units.values())
         native = [spec for manifest in ordered for spec in manifest.specs]
         if sum(spec.numel for spec in native) != sum(spec.numel for spec in plan.layout.specs):

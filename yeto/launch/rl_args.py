@@ -1391,7 +1391,12 @@ def _prepare_rl_args(
         if getattr(args, "tuning", "lora") == "full" and not getattr(args, "rl_expert_selection", None):
             raise ValueError("--rl-model-recipe kimi_k31 needs --rl-expert-selection PATH")
     elif getattr(args, "rl_expert_selection", None):
-        raise ValueError("--rl-expert-selection belongs to --rl-model-recipe kimi_k31")
+        if getattr(args, "rl_model_recipe", "generic") != "generic" or getattr(args, "tuning", "lora") != "full":
+            raise ValueError("--rl-expert-selection belongs to --rl-model-recipe kimi_k31, or to --tuning full "
+                             "with the generic recipe (an in_place selection: partial experts of any MoE model)")
+        from .partial_experts_checks import check_generic_selection
+
+        args._partial_experts = check_generic_selection(args)
     if getattr(args, "rl_routed_expert_qat", None) and getattr(args, "rl_model_recipe", "generic") != "kimi_k31":
         raise ValueError("--rl-routed-expert-qat belongs to --rl-model-recipe kimi_k31")
     if getattr(args, "rl_model_recipe", "generic") == "deepseek-v4-flash":

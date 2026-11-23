@@ -136,7 +136,9 @@ def init_release_block(args, model: str) -> str:
         command += " --if-released"
     if args.model_revision:
         command += f" --model-revision {shlex.quote(args.model_revision)}"
-    if getattr(args, "rl_expert_selection", None):
+    if getattr(args, "rl_expert_selection", None) and getattr(args, "rl_model_recipe", None) != "generic":
+        # the K3.1 release overlay reads the slot-order selection (a generic partial-experts
+        # release is a whole checkpoint)
         command += f" --expert-selection {RL_EXPERT_SELECTION_PATH}"
     from ..rl.engine.init_from_release import FAILURE_FILE
 

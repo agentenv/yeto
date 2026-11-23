@@ -276,6 +276,9 @@ class RoleStreamConfig:
     # without this island (quorum K below the island count); a newer PULL then
     # supersedes an unanswered older one and the broadcast overwrites.
     partial_quorum: bool = False
+    # Partial experts: the routed experts that train (yeto.rl.moe_layout.ExpertSubset);
+    # only they have masters. Bound through the layout hash (their tensor names).
+    expert_subset: Any = None
     # Merge mode of every non-vocabulary fragment ("avg" or "rda"); the
     # vocabulary tables always average. Bound through the layout hash.
     matrix_merge: str = "avg"

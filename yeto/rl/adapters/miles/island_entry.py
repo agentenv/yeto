@@ -848,6 +848,36 @@ def _require_env(name: str, value: str) -> None:
     os.environ[name] = value
 
 
+def _configure_generic_partial_experts(args, provider) -> tuple[str, ...]:
+    """Generic partial experts (an ``in_place`` selection, any MoE model the Bridge reads).
+
+    Checks the selection against the provider's MoE geometry and the run's EP,
+    exports the switches every Ray worker's ``sitecustomize`` reads, arms the
+    model-provider hook here, and returns the Miles argv that freezes the
+    router's expert bias."""
+
+    from yeto.rl.adapters.miles.models.partial_experts import in_place as partial_experts
+    from yeto.rl.moe_geometry import from_bridge_provider
+
+    selection = partial_experts.load_in_place(args.rl_expert_selection)
+    partial_experts.check_against_geometry(selection, from_bridge_provider(provider),
+                                           ep_size=getattr(args, "expert_parallel", None))
+    for name, value in partial_experts.island_env(args.rl_expert_selection).items():
+        _require_env(name, value)
+    partial_experts.install()
+    return partial_experts.BIAS_UPDATE_ARGV
+
+
+def _partial_experts_subset(args):
+    """The expert subset of a generic partial-experts island (None otherwise)."""
+
+    if getattr(args, "rl_model_recipe", "generic") != "generic" or not getattr(args, "rl_expert_selection", None):
+        return None
+    from yeto.rl.adapters.miles.models.partial_experts import in_place as partial_experts
+
+    return partial_experts.expert_subset(partial_experts.load_in_place(args.rl_expert_selection))
+
+
 def _configure_deepseek_v4_env(args, *, clone_only_lora: bool, expert_full: bool) -> None:
     """Process-wide switches the DeepSeek V4 runtime patches read (sitecustomize).
 
@@ -1119,6 +1149,7 @@ def _dense_full_sync_config(
         # overlap's outer-step lag is bound into the session contract.
         overlap=bool(getattr(args, "sweep_overlap", False)),
         partial_quorum=async_rounds,
+        expert_subset=_partial_experts_subset(args),
         local_init=_local_init(args, async_rounds),
         local_init_fallback=bool(getattr(args, "local_init_fallback", False)),
         matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
@@ -2082,6 +2113,8 @@ def run_miles(
         )
         provider = model_bridge.to_megatron_provider(load_weights=False)
         provider.finalize()
+        if full_parameter and getattr(args, "rl_expert_selection", None):
+            extra_argv = (*extra_argv, *_configure_generic_partial_experts(args, provider))
         # all-linear on a MoE model adapts the routed experts one adapter per expert,
         # the layout Megatron-Bridge exports (yeto.rl.lora_layout)
         attention_specs = () if full_parameter else offline_canonical_specs(

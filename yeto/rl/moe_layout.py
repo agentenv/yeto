@@ -64,6 +64,9 @@ class ExpertSubset:
             if int(layer) < 0 or not ids or any(not 0 <= int(e) < self.num_experts for e in ids):
                 raise ValueError(f"layer {layer}: trainable ids must lie in [0, {self.num_experts})")
 
+    def __hash__(self) -> int:
+        return hash((self.num_experts, tuple(sorted((int(k), tuple(sorted(v))) for k, v in self.trainable.items()))))
+
     @classmethod
     def of(cls, num_experts: int, trainable: Mapping[int, Iterable[int]]) -> ExpertSubset:
         return cls(int(num_experts), {int(k): frozenset(int(e) for e in v) for k, v in trainable.items()})

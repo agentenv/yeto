@@ -229,7 +229,7 @@ def cut_bytes_per_node(args, num_nodes: int) -> float | None:
     """Estimated bytes of one round cut on one node: the trainable parameters with their
     optimizer state (bf16 weight + fp32 master/m/v, 14 bytes each), split over the nodes.
     Known for the Kimi-K3.1 partial-experts form (``--rl-expert-selection``); None otherwise."""
-    if not getattr(args, "rl_expert_selection", None):
+    if not getattr(args, "rl_expert_selection", None) or getattr(args, "rl_model_recipe", None) == "generic":
         return None
     from ..rl.engine import backends
     from .k31_checks import NON_EXPERT_PER_LAYER, check_expert_selection
