@@ -205,10 +205,10 @@ def check_eval(args) -> None:
 # of the full-parameter preset instead.
 ISLAND_SYNC_PRESETS = ("strict-avg", "full-parameter", "dense-full")
 DECOUPLED_LORA_REFUSED = (
-    "--rl-sync-preset decoupled with --tuning lora is not wired on the verl backend: the verl island "
-    "has no LoRA fragment session. Use --rl-sync-preset strict-avg (LoRA, one fragment), "
-    "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async with --tuning full "
-    "(the multi-fragment asynchronous counterpart of decoupled), or --rl-backend miles")
+    "--rl-sync-preset decoupled with --tuning lora is not wired on the verl backend yet (the verl island "
+    "has no LoRA fragment session; it lands in a follow-up). For full parameters use --tuning full with "
+    "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async, the multi-fragment asynchronous "
+    "counterpart of decoupled; for LoRA use --rl-sync-preset strict-avg, or --rl-backend miles")
 
 
 def check_sync_preset(args) -> None:
