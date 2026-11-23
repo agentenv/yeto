@@ -48,6 +48,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from yeto.breakers import events as breaker_events
+
 from . import money
 from . import status as el
 
@@ -244,6 +246,7 @@ class IslandPool:
     breaker: el.Breaker = field(default_factory=el.Breaker)
     budget: el.Budget = field(default_factory=el.Budget)
     _refused: str | None = None
+    _capped: el.Refusal | None = None  # the cap behind the last gate refusal (node / order / spend)
     _slot_hold: dict[Any, float] = field(default_factory=dict)  # slot -> its guard refused: not before
     # slot -> when an order on it last failed: tried after the slots that did not fail, so one
     # broken slot cannot be first in line every tick and trip the breaker while others idle
@@ -439,8 +442,9 @@ class IslandPool:
         billed = len(self.live())
         if self.ecfg.max_nodes is None:  # the default cap (2 x target) leaves out nodes a scale down drains
             billed -= len(self.retiring())
-        refused = self.budget.refusal(self.ecfg, billed_nodes=billed, target=self.config.target,
-                                      hourly_ucr=self.config.hourly())
+        self._capped = self.budget.check(self.ecfg, billed_nodes=billed, target=self.config.target,
+                                         hourly_ucr=self.config.hourly())
+        refused = None if self._capped is None else self._capped.why
         if refused is None and self.gate is not None:
             try:
                 refused = self.gate()
@@ -464,6 +468,10 @@ class IslandPool:
             if refused != self._refused and not refused.startswith("breaker open"):
                 self.log(f"pool: {refused}: not ordering")
                 self._event("order_refused", why=refused)
+                capped = self._capped
+                if capped is not None and capped.why == refused:
+                    self._trip(capped.breaker, capped.value, capped.limit, "pause", detail=refused,
+                               unit=capped.unit, legacy_event="order_refused")
             self._refused = refused
             return None
         self._refused = None
@@ -573,8 +581,26 @@ class IslandPool:
         if outcome == "open":
             self._event("breaker_open", after=what, trips=self.breaker.trips,
                         cooldown_s=round(self.breaker.open_until - now))
+            self._trip("pool.provision_breaker", self.breaker.trips, self.ecfg.breaker_max_trips, "halt",
+                       state="warn", detail=f"open for {self.breaker.open_until - now:.0f}s after {what}",
+                       legacy_event="breaker_open")
         elif outcome == "tripped":
             self._event("breaker_tripped", after=what, trips=self.breaker.trips)
+            self._trip("pool.provision_breaker", self.breaker.trips, self.ecfg.breaker_max_trips, "halt",
+                       detail=f"tripped after {what}: no more orders", legacy_event="breaker_tripped")
+
+    def _trip(self, name: str, value: float | None, limit: float | None, action: str, *,
+              slot: Any = None, **fields: Any) -> None:
+        """One ``rl_breaker`` event on the pool's tape next to the legacy one (a stop action
+        carries ``stop_reason``). It never changes what the pool does, and never raises into it."""
+        assert self.events is not None
+        legacy = fields.pop("legacy_event", None)
+        try:
+            breaker_events.trip(name, value, limit, action, emit=self.events.record, run=self.events.run,
+                                scope={"pool": self.config.shard_base, "slot": slot}, now=self.clock(),
+                                legacy_event=f"{self.events.prefix}{legacy}" if legacy else None, **fields)
+        except Exception as error:  # noqa: BLE001 - a report never stops the pool
+            self.log(f"pool: rl_breaker {name} not written: {error!r}"[:300])
 
     def _usd_per_h(self, m: Member) -> float | None:
         """One machine hour of ``m`` in USD from its provider's ``hourly_cost`` (the
@@ -1741,7 +1767,11 @@ class IslandPool:
             m.created = now  # the start timeout counts from the restart
             return
         self._event("sampler_crash_loop", ticket=m.ticket, shard=m.shard, restarts=m.restarts, detail=detail)
-        if not m.ever_ready and self.ecfg.crash_loop_before_ready == "halt":
+        halt = not m.ever_ready and self.ecfg.crash_loop_before_ready == "halt"
+        self._trip("pool.crash_loop", m.restarts, self.ecfg.max_sampler_restarts, "halt" if halt else "replace",
+                   slot=m.account, detail=f"{m.ticket} shard {m.shard}: {detail}"[:300],
+                   legacy_event="sampler_crash_loop")
+        if halt:
             # never joined: a replacement would run the same image / model / spec and fail alike
             self._config_error(m, f"crash loop before the first join: {detail}")
             return

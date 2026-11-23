@@ -2,8 +2,10 @@
 
 Severity: 0 critical / 1 warning / 2 info. Every alert carries a locate target
 (``island``, ``round``, ``metric``) the page uses to focus the chart, the
-round table and the island drill-down. Thresholds are configurable through
-``merged_thresholds`` (CLI ``--thresholds file.json``).
+round table and the island drill-down, and the breaker registry entry that
+judges it (``breaker``). Thresholds are declared in the registry
+(``yeto.breakers.layers.monitor``) and configurable through ``merged_thresholds``
+(CLI ``--thresholds file.json``).
 """
 
 from __future__ import annotations
@@ -12,81 +14,11 @@ import math
 import statistics
 from typing import Any
 
-DEFAULT_THRESHOLDS: dict[str, float] = {
-    "heartbeat_warn_s": 60.0,
-    "heartbeat_severe_s": 300.0,
-    # Island still starting (no rl_driver_start yet: weight load, Ray, engine init;
-    # FN 2x8 measured 10-15 min). Tasks 8.1.
-    "startup_warn_s": 1200.0,
-    "startup_severe_s": 1800.0,
-    # the actor init stage of a trainer start (model build + weight load: trainer_start_phase
-    # actor_import_done -> actor_init_done, or rl_startup_step before weights_loaded) writes
-    # no event for its whole length; K3.1 mbridge load measured ~22 min
-    "startup_init_warn_s": 2700.0,
-    "startup_init_severe_s": 3600.0,
-    # 8.4: one startup sub-step (Ray up / engines ready / weights loaded) taking
-    # longer than this while heartbeats still arrive (process alive, step stuck).
-    "startup_step_warn_s": 900.0,
-    "missed_consecutive_warn": 2,
-    "missed_consecutive_severe": 5,
-    "quorum_recent_rounds": 7,
-    "quorum_min_rounds": 10,
-    "quorum_factor": 3.0,
-    "grad_norm_window": 8,
-    "grad_norm_spike_factor": 5.0,
-    "clipfrac_info": 0.2,
-    "kl_warn": 0.1,
-    "budget_warn_pct": 60.0,
-    "budget_severe_pct": 80.0,
-    # SFT page reference lines (not alerts), 0 = none drawn: the expected step time
-    # of the recipe, the accelerator's HBM limit, the syncer host's RSS cap;
-    # "slow step" = step time above the reference x factor
-    "sft_ref_step_s": 0.0,
-    "sft_hbm_limit_gib": 0.0,
-    "sft_syncer_rss_limit_bytes": 0.0,
-    "sft_slow_factor": 1.1,
-    # SFT island status: "stopped" after no step for factor x step time p50 + slack
-    "sft_stop_factor": 1.5,
-    "sft_stop_slack_s": 300.0,
-    # CompactionRL (sampler rounds' agentic.compaction), over each sampler's last
-    # compaction_window_rounds rounds that carry it, once it has compaction_min_trials
-    # summaries / compacted trials: summary_ok share below warn / severe; share of the
-    # compacted trials truncated after compacting above warn; share of trials that
-    # compacted at all above info (the context budget is small for the tasks)
-    "compaction_window_rounds": 5,
-    "compaction_min_trials": 5,
-    "compaction_summary_ok_warn": 0.9,
-    "compaction_summary_ok_severe": 0.5,
-    "compaction_truncated_warn": 0.2,
-    "compaction_frac_info": 0.5,
-    # share of multi-segment trials not written (lost: drain timeout / other version /
-    # aborted; dropped: group not written) minus the share of one-segment trials
-    "compaction_long_loss_gap": 0.2,
-    # trials the gateway invalidated for a fork / history rewrite of a compacted session
-    # (compaction_fork_lost), as a share of the compacted trials (written + fork-lost)
-    "compaction_fork_lost_warn": 0.05,
-    # agentic samplers: trials that ended over the last trial_fail_window_rounds rounds of the
-    # current incarnation in which any trial ended, once trial_fail_min_trials ended: none
-    # with a verdict (ok / policy_limit) is critical, an aborted (infra) share above warn
-    # a warning. Mirrors the run breaker's "every group INFRA" rule on the page.
-    "trial_fail_window_rounds": 10,
-    "trial_fail_min_trials": 8,
-    "trial_fail_warn": 0.5,
-    # an async run whose samplers are up while no trainer island is on the tapes (its
-    # launch failed, or it was torn down): seconds since the first sampler event
-    "trainer_missing_warn_s": 1200.0,
-    "trainer_missing_severe_s": 1800.0,
-    # trainer launches that ended with a failure leave (island_leave not STOPPED / DONE ...)
-    # in the last trainer_fail_window_s: one is a warning, trainer_fail_loop or more critical
-    "trainer_fail_window_s": 3600.0,
-    "trainer_fail_loop": 2,
-    # a sampler waiting on a full backlog (as it counts it) while the trainers' read
-    # position leaves less than its cap: it reported within this many seconds
-    "stale_read_recent_s": 300.0,
-    # a trainer skipping releases because the previous upload is still in flight, with no
-    # release since the first skip of the streak, for this long
-    "release_stall_warn_s": 600.0,
-}
+from yeto.breakers.layers import monitor as monitor_layer
+
+# the numbers and their notes live in the breaker registry (monitor.dashboard_* entries):
+# one definition for this page, ``yeto run status`` and ``yeto breaker show``
+DEFAULT_THRESHOLDS: dict[str, float] = {p.name: p.default for b in monitor_layer.DASHBOARD for p in b.params}
 
 
 def merged_thresholds(overrides: dict | None) -> dict:
@@ -101,7 +33,8 @@ def merged_thresholds(overrides: dict | None) -> dict:
 def _alert(sev: int, rule: str, title: str, detail: str, *, island: str | None = None,
            round: Any = None, metric: str | None = None) -> dict:
     return {"sev": sev, "rule": rule, "title": title, "detail": detail,
-            "island": island, "round": round, "metric": metric}
+            "island": island, "round": round, "metric": metric,
+            "breaker": monitor_layer.DASHBOARD_RULES.get(rule)}
 
 
 # keep in sync with yeto.rl.engine.telemetry.STARTUP_STEPS (dashboard does not import the engine)

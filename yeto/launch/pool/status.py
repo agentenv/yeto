@@ -2,7 +2,8 @@
 one island (:class:`LeaseStatus`), what one look at its node shows (:class:`Probe`),
 the verdict of the two (:func:`classify`), the eviction knobs (:class:`ElasticConfig`),
 the provisioning circuit breaker (:class:`Breaker`), the run budget (:class:`Budget`)
-and the event log (:class:`EventLog`).
+and the event log (:class:`EventLog`). Their limits are registered as ``pool.*`` entries
+of the breaker registry (:mod:`yeto.breakers.layers.pool`).
 
 Nothing here talks to a cloud. The National Compute pool (``yeto.launch.nc``) is
 where these were first written.
@@ -392,6 +393,18 @@ class Breaker:
         return "open"
 
 
+@dataclass(frozen=True)
+class Refusal:
+    """An order refused by a cap: why, the registry entry (``pool.node_cap`` /
+    ``pool.spend_cap``), the value it judged and its limit (``unit``: none for counts)."""
+
+    why: str
+    breaker: str
+    value: float
+    limit: float
+    unit: str | None = None
+
+
 @dataclass
 class Budget:
     """Spend of the run in ucr: the active seconds of every member times its rate
@@ -407,21 +420,30 @@ class Budget:
 
     def refusal(self, cfg: ElasticConfig, *, billed_nodes: int, target: int, hourly_ucr: int) -> str | None:
         """Why a new order is refused now (None: allowed)."""
+        refused = self.check(cfg, billed_nodes=billed_nodes, target=target, hourly_ucr=hourly_ucr)
+        return None if refused is None else refused.why
+
+    def check(self, cfg: ElasticConfig, *, billed_nodes: int, target: int, hourly_ucr: int) -> Refusal | None:
+        """:meth:`refusal` with the breaker that refused, its value and its limit."""
         cap_nodes = cfg.max_nodes if cfg.max_nodes is not None else 2 * target
         if billed_nodes >= cap_nodes:
-            return f"{billed_nodes} nodes billed, max_nodes {cap_nodes}"
+            return Refusal(f"{billed_nodes} nodes billed, max_nodes {cap_nodes}", "pool.node_cap",
+                           billed_nodes, cap_nodes)
         if cfg.max_orders is not None and self.orders >= cfg.max_orders:
-            return f"{self.orders} orders placed, max_orders {cfg.max_orders}"
+            return Refusal(f"{self.orders} orders placed, max_orders {cfg.max_orders}", "pool.node_cap",
+                           self.orders, cfg.max_orders)
         if cfg.max_run_spend_ucr is not None and self.spent_ucr + hourly_ucr > cfg.max_run_spend_ucr:
-            return (f"spend {self.spent_ucr:.0f} + one node hour {hourly_ucr} > "
-                    f"max_run_spend_ucr {cfg.max_run_spend_ucr}")
+            return Refusal(f"spend {self.spent_ucr:.0f} + one node hour {hourly_ucr} > "
+                           f"max_run_spend_ucr {cfg.max_run_spend_ucr}", "pool.spend_cap",
+                           self.spent_ucr + hourly_ucr, cfg.max_run_spend_ucr, "ucr")
         if cfg.max_run_spend_usd is not None:
             from .money import to_usd  # noqa: PLC0415
 
             spent, hour = to_usd(self.spent_ucr, "ucr"), to_usd(hourly_ucr, "ucr")
             if spent + hour > float(cfg.max_run_spend_usd):
-                return (f"spend ${spent:.2f} + one node hour ${hour:.2f} > max_run_spend_usd "
-                        f"${float(cfg.max_run_spend_usd):.2f}")
+                return Refusal(f"spend ${spent:.2f} + one node hour ${hour:.2f} > max_run_spend_usd "
+                               f"${float(cfg.max_run_spend_usd):.2f}", "pool.spend_cap",
+                               spent + hour, float(cfg.max_run_spend_usd), "usd")
         return None
 
     @property
@@ -452,6 +474,15 @@ class EventLog:
     def __call__(self, event: str, **detail: Any) -> dict[str, Any]:
         doc = {"t": self.clock(), "event": f"{self.prefix}{event}", **({"run": self.run} if self.run else {}),
                **detail}
+        return self._write(doc, detail)
+
+    def record(self, doc: Mapping[str, Any]) -> dict[str, Any]:
+        """Write an event built elsewhere under its own name (``rl_breaker``: no prefix)."""
+        doc = {"t": self.clock(), **({"run": self.run} if self.run else {}), **doc}
+        return self._write(doc, {k: doc[k] for k in ("name", "state", "action", "value", "limit", "stop_reason")
+                                 if doc.get(k) is not None})
+
+    def _write(self, doc: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
         self.events.append(doc)
         self.log(f"pool event {doc['event']} " + " ".join(f"{k}={v}" for k, v in _shown(detail).items()))
         if self.path is not None:
