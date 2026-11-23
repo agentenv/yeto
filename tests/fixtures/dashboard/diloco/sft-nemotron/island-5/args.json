@@ -1,0 +1,1 @@
+{"tensor_model_parallel_size": 4, "expert_model_parallel_size": 8, "pipeline_model_parallel_size": 3, "world_size": 24, "train_iters": 762, "global_batch_size": 192, "max_length": 28672, "cached_dataset": ["data/cached_win_v2"]}

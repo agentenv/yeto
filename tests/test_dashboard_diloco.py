@@ -31,7 +31,7 @@ D = FX / "diloco"
 
 def load(name: str, *, skip=lambda path: False) -> Reducer:
     r = Reducer(run=name)
-    paths = [p for p in sorted((D / name).rglob("*.jsonl")) if not skip(p)]
+    paths = [p for p in sources.discover([str(D / name)]) if not skip(p)]
     load_all(r, [str(p) for p in paths])
     return r
 
@@ -334,7 +334,7 @@ eval(app);
 const texts = svg.map((n) => String(n.textContent || "")).filter(Boolean);
 const box = (svg.find((n) => /to syncer|to trainers/.test(n.attrs["aria-label"] || "")) || { attrs: {} }).attrs;
 console.log(JSON.stringify({ hidden: els.topoBox.hidden, note: els.topoNote.textContent, title: els.topoBox.attrs.title || null,
-  texts, label: box["aria-label"] || null, viewBox: box.viewBox || null, kpis: els.rKpis.innerHTML, nodes: els.rNodes.innerHTML,
+  texts, label: box["aria-label"] || null, viewBox: box.viewBox || null, kpis: mk("rKpis").innerHTML, nodes: mk("rNodes").innerHTML,
   matrix: made.map((n) => n.innerHTML).filter((h) => /class="fm"/.test(h)).join(""), legend: mk("topoLg").innerHTML }));
 """
 
@@ -399,3 +399,66 @@ def test_async_grpo_page_keeps_v1(tmp_path):
     assert out["label"] == "samplers to run store to trainers" and "layout: async-grpo" in (out["title"] or "")
     assert "Buffer backlog" in out["kpis"] and "Syncer step" not in out["kpis"] and "Round / policy" in out["nodes"]
     assert "Fragment delta PUSH" not in out["legend"]
+
+
+# -- decoupled DiLoCo SFT (topology_sft.py) ------------------------------------------------
+SFT = "sft-nemotron"  # 10 ms-swift learner islands, P 64, H 32, trimmed to the last 60 steps / 120 merges
+
+
+def test_sft_layout_and_its_reason():
+    r = load(SFT)
+    lay = r.page_view(now=r.max_ts)["layout"]
+    assert lay["kind"] == "sft" and "SFT islands 10" in lay["reason"] and "120 syncer merge record(s)" in lay["reason"]
+    for name in ("run-a", "run-b", "k31-synced-group", "async-e2e"):  # the RL syncer tape is never an SFT record
+        assert load(name).sft.sft_records == 0
+
+
+def test_sft_without_a_syncer_draws_nothing():
+    r = load(SFT, skip=lambda p: "syncer" in p.parts)
+    view = r.page_view(now=r.max_ts)
+    assert view["layout"]["kind"] == "none" and "topology" not in view and view["sft"]["islands"]
+
+
+def test_sft_syncer_learners_and_fragments_match_the_tapes():
+    r = load(SFT)
+    tape = lines(D / SFT / "syncer" / "tape.jsonl")
+    merges = [m for m in tape if "fragment" in m and "kind" not in m]
+    d = diloco(r)
+    assert (d["kind"], d["P"], d["M"], d["N"], d["H"], d["total_steps"]) == ("sft", 64, 10, 1, 32, 1510)
+    assert d["versions"] == [max(m["step"] for m in merges if m["fragment"] == f) for f in range(64)]
+    assert d["shards"][0]["step"] == 210 and d["roster"] == 10 and not d["done"]
+    by = {t["id"]: t for t in d["trainers"]}
+    one = by["1"]
+    last = merges[-1]
+    resp = next(x for x in last["responders"] if x["id"] == 1)
+    assert one["contrib"][last["fragment"]] == {"step": 210, "frag": 17, "base": resp["base_version"],
+                                                "staleness": resp["staleness"], "tokens": resp["c_tokens"],
+                                                "recv_s": resp["recv_seconds"], "ts": resp["arrived_unix"]}
+    assert [n["machine"] for n in by["0"]["nodes"]] == ["m01", "m02", "m03"] and by["0"]["nodes"][0]["gpus"] == 8
+    assert by["0"]["learner"]["layout"] == "TP4/EP8/PP3" and by["0"]["steps_total"] == 1092 and by["0"]["step"] == 189
+    # merged after the island's last applying step (yeto_steps applies > 0) = not applied yet
+    steps = lines(D / SFT / "island-0" / "yeto_steps.jsonl")
+    applied = max(x["time"] for x in steps if x["applies"])
+    want = sum(1 for m in merges if m["time_unix"] > applied)
+    assert by["0"]["pending_n"] == want == 2
+    # the deltas accepted after the last merge make the next step's round
+    acc = sorted({str(x["island_id"]) for x in tape if x.get("kind") == "delta_accepted" and x["time_unix"] > last["time_unix"]})
+    assert [(x["step"], x["frag"], x["pushed"]) for x in d["rounds"]] == [(211, 18, acc)] and acc == ["8", "9"]
+
+
+def test_sft_raises_no_diloco_alert():
+    r = load(SFT)
+    assert [a for a in r.overview(now=r.max_ts)["alerts"] if a["rule"].startswith("diloco_")] == []
+
+
+def test_page_draws_the_sft_islands_on_the_sft_page(tmp_path):
+    out = _smoke(tmp_path, load(SFT))
+    joined = " | ".join(out["texts"])
+    assert out["hidden"] is False and out["label"] == "learner islands to syncer" and "layout: sft" in out["note"]
+    assert out["viewBox"].startswith("0 0 1480 ")
+    for want in ("Island 0", "Learner 0 · fast island", "Learner 9 · slow island 9", "n0 · m01", "card ×8", "step 210",
+                 "of 1510 · 120 merges", "H 32", "loss 0.6396"):
+        assert want in joined, want
+    assert "t210" in out["matrix"] and "base v146" in out["matrix"] and "Island 9" in out["matrix"]
+    assert "learner → syncer" in out["legend"]
+    assert out["kpis"] == ""  # the SFT page keeps its own cards (sKpis), the RL cards stay empty

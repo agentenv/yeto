@@ -1190,9 +1190,15 @@ class Reducer:
         """SFT islands (ms-swift) and the syncer as the page draws them; None for RL runs."""
         if not self.sft.islands and not self.sft.sft_records:
             return None  # RL run (its syncer tape / syncer.log alone do not make an SFT run)
+        key = (self.sft.records, len(self.merges), now)  # the page view and its topology (topology_sft) share it
+        hit = getattr(self, "_sft_view", None)
+        if hit is not None and hit[0] == key:
+            return hit[1]
         refs = {k: self.thresholds.get(k, v) for k, v in sft_mod.DEFAULT_REFS.items()}
         refs = {k: v for k, v in refs.items() if v > 0 or k not in sft_mod.REF_LINES}  # unset lines are not drawn
-        return self.sft.view(now=now, merges=self.merges, refs=refs)
+        out = self.sft.view(now=now, merges=self.merges, refs=refs)
+        self._sft_view = (key, out)
+        return out
 
     def _feed_other(self, r: dict, iid: str | None, ts: float | None) -> None:
         if iid is not None:

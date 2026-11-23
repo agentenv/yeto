@@ -325,7 +325,7 @@ function sft(S){
     ["Latest loss",lastWith(fast,C("loss"))?k(lastWith(fast,C("loss"))[C("loss")],4):"n/a",losses.join(" · ")||"no data"],
     ["Syncer outer step",(sy.outer_step==null?"0":sy.outer_step)+" / "+(sy.total_steps==null?"n/a":sy.total_steps),sy.eta_ts?"ETA final cut "+day(sy.eta_ts):(sy.outer_step==null?"waiting for the first outer step":"ETA n/a")],
     ["Rejected / timeout / not carried",cnt("rejected")+" / "+cnt("timeout")+" / "+cnt("not_carried"),"last hour, from "+(sy.log_seen?"syncer.log":"the syncer tape")],
-    ["Syncer RSS",rl?bytes(rl[1]):"n/a",rl?(fin(cap)?(100*rl[1]/cap).toFixed(0)+"% of the "+bytes(cap)+" cap · ":"")+"sampled "+ago(rl[0]):"not sampled"]];
+    ["Syncer RSS",rl?bytes(rl[1]):"n/a",rl?(fin(cap)?(100*rl[1]/cap).toFixed(0)+"% of the "+bytes(cap)+" cap · ":"")+"sampled "+ago(rl[0]):OFF?"not sampled in this offline snapshot (no collector RSS samples)":"not sampled (no collector RSS samples)"]];
   $("sKpis").innerHTML=kp.map(function(x){return '<div class="kc"'+(x[3]?' title="'+esc(x[3])+'"':'')+'><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
   // islands now
   var hbmLim=refs.sft_hbm_limit_gib,hasLim=fin(hbmLim),hbmMax=Math.max(64,hasLim?hbmLim*1.15:0); // no limit configured: no limit marker
@@ -673,6 +673,8 @@ function render(view,offline){
   var RL=!S&&!!$("rlmRoot");
   if(document.body&&document.body.classList)document.body.classList.toggle("sftmode",!!S||RL);
   if(sroot)sroot.hidden=!S;if(rroot)rroot.hidden=!!S;
+  // one topology panel: under the SFT page's islands for a DiLoCo SFT run, else in the RL page
+  var tb=$("topoBox"),slot=$(S?"sTopoSlot":"rTopoSlot");if(tb&&slot&&tb.parentNode!==slot)slot.appendChild(tb);
   controls(offline,onReload);
   var run=(V.overview||{}).run;
   if(S){$("title").innerHTML='yeto metrics <span class="tg">'+esc(run||"unnamed run")+'</span><span class="tg">SFT · decoupled DiLoCo</span>';
