@@ -86,6 +86,11 @@ def parse_args(argv):
     p.add_argument("--reward-sha256", default=None)
     p.add_argument("--initial-adapter", default=None)
     p.add_argument("--initial-adapter-sha256", default=None)
+    # the model recipe flags the launcher forwards; anything but the generic
+    # recipe is refused (run_config_rules.model_recipe_problems), never dropped
+    p.add_argument("--rl-model-recipe", default=None)
+    p.add_argument("--rl-expert-selection", default=None)
+    p.add_argument("--expert-full-count", type=int, default=0)
     p.add_argument("--rl-island-pool", action="store_true")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
     p.add_argument("--rl-sync-island-lease-s", type=float, default=None)
@@ -698,6 +703,11 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
 def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
     run_config_rules.refuse_agentic_argv(ignored)  # never ignore agentic flags
+    recipe_problems = run_config_rules.model_recipe_problems(
+        recipe=args.rl_model_recipe, expert_selection=args.rl_expert_selection,
+        expert_full_count=args.expert_full_count)
+    if recipe_problems:
+        raise SystemExit(run_config_rules.model_recipe_refusal(recipe_problems))
     if not args.rl_single_island_no_sync:
         problem = run_config_rules.island_sync_preset_problem(args.sync_preset,
                                                               parameter_mode=args.parameter_mode)
