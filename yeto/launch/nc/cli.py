@@ -1614,7 +1614,7 @@ def _print_breaker_deprecations(cfg: dict[str, Any]) -> None:
 
 _OVERRIDE_KEYS = ("data_slot", "drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens",
                   "continues_shard")
-_POOL_KEYS = ("drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens", "dispense")
+_POOL_KEYS = ("drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens", "dispense", "breakers")
 
 
 def _add_sampler_override_args(p) -> None:
@@ -1663,6 +1663,13 @@ def _overrides(cfg) -> dict:
             check_store_config(cfg["dispense"])
         except Exception as error:  # noqa: BLE001 - DispenseError: a pool config error
             raise ValueError(f"pool sampler config: dispense: {error}") from error
+    if cfg.get("breakers") is not None:  # the run's sampler / harness settings (yeto run up)
+        from yeto.breakers import BreakerConfigError, parse_section  # noqa: PLC0415
+
+        try:
+            parse_section(cfg["breakers"])
+        except BreakerConfigError as error:
+            raise ValueError(f"pool sampler config: breakers: {error}") from error
     return {k: cfg.get(k) for k in _POOL_KEYS}
 
 

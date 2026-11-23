@@ -706,6 +706,10 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     from .rollout_data_path import normalize_spec  # noqa: PLC0415
 
     env = os.environ if environ is None else environ
+    from .sampler_breakers import apply_harness_env  # noqa: PLC0415
+
+    for change in apply_harness_env(spec):  # the run's breakers.harness values (yeto run up)
+        print(f"[engine-sampler] breakers: {change}", flush=True)
     if stores is None:
         spec = normalize_spec(spec)
     spec = apply_rollout_quant(spec)

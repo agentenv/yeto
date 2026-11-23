@@ -140,19 +140,37 @@ def dispense_config(namespace: str, *, lease_s: float | None = None, max_redo: i
     return out
 
 
+def merge_breakers(base: Mapping[str, Any], extra: Mapping[str, Any], where: str = "breakers") -> dict[str, Any]:
+    """``extra`` merged into the ``breakers`` section ``base``: a value both set has to be the
+    same (else ValueError, naming the key); neither input is changed."""
+    out = json.loads(json.dumps(dict(base)))
+    for key, value in extra.items():
+        at = f"{where}.{key}"
+        if key not in out:
+            out[key] = json.loads(json.dumps(value))
+        elif isinstance(out[key], Mapping) and isinstance(value, Mapping):
+            out[key] = merge_breakers(out[key], value, at)
+        elif out[key] != value or isinstance(out[key], bool) != isinstance(value, bool):
+            raise ValueError(f"{at}: {out[key]!r} in the spec, {value!r} from the run config")
+    return out
+
+
 def apply_sampler_overrides(spec: Mapping[str, Any], *, data_slot: str | None = None,
                             drop_zero_variance: bool | None = None, thinking_effort: str | None = None,
                             reload: str | None = None, n: int | None = None,
                             max_tokens: int | None = None, continues_shard: str | None = None,
-                            dispense: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                            dispense: Mapping[str, Any] | None = None,
+                            breakers: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The run knobs of one sampler laid over a base spec (None: keep the base value),
     with the same meaning as ``yeto engine-sampler-modal``: ``data_slot`` "I/N" (this
     sampler's prompt rows), ``drop_zero_variance`` (``drop_zero_variance_groups``),
     ``thinking_effort`` (the chat template kwarg), ``reload`` ``hot`` (in-place reload
     with expert-file updates and the probe) or ``restart``, ``n`` and ``max_tokens``
     (sampling); ``continues_shard``: the shard this replacement sampler continues;
-    ``dispense``: ``prompts.dispense`` (:func:`dispense_config`; excludes ``data_slot``). Refuses a ``max_tokens`` that does not fit ``max_model_len`` with the
-    spec's ``max_prompt_tokens``."""
+    ``dispense``: ``prompts.dispense`` (:func:`dispense_config`; excludes ``data_slot``);
+    ``breakers``: merged into the spec's ``breakers`` section (:func:`merge_breakers`: the
+    run's sampler / harness settings, ``yeto run up``). Refuses a ``max_tokens`` that does
+    not fit ``max_model_len`` with the spec's ``max_prompt_tokens``."""
     from yeto.rl.engine.data_split import DataSlot
 
     out = json.loads(json.dumps(spec))
@@ -165,6 +183,8 @@ def apply_sampler_overrides(spec: Mapping[str, Any], *, data_slot: str | None = 
         if data_slot or prompts.get("data_slot"):
             raise ValueError("a dispensed sampler takes no data slot")
         prompts["dispense"] = dict(dispense)
+    if breakers:
+        out["breakers"] = merge_breakers(out.get("breakers") or {}, breakers)
     if continues_shard:  # a replacement: continue that shard's prompts (sampler_resume handoff)
         if continues_shard == out.get("sampler_id"):
             raise ValueError("continues_shard names the sampler's own shard")
