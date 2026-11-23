@@ -168,7 +168,9 @@ Inspect and end runs. Each takes the run name (its `--cluster-prefix`).
 | `yeto stop-run RUN` | stop a run cleanly | — |
 | `yeto cost --run RUN` | cost per resource and per UTC hour, GPU effective utilization ([COST_GUARD.md](COST_GUARD.md)) | `--json`, `--no-billing`, `--prices FILE`, `--tapes GLOB...`, `--gap-minutes` |
 | `yeto cleanup --run RUN` | release every resource the run's ledger still lists, each by its exact id | `--dry-run` |
-| `yeto breaker --trainer-log LOG` | read-only health breakers over a run's event tapes; exit 1 on a trip ([BREAKER.md](BREAKER.md)) | `--sampler-tapes`, `--sampler-hardware`, `--noise-floor`, `--logprob-warn`, `--logprob-act`, `--window`, `--flips`, `--json` |
+| `yeto breaker check --trainer-log LOG` | read-only health breakers over a run's event tapes; exit 1 on a trip ([BREAKER.md](BREAKER.md)); `yeto breaker --trainer-log LOG` is the same | `--sampler-tapes`, `--sampler-hardware`, `--noise-floor`, `--logprob-warn`, `--logprob-act`, `--window`, `--flips`, `--json`; `--config RUN.json`: the dependency rules only |
+| `yeto breaker show --config RUN.json` | every breaker's effective value, its source, switch groups, dependency findings and conflicts; exit 1 on an error or a conflict ([BREAKERS.md](BREAKERS.md)) | `--breakers FILE`, `--spec FILE`, `--pool NAME`, `--layer L`, `--json`, `--all` |
+| `yeto breaker list` | the breaker registry, no config needed | `--markdown`, `--json`, `--layer L` |
 
 `yeto down RUN` also releases what the run's resource ledger still lists (sampler
 apps, NC leases). The launch flags of the cost guard (`--budget-usd`, idle

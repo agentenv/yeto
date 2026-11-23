@@ -93,8 +93,12 @@ def _example(kind: str) -> tuple[int, dict[str, Any]]:
 def _check_run(cfg: dict[str, Any], tmp: Path) -> None:
     """``yeto run up``'s own reading of a run config: load_config, then every pool through pool_config."""
     _, pool = _example("pool")
+    pool = _filled(pool, tmp)
+    spec = Path(pool["spec"])
+    if not spec.exists():  # breakers.sampler / .harness ride in the pool's spec: run up loads it
+        spec.write_text("{}")
     pool_file = tmp / "pool.json"
-    pool_file.write_text(json.dumps(_filled(pool, tmp)))
+    pool_file.write_text(json.dumps(pool))
     cfg = _filled(cfg, tmp)
     if "pool" in cfg:
         cfg["pool"]["config"] = str(pool_file)
@@ -135,7 +139,7 @@ def _check_pool(cfg: dict[str, Any], tmp: Path) -> None:
 
 # A provider fragment may carry the pool keys that go with it (slot count, target, shard base).
 POOL_PROVIDER_KEYS = {"provider", "target", "slots", "shard_base"}
-RUN_KEYS = {"starvation", "controller", "rollout", "samplers", "budget", "first_group", "dashboard"}
+RUN_KEYS = {"starvation", "controller", "rollout", "samplers", "budget", "first_group", "dashboard", "breakers"}
 
 
 def _cases():

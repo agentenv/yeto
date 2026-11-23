@@ -97,3 +97,14 @@ All events go to `~/.yeto/runs/<run>/cost-events.jsonl` and to the launcher log 
 `idle_shutdown`, `cost_guard_stop` (mode graceful / forced), `nc_lease_overdue`.
 
 `--no-cost-guard` turns the guard off. The ledger, the reaper and `yeto cleanup` keep working.
+
+## Registry names
+
+The guard's limits are breakers of the `launch` layer
+([BREAKERS.md](BREAKERS.md)): `launch.budget` (`--budget-usd`, `--budget-warn-usd`,
+`--budget-stop-grace-minutes`; `--budget-usd off` turns it off), `launch.idle` (the idle flags) and
+`launch.nc_lease_overdue` (`--nc-lease-overdue-minutes`, default 5). `--no-cost-guard` is the
+`cost_guard` switch group over those three. They can also be set in a `breakers:` section
+(`yeto launch --breakers FILE`, or the run config of `yeto run up`), where `launch.budget.usd`
+inherits `run.budget.usd`. Each trip also writes an `rl_breaker` line to `cost-events.jsonl`, and a stop
+puts `stop_reason=breaker:<name>` on the launcher's last line and in the run record.
