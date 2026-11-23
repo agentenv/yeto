@@ -105,6 +105,17 @@ def test_budget_thresholds(hours, sev):
     assert [a["sev"] for a in got] == ([] if sev is None else [sev])
 
 
+
+def test_budget_past_the_cap_says_reached_not_a_negative_eta():
+    r = Reducer(budget_usd=10.0, prices={"prices": {"nebius:H200": 4.0}})
+    r.feed({"event": "island_ready", "island": "x-l0-eu", "island_id": 0, "cloud": "nebius",
+            "gpu": "H200", "gpus": 3, "time_unix": T0})
+    (got,) = [a for a in r.overview(now=T0 + 3 * 3600)["alerts"] if a["rule"] == "budget"]
+    assert got["sev"] == 0 and got["detail"].endswith(", cap reached")
+    assert "reached in about" not in got["detail"]
+    (early,) = [a for a in r.overview(now=T0 + 0.6 * 3600)["alerts"] if a["rule"] == "budget"]
+    assert "reached in about" in early["detail"] and "-" not in early["detail"].split("about")[1]
+
 def test_alerts_sorted_by_severity_and_locatable():
     r = four_island_reducer()
     r.feed({"event": "rl_reconfiguration", "island_id": 3, "result": "RECOVERY_REQUIRED",
