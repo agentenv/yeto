@@ -38,8 +38,9 @@ import json
 import os
 import sys
 import time
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from yeto.protocol import (
@@ -490,6 +491,20 @@ class RoleFragmentSubmission:
     c_tokens: int
     payload_bytes: int
     pull_to_push_seconds: float
+    # wall clock: the PULL (permit) arrived, and the PUSH was handed to the client's send queue
+    permit_received_unix: float | None = field(default=None, compare=False)
+    enqueued_unix: float | None = field(default=None, compare=False)
+
+
+def _unix_of(monotonic_at: float) -> float:
+    """Wall clock of an earlier ``time.monotonic()`` reading."""
+    return time.time() - (time.monotonic() - monotonic_at)
+
+
+# Fragment records kept for the sync session's next boundary (one per fragment
+# and round, drained at every boundary); the bound only matters for a stream
+# nothing drains.
+FRAGMENT_RECORDS_MAX = 4096
 
 
 @dataclass(frozen=True)
@@ -510,6 +525,7 @@ class SentPush:
     link_generation: int
     timings: dict[str, float]
     finished_at: float  # time.monotonic() when the last chunk was queued
+    nbytes: int | None = None  # PUSH payload bytes on the wire
 
 
 @dataclass(frozen=True)
@@ -691,6 +707,14 @@ class FullParameterRoleStream:
         # Per fragment: the generation of the link its PULLs arrive on.
         self._link_generations: dict[int, int] | None = None
         self._staged: dict[tuple[int, int], Any] = {}
+        # Per staged broadcast: when it arrived (monotonic) and its payload bytes.
+        self._staged_arrival: dict[tuple[int, int], tuple[float, int | None]] = {}
+        # rl_fragment_push / rl_fragment_bcast records since the last
+        # drain_fragment_records (FullParameterSync emits the actor's).
+        self._fragment_records: deque[dict[str, Any]] = deque(maxlen=FRAGMENT_RECORDS_MAX)
+        # (fragment_id, global_step) this island pushed and whose broadcast it
+        # has not applied yet: an applied round without one was overwritten.
+        self._pushed_rounds: set[tuple[int, int]] = set()
         self._pinned_cuts: dict[int, tuple[Any, int]] = {}
         self._pinned_anchors: dict[int, tuple[Any, int]] = {}
         # Overlap: the cut the current local round started from, and the
@@ -1449,6 +1473,7 @@ class FullParameterRoleStream:
                 raise RuntimeError("role-stream staged fragment replay changed bytes")
             if previous is None:
                 self._staged[key] = stored
+                self._staged_arrival[key] = (update.received_at, getattr(update, "payload_bytes", None))
                 staged.append(key)
         return tuple(staged)
 
@@ -1501,6 +1526,7 @@ class FullParameterRoleStream:
                 )
             finally:
                 rebased.release()  # the applied target holds its own references
+        self._record_applied(fragment_id, version, catch_up=catch_up)
         self._close_staged_round(fragment_id, version)
         return (fragment_id,)
 
@@ -1526,7 +1552,8 @@ class FullParameterRoleStream:
             for fragment_id, version, catch_up in items
         }
         await self._apply_authoritative(selected)
-        for fragment_id, version, _catch_up in items:
+        for fragment_id, version, catch_up in items:
+            self._record_applied(fragment_id, version, catch_up=catch_up)
             self._close_staged_round(fragment_id, version)
         return tuple(fragment_ids)
 
@@ -1556,13 +1583,46 @@ class FullParameterRoleStream:
 
     def _close_staged_round(self, fragment_id: int, version: int) -> None:
         self._staged.pop((fragment_id, version), None)
+        self._staged_arrival.pop((fragment_id, version), None)
         for older in [k for k in self._staged if k[0] == fragment_id and k[1] < version]:
             self._staged.pop(older).release()
+            self._staged_arrival.pop(older, None)
         if self.config.partial_quorum:
             # The round closed: an unanswered PULL of it can never commit.
             permit = self._pending.get(fragment_id)
             if permit is not None and permit.global_step <= version:
                 self._pending.pop(fragment_id)
+
+    def _record_applied(self, fragment_id: int, version: int, *, catch_up: bool) -> None:
+        """One ``rl_fragment_bcast`` record (the LoRA stack's schema): a staged
+        broadcast is in the trainable weights after this safe boundary's apply.
+        ``queue_seconds`` runs from its arrival to the end of that apply, so
+        ``applied_unix - received_unix == queue_seconds`` as on the LoRA stack."""
+
+        applied_at, applied_unix = time.monotonic(), time.time()
+        received_at, payload_bytes = self._staged_arrival.get((fragment_id, version), (applied_at, None))
+        queue_seconds = max(0.0, applied_at - received_at)
+        pushed = (fragment_id, version) in self._pushed_rounds
+        self._pushed_rounds = {key for key in self._pushed_rounds if key[0] != fragment_id or key[1] > version}
+        self._fragment_records.append({
+            "event": "rl_fragment_bcast",
+            "fragment_id": fragment_id,
+            "version": version,
+            **({} if payload_bytes is None else {"payload_bytes": int(payload_bytes)}),
+            "queue_seconds": queue_seconds,
+            "received_unix": applied_unix - queue_seconds,
+            "applied_unix": applied_unix,
+            **({"catch_up": True} if catch_up else {}),
+            # partial quorum: the round closed without this island's push
+            **({"overwrite": True} if self.config.partial_quorum and not pushed and not catch_up else {}),
+        })
+
+    def drain_fragment_records(self) -> list[dict[str, Any]]:
+        """The ``rl_fragment_push`` / ``rl_fragment_bcast`` records since the last call."""
+
+        records = list(self._fragment_records)
+        self._fragment_records.clear()
+        return records
 
     @property
     def retires_terminal_broadcasts(self) -> bool:
@@ -1984,7 +2044,7 @@ class FullParameterRoleStream:
         self.note_push_timing(candidate, sent.timings)
         if not sent.queued:
             return None
-        return self._pushed(candidate, sent.link_generation)
+        return self._pushed(candidate, sent.link_generation, sent.finished_at, sent.nbytes)
 
     # -- background pushes -----------------------------------------------------
     # ``RolePairing`` runs prepare_push + send_prepared on a worker thread
@@ -2040,19 +2100,23 @@ class FullParameterRoleStream:
         except PartialMessageGenerationLost:
             queued = False
         timings["push_s"] = time.monotonic() - started
-        return SentPush(queued is True, link_generation, timings, time.monotonic())
+        return SentPush(queued is True, link_generation, timings, time.monotonic(), prepared.encoded.nbytes)
 
-    def note_pushed(self, candidate: RoleSubmissionCandidate, link_generation: int) -> RoleFragmentSubmission:
-        """Record a background push that :meth:`send_prepared` queued."""
+    def note_pushed(self, candidate: RoleSubmissionCandidate, link_generation: int,
+                    enqueued_at: float | None = None, wire_bytes: int | None = None) -> RoleFragmentSubmission:
+        """Record a background push that :meth:`send_prepared` queued
+        (``enqueued_at`` and ``wire_bytes``: its :attr:`SentPush.finished_at`
+        and :attr:`SentPush.nbytes`)."""
 
-        return self._pushed(candidate, link_generation)
+        return self._pushed(candidate, link_generation, enqueued_at, wire_bytes)
 
     def note_push_timing(self, candidate: RoleSubmissionCandidate, timings: Mapping[str, float]) -> None:
         """Account one prepared push's time split (:meth:`_note_push_timing`)."""
 
         self._note_push_timing(candidate, dict(timings), timings.get("push_s", 0.0), prepared=True)
 
-    def _pushed(self, candidate: RoleSubmissionCandidate, link_generation: int | None = None) -> RoleFragmentSubmission:
+    def _pushed(self, candidate: RoleSubmissionCandidate, link_generation: int | None = None,
+                enqueued_at: float | None = None, wire_bytes: int | None = None) -> RoleFragmentSubmission:
         self._answered[
             (candidate.permit.global_step, candidate.permit.round_attempt)
         ] = self._link_generation(candidate.permit.fragment_id) if link_generation is None else link_generation
@@ -2067,7 +2131,8 @@ class FullParameterRoleStream:
             self._pending.pop(candidate.permit.fragment_id)
         terminal = candidate.permit.global_step == self.config.total_fragment_steps
         self.terminal_submitted = self.terminal_submitted or terminal
-        return RoleFragmentSubmission(
+        enqueued_at = time.monotonic() if enqueued_at is None else enqueued_at
+        submission = RoleFragmentSubmission(
             self.config.role,
             candidate.permit.fragment_id,
             candidate.permit.global_step,
@@ -2076,8 +2141,17 @@ class FullParameterRoleStream:
             candidate.c_steps,
             candidate.c_tokens,
             candidate.payload_bytes,
-            max(0.0, time.monotonic() - candidate.permit.received_at),
+            max(0.0, enqueued_at - candidate.permit.received_at),
+            _unix_of(candidate.permit.received_at),
+            _unix_of(enqueued_at),
         )
+        self._pushed_rounds.add((submission.fragment_id, submission.global_step))
+        record = {key: value for key, value in asdict(submission).items() if key != "role"}
+        # payload_bytes: the fragment's f32 size; wire_bytes: what the PUSH put on
+        # the wire (int4: about an eighth), known when its bytes were encoded ahead
+        self._fragment_records.append({"event": "rl_fragment_push", **record, "realized_h": submission.c_steps,
+                                       **({} if wire_bytes is None else {"wire_bytes": int(wire_bytes)})})
+        return submission
 
     def _note_push_timing(self, candidate: RoleSubmissionCandidate, timings: dict[str, float],
                           total: float, *, prepared: bool = False) -> None:
