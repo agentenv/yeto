@@ -1,0 +1,316 @@
+"""``yeto breaker {check,show,list}``.
+
+``check`` is the read-only health check over a run's event tapes (:mod:`yeto.rl.breaker`);
+``yeto breaker --trainer-log ...`` (no subcommand) still runs it. ``show`` prints every
+breaker's effective setting for a run config and where it came from; ``list`` prints the
+registry. Exit codes of ``show``: 0 ok, 1 a conflict or an error-level finding, 2 bad input.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+SUBCOMMANDS = ("check", "show", "list")
+
+
+def add_parser(sub: Any) -> argparse.ArgumentParser:
+    from yeto.rl.breaker import add_check_args  # noqa: PLC0415 - the check's flags live with the check
+
+    p = sub.add_parser(
+        "breaker", help="breakers: check a run's tapes against health limits, show effective settings",
+        description="check: read-only health limits over a run's event tapes (exit 1 on a trip; "
+                    "`yeto breaker --trainer-log ...` is the same). show: every breaker's effective "
+                    "setting and its source. list: the registry. See docs/BREAKER.md.")
+    group = p.add_subparsers(dest="breaker_command", metavar="{check,show,list}")
+    check = group.add_parser("check", help="check a run's event tapes against health limits (exit 1 on a trip)",
+                             description="Read-only health breakers over a run's event tapes; exit 1 when one "
+                                         "trips. See docs/BREAKER.md.")
+    add_check_args(check)
+    for action in check._actions:  # the tapes are not needed when --config / --breakers asks for the rules only
+        if "--trainer-log" in action.option_strings:
+            action.required = False
+    rules = check.add_mutually_exclusive_group()
+    rules.add_argument("--config", help="run only the dependency rules over this run config (no tapes)")
+    rules.add_argument("--breakers", help="run only the dependency rules over this breakers file (no tapes)")
+    show = group.add_parser("show", help="effective breaker settings of a run config, with sources and checks")
+    src = show.add_mutually_exclusive_group()
+    src.add_argument("--config", help="run config (JSON); its breakers: section and legacy knobs are read")
+    src.add_argument("--breakers", help="a bare breakers: object, or a whole run config (JSON)")
+    show.add_argument("--spec", help="sampler spec (JSON), for the sampler / harness aliases")
+    show.add_argument("--layer", choices=_layers(), help="only this layer")
+    show.add_argument("--pool", help="apply breakers.pools.<POOL> overrides")
+    show.add_argument("--json", action="store_true", help="print the breakers.resolved.json object")
+    show.add_argument("--all", action="store_true", help="also list semantic entries")
+    listing = group.add_parser("list", help="the breaker registry (no config needed)")
+    listing.add_argument("--layer", choices=_layers(), help="only this layer")
+    fmt = listing.add_mutually_exclusive_group()
+    fmt.add_argument("--markdown", action="store_true", help="markdown tables, one per layer (docs)")
+    fmt.add_argument("--json", action="store_true", help="one JSON object")
+    return p
+
+
+def _layers() -> tuple[str, ...]:
+    from yeto.breakers.spec import LAYERS  # noqa: PLC0415
+
+    return LAYERS
+
+
+def normalize_argv(argv: Sequence[str]) -> list[str]:
+    """``breaker <check flags>`` (the spelling before the command group) -> ``breaker check ...``."""
+    out = list(argv)
+    if out and out[0] == "breaker" and (len(out) == 1 or out[1] not in (*SUBCOMMANDS, "-h", "--help")):
+        out.insert(1, "check")
+    return out
+
+
+def main(args: argparse.Namespace) -> int:
+    command = getattr(args, "breaker_command", None) or "check"
+    if command == "check":
+        if getattr(args, "config", None) or getattr(args, "breakers", None):
+            return cmd_rules(args)
+        if not getattr(args, "trainer_log", None):
+            print("yeto breaker check: error: the following arguments are required: --trainer-log "
+                  "(or --config / --breakers for the dependency rules)", file=sys.stderr)
+            return 2
+        from yeto.rl.breaker import cmd_breaker  # noqa: PLC0415
+
+        return cmd_breaker(args)
+    if command == "list":
+        return cmd_list(args)
+    return cmd_show(args)
+
+
+# --- show ------------------------------------------------------------------------------------------
+
+
+def _read_json(path: str, what: str) -> Any:
+    file = Path(path).expanduser()
+    try:
+        return json.loads(file.read_text())
+    except OSError as error:
+        raise ValueError(f"{what} {file}: cannot be read ({error.strerror or error})") from None
+    except ValueError as error:
+        raise ValueError(f"{what} {file}: not valid JSON ({error})") from None
+
+
+def _sources(args: argparse.Namespace) -> tuple[Any, Mapping[str, Any] | None]:
+    from yeto.breakers.resolve import Sources  # noqa: PLC0415
+
+    spec = _read_json(args.spec, "sampler spec") if args.spec else None
+    if args.config:
+        cfg = _read_json(args.config, "run config")
+        if not isinstance(cfg, dict):
+            raise ValueError(f"run config {args.config}: must be a JSON object")
+        return Sources.from_run_config(cfg, spec=spec), cfg
+    if args.breakers:
+        data = _read_json(args.breakers, "breakers file")
+        if not isinstance(data, dict):
+            raise ValueError(f"breakers file {args.breakers}: must be a JSON object")
+        if "breakers" in data:  # a whole run config
+            return Sources.from_run_config(data, spec=spec), data
+        return Sources(section=data, spec=spec), None
+    return Sources(spec=spec), None
+
+
+def cmd_rules(args: argparse.Namespace) -> int:
+    """``check --config``: the dependency rules alone; exit 1 on an error finding or a conflict."""
+    from yeto.breakers.resolve import load_rules, preflight, resolve  # noqa: PLC0415
+    from yeto.breakers.spec import BreakerConfigError, RegistryError  # noqa: PLC0415
+
+    args.spec = getattr(args, "spec", None)
+    try:
+        sources, cfg = _sources(args)
+        rb = resolve(sources, strict=False)
+        findings = preflight(rb, run_config=cfg, sources=sources)
+    except (BreakerConfigError, RegistryError, ValueError) as error:
+        print(f"[breaker] {error}", file=sys.stderr)
+        return 2
+    rules = load_rules()
+    fmt = getattr(rules, "format_finding", None) or (lambda f: f"{f.rule:<4} {f.level:<6} {f.message}")
+    if args.json:
+        print(json.dumps({"findings": [f.to_json() for f in findings],
+                          "conflicts": [c.to_json() for c in rb.conflicts]}, sort_keys=True))
+    else:
+        for f in findings:
+            print(fmt(f))
+        for c in rb.conflicts:
+            print(f"conflict {c.name}: {c.message}")
+    return 1 if rb.conflicts or any(f.level == "error" for f in findings) else 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    from yeto.breakers.resolve import preflight, resolve  # noqa: PLC0415
+    from yeto.breakers.spec import BreakerConfigError, RegistryError  # noqa: PLC0415
+
+    try:
+        sources, cfg = _sources(args)
+        rb = resolve(sources, pool=args.pool, strict=False)
+        findings = preflight(rb, run_config=cfg, sources=sources)
+    except (BreakerConfigError, RegistryError, ValueError) as error:
+        print(f"[breaker] {error}", file=sys.stderr)
+        return 2
+    data = rb.to_json(findings)
+    if args.layer:
+        data["entries"] = [e for e in data["entries"] if e["layer"] == args.layer]
+    if args.json:
+        print(json.dumps(data, sort_keys=True, default=str))
+    else:
+        print(render_show(data, show_all=args.all))
+    errors = [f for f in findings if f.level == "error"]
+    return 1 if rb.conflicts or errors else 0
+
+
+def _fmt(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, Mapping):
+        return json.dumps(dict(value), sort_keys=True)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _effective(entry: Mapping[str, Any]) -> str:
+    if entry["kind"] in ("invariant", "semantic") and not entry["params"]:
+        return "-"
+    parts = []
+    for name, value in entry["params"].items():
+        src = entry["sources"].get(name, {})
+        suffix = f" (inherit {src['location'].split(' ', 1)[1]})" if src.get("kind") == "inherit" else ""
+        parts.append(f"{name}={_fmt(value)}{suffix}")
+    return " ".join(parts) or "-"
+
+
+def _source(entry: Mapping[str, Any]) -> str:
+    if entry["kind"] == "invariant":
+        return "(cannot disable)"
+    if entry["kind"] == "semantic":
+        return f"(native: {entry.get('native', '')})"
+    order = ("breakers", "switch", "legacy", "inherit", "default")
+    best = min(entry["sources"].values(), key=lambda s: order.index(s["kind"]),
+               default={"kind": "default", "location": "default"})
+    return best["location"] + (" (legacy)" if best["kind"] == "legacy" else "")
+
+
+def _marks(entry: Mapping[str, Any], findings: Iterable[Mapping[str, Any]]) -> str:
+    marks = []
+    if entry.get("implicit"):
+        marks.append("!")
+    if entry.get("redundant"):
+        marks.append("!redundant")
+    marks += [f"!{f['rule']}" for f in findings if entry["name"] in f.get("items", ())]
+    return " ".join(dict.fromkeys(marks))
+
+
+def _table(rows: list[list[str]]) -> list[str]:
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    return ["  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip() for r in rows]
+
+
+def render_show(data: Mapping[str, Any], *, show_all: bool = False) -> str:
+    """The ``show`` table of a ``breakers.resolved.json`` object."""
+    findings = data.get("findings", [])
+    rows = [["NAME", "LAYER", "KIND", "ON", "ACTION", "EFFECTIVE", "SOURCE", ""]]
+    for e in data["entries"]:
+        if e["kind"] == "semantic" and not show_all:
+            continue
+        rows.append([e["name"], e["layer"], e["kind"], "on" if e["enabled"] else "off", e["action"] or "-",
+                     _effective(e), _source(e), _marks(e, findings)])
+    lines = _table(rows)
+    if data.get("switches"):
+        lines.append("SWITCHES")
+        for name, s in sorted(data["switches"].items()):
+            src = "" if s["source"] == "default" else f"  ({s['source']})"
+            lines.append(f"  {name:<20} {'on' if s['on'] else 'off':<4} {', '.join(s['members'])}{src}")
+    overrides = (data.get("deps") or {}).get("overrides") or {}
+    if findings or overrides:
+        lines.append("DEPENDENCIES")
+        for f in findings:
+            over = f"  [override {f['overridden']}]" if f.get("overridden") else ""
+            lines.append(f"  {f['rule']:<4} {f['level']:<6} {f['message']}{over}")
+        for rule, level in sorted(overrides.items()):
+            lines.append(f"  override  {rule} -> {level}")
+    if data.get("deprecations"):
+        lines.append("DEPRECATED")
+        lines += [f"  {line}" for line in data["deprecations"]]
+    if data.get("conflicts"):
+        lines.append("CONFLICTS")
+        lines += [f"  {c['name']}: {c['message']}" for c in data["conflicts"]]
+    return "\n".join(lines)
+
+
+# --- list ------------------------------------------------------------------------------------------
+
+
+def _default(b: Any) -> str:
+    return " ".join(f"{p.name}={_fmt(p.default)}" for p in b.params) or "-"
+
+
+def _alias_text(b: Any) -> str:
+    return ", ".join(a.location for a in b.aliases) or "-"
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    from yeto.breakers.registry import default_registry  # noqa: PLC0415
+    from yeto.breakers.spec import LAYERS, RegistryError  # noqa: PLC0415
+
+    try:
+        reg = default_registry()
+    except RegistryError as error:
+        print(f"[breaker] {error}", file=sys.stderr)
+        return 2
+    layers = [args.layer] if args.layer else list(LAYERS)
+    entries = [b for layer in layers for b in reg.layer(layer)]
+    if args.json:
+        print(json.dumps({"breakers": [_list_row(b, reg) for b in entries],
+                          "switch_groups": [{"name": g.name, "members": list(g.members),
+                                             "aliases": [a.location for a in g.aliases]}
+                                            for g in reg.switch_groups]}, sort_keys=True))
+        return 0
+    if args.markdown:
+        print(render_markdown(reg, layers))
+        return 0
+    rows = [["NAME", "LAYER", "KIND", "ON", "ACTION", "DEFAULT", "ALIASES"]]
+    for b in entries:
+        rows.append([b.name, b.layer, b.kind, "on" if b.default_enabled else "off", b.default_action or "-",
+                     _default(b), _alias_text(b)])
+    print("\n".join(_table(rows)))
+    return 0
+
+
+def _list_row(b: Any, reg: Any) -> dict[str, Any]:
+    return {"name": b.name, "layer": b.layer, "kind": b.kind, "default_enabled": b.default_enabled,
+            "can_disable": b.can_disable, "actions": list(b.actions), "default_action": b.default_action,
+            "params": [{"name": p.name, "default": p.default, "unit": p.unit, "nullable": p.nullable,
+                        "inherit_from": p.inherit_from} for p in b.params],
+            "aliases": [a.location for a in b.aliases], "switch_groups": list(reg.groups_of(b.name)),
+            "depends_on": list(b.depends_on), "owner": b.owner, "native": b.native, "doc": b.doc}
+
+
+def render_markdown(reg: Any, layers: Iterable[str]) -> str:
+    """One markdown table per layer (the reference tables of docs/BREAKERS.md)."""
+    out = []
+    for layer in layers:
+        entries = reg.layer(layer)
+        if not entries:
+            continue
+        out += [f"### {layer}", "", "| Name | Kind | Default | Action | Can disable | Legacy knobs | Notes |",
+                "|---|---|---|---|---|---|---|"]
+        for b in entries:
+            cells = [f"`{b.name}`", b.kind, _default(b), b.default_action or "-",
+                     "yes" if b.can_disable else "no", _alias_text(b), b.doc or b.native]
+            out.append("| " + " | ".join(c.replace("|", "\\|") for c in cells) + " |")
+        out.append("")
+    if reg.switch_groups:
+        out += ["### switch groups", "", "| Group | Members | Legacy switch |", "|---|---|---|"]
+        for g in reg.switch_groups:
+            out.append(f"| `{g.name}` | {', '.join(g.members)} | {', '.join(a.location for a in g.aliases) or '-'} |")
+        out.append("")
+    return "\n".join(out).rstrip()
