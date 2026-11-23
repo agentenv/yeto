@@ -13,6 +13,11 @@ once. Expert tensor parallelism is pinned to 1, so with data parallelism 1
 the experts are replicated on ``TP x CP / EP`` ranks when EP is smaller than
 ``TP x CP``. Replicated experts would be pushed once per replica and could
 drift apart under block-quantized pushes, so they are refused.
+
+With partial-expert training only the selected experts are trainable, so only
+they have FP32 masters and appear in the manifests; the frozen ones never
+reach a fragment. :class:`ExpertSubset` declares that set, and the check then
+requires exactly it instead of every expert.
 """
 
 from __future__ import annotations
@@ -39,6 +44,29 @@ _ROUTER = re.compile(r"(?:^|\.)decoder\.layers\.(\d+)\.mlp\.router\.weight\Z")
 # on every TP rank, megatron/core/transformer/moe/moe_layer.py).
 _LATENT_FC1 = re.compile(r"(?:^|\.)decoder\.layers\.(\d+)\.mlp\.fc1_latent_proj\.weight\Z")
 _SHARD_SIZES = re.compile(r"([a-z]+)\d+-of-(\d+)")
+
+
+@dataclass(frozen=True)
+class ExpertSubset:
+    """The routed experts that train, per MoE layer (original expert ids).
+
+    ``num_experts`` is the router's width (all experts of a layer, trainable or
+    frozen); ``trainable`` maps each MoE layer to its trainable ids.
+    """
+
+    num_experts: int
+    trainable: Mapping[int, frozenset[int]]
+
+    def __post_init__(self) -> None:
+        if self.num_experts <= 0 or not self.trainable:
+            raise ValueError("an expert subset needs a positive expert count and one layer")
+        for layer, ids in self.trainable.items():
+            if int(layer) < 0 or not ids or any(not 0 <= int(e) < self.num_experts for e in ids):
+                raise ValueError(f"layer {layer}: trainable ids must lie in [0, {self.num_experts})")
+
+    @classmethod
+    def of(cls, num_experts: int, trainable: Mapping[int, Iterable[int]]) -> ExpertSubset:
+        return cls(int(num_experts), {int(k): frozenset(int(e) for e in v) for k, v in trainable.items()})
 
 
 @dataclass(frozen=True)
@@ -77,7 +105,9 @@ def parallel_sizes(shard_id: str) -> dict[str, int]:
     return {axis: int(size) for axis, size in _SHARD_SIZES.findall(shard_id)}
 
 
-def check_expert_partition(specs: Iterable) -> ExpertPartition | None:
+def check_expert_partition(
+    specs: Iterable, *, subset: ExpertSubset | None = None
+) -> ExpertPartition | None:
     """Check that every expert of every MoE layer has exactly one owner.
 
     ``specs`` are objects with ``role``, ``shard_id``, ``name`` and ``shape``
@@ -87,6 +117,10 @@ def check_expert_partition(specs: Iterable) -> ExpertPartition | None:
     different owners, or disagrees with its router or its peers in shape.
     With a latent MoE layer the router reads the hidden size and the experts
     the latent size of the layer's ``fc1_latent_proj``.
+
+    ``subset`` (partial-expert training): each MoE layer must hold exactly its
+    trainable experts, every layer of the subset must be present, and the
+    router (when trainable) has ``subset.num_experts`` rows.
     """
 
     owners: dict[tuple[str, int, str, int], tuple[str, str]] = {}
@@ -144,14 +178,26 @@ def check_expert_partition(specs: Iterable) -> ExpertPartition | None:
             raise ValueError(
                 f"expert {expert} of layer {layer} has its projections on two owners"
             )
-    num_experts = None
+    num_experts = None if subset is None else subset.num_experts
     for (role, layer), experts in sorted(by_layer.items()):
-        count = len(experts)
+        if subset is None:
+            count = len(experts)
+            wanted: set[int] = set(range(count))
+            label = f"0..{count - 1}"
+        else:
+            if layer not in subset.trainable:
+                raise ValueError(f"layer {layer} has trainable experts but the selection names none")
+            count = subset.num_experts
+            wanted = set(subset.trainable[layer])
+            label = f"the {len(wanted)} selected"
         for projection in ("linear_fc1", "linear_fc2"):
             ids = {e for (r, lay, p, e) in owners if (r, lay, p) == (role, layer, projection)}
-            if ids != set(range(count)):
+            if ids != wanted:
+                missing = sorted(wanted - ids)[:8]
+                extra = sorted(ids - wanted)[:8]
                 raise ValueError(
-                    f"layer {layer} {projection} experts are not 0..{count - 1}: {sorted(ids)}"
+                    f"layer {layer} {projection} experts are not {label} "
+                    f"(missing {missing}, unexpected {extra})"
                 )
         if num_experts is None:
             num_experts = count
@@ -173,6 +219,12 @@ def check_expert_partition(specs: Iterable) -> ExpertPartition | None:
                 f"layer {layer} router shape {router} does not match {count} experts "
                 f"of hidden size {router_input}"
             )
+
+    if subset is not None:
+        for role in sorted({role for role, _ in by_layer}):
+            absent = sorted(set(subset.trainable) - {lay for r, lay in by_layer if r == role})
+            if absent:
+                raise ValueError(f"{role}: selected MoE layers hold no trainable expert: {absent[:8]}")
 
     per_owner: dict[tuple[str, str], int] = {}
     for experts in by_layer.values():
