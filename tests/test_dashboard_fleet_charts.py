@@ -325,3 +325,26 @@ def test_a_relaunch_after_a_teardown_is_starting_not_stopped():
 
     assert status(False) == "stopped"
     assert status(True) == "starting"
+
+
+def test_dispense_ledger_shows_a_crashed_samplers_claims_and_their_reclaim():
+    # s1 claims slots 1 and 2, then crashes; s0's tape (read first: out of time order) has the
+    # expiry of slot 1 and its re-claim as attempt 1; slot 2's lease has not run out yet
+    d = {"backend": "store", "namespace": "ns"}
+    s0 = [{"event": "rl_dispense_claim", "slot": 3, "attempt": 0, "task_id": "t3", "time_unix": T0 + 10},
+          {"event": "rl_dispense_settle", "slot": 3, "attempt": 0, "state": "trained", "time_unix": T0 + 100},
+          {"event": "rl_dispense_expired", "slot": 1, "attempt": 0, "seen": T0 + 30, "time_unix": T0 + 1300},
+          {"event": "rl_dispense_claim", "slot": 1, "attempt": 1, "task_id": "t1", "time_unix": T0 + 1301}]
+    s1 = [{"event": "rl_dispense_claim", "slot": 1, "attempt": 0, "task_id": "t1", "time_unix": T0 + 20},
+          {"event": "rl_dispense_claim", "slot": 2, "attempt": 0, "task_id": "t2", "time_unix": T0 + 21}]
+    r = Reducer(run="r")
+    for sid, recs in (("s0", s0), ("s1", s1)):
+        r.feed({"event": "rl_sampler_start", "sampler_id": sid, "time_unix": T0}, source=f"store:{sid}/a", offset=0)
+        for i, rec in enumerate(recs):
+            r.feed({**d, **rec, "sampler_id": sid}, source=f"store:{sid}/a", offset=i + 1)
+    D = r.page_view()["async"]["dispense"]
+    assert D["slots"] == 3 and D["settled"] == {"trained": 1} and D["ends"] == {"expired": 1}
+    assert D["reclaimed_slots"] == 1
+    assert [(h["slot"], h["attempt"], h["by"]) for h in D["held"]] == [(1, 1, "s0"), (2, 0, "s1")]
+    exp = [e for e in D["events"] if e["kind"] == "expired"]
+    assert exp == [{"ts": T0 + 1300, "kind": "expired", "by": "s0", "slot": 1, "attempt": 0, "seen": T0 + 30}]
