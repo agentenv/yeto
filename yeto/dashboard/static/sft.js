@@ -70,11 +70,27 @@ var W=380,H=170,M={l:46,r:10,t:10,b:22};
 function axisX(t0,t1){var span=t1-t0,steps=[60,300,600,900,1800,3600,7200,10800,21600,43200,86400,172800,604800],st=steps[steps.length-1];
   for(var i=0;i<steps.length;i++)if(span/steps[i]<=5){st=steps[i];break}
   var off=new Date().getTimezoneOffset()*60,out=[];for(var t=Math.ceil((t0-off)/st)*st+off;t<=t1;t+=st)out.push(t);return {ticks:out,fmt:st>=86400?function(t){var d=new Date(t*1000);return (d.getMonth()+1)+"/"+d.getDate()}:function(t){return clock(t)}}}
-/* opts: series [{name,color,pts:[[t,v]],dash,width}], kind line|stack|bars, refs [{y,label}], yfmt, y0 (force 0 baseline), bucket (bars, s) */
-function chart(id,opts){
+/* restart / pool marks -> clusters for the marker strip above the plot: marks closer than 2 min
+   (or than 6 px at this range) merge into one, whatever island they belong to; the labels go to
+   the hover tooltip, never into the plot */
+var MARK_MERGE_S=120,MARK_STRIP=12,REW_WIN=8;
+function markClusters(list,t0,t1,pxS){var out=[],gap=Math.max(MARK_MERGE_S,6*(pxS||0));
+  (list||[]).filter(function(m){return fin(m.t)&&m.t>=t0&&m.t<=t1}).sort(function(a,b){return a.t-b.t}).forEach(function(m){var g=out[out.length-1];
+    if(g&&m.t-g.last<=gap){g.items.push(m);g.last=m.t;if(g.colors.indexOf(m.color||GREY)<0)g.colors.push(m.color||GREY)}
+    else out.push({t:m.t,last:m.t,items:[m],colors:[m.color||GREY]})});return out}
+/* a line series splits where two neighbours are further apart than 3x its median spacing, or
+   where the incarnation (third element of a point, when given) changes: no line across a gap */
+function segments(P,all){var g=[];for(var i=1;i<all.length;i++)g.push(all[i][0]-all[i-1][0]);g.sort(function(a,b){return a-b});
+  var med=g.length>=2?g[Math.floor(g.length/2)]:0,out=[],cur=[];
+  P.forEach(function(p,i){var q=P[i-1];if(q&&((med>0&&p[0]-q[0]>3*med)||(p.length>2&&q.length>2&&p[2]!=null&&q[2]!=null&&p[2]!==q[2]))){out.push(cur);cur=[]}cur.push(p)});
+  if(cur.length)out.push(cur);return out}
+/* opts: series [{name,color,pts:[[t,v(,incarnation)]],dash,width,dots,faint}], kind line|stack|bars, refs [{y,label}], yfmt, y0 (force 0 baseline),
+   bucket (bars, s), vmarks [{t,color,label}] (marker strip above the plot) */
+function chart(id,opts){return chartTs(id,opts)}
+function chartTs(id,opts){
   var box=$(id);if(!box)return;var t1=NOW,t0=NOW-RANGE_H*3600;
   var ser=(opts.series||[]).map(function(s){var all=(s.pts||[]).filter(function(p){return fin(p[0])&&fin(p[1])}).sort(function(a,b){return a[0]-b[0]});
-    return {name:s.name,color:s.color,dash:s.dash,width:s.width,legend:s.legend!==false,all:all,
+    return {name:s.name,color:s.color,dash:s.dash,width:s.width,dots:s.dots,faint:s.faint,legend:s.legend!==false,all:all,
     pts:all.filter(function(p){return p[0]>=t0&&p[0]<=t1})}});
   var leg='<div class="lg">'+ser.filter(function(s){return s.legend}).map(function(s){return s.pts.length?'<span><i style="background:'+s.color+'"></i>'+esc(s.name)+'</span>':
     '<span class="nd"><i style="background:#4b4b52"></i>'+esc(s.name)+' (no data)</span>'}).join("")+
@@ -94,7 +110,7 @@ function chart(id,opts){
     var xs=Object.keys(keys).map(Number).sort(function(a,b){return a-b}),acc={};
     ser.forEach(function(s){s.pts=xs.map(function(x){var lo=acc[x]||0,v=s.b[x]||0;acc[x]=lo+v;return [Math.min(t1,Math.max(t0,x+bk/2)),lo+v,lo,v]})});var NB=xs.length;
   }
-  var vals=[];ser.forEach(function(s){s.pts.forEach(function(p){vals.push(p[1]);if(p.length>2)vals.push(p[2])})});(opts.refs||[]).forEach(function(r){if(fin(r.y))vals.push(r.y)});
+  var vals=[];ser.forEach(function(s){s.pts.forEach(function(p){vals.push(p[1]);if(stack&&p.length>2)vals.push(p[2])})});(opts.refs||[]).forEach(function(r){if(fin(r.y))vals.push(r.y)});
   var off=null;if(opts.clip&&!stack&&vals.length>=10){var sv=vals.slice().sort(function(a,b){return a-b}),q9=rank(sv,0.9),mx=sv[sv.length-1];
     if(q9>0&&mx>4*q9){var cap=1.5*q9;off={cap:cap,max:mx,n:0};vals=vals.filter(function(v){return v<=cap});vals.push(cap)}} // a few huge values (8 h first round) would flatten the rest
   var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),dlo=lo,dhi=hi;if(opts.y0!==false&&(stack||opts.y0||lo>=0&&lo<hi*0.35))lo=Math.min(0,lo);
@@ -103,39 +119,48 @@ function chart(id,opts){
   var ticks=(opts.yfmt===dur?durTicks:nice)(lo,hi,4);lo=ticks[0];hi=ticks[ticks.length-1];
   var yf=opts.yfmt||function(v){return k(v)},yl=yf===dur?durAxis(ticks):(opts.yaxis||!opts.yfmt||opts.yfmt===k)?numAxis(ticks):yf;
   var ML=Math.max(30,Math.min(96,Math.ceil(8+5.4*Math.max.apply(null,ticks.map(function(v){return String(yl(v)).length})))));
-  var x=function(t){return ML+(t-t0)*(W-ML-M.r)/(t1-t0)},y=function(v){return M.t+(hi-Math.min(v,off?hi:v))/(hi-lo)*(H-M.t-M.b)};
-  var o=['<svg viewBox="0 0 '+W+' '+H+'" class="ch" role="img" aria-label="'+esc(opts.title||id)+'"><defs><clipPath id="cp-'+id+'"><rect x="'+(ML-4)+'" y="'+(M.t-4)+'" width="'+(W-ML-M.r+8)+'" height="'+(H-M.t-M.b+8)+'"/></clipPath></defs>'];
+  var MK=markClusters(opts.vmarks,t0,t1,(t1-t0)/(W-ML-M.r)),MT=M.t+(MK.length?MARK_STRIP:0); // marks: a strip above the plot
+  var x=function(t){return ML+(t-t0)*(W-ML-M.r)/(t1-t0)},y=function(v){return MT+(hi-Math.min(v,off?hi:v))/(hi-lo)*(H-MT-M.b)};
+  var o=['<svg viewBox="0 0 '+W+' '+H+'" class="ch" role="img" aria-label="'+esc(opts.title||id)+'"><defs><clipPath id="cp-'+id+'"><rect x="'+(ML-4)+'" y="'+(MT-4)+'" width="'+(W-ML-M.r+8)+'" height="'+(H-MT-M.b+8)+'"/></clipPath></defs>'];
   ticks.forEach(function(v){o.push('<line class="gl" x1="'+ML+'" x2="'+(W-M.r)+'" y1="'+y(v).toFixed(1)+'" y2="'+y(v).toFixed(1)+'"/><text x="'+(ML-6)+'" y="'+(y(v)+3.5).toFixed(1)+'" text-anchor="end">'+esc(yl(v))+'</text>')});
   var ax=axisX(t0,t1);ax.ticks.forEach(function(t){o.push('<text x="'+x(t).toFixed(1)+'" y="'+(H-6)+'" text-anchor="middle">'+esc(ax.fmt(t))+'</text>')});
   var PW=W-ML-M.r,bw=Math.max(1,Math.min(PW*bk/span*0.8,PW/Math.max(1,NB||1)*0.8));
+  if(MK.length){o.push('<g class="mks"><line class="gl" x1="'+ML+'" x2="'+(W-M.r)+'" y1="'+(MARK_STRIP+1)+'" y2="'+(MARK_STRIP+1)+'"/>'); // restarts / joins / exits: one small triangle per island color
+    MK.forEach(function(g){var mx0=x(g.t),cols=g.colors.slice(0,3);o.push('<g class="mk"><title>'+esc(g.items.map(function(m){return clock(m.t,true)+" "+(m.label||"")}).join("\n"))+'</title>'+
+      '<rect x="'+(mx0-6).toFixed(1)+'" y="1" width="12" height="'+MARK_STRIP+'" fill="transparent"/>'+cols.map(function(cl,j){var cx0=mx0+(j-(cols.length-1)/2)*5;
+        return '<path d="M'+(cx0-3).toFixed(1)+',4L'+(cx0+3).toFixed(1)+',4L'+cx0.toFixed(1)+','+(MARK_STRIP-1)+'Z" fill="'+cl+'"/>'}).join("")+
+      (g.items.length>1?'<text x="'+(mx0+3+2.5*cols.length).toFixed(1)+'" y="'+(MARK_STRIP-2)+'" font-size="8" fill="'+GREY+'">'+g.items.length+'</text>':"")+'</g>')});o.push('</g>')}
   o.push('<g clip-path="url(#cp-'+id+')">');
-  (opts.vmarks||[]).filter(function(m){return fin(m.t)&&m.t>=t0&&m.t<=t1}).sort(function(a,b){return a.t-b.t}).forEach(function(m,i){var mx0=x(m.t).toFixed(1),cl=m.color||GREY; // restarts / joins / exits
-    o.push('<g><title>'+esc(m.label||"")+'</title><line x1="'+mx0+'" x2="'+mx0+'" y1="'+M.t+'" y2="'+(H-M.b)+'" stroke="transparent" stroke-width="8"/><line x1="'+mx0+'" x2="'+mx0+'" y1="'+M.t+'" y2="'+(H-M.b)+'" stroke="'+cl+'" stroke-width="1" stroke-dasharray="2 3"/><text x="'+(+mx0+2)+'" y="'+(M.t+9+10*(i%3))+'" font-size="9" fill="'+cl+'">'+esc(m.short||"")+'</text></g>')});
-  ser.forEach(function(s){var P=s.pts;if(!P.length)return;
+  ser.forEach(function(s){var P=s.pts;if(!P.length)return;var SG=opts.kind?[P]:segments(P,s.all);
     if(opts.kind==="bars"){P.forEach(function(p){if(p[3]>0)o.push('<rect x="'+Math.min(W-M.r-bw,Math.max(ML,x(p[0])-bw/2)).toFixed(1)+'" y="'+y(p[1]).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+Math.max(0.5,y(p[2])-y(p[1])).toFixed(1)+'" fill="'+s.color+'"/>')});return}
-    var line=P.map(function(p,i){return (i?"L":"M")+x(p[0]).toFixed(1)+","+y(p[1]).toFixed(1)}).join("");
+    var line=SG.map(function(G){return G.map(function(p,i){return (i?"L":"M")+x(p[0]).toFixed(1)+","+y(p[1]).toFixed(1)}).join("")}).join("");
+    if(s.faint){P.forEach(function(p){o.push('<circle cx="'+x(p[0]).toFixed(1)+'" cy="'+y(Math.min(p[1],hi)).toFixed(1)+'" r="1.7" fill="'+s.color+'" fill-opacity=".4"/>')});return} // raw values behind a smoothed line
     if(opts.kind==="stack"){var base=P.slice().reverse().map(function(p){return "L"+x(p[0]).toFixed(1)+","+y(p[2]).toFixed(1)}).join("");
       o.push('<path d="'+line+base+'Z" fill="'+s.color+'" fill-opacity=".32"/>')}
-    var sparse=P.length<=SPARSE&&opts.kind!=="stack";
-    if(sparse&&P.length>1&&!opts.dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-opacity=".35" stroke-width="1"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+'/>');
-    if(sparse||opts.dots)P.forEach(function(p){if(off&&p[1]>hi){off.n++;var cx0=x(p[0]),cy0=M.t+1;
+    var sparse=P.length<=SPARSE&&opts.kind!=="stack",dots=opts.dots||s.dots;
+    if(sparse&&P.length>1&&!dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-opacity=".35" stroke-width="1"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+'/>');
+    if(sparse||dots)P.forEach(function(p){if(off&&p[1]>hi){off.n++;var cx0=x(p[0]),cy0=M.t+1;
         o.push('<path class="off" d="M'+(cx0-3.5).toFixed(1)+','+(cy0+6)+'L'+(cx0+3.5).toFixed(1)+','+(cy0+6)+'L'+cx0.toFixed(1)+','+cy0+'Z" fill="'+s.color+'"/>');return}
       o.push('<circle cx="'+x(p[0]).toFixed(1)+'" cy="'+y(p[1]).toFixed(1)+'" r="'+(sparse?(s.dash?2.4:3):1.6)+'" fill="'+(s.dash&&sparse?"var(--panel)":s.color)+'" stroke="'+s.color+'" stroke-width="'+(s.dash&&sparse?1.4:0)+'"/>')});
-    if(!sparse&&P.length>1&&!opts.dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-width="'+(s.width||1.5)+'"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+' stroke-linejoin="round"/>')});
+    if(!sparse&&P.length>1&&!dots){o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-width="'+(s.width||1.5)+'"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+' stroke-linejoin="round"/>');
+      SG.forEach(function(G){if(G.length===1)o.push('<circle cx="'+x(G[0][0]).toFixed(1)+'" cy="'+y(G[0][1]).toFixed(1)+'" r="1.8" fill="'+s.color+'"/>')})}}); // a lone point between gaps
   o.push('</g>');
-  if(off&&off.n)o.push('<text x="'+(ML+4)+'" y="'+(M.t+16)+'" class="rt offn">\u25b2 '+off.n+' off scale \u00b7 max '+esc(yf(off.max))+'</text>');
-  if(zoom)o.push('<text x="'+(W-M.r-2)+'" y="'+(M.t+8)+'" text-anchor="end" class="rt">'+esc(zoom)+'</text>');
+  if(off&&off.n)o.push('<text x="'+(ML+4)+'" y="'+(MT+16)+'" class="rt offn">\u25b2 '+off.n+' off scale \u00b7 max '+esc(yf(off.max))+'</text>');
+  if(zoom)o.push('<text x="'+(W-M.r-2)+'" y="'+(MT+8)+'" text-anchor="end" class="rt">'+esc(zoom)+'</text>');
   (opts.refs||[]).forEach(function(r){if(!fin(r.y)||r.y<lo||r.y>hi)return;o.push('<line x1="'+ML+'" x2="'+(W-M.r)+'" y1="'+y(r.y).toFixed(1)+'" y2="'+y(r.y).toFixed(1)+'" stroke="'+(r.color||GREY)+'" stroke-dasharray="4 3" stroke-width="1"/>'+
     (r.label?'<text x="'+(W-M.r-2)+'" y="'+(y(r.y)-4).toFixed(1)+'" text-anchor="end" class="rt">'+esc(r.label)+'</text>':""))});
-  o.push('<line class="cx" x1="0" x2="0" y1="'+M.t+'" y2="'+(H-M.b)+'" visibility="hidden"/></svg>');
+  o.push('<line class="cx" x1="0" x2="0" y1="'+MT+'" y2="'+(H-M.b)+'" visibility="hidden"/></svg>');
   box.innerHTML='<div class="cw">'+o.join("")+'<div class="tt"></div></div>'+leg;
-  CH[id]={ser:ser,x:x,t0:t0,t1:t1,yf:yf,stack:stack,ml:ML};
+  CH[id]={ser:ser,x:x,t0:t0,t1:t1,yf:yf,stack:stack,ml:ML,mk:MK};
   box.onmousemove=function(e){hover(id,box,e)};box.onmouseleave=function(){var t=box.querySelector&&box.querySelector(".tt");if(t)t.style.display="none";var c=box.querySelector&&box.querySelector(".cx");if(c)c.setAttribute("visibility","hidden")};
 }
 function hover(id,box,e){var c=CH[id];if(!c||!box.querySelector)return;var svg=box.querySelector("svg"),tt=box.querySelector(".tt"),cx=box.querySelector(".cx");if(!svg||!tt)return;
   var b=svg.getBoundingClientRect(),vx=(e.clientX-b.left)*W/b.width;var t=c.t0+(vx-c.ml)*(c.t1-c.t0)/(W-c.ml-M.r);if(t<c.t0||t>c.t1){tt.style.display="none";return}
   var rows=[],bestT=null;c.ser.forEach(function(s){var best=null,bd=1e18;s.pts.forEach(function(p){var d=Math.abs(p[0]-t);if(d<bd){bd=d;best=p}});
     if(best&&bd<(c.t1-c.t0)/20){bestT=best[0];rows.push('<div><i style="background:'+s.color+'"></i>'+esc(s.name)+'<b>'+esc(c.yf(c.stack?best[3]:best[1]))+'</b></div>')}});
+  // marks within 8 px of the cursor: their labels (the plot itself carries none)
+  var mg=null,md=8;(c.mk||[]).forEach(function(g){var d=Math.abs(c.x(g.t)-vx);if(d<=md){md=d;mg=g}});
+  if(mg){if(bestT==null)bestT=mg.t;rows=mg.items.map(function(m){return '<div class="mkr"><i style="background:'+(m.color||GREY)+'"></i>'+esc(clock(m.t,true)+" "+(m.label||""))+'</div>'}).concat(rows)}
   if(!rows.length){tt.style.display="none";return}
   cx.setAttribute("x1",c.x(bestT));cx.setAttribute("x2",c.x(bestT));cx.setAttribute("visibility","visible");
   tt.innerHTML='<div class="th">'+esc(day(bestT))+'</div>'+rows.join("");tt.style.display="block";
@@ -396,10 +421,25 @@ function inR(t,a,b){return fin(t)&&t>a&&t<=b}
 function rlCards(V){var O=V.overview||{},cs=(O.islands||[]).map(function(c,i){var o={};for(var key in c)o[key]=c[key];o.i=i;o.color=PAL[i%PAL.length];
   o.label=({sampler:"sampler ",trainer:"trainer ",unrecognized:"unrecognized tape "}[o.role]||"island ")+o.id;var sp=((V.async||{}).samplers||{})[o.id],topo=sp&&sp.provenance&&sp.provenance.topology;
   o.cards=fin(c.gpus)?c.gpus:(topo&&/tp(\d+)/.test(topo)?+/tp(\d+)/.exec(topo)[1]:1);return o});return cs}
-/* billed hours: fleet ready -> stop wall clock (cost view) when the island is in fleet.jsonl, else its first -> last event (NC leases are not in fleet.jsonl) */
+/* billed hours: fleet ready -> stop wall clock (cost view) when the island is in fleet.jsonl, else
+   (a sampler outside the fleet ledger: NC lease, Modal / Daytona sandbox) the union of its
+   incarnations' first -> last event, or the island's first -> last event without incarnations.
+   A lower bound: boot before an incarnation's first event is not on the tapes. */
+function spanUnion(sp){var a=sp.filter(function(x){return fin(x[0])&&fin(x[1])&&x[1]>=x[0]}).sort(function(p,q){return p[0]-q[0]}),out=[];
+  a.forEach(function(x){var l=out[out.length-1];if(l&&x[0]<=l[1])l[1]=Math.max(l[1],x[1]);else out.push([x[0],x[1]])});return out}
 function rlBilled(V,c){var ci=(((V.overview||{}).cost||{}).islands||[]).filter(function(r){return String(r.id)===String(c.id)})[0],ex=(V.islands||{})[c.id]||{};
-  if(ci&&fin(ci.hours)&&ci.hours>0)return {h:ci.hours,src:"fleet"};var sp=((V.async||{}).samplers||{})[c.id]||{},a=fin(sp.first_ts)?sp.first_ts:ex.first_ts,b=fin(sp.last_ts)?sp.last_ts:ex.last_ts;
-  return fin(a)&&fin(b)?{h:(b-a)/3600,src:"events",a:a,b:b}:{h:null,src:"none"}}
+  if(ci&&fin(ci.hours)&&ci.hours>0)return {h:ci.hours,src:"fleet"};var sp=((V.async||{}).samplers||{})[c.id]||{};
+  var spans=spanUnion((sp.incarnations||[]).map(function(x){return [x.first_ts,x.last_ts]}));
+  if(!spans.length)spans=spanUnion([[ex.first_ts,ex.last_ts]]);
+  return spans.length?{h:sum(spans.map(function(x){return x[1]-x[0]}))/3600,src:"events",spans:spans}:{h:null,src:"none"}}
+function spanOverlap(spans,a,b){return sum(spans.map(function(x){return Math.max(0,Math.min(b,x[1])-Math.max(a,x[0]))}))}
+/* the trainer round in progress: a live trainer whose last round ended (train / sync / publish
+   done) and that has not read a new batch since is waiting on the buffer right now. Completed
+   rounds alone hide a round stuck for many minutes. */
+function curWait(V,c){if(!rlLive(c.status))return null;var rr=(((V.islands||{})[c.id]||{}).rounds||[]),l=rr[rr.length-1];if(!l)return null;
+  var end=fin(l.ts)?l.ts:null;Object.keys(l.phases||{}).forEach(function(p){var e=(l.phases[p]||[])[1];if(fin(e)&&(end==null||e>end))end=e});if(end==null)return null;
+  var tr=((((V.async||{}).trainers||{})[c.id]||{}).rounds||[]),rd=tr.length?tr[tr.length-1].read_ts:null;if(fin(rd)&&rd>end)return null;
+  return NOW>end?{since:end,s:NOW-end,round:fin(l.round)?l.round+1:null}:null}
 // a card row in rows of equal length: as many columns as fit (cards >= 150 px), then the
 // cards spread evenly over the rows, so a row of 8 never ends with one card alone on a line
 function evenGrid(box,n){if(!box||!n)return;var w=box.clientWidth||box.getBoundingClientRect().width||0;if(!w)return;
@@ -452,9 +492,9 @@ function rlm(V){
       if(c.role==="sampler"&&s){var sr=s.rounds||[],l=s.last_round||sr[sr.length-1]||{},ld=(A.releases||[]).map(function(x){return (x.loads||{})[c.id]?[x.policy_version,x.loads[c.id]]:null}).filter(Boolean).pop();
         return row+'<td>'+k(s.n_rounds-(s.empty_rounds||0),0)+' rounds with groups'+(s.empty_rounds?' (+'+k(s.empty_rounds,0)+' without groups)':'')+' / '+(s.policy_version==null?"n/a":"v"+s.policy_version)+'<div class="ns">'+ago(l.ts)+' · age p50 '+k(s.lag_p50,1)+'</div></td><td>'+k(s.reward_mean_last,3)+(fin(s.reward_last_ts)?'<div class="ns">round '+esc(s.reward_last_rollout_id)+' · '+ago(s.reward_last_ts)+'</div>':"")+'</td><td>n/a</td><td>n/a</td><td>n/a</td><td>'+dur(l.generate_s)+'<div class="ns">generate, p50 '+dur(s.generate_p50_s)+'</div></td><td>'+(fin(l.response_tokens)&&l.generate_s?k(l.response_tokens/l.generate_s):"n/a")+'</td>'+hb+
           '<td>'+(ld?(ld[1].at_start?"at start":dur(ld[1].load_wall_s))+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+(ld[1].at_start?"loaded when the sampler started":dur(ld[1].latency_s)+' after release')+'</div>':"none yet")+'</td><td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
-      var mr=(A.releases||[]).filter(function(x){return String(x.trainer)===String(c.id)}).pop(),kl=lastW(rr,"kl_tr")||lastW(rr,"kl")||{};
+      var mr=(A.releases||[]).filter(function(x){return String(x.trainer)===String(c.id)}).pop(),kl=lastW(rr,"kl_tr")||lastW(rr,"kl")||{},cw=curWait(V,c);
       return row+'<td>'+(r.round==null?"n/a":r.round)+' / '+(c.policy_version==null?"n/a":"v"+c.policy_version)+'<div class="ns">'+ago(r.ts)+'</div></td><td>'+k((lastW(rr,"reward")||{}).reward,3)+'</td><td>'+(fin(kl.kl_tr)?k(kl.kl_tr,4)+(fin(kl.kl)?'<div class="ns">PPO '+k(kl.kl,4)+'</div>':""):fin(kl.kl)?'n/a<div class="ns">PPO '+k(kl.kl,4)+'</div>':"n/a")+'</td><td>'+k((lastW(rr,"logprob_diff")||{}).logprob_diff,4)+'</td><td>'+k((lastW(rr,"grad_norm")||{}).grad_norm,3)+'</td>'+
-        '<td>'+dur(r.step_s)+'<div class="ns">round '+dur(r.round_s)+'</div></td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td><td>trainer '+esc(c.id)+'<div class="ns">'+esc((c.left||{}).reason||"")+'</div></td></tr>'};
+        '<td>'+dur(r.step_s)+'<div class="ns">round '+dur(r.round_s)+'</div>'+(cw&&cw.s>=60?'<div class="ns wt">current round'+(cw.round!=null?" "+cw.round:"")+' waiting for data '+dur(cw.s)+'</div>':"")+'</td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td><td>trainer '+esc(c.id)+'<div class="ns">'+esc((c.left||{}).reason||"")+'</div></td></tr>'};
   var unkRow=function(c){var ex=X[c.id]||{};return '<tr class="off"><td><div class="nn">'+rlDot("unknown")+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">no trainer or sampler events in this tape; not counted</div></td><td colspan="10">'+
     esc(c.source_lost?"tape source lost: "+String(c.source_lost.error||"").slice(0,120):"")+'</td></tr>'};
   var liveC=act.filter(function(c){return rlLive(c.status)||c.status==="stale"}),endC=act.filter(function(c){return liveC.indexOf(c)<0});
@@ -464,10 +504,13 @@ function rlm(V){
   // fleet charts
   $("rFleetH").textContent="Fleet over the last "+rangeLabel();
   var ser=function(L,key,f){return L.map(function(c){return {name:c.label,color:c.color,pts:RR(c).map(function(r){return [r.ts,f?f(r):r[key]]})}})};
-  var sser=function(key,f){return sps.map(function(c){return {name:c.label,color:c.color,dash:true,pts:SR(c).map(function(r){return [r.ts,f?f(r):r[key]]})}})};
+  var sser=function(key,f){return sps.map(function(c){return {name:c.label,color:c.color,dash:true,pts:SR(c).map(function(r){return [r.ts,f?f(r):r[key],r.incarnation]})}})};
+  // sampler reward: group-weighted rolling mean over the last REW_WIN groups (whole rounds, newest first)
+  var rroll=function(c){var w=[],out=[];SR(c).forEach(function(r){if(!fin(r.reward_mean)||!(r.groups>0))return;w.push(r);var g=0,v=0;
+    for(var j=w.length-1;j>=0&&g<REW_WIN;j--){g+=w[j].groups;v+=w[j].groups*w[j].reward_mean}out.push([r.ts,v/g,r.incarnation])});return out};
   var evs=cs.filter(function(c){return ((X[c.id]||{}).evals||[]).length});
   var g=[];if(evs.length)g.push(["rfEval","Held-out eval","rl_eval: "+esc(((X[evs[0].id].evals[0])||[])[2]||"")]);
-  g=g.concat([["rfRew","Reward","trained batch mean per trainer round (solid); sampler round mean (dashed), one line per shard across its restarts. Dotted marks: −sN NC pool took sampler shard N out (restart / fenced / released / lost), +sN shard N ready again (#k = k-th restart), ↻ new sampler incarnation / trainer relaunch; hover a mark for the reason"],["rfKl","train-rollout KL","trainer vs sampler logprobs (train_metrics.train_rollout_kl) per trainer round"],["rfPkl","PPO KL","trainer policy vs the old logprobs of the batch (train_metrics.ppo_kl); near 0 with one optimizer step per batch"],
+  g=g.concat([["rfRew","Reward","trainer: batch mean per trained step (solid). Sampler: group-weighted mean of its last "+REW_WIN+" groups (dashed), raw round means as faint dots. Triangles above every fleet chart: restarts and pool events (merged within 2 min), hover for details. Lines break at gaps over 3× the usual spacing and at a new incarnation"],["rfKl","train-rollout KL","trainer vs sampler logprobs (train_metrics.train_rollout_kl) per trainer round"],["rfPkl","PPO KL","trainer policy vs the old logprobs of the batch (train_metrics.ppo_kl); near 0 with one optimizer step per batch"],
     ["rfLp","logprob |diff|","train vs rollout logprob abs diff per round"],["rfTis","TIS clipfrac","share of tokens whose IS weight was clipped"],["rfGn","grad_norm","per trainer round"],
     ["rfLr","Learning rate","applied lr per round"],["rfStep","Trainer step time","train step seconds (solid); round wall time (dashed)"],["rfTps","Tokens / s","stacked by trainer; tok_per_s interpolated onto one time grid, then summed"],
     ["rfHbm","HBM","mean used GiB over each island's GPUs (NVML / host probe)"],["rfHost","Host memory","per node, from the Modal host probe (YETO_MODAL_HOSTMEM_SAMPLE_S)"],
@@ -479,33 +522,36 @@ function rlm(V){
   var f3=function(v){return k(v,3)},f4=function(v){return v.toPrecision(3)};
   if(evs.length)chart("rfEval",{series:evs.map(function(c){return {name:c.label,color:c.color,pts:X[c.id].evals.map(function(e){return [e[0],e[1]]})}}),yfmt:f3,y0:false,dots:true});
   var shN=function(x){var m=/-(\d+)$/.exec(String(x==null?"":x));return m?"s"+m[1]:String(x==null?"?":x)};
-  var vm=[];sps.forEach(function(c){((S[c.id]||{}).restarts||[]).forEach(function(x){vm.push({t:x.ts,color:c.color,short:"↻"+shN(c.id),label:c.label+" restarted (incarnation "+x.incarnation+")"})})});
-  trs.forEach(function(c){(c.launches||[]).slice(1).forEach(function(x){vm.push({t:x.first_ts,color:c.color,short:"↻trainer",label:c.label+" relaunched ("+x.launch+")"})})});
+  var vm=[];sps.forEach(function(c){((S[c.id]||{}).restarts||[]).forEach(function(x){vm.push({t:x.ts,color:c.color,label:"↻ "+c.label+" restarted (incarnation "+x.incarnation+")"})})});
+  trs.forEach(function(c){(c.launches||[]).slice(1).forEach(function(x){vm.push({t:x.first_ts,color:c.color,label:"↻ "+c.label+" relaunched ("+x.launch+")"})})});
   var PMK={member_ready:["+","ready"],sampler_restart:["−","restart"],released:["−","released"],released_externally:["−","released"],shard_fenced:["−","fenced"],
     evicted:["−","evicted"],expired:["−","expired"],node_lost:["−","node lost"],sampler_crash_loop:["−","crash loop"],scaled_down:["−","scaled down"],manual_release_detected:["−","released by hand"],manual_pause:["−","paused by hand"],manual_resume:["+","resumed by hand"],scale_draining:["−","draining (scale down)"],start_failed:["−","start failed"],start_retry:["↻","start retry"],sampler_vram_high:["!","VRAM high"],stale_handoff_set_aside:["+","stale stop request set aside"],node_reachable_again:["+","reachable"]};
   (A.pool||[]).forEach(function(p){var e=String(p.event||"").replace("nc_elastic_",""),m=PMK[e];if(!m)return;var why=p.detail||p.why||p.reason||p.error||(p.max_frac!=null?"max "+(100*p.max_frac).toFixed(1)+"% of a GPU":"");
-    var sc=sps.filter(function(c){return String(c.id)===String(p.shard)})[0];vm.push({t:p.ts,color:sc?sc.color:null,short:m[0]+shN(p.shard)+" "+m[1]+(e==="member_ready"&&fin(p.restarts)&&p.restarts>0?" #"+p.restarts:""),
-      label:"NC pool: sampler shard "+(p.shard==null?"?":p.shard)+" "+m[1]+(p.ticket?" · ticket "+p.ticket:"")+(fin(p.restarts)?" · restarts "+p.restarts:"")+(why?" · "+String(why).slice(0,160):"")})});
-  chart("rfRew",{series:ser(trs,"reward").concat(sser("reward_mean")),yfmt:f3,y0:false,vmarks:vm});
-  chart("rfKl",mag({series:ser(trs,"kl_tr"),yfmt:f4}));chart("rfPkl",mag({series:ser(trs,"kl"),yfmt:f4}));
-  chart("rfLp",mag({series:ser(trs,"logprob_diff"),yfmt:f4}));chart("rfTis",mag({series:ser(trs,"tis_clip"),yfmt:f4}));chart("rfGn",mag({series:ser(trs,"grad_norm"),yfmt:f3}));
-  chart("rfLr",axs({series:ser(trs,"lr"),yfmt:function(v){return v.toExponential(2)}}));
-  chart("rfStep",{series:ser(trs,"step_s").concat(trs.map(function(c){return {name:c.label+" round",color:c.color,dash:true,legend:false,pts:RR(c).map(function(r){return [r.ts,r.round_s]})}})),yfmt:dur});
-  chart("rfTps",{kind:"stack",interp:600,series:ser(trs,"tok_s"),yfmt:k});
-  chart("rfHbm",{series:cs.map(function(c){var ns=(X[c.id]||{}).node_series||{},n=Object.keys(ns)[0];return {name:c.label,color:c.color,pts:n?ns[n].map(function(p){return [p[0],p[1]]}):[]}}),yfmt:function(v){return v.toFixed(0)+" G"}});
-  chart("rfHost",{series:[]});
-  chart("rfRound",{series:sps.map(function(c){return {name:c.label,color:c.color,pts:SR(c).map(function(r){return [r.ts,r.generate_s]})}}),yfmt:dur});
-  var ageMean=function(r){var a=(TR[r._c]||{}),h=r.ages||{},n=0,s=0;Object.keys(h).forEach(function(x){if(fin(h[x])&&!isNaN(+x)){n+=h[x];s+=h[x]*(+x)}});return n?s/n:null};
-  chart("rfAge",{series:trs.map(function(c){return {name:c.label,color:c.color,pts:((TR[c.id]||{}).rounds||[]).map(function(r){return [r.ts,ageMean(r)]})}}).concat(sser("version_lag")),yfmt:function(v){return v.toFixed(1)},dots:true});
-  chart("rfResp",mag({series:trs.map(function(c){return {name:c.label+" generated (loss mask)",color:c.color,pts:RR(c).map(function(r){return [r.ts,r.resp_mean]})}})
+    var sc=sps.filter(function(c){return String(c.id)===String(p.shard)})[0];vm.push({t:p.ts,color:sc?sc.color:null,
+      label:m[0]+shN(p.shard)+" NC pool: sampler shard "+(p.shard==null?"?":p.shard)+" "+m[1]+(p.ticket?" · ticket "+p.ticket:"")+(fin(p.restarts)?" · restarts "+p.restarts:"")+(why?" · "+String(why).slice(0,160):"")})});
+  var fc=function(id,o){o.vmarks=vm;return chartTs(id,o)}; // every fleet time chart carries the same marker strip
+  fc("rfRew",{series:ser(trs,"reward").concat(sps.map(function(c){return {name:c.label+" (mean of last "+REW_WIN+" groups)",color:c.color,dash:true,pts:rroll(c)}}),
+    sps.map(function(c){return {name:c.label+" round mean",color:c.color,faint:true,legend:false,pts:SR(c).map(function(r){return [r.ts,r.reward_mean]})}})),yfmt:f3,y0:false});
+  fc("rfKl",mag({series:ser(trs,"kl_tr"),yfmt:f4}));fc("rfPkl",mag({series:ser(trs,"kl"),yfmt:f4}));
+  fc("rfLp",mag({series:ser(trs,"logprob_diff"),yfmt:f4}));fc("rfTis",mag({series:ser(trs,"tis_clip"),yfmt:f4}));fc("rfGn",mag({series:ser(trs,"grad_norm"),yfmt:f3}));
+  fc("rfLr",axs({series:ser(trs,"lr"),yfmt:function(v){return v.toExponential(2)}}));
+  fc("rfStep",{series:ser(trs,"step_s").concat(trs.map(function(c){return {name:c.label+" round",color:c.color,dash:true,legend:false,pts:RR(c).map(function(r){return [r.ts,r.round_s]})}})),yfmt:dur});
+  fc("rfTps",{kind:"stack",interp:600,series:ser(trs,"tok_s"),yfmt:k});
+  fc("rfHbm",{series:cs.map(function(c){var ns=(X[c.id]||{}).node_series||{},n=Object.keys(ns)[0];return {name:c.label,color:c.color,pts:n?ns[n].map(function(p){return [p[0],p[1]]}):[]}}),yfmt:function(v){return v.toFixed(0)+" G"}});
+  fc("rfHost",{series:[]});
+  fc("rfRound",{series:sps.map(function(c){return {name:c.label,color:c.color,pts:SR(c).map(function(r){return [r.ts,r.generate_s,r.incarnation]})}}),yfmt:dur});
+  // trained groups' mean policy age: the round's age histogram, else the trainer's own mean (rl_round_trained.policy_age_mean; newer tapes carry no histogram)
+  var ageMean=function(r){var h=r.ages||{},n=0,s=0;Object.keys(h).forEach(function(x){if(fin(h[x])&&!isNaN(+x)){n+=h[x];s+=h[x]*(+x)}});return n?s/n:fin(r.policy_age_mean)?r.policy_age_mean:null};
+  fc("rfAge",{series:trs.map(function(c){return {name:c.label,color:c.color,pts:((TR[c.id]||{}).rounds||[]).map(function(r){return [r.ts,ageMean(r)]})}}).concat(sser("version_lag")),yfmt:function(v){return v.toFixed(1)},dots:true});
+  fc("rfResp",mag({series:trs.map(function(c){return {name:c.label+" generated (loss mask)",color:c.color,pts:RR(c).map(function(r){return [r.ts,r.resp_mean]})}})
     .concat(trs.map(function(c){return {name:c.label+" full",color:c.color,dash:"1 3",pts:RR(c).map(function(r){return [r.ts,r.resp_full_mean]})}}).filter(function(x){return x.pts.some(function(p){return fin(p[1])})}))
     .concat(sps.map(function(c){return {name:c.label+" full",color:c.color,dash:true,pts:SR(c).map(function(r){return [r.ts,r.resp_len_mean]})}})),yfmt:k}));
-  chart("rfBl",{series:[{name:"backlog",color:PAL[3],pts:bl?bl.points.map(function(p){return [p[0],p[3]]}):[]}].concat(sps.map(function(c){return {name:c.label+" reported",color:c.color,pts:((S[c.id]||{}).backlog||[]).map(function(p){return [p[0],p[1]]}),legend:true}})),yfmt:k,
+  fc("rfBl",{series:[{name:"backlog",color:PAL[3],pts:bl?bl.points.map(function(p){return [p[0],p[3]]}):[]}].concat(sps.map(function(c){return {name:c.label+" reported",color:c.color,pts:((S[c.id]||{}).backlog||[]).map(function(p){return [p[0],p[1]]}),legend:true}})),yfmt:k,
     refs:caps.length?[{y:sum(caps),label:"caps "+sum(caps),legend:"sum of backlog caps",color:"#eab308"}]:[]});
-  chart("rfRel",{dots:true,series:sps.map(function(c){return {name:c.label,color:c.color,pts:(A.releases||[]).map(function(x){var l=(x.loads||{})[c.id];return l&&!l.at_start?[l.loaded_at,l.latency_s]:null}).filter(Boolean)}}),yfmt:dur});
+  fc("rfRel",{dots:true,series:sps.map(function(c){return {name:c.label,color:c.color,pts:(A.releases||[]).map(function(x){var l=(x.loads||{})[c.id];return l&&!l.at_start?[l.loaded_at,l.latency_s]:null}).filter(Boolean)}}),yfmt:dur});
   var tb=function(key){var o=[];trs.forEach(function(c){((TR[c.id]||{}).rounds||[]).forEach(function(r){if(fin(r.ts)&&r[key]>0)o.push([r.ts,r[key]])})});return o};
   var sb=function(key){var o=[];sps.forEach(function(c){SR(c).forEach(function(r){if(r[key]>0)o.push([r.ts,r[key]])})});return o};
-  chart("rfDrop",{kind:"bars",series:[{name:"stale",color:PAL[3],pts:tb("stale_groups")},{name:"zero-variance",color:PAL[5],pts:sb("zero_variance_dropped").length?sb("zero_variance_dropped"):sb("zero_variance_seen")},
+  fc("rfDrop",{kind:"bars",series:[{name:"stale",color:PAL[3],pts:tb("stale_groups")},{name:"zero-variance",color:PAL[5],pts:sb("zero_variance_dropped").length?sb("zero_variance_dropped"):sb("zero_variance_seen")},
     {name:"truncated (samples)",color:PAL[1],pts:sb("truncated")},{name:"infra",color:PAL[8],pts:sb("dropped_groups")}],yfmt:function(v){return +v.toFixed(1)+""}});
   foldEmpty(g,"rFleetNone");balanceGrid("rFleet",340,4);
   rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp);
@@ -514,32 +560,38 @@ function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
   $("rCostH").textContent="Cost / efficiency over the last "+rangeLabel();
   var X=V.islands||{};
   var waitS=function(c,a,b){return sum(((X[c.id]||{}).rounds||[]).filter(function(r){return r.phases&&r.phases.R&&inR(r.phases.R[1],a,b)}).map(function(r){return r.dur.R}))};
-  function agg(a,b){var o={groups:0,tok:0,billT:0,billS:0,effT:0,effS:0,wait:0,wall:0};
-    cs.forEach(function(c){var bh=rlBilled(V,c),span=bh.src==="events"?[bh.a,bh.b]:[((X[c.id]||{}).ready_ts)||(X[c.id]||{}).first_ts,(X[c.id]||{}).last_ts];
-      var ov=fin(span[0])&&fin(span[1])?Math.max(0,Math.min(b,span[1])-Math.max(a,span[0])):0,cards=c.cards;
+  var CW={};trs.forEach(function(c){var w=curWait(V,c);if(w)CW[c.id]=w});
+  function agg(a,b){var o={groups:0,tok:0,billT:0,billS:0,effT:0,effS:0,wait:0,wall:0,cur:0};
+    cs.forEach(function(c){var bh=rlBilled(V,c),span=bh.src==="events"?null:[((X[c.id]||{}).ready_ts)||(X[c.id]||{}).first_ts,(X[c.id]||{}).last_ts];
+      var ov=span?(fin(span[0])&&fin(span[1])?Math.max(0,Math.min(b,span[1])-Math.max(a,span[0])):0):spanOverlap(bh.spans||[],a,b),cards=c.cards;
       if(c.role==="sampler"){o.billS+=ov*cards;SR(c).forEach(function(r){if(inR(r.ts,a,b)){o.effS+=(r.generate_s||0)*cards;o.groups+=r.groups||0}})}
-      else{o.billT+=ov*cards;RR(c).forEach(function(r){if(inR(r.ts,a,b)){o.effT+=(r.step_s||0)*cards;o.tok+=r.tokens||0;o.wall+=r.round_s||0}});o.wait+=waitS(c,a,b)}});
-    o.bill=o.billT+o.billS;o.eff=o.effT+o.effS;o.util=o.bill?o.eff/o.bill:null;o.tpc=o.billT?o.tok/o.billT:null;o.ws=o.wall?o.wait/o.wall:null;return o}
+      else{o.billT+=ov*cards;RR(c).forEach(function(r){if(inR(r.ts,a,b)){o.effT+=(r.step_s||0)*cards;o.tok+=r.tokens||0;o.wall+=r.round_s||0}});o.wait+=waitS(c,a,b);
+        var w=CW[c.id];if(w)o.cur+=spanOverlap([[w.since,NOW]],a,b)}}); // the round in progress, still waiting
+    o.bill=o.billT+o.billS;o.eff=o.effT+o.effS;o.util=o.bill?o.eff/o.bill:null;o.tpc=o.billT?o.tok/o.billT:null;o.wsDone=o.wall?o.wait/o.wall:null;o.ws=o.wall+o.cur?(o.wait+o.cur)/(o.wall+o.cur):null;return o}
   var A=agg(t0,t1),B=agg(tp,t0);
   function delta(a,b,fmt){if(!fin(a)||!fin(b)||!b)return '<span class="dl">no previous '+rangeLabel()+'</span>';var d=a-b,p=100*d/b;
     return '<span class="dl '+(d>=0?"up":"dn")+'">'+(d>=0?"&uarr; +":"&darr; ")+esc(fmt(d))+' · '+(p>=0?"+":"")+p.toFixed(0)+'% vs previous '+rangeLabel()+'</span>'}
   var pc=function(v){return fin(v)?(100*v).toFixed(1)+"%":"n/a"},ch=function(s){return k(s/3600,1)};
   var nc=sps.some(function(c){return rlBilled(V,c).src==="events"});
   var ck=[["Groups / tokens",k(A.groups,0)+" / "+k(A.tok),"groups written by samplers / tokens trained",delta(A.groups,B.groups,function(v){return k(v,0)})],
-    ["Card-hours",ch(A.billT)+" + "+ch(A.billS),"trainers + samplers"+(nc?"; NC samplers: first → last event (lease not on the tapes)":""),delta(A.bill,B.bill,ch)],
+    ["Card-hours",ch(A.billT)+" + "+ch(A.billS),"trainers + samplers"+(nc?"; samplers outside the fleet ledger: union of their incarnations' first → last event (a lower bound: boot before the first event is not on the tapes)":""),delta(A.bill,B.bill,ch)],
     ["Tokens / card·s",k(A.tpc),"trained tokens ÷ trainer card-seconds",delta(A.tpc,B.tpc,k)],
     ["MFU","n/a","the RL tapes carry no FLOP counts",""],
     ["GPU effective utilization",pc(A.util),"(train step + generate time) × cards ÷ billed card time · trainers "+pc(A.billT?A.effT/A.billT:null)+" · samplers "+pc(A.billS?A.effS/A.billS:null),delta(A.util,B.util,function(v){return (100*v).toFixed(1)+" pt"})],
-    ["Trainer waiting for data",pc(A.ws),"rollout phase (waiting on the buffer) ÷ round wall time",delta(A.ws,B.ws,function(v){return (100*v).toFixed(1)+" pt"})],
+    ["Trainer waiting for data",pc(A.ws),"rollout phase (waiting on the buffer) ÷ round wall time, including the round in progress"+
+      (Object.keys(CW).length?" · now: "+Object.keys(CW).map(function(i){return "trainer "+i+" waiting "+dur(CW[i].s)}).join(", ")+" · completed rounds only "+pc(A.wsDone):""),delta(A.ws,B.ws,function(v){return (100*v).toFixed(1)+" pt"})],
     ["Projected finish","n/a","the tapes carry no total round count",""]];
   $("rCostK").innerHTML=ck.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div>'+x[3]+'</div>'}).join("");
   $("rCost").innerHTML=card("rcG","Groups per hour","stacked by sampler")+card("rcCh","Card-hours per hour","billed card time vs effective (train step / generate)")+
-    card("rcW","Trainer waiting per hour","rollout-phase seconds (waiting on the buffer) per trainer")+card("rcPv","Groups by policy version","per hour, stacked by the version the sampler generated with (no task labels on the tapes)");
+    card("rcW","Trainer waiting per hour","rollout-phase seconds (waiting on the buffer) per trainer; yellow: the round still waiting now")+card("rcPv","Groups by policy version","per hour, stacked by the version the sampler generated with (no task labels on the tapes)");
   chart("rcG",{kind:"bars",bucket:3600,series:sps.map(function(c){return {name:c.label,color:c.color,pts:SR(c).map(function(r){return [r.ts,r.groups]})}}),yfmt:k});
   var HB=RANGE_H<=1?600:3600,hrs=[];for(var h=Math.floor(t0/HB)*HB;h<t1;h+=HB)hrs.push(h);
   var bill=hrs.map(function(h){var a=agg(h,h+HB);return [[h+HB/2,a.bill/3600],[h+HB/2,a.eff/3600]]});
   chart("rcCh",{series:[{name:"Card-hours",color:PAL[0],pts:bill.map(function(x){return x[0]}).filter(function(p){return p[1]>0})},{name:"Effective",color:PAL[2],pts:bill.map(function(x){return x[1]}).filter(function(p,i){return bill[i][0][1]>0})}],yfmt:function(v){return k(v,2)}});
-  chart("rcW",{kind:"bars",bucket:3600,series:trs.map(function(c){return {name:c.label,color:c.color,pts:((X[c.id]||{}).rounds||[]).filter(function(r){return r.phases&&r.phases.R}).map(function(r){return [r.phases.R[1],r.dur.R]})}}),yfmt:dur});
+  // the round in progress: its waiting so far, split per hour bucket, in a lighter bar on top
+  var cwPts=function(c){var w=CW[c.id],o=[];if(!w)return o;for(var h=Math.floor(w.since/3600)*3600;h<NOW;h+=3600){var v=spanOverlap([[w.since,NOW]],h,h+3600);if(v>0)o.push([Math.min(NOW,Math.max(w.since,h+1)),v])}return o};
+  chart("rcW",{kind:"bars",bucket:3600,series:trs.map(function(c){return {name:c.label,color:c.color,pts:((X[c.id]||{}).rounds||[]).filter(function(r){return r.phases&&r.phases.R}).map(function(r){return [r.phases.R[1],r.dur.R]})}})
+    .concat(trs.filter(function(c){return CW[c.id]}).map(function(c){return {name:c.label+" current round (in progress)",color:"#eab308",pts:cwPts(c)}})),yfmt:dur});
   var pv={};sps.forEach(function(c){SR(c).forEach(function(r){var v=r.policy_version==null?"?":"v"+r.policy_version;(pv[v]=pv[v]||[]).push([r.ts,r.groups])})});
   chart("rcPv",{kind:"bars",bucket:3600,series:Object.keys(pv).sort().map(function(v,i){return {name:v,color:PAL[i%PAL.length],pts:pv[v]}}),yfmt:k});
   foldEmpty([["rcG","Groups per hour","stacked by sampler"],["rcCh","Card-hours per hour",""],["rcW","Trainer waiting per hour",""],["rcPv","Groups by policy version",""]],"rCostNone");balanceGrid("rCost",340,4);
@@ -565,5 +617,5 @@ function render(view,offline){
   else{rlDist(V);if(RL){var lay=String((($("title")||{}).innerHTML)||"").replace(/<[^>]*>/g,"").split(" · ")[0],tg=(V.async?"RL · async GRPO":"RL")+(lay?" · "+lay:"");$("title").innerHTML='yeto metrics <span class="tg">'+esc(run||"unnamed run")+'</span><span class="tg">'+tg+'</span>';
     document.title="yeto metrics · "+(run||"RL");$("sub").textContent="updated "+clock(offline?NOW:Date.now()/1000,true)+" · times in your local zone"+(offline?" · offline export, data as of "+day(NOW):" · live");rlm(V)}}
 }
-return {bins:bins,evalTip:evalTip,durAxis:durAxis,durTicks:durTicks,numAxis:numAxis,nice:nice,interpStack:interpStack,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
+return {markClusters:markClusters,segments:segments,spanUnion:spanUnion,spanOverlap:spanOverlap,bins:bins,evalTip:evalTip,durAxis:durAxis,durTicks:durTicks,numAxis:numAxis,nice:nice,interpStack:interpStack,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
 })();

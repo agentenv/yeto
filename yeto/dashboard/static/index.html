@@ -129,14 +129,14 @@ td.bar,th.bar{text-align:left!important;min-width:200px}.bl{font-size:11px;margi
 .cg{display:grid;grid-template-columns:repeat(auto-fill,minmax(max(340px,calc((100% - 42px) / 4)),1fr));gap:14px}
 .cc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 12px 8px;min-width:0;display:flex;flex-direction:column}
 .ct{font-size:12.5px;font-weight:600}.cs{font-size:11px;color:var(--ink2);margin:2px 0 8px}
-.cc>.cs{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.9em}
+.cc>.cs{min-height:2.9em;overflow-wrap:anywhere} /* subtitles wrap in full: a cut one hid how the chart is computed */
 .cfold{font-size:11.5px;color:var(--ink2);margin:10px 2px 0}.cfold b{color:var(--ink);font-weight:500}.cfold[hidden]{display:none}
 .cw{position:relative;overflow:hidden}.cc{overflow:hidden}svg.ch,svg.hs{display:block;width:100%;height:auto}
 svg.ch text,svg.hs text{fill:var(--ink2);font:9.5px var(--sans)}svg .gl{stroke:var(--line);stroke-width:.8}svg .cx{stroke:var(--ink2);stroke-dasharray:2 2}
 svg text.rt{fill:#c9cad0;font-size:9px}
 .lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;color:var(--ink);margin:8px 0 2px}.lg i,.tt i,.dh i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
 .tt{position:absolute;display:none;pointer-events:none;background:#202024;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;min-width:150px;z-index:4;box-shadow:0 6px 18px rgba(0,0,0,.35)}
-.tt .th{color:var(--ink2);margin-bottom:3px}.tt div{display:flex;align-items:center;gap:2px}.tt b{margin-left:auto;padding-left:10px;font-weight:500}
+.tt .th{color:var(--ink2);margin-bottom:3px}.tt .mkr{color:var(--ink2);max-width:320px;white-space:normal}.ns.wt{color:var(--warn)}.tt div{display:flex;align-items:center;gap:2px}.tt b{margin-left:auto;padding-left:10px;font-weight:500}
 .lg .nd{color:var(--ink2)}.empty{color:var(--ink2);font-size:12px;padding:28px 0;text-align:center}
 .dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(560px,1fr));gap:14px}
 .dc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 0 0;min-width:0}

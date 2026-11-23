@@ -164,6 +164,13 @@ def compaction_total(rows: list[dict]) -> dict | None:
 _ERROR_LINE = re.compile(r"^\s*([A-Za-z_][\w.]*(?:Error|Exception)): (.+)$")
 
 
+def _latest_incarnation(incs: list[dict]) -> str | None:
+    """The incarnation that started last (rows without a start time count as oldest)."""
+    if not incs:
+        return None
+    return max(incs, key=lambda x: (x["first_ts"] is not None, x["first_ts"] or 0))["incarnation"]
+
+
 def root_cause(error: Any) -> str | None:
     """The first ``SomeError: message`` line of a leave's error text: with chained
     exceptions ("The above exception was the direct cause ...") that is the root cause
@@ -274,13 +281,20 @@ class AsyncState:
             if i < len(self.pool):
                 del self.pool[i]
 
-    def fold(self, r: dict, iid: str, ts: float | None) -> None:
+    def fold(self, r: dict, iid: str, ts: float | None, inc: str | None = None,
+             boot_ts: float | None = None) -> None:
+        """``inc``: the sampler incarnation the record's tape last announced (rl_sampler_join /
+        rl_sampler_start earlier in the same source; "" = a known source that has announced none
+        yet, None = no source). Tapes of several incarnations arrive interleaved (a run store
+        lists their folders by name, not by time), so the latest join is not necessarily the
+        incarnation a round belongs to. ``boot_ts``: on a join, the earliest record of its tape
+        before it (engine start, model load), which starts the incarnation."""
         ev = r.get("event")
         if not isinstance(ev, str):
             return
         if ev.startswith("rl_sampler_"):
             self.roles[iid] = "sampler"
-            self._fold_sampler(r, iid, ts, ev)
+            self._fold_sampler(r, iid, ts, ev, inc, boot_ts)
         elif ev in TRAINER_EVENTS or ev in ("rl_rollout_carry_over", "offpolicy_gate", "rl_round_phases",
                                             "rl_round_wall", "island_leave",
                                             "rl_buffer_unidentified_policy_starved"):
@@ -296,23 +310,33 @@ class AsyncState:
             self.sampler[iid]["resource"] = {"available": r.get("available"), "reason": r.get("reason"),
                                              "source": r.get("source")}
 
-    def _fold_sampler(self, r: dict, iid: str, ts: float | None, ev: str) -> None:
+    def _fold_sampler(self, r: dict, iid: str, ts: float | None, ev: str, hint: str | None = None,
+                      boot_ts: float | None = None) -> None:
         s = self._s(iid)
         s["last_type"], s["last_ts"] = ev, ts
         rid = _int(r.get("rollout_id"))
         inc = r.get("incarnation")
-        if inc is not None and ev in ("rl_sampler_join", "rl_sampler_start"):
+        if inc is not None and (ev in ("rl_sampler_join", "rl_sampler_start")
+                                or not any(x["incarnation"] == str(inc) for x in s["incarnations"])):
+            # a join / start, or any record naming an incarnation not seen yet (its join unread)
             inc = str(inc)
             row = next((x for x in s["incarnations"] if x["incarnation"] == inc), None)
             if row is None:
-                s["incarnations"].append({"incarnation": inc, "first_ts": ts, "last_ts": ts})
-            elif ts is not None:
-                row["first_ts"] = ts if row["first_ts"] is None else min(row["first_ts"], ts)
-            if inc != s.get("incarnation"):
+                row = {"incarnation": inc, "first_ts": ts, "last_ts": ts}
+                s["incarnations"].append(row)
+            for t in (ts, boot_ts):
+                if t is not None:
+                    row["first_ts"] = t if row["first_ts"] is None else min(row["first_ts"], t)
+            latest = _latest_incarnation(s["incarnations"])
+            if latest != s.get("incarnation"):
                 s["ended"] = False  # a restart: the earlier incarnation's stop is not this one's
-            s["incarnation"] = inc
-        if s["incarnations"] and ts is not None:
-            cur = next((x for x in s["incarnations"] if x["incarnation"] == s.get("incarnation")), None)
+            s["incarnation"] = latest  # the newest by start time, whatever order the tapes arrive in
+        # the incarnation this record belongs to: its own, else the one its tape announced last,
+        # else (an old tape without the announcement in the same source) the newest one
+        # ("" = its tape has not announced one yet: the record is not attributed)
+        own = str(inc) if inc is not None else (hint or None) if hint is not None else s.get("incarnation")
+        if s["incarnations"] and ts is not None and own is not None:
+            cur = next((x for x in s["incarnations"] if x["incarnation"] == own), None)
             if cur is not None:
                 cur["last_ts"] = ts if cur["last_ts"] is None else max(cur["last_ts"], ts)
         if ev == "rl_sampler_join":
@@ -325,16 +349,17 @@ class AsyncState:
                                for k in ("card_model", "engine", "precision", "topology")}
         if ev == "rl_sampler_round" and s["first_round_ts"] is None:
             s["first_round_ts"] = ts if ts is not None else 0.0
-        key = (s.get("incarnation"), rid)  # a restarted sampler may count its rounds from 0 again
+        rinc = own if own is not None else s.get("incarnation")
+        key = (rinc, rid)  # a restarted sampler may count its rounds from 0 again
         if ev == "rl_sampler_round" and rid is not None:
-            row = s["rounds"].setdefault(key, {"rollout_id": rid, "incarnation": s.get("incarnation")})
+            row = s["rounds"].setdefault(key, {"rollout_id": rid, "incarnation": rinc})
             row.update({"ts": ts, "policy_version": r.get("policy_version"), "version_lag": r.get("version_lag"),
                         "groups": r.get("groups"), "buffer_end": r.get("buffer_end"),
                         "generate_s": _f(r.get("generate_s"))})
             if s["first_round_ts"] is None:
                 s["first_round_ts"] = ts
         elif ev == "rl_sampler_engine_round" and rid is not None:
-            row = s["rounds"].setdefault(key, {"rollout_id": rid, "incarnation": s.get("incarnation")})
+            row = s["rounds"].setdefault(key, {"rollout_id": rid, "incarnation": rinc})
             finish = r.get("finish") if isinstance(r.get("finish"), dict) else {}
             if row.get("ts") is None:
                 row["ts"] = ts  # rl_sampler_round (when it follows) sets the round's own time
@@ -398,8 +423,8 @@ class AsyncState:
                 del s["backlog"][:-2000]
             if r.get("max_backlog_groups") is not None:
                 s["max_backlog_groups"] = r.get("max_backlog_groups")
-        if ev in SAMPLER_END_EVENTS:
-            s["ended"] = True
+        if ev in SAMPLER_END_EVENTS and rinc == s.get("incarnation"):
+            s["ended"] = True  # an older incarnation's stop read late does not end the newest one
         if ev == "rl_sampler_waiting":
             reason = str(r.get("reason") or "")
             s["last_wait"] = SAMPLER_WAIT_EVENTS.get(f"rl_sampler_{reason}", f"waiting ({reason or 'no reason'})")

@@ -301,6 +301,9 @@ class Reducer:
         self._seen_digests: set[bytes] = set()  # timestamped events folded so far (_digest)
         self._launch_owner: dict[bytes, str] = {}  # store record -> the trainer launch that carried it first
         self.duplicates = 0  # records dropped as already folded from another source
+        self._source: str = "-"  # the source of the record being fed
+        self._source_inc: dict[str, str] = {}  # source -> sampler incarnation its last join named
+        self._source_pre: dict[str, float] = {}  # source -> earliest record time before its first join
         # the dashboard's own command line, for the page's "Commands" box (cli.page_commands)
         self.commands: dict[str, str] | None = None
 
@@ -357,6 +360,7 @@ class Reducer:
         elif kind == "learner" and iid is not None and source != "-":
             self._source_island[source] = iid
         self._superseded = False
+        self._source = source
         launch = _store_launch(source)
         if kind == "learner" and iid is not None and launch is not None:
             self._superseded = self._launch(self.island(iid), launch, ts)
@@ -531,7 +535,16 @@ class Reducer:
         if event in ("rl_sampler_join", "rl_sampler_start") and r.get("incarnation") is not None \
                 and str(r["incarnation"]) != (self.async_.sampler.get(iid) or {}).get("incarnation"):
             isl["finalized"] = False  # a new sampler incarnation: an earlier one's end is not this one's
-        self.async_.fold(r, iid, ts)
+        # a sampler tape names its incarnation in rl_sampler_join; the records before it (the
+        # engine start, the model load) belong to that incarnation too: its boot time
+        src, boot = self._source, None
+        if src != "-":
+            if event in ("rl_sampler_join", "rl_sampler_start") and r.get("incarnation") is not None:
+                self._source_inc[src] = str(r["incarnation"])
+                boot = self._source_pre.pop(src, None)
+            elif src not in self._source_inc and ts is not None and r.get("incarnation") is None:
+                self._source_pre[src] = min(ts, self._source_pre.get(src, ts))
+        self.async_.fold(r, iid, ts, self._source_inc.get(src, "" if src != "-" else None), boot)
         if r.get("policy_version") is not None and event in (
                 "rl_policy_apply", "rl_publication", "rl_driver_phase", "rl_heartbeat",
                 "rl_round_cut", "rl_member_publication", "rl_resume",
@@ -820,7 +833,7 @@ class Reducer:
     def node_series(self, isl: dict) -> dict:
         out = {}
         for rank, ser in isl["node_series"].items():
-            rows = list(ser)
+            rows = sorted(ser, key=lambda p: p[0])  # tapes of several launches / incarnations interleave
             step = max(1, len(rows) // NODE_SERIES_POINTS)
             out[rank] = rows[::step]
         return out
