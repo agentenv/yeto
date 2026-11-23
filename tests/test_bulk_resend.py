@@ -189,9 +189,17 @@ class LightIsland(threading.Thread):
 
 
 def tape_records(tape: Path) -> list[dict]:
+    """The complete records of a tape the live syncer may still be appending to.
+
+    Every record the syncer writes ends with a newline; a read racing an append
+    can see the first part of the next record (JSONDecodeError: unterminated
+    string). That unterminated tail is left for the next read. Complete lines
+    are still parsed strictly."""
     if not tape.exists():
         return []
-    return [json.loads(line) for line in tape.read_text().splitlines() if line.strip()]
+    text = tape.read_text()
+    complete = text[: text.rfind("\n") + 1]
+    return [json.loads(line) for line in complete.splitlines() if line.strip()]
 
 
 def merges_with(records: list[dict], learner_id: int, since_unix: float, until_unix: float) -> int:
