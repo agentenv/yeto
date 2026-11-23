@@ -1,0 +1,359 @@
+{
+ "full_parameter_fixed_partition": {
+  "0": {
+   "arch_source": "<qwen3_0p6b>/config.json",
+   "calibrated": false,
+   "colocated": true,
+   "dp": 8,
+   "estimated": true,
+   "fits": true,
+   "gpu": "H100",
+   "gpu_mem_gib": 79.18,
+   "learner_id": 0,
+   "limit_gib": 71.262,
+   "margin": 0.9,
+   "model": "<qwen3_0p6b>",
+   "model_id": "<qwen3_0p6b>",
+   "parts_gib": {
+    "activations": 9.979,
+    "fixed_overhead": 9.288,
+    "grads_optimizer": 9.757,
+    "inference": 0.0,
+    "logits_block": 1.159,
+    "rollout_phase_extra": 5.239,
+    "weights": 1.22
+   },
+   "peak_gib": 36.642,
+   "pp": 1,
+   "rollout_phase_gib": 36.642,
+   "tokens": 4096,
+   "tp": 1,
+   "train_phase_gib": 31.403,
+   "tuning": "full"
+  },
+  "1": {
+   "arch_source": "<qwen3_0p6b>/config.json",
+   "calibrated": false,
+   "colocated": true,
+   "dp": 8,
+   "estimated": true,
+   "fits": true,
+   "gpu": "H100",
+   "gpu_mem_gib": 79.18,
+   "learner_id": 1,
+   "limit_gib": 71.262,
+   "margin": 0.9,
+   "model": "<qwen3_0p6b>",
+   "model_id": "<qwen3_0p6b>",
+   "parts_gib": {
+    "activations": 9.979,
+    "fixed_overhead": 9.288,
+    "grads_optimizer": 9.757,
+    "inference": 0.0,
+    "logits_block": 1.159,
+    "rollout_phase_extra": 5.239,
+    "weights": 1.22
+   },
+   "peak_gib": 36.642,
+   "pp": 1,
+   "rollout_phase_gib": 36.642,
+   "tokens": 4096,
+   "tp": 1,
+   "train_phase_gib": 31.403,
+   "tuning": "full"
+  }
+ },
+ "k31_buffer_trainer": {
+  "0": {
+   "arch_source": "<kimi_k31>/config.json",
+   "calibrated": false,
+   "colocated": false,
+   "dp": 16,
+   "estimated": true,
+   "fits": false,
+   "gpu": "H100",
+   "gpu_mem_gib": 79.18,
+   "learner_id": 0,
+   "limit_gib": 71.262,
+   "margin": 0.9,
+   "model": "<kimi_k31>",
+   "model_id": "<kimi_k31>",
+   "parts_gib": {
+    "activations": 232.02,
+    "fixed_overhead": 18154.798,
+    "grads_optimizer": 82413.857,
+    "inference": 0.0,
+    "logits_block": 1.25,
+    "weights": 10301.732
+   },
+   "peak_gib": 111103.658,
+   "pp": 1,
+   "rollout_phase_gib": 0.0,
+   "suggestions": [],
+   "tokens": 4096,
+   "tp": 1,
+   "train_phase_gib": 111103.658,
+   "tuning": "full"
+  }
+ },
+ "no_sync_lora": {
+  "0": {
+   "arch_source": "<qwen3_8b>/config.json",
+   "calibrated": false,
+   "colocated": true,
+   "dp": 8,
+   "estimated": true,
+   "fits": false,
+   "gpu": "H100",
+   "gpu_mem_gib": 79.18,
+   "learner_id": 0,
+   "limit_gib": 71.262,
+   "margin": 0.9,
+   "model": "<qwen3_8b>",
+   "model_id": "<qwen3_8b>",
+   "parts_gib": {
+    "activations": 51.322,
+    "fixed_overhead": 18.544,
+    "grads_optimizer": 0.65,
+    "inference": 0.0,
+    "logits_block": 1.159,
+    "weights": 16.381
+   },
+   "peak_gib": 88.057,
+   "pp": 1,
+   "rollout_phase_gib": 36.642,
+   "suggestions": [
+    {
+     "change": "context 4096 -> 2048, response 2048 -> 1024",
+     "peak_gib": 56.692,
+     "response_len": 1024,
+     "seq_len": 2048
+    },
+    {
+     "change": "2x GPUs of the same type (TP 1 -> 2)",
+     "peak_gib": 46.902
+    }
+   ],
+   "tokens": 4096,
+   "tp": 1,
+   "train_phase_gib": 88.057,
+   "tuning": "lora"
+  }
+ },
+ "pair_trainer": {
+  "1": {
+   "arch_source": "<qwen3_8b>/config.json",
+   "calibrated": false,
+   "colocated": true,
+   "dp": 8,
+   "estimated": true,
+   "fits": false,
+   "gpu": "H100",
+   "gpu_mem_gib": 79.18,
+   "learner_id": 1,
+   "limit_gib": 71.262,
+   "margin": 0.9,
+   "model": "<qwen3_8b>",
+   "model_id": "<qwen3_8b>",
+   "parts_gib": {
+    "activations": 51.322,
+    "fixed_overhead": 18.544,
+    "grads_optimizer": 0.65,
+    "inference": 0.0,
+    "logits_block": 1.159,
+    "weights": 16.381
+   },
+   "peak_gib": 88.057,
+   "pp": 1,
+   "rollout_phase_gib": 36.642,
+   "suggestions": [
+    {
+     "change": "context 4096 -> 2048, response 2048 -> 1024",
+     "peak_gib": 56.692,
+     "response_len": 1024,
+     "seq_len": 2048
+    },
+    {
+     "change": "2x GPUs of the same type (TP 1 -> 2)",
+     "peak_gib": 46.902
+    }
+   ],
+   "tokens": 4096,
+   "tp": 1,
+   "train_phase_gib": 88.057,
+   "tuning": "lora"
+  }
+ },
+ "strict_avg_two_islands": {
+  "0": {
+   "arch_source": "<qwen3_8b>/config.json",
+   "calibrated": false,
+   "colocated": true,
+   "dp": 8,
+   "estimated": true,
+   "fits": false,
+   "gpu": "H100",
+   "gpu_mem_gib": 79.18,
+   "learner_id": 0,
+   "limit_gib": 71.262,
+   "margin": 0.9,
+   "model": "<qwen3_8b>",
+   "model_id": "<qwen3_8b>",
+   "parts_gib": {
+    "activations": 51.322,
+    "fixed_overhead": 18.544,
+    "grads_optimizer": 0.65,
+    "inference": 0.0,
+    "logits_block": 1.159,
+    "weights": 16.381
+   },
+   "peak_gib": 88.057,
+   "pp": 1,
+   "rollout_phase_gib": 36.642,
+   "suggestions": [
+    {
+     "change": "context 4096 -> 2048, response 2048 -> 1024",
+     "peak_gib": 56.692,
+     "response_len": 1024,
+     "seq_len": 2048
+    },
+    {
+     "change": "2x GPUs of the same type (TP 1 -> 2)",
+     "peak_gib": 46.902
+    }
+   ],
+   "tokens": 4096,
+   "tp": 1,
+   "train_phase_gib": 88.057,
+   "tuning": "lora"
+  },
+  "1": {
+   "arch_source": "<qwen3_8b>/config.json",
+   "calibrated": false,
+   "colocated": true,
+   "dp": 8,
+   "estimated": true,
+   "fits": false,
+   "gpu": "H100",
+   "gpu_mem_gib": 79.18,
+   "learner_id": 1,
+   "limit_gib": 71.262,
+   "margin": 0.9,
+   "model": "<qwen3_8b>",
+   "model_id": "<qwen3_8b>",
+   "parts_gib": {
+    "activations": 51.322,
+    "fixed_overhead": 18.544,
+    "grads_optimizer": 0.65,
+    "inference": 0.0,
+    "logits_block": 1.159,
+    "weights": 16.381
+   },
+   "peak_gib": 88.057,
+   "pp": 1,
+   "rollout_phase_gib": 36.642,
+   "suggestions": [
+    {
+     "change": "context 4096 -> 2048, response 2048 -> 1024",
+     "peak_gib": 56.692,
+     "response_len": 1024,
+     "seq_len": 2048
+    },
+    {
+     "change": "2x GPUs of the same type (TP 1 -> 2)",
+     "peak_gib": 46.902
+    }
+   ],
+   "tokens": 4096,
+   "tp": 1,
+   "train_phase_gib": 88.057,
+   "tuning": "lora"
+  }
+ },
+ "synced_group_trainers": {
+  "0": {
+   "arch_source": "<qwen3_8b>/config.json",
+   "calibrated": false,
+   "colocated": false,
+   "dp": 8,
+   "estimated": true,
+   "fits": false,
+   "gpu": "H100",
+   "gpu_mem_gib": 79.18,
+   "learner_id": 0,
+   "limit_gib": 71.262,
+   "margin": 0.9,
+   "model": "<qwen3_8b>",
+   "model_id": "<qwen3_8b>",
+   "parts_gib": {
+    "activations": 51.322,
+    "fixed_overhead": 18.544,
+    "grads_optimizer": 0.65,
+    "inference": 0.0,
+    "logits_block": 1.159,
+    "weights": 16.381
+   },
+   "peak_gib": 88.057,
+   "pp": 1,
+   "rollout_phase_gib": 0.0,
+   "suggestions": [
+    {
+     "change": "context 4096 -> 2048, response 2048 -> 1024",
+     "peak_gib": 56.692,
+     "response_len": 1024,
+     "seq_len": 2048
+    },
+    {
+     "change": "2x GPUs of the same type (TP 1 -> 2)",
+     "peak_gib": 46.902
+    }
+   ],
+   "tokens": 4096,
+   "tp": 1,
+   "train_phase_gib": 88.057,
+   "tuning": "lora"
+  },
+  "1": {
+   "arch_source": "<qwen3_8b>/config.json",
+   "calibrated": false,
+   "colocated": false,
+   "dp": 8,
+   "estimated": true,
+   "fits": false,
+   "gpu": "H100",
+   "gpu_mem_gib": 79.18,
+   "learner_id": 1,
+   "limit_gib": 71.262,
+   "margin": 0.9,
+   "model": "<qwen3_8b>",
+   "model_id": "<qwen3_8b>",
+   "parts_gib": {
+    "activations": 51.322,
+    "fixed_overhead": 18.544,
+    "grads_optimizer": 0.65,
+    "inference": 0.0,
+    "logits_block": 1.159,
+    "weights": 16.381
+   },
+   "peak_gib": 88.057,
+   "pp": 1,
+   "rollout_phase_gib": 0.0,
+   "suggestions": [
+    {
+     "change": "context 4096 -> 2048, response 2048 -> 1024",
+     "peak_gib": 56.692,
+     "response_len": 1024,
+     "seq_len": 2048
+    },
+    {
+     "change": "2x GPUs of the same type (TP 1 -> 2)",
+     "peak_gib": 46.902
+    }
+   ],
+   "tokens": 4096,
+   "tp": 1,
+   "train_phase_gib": 88.057,
+   "tuning": "lora"
+  }
+ }
+}

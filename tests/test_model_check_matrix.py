@@ -330,3 +330,17 @@ def test_every_pending_entry_still_reaches_a_failing_cell():
             assert not re.search(r"#\d", render_text(report))
     assert reached == set(PENDING)
 
+
+def test_the_sampler_memory_is_the_preflight_engine_estimate():
+    from yeto import memory_estimate as me
+
+    small = check_model(_config("qwen3_8b"), CheckRequest()).recommended["memory"]["sampler"]
+    assert small == {**small, "engine_tp": 1, "mem_fraction_static": 0.4, "fits": True}
+    cfg = _config("qwen3_8b")
+    arch = me.arch_from_hf_config(cfg, precise=True)
+    est = me.estimate_engine(me.EngineRequest(arch=arch, gpu="H100", gpu_mem_gib=me.gpu_capacity_gib("H100"),
+                                              tokens=4096, kv_bytes_per_token=me.kv_bytes_per_token(arch, cfg, 1)))
+    assert small["peak_gib"] == est["peak_gib"] and small["kv_pool_tokens"] == est["kv_pool_tokens"]
+    k31 = check_model(_config("kimi_k31"), CheckRequest(form="partial-moe", preset="full-parameter"))
+    assert k31.recommended["memory"]["sampler"]["fits"] is False  # bf16 K3.1 does not fit 8 x H100
+

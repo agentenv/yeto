@@ -177,7 +177,8 @@ reason, a suggestion and where the rule lives: `launcher` (`yeto launch`
 refuses it), `island` (the island refuses it at start), `upstream` (the pinned
 Megatron-Bridge / Miles cannot run it) or `estimate`. It then prints the
 recommended `P` / `tau` / `H`, a GPU-memory estimate (the launch preflight's
-model for dense models, the model registry's smallest trainer for MoE), the
+model for dense models, the model registry's smallest trainer for MoE; the sampler engine as the
+preflight estimates sampler islands), the
 `yeto launch` flags of the cell and the templates a new model needs. The exit
 code is 0 when the cell is runnable, 1 when not, 2 when the config cannot be
 read.

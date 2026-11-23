@@ -47,6 +47,19 @@ every other parameter is frozen. A fixed partition (``--rl-placement
 fixed-partition``) trains on the island's GPUs minus ``--rollout-num-gpus`` and
 ``--rl-standby-gpus``, with no rollout engine on them.
 
+Sampler islands (``--rl-sample-role sampler``, or the ``sampler`` islands of a
+store-coupled pair or synced group) build no trainer: each GPU holds a share of
+an SGLang engine of ``--rollout-num-gpus-per-engine`` (or ``--sglang-tp-size``)
+GPUs. SGLang reserves ``mem_fraction_static`` x GPU memory for the weights
+(2*P/TP_engine) and the KV cache pool, which must hold at least one longest
+context (bf16 K and V per layer: GQA heads split over TP_engine; MLA one latent of
+``kv_lora_rank + qk_rope_head_dim`` per layer, replicated), and R0 sits outside
+it: peak = mem_fraction_static x GPU memory + R0 (part 5 and the rollout phase
+above). The engine estimate is not calibrated: an over-limit sampler island
+warns and never stops a launch. It covers the SGLang samplers a launch starts
+(its sampler islands); an external sampler pool (``yeto run up`` vLLM samplers,
+``--rollout-pool``) is sized by its own spec, not by this preflight.
+
 Only Qwen3.5-4B is calibrated; other models get the same constants and the
 launcher treats an estimate for them as advisory (warn, never refuse) until
 data exists (design: Risks).
@@ -56,6 +69,7 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 import sys
 from dataclasses import dataclass, replace
@@ -317,7 +331,7 @@ def estimate(req: MemoryRequest) -> dict[str, Any]:
     block = req.tokens if req.logits_chunk is None else min(req.tokens, req.logits_chunk)
     parts["logits_block"] = K_LOGIT * block * a.vocab / req.tp * 4 / GIB
     train_alloc = sum(parts.values())
-    engine = req.mem_fraction_static * req.gpu_mem_gib
+    engine = engine_static_gib(req.mem_fraction_static, req.gpu_mem_gib)
     parts["inference"] = engine if (req.colocated and not req.offload) else 0.0
     parts["fixed_overhead"] = R0_GIB + FRAG * train_alloc
     train_phase = sum(parts.values())
@@ -328,6 +342,85 @@ def estimate(req: MemoryRequest) -> dict[str, Any]:
     return {"parts_gib": {k: round(v, 3) for k, v in parts.items()},
             "train_phase_gib": round(train_phase, 3), "rollout_phase_gib": round(rollout_phase, 3),
             "peak_gib": round(peak, 3)}
+
+
+def engine_static_gib(mem_fraction_static: float, gpu_mem_gib: float) -> float:
+    """What a rollout engine reserves on one GPU (weights + KV cache pool): SGLang's
+    ``mem_fraction_static`` of the card."""
+    return mem_fraction_static * gpu_mem_gib
+
+
+@dataclass(frozen=True)
+class EngineRequest:
+    """One GPU of a sampler island's rollout engine."""
+    arch: ModelArch
+    gpu: str
+    gpu_mem_gib: float
+    tokens: int                    # one longest context (prompt + response)
+    engine_tp: int = 1
+    mem_fraction_static: float = 0.4
+    kv_bytes_per_token: float = 0.0  # on one GPU of the engine (kv_bytes_per_token())
+
+
+def kv_bytes_per_token(arch: ModelArch, cfg: dict | None, engine_tp: int) -> float:
+    """bf16 KV cache bytes of one token on one GPU of a TP engine (upper bound: every
+    layer is counted as attention)."""
+    t = (cfg or {}).get("text_config") or cfg or {}
+    rank = int(t.get("kv_lora_rank") or 0)
+    if rank:  # MLA: one latent (and the decoupled rope key) per token and layer, on every TP rank
+        return 2.0 * arch.layers * (rank + int(t.get("qk_rope_head_dim") or 0))
+    heads = math.ceil(arch.kv_heads / max(1, engine_tp))  # KV heads replicate past TP = kv_heads
+    return 2.0 * 2 * arch.layers * heads * arch.head_dim
+
+
+def estimate_engine(req: EngineRequest) -> dict[str, Any]:
+    """Per-GPU peak of a sampler island (module doc): the engine's static share (weights,
+    one context of KV cache, the rest of the KV pool) plus the fixed overhead."""
+    engine = engine_static_gib(req.mem_fraction_static, req.gpu_mem_gib)
+    weights = 2 * req.arch.params / max(1, req.engine_tp) / GIB
+    kv = req.kv_bytes_per_token * req.tokens / GIB
+    peak = engine + R0_GIB
+    parts = {"weights": weights, "kv_cache_one_context": kv, "kv_pool_rest": engine - weights - kv,
+             "fixed_overhead": R0_GIB}
+    pool_tokens = int(max(0.0, engine - weights) * GIB / req.kv_bytes_per_token) if req.kv_bytes_per_token else 0
+    return {"parts_gib": {k: round(v, 3) for k, v in parts.items()},
+            "train_phase_gib": 0.0, "rollout_phase_gib": round(peak, 3), "peak_gib": round(peak, 3),
+            "engine_gib": round(engine, 3), "engine_fits": weights + kv <= engine, "kv_pool_tokens": pool_tokens}
+
+
+def engine_request_from_args(args, spec, arch: ModelArch, cfg: dict | None = None) -> EngineRequest:
+    """Launcher args + one sampler island ClusterSpec -> EngineRequest."""
+    cap = gpu_capacity_gib(spec.gpu)
+    engine_tp = int(getattr(args, "sglang_tp_size", None) or getattr(args, "rollout_num_gpus_per_engine", 1) or 1)
+    seq = int(getattr(args, "seq_len", 2048) or 2048)
+    resp = getattr(args, "rollout_max_response_len", None)
+    return EngineRequest(
+        arch=arch, gpu=str(spec.gpu), gpu_mem_gib=float(cap or 0), tokens=max(seq, int(resp)) if resp else seq,
+        engine_tp=engine_tp, mem_fraction_static=float(getattr(args, "sglang_mem_fraction_static", 0.4) or 0.4),
+        kv_bytes_per_token=kv_bytes_per_token(arch, cfg, engine_tp))
+
+
+def engine_suggestions(req: EngineRequest, limit_frac: float, *, island_gpus: int,
+                       cfg: dict | None = None) -> list[dict]:
+    """Engine changes that fit (weights + one context inside the static share, peak
+    under the limit)."""
+    out = []
+    limit = limit_frac * req.gpu_mem_gib
+    tp = req.engine_tp * 2
+    while tp <= island_gpus and island_gpus % tp == 0:
+        est = estimate_engine(replace(req, engine_tp=tp, kv_bytes_per_token=kv_bytes_per_token(req.arch, cfg, tp)))
+        if est["engine_fits"] and est["peak_gib"] <= limit:
+            out.append({"change": f"--rollout-num-gpus-per-engine {tp}", "peak_gib": est["peak_gib"]})
+            break
+        tp *= 2
+    for fraction in (0.6, 0.7, 0.8):
+        if fraction <= req.mem_fraction_static:
+            continue
+        est = estimate_engine(replace(req, mem_fraction_static=fraction))
+        if est["engine_fits"] and est["peak_gib"] <= limit:
+            out.append({"change": f"--sglang-mem-fraction-static {fraction}", "peak_gib": est["peak_gib"]})
+            break
+    return out
 
 
 def _round_down_1024(n: int) -> int:
@@ -480,6 +573,9 @@ def estimate_for_launch(args, spec, *, margin: float) -> dict[str, Any]:
     if arch is None:
         return {**base, "estimated": False,
                 "reason": f"model structure of {repo!r} unknown (no local or cached config.json)"}
+    if is_sampler_island(args):
+        return _sampler_record(args, spec, arch, cfg, {**base, "estimated": True, "model_id": repo,
+                                                        "arch_source": source}, margin=margin, cap=cap)
     req = request_from_args(args, spec, arch, cfg)
     est = estimate(req)
     limit = margin * cap
@@ -496,6 +592,31 @@ def estimate_for_launch(args, spec, *, margin: float) -> dict[str, Any]:
         rec["suggestions"] = suggestions(req, margin, response_len=int(resp) if resp else None,
                                          larger_gpus=_larger_gpus())
         _print_parallel_shape_hint(req, margin, rec["suggestions"])
+    return rec
+
+
+SAMPLER = "sampler"
+SAMPLER_ADVISORY = "sampler engine estimate (not calibrated): advisory, never stops a launch"
+
+
+def is_sampler_island(args) -> bool:
+    """The island only generates (``--rl-sample-role sampler``; a pair's or synced group's
+    sampler islands get that role from ``yeto.rl.engine.sample_roles.island_roles``)."""
+    return str(getattr(args, "rl_sample_role", "") or "") == SAMPLER
+
+
+def _sampler_record(args, spec, arch: ModelArch, cfg: dict | None, head: dict, *, margin: float,
+                    cap: float) -> dict[str, Any]:
+    req = engine_request_from_args(args, spec, arch, cfg)
+    est = estimate_engine(req)
+    limit = margin * cap
+    fits = est["engine_fits"] and est["peak_gib"] <= limit
+    rec = {**head, "role": SAMPLER, "calibrated": False, "advisory": SAMPLER_ADVISORY, "gpu_mem_gib": cap,
+           "limit_gib": round(limit, 3), "tokens": req.tokens, "engine_tp": req.engine_tp,
+           "mem_fraction_static": req.mem_fraction_static, **est, "fits": fits}
+    if not fits:
+        rec["suggestions"] = engine_suggestions(req, margin, island_gpus=int(getattr(spec, "total_gpus", 1) or 1),
+                                                cfg=cfg)
     return rec
 
 

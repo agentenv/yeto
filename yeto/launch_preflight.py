@@ -20,6 +20,7 @@ give it a fake /proc directory and a fake clock.
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 import time
@@ -302,15 +303,42 @@ def memory_config(args) -> tuple[str, float]:
 
 
 def island_memory_estimates(args, specs: Iterable, *, margin: float) -> list[dict]:
-    """Per-island estimate records (dry-run ``memory_estimate`` and manifest)."""
+    """Per-island estimate records (dry-run ``memory_estimate`` and manifest). A sampler
+    island of a pair or synced group is estimated as its rollout engine; every other
+    island with the launch's own arguments, as before."""
 
-    from .memory_estimate import estimate_for_launch
+    from .memory_estimate import SAMPLER, estimate_for_launch
 
+    specs = list(specs)
+    roles = _island_sample_roles(args, len(specs))
     out = []
     for learner_id, spec in enumerate(specs):
-        est = estimate_for_launch(args, spec, margin=margin)
+        island = args
+        if roles.get(learner_id) == SAMPLER:
+            island = copy.copy(args)
+            island.rl_sample_role = SAMPLER
+        est = estimate_for_launch(island, spec, margin=margin)
         out.append({"learner_id": learner_id, **est})
     return out
+
+
+def _island_sample_roles(args, num_islands: int) -> dict[int, str]:
+    """``sample_roles.island_roles`` of an RL launch ({} otherwise, or when the roles do
+    not parse: the launch checks refuse those with their own message)."""
+    if getattr(args, "training_mode", "sft") != "rl":
+        return {}
+    from .rl.engine import sample_roles
+
+    try:
+        return sample_roles.island_roles(args, num_islands)
+    except ValueError:
+        return {}
+
+
+def _advisory_label(rec: dict) -> str:
+    if rec.get("role") == "sampler":
+        return "WARNING (sampler engine estimate, advisory only):"
+    return "WARNING (model not calibrated, advisory only):"
 
 
 def memory_preflight(args, specs, *, out=None) -> dict:
@@ -339,8 +367,7 @@ def memory_preflight(args, specs, *, out=None) -> dict:
             else:
                 # design Risks: constants are calibrated on Qwen3.5-4B only; for
                 # other models an over-limit estimate warns and never refuses.
-                print(format_memory_refusal(rec).replace("STOP:", "WARNING (model not calibrated, "
-                                                         "advisory only):", 1), file=out, flush=True)
+                print(format_memory_refusal(rec).replace("STOP:", _advisory_label(rec), 1), file=out, flush=True)
     if over:
         text = "\n".join(format_memory_refusal(rec) for rec in over)
         if mode == "error":
@@ -351,10 +378,16 @@ def memory_preflight(args, specs, *, out=None) -> dict:
 
 
 def format_memory_refusal(rec: dict) -> str:
-    lines = [f"[preflight] STOP: island {rec['learner_id']} ({rec['gpu']}, {rec['gpu_mem_gib']} GiB) "
-             f"estimated peak {rec['peak_gib']:.1f} GiB > {rec['margin']:.0%} limit "
-             f"{rec['limit_gib']:.1f} GiB per GPU",
-             "[preflight]   parts (GiB):"]
+    head = f"[preflight] STOP: island {rec['learner_id']} ({rec['gpu']}, {rec['gpu_mem_gib']} GiB) "
+    if rec.get("role") == "sampler" and not rec.get("engine_fits", True):
+        parts = rec["parts_gib"]
+        head += (f"sampler engine: weights + one context {parts['weights'] + parts['kv_cache_one_context']:.1f} GiB "
+                 f"> --sglang-mem-fraction-static share {rec['engine_gib']:.1f} GiB per GPU "
+                 f"(engine TP {rec['engine_tp']})")
+    else:
+        head += (f"estimated peak {rec['peak_gib']:.1f} GiB > {rec['margin']:.0%} limit "
+                 f"{rec['limit_gib']:.1f} GiB per GPU")
+    lines = [head, "[preflight]   parts (GiB):"]
     for key, value in rec["parts_gib"].items():
         lines.append(f"[preflight]     {key:<22} {value:8.2f}")
     if rec.get("suggestions"):
@@ -362,7 +395,9 @@ def format_memory_refusal(rec: dict) -> str:
         for s in rec["suggestions"]:
             lines.append(f"[preflight]     - {s['change']}: {s['peak_gib']:.1f} GiB")
     else:
-        lines.append("[preflight]   no tried suggestion fits (shorter context, 2x GPUs, larger GPU)")
+        lines.append("[preflight]   no tried suggestion fits ("
+                     + ("wider engine, higher --sglang-mem-fraction-static, shorter context, larger GPU)"
+                        if rec.get("role") == "sampler" else "shorter context, 2x GPUs, larger GPU)"))
     return "\n".join(lines)
 
 
@@ -542,7 +577,7 @@ def print_dry_run_memory(memory: list[dict] | None, *, out=None) -> None:
         elif not rec.get("fits"):
             text = format_memory_refusal(rec)
             label = ("WARNING (dry run; a real launch stops here with --preflight-memory error):"
-                     if rec.get("calibrated") else "WARNING (model not calibrated, advisory only):")
+                     if rec.get("calibrated") else _advisory_label(rec))
             print(text.replace("STOP:", label, 1), file=out, flush=True)
 
 

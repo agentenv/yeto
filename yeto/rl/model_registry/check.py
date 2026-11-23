@@ -496,10 +496,35 @@ def _memory(req: CheckRequest, recipe: str, profile: ModelSyncProfile, cfg: dict
         return out
     out["min_trainer"] = {k: plan[k] for k in ("world", "nodes", "tensor_parallel", "pipeline_parallel",
                                                 "expert_parallel", "state_gib_per_card") if k in plan}
+    out["sampler"] = sampler_memory(req, cfg, capacity)
     if profile.moe and not generic_partial:
         out["fits"] = bool(plan.get("fits")) and plan["world"] <= actor
         out["note"] = "MoE: the registry's smallest trainer (model state per card, EP-sharded experts)"
     return out
+
+
+def sampler_memory(req: CheckRequest, cfg: dict, capacity: float) -> dict[str, Any]:
+    """A sampler island's SGLang engine (the launch preflight's sampler estimate,
+    :func:`yeto.memory_estimate.estimate_engine`): the narrowest engine TP, at the
+    default then a raised ``--sglang-mem-fraction-static``, whose weights and one
+    context of KV cache fit (bf16 weights: an upper bound for quantized checkpoints)."""
+
+    from yeto import memory_estimate as me
+
+    arch = me.arch_from_hf_config(cfg, precise=True)
+    widths = [tp for tp in (1, 2, 4, 8) if tp <= req.gpus_per_island and req.gpus_per_island % tp == 0]
+    last: dict[str, Any] = {}
+    for fraction in (0.4, 0.8):
+        for tp in widths:
+            est = me.estimate_engine(me.EngineRequest(
+                arch=arch, gpu=req.card, gpu_mem_gib=capacity, tokens=req.seq_len, engine_tp=tp,
+                mem_fraction_static=fraction, kv_bytes_per_token=me.kv_bytes_per_token(arch, cfg, tp)))
+            last = {"engine_tp": tp, "mem_fraction_static": fraction, "peak_gib": est["peak_gib"],
+                    "kv_pool_tokens": est["kv_pool_tokens"],
+                    "fits": est["engine_fits"] and est["peak_gib"] <= 0.9 * capacity}
+            if last["fits"]:
+                return last
+    return last
 
 
 # ----------------------------------------------------------------------------- launch flags and templates
@@ -693,6 +718,11 @@ def render_text(report: CheckReport) -> str:
     peak = f"peak {memory['peak_gib_per_gpu']} GiB/GPU, " if "peak_gib_per_gpu" in memory else ""
     lines.append(f"memory   {memory.get('card')} ({memory.get('capacity_gib')} GiB): {peak}fits={memory.get('fits')}; "
                  f"smallest trainer {memory.get('min_trainer')}")
+    sampler = memory.get("sampler") or {}
+    if sampler:
+        lines.append(f"sampler  engine TP {sampler['engine_tp']}, --sglang-mem-fraction-static "
+                     f"{sampler['mem_fraction_static']}: fits={sampler['fits']}, peak {sampler['peak_gib']} GiB/GPU, "
+                     f"KV pool {sampler['kv_pool_tokens']} tokens")
     lines.append(f"gpu      {report.recommended.get('gpu')}")
     lines.append("flags    " + " ".join(report.launch_argv))
     lines += [f"not on main yet: {PENDING[key]}" for key in report.pending]
