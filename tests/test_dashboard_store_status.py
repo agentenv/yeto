@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from pathlib import Path
 
 from yeto.dashboard import cli as dcli
 from yeto.dashboard import sources
@@ -107,9 +109,10 @@ def test_export_of_a_run_with_no_tapes_still_refuses(tmp_path, monkeypatch):
         assert "no tapes" in str(exc)
     else:
         raise AssertionError("export without any tape must refuse")
+    syncer = str(Path(os.path.expanduser("~/yeto-output/yeto-tape.jsonl")))  # followed once it appears
     assert dcli._paths(_args()) == [str(tmp_path / "nope" / "events"), str(tmp_path / "nope" / "fleet.jsonl"),
                                     str(tmp_path / "nope" / "cost-events.jsonl"),
-                                    str(tmp_path / "up" / _args().run / "events.jsonl")]
+                                    str(tmp_path / "up" / _args().run / "events.jsonl"), syncer]
 
 
 def test_store_run_name_labels_a_store_only_dashboard():

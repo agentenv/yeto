@@ -1,7 +1,8 @@
 // Live topology panel: samplers -> run store -> trainers (page view key "topology", topology.py).
 // Groups written / read and policy releases / loads are tape events replayed at their own
 // time_unix, DELAY_S behind the newest data, so the motion keeps the real order and pace
-// instead of jumping every tape upload (30 s) and store poll (10 s).
+// instead of jumping every tape upload (30 s) and store poll (10 s). A run with a syncer
+// (view.topology.kind) is drawn by topology_diloco.js with the helpers exported below.
 var YetoTopo=(function(){
 "use strict";
 var NS="http:"+"//www.w3.org/2000/svg"; // SVG namespace id, not a request
@@ -236,7 +237,7 @@ function frame(ts){
 function kick(){if(raf==null&&visible&&!document.hidden&&typeof requestAnimationFrame==="function"&&T&&T.live){lastTick=null;raf=requestAnimationFrame(frame)}}
 
 function tip(e){
-  var tp=$("topoTip");if(!tp||!L)return;var g=e.target.closest&&e.target.closest("[data-tp]");
+  var tp=$("topoTip");if(!tp||!L||!T)return;var g=e.target.closest&&e.target.closest("[data-tp]");
   if(!g){tp.style.display="none";return}
   var c=L.cards.filter(function(o){return o.c.key===g.getAttribute("data-tp")})[0];if(!c){tp.style.display="none";return}
   var tn=now(),row=function(k,v){return '<div class="row"><span>'+esc(k)+'</span><span>'+esc(v)+'</span></div>'};
@@ -250,6 +251,7 @@ function tip(e){
 function render(view,offline){
   var box=$("topoBox"),host=$("topo");if(!box||!host)return;
   var t=view&&view.topology;
+  if(typeof YetoTopoD!=="undefined"&&YetoTopoD.render(view,offline)){T=null;L=null;return}
   if(!t||!t.samplers||!t.samplers.length){box.hidden=true;T=null;return}
   box.hidden=false;
   t.live=!offline&&((view.overview||{}).mode==="live");
@@ -267,5 +269,6 @@ function render(view,offline){
     if(typeof matchMedia==="function"){var mq=matchMedia("(prefers-color-scheme: light)");if(mq&&mq.addEventListener)mq.addEventListener("change",function(){C=colors();if(T)paint()})}
     var rt=null;if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("resize",function(){clearTimeout(rt);rt=setTimeout(function(){if(!T)return;var w=host.clientWidth;if((w<640)!==(L.W<640))build(host);else fit();paint()},150)})}}
 
-return{render:render,_nodes:nodes,_label:label,_particles:function(){return P.length}};
+return{render:render,_nodes:nodes,_label:label,_particles:function(){return P.length},
+  util:{el:el,bez:bez,poly:poly,offset:offset,rev:rev,dpath:dpath,at:at,dur:dur,bytes:bytes,esc:esc,fin:fin,reduced:reduced,clock:clock}};
 })();

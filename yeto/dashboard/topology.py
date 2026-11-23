@@ -17,6 +17,10 @@ anyway, read by ``StoreTapes`` / the tape followers):
   (``release_timings.upload_s``), drains (``rl_agentic_drain``) and loads with
   their fetch window (``rl_sampler_policy_loaded.seen_at`` +
   ``follower_timings.resolve_s``).
+
+A run with a syncer (``topology_diloco.kind``) adds ``kind`` and its ``diloco`` part
+(trainers <-> syncer, fragments, in-island rollout); without samplers it still gets
+the panel. A run without a syncer gets exactly the view above.
 """
 
 from __future__ import annotations
@@ -76,16 +80,26 @@ def _release_kind(rec: dict) -> str:
     return "delta" if _f(rec.get("delta_ratio")) is not None else "full"
 
 
+def layout(reducer) -> dict:
+    """``{"kind", "reason"}``: the drawing the page uses for this run (``topology_diloco.layout``)."""
+    from . import topology_diloco
+
+    return topology_diloco.layout(reducer)
+
+
 def view(reducer, cards: list[dict], now: float) -> dict | None:
-    """The topology panel's data; None for a run without samplers. ``cards``: the island
-    cards of the same page view (hardware, step, policy version, leave reason); status and
-    liveness come from ``reducer.island_states``."""
+    """The topology panel's data; None for a run without samplers and without a syncer.
+    ``cards``: the island cards of the same page view (hardware, step, policy version, leave
+    reason); status and liveness come from ``reducer.island_states``."""
+    from . import topology_diloco  # imports this module's helpers
+
     asy = reducer.async_
     states = reducer.island_states(now)
     roles = {iid: role for iid, role in asy.roles.items() if iid in reducer.islands}
     sampler_ids = [i for i, r in roles.items() if r == "sampler"]
     trainer_ids = [i for i, r in roles.items() if r == "trainer"]
-    if not sampler_ids:
+    diloco = topology_diloco.current(reducer, cards, now)
+    if not sampler_ids and diloco is None:
         return None
     by_id = {c["id"]: c for c in cards}
     lo, rate_lo = now - WINDOW_S, now - RATE_S
@@ -224,7 +238,7 @@ def view(reducer, cards: list[dict], now: float) -> dict | None:
     bl = asy.backlog_series() or {}
     pts = bl.get("points") or []
     last_pt = pts[-1] if pts else None
-    return {
+    out = {
         "now": now, "window_s": WINDOW_S, "rate_s": RATE_S,
         "samplers": samplers, "trainers": trainers,
         "buffer": {"backlog": last_pt[3] if last_pt else None, "written": bl.get("written"), "read": bl.get("read"),
@@ -233,3 +247,7 @@ def view(reducer, cards: list[dict], now: float) -> dict | None:
         "store": (reducer.store_status() or {}).get("uri") if callable(reducer.store_status) else None,
         "flows": flows,
     }
+    if diloco is not None:
+        out["kind"] = diloco["kind"]
+        out["diloco"] = diloco
+    return out

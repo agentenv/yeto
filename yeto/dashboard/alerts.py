@@ -103,8 +103,11 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
 def consecutive_missed(rounds: list[dict], th: dict) -> list[dict]:
     run: dict[str, list] = {}
     best: dict[str, list] = {}
+    partial: set = set()  # rounds that closed on a quorum below the roster
     for r in rounds:
         missed = set(r["missed"])
+        if r.get("quorum") is not None and r["expected"] is not None and r["quorum"] < r["expected"]:
+            partial.add(r["round"])
         for iid in list(run):
             if iid not in missed:
                 run.pop(iid)
@@ -121,8 +124,12 @@ def consecutive_missed(rounds: list[dict], th: dict) -> list[dict]:
             sev = 1
         else:
             continue
-        out.append(_alert(sev, "missed", f"island {iid} missed consecutive rounds",
-                          f"rounds {rs[0]}–{rs[-1]}: no response for {n} rounds in a row", island=iid,
+        detail = f"rounds {rs[0]}–{rs[-1]}: no response for {n} rounds in a row"
+        if all(x in partial for x in rs):
+            # partial quorum: a round closes without the slow island by design and its push is
+            # carried into a later round; worth a note, not a warning
+            sev, detail = 2, detail + " (partial quorum: each closed on fewer than the roster, its pushes carry over)"
+        out.append(_alert(sev, "missed", f"island {iid} missed consecutive rounds", detail, island=iid,
                           round=rs[0], metric="reward"))
     return out
 
@@ -457,13 +464,16 @@ def _with_release(reducer, th: dict, now: float) -> list[dict]:
 
 def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict],
              store: dict | None = None) -> list[dict]:
+    from . import alerts_diloco  # a run with a syncer; imports _alert from here
+
     th = reducer.thresholds
     alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
               + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
               + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)
               + _with_release(reducer, th, now) + breakers(reducer, now)
-              + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
+              + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown")
+              + alerts_diloco.evaluate(reducer, now, cards))
     # an alert whose monitor entry the run config switched off (``breakers.monitor.<entry>.enabled``)
     alerts = [a for a in alerts if not (a.get("breaker") and reducer.breakers.disabled(a["breaker"]))]
     alerts.sort(key=lambda a: a["sev"])
