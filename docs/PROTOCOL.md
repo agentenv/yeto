@@ -658,7 +658,7 @@ always take the strict values.
 | `--rl-sync-learner-weight` | `tokens2-over-steps` | `equal` |
 | `--rl-sync-matrix-merge` (decoupled, full-parameter) | `rda` (embedding fragments stay averaged) | `avg` |
 | `--rl-sync-outer-lr` / `--rl-sync-outer-momentum` | 1.0 / 0 below 4 local rounds per sync (H), 0.7 / 0.9 from H = 4 | the preset's |
-| `--rl-sync-push-dtype` (full-parameter) | `int4` (linear, block 128, blocks restart at tensor boundaries) | `f32` |
+| `--rl-sync-push-dtype` (full-parameter) | `int4` (linear, block 128, blocks restart at tensor boundaries); the upload (PUSH) only | `f32` |
 | `--rl-peer-recovery` (full-parameter) | on with async rounds, a fixed roster, one syncer process, no broadcast deltas and a snapshot store; else off | off |
 
 The grace window adapts to the islands' measured step time through the
@@ -682,6 +682,16 @@ A quorum of 1 needs a base lag of at least 1 round: otherwise the push of an
 island that missed the quorum is a strict failure of a fixed roster.
 Asynchronous full-parameter islands train until the syncer stops them, so
 `--rl-lr-schedule auto` gives them a constant learning rate.
+
+The push dtype compresses the upload only. The syncer broadcasts every
+merged fragment (BCAST) in f32 in both modes; the one downlink compression is
+the opt-in bf16 delta against the islands' shared anchor
+(`--rl-sync-bcast-delta-full-every N`, a fixed roster only, and it turns
+`--rl-peer-recovery` off). An island must download each new fragment version
+of the whole model, so on a slow link (a tunnel at about 10 MB/s, an f32
+fragment of hundreds of MB) it can fall behind the merged versions and miss
+the quorum-1 rounds; the syncer tape then shows it in `missed_grace` round
+after round.
 
 `--rl-sync-mode strict` produces the syncer and island commands of the
 launcher before the modes existed (tested byte for byte).

@@ -668,6 +668,7 @@ injection and are omitted here.
 | `--rl-eval-samples-per-prompt` | — | samples per eval prompt |
 | `--rl-eval-temperature`, `--rl-eval-top-p` | — | eval sampling (temperature 0 = greedy) |
 | `--rl-observe-timeline` | off | record per-round timeline labels |
+| `--rl-round-summary` | `auto` | per-round reward / response-length summary on the island tape; `auto` turns it on for Miles `full-parameter` islands with asynchronous rounds (their round event carries no reward otherwise) and prints a line; `on` for every island, `off` never |
 | `--observe-training-entropy` | off | log training-side policy entropy |
 | `--rl-verify-every-round` | off | hash the policy and check engine weights at every publication |
 

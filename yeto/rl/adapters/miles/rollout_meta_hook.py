@@ -509,10 +509,13 @@ def buffer_summary_enabled(args: Any) -> bool:
 
 
 def batch_summary_enabled(args: Any) -> bool:
-    """Opt-in (``--rl-observe-timeline`` sets ``args.yeto_rl_observe_timeline``,
-    or ``YETO_RL_BATCH_SUMMARY=1``): the default metadata key set is unchanged."""
-    return bool(ext_attr(args, "rl_observe_timeline", False)) or os.environ.get(
-        BATCH_SUMMARY_ENV) == "1"
+    """On with ``--rl-observe-timeline`` (``args.yeto_rl_observe_timeline``),
+    ``--rl-batch-summary`` (``args.yeto_rl_batch_summary``, which the launcher
+    sends to full-parameter islands with asynchronous rounds, ``--rl-round-summary``) or
+    ``YETO_RL_BATCH_SUMMARY=1``; otherwise the metadata key set is unchanged."""
+    return (bool(ext_attr(args, "rl_observe_timeline", False))
+            or bool(ext_attr(args, "rl_batch_summary", False))
+            or os.environ.get(BATCH_SUMMARY_ENV) == "1")
 
 
 def build_metadata(
