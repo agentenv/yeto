@@ -11,6 +11,7 @@ import torch
 
 from free_ports import free_port
 from process_groups import group_popen
+from syncer_build import build_syncer
 from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
 from yeto.protocol import (
     _CHUNK_HEAD,
@@ -46,10 +47,8 @@ PULL = struct.Struct("<IQI")
 
 @pytest.fixture(scope="module")
 def syncer_binary() -> Path:
-    subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True)
-    binary = ROOT / "syncer/target/debug/yeto-syncer"
-    assert binary.is_file()
-    return binary
+    # Built once per session before the first test (conftest), not in this setup.
+    return build_syncer()
 
 
 def connect(port: int) -> socket.socket:

@@ -22,6 +22,7 @@ import pytest
 
 from free_ports import free_port
 from process_groups import group_popen
+from syncer_build import build_syncer
 from yeto import recovery_protocol as rp
 from yeto.fragments import MERGE_AVG, Fragment, FragmentLayout
 from yeto.protocol import DTYPE_F32, BcastFragment, SyncerClient, encode_hello, layout_fingerprint
@@ -39,13 +40,12 @@ from yeto.rl.peer_recovery import (
 ROOT = Path(__file__).resolve().parent.parent
 NUMEL = 64
 FRAGMENTS = 4
-BOUND_H = 8
-
-
-def build_syncer() -> Path:
-    binary = ROOT / "syncer/target/debug/yeto-syncer"
-    subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True)
-    return binary
+# Rounds commit every ~40 ms (--min-round-interval-ms): a 0.3 s snapshot
+# transfer lands at ~7 steps (9 on a loaded CI runner, which missed a bound of
+# 8), a 1.0 s one at ~24. The bound only labels the outcome (missed or not);
+# 12 sits between the two with room on both sides. The fast transfer stays
+# longer than FRAGMENTS rounds so every fragment has a newer version to replay.
+BOUND_H = 12
 
 
 def make_layout() -> FragmentLayout:
@@ -738,8 +738,10 @@ def test_background_donor_answers_after_the_commit_and_training_goes_on(tmp_path
     assert donor.poll() == 0, "one snapshot in flight: the next request waits"
     store.gate.set()
     assert donor.wait(5)
-    assert donor.poll() == 1, "the finished snapshot is reported at the next safe point"
+    # Read before the poll: the poll starts the waiting request, whose commit is
+    # no longer gated and may answer at once.
     assert [s[1] for s in client.sent] == [request]
+    assert donor.poll() == 1, "the finished snapshot is reported at the next safe point"
     assert store.pending[0] == donor.timings[0]["bytes"] > 0
     assert donor.timings[0]["result"] == "served"
     assert donor.wait(5), "the poll above started the waiting request"

@@ -202,6 +202,27 @@ def _select_shard(config, items):
         items[:] = keep
 
 
+@_pytest.hookimpl(tryfirst=True)
+def pytest_runtestloop(session):
+    """Build the syncer binary before the first test when a selected test needs it.
+
+    Otherwise the cold build (8-40 s on a CI runner) ran in the setup of whichever
+    syncer test came first in the shard and counted against that test's timeout
+    (test_delta_protocol: 20 s, all 12 cases errored). A failed build is only
+    reported here: the tests that need the binary rebuild and fail with cargo's error.
+    """
+    if session.config.option.collectonly:
+        return None
+    from syncer_build import build_syncer, uses_syncer_build
+
+    if any(uses_syncer_build(item) for item in session.items):
+        try:
+            build_syncer()
+        except Exception as exc:  # noqa: BLE001 - surfaced again by the tests that need it
+            print(f"\nsyncer pre-build failed ({exc!r}); syncer tests will retry the build")
+    return None
+
+
 def _blocked_ray_init(*_args, **_kwargs):
     raise RuntimeError(RAY_LOCAL_HINT)
 
