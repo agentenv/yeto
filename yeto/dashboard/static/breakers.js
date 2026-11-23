@@ -56,7 +56,7 @@ function layer(L){
   var more="";if(rest.length){var on=!!open[L.layer];
     more='<button class="btn bmore" data-layer="'+esc(L.layer)+'" aria-expanded="'+on+'">'+(on?"hide":"show")+" "+rest.length+" off / invariant</button>"+(on?rest.map(row).join(""):"")}
   return '<div class="blay">'+head+main.map(row).join("")+more+'</div>'}
-function trips(B){var t=B.trips||[],g=B.acted_total?'<div class="note">guards that drop a group or a trial acted '+B.acted_total+' time'+(B.acted_total===1?"":"s")+': counted on their cards, not listed here</div>':"";
+function trips(B){var t=B.trips||[],g=B.acted_total?'<div class="note">guards that drop data (groups, trials, claims) acted '+B.acted_total+' time'+(B.acted_total===1?"":"s")+': counted on their cards, not listed here</div>':"";
   if(!t.length)return g+'<div class="note">no trips on the tapes</div>';
   return g+'<div class="btrips">'+t.slice(0,30).map(function(x){var cls=TRIP_CLS[x.state]||"mu";
     return '<div><span class="t">'+esc(clock(x.ts))+'</span><span class="x"><span class="st '+cls+'"><i></i>'+esc(x.state)+'</span> <span class="mono">'+esc(x.name)+'</span>'+

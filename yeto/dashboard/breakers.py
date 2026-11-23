@@ -45,7 +45,8 @@ RECENT_TRIP_S = 3600.0
 DROP_ACTIONS = ("drop", "downweight", "quarantine")
 ROUNDS_KEPT = 200  # per-round drop tallies kept per trainer island / sampler
 # what one act of a guard drops (the card's "M <unit>"); groups unless named here
-DROP_UNITS = {"sampler.drain": "trials cut", "sampler.trial_wall_clock": "trials cut"}
+DROP_UNITS = {"sampler.drain": "trials cut", "sampler.trial_wall_clock": "trials cut",
+              "sampler.dispense_lease": "leases expired"}
 
 
 def _f(v: Any) -> float | None:
@@ -105,6 +106,7 @@ LEGACY_TRIPS: dict[str, Callable[[dict], list]] = {
     # routine records: a trip only under their condition
     "rl_agentic_group": _group,
     "rl_agentic_drain": _when("sampler.drain", test=lambda r: _drain_cut(r) > 0, count=_drain_cut),
+    "rl_dispense_expired": _when("sampler.dispense_lease"),  # one record per expired claim
     "rl_dispense_settle": _when("sampler.dispense_redo",
                                 test=lambda r: r.get("state") in ("exhausted", "expired", "redo")),
     "rl_buffer_stale_skipped": _when("trainer.policy_age", test=lambda r: _n(r, "stale_groups") > 0,

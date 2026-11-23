@@ -301,13 +301,18 @@ def test_legacy_table_names_entries_that_declare_the_event():
 
 def test_healthy_replay_shows_no_trip():
     """A trimmed slice of a healthy run's tapes (every group written, drains clean, tasks
-    trained, no stale group, lease expiries recovered): routine telemetry, not trips."""
+    trained, no stale group): routine telemetry, not trips. The 4 claims of a killed sampler
+    whose lease expired (and were dispensed again) are the lease guard acting: amber on its card."""
     r = Reducer()
     sources.load_all(r, [str(R2_HEALTHY)])
     assert r.counts["learner"] == 79
     v = r.page_view(now=T0)
-    assert "breakers" not in v  # nothing to show: no trip, no setting, no snapshot
-    assert not [a for a in v["overview"]["alerts"] if a["rule"] == "breaker"]
+    b = v["breakers"]
+    assert b["trips"] == [] and b["acted_total"] == 4
+    assert not any(x["tripped"] for L in b["layers"] for x in L["rows"])
+    assert [(n, x["acted"]["acts"], x["acted"]["unit"]) for n, x in rows(b).items() if x.get("acted", {}).get("acts")] == [
+        ("sampler.dispense_lease", 4, "leases expired")]
+    assert not [a for a in v["overview"]["alerts"] if a["rule"] in ("breaker", "guard_drops")]
 
 
 @pytest.mark.parametrize("record,entry,dropped", [
@@ -317,6 +322,7 @@ def test_healthy_replay_shows_no_trip():
     (legacy("rl_agentic_drain", abandoned_trials=0, detached_trials=3), "sampler.drain", 3),
     (legacy("rl_agentic_drain", abandoned_trials=1, detached_trials=0), "sampler.drain", 1),
     ({"event": "rl_buffer_stale_skipped", "island_id": 0, "time_unix": T0, "stale_groups": 3}, "trainer.policy_age", 3),
+    (legacy("rl_dispense_expired", slot=3), "sampler.dispense_lease", 1),  # the lease guard reclaimed a claim
 ])
 def test_legacy_record_of_a_dropping_guard_is_counted_on_its_card(record, entry, dropped):
     r = Reducer()
@@ -351,7 +357,6 @@ def test_legacy_record_of_a_breaker_is_a_trip(record, entry):
     legacy("rl_dispense_settle", state="trained"),
     legacy("rl_dispense_settle", state="dropped"),
     {"event": "rl_buffer_stale_skipped", "island_id": 0, "time_unix": T0, "stale_groups": 0},
-    legacy("rl_dispense_expired", slot=3),  # the lease noticed; the settle tells whether it cost a redo
     legacy("rl_dispense_lease", slot=3),
     legacy("rl_sampler_vram_ok"),
 ])
