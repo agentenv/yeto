@@ -1122,9 +1122,18 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
     if clips:
         raise SystemExit("the verl FSDP2 island does not map " + ", ".join(clips) + " (only the Megatron island does)")
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
+    targets = "all-linear"
+    if not full:  # the modules the island's canonical specs name (trainer.run_island)
+        from .lora_targets import island_target_modules
+
+        try:
+            targets = island_target_modules(args.lora_targets, model_path,
+                                            trust_remote_code=bool(getattr(args, "trust_remote_code", False)))
+        except vconf.VerlConfigError as exc:
+            raise SystemExit(str(exc)) from exc
     run = vconf.VerlRunConfig(
         model_path=model_path, train_file=train_file, val_file=val_file, out_dir=out_dir,
-        parameter_mode=args.parameter_mode,
+        parameter_mode=args.parameter_mode, target_modules=targets,
         lora_rank=0 if full else args.lora_r, lora_alpha=0 if full else args.lora_r, lr=args.inner_lr,
         groups_per_round=args.groups_per_round, samples_per_group=args.samples_per_group,
         max_prompt_len=max_prompt, max_response_len=args.rollout_max_response_len, seed=args.seed,
