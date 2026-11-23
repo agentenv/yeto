@@ -238,11 +238,11 @@ class Scenario:
         return float(self.success_p)
 
 
-# 4096 / 1024: t_comp holds the summary turn (summary_max_tokens 128 + the summary request's
-# byte bound, 632) and the budget leaves the engine room for it after a full step
+# 4096 / 1152: t_comp holds the summary turn (summary_max_tokens 128 + the summary request's
+# byte bound, 799) and the budget leaves the engine room for it after a full step
 # (config_from_spec: check_summary_room / check_summary_headroom with turn_max_tokens 192).
 # A t_comp of 512 is refused by the spec (``tcomp_overflow`` runs it with the checks off).
-SMALL = {"context_budget": 4096, "t_comp": 1024, "keep_recent_steps": 2, "max_compactions": 3,
+SMALL = {"context_budget": 4096, "t_comp": 1152, "keep_recent_steps": 2, "max_compactions": 3,
          "summary_max_tokens": 128}
 SHORT_STEP = {"action_tokens": Dist("int", 20, 60), "tool_tokens": Dist("int", 60, 110),
               "summary_tokens": Dist("int", 30, 70)}
@@ -250,7 +250,7 @@ MIXED = {0: 0.5, 1: 0.25, 2: 0.75, 3: 0.5, 4: 0.5, 5: 0.25}
 SCENARIOS: dict[str, Scenario] = {s.name: s for s in (
     Scenario("no_compaction", "compaction off, short trials (main format)", compaction=None, max_model_len=16384,
              max_response_len=16384, steps=Dist("int", 2, 5), success_p=MIXED),
-    Scenario("no_trigger", "compaction on (4096 / 1024), trials too short to trigger it", compaction=SMALL,
+    Scenario("no_trigger", "compaction on (4096 / 1152), trials too short to trigger it", compaction=SMALL,
              steps=Dist("int", 3, 8), success_p=MIXED, **SHORT_STEP),
     Scenario("compact_once", "compaction on, about one compaction per trial", compaction=SMALL,
              steps=Dist("int", 18, 24), success_p=MIXED, **SHORT_STEP),

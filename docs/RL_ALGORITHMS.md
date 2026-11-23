@@ -676,7 +676,13 @@ critic lr 3e-6; 2 critic updates per policy update; 50-step warm-up; the
 critic target is the **uncorrected local return** (local advantage + V); the
 old one-sample implementation stays as the explicit control
 `cross_segment_whole_rollout`. The 9-section summary template is a Yeto
-draft (the paper gives no section names).
+draft (the paper gives no section names). Yeto additions to the rebuilt
+context (eq. 9): the task message is kept word for word after the system
+prompt (`keep_task_message`, on by default; cut to `task_message_max_tokens`
+only when it alone would keep the rebuild over the trigger), and optionally
+the last step with its tool output cut when no whole step fits
+(`keep_last_step_max_tokens`, off by default). Both are prompt (mask 0); see
+[KIMI_K31_ASYNC_RL_GUIDE.md section 3.6](KIMI_K31_ASYNC_RL_GUIDE.md#36-context-compaction).
 
 ```bash
 $M --dry-run --extra "--advantage-estimator ppo --gae-variant cross_segment_per_sample \

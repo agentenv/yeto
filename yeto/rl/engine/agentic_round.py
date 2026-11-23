@@ -93,7 +93,11 @@ the same on every segment, None with replay off). Only the last segment can be `
 room for a summary request). A trial with no compaction is the sample above,
 without ``metadata.compaction``; on a compacting proxy it is ``truncated`` too
 when the context filled. The round event counts the trials that ended with no
-room for a summary (``agentic.compaction_no_room``, only when there are any).
+room for a summary (``agentic.compaction_no_room``, only when there are any),
+and the segments whose rebuilt context cut the task message or the kept last
+step's tool output (``agentic.compaction_task_truncated`` /
+``agentic.compaction_last_step_truncated``, likewise; ``metadata.compaction``
+then carries ``task_truncated`` / ``last_step_truncated``).
 
 The trials run on one event loop thread kept for the island's life (the
 recorder's HTTP server lives on that loop); the engine calls run in its
@@ -234,6 +238,11 @@ def agentic_sample(item: PromptItem, finished: Any, *, version: int, provenance:
 COMPACTION_SCHEMA = 1
 CONTEXT_FULL = "context_full"  # RecordingBackend's parse_error prefix when the prompt fills max_model_len
 COMPACTION_NO_ROOM = "compaction_no_room"  # records.COMPACTION_NO_ROOM (not imported: the gateway is optional)
+# Optional booleans of a rebuilt segment's ``metadata.compaction``: its rebuilt context cut the
+# task message / the kept last step's tool output (records ``keep_task_message`` /
+# ``keep_last_step_max_tokens``). The round event counts the segments with each set
+# (``agentic.compaction_<flag>``, only when there are any).
+COMPACTION_REBUILD_FLAGS = ("task_truncated", "last_step_truncated")
 
 
 def agentic_samples(item: PromptItem, finished: Any, *, version: int, provenance: Mapping[str, str],
@@ -287,6 +296,9 @@ def agentic_samples(item: PromptItem, finished: Any, *, version: int, provenance
                               "summary_tokens": int(part.summary_tokens), "retry_replays": part.retry_replays}
         if max_model_len is not None:
             meta["compaction"]["max_model_len"] = int(max_model_len)
+        for key in COMPACTION_REBUILD_FLAGS:  # only from a records proxy that reports them
+            if getattr(part, key, None) is not None:
+                meta["compaction"][key] = bool(getattr(part, key))
         samples.append(sample)
     return samples
 
@@ -400,6 +412,7 @@ class _Tally:
     retried: Counter[str] = dataclasses.field(default_factory=Counter)  # infra retries
     refilled: int = 0  # groups written whole only thanks to a retry
     no_room: int = 0  # kept trials that ended with no room for a compaction summary
+    rebuild_cuts: Counter[str] = dataclasses.field(default_factory=Counter)  # COMPACTION_REBUILD_FLAGS set
     compaction: CompactionTally = dataclasses.field(default_factory=CompactionTally)  # written samples
 
 
@@ -1020,6 +1033,8 @@ class AgenticRound(EngineRound):
                 for sample in trial:
                     tally.finish[sample["metadata"]["finish_reason"]] += 1
                     tally.tokens += sample["response_length"]
+                    rebuilt = sample["metadata"].get("compaction") or {}
+                    tally.rebuild_cuts.update(key for key in COMPACTION_REBUILD_FLAGS if rebuilt.get(key))
                 tally.rewards.append(trial[0]["reward"])  # per trial, not per segment
                 tally.no_room += int(compaction_no_room(finished))
                 tally.lengths.append(sum(int(sum(sample["loss_mask"])) for sample in trial))
@@ -1099,6 +1114,8 @@ class AgenticRound(EngineRound):
                    "session_collisions_total": self.session_collisions}
         if tally.no_room:  # CompactionRL only (absent without compaction)
             agentic[COMPACTION_NO_ROOM] = tally.no_room
+        for key, count in sorted(tally.rebuild_cuts.items()):  # likewise, only when a rebuild cut text
+            agentic[f"compaction_{key}"] = count
         cfg = compaction_config(self.recorder)
         compaction = tally.compaction.summary(enabled=cfg is not None,
                                               max_compactions=getattr(cfg, "max_compactions", None))

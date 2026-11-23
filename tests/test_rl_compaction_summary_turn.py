@@ -150,7 +150,7 @@ def test_episode_driver_uses_the_configured_prompts():
     cfg = CompactionConfig(context_budget=100, t_comp=40, summary_prompt="Q?", resume_template="R: {summary}")
     ep = run_episode(policy, Env(), [{"role": "system", "content": "s"}, {"role": "user", "content": "t"}], cfg)
     assert ep.compactions >= 1 and "Q?" in seen
-    assert ep.segments[1].prompt[1]["content"] == "R: S"
+    assert [m["content"] for m in ep.segments[1].prompt[:3]] == ["s", "t", "R: S"]  # system, task, resume
 
 
 # ------------------------------------------------------------------ proxy

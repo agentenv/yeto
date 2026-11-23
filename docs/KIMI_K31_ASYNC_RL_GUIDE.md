@@ -753,6 +753,31 @@ Optional keys: `summary_max_tokens`, `summary_prompt` and `resume_template`
 `resume_template` must contain `{summary}`). `pool --dry-run` lists the keys it
 accepts when it refuses an unknown one.
 
+Three optional keys shape the rebuilt context (the prompt of the next segment):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `keep_task_message` | `true` | Keep the trial's first user message (the task) word for word in every rebuilt context, after the system prompt and before the resume message. `false` keeps the task only through the summary (the paper's rebuild). |
+| `task_message_max_tokens` | 4096 | Used only when the whole task message would keep the rebuilt context over the trigger. The task is then cut to about this many tokens: its start and end are kept, with a `[... N tokens truncated by context compaction ...]` marker in between. Integer >= 64. |
+| `keep_last_step_max_tokens` | `null` (off) | When not even one whole recent step fits, keep the last step anyway: the policy's call whole, its tool output cut to about this many tokens in total (start and end kept, marker in between). Off: no step is kept, as before. Integer >= 64, or `null`. |
+
+Why `keep_task_message` is on. Without it the task survives a compaction only
+as the policy's own summary of it. A summary can drop a directory or an ID
+(seen in testing: `orders.tsv` without `/workspace/fs/data/`), and the trial
+then fails for a reason that has nothing to do with the task. With it, every
+segment sees the task as written.
+
+Why `keep_last_step_max_tokens` is off. A cut tool output never appears in an
+uncompacted trial. Turning it on trains the policy on prompts the environment
+never produced. Turn it on when single tool outputs are often larger than the
+room left after a compaction (`kept_steps` is 0 in most rebuilt segments).
+
+The default summary request asks the policy to copy the task's goal and
+constraints, file paths with their directories, commands, IDs, URLs, key values
+and unfinished items word for word. The default resume message says that the
+task message above it is authoritative. The nine summary sections are
+unchanged.
+
 **Checks before anything is ordered.** `pool --dry-run` and `yeto run up`
 preflight refuse:
 
@@ -813,8 +838,11 @@ prompt is bounded by `context_budget` (the next compaction), not by
   the same policy to summarise the trial so far (an `<analysis>` part and a
   `<summary>` part). The summary tokens are trained like any other policy output,
   also when the summary is malformed (`summary_ok: false`) or cut.
-- The next segment starts from the system prompt, a resume message carrying the
-  summary, and the last `keep_recent_steps` steps.
+- The next segment starts from the system prompt, the task message (with
+  `keep_task_message`, the default), a resume message carrying the summary, and
+  the last `keep_recent_steps` steps. With `keep_last_step_max_tokens`, a
+  rebuild that fits no whole step keeps the last step with its tool output cut.
+  All of this is prompt: it has loss mask 0 and is never trained.
 - Each segment becomes one training sample. All segments of a trial go into the
   same buffer group, with the same `group_index` and `index` and the trial's
   reward. A group can therefore hold more samples than `sampling.n`. A training
@@ -911,10 +939,20 @@ evaluation: with compaction on, scores are not comparable to an uncompacted run.
   [RL_ALGORITHMS.md](RL_ALGORITHMS.md)) is unchanged. It is still refused on the
   Harbor path, and it cannot be combined with `agentic.compaction`.
 
+**Effect on the training distribution.** The rebuilt context is the prompt of
+the next segment, so these keys change what the policy is conditioned on after
+a compaction, not which tokens are trained or how rewards and advantages are
+computed. Segment rewards, the shared per-trial index and the per-trial GRPO
+advantage are unchanged. `keep_task_message` adds the task message to every
+rebuilt prompt (a few hundred tokens for a typical task; at most
+`task_message_max_tokens` when it is cut), which leaves that much less room for
+kept steps. Keep the setting fixed within a run: changing it mid-run changes
+the prompts of later segments.
+
 **What to look at.**
 
 - `pool --dry-run` prints the effective values, for example
-  `agentic.compaction: on: context_budget 245760, t_comp 10240 (...), keep_recent_steps 2, max_compactions 3 (at most 4 segments per trial)`.
+  `agentic.compaction: on: context_budget 245760, t_comp 10240 (...), keep_recent_steps 2, max_compactions 3 (at most 4 segments per trial), summary max_tokens: the turn's, at most 4096, keep_task_message on (...), keep_last_step_max_tokens off (...)`.
   `yeto run up` preflight prints the same line as `preflight: agentic.compaction on: ...`,
   and the sampler logs it at start.
 - The records proxy counts `compactions` (summaries written) and `context_full`
@@ -929,7 +967,13 @@ evaluation: with compaction on, scores are not comparable to an uncompacted run.
   segment but the last ends with its summary: `status: completed` and
   `metadata.finish_reason: stop`, with the engine's finish reason of the summary
   turn in `metadata.summary_finish_reason` (`length`: the summary hit its
-  `max_tokens`).
+  `max_tokens`). A rebuilt segment also carries `task_truncated` (with
+  `keep_task_message`) and `last_step_truncated` (with
+  `keep_last_step_max_tokens`): `true` when its rebuilt context cut that text.
+  The round event counts those segments as `agentic.compaction_task_truncated`
+  and `agentic.compaction_last_step_truncated` (absent when zero), and the
+  trial's records count them as `task_message_truncated` and
+  `compaction_last_step_truncated`.
 - A high share of `summary_ok: false`, or of trials whose last segment is
   truncated after `max_compactions`, means the summaries are not doing their job:
   raise `context_budget` (up to `max_model_len`) or `max_compactions`. A high
@@ -985,7 +1029,7 @@ DCP 8 without R3 (the AMD recipe) decodes at 43 tok/s per stream.
 | `sampling.n` | 8 | Equals `--n-samples-per-prompt 8`. |
 | `agentic.max_prompt_len` / `max_response_len` | 16384 / 262144 | `max_response_len` = `--rollout-max-response-len` = `--seq-len` = `max_model_len`: a row is at most the engine context (a trial ends there), and the same rows hold with context compaction on (section 3.6). |
 | `--rl-max-tokens-per-gpu` | 131072 | `--seq-len / CP` at CP2: one micro batch is one full-length row (section 3.6). |
-| `agentic.compaction` | off | To turn it on, add the validated block `{"context_budget": 245760, "t_comp": 10240, "keep_recent_steps": 2, "max_compactions": 3}` to `agentic` (the spec's `_comment` carries it). `context_budget` is at most 259464 here (`turn_max_tokens` 8192, default summary turn); 245760 leaves the summary turn 13704 tokens of headroom. Then read section 3.6 for the drain cut, the trial wall clock and the buffer group size. |
+| `agentic.compaction` | off | To turn it on, add the validated block `{"context_budget": 245760, "t_comp": 10240, "keep_recent_steps": 2, "max_compactions": 3}` to `agentic` (the spec's `_comment` carries it). `context_budget` is at most 259297 here (`turn_max_tokens` 8192, default summary turn); 245760 leaves the summary turn 13537 tokens of headroom. Then read section 3.6 for the drain cut, the trial wall clock and the buffer group size. |
 | `task_defaults.agent_timeout_s` / `wall_clock_s` | 7200 / 7800 s | With 3600 / 4200 s most trials of a C=16 run were cut by the 1 h timeout (2026-11-17). At 42 tok/s a 2 h trial can still generate about 100k tokens with two thirds of its time in tools. |
 | `agentic.weight_switch` | `drain` | vLLM ROCm has no live update. |
 | `agentic.drain_timeout_s` / `reload_max_defer_s` | 1800 / 1800 s | See below. The cut is the smaller of the two, so they move together. |

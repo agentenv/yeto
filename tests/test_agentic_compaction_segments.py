@@ -50,9 +50,10 @@ SUMMARY_END = "Do not call any tool in this turn."  # the last sentence of SUMMA
 LAST = "LAST"  # a tool output that ends with it asks the model to finish
 EXPERTS, LAYERS, TOPK, K = 16, 3, 2, 4
 # Budget calibrated on GLM-4.7-Flash: each step adds ~140 tokens, the first prompt
-# is ~164 tokens and a compacted segment's first prompt ~337: with t_comp 1 the
-# third request compacts, and every second one after it.
-BUDGET = 350
+# is ~164 tokens and a compacted segment's first prompt ~375 (system + the task
+# message, kept by default + resume + the kept step): with t_comp 1 the third
+# request compacts, and every second one after it.
+BUDGET = 400
 RESUME_HEAD = RESUME_TEMPLATE.split("{summary}")[0].strip()
 
 
@@ -128,9 +129,10 @@ class Agent:
     :data:`LAST` tool output). A refused call (HTTP 409, the context is full)
     ends the agent as a non-zero exit, as Harbor reports it."""
 
-    def __init__(self, steps: int, rewards: list[float] | None = None) -> None:
+    def __init__(self, steps: int, rewards: list[float] | None = None, task: str = "do the task") -> None:
         self.steps = steps
         self.rewards = list(rewards or [])
+        self.task = task
         self.calls = 0
 
     async def run(self, task: Any, endpoint: str) -> TrialVerdict:
@@ -138,7 +140,7 @@ class Agent:
 
         reward = self.rewards[self.calls] if self.calls < len(self.rewards) else 1.0
         self.calls += 1
-        items = [user_item("do the task")]
+        items = [user_item(self.task)]
         async with aiohttp.ClientSession() as http:
             for turn in range(self.steps):
                 async with http.post(f"{endpoint}/responses", json=responses_body(copy.deepcopy(items))) as reply:
@@ -267,6 +269,8 @@ def test_segments_from_records_groups_the_calls_per_compaction_segment(glm):
     assert len(groups) == 4 and {g.context_budget for g in groups} == {BUDGET}
     assert [t for g in groups for t in g.turns] == turns_from_records(records)  # the flat calls, unchanged
     assert [g.kept_steps for g in groups] == [None, 1, 1, 1] and [g.summary_ok for g in groups] == [True] * 3 + [None]
+    assert [g.task_truncated for g in groups] == [None, False, False, False]  # the task message, whole
+    assert [g.last_step_truncated for g in groups] == [None] * 4  # keep_last_step_max_tokens is off
     for group in groups:  # each group extends its own first prompt
         first = group.turns[0].prompt_ids
         assert all(t.prompt_ids[:len(first)] == first for t in group.turns)
@@ -342,6 +346,35 @@ def test_a_compacted_trial_writes_one_sample_per_segment_into_its_group(tmp_path
         assert {s["metadata"]["weight_version"] for s in trial} == {"3"}
     (group,) = [f for name, f in events if name == GROUP_EVENT]
     assert group["kept"] == 2 and group["trials"] == 2 and group["written"]
+    for trial in trials.values():  # the task message is kept whole (keep_task_message, the default)
+        metas = [s["metadata"]["compaction"] for s in trial]
+        assert "task_truncated" not in metas[0] and all(m["task_truncated"] is False for m in metas[1:])
+        assert not any("last_step_truncated" in m for m in metas)  # keep_last_step_max_tokens is off
+    (round_event,) = [f for name, f in events if name == "rl_sampler_engine_round"]
+    assert not any(k.startswith("compaction_task") or k.startswith("compaction_last") for k in round_event["agentic"])
+
+
+def test_cut_rebuilds_are_in_the_segment_metadata_and_the_round_event(tmp_path, glm):
+    """A task message too long for the rebuilt context is cut on every rebuild; the
+    segments say so (metadata.compaction.task_truncated) and the round event counts
+    them (agentic.compaction_task_truncated). The cut task is prompt (mask 0)."""
+    engine = _engine(glm)
+    cfg = dataclasses.replace(_cfg(max_compactions=2), task_message_max_tokens=64)
+    recorder = ProxyTokenRecorder(_proxy(engine, glm, cfg), allow_compaction=True)
+    task = "do the task: " + " ".join(f"detail{i}" for i in range(300))
+    samples, events = _round(tmp_path, recorder, engine, Agent(6, task=task), n=1)
+    trial = _by_trial(samples)[0]
+    assert len(trial) == 3
+    _check_segments(trial, engine, cfg, glm)
+    metas = [s["metadata"]["compaction"] for s in trial]
+    assert "task_truncated" not in metas[0] and [m["task_truncated"] for m in metas[1:]] == [True, True]
+    for sample in trial[1:]:
+        prompt = glm.decode(sample["tokens"][:-sample["response_length"]])
+        assert "tokens truncated by context compaction" in prompt and "detail150" not in prompt
+        assert "do the task: detail0" in prompt
+    (round_event,) = [f for name, f in events if name == "rl_sampler_engine_round"]
+    assert round_event["agentic"]["compaction_task_truncated"] == 2
+    assert "compaction_last_step_truncated" not in round_event["agentic"]
 
 
 def test_the_context_full_after_the_last_compaction_truncates_only_the_last_segment(tmp_path, glm):
@@ -400,10 +433,10 @@ def test_no_room_for_a_later_summary_truncates_the_last_segment(tmp_path, glm):
     """Compacted once; the next summary request does not fit: the last segment is truncated.
 
     The first summary request fits with the newest tool output left out of it
-    (~510 tokens); the second segment's one is longer (it starts from the resume
-    message and the kept step, ~520): max_model_len 475-490 on GLM-4.7-Flash
+    (~510 tokens); the second segment's one is longer (it starts from the task and
+    resume messages and the kept step): max_model_len 525-560 on GLM-4.7-Flash
     lets the first through and not the second."""
-    engine = _engine(glm, max_model_len=485)
+    engine = _engine(glm, max_model_len=540)
     cfg = _cfg()
     recorder = ProxyTokenRecorder(_proxy(engine, glm, cfg), allow_compaction=True)
     samples, events = _round(tmp_path, recorder, engine, Agent(8), n=1)
@@ -424,7 +457,7 @@ def test_r3_rows_and_topk_are_each_segments_own(tmp_path, glm):
     the per-segment window."""
     engine = _engine(glm, arrays=True)
     cfg = _cfg(max_compactions=1)
-    max_response_len = 450  # segment 1: prompt ~337 + response ~426 > first prompt ~164 + 450
+    max_response_len = 480  # segment 0's response (~456, its summary turn included) fits; segment 1's prompt ~375
     recorder = ProxyTokenRecorder(_proxy(engine, glm, cfg, r3_response_len=max_response_len), allow_compaction=True)
     samples, _ = _round(tmp_path, recorder, engine, Agent(6), n=1, max_response_len=max_response_len)
     trial = _by_trial(samples)[0]

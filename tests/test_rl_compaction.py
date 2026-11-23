@@ -80,13 +80,19 @@ def test_compaction_segments_numbering_and_shared_reward():
     assert all(t["kind"] != "summary" for t in ep.segments[-1].turns)
 
 
-def test_rebuilt_context_is_system_resume_and_last_k_steps():
+@pytest.mark.parametrize("keep_task", [False, True])
+def test_rebuilt_context_is_system_resume_and_last_k_steps(keep_task):
+    """keep_task_message False: the paper's ``s + u_resume + last k``; True (the
+    default): the task message, verbatim, between ``s`` and u_resume."""
     policy = FakePolicy(5)
     ep = run_episode(policy, FakeEnv(20, 5), PROMPT,
-                     CompactionConfig(context_budget=200, t_comp=120), rollout_id="r")
+                     CompactionConfig(context_budget=260, t_comp=120, keep_task_message=keep_task), rollout_id="r")
     assert ep.compactions >= 1 and ep.kept_steps[0] == 2
     seg1 = ep.segments[1].prompt
-    assert seg1[0] == PROMPT[0]  # s = system prompt only
+    assert seg1[0] == PROMPT[0]  # s = system prompt
+    if keep_task:
+        assert seg1[1] == PROMPT[1]  # the task, verbatim
+        seg1 = [seg1[0], *seg1[2:]]
     assert seg1[1]["role"] == "user"
     assert seg1[1]["content"] == cp.RESUME_TEMPLATE.format(summary="summary-1")
     assert "scratch notes" not in seg1[1]["content"]  # <analysis> dropped
@@ -102,12 +108,12 @@ def test_rebuilt_context_is_system_resume_and_last_k_steps():
 
 def test_k_is_reduced_when_recent_steps_do_not_fit():
     ep = run_episode(FakePolicy(15), FakeEnv(20, 15), PROMPT,
-                     CompactionConfig(context_budget=100, t_comp=50), rollout_id="r")
+                     CompactionConfig(context_budget=130, t_comp=50), rollout_id="r")
     assert ep.compactions >= 1
     assert ep.kept_steps[0] < 2
     for seg in ep.segments[1:]:
         assert not cp.should_compact(cp.context_tokens(seg.prompt, cp.default_count_tokens),
-                                     CompactionConfig(context_budget=100, t_comp=50))
+                                     CompactionConfig(context_budget=130, t_comp=50))
 
 
 def test_at_most_three_compactions_then_truncated_when_full():
@@ -125,7 +131,7 @@ def test_max_compactions_is_configurable_and_zero_disables():
 def test_missing_summary_tag_is_recorded():
     ep = run_episode(FakePolicy(10, summary_ok=False), FakeEnv(8, 10), PROMPT, cfg())
     assert ep.summaries_ok and not any(ep.summaries_ok)
-    assert "scratch" not in ep.segments[1].prompt[1]["content"]
+    assert "scratch" not in ep.segments[1].prompt[2]["content"]  # system, task, resume
 
 
 def test_summary_template_has_nine_sections_and_tags():
@@ -138,3 +144,37 @@ def test_summary_template_has_nine_sections_and_tags():
 def test_config_validation():
     with pytest.raises(ValueError):
         CompactionConfig(context_budget=10240)
+
+
+def test_truncate_middle_keeps_head_and_tail():
+    text = " ".join(f"w{i}" for i in range(200))
+    assert cp.truncate_middle(text, 300, str.split, " ".join) == (text, 0)  # fits: unchanged
+    cut, dropped = cp.truncate_middle(text, 64, str.split, " ".join)
+    words = text.split()
+    keep = 64 - cp._MARKER_RESERVE
+    assert dropped == 200 - keep
+    assert cut.startswith(" ".join(words[:keep - keep // 2])) and cut.endswith(" ".join(words[-(keep // 2):]))
+    assert cp.TRUNCATION_MARKER.format(n=dropped) in cut
+
+
+def test_driver_cuts_a_task_that_keeps_the_rebuild_over_the_trigger():
+    task = {"role": "user", "content": "GOAL " + " ".join(["t"] * 200) + " END"}
+    ep = run_episode(FakePolicy(5), FakeEnv(6, 5), [PROMPT[0], task],
+                     CompactionConfig(context_budget=300, t_comp=120, task_message_max_tokens=64), rollout_id="r")
+    assert ep.compactions >= 1
+    kept_task = ep.segments[1].prompt[1]["content"]
+    assert kept_task.startswith("GOAL") and kept_task.endswith("END") and "tokens truncated" in kept_task
+    assert len(kept_task.split()) < 80
+
+
+def test_driver_keeps_the_last_step_cut_only_when_asked():
+    """One step is larger than the trigger: no step is kept, unless keep_last_step_max_tokens."""
+    base = {"context_budget": 300, "t_comp": 100}
+    off = run_episode(FakePolicy(5), FakeEnv(3, 400), PROMPT, CompactionConfig(**base), rollout_id="r")
+    assert off.kept_steps and set(off.kept_steps) == {0}
+    on = run_episode(FakePolicy(5), FakeEnv(3, 400), PROMPT,
+                     CompactionConfig(**base, keep_last_step_max_tokens=64), rollout_id="r")
+    assert on.kept_steps and set(on.kept_steps) == {1}
+    action, observation = on.segments[1].prompt[-2:]
+    assert action["role"] == "assistant" and action["content"] == " ".join(["a1"] * 5)  # the action whole
+    assert "tokens truncated" in observation["content"] and len(observation["content"].split()) < 80

@@ -113,7 +113,7 @@ def segments_from_records(records: Mapping[str, Any], *,
     """The proxy records of one trajectory as model calls per compaction segment.
 
     A compaction segment (records ``segment`` > 0) starts a new token stream
-    (``system + u_resume(S) + last k steps``), so its calls form a group of
+    (``system + [task] + u_resume(S) + last k steps``), so its calls form a group of
     their own, joined into a sample of their own.  A later session's first
     segment is no compaction: its calls follow the current group, as in
     :func:`turns_from_records` (the join rebases or refuses them).  Without
@@ -124,7 +124,9 @@ def segments_from_records(records: Mapping[str, Any], *,
     ``<summary>`` tag (None: it ended without one); ``summary_tokens``: the
     tokens its summary turn generated (0 without one); ``retry_replays``: the
     gateway's count for the whole trajectory (None: replay is off), on every
-    segment."""
+    segment; ``task_truncated`` / ``last_step_truncated``: the segment's rebuilt
+    context cut the task message / the kept last step's tool output (None: not
+    rebuilt, or the option is off)."""
     groups: list[CompactionSegment] = []
     replays = (records.get("gateway") or {}).get("retry_replays")
     replays = None if replays is None else int(replays)
@@ -142,6 +144,8 @@ def segments_from_records(records: Mapping[str, Any], *,
                 continue
             groups.append(CompactionSegment(turns=tuple(turns), kept_steps=sample.get("kept_steps"),
                                             summary_ok=sample.get("summary_ok"),
+                                            task_truncated=sample.get("task_truncated"),
+                                            last_step_truncated=sample.get("last_step_truncated"),
                                             context_budget=context_budget, summary_tokens=summary,
                                             retry_replays=replays))
     return groups

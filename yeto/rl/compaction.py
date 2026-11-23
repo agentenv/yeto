@@ -9,7 +9,13 @@ Pure-Python episode driver for compacted agent rollouts, after CompactionRL
   with an ``<analysis>`` scratch part and a ``<summary>`` part;
 * rebuilt context (eq. 9): ``s + u_resume(S_t) + last k steps`` (k = 2, reduced
   when the rebuilt context would trigger again); a step = (action, observation)
-  is atomic (eq. 6);
+  is atomic (eq. 6). yeto addition (``keep_task_message``, on by default): the
+  task message, verbatim, follows ``s`` -- ``s + task + u_resume(S_t) + last k
+  steps`` -- so the task survives a compaction as written, not only as the
+  summary's paraphrase (cut to ``task_message_max_tokens`` when it would keep
+  the rebuilt context over the trigger). Optional (``keep_last_step_max_tokens``,
+  off by default): when even k = 1 does not fit, the last step is kept with its
+  tool output cut in the middle instead of keeping no step;
 * at most 3 compactions per rollout (sec. 5.1); after the last one the episode
   runs until the context is full and is then marked truncated;
 * every segment carries the rollout's task reward (shared return, no separate
@@ -39,6 +45,16 @@ from typing import Any, Protocol
 T_COMP = 10_240
 KEEP_RECENT_STEPS = 2
 MAX_COMPACTIONS = 3
+# Cap of the task message in a rebuilt context, applied only when the whole task
+# message would keep the rebuilt context over the trigger (keep_task_message).
+TASK_MESSAGE_MAX_TOKENS = 4096
+# Least token cap of a cut text (task message, kept tool output): room for the
+# truncation marker and some text on both sides of it.
+MIN_CUT_TOKENS = 64
+# The marker that replaces the middle of a cut text ({n}: tokens left out).
+TRUNCATION_MARKER = "\n[... {n} tokens truncated by context compaction ...]\n"
+# Tokens reserved for the marker when a text is cut to a token cap.
+_MARKER_RESERVE = 24
 
 # yeto draft (paper: not given) -- 9 sections covering the sec. 4.1 list.
 SUMMARY_SECTIONS: tuple[str, ...] = (
@@ -61,12 +77,16 @@ SUMMARY_PROMPT = (
     "Then write the summary inside <summary></summary> with exactly these numbered "
     "sections:\n"
     + "".join(f"{i}. {name}\n" for i, name in enumerate(SUMMARY_SECTIONS, 1))
-    + "Do not call any tool in this turn."
+    + "Copy verbatim, never paraphrased: the task's goal and constraints, every file path "
+    "with its full directory, command, ID, URL and key value, and every unfinished item.\n"
+    "Do not call any tool in this turn."
 )
 
 RESUME_TEMPLATE = (
     "This session continues from an earlier one whose context was compacted. "
     "Summary of the earlier interaction:\n\n{summary}\n\n"
+    "If the original task message is shown above, it is authoritative: follow it, and take "
+    "file paths, commands and IDs from it verbatim, not from this summary. "
     "The most recent steps follow verbatim. Continue the task."
 )
 
@@ -112,7 +132,17 @@ class CompactionConfig:
     the summary request (:func:`summary_request_tokens`).
     ``summary_prompt`` / ``resume_template``: q_sum and u_resume (default: the
     yeto drafts :data:`SUMMARY_PROMPT` / :data:`RESUME_TEMPLATE`);
-    ``resume_template`` has one ``{summary}`` field."""
+    ``resume_template`` has one ``{summary}`` field.
+
+    ``keep_task_message`` (default True): a rebuilt context keeps the
+    trajectory's first user message (the task) verbatim after the system
+    messages and before u_resume; False is the paper's ``s + u_resume + last k
+    steps``. ``task_message_max_tokens``: when the whole task message would
+    keep the rebuilt context over the trigger, it is cut to about this many
+    tokens (head and tail kept, :data:`TRUNCATION_MARKER` in the middle).
+    ``keep_last_step_max_tokens`` (default None: off): when not even one whole
+    step fits (k would be 0), keep the last step with its tool output cut to
+    about this many tokens in total (the policy's call is never cut)."""
 
     context_budget: int  # C (paper: 64k GLM-4.7-Flash, 80k GLM-4.5-Air-SFT)
     t_comp: int = T_COMP
@@ -122,6 +152,9 @@ class CompactionConfig:
     summary_max_tokens: int | None = None
     summary_prompt: str = SUMMARY_PROMPT
     resume_template: str = RESUME_TEMPLATE
+    keep_task_message: bool = True
+    task_message_max_tokens: int = TASK_MESSAGE_MAX_TOKENS
+    keep_last_step_max_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if self.context_budget <= self.t_comp:
@@ -141,6 +174,17 @@ class CompactionConfig:
             if isinstance(self.summary_max_tokens, bool) or not isinstance(self.summary_max_tokens, int):
                 raise ValueError(f"summary_max_tokens must be an integer, got {self.summary_max_tokens!r}")
             self.check_summary_room(self.summary_max_tokens)
+        if not isinstance(self.keep_task_message, bool):
+            raise ValueError(f"keep_task_message must be true or false, got {self.keep_task_message!r}")
+        for name in ("task_message_max_tokens", "keep_last_step_max_tokens"):
+            value = getattr(self, name)
+            if value is None and name == "keep_last_step_max_tokens":
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer, got {value!r}")
+            if value < MIN_CUT_TOKENS:
+                raise ValueError(f"{name} must be >= {MIN_CUT_TOKENS} (room for the truncation marker), "
+                                 f"got {value}")
 
     def summary_tokens(self, turn_max_tokens: int) -> int:
         """The summary turn's ``max_tokens`` given the signed per-turn one."""
@@ -227,22 +271,71 @@ def step_messages(step: tuple[str, str]) -> list[Message]:
     return [{"role": "assistant", "content": action}, {"role": "user", "content": observation}]
 
 
+def truncate_middle(text: str, max_tokens: int, encode: Callable[[str], Sequence[Any]],
+                    decode: Callable[[Sequence[Any]], str]) -> tuple[str, int]:
+    """``(text, tokens left out)``: ``text`` cut to about ``max_tokens`` tokens,
+    its head and tail kept and :data:`TRUNCATION_MARKER` in the middle; the
+    text unchanged (0) when it already fits. ``encode`` / ``decode``: plain-text
+    tokenization (the records proxy: the policy tokenizer; the episode driver:
+    whitespace words)."""
+    ids = list(encode(text))
+    if len(ids) <= max_tokens:
+        return text, 0
+    keep = max(max_tokens - _MARKER_RESERVE, 2)
+    head, tail = keep - keep // 2, keep // 2
+    dropped = len(ids) - head - tail
+    return decode(ids[:head]) + TRUNCATION_MARKER.format(n=dropped) + decode(ids[len(ids) - tail:]), dropped
+
+
+def _word_cut(text: str, max_tokens: int) -> tuple[str, int]:
+    """:func:`truncate_middle` on whitespace words (the episode driver's tokens)."""
+    return truncate_middle(text, max_tokens, str.split, " ".join)
+
+
+def first_task_message(messages: Sequence[Message]) -> Message | None:
+    """The task: the first user message before any assistant message (None: none)."""
+    for message in messages:
+        role = message.get("role")
+        if role == "assistant":
+            return None
+        if role == "user":
+            return message
+    return None
+
+
 def rebuild_context(prefix: Sequence[Message], summary: str, steps: Sequence[tuple[str, str]],
-                    cfg: CompactionConfig, count: Callable[[str], int]) -> tuple[list[Message], int]:
-    """Eq. 9: ``s + u_resume(S) + last k steps``; returns (context, k used).
+                    cfg: CompactionConfig, count: Callable[[str], int], *,
+                    task: Message | None = None,
+                    cut: Callable[[str, int], tuple[str, int]] = _word_cut) -> tuple[list[Message], int]:
+    """Eq. 9: ``s + [task] + u_resume(S) + last k steps``; returns (context, k used).
 
     k starts at ``cfg.keep_recent_steps`` and is reduced while the rebuilt
     context would trigger compaction again (yeto reading of "reduce k when
-    necessary").
+    necessary"). ``task`` (kept when ``cfg.keep_task_message``) is cut to
+    ``cfg.task_message_max_tokens`` when even k = 0 would trigger with it whole.
+    With ``cfg.keep_last_step_max_tokens``, a k of 0 becomes 1: the last step
+    with its observation cut to that many tokens, when that fits.
+    ``cut(text, max_tokens)``: :func:`truncate_middle` in the caller's tokens.
     """
 
     resume = {"role": "user", "content": cfg.resume_template.format(summary=summary)}
-    for k in range(min(cfg.keep_recent_steps, len(steps)), -1, -1):
-        recent = [m for st in steps[len(steps) - k:] for m in step_messages(st)] if k else []
-        ctx = [*prefix, resume, *recent]
-        if not should_compact(context_tokens(ctx, count), cfg) or k == 0:
-            return ctx, k
-    raise AssertionError("unreachable")
+    head = [*prefix, resume]
+    if cfg.keep_task_message and task is not None:
+        head = [*prefix, dict(task), resume]
+        if should_compact(context_tokens(head, count), cfg):
+            text, dropped = cut(str(task["content"]), cfg.task_message_max_tokens)
+            if dropped:
+                head[len(prefix)] = {**task, "content": text}
+    for k in range(min(cfg.keep_recent_steps, len(steps)), 0, -1):
+        recent = [m for st in steps[len(steps) - k:] for m in step_messages(st)]
+        if not should_compact(context_tokens([*head, *recent], count), cfg):
+            return [*head, *recent], k
+    if cfg.keep_last_step_max_tokens is not None and cfg.keep_recent_steps and steps:
+        action, observation = steps[-1]
+        last = step_messages((action, cut(observation, cfg.keep_last_step_max_tokens)[0]))
+        if not should_compact(context_tokens([*head, *last], count), cfg):
+            return [*head, *last], 1
+    return head, 0
 
 
 @dataclass
@@ -317,9 +410,12 @@ def run_episode(policy: Callable[[list[Message]], str], env: Environment,
     ``prompt`` is the initial history (system prompt first, then the task);
     ``keep_prefix`` leading messages are the ``s`` kept on rebuild (paper: the
     system prompt; the task itself survives through section 1 of the summary).
+    With ``cfg.keep_task_message`` the first user message after them is kept
+    verbatim as well (:func:`rebuild_context`).
     """
 
     prefix = list(prompt[:keep_prefix])
+    task = first_task_message(prompt[keep_prefix:])
     ctx: list[Message] = list(prompt)
     seg = Segment(0, list(ctx))
     segments = [seg]
@@ -354,7 +450,7 @@ def run_episode(policy: Callable[[list[Message]], str], env: Environment,
                           "tokens": count(text)})
         summary, ok = extract_summary(text)
         summaries_ok.append(ok)
-        ctx, k = rebuild_context(prefix, summary, steps, cfg, count)
+        ctx, k = rebuild_context(prefix, summary, steps, cfg, count, task=task)
         kept.append(k)
         compactions += 1
         seg = Segment(compactions, list(ctx))
@@ -477,10 +573,12 @@ def refresh_segment_counts(samples: Any) -> int:
 # Every CompactionConfig field is a spec key except ``max_turns``: the episode
 # driver's evaluation cap, which the records proxy does not read (an accepted key
 # must reach its consumer). CompactionConfig checks the summary-turn fields
-# (``summary_max_tokens``, ``summary_prompt``, ``resume_template``).
+# (``summary_max_tokens``, ``summary_prompt``, ``resume_template``) and the
+# rebuild fields (``keep_task_message``, ``keep_last_step_max_tokens``: null is off).
 SPEC_KEYS: tuple[str, ...] = tuple(f.name for f in fields(CompactionConfig) if f.name != "max_turns")
 # Integer keys and their least value (``summary_max_tokens``: CompactionConfig checks it).
-_INT_MINIMUM = {"context_budget": 1, "t_comp": 1, "keep_recent_steps": 0, "max_compactions": 0}
+_INT_MINIMUM = {"context_budget": 1, "t_comp": 1, "keep_recent_steps": 0, "max_compactions": 0,
+                "task_message_max_tokens": MIN_CUT_TOKENS}
 
 
 def _spec_int(name: str, value: Any, *, minimum: int) -> int:
@@ -623,6 +721,16 @@ def describe(cfg: CompactionConfig) -> str:
         line += f", summary_max_tokens {cfg.summary_max_tokens}"
     else:
         line += f", summary max_tokens: the turn's, at most {DEFAULT_SUMMARY_MAX_TOKENS}"
+    if cfg.keep_task_message:
+        line += (f", keep_task_message on (the task message is kept verbatim in a rebuilt context, cut to "
+                 f"task_message_max_tokens {cfg.task_message_max_tokens} only when it would keep it over the trigger)")
+    else:
+        line += ", keep_task_message off (a rebuilt context keeps the task only through the summary)"
+    if cfg.keep_last_step_max_tokens is not None:
+        line += (f", keep_last_step_max_tokens {cfg.keep_last_step_max_tokens} (when no whole step fits, the "
+                 f"last step is kept with its tool output cut to that many tokens)")
+    else:
+        line += ", keep_last_step_max_tokens off (when no whole step fits, no step is kept)"
     if cfg.max_compactions == 0:
         line += ("; max_compactions 0: the proxy never compacts, but still ends a trial at context_budget "
                  "(remove agentic.compaction to turn it off)")

@@ -214,7 +214,10 @@ compacted trial is written as one buffer sample per segment
 - Sampler: each `rl_sampler_engine_round` carries `agentic.compaction`, the
   summary of the round's written samples (`yeto/rl/engine/timeline.py:
   CompactionTally`); the sampler log prints the same as one
-  `agentic round N compaction: ...` line.
+  `agentic round N compaction: ...` line. The round event also counts the
+  segments whose rebuilt context cut the task message or the kept last step's
+  tool output, as `agentic.compaction_task_truncated` and
+  `agentic.compaction_last_step_truncated` (absent when zero).
 - Trainer: `rl_round_trained.compaction` is the same summary over the step's
   trained samples; W&B gets its scalars as `train/compaction/<key>` on
   `train/step`.

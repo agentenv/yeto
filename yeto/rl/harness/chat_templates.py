@@ -596,6 +596,14 @@ class ChatTemplate:
         self._renderings().append((text, ends, pieces))
         return text
 
+    def text_ids(self, text: str) -> list[int]:
+        """Token ids of plain message text, outside any rendering: to measure and
+        cut message content (the records proxy's compaction), never a stream's ids
+        (:meth:`encode` gives those)."""
+        if self.spec.segment_encoding:
+            return list(self._piece(text, False))
+        return list(self.tokenizer.encode(text, add_special_tokens=False))
+
     def decode(self, ids: Sequence[int]) -> str:
         return self.tokenizer.decode(list(ids), skip_special_tokens=False)
 

@@ -25,8 +25,13 @@ signed sampling. This backend replaces the session server behind it:
   rendering on one core, and the proxy runs it on its event loop);
 * optional context compaction (CompactionRL, :mod:`yeto.rl.compaction`): when
   ``C - |h| < T_comp`` the policy writes a summary in the current segment
-  (trainable), and the next segment starts from ``system + u_resume(S) + last
-  k steps``. One training sample per segment, as in the Codex bridge.
+  (trainable), and the next segment starts from ``system + task + u_resume(S) +
+  last k steps`` (``task``: the first user message, verbatim, with
+  ``keep_task_message``; cut to ``task_message_max_tokens`` only when it would
+  keep the rebuilt context over the trigger). With ``keep_last_step_max_tokens``,
+  a rebuild that fits no whole step keeps the last one with its tool output cut.
+  The rebuilt context is prompt (mask 0). One training sample per segment, as in
+  the Codex bridge.
 * R3 rows to the training window (``r3_response_len``): an engine returns one
   routing row per stream position (``[len(prompt) + len(completion) - 1, L_moe,
   top_k]``; GBs at a 1M context), but ``join_turns`` keeps only the first
@@ -50,7 +55,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from yeto.rl.compaction import CompactionConfig, extract_summary, should_compact
+from yeto.rl.compaction import (
+    MIN_CUT_TOKENS,
+    CompactionConfig,
+    extract_summary,
+    first_task_message,
+    should_compact,
+    truncate_middle,
+)
 from yeto.rl.engine.sampler_engine import (
     FINISH_LENGTH,
     Completion,
@@ -150,6 +162,10 @@ class Segment:
     last_finish: str | None = None
     kept_steps: int | None = None
     summary_ok: bool | None = None
+    # rebuilt context (index > 0; None on the first segment): the task message was cut
+    # (None: no task message kept), the kept last step's tool output was cut
+    task_truncated: bool | None = None
+    last_step_truncated: bool | None = None
 
     def extend(self, ids: Sequence[int], *, mask: int, logprobs: Sequence[float] | None = None) -> None:
         self.token_ids.extend(int(t) for t in ids)
@@ -159,6 +175,7 @@ class Segment:
     def sample(self) -> dict[str, Any]:
         return {"segment": self.index, "token_ids": list(self.token_ids), "loss_mask": list(self.loss_mask),
                 "logprobs": list(self.logprobs), "kept_steps": self.kept_steps, "summary_ok": self.summary_ok,
+                "task_truncated": self.task_truncated, "last_step_truncated": self.last_step_truncated,
                 "turns": [vars(t).copy() for t in self.turns]}
 
 
@@ -239,6 +256,9 @@ class _Session:
     turns: int = 0
     render_memo: _RenderMemo | None = None  # the last _prompt rendering (RecordingBackend._prompt)
     forgotten: bool = False  # RecordingBackend.forget dropped it; a request still in flight stops
+    # the first user message of the session's first segment, kept by every rebuilt context
+    # (keep_task_message); a private copy taken at the first compaction
+    task_message: Message | None = None
 
 
 def _common_prefix(a: str, b: str) -> str:
@@ -441,6 +461,13 @@ class RecordingBackend:
         (``messages[segment.base:]``); the next segment keeps the last ``k``
         whole steps (assistant + its tool outputs), ``k`` reduced while the
         rebuilt context would trigger again (as :func:`yeto.rl.compaction.rebuild_context`).
+        Its head is ``system + task + u_resume(S)``: ``task`` is the session's first
+        user message (``keep_task_message``), cut to ``task_message_max_tokens``
+        when the head would trigger with it whole (counter ``task_message_truncated``).
+        When no whole step fits and ``keep_last_step_max_tokens`` is set, the last
+        step moves into the head with its tool outputs cut to that many tokens in
+        all (the assistant message whole; counter ``compaction_last_step_truncated``),
+        when that fits; the agent's own copy of the step is then behind ``base``.
 
         The summary turn samples ``cfg.summary_max_tokens`` (else the turn's
         ``max_tokens`` capped at :data:`~yeto.rl.compaction.DEFAULT_SUMMARY_MAX_TOKENS`).
@@ -496,7 +523,7 @@ class RecordingBackend:
             counters["summary_not_ok"] += 1
 
         systems = list(itertools.takewhile(lambda m: m.get("role") == "system", context))
-        head = systems + [{"role": "user", "content": cfg.resume_template.format(summary=summary)}]
+        resume = {"role": "user", "content": cfg.resume_template.format(summary=summary)}
         history = context[len(segment.head):]
         steps = _atomic_step_starts(history)
         tools = self.tools.get(session.trajectory_id)
@@ -504,20 +531,72 @@ class RecordingBackend:
         def tokens(rebuilt: list[Message]) -> int:
             return len(self.template.encode(self.template.render(rebuilt, tools=tools, add_generation_prompt=True)))
 
-        kept, first = 0, len(history)
+        head = systems + [resume]
+        task_cut: bool | None = None
+        task = self._task_message(session, segment, context) if cfg.keep_task_message else None
+        if task is not None:
+            head, task_cut = systems + [task, resume], False
+            if should_compact(tokens(head), cfg):  # the whole task would keep the rebuilt context over the trigger
+                short, task_cut = self._cut_message(task, cfg.task_message_max_tokens)
+                if task_cut:
+                    head = systems + [short, resume]
+                    counters["task_message_truncated"] += 1
+        kept, first, step_cut = 0, len(history), None
         for k in range(min(cfg.keep_recent_steps, len(steps)), 0, -1):
             if not should_compact(tokens(head + history[steps[-k]:]), cfg):
                 kept, first = k, steps[-k]
                 break
         else:
-            used = tokens(head)
-            if used >= int(self.engine.max_model_len):  # the next segment could not sample a token
-                counters[COMPACTION_NO_ROOM] += 1
-                self._context_full(session, segment, f"{COMPACTION_NO_ROOM}: the rebuilt context has {used} "
-                                                     f"tokens; max_model_len is {self.engine.max_model_len}")
-            if should_compact(used, cfg):  # even k = 0 is over the trigger: _should_compact will not compact it again
-                counters["compaction_rebuild_over_budget"] += 1
-        session.segments.append(Segment(len(session.segments), head=head, base=segment.base + first, kept_steps=kept))
+            last = self._cut_last_step(history[steps[-1]:]) if steps and cfg.keep_recent_steps else None
+            if last is not None and not should_compact(tokens(head + last), cfg):
+                head, kept, step_cut = head + last, 1, True  # the step is in the head, the agent's copy behind base
+                counters["compaction_last_step_truncated"] += 1
+            else:
+                used = tokens(head)
+                if used >= int(self.engine.max_model_len):  # the next segment could not sample a token
+                    counters[COMPACTION_NO_ROOM] += 1
+                    self._context_full(session, segment, f"{COMPACTION_NO_ROOM}: the rebuilt context has {used} "
+                                                         f"tokens; max_model_len is {self.engine.max_model_len}")
+                if should_compact(used, cfg):  # even k = 0 is over the trigger: _should_compact will not compact it again
+                    counters["compaction_rebuild_over_budget"] += 1
+        session.segments.append(Segment(len(session.segments), head=head, base=segment.base + first, kept_steps=kept,
+                                        task_truncated=task_cut,
+                                        last_step_truncated=None if cfg.keep_last_step_max_tokens is None
+                                        else bool(step_cut)))
+
+    @staticmethod
+    def _task_message(session: _Session, segment: Segment, context: list[Message]) -> Message | None:
+        """The session's task message (its first segment's first user message, before any
+        assistant message): a private copy taken at the first compaction (None: none)."""
+        if session.task_message is None and segment.index == 0:
+            task = first_task_message(context)
+            if task is not None:
+                session.task_message = copy.deepcopy(task)
+        return session.task_message
+
+    def _cut_message(self, message: Message, max_tokens: int) -> tuple[Message, bool]:
+        """``(message, cut)``: a copy with its text content cut in the middle to about
+        ``max_tokens`` policy tokens (:func:`~yeto.rl.compaction.truncate_middle`);
+        the message itself when it fits or has no text content."""
+        content = message.get("content")
+        if not isinstance(content, str):
+            return message, False
+        text, dropped = truncate_middle(content, max_tokens, self.template.text_ids, self.template.decode)
+        return ({**message, "content": text}, True) if dropped else (message, False)
+
+    def _cut_last_step(self, step: list[Message]) -> list[Message] | None:
+        """The last step (assistant message + its outputs) with the outputs cut to
+        ``keep_last_step_max_tokens`` in all, split evenly; the assistant message is
+        kept whole. None when the option is off or nothing is cut."""
+        cap = self.compaction.keep_last_step_max_tokens if self.compaction is not None else None
+        outputs = len(step) - 1
+        if cap is None or outputs < 1:
+            return None
+        each = max(cap // outputs, MIN_CUT_TOKENS)
+        cut = [self._cut_message(m, each) for m in step[1:]]
+        if not any(was_cut for _, was_cut in cut):
+            return None
+        return [copy.deepcopy(step[0]), *(copy.deepcopy(m) for m, _ in cut)]
 
     async def _sample(self, session: _Session, segment: Segment, pending: _Prompt, params: SamplingParams,
                       *, kind: str) -> Completion:
