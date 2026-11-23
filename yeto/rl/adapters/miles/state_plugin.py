@@ -263,6 +263,43 @@ def _no_conversion(_tensor: Any) -> Any:
     raise StatePluginError("a packed adapter converts through its PackedAdapterPolicy")
 
 
+# Megatron-Bridge members the bindings use beyond its collective export, kept in
+# these two functions so a Bridge upgrade is checked in one place. Verified
+# against the pinned Megatron-Bridge a0c6d6e09b0bd4d208c2d936608319d5ab456d87
+# (``models/conversion/param_mapping.py``): ``MegatronParamMapping.local_hf_param_specs``
+# (the collective-free HF view of one local parameter) and ``_local_hf_sharding``
+# with ``tp_rank`` (how ``local_hf_params`` describes a TP/ETP shard).
+
+
+def _bridge_hf_name(mapping: Any) -> str:
+    """The HF name of one adapter parameter, without a collective.
+
+    ``mapping.megatron_to_hf`` would broadcast over the PP group, and each stage
+    resolves only its own bindings, so the stages' collectives would not pair up.
+    """
+
+    specs = mapping.local_hf_param_specs()
+    if len(specs) != 1 or specs[0].split_count != 1:
+        raise StatePluginError(f"ambiguous LoRA mapping for {mapping.hf_param!r}")
+    return specs[0].name
+
+
+def _bridge_local_shard(mapping: Any, parameter: Any, tensor: Any) -> Any:
+    """This rank's shard of a complete canonical tensor, in its own dtype.
+
+    The same split as ``mapping.hf_to_megatron`` (Column: dim 0, Row: dim 1,
+    Replicated: whole), taken locally: no scatter, and no cast of the FP32
+    value to the bf16 model dtype, so the master gets the canonical value.
+    """
+
+    _group, dim, size = mapping._local_hf_sharding(parameter, None)
+    if dim is None or size == 1:
+        return tensor
+    if tensor.shape[dim] % size:
+        raise StatePluginError(f"LoRA tensor {mapping.hf_param!r} does not split into {size} TP shards")
+    return tensor.chunk(size, dim=dim)[mapping.tp_rank]
+
+
 def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
     """Resolve (and cache) adapter bindings via Megatron-Bridge conversion tasks.
 
@@ -294,17 +331,13 @@ def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
                     bindings.append(AdapterBinding(_canonical(packed_name), side.param_weight,
                                                    _no_conversion, _no_conversion, packed=True))
                     continue
-                # names only: the model copy has the master's shape
-                converted = side.mapping.megatron_to_hf(side.param_weight, side.megatron_module)
-                if len(converted) != 1:
-                    raise StatePluginError(f"ambiguous LoRA mapping for {side.param_name!r}")
-                name = _canonical(next(iter(converted)))
+                name = _canonical(_bridge_hf_name(side.mapping))
 
                 def to_hf(tensor, _side=side):
                     return next(iter(_side.mapping.megatron_to_hf(tensor, _side.megatron_module).values()))
 
                 def from_hf(tensor, _side=side):
-                    return _side.mapping.hf_to_megatron(tensor, _side.megatron_module)
+                    return _bridge_local_shard(_side.mapping, _side.param_weight, tensor)
 
                 bindings.append(AdapterBinding(name, side.param_weight, to_hf, from_hf))
     names = [b.name for b in bindings]

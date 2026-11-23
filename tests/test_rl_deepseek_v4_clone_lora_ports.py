@@ -138,7 +138,8 @@ def test_bindings_name_packed_sides_by_policy_and_refuse_conversion(monkeypatch,
     model.packed, model.attention = packed, attention
 
     def task(param, hf_param, converted):
-        mapping = SimpleNamespace(hf_param=hf_param, megatron_to_hf=lambda _t, _m: converted)
+        specs = tuple(SimpleNamespace(name=name, split_count=1) for name in converted)
+        mapping = SimpleNamespace(hf_param=hf_param, local_hf_param_specs=lambda: specs)
         side = SimpleNamespace(param_weight=param, param_name="p", megatron_module=None, mapping=mapping)
         return SimpleNamespace(adapter_key=hf_param, linear_in_task=side,
                                linear_out_task=SimpleNamespace(param_weight=None))
