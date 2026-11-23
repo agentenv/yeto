@@ -185,3 +185,21 @@ def test_a_preset_that_matches_nothing_names_the_model_linears(tmp_path):
     GPT2Config(n_layer=1, n_embd=32, n_head=2, vocab_size=64, architectures=["GPT2LMHeadModel"]).save_pretrained(path)
     with pytest.raises(ValueError, match=r"--lora-targets attention matches no module of this 'gpt2' model"):
         derive_peft_lora_specs(str(path), None, rank=2, targets="attention")
+
+
+def test_the_export_tool_reads_the_layout_the_checkpoint_records(tmp_path):
+    from yeto.rl.core import canonical_layout_hash
+    from yeto.rl.export import _checkpoint_specs
+
+    path = _config(tmp_path, moe=True)
+    routed = derive_peft_lora_specs(path, None, rank=2, targets="all-linear", routed_experts=True)
+    plain = derive_peft_lora_specs(path, None, rank=2, targets="all-linear")
+    assert routed != plain
+
+    def pick(specs):
+        checkpoint = SimpleNamespace(layout_hash=canonical_layout_hash(specs))
+        return _checkpoint_specs(path, None, checkpoint, rank=2, targets="all-linear", trust_remote_code=False,
+                                 sync_preset="strict-avg", fragments=1, matrix_merge="avg")
+
+    assert pick(routed) == routed  # a Miles island's checkpoint
+    assert pick(plain) == plain  # PEFT's own selection (other backends)
