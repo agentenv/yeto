@@ -451,3 +451,16 @@ def test_the_worker_records_the_stop_reason(runs_dir, monkeypatch):
     assert cli.cmd_worker("r") == RUN_STALLED_EXIT
     meta = runs.load_run("r")
     assert meta["exit_code"] == 6 and meta["stop_reason"] == "breaker:launch.stall"
+
+
+def test_the_launch_cli_prints_each_deprecation_once_and_never_fails():
+    class Resolved:
+        def deprecations(self):
+            return ["launch_flag --old is deprecated: write breakers.launch.x.y"]
+
+    lines: list[str] = []
+    breakers_file.print_deprecations(BASE, Resolved(), log=lines.append)
+    assert lines == ["[yeto] DEPRECATED: launch_flag --old is deprecated: write breakers.launch.x.y"]
+    lines.clear()
+    breakers_file.print_deprecations([*BASE, "--rl-trainer-max-failures", "0"], log=lines.append)
+    assert lines == []  # no launch alias is deprecated yet; an out-of-bounds flag is the launch's own check

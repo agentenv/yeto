@@ -60,6 +60,22 @@ def apply(path: str | Path, argv: Sequence[str], *, log: Callable[[str], None] =
     return list(out.argv if out.argv is not None else argv), resolved
 
 
+def print_deprecations(argv: Sequence[str], resolved: Any = None, *,
+                       log: Callable[[str], None] = print) -> None:
+    """Print once, at the launch CLI, every deprecated legacy knob the launch uses (decision 9).
+    Never fails a launch: without ``--breakers`` the flags are resolved leniently."""
+    try:
+        if resolved is None:
+            from yeto import breakers
+
+            resolved = breakers.resolve(breakers.Sources(argv=list(argv)), layers=APPLIED_LAYERS, strict=False)
+        lines = resolved.deprecations()
+    except Exception:  # noqa: BLE001 - a note, not a check
+        return
+    for line in lines:
+        log(f"[yeto] DEPRECATED: {line}")
+
+
 def save_resolved(run: str, resolved: Any) -> Path | None:
     """``breakers.resolved.json`` in the run directory (for ``show`` and the dashboard)."""
     from .. import runs

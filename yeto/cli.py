@@ -2632,8 +2632,11 @@ def main(argv=None) -> int:
         args = parser.parse_args(["launch", *launch_argv])
         args._breakers_resolved = resolved
     if args.command == "launch":
+        from .launch.breakers_file import print_deprecations
+
         # the launch argv after write-back (the breakers sources of the dry-run rule check)
         args._launch_argv = list(launch_argv if getattr(args, "breakers", None) else argv[1:])
+        print_deprecations(args._launch_argv, getattr(args, "_breakers_resolved", None))
         return cmd_launch(args)
     if args.command == "shape":
         return cmd_shape(args)
