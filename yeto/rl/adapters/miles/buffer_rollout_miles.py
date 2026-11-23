@@ -36,17 +36,13 @@ from .buffer_rollout import (
     is_padding,
     EXTERNAL_CUT_ROUND_ATTR,
     DEFAULT_POLL_S,
-    DEFAULT_WAIT_S,
     INCARNATION_ENV,
-    DEFAULT_MAX_DAMAGED_RUN,
-    MAX_DAMAGED_RUN_ENV,
     MAX_POLICY_AGE_ENV,
     ONE_GROUP_PER_TASK_ENV,
     POLL_ENV,
     SAMPLER_ID_ENV,
     SHARD_ENV,
     TRAINER,
-    WAIT_ENV,
     unidentified_metadata,
     BatchReader,
     DataSlot,
@@ -69,11 +65,12 @@ from .buffer_rollout import (
     register_reader,
     reader_basis_version,
     stamp_merged_release_cuts,
+    unconvertible_round,
     with_reader_edits,
     xhw_round,
 )
 from yeto.rl.engine.data_split import row_runs
-from yeto.rl.engine.xhw_guard import ENV as XHW_ENV
+from yeto.rl.engine import trainer_breakers
 from yeto.rl.engine.task_dispense import DISPENSE_POSITION_KEY
 
 from .proc_state import set_proc_state
@@ -215,9 +212,10 @@ class _BufferRound:
         """``merge_shards``: the trainer merges the sampler shards of an object
         store (``open_buffer(reader=True)``); a convertible node does not (the
         head merges its pool's shards)."""
-        age = os.environ.get(MAX_POLICY_AGE_ENV)
-        if age is None:
+        if os.environ.get(MAX_POLICY_AGE_ENV) is None:
             raise SampleBufferRolloutError(f"{MAX_POLICY_AGE_ENV} is not set")
+        # trainer.sample_wait / policy_age / buffer_damaged (the launcher exports the flags as env)
+        limits = trainer_breakers.reader_limits(trainer_breakers.resolved(names=trainer_breakers.READER))
         self.args = args
         check_xhw_downweight(std_normalized=bool(getattr(args, "grpo_std_normalization", True)), args=args)
         self.groups = int(args.rollout_batch_size)
@@ -230,11 +228,11 @@ class _BufferRound:
         self.relay_pump = maybe_start_relay_pump(buffer)
         self.reader = BatchReader(
             buffer, cursor_log=open_lane_log(buffer),
-            max_policy_age=int(age),
-            wait_s=float(os.environ.get(WAIT_ENV, DEFAULT_WAIT_S)),
+            max_policy_age=limits.max_policy_age,
+            wait_s=limits.wait_s,
             poll_s=float(os.environ.get(POLL_ENV, DEFAULT_POLL_S)),
             group_size=self.samples_per_group,
-            max_damaged_run=int(os.environ.get(MAX_DAMAGED_RUN_ENV) or DEFAULT_MAX_DAMAGED_RUN),
+            max_damaged_run=limits.max_damaged_run,
             one_group_per_task=(os.environ.get(ONE_GROUP_PER_TASK_ENV) or "1").strip().lower()
             not in ("0", "off", "false"))
         register_reader(self.reader)
@@ -263,9 +261,7 @@ class _BufferRound:
                 break
             # every group of this take was malformed: its positions are consumed, take again
         else:
-            raise SampleBufferRolloutError(
-                f"rollout {input.rollout_id}: {MAX_UNCONVERTIBLE_TAKES} takes in a row with no group that "
-                f"converts to Miles samples: {unconvertible[-1]}")
+            raise unconvertible_round(input.rollout_id, MAX_UNCONVERTIBLE_TAKES, unconvertible[-1])
         # where this round's takes left the reader: the driver keeps it for the policy
         # releases (MilesRolloutPool.buffer_read_positions), which then never call into
         # this process while a later take holds its event loop
@@ -275,8 +271,7 @@ class _BufferRound:
             groups = [(position, group) for position, group in groups if position in kept_positions]
         groups, xhw_meta = xhw_round(groups, report, getattr(self.reader, "xhw_actions", {}),
                                      std_normalized=bool(getattr(self.args, "grpo_std_normalization", True)),
-                                     enabled=bool((os.environ.get(XHW_ENV) or "").strip()
-                                                  not in ("", "0", "off", "false")))
+                                     enabled=trainer_breakers.xhw_enabled())
         merged_cuts = getattr(self, "relay_pump", None) is None and merged_release_mode()
         pruned, pruned_groups = 0, []
         if merged_cuts:  # a merged-lane synced trainer: name each group's merged release

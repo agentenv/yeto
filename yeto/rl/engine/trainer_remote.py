@@ -49,7 +49,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from yeto.rl.pool_client import LeaveReason
 
-from . import recovery
+from . import recovery, trainer_breakers
 from .resume import FLAT_MANIFEST, LATEST, STATE_DIR, CheckpointStore
 from .trainer_lifecycle import (
     CUT_TRIGGER_FOR_REASON,
@@ -288,7 +288,9 @@ class IslandTrainerAgent:
                  poll_s: float = DEFAULT_POLL_S, sleep: Callable[[float], None] = time.sleep,
                  release_drain_s: float | None = None) -> None:
         self.driver = driver
-        self.release_drain_s = float(os.environ.get(RELEASE_DRAIN_ENV) or DEFAULT_RELEASE_DRAIN_S) \
+        # trainer.release_drain (YETO_TRAINER_RELEASE_DRAIN_S)
+        self.release_drain_s = trainer_breakers.release_drain_s(
+            trainer_breakers.resolved(names=(trainer_breakers.RELEASE_DRAIN,))) \
             if release_drain_s is None else float(release_drain_s)
         self.lifecycle = DriverLifecycle(lambda _handle: driver, cuts=cuts,
                                          first_incarnation=int(incarnation))
@@ -348,6 +350,9 @@ class IslandTrainerAgent:
             handle.error = RemoteTrainerError(
                 f"policy release upload still running {self.release_drain_s:.0f} s after the stop; "
                 "stopped without it (the samplers keep the previous release)")
+            trainer_breakers.trip(trainer_breakers.RELEASE_DRAIN, self.emit, value=self.release_drain_s,
+                                  limit=self.release_drain_s, detail=str(handle.error),
+                                  legacy_event="RemoteTrainerError")
         elif failed:
             handle.error = failed[0]
 
