@@ -118,6 +118,19 @@ def test_dense_full_parameters_through_decoupled_equal_the_explicit_async_launch
             "full-parameter", "async", "full")
 
 
+def test_layout_auto_through_decoupled_equals_the_explicit_async_launch(capsys):
+    """``--rl-parameter-layout-sha256 auto`` (the syncer binds the layout of the first HELLO)
+    reaches the routed islands as it reaches an explicit full-parameter async launch."""
+    from yeto.rl.engine.selection import PARAMETER_LAYOUT_AUTO
+
+    dense_auto = tuple(PARAMETER_LAYOUT_AUTO if f == LAYOUT else f for f in DENSE)
+    plan = _assert_same_launch((*DECOUPLED, *dense_auto), (*FULL_ASYNC, *dense_auto), TWO, capsys)
+    for k in range(2):
+        island = _island(plan, k)
+        assert (island.sync_preset, island.full_parameter_rounds) == ("full-parameter", "async")
+        assert island.parameter_layout_sha256 == PARAMETER_LAYOUT_AUTO
+
+
 def test_partial_experts_through_decoupled_equal_the_explicit_async_launch(tmp_path, capsys):
     """Kimi-K3.1 synced trainers. Before routing, ``decoupled`` with this form
     passed the launcher but every island refused it at start-up
