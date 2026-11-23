@@ -218,7 +218,7 @@ def test_a_breaker_stopped_island_is_billed_up_to_its_trainer_down(tmp_path, run
         pinned.append(c["total_usd"])
     assert pinned[0] == pinned[1] == pinned[2] and live["cost_usd"] < pinned[0]
     (alert,) = [a for a in r.overview(now=down + 3600)["alerts"] if a["rule"] == "budget"]
-    assert alert["detail"].endswith(", cap reached")
+    assert "reached in about" not in alert["detail"]  # no ETA once nothing burns
 
 
 def test_without_the_up_state_the_registry_finish_pins_it(tmp_path):
