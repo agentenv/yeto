@@ -636,7 +636,7 @@ class AsyncState:
                 "vram": s.get("vram"),
                 "sampling": s.get("sampling"), "provenance": s.get("provenance"),
                 "incarnation": incs[-1]["incarnation"] if incs else s.get("incarnation"), "shard": s.get("shard"),
-                "first_ts": s.get("start"), "last_ts": s.get("last_ts"),
+                "first_ts": s.get("start"), "last_ts": s.get("last_ts"), "last_type": s.get("last_type"),
             }
             comp = compaction_total(rows)
             if comp is None and s.get("drained"):

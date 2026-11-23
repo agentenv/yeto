@@ -140,6 +140,10 @@ def test_rl_page_marks_waiting_round_and_card_time(tmp_path):
     assert "mean of last 8 groups" in out["rew"]
     assert "trainer 0 (no data)" not in out["age"]
     assert "union of their incarnations" in out["cost"]
+    # Async GRPO trainer table: a column no round reports (PPO KL here) is hidden and named
+    hidden = out["atr"].split("hidden: ", 1)[1]
+    assert "PPO KL" in hidden and ">PPO KL</th>" not in out["atr"] and ">policy ages</th>" in out["atr"]
+    assert "samplers do not train" in out["nodes"]
 
 
 RL_SMOKE = r"""
@@ -158,7 +162,7 @@ global.navigator={};global.localStorage={getItem(){return null},setItem(){}};glo
 global.location={hash:"",search:""};
 eval(appM[1]);
 process.stdout.write(JSON.stringify({rew:mk("rfRew").innerHTML,age:mk("rfAge").innerHTML,cost:mk("rCostK").innerHTML,
-  nodes:mk("rNodes").innerHTML}));
+  nodes:mk("rNodes").innerHTML,atr:mk("aTrainer").innerHTML,asp:mk("aSamplers").innerHTML,wall:mk("wall").innerHTML}));
 """
 
 
