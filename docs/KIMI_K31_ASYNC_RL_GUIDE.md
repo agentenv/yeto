@@ -2621,7 +2621,11 @@ Exit codes: `0` no error, `1` an error finding or a conflict, `2` bad input
 `yeto run up` saves the same data as `breakers.resolved.json` in its state
 directory. The dashboard's Breakers panel reads it, together with the
 `rl_breaker` and `rl_breaker_status` events, and shows how close each entry is
-to its limit. `yeto run status` prints a `breakers` summary. Every trip writes
+to its limit. A guard that drops data (`trainer.policy_age`, `sampler.min_samples`,
+the trial cuts, `sampler.dispense_lease`) counts its acts on its card in amber
+and is not listed as a trip; it turns red, with an alert, only when it drops a
+sustained share of the groups (`monitor.dashboard_guard_drops`). `yeto run status`
+prints a `breakers` summary. Every trip writes
 an `rl_breaker` event to the component's tape: the trainer's `YETO_RL_EVENT`
 lines, the sampler and pool tapes, `cost-events.jsonl` for `yeto launch`, and
 `events.jsonl` in the `run up` state directory. A breaker that stops the run

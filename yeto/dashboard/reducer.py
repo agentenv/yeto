@@ -516,6 +516,12 @@ class Reducer:
             self.thresholds["budget_warn_pct"] = round(warn * 100.0, 6)
         return True
 
+    def guard_drop_rates(self) -> dict[str, dict]:
+        """Data-dropping guards' share of the data dropped over their recent rounds
+        (``BreakerState.drop_rates``, window and minimum from the monitor thresholds)."""
+        th = self.thresholds
+        return self.breakers.drop_rates(int(th["guard_drop_window_rounds"]), th["guard_drop_min_groups"])
+
     def breakers_view(self, cost: dict | None = None) -> dict | None:
         """The Breakers panel; ``cost``: the page's cost view, whose estimate is the
         ``run.budget`` gauge when no process reports one."""
@@ -525,7 +531,9 @@ class Reducer:
             gauges["run.budget"] = {"value": total, "limit": cap, "unit": "usd", "ratio": round(total / cap, 4),
                                     "gauge": "level", "detail": "dashboard estimate, not billing data",
                                     "scope": None, "scopes": 1, "ts": None}
-        view = self.breakers.view(gauges)
+        th = self.thresholds
+        view = self.breakers.view(gauges, self.guard_drop_rates(), th["guard_drop_alert_ratio"],
+                                  int(th["guard_drop_min_rounds"]))
         if view is None:
             return None
         usd = finite(self.breakers.section_param("run.budget", "usd"))
