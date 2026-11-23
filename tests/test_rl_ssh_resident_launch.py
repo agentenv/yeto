@@ -45,6 +45,17 @@ def _args(tmp_path, *extra):
     return args
 
 
+def _fleet(args) -> list[tuple[str, str, str | None]]:
+    """(event, island, reason) of the run's fleet.jsonl lifecycle records."""
+    import json
+
+    from yeto import runs
+
+    path = runs.run_dir(args.cluster_prefix) / "fleet.jsonl"
+    recs = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [(r["event"], r["island"], r.get("reason")) for r in recs if r["event"].startswith("island_")]
+
+
 def _finish_when_started(cluster, k=0):
     def finish():
         for _ in range(500):
@@ -99,10 +110,14 @@ def test_an_unconfirmed_release_exits_5_and_keeps_the_head(monkeypatch, tmp_path
     _finish_when_started(cluster)
     assert launcher.run(args) == launcher.TEARDOWN_UNVERIFIED_EXIT == 5
     assert args._teardown_incomplete is True
+    stops = [e for e in _fleet(args) if e[0] == "island_stop"]
+    assert [e[2] for e in stops] == ["SUCCEEDED"]  # the normal end's record only: the unconfirmed release adds none
 
 
 def test_the_stop_flag_stops_the_island_and_exits_9(monkeypatch, tmp_path, cluster):
-    from yeto import runs
+    from yeto import breakers, runs
+
+    breakers.clear_stop_reason()  # a worker is one process per run: no earlier test's trip
 
     record, clock = [], Clock()
     _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
@@ -111,6 +126,9 @@ def test_the_stop_flag_stops_the_island_and_exits_9(monkeypatch, tmp_path, clust
     assert launcher.run(args) == launcher.RUN_STOPPED_EXIT == 9
     assert cluster.count("start", 0) == 3 and cluster.count("kill", 0) == 3
     assert all(cluster.runs[n][0]["state"] == "exited" for n in NAMES)
+    # the stop's teardown closes the island in fleet.jsonl (the page stops billing it)
+    (ready,), (stop,) = ([e for e in _fleet(args) if e[0] == k] for k in ("island_ready", "island_stop"))
+    assert stop == ("island_stop", ready[1], "teardown")
 
 
 def test_a_second_launch_of_the_run_reattaches_to_the_kept_island(monkeypatch, tmp_path, cluster):
@@ -122,6 +140,7 @@ def test_a_second_launch_of_the_run_reattaches_to_the_kept_island(monkeypatch, t
     args.keep = True
     runs.request_stop(args.cluster_prefix)  # the first launcher ends at once, the island is kept
     assert launcher.run(args) == 9 and cluster.count("kill") == 0
+    assert not [e for e in _fleet(args) if e[0] == "island_stop"]  # kept: still running and billed
     runs.stop_flag_path(args.cluster_prefix).unlink()
     again = _args(tmp_path)
     _finish_when_started(cluster)

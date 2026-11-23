@@ -128,16 +128,97 @@ def nc_lease_spans(pool_events) -> dict[str, tuple[float, float | None]]:
     return {k: (v[0], v[1]) for k, v in spans.items()}
 
 
+def _utc_seconds(value) -> float | None:
+    import datetime as _dt
+
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return _dt.datetime.strptime(value.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def run_stop_marks(reducer) -> list[tuple[float, str]]:
+    """When the run itself says its islands stopped, for an island whose ``fleet.jsonl`` has
+    no ``island_stop`` (a breaker stop or ``yeto down`` that killed the launcher before it
+    wrote one, an older tape, a ``kill -9``): the ``run up`` state's ``trainer_down`` /
+    ``trainer_finished`` / ``trainer_exit_seen`` stamps and the end of its last up period
+    (``yeto run down``), and the run registry's ``finished_at`` once the run left RUNNING.
+    A breaker trip alone (``stop_reason``) is not one: the trainer still drains until its
+    ``trainer_down``."""
+    marks: list[tuple[float, str]] = []
+    up = getattr(reducer, "up_state", None)
+    if up:
+        try:
+            state = json.loads(Path(up).expanduser().read_text())
+        except (OSError, ValueError):
+            state = None
+        if isinstance(state, dict):
+            steps = state.get("steps") if isinstance(state.get("steps"), dict) else {}
+            down = _utc_seconds((steps.get("trainer_down") or {}).get("at"))
+            if down is not None:
+                reason = (state.get("breaker") or {}).get("stop_reason") if isinstance(
+                    state.get("breaker"), dict) else None
+                marks.append((down, "run up trainer_down" + (f" ({reason})" if reason else "")))
+            for key in ("trainer_finished", "trainer_exit_seen"):
+                t = _utc_seconds(state.get(key))
+                if t is not None:
+                    marks.append((t, f"run up {key}"))
+            ups = [p for p in state.get("ups") or () if isinstance(p, dict)]
+            if ups and ups[-1].get("end") is not None:
+                t = _utc_seconds(ups[-1]["end"])
+                if t is not None:
+                    marks.append((t, "run up down"))
+    meta_of = getattr(reducer, "run_meta_fresh", None)
+    meta = meta_of() if callable(meta_of) else None
+    if isinstance(meta, dict) and meta.get("state") not in (None, "RUNNING"):
+        t = _utc_seconds(meta.get("finished_at"))
+        if t is not None:
+            marks.append((t, f"run {str(meta['state']).lower()}"))
+    return marks
+
+
+def island_stopped_at(reducer, isl: dict, marks: list[tuple[float, str]]) -> tuple[float, str] | None:
+    """Where the billed wall clock of an island still open in ``fleet.jsonl`` ends: the
+    earliest stop mark after its latest ``island_ready`` (an earlier mark belongs to a
+    launch before a relaunch), or our own stop of it (``stopped_by_us``), and never before
+    its last event (it ran until then). None: still running."""
+    ready = isl.get("last_ready_ts") or isl.get("open_ts")
+    if isl.get("open_ts") is None or ready is None:
+        return None
+    found = [(t, src) for t, src in marks if t >= ready]
+    stop = reducer.operator_stop() if hasattr(reducer, "operator_stop") else None
+    if stop and stop.get("time_unix") is not None and stop["time_unix"] >= ready and reducer.stopped_by_us(isl):
+        found.append((float(stop["time_unix"]), f"operator stop ({stop.get('cause') or 'stop'})"))
+    if not found:
+        return None
+    t, src = min(found)
+    last = isl.get("last_event_ts")
+    return (max(t, last) if last is not None else t), src
+
+
 def cost_view(reducer, now: float) -> dict:
     rows = []
     async_ = getattr(reducer, "async_", None)
     leases = nc_lease_spans(getattr(async_, "pool", None))
     node_rates = nc_node_rates(getattr(async_, "pool", None))
+    marks = run_stop_marks(reducer)
     for iid in reducer.island_ids():
         isl = reducer.islands[iid]
         if isl.get("ready_ts") is None and isl.get("cloud") is None:
             continue  # no fleet data at all for this island
         row = island_cost(isl, reducer.prices, now)
+        ended = island_stopped_at(reducer, isl, marks) if row["running"] and isl.get("ready_ts") is not None else None
+        if ended is not None and ended[0] < now:
+            # fleet.jsonl never closed it, but the run says it stopped: bill up to that stop
+            row["hours"] = (isl.get("closed_s", 0.0) + max(0.0, ended[0] - isl["open_ts"])) / 3600.0
+            row["running"] = False
+            row["cost_usd"] = row["rate_usd_h"] * row["hours"] if row["rate_usd_h"] is not None else None
+            row["billed_until"], row["billed_until_source"] = ended
         if iid in node_rates:  # the provider's own machine-hour rate beats the price table
             row.update(rate_usd_h=node_rates[iid], priced=True, gpu_only=False, rate_source="provider hourly_cost")
             if row["hours"] is not None:

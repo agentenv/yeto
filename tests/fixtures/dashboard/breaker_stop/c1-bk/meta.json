@@ -1,0 +1,10 @@
+{
+ "name": "c1-bk",
+ "state": "DOWN",
+ "exit_code": null,
+ "started_at": 1795466809.513967,
+ "finished_at": 1795467192.337433,
+ "args": {
+  "gpu": "modal:1xh100"
+ }
+}

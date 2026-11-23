@@ -440,3 +440,36 @@ def test_the_release_stall_can_be_turned_off(make_run):
     run = make_run(breakers={"run": {"release_stall": {"enabled": False}}})
     run._objects = lambda: pytest.fail("no read while the breaker is off")
     assert run.release_stall_check(run.clock.t) is None
+
+
+def test_run_budget_trips_at_the_same_point_whatever_the_fleet_tape_says(make_run, monkeypatch):
+    """run.budget reads the up monitor's own spend (trainer_t0 x usd_per_h + pool node hours),
+    never the dashboard's fleet.jsonl estimate: the island_stop a teardown now writes there (or
+    its absence after a breaker stop) moves neither the spend nor the trip point."""
+    import os
+
+    from yeto import runs
+
+    run = make_run(budget={"usd": 50, "wall_h": None})
+    monkeypatch.setattr(up.Run, "node_hours", lambda self, i, now=None: 0.0)  # the trainer alone
+    t0 = run.clock.t
+    run.state.update(trainer_t0=t0, ups=[{"start": t0, "seen": t0, "end": None, "pid": os.getpid()}])
+
+    def trip_points():
+        out = []
+        for minutes in (29.0, 30.5):
+            run.clock.t = t0 + minutes * 60
+            run.state.pop("breaker", None)
+            out.append((round(run.spend_usd(), 4), run.breach(trainer=False)))
+        return out
+
+    before = trip_points()
+    assert before[0][1] is None and before[1][1] == "budget $50.83"
+    fleet = runs.run_dir("r1-trainer") / "fleet.jsonl"
+    fleet.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"island": "r1-trainer-l0-modal", "island_id": 0, "cloud": "modal", "gpu": "B300", "gpus": 16}
+    fleet.write_text(json.dumps({"event": "island_ready", "time_unix": t0, **rec}) + "\n")
+    assert trip_points() == before  # open in the fleet tape (the breaker-stop case)
+    with fleet.open("a") as fh:
+        fh.write(json.dumps({"event": "island_stop", "time_unix": t0 + 60, "reason": "teardown", **rec}) + "\n")
+    assert trip_points() == before  # closed early by a teardown record

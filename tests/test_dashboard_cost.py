@@ -1,9 +1,14 @@
 """Cost view (v7 arithmetic) and the head fleet.jsonl."""
 
+import calendar
 import json
+import shutil
+import time
+from pathlib import Path
 
 import pytest
 
+from yeto.dashboard import sources
 from yeto.dashboard.fleet import FleetLog, island_id_of, meta_from_task
 from yeto.dashboard.reducer import Reducer
 from yeto.dashboard.sources import load_all
@@ -160,3 +165,158 @@ def test_fleet_log_failure_never_breaks_the_controller(tmp_path):
     ctl = make_controller(ops, {"l0": 1})
     ctl.fleet_log = Broken()
     assert list(ctl.run()) == ["l0"]
+
+
+# ------------------------------------------------------------- after a stop the estimate stops
+# Two real runs (redacted) whose run.budget breaker stopped the trainer: `run up` signalled the
+# launcher and `yeto down` stopped the Modal app, so fleet.jsonl kept only island_ready (no
+# island_stop). The page used to bill the island up to "now" for hours after.
+
+STOP_FIXTURES = Path(__file__).parent / "fixtures" / "dashboard" / "breaker_stop"
+
+
+def _utc(stamp: str) -> float:
+    return float(calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")))
+
+
+def _stopped_run(tmp_path, run, *, up=True, meta=True, extra=()):
+    d = tmp_path / run
+    shutil.copytree(STOP_FIXTURES / run, d)
+    if not meta:
+        (d / "meta.json").unlink()
+    with (d / "fleet.jsonl").open("a") as fh:
+        for rec in extra:
+            fh.write(json.dumps(rec) + "\n")
+    r = Reducer(run=run, budget_usd=0.5)
+    if up:
+        r.up_state = str(d / "up" / "state.json")
+    load_all(r, [str(p) for p in sources.discover([str(d)])])
+    state = json.loads((d / "up" / "state.json").read_text())
+    fleet = [json.loads(x) for x in (d / "fleet.jsonl").read_text().splitlines()]
+    ready_ts = next(x["time_unix"] for x in fleet if x["event"] == "island_ready")
+    return r, _utc(state["steps"]["trainer_down"]["at"]), ready_ts
+
+
+def _row(r, now):
+    c = r.overview(now=now)["cost"]
+    (row,) = c["islands"]
+    return c, row
+
+
+@pytest.mark.parametrize("run", ["c1-bk", "c1-bkr"])
+def test_a_breaker_stopped_island_is_billed_up_to_its_trainer_down(tmp_path, run):
+    r, down, ready_ts = _stopped_run(tmp_path, run)
+    _, live = _row(r, down - 30)
+    assert live["running"] and live.get("billed_until") is None
+    pinned = []
+    for later in (60, 25 * 60, 6 * 3600):
+        c, row = _row(r, down + later)
+        assert not row["running"] and row["billed_until"] == down
+        assert row["billed_until_source"] == "run up trainer_down (breaker:run.budget)"
+        assert row["hours"] == pytest.approx((down - ready_ts) / 3600)
+        assert c["burn_usd_h"] == 0 and c["hours_to_cap"] is None
+        pinned.append(c["total_usd"])
+    assert pinned[0] == pinned[1] == pinned[2] and live["cost_usd"] < pinned[0]
+    (alert,) = [a for a in r.overview(now=down + 3600)["alerts"] if a["rule"] == "budget"]
+    assert alert["detail"].endswith(", cap reached")
+
+
+def test_without_the_up_state_the_registry_finish_pins_it(tmp_path):
+    r, down, ready_ts = _stopped_run(tmp_path, "c1-bk", up=False)
+    finished = json.loads((tmp_path / "c1-bk" / "meta.json").read_text())["finished_at"]
+    _, row = _row(r, down + 3600)
+    assert (row["running"], row["billed_until"], row["billed_until_source"]) == (False, finished, "run down")
+    assert row["hours"] == pytest.approx((finished - ready_ts) / 3600)
+
+
+def test_with_nothing_saying_it_stopped_the_island_is_still_billed(tmp_path):
+    r, down, _ = _stopped_run(tmp_path, "c1-bk", up=False, meta=False)
+    _, a = _row(r, down + 60)
+    _, b = _row(r, down + 3600)
+    assert a["running"] and b["running"] and b["cost_usd"] > a["cost_usd"]
+
+
+def test_the_island_stop_a_teardown_writes_closes_it_by_itself(tmp_path):
+    name = "c1-bk-l0-modal"
+    stop = {"event": "island_stop", "island": name, "island_id": 0, "cloud": "modal", "gpu": "H100", "gpus": 1,
+            "cpus": 16, "memory_gib": 128.0, "reason": "teardown"}
+    _, down, ready_ts = _stopped_run(tmp_path / "probe", "c1-bk", up=False, meta=False)
+    r, _, _ = _stopped_run(tmp_path, "c1-bk", up=False, meta=False, extra=[{**stop, "time_unix": down + 5}])
+    _, row = _row(r, down + 3600)
+    assert not row["running"] and row.get("billed_until") is None  # closed by the fleet tape itself
+    assert row["hours"] == pytest.approx((down + 5 - ready_ts) / 3600)
+
+
+def test_a_relaunch_after_the_stop_is_billed_again(tmp_path):
+    name = "c1-bk-l0-modal"
+    _, down, _ = _stopped_run(tmp_path / "probe", "c1-bk")
+    again = {"event": "island_ready", "island": name, "island_id": 0, "cloud": "modal", "gpu": "H100", "gpus": 1,
+             "cpus": 16, "memory_gib": 128.0, "relaunched": True, "time_unix": down + 600}
+    r, _, _ = _stopped_run(tmp_path, "c1-bk", extra=[again])
+    _, a = _row(r, down + 700)
+    _, b = _row(r, down + 3600)
+    assert a["running"] and b["running"] and b["cost_usd"] > a["cost_usd"]
+
+
+def _lifecycle(path):
+    recs = [json.loads(line) for line in path.read_text().splitlines() if line.startswith('{"')]
+    return [(r["event"], r["island"], r.get("reason")) for r in recs if r["event"].startswith("island_")]
+
+
+def test_close_open_islands_stops_only_the_open_ones_once(tmp_path, capsys):
+    from yeto.dashboard.fleet import close_open_islands
+
+    path = tmp_path / "fleet.jsonl"
+    log = FleetLog(path, {"r-l0-modal": {"cloud": "modal", "gpu": "H100", "gpus": 1, "cpus": 16},
+                          "r-l1-modal": {"cloud": "modal", "gpu": "H100", "gpus": 1},
+                          "r-l2-modal": {"cloud": "modal", "gpu": "H100", "gpus": 1}}, clock=lambda: T0)
+    for name in log.meta:
+        log.event("island_ready", name)
+    log.event("island_stop", "r-l1-modal", reason="SUCCEEDED")
+    log.cost_tick()
+    with path.open("a") as fh:
+        fh.write("{not json\n")
+    assert close_open_islands(path, "breaker:run.budget", skip=["r-l2-modal"], clock=lambda: T0 + 60) == ["r-l0-modal"]
+    assert close_open_islands(path, "teardown", clock=lambda: T0 + 90) == ["r-l2-modal"]
+    assert close_open_islands(path, "teardown") == []  # idempotent
+    assert _lifecycle(path)[-3:] == [("island_stop", "r-l1-modal", "SUCCEEDED"),
+                                     ("island_stop", "r-l0-modal", "breaker:run.budget"),
+                                     ("island_stop", "r-l2-modal", "teardown")]
+    stop = json.loads(path.read_text().splitlines()[-2])
+    assert (stop["time_unix"], stop["island_id"], stop["cloud"], stop["cpus"]) == (T0 + 60, 0, "modal", 16)
+    assert close_open_islands(tmp_path / "missing.jsonl", "teardown") == []
+    (tmp_path / "dir.jsonl").mkdir()
+    assert close_open_islands(tmp_path / "dir.jsonl", "teardown") == []  # never raises
+
+
+def test_the_teardown_reason_names_the_breaker_that_stopped_the_run(monkeypatch):
+    from yeto import breakers
+    from yeto.dashboard.fleet import teardown_stop_reason
+
+    breakers.clear_stop_reason()
+    monkeypatch.delenv("YETO_STOP_REASON", raising=False)
+    assert teardown_stop_reason() == "teardown"
+    monkeypatch.setenv("YETO_STOP_REASON", "breaker:run.budget")
+    assert teardown_stop_reason() == "breaker:run.budget"
+    breakers.record_stop_reason("breaker:launch.budget")
+    try:
+        assert teardown_stop_reason() == "breaker:launch.budget"
+    finally:
+        breakers.clear_stop_reason()
+
+
+def test_yeto_down_closes_the_islands_a_killed_launcher_left_open(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from yeto import breakers, cli, runs
+
+    breakers.clear_stop_reason()
+    monkeypatch.delenv("YETO_STOP_REASON", raising=False)
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path)
+    runs.create_run("c1-bk", {"cluster_prefix": "c1-bk"})
+    fleet = runs.run_dir("c1-bk") / "fleet.jsonl"
+    shutil.copy(STOP_FIXTURES / "c1-bk" / "fleet.jsonl", fleet)
+    assert cli.cmd_down(SimpleNamespace(run="c1-bk")) == 0
+    assert _lifecycle(fleet) == [("island_ready", "c1-bk-l0-modal", None),
+                                 ("island_stop", "c1-bk-l0-modal", "teardown")]
+    assert runs.load_run("c1-bk")["state"] == runs.DOWN
