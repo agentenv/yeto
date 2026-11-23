@@ -723,7 +723,9 @@ _SYNC = (
         metavar="HEX",
         help="full-parameter preset only: the full-parameter layout hash reported by the Miles "
         "layout probe (yeto.rl.adapters.miles.models.full_parameter_manifest_probe); "
-        "--fragments must equal that layout's fragment count",
+        "--fragments must equal that layout's fragment count. 'auto' (Miles, opt-in): no frozen "
+        "hash; each island prints and records the layout it observes and the syncer binds the "
+        "first HELLO's layout (another layout is refused there, a resume verifies it)",
     ),
 )
 

@@ -1390,6 +1390,7 @@ class FullParameterSync(RoundCutHooks):
     def start(self, driver: IslandDriver) -> SyncStart:
         self._driver = driver
         self.run(self.pairing.gather_roles(lambda role, stream: stream.initialize(self.groups[role])))
+        self._emit_bound_layouts(driver)
         self._upload_before = self._stream_snapshots()
         outcome = getattr(self.actor, "recovery_outcome", None)
         if outcome is not None:
@@ -1407,6 +1408,17 @@ class FullParameterSync(RoundCutHooks):
         self._publish_outer_version(driver)
         # the local round counter starts at 0 in every process (module doc)
         return SyncStart(state=self.actor.resident_state(0), rollout_id=0)
+
+    def _emit_bound_layouts(self, driver: IslandDriver) -> None:
+        """``--rl-parameter-layout-sha256 auto``: the layout each such role
+        observed, admitted by the syncer at its HELLO (the value to pin later)."""
+
+        from .full_parameter_stream import LAYOUT_BOUND_EVENT, observed_layout_record
+
+        for stream in self.pairing.streams.values():
+            config, adapter = getattr(stream, "config", None), getattr(stream, "adapter", None)
+            if config is not None and adapter is not None and config.expected_layout_hash is None:
+                driver.emit(LAYOUT_BOUND_EVENT, **observed_layout_record(config, adapter.layout))
 
     def _publish_outer_version(self, driver: IslandDriver) -> None:
         """The driver's publish event and the synced-trainer releases read it."""

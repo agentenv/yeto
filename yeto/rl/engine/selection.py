@@ -34,6 +34,11 @@ RL_MATRIX_MERGES = ("avg", "rda")
 # is the strict policy sweep (every island per round, plain average, the
 # control); "async" runs asynchronous sharded fragment rounds.
 FULL_PARAMETER_ROUNDS = ("sweep", "async")
+# ``--rl-parameter-layout-sha256 auto`` (opt-in; Miles): no frozen layout hash.
+# Each island prints and records the layout it observes, and the syncer binds
+# the layout of the first HELLO (another layout is refused at HELLO, a resume
+# verifies the checkpoint's layout). The fragment count stays explicit.
+PARAMETER_LAYOUT_AUTO = "auto"
 # How a multi-island RL run fills the sync options the command leaves unset.
 # "async" (default): asynchronous sharded rounds, quorum 1 with the adaptive
 # grace window, tokens^2/steps island weights, RDA matrix merge, outer

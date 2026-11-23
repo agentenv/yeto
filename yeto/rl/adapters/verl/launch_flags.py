@@ -118,7 +118,9 @@ def full_parameter_problems(args) -> list[str]:
         if getattr(args, dest, False):
             problems.append(f"no {option} (not offered by the verl stream)")
     if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
-        problems.append(f"the verl layout hash and fragment count from `{FULL_PARAMETER_PLAN_COMMAND}`")
+        problems.append(f"the verl layout hash and fragment count from `{FULL_PARAMETER_PLAN_COMMAND}`"
+                        + (" (--rl-parameter-layout-sha256 auto is Miles-only: verl plans its layout "
+                           "offline)" if getattr(args, "rl_parameter_layout_sha256", None) == "auto" else ""))
     ignored = [option for dest, off, option in IGNORED_ON_VERL_FULL_PARAMETER
                if getattr(args, dest, off) not in (off, None)]
     if ignored:
