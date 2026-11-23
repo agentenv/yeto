@@ -197,3 +197,43 @@ def check_eval(args) -> None:
             or getattr(args, "rl_island_sample_role", None)):
         raise ValueError("--rl-eval-interval on verl does not cover sampler / buffer-trainer islands "
                          "(no evaluate hook on that path)")
+
+
+# The sync presets a verl island runs (``island_entry.sync_mode``). ``decoupled`` is
+# the LoRA fragment session (``yeto.rl.engine.bridges.DecoupledSync``), which the verl
+# island does not run; full parameters take the multi-fragment asynchronous session
+# of the full-parameter preset instead.
+ISLAND_SYNC_PRESETS = ("strict-avg", "full-parameter", "dense-full")
+DECOUPLED_LORA_REFUSED = (
+    "--rl-sync-preset decoupled with --tuning lora is not wired on the verl backend yet (the verl island "
+    "has no LoRA fragment session; it lands in a follow-up). For full parameters use --tuning full with "
+    "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async, the multi-fragment asynchronous "
+    "counterpart of decoupled; for LoRA use --rl-sync-preset strict-avg, or --rl-backend miles")
+
+
+def check_sync_preset(args) -> None:
+    """Launcher side: refuse a sync preset the verl island would not run.
+
+    Before this check the island dropped ``--sync-preset`` (``parse_known_args``) and
+    ran strict-avg against a decoupled syncer."""
+    if getattr(args, "rl_single_island_no_sync", False):
+        return
+    preset = getattr(args, "rl_sync_preset", None) or "strict-avg"
+    if preset == "decoupled":
+        raise ValueError(DECOUPLED_LORA_REFUSED)
+    if preset not in ISLAND_SYNC_PRESETS:
+        raise ValueError(f"--rl-sync-preset {preset} is not run by the verl island (it runs "
+                         + ", ".join(ISLAND_SYNC_PRESETS) + ")")
+
+
+def island_sync_preset_problem(preset: str | None, *, parameter_mode: str) -> str | None:
+    """Island side of :func:`check_sync_preset` (an island started without the launcher,
+    or by an older one): why ``--sync-preset`` cannot run here, None when it can.
+    None (the flag absent) keeps the island's own choice."""
+    if preset is None or preset in ISLAND_SYNC_PRESETS:
+        if preset in ("full-parameter", "dense-full") and parameter_mode != "full":
+            return f"--sync-preset {preset} needs --parameter-mode full"
+        return None
+    if preset == "decoupled":
+        return DECOUPLED_LORA_REFUSED
+    return f"--sync-preset {preset} is not run by the verl island (it runs " + ", ".join(ISLAND_SYNC_PRESETS) + ")"

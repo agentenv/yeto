@@ -1100,6 +1100,11 @@ def _prepare_rl_args(
     engine_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_engine_shape", None)
     if callable(engine_check):
         engine_check(args)
+    # A backend that runs only some sync presets refuses the rest (verl: no LoRA
+    # fragments) instead of its island silently running another one.
+    sync_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_sync_preset", None)
+    if callable(sync_check):
+        sync_check(args)
     # A backend whose eval hook covers only some of its paths refuses the rest.
     eval_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_eval", None)
     if callable(eval_check):
