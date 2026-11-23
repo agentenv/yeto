@@ -196,7 +196,10 @@ def test_without_the_flag_other_weights_stop_the_run_as_on_main(
     assert code != 0
     assert "RL strict failure init_digest_mismatch" in log
     assert "every island must load the same base checkpoint (or start with --rl-init-mode upload)" in log
-    # main's strict-failure record, and nothing else on the tape.
+    # main's strict-failure record, and nothing else on the tape but the syncer's
+    # own connection records (keyed by "kind")
+    assert {r["kind"] for r in tape if "kind" in r} <= {"member_connected", "member_disconnected"}, tape
+    tape = [r for r in tape if "kind" not in r]
     assert [(r["event"], r["metric"], sorted(r)) for r in tape] == [
         ("rl_strict_failure", "init_digest_mismatch", ["error", "event", "metric", "value"])], tape
     assert tape[0]["error"].startswith("init digest mismatch: fragment")
