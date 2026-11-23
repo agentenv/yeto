@@ -181,7 +181,9 @@ class CostGuard:
         except OSError as exc:
             self.log(f"[cost-guard] cannot write {self.events_path}: {exc}")
         if event != "cost_tick":
-            self.log(f"[cost-guard] {event}: " + ", ".join(f"{k}={v}" for k, v in fields.items()))
+            level = "WARNING " if fields.get("severity") == "warning" else ""
+            self.log(f"[cost-guard] {level}{event}: "
+                     + ", ".join(f"{k}={v}" for k, v in fields.items() if k != "severity"))
         return rec
 
     # -- one tick ------------------------------------------------------------------
@@ -217,8 +219,14 @@ class CostGuard:
         for i in summary.unpriced:
             if i.open and i.key not in self.unpriced_warned:
                 self.unpriced_warned.add(i.key)
-                self.emit("cost_unpriced", resource=i.key, note=i.note,
-                          detail="this resource is NOT counted against the budget")
+                budget = self.config.budget_usd
+                self.emit("cost_unpriced", severity="warning", resource=i.key, note=i.note,
+                          budget_usd=budget,
+                          detail=("this resource is NOT counted against the budget"
+                                  + (f": --budget-usd {budget:g} does not see its spend"
+                                     if budget is not None else "")
+                                  + "; set usd_per_hour on the resource or a price table "
+                                  "(YETO_DASHBOARD_PRICES)"))
         cfg = self.config
         if cfg.warn_usd is not None and total >= cfg.warn_usd and not self.warned_budget:
             self.warned_budget = True
