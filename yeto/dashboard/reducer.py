@@ -96,6 +96,8 @@ EXTRA_SERIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("logprob_diff", ("train_metrics.train_rollout_logprob_abs_diff", "train/train_rollout_logprob_abs_diff")),
     ("train_step", ("train_step",)),
     ("step_s", ("step_seconds",)),
+    # share of the round's groups whose rewards were all equal (zero advantage; rl_local_round)
+    ("zero_var_ratio", ("zero_variance_group_ratio",)),
 )
 
 
@@ -729,6 +731,7 @@ class Reducer:
             if j < len(pubs):
                 ph["P"] = [pubs[j]["start"], pubs[j]["end"]]
         pts = isl["points"]
+        shares = self.sampler_shares(isl)
         ids = sorted(set(rounds) | {x - 1 for x in pts})
         out = []
         for rid in ids:
@@ -744,11 +747,46 @@ class Reducer:
                 "grad_norm": pt.get("grad_norm"), "kl": pt.get("kl"), "kl_tr": pt.get("kl_tr"),
                 "tis_clip": pt.get("tis_clip"), "resp_derived": bool(pt.get("resp_len_derived")),
                 "ts": pt.get("t"), "lr": pt.get("lr"), "step_s": pt.get("step_s"), "round_s": pt.get("round_s"),
-                "tokens": pt.get("tokens"),
+                "tokens": pt.get("tokens"), "zero_var_ratio": pt.get("zero_var_ratio"),
                 "phases": ph, "dur": {k: round(v[1] - v[0], 1) for k, v in ph.items()},
                 "discarded_trainings": self.discarded_trainings(isl, rid),
+                "by_sampler": shares.get(rid),
             })
         return out
+
+    def sampler_shares(self, isl: dict) -> dict[int, dict]:
+        """Async buffer trainer: per trained round, what each sampler contributed: groups, samples,
+        the policy versions they were generated with, their mean age and mean reward. A sampler
+        names its trajectories ``<incarnation>-r<round>-row<row>-<sample>``, so the incarnation
+        prefix of rl_trajectory_reward.trajectory_id gives the sampler."""
+        owner = {x["incarnation"]: iid for iid, s in self.async_.sampler.items() for x in s.get("incarnations") or ()}
+        if not owner or not isl["trajs"]:
+            return {}
+        acc: dict[int, dict] = {}
+        for t in isl["trajs"]:
+            m = TRAJ_ID_RE.match(str(t.get("id") or ""))
+            sid = owner.get(m.group(1)) if m else None
+            if sid is None or t.get("rid") is None:
+                continue
+            a = acc.setdefault(t["rid"], {}).setdefault(sid, {"groups": set(), "samples": 0, "versions": set(),
+                                                             "rewards": [], "ages": []})
+            a["samples"] += 1
+            if t.get("group") is not None:
+                a["groups"].add(t["group"])
+            # generated with: the version segments of the trajectory ([version, from, to] per segment);
+            # rl_trajectory_reward.policy_version is the trainer's own version
+            gen = [x[0] if isinstance(x, list) and x else x for x in (t.get("versions") or ())]
+            gen = [v for v in gen if isinstance(v, int) and not isinstance(v, bool)]
+            if gen:
+                a["versions"].update(gen)
+                a["ages"].append(t["rid"] - min(gen))
+            if t.get("reward") is not None:
+                a["rewards"].append(t["reward"])
+        return {rid: {sid: {"groups": len(a["groups"]) or None, "samples": a["samples"],
+                            "versions": sorted(a["versions"]),
+                            "age_mean": round(sum(a["ages"]) / len(a["ages"]), 3) if a["ages"] else None,
+                            "reward_mean": round(sum(a["rewards"]) / len(a["rewards"]), 4) if a["rewards"] else None}
+                      for sid, a in by.items()} for rid, by in acc.items()}
 
     @staticmethod
     def discarded_trainings(isl: dict, rid: int) -> int:
@@ -1609,6 +1647,9 @@ _SUMMARY_KEYS = ("phase", "rollout_id", "local_round_id", "policy_version", "rew
                  "grad_norm", "result", "global_step", "fragment_id", "error")
 
 
+TRAJ_ID_RE = re.compile(r"^(.+)-r\d+-row\d+-\d+$")  # <sampler incarnation>-r<round>-row<row>-<sample>
+
+
 def _traj(r: dict) -> dict:
     """Compact per-trajectory record. Missing = None."""
     out = {"rid": r.get("rollout_id") if isinstance(r.get("rollout_id"), int) else None,
@@ -1623,6 +1664,8 @@ def _traj(r: dict) -> dict:
     out["started_rid"] = sr if isinstance(sr, int) and not isinstance(sr, bool) else None
     pv = r.get("policy_versions")
     out["versions"] = pv if isinstance(pv, list) and pv else None
+    gi = r.get("group_index")
+    out["group"] = gi if isinstance(gi, int) and not isinstance(gi, bool) else None
     return out
 
 

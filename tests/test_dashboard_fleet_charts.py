@@ -160,3 +160,63 @@ eval(appM[1]);
 process.stdout.write(JSON.stringify({rew:mk("rfRew").innerHTML,age:mk("rfAge").innerHTML,cost:mk("rCostK").innerHTML,
   nodes:mk("rNodes").innerHTML}));
 """
+
+
+def _trainer_round(rid: int, t: float, *, ages: dict, zvr: float, sampler_inc: str) -> list[tuple[str, dict]]:
+    src = "store:trainer/l0-modal-20261123T0000Z"
+    recs = [{"event": "rl_round_trained", "island_id": 0, "rollout_id": rid, "time_unix": t, "trained_groups": 8,
+             "trained_samples": 16, "reward_mean": 0.5, "policy_age_groups": ages, "policy_age_mean": 1.0},
+            {"event": "rl_local_round", "island_id": 0, "local_round_id": rid + 1, "time_unix": t + 1,
+             "zero_variance_group_ratio": zvr}]
+    for g in range(2):  # two of the round's groups came from the sampler, generated with v(rid-1)
+        recs.append({"event": "rl_trajectory_reward", "island_id": 0, "rollout_id": rid, "time_unix": t,
+                     "trajectory_id": f"{sampler_inc}-r0-row{g}-0", "group_index": g, "reward": float(g),
+                     "policy_version": rid, "policy_versions": [[rid - 1, 0, 100]]})
+    return [(src, x) for x in recs]
+
+
+def test_trainer_round_ages_zero_variance_and_sampler_share():
+    recs = [("store:s0/a-new", x) for x in _sampler_tape("a-new", T0, 3, 0)]
+    recs += _trainer_round(4, T0 + 400, ages={"1": 6, "2": 2}, zvr=0.625, sampler_inc="a-new")
+    r = Reducer(run="r")
+    for i, (src, rec) in enumerate(recs):
+        r.feed(rec, source=src, offset=i)
+    v = r.page_view()
+    t = v["async"]["trainers"]["0"]
+    assert t["age_hist"] == {"1": 6, "2": 2}  # rl_round_trained.policy_age_groups, not the empty read histogram
+    (row,) = [x for x in v["islands"]["0"]["rounds"] if x["round"] == 4]
+    assert row["zero_var_ratio"] == 0.625
+    assert row["by_sampler"] == {"s0": {"groups": 2, "samples": 2, "versions": [3], "age_mean": 1.0, "reward_mean": 0.5}}
+    # samplers keep their own round numbers: the synchronous "missed rounds" alert never names them
+    assert not [a for a in r.overview(now=T0 + 500)["alerts"] if "missed" in a["rule"]]
+
+
+def test_backlog_cap_is_the_newest_starts():
+    new = _sampler_tape("a-new", T0 + 1000, 1, 3)
+    new[0]["max_backlog_groups"] = 64
+    r = Reducer(run="r")
+    for i, rec in enumerate(new):
+        r.feed(rec, source="store:s0/a-new", offset=i)
+    for i, rec in enumerate(_sampler_tape("b-old", T0, 1, 0)):  # cap 16, read later
+        r.feed(rec, source="store:s0/b-old", offset=i)
+    assert r.page_view()["async"]["samplers"]["s0"]["max_backlog_groups"] == 64
+
+
+def test_many_samplers_draw_one_aggregate_with_a_toggle(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    recs = []
+    for n in range(4):
+        tape = _sampler_tape(f"i{n}", T0 + 10 * n, 4, 0)
+        for x in tape:
+            x["sampler_id"] = f"s{n}"
+            if x["event"] == "rl_sampler_round":
+                x["reward_mean"], x["generate_s"] = 0.25 * n, 30.0 + n
+        recs += [(f"store:s{n}/i{n}", x) for x in tape]
+    page = _rl_view_page(tmp_path, recs, T0 + 600)
+    res = subprocess.run([node, "-e", RL_SMOKE, str(page)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert "all 4 samplers (mean of last 32 groups)" in out["rew"] and "show each sampler (4)" in out["rew"]
+    assert "sampler s1 (mean of last 8 groups)" not in out["rew"]  # each sampler only behind the toggle

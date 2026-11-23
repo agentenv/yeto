@@ -341,12 +341,14 @@ class AsyncState:
                 cur["last_ts"] = ts if cur["last_ts"] is None else max(cur["last_ts"], ts)
         if ev == "rl_sampler_join":
             s["shard"] = r.get("sampler")
-        if ev == "rl_sampler_start":
+        # the newest engine start sets the sampler's settings: tapes of older incarnations may be read later
+        if ev == "rl_sampler_start" and (ts is None or s.get("start") is None or ts >= s["start"]):
             s["start"] = ts
             s["max_backlog_groups"] = r.get("max_backlog_groups")
+            s["cap_ts"] = ts
             s["sampling"] = {k: (r.get("sampling") or {}).get(k) for k in ("n", "max_tokens", "temperature")}
             s["provenance"] = {k: (r.get("provenance") or {}).get(k)
-                               for k in ("card_model", "engine", "precision", "topology")}
+                               for k in ("card_model", "engine", "precision", "topology", "device_family")}
         if ev == "rl_sampler_round" and s["first_round_ts"] is None:
             s["first_round_ts"] = ts if ts is not None else 0.0
         rinc = own if own is not None else s.get("incarnation")
@@ -421,8 +423,9 @@ class AsyncState:
             if ts is not None and b is not None:
                 s["backlog"].append([ts, b, ev != "rl_sampler_admitted"])
                 del s["backlog"][:-2000]
-            if r.get("max_backlog_groups") is not None:
+            if r.get("max_backlog_groups") is not None and (ts is None or s.get("cap_ts") is None or ts >= s["cap_ts"]):
                 s["max_backlog_groups"] = r.get("max_backlog_groups")
+                s["cap_ts"] = ts
         if ev in SAMPLER_END_EVENTS and rinc == s.get("incarnation"):
             s["ended"] = True  # an older incarnation's stop read late does not end the newest one
         if ev == "rl_sampler_waiting":
@@ -472,6 +475,11 @@ class AsyncState:
             row.update({"ts": ts, "trained_groups": r.get("trained_groups"),
                         "trained_samples": r.get("trained_samples"),
                         "policy_age_mean": r.get("policy_age_mean"), "policy_age_max": r.get("policy_age_max")})
+            pag = r.get("policy_age_groups")
+            if isinstance(pag, dict) and pag:  # the trained groups' ages ({age: groups}); rl_group_policies
+                # names the groups read, which a filter may still drop, so the trained ones win
+                row["ages"] = {str(k): v for k, v in sorted(pag.items(), key=lambda kv: _age_key(kv[0]))}
+                row["ages_trained"] = True
             comp = compaction_row(r.get("compaction"))
             if comp is not None:  # absent without compaction (old row keys)
                 row["compaction"] = comp
@@ -488,7 +496,8 @@ class AsyncState:
         elif ev == "rl_group_policies":
             ages = r.get("ages") if isinstance(r.get("ages"), dict) else {}
             row["groups_read"] = len(r["groups"]) if isinstance(r.get("groups"), list) else None
-            row["ages"] = {str(k): v for k, v in sorted(ages.items(), key=lambda kv: _age_key(kv[0]))}
+            if not row.get("ages_trained"):
+                row["ages"] = {str(k): v for k, v in sorted(ages.items(), key=lambda kv: _age_key(kv[0]))}
             row["merged_version"] = r.get("merged_version")
         elif ev == "offpolicy_gate":
             c = r.get("counts") if isinstance(r.get("counts"), dict) else {}

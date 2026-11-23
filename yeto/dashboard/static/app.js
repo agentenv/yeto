@@ -75,13 +75,19 @@ function kpis(){
   var al=O.alerts||[];$("alertBox").hidden=!al.length;
   $("alertBox").innerHTML="<h2>Alerts</h2>"+al.map(function(a){return '<div><span class="st '+(a.sev===0?"bd":a.sev===1?"wn":"mu")+'"><i></i>'+["critical","warning","info"][a.sev]+'</span> <b>'+esc(a.title)+'</b> <span class="note">'+esc(a.detail)+'</span></div>'}).join("");
 }
+/* a sampler without a fleet record: its platform from rl_sampler_start provenance (engine on device
+   family; the cloud is not on its tape) and its reward from its last round with groups */
+function spOf(c){return c&&c.role==="sampler"?(((V.async||{}).samplers||{})[c.id]||null):null}
+function platform(c){if(c.cloud)return c.cloud;var p=(spOf(c)||{}).provenance||{};
+  return p.engine||p.device_family?[p.engine,p.device_family].filter(Boolean).join(" on ")+" (cloud not on the tape)":"n/a"}
+function islReward(c){if(c.reward!=null)return c.reward;var sp=spOf(c);return sp?sp.reward_mean_last:null}
 function wall(){
   var multi=kind()==="multi_island";$("islandWall").hidden=!multi;$("navWall").style.display=multi?"":"none";
   $("syncerBox").hidden=!(multi&&V.usage.syncer);
   if(multi)$("wall").innerHTML=(O.islands||[]).map(function(c){return '<div class="card'+(c.id===SEL?" sel":"")+'" data-id="'+esc(c.id)+'" tabindex="0">'+
     '<div style="display:flex;justify-content:space-between"><b><i class="sw" style="background:'+islColor(c.id)+'"></i>'+islName(c)+'</b>'+negBadge(c)+stBadge(c.status,c)+'</div>'+
-    '<div class="note mono">'+esc(c.cloud||"n/a")+' · '+esc(c.gpu||"")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</div>'+
-    '<div class="kv"><span>policy version</span><span class="num">'+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span><span>reward</span><span class="num">'+f(c.reward)+'</span><span>phase</span><span class="num">'+esc(c.phase||(c.role==="sampler"?"sampling":"n/a"))+'</span><span>role</span><span class="num">'+esc(c.role||"n/a")+'</span></div></div>'}).join("");
+    '<div class="note mono">'+esc(platform(c))+' · '+esc(c.gpu||"")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</div>'+
+    '<div class="kv"><span>policy version</span><span class="num">'+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span><span>reward</span><span class="num">'+f(islReward(c))+'</span><span>phase</span><span class="num">'+esc(c.phase||(c.role==="sampler"?"sampling":"n/a"))+'</span><span>role</span><span class="num">'+esc(c.role||"n/a")+'</span></div></div>'}).join("");
   Array.prototype.forEach.call(document.querySelectorAll(".card"),function(d){d.onclick=d.onkeydown=function(e){if(e.type==="keydown"&&e.key!=="Enter")return;SEL=d.dataset.id;cur=null;render()}});
   if(multi&&V.usage.syncer){var rows=(V.rounds_syncer||[]).slice(-30).reverse();
     $("syncer").innerHTML='<table class="c"><tr><th>global round</th><th>expected/responded</th><th>missed</th><th>quorum ms</th><th>merge ms</th><th>resends</th></tr>'+rows.map(function(r){
@@ -169,8 +175,16 @@ function highlight(){
 function row(k,v){return '<div class="row"><span>'+k+'</span><span>'+v+'</span></div>'}
 function tipHtml(r){
   var h='<div class="h">Round '+r.round+' · trained on policy v'+r.policy_version+' → published '+(r.published_version==null?"n/a":"v"+r.published_version)+'</div>';
-  if(kind()==="multi_island"){return h+(O.islands||[]).map(function(c){var rr=((V.islands[c.id]||{}).rounds||[]).find(function(x){return x.round===r.round});
-    return row('<i class="sw" style="background:'+islColor(c.id)+'"></i>Island '+esc(c.id),rr?f(rr.reward)+" · truncated "+pct(rr.trunc):"missed")}).join("")}
+  // async buffer mode: samplers keep their own round numbers and never take part in a trainer round,
+  // so a sampler row says what the trainer took from it this round (no "missed"); nothing taken, no row
+  var asy=Object.keys((V.async||{}).samplers||{}).length>0;
+  if(kind()==="multi_island"){return h+(O.islands||[]).map(function(c){var sw='<i class="sw" style="background:'+islColor(c.id)+'"></i>';
+    if(asy&&c.role==="sampler"){var b=(r.by_sampler||{})[c.id];if(!b)return "";var vs=b.versions||[];
+      return row(sw+"sampler "+esc(c.id),(b.groups!=null?f(b.groups,0)+" groups":f(b.samples,0)+" samples")+(vs.length?" · v"+vs[0]+(vs.length>1?"–v"+vs[vs.length-1]:""):"")+
+        (fin(b.age_mean)?" (age "+f(b.age_mean,1)+")":"")+(fin(b.reward_mean)?" · reward "+f(b.reward_mean,3):""))}
+    var rr=((V.islands[c.id]||{}).rounds||[]).find(function(x){return x.round===r.round});
+    if(!rr&&asy)return "";
+    return row(sw+"Island "+esc(c.id),rr?f(rr.reward)+" · truncated "+pct(rr.trunc):"missed")}).join("")}
   return h+row("reward mean",f(r.reward))+row("train-rollout KL / TIS clipfrac",f(r.kl_tr,5)+" / "+f(r.tis_clip,4))+row("p10 / p50 / p90",f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2))+row("truncation",pct(r.trunc))+
     row("logprob diff",f(r.logprob_diff,4))+row("response length mean / p95",f(r.resp_mean,0)+" / "+f(r.resp_p95,0))+row("grad_norm",f(r.grad_norm,4))+
     PH.map(function(p){return row('<i class="sw" style="background:var(--'+p[0]+')"></i>'+p[1],fin(r.dur[p[0]])?f(r.dur[p[0]],0)+" s":"n/a")}).join("")}
@@ -312,15 +326,17 @@ function chartNodes(){
   var W=boxW(box,560),H=210,m={l:44,r:14,t:8,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"GPU memory per node"},box),g=el("g",{"class":"grid"},s);
   [0,.5,1].forEach(function(q){el("line",{x1:m.l,x2:W-m.r,y1:sy(vm*q),y2:sy(vm*q)},g);el("text",{x:m.l-6,y:sy(vm*q)+4,"text-anchor":"end"},s).textContent=(vm*q).toFixed(0)});
-  ks.forEach(function(k){el("path",{d:"M"+ns[k].map(function(p){return sx(p[0])+","+sy(p[1])}).join("L"),fill:"none",stroke:col(k),"stroke-width":2},s)});
+  // no line across a gap (3x the usual spacing): an island down or restarted draws two pieces, not a diagonal
+  ks.forEach(function(k){var P=ns[k].slice().sort(function(a,b){return a[0]-b[0]});
+    el("path",{d:YetoExt.segments(P,P).map(function(G){return "M"+G.map(function(p){return sx(p[0])+","+sy(p[1])}).join("L")}).join(""),fill:"none",stroke:col(k),"stroke-width":2},s)});
   [t0,(t0+t1)/2,t1].forEach(function(t){el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)});
   var hasU=ks.some(function(k){return ns[k].some(function(p){return fin(p[2])})});
-  $("nodesNote").textContent="Source: per-node host probe."+(hasU?"":" GPU utilization: not sampled in this tape (older probes record memory only).");
+  $("nodesNote").textContent="Source: per-node host probe or the island's NVML samples (rl_resource_sample)."+(hasU?"":" GPU utilization: not sampled in this tape (older probes record memory only).");
 }
 function islands(){
   $("islands").innerHTML=(O.islands||[]).map(function(c){var ex=V.islands[c.id]||{},re=ex.ray_embed||{};
     return '<details class="isl"'+(c.id===SEL?" open":"")+'><summary><span><b>'+islName(c)+'</b> <span class="note">'+esc(c.name||"")+'</span></span>'+negBadge(c)+stBadge(c.status,c)+'</summary>'+
-    '<div class="kv"><span>cloud / GPU</span><span class="num">'+esc(c.cloud||"n/a")+' · '+esc(c.gpu||"n/a")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</span>'+
+    '<div class="kv"><span>cloud / GPU</span><span class="num">'+esc(platform(c))+' · '+esc(c.gpu||"n/a")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</span>'+
     '<span>phase / policy</span><span class="num">'+esc(c.phase||"n/a")+' · '+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span>'+
     '<span>last event</span><span class="num">'+(fin(c.last_event_age_s)?f(c.last_event_age_s,0)+" s ago":"n/a")+'</span>'+
     (c.starting?'<span>startup elapsed</span><span class="num">'+hm(c.startup_s)+'</span>':"")+
