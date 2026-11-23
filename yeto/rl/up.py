@@ -750,6 +750,11 @@ class Run:
         for line in self.breakers.deprecations():
             _log(f"preflight: deprecated: {line}")
         self.log_release_stall()
+        problem = self.env_file_problem()
+        if problem is not None:
+            _log(f"preflight: {problem}")
+            self.mark("preflight", ok=False)
+            return False
         problem = self.rules_problem()
         if problem is not None:
             _log(f"preflight: {problem}")
@@ -1651,6 +1656,21 @@ class Run:
             return None  # the pool dry-run reports an unreadable pool config
         found = up_consistency.problems(str(self.cfg["store"]), [str(a) for a in self.cfg["trainer"]["argv"]],
                                         pool_cfg, data_path=self.pools[pool].data_path)
+        return "; ".join(found) if found else None
+
+    def env_file_problem(self) -> str | None:
+        """A pool's ``agentic_env_file`` the samplers could not start with, or would read
+        differently from the breaker views (:func:`yeto.breakers.rules_facts.env_file_problems`:
+        unreadable, a line docker refuses, a quoted value a breaker reads); None when all are fine."""
+        from yeto.breakers.rules_facts import env_file_problems  # noqa: PLC0415
+
+        found = []
+        for ref in self.pools:
+            try:
+                cfg = ref.load()
+            except (OSError, ValueError):
+                continue  # the pool dry-run reports an unreadable pool config
+            found += [p + (f" (pool {ref.name})" if len(self.pools) > 1 else "") for p in env_file_problems(cfg)]
         return "; ".join(found) if found else None
 
     def rules_problem(self) -> str | None:
