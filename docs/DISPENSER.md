@@ -64,7 +64,7 @@ The dispenser lives in the `prompts.dispense` section of the sampler spec:
 | `backend` | `"store"` selects this dispenser. | `tcp` |
 | `namespace` | Path of the ledger under the run's store. Use **the same value on every sampler** of the run. Give a new run a new namespace. | `task-dispense` |
 | `store` | Another store root for the ledger. | the spec's `buffer_root` / `store` |
-| `lease_s` | Claim lease. The holder renews it every `lease_s / 3`, so a trajectory may run far longer than the lease. A claim counts as expired only after the holder stops renewing for `lease_s`. | 900 |
+| `lease_s` | Claim lease. The holder renews it every `lease_s / 3`, so a trajectory may run far longer than the lease. A claim counts as expired only after the holder stops renewing for `lease_s`. The lease does **not** limit trial time; it only sets how long a dead sampler's tasks wait before another sampler takes them. Keep 900. A value above 1800 s gets a warning (dry run and sampler start). See [Changing the lease](#changing-the-lease). | 900 |
 | `max_redo` | How many `infra` or `expired` endings a task may have before it is marked `exhausted`. Releases (fenced, restarted, shut down) do not count. | 2 |
 | `passes`, `seed` | Number of passes over the data. Pass 0 is in file order; each later pass is reshuffled by `seed`. | 1, 0 |
 | `holdout_ids` / `holdout` | Task ids that must never be trained on, given inline or as a file path on the sampler. A training row that has one of these ids makes the sampler refuse to start. | none |
@@ -75,6 +75,24 @@ The dispenser lives in the `prompts.dispense` section of the sampler spec:
 | `full_scan` | `true`: every scan lists the whole ledger. By default a scan lists only the tasks that are not settled yet. | false |
 
 A single task can override the lease through `metadata.dispense_lease_s` in its row.
+
+### Changing the lease
+
+`lease_s` is a runtime setting. It is not part of the plan:
+
+- Each sampler renews by the `lease_s` of its own spec. `plan.json` records the first sampler's
+  value for reference only. A sampler whose `lease_s` differs from the plan prints both values at
+  start; `rl_dispense_lease` on its tape has `lease_s` and `plan_lease_s`.
+- To change it, edit `lease_s` in the spec (or `--dispense-lease-s`) and restart the samplers. The
+  new value applies from their next claim. The plan, its fingerprint and the task order do not
+  change.
+- Each claim records its holder's lease (`lease_s` in the claim and in `status --json`).
+  Another sampler ends a claim as `expired` only when **both** its own lease and the holder's
+  recorded lease have run out. So samplers with different leases are safe: a short-lease sampler
+  never takes a task from a live long-lease holder, and a long-lease sampler only waits longer.
+- A row's `metadata.dispense_lease_s` still overrides the lease for that task, on every sampler.
+- Samplers of older yeto versions judge every claim by the plan's lease. If one may still run,
+  raise `lease_s` above the plan's value on all samplers at the same time.
 
 The NC sampler launcher sets the section with flags. Pass them identically to every sampler:
 
@@ -117,6 +135,12 @@ Each task (a "slot" of the global sequence) moves through these states:
 - **Mix and labels.** The weighted interleave of streams is fixed in the plan, so the mix holds
   over the whole run, whichever sampler takes which task. A sampler limited to some labels takes
   only those tasks and leaves the rest to the other samplers.
+- **One task at a time where possible.** With `passes` > 1, the passes of one task can meet at a
+  pass boundary (later passes are reshuffled), and a redo can meet a later pass. When a sampler
+  claims, it takes the tasks that have no attempt in flight first (on any sampler). A task that is
+  already running is taken only when nothing else is left, so no task waits for long and the last
+  tasks of a run may still run twice at once. This changes only the claim order: the plan, its
+  fingerprint and the mix stay the same.
 
 ## Checking status
 
@@ -138,6 +162,7 @@ The command prints a totals line and one row per task. The totals count tasks in
 | `holder` | Sampler of the latest attempt. |
 | `elapsed_s` | Duration of the settling attempt. |
 | `beat_age_s` | Time since the last renewal. |
+| `lease_s` | The holder's lease for this claim (`--json` only). A claim with none (older yeto) uses the plan's. |
 | `failure_reasons` | One entry per failed attempt, as `attempt:kind:reason`. |
 
 Options:
@@ -163,6 +188,7 @@ Samplers also record dispenser events on their event tape:
 | `rl_dispense_recover` | The sampler restarted and recovered its earlier claims. |
 | `rl_dispense_written` | Per-round summary. |
 | `rl_dispense_close` | The sampler shut down. |
+| `rl_dispense_lease` | At start: the sampler's `lease_s`, `renew_s`, `plan_lease_s` when it differs, and the long-lease `warning`. |
 
 ## Limits
 

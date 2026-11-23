@@ -560,6 +560,20 @@ Key fields (the complete list is in
 `pool --dry-run` (part of preflight) refuses unknown keys, so a typo is
 reported before anything is ordered.
 
+**Dispenser lease (`sampler.dispense.lease_s`).** Keep the default, 900 s.
+
+- The lease does not limit how long a trial runs. The holder renews it every
+  `lease_s / 3`.
+- It only sets how long the tasks of a dead sampler wait before another
+  sampler takes them.
+- Above 1800 s, `pool --dry-run` and the sampler start print a warning.
+- To change it, edit `lease_s` and restart the samplers. Each sampler uses its
+  own value. The value in `plan.json` is kept for reference only.
+- Samplers with different leases are safe. A claim expires only when both the
+  holder's lease and the checking sampler's lease have run out.
+
+Details: [DISPENSER.md, Changing the lease](DISPENSER.md#changing-the-lease).
+
 ### 3.4 The sampler spec
 
 Start from `examples/k31/sampler-spec.nc-mi355x-vllm.json`. Placeholders such

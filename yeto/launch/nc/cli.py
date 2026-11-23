@@ -864,6 +864,13 @@ def pool_config_warnings(cfg: dict[str, Any]) -> list[str]:
         notes.append("sampler spec: incarnation_lease is false: a fenced or replaced node's task claims are "
                      "not released at once (the other samplers wait out the dispense lease, lease_s) and its "
                      "sampler is not fenced; remove the key (default on) for an elastic pool")
+    dispense = pool_dispense(cfg)
+    if dispense is not None:
+        from yeto.rl.engine.store_dispense import lease_warning  # noqa: PLC0415
+
+        warning = lease_warning(dispense.get("lease_s"))
+        if warning is not None:
+            notes.append(warning)
     return notes
 
 

@@ -398,8 +398,10 @@ def test_events_reach_the_tape(tmp_path):
     spots = _slots(s(0))
     s.written(0, spots[:1], requeue=spots[1:])
     names = [e for e, _ in events]
-    assert names == ["rl_dispense_claim", "rl_dispense_claim", "rl_dispense_settle", "rl_dispense_requeue"]
-    assert events[2][1]["state"] == "trained" and events[2][1]["backend"] == "store"
+    assert names == ["rl_dispense_lease", "rl_dispense_claim", "rl_dispense_claim", "rl_dispense_settle",
+                     "rl_dispense_requeue"]
+    assert events[0][1]["lease_s"] == 90 and "plan_lease_s" not in events[0][1]
+    assert events[3][1]["state"] == "trained" and events[3][1]["backend"] == "store"
 
 
 def test_build_prompts_wires_the_store_backend(tmp_path):
@@ -735,3 +737,164 @@ def test_a_new_incarnation_of_a_retired_holder_is_not_fenced_by_the_old_marker(t
     sd.retire(store, "run/dispense", "s0")  # no incarnation given: the ones holding claims
     new = _open(path, store, inc="i1", groups=2)
     assert new.poll(2) == ("items", [0, 1])
+
+
+# -- lease_s is the spec's, not the plan's; expiry by the holder's recorded lease
+
+
+def _claim_body(store, slot, attempt=0):
+    return json.loads(store.data[f"run/dispense/claims/{slot:012d}/{attempt:04d}"][0])
+
+
+def test_the_spec_lease_wins_over_the_plan_lease(tmp_path):
+    """A restart with a new lease_s takes effect: the plan's lease is kept for reference."""
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(2))
+    _open(path, store, holder="first", config={"lease_s": 7200})
+    assert json.loads(store.data["run/dispense/plan.json"][0])["lease_s"] == 7200
+    events = []
+    worker = _open(path, store, holder="w", groups=1, config={"lease_s": 1200},
+                   emit=lambda e, **f: events.append((e, f)))
+    assert worker.ledger.lease_s == 1200 and worker.ledger.plan_lease_s == 7200
+    assert events[0][0] == sd.LEASE_EVENT
+    assert events[0][1]["lease_s"] == 1200 and events[0][1]["plan_lease_s"] == 7200
+    assert "warning" not in events[0][1]
+    assert _slots(worker(0)) == [0]
+    assert worker.renew_period() == pytest.approx(400.0)  # lease / 3 of the spec's lease
+    assert _claim_body(store, 0)["lease_s"] == 1200
+    # the worker dies: a scanner of the same spec takes the slot back after 1200 s, not 7200 s
+    scanner = _open(path, store, holder="s", groups=2, config={"lease_s": 1200})
+    store.now += 1199
+    assert scanner._claim(2)[0] == [1]
+    store.now += 2
+    got, _ended = scanner._claim(2)
+    assert got == [0]
+    assert "run/dispense/fail/000000000000/0000.expired" in store.data
+
+
+def test_a_scanner_with_a_shorter_lease_never_expires_a_live_holder_with_a_longer_one(tmp_path):
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(1))
+    holder = _open(path, store, holder="long", groups=1, config={"lease_s": 3600})
+    scanner = _open(path, store, holder="short", groups=1, config={"lease_s": 90})
+    assert _slots(holder(0)) == [0]
+    for _ in range(6):  # renewed every 1200 s; the scanner's own lease is 90 s
+        store.now += 1100
+        assert scanner._claim(1)[0] == []
+        assert holder.renew() == 1
+    assert holder.still_holds(0)
+    # the holder dies: expired once its own lease has run out
+    store.now += 3599
+    assert scanner._claim(1)[0] == []
+    store.now += 2
+    assert scanner._claim(1)[0] == [0]
+    assert "run/dispense/fail/000000000000/0000.expired" in store.data
+
+
+def test_a_scanner_with_a_longer_lease_expires_after_its_own_lease(tmp_path):
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(1))
+    dead = _open(path, store, holder="dead", groups=1, config={"lease_s": 90})
+    scanner = _open(path, store, holder="slow", groups=1, config={"lease_s": 300})
+    assert _slots(dead(0)) == [0]
+    store.now += 120  # past the holder's 90 s, inside the scanner's 300 s
+    assert scanner._claim(1)[0] == []
+    store.now += 181
+    assert scanner._claim(1)[0] == [0]
+
+
+def test_a_claim_of_older_code_is_judged_by_the_plan_lease(tmp_path):
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(1))
+    _open(path, store, holder="first", config={"lease_s": 600})
+    # older code: the claim body records no lease, the holder renews by the plan's 600 s
+    store.create("run/dispense/claims/000000000000/0000",
+                 json.dumps({"holder": "old", "incarnation": "i", "attempt": 0}).encode())
+    scanner = _open(path, store, holder="new", groups=1, config={"lease_s": 90})
+    store.now += 300
+    assert scanner._claim(1)[0] == []
+    store.now += 301
+    assert scanner._claim(1)[0] == [0]
+
+
+def test_the_row_lease_is_recorded_in_the_claim_and_still_overrides(tmp_path):
+    store = FakeObjects()
+    rows = _rows(2)
+    rows[0]["metadata"]["dispense_lease_s"] = 3600
+    path = _write(tmp_path, rows)
+    worker = _open(path, store, holder="w", groups=2, config={"lease_s": 90})
+    assert sorted(_slots(worker(0))) == [0, 1]
+    assert _claim_body(store, 0)["lease_s"] == 3600 and _claim_body(store, 1)["lease_s"] == 90
+    store.now += 1000
+    other = _open(path, store, holder="o", groups=2, config={"lease_s": 90})
+    assert other._claim(2)[0] == [1]  # the row's hour holds slot 0, the default 90 s freed slot 1
+
+
+def test_status_labels_a_claim_by_its_holders_lease(tmp_path):
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(1))
+    _open(path, store, holder="first", config={"lease_s": 90})  # the plan says 90 s
+    worker = _open(path, store, holder="w", groups=1, config={"lease_s": 1200})
+    worker(0)
+    store.now += 600
+    task = _status(store)["tasks"][0]
+    assert task["state"] == "running" and task["lease_s"] == 1200
+
+
+def test_lease_s_is_checked_and_a_long_lease_is_warned(tmp_path, capsys):
+    with pytest.raises(DispenseError, match="lease_s"):
+        sd.check_store_config({"backend": "store", "lease_s": 0})
+    with pytest.raises(DispenseError, match="lease_s"):
+        sd.check_store_config({"backend": "store", "lease_s": "900"})
+    assert sd.lease_warning(900) is None and sd.lease_warning(1800) is None and sd.lease_warning(None) is None
+    text = sd.lease_warning(7200)
+    assert "does not limit how long a trial runs" in text and "2400" in text and "900" in text
+    store = FakeObjects()
+    events = []
+    _open(_write(tmp_path, _rows(1)), store, config={"lease_s": 7200}, emit=lambda e, **f: events.append((e, f)))
+    assert events[0][1]["warning"] == text
+    assert "WARNING: prompts.dispense.lease_s is 7200 s" in capsys.readouterr().out
+
+
+def test_the_pool_dry_run_warns_on_a_long_dispense_lease(tmp_path):
+    from yeto.launch.nc import cli
+
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"prompts": {"dispense": {"backend": "store", "namespace": "n", "lease_s": 7200}}}))
+    notes = cli.pool_config_warnings({"spec": str(spec)})
+    assert any("lease_s is 7200 s" in n for n in notes)
+    assert not any("lease_s" in n for n in cli.pool_config_warnings(
+        {"spec": str(spec), "sampler": {"dispense": {"backend": "store", "namespace": "n", "lease_s": 900}}}))
+
+
+# -- passes of one task are not run together while other tasks are left
+
+
+def test_a_task_with_an_attempt_in_flight_is_claimed_last(tmp_path):
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(2))
+    cfg = {"passes": 2, "seed": 1}  # slots 0..3 are rows 0, 1, 1, 0
+    a = _open(path, store, holder="a", groups=2, config=cfg)
+    b = _open(path, store, holder="b", groups=1, config=cfg)
+    assert sorted(_slots(a(0))) == [0, 1]
+    a.written(0, [0], keep=[1])  # row 0 done, row 1 (slot 1) still running on a
+    assert _slots(b(0)) == [3]  # slot 2 is row 1 again: slot 3 (row 0) goes first
+    assert b.stats["deferred_busy_task"] == 1
+    # nothing else left: the task's second pass runs next to its first (no slot starves)
+    assert _slots(b(0)) == [2]
+    assert sorted(a.ledger.slots.row(p) for p in (1, 2)) == [1, 1]
+
+
+def test_one_claim_pass_does_not_take_two_passes_of_one_task_while_others_are_left(tmp_path):
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(3))
+    cfg = {"passes": 2, "seed": 0}  # slots 0..5 are rows 0, 1, 2, 0, 2, 1
+    s = _open(path, store, holder="s", groups=2, config=cfg)
+    assert _slots(s(0)) == [0, 1]
+    s.written(0, [0, 1])
+    s.groups_per_round = 3
+    # plan order would be slots 2, 3, 4 (rows 2, 0, 2): slot 4 waits behind slot 5 (row 1)
+    assert _slots(s(0)) == [2, 3, 5]
+    s.written(0, [3, 5], keep=[2])
+    assert _slots(s(0)) == [4]  # the last slot runs next to its task's other pass
+
