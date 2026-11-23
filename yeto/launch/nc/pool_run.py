@@ -56,6 +56,9 @@ SANDBOX_WARNING = ("Daytona sandboxes are created with auto-stop off: a sandbox 
                    "deleted. Keep this pool running, or delete its sandboxes with "
                    "`python -m yeto.launch.nc pool-stop --config <file>`.")
 DRAIN_ATTEMPTS = 3
+# the breaker layers a pool's own dependency check resolves (breaker_findings): what its
+# config, its samplers' spec and their env hold; not the trainer's or the launcher's
+RULE_LAYERS = ("pool", "sampler", "harness", "monitor")
 
 
 CLOUD_WARNING = ("Cloud rollout islands ({kind}) bill until they are released: keep this pool running, "
@@ -378,13 +381,16 @@ def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str],
 def breaker_findings(cfg: dict[str, Any]) -> list[Any]:
     """The dependency rules between the breaker thresholds of this pool's samplers
     (:mod:`yeto.breakers.rules`) on their own resolve; [] when the config does not
-    resolve (its own checks report why)."""
+    resolve (its own checks report why). Only the layers a pool sees are resolved
+    (:data:`RULE_LAYERS`): the trainer's and the launcher's limits live in its argv,
+    which a pool does not have, so a rule that reads them is skipped here instead of
+    judging their defaults; the run-level preflight checks those against the real argv."""
     from yeto import breakers  # noqa: PLC0415
     from yeto.breakers.rules_facts import pool_sources  # noqa: PLC0415
 
     sources = pool_sources(cfg)
     try:
-        resolved = breakers.resolve(sources, strict=False)
+        resolved = breakers.resolve(sources, strict=False, layers=RULE_LAYERS)
     except ValueError:
         return []
     return breakers.preflight(resolved, sources=sources)
