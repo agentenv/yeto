@@ -176,3 +176,12 @@ def test_offline_linear_pairs_equal_peft_where_peft_keeps_the_targets(tmp_path):
                               LoraConfig(r=4, lora_alpha=4, target_modules=modules, task_type="CAUSAL_LM"))
     theirs = {name: tuple(t.shape) for name, t in get_peft_model_state_dict(peft).items()}
     assert ours == theirs
+
+
+def test_a_preset_that_matches_nothing_names_the_model_linears(tmp_path):
+    from transformers import GPT2Config
+
+    path = tmp_path / "gpt2"
+    GPT2Config(n_layer=1, n_embd=32, n_head=2, vocab_size=64, architectures=["GPT2LMHeadModel"]).save_pretrained(path)
+    with pytest.raises(ValueError, match=r"--lora-targets attention matches no module of this 'gpt2' model"):
+        derive_peft_lora_specs(str(path), None, rank=2, targets="attention")

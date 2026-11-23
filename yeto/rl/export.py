@@ -186,6 +186,7 @@ def derive_peft_lora_specs(
     from .lora_layout import adapts_routed_experts, routed_expert_lora_specs
 
     fused_experts = routed_experts and adapts_routed_experts(targets, config)
+    choice = targets if isinstance(targets, str) else "list"
     clone_expert_mode = targets == "attention-routed-experts"
     expert_specs = (
         _deepseek_v4_clone_expert_lora_specs(config, rank=rank)
@@ -214,6 +215,13 @@ def derive_peft_lora_specs(
             targets = sorted(
                 name for name, _ in base.named_modules() if pattern.fullmatch(name)
             )
+            if not targets:
+                from .lora_layout import linear_leaf_names
+
+                raise ValueError(
+                    f"--lora-targets {choice} matches no module of this {config.model_type!r} model "
+                    f"(its linear layers: {', '.join(linear_leaf_names(base))}); use --lora-targets "
+                    "all-linear, or add the model's attention projection names to the attention preset")
         adapter = get_peft_model(
             base,
             LoraConfig(

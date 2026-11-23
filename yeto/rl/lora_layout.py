@@ -130,6 +130,14 @@ def all_linear_modules(model: Any) -> list[str]:
     return sorted(selected)
 
 
+def linear_leaf_names(model: Any) -> list[str]:
+    """The distinct leaf names of the model's ``nn.Linear`` layers (error messages)."""
+
+    import torch
+
+    return sorted({name.rsplit(".", 1)[-1] for name, m in model.named_modules() if isinstance(m, torch.nn.Linear)})
+
+
 def linear_lora_specs(model: Any, modules: Iterable[str], *, rank: int) -> tuple[CanonicalTensorSpec, ...]:
     """PEFT's LoRA pair of each named ``nn.Linear``: ``lora_A [r, in]``, ``lora_B [out, r]``."""
 
@@ -221,4 +229,4 @@ def offline_canonical_specs(profile: Any, *, rank: int, targets: str, model_path
 
 __all__ = ["CANONICAL_PREFIX", "MAX_CANONICAL_LORA_BYTES", "LoraLayoutError", "adapts_routed_experts",
            "all_linear_modules", "check_canonical_size", "fused_expert_lora_specs", "has_expert_specs",
-           "linear_lora_specs", "offline_canonical_specs", "routed_expert_lora_specs"]
+           "linear_leaf_names", "linear_lora_specs", "offline_canonical_specs", "routed_expert_lora_specs"]
