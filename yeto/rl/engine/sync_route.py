@@ -29,14 +29,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .selection import (
+    DECOUPLED_SYNC_PRESET,
     FULL_PARAMETER_SYNC_PRESET,
     SAO_STREAMING_SYNC_PRESET,
+    STRICT_AVG_SYNC_PRESET,
     canonical_sync_preset,
     is_sync_mode_default,
 )
-
-DECOUPLED_SYNC_PRESET = "decoupled"
-STRICT_AVG_SYNC_PRESET = "strict-avg"
 
 # Transport names recorded in the route (provenance and the dry-run line).
 LORA_FRAGMENTS = "lora-fragments"

@@ -23,10 +23,13 @@ RL_ENGINES = ("ports",)
 # ``full-parameter`` names the transport (every parameter of the synced state
 # is swept), not which parameters train: DeepSeek V4 expert-full rides it too
 # too.  ``dense-full`` is its old name, kept as an alias.
+STRICT_AVG_SYNC_PRESET = "strict-avg"
+DECOUPLED_SYNC_PRESET = "decoupled"
 FULL_PARAMETER_SYNC_PRESET = "full-parameter"
 SAO_STREAMING_SYNC_PRESET = "sao-streaming-full"
 FULL_PARAMETER_SYNC_PRESETS = frozenset({FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET})
-SYNC_PRESETS = ("strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET)
+SYNC_PRESETS = (STRICT_AVG_SYNC_PRESET, DECOUPLED_SYNC_PRESET, FULL_PARAMETER_SYNC_PRESET,
+                SAO_STREAMING_SYNC_PRESET)
 SYNC_PRESET_ALIASES = {"dense-full": FULL_PARAMETER_SYNC_PRESET}
 # the syncer merge of decoupled RL's matrix fragments (yeto.rl.core).
 RL_MATRIX_MERGES = ("avg", "rda")
