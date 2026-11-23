@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -141,3 +142,30 @@ def test_k31_customer_plan_is_unchanged(case, tmp_path, monkeypatch, capsys):
         GOLDEN.write_text(json.dumps(golden, indent=1, sort_keys=True) + "\n")
         return
     assert got == json.loads(GOLDEN.read_text())[case]
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_k31_customer_island_telemetry_is_unchanged(case, monkeypatch, capsys):
+    """The customer's single trainer (no syncer) keeps its telemetry exactly: its golden island
+    command, parsed by the Miles island, heartbeats every 30 s and samples resources every 60 s
+    only where the kit turns --rl-observe-timeline on (and not at all otherwise), and the
+    outer-synced heartbeat default (an ``[auto]`` line) does not apply to it."""
+    import shlex
+
+    from yeto.rl.adapters.miles import island_entry
+
+    command = json.loads(GOLDEN.read_text())[case]["plan"]["island_requests"][0]["learner_command"]
+    tokens = shlex.split(command.replace("$LEARNER_ID", "0"))  # the island's shell sets it
+    tokens = tokens[tokens.index("yeto.rl.adapters.miles.island_entry") + 1:]
+    tokens = tokens[:next((i for i, t in enumerate(tokens) if t in ("&&", ";", "|", "||")), len(tokens))]
+    args, _unknown = island_entry.build_parser().parse_known_args(tokens)
+    assert args.rl_single_island_no_sync
+    assert args.rl_heartbeat_interval is None and args.rl_resource_sample_interval is None
+    monkeypatch.setattr("yeto.rl.adapters.miles.elastic_hook.apply_recommend_flags", lambda a, m: None)
+    miles = SimpleNamespace()
+    capsys.readouterr()
+    island_entry.apply_ports_infra_switches(args, miles, environ={})
+    telemetry = {k: v for k, v in vars(miles).items() if k.endswith("_interval_s")}
+    assert telemetry == ({"yeto_rl_heartbeat_interval_s": 30.0, "yeto_rl_resource_sample_interval_s": 60.0}
+                         if args.rl_observe_timeline else {})
+    assert "[auto] rl_heartbeat" not in capsys.readouterr().out

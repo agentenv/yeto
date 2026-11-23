@@ -286,6 +286,10 @@
     "rl/completed_trajectories": 4,
     "rl/current_vs_rollout_kl": null,
     "rl/ess_ratio": null,
+    "rl/fragment_local_steps": [
+     1,
+     1
+    ],
     "rl/fragment_versions": [
      0,
      0
@@ -303,9 +307,24 @@
     "rl/tool_wait_seconds": "<VOLATILE>",
     "rl/zero_variance_group_ratio": 0.0,
     "rollout_seconds": "<VOLATILE>",
+    "sync/H": 2,
     "sync/applied_fragments": [],
     "sync/fragment_payload_bytes_received": 0,
     "sync/fragment_payload_bytes_sent": 0,
+    "sync/held_permits": [
+     {
+      "attempt": 1,
+      "fragment": 0,
+      "received_unix": "<VOLATILE>",
+      "step": 1
+     },
+     {
+      "attempt": 1,
+      "fragment": 1,
+      "received_unix": "<VOLATILE>",
+      "step": 2
+     }
+    ],
     "sync/submitted_fragments": [],
     "time_unix": "<VOLATILE>",
     "tool_wait_seconds": "<VOLATILE>",
@@ -492,6 +511,10 @@
     "rl/completed_trajectories": 4,
     "rl/current_vs_rollout_kl": null,
     "rl/ess_ratio": null,
+    "rl/fragment_local_steps": [
+     2,
+     2
+    ],
     "rl/fragment_versions": [
      0,
      0
@@ -509,9 +532,11 @@
     "rl/tool_wait_seconds": "<VOLATILE>",
     "rl/zero_variance_group_ratio": 0.0,
     "rollout_seconds": "<VOLATILE>",
+    "sync/H": 2,
     "sync/applied_fragments": [],
     "sync/fragment_payload_bytes_received": 0,
     "sync/fragment_payload_bytes_sent": 24,
+    "sync/held_permits": [],
     "sync/submitted_fragments": [
      0,
      1
@@ -532,11 +557,13 @@
     "c_steps": 2,
     "c_tokens": 24,
     "delta_l2_norm": 0.8660253882408142,
+    "enqueued_unix": "<VOLATILE>",
     "event": "rl_fragment_push",
     "fragment_id": 0,
     "global_step": 1,
     "island_id": 0,
     "payload_bytes": 12,
+    "permit_received_unix": "<VOLATILE>",
     "pull_to_push_seconds": "<VOLATILE>",
     "realized_h": 2,
     "round_attempt": 1,
@@ -547,11 +574,13 @@
     "c_steps": 2,
     "c_tokens": 24,
     "delta_l2_norm": 0.8660253882408142,
+    "enqueued_unix": "<VOLATILE>",
     "event": "rl_fragment_push",
     "fragment_id": 1,
     "global_step": 2,
     "island_id": 0,
     "payload_bytes": 12,
+    "permit_received_unix": "<VOLATILE>",
     "pull_to_push_seconds": "<VOLATILE>",
     "realized_h": 2,
     "round_attempt": 1,
@@ -750,6 +779,10 @@
     "rl/completed_trajectories": 4,
     "rl/current_vs_rollout_kl": null,
     "rl/ess_ratio": null,
+    "rl/fragment_local_steps": [
+     0,
+     0
+    ],
     "rl/fragment_versions": [
      0,
      0
@@ -767,12 +800,27 @@
     "rl/tool_wait_seconds": "<VOLATILE>",
     "rl/zero_variance_group_ratio": 0.0,
     "rollout_seconds": "<VOLATILE>",
+    "sync/H": 2,
     "sync/applied_fragments": [
      0,
      1
     ],
     "sync/fragment_payload_bytes_received": 24,
     "sync/fragment_payload_bytes_sent": 0,
+    "sync/held_permits": [
+     {
+      "attempt": 1,
+      "fragment": 0,
+      "received_unix": "<VOLATILE>",
+      "step": 3
+     },
+     {
+      "attempt": 1,
+      "fragment": 1,
+      "received_unix": "<VOLATILE>",
+      "step": 4
+     }
+    ],
     "sync/submitted_fragments": [],
     "time_unix": "<VOLATILE>",
     "tool_wait_seconds": "<VOLATILE>",
@@ -786,20 +834,24 @@
     "zero_variance_group_ratio": 0.0
    },
    {
+    "applied_unix": "<VOLATILE>",
     "event": "rl_fragment_bcast",
     "fragment_id": 0,
     "island_id": 0,
     "payload_bytes": 12,
     "queue_seconds": "<VOLATILE>",
+    "received_unix": "<VOLATILE>",
     "time_unix": "<VOLATILE>",
     "version": 1
    },
    {
+    "applied_unix": "<VOLATILE>",
     "event": "rl_fragment_bcast",
     "fragment_id": 1,
     "island_id": 0,
     "payload_bytes": 12,
     "queue_seconds": "<VOLATILE>",
+    "received_unix": "<VOLATILE>",
     "time_unix": "<VOLATILE>",
     "version": 2
    },
@@ -977,6 +1029,10 @@
     "rl/completed_trajectories": 4,
     "rl/current_vs_rollout_kl": null,
     "rl/ess_ratio": null,
+    "rl/fragment_local_steps": [
+     1,
+     1
+    ],
     "rl/fragment_versions": [
      1,
      2
@@ -994,9 +1050,24 @@
     "rl/tool_wait_seconds": "<VOLATILE>",
     "rl/zero_variance_group_ratio": 0.0,
     "rollout_seconds": "<VOLATILE>",
+    "sync/H": 2,
     "sync/applied_fragments": [],
     "sync/fragment_payload_bytes_received": 0,
     "sync/fragment_payload_bytes_sent": 0,
+    "sync/held_permits": [
+     {
+      "attempt": 1,
+      "fragment": 0,
+      "received_unix": "<VOLATILE>",
+      "step": 3
+     },
+     {
+      "attempt": 1,
+      "fragment": 1,
+      "received_unix": "<VOLATILE>",
+      "step": 4
+     }
+    ],
     "sync/submitted_fragments": [],
     "time_unix": "<VOLATILE>",
     "tool_wait_seconds": "<VOLATILE>",
@@ -1183,6 +1254,10 @@
     "rl/completed_trajectories": 4,
     "rl/current_vs_rollout_kl": null,
     "rl/ess_ratio": null,
+    "rl/fragment_local_steps": [
+     2,
+     2
+    ],
     "rl/fragment_versions": [
      1,
      2
@@ -1200,9 +1275,11 @@
     "rl/tool_wait_seconds": "<VOLATILE>",
     "rl/zero_variance_group_ratio": 0.0,
     "rollout_seconds": "<VOLATILE>",
+    "sync/H": 2,
     "sync/applied_fragments": [],
     "sync/fragment_payload_bytes_received": 0,
     "sync/fragment_payload_bytes_sent": 24,
+    "sync/held_permits": [],
     "sync/submitted_fragments": [
      0,
      1
@@ -1223,11 +1300,13 @@
     "c_steps": 2,
     "c_tokens": 24,
     "delta_l2_norm": 0.8660253882408142,
+    "enqueued_unix": "<VOLATILE>",
     "event": "rl_fragment_push",
     "fragment_id": 0,
     "global_step": 3,
     "island_id": 0,
     "payload_bytes": 12,
+    "permit_received_unix": "<VOLATILE>",
     "pull_to_push_seconds": "<VOLATILE>",
     "realized_h": 2,
     "round_attempt": 1,
@@ -1238,11 +1317,13 @@
     "c_steps": 2,
     "c_tokens": 24,
     "delta_l2_norm": 0.8660253882408142,
+    "enqueued_unix": "<VOLATILE>",
     "event": "rl_fragment_push",
     "fragment_id": 1,
     "global_step": 4,
     "island_id": 0,
     "payload_bytes": 12,
+    "permit_received_unix": "<VOLATILE>",
     "pull_to_push_seconds": "<VOLATILE>",
     "realized_h": 2,
     "round_attempt": 1,

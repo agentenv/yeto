@@ -465,13 +465,22 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_observe_timeline = True
     from yeto.rl.engine.telemetry import DEFAULT_HEARTBEAT_INTERVAL_S, DEFAULT_RESOURCE_INTERVAL_S
 
-    for flag, attr, default in (
-        ("rl_heartbeat_interval", "yeto_rl_heartbeat_interval_s", DEFAULT_HEARTBEAT_INTERVAL_S),
+    # An outer-synced island (a syncer, a DiLoCo run) heartbeats by default: its
+    # rounds wait for the other islands (the first round, a terminal round in the
+    # syncer's grace window) and write nothing meanwhile, which reads as a stalled
+    # island without heartbeats. A no-sync island (the customer's single trainer)
+    # keeps its default: on only with --rl-observe-timeline.
+    synced = not getattr(args, "rl_single_island_no_sync", False)
+    for flag, attr, default, auto in (
+        ("rl_heartbeat_interval", "yeto_rl_heartbeat_interval_s", DEFAULT_HEARTBEAT_INTERVAL_S, synced),
         ("rl_resource_sample_interval", "yeto_rl_resource_sample_interval_s",
-         DEFAULT_RESOURCE_INTERVAL_S),
+         DEFAULT_RESOURCE_INTERVAL_S, False),
     ):
         value = getattr(args, flag, None)
-        value = (default if observe else None) if value is None else float(value)
+        if value is None and auto and not observe:
+            print(f"[auto] rl_heartbeat every {default:g} s on this outer-synced island "
+                  "(--rl-heartbeat-interval 0 turns it off)", flush=True)
+        value = (default if observe or auto else None) if value is None else float(value)
         if value:
             if value < 0:
                 raise ValueError(f"--{flag.replace('_', '-')} must be >= 0")

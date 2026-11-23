@@ -334,7 +334,7 @@ def _backend_identity() -> dict:
 # ---------------------------------------------------------------- fake-engine tapes / progress
 # Fields that carry wall-clock time, durations or host-specific values.
 _VOLATILE_KEYS = re.compile(r"(^|[/_])(ts|time|timestamp|wall|elapsed|seconds|duration|pid|host|"
-                            r"started_at|finished_at|monotonic)($|[/_])|_s$|_ms$|_seconds$")
+                            r"started_at|finished_at|monotonic)($|[/_])|_s$|_ms$|_seconds$|_unix$")
 
 
 def _scrub(node: Any, tmp: str) -> Any:

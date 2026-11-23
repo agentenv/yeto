@@ -220,6 +220,21 @@ def record_strict_local_round(self, stats: LocalRoundStats) -> None:
     _atomic_save_island_checkpoint(path, payload)
 
 
+def _fragment_progress_fields(bridge: Any, optimizer_steps: int) -> dict[str, Any]:
+    """``rl_local_round`` of a decoupled island: per fragment the local optimizer steps since
+    its anchor (``rl/fragment_local_steps``, length P), the PULLs it holds and has not answered
+    (``sync/held_permits``) and the local horizon (``sync/H``); absent without that bridge."""
+    steps_at_anchor = getattr(bridge, "steps_at_anchor", None)
+    if not isinstance(steps_at_anchor, tuple) or not callable(getattr(bridge, "held_permits", None)):
+        return {}
+    horizon = getattr(getattr(bridge, "config", None), "local_horizon", None)
+    return {
+        "rl/fragment_local_steps": [optimizer_steps - int(s) for s in steps_at_anchor],
+        "sync/held_permits": bridge.held_permits(),
+        **({"sync/H": int(horizon)} if isinstance(horizon, int) else {}),
+    }
+
+
 class DecoupledProgress:
     """Decoupled progress/event helpers shared by the legacy Miles sync and the ports bridge.
 
@@ -262,6 +277,7 @@ class DecoupledProgress:
         submissions: tuple[FragmentSubmission, ...] = (),
         additional_payload_bytes_received: int = 0,
     ) -> None:
+        bridge = getattr(self, "bridge", None)
         train_metrics = {}
         if stats.train_step is not None:
             train_metrics = {
@@ -318,6 +334,7 @@ class DecoupledProgress:
                 "sync/fragment_payload_bytes_sent": sum(
                     submission.payload_bytes for submission in submissions
                 ),
+                **_fragment_progress_fields(bridge, self.optimizer_steps),
             }
         )
         for broadcast in () if batch is None else batch.broadcasts:
@@ -328,6 +345,14 @@ class DecoupledProgress:
                     "version": broadcast.version,
                     "payload_bytes": broadcast.payload_bytes,
                     "queue_seconds": broadcast.queue_seconds,
+                    **{
+                        name: value
+                        for name, value in (
+                            ("received_unix", getattr(broadcast, "received_unix", None)),
+                            ("applied_unix", getattr(broadcast, "applied_unix", None)),
+                        )
+                        if value is not None
+                    },
                 }
             )
         for submission in submissions:

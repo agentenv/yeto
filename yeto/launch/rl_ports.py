@@ -723,6 +723,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += f" --rl-verify-every {int(args.rl_verify_every)}"
     if getattr(args, "rl_resource_sample_interval", None) is not None:
         flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
+    if getattr(args, "rl_heartbeat_interval", None) is not None:  # default: the island decides
+        flags += f" --rl-heartbeat-interval {float(args.rl_heartbeat_interval)!r}"
     flags += _rl_backend_module(args, "elastic_hook").recommend_flags(args)
     if getattr(args, "rl_deterministic_trainer", False):
         flags += " --rl-deterministic-trainer"

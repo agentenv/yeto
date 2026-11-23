@@ -749,6 +749,43 @@ def test_decoupled_run_until_stop_against_fake_syncer(tmp_path):
     assert "drain_bcast" in phases and "drain_pull" in phases
 
 
+def test_decoupled_tape_carries_wall_clock_stamps_and_fragment_progress(tmp_path):
+    """Additive island fields: PUSH / BCAST wall-clock stamps, and per local round the steps
+    since each fragment's anchor, the PULLs held and H (the existing fields are unchanged)."""
+    import time
+
+    args = _dargs(tmp_path)
+    engine = _dengine()
+    initial = engine.canonical(0)
+    syncer = FakeDecoupledSyncer(build_rl_fragment_layout(initial.specs, 2), initial.tensors,
+                                 learners=1, total_steps=4, pipeline=2)
+    sync = DecoupledSync(args, client_factory=lambda _bridge: syncer.client(0))
+    started = time.time()
+    _driver(engine, sync, tmp_path, progress=DecoupledIslandProgress(args), max_rollouts=20).run()
+    events = _events(tmp_path / "events.jsonl")
+    pushes = [e for e in events if e["event"] == "rl_fragment_push"]
+    assert pushes
+    for push in pushes:
+        assert started <= push["permit_received_unix"] <= push["enqueued_unix"] <= time.time()
+        assert abs(push["enqueued_unix"] - push["permit_received_unix"] - push["pull_to_push_seconds"]) < 1.0
+    bcasts = [e for e in events if e["event"] == "rl_fragment_bcast"]
+    assert bcasts
+    for bcast in bcasts:
+        assert started <= bcast["received_unix"] <= bcast["applied_unix"] <= time.time()
+        assert abs(bcast["applied_unix"] - bcast["received_unix"] - bcast["queue_seconds"]) < 1e-3
+    rounds = [e for e in events if e["event"] == "rl_local_round"]
+    assert rounds and all(r["sync/H"] == args.yeto_rl_local_horizon for r in rounds)
+    for r in rounds:
+        assert len(r["rl/fragment_local_steps"]) == 2 and min(r["rl/fragment_local_steps"]) >= 0
+        for held in r["sync/held_permits"]:
+            assert set(held) == {"fragment", "step", "attempt", "received_unix"}
+            assert held["fragment"] not in r["sync/submitted_fragments"]  # answered PULLs are not held
+            assert held["fragment"] == (held["step"] - 1) % 2 and started <= held["received_unix"] <= time.time()
+    # a fragment whose BCAST was just applied starts again from 0 local steps
+    applied = [r for r in rounds if r["sync/applied_fragments"]]
+    assert applied and all(r["rl/fragment_local_steps"][f] == 0 for r in applied for f in r["sync/applied_fragments"])
+
+
 # ---------------------------------------------------------------------------
 # fix-decoupled-lr-schedule 2.1: zero learning rate before the final round
 # ---------------------------------------------------------------------------
