@@ -429,11 +429,10 @@ def request_from_args(args, spec, arch: ModelArch, cfg: dict | None = None) -> M
     cap = gpu_capacity_gib(spec.gpu)
     total = int(getattr(spec, "total_gpus", 1) or 1)
     # GPUs of the island that do not train: a fixed partition's rollout and standby GPUs
+    rollout_gpus = 0
     if getattr(args, "rl_placement", "colocated") == "fixed-partition":
         rollout_gpus = (int(getattr(args, "rollout_num_gpus", 0) or 0)
                         + int(getattr(args, "rl_standby_gpus", 0) or 0))
-    else:
-        rollout_gpus = int(getattr(args, "rl_rollout_gpus", 0) or 0)
     train_gpus = max(1, total - rollout_gpus)
     tp = int(getattr(args, "tensor_parallel", 1) or 1)
     pp = int(getattr(args, "pipeline_parallel", 1) or 1)

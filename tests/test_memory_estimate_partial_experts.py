@@ -8,11 +8,13 @@ GPUs, the routed experts are split over EP ranks and only the selected experts t
 
 from __future__ import annotations
 
+import io
 import json
 from types import SimpleNamespace
 
 import pytest
 
+import yeto.launch_preflight as lp
 import yeto.memory_estimate as me
 from yeto.rl.adapters.miles.models.partial_experts.selection import ExpertSelection
 
@@ -99,3 +101,33 @@ def test_other_launches_keep_their_estimate(model, tmp_path):
     legacy = me.MemoryRequest(arch=arch, gpu="H100", gpu_mem_gib=req.gpu_mem_gib, tokens=4096, tuning="full",
                               dp=2, recompute=True, colocated=False, offload=True, mem_fraction_static=0.7)
     assert me.estimate(req) == me.estimate(legacy)
+
+
+def _calibrated(**kw):
+    base = dict(training_mode="rl", model="Qwen/Qwen3.5-4B", tuning="full", seq_len=4096,
+                rollout_max_response_len=None, tensor_parallel=1, pipeline_parallel=1, rl_placement="fixed-partition",
+                rollout_num_gpus=1, rl_standby_gpus=0, rl_sample_role=None, rl_buffer_shards=None,
+                sglang_mem_fraction_static=0.4, preflight_memory=None, preflight_memory_margin=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_a_calibrated_fixed_partition_launch_still_passes_the_refusing_preflight(monkeypatch):
+    """--preflight-memory error (the default) refuses a calibrated model over the margin; the
+    smaller trainer data-parallel size of a fixed partition must not refuse what passed."""
+    monkeypatch.setenv("HF_HUB_CACHE", "/nonexistent")  # builtin Qwen3.5-4B config
+    assert lp.memory_config(_calibrated()) == (lp.DEFAULT_MEMORY_MODE, lp.DEFAULT_MEMORY_MARGIN) == ("error", 0.9)
+    report = lp.memory_preflight(_calibrated(), [SimpleNamespace(gpu="H200", total_gpus=2)], out=io.StringIO())
+    (rec,) = report["islands"]
+    assert rec["calibrated"] and rec["fits"] and (rec["dp"], rec["colocated"]) == (1, False), rec
+
+
+@pytest.mark.parametrize("gpu", ["H100", "H200"])
+@pytest.mark.parametrize("tuning", ["full", "lora"])
+@pytest.mark.parametrize("seq", [2048, 4096, 8192, 16384])
+def test_a_fixed_partition_never_estimates_above_the_old_colocated_estimate(monkeypatch, gpu, tuning, seq):
+    monkeypatch.setenv("HF_HUB_CACHE", "/nonexistent")
+    spec = SimpleNamespace(gpu=gpu, total_gpus=2)
+    new = me.estimate_for_launch(_calibrated(tuning=tuning, seq_len=seq), spec, margin=0.9)
+    old = me.estimate_for_launch(_calibrated(tuning=tuning, seq_len=seq, rl_placement="colocated"), spec, margin=0.9)
+    assert new["peak_gib"] <= old["peak_gib"] and (new["fits"] or not old["fits"])
