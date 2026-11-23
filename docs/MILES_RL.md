@@ -53,7 +53,7 @@ The supported model and runtime contract is deliberately narrow:
 | rollout | colocated SGLang (`--rl-placement fixed-partition` is also available for LoRA and is used by the multi-node and elastic paths) |
 | optimization | GRPO plus the declared GRPO-family mechanisms (see [RL_ALGORITHMS.md](RL_ALGORITHMS.md)); critic algorithms (PPO, VAPO, SAO, CompactionRL) run on a single island without outer sync only |
 | island size | one or more nodes and one or more GPUs per node |
-| parallelism | the recipe sets TP/PP (the multi-node and Flash-Next profiles use TP > 1); dense EP = 1; MoE EP may divide the island world size when LoRA tensors remain replicated |
+| parallelism | the recipe sets TP/PP (the multi-node and Flash-Next profiles use TP > 1); canonical LoRA export and apply work at any TP/PP (see [LoRA under model parallelism](#lora-under-model-parallelism)); dense EP = 1; MoE EP may divide the island world size when LoRA tensors remain replicated |
 | membership | fixed logical island IDs `0..M-1`, `M >= 1` |
 | wire format | f32 |
 | global weighting | complete roster, equal learner weight |
@@ -68,7 +68,6 @@ fallback.
 The following remain outside this boundary:
 
 - critic LoRA (`critic.param_mode=lora` is refused) or diffusion RL;
-- TP>1 or PP>1 LoRA gather/scatter;
 - expert-sharded LoRA tensors;
 - trajectory migration across policy snapshots;
 - same-fragment stale updates, dynamic quorum, or learner weighting;
@@ -123,6 +122,27 @@ The Miles boundary provides:
 Native Miles and `strict-avg` keep their bounded rollout loops. Only the
 `decoupled` external-sync path runs until the authoritative final cut asks it
 to stop.
+
+## LoRA under model parallelism
+
+With TP > 1 or PP > 1 the state plugin uses Megatron-Bridge for everything
+except the per-rank FP32 write:
+
+- export: Bridge's collective `AutoBridge.export_adapter_weights` gathers each
+  adapter over TP and broadcasts it over PP from the FP32 masters; the main
+  rank keeps the complete PEFT tensors;
+- binding names: Bridge's collective-free `local_hf_param_specs`, so a PP
+  stage that resolves only its own adapters enters no PP collective (uneven
+  stages hold different adapter counts);
+- apply: every rank takes its shard of the canonical FP32 tensor locally,
+  split the way Bridge's `hf_to_megatron` would (`_local_hf_sharding` and the
+  mapping's TP rank), but without its scatter's cast to the bf16 model dtype,
+  so the FP32 master holds the canonical value bit for bit.
+
+`tests/test_rl_lora_parallel.py` runs this on gloo ranks over real
+Megatron-Core and Megatron-Bridge (TP2, PP2 with uneven stages, TP2xPP2,
+TP2xDP2): the export matches the single-rank names and shapes, and
+apply-then-export is bit-exact FP32.
 
 ## Canonical LoRA Identity
 
