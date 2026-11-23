@@ -261,18 +261,24 @@ routed. The launcher provenance of a routed run records
 `sync_preset_requested` and `sync_route`.
 
 The two stacks share the algorithm (one version per fragment, merge alpha 0,
-`T = N * P` outer steps, quorum, grace and outer Nesterov from the sync
-mode). They differ where the trainable state differs:
+`T = N * P` outer steps) and take the same `--rl-sync-mode` values: in the
+default `async` mode both get quorum 1, the adaptive grace window,
+`tokens2-over-steps` weights, `rda`, and outer lr 1.0 / momentum 0 below
+H = 4 (0.7 / 0.9 from H = 4); `strict` gives both the full roster, equal
+weights and `avg` (see [PROTOCOL.md](PROTOCOL.md#rl-sync-modes---rl-sync-mode)).
+They differ where the trainable state differs:
 
 | | LoRA fragment stack | full-parameter stack (async rounds) |
 | --- | --- | --- |
 | tensors | canonical PEFT LoRA, CPU f32, binpack fragments | each rank's FP32 masters, owner-affine fragments; experts by global index |
-| wire | f32 | `int4` by default in `--rl-sync-mode async`, f32 in `strict` |
-| sync-mode defaults | quorum, grace, outer step from the mode | the same, plus terminal grace, `int4`, peer recovery |
-| rollout token | `yeto:<rollout_id>:<policy_hash>` over the complete LoRA | the same token; the hash is over the trainer's published policy |
+| push dtype | always f32 | `int4` in `async` mode, f32 in `strict` |
+| terminal grace, peer recovery | no | yes (`async` mode) |
+| `--syncer-shards` | no | yes |
+| `--rl-sync-max-learners` (island pool grows past the launch) | yes | no: the session binds the launched roster |
+| rollout token | `yeto:<rollout_id>:<policy_hash>` over the complete LoRA | the same form; the hash is over the trainer's published policy |
 | island tape | `rl_local_round`, `rl_fragment_push`, `rl_fragment_bcast` | `rl_full_parameter_round` (`sync/fragment_versions`, push and apply timings) |
-| final policy | applied on every island; `yeto-rl-export` writes the PEFT adapter | stays in the syncer checkpoint with the `ack` final cut; `--rl-sync-final-cut download` applies it on the islands, `--rl-export-hf-rounds final` exports it |
-| sampler islands | not yet (follow-trainer in progress) | supported (synced groups) |
+| final cut | every island downloads and applies it; `yeto-rl-export` writes the PEFT adapter | manifest only (`ack`) in `async` mode, so the final policy stays in the syncer checkpoint; `--rl-sync-final-cut download` applies it on the islands, `--rl-export-hf-rounds final` then exports it |
+| sampler islands | not yet | supported (synced groups) |
 
 ### Policy snapshots
 
