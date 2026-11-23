@@ -60,7 +60,7 @@ function controls(offline,reload){
   onReload=reload;var box=$("rangeBox");if(!box)return;
   box.innerHTML='<div class="seg">'+RANGES.map(function(r){return '<button class="'+(r[1]===RANGE_H?"on":"")+'" data-h="'+r[1]+'">'+r[0]+'</button>'}).join("")+'</div>'+
     '<button class="btn rl" id="reloadBtn" title="'+(offline?"offline export: data is fixed":"fetch now")+'"'+(offline?" disabled":"")+'>&#x21bb; Reload</button>';
-  Array.prototype.forEach.call(box.querySelectorAll?box.querySelectorAll(".seg button"):[],function(b){b.onclick=function(){RANGE_H=+b.dataset.h;try{localStorage.setItem("yeto-range",RANGE_H)}catch(e){}render(V,OFF)}});
+  Array.prototype.forEach.call(box.querySelectorAll?box.querySelectorAll(".seg button"):[],function(b){b.onclick=function(){RANGE_H=+b.dataset.h;RANGE_SET=true;try{localStorage.setItem("yeto-range",RANGE_H)}catch(e){}render(V,OFF)}});
   var rb=$("reloadBtn");if(rb)rb.onclick=function(){if(onReload)onReload()};
 }
 function rangeLabel(){return RANGE_H>=48?(RANGE_H/24)+" days":RANGE_H===1?"hour":RANGE_H+" hours"}
@@ -400,6 +400,11 @@ function rlCards(V){var O=V.overview||{},cs=(O.islands||[]).map(function(c,i){va
 function rlBilled(V,c){var ci=(((V.overview||{}).cost||{}).islands||[]).filter(function(r){return String(r.id)===String(c.id)})[0],ex=(V.islands||{})[c.id]||{};
   if(ci&&fin(ci.hours)&&ci.hours>0)return {h:ci.hours,src:"fleet"};var sp=((V.async||{}).samplers||{})[c.id]||{},a=fin(sp.first_ts)?sp.first_ts:ex.first_ts,b=fin(sp.last_ts)?sp.last_ts:ex.last_ts;
   return fin(a)&&fin(b)?{h:(b-a)/3600,src:"events",a:a,b:b}:{h:null,src:"none"}}
+// a card row in rows of equal length: as many columns as fit (cards >= 150 px), then the
+// cards spread evenly over the rows, so a row of 8 never ends with one card alone on a line
+function evenGrid(box,n){if(!box||!n)return;var w=box.clientWidth||box.getBoundingClientRect().width||0;if(!w)return;
+  var fit=Math.max(1,Math.floor((w+12)/(150+12))),rows=Math.ceil(n/fit),cols=Math.ceil(n/rows);
+  box.style.gridTemplateColumns="repeat("+cols+",minmax(0,1fr))"}
 function rlm(V){
   var O=V.overview||{},A=V.async||{},S=A.samplers||{},TR=A.trainers||{},X=V.islands||{},cs=rlCards(V);
   var t1=NOW,t0=NOW-RANGE_H*3600,tp=t0-RANGE_H*3600;
@@ -414,33 +419,42 @@ function rlm(V){
   var fr=f0?RR(f0).filter(function(r){return inR(r.ts,t0,t1)}).map(function(r){return r.round_s}).filter(fin).sort(function(a,b){return a-b}):[];
   var rew=cs.map(function(c){var sp=S[c.id]||{},v=c.role==="sampler"?sp.reward_mean_last:(lastW(RR(c),"reward")||{}).reward;return fin(v)?(c.role==="sampler"?"sampler ":"trainer ")+c.id+" "+v.toFixed(3)+(c.role==="sampler"&&fin(sp.reward_last_ts)?" ("+ago(sp.reward_last_ts)+")":""):null}).filter(Boolean);
   var lastRew=f0?lastW(RR(f0),"reward"):null,pvs=cs.map(function(c){return c.policy_version}).filter(fin),rel=A.releases||[],lr=rel.length?rel[rel.length-1]:null;
+  var spv=sps.map(function(c){return c.policy_version}).filter(fin); // the versions the samplers generate with
+  var trel=rel.filter(function(r){return r.trainer!=null||fin(r.released_at)}),ltr=trel.length?trel[trel.length-1]:null;
   var toks=sum(trs.map(function(c){return sum(RR(c).map(function(r){return r.tokens}))})),bl=A.backlog,blp=bl&&bl.points&&bl.points.length?bl.points[bl.points.length-1]:null;
   var caps=sps.map(function(c){return (S[c.id]||{}).max_backlog_groups}).filter(fin);
-  var kp=[["Islands active / total",act.filter(function(c){return rlLive(c.status)}).length+" / "+act.length,"trainers "+liveTr.length+"/"+trs.length+" · samplers "+sps.filter(function(c){return rlLive(c.status)}).length+"/"+sps.length+" · "+act.map(function(c){return c.label+" "+c.status}).join(" · ")+(unk.length?" · "+unk.length+" unrecognized tape(s) not counted":"")],
+  var kp=[["Islands active / total",act.filter(function(c){return rlLive(c.status)}).length+" / "+act.length,["trainers "+liveTr.length+"/"+trs.length,"samplers "+sps.filter(function(c){return rlLive(c.status)}).length+"/"+sps.length].concat(act.map(function(c){return c.label+" "+c.status}),unk.length?[unk.length+" unrecognized tape(s) not counted"]:[]).join(" · ")],
     ["Groups trained / written",k(tsum("trained_groups")||0,0)+" / "+k(ssum("groups")||0,0),(tsum("trained_groups")?"trainers trained "+k(tsum("trained_groups"),0)+" groups ("+k(toks)+" tokens)":"trainer has trained 0 groups yet")+" · samplers wrote "+k(ssum("groups")||0,0)+" groups, whole run"],
     ["Fleet tokens / s",k(tokS),(liveTr.length?"live trainers, last round":"last round of each trainer")+" · MFU not on the tapes"],
     [(f0?f0.label:"Trainer")+" step p50",dur(pctl(fs,0.5)),"round p50 "+dur(pctl(fr,0.5))+" · "+fs.length+" steps in range"],
-    ["Latest reward",lastRew?k(lastRew.reward,3):"not trained yet",(lastRew?"trainer batch":"trainer has no trained batch yet")+(rew.length?" · "+rew.join(" · "):" · no reward on the tapes (enable the buffer trainer's batch summary: yeto ≥ this version)")],
-    ["Policy version / releases",(pvs.length?"v"+Math.max.apply(null,pvs):"n/a")+" / "+rel.length,lr?"last release v"+lr.policy_version+" "+ago(lr.released_at):"no release yet"],
-    ["Rejected: stale / zero-var / trunc / infra",[tsum("stale_groups"),ssum("zero_variance_dropped"),ssum("truncated"),ssum("dropped_groups")].map(function(v){return fin(v)?k(v,0):"n/a"}).join(" / "),"groups / groups / samples / groups, whole run"],
+    ["Latest reward",lastRew?k(lastRew.reward,3):"not trained yet",(lastRew?"trainer batch":"trainer has no trained batch yet")+(rew.length?" · "+rew.join(" · "):(cs.length?" · no reward reported yet (trainers report it per trained batch, samplers per round)":" · no island has reported yet"))],
+    // releases = versions a trainer released; a sampler starting on the base weights (v0, no
+    // trainer, no release time) makes a release row for its load but is not a release
+    ["Policy version / releases",(pvs.length?"v"+Math.max.apply(null,pvs):"n/a")+" / "+trel.length,ltr?"last release v"+ltr.policy_version+" "+ago(ltr.released_at):"no trainer release yet"+(spv.length?" · samplers on v"+Math.max.apply(null,spv)+(Math.max.apply(null,spv)===0?" (base weights)":""):"")],
+    ["Rejected: stale / zero-var / trunc / infra",[tsum("stale_groups"),ssum("zero_variance_dropped"),ssum("truncated"),ssum("dropped_groups")].map(function(v){return fin(v)?k(v,0):"n/a"}).join(" / "),"groups / groups / samples / groups, whole run"+
+      // trials that never formed a group (aborted on infrastructure) are not in the group counts
+      (fin(ssum("trials_aborted"))||fin(ssum("trials_ok"))?" · trials aborted "+k(ssum("trials_aborted")||0,0)+" of "+k((ssum("trials_aborted")||0)+(ssum("trials_ok")||0)+(ssum("trials_policy_limit")||0),0)+" ended":"")],
     ["Buffer backlog",blp&&fin(blp[3])?k(blp[3],0):"n/a",bl?"written "+k(bl.written,0)+" · read "+k(bl.read,0)+(caps.length?" · cap "+caps.join("+"):""):"no sampler rounds"]];
   if((V.usage||{}).syncer){var rs=V.rounds_syncer||[];kp.push(["Syncer outer step",rs.length?String(rs[rs.length-1].round):"0","merges on the syncer tape"],["Syncer RSS","n/a","syncer.log not collected for RL runs"])}
-  $("rKpis").innerHTML=kp.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
+  // a long value (the four rejected counts) wraps in a smaller font instead of being cut off
+  $("rKpis").innerHTML=kp.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv'+(String(x[1]).length>12?" long":"")+'" title="'+esc(x[1])+'">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
+  evenGrid($("rKpis"),kp.length);
   // islands now
   var pool=A.pool||[],pl=pool.length?pool[pool.length-1]:null;
   var lts=cs.map(function(c){return (X[c.id]||{}).last_ts}).filter(function(t){return fin(t)&&t>0});
-  $("rNodesNote").textContent=(lts.length?"last event "+ago(Math.max.apply(null,lts)):"no events yet")+(pl?" · NC pool: "+pl.event.replace("nc_elastic_","")+" "+ago(pl.ts):"");
+  var st=O.store,stx=!st?"":st.failing?" · run store: read failing ("+st.failing+"×)":!st.polled?" · run store: not read yet":" · run store: "+st.sources+" tape(s)"+(fin(st.last_ok_at)?", read "+ago(st.last_ok_at):"");
+  $("rNodesNote").textContent=(lts.length?"last event "+ago(Math.max.apply(null,lts)):"no events yet")+(pl?" · NC pool: "+pl.event.replace("nc_elastic_","")+" "+ago(pl.ts):"")+stx;
   var hbm=function(c){var ns=(X[c.id]||{}).node_series||{},pk=null;Object.keys(ns).forEach(function(n){ns[n].forEach(function(p){if(fin(p[1]))pk=pk==null?p[1]:Math.max(pk,p[1])})});return pk};
   var head='<tr><th>Island</th><th>Round / policy</th><th>Reward</th><th>train-rollout KL</th><th>logprob |diff|</th><th>grad_norm</th><th>Step / round time</th><th>Tokens/s</th><th class="bar">HBM peak</th><th>Last release / load</th><th>Shard · incarnation</th></tr>';
   var rowOf=function(c){var ex=X[c.id]||{},s=S[c.id],rr=RR(c),r=rr[rr.length-1]||{},liv=rlLive(c.status),h=hbm(c),lim=ex.hbm_total_gib,mx=Math.max(64,fin(lim)?lim*1.15:0),pc=fin(h)?Math.min(100,100*h/mx):0;
       var row='<tr'+(liv?'':' class="off"')+'><td><div class="nn">'+rlDot(c.status)+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null].filter(Boolean).join(" · ")||"n/a")+' · '+esc(c.status+(c.waiting_reason?": "+c.waiting_reason:"")+(c.left?" ("+(c.left.reason||"")+")":"")+(c.starting&&c.startup_stage?": "+c.startup_stage.label+(fin(c.startup_stage.age_s)?" "+dur(c.startup_stage.age_s):"")+(fin(c.startup_s)?" · start "+dur(c.startup_s):""):"")+((c.launches||[]).length>1?" · launch "+(c.launches.length)+" ("+(c.launches.length-1)+" superseded)":""))+'</div></td>';
       var hb='<td class="bar"><div class="bl">'+(fin(h)?h.toFixed(1)+" GiB"+(fin(lim)?" of "+lim+" GiB":""):"not sampled")+'</div><div class="bt"><div class="bf'+(liv?"":" idle")+'" style="width:'+pc.toFixed(1)+'%"></div>'+(fin(lim)?'<div class="bm" style="left:'+(100*lim/mx).toFixed(1)+'%"></div>':"")+'</div>'+(fin(h)?"":'<div class="ns" title="'+esc(ex.gpu_mem_note||"")+'">'+(/unavailable/.test(ex.gpu_mem_note||"")?"telemetry library missing":"enable --rl-resource-sample-interval")+'</div>')+'</td>';
       if(c.role==="sampler"&&s){var sr=s.rounds||[],l=s.last_round||sr[sr.length-1]||{},ld=(A.releases||[]).map(function(x){return (x.loads||{})[c.id]?[x.policy_version,x.loads[c.id]]:null}).filter(Boolean).pop();
-        return row+'<td>'+k(s.n_rounds-(s.empty_rounds||0),0)+' rounds with groups'+(s.empty_rounds?' (+'+k(s.empty_rounds,0)+' idle polls)':'')+' / '+(s.policy_version==null?"n/a":"v"+s.policy_version)+'<div class="ns">'+ago(l.ts)+' · age p50 '+k(s.lag_p50,1)+'</div></td><td>'+k(s.reward_mean_last,3)+(fin(s.reward_last_ts)?'<div class="ns">round '+esc(s.reward_last_rollout_id)+' · '+ago(s.reward_last_ts)+'</div>':"")+'</td><td>n/a</td><td>n/a</td><td>n/a</td><td>'+dur(l.generate_s)+'<div class="ns">generate, p50 '+dur(s.generate_p50_s)+'</div></td><td>'+(fin(l.response_tokens)&&l.generate_s?k(l.response_tokens/l.generate_s):"n/a")+'</td>'+hb+
-          '<td>'+(ld?dur(ld[1].load_wall_s)+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+dur(ld[1].latency_s)+' after release</div>':"none yet")+'</td><td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
+        return row+'<td>'+k(s.n_rounds-(s.empty_rounds||0),0)+' rounds with groups'+(s.empty_rounds?' (+'+k(s.empty_rounds,0)+' without groups)':'')+' / '+(s.policy_version==null?"n/a":"v"+s.policy_version)+'<div class="ns">'+ago(l.ts)+' · age p50 '+k(s.lag_p50,1)+'</div></td><td>'+k(s.reward_mean_last,3)+(fin(s.reward_last_ts)?'<div class="ns">round '+esc(s.reward_last_rollout_id)+' · '+ago(s.reward_last_ts)+'</div>':"")+'</td><td>n/a</td><td>n/a</td><td>n/a</td><td>'+dur(l.generate_s)+'<div class="ns">generate, p50 '+dur(s.generate_p50_s)+'</div></td><td>'+(fin(l.response_tokens)&&l.generate_s?k(l.response_tokens/l.generate_s):"n/a")+'</td>'+hb+
+          '<td>'+(ld?(ld[1].at_start?"at start":dur(ld[1].load_wall_s))+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+(ld[1].at_start?"loaded when the sampler started":dur(ld[1].latency_s)+' after release')+'</div>':"none yet")+'</td><td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
       var mr=(A.releases||[]).filter(function(x){return String(x.trainer)===String(c.id)}).pop(),kl=lastW(rr,"kl_tr")||lastW(rr,"kl")||{};
       return row+'<td>'+(r.round==null?"n/a":r.round)+' / '+(c.policy_version==null?"n/a":"v"+c.policy_version)+'<div class="ns">'+ago(r.ts)+'</div></td><td>'+k((lastW(rr,"reward")||{}).reward,3)+'</td><td>'+(fin(kl.kl_tr)?k(kl.kl_tr,4)+(fin(kl.kl)?'<div class="ns">PPO '+k(kl.kl,4)+'</div>':""):fin(kl.kl)?'n/a<div class="ns">PPO '+k(kl.kl,4)+'</div>':"n/a")+'</td><td>'+k((lastW(rr,"logprob_diff")||{}).logprob_diff,4)+'</td><td>'+k((lastW(rr,"grad_norm")||{}).grad_norm,3)+'</td>'+
-        '<td>'+dur(r.step_s)+'<div class="ns">round '+dur(r.round_s)+'</div></td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td><td>trainer '+esc(c.id)+'<div class="ns">'+esc(((TR[c.id]||{}).left||{}).reason||"")+'</div></td></tr>'};
+        '<td>'+dur(r.step_s)+'<div class="ns">round '+dur(r.round_s)+'</div></td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td><td>trainer '+esc(c.id)+'<div class="ns">'+esc((c.left||{}).reason||"")+'</div></td></tr>'};
   var unkRow=function(c){var ex=X[c.id]||{};return '<tr class="off"><td><div class="nn">'+rlDot("unknown")+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">no trainer or sampler events in this tape; not counted</div></td><td colspan="10">'+
     esc(c.source_lost?"tape source lost: "+String(c.source_lost.error||"").slice(0,120):"")+'</td></tr>'};
   var liveC=act.filter(function(c){return rlLive(c.status)||c.status==="stale"}),endC=act.filter(function(c){return liveC.indexOf(c)<0});
@@ -533,8 +547,11 @@ function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
 function render(view,offline){
   V=view;OFF=offline;if(!V)return;var S=V.sft;
   NOW=offline?((S&&S.now)||(V.overview||{}).now||Date.now()/1000):Date.now()/1000;
-  if(offline&&!RANGE_SET&&!S){var o0=V.overview||{},sp=fin(o0.data_ts)&&fin(o0.first_ts)?(o0.data_ts-o0.first_ts)/3600:null; // an export shows its whole run in the smallest window
-    if(fin(sp))RANGE_H=(RANGES.filter(function(r){return r[1]>=sp})[0]||RANGES[RANGES.length-1])[1];RANGE_SET=true}
+  // until the viewer picks a range, show the whole run in the smallest window that holds it:
+  // an export once (its data is fixed), the live page on every render (1h, then 6h ... as the
+  // run grows), so a run younger than an hour is not squeezed into the right edge of 24h
+  if(!RANGE_SET&&!S){var o0=V.overview||{},end=offline?o0.data_ts:NOW,sp=fin(end)&&fin(o0.first_ts)?(end-o0.first_ts)/3600:null;
+    if(fin(sp))RANGE_H=(RANGES.filter(function(r){return r[1]>=sp})[0]||RANGES[RANGES.length-1])[1];if(offline)RANGE_SET=true}
   var sroot=$("sftRoot"),rroot=$("rlRoot");
   var RL=!S&&!!$("rlmRoot");
   if(document.body&&document.body.classList)document.body.classList.toggle("sftmode",!!S||RL);

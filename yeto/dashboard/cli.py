@@ -55,14 +55,52 @@ def add_parser(sub) -> None:
     m.add_argument("--island", default=None, help="island id recorded on dashboard_source_lost events")
 
 
+def store_run_name(store: str | None) -> str | None:
+    """The run of a ``--store .../runs/<run>`` URI or directory (the page's run label when
+    no ``--run`` is given); None for any other layout."""
+    parts = [p for p in str(store or "").split("://")[-1].strip("/").split("/") if p]
+    return parts[-1] if len(parts) >= 2 and parts[-2] == "runs" else None
+
+
+def page_commands(args) -> dict[str, str]:
+    """The page's "Commands" box: this dashboard's own serve / export command lines,
+    rebuilt from its arguments (not the defaults), so a copied command reproduces it."""
+    import shlex
+
+    src: list[str] = []
+    if args.run:
+        src += ["--run", args.run]
+    if getattr(args, "store", None):
+        src += ["--store", args.store]
+    if args.tapes:
+        src += ["--tapes", *args.tapes]
+    for flag, key in (("--up-state", "up_state"), ("--prices", "prices"), ("--thresholds", "thresholds"),
+                      ("--label", "label")):
+        if getattr(args, key, None):
+            src += [flag, str(getattr(args, key))]
+    if getattr(args, "budget", None) is not None:
+        src += ["--budget", f"{args.budget:g}"]
+    serve = ["yeto", "dashboard", "serve", *src]
+    if getattr(args, "host", "127.0.0.1") != "127.0.0.1":
+        serve += ["--host", args.host]
+    serve += ["--port", str(getattr(args, "port", 8787))]
+    if getattr(args, "store", None) and float(getattr(args, "store_poll", 10.0) or 0) != 10.0:
+        serve += ["--store-poll", f"{args.store_poll:g}"]
+    name = args.run or getattr(args, "label", None) or "run"
+    export = ["yeto", "dashboard", "export", *src, "-o", f"{name}.html"]
+    return {"serve": shlex.join(serve), "export": shlex.join(export)}
+
+
 def _reducer(args):
     from .cost import load_prices
     from .reducer import Reducer
 
     thresholds = json.loads(Path(args.thresholds).read_text()) if args.thresholds else None
-    reducer = Reducer(run=args.run, prices=load_prices(args.prices), budget_usd=args.budget,
+    reducer = Reducer(run=args.run or store_run_name(getattr(args, "store", None)),
+                      prices=load_prices(args.prices), budget_usd=args.budget,
                       thresholds=thresholds)
     reducer.up_state = getattr(args, "up_state", None)
+    reducer.commands = page_commands(args)
     return reducer
 
 
@@ -74,6 +112,12 @@ def _paths(args) -> list[str]:
         paths = run_sources(args.run) + paths
     if not paths and not getattr(args, "store", None):
         raise SystemExit("[dashboard] no tapes: pass --run <run>, --tapes PATH... and/or --store URI")
+    missing = [p for p in paths if not Path(p).expanduser().exists()]
+    if missing and len(missing) == len(paths) and not getattr(args, "store", None):
+        if args.dashboard_command == "export":  # nothing to export (a mistyped run name, say)
+            raise SystemExit(f"[dashboard] no tapes: none of {', '.join(missing)} exists")
+    for p in missing:  # serve follows them once they appear (a dashboard started before the run)
+        print(f"[dashboard] waiting for {p} (not there yet)", file=sys.stderr)
     return paths
 
 
@@ -130,6 +174,7 @@ def main(args) -> int:
         sources = load_all(reducer, paths)
         st = _store(args)
         if st is not None:
+            reducer.store_status = st.status
             st.pump(reducer)
             sources = list(sources) + sorted(st.sources)
         out = export_html(reducer, args.out)

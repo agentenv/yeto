@@ -50,6 +50,8 @@ class DashboardState:
     def __init__(self, reducer: Reducer, paths: list[str], store: Any = None):
         self.store = store  # store_tapes.StoreTapes: island tapes uploaded to the run store
         self.reducer = reducer
+        if store is not None and callable(getattr(store, "status", None)):
+            reducer.store_status = store.status  # read failures reach the page and the alerts
         self.paths = list(paths)
         self.sources: dict[str, TapeSource] = {}
         self.lock = threading.Lock()

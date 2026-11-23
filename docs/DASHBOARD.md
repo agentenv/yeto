@@ -58,6 +58,42 @@ Endpoints (all GET; any other method gets 405):
 | `/api/fleet` | `fleet.jsonl` lifecycle and `cost_tick`, price table source, cost view |
 | `/api/events?island=&type=&after=&limit=` | Paged events (`after` is the previous page's `cursor`) |
 
+## Run store: tapes uploaded by the islands (`--store`)
+
+```bash
+yeto dashboard serve --run <run> --store s3://<bucket>/runs/<run> --port 8787 [--store-poll 10] \
+    [--up-state ~/.yeto/rl-up/<run>/state.json] [--budget 50]
+yeto dashboard export --store s3://<bucket>/runs/<run> -o run.html
+```
+
+`--store` (an `s3://` URI or a directory) reads every island's
+`tapes/<island>/<incarnation>/<seq>.jsonl` chunk, the tapes the samplers and the
+trainer upload every `YETO_RL_TAPE_UPLOAD_S` seconds: islands on leased nodes and
+replacement nodes appear without a per-node mirror. The store is polled every
+`--store-poll` seconds (default 10). Credentials come from the environment, as for
+the launcher (`YETO_RL_STORE_S3_*`, else `AWS_PROFILE` / the AWS variables).
+`--up-state` adds the cumulative runtime and spend of a `yeto run up` run; the file
+is read on every view and may appear later.
+
+A failing store read is shown, not hidden: `/api/overview` and `/api/view` carry
+`overview.store` (`sources`, `requests`, `errors`, `failing`, `last_error`,
+`last_ok_at`); while `failing` is non-zero the page raises the warning "run store
+unreadable" and, with no island yet, the global status says so instead of "no
+data". The "Islands now" note shows the tapes read and the last clean read.
+
+One record often reaches the dashboard more than once: the launcher's echoed tape
+(`~/.yeto/runs/<run>/events`) and the trainer's store upload carry the same records,
+and a restarted trainer uploads its whole local tape again under its new launch. A
+timestamped event equal to one already folded for the same island is dropped
+(`overview.duplicates` counts them), so counts are not inflated and a restart is
+dated by its own first record.
+
+A dashboard may start before the run: the run's own paths under `--run`
+(`~/.yeto/runs/<run>/events`, `fleet.jsonl`) and the `--tapes` paths are followed
+once they appear. `export` still refuses when none of its paths exists and no
+`--store` is given. The page's "Commands" box repeats this dashboard's own
+arguments (port, store, tapes ...), so a copied command reproduces it.
+
 ## Offline export
 
 ```bash
@@ -122,6 +158,12 @@ and the budget can be passed to the launcher with the environment variables
 | Budget | 60% / 80% | 1/0 |
 | RECOVERY_REQUIRED (journal phase or tape `rl_reconfiguration`) | — | 0 |
 | ssh mirror source lost | — | 1 |
+| Run store unreadable (`--store` reads failing since the last clean poll) | — | 1 |
+| A trainer skipping releases while the previous upload is in flight (`rl_policy_release_skipped` upload_in_flight) with no `rl_policy_released` since, for over 10 min | samplers waiting on a stale read position: critical, else warning | 0/1 |
+| A sampler waiting on a full backlog (as it counts it, reported in the last 5 min) while the trainers' read position leaves less than its cap: it learns the read position only from a policy release or the trainer's read heartbeat | — | 1 |
+| Trainer launches ending in a failure leave (`island_leave` not STOPPED / DONE ...) in the last hour; the detail names the root-cause error line | 1: warning, >= 2: critical | 1/0 |
+| Samplers up without any trainer island on the tapes (async run; since the first sampler event) | > 1200 s warning, > 1800 s critical | 1/0 |
+| Agentic sampler trials (current incarnation, last 10 rounds in which trials ended, >= 8 trials): none with a verdict (ok / policy limit); aborted (infrastructure) share | none: critical; > 50%: warning | 0/1 |
 | Compaction `summary_ok` share (per sampler, last 5 rounds with compaction, >= 5 summaries) | < 90% warning, < 50% critical | 1/0 |
 | Compacted trials ending truncated (same window, >= 5 compacted trials) | > 20% | 1 |
 | Trials that compacted at all (same window, >= 5 trials) | > 50% info | 2 |

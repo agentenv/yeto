@@ -65,6 +65,27 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # trials the gateway invalidated for a fork / history rewrite of a compacted session
     # (compaction_fork_lost), as a share of the compacted trials (written + fork-lost)
     "compaction_fork_lost_warn": 0.05,
+    # agentic samplers: trials that ended over the last trial_fail_window_rounds rounds of the
+    # current incarnation in which any trial ended, once trial_fail_min_trials ended: none
+    # with a verdict (ok / policy_limit) is critical, an aborted (infra) share above warn
+    # a warning. Mirrors the run breaker's "every group INFRA" rule on the page.
+    "trial_fail_window_rounds": 10,
+    "trial_fail_min_trials": 8,
+    "trial_fail_warn": 0.5,
+    # an async run whose samplers are up while no trainer island is on the tapes (its
+    # launch failed, or it was torn down): seconds since the first sampler event
+    "trainer_missing_warn_s": 1200.0,
+    "trainer_missing_severe_s": 1800.0,
+    # trainer launches that ended with a failure leave (island_leave not STOPPED / DONE ...)
+    # in the last trainer_fail_window_s: one is a warning, trainer_fail_loop or more critical
+    "trainer_fail_window_s": 3600.0,
+    "trainer_fail_loop": 2,
+    # a sampler waiting on a full backlog (as it counts it) while the trainers' read
+    # position leaves less than its cap: it reported within this many seconds
+    "stale_read_recent_s": 300.0,
+    # a trainer skipping releases because the previous upload is still in flight, with no
+    # release since the first skip of the streak, for this long
+    "release_stall_warn_s": 600.0,
 }
 
 
@@ -324,11 +345,158 @@ def compaction(reducer, th: dict) -> list[dict]:
     return out
 
 
-def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict]) -> list[dict]:
+def store_unreadable(store: dict | None) -> list[dict]:
+    """``--store`` reads failing since the last clean poll: without this the page shows
+    "no data", the same as a run that has not started."""
+    if not store or not store.get("failing"):
+        return []
+    where = store.get("uri") or "the run store"
+    return [_alert(1, "store_unreadable", "run store unreadable",
+                   f"{store['failing']} failed read(s) of {where} since the last clean poll: "
+                   f"{(store.get('last_error') or '')[:200]}")]
+
+
+def trial_failures(reducer, th: dict) -> list[dict]:
+    from .async_rl import _row_order
+
+    out = []
+    state = getattr(reducer, "async_", None)
+    for iid, s in sorted((state.sampler if state is not None else {}).items()):
+        inc = s.get("incarnation")
+        rows = [r for r in sorted(s["rounds"].values(), key=_row_order)
+                if r.get("incarnation") == inc and any(r.get(f"trials_{k}") for k in ("ok", "policy_limit", "aborted"))]
+        rows = rows[-int(th["trial_fail_window_rounds"]):]
+        tot = {k: sum(r.get(f"trials_{k}") or 0 for r in rows) for k in ("ok", "policy_limit", "aborted")}
+        ended = sum(tot.values())
+        if not rows or ended < th["trial_fail_min_trials"]:
+            continue
+        last = rows[-1]
+        why = ", ".join(f"{k} {v:g}" for k, v in sorted((last.get("infra_retries_by") or {}).items()))
+        lost = ", ".join(f"{k} {v:g}" for k, v in sorted((last.get("lost_by") or {}).items()))
+        detail = (f"{tot['aborted']:g} of {ended:g} trials ended aborted (infrastructure) in the last {len(rows)} "
+                  f"round(s), ok {tot['ok']:g}, policy limit {tot['policy_limit']:g}"
+                  + (f"; infra retries so far: {why}" if why else "") + (f"; lost: {lost}" if lost else ""))
+        if tot["ok"] + tot["policy_limit"] == 0:
+            out.append(_alert(0, "trial_fail", f"sampler {iid}: no trial is finishing", detail, island=iid))
+        elif tot["aborted"] / ended > th["trial_fail_warn"]:
+            out.append(_alert(1, "trial_fail", f"sampler {iid}: most trials fail on infrastructure", detail,
+                              island=iid))
+    return out
+
+
+def trainer_missing(reducer, th: dict, now: float, cards: list[dict]) -> list[dict]:
+    state = getattr(reducer, "async_", None)
+    if state is None:
+        return []
+    roles = {c["id"]: state.role(c["id"]) for c in cards}
+    live = [c for c in cards if roles[c["id"]] == "sampler" and c["status"] in ("ok", "waiting", "starting")]
+    if not live or any(r == "trainer" for r in roles.values()):
+        return []
+    firsts = [reducer.islands[c["id"]].get("first_ts") for c in live if c["id"] in reducer.islands]
+    firsts = [t for t in firsts if t is not None]
+    if not firsts:
+        return []
+    age = now - min(firsts)
+    if age <= th["trainer_missing_warn_s"]:
+        return []
+    stop = reducer.operator_stop() or {}
+    torn = (f"; the launcher tore the run's app down (operator stop: {stop.get('cause')}, {stop.get('marker')})"
+            if stop.get("cause") else "")
+    sev = 0 if age > th["trainer_missing_severe_s"] else 1
+    names = ", ".join(c["id"] for c in live)
+    return [_alert(sev, "trainer_missing", "samplers running without a trainer",
+                   f"{len(live)} sampler(s) up for {age / 60:.0f} min ({names}) and no trainer island on the "
+                   f"tapes: their groups pile up in the buffer and nothing trains them{torn}",
+                   island=live[0]["id"])]
+
+
+def trainer_failed(reducer, th: dict, now: float) -> list[dict]:
+    from .reducer import CLEAN_LEAVE
+
+    out = []
+    state = getattr(reducer, "async_", None)
+    for iid, t in sorted((state.trainer if state is not None else {}).items()):
+        bad = [x for x in t.get("leaves") or []
+               if str(x.get("reason") or "").upper() not in CLEAN_LEAVE
+               and x.get("ts") is not None and now - x["ts"] <= th["trainer_fail_window_s"]]
+        if not bad:
+            continue
+        last = bad[-1]
+        why = last.get("cause") or last.get("error_type") or "no error text"
+        detail = (f"{len(bad)} failed launch(es) in the last {th['trainer_fail_window_s'] / 60:.0f} min, "
+                  f"last {last.get('reason')}: {why}")
+        isl = reducer.islands.get(iid) or {}
+        relaunched = isl.get("launch_ts") is not None and isl["launch_ts"] > last["ts"]
+        if relaunched:  # the current launch started after the last failure: say so, not critical
+            out.append(_alert(1, "trainer_failed", f"trainer {iid} failed earlier, relaunched",
+                              detail + "; the current launch started after it", island=iid))
+        elif len(bad) >= th["trainer_fail_loop"]:
+            out.append(_alert(0, "trainer_failed", f"trainer {iid} keeps failing", detail, island=iid))
+        else:
+            out.append(_alert(1, "trainer_failed", f"trainer {iid} failed", detail, island=iid))
+    return out
+
+
+def stale_read_position(reducer, th: dict, now: float) -> list[dict]:
+    state = getattr(reducer, "async_", None)
+    if state is None or not state.sampler:
+        return []
+    series = state.backlog_series() or {}
+    pts = [p for p in series.get("points") or [] if p[3] is not None]
+    if not pts:
+        return []
+    out = []
+    for iid, s in sorted(state.sampler.items()):
+        cap = s.get("max_backlog_groups")
+        rep = s["backlog"][-1] if s["backlog"] else None
+        if s.get("ended") or cap is None or rep is None or not rep[2] or now - rep[0] > th["stale_read_recent_s"]:
+            continue
+        seen = [p for p in pts if p[0] <= rep[0]]  # what the trainers had read when the sampler reported
+        if not seen or seen[-1][3] >= float(cap) or rep[1] < float(cap):
+            continue
+        p = seen[-1]
+        out.append(_alert(1, "stale_read_position", f"sampler {iid} waits on a stale read position",
+                          f"it counts {rep[1]:g} groups unread (cap {cap}) and stops generating, but the trainers "
+                          f"have read {p[2]:g} of the {p[1]:g} groups written ({p[3]:g} left): a sampler learns the "
+                          "read position from a policy release or the trainer's read heartbeat "
+                          "(sample-buffer/read-position.json), and none came since", island=iid))
+    return out
+
+
+def release_stalled(reducer, th: dict, now: float, stale: list[dict]) -> list[dict]:
+    state = getattr(reducer, "async_", None)
+    if state is None:
+        return []
+    out = []
+    for iid, t in sorted(state.trainer.items()):
+        last_rel = max((r["ts"] for r in state.releases if r.get("trainer") == iid and r.get("ts") is not None),
+                       default=None)
+        streak = [x for x in t.get("upload_skips") or [] if last_rel is None or x["ts"] > last_rel]
+        if not streak or now - streak[0]["ts"] <= th["release_stall_warn_s"]:
+            continue
+        versions = ", ".join(f"v{x['policy_version']}" for x in streak[-5:])
+        detail = (f"a policy release has been uploading for over {(now - streak[0]['ts']) / 60:.0f} min: the "
+                  f"trainer skipped {len(streak)} release(s) since ({versions}) and wrote no rl_policy_released")
+        if stale:  # samplers wait for this release to learn the read position: the loop stands still
+            detail += "; samplers wait for it (stale read position), so nothing is generated or trained"
+        out.append(_alert(0 if stale else 1, "release_stalled", f"trainer {iid}: policy release stuck uploading",
+                          detail, island=iid))
+    return out
+
+
+def _with_release(reducer, th: dict, now: float) -> list[dict]:
+    stale = stale_read_position(reducer, th, now)
+    return stale + release_stalled(reducer, th, now, stale)
+
+
+def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict],
+             store: dict | None = None) -> list[dict]:
     th = reducer.thresholds
-    alerts = (recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
+    alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
-              + budget(cost, th) + compaction(reducer, th)
+              + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
+              + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)
+              + _with_release(reducer, th, now)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
     alerts.sort(key=lambda a: a["sev"])
     for i, a in enumerate(alerts):

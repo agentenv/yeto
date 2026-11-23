@@ -14,6 +14,7 @@ Health of each role is judged by its own cadence (see ``expected_gap_s``).
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 POOL_PREFIX = "nc_elastic_"
@@ -30,7 +31,7 @@ SAMPLER_WAIT_EVENTS = {"rl_sampler_backlog_full": "backlog full (trainers behind
                        "rl_sampler_waiting_policy": "waiting for a policy release"}
 SAMPLER_END_EVENTS = frozenset({"rl_sampler_stopped", "rl_sampler_data_end"})
 TRAINER_EVENTS = frozenset({"rl_round_trained", "rl_driver_start", "rl_group_policies",
-                            "rl_buffer_stale_skipped", "rl_policy_released",
+                            "rl_buffer_stale_skipped", "rl_policy_released", "rl_policy_release_skipped",
                             "rl_buffer_unidentified_policy_skipped"})
 # sampler-reported reward/length summary keys (rl_sampler_engine_round)
 # the sample-buffer reader's short-group handling per round (rl_buffer_stale_skipped)
@@ -160,6 +161,38 @@ def compaction_total(rows: list[dict]) -> dict | None:
     return out
 
 
+_ERROR_LINE = re.compile(r"^\s*([A-Za-z_][\w.]*(?:Error|Exception)): (.+)$")
+
+
+def root_cause(error: Any) -> str | None:
+    """The first ``SomeError: message`` line of a leave's error text: with chained
+    exceptions ("The above exception was the direct cause ...") that is the root cause
+    (a CUDA OOM), not the wrapper raised last (miles' NonRetryableError)."""
+    for line in str(error or "").splitlines():
+        m = _ERROR_LINE.match(line)
+        if m:
+            return f"{m.group(1)}: {m.group(2)}"[:240]
+    return None
+
+
+def trial_outcomes(agentic: dict) -> dict:
+    """One ``rl_sampler_engine_round.agentic``: trials that ended in the round by outcome
+    (``outcomes.harness_outcome_<o>_total`` are counts since the previous round event,
+    yeto.rl.engine.agentic_round._outcomes: ok / policy_limit carry a verdict, aborted is
+    an infrastructure failure), plus the incarnation's running infra-retry and lost totals
+    by reason. The per-round ``lost_trials`` only counts when a group ends, so a sampler
+    whose every trial fails shows it here first (the trial-failure alert)."""
+    out: dict = {}
+    oc = agentic.get("outcomes") if isinstance(agentic.get("outcomes"), dict) else {}
+    for key in ("ok", "policy_limit", "aborted"):
+        if _f(oc.get(f"harness_outcome_{key}_total")) is not None:
+            out[f"trials_{key}"] = _f(oc.get(f"harness_outcome_{key}_total"))
+    for key, src in (("infra_retries_by", "infra_retries_total"), ("lost_by", "lost_total")):
+        if isinstance(agentic.get(src), dict):
+            out[key] = _reasons(agentic[src])
+    return out
+
+
 def _f(v: Any) -> float | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
@@ -275,6 +308,8 @@ class AsyncState:
                 s["incarnations"].append({"incarnation": inc, "first_ts": ts, "last_ts": ts})
             elif ts is not None:
                 row["first_ts"] = ts if row["first_ts"] is None else min(row["first_ts"], ts)
+            if inc != s.get("incarnation"):
+                s["ended"] = False  # a restart: the earlier incarnation's stop is not this one's
             s["incarnation"] = inc
         if s["incarnations"] and ts is not None:
             cur = next((x for x in s["incarnations"] if x["incarnation"] == s.get("incarnation")), None)
@@ -319,6 +354,8 @@ class AsyncState:
             for k in ("retried_trials", "lost_trials"):
                 if agentic and _f(agentic.get(k)) is not None:
                     row[k] = _f(agentic.get(k))
+            if agentic:  # trials ended this round by outcome; infra retries / lost so far
+                row.update(trial_outcomes(agentic))
             if agentic and row.get("reward_mean") is None and _f(agentic.get("reward_mean")) is not None:
                 row["reward_mean"] = _f(agentic.get("reward_mean"))
             comp = compaction_row((agentic or {}).get("compaction"))
@@ -352,27 +389,42 @@ class AsyncState:
                                "released_at": None, "seen_at": None, "loaded_at": ts, "resolve_s": None,
                                "load_s": None, "pause_s": None, "buffer_selected": None, "load_wall_s": None,
                                "at_start": True})
-        elif ev in ("rl_sampler_backlog_full", "rl_sampler_admitted"):
+        elif ev in ("rl_sampler_backlog_full", "rl_sampler_admitted") or (
+                ev == "rl_sampler_waiting" and r.get("reason") == "backlog_full"):
+            # rl_sampler_waiting repeats the backlog the sampler sees while it waits
             b = _f(r.get("backlog_groups"))
             if ts is not None and b is not None:
-                s["backlog"].append([ts, b, ev == "rl_sampler_backlog_full"])
+                s["backlog"].append([ts, b, ev != "rl_sampler_admitted"])
+                del s["backlog"][:-2000]
             if r.get("max_backlog_groups") is not None:
                 s["max_backlog_groups"] = r.get("max_backlog_groups")
         if ev in SAMPLER_END_EVENTS:
             s["ended"] = True
-        s["last_wait"] = SAMPLER_WAIT_EVENTS.get(ev)
+        if ev == "rl_sampler_waiting":
+            reason = str(r.get("reason") or "")
+            s["last_wait"] = SAMPLER_WAIT_EVENTS.get(f"rl_sampler_{reason}", f"waiting ({reason or 'no reason'})")
+        else:
+            s["last_wait"] = SAMPLER_WAIT_EVENTS.get(ev)
 
     def _fold_trainer(self, r: dict, iid: str, ts: float | None, ev: str) -> None:
         t = self._t(iid)
         rid = _int(r.get("rollout_id"))
         if ev == "island_leave":
             t["left"] = {"ts": ts, "reason": r.get("reason_name") or r.get("reason"),
-                         "error_type": r.get("error_type")}
+                         "error_type": r.get("error_type"), "cause": root_cause(r.get("error"))}
+            t.setdefault("leaves", []).append(t["left"])
+            del t["leaves"][:-50]
             return
         if ev == "rl_buffer_unidentified_policy_starved":
             # the reader reads groups and keeps none (groups of versions no record names)
             t["unidentified_starved"] = {"ts": ts, "selections": r.get("selections"),
                                          "groups": r.get("unidentified_policy_groups_total")}
+            return
+        if ev == "rl_policy_release_skipped":
+            # a release skipped because the previous one is still uploading (--rl-release-skip-busy)
+            if r.get("reason") == "upload_in_flight" and ts is not None:
+                t.setdefault("upload_skips", []).append({"ts": ts, "policy_version": r.get("policy_version")})
+                del t["upload_skips"][:-200]
             return
         if ev == "rl_policy_released":
             origin = r.get("origin") if isinstance(r.get("origin"), dict) else {}
@@ -535,6 +587,9 @@ class AsyncState:
                 "zero_variance_dropped": tot("zero_variance_dropped"), "zero_variance_seen": tot("zero_variance_seen"),
                 "dropped_groups": tot("dropped_groups"),
                 "retried_trials": tot("retried_trials"), "lost_trials": tot("lost_trials"),
+                # trials ended by outcome over every round (trial_outcomes)
+                "trials_ok": tot("trials_ok"), "trials_policy_limit": tot("trials_policy_limit"),
+                "trials_aborted": tot("trials_aborted"),
                 # the last round that carried a reward (empty rounds carry none)
                 "reward_mean_last": rew.get("reward_mean") if rew else None,
                 "reward_last_ts": rew.get("ts") if rew else None,

@@ -22,6 +22,8 @@ Anything else is passed through to the events view. Missing values stay
 from __future__ import annotations
 
 import bisect
+import hashlib
+import json
 import math
 import re
 import time
@@ -294,6 +296,13 @@ class Reducer:
         self._source_island: dict[str, str] = {}  # tape path -> the island its records name
         self.async_ = async_rl.AsyncState()  # samplers / buffer / releases / NC pool (async_rl.py)
         self._superseded = False  # the record being fed is from a superseded trainer launch
+        # set by serve / export when --store is given: () -> StoreTapes.status() (store_tapes.py)
+        self.store_status: Any = None
+        self._seen_digests: set[bytes] = set()  # timestamped events folded so far (_digest)
+        self._launch_owner: dict[bytes, str] = {}  # store record -> the trainer launch that carried it first
+        self.duplicates = 0  # records dropped as already folded from another source
+        # the dashboard's own command line, for the page's "Commands" box (cli.page_commands)
+        self.commands: dict[str, str] | None = None
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
@@ -310,17 +319,36 @@ class Reducer:
             return False
         if record.get("event") == HOST_SAMPLE_EVENT:
             return self._feed_host(record, island, node)
+        kind = classify(record)
+        iid = (_iid(island) if island_fixed and island is not None and kind == "learner" else None) \
+            or _iid(record.get("island_id", record.get("learner_id"))) or island \
+            or (_iid(record.get("sampler_id")) if kind == "learner" else None)
+        digest = self._digest(record, iid)
+        duplicate = digest is not None and digest in self._seen_digests
+        launch = _store_launch(source) if kind == "learner" and iid is not None else None
+        if launch is not None and digest is not None:
+            # a store record dates the launch that carried it first; the same record in a later
+            # launch is history a restarted trainer uploaded again and must not date it
+            owner = self._launch_owner.setdefault(digest, launch)
+            if duplicate:  # folded already (often from the echoed tape): count once, still date
+                if owner == launch:
+                    self._launch(self.island(iid), launch,
+                                 record_ts(record) if kind != "pool" else async_rl.pool_ts(record))
+                else:  # the launch exists, so an older leave is attributed to the older launch
+                    self.island(iid)["launches"].setdefault(launch, {"launch": launch, "first_ts": None,
+                                                                     "last_ts": None})
+        if duplicate:
+            self.duplicates += 1
+            return False
+        if digest is not None:
+            self._seen_digests.add(digest)
         if record.get("event") in SPOT_EVENTS:
             self.spot.append(_spot_row(record))
-        kind = classify(record)
         self.counts[kind] = self.counts.get(kind, 0) + 1
         ts = record_ts(record) if kind != "pool" else async_rl.pool_ts(record)
         if ts is not None:
             self.max_ts = ts if self.max_ts is None else max(self.max_ts, ts)
             self.min_ts = ts if self.min_ts is None else min(self.min_ts, ts)
-        iid = (_iid(island) if island_fixed and island is not None and kind == "learner" else None) \
-            or _iid(record.get("island_id", record.get("learner_id"))) or island \
-            or (_iid(record.get("sampler_id")) if kind == "learner" else None)
         if record.get("event") in ("dashboard_source_lost", "dashboard_source_restored") and source.endswith(
                 ".source.jsonl"):
             # a mirror's status file names the island by the mirror's --island label; the
@@ -440,16 +468,34 @@ class Reducer:
         cur = isl["launches"].get(isl["launch"]) if isl["launch"] is not None else None
         if cur is None:
             isl["launch"], isl["launch_ts"] = launch, row["first_ts"]
+            if any(k != launch for k in isl["launches"]):
+                # an earlier launch is known only from records the echoed tape folded first
+                # (feed: duplicates): this one is its restart
+                _restart(isl, row["first_ts"])
             return False
         if launch == isl["launch"]:
             return False
         if row["first_ts"] is not None and (cur["first_ts"] is None or row["first_ts"] > cur["first_ts"]):
             isl["launch"] = launch  # a restart: a new launch of the same island
-            isl.update({"driver_started": False, "startup_steps": {}, "startup_step": None,
-                        "startup_step_ts": None, "start_phase": None, "start_phase_ts": None,
-                        "launch_ts": row["first_ts"]})
+            _restart(isl, row["first_ts"])
             return False
         return True
+
+    def _digest(self, record: dict, iid: str | None) -> bytes | None:
+        """Identity of a timestamped event of island ``iid``, None for any other record.
+        One record reaches the dashboard more than once: the launcher's echoed tape
+        (``~/.yeto/runs/<run>/events``) and the trainer's store upload carry the same
+        records, and a restarted trainer uploads its whole local tape again under its new
+        launch; ``feed`` folds it once. Records without ``time_unix`` (which may repeat
+        legitimately) have no identity; equal records of two islands (whose tapes name the
+        island by file name only) are two records."""
+        if not isinstance(record.get("event"), str) or not isinstance(record.get("time_unix"), (int, float)):
+            return None
+        try:
+            text = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            return None
+        return hashlib.blake2b(f"{iid}\x00{text}".encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
     def island(self, iid: str) -> dict:
         isl = self.islands.get(iid)
@@ -468,6 +514,10 @@ class Reducer:
         for k, v in values.items():
             if v is not None:
                 pt[k] = v
+        if pt.get("kl") is not None and pt.get("kl") == pt.get("kl_tr"):
+            # the round's other record (rl_local_round) carries the train-rollout KL in
+            # ``mean_kl`` without naming it: it is not the PPO KL (either arrival order)
+            pt.pop("kl")
 
     def _feed_learner(self, r: dict, iid: str | None, ts: float | None) -> None:
         event = r["event"]
@@ -478,6 +528,9 @@ class Reducer:
             self._touch(isl, ts)
         isl["events_by_type"][event] = isl["events_by_type"].get(event, 0) + 1
         isl["recent"].append({"ts": ts, "type": event, "summary": _summary(r)})
+        if event in ("rl_sampler_join", "rl_sampler_start") and r.get("incarnation") is not None \
+                and str(r["incarnation"]) != (self.async_.sampler.get(iid) or {}).get("incarnation"):
+            isl["finalized"] = False  # a new sampler incarnation: an earlier one's end is not this one's
         self.async_.fold(r, iid, ts)
         if r.get("policy_version") is not None and event in (
                 "rl_policy_apply", "rl_publication", "rl_driver_phase", "rl_heartbeat",
@@ -1294,13 +1347,16 @@ class Reducer:
         rounds = self.rounds()
         cost = self.cost(now)
         cards = [self._island_card(self.islands[k], now) for k in self.island_ids()]
-        alerts = alerts_mod.evaluate(self, now=now, rounds=rounds, cost=cost, cards=cards)
+        store = self.store_status() if callable(self.store_status) else None
+        alerts = alerts_mod.evaluate(self, now=now, rounds=rounds, cost=cost, cards=cards, store=store)
         torn_down = (self.operator_stop() or {}).get("cause") == "teardown"
         n_bad = sum(1 for c in cards if c["status"] in ("stale", "recovery")
                     or (c["status"] == "lost" and not torn_down))  # after teardown a lost node is expected
         sev0 = sum(1 for a in alerts if a["sev"] == 0)
         stop = self.operator_stop()
-        if not cards:
+        if not cards and store and store.get("failing"):
+            global_status = {"level": "bad", "text": "run store unreadable"}
+        elif not cards:
             global_status = {"level": "muted", "text": "no data"}
         elif stop and all(c["status"] in ("stopped", "done") for c in cards):
             global_status = {"level": "muted", "text": f"stopped (stopped by us: {stop.get('cause')})"}
@@ -1323,6 +1379,7 @@ class Reducer:
             "round_marks": [{"round": r["round"], "missed": bool(r["missed"]), "resend": r["resend"]}
                             for r in rounds],
             "counts": dict(self.counts), "events_total": self.event_seq,
+            "store": store, "commands": self.commands, "duplicates": self.duplicates,
         }
 
     def _run_meta(self) -> tuple:
@@ -1474,6 +1531,24 @@ def _gpu_from_mem(mb: float | None) -> str | None:
 # island_leave reasons that end a run on purpose; a failed trainer (INFRA_FAILED ...)
 # is relaunched, so its samplers keep running and are not "done"
 CLEAN_LEAVE = frozenset({"STOPPED", "DONE", "FINISHED", "COMPLETED", "DRAINED"})
+
+
+def _restart(isl: dict, since: float | None) -> None:
+    """A new launch of ``isl`` began at ``since``: its startup state starts over. State its
+    own records set already (the echoed tape can deliver them before the store upload
+    that dates the launch) is kept: only what is older than ``since`` is cleared."""
+    def old(ts: Any) -> bool:
+        return since is None or ts is None or ts < since
+
+    starts = [t for t in isl.get("driver_starts") or [] if t is not None and not old(t)]
+    if not starts:
+        isl["driver_started"] = False
+    isl["startup_steps"] = {k: v for k, v in isl["startup_steps"].items() if not old(v.get("ts"))}
+    if old(isl.get("startup_step_ts")):
+        isl["startup_step"], isl["startup_step_ts"] = None, None
+    if old(isl.get("start_phase_ts")):
+        isl["start_phase"], isl["start_phase_ts"] = None, None
+    isl["launch_ts"] = since
 
 
 def _clean_leave(left: dict | None) -> bool:

@@ -180,11 +180,13 @@ def run_sources(run: str) -> list[str]:
         RL_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-tape.jsonl"
 
     d = runs_mod.run_dir(run)
+    # the run's own paths are kept even before they exist: serve re-discovers them every
+    # poll, so a dashboard started before the run follows them once they appear
     out = [str(d / "events"), str(d / "fleet.jsonl")]
     syncer = Path(os.path.expanduser(RL_SYNCER_EVENT_TAPE))
-    if syncer.exists():
+    if syncer.exists():  # host-wide, not the run's: only when present at start
         out.append(str(syncer))
-    return [p for p in out if Path(p).exists()]
+    return out
 
 
 _RUN_FROM_TAPE_DIR = re.compile(r"^yeto-(.+)$")
