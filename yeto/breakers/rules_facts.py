@@ -40,6 +40,8 @@ class TrainerFacts:
     record_rounds: int = 0               # m of sample_roles.release_backlog_need
     backlog_need: int | None = None      # groups the samplers must hold between two releases
     single_buffer_trainer: bool = False  # --rl-sample-role trainer --rl-single-island-no-sync
+    # a Miles island reads the sample buffer (role trainer or convertible): it heartbeats while it waits
+    buffer_trainer: bool = False
     max_policy_staleness: int | None = None  # the algorithm spec's execution.max_policy_staleness
     estimator: str | None = None         # the algorithm spec's advantage estimator
     backend: str | None = None           # --rl-backend
@@ -155,11 +157,30 @@ def trainer_facts(args: Any, argv: list[str]) -> TrainerFacts:
         steps=positive_int(getattr(args, "total_steps", None)),
         release_every=cadence.get("release_every") or positive_int(getattr(args, "rl_release_every", None)) or 1,
         record_rounds=cadence.get("m", 0), backlog_need=cadence.get("need"),
-        single_buffer_trainer=bool(cadence),
+        single_buffer_trainer=bool(cadence), buffer_trainer=buffer_trainer(args),
         max_policy_staleness=None if algorithm is None else algorithm[0],
         estimator=None if algorithm is None else algorithm[1],
         backend=getattr(args, "rl_backend", None),
         modal=str(getattr(args, "gpu", "") or "").startswith("modal:"))
+
+
+def buffer_trainer(args: Any) -> bool:
+    """Whether a Miles island of the launch reads the sample buffer (role ``trainer`` or
+    ``convertible``): the islands whose reader heartbeats while it waits (the launcher gives
+    them the interval, ``launcher._wait_heartbeat_env``; the verl buffer feed does not beat)."""
+    from yeto.launch.topology import rl_island_count  # noqa: PLC0415
+    from yeto.rl.engine import sample_roles  # noqa: PLC0415
+
+    if (getattr(args, "rl_backend", None) or "miles") != "miles":
+        return False
+
+    readers = (sample_roles.TRAINER, sample_roles.CONVERTIBLE)
+    try:
+        roles = set(sample_roles.island_roles(args, rl_island_count(args)).values())
+        roles.add(sample_roles.sample_role(args))
+    except (TypeError, ValueError):
+        return False  # the launch's own checks name the bad role
+    return bool(roles & set(readers))
 
 
 def _algorithm(args: Any) -> tuple[int, str] | None:

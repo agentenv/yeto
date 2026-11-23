@@ -251,9 +251,21 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     io.apply_to_task(task, {**parse_island_env(args), **io.island_env(args, m, overrides),
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {}),
                             **sample_roles.island_env(iargs),
+                            **_wait_heartbeat_env(args, iargs),
                             **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None)),
                             **_resume_marker_env(iargs, getattr(spec, "cloud", None))})
     return task
+
+
+def _wait_heartbeat_env(args, iargs) -> dict[str, str]:
+    """A buffer-trainer island (it reads the sample buffer): the interval of its wait
+    heartbeat, derived from this launch's stall clock (``trainer_breakers.wait_heartbeat_env``)."""
+    from .launch.fleet import effective_stall_timeout
+    from .rl.engine import sample_roles, trainer_breakers
+
+    if sample_roles.sample_role(iargs) not in (sample_roles.TRAINER, sample_roles.CONVERTIBLE):
+        return {}
+    return trainer_breakers.wait_heartbeat_env(effective_stall_timeout(args))
 
 
 def _resume_marker_env(iargs, cloud: str | None) -> dict[str, str]:
