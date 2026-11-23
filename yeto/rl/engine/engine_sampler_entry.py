@@ -623,13 +623,33 @@ def tape_writer(path: str | Path, sampler_id: str, island_id: int | None = None)
 
 # ---------------------------------------------------------------------- run
 
+def backlog_note(spec: Mapping[str, Any]) -> tuple[Any, str | None]:
+    """``(max_backlog_groups, note)`` without the required-key check: the spec's
+    value (note None, or the note of an ``"auto"`` the pool resolved), or for
+    ``"auto"`` the cap ``yeto run up`` derived, else the fallback
+    (:func:`~.sample_roles.resolve_auto_backlog`)."""
+    from .sample_roles import AUTO_BACKLOG_NOTE_KEY, resolve_auto_backlog  # noqa: PLC0415
+
+    cap, note = resolve_auto_backlog(spec.get("max_backlog_groups"))
+    if note is None and spec.get(AUTO_BACKLOG_NOTE_KEY):
+        note = str(spec[AUTO_BACKLOG_NOTE_KEY])
+    return cap, note
+
+
+def backlog_cap(spec: Mapping[str, Any]) -> tuple[int, str | None]:
+    """``(max_backlog_groups, note)`` of a spec that must set it (:func:`backlog_note`)."""
+    _require(spec, "max_backlog_groups")
+    cap, note = backlog_note(spec)
+    return int(cap), note
+
+
 def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
     sampling = dict(_require(spec, "sampling"))
     sampling["stop"] = tuple(sampling.get("stop") or ())
     base_dir = spec.get("base_dir")
     return EngineSamplerConfig(
         sampler_id=str(_require(spec, "sampler_id")), num_rollouts=int(_require(spec, "num_rollouts")),
-        max_backlog_groups=int(_require(spec, "max_backlog_groups")),
+        max_backlog_groups=backlog_cap(spec)[0],
         sampling=SamplingParams(**sampling), max_prompt_tokens=int(_require(spec, "max_prompt_tokens")),
         base_version=int(spec.get("base_version", 0)), base_dir=None if base_dir is None else Path(base_dir),
         min_round_s=spec.get("min_round_s"), poll_s=float(spec.get("poll_s", 5.0)),
@@ -677,6 +697,9 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         spec = normalize_spec(spec)
     spec = apply_rollout_quant(spec)
     config = island_config(spec)
+    _cap, note = backlog_note(spec)
+    if note is not None:
+        print(f"[engine-sampler] max_backlog_groups {config.max_backlog_groups} ({note})", flush=True)
     incarnation = incarnation or new_incarnation()
     if env.get("YETO_BOAT_RUN_ID") and env.get("YETO_BOAT_INCARNATION") != incarnation:
         # An engine sampler (the release-store path, e.g. the 120B spot island) labels its

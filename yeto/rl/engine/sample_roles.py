@@ -68,6 +68,8 @@ This module is engine-neutral; the Miles mapping is in
 from __future__ import annotations
 
 import copy
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -905,6 +907,47 @@ def release_backlog_need(*, groups_per_round: int, release_every: int, record_ro
     The first release, at version ``release_every``, needs ``release_every x
     groups_per_round`` groups below the cap before it can be trained at all."""
     return (max(1, int(release_every)) + max(0, int(record_rounds)) + 1) * int(groups_per_round) + int(margin)
+
+
+# ``max_backlog_groups: "auto"`` in a sampler spec: ``yeto run up`` derives the cap from
+# the trainer's release cadence (:func:`auto_backlog_groups`) and hands it to its pools
+# in these variables; a pool or a sampler started without them takes the fallback.
+AUTO_BACKLOG = "auto"
+AUTO_BACKLOG_ENV = "YETO_RL_AUTO_BACKLOG_GROUPS"
+AUTO_BACKLOG_WHY_ENV = "YETO_RL_AUTO_BACKLOG_WHY"
+# the spec key a resolved "auto" cap leaves its note in (the sampler prints it at start)
+AUTO_BACKLOG_NOTE_KEY = "max_backlog_groups_auto"
+# the cap of an "auto" sampler that cannot see the run config (started on its own, or
+# a trainer the formula does not cover): large enough for one sampler of a trainer
+# releasing every 24 rounds of 8 groups, so it never waits at its cap for a release
+AUTO_BACKLOG_FALLBACK_GROUPS = 256
+
+
+def auto_backlog_groups(*, groups_per_round: int, release_every: int, record_rounds: int,
+                        samplers: int) -> int:
+    """The ``max_backlog_groups`` an ``"auto"`` sampler runs with:
+    :func:`release_backlog_need` over the samplers, rounded up
+    (``ceil(((release_every + m + 1) x groups_per_round + 8) / samplers)``)."""
+    need = release_backlog_need(groups_per_round=groups_per_round, release_every=release_every,
+                                record_rounds=record_rounds)
+    return -(-need // max(1, int(samplers)))
+
+
+def resolve_auto_backlog(value: Any, environ: Mapping[str, str] | None = None) -> tuple[Any, str | None]:
+    """``(cap, note)`` of a spec's ``max_backlog_groups``: a number is returned as is
+    (note None); ``"auto"`` takes the value ``yeto run up`` derived
+    (:data:`AUTO_BACKLOG_ENV`), else :data:`AUTO_BACKLOG_FALLBACK_GROUPS`; the note
+    says which, for the start log."""
+    if not (isinstance(value, str) and value.strip().lower() == AUTO_BACKLOG):
+        return value, None
+    env = os.environ if environ is None else environ
+    raw = str(env.get(AUTO_BACKLOG_ENV) or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        why = str(env.get(AUTO_BACKLOG_WHY_ENV) or "").strip()
+        return int(raw), "auto" + (f": {why}" if why else " (derived by yeto run up)")
+    return AUTO_BACKLOG_FALLBACK_GROUPS, (
+        f"auto: fallback {AUTO_BACKLOG_FALLBACK_GROUPS} (no run config: the release cadence and the sampler "
+        f"count are known to `yeto run up` only; set a number to size it yourself)")
 
 
 def _max_backlog_rounds(args: Any, role: str) -> int | None:

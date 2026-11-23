@@ -43,7 +43,7 @@
   },
   "sampling": {"max_tokens": 8192, "temperature": 1.0, "top_p": 1.0, "top_k": -1, "n": 8},
   "num_rollouts": 1000000,
-  "max_backlog_groups": 256,
+  "max_backlog_groups": "auto",
   "max_prompt_tokens": 4096,
   "base_version": 0,
   "poll_s": 5.0,

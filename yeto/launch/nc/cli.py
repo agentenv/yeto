@@ -707,6 +707,13 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
         spec["max_backlog_groups"] = tasks.backlog_groups(
             groups_per_round=int(spec["prompts"]["groups_per_round"]), samplers=len(spec["buffer_shards"]),
             **backlog)
+    else:  # "auto": the cap `yeto run up` derived for its pools, else the fallback (the note says which)
+        from yeto.rl.engine.sample_roles import AUTO_BACKLOG_NOTE_KEY, resolve_auto_backlog  # noqa: PLC0415
+
+        cap, note = resolve_auto_backlog(spec.get("max_backlog_groups"))
+        if note is not None:
+            spec["max_backlog_groups"] = cap
+            spec[AUTO_BACKLOG_NOTE_KEY] = note
     return spec
 
 

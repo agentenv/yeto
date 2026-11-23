@@ -82,7 +82,7 @@
   ],
   "start_on_latest": true,
   "reload_max_defer_s": 1800,
-  "max_backlog_groups": 64,
+  "max_backlog_groups": "auto",
   "max_consecutive_load_failures": 3,
   "drop_zero_variance_groups": false,
   "prompts": {
