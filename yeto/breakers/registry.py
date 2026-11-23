@@ -141,6 +141,10 @@ def _check_breaker(b: Breaker, by_name: dict[str, Breaker]) -> list[str]:
             out.append(f"{b.name}: alias {a.path} maps 'enabled' but has no off_values / on_values")
         if (a.off_values or (a.param is None and a.nargs == 0)) and not b.can_disable:
             out.append(f"{b.name}: alias {a.path} turns off an entry that cannot be disabled")
+        paths = {x.path for x in b.aliases}
+        for s in a.shadowed_by:
+            if s not in SURFACES and s not in paths:
+                out.append(f"{b.name}: alias {a.path} shadowed_by {s!r} is neither a surface nor a sibling alias")
         if a.nargs not in (0, 1) or (a.nargs == 0 and not a.surface.endswith("flag")):
             out.append(f"{b.name}: alias {a.path}: nargs 0 is for flags only (nargs 0 or 1)")
     return out

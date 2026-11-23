@@ -685,3 +685,64 @@ def test_off_when_null():
     assert rb.enabled("run.starve") and rb.get("run.starve.alert_s") is None and rb.get("run.starve.stop_s") == 7200
     with pytest.raises(RegistryError, match="off_when_null"):
         registry_mod.Registry([Breaker("run.x", "run", "alert", off_when_null=("t",), params=(Param("t", float, 1.0),))])
+
+
+# --- trainer island env and shadowed aliases ---------------------------------------------------------
+
+
+@pytest.fixture
+def island_reg():
+    return registry_mod.Registry([
+        Breaker("trainer.sample_wait", "trainer", "breaker", params=(Param("timeout_s", float, 3600.0, lo=0),),
+                aliases=(Alias("trainer_flag", "--rl-sample-wait-s", "timeout_s"),
+                         Alias("trainer_env", "YETO_SAMPLE_BUFFER_WAIT_S", "timeout_s",
+                               shadowed_by=("--rl-sample-wait-s",)))),
+        Breaker("trainer.policy_age", "trainer", "guard", params=(Param("max_versions", int, 0, lo=0),),
+                aliases=(Alias("trainer_flag", "--rl-max-policy-age", "max_versions"),
+                         Alias("trainer_env", "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE", "max_versions",
+                               shadowed_by=("trainer_flag",)))),
+        Breaker("trainer.damaged", "trainer", "breaker", params=(Param("max_run_n", int, 8, lo=0),),
+                aliases=(Alias("trainer_env", "YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN", "max_run_n", off_values=("0",)),)),
+    ])
+
+
+def test_trainer_env_reads_argv_pairs(island_reg):
+    argv = ["--island-env", "YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN=4", "--modal-env=YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN=6"]
+    rb = resolve(Sources(argv=argv, env={"YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN": "2"}), registry=island_reg)
+    assert rb.get("trainer.damaged.max_run_n") == 6  # --modal-env after --island-env, both over the env
+    assert rb.entry("trainer.damaged").sources["max_run_n"].location == \
+        "trainer.argv --modal-env YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN"
+    rb = resolve(Sources(env={"YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN": "0"}), registry=island_reg)
+    assert not rb.enabled("trainer.damaged")
+    assert rb.entry("trainer.damaged").sources["enabled"].location == "env YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN"
+
+
+def test_shadowed_alias(island_reg):
+    # the launcher derives the env from the flag: the flag wins, no conflict
+    rb = resolve(Sources(argv=["--rl-sample-wait-s", "5400"], env={"YETO_SAMPLE_BUFFER_WAIT_S": "7200"}),
+                 registry=island_reg)
+    assert rb.get("trainer.sample_wait.timeout_s") == 5400 and rb.conflicts == ()
+    # in the trainer process only the env exists
+    rb = resolve(Sources(env={"YETO_SAMPLE_BUFFER_WAIT_S": "7200", "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE": "4"}),
+                 registry=island_reg)
+    assert rb.get("trainer.sample_wait.timeout_s") == 7200 and rb.get("trainer.policy_age.max_versions") == 4
+    # any trainer argv shadows the policy-age env (the launcher always writes it)
+    rb = resolve(Sources(argv=[], env={"YETO_SAMPLE_BUFFER_MAX_POLICY_AGE": "4"}), registry=island_reg)
+    assert rb.get("trainer.policy_age.max_versions") == 0
+    with pytest.raises(RegistryError, match="shadowed_by"):
+        registry_mod.Registry([Breaker("trainer.x", "trainer", "breaker", params=(Param("n", int, 1),),
+                                       aliases=(Alias("env", "X", "n", shadowed_by=("--nope",)),))])
+
+
+def test_trainer_env_write_back(island_reg):
+    section = {"trainer": {"damaged": {"max_run_n": 3}}}
+    sources = Sources(argv=["--training-mode", "rl"], env={}, section=section)
+    out = materialize(resolve(sources, registry=island_reg), sources, registry=island_reg)
+    assert out.argv == ["--training-mode", "rl", "--island-env", "YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN=3"]
+    assert out.env == {}
+    argv = ["--modal-env", "YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN=3"]
+    sources = Sources(argv=argv, section=section)
+    assert materialize(resolve(sources, registry=island_reg), sources, registry=island_reg).argv == argv
+    sources = Sources(env={}, section=section)
+    out = materialize(resolve(sources, registry=island_reg), sources, registry=island_reg)
+    assert out.env == {"YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN": "3"}
