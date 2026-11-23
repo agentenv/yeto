@@ -229,7 +229,7 @@ def view(reducer, cards: list[dict], now: float) -> dict | None:
             "id": iid, "name": c.get("name"), "gpu": c.get("gpu"), "gpus": c.get("gpus"), "arch": arch_of(c.get("gpu")),
             "status": status, "live": bool(st.get("alive")), "starting": bool(st.get("starting")),
             "step": c.get("round") if c.get("round") is not None else c.get("rollout_id"),
-            "policy_version": c.get("policy_version"),
+            "policy_version": c.get("policy_version"), "released_version": c.get("released_version"),
             "phase": DRIVER_PHASES.get(ph.get("phase"), ph.get("phase")), "phase_since": ph.get("since"),
             "reason": (c.get("left") or {}).get("reason"),
         })

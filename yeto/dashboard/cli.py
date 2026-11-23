@@ -105,11 +105,14 @@ def _reducer(args):
 
 
 def _paths(args) -> list[str]:
-    from .sources import run_sources
+    from .sources import run_sources, up_events_path
 
     paths = list(args.tapes)
+    up_state = getattr(args, "up_state", None)
     if args.run:
-        paths = run_sources(args.run) + paths
+        paths = run_sources(args.run, up_state=up_state) + paths
+    elif up_state:  # the run up monitor's tape (run-layer breakers) sits next to its state file
+        paths.append(up_events_path(up_state=up_state))
     if not paths and not getattr(args, "store", None):
         raise SystemExit("[dashboard] no tapes: pass --run <run>, --tapes PATH... and/or --store URI")
     missing = [p for p in paths if not Path(p).expanduser().exists()]

@@ -111,7 +111,7 @@ def test_budget_past_the_cap_says_reached_not_a_negative_eta():
     r.feed({"event": "island_ready", "island": "x-l0-eu", "island_id": 0, "cloud": "nebius",
             "gpu": "H200", "gpus": 3, "time_unix": T0})
     (got,) = [a for a in r.overview(now=T0 + 3 * 3600)["alerts"] if a["rule"] == "budget"]
-    assert got["sev"] == 0 and got["detail"].endswith(", cap reached")
+    assert got["sev"] == 0 and got["title"] == "over budget" and got["detail"].startswith("over budget: $")
     assert "reached in about" not in got["detail"]
     (early,) = [a for a in r.overview(now=T0 + 0.6 * 3600)["alerts"] if a["rule"] == "budget"]
     assert "reached in about" in early["detail"] and "-" not in early["detail"].split("about")[1]

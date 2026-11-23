@@ -180,6 +180,7 @@
      "phase_since": 1795434382.0758076,
      "policy_version": 14,
      "reason": "INFRA_FAILED",
+     "released_version": 14,
      "starting": false,
      "status": "done",
      "step": 14
@@ -508,6 +509,7 @@
      "phase_since": 1795433310.747111,
      "policy_version": 14,
      "reason": "INFRA_FAILED",
+     "released_version": 14,
      "starting": false,
      "status": "done",
      "step": 14

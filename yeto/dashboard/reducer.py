@@ -38,7 +38,7 @@ from . import breakers as breakers_mod
 from . import cost as cost_mod
 from . import sft as sft_mod
 from . import topology as topology_mod
-from .sources import COST_EVENTS_FILE
+from .sources import COST_EVENTS_FILE, up_state_stops
 
 FLEET_EVENTS = frozenset({"island_launch", "island_ready", "island_lost", "island_stop", "island_done",
                           "cost_tick"})
@@ -254,7 +254,7 @@ def _new_island(iid: str) -> dict:
         "price_key": None, "cpus": None, "memory_gib": None, "driver_started": False,
         "nodes": {}, "node_series": {}, "spans": [], "pubs": {}, "first_ts": None, "last_event_ts": None, "last_heartbeat_ts": None,
         "heartbeat_seen": False, "round": None, "rollout_id": None, "policy_version": None,
-        "phase": None, "finalized": False, "fleet_state": None, "ready_ts": None, "last_ready_ts": None, "stop_ts": None,
+        "phase": None, "finalized": False, "run_end": None, "fleet_state": None, "ready_ts": None, "last_ready_ts": None, "stop_ts": None,
         "lost_ts": None, "open_ts": None, "closed_s": 0.0, "points": {}, "nonfinite": [], "resource": None, "host": None, "staleness": None,
         "contribution": None, "reconfig": [], "cells": None, "cells_source": None,
         "transactions": {}, "tx_order": [], "recovery_required": [], "source_lost": None,
@@ -466,6 +466,56 @@ class Reducer:
     def operator_stop(self) -> dict | None:
         return self.operator_stops[0] if self.operator_stops else None
 
+    def _released_version(self, iid: str) -> int | None:
+        """The newest version this trainer released (``rl_policy_released``): with a release
+        every N rounds it trails the trainer's own (local) ``policy_version``."""
+        rel = [x for x in self.async_.releases if str(x.get("trainer")) == str(iid)
+               and isinstance(x.get("policy_version"), int)]
+        return max(rel, key=lambda x: (x.get("ts") or 0, x["policy_version"]))["policy_version"] if rel else None
+
+    def run_finish(self) -> dict | None:
+        """The run ended on its own: every trainer (every island when no role is known) that
+        wrote ``rl_run_end`` -- its process exits 0 at ``data_ended`` / ``total_steps`` /
+        ``stop_after_rounds`` / ``stopped`` (the sync ended it). None while one has not."""
+        ids = [i for i, role in self.async_.roles.items() if role == "trainer" and i in self.islands] \
+            or [i for i, isl in self.islands.items() if isl.get("run_end")]
+        ends = [self.islands[i].get("run_end") for i in ids]
+        if not ends or any(e is None for e in ends):
+            return None
+        last = max(ends, key=lambda e: e.get("ts") or 0)
+        reasons = sorted({str(e.get("reason") or "ended") for e in ends})
+        return {"reason": " / ".join(reasons), "source": last.get("source"), "ts": last.get("ts")}
+
+    def active_stops(self) -> list[dict]:
+        """Our stops that end a run on purpose: the stop markers (gate / early / watchdog),
+        a ``run up`` breaker's stop (``stop_reason`` in its state file, or an ``rl_breaker``
+        stop trip). ``teardown.json`` is not one: the launcher writes it after a normal finish
+        as well (see :meth:`run_end_status`)."""
+        out = [dict(x, kind="marker") for x in self.operator_stops if x.get("cause") != "teardown"]
+        for t in self.breakers.trips:
+            if t.get("state") == "trip" and t.get("stop_reason"):
+                out.append({"cause": t["stop_reason"], "time_unix": t.get("ts"), "marker": "rl_breaker " + str(t.get("name")),
+                            "kind": "breaker"})
+        out += up_state_stops(getattr(self, "up_state", None))
+        return sorted(out, key=lambda x: x.get("time_unix") or 0)
+
+    def run_end_status(self) -> dict | None:
+        """How the run ended, once it has: ``{"kind": "stopped", "stop": ...}`` when we stopped
+        it (an active stop not later than the trainers' normal end, or a teardown without one),
+        ``{"kind": "finished", "finish": ...}`` when the trainers ended on their own (a teardown
+        after that is the launcher cleaning up), else None."""
+        finish = self.run_finish()
+        stops = self.active_stops()
+        if finish is not None:
+            end = finish.get("ts")
+            early = [x for x in stops if end is None or x.get("time_unix") is None
+                     or x["time_unix"] <= end + STOP_SLACK_S]
+            return {"kind": "stopped", "stop": early[0]} if early else {"kind": "finished", "finish": finish}
+        if stops:
+            return {"kind": "stopped", "stop": stops[0]}
+        stop = self.operator_stop()
+        return {"kind": "stopped", "stop": stop} if stop else None
+
     def stopped_by_us(self, isl: dict) -> bool:
         """True when we issued a stop and the island's first failure (RECOVERY_REQUIRED
         or fleet island_lost) is not earlier than it (5 s slack for clock skew between
@@ -473,6 +523,8 @@ class Reducer:
         stop = self.operator_stop()
         if stop is None or stop.get("time_unix") is None:
             return False
+        if stop.get("cause") == "teardown" and (self.run_end_status() or {}).get("kind") == "finished":
+            return False  # the launcher's cleanup after the trainers ended on their own
         if stop.get("cause") == "teardown" and (isl["last_event_ts"] or 0) > stop["time_unix"] + 60:
             return False  # an older launch's teardown.json: this island ran after it
         if stop.get("cause") == "teardown" and (isl["last_ready_ts"] or 0) > stop["time_unix"] + STOP_SLACK_S:
@@ -733,6 +785,11 @@ class Reducer:
             isl["cuts"].append({"ts": ts, "rollout_id": r.get("rollout_id"), "cut_id": r.get("cut_id"),
                                 "bytes": r.get("cut_bytes"), "save_s": r.get("save_s"),
                                 "total_s": r.get("total_s")})
+        elif event == "rl_run_end":
+            # the island ends normally (its process exits 0): why (driver._emit_run_end)
+            if ts is None or isl.get("launch_ts") is None or ts >= isl["launch_ts"]:
+                isl["run_end"] = {"ts": ts, "reason": r.get("reason"), "source": r.get("source"),
+                                  "rollout_id": r.get("rollout_id")}
         elif event == "rl_learner_finalized":
             # a launch's finalize read after a newer launch began belongs to the older launch
             if ts is None or isl.get("launch_ts") is None or ts >= isl["launch_ts"]:
@@ -1420,6 +1477,7 @@ class Reducer:
             "startup_step": isl["startup_step"],
             "startup_step_age_s": _r(now - step_ref) if starting and step_ref is not None else None,
             "rollout_id": isl["rollout_id"], "policy_version": isl["policy_version"],
+            "released_version": self._released_version(isl["id"]),
             "phase": isl["phase"], "staleness": isl["staleness"], "contribution": isl["contribution"],
             "gpu_util_pct": res.get("util_pct"), "mem_pct": res.get("mem_pct"),
             "resource_available": res.get("available") if res else None,
@@ -1565,12 +1623,18 @@ class Reducer:
                     or (c["status"] == "lost" and not torn_down))  # after teardown a lost node is expected
         sev0 = sum(1 for a in alerts if a["sev"] == 0)
         stop = self.operator_stop()
+        # every island ended (a trainer leaving on a STOP flag reads "left"): how the run ended
+        ended = self.run_end_status() if cards and all(c["status"] in ("stopped", "done", "left") for c in cards) else None
         if not cards and store and store.get("failing"):
             global_status = {"level": "bad", "text": "run store unreadable"}
         elif not cards:
             global_status = {"level": "muted", "text": "no data"}
-        elif stop and all(c["status"] in ("stopped", "done") for c in cards):
-            global_status = {"level": "muted", "text": f"stopped (stopped by us: {stop.get('cause')})"}
+        elif ended and ended["kind"] == "finished":
+            fin_ = ended["finish"]
+            global_status = {"level": "ok", "text": f"finished ({fin_['reason']}"
+                             + (f", {fin_['source']}" if fin_.get("source") else "") + ")"}
+        elif ended and ended["kind"] == "stopped":
+            global_status = {"level": "muted", "text": f"stopped (stopped by us: {ended['stop'].get('cause')})"}
         elif n_bad:
             global_status = {"level": "bad", "text": f"{n_bad} islands unhealthy"}
         elif sev0:
@@ -1582,6 +1646,7 @@ class Reducer:
         run, inferred = self.run_name()
         return {
             "run": run, "run_inferred": inferred, "operator_stop": stop, "run_kind": self.run_kind(),
+            "run_end": ended,
             "mode": "live" if live else "offline", "now": now,
             "data_ts": self.max_ts, "first_ts": self.min_ts, "global_status": global_status,
             "alerts": alerts, "cost": cost, "islands": cards,

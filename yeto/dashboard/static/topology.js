@@ -13,6 +13,8 @@ var bound=false,T=null,V=null,L=null,P=[],C=null,recvAt=0,lastTd=null,raf=null,v
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
 function fin(x){return typeof x==="number"&&isFinite(x)}
+// a trainer releasing every N rounds runs ahead of its last release: name both, never two bare numbers
+function pvTxt(v,rel){if(!fin(v))return fin(rel)?"released v"+rel:"n/a";return fin(rel)&&rel!==v?"local v"+v+" · released v"+rel:"v"+v}
 function el(tag,attrs,parent,text){var e=document.createElementNS(NS,tag);if(attrs)for(var k in attrs)e.setAttribute(k,attrs[k]);if(text!=null)e.textContent=text;if(parent)parent.appendChild(e);return e}
 function dur(s){if(!fin(s))return "n/a";s=Math.max(0,Math.round(s));if(s<60)return s+"s";var m=Math.floor(s/60),r=s%60;return m<60?m+"m"+(r<10?"0":"")+r+"s":Math.floor(m/60)+"h"+(m%60)+"m"}
 function bytes(b){return !fin(b)?"n/a":b>=1e9?(b/1e9).toFixed(2)+" GB":(b/1e6).toFixed(0)+" MB"}
@@ -183,7 +185,7 @@ function paint(){
   L.trc.forEach(function(o,k){var tr=L.trs[k];
     // the round the "Islands now" table shows: the trainer's last round record
     var rr=(((V||{}).islands||{})[tr.id]||{}).rounds||[],lr=null;for(var i=rr.length-1;i>=0;i--)if(fin(rr[i].ts)&&rr[i].round!=null){lr=rr[i].round;break}
-    o.step.textContent=lr!=null?"round "+lr:fin(tr.step)?"round "+tr.step:"round n/a";o.ver.textContent=fin(tr.policy_version)?"policy v"+tr.policy_version:"";
+    o.step.textContent=lr!=null?"round "+lr:fin(tr.step)?"round "+tr.step:"round n/a";o.ver.textContent=fin(tr.policy_version)?(fin(tr.released_version)&&tr.released_version!==tr.policy_version?pvTxt(tr.policy_version,tr.released_version):"policy v"+tr.policy_version):"";
     var txt,col;
     if(!tr.live){txt=(tr.status||"ended")+(tr.reason?": "+tr.reason:"");col=C.ink2}
     else if(tr.starting||tr.status==="starting"){txt="starting";col=C.warn}

@@ -194,7 +194,17 @@ def load_all(reducer, paths: list[str]) -> list[TapeSource]:
     return sources
 
 
-def run_sources(run: str) -> list[str]:
+def up_events_path(run: str | None = None, up_state: str | None = None) -> str | None:
+    """The ``run up`` monitor's tape: next to ``--up-state`` (the state file ``run up`` hands the
+    dashboard it starts), else ``$YETO_STATE_DIR/<run>`` (default ``~/.yeto/rl-up``)."""
+    if up_state:
+        return str(Path(os.path.expanduser(str(up_state))).parent / UP_EVENTS_FILE)
+    if run:
+        return str(Path(os.environ.get("YETO_STATE_DIR") or "~/.yeto/rl-up").expanduser() / run / UP_EVENTS_FILE)
+    return None
+
+
+def run_sources(run: str, up_state: str | None = None) -> list[str]:
     """Default tape locations for a run registered under ``~/.yeto/runs``."""
     from .. import runs as runs_mod
 
@@ -209,8 +219,7 @@ def run_sources(run: str) -> list[str]:
     # guard's and the ``run up`` monitor's tapes feed the Breakers panel only; the host-wide
     # syncer tape too: a syncer that starts after the dashboard (or a tape the launcher copies
     # from the syncer's host later) is followed once it appears, with its shards
-    up = Path(os.environ.get("YETO_STATE_DIR") or "~/.yeto/rl-up").expanduser() / run
-    return [str(d / "events"), str(d / "fleet.jsonl"), str(d / COST_EVENTS_FILE), str(up / UP_EVENTS_FILE),
+    return [str(d / "events"), str(d / "fleet.jsonl"), str(d / COST_EVENTS_FILE), up_events_path(run, up_state),
             str(Path(os.path.expanduser(RL_SYNCER_EVENT_TAPE)))]
 
 
@@ -334,3 +343,34 @@ def operator_stops_near(paths: list[str], max_up: int = 5) -> list[dict]:
             seen.add(d)
             out += stop_records_in(d)
     return out
+
+
+_UP_STOPS: dict[str, tuple] = {}
+
+
+def up_state_stops(path: str | os.PathLike | None) -> list[dict]:
+    """The stops a ``run up`` monitor recorded in its state file (``--up-state``): every
+    top-level entry with a ``stop_reason`` (a breaker trip that stopped the trainer:
+    ``{"at": <utc>, "why": ..., "stop_reason": ...}``). Re-read when the file changes."""
+    if not path:
+        return []
+    p = Path(os.path.expanduser(str(path)))
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return []
+    hit = _UP_STOPS.get(str(p))
+    if hit and hit[0] == mtime:
+        return [dict(x) for x in hit[1]]
+    try:
+        state = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return []
+    out = []
+    for key, row in (state.items() if isinstance(state, dict) else ()):
+        if isinstance(row, dict) and row.get("stop_reason"):
+            at = row.get("at")
+            out.append({"cause": str(row["stop_reason"]), "time_unix": _utc_stamp(at) if isinstance(at, str) else None,
+                        "marker": f"{p.name} {key}", "path": str(p), "why": row.get("why"), "kind": "up"})
+    _UP_STOPS[str(p)] = (mtime, out)
+    return [dict(x) for x in out]

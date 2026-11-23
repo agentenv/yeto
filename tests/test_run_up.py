@@ -698,3 +698,21 @@ def test_dry_run_warns_where_a_real_modal_launch_stops(monkeypatch, capsys):
     with pytest.raises(Past):
         cli.cmd_launch(SimpleNamespace(cluster_prefix="x", gpu="modal:2x8xb300", dry_run=True))
     assert "WARNING (dry run; a real launch stops here)" in capsys.readouterr().err
+
+
+def test_dashboard_reads_the_run_up_tape_next_to_its_state(make_run, monkeypatch, tmp_path):
+    """``up`` names the dashboard's run by the trainer launch (``--run r1-trainer``) while its
+    own state directory is named by the run: the run-layer breaker tape is found through
+    ``--up-state``, wherever YETO_STATE_DIR points."""
+    import argparse
+
+    from yeto.dashboard import cli
+
+    run = make_run()
+    monkeypatch.setenv("YETO_STATE_DIR", str(tmp_path / "elsewhere"))
+    p = argparse.ArgumentParser()
+    cli.add_parser(p.add_subparsers(dest="command"))
+    args = p.parse_args(["dashboard", "export", "-o", "x.html", *run.dashboard_args()])
+    paths = cli._paths(args)
+    assert str(run.state_path.parent / "events.jsonl") in paths
+    assert not any("elsewhere" in x for x in paths)

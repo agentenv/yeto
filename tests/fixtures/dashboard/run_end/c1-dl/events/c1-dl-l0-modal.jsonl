@@ -1,0 +1,180 @@
+{"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "policy_version": null, "rollout_id": null, "seq": 1, "time_unix": 1795463485.8719642}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "policy_version": null, "rollout_id": null, "seq": 2, "time_unix": 1795463515.873521}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "policy_version": null, "rollout_id": null, "seq": 3, "time_unix": 1795463545.8751402}
+{"event": "rl_driver_start", "island_id": 0, "time_unix": 1795463571.8431778}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 0, "time_unix": 1795463578.7089794}
+{"event": "rl_publication", "island_id": 0, "policy_version": 0, "time_unix": 1795463579.300091}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 0, "rollout_id": 0, "time_unix": 1795463579.3008523}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 0, "time_unix": 1795463595.5848384}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 0, "rollout_id": 0, "seq": 1, "rounds_completed": 0, "time_unix": 1795463601.8425558}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 0, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.4390625, "grad_norm": 1.8182082176208496, "step_seconds": 15.897546914999964, "tok_per_s": 338.7944082692466, "policy_age_mean": 0.0, "policy_age_max": 0, "time_unix": 1795463611.4832637}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 0, "time_unix": 1795463611.5004752}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 1, "time_unix": 1795463618.4665177}
+{"event": "rl_publication", "island_id": 0, "policy_version": 1, "time_unix": 1795463618.4726837}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 1, "rollout_id": 1, "time_unix": 1795463618.4735804}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 1, "time_unix": 1795463626.9029813}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 1, "rollout_id": 1, "seq": 2, "rounds_completed": 1, "time_unix": 1795463631.8430626}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 1, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.15625, "grad_norm": 1.2545853853225708, "step_seconds": 7.879888649999998, "tok_per_s": 682.7507645047752, "policy_age_mean": 1.0, "policy_age_max": 1, "time_unix": 1795463634.7832868}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 1, "time_unix": 1795463634.7911305}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 2, "time_unix": 1795463641.7332172}
+{"event": "rl_publication", "island_id": 0, "policy_version": 2, "time_unix": 1795463641.7385516}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 2, "rollout_id": 2, "time_unix": 1795463641.7393887}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 2, "time_unix": 1795463647.1799982}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 2, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.1627609375, "grad_norm": 0.5400445461273193, "step_seconds": 9.537081771999965, "tok_per_s": 603.4340627020914, "policy_age_mean": 2.0, "policy_age_max": 2, "time_unix": 1795463656.7174866}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 2, "time_unix": 1795463656.7252777}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 2, "rollout_id": 2, "seq": 3, "rounds_completed": 2, "time_unix": 1795463661.8449583}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 3, "time_unix": 1795463663.7987227}
+{"event": "rl_publication", "island_id": 0, "policy_version": 3, "time_unix": 1795463663.8050296}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "time_unix": 1795463663.806387}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 3, "time_unix": 1795463677.493956}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 3, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.359375, "grad_norm": 0.15288637578487396, "step_seconds": 8.538530008999999, "tok_per_s": 1158.1618837875542, "policy_age_mean": 3.0, "policy_age_max": 3, "time_unix": 1795463686.03296}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 3, "time_unix": 1795463686.0410657}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 3, "rollout_id": 3, "seq": 4, "rounds_completed": 3, "time_unix": 1795463691.8462925}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 4, "time_unix": 1795463693.1284583}
+{"event": "rl_publication", "island_id": 0, "policy_version": 4, "time_unix": 1795463693.1341379}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "time_unix": 1795463693.1349978}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 5, "rounds_completed": 4, "time_unix": 1795463721.847394}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 6, "rounds_completed": 4, "time_unix": 1795463751.8481443}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 7, "rounds_completed": 4, "time_unix": 1795463781.84956}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 4, "time_unix": 1795463781.913449}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 4, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.40625, "grad_norm": 0.9600728750228882, "step_seconds": 11.17683466699998, "tok_per_s": 1044.2133526819593, "policy_age_mean": 4.0, "policy_age_max": 4, "time_unix": 1795463793.0907593}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 4, "time_unix": 1795463793.0984766}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 5, "time_unix": 1795463800.2653403}
+{"event": "rl_publication", "island_id": 0, "policy_version": 5, "time_unix": 1795463800.2705064}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "time_unix": 1795463800.271326}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "seq": 8, "rounds_completed": 5, "time_unix": 1795463811.8508825}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "seq": 9, "rounds_completed": 5, "time_unix": 1795463841.8527105}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "seq": 10, "rounds_completed": 5, "time_unix": 1795463871.8540976}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "seq": 11, "rounds_completed": 5, "time_unix": 1795463901.8547623}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "seq": 12, "rounds_completed": 5, "time_unix": 1795463931.8561983}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "seq": 13, "rounds_completed": 5, "time_unix": 1795463961.8576112}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 5, "time_unix": 1795463962.8915036}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 5, "rollout_id": 5, "seq": 14, "rounds_completed": 5, "time_unix": 1795463991.8581836}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 5, "trained_groups": 8, "trained_samples": 98, "reward_mean": 0.407553125, "grad_norm": 0.358527272939682, "step_seconds": 50.393190822000065, "tok_per_s": 992.6142636350469, "policy_age_mean": 5.0, "policy_age_max": 5, "time_unix": 1795464013.2851436}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 5, "time_unix": 1795464013.2968228}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 6, "time_unix": 1795464020.3507419}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "publish", "policy_version": 5, "rollout_id": null, "seq": 15, "rounds_completed": 5, "time_unix": 1795464021.8591297}
+{"event": "rl_publication", "island_id": 0, "policy_version": 6, "time_unix": 1795464025.8024666}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "time_unix": 1795464025.803394}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 16, "rounds_completed": 6, "time_unix": 1795464051.8603525}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 6, "local_version": 6, "seq": 1, "released_at": 1795464067.736, "release_bytes": 8060901581, "release_timings": {"digest_s": 0.001, "latest_s": 2.579, "prune_s": 0.702, "read_latest_s": 0.953, "stage_export_s": 5.441, "upload_s": 40.343, "wait_previous_s": 0.0}, "buffer_selected": 49, "time_unix": 1795464071.0183232}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 17, "rounds_completed": 6, "time_unix": 1795464081.8614845}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 18, "rounds_completed": 6, "time_unix": 1795464111.8625317}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 19, "rounds_completed": 6, "time_unix": 1795464141.8657522}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 6, "time_unix": 1795464155.2388844}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 6, "rollout_id": 6, "seq": 20, "rounds_completed": 6, "time_unix": 1795464171.8663528}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 6, "rollout_id": 6, "seq": 21, "rounds_completed": 6, "time_unix": 1795464201.8676846}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 6, "rollout_id": 6, "seq": 22, "rounds_completed": 6, "time_unix": 1795464231.8683622}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 6, "rollout_id": 6, "seq": 23, "rounds_completed": 6, "time_unix": 1795464261.8695319}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 6, "trained_groups": 8, "trained_samples": 174, "reward_mean": 0.39584375, "grad_norm": 0.2135784775018692, "step_seconds": 119.07801940599995, "tok_per_s": 921.0096082138396, "policy_age_mean": 6.0, "policy_age_max": 6, "time_unix": 1795464274.3174624}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 6, "time_unix": 1795464274.340314}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 7, "time_unix": 1795464281.5650158}
+{"event": "rl_publication", "island_id": 0, "policy_version": 7, "time_unix": 1795464281.571116}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "time_unix": 1795464281.572115}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 24, "rounds_completed": 7, "time_unix": 1795464291.870937}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 25, "rounds_completed": 7, "time_unix": 1795464321.87254}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 26, "rounds_completed": 7, "time_unix": 1795464351.8737168}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 27, "rounds_completed": 7, "time_unix": 1795464381.8746805}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 28, "rounds_completed": 7, "time_unix": 1795464411.8758523}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 7, "time_unix": 1795464422.0935035}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 7, "rollout_id": 7, "seq": 29, "rounds_completed": 7, "time_unix": 1795464441.8767328}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 7, "rollout_id": 7, "seq": 30, "rounds_completed": 7, "time_unix": 1795464471.8773181}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 7, "rollout_id": 7, "seq": 31, "rounds_completed": 7, "time_unix": 1795464501.8779738}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 7, "rollout_id": 7, "seq": 32, "rounds_completed": 7, "time_unix": 1795464531.8788142}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 7, "trained_groups": 8, "trained_samples": 179, "reward_mean": 0.23270000000000002, "grad_norm": 0.19559374451637268, "step_seconds": 128.451489585, "tok_per_s": 925.1196726789598, "policy_age_mean": 4.75, "policy_age_max": 7, "time_unix": 1795464550.5458832}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 7, "time_unix": 1795464550.5658352}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 8, "time_unix": 1795464557.6108148}
+{"event": "rl_publication", "island_id": 0, "policy_version": 8, "time_unix": 1795464557.6160371}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "time_unix": 1795464557.6169748}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "seq": 33, "rounds_completed": 8, "time_unix": 1795464561.8803403}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 8, "time_unix": 1795464566.5791166}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 8, "rollout_id": 8, "seq": 34, "rounds_completed": 8, "time_unix": 1795464591.8811715}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 8, "trained_groups": 8, "trained_samples": 88, "reward_mean": 0.20390625, "grad_norm": 0.2803308963775635, "step_seconds": 38.60146544999998, "tok_per_s": 1334.198051799612, "policy_age_mean": 2.0, "policy_age_max": 2, "time_unix": 1795464605.181035}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 8, "time_unix": 1795464605.1920717}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 9, "time_unix": 1795464612.2193673}
+{"event": "rl_publication", "island_id": 0, "policy_version": 9, "time_unix": 1795464612.2252073}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 9, "rollout_id": 9, "time_unix": 1795464612.2260377}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 9, "time_unix": 1795464618.0433812}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 9, "rollout_id": 9, "seq": 35, "rounds_completed": 9, "time_unix": 1795464621.8817673}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 9, "rollout_id": 9, "seq": 36, "rounds_completed": 9, "time_unix": 1795464651.8829262}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 9, "trained_groups": 8, "trained_samples": 114, "reward_mean": 0.2109375, "grad_norm": 0.21671365201473236, "step_seconds": 60.925524388999975, "tok_per_s": 1125.4724631041538, "policy_age_mean": 3.0, "policy_age_max": 3, "time_unix": 1795464678.9693573}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 9, "time_unix": 1795464678.9855464}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 9, "rollout_id": 9, "seq": 37, "rounds_completed": 9, "time_unix": 1795464681.8842182}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 10, "time_unix": 1795464686.0151365}
+{"event": "rl_publication", "island_id": 0, "policy_version": 10, "time_unix": 1795464686.0204442}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "time_unix": 1795464686.021354}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "seq": 38, "rounds_completed": 10, "time_unix": 1795464711.8857012}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "seq": 39, "rounds_completed": 10, "time_unix": 1795464741.8867772}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 10, "time_unix": 1795464765.484985}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 10, "rollout_id": 10, "seq": 40, "rounds_completed": 10, "time_unix": 1795464771.8873127}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 10, "trained_groups": 8, "trained_samples": 84, "reward_mean": 0.2265625, "grad_norm": 0.4101409614086151, "step_seconds": 34.266953264999984, "tok_per_s": 991.1298427190362, "policy_age_mean": 4.0, "policy_age_max": 4, "time_unix": 1795464799.7523735}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 10, "time_unix": 1795464799.7623208}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 10, "rollout_id": 10, "seq": 41, "rounds_completed": 10, "time_unix": 1795464801.8886402}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 11, "time_unix": 1795464806.8419402}
+{"event": "rl_publication", "island_id": 0, "policy_version": 11, "time_unix": 1795464806.8476138}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 11, "rollout_id": 11, "time_unix": 1795464806.8485494}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 11, "time_unix": 1795464816.9338682}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 11, "rollout_id": 11, "seq": 42, "rounds_completed": 11, "time_unix": 1795464831.8892226}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 11, "rollout_id": 11, "seq": 43, "rounds_completed": 11, "time_unix": 1795464861.889809}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 11, "trained_groups": 8, "trained_samples": 124, "reward_mean": 0.1464296875, "grad_norm": 0.21498940885066986, "step_seconds": 72.71042501299985, "tok_per_s": 922.4674451842093, "policy_age_mean": 5.0, "policy_age_max": 5, "time_unix": 1795464889.64477}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 11, "time_unix": 1795464889.658971}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 11, "rollout_id": 11, "seq": 44, "rounds_completed": 11, "time_unix": 1795464891.8904397}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 12, "time_unix": 1795464896.6614208}
+{"event": "rl_publication", "island_id": 0, "policy_version": 12, "time_unix": 1795464901.3101625}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 12, "rollout_id": 12, "time_unix": 1795464901.3111608}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 12, "rollout_id": 12, "seq": 45, "rounds_completed": 12, "time_unix": 1795464921.8910823}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 12, "local_version": 12, "seq": 2, "released_at": 1795464939.894, "release_bytes": 8060901581, "release_timings": {"digest_s": 0.001, "latest_s": 1.957, "prune_s": 0.911, "read_latest_s": 0.589, "stage_export_s": 4.639, "upload_s": 37.996, "wait_previous_s": 0.0}, "buffer_selected": 97, "time_unix": 1795464942.7616467}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 12, "time_unix": 1795464943.3127553}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 12, "rollout_id": 12, "seq": 46, "rounds_completed": 12, "time_unix": 1795464951.8917248}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 12, "trained_groups": 8, "trained_samples": 71, "reward_mean": 0.12369999999999999, "grad_norm": 0.5132743120193481, "step_seconds": 18.513857490999953, "tok_per_s": 1225.2443884818308, "policy_age_mean": 6.0, "policy_age_max": 6, "time_unix": 1795464961.8270514}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 12, "time_unix": 1795464961.8357081}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 13, "time_unix": 1795464968.875158}
+{"event": "rl_publication", "island_id": 0, "policy_version": 13, "time_unix": 1795464968.8806791}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "time_unix": 1795464968.8815823}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "seq": 47, "rounds_completed": 13, "time_unix": 1795464981.8924704}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "seq": 48, "rounds_completed": 13, "time_unix": 1795465011.893083}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "seq": 49, "rounds_completed": 13, "time_unix": 1795465041.8937554}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 13, "time_unix": 1795465042.2932632}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 13, "rollout_id": 13, "seq": 50, "rounds_completed": 13, "time_unix": 1795465071.894583}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 13, "trained_groups": 8, "trained_samples": 102, "reward_mean": 0.32135625, "grad_norm": 0.1863754838705063, "step_seconds": 47.15584148300013, "tok_per_s": 957.2727064211866, "policy_age_mean": 7.0, "policy_age_max": 7, "time_unix": 1795465089.4495242}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 13, "time_unix": 1795465089.4622626}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 14, "time_unix": 1795465096.4707997}
+{"event": "rl_publication", "island_id": 0, "policy_version": 14, "time_unix": 1795465096.476436}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "time_unix": 1795465096.4773407}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "seq": 51, "rounds_completed": 14, "time_unix": 1795465101.8957305}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "seq": 52, "rounds_completed": 14, "time_unix": 1795465131.8967578}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "seq": 53, "rounds_completed": 14, "time_unix": 1795465161.897963}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "seq": 54, "rounds_completed": 14, "time_unix": 1795465191.899482}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 14, "time_unix": 1795465214.3488767}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 14, "rollout_id": 14, "seq": 55, "rounds_completed": 14, "time_unix": 1795465221.900157}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 14, "rollout_id": 14, "seq": 56, "rounds_completed": 14, "time_unix": 1795465251.900776}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 14, "trained_groups": 8, "trained_samples": 95, "reward_mean": 0.63671875, "grad_norm": 0.30844342708587646, "step_seconds": 41.157824193999886, "tok_per_s": 872.1549475210846, "policy_age_mean": 3.5, "policy_age_max": 8, "time_unix": 1795465255.5077147}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 14, "time_unix": 1795465255.5194638}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 15, "time_unix": 1795465262.5551736}
+{"event": "rl_publication", "island_id": 0, "policy_version": 15, "time_unix": 1795465262.5607326}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 15, "rollout_id": 15, "time_unix": 1795465262.5616188}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 15, "rollout_id": 15, "seq": 57, "rounds_completed": 15, "time_unix": 1795465281.9021997}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 15, "rollout_id": 15, "seq": 58, "rounds_completed": 15, "time_unix": 1795465311.9038227}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 15, "time_unix": 1795465329.235523}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 15, "rollout_id": 15, "seq": 59, "rounds_completed": 15, "time_unix": 1795465341.9045436}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 15, "rollout_id": 15, "seq": 60, "rounds_completed": 15, "time_unix": 1795465371.9053376}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 15, "trained_groups": 8, "trained_samples": 109, "reward_mean": 0.6344875, "grad_norm": 0.1842789202928543, "step_seconds": 54.953259135999815, "tok_per_s": 936.4139781527401, "policy_age_mean": 3.0, "policy_age_max": 3, "time_unix": 1795465384.189246}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 15, "time_unix": 1795465384.2019856}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 16, "time_unix": 1795465391.1378028}
+{"event": "rl_publication", "island_id": 0, "policy_version": 16, "time_unix": 1795465391.1431992}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 16, "rollout_id": 16, "time_unix": 1795465391.1440964}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 16, "rollout_id": 16, "seq": 61, "rounds_completed": 16, "time_unix": 1795465401.9066966}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 16, "rollout_id": 16, "seq": 62, "rounds_completed": 16, "time_unix": 1795465431.908171}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 16, "time_unix": 1795465460.1439738}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 16, "rollout_id": 16, "seq": 63, "rounds_completed": 16, "time_unix": 1795465461.9087746}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 16, "rollout_id": 16, "seq": 64, "rounds_completed": 16, "time_unix": 1795465491.909369}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 16, "trained_groups": 8, "trained_samples": 105, "reward_mean": 0.268696875, "grad_norm": 0.40120190382003784, "step_seconds": 52.81430849499975, "tok_per_s": 911.4007429361161, "policy_age_mean": 4.0, "policy_age_max": 4, "time_unix": 1795465512.958772}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 16, "time_unix": 1795465512.9709785}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 17, "time_unix": 1795465519.939099}
+{"event": "rl_publication", "island_id": 0, "policy_version": 17, "time_unix": 1795465519.9447107}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 17, "rollout_id": 17, "time_unix": 1795465519.9455786}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 17, "rollout_id": 17, "seq": 65, "rounds_completed": 17, "time_unix": 1795465521.9106638}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 17, "rollout_id": 17, "seq": 66, "rounds_completed": 17, "time_unix": 1795465551.9113326}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 17, "rollout_id": 17, "seq": 67, "rounds_completed": 17, "time_unix": 1795465581.9125695}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 17, "rollout_id": 17, "seq": 68, "rounds_completed": 17, "time_unix": 1795465611.9134789}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 17, "rollout_id": 17, "seq": 69, "rounds_completed": 17, "time_unix": 1795465641.9150116}
