@@ -43,7 +43,9 @@ from typing import Any
 
 from .topology import DRIVER_PHASES, RATE_S, WINDOW_S, arch_of
 
-SHARD_TAPE = re.compile(r"\.shard(\d+)\.jsonl$")
+# shard i > 0 of the syncer: its local tape yeto-tape.shard<i>.jsonl, or its store upload
+# tapes/syncer-shard<i>/<incarnation>/ (source "store:syncer-shard<i>/<incarnation>")
+SHARD_TAPE = re.compile(r"\.shard(\d+)\.jsonl$|(?:^|[:/])syncer-shard(\d+)/")
 VECTOR_KEYS = ("rl/fragment_versions", "sync/fragment_versions")
 ROUND_OPEN_WARN_S = 120.0  # a round open longer than max(this, 3 x median round wall time): waiting for quorum
 STUCK_MIN_S = 240.0  # a fragment not merged for max(this, 3 x the fragment period): not advancing
@@ -77,8 +79,9 @@ def _median(xs: list[float]) -> float | None:
 
 
 def shard_count(reducer) -> int:
-    """Shards of the syncer: one tape per shard, ``yeto-tape.shard<i>.jsonl`` for i > 0."""
-    idx = [int(m.group(1)) for s in reducer.sources_seen for m in [SHARD_TAPE.search(s)] if m]
+    """Shards of the syncer: one tape per shard, ``yeto-tape.shard<i>.jsonl`` (or its store
+    upload ``syncer-shard<i>``) for i > 0."""
+    idx = [int(m.group(1) or m.group(2)) for s in reducer.sources_seen for m in [SHARD_TAPE.search(s)] if m]
     return max(idx) + 1 if idx else 1
 
 

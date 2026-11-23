@@ -26,6 +26,8 @@ class LocalSyncer:
     it pick up from its on-disk checkpoint.
     """
 
+    store_uploaders: tuple = ()  # start_store_upload: the syncer tape's run-store uploaders
+
     def __init__(
         self,
         args,
@@ -130,6 +132,9 @@ class LocalSyncer:
         if self.tape_run is not None:
             self.tape_run.finish()
             self.tape_run = None
+        for up in self.store_uploaders:  # drains what the syncer wrote last (bounded in time)
+            up.stop()
+        self.store_uploaders = ()
 
     def _stop_tree(self) -> None:
         """Terminate the syncer's process group, even when its leader (the
@@ -192,6 +197,28 @@ class LocalSyncer:
             offsets=OffsetStore(offset_path_for(self.event_tape)),
         )
         self.tape_forwarder.start()
+
+    def start_store_upload(self, args, objects=None) -> None:
+        """Copy the syncer's tape (and each shard's) into the run store under
+        ``tapes/syncer[-shard<i>]/``, so a dashboard with ``--store`` alone sees the syncer
+        (``tape_upload.syncer_uploaders``). Only with an object store (``s3://`` / ``oss://``
+        ``--rl-checkpoint-store``) and a non-zero ``YETO_RL_TAPE_UPLOAD_S``. The uploaders
+        read the tape file on their own threads: the syncer is never waited for."""
+        from ..rl.engine.tape_upload import syncer_incarnation, syncer_uploaders, upload_interval_s
+        from .storage import is_object_store_uri, store_client_environ
+        from .syncer import syncer_shard_count
+
+        store = str(getattr(args, "rl_checkpoint_store", None) or "")
+        interval = upload_interval_s()
+        if not is_object_store_uri(store) or interval is None:
+            return
+        if objects is None:
+            from .trainer_island import head_store_objects
+
+            objects = head_store_objects(store, store_client_environ(args))
+        self.store_uploaders = tuple(syncer_uploaders(objects, self.event_tape, shards=syncer_shard_count(args),
+                                                      incarnation=syncer_incarnation(), interval_s=interval))
+        print(f"[launcher] syncer tape -> {store.rstrip('/')}/tapes/syncer every {interval:.0f} s", flush=True)
 
     def _signal_tree(self, sig: int) -> None:
         """Signal the syncer's whole process group (see start()), falling

@@ -110,6 +110,9 @@ def test_head_controller_reloads_the_contract_bundle(tmp_path, monkeypatch):
         def start_tape_forwarder(self, _args):
             pass
 
+        def start_store_upload(self, _args):
+            pass
+
         def stop(self):
             pass
 
