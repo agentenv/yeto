@@ -929,7 +929,10 @@ class ReleasingPublisher:
                   weights=release.weights, sha256=release.sha256,
                   engine_checksum=release.engine_checksum, released_at=release.released_at,
                   release_timings=timings, latest_source=self.releases.last_latest_source,
-                  release_bytes=sum((release.files or {}).values()), **event)
+                  release_bytes=sum((release.files or {}).values()),
+                  # directories of stopped uploads this release pruned (policy_release module doc)
+                  orphans_removed=list(getattr(self.releases, "last_orphans_removed", None) or []),
+                  **event)
 
     def drain_releases(self) -> None:
         """Release the last version a cadence skipped (the trained policy always
