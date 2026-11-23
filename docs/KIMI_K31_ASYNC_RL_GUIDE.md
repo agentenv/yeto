@@ -2540,7 +2540,7 @@ You can now set any breaker in one section of `run.json`:
   "trainer": {"sample_wait": {"timeout_s": 7200}},
   "sampler": {"dispense_redo": {"max_n": 6}, "infra_streak": {"max_n": 5}},
   "harness": {"setup_retries": {"max_n": 6}},
-  "pool":    {"engine_stall": {"limit_s": 900}},
+  "pool":    {"crash_loop": {"action": "halt"}},
   "pools":   {"pool": {"start_timeout": {"limit_s": 5400}}},
   "deps":    {"outage_tolerance_s": 3600}
 }
