@@ -272,7 +272,15 @@ def run_view_sources(run_config: Mapping[str, Any], *, pool: str | None = None) 
     if not chosen:
         return RunView(Sources.from_run_config(run_config), pool, names)
     name, cfg, _ = chosen[0]
-    return RunView(pool_sources(cfg, run_config=run_config, argv=_argv(run_config, None)), name, names)
+    argv = _argv(run_config, None)
+    sources = pool_sources(cfg, run_config=run_config, argv=argv)
+    from yeto.rl import up_consistency  # noqa: PLC0415
+
+    if argv is not None and up_consistency.is_auto_backlog(sources.spec):
+        auto = up_consistency.auto_backlog(argv, [(c, path) for _n, c, path in pools])
+        if auto is not None:  # run up hands this cap to the pool's samplers (sample_roles.AUTO_BACKLOG_ENV)
+            sources.spec = {**sources.spec, "max_backlog_groups": int(auto["groups"])}
+    return RunView(sources, name, names)
 
 
 def pool_facts(name: str, cfg: Mapping[str, Any], data_path: str = "r2", *,

@@ -127,3 +127,24 @@ def test_run_up_falls_back_to_the_run_config_on_an_unreadable_pool(tmp_path, cap
     doc = _write_resolved(tmp_path, cfg)
     assert doc["pool"] is None and _entry(doc, "pool.start_timeout")["params"]["limit_s"] == 3600
     assert "breakers.resolved.json shows the run config alone" in capsys.readouterr().out
+
+
+def test_an_auto_backlog_shows_the_cap_run_up_derives(tmp_path, capsys):
+    """``max_backlog_groups: "auto"``: run up hands the pool's samplers the cap it derives from
+    the trainer's release cadence; the view shows that cap, not the sampler-process fallback."""
+    from yeto.rl import up_consistency
+
+    spec = tmp_path / "auto-spec.json"
+    spec.write_text(json.dumps({**SPEC, "max_backlog_groups": "auto"}))
+    pool = tmp_path / "auto-pool.json"
+    pool.write_text(json.dumps({"spec": str(spec), "target": 2}))
+    argv = ["--training-mode", "rl", "--gpu", "modal:8xh100", "--cluster-prefix", "r", "--model", "Qwen/Qwen3-1.7B",
+            "--data", "HuggingFaceH4/MATH-500", "--rollout-batch-size", "8", "--n-samples-per-prompt", "8",
+            "--rl-sample-role", "trainer", "--rl-single-island-no-sync", "--rl-max-policy-age", "12",
+            "--rl-release-every", "6"]
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps({"run": "r", "store": "s3://b/r", "trainer": {"argv": argv},
+                                "pool": {"config": str(pool)}}))
+    want = up_consistency.auto_backlog(argv, [(json.loads(pool.read_text()), "r2")])["groups"]
+    rc, data = _show_json(capsys, "--config", str(path))
+    assert _entry(data, "sampler.max_backlog_groups")["params"]["groups_n"] == want != 256
