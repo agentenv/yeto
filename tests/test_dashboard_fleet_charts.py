@@ -77,6 +77,11 @@ out.mk=YE.markClusters([{t:100,color:'a'},{t:160,color:'b'},{t:700,color:'a'},{t
 var P=[[0,1,'x'],[60,1,'x'],[120,1,'x'],[720,1,'x'],[780,1,'y'],[840,1,'y']];
 out.seg=YE.segments(P,P).map(function(g){return g.map(function(p){return p[0]})});
 out.two=YE.segments([[0,1],[900,2]],[[0,1],[900,2]]).length; // too few gaps for a median: never split
+// the cadence changes from 35 s to 200 s (one of two samplers gone): one line, not dots; a
+// 20 min hole in the slow part still breaks it
+var C=[];for(var k=0;k<20;k++)C.push([35*k,1]);for(var k=1;k<=8;k++)C.push([665+200*k,1]);
+C.push([2265+1200,1]);for(var k=1;k<=4;k++)C.push([3465+200*k,1]);
+out.cad=YE.segments(C,C).map(function(g){return g.length});
 out.union=YE.spanUnion([[10,20],[15,30],[40,50],[null,5]]);
 out.ov=YE.spanOverlap([[10,20],[40,50]],15,45);
 process.stdout.write(JSON.stringify(out));
@@ -97,6 +102,7 @@ def test_chart_helpers():
     assert out["mk"] == [[100, 2, ["a", "b"]], [700, 1, ["a"]]]
     assert out["seg"] == [[0, 60, 120], [720], [780, 840]]
     assert out["two"] == 1
+    assert out["cad"] in ([20, 8, 5], [28, 5])  # the change itself may break once, the hole must
     assert out["union"] == [[10, 30], [40, 50]]
     assert out["ov"] == 10
 

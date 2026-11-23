@@ -83,9 +83,16 @@ function markClusters(list,t0,t1,pxS){var out=[],gap=Math.max(MARK_MERGE_S,6*(px
     else out.push({t:m.t,last:m.t,items:[m],colors:[m.color||GREY]})});return out}
 /* a line series splits where two neighbours are further apart than 3x its median spacing, or
    where the incarnation (third element of a point, when given) changes: no line across a gap */
-function segments(P,all){var g=[];for(var i=1;i<all.length;i++)g.push(all[i][0]-all[i-1][0]);g.sort(function(a,b){return a-b});
-  var med=g.length>=2?g[Math.floor(g.length/2)]:0,out=[],cur=[];
-  P.forEach(function(p,i){var q=P[i-1];if(q&&((med>0&&p[0]-q[0]>3*med)||(typeof p[2]==="string"&&typeof q[2]==="string"&&p[2]!==q[2]))){out.push(cur);cur=[]}cur.push(p)});
+/* a gap breaks the line when it is over 3x the usual spacing AROUND it (the median of up to 4
+   gaps on each side): a run whose cadence changes (a sampler gone, slower steps) keeps its line
+   after the change instead of turning into dots; a real hole is long next to its neighbours */
+function segments(P,all){var T=all.map(function(p){return p[0]}),g=[];for(var i=1;i<T.length;i++)g.push(T[i]-T[i-1]);
+  var mid=function(v){v=v.slice().sort(function(a,b){return a-b});return v.length?v[Math.floor(v.length/2)]:0},glob=g.length>=2?mid(g):0;
+  var near=function(t){var lo=0,hi=T.length-1;while(lo<hi){var m=(lo+hi)>>1;if(T[m]<t)lo=m+1;else hi=m}if(T[lo]!==t||lo<1)return glob;
+    var j=lo-1,w=g.slice(Math.max(0,j-4),j).concat(g.slice(j+1,j+5));return w.length>=2?mid(w):glob};
+  var out=[],cur=[];
+  P.forEach(function(p,i){var q=P[i-1],med=q&&g.length>=2?near(p[0]):0;
+    if(q&&((med>0&&p[0]-q[0]>3*med)||(typeof p[2]==="string"&&typeof q[2]==="string"&&p[2]!==q[2]))){out.push(cur);cur=[]}cur.push(p)});
   if(cur.length)out.push(cur);return out}
 /* opts: series [{name,color,pts:[[t,v(,incarnation)]],dash,width,dots,faint}], kind line|stack|bars, refs [{y,label}], yfmt, y0 (force 0 baseline),
    bucket (bars, s), vmarks [{t,color,label}] (marker strip above the plot) */
