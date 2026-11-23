@@ -1,0 +1,2 @@
+{"event": "cost_tick", "run": "brk-demo", "time_unix": 1790000060.0, "total_usd": 12.0, "budget_usd": 450}
+{"event": "rl_breaker", "schema": "yeto-breaker-v1", "name": "launch.budget", "layer": "launch", "kind": "breaker", "state": "warn", "action": "stop", "value": 365.0, "limit": 450, "unit": "usd", "direction": "max", "scope": {}, "count": 1, "time_unix": 1790003300.0, "detail": "spend at 81% of the budget", "legacy_event": "cost_budget_warn", "run": "brk-demo"}

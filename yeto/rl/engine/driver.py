@@ -732,6 +732,8 @@ class IslandDriver:
     def emit(self, event: str, **fields: Any) -> None:
         record = {"event": event, **fields}
         self.events.append(record)
+        if event == "rl_breaker" and self.breaker_status is not None:
+            self.breaker_status.note(record)  # its last trip in the next status snapshot
         feed = getattr(getattr(self, "elastic_hook", None), "feed", None)
         if self.observe and callable(feed):
             feed(record)  # in-memory mirror, independent of the tape path
@@ -1825,6 +1827,8 @@ class IslandDriver:
     # fleet-dashboard 2.1/2.2 (opt-in; None = not started, tape unchanged).
     heartbeat_interval_s: float | None = None
     resource_sample_interval_s: float | None = None
+    # rl_breaker_status snapshots (yeto.breakers.status.StatusThread, not started yet); None: none
+    breaker_status: Any = None
     _resource_sampler: Any = None
 
     def _heartbeat_state(self) -> dict[str, Any]:
@@ -1854,6 +1858,8 @@ class IslandDriver:
                     self.emit, interval_s=self.resource_sample_interval_s, clock=self.clock,
                     labels=self._labels)
                 threads.append(self._resource_sampler.start())
+            if self.breaker_status is not None:
+                threads.append(self.breaker_status.start())
             yield
         finally:
             for thread in threads:

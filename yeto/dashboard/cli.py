@@ -130,6 +130,15 @@ def _store(args):
                       interval_s=float(getattr(args, "store_poll", None) or 0.0))
 
 
+def _resolved(args, paths: list[str], store=None):
+    """The run's ``breakers.resolved.json`` (Breakers panel): next to ``--up-state``, in
+    the ``run up`` state directory of ``--run``, beside a tape, or under the store's ``meta/``."""
+    from .breakers import ResolvedFile, resolved_candidates
+
+    return ResolvedFile(resolved_candidates(paths, run=args.run, up_state=getattr(args, "up_state", None)),
+                        getattr(store, "objects", None))
+
+
 def _attach_compare(reducer, args) -> None:
     """load the --compare run into its own reducer."""
     if not getattr(args, "compare", None):
@@ -162,8 +171,9 @@ def main(args) -> int:
         from .serve import serve
 
         try:
+            st = _store(args)
             return serve(paths, reducer=reducer, host=args.host, port=args.port,
-                         interval=args.poll, head=args.head, store=_store(args))
+                         interval=args.poll, head=args.head, store=st, resolved=_resolved(args, paths, st))
         except ValueError as exc:
             print(f"[dashboard] {exc}", file=sys.stderr)
             return 2
@@ -173,6 +183,7 @@ def main(args) -> int:
 
         sources = load_all(reducer, paths)
         st = _store(args)
+        _resolved(args, paths, st).pump(reducer)
         if st is not None:
             reducer.store_status = st.status
             st.pump(reducer)

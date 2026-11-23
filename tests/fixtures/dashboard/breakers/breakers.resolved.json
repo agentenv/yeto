@@ -1,0 +1,592 @@
+{
+ "schema": "yeto-breakers-resolved-v1",
+ "pool": null,
+ "has_section": true,
+ "entries": [
+  {
+   "name": "run.budget",
+   "layer": "run",
+   "kind": "breaker",
+   "enabled": true,
+   "action": "stop",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "usd": 450,
+    "warn_ratio": 0.8
+   },
+   "units": {
+    "usd": "usd",
+    "warn_ratio": "ratio"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "legacy",
+     "location": "run_config budget.usd"
+    },
+    "usd": {
+     "kind": "legacy",
+     "location": "run_config budget.usd"
+    },
+    "warn_ratio": {
+     "kind": "default",
+     "location": "default"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [
+    "D11"
+   ],
+   "gauge": "level",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "run.wall_clock",
+   "layer": "run",
+   "kind": "breaker",
+   "enabled": true,
+   "action": "stop",
+   "can_disable": true,
+   "implicit": true,
+   "params": {
+    "hours": 3.0
+   },
+   "units": {
+    "hours": "h"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "default",
+     "location": "default (implicit)"
+    },
+    "hours": {
+     "kind": "default",
+     "location": "default (implicit)"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [],
+   "gauge": "elapsed",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "run.starvation",
+   "layer": "run",
+   "kind": "breaker",
+   "enabled": true,
+   "action": "stop",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "alert_s": 1800,
+    "stop_s": 7200
+   },
+   "units": {
+    "alert_s": "s",
+    "stop_s": "s"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "default",
+     "location": "default"
+    },
+    "alert_s": {
+     "kind": "default",
+     "location": "default"
+    },
+    "stop_s": {
+     "kind": "default",
+     "location": "default"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [
+    "D7"
+   ],
+   "gauge": "elapsed",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "launch.budget",
+   "layer": "launch",
+   "kind": "breaker",
+   "enabled": true,
+   "action": "stop",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "usd": 450
+   },
+   "units": {
+    "usd": "usd"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "default",
+     "location": "default"
+    },
+    "usd": {
+     "kind": "legacy",
+     "location": "trainer.argv --budget-usd"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [
+    "cost_guard"
+   ],
+   "depends_on": [],
+   "gauge": "level",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "launch.idle",
+   "layer": "launch",
+   "kind": "guard",
+   "enabled": false,
+   "action": "stop",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "warn_s": 900
+   },
+   "units": {
+    "warn_s": "s"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "switch",
+     "location": "switch cost_guard (trainer.argv --no-cost-guard)"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [
+    "cost_guard"
+   ],
+   "depends_on": [],
+   "gauge": "none",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "launch.stall",
+   "layer": "launch",
+   "kind": "breaker",
+   "enabled": true,
+   "action": "stop",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "timeout_s": 900
+   },
+   "units": {
+    "timeout_s": "s"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "default",
+     "location": "default"
+    },
+    "timeout_s": {
+     "kind": "default",
+     "location": "default"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [
+    "D5",
+    "D6"
+   ],
+   "gauge": "elapsed",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "trainer.sample_wait",
+   "layer": "trainer",
+   "kind": "breaker",
+   "enabled": true,
+   "action": "stop",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "timeout_s": 3600
+   },
+   "units": {
+    "timeout_s": "s"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "default",
+     "location": "default"
+    },
+    "timeout_s": {
+     "kind": "legacy",
+     "location": "trainer.argv --rl-sample-wait-s"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [
+    "D4",
+    "D5"
+   ],
+   "gauge": "elapsed",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "trainer.policy_age",
+   "layer": "trainer",
+   "kind": "breaker",
+   "enabled": true,
+   "action": "drop",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "max_versions": 8
+   },
+   "units": {
+    "max_versions": "n"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "default",
+     "location": "default"
+    },
+    "max_versions": {
+     "kind": "breakers",
+     "location": "breakers.trainer.policy_age.max_versions"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [
+    "D15"
+   ],
+   "gauge": "count",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "trainer.token_alignment",
+   "layer": "trainer",
+   "kind": "invariant",
+   "enabled": true,
+   "action": "drop",
+   "can_disable": false,
+   "implicit": false,
+   "params": {},
+   "units": {},
+   "sources": {},
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [],
+   "gauge": "none",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "sampler.drain",
+   "layer": "sampler",
+   "kind": "guard",
+   "enabled": true,
+   "action": "drop",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "timeout_s": 600
+   },
+   "units": {
+    "timeout_s": "s"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "default",
+     "location": "default"
+    },
+    "timeout_s": {
+     "kind": "legacy",
+     "location": "spec reload_max_defer_s"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [
+    "D1"
+   ],
+   "gauge": "elapsed",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "sampler.dispense_redo",
+   "layer": "sampler",
+   "kind": "retry_budget",
+   "enabled": true,
+   "action": null,
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "max_n": 4
+   },
+   "units": {
+    "max_n": "n"
+   },
+   "sources": {
+    "max_n": {
+     "kind": "legacy",
+     "location": "pool sampler.dispense.max_redo"
+    }
+   },
+   "redundant": [
+    "spec prompts.dispense.max_redo"
+   ],
+   "switch_groups": [],
+   "depends_on": [
+    "D8",
+    "D9"
+   ],
+   "gauge": "count",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "sampler.min_samples",
+   "layer": "sampler",
+   "kind": "guard",
+   "enabled": true,
+   "action": "drop",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "min_n": 2
+   },
+   "units": {
+    "min_n": "n"
+   },
+   "sources": {
+    "min_n": {
+     "kind": "legacy",
+     "location": "spec agentic.min_samples"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [
+    "D16"
+   ],
+   "gauge": "count",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "harness.setup_retries",
+   "layer": "harness",
+   "kind": "retry_budget",
+   "enabled": true,
+   "action": null,
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "max_n": 0
+   },
+   "units": {
+    "max_n": "n"
+   },
+   "sources": {
+    "max_n": {
+     "kind": "default",
+     "location": "default"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [],
+   "gauge": "count",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "harness.reach_check",
+   "layer": "harness",
+   "kind": "guard",
+   "enabled": false,
+   "action": null,
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "attempts_n": 15
+   },
+   "units": {
+    "attempts_n": "n"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "legacy",
+     "location": "env YETO_AGENTENV_SKIP_REACH_CHECK"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [],
+   "gauge": "none",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "pool.engine_stall",
+   "layer": "pool",
+   "kind": "breaker",
+   "enabled": true,
+   "action": "replace",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "limit_s": 600
+   },
+   "units": {
+    "limit_s": "s"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "default",
+     "location": "default"
+    },
+    "limit_s": {
+     "kind": "legacy",
+     "location": "pool elastic engine_stall_s"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [],
+   "gauge": "elapsed",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "pool.sampler_restarts",
+   "layer": "pool",
+   "kind": "retry_budget",
+   "enabled": true,
+   "action": null,
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "max_n": 2,
+    "reset_s": 1800
+   },
+   "units": {
+    "max_n": "n",
+    "reset_s": "s"
+   },
+   "sources": {
+    "max_n": {
+     "kind": "default",
+     "location": "default"
+    },
+    "reset_s": {
+     "kind": "default",
+     "location": "default"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [],
+   "gauge": "count",
+   "direction": "max",
+   "owner": ""
+  },
+  {
+   "name": "monitor.dashboard_heartbeat",
+   "layer": "monitor",
+   "kind": "alert",
+   "enabled": true,
+   "action": "warn",
+   "can_disable": true,
+   "implicit": false,
+   "params": {
+    "heartbeat_warn_s": 60.0,
+    "heartbeat_severe_s": 300.0
+   },
+   "units": {
+    "heartbeat_warn_s": "s",
+    "heartbeat_severe_s": "s"
+   },
+   "sources": {
+    "enabled": {
+     "kind": "default",
+     "location": "default"
+    }
+   },
+   "redundant": [],
+   "switch_groups": [],
+   "depends_on": [],
+   "gauge": "none",
+   "direction": "max",
+   "owner": ""
+  }
+ ],
+ "switches": {
+  "cost_guard": {
+   "on": false,
+   "members": [
+    "launch.budget",
+    "launch.idle"
+   ],
+   "source": "trainer.argv --no-cost-guard"
+  }
+ },
+ "deps": {
+  "outage_tolerance_s": 3600,
+  "overrides": {}
+ },
+ "findings": [
+  {
+   "rule": "D1",
+   "level": "warn",
+   "message": "sampler.drain: drain_timeout_s 2400 is never effective (reload_max_defer_s 600 is smaller)",
+   "items": [
+    "sampler.drain"
+   ],
+   "values": {
+    "drain_timeout_s": 2400,
+    "reload_max_defer_s": 600
+   },
+   "suggested": {},
+   "overridden": null
+  },
+  {
+   "rule": "D8",
+   "level": "warn",
+   "message": "dispense coverage: 41 rows x 4 passes = 164 slots for 20 x 8 = 160 groups (margin 2.5% < 10%)",
+   "items": [
+    "sampler.dispense_redo"
+   ],
+   "values": {},
+   "suggested": {},
+   "overridden": null
+  },
+  {
+   "rule": "D9",
+   "level": "info",
+   "message": "one slot rides out about 3 min of gateway outage (redo 2, infra_retries 2, setup_retries 0)",
+   "items": [
+    "sampler.dispense_redo",
+    "harness.setup_retries"
+   ],
+   "values": {},
+   "suggested": {},
+   "overridden": null
+  }
+ ],
+ "conflicts": []
+}

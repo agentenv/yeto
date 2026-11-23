@@ -780,8 +780,26 @@ class Run:
         ok &= self._cmd(self.yeto("launch", *self.trainer_argv(), "--dry-run"), log="preflight.log") == 0
         for argv in (self.cfg.get("preflight") or {}).get("commands") or ():
             ok &= self._cmd([os.path.expanduser(a) for a in argv], log="preflight.log") == 0
+        self.write_breakers_resolved()
         self.mark("preflight", ok=bool(ok))
         return bool(ok)
+
+    def write_breakers_resolved(self) -> None:
+        """``breakers.resolved.json`` in the state directory: every layer's settings as this
+        run config resolves them, with the dependency findings (the ``yeto breaker show
+        --json`` object; the dashboard's Breakers panel and ``run status`` read it). Never
+        raises: a view only."""
+        from yeto import breakers  # noqa: PLC0415
+
+        try:
+            sources = breakers.Sources.from_run_config(self.cfg)
+            resolved = breakers.resolve(sources, strict=False)
+            doc = resolved.to_json(breakers.preflight(resolved, run_config=self.cfg, sources=sources))
+            tmp = self.dir / "breakers.resolved.json.tmp"
+            tmp.write_text(json.dumps(doc, indent=1, default=str))
+            os.replace(tmp, self.dir / "breakers.resolved.json")
+        except Exception as error:  # noqa: BLE001
+            _log(f"preflight: breakers.resolved.json not written ({type(error).__name__}: {error})")
 
     # The trainer's cluster preflight (yeto.launch.preflight.gate): run before anything is
     # ordered; once it passed (or --skip-preflight skipped it) the trainer's own launch skips it.
@@ -2514,7 +2532,39 @@ class Run:
                            env=self.env, capture_output=True, text=True, timeout=300, check=False)
         out["dispense"] = _output_tail(p)
         out["trainer_buffer"] = self.trainer_buffer_counts()
+        out["breakers"] = self.breaker_status()
         return out
+
+    def breaker_status(self) -> dict[str, Any]:
+        """The run's breakers in short: the resolved settings (``breakers.resolved.json``
+        in the state directory: implicit defaults, entries off, dependency findings) and
+        the newest trips and near-limit gauges on this run's ``events.jsonl`` and the
+        trainer's log (``rl_breaker`` / ``rl_breaker_status``)."""
+        from yeto.dashboard.breakers import RESOLVED_FILE, summary  # noqa: PLC0415
+        from yeto.rl.event_echo import PREFIX  # noqa: PLC0415
+
+        doc = None
+        try:
+            doc = json.loads((self.dir / RESOLVED_FILE).read_text())
+        except (OSError, ValueError):
+            pass
+        records: list[dict] = []
+        log = ((self.state.get("procs") or {}).get("trainer") or {}).get("log")
+        for path, prefix in ((self.dir / "events.jsonl", ""), (Path(log) if log else None, PREFIX)):
+            if path is None or not path.is_file():
+                continue
+            with open(path, errors="replace") as fh:
+                for line in fh:
+                    if "rl_breaker" not in line:
+                        continue
+                    at = line.find(prefix) if prefix else 0
+                    try:
+                        record = json.loads(line[at + len(prefix):]) if at >= 0 else None
+                    except ValueError:
+                        continue
+                    if isinstance(record, dict):
+                        records.append(record)
+        return summary(doc if isinstance(doc, dict) else None, records)
 
     def trainer_buffer_counts(self) -> dict[str, Any]:
         """What the trainer's buffer reader passed over, summed over the trainer's log

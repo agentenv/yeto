@@ -426,6 +426,30 @@ def release_stalled(reducer, th: dict, now: float, stale: list[dict]) -> list[di
     return out
 
 
+BREAKER_SEV = {"trip": 0, "warn": 1, "config_mismatch": 1, "shadow": 2}
+
+
+def breakers(reducer, now: float) -> list[dict]:
+    """Design 9.3: the newest ``rl_breaker`` of each breaker and scope
+    (``BreakerState.alert_rows``): a trip is critical, a warn or a config mismatch a
+    warning, a shadow trip (``action: warn`` on an entry that would act) info."""
+    out = []
+    for row in reducer.breakers.alert_rows(now):
+        sev = BREAKER_SEV.get(row.get("state"))
+        if sev is None:
+            continue
+        where = f" ({row['scope']})" if row.get("scope") else ""
+        what = {"trip": "tripped", "warn": "near its limit", "config_mismatch": "runs with other settings",
+                "shadow": "would have tripped"}[row["state"]]
+        parts = [p for p in (row.get("detail"), row.get("stop_reason"),
+                             f"{row['value']:g} / {row['limit']:g} {row.get('unit') or ''}".strip()
+                             if row.get("value") is not None and row.get("limit") is not None else None) if p]
+        island = row["scope"][len("island "):] if str(row.get("scope") or "").startswith("island ") else None
+        out.append(_alert(sev, "breaker", f"breaker {row['name']} {what}{where}", "; ".join(parts)[:240],
+                          island=island))
+    return out
+
+
 def _with_release(reducer, th: dict, now: float) -> list[dict]:
     stale = stale_read_position(reducer, th, now)
     return stale + release_stalled(reducer, th, now, stale)
@@ -438,8 +462,10 @@ def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
               + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
               + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)
-              + _with_release(reducer, th, now)
+              + _with_release(reducer, th, now) + breakers(reducer, now)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
+    # an alert whose monitor entry the run config switched off (``breakers.monitor.<entry>.enabled``)
+    alerts = [a for a in alerts if not (a.get("breaker") and reducer.breakers.disabled(a["breaker"]))]
     alerts.sort(key=lambda a: a["sev"])
     for i, a in enumerate(alerts):
         a["id"] = i
