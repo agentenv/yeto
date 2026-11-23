@@ -221,7 +221,12 @@ def grad_norm(reducer, th: dict) -> list[dict]:
         pts = [(x, isl["points"][x]["grad_norm"]) for x in sorted(isl["points"])
                if isl["points"][x].get("grad_norm") is not None]
         for i in range(w, len(pts)):
-            base = statistics.median(v for _, v in pts[i - w:i])
+            # a step whose groups all had equal rewards (zero advantage) has grad_norm exactly 0:
+            # no gradient, not a small one; it would pull the baseline down and flag normal steps
+            prev = [v for _, v in pts[i - w:i] if v != 0]
+            if len(prev) < (w + 1) // 2:
+                continue
+            base = statistics.median(prev)
             x, v = pts[i]
             if base > 0 and v > th["grad_norm_spike_factor"] * base:
                 out.append(_alert(1, "grad_norm_spike", f"island {iid} grad_norm spike",

@@ -68,6 +68,22 @@ def test_grad_norm_spike_and_nan():
     assert not [a for a in quiet.overview()["alerts"] if a["rule"].startswith("grad_norm")]
 
 
+def test_grad_norm_baseline_skips_zero_advantage_steps():
+    # GRPO steps whose groups all had equal rewards report grad_norm 0 (no gradient): they are
+    # not part of the baseline, so a normal step after a few of them is not a spike
+    seq = [0.967, 3.211, 0.769, 0.42, 0.617, 0.999, 0, 0.172, 1.213, 0.566, 0.702, 0, 0.813, 0, 1.847]
+    r = Reducer()
+    for x, g in enumerate(seq, 1):
+        r.feed(local_round(0, x, T0 + x, grad_norm=g))
+    assert not [a for a in r.overview()["alerts"] if a["rule"] == "grad_norm_spike"]
+    r.feed(local_round(0, 16, T0 + 16, grad_norm=7.5))  # ~10x the nonzero median: a spike
+    assert [a["round"] for a in r.overview()["alerts"] if a["rule"] == "grad_norm_spike"] == [16]
+    mostly_zero = Reducer()  # too few nonzero steps in the window for a baseline: no verdict
+    for x, g in enumerate([0, 0, 0, 0, 0, 0.1, 0, 0.2, 5.0], 1):
+        mostly_zero.feed(local_round(0, x, T0 + x, grad_norm=g))
+    assert not [a for a in mostly_zero.overview()["alerts"] if a["rule"] == "grad_norm_spike"]
+
+
 def test_clipfrac_and_kl_thresholds_are_configurable():
     r = Reducer(thresholds={"kl_warn": 0.01})
     r.feed(local_round(0, 1, T0, clip_fraction=0.25, mean_kl=0.02))
