@@ -335,6 +335,10 @@ def test_two_launcher_built_verl_islands_run_decoupled_fragments_through_the_rea
         applies = [json.loads(line) for line in (island.out / f"verl-apply-{learner_id}.jsonl").read_text()
                    .splitlines()]
         assert applies[0]["optimizer"] == "reset" and {a["optimizer"] for a in applies[1:]} == {"preserve"}
+        # remote_apply_lora zeroes verl's Adam moments only on the reset (as the Miles island)
+        assert applies[0]["workers"][0]["moments_zeroed"] > 0
+        assert all(a["workers"][0]["moments_zeroed"] == 0 for a in applies[1:])
+        assert len(applies) > 1  # broadcasts were applied
         hashes.add(result["state"].policy_tensor_hash())
         saved = torch.load(plans[learner_id][ds.PLAN_KEY]["completed_groups_path"], weights_only=True)
         assert saved["config"]["sync_preset"] == "decoupled"
