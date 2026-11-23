@@ -538,7 +538,7 @@ function rlm(V){
     return {series:[{name:"samplers p50 ("+sps.length+")"+(o.suffix||""),color:SC,dash:o.dash,pts:q.mid}].concat(o.noBand?[]:[{name:"samplers p10–p90",color:SC,band:true,legend:false,pts:q.band}]),extra:each}};
   var evs=cs.filter(function(c){return ((X[c.id]||{}).evals||[]).length});
   var g=[];if(evs.length)g.push(["rfEval","Held-out eval","rl_eval: "+esc(((X[evs[0].id].evals[0])||[])[2]||"")]);
-  g=g.concat([["rfRew","Reward","trainer: batch mean per trained step (solid). Samplers: group-weighted mean of the last "+(MANY?REW_WIN+"×"+sps.length+" groups over all samplers (dashed; each sampler behind the legend toggle)":REW_WIN+" groups (dashed)")+"; hover shows the round's own mean. Triangles above every fleet chart: restarts and pool events (merged within 2 min), hover for details. Lines break at gaps over 3× the usual spacing and at a new incarnation"],["rfKl","train-rollout KL","trainer vs sampler logprobs (train_metrics.train_rollout_kl) per trainer round"],["rfPkl","PPO KL","trainer policy vs the old logprobs of the batch (train_metrics.ppo_kl); near 0 with one optimizer step per batch"],
+  g=g.concat([["rfRew","Reward","trainer: batch mean per trained step (solid). Samplers: group-weighted mean of the last "+(sps.length>1?REW_WIN+"×"+sps.length+" groups over all samplers (dashed; each sampler's own line from the legend toggle"+(MANY?")":", open by default)"):REW_WIN+" groups (dashed)")+"; hover shows the round's own mean. Triangles above every fleet chart: restarts and pool events (merged within 2 min), hover for details. Lines break at gaps over 3× the usual spacing and at a new incarnation"],["rfKl","train-rollout KL","trainer vs sampler logprobs (train_metrics.train_rollout_kl) per trainer round"],["rfPkl","PPO KL","trainer policy vs the old logprobs of the batch (train_metrics.ppo_kl); near 0 with one optimizer step per batch"],
     ["rfLp","logprob |diff|","train vs rollout logprob abs diff per round"],["rfTis","TIS / IS clipped","share of tokens whose IS weight was clipped: mismatch.tis_clipfrac, with score centering train_metrics.sc_is_clipped"],["rfGn","grad_norm","per trainer round"],
     ["rfLr","Learning rate","rl_round_trained.applied_lrs[0] (applied_lr): the lr the trainer reports per round; the engine's own log line (e.g. Miles lr-pg_0) is not on the tapes"],["rfStep","Trainer step time","train step seconds (solid); round wall time (dashed)"],["rfTps","Tokens / s","stacked by trainer; tok_per_s interpolated onto one time grid, then summed"],
     ["rfHbm","HBM","mean used GiB over each island's GPUs (NVML / host probe)"+(MANY?"; samplers: p50 and p10–p90 band":"")],["rfHost","Host memory","per node, from the Modal host probe (YETO_MODAL_HOSTMEM_SAMPLE_S)"],
@@ -560,8 +560,10 @@ function rlm(V){
   var fc=function(id,o){o.vmarks=vm;return chartTs(id,o)}; // every fleet time chart carries the same marker strip
   var each=sps.map(function(c){return {name:c.label+" (mean of last "+REW_WIN+" groups)",color:c.color,dash:true,pts:roll(SR(c),REW_WIN,true)}});
   var allR=[];sps.forEach(function(c){allR=allR.concat(SR(c))});allR.sort(function(a,b){return a.ts-b.ts});
-  fc("rfRew",{series:ser(trs,"reward").concat(MANY?[{name:"all "+sps.length+" samplers (mean of last "+REW_WIN*sps.length+" groups)",color:SC,dash:true,pts:roll(allR,REW_WIN*sps.length,false)}]:each),
-    extra:MANY?each:[],extraLabel:XL,yfmt:f3,y0:false});
+  // two or more samplers: the pooled mean is the line to read; each sampler's own line is open by default up to SAMPLER_LINES
+  var POOL=sps.length>1;
+  fc("rfRew",{series:ser(trs,"reward").concat(POOL?[{name:"all "+sps.length+" samplers (mean of last "+REW_WIN*sps.length+" groups)",color:SC,dash:true,width:2,pts:roll(allR,REW_WIN*sps.length,false)}]:each),
+    extra:POOL?each:[],extraOpen:!MANY,extraLabel:XL,yfmt:f3,y0:false});
   fc("rfKl",mag({series:ser(trs,"kl_tr"),yfmt:f4}));fc("rfPkl",mag({series:ser(trs,"kl"),yfmt:f4}));
   fc("rfLp",mag({series:ser(trs,"logprob_diff"),yfmt:f4}));fc("rfTis",mag({series:ser(trs,"tis_clip",function(r){return fin(r.tis_clip)?r.tis_clip:r.is_clip}),yfmt:f4}));fc("rfGn",mag({series:ser(trs,"grad_norm"),yfmt:f3}));
   fc("rfLr",axs({series:ser(trs,"lr"),yfmt:function(v){return v.toExponential(2)}}));
