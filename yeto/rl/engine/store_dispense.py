@@ -614,10 +614,10 @@ class StoreLedger:
         self.holder, self.incarnation = str(holder), str(incarnation)
         self.seed, self.passes = int(seed), int(passes)
         self.lease_s, self.max_redo = float(lease_s), int(max_redo)
-        self.plan_bytes: bytes | None = None  # plan.json as open() wrote or read it
         self.holdout_sha256 = holdout_sha256
         self.slots = slots or SlotMap(self.rows, seed=self.seed, passes=self.passes)
         self.limit = self.slots.size
+        self.plan_bytes: bytes | None = None  # plan.json as open() wrote or read it
         self._leases = list(leases) if leases is not None else None
         # sampler id -> the incarnation its incarnation lease names (None: no lease)
         self.lease_of_holder = lease_of_holder
