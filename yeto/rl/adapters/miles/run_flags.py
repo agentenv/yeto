@@ -62,8 +62,10 @@ _MODE = (
         choices=["auto", "flash", "fused", "unfused"],
         default="auto",
         help="override the recipe's Megatron --attention-backend (auto = recipe "
-        "decides); use unfused when the flash-attn cute JIT cannot compile on "
-        "the target GPU. Recipes with flash-only kernels refuse non-flash.",
+        "decides; the generic recipe uses fused, or unfused under "
+        "--rl-deterministic-trainer); use fused when the flash-attn cute JIT cannot "
+        "compile on the target GPU. unfused materializes the full score matrix "
+        "(short sequences only). Recipes with flash-only kernels refuse non-flash.",
     ),
 )
 

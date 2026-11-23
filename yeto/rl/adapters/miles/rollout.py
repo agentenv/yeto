@@ -630,6 +630,7 @@ _CARRY_OVER_KEYS = (
     "cross_version_ratio_p50", "cross_version_ratio_p90", "cross_version_ratio_p99",
     "cross_version_ratio_min", "cross_version_ratio_max",
     "cross_version_unscored_reasons", "cross_version_unknown_version_tokens",
+    "cross_version_estimate_skipped",  # no router endpoint on the trainer: why, once
     "cross_version_ratio_near_zero", "cross_version_ratio_near_zero_examples",
     # 5.1/5.3: agentic suspension between model turns (carry_over.suspend_fields)
     "suspended_groups", "suspended_done_groups", "over_age_cancelled_groups",

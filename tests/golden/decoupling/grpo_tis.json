@@ -217,7 +217,7 @@
   "--accumulate-allreduce-grads-in-fp32",
   "--attention-softmax-in-fp32",
   "--attention-backend",
-  "unfused",
+  "fused",
   "--no-gradient-accumulation-fusion",
   "--bf16",
   "--no-load-optim",
@@ -247,7 +247,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "94a8f220ada63fc4863e269384723fe8742216fb0a935fb04c80e4f0f91db2d3",
+ "miles_argv_sha256": "5e8952bb2021365b93feb80869a97d63046c77b30d09a7a3433c1431ee08285b",
  "name": "grpo_tis",
  "placement": {
   "allow_cross_node_engine_tp": false,

@@ -177,7 +177,7 @@
   "--accumulate-allreduce-grads-in-fp32",
   "--attention-softmax-in-fp32",
   "--attention-backend",
-  "unfused",
+  "fused",
   "--no-gradient-accumulation-fusion",
   "--bf16",
   "--no-load-optim",
@@ -206,7 +206,7 @@
   "120",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "86b77438b77681b0d135744e22e4877e6a6dab3b00f3923f7bfc64adb054bca7",
+ "miles_argv_sha256": "8263d820a1a80b45eeb43a9633f17039d10a19cf1bd0f4b8e9866dd8ec5f921d",
  "name": "elastic",
  "placement": {
   "allow_cross_node_engine_tp": false,

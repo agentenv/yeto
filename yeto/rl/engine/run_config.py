@@ -726,6 +726,28 @@ def _resolve_ref_load(args, model_path) -> str:
     return _rules(_backend_of(args)).resolve_ref_load(args, model_path)
 
 
+def generic_attention_backend(args) -> str:
+    """Megatron ``--attention-backend`` of the generic recipe.
+
+    ``fused`` (Transformer Engine cuDNN fused attention): memory linear in the
+    sequence length.  The original ``unfused`` default (Miles LoRA federation,
+    2026-07) avoided the flash-attn CUTE GQA kernel on A100; it never needed
+    to rule out cuDNN fused attention, and unfused materializes the S x S score
+    matrix (a 32k-token packed sequence asks for ~47 GiB in one baddbmm and
+    OOMs on the first step).
+
+    ``--rl-deterministic-trainer`` keeps ``unfused``: Megatron
+    ``--deterministic-mode`` sets ``NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`` and
+    Transformer Engine then drops cuDNN fused attention on pre-Hopper cards,
+    leaving no backend under ``--attention-backend fused``; unfused is
+    deterministic on every card (short sequences only).
+    """
+
+    if getattr(args, "rl_deterministic_trainer", False):
+        return "unfused"
+    return "fused"
+
+
 def _validate_callable_spec(spec: str) -> None:
     module, separator, function = spec.partition(":")
     if not separator or not module or not function.isidentifier():
@@ -1023,11 +1045,11 @@ def resolve_rl_run_config(
     elif qwen35_recipe:
         recipe_name, attention_backend = RECIPE_QWEN3_5, "flash"
     else:
-        recipe_name, attention_backend = RECIPE_GENERIC, "unfused"
+        recipe_name, attention_backend = RECIPE_GENERIC, generic_attention_backend(args)
 
     # rlf-codex-rl 5.8: --rl-training-attention-backend overrides the recipe's
-    # default (e.g. flash -> unfused when the flash-attn cute JIT fails to
-    # compile on a given GPU). Recipes whose kernels hard-require flash
+    # default (e.g. flash -> fused when the flash-attn cute JIT fails to
+    # compile on a given GPU; unfused only for short sequences). Recipes whose kernels hard-require flash
     # attention refuse any other backend.
     backend_override = getattr(args, "rl_training_attention_backend", "auto") or "auto"
     if backend_override != "auto":
