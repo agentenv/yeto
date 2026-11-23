@@ -123,6 +123,11 @@ arguments (port, store, tapes ...), so a copied command reproduces it.
   round (groups, generation versions and age, mean reward), matched by the incarnation prefix of
   `rl_trajectory_reward.trajectory_id`; samplers keep their own round numbers, so there is no
   "missed" row (that and the consecutive-missed alert belong to synchronous multi-island runs).
+- **Task dispense** (Async GRPO section): the slot ledger as the samplers' `rl_dispense_*` events
+  show it: slots settled by state, attempts ended without settling (expired lease, released,
+  requeued, lost), re-claimed slots, and every claim still held with its holder. A holder whose
+  island is stale / lost / stopped is flagged: its claims come back only when their lease expires
+  and another sampler claims them again (attempt + 1). The lease itself is not on the tapes.
 
 ## Offline export
 

@@ -448,7 +448,7 @@ function asyncPanel(){
       '</td><td class="num">'+f(x.lag_p50,1)+" / "+f(x.lag_max,0)+'</td><td>'+hist(x.lag_hist)+'</td><td class="num">'+f(x.generate_p50_s,0)+" / "+f(x.generate_max_s,0)+'</td><td class="num">'+f(x.groups,0)+'</td><td class="num">'+zvCell(x)+
       '</td><td class="num">'+f(x.truncated,0)+(fin(x.samples)&&fin(x.truncated)?" ("+pct(x.truncated/x.samples)+")":"")+'</td><td class="num">'+f(x.dropped_groups,0)+'</td><td class="num">'+f(x.retried_trials,0)+" / "+f(x.lost_trials,0)+'</td><td class="num">'+f(x.reward_mean_last)+'</td><td class="num">'+f(x.max_backlog_groups,0)+'</td></tr>'}).join("")+'</table>'+
     (sps.some(function(c){var x=S[c.id]||{};return !fin(x.samples)})?'<div class="note">n/a in truncated / reward: the sampler did not write rl_sampler_engine_round with these fields (Miles-generating samplers and older yeto versions do not); zero-variance then comes from the trainer</div>':"");
-  aBacklog(A);aRel(A);aComp(A);
+  aBacklog(A);aRel(A);aComp(A);aDisp(A,cards);
   var pl=(A.pool||[]).slice(-100).reverse();$("aPoolBox").hidden=!pl.length;
   var sc=A.pool_scale;$("aPoolScale").textContent=sc?("samplers: "+sc.ready.length+" ready"+(sc.draining.length?", "+sc.draining.length+" draining ("+sc.draining.join(", ")+")":"")+(sc.paused&&sc.paused.length?", "+sc.paused.length+" paused by hand ("+sc.paused.join(", ")+")":"")+(sc.target!=null?" · target "+sc.target+(sc.manual?" (set by hand)":""):"")+(sc.ready.length?" · shards "+sc.ready.join(", "):"")):"";
   $("aPool").innerHTML=pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>'+(/^nc_elastic_manual_/.test(e.event||"")?"manual":"pool")+'</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
@@ -497,6 +497,22 @@ function aBacklog(A){
   tAxis(s,t0,t1,sx,H);
   $("legBacklog").innerHTML='<span><i class="sw" style="background:var(--T)"></i>backlog (written '+f(b.written,0)+' · read position '+f(b.read,0)+')</span>'+(rk.length?'<span><i class="sw" style="background:var(--bad)"></i>sampler reported: backlog full</span><span><i class="sw" style="background:var(--i1)"></i>sampler reported: admitted</span>':"")+
     (b.has_reads&&b.read_source&&b.read_source!=="buffer_selected"?'<span>read position = '+esc(b.read_source)+' (no rl_policy_released.buffer_selected yet)</span>':"")+(b.has_reads?"":'<span>no read position on the tapes (no rl_policy_released.buffer_selected): backlog unknown</span>');
+}
+function aDisp(A,cards){
+  // task dispense ledger (rl_dispense_*): slots by state, claims still held and who holds them
+  var D=A.dispense,box=$("aDispBox");box.hidden=!D;if(!D)return;
+  var st={};(cards||[]).forEach(function(c){st[c.id]=c.status});
+  var dead=function(id){return ["stale","lost","left","stopped","done","recovery"].indexOf(st[id])>=0};
+  var kv=function(o){var k=Object.keys(o||{});return k.length?k.map(function(x){return esc(x)+" "+o[x]}).join(" · "):"0"};
+  var now=fin(O.now)?O.now:Date.now()/1e3,held=D.held||[],by={};held.forEach(function(h){(by[h.by]=by[h.by]||[]).push(h)});
+  var html='<div class="note">slots seen '+D.slots+' · settled: '+kv(D.settled)+' · attempts ended unsettled: '+kv(D.ends)+' (expired = lease ran out, the slot is claimed again) · re-claimed slots '+D.reclaimed_slots+' · held now '+held.length+'</div>';
+  html+=Object.keys(by).sort().map(function(k){var hs=by[k],bad=dead(k);
+    return '<div class="note">'+(bad?'<span class="st bd"><i></i>'+esc(st[k])+'</span> ':"")+'sampler '+esc(k)+' holds '+hs.length+': '+hs.map(function(h){return "slot "+h.slot+(h.attempt?" (attempt "+h.attempt+")":"")+" claimed "+clock(h.claim_ts)+(fin(h.claim_ts)?" ("+f((now-h.claim_ts)/60,0)+" min ago)":"")}).join(", ")+
+      (bad?' — <b>its island is '+esc(st[k])+': these slots wait for their lease to expire, then another sampler re-claims them</b>':"")+'</div>'}).join("");
+  var ev=(D.events||[]).filter(function(e){return e.kind!=="drain"}).slice(-12).reverse();
+  if(ev.length)html+='<table class="c"><tr><th>time</th><th>event</th><th>slot</th><th>attempt</th><th>noticed by</th><th>detail</th></tr>'+ev.map(function(e){
+    return '<tr><td class="num">'+clock(e.ts)+'</td><td>'+esc(e.kind)+'</td><td class="num">'+(e.slot==null?"—":e.slot)+'</td><td class="num">'+(e.attempt==null?"—":e.attempt)+'</td><td>'+esc(e.by)+'</td><td class="note">'+esc([e.reason,e.state,e.superseded_by?"superseded by "+e.superseded_by:null,fin(e.seen)?"last renewed "+clock(e.seen):null].filter(Boolean).join(" · "))+'</td></tr>'}).join("")+'</table>';
+  $("aDisp").innerHTML=html;
 }
 function aRel(A){
   var box=$("aRelChart"),rows=A.releases||[],pool=(A.pool||[]).filter(function(e){return fin(e.ts)}),box2=$("aRelTable");box.innerHTML="";box2.innerHTML="";

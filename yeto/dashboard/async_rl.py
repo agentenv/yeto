@@ -236,6 +236,11 @@ def pool_state_event(p: dict) -> bool:
             or ev.startswith(POOL_MANUAL_PREFIX) or (p.get("shard") is not None and bool(p.get("ticket"))))
 
 
+# rl_dispense_* kinds that end one attempt without settling the slot, and the kinds listed
+DISPENSE_ENDS = ("expired", "release", "requeue", "lost")
+DISPENSE_NOTED = DISPENSE_ENDS + ("scan_failed", "recover", "drain")
+
+
 class AsyncState:
     def __init__(self) -> None:
         self.roles: dict[str, str] = {}
@@ -244,6 +249,10 @@ class AsyncState:
         self.releases: list[dict] = []
         self.loads: list[dict] = []
         self.drains: list[dict] = []  # rl_agentic_drain: the weight switch's wait for in-flight trials
+        # task dispense ledger as the samplers saw it (rl_dispense_*): slot -> attempts / settle;
+        # tapes of several samplers arrive out of time order, so state is keyed by attempt
+        self.dispense: dict[int, dict] = {}
+        self.dispense_events: list[dict] = []  # expiries, releases, requeues, losses, scan failures
         self.pool: list[dict] = []
         self.pool_shards: set[str] = set()  # every shard a pool event named (trimmed events too)
         self._pool_kept = 0  # self.pool[:_pool_kept] are all state events: the trim scan starts here
@@ -313,9 +322,63 @@ class AsyncState:
                 d = self._s(iid).setdefault("drained", {})
                 for b, n in _reasons(r["drained_by_segments"]).items():
                     d[b] = d.get(b, 0) + n
+        elif ev.startswith("rl_dispense_"):
+            self._fold_dispense(r, iid, ts, ev)
         elif ev == "rl_resource_sample" and iid in self.sampler:
             self.sampler[iid]["resource"] = {"available": r.get("available"), "reason": r.get("reason"),
                                              "source": r.get("source")}
+
+    def _fold_dispense(self, r: dict, iid: str, ts: float | None, ev: str) -> None:
+        kind = ev[len("rl_dispense_"):]
+        slot, attempt = _int(r.get("slot")), _int(r.get("attempt"))
+        if kind in DISPENSE_NOTED:
+            self.dispense_events.append({"ts": ts, "kind": kind, "by": iid, "slot": slot, "attempt": attempt,
+                                         **{k: r.get(k) for k in ("reason", "state", "seen", "task_id", "superseded_by")
+                                            if r.get(k) is not None}})
+            del self.dispense_events[:-500]
+        if slot is None:
+            return
+        d = self.dispense.setdefault(slot, {"attempts": {}, "done": None, "done_ts": None})
+        if kind == "claim" and attempt is not None:
+            a = d["attempts"].setdefault(attempt, {"end": None, "end_ts": None})
+            a.update({"by": iid, "claim_ts": ts, "task_id": r.get("task_id")})
+        elif kind == "settle":
+            d["done"], d["done_ts"] = r.get("state") or "settled", ts
+            if attempt is not None:
+                d["attempts"].setdefault(attempt, {}).update({"end": r.get("state") or "settled", "end_ts": ts})
+        elif kind in DISPENSE_ENDS and attempt is not None:
+            a = d["attempts"].setdefault(attempt, {})
+            if a.get("end") is None:
+                a.update({"end": kind, "end_ts": ts, "end_by": iid})
+
+    def dispense_view(self) -> dict | None:
+        """Slots by state (settled trained / dropped / exhausted, held now) and the claims
+        still held, with who holds them: a sampler that crashed keeps its claims until their
+        lease expires and another sampler re-claims them (attempt + 1)."""
+        if not self.dispense and not self.dispense_events:
+            return None
+        settled: dict[str, int] = {}
+        held: list[dict] = []
+        reclaimed = 0
+        for slot, d in self.dispense.items():
+            if d["done"] is not None:
+                settled[d["done"]] = settled.get(d["done"], 0) + 1
+            if any(a > 0 for a in d["attempts"]):
+                reclaimed += 1
+            if d["done"] is None and d["attempts"]:
+                top = max(d["attempts"])
+                a = d["attempts"][top]
+                if a.get("end") is None and a.get("by") is not None:
+                    held.append({"slot": slot, "attempt": top, "by": a["by"], "claim_ts": a.get("claim_ts"),
+                                 "task_id": a.get("task_id")})
+        ends: dict[str, int] = {}
+        for d in self.dispense.values():
+            for a in d["attempts"].values():
+                if a.get("end") in DISPENSE_ENDS:
+                    ends[a["end"]] = ends.get(a["end"], 0) + 1
+        return {"slots": len(self.dispense), "settled": dict(sorted(settled.items())), "ends": dict(sorted(ends.items())),
+                "reclaimed_slots": reclaimed, "held": sorted(held, key=lambda x: (x["by"], x["slot"])),
+                "events": self.dispense_events[-100:]}
 
     def _fold_sampler(self, r: dict, iid: str, ts: float | None, ev: str, hint: str | None = None,
                       boot_ts: float | None = None) -> None:
@@ -694,6 +757,7 @@ class AsyncState:
                 trainers[iid]["compaction"] = comp
         return {"samplers": samplers, "trainers": trainers, "backlog": self.backlog_series(),
                 "releases": self.release_rows(), "pool": self.pool[-500:], "pool_scale": self.pool_scale(),
+                "dispense": self.dispense_view(),
                 "roles": dict(self.roles)}
 
     def pool_scale(self) -> dict | None:
