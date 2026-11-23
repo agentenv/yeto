@@ -1414,7 +1414,9 @@ def cmd_launch(args) -> int:
             print(f"[yeto] dry run rejected: {exc}", file=sys.stderr)
             return 1
         print(json.dumps(plan, indent=2, sort_keys=True))
-        return 0
+        from .launch_preflight import breaker_rules
+
+        return breaker_rules(args)  # the dependency rules between the launch's breaker thresholds
     if getattr(args, "controller", "local") == "head":
         return cmd_launch_head(args)
     try:  # launch-preflight-guards: before the worker can create any cloud resource

@@ -875,14 +875,7 @@ def pool_config_warnings(cfg: dict[str, Any]) -> list[str]:
         notes.append("sampler spec: incarnation_lease is false: a fenced or replaced node's task claims are "
                      "not released at once (the other samplers wait out the dispense lease, lease_s) and its "
                      "sampler is not fenced; remove the key (default on) for an elastic pool")
-    dispense = pool_dispense(cfg)
-    if dispense is not None:
-        from yeto.rl.engine.store_dispense import lease_warning  # noqa: PLC0415
-
-        warning = lease_warning(dispense.get("lease_s"))
-        if warning is not None:
-            notes.append(warning)
-    return notes
+    return notes  # the dispense lease and the drain cut: yeto.breakers.rules (D10, D1)
 
 
 def prompts_file_report(cfg: dict[str, Any], spec: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
@@ -1607,7 +1600,8 @@ def _print_breaker_deprecations(cfg: dict[str, Any]) -> None:
     """The pool loop's start: one line per deprecated breaker knob of the pool config (decision 9).
     A knob that does not resolve is left to the pool's own checks, which name it."""
     from yeto import breakers  # noqa: PLC0415
-    from yeto.launch.rollout.pools import POOL_LAYERS, pool_sources  # noqa: PLC0415
+    from yeto.breakers.rules_facts import pool_sources  # noqa: PLC0415
+    from yeto.launch.rollout.pools import POOL_LAYERS  # noqa: PLC0415
 
     try:
         resolved = breakers.resolve(pool_sources(cfg), layers=POOL_LAYERS, strict=False)

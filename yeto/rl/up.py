@@ -750,9 +750,9 @@ class Run:
         for line in self.breakers.deprecations():
             _log(f"preflight: deprecated: {line}")
         self.log_release_stall()
-        if self.stall_timeout_s() <= 0:
-            _log("preflight: --rl-stall-timeout 0 disables the trainer's hang detection; run up refuses it "
-                 "(the monitor's silence backstop is 4x this timeout)")
+        problem = self.rules_problem()
+        if problem is not None:
+            _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
             return False
         for i in range(len(self.pools)):
@@ -767,11 +767,6 @@ class Run:
                 self.mark("preflight", ok=False)
                 return False
             self.log_compaction(i)
-        problem = self.backlog_problem()
-        if problem is not None:
-            _log(f"preflight: {problem}")
-            self.mark("preflight", ok=False)
-            return False
         ok = True
         for path in self.pool_configs:
             ok &= self._cmd(self.nc("pool", "--config", path, "--dry-run"), log="preflight.log") == 0
@@ -1629,17 +1624,35 @@ class Run:
                                         pool_cfg, data_path=self.pools[pool].data_path)
         return "; ".join(found) if found else None
 
-    def backlog_problem(self) -> str | None:
-        """The samplers' backlog caps against a single trainer's release cadence
-        (:func:`yeto.rl.up_consistency.backlog_findings`, over every pool): a cap the
-        trainer can never read past to its first release refuses the run; caps the
-        samplers would wait at between releases are a warning line with the value to set."""
-        from yeto.rl import up_consistency  # noqa: PLC0415
+    def rules_problem(self) -> str | None:
+        """The dependency rules between the run's breaker thresholds
+        (:mod:`yeto.breakers.rules`, D1-D21: the stall timer and the silence backstop,
+        the samplers' backlog caps against the release cadence, dispense coverage,
+        nested timeouts, ...): a warning or a note is a preflight line; an error
+        refuses the run before anything is ordered. First the cap the pools'
+        ``max_backlog_groups: "auto"`` samplers get (:attr:`auto_backlog`)."""
+        from yeto import breakers  # noqa: PLC0415
+        from yeto.breakers.rules import format_finding  # noqa: PLC0415
 
+        self.log_auto_backlog()
+        try:
+            resolved = breakers.resolved(self.cfg, strict=False)  # conflicts: refused by their own check
+        except ValueError as error:
+            return str(error)
+        errors = []
+        for f in breakers.preflight(resolved, run_config=self.cfg):
+            if f.level == "error":
+                errors.append(format_finding(f))
+            else:
+                _log(f"preflight: {'WARNING' if f.level == 'warn' else 'note'}: {format_finding(f)}")
+        return "; ".join(errors) if errors else None
+
+    def log_auto_backlog(self) -> None:
+        """The preflight line of the ``max_backlog_groups: "auto"`` cap (nothing without one)."""
         try:
             pools = [(ref.load(), ref.data_path) for ref in self.pools]
         except (OSError, ValueError):
-            return None  # the pool dry-run reports an unreadable pool config
+            return  # the pool dry-run reports an unreadable pool config
         auto = self.auto_backlog
         if auto is not None:
             _log(f"preflight: max_backlog_groups auto -> {auto['groups']} per sampler ({auto['why']}; "
@@ -1649,10 +1662,6 @@ class Run:
 
             _log(f"preflight: max_backlog_groups auto -> fallback {sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS} per "
                  "sampler (the trainer is not a single buffer trainer, or no pool has a target)")
-        problems, warnings = up_consistency.backlog_findings([str(a) for a in self.cfg["trainer"]["argv"]], pools)
-        for warning in warnings:
-            _log(f"preflight: WARNING: {warning}")
-        return "; ".join(problems) if problems else None
 
     def log_compaction(self, pool: int = 0) -> None:
         """Preflight lines of the pool's ``agentic.compaction`` (nothing without it) and a

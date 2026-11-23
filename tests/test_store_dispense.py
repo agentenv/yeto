@@ -867,13 +867,13 @@ def test_lease_s_is_checked_and_a_long_lease_is_warned(tmp_path, capsys):
 
 
 def test_the_pool_dry_run_warns_on_a_long_dispense_lease(tmp_path):
-    from yeto.launch.nc import cli
+    from yeto.launch.nc import pool_run
 
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps({"prompts": {"dispense": {"backend": "store", "namespace": "n", "lease_s": 7200}}}))
-    notes = cli.pool_config_warnings({"spec": str(spec)})
-    assert any("lease_s is 7200 s" in n for n in notes)
-    assert not any("lease_s" in n for n in cli.pool_config_warnings(
+    found = pool_run.breaker_findings({"spec": str(spec)})  # the dependency rule D10
+    assert any(f.rule == "D10" and "lease_s is 7200 s" in f.message for f in found)
+    assert not any(f.rule == "D10" for f in pool_run.breaker_findings(
         {"spec": str(spec), "sampler": {"dispense": {"backend": "store", "namespace": "n", "lease_s": 900}}}))
 
 

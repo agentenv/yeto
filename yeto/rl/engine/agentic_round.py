@@ -1320,9 +1320,17 @@ def drain_timeout_warning(spec: Mapping[str, Any], *, live_engine: bool | None =
     if cap is None:
         return None
     drain = section.get("drain_timeout_s")
+    return drain_cut_warning(None if drain is None else float(drain), cap,
+                             compaction=section.get("compaction") is not None)
+
+
+def drain_cut_warning(drain: float | None, cap: float, *, compaction: bool = False) -> str | None:
+    """The warning of a drain-mode sampler's cut (:func:`drain_timeout_warning`, the
+    dependency rule D1 of :mod:`yeto.breakers.rules_timing`): ``drain`` the
+    ``agentic.drain_timeout_s`` (None: unset), ``cap`` the ``reload_max_defer_s``."""
     note = None
-    if section.get("compaction") is not None:
-        cut = effective_drain_timeout(None if drain is None else float(drain), cap)
+    if compaction:
+        cut = effective_drain_timeout(drain, cap)
         note = (f"agentic.compaction with the drain weight switch: every release cuts the trials still running "
                 f"{cut:g} s after its drain began, and a cut compacted trial is lost with all its segments "
                 f"(compacted trials are the long ones, each compaction adds a summary turn), so the groups' "
@@ -1331,9 +1339,9 @@ def drain_timeout_warning(spec: Mapping[str, Any], *, live_engine: bool | None =
                 f"{COMPACTION_DRAIN_FLOOR_S:g} s (an estimate for a 262k budget and 3 compactions; measure the "
                 f"compacted trials' wall time) and release less often (--rl-release-every N with "
                 f"--rl-max-policy-age raised to match); watch rl_agentic_drain abandoned_trials")
-    if drain is not None and float(drain) <= cap:
+    if drain is not None and drain <= cap:
         return note
-    shown = "unset (no bound)" if drain is None else f"{float(drain):g} s"
+    shown = "unset (no bound)" if drain is None else f"{drain:g} s"
     return ("" if note is None else f"{note}; ") + (
             f"agentic.drain_timeout_s is {shown}, above reload_max_defer_s {cap:g} s: a drain-mode weight switch "
             f"waits at most {cap:g} s on running trials, then cancels them (lost as drain_timeout); set "
