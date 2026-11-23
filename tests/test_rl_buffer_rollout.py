@@ -507,11 +507,15 @@ def test_reader_round_reports_its_stale_groups_as_round_metadata(monkeypatch):
     reader = plugin._BufferRound.__new__(plugin._BufferRound)
     reader.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path="all")
     reader.groups, reader.samples_per_group = 1, 2
-    reader.reader = SimpleNamespace(take=lambda rid, n, current_version: ([(3, group)], report))
+    # the reader stands at 4 after the take: the round reports it for the policy releases
+    reader.reader = SimpleNamespace(buffer=SimpleNamespace(read_cursor=4,
+                                                           shard_positions=lambda cursor: {"s0": cursor - 1}),
+                                    take=lambda rid, n, current_version: ([(3, group)], report))
     out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=4))
     fill = {"buffer_incomplete_groups": 0, "buffer_dropped_small_groups": 0,
             "buffer_carried_over_groups": 0, "buffer_padded_samples": 0}
-    assert calls == [("meta", 2, {"buffer_stale_groups": 3, **fill}), ("all",)]
+    read = {"buffer_read_cursor": 4, "buffer_read_shards": {"s0": 3}}
+    assert calls == [("meta", 2, {"buffer_stale_groups": 3, **fill, **read}), ("all",)]
     assert out["metrics"]["sample_buffer/stale_groups"] == 3.0
 
 
@@ -535,7 +539,8 @@ def test_reader_round_pads_a_short_round_to_exactly_the_global_batch(monkeypatch
     reader = plugin._BufferRound.__new__(plugin._BufferRound)
     reader.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path="all")
     reader.groups, reader.samples_per_group = 2, 4
-    reader.reader = SimpleNamespace(take=lambda rid, n, current_version: (groups, report))
+    reader.reader = SimpleNamespace(buffer=SimpleNamespace(read_cursor=0, shard_positions=lambda cursor: {}),
+                                    take=lambda rid, n, current_version: (groups, report))
     out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=4))
     assert calls[0][2]["buffer_padded_samples"] == 1 and calls[0][2]["buffer_carried_over_groups"] == 1
     assert calls[1] == ("all", 7)  # the hooks see the real samples only

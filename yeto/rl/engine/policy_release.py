@@ -808,7 +808,10 @@ class PolicyReleaseStore:
         then the record, in the release directory and as LATEST, in one put.
         ``position()`` is called between the two: ``(buffer_selected,
         buffer_shards)`` then include the rounds the trainer took while the weights
-        uploaded, so a sampler's backlog cap lifts with this release. ``staged``
+        uploaded, so a sampler's backlog cap lifts with this release. It must not
+        wait for the trainer's next round: that round may wait for groups the
+        samplers write only after this record lifts their cap (a Miles trainer reads
+        the position its driver kept after the last finished round). ``staged``
         keeps its files.
 
         ``delta_base``: upload the bf16 delta of ``staged`` against this earlier

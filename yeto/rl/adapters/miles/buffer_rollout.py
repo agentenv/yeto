@@ -2493,6 +2493,21 @@ def executor_read_shards(_executor: Any) -> dict[str, int] | None:
     return reader.buffer.shard_positions(reader.buffer.read_cursor) or None
 
 
+def reader_positions(reader: BatchReader) -> tuple[int, dict[str, int] | None]:
+    """``(read cursor, read cursor per sampler shard)`` of ``reader``, read together
+    (the shards None when the buffer has no merged shards)."""
+    cursor = int(reader.buffer.read_cursor)
+    shards = reader.buffer.shard_positions(cursor) or None
+    return cursor, None if shards is None else {str(k): int(v) for k, v in shards.items()}
+
+
+def executor_read_positions(_executor: Any) -> tuple[int, dict[str, int] | None] | None:
+    """Runs INSIDE the rollout executor actor: :func:`reader_positions` of the
+    trainer's reader (None before the reader exists)."""
+    reader = _ACTIVE.get(TRAINER)
+    return None if reader is None else reader_positions(reader)
+
+
 def executor_set_relay_gate_version(_executor: Any, version: int) -> int | None:
     """:func:`executor_set_gate_version` of a relay trainer: a gate set
     before the reader exists is kept and applied when the reader registers, so
@@ -2689,14 +2704,23 @@ class BufferCutLink:
     """Driver side: the round cut's watermark and restore hooks over ``in_executor``
     (``MilesRolloutPool._in_executor``: runs ``fn(executor, *args)`` in the actor)."""
 
-    def __init__(self, in_executor: Callable[..., Any]) -> None:
+    def __init__(self, in_executor: Callable[..., Any],
+                 on_positions: Callable[[Any], None] | None = None) -> None:
+        """``on_positions(positions)``: told the reader's positions
+        (:func:`executor_read_positions`) after every restore, which moves the read
+        cursor (``MilesRolloutPool.note_buffer_read_positions``: the release records
+        read that cache instead of the executor)."""
         self.in_executor = in_executor
+        self.on_positions = on_positions
 
     def watermark(self, rollout_id: int) -> int:
         return int(self.in_executor(executor_watermark_before, int(rollout_id)))
 
     def resume(self, watermark: int) -> int:
-        return int(self.in_executor(executor_reset, int(watermark)))
+        landed = int(self.in_executor(executor_reset, int(watermark)))
+        if self.on_positions is not None:
+            self.on_positions(self.in_executor(executor_read_positions))
+        return landed
 
 
 def wire_sample_buffer(checkpoint: Any, rollout: Any) -> BufferCutLink:
@@ -2705,7 +2729,7 @@ def wire_sample_buffer(checkpoint: Any, rollout: Any) -> BufferCutLink:
     if not callable(in_executor):
         raise SampleBufferRolloutError(f"rollout pool {type(rollout).__name__} cannot run "
                                        "code in the rollout executor")
-    link = BufferCutLink(in_executor)
+    link = BufferCutLink(in_executor, getattr(rollout, "note_buffer_read_positions", None))
     checkpoint.buffer_watermark = link.watermark
     checkpoint.buffer_resume = link.resume
     return link

@@ -1168,7 +1168,8 @@ def _wire_round_cuts_off(driver: Any, *, miles_args: Any) -> None:
     reader = custom_function_path(getattr(miles_args, "rollout_function_path", None)) in READER_FUNCTION_PATHS
     in_executor = getattr(driver.rollout, "_in_executor", None)
     if reader and callable(in_executor):
-        driver.buffer_start_without_cuts = BufferCutLink(in_executor).resume
+        driver.buffer_start_without_cuts = BufferCutLink(
+            in_executor, getattr(driver.rollout, "note_buffer_read_positions", None)).resume
     print(f"[rl] {ROUND_CUTS_OFF_NOTE}", flush=True)
     driver.emit("rl_round_cuts_off", buffer_reader=bool(reader),
                 init_release=(getattr(miles_args, "yeto_rl_init_release", None) or {}).get("path"),

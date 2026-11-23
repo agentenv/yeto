@@ -41,7 +41,8 @@ def _reader(monkeypatch, groups, *, actions=None, positions=None):
     reader.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path=None,
                                   grpo_std_normalization=False)
     reader.groups, reader.samples_per_group = len(groups), 4
-    reader.reader = SimpleNamespace(take=lambda rid, n, current_version: (groups, report),
+    reader.reader = SimpleNamespace(buffer=SimpleNamespace(read_cursor=0, shard_positions=lambda cursor: {}),
+                                    take=lambda rid, n, current_version: (groups, report),
                                     xhw_actions=actions or {})
     return plugin, reader
 

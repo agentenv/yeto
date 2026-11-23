@@ -676,6 +676,11 @@ class Run:
                 self.mark("preflight", ok=False)
                 return False
             self.log_compaction(i)
+        problem = self.backlog_problem()
+        if problem is not None:
+            _log(f"preflight: {problem}")
+            self.mark("preflight", ok=False)
+            return False
         ok = True
         for path in self.pool_configs:
             ok &= self._cmd(self.nc("pool", "--config", path, "--dry-run"), log="preflight.log") == 0
@@ -1511,6 +1516,22 @@ class Run:
         found = up_consistency.problems(str(self.cfg["store"]), [str(a) for a in self.cfg["trainer"]["argv"]],
                                         pool_cfg, data_path=self.pools[pool].data_path)
         return "; ".join(found) if found else None
+
+    def backlog_problem(self) -> str | None:
+        """The samplers' backlog caps against a single trainer's release cadence
+        (:func:`yeto.rl.up_consistency.backlog_findings`, over every pool): a cap the
+        trainer can never read past to its first release refuses the run; caps the
+        samplers would wait at between releases are a warning line with the value to set."""
+        from yeto.rl import up_consistency  # noqa: PLC0415
+
+        try:
+            pools = [(ref.load(), ref.data_path) for ref in self.pools]
+        except (OSError, ValueError):
+            return None  # the pool dry-run reports an unreadable pool config
+        problems, warnings = up_consistency.backlog_findings([str(a) for a in self.cfg["trainer"]["argv"]], pools)
+        for warning in warnings:
+            _log(f"preflight: WARNING: {warning}")
+        return "; ".join(problems) if problems else None
 
     def log_compaction(self, pool: int = 0) -> None:
         """Preflight lines of the pool's ``agentic.compaction`` (nothing without it) and a
