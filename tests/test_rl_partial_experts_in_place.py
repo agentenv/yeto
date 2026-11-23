@@ -147,3 +147,16 @@ def test_partial_manifests_need_the_declared_subset():
         check_expert_partition(_expert_specs(selection.trainable, layers=(1,)), subset=subset)
     # A trainable router keeps the full expert width.
     check_expert_partition(_expert_specs(selection.trainable, router=True), subset=subset)
+
+
+def test_slot_order_digests_are_pinned():
+    """Kimi-K3.1 (slot_order) selections keep the digests main produced before the in-place layout."""
+    synthetic = sel.ExpertSelection.synthetic("random", model="kimi_k31", num_experts=32, num_trainable=8,
+                                              ep_size=4, layers=range(1, 5), seed=7)
+    assert synthetic.sha256 == "82e0173d694da879f2a5a8fe3325763054060e29d06b98bdfc4435baa2f55d79"
+    assert synthetic.trainable_sha256 == "27e1c6447f09c874562f4a13111a0b2ba66b84788970c683431ba73c9f81ef50"
+    counts = {layer: [(layer * 31 + expert * 17) % 97 for expert in range(32)] for layer in range(1, 5)}
+    lpt = sel.ExpertSelection.from_counts(counts, model="kimi_k31", num_trainable=8, ep_size=4, placement="lpt")
+    assert lpt.sha256 == "fad83285eb69496cf3a858a279074031b29bb3daa8885e106e17946a5565b69c"
+    assert lpt.trainable_sha256 == "2d8b14bc501bbcf11f1216187bbf9c34892553f65b5cf6df89bd047058fc6fc4"
+    assert lpt.with_ep_size(2).sha256 == "de3cc5b50429f9892a48880f188cbef7bb1b7e5a8d72c17e19dd56520c8ba0b6"
