@@ -514,6 +514,10 @@ class Reducer:
         for k, v in values.items():
             if v is not None:
                 pt[k] = v
+        if pt.get("kl") is not None and pt.get("kl") == pt.get("kl_tr"):
+            # the round's other record (rl_local_round) carries the train-rollout KL in
+            # ``mean_kl`` without naming it: it is not the PPO KL (either arrival order)
+            pt.pop("kl")
 
     def _feed_learner(self, r: dict, iid: str | None, ts: float | None) -> None:
         event = r["event"]

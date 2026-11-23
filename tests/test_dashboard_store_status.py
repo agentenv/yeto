@@ -370,3 +370,19 @@ def test_a_release_stuck_uploading_warns_and_is_critical_when_samplers_wait_for_
     reducer.feed({"event": "rl_policy_released", "island_id": 0, "policy_version": 1, "buffer_selected": 16,
                   "time_unix": T0 + 710}, source="t", offset=1000)
     assert not [a for a in reducer.overview(now=T0 + 720)["alerts"] if a["rule"] == "release_stalled"]
+
+
+def test_a_local_round_mean_kl_equal_to_the_train_rollout_kl_is_not_the_ppo_kl():
+    trained = {"event": "rl_round_trained", "island_id": 0, "rollout_id": 0, "time_unix": T0 + 1,
+               "mean_kl": 0.000487, "train_metrics": {"train_rollout_kl": 0.000487, "entropy": 0.043}}
+    local = {"event": "rl_local_round", "island_id": 0, "local_round_id": 1, "time_unix": T0 + 2,
+             "mean_kl": 0.000487}
+    for order in ((trained, local), (local, trained)):
+        reducer = Reducer(run="r")
+        for i, rec in enumerate(order):
+            reducer.feed(rec, source="t", offset=i)
+        s = reducer.series(reducer.islands["0"])
+        assert not s.get("kl") and [v for _, v in s["kl_tr"]] == [0.000487]
+    reducer = Reducer(run="r")  # a real PPO KL on rl_local_round still shows
+    reducer.feed({**local, "mean_kl": 0.02}, source="t", offset=0)
+    assert [v for _, v in reducer.series(reducer.islands["0"])["kl"]] == [0.02]
