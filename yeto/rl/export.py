@@ -171,7 +171,9 @@ def derive_peft_lora_specs(
     the routed experts, one adapter per expert, as Megatron-Bridge exports them
     (Miles islands); the specs come from :func:`yeto.rl.lora_layout.routed_expert_lora_specs`
     on the same empty-weights model (PEFT's Transformers-5 target conversion
-    rewrites such a target list, see there).
+    rewrites such a target list, see there). The other ``nn.Linear`` targets of
+    that layout get PEFT's pairs without running PEFT, so the layout is the same
+    under every PEFT version.
     """
 
     from accelerate import init_empty_weights
@@ -222,6 +224,14 @@ def derive_peft_lora_specs(
                     f"--lora-targets {choice} matches no module of this {config.model_type!r} model "
                     f"(its linear layers: {', '.join(linear_leaf_names(base))}); use --lora-targets "
                     "all-linear, or add the model's attention projection names to the attention preset")
+        if routed_experts and not expert_specs:
+            # the Megatron-Bridge layout of a Miles island: PEFT's pairs and matching
+            # rules without running the installed PEFT (lora_layout.linear_target_modules)
+            from .lora_layout import linear_lora_specs, linear_target_modules
+
+            modules = linear_target_modules(base, targets)
+            if modules is not None:
+                return tuple(sorted(linear_lora_specs(base, modules, rank=rank)))
         adapter = get_peft_model(
             base,
             LoraConfig(

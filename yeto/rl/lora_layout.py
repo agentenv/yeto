@@ -17,7 +17,10 @@ expert layout Megatron-Bridge exports and SGLang serves
 ``share_expert_adapters=False``). So :func:`fused_expert_lora_specs` writes the
 per-expert names and shapes from the fused parameters, and
 :func:`routed_expert_lora_specs` gives every ``nn.Linear`` PEFT's pair directly
-(see there why not through ``get_peft_model``). The island's first export
+(see there why not through ``get_peft_model``). The other targets of a Miles
+island follow PEFT's matching rules without running PEFT
+(:func:`linear_target_modules`), so the bound layout does not depend on the
+installed PEFT version (the image, CI and a laptop carry different ones). The island's first export
 through Bridge checks them, so a model whose checkpoint names differ is refused
 there rather than trained under a wrong layout.
 
@@ -149,6 +152,37 @@ def linear_lora_specs(model: Any, modules: Iterable[str], *, rank: int) -> tuple
     return tuple(specs)
 
 
+def linear_target_modules(model: Any, targets: str | Sequence[str]) -> list[str] | None:
+    """The modules PEFT's ``target_modules`` matching selects for ``targets``
+    (``"all-linear"`` or module names / name suffixes), or ``None`` when one of
+    them is not an ``nn.Linear`` or none matches (the caller asks PEFT then).
+
+    PEFT's rules (``tuners_utils._maybe_include_all_linear_layers`` and
+    ``check_target_module_exists``): ``all-linear`` is every linear layer but the
+    output head; a name targets a module whose name equals it or ends with
+    ``"." + name``.
+    """
+
+    import torch
+
+    modules = dict(model.named_modules())
+    if targets == "all-linear":
+        if any(type(module).__name__ == "Conv1D" for module in modules.values()):
+            return None  # PEFT's all-linear also takes Transformers' Conv1D (GPT-2)
+        output = getattr(model, "get_output_embeddings", lambda: None)()
+        selected = [name for name, module in modules.items()
+                    if isinstance(module, torch.nn.Linear) and module is not output]
+    elif isinstance(targets, str):
+        return None
+    else:
+        wanted = tuple(targets)
+        selected = [name for name in modules if name and any(
+            name == target or name.endswith(f".{target}") for target in wanted)]
+        if any(not isinstance(modules[name], torch.nn.Linear) for name in selected):
+            return None
+    return sorted(selected) or None
+
+
 def routed_expert_lora_specs(model: Any, *, rank: int, config: Any) -> tuple[CanonicalTensorSpec, ...]:
     """``all-linear`` with routed experts on a model built with empty weights.
 
@@ -229,4 +263,4 @@ def offline_canonical_specs(profile: Any, *, rank: int, targets: str, model_path
 
 __all__ = ["CANONICAL_PREFIX", "MAX_CANONICAL_LORA_BYTES", "LoraLayoutError", "adapts_routed_experts",
            "all_linear_modules", "check_canonical_size", "fused_expert_lora_specs", "has_expert_specs",
-           "linear_leaf_names", "linear_lora_specs", "offline_canonical_specs", "routed_expert_lora_specs"]
+           "linear_leaf_names", "linear_lora_specs", "linear_target_modules", "offline_canonical_specs", "routed_expert_lora_specs"]
