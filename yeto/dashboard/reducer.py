@@ -294,6 +294,10 @@ class Reducer:
         self._source_island: dict[str, str] = {}  # tape path -> the island its records name
         self.async_ = async_rl.AsyncState()  # samplers / buffer / releases / NC pool (async_rl.py)
         self._superseded = False  # the record being fed is from a superseded trainer launch
+        # set by serve / export when --store is given: () -> StoreTapes.status() (store_tapes.py)
+        self.store_status: Any = None
+        # the dashboard's own command line, for the page's "Commands" box (cli.page_commands)
+        self.commands: dict[str, str] | None = None
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
@@ -1294,13 +1298,16 @@ class Reducer:
         rounds = self.rounds()
         cost = self.cost(now)
         cards = [self._island_card(self.islands[k], now) for k in self.island_ids()]
-        alerts = alerts_mod.evaluate(self, now=now, rounds=rounds, cost=cost, cards=cards)
+        store = self.store_status() if callable(self.store_status) else None
+        alerts = alerts_mod.evaluate(self, now=now, rounds=rounds, cost=cost, cards=cards, store=store)
         torn_down = (self.operator_stop() or {}).get("cause") == "teardown"
         n_bad = sum(1 for c in cards if c["status"] in ("stale", "recovery")
                     or (c["status"] == "lost" and not torn_down))  # after teardown a lost node is expected
         sev0 = sum(1 for a in alerts if a["sev"] == 0)
         stop = self.operator_stop()
-        if not cards:
+        if not cards and store and store.get("failing"):
+            global_status = {"level": "bad", "text": "run store unreadable"}
+        elif not cards:
             global_status = {"level": "muted", "text": "no data"}
         elif stop and all(c["status"] in ("stopped", "done") for c in cards):
             global_status = {"level": "muted", "text": f"stopped (stopped by us: {stop.get('cause')})"}
@@ -1323,6 +1330,7 @@ class Reducer:
             "round_marks": [{"round": r["round"], "missed": bool(r["missed"]), "resend": r["resend"]}
                             for r in rounds],
             "counts": dict(self.counts), "events_total": self.event_seq,
+            "store": store, "commands": self.commands,
         }
 
     def _run_meta(self) -> tuple:

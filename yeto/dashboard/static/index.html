@@ -19,7 +19,7 @@
 @media (prefers-color-scheme:light){:root:not([data-theme]){
   --bg:#f6f6f7;--panel:#ffffff;--ink:#18181b;--ink2:#6b6b73;--line:#e3e3e7;--accent:#2563eb;
   --good:#16a34a;--warn:#ca8a04;--bad:#dc2626;--band:rgba(139,92,246,.16)}
-  :root:not([data-theme]) .seg button.on{background:#e7e7ea}}
+  :root:not([data-theme]) .seg button.on,:root:not([data-theme]) .btn.rl{background:#e7e7ea}}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 var(--sans)}
 .num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
@@ -106,12 +106,12 @@ body.sftmode .app{grid-template-columns:minmax(0,1fr)}body.sftmode nav,body.sftm
 .seg button{border:0;background:transparent;color:var(--ink2);font:inherit;padding:3px 10px;border-radius:6px;cursor:pointer}
 .seg button.on{background:#2c2c31;color:var(--ink);font-weight:600}
 :root[data-theme="light"] .seg button.on{background:#e7e7ea}
-.btn.rl{background:#26262a;border-color:var(--line)}.btn[disabled]{opacity:.5;cursor:default}
+.btn.rl{background:#26262a;border-color:var(--line)}:root[data-theme="light"] .btn.rl{background:#e7e7ea}.btn[disabled]{opacity:.5;cursor:default}
 .tg{display:inline-block;margin-left:8px;padding:1px 8px;border:1px solid var(--line);border-radius:999px;font-size:11px;color:var(--ink2);vertical-align:3px;font-weight:400}
 .krow{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0 14px}
 .kc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 12px 10px;min-width:0}
 .kc .kt{font-size:12px;color:var(--ink)}.kc .kv{font-size:19px;font-weight:600;margin:6px 0 4px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kc .ks{font-size:11px;color:var(--ink2);overflow-wrap:anywhere}.kc .dl{display:block;font-size:11px;color:var(--ink2);margin-top:6px}.dl.up::first-letter{color:var(--good)}
+.kc .kv.long{white-space:normal;font-size:16px;line-height:1.25}.kc .ks{font-size:11px;color:var(--ink2);overflow-wrap:anywhere}.kc .dl{display:block;font-size:11px;color:var(--ink2);margin-top:6px}.dl.up::first-letter{color:var(--good)}
 .blk{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 12px 6px;margin-bottom:14px;overflow-x:auto}
 .bh{display:flex;justify-content:space-between;gap:10px;align-items:baseline;margin-bottom:8px}.bh b{font-size:13px}.bh span{font-size:11px;color:var(--ink2)}
 table.nt{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}

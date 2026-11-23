@@ -336,10 +336,13 @@ function islands(){
     '<span>Ray dashboard</span><span>'+esc(re.note||(re.command?re.command:"localhost :"+re.port))+'</span></div></details>'}).join("")||'<div class="note">no data</div>';
 }
 function cost(){
-  var c=O.cost||{};
-  $("costBox").innerHTML='<table class="c"><tr><th></th><th>GPU/h</th><th>CPU+memory/h</th><th>total/h</th><th>duration</th><th>cumulative</th></tr>'+(c.islands||[]).map(function(r){
+  var c=O.cost||{},ci=c.islands||[];
+  var ni=(O.islands||[]).length;
+  if(!ci.length){$("costBox").innerHTML='<div class="note">'+(ni?'no cost data for the '+ni+' island(s): cost needs island_ready in fleet.jsonl or the cloud and GPU type on the tapes':'no island has reported yet, so nothing is priced')+
+    (fin(c.budget_usd)?' · budget $'+f(c.budget_usd,0):'')+'. Prices: '+esc(c.prices_source||"")+'</div>';return}
+  $("costBox").innerHTML='<table class="c"><tr><th></th><th>GPU/h</th><th>CPU+memory/h</th><th>total/h</th><th>duration</th><th>cumulative</th></tr>'+ci.map(function(r){
     return '<tr><td>Island '+esc(r.id)+'</td><td class="num">'+(fin(r.gpu_rate_usd_h)?"$"+f(r.gpu_rate_usd_h,2):"unpriced")+'</td><td class="num">'+(fin(r.host_rate_usd_h)?"$"+f(r.host_rate_usd_h,2):"GPU only")+'</td><td class="num">'+(fin(r.rate_usd_h)?"$"+f(r.rate_usd_h,2):"n/a")+'</td><td class="num">'+f(r.hours,2)+' h</td><td class="num">'+(fin(r.cost_usd)?"$"+f(r.cost_usd,1):"n/a")+'</td></tr>'}).join("")+'</table>'+
-    '<div class="note" style="margin-top:6px">'+esc(c.note||"")+'. Specs: '+(c.islands||[]).map(function(r){return "island "+esc(r.id)+" "+(r.cpus==null?"n/a":r.cpus)+" cores, "+(r.memory_gib==null?"n/a":r.memory_gib)+" GiB"}).join("; ")+'. Prices: '+esc(c.prices_source||"")+'</div>';
+    '<div class="note" style="margin-top:6px">'+esc(c.note||"")+'. Specs: '+ci.map(function(r){return "island "+esc(r.id)+" "+(r.cpus==null?"n/a":r.cpus)+" cores, "+(r.memory_gib==null?"n/a":r.memory_gib)+" GiB"}).join("; ")+'. Prices: '+esc(c.prices_source||"")+'</div>';
 }
 var EV_KEEP={rl_engine_selected:1,rl_driver_start:1,rl_driver_phase:1,rl_publication:1,rl_round_trained:1,rl_reconfiguration:1,rl_learner_finalized:1,
   island_ready:1,island_lost:1,island_stop:1,island_done:1,island_leave:1,operator_stop:1,dashboard_source_lost:1,rl_elastic_recommendation:1,
@@ -357,7 +360,8 @@ function events(){
   $("evs").innerHTML=list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" island "+esc(e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
 }
 function cmds(){
-  var run=O.run||"<run>",list=[["Local dashboard","yeto dashboard serve --run "+run+" --port 8787"],["Export offline page","yeto dashboard export --run "+run+" -o "+run+".html"],
+  var run=O.run||"<run>",cm=O.commands||{};
+  var list=[["Local dashboard",cm.serve||"yeto dashboard serve --run "+run+" --port 8787"],["Export offline page",cm.export||"yeto dashboard export --run "+run+" -o "+run+".html"],
     ["Run status","yeto status "+run]];
   if(((O.islands||[])[0]||{}).cloud==="modal")list.push(["Modal logs","modal app logs yeto-"+run],["Stop app","modal app stop --yes yeto-"+run]);
   $("cmdBox").innerHTML=list.map(function(c,i){return '<div class="cmd"><span class="l">'+esc(c[0])+'</span><code id="cmd'+i+'">'+esc(c[1])+'</code><button class="btn" data-c="'+i+'">Copy</button></div>'}).join("");

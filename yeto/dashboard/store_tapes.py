@@ -65,6 +65,11 @@ class StoreTapes:
         self.errors = 0
         self.last_error: str | None = None
         self.requests = 0  # listing requests so far
+        # health of the store reads, for the page and the alerts (``status``): failures since
+        # the last poll that read the store cleanly, and the wall clock of that poll
+        self.failing = 0
+        self.last_ok_at: float | None = None
+        self.last_error_at: float | None = None
 
     def _done(self, key: str) -> bool:
         tape = tape_of(key)
@@ -95,8 +100,7 @@ class StoreTapes:
         try:
             keys = self._new_keys()
         except Exception as error:  # noqa: BLE001 - a store hiccup must not stop the page
-            self.errors += 1
-            self.last_error = f"{type(error).__name__}: {error}"[:300]
+            self._failed(error)
             return 0
         n, blocked = 0, set()
         for key in keys:
@@ -111,8 +115,7 @@ class StoreTapes:
                 seq = int(chunk.split(".")[0])
                 data = self.objects.read(key)
             except Exception as error:  # noqa: BLE001
-                self.errors += 1
-                self.last_error = f"{type(error).__name__}: {error}"[:300]
+                self._failed(error)
                 blocked.add((island, inc))
                 continue  # retried at the next poll
             self.cursors[tape_of(key)] = key  # keys come sorted: the cursor only moves forward
@@ -132,4 +135,21 @@ class StoreTapes:
                     continue
                 if isinstance(rec, dict) and reducer.feed(rec, source=source, offset=seq * _SEQ_SPAN + pos):
                     n += 1
+        if not blocked:
+            self.failing = 0
+            self.last_ok_at = time.time()
         return n
+
+    def _failed(self, error: BaseException) -> None:
+        self.errors += 1
+        self.failing += 1
+        self.last_error = f"{type(error).__name__}: {error}"[:300]
+        self.last_error_at = time.time()
+
+    def status(self) -> dict:
+        """What the page and the alerts show about the store reads: ``failing`` counts the
+        failures since the last clean poll (0: the store reads fine, or was never polled)."""
+        return {"label": self.label, "uri": getattr(self.objects, "uri", None), "sources": len(self.sources),
+                "requests": self.requests, "errors": self.errors, "failing": self.failing,
+                "last_error": self.last_error, "last_error_at": self.last_error_at,
+                "last_ok_at": self.last_ok_at, "polled": self._next_poll is not None}

@@ -58,6 +58,35 @@ Endpoints (all GET; any other method gets 405):
 | `/api/fleet` | `fleet.jsonl` lifecycle and `cost_tick`, price table source, cost view |
 | `/api/events?island=&type=&after=&limit=` | Paged events (`after` is the previous page's `cursor`) |
 
+## Run store: tapes uploaded by the islands (`--store`)
+
+```bash
+yeto dashboard serve --run <run> --store s3://<bucket>/runs/<run> --port 8787 [--store-poll 10] \
+    [--up-state ~/.yeto/rl-up/<run>/state.json] [--budget 50]
+yeto dashboard export --store s3://<bucket>/runs/<run> -o run.html
+```
+
+`--store` (an `s3://` URI or a directory) reads every island's
+`tapes/<island>/<incarnation>/<seq>.jsonl` chunk, the tapes the samplers and the
+trainer upload every `YETO_RL_TAPE_UPLOAD_S` seconds: islands on leased nodes and
+replacement nodes appear without a per-node mirror. The store is polled every
+`--store-poll` seconds (default 10). Credentials come from the environment, as for
+the launcher (`YETO_RL_STORE_S3_*`, else `AWS_PROFILE` / the AWS variables).
+`--up-state` adds the cumulative runtime and spend of a `yeto run up` run; the file
+is read on every view and may appear later.
+
+A failing store read is shown, not hidden: `/api/overview` and `/api/view` carry
+`overview.store` (`sources`, `requests`, `errors`, `failing`, `last_error`,
+`last_ok_at`); while `failing` is non-zero the page raises the warning "run store
+unreadable" and, with no island yet, the global status says so instead of "no
+data". The "Islands now" note shows the tapes read and the last clean read.
+
+A dashboard may start before the run: the run's own paths under `--run`
+(`~/.yeto/runs/<run>/events`, `fleet.jsonl`) and the `--tapes` paths are followed
+once they appear. `export` still refuses when none of its paths exists and no
+`--store` is given. The page's "Commands" box repeats this dashboard's own
+arguments (port, store, tapes ...), so a copied command reproduces it.
+
 ## Offline export
 
 ```bash

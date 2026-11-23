@@ -324,9 +324,21 @@ def compaction(reducer, th: dict) -> list[dict]:
     return out
 
 
-def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict]) -> list[dict]:
+def store_unreadable(store: dict | None) -> list[dict]:
+    """``--store`` reads failing since the last clean poll: without this the page shows
+    "no data", the same as a run that has not started."""
+    if not store or not store.get("failing"):
+        return []
+    where = store.get("uri") or "the run store"
+    return [_alert(1, "store_unreadable", "run store unreadable",
+                   f"{store['failing']} failed read(s) of {where} since the last clean poll: "
+                   f"{(store.get('last_error') or '')[:200]}")]
+
+
+def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict],
+             store: dict | None = None) -> list[dict]:
     th = reducer.thresholds
-    alerts = (recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
+    alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
               + budget(cost, th) + compaction(reducer, th)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))

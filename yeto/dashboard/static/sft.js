@@ -400,6 +400,11 @@ function rlCards(V){var O=V.overview||{},cs=(O.islands||[]).map(function(c,i){va
 function rlBilled(V,c){var ci=(((V.overview||{}).cost||{}).islands||[]).filter(function(r){return String(r.id)===String(c.id)})[0],ex=(V.islands||{})[c.id]||{};
   if(ci&&fin(ci.hours)&&ci.hours>0)return {h:ci.hours,src:"fleet"};var sp=((V.async||{}).samplers||{})[c.id]||{},a=fin(sp.first_ts)?sp.first_ts:ex.first_ts,b=fin(sp.last_ts)?sp.last_ts:ex.last_ts;
   return fin(a)&&fin(b)?{h:(b-a)/3600,src:"events",a:a,b:b}:{h:null,src:"none"}}
+// a card row in rows of equal length: as many columns as fit (cards >= 150 px), then the
+// cards spread evenly over the rows, so a row of 8 never ends with one card alone on a line
+function evenGrid(box,n){if(!box||!n)return;var w=box.clientWidth||box.getBoundingClientRect().width||0;if(!w)return;
+  var fit=Math.max(1,Math.floor((w+12)/(150+12))),rows=Math.ceil(n/fit),cols=Math.ceil(n/rows);
+  box.style.gridTemplateColumns="repeat("+cols+",minmax(0,1fr))"}
 function rlm(V){
   var O=V.overview||{},A=V.async||{},S=A.samplers||{},TR=A.trainers||{},X=V.islands||{},cs=rlCards(V);
   var t1=NOW,t0=NOW-RANGE_H*3600,tp=t0-RANGE_H*3600;
@@ -416,20 +421,23 @@ function rlm(V){
   var lastRew=f0?lastW(RR(f0),"reward"):null,pvs=cs.map(function(c){return c.policy_version}).filter(fin),rel=A.releases||[],lr=rel.length?rel[rel.length-1]:null;
   var toks=sum(trs.map(function(c){return sum(RR(c).map(function(r){return r.tokens}))})),bl=A.backlog,blp=bl&&bl.points&&bl.points.length?bl.points[bl.points.length-1]:null;
   var caps=sps.map(function(c){return (S[c.id]||{}).max_backlog_groups}).filter(fin);
-  var kp=[["Islands active / total",act.filter(function(c){return rlLive(c.status)}).length+" / "+act.length,"trainers "+liveTr.length+"/"+trs.length+" · samplers "+sps.filter(function(c){return rlLive(c.status)}).length+"/"+sps.length+" · "+act.map(function(c){return c.label+" "+c.status}).join(" · ")+(unk.length?" · "+unk.length+" unrecognized tape(s) not counted":"")],
+  var kp=[["Islands active / total",act.filter(function(c){return rlLive(c.status)}).length+" / "+act.length,["trainers "+liveTr.length+"/"+trs.length,"samplers "+sps.filter(function(c){return rlLive(c.status)}).length+"/"+sps.length].concat(act.map(function(c){return c.label+" "+c.status}),unk.length?[unk.length+" unrecognized tape(s) not counted"]:[]).join(" · ")],
     ["Groups trained / written",k(tsum("trained_groups")||0,0)+" / "+k(ssum("groups")||0,0),(tsum("trained_groups")?"trainers trained "+k(tsum("trained_groups"),0)+" groups ("+k(toks)+" tokens)":"trainer has trained 0 groups yet")+" · samplers wrote "+k(ssum("groups")||0,0)+" groups, whole run"],
     ["Fleet tokens / s",k(tokS),(liveTr.length?"live trainers, last round":"last round of each trainer")+" · MFU not on the tapes"],
     [(f0?f0.label:"Trainer")+" step p50",dur(pctl(fs,0.5)),"round p50 "+dur(pctl(fr,0.5))+" · "+fs.length+" steps in range"],
-    ["Latest reward",lastRew?k(lastRew.reward,3):"not trained yet",(lastRew?"trainer batch":"trainer has no trained batch yet")+(rew.length?" · "+rew.join(" · "):" · no reward on the tapes (enable the buffer trainer's batch summary: yeto ≥ this version)")],
+    ["Latest reward",lastRew?k(lastRew.reward,3):"not trained yet",(lastRew?"trainer batch":"trainer has no trained batch yet")+(rew.length?" · "+rew.join(" · "):(cs.length?" · no reward reported yet (trainers report it per trained batch, samplers per round)":" · no island has reported yet"))],
     ["Policy version / releases",(pvs.length?"v"+Math.max.apply(null,pvs):"n/a")+" / "+rel.length,lr?"last release v"+lr.policy_version+" "+ago(lr.released_at):"no release yet"],
     ["Rejected: stale / zero-var / trunc / infra",[tsum("stale_groups"),ssum("zero_variance_dropped"),ssum("truncated"),ssum("dropped_groups")].map(function(v){return fin(v)?k(v,0):"n/a"}).join(" / "),"groups / groups / samples / groups, whole run"],
     ["Buffer backlog",blp&&fin(blp[3])?k(blp[3],0):"n/a",bl?"written "+k(bl.written,0)+" · read "+k(bl.read,0)+(caps.length?" · cap "+caps.join("+"):""):"no sampler rounds"]];
   if((V.usage||{}).syncer){var rs=V.rounds_syncer||[];kp.push(["Syncer outer step",rs.length?String(rs[rs.length-1].round):"0","merges on the syncer tape"],["Syncer RSS","n/a","syncer.log not collected for RL runs"])}
-  $("rKpis").innerHTML=kp.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
+  // a long value (the four rejected counts) wraps in a smaller font instead of being cut off
+  $("rKpis").innerHTML=kp.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv'+(String(x[1]).length>12?" long":"")+'" title="'+esc(x[1])+'">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
+  evenGrid($("rKpis"),kp.length);
   // islands now
   var pool=A.pool||[],pl=pool.length?pool[pool.length-1]:null;
   var lts=cs.map(function(c){return (X[c.id]||{}).last_ts}).filter(function(t){return fin(t)&&t>0});
-  $("rNodesNote").textContent=(lts.length?"last event "+ago(Math.max.apply(null,lts)):"no events yet")+(pl?" · NC pool: "+pl.event.replace("nc_elastic_","")+" "+ago(pl.ts):"");
+  var st=O.store,stx=!st?"":st.failing?" · run store: read failing ("+st.failing+"×)":!st.polled?" · run store: not read yet":" · run store: "+st.sources+" tape(s)"+(fin(st.last_ok_at)?", read "+ago(st.last_ok_at):"");
+  $("rNodesNote").textContent=(lts.length?"last event "+ago(Math.max.apply(null,lts)):"no events yet")+(pl?" · NC pool: "+pl.event.replace("nc_elastic_","")+" "+ago(pl.ts):"")+stx;
   var hbm=function(c){var ns=(X[c.id]||{}).node_series||{},pk=null;Object.keys(ns).forEach(function(n){ns[n].forEach(function(p){if(fin(p[1]))pk=pk==null?p[1]:Math.max(pk,p[1])})});return pk};
   var head='<tr><th>Island</th><th>Round / policy</th><th>Reward</th><th>train-rollout KL</th><th>logprob |diff|</th><th>grad_norm</th><th>Step / round time</th><th>Tokens/s</th><th class="bar">HBM peak</th><th>Last release / load</th><th>Shard · incarnation</th></tr>';
   var rowOf=function(c){var ex=X[c.id]||{},s=S[c.id],rr=RR(c),r=rr[rr.length-1]||{},liv=rlLive(c.status),h=hbm(c),lim=ex.hbm_total_gib,mx=Math.max(64,fin(lim)?lim*1.15:0),pc=fin(h)?Math.min(100,100*h/mx):0;
