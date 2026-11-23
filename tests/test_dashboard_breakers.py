@@ -211,8 +211,10 @@ def test_cost_guard_tape_feeds_only_the_panel(tmp_path):
     assert len(r.cost_ticks) == 0 and r.counts["fleet"] == 0  # not the fleet's cost tick
     g = rows(r.page_view(now=T0 + 5)["breakers"])["launch.budget"]["gauge"]
     assert g["ratio"] == 0.5
+    folded = sum(1 for e in r.events if e["source"].endswith("cost-events.jsonl"))
+    assert folded >= 1  # the tick (idle_warn too once the launch layer maps it)
     sources.load_all(r, [str(tmp_path)])  # read again from offset 0 by a new source: not folded twice
-    assert sum(1 for e in r.events if e["source"].endswith("cost-events.jsonl")) == 1
+    assert sum(1 for e in r.events if e["source"].endswith("cost-events.jsonl")) == folded
 
 
 def test_run_up_tape_needs_its_state_file(tmp_path):
@@ -377,3 +379,9 @@ def test_run_up_writes_the_resolved_file(tmp_path):
     r = Reducer()
     assert ResolvedFile([tmp_path / RESOLVED_FILE]).pump(r)
     assert r.budget_usd is None  # a legacy budget does not change the page
+
+
+def test_cost_guard_tape_name_matches_the_guard():
+    from yeto.cost.guard import EVENTS_FILE
+
+    assert sources.COST_EVENTS_FILE == EVENTS_FILE  # launch trips go there too (yeto.launch.trips)
