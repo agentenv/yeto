@@ -2399,6 +2399,12 @@ def run_ports_island(
             driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
             driver.resource_sample_interval_s = getattr(
                 miles_args, "yeto_rl_resource_sample_interval_s", None)
+            from yeto.breakers.status import status_thread  # noqa: PLC0415
+
+            # rl_breaker_status: the trainer settings this island runs with (its argv + env)
+            driver.breaker_status = status_thread(lambda record: driver.emit(**record), "trainer",
+                                                  scope={"island": str(learner_id)}, argv=sys.argv[1:],
+                                                  env=os.environ)
             eval_wiring.attach(driver, miles_args, eval_guard)
             driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)
             driver.data_slot = ("dispense" if getattr(miles_args, "yeto_rl_data_dispense", None)

@@ -110,10 +110,21 @@ def cluster_tape_island(path: Path) -> str | None:
     return m.group(1) if m else None
 
 
+COST_EVENTS_FILE = "cost-events.jsonl"  # yeto.cost.guard.EVENTS_FILE (the dashboard does not import the guard)
+UP_EVENTS_FILE = "events.jsonl"  # the ``run up`` monitor's tape, next to its state.json
+
+
+def breakers_only(path: Path) -> bool:
+    """A tape that feeds only the Breakers panel (``Reducer.feed_breaker``): the cost
+    guard's events and the ``run up`` monitor's tape."""
+    return path.name == COST_EVENTS_FILE or (path.name == UP_EVENTS_FILE and (path.parent / "state.json").is_file())
+
+
 class TapeSource:
     def __init__(self, path: str | os.PathLike, island: str | None = None):
         self.path = Path(path)
         self.name = str(self.path)
+        self.breakers_only = breakers_only(self.path)
         cluster = cluster_tape_island(self.path) if island is None else None
         self.island_fixed = cluster is not None
         self.island = island if island is not None else cluster if cluster is not None else (
@@ -155,6 +166,9 @@ class TapeSource:
     def pump(self, reducer) -> int:
         n = 0
         for off, rec in self.read_new():
+            if self.breakers_only:
+                n += reducer.feed_breaker(rec, source=self.name, offset=off)
+                continue
             if reducer.feed(rec, source=self.name, offset=off, island=self.island, node=self.node,
                             island_fixed=self.island_fixed):
                 n += 1
@@ -181,8 +195,10 @@ def run_sources(run: str) -> list[str]:
 
     d = runs_mod.run_dir(run)
     # the run's own paths are kept even before they exist: serve re-discovers them every
-    # poll, so a dashboard started before the run follows them once they appear
-    out = [str(d / "events"), str(d / "fleet.jsonl")]
+    # poll, so a dashboard started before the run follows them once they appear; the cost
+    # guard's and the ``run up`` monitor's tapes feed the Breakers panel only
+    up = Path(os.environ.get("YETO_STATE_DIR") or "~/.yeto/rl-up").expanduser() / run
+    out = [str(d / "events"), str(d / "fleet.jsonl"), str(d / COST_EVENTS_FILE), str(up / UP_EVENTS_FILE)]
     syncer = Path(os.path.expanduser(RL_SYNCER_EVENT_TAPE))
     if syncer.exists():  # host-wide, not the run's: only when present at start
         out.append(str(syncer))

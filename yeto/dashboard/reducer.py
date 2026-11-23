@@ -14,6 +14,8 @@ Streams understood (classified per record, not per file):
 * controller journal: ``{"kind": ..., "seq": ...}`` (``journal.Journal.append``)
 * head ``fleet.jsonl``: ``island_launch|island_ready|island_lost|island_stop``
   and ``cost_tick``
+* breakers (any tape): ``rl_breaker``, ``rl_breaker_status`` and the registry's
+  legacy trip events, folded by ``breakers.BreakerState`` (the Breakers panel)
 
 Anything else is passed through to the events view. Missing values stay
 ``None`` (rendered as "no data"), never 0.
@@ -32,9 +34,11 @@ from typing import Any, Iterable
 
 from . import alerts as alerts_mod
 from . import async_rl
+from . import breakers as breakers_mod
 from . import cost as cost_mod
 from . import sft as sft_mod
 from . import topology as topology_mod
+from .sources import COST_EVENTS_FILE
 
 FLEET_EVENTS = frozenset({"island_launch", "island_ready", "island_lost", "island_stop", "island_done",
                           "cost_tick"})
@@ -273,7 +277,9 @@ class Reducer:
         self.run = run
         self.prices = prices if prices is not None else cost_mod.load_prices(None)
         self.budget_usd = budget_usd
+        self.budget_from_cli = budget_usd is not None
         self.thresholds = alerts_mod.merged_thresholds(thresholds)
+        self.threshold_overrides = frozenset(thresholds or ())  # --thresholds keys: never replaced
         self.offsets: dict[str, int] = {}
         self.islands: dict[str, dict] = {}
         self.merges: list[dict] = []
@@ -298,6 +304,7 @@ class Reducer:
         self.sft = sft_mod.SftState()  # ms-swift SFT islands + syncer side streams (sft.py)
         self._source_island: dict[str, str] = {}  # tape path -> the island its records name
         self.async_ = async_rl.AsyncState()  # samplers / buffer / releases / NC pool (async_rl.py)
+        self.breakers = breakers_mod.BreakerState()  # resolved settings, status snapshots, trips (breakers.py)
         self._superseded = False  # the record being fed is from a superseded trainer launch
         # set by serve / export when --store is given: () -> StoreTapes.status() (store_tapes.py)
         self.store_status: Any = None
@@ -352,6 +359,7 @@ class Reducer:
             self.spot.append(_spot_row(record))
         self.counts[kind] = self.counts.get(kind, 0) + 1
         ts = record_ts(record) if kind != "pool" else async_rl.pool_ts(record)
+        self.breakers.fold(record, iid, ts)
         if ts is not None:
             self.max_ts = ts if self.max_ts is None else max(self.max_ts, ts)
             self.min_ts = ts if self.min_ts is None else min(self.min_ts, ts)
@@ -458,6 +466,57 @@ class Reducer:
         if isl["lost_ts"] is not None:
             fails.append(isl["lost_ts"])
         return not fails or min(fails) >= stop["time_unix"] - STOP_SLACK_S
+
+    def feed_breaker(self, record: Any, *, source: str, offset: int | None = None) -> bool:
+        """Fold a record of a tape that feeds only the Breakers panel (the cost guard's
+        ``cost-events.jsonl``, the ``run up`` monitor's ``events.jsonl``: their other
+        records, e.g. the guard's own ``cost_tick``, are not the fleet's)."""
+        if offset is not None:
+            if offset <= self.offsets.get(source, -1):
+                return False
+            self.offsets[source] = offset
+        if not isinstance(record, dict):
+            return False
+        ts = record_ts(record)
+        if not self.breakers.fold(record, None, ts, cost_guard=source.endswith(COST_EVENTS_FILE)):
+            return False
+        self.event_seq += 1
+        self.events.append({"seq": self.event_seq, "ts": ts, "island": None, "type": record.get("event"),
+                            "source": source, "stream": "other", "record": record})
+        return True
+
+    def load_resolved(self, doc: Any, source: str) -> bool:
+        """Take a run's ``breakers.resolved.json`` (``breakers.ResolvedFile``). When the
+        run config's ``breakers:`` section sets ``run.budget.usd`` / ``warn_ratio``, they
+        are the page's budget (unless ``--budget``) and its budget warn line (unless
+        ``--thresholds`` sets ``budget_warn_pct``); a ``--budget`` that differs is shown as
+        a mismatch. Without a section nothing changes."""
+        if not self.breakers.load_resolved(doc, source):
+            return False
+        usd = finite(self.breakers.section_param("run.budget", "usd"))
+        if usd is not None and not self.budget_from_cli:
+            self.budget_usd = usd
+        warn = finite(self.breakers.section_param("run.budget", "warn_ratio"))
+        if warn is not None and "budget_warn_pct" not in self.threshold_overrides:
+            self.thresholds["budget_warn_pct"] = round(warn * 100.0, 6)
+        return True
+
+    def breakers_view(self, cost: dict | None = None) -> dict | None:
+        """The Breakers panel; ``cost``: the page's cost view, whose estimate is the
+        ``run.budget`` gauge when no process reports one."""
+        gauges = {}
+        total, cap = finite((cost or {}).get("total_usd")), finite((cost or {}).get("budget_usd"))
+        if total is not None and cap:
+            gauges["run.budget"] = {"value": total, "limit": cap, "unit": "usd", "ratio": round(total / cap, 4),
+                                    "gauge": "level", "detail": "dashboard estimate, not billing data",
+                                    "scope": None, "scopes": 1, "ts": None}
+        view = self.breakers.view(gauges)
+        if view is None:
+            return None
+        usd = finite(self.breakers.section_param("run.budget", "usd"))
+        if self.budget_from_cli and usd is not None and self.budget_usd != usd:
+            view["budget_mismatch"] = {"cli": self.budget_usd, "resolved": usd}
+        return view
 
     def feed_many(self, records: Iterable[dict], **kw: Any) -> None:
         for r in records:
@@ -918,6 +977,9 @@ class Reducer:
         topo = topology_mod.view(self, ov["islands"], now)
         if topo is not None:
             view["topology"] = topo
+        brk = self.breakers_view(ov.get("cost"))
+        if brk is not None:
+            view["breakers"] = brk
         sft = self.sft_view(now)
         if sft is not None:
             view["sft"] = sft

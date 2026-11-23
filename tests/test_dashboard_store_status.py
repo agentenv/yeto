@@ -100,13 +100,16 @@ def test_run_tapes_that_appear_after_start_are_followed(tmp_path, monkeypatch):
 
 def test_export_of_a_run_with_no_tapes_still_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / "nope")
+    monkeypatch.setenv("YETO_STATE_DIR", str(tmp_path / "up"))
     try:
         dcli._paths(_args(dashboard_command="export"))
     except SystemExit as exc:
         assert "no tapes" in str(exc)
     else:
         raise AssertionError("export without any tape must refuse")
-    assert dcli._paths(_args()) == [str(tmp_path / "nope" / "events"), str(tmp_path / "nope" / "fleet.jsonl")]
+    assert dcli._paths(_args()) == [str(tmp_path / "nope" / "events"), str(tmp_path / "nope" / "fleet.jsonl"),
+                                    str(tmp_path / "nope" / "cost-events.jsonl"),
+                                    str(tmp_path / "up" / _args().run / "events.jsonl")]
 
 
 def test_store_run_name_labels_a_store_only_dashboard():

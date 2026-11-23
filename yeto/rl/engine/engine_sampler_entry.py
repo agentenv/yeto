@@ -910,11 +910,14 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
          on_data_path: Callable[[Any], Any] | None = None) -> int:
     tape = incarnation_tape(_require(spec, "event_tape"), incarnation)
     write = tape_writer(tape, config.sampler_id, spec.get("island_id"))
+    status: list[Any] = [None]  # the breaker status thread, once started
 
     def emit(event: str, **fields: Any) -> None:
         write(event, **fields)
         if on_event is not None:
             on_event(event, **fields)
+        if event == "rl_breaker" and status[0] is not None:
+            status[0].note({"event": event, **fields})  # its last trip in the next snapshot
 
     from .rollout_data_path import LegacyDataPath, member_store_of, open_data_path  # noqa: PLC0415
 
@@ -924,12 +927,21 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         data_path = LegacyDataPath(*stores(incarnation, emit), member_store_of(spec, environ))
     if on_data_path is not None:
         on_data_path(data_path)
+
+    from yeto.breakers.status import start_status  # noqa: PLC0415
+
+    # rl_breaker_status: the sampler / harness settings this sampler runs with (spec + env)
+    status[0] = start_status(lambda record: emit(**record), ("sampler", "harness"),
+                             scope={"sampler_id": config.sampler_id}, spec=spec,
+                             env=os.environ if environ is None else environ)
     try:
         return _run_on(data_path, spec, env, config, incarnation, emit=emit, tape=tape, environ=environ,
                        resource_sampler=resource_sampler, stop=stop, stop_reason=stop_reason,
                        reclaim_deadline=reclaim_deadline)
     finally:
         data_path.close()
+        if status[0] is not None:
+            status[0].stop()
 
 
 def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,

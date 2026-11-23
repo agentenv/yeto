@@ -545,6 +545,7 @@ function render(){
   header();kpis();wall();chartMetric();chartDur();chartTl();highlight();asyncPanel();util();chartNodes();islands();cost();events();cmds();folds();spot();
   if(typeof YetoExt!=="undefined")YetoExt.render(V,OFFLINE);
   if(typeof YetoTopo!=="undefined")YetoTopo.render(V,OFFLINE);
+  if(typeof YetoBrk!=="undefined")YetoBrk.render(V);
 }
 // the server runs newer page code than this tab (redeployed): reload once per build, else say so
 function stale(b){if(!b||typeof YETO_BUILD!=="string"||b===YETO_BUILD)return;var done=null;

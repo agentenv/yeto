@@ -2514,7 +2514,39 @@ class Run:
                            env=self.env, capture_output=True, text=True, timeout=300, check=False)
         out["dispense"] = _output_tail(p)
         out["trainer_buffer"] = self.trainer_buffer_counts()
+        out["breakers"] = self.breaker_status()
         return out
+
+    def breaker_status(self) -> dict[str, Any]:
+        """The run's breakers in short: the resolved settings (``breakers.resolved.json``
+        in the state directory: implicit defaults, entries off, dependency findings) and
+        the newest trips and near-limit gauges on this run's ``events.jsonl`` and the
+        trainer's log (``rl_breaker`` / ``rl_breaker_status``)."""
+        from yeto.dashboard.breakers import RESOLVED_FILE, summary  # noqa: PLC0415
+        from yeto.rl.event_echo import PREFIX  # noqa: PLC0415
+
+        doc = None
+        try:
+            doc = json.loads((self.dir / RESOLVED_FILE).read_text())
+        except (OSError, ValueError):
+            pass
+        records: list[dict] = []
+        log = ((self.state.get("procs") or {}).get("trainer") or {}).get("log")
+        for path, prefix in ((self.dir / "events.jsonl", ""), (Path(log) if log else None, PREFIX)):
+            if path is None or not path.is_file():
+                continue
+            with open(path, errors="replace") as fh:
+                for line in fh:
+                    if "rl_breaker" not in line:
+                        continue
+                    at = line.find(prefix) if prefix else 0
+                    try:
+                        record = json.loads(line[at + len(prefix):]) if at >= 0 else None
+                    except ValueError:
+                        continue
+                    if isinstance(record, dict):
+                        records.append(record)
+        return summary(doc if isinstance(doc, dict) else None, records)
 
     def trainer_buffer_counts(self) -> dict[str, Any]:
         """What the trainer's buffer reader passed over, summed over the trainer's log

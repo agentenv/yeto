@@ -164,6 +164,25 @@ table.qt td:first-child,table.qt th:first-child{text-align:left;color:var(--ink2
 #topo .tpcv{position:absolute;left:0;top:0;pointer-events:none}#topo .tpfoot{font-size:11px;color:var(--ink2);margin-top:6px}
 #topoBox .lg .ln{display:inline-block;width:18px;height:0;border-top:3px solid currentColor;margin-right:6px;vertical-align:middle}
 #topoBox .lg .cd{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
+/* Breakers panel (breakers.js): rows wrap at any width, nothing scrolls sideways */
+#brkBox{overflow-x:visible}#brkBox .bh{flex-wrap:wrap}#brkBox[hidden]{display:none}
+.bgrid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:4px 24px;align-items:start}.bgrid>div{min-width:0}
+.blay{margin-bottom:12px}.blh{border-bottom:1px solid var(--line);padding:4px 0;font-size:12.5px;overflow-wrap:anywhere}
+.brow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:3px 16px;padding:7px 4px;border-bottom:1px dashed var(--line);font-size:12px}
+.brow .bn,.brow .bs,.brow .bt2{grid-column:1/-1}.brow .mono,.brow .bl{overflow-wrap:anywhere}.brow .tag{margin-left:2px}
+.brow.btrip{background:color-mix(in srgb,var(--bad) 9%,transparent);border-radius:6px}
+.bp{display:inline-block;margin-right:10px;font:11.5px var(--mono)}.bk{color:var(--ink2)}
+.bbar{height:5px;background:var(--line);border-radius:3px;margin:3px 0 4px;max-width:260px}.bbf{height:5px;border-radius:3px}
+.bbf.g{background:var(--good)}.bbf.y{background:var(--warn)}.bbf.r{background:var(--bad)}
+.bsrc{display:inline-block;padding:0 7px;border:1px solid var(--line);border-radius:999px;font-size:11px;color:var(--ink2)}
+.bsrc.bs-breakers{color:var(--accent);border-color:var(--accent)}.bsrc.bs-legacy{color:var(--warn);border-color:var(--warn)}.bsrc.bs-switch,.bsrc.bs-inherit{color:var(--ink)}
+.bmore{font-size:11.5px;padding:2px 8px;margin:6px 0 2px}
+.btrips>div{display:grid;grid-template-columns:62px minmax(0,1fr);gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);font-size:12px}
+.btrips .t{font-family:var(--mono);color:var(--ink2)}.btrips .num{white-space:nowrap}.btrips .x{overflow-wrap:anywhere;min-width:0}.bsr{font-size:11px;color:var(--bad)}
+.bfind>div{padding:4px 0;border-bottom:1px dashed var(--line);font-size:12px;overflow-wrap:anywhere}
+.bsw{margin:0 0 8px;overflow-wrap:anywhere}.banner.bbad{border-color:var(--bad);color:var(--bad)}
+@media (max-width:1100px){.bgrid{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:700px){.brow{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:700px){.dgrid{grid-template-columns:1fr}.dg{grid-template-columns:1fr}.cg{grid-template-columns:1fr}main{padding:14px 16px}
   /* Islands now: the table scrolls inside its box with the island column pinned */
   #rNodes::before,#sNodes::before{content:"swipe the table sideways for every column";display:block;font-size:11px;color:var(--ink2);margin:0 0 4px}
@@ -179,7 +198,7 @@ The data is inside the file; no network access is needed.</div>
 <div class="app">
 <nav aria-label="Page navigation">
   <div class="brand">yeto dashboard</div>
-  <a href="#overview">Overview</a><a href="#islandWall" id="navWall">Islands</a><a href="#rounds">Per round</a><a href="#async" id="navAsync" style="display:none">Async GRPO</a><a href="#util">Generation utilization</a><a href="#nodes">Nodes</a><a href="#cost">Cost</a>
+  <a href="#overview">Overview</a><a href="#islandWall" id="navWall">Islands</a><a href="#rounds">Per round</a><a href="#async" id="navAsync" style="display:none">Async GRPO</a><a href="#brkBox" id="navBrk" style="display:none">Breakers</a><a href="#util">Generation utilization</a><a href="#nodes">Nodes</a><a href="#cost">Cost</a>
   <a href="#events">Events</a><a href="#cmds">Commands</a><a href="#unused">Unused panels</a>
   <div class="sub" id="navSub"></div>
 </nav>
@@ -214,6 +233,7 @@ The data is inside the file; no network access is needed.</div>
   <span><i style="background:var(--arch-ampere)"></i>Ampere</span><span><i style="background:var(--arch-ada)"></i>Ada</span><span><i style="background:var(--arch-hopper)"></i>Hopper</span><span><i style="background:var(--arch-blackwell)"></i>Blackwell</span><span><i style="background:var(--arch-cdna4)"></i>CDNA</span>
   <span><i class="cd" style="background:var(--good)"></i>sampling</span><span><i class="cd" style="background:var(--wt)"></i>reloading / loading</span><span><i class="cd" style="background:var(--warn)"></i>backlog full / starting</span><span style="color:var(--warn)">v12 −1 = behind LATEST</span></div>
   <div id="topo"></div><div class="tip" id="topoTip"></div></section>
+<section class="blk" id="brkBox" hidden aria-label="Breakers"><div class="bh"><b>Breakers</b><span id="brkNote"></span></div><div id="brk"></div></section>
 <div class="sh"><h2 id="rFleetH">Fleet</h2><div class="cs">per island; points are trainer rounds, sampler rounds and releases</div></div>
 <div class="cg" id="rFleet"></div>
 <div class="cfold" id="rFleetNone" hidden></div>
