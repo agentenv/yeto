@@ -112,21 +112,30 @@ def _calibrated(**kw):
     return SimpleNamespace(**base)
 
 
-def test_a_calibrated_fixed_partition_launch_still_passes_the_refusing_preflight(monkeypatch):
+def _builtin_configs_only(tmp_path, monkeypatch) -> None:
+    """No Hugging Face cache anywhere: the builtin Qwen3.5-4B config, whatever the machine has."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "no-hub"))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "no-hf-home"))
+
+
+def test_a_calibrated_fixed_partition_launch_still_passes_the_refusing_preflight(tmp_path, monkeypatch):
     """--preflight-memory error (the default) refuses a calibrated model over the margin; the
     smaller trainer data-parallel size of a fixed partition must not refuse what passed."""
-    monkeypatch.setenv("HF_HUB_CACHE", "/nonexistent")  # builtin Qwen3.5-4B config
+    _builtin_configs_only(tmp_path, monkeypatch)
     assert lp.memory_config(_calibrated()) == (lp.DEFAULT_MEMORY_MODE, lp.DEFAULT_MEMORY_MARGIN) == ("error", 0.9)
     report = lp.memory_preflight(_calibrated(), [SimpleNamespace(gpu="H200", total_gpus=2)], out=io.StringIO())
     (rec,) = report["islands"]
-    assert rec["calibrated"] and rec["fits"] and (rec["dp"], rec["colocated"]) == (1, False), rec
+    assert rec["arch_source"] == "builtin" and rec["calibrated"] and rec["fits"], rec
+    assert (rec["dp"], rec["colocated"]) == (1, False)
 
 
 @pytest.mark.parametrize("gpu", ["H100", "H200"])
 @pytest.mark.parametrize("tuning", ["full", "lora"])
 @pytest.mark.parametrize("seq", [2048, 4096, 8192, 16384])
-def test_a_fixed_partition_never_estimates_above_the_old_colocated_estimate(monkeypatch, gpu, tuning, seq):
-    monkeypatch.setenv("HF_HUB_CACHE", "/nonexistent")
+def test_a_fixed_partition_never_estimates_above_the_old_colocated_estimate(tmp_path, monkeypatch, gpu, tuning,
+                                                                            seq):
+    _builtin_configs_only(tmp_path, monkeypatch)
     spec = SimpleNamespace(gpu=gpu, total_gpus=2)
     new = me.estimate_for_launch(_calibrated(tuning=tuning, seq_len=seq), spec, margin=0.9)
     old = me.estimate_for_launch(_calibrated(tuning=tuning, seq_len=seq, rl_placement="colocated"), spec, margin=0.9)
