@@ -576,7 +576,7 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 | `engine.options.tp`, `max_num_seqs` | Tensor parallel degree and concurrent sequences per engine. |
 | `sampling.n` | Samples per prompt (group size). |
 | `sampling.max_tokens`, `temperature`, `top_p`, `top_k` | Generation settings. |
-| `max_backlog_groups` | Groups a sampler may hold ahead of the trainer before it pauses. |
+| `max_backlog_groups` | Groups a sampler may write into its shard past the trainer's read position recorded in the newest policy release it has loaded (0 before the first release) before it pauses. Not the trainer's live position: the cap moves only when a release lands. See "How the backlog cap counts" below. |
 | `reload_max_defer_s` | Longest time, in seconds, a downloaded policy release may wait for running agentic trials before the sampler loads it anyway (default 600; `null` waits indefinitely). A forced load is reported as `rl_sampler_policy_loaded` with `forced: true` and `deferred_s`; trials that span the switch are excluded from training (lost as `served_by_other_version`, or aborted when the switch falls inside a model call) and counted in `rl_agentic_group`. |
 | `agentic.weight_switch` | How an agentic sampler switches weights: `drain` (default on engines without live updates) stops starting new trials, waits for the running ones, then loads the release; `live` loads into the running engine. With `agentic.compaction` prefer `live`: a drain cuts the long compacted trials (section 3.6). |
 | `agentic.drain_timeout_s` | Longest a `drain` switch waits on running trials before it cancels them (lost as `drain_timeout`). The effective limit is min(`agentic.drain_timeout_s`, `reload_max_defer_s`): with `reload_max_defer_s` 600 and `drain_timeout_s` 3600, a drain ends after 600 s. A larger `drain_timeout_s` (or none) is reported as a warning by `pool --dry-run` and at sampler start (not for a spec that resolves to `live`). **Behaviour change:** a drain-mode spec without `drain_timeout_s` used to wait for its trials to end by themselves; it is now cut at `reload_max_defer_s` (default 600 s) and the trials still running are cancelled and lost. Set `reload_max_defer_s: null` (and no `drain_timeout_s`) to keep the old wait. Must be a number >= 0 or `null`. Keep it at or below `reload_max_defer_s`: while a drain waits the engine starts no new trial, and one trial running into an hour-long agent timeout otherwise idles the node for that hour. |
@@ -586,6 +586,48 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 | `reward`, `reward_kind` | Reward function import path and kind. |
 | `agentic.*` | Agentic trial settings: `max_in_flight`, `turn_max_tokens`, `max_response_len`, `infra_retries`, `task_defaults`, `setup` (sandbox, tunnel, tasks), `envs` ([SANDBOX_HOSTS.md](SANDBOX_HOSTS.md)). |
 | `agentic.compaction` | Optional, off by default: context compaction of long trials (section 3.6). |
+
+**How the backlog cap counts.** A sampler's backlog is the number of groups
+in its own buffer shard after the trainer's read position in that shard, as
+recorded in the newest policy release the sampler has loaded (`buffer_shards`
+in the release record; 0 before the first release). The sampler does not see
+where the trainer is reading right now. Between two releases the trainer
+keeps reading, but the samplers' backlog counts do not go down; they reset
+only when the next release lands. A release records the read position the
+trainer reached after its last finished round. The trainer keeps this
+position as it reads and does not have to ask the rollout worker for it. With
+a staged (full-parameter) release the position is taken when the record is
+written after the upload, so it also covers the rounds the trainer finished
+during the upload.
+
+So the samplers together must be allowed to hold every group the trainer
+reads between two releases. Otherwise they stop at their caps
+(`waiting: backlog full`) while the trainer waits for groups, and nothing
+moves until the next release. Size the cap per sampler as
+`max_backlog_groups >= ceil(((release_every + m + 1) x rollout_batch_size + 8) / samplers)`,
+where `release_every` is `--rl-release-every`, `rollout_batch_size` is the
+trainer's groups per round, and `m` is the number of rounds the trainer starts
+between publishing a policy and writing its release record: 0 for a release
+written inline, and 3 for a staged upload with `--rl-release-skip-busy` (the
+round after the publication plus an upload assumed to take 2 rounds). Without
+skip-busy, `m` is min(`release_every`, 3). The margin of 8 covers groups that
+use buffer positions without being trained (stale or damaged). Example: 2
+samplers, `--rl-release-every 1`, `--rollout-batch-size 8`, staged upload with
+skip-busy: ((1 + 3 + 1) x 8 + 8) / 2 = 24 per sampler. If uploads take longer
+than 2 trainer steps, use a larger `m`: the upload time divided by the step
+time, rounded up, plus 1. When the pool config has a `backlog` section, that
+section sets the cap instead of the spec's value.
+
+`yeto run up` checks this lower bound in its preflight, before it orders any
+machine. The check applies to a single buffer trainer (`--rl-sample-role
+trainer` with `--rl-single-island-no-sync`) with store-backed pools.
+- The run is refused when even every pool at its maximum node count, each
+  sampler at its cap plus the groups it can write past it, cannot hold the
+  `release_every x rollout_batch_size` groups that come before the first
+  release. Such a trainer would never release.
+- A warning gives the value to set when the target samplers hold fewer
+  groups than the formula above requires. It also gives a second value that
+  keeps up with one sampler down or being replaced.
 
 **GPU memory utilization.** To change it, add the flag to
 `engine.server.extra_args`, for example
@@ -1041,7 +1083,14 @@ measured p90 if it is longer.
    importance correction, and a spec TIS correction next to it is refused. Use
    the shipped `algorithm-spec.async-age12.json` (`algorithm-spec.async-age12-tis.json`
    is for the default policy loss; `algorithm-spec.async-age2.json` has 2 and is
-   refused at this policy age). With `--rl-round-cuts off` the argv carries no
+   refused at this policy age). Score centering trains on group-centered
+   rewards, so the shipped spec has `"std_normalization": false`. A spec of
+   your own that keeps `true` is overridden to `false` by `--rl-loss
+   score_centering`, and the launcher prints
+   `[yeto] WARNING: --rl-algorithm-spec ... the file value is overridden`. Set
+   it to `false` so that the file matches what runs. A spec that selects
+   `loss.variant: score_centering` itself with `std_normalization: true` is
+   refused. With `--rl-round-cuts off` the argv carries no
    cut-only flag (`--rl-stop-after-rounds`, `--rl-cut-every`); `--total-steps`
    ends the run.
 7. `budget.wall_h`, `budget.usd` and `elastic.max_run_spend_ucr` are set, and
@@ -1471,10 +1520,44 @@ over it the same way instead of failing at its start.
     instead of reading from the start.)
   - Cost of this resume: the Adam moments and step count start from zero and
     the fp32 master copy is rebuilt from the bf16 release weights; the LR
-    schedule position is not restored (warmup and decay restart from the
-    beginning of the schedule); the RNG state is reset. At most one release
+    schedule position is not restored (the schedule restarts from its
+    beginning, see the next item); the RNG state is reset. At most one release
     interval of training is lost (`--rl-release-every` versions): the rounds
     trained after the newest release are trained again from the buffer.
+  - The LR schedule after this resume. The relaunched trainer's LR scheduler
+    starts again at step 0, while the round numbers continue from the release
+    (`--total-steps` still counts from the start of the run: a trainer that
+    resumes from `vK` trains rounds `K` to `--total-steps`). The effect
+    depends on `--rl-lr-schedule`:
+    - Warmup: there is none to repeat. yeto always passes
+      `--lr-warmup-iters 0` to Miles, and `--lr-warmup-iters`,
+      `--lr-decay-style`, `--lr-decay-iters` and `--min-lr` are refused in extra
+      Miles arguments. A resume therefore never runs a warmup again, and no
+      flag adds one.
+    - `constant` (the K3.1 `run.*.json` examples): the LR is `--inner-lr`
+      before and after the resume. Nothing changes.
+    - `linear` (what `auto` becomes for a single trainer island, for example
+      `examples/k31/launch-trainer-modal-b300.sh` without
+      `--rl-lr-schedule`): the LR decays from `--inner-lr` to 0 over
+      `--total-steps x --rl-optimizer-steps` optimizer steps, counted from this
+      start. Every relaunch jumps back to the full `--inner-lr` and starts the
+      decay over again. A trainer resumed from `vK` stops at `--total-steps`
+      with the LR at about `--inner-lr x K / --total-steps` instead of 0, so
+      the remaining rounds train at a higher LR than planned.
+    - The fresh Adam state has an effect of its own. With zero moments, the
+      first steps move every weight by about the LR in the direction of the
+      gradient's sign. That is more than in a running optimizer, whose moments
+      average out noisy gradients. A warmup would soften this, but yeto has
+      none (see above).
+    What to do:
+    - Use `--rl-lr-schedule constant` for runs that you expect to resume.
+      This keeps the LR the same across relaunches. The K3.1 run examples
+      already pass it.
+    - If you need a decaying LR, accept that each relaunch restarts the
+      decay, or keep round cuts on (`--rl-round-cuts auto`) for that run: a
+      cut restores the scheduler and the Adam state, but a full-parameter
+      K3.1 cut is about 5 TB (first item of this section).
+    - No flag restores the scheduler position or skips a warmup on this path.
   - To resume from a specific release instead, put
     `--rl-init-from-release r<seq>-v<version>` in `trainer.argv` (it must be
     the store's newest; see the next item).
@@ -1565,6 +1648,51 @@ accepted when the algorithm's semantic hash is unchanged, and the manifest
 records the old and new pack with your reason. To resume deliberately on the
 pinned pack, use `--rl-code-pack-keep` instead. For algorithm changes,
 Recommended practice: start a new run (another `--cluster-prefix`).
+
+**When you need `--rl-code-pack-upgrade`.** You need it whenever you restart
+the trainer of an existing run (same `--cluster-prefix` and checkpoint store)
+on code that differs from the pinned pack. The usual case is upgrading yeto
+on the control host (`git pull`, a new tag, or a local fix): the commit or the
+uncommitted changes of the local tree no longer match the pack. In `release`
+mode the case is a different `--rl-image` digest. `--rl-code-pack auto` (the
+default) is `git-patch` for the bucket and `modal-volume://` stores that this
+guide uses, so the check applies to K3.1 runs. Without the flag, `yeto run up`
+stops in its preflight, before it orders any machine, and a direct
+`yeto launch` stops at the start, with an error that begins
+`--rl-code-pack git-patch: the run manifest pins code pack <old> (commit <c>), but the local tree is <new> (commit <c'>)`
+and names the three ways on: `--rl-code-pack-keep` (resume on the pinned
+code), `--rl-code-pack-upgrade "<reason>"` (move the run to the local tree),
+or a new run under another `--cluster-prefix`.
+
+**How to add it.** Put the flag and a reason as two elements in
+`trainer.argv` of `run.json`, for example
+`"--rl-code-pack-upgrade", "upgrade yeto to <commit>: <why>"`, then
+`yeto run up --config <run.json>`. Remove it after the upgraded trainer has
+started. If you leave it in, a later relaunch on an unchanged tree only logs
+`upgrade requested but the local tree equals the run pack`. A relaunch after
+a further code change, however, upgrades again silently under the old
+reason.
+
+**What it does and what follows.**
+- The upgrade is accepted only when the semantic hash of the algorithm spec
+  that the launch resolves is the same as the run's. The hash is taken after
+  `--rl-loss` is applied, so setting `"std_normalization": false` in a
+  `score_centering` base spec does not change it (that value is what runs
+  anyway, section 3.7). A changed hash is refused with
+  `code pack upgrade refused: semantic hash changes (...)`; start a new run
+  for that change.
+- The run manifest records the old and new pack, both commits and your
+  reason in `code_pack.upgrades`. From then on, every resumed or replacement
+  island of the run gets the new pack. Going back to the old code is another
+  upgrade. For the store format, see "No way back" below.
+- The trainer restarts like any other relaunch. With `--rl-round-cuts off`
+  (the K3.1 default) it continues from the newest policy release with a
+  fresh optimizer state and a restarted LR schedule (section 5.3). Upgrade
+  the samplers and the pool before the trainer (the upgrade order below).
+- Only with `--rl-light-hash`, a drifted tree is upgraded automatically when
+  the semantic hash is unchanged. The upgrade is recorded with the reason
+  `auto: local tree changed, semantic hash unchanged (light hash)` and a
+  warning in the launcher log.
 
 Mixed versions on one run store (the fence format of section 5.2):
 
@@ -2311,7 +2439,10 @@ Check the reason shown in its status:
 - `backlog full (trainers behind)`: the sampler has `max_backlog_groups`
   ready and pauses by design. The trainer is the bottleneck. Check the trainer
   rounds and `trainer.log`. Scaling samplers down saves cost while this
-  persists.
+  persists. If the trainer is also waiting for groups, the caps are too small
+  for the release cadence: the count starts from the newest release's read
+  position, not from the trainer's live position (section 3.4, "How the
+  backlog cap counts").
 - `waiting for a policy release`: the sampler cannot generate more within
   `--rl-max-policy-age` until a newer release arrives. Check the Policy
   releases panel for the latest release and load time. If the trainer has

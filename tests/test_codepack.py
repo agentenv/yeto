@@ -363,3 +363,34 @@ def test_verify_release_tree(tmp_path: Path) -> None:
         codepack.verify_release_tree(src, manifest)
     with pytest.raises(CodePackError, match="not a yeto release image"):
         codepack.verify_release_tree(src, tmp_path / "missing.json")
+
+
+def test_every_pack_refusal_names_the_upgrade_flag_with_its_reason(repo: Path, tmp_path: Path) -> None:
+    """An operator who upgrades yeto meets these refusals: each one names
+    --rl-code-pack-upgrade "<reason>" (the flag takes a value) and what it records."""
+    store = DirPackStore(tmp_path / "store", uri_base="file-store://run")
+    first = codepack.resolve_run_pack(previous=None, repo=repo, store=store,
+                                      cache_root=tmp_path / "c1", semantic_sha256="s",
+                                      log=lambda _m: None)
+    manifest = {"code_pack": first.pack.record(), "semantic_sha256": "s"}
+    (repo / "yeto" / "a.py").write_text("A = 3\n")
+    _git_commit(repo, "upgrade")
+    messages = []
+    for call in (
+        lambda: codepack.resolve_run_pack(previous=manifest, repo=repo, store=store,
+                                          cache_root=tmp_path / "c2", semantic_sha256="s",
+                                          log=lambda _m: None),
+        lambda: _release(manifest, semantic_sha256="s"),
+    ):
+        with pytest.raises(CodePackError) as err:
+            call()
+        messages.append(str(err.value))
+    messages.append(codepack.run_pack_problem(previous=manifest, repo=repo,
+                                              store_base="file-store://run"))
+    for message in messages:
+        assert '--rl-code-pack-upgrade "<reason>"' in message, message
+        assert "semantic hash" in message, message
+    with pytest.raises(CodePackError, match="start a new run instead .another --cluster-prefix"):
+        codepack.resolve_run_pack(previous=manifest, repo=repo, store=store,
+                                  cache_root=tmp_path / "c3", semantic_sha256="t",
+                                  upgrade_reason="upgrade", log=lambda _m: None)

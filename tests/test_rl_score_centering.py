@@ -149,6 +149,49 @@ def test_launcher_helper_from_rl_loss_args():
         sc.spec_from_rl_loss_args(SimpleNamespace(rl_loss="sft"))
 
 
+def test_spec_file_std_normalization_true_is_overridden_with_a_warning(capsys, monkeypatch):
+    monkeypatch.setattr(sc, "_WARNED", set())
+    base = AlgorithmSpec.from_dict({**AlgorithmSpec().structured_dict(),
+                                    "advantage": {"estimator": "grpo", "std_normalization": True}})
+    args = SimpleNamespace(rl_loss="score_centering", rl_score_centering_is="tis",
+                           rl_algorithm_spec="algorithm-spec.json")
+    spec = sc.spec_from_rl_loss_args(args, base)
+    assert spec.advantage.std_normalization is False and spec.rejections() == []
+    err = capsys.readouterr().err
+    assert "[yeto] WARNING: --rl-algorithm-spec algorithm-spec.json has advantage.std_normalization=true" in err
+    assert "overridden" in err
+    sc.spec_from_rl_loss_args(args, base)  # once per process
+    assert capsys.readouterr().err == ""
+
+
+def test_spec_file_std_normalization_false_or_no_file_is_silent(capsys, monkeypatch):
+    monkeypatch.setattr(sc, "_WARNED", set())
+    off = AlgorithmSpec.from_dict({**AlgorithmSpec().structured_dict(),
+                                   "advantage": {"estimator": "grpo", "std_normalization": False}})
+    sc.spec_from_rl_loss_args(SimpleNamespace(rl_loss="score_centering", rl_algorithm_spec="a.json"), off)
+    sc.spec_from_rl_loss_args(SimpleNamespace(rl_loss="score_centering"), AlgorithmSpec())  # legacy CLI
+    sc.spec_from_rl_loss_args(SimpleNamespace(rl_loss="policy_loss", rl_algorithm_spec="a.json"),
+                              AlgorithmSpec())
+    assert capsys.readouterr().err == ""
+    # a file that selects the variant itself is rejected, not overridden
+    declared = sc.score_centering_spec().structured_dict()
+    declared["advantage"]["std_normalization"] = True
+    spec = AlgorithmSpec.from_dict(declared)
+    assert sc.std_normalization_override_warning(SimpleNamespace(rl_algorithm_spec="a.json"), spec) is None
+    assert any("std_normalization=True" in p for p in spec.rejections())
+
+
+def test_shipped_score_centering_examples_disable_std_normalization():
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    # the bases of --rl-loss score_centering (the -tis specs are for the default policy loss)
+    for name in ("algorithm-spec.async-age2.json", "algorithm-spec.async-age12.json"):
+        path = root / "examples" / "k31" / name
+        assert json.loads(path.read_text())["advantage"]["std_normalization"] is False, name
+
+
 def test_dry_run_reports_the_unverified_mechanism(tmp_path):
     path = tmp_path / "sc.json"
     path.write_text(sc.score_centering_spec().canonical_json())

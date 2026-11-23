@@ -34,6 +34,7 @@ byte-identical.
 from __future__ import annotations
 
 import math
+import sys
 from typing import Any
 
 from yeto.rl.engine.algorithm import (
@@ -282,6 +283,26 @@ def score_centering_spec(
     return AlgorithmSpec.from_dict(payload)
 
 
+_WARNED: set[str] = set()  # one warning per process (launcher, island and harness all resolve)
+
+
+def std_normalization_override_warning(args: Any, base: AlgorithmSpec) -> str | None:
+    """Why ``--rl-loss score_centering`` overrides the ``--rl-algorithm-spec`` file (None: it
+    does not). The file is a base spec: ``score_centering_spec`` forces
+    ``advantage.std_normalization`` to False (the recipe needs group-centered rewards), so a
+    file that says ``true`` -- or leaves the default ``true`` -- reads as if it applied.
+    A warning, not a rejection: the effective spec is the recipe's. A file that selects
+    ``loss.variant='score_centering'`` itself with ``std_normalization: true`` is still
+    rejected (``score_centering_requirements``): nothing overrides it."""
+    path = getattr(args, "rl_algorithm_spec", None)
+    if not path or not base.advantage.std_normalization or selected(base):
+        return None
+    return (f"--rl-algorithm-spec {path} has advantage.std_normalization=true, but "
+            "--rl-loss score_centering trains with std_normalization=false (group-centered "
+            "rewards, --disable-grpo-std-normalization); the file value is overridden. Set "
+            '"std_normalization": false in the file to match what runs.')
+
+
 def spec_from_rl_loss_args(args: Any, base: AlgorithmSpec | None = None) -> AlgorithmSpec:
     """Apply ``--rl-loss`` and ``--rl-score-centering-*`` launcher options to ``base``.
 
@@ -298,6 +319,10 @@ def spec_from_rl_loss_args(args: Any, base: AlgorithmSpec | None = None) -> Algo
             if getattr(args, name, None) is not None:
                 raise AlgorithmSpecError(f"--{name.replace('_', '-')} needs --rl-loss score_centering")
         return spec
+    warning = std_normalization_override_warning(args, spec)
+    if warning is not None and warning not in _WARNED:
+        _WARNED.add(warning)
+        print(f"[yeto] WARNING: {warning}", file=sys.stderr, flush=True)
     return score_centering_spec(
         base=spec,
         importance_sampling=getattr(args, "rl_score_centering_is", None) or DEFAULT_IS,

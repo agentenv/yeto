@@ -479,6 +479,11 @@ def fetch_tree(pack: CodePack, store: PackStore, cache_root: str | os.PathLike[s
     return unpack(store.get(pack.pack_uri), pack.digest, cache_root)
 
 
+# How every refusal names the switch (the flag takes a reason, recorded in the manifest).
+UPGRADE_HINT = ('--rl-code-pack-upgrade "<reason>" (accepted when the algorithm semantic hash '
+                "is unchanged; the run manifest records old -> new pack and the reason)")
+
+
 def upgrade_record(old: CodePack, new: CodePack, *, old_semantic: str | None,
                    new_semantic: str | None, reason: str,
                    now: float | None = None) -> CodePack:
@@ -492,7 +497,9 @@ def upgrade_record(old: CodePack, new: CodePack, *, old_semantic: str | None,
                             "new algorithm spec is unknown")
     if old_semantic != new_semantic:
         raise CodePackError(f"code pack upgrade refused: semantic hash changes "
-                            f"({old_semantic} -> {new_semantic}); start a new run instead")
+                            f"({old_semantic} -> {new_semantic}): the algorithm spec this launch "
+                            "resolves differs from the run's; start a new run instead (another "
+                            "--cluster-prefix)")
     step = {"from": old.digest, "to": new.digest, "from_commit": old.commit,
             "to_commit": new.commit, "semantic_sha256": new_semantic, "reason": reason,
             "unix": time.time() if now is None else now}
@@ -604,7 +611,7 @@ def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
     if old.mode == CODE_PACK_MODE_RELEASE and upgrade_reason is None:
         raise CodePackError(f"this run uses the release image {old.pack_uri}; resume it with "
                             "--rl-code-pack release and that --rl-image, or switch with "
-                            "--rl-code-pack-upgrade")
+                            f"{UPGRADE_HINT}")
     if upgrade_reason is not None:
         candidate, data = make_and_store(repo, store)
         if candidate.digest == old.digest:
@@ -648,7 +655,7 @@ def _drift_problem(old: CodePack, local: CodePack) -> str | None:
             f"{', dirty' if old.dirty else ''}), but the local tree is {local.digest[:16]} "
             f"(commit {local.commit[:12]}{', dirty' if local.dirty else ''}). Resume on the "
             "pinned code with --rl-code-pack-keep, move the run to the local tree with "
-            "--rl-code-pack-upgrade REASON, or start a new run (another --cluster-prefix)")
+            f"{UPGRADE_HINT}, or start a new run (another --cluster-prefix)")
 
 
 def run_pack_problem(*, previous: Mapping[str, Any] | None, repo: str | os.PathLike[str],
@@ -671,7 +678,7 @@ def run_pack_problem(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
         if not strict and _auto_upgrade_ok(previous, semantic_sha256):
             return None  # non-strict: the launch upgrades automatically
         return (f"this run's pack is {old.mode} {old.digest[:16]}, not the release image "
-                f"{candidate.pack_uri}; switch only with --rl-code-pack-upgrade")
+                f"{candidate.pack_uri}; switch only with {UPGRADE_HINT}")
     old_uri = old_record.get("pack_uri")
     if (old_uri and store_base and old.mode != CODE_PACK_MODE_RELEASE
             and not str(old_uri).startswith(store_base.rstrip("/") + "/")):
@@ -679,7 +686,7 @@ def run_pack_problem(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
     if old.mode == CODE_PACK_MODE_RELEASE:
         return (f"this run uses the release image {old.pack_uri}; resume it with "
                 "--rl-code-pack release and that --rl-image, or switch with "
-                "--rl-code-pack-upgrade")
+                f"{UPGRADE_HINT}")
     if keep_pinned or (not strict and _auto_upgrade_ok(previous, semantic_sha256)):
         return None  # non-strict: the launch upgrades automatically (resolve_run_pack)
     return _drift_problem(old, build_pack(repo)[0])
@@ -704,7 +711,7 @@ def _resolve_release_pack(old_record, previous, release_image: str, *,
             f"{candidate.digest[:16]}); automatic upgrade (--rl-light-hash)")
     if upgrade_reason is None:
         raise CodePackError(f"this run's pack is {old.mode} {old.digest[:16]}, not the release image "
-                            f"{candidate.pack_uri}; switch only with --rl-code-pack-upgrade")
+                            f"{candidate.pack_uri}; switch only with {UPGRADE_HINT}")
     new = upgrade_record(old, candidate, old_semantic=(previous or {}).get("semantic_sha256"),
                          new_semantic=semantic_sha256, reason=upgrade_reason)
     log(f"[codepack] upgrade {old.digest[:16]} -> release {new.digest[:16]}: {upgrade_reason}")
