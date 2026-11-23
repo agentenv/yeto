@@ -34,6 +34,7 @@ from . import alerts as alerts_mod
 from . import async_rl
 from . import cost as cost_mod
 from . import sft as sft_mod
+from . import topology as topology_mod
 
 FLEET_EVENTS = frozenset({"island_launch", "island_ready", "island_lost", "island_stop", "island_done",
                           "cost_tick"})
@@ -914,6 +915,9 @@ class Reducer:
         asy = self.async_.view()
         if asy is not None:
             view["async"] = asy
+        topo = topology_mod.view(self, ov["islands"], now)
+        if topo is not None:
+            view["topology"] = topo
         sft = self.sft_view(now)
         if sft is not None:
             view["sft"] = sft
