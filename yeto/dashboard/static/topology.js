@@ -38,6 +38,8 @@ function at(p,u){var t=Math.max(0,Math.min(1,u))*p.L,len=p.len,lo=0,hi=len.lengt
 function label(s){var p=[s.card,s.precision,s.engine].filter(Boolean);return p.length?p.join(" · "):s.id}
 function nodes(t){
   var live=t.samplers.filter(function(s){return s.live}),ended=t.samplers.filter(function(s){return !s.live});
+  // no live sampler (a finished run): draw the ended ones, dimmed, rather than an empty column
+  if(!live.length){live=ended;ended=[]}
   if(live.length<=MAX_CARDS)return{cards:live.map(function(s){return{one:s,members:[s],key:s.id}}),ended:ended};
   var by={},order=[];
   live.forEach(function(s){var k=label(s);if(!by[k]){by[k]={members:[],key:k};order.push(k)}by[k].members.push(s)});
@@ -162,6 +164,7 @@ function paint(){
     o.st.textContent=st;o.st.style.fill=(one?one.state==="sampling":col===C.good)?C.ink:col;
     o.dot.setAttribute("fill",col);
     var rate=ms.reduce(function(a,s){return a+(s.rate_gpm||0)},0);o.rate.textContent=rate.toFixed(1)+" g/min";
+    o.g.setAttribute("opacity",ms.some(function(s){return s.live})?1:0.55);
     var stale=ms.some(function(s){return s.status==="stale"});
     o.box.style.stroke=stale?C.bad:lag>=2?C.warn:"";o.box.style.strokeDasharray=stale?"4 3":"";
     var lg=Math.max.apply(null,ms.map(function(s){return fin(s.last_group_ts)?s.last_group_ts:-1e18})),age=tn-DELAY_S-lg;
