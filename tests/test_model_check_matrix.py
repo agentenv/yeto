@@ -247,6 +247,10 @@ def test_report_dict_is_json_and_the_cli_exit_code_follows_the_verdict(capsys):
     assert main(["model", "check", str(MODELS["mixtral_8x7b"]), "--no-fetch", "--form", "full",
                  "--preset", "full-parameter", "--json"]) == 1
     assert json.loads(capsys.readouterr().out)["runnable"] is False
+    assert main(["model", "check", str(MODELS["qwen3_8b"]), "--no-fetch", "--recipe", "nope"]) == 2
+    assert "not a --rl-model-recipe" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["model", "check", str(MODELS["qwen3_8b"]), "--tensor-parallel", "0"])
 
 
 def test_the_index_verifies_expert_names():

@@ -110,17 +110,30 @@ def add_model_parser(sub: Any) -> argparse.ArgumentParser:
     c.add_argument("--preset", choices=PRESETS, default="decoupled")
     c.add_argument("--backend", choices=BACKENDS, default="miles")
     c.add_argument("--recipe", default=None, help="--rl-model-recipe (default: the model registry's family recipe)")
-    c.add_argument("--tensor-parallel", type=int, default=1)
-    c.add_argument("--pipeline-parallel", type=int, default=1)
-    c.add_argument("--expert-parallel", type=int, default=None, help="default: recommended")
+    c.add_argument("--tensor-parallel", type=_positive, default=1)
+    c.add_argument("--pipeline-parallel", type=_positive, default=1)
+    c.add_argument("--expert-parallel", type=_positive, default=None, help="default: recommended")
     c.add_argument("--lora-targets", choices=["attention", "all-linear"], default="attention")
-    c.add_argument("--lora-rank", type=int, default=16)
-    c.add_argument("--islands", type=int, default=2)
-    c.add_argument("--gpus-per-island", type=int, default=8)
+    c.add_argument("--lora-rank", type=_positive, default=16)
+    c.add_argument("--islands", type=_positive, default=2)
+    c.add_argument("--gpus-per-island", type=_positive, default=8)
     c.add_argument("--card", default="H100", help="H100, H200, B200, B300, A100-80GB")
-    c.add_argument("--seq-len", type=int, default=4096)
+    c.add_argument("--seq-len", type=_positive, default=4096)
     c.add_argument("--json", action="store_true", help="print one JSON object")
     return p
+
+
+def _positive(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, not {text}")
+    return value
+
+
+def _known_recipes() -> list[str]:
+    from yeto.rl.stage1 import _miles_recipes
+
+    return _miles_recipes()
 
 
 def _fetch(model: str, filename: str, revision: str | None) -> str:
@@ -161,6 +174,10 @@ def _weight_names(args: argparse.Namespace, source: str) -> list[str] | None:
 def cmd_model(args: argparse.Namespace) -> int:
     from .check import CheckRequest, check_model, render_text, report_dict
 
+    if args.recipe is not None and args.recipe not in (known := _known_recipes()):
+        print(f"yeto model check: --recipe {args.recipe} is not a --rl-model-recipe ({', '.join(known)})",
+              file=sys.stderr)
+        return 2
     try:
         cfg, source = _check_config(args)
         names = _weight_names(args, source)
