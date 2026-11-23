@@ -361,3 +361,19 @@ def test_exported_page_draws_the_panel(tmp_path):
                  "default (implicit)", "show 1 off / invariant", "55 min / 60 min (92%)", "cost_guard"):
         assert want in html, want
     assert "undefined" not in html and "NaN" not in html
+
+
+def test_run_up_writes_the_resolved_file(tmp_path):
+    from yeto.rl.up import Run
+
+    run = Run.__new__(Run)
+    run.dir = tmp_path
+    run.cfg = {"run": "r", "trainer": {"argv": ["--rl-stall-timeout", "900"]}, "budget": {"usd": 40}}
+    run.write_breakers_resolved()
+    doc = json.loads((tmp_path / RESOLVED_FILE).read_text())
+    assert doc["schema"] == "yeto-breakers-resolved-v1" and doc["has_section"] is False
+    budget = next(e for e in doc["entries"] if e["name"] == "run.budget")
+    assert budget["params"]["usd"] == 40 and budget["sources"]["usd"]["kind"] == "legacy"
+    r = Reducer()
+    assert ResolvedFile([tmp_path / RESOLVED_FILE]).pump(r)
+    assert r.budget_usd is None  # a legacy budget does not change the page
