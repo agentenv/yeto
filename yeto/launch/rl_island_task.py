@@ -352,6 +352,9 @@ def make_miles_island_task(
            if getattr(args, "rl_gradient_accumulation_fusion", False) else "")
         + (f" --rl-max-tokens-per-gpu {int(args.rl_max_tokens_per_gpu)}"
            if getattr(args, "rl_max_tokens_per_gpu", None) is not None else "")
+        # "auto" (the default) is resolved on the island from its --seq-len
+        + (f" --rl-log-probs-chunk-size {int(args.rl_log_probs_chunk_size)}"
+           if getattr(args, "rl_log_probs_chunk_size", "auto") not in (None, "auto") else "")
         + (f" --rl-ascend-plugin-stack {args.rl_ascend_plugin_stack}"
            if getattr(args, "rl_ascend_plugin_stack", None) else "")
         + (f" --rl-ascend-plugin-recipe {args.rl_ascend_plugin_recipe}"

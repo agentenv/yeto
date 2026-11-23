@@ -46,7 +46,7 @@ class Clock:
             raise AssertionError("controller did not terminate")
 
 
-def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
+def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=(), log_lines=()):
     from yeto import runs
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
@@ -93,7 +93,7 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
             record.append(("stop_app",))
 
         def tail_logs(self, call_id, entries=100):
-            return []
+            return list(log_lines) if self.owner.get(call_id) in failing else []
 
     class FakeSkyOps:  # sky side of RoutingOps (sky islands and the syncer)
         def job_status(self, cluster, job_id):
@@ -119,7 +119,7 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
             record.append(("down", cluster))
 
         def rl_strict_failure(self, cluster, job_id):
-            return None
+            return next((line for line in log_lines if "[yeto-" in line), None) if "-l" in cluster else None
 
         def now(self):
             return clock.now()

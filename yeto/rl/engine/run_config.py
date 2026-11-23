@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from yeto.config_errors import ConfigError
+
 from . import sample_roles
 from .sample_roles import SampleBufferConfig
 
@@ -270,13 +272,49 @@ class BatchConfig:
 
 
 DP_OPTIMIZERS = ("auto", "distributed", "replicated")
+# --rl-log-probs-chunk-size: the trainer scores each response's log-probabilities
+# (and entropy) over the vocabulary in chunks of this many rows, so one fp32
+# [rows, vocab / TP] block, not one block of the whole response, is materialized
+# at a time. Rows are independent (one softmax per row), so the chunk size changes
+# memory only, not the values. "auto" (the default) chunks at
+# LOG_PROBS_CHUNK_AUTO_ROWS when --seq-len exceeds it (a response of at most that
+# many rows is one chunk either way); 0 turns chunking off (one block per response).
+LOG_PROBS_CHUNK_AUTO = "auto"
+LOG_PROBS_CHUNK_AUTO_ROWS = 4096
+
+
+def log_probs_chunk_size_arg(text: str) -> str | int:
+    """argparse type of ``--rl-log-probs-chunk-size``: ``auto``, 0 (off) or a positive row count."""
+    if str(text).strip().lower() == LOG_PROBS_CHUNK_AUTO:
+        return LOG_PROBS_CHUNK_AUTO
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        raise ValueError(f"--rl-log-probs-chunk-size must be auto, 0 (off) or a positive "
+                         f"row count, got {text!r}") from None
+    if value < 0:
+        raise ValueError(f"--rl-log-probs-chunk-size must be auto, 0 (off) or a positive "
+                         f"row count, got {value}")
+    return value
+
+
+def resolve_log_probs_chunk_size(value: Any, seq_len: int) -> int:
+    """The trainer's log-prob chunk rows (0 = off) for ``--rl-log-probs-chunk-size``
+    ``value`` (None = auto) at ``--seq-len`` ``seq_len``."""
+    if value is None or value == LOG_PROBS_CHUNK_AUTO:
+        return LOG_PROBS_CHUNK_AUTO_ROWS if int(seq_len) > LOG_PROBS_CHUNK_AUTO_ROWS else 0
+    try:
+        return int(log_probs_chunk_size_arg(value))
+    except ValueError as error:
+        raise ConfigError(str(error)) from None
 
 
 @dataclass(frozen=True)
 class TrainMemoryConfig:
     """Trainer memory knobs (--rl-activation-recompute, --rl-max-tokens-per-gpu,
-    --rl-optimizer-offload-fraction). Defaults keep the historical argv: no
-    recompute, fixed micro batches, optimizer state on the device."""
+    --rl-optimizer-offload-fraction, --rl-log-probs-chunk-size). Defaults keep the
+    historical argv: no recompute, fixed micro batches, optimizer state on the
+    device, one log-prob block per response."""
 
     # Recompute every layer's activations in backward (keep only layer inputs).
     activation_recompute: bool = False
@@ -301,6 +339,10 @@ class TrainMemoryConfig:
     # inside TE FusedAdam, which the full-parameter sync cannot read, so only a
     # no-sync island may use it.
     precision_aware_optimizer: bool = False
+    # Rows per chunk of the trainer's log-prob / entropy computation over the
+    # vocabulary (Miles --log-probs-chunk-size); 0 = one block per response
+    # (the historical argv). --rl-log-probs-chunk-size resolves "auto" here.
+    log_probs_chunk_size: int = 0
 
 
 @dataclass(frozen=True)
@@ -1332,28 +1374,37 @@ def _fp8_source(args) -> str:
 
 
 def _train_memory(args) -> TrainMemoryConfig:
+    """The trainer memory knobs from the launch options. Pure option checks, no GPU
+    and no model: the launcher runs it before any cloud work (also under ``--dry-run``,
+    ``yeto.rl.adapters.miles.run_config_rules.check_train_memory``) and the island
+    again; a refusal is a :class:`~yeto.config_errors.ConfigError` (not retried)."""
     max_tokens = getattr(args, "rl_max_tokens_per_gpu", None)
     cp = int(getattr(args, "context_parallel", 1) or 1)
-    if max_tokens is not None and int(max_tokens) * cp < int(args.seq_len):
+    seq_len = int(args.seq_len)
+    if max_tokens is not None and int(max_tokens) * cp < seq_len:
         # a sample longer than the budget would not fit in any micro batch
         # (Miles packs max_tokens_per_gpu * CP tokens per micro batch: dp_schedule.py)
-        raise ValueError(
-            f"--rl-max-tokens-per-gpu {max_tokens} x CP {cp} is below --seq-len {args.seq_len}"
+        raise ConfigError(
+            f"--rl-max-tokens-per-gpu {max_tokens} x CP {cp} is below --seq-len {seq_len}: a "
+            f"full-length sample fits in no micro batch; set --rl-max-tokens-per-gpu to at least "
+            f"{-(-seq_len // cp)} (--seq-len / CP), raise --context-parallel, or lower --seq-len"
         )
     offload = float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)
     if not 0.0 <= offload <= 1.0:
-        raise ValueError(f"--rl-optimizer-offload-fraction {offload} is not in [0, 1]")
+        raise ConfigError(f"--rl-optimizer-offload-fraction {offload} is not in [0, 1]")
     dp_optimizer = getattr(args, "rl_dp_optimizer", None) or "auto"
     if dp_optimizer not in DP_OPTIMIZERS:
-        raise ValueError(f"--rl-dp-optimizer {dp_optimizer!r} is not one of {', '.join(DP_OPTIMIZERS)}")
+        raise ConfigError(f"--rl-dp-optimizer {dp_optimizer!r} is not one of {', '.join(DP_OPTIMIZERS)}")
     precision_aware = bool(getattr(args, "rl_precision_aware_optimizer", False))
     if precision_aware and not getattr(args, "rl_single_island_no_sync", False):
         # Miles full_parameter_state reads FP32 masters; TE FusedAdam keeps only remainders
-        raise ValueError("--rl-precision-aware-optimizer needs --rl-single-island-no-sync "
-                         "(the full-parameter sync reads FP32 optimizer masters)")
+        raise ConfigError("--rl-precision-aware-optimizer needs --rl-single-island-no-sync "
+                          "(the full-parameter sync reads FP32 optimizer masters)")
     if precision_aware and offload > 0:
-        raise ValueError("--rl-precision-aware-optimizer and --rl-optimizer-offload-fraction "
-                         "are exclusive (the offload already runs the precision-aware path)")
+        raise ConfigError("--rl-precision-aware-optimizer and --rl-optimizer-offload-fraction "
+                          "are exclusive (the offload already runs the precision-aware path)")
+    log_probs_chunk_size = resolve_log_probs_chunk_size(
+        getattr(args, "rl_log_probs_chunk_size", None), seq_len)
     return TrainMemoryConfig(
         activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
         max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
@@ -1362,6 +1413,7 @@ def _train_memory(args) -> TrainMemoryConfig:
         dp_optimizer=dp_optimizer,
         grad_reduce_bf16=bool(getattr(args, "rl_grad_reduce_bf16", False)),
         precision_aware_optimizer=precision_aware,
+        log_probs_chunk_size=log_probs_chunk_size,
     )
 
 

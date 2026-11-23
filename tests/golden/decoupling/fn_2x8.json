@@ -224,6 +224,8 @@
   "miles",
   "--update-weight-engine-request-timeout",
   "120",
+  "--log-probs-chunk-size",
+  "4096",
   "--spec",
   "miles_plugins.models.qwen3_8_next.qwen3_8_next",
   "get_qwen3_8_next_spec",
@@ -353,7 +355,7 @@
   "--sglang-ep-size",
   "8"
  ],
- "miles_argv_sha256": "3ec26e53a3d33d66ae9d1bbb628ba0ecc95f6d47cbc68a244ea036b23ea8eae8",
+ "miles_argv_sha256": "f0666bc8b22a9a4a9e8364a6acf606fe841646f8c17510934b947702b755b41a",
  "name": "fn_2x8",
  "placement": {
   "allow_cross_node_engine_tp": false,

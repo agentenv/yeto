@@ -7,6 +7,7 @@ import sys
 import threading
 from dataclasses import dataclass
 
+from ..config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER  # noqa: F401 - registered exit code
 from .syncer import island_pool
 from .sky_ops import SYNCER_REFUSAL_MARKERS
 
@@ -85,7 +86,8 @@ TEARDOWN_UNVERIFIED_EXIT = 5
 # run script re-ran): the run is failed and the Modal app stopped. Registered exit codes:
 # 1 failed, 2 artifact not fetchable, 3 incomplete tape, 4 island failed, 5 teardown
 # unverified, 6 stalled, 7 Modal container id changed, 8 trainer scheduler gave up,
-# 9 stopped on the STOP flag.
+# 9 stopped on the STOP flag, 10 an island refused its configuration
+# (CONFIG_ERROR_EXIT, yeto.config_errors: also the island's own exit code; not retried).
 CONTAINER_CHANGED_EXIT = 7
 # The trainer scheduler stopped after too many failed trainer incarnations in a row.
 TRAINER_GAVE_UP_EXIT = 8
@@ -97,6 +99,12 @@ class RunStopRequested(RuntimeError):
 
 # Exit code when the run ended on its STOP flag (``yeto stop-run``).
 RUN_STOPPED_EXIT = 9
+
+
+class IslandConfigError(RuntimeError):
+    """An island refused its launch options (``[yeto-config-error]``, island exit
+    :data:`CONFIG_ERROR_EXIT`): deterministic, so it is not relaunched; the run ends
+    with :data:`CONFIG_ERROR_EXIT`."""
 
 
 class FleetController:
@@ -480,6 +488,17 @@ class FleetController:
             elif not is_syncer and self._await_finalized(rec):
                 return  # grace: the finalized record may still be in the log stream
             else:
+                config_error = None if is_syncer else self._config_error(rec)
+                if config_error is not None:
+                    # the island refused its launch options: a relaunch fails the same way
+                    self._fleet("island_lost", rec["name"], reason=f"configuration error: {config_error}"[:500])
+                    if self.elastic:
+                        print(f"[launcher] {rec['name']}: configuration error, not relaunched; the "
+                              f"elastic pool goes on without it: {config_error}", file=sys.stderr)
+                        self._abandon(rec, 0.0, reason="configuration error (elastic: island dropped)")
+                        return
+                    raise IslandConfigError(f"island {rec['name']} refused its configuration "
+                                            f"(not relaunched): {config_error}")
                 strict_failure = self._strict_failure(rec)
                 if strict_failure is not None and self.elastic and not is_syncer:
                     # Elastic: a refused or strictly failed island is a deterministic
@@ -649,6 +668,19 @@ class FleetController:
             return bool(probe(name, job_id))
         except Exception:
             return False
+
+    def _config_error(self, rec) -> str | None:
+        """The island's ``[yeto-config-error]`` log line (its own refusal of the launch
+        options), read with the strict-failure log probe; None without one. Any roster:
+        a configuration error is never worth a relaunch."""
+        probe = getattr(self.ops, "rl_strict_failure", None)
+        if probe is None:
+            return None
+        try:
+            text = probe(rec["name"], rec["job_id"])
+        except Exception:
+            return None
+        return text if text is not None and CONFIG_ERROR_MARKER in text else None
 
     def _strict_failure(self, rec) -> str | None:
         if not (self.fixed_roster or self.elastic):
