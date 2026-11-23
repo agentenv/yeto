@@ -221,7 +221,7 @@ def check(args) -> None:
         raise SystemExit("--rl-trainer-scheduler-interval must be positive")
     if getattr(args, "rl_trainer_drain_seconds", DEFAULT_DRAIN_SECONDS) < 0:
         raise SystemExit("--rl-trainer-drain-seconds must be >= 0")
-    if getattr(args, "rl_trainer_max_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES) < 1:
+    if max_failures(args) < 1:
         raise SystemExit("--rl-trainer-max-failures must be >= 1")
     if getattr(args, "rl_trainer_ready_seconds", DEFAULT_READY_SECONDS) <= 0:
         raise SystemExit("--rl-trainer-ready-seconds must be positive")
@@ -275,6 +275,12 @@ def _check_trainer_island(args) -> None:
                              f"--rl-checkpoint-store {store}: {reason}")
 
 
+def max_failures(args) -> int:
+    """``launch.trainer_failures``: failed trainer incarnations in a row before the scheduler
+    gives up (``--rl-trainer-max-failures``)."""
+    return int(getattr(args, "rl_trainer_max_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES))
+
+
 def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
     """Backlog scheduler + lifecycle + loop over ``journal``; restored from its records."""
     records = journal.records
@@ -291,8 +297,7 @@ def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
                        spec=binding.spec, needs_first_policy=binding.needs_first_policy,
                        ready_timeout_s=float(getattr(
                            args, "rl_trainer_ready_seconds", DEFAULT_READY_SECONDS)),
-                       max_consecutive_failures=int(getattr(
-                           args, "rl_trainer_max_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES)))
+                       max_consecutive_failures=max_failures(args))
     if loop.restore(records):
         print(f"[launcher] trainer scheduler continues from {journal.dir}", flush=True)
     if binding.after_restore is not None:

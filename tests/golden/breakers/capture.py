@@ -144,7 +144,7 @@ def run_values(cfg: dict[str, Any], state_root: Path) -> dict[str, Any]:
 
 # ----------------------------------------------------------------------------- launch + trainer
 def launch_values(argv: list[str]) -> dict[str, Any]:
-    from yeto.cost.guard import GuardConfig, guard_config_from_args, guard_enabled
+    from yeto.cost.guard import guard_config_from_args, guard_enabled
     from yeto.launch.fleet import DEFAULT_RL_STALL_TIMEOUT_S
     from yeto.modal_runner import DEFAULT_RETRIES, DEFAULT_TIMEOUT_S
     from yeto.rl import up_consistency
@@ -159,18 +159,21 @@ def launch_values(argv: list[str]) -> dict[str, Any]:
     out["launch.budget.enabled"] = on
     if on:
         out["launch.budget.usd"] = cfg.budget_usd
-        out["launch.budget.warn_usd"] = cfg.warn_usd
+        out["launch.budget.warn_usd"] = args.budget_warn_usd  # raw: null is 80 % of usd
+        out["launch.budget.effective_warn_usd"] = cfg.warn_usd
         out["launch.budget.stop_grace_s"] = cfg.stop_grace_s
     on = guard and cfg.idle.enabled
     out["launch.idle.enabled"] = on
     if on:
         out["launch.idle.warn_s"] = cfg.idle.idle_after_s
         out["launch.idle.stop_after_warn_s"] = cfg.idle.stop_after_s
-        out["launch.idle.load_grace_s"] = cfg.idle.load_grace_s
+        # raw: null is the recipe default (cost.guard.default_load_grace_minutes)
+        out["launch.idle.load_grace_s"] = None if args.load_grace_minutes is None else args.load_grace_minutes * 60
+        out["launch.idle.effective_load_grace_s"] = cfg.idle.load_grace_s
         out["launch.idle.max_load_s"] = cfg.idle.max_load_s
     out["launch.nc_lease_overdue.enabled"] = guard
     if guard:
-        out["launch.nc_lease_overdue.grace_s"] = GuardConfig.nc_overdue_grace_s
+        out["launch.nc_lease_overdue.grace_s"] = cfg.nc_overdue_grace_s
     # yeto.launcher: the fleet's stall_timeout
     raw = getattr(args, "rl_stall_timeout", None)
     stall = float(raw or DEFAULT_RL_STALL_TIMEOUT_S) if raw != 0 else 0.0

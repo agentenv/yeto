@@ -19,7 +19,10 @@ The launcher runs one :class:`CostGuard` thread per run. Every ``poll_s`` it
    unless ``release_overdue_nc`` is set.
 
 Every event goes to ``<run dir>/cost-events.jsonl`` and to stdout
-(``[cost-guard] ...``), so the launcher log and the dashboard see it.
+(``[cost-guard] ...``), so the launcher log and the dashboard see it. Budget, idle and
+lease-overdue trips also write one ``rl_breaker`` line there (registry entries
+``launch.budget``, ``launch.idle``, ``launch.nc_lease_overdue``); a budget or idle stop
+records the process's ``stop_reason`` (``breaker:launch.budget`` / ``breaker:launch.idle``).
 """
 
 from __future__ import annotations
@@ -40,6 +43,16 @@ from .ledger import Resource, ResourceLedger
 
 EVENTS_FILE = "cost-events.jsonl"
 PREFIX = "YETO_RL_EVENT "
+
+
+def append_event(path: Path, rec: dict[str, Any], log: Callable[[str], None] = print) -> None:
+    """One record on the launch tape (``cost-events.jsonl``); a write error is only logged."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
+    except OSError as exc:
+        log(f"[cost-guard] cannot write {path}: {exc}")
 
 
 @dataclass
@@ -174,17 +187,22 @@ class CostGuard:
 
     def emit(self, event: str, **fields: Any) -> dict[str, Any]:
         rec = {"event": event, "run": self.run, "time_unix": self.clock(), **fields}
-        try:
-            self.events_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.events_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(rec, default=str) + "\n")
-        except OSError as exc:
-            self.log(f"[cost-guard] cannot write {self.events_path}: {exc}")
+        append_event(self.events_path, rec, self.log)
         if event != "cost_tick":
             level = "WARNING " if fields.get("severity") == "warning" else ""
             self.log(f"[cost-guard] {level}{event}: "
                      + ", ".join(f"{k}={v}" for k, v in fields.items() if k != "severity"))
         return rec
+
+    def trip(self, name: str, value: float | None, limit: float | None, **fields: Any) -> None:
+        """The ``rl_breaker`` line of a trip, next to its legacy event (never raises)."""
+        from .. import breakers
+
+        try:
+            breakers.trip(name, value, limit, run=self.run, now=self.clock(),
+                          emit=lambda rec: append_event(self.events_path, rec, self.log), **fields)
+        except Exception as exc:  # noqa: BLE001 - reporting must not change what the guard does
+            self.log(f"[cost-guard] rl_breaker {name} not recorded: {type(exc).__name__}: {exc}")
 
     # -- one tick ------------------------------------------------------------------
 
@@ -232,20 +250,29 @@ class CostGuard:
             self.warned_budget = True
             self.emit("cost_budget_warn", total_usd=round(total, 2), warn_usd=cfg.warn_usd,
                       budget_usd=cfg.budget_usd)
+            self.trip("launch.budget", round(total, 2), cfg.warn_usd, state="warn",
+                      legacy_event="cost_budget_warn")
         if cfg.budget_usd is not None and total >= cfg.budget_usd and self.stop_at is None:
             self.emit("cost_budget_exceeded", total_usd=round(total, 2), budget_usd=cfg.budget_usd)
+            self.trip("launch.budget", round(total, 2), cfg.budget_usd, legacy_event="cost_budget_exceeded",
+                      detail=f"ledger spend ${total:.2f} reached the budget ${cfg.budget_usd:.2f}")
             self._request_stop(f"budget ${cfg.budget_usd:.2f} reached (${total:.2f})", now)
         verdict = self.idle.verdict(now)
+        idle_limit = cfg.idle.idle_after_s + cfg.idle.stop_after_s
         if verdict.state in ("warn", "stop") and not self.idle_warned:
             self.idle_warned = True
             self.emit("idle_warn", reason=verdict.reason, idle_min=round(verdict.idle_s / 60, 1),
-                      shutdown_in_min=round(max(0.0, cfg.idle.idle_after_s + cfg.idle.stop_after_s
-                                                - verdict.idle_s) / 60, 1))
+                      shutdown_in_min=round(max(0.0, idle_limit - verdict.idle_s) / 60, 1))
+            self.trip("launch.idle", round(verdict.idle_s, 1), cfg.idle.idle_after_s, state="warn",
+                      legacy_event="idle_warn", detail=verdict.reason or "")
         elif verdict.state in ("ok", "loading") and self.idle_warned and self.stop_at is None:
             self.idle_warned = False
             self.emit("idle_cleared", state=verdict.state)
+            self.trip("launch.idle", None, cfg.idle.idle_after_s, state="clear", legacy_event="idle_cleared")
         if verdict.state == "stop" and self.stop_at is None:
             self.emit("idle_shutdown", reason=verdict.reason, idle_min=round(verdict.idle_s / 60, 1))
+            self.trip("launch.idle", round(verdict.idle_s, 1), idle_limit, legacy_event="idle_shutdown",
+                      detail=verdict.reason or "")
             self._request_stop(f"idle: {verdict.reason}", now)
         for r in resources:
             if r.kind != "nc_lease" or not r.open or r.key in self.overdue_released:
@@ -258,6 +285,8 @@ class CostGuard:
                           overdue_min=round((now - until) / 60, 1), action="release" if release else "alert",
                           detail=None if release else "kept: the NC pool owns it (pool-stop / "
                           f"yeto cleanup --run {self.run} --include-pools)")
+                self.trip("launch.nc_lease_overdue", round(now - until, 1), cfg.nc_overdue_grace_s,
+                          legacy_event="nc_lease_overdue", scope={"resource": r.key})
                 if not release:
                     continue
                 try:
@@ -317,6 +346,7 @@ def guard_config_from_args(args) -> GuardConfig:
     return GuardConfig(
         budget_usd=g("budget_usd"), budget_warn_usd=g("budget_warn_usd"),
         poll_s=float(g("cost_poll_seconds") or 60), stop_grace_s=m("budget_stop_grace_minutes", 20),
+        nc_overdue_grace_s=m("nc_lease_overdue_minutes", 5),
         idle=IdleConfig(idle_after_s=m("idle_warn_minutes", 15), stop_after_s=m("idle_stop_minutes", 15),
                         load_grace_s=m("load_grace_minutes", default_load_grace_minutes(args)),
                         max_load_s=m("max_load_minutes", 120)))

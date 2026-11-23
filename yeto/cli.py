@@ -808,6 +808,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     from .cost.report import add_launch_arguments as _add_cost_launch_arguments
 
     _add_cost_launch_arguments(p)
+    p.add_argument(
+        "--breakers",
+        default=None,
+        metavar="FILE",
+        help="a breakers: section (bare, or a whole run config) for this launch: its launch "
+        "and trainer entries are written back into these flags; a flag that disagrees with it "
+        "refuses the launch (yeto breaker show --breakers FILE prints the effective values)",
+    )
 
     # W&B telemetry. One group per fleet (this run's name), one run per
     # island plus one for the syncer's event tape; see docs/WANDB.md.
@@ -1420,8 +1428,13 @@ def cmd_launch(args) -> int:
         return code
 
     args_dict = {k: v for k, v in vars(args).items()
-                 if k not in ("command", "_launch_preflight_manifest")}
+                 if k not in ("command", "_launch_preflight_manifest", "_breakers_resolved",
+                              "_launch_argv")}
     runs.create_run(name, args_dict)
+    if getattr(args, "_breakers_resolved", None) is not None:
+        from .launch.breakers_file import save_resolved
+
+        save_resolved(name, args._breakers_resolved)
     proc = _spawn_worker(name)
     runs.update_run(name, pid=proc.pid)
     print(f"[yeto] run '{name}' submitted; worker pid {proc.pid}.")
@@ -1963,7 +1976,8 @@ def cmd_worker(name: str) -> int:
         import traceback
 
         traceback.print_exc()
-        runs.update_run(name, state=runs.FAILED, exit_code=1, finished_at=time.time())
+        runs.update_run(name, state=runs.FAILED, exit_code=1, finished_at=time.time(),
+                        **_stop_reason_field())
         _backstop_cleanup(name, args)
         return 1
     code = int(code or 0)
@@ -1973,8 +1987,18 @@ def cmd_worker(name: str) -> int:
         state=runs.SUCCEEDED if code == 0 else runs.FAILED,
         exit_code=code,
         finished_at=time.time(),
+        **_stop_reason_field(),
     )
     return code
+
+
+def _stop_reason_field() -> dict:
+    """``{"stop_reason": "breaker:<name>"}`` when a breaker of this worker stopped the run
+    (the launch-layer trips record it; decision 10: the exit code is unchanged)."""
+    from .breakers import current_stop_reason
+
+    reason = current_stop_reason()
+    return {} if reason is None else {"stop_reason": reason}
 
 
 def _backstop_cleanup(name: str, args) -> None:
@@ -2597,7 +2621,22 @@ def main(argv=None) -> int:
 
         argv = normalize_argv(argv)
     args = parser.parse_args(argv)
+    if args.command == "launch" and getattr(args, "breakers", None):
+        from .launch import breakers_file
+
+        try:
+            launch_argv, resolved = breakers_file.apply(args.breakers, argv[1:])
+        except (OSError, ValueError) as exc:
+            print(f"[yeto] --breakers {args.breakers}: {exc}", file=sys.stderr)
+            return 2
+        args = parser.parse_args(["launch", *launch_argv])
+        args._breakers_resolved = resolved
     if args.command == "launch":
+        from .launch.breakers_file import print_deprecations
+
+        # the launch argv after write-back (the breakers sources of the dry-run rule check)
+        args._launch_argv = list(launch_argv if getattr(args, "breakers", None) else argv[1:])
+        print_deprecations(args._launch_argv, getattr(args, "_breakers_resolved", None))
         return cmd_launch(args)
     if args.command == "shape":
         return cmd_shape(args)
