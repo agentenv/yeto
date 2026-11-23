@@ -163,8 +163,16 @@ def derive_peft_lora_specs(
     rank: int,
     targets: str | Sequence[str],
     trust_remote_code: bool = False,
+    routed_experts: bool = False,
 ) -> tuple[CanonicalTensorSpec, ...]:
-    """Build PEFT's actual LoRA tensor contract without allocating weights."""
+    """Build PEFT's actual LoRA tensor contract without allocating weights.
+
+    ``routed_experts``: ``all-linear`` on a mixture-of-experts model also adapts
+    the routed experts, one adapter per expert, as Megatron-Bridge exports them
+    (Miles islands); the specs come from :func:`yeto.rl.lora_layout.routed_expert_lora_specs`
+    on the same empty-weights model (PEFT's Transformers-5 target conversion
+    rewrites such a target list, see there).
+    """
 
     from accelerate import init_empty_weights
     from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
@@ -175,6 +183,10 @@ def derive_peft_lora_specs(
         revision=revision,
         trust_remote_code=trust_remote_code,
     )
+    from .lora_layout import adapts_routed_experts, routed_expert_lora_specs
+
+    fused_experts = routed_experts and adapts_routed_experts(targets, config)
+    choice = targets if isinstance(targets, str) else "list"
     clone_expert_mode = targets == "attention-routed-experts"
     expert_specs = (
         _deepseek_v4_clone_expert_lora_specs(config, rank=rank)
@@ -196,11 +208,20 @@ def derive_peft_lora_specs(
             config,
             trust_remote_code=trust_remote_code,
         )
+        if fused_experts:
+            return routed_expert_lora_specs(base, rank=rank, config=config)
         if isinstance(targets, str) and targets != "all-linear":
             pattern = re.compile(targets)
             targets = sorted(
                 name for name, _ in base.named_modules() if pattern.fullmatch(name)
             )
+            if not targets:
+                from .lora_layout import linear_leaf_names
+
+                raise ValueError(
+                    f"--lora-targets {choice} matches no module of this {config.model_type!r} model "
+                    f"(its linear layers: {', '.join(linear_leaf_names(base))}); use --lora-targets "
+                    "all-linear, or add the model's attention projection names to the attention preset")
         adapter = get_peft_model(
             base,
             LoraConfig(
@@ -229,6 +250,39 @@ def derive_peft_lora_specs(
     if overlap:
         raise RuntimeError(f"duplicate synthesized expert LoRA tensors: {sorted(overlap)[:4]}")
     return tuple(sorted((*peft_specs, *expert_specs)))
+
+
+def _checkpoint_specs(model, revision, checkpoint, *, rank, targets, trust_remote_code,
+                      sync_preset, fragments, matrix_merge) -> tuple[CanonicalTensorSpec, ...]:
+    """The PEFT specs a checkpoint was trained under.
+
+    ``all-linear`` on a mixture-of-experts model has two layouts: a Miles island
+    adapts every routed expert (``routed_experts``), other backends keep PEFT's
+    own selection. The one whose layout the checkpoint records is used; the
+    caller's checks then reject a checkpoint that matches neither.
+    """
+
+    def derive(routed_experts: bool):
+        return derive_peft_lora_specs(model, revision, rank=rank, targets=targets,
+                                      trust_remote_code=trust_remote_code, routed_experts=routed_experts)
+
+    def recorded(specs) -> str | None:
+        if sync_preset == "strict-avg":
+            return canonical_layout_hash(specs)
+        if sync_preset == "decoupled" and fragments >= 2:
+            from ..protocol import layout_fingerprint
+
+            return layout_fingerprint(build_rl_fragment_layout(specs, fragments, matrix_merge=matrix_merge)).hex()
+        return None
+
+    specs = derive(True)
+    if checkpoint.layout_hash is None or recorded(specs) == checkpoint.layout_hash:
+        return specs
+    try:
+        fallback = derive(False)
+    except ValueError:  # PEFT cannot build its own selection on this model (e.g. fused experts)
+        return specs
+    return fallback if recorded(fallback) == checkpoint.layout_hash else specs
 
 
 def adapter_targets(specs: Sequence[CanonicalTensorSpec]) -> list[str]:
@@ -325,12 +379,16 @@ def export_rl_checkpoint(
 
     model = resolve(model)
     checkpoint = parse_checkpoint(checkpoint_path)
-    specs = derive_peft_lora_specs(
+    specs = _checkpoint_specs(
         model,
         model_revision,
+        checkpoint,
         rank=rank,
         targets=lora_targets,
         trust_remote_code=trust_remote_code,
+        sync_preset=sync_preset,
+        fragments=fragments,
+        matrix_merge=matrix_merge,
     )
     canonical_hash = canonical_layout_hash(specs)
     if sync_preset == "strict-avg":

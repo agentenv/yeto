@@ -57,8 +57,10 @@ def test_standby_gpus_need_a_lora_fixed_partition():
 
 
 def test_ep_refuses_expert_sharded_lora_only_when_lora_is_trained():
-    """EP>1 with --lora-targets all-linear refuses sharded expert LoRA; a full-parameter
-    run builds no LoRA, so the same flag does not refuse it."""
+    """EP>1 with --lora-targets all-linear: a recipe that keeps LoRA replicated refuses
+    expert-sharded LoRA, the generic recipe (Bridge grouped-expert adapters) needs
+    grouped-GEMM experts; a full-parameter run builds no LoRA, so the same flag
+    refuses neither."""
 
     (base,), kwargs = _captured_args()
     provider = argparse.Namespace(**{**vars(kwargs["provider"]), "num_moe_experts": 4, "moe_layer_freq": 1,
@@ -66,6 +68,9 @@ def test_ep_refuses_expert_sharded_lora_only_when_lora_is_trained():
                                      "position_embedding_type": "rope"})
     moe = {**vars(base), "expert_parallel": 2, "lora_targets": "all-linear"}
     with pytest.raises(ValueError, match="replicated attention LoRA"):
+        rc.resolve_rl_run_config(argparse.Namespace(**{**moe, "rl_model_recipe": rc.RECIPE_QWEN3_5}),
+                                 **{**kwargs, "provider": provider})
+    with pytest.raises(ValueError, match="grouped-GEMM experts"):
         rc.resolve_rl_run_config(argparse.Namespace(**moe), **{**kwargs, "provider": provider})
     full = argparse.Namespace(**{**moe, "parameter_mode": "full", "rl_single_island_no_sync": True})
     config = rc.resolve_rl_run_config(full, **{**kwargs, "provider": provider, "target_modules": []},
