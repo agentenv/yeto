@@ -54,6 +54,12 @@ STRICT_METRICS = {
     "policy_hash_mismatch_after_rebuild": "trainer.policy_hash",
 }
 
+# While the buffer reader waits for new groups (inside trainer.sample_wait) it emits one
+# rl_sample_wait island event per heartbeat, so launch.stall (no island event for
+# --rl-stall-timeout) does not end a legitimate wait as a hang: every max(60 s, stall / 4).
+WAIT_HEARTBEAT_ENV = "YETO_SAMPLE_BUFFER_HEARTBEAT_S"
+MIN_WAIT_HEARTBEAT_S = 60.0
+
 _REGISTRY: Registry | None = None
 
 
@@ -127,6 +133,20 @@ def xhw_guard(rb: breakers.ResolvedBreakers) -> XhwGuard | None:
 def xhw_enabled(environ: Mapping[str, str] | None = None) -> bool:
     """Whether the xhw guard is on (the reader applies its actions to a round)."""
     return resolved(environ, names=(XHW_GUARD,)).enabled(XHW_GUARD)
+
+
+def wait_heartbeat_s(stall_s: float) -> float:
+    """Seconds between the reader's wait heartbeats under a stall clock of ``stall_s``
+    (0: the stall clock is off)."""
+    return max(MIN_WAIT_HEARTBEAT_S, float(stall_s) / 4)
+
+
+def wait_heartbeat_env(stall_s: float) -> dict[str, str]:
+    """The env the launcher gives a buffer-trainer island ({} with the stall clock off:
+    the reader then beats at the minimum, which nothing reads)."""
+    if float(stall_s) <= 0:
+        return {}
+    return {WAIT_HEARTBEAT_ENV: f"{wait_heartbeat_s(stall_s):g}"}
 
 
 def release_drain_s(rb: breakers.ResolvedBreakers) -> float:

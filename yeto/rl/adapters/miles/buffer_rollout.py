@@ -102,6 +102,11 @@ BUFFER_ROOT_ENV = "YETO_SAMPLE_BUFFER_ROOT"  # checkpoint store path holding sam
 SAMPLER_ID_ENV = "YETO_SAMPLE_BUFFER_SAMPLER_ID"  # prefix of the sample ids a sampler writes
 WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds without a new group while a round fills
 POLL_ENV = "YETO_SAMPLE_BUFFER_POLL_S"  # reader: seconds between index reads while waiting
+# reader: seconds between rl_sample_wait records while a take waits for new groups (the
+# launcher sets it from --rl-stall-timeout, trainer_breakers.wait_heartbeat_env)
+HEARTBEAT_ENV = trainer_breakers.WAIT_HEARTBEAT_ENV
+DEFAULT_HEARTBEAT_S = trainer_breakers.MIN_WAIT_HEARTBEAT_S
+WAIT_EVENT = "rl_sample_wait"
 MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
 # reader: 0 turns off "one trained group per store-dispenser task" (TaskSlots); default on
 ONE_GROUP_PER_TASK_ENV = "YETO_SAMPLE_BUFFER_ONE_GROUP_PER_TASK"
@@ -117,7 +122,7 @@ DATA_SLOT_ENV = "YETO_SAMPLE_BUFFER_DATA_SLOT"  # sampler: "index/count" of the 
 INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"  # set by the sampler island before Ray starts
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
-ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV,
+ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, HEARTBEAT_ENV, SHARD_ENV,
                SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV,
                # the trainer's relay pump (yeto.rl.spot_rollout.relay_buffer.RELAY_ENVS)
                "YETO_SAMPLE_RELAY_ADDR", "YETO_SAMPLE_RELAY_CHANNEL", "YETO_SAMPLE_RELAY_PREFETCH",
@@ -1265,7 +1270,7 @@ class BatchReader:
                  read_workers: int = DEFAULT_READ_WORKERS, prefetch: bool = True,
                  incarnation_gate: Any = "auto", group_size: int | None = None,
                  max_damaged_run: int = DEFAULT_MAX_DAMAGED_RUN, one_group_per_task: bool = True,
-                 max_inflight_bytes: Any = "auto") -> None:
+                 max_inflight_bytes: Any = "auto", heartbeat_s: float = DEFAULT_HEARTBEAT_S) -> None:
         """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
         the reader continues after its last line and appends one per round.
         ``read_workers`` < 2 reads the payloads one by one; ``prefetch`` needs a
@@ -1290,12 +1295,17 @@ class BatchReader:
         doc); 0: no limit. ``one_group_per_task``: a second group of a store-dispenser
         task is passed over (:class:`TaskSlots`, ``TakeReport.duplicate_task_groups``).
         ``max_inflight_bytes``: the raw payload bytes held at once (:class:`ByteBudget`;
-        ``"auto"``: :func:`inflight_bytes_limit` from the environment; None or 0: no limit)."""
+        ``"auto"``: :func:`inflight_bytes_limit` from the environment; None or 0: no limit).
+        ``heartbeat_s``: while a take waits for new groups (the ``wait_s`` bound), one
+        :data:`WAIT_EVENT` record per ``heartbeat_s`` seconds, so the launcher's stall clock
+        (``launch.stall``, any island event) does not take the wait for a hang; a wait for
+        unreadable leases (no ``wait_s`` bound) gets none. 0: no heartbeat."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
         self.max_policy_age = int(max_policy_age)
         self.wait_s = float(wait_s)
+        self.heartbeat_s = float(heartbeat_s)
         self.poll_s = float(poll_s)
         self.consumer = consumer
         self.clock = clock
@@ -1753,7 +1763,7 @@ class BatchReader:
 
     def _take(self, rollout_id: int, groups: int, current_version: int | None
               ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
-        started = progress = self.clock()
+        started = progress = beat = self.clock()
         self._rollout_id = rollout_id
         self._stop_prefetching()
         ahead = dict(self._reads)
@@ -1916,7 +1926,8 @@ class BatchReader:
                 if rejected or again_deferred:  # replaced if the buffer holds more; or waits
                     continue
                 break
-            if self.clock() - progress > self.wait_s:
+            waited = self.clock() - progress
+            if waited > self.wait_s:
                 error = SampleBufferRolloutError(
                     f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
                     f"without a new group (buffer position {self._cursor()})")
@@ -1925,6 +1936,11 @@ class BatchReader:
                                       detail=str(error), legacy_event="SampleBufferRolloutError")
                 raise self._ended(error, stale=stale, stale_incarnation=fenced, quarantined=quarantined,
                                   dropped_small=dropped_small)
+            if self.heartbeat_s > 0 and self.clock() - max(progress, beat) >= self.heartbeat_s:
+                # a legitimate wait is not a hang: the launcher's stall clock sees this event
+                beat = self.clock()
+                self.emit(WAIT_EVENT, rollout_id=rollout_id, waited_s=round(waited, 3), limit_s=self.wait_s,
+                          groups=len(chosen), needed=groups, heartbeat_s=self.heartbeat_s)
             self.sleep(self.poll_s)
         self._deferred.sort(key=lambda pending: pending[0])
         end = self._cursor()

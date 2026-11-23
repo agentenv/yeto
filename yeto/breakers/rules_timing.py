@@ -22,6 +22,15 @@ VERIFIER_GOOD_S = 300.0  # D2: headroom below this is a warning
 INFRA_ATTEMPT_S = 20.0
 MODAL_MAX_TIMEOUT_S = 86400.0  # D13: the longest timeout Modal accepts for a function
 FIRST_GROUP_MIN_S = 600.0  # D14: a sampler's first group after it is ready (warm-up + one round)
+# D5: a buffer trainer emits rl_sample_wait every max(60 s, stall / 4) while it waits for groups
+# (yeto.rl.engine.trainer_breakers.wait_heartbeat_s; a test keeps the two equal)
+WAIT_HEARTBEAT_MIN_S = 60.0
+WAIT_HEARTBEAT_STALL_FRACTION = 0.25
+
+
+def wait_heartbeat_s(stall: float) -> float:
+    """Seconds between a waiting buffer trainer's heartbeats under a stall clock of ``stall``."""
+    return max(WAIT_HEARTBEAT_MIN_S, stall * WAIT_HEARTBEAT_STALL_FRACTION)
 
 
 def drain_cut(ctx: Ctx) -> float | None:
@@ -173,10 +182,16 @@ def sample_wait(ctx: Ctx) -> Iterator[Finding]:
 
 @rule("D5", "stall_covers_sample_wait")
 def stall_covers_sample_wait(ctx: Ctx) -> Iterator[Finding]:
-    """launch.stall >= trainer.sample_wait, else the sample wait never fires."""
+    """launch.stall >= trainer.sample_wait, else the sample wait never fires; unless the
+    trainer reads the sample buffer: it then emits an island event every
+    :func:`wait_heartbeat_s` while it waits, and two of them fit in the stall window
+    (one lost log line is not a hang)."""
     stall = ctx.number("launch.stall.timeout_s")
     wait = ctx.number("trainer.sample_wait.timeout_s")
     if stall is None or wait is None or stall >= wait:
+        return
+    trainer = ctx.facts.trainer
+    if trainer is not None and trainer.buffer_trainer and stall >= 2 * wait_heartbeat_s(stall):
         return
     yield finding("D5", "warn",
                   f"launch.stall {fmt_s(stall)} < trainer.sample_wait {fmt_s(wait)}: the buffer reader emits no island "

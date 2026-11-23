@@ -202,6 +202,23 @@ def test_d5_passes_when_the_stall_timer_covers_the_wait_or_is_off():
                                   off=("launch.stall",))) == []
 
 
+@pytest.mark.parametrize("stall", [120, 900, 3599])
+def test_d5_passes_when_a_buffer_trainer_heartbeats_while_it_waits(stall):
+    """A buffer trainer emits rl_sample_wait every max(60 s, stall / 4) while it waits: two
+    beats fit in the stall window, so the stall timer no longer ends a legitimate wait."""
+    rb = FakeResolved({"launch.stall.timeout_s": stall, "trainer.sample_wait.timeout_s": 3600})
+    assert run("D5", rb, trainer=replace(TRAINER, buffer_trainer=True)) == []
+
+
+def test_d5_still_warns_without_a_heartbeat_that_covers_the_stall_window():
+    rb = FakeResolved({"launch.stall.timeout_s": 100, "trainer.sample_wait.timeout_s": 3600})
+    found = run("D5", rb, trainer=replace(TRAINER, buffer_trainer=True))  # a 60 s beat: one per window
+    assert levels(found) == ["warn"] and found[0].suggested == {"launch.stall.timeout_s": 3600}
+    rb = FakeResolved({"launch.stall.timeout_s": 900, "trainer.sample_wait.timeout_s": 3600})
+    assert levels(run("D5", rb, trainer=replace(TRAINER, buffer_trainer=False))) == ["warn"]  # no buffer reader
+    assert levels(run("D5", rb, trainer=None)) == ["warn"]  # the trainer argv is not known here
+
+
 # -------------------------------------------------------------------- D6
 
 SILENCE = {"run.trainer_silence.limit_s": None, "run.trainer_silence.stall_factor_n": 4,

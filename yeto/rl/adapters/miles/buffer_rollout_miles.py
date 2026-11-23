@@ -35,7 +35,9 @@ from .buffer_rollout import (
     DATA_SLOT_ENV,
     is_padding,
     EXTERNAL_CUT_ROUND_ATTR,
+    DEFAULT_HEARTBEAT_S,
     DEFAULT_POLL_S,
+    HEARTBEAT_ENV,
     INCARNATION_ENV,
     MAX_POLICY_AGE_ENV,
     ONE_GROUP_PER_TASK_ENV,
@@ -233,6 +235,7 @@ class _BufferRound:
             poll_s=float(os.environ.get(POLL_ENV, DEFAULT_POLL_S)),
             group_size=self.samples_per_group,
             max_damaged_run=limits.max_damaged_run,
+            heartbeat_s=float(os.environ.get(HEARTBEAT_ENV) or DEFAULT_HEARTBEAT_S),
             one_group_per_task=(os.environ.get(ONE_GROUP_PER_TASK_ENV) or "1").strip().lower()
             not in ("0", "off", "false"))
         register_reader(self.reader)
