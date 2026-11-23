@@ -1414,28 +1414,19 @@ def selection_event(
     unverified_mechanisms: Any = (),
     outer_sync: bool | None = None,
 ) -> dict[str, Any]:
-    """Run event carrying the algorithm identity and its provenance.
+    """Run event carrying the algorithm identity and its provenance
+    (``yeto.rl.engine.selection.engine_selected_event``, the record every backend writes).
 
     ``rl/algorithm_absorbed_flags`` lists flags absorbed from extra argv;
     ``rl/unverified_mechanisms`` the unverified-mechanism allowances (an artifact of
     such a run contains unverified mechanisms).
     """
+    from yeto.rl.engine.selection import engine_selected_event
 
-    event = {
-        "event": "rl_engine_selected",
-        "rl_engine": "ports",
-        "miles_commit": miles_commit,
-        "rl/algorithm_spec_sha256": algorithm.sha256(),
-        "rl/algorithm_spec": algorithm.canonical_json(),
-        "rl/algorithm_absorbed_flags": dict(getattr(launch, "absorbed_flags", None) or {}),
-        "placement": launch.placement.kind,
-    }
-    if unverified_mechanisms:
-        event["rl/unverified_mechanisms"] = sorted(unverified_mechanisms)
-        event["rl/contains_unverified_mechanisms"] = True
-    # Always recorded; an unknown mode (None) is the R0 default: outer sync on.
-    event["rl/outer_sync"] = True if outer_sync is None else bool(outer_sync)
-    return event
+    return engine_selected_event(
+        algorithm=algorithm, placement=launch.placement.kind, backend_fields={"miles_commit": miles_commit},
+        absorbed_flags=getattr(launch, "absorbed_flags", None), unverified_mechanisms=unverified_mechanisms,
+        outer_sync=outer_sync)
 
 
 def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str | None:

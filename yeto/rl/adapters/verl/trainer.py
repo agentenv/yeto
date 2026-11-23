@@ -317,6 +317,9 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
                  "parameter_mode": "full" if full else "lora", "init_seconds": time.time() - t0})
     spec = (AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec")
             else AlgorithmSpec())
+    from .driver_extras import engine_selected
+
+    tape.append(engine_selected(plan, spec))  # the algorithm identity (yeto-rl-export --rl-event-tape)
     # Round cuts (--rl-resume-store): the store is restored before the driver
     # is built, so the driver's ledger is the restored one
     resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg), sync=sync)
@@ -466,6 +469,9 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
                           compat_group=identity.compat_group)
         policy_state = VerlPolicyState(island)
     spec = AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec") else AlgorithmSpec()
+    from .driver_extras import engine_selected
+
+    tape.append(engine_selected(plan, spec))  # the algorithm identity (yeto-rl-export --rl-event-tape)
     profile = execution_profile_for(spec, limit, groups_per_round=int(plan["groups_per_round"]),
                                     samples_per_group=int(plan["samples_per_group"]), sync=plan["sync"])
     if buffer_ports is None:

@@ -700,7 +700,9 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
                  "parameter_mode": "full", "asserted": asserted, "init_seconds": time.time() - t0})
     spec = AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec") else AlgorithmSpec()
     fingerprint = _fingerprint(cfg)
-    from .driver_extras import TestExitPublisher
+    from .driver_extras import TestExitPublisher, engine_selected
+
+    tape.append(engine_selected(plan, spec))  # the algorithm identity (yeto-rl-export --rl-event-tape)
 
     # TEST ONLY (leave/rejoin, as the FSDP2 island): end the first process after a given publication
     publisher = TestExitPublisher(MegatronPublisher(island), plan.get("test_exit_after_version"), tape,
