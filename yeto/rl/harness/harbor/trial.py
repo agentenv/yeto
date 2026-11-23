@@ -215,13 +215,27 @@ def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings)
         use_yeto_codex(agent)
     elif task.agent == "pi":
         use_yeto_pi(agent, max_tokens=settings.turn_max_tokens)
+    env_kwargs = dict(settings.provider_kwargs)
+    if task.provider == "agentenv" and "ttl_s" not in env_kwargs:
+        # the microVM's TTL is the backstop for a lost delete (a killed sampler): the trial's
+        # wall clock plus room for its create and teardown, not a fixed three hours
+        env_kwargs["ttl_s"] = agentenv_ttl_s(task.budget.wall_clock_s)
     return TrialConfig(
         task=TaskConfig(path=path),
         agent=agent,
-        environment=EnvironmentConfig(**env_target, delete=True, kwargs=dict(settings.provider_kwargs)),
+        environment=EnvironmentConfig(**env_target, delete=True, kwargs=env_kwargs),
         trials_dir=settings.trials_dir,
         timeout_multiplier=settings.timeout_multiplier,
     )
+
+
+AGENTENV_TTL_MARGIN_S = 900  # create (cold start, setup retries), verifier upload, delete
+
+
+def agentenv_ttl_s(wall_clock_s: float) -> int:
+    """An AgentENV trial microVM's TTL: the trial wall clock (the outer cap of the whole
+    trial) plus :data:`AGENTENV_TTL_MARGIN_S`."""
+    return int(float(wall_clock_s)) + AGENTENV_TTL_MARGIN_S
 
 
 def verdict_from_result(result: Any, *, trial_dir: str | None = None) -> TrialVerdict:

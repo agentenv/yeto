@@ -112,7 +112,7 @@ class AgentenvClient(Protocol):
     def set_ttl(self, sandbox_id: str, ttl_seconds: int) -> None: ...
     def delete(self, sandbox_id: str) -> None: ...
     # Optional on fakes: metadata-based orphan cleanup (there is no create name=)
-    # def list_sandboxes(self, metadata: dict[str, str]) -> list[str]
+    # def list_sandboxes(self, metadata: dict[str, str]) -> list[agentenv_labels.Listed]
 
 
 API_KEY_FILE_ENV = "AGENTENV_API_KEY_FILE"  # a 0600 file: AGENTENV_API_KEY=... (env-file) or the bare key
@@ -332,6 +332,28 @@ class SdkAgentenvClient:
                                     f"(gateway ignored secure; set {INSECURE_ENV}=1 to allow)")
             self._tokens[sandbox_id] = token
         return sandbox_id
+
+    def list_sandboxes(self, metadata: dict[str, str]) -> list:
+        """The running sandboxes of this API key with their metadata (control plane
+        ``GET /sandboxes``, ``?metadata=`` as a filter hint: the caller checks every
+        row's metadata again, :func:`.agentenv_labels.sweep_stale`)."""
+        import httpx
+        from urllib.parse import urlencode
+
+        from .agentenv_labels import parse_listing
+
+        base = self._api_url
+        if not base:
+            raise AgentenvError(f"agentenv list needs {API_URL_ENV} (the control-plane base URL)")
+        try:
+            resp = httpx.get(f"{base.rstrip('/')}/sandboxes", params={"metadata": urlencode(metadata)},
+                             headers={"X-API-Key": self._api_key}, timeout=self._request_timeout_s, trust_env=False)
+            resp.raise_for_status()
+            return parse_listing(resp.json())
+        except httpx.HTTPStatusError as exc:
+            raise AgentenvError(f"agentenv list failed: HTTP {exc.response.status_code}") from None
+        except (httpx.HTTPError, json.JSONDecodeError) as exc:
+            raise AgentenvError(f"agentenv list failed: {type(exc).__name__}") from None
 
     def _kill_quietly(self, sandbox_id: str) -> None:
         try:

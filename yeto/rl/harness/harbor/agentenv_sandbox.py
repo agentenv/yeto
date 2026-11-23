@@ -146,12 +146,12 @@ class AgentenvSandbox:
             raise
 
     def _metadata(self) -> dict[str, str] | None:
-        """Run / island / incarnation labels for orphan cleanup by a successor.
+        """The trial name and the owner (run / shard / incarnation,
+        :mod:`.agentenv_labels`): a later incarnation of the same shard deletes what
+        a killed one left (:func:`.agentenv_labels.sweep_stale`)."""
+        from .agentenv_labels import owner_metadata
 
-        TODO(verify on hardware): wire ``agentenv_labels`` (mirroring
-        ``boat_labels``) once AgentENV's list/metadata filtering is confirmed.
-        """
-        return {"yeto_name": self._name}
+        return {"yeto_name": self._name, **owner_metadata()}
 
     async def adopt(self, sandbox_id: str, spec: SandboxSpec, *, name: str) -> None:
         """Take over an already-created microVM (a snapshot ``/fork`` clone) for ``name``.

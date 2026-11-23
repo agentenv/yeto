@@ -721,6 +721,30 @@ def _member_incarnation_env(env: Any, incarnation: str, *, shard: Any = None):
                 env[k] = v
 
 
+def sweep_agentenv_orphans(spec: Mapping[str, Any], env: Any, emit: Callable[..., None]) -> list[str]:
+    """Delete the AgentENV microVMs an earlier incarnation of this shard left (a killed
+    sampler deletes none): only those whose metadata names this run, this shard and
+    another incarnation (:mod:`yeto.rl.harness.harbor.agentenv_labels`). Only on an
+    AgentENV sampler; never fails the start."""
+    agentic = spec.get("agentic") if isinstance(spec.get("agentic"), Mapping) else {}
+    defaults = agentic.get("task_defaults") if isinstance(agentic.get("task_defaults"), Mapping) else {}
+    if str(env.get("HARBOR_ENV_TYPE") or defaults.get("provider") or "") != "agentenv":
+        return []
+    try:
+        from yeto.rl.harness.harbor.agentenv_client import process_client  # noqa: PLC0415
+        from yeto.rl.harness.harbor.agentenv_labels import owner_from_env, sweep_stale  # noqa: PLC0415
+
+        owner = owner_from_env(env)
+        if owner is None:
+            print("[engine-sampler] agentenv orphan sweep skipped: no run label (YETO_SANDBOX_RUN_LABEL / "
+                  "YETO_NC_RUN_PREFIX) or shard", flush=True)
+            return []
+        return sweep_stale(process_client(), owner, emit=emit)
+    except Exception as error:  # noqa: BLE001 - orphans only cost room until their TTL
+        print(f"[engine-sampler] agentenv orphan sweep failed: {type(error).__name__}: {error}"[:300], flush=True)
+        return []
+
+
 POOL_FENCE_PREFIX = "pool-fence:"  # yeto.launch.nc.elastic.FENCE_PREFIX: the lease a pool fence writes
 
 
@@ -915,6 +939,7 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
                                             buffer=buffer)
     if lease is not None and lease.take_shard() is not None:
         buffer.refresh()  # the resume point below sees every valid write of an earlier incarnation
+    sweep_agentenv_orphans(spec, env, emit)  # the lease is ours: no earlier incarnation still runs trials
     resume = resume_point(buffer.entries(), config.sampler_id)
     if callable(getattr(prompts, "recover", None)):  # store dispenser: settle what was written, free the rest
         if getattr(prompts, "emit", False) is None:
