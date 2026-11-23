@@ -341,6 +341,13 @@ def trainer_missing(reducer, th: dict, now: float, cards: list[dict]) -> list[di
     live = [c for c in cards if roles[c["id"]] == "sampler" and c["status"] in ("ok", "waiting", "starting")]
     if not live or any(r == "trainer" for r in roles.values()):
         return []
+    # a trainer still starting (start phases, startup heartbeats; no rl_driver_start yet) is on
+    # the tapes too: run up starts it only after the first group, and a K3.1 actor init takes
+    # about 20 min before rl_driver_start. A launch that left, or went quiet past its startup
+    # threshold (startup_slow: the startup alerts' finding), no longer counts.
+    if any(c.get("role") == "trainer" and roles[c["id"]] != "sampler" and c["status"] == "starting"
+           and not c.get("left") and not c.get("startup_slow") for c in cards):
+        return []
     firsts = [reducer.islands[c["id"]].get("first_ts") for c in live if c["id"] in reducer.islands]
     firsts = [t for t in firsts if t is not None]
     if not firsts:

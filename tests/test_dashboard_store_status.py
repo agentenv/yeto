@@ -197,6 +197,32 @@ def test_no_trainer_alert_once_a_trainer_is_on_the_tapes():
     assert not _missing_alerts(recs, T0 + 2010)
 
 
+def _trainer_starting(t0, until, step=30.0):
+    """A trainer run up launched after the first group: its start phases and startup
+    heartbeats, no rl_driver_start yet (a K3.1 actor init takes about 20 min)."""
+    recs = [{"event": "trainer_start_phase", "island_id": "trainer", "phase": "submitted", "time_unix": t0}]
+    t, seq = t0 + step, 1
+    while t <= until:
+        recs.append({"event": "rl_heartbeat", "island_id": "trainer", "phase": "startup", "seq": seq, "time_unix": t})
+        t, seq = t + step, seq + 1
+    return recs
+
+
+def test_a_starting_trainer_counts_as_on_the_tapes():
+    recs = _sampler_up(2400) + _trainer_starting(T0 + 1300, T0 + 2400)
+    assert not _missing_alerts(recs, T0 + 2410)
+
+
+def test_a_trainer_launch_that_went_silent_or_left_does_not_count():
+    silent = _sampler_up(2400) + _trainer_starting(T0 + 300, T0 + 400)  # nothing from it for 33 min
+    crit = _missing_alerts(silent, T0 + 2410)
+    assert len(crit) == 1 and crit[0]["sev"] == 0
+    left = _sampler_up(2400) + _trainer_starting(T0 + 1300, T0 + 1400) + [
+        {"event": "island_leave", "island_id": "trainer", "reason": 4, "reason_name": "INFRA_FAILED",
+         "error_type": "ImageBuildError", "error": "image build failed", "time_unix": T0 + 1410}]
+    assert len(_missing_alerts(left, T0 + 2410)) == 1
+
+
 OOM = ("Traceback (most recent call last):\n  File \"x.py\", line 1, in f\n"
        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 47.05 GiB.\n\n"
        "The above exception was the direct cause of the following exception:\n\n"
