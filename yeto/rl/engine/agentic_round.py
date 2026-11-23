@@ -1088,7 +1088,7 @@ class AgenticRound(EngineRound):
                       keep=[g.spot for g in self._unsettled if g.spot is not None],
                       requeue=requeue, outcome=outcome)
         if self.infra_streak is not None:
-            self.infra_streak.group(reason)
+            self.infra_streak.group(reason, lost)
         served = self.engine.served_version()
         self.emit(GROUP_EVENT, rollout_id=rid, prompt_id=group.item.prompt_id, written=reason is None,
                   dropped_reason=reason, trials=n, kept=len(kept), lost=dict(sorted(lost.items())),
@@ -1525,7 +1525,7 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
                                      f"sandbox cap {slots.limit} (HARBOR_MAX_SANDBOXES)")
     from yeto.breakers import BreakerConfigError
 
-    from .infra_streak import InfraStreak
+    from .infra_streak import InfraStreak, startup_line
     from .sampler_breakers import spec_breakers
 
     try:  # min_samples, infra_retries, the drain: the breaker registry's sampler entries
@@ -1535,6 +1535,7 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
     drain_timeout_s, abandon_grace_s = drain_settings(spec, drain=switch == "drain", resolved=limits)  # checked first
     infra_retries = limits.get("sampler.infra_retries.max_n")
     min_samples = limits.get("sampler.min_samples.min_n")
+    print(startup_line(InfraStreak.of(limits)), flush=True)
     if switch == "drain":
         warning = drain_timeout_warning(spec, live_engine=False)
         if warning is not None:

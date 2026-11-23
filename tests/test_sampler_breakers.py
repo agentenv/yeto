@@ -193,6 +193,31 @@ def test_the_streak_warns_once_per_streak_by_default():
     assert len(tape.breakers()) == 2 and streak.trips == 2
 
 
+def test_groups_a_release_cut_are_not_an_infra_streak():
+    from yeto.rl.engine import infra_streak
+
+    assert infra_streak.NOT_INFRA_LOSSES == {ar.LOST_DRAIN, ar.LOST_VERSION}
+    tape = Tape()
+    streak = InfraStreak(max_n=2, action="pause")
+    streak.emit = tape
+    for lost in ({ar.LOST_DRAIN: 3}, {ar.LOST_VERSION: 1, "NetworkError": 4}, {ar.LOST_DRAIN: 1}):
+        streak.group("below_min_samples", lost)  # a drain cut or a weight switch: a healthy run's release
+    assert tape.breakers() == [] and streak.streak == 0 and not streak.paused()
+    streak.group("below_min_samples", {"NetworkError": 8})
+    streak.group("below_min_samples", {ar.LOST_DRAIN: 2})  # neither counts nor ends the streak
+    streak.group("below_min_samples", {"aborted": 8})
+    assert streak.paused() and len(tape.breakers()) == 1
+
+
+def test_the_sampler_says_at_start_whether_the_streak_is_on_and_how_to_change_it():
+    from yeto.rl.engine.infra_streak import startup_line
+
+    warn = startup_line(InfraStreak(max_n=5))
+    assert "on" in warn and "5 groups" in warn and "action pause" in warn and "enabled false" in warn
+    assert "300 s" in startup_line(InfraStreak(action="pause"))
+    assert "off" in startup_line(None)
+
+
 def test_a_pause_holds_claims_until_a_group_is_written_or_the_cool_down():
     tape, now = Tape(), [0.0]
     streak = InfraStreak(max_n=2, cooldown_s=300, action="pause", clock=lambda: now[0])
