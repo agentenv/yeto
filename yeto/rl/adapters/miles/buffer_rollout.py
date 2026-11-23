@@ -90,6 +90,7 @@ from yeto.rl.engine.merged_release import (
 )
 from yeto.rl.engine.data_split import DATA_ROW_KEY, DataSlot  # noqa: F401 - DATA_ROW_KEY re-exported
 from yeto.rl.engine.incarnation_lease import LeaseUnknown
+from yeto.rl.engine import trainer_breakers
 from yeto.rl.engine.policy_age import age_floor
 from yeto.rl.engine.trainer_lifecycle import Selected
 from yeto.rl.engine.xhw_guard import downweight_group, rollout_stats, source_key
@@ -348,7 +349,20 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
             problems.append(f"buffer position {position}: {error}")
     for problem in problems:
         print(f"[sample-buffer] WARNING: group left out of the round: {problem}", flush=True)
+    if problems:
+        trainer_breakers.trip(trainer_breakers.SAMPLE_ALIGNMENT, _echo_event, count=len(problems),
+                              detail=problems[-1])
     return kept, problems
+
+
+def unconvertible_round(rollout_id: int, takes: int, problem: str) -> SampleBufferRolloutError:
+    """The error that ends a round after ``takes`` takes in a row without a group that
+    converts (:func:`miles_groups`), reported as a ``trainer.sample_alignment`` stop."""
+    error = SampleBufferRolloutError(f"rollout {rollout_id}: {takes} takes in a row with no group that "
+                                     f"converts to Miles samples: {problem}")
+    trainer_breakers.trip(trainer_breakers.SAMPLE_ALIGNMENT, _echo_event, action="stop", value=takes,
+                          limit=takes, detail=str(error), legacy_event="SampleBufferRolloutError")
+    return error
 
 
 def with_reader_edits(converted: Sequence[tuple[int, list[dict[str, Any]]]],
@@ -479,7 +493,7 @@ def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[s
     positions = [position for position, _ in groups]
     problems = segmented_round_problems(args)
     if problems:
-        raise SampleBufferRolloutError(
+        raise _refused_round(
             f"groups at buffer positions {positions[:8]} hold compacted trials (several samples "
             f"per trial); Miles trains them one rollout per trial only on its rollout-side DP schedule, "
             f"which this trainer does not use ({', '.join(problems)})")
@@ -489,7 +503,7 @@ def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[s
     seq_length = getattr(args, "seq_length", None)
     if widths and (not isinstance(seq_length, int) or seq_length < max(w for w, _ in widths)):
         width, what = max(widths)
-        raise SampleBufferRolloutError(
+        raise _refused_round(
             f"groups at buffer positions {positions[:8]} hold compaction segments that can reach {width} "
             f"tokens ({what}); this trainer's --seq-length {seq_length} does not hold one (a segment "
             f"ends with its summary, which would be cut): raise --seq-len to {width}")
@@ -497,7 +511,15 @@ def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[s
 
     problems = sibling_problems([d for _, group in every for d in group])
     if problems:
-        raise SampleBufferRolloutError("compaction segments are not rollout siblings: " + "; ".join(problems))
+        raise _refused_round("compaction segments are not rollout siblings: " + "; ".join(problems))
+
+
+def _refused_round(message: str) -> SampleBufferRolloutError:
+    """A round of compacted trials this trainer cannot train whole (``trainer.compaction_round``)."""
+    error = SampleBufferRolloutError(message)
+    trainer_breakers.trip(trainer_breakers.COMPACTION_ROUND, _echo_event, detail=message,
+                          legacy_event="SampleBufferRolloutError")
+    return error
 
 
 def stale_segment_buckets(report: Any, pruned: Sequence[Sequence[dict[str, Any]]] = (), *,
@@ -1492,12 +1514,15 @@ class BatchReader:
         limit, damaged = self.max_damaged_run, len(self._damaged)
         if limit > 0 and (self._damaged_run >= limit
                           or (damaged >= limit and damaged > self._decoded_payloads)):
-            raise DamagedPayloadLimit(
+            error = DamagedPayloadLimit(
                 f"{damaged} damaged payloads in this take ({self._damaged_run} in a row, "
                 f"{self._decoded_payloads} decoded), the last at buffer position {int(position)} "
                 f"({getattr(entry, 'sample_id', None)}: {reason}); this is not one damaged object: check the "
                 f"samplers' payload schema against this reader's ({PAYLOAD_SCHEMA}). Nothing was consumed; "
                 f"{MAX_DAMAGED_RUN_ENV} (now {limit}, 0: no limit) sets the bound")
+            trainer_breakers.trip(trainer_breakers.BUFFER_DAMAGED, self.emit, value=self._damaged_run,
+                                  limit=limit, detail=str(error), legacy_event="DamagedPayloadLimit")
+            raise error
         return None
 
     def _ended(self, error: SampleBufferRolloutError, **counts: int) -> SampleBufferRolloutError:
@@ -1696,7 +1721,7 @@ class BatchReader:
         self._damaged_run = self._decoded_payloads = 0
         self._duplicates = []
         try:
-            return self._take(int(rollout_id), int(groups), current_version)
+            out, report = self._take(int(rollout_id), int(groups), current_version)
         except BaseException:
             self._abandon_open()  # its reads: selected again by the next take, read again then
             self._retry = self._taken + self._retry
@@ -1707,6 +1732,24 @@ class BatchReader:
             raise
         finally:
             self._taken = []
+        self._report_round(report)  # after the take: a report never undoes a round
+        return out, report
+
+    def _report_round(self, report: TakeReport) -> None:
+        """One ``rl_breaker`` record per round for each guard that passed groups over:
+        ``trainer.policy_age`` (too old) and ``trainer.group_integrity`` (too few or too many
+        trials, a non-finite reward or log-prob). Nothing when no group was passed over."""
+        rollout = f"rollout {report.rollout_id}"
+        if report.stale_groups:
+            trainer_breakers.trip(trainer_breakers.POLICY_AGE, self.emit, limit=self.max_policy_age,
+                                  count=report.stale_groups, legacy_event="rl_buffer_stale_skipped",
+                                  detail=f"{rollout}: {report.stale_groups} groups older than "
+                                  f"{self.max_policy_age} versions")
+        bad = {"dropped_small": report.dropped_small_groups, "nonfinite_reward": report.nonfinite_reward_groups,
+               "nonfinite_logprob": report.nonfinite_logprob_groups}
+        if sum(bad.values()):
+            trainer_breakers.trip(trainer_breakers.GROUP_INTEGRITY, self.emit, count=sum(bad.values()),
+                                  detail=f"{rollout}: " + ", ".join(f"{n} {why}" for why, n in bad.items() if n))
 
     def _take(self, rollout_id: int, groups: int, current_version: int | None
               ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
@@ -1874,10 +1917,14 @@ class BatchReader:
                     continue
                 break
             if self.clock() - progress > self.wait_s:
-                raise self._ended(SampleBufferRolloutError(
+                error = SampleBufferRolloutError(
                     f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
-                    f"without a new group (buffer position {self._cursor()})"),
-                    stale=stale, stale_incarnation=fenced, quarantined=quarantined, dropped_small=dropped_small)
+                    f"without a new group (buffer position {self._cursor()})")
+                trainer_breakers.trip(trainer_breakers.SAMPLE_WAIT, self.emit,
+                                      value=round(self.clock() - progress, 3), limit=self.wait_s,
+                                      detail=str(error), legacy_event="SampleBufferRolloutError")
+                raise self._ended(error, stale=stale, stale_incarnation=fenced, quarantined=quarantined,
+                                  dropped_small=dropped_small)
             self.sleep(self.poll_s)
         self._deferred.sort(key=lambda pending: pending[0])
         end = self._cursor()
@@ -2648,9 +2695,7 @@ def check_xhw_downweight(*, std_normalized: bool, environ: Mapping[str, str] | N
     scaling, and its correctness test ``reward == 1`` no longer holds), a reward dict
     (``--reward-key``), and a yeto reward shaper or an advantage transform other than
     ``grpo_default`` (``advantage.reward_shapers`` / ``advantage.transform``)."""
-    from yeto.rl.engine.xhw_guard import XhwGuard  # noqa: PLC0415
-
-    guard = XhwGuard.from_env(os.environ if environ is None else environ)
+    guard = trainer_breakers.xhw_guard(trainer_breakers.resolved(environ, names=(trainer_breakers.XHW_GUARD,)))
     if guard is None or guard.action != "downweight":
         return
     if std_normalized:

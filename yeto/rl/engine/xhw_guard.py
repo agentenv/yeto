@@ -73,6 +73,33 @@ class XhwGuardStop(RuntimeError):
     """A source crossed the act limits with ``action=stop``."""
 
 
+OFF_VALUES = ("", "0", "off", "false")  # the guard is off (unset counts too)
+FLOAT_KEYS = frozenset({f"{lvl}_{m}" for lvl in ("warn", "act") for m in METRICS}
+                       | {"weight", "max_cond", "confidence_z"})
+INT_KEYS = frozenset({"window", "min_rounds", "quarantine_rounds"})
+
+
+def parse_spec(raw: str | None) -> dict[str, Any] | None:
+    """A ``YETO_RL_XHW_GUARD`` value as its keys (``{}``: the defaults); None when the
+    guard is off. The breaker registry reads the same value through it
+    (``yeto.breakers.layers.trainer``)."""
+    raw = (raw or "").strip()
+    if raw in OFF_VALUES:
+        return None
+    if raw in ("1", "on", "true"):
+        return {}
+    values: dict[str, Any] = {}
+    for part in raw.split(","):
+        key, eq, value = part.strip().partition("=")
+        if not eq or key not in FLOAT_KEYS | INT_KEYS | {"action"}:
+            raise XhwGuardConfigError(f"{ENV}={raw!r}: unknown or malformed {part!r}")
+        try:
+            values[key] = float(value) if key in FLOAT_KEYS else int(value) if key in INT_KEYS else value
+        except ValueError:
+            raise XhwGuardConfigError(f"{ENV}={raw!r}: bad value in {part!r}") from None
+    return values
+
+
 def source_key(provenance: Mapping[str, Any] | None, shard: str | None = None) -> str:
     """``sampler_id|engine|engine_version|card_model`` of a buffer entry (``unknown`` parts
     for entries without provenance; ``shard`` stands in for a missing sampler id)."""
@@ -330,22 +357,9 @@ class XhwGuard:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] = os.environ) -> "XhwGuard | None":
-        raw = (environ.get(ENV) or "").strip()
-        if not raw or raw in ("0", "off", "false"):
+        values = parse_spec(environ.get(ENV))
+        if values is None:
             return None
-        if raw in ("1", "on", "true"):
-            return cls()
-        floats = {f"{lvl}_{m}" for lvl in ("warn", "act") for m in METRICS} | {"weight", "max_cond", "confidence_z"}
-        ints = {"window", "min_rounds", "quarantine_rounds"}
-        values: dict[str, Any] = {}
-        for part in raw.split(","):
-            key, eq, value = part.strip().partition("=")
-            if not eq or key not in floats | ints | {"action"}:
-                raise XhwGuardConfigError(f"{ENV}={raw!r}: unknown or malformed {part!r}")
-            try:
-                values[key] = float(value) if key in floats else int(value) if key in ints else value
-            except ValueError:
-                raise XhwGuardConfigError(f"{ENV}={raw!r}: bad value in {part!r}") from None
         base = cls.__dataclass_fields__
         limits = {lvl: Limits(*(values.pop(f"{lvl}_{m}", getattr(base[lvl].default, m)) for m in METRICS))
                   for lvl in ("warn", "act")}

@@ -24,6 +24,27 @@ class NanSkipConfigError(ValueError):
     pass
 
 
+SPEC_KEYS = {"max_consecutive": int, "max_fraction": float, "min_rounds": int}
+
+
+def parse_spec(raw: str | None) -> dict[str, float | int] | None:
+    """A ``YETO_RL_NAN_SKIP`` value as :class:`NanSkipPolicy` keyword arguments (``{}``:
+    the defaults); None when it is unset or empty (the strict behavior). The breaker
+    registry reads the same value through it (``yeto.breakers.layers.trainer``)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if raw in ("1", "on", "true"):
+        return {}
+    kwargs = {}
+    for part in raw.split(","):
+        key, eq, value = part.strip().partition("=")
+        if not eq or key not in SPEC_KEYS:
+            raise NanSkipConfigError(f"{ENV}={raw!r}: expected key=value with keys {sorted(SPEC_KEYS)}")
+        kwargs[key] = SPEC_KEYS[key](value)
+    return kwargs
+
+
 @dataclass
 class NanSkipPolicy:
     max_consecutive: int = 2
@@ -39,19 +60,8 @@ class NanSkipPolicy:
 
     @classmethod
     def from_env(cls, environ=os.environ) -> NanSkipPolicy | None:
-        raw = (environ.get(ENV) or "").strip()
-        if not raw:
-            return None
-        if raw in ("1", "on", "true"):
-            return cls()
-        kwargs = {}
-        types = {"max_consecutive": int, "max_fraction": float, "min_rounds": int}
-        for part in raw.split(","):
-            key, eq, value = part.strip().partition("=")
-            if not eq or key not in types:
-                raise NanSkipConfigError(f"{ENV}={raw!r}: expected key=value with keys {sorted(types)}")
-            kwargs[key] = types[key](value)
-        return cls(**kwargs)
+        kwargs = parse_spec(environ.get(ENV))
+        return None if kwargs is None else cls(**kwargs)
 
     def finite_round(self) -> None:
         self.rounds += 1

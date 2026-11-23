@@ -528,7 +528,8 @@ def test_a_source_whose_every_group_is_damaged_is_reported_by_name_though_the_ru
         _damage(s3, sample_id, "truncated")
     batch_reader = reader(trainer(s3, ("s0", "s1")))
     events = []
-    batch_reader.emit = lambda event, **fields: events.append((event, fields))
+    # the drain ends on the no-new-group wait: its rl_breaker record (trainer.sample_wait) is not looked at here
+    batch_reader.emit = lambda event, **fields: event == "rl_breaker" or events.append((event, fields))
     trained, reports = drain(batch_reader)
     assert _ids(trained) == ids["s0"]  # the run goes on with the good sampler
     assert [event for event, _ in events] == [br.SOURCE_BAD_STREAK_EVENT] * 2  # at 4 and at 8 in a row
@@ -547,6 +548,7 @@ def test_a_source_that_trains_a_group_again_starts_its_bad_count_over(monkeypatc
         _damage(s3, ids["s1"][g], "missing")
     batch_reader = reader(trainer(s3, ("s0", "s1")))
     events = []
-    batch_reader.emit = lambda event, **fields: events.append((event, fields))
+    # the drain ends on the no-new-group wait: its rl_breaker record (trainer.sample_wait) is not looked at here
+    batch_reader.emit = lambda event, **fields: event == "rl_breaker" or events.append((event, fields))
     drain(batch_reader)
     assert events == []

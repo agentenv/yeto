@@ -94,6 +94,7 @@ from .execution_profile import (
     train_blockers,
 )
 from .engine_outage import EnginesLost
+from . import trainer_breakers
 from .nan_skip import NanSkipPolicy
 from .xhw_guard import XhwGuard, XhwGuardStop
 from .leave_reason import leave_reason_for
@@ -670,12 +671,13 @@ class IslandDriver:
         self.execution_mode = profile.execution_mode if profile is not None else EXECUTION_MODE
         self.weight_transport: str | None = None
         self.trained_version: int | None = None
-        # opt-in (YETO_RL_NAN_SKIP): a non-finite grad_norm skips the round instead of failing
-        self.nan_skip: NanSkipPolicy | None = NanSkipPolicy.from_env()
-        # opt-in (YETO_RL_XHW_GUARD): per-source train/rollout mismatch guard of a buffer
-        # trainer; ``xhw_actions_sink`` hands its actions to the buffer reader (set by the
+        limits = trainer_breakers.resolved(names=(trainer_breakers.NAN, trainer_breakers.XHW_GUARD))
+        # opt-in (trainer.nan, YETO_RL_NAN_SKIP): a non-finite grad_norm skips the round instead of failing
+        self.nan_skip: NanSkipPolicy | None = trainer_breakers.nan_skip_policy(limits)
+        # opt-in (trainer.xhw_guard, YETO_RL_XHW_GUARD): per-source train/rollout mismatch guard of
+        # a buffer trainer; ``xhw_actions_sink`` hands its actions to the buffer reader (set by the
         # Miles trainer wiring; None: the guard only reports)
-        self.xhw_guard: XhwGuard | None = XhwGuard.from_env()
+        self.xhw_guard: XhwGuard | None = trainer_breakers.xhw_guard(limits)
         self.xhw_actions_sink: Any = None
         self._open_span: tuple[str, float, int | None] | None = None
         self.fault_injection = load_fault_injection()
@@ -1799,6 +1801,11 @@ class IslandDriver:
         event.pop("schema", None)
         event.pop("rollout_id", None)
         self.emit("rl_xhw_mismatch", rollout_id=rollout_id, **event)
+        acted = int(event["quarantined_groups"] or 0) + int(event["downweighted_groups"] or 0)
+        if acted:  # the reader applied the last round's actions: one record per round
+            trainer_breakers.trip(trainer_breakers.XHW_GUARD, self.emit, action=self.xhw_guard.action,
+                                  count=acted, detail=f"rollout {rollout_id}: {acted} groups quarantined "
+                                  "or downweighted", legacy_event="rl_xhw_mismatch")
         if callable(self.xhw_actions_sink):
             self.xhw_actions_sink(event["actions"])
 
@@ -2959,6 +2966,8 @@ class IslandDriver:
                 self.sync.finish(self)
                 return state
             except StrictRlInvariantError as error:
+                trainer_breakers.trip(trainer_breakers.strict_breaker(error.metric), self.emit,
+                                      detail=f"{error.metric}: {error}", legacy_event="rl_strict_failure")
                 self.emit(
                     "rl_strict_failure",
                     metric=error.metric,
