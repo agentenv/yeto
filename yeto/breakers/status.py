@@ -64,19 +64,23 @@ def primary_limit(params: Mapping[str, Any]) -> float | None:
 
 def resolved_for(*, argv: Sequence[str] | None = None, spec: Mapping[str, Any] | None = None,
                  env: Mapping[str, str] | None = None, run_config: Mapping[str, Any] | None = None,
-                 pool: str | None = None) -> Any:
+                 pool: str | None = None, layers: Iterable[str] | None = None) -> Any:
     """The settings this process runs with: the resolved file handed to it
     (``YETO_BREAKERS_RESOLVED``, phase 4) when there is one, else the registry resolved
-    over the surfaces the process can see (non-strict: a conflict never stops a
-    component here, ``run up`` refuses it before anything starts). None when nothing
-    resolves; the snapshot then carries gauges only."""
+    over the surfaces the process can see (a sampler spec's own ``breakers`` section
+    included; non-strict: a conflict never stops a component here, the component's own
+    resolve or ``run up`` refuses it). None when nothing resolves; the snapshot then
+    carries gauges only."""
     from .resolve import Sources, load_resolved, resolve  # noqa: PLC0415
 
     try:
         path = (env or {}).get(RESOLVED_ENV)
         if path and os.path.isfile(path):
             return load_resolved(path)
-        return resolve(Sources(run_config=run_config, argv=argv, spec=spec, env=env), pool=pool, strict=False)
+        section = spec.get("breakers") if isinstance(spec, Mapping) and run_config is None else None
+        sources = Sources(run_config=run_config, argv=argv, spec=spec, env=env,
+                          section=section if isinstance(section, Mapping) else None)
+        return resolve(sources, pool=pool, strict=False, layers=None if layers is None else tuple(layers))
     except Exception as error:  # noqa: BLE001 - status is observation only
         print(f"[breakers] status: settings not resolved ({type(error).__name__}: {error})", file=sys.stderr)
         return None
@@ -279,7 +283,8 @@ def status_thread(emit: Callable[[dict], Any], layers: str | Iterable[str], *,
     (:func:`resolved_for`); None when nothing resolves or anything fails: a component
     never fails to start for its status snapshots."""
     try:
-        resolved = resolved_for(argv=argv, spec=spec, env=env)
+        layer_names = (layers,) if isinstance(layers, str) else tuple(layers)
+        resolved = resolved_for(argv=argv, spec=spec, env=env, layers=layer_names)
         if resolved is None and not gauges:
             return None
         return StatusThread(StatusEmitter(emit, layers, resolved=resolved, scope=scope, gauges=gauges, **kw))
