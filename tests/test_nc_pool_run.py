@@ -332,6 +332,41 @@ def test_the_full_local_build_refuses_what_the_node_would_refuse(tmp_path, capsy
     assert "refused by the sampler" in capsys.readouterr().out
 
 
+def test_an_auto_backlog_cap_is_resolved_for_the_node_and_printed(tmp_path, capsys, monkeypatch):
+    """``max_backlog_groups: "auto"``: the node gets the cap ``yeto run up`` derived (its
+    environment), or the fallback without one; the dry run prints it, the sampler's
+    config builds from the rendered spec and from an unresolved one alike."""
+    from yeto.rl.engine import engine_sampler_entry as entry
+    from yeto.rl.engine import sample_roles
+
+    monkeypatch.delenv(sample_roles.AUTO_BACKLOG_ENV, raising=False)
+    monkeypatch.delenv(sample_roles.AUTO_BACKLOG_WHY_ENV, raising=False)
+    doc = json.loads(EXAMPLE_SPEC.read_text())
+    assert doc["max_backlog_groups"] == "auto"
+    doc["reward"], doc["reward_kind"] = "yeto.rl.numeric_answer_reward:score", "miles"
+    cfg, path = _cfg(tmp_path, spec_doc=doc)
+    spec = pool_run.check_sampler_spec(cfg)
+    assert spec["max_backlog_groups"] == sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS
+    assert "fallback" in spec[sample_roles.AUTO_BACKLOG_NOTE_KEY]
+    monkeypatch.setenv(sample_roles.AUTO_BACKLOG_ENV, "30")
+    why = "ceil(((release_every 6 + m 3 + 1) x 8 + 8) / samplers 3) = 30"
+    monkeypatch.setenv(sample_roles.AUTO_BACKLOG_WHY_ENV, why)
+    spec = pool_run.check_sampler_spec(cfg)
+    assert spec["max_backlog_groups"] == 30
+    assert entry.backlog_cap(spec) == (30, f"auto: {why}")
+    capsys.readouterr()
+    assert cli.main(["pool", "--config", path, "--dry-run"]) == 0
+    assert "max_backlog_groups 30 per sampler (auto: ceil(" in capsys.readouterr().out
+    monkeypatch.delenv(sample_roles.AUTO_BACKLOG_ENV)
+    cap, note = entry.backlog_cap(doc)  # a sampler started on the raw spec, outside any pool
+    assert cap == sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS and "fallback" in note
+    doc["max_backlog_groups"] = 16
+    cfg, path = _cfg(tmp_path, spec_doc=doc)
+    spec = pool_run.check_sampler_spec(cfg)
+    assert spec["max_backlog_groups"] == 16 and sample_roles.AUTO_BACKLOG_NOTE_KEY not in spec
+    assert entry.backlog_cap(spec) == (16, None)
+
+
 def test_the_local_build_applies_the_data_path_defaults(tmp_path):
     """A syncer-path spec without num_rollouts passes: the sampler fills in the
     syncer path's defaults (no round limit) before it checks the island config."""

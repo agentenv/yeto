@@ -268,6 +268,59 @@ def test_release_record_rounds_and_backlog_need():
     assert need(groups_per_round=8, release_every=1, record_rounds=3) == 48  # the 1123 e2e: 1 x 16 < 48
 
 
+def test_an_auto_cap_is_derived_from_the_release_cadence(setup, capsys, monkeypatch):
+    """``max_backlog_groups: "auto"``: run up derives ceil(88 / 3) = 30 for 3 samplers of a
+    trainer releasing every 6th version of 8 groups (88 / 1 = 88 for one), hands it to the
+    pool processes in their environment, prints it, and the backlog check passes."""
+    from yeto.rl.engine import sample_roles
+
+    monkeypatch.setenv(sample_roles.AUTO_BACKLOG_ENV, "7")  # an inherited value never reaches the pools
+    _release_cadence(setup, samplers=3, cap="auto")
+    run = setup.make()
+    assert run.auto_backlog["groups"] == 30 and run.env[sample_roles.AUTO_BACKLOG_ENV] == "30"
+    assert run.env[sample_roles.AUTO_BACKLOG_WHY_ENV] == run.auto_backlog["why"] == (
+        "ceil(((release_every 6 + m 3 + 1) x 8 + 8) / samplers 3) = 30")
+    assert run.backlog_problem() is None
+    out = capsys.readouterr().out
+    assert "max_backlog_groups auto -> 30 per sampler" in out and "WARNING" not in out
+    shape = up_consistency.pool_backlog(run.pools[0].load(), auto=30)
+    assert shape["cap"] == 30
+    setup.pool["target"] = 1
+    run = setup.make()
+    assert run.auto_backlog["groups"] == 88 and run.backlog_problem() is None
+    assert run.preflight() is True and run.calls
+
+
+def test_an_auto_cap_without_a_single_buffer_trainer_takes_the_fallback(setup, capsys, monkeypatch):
+    from yeto.rl.engine import sample_roles
+
+    monkeypatch.setenv(sample_roles.AUTO_BACKLOG_ENV, "7")
+    _release_cadence(setup, samplers=2, cap="auto")
+    setup.argv.remove("--rl-single-island-no-sync")  # a synced trainer: the formula does not cover it
+    run = setup.make()
+    assert run.auto_backlog is None and sample_roles.AUTO_BACKLOG_ENV not in run.env
+    assert run.backlog_problem() is None
+    assert f"auto -> fallback {sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS} per sampler" in capsys.readouterr().out
+    setup.argv.append("--rl-single-island-no-sync")
+    setup.spec["max_backlog_groups"] = 16  # a number: no derivation, the check as before
+    run = setup.make()
+    assert run.auto_backlog is None and sample_roles.AUTO_BACKLOG_ENV not in run.env
+
+
+def test_resolve_auto_backlog():
+    from yeto.rl.engine import sample_roles
+
+    resolve = sample_roles.resolve_auto_backlog
+    assert resolve(16, {}) == (16, None) and resolve("16", {}) == ("16", None)  # numbers are left alone
+    cap, note = resolve("auto", {})
+    assert cap == sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS and "fallback" in note
+    env = {sample_roles.AUTO_BACKLOG_ENV: "30", sample_roles.AUTO_BACKLOG_WHY_ENV: "ceil(88 / 3) = 30"}
+    assert resolve("AUTO", env) == (30, "auto: ceil(88 / 3) = 30")
+    assert resolve("auto", {sample_roles.AUTO_BACKLOG_ENV: "0"})[0] == sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS
+    assert sample_roles.auto_backlog_groups(groups_per_round=8, release_every=1, record_rounds=3, samplers=1) == 48
+    assert sample_roles.auto_backlog_groups(groups_per_round=8, release_every=6, record_rounds=3, samplers=3) == 30
+
+
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "k31"
 
 

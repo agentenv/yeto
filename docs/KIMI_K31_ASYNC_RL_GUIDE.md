@@ -590,7 +590,7 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 | `engine.options.tp`, `max_num_seqs` | Tensor parallel degree and concurrent sequences per engine. |
 | `sampling.n` | Samples per prompt (group size). |
 | `sampling.max_tokens`, `temperature`, `top_p`, `top_k` | Generation settings. |
-| `max_backlog_groups` | Groups a sampler may write into its shard past the trainer's read position recorded in the newest policy release it has loaded (0 before the first release) before it pauses. Not the trainer's live position: the cap moves only when a release lands. See "How the backlog cap counts" below. |
+| `max_backlog_groups` | Groups a sampler may write into its shard past the trainer's read position recorded in the newest policy release it has loaded (0 before the first release) before it pauses. Not the trainer's live position: the cap moves only when a release lands. Default `"auto"`: `yeto run up` derives it from the run config. A number overrides it. See "How the backlog cap counts" below. |
 | `reload_max_defer_s` | Longest time, in seconds, a downloaded policy release may wait for running agentic trials before the sampler loads it anyway (default 600; `null` waits indefinitely). A forced load is reported as `rl_sampler_policy_loaded` with `forced: true` and `deferred_s`; trials that span the switch are excluded from training (lost as `served_by_other_version`, or aborted when the switch falls inside a model call) and counted in `rl_agentic_group`. |
 | `agentic.weight_switch` | How an agentic sampler switches weights: `drain` (default on engines without live updates) stops starting new trials, waits for the running ones, then loads the release; `live` loads into the running engine. With `agentic.compaction` prefer `live`: a drain cuts the long compacted trials (section 3.6). |
 | `agentic.drain_timeout_s` | Longest a `drain` switch waits on running trials before it cancels them (lost as `drain_timeout`). The effective limit is min(`agentic.drain_timeout_s`, `reload_max_defer_s`): with `reload_max_defer_s` 600 and `drain_timeout_s` 3600, a drain ends after 600 s. A larger `drain_timeout_s` (or none) is reported as a warning by `pool --dry-run` and at sampler start (not for a spec that resolves to `live`). **Behaviour change:** a drain-mode spec without `drain_timeout_s` used to wait for its trials to end by themselves; it is now cut at `reload_max_defer_s` (default 600 s) and the trials still running are cancelled and lost. Set `reload_max_defer_s: null` (and no `drain_timeout_s`) to keep the old wait. Must be a number >= 0 or `null`. Keep it at or below `reload_max_defer_s`: while a drain waits the engine starts no new trial, and one trial running into an hour-long agent timeout otherwise idles the node for that hour. |
@@ -631,6 +631,24 @@ skip-busy: ((1 + 3 + 1) x 8 + 8) / 2 = 24 per sampler. If uploads take longer
 than 2 trainer steps, use a larger `m`: the upload time divided by the step
 time, rounded up, plus 1. When the pool config has a `backlog` section, that
 section sets the cap instead of the spec's value.
+
+**`"auto"` (the default in the example specs).** Leave
+`max_backlog_groups` at `"auto"` and `yeto run up` computes the cap with this
+formula. It takes `release_every`, `rollout_batch_size`, skip-busy and the
+release mode from `trainer.argv`. It takes `samplers` from the `target` of
+every store-backed pool. The preflight prints the result. With 3 samplers,
+`--rl-release-every 6` and 8 groups a step it prints
+`max_backlog_groups auto -> 30 per sampler (ceil(((release_every 6 + m 3 + 1) x 8 + 8) / samplers 3) = 30; ...)`.
+`nc pool --dry-run` prints the same value. Each sampler prints it again at
+start (`[engine-sampler] max_backlog_groups 30 (auto: ...)`).
+- To turn it off, write a number. The number is used as is. The preflight
+  checks it as below.
+- The formula covers a single buffer trainer only. For any other trainer, and
+  for a sampler or pool started outside `yeto run up`, `"auto"` falls back to
+  256 and the log says so. Write a number there if 256 does not fit.
+- A pool `backlog` section still wins over the spec.
+- `samplers` is the pools' `target`. An elastic pool that runs more nodes
+  only holds more, so the cap stays safe.
 
 `yeto run up` checks this lower bound in its preflight, before it orders any
 machine. The check applies to a single buffer trainer (`--rl-sample-role

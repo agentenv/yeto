@@ -448,6 +448,29 @@ class Run:
         except ValueError as error:  # a samplers / pool section the rollout layer refuses
             raise PoolConfigError(str(error)) from None
         self.controller: Any = None  # controller: in_process -> the RolloutController of every pool
+        self.auto_backlog = self._derive_auto_backlog()
+
+    def _derive_auto_backlog(self) -> dict[str, Any] | None:
+        """The cap of the pools' ``max_backlog_groups: "auto"`` samplers
+        (:func:`yeto.rl.up_consistency.auto_backlog`), handed to every pool process
+        in its environment (:data:`~yeto.rl.engine.sample_roles.AUTO_BACKLOG_ENV`);
+        None (and no variable, not even an inherited one) when no spec says "auto"
+        or the trainer is not a single buffer trainer: those samplers take the fallback."""
+        from yeto.rl import up_consistency  # noqa: PLC0415
+        from yeto.rl.engine import sample_roles  # noqa: PLC0415
+
+        for key in (sample_roles.AUTO_BACKLOG_ENV, sample_roles.AUTO_BACKLOG_WHY_ENV):
+            self.env.pop(key, None)
+        try:
+            pools = [(ref.load(), ref.data_path) for ref in self.pools]
+        except (OSError, ValueError):
+            return None  # the pool dry-run reports an unreadable pool config
+        argv = [str(a) for a in (self.cfg.get("trainer") or {}).get("argv") or ()]
+        found = up_consistency.auto_backlog(argv, pools)
+        if found is not None:
+            self.env[sample_roles.AUTO_BACKLOG_ENV] = str(found["groups"])
+            self.env[sample_roles.AUTO_BACKLOG_WHY_ENV] = found["why"]
+        return found
 
     # -- state
     def reload_state(self, *, strict: bool = False) -> bool:
@@ -1528,6 +1551,15 @@ class Run:
             pools = [(ref.load(), ref.data_path) for ref in self.pools]
         except (OSError, ValueError):
             return None  # the pool dry-run reports an unreadable pool config
+        auto = self.auto_backlog
+        if auto is not None:
+            _log(f"preflight: max_backlog_groups auto -> {auto['groups']} per sampler ({auto['why']}; "
+                 "set a number in the sampler spec to override)")
+        elif any(up_consistency.is_auto_backlog(up_consistency.effective_spec(cfg)) for cfg, _path in pools):
+            from yeto.rl.engine import sample_roles  # noqa: PLC0415
+
+            _log(f"preflight: max_backlog_groups auto -> fallback {sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS} per "
+                 "sampler (the trainer is not a single buffer trainer, or no pool has a target)")
         problems, warnings = up_consistency.backlog_findings([str(a) for a in self.cfg["trainer"]["argv"]], pools)
         for warning in warnings:
             _log(f"preflight: WARNING: {warning}")

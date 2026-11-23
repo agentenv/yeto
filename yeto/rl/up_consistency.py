@@ -38,7 +38,8 @@ surface after the trainer island loaded its weights (a K3.1 B300 island: about
   between two releases. Refused when the trainer can never read up to its first
   release (``--rl-release-every`` x ``--rollout-batch-size`` groups) even with every
   sampler at its cap; a warning with the value to set when the samplers would wait
-  at their caps between releases;
+  at their caps between releases. A spec's ``"auto"`` cap is derived from the same
+  formula (:func:`auto_backlog`) and checked as that value;
 * prices (:func:`price_problem`): with a spend cap (``budget.usd``) every pool of a
   USD-priced provider (Modal / Daytona / Sky) needs a real hourly price, or the run's
   spend estimate counts its islands at 0 and the cap never fires on them.
@@ -494,13 +495,16 @@ def _positive_int(value: Any) -> int | None:
     return number if number > 0 else None
 
 
-def pool_backlog(pool_cfg: dict[str, Any]) -> dict[str, int] | None:
+def pool_backlog(pool_cfg: dict[str, Any], *, auto: int | None = None) -> dict[str, int] | None:
     """The backlog shape of one pool's samplers: ``cap`` (``max_backlog_groups`` as a
-    node runs it: the spec's, or the pool's ``backlog`` section, ``nc.cli``),
-    ``target`` (samplers the pool keeps running), ``most`` (the most it runs at
-    once: ``elastic.max_nodes`` when larger) and ``over`` (the groups one sampler
-    can write past its cap: a round, or the groups of one agentic call, upper
-    bound). None when the pool does not say (no spec, a placeholder)."""
+    node runs it: the spec's, or the pool's ``backlog`` section, ``nc.cli``; a spec's
+    ``"auto"`` is ``auto``, the value :func:`auto_backlog` derived, else the
+    fallback), ``target`` (samplers the pool keeps running), ``most`` (the most it
+    runs at once: ``elastic.max_nodes`` when larger) and ``over`` (the groups one
+    sampler can write past its cap: a round, or the groups of one agentic call,
+    upper bound). None when the pool does not say (no spec, a placeholder)."""
+    from yeto.rl.engine import sample_roles  # noqa: PLC0415
+
     spec = effective_spec(pool_cfg)
     target = _positive_int(pool_cfg.get("target"))
     if spec is None or target is None:
@@ -508,6 +512,8 @@ def pool_backlog(pool_cfg: dict[str, Any]) -> dict[str, int] | None:
     prompts = spec.get("prompts") or {}
     per_round = _positive_int(prompts.get("groups_per_round")) or 1
     cap = _positive_int(spec.get("max_backlog_groups"))
+    if is_auto_backlog(spec):
+        cap = auto or sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS
     backlog = pool_cfg.get("backlog")
     if backlog:
         from yeto.launch.nc import tasks  # noqa: PLC0415
@@ -525,6 +531,63 @@ def pool_backlog(pool_cfg: dict[str, Any]) -> dict[str, int] | None:
     over = max(per_round, -(-in_flight // n) if in_flight else 0)
     most = max(target, _positive_int((pool_cfg.get("elastic") or {}).get("max_nodes")) or 0)
     return {"cap": cap, "target": target, "most": most, "over": over}
+
+
+def is_auto_backlog(spec: dict[str, Any] | None) -> bool:
+    """True when a sampler spec sets ``max_backlog_groups`` to ``"auto"``."""
+    from yeto.rl.engine import sample_roles  # noqa: PLC0415
+
+    value = (spec or {}).get("max_backlog_groups")
+    return isinstance(value, str) and value.strip().lower() == sample_roles.AUTO_BACKLOG
+
+
+def release_cadence(trainer_argv: list[str]) -> dict[str, Any] | None:
+    """The release cadence a single buffer trainer (``--rl-sample-role trainer`` with
+    ``--rl-single-island-no-sync``) holds its samplers to: ``groups_per_round``
+    (``--rollout-batch-size``), ``release_every``, ``staged`` (a full-parameter
+    release uploaded off the training thread), ``m``
+    (:func:`yeto.rl.engine.sample_roles.release_record_rounds`) and ``need``
+    (:func:`yeto.rl.engine.sample_roles.release_backlog_need`, all samplers
+    together). None for any other trainer."""
+    from yeto.rl.engine import sample_roles  # noqa: PLC0415
+
+    args = trainer_args(trainer_argv)
+    if args is None or getattr(args, "rl_sample_role", None) != "trainer" \
+            or not getattr(args, "rl_single_island_no_sync", False):
+        return None
+    groups = _positive_int(getattr(args, "rollout_batch_size", None))
+    every = _positive_int(getattr(args, "rl_release_every", None)) or 1
+    if groups is None:
+        return None
+    staged = getattr(args, "tuning", None) != "lora" and not getattr(args, "rl_release_inline", False)
+    skip_busy = bool(staged and getattr(args, "rl_release_skip_busy", False))
+    rounds = sample_roles.release_record_rounds(release_every=every, staged=staged, skip_busy=skip_busy)
+    need = sample_roles.release_backlog_need(groups_per_round=groups, release_every=every, record_rounds=rounds)
+    return {"groups_per_round": groups, "release_every": every, "staged": staged, "m": rounds, "need": need}
+
+
+def auto_backlog(trainer_argv: list[str], pools: list[tuple[dict[str, Any], str]]) -> dict[str, Any] | None:
+    """The ``max_backlog_groups`` of every ``"auto"`` sampler of a run: ``groups`` (per
+    sampler) and ``why`` (the formula with the run's numbers), from the trainer's
+    release cadence (:func:`release_cadence`) over the target samplers of every
+    store-backed pool, :func:`yeto.rl.engine.sample_roles.auto_backlog_groups`.
+    None when no pool's spec says ``"auto"``, or the trainer is not a single
+    buffer trainer (those samplers then take the fallback)."""
+    from yeto.rl.engine import sample_roles  # noqa: PLC0415
+
+    specs = [(cfg, effective_spec(cfg)) for cfg, data_path in pools if data_path == "r2"]
+    if not any(is_auto_backlog(spec) for _cfg, spec in specs):
+        return None
+    cadence = release_cadence(trainer_argv)
+    samplers = sum(_positive_int(cfg.get("target")) or 0 for cfg, spec in specs if spec is not None)
+    if cadence is None or samplers < 1:
+        return None
+    groups = sample_roles.auto_backlog_groups(groups_per_round=cadence["groups_per_round"],
+                                              release_every=cadence["release_every"],
+                                              record_rounds=cadence["m"], samplers=samplers)
+    why = (f"ceil(((release_every {cadence['release_every']} + m {cadence['m']} + 1) x {cadence['groups_per_round']} + "
+           f"{sample_roles.RELEASE_BACKLOG_MARGIN_GROUPS}) / samplers {samplers}) = {groups}")
+    return {**cadence, "groups": groups, "why": why, "samplers": samplers}
 
 
 def backlog_findings(trainer_argv: list[str], pools: list[tuple[dict[str, Any], str]]
@@ -551,21 +614,17 @@ def backlog_findings(trainer_argv: list[str], pools: list[tuple[dict[str, Any], 
       rounded up, and over one sampler fewer (one down or being replaced)."""
     from yeto.rl.engine import sample_roles  # noqa: PLC0415
 
-    args = trainer_args(trainer_argv)
-    if args is None or getattr(args, "rl_sample_role", None) != "trainer" \
-            or not getattr(args, "rl_single_island_no_sync", False):
+    cadence = release_cadence(trainer_argv)
+    if cadence is None:
         return [], []
-    groups = _positive_int(getattr(args, "rollout_batch_size", None))
-    every = _positive_int(getattr(args, "rl_release_every", None)) or 1
-    if groups is None:
-        return [], []
-    shapes = [shape for cfg, data_path in pools if data_path == "r2" and (shape := pool_backlog(cfg))]
+    groups, every, rounds, need = (cadence["groups_per_round"], cadence["release_every"], cadence["m"],
+                                   cadence["need"])
+    derived = auto_backlog(trainer_argv, pools)
+    auto = None if derived is None else derived["groups"]
+    shapes = [shape for cfg, data_path in pools if data_path == "r2" and (shape := pool_backlog(cfg, auto=auto))]
     if not shapes:
         return [], []
-    staged = getattr(args, "tuning", None) != "lora" and not getattr(args, "rl_release_inline", False)
-    skip_busy = bool(staged and getattr(args, "rl_release_skip_busy", False))
-    rounds = sample_roles.release_record_rounds(release_every=every, staged=staged, skip_busy=skip_busy)
-    need = sample_roles.release_backlog_need(groups_per_round=groups, release_every=every, record_rounds=rounds)
+    staged = cadence["staged"]
     first = every * groups
     most = sum(s["most"] * (s["cap"] + s["over"]) for s in shapes)
     caps = ", ".join(f"{s['target']} x {s['cap']}" for s in shapes)

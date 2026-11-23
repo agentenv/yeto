@@ -391,6 +391,10 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
             spec = check_sampler_spec(cfg, pc)
             print(f"sampler spec: {cfg['spec']} passes the sampler's checks (sampler_id {spec.get('sampler_id')}, "
                   f"buffer_shards {spec.get('buffer_shards')})")
+            from yeto.rl.engine.sample_roles import AUTO_BACKLOG_NOTE_KEY  # noqa: PLC0415
+
+            if spec.get(AUTO_BACKLOG_NOTE_KEY):  # no line for a number (the output is as before)
+                print(f"max_backlog_groups {spec['max_backlog_groups']} per sampler ({spec[AUTO_BACKLOG_NOTE_KEY]})")
             from yeto.launch import agentic_setup  # noqa: PLC0415
 
             from yeto.rl.engine.agentic_round import drain_settings, drain_timeout_warning  # noqa: PLC0415
