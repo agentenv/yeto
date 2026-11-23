@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 
 from yeto.rl.model_registry.check import (
-    BACKENDS, FAIL, FORMS, ISLAND, PENDING, PRESETS, CheckRequest, actor_gpus, check_model, render_text,
-    report_dict,
+    BACKENDS, FAIL, FORMS, ISLAND, PENDING, PRESETS, WARN, CheckReport, CheckRequest, actor_gpus, check_model,
+    render_text, report_dict,
 )
 
 DATA = Path(__file__).parent / "data" / "model_registry"
@@ -261,6 +261,33 @@ def test_three_onboarding_examples():
     assert k31.recipe == "kimi_k31" and k31.launcher_accepts and k31.request.expert_parallel == 8
     k31_decoupled = check_model(_config("kimi_k31"), CheckRequest(form="lora", preset="decoupled"))
     assert not k31_decoupled.launcher_accepts and k31_decoupled.pending == ["decoupled/kimi_k31-lora"]
+
+
+def test_the_gpu_suggestion_splits_islands_into_whole_nodes(launcher):
+    from yeto.rl.model_registry.check import gpu_spec
+
+    def suggest(model: str, **fields) -> CheckReport:
+        return check_model(_config(model), CheckRequest(**fields), model=model)
+
+    # 48 B300 per island is six 8-GPU nodes, not one 48-GPU container
+    k31 = suggest("kimi_k31", form="partial-moe", preset="decoupled", card="B300", gpus_per_island=48)
+    assert k31.recommended["gpu"] == "modal:6x8xb300,modal:6x8xb300"
+    batch = ("--rollout-batch-size", "48")  # the fixture's 8x2 batch does not split over 48-GPU islands
+    assert launcher((*k31.launch_argv, *batch), gpu_spec(k31.request, k31.recipe)) is None
+    assert not any(i.name == "hardware" for i in k31.items)
+    single = suggest("kimi_k31", form="partial-moe", preset="single-island", card="b300", gpus_per_island=48)
+    assert single.recommended["gpu"] == "modal:6x8xb300"
+    # one node or less stays one container; DSV4's two-node island keeps 2x8
+    assert suggest("qwen3_8b", form="full", gpus_per_island=8).recommended["gpu"] == "modal:1x8xh100,modal:1x8xh100"
+    assert suggest("qwen3_8b", form="full", gpus_per_island=4).recommended["gpu"] == "modal:1x4xh100,modal:1x4xh100"
+    assert suggest("qwen3_8b", form="full", gpus_per_island=16).recommended["gpu"] == \
+        "modal:2x8xh100,modal:2x8xh100"
+    dsv4 = suggest("deepseek_v4_flash", form="partial-moe", preset="full-parameter")
+    assert dsv4.recommended["gpu"] == "modal:2x8xh100,modal:2x8xh100"
+    # no whole-node split exists: the suggestion warns instead of passing silently
+    odd = suggest("qwen3_8b", form="full", gpus_per_island=12)
+    assert odd.recommended["gpu"] == "modal:1x12xh100,modal:1x12xh100"
+    assert [i.status for i in odd.items if i.name == "hardware"] == [WARN]
 
 
 def test_report_dict_is_json_and_the_cli_exit_code_follows_the_verdict(capsys):
