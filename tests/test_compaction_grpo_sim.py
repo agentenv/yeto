@@ -71,7 +71,11 @@ def check_trial_samples(r: sim.SimRun) -> None:
             continue
         metas = [x["metadata"]["compaction"] for x in t.samples]
         k = len(t.samples)
-        assert all(set(m) == COMPACTION_KEYS for m in metas)
+        assert all(set(m) == COMPACTION_KEYS for m in metas[:1])
+        # a rebuilt segment also says whether its rebuild cut the task message (keep_task_message is on
+        # by default; keep_last_step_max_tokens is off, so last_step_truncated is not reported)
+        assert all(set(m) == COMPACTION_KEYS | {"task_truncated"} for m in metas[1:])
+        assert all(m["task_truncated"] is False for m in metas[1:])  # the sim's task messages are short
         assert [m["segment_index"] for m in metas] == list(range(k))
         assert {m["num_segments"] for m in metas} == {k} and {m["schema"] for m in metas} == {1}
         assert {m["trajectory_id"] for m in metas} == {t.trajectory_id}

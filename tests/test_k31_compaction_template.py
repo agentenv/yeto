@@ -6,7 +6,10 @@ outputs) drives :class:`RecordsProxy` with compaction over a scripted
 scripted assistant message, so a correct proxy shows no render drift. Checked
 per segment: the engine prompts are prefixes of the segment's stream, the
 stream is the template rendering of the segment's context token for token,
-and a later segment starts at ``system + user(resume) + the last k steps``.
+and a later segment starts at ``system + user(task) + user(resume) + the last k
+steps`` (``user(task)``: the first user message, verbatim, with the default
+``keep_task_message``; cut only when it keeps the rebuild over the trigger), or
+with ``keep_last_step_max_tokens`` the last step with its tool output cut.
 
 Kimi-K3.1 needs the checkpoint's tokenizer (``YETO_K31_TOKENIZER``, as
 ``tests/test_kimi_k31_template.py``; skipped without it); Qwen3-0.6B comes from
@@ -26,7 +29,7 @@ import pytest
 from hf_assets import require_hf_repo
 
 from yeto.rl.adapters.sampler_engines.fake import FakeEngine
-from yeto.rl.compaction import RESUME_TEMPLATE, SUMMARY_PROMPT, CompactionConfig
+from yeto.rl.compaction import RESUME_TEMPLATE, SUMMARY_PROMPT, CompactionConfig, extract_summary, should_compact
 from yeto.rl.harness.chat_templates import TEMPLATES, ChatTemplate, check_alignment, parse_kimi_k3
 from yeto.rl.harness.gateway.proxy import RecordsProxy
 from yeto.rl.harness.gateway.records import ContextFull, RecordsMismatch
@@ -137,14 +140,18 @@ class Run:
     messages: list[dict[str, Any]]  # the agent's final history
     triggers: list[list[dict[str, Any]]]  # per compaction: the agent request that triggered it
     model: Model
+    task: str = TASK
 
 
-def run_agent(template: ChatTemplate, cfg: CompactionConfig | None, *, return_stop: bool = True) -> Run:
+def run_agent(template: ChatTemplate, cfg: CompactionConfig | None, *, return_stop: bool = True,
+              task: str = TASK, output: Any = None) -> Run:
+    """``task``: the first user message; ``output(step)``: a step's tool output (default :func:`tool_output`)."""
+    output = output or tool_output
     model = Model(template, return_stop=return_stop)
     engine = FakeEngine(token_reply=model, max_model_len=65536)
     engine.start(None, 3)
     proxy = RecordsProxy(engine, template, model="policy", signed_sampling=SIGNED, compaction=cfg, max_chains=1)
-    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": TASK}]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task}]
     triggers = []
     for turn in range(STEPS + 1):
         before = proxy.backend.counters.get("t", {}).get("compactions", 0)
@@ -159,15 +166,15 @@ def run_agent(template: ChatTemplate, cfg: CompactionConfig | None, *, return_st
             assert proxy.backend.counters["t"]["context_budget_full"] == 1
             while messages[-1]["role"] != "assistant":
                 messages.pop()
-            return Run(proxy, engine, messages, triggers, model)
+            return Run(proxy, engine, messages, triggers, model, task)
         if proxy.backend.counters["t"].get("compactions", 0) > before:
             triggers.append(copy.deepcopy(messages))
         message = response["choices"][0]["message"]
         messages.append(message)  # pi sends the assistant message back as it came (reasoning included)
         for call in message.get("tool_calls") or []:
-            messages.append({"role": "tool", "tool_call_id": call["id"], "content": tool_output(turn)})
+            messages.append({"role": "tool", "tool_call_id": call["id"], "content": output(turn)})
     assert messages[-1]["content"] == FINAL["content"]
-    return Run(proxy, engine, messages, triggers, model)
+    return Run(proxy, engine, messages, triggers, model, task)
 
 
 def _step_tokens(template: ChatTemplate) -> tuple[int, int]:
@@ -229,14 +236,38 @@ def check_segments(template: ChatTemplate, run: Run, *, prefill: str = "") -> li
             rest = template.decode([t for t in expected[len(body):] if t not in template.stop_token_ids])
             assert rest.strip() == "", f"segment {index}: the rendering goes on after the stream: {rest[:80]!r}"
         assert check_alignment(template, context, tools=TOOLS, add_generation_prompt=False).aligned
-        if index:  # system + user(resume) + the last k steps, each step starting at an assistant message
-            assert [m["role"] for m in segment.head] == ["system", "user"]
-            assert segment.head[1]["content"].startswith(RESUME_TEMPLATE.split("{summary}")[0])
-            assert "1. Goal: fix the failing test" in segment.head[1]["content"]
-            assert run.messages[segment.base]["role"] == "assistant"
-            kept = run.triggers[index - 1][segment.base:]  # what the compaction carried over
-            assert sum(m["role"] == "assistant" for m in kept) == sample["kept_steps"]
+        if index:  # system + [task] + user(resume) + the last k steps, each step starting at an assistant message
+            cfg = run.proxy.backend.compaction
+            lead = 2 + cfg.keep_task_message  # system, [task], resume
+            assert [m["role"] for m in segment.head[:lead]] == ["system", "user"] + ["user"] * cfg.keep_task_message
+            if not cfg.keep_task_message:
+                assert sample["task_truncated"] is None
+            elif sample["task_truncated"]:  # head and tail of the task, the marker between them
+                assert segment.head[1]["content"] != run.task and TRUNCATED in segment.head[1]["content"]
+            else:  # the task message verbatim, between the system message and the resume message
+                assert segment.head[1] == {"role": "user", "content": run.task}
+            resume = segment.head[lead - 1]["content"]
+            assert resume.startswith(RESUME_TEMPLATE.split("{summary}")[0])
+            assert "1. Goal: fix the failing test" in resume
+            # the rebuilt context is prompt: no trained token before the segment's first completion
+            assert set(mask[:len(sample["turns"][0]["prompt_added"])]) == {0}
+            carried = segment.head[lead:]  # a last step with its tool output cut (keep_last_step_max_tokens)
+            trigger = run.triggers[index - 1]
+            if sample["last_step_truncated"]:
+                last = max(i for i, m in enumerate(trigger) if m["role"] == "assistant")
+                assert carried[0] == trigger[last]  # the policy's call, whole
+                assert [m["role"] for m in carried[1:]] == ["tool"] * (len(trigger) - last - 1)
+                assert all(TRUNCATED in m["content"] for m in carried[1:])
+            else:
+                assert carried == []
+            if segment.base < len(run.messages):
+                assert run.messages[segment.base]["role"] == "assistant"
+            kept = trigger[segment.base:]  # what the compaction carried over
+            assert sum(m["role"] == "assistant" for m in kept + carried) == sample["kept_steps"]
     return samples
+
+
+TRUNCATED = "tokens truncated by context compaction"
 
 
 def first_diff(a: list[int], b: list[int]) -> int | None:
@@ -343,7 +374,7 @@ def test_k31_summary_comes_from_the_response_channel(k31_base, monkeypatch):
     for summary in (quoting, untagged):
         monkeypatch.setattr(__import__(__name__), "SUMMARY", summary)
         run = run_agent(template, _config(template, keep=2, max_compactions=1))
-        resumes.append(run.proxy.backend.sessions["rec0"].segments[1].head[1]["content"])
+        resumes.append(run.proxy.backend.sessions["rec0"].segments[1].head[-1]["content"])
     assert "1. Goal: fix the failing test" in resumes[0]
     assert "Goal: fix the failing test in /app." in resumes[1]
     assert not any("<|close|>" in r or "numbered sections" in r for r in resumes)
@@ -395,3 +426,105 @@ def test_k31_thinking_effort_is_fixed_per_stream_and_tool_choice_is_not(k31_base
     none = _with_kwargs(k31_base, {"thinking_effort": "low", "tool_choice": "none"})
     history = plain.render(conversation, tools=TOOLS, add_generation_prompt=False)
     assert none.render(conversation, tools=TOOLS, add_generation_prompt=True).startswith(history)
+
+
+# ---------------------------------------------------------------------- the rebuilt context's options
+@pytest.fixture(scope="module")
+def glm5_base() -> ChatTemplate:
+    return ChatTemplate.load("glm5", tokenizer_path=require_hf_repo(TEMPLATES["glm5"].tokenizer))
+
+
+def _tokens(template: ChatTemplate, messages: list[dict[str, Any]]) -> int:
+    return len(template.encode(template.render(messages, tools=TOOLS, add_generation_prompt=True)))
+
+
+def _resume() -> dict[str, Any]:
+    return {"role": "user", "content": RESUME_TEMPLATE.format(summary=extract_summary(SUMMARY["content"])[0])}
+
+
+@pytest.mark.parametrize("keep_task", [True, False])
+def test_the_task_message_survives_a_compaction_verbatim(glm5_base, keep_task):
+    """Default on: each rebuilt context renders system, the task message as the agent
+    sent it, then the resume message (all prompt, mask 0). Off: system + resume, the
+    paper's rebuild, as before the option existed."""
+    task = "Using /workspace/fs/data/orders.tsv and /workspace/fs/data/users.csv, write the answer to /workspace/answer.txt."
+    cfg = dataclasses.replace(_config(glm5_base, keep=2, max_compactions=2), keep_task_message=keep_task)
+    run = run_agent(glm5_base, cfg, task=task)
+    samples = check_segments(glm5_base, run)
+    assert len(samples) == 3
+    for sample in samples[1:]:
+        prompt = glm5_base.decode(sample["token_ids"][:len(sample["turns"][0]["prompt_added"])])
+        assert (task in prompt) == keep_task  # the full paths, verbatim
+        if keep_task:
+            assert prompt.index(SYSTEM) < prompt.index(task) < prompt.index(RESUME_TEMPLATE[:40])
+        assert sample["task_truncated"] is (False if keep_task else None) and sample["last_step_truncated"] is None
+    counters = run.proxy.records("t")["counters"]
+    assert "task_message_truncated" not in counters and "compaction_last_step_truncated" not in counters
+
+
+def test_a_task_message_that_keeps_the_rebuild_over_the_trigger_is_cut(glm5_base):
+    """A task message that alone keeps the rebuilt context over the trigger is cut to
+    task_message_max_tokens: its head and tail kept, the marker between them."""
+    task = ("Goal: count the paid orders per user in /workspace/fs/data/orders.tsv. "
+            + " ".join(f"note{i}" for i in range(400)) + " Write only the name to /workspace/answer.txt.")
+    head = _tokens(glm5_base, [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task}, _resume()])
+    cfg = CompactionConfig(context_budget=head - 1 + 50, t_comp=50, keep_recent_steps=2, max_compactions=2,
+                           task_message_max_tokens=96)
+    run = run_agent(glm5_base, cfg, task=task)
+    samples = check_segments(glm5_base, run)
+    counters = run.proxy.records("t")["counters"]
+    assert counters["task_message_truncated"] == counters["compactions"] == len(samples) - 1 == 2
+    for sample, segment in zip(samples[1:], run.proxy.backend.sessions["rec0"].segments[1:]):
+        assert sample["task_truncated"] is True
+        cut = segment.head[1]["content"]
+        assert cut.startswith("Goal: count the paid orders per user in /workspace/fs/data/orders.tsv.")
+        assert cut.endswith("Write only the name to /workspace/answer.txt.")
+        assert len(glm5_base.text_ids(cut)) <= 96 + 16  # the cap, give or take the marker's own tokens
+        assert not should_compact(_tokens(glm5_base, segment.head), cfg)
+
+
+@pytest.mark.parametrize("cap", [None, 160])
+def test_keep_last_step_cuts_the_tool_output_when_no_whole_step_fits(glm5_base, cap):
+    """No whole step fits the rebuilt context: off (the default), no step is kept;
+    with keep_last_step_max_tokens the last step is kept, the policy's call whole and
+    its tool output cut in the middle to the cap."""
+    def big(step: int) -> str:
+        return f"BEGIN {step}\n" + "\n".join(f"row {i}: value {i * 7}" for i in range(300)) + f"\nEND {step}"
+
+    head = _tokens(glm5_base, [{"role": "system", "content": SYSTEM}, {"role": "user", "content": TASK}, _resume()])
+    cfg = CompactionConfig(context_budget=head + 450 + 50, t_comp=50, keep_recent_steps=2, max_compactions=2,
+                           keep_last_step_max_tokens=cap)
+    run = run_agent(glm5_base, cfg, output=big)
+    samples = check_segments(glm5_base, run)
+    counters = run.proxy.records("t")["counters"]
+    assert counters["compactions"] == len(samples) - 1 == 2
+    if cap is None:
+        assert all(s["kept_steps"] == 0 and s["last_step_truncated"] is None for s in samples[1:])
+        assert "compaction_last_step_truncated" not in counters
+        return
+    assert all(s["kept_steps"] == 1 and s["last_step_truncated"] is True for s in samples[1:])
+    assert counters["compaction_last_step_truncated"] == 2
+    for segment in run.proxy.backend.sessions["rec0"].segments[1:]:
+        output = segment.head[-1]["content"]
+        step = output.split("\n", 1)[0].split()[1]
+        assert output.startswith(f"BEGIN {step}\n") and output.endswith(f"END {step}") and TRUNCATED in output
+        assert len(glm5_base.text_ids(output)) <= cap + 16
+
+
+@needs_k31
+def test_k31_rebuild_options_join_without_drift(k31_base):
+    """Kimi-K3.1 (segment encoding): a cut task message and a cut last step render and
+    join token for token like any rebuilt context."""
+    template = _with_kwargs(k31_base, {"thinking_effort": "low"})
+
+    def big(step: int) -> str:
+        return "\n".join(f"row {i}: value {i * 7}" for i in range(300))
+
+    task = TASK + " " + " ".join(f"detail{i}" for i in range(400))
+    head = _tokens(template, [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task}, _resume()])
+    cfg = CompactionConfig(context_budget=head - 1 + 50, t_comp=50, keep_recent_steps=2, max_compactions=2,
+                           task_message_max_tokens=96, keep_last_step_max_tokens=160)
+    run = run_agent(template, cfg, task=task, output=big)
+    samples = check_segments(template, run)
+    assert len(samples) == 3 and all(s["task_truncated"] and s["last_step_truncated"] for s in samples[1:])
+    assert all(s["kept_steps"] == 1 for s in samples[1:])

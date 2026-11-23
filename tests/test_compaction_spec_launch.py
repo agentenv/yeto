@@ -172,6 +172,43 @@ def test_the_summary_turn_keys_reach_the_config():
         C.config_from_spec(_spec({"context_budget": 65536, "t_comp": 2048, "summary_max_tokens": 2048}))
 
 
+
+def test_the_rebuild_keys_default_and_reach_the_config():
+    """keep_task_message defaults on (task_message_max_tokens 4096), keep_last_step_max_tokens
+    off; the dry run's line names the values in effect."""
+    default = C.config_from_spec(_spec({"context_budget": 65536}))
+    assert (default.keep_task_message, default.task_message_max_tokens, default.keep_last_step_max_tokens) == \
+        (True, C.TASK_MESSAGE_MAX_TOKENS, None) == (True, 4096, None)
+    line = C.describe(default)
+    assert "keep_task_message on" in line and "task_message_max_tokens 4096" in line
+    assert "keep_last_step_max_tokens off" in line
+    cfg = C.config_from_spec(_spec({"context_budget": 65536, "keep_task_message": False,
+                                    "task_message_max_tokens": 1024, "keep_last_step_max_tokens": 2048}))
+    assert (cfg.keep_task_message, cfg.task_message_max_tokens, cfg.keep_last_step_max_tokens) == (False, 1024, 2048)
+    line = C.describe(cfg)
+    assert "keep_task_message off" in line and "keep_last_step_max_tokens 2048" in line
+    assert C.config_from_spec(_spec({"context_budget": 65536, "keep_last_step_max_tokens": None})) == default
+    assert set(C.SPEC_KEYS) == {"context_budget", "t_comp", "keep_recent_steps", "max_compactions",
+                                "summary_max_tokens", "summary_prompt", "resume_template", "keep_task_message",
+                                "task_message_max_tokens", "keep_last_step_max_tokens"}
+
+
+@pytest.mark.parametrize(("section", "match"), [
+    ({"keep_task_message": "yes"}, "keep_task_message must be true or false"),
+    ({"keep_task_message": 1}, "keep_task_message must be true or false"),
+    ({"task_message_max_tokens": 63}, "task_message_max_tokens must be >= 64"),
+    ({"task_message_max_tokens": True}, "task_message_max_tokens must be an integer"),
+    ({"task_message_max_tokens": None}, "task_message_max_tokens must be an integer"),
+    ({"keep_last_step_max_tokens": 0}, "keep_last_step_max_tokens must be >= 64"),
+    ({"keep_last_step_max_tokens": 1.5}, "keep_last_step_max_tokens must be an integer"),
+    ({"keep_last_step_max_tokens": False}, "keep_last_step_max_tokens must be an integer"),
+    ({"keep_task": True}, "unknown key"),
+])
+def test_bad_rebuild_keys_are_refused(section, match):
+    with pytest.raises(ValueError, match=match):
+        C.config_from_spec(_spec({"context_budget": 65536, **section}))
+
+
 # -- the records proxy and the trials get it -----------------------------------
 
 def _round(monkeypatch, agentic, *, build=None):

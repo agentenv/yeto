@@ -22,7 +22,7 @@ the round's ``rl_agentic_trial_lost`` event.
 CompactionRL (``segmented=True``, the engine sampler's agentic round, with a
 recorder that has ``close_segments``): a trial the records proxy compacted is
 one stream per compaction segment.  Steps 3-4 run per segment (each segment's
-prompt is its own ``system + u_resume(S) + last k steps``) and
+prompt is its own ``system + [task] + u_resume(S) + last k steps``) and
 :attr:`FinishedSample.parts` holds the joined segments; the outcome and the
 reward (step 2) stay the trial's, once.  Only the last segment may be cut at
 ``max_response_len``: an earlier cut segment would lose the summary it ended
@@ -58,7 +58,10 @@ class CompactionSegment:
     ``summary_ok``: the summary it ended with had a closed tag (None: no summary);
     ``context_budget``: the proxy's compaction ``C``; ``summary_tokens``: tokens
     its summary turn generated (0 without one); ``retry_replays``: the trial's
-    resent requests the gateway answered from a lost reply (None: replay off)."""
+    resent requests the gateway answered from a lost reply (None: replay off);
+    ``task_truncated`` / ``last_step_truncated``: its rebuilt context cut the
+    task message / the kept last step's tool output (None: the first segment,
+    or the records proxy option is off)."""
 
     turns: tuple[TokenTurn, ...]
     kept_steps: int | None = None
@@ -67,6 +70,8 @@ class CompactionSegment:
     tokens: TokenSegments | None = None
     summary_tokens: int = 0
     retry_replays: int | None = None
+    task_truncated: bool | None = None
+    last_step_truncated: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -177,7 +182,7 @@ def _finish_parts(trajectory: AgentTrajectory, recorder: Any, recorded: Sequence
     """Steps 3-4 per compaction segment (module doc); the outcome is the trial's.
 
     ``max_prompt_len`` bounds the first segment only: a later one starts from
-    ``system + u_resume(S) + last k steps``, bounded by the compaction budget.
+    ``system + [task] + u_resume(S) + last k steps``, bounded by the compaction budget.
     A segment without a trained token is left out (``num_segments`` counts
     the segments written)."""
     if trajectory.outcome is Outcome.ABORTED:

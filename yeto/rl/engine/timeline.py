@@ -577,7 +577,7 @@ def load_windows(events: Iterable[Mapping[str, object]], window_s: float) -> lis
 # buffer samples that share its reward; each carries ``metadata.compaction``
 # (schema 1: trajectory_id, segment_index, num_segments, context_budget,
 # summary_ok, kept_steps, segment_tokens, tokens_after; optional summary_tokens,
-# compactions, context_full). A sample without that key is one whole trial.
+# compactions, context_full, task_truncated, last_step_truncated). A sample without that key is one whole trial.
 # The same summary is read on the sampler (one round's written samples, under
 # ``rl_sampler_engine_round.agentic.compaction``) and on the trainer (one step's
 # trained Miles samples). Without any compaction data it returns None, so the
