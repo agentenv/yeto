@@ -179,9 +179,11 @@ def _parsed(extra: list[str], *, parameter_mode="full", sync_flag=()):
 
 
 def test_the_island_plan_carries_exports_and_data_positions_only_when_given(model_dir):
-    assert vfs.full_parameter_extras(_parsed([]), sync="strict") == {}
+    # a synced island heartbeats by default (train_options.heartbeat_plan); 0 turns it off
+    assert vfs.full_parameter_extras(_parsed([]), sync="strict") == {"heartbeat_interval_s": 30.0}
+    assert vfs.full_parameter_extras(_parsed(["--rl-heartbeat-interval", "0"]), sync="strict") == {}
     parsed = _parsed(["--rl-export-hf-rounds", "2,final", "--rl-export-hf-store", "/s/hf",
-                      "--rl-data-position-store", "/s"])
+                      "--rl-data-position-store", "/s", "--rl-heartbeat-interval", "0"])
     extras = {"hf_exports": {"rounds": "2,final", "store": "/s/hf/island1"}, "data_position_store": "/s"}
     assert vfs.full_parameter_extras(parsed, sync="strict") == extras
     # plan_section puts them at the plan's top level (island_entry merges it into the plan)

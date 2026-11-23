@@ -1437,7 +1437,7 @@ def full_parameter_extras(args: Any, *, sync: str) -> dict[str, Any]:
         out["data_position_store"] = str(store)
     from .train_options import observation_plan  # Absent when off
 
-    out.update(observation_plan(args))
+    out.update(observation_plan(args, synced=sync != "none"))
     return out
 
 

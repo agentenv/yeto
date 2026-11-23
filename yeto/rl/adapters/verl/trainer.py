@@ -358,6 +358,10 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
 
         wire_full_parameter_extras(driver, island, plan)
         wire_rollout_ahead(driver, plan)  # --rl-rollout-ahead 1 (0: serial rounds)
+    else:  # a LoRA island's heartbeat (train_options.heartbeat_plan; none when off)
+        from .train_options import wire_observation
+
+        wire_observation(driver, plan)
     if full and plan.get("separate"):  # engine outage (nothing without the budget)
         from .engine_recovery import arm_verl_engine_outage
         from .full_parameter_stream import _LoopRunner
@@ -487,6 +491,10 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
         from .driver_extras import wire_full_parameter_extras
 
         wire_full_parameter_extras(driver, island, plan)
+    else:  # a LoRA island's heartbeat (train_options.heartbeat_plan; none when off)
+        from .train_options import wire_observation
+
+        wire_observation(driver, plan)
     if buffer_ports is not None:
         publisher.bind(driver)  # synced buffer trainers release the driver's merged version
     round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)

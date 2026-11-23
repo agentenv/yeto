@@ -858,6 +858,14 @@ def main(argv=None) -> int:
             raise SystemExit("a verl decoupled island needs: " + "; ".join(problems))
         decoupled_plan = {decoupled_session.PLAN_KEY: decoupled_session.plan_section(
             args, trainer_gpus=run.n_gpus)}
+    lora_heartbeat: dict = {}
+    if not full:  # a full-parameter island plans it with its observation keys (plan_section)
+        from .train_options import heartbeat_plan
+
+        try:
+            lora_heartbeat = heartbeat_plan(args, synced=sync != "none")
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     full_plan: dict = {}
     if full and (megatron is None or sync != "none"
                  or buffer_section is not None):  # model identity, and the outer
@@ -940,7 +948,7 @@ def main(argv=None) -> int:
         "learner_id": lid, "sync": sync, "syncer": args.syncer, "global_rounds": args.global_rounds,
         "groups_per_round": args.groups_per_round, "samples_per_group": args.samples_per_group,
         "model_path": model_path, "model_revision": args.model_revision, "lora_rank": run.lora_rank,
-        "parameter_mode": args.parameter_mode, **full_plan, **decoupled_plan,
+        "parameter_mode": args.parameter_mode, **full_plan, **decoupled_plan, **lora_heartbeat,
         "lora_targets": args.lora_targets, "event_tape": os.path.expanduser(args.event_tape),
         "out_dir": str(OUTPUT), "tis_upper": algo["tis_upper"], "wan_streams": args.wan_streams,
         "bcast_delta": bool(args.bcast_delta),

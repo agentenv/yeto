@@ -26,7 +26,10 @@ MAPPED = {
 OBSERVED = {
     ("--rl-observe-timeline",): {"observe_timeline": True, "heartbeat_interval_s": 30.0,
                                  "resource_sample_interval_s": 60.0},
-    ("--rl-resource-sample-interval", "5"): {"resource_sample_interval_s": 5.0},
+    # the plan below is a synced island's: it heartbeats every 30 s unless told otherwise
+    ("--rl-resource-sample-interval", "5"): {"heartbeat_interval_s": 30.0, "resource_sample_interval_s": 5.0},
+    ("--rl-heartbeat-interval", "12"): {"heartbeat_interval_s": 12.0},
+    ("--rl-heartbeat-interval", "0"): {},
     ("--rl-observe-timeline", "--rl-resource-sample-interval", "0"): {"observe_timeline": True,
                                                                       "heartbeat_interval_s": 30.0},
 }
