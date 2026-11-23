@@ -187,19 +187,33 @@ def test_a_preset_that_matches_nothing_names_the_model_linears(tmp_path):
         derive_peft_lora_specs(str(path), None, rank=2, targets="attention")
 
 
-def test_the_export_tool_reads_the_layout_the_checkpoint_records(tmp_path):
+def test_the_export_tool_reads_the_layout_the_checkpoint_records(tmp_path, monkeypatch):
+    from yeto.rl import export
     from yeto.rl.core import canonical_layout_hash
-    from yeto.rl.export import _checkpoint_specs
 
     path = _config(tmp_path, moe=True)
     routed = derive_peft_lora_specs(path, None, rank=2, targets="all-linear", routed_experts=True)
-    plain = derive_peft_lora_specs(path, None, rank=2, targets="all-linear")
-    assert routed != plain
+    # PEFT's own all-linear selection on fused experts depends on the PEFT version
+    # (some raise on it); a distinct layout stands in for it here
+    plain = routed[:-2]
+    peft_raises = False
+
+    def derive(model, revision, *, routed_experts=False, **kwargs):
+        if routed_experts:
+            return routed
+        if peft_raises:
+            raise ValueError("Target modules not found in the base model")
+        return plain
+
+    monkeypatch.setattr(export, "derive_peft_lora_specs", derive)
 
     def pick(specs):
         checkpoint = SimpleNamespace(layout_hash=canonical_layout_hash(specs))
-        return _checkpoint_specs(path, None, checkpoint, rank=2, targets="all-linear", trust_remote_code=False,
-                                 sync_preset="strict-avg", fragments=1, matrix_merge="avg")
+        return export._checkpoint_specs(path, None, checkpoint, rank=2, targets="all-linear",
+                                        trust_remote_code=False, sync_preset="strict-avg", fragments=1,
+                                        matrix_merge="avg")
 
     assert pick(routed) == routed  # a Miles island's checkpoint
     assert pick(plain) == plain  # PEFT's own selection (other backends)
+    peft_raises = True
+    assert pick(plain) == routed  # no PEFT layout to fall back to: the caller's layout check refuses it

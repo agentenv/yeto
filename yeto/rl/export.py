@@ -278,7 +278,10 @@ def _checkpoint_specs(model, revision, checkpoint, *, rank, targets, trust_remot
     specs = derive(True)
     if checkpoint.layout_hash is None or recorded(specs) == checkpoint.layout_hash:
         return specs
-    fallback = derive(False)
+    try:
+        fallback = derive(False)
+    except ValueError:  # PEFT cannot build its own selection on this model (e.g. fused experts)
+        return specs
     return fallback if recorded(fallback) == checkpoint.layout_hash else specs
 
 
