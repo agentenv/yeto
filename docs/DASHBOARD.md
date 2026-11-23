@@ -151,6 +151,8 @@ and the budget can be passed to the launcher with the environment variables
 | Budget | 60% / 80% | 1/0 |
 | RECOVERY_REQUIRED (journal phase or tape `rl_reconfiguration`) | — | 0 |
 | ssh mirror source lost | — | 1 |
+| Run store unreadable (`--store` reads failing since the last clean poll) | — | 1 |
+| Agentic sampler trials (current incarnation, last 10 rounds in which trials ended, >= 8 trials): none with a verdict (ok / policy limit); aborted (infrastructure) share | none: critical; > 50%: warning | 0/1 |
 | Compaction `summary_ok` share (per sampler, last 5 rounds with compaction, >= 5 summaries) | < 90% warning, < 50% critical | 1/0 |
 | Compacted trials ending truncated (same window, >= 5 compacted trials) | > 20% | 1 |
 | Trials that compacted at all (same window, >= 5 trials) | > 50% info | 2 |
