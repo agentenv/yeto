@@ -91,6 +91,10 @@ class BroadcastReceipt:
     anchor: torch.Tensor = field(repr=False, compare=False)
     payload_bytes: int
     queue_seconds: float
+    # wall clock: the BCAST arrived (the client's monotonic received_at) and was
+    # staged into the trainable weights (the safe boundary)
+    received_unix: float | None = None
+    applied_unix: float | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,14 @@ class FragmentSubmission:
     delta_l2_norm: float
     payload_bytes: int
     pull_to_push_seconds: float
+    # wall clock: the PULL (permit) arrived, and the PUSH was handed to the client's send queue
+    permit_received_unix: float | None = None
+    enqueued_unix: float | None = None
+
+
+def _unix_of(monotonic_at: float) -> float:
+    """Wall clock of an earlier ``time.monotonic()`` reading."""
+    return time.time() - (time.monotonic() - monotonic_at)
 
 
 @dataclass(frozen=True)
@@ -205,6 +217,12 @@ class DecoupledRlBridge:
     @property
     def steps_at_anchor(self) -> tuple[int, ...]:
         return tuple(self._steps_at_anchor)
+
+    def held_permits(self) -> list[dict]:
+        """The PULLs this island holds and has not answered yet (``sync/held_permits``)."""
+        return [{"fragment": permit.fragment_id, "step": permit.global_step,
+                 "attempt": permit.round_attempt, "received_unix": _unix_of(permit.received_at)}
+                for _, permit in sorted(self._pending.items())]
 
     @property
     def tokens_at_anchor(self) -> tuple[int, ...]:
@@ -319,6 +337,7 @@ class DecoupledRlBridge:
         staged_versions = list(versions)
         broadcasts = []
         drained_at = time.monotonic()
+        drained_unix = time.time()
         updates = sorted(
             self.client.drain_updates(),
             key=lambda update: (update.fragment_id, update.version),
@@ -340,6 +359,8 @@ class DecoupledRlBridge:
                     flat.clone(),
                     len(update.data),
                     max(0.0, drained_at - update.received_at),
+                    drained_unix - max(0.0, drained_at - update.received_at),
+                    drained_unix,
                 )
             )
         return BroadcastBatch(
@@ -412,6 +433,7 @@ class DecoupledRlBridge:
                 c_tokens,
                 payload,
             )
+            enqueued_unix = time.time()
             self._answered.add((permit.global_step, permit.round_attempt))
             self._pending.pop(fragment_id)
             pull_to_push_seconds = time.monotonic() - permit.received_at
@@ -426,6 +448,8 @@ class DecoupledRlBridge:
                     float(delta.norm().item()),
                     len(payload),
                     pull_to_push_seconds,
+                    _unix_of(permit.received_at),
+                    enqueued_unix,
                 )
             )
         return tuple(submissions)
@@ -542,6 +566,7 @@ class DecoupledRlBridge:
                 action_tokens,
                 payload,
             )
+            enqueued_unix = time.time()
             submissions.append(
                 FragmentSubmission(
                     fragment_id,
@@ -553,6 +578,8 @@ class DecoupledRlBridge:
                     float(delta.norm().item()),
                     len(payload),
                     time.monotonic() - permit_received,
+                    _unix_of(permit_received),
+                    enqueued_unix,
                 )
             )
             completed.add(fragment_id)

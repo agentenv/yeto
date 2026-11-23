@@ -602,10 +602,12 @@ _ISLAND = (
     island_flag("--expert-parallel", type=int, default=None),
     island_flag("--context-parallel", type=int, default=1),
     island_flag("--rollout-num-gpus", type=int, default=None),
-    # fleet-dashboard 2.1/2.2 (ports only): rl_heartbeat / rl_resource_sample
-    # periods in seconds; default None = 30 / 60 with --rl-observe-timeline,
-    # else off (0 disables explicitly).
-    island_flag("--rl-heartbeat-interval", type=float, default=None),
+    # fleet-dashboard 2.1/2.2 (ports only): rl_heartbeat period in seconds;
+    # default None = 30 on an outer-synced island or with --rl-observe-timeline,
+    # else off (0 disables explicitly). The launcher forwards it only when given.
+    shared_flag("--rl-heartbeat-interval", type=float, default=None, metavar="SECONDS",
+                help="ports: rl_heartbeat period forwarded to the learner (default: 30 s on an "
+                "outer-synced island and with --rl-observe-timeline, else off; 0 = off)"),
     # GPUs per island node when the island spans nodes (the
     # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
     island_flag("--rl-island-gpus-per-node", type=int, default=None),

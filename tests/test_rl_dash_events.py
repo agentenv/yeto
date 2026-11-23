@@ -280,13 +280,51 @@ def test_learner_switch_defaults(monkeypatch):
         apply_ports_infra_switches(ns, miles, environ={})
         return vars(miles)
 
-    assert "yeto_rl_heartbeat_interval_s" not in run()
+    no_sync = dict(rl_single_island_no_sync=True)
+    assert "yeto_rl_heartbeat_interval_s" not in run(**no_sync)
     got = run(rl_heartbeat_interval=45.0, rl_resource_sample_interval=0)
     assert got["yeto_rl_heartbeat_interval_s"] == 45.0
     assert "yeto_rl_resource_sample_interval_s" not in got
-    on = run(rl_observe_timeline=True)
+    on = run(rl_observe_timeline=True, **no_sync)
     assert on["yeto_rl_heartbeat_interval_s"] == 30.0
     assert on["yeto_rl_resource_sample_interval_s"] == 60.0
+
+
+def test_an_outer_synced_island_heartbeats_by_default_and_says_so(monkeypatch, capsys):
+    """A DiLoCo island waits for the others (its first round, a terminal round in the
+    syncer's grace window) without writing anything: it heartbeats every 30 s unless
+    --rl-heartbeat-interval 0; the resource sampler keeps its opt-in default."""
+    from yeto.rl.adapters.miles.island_entry import apply_ports_infra_switches
+
+    monkeypatch.setattr("yeto.rl.adapters.miles.elastic_hook.apply_recommend_flags", lambda a, m: None)
+
+    def run(**kw):
+        ns = SimpleNamespace(**{**dict(rl_observe_timeline=False, rl_heartbeat_interval=None,
+                                       rl_resource_sample_interval=None,
+                                       rl_single_island_no_sync=False), **kw})
+        miles = SimpleNamespace()
+        apply_ports_infra_switches(ns, miles, environ={})
+        return vars(miles), capsys.readouterr().out
+
+    got, out = run()
+    assert got["yeto_rl_heartbeat_interval_s"] == 30.0
+    assert "yeto_rl_resource_sample_interval_s" not in got
+    assert "[auto] rl_heartbeat every 30 s on this outer-synced island (--rl-heartbeat-interval 0" in out
+    off, out = run(rl_heartbeat_interval=0.0)
+    assert "yeto_rl_heartbeat_interval_s" not in off and "[auto]" not in out
+    observed, out = run(rl_observe_timeline=True)
+    assert observed["yeto_rl_heartbeat_interval_s"] == 30.0 and "[auto]" not in out
+    single, out = run(rl_single_island_no_sync=True)
+    assert "yeto_rl_heartbeat_interval_s" not in single and "[auto]" not in out
+
+
+def test_the_launcher_forwards_the_heartbeat_interval_only_when_given():
+    from yeto import launcher as L
+    from yeto.cli import parse_args
+
+    M = ["--training-mode", "rl", "--gpu", "modal:1xh100", "--model", "Qwen/Qwen3-0.6B", "--data", "zhuzilin/gsm8k"]
+    assert "--rl-heartbeat-interval" not in L._ports_infra_flags(parse_args(M))[1]
+    assert " --rl-heartbeat-interval 0.0" in L._ports_infra_flags(parse_args([*M, "--rl-heartbeat-interval", "0"]))[1]
 
 
 def test_ports_local_round_reaches_wandb_train_axis():
