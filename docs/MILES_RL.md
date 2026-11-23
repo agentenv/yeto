@@ -163,7 +163,7 @@ The public parameters are:
 | `N` | `--total-steps` | complete fragment sweeps |
 | `T` | internal | outer fragment steps, exactly `N * P` |
 
-The launcher fixes the rest of the algorithm:
+With `--rl-sync-mode strict` the launcher fixes the rest of the algorithm:
 
 ```text
 quorum                 = M
@@ -180,6 +180,27 @@ wire_dtype              = f32
 checkpoint_every        = 1
 optimizer_steps/rollout = 1
 ```
+
+`--rl-sync-mode async` is the default for two or more islands. It keeps
+the fragment layout, f32 wire, AVG of embedding fragments and checkpoint
+cadence above, and fills every sync option the command leaves unset with the
+asynchronous values (see
+[PROTOCOL.md](PROTOCOL.md#rl-sync-modes---rl-sync-mode)):
+
+```text
+quorum                 = 1
+grace_ms                = adaptive, capped at 300000
+max_base_lag            = 1 round (P versions); a late push is carried into
+                          the fragment's next round
+learner_weight          = tokens2-over-steps
+merge_mode              = RDA (--rl-sync-matrix-merge rda)
+outer_lr / momentum     = 1.0 / 0 when H < 4, 0.7 / 0.9 when H >= 4
+```
+
+A two-island run with `--local-rl-rounds-per-sync 2` and no other sync flag
+therefore runs without an outer Nesterov step. Pass `--rl-sync-mode strict`
+for the table above, or any `--rl-sync-*` option to override one value; the
+dry run prints the effective syncer command.
 
 `--experimental-rl-sync` cannot be combined with this preset.
 
