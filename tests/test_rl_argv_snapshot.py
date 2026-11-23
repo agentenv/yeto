@@ -54,3 +54,20 @@ def test_standby_gpus_need_a_lora_fixed_partition():
     full = argparse.Namespace(**{**base, "parameter_mode": "full", "rl_standby_gpus": 1})
     with pytest.raises(ValueError, match="not supported for full-parameter"):
         rc.resolve_rl_run_config(full, **kwargs)
+
+
+def test_ep_refuses_expert_sharded_lora_only_when_lora_is_trained():
+    """EP>1 with --lora-targets all-linear refuses sharded expert LoRA; a full-parameter
+    run builds no LoRA, so the same flag does not refuse it."""
+
+    (base,), kwargs = _captured_args()
+    provider = argparse.Namespace(**{**vars(kwargs["provider"]), "num_moe_experts": 4, "moe_layer_freq": 1,
+                                     "moe_ffn_hidden_size": 8, "moe_router_topk": 2,
+                                     "position_embedding_type": "rope"})
+    moe = {**vars(base), "expert_parallel": 2, "lora_targets": "all-linear"}
+    with pytest.raises(ValueError, match="replicated attention LoRA"):
+        rc.resolve_rl_run_config(argparse.Namespace(**moe), **{**kwargs, "provider": provider})
+    full = argparse.Namespace(**{**moe, "parameter_mode": "full", "rl_single_island_no_sync": True})
+    config = rc.resolve_rl_run_config(full, **{**kwargs, "provider": provider, "target_modules": []},
+                                      yeto_policy_sync=False, verify_ref_load=False)
+    assert config.parallel.expert_parallel == 2

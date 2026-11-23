@@ -884,9 +884,10 @@ def resolve_rl_run_config(
     recipe = getattr(args, "rl_model_recipe", RECIPE_GENERIC)
     # the native Flash-Next plugin and the Kimi-K3.1 plugin (shared-outer expert LoRA)
     # shard routed-expert LoRA by EP themselves
-    # (deepseek_v41 all-linear = attention + the replicated shared expert, routed experts excluded)
-    if (fn_variant is None and recipe not in (RECIPE_KIMI_K31, RECIPE_DEEPSEEK_V41) and is_moe
-            and expert_parallel > 1 and args.lora_targets == "all-linear"):
+    # (deepseek_v41 all-linear = attention + the replicated shared expert, routed experts excluded);
+    # full-parameter runs build no LoRA, whatever --lora-targets says
+    if (parameter_mode != "full" and fn_variant is None and recipe not in (RECIPE_KIMI_K31, RECIPE_DEEPSEEK_V41)
+            and is_moe and expert_parallel > 1 and args.lora_targets == "all-linear"):
         raise ValueError(
             "EP>1 requires replicated attention LoRA, not expert-sharded all-linear LoRA"
         )
