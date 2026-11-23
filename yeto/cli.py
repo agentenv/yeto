@@ -1892,6 +1892,7 @@ def cmd_head(payload: str) -> int:
     syncer.start()
     syncer.start_log_forwarder()
     syncer.start_tape_forwarder(args)
+    syncer.start_store_upload(args)
     try:
         code = launcher.run(args, local_syncer=syncer)
     except BaseException:

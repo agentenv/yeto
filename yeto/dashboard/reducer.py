@@ -336,7 +336,7 @@ class Reducer:
         iid = (_iid(island) if island_fixed and island is not None and kind == "learner" else None) \
             or _iid(record.get("island_id", record.get("learner_id"))) or island \
             or (_iid(record.get("sampler_id")) if kind == "learner" else None)
-        digest = self._digest(record, iid)
+        digest = self._digest(record, iid, kind)
         duplicate = digest is not None and digest in self._seen_digests
         launch = _store_launch(source) if kind == "learner" and iid is not None else None
         if launch is not None and digest is not None:
@@ -549,15 +549,17 @@ class Reducer:
             return False
         return True
 
-    def _digest(self, record: dict, iid: str | None) -> bytes | None:
+    def _digest(self, record: dict, iid: str | None, kind: str | None = None) -> bytes | None:
         """Identity of a timestamped event of island ``iid``, None for any other record.
         One record reaches the dashboard more than once: the launcher's echoed tape
         (``~/.yeto/runs/<run>/events``) and the trainer's store upload carry the same
         records, and a restarted trainer uploads its whole local tape again under its new
         launch; ``feed`` folds it once. Records without ``time_unix`` (which may repeat
         legitimately) have no identity; equal records of two islands (whose tapes name the
-        island by file name only) are two records."""
-        if not isinstance(record.get("event"), str) or not isinstance(record.get("time_unix"), (int, float)):
+        island by file name only) are two records. The syncer's merge and pool records (no
+        ``event``) have one too: the local syncer tape and its store upload carry the same ones."""
+        syncer = kind == "syncer" or sft_mod.is_syncer_tape(record)
+        if not (isinstance(record.get("event"), str) or syncer) or not isinstance(record.get("time_unix"), (int, float)):
             return None
         try:
             text = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)

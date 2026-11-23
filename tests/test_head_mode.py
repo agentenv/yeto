@@ -160,6 +160,9 @@ def test_cmd_head_reconstructs_args_and_starts_syncer(monkeypatch):
         def start_tape_forwarder(self, args):
             seen["tape_forwarder"] = getattr(args, "wandb", False)
 
+        def start_store_upload(self, args):
+            seen["store_upload"] = getattr(args, "rl_checkpoint_store", None)
+
         def stop(self):
             seen["stopped"] = True
 

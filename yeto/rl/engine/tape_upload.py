@@ -17,6 +17,15 @@ in wall time (:data:`FINAL_FLUSH_ENV`): one store write may block for minutes
 during that drain on the main thread (a cluster teardown racing the last upload)
 is held and delivered again once the drain ends, so the last chunk is not cut
 off mid-request.
+
+The syncer's tape goes the same way (:func:`syncer_uploaders`): ``tapes/syncer/`` and
+``tapes/syncer-shard<i>/`` for its shards, so ``--store`` alone shows the syncer even when
+it runs in a container or on a VM the dashboard cannot reach. The uploader only reads the
+file the syncer appends to, on its own thread (or process: ``follow``); it is never on the
+syncer's merge path. What it has not uploaded yet stays on the local tape, read back in
+bounded chunks (:data:`MAX_CHUNK_BYTES`), so nothing queues up in memory and nothing is
+dropped; a failed write is counted (``failures``) and logged with the error type and the
+key only, never the store credentials.
 """
 
 from __future__ import annotations
@@ -257,9 +266,71 @@ def trainer_uploader(event_tape: Any, *, learner_id: Any = 0, environ: Any = Non
     return up.start()
 
 
+SYNCER_ISLAND = "syncer"
+
+
+def syncer_island(index: int) -> str:
+    """Store name of syncer shard ``index``: ``syncer`` for shard 0, ``syncer-shard<i>`` else."""
+    return SYNCER_ISLAND if index == 0 else f"{SYNCER_ISLAND}-shard{index}"
+
+
+def shard_tape(tape: str | os.PathLike[str], index: int) -> Path:
+    """Shard ``index``'s tape next to the syncer's (the rule of ``launch.syncer._shard_path``:
+    ``<stem>.shard<i><suffix>`` for i > 0)."""
+    path = Path(os.path.expanduser(str(tape)))
+    return path if index == 0 else path.with_name(f"{path.stem}.shard{index}{path.suffix}")
+
+
+def syncer_uploaders(objects: Any, tape: str | os.PathLike[str], *, shards: int = 1, incarnation: str,
+                     interval_s: float = DEFAULT_INTERVAL_S, from_end: bool = True,
+                     log: Callable[[str], None] = print) -> list[TapeUploader]:
+    """Started uploaders of the syncer's tape and of each shard's (a tape that does not exist
+    yet is picked up once it does). ``from_end``: start at the tape's current end, because a
+    reused host keeps an earlier job's tape, which that job uploaded."""
+    out = []
+    for index in range(max(1, int(shards))):
+        path = shard_tape(tape, index)
+        up = TapeUploader(objects, path, island=syncer_island(index), incarnation=incarnation,
+                          interval_s=interval_s, log=log)
+        if from_end:
+            with contextlib.suppress(OSError):
+                up.offset = path.stat().st_size
+        out.append(up.start())
+    return out
+
+
+def syncer_incarnation() -> str:
+    """This syncer process's store incarnation: host and UTC start time (a restarted syncer
+    adds its own prefix next to the previous one)."""
+    import socket  # noqa: PLC0415
+
+    return f"{socket.gethostname()}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+
+
+def _follow(args: Any) -> int:
+    """Upload the syncer tape(s) until SIGTERM / SIGINT, then drain (the sidecar of a syncer
+    the launcher does not run itself, e.g. in a container)."""
+    from yeto.dashboard.store_tapes import open_objects  # noqa: PLC0415
+
+    interval = upload_interval_s(args.interval)
+    if interval is None:
+        print("[tape-upload] upload interval 0: nothing to do", flush=True)
+        return 0
+    done = threading.Event()
+    for name in HELD_SIGNALS:
+        signal.signal(getattr(signal, name), lambda *_: done.set())
+    ups = syncer_uploaders(open_objects(args.store), args.tape, shards=args.shards,
+                           incarnation=args.incarnation or syncer_incarnation(), interval_s=interval,
+                           from_end=args.from_end)
+    print(f"[tape-upload] following {args.tape} ({args.shards} shard(s)) every {interval:.0f} s", flush=True)
+    done.wait()
+    return 0 if all([up.stop() for up in ups]) else 1
+
+
 def main(argv: Any = None) -> int:
     """``event --store URI --island NAME [--incarnation I]``: one JSON event per stdin line
-    into ``tapes/<island>/<incarnation>/<ms>.jsonl`` (the NC pool's ``event_command``)."""
+    into ``tapes/<island>/<incarnation>/<ms>.jsonl`` (the NC pool's ``event_command``).
+    ``follow --tape PATH --store URI [--shards N]``: the syncer tape uploader as a process."""
     import argparse  # noqa: PLC0415
     import sys  # noqa: PLC0415
     import time  # noqa: PLC0415
@@ -270,7 +341,16 @@ def main(argv: Any = None) -> int:
     ev.add_argument("--store", required=True)
     ev.add_argument("--island", required=True)
     ev.add_argument("--incarnation", default="controller")
+    fo = sub.add_parser("follow", help="upload the syncer tape (and its shards' tapes) until stopped")
+    fo.add_argument("--tape", required=True, help="the syncer's --event-tape")
+    fo.add_argument("--store", required=True, help="the run store (s3://, oss:// or a directory)")
+    fo.add_argument("--shards", type=int, default=1, help="--syncer-shards of the run")
+    fo.add_argument("--incarnation", default=None, help="default: host and UTC start time")
+    fo.add_argument("--interval", type=float, default=None, help=f"seconds between uploads ({INTERVAL_ENV} wins)")
+    fo.add_argument("--from-end", action="store_true", help="skip what the tape holds already")
     args = parser.parse_args(argv)
+    if args.cmd == "follow":
+        return _follow(args)
     data = b"".join(line if line.endswith(b"\n") else line + b"\n"
                     for line in sys.stdin.buffer.read().splitlines() if line.strip())
     if not data:
