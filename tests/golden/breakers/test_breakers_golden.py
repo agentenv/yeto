@@ -101,13 +101,14 @@ def _registry():
 
 def _sources(breakers: Any, name: str, tmp: Path) -> Any:
     loaded = load_case(BY_NAME[name], tmp)
-    pool = loaded.pool or {}
-    env = {**loaded.trainer_env, **loaded.sampler_env}
-    return breakers.Sources(run_config=loaded.run_config, argv=loaded.argv, spec=loaded.spec,
-                            pool_elastic=pool.get("elastic") if loaded.pool is not None else None,
-                            pool_dispense=((pool.get("sampler") or {}).get("dispense")
-                                           if loaded.pool is not None else None),
-                            env=env)
+    surfaces: dict[str, Any] = {"run_config": loaded.run_config, "argv": loaded.argv, "spec": loaded.spec,
+                                "env": {**loaded.trainer_env, **loaded.sampler_env}}
+    if loaded.pool is not None:
+        surfaces["pool_config"] = loaded.pool
+        surfaces["pool_elastic"] = loaded.pool.get("elastic") or {}
+        surfaces["pool_dispense"] = (loaded.pool.get("sampler") or {}).get("dispense") or {}
+    known = getattr(breakers.Sources, "__dataclass_fields__", surfaces)
+    return breakers.Sources(**{k: v for k, v in surfaces.items() if k in known})
 
 
 def _split(key: str) -> tuple[str, str]:
