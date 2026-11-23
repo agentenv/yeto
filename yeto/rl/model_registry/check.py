@@ -43,15 +43,13 @@ OK, WARN, FAIL = "ok", "warn", "fail"
 LAUNCHER, ISLAND, UPSTREAM, ESTIMATE = "launcher", "island", "upstream", "estimate"
 MAX_FRAGMENT_BYTES = 2 << 30  # --rl-sync-fragment-max-bytes default (yeto/launch/rl_args.py defaults)
 DEFAULT_P, DEFAULT_TAU, DEFAULT_H = 4, 2, 4  # decoupled runs A/B/C (P=4, tau=2, H=4); H>=4: outer Nesterov
-PARTIAL_RECIPES = {"kimi_k31", "deepseek-v4-flash"}
+PARTIAL_RECIPES = {"kimi_k31", "deepseek-v4-flash", "generic"}
 DSV4_EXPERT_FULL_COUNT = 4  # --expert-full-count of the deepseek-v4-flash expert-full form
 # Failing cells that open work turns into runs (printed as "not on main yet"). Remove an
 # entry in the change that flips its cell: tests/test_model_check_matrix.py requires every
-# key to still reach a failing cell. Open work per key, for maintainers: partial-moe/generic:
-# the launcher wiring of in-place selections on any MoE; decoupled/kimi_k31-lora: K3.1 offline
-# LoRA specs (the generic ones are on main).
+# key to still reach a failing cell. Open work per key, for maintainers: decoupled/kimi_k31-lora:
+# K3.1 offline LoRA specs (the generic ones are on main).
 PENDING = {
-    "partial-moe/generic": "in-place routed-expert selections on any MoE (generic recipe)",
     "decoupled/kimi_k31-lora": "kimi_k31 LoRA under decoupled, from an offline canonical LoRA layout",
 }
 
@@ -138,12 +136,19 @@ def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> li
 
     if form == "partial-moe":
         if not profile.moe:
-            fail("partial experts need a MoE model", "--tuning full or LoRA")
+            # the launcher checks the selection against config.json only when it can read it locally
+            fail("partial experts need a MoE model (the island checks the selection against the checkpoint)",
+                 "--tuning full or LoRA", source=ISLAND)
+        if backend == "verl":
+            fail("verl trains no expert selection: --rl-expert-selection / --expert-full-count are refused "
+                 "(yeto/rl/adapters/verl/run_config_rules.py check_model_recipe)", "--rl-backend miles")
         elif recipe not in PARTIAL_RECIPES:
-            fail(f"no partial-expert form for --rl-model-recipe {recipe} on main: --rl-expert-selection belongs "
-                 "to kimi_k31, --expert-full-count to deepseek-v4-flash (yeto/launch/rl_args.py)",
-                 "train the routed experts with full parameters, or register a PartialExpertModelConfig "
-                 "(template below)", "partial-moe/generic")
+            fail(f"no partial-expert form for --rl-model-recipe {recipe}: --rl-expert-selection belongs to "
+                 "kimi_k31 and the generic recipe, --expert-full-count to deepseek-v4-flash "
+                 "(yeto/launch/rl_args.py)", "--rl-model-recipe generic with an in_place selection")
+        elif recipe == "generic" and preset == "strict-avg":
+            fail("--tuning full behind a syncer needs --rl-sync-preset decoupled or full-parameter "
+                 "(yeto/launch/rl_args.py)", "--rl-sync-preset decoupled")
         elif recipe == "deepseek-v4-flash" and preset != "full-parameter":
             fail("expert-full tuning needs --rl-sync-preset full-parameter or decoupled "
                  "(yeto/rl/engine/selection.py)", "--rl-sync-preset decoupled")
@@ -404,12 +409,19 @@ def _lora_numel(profile: ModelSyncProfile, targets: str, rank: int) -> tuple[int
     return tensors, numel
 
 
+def generic_selection_size(profile: ModelSyncProfile) -> int:
+    """Trainable experts per MoE layer the check sizes a generic in_place selection with
+    (an eighth of the router, at least the experts per token)."""
+    return max(profile.experts_per_token or 1, profile.num_routed_experts // 8)
+
+
 def _trainable_params(profile: ModelSyncProfile, cfg: dict, form: str) -> float:
     from yeto.memory_estimate import param_breakdown
 
     parts = param_breakdown(cfg)
     if form == "partial-moe":
-        per_layer = getattr(profile.partial_experts, "num_trainable_per_layer", None) or 0
+        per_layer = (getattr(profile.partial_experts, "num_trainable_per_layer", None)
+                     or (generic_selection_size(profile) if profile.recipe == "generic" else 0))
         if per_layer and profile.num_routed_experts:
             return parts["routed_experts"] * per_layer / profile.num_routed_experts
         return parts["routed_experts"] / max(1, profile.num_routed_experts) * DSV4_EXPERT_FULL_COUNT
@@ -440,9 +452,9 @@ def recommend_sync(req: CheckRequest, profile: ModelSyncProfile, cfg: dict) -> d
 
 
 def _memory(req: CheckRequest, recipe: str, profile: ModelSyncProfile, cfg: dict) -> dict[str, Any]:
-    """Dense: the launch preflight's per-GPU peak (:mod:`yeto.memory_estimate`) at the
-    request's shape. MoE: the registry's smallest trainer (EP-sharded experts), which
-    the preflight model does not cover."""
+    """Dense models and generic partial experts: the launch preflight's per-GPU peak
+    (:mod:`yeto.memory_estimate`) at the request's shape. Other MoE forms: the registry's
+    smallest trainer (EP-sharded experts), which the preflight model does not cover."""
 
     from yeto import memory_estimate as me
 
@@ -454,15 +466,23 @@ def _memory(req: CheckRequest, recipe: str, profile: ModelSyncProfile, cfg: dict
     actor = actor_gpus(req, recipe)
     tuning = "lora" if req.form == "lora" else "full"
     out: dict[str, Any] = {"card": req.card, "capacity_gib": round(capacity, 1), "trainer_gpus": actor}
-    if not profile.moe:
+    generic_partial = profile.moe and req.form == "partial-moe" and recipe == "generic"
+    if not profile.moe or generic_partial:
         dp = max(1, actor // (req.tensor_parallel * req.pipeline_parallel))
         colocated = rollout_gpus(req, recipe) is None
+        partial = {}
+        if generic_partial:  # the preflight's partial-experts shape (selection of generic_selection_size)
+            breakdown = me.param_breakdown(cfg)
+            partial = {"ep": req.expert_parallel or 1, "expert_params": float(breakdown["routed_experts"]),
+                       "trainable_params": float(breakdown["per_expert"] * len(profile.moe_layers)
+                                                 * generic_selection_size(profile)),
+                       "recompute": True}
         estimate = me.estimate(me.MemoryRequest(
             arch=me.arch_from_hf_config(cfg, precise=True), gpu=req.card, gpu_mem_gib=capacity, tokens=req.seq_len,
             tuning=tuning, lora_rank=req.lora_rank,
             lora_targets="attention" if req.lora_targets == "attention" else "all",
             tp=req.tensor_parallel, pp=req.pipeline_parallel, dp=dp, distributed_optimizer=tuning == "full",
-            colocated=colocated, offload=colocated))
+            colocated=colocated, offload=colocated, **partial))
         out["peak_gib_per_gpu"] = estimate["peak_gib"]
         out["fits"] = estimate["peak_gib"] <= 0.9 * capacity
     # partial experts: K3.1's selection is the registry's partial plan; DSV4 expert-full
@@ -476,7 +496,7 @@ def _memory(req: CheckRequest, recipe: str, profile: ModelSyncProfile, cfg: dict
         return out
     out["min_trainer"] = {k: plan[k] for k in ("world", "nodes", "tensor_parallel", "pipeline_parallel",
                                                 "expert_parallel", "state_gib_per_card") if k in plan}
-    if profile.moe:
+    if profile.moe and not generic_partial:
         out["fits"] = bool(plan.get("fits")) and plan["world"] <= actor
         out["note"] = "MoE: the registry's smallest trainer (model state per card, EP-sharded experts)"
     return out
@@ -546,18 +566,13 @@ TEMPLATE_CONVERTER = """# Megatron -> HF full-parameter publication (miles _conv
 # bridge it in the yeto Miles adapter (no upstream PR), e.g. a converter keyed by
 # the config class that maps decoder.layers.L.* to model.layers.L.*, selected
 # with the recipe's --model-name. Until then: --rl-backend verl or --form lora."""
-TEMPLATE_PARTIAL = """# yeto/rl/adapters/miles/models/<family>/model.py
-from yeto.rl.adapters.miles.models.partial_experts.config import (
-    IN_PLACE_PERMUTED, PartialExpertModelConfig, register_model)
-
-MODEL_CONFIG = register_model(PartialExpertModelConfig(
-    model_type="{model_type}", num_routed_experts={experts}, num_moe_layers={moe_layers},
-    trainable_strategy=IN_PLACE_PERMUTED, ep_size_default={ep},
-    allow_distributed_optimizer=True, requires_complete_master=False,
-    trainable_param_attr="yeto_trainable_expert", needs_engine_patch=False,
-    num_trainable_per_layer={trainable}))
-# add the module to known_model_configs(); build a selection with
-# python -m yeto.rl.adapters.miles.models.partial_experts.selection --mode uniform ..."""
+TEMPLATE_SELECTION = """# the routed experts to train: an in_place selection (any MoE, generic recipe)
+python -m yeto.rl.adapters.miles.models.partial_experts.selection --layout in_place \\
+  --hf-config <checkpoint>/config.json --num-trainable {trainable} --ep-size {ep} --mode uniform \\
+  --output expert_selection.json
+python -m yeto.rl.adapters.miles.models.partial_experts.selection --validate expert_selection.json \\
+  --hf-config <checkpoint>/config.json
+# then: --tuning full --rl-expert-selection expert_selection.json --expert-parallel {ep}"""
 TEMPLATE_FAMILY = """# yeto/rl/model_registry/families.py: a FamilyEntry so `yeto adapt` and
 # `yeto model check` name the family instead of the generic fallback
 {name} = FamilyEntry("{family}", ("{arch}",), ("{model_type}",), _dense_recipes(
@@ -575,10 +590,9 @@ def _templates(report: CheckReport) -> list[str]:
         out.append(TEMPLATE_PROVIDER)
     if "converter" in reasons:
         out.append(TEMPLATE_CONVERTER)
-    if "no partial-expert form" in reasons and p.moe:
-        out.append(TEMPLATE_PARTIAL.format(model_type=p.model_type, experts=p.num_routed_experts,
-                                           moe_layers=len(p.moe_layers), ep=8,
-                                           trainable=max(8, p.num_routed_experts // 8)))
+    req = report.request
+    if req.form == "partial-moe" and report.recipe == "generic" and p.moe:
+        out.append(TEMPLATE_SELECTION.format(trainable=generic_selection_size(p), ep=req.expert_parallel or 1))
     if any(i.name == "expert-naming" and i.status == FAIL for i in report.items):
         experts = next((m for m in p.linear_modules if m.kind == "experts"), None)
         out.append(TEMPLATE_NAMING.format(path=experts.path if experts else "<experts path>"))

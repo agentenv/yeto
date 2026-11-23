@@ -63,15 +63,21 @@ def launcher(tmp_path_factory):
     folder = tmp_path_factory.mktemp("sel")
 
     @lru_cache(maxsize=None)
-    def selection(ep: int) -> str:
-        """A K3.1 selection built for the cell's EP (the user builds it at the launch's EP)."""
+    def selection(recipe: str, ep: int) -> str:
+        """The cell's selection, built at the launch's EP as the user builds it: K3.1 slot_order,
+        or an in_place selection for the generic recipe (the launcher reads no config.json for
+        ``org/model``, so its shape is not checked against the fixture model here)."""
 
-        path = folder / f"expert_selection.ep{ep}.json"
+        path = folder / f"expert_selection.{recipe}.ep{ep}.json"
         try:
-            ExpertSelection.synthetic("uniform", model="kimi_k31", num_experts=896, num_trainable=128,
-                                      ep_size=ep, layers=list(range(1, 93))).write(str(path))
+            if recipe == "kimi_k31":
+                ExpertSelection.synthetic("uniform", model="kimi_k31", num_experts=896, num_trainable=128,
+                                          ep_size=ep, layers=list(range(1, 93))).write(str(path))
+            else:
+                ExpertSelection.in_place("uniform", model="generic", num_experts=64, num_trainable=8,
+                                         ep_size=ep, layers=list(range(4))).write(str(path))
         except ValueError:  # an EP the selection cannot split (the check refuses it on its own)
-            return selection(8)
+            return selection(recipe, 8)
         return str(path)
 
     fill = {"<64-hex>": HEX, "<store>": "modal-volume://v/run", "<verl plan hash>": HEX}
@@ -79,7 +85,7 @@ def launcher(tmp_path_factory):
     @lru_cache(maxsize=None)
     def run(argv: tuple[str, ...], gpu: str) -> str | None:
         ep = int(argv[argv.index("--expert-parallel") + 1]) if "--expert-parallel" in argv else 8
-        fill["<expert_selection.json>"] = selection(ep)
+        fill["<expert_selection.json>"] = selection(argv[argv.index("--rl-model-recipe") + 1], ep)
         args = parse_args([
             "--gpu", gpu, "--model", "org/model", "--data", "org/data", "--training-mode", "rl",
             "--total-steps", "3", "--rollout-batch-size", "8", "--n-samples-per-prompt", "2",
@@ -245,6 +251,11 @@ def test_three_onboarding_examples():
     on_verl = check_model(_config("mixtral_8x7b"), CheckRequest(form="full", preset="full-parameter",
                                                                 backend="verl"))
     assert on_verl.runnable
+
+    moe = check_model(_config("qwen3_30b_a3b"), CheckRequest(form="partial-moe", preset="decoupled"))
+    assert moe.runnable and moe.launch_argv[moe.launch_argv.index("--rl-sync-preset") + 1] == "decoupled"
+    assert moe.recommended["memory"]["fits"] and "peak_gib_per_gpu" in moe.recommended["memory"]
+    assert any("--layout in_place" in t for t in moe.templates)
 
     k31 = check_model(_config("kimi_k31"), CheckRequest(form="partial-moe", preset="full-parameter"))
     assert k31.recipe == "kimi_k31" and k31.launcher_accepts and k31.request.expert_parallel == 8

@@ -135,12 +135,15 @@ names this for every trainable form; the form decides which sync stack runs it
 |---|---|---|
 | LoRA | LoRA fragments (`decoupled`; `strict-avg` is one fragment per round) | the canonical LoRA layout, bin-packed into `--fragments P` (2 <= P <= LoRA tensors) |
 | Full parameters | full-parameter asynchronous rounds (the same as `--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async`) | every parameter, owner-affine fragments of at most 2 GiB in FP32 |
-| Partial experts (MoE) | full-parameter asynchronous rounds, with the recipe's selection | the parameters the recipe trains (the selected routed experts and the trainable dense part) |
+| Partial experts (MoE) | full-parameter asynchronous rounds, with the recipe's selection | the parameters the recipe trains (generic `in_place` selection: the selected routed experts only) |
 
 `--tuning full` with `strict-avg` is refused at launch: that preset merges
-LoRA. Partial experts exist for two recipes today:
-`--rl-model-recipe kimi_k31 --tuning full --rl-expert-selection <file>` and
-`--rl-model-recipe deepseek-v4-flash --expert-full-count N`.
+LoRA. Partial experts: any MoE model on the generic recipe with an `in_place`
+selection (`--tuning full --rl-expert-selection <file>`, built with
+`python -m yeto.rl.adapters.miles.models.partial_experts.selection --layout in_place`),
+`--rl-model-recipe kimi_k31 --tuning full --rl-expert-selection <file>`
+(slot order) and `--rl-model-recipe deepseek-v4-flash --expert-full-count N`.
+All are Miles-only.
 
 ### 1. Checklist
 
@@ -231,7 +234,7 @@ cannot drift apart. The upstream rules are read from the pinned sources
 |---|---|
 | no Megatron-Bridge bridge | a provider view under `yeto/rl/adapters/miles/models/<family>/` (model it on `deepseek_v41/provider.py`) and a `--rl-model-recipe <family>` entry |
 | no Miles converter (full / partial) | a Megatron->HF converter in the yeto Miles adapter, selected by the recipe's `--model-name` |
-| partial experts on a new MoE | a `PartialExpertModelConfig` registration (in-place permuted experts) and a selection from `python -m yeto.rl.adapters.miles.models.partial_experts.selection` |
+| partial experts on a MoE | an `in_place` selection from `python -m yeto.rl.adapters.miles.models.partial_experts.selection --layout in_place --hf-config <config.json>` (the check prints the command) |
 | checkpoint expert names | a name mapping in the recipe's provider view |
 | unknown family | a `FamilyEntry` in `yeto/rl/model_registry/families.py`, so `yeto adapt` and the check name it |
 
