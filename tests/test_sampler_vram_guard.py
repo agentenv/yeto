@@ -33,7 +33,9 @@ def _cards(*free_gib, total_mb=TOTAL_MB):
 # ------------------------------------------------------------------ alert
 def test_a_card_above_97_percent_alerts_once_then_again_after_the_interval_and_clears():
     events, clock = [], [0.0]
-    watch = vg.VramWatch(lambda ev, **f: events.append((ev, f)), realert_s=600, clock=lambda: clock[0])
+    # rl_breaker records (sampler.vram_guard) follow each edge: test_sampler_breakers.py
+    watch = vg.VramWatch(lambda ev, **f: ev == "rl_breaker" or events.append((ev, f)), realert_s=600,
+                         clock=lambda: clock[0])
     assert watch.observe(_cards(40, 40)) is None  # 86%
     assert watch.observe(_cards(40, 5)) == vg.VRAM_HIGH_EVENT  # 98.3% on card 1
     ev, f = events[-1]
@@ -69,7 +71,8 @@ def test_the_resource_sampler_feeds_the_watch_from_its_card_samples():
     sampler = ResourceSampler(emit, collector=_Collector([_cards(2), _cards(50)]), interval_s=3600,
                               vram_watch=vg.VramWatch(emit))
     assert sampler.tick() and sampler.tick()
-    assert events == ["rl_resource_sample", vg.VRAM_HIGH_EVENT, "rl_resource_sample", vg.VRAM_OK_EVENT]
+    assert events == ["rl_resource_sample", vg.VRAM_HIGH_EVENT, "rl_breaker", "rl_resource_sample",
+                      vg.VRAM_OK_EVENT, "rl_breaker"]
 
 
 def test_the_pool_probe_and_pool_report_a_new_alert_once():

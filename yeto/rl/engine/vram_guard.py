@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .sampler_breakers import trip
+
 VRAM_HIGH_EVENT = "rl_sampler_vram_high"
 VRAM_OK_EVENT = "rl_sampler_vram_ok"
 DEFAULT_HIGH_FRAC = 0.97
@@ -105,6 +107,8 @@ class VramWatch:
                           high_for_s=round(now - self.high_since, 3),
                           cards=[{k: r[k] for k in ("index", "used_mb", "total_mb", "frac")} for r in high],
                           min_free_mib=min(r["free_bytes"] for r in rows) // MIB, **self.labels())
+                trip(self.emit, "sampler.vram_guard", top, self.high_frac, legacy_event=VRAM_HIGH_EVENT,
+                     detail=f"{len(high)} card(s) above {self.high_frac:g}")
                 return VRAM_HIGH_EVENT
             return None
         if self.high_since is not None:
@@ -112,6 +116,7 @@ class VramWatch:
             self.high_since = self._alerted_at = None
             self.emit(VRAM_OK_EVENT, max_frac=top, threshold=self.high_frac, high_for_s=round(was, 3),
                       **self.labels())
+            trip(self.emit, "sampler.vram_guard", top, self.high_frac, state="clear", legacy_event=VRAM_OK_EVENT)
             return VRAM_OK_EVENT
         return None
 

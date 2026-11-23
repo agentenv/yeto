@@ -55,6 +55,7 @@ from .buffer_payload import (
 from .loop_guard import LoopGuard
 from .policy_release import PolicyFollower, PolicyReleaseStore, ReleaseNotLoaded
 from .policy_versions import engine_weight_version
+from .sampler_breakers import trip
 from .sampler_checks import PortReleaseLoader, PostLoadChecks, SamplerLoadFatal, check_sampling_fits
 from .sampler_engine import (
     FINISH_STOP,
@@ -425,10 +426,18 @@ class EngineRound:
             now = getattr(self, "monotonic", time.monotonic)()
             if self._unread_since is None:
                 self._unread_since = now
-            if self.should_stop() or now - self._unread_since >= self.write_defer_max_s:
+                if unknown == "lease_unread":  # one per outage: group writes wait for a lease read
+                    trip(self.emit, "sampler.incarnation_lease", None, None, legacy_event=WRITE_DEFERRED_EVENT,
+                         detail="the incarnation lease stayed unread too long: group writes wait")
+            stopping = self.should_stop()
+            if stopping or now - self._unread_since >= self.write_defer_max_s:
                 self.emit(WRITE_DEFERRED_EVENT, reason=unknown, dispense_position=spot, given_up=True,
                           waited_s=round(now - (since or now), 1),
                           store_unread_s=round(now - self._unread_since, 1))
+                if not stopping:  # the loop's stop gives a group up too, but that is no breaker
+                    trip(self.emit, "sampler.write_defer", round(now - self._unread_since, 1),
+                         self.write_defer_max_s, legacy_event=WRITE_DEFERRED_EVENT,
+                         detail=f"{unknown}: group given up, task released")
                 return STORE_UNREAD
             if since is None:
                 since = now

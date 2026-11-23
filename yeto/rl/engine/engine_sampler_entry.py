@@ -80,6 +80,14 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   card sampler's high-VRAM alert (``vram_guard.VramWatch``; default 0.97, every
   600 s while high, a sample every 60 s): ``rl_sampler_vram_high`` /
   ``rl_sampler_vram_ok`` on the tape;
+* ``max_read_outage_s`` (default 1800; null: no bound) / ``max_damaged_latest_reads``
+  (default 120): optional, the store read outage that ends the island
+  (``sampler_loop.StoreReadOutage``);
+* ``breakers``: optional, a breakers section (``yeto.breakers``; the ``sampler`` and
+  ``harness`` entries apply here). Every limit above is also a breaker registry
+  entry (``yeto.breakers.layers.sampler``) whose spec alias is the key named here;
+  a section value that disagrees with the key refuses the start. Each trip writes
+  ``rl_breaker`` on the tape next to its own event;
 * ``event_tape``: the JSONL tape file of the island's events; each
   incarnation writes its own file next to it (``events.<incarnation>.jsonl``),
   so a replacement container never overwrites an earlier one's tape.
@@ -114,8 +122,7 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .engine_sampler import (DEFAULT_RELOAD_MAX_DEFER_S, EngineSamplerConfig, PromptItem, Reward,
-                             build_engine_sampler)
+from .engine_sampler import EngineSamplerConfig, PromptItem, Reward, build_engine_sampler
 from .sampler_checks import PostLoadChecks
 from .data_split import DataSlot
 from .sampler_engine import (
@@ -391,6 +398,7 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
     do, and the lease record is not read (``store_dispense`` module doc)."""
     from .incarnation_lease import read_lease  # noqa: PLC0415
     from .resume import store_for  # noqa: PLC0415
+    from .sampler_breakers import dispense_limits, spec_breakers  # noqa: PLC0415
     from .store_dispense import StoreDispensedPrompts  # noqa: PLC0415
     from .task_dispense import SAMPLER_INCARNATION_ENV, DispenseError  # noqa: PLC0415
 
@@ -435,7 +443,8 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
             incarnation=str(incarnation), input_key=str(_require(prompts, "input_key", "prompts")),
             label_key=prompts.get("label_key"),
             groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render,
-            task_key=task_key, lease_of_holder=None if lease_off else lease_of_holder, gate=gate)
+            task_key=task_key, lease_of_holder=None if lease_off else lease_of_holder, gate=gate,
+            limits=dispense_limits(spec_breakers(spec)))
     except DispenseError as error:
         raise SamplerSpecError(str(error)) from error
 
@@ -644,6 +653,11 @@ def backlog_cap(spec: Mapping[str, Any]) -> tuple[int, str | None]:
 
 
 def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
+    """The island's config; its breaker limits come from the registry
+    (:func:`~.sampler_breakers.spec_breakers`)."""
+    from .sampler_breakers import spec_breakers  # noqa: PLC0415
+
+    resolved = spec_breakers(spec)
     sampling = dict(_require(spec, "sampling"))
     sampling["stop"] = tuple(sampling.get("stop") or ())
     base_dir = spec.get("base_dir")
@@ -654,9 +668,8 @@ def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
         base_version=int(spec.get("base_version", 0)), base_dir=None if base_dir is None else Path(base_dir),
         min_round_s=spec.get("min_round_s"), poll_s=float(spec.get("poll_s", 5.0)),
         live_poll_s=None if spec.get("live_poll_s") is None else float(spec["live_poll_s"]),
-        reload_max_defer_s=(None if "reload_max_defer_s" in spec and spec["reload_max_defer_s"] is None
-                            else float(spec.get("reload_max_defer_s", DEFAULT_RELOAD_MAX_DEFER_S))),
-        max_consecutive_load_failures=int(spec.get("max_consecutive_load_failures", 3)),
+        reload_max_defer_s=resolved.get("sampler.drain.reload_max_defer_s"),
+        max_consecutive_load_failures=resolved.get("sampler.load_failures.max_consecutive_n"),
         expert_selection_sha256=(None if spec.get("expert_selection_sha256") is None
                                  else str(spec["expert_selection_sha256"])),
         expert_trainable_sha256=(None if spec.get("expert_trainable_sha256") is None
@@ -958,8 +971,11 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         install_marker_signals(env)
     buffer.refresh()
     member_store = data_path.member_store
+    from .sampler_breakers import spec_breakers  # noqa: PLC0415
+
+    limits = spec_breakers(spec)  # the registry's sampler entries (yeto.breakers.layers.sampler)
     lease, lease_poll_s = incarnation_lease(spec, config.sampler_id, incarnation, member_store, environ,
-                                            buffer=buffer)
+                                            buffer=buffer, resolved=limits)
     if lease is not None and lease.take_shard() is not None:
         buffer.refresh()  # the resume point below sees every valid write of an earlier incarnation
     sweep_agentenv_orphans(spec, env, emit)  # the lease is ours: no earlier incarnation still runs trials
@@ -1003,15 +1019,14 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
     if resource_sampler is None:
         from .telemetry import ResourceSampler  # noqa: PLC0415
 
-        from .vram_guard import DEFAULT_HIGH_FRAC, DEFAULT_REALERT_S, VramWatch  # noqa: PLC0415
-
-        guard = spec.get("vram_guard") if isinstance(spec.get("vram_guard"), Mapping) else {}
+        from .vram_guard import VramWatch  # noqa: PLC0415
 
         def resource_sampler(sink: Callable[..., None]) -> Any:
             emit_ = lambda event, **fields: sink(event, **fields)  # noqa: E731
-            watch = VramWatch(emit_, high_frac=float(guard.get("high_frac", DEFAULT_HIGH_FRAC)),
-                              realert_s=float(guard.get("realert_s", DEFAULT_REALERT_S)))
-            kw = {"interval_s": float(guard["interval_s"])} if guard.get("interval_s") else {}
+            watch = VramWatch(emit_, high_frac=limits.get("sampler.vram_guard.high_frac_ratio"),
+                              realert_s=limits.get("sampler.vram_guard.realert_s"))
+            interval_s = limits.get("sampler.vram_guard.interval_s")
+            kw = {"interval_s": interval_s} if interval_s else {}
             return ResourceSampler(emit_, vram_watch=watch, **kw).start()
 
     telemetry = resource_sampler(emit)
@@ -1052,8 +1067,9 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
                                       reclaimed=lambda: reclaimed() or fenced(), incarnation=incarnation,
                                       resume=resume,
                                       data_cursor=getattr(prompts, "cursor", None), make_round=make_round)
-        if spec.get("write_defer_max_s") is not None:
-            island.round.write_defer_max_s = float(spec["write_defer_max_s"])
+        island.round.write_defer_max_s = limits.get("sampler.write_defer.limit_s")
+        island.loop.max_read_outage_s = limits.get("sampler.store_read_outage.limit_s")
+        island.loop.max_damaged_latest_reads = limits.get("sampler.store_read_outage.max_damaged_latest_n")
         latest = releases.latest()
         membership.join(tape=str(tape), latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
@@ -1148,10 +1164,14 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
             emit(FINALIZED_EVENT, rounds=rounds)
         return rounds
     except BaseException as error:
+        from .sampler_breakers import stop_reason_of  # noqa: PLC0415
+
+        tripped = stop_reason_of(error)  # a breaker that stops the sampler: "breaker:<name>"
         try:
             leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.FENCED if fenced()
                   else LeaveReason.INFRA_FAILED,
-                  error=f"{type(error).__name__}: {error}"[:300])
+                  error=f"{type(error).__name__}: {error}"[:300],
+                  **({} if tripped is None else {"stop_reason": tripped}))
         except Exception:  # noqa: BLE001 - the original error is the one to report
             pass
         raise
@@ -1181,7 +1201,8 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
 
 
 def incarnation_lease(spec: Mapping[str, Any], sampler_id: str, incarnation: str, default_store: Any,
-                      environ: Mapping[str, str] | None = None, *, buffer: Any = None) -> tuple[Any, float]:
+                      environ: Mapping[str, str] | None = None, *, buffer: Any = None,
+                      resolved: Any = None) -> tuple[Any, float]:
     """``(IncarnationLease | None, poll seconds)`` of ``spec["incarnation_lease"]``:
     absent or ``true`` = on, in the buffer store; ``false`` = off; a mapping may name
     ``store`` (another store path every incarnation reads, e.g. a shared bucket mount),
@@ -1190,23 +1211,25 @@ def incarnation_lease(spec: Mapping[str, Any], sampler_id: str, incarnation: str
     may stay unread before group writes are held back, default 60; null: no bound).
     ``buffer``: the sampler's shard writer; where its shard can hold ownership records
     they are the fence (``incarnation_lease`` module doc) and ``store`` /
-    ``write_check_s`` only place and pace the observation record."""
-    from .incarnation_lease import (DEFAULT_MAX_UNREAD_S, DEFAULT_POLL_S, DEFAULT_WRITE_CHECK_S,  # noqa: PLC0415
-                                    IncarnationLease)
+    ``write_check_s`` only place and pace the observation record. On and
+    ``max_unread_s`` are the registry's ``sampler.incarnation_lease`` (``resolved``:
+    the spec's resolved breakers, default resolved here)."""
+    from .incarnation_lease import DEFAULT_POLL_S, DEFAULT_WRITE_CHECK_S, IncarnationLease  # noqa: PLC0415
+    from .sampler_breakers import spec_breakers  # noqa: PLC0415
 
-    section = spec.get("incarnation_lease", True)
-    if section is False or section is None:
+    resolved = spec_breakers(spec) if resolved is None else resolved
+    if not resolved.enabled("sampler.incarnation_lease"):
         return None, DEFAULT_POLL_S
-    section = {} if section is True else dict(section)
+    section = spec.get("incarnation_lease", True)
+    section = dict(section) if isinstance(section, Mapping) else {}
     store = default_store
     if section.get("store"):
         from .resume import store_for  # noqa: PLC0415
 
         store = store_for(str(section["store"]), environ=environ)
-    max_unread_s = section.get("max_unread_s", DEFAULT_MAX_UNREAD_S)
     lease = IncarnationLease(store, sampler_id, incarnation, buffer=buffer,
                              write_check_s=float(section.get("write_check_s", DEFAULT_WRITE_CHECK_S)),
-                             max_unread_s=None if max_unread_s is None else float(max_unread_s))
+                             max_unread_s=resolved.get("sampler.incarnation_lease.max_unread_s"))
     return lease, float(section.get("poll_s", DEFAULT_POLL_S))
 
 
@@ -1373,6 +1396,11 @@ def main(argv: Sequence[str] | None = None, *, default_data_path: str | None = N
         print(f"[engine-sampler] spec rejected: {error}", file=sys.stderr)
         return 2
     except Exception as error:
+        from .sampler_breakers import stop_reason_of  # noqa: PLC0415
+
+        tripped = stop_reason_of(error)
+        if tripped is not None:  # the exit code stays the error's; the line names the breaker
+            print(f"[engine-sampler] stopped: stop_reason={tripped}", file=sys.stderr, flush=True)
         # after a reclaim, an ordinary error is most likely the teardown under way;
         # KeyboardInterrupt and SystemExit are not converted, and the original type
         # stays in the log line so a real failure can still be told apart

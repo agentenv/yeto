@@ -996,6 +996,9 @@ class StoreDispensedPrompts:
         # sandbox gate (yeto.sandbox.gate.SandboxGate): readiness filter and free capacity.
         # A runtime filter only: the plan (and so every sampler's slot sequence) is unchanged.
         self.gate = gate
+        # True: claim no new task, the claims in flight go on (the agentic round's
+        # infra streak, breaker sampler.infra_streak with action pause)
+        self.paused: Callable[[], bool] | None = None
         self._gate_dropped: set[int] = set()
         self._task_slots: dict[str, list[int]] | None = None
         self._waiting_capacity = False
@@ -1031,6 +1034,22 @@ class StoreDispensedPrompts:
             except Exception as error:  # noqa: BLE001 - the tape is advisory here
                 logger.warning("store dispenser: emit %s failed: %r", event, error)
 
+    def _ledger_end(self, event: str, **fields: Any) -> None:
+        """An attempt or a slot the scan ended (:meth:`StoreLedger.candidates`): its event,
+        and ``rl_breaker`` of the lease (``expired``) or the redo limit (``exhausted``)."""
+        from .sampler_breakers import trip  # noqa: PLC0415
+
+        self._emit(event, **fields)
+        slot = fields.get("slot")
+        if event == EXPIRED_EVENT:
+            trip(self._emit, "sampler.dispense_lease", round(float(fields["now"]) - float(fields["seen"]), 1),
+                 fields.get("lease_s"), legacy_event=event, scope={"slot": slot},
+                 detail=f"slot {slot} attempt {fields.get('attempt')}: no renewal, dispensed again")
+        elif event == SETTLE_EVENT and fields.get("state") == "exhausted":
+            trip(self._emit, "sampler.dispense_redo", self.ledger.max_redo + 1, self.ledger.max_redo,
+                 legacy_event=event, scope={"slot": slot},
+                 detail=f"slot {slot} exhausted after {fields.get('attempts')} attempts")
+
     def _is_fenced(self) -> bool:
         if self._retired:
             return True
@@ -1045,14 +1064,21 @@ class StoreDispensedPrompts:
              incarnation: str, input_key: str, label_key: str | None, groups_per_round: int,
              render: Callable[[Any], str] = str, task_key: str | None = None,
              lease_of_holder: Callable[[str], str | None] | None = None,
-             gate: Any = None, **kwargs: Any) -> "StoreDispensedPrompts":
+             gate: Any = None, limits: tuple[float, int] | None = None,
+             **kwargs: Any) -> "StoreDispensedPrompts":
         """``config`` (``prompts.dispense`` of the spec): ``backend: "store"``,
         ``namespace``, ``seed``, ``passes``, ``lease_s``, ``max_redo``, ``holdout``
         (a path on the sampler) or ``holdout_ids`` (inline), ``require_holdout``,
         ``mix`` / ``by_label`` / ``labels`` (streams), ``scan_s`` / ``max_scan_s``,
         ``full_scan`` (true: every scan lists the whole namespace; default: only the
-        unsettled slots, :data:`FULL_SCAN_ENV` overrides the default)."""
+        unsettled slots, :data:`FULL_SCAN_ENV` overrides the default). ``limits``:
+        ``(lease_s, max_redo)`` as the breaker registry resolved them from the whole
+        spec (``sampler.dispense_lease`` / ``sampler.dispense_redo``); default: from
+        ``config``."""
+        from .sampler_breakers import config_dispense_limits  # noqa: PLC0415
+
         check_store_config(config)
+        lease_s, max_redo = config_dispense_limits(config) if limits is None else limits
         with open(os.path.expanduser(str(path)), encoding="utf-8") as handle:
             rows = [json.loads(line) for line in handle if line.strip()]
         count, digest = file_fingerprint(path)
@@ -1082,8 +1108,7 @@ class StoreDispensedPrompts:
         slots = SlotMap(count, seed=seed, passes=passes, table=table)
         ledger = StoreLedger(ledger_objects(store), str(config.get("namespace") or DEFAULT_NAMESPACE),
                              rows=count, fingerprint=digest, holder=holder, incarnation=incarnation,
-                             seed=seed, passes=passes, lease_s=float(config.get("lease_s", DEFAULT_LEASE_S)),
-                             max_redo=int(config.get("max_redo", DEFAULT_MAX_REDO)),
+                             seed=seed, passes=passes, lease_s=lease_s, max_redo=max_redo,
                              holdout_sha256=holdout_sha, leases=leases, slots=slots,
                              lease_of_holder=lease_of_holder,
                              full_scan=None if config.get("full_scan") is None else bool(config["full_scan"]))
@@ -1259,6 +1284,8 @@ class StoreDispensedPrompts:
         if self._drain_seen is not None:
             self._emit(DRAIN_EVENT, state="resumed", seq=self._drain_seen)
             self._drain_seen = self._drain_answered = None
+        if self.paused is not None and self.paused():  # like a drain, for this process only
+            return [], False
         accept = self.accept
         view = None
         if self.gate is not None:
@@ -1276,7 +1303,7 @@ class StoreDispensedPrompts:
                 return False
 
         try:
-            candidates, ended = self.ledger.candidates(states, now, accept=accept, on_end=self._emit)
+            candidates, ended = self.ledger.candidates(states, now, accept=accept, on_end=self._ledger_end)
         except DispenseError:
             raise
         except Exception as error:  # noqa: BLE001 - an attempt it could not end: the next scan ends it

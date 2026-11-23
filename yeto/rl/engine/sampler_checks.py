@@ -58,6 +58,7 @@ from yeto.rl.quant.schemes import FP8_FFN_CHANNEL
 
 from .policy_release import LORA, PolicyRelease, ReleaseNotLoaded
 from .release_overlay import is_partial_release, overlay_release
+from .sampler_breakers import trip
 from .sampler_engine import SamplerEngine, SamplerEngineError, SamplingParams
 
 # Routed-expert matrices of GLM5.3-Flash as the GLM inference report counts them.
@@ -443,6 +444,8 @@ class PortReleaseLoader:
                   failures=self.failures, max_consecutive_failures=self.max_consecutive_failures,
                   **fields)
         if self.failures >= self.max_consecutive_failures:
+            trip(self.emit, "sampler.load_failures", self.failures, self.max_consecutive_failures,
+                 detail=f"{step} for v{version}", legacy_event="SamplerLoadFatal")
             raise SamplerLoadFatal(f"post-load checks failed {self.failures} times in a row "
                                    f"(last: {step} for v{version}): {str(detail)[:300]}")
 
