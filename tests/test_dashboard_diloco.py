@@ -3,6 +3,8 @@ static/topology_diloco.js), checked against trimmed real tapes:
 
 * ``async-e2e`` / ``async-compaction``: async GRPO (one trainer, two cross-island samplers, no
   syncer): the V1 drawing, its view identical to the one main computed (``*.v1-golden.json``);
+  their trainer tapes keep ``rl_heartbeat`` / ``trainer_start_phase`` and the earlier launches
+  (``events/previous/``), so a live replay sees the trainer as alive as the run did;
 * ``run-a``: decoupled DiLoCo, two colocated islands (island 1 relaunched once);
 * ``run-b``: decoupled DiLoCo, two fixed-partition islands (2 cards each);
 * ``k31-synced-group``: full-parameter synced group, 2 trainers + 2 samplers, shared store,
@@ -29,9 +31,14 @@ from yeto.dashboard.sources import load_all
 D = FX / "diloco"
 
 
+def tapes(name: str) -> list[str]:
+    # ``events/`` as ``run_sources`` passes it: the earlier launches under ``events/previous/<stamp>/``
+    return [str(D / name), str(D / name / "events")]
+
+
 def load(name: str, *, skip=lambda path: False) -> Reducer:
     r = Reducer(run=name)
-    paths = [p for p in sources.discover([str(D / name)]) if not skip(p)]
+    paths = [p for p in sources.discover(tapes(name)) if not skip(p)]
     load_all(r, [str(p) for p in paths])
     return r
 
@@ -70,6 +77,40 @@ def test_async_grpo_view_is_unchanged(name):
         assert view.get("topology") == want["topology"], when
         got = [{k: a[k] for k in ("sev", "rule", "title", "detail", "island")} for a in view["overview"]["alerts"]]
         assert got == want["alerts"], when
+
+
+LIVENESS_RULES = ("heartbeat", "startup", "startup_step")
+
+
+def _record_ts(rec: dict) -> float | None:
+    v = rec.get("time_unix", rec.get("ts"))
+    return float(v) if isinstance(v, (int, float)) else None
+
+
+@pytest.mark.parametrize("name", ["async-e2e", "async-compaction"])
+def test_async_grpo_live_replay_raises_no_liveness_alert(name):
+    """Replayed live (records in time order, the page read every 30 s from the first record to an
+    hour after the last), a healthy async GRPO run never reads as a stalled or slow-starting
+    island: not mid-run, not while the trainer finishes, releases and leaves, not after."""
+    recs = []
+    for src in (sources.make_source(p) for p in sources.discover(tapes(name))):
+        last = 0.0
+        for off, rec in src.read_new():
+            last = (_record_ts(rec) if isinstance(rec, dict) else None) or last
+            recs.append((last, src, off, rec))
+    recs.sort(key=lambda x: x[0])
+    first, end = min(t for t, *_ in recs if t), recs[-1][0]
+    r, i, seen, t = Reducer(run=name), 0, [], first
+    while t <= end + 3600:
+        while i < len(recs) and recs[i][0] <= t:
+            _, src, off, rec = recs[i]
+            r.feed(rec, source=src.name, offset=off, island=src.island, node=src.node,
+                   island_fixed=src.island_fixed)
+            i += 1
+        seen += [(round(t - end), a["title"], a["detail"]) for a in r.overview(now=t)["alerts"]
+                 if a["rule"] in LIVENESS_RULES]
+        t += 30
+    assert i == len(recs) and seen == []
 
 
 def test_a_stray_syncer_tape_does_not_turn_async_into_diloco(tmp_path):

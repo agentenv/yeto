@@ -73,7 +73,7 @@
      "policy_version": 25,
      "reason": "STOPPED",
      "starting": false,
-     "status": "left",
+     "status": "done",
      "step": 25
     }
    ],
@@ -125,6 +125,21 @@
      "n": 8,
      "s": "qwen4b-e2e-1123-0",
      "t": 1795422392.081138
+    },
+    {
+     "i": "0",
+     "k": "r",
+     "m": 8,
+     "t": 1795422393.1488318
+    },
+    {
+     "b": 8060901581.0,
+     "i": "0",
+     "k": "u",
+     "kind": "full",
+     "t": 1795422395.3600192,
+     "u0": 1795422354.1780193,
+     "v": 12
     },
     {
      "k": "g",
@@ -189,6 +204,21 @@
      "n": 8,
      "s": "qwen4b-e2e-1123-0",
      "t": 1795422668.8615663
+    },
+    {
+     "i": "0",
+     "k": "r",
+     "m": 8,
+     "t": 1795422672.5203593
+    },
+    {
+     "b": 211450731.0,
+     "i": "0",
+     "k": "u",
+     "kind": "delta",
+     "t": 1795422683.538794,
+     "u0": 1795422667.574794,
+     "v": 13
     },
     {
      "k": "g",
@@ -267,10 +297,32 @@
      "n": 8,
      "s": "qwen4b-e2e-1123-0",
      "t": 1795422872.1547046
+    },
+    {
+     "i": "0",
+     "k": "r",
+     "m": 8,
+     "t": 1795422874.2687247
+    },
+    {
+     "b": 8060901581.0,
+     "i": "0",
+     "k": "u",
+     "kind": "full",
+     "t": 1795422876.4100296,
+     "u0": 1795422837.4970295,
+     "v": 14
     }
    ],
-   "last_release": null,
-   "latest": null,
+   "last_release": {
+    "bytes": 8060901581.0,
+    "delta_ratio": null,
+    "kind": "full",
+    "ts": 1795422876.4100296,
+    "upload_s": 38.913,
+    "v": 14
+   },
+   "latest": 14,
    "now": 1795422891.332,
    "rate_s": 300.0,
    "samplers": [
@@ -280,7 +332,7 @@
      "engine": "vLLM",
      "gpus": 1,
      "id": "qwen4b-e2e-1123-0",
-     "lag": null,
+     "lag": -6,
      "last_group_ts": 1795422872.1547046,
      "live": false,
      "policy_version": 20,
@@ -298,7 +350,7 @@
      "engine": "vLLM",
      "gpus": 1,
      "id": "qwen4b-e2e-1123-1",
-     "lag": null,
+     "lag": -6,
      "last_group_ts": 1795424601.1152625,
      "live": false,
      "policy_version": 20,
@@ -320,12 +372,12 @@
      "id": "0",
      "live": false,
      "name": "qwen4b-e2e-1123-l0-modal",
-     "phase": null,
-     "phase_since": null,
+     "phase": "syncing",
+     "phase_since": 1795422885.479153,
      "policy_version": 25,
      "reason": "STOPPED",
      "starting": false,
-     "status": "left",
+     "status": "done",
      "step": 25
     }
    ],
