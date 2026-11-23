@@ -158,4 +158,7 @@ def evaluate(reducer, now: float, cards: list[dict]) -> list[dict[str, Any]]:
     d = topology_diloco.current(reducer, cards, now)
     if d is None or d["kind"] == "sft":  # the SFT page has its own island status and syncer problems
         return []
-    return [a for rule in RULES for a in rule(d, now)]
+    from .island_starvation import starved  # reads the merge records, not only this view
+
+    merges = topology_diloco.merge_rows(reducer, now, max(1, d.get("N") or 1))
+    return [a for rule in RULES for a in rule(d, now)] + starved(d, now, merges)
