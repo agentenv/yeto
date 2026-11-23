@@ -31,7 +31,7 @@ SAMPLER_WAIT_EVENTS = {"rl_sampler_backlog_full": "backlog full (trainers behind
                        "rl_sampler_waiting_policy": "waiting for a policy release"}
 SAMPLER_END_EVENTS = frozenset({"rl_sampler_stopped", "rl_sampler_data_end"})
 TRAINER_EVENTS = frozenset({"rl_round_trained", "rl_driver_start", "rl_group_policies",
-                            "rl_buffer_stale_skipped", "rl_policy_released",
+                            "rl_buffer_stale_skipped", "rl_policy_released", "rl_policy_release_skipped",
                             "rl_buffer_unidentified_policy_skipped"})
 # sampler-reported reward/length summary keys (rl_sampler_engine_round)
 # the sample-buffer reader's short-group handling per round (rl_buffer_stale_skipped)
@@ -419,6 +419,12 @@ class AsyncState:
             # the reader reads groups and keeps none (groups of versions no record names)
             t["unidentified_starved"] = {"ts": ts, "selections": r.get("selections"),
                                          "groups": r.get("unidentified_policy_groups_total")}
+            return
+        if ev == "rl_policy_release_skipped":
+            # a release skipped because the previous one is still uploading (--rl-release-skip-busy)
+            if r.get("reason") == "upload_in_flight" and ts is not None:
+                t.setdefault("upload_skips", []).append({"ts": ts, "policy_version": r.get("policy_version")})
+                del t["upload_skips"][:-200]
             return
         if ev == "rl_policy_released":
             origin = r.get("origin") if isinstance(r.get("origin"), dict) else {}

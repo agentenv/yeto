@@ -83,6 +83,9 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # a sampler waiting on a full backlog (as it counts it) while the trainers' read
     # position leaves less than its cap: it reported within this many seconds
     "stale_read_recent_s": 300.0,
+    # a trainer skipping releases because the previous upload is still in flight, with no
+    # release since the first skip of the streak, for this long
+    "release_stall_warn_s": 600.0,
 }
 
 
@@ -460,6 +463,32 @@ def stale_read_position(reducer, th: dict, now: float) -> list[dict]:
     return out
 
 
+def release_stalled(reducer, th: dict, now: float, stale: list[dict]) -> list[dict]:
+    state = getattr(reducer, "async_", None)
+    if state is None:
+        return []
+    out = []
+    for iid, t in sorted(state.trainer.items()):
+        last_rel = max((r["ts"] for r in state.releases if r.get("trainer") == iid and r.get("ts") is not None),
+                       default=None)
+        streak = [x for x in t.get("upload_skips") or [] if last_rel is None or x["ts"] > last_rel]
+        if not streak or now - streak[0]["ts"] <= th["release_stall_warn_s"]:
+            continue
+        versions = ", ".join(f"v{x['policy_version']}" for x in streak[-5:])
+        detail = (f"a policy release has been uploading for over {(now - streak[0]['ts']) / 60:.0f} min: the "
+                  f"trainer skipped {len(streak)} release(s) since ({versions}) and wrote no rl_policy_released")
+        if stale:  # samplers wait for this release to learn the read position: the loop stands still
+            detail += "; samplers wait for it (stale read position), so nothing is generated or trained"
+        out.append(_alert(0 if stale else 1, "release_stalled", f"trainer {iid}: policy release stuck uploading",
+                          detail, island=iid))
+    return out
+
+
+def _with_release(reducer, th: dict, now: float) -> list[dict]:
+    stale = stale_read_position(reducer, th, now)
+    return stale + release_stalled(reducer, th, now, stale)
+
+
 def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict],
              store: dict | None = None) -> list[dict]:
     th = reducer.thresholds
@@ -467,7 +496,7 @@ def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
               + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
               + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)
-              + stale_read_position(reducer, th, now)
+              + _with_release(reducer, th, now)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
     alerts.sort(key=lambda a: a["sev"])
     for i, a in enumerate(alerts):

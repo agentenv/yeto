@@ -350,3 +350,23 @@ def test_a_new_sampler_incarnation_is_not_done():
         reducer.feed(rec, source="t", offset=i)
     card = next(c for c in reducer.overview(now=T0 + 140)["islands"] if c["id"] == "s1")
     assert card["status"] not in ("done", "stopped", "left")
+
+
+def test_a_release_stuck_uploading_warns_and_is_critical_when_samplers_wait_for_it():
+    base = _stale_read_records()
+    skip = {"event": "rl_policy_release_skipped", "island_id": 0, "policy_version": 2,
+            "reason": "upload_in_flight", "local_version": 2, "time_unix": T0 + 50}
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(base + [skip]):
+        reducer.feed(rec, source="t", offset=i)
+    assert not [a for a in reducer.overview(now=T0 + 300)["alerts"] if a["rule"] == "release_stalled"]
+    crit = [a for a in reducer.overview(now=T0 + 700)["alerts"] if a["rule"] == "release_stalled"]
+    # the sampler's report is older than stale_read_recent_s by now: only the release alert remains
+    assert len(crit) == 1 and crit[0]["sev"] == 1 and "v2" in crit[0]["detail"]
+    reducer.feed({"event": "rl_sampler_waiting", "sampler_id": "s1", "incarnation": "a1", "rollout_id": 9,
+                  "reason": "backlog_full", "backlog_groups": 17, "time_unix": T0 + 690}, source="t", offset=999)
+    crit = [a for a in reducer.overview(now=T0 + 700)["alerts"] if a["rule"] == "release_stalled"]
+    assert len(crit) == 1 and crit[0]["sev"] == 0 and "nothing is generated" in crit[0]["detail"]
+    reducer.feed({"event": "rl_policy_released", "island_id": 0, "policy_version": 1, "buffer_selected": 16,
+                  "time_unix": T0 + 710}, source="t", offset=1000)
+    assert not [a for a in reducer.overview(now=T0 + 720)["alerts"] if a["rule"] == "release_stalled"]
