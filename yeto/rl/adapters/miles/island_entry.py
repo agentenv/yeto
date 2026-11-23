@@ -863,9 +863,10 @@ def _configure_generic_partial_experts(args, provider) -> tuple[str, ...]:
     """Generic partial experts (an ``in_place`` selection, any MoE model the Bridge reads).
 
     Checks the selection against the provider's MoE geometry and the run's EP,
-    exports the switches every Ray worker's ``sitecustomize`` reads, arms the
-    model-provider hook here, and returns the Miles argv that freezes the
-    router's expert bias."""
+    sets the switches every Ray worker's ``sitecustomize`` reads (Ray started
+    before this runs, so ``connect_island_ray`` forwards them through the job's
+    ``runtime_env``), arms the model-provider hook here, and returns the Miles
+    argv that freezes the router's expert bias."""
 
     from yeto.rl.adapters.miles.models.partial_experts import in_place as partial_experts
     from yeto.rl.moe_geometry import from_bridge_provider
