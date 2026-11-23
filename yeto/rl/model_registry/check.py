@@ -575,11 +575,42 @@ def launch_argv(req: CheckRequest, recipe: str, rec: dict[str, Any]) -> list[str
     return argv
 
 
+def node_shape(req: CheckRequest, recipe: str) -> tuple[int, int]:
+    """``(nodes, GPUs per node)`` of one island on Modal.
+
+    An island larger than one whole node of the card (``MODAL_FULL_NODE``, the rule
+    ``validate_modal_shape`` enforces) is split into whole nodes: 48 B300 -> 6x8. A total
+    the card's node size does not divide, or a card without a whole-node size, is left as
+    one container (``island_shape_item`` warns)."""
+    from yeto.gpu_spec import UnknownCard, canonical_card
+    from yeto.modal_runner import MODAL_FULL_NODE
+
+    nodes, per_node = island_nodes(req, recipe), req.gpus_per_island
+    total = nodes * per_node
+    try:
+        full = MODAL_FULL_NODE.get(canonical_card(req.card))
+    except UnknownCard:
+        full = None
+    if full and total > full and total % full == 0:
+        return total // full, full
+    return nodes, per_node
+
+
+def island_shape_item(req: CheckRequest, recipe: str) -> CheckItem | None:
+    """WARN when the suggested island is not a shape Modal schedules (1-8 GPUs per container,
+    whole nodes when there is more than one)."""
+    nodes, per_node = node_shape(req, recipe)
+    if per_node <= 8:
+        return None
+    return CheckItem("hardware", WARN, f"{nodes * per_node} GPUs per island is not a whole number of "
+                     f"{req.card} nodes (yeto/modal_runner.py validate_modal_shape)",
+                     "--gpus-per-island a multiple of the card's GPUs per node", ESTIMATE)
+
+
 def gpu_spec(req: CheckRequest, recipe: str) -> str:
-    """The ``--gpu`` of the cell (Modal H100 islands; recipes with two-node islands)."""
-    nodes = island_nodes(req, recipe)
-    island = f"modal:{nodes}x{req.gpus_per_island}x{req.card.lower()}" if nodes > 1 else \
-        f"modal:1x{req.gpus_per_island}x{req.card.lower()}"
+    """The ``--gpu`` of the cell: Modal islands split into whole nodes (see ``node_shape``)."""
+    nodes, per_node = node_shape(req, recipe)
+    island = f"modal:{nodes}x{per_node}x{req.card.lower()}"
     return ",".join([island] * (1 if req.preset == "single-island" else req.islands))
 
 
@@ -666,6 +697,9 @@ def check_model(hf_config: dict, request: CheckRequest, *, model: str = "<model>
     items += _lora_items(req, recipe, profile)
     items.append(_layout_item(req, recipe, profile))
     items.append(_naming_item(profile, weight_names))
+    shape = island_shape_item(req, recipe)
+    if shape is not None:
+        items.append(shape)
     report = CheckReport(model=model, request=replace(req, preset="decoupled") if routed else req, recipe=recipe,
                          profile=profile, items=items)
     report._config = hf_config  # type: ignore[attr-defined]
