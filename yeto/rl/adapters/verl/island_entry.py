@@ -78,8 +78,14 @@ def parse_args(argv):
                    default="none")
     p.add_argument("--rl-algorithm-spec", default=None)
     # the launcher's sync preset; one the island does not run is refused
-    # (run_config_rules.island_sync_preset_problem), never dropped
+    # (run_config_rules.island_sync_preset_problem), never dropped. "decoupled"
+    # runs the LoRA fragment session (.decoupled_session) with the flags below
     p.add_argument("--sync-preset", default=None)
+    p.add_argument("--completed-groups-path", default=None)
+    p.add_argument("--source-sha256", default=None)
+    p.add_argument("--reward-sha256", default=None)
+    p.add_argument("--initial-adapter", default=None)
+    p.add_argument("--initial-adapter-sha256", default=None)
     p.add_argument("--rl-island-pool", action="store_true")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
     p.add_argument("--rl-sync-island-lease-s", type=float, default=None)
@@ -815,8 +821,12 @@ def main(argv=None) -> int:
         run, overrides = fsdp_island_run(args, model_path=model_path, train_file=train_file,
                                          val_file=val_file, out_dir=str(work / "out"), algo=algo, chat=chat,
                                          ray_info=ray_info, max_prompt=max_prompt, limit=limit, pools=pools)
+    from . import decoupled_session
+
     if args.rl_single_island_no_sync:
         sync = "none"
+    elif decoupled_session.requested(args):
+        sync = "decoupled"  # an island pool rides in the decoupled bridge (plan_section)
     elif args.rl_island_pool:
         sync = "pool"
     else:
@@ -829,6 +839,15 @@ def main(argv=None) -> int:
         resume = resume_config(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    decoupled_plan: dict = {}
+    if decoupled_session.requested(args):
+        problems = decoupled_session.island_problems(
+            args, megatron=megatron is not None, buffer_trainer=buffer_section is not None,
+            max_policy_age=limit, rollout_ahead=ahead, separate=pools is not None, resume=resume)
+        if problems:
+            raise SystemExit("a verl decoupled island needs: " + "; ".join(problems))
+        decoupled_plan = {decoupled_session.PLAN_KEY: decoupled_session.plan_section(
+            args, trainer_gpus=run.n_gpus)}
     full_plan: dict = {}
     if full and (megatron is None or sync != "none"
                  or buffer_section is not None):  # model identity, and the outer
@@ -911,7 +930,7 @@ def main(argv=None) -> int:
         "learner_id": lid, "sync": sync, "syncer": args.syncer, "global_rounds": args.global_rounds,
         "groups_per_round": args.groups_per_round, "samples_per_group": args.samples_per_group,
         "model_path": model_path, "model_revision": args.model_revision, "lora_rank": run.lora_rank,
-        "parameter_mode": args.parameter_mode, **full_plan,
+        "parameter_mode": args.parameter_mode, **full_plan, **decoupled_plan,
         "lora_targets": args.lora_targets, "event_tape": os.path.expanduser(args.event_tape),
         "out_dir": str(OUTPUT), "tis_upper": algo["tis_upper"], "wan_streams": args.wan_streams,
         "bcast_delta": bool(args.bcast_delta),

@@ -199,41 +199,63 @@ def check_eval(args) -> None:
                          "(no evaluate hook on that path)")
 
 
-# The sync presets a verl island runs (``island_entry.sync_mode``). ``decoupled`` is
-# the LoRA fragment session (``yeto.rl.engine.bridges.DecoupledSync``), which the verl
-# island does not run; full parameters take the multi-fragment asynchronous session
-# of the full-parameter preset instead.
-ISLAND_SYNC_PRESETS = ("strict-avg", "full-parameter", "dense-full")
-DECOUPLED_LORA_REFUSED = (
-    "--rl-sync-preset decoupled with --tuning lora is not wired on the verl backend yet (the verl island "
-    "has no LoRA fragment session; it lands in a follow-up). For full parameters use --tuning full with "
-    "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async, the multi-fragment asynchronous "
-    "counterpart of decoupled; for LoRA use --rl-sync-preset strict-avg, or --rl-backend miles")
+# The sync presets a verl island runs (``island_entry.main`` picks the session).
+# ``decoupled`` is the LoRA fragment session (``yeto.rl.engine.bridges.DecoupledSync``
+# over the verl ports, ``.decoupled_session``) on the synchronous colocated FSDP2
+# island; full parameters take the multi-fragment asynchronous session of the
+# full-parameter preset instead.
+ISLAND_SYNC_PRESETS = ("strict-avg", "decoupled", "full-parameter", "dense-full")
+
+
+def decoupled_problems(args) -> list[str]:
+    """Why a verl launch cannot run ``--rl-sync-preset decoupled`` ([] when it can); the
+    island refuses the same shapes again (``decoupled_session.island_problems``)."""
+    from yeto.launch.rl_ports import island_cuts_requested
+
+    problems = []
+    if getattr(args, "tuning", "lora") != "lora":
+        problems.append("--tuning lora (full parameters: --rl-sync-preset full-parameter "
+                        "--rl-sync-full-parameter-rounds async)")
+    if megatron_run(args):
+        problems.append("TP=PP=EP=CP=1 (the FSDP2 island; the Megatron island trains full parameters)")
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) or int(getattr(args, "rl_rollout_ahead", 0) or 0):
+        problems.append("--rl-max-policy-age 0 without --rl-rollout-ahead (the synchronous trainer)")
+    if getattr(args, "rl_placement", "colocated") != "colocated":
+        problems.append("--rl-placement colocated")
+    if ((getattr(args, "rl_sample_role", None) or "both") != "both"
+            or getattr(args, "rl_island_sample_role", None)):
+        problems.append("no sampler / buffer-trainer split")
+    if island_cuts_requested(args):
+        problems.append("no island round cuts (the island's progress file is its restart record)")
+    return problems
 
 
 def check_sync_preset(args) -> None:
-    """Launcher side: refuse a sync preset the verl island would not run.
-
-    Before this check the island dropped ``--sync-preset`` (``parse_known_args``) and
-    ran strict-avg against a decoupled syncer."""
+    """Launcher side: refuse a sync preset, or a decoupled shape, the verl island would
+    not run. (Before this check the island dropped ``--sync-preset``, parsed with
+    ``parse_known_args``, and ran strict-avg against a decoupled syncer.)"""
     if getattr(args, "rl_single_island_no_sync", False):
         return
     preset = getattr(args, "rl_sync_preset", None) or "strict-avg"
-    if preset == "decoupled":
-        raise ValueError(DECOUPLED_LORA_REFUSED)
     if preset not in ISLAND_SYNC_PRESETS:
         raise ValueError(f"--rl-sync-preset {preset} is not run by the verl island (it runs "
                          + ", ".join(ISLAND_SYNC_PRESETS) + ")")
+    if preset == "decoupled":
+        problems = decoupled_problems(args)
+        if problems:
+            raise ValueError("--rl-sync-preset decoupled on the verl backend covers the synchronous "
+                             "colocated LoRA island; missing: " + "; ".join(problems))
 
 
 def island_sync_preset_problem(preset: str | None, *, parameter_mode: str) -> str | None:
     """Island side of :func:`check_sync_preset` (an island started without the launcher,
     or by an older one): why ``--sync-preset`` cannot run here, None when it can.
     None (the flag absent) keeps the island's own choice."""
-    if preset is None or preset in ISLAND_SYNC_PRESETS:
-        if preset in ("full-parameter", "dense-full") and parameter_mode != "full":
-            return f"--sync-preset {preset} needs --parameter-mode full"
-        return None
-    if preset == "decoupled":
-        return DECOUPLED_LORA_REFUSED
-    return f"--sync-preset {preset} is not run by the verl island (it runs " + ", ".join(ISLAND_SYNC_PRESETS) + ")"
+    if preset is not None and preset not in ISLAND_SYNC_PRESETS:
+        return f"--sync-preset {preset} is not run by the verl island (it runs " + ", ".join(ISLAND_SYNC_PRESETS) + ")"
+    if preset in ("full-parameter", "dense-full") and parameter_mode != "full":
+        return f"--sync-preset {preset} needs --parameter-mode full"
+    if preset == "decoupled" and parameter_mode != "lora":
+        return ("--sync-preset decoupled needs --parameter-mode lora (full parameters: --sync-preset "
+                "full-parameter --full-parameter-rounds async)")
+    return None

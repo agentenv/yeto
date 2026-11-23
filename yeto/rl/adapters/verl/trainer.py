@@ -172,7 +172,8 @@ def publish_selftest(island, publisher, policy_state, specs) -> dict:
 
 def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_sha256: str,
                compat_group: str | None = None):
-    """Outer sync of the island plan: none / strict / pool (both trainer paths)."""
+    """Outer sync of the island plan: none / strict / pool (both trainer paths), or
+    decoupled LoRA fragments (the synchronous trainer, ``.decoupled_session``)."""
     from yeto.rl.engine.bridges import LocalOnlySync, PoolAvgSync, StrictAvgSync
 
     learner_id = int(plan["learner_id"])
@@ -180,6 +181,11 @@ def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_
     rounds = int(plan["global_rounds"])
     if mode == "none":
         sync = LocalOnlySync(rounds)
+    elif mode == "decoupled":
+        from .decoupled_session import build_sync as build_decoupled_sync
+
+        sync = build_decoupled_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash,
+                                    identity_sha256=identity_sha256, compat_group=compat_group)
     else:
         from yeto.rl.bridge import BridgeConfig
 
@@ -319,6 +325,11 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         from .separate import driver_options as separate_driver_options
 
         driver_options.update(separate_driver_options(plan, spec, driver_options["capabilities"]))
+    from .decoupled_session import progress_for
+
+    progress = progress_for(sync)  # decoupled: the schema-4 progress file, as on Miles
+    if progress is not None:
+        driver_options["progress"] = progress
     dispense = None
     if plan.get("dispense"):  # The rows come from the task dispenser
         from .task_dispense import install as install_dispense
@@ -399,6 +410,8 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
     from .identity import backend_identity
     from .ports_impl import VerlPolicyState
 
+    if plan.get("sync") == "decoupled":  # island_entry refuses it first (decoupled_session)
+        raise ValueError("the decoupled session runs on the synchronous verl trainer only")
     t0 = time.time()
     learner_id = int(plan["learner_id"])
     limit = int(plan["max_policy_age"])
