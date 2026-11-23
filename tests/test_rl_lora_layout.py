@@ -217,3 +217,75 @@ def test_the_export_tool_reads_the_layout_the_checkpoint_records(tmp_path, monke
     assert pick(plain) == plain  # PEFT's own selection (other backends)
     peft_raises = True
     assert pick(plain) == routed  # no PEFT layout to fall back to: the caller's layout check refuses it
+
+
+def _model(tmp_path, family: str) -> str:
+    if family in ("qwen3", "qwen3_moe"):
+        return _config(tmp_path, moe=family == "qwen3_moe")
+    return _family(tmp_path, family)
+
+
+# canonical_layout_hash of a Miles island's offline layout (rank 4), recorded with
+# PEFT 0.20.0 (the Miles image's). Where PEFT keeps the targets, PEFT 0.19.1, 0.20.0
+# and 0.21.0 give the same specs through get_peft_model; PEFT's own all-linear on
+# these mixture-of-experts layouts differs across those versions (stacked experts,
+# dropped MLPs, or an error), which is why the island does not ask PEFT for it.
+_OFFLINE_LAYOUTS = {
+    ("qwen3", "all-linear"): "1d7c7246321852cb16dd863b03c7c98c8945070845fb83452a1c17a5672ffdad",
+    ("qwen3", "attention"): "f6da69edd175cc748bdeaf4ecf4df4ea42667dd02f1bd11c41704a6298032e21",
+    ("qwen3", "q_proj,o_proj"): "d3baaf048d44889dcd39d26ae9caa59491af0b33b4c79b2093deadab95761f52",
+    ("qwen3_moe", "all-linear"): "1e914042337d37ad8935d733c92e9ebffb1d849ae1b9a8995af09d0ba690345e",
+    ("qwen3_moe", "attention"): "f6da69edd175cc748bdeaf4ecf4df4ea42667dd02f1bd11c41704a6298032e21",
+    ("deepseek_v3", "all-linear"): "e5cd5c27a8943967aee8812b99dba6c919ac12301ae915f764cd2d6418e8ef64",
+    ("deepseek_v3", "attention"): "1c00ebc52dec4221fd07cd5db80dbaae169fca701e2d215e79ca7b9552d34328",
+    ("deepseek_v3", "q_proj,o_proj"): "abda873f7c4ffd871e080e9a527656746aa793d627f44fd102fc04c7336d98cf",
+    ("glm4_moe", "all-linear"): "0ab0026cd3e1c2a69dac3b77135181ac219ffd48c902e3ab60947db113688ca2",
+    ("glm4_moe", "attention"): "f6da69edd175cc748bdeaf4ecf4df4ea42667dd02f1bd11c41704a6298032e21",
+}
+
+
+def _targets(choice: str):
+    return choice.split(",") if "," in choice else choice
+
+
+@pytest.mark.parametrize(("family", "choice"), sorted(_OFFLINE_LAYOUTS))
+def test_offline_layout_does_not_follow_the_installed_peft(tmp_path, monkeypatch, family, choice):
+    """The layout a Miles island binds is the image's whatever PEFT this
+    environment has: it is computed without running PEFT."""
+
+    import peft
+
+    from yeto.rl.core import canonical_layout_hash
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the offline Miles layout must not depend on the installed PEFT")
+
+    monkeypatch.setattr(peft, "get_peft_model", refuse)
+    specs = lora_layout.offline_canonical_specs(None, rank=4, targets=_targets(choice),
+                                                model_path=_model(tmp_path, family))
+    assert canonical_layout_hash(specs) == _OFFLINE_LAYOUTS[family, choice]
+
+
+@pytest.mark.parametrize("family", ["qwen3", "qwen3_moe", "deepseek_v3", "glm4_moe"])
+@pytest.mark.parametrize("choice", ["attention", "q_proj,o_proj", "all-linear"])
+def test_offline_layout_equals_peft_where_peft_keeps_the_targets(tmp_path, family, choice):
+    """Against the installed PEFT's get_peft_model: equal wherever no routed experts are adapted."""
+
+    path = _model(tmp_path, family)
+    ours = lora_layout.offline_canonical_specs(None, rank=4, targets=_targets(choice), model_path=path)
+    if lora_layout.has_expert_specs(ours):
+        pytest.skip("routed experts: PEFT's own layout is stacked or version dependent")
+    assert ours == derive_peft_lora_specs(path, None, rank=4, targets=_targets(choice))
+
+
+def test_linear_target_modules_defers_to_peft_beyond_nn_linear(tmp_path):
+    from accelerate import init_empty_weights
+    from transformers import AutoConfig, AutoModelForCausalLM, GPT2Config
+
+    path = tmp_path / "gpt2"
+    GPT2Config(n_layer=1, n_embd=32, n_head=2, vocab_size=64, architectures=["GPT2LMHeadModel"]).save_pretrained(path)
+    with init_empty_weights():
+        model = AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(path))
+    assert lora_layout.linear_target_modules(model, "all-linear") is None  # Conv1D
+    assert lora_layout.linear_target_modules(model, ["c_attn"]) is None
+    assert lora_layout.linear_target_modules(model, ["nothing"]) is None
