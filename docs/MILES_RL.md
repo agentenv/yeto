@@ -48,7 +48,7 @@ The supported model and runtime contract is deliberately narrow:
 | dimension | supported value |
 | --- | --- |
 | model | causal language model |
-| tuning | LoRA (`strict-avg`, `decoupled`); full parameters (`--tuning full`) with the `full-parameter` or `sao-streaming-full` preset, or on a `--rl-single-island-no-sync` island |
+| tuning | LoRA (`strict-avg`, `decoupled`); full parameters (`--tuning full`) with the `full-parameter` or `sao-streaming-full` preset, `decoupled` (routed to `full-parameter` async rounds, see [Routing by trainable form](#routing-by-trainable-form)), or on a `--rl-single-island-no-sync` island |
 | learner | pinned Miles with Megatron-Core |
 | rollout | colocated SGLang (`--rl-placement fixed-partition` is also available for LoRA and is used by the multi-node and elastic paths) |
 | optimization | GRPO plus the declared GRPO-family mechanisms (see [RL_ALGORITHMS.md](RL_ALGORITHMS.md)); critic algorithms (PPO, VAPO, SAO, CompactionRL) run on a single island without outer sync only |
@@ -237,6 +237,42 @@ for the table above, or any `--rl-sync-*` option to override one value; the
 dry run prints the effective syncer command.
 
 `--experimental-rl-sync` cannot be combined with this preset.
+
+### Routing by trainable form
+
+`--rl-sync-preset decoupled` names asynchronous multi-fragment outer
+synchronization for every trainable form. The launcher routes it once, before
+any other rule reads the preset (`yeto.rl.engine.sync_route`), and prints the
+route when it changes the preset:
+
+| trainable form | runs on | preset after routing |
+| --- | --- | --- |
+| LoRA (`--tuning lora`) | the LoRA fragment stack described in this section | `decoupled` (unchanged) |
+| full parameters (`--tuning full`), including partial routed experts (`--rl-expert-selection`) | the full-parameter stack with asynchronous fragment rounds | `full-parameter`, `--rl-sync-full-parameter-rounds async` |
+| expert-full LoRA hybrid (`--expert-full-count`) | the full-parameter stack with asynchronous fragment rounds | `full-parameter`, `--rl-sync-full-parameter-rounds async` |
+
+A routed run produces the same syncer and island commands as the explicit
+`--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async`
+launch; `--pipeline` becomes `--rl-sync-fragment-pipeline` (bounded by
+`--fragments`) when the latter is unset. `--rl-sync-full-parameter-rounds
+sweep` with `decoupled` is refused (the strict sweep is the explicit
+`full-parameter` preset). `--rl-single-island-no-sync` islands are never
+routed. The launcher provenance of a routed run records
+`sync_preset_requested` and `sync_route`.
+
+The two stacks share the algorithm (one version per fragment, merge alpha 0,
+`T = N * P` outer steps, quorum, grace and outer Nesterov from the sync
+mode). They differ where the trainable state differs:
+
+| | LoRA fragment stack | full-parameter stack (async rounds) |
+| --- | --- | --- |
+| tensors | canonical PEFT LoRA, CPU f32, binpack fragments | each rank's FP32 masters, owner-affine fragments; experts by global index |
+| wire | f32 | `int4` by default in `--rl-sync-mode async`, f32 in `strict` |
+| sync-mode defaults | quorum, grace, outer step from the mode | the same, plus terminal grace, `int4`, peer recovery |
+| rollout token | `yeto:<rollout_id>:<policy_hash>` over the complete LoRA | the same token; the hash is over the trainer's published policy |
+| island tape | `rl_local_round`, `rl_fragment_push`, `rl_fragment_bcast` | `rl_full_parameter_round` (`sync/fragment_versions`, push and apply timings) |
+| final policy | applied on every island; `yeto-rl-export` writes the PEFT adapter | stays in the syncer checkpoint with the `ack` final cut; `--rl-sync-final-cut download` applies it on the islands, `--rl-export-hf-rounds final` exports it |
+| sampler islands | not yet (follow-trainer in progress) | supported (synced groups) |
 
 ### Policy snapshots
 
@@ -906,7 +942,7 @@ refused before startup, each with its reason: non-causal models,
 SAO streaming under elastic island scheduling (the SAO island session has no
 pool membership; the `full-parameter` preset takes membership options with
 `--rl-sync-full-parameter-rounds async`), expert-full tuning without the
-`full-parameter` sync preset, `--use-critic` or an advantage estimator other than GRPO/PPO,
+`full-parameter` sync preset (after routing: `decoupled` with expert-full is routed there), `--use-critic` or an advantage estimator other than GRPO/PPO,
 and fixed partition requested through pass-through argv instead of
 `--rl-placement fixed-partition`. Full-parameter training
 (`--rl-sync-preset full-parameter`, alias `dense-full`), SAO streaming

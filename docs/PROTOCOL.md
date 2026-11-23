@@ -641,7 +641,10 @@ weights, counters, quorum/grace timings, and sync latency.
 
 A launch with two or more islands on the strict-avg (LoRA), decoupled or
 full-parameter preset fills the sync options it leaves unset from the sync
-mode. An option given on the command line always wins. One island,
+mode. `decoupled` with full parameters or the expert-full hybrid is routed to
+`full-parameter` with asynchronous rounds before the mode applies
+([MILES_RL.md](MILES_RL.md#routing-by-trainable-form)), so it takes the
+full-parameter rows below. An option given on the command line always wins. One island,
 `sao-streaming-full`, `--experimental-rl-sync` and algorithms with a critic
 always take the strict values.
 
