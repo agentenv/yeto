@@ -105,7 +105,7 @@ def test_install_ext_fails_closed():
 
 def test_wire_keys_are_unprefixed_and_iterated_sorted():
     keys = list(xa.iter_ext_keys())
-    assert keys == sorted(xa.WIRE_KEYS) and len(keys) == 26
+    assert keys == sorted(xa.WIRE_KEYS) and len(keys) == 27
     assert all(not k.startswith("yeto_") for k in keys)
     assert xa.ext_key("yeto_rl_x") == "rl_x" and xa.attr_name("rl_x") == "yeto_rl_x"
     assert xa.attr_name("yeto_rl_x") == "yeto_rl_x" and xa.ext_key("rl_x") == "rl_x"

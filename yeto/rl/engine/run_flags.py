@@ -670,6 +670,12 @@ _RUNTIME = (
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     shared_flag("--rl-observe-timeline", action="store_true",
                 help="ports: record per-round timeline labels; off by default"),
+    # Per-round reward / response-length summary on the island tape. auto: on
+    # for the islands of a full-parameter run with asynchronous rounds, whose
+    # round events carry no reward otherwise; off for every other run.
+    cli_flag("--rl-round-summary", choices=("auto", "on", "off"), default="auto",
+             help="ports: per-round reward/response-length summary on the island tape; "
+             "auto = on for full-parameter islands with asynchronous rounds"),
     shared_flag("--rl-verify-every-round", action="store_true",
                 help="ports: hash the policy and read the engine weight checksums back at every "
                 "publication (default: on the first publication and on every --rl-cut-every-th "

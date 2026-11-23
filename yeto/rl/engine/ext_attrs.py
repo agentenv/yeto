@@ -30,6 +30,7 @@ _MISSING = object()
 WIRE_KEYS: frozenset[str] = frozenset({
     # rollout executor / hooks
     "algo_plugins",
+    "rl_batch_summary",
     "rl_codex_reasoning_in_loss",
     "rl_codex_reasoning_markers",
     "rl_dynamic_sampling_max_replacements",

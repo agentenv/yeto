@@ -597,6 +597,30 @@ _RL_OUTER_MERGE_OPTIONS = (
 ISLAND_STATE_SOURCES = ("peer", "catch-up", "cut")
 
 
+def round_summary_auto(args) -> bool:
+    """``--rl-round-summary auto`` turns the summary on for the Miles islands of a
+    full-parameter run with asynchronous rounds: their round events carry no
+    reward or response length otherwise (LoRA islands record them in
+    ``rl_local_round``). Only under the asynchronous sync mode (the default):
+    every other launch keeps its argv, a no-sync island (the customer buffer
+    trainer) and every ``--rl-sync-mode strict`` launch, whose commands are
+    pinned byte for byte to the commands before the sync modes."""
+    return ((getattr(args, "rl_backend", None) or "miles") == "miles"
+            and not getattr(args, "rl_single_island_no_sync", False)
+            and getattr(args, "rl_sync_mode_effective", "strict") == "async"
+            and rl_full_parameter_async(args))
+
+
+def _resolve_round_summary(args) -> None:
+    """``--rl-round-summary`` -> ``args.rl_batch_summary`` (the island flag)."""
+    mode = getattr(args, "rl_round_summary", "auto") or "auto"
+    on = mode == "on" or (mode == "auto" and round_summary_auto(args))
+    args.rl_batch_summary = on
+    if on and mode == "auto":
+        print("[auto] per-round reward/response-length summary on for the "
+              "full-parameter islands (--rl-round-summary off disables)", flush=True)
+
+
 def _default_peer_recovery(args) -> None:
     """Resolve the state source of a replacement island (``--rl-island-state-source``)
     and ``--rl-peer-recovery`` together; the two always agree afterwards.
@@ -949,6 +973,7 @@ def _prepare_rl_args(
     _apply_rl_sync_mode(args)
     _default_spot_island_pool(args)
     _default_peer_recovery(args)
+    _resolve_round_summary(args)
 
     from ..adapter_lifecycle import directory_sha256, selected_parent
 

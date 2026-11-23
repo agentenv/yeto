@@ -463,6 +463,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     observe = bool(getattr(args, "rl_observe_timeline", False))
     if observe:
         miles_args.yeto_rl_observe_timeline = True
+    if getattr(args, "rl_batch_summary", False):  # rollout_meta_hook.batch_summary_enabled
+        miles_args.yeto_rl_batch_summary = True
     from yeto.rl.engine.telemetry import DEFAULT_HEARTBEAT_INTERVAL_S, DEFAULT_RESOURCE_INTERVAL_S
 
     # An outer-synced island (a syncer, a DiLoCo run) heartbeats by default: its

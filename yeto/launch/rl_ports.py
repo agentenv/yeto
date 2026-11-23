@@ -713,6 +713,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-overlap-eval"
     if getattr(args, "rl_observe_timeline", False):
         flags += " --rl-observe-timeline"
+    if getattr(args, "rl_batch_summary", False):  # resolved from --rl-round-summary (rl_args)
+        flags += " --rl-batch-summary"
     if getattr(args, "rl_debug_dump", False):
         flags += " --rl-debug-dump"
     if getattr(args, "rl_profile_trainer", False):

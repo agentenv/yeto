@@ -397,6 +397,10 @@ _AGENT = (
 )
 
 _ISLAND = (
+    # Sent by the launcher from --rl-round-summary: the rollout metadata hook
+    # records the per-round reward / response-length summary
+    # (rollout_meta_hook.batch_summary_enabled).
+    island_flag("--rl-batch-summary", action="store_true"),
     # Set by the launcher when any island pool option is given (dynamic membership).
     island_flag("--rl-island-pool", action="store_true",
                 help="this island joins a dynamic island pool on the syncer: it heartbeats "
