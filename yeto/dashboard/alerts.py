@@ -206,7 +206,9 @@ def budget(cost: dict, th: dict) -> list[dict]:
         return []
     eta = cost.get("hours_to_cap")
     detail = f"${cost['total_usd']:.2f} / ${cost['budget_usd']:.2f} (estimate, not billing data)"
-    if eta is not None and math.isfinite(eta):
+    if pct >= 100 or (eta is not None and eta <= 0):
+        detail += ", cap reached"
+    elif eta is not None and math.isfinite(eta):
         detail += f", reached in about {eta:.1f} h at ${cost['burn_usd_h']:.2f}/h"
     return [_alert(sev, "budget", f"budget at {pct:.0f}%", detail)]
 
