@@ -254,7 +254,7 @@ def _default(b: Any) -> str:
 
 
 def _alias_text(b: Any) -> str:
-    return ", ".join(a.location for a in b.aliases) or "-"
+    return ", ".join(a.location + (" (deprecated)" if a.deprecated else "") for a in b.aliases) or "-"
 
 
 def cmd_list(args: argparse.Namespace) -> int:
