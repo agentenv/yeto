@@ -263,6 +263,8 @@ def test_forward_tables_name_flags_of_both_layers():
 _NON_RL_LITERALS = frozenset({
     # podman / docker CLI flags of the own-SSH-node sampler pool (yeto.launch.ssh_sampler_pool)
     "--security-opt", "--signal", "--tail", "--type",
+    # the AgentENV-side regctl setting the task image check names (yeto.launch.agentic_setup)
+    "--tls",
     "--abbrev-ref", "--adapter-dir", "--add", "--address", "--allow-unattested-legacy-adapter",
     "--allow-unauthenticated-islands", "--require-profile-record", "--async-checkpoint", "--inline-resend", "--inline-broadcast", "--bcast-delta-full-every", "--bind", "--cap-add", "--carry-gamma",
     "--background-checkpoint", "--checkpoint-at-steps", "--checkpoint-every", "--checkpoint-on-start",
