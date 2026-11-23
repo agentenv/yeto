@@ -377,7 +377,9 @@ def test_island_configures_the_runtime_from_the_bridge_provider(tmp_path, monkey
     path = tmp_path / "selection.json"
     selection.write(path)
     for name in (in_place.ENV_SELECTION, in_place.GROUPED_SINGLE_PARAM_ENV):
-        monkeypatch.delenv(name, raising=False)
+        # setenv first so monkeypatch restores the absence: the island writes os.environ itself
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
     installed = []
     monkeypatch.setattr(in_place, "install", lambda: installed.append(True))
     # the Megatron-Bridge DeepSeek provider: layer 0 dense as a moe_layer_freq mask
