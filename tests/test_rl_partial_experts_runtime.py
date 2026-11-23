@@ -407,3 +407,28 @@ def test_kimi_k31_recipe_refuses_an_in_place_selection(tmp_path):
     with pytest.raises(ValueError, match="needs a slot_order selection"):
         check_expert_selection(types.SimpleNamespace(rl_expert_selection=str(path), expert_parallel=8,
                                                      model="org/model"))
+
+
+def test_generic_partial_experts_through_decoupled_equal_the_explicit_async_launch(tmp_path, monkeypatch, capsys):
+    """--rl-sync-preset decoupled + --tuning full + an in_place selection is routed to the full-parameter
+    preset's async rounds: the same plan as the explicit launch."""
+    import json
+
+    from yeto.launcher import _prepare_rl_args, dry_run_plan
+
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "partial-experts-test-key")
+    structure = dict(STRUCTURES["qwen3_moe"], ep=4)
+    selection = sel.ExpertSelection.in_place("uniform", model="qwen3_moe", num_experts=8, num_trainable=4,
+                                             ep_size=4, layers=(0, 1))
+    _, explicit = _launch(tmp_path, structure, selection)
+    model, path = tmp_path / "model", tmp_path / "selection.json"
+    args = _launcher_args("ports", (
+        "--model", str(model), "--rl-sync-preset", "decoupled", "--tuning", "full",
+        "--rl-expert-selection", str(path), "--expert-parallel", "4",
+        "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "4", "--rl-parameter-layout-sha256", "e" * 64,
+        "--fragments", "4", "--local-rl-rounds-per-sync", "4"), gpu="modal:8xh100,modal:8xh100")
+    args.controller = "local"
+    _prepare_rl_args(args)
+    assert "[sync-route] decoupled -> full-parameter (async rounds)" in capsys.readouterr().out
+    routed = dry_run_plan(args)
+    assert json.dumps(routed, sort_keys=True, default=str) == json.dumps(explicit, sort_keys=True, default=str)
