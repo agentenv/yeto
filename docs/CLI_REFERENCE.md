@@ -497,7 +497,7 @@ containers, recovery after preemption, and the RL trainer scheduler. See
 | `--learner-cpus` | — | vCPU hint per learner node, e.g. `8+` |
 | `--learner-instance-type` | — | pin learner nodes to an exact instance type |
 | `--learner-image` | — | machine image: cloud image id, SkyPilot tag, or `docker:` image |
-| `--syncer-region` | `us-west-2` | syncer VM placement: AWS region or `cloud/region` |
+| `--syncer-region` | `us-west-2` | syncer VM placement: AWS region or `cloud/region`. Left unset, a synced launch whose Modal or AWS islands all pin one `@region` area puts the syncer in that area's AWS region (printed as `[auto] syncer region ...`); setting the flag opts out. The launch warns about Modal islands without `@region` or in another area than the syncer (one stream measured 15.9 MB/s across regions, 132 MB/s within one) and about a large per-fragment f32 download |
 | `--syncer-memory` | `32` | syncer RAM (GB) |
 | `--syncer-instance-type` | — | head VM instance type (default: cheapest meeting `--syncer-memory`) |
 | `--syncer-disk-gib` | — | head VM disk (GiB) |

@@ -1339,6 +1339,10 @@ def dry_run_plan(args) -> dict:
 
     memory = dry_run_memory(args, specs)
     print_dry_run_memory(memory)
+    if rl:
+        from .launch.downlink_demand import downlink_preflight
+
+        downlink_preflight(args)  # a WARNING only; not in the plan (byte-locked)
     from .launch.model_check import preflight_trainer_model
 
     trainer_model = preflight_trainer_model(args)  # ModelCheckError (a ValueError): rejected
