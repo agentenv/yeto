@@ -66,11 +66,12 @@ from .launch.modal_islands import (
 )
 from .launch.peer_recovery import relaunch_envs as peer_recovery_relaunch_envs
 from .launch.fleet import (
-    CONFIG_ERROR_EXIT, CONTAINER_CHANGED_EXIT, DEFAULT_RL_STALL_TIMEOUT_S, FAILED_RUN_DRAIN_S,
+    CONFIG_ERROR_EXIT, CONTAINER_CHANGED_EXIT, FAILED_RUN_DRAIN_S,
     ISLAND_FAILED_EXIT, RUN_STALLED_EXIT, RUN_STOPPED_EXIT, TEARDOWN_UNVERIFIED_EXIT,
     TRAINER_GAVE_UP_EXIT, FixedRosterIslandAbandoned, FleetController, IslandConfigError,
-    RunStalled, RunStopRequested, controller_fixed_roster,
+    RunStalled, RunStopRequested, controller_fixed_roster, effective_stall_timeout,
 )
+from .launch import trips
 from .launch.teardown import collect_diagnostics_parallel, teardown_island
 from .launch.verda import _rename_hook, launch_verda_island, prepare_verda_islands
 from .launch.manifest import (
@@ -856,9 +857,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 (lambda: sum(c.count for c in list(event_collectors.values())))
                 if echo_names else None
             ),
-            stall_timeout=float(
-                getattr(args, "rl_stall_timeout", None) or DEFAULT_RL_STALL_TIMEOUT_S
-            ) if getattr(args, "rl_stall_timeout", None) != 0 else 0.0,
+            stall_timeout=effective_stall_timeout(args),
             keep_abandoned=bool(getattr(args, "keep_abandoned", False)),
             no_recover=verda["no_recover"] if verda else (),
             instance_guard=verda["guard"] if verda else None,
@@ -922,11 +921,16 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             # cannot finish the run usefully: tear everything down
             print(f"[launcher] ERROR: {error}; stopping the run (exit {TRAINER_GAVE_UP_EXIT})",
                   file=sys.stderr)
+            limit = trainer_loop.max_failures(args)
+            trips.trip(args.cluster_prefix, "launch.trainer_failures", limit, limit,
+                       legacy_event="TrainerLoopGaveUp", detail=str(error))
             drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
             return CONTAINER_CHANGED_EXIT if container_changed() else TRAINER_GAVE_UP_EXIT
         except RunStalled as error:
             print(f"[launcher] ERROR: {error}; stopping the run (exit {RUN_STALLED_EXIT})",
                   file=sys.stderr)
+            trips.trip(args.cluster_prefix, "launch.stall", error.silent_s, error.timeout_s,
+                       legacy_event="RunStalled", detail=str(error))
             drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
             return CONTAINER_CHANGED_EXIT if container_changed() else RUN_STALLED_EXIT
         except RunStopRequested as error:
@@ -1150,6 +1154,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 # The head must NOT self-terminate: it is the only thing that
                 # can still reach these orphaned learner clusters via sky.
                 args._teardown_incomplete = True
+                trips.trip(prefix, "launch.teardown_verify", len(unverified), 0, state="warn",
+                           detail=f"termination not confirmed: {', '.join(unverified)}",
+                           scope={"clusters": ",".join(unverified)})
                 print(
                     f"[launcher] WARNING: could not confirm termination of "
                     f"{unverified}; leaving the head up so they stay reachable. "
@@ -1189,6 +1196,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 )
         if teardown_unverified and sys.exc_info()[0] is None:
             # the run's own outcome is secondary to a possibly still-running app
+            trips.trip(prefix, "launch.teardown_verify", None, None,
+                       detail=f"teardown not confirmed (exit {TEARDOWN_UNVERIFIED_EXIT})")
             return TEARDOWN_UNVERIFIED_EXIT  # noqa: B012
 
 

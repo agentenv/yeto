@@ -153,11 +153,21 @@ def add_parsers(sub) -> None:
                        help="deprecated: the earlier name of --include-pools (every pool provider)")
 
 
+def usd_or_off(text: str) -> float | None:
+    """``--budget-usd`` value: a number, or ``off`` / ``none`` for no budget (how the breakers
+    resolver writes back a disabled ``launch.budget``)."""
+    if str(text).strip().lower() in ("off", "none"):
+        return None
+    return float(text)
+
+
 def add_launch_arguments(p) -> None:
+    # registry entries launch.budget / launch.idle (yeto.breakers.layers.launch); these flags
+    # are their aliases and --no-cost-guard is the cost_guard switch group
     g = p.add_argument_group("cost guard (budget breaker, idle shutdown)")
-    g.add_argument("--budget-usd", type=float, default=None,
+    g.add_argument("--budget-usd", type=usd_or_off, default=None,
                    help="stop the run gracefully (cut, then teardown) when its cost reaches this "
-                   "(default: no budget stop)")
+                   "(default: no budget stop; 'off': none)")
     g.add_argument("--budget-warn-usd", type=float, default=None,
                    help="emit cost_budget_warn at this cost (default: 80%% of --budget-usd)")
     g.add_argument("--budget-stop-grace-minutes", type=float, default=20.0,
@@ -174,6 +184,9 @@ def add_launch_arguments(p) -> None:
     g.add_argument("--max-load-minutes", type=float, default=120.0,
                    help="loading events alone cannot exempt a run longer than this since its last "
                    "progress (default 120)")
+    g.add_argument("--nc-lease-overdue-minutes", type=float, default=5.0,
+                   help="nc_lease_overdue alert when an NC lease is still open this long after its "
+                   "lease end (default 5)")
     g.add_argument("--cost-poll-seconds", type=float, default=60.0,
                    help="cost guard tick (default 60)")
     g.add_argument("--cost-prices", default=None,

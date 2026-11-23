@@ -66,12 +66,30 @@ RELAUNCH_JOIN_S = 120.0
 
 
 class RunStalled(RuntimeError):
-    """No island produced an event for the stall timeout (and not all finalized)."""
+    """No island produced an event for the stall timeout (and not all finalized).
+
+    The ``launch.stall`` breaker (``yeto.breakers.layers.launch``): ``silent_s`` is how long
+    the islands were silent, ``timeout_s`` the limit."""
+
+    def __init__(self, message: str, *, silent_s: float | None = None,
+                 timeout_s: float | None = None) -> None:
+        super().__init__(message)
+        self.silent_s = silent_s
+        self.timeout_s = timeout_s
 
 
 # Exit code when the run stalled (no island event for --rl-stall-timeout).
 RUN_STALLED_EXIT = 6
 DEFAULT_RL_STALL_TIMEOUT_S = 900.0
+
+
+def effective_stall_timeout(args) -> float:
+    """``launch.stall``: the fleet's stall clock in seconds (``--rl-stall-timeout``; unset:
+    the default; 0: off)."""
+    value = getattr(args, "rl_stall_timeout", None)
+    if value == 0:
+        return 0.0
+    return float(value or DEFAULT_RL_STALL_TIMEOUT_S)
 
 
 class FixedRosterIslandAbandoned(RuntimeError):
@@ -604,11 +622,12 @@ class FleetController:
         if self._progress is None or progress != self._progress:
             self._progress, self._progress_at = progress, now
             return
-        if now - self._progress_at >= self.stall_timeout and not self._all_learners_finalized():
-            message = (f"no island event for {now - self._progress_at:.0f}s "
+        silent = now - self._progress_at
+        if silent >= self.stall_timeout and not self._all_learners_finalized():
+            message = (f"no island event for {silent:.0f}s "
                        f"(stall timeout {self.stall_timeout:.0f}s, {progress} events so far)")
             print(f"[launcher] ERROR: run stalled: {message}", file=sys.stderr)
-            raise RunStalled(message)
+            raise RunStalled(message, silent_s=silent, timeout_s=self.stall_timeout)
 
     def _all_learners_finalized(self) -> bool:
         return self.finalized_probe is not None and all(
