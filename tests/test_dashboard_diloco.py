@@ -706,5 +706,5 @@ def test_bcast_flows_use_the_syncer_and_island_stamps(tmp_path):
 def test_page_draws_the_pull_the_config_and_the_lost_link(tmp_path):
     reducer, mid, ahead = _run_b_with_p1_records()
     joined = " | ".join(_smoke(tmp_path, reducer)["texts"])
-    assert f"t{ahead} f{(ahead - 1) % 4}: PULL sent, no PUSH yet" in joined and "1 quorum timeout" in joined
-    assert "τ 2 · T 24 · lr 0.7" in joined and "syncer link ✕" in joined
+    assert f"t{ahead} f{(ahead - 1) % 4}: PULL out · 20s · attempt 2 · 1 timeout" in joined
+    assert "τ 2 · T 24 · lr 0.7" in joined and "link ✕" in joined
