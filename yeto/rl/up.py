@@ -790,10 +790,18 @@ class Run:
         --json`` object; the dashboard's Breakers panel and ``run status`` read it). Never
         raises: a view only."""
         from yeto import breakers  # noqa: PLC0415
+        from yeto.breakers.rules_facts import run_view_sources  # noqa: PLC0415
 
         try:
-            sources = breakers.Sources.from_run_config(self.cfg)
-            resolved = breakers.resolve(sources, strict=False)
+            # the run's only pool fills the pool / sampler / harness rows (a view; Run.breakers,
+            # which the monitor reads, stays the run config's own run / launch resolve)
+            try:
+                view = run_view_sources(self.cfg)
+                sources, pool = view.sources, view.pool
+            except ValueError as error:
+                _log(f"preflight: breakers.resolved.json shows the run config alone ({error})")
+                sources, pool = breakers.Sources.from_run_config(self.cfg), None
+            resolved = breakers.resolve(sources, pool=pool, strict=False)
             doc = resolved.to_json(breakers.preflight(resolved, run_config=self.cfg, sources=sources))
             tmp = self.dir / "breakers.resolved.json.tmp"
             tmp.write_text(json.dumps(doc, indent=1, default=str))

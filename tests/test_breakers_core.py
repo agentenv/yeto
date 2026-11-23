@@ -529,9 +529,16 @@ SWITCHES
   cost_guard           off  launch.budget, launch.idle  (switch cost_guard (trainer.argv --no-cost-guard))"""
 
 
+def _pool_file(tmp_path, pool=None):
+    """``show --config`` reads the run's pool config (its pool / sampler / harness rows)."""
+    path = tmp_path / "pool.json"
+    path.write_text(json.dumps(pool or {}))
+    return {"config": str(path)}
+
+
 def test_show_snapshot(reg, tmp_path, capsys):
     cfg = _cfg(trainer={"argv": ["--rl-sample-wait-s", "7200", "--no-cost-guard"]},
-               breakers={"run": {"budget": {"usd": 450}}})
+               breakers={"run": {"budget": {"usd": 450}}}, pool=_pool_file(tmp_path))
     path = tmp_path / "run.json"
     path.write_text(json.dumps(cfg))
     assert _run(["breaker", "show", "--config", str(path)]) == 0
@@ -553,7 +560,8 @@ def test_show_json_and_exit_codes(reg, tmp_path, capsys):
     # a conflict: exit 1
     cfg = tmp_path / "run.json"
     cfg.write_text(json.dumps(_cfg(trainer={"argv": ["--rl-sample-wait-s", "60"]},
-                                   breakers={"trainer": {"sample_wait": {"timeout_s": 7200}}})))
+                                   breakers={"trainer": {"sample_wait": {"timeout_s": 7200}}},
+                                   pool=_pool_file(tmp_path))))
     assert _run(["breaker", "show", "--config", str(cfg)]) == 1
     assert "CONFLICTS" in capsys.readouterr().out
     # bad input: exit 2

@@ -43,7 +43,8 @@ def add_parser(sub: Any) -> argparse.ArgumentParser:
     src.add_argument("--breakers", help="a bare breakers: object, or a whole run config (JSON)")
     show.add_argument("--spec", help="sampler spec (JSON), for the sampler / harness aliases")
     show.add_argument("--layer", choices=_layers(), help="only this layer")
-    show.add_argument("--pool", help="apply breakers.pools.<POOL> overrides")
+    show.add_argument("--pool", help="the run's pool whose config, sampler spec and breakers.pools.<POOL> "
+                      "overrides the pool / sampler / harness rows read (default: the run's only pool)")
     show.add_argument("--json", action="store_true", help="print the breakers.resolved.json object")
     show.add_argument("--all", action="store_true", help="also list semantic entries")
     listing = group.add_parser("list", help="the breaker registry (no config needed)")
@@ -98,7 +99,9 @@ def _read_json(path: str, what: str) -> Any:
         raise ValueError(f"{what} {file}: not valid JSON ({error})") from None
 
 
-def _sources(args: argparse.Namespace) -> tuple[Any, Mapping[str, Any] | None]:
+def _sources(args: argparse.Namespace, *, view: bool = False) -> tuple[Any, Mapping[str, Any] | None]:
+    """The resolver sources of the command's input. ``view`` (``show``): a run config's only pool
+    (or ``--pool``) fills the pool, sampler and harness rows, unless ``--spec`` names a spec."""
     from yeto.breakers.resolve import Sources  # noqa: PLC0415
 
     spec = _read_json(args.spec, "sampler spec") if args.spec else None
@@ -106,6 +109,12 @@ def _sources(args: argparse.Namespace) -> tuple[Any, Mapping[str, Any] | None]:
         cfg = _read_json(args.config, "run config")
         if not isinstance(cfg, dict):
             raise ValueError(f"run config {args.config}: must be a JSON object")
+        if view and spec is None:  # the pool, sampler and harness rows: the run's pool and its samplers' spec
+            from yeto.breakers.rules_facts import run_view_sources  # noqa: PLC0415
+
+            seen = run_view_sources(cfg, pool=getattr(args, "pool", None))
+            args.pool, args.view_pools = seen.pool, seen.pools
+            return seen.sources, cfg
         return Sources.from_run_config(cfg, spec=spec), cfg
     if args.breakers:
         data = _read_json(args.breakers, "breakers file")
@@ -148,7 +157,7 @@ def cmd_show(args: argparse.Namespace) -> int:
     from yeto.breakers.spec import BreakerConfigError, RegistryError  # noqa: PLC0415
 
     try:
-        sources, cfg = _sources(args)
+        sources, cfg = _sources(args, view=True)
         rb = resolve(sources, pool=args.pool, strict=False)
         findings = preflight(rb, run_config=cfg, sources=sources)
     except (BreakerConfigError, RegistryError, ValueError) as error:
@@ -161,6 +170,10 @@ def cmd_show(args: argparse.Namespace) -> int:
         print(json.dumps(data, sort_keys=True, default=str))
     else:
         print(render_show(data, show_all=args.all))
+        pools = getattr(args, "view_pools", ())
+        if args.pool is None and len(pools) > 1:
+            print(f"pool / sampler / harness rows show defaults: {len(pools)} pools ({', '.join(pools)}), "
+                  "pass --pool NAME")
     errors = [f for f in findings if f.level == "error"]
     return 1 if rb.conflicts or errors else 0
 
