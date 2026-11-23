@@ -1220,6 +1220,15 @@ def _prepare_rl_args(
         raise ValueError("RL v0 does not support external learner slots")
     if int(getattr(args, "context_parallel", 1) or 1) <= 0:
         raise ValueError("RL context parallelism must be positive")
+    # The island's trainer memory rules (micro batch budget vs --seq-len, optimizer
+    # options, log-prob chunks): pure option checks on the args each island receives
+    # (its placement and sample role), refused here before any cloud work
+    train_memory_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_train_memory", None)
+    if callable(train_memory_check):
+        from ..rl.engine import sample_roles
+
+        train_memory_check([sample_roles.island_args(iargs, m, len(per_island))
+                            for m, iargs in enumerate(per_island)])
     # Each island's own parallel shape (--rl-island-placement with
     # --rl-sync-layout shape-free), else the run-wide flags.
     for iargs, spec in zip(per_island, specs):

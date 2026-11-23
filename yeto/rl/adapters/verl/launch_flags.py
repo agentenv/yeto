@@ -151,6 +151,7 @@ IGNORED_ON_VERL_FULL_PARAMETER = (
     ("rl_lora_dropout", None, "--rl-lora-dropout"),
     ("rl_lora_expert_rank", None, "--rl-lora-expert-rank"),
     ("rl_profile_trainer", False, "--rl-profile-trainer"),
+    ("rl_log_probs_chunk_size", "auto", "--rl-log-probs-chunk-size"),
 )
 # Why each option above has no verl mapping yet (the launcher's refusal says it).
 NOT_MAPPED_REASONS = {
@@ -164,6 +165,8 @@ NOT_MAPPED_REASONS = {
     "--rl-lora-expert-rank": "a full-parameter island has no LoRA adapter",
     "--rl-profile-trainer": "the trainer step runs in verl's Ray workers; the step profiler is not hooked "
                             "there",
+    "--rl-log-probs-chunk-size": "Miles' log-prob row chunks; verl's actor computes log-probs in its own "
+                                 "workers and no chunk option is mapped there",
 }
 # The options above that do not apply to a full-parameter
 # FSDP2 island at all (the rest wait for a mapping)

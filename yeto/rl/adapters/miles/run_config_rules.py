@@ -106,6 +106,23 @@ def check_train_extra_env(*, recipe: str | None, env_pairs) -> None:
             train_extra_argv(recipe or RECIPE_GENERIC, value)
 
 
+def check_train_memory(island_args) -> None:
+    """The trainer memory options of every island (``island_args``: one launch args copy
+    per island) through the rules the island applies when it builds its run config
+    (:func:`yeto.rl.engine.run_config._train_memory`, the same function), here, before
+    any GPU starts (also under ``--dry-run``). They read only the launch options:
+    ``--rl-max-tokens-per-gpu`` x CP against ``--seq-len``, the optimizer offload
+    fraction, ``--rl-dp-optimizer``, the precision-aware optimizer and
+    ``--rl-log-probs-chunk-size``. A Qwen3-4B launch with ``--rl-max-tokens-per-gpu
+    16384`` and ``--seq-len 32768`` passed its dry run and was refused only by the
+    island, after Modal had started the container (and retried it)."""
+    from yeto.rl.engine.run_config import _train_memory
+
+    for iargs in island_args:
+        if (getattr(iargs, "rl_backend", None) or "miles") == "miles":  # --rl-island-engine: own rules
+            _train_memory(iargs)
+
+
 def _miles_pin_gap(first: str, feature: str, *, feature_name: str) -> str | None:
     """Why the pinned Miles lacks ``feature`` (registered as ``feature_name`` in
     the lineage tables, first carried by fork commit ``first`` on ports-v1);

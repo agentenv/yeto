@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from yeto.config_errors import ConfigError
 from yeto.rl.adapters.miles.pins import (
     MILES_DISTOPT_FULL_PARAMETER_COMMIT,
     MILES_NEXT_COMMIT,
@@ -152,8 +153,9 @@ _FT_NAMESPACE_OFF = (
 )
 
 
-class MilesConfigError(ValueError):
-    """The ports path cannot express this configuration; startup is refused."""
+class MilesConfigError(ConfigError):
+    """The ports path cannot express this configuration; startup is refused (a
+    :class:`~yeto.config_errors.ConfigError`: the island exits without a retry)."""
 
 
 def _require_elastic_pin(k31_feature: str, what: str) -> None:
@@ -466,6 +468,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "train_memory.dp_optimizer": _ok,  # _full_parameter_optimizer_attrs
     "train_memory.grad_reduce_bf16": _ok,  # base argv: --grad-reduce-in-bf16
     "train_memory.precision_aware_optimizer": _ok,  # train_memory_argv
+    "train_memory.log_probs_chunk_size": _ok,  # train_memory_argv: --log-probs-chunk-size
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
                     "fused_stage", "release_legacy", "release_inline",
@@ -1386,6 +1389,9 @@ def translate_run_config(
         values = _deepseek_v41_values(values, config, deepseek_v41)
     values.extend(extra_argv)
     train_extra = train_extra_argv(recipe.name, os.environ.get(TRAIN_EXTRA_ENV, ""))
+    if LOG_PROBS_CHUNK_FLAG in train_extra:
+        # the island environment's explicit value replaces --rl-log-probs-chunk-size
+        values = drop_flag_value(values, LOG_PROBS_CHUNK_FLAG)
     if any(flag in train_extra for flag in PIPELINE_SPLIT_FLAGS):
         check_pipeline_split(geometry.num_layers, parallel.pipeline_parallel,
                              parallel.uneven_pipeline_layers, (*extra_argv, *train_extra))
@@ -1480,7 +1486,8 @@ TRAIN_EXTRA_FLAGS = frozenset({
     "--moe-flex-dispatcher-backend",
     # Miles computes the loss log-probabilities over the sequence in chunks
     # of N tokens instead of one fp32 full-vocabulary block (a full block ran out of
-    # memory there on a long agentic sample: 11.94 GiB for one block)
+    # memory there on a long agentic sample: 11.94 GiB for one block). Every recipe
+    # has --rl-log-probs-chunk-size for it now; a value here replaces that one.
     "--log-probs-chunk-size",
     # torch profiler of the Miles train loop (Megatron --use-pytorch-profiler and its
     # step window, Miles --profile-target); the trace goes to --tensorboard-dir
@@ -1611,10 +1618,13 @@ def _full_recompute_for_mxfp4_experts(values: list[str]) -> list[str]:
     return values
 
 
+LOG_PROBS_CHUNK_FLAG = "--log-probs-chunk-size"
+
+
 def train_memory_argv(memory: Any) -> tuple[str, ...]:
     """Megatron full uniform recompute (one layer per chunk), Miles dynamic
-    batching (the same values the validated Flash-Next recipe uses) and the
-    optimizer host offload."""
+    batching (the same values the validated Flash-Next recipe uses), the
+    optimizer host offload and the log-prob row chunks."""
 
     values: list[str] = []
     if memory.activation_recompute:
@@ -1627,7 +1637,26 @@ def train_memory_argv(memory: Any) -> tuple[str, ...]:
         values.extend((*OPTIMIZER_OFFLOAD_ARGV, "--optimizer-offload-fraction", repr(fraction)))
     if getattr(memory, "precision_aware_optimizer", False):
         values.extend(PRECISION_AWARE_ARGV)
+    chunk = int(getattr(memory, "log_probs_chunk_size", 0) or 0)
+    if chunk > 0:
+        # Miles splits each response's [rows, vocab / TP] log-prob / entropy computation
+        # (and score centering's selected log-probs) into chunks of this many rows
+        values.extend((LOG_PROBS_CHUNK_FLAG, str(chunk)))
     return tuple(values)
+
+
+def drop_flag_value(values: Sequence[str], flag: str) -> list[str]:
+    """``values`` without every ``flag VALUE`` pair."""
+    out: list[str] = []
+    skip = False
+    for token in values:
+        if skip:
+            skip = False
+        elif token == flag:
+            skip = True
+        else:
+            out.append(token)
+    return out
 
 
 def harbor_rollout_argv(agent_function: str, *, sample_buffer: Any = None) -> tuple[str, ...]:

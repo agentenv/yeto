@@ -42,6 +42,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from yeto.config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODAL_TOKEN_PATH = "~/.modal.toml"
 # Where the repo lands in the container; the sky task scripts `cd
@@ -1139,7 +1141,10 @@ def _which(cmd: str) -> str | None:
 
 def island_main(cfg_json: str) -> int:
     """Body of the Modal function: runs in the container. Returns the run
-    script's exit code (nonzero raises so Modal records the failure)."""
+    script's exit code (nonzero raises so Modal records the failure, except
+    :data:`~yeto.config_errors.CONFIG_ERROR_EXIT`: returned, so Modal's retries do
+    not run a configuration the island refused again; :meth:`ModalOps.status`
+    reads that return value as FAILED)."""
     cfg = ModalIslandConfig.from_json(cfg_json)
     if cfg.num_nodes > 1:
         import modal
@@ -1318,6 +1323,12 @@ def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dic
     peer_check()
     code = run_island_script(container_command(cfg.run_script), env)
     peer_check()
+    if code == CONFIG_ERROR_EXIT:
+        # the island refused its launch options: every retry would fail the same way.
+        # A returned value ends the Modal call without a retry (a raise would be retried).
+        print(f"[modal-island {cfg.learner_id}] rank {rank} exited with {code}: configuration "
+              "error, not retried", flush=True)
+        return code
     if code != 0:
         raise RuntimeError(f"island {cfg.learner_id} rank {rank} exited with {code}")
     return code
@@ -1855,7 +1866,7 @@ class ModalOps:
             errors = self._transport_errors = {}
         try:
             call = modal.FunctionCall.from_id(call_id)
-            call.get(timeout=0)
+            result = call.get(timeout=0)
         except TimeoutError:
             errors.pop(call_id, None)
             return "RUNNING"
@@ -1879,6 +1890,16 @@ class ModalOps:
                 print(f"[modal] call {call_id} ended as FAILED: {_exc_text(exc)}", file=sys.stderr)
             return "FAILED"
         errors.pop(call_id, None)
+        if result == CONFIG_ERROR_EXIT and not isinstance(result, bool):
+            # island_main returns (does not raise) a configuration error: no Modal retry
+            logged = getattr(self, "_failure_logged", None)
+            if logged is None:
+                logged = self._failure_logged = set()
+            if call_id not in logged:
+                logged.add(call_id)
+                print(f"[modal] call {call_id} ended as FAILED: the island refused its configuration "
+                      f"(exit {CONFIG_ERROR_EXIT}, {CONFIG_ERROR_MARKER} in its log)", file=sys.stderr)
+            return "FAILED"
         return "SUCCEEDED"
 
     def cancel(self, call_id: str) -> None:
@@ -2339,6 +2360,7 @@ class ModalIslandOps:
             for line in self.ops.tail_logs(job_id, entries=400):
                 text = str(line).strip()
                 if "[yeto-rl-strict-failure]" in text or "StrictRlInvariantError:" in text \
+                        or CONFIG_ERROR_MARKER in text \
                         or any(m in text for m in SYNCER_REFUSAL_MARKERS):
                     return text
         except Exception:  # noqa: BLE001

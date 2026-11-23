@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -2775,6 +2776,22 @@ def _run_miles_island(args, model_path, rollout_model_path, prompt_path, eval_pr
     )
 
 
+def config_error_exit(error: BaseException, stream=None) -> int | None:
+    """:data:`~yeto.config_errors.CONFIG_ERROR_EXIT` when ``error`` comes from a
+    :class:`~yeto.config_errors.ConfigError` (the launch options cannot run: the same
+    on every attempt), after its traceback and the ``[yeto-config-error]`` line the
+    launcher's log probe reads; None for any other error (raised as before, retried)."""
+    from yeto.config_errors import CONFIG_ERROR_EXIT, config_error_in, config_error_line
+
+    refused = config_error_in(error)
+    if refused is None:
+        return None
+    stream = sys.stderr if stream is None else stream
+    traceback.print_exception(error, file=stream)
+    print(config_error_line(refused), file=stream, flush=True)
+    return CONFIG_ERROR_EXIT
+
+
 def _rejoin_exhausted(error: BaseException | None) -> bool:
     seen = set()
     while error is not None and id(error) not in seen:
@@ -2798,4 +2815,7 @@ if __name__ == "__main__":
 
             print(f"[yeto-island] elastic re-JOIN exhausted: {error}", file=sys.stderr)
             raise SystemExit(ELASTIC_REJOIN_FAILED_EXIT) from error
+        code = config_error_exit(error)
+        if code is not None:
+            raise SystemExit(code) from error
         raise

@@ -598,7 +598,8 @@ def test_train_memory_from_args_refuses_a_budget_below_seq_len():
     with pytest.raises(ValueError, match="below --seq-len"):
         rc._train_memory(args)
     args.rl_max_tokens_per_gpu = 32768
-    assert rc._train_memory(args) == rc.TrainMemoryConfig(True, 32768)
+    # --rl-log-probs-chunk-size auto (absent): 4096-row chunks above a 4096 --seq-len
+    assert rc._train_memory(args) == rc.TrainMemoryConfig(True, 32768, log_probs_chunk_size=4096)
     assert rc._train_memory(SimpleNamespace(seq_len=8)) == rc.TrainMemoryConfig()
     assert rc._train_memory(SimpleNamespace(seq_len=8, rl_optimizer_offload_fraction=1.0)) == \
         rc.TrainMemoryConfig(optimizer_offload_fraction=1.0)

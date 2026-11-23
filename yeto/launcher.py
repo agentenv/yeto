@@ -66,9 +66,9 @@ from .launch.modal_islands import (
 )
 from .launch.peer_recovery import relaunch_envs as peer_recovery_relaunch_envs
 from .launch.fleet import (
-    CONTAINER_CHANGED_EXIT, DEFAULT_RL_STALL_TIMEOUT_S, FAILED_RUN_DRAIN_S, ISLAND_FAILED_EXIT,
-    RUN_STALLED_EXIT, RUN_STOPPED_EXIT, TEARDOWN_UNVERIFIED_EXIT, TRAINER_GAVE_UP_EXIT,
-    FixedRosterIslandAbandoned, FleetController,
+    CONFIG_ERROR_EXIT, CONTAINER_CHANGED_EXIT, DEFAULT_RL_STALL_TIMEOUT_S, FAILED_RUN_DRAIN_S,
+    ISLAND_FAILED_EXIT, RUN_STALLED_EXIT, RUN_STOPPED_EXIT, TEARDOWN_UNVERIFIED_EXIT,
+    TRAINER_GAVE_UP_EXIT, FixedRosterIslandAbandoned, FleetController, IslandConfigError,
     RunStalled, RunStopRequested, controller_fixed_roster,
 )
 from .launch.teardown import collect_diagnostics_parallel, teardown_island
@@ -936,6 +936,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                   file=sys.stderr)
             drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
             return RUN_STOPPED_EXIT
+        except IslandConfigError as error:
+            # An island refused its launch options: every relaunch would fail the same
+            # way. Secure the tapes (bounded), then the finally block tears down.
+            print(f"[launcher] ERROR: {error}; stopping the run (exit {CONFIG_ERROR_EXIT}): fix "
+                  "the launch options, then launch again", file=sys.stderr)
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return CONTAINER_CHANGED_EXIT if container_changed() else CONFIG_ERROR_EXIT
         except FixedRosterIslandAbandoned as error:
             # A fixed-roster island failed for good: the run cannot finish.
             # Secure the tapes (bounded), then the finally block tears every

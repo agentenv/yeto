@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..config_errors import CONFIG_ERROR_MARKER
 from .ssh_trainer_island import (
     KILL_GRACE_S,
     NodeState,
@@ -80,7 +81,8 @@ WORKER_EXIT_GRACE_S = 120.0
 HEALTH_EVERY_S = 60.0
 LOG_TAIL_LINES = 400
 STRICT_MARKERS = ("[yeto-rl-strict-failure]", "StrictRlInvariantError:",
-                  "backend identity mismatch, JOIN refused", "session mismatch (HELLO refused")
+                  "backend identity mismatch, JOIN refused", "session mismatch (HELLO refused",
+                  CONFIG_ERROR_MARKER)
 
 
 class _Status:

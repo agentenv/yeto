@@ -13,7 +13,12 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
-from yeto.rl.engine.run_config import DP_OPTIMIZERS
+from yeto.rl.engine.run_config import (
+    DP_OPTIMIZERS,
+    LOG_PROBS_CHUNK_AUTO,
+    LOG_PROBS_CHUNK_AUTO_ROWS,
+    log_probs_chunk_size_arg,
+)
 from yeto.rl.engine.run_flags import GLOBAL_ROUNDS_HELP, RlFlag, cli_flag, island_flag, shared_flag
 from yeto.rl.engine.selection import (
     FULL_PARAMETER_ROUNDS,
@@ -244,6 +249,13 @@ _ELASTIC = (
 
 _RUN_CONTROL: tuple = ()  # --rl-miles-overlay went with the critic source overlay
 
+def _log_probs_chunk_size(text: str) -> str | int:
+    try:
+        return log_probs_chunk_size_arg(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 _ROLLOUT_ENGINE = (
     shared_flag(
         "--rl-activation-recompute",
@@ -258,6 +270,18 @@ _ROLLOUT_ENGINE = (
         help="ports: Miles dynamic batching, packing samples into micro batches of "
         "at most this many tokens per GPU (must be >= --seq-len). Default: fixed "
         "micro batches",
+    ),
+    shared_flag(
+        "--rl-log-probs-chunk-size",
+        type=_log_probs_chunk_size,
+        default=LOG_PROBS_CHUNK_AUTO,
+        help="ports: rows per chunk of the trainer's log-prob / entropy computation over the "
+        "vocabulary (Miles --log-probs-chunk-size; score centering's selected log-probs too): "
+        "one fp32 [rows, vocab / TP] block at a time instead of one block of the whole "
+        "response, which runs out of memory on long responses. Memory only: rows are "
+        f"independent, the values do not change. auto (default): {LOG_PROBS_CHUNK_AUTO_ROWS} "
+        f"rows when --seq-len exceeds {LOG_PROBS_CHUNK_AUTO_ROWS}, else off; 0: off (one block "
+        "per response); N: N rows",
     ),
     shared_flag(
         "--rl-gradient-accumulation-fusion",
