@@ -23,6 +23,7 @@ from yeto.rl.engine.full_parameter_identity import (
     is_sha256,
     local_init as local_init_rule,
 )
+from yeto.rl.engine.selection import PARAMETER_LAYOUT_AUTO
 from yeto.rl.engine.run_flags import (
     FULL_PARAMETER_ASYNC_MAX_PIPELINE,
     FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD as MAX_LOCAL_ROUNDS_AHEAD,
@@ -1012,7 +1013,8 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
         or type(args.fragments) is not int
         or args.fragments < 1
         or args.total_fragment_steps != args.global_rounds * args.fragments
-        or not _is_sha256(args.parameter_layout_sha256)
+        or not (_is_sha256(args.parameter_layout_sha256)
+                or args.parameter_layout_sha256 == PARAMETER_LAYOUT_AUTO)
     ):
         raise ValueError("dense full-parameter fragment budget must equal rounds*fragments")
     if _full_parameter_async(args):
@@ -1088,7 +1090,9 @@ def _dense_full_sync_config(
         learner_generations=_roster_generations(args),
         total_fragment_steps=args.total_fragment_steps,
         expected_fragments=args.fragments,
-        expected_layout_hash=args.parameter_layout_sha256,
+        # auto: the syncer binds the layout at the first HELLO (the island prints and records its own)
+        expected_layout_hash=(None if args.parameter_layout_sha256 == PARAMETER_LAYOUT_AUTO
+                              else args.parameter_layout_sha256),
         local_horizon=int(args.local_horizon) if async_rounds else 1,
         optimizer_steps_per_round=args.optimizer_steps,
         training_contract_hash=training_contract_sha256,

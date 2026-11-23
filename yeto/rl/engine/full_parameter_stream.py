@@ -225,7 +225,11 @@ class RoleStreamConfig:
     learner_generations: tuple[int, ...]
     total_fragment_steps: int
     expected_fragments: int
-    expected_layout_hash: str
+    # The frozen layout hash the island checks its own layout against; None
+    # (``--rl-parameter-layout-sha256 auto``): no island-side check, the
+    # syncer binds the layout of the first HELLO (later islands with another
+    # layout are refused there; a resume verifies the checkpoint's layout).
+    expected_layout_hash: str | None
     local_horizon: int
     optimizer_steps_per_round: int
     training_contract_hash: str
@@ -459,7 +463,8 @@ class RoleStreamConfig:
             or self.max_chunk_bytes % 4
         ):
             raise ValueError("role-stream transport bounds are invalid")
-        require_sha256("expected_layout_hash", self.expected_layout_hash)
+        if self.expected_layout_hash is not None:
+            require_sha256("expected_layout_hash", self.expected_layout_hash)
         require_sha256("training_contract_hash", self.training_contract_hash)
         require_sha256("syncer_profile_hash", self.syncer_profile_hash)
         require_sha256("algorithm_spec_sha256", self.algorithm_spec_sha256)
@@ -535,6 +540,24 @@ class RoleRoundResult:
     applied_fragments: tuple[int, ...]
     submissions: tuple[RoleFragmentSubmission, ...]
     terminal_submitted: bool
+
+
+LAYOUT_AUTO_LOG_PREFIX = "[yeto-layout-auto] "
+LAYOUT_BOUND_EVENT = "rl_full_parameter_layout_bound"
+
+
+def observed_layout_record(config: RoleStreamConfig, layout) -> dict[str, Any]:
+    """The layout an island observed under ``--rl-parameter-layout-sha256 auto``:
+    printed before the HELLO and written to the island tape once the syncer
+    admitted it, so a later run can pin ``parameter_layout_sha256``."""
+
+    return {
+        "role": config.role,
+        "learner_id": config.learner_id,
+        "parameter_layout_sha256": layout.layout_hash,
+        "fragments": layout.fragments.num_fragments,
+        "fragment_bytes": [fragment.numel * 4 for fragment in layout.fragments.fragments],
+    }
 
 
 def session_contract_hash(
@@ -812,6 +835,10 @@ class FullParameterRoleStream:
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} stream initialized twice")
         group = await self._prepare_group(group)
         adapter, initial = await self._initialize_adapter(group)
+        if self.config.expected_layout_hash is None:
+            # Before the HELLO, so a layout the syncer refuses is in the log too.
+            print(LAYOUT_AUTO_LOG_PREFIX + json.dumps(observed_layout_record(self.config, adapter.layout),
+                                                      sort_keys=True), flush=True)
         if self.config.expert_token_weights:
             await self._install_routed_token_counter(group, adapter)
         # With spot subscribers, island 0 publishes the layout they

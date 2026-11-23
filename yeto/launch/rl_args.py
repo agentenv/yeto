@@ -22,6 +22,7 @@ from ..rl.engine.selection import (
     ASYNC_NESTEROV_MIN_H,
     ASYNC_TERMINAL_GRACE_MS,
     FULL_PARAMETER_SYNC_PRESET,
+    PARAMETER_LAYOUT_AUTO,
     SAO_STREAMING_SYNC_PRESET,
     is_sync_mode_default,
     plain,
@@ -324,8 +325,13 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
                             "trainers start no engine; the sampler islands generate)")
     elif not fixed_partition:
         problems.append("--rl-placement fixed-partition (dedicated rollout GPUs)")
-    if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
-        problems.append("--rl-parameter-layout-sha256 <64 lowercase hex>")
+    layout_sha256 = getattr(args, "rl_parameter_layout_sha256", None) or ""
+    if layout_sha256 == PARAMETER_LAYOUT_AUTO:
+        print("[launcher] layout hash: bound by the syncer at first HELLO; resume verifies it "
+              "(--rl-parameter-layout-sha256 auto; each island prints its observed hash to pin later)",
+              flush=True)
+    elif not re.fullmatch(r"[0-9a-f]{64}", layout_sha256):
+        problems.append(f"--rl-parameter-layout-sha256 <64 lowercase hex> (or {PARAMETER_LAYOUT_AUTO})")
     if args.experimental_rl_sync:
         problems.append("no --experimental-rl-sync")
     if int(getattr(args, "rl_optimizer_steps", 1) or 1) != 1:

@@ -577,7 +577,8 @@ class VerlChunkedFullParameterAdapter:
                                 matrix_merge=config.matrix_merge)
         adapter = cls(layout, max_chunk_bytes=config.max_chunk_bytes)
         if (layout.fragments.num_fragments != config.expected_fragments
-                or layout.layout_hash != config.expected_layout_hash):
+                or (config.expected_layout_hash is not None  # None: bound by the syncer (auto)
+                    and layout.layout_hash != config.expected_layout_hash)):
             # The refusal doubles as a layout probe: the observed values to freeze.
             print(LAYOUT_PROBE_LOG_PREFIX + json.dumps(adapter.probe_record(), sort_keys=True), flush=True)
             raise RuntimeError(

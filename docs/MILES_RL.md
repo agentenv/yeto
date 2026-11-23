@@ -20,6 +20,20 @@ mode), whose `--rl-sync-full-parameter-rounds async` profile is the
 asynchronous multi-fragment counterpart of `decoupled`; `sao-streaming-full`
 syncs a full actor and critic.
 
+The full-parameter preset needs the island layout's hash
+(`--rl-parameter-layout-sha256`, with `--fragments` equal to that layout's
+fragment count). A Miles run may pass `--rl-parameter-layout-sha256 auto`
+instead (opt-in; an explicit hash and a missing hash behave as before). Then no
+frozen hash is checked on the island: every island prints the layout it
+observes (`[yeto-layout-auto] {...}`, before its HELLO) and records it on its
+tape (`rl_full_parameter_layout_bound`). The syncer binds the layout of the
+first HELLO, refuses an island with another layout at its HELLO, and a resume
+verifies the checkpoint's layout. The recorded `parameter_layout_sha256` can
+be pinned in a later run: the HELLO is the same either way. The fragment count
+stays explicit. verl plans its layout offline
+(`python -m yeto.rl.adapters.verl.full_parameter_plan`) and does not take
+`auto`.
+
 Selecting `decoupled` is intentional. The launcher never infers it from the
 model, island count, or generic DiLoCo flags.
 
