@@ -577,7 +577,7 @@ def load_windows(events: Iterable[Mapping[str, object]], window_s: float) -> lis
 # buffer samples that share its reward; each carries ``metadata.compaction``
 # (schema 1: trajectory_id, segment_index, num_segments, context_budget,
 # summary_ok, kept_steps, segment_tokens, tokens_after; optional summary_tokens,
-# compactions, context_full, task_truncated, last_step_truncated). A sample without that key is one whole trial.
+# compactions, context_full, summary_truncated, task_truncated, last_step_truncated). A sample without that key is one whole trial.
 # The same summary is read on the sampler (one round's written samples, under
 # ``rl_sampler_engine_round.agentic.compaction``) and on the trainer (one step's
 # trained Miles samples). Without any compaction data it returns None, so the
@@ -592,10 +592,14 @@ COMPACTION_COUNT_KEYS = (
     # gateway (records ``gateway`` snapshot): lost replies replayed; trials invalidated for a
     # fork / history rewrite of a compacted session; written compacted + fork-lost trials
     "retry_replays", "retry_replay_trials", "fork_lost_trials", "compaction_exposed_trials",
+    # summaries cut at the summary turn's max_tokens before a complete summary (a subset of
+    # summaries - summary_ok); null when no sample reports it
+    "summary_truncated",
 )
 COMPACTION_RATIO_KEYS = (
     "compacted_frac", "compactions_mean", "samples_per_trial", "segment_sample_frac",
     "summary_ok_frac", "truncated_compacted_frac", "summary_token_frac", "fork_lost_frac",
+    "summary_truncated_frac",
 )
 FORK_LOST_MARK = "compaction_fork_lost"  # gateway invalidation reason prefix
 
@@ -630,6 +634,7 @@ def derive_compaction_ratios(counts: Mapping[str, Any]) -> dict[str, float | Non
                                            counts.get("compacted_trials")),
         "summary_token_frac": _ratio(counts.get("summary_tokens"), counts.get("trainable_tokens")),
         "fork_lost_frac": _ratio(counts.get("fork_lost_trials"), counts.get("compaction_exposed_trials")),
+        "summary_truncated_frac": _ratio(counts.get("summary_truncated"), counts.get("summaries")),
     }
 
 
@@ -747,7 +752,7 @@ class CompactionTally:
             reward = _reward(sample)
             trial = self._trials.setdefault(key, {
                 "segments": 0, "num_segments": 1, "last": -1, "status": "", "compactions": 0,
-                "summaries": 0, "summary_ok": 0, "trainable": 0, "summary_tokens": None,
+                "summaries": 0, "summary_ok": 0, "summary_truncated": None, "trainable": 0, "summary_tokens": None,
                 "context_full": None, "reward": reward, "replays": None})
             self._samples += 1
             if reward is not None:
@@ -766,6 +771,8 @@ class CompactionTally:
                 if isinstance(comp.get("summary_ok"), bool):
                     trial["summaries"] += 1
                     trial["summary_ok"] += int(comp["summary_ok"])
+                if isinstance(comp.get("summary_truncated"), bool):
+                    trial["summary_truncated"] = (trial["summary_truncated"] or 0) + int(comp["summary_truncated"])
                 n = _int_field(comp.get("summary_tokens"))
                 if n is not None:
                     trial["summary_tokens"] = (trial["summary_tokens"] or 0) + n
@@ -829,7 +836,7 @@ class CompactionTally:
         counts = dict.fromkeys(COMPACTION_COUNT_KEYS, 0)
         hist: dict[int, int] = {}
         written: dict[str, int] = {}
-        summary_tokens = full = replays = None
+        summary_tokens = full = replays = cut = None
         trial_rewards: list[float] = []
         trial_tokens: list[float] = []
         for trial in self._trials.values():
@@ -856,6 +863,8 @@ class CompactionTally:
                 trial_rewards.append(trial["reward"])
             if trial["summary_tokens"] is not None:
                 summary_tokens = (summary_tokens or 0) + trial["summary_tokens"]
+            if trial["summary_truncated"] is not None:
+                cut = (cut or 0) + trial["summary_truncated"]
             if trial["context_full"] is not None:
                 full = (full or 0) + int(trial["context_full"])
             if trial["replays"] is not None:
@@ -864,6 +873,7 @@ class CompactionTally:
                 replays[1] += int(trial["replays"] > 0)
         counts["samples"] = self._samples
         counts["summary_tokens"] = summary_tokens  # None: no sample reported its summary length
+        counts["summary_truncated"] = cut  # None: no sample reported it (an older records proxy)
         counts["context_full_trials"] = full
         counts["retry_replays"], counts["retry_replay_trials"] = replays or (None, None)  # None: not reported
         counts["fork_lost_trials"] = self._fork_lost
@@ -905,5 +915,6 @@ def compaction_log_line(stats: Mapping[str, Any]) -> str:
     return (f"compaction: trials={stats.get('trials')} samples={stats.get('samples')} "
             f"compacted={stats.get('compacted_trials')} ({pct('compacted_frac')}) "
             f"compactions/trial={stats.get('compactions_mean')} segments={stats.get('segments_hist')} "
-            f"summary_ok={pct('summary_ok_frac')} truncated_after_compaction={stats.get('truncated_compacted_trials')} "
+            f"summary_ok={pct('summary_ok_frac')} summary_truncated={pct('summary_truncated_frac')} "
+            f"truncated_after_compaction={stats.get('truncated_compacted_trials')} "
             f"({pct('truncated_compacted_frac')}) summary_tokens={pct('summary_token_frac')}")

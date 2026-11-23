@@ -209,6 +209,46 @@ def test_bad_rebuild_keys_are_refused(section, match):
         C.config_from_spec(_spec({"context_budget": 65536, **section}))
 
 
+
+def test_dry_run_suggests_a_longer_summary_turn_only_when_it_fits():
+    """keep_task_message on and a summary turn below 2048 that t_comp (and the engine
+    context, when known) could hold at 2048: a note; the defaults do not change."""
+    small = {"context_budget": 65536, "summary_max_tokens": 1024}
+    spec = _spec(small)
+    cfg = C.config_from_spec(spec)
+    note = C.spec_summary_length_note(spec, cfg)
+    assert note is not None and "summary_max_tokens 2048" in note and "max_tokens is 1024" in note
+    assert cfg.summary_max_tokens == 1024 and C.CompactionConfig(context_budget=65536).summary_max_tokens is None
+    for section in ({**small, "keep_task_message": False},  # the identifiers request is off
+                    {"context_budget": 65536, "summary_max_tokens": 2048},  # already 2048
+                    {"context_budget": 65536},  # the turn's 4096 (capped at 4096)
+                    {"context_budget": 4608, "t_comp": 2048, "summary_max_tokens": 1024}):  # t_comp: no room
+        spec = _spec(section)
+        assert C.spec_summary_length_note(spec, C.config_from_spec(spec)) is None, section
+    # no summary_max_tokens and a small turn cap: the turn's 1024 is the summary cap
+    spec = _spec({"context_budget": 65536}, turn_max_tokens=1024)
+    assert "max_tokens is 1024" in C.spec_summary_length_note(spec, C.config_from_spec(spec))
+    # t_comp holds 2048 + the request, but the engine context leaves headroom for 1024 only: no note
+    t_comp = 2048 + C.summary_request_tokens(C.SUMMARY_PROMPT)
+    section = {"context_budget": 32768 - 500, "t_comp": t_comp, "summary_max_tokens": 1024}
+    spec = _spec(section, max_model_len=32768, turn_max_tokens=1024)
+    assert C.spec_summary_length_note(spec, C.config_from_spec(spec)) is None
+    spec = _spec(section, turn_max_tokens=1024)  # engine context unknown: t_comp alone decides
+    assert C.spec_summary_length_note(spec, C.config_from_spec(spec)) is not None
+
+
+def test_the_preflight_lines_carry_the_summary_length_note(monkeypatch):
+    from yeto.rl import up_consistency
+
+    spec = _spec({"context_budget": 65536, "summary_max_tokens": 1024}, task_defaults={"agent": "pi"})
+    monkeypatch.setattr(up_consistency, "effective_spec", lambda _cfg: spec)
+    lines = up_consistency.compaction_lines({})
+    assert lines[0].startswith("agentic.compaction on:")
+    assert any(line.startswith("NOTE: agentic.compaction: the summary turn's max_tokens is 1024") for line in lines)
+    spec["agentic"]["compaction"]["summary_max_tokens"] = 2048
+    assert not any(line.startswith("NOTE:") for line in up_consistency.compaction_lines({}))
+
+
 # -- the records proxy and the trials get it -----------------------------------
 
 def _round(monkeypatch, agentic, *, build=None):

@@ -166,11 +166,65 @@ def test_summary_cut_at_its_length_still_opens_the_next_segment(glm):
     first, second = records["sessions"][0]["samples"]
     assert first["turns"][-1]["kind"] == "summary" and first["turns"][-1]["finish_reason"] == "length"
     assert first["summary_ok"] is False and second["summary_ok"] is None
-    assert records["counters"]["summary_truncated"] == 1 and records["counters"]["summary_not_ok"] == 1
+    # cut at its max_tokens: summary_truncated, counted apart from a malformed summary (summary_not_ok)
+    assert first["summary_truncated"] is True and second["summary_truncated"] is None
+    assert records["counters"]["summary_truncated"] == 1 and "summary_not_ok" not in records["counters"]
     resume = glm.decode(second["token_ids"])
     assert "1. listed" in resume and "<summary>" not in resume  # the part written, tag dropped
+    assert cp.SUMMARY_CUT_NOTE in resume
     assert [t["kind"] for t in second["turns"]] == ["action"]
     assert second["turns"][0]["finish_reason"] == "stop" and second["turns"][0]["parse_error"] is None
+    # the summary turn trains as generated: its 12 sampled tokens are mask 1
+    summary_turn = first["turns"][-1]
+    assert len(summary_turn["completion"]) == 12 and first["loss_mask"][-12:] == [1] * 12
+
+
+def test_a_cut_summary_resumes_from_the_sections_it_got_to(glm):
+    """A summary cut in its fourth section: the next segment resumes from sections 1-3
+    (the half-written line is left out) and the cut note; a complete summary is still
+    summary_ok with summary_truncated False."""
+    body = ("<analysis>keep the paths</analysis>\n<summary>\n1. Original task and goal: read /data/in/a.txt\n"
+            "2. Constraints and environment facts: none\n3. Completed actions: ran cat /data/in/a.txt\n"
+            "4. Important observations: the file /data/in/b-" + "long path part " * 30 + "</summary>")
+    cut = assistant("c", content=body)
+    whole = len(glm.encode(model_text(glm, cut)))
+    tokens = len(glm.encode(model_text(glm, assistant("c", content=body.split("4. Important")[0])))) + 8
+    assert tokens < whole
+    cfg = third_trigger(glm, 2000, keep_recent_steps=1, summary_max_tokens=tokens)
+    proxy, _engine = proxy_for(glm, [SCRIPT[0], SCRIPT[1], cut, SCRIPT[2]], cfg)
+    run(proxy, "t", RESULTS)
+    records = proxy.records("t")
+    first, second = records["sessions"][0]["samples"]
+    assert (first["summary_ok"], first["summary_truncated"]) == (False, True)
+    assert records["counters"]["summary_truncated_sections"] == 3
+    resume = proxy.backend.sessions["rec0"].segments[1].head[-1]["content"]
+    assert "1. Original task and goal: read /data/in/a.txt" in resume
+    assert "3. Completed actions: ran cat /data/in/a.txt" in resume
+    assert "4. Important" not in resume and "/data/in/b-" not in resume  # the half-written line is left out
+    assert cp.SUMMARY_CUT_NOTE in resume
+    assert "keep the paths" not in resume  # the analysis is dropped
+
+    complete = assistant("c", content="<summary>1. listed files</summary>")
+    proxy, _engine = proxy_for(glm, [SCRIPT[0], SCRIPT[1], complete, SCRIPT[2]],
+                               third_trigger(glm, 2000, keep_recent_steps=1))
+    run(proxy, "t", RESULTS)
+    first, _second = proxy.records("t")["sessions"][0]["samples"]
+    assert (first["summary_ok"], first["summary_truncated"]) == (True, False)
+    assert "summary_truncated" not in proxy.records("t")["counters"]
+
+
+def test_salvage_summary_keeps_the_sections_written():
+    text = "<analysis>a</analysis><summary>\n1. Goal: x\n2. Facts: /a/b\n3. Done: cat /a/b\n4. Obs: /a/c-par"
+    summary, sections = cp.salvage_summary(text)
+    assert sections == 3 and summary.endswith(cp.SUMMARY_CUT_NOTE)
+    assert "3. Done: cat /a/b" in summary and "/a/c-par" not in summary
+    # cut inside the analysis: no section, the analysis text is kept (its unfinished line left out)
+    summary, sections = cp.salvage_summary("<analysis>step one\nstep tw")
+    assert sections == 0 and summary == f"step one\n{cp.SUMMARY_CUT_NOTE}"
+    # nothing written at all: the note alone
+    assert cp.salvage_summary("") == (cp.SUMMARY_CUT_NOTE, 0)
+    # headers in markdown form count as well
+    assert cp.salvage_summary("<summary>\n**1. Goal** x\n## 2. Facts y\ncut")[1] == 2
 
 
 def test_summary_request_without_room_leaves_the_newest_output_out(glm):

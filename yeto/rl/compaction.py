@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Protocol
 
 T_COMP = 10_240
@@ -72,13 +72,13 @@ SUMMARY_SECTIONS: tuple[str, ...] = (
 SUMMARY_PROMPT = (
     "Your context is almost full. Summarize the interaction so far so that you can "
     "continue the task from the summary alone.\n"
-    "First think inside <analysis></analysis>: go through the history in order and "
-    "check what must not be lost.\n"
+    "First, inside <analysis></analysis>, note in a few short lines what must not be lost.\n"
     "Then write the summary inside <summary></summary> with exactly these numbered "
     "sections:\n"
     + "".join(f"{i}. {name}\n" for i, name in enumerate(SUMMARY_SECTIONS, 1))
-    + "Copy verbatim, never paraphrased: the task's goal and constraints, every file path "
-    "with its full directory, command, ID, URL and key value, and every unfinished item.\n"
+    + "Be brief: a few short lines per section, no restated tool output.\n"
+    "Copy verbatim, once each: task goal and constraints, file paths with full "
+    "directories, commands, IDs, URLs, key numbers.\n"
     "Do not call any tool in this turn."
 )
 
@@ -264,6 +264,30 @@ def extract_summary(text: str) -> tuple[str, bool]:
         head, scratch = stripped.split("<analysis>", 1)
         stripped = head if head.strip() else scratch
     return stripped.strip(), False
+
+
+# Ends a summary that was cut at its length (:func:`salvage_summary`).
+SUMMARY_CUT_NOTE = "[The summary was cut at its length limit; later sections may be missing.]"
+_SECTION_HEAD = re.compile(r"^\s*(?:#+\s*|\*\*)?([1-9])[.)]\s", flags=re.M)
+
+
+def salvage_summary(text: str) -> tuple[str, int]:
+    """``(summary, sections)``: best-effort summary of a summary turn cut at its
+    length without a closed ``<summary>`` tag. The text :func:`extract_summary`
+    keeps, from the first numbered section header on when there is one, without
+    its last line (cut mid-way: a half-written path is worse than none), and
+    :data:`SUMMARY_CUT_NOTE` at the end. ``sections``: numbered section headers
+    kept (0: none, the text is kept as written)."""
+    body, _ok = extract_summary(text)
+    lines = body.splitlines()
+    if len(lines) > 1:
+        lines = lines[:-1]
+    body = "\n".join(lines).rstrip()
+    first = _SECTION_HEAD.search(body)
+    if first is not None:
+        body = body[first.start():].lstrip("\n")
+    sections = len({m.group(1) for m in _SECTION_HEAD.finditer(body)})
+    return (f"{body}\n{SUMMARY_CUT_NOTE}" if body else SUMMARY_CUT_NOTE), sections
 
 
 def step_messages(step: tuple[str, str]) -> list[Message]:
@@ -710,6 +734,43 @@ def config_from_spec(spec: Mapping[str, Any], *, max_model_len: int | None = Non
                          f"set max_response_len >= {width}")
     _check_agent(agentic)
     return cfg
+
+
+# The summary_max_tokens the dry runs suggest when keep_task_message is on (summary_length_note).
+SUGGESTED_SUMMARY_MAX_TOKENS = 2048
+
+
+def summary_length_note(cfg: CompactionConfig, turn_max_tokens: int,
+                        max_model_len: int | None = None) -> str | None:
+    """A dry-run note (None: nothing to say): with ``keep_task_message`` on, the
+    summary request asks for identifiers verbatim and summaries run longer, so a
+    summary turn below :data:`SUGGESTED_SUMMARY_MAX_TOKENS` is often cut. Only
+    when the spec's room allows that many (``t_comp`` holds it,
+    :meth:`CompactionConfig.check_summary_room`, and the engine context when known,
+    :meth:`CompactionConfig.check_summary_headroom`). Advice only: the defaults do
+    not change."""
+    tokens = cfg.summary_tokens(turn_max_tokens)
+    if not cfg.keep_task_message or tokens >= SUGGESTED_SUMMARY_MAX_TOKENS:
+        return None
+    try:
+        bigger = replace(cfg, summary_max_tokens=SUGGESTED_SUMMARY_MAX_TOKENS)
+        if max_model_len is not None:
+            bigger.check_summary_headroom(max_model_len, turn_max_tokens)
+    except ValueError:
+        return None
+    return (f"agentic.compaction: the summary turn's max_tokens is {tokens}; with keep_task_message on the "
+            f"summary keeps identifiers verbatim and small models often reach that cap (a cut summary is counted "
+            f"as summary_truncated). The spec has room for summary_max_tokens {SUGGESTED_SUMMARY_MAX_TOKENS}: "
+            f"consider setting it")
+
+
+def spec_summary_length_note(spec: Mapping[str, Any], cfg: CompactionConfig) -> str | None:
+    """:func:`summary_length_note` for a sampler spec (``agentic.turn_max_tokens``, the
+    spec's engine context); None without a turn cap."""
+    agentic = spec.get("agentic") if isinstance(spec.get("agentic"), Mapping) else {}
+    if agentic.get("turn_max_tokens") is None:
+        return None
+    return summary_length_note(cfg, int(agentic["turn_max_tokens"]), spec_max_model_len(spec))
 
 
 def describe(cfg: CompactionConfig) -> str:

@@ -239,7 +239,7 @@ class Scenario:
 
 
 # 4096 / 1152: t_comp holds the summary turn (summary_max_tokens 128 + the summary request's
-# byte bound, 799) and the budget leaves the engine room for it after a full step
+# byte bound, 798) and the budget leaves the engine room for it after a full step
 # (config_from_spec: check_summary_room / check_summary_headroom with turn_max_tokens 192).
 # A t_comp of 512 is refused by the spec (``tcomp_overflow`` runs it with the checks off).
 SMALL = {"context_budget": 4096, "t_comp": 1152, "keep_recent_steps": 2, "max_compactions": 3,

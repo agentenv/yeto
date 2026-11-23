@@ -231,6 +231,9 @@ def _check_segments(trial: list[dict], engine: Engine, cfg: CompactionConfig, te
     assert [m["segment_tokens"] for m in metas] == trained
     assert [m["tokens_after"] for m in metas] == [sum(trained[i + 1:]) for i in range(count)]
     assert [m["summary_ok"] for m in metas] == [True] * (count - 1) + [None]
+    # complete summaries: not cut; the last segment ends with no summary and carries no flag
+    assert [m.get("summary_truncated") for m in metas] == [False] * (count - 1) + [None]
+    assert "summary_truncated" not in metas[-1]
     assert metas[0]["kept_steps"] is None and all(m["kept_steps"] in (0, 1) for m in metas[1:])
     assert all(s["status"] == "completed" for s in trial[:-1])
     prompts = {p for p, _ in engine.completions}

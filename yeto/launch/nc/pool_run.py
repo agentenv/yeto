@@ -400,7 +400,12 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
             warning = drain_timeout_warning(spec)  # none for a spec that resolves to the live switch
             if warning is not None:
                 notes.append(warning)
-            from yeto.rl.compaction import config_from_spec, describe, segment_width  # noqa: PLC0415
+            from yeto.rl.compaction import (  # noqa: PLC0415
+                config_from_spec,
+                describe,
+                segment_width,
+                spec_summary_length_note,
+            )
 
             compaction = config_from_spec(spec)  # a bad agentic.compaction: a problem here
             if compaction is not None:  # no line without the section (the output is as before)
@@ -408,6 +413,9 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
                 _width, width_warning = segment_width(spec, compaction)
                 if width_warning is not None:
                     notes.append(width_warning)
+                length_note = spec_summary_length_note(spec, compaction)
+                if length_note is not None:
+                    notes.append(length_note)
             setup_lines, setup_problems = agentic_setup.dry_run_report(spec, base_dir=Path(cfg["spec"]).parent)
             for line in setup_lines:
                 print(f"agentic.setup: {line}")

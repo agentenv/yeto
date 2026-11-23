@@ -828,11 +828,23 @@ uncompacted trial. Turning it on trains the policy on prompts the environment
 never produced. Turn it on when single tool outputs are often larger than the
 room left after a compaction (`kept_steps` is 0 in most rebuilt segments).
 
-The default summary request asks the policy to copy the task's goal and
-constraints, file paths with their directories, commands, IDs, URLs, key values
-and unfinished items word for word. The default resume message says that the
-task message above it is authoritative. The nine summary sections are
-unchanged.
+The default summary request asks for short prose: a few short lines per
+section, no restated tool output, and a brief `<analysis>`. It asks for
+identifiers word for word, each once: the task's goal and constraints, file
+paths with their full directories, commands, IDs, URLs and key numbers. The
+default resume message says that the task message above it is authoritative.
+The nine summary sections are unchanged.
+
+**Summary length.** A summary that keeps identifiers is longer. When the
+summary turn reaches its `max_tokens` before `</summary>`, the segment is
+`summary_truncated`, not `summary_ok`. The next segment resumes from the
+sections that were written: the half-written last line is dropped, and a note
+says the summary was cut. The summary turn is still trained as generated
+(loss mask 1). If many summaries are cut, raise `summary_max_tokens`. With
+`keep_task_message` on, the dry runs print a note when the summary turn is
+below 2048 tokens and `t_comp` (and the engine context, when known) has room
+for 2048. The default does not change: a larger default would change the room
+checks of existing specs.
 
 **Checks before anything is ordered.** `pool --dry-run` and `yeto run up`
 preflight refuse:
@@ -1013,10 +1025,13 @@ the prompts of later segments.
   and the sampler logs it at start.
 - The records proxy counts `compactions` (summaries written) and `context_full`
   (model calls refused because the context was full) per trial, in the trial's
-  records (`counters`).
+  records (`counters`). It counts cut summaries as `summary_truncated` and other
+  incomplete summaries as `summary_not_ok`.
 - Every segment sample carries `metadata.compaction`: `trajectory_id`,
-  `segment_index`, `num_segments`, `context_budget`, `summary_ok` (false when the
-  policy did not close a `<summary>` tag), `kept_steps`, `segment_tokens`,
+  `segment_index`, `num_segments`, `context_budget`, `summary_ok` (true only for
+  a complete summary with a closed `<summary>` tag), `summary_truncated` (on a
+  segment that ends with a summary: true when the summary turn hit its
+  `max_tokens` first), `kept_steps`, `segment_tokens`,
   `tokens_after` and, when the engine reports it, `max_model_len` (the trainer
   stops on a round whose segments can be wider than its `--seq-len`: this
   `max_model_len`, else `context_budget`). Without `agentic.compaction` no sample has this key. Every
@@ -1030,9 +1045,14 @@ the prompts of later segments.
   and `agentic.compaction_last_step_truncated` (absent when zero), and the
   trial's records count them as `task_message_truncated` and
   `compaction_last_step_truncated`.
-- A high share of `summary_ok: false`, or of trials whose last segment is
-  truncated after `max_compactions`, means the summaries are not doing their job:
-  raise `context_budget` (up to `max_model_len`) or `max_compactions`. A high
+- The round event's `agentic.compaction` reports `summary_truncated` and
+  `summary_truncated_frac` next to `summary_ok_frac`. A high
+  `summary_truncated_frac` means the summary turn is too short: raise
+  `summary_max_tokens` (and `t_comp` if the room check refuses it).
+- A high share of `summary_ok: false` that is not `summary_truncated`, or of
+  trials whose last segment is truncated after `max_compactions`, means the
+  summaries are not doing their job: raise `context_budget` (up to
+  `max_model_len`) or `max_compactions`. A high
   `drain_timeout` loss or stale-group count on trials with several segments
   means the weight-switch settings above are too tight.
 
@@ -1085,7 +1105,7 @@ DCP 8 without R3 (the AMD recipe) decodes at 43 tok/s per stream.
 | `sampling.n` | 8 | Equals `--n-samples-per-prompt 8`. |
 | `agentic.max_prompt_len` / `max_response_len` | 16384 / 262144 | `max_response_len` = `--rollout-max-response-len` = `--seq-len` = `max_model_len`: a row is at most the engine context (a trial ends there), and the same rows hold with context compaction on (section 3.6). |
 | `--rl-max-tokens-per-gpu` | 131072 | `--seq-len / CP` at CP2: one micro batch is one full-length row (section 3.6). |
-| `agentic.compaction` | off | To turn it on, add the validated block `{"context_budget": 245760, "t_comp": 10240, "keep_recent_steps": 2, "max_compactions": 3}` to `agentic` (the spec's `_comment` carries it). `context_budget` is at most 259297 here (`turn_max_tokens` 8192, default summary turn); 245760 leaves the summary turn 13537 tokens of headroom. Then read section 3.6 for the drain cut, the trial wall clock and the buffer group size. |
+| `agentic.compaction` | off | To turn it on, add the validated block `{"context_budget": 245760, "t_comp": 10240, "keep_recent_steps": 2, "max_compactions": 3}` to `agentic` (the spec's `_comment` carries it). `context_budget` is at most 259298 here (`turn_max_tokens` 8192, default summary turn); 245760 leaves the summary turn 13538 tokens of headroom. Then read section 3.6 for the drain cut, the trial wall clock and the buffer group size. |
 | `task_defaults.agent_timeout_s` / `wall_clock_s` | 7200 / 7800 s | With 3600 / 4200 s most trials of a C=16 run were cut by the 1 h timeout (2026-11-17). At 42 tok/s a 2 h trial can still generate about 100k tokens with two thirds of its time in tools. |
 | `agentic.weight_switch` | `drain` | vLLM ROCm has no live update. |
 | `agentic.drain_timeout_s` / `reload_max_defer_s` | 1800 / 1800 s | See below. The cut is the smaller of the two, so they move together. |

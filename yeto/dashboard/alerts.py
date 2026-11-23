@@ -309,10 +309,14 @@ def compaction(reducer, th: dict) -> list[dict]:
         ok, n = c.get("summary_ok_frac"), c.get("summaries") or 0
         if ok is not None and n >= least and ok < th["compaction_summary_ok_warn"]:
             sev = 0 if ok < th["compaction_summary_ok_severe"] else 1
+            cut = c.get("summary_truncated_frac")
+            why = ("the policy's summaries miss the <summary> block, the next segment resumes from raw text"
+                   if not cut else
+                   f"{cut:.0%} of the summaries hit the summary turn's max_tokens (summary_truncated): raise "
+                   "agentic.compaction.summary_max_tokens if t_comp has room; the rest miss the <summary> block")
             out.append(_alert(sev, "compaction_summary", f"sampler {iid} compaction summaries failing",
                               f"summary_ok {ok:.0%} of {n:.0f} summaries in the last {len(rows)} rounds "
-                              f"(threshold {th['compaction_summary_ok_warn']:.0%}): the policy's summaries "
-                              "miss the <summary> block, the next segment resumes from raw text", island=iid,
+                              f"(threshold {th['compaction_summary_ok_warn']:.0%}): {why}", island=iid,
                               round=last))
         tr, nc = c.get("truncated_compacted_frac"), c.get("compacted_trials") or 0
         if tr is not None and nc >= least and tr > th["compaction_truncated_warn"]:

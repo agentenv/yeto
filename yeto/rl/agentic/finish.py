@@ -56,6 +56,7 @@ class CompactionSegment:
     ``close_segments``) and, after :func:`finish_sample`, its joined stream.
     ``kept_steps``: steps kept from the segment before (None on the first);
     ``summary_ok``: the summary it ended with had a closed tag (None: no summary);
+    ``summary_truncated``: it hit its max_tokens before a complete summary (None: no summary);
     ``context_budget``: the proxy's compaction ``C``; ``summary_tokens``: tokens
     its summary turn generated (0 without one); ``retry_replays``: the trial's
     resent requests the gateway answered from a lost reply (None: replay off);
@@ -66,6 +67,7 @@ class CompactionSegment:
     turns: tuple[TokenTurn, ...]
     kept_steps: int | None = None
     summary_ok: bool | None = None
+    summary_truncated: bool | None = None
     context_budget: int | None = None
     tokens: TokenSegments | None = None
     summary_tokens: int = 0
