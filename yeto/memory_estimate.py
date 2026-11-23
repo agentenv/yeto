@@ -38,6 +38,15 @@ one GPU per island, colocated).
 * K_ACT (no recompute): run d measured peak (tape ``peak_gpu_mem_bytes``,
   max of the two islands, 132.36e9 bytes = 123.27 GiB) solved for K_ACT.
 
+Partial routed experts (``--tuning full`` with an ``in_place``
+``--rl-expert-selection``, any MoE model): the routed experts are split over
+EP ranks (weights 2*(P - P_exp + P_exp/EP)/(TP*PP)) and only the selected
+experts carry grads and optimizer state (P_train/(TP*PP*EP) per GPU, the
+optimizer sharded over the expert data-parallel group DP/EP when distributed);
+every other parameter is frozen. A fixed partition (``--rl-placement
+fixed-partition``) trains on the island's GPUs minus ``--rollout-num-gpus`` and
+``--rl-standby-gpus``, with no rollout engine on them.
+
 Only Qwen3.5-4B is calibrated; other models get the same constants and the
 launcher treats an estimate for them as advisory (warn, never refuse) until
 data exists (design: Risks).
@@ -217,6 +226,12 @@ def _hf_cache_configs(repo: str) -> list[str]:
 
 def resolve_arch(model: str) -> tuple[ModelArch | None, str, str]:
     """(arch, resolved model id, source).  Source: local dir / HF cache / "none"."""
+    arch, repo, source, _ = _resolve(model)
+    return arch, repo, source
+
+
+def _resolve(model: str) -> tuple[ModelArch | None, str, str, dict | None]:
+    """:func:`resolve_arch` plus the config it read."""
     try:
         from .models import resolve
 
@@ -229,12 +244,13 @@ def resolve_arch(model: str) -> tuple[ModelArch | None, str, str]:
     candidates += _hf_cache_configs(str(repo))
     for path in candidates:
         try:
-            return arch_from_hf_config(json.loads(Path(path).read_text(encoding="utf-8"))), str(repo), path
+            cfg = json.loads(Path(path).read_text(encoding="utf-8"))
+            return arch_from_hf_config(cfg), str(repo), path, cfg
         except (OSError, ValueError, KeyError, TypeError):
             continue
     if str(repo) in BUILTIN_CONFIGS:
-        return arch_from_hf_config(BUILTIN_CONFIGS[str(repo)]), str(repo), "builtin"
-    return None, str(repo), "none"
+        return arch_from_hf_config(BUILTIN_CONFIGS[str(repo)]), str(repo), "builtin", BUILTIN_CONFIGS[str(repo)]
+    return None, str(repo), "none", None
 
 
 # --- request ----------------------------------------------------------------
@@ -258,6 +274,10 @@ class MemoryRequest:
     offload: bool = True           # engine released during training (colocated default)
     mem_fraction_static: float = 0.4
     optimizer_offload_fraction: float = 0.0  # share of the 12 B/param optimizer state in host memory
+    # partial routed experts (in_place selection) only; the defaults keep every other estimate
+    ep: int = 1                              # expert parallel: routed experts split over EP ranks
+    expert_params: float = 0.0               # routed-expert parameters of the model
+    trainable_params: float | None = None    # trainable (selected expert) parameters; None = all
 
 
 def lora_params(arch: ModelArch, rank: int, targets: str) -> float:
@@ -272,8 +292,20 @@ def estimate(req: MemoryRequest) -> dict[str, Any]:
     a = req.arch
     shard = req.tp * req.pp
     parts: dict[str, float] = {}
-    parts["weights"] = 2 * a.params / shard / GIB
-    if req.tuning == "full":
+    partial = req.ep > 1 or req.expert_params > 0 or req.trainable_params is not None
+    if partial:
+        held = a.params - req.expert_params + req.expert_params / req.ep
+        parts["weights"] = 2 * held / shard / GIB
+    else:
+        parts["weights"] = 2 * a.params / shard / GIB
+    if req.tuning == "full" and partial:
+        # only the selected experts train: grads and optimizer of this rank's share of them,
+        # the optimizer sharded over the expert data-parallel group when distributed
+        trainable = (held if req.trainable_params is None else req.trainable_params / req.ep) / shard
+        edp_shard = max(1, req.dp // req.ep) if req.distributed_optimizer else 1
+        kept = 1.0 - min(1.0, max(0.0, req.optimizer_offload_fraction))
+        parts["grads_optimizer"] = (4 * trainable + kept * 12 * trainable / edp_shard) / GIB
+    elif req.tuning == "full":
         dp_shard = req.dp if req.distributed_optimizer else 1
         kept = 1.0 - min(1.0, max(0.0, req.optimizer_offload_fraction))
         parts["grads_optimizer"] = (4 * a.params / shard + kept * 12 * a.params / (shard * dp_shard)) / GIB
@@ -369,11 +401,38 @@ def _larger_gpus() -> dict[str, float]:
     return caps
 
 
-def request_from_args(args, spec, arch: ModelArch) -> MemoryRequest:
+def partial_experts_shape(args, cfg: dict | None) -> dict[str, float] | None:
+    """``{"ep", "expert_params", "trainable_params"}`` of a generic partial-experts launch
+    (``--tuning full`` with an ``in_place`` ``--rl-expert-selection``), else None. Best
+    effort: an unreadable selection or config gives None (the launch checks report it)."""
+    path = getattr(args, "rl_expert_selection", None)
+    if not path or cfg is None or (getattr(args, "tuning", "lora") or "lora") != "full":
+        return None
+    try:
+        from .rl.engine import backends
+
+        selection = backends.module("expert_selection", "miles").ExpertSelection.load_file(
+            os.path.expanduser(str(path)))
+        if selection.layout != "in_place":
+            return None  # kimi_k31 slot_order: estimated by yeto.launch.k31_checks
+        breakdown = param_breakdown(cfg)
+        selected = sum(len(ids) for ids in selection.trainable.values())
+    except Exception:  # noqa: BLE001 - advisory estimate
+        return None
+    ep = int(getattr(args, "expert_parallel", 0) or 0) or int(selection.ep_size)
+    return {"ep": max(1, ep), "expert_params": float(breakdown["routed_experts"]),
+            "trainable_params": float(breakdown["per_expert"] * selected)}
+
+
+def request_from_args(args, spec, arch: ModelArch, cfg: dict | None = None) -> MemoryRequest:
     """Launcher args + one island ClusterSpec -> MemoryRequest (one GPU of the island)."""
     cap = gpu_capacity_gib(spec.gpu)
     total = int(getattr(spec, "total_gpus", 1) or 1)
-    rollout_gpus = int(getattr(args, "rl_rollout_gpus", 0) or 0)
+    # GPUs of the island that do not train: a fixed partition's rollout and standby GPUs
+    rollout_gpus = 0
+    if getattr(args, "rl_placement", "colocated") == "fixed-partition":
+        rollout_gpus = (int(getattr(args, "rollout_num_gpus", 0) or 0)
+                        + int(getattr(args, "rl_standby_gpus", 0) or 0))
     train_gpus = max(1, total - rollout_gpus)
     tp = int(getattr(args, "tensor_parallel", 1) or 1)
     pp = int(getattr(args, "pipeline_parallel", 1) or 1)
@@ -399,6 +458,7 @@ def request_from_args(args, spec, arch: ModelArch) -> MemoryRequest:
         offload=True if rollout_gpus == 0 or buffer_trainer else bool(getattr(args, "rl_offload_train", False)),
         mem_fraction_static=float(getattr(args, "sglang_mem_fraction_static", 0.4) or 0.4),
         optimizer_offload_fraction=offload_fraction,
+        **(partial_experts_shape(args, cfg) or {}),
     )
 
 
@@ -416,11 +476,11 @@ def estimate_for_launch(args, spec, *, margin: float) -> dict[str, Any]:
                        "hand from npu-smi info, e.g. weights 2 bytes/param / (TP x PP) plus "
                        "the vllm-ascend sleep-level-1 engine share)")
         return {**base, "estimated": False, "reason": reason}
-    arch, repo, source = resolve_arch(model)
+    arch, repo, source, cfg = _resolve(model)
     if arch is None:
         return {**base, "estimated": False,
                 "reason": f"model structure of {repo!r} unknown (no local or cached config.json)"}
-    req = request_from_args(args, spec, arch)
+    req = request_from_args(args, spec, arch, cfg)
     est = estimate(req)
     limit = margin * cap
     fits = est["peak_gib"] <= limit
@@ -429,6 +489,8 @@ def estimate_for_launch(args, spec, *, margin: float) -> dict[str, Any]:
            "calibrated": calibrated, "gpu_mem_gib": cap, "limit_gib": round(limit, 3),
            "tokens": req.tokens, "tuning": req.tuning, "tp": req.tp, "pp": req.pp, "dp": req.dp,
            "colocated": req.colocated, **est, "fits": fits}
+    if req.trainable_params is not None:
+        rec.update(ep=req.ep, trainable_params=req.trainable_params)
     if not fits:
         resp = getattr(args, "rollout_max_response_len", None)
         rec["suggestions"] = suggestions(req, margin, response_len=int(resp) if resp else None,
