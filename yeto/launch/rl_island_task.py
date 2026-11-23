@@ -563,7 +563,7 @@ def make_miles_island_task(
         # `ray start` so every Ray worker inherits it.  Harmless at TP1.
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         # No NVTE_*_ATTN pins here: the learner passes --attention-backend
-        # per recipe (unfused for the generic provider, flash for
+        # per recipe (fused for the generic provider, flash for
         # gated-delta-net hybrids and DeepSeek V4) and Megatron sets the
         # three NVTE variables itself from that choice; a pin that
         # disagrees makes it assert at model construction.

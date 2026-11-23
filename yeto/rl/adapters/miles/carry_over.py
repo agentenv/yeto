@@ -283,6 +283,26 @@ def scoring_routing_headers(args: Any, sample: Any) -> dict[str, str]:
     return {}
 
 
+def router_scoring_unavailable(args: Any) -> str | None:
+    """Why the trainer cannot score through a local SGLang router (None: it can).
+
+    A trainer whose sampler runs elsewhere (``--rl-sample-role trainer``,
+    decoupled samplers) starts no rollout engine: Miles leaves the router port
+    unset, and ``http://<ip>:None/generate`` raised ``InvalidURL: nonnumeric
+    port: 'None'`` once per cross-version sample."""
+    ip = getattr(args, "sglang_router_ip", None)
+    port = getattr(args, "sglang_router_port", None)
+    if not ip or port in (None, ""):
+        return (f"no local SGLang router (sglang_router_ip={ip!r}, sglang_router_port={port!r}): "
+                "the trainer runs no rollout engine (decoupled sampler), cross-version "
+                "estimate skipped")
+    try:
+        int(port)
+    except (TypeError, ValueError):
+        return f"SGLang router port {port!r} is not a number: cross-version estimate skipped"
+    return None
+
+
 def router_prefill_scorer(args: Any, timeout_s: float = 120.0) -> Scorer:
     """Score a sample's response tokens under the engines' current weights
     (SGLang prefill through the Miles router); None when scoring fails."""
@@ -290,8 +310,12 @@ def router_prefill_scorer(args: Any, timeout_s: float = 120.0) -> Scorer:
 
     def score(sample: Any) -> list[float] | None:
         score.last_error = None
+        unavailable = router_scoring_unavailable(args)
+        if unavailable is not None:
+            score.last_error = unavailable
+            return None
         try:
-            url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+            url = f"http://{args.sglang_router_ip}:{int(args.sglang_router_port)}/generate"
             from miles.rollout.generate_utils.prefill_logprobs import (
                 _build_prefill_scoring_payload,
                 _extract_response_logprobs,

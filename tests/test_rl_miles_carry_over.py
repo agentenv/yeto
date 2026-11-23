@@ -392,3 +392,37 @@ def test_driver_governs_on_a_late_rollout_estimate(tmp_path):
     driver.run()
     events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
     assert asked and [e for e in events if e["event"] == "rl_policy_age_fallback"] and calls == [0]
+
+
+@pytest.mark.parametrize("ip,port", [("10.0.0.1", None), (None, None), ("10.0.0.1", "")])
+def test_trainer_without_router_skips_the_estimate_with_a_reason(sink, ip, port):
+    """A decoupled trainer (no rollout engine) has no router port: the estimate is
+    skipped with one reason, not tried (``InvalidURL: nonnumeric port: 'None'``) per sample."""
+    engine = FakePartialEngine()
+    args = SimpleNamespace(yeto_rl_max_policy_age=1, tis_clip=2.0, tis_clip_low=0.0,
+                           sglang_router_ip=ip, sglang_router_port=port)
+    s = Sample(index=0, group_index=0)
+    engine.generate(s, 3, 4, finish=False)
+    engine.generate(s, 4, 2, finish=True, reward=1.0)
+    hook.put_policy_token(tok(4), sink)
+    fields = hook.carry_over_fields(args, [s], sink)
+    assert fields["cross_version_tokens"] == 4
+    assert "no local SGLang router" in fields[hook.CROSS_VERSION_ESTIMATE_SKIPPED]
+    assert "cross_version_unscored_reasons" not in fields
+    assert "cross_version_estimate" not in fields  # not deferred: nothing runs later
+    from yeto.rl.adapters.miles.rollout import _carry_over_fields
+
+    assert _carry_over_fields(fields)[hook.CROSS_VERSION_ESTIMATE_SKIPPED] == \
+        fields[hook.CROSS_VERSION_ESTIMATE_SKIPPED]
+
+
+def test_router_scorer_never_builds_a_url_without_a_port():
+    scorer = carry_over.router_prefill_scorer(SimpleNamespace(sglang_router_ip="10.0.0.1",
+                                                              sglang_router_port=None))
+    assert scorer(object()) is None
+    assert "InvalidURL" not in scorer.last_error and "sglang_router_port=None" in scorer.last_error
+    assert carry_over.router_scoring_unavailable(
+        SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port="x")).startswith(
+            "SGLang router port 'x' is not a number")
+    assert carry_over.router_scoring_unavailable(
+        SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=30000)) is None

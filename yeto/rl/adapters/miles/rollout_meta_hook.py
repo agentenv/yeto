@@ -626,6 +626,10 @@ def build_metadata(
     return payload
 
 
+# carry-over field: why the cross-version IS estimate did not run (absent when it ran)
+CROSS_VERSION_ESTIMATE_SKIPPED = "cross_version_estimate_skipped"
+
+
 def carry_over_fields(args: Any, trained_samples: Sequence[Any],
                       sink: str | None = None, scorer: Any = None, *,
                       defer_estimate_for: int | None = None) -> dict[str, Any]:
@@ -648,6 +652,12 @@ def carry_over_fields(args: Any, trained_samples: Sequence[Any],
     fields["cross_version_tokens"] = crossed
     fields["trained_response_tokens"] = total
     if crossed:
+        if scorer is None:
+            skipped = _carry.router_scoring_unavailable(args)
+            if skipped is not None:
+                # no endpoint to score against: say why once, score nothing
+                fields[CROSS_VERSION_ESTIMATE_SKIPPED] = skipped
+                return fields
         scorer = scorer if scorer is not None else _carry.router_prefill_scorer(args)
         if defer_estimate_for is None:
             fields.update(_carry.estimate_cross_version_truncation(args, trained_samples, version, scorer))

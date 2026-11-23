@@ -2220,10 +2220,9 @@ done
             "--env YETO_TMS_POST_PAUSE_IDLE_S=30 \\\n"
         )
     else:
-        attention_env = (
-            "  --env NVTE_FLASH_ATTN=0 --env NVTE_FUSED_ATTN=0 "
-            "--env NVTE_UNFUSED_ATTN=1 \\\n"
-        )
+        # No NVTE_*_ATTN pins: Megatron sets them from the recipe's
+        # --attention-backend and asserts on a pin that disagrees.
+        attention_env = ""
         recipe_env = ""
         diagnostics_env = ""
     common = (
