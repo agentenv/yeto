@@ -1103,7 +1103,7 @@
    "trainer.policy_age.enabled": true,
    "trainer.policy_age.max_versions": 12,
    "trainer.sample_wait.enabled": true,
-   "trainer.sample_wait.timeout_s": 3600.0,
+   "trainer.sample_wait.timeout_s": 10800.0,
    "trainer.xhw_guard.enabled": false
   },
   "k31-run-baremetal-b300-262k": {
@@ -1229,7 +1229,7 @@
    "trainer.policy_age.enabled": true,
    "trainer.policy_age.max_versions": 12,
    "trainer.sample_wait.enabled": true,
-   "trainer.sample_wait.timeout_s": 3600.0,
+   "trainer.sample_wait.timeout_s": 10800.0,
    "trainer.xhw_guard.enabled": false
   },
   "k31-spec-cpu-fake": {

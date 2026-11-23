@@ -512,6 +512,7 @@ The full trainer command, with comments for every flag, is in
 | `--rl-release-every N` | Release every N-th policy version to the samplers (default 1). Needs `--rl-max-policy-age >= N`. |
 | `--rl-release-skip-busy` | Skip a release while the previous upload is still in flight (latest wins; the trainer never waits for an upload). Needs staged full-weight releases (`--tuning full`, no `--rl-release-inline`) and `--rl-max-policy-age >= 3`. See section 3.5. |
 | `--rl-stall-timeout` | Trainer hang detection in seconds. `yeto run up` refuses `0`. |
+| `--rl-sample-wait-s` | How long the trainer waits for enough groups before it gives up (default 3600). The K3.1 examples set `10800`: one agentic round can take 7800 s plus 1800 s of drain. While it waits, the trainer writes an `rl_sample_wait` heartbeat every max(60 s, stall / 4). So a wait longer than `--rl-stall-timeout` is fine; the examples keep stall at `7200`. A real hang still trips the stall clock at the configured time. |
 | `--rl-stop-after-rounds N` | Stop after N rounds with a final cut. |
 
 ### 3.3 `pool.json`
