@@ -191,21 +191,27 @@ def estimator_of(algorithm: Mapping[str, Any]) -> str:
 
 # -------------------------------------------------------------------- pools
 
-def run_pools(run_config: Mapping[str, Any]) -> list[tuple[str, dict[str, Any], str]]:
+def run_pools(run_config: Mapping[str, Any], *, strict: bool = False) -> list[tuple[str, dict[str, Any], str]]:
     """``(name, pool config, data path)`` of a run config's pools (``pool`` or
     ``samplers``), read like :func:`yeto.launch.rollout.pools.resolve` without writing
     the merged inline configs; a pool whose file does not load is left out (the pool
-    dry-run reports it)."""
+    dry-run reports it), or with ``strict`` raises ValueError naming the file."""
     from yeto.launch.rollout.pools import ENTRY_KEYS  # noqa: PLC0415
 
+    def load(path: Any) -> dict[str, Any] | None:
+        doc = _load_json(path)
+        if doc is None and strict:
+            raise ValueError(f"pool config {path}: cannot be read as a JSON object")
+        return doc
+
     if isinstance(run_config.get("pool"), Mapping):
-        cfg = _load_json(run_config["pool"].get("config"))
+        cfg = load(run_config["pool"].get("config"))
         return [] if cfg is None else [("pool", cfg, str(cfg.get("data_path", "r2")))]
     out = []
     for i, entry in enumerate(run_config.get("samplers") or ()):
         if not isinstance(entry, Mapping):
             continue
-        base = _load_json(entry.get("config")) if entry.get("config") else {}
+        base = load(entry.get("config")) if entry.get("config") else {}
         if base is None:
             continue
         cfg = {**base, **{k: v for k, v in entry.items() if k not in ENTRY_KEYS}}
@@ -239,6 +245,34 @@ def pool_sources(cfg: Mapping[str, Any], *, run_config: Mapping[str, Any] | None
     return Sources(run_config=run_config, argv=argv, spec=_effective_spec(cfg) or None, pool_config=cfg,
                    pool_elastic=dict(cfg.get("elastic") or {}),
                    pool_dispense=dict((cfg.get("sampler") or {}).get("dispense") or {}), env=env)
+
+
+@dataclass(frozen=True)
+class RunView:
+    """The sources of a run config's one-page breaker view and the pool whose knobs it reads."""
+    sources: Sources
+    pool: str | None  # the pool (and its samplers) the view reads; None: the run config alone
+    pools: tuple[str, ...]  # every pool of the run
+
+
+def run_view_sources(run_config: Mapping[str, Any], *, pool: str | None = None) -> RunView:
+    """The sources of a run config's one-page view (``yeto breaker show --config``, run up's
+    ``breakers.resolved.json``). The run config holds no pool, sampler or harness knob: each
+    pool resolves its own (:func:`pool_sources`), so the view reads one pool's, the run's only
+    pool or ``pool`` by name. With several pools and no name it is the run config alone (those
+    rows then show defaults), as is a run without pools. Raises ValueError on a pool file that
+    does not load and on a ``pool`` the run does not have."""
+    from yeto.breakers.resolve import Sources  # noqa: PLC0415
+
+    pools = run_pools(run_config, strict=True)
+    names = tuple(name for name, _, _ in pools)
+    if pool is not None and names and pool not in names:
+        raise ValueError(f"pool {pool!r}: the run config has no such pool (its pools: {', '.join(names)})")
+    chosen = [p for p in pools if p[0] == pool] if pool is not None else pools if len(pools) == 1 else []
+    if not chosen:
+        return RunView(Sources.from_run_config(run_config), pool, names)
+    name, cfg, _ = chosen[0]
+    return RunView(pool_sources(cfg, run_config=run_config, argv=_argv(run_config, None)), name, names)
 
 
 def pool_facts(name: str, cfg: Mapping[str, Any], data_path: str = "r2", *,
