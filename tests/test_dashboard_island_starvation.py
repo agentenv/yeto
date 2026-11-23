@@ -4,14 +4,17 @@ Derived from the merge records of the syncer tape (expected / responded /
 missed_grace / grace_ms). The starved pattern is the one of a two-island
 full-parameter run whose second island sat behind a cross-region link: it
 responded to one merge in eight and the syncer waited out its grace for it on
-the others. A run whose islands miss merges now and then (fixture run-a) raises
-nothing.
+the others (fixture g5-fullparam, replayed merge by merge). A run whose islands
+miss merges now and then (fixture run-a) raises nothing.
 """
 
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 from types import SimpleNamespace
+
 
 from dashboard_helpers import FX
 
@@ -111,6 +114,40 @@ def test_the_real_run_a_merges_raise_nothing():
     view = _view(trainers=[_trainer("0"), _trainer("1")])
     for end in range(st.MIN_MERGES, len(merges) + 1):
         assert st.starved(view, r.max_ts, merges[:end]) == [], end
+
+
+def _replay(src: Path, cut: float, tmp: Path) -> list[tuple[str, int]]:
+    """The starvation alerts of the run as its tapes stood at ``cut`` (every record later dropped)."""
+    for p in src.rglob("*.jsonl"):
+        q = tmp / p.relative_to(src)
+        q.parent.mkdir(parents=True, exist_ok=True)
+        keep = [x for x in p.read_text().splitlines() if x.strip() and json.loads(x).get("time_unix", 0) <= cut]
+        q.write_text("".join(x + "\n" for x in keep))
+    r = Reducer(run=src.name)
+    load_all(r, [str(p) for p in sources.discover([str(tmp)])])
+    cards = r.overview(now=cut)["islands"]
+    return [(a["island"], a["sev"]) for a in alerts_diloco.evaluate(r, cut, cards)
+            if a["rule"] == "diloco_island_starved"]
+
+
+def test_the_real_cross_region_run_starves_island_1_only(tmp_path):
+    """g5-fullparam: island 1 sat behind a cross-region link, responded to merge 1 only and
+    was waited for on merges 2..12. It warns from merge 4 (1 of 4) and is critical from
+    merge 9 (none of its last 8, each waited out); island 0 never alerts."""
+    src = FX / "diloco" / "g5-fullparam"
+    merges = [json.loads(x) for x in (src / "yeto-tape.jsonl").read_text().splitlines() if x.strip()]
+    assert [m["step"] for m in merges] == list(range(1, 13))
+    for m in merges:
+        got = _replay(src, m["time_unix"], tmp_path / f"at-{m['step']}")
+        want = [] if m["step"] < 4 else [("1", 1)] if m["step"] < 9 else [("1", 0)]
+        assert got == want, m["step"]
+
+
+def test_the_real_run_a_replay_raises_nothing(tmp_path):
+    src = FX / "diloco" / "run-a"
+    merges = [json.loads(x) for x in (src / "yeto-tape.jsonl").read_text().splitlines() if x.strip()]
+    for m in merges:
+        assert _replay(src, m["time_unix"], tmp_path / f"at-{m['step']}") == [], m["step"]
 
 
 def test_evaluate_runs_the_rule_on_the_syncer_merges(monkeypatch):
