@@ -121,3 +121,58 @@ def test_generic_expert_lora_model_limits():
         check_generic_expert_lora(SimpleNamespace(moe_grouped_gemm=False), expert_parallel=2)
     with pytest.raises(ValueError, match="no fp8/fp4"):
         check_generic_expert_lora(SimpleNamespace(moe_grouped_gemm=True, fp8="e4m3"), expert_parallel=2)
+
+
+def _family(tmp_path, name: str) -> str:
+    from transformers import DeepseekV3Config, Glm4MoeConfig
+
+    base = dict(vocab_size=128, hidden_size=64, num_attention_heads=4, num_key_value_heads=2, num_hidden_layers=3,
+                intermediate_size=96, moe_intermediate_size=32, n_routed_experts=4, num_experts_per_tok=2,
+                n_shared_experts=1, first_k_dense_replace=1, n_group=1, topk_group=1)
+    config = {
+        "deepseek_v3": lambda: DeepseekV3Config(**base, q_lora_rank=32, kv_lora_rank=16, qk_rope_head_dim=8,
+                                                qk_nope_head_dim=8, v_head_dim=16,
+                                                architectures=["DeepseekV3ForCausalLM"]),
+        "glm4_moe": lambda: Glm4MoeConfig(**base, head_dim=16, architectures=["Glm4MoeForCausalLM"]),
+    }[name]()
+    path = tmp_path / name
+    config.save_pretrained(path)
+    return str(path)
+
+
+@pytest.mark.parametrize("family", ["deepseek_v3", "glm4_moe"])
+def test_dense_first_layer_and_shared_experts_keep_their_adapters(tmp_path, family):
+    """On these layouts PEFT's Transformers-5 target conversion wraps the fused
+    experts as one stacked parameter and drops the dense and shared MLPs; the
+    offline layout keeps all three, one adapter per routed expert."""
+
+    specs = lora_layout.offline_canonical_specs(None, rank=4, targets="all-linear",
+                                                model_path=_family(tmp_path, family))
+    names = {s.name: s.shape for s in specs}
+    prefix = "base_model.model.model.layers"
+
+    assert names[f"{prefix}.0.mlp.gate_proj.lora_B.weight"] == (96, 4)  # dense first layer
+    assert names[f"{prefix}.2.mlp.shared_experts.down_proj.lora_A.weight"] == (4, 32)
+    assert names[f"{prefix}.1.mlp.experts.3.up_proj.lora_B.weight"] == (32, 4)
+    assert not [n for n in names if ".experts.base_layer." in n or ".experts.lora_" in n or ".layers.0.mlp.experts" in n]
+    assert sum(".experts." in n and "shared" not in n for n in names) == 2 * 4 * 6
+
+
+def test_offline_linear_pairs_equal_peft_where_peft_keeps_the_targets(tmp_path):
+    """The pairs computed for nn.Linear modules are PEFT's (Qwen3-MoE: PEFT's
+    target conversion leaves an explicit attention list alone)."""
+
+    from accelerate import init_empty_weights
+    from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.from_pretrained(_config(tmp_path, moe=True))
+    with init_empty_weights():
+        model = AutoModelForCausalLM.from_config(config)
+    modules = lora_layout.all_linear_modules(model)
+    ours = {s.name: s.shape for s in lora_layout.linear_lora_specs(model, modules, rank=4)}
+    with init_empty_weights():
+        peft = get_peft_model(AutoModelForCausalLM.from_config(config),
+                              LoraConfig(r=4, lora_alpha=4, target_modules=modules, task_type="CAUSAL_LM"))
+    theirs = {name: tuple(t.shape) for name, t in get_peft_model_state_dict(peft).items()}
+    assert ours == theirs

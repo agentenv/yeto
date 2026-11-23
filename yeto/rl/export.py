@@ -169,8 +169,9 @@ def derive_peft_lora_specs(
 
     ``routed_experts``: ``all-linear`` on a mixture-of-experts model also adapts
     the routed experts, one adapter per expert, as Megatron-Bridge exports them
-    (Miles islands). PEFT cannot see Transformers' fused expert blocks, so their
-    specs come from :func:`yeto.rl.lora_layout.fused_expert_lora_specs`.
+    (Miles islands); the specs come from :func:`yeto.rl.lora_layout.routed_expert_lora_specs`
+    on the same empty-weights model (PEFT's Transformers-5 target conversion
+    rewrites such a target list, see there).
     """
 
     from accelerate import init_empty_weights
@@ -182,7 +183,7 @@ def derive_peft_lora_specs(
         revision=revision,
         trust_remote_code=trust_remote_code,
     )
-    from .lora_layout import adapts_routed_experts, all_linear_modules, fused_expert_lora_specs, has_expert_specs
+    from .lora_layout import adapts_routed_experts, routed_expert_lora_specs
 
     fused_experts = routed_experts and adapts_routed_experts(targets, config)
     clone_expert_mode = targets == "attention-routed-experts"
@@ -207,8 +208,8 @@ def derive_peft_lora_specs(
             trust_remote_code=trust_remote_code,
         )
         if fused_experts:
-            targets = all_linear_modules(base)
-        elif isinstance(targets, str) and targets != "all-linear":
+            return routed_expert_lora_specs(base, rank=rank, config=config)
+        if isinstance(targets, str) and targets != "all-linear":
             pattern = re.compile(targets)
             targets = sorted(
                 name for name, _ in base.named_modules() if pattern.fullmatch(name)
@@ -236,18 +237,6 @@ def derive_peft_lora_specs(
         )
         for name, tensor in sorted(state.items())
     )
-    if fused_experts and not has_expert_specs(peft_specs):
-        # PEFT adapted every per-expert nn.Linear itself when the model has them
-        text = getattr(config, "text_config", None) or config
-        expert_specs = fused_expert_lora_specs(
-            ((name, tuple(p.shape)) for name, p in base.named_parameters()),
-            rank=rank, hidden_size=int(text.hidden_size))
-        if not expert_specs:
-            raise ValueError(
-                "--lora-targets all-linear on this mixture-of-experts model: PEFT found no "
-                "per-expert linear layers and the model has no fused experts.gate_up_proj / "
-                "experts.down_proj; its routed experts cannot get canonical LoRA names. "
-                "Use --lora-targets attention")
     names = {spec.name for spec in peft_specs}
     overlap = names.intersection(spec.name for spec in expert_specs)
     if overlap:

@@ -155,12 +155,14 @@ are the per-expert PEFT names
 `model.layers.L.mlp.experts.E.{gate,up,down}_proj.lora_{A,B}.weight`; routers
 are never adapted.
 
-- Offline layout: PEFT, on the model built with empty weights, gives every
-  `nn.Linear` adapter. Transformers stores routed experts as fused
-  `experts.gate_up_proj` / `experts.down_proj` parameters that PEFT's
-  `target_modules` cannot reach, and PEFT's `target_parameters` gives a stacked
-  layout, not Bridge's; `yeto.rl.lora_layout` writes the per-expert specs from
-  the fused shapes. The island's first export through Bridge must match.
+- Offline layout (`yeto.rl.lora_layout`), from the model built with empty
+  weights: every `nn.Linear` gets PEFT's pair (`lora_A [r, in]`,
+  `lora_B [out, r]`), and each fused `experts.gate_up_proj` /
+  `experts.down_proj` block one pair per expert. `get_peft_model` itself is not
+  used here: its Transformers-5 target conversion wraps the fused experts as one
+  stacked parameter (PEFT's `target_parameters` layout, not Bridge's) and, on
+  DeepSeek-V3 / GLM-4.5 layouts, drops the dense and shared-expert MLPs. The
+  island's first export through Bridge must match the offline layout.
 - Export and apply: each local expert has its own binding and global name
   (expert `ep_rank * local_experts + i`). Bridge's collective export gathers the
   grouped-expert adapters over EP, so the main rank assembles the policy, and

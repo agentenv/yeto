@@ -15,7 +15,9 @@ stacked layout (``experts.base_layer.lora_A [r*E, H]``), not the one-adapter-per
 expert layout Megatron-Bridge exports and SGLang serves
 (``<block>.experts.<e>.{gate,up,down}_proj.lora_{A,B}.weight``, Miles'
 ``share_expert_adapters=False``). So :func:`fused_expert_lora_specs` writes the
-per-expert names and shapes from the fused parameters; the island's first export
+per-expert names and shapes from the fused parameters, and
+:func:`routed_expert_lora_specs` gives every ``nn.Linear`` PEFT's pair directly
+(see there why not through ``get_peft_model``). The island's first export
 through Bridge checks them, so a model whose checkpoint names differ is refused
 there rather than trained under a wrong layout.
 
@@ -128,6 +130,45 @@ def all_linear_modules(model: Any) -> list[str]:
     return sorted(selected)
 
 
+def linear_lora_specs(model: Any, modules: Iterable[str], *, rank: int) -> tuple[CanonicalTensorSpec, ...]:
+    """PEFT's LoRA pair of each named ``nn.Linear``: ``lora_A [r, in]``, ``lora_B [out, r]``."""
+
+    by_name = dict(model.named_modules())
+    specs: list[CanonicalTensorSpec] = []
+    for name in modules:
+        linear = by_name[name]
+        specs += _pair(name, int(linear.in_features), int(linear.out_features), rank)
+    return tuple(specs)
+
+
+def routed_expert_lora_specs(model: Any, *, rank: int, config: Any) -> tuple[CanonicalTensorSpec, ...]:
+    """``all-linear`` with routed experts on a model built with empty weights.
+
+    Every adapted ``nn.Linear`` (:func:`all_linear_modules`) gets PEFT's pair,
+    and each fused expert block one pair per expert. The pairs are computed here
+    rather than through ``get_peft_model``: on Transformers 5, PEFT converts a
+    target list to the fused layout through the checkpoint conversion mapping
+    (``convert_peft_config_for_transformers``), and on DeepSeek-V3 / GLM-4.5
+    layouts that wraps ``mlp.experts`` as a stacked parameter and drops the
+    dense and shared-expert MLPs. On models where PEFT is unaffected the two are
+    identical (``tests/test_rl_lora_layout.py``).
+    """
+
+    linear = all_linear_modules(model)
+    specs = list(linear_lora_specs(model, linear, rank=rank))
+    if not has_expert_specs(specs):  # no per-expert nn.Linear: the experts are fused
+        text = getattr(config, "text_config", None) or config
+        experts = fused_expert_lora_specs(((n, tuple(p.shape)) for n, p in model.named_parameters()),
+                                          rank=rank, hidden_size=int(text.hidden_size))
+        if not experts:
+            raise LoraLayoutError(
+                "--lora-targets all-linear on this mixture-of-experts model: it has neither per-expert "
+                "linear layers nor fused experts.gate_up_proj / experts.down_proj, so its routed experts "
+                "have no canonical LoRA names; use --lora-targets attention")
+        specs += experts
+    return tuple(sorted(specs))
+
+
 def adapts_routed_experts(targets: str | Sequence[str], config: Any) -> bool:
     """Whether ``--lora-targets`` asks for routed-expert adapters on this model."""
 
@@ -180,4 +221,4 @@ def offline_canonical_specs(profile: Any, *, rank: int, targets: str, model_path
 
 __all__ = ["CANONICAL_PREFIX", "MAX_CANONICAL_LORA_BYTES", "LoraLayoutError", "adapts_routed_experts",
            "all_linear_modules", "check_canonical_size", "fused_expert_lora_specs", "has_expert_specs",
-           "offline_canonical_specs"]
+           "linear_lora_specs", "offline_canonical_specs", "routed_expert_lora_specs"]

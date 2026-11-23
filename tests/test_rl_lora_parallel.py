@@ -243,27 +243,33 @@ def _spawn(tmp_path, tp: int, pp: int, ep: int, dp: int, *extra: str, timeout: i
     return proc, out
 
 
-def _offline(tmp_path, *, moe: bool) -> list:
+def _offline(tmp_path, *, family: str) -> list:
     """The offline canonical specs (``lora_layout``) of the round trip's model, as
     the JSON ``shapes`` rows; the HF config mirrors ``megatron_lora_roundtrip.HF``."""
 
-    from transformers import Qwen3Config, Qwen3MoeConfig
+    from transformers import Glm4MoeConfig, Qwen3Config, Qwen3MoeConfig
 
     from yeto.rl.lora_layout import offline_canonical_specs
 
     hf = dict(vocab_size=128, hidden_size=64, intermediate_size=96, num_hidden_layers=3, num_attention_heads=4,
               num_key_value_heads=2, head_dim=16, tie_word_embeddings=False)
-    path = tmp_path / ("hf-moe" if moe else "hf-dense")
-    config = (Qwen3MoeConfig(**hf, moe_intermediate_size=32, num_experts=4, num_experts_per_tok=2,
-                             architectures=["Qwen3MoeForCausalLM"]) if moe
-              else Qwen3Config(**hf, architectures=["Qwen3ForCausalLM"]))
+    experts = dict(moe_intermediate_size=32, num_experts_per_tok=2)
+    path = tmp_path / f"hf-{family}"
+    config = {
+        "dense": lambda: Qwen3Config(**hf, architectures=["Qwen3ForCausalLM"]),
+        "qwen3_moe": lambda: Qwen3MoeConfig(**hf, **experts, num_experts=4, architectures=["Qwen3MoeForCausalLM"]),
+        # dense first layer, then MoE layers with one shared expert (the DeepSeek-V3 MLP layout)
+        "glm4_moe": lambda: Glm4MoeConfig(**hf, **experts, n_routed_experts=4, n_shared_experts=1,
+                                          first_k_dense_replace=1, n_group=1, topk_group=1,
+                                          architectures=["Glm4MoeForCausalLM"]),
+    }[family]()
     config.save_pretrained(path)
     specs = offline_canonical_specs(None, rank=4, targets="all-linear", model_path=str(path))
     return sorted([spec.name, list(spec.shape)] for spec in specs)
 
 
-def _run(tmp_path, tp: int, pp: int, ep: int, dp: int) -> dict:
-    proc, out = _spawn(tmp_path, tp, pp, ep, dp)
+def _run(tmp_path, tp: int, pp: int, ep: int, dp: int, *extra: str) -> dict:
+    proc, out = _spawn(tmp_path, tp, pp, ep, dp, *extra)
     assert proc.returncode == 0, proc.stderr[-4000:]
     return json.loads(out.read_text())
 
@@ -275,7 +281,7 @@ def test_real_canonical_lora_round_trip_matches_across_tp_and_pp(tmp_path):
 
     reference = _run(tmp_path, 1, 1, 0, 1)
     assert reference["ok"] and reference["names"] == 3 * 7 * 2
-    assert reference["shapes"] == _offline(tmp_path, moe=False)
+    assert reference["shapes"] == _offline(tmp_path, family="dense")
     for tp, pp, dp in ((2, 1, 1), (1, 2, 1), (2, 2, 1), (2, 1, 2)):
         result = _run(tmp_path, tp, pp, 0, dp)
         assert result["ok"] and result["ranks"] == tp * pp * dp
@@ -291,7 +297,7 @@ def test_real_grouped_expert_lora_round_trip_matches_across_ep_tp_and_pp(tmp_pat
     reference = _run(tmp_path, 1, 1, 1, 1)
     experts = 3 * 4 * 6  # layers x experts x (gate, up, down) x (A, B)
     assert reference["ok"] and reference["grouped_adapters"] and reference["names"] == 3 * 4 * 2 + experts
-    assert reference["shapes"] == _offline(tmp_path, moe=True)  # offline layout == Bridge's export
+    assert reference["shapes"] == _offline(tmp_path, family="qwen3_moe")  # offline layout == Bridge's export
     for tp, pp, ep, dp in ((1, 1, 2, 2), (2, 1, 2, 1), (1, 2, 2, 2), (2, 2, 2, 1)):
         result = _run(tmp_path, tp, pp, ep, dp)
         assert result["ok"] and result["grouped_adapters"], (tp, pp, ep, dp)
@@ -306,3 +312,18 @@ def test_real_sequential_expert_lora_under_ep_is_refused(tmp_path):
     proc, _out = _spawn(tmp_path, 1, 1, 2, 2, "sequential")
     assert proc.returncode != 0
     assert "SequentialMLP experts" in proc.stderr and "--moe-grouped-gemm" in proc.stderr
+
+
+@pytest.mark.skipif(not all(_REAL.values()), reason="needs YETO_MEGATRON_PYTHON / _LM_PATH / _BRIDGE_PATH")
+def test_real_dense_first_layer_and_shared_expert_layout(tmp_path):
+    """The GLM-4.5 / DeepSeek-V3 MLP layout through Bridge's GLM-4.5 mapping: a
+    dense first layer, shared experts and grouped routed experts all export, and
+    the offline layout equals the export tensor by tensor (PEFT's own target
+    conversion drops the dense and shared MLPs on this layout)."""
+
+    reference = _run(tmp_path, 1, 1, 1, 1, "glm45")
+    assert reference["ok"] and reference["names"] == 3 * 8 + 6 + 2 * 6 + 2 * 4 * 6  # attention, dense, shared, experts
+    assert reference["shapes"] == _offline(tmp_path, family="glm4_moe")
+    for tp, pp, ep, dp in ((1, 1, 2, 2), (1, 2, 2, 2)):
+        result = _run(tmp_path, tp, pp, ep, dp, "glm45")
+        assert result["ok"] and result["shapes"] == reference["shapes"], (tp, pp, ep, dp)
