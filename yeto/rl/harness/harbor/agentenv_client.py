@@ -49,9 +49,13 @@ COLD_START_ENV = "YETO_AGENTENV_COLD_START"
 REQUEST_TIMEOUT_ENV = "YETO_AGENTENV_REQUEST_TIMEOUT_S"
 # Cold-start root disk (sparse). Task images converted to overlaybd can report a
 # base virtual size of 64 GiB; the gateway's default diskSizeMB (8 GiB) is then
-# refused ("smaller than base virtual size; shrinking is disabled").
+# refused ("smaller than base virtual size; shrinking is disabled"). 64 GiB is the
+# smallest size those images take, and the size a single-node AgentENV accepts:
+# 131072 (128 GiB) was refused there while 65536 cold-started (root disk 63G).
+# The control plane reports no maximum, so a larger value is the operator's choice
+# (YETO_AGENTENV_DISK_SIZE_MB) and a refused create says so (cold_start_hint).
 DISK_SIZE_MB_ENV = "YETO_AGENTENV_DISK_SIZE_MB"
-DEFAULT_DISK_SIZE_MB = 131072
+DEFAULT_DISK_SIZE_MB = 65536
 # Secure sandboxes (the default): AgentENV returns an ``envdAccessToken`` and envd
 # (exec/files) refuses requests without it in ``X-Access-Token``.  Without
 # secure mode anyone who can reach the gateway can run commands in the microVM.
@@ -73,6 +77,31 @@ DEFAULT_REQUEST_TIMEOUT_S = 120.0  # cold creates take tens of seconds
 # AgentENV REST allows a fork fan-out of 1-100; the SDK caps it at 20.  Take
 # the stricter bound.  TODO(verify on hardware): the real per-call limit.
 MAX_FORK_COUNT = 20
+
+
+def _body_text(response) -> str:
+    """The response text for keyword matching only: it is never put in a message
+    (a gateway may echo request or token fields)."""
+    try:
+        return str(response.text or "")[:4000]
+    except Exception:  # noqa: BLE001  the hint is best effort
+        return ""
+
+
+def cold_start_hint(status: int, text: str, body: dict[str, object]) -> str:
+    """What to change after a refused cold start, unless the refusal is about the key
+    or the quota: the disk size the create asked for and the variable that sets it.
+    The gateway's text only picks the hint (raise vs lower); it is not echoed."""
+    if status in (401, 403, 402, 429):
+        return ""
+    disk = body.get("diskSizeMB")
+    low = text.lower()
+    if "base virtual size" in low or "shrink" in low:
+        return (f" (the gateway says diskSizeMB {disk} is below the image's base size: raise {DISK_SIZE_MB_ENV}, "
+                "e.g. 65536 for an overlaybd image that reports 64 GiB)")
+    return (f" (the create asked for diskSizeMB {disk}: a node with less free block space refuses it; set "
+            f"{DISK_SIZE_MB_ENV} lower, no lower than the task image's base size, 65536 for overlaybd images "
+            "of 64 GiB)")
 
 
 class AgentenvError(RuntimeError):
@@ -317,7 +346,8 @@ class SdkAgentenvClient:
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             cls = AgentenvQuotaError if status in (402, 429) else AgentenvError
-            raise cls(f"agentenv {op} failed: HTTP {status}") from None
+            hint = cold_start_hint(status, _body_text(exc.response), body) if path == "/sandboxes-cold" else ""
+            raise cls(f"agentenv {op} failed: HTTP {status}{hint}") from None
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             raise AgentenvError(f"agentenv {op} failed: {type(exc).__name__}") from None
         sandbox_id = data.get("sandboxID") or data.get("sandbox_id") if isinstance(data, dict) else None

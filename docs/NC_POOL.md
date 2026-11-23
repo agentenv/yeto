@@ -840,6 +840,34 @@ before the sampler starts.
   reward. By hand, from a sandbox: `curl http://<relay>:<port>/` must give an
   HTTP status.
 
+**Task images.** Each task's `[environment].docker_image` is the image its
+microVM boots from. The AgentENV worker pulls it with its own puller (regctl),
+over **https** by default; an image yeto cannot see the worker pull fails the
+cold start (gateway HTTP 500) and the trial with it. So:
+
+- Push task images to a registry every AgentENV worker reaches over https with a
+  certificate it trusts (a public registry, or one on the sandbox network with a
+  proper certificate).
+- A plain-http registry on the sandbox network works only after
+  `regctl registry set <registry-host:port> --tls disabled` as the aenv user on
+  **every** worker. That is an AgentENV-side setting; yeto does not make it.
+- The address must be the one the workers reach: `localhost` / `127.0.0.1` means
+  each worker itself, and a launcher-only private address does not work.
+
+`agentic-setup --dry-run` and `pool --dry-run` read the task images of a local
+task directory: a URL scheme in `docker_image` (`http://...`) is refused, and a
+registry on a loopback, private or IP address, a single-label host name or port
+5000 (the plain-http default of a self-hosted registry) prints a WARNING with
+the two fixes above.
+
+**Sandbox disk.** A cold start asks for `diskSizeMB` =
+`YETO_AGENTENV_DISK_SIZE_MB` (default 65536, 64 GiB: the smallest size an
+overlaybd task image that reports a 64 GiB base takes). The control plane
+reports no maximum; a node with less free block space refuses a larger value,
+and the error then names the size asked for and this variable (lower it, but not
+below the image's base size; a refusal that says "smaller than base virtual
+size" asks to raise it). The gateway's own text is not echoed.
+
 ## Known limitations
 
 - **A delete cannot name its ticket.** `nc-manage delete --account N`

@@ -922,6 +922,7 @@ def local_problems(setup: AgenticSetup, *, environ: Mapping[str, str] | None = N
                            f"{' ...' if len(missing) > 10 else ''}")
             if not setup.tasks.ids and not any(src.glob("*/task.toml")):
                 out.append(f"agentic.setup.tasks.source {src} holds no <id>/task.toml")
+    out += task_image_findings(setup)[0]
     return out
 
 
@@ -993,7 +994,99 @@ def dry_run_report(spec: Mapping[str, Any], *, base_dir: str | Path | None = Non
         return [], [str(error)]
     if setup is None:
         return [], []
-    return describe(setup), local_problems(setup, environ=environ)
+    lines = describe(setup)
+    lines += [f"  WARNING: {w}" for w in task_image_findings(setup)[1]]
+    return lines, local_problems(setup, environ=environ)
+
+
+# -- task images of an AgentENV run ----------------------------------------------------
+
+def image_registry(ref: str) -> str:
+    """The registry host (``host[:port]``) of an image reference; ``docker.io`` for a
+    Docker Hub name (no dot, colon or ``localhost`` in the first path part)."""
+    first, sep, _rest = ref.partition("/")
+    if sep and ("." in first or ":" in first or first == "localhost"):
+        return first
+    return "docker.io"
+
+
+def _registry_concern(host: str) -> str | None:
+    """Why an AgentENV worker may not pull from ``host`` (None: a public https name)."""
+    import ipaddress  # noqa: PLC0415
+
+    if host.startswith("["):  # [v6]:port
+        name, _, rest = host[1:].partition("]")
+        port = rest.removeprefix(":")
+    elif host.count(":") == 1:
+        name, _, port = host.partition(":")
+    else:
+        name, port = host, ""
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        ip = None
+    if name == "localhost" or (ip is not None and ip.is_loopback):
+        return ("a loopback address: each AgentENV worker pulls from itself, so the registry must run on every "
+                "worker")
+    if ip is not None and (ip.is_private or ip.is_link_local or ip in ipaddress.ip_network("100.64.0.0/10")):
+        return "a private address: it must be reachable from the AgentENV workers, not only from this host"
+    if ip is not None:
+        return "an IP address (no TLS certificate names it)"
+    if "." not in name:
+        return "a single-label host name (an internal registry)"
+    if port == "5000":
+        return "port 5000 (the plain-http default of a self-hosted registry)"
+    return None
+
+
+def task_image_findings(setup: AgenticSetup) -> tuple[list[str], list[str]]:
+    """``(problems, warnings)`` of the task images of an AgentENV run with a local task
+    directory: a URL scheme in ``[environment].docker_image`` is a problem; a registry
+    AgentENV may not pull from is a warning. AgentENV pulls the
+    image on the worker with its own puller (regctl), over https unless the worker was
+    told otherwise: a plain-http registry pulls only after ``regctl registry set <host>
+    --tls disabled`` as the aenv user on every worker (an AgentENV-side setting)."""
+    if setup.agentenv is None or setup.tasks is None or setup.tasks.store_prefix is not None:
+        return [], []
+    src = Path(setup.tasks.source)
+    if not src.is_dir():
+        return [], []
+    import tomllib  # noqa: PLC0415
+
+    tomls = [src / i / "task.toml" for i in setup.tasks.ids] if setup.tasks.ids else sorted(src.glob("*/task.toml"))
+    images: dict[str, list[str]] = {}
+    problems: list[str] = []
+    warnings: list[str] = []
+    for path in tomls:
+        if not path.is_file():
+            continue  # local_problems names a missing task.toml
+        try:
+            env = tomllib.loads(path.read_text()).get("environment") or {}
+        except (OSError, ValueError) as error:
+            problems.append(f"agentic.setup.tasks: {path}: {type(error).__name__}: {error}"[:300])
+            continue
+        image = str(env.get("docker_image") or "").strip()
+        if not image:
+            continue  # the AgentENV environment refuses such a task by name at its trial
+        images.setdefault(image, []).append(path.parent.name)
+    fix = ("push the task images to a registry the AgentENV workers reach over https with a certificate they trust; "
+           "or, for a plain-http registry on the sandbox network, run `regctl registry set <host> --tls disabled` "
+           "as the aenv user on every AgentENV worker (an AgentENV setting yeto cannot make)")
+    by_host: dict[str, list[str]] = {}
+    for image, ids in images.items():
+        if "://" in image:
+            problems.append(f"agentic.setup.tasks: {ids[0]}{f' (+{len(ids) - 1})' if len(ids) > 1 else ''}: "
+                            f"docker_image {image!r} has a URL scheme; an image reference is host/name:tag (AgentENV "
+                            f"pulls over https; {fix})")
+            continue
+        by_host.setdefault(image_registry(image), []).extend(ids)
+    for host, ids in sorted(by_host.items()):
+        concern = _registry_concern(host)
+        if concern:
+            warnings.append(f"task images on registry {host} ({len(ids)} task(s)): {concern}. AgentENV pulls task "
+                            f"images over https by default; a microVM whose image does not pull fails its cold "
+                            f"start (gateway HTTP 500). Fix: {fix}")
+    return problems, warnings
 
 
 def strip(spec: Mapping[str, Any]) -> dict[str, Any]:

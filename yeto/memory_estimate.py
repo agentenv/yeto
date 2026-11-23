@@ -8,11 +8,17 @@ degrees, C = logits chunk tokens (None = no chunking).
 The six parts (design decision 2):
 
 1. weights            2*P/(TP*PP)                                   (bf16)
-2. grads + optimizer  full: 4*P/(TP*PP) + 12*P/(TP*PP*DP_shard); LoRA: 16*P_lora
+2. grads + optimizer  full: 4*P/(TP*PP) + (1-f)*12*P/(TP*PP*DP_shard), f the
+                      optimizer offload fraction (``--rl-optimizer-offload-fraction``:
+                      that share of the fp32 master weights and Adam moments sits in
+                      host memory); LoRA: 16*P_lora
 3. activations        K_ACT * L/PP * T/(TP*CP) * H * 2
 4. logits block       K_LOGIT * min(T, C) * V/TP * 4
 5. inference          SGLang mem_fraction_static * GPU memory, when the rollout
-                      engine shares the GPU and is NOT released during training
+                      engine shares the GPU and is NOT released during training;
+                      none on a buffer trainer (``--rl-sample-role trainer`` or
+                      ``--rl-buffer-shards``: the samplers run elsewhere, the
+                      island has no engine)
 6. fixed overhead     R0 + FRAG * (parts 1-4)   (CUDA context, NCCL, residual of
                       released engines, allocator fragmentation)
 
@@ -251,6 +257,7 @@ class MemoryRequest:
     colocated: bool = True         # train and rollout engine share the GPU
     offload: bool = True           # engine released during training (colocated default)
     mem_fraction_static: float = 0.4
+    optimizer_offload_fraction: float = 0.0  # share of the 12 B/param optimizer state in host memory
 
 
 def lora_params(arch: ModelArch, rank: int, targets: str) -> float:
@@ -268,7 +275,8 @@ def estimate(req: MemoryRequest) -> dict[str, Any]:
     parts["weights"] = 2 * a.params / shard / GIB
     if req.tuning == "full":
         dp_shard = req.dp if req.distributed_optimizer else 1
-        parts["grads_optimizer"] = (4 * a.params / shard + 12 * a.params / (shard * dp_shard)) / GIB
+        kept = 1.0 - min(1.0, max(0.0, req.optimizer_offload_fraction))
+        parts["grads_optimizer"] = (4 * a.params / shard + kept * 12 * a.params / (shard * dp_shard)) / GIB
     else:
         parts["grads_optimizer"] = 16 * lora_params(a, req.lora_rank, req.lora_targets) / GIB
     k_act = K_ACT_RECOMPUTE if req.recompute else K_ACT_NO_RECOMPUTE
@@ -373,16 +381,24 @@ def request_from_args(args, spec, arch: ModelArch) -> MemoryRequest:
     resp = getattr(args, "rollout_max_response_len", None)
     tokens = max(seq, int(resp)) if (resp and getattr(args, "training_mode", "sft") == "rl") else seq
     model = str(getattr(args, "model", ""))
+    # a buffer trainer reads groups the samplers wrote elsewhere: no rollout engine on its GPUs
+    buffer_trainer = (str(getattr(args, "rl_sample_role", "") or "") == "trainer"
+                      or bool(getattr(args, "rl_buffer_shards", None)))
+    try:
+        offload_fraction = float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        offload_fraction = 0.0
     return MemoryRequest(
         arch=arch, gpu=str(spec.gpu), gpu_mem_gib=float(cap or 0), tokens=tokens,
         tuning=getattr(args, "tuning", "lora") or "lora",
         lora_rank=int(getattr(args, "lora_r", 16) or 16),
         lora_targets=str(getattr(args, "lora_targets", "attention") or "attention"),
         tp=tp, pp=pp, dp=max(1, train_gpus // (tp * pp)),
-        recompute="deepseek" in model.lower(),
-        colocated=rollout_gpus == 0,
-        offload=True if rollout_gpus == 0 else bool(getattr(args, "rl_offload_train", False)),
+        recompute="deepseek" in model.lower() or bool(getattr(args, "rl_activation_recompute", False)),
+        colocated=rollout_gpus == 0 and not buffer_trainer,
+        offload=True if rollout_gpus == 0 or buffer_trainer else bool(getattr(args, "rl_offload_train", False)),
         mem_fraction_static=float(getattr(args, "sglang_mem_fraction_static", 0.4) or 0.4),
+        optimizer_offload_fraction=offload_fraction,
     )
 
 
