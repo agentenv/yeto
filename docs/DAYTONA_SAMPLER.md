@@ -14,10 +14,16 @@ SSH (Daytona's gateway) or the SDK's `process.exec`. The National Compute sample
 | Card check | `rocm-smi` on the host | `preflight`: `/dev/kfd`, `/dev/dri`, torch HIP, gfx950 |
 | Base model | aws-cli container, capped parallel pull to `/mnt/nvme/models` | Same pull shell, run by the sandbox's awscli into `/models` |
 | Code | `git archive` to `/mnt/nvme/yeto/<sha>`, mounted at `/yeto` | `git archive` to `/work/yeto/<sha>` |
-| Secrets | `--env-file` on `docker run` | Env files (0600) sourced by the start script |
+| Secrets | `--env-file` on `docker run` | Env files (0600) sourced by the start script; every value yeto writes is shell-quoted, and the operator's `agentic_env_file` (a docker env file) gets its unquoted values quoted |
 | Agentic setup | Helper steps in the image via `docker run`; tunnel helper container | Helper steps in the sandbox; tunnel is a detached process |
+| Records relay | systemd unit `yeto-records-relay.service` | No systemd: the reconnecting supervisor as a detached process, PID in `/records-relay/supervisor.pid` ([NC_POOL.md](NC_POOL.md#agentenv-sandboxes-the-records-relay)) |
+| Prompts | `node_hooks` copy, or the pool's `prompts_file` | The pool's `prompts_file`, uploaded to the spec's `prompts.path` and checked by size and sha256 at every start |
 | Sampler | `docker run -d yeto-sampler-<shard>` | `setsid bash /work/sampler/<shard>.start.sh` (pid, exit and log files) |
 | Probe / stop | `docker inspect` / `docker stop` | pid file + `/proc` / process-group TERM then KILL |
+
+On both routes the sampler runs with `YETO_SPOT_RECLAIM_MARKER=/work/sampler/<shard>.reclaim`:
+the stop's SIGTERM writes the marker and the sampler leaves in order (it stops the engine,
+frees its task claims and exits) before the grace period ends in a KILL.
 
 The sandbox paths are the container paths of the NC route (`/work`, `/models/kimi-k3.1-pro`),
 so one sampler spec serves both routes.

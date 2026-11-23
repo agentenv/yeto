@@ -112,7 +112,15 @@ Step ``records_relay``: the key (and known_hosts) under ``<nvme>/records-relay``
 ``yeto-records-relay.service`` (``Restart=always``) running ``ssh -N
 -o ExitOnForwardFailure=yes -R <bind>:<listen_port>:127.0.0.1:<agentic.proxy.port>``
 to the relay; checked by the unit staying active without a restart for
-``settle_s``. The sampler's ``YETO_RECORDS_PROXY_PUBLIC_BASE`` becomes
+``settle_s``. A host without systemd (PID 1 is not systemd, or no ``systemctl``:
+a Daytona or Modal sandbox, most containers) runs the same forward under yeto's
+reconnecting supervisor instead (``python -m yeto.launch.agentic_node_agent
+tunnel``: reconnect with backoff, one JSON line per up / down in
+``<relay dir>/events.jsonl``): a ``docker run --restart unless-stopped`` helper
+container on a docker node, a detached process on a process node (its PID in
+``<relay dir>/supervisor.pid``; stopped by that PID after a check of its command
+line, never by a name match). Either way every sampler start runs this step
+again, so a rebooted host gets its forward back. The sampler's ``YETO_RECORDS_PROXY_PUBLIC_BASE`` becomes
 ``http://<public_host>:<listen_port>``. The relay host side (sshd ``GatewayPorts
 clientspecified``, the restricted ``authorized_keys`` line of every node key,
 the firewall of the listen ports) is one idempotent command:
@@ -162,6 +170,10 @@ PLACEHOLDER = re.compile(r"__TODO|<[^>]*>")
 RELAY_UNIT = "yeto-records-relay.service"
 RELAY_UNIT_PATH = f"/etc/systemd/system/{RELAY_UNIT}"
 RELAY_TAG = "yeto-records-relay"  # the authorized_keys comment of every line records-relay writes
+RELAY_CONTAINER = "yeto-records-relay"  # the supervisor container of a docker node without systemd
+# "systemd" when PID 1 is systemd and systemctl is there; anything else gets the supervisor
+SYSTEMD_PROBE = ('if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && command -v systemctl >/dev/null 2>&1; '
+                 'then echo YETO_INIT systemd; else echo YETO_INIT none; fi')
 
 _KEYS = {
     "": {"root", "harbor", "docker_cli", "sandbox", "tunnel", "tasks", "records_secret", "provider", "agentenv",
@@ -951,7 +963,8 @@ def describe(setup: AgenticSetup) -> list[str]:
                      f"-> {setup.agentenv_key_file} (0600, ${AGENTENV_KEY_FILE_ENV}); no docker host, no tunnel")
         lines.append(f"  records_proxy: public base {a.records_public_base or '-'}")
     if (r := setup.relay) is not None:
-        lines.append(f"  records_relay: {RELAY_UNIT} (Restart=always) ssh -N -R {r.forward} {r.user}@{r.host}:{r.port}"
+        lines.append(f"  records_relay: {RELAY_UNIT} (Restart=always; without systemd the reconnecting supervisor) "
+                     f"ssh -N -R {r.forward} {r.user}@{r.host}:{r.port}"
                      f", key {r.key.describe()}, known_hosts {r.known_hosts.describe() if r.known_hosts else 'accept-new'}"
                      f"; the relay side: python -m yeto.launch.nc records-relay --spec <spec>")
     if t:
@@ -1130,6 +1143,62 @@ def relay_unit(r: RelaySpec, relay_dir: str) -> str:
         "Restart=always", "RestartSec=5", "", "[Install]", "WantedBy=multi-user.target", ""])
 
 
+def relay_supervisor_argv(r: RelaySpec, relay_dir: str, python: str) -> list[str]:
+    """The forward of :func:`relay_unit` under yeto's reconnecting supervisor (a host
+    without systemd): the same ssh command, restarted forever with a backoff of 5 s
+    doubling to 60 s (reset after a connection that stayed up), each up / down a line
+    in ``<relay_dir>/events.jsonl``."""
+    return [python, "-m", "yeto.launch.agentic_node_agent", "tunnel", "--events", f"{relay_dir}/events.jsonl",
+            "--settle-s", f"{r.settle_s:g}", "--retry-s", "5", "--max-backoff-s", "60", "--",
+            "ssh", "-N", "-F", f"{relay_dir}/config", "-R", r.forward, RELAY_TAG]
+
+
+# -- env files ---------------------------------------------------------------------
+
+def env_file_text(env: Mapping[str, str], *, style: str) -> str:
+    """``KEY=VALUE`` lines of ``env`` (sorted) for one reader:
+
+    ``docker``  ``docker run --env-file``: the value is taken literally (no quotes are
+                removed, nothing is expanded), so it is written as is; a newline cannot
+                be written and is refused.
+    ``shell``   ``set -a; . <file>`` and systemd ``EnvironmentFile=``: every value is
+                single-quoted (:func:`shlex.quote`; an inner ``'`` becomes ``'"'"'``), which
+                both readers strip and take literally: a JSON value with spaces and quotes
+                (``HARBOR_ENV_KWARGS``) is one value, not words and a command."""
+    if style not in ("docker", "shell"):
+        raise ValueError(f"env file style {style!r}: docker or shell")
+    lines = []
+    for key, value in sorted(env.items()):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(key)):
+            raise ValueError(f"env file: {key!r} is not a variable name")
+        value = str(value)
+        if style == "docker":
+            if "\n" in value or "\r" in value:
+                raise ValueError(f"env file: the value of {key} has a newline (docker --env-file cannot hold it)")
+            lines.append(f"{key}={value}\n")
+        else:
+            lines.append(f"{key}={shlex.quote(value)}\n")
+    return "".join(lines)
+
+
+def shell_env_file(text: str) -> str:
+    """An operator env file written for ``docker run --env-file`` (the docker route's
+    reader: ``KEY=VALUE`` literally) made safe to ``source``: an unquoted value is
+    single-quoted, so the process route reads what the docker route reads. A value
+    that already starts with a quote, an ``export`` line, a comment and anything
+    that is not ``KEY=VALUE`` are kept as written (the operator wrote shell)."""
+    out = []
+    for line in text.splitlines():
+        body = line.lstrip()  # docker trims the left only: a trailing space is part of the value
+        name, eq, value = body.partition("=")
+        if (not eq or body.startswith("#") or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+                or value[:1] in ("'", '"')):
+            out.append(line)
+            continue
+        out.append(f"{name}={shlex.quote(value)}")
+    return "\n".join(out) + ("\n" if out else "")
+
+
 # -- provisioning ----------------------------------------------------------------
 
 HARBOR_CHECK = r"""
@@ -1291,10 +1360,58 @@ class Provisioner:
         parts = (out.stdout or "").split()
         return (parts[0] if parts else "unknown"), (parts[1] if len(parts) > 1 else "")
 
+    def _has_systemd(self) -> bool:
+        """PID 1 is systemd and ``systemctl`` is there (a Daytona / Modal sandbox and most
+        containers have neither: the forward then runs under the supervisor)."""
+        out = self.node.sh(SYSTEMD_PROBE, timeout=60)
+        return "YETO_INIT systemd" in (out.stdout or "")
+
+    @property
+    def _relay_events(self) -> str:
+        return f"{self.relay_dir}/events.jsonl"
+
+    def _relay_supervisor_state(self) -> tuple[str, str]:
+        """``(state, restarts)`` of the supervised forward in the systemd vocabulary:
+        ``active`` once the supervisor runs and its last event is ``up``; ``restarts``
+        counts the ``down`` events (the events file is emptied at each supervisor start)."""
+        ev = shlex.quote(self._relay_events)
+        out = self.node.sh(f"sudo grep -c '\"state\": \"down\"' {ev} 2>/dev/null; sudo tail -n 1 {ev} 2>/dev/null",
+                           timeout=60)
+        lines = (out.stdout or "").splitlines()
+        downs = lines[0].strip() if lines and lines[0].strip().isdigit() else "0"
+        last = _events("\n".join(lines[1:]))
+        up = bool(last) and last[-1].get("state") == "up"
+        return ("active" if up and self._relay_supervisor_running() else "activating"), downs
+
+    def _relay_supervisor_running(self) -> bool:
+        out = self.node.sh(f"sudo docker inspect -f '{{{{.State.Running}}}}' {RELAY_CONTAINER} 2>/dev/null || true",
+                           timeout=60)
+        return (out.stdout or "").strip() == "true"
+
+    def _relay_supervisor_start(self, argv: Sequence[str]) -> Any:
+        """A docker node without systemd: the supervisor in a helper container of the
+        sampler image (host network, ``--restart unless-stopped``), the relay directory
+        mounted at its own path (the ssh config names it)."""
+        d = self.relay_dir
+        run = ["sudo", "docker", "run", "-d", "--name", RELAY_CONTAINER, "--restart", "unless-stopped",
+               "--network", "host", "-v", f"{self.node.yeto_dir}:/yeto:ro", "-v", f"{d}:{d}",
+               "-e", "PYTHONPATH=/yeto", "--entrypoint", argv[0], self.node.image, *argv[1:]]
+        return self.node.sh(f"sudo docker rm -f {RELAY_CONTAINER} >/dev/null 2>&1; "
+                            f"sudo sh -c {shlex.quote(': > ' + shlex.quote(self._relay_events))}; "
+                            + shlex.join(run), timeout=300)
+
+    def _relay_log(self, systemd: bool) -> str:
+        if systemd:
+            return self.node.sh(f"sudo journalctl -u {RELAY_UNIT} -n 30 --no-pager 2>&1", timeout=60).stdout or ""
+        out = self.node.sh(f"sudo tail -n 30 {shlex.quote(self._relay_events)} 2>/dev/null", timeout=60)
+        return "\n".join(str(e.get("stderr") or "") for e in _events(out.stdout) if e.get("state") == "down")
+
     def records_relay(self) -> None:
-        """The node's reverse forward to the records relay as a systemd unit
-        (``Restart=always``): the key and ssh config under :attr:`relay_dir` (0700), never
-        in ``/work``; checked by the unit staying active with no restart for ``settle_s``."""
+        """The node's reverse forward to the records relay: a systemd unit
+        (``Restart=always``), or on a host without systemd the same ssh command under
+        yeto's reconnecting supervisor (:func:`relay_supervisor_argv`). The key and ssh
+        config sit under :attr:`relay_dir` (0700), never in ``/work``; checked by the
+        forward staying up with no restart for ``settle_s``."""
         r = self.setup.relay
         if r is None:
             return
@@ -1306,27 +1423,39 @@ class Provisioner:
         changed |= self.node.put(relay_ssh_config(r, d), f"{d}/config", mode="644")
         if r.known_hosts:
             changed |= self.node.put(r.known_hosts.read(self.environ), f"{d}/known_hosts", mode="644")
-        changed |= self.node.put(relay_unit(r, d), RELAY_UNIT_PATH, mode="644")
-        state, _ = self._relay_state()
-        if changed or state != "active":
-            out = self.node.sh(f"sudo systemctl daemon-reload && sudo systemctl enable {RELAY_UNIT} >/dev/null 2>&1 "
-                               f"&& sudo systemctl restart {RELAY_UNIT}", timeout=120)
-            if out.returncode != 0:
-                raise self._fail("records_relay", f"starting {RELAY_UNIT}: {(out.stderr or '').strip()[-300:]}")
+        systemd = self._has_systemd()
+        if systemd:
+            what, state_of = RELAY_UNIT, self._relay_state
+            changed |= self.node.put(relay_unit(r, d), RELAY_UNIT_PATH, mode="644")
+            state, _ = state_of()
+            if changed or state != "active":
+                out = self.node.sh(f"sudo systemctl daemon-reload && sudo systemctl enable {RELAY_UNIT} "
+                                   f">/dev/null 2>&1 && sudo systemctl restart {RELAY_UNIT}", timeout=120)
+                if out.returncode != 0:
+                    raise self._fail("records_relay", f"starting {RELAY_UNIT}: {(out.stderr or '').strip()[-300:]}")
+        else:
+            what, state_of = "the records relay supervisor (no systemd)", self._relay_supervisor_state
+            argv = relay_supervisor_argv(r, d, self.node.python)
+            changed |= self.node.put(shlex.join(argv) + "\n", f"{d}/supervisor.argv", mode="644")
+            state = "active" if self._relay_supervisor_running() else "inactive"
+            if changed or state != "active":
+                out = self._relay_supervisor_start(argv)
+                if out.returncode != 0:
+                    raise self._fail("records_relay", f"starting {what}: {(out.stderr or '').strip()[-300:]}")
         deadline = self.clock() + max(r.ready_timeout_s, r.settle_s)
-        before = self._relay_state()
+        before = state_of()
         while True:
             self.sleep(r.settle_s)
-            now = self._relay_state()
+            now = state_of()
             if before[0] == now[0] == "active" and before[1] == now[1]:
                 return self._done("records_relay", "changed" if changed or state != "active" else "ok",
-                                  f"-R {r.forward} via {r.user}@{r.host}:{r.port}; public base {r.public_base}")
+                                  f"-R {r.forward} via {r.user}@{r.host}:{r.port}; public base {r.public_base}"
+                                  + ("" if systemd else "; supervisor (no systemd)"))
             if self.clock() >= deadline:
-                log = self.node.sh(f"sudo journalctl -u {RELAY_UNIT} -n 30 --no-pager 2>&1", timeout=60)
                 fpr, _ = key_identity(r.key, environ=self.environ, run=self.local_run)
                 raise self._fail("records_relay", classify_relay_failure(
-                    log.stdout or "", who=f"{r.user}@{r.host}:{r.port}", fingerprint=fpr,
-                    listen=f"{r.bind}:{r.listen_port}") + f" ({RELAY_UNIT} {now[0]}, restarts {now[1] or '?'})")
+                    self._relay_log(systemd), who=f"{r.user}@{r.host}:{r.port}", fingerprint=fpr,
+                    listen=f"{r.bind}:{r.listen_port}") + f" ({what} {now[0]}, restarts {now[1] or '?'})")
             before = now
 
     def agentenv_key(self) -> None:
