@@ -348,3 +348,20 @@ def test_dispense_ledger_shows_a_crashed_samplers_claims_and_their_reclaim():
     assert [(h["slot"], h["attempt"], h["by"]) for h in D["held"]] == [(1, 1, "s0"), (2, 0, "s1")]
     exp = [e for e in D["events"] if e["kind"] == "expired"]
     assert exp == [{"ts": T0 + 1300, "kind": "expired", "by": "s0", "slot": 1, "attempt": 0, "seen": T0 + 30}]
+
+
+def test_the_newest_island_leave_wins_when_an_older_one_is_read_last():
+    # launch A failed (INFRA_FAILED), launch B was stopped by the operator (STOPPED); the rotated
+    # echo file of launch A is read after launch B's records: B's stop is the island's state
+    def leave(reason: str, t: float) -> dict:
+        return {"event": "island_leave", "island_id": 0, "reason_name": reason, "error_type": "x", "time_unix": t}
+
+    b = _launch("l0-modal-B", T0 + 1300, finish=False) + [("store:trainer/l0-modal-B", leave("STOPPED", T0 + 1500))]
+    a = _launch("l0-modal-A", T0, finish=False) + [("store:trainer/l0-modal-A", leave("INFRA_FAILED", T0 + 200))]
+    r = Reducer(run="r")
+    for i, (src, rec) in enumerate(b + a):
+        r.feed(rec, source=src, offset=i)
+    ov = r.overview(now=T0 + 5000)
+    card = {c["id"]: c for c in ov["islands"]}["0"]
+    assert card["left"]["reason"] == "STOPPED" and card["status"] == "left"
+    assert not [x for x in ov["alerts"] if x["rule"] == "heartbeat"]  # not a stale trainer

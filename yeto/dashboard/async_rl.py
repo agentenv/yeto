@@ -509,9 +509,15 @@ class AsyncState:
         t = self._t(iid)
         rid = _int(r.get("rollout_id"))
         if ev == "island_leave":
-            t["left"] = {"ts": ts, "reason": r.get("reason_name") or r.get("reason"),
-                         "error_type": r.get("error_type"), "cause": root_cause(r.get("error"))}
-            t.setdefault("leaves", []).append(t["left"])
+            leave = {"ts": ts, "reason": r.get("reason_name") or r.get("reason"),
+                     "error_type": r.get("error_type"), "cause": root_cause(r.get("error"))}
+            # the newest leave wins: rotated echo files (events/previous/<utc>/) and launch
+            # folders are read by name, so an older launch's leave can arrive last
+            old = t["left"]
+            if old is None or ts is None or old.get("ts") is None or ts >= old["ts"]:
+                t["left"] = leave
+            t.setdefault("leaves", []).append(leave)
+            t["leaves"].sort(key=lambda x: x["ts"] if x["ts"] is not None else float("-inf"))
             del t["leaves"][:-50]
             return
         if ev == "rl_buffer_unidentified_policy_starved":
