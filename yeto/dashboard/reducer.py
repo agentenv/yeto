@@ -47,6 +47,10 @@ POLICY_SWEEP_LEDGER_EVENT = "policy_sweep_ledger"
 # the island connections it saw; a ``learner_id`` there is not a sign of life of that island
 SYNCER_RECORD_KINDS = frozenset({"syncer_config", "round_open", "round_attempt_timeout",
                                  "member_connected", "member_disconnected"})
+SYNCER_RECORDS_MAX = 200_000  # a few per merge: a long run's rounds fit
+# a DiLoCo trainer without heartbeats in the syncer's terminal phase: the last rounds wait up to
+# the syncer's terminal grace for every island (when its config does not say how long)
+TERMINAL_GRACE_DEFAULT_S = 120.0
 SYNCER_ISLAND_EVENTS = frozenset({"rl_fragment_push", "rl_policy_apply", "rl_pull_resend",
                                   "rl_member_publication"})
 TERMINAL_TX_PHASES = ("COMMITTED", "SUCCEEDED", "CANCELLED", "REBUILT_OLD", "RECOVERY_REQUIRED",
@@ -287,6 +291,10 @@ class Reducer:
         self.offsets: dict[str, int] = {}
         self.islands: dict[str, dict] = {}
         self.merges: list[dict] = []
+        # the syncer's own records (SYNCER_RECORD_KINDS) with ``_ts`` / ``_source``
+        self.syncer_records: list[dict] = []
+        # each trainer's rl_engine_selected rl/outer_sync (a DiLoCo island, not a no-sync one)
+        self.outer_sync: dict[str, bool] = {}
         self.ledger: dict | None = None
         self.pushes: dict[int, set[str]] = {}
         self.resends: dict[int, int] = {}
@@ -383,6 +391,9 @@ class Reducer:
             # The syncer writes the same tape for RL and SFT runs: the SFT page
             # reads it too, but it alone does not make a run an SFT run.
             self.sft.fold(record, ts)
+        if record.get("event") == "rl_engine_selected" and iid is not None \
+                and isinstance(record.get("rl/outer_sync"), bool):
+            self.outer_sync[iid] = record["rl/outer_sync"]
         getattr(self, "_feed_" + kind)(record, iid, ts)
         self.event_seq += 1
         etype = record.get("event") or (("journal:" + str(record.get("kind"))) if kind == "journal"
@@ -1206,8 +1217,28 @@ class Reducer:
         self._sft_view = (key, out)
         return out
 
+    def _syncer_terminal_grace_s(self) -> float | None:
+        """The syncer's terminal grace once its committed steps reach the last P steps of the run
+        (its ``syncer_config``: last_step, fragments, terminal_grace_ms), else None."""
+        cfg = next((r for r in reversed(self.syncer_records) if r.get("kind") == "syncer_config"), None)
+        if cfg is None or not self.merges:
+            return None
+        last, p = cfg.get("last_step"), cfg.get("fragments")
+        if not isinstance(last, int) or not isinstance(p, int) or p < 1:
+            return None
+        top = max((m.get("step") for m in self.merges if isinstance(m.get("step"), int)), default=0)
+        if top <= last - p:
+            return None
+        grace = cfg.get("terminal_grace_ms")
+        return max(TERMINAL_GRACE_DEFAULT_S, grace / 1000.0) if isinstance(grace, (int, float)) and grace > 0 \
+            else TERMINAL_GRACE_DEFAULT_S
+
     def _feed_other(self, r: dict, iid: str | None, ts: float | None) -> None:
-        if iid is not None and r.get("kind") not in SYNCER_RECORD_KINDS:
+        if r.get("kind") in SYNCER_RECORD_KINDS and r.get("event") is None:
+            if len(self.syncer_records) < SYNCER_RECORDS_MAX:
+                self.syncer_records.append(dict(r, _ts=ts, _source=self._source))
+            return
+        if iid is not None:
             self._touch(self.island(iid), ts)
 
     # -- views ------------------------------------------------------------------
@@ -1307,6 +1338,15 @@ class Reducer:
         warn_s = self.thresholds["heartbeat_warn_s"]
         if not isl["heartbeat_seen"] and gap is not None:
             warn_s = max(warn_s, gap)
+        if not isl["heartbeat_seen"] and self.outer_sync.get(isl["id"]):
+            # a DiLoCo trainer without heartbeats (older islands) writes nothing while it waits for
+            # the others: its first round (warm-up, the first generation) and, in the syncer's
+            # terminal phase, a last round held open for the slowest island
+            if isl["driver_started"] and not (self.async_.trainer.get(isl["id"]) or {}).get("walls"):
+                warn_s = max(warn_s, self.thresholds["startup_warn_s"])
+            terminal = self._syncer_terminal_grace_s()
+            if terminal is not None:
+                warn_s = max(warn_s, (gap or 0.0) + terminal)
         # a sampler "runs until its trainers end": done once they ended and it stopped writing groups;
         # one still writing groups after the trainers finished is running (and billed), not done
         trainers_done = role == "sampler" and self._trainers_done() and (
