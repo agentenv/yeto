@@ -221,6 +221,7 @@ later (see [CHANGELOG.md](../CHANGELOG.md)).
 | `monitor.dashboard_trainer_failed` | alert | trainer_fail_window_s=3600 trainer_fail_loop=2 | warn | yes | - | failed trainer launches in the window |
 | `monitor.dashboard_stale_read_position` | alert | stale_read_recent_s=300 | warn | yes | - | a sampler waits on a read position the trainers have moved past |
 | `monitor.dashboard_release_stalled` | alert | release_stall_warn_s=600 | warn | yes | - | a policy release stuck uploading (critical when samplers wait on it) |
+| `monitor.dashboard_guard_drops` | alert | guard_drop_window_rounds=10 guard_drop_min_groups=20 guard_drop_min_rounds=3 guard_drop_warn_ratio=0.1 guard_drop_alert_ratio=0.25 | warn | yes | - | share of the groups a data-dropping guard dropped over its recent rounds |
 | `monitor.health_logprob` | alert | amd_warn_abs_diff=0.1 amd_act_abs_diff=0.15 nvidia_warn_abs_diff=0.04 nvidia_act_abs_diff=0.052 ascend_warn_abs_diff=0.05 ascend_act_abs_diff=0.075 | warn | yes | - | train/rollout log-prob mismatch per sampler hardware class (amd: the in-run xhw guard's defaults) |
 | `monitor.health_is_clipped` | alert | max_ratio=0.05 | warn | yes | - | sc_is_clipped, mean over the window |
 | `monitor.health_is_weight` | alert | min_ratio=0.9 | warn | yes | - | sc_importance_weight, mean over the window |
