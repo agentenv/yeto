@@ -2563,6 +2563,24 @@ The rules:
 The old knobs still work: flags in `trainer.argv`, `budget.*`, spec fields,
 pool `elastic` fields and environment variables. See 7.8.
 
+Where each layer applies:
+
+- `yeto run up` applies every layer: it writes the values into the trainer
+  argv, the pool config and the sampler spec copy it hands on.
+- `yeto launch --breakers FILE` applies the `launch` and `trainer` layers. The
+  file holds a bare `breakers:` object or a whole run config.
+- A sampler spec may carry its own `breakers` key. The sampler applies its
+  `sampler` and `harness` layers. It must agree with the spec's native keys.
+
+Limits in this release:
+
+- Trainer: the section can turn the NaN skip (`trainer.nan.skip`) and the xhw
+  guard (`trainer.xhw_guard.enabled`) on. Their thresholds and the xhw action
+  are still set with `YETO_RL_NAN_SKIP` and `YETO_RL_XHW_GUARD`. Writing them in
+  the section is refused with "cannot be applied".
+- `trainer.sample_wait`, `trainer.nan` and `trainer.release_drain` cannot be
+  turned off, as before. `trainer.nan` picks strict mode or skip-then-stop.
+
 ### 7.2 See what is in force: `yeto breaker show`
 
 ```bash
@@ -2589,8 +2607,14 @@ shows the cap `yeto run up` derives for it.
 Exit codes: `0` no error, `1` an error finding or a conflict, `2` bad input.
 
 `yeto run up` saves the same data as `breakers.resolved.json` in its state
-directory. The dashboard reads it for the Breakers panel. The old spelling
-`yeto breaker --trainer-log ...` still runs `check`.
+directory. The dashboard's Breakers panel reads it, together with the
+`rl_breaker` and `rl_breaker_status` events, and shows how close each entry is
+to its limit. `yeto run status` prints a `breakers` summary. Every trip writes
+an `rl_breaker` event to the component's tape: the trainer's `YETO_RL_EVENT`
+lines, the sampler and pool tapes, `cost-events.jsonl` for `yeto launch`, and
+`events.jsonl` in the `run up` state directory. A breaker that stops the run
+adds `stop_reason=breaker:<name>` to the launcher's last line, the run record
+and `state.json`. Exit codes do not change.
 
 ### 7.3 Switch groups
 
@@ -2723,6 +2747,13 @@ the limit. The `yeto run up` monitor reads the store's `LATEST` pointer.
   agree.
 - The sampler prints one line at start: the limit, how to pause, how to turn
   it off.
+
+Related harness knobs: `harness.setup_retries` (retries before the agent
+runs, with backoff from 5 s up to 60 s) and `sampler.infra_retries` (the slot
+is requeued at once) multiply. A slot survives about (infra_retries + 1) x
+(setup_retries + 1) failed starts; rule D9 prints how long that lasts. The
+sandbox TTL is the trial wall clock + 900 s on AgentENV, unless
+`harness.sandbox_ttl.limit_s` sets one value for every sandbox.
 
 Map from the old e2e watchdog scripts:
 

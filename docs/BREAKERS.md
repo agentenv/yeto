@@ -130,6 +130,24 @@ later (see [CHANGELOG.md](../CHANGELOG.md)).
 | `launch.provider_timeout` | breaker | timeout_s=86400 retries_n=10 | stop | no | trainer.argv --modal-timeout-s, trainer.argv --modal-retries | enforced by the provider, not by yeto: no rl_breaker event |
 | `launch.teardown_verify` | invariant | - | stop | no | - | after teardown every Modal app row of the run is stopped with 0 tasks (else exit 5) and every sky cluster is confirmed gone (else the head stays up) |
 
+### trainer
+
+| Name | Kind | Default | Action | Can disable | Legacy knobs | Notes |
+|---|---|---|---|---|---|---|
+| `trainer.sample_wait` | breaker | timeout_s=3600 | stop | no | trainer.argv --rl-sample-wait-s, trainer env YETO_SAMPLE_BUFFER_WAIT_S | the buffer reader ends the run when no new group arrives for timeout_s while a round fills |
+| `trainer.policy_age` | guard | max_versions=null | drop | yes | trainer.argv --rl-max-policy-age, trainer env YETO_SAMPLE_BUFFER_MAX_POLICY_AGE | groups older than max_versions are consumed, not trained (0 / unset: every sample from the policy just published, no buffer trainer) |
+| `trainer.nan` | breaker | skip=false skip_max_consecutive_n=2 skip_max_fraction=0.05 skip_min_rounds_n=20 | stop | no | trainer env YETO_RL_NAN_SKIP, trainer env YETO_RL_NAN_SKIP, trainer env YETO_RL_NAN_SKIP, trainer env YETO_RL_NAN_SKIP | a non-finite grad_norm stops the trainer (strict); with skip, the round is skipped and the trainer stops past the skip limits (nan_skip_breaker) |
+| `trainer.xhw_guard` | guard | warn_abs_diff=0.1 act_abs_diff=0.15 warn_kl=0.03 act_kl=0.06 warn_clip=0.01 act_clip=0.03 window_n=3 min_rounds_n=2 quarantine_rounds_n=8 weight=0.5 max_cond=20 confidence_z=2 | quarantine | yes | trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD, trainer env YETO_RL_XHW_GUARD | per-source train/rollout log-prob mismatch: warn, quarantine or downweight a source, or stop |
+| `trainer.buffer_damaged` | breaker | max_run_n=8 | stop | yes | trainer env YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN | a systematic payload fault stops the take instead of consuming the backlog |
+| `trainer.release_drain` | breaker | timeout_s=1800 | stop | no | trainer env YETO_TRAINER_RELEASE_DRAIN_S | a commanded island stops without the upload still running after timeout_s (the samplers keep the previous release) |
+| `trainer.group_integrity` | invariant | - | drop | no | - | a group with fewer than 2 or more than n trials, or a non-finite reward or log-prob, is consumed, not trained |
+| `trainer.sample_alignment` | invariant | - | drop | no | - | a group whose samples do not convert to the trainer's form (R3 routing rows, segment layout) leaves the round; takes in a row without a convertible group stop the trainer |
+| `trainer.compaction_round` | invariant | - | stop | no | - | a round of compacted trials the trainer cannot train whole (DP schedule, --seq-length, segment siblings) is refused |
+| `trainer.nonfinite_reward` | invariant | - | stop | no | - | a batch with a non-finite group reward is refused before training |
+| `trainer.gradient_flow` | invariant | - | stop | no | - | grad_norm 0 while the round's advantages (or a mechanism) require a gradient |
+| `trainer.policy_hash` | invariant | - | stop | no | - | the trainer's policy differs from the cut it applied or was rebuilt from |
+| `trainer.strict_invariant` | invariant | - | stop | no | - | any other strict trainer check (layout hash, LR 0 before the final round, rollout statistics) ends the trainer abnormally |
+
 ### sampler
 
 | Name | Kind | Default | Action | Can disable | Legacy knobs | Notes |
