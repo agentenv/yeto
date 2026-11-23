@@ -18,6 +18,7 @@ from yeto.breakers import events as breaker_events
 from yeto.breakers.layers import monitor, pool
 from yeto.breakers.registry import Registry, load_layers
 from yeto.breakers.resolve import Sources, resolve
+from yeto.breakers.rules_facts import pool_sources
 from yeto.breakers.spec import Breaker, BreakerConfigError, Param
 from yeto.dashboard import alerts
 from yeto.launch.nc import cli as nc_cli
@@ -353,7 +354,7 @@ def test_the_pool_resolves_against_its_rendered_spec(tmp_path, monkeypatch):
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps({"prompts": {"dispense": {"max_redo": 2, "lease_s": 900}}}))
     path = _pool_file(tmp_path, spec=str(spec), sampler={"dispense": {"max_redo": 4, "lease_s": 900}})
-    sources = rollout_pools.pool_sources(json.loads(Path(path).read_text()))
+    sources = pool_sources(json.loads(Path(path).read_text()))
     assert sources.spec["prompts"]["dispense"]["max_redo"] == 4
     cfg = {"pool": {"config": path}, "breakers": {"pool": {"crash_loop": {"action": "halt"}}}}
     (ref,) = rollout_pools.resolve(cfg, tmp_path / "state")

@@ -595,7 +595,8 @@ def check_policy_age_spec(args) -> None:
     algorithm spec with ``execution.max_policy_staleness >= N`` -- the same rule
     the Miles island applies in its config translation (adapters/miles/config.py)
     and its A1 preflight, now checked before any cloud resource (a run once failed this check
-    only on the island).
+    only on the island). The dependency rule D15
+    (:func:`yeto.breakers.rules_data.policy_age_problem`).
     Needs prepared args (``rl_algorithm_spec_json`` resolved)."""
     if getattr(args, "training_mode", "sft") != "rl":
         return
@@ -604,22 +605,48 @@ def check_policy_age_spec(args) -> None:
         return
     import json as _json
 
-    from .rl.engine.algorithm import AlgorithmSpec
-    from .rl.engine.execution_profile import algorithm_max_policy_staleness
+    from .breakers.rules_data import policy_age_problem
+    from .breakers.rules_facts import policy_staleness
 
     raw = getattr(args, "rl_algorithm_spec_json", None)
-    tolerated = (algorithm_max_policy_staleness(AlgorithmSpec.from_dict(_json.loads(raw)))
-                 if raw else 0)
-    if tolerated < age:
-        raise PreflightError(
-            f"--rl-max-policy-age {age} needs an algorithm spec with "
-            f"execution.max_policy_staleness >= {age} (and a TIS correction); the run's spec "
-            f"tolerates {tolerated} (--rl-algorithm-spec). Start from a shipped spec, e.g. "
-            "examples/k31/algorithm-spec.async-age2-tis.json (max_policy_staleness 2, TIS), "
-            "or lower --rl-max-policy-age"
-            + ("; with --rl-backend verl set correction.lower to 0.0 in a copy of it (verl TIS "
-               "clamps the upper side only and refuses lower > 0)"
-               if (getattr(args, "rl_backend", None) or "miles") == "verl" else ""))
+    tolerated = policy_staleness(_json.loads(raw)) if raw else 0
+    problem = policy_age_problem(age, tolerated, backend=getattr(args, "rl_backend", None))
+    if problem is not None:
+        raise PreflightError(problem)
+
+
+def breaker_findings(args) -> list:
+    """The dependency rules between breaker thresholds (:mod:`yeto.breakers.rules`)
+    over a ``yeto launch``: the launch and trainer layers this process applies (the
+    stall timer against the sample wait, finite limits, ...). Reads the launch argv
+    as written (``args._launch_argv``) and the resolve of ``--breakers`` when one was
+    given (``args._breakers_resolved``); [] when nothing resolves (the launch reports why)."""
+    from . import breakers
+
+    sources = breakers.Sources(argv=[str(a) for a in getattr(args, "_launch_argv", None) or ()])
+    resolved = getattr(args, "_breakers_resolved", None)
+    if resolved is None:
+        try:
+            resolved = breakers.resolve(sources, strict=False)
+        except ValueError:
+            return []
+    return breakers.preflight(resolved, sources=sources)
+
+
+def breaker_rules(args, *, out=None) -> int:
+    """``yeto launch --dry-run``: print :func:`breaker_findings` (stderr); 1 when one
+    is an error (decision 6: it would refuse the start), else 0."""
+    import sys as _sys
+
+    from .breakers.rules import format_finding
+
+    out = _sys.stderr if out is None else out
+    code = 0
+    for finding in breaker_findings(args):
+        tag = {"error": "ERROR", "warn": "WARNING", "info": "note"}[finding.level]
+        print(f"[yeto] {tag}: {format_finding(finding)}", file=out)
+        code = 1 if finding.level == "error" else code
+    return code
 
 
 # ---------------------------------------------------------------------------

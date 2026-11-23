@@ -162,21 +162,6 @@ def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) 
     return PoolRef(name, target, interval, _number(entry, f"samplers[{i}]", "usd_per_h", None), data_path)
 
 
-def pool_sources(doc: dict[str, Any], run_config: dict[str, Any] | None = None) -> Any:
-    """The breaker sources one pool config shows: its top level, ``elastic``, ``sampler.dispense``
-    and the sampler spec as the pool renders it (the pool's ``sampler`` knobs laid over the spec
-    file: a raw spec next to the pool's dispense would read as two disagreeing knobs). The spec is
-    read only; ``run_config`` adds the run's ``breakers:`` section and its other surfaces."""
-    from yeto import breakers  # noqa: PLC0415
-    from yeto.rl.up_consistency import effective_spec  # noqa: PLC0415
-
-    surfaces = {"pool_config": doc, "pool_elastic": doc.get("elastic") or {},
-                "pool_dispense": (doc.get("sampler") or {}).get("dispense") or {}, "spec": effective_spec(doc)}
-    if run_config is None:
-        return breakers.Sources(**surfaces)
-    return breakers.Sources.from_run_config(run_config, **surfaces)
-
-
 POOL_LAYERS = ("pool", "sampler")  # the layers whose knobs a pool config holds
 
 
@@ -188,9 +173,10 @@ def with_breakers(cfg: dict[str, Any], ref: PoolRef, state_dir: Path) -> PoolRef
     if not cfg.get("breakers"):
         return ref
     from yeto import breakers  # noqa: PLC0415
+    from yeto.breakers.rules_facts import pool_sources  # noqa: PLC0415
 
     doc = ref.load()
-    sources = pool_sources(doc, cfg)
+    sources = pool_sources(doc, run_config=cfg)  # the spec as the pool renders it (read only)
     try:
         resolved = breakers.resolve(sources, pool=ref.name, layers=POOL_LAYERS)
         out = breakers.materialize(resolved, sources, surfaces=("pool_config", "pool_elastic", "pool_dispense"))

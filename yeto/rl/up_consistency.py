@@ -32,14 +32,10 @@ surface after the trainer island loaded its weights (a K3.1 B300 island: about
   GRPO-family estimator, the rollout-side schedule (dynamic batch size, none of
   :data:`SPLIT_BY_SAMPLE_FLAGS`) and rows of at least ``context_budget``
   (:func:`compaction_problem`; verl and PPO CompactionRL are refused);
-* backlog cap vs release cadence (:func:`backlog_findings`, a single trainer):
-  a sampler's ``max_backlog_groups`` counts from the newest release's read
-  position, so the samplers together must hold the groups the trainer reads
-  between two releases. Refused when the trainer can never read up to its first
-  release (``--rl-release-every`` x ``--rollout-batch-size`` groups) even with every
-  sampler at its cap; a warning with the value to set when the samplers would wait
-  at their caps between releases. A spec's ``"auto"`` cap is derived from the same
-  formula (:func:`auto_backlog`) and checked as that value;
+* the backlog shape of a pool (:func:`pool_backlog`; a spec's ``"auto"`` cap is
+  derived from the release cadence, :func:`auto_backlog`), which the dependency
+  rule D19 (:mod:`yeto.breakers.rules_data`) checks against a single trainer's
+  release cadence;
 * prices (:func:`price_problem`): with a spend cap (``budget.usd``) every pool of a
   USD-priced provider (Modal / Daytona / Sky) needs a real hourly price, or the run's
   spend estimate counts its islands at 0 and the cap never fires on them.
@@ -588,70 +584,6 @@ def auto_backlog(trainer_argv: list[str], pools: list[tuple[dict[str, Any], str]
     why = (f"ceil(((release_every {cadence['release_every']} + m {cadence['m']} + 1) x {cadence['groups_per_round']} + "
            f"{sample_roles.RELEASE_BACKLOG_MARGIN_GROUPS}) / samplers {samplers}) = {groups}")
     return {**cadence, "groups": groups, "why": why, "samplers": samplers}
-
-
-def backlog_findings(trainer_argv: list[str], pools: list[tuple[dict[str, Any], str]]
-                     ) -> tuple[list[str], list[str]]:
-    """``(problems, warnings)`` of the samplers' backlog caps against a single
-    buffer trainer's release cadence (``pools``: each pool's config and data path).
-
-    A sampler's backlog counts from the read position of the newest release it
-    sees, 0 before the first (``SamplerLoop.backlog``): until a release lands, the
-    samplers together write at most the sum of their caps (plus the groups each
-    can write past it). Checked for a trainer with ``--rl-sample-role trainer``
-    and ``--rl-single-island-no-sync`` over ``r2`` pools (synced trainers size
-    their samplers by the pool's ``backlog`` section; relay pools have no cap).
-
-    * problem: even with every pool at its most samplers, each at its cap plus
-      the most it writes past it, the trainer cannot read the ``release_every x
-      groups_per_round`` groups up to its first release; it would wait for groups
-      until ``--rl-sample-wait-s`` ends the run (only a replacement node's new
-      shard could move it on), so nothing should be ordered;
-    * warning: the target samplers hold fewer than
-      :func:`yeto.rl.engine.sample_roles.release_backlog_need` groups: they wait
-      at their caps between releases (sampling time lost every release, a trainer
-      waiting for groups). The value to set is that need over the samplers,
-      rounded up, and over one sampler fewer (one down or being replaced)."""
-    from yeto.rl.engine import sample_roles  # noqa: PLC0415
-
-    cadence = release_cadence(trainer_argv)
-    if cadence is None:
-        return [], []
-    groups, every, rounds, need = (cadence["groups_per_round"], cadence["release_every"], cadence["m"],
-                                   cadence["need"])
-    derived = auto_backlog(trainer_argv, pools)
-    auto = None if derived is None else derived["groups"]
-    shapes = [shape for cfg, data_path in pools if data_path == "r2" and (shape := pool_backlog(cfg, auto=auto))]
-    if not shapes:
-        return [], []
-    staged = cadence["staged"]
-    first = every * groups
-    most = sum(s["most"] * (s["cap"] + s["over"]) for s in shapes)
-    caps = ", ".join(f"{s['target']} x {s['cap']}" for s in shapes)
-    samplers = sum(s["target"] for s in shapes)
-    held = sum(s["target"] * s["cap"] for s in shapes)
-    fewer = max(1, samplers - 1)
-    suggest, suggest_fewer = -(-need // samplers), -(-need // fewer)
-    advice = (f"set max_backlog_groups to at least {suggest} per sampler"
-              + (f" ({suggest_fewer} to keep up with one of the {samplers} samplers down or being replaced)"
-                 if samplers > 1 else "")
-              + f" = ceil(((release_every {every} + m {rounds} + 1) x {groups} + "
-                f"{sample_roles.RELEASE_BACKLOG_MARGIN_GROUPS}) / samplers), or release more often")
-    if most < first:
-        return [(f"the samplers ({caps} max_backlog_groups; at most {most} groups with every node a pool may run, "
-                 f"each past its cap) count their backlog from the newest release's read position, 0 before the "
-                 f"first release, but the trainer reads --rl-release-every {every} x --rollout-batch-size {groups} "
-                 f"= {first} groups before it can release: it would wait for groups and never release; "
-                 + advice)], []
-    if held >= need:
-        return [], []
-    upload = (f"m = {rounds}: the round after a publication plus a staged upload assumed "
-              f"{sample_roles.ASSUMED_UPLOAD_ROUNDS} rounds long; re-derive with the measured upload / step time"
-              if staged else "m = 0: releases written inline")
-    return [], [f"the samplers ({caps} max_backlog_groups = {held} groups) count their backlog from the newest "
-                f"release's read position, and the trainer reads up to {need} groups between two releases "
-                f"(--rl-release-every {every}, --rollout-batch-size {groups}, {upload}): the samplers would wait "
-                f"at their caps between releases; " + advice]
 
 
 def store_problems(run_store: str, args: Any, pool_cfg: dict[str, Any], *, data_path: str = "r2") -> list[str]:

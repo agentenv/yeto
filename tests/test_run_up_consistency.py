@@ -215,15 +215,18 @@ def test_backlog_caps_below_the_release_cadence_warn_with_the_value_to_set(setup
     ceil(88 / 3) = 30, or ceil(88 / 2) = 44 with one sampler down."""
     _release_cadence(setup, samplers=3, cap=16)
     run = setup.make()
-    assert run.consistency_problem() is None and run.backlog_problem() is None
+    assert run.consistency_problem() is None and run.rules_problem() is None
     out = capsys.readouterr().out
-    assert "WARNING" in out and "3 x 16 max_backlog_groups = 48 groups" in out and "up to 88 groups" in out
+    assert "WARNING: D19 warn" in out and "3 x 16 max_backlog_groups = 48 groups" in out and "up to 88 groups" in out
     assert "at least 30 per sampler" in out and "44 to keep up with one of the 3 samplers down" in out
     assert run.preflight() is True and run.calls  # a warning orders as before
     assert "max_backlog_groups" in capsys.readouterr().out
     setup.spec["max_backlog_groups"] = 30
-    assert setup.make().backlog_problem() is None
+    assert setup.make().rules_problem() is None
     assert "max_backlog_groups" not in capsys.readouterr().out
+    setup.spec["max_backlog_groups"] = "auto"  # sized from the release cadence: satisfied
+    assert setup.make().rules_problem() is None
+    assert "D19" not in capsys.readouterr().out
 
 
 def test_a_cap_the_trainer_cannot_read_past_to_its_first_release_is_refused(setup):
@@ -233,26 +236,27 @@ def test_a_cap_the_trainer_cannot_read_past_to_its_first_release_is_refused(setu
     _release_cadence(setup, samplers=1, cap=16)
     run = setup.make()
     assert run.preflight() is False and run.calls == []
-    problem = run.backlog_problem()
-    assert "= 48 groups before it can release" in problem and "never release" in problem
-    assert "at least 88 per sampler" in problem
+    problem = run.rules_problem()
+    assert problem.startswith("D19 error") and "= 48 groups before it can release" in problem
+    assert "never release" in problem and "at least 88 per sampler" in problem
     setup.pool["elastic"] = {"max_nodes": 3}
-    assert setup.make().backlog_problem() is None  # 3 x (16 + 2) >= 48: a warning only
+    assert setup.make().rules_problem() is None  # 3 x (16 + 2) >= 48: a warning only
 
 
 def test_the_backlog_check_follows_the_pool_section_and_skips_other_trainers(setup):
     _release_cadence(setup, samplers=1, cap=16)
     setup.pool["backlog"] = {"synced": False, "explicit_rounds": 64}  # nc.cli: 64 rounds x 2 groups
     run = setup.make()
-    assert run.backlog_problem() is None
+    assert run.rules_problem() is None
     shape = up_consistency.pool_backlog(run.pools[0].load())
     assert (shape["cap"], shape["target"], shape["over"]) == (128, 1, 2)
     del setup.pool["backlog"]
     i = setup.argv.index("--rl-single-island-no-sync")
     del setup.argv[i]  # a synced trainer: its samplers are sized by the pool's backlog section
-    assert setup.make().backlog_problem() is None
-    pool = setup.make().pools[0].load()
-    assert up_consistency.backlog_findings(setup.argv + ["--rl-single-island-no-sync"], [(pool, "syncer")]) == ([], [])
+    assert setup.make().rules_problem() is None
+    setup.argv.append("--rl-single-island-no-sync")
+    setup.pool["data_path"] = "syncer"  # relay pools have no cap
+    assert setup.make().rules_problem() is None
 
 
 def test_release_record_rounds_and_backlog_need():
@@ -280,14 +284,14 @@ def test_an_auto_cap_is_derived_from_the_release_cadence(setup, capsys, monkeypa
     assert run.auto_backlog["groups"] == 30 and run.env[sample_roles.AUTO_BACKLOG_ENV] == "30"
     assert run.env[sample_roles.AUTO_BACKLOG_WHY_ENV] == run.auto_backlog["why"] == (
         "ceil(((release_every 6 + m 3 + 1) x 8 + 8) / samplers 3) = 30")
-    assert run.backlog_problem() is None
+    assert run.rules_problem() is None
     out = capsys.readouterr().out
-    assert "max_backlog_groups auto -> 30 per sampler" in out and "WARNING" not in out
+    assert "max_backlog_groups auto -> 30 per sampler" in out and "D19" not in out
     shape = up_consistency.pool_backlog(run.pools[0].load(), auto=30)
     assert shape["cap"] == 30
     setup.pool["target"] = 1
     run = setup.make()
-    assert run.auto_backlog["groups"] == 88 and run.backlog_problem() is None
+    assert run.auto_backlog["groups"] == 88 and run.rules_problem() is None
     assert run.preflight() is True and run.calls
 
 
@@ -299,7 +303,7 @@ def test_an_auto_cap_without_a_single_buffer_trainer_takes_the_fallback(setup, c
     setup.argv.remove("--rl-single-island-no-sync")  # a synced trainer: the formula does not cover it
     run = setup.make()
     assert run.auto_backlog is None and sample_roles.AUTO_BACKLOG_ENV not in run.env
-    assert run.backlog_problem() is None
+    assert run.rules_problem() is None
     assert f"auto -> fallback {sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS} per sampler" in capsys.readouterr().out
     setup.argv.append("--rl-single-island-no-sync")
     setup.spec["max_backlog_groups"] = 16  # a number: no derivation, the check as before

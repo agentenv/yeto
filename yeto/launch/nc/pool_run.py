@@ -375,6 +375,21 @@ def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str],
     return problems
 
 
+def breaker_findings(cfg: dict[str, Any]) -> list[Any]:
+    """The dependency rules between the breaker thresholds of this pool's samplers
+    (:mod:`yeto.breakers.rules`) on their own resolve; [] when the config does not
+    resolve (its own checks report why)."""
+    from yeto import breakers  # noqa: PLC0415
+    from yeto.breakers.rules_facts import pool_sources  # noqa: PLC0415
+
+    sources = pool_sources(cfg)
+    try:
+        resolved = breakers.resolve(sources, strict=False)
+    except ValueError:
+        return []
+    return breakers.preflight(resolved, sources=sources)
+
+
 def dry_run(cfg: dict[str, Any], config_path: str) -> int:
     """Validate the config and print the orders and the spend the pool would make;
     orders nothing and calls no National Compute API."""
@@ -397,13 +412,10 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
                 print(f"max_backlog_groups {spec['max_backlog_groups']} per sampler ({spec[AUTO_BACKLOG_NOTE_KEY]})")
             from yeto.launch import agentic_setup  # noqa: PLC0415
 
-            from yeto.rl.engine.agentic_round import drain_settings, drain_timeout_warning  # noqa: PLC0415
+            from yeto.rl.engine.agentic_round import drain_settings  # noqa: PLC0415
 
             if isinstance(spec.get("agentic"), dict):
                 drain_settings(spec, drain=True)  # a bad drain_timeout_s / abandon_grace_s: a problem here
-            warning = drain_timeout_warning(spec)  # none for a spec that resolves to the live switch
-            if warning is not None:
-                notes.append(warning)
             from yeto.rl.compaction import (  # noqa: PLC0415
                 config_from_spec,
                 describe,
@@ -513,6 +525,10 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
               "rate)")
     if not external:
         print(f"stops ordering and drains below a balance of {pc.stop_below_ucr} ucr")
+    from yeto.breakers.rules import format_finding  # noqa: PLC0415
+
+    for finding in breaker_findings(cfg):  # the drain cut (D1), the dispense lease (D10), ...
+        (problems if finding.level == "error" else notes).append(format_finding(finding))
     print(f"WARNING: {lease_warning(cfg, config_path)}")
     print("The control loop runs in the foreground on this host: keep it up for the whole run "
           "(tmux / systemd on an always-on machine).")
@@ -568,7 +584,9 @@ def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: Is
     """The foreground control loop of a pool (``pool --config F``)."""
     external = not is_national_compute(cfg)
     pc = cli.pool_config(cfg, allowed=None if external else cli.allowed_accounts())
-    for note in cli.pool_config_warnings(cfg):
+    from yeto.breakers.rules import format_finding  # noqa: PLC0415
+
+    for note in [*cli.pool_config_warnings(cfg), *map(format_finding, breaker_findings(cfg))]:
         _say(f"WARNING: {note}")
     holder = lock_holder(lock_path(cfg))
     if holder is not None:
