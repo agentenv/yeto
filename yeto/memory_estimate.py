@@ -56,7 +56,9 @@ context (bf16 K and V per layer: GQA heads split over TP_engine; MLA one latent 
 ``kv_lora_rank + qk_rope_head_dim`` per layer, replicated), and R0 sits outside
 it: peak = mem_fraction_static x GPU memory + R0 (part 5 and the rollout phase
 above). The engine estimate is not calibrated: an over-limit sampler island
-warns and never stops a launch.
+warns and never stops a launch. It covers the SGLang samplers a launch starts
+(its sampler islands); an external sampler pool (``yeto run up`` vLLM samplers,
+``--rollout-pool``) is sized by its own spec, not by this preflight.
 
 Only Qwen3.5-4B is calibrated; other models get the same constants and the
 launcher treats an estimate for them as advisory (warn, never refuse) until
