@@ -880,6 +880,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 (lambda name: name in event_collectors and event_collectors[name].left_pool)
                 if echo_names else None
             ),
+            awaiting_syncer_probe=(
+                (lambda name: name in event_collectors and event_collectors[name].awaiting_syncer)
+                if echo_names else None
+            ),
             elastic=island_pool(args),
             no_island_relaunch=bool(getattr(args, "no_island_relaunch", False)),
             wan_reject_probe=(

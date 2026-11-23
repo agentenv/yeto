@@ -203,3 +203,66 @@ def test_without_followers_a_running_island_keeps_the_run_open():
                           syncer_restart=lambda: None)
     codes = ctl.run()
     assert "SUCCEEDED" in codes["s2"] and ops.t >= 150
+
+
+
+def _head_ctl(ops, finished, awaiting):
+    return FleetController(learners={"l0": ("task-l0", 1), "l1": ("task-l1", 2)}, syncer=None,
+                           sky_ops=ops, poll_interval=30, recover_timeout=600,
+                           thread_cls=ImmediateThread, fixed_roster=True,
+                           syncer_probe=lambda: None, syncer_restart=lambda: None,
+                           syncer_finished_probe=lambda: finished(ops.t),
+                           finalized_probe=lambda name: name == "l0",
+                           awaiting_syncer_probe=lambda name: name in awaiting)
+
+
+def test_replacement_that_comes_up_after_the_final_cut_is_stopped_not_left_dialing():
+    """A replacement relaunched before the syncer finished but up only after its final
+    cut has no syncer to join: it dialed the closed port until its 900 s connect
+    timeout on a billed GPU. The launcher ends it LATE_ISLAND_GRACE_S after the
+    syncer finished."""
+    from yeto.launch.fleet import LATE_ISLAND_GRACE_S
+
+    ops = FakeOps()
+    ops.status_seq["l0"] = [RUNNING] * 10 + [SUCCEEDED]
+    ops.status_seq["l1"] = [FAILED]  # killed; the replacement then runs and never joins
+    ops.relaunch_results["l1"] = [3]
+    ctl = _head_ctl(ops, finished=lambda t: t >= 300, awaiting={"l1"})
+    codes = ctl.run()
+    assert len(ops.relaunch_calls) == 1
+    assert ctl.learners["l1"]["state"] == "done"
+    assert codes["l1"].startswith("SUCCEEDED (syncer finished before the island joined")
+    assert 300 + LATE_ISLAND_GRACE_S <= ops.t < 300 + LATE_ISLAND_GRACE_S + 60
+
+
+def test_island_that_reached_the_syncer_is_not_stopped_while_it_finishes():
+    """An island that took the final cut may still be saving after the syncer
+    exited; only an island still waiting for the syncer is ended."""
+    ops = FakeOps()
+    ops.status_seq["l0"] = [RUNNING] * 20 + [SUCCEEDED]
+    ops.status_seq["l1"] = [RUNNING] * 20 + [SUCCEEDED]
+    codes = _head_ctl(ops, finished=lambda t: t >= 30, awaiting=set()).run()
+    assert "stopped by the launcher" not in codes["l0"] + codes["l1"]
+    assert ops.t >= 20 * 30
+
+    ops = FakeOps()  # waiting for the syncer, but the syncer has not finished
+    ops.status_seq["l0"] = [RUNNING] * 20 + [SUCCEEDED]
+    ops.status_seq["l1"] = [RUNNING] * 20 + [SUCCEEDED]
+    codes = _head_ctl(ops, finished=lambda t: False, awaiting={"l1"}).run()
+    assert "stopped by the launcher" not in codes["l1"]
+
+
+def _rec(event, **kw):
+    return PREFIX + json.dumps({"island_id": 1, "time_unix": 1.0, "event": event, **kw})
+
+
+def test_tape_collector_awaiting_syncer_follows_the_current_incarnation(tmp_path):
+    c = TapeCollector(tmp_path / "t.jsonl")
+    assert not c.awaiting_syncer
+    c.feed(_rec("rl_driver_start", n=1) + "\n")
+    assert c.awaiting_syncer  # booted, no cut from the syncer yet
+    c.feed(_rec("rl_policy_apply", optimizer="reset") + "\n" + _rec("rl_local_round", n=1) + "\n")
+    assert not c.awaiting_syncer
+    c.feed(_rec("rl_driver_start", n=2) + "\n")  # relaunched after the final cut
+    c.feed(_rec("island_leave", reason=4) + "\n")
+    assert c.awaiting_syncer

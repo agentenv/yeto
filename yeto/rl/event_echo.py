@@ -107,6 +107,13 @@ def echo_record(record: dict) -> None:
 
 
 FINALIZED_EVENT = "rl_learner_finalized"
+# Records an engine island writes only once it holds a policy from the syncer
+# (applied a cut, trained a round, or took the final cut). An island whose tape
+# has none since its last rl_driver_start has not reached the syncer yet.
+JOINED_EVENTS = frozenset({
+    "rl_policy_apply", "rl_local_round", "rl_round_trained", "rl_sync_hook",
+    "rl_final_cut", "rl_full_parameter_final_ack", FINALIZED_EVENT,
+})
 MAX_PENDING_CHARS = 1 << 20  # bound on a held, unterminated tape line
 REQUIRED_KEYS = ("island_id", "time_unix", "event")
 INVALID = object()  # prefix present but not a tape record (e.g. truncated line)
@@ -158,6 +165,9 @@ class TapeCollector:
         self.finalized = False
         self.left_pool = False  # 0.27: elastic_left_pool seen (re-JOIN exhausted)
         self.wan_rejects = 0  # rl_wan_probe records with accepted=false
+        # The island's engine driver started (rl_driver_start) and has written no
+        # JOINED_EVENTS record since: it is still waiting for the syncer.
+        self.awaiting_syncer = False
         self.closed = False
 
     @property
@@ -212,6 +222,10 @@ class TapeCollector:
             self.finalized = True
         elif event == "elastic_left_pool":
             self.left_pool = True
+        if event == "rl_driver_start":
+            self.awaiting_syncer = True
+        elif event in JOINED_EVENTS:
+            self.awaiting_syncer = False
 
     def recover_from_file(self, tape_file) -> bool:
         """Complete the tape from the island's own tape file (raw tape lines, the

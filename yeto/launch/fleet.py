@@ -60,6 +60,11 @@ WAN_RECOVERY_S = 900.0
 # How long a failed-looking island is given for its rl_learner_finalized record
 # to arrive over the log stream before recovery starts.
 FINALIZE_GRACE_S = 60.0
+# How long an island still waiting for the syncer may keep running after the
+# syncer finished its run. The syncer is gone, so such an island (a replacement
+# that came up after the final cut) can only dial a closed port until its
+# connect timeout; the grace covers log-stream delay of its join records.
+LATE_ISLAND_GRACE_S = 120.0
 # Bound on waiting for an in-flight relaunch before abandoning (so a late
 # sky.launch cannot re-create a cluster after teardown).
 RELAUNCH_JOIN_S = 120.0
@@ -185,6 +190,7 @@ class FleetController:
         keep_abandoned: bool = False,
         syncer_finished_probe=None,
         left_pool_probe=None,
+        awaiting_syncer_probe=None,
         elastic: bool = False,
         no_island_relaunch: bool = False,
         replacement_planner=None,
@@ -216,6 +222,10 @@ class FleetController:
         # 0.27: name -> bool, the island left the elastic pool for good (re-JOIN
         # exhausted, learner exit 7); elastic only.
         self.left_pool_probe = left_pool_probe
+        # name -> bool: the island's driver started and has not reached the syncer
+        # yet (TapeCollector.awaiting_syncer). After the syncer finished such an
+        # island is ended instead of left dialing until its connect timeout.
+        self.awaiting_syncer_probe = awaiting_syncer_probe
         self.elastic = elastic
         self.no_island_relaunch = no_island_relaunch
         # name -> number of rejected link probes the island logged
@@ -457,6 +467,8 @@ class FleetController:
         if rec["state"] == RUNNING:
             verdict, status = self._probe(rec)
             if verdict is None:
+                if not is_syncer and self._end_late_island(rec):
+                    return
                 recovered_at = rec.get("recovered_at")
                 if recovered_at is not None and self.ops.now() - recovered_at >= RECOVERY_STABLE_S:
                     # stable again: close the recovery window
@@ -559,6 +571,36 @@ class FleetController:
             self._fleet("island_done", name, reason="trainers ended")
             print(f"[launcher] {name}: every trainer it feeds has ended; stopping the sampler",
                   file=sys.stderr)
+
+    def _end_late_island(self, rec) -> bool:
+        """End a running island that is still waiting for the syncer
+        LATE_ISLAND_GRACE_S after the syncer finished its run. The syncer only
+        waits for the learners connected at its final cut, so a replacement that
+        comes up after that cut has no syncer to join and would otherwise hold
+        its machine until its connect timeout (900 s and more) before failing.
+        An island that reached the syncer (it may be saving its final policy)
+        is left alone."""
+        if (rec["name"] in self.followers or not self._awaiting_syncer(rec)
+                or not self._syncer_finished()):
+            rec.pop("late_since", None)
+            return False
+        since = rec.setdefault("late_since", self.ops.now())
+        if self.ops.now() - since < LATE_ISLAND_GRACE_S:
+            return False
+        rec["state"] = DONE
+        rec["exit"] = "SUCCEEDED (syncer finished before the island joined; stopped by the launcher)"
+        self._fleet("island_done", rec["name"], reason="syncer finished before it joined")
+        print(f"[launcher] {rec['name']}: the syncer finished and the island has not reached it "
+              f"after {LATE_ISLAND_GRACE_S:.0f}s; stopping it", file=sys.stderr)
+        return True
+
+    def _awaiting_syncer(self, rec) -> bool:
+        if self.awaiting_syncer_probe is None:
+            return False
+        try:
+            return bool(self.awaiting_syncer_probe(rec["name"]))
+        except Exception:
+            return False
 
     def _syncer_finished(self) -> bool:
         if self.syncer is not None and self.syncer["state"] == DONE \
