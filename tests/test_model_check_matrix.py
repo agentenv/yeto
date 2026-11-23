@@ -22,7 +22,8 @@ from pathlib import Path
 import pytest
 
 from yeto.rl.model_registry.check import (
-    BACKENDS, FAIL, FORMS, ISLAND, PRESETS, CheckRequest, actor_gpus, check_model, render_text, report_dict,
+    BACKENDS, FAIL, FORMS, ISLAND, PENDING, PRESETS, CheckRequest, actor_gpus, check_model, render_text,
+    report_dict,
 )
 
 DATA = Path(__file__).parent / "data" / "model_registry"
@@ -59,14 +60,26 @@ def launcher(tmp_path_factory):
     from yeto.launcher import _prepare_rl_args
     from yeto.rl.adapters.miles.models.partial_experts.selection import ExpertSelection
 
-    selection = tmp_path_factory.mktemp("sel") / "expert_selection.json"
-    ExpertSelection.synthetic("uniform", model="kimi_k31", num_experts=896, num_trainable=128, ep_size=8,
-                              layers=list(range(1, 93))).write(str(selection))
-    fill = {"<expert_selection.json>": str(selection), "<64-hex>": HEX, "<store>": "modal-volume://v/run",
-            "<verl plan hash>": HEX}
+    folder = tmp_path_factory.mktemp("sel")
+
+    @lru_cache(maxsize=None)
+    def selection(ep: int) -> str:
+        """A K3.1 selection built for the cell's EP (the user builds it at the launch's EP)."""
+
+        path = folder / f"expert_selection.ep{ep}.json"
+        try:
+            ExpertSelection.synthetic("uniform", model="kimi_k31", num_experts=896, num_trainable=128,
+                                      ep_size=ep, layers=list(range(1, 93))).write(str(path))
+        except ValueError:  # an EP the selection cannot split (the check refuses it on its own)
+            return selection(8)
+        return str(path)
+
+    fill = {"<64-hex>": HEX, "<store>": "modal-volume://v/run", "<verl plan hash>": HEX}
 
     @lru_cache(maxsize=None)
     def run(argv: tuple[str, ...], gpu: str) -> str | None:
+        ep = int(argv[argv.index("--expert-parallel") + 1]) if "--expert-parallel" in argv else 8
+        fill["<expert_selection.json>"] = selection(ep)
         args = parse_args([
             "--gpu", gpu, "--model", "org/model", "--data", "org/data", "--training-mode", "rl",
             "--total-steps", "3", "--rollout-batch-size", "8", "--n-samples-per-prompt", "2",
@@ -97,6 +110,7 @@ def _cells():
 # shape and target variations on top of the recommended cells (the refusals they reach)
 VARIATIONS = (
     {"lora_targets": "all-linear"},
+    {"lora_targets": "all-linear", "expert_parallel": 2},
     {"expert_parallel": 3},
     {"tensor_parallel": 2},
     {"tensor_parallel": 2, "pipeline_parallel": 2},
@@ -130,12 +144,12 @@ def _launcher_disagreements(run, model: str, cells) -> list[str]:
 
 @pytest.mark.parametrize("model", sorted(MODELS))
 def test_launcher_verdicts_match_yeto_launch(launcher, model):
-    assert _launcher_disagreements(launcher, model, _cells()) == []
+    assert not (bad := _launcher_disagreements(launcher, model, _cells())), "\n\n".join(bad)
 
 
 @pytest.mark.parametrize("model", VARIED)
 def test_launcher_verdicts_match_yeto_launch_on_other_shapes(launcher, model):
-    assert _launcher_disagreements(launcher, model, _varied_cells()) == []
+    assert not (bad := _launcher_disagreements(launcher, model, _varied_cells())), "\n\n".join(bad)
 
 
 # ----------------------------------------------------------------------------- island run config
@@ -174,7 +188,7 @@ def _island_refusal(cfg: dict, report) -> str | None:
     full = req.form != "lora"
     namespace = argparse.Namespace(**{
         **vars(base), "seq_len": req.seq_len, "lora_r": req.lora_rank,
-        "lora_targets": base.lora_targets if full else req.lora_targets,  # full: the island default
+        "lora_targets": req.lora_targets,
         "actor_num_gpus_per_node": actor_gpus(req, report.recipe), "tensor_parallel": req.tensor_parallel,
         "pipeline_parallel": req.pipeline_parallel, "expert_parallel": req.expert_parallel,
         "parameter_mode": "full" if full else "lora", "rl_model_recipe": report.recipe,
@@ -234,7 +248,7 @@ def test_three_onboarding_examples():
     k31 = check_model(_config("kimi_k31"), CheckRequest(form="partial-moe", preset="full-parameter"))
     assert k31.recipe == "kimi_k31" and k31.launcher_accepts and k31.request.expert_parallel == 8
     k31_decoupled = check_model(_config("kimi_k31"), CheckRequest(form="lora", preset="decoupled"))
-    assert not k31_decoupled.launcher_accepts and any("#666" in p for p in k31_decoupled.pending)
+    assert not k31_decoupled.launcher_accepts and k31_decoupled.pending == ["decoupled/kimi_k31-lora"]
 
 
 def test_report_dict_is_json_and_the_cli_exit_code_follows_the_verdict(capsys):
@@ -288,3 +302,19 @@ def test_the_matrix_reaches_both_verdicts(launcher):
         if refusal:
             refusals.add(refusal.split(":")[0][:60])
     assert seen[True] > 100 and seen[False] > 100 and len(refusals) >= 5
+
+
+def test_every_pending_entry_still_reaches_a_failing_cell():
+    """A change that turns a pending cell into a run removes its PENDING entry too;
+    the printed report names the open work, never a pull request number."""
+
+    import re
+
+    reached = set()
+    for model, request in list(_cells()) + list(_varied_cells()):
+        report = check_model(_config(model), request, model=model)
+        reached.update(report.pending)
+        if report.pending:
+            assert not re.search(r"#\d", render_text(report))
+    assert reached == set(PENDING)
+

@@ -17,8 +17,9 @@ One request (trainable form, sync preset, backend, parallel shape) against one
 The ``launcher`` items mirror ``yeto/launch/rl_args.py`` and
 ``yeto/rl/engine/selection.py`` on main; ``tests/test_model_check_matrix.py``
 runs the launcher on ``launch_argv`` for every fixture model, form, preset and
-backend and fails when the two disagree. ``PENDING`` names the open pull
-requests that change a cell. Import-light: stdlib and the model registry only.
+backend and fails when the two disagree. ``PENDING`` names the cells that open
+work changes ("not on main yet"); the matrix test fails when a key no longer
+reaches a failing cell. Import-light: stdlib and the model registry only.
 """
 
 from __future__ import annotations
@@ -40,19 +41,23 @@ PRESETS = ("strict-avg", "decoupled", "full-parameter", "single-island")
 BACKENDS = ("miles", "verl")
 OK, WARN, FAIL = "ok", "warn", "fail"
 LAUNCHER, ISLAND, UPSTREAM, ESTIMATE = "launcher", "island", "upstream", "estimate"
-MAX_FRAGMENT_BYTES = 2 << 30  # --rl-sync-fragment-max-bytes default (fit_owner_affine_layout bound)
+MAX_FRAGMENT_BYTES = 2 << 30  # --rl-sync-fragment-max-bytes default (yeto/launch/rl_args.py defaults)
 DEFAULT_P, DEFAULT_TAU, DEFAULT_H = 4, 2, 4  # decoupled runs A/B/C (P=4, tau=2, H=4); H>=4: outer Nesterov
 PARTIAL_RECIPES = {"kimi_k31", "deepseek-v4-flash"}
 DSV4_EXPERT_FULL_COUNT = 4  # --expert-full-count of the deepseek-v4-flash expert-full form
-# Open pull requests that change a cell of the matrix (update the table when one merges).
+# Failing cells that open work turns into runs (printed as "not on main yet"). Remove an
+# entry in the change that flips its cell: tests/test_model_check_matrix.py requires every
+# key to still reach a failing cell. Open work per key, for maintainers: decoupled/* #653,
+# partial-moe/generic #649 wiring, decoupled/kimi_k31-lora #666, lora/expert-ep #658 #666,
+# verl/decoupled-lora #657 #662.
 PENDING = {
-    "decoupled/full": "#653 routes --rl-sync-preset decoupled --tuning full to full-parameter async rounds",
-    "decoupled/partial-moe": "#653 routes decoupled partial experts (K3.1 selection, DSV4 expert-full) to "
+    "decoupled/full": "--rl-sync-preset decoupled --tuning full routed to full-parameter async rounds",
+    "decoupled/partial-moe": "decoupled partial experts (K3.1 selection, DSV4 expert-full) routed to "
                              "full-parameter async rounds",
-    "partial-moe/generic": "#649 adds in-place expert selections for any MoE; launcher wiring follows",
-    "decoupled/kimi_k31-lora": "#666 offline canonical LoRA specs lift the first-export layout refusal",
-    "lora/expert-ep": "#658/#666 routed-expert LoRA under EP>1 on the generic recipe",
-    "verl/decoupled-lora": "#657 runs decoupled LoRA fragments on the verl island",
+    "partial-moe/generic": "in-place routed-expert selections on any MoE (generic recipe)",
+    "decoupled/kimi_k31-lora": "kimi_k31 LoRA under decoupled, from an offline canonical LoRA layout",
+    "lora/expert-ep": "routed-expert LoRA under EP>1 on the generic recipe",
+    "verl/decoupled-lora": "decoupled LoRA fragments on the verl island",
 }
 
 
@@ -80,6 +85,7 @@ class CheckItem:
     reason: str
     suggestion: str = ""
     source: str = LAUNCHER
+    pending: str = ""  # a PENDING key: open work turns this failing cell into a run
 
 
 @dataclass
@@ -92,7 +98,12 @@ class CheckReport:
     recommended: dict[str, Any] = field(default_factory=dict)
     templates: list[str] = field(default_factory=list)
     launch_argv: list[str] = field(default_factory=list)
-    pending: list[str] = field(default_factory=list)
+
+    @property
+    def pending(self) -> list[str]:
+        """PENDING keys of the failing items (open work that turns them into runs)."""
+
+        return sorted({i.pending for i in self.items if i.pending and i.status == FAIL})
 
     def _ok(self, *sources: str) -> bool:
         return not any(i.status == FAIL and i.source in sources for i in self.items)
@@ -123,15 +134,12 @@ def family_recipe(hf_config: dict) -> str:
 
 
 # ----------------------------------------------------------------------------- launcher cells
-def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> tuple[list[CheckItem], list[str]]:
+def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> list[CheckItem]:
     items: list[CheckItem] = []
-    pending: list[str] = []
     form, preset, backend = req.form, req.preset, req.backend
 
     def fail(reason: str, suggestion: str = "", pend: str | None = None, source: str = LAUNCHER) -> None:
-        items.append(CheckItem("form", FAIL, reason, suggestion, source))
-        if pend:
-            pending.append(PENDING[pend])
+        items.append(CheckItem("form", FAIL, reason, suggestion, source, pend or ""))
 
     if form == "partial-moe":
         if not profile.moe:
@@ -141,7 +149,7 @@ def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> tu
                  "to kimi_k31, --expert-full-count to deepseek-v4-flash (yeto/launch/rl_args.py)",
                  "train the routed experts with full parameters, or register a PartialExpertModelConfig "
                  "(template below)", "partial-moe/generic")
-        elif backend == "verl":
+        elif backend == "verl" and recipe == "deepseek-v4-flash":
             fail(f"the {recipe} partial-expert recipe is a Miles recipe", "--rl-backend miles")
         elif recipe == "deepseek-v4-flash" and preset != "full-parameter":
             fail("expert-full tuning needs --rl-sync-preset full-parameter (yeto/rl/engine/selection.py)",
@@ -151,6 +159,11 @@ def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> tu
             fail("--tuning full behind a syncer needs --rl-sync-preset full-parameter (yeto/launch/rl_args.py)",
                  "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async",
                  "decoupled/partial-moe" if preset == "decoupled" else None)
+        elif backend == "verl" and recipe == "kimi_k31":
+            # the launcher accepts it; no verl code reads --rl-model-recipe or --rl-expert-selection
+            fail("verl islands ignore --rl-model-recipe kimi_k31 and --rl-expert-selection (no verl code reads "
+                 "them): the selection would not be trained as partial experts", "--rl-backend miles",
+                 source=ISLAND)
     elif form == "full":
         if recipe == "kimi_k31":
             fail("--rl-model-recipe kimi_k31 trains full parameters on a routed-expert selection only "
@@ -188,7 +201,7 @@ def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> tu
                  "(yeto/rl/adapters/verl/megatron_engine.py sync_problems)", "--pipeline-parallel 1")
     if not any(i.status == FAIL for i in items):
         items.append(CheckItem("form", OK, f"{form} with {preset} on {backend} (recipe {recipe})"))
-    return items, pending
+    return items
 
 
 def _ep(req: CheckRequest, profile: ModelSyncProfile) -> int:
@@ -303,8 +316,7 @@ def _lora_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> li
         elif recipe == "generic" and _ep(req, profile) > 1:
             out.append(CheckItem("lora-targets", FAIL, "EP>1 requires replicated attention LoRA, not "
                                  "expert-sharded all-linear LoRA (yeto/rl/engine/run_config.py)",
-                                 "--expert-parallel 1, or --lora-targets attention", ISLAND))
-            out.append(CheckItem("lora-targets", WARN, PENDING["lora/expert-ep"], "", ESTIMATE))
+                                 "--expert-parallel 1, or --lora-targets attention", ISLAND, "lora/expert-ep"))
         if recipe == "kimi_k31" and req.preset != "single-island":
             out.append(CheckItem("lora-targets", FAIL, "kimi_k31 synced LoRA trainers take --lora-targets "
                                  "attention only (yeto/rl/engine/kimi_k31_lora.py)", "--lora-targets attention",
@@ -619,14 +631,13 @@ def check_model(hf_config: dict, request: CheckRequest, *, model: str = "<model>
         items.append(CheckItem("contract", OK, f"{profile.model_type}: {profile.num_layers} layers"
                                + (f", {len(profile.moe_layers)} MoE layers x {profile.num_routed_experts} experts"
                                   if profile.moe else ", dense"), "", ESTIMATE))
-    form_items, pending = _form_items(req, recipe, profile)
-    items += form_items
+    items += _form_items(req, recipe, profile)
     items += _backend_items(req, recipe, profile)
     items += _parallel_items(req, recipe, profile, hf_config)
     items += _lora_items(req, recipe, profile)
     items.append(_layout_item(req, recipe, profile))
     items.append(_naming_item(profile, weight_names))
-    report = CheckReport(model=model, request=req, recipe=recipe, profile=profile, items=items, pending=pending)
+    report = CheckReport(model=model, request=req, recipe=recipe, profile=profile, items=items)
     report._config = hf_config  # type: ignore[attr-defined]
     sync = recommend_sync(req, profile, hf_config)
     try:
@@ -676,7 +687,7 @@ def render_text(report: CheckReport) -> str:
                  f"smallest trainer {memory.get('min_trainer')}")
     lines.append(f"gpu      {report.recommended.get('gpu')}")
     lines.append("flags    " + " ".join(report.launch_argv))
-    lines += [f"pending  {p}" for p in report.pending]
+    lines += [f"not on main yet: {PENDING[key]}" for key in report.pending]
     for template in report.templates:
         lines.append("template\n" + template)
     lines.append("(config.json only; upstream rules from the pinned sources; estimates are upper bounds)")
