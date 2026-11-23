@@ -207,7 +207,7 @@ function syncerLabel(nd,S,narrow){if(!S)return;var y=S.y+S.h+8,w=narrow?S.w:200;
   var g=el("g",{transform:"translate("+S.x+","+y+")","data-td":"snode"},nd);el("rect",{width:w,height:28,rx:7,"class":"tpbox"},g);
   var cx=8;D.shards.forEach(function(s){var lab="S"+(D.shards.length>1?s.index:"");el("rect",{x:cx,y:7,width:22,height:14,rx:3,fill:"var(--ink2)",opacity:0.22,stroke:"var(--ink2)"},g);
     el("text",{x:cx+11,y:17.5,"text-anchor":"middle","class":"tpm",style:"font-size:9.5px;font-weight:600"},g,lab);cx+=26});
-  el("text",{x:cx+4,y:18,"class":"tpm"},g,"syncer · machine —")}
+  el("text",{x:cx+4,y:18,"class":"tpm"},g,"syncer · machine not on the tape")}
 
 function trainerCard(nd,x,y,w,h,tr,co){
   var g=el("g",{transform:"translate("+x+","+y+")","data-td":"trn:"+tr.id},nd);
@@ -358,8 +358,8 @@ function paintRollout(tr,o,tn,td){var r=tr.island,ro=o.ro,st=rolloutState(tr,tn)
 
 // -- fragment matrix (HTML) ------------------------------------------------------------
 function matrix(tn){
-  var P=D.P||0,H=D.H,h='<div class="fmh"><b>Fragments</b><span>P '+P+" × M "+D.M+(H?(D.H_exact?" · H ":" · H ≤ ")+H:"")+(fin(D.period_s)?" · fragment period ≈ "+dur(D.period_s):"")+" · header = time since the fragment's last merge"+(D.behind?" · syncer tape behind":"")+'</span></div><table class="fm"><tr><th class="rh">fragment</th>';
-  for(var f=0;f<P;f++){var st=D.stuck.indexOf(f)>=0,lt=D.last_merge_ts[f];h+='<th class="'+(st?"stuck":"")+'" title="'+esc("fragment "+f+(D.shards.length>1?", shard "+shardOf(f):"")+(fin(lt)?", last merged "+dur(tn-lt)+" ago":", not merged yet"))+'">f'+f+(D.shards.length>1?" · s"+shardOf(f):"")+'<span class="fa">'+(st?"stuck ":"")+(fin(lt)?dur(tn-lt):"—")+"</span></th>"}
+  var P=D.P||0,H=D.H,h='<div class="fmh"><b>Fragments</b><span>P '+P+" × M "+D.M+(H?(D.H_exact?" · H ":" · H ≤ ")+H:"")+(fin(D.period_s)?" · fragment period ≈ "+dur(D.period_s):"")+" · column header: age of the fragment's last merge"+(T.live?"":", as of the snapshot")+(D.behind?" · syncer tape behind":"")+'</span></div><table class="fm"><tr><th class="rh">fragment</th>';
+  for(var f=0;f<P;f++){var st=D.stuck.indexOf(f)>=0,lt=D.last_merge_ts[f];h+='<th class="'+(st?"stuck":"")+'" title="'+esc("fragment "+f+(D.shards.length>1?", shard "+shardOf(f):"")+(fin(lt)?", last merged "+dur(tn-lt)+" ago":", not merged yet"))+'">f'+f+(D.shards.length>1?" · s"+shardOf(f):"")+'<span class="fa">'+(st?"stuck ":"")+(fin(lt)?"merged "+dur(tn-lt)+" ago":"not merged")+"</span></th>"}
   h+='</tr><tr><th class="rh">Syncer<span class="ns">committed version · round</span></th>';
   for(f=0;f<P;f++){var r=D.rounds.filter(function(x){return x.frag===f})[0],cls="",s2="idle",lt2=D.last_merge_ts[f];
     if(r){cls=r.blocked?"sy-stuck":r.state==="merging"?"sy-merge":"sy-gather";s2=(r.state==="merging"?"merging":"PUSH "+r.pushed.length+"/"+D.M)+" t"+r.step}
