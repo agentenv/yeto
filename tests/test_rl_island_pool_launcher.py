@@ -266,3 +266,21 @@ def test_head_job_ships_hmac_secret(monkeypatch, tmp_path):
     assert launcher.island_hmac_secret(_sft()) == {}
     assert launcher.island_hmac_secret(_args(POOL)) == {
         "YETO_ISLAND_HMAC_KEY": "k3y"}
+
+
+def test_the_syncer_tape_forwarder_wandb_key_is_a_secret(monkeypatch, tmp_path):
+    """secret-handling-hardening: sky redacts ``secrets=``, not ``envs=``; the syncer task's
+    W&B key (tape forwarder, --wandb) shipped in plain envs, so sky's records showed it."""
+    _fake_sky(monkeypatch)
+    monkeypatch.setattr("yeto.launch.syncer.build_syncer_binary", lambda: tmp_path / "yeto-syncer")
+    monkeypatch.setenv("WANDB_API_KEY", "w4ndb-k3y")
+    import platform
+    for system, machine in (("Linux", "x86_64"), ("Darwin", "arm64")):  # fast path and remote build
+        monkeypatch.setattr(platform, "system", lambda s=system: s)
+        monkeypatch.setattr(platform, "machine", lambda m=machine: m)
+        args = _args(POOL)
+        args.wandb = True
+        task = launcher.make_syncer_task(args, 2)
+        assert task.secrets == {"YETO_ISLAND_HMAC_KEY": "k3y", "WANDB_API_KEY": "w4ndb-k3y"}
+        assert "WANDB_API_KEY" not in task.envs and task.envs["YETO_RUN_GROUP"]
+        assert "w4ndb-k3y" not in task.run + (task.setup or "") + json.dumps(task.envs)

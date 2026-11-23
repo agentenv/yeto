@@ -18,6 +18,7 @@ from pathlib import Path
 from ..rl.engine.run_flags import CLI, rl_option_pairs
 from ..rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
 from . import REPO_ROOT
+from .credentials import split_secret_envs
 from .remote_setup import WAN_TUNING
 
 
@@ -1116,6 +1117,14 @@ def probe_syncer_ports(args, host: str, *, probe=None) -> list[str]:
     return details
 
 
+def _syncer_envs_and_secrets(args, envs: dict) -> tuple[dict, dict | None]:
+    """(plain envs, sky secrets) of the syncer task: the tape forwarder's W&B key and the
+    island HMAC key go to ``secrets=`` (redacted in sky's records), never to plain ``envs=``."""
+    plain, secrets = split_secret_envs(envs)
+    secrets.update(island_hmac_secret(args))
+    return plain, secrets or None
+
+
 def make_syncer_task(args, num_learners: int):
     import platform
 
@@ -1124,6 +1133,7 @@ def make_syncer_task(args, num_learners: int):
     cross = (platform.system(), platform.machine()) != ("Linux", "x86_64")
     if cross:
         tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
+        tape_envs, secrets = _syncer_envs_and_secrets(args, tape_envs)
         print("[launcher] non-x86-Linux submitter: building the syncer on the syncer VM")
         task = sky.Task(
             name="yeto-syncer",
@@ -1131,7 +1141,7 @@ def make_syncer_task(args, num_learners: int):
             run=tape_run + syncer_command(args, num_learners),
             workdir=str(REPO_ROOT),
             envs=tape_envs,
-            secrets=island_hmac_secret(args) or None,
+            secrets=secrets,
         )
         infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
         task.set_resources(
@@ -1150,6 +1160,7 @@ def make_syncer_task(args, num_learners: int):
 
     binary = build_syncer_binary()
     tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
+    tape_envs, secrets = _syncer_envs_and_secrets(args, tape_envs)
     cmd = tape_run + "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
     task = sky.Task(
         name="yeto-syncer",
@@ -1161,7 +1172,7 @@ def make_syncer_task(args, num_learners: int):
         # cross-build path already uses.
         workdir=str(REPO_ROOT) if getattr(args, "wandb", False) else None,
         envs=tape_envs,
-        secrets=island_hmac_secret(args) or None,
+        secrets=secrets,
     )
     # --syncer-region accepts "region" (AWS assumed) or "cloud/region".
     infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
