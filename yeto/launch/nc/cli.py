@@ -609,19 +609,22 @@ class NcSshOps:
         return render_spec(self.cfg, m, shards)
 
     def _start_sampler(self, lease: NodeLease, m: Member, shards: list[str]) -> None:
+        # the prompts file goes to every node at every start (checked by size and sha256 there)
+        prompts = {"prompts_file": str(Path(str(self.cfg["prompts_file"])).expanduser())} \
+            if self.cfg.get("prompts_file") else {}
         if self.sampler_route is not None:
             self.sampler_route.start(node_pool.host_alias(lease.ticket), spec=self._spec(m, shards), shard=m.shard,
                                      run_prefix=self.cfg["run_prefix"], r2_env_file=self.cfg["r2_env_file"],
                                      protected=frozenset(self.cfg.get("protected_prefixes", ())),
                                      agentic_env_file=self.cfg.get("agentic_env_file"),
-                                     spec_dir=Path(self.cfg["spec"]).expanduser().parent, run=self._run)
+                                     spec_dir=Path(self.cfg["spec"]).expanduser().parent, run=self._run, **prompts)
             return
         ssh_sampler.start_sampler(lease, spec=self._spec(m, shards), shard=m.shard, run_prefix=self.cfg["run_prefix"],
                                   r2_env_file=self.cfg["r2_env_file"],
                                   image=pool_sampler_image(self.cfg) or self.cfg.get("image", ssh_sampler.IMAGE),
                                   protected=frozenset(self.cfg.get("protected_prefixes", ())),
                                   state_dir=tunnel.state_dir(), agentic_env_file=self.cfg.get("agentic_env_file"),
-                                  run=self._run)
+                                  run=self._run, **prompts)
 
     def _tape_glob(self, shard: str) -> str:
         """The node path glob of the shard's event tapes (``event_tape`` of the spec,
@@ -731,7 +734,8 @@ POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base
                        "engine", "platform",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "model_src", "model_dest",
-                       "workdir", "comment", "sampler_route", "data_path", "syncer", "protected_accounts"})
+                       "workdir", "comment", "sampler_route", "data_path", "syncer", "protected_accounts",
+                       "prompts_file"})
 DATA_PATHS = ("r2", "syncer")  # buffer shards + releases in the run store | syncer broadcast + sample relay
 REQUIRED_KEYS = ("target", "shard_base")  # and "accounts" (or "slots" off National Compute)
 
@@ -865,6 +869,39 @@ def pool_config_warnings(cfg: dict[str, Any]) -> list[str]:
                      "not released at once (the other samplers wait out the dispense lease, lease_s) and its "
                      "sampler is not fenced; remove the key (default on) for an elastic pool")
     return notes
+
+
+def prompts_file_report(cfg: dict[str, Any], spec: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+    """``(lines, problems, notes)`` of the pool's ``prompts_file`` for ``pool --dry-run``:
+    the file must exist and be readable; without it, the spec's ``prompts.path`` must
+    reach each node another way (a ``node_hooks`` copy), which a sandbox reached through
+    a provider API only (Daytona ``transport: sdk``) has no ssh alias for."""
+    prompts = spec.get("prompts") if isinstance(spec.get("prompts"), dict) else {}
+    remote = prompts.get("path")
+    if cfg.get("prompts_file"):
+        import hashlib  # noqa: PLC0415
+
+        local = Path(str(cfg["prompts_file"])).expanduser()
+        if not remote:
+            return [], [f"prompts_file {local}: the sampler spec has no prompts.path to upload it to"], []
+        try:
+            data = local.read_bytes()
+        except OSError as error:
+            return [], [f"prompts_file {local}: {error.strerror or error}"], []
+        rows = sum(1 for line in data.splitlines() if line.strip())
+        return [f"prompts_file: {local} ({rows} rows, {len(data)} bytes, sha256 "
+                f"{hashlib.sha256(data).hexdigest()[:12]}) -> {remote} on every node, checked there at each start"], [], []
+    if not remote:
+        return [], [], []
+    provider = cfg.get("provider") if isinstance(cfg.get("provider"), dict) else {}
+    if provider.get("transport") == "sdk":
+        return [], [f"the sampler spec reads prompts.path {remote}, and these sandboxes are reached through the "
+                    "provider API only (transport sdk: no ssh alias for a node hook): set prompts_file"], []
+    if not cfg.get("node_hooks"):
+        return [], [], [f"the sampler spec reads prompts.path {remote} and the pool has no prompts_file and no "
+                        "node_hooks: each sampler start fails unless the file is already on the node; set "
+                        "prompts_file (copied and checked by size and sha256 at every start)"]
+    return [], [], []
 
 
 def pool_has_dispenser(cfg: dict[str, Any]) -> bool:

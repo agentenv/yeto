@@ -1052,7 +1052,9 @@ measured p90 if it is longer.
    `known_hosts` is filled, and `yeto sandbox prepare` has run (section 2).
 9. The `prompts` node hook in the pool points at the real `prompts.jsonl`; it
    copies it to `/mnt/nvme/work/sampler/prompts.jsonl` on each node
-   (`/work/sampler/prompts.jsonl` in the sampler container).
+   (`/work/sampler/prompts.jsonl` in the sampler container). Or set the pool's
+   `prompts_file` instead: it is copied at every start and checked there by
+   size and sha256 (the only way on a Daytona `transport: sdk` pool).
 10. The dry run prints one expected WARNING: one buffer group can reach
     10.4 GiB (8 trials x 262144 tokens, codec json), over the 5 GiB single PUT
     limit. A multipart write handles it. `YETO_SAMPLE_BUFFER_PAYLOAD_CODEC=zstd`

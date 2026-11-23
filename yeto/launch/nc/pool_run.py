@@ -412,6 +412,11 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
             for line in setup_lines:
                 print(f"agentic.setup: {line}")
             problems += [f"agentic.setup: {p}" for p in setup_problems]
+            prompt_lines, prompt_problems, prompt_notes = cli.prompts_file_report(cfg, spec)
+            for line in prompt_lines:
+                print(line)
+            problems += prompt_problems
+            notes += prompt_notes
         except ValueError as error:
             problems.append(str(error))
         env_file = Path(str(cfg.get("r2_env_file") or "")).expanduser()

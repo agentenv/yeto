@@ -220,8 +220,13 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
                   r2_env_file: str, image: str = IMAGE, protected: frozenset[str] = frozenset(),
                   state_dir: Path, agentic_env_file: str | None = None, spec_dir: str | Path | None = None,
                   emit: Callable[[dict[str, Any]], None] | None = None,
-                  run: Callable[..., Any] = subprocess.run) -> str:
+                  run: Callable[..., Any] = subprocess.run, prompts_file: str | Path | None = None) -> str:
     """Upload code, spec and env file; start the sampler container detached. Returns its name.
+
+    ``prompts_file``: the local prompts JSONL, copied to the spec's ``prompts.path``
+    (a container path under ``/work``) and checked on the node by size and sha256.
+    The sampler gets ``YETO_SPOT_RECLAIM_MARKER``: ``docker stop`` (SIGTERM) is its
+    orderly leave.
 
     ``agentic_env_file``: a local env file of an agentic sampler (``HARBOR_*``,
     ``DOCKER_HOST``, ``YETO_RECORDS_PROXY_*``), uploaded next to the spec and passed
@@ -257,8 +262,13 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
     upload_file(alias, local, f"{NVME}/work/sampler/{shard}.json", mode="644", run=run)
     env_on_node = f"/home/{lease.user}/.yeto-nc-r2.env"
     upload_file(alias, r2_env_file, env_on_node, run=run)
+    if prompts_file is not None:
+        upload_prompts(alias, prompts_file, spec, run=run)
     extra: list[str] = []
     env = sampler_env(prefix)
+    # SIGTERM (docker stop) is the orderly leave (sampler_resume.install_marker_signals): without
+    # it the sampler is PID 1 of its container, ignores SIGTERM and is killed after the grace
+    env["YETO_SPOT_RECLAIM_MARKER"] = f"/work/sampler/{shard}.reclaim"
     # the release download's start spread is taken from this key (policy_release.download_delay_s):
     # with --network host the host name is the node's, which NC nodes need not keep distinct
     env["YETO_RL_RELEASE_SPREAD_KEY"] = f"{prefix}/{shard}"
@@ -267,8 +277,8 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
                                        prelude=SSH_HOME_LINK, run=run)
         agentic_setup.Provisioner(setup, target, emit=emit or _print_event, store_env_file=env_on_node).run()
         setup_env = state_dir / f"{shard}.agentic-setup.env"
-        setup_env.write_text("".join(f"{k}={v}\n" for k, v in sorted(
-            setup.container_env(python_bin=str(Path(python_for(image)).parent)).items())))
+        setup_env.write_text(agentic_setup.env_file_text(  # docker --env-file: values taken literally
+            setup.container_env(python_bin=str(Path(python_for(image)).parent)), style="docker"))
         extra.append(f"{NVME}/work/sampler/{shard}.agentic-setup.env")
         upload_file(alias, setup_env, extra[-1], mode="600", run=run)
         env["PYTHONPATH"] = setup.python_path()
@@ -283,6 +293,28 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
     if out.returncode != 0:
         raise RuntimeError(f"docker run {name}: {(out.stderr or '')[-400:]}")
     return name
+
+
+def upload_prompts(alias: str, local: str | Path, spec: Mapping[str, Any], *,
+                   run: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
+    """``local`` to the spec's ``prompts.path`` on the node (``/work/...`` in the container is
+    ``<NVMe>/work/...`` on the host), then the size and sha256 there checked against it."""
+    import hashlib  # noqa: PLC0415
+
+    remote = str(((spec.get("prompts") or {}) if isinstance(spec.get("prompts"), Mapping) else {}).get("path") or "")
+    if not remote.startswith("/work/"):
+        raise ValueError(f"prompts.path {remote or '(unset)'!r}: a prompts file needs a container path under /work/")
+    data = Path(local).expanduser().read_bytes()
+    digest, host = hashlib.sha256(data).hexdigest(), f"{NVME}{remote}"
+    ssh(alias, f"mkdir -p {shlex.quote(str(Path(host).parent))}", run=run, timeout=60)
+    upload_file(alias, local, host, mode="644", run=run)
+    q = shlex.quote(host)
+    out = ssh(alias, f"echo YETO_PROMPTS $(wc -c < {q}) $(sha256sum {q} | cut -d' ' -f1)", run=run, timeout=120)
+    have = next((ln.split()[1:] for ln in (out.stdout or "").splitlines() if ln.startswith("YETO_PROMPTS ")), [])
+    if have != [str(len(data)), digest]:
+        raise RuntimeError(f"{alias}: prompts file {host} does not match {local} after the copy "
+                           f"(node size/sha256 {' '.join(have) or 'unreadable'}, local {len(data)} {digest[:12]})")
+    return {"path": remote, "bytes": len(data), "sha256": digest}
 
 
 def direct_records_warning(setup: agentic_setup.AgenticSetup, spec: Mapping[str, Any],

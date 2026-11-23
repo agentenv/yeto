@@ -19,8 +19,14 @@ model pull, a helper container for the agentic tunnel) becomes:
 * the sampler runs as ``setsid bash <start script>``: its own process group,
   pid in ``/work/sampler/<shard>.pid``, exit code in ``<shard>.exit``, log in
   ``/work/logs/<shard>.log``; it is stopped by its process group, never by name;
+  ``YETO_SPOT_RECLAIM_MARKER`` makes that SIGTERM its orderly leave (engine
+  stopped, claims freed), as on every other route;
+* the env files the start script sources are shell-quoted
+  (:func:`agentic_setup.env_file_text`), and the pool's ``prompts_file`` is
+  uploaded to the spec's ``prompts.path`` and checked by size and sha256;
 * the agentic setup runs through :class:`ProcessProvisioner` (no docker: the
-  helper steps run in the sandbox, the reverse tunnel is a process).
+  helper steps run in the sandbox, the reverse tunnel is a process, and the
+  records relay runs under the reconnecting supervisor: a sandbox has no systemd).
 
 What drives the sandbox is a :class:`SandboxExec` the provider layer supplies
 (:class:`SshExec` is one over plain ``ssh``). Nothing here creates, stops or
@@ -668,17 +674,54 @@ class SamplerStart:
     setup_report: dict[str, str] = field(default_factory=dict)
 
 
+def upload_prompts(box: SandboxExec, local: str | Path, remote: str) -> dict[str, Any]:
+    """The prompts file at ``remote`` (the spec's ``prompts.path``), checked on the
+    sandbox by size and sha256 against the local file (a large file goes through the
+    store with its own sha256 check first, :class:`StoreUploadExec`)."""
+    if not str(remote).startswith("/"):
+        raise ValueError(f"prompts.path {remote!r} must be an absolute path on the sampler host")
+    data = Path(local).expanduser().read_bytes()
+    import hashlib  # noqa: PLC0415
+
+    digest = hashlib.sha256(data).hexdigest()
+    put(box, data, remote, mode="644")
+    q = shlex.quote(remote)
+    out = sh(box, f"echo YETO_PROMPTS $(wc -c < {q}) $(sha256sum {q} | cut -d' ' -f1)", timeout=120)
+    have = next((ln.split()[1:] for ln in out.stdout.splitlines() if ln.startswith("YETO_PROMPTS ")), [])
+    if have != [str(len(data)), digest]:
+        raise RuntimeError(f"{box.name}: prompts file {remote} does not match {local} after the upload "
+                           f"(sandbox size/sha256 {' '.join(have) or 'unreadable'}, local {len(data)} {digest[:12]})")
+    return {"path": remote, "bytes": len(data), "sha256": digest}
+
+
+def prompts_path(spec: Mapping[str, Any]) -> str | None:
+    """The spec's ``prompts.path`` (None without one)."""
+    prompts = spec.get("prompts")
+    return str(prompts["path"]) if isinstance(prompts, Mapping) and prompts.get("path") else None
+
+
+def reclaim_env(shard: str, sampler_dir: str = SAMPLER_DIR) -> dict[str, str]:
+    """``YETO_SPOT_RECLAIM_MARKER`` of a sampler, as every other route sets it: SIGTERM
+    writes the marker and the sampler leaves in order (stops the engine, frees its
+    claims, exits) instead of dying in its round."""
+    return {"YETO_SPOT_RECLAIM_MARKER": f"{sampler_dir}/{shard}.reclaim"}
+
+
 def start_sampler(box: SandboxExec, *, spec: Mapping[str, Any], shard: str, run_prefix: str,
                   r2_env_file: str | Path, code: tuple[str, bytes], gpus: int = 8,
                   requirements: Requirements | None = None, protected: frozenset[str] = frozenset(),
                   agentic_env_file: str | Path | None = None, spec_dir: str | Path | None = None,
                   emit: Callable[[dict[str, Any]], None] | None = None,
-                  environ: Mapping[str, str] | None = None) -> SamplerStart:
-    """Preflight, upload code / spec / env files, agentic setup, start the sampler
-    process detached (a running one of the shard is stopped first).
+                  environ: Mapping[str, str] | None = None,
+                  prompts_file: str | Path | None = None) -> SamplerStart:
+    """Preflight, upload code / spec / env files / prompts, agentic setup, start the
+    sampler process detached (a running one of the shard is stopped first).
 
     ``code``: ``(sha, tar)`` of :func:`code_tar`. ``requirements``: default
-    :func:`requirements_of` the spec. Refusals match the NC route's."""
+    :func:`requirements_of` the spec. ``prompts_file``: the local prompts JSONL,
+    uploaded to the spec's ``prompts.path`` and checked by size and sha256; without
+    it that path must already be on the sandbox (refused at start otherwise, not at
+    the sampler's first round). Refusals match the NC route's."""
     prefix = run_prefix.strip("/")
     if not prefix:
         raise ValueError("run_prefix is required")
@@ -698,11 +741,24 @@ def start_sampler(box: SandboxExec, *, spec: Mapping[str, Any], shard: str, run_
         raise RuntimeError(f"{box.name}: preparing {WORK}: {out.stderr.strip()[-300:]}")
     put(box, Path(r2_env_file).expanduser().read_bytes(), STORE_ENV)  # never echoed
     preflight(box, requirements or requirements_of(spec, gpus=gpus), emit=emit)
+    remote_prompts = prompts_path(spec)
+    if prompts_file is not None:
+        if remote_prompts is None:
+            raise ValueError("a prompts file needs the spec's prompts.path (where the sampler reads it)")
+        emit({"event": "daytona_sampler_prompts", "sandbox": box.name, "shard": shard,
+              **upload_prompts(box, prompts_file, remote_prompts)})
+    elif remote_prompts is not None:
+        if sh(box, f"test -s {shlex.quote(remote_prompts)}", timeout=60).returncode != 0:
+            raise RuntimeError(f"{box.name}: the spec's prompts.path {remote_prompts} is not on the sandbox: set "
+                               "the pool config's prompts_file (uploaded and checked at every start)")
     yeto_dir = upload_code(box, *code)
     p = paths(shard)
     spec = {"start_on_latest": True, **spec}
     put(box, json.dumps(agentic_setup.strip(spec), indent=1), p["spec"], mode="644")
     env = process_env(prefix, yeto_dir, gpus=gpus)
+    env.update(reclaim_env(shard))
+    # the release download's start spread is keyed per shard, as on the NC route
+    env["YETO_RL_RELEASE_SPREAD_KEY"] = f"{prefix}/{shard}"
     env_files = [STORE_ENV]
     report: dict[str, str] = {}
     if setup is not None:
@@ -710,13 +766,15 @@ def start_sampler(box: SandboxExec, *, spec: Mapping[str, Any], shard: str, run_
         report = ProcessProvisioner(setup, node, emit=emit, store_env_file=STORE_ENV,
                                     **({"environ": environ} if environ is not None else {})).run()
         setup_env = f"{SAMPLER_DIR}/{shard}.agentic-setup.env"
-        put(box, "".join(f"{k}={v}\n" for k, v in sorted(
-            setup.container_env(python_bin=str(Path(PYTHON).parent)).items())), setup_env)
+        # sourced by the start script: quoted (HARBOR_ENV_KWARGS is JSON with spaces and quotes)
+        put(box, agentic_setup.env_file_text(setup.container_env(python_bin=str(Path(PYTHON).parent)),
+                                             style="shell"), setup_env)
         env_files.append(setup_env)
         env["PYTHONPATH"] = setup.python_path(base=yeto_dir)
     if agentic_env_file:
         env_files.append(f"{SAMPLER_DIR}/{shard}.agentic.env")  # after the setup's: the operator's file wins
-        put(box, Path(agentic_env_file).expanduser().read_bytes(), env_files[-1])
+        # the operator's file is a docker --env-file (the NC route): made safe to source
+        put(box, agentic_setup.shell_env_file(Path(agentic_env_file).expanduser().read_text()), env_files[-1])
     put(box, start_script(env, spec_path=p["spec"], env_files=env_files), p["script"], mode="700")
     sh(box, stop_command(shard, grace_s=30), timeout=150)
     out = sh(box, launch_command(shard), timeout=120)
@@ -842,8 +900,45 @@ class ProcessProvisioner(agentic_setup.Provisioner):
             f"echo $! > {TUNNEL_PID}", timeout=120)
 
 
+    # -- the records relay without systemd: a detached supervisor process
+    @property
+    def _relay_pidfile(self) -> str:
+        return f"{self.relay_dir}/supervisor.pid"
+
+    def _relay_alive(self) -> str:
+        """Shell test: the recorded PID is alive and is the relay supervisor (its command
+        line names the supervisor module and the relay host alias; a reused PID is not)."""
+        return _alive_cmdline(self._relay_pidfile, "yeto.launch.agentic_node_agent", agentic_setup.RELAY_TAG)
+
+    def _relay_supervisor_running(self) -> bool:
+        return self.node.sh(self._relay_alive(), timeout=60).returncode == 0
+
+    def _relay_supervisor_start(self, argv: Sequence[str]) -> Any:
+        """Stop the recorded supervisor (TERM to its process group after the command line
+        check, KILL after 5 s), empty the events file, start a new one with ``setsid``
+        (its own session: the sampler's group stop does not reach it) and record its PID."""
+        pidfile, ev = shlex.quote(self._relay_pidfile), shlex.quote(self._relay_events)
+        inner = f"export PYTHONPATH={shlex.quote(self.node.yeto_dir)}; exec {shlex.join(argv)}"
+        log = shlex.quote(f"{self.relay_dir}/supervisor.log")
+        return self.node.sh(
+            f"if {self._relay_alive()}; then kill -TERM -- -$p 2>/dev/null; "
+            "for i in 1 2 3 4 5; do kill -0 -- -$p 2>/dev/null || break; sleep 1; done; "
+            "kill -KILL -- -$p 2>/dev/null; fi; "
+            f"rm -f {pidfile}; : > {ev}; "
+            f"{{ setsid bash -c {shlex.quote(inner)} >> {log} 2>&1 </dev/null & echo $! > {pidfile}; }}", timeout=120)
+
+
 def _alive_any(pidfile: str) -> str:
     return f"{{ p=$(cat {pidfile} 2>/dev/null); [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null; }}"
+
+
+def _alive_cmdline(pidfile: str, *needles: str) -> str:
+    """Shell test (sets ``$p``): the PID in ``pidfile`` is alive and its command line
+    holds every one of ``needles`` (a check of the recorded PID, not a name search)."""
+    checks = "".join(f" && tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null | grep -qF -- {shlex.quote(n)}"
+                     for n in needles)
+    return (f"{{ p=$(cat {shlex.quote(pidfile)} 2>/dev/null); [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null"
+            f"{checks}; }}")
 
 
 # -- the pool's sampler route ------------------------------------------------------------
@@ -882,12 +977,13 @@ class DaytonaSamplerRoute:
     def start(self, alias: str, *, spec: Mapping[str, Any], shard: str, run_prefix: str, r2_env_file: str,
               protected: frozenset[str] = frozenset(), agentic_env_file: str | None = None,
               spec_dir: str | Path | None = None, emit: Callable[[dict[str, Any]], None] | None = None,
-              run: Callable[..., Any] = subprocess.run) -> str:
+              run: Callable[..., Any] = subprocess.run, prompts_file: str | None = None) -> str:
         """Idempotent: a running sampler of the shard is stopped and started again."""
         req = requirements_of(spec, gpus=self.gpus, plan=self.plan, **self.requirements)
         start_sampler(self._box(alias, run, r2_env_file, run_prefix), spec=spec, shard=shard, run_prefix=run_prefix,
                       r2_env_file=r2_env_file, code=self.code(run), gpus=self.gpus, requirements=req,
-                      protected=protected, agentic_env_file=agentic_env_file, spec_dir=spec_dir, emit=emit)
+                      protected=protected, agentic_env_file=agentic_env_file, spec_dir=spec_dir, emit=emit,
+                      prompts_file=prompts_file)
         return f"yeto-sampler-{shard}"
 
     def run_script(self, alias: str, script: str, *, timeout: float, run: Callable[..., Any] = subprocess.run

@@ -6,6 +6,7 @@ self-check hint. No SSH, no machine."""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -137,6 +138,9 @@ class RelayNode(FakeNode):
 
     def run(self, argv, **kw):
         cmd = argv[-1] if argv[0] == "ssh" else " ".join(argv)
+        if argv[0] == "ssh" and "YETO_INIT" in cmd:
+            self.calls.append(cmd)
+            return self.r("YETO_INIT systemd\n")
         if argv[0] == "ssh" and "systemctl is-active" in cmd:
             self.calls.append(cmd)
             if self.flaps:
@@ -191,6 +195,77 @@ def test_a_flapping_unit_fails_the_setup_with_the_relay_fix(tmp_path):
     denied = RelayNode(flaps=True, journal="root@relay: Permission denied (publickey).\n")
     with pytest.raises(su.SetupError, match="SHA256:fake1 needs its restricted authorized_keys line"):
         _prov(tmp_path, denied).run()
+
+
+class NoSystemdNode(FakeNode):
+    """A docker node whose PID 1 is not systemd: the supervisor container's events file
+    gets an ``up`` line once it starts (``down`` lines first with ``flaps``)."""
+
+    def __init__(self, *, flaps=0, stderr="", **kw):
+        super().__init__(**kw)
+        self.running, self.flaps, self.stderr, self.ev = False, flaps, stderr, []
+
+    def run(self, argv, **kw):
+        cmd = argv[-1] if argv[0] == "ssh" else " ".join(argv)
+        if argv[0] != "ssh":
+            return super().run(argv, **kw)
+        if "YETO_INIT" in cmd:
+            self.calls.append(cmd)
+            return self.r("YETO_INIT none\n")
+        if "systemctl" in cmd or "journalctl" in cmd:
+            raise AssertionError(f"systemd used on a node without it: {cmd}")
+        if "docker inspect" in cmd and su.RELAY_CONTAINER in cmd:
+            self.calls.append(cmd)
+            return self.r("true\n" if self.running else "")
+        if "docker run -d" in cmd and su.RELAY_CONTAINER in cmd:
+            self.calls.append(cmd)
+            self.running = True
+            self.ev = []
+            return self.r("cid\n")
+        if "grep -c" in cmd and "events.jsonl" in cmd:
+            self.calls.append(cmd)
+            if self.flaps:
+                self.ev.append({"event": "rl_agentic_tunnel", "state": "down", "stderr": self.stderr})
+            elif not self.ev or self.ev[-1]["state"] != "up":
+                self.ev.append({"event": "rl_agentic_tunnel", "state": "up"})
+            downs = sum(e["state"] == "down" for e in self.ev)
+            return self.r(f"{downs}\n{json.dumps(self.ev[-1])}\n")
+        if "tail -n 30" in cmd and "events.jsonl" in cmd:
+            self.calls.append(cmd)
+            return self.r("".join(json.dumps(e) + "\n" for e in self.ev))
+        return super().run(argv, **kw)
+
+
+def test_without_systemd_the_forward_runs_under_the_supervisor_container(tmp_path):
+    fake = NoSystemdNode()
+    report = _prov(tmp_path, fake).run()
+    assert report["records_relay"] == "changed" and su.RELAY_UNIT_PATH not in fake.files
+    start = next(c for c in fake.calls if "docker run -d" in c)
+    assert "--restart unless-stopped" in start and "--network host" in start
+    assert "-m yeto.launch.agentic_node_agent tunnel --events /mnt/nvme/records-relay/events.jsonl" in start
+    assert "-R 0.0.0.0:18282:127.0.0.1:18080 yeto-records-relay" in start
+    assert "-v /mnt/nvme/records-relay:/mnt/nvme/records-relay" in start  # the ssh config names that path
+    assert ": > /mnt/nvme/records-relay/events.jsonl" in start  # a stale up line of an old supervisor is gone
+    argv = fake.files["/mnt/nvme/records-relay/supervisor.argv"][0]
+    assert "ssh -N -F /mnt/nvme/records-relay/config" in argv
+    assert not any("fake-1" in c for c in fake.calls)
+    for c in fake.calls:
+        assert "pkill" not in c and "pgrep" not in c and "killall" not in c
+    # idempotent: the running supervisor with the same argv is kept
+    starts = sum("docker run -d" in c for c in fake.calls)
+    assert _prov(tmp_path, fake).run()["records_relay"] == "ok"
+    assert sum("docker run -d" in c for c in fake.calls) == starts
+    # a stopped one (a rebooted host: the sampler start runs the step again) is started again
+    fake.running = False
+    assert _prov(tmp_path, fake).run()["records_relay"] == "changed"
+
+
+def test_a_flapping_supervisor_fails_with_the_relay_fix(tmp_path):
+    fake = NoSystemdNode(flaps=1, stderr="Error: remote port forwarding failed for listen port 18282")
+    with pytest.raises(su.SetupError, match="records_relay") as info:
+        _prov(tmp_path, fake).run()
+    msg = str(info.value)
+    assert "permitlisten" in msg and "supervisor (no systemd)" in msg and "restarts" in msg
 
 
 def test_without_a_relay_no_unit_is_written(tmp_path):

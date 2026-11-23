@@ -167,7 +167,8 @@ error, never silently ignored.
 | `bucket_env` | Name of the bucket variable in the store env file. | `R2_BUCKET` |
 | `image` | Sampler container image. | the pinned digest of the K3.1 ROCm vLLM image (`yeto.rl.sampler_pins.VLLM_SAMPLER_IMAGE_ROCM`) |
 | `protected_prefixes` | Run prefixes the sampler must never write to (for example, another live run's prefix in the same bucket). | `[]` |
-| `agentic_env_file` | Second env file for agentic samplers (sandbox hosts, records proxy). | none |
+| `agentic_env_file` | Second env file for agentic samplers (sandbox hosts, records proxy). Written for `docker run --env-file` (`KEY=VALUE`, taken literally); on a process route (Daytona) an unquoted value is quoted before the start script sources it, so both routes read the same values. | none |
+| `prompts_file` | Local prompts JSONL. Copied at every sampler start to the spec's `prompts.path` on the node (`/work/...`; NVMe on NC) and checked there by size and sha256; the start fails on a mismatch. Without it, the spec's `prompts.path` must reach the node another way (a `node_hooks` copy); on a Daytona `transport: sdk` pool (no ssh alias for a hook) the dry run refuses a spec with `prompts.path` and no `prompts_file`. | none |
 | `sampler` | Per-run sampler knobs, see below. | `{}` |
 | `model_pull` | Pulls the model from the bucket onto each new node, see below. | none (the model must already be on the node) |
 | `backlog` | Sizes `max_backlog_groups` from the sampler layout, see below. | none (the spec's value) |
@@ -811,6 +812,21 @@ journal classified (key refused: add the key with `records-relay`; forward
 refused: permitlisten, GatewayPorts, or another tunnel already holds the port,
 such as a relay service set up by hand earlier on the node: stop that one).
 A rerun with unchanged settings leaves the unit running.
+
+**A host without systemd** (PID 1 is not systemd or there is no `systemctl`: a
+Daytona or Modal sandbox, most containers) gets the same forward under yeto's
+reconnecting supervisor, `python -m yeto.launch.agentic_node_agent tunnel`: the
+same ssh command, restarted with a backoff of 5 s doubling to 60 s (reset after a
+connection that stayed up), every up and down a JSON line in
+`<relay dir>/events.jsonl`. On a docker node it runs as the helper container
+`yeto-records-relay` (`--restart unless-stopped`); on a process node (the Daytona
+route) as a detached process in its own session, its PID in
+`<relay dir>/supervisor.pid`. A changed setting stops the recorded PID's process
+group after a check of its command line (never a name match) and starts a new
+one. The step passes when the last event is `up` with no new `down` for
+`settle_s`, and fails with the last ssh errors classified as above. Every
+sampler start runs the step again, so a restarted sandbox gets its forward back
+before the sampler starts.
 
 **Checks.**
 
