@@ -94,7 +94,7 @@ BREAKERS: tuple[Breaker, ...] = (
                       doc="after the STOP flag, wait this long for the launcher before yeto down"),
                 Param("check_s", float, starvation.DEFAULT_CHECK_S, unit="s", lo=0.0,
                       doc="list the buffer at most this often (> 0 while a verdict is on)")),
-        actions=("stop",), default_action="stop",
+        actions=("stop",), default_action="stop", off_when_null=("alert_s", "stop_s"),
         aliases=(Alias("run_config", "starvation.alert_min", "alert_s", to_canonical=_minutes_or_off, materialize=False),
                  Alias("run_config", "starvation.stop_min", "stop_s", to_canonical=_minutes_or_off, materialize=False),
                  Alias("run_config", "starvation.unhealthy_min", "unhealthy_s", scale=60, materialize=False),

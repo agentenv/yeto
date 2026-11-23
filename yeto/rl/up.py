@@ -724,6 +724,8 @@ class Run:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
             return False
+        for line in self.breakers.deprecations():
+            _log(f"preflight: deprecated: {line}")
         if self.stall_timeout_s() <= 0:
             _log("preflight: --rl-stall-timeout 0 disables the trainer's hang detection; run up refuses it "
                  "(the monitor's silence backstop is 4x this timeout)")

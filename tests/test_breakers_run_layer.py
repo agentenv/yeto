@@ -254,6 +254,14 @@ def test_starvation_from_resolved_matches_the_legacy_section():
         assert st.StarvationConfig.from_resolved(rb) == st.StarvationConfig.from_section(section), section
 
 
+def test_both_starvation_verdicts_off_turn_the_breaker_off():
+    rb = breakers.resolve(breakers.Sources(run_config=_cfg(starvation={"alert_min": 0, "stop_min": 0})),
+                          layers=("run",))
+    assert not rb.enabled("run.starvation")
+    rb = breakers.resolve(breakers.Sources(run_config=_cfg(starvation={"alert_min": 0})), layers=("run",))
+    assert rb.enabled("run.starvation")  # the stop verdict is still on
+
+
 def test_starvation_turned_off_by_the_section_and_a_bad_combination():
     rb = breakers.resolve(breakers.Sources(run_config=_cfg(breakers={"run": {"starvation": {"enabled": False}}})))
     assert not st.StarvationConfig.from_resolved(rb).enabled
