@@ -23,6 +23,7 @@ from typing import Any
 
 from yeto.breakers.registry import Registry, default_registry
 from yeto.breakers.spec import (
+    ENV_PAIR_FLAGS,
     FLAG_SURFACES,
     INHERIT,
     LAYERS,
@@ -111,10 +112,13 @@ class Sources:
         return None
 
     def surface(self, surface: str) -> Any:
+        if surface == "trainer_env":  # the island env exists when either of its parts is known here
+            return self.env if self.env is not None else (self.argv if self.argv is not None else None)
         return getattr(self, _SURFACE_FIELD[surface])
 
 
-_SURFACE_FIELD = {"run_config": "run_config", "trainer_flag": "argv", "launch_flag": "argv", "spec": "spec",
+_SURFACE_FIELD = {"run_config": "run_config", "trainer_flag": "argv", "launch_flag": "argv", "trainer_env": "env",
+                  "spec": "spec",
                   "pool_config": "pool_config", "pool_elastic": "pool_elastic", "pool_dispense": "pool_dispense", "pool_cli_flag": "pool_cli",
                   "env": "env"}
 
@@ -593,7 +597,45 @@ def _argv_set(argv: list[str], flag: str, value: str) -> None:
         argv.extend([flag, value])
 
 
+def _env_pairs(argv: Sequence[str] | None) -> dict[str, tuple[str, str]]:
+    """``NAME -> (value, flag)`` of the argv's ``--island-env`` / ``--modal-env`` pairs, as the
+    island sees them: ``--modal-env`` applies after ``--island-env``, a later pair after an earlier."""
+    found: dict[str, dict[str, str]] = {flag: {} for flag in ENV_PAIR_FLAGS}
+    for i, arg in enumerate(argv or ()):
+        for flag in ENV_PAIR_FLAGS:
+            item = argv[i + 1] if arg == flag and i + 1 < len(argv) else (
+                arg.split("=", 1)[1] if arg.startswith(flag + "=") else None)
+            if item is not None:
+                key, sep, value = item.partition("=")
+                if sep and key:
+                    found[flag][key] = value
+    return {k: (v, flag) for flag in ENV_PAIR_FLAGS for k, v in found[flag].items()}
+
+
+def _shadowed(sources: Sources, b: Breaker, alias: Alias) -> bool:
+    for name in alias.shadowed_by:
+        if name in _SURFACE_FIELD:
+            if sources.surface(name) is not None:
+                return True
+        elif any(_read(sources, a) is not _ABSENT for a in b.aliases if a.path == name and a is not alias):
+            return True
+    return False
+
+
+def _read_at(sources: Sources, alias: Alias) -> tuple[Any, str]:
+    """The alias's raw value (``_ABSENT``: not set here) and the location it was read at."""
+    if alias.surface == "trainer_env":
+        pair = _env_pairs(sources.argv).get(alias.path)
+        if pair is not None:
+            return pair[0], f"trainer.argv {pair[1]} {alias.path}"
+        env = sources.env if sources.env is not None else {}
+        return env.get(alias.path, _ABSENT), f"env {alias.path}"
+    return _read(sources, alias), alias.location
+
+
 def _read(sources: Sources, alias: Alias) -> Any:
+    if alias.surface == "trainer_env":
+        return _read_at(sources, alias)[0]
     surface = sources.surface(alias.surface)
     if surface is None:
         return _ABSENT
@@ -699,11 +741,16 @@ class _Resolver:
         legacy_params: dict[str, list[tuple[Any, Source]]] = {}
         legacy_enabled: list[tuple[bool, Source]] = []
         legacy_action: list[tuple[Any, Source]] = []
+        deprecated: dict[str, str] = {}  # location -> the key it sets
         for alias in b.aliases:
-            raw = _read(self.sources, alias)
+            if _shadowed(self.sources, b, alias):
+                continue
+            raw, location = _read_at(self.sources, alias)
             if raw is _ABSENT:
                 continue
-            src = Source("legacy", alias.location)
+            src = Source("legacy", location)
+            if alias.deprecated:
+                deprecated[location] = alias.param or "enabled"
             if _matches(raw, alias.off_values):
                 legacy_enabled.append((False, src))
                 continue
@@ -716,14 +763,14 @@ class _Resolver:
                     try:
                         raw = alias.to_canonical(raw)
                     except (TypeError, ValueError) as error:
-                        self.conflict(b.name, f"{alias.location} cannot be read as the action ({error})",
-                                      alias.location)
+                        self.conflict(b.name, f"{location} cannot be read as the action ({error})",
+                                      location)
                         continue
                     if raw is None:
                         continue
                 if b.actions and raw not in b.actions:
-                    self.conflict(b.name, f"{alias.location} = {raw!r} is not an action of {b.name} "
-                                          f"(choices: {list(b.actions)})", alias.location)
+                    self.conflict(b.name, f"{location} = {raw!r} is not an action of {b.name} "
+                                          f"(choices: {list(b.actions)})", location)
                     continue
                 legacy_action.append((raw, src))
                 continue
@@ -736,12 +783,12 @@ class _Resolver:
             try:
                 value = _coerce(p, raw, alias)
             except (TypeError, ValueError) as error:
-                self.conflict(b.name, f"{alias.location} = {raw!r} cannot be read as {p.name} ({error})",
-                              alias.location)
+                self.conflict(b.name, f"{location} = {raw!r} cannot be read as {p.name} ({error})",
+                              location)
                 continue
             error = _value_error(p, value)
             if error:
-                self.conflict(b.name, f"{alias.location} = {raw!r}: {p.name} {error}", alias.location)
+                self.conflict(b.name, f"{location} = {raw!r}: {p.name} {error}", location)
                 continue
             legacy_params.setdefault(p.name, []).append((value, src))
 
@@ -758,7 +805,7 @@ class _Resolver:
             sources = {k: Source("default", "default (implicit)") for k in sources}
         entry = ResolvedEntry(b, bool(enabled.value), action.value, {k: _freeze(v.value) for k, v in values.items()},
                               sources, tuple(redundant), self.reg.groups_of(b.name),
-                              _deprecations(b, sources, redundant))
+                              _deprecations(b, sources, redundant, deprecated))
         self.busy.discard(b.name)
         self.done[b.name] = entry
         return entry
@@ -869,8 +916,9 @@ class _Resolver:
         return _Value(b.default_action, Source("default", "default"))
 
 
-def _deprecations(b: Breaker, sources: Mapping[str, Source], redundant: Iterable[str]) -> tuple[str, ...]:
-    deprecated = {a.location: a for a in b.aliases if a.deprecated}
+def _deprecations(b: Breaker, sources: Mapping[str, Source], redundant: Iterable[str],
+                  deprecated: Mapping[str, str]) -> tuple[str, ...]:
+    """One line per deprecated knob (``deprecated``: location -> key) that supplied a winning or redundant value."""
     if not deprecated:
         return ()
     used: dict[str, str] = {}
@@ -879,8 +927,7 @@ def _deprecations(b: Breaker, sources: Mapping[str, Source], redundant: Iterable
             used.setdefault(src.location, key)
     for location in redundant:
         if location in deprecated:
-            alias = deprecated[location]
-            used.setdefault(location, alias.param or "enabled")
+            used.setdefault(location, deprecated[location])
     return tuple(f"{location} is deprecated (removed two minor versions after it was deprecated): "
                  f"write breakers.{b.name}.{key}" for location, key in used.items())
 
@@ -947,6 +994,8 @@ class _Writer:
         return alias.materialize and alias.surface in self.wanted and self.out.surface(alias.surface) is not None
 
     def _write(self, alias: Alias, legacy: Any) -> bool:
+        if alias.surface == "trainer_env":
+            return self._write_trainer_env(alias.path, legacy)
         target = self.out.surface(alias.surface)
         if alias.surface in FLAG_SURFACES:
             if alias.nargs == 0:
@@ -970,6 +1019,30 @@ class _Writer:
         self.out.changes.append(f"{alias.location} {_fmt(legacy) if legacy is not None else 'null'}")
         return True
 
+    def _write_trainer_env(self, name: str, legacy: Any) -> bool:
+        """An existing argv pair is replaced in its flag; else the argv gets ``--island-env K=V``
+        (the island sees it on every provider); else the env gets it."""
+        if legacy is None:
+            return False
+        value = _fmt(legacy)
+        argv = self.out.argv
+        pair = _env_pairs(argv).get(name)
+        if argv is not None:
+            flag = pair[1] if pair else ENV_PAIR_FLAGS[0]
+            if pair:
+                for i, arg in enumerate(argv):
+                    if arg == flag and i + 1 < len(argv) and argv[i + 1].partition("=")[0] == name:
+                        argv[i + 1] = f"{name}={value}"
+                    elif arg.startswith(f"{flag}={name}="):
+                        argv[i] = f"{flag}={name}={value}"
+            else:
+                argv.extend([flag, f"{name}={value}"])
+            self.out.changes.append(f"trainer.argv {flag} {name}={value}")
+            return True
+        self.out.env[name] = value
+        self.out.changes.append(f"env {name} {value}")
+        return True
+
     def switch_off(self, group: Any) -> bool:
         for alias in group.aliases:
             if _read(self.sources, alias) is not _ABSENT:
@@ -980,6 +1053,10 @@ class _Writer:
                 if self._write(alias, off):
                     return True
         return False
+
+    def _aliases(self, b: Breaker, keep: Any) -> list[Alias]:
+        """``b``'s aliases that ``keep`` selects, without those a present knob shadows."""
+        return [a for a in b.aliases if keep(a) and not _shadowed(self.sources, b, a)]
 
     def _here(self, b: Breaker) -> bool:
         """Some native knob of ``b`` lives in this process. An entry with no alias at all is applied
@@ -998,23 +1075,23 @@ class _Writer:
             if en.kind == "switch" and any(g in switched for g in e.switch_groups):
                 return
             if en.kind in ("breakers", "switch"):
-                off = [a for a in b.aliases if a.off_values]
+                off = self._aliases(b, lambda a: a.off_values)
                 already = any(_matches(_read(self.sources, a), a.off_values) for a in off
                               if _read(self.sources, a) is not _ABSENT)
                 if not already and not self._first(off, lambda a: a.off_values[0], check_present=False):
                     self._unapplied(b, "enabled = false")
             return
         if en.kind == "breakers" and not b.default_enabled:
-            on = [a for a in b.aliases if a.param is None and a.on_values]
+            on = self._aliases(b, lambda a: a.param is None and a.on_values)
             self._first(on, lambda a: a.on_values[0])
         for p in b.params:
             if e.sources[p.name].kind in ("breakers", "inherit"):
                 value = e.params[p.name]
-                aliases = [a for a in b.aliases if a.param == p.name]
+                aliases = self._aliases(b, lambda a, p=p: a.param == p.name)
                 if not self._first(aliases, lambda a, p=p, value=value: _to_legacy(p, value, a)):
                     self._unapplied(b, f"{p.name} = {_fmt(value) if value is not None else 'null'}")
         if e.sources["action"].kind == "breakers" and e.action != b.default_action:
-            aliases = [a for a in b.aliases if a.param == "action"]
+            aliases = self._aliases(b, lambda a: a.param == "action")
             if not self._first(aliases, lambda a: e.action):
                 self._unapplied(b, f"action = {e.action}")
 

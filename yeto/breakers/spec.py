@@ -13,15 +13,17 @@ from typing import Any, Literal
 Layer = Literal["run", "launch", "trainer", "sampler", "harness", "pool", "monitor"]
 Kind = Literal["breaker", "guard", "retry_budget", "alert", "invariant", "semantic"]
 Action = Literal["warn", "drop", "quarantine", "downweight", "pause", "replace", "halt", "stop"]
-Surface = Literal["run_config", "trainer_flag", "launch_flag", "spec", "pool_config", "pool_elastic",
-                  "pool_dispense", "pool_cli_flag", "env"]
+Surface = Literal["run_config", "trainer_flag", "launch_flag", "trainer_env", "spec", "pool_config",
+                  "pool_elastic", "pool_dispense", "pool_cli_flag", "env"]
 Gauge = Literal["elapsed", "level", "count", "ratio", "none"]
 
 LAYERS: tuple[str, ...] = ("run", "launch", "trainer", "sampler", "harness", "pool", "monitor")
 KINDS: tuple[str, ...] = ("breaker", "guard", "retry_budget", "alert", "invariant", "semantic")
 ACTIONS: tuple[str, ...] = ("warn", "drop", "quarantine", "downweight", "pause", "replace", "halt", "stop")
-SURFACES: tuple[str, ...] = ("run_config", "trainer_flag", "launch_flag", "spec", "pool_config", "pool_elastic",
-                             "pool_dispense", "pool_cli_flag", "env")
+SURFACES: tuple[str, ...] = ("run_config", "trainer_flag", "launch_flag", "trainer_env", "spec", "pool_config",
+                             "pool_elastic", "pool_dispense", "pool_cli_flag", "env")
+# the trainer island's env: ``env``, then the trainer argv's ``--island-env K=V``, then ``--modal-env K=V``
+ENV_PAIR_FLAGS: tuple[str, ...] = ("--island-env", "--modal-env")
 GAUGES: tuple[str, ...] = ("elapsed", "level", "count", "ratio", "none")
 # only these kinds are written in ``breakers:``; invariants and semantic entries stay at their native place
 CONFIGURABLE_KINDS: tuple[str, ...] = ("breaker", "guard", "retry_budget", "alert")
@@ -64,12 +66,15 @@ class Alias:
     nargs: int = 1  # flags: 0 for a bare switch (present: True)
     materialize: bool = True  # write-back target
     null_means_default: bool = False  # a nullable param's legacy null falls through (else: null = no limit)
+    shadowed_by: tuple[str, ...] = ()  # sibling alias paths, or surfaces: when one is present, this alias
+    #                                    is not read (the launcher derives it from that knob)
     deprecated: bool = False
 
     @property
     def location(self) -> str:
         """Where the alias lives, as ``show`` and the conflict messages name it."""
         prefix = {"run_config": "run config", "trainer_flag": "trainer.argv", "launch_flag": "trainer.argv",
+                  "trainer_env": "trainer env",
                   "spec": "spec", "pool_config": "pool config", "pool_elastic": "pool elastic", "pool_dispense": "pool sampler.dispense",
                   "pool_cli_flag": "pool argv", "env": "env"}[self.surface]
         return f"{prefix} {self.path}"
