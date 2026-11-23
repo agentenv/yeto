@@ -1,6 +1,14 @@
 {
  "end": {
-  "alerts": [],
+  "alerts": [
+   {
+    "detail": "1 failed launch(es) in the last 60 min, last INFRA_FAILED: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 6.57 GiB. GPU 0 has a total capacity of 79.17 GiB of which 4.37 GiB is free. Process 1 has 74.72 GiB memory in use. Of the allocated memory 65.72 GiB is allocated by PyTorch, and",
+    "island": "0",
+    "rule": "trainer_failed",
+    "sev": 1,
+    "title": "trainer 0 failed"
+   }
+  ],
   "now": 1795434408.359533,
   "topology": {
    "buffer": {
@@ -171,7 +179,7 @@
      "phase": "finished",
      "phase_since": 1795434382.0758076,
      "policy_version": 14,
-     "reason": null,
+     "reason": "INFRA_FAILED",
      "starting": false,
      "status": "done",
      "step": 14
@@ -181,7 +189,15 @@
   }
  },
  "mid": {
-  "alerts": [],
+  "alerts": [
+   {
+    "detail": "1 failed launch(es) in the last 60 min, last INFRA_FAILED: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 6.57 GiB. GPU 0 has a total capacity of 79.17 GiB of which 4.37 GiB is free. Process 1 has 74.72 GiB memory in use. Of the allocated memory 65.72 GiB is allocated by PyTorch, and",
+    "island": "0",
+    "rule": "trainer_failed",
+    "sev": 1,
+    "title": "trainer 0 failed"
+   }
+  ],
   "now": 1795433380.578,
   "topology": {
    "buffer": {
@@ -491,7 +507,7 @@
      "phase": "training",
      "phase_since": 1795433310.747111,
      "policy_version": 14,
-     "reason": null,
+     "reason": "INFRA_FAILED",
      "starting": false,
      "status": "done",
      "step": 14
