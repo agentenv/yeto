@@ -1520,7 +1520,7 @@ class Run:
         if wall_h is not None and "t0" in self.state and self.wall_elapsed_s() > wall_h * 3600:
             why, tripped = "wall clock", ("run.wall_clock", self.wall_elapsed_s() / 3600, wall_h)
         elif (spend := self.spend_usd()) > (up_consistency.NO_CAP_USD if usd is None else usd):
-            why, tripped = f"budget ${spend:.0f}", ("run.budget", spend, usd)
+            why, tripped = f"budget ${spend:.2f}", ("run.budget", spend, usd)
         # the trainer: only its launcher's exit. An OOM or a fatal island error ends the
         # launcher; a hang is Miles' --rl-stall-timeout and the launcher's own business.
         tr = (self.state.get("procs") or {}).get("trainer") if trainer else None
@@ -2389,12 +2389,12 @@ class Run:
                 continue
             elapsed = self.wall_elapsed_s()
             n = "?" if billed is None else len(billed)
-            _log(f"STILL BILLING after '{why}': {n} machine(s) of {self.pools_phrase()}, spend ${spend:.0f}; "
+            _log(f"STILL BILLING after '{why}': {n} machine(s) of {self.pools_phrase()}, spend ${spend:.2f}; "
                  f"release with: "
-                 f"yeto run down --config <run.json> (forced at ${usd_cap:.0f}"
+                 f"yeto run down --config <run.json> (forced at ${usd_cap:.2f}"
                  + (f" or {wall_cap / 3600:.1f} h)" if wall_h is not None else "; no wall-clock cap)"))
             if spend > usd_cap or elapsed > wall_cap:
-                cap = f"spend ${spend:.0f} > ${usd_cap:.0f}" if spend > usd_cap else \
+                cap = f"spend ${spend:.2f} > ${usd_cap:.2f}" if spend > usd_cap else \
                     f"wall {elapsed / 3600:.1f} h > {wall_cap / 3600:.1f} h"
                 _log(f"BREAKER: {cap} ({factor}x the budget): forcing pool-stop")
                 if "nc_forced_stop" not in forced:
@@ -2628,7 +2628,7 @@ class Run:
         spent = self.spend_usd()
         add = new * self.node_usd_per_h(i)
         if spent + add > cap:
-            return (f"spend ${spent:.0f} + {new} new node hour(s) ${add:.0f} > budget.usd ${cap:.0f}")
+            return (f"spend ${spent:.2f} + {new} new node hour(s) ${add:.2f} > budget.usd ${cap:.2f}")
         return None
 
     def scale(self, samplers: int | None = None, retire: list[str] | None = None, *, add: int = 0,

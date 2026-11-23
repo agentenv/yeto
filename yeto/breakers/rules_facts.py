@@ -253,17 +253,19 @@ def _load_json(path: Any) -> dict[str, Any] | None:
 
 
 def pool_sources(cfg: Mapping[str, Any], *, run_config: Mapping[str, Any] | None = None,
-                 argv: list[str] | None = None) -> Sources:
+                 argv: list[str] | None = None, spec: Mapping[str, Any] | None = None) -> Sources:
     """The resolver sources of one pool's samplers: the pool-merged spec (the pool's
     ``sampler`` knobs laid over it; its ``sampler.dispense`` replaces ``prompts.dispense``
     wholesale, so the raw spec's dispense is never read beside the pool's), the pool
     file, its elastic and dispense sections (``{}`` when absent: write-back targets),
-    and the env they see (the run config's ``env`` and the pool's ``agentic_env_file``)."""
+    and the env they see (the run config's ``env`` and the pool's ``agentic_env_file``).
+    ``spec``: this spec instead of the pool's spec file (the pool's knobs still laid over it)."""
     from yeto.breakers.resolve import Sources  # noqa: PLC0415
 
     cfg = dict(cfg)
     env = {**{str(k): str(v) for k, v in ((run_config or {}).get("env") or {}).items()}, **_env_file(cfg)}
-    return Sources(run_config=run_config, argv=argv, spec=_effective_spec(cfg) or None, pool_config=cfg,
+    merged = _effective_spec(cfg) if spec is None else _laid_over(cfg, spec)
+    return Sources(run_config=run_config, argv=argv, spec=merged or None, pool_config=cfg,
                    pool_elastic=dict(cfg.get("elastic") or {}),
                    pool_dispense=dict((cfg.get("sampler") or {}).get("dispense") or {}), env=env)
 
@@ -276,13 +278,15 @@ class RunView:
     pools: tuple[str, ...]  # every pool of the run
 
 
-def run_view_sources(run_config: Mapping[str, Any], *, pool: str | None = None) -> RunView:
+def run_view_sources(run_config: Mapping[str, Any], *, pool: str | None = None,
+                     spec: Mapping[str, Any] | None = None) -> RunView:
     """The sources of a run config's one-page view (``yeto breaker show --config``, run up's
     ``breakers.resolved.json``). The run config holds no pool, sampler or harness knob: each
     pool resolves its own (:func:`pool_sources`), so the view reads one pool's, the run's only
     pool or ``pool`` by name. With several pools and no name it is the run config alone (those
-    rows then show defaults), as is a run without pools. Raises ValueError on a pool file that
-    does not load and on a ``pool`` the run does not have."""
+    rows then show defaults), as is a run without pools. ``spec`` (``show --spec``) replaces
+    the pool's spec file; the pool's knobs and env file are still read. Raises ValueError on a
+    pool file that does not load and on a ``pool`` the run does not have."""
     from yeto.breakers.resolve import Sources  # noqa: PLC0415
 
     pools = run_pools(run_config, strict=True)
@@ -291,10 +295,10 @@ def run_view_sources(run_config: Mapping[str, Any], *, pool: str | None = None) 
         raise ValueError(f"pool {pool!r}: the run config has no such pool (its pools: {', '.join(names)})")
     chosen = [p for p in pools if p[0] == pool] if pool is not None else pools if len(pools) == 1 else []
     if not chosen:
-        return RunView(Sources.from_run_config(run_config), pool, names)
+        return RunView(Sources.from_run_config(run_config, spec=spec), pool, names)
     name, cfg, _ = chosen[0]
     argv = _argv(run_config, None)
-    sources = pool_sources(cfg, run_config=run_config, argv=argv)
+    sources = pool_sources(cfg, run_config=run_config, argv=argv, spec=spec)
     from yeto.rl import up_consistency  # noqa: PLC0415
 
     if argv is not None and up_consistency.is_auto_backlog(sources.spec):
@@ -312,6 +316,18 @@ def pool_facts(name: str, cfg: Mapping[str, Any], data_path: str = "r2", *,
     sources = pool_sources(cfg, run_config=run_config, argv=argv)
     resolved = resolve(sources, pool=name, strict=False)
     return _facts(name, resolved, dict(sources.spec or {}), dict(cfg), data_path, dispense=_pool_dispense(cfg))
+
+
+def _laid_over(cfg: Mapping[str, Any], spec: Mapping[str, Any]) -> dict[str, Any]:
+    """``spec`` with the pool's ``sampler`` knobs laid over it, as the pool renders it
+    (``spec`` as it is when the knobs do not apply: the pool dry-run names why)."""
+    from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
+    from yeto.launch.nc import tasks  # noqa: PLC0415
+
+    try:
+        return tasks.apply_sampler_overrides(spec, **nc_cli._overrides(dict(cfg.get("sampler") or {})))
+    except (ValueError, TypeError):
+        return dict(spec)
 
 
 def _effective_spec(cfg: Mapping[str, Any]) -> dict[str, Any]:
