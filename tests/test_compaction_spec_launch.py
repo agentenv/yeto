@@ -25,6 +25,7 @@ from yeto.rl.engine import agentic_round as ar
 from yeto.rl.harness.harbor import pi_config
 
 GRPO_SPEC = Path(__file__).resolve().parents[1] / "examples/k31/algorithm-spec.async-age2.json"
+GRPO_SPEC_AGE12 = GRPO_SPEC.with_name("algorithm-spec.async-age12.json")  # max_policy_staleness 12
 # the summary-turn keys of CompactionConfig (accepted once the config has them)
 AGENTIC = {"turn_max_tokens": 4096, "max_response_len": 1 << 20}
 
@@ -582,12 +583,26 @@ def test_micro_batch_warning_is_per_cp_group():
 
 def test_run_up_preflight_warns_on_a_micro_batch_wider_than_a_row(setup, capsys):  # noqa: F811
     _compacting(setup)
-    setup.argv += ["--rl-algorithm-spec", str(GRPO_SPEC), "--rl-max-policy-age", "8", "--context-parallel", "2"]
+    setup.argv += ["--rl-algorithm-spec", str(GRPO_SPEC_AGE12), "--rl-max-policy-age", "8", "--context-parallel", "2"]
     run = setup.make()
     assert run.consistency_problem() is None
     run.preflight()
     out = capsys.readouterr().out
     assert "WARNING: --rl-max-tokens-per-gpu 32768 x CP 2 = 65536 tokens per micro batch > --seq-len 32768" in out
+
+
+def test_run_up_preflight_refuses_a_policy_age_the_algorithm_spec_does_not_tolerate(setup, capsys):  # noqa: F811
+    """--rl-max-policy-age 8 with a max_policy_staleness 2 spec was always refused: run up's
+    ``yeto launch --dry-run`` step raised it (check_policy_age_spec). Rule D15 now refuses it
+    with the same message before anything runs; a spec that tolerates the age passes."""
+    _compacting(setup)
+    setup.argv += ["--rl-algorithm-spec", str(GRPO_SPEC), "--rl-max-policy-age", "8"]
+    run = setup.make()
+    assert run.preflight() is False and run.calls == []
+    out = capsys.readouterr().out
+    assert "D15 error --rl-max-policy-age 8 needs an algorithm spec with execution.max_policy_staleness >= 8" in out
+    _set(setup.argv, "--rl-algorithm-spec", str(GRPO_SPEC_AGE12))
+    assert setup.make().preflight() is True
 
 
 def test_run_up_preflight_refuses_compaction_on_verl(setup):  # noqa: F811
