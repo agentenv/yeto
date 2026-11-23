@@ -647,7 +647,9 @@ class RolePairing:
                 pusher.busy_seconds += sent.timings.get("prepare_s", 0.0) + sent.timings.get("push_s", 0.0)
                 if not sent.queued:
                     continue
-                submission = stream.note_pushed(job.candidates[role], sent.link_generation)
+                submission = stream.note_pushed(job.candidates[role], sent.link_generation,
+                                                enqueued_at=sent.finished_at,
+                                                wire_bytes=getattr(sent, "nbytes", None))
                 if id(pair) in live:
                     pair.submissions[role] = submission
                     self._harvested[role].append(submission)
@@ -1452,7 +1454,24 @@ class FullParameterSync(RoundCutHooks):
                 **self._upload_fields(),
             },
         )
+        self._emit_fragment_records(driver)
         return SyncBoundary(state=state, stop=self.terminal)
+
+    def _emit_fragment_records(self, driver: IslandDriver) -> None:
+        """The actor's ``rl_fragment_push`` (a PUSH handed to the send queue) and
+        ``rl_fragment_bcast`` (a broadcast applied at a safe boundary) records
+        since the last boundary, in the LoRA stack's schema (``progress.py``):
+        one per fragment and round, after this boundary's round event. Other
+        roles' records are drained and dropped (the actor names the round)."""
+
+        for role, stream in self.pairing.streams.items():
+            drain = getattr(stream, "drain_fragment_records", None)
+            records = drain() if callable(drain) else ()
+            if role != "actor":
+                continue
+            for record in records:
+                record = dict(record)
+                driver.emit(record.pop("event"), **record)
 
     def _partial_quorum_fields(self, versions: tuple[int, ...]) -> dict[str, int]:
         pairing = self.pairing

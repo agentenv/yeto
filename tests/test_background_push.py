@@ -89,7 +89,7 @@ class _BackgroundRole(_PairedRole):
     def note_push_timing(self, candidate, timings):
         self.timed.append(candidate.permit.global_step)
 
-    def note_pushed(self, candidate, link_generation):
+    def note_pushed(self, candidate, link_generation, enqueued_at=None, wire_bytes=None):
         assert threading.current_thread() is threading.main_thread()
         assert link_generation == 1
         self.noted.append(candidate.permit.global_step)

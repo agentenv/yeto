@@ -1042,6 +1042,8 @@ class BcastFragment:
     # current value sent as the re-HELLO catch-up (or a newer one), not
     # necessarily a merge of a round this island answered.
     catch_up: bool = field(default=False, compare=False)
+    # Payload bytes received for a streamed (stored) broadcast; None otherwise.
+    payload_bytes: int | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -1208,6 +1210,7 @@ class _StreamedInboundFragment:
     fragment_id: int
     version: int
     payload: StreamedInboundPayload
+    payload_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2973,6 +2976,7 @@ class SyncerClient:
             partial.fragment_id,
             partial.version,
             committed,
+            partial.payload_bytes,
         )
 
     @staticmethod
@@ -3098,6 +3102,7 @@ class SyncerClient:
                         stored=True,
                         discard=committed.discard,
                         catch_up=catch_up,
+                        payload_bytes=inbound.payload_bytes,
                     )
                 )
             return
