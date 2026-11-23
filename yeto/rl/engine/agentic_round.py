@@ -1149,6 +1149,10 @@ class AgenticRound(EngineRound):
             agentic["reward_mean"] = compaction["reward_mean_trial"]
             agentic["policy_tokens_mean"] = compaction["policy_tokens_mean_trial"]
             logger.info("agentic round %s %s", rollout_id, compaction_log_line(compaction))
+        from yeto.rl.harness.harbor.breaker_settings import trip_events as harness_trip_events
+
+        for event in harness_trip_events(self.harness, scope={"rollout_id": int(rollout_id)}):  # aggregated
+            self.emit(event.pop("event"), **event)
         self.emit(ROUND_EVENT, rollout_id=int(rollout_id), policy_version=self.engine.served_version(),
                   groups=tally.written, samples=tally.samples, response_tokens=tally.tokens,
                   finish=dict(sorted(tally.finish.items())), source=self.provenance.key(),
@@ -1524,13 +1528,14 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         check_agentenv_cap(max_in_flight)
     if defaults.get("provider"):
         # A trial waiting for a sandbox slot would spend its wall-clock budget waiting:
-        # the cap (HARBOR_MAX_SANDBOXES, required for remote-docker) must cover max_in_flight.
+        # the cap (harness.sandbox_caps.max_sandboxes, required for remote-docker) must cover max_in_flight.
         from yeto.rl.harness.harbor.capacity import process_limits
 
         slots = process_limits().slots(str(defaults["provider"]))
         if slots is not None and slots.limit < max_in_flight:
             raise HarnessConfigError(f"agentic.max_in_flight {max_in_flight} exceeds the {defaults['provider']} "
-                                     f"sandbox cap {slots.limit} (HARBOR_MAX_SANDBOXES)")
+                                     f"sandbox cap {slots.limit} (harness.sandbox_caps.max_sandboxes, "
+                                     "env HARBOR_MAX_SANDBOXES)")
     from yeto.breakers import BreakerConfigError
 
     from .infra_streak import InfraStreak, startup_line

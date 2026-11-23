@@ -18,7 +18,6 @@ import argparse
 import ast
 import contextlib
 import copy
-import inspect
 import json
 import os
 import re
@@ -311,8 +310,7 @@ def harness_values(env: Mapping[str, str]) -> dict[str, Any]:
     with _environ(env):
         out["harness.setup_retries.enabled"] = True
         out["harness.setup_retries.max_n"] = setup_retries_from_env()
-        out["harness.setup_retries.backoff_initial_s"] = (
-            inspect.signature(HarborHarness.__init__).parameters["retry_backoff_s"].default)
+        out["harness.setup_retries.backoff_initial_s"] = HarborHarness(lambda task, url: None)._retry_backoff_s
         skip = os.environ.get(agentenv_env.SKIP_REACH_ENV, "").strip() == "1"
         out["harness.reach_check.enabled"] = not skip
         if not skip:
@@ -329,7 +327,8 @@ def harness_values(env: Mapping[str, str]) -> dict[str, Any]:
         out["harness.sandbox_caps.agentenv_create_timeout_s"] = float(
             os.environ.get(agentenv_client.REQUEST_TIMEOUT_ENV, "") or agentenv_client.DEFAULT_REQUEST_TIMEOUT_S)
         out["harness.sandbox_ttl.enabled"] = True
-        out["harness.sandbox_ttl.limit_s"] = float(agentenv_client.DEFAULT_TTL_S)
+        # a sandbox without a trial wall clock (a boat trial); an AgentENV trial gets wall clock + 900 s
+        out["harness.sandbox_ttl.default_s"] = float(agentenv_client.DEFAULT_TTL_S)
     return out
 
 

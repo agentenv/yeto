@@ -6,7 +6,7 @@ one slot of its provider for as long as its sandbox can exist: from
 inside ``run``).  A trial that finds no free slot waits; it never starts a
 sandbox above the cap.
 
-``HARBOR_MAX_SANDBOXES``:
+``harness.sandbox_caps.max_sandboxes`` (env ``HARBOR_MAX_SANDBOXES``, :mod:`.breaker_settings`):
   ``N``                       every provider: at most N sandboxes
   ``{"remote-docker": 8, "*": 32}``  per provider, ``*`` for the others
   unset / ``{}``              no cap, except providers in :data:`CAP_REQUIRED`
@@ -25,15 +25,16 @@ cancellation-safe: a waiter that is cancelled holds nothing.
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
+from yeto.breakers.layers.harness import sandbox_caps
 from yeto.rl.agentic import HarnessConfigError
 
-MAX_SANDBOXES_ENV = "HARBOR_MAX_SANDBOXES"
+from . import breaker_settings
+
+MAX_SANDBOXES_ENV = "HARBOR_MAX_SANDBOXES"  # alias of harness.sandbox_caps.max_sandboxes
 CAP_REQUIRED = frozenset({"remote-docker"})
 WILDCARD = "*"
 POLL_S = 0.05
@@ -83,18 +84,10 @@ class SandboxSlots:
 
 def parse_caps(raw: str) -> dict[str, int]:
     """``HARBOR_MAX_SANDBOXES`` -> {provider or ``*``: cap} (module doc)."""
-    raw = raw.strip()
-    if not raw:
-        return {}
     try:
-        value = json.loads(raw)
+        return sandbox_caps(raw) or {}
     except ValueError as exc:
-        raise HarnessConfigError(f"{MAX_SANDBOXES_ENV} must be N or a JSON object, got {raw!r}") from exc
-    caps = {WILDCARD: value} if isinstance(value, int) and not isinstance(value, bool) else value
-    if not isinstance(caps, dict) or not all(
-            isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v >= 1 for k, v in caps.items()):
-        raise HarnessConfigError(f"{MAX_SANDBOXES_ENV} caps must be integers >= 1, got {raw!r}")
-    return dict(caps)
+        raise HarnessConfigError(f"{MAX_SANDBOXES_ENV}: {exc}") from exc
 
 
 class SandboxLimits:
@@ -107,8 +100,7 @@ class SandboxLimits:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> SandboxLimits:
-        environ = os.environ if environ is None else environ
-        return cls(parse_caps(str(environ.get(MAX_SANDBOXES_ENV, "") or "")))
+        return cls(breaker_settings.setting("harness.sandbox_caps.max_sandboxes", environ))
 
     def cap(self, provider: str) -> int | None:
         return self.caps.get(provider, self.caps.get(WILDCARD))
@@ -118,7 +110,8 @@ class SandboxLimits:
         limit = self.cap(provider)
         if limit is None:
             if provider in CAP_REQUIRED:
-                raise HarnessConfigError(f"provider {provider} needs a sandbox cap: set {MAX_SANDBOXES_ENV} "
+                raise HarnessConfigError(f"provider {provider} needs a sandbox cap: set "
+                                         f"harness.sandbox_caps.max_sandboxes (env {MAX_SANDBOXES_ENV}) "
                                          f"(e.g. {{\"{provider}\": 8}}) to what the sandbox host holds")
             return None
         with self._lock:
@@ -133,7 +126,7 @@ _process_lock = threading.Lock()
 
 
 def process_limits() -> SandboxLimits:
-    """The process-wide limits (``HARBOR_MAX_SANDBOXES`` read once), shared by every harness."""
+    """The process-wide limits (``harness.sandbox_caps.max_sandboxes`` read once), shared by every harness."""
     global _process_limits
     with _process_lock:
         if _process_limits is None:

@@ -36,12 +36,15 @@ from typing import Protocol
 
 from yeto.rl.agentic.loop_local import LoopLocal
 
+from . import breaker_settings
+
 API_HOST = "https://boat.dev/api/v1"
 API_KEY_ENV = "BOAT_API_KEY"
 PROXY_ENV = "YETO_BOAT_PROXY"  # http://host:port of an HTTP(S) CONNECT proxy for the boat API
 CLI_CONFIG = Path("~/.config/ascii/boat/config.json")
 
-# Plan limits (box_20).  Override per deployment with the env names below.
+# Plan limits (box_20): the defaults of harness.sandbox_caps.boat_* (.breaker_settings); the
+# env names below are its aliases.
 MAX_ACTIVE_SANDBOXES = 100
 MAX_STARTS_PER_MINUTE = 12
 MAX_ACTIVE_ENV = "YETO_BOAT_MAX_ACTIVE"
@@ -214,12 +217,17 @@ def _http(request: urllib.request.Request, timeout_s: float = 600.0) -> bytes:
         raise BoatError(f"boat file transfer failed: HTTP {exc.code}") from None
 
 
+def _cap(param: str) -> float | None:
+    """``harness.sandbox_caps.boat_<param>`` (:mod:`.breaker_settings`)."""
+    return breaker_settings.setting(f"harness.sandbox_caps.boat_{param}")
+
+
 def check_in_flight_cap(max_in_flight: int) -> int:
     """Refuse an admission gate that would hold more sandboxes than the boat account allows."""
-    cap = int(os.environ.get(MAX_ACTIVE_ENV, MAX_ACTIVE_SANDBOXES))
+    cap = int(_cap("max_active_n"))
     if max_in_flight > cap:
         raise ValueError(f"max_in_flight={max_in_flight} exceeds the boat active-sandbox cap {cap} "
-                         f"({MAX_ACTIVE_ENV})")
+                         f"(harness.sandbox_caps.boat_max_active_n, env {MAX_ACTIVE_ENV})")
     return max_in_flight
 
 
@@ -246,10 +254,9 @@ class BoatQuota:
 
     @classmethod
     def from_env(cls) -> BoatQuota:
-        hourly = os.environ.get(MAX_STARTS_HOUR_ENV, "").strip()
-        return cls(int(os.environ.get(MAX_ACTIVE_ENV, MAX_ACTIVE_SANDBOXES)),
-                   int(os.environ.get(MAX_STARTS_ENV, MAX_STARTS_PER_MINUTE)),
-                   starts_per_hour=int(hourly) if hourly else None)
+        hourly = _cap("starts_per_hour_n")
+        return cls(int(_cap("max_active_n")), int(_cap("starts_per_minute_n")),
+                   starts_per_hour=None if hourly is None else int(hourly))
 
     def _wait_s(self, now: float) -> float:
         """Seconds until one more start fits every window (0 = now)."""
