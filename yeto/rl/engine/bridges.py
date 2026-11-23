@@ -1105,6 +1105,20 @@ class DecoupledSync(RoundCutHooks):
     def _append_event(self, event: dict[str, Any]) -> None:
         self._driver.events.append(event)
 
+    def _publish_outer_version(self, versions) -> None:
+        """A synced buffer trainer (a decoupled synced group: ``sample_roles``
+        module doc) states the merged version of its fragment cut on the driver
+        (``IslandDriver.outer_version``): every fragment merged at least that many
+        times (``full_parameter_sync.merged_version``, the same numbering). Its
+        samplers follow its local versions, so this is evidence (``rl_publication``
+        carries it), not the gate. Colocated decoupled islands keep their tapes."""
+        if getattr(self.args, "yeto_rl_sample_lane", None) is None:
+            return
+        from .full_parameter_sync import merged_version
+
+        self._driver.outer_version = merged_version(tuple(versions))
+        self._driver.fragment_versions = tuple(int(v) for v in versions)
+
     _record_local_round = legacy_progress.DecoupledProgress._record_local_round
     _record_final_payload = legacy_progress.DecoupledProgress._record_final_payload
     _save_progress = legacy_progress.DecoupledProgress._save_progress
@@ -1203,6 +1217,7 @@ class DecoupledSync(RoundCutHooks):
             cut, optimizer_steps=self.optimizer_steps, action_tokens=self.action_tokens
         )
         self.snapshot = PolicySnapshot.create(self.optimizer_steps, self.current, versions)
+        self._publish_outer_version(versions)
         self._save_progress(self.snapshot, stats=None)
         startup_manifest = getattr(self.bridge, "startup_final_manifest", None)
         if startup_manifest is not None:
@@ -1227,6 +1242,7 @@ class DecoupledSync(RoundCutHooks):
         self.snapshot = PolicySnapshot.create(
             final.policy_version, self.current, manifest.versions
         )
+        self._publish_outer_version(manifest.versions)
         self._save_progress(self.snapshot, stats=stats)
         self.bridge.acknowledge_finalization(manifest)
         if final_payload_bytes_received:
@@ -1349,6 +1365,7 @@ class DecoupledSync(RoundCutHooks):
         self.snapshot = PolicySnapshot.create(
             next_rollout_id, current, self.bridge.fragment_versions
         )
+        self._publish_outer_version(self.snapshot.fragment_versions)
         self._save_progress(self.snapshot, stats=stats)
         return SyncBoundary(self._snapshot_state(self.snapshot), stop=False)
 

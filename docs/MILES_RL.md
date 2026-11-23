@@ -329,6 +329,51 @@ python3 scripts/benchmark_rl.py --model Qwen/Qwen3-0.6B \
   --islands 2 --arms decoupled --dry-run
 ```
 
+### Decoupled synced group (sampler islands)
+
+Each trainer can be a complete async GRPO island with its own sampler
+islands, and the trainers merge their fragments through the syncer: a synced
+group (`--rl-sample-role trainer --rl-island-sample-role M:sampler`) with the
+decoupled preset. A decoupled trainer has one version per fragment, merged at
+different times, so there is no single merged policy to release to a shared
+sampler pool: the group needs `--rl-sampler-follow trainer`.
+
+- Sampler j (in island order) feeds trainer j % K. Each trainer and its
+  samplers share the store sub-directory `trainer<k>` of
+  `--rl-checkpoint-store` (the sample buffer and the policy releases); the
+  trainer reads that whole buffer.
+- The trainer releases every local policy version (`origin.kind` `local`);
+  the samplers stamp that version on their groups, and the trainer gates them
+  with `--rl-max-policy-age` (at least 1) in local versions. Truncated
+  importance sampling divides by the rollout log-probabilities the sampler
+  recorded; watch `logprob_abs_diff` and `tis_clipfrac`.
+- Each release record carries the fragment version vector of that local
+  version (`origin.fragment_versions`) and its merged version
+  (`origin.merged_version`: the merges every fragment has received, the
+  full-parameter preset's unit). `rl_publication` carries the merged version
+  as `sync/outer_version`.
+- A sampler runs as a LoRA no-sync sampler (`--sync-preset strict-avg`, one
+  fragment, the trainer's LoRA rank and targets). It has no fixed round count:
+  it generates until its trainer ended (`--rl-sampler-until-trainers-end 1`),
+  since the trainers run until the syncer's final cut.
+- Refused: a decoupled group without `--rl-sampler-follow trainer`, a backend
+  other than Miles, and `--rl-initial-adapter` (the samplers serve the base
+  checkpoint until the first release, so version 0 must be the base policy).
+- Trainer and sampler islands may use different GPU types or clouds (for
+  example H100 trainers with L40S samplers). The samplers of this form are
+  Miles sampler islands of the same launch; an engine sampler pool
+  (`yeto run up`) feeds synced trainers through the merged releases only.
+
+```bash
+yeto launch --training-mode rl --tuning lora --lora-targets attention \
+  --gpu modal:1x1xh100,modal:1x1xh100,modal:1x1xl40s,modal:1x1xl40s \
+  --rl-sync-preset decoupled --fragments 4 --pipeline 2 --local-rl-rounds-per-sync 4 \
+  --rl-sample-role trainer --rl-island-sample-role 2:sampler --rl-island-sample-role 3:sampler \
+  --rl-sampler-follow trainer --rl-max-policy-age 2 \
+  --rl-algorithm-spec examples/k31/algorithm-spec.async-age2-tis.json \
+  --rl-checkpoint-store s3://BUCKET/runs/RUN ...
+```
+
 ## Launching
 
 A strict two-island run uses the default preset:

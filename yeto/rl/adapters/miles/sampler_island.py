@@ -1026,8 +1026,15 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
             return release_version(driver, state, lane)
 
         def origin(state: Any) -> dict[str, Any]:
-            return {"kind": "local" if lane.is_own else "merged", "learner_id": lane.index,
-                    "num_learners": lane.count, "local_version": int(state.policy_version)}
+            record = {"kind": "local" if lane.is_own else "merged", "learner_id": lane.index,
+                      "num_learners": lane.count, "local_version": int(state.policy_version)}
+            # a decoupled trainer (bridges.DecoupledSync): the fragment cut this local
+            # version holds, and its merged version, for the evidence
+            fragments = getattr(driver, "fragment_versions", None)
+            if fragments is not None:
+                record["fragment_versions"] = [int(v) for v in fragments]
+                record["merged_version"] = getattr(driver, "outer_version", None)
+            return record
 
         def on_gap(previous: int, version: int) -> None:
             driver.emit("rl_policy_release_gap", previous_version=previous, policy_version=version)

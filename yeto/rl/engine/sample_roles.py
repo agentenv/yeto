@@ -50,6 +50,12 @@ releases), the trainer reads that whole buffer (its own lane, 0 of 1) and
 releases every local policy version for its samplers
 (``merged_release`` module doc). The trainers still merge through the syncer.
 
+Decoupled groups (``--rl-sync-preset decoupled``, Miles): a decoupled trainer
+has one version per fragment, merged at different times, so its group needs
+``--rl-sampler-follow trainer`` (:func:`check_decoupled_group`); its samplers
+run as LoRA no-sync samplers (:func:`_as_lora_sampler`) and, like those of a
+full-parameter group, generate until their trainer ended.
+
 How long a full-parameter synced group's samplers run (Miles): its trainers
 run asynchronous rounds until the syncer stops them, so their round count is
 not known before the launch (``run_config.resolve_lr_schedule``). Its samplers
@@ -81,6 +87,7 @@ BOTH, SAMPLER, TRAINER, CONVERTIBLE = "both", "sampler", "trainer", "convertible
 SAMPLE_ROLES = (BOTH, SAMPLER, TRAINER, CONVERTIBLE)
 # --rl-sampler-follow: what a synced group's samplers load (module doc)
 FOLLOW_MERGED, FOLLOW_TRAINER = "merged", "trainer"
+DECOUPLED_SYNC_PRESET = "decoupled"
 
 # groups a sampler may have ahead of the trainer's last released read position,
 # in units of one round (rollout batch), when --rl-sampler-max-backlog-rounds is unset
@@ -206,20 +213,36 @@ def check_synced_group(args: Any, num_islands: int) -> None:
         raise ValueError(f"--total-steps {args.total_steps}: {samplers} sampler islands share the "
                          f"rounds of {trainers} trainers; trainers x total steps must be a multiple "
                          "of the sampler count")
-    if getattr(args, "rl_sync_preset", None) == "decoupled":
-        # Its sampler islands run as no-sync islands, which the island entry refuses
-        # with the decoupled preset; the decoupled trainers also have no single merged
-        # version to release (per-fragment versions). Refuse before any GPU starts.
-        raise ValueError("--rl-sync-preset decoupled does not combine with a synced group "
-                         "(--rl-island-sample-role M:sampler): decoupled islands generate "
-                         "their own rollouts (colocated); use --rl-sync-preset strict-avg or "
-                         f"{FULL_PARAMETER_SYNC_PRESET} for a synced group")
+    if getattr(args, "rl_sync_preset", None) == DECOUPLED_SYNC_PRESET:
+        check_decoupled_group(args)
     if int(getattr(args, "external_learners", 0) or 0):
         raise ValueError("a synced group does not take external learners")
     if getattr(args, "rl_trainer_scheduler", None) not in (None, "off"):
         raise ValueError("--rl-trainer-scheduler does not combine with a synced group")
     for m in range(num_islands):
         check_launch(island_args(args, m, num_islands))
+
+
+def check_decoupled_group(args: Any) -> None:
+    """Launch checks of a decoupled synced group (module doc, decoupled groups).
+
+    Its trainers have no single merged version (one version per fragment, merged
+    at different times), so every sampler follows its own trainer and serves that
+    trainer's local versions; the trainers merge their fragments through the
+    syncer as decoupled islands do. The samplers start from the base checkpoint:
+    an initial adapter would make the trainers' version 0 differ from what the
+    samplers serve before the first release, so it is refused."""
+    if getattr(args, "rl_sampler_follow", FOLLOW_MERGED) != FOLLOW_TRAINER:
+        raise ValueError("--rl-sync-preset decoupled in a synced group (--rl-island-sample-role "
+                         "M:sampler) needs --rl-sampler-follow trainer: a decoupled trainer has "
+                         "no single merged version to release (each fragment has its own), so "
+                         "each sampler serves its own trainer's local versions")
+    if (getattr(args, "rl_backend", None) or "miles") != "miles":
+        raise ValueError("a decoupled synced group is wired for --rl-backend miles only")
+    if getattr(args, "rl_initial_adapter", None) is not None:
+        raise ValueError("a decoupled synced group does not take --rl-initial-adapter: its "
+                         "samplers serve the base checkpoint until the first release, so the "
+                         "trainers' version 0 must be the base policy")
 
 
 def check_sample_store(args: Any) -> None:
@@ -371,8 +394,11 @@ def substore_uri(store: str, name: str) -> str:
 
 def sampler_stop_trainers(args: Any, num_islands: int) -> dict[int, int]:
     """Sampler island -> how many trainers' ends stop it, for the samplers of a
-    full-parameter synced group on Miles (module doc); empty for every other launch."""
-    if (not is_synced_group(args) or getattr(args, "rl_sync_preset", None) != FULL_PARAMETER_SYNC_PRESET
+    full-parameter or decoupled synced group on Miles (module doc); empty for every
+    other launch."""
+    if (not is_synced_group(args)
+            or getattr(args, "rl_sync_preset", None) not in (FULL_PARAMETER_SYNC_PRESET,
+                                                             DECOUPLED_SYNC_PRESET)
             or (getattr(args, "rl_backend", None) or "miles") != "miles"):
         return {}
     trainers = 1 if sampler_bindings(args, num_islands) else len(synced_group_learners(args, num_islands))
@@ -519,6 +545,8 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
         out.rl_sampler_max_backlog_rounds = full_parameter_sampler_backlog_rounds(
             args, island, num_islands)
         _as_full_parameter_sampler(out)
+    elif getattr(args, "rl_sync_preset", None) == DECOUPLED_SYNC_PRESET:
+        _as_lora_sampler(out)
     if getattr(args, "rl_total_fragment_steps", None) is not None:
         out.rl_total_fragment_steps = out.total_steps * int(getattr(out, "fragments", 1) or 1)
     return out
@@ -589,6 +617,22 @@ def _as_full_parameter_sampler(out: Any) -> None:
     out.rl_sync_bcast_delta_full_every = 0
     out.local_rl_rounds_per_sync = 1
     out.fragments = 1
+
+
+def _as_lora_sampler(out: Any) -> None:
+    """A sampler of a decoupled synced group runs as a pair's LoRA sampler: a
+    no-sync island with the default sync preset and one fragment (it syncs
+    nothing, so no fragment, pipeline or merge option reaches its command). It
+    loads its trainer's LoRA releases; it keeps the trainer's LoRA rank and
+    targets, so the released adapter fits its engines."""
+    out.rl_sync_preset = "strict-avg"
+    out.tuning = "lora"
+    out.rl_sync_matrix_merge = "avg"
+    out.local_rl_rounds_per_sync = 1
+    out.fragments = 1
+    out.pipeline = 1
+    out.rl_initial_adapter = None
+    out.rl_initial_adapter_sha256 = None
 
 
 def island_learner(args: Any, island: int, num_learners: int,
