@@ -154,3 +154,38 @@ def test_trial_alert_reads_only_the_current_incarnation():
             {"event": "rl_sampler_start", "sampler_id": "s1", "incarnation": "a2", "time_unix": T0 + 50},
             _engine_round(0, T0 + 60, ok=10, inc="a2")]
     assert not _trial_alerts(*recs)
+
+
+def _sampler_up(until_s, step=30.0):
+    recs = [{"event": "rl_sampler_start", "sampler_id": "s1", "incarnation": "a1", "max_backlog_groups": 16,
+             "time_unix": T0}]
+    t, rid = T0 + step, 0
+    while t <= T0 + until_s:
+        recs.append(_engine_round(rid, t, ok=8))
+        recs.append({"event": "rl_resource_sample", "sampler_id": "s1", "time_unix": t, "available": True,
+                     "gpus": [{"index": 0, "mem_total_mb": 46068.0, "mem_used_mb": 43000.0}]})
+        t, rid = t + step, rid + 1
+    return recs
+
+
+def _missing_alerts(recs, now, stop=None):
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(recs):
+        reducer.feed(rec, source="t", offset=i)
+    if stop:
+        reducer.feed_operator_stop(stop)
+    return [a for a in reducer.overview(now=now)["alerts"] if a["rule"] == "trainer_missing"]
+
+
+def test_samplers_without_a_trainer_warn_then_go_critical():
+    assert not _missing_alerts(_sampler_up(900), T0 + 910)  # still within the trainer's startup
+    warn = _missing_alerts(_sampler_up(1500), T0 + 1510)
+    assert len(warn) == 1 and warn[0]["sev"] == 1 and "nothing trains them" in warn[0]["detail"]
+    stop = {"event": "operator_stop", "time_unix": T0 + 60, "cause": "teardown", "marker": "teardown.json (mtime)"}
+    crit = _missing_alerts(_sampler_up(2000), T0 + 2010, stop=stop)
+    assert len(crit) == 1 and crit[0]["sev"] == 0 and "teardown" in crit[0]["detail"]
+
+
+def test_no_trainer_alert_once_a_trainer_is_on_the_tapes():
+    recs = _sampler_up(2000) + [{"event": "rl_driver_start", "island_id": "trainer", "time_unix": T0 + 1990}]
+    assert not _missing_alerts(recs, T0 + 2010)

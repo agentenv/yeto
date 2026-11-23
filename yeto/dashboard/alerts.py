@@ -72,6 +72,10 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "trial_fail_window_rounds": 10,
     "trial_fail_min_trials": 8,
     "trial_fail_warn": 0.5,
+    # an async run whose samplers are up while no trainer island is on the tapes (its
+    # launch failed, or it was torn down): seconds since the first sampler event
+    "trainer_missing_warn_s": 1200.0,
+    "trainer_missing_severe_s": 1800.0,
 }
 
 
@@ -370,12 +374,39 @@ def trial_failures(reducer, th: dict) -> list[dict]:
     return out
 
 
+def trainer_missing(reducer, th: dict, now: float, cards: list[dict]) -> list[dict]:
+    state = getattr(reducer, "async_", None)
+    if state is None:
+        return []
+    roles = {c["id"]: state.role(c["id"]) for c in cards}
+    live = [c for c in cards if roles[c["id"]] == "sampler" and c["status"] in ("ok", "waiting", "starting")]
+    if not live or any(r == "trainer" for r in roles.values()):
+        return []
+    firsts = [reducer.islands[c["id"]].get("first_ts") for c in live if c["id"] in reducer.islands]
+    firsts = [t for t in firsts if t is not None]
+    if not firsts:
+        return []
+    age = now - min(firsts)
+    if age <= th["trainer_missing_warn_s"]:
+        return []
+    stop = reducer.operator_stop() or {}
+    torn = (f"; the launcher tore the run's app down (operator stop: {stop.get('cause')}, {stop.get('marker')})"
+            if stop.get("cause") else "")
+    sev = 0 if age > th["trainer_missing_severe_s"] else 1
+    names = ", ".join(c["id"] for c in live)
+    return [_alert(sev, "trainer_missing", "samplers running without a trainer",
+                   f"{len(live)} sampler(s) up for {age / 60:.0f} min ({names}) and no trainer island on the "
+                   f"tapes: their groups pile up in the buffer and nothing trains them{torn}",
+                   island=live[0]["id"])]
+
+
 def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict],
              store: dict | None = None) -> list[dict]:
     th = reducer.thresholds
     alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
               + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
+              + trainer_missing(reducer, th, now, cards)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
     alerts.sort(key=lambda a: a["sev"])
     for i, a in enumerate(alerts):
