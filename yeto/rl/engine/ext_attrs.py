@@ -30,6 +30,7 @@ _MISSING = object()
 WIRE_KEYS: frozenset[str] = frozenset({
     # rollout executor / hooks
     "algo_plugins",
+    "rl_batch_summary",
     "rl_codex_reasoning_in_loss",
     "rl_codex_reasoning_markers",
     "rl_dynamic_sampling_max_replacements",
@@ -44,7 +45,6 @@ WIRE_KEYS: frozenset[str] = frozenset({
     "rl_max_policy_age",
     "rl_mismatch_tape_max",
     "rl_mismatch_text_max",
-    "rl_batch_summary",
     "rl_observe_timeline",
     "rl_policy_version",
     "rl_reward_sha256",
