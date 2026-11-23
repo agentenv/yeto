@@ -48,6 +48,15 @@ def _spec(path: str, param: str | None, **kw: Any) -> Alias:
     return Alias("spec", path, param, **kw)
 
 
+def _backlog_groups(value: Any) -> int:
+    """A spec's ``max_backlog_groups`` as the sampler runs with it: ``"auto"`` is the
+    cap ``yeto run up`` derived, else the fallback (``sample_roles.resolve_auto_backlog``,
+    a light module, imported when a spec is read)."""
+    from yeto.rl.engine.sample_roles import resolve_auto_backlog  # noqa: PLC0415
+
+    return int(resolve_auto_backlog(value)[0])
+
+
 BREAKERS: tuple[Breaker, ...] = (
     Breaker(
         name="sampler.load_failures", layer="sampler", kind="breaker",
@@ -210,8 +219,12 @@ BREAKERS: tuple[Breaker, ...] = (
     Breaker(name="sampler.dispense_passes", layer="sampler", kind="semantic", native="spec prompts.dispense.passes",
             depends_on=("D8",), owner=f"{OWNER}.store_dispense", doc="passes over the data"),
     Breaker(name="sampler.max_backlog_groups", layer="sampler", kind="semantic", native="spec max_backlog_groups",
+            params=(Param("groups_n", int, None, unit="n", lo=1, nullable=True,
+                          doc="the cap; \"auto\" in the spec shows the derived value"),),
+            aliases=(_spec("max_backlog_groups", "groups_n", to_canonical=_backlog_groups, materialize=False),),
             depends_on=("D19",), owner=f"{OWNER}.sampler_loop",
-            doc="unread groups at which the sampler pauses generating (rl_sampler_backlog_full)"),
+            doc="unread groups at which the sampler pauses generating (rl_sampler_backlog_full); "
+                "\"auto\": derived by yeto run up from the release cadence (sample_roles)"),
     Breaker(name="sampler.max_compactions", layer="sampler", kind="semantic",
             native="spec agentic.compaction.max_compactions", owner="yeto.rl.compaction",
             doc="compactions of one trial before ContextFull (POLICY_LIMIT, kept)"),

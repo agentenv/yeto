@@ -153,3 +153,16 @@ def test_a_section_that_disagrees_with_a_spec_key_is_refused():
 def test_a_bad_value_is_refused(spec):
     with pytest.raises(ValueError):
         spec_breakers(spec)
+
+
+@pytest.mark.parametrize(("spec", "env"), [({"max_backlog_groups": 16}, None), ({"max_backlog_groups": "auto"}, None),
+                                           ({"max_backlog_groups": "auto"}, "40")])
+def test_the_backlog_cap_shows_the_value_the_sampler_runs_with(monkeypatch, spec, env):
+    from yeto.rl.engine.engine_sampler_entry import backlog_cap
+    from yeto.rl.engine.sample_roles import AUTO_BACKLOG_ENV
+
+    if env is None:
+        monkeypatch.delenv(AUTO_BACKLOG_ENV, raising=False)
+    else:
+        monkeypatch.setenv(AUTO_BACKLOG_ENV, env)
+    assert spec_breakers(spec).get("sampler.max_backlog_groups.groups_n") == backlog_cap(spec)[0]
