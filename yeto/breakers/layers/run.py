@@ -130,10 +130,8 @@ BREAKERS: tuple[Breaker, ...] = (
     Breaker(
         name="run.release_stall", layer="run", kind="breaker",
         params=(Param("limit_s", float, None, unit="s", lo=1.0, nullable=True,
-                      doc="no new policy release this long after the previous one (or the trainer's start); "
-                          f"null: {release_stall.MIN_LIMIT_S / 60:.0f} min or {release_stall.INTERVAL_FACTOR}x "
-                          f"the median release interval once {release_stall.LEARN_RELEASES} releases were seen, "
-                          f"else {release_stall.DEFAULT_LIMIT_S / 60:.0f} min"),
+                      doc="no new policy release this long after the previous one (or the trainer's restart); "
+                          f"null: {release_stall.limit_phrase(None)}"),
                 Param("check_s", float, release_stall.DEFAULT_CHECK_S, unit="s", lo=1.0,
                       doc="read the store's LATEST release at most this often"),
                 Param("stop_grace_s", float, starvation.DEFAULT_STOP_GRACE_MIN * 60, unit="s", lo=0.0,

@@ -8,9 +8,11 @@ head-side verdict ``yeto run up`` takes from the store's ``LATEST`` release poin
 
 * the clock starts at the first release seen (none yet: no verdict), and starts again
   at a new release and at a trainer restart (a new launcher: it loads before it publishes);
-* the limit is ``limit_s`` when set, else :data:`DEFAULT_LIMIT_S` until
-  :data:`LEARN_RELEASES` releases were seen in one trainer launch, then the larger of
-  :data:`MIN_LIMIT_S` and :data:`INTERVAL_FACTOR` x the median interval between them;
+* the limit is ``limit_s`` when set; else, until :data:`LEARN_RELEASES` releases were
+  published by one trainer launch, the larger of :data:`DEFAULT_LIMIT_S` and
+  :data:`FIRST_WAIT_FACTOR` x the wait for that launch's first release (a slow first round,
+  e.g. a release every 6 steps of long agentic groups, is no stall); then the larger of
+  :data:`MIN_LIMIT_S` and :data:`INTERVAL_FACTOR` x the median interval between releases;
 * past the limit: ``alert`` once per stalled stretch, or ``stop`` with ``action: stop``.
   A pointer that cannot be read is no evidence: no stop.
 
@@ -23,10 +25,11 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any, Hashable
 
-DEFAULT_LIMIT_S = 3600.0  # the limit until the release interval is known
+DEFAULT_LIMIT_S = 3600.0  # the limit until the release interval is known (at least)
+FIRST_WAIT_FACTOR = 2  # ... or this many times the wait for the launch's first release
 MIN_LIMIT_S = 1800.0  # the learned limit is never below this
 INTERVAL_FACTOR = 5  # the learned limit: this many median release intervals
-LEARN_RELEASES = 3  # releases seen in one trainer launch before the interval is learned
+LEARN_RELEASES = 3  # releases published by one trainer launch before the interval is learned
 DEFAULT_CHECK_S = 300.0  # read the LATEST pointer at most this often
 _INTERVALS_KEPT = 20
 
@@ -37,6 +40,15 @@ RECOVERED_EVENT = "trainer_release_stall_recovered"
 STOP_EVENT = "trainer_release_stall_stop"
 
 OK, ALERT, STOP = "ok", "alert", "stop"
+
+
+def limit_phrase(limit_s: float | None) -> str:
+    """The limit as the preflight and the docs state it."""
+    if limit_s is not None:
+        return f"{limit_s / 60:g} min"
+    return (f"max({DEFAULT_LIMIT_S / 60:.0f} min, {FIRST_WAIT_FACTOR}x the wait for the trainer's first release) "
+            f"until {LEARN_RELEASES} releases, then max({MIN_LIMIT_S / 60:.0f} min, {INTERVAL_FACTOR}x the median "
+            "release interval")
 
 
 @dataclass(frozen=True)
@@ -62,6 +74,9 @@ class ReleaseStallWatch:
     release: Hashable | None = None  # the newest release seen (its LATEST identity)
     since: float | None = None  # the clock's start: the newest release, or the trainer's restart
     incarnation: Hashable | None = None  # the trainer launcher the clock belongs to
+    started: float | None = None  # when this launcher was first seen
+    observed: bool = False  # the pointer was read once in this launcher (a later change is its release)
+    first_wait: float | None = None  # this launcher's start to its first release
     released_at: float | None = None  # when this launcher's newest release was seen
     intervals: list[float] = field(default_factory=list)
     alerted: bool = False
@@ -71,7 +86,7 @@ class ReleaseStallWatch:
             return float(self.config.limit_s)
         if len(self.intervals) >= LEARN_RELEASES - 1:
             return max(MIN_LIMIT_S, INTERVAL_FACTOR * statistics.median(self.intervals))
-        return DEFAULT_LIMIT_S
+        return max(DEFAULT_LIMIT_S, FIRST_WAIT_FACTOR * (self.first_wait or 0.0))
 
     def observe(self, now: float, *, release: Hashable | None, incarnation: Hashable, read: bool = True) -> Verdict:
         """One check. ``release``: the identity of the store's LATEST release (None: none
@@ -79,15 +94,21 @@ class ReleaseStallWatch:
         ``incarnation``: the trainer launcher (a new one restarts the clock)."""
         recovered = False
         if incarnation != self.incarnation:
-            self.incarnation = incarnation
-            self.released_at = None  # an interval across a restart counts the restart
+            self.incarnation, self.started, self.observed = incarnation, now, False
+            self.first_wait = self.released_at = None  # intervals and waits are this launcher's
+            self.intervals = []
             self.since = now if self.release is not None else None
             self.alerted = False
         if read and release is not None and release != self.release:
-            if self.release is not None and self.released_at is not None:
-                self.intervals = (self.intervals + [now - self.released_at])[-_INTERVALS_KEPT:]
-            self.release, self.since, self.released_at = release, now, now
+            if self.observed:  # published while this launcher ran (not a release it found)
+                if self.released_at is not None:
+                    self.intervals = (self.intervals + [now - self.released_at])[-_INTERVALS_KEPT:]
+                elif self.first_wait is None:
+                    self.first_wait = now - self.started
+                self.released_at = now
+            self.release, self.since = release, now
             recovered, self.alerted = self.alerted, False
+        self.observed = self.observed or read
         if self.since is None:
             return Verdict(OK, recovered=recovered)
         stalled, limit = max(0.0, now - self.since), self.limit_s()

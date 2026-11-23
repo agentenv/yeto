@@ -726,6 +726,7 @@ class Run:
             return False
         for line in self.breakers.deprecations():
             _log(f"preflight: deprecated: {line}")
+        self.log_release_stall()
         if self.stall_timeout_s() <= 0:
             _log("preflight: --rl-stall-timeout 0 disables the trainer's hang detection; run up refuses it "
                  "(the monitor's silence backstop is 4x this timeout)")
@@ -2172,6 +2173,19 @@ class Run:
             return (None if raw is None else release_identity(json.loads(raw))), True
         except Exception:  # noqa: BLE001 - checked again next poll
             return None, False
+
+    def log_release_stall(self) -> None:
+        """The preflight line of ``run.release_stall``: on by default, so it is stated."""
+        from yeto.rl.release_stall import ALERT_EVENT, limit_phrase  # noqa: PLC0415
+
+        entry = self.breakers.entry("run.release_stall")
+        if not entry.enabled:
+            _log(f"preflight: run.release_stall is off ({entry.sources['enabled'].location})")
+            return
+        what = "stops the trainer (STOP flag)" if entry.action == "stop" else f"logs {ALERT_EVENT} (no stop)"
+        _log(f"preflight: run.release_stall is on: after the first policy release, no new release for "
+             f"{limit_phrase(entry.params['limit_s'])} {what}. Set breakers.run.release_stall "
+             '{"limit_s": N}, {"action": "stop"} to stop the trainer, or {"enabled": false} to turn it off')
 
     def release_stall_check(self, now: float) -> str | None:
         """Alert on a trainer that stopped publishing releases (``run.release_stall``);

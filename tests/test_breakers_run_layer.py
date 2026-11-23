@@ -307,16 +307,38 @@ def test_release_stall_alerts_once_per_stretch_after_the_default_limit():
     assert v.state == rs.OK and v.recovered
 
 
+def _published(w, every_s, n, *, start=0.0, incarnation=1):
+    w.observe(start, release=None, incarnation=incarnation)
+    for i in range(n):
+        w.observe(start + (i + 1) * every_s, release=f"r{i}", incarnation=incarnation)
+
+
 def test_the_release_stall_limit_is_learned_from_the_release_interval():
     w = _watch()
-    for i in range(rs.LEARN_RELEASES):
-        w.observe(i * 1200.0, release=f"r{i}", incarnation=1)
+    _published(w, 1200.0, rs.LEARN_RELEASES)
     assert w.limit_s() == max(rs.MIN_LIMIT_S, rs.INTERVAL_FACTOR * 1200.0)
     w = _watch()
-    for i in range(rs.LEARN_RELEASES):
-        w.observe(i * 60.0, release=f"r{i}", incarnation=1)
+    _published(w, 60.0, rs.LEARN_RELEASES)
     assert w.limit_s() == rs.MIN_LIMIT_S
     assert _watch(limit_s=900).limit_s() == 900
+
+
+def test_a_slow_first_release_widens_the_limit_until_the_interval_is_learned():
+    w = _watch()
+    _published(w, 2 * 3600.0, 1)  # the first release after 2 h (a release every 6 long agentic steps)
+    assert w.limit_s() == rs.FIRST_WAIT_FACTOR * 2 * 3600.0
+    assert w.observe(2 * 3600.0 + 3 * 3600.0, release="r0", incarnation=1).state == rs.OK
+    w = _watch()
+    _published(w, 600.0, 1)
+    assert w.limit_s() == rs.DEFAULT_LIMIT_S
+
+
+def test_a_release_found_at_the_start_is_no_first_wait():
+    w = _watch()
+    w.observe(0, release="r5", incarnation=1)  # an earlier launch published it
+    assert w.first_wait is None and w.limit_s() == rs.DEFAULT_LIMIT_S
+    w.observe(9000, release="r6", incarnation=1)
+    assert w.first_wait == 9000
 
 
 def test_a_trainer_restart_starts_the_release_clock_again():
@@ -394,6 +416,15 @@ def test_release_stall_action_stop_stops_the_trainer_through_the_stop_flag(make_
     assert downs and downs[0].startswith(rs.STOP_EVENT)
     assert run.state["release_stall"]["stop_reason"] == "breaker:run.release_stall"
     assert [e["state"] for e in _events(run) if e["name"] == "run.release_stall"] == ["trip"]
+
+
+def test_preflight_states_the_release_stall(make_run, monkeypatch, capsys):
+    monkeypatch.setattr("yeto.launch_preflight.modal_sdk_problem", lambda env: None)
+    assert make_run(budget={"wall_h": 10}).preflight()
+    out = capsys.readouterr().out
+    assert "run.release_stall is on" in out and "(no stop)" in out and '{"action": "stop"}' in out
+    assert make_run(budget={"wall_h": 10}, breakers={"run": {"release_stall": {"enabled": False}}}).preflight()
+    assert "run.release_stall is off (breakers.run.release_stall.enabled)" in capsys.readouterr().out
 
 
 def test_the_release_stall_can_be_turned_off(make_run):
