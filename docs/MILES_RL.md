@@ -1228,7 +1228,8 @@ the pinned Megatron-Bridge reads works; nothing is model-specific:
   checks the same against its Megatron-Bridge provider.
 - On every trainer rank a model-provider hook freezes each chunk before DDP
   wraps it (`partial_experts/in_place.py`; experts must be individual
-  parameters, `NVTE_GROUPED_LINEAR_SINGLE_PARAM=0`, which the island sets).
+  parameters, `NVTE_GROUPED_LINEAR_SINGLE_PARAM=0`; the island sets both
+  switches and forwards them to the Ray workers through the job `runtime_env`).
   The router's expert bias stays fixed (`--moe-router-bias-update-rate 0`).
 - Only the selected experts have FP32 masters, so Miles' full-parameter
   export and the syncer fragments carry only them; the layout check requires
@@ -1261,6 +1262,17 @@ the generic recipe refuses them, and the K3.1 recipe refuses `in_place` ones.
   `--rl-sampler-engine sglang` declares samplers that serve MoE LoRA; with
   `--rl-sampler-engine vllm` it names the reason. Behind the syncer only
   `attention` is accepted.
+
+Known limitation (`--tuning full`): the yeto optimizer patch
+(`models/kimi_k31/ports_runtime.py`) does not reach the Ray workers today. The
+island sets `YETO_K31_PARTIAL_EXPERTS_PORTS` and installs the patch in the
+driver after Ray has started; the optimizer is built in the trainer actors,
+which receive neither `YETO_K31_PARTIAL_EXPERTS_PORTS` nor
+`YETO_K31_PARTIAL_EXPERT_LR` (the job `runtime_env` does not forward them and
+`sitecustomize` has no K3.1 branch). So the FP32 optimizer-master check does
+not run in the workers, `YETO_K31_PARTIAL_EXPERT_LR` has no effect, and the
+trainer uses Miles' default optimizer. The expert freeze is unaffected: it is
+Miles' `--partial-experts-selection` argument, which every actor receives.
 
 A trainer island (`--rl-sample-role trainer`) reads groups from the store, not
 `--data` rows: its `--data` may be a local file without a revision.
