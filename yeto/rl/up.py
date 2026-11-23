@@ -2863,6 +2863,113 @@ def _log_sigterm_during_drain(signum: int, frame: Any) -> None:  # noqa: ARG001
          "(cutting it short would leave machines billing)")
 
 
+FORCED_EXIT_CODE = 128 + int(signal.SIGINT)  # a second Ctrl-C: the shell's own convention
+
+
+class CtrlC:
+    """SIGINT (Ctrl-C) of ``run up``: the SIGTERM exit, announced, with a forced second.
+
+    Without it a ``run up`` started in the background of a non-interactive shell
+    (``cmd &`` in a script, as a launcher script does) ignores SIGINT: POSIX starts
+    that job with SIGINT set to SIG_IGN and Python keeps an inherited SIG_IGN, so
+    ``kill -INT`` / Ctrl-C did nothing and only SIGTERM ended the monitor. In the
+    foreground the default KeyboardInterrupt ended it with a traceback, and a second
+    Ctrl-C cut the in-process exit drain short (only SIGTERM was held during it).
+
+    The first SIGINT logs one line (what stops, what keeps running or is released)
+    and then takes exactly what SIGTERM does at that moment: the handler installed
+    for SIGTERM is called (in-process: ``SystemExit(143)`` through the exit drain;
+    during the drain: logged and held), and with the default SIGTERM disposition
+    (``controller: subprocess``) the process ends by SIGTERM, leaving the pool loops,
+    the trainer and the dashboard running in their own sessions as SIGTERM does.
+    A second SIGINT ends the process at once (exit code 130) without a traceback,
+    saying what may still bill."""
+
+    def __init__(self, run: Run):
+        self.run = run
+        self.stopping = False
+        self._installed = False
+        self._old: Any = None
+
+    def install(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            return
+        try:
+            self._old = signal.signal(signal.SIGINT, self.handle)
+            self._installed = True
+        except (ValueError, OSError):
+            pass
+
+    def restore(self) -> None:
+        """Back to the earlier SIGINT handler, unless a Ctrl-C started the exit (then a
+        second one must still force it)."""
+        if self._installed and not self.stopping:
+            try:
+                signal.signal(signal.SIGINT, self._old if self._old is not None else signal.SIG_DFL)
+            except (ValueError, OSError):
+                pass
+            self._installed = False
+
+    def plan(self) -> str:
+        """What the SIGTERM exit does with the machines, as the first Ctrl-C line says it."""
+        run = self.run
+        try:
+            pools = run.pools_phrase()
+        except Exception:  # noqa: BLE001 - a log line only
+            pools = "the sampler pools"
+        if run.in_process:
+            controller = getattr(run, "controller", None)
+            if controller is not None and controller.stopped:
+                return (f"the in-process controller already stopped {pools}; the trainer and the dashboard keep "
+                        "running in their own sessions")
+            if bool(rollout_section(run.cfg).get("drain_on_exit", True)):
+                return (f"draining and releasing {pools} before exit (rollout.drain_on_exit); the trainer and the "
+                        "dashboard keep running in their own sessions. Ctrl-C again forces the exit now and "
+                        "leaves the machines billing")
+            return (f"rollout.drain_on_exit is false: leaving {pools} running and billing, undriven, and the "
+                    "trainer and the dashboard running; release them with `yeto run down --config <run.json>`")
+        return (f"leaving {pools} (the pool loops), the trainer and the dashboard running in their own sessions, "
+                "still billing: release them with `yeto run down --config <run.json>`; a later `yeto run up` of "
+                "this config adopts them")
+
+    def handle(self, signum: int, frame: Any) -> None:
+        if self.stopping:
+            self._say("second Ctrl-C: forcing the exit now, the exit steps are cut short; "
+                      + self._left_running()
+                      + f" (exit code {FORCED_EXIT_CODE})")
+            os._exit(FORCED_EXIT_CODE)
+        self.stopping = True
+        try:
+            plan = self.plan()
+        except Exception:  # noqa: BLE001 - a log line only: the exit itself must still happen
+            plan = "the machines are kept or released as on SIGTERM"
+        self._say(f"Ctrl-C: stopping the run up monitor, as on SIGTERM: {plan}")
+        term = signal.getsignal(signal.SIGTERM)
+        if callable(term):
+            term(int(signal.SIGTERM), frame)
+        elif term == signal.SIG_DFL:
+            signal.raise_signal(signal.SIGTERM)
+        else:  # SIGTERM ignored (inherited SIG_IGN): still the exit SIGTERM would take with a handler
+            raise SystemExit(128 + int(signal.SIGTERM))
+
+    def _left_running(self) -> str:
+        try:
+            pools = self.run.pools_phrase()
+        except Exception:  # noqa: BLE001 - a log line only
+            pools = "the sampler pools"
+        return (f"{pools}, the trainer and the dashboard may STILL BE RUNNING and billing: check with "
+                "`yeto run status --config <run.json>` and release them with `yeto run down --config <run.json>`")
+
+    @staticmethod
+    def _say(msg: str) -> None:
+        # in a signal handler: a print that collides with the main thread's write
+        # (reentrant buffered write) must not turn the stop into a traceback
+        try:
+            _log(msg)
+        except (RuntimeError, OSError, ValueError):
+            pass
+
+
 class RunUpRefused(RuntimeError):
     """``run up`` must not go on; the message says why and what to do."""
 
@@ -3001,6 +3108,9 @@ def main(args: Any) -> int:
         # SIGTERM (systemd stop, kill) ends the process through SystemExit, so the exit
         # path (the drain, or with drain_on_exit false the undriven banner) runs
         signal.signal(signal.SIGTERM, _exit_on_sigterm)
+    # Ctrl-C from here on: the SIGTERM exit (CtrlC), announced; a second Ctrl-C forces it
+    ctrl_c = CtrlC(run)
+    ctrl_c.install()
     rc = 1
     try:
         # in the try: a SIGTERM while the pools start still drains what they ordered
@@ -3012,6 +3122,7 @@ def main(args: Any) -> int:
     finally:
         if run.in_process and not run.drain_controller():
             rc = rc or 1
+        ctrl_c.restore()
     return rc
 
 
