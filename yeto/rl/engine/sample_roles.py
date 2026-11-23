@@ -81,13 +81,17 @@ from types import SimpleNamespace
 from typing import Any
 
 from .data_split import DataSlot  # noqa: F401 - re-exported (callers import it from here)
-from .selection import FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
+from .selection import (
+    DECOUPLED_SYNC_PRESET,
+    FULL_PARAMETER_SYNC_PRESET,
+    SAO_STREAMING_SYNC_PRESET,
+    STRICT_AVG_SYNC_PRESET,
+)
 
 BOTH, SAMPLER, TRAINER, CONVERTIBLE = "both", "sampler", "trainer", "convertible"
 SAMPLE_ROLES = (BOTH, SAMPLER, TRAINER, CONVERTIBLE)
 # --rl-sampler-follow: what a synced group's samplers load (module doc)
 FOLLOW_MERGED, FOLLOW_TRAINER = "merged", "trainer"
-DECOUPLED_SYNC_PRESET = "decoupled"
 
 # groups a sampler may have ahead of the trainer's last released read position,
 # in units of one round (rollout batch), when --rl-sampler-max-backlog-rounds is unset
@@ -610,7 +614,7 @@ def _as_full_parameter_sampler(out: Any) -> None:
     """A sampler of a full-parameter synced group runs as a pair's full-parameter
     sampler: a no-sync island with ``--tuning full`` and the default sync preset
     (it syncs nothing, so no fragment or merge option reaches its command)."""
-    out.rl_sync_preset = "strict-avg"
+    out.rl_sync_preset = STRICT_AVG_SYNC_PRESET
     out.tuning = "full"
     out.rl_sync_full_parameter_rounds = "sweep"
     out.rl_sync_matrix_merge = "avg"
@@ -625,7 +629,7 @@ def _as_lora_sampler(out: Any) -> None:
     nothing, so no fragment, pipeline or merge option reaches its command). It
     loads its trainer's LoRA releases; it keeps the trainer's LoRA rank and
     targets, so the released adapter fits its engines."""
-    out.rl_sync_preset = "strict-avg"
+    out.rl_sync_preset = STRICT_AVG_SYNC_PRESET
     out.tuning = "lora"
     out.rl_sync_matrix_merge = "avg"
     out.local_rl_rounds_per_sync = 1
