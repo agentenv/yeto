@@ -70,14 +70,13 @@ def resolved_for(*, argv: Sequence[str] | None = None, spec: Mapping[str, Any] |
     over the surfaces the process can see (non-strict: a conflict never stops a
     component here, ``run up`` refuses it before anything starts). None when nothing
     resolves; the snapshot then carries gauges only."""
-    from . import resolve as resolve_mod  # noqa: PLC0415
+    from .resolve import Sources, load_resolved, resolve  # noqa: PLC0415
 
     try:
         path = (env or {}).get(RESOLVED_ENV)
         if path and os.path.isfile(path):
-            return resolve_mod.load_resolved(path)
-        sources = resolve_mod.Sources(run_config=run_config, argv=argv, spec=spec, env=env)
-        return resolve_mod.resolve(sources, pool=pool, strict=False)
+            return load_resolved(path)
+        return resolve(Sources(run_config=run_config, argv=argv, spec=spec, env=env), pool=pool, strict=False)
     except Exception as error:  # noqa: BLE001 - status is observation only
         print(f"[breakers] status: settings not resolved ({type(error).__name__}: {error})", file=sys.stderr)
         return None

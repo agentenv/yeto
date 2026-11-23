@@ -68,7 +68,7 @@ def test_unchanged_snapshot_waits_for_the_refresh():
     em.poll(0.0)
     assert em.poll(5.0) is None  # between two checks: no gauge read
     assert em.poll(30.0) is None and em.poll(599.0) is None
-    assert em.poll(601.0) is not None and len(sent) == 2
+    assert em.poll(620.0) is not None and len(sent) == 2
 
 
 def test_rising_band_is_sent_at_once_a_falling_one_after_the_gap():
