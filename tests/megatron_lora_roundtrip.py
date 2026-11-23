@@ -69,12 +69,45 @@ RANK = 4
 TARGETS = ["linear_q", "linear_k", "linear_v", "linear_proj", "linear_fc1_gate", "linear_fc1_up", "linear_fc2"]
 
 
-def _model(tp: int, pp: int, ep: int):
+def _grouped_linears():
+    """CPU stand-ins for Transformer Engine's column/row grouped linears.
+
+    ``TEGroupedMLP`` (Miles' MoE experts, ``--moe-grouped-gemm``) builds its fc1/fc2
+    from TE's grouped linear, which has no CPU build. Bridge only reads its
+    ``num_gemms``, ``in_features``/``out_features``, ``config`` and the per-expert
+    ``weight<i>`` parameters when it injects and converts the grouped-expert LoRA;
+    nothing here runs a forward pass. Expert tensor parallelism is 1.
+    """
+
+    import torch
+
+    class GroupedLinear(torch.nn.Module):
+        def __init__(self, num_gemms, input_size, output_size, *, config, **_kwargs):
+            super().__init__()
+            self.num_gemms, self.config = num_gemms, config
+            self.in_features, self.out_features = input_size, output_size
+            for index in range(num_gemms):
+                weight = torch.nn.Parameter(torch.randn(output_size, input_size).to(config.params_dtype))
+                self.register_parameter(f"weight{index}", weight)
+
+    class ColumnGroupedLinear(GroupedLinear):
+        pass
+
+    class RowGroupedLinear(GroupedLinear):
+        pass
+
+    return ColumnGroupedLinear, RowGroupedLinear
+
+
+def _model(tp: int, pp: int, ep: int, *, grouped: bool):
+    import functools
+
     import torch
     from megatron.core import parallel_state as mpu
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
     from megatron.core.transformer import TransformerConfig
+    from megatron.core.transformer.moe.experts import GroupedMLPSubmodules, TEGroupedMLP
 
     moe = ep > 0
     config = TransformerConfig(
@@ -87,16 +120,36 @@ def _model(tp: int, pp: int, ep: int):
         # uneven stages (1 + 2 layers): the stages hold different adapter counts
         **(dict(num_layers_in_first_pipeline_stage=1) if pp == 2 else {}),
         **(dict(num_moe_experts=NUM_EXPERTS, moe_ffn_hidden_size=MOE_FFN, moe_router_topk=2,
-                expert_model_parallel_size=ep, moe_grouped_gemm=False, moe_token_dispatcher_type="alltoall")
+                expert_model_parallel_size=ep, expert_tensor_parallel_size=1,
+                moe_token_dispatcher_type="allgather")
            if moe else {}))
     config.share_embeddings_and_output_weights = False
+    spec = get_gpt_layer_local_spec(num_experts=NUM_EXPERTS if moe else None, moe_grouped_gemm=False,
+                                    qk_layernorm=True, normalization="RMSNorm")
+    if moe and grouped:
+        column, row = _grouped_linears()
+        moe_layer = spec.submodules.mlp  # partial(MoELayer, submodules=MoESubmodules(...))
+        moe_layer.keywords["submodules"].experts = functools.partial(
+            TEGroupedMLP, submodules=GroupedMLPSubmodules(linear_fc1=column, linear_fc2=row))
     torch.manual_seed(0)
-    return GPTModel(config=config, transformer_layer_spec=get_gpt_layer_local_spec(
-                        num_experts=NUM_EXPERTS if moe else None, moe_grouped_gemm=False,
-                        qk_layernorm=True, normalization="RMSNorm"),
+    return GPTModel(config=config, transformer_layer_spec=spec,
                     vocab_size=HF["vocab_size"], max_sequence_length=32,
                     share_embeddings_and_output_weights=False, position_embedding_type="rope",
                     pre_process=mpu.is_pipeline_first_stage(), post_process=mpu.is_pipeline_last_stage())
+
+
+def _bridge_sees_grouped_linears(model) -> None:
+    """Point Bridge's TE class checks at the stand-ins (and nothing else at TE)."""
+
+    from megatron.bridge.peft import utils as peft_utils
+
+    grouped = {type(m) for m in model.modules() if hasattr(m, "num_gemms")}
+    column = tuple(t for t in grouped if t.__name__.startswith("Column"))
+    row = tuple(t for t in grouped if t.__name__.startswith("Row"))
+    unused = type("NotTE", (), {})
+    peft_utils.HAVE_TE = bool(grouped)
+    peft_utils.TECL, peft_utils.TERL = column, row
+    peft_utils.TELayerNormColumnParallelLinear = peft_utils.TELinear = unused
 
 
 class _Bridge:
@@ -144,18 +197,28 @@ class _Leaf:
                 p.copy_(p.main_param.view_as(p).to(p.dtype))
 
 
+def _miles_package(name: str) -> types.ModuleType:
+    for parent in ("miles", "miles.backends", "miles.backends.megatron_utils", "miles.utils"):
+        sys.modules.setdefault(parent, types.ModuleType(parent))
+    module = sys.modules[name] = types.ModuleType(name)
+    parent, _, leaf = name.rpartition(".")
+    setattr(sys.modules[parent], leaf, module)
+    return module
+
+
+def _install_replay_stub() -> None:
+    """The pinned (Miles-patched) Megatron-Core registers every MoE router with
+    Miles' routing replay manager; outside Miles it is a no-op."""
+
+    _miles_package("miles.utils.replay_base").routing_replay_manager = mock.MagicMock()
+
+
 def _install_miles_stubs(bridge) -> None:
     """``state_plugin`` reaches Bridge through two Miles helpers; provide them."""
 
-    hf_export = types.ModuleType("miles.backends.megatron_utils.hf_export")
-    hf_export._get_hf_bridge = lambda _checkpoint: bridge
-    utils = types.ModuleType("miles.utils.megatron_bridge_utils")
-    utils.patch_megatron_model = lambda _model: contextlib.nullcontext()
-    for name in ("miles", "miles.backends", "miles.backends.megatron_utils", "miles.utils"):
-        sys.modules.setdefault(name, types.ModuleType(name))
-    sys.modules["miles.backends.megatron_utils.hf_export"] = hf_export
-    sys.modules["miles.utils.megatron_bridge_utils"] = utils
-    sys.modules["miles.utils"].megatron_bridge_utils = utils
+    _miles_package("miles.backends.megatron_utils.hf_export")._get_hf_bridge = lambda _checkpoint: bridge
+    _miles_package("miles.utils.megatron_bridge_utils").patch_megatron_model = (
+        lambda _model: contextlib.nullcontext())
 
 
 def _perturb(name: str, shape, scale: float):
@@ -167,7 +230,7 @@ def _perturb(name: str, shape, scale: float):
     return scale * torch.randn(tuple(shape), generator=torch.Generator().manual_seed(seed))
 
 
-def _rank_main(rank: int, world: int, tp: int, pp: int, ep: int, port: int, out_path: str) -> None:
+def _rank_main(rank: int, world: int, tp: int, pp: int, ep: int, grouped: bool, port: int, out_path: str) -> None:
     import torch
     import torch.distributed as dist
 
@@ -177,20 +240,23 @@ def _rank_main(rank: int, world: int, tp: int, pp: int, ep: int, port: int, out_
     from megatron.core import parallel_state as mpu
 
     mpu.initialize_model_parallel(tensor_model_parallel_size=tp, pipeline_model_parallel_size=pp,
-                                  expert_model_parallel_size=max(ep, 1))
-    model = _model(tp, pp, ep)
+                                  expert_model_parallel_size=max(ep, 1), expert_tensor_parallel_size=1)
+    _install_replay_stub()
+    model = _model(tp, pp, ep, grouped=grouped)
     sys.meta_path.insert(0, _StubFinder())  # after the model: Megatron-Core must not see a TE stand-in
     torch.cuda.current_device = lambda: None
 
-    from megatron.bridge.peft import utils as peft_utils
     from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 
-    peft_utils.HAVE_TE = False  # local layer spec: the TE classes are stand-ins here
+    _bridge_sees_grouped_linears(model)
 
     lora = CanonicalLoRA(target_modules=TARGETS, dim=RANK, alpha=RANK, dropout=0.0,
                          lora_A_init_method="xavier", lora_B_init_method="xavier", share_expert_adapters=False)
     modules = lora([model], training=True)
     adapters = [p for chunk in modules for p in chunk.parameters() if p.requires_grad]
+    # grouped experts: Bridge's GroupedExpertLinearAdapter, one [local experts, ...] parameter
+    grouped_adapters = sum(1 for p in adapters if p.ndim == 3)
+    assert (grouped_adapters > 0) == (ep > 0 and grouped), grouped_adapters
     leaf = _Leaf(adapters)
     # FP32 detail the bf16 copy cannot hold: proves the export reads the masters.
     for p in adapters:
@@ -214,7 +280,7 @@ def _rank_main(rank: int, world: int, tp: int, pp: int, ep: int, port: int, out_
     box = [shapes]
     dist.broadcast_object_list(box, src=0)
     shapes = box[0]
-    result = {"names": len(shapes)}
+    result = {"names": len(shapes), "grouped_adapters": grouped_adapters}
 
     # 2. apply a perturbed policy on every rank, export it back
     target = {name: (_perturb(name, shape, 0.05)).float() for name, shape in shapes.items()}
@@ -241,11 +307,12 @@ def main(argv: list[str]) -> int:
     import torch.multiprocessing as mp
 
     tp, pp, ep, dp, out_path = int(argv[0]), int(argv[1]), int(argv[2]), int(argv[3]), argv[4]
+    grouped = argv[5:] != ["sequential"]
     world = tp * pp * dp
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    mp.spawn(_rank_main, args=(world, tp, pp, ep, port, out_path), nprocs=world)
+    mp.spawn(_rank_main, args=(world, tp, pp, ep, grouped, port, out_path), nprocs=world)
     print(Path(out_path).read_text())
     return 0
 

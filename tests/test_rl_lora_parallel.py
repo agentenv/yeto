@@ -36,6 +36,7 @@ class _Mapping:
 
     def __init__(self, hf_param: str, dim: int | None, tp_size: int = 1, tp_rank: int = 0):
         self.hf_param, self._dim, self.tp_size, self.tp_rank = hf_param, dim, tp_size, tp_rank
+        self.ep_size = 1
 
     def local_hf_param_specs(self):
         return (SimpleNamespace(name=self.hf_param, split_count=1),)
@@ -122,17 +123,117 @@ def test_a_pipeline_stage_names_its_bindings_without_a_collective(monkeypatch):
     assert torch.equal(a.from_hf(full_a), full_a[:, 3:])
 
 
+class _ExpertBridge:
+    """Bridge's per-expert name resolution: expert ``g`` of a grouped linear is
+    ``<prefix>.weight<g>``; Qwen3-MoE names it ``model.layers.L.mlp.experts.g.*``."""
+
+    def __init__(self, tasks, *, packed: bool = False):
+        self._tasks, self._packed = tasks, packed
+
+    def build_adapter_conversion_tasks(self, _model):
+        return self._tasks
+
+    def mapping_registry(self):
+        return "registry"
+
+    def _resolve_hf_adapter_param_name(self, registry, prefix, suffix, base_suffix, key):
+        assert registry == "registry"
+        layer = prefix.split(".")[2]
+        expert = "" if self._packed else f".{base_suffix.removeprefix('.weight')}"
+        proj = {"adapter_gate": "gate_proj", "adapter_up": "up_proj", None: "down_proj"}[key]
+        side = "lora_A" if suffix == ".linear_in.weight" else "lora_B"
+        return f"model.layers.{layer}.mlp.experts{expert}.{proj}.{side}.weight"
+
+
+def _expert_actor(monkeypatch, *, ep_rank: int, num_local: int = 2, packed: bool = False, etp: int = 1):
+    model = torch.nn.Module()
+    prefix = "decoder.layers.0.mlp.experts.linear_fc2"
+    a = torch.nn.Parameter(torch.zeros(num_local, 4, 8, dtype=torch.bfloat16))
+    b = torch.nn.Parameter(torch.zeros(num_local, 6, 4, dtype=torch.bfloat16))
+    model.a, model.b = a, b
+
+    def side(param):
+        mapping = SimpleNamespace(hf_param="unused", tp_size=etp, ep_rank=ep_rank, ep_size=2)
+        return SimpleNamespace(param_weight=param, param_name="p", megatron_module=None, mapping=mapping)
+
+    task = SimpleNamespace(global_base_prefix=prefix, adapter_key=None, requires_expert_splits=True,
+                           linear_in_task=side(a), linear_out_task=side(b))
+    bridge = SimpleNamespace(_model_bridge=_ExpertBridge({prefix: [task]}, packed=packed))
+    hf_export = ModuleType("miles.backends.megatron_utils.hf_export")
+    hf_export._get_hf_bridge = lambda _path: bridge
+    monkeypatch.setitem(sys.modules, hf_export.__name__, hf_export)
+    return SimpleNamespace(model=[model], args=SimpleNamespace(hf_checkpoint="/ckpt")), a, b
+
+
+def test_grouped_expert_bindings_name_each_global_expert(monkeypatch):
+    actor, a, b = _expert_actor(monkeypatch, ep_rank=1)
+
+    bindings = sp.adapter_bindings(actor)
+
+    names = [(b_.name.removeprefix("base_model.model.model.layers.0.mlp.experts."), b_.slot) for b_ in bindings]
+    # EP rank 1 holds global experts 2 and 3
+    assert names == [("2.down_proj.lora_A.weight", 0), ("2.down_proj.lora_B.weight", 0),
+                     ("3.down_proj.lora_A.weight", 1), ("3.down_proj.lora_B.weight", 1)]
+    assert {id(x.parameter) for x in bindings} == {id(a), id(b)}
+    with pytest.raises(sp.StatePluginError, match="Bridge collective export"):
+        bindings[0].to_hf(a)
+
+
+def test_grouped_expert_apply_stacks_the_slots_in_fp32(monkeypatch):
+    actor, a, _b = _expert_actor(monkeypatch, ep_rank=0)
+    bindings = [x for x in sp.adapter_bindings(actor) if x.parameter is a]
+    values = {x.name: torch.full((4, 8), 0.1 + x.slot, dtype=torch.float32) for x in bindings}
+
+    targets = sp._apply_targets(bindings, values)
+
+    assert targets[id(a)].dtype == torch.float32 and targets[id(a)].shape == a.shape
+    assert torch.equal(targets[id(a)][1], values[bindings[1].name])
+    with pytest.raises(sp.StatePluginError, match=r"expects \(4, 8\)"):
+        bindings[0].from_hf(torch.zeros(8, 4))
+    with pytest.raises(sp.StatePluginError, match="do not cover 2 experts"):
+        sp._apply_targets(bindings[:1], values)
+
+
+def test_grouped_expert_lora_refuses_stacked_names_and_expert_tp(monkeypatch):
+    actor, _a, _b = _expert_actor(monkeypatch, ep_rank=0, packed=True)
+    with pytest.raises(sp.StatePluginError, match="no per-expert HF names"):
+        sp.adapter_bindings(actor)
+    actor, _a, _b = _expert_actor(monkeypatch, ep_rank=0, etp=2)
+    with pytest.raises(sp.StatePluginError, match="expert tensor parallel size 1"):
+        sp.adapter_bindings(actor)
+
+
+def test_sequential_expert_lora_under_ep_is_refused(monkeypatch):
+    actor = _actor_with_stage(monkeypatch, range(1))
+    (task,) = next(iter(_actor_tasks(actor).values()))
+    task.global_base_prefix = "decoder.layers.0.mlp.experts.local_experts.0.linear_fc2"
+    task.linear_in_task.mapping.ep_size = 2
+    with pytest.raises(sp.StatePluginError, match="SequentialMLP experts"):
+        sp.adapter_bindings(actor)
+
+
+def _actor_tasks(actor):
+    from miles.backends.megatron_utils.hf_export import _get_hf_bridge
+
+    return _get_hf_bridge("/ckpt")._model_bridge.build_adapter_conversion_tasks(actor.model)
+
+
 # ----------------------------------------------------------------------------- real Megatron-Core and Bridge
 _REAL = {key: os.environ.get(key) for key in ("YETO_MEGATRON_PYTHON", "YETO_MEGATRON_LM_PATH",
                                               "YETO_MEGATRON_BRIDGE_PATH")}
 
 
-def _run(tmp_path, tp: int, pp: int, ep: int, dp: int, *, timeout: int = 900) -> dict:
-    out = tmp_path / f"lora-{tp}-{pp}-{ep}-{dp}.json"
+def _spawn(tmp_path, tp: int, pp: int, ep: int, dp: int, *extra: str, timeout: int = 900):
+    out = tmp_path / f"lora-{tp}-{pp}-{ep}-{dp}{''.join(extra)}.json"
     env = {**os.environ, "OMP_NUM_THREADS": "2"}
     proc = subprocess.run([_REAL["YETO_MEGATRON_PYTHON"], "-I", str(REPO / "tests/megatron_lora_roundtrip.py"),
-                           str(tp), str(pp), str(ep), str(dp), str(out)], env=env, capture_output=True, text=True,
-                          timeout=timeout)
+                           str(tp), str(pp), str(ep), str(dp), str(out), *extra], env=env, capture_output=True,
+                          text=True, timeout=timeout)
+    return proc, out
+
+
+def _run(tmp_path, tp: int, pp: int, ep: int, dp: int) -> dict:
+    proc, out = _spawn(tmp_path, tp, pp, ep, dp)
     assert proc.returncode == 0, proc.stderr[-4000:]
     return json.loads(out.read_text())
 
@@ -148,3 +249,28 @@ def test_real_canonical_lora_round_trip_matches_across_tp_and_pp(tmp_path):
         result = _run(tmp_path, tp, pp, 0, dp)
         assert result["ok"] and result["ranks"] == tp * pp * dp
         assert result["shapes"] == reference["shapes"], (tp, pp, dp)
+
+
+@pytest.mark.skipif(not all(_REAL.values()), reason="needs YETO_MEGATRON_PYTHON / _LM_PATH / _BRIDGE_PATH")
+def test_real_grouped_expert_lora_round_trip_matches_across_ep_tp_and_pp(tmp_path):
+    """Grouped-expert LoRA (Bridge ``GroupedExpertLinearAdapter``, one pair per
+    expert): EP2 alone and with TP2 / PP2 export every expert of every layer under
+    its own PEFT name with the EP1 shapes, and apply-then-export is bit-exact."""
+
+    reference = _run(tmp_path, 1, 1, 1, 1)
+    experts = 3 * 4 * 6  # layers x experts x (gate, up, down) x (A, B)
+    assert reference["ok"] and reference["grouped_adapters"] and reference["names"] == 3 * 4 * 2 + experts
+    for tp, pp, ep, dp in ((1, 1, 2, 2), (2, 1, 2, 1), (1, 2, 2, 2), (2, 2, 2, 1)):
+        result = _run(tmp_path, tp, pp, ep, dp)
+        assert result["ok"] and result["grouped_adapters"], (tp, pp, ep, dp)
+        assert result["shapes"] == reference["shapes"], (tp, pp, ep, dp)
+
+
+@pytest.mark.skipif(not all(_REAL.values()), reason="needs YETO_MEGATRON_PYTHON / _LM_PATH / _BRIDGE_PATH")
+def test_real_sequential_expert_lora_under_ep_is_refused(tmp_path):
+    """Bridge exports SequentialMLP expert adapters without an EP gather, so the
+    main rank would miss half the experts: the bindings refuse it by name."""
+
+    proc, _out = _spawn(tmp_path, 1, 1, 2, 2, "sequential")
+    assert proc.returncode != 0
+    assert "SequentialMLP experts" in proc.stderr and "--moe-grouped-gemm" in proc.stderr
