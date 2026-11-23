@@ -134,6 +134,20 @@ once every shard has ended. The consumed watermark stays one position in the
 merged index; :meth:`FileSampleBuffer.shard_positions` turns it into the
 per-shard positions (the merged index is durable, so a restore from a cut
 resumes every shard where that cut left it).
+
+Data end by the task dispenser. A sampler whose store dispenser settled every
+task (``rl_sampler_data_ended``: ``DispenseEnded``, a state of the ledger that
+never changes back, not the end of the sampler process) ends its shard with an
+end record naming the dispenser plan (``"dispense": {"namespace", "plan"}``).
+Every group of that plan was written before its task settled, so once such a
+record is read and every shard read once more, no shard gets another group of
+that plan. The merged index then ends even when some expected shards wrote no
+end record (a ``--rl-buffer-shards`` index no sampler took, a sampler that
+stopped and never came back), provided each of them holds groups of settled
+plans only: a shard with a group of another dispenser or of no dispenser keeps
+the data going (its sampler writes its own end). A sampler that only stopped
+(preempted, scaled down, restarted) writes no end record and ends nothing. A
+dispenser that has not written a single group by then is not waited for.
 """
 
 from __future__ import annotations
@@ -149,7 +163,7 @@ import re
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
@@ -824,6 +838,14 @@ def open_trainer_buffer(store: CheckpointStore | ObjectStore, *, batch_size: int
                             merge_shards=merge, expected_shards=named if merge and named else None, **kwargs)
 
 
+def _dispense_plan_of(record: Mapping[str, Any]) -> str | None:
+    """The store dispenser plan a group record was sampled under (its round record's
+    ``dispense_plan``); None for a group of any other prompt source."""
+    sampler_round = record.get("sampler_round")
+    plan = sampler_round.get("dispense_plan") if isinstance(sampler_round, Mapping) else None
+    return str(plan) if plan else None
+
+
 class FileSampleBuffer:
     """:class:`~yeto.rl.engine.trainer_lifecycle.DurableSampleBuffer` over a store
     (a :class:`CheckpointStore`, or an :class:`ObjectStore` at the store root).
@@ -907,6 +929,13 @@ class FileSampleBuffer:
         self.merge_events: Callable[..., None] | None = print_merge_event if merge_shards else None
         self._shard_readers: dict[str, JsonlIndex | ObjectIndex] = {}
         self._shards_ended: set[str] = set()
+        # the data end by the task dispenser (module doc): per shard the dispenser plans
+        # of its merged groups (None: a group of no store dispenser), the shards whose end
+        # record says their dispenser settled every task, and whether a whole merge pass
+        # has run since the first such end record was read
+        self._shard_plans: dict[str, set[str | None]] = {}
+        self._dispense_ends: dict[str, dict[str, Any]] = {}
+        self._dispense_armed = False
         self._foreign_shards: set[str] = set()  # shards seen but not expected (skipped)
         self.batch_size = int(batch_size)
         self.arrival_window_s = float(arrival_window_s)
@@ -985,10 +1014,15 @@ class FileSampleBuffer:
         with hold() if callable(hold) else nullcontext():
             yield
 
-    def mark_data_end(self) -> None:
+    def mark_data_end(self, *, dispense: Mapping[str, Any] | None = None) -> None:
         """The samplers will append nothing more. A shard writer that lost its shard
-        (:class:`ShardFenced`) cannot end it: the owner may still write."""
+        (:class:`ShardFenced`) cannot end it: the owner may still write.
+        ``dispense``: the shard ends because its store dispenser settled every task
+        (``StoreDispensedPrompts.end_detail``: namespace, plan); the merger then ends
+        the shards that cannot get a group of that plan any more (module doc)."""
         who = {} if self._writer is None else {"incarnation": self._writer}
+        if dispense:
+            who["dispense"] = dict(dispense)
         self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "end": True, **who})
 
     def _write_record(self, make: Callable[[int], dict]) -> None:
@@ -1198,6 +1232,8 @@ class FileSampleBuffer:
             self._shard_of.append(shard)
             self._shard_pos_of.append(shard_pos)
             self._entries.append(_entry(record))
+            if shard is not None:
+                self._shard_plans.setdefault(shard, set()).add(_dispense_plan_of(record))
 
     def _absorb_non_group(self, record: Mapping[str, Any]) -> None:
         """A v2 record of the merged index: the format marker, or a shard's ownership
@@ -1318,6 +1354,10 @@ class FileSampleBuffer:
                     self._drop_fenced(shard, owner, record)
                 elif record.get("end"):
                     self._shards_ended.add(shard)
+                    plan = (record.get("dispense") or {}).get("plan") if isinstance(record.get("dispense"),
+                                                                                    Mapping) else None
+                    if plan:
+                        self._dispense_ends[shard] = dict(record["dispense"])
                 elif int(record["pos"]) >= merged:
                     taken = True
                     more = {} if owner is None else {"shard_epoch": owner.epoch}
@@ -1341,6 +1381,10 @@ class FileSampleBuffer:
         expected = set(self._shard_readers) if self._expected_shards is None else self._expected_shards
         if expected and self._shards_ended >= expected:
             merged.append({"schema": SCHEMA, "end": True})
+        elif expected and (settled_end := self._dispense_settled_end(expected, merged)) is not None:
+            merged.append({"schema": SCHEMA, "end": True, **settled_end})
+        if self._dispense_ends:
+            self._dispense_armed = True  # every shard is read once more after the first one
         if not self._format_marked and any(owner is not None for owner in self._shard_owner.values()):
             # before the first record merged from a shard with ownership records (module doc)
             merged.insert(0, {"schema": OWNER_SCHEMA, "marker": FORMAT_MARKER, "note": _MARKER_NOTE})
@@ -1349,6 +1393,31 @@ class FileSampleBuffer:
             for shard, records in self._shard_pending.items():
                 done = self._shard_next.get(shard, 0)
                 self._shard_pending[shard] = [r for r in records if r["shard_pos"] >= done]
+
+    def _dispense_settled_end(self, expected: Iterable[str],
+                              pending: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+        """The fields of the merged end record when the task dispenser ended the data
+        although some expected shards wrote no end record (module doc, data end by the
+        task dispenser), else None. Every shard not ended must hold groups of the
+        settled dispensers only (none at all: a shard index no sampler took, or whose
+        sampler stopped and never came back); the shards were all read in this pass,
+        after the first such end record was read (``_dispense_armed``); no shard waits
+        on a missing record."""
+        if not self._dispense_armed or self._blocked:
+            return None
+        settled = {str(d["plan"]) for d in self._dispense_ends.values()}
+        rest = sorted(set(expected) - self._shards_ended)
+        plans = {shard: set(self._shard_plans.get(shard, ())) for shard in rest}
+        for record in pending:  # merged in this pass, not absorbed yet
+            if record.get("shard") in plans:
+                plans[record["shard"]].add(_dispense_plan_of(record))
+        if any(not shard_plans <= settled for shard_plans in plans.values()):
+            return None
+        detail = {"reason": "dispense_settled", "shards_not_ended": rest, "plans": sorted(settled)}
+        print(f"[sample-buffer] the task dispenser settled every task ({', '.join(sorted(settled))}): the data "
+              f"ends; shard(s) {rest} wrote no end record and get no group of it any more", flush=True)
+        self._merge_event("data_end_by_dispenser", shards_not_ended=rest, plans=sorted(settled))
+        return detail
 
     def _merge_event(self, reason: str, **fields: Any) -> None:
         if self.merge_events is not None:

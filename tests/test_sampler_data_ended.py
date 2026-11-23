@@ -44,3 +44,27 @@ def test_a_fenced_dispense_end_is_not_the_data_end(tmp_path):
     with pytest.raises(DispenseFencedEnd):
         loop.run()
     assert not buffer.data_ended
+
+
+def test_the_store_dispenser_end_names_its_plan_in_the_shard_end_record(tmp_path):
+    """The shard's end record carries the dispenser plan: the trainer's merger then ends
+    the shards no group of that plan can reach (sample_buffer module doc)."""
+    detail = {"backend": "store", "namespace": "run/task-dispense", "plan": "run/task-dispense:00ff", "slots": 3}
+    events = []
+
+    def generate(rollout_id):
+        error = DispenseEnded("every task of the store dispenser is settled")
+        error.dispense = detail
+        raise error
+
+    follower = PolicyFollower(PolicyReleaseStore(CheckpointStore(tmp_path / "releases")),
+                              lambda release, directory: None)
+    buffer = FileSampleBuffer(CheckpointStore(tmp_path / "buffer"), batch_size=1)
+    loop = SamplerLoop(follower=follower, buffer=buffer, generate=generate, num_rollouts=None,
+                       max_backlog_groups=8, emit=lambda name, **kw: events.append((name, kw)))
+    assert loop.run() == 0
+    assert buffer.data_ended
+    ended = [kw for name, kw in events if name == "rl_sampler_data_ended"]
+    assert ended[0]["dispense"] == detail
+    records = [line for line in (tmp_path / "buffer" / "sample-buffer" / "index.jsonl").read_text().splitlines()]
+    assert '"dispense"' in records[-1] and '"run/task-dispense:00ff"' in records[-1]

@@ -2923,6 +2923,7 @@ class IslandDriver:
                                  defer=not start.finished)
                 rollout_id = start.rollout_id
                 finished = start.finished
+                data_end: BaseException | None = None
                 while not finished:
                     if self.max_rollouts is not None and rollout_id >= self.max_rollouts:
                         raise DriverError("run reached max_rollouts without a stop")
@@ -2937,6 +2938,7 @@ class IslandDriver:
                         # The task dispenser has no rows left for this island.
                         # The rounds so far are trained and published: end FINISHED
                         self._emit_data_end(rollout_id, error)
+                        data_end = error
                         break
                     state = boundary.state
                     rollout_id += 1
@@ -2944,12 +2946,14 @@ class IslandDriver:
                         # the batch generated ahead met the end of the data: the
                         # round just trained is the last one (``_join_ahead``)
                         self._emit_data_end(rollout_id, self._data_end)
+                        data_end = self._data_end
                         break
                     self._maybe_eval(rollout_id, force=boundary.stop, defer=not boundary.stop)
                     finished = boundary.stop
                 self.refuse_reconfiguration_for_finalization(rollout_id)
-                self._drain_releases()
+                self._drain_releases()  # the last trained policy reaches the store (a final release)
                 self._close_rollout_data(rollout_id)
+                self._emit_run_end(rollout_id, data_end)
                 self.phase("finish", rollout_id=rollout_id)
                 self._close_span()
                 self.sync.finish(self)
@@ -2991,6 +2995,29 @@ class IslandDriver:
         end = getattr(self.sync, "end_on_data", None)
         if callable(end):  # e.g. full parameter: the island leaves without a final cut
             end(self)
+
+    def _emit_run_end(self, rollout_id: int, data_end: BaseException | None) -> None:
+        """``rl_run_end``: why this island ends normally (the process exits 0).
+        ``reason``: ``data_ended`` (``source``: ``buffer_exhausted``, every sampler
+        shard ended and the buffer is read to its end; ``dispense_ended``, the task
+        dispenser has no rows left), ``total_steps`` (the rounds of ``--total-steps``
+        are trained), ``stop_after_rounds`` (``--rl-stop-after-rounds``) or ``stopped``
+        (the sync ended the run: a global round count, the syncer finalizing)."""
+        fields: dict[str, Any] = {"rollout_id": int(rollout_id)}
+        num_rollout = getattr(self.sync, "num_rollout", None)
+        if data_end is not None:
+            fields.update(reason="data_ended", source=data_end_kind(data_end))
+        elif isinstance(num_rollout, int) and not isinstance(num_rollout, bool):
+            end = num_rollout + int(getattr(self.sync, "resumed_at", 0) or 0)
+            fields.update(reason="total_steps" if rollout_id >= end else
+                          "stop_after_rounds" if getattr(self.sync, "stop_after", None) is not None else "stopped",
+                          num_rollout=num_rollout)
+        else:
+            fields.update(reason="stopped")
+        self.emit("rl_run_end", **fields)
+        print(f"[rl] run ends normally: {fields['reason']}"
+              + (f" ({fields['source']})" if fields.get("source") else "")
+              + f" after rollout {rollout_id}", file=sys.stderr, flush=True)
 
     def _commit_round_data(self, rollout_id: int) -> None:
         """The rows of ``rollout_id`` trained and passed the sync boundary;

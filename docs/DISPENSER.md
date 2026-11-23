@@ -24,7 +24,8 @@ If all your samplers can reach one syncer over TCP, the syncer's task dispenser
 - **The data ends cleanly.** Once every task of every pass is settled, every sampler prints
   `[engine-sampler] data ended`, writes `rl_sampler_data_ended` and exits with code 0. The NC pool
   ([NC_POOL.md](NC_POOL.md)) takes exit 0 as the normal end of the run: it does not restart the
-  sampler or replace its node.
+  sampler or replace its node. The trainer then trains what is left and exits with code 0 as
+  well (see [When the data ends](#when-the-data-ends)).
 
 ## Requirements
 
@@ -205,3 +206,37 @@ Samplers also record dispenser events on their event tape:
   holders are covered by the trainer's incarnation gate.
 - **Ledger size.** The ledger keeps one object per claim, renewal, failure and settlement. Delete
   the namespace when the run is archived.
+
+## When the data ends
+
+1. Once every task is settled, each sampler ends its buffer shard with an end record that names
+   the dispenser plan, writes `rl_sampler_data_ended` and exits 0. This is a state of the ledger
+   that never changes back. A sampler that only stops (preempted, scaled down, restarted) writes no
+   end record.
+2. The trainer's merger reads that end record, reads every shard once more, and then ends the
+   data. Shards of `--rl-buffer-shards` that wrote no end record do not hold it back if they have
+   no groups (no sampler took that shard index) or only groups of the settled plan (their sampler
+   stopped and never came back). A shard with groups of another source keeps the data going until
+   it writes its own end. The merger logs `the task dispenser settled every task` and reports
+   `data_end_by_dispenser`.
+3. The trainer trains the groups that are left. The last round may be short of groups; it is
+   padded to the batch size and trained, not dropped. The next read finds the end
+   (`rl_buffer_exhausted`).
+4. The trainer releases the last trained policy (a release skipped by `--rl-release-every` or
+   `--rl-release-skip-busy` is published now), writes `rl_run_end` with `reason: "data_ended"` and
+   exits 0. A run that reaches `--total-steps` first writes `rl_run_end` with
+   `reason: "total_steps"`.
+
+A run that uses several dispensers (several pools, each with its own namespace) ends when every
+dispenser that wrote groups is settled. A dispenser that has not written a single group by then is
+not waited for.
+
+## A new task set or more passes
+
+The prompt file, `passes`, `seed`, the streams and the hold-out list are part of the plan. A
+sampler that disagrees with the plan refuses to start (`dispense mismatch`). Once the data ended,
+the buffer shards are ended too, and the trainer does not read past that end.
+
+To continue with new tasks or more passes, start a new run under a new prefix: a new `namespace`,
+a new buffer and a new trainer store. Do not edit or delete `plan.json` of a running ledger, and do
+not reuse a namespace for another task set.

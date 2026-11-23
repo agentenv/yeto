@@ -308,6 +308,16 @@ def test_data_ends_after_every_pass(tmp_path):
     assert s.close()["released"] == 0
 
 
+def test_the_data_end_names_the_plan(tmp_path):
+    store = FakeObjects()
+    s = _open(_write(tmp_path, _rows(1)), store, groups=1)
+    s.written(0, _slots(s(0)))
+    with pytest.raises(DispenseEnded) as ended:
+        s(0)
+    assert ended.value.dispense == {"backend": "store", "namespace": "run/dispense", "plan": s.plan_id, "slots": 1}
+    assert s.plan_id.startswith("run/dispense:")
+
+
 def test_gap_below_the_frontier_is_given_out(tmp_path):
     store = FakeObjects()
     path = _write(tmp_path, _rows(3))

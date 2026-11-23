@@ -1041,3 +1041,36 @@ def test_phase_accounting_off_reads_no_clock():
     stub.round_phases = True
     IslandDriver._account_phase(stub, "train")
     assert reads == [1] and stub._phase_mark == ("train", 0.0)
+
+
+# ---------------------------------------------------------------------------
+# rl_run_end: why a run ended normally (total steps vs the end of the data)
+# ---------------------------------------------------------------------------
+def test_run_end_names_total_steps(tmp_path, capsys):
+    _driver(_engine(), LocalOnlySync(2), tmp_path).run()
+    ends = [e for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_run_end"]
+    assert len(ends) == 1
+    assert {k: ends[0][k] for k in ("reason", "rollout_id", "num_rollout")} == {
+        "reason": "total_steps", "rollout_id": 2, "num_rollout": 2}
+    assert "run ends normally: total_steps" in capsys.readouterr().err
+
+
+def test_run_end_names_the_data_end_and_the_rounds_before_it_are_trained(tmp_path):
+    from yeto.rl.engine.buffer_payload import SampleBufferExhausted
+
+    engine = _engine()
+    generate = engine.rollout.generate
+
+    def ending(rollout_id, **kwargs):
+        if rollout_id == 2:
+            raise SampleBufferExhausted("rollout 2: the sample buffer ended with no trainable group")
+        return generate(rollout_id, **kwargs)
+
+    engine.rollout.generate = ending
+    final = _driver(engine, LocalOnlySync(5), tmp_path).run()
+    assert final.policy_version == 2  # two rounds trained and published, then FINISHED
+    events = _events(tmp_path / "events.jsonl")
+    names = [e["event"] for e in events]
+    assert names.index("rl_buffer_exhausted") < names.index("rl_run_end")
+    end = events[names.index("rl_run_end")]
+    assert (end["reason"], end["source"], end["rollout_id"]) == ("data_ended", "buffer_exhausted", 2)
