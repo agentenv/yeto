@@ -78,6 +78,7 @@ from typing import Any
 from .merged_release import fastest_lane_read
 from .object_store import is_fatal_store_error
 from .policy_release import LATEST_UNREAD, PolicyFollower, ReleaseNotLoaded
+from .sampler_breakers import trip
 from .sample_buffer import SampleBufferError, buffer_dir, read_read_position
 from .task_dispense import DispenseEnded, DispenseFencedEnd
 
@@ -186,6 +187,8 @@ class SamplerLoop:
         """Raise when ``what`` has failed for longer than ``max_read_outage_s``."""
         bound = getattr(self, "max_read_outage_s", DEFAULT_MAX_READ_OUTAGE_S)
         if bound is not None and self.clock() - since > bound:
+            trip(self.emit, "sampler.store_read_outage", round(self.clock() - since, 1), bound,
+                 detail=f"store read {what!r} failed {failures} times", legacy_event="StoreReadOutage")
             raise StoreReadOutage(f"store read {what!r} failed {failures} times over "
                                   f"{self.clock() - since:.0f} s (max_read_outage_s {bound:.0f}): "
                                   f"{type(error).__name__}: {error}"[:500]) from error
@@ -259,6 +262,8 @@ class SamplerLoop:
             self.read_failures += int(unread)
             self._damaged_latest = self._damaged_latest + 1 if unread and error.fields.get("damaged") else 0
             if self._damaged_latest >= self.max_damaged_latest_reads:
+                trip(self.emit, "sampler.store_read_outage", self._damaged_latest, self.max_damaged_latest_reads,
+                     unit="n", detail="LATEST is no release record", legacy_event="ReleaseNotLoaded")
                 raise
             if error.reason == "download_failed":  # retried, but not for ever on old weights
                 if getattr(self, "_download_failing_since", None) is None:

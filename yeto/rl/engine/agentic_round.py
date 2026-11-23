@@ -125,6 +125,7 @@ from .engine_sampler import (DEFAULT_RELOAD_MAX_DEFER_S, ROUND_EVENT, EngineRoun
                              unique_prompt_ids)
 from .sample_buffer import ShardFenced
 from .policy_versions import engine_weight_version
+from .sampler_breakers import trip
 from .sampler_engine import FINISH_LENGTH, FINISH_STOP, SamplerEngineError, updates_during_generation
 from .timeline import (COMPACTION_KEY, CompactionTally, compaction_config, compaction_log_line, drained_fields,
                        live_segments, segment_bucket)
@@ -439,7 +440,11 @@ class AgenticRound(EngineRound):
     the policy produced anything (:func:`infra_failure`) runs again in its slot
     with a new session, at most this many times per slot, so its group is still
     written whole instead of short (dropped by a trainer that trains whole
-    groups). No trial gets a wall-clock cap beyond its own budget."""
+    groups). No trial gets a wall-clock cap beyond its own budget.
+
+    ``infra_streak``: groups in a row lost to infrastructure
+    (:class:`~.infra_streak.InfraStreak`, breaker ``sampler.infra_streak``; None:
+    not counted). Its ``pause`` action holds the store dispenser's new claims."""
 
     streams = True  # build_engine_sampler wires the follower to the stream
 
@@ -450,7 +455,7 @@ class AgenticRound(EngineRound):
                  loop: LoopThread | None = None, weight_switch: str = "auto",
                  drain_timeout_s: float | None = None, release_poll_s: float = 5.0, wait_s: float = 0.5,
                  abandon_grace_s: float = ABANDON_GRACE_S,
-                 infra_retries: int = DEFAULT_INFRA_RETRIES,
+                 infra_retries: int = DEFAULT_INFRA_RETRIES, infra_streak: Any = None,
                  clock: Callable[[], float] = time.monotonic, **kwargs: Any) -> None:
         kwargs.setdefault("reward", lambda item, completion: 0.0)  # the verifier's reward is used
         super().__init__(engine, writer, **kwargs)
@@ -489,7 +494,17 @@ class AgenticRound(EngineRound):
         self.infra_retries = int(infra_retries)
         self.retries_total: Counter[str] = Counter()  # over the island's life (loop thread)
         self.retries_exhausted = 0
+        self._exhausted_reported = 0  # retries_exhausted at the last round's rl_breaker
         self._retry_events: deque[dict[str, Any]] = deque()
+        self.infra_streak = infra_streak
+        if infra_streak is not None:
+            infra_streak.emit = self.emit
+            if infra_streak.action == "pause":
+                if hasattr(self.prompts, "paused"):  # the store dispenser: no new claim while paused
+                    self.prompts.paused = infra_streak.paused
+                else:
+                    logger.warning("sampler.infra_streak action pause needs the store dispenser "
+                                   "(prompts.dispense backend store); it only warns here")
         # the seq of a release newer than the served one (build_engine_sampler: the follower's)
         self.release_pending: Callable[[], int | None] = lambda: None
         # True once the pending release is on local disk (build_engine_sampler: the
@@ -962,6 +977,10 @@ class AgenticRound(EngineRound):
                   # compaction on: the cut trials by segment count (absent otherwise: old field set)
                   **(drained_fields(self._drain_by_segments) if compaction_config(self.recorder) is not None
                      else {}))
+        lost = int(self._drain_abandoned) + int(self._drain_detached)
+        if self._drain_cut_at is not None and lost:
+            trip(self.emit, "sampler.drain", round(waited, 3), self.drain_timeout_s, count=lost,
+                 legacy_event=DRAIN_EVENT, detail=f"release seq {self._drain_seq}: {lost} trial(s) cut")
 
     def _settle(self, group: _Group, tally: _Tally) -> None:
         """Filter, score and write one group whose trials all ended (module doc)."""
@@ -1068,6 +1087,8 @@ class AgenticRound(EngineRound):
         self._written(rid, [group.spot] if written else [],
                       keep=[g.spot for g in self._unsettled if g.spot is not None],
                       requeue=requeue, outcome=outcome)
+        if self.infra_streak is not None:
+            self.infra_streak.group(reason, lost)
         served = self.engine.served_version()
         self.emit(GROUP_EVENT, rollout_id=rid, prompt_id=group.item.prompt_id, written=reason is None,
                   dropped_reason=reason, trials=n, kept=len(kept), lost=dict(sorted(lost.items())),
@@ -1132,6 +1153,19 @@ class AgenticRound(EngineRound):
                   groups=tally.written, samples=tally.samples, response_tokens=tally.tokens,
                   finish=dict(sorted(tally.finish.items())), source=self.provenance.key(),
                   dropped_groups=tally.dropped, agentic=agentic, **extra)
+        self._round_breakers(rollout_id, tally)
+
+    def _round_breakers(self, rollout_id: int, tally: _Tally) -> None:
+        """The round's drops, one ``rl_breaker`` per entry (design 8.1, aggregated per
+        round): groups below ``min_samples`` and trials whose infra retries ran out."""
+        if tally.small:
+            trip(self.emit, "sampler.min_samples", None, self.min_samples, count=tally.small,
+                 legacy_event=GROUP_EVENT, detail=f"round {rollout_id}: {tally.small} group(s) not written")
+        exhausted = self.retries_exhausted - self._exhausted_reported  # the loop thread counts
+        if exhausted > 0:
+            self._exhausted_reported += exhausted
+            trip(self.emit, "sampler.infra_retries", self.infra_retries, self.infra_retries, count=exhausted,
+                 legacy_event=RETRY_EVENT, detail=f"round {rollout_id}: {exhausted} trial(s) out of retries")
 
     # ------------------------------------------------------------------ round
     def __call__(self, rollout_id: int) -> None:
@@ -1198,13 +1232,16 @@ def effective_drain_timeout(drain_timeout_s: float | None, max_defer_s: float | 
     return min(bounds) if bounds else None
 
 
-def drain_settings(spec: Mapping[str, Any], *, drain: bool) -> tuple[float | None, float]:
+def drain_settings(spec: Mapping[str, Any], *, drain: bool, resolved: Any = None) -> tuple[float | None, float]:
     """``(drain_timeout_s, abandon_grace_s)`` of the round built from ``spec``
     (:func:`round_factory`). ``drain``: the weight switch resolved to ``drain``;
     the cut is then min(``agentic.drain_timeout_s``, ``reload_max_defer_s``)
     (:func:`effective_drain_timeout`), else ``agentic.drain_timeout_s`` as written
     (a live round never drains). A value that is not a finite number >= 0
-    (``abandon_grace_s``: also ``null``) is a :class:`HarnessConfigError`."""
+    (``abandon_grace_s``: also ``null``) is a :class:`HarnessConfigError`. The
+    values are the breaker registry's ``sampler.drain`` (``resolved``: the spec's
+    resolved breakers, default resolved here), read once the spec's own values
+    passed these checks."""
     from yeto.rl.agentic import HarnessConfigError
 
     section = spec.get("agentic") if isinstance(spec.get("agentic"), Mapping) else {}
@@ -1222,9 +1259,8 @@ def drain_settings(spec: Mapping[str, Any], *, drain: bool) -> tuple[float | Non
                                      f"{' or null' if nullable else ''}, got {value!r}")
         return number_
 
-    cut = number("drain_timeout_s", None, nullable=True)
-    grace = number("abandon_grace_s", ABANDON_GRACE_S, nullable=False)
-    assert grace is not None
+    number("drain_timeout_s", None, nullable=True)
+    number("abandon_grace_s", ABANDON_GRACE_S, nullable=False)
     if drain:
         try:
             defer = reload_max_defer_s(spec)
@@ -1233,8 +1269,14 @@ def drain_settings(spec: Mapping[str, Any], *, drain: bool) -> tuple[float | Non
         if defer is not None and not 0 < defer < float("inf"):
             raise HarnessConfigError("spec reload_max_defer_s must be a number > 0 or null, "
                                      f"got {spec.get('reload_max_defer_s')!r}")
-        cut = effective_drain_timeout(cut, defer)
-    return cut, grace
+    if resolved is None:
+        from .sampler_breakers import spec_breakers  # noqa: PLC0415
+
+        resolved = spec_breakers(spec)
+    cut = resolved.get("sampler.drain.timeout_s")
+    if drain:
+        cut = effective_drain_timeout(cut, resolved.get("sampler.drain.reload_max_defer_s"))
+    return cut, resolved.get("sampler.drain.abandon_grace_s")
 
 
 def spec_live_engine(spec: Mapping[str, Any]) -> bool:
@@ -1386,13 +1428,19 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
       ``YETO_RECORDS_PROXY_SECRET_FILE`` (the Modal tunnel, written in the container);
     * ``infra_retries``: runs again of a trial that failed on infrastructure before
       the policy ran, per slot (default 2; 0 = off);
+    * ``infra_streak`` (optional): ``{"enabled", "max_n", "cooldown_s", "action"}``
+      of breaker ``sampler.infra_streak`` (:mod:`.infra_streak`; default on, 5
+      groups, ``warn``; ``pause`` holds the store dispenser's claims for up to 300 s);
     * ``task_defaults``: :meth:`AgentTask.from_mapping` defaults; ``provider``
       falls back to ``HARBOR_ENV_TYPE``;
     * ``compaction`` (optional, default off): the records proxy's context
       compaction (:func:`spec_compaction`; one training sample per segment).
 
-    Harbor's settings (task directories, trials, provider kwargs) are the
-    environment variables both backends read (``HarborSettings.from_env``)."""
+    ``min_samples``, ``infra_retries``, the drain and ``infra_streak`` are read
+    through the breaker registry (``yeto.rl.engine.sampler_breakers``; the keys
+    above are its spec aliases). Harbor's settings (task directories, trials,
+    provider kwargs) are the environment variables both backends read
+    (``HarborSettings.from_env``)."""
     from functools import partial
     from pathlib import Path
 
@@ -1421,7 +1469,6 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         max_in_flight = int(section["max_in_flight"])
         max_response_len = int(section["max_response_len"])
         switch = str(section.get("weight_switch", "auto"))
-        infra_retries = int(section.get("infra_retries", DEFAULT_INFRA_RETRIES))
     except (KeyError, TypeError, ValueError) as exc:
         raise HarnessConfigError(f"spec agentic section: bad or missing {exc}") from exc
     proxy_cfg = dict(section.get("proxy") or {})
@@ -1476,7 +1523,19 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         if slots is not None and slots.limit < max_in_flight:
             raise HarnessConfigError(f"agentic.max_in_flight {max_in_flight} exceeds the {defaults['provider']} "
                                      f"sandbox cap {slots.limit} (HARBOR_MAX_SANDBOXES)")
-    drain_timeout_s, abandon_grace_s = drain_settings(spec, drain=switch == "drain")  # checked first
+    from yeto.breakers import BreakerConfigError
+
+    from .infra_streak import InfraStreak, startup_line
+    from .sampler_breakers import spec_breakers
+
+    try:  # min_samples, infra_retries, the drain: the breaker registry's sampler entries
+        limits = spec_breakers(spec)
+    except BreakerConfigError as exc:
+        raise HarnessConfigError(f"spec agentic section: {exc}") from exc
+    drain_timeout_s, abandon_grace_s = drain_settings(spec, drain=switch == "drain", resolved=limits)  # checked first
+    infra_retries = limits.get("sampler.infra_retries.max_n")
+    min_samples = limits.get("sampler.min_samples.min_n")
+    print(startup_line(InfraStreak.of(limits)), flush=True)
     if switch == "drain":
         warning = drain_timeout_warning(spec, live_engine=False)
         if warning is not None:
@@ -1488,10 +1547,10 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
                             max_response_len=max_response_len,
                             max_prompt_len=None if section.get("max_prompt_len") is None
                             else int(section["max_prompt_len"]),
-                            min_samples=int(section.get("min_samples", 2)), task_defaults=defaults,
+                            min_samples=min_samples, task_defaults=defaults,
                             sampling_params={"temperature": signed["temperature"], "top_p": signed["top_p"]},
                             weight_switch=switch, drain_timeout_s=drain_timeout_s, loop=loop,
                             abandon_grace_s=abandon_grace_s,
-                            infra_retries=infra_retries, **kwargs)
+                            infra_retries=infra_retries, infra_streak=InfraStreak.of(limits), **kwargs)
 
     return make

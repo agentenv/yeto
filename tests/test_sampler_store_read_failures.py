@@ -869,4 +869,5 @@ def test_a_group_write_waits_for_the_store_on_the_rounds_own_clock():
     round_.monotonic = lambda: now[0]
     round_.sleep = lambda s: now.__setitem__(0, now[0] + s)
     assert round_._write_refusal(None) == engine_sampler.STORE_UNREAD
-    assert now[0] == 30.0 and events[-1][1]["given_up"] is True
+    assert now[0] == 30.0 and events[-2][1]["given_up"] is True
+    assert events[-1][0] == "rl_breaker" and events[-1][1]["name"] == "sampler.write_defer"  # the extra record
