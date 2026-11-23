@@ -1454,7 +1454,9 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
     with it so actors import the pinned Miles checkout, not the image's;
     ``YETO_RL_ELASTIC_METADATA`` (only when ``--rl-elastic`` set it) so the
     rollout metadata hook in the workers reports the data cursor;
-    ``YETO_RL_BACKEND=miles`` so neutral rollout-side code finds this adapter.
+    ``YETO_RL_BACKEND=miles`` so neutral rollout-side code finds this adapter;
+    the generic partial-experts switches (only with an in-place selection) so
+    each worker's ``sitecustomize`` freezes all but the selected experts.
     """
 
     environ = os.environ if environ is None else environ
@@ -1515,6 +1517,10 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
         # inherit the raylet's environment, not the driver's.
         env_vars[ELASTIC_METADATA_ENV] = "1"
+    from .models.partial_experts.in_place import worker_env as partial_experts_worker_env
+
+    # generic partial experts: set after ``ray start``, so only runtime_env reaches the workers
+    env_vars.update(partial_experts_worker_env(environ))
     env_vars.update(quant_env)
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address

@@ -45,7 +45,8 @@ from .freeze import ExpertParamDecision, apply_expert_freeze, model_chunks
 from .hooks import install_once, install_or_defer
 from .selection import LAYOUT_IN_PLACE, ExpertSelection
 
-# Ray workers inherit both: sitecustomize arms the model-provider hook when the first is set.
+# Ray workers get both through the job's runtime_env (worker_env): sitecustomize arms the
+# model-provider hook when the first is set.
 ENV_SELECTION = "YETO_PARTIAL_EXPERTS_SELECTION"
 GROUPED_SINGLE_PARAM_ENV = "NVTE_GROUPED_LINEAR_SINGLE_PARAM"
 # The Miles flag that keeps the router's expert bias fixed (a frozen router).
@@ -277,6 +278,20 @@ def install() -> None:
 
 
 def island_env(selection_path: str) -> Mapping[str, str]:
-    """The process environment an island exports before Ray starts (workers inherit it)."""
+    """The switches the island driver sets for a selection (see :func:`worker_env`)."""
 
     return {ENV_SELECTION: str(selection_path), GROUPED_SINGLE_PARAM_ENV: "0"}
+
+
+def worker_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """The switches every Ray worker needs, read back from the driver's environment.
+
+    The island configures partial experts after ``ray start``, and Ray workers
+    inherit the raylet's environment, not the driver's: the island forwards
+    these through the job's ``runtime_env``
+    (:func:`yeto.rl.adapters.miles.entry.connect_island_ray`) so each worker's
+    ``sitecustomize`` arms the model-provider hook. Empty without a selection.
+    """
+
+    path = environ.get(ENV_SELECTION)
+    return {} if not path else dict(island_env(path))
