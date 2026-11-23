@@ -87,30 +87,53 @@ def _record_ts(rec: dict) -> float | None:
     return float(v) if isinstance(v, (int, float)) else None
 
 
+def live_alerts(paths: list[str], *, extra: tuple = (), after_s: float = 3600, step: float = 30) -> list[tuple]:
+    """Replay tapes live (records in time order, the page read every ``step`` s from the first
+    record to ``after_s`` after the last); the liveness alerts seen, as (s from the end, title)."""
+    recs = []
+    for src in (sources.make_source(p) for p in sources.discover(paths)):
+        last = 0.0
+        for off, rec in src.read_new():
+            last = (_record_ts(rec) if isinstance(rec, dict) else None) or last
+            recs.append((last, src.name, off, rec, src))
+    for off, rec in enumerate(extra):
+        recs.append((rec["time_unix"], "extra/yeto-tape.jsonl", off, rec, None))
+    recs.sort(key=lambda x: x[0])
+    first, end = min(t for t, *_ in recs if t), recs[-1][0]
+    r, i, seen, t = Reducer(run="replay"), 0, [], first
+    while t <= end + after_s:
+        while i < len(recs) and recs[i][0] <= t:
+            _, name, off, rec, src = recs[i]
+            r.feed(rec, source=name, offset=off, **({} if src is None else {
+                "island": src.island, "node": src.node, "island_fixed": src.island_fixed}))
+            i += 1
+        seen += [(round(t - end), a["title"]) for a in r.overview(now=t)["alerts"] if a["rule"] in LIVENESS_RULES]
+        t += step
+    assert i == len(recs)
+    return seen
+
+
 @pytest.mark.parametrize("name", ["async-e2e", "async-compaction"])
 def test_async_grpo_live_replay_raises_no_liveness_alert(name):
     """Replayed live (records in time order, the page read every 30 s from the first record to an
     hour after the last), a healthy async GRPO run never reads as a stalled or slow-starting
     island: not mid-run, not while the trainer finishes, releases and leaves, not after."""
-    recs = []
-    for src in (sources.make_source(p) for p in sources.discover(tapes(name))):
-        last = 0.0
-        for off, rec in src.read_new():
-            last = (_record_ts(rec) if isinstance(rec, dict) else None) or last
-            recs.append((last, src, off, rec))
-    recs.sort(key=lambda x: x[0])
-    first, end = min(t for t, *_ in recs if t), recs[-1][0]
-    r, i, seen, t = Reducer(run=name), 0, [], first
-    while t <= end + 3600:
-        while i < len(recs) and recs[i][0] <= t:
-            _, src, off, rec = recs[i]
-            r.feed(rec, source=src.name, offset=off, island=src.island, node=src.node,
-                   island_fixed=src.island_fixed)
-            i += 1
-        seen += [(round(t - end), a["title"], a["detail"]) for a in r.overview(now=t)["alerts"]
-                 if a["rule"] in LIVENESS_RULES]
-        t += 30
-    assert i == len(recs) and seen == []
+    assert live_alerts(tapes(name)) == []
+
+
+def test_a_diloco_trainer_without_heartbeats_is_not_stale_in_its_first_round():
+    """Full-parameter DiLoCo islands of older runs write no rl_heartbeat: the first round after
+    rl_driver_start (warm-up, the first generation: minutes) is not a heartbeat timeout. Only the
+    terminal round, which waits for the slowest island, still reads stale on such a tape..."""
+    seen = live_alerts(tapes("g5-fullparam"), after_s=600, step=10)
+    assert seen and all(t >= -150 for t, _ in seen), seen
+    # ... unless the syncer's config says the run is in its terminal phase (last_step 12, P 4):
+    # its terminal grace (120 s) covers the island waiting for the others
+    tape = lines(D / "g5-fullparam" / "yeto-tape.jsonl")
+    config = {"kind": "syncer_config", "fragments": 4, "owned_fragments": [0, 4], "shard_index": 0,
+              "shard_count": 1, "learners": 2, "quorum": 1, "pipeline": 4, "total_steps": 12, "last_step": 12,
+              "terminal_grace_ms": 120000, "time_unix": tape[0]["time_unix"] - 1}
+    assert live_alerts(tapes("g5-fullparam"), extra=(config,), after_s=600, step=10) == []
 
 
 def test_a_stray_syncer_tape_does_not_turn_async_into_diloco(tmp_path):
@@ -121,10 +144,11 @@ def test_a_stray_syncer_tape_does_not_turn_async_into_diloco(tmp_path):
     assert r.page_view(now=r.max_ts)["layout"]["kind"] == "async"
 
 
-def test_the_syncers_own_records_change_nothing_on_the_page():
+def test_the_syncers_own_records_add_config_and_links_only():
     """The syncer's config, round open / timeout and connection records (``kind``, no ``step``)
     are not merges, and a ``learner_id`` there is no sign of life of that island: run B's page
-    with them on its syncer tape equals the page without them."""
+    with them on its syncer tape equals the page without them but for the config and the
+    trainers' syncer links."""
     before = load("run-b")
     tape = lines(D / "run-b" / "yeto-tape.jsonl")
     first, last = tape[0]["time_unix"], tape[-1]["time_unix"]
@@ -145,9 +169,19 @@ def test_the_syncers_own_records_change_nothing_on_the_page():
     assert after.island_ids() == before.island_ids()
     now = before.max_ts
     a, b = (json.loads(json.dumps(r.page_view(now=now), default=str)) for r in (before, after))
-    for key in ("layout", "topology", "islands"):
+    for key in ("layout", "islands"):
         assert a.get(key) == b.get(key), key
     assert a["overview"]["alerts"] == b["overview"]["alerts"]
+    da, db = a["topology"]["diloco"], b["topology"]["diloco"]
+    # what they add: the syncer's config and each trainer's connection as the syncer saw it
+    assert da["config"] is None and db["config"]["P"] == 4 and db["config"]["tau"] == 2 and db["config"]["T"] == 24
+    assert [t["syncer_link"] for t in da["trainers"]] == [None, None]
+    assert [(t["syncer_link"] or {}).get("state") for t in db["trainers"]] == ["connected", "disconnected"]
+    for d in (da, db):
+        d.pop("config")
+        for t in d["trainers"]:
+            t.pop("syncer_link")
+    assert da == db  # every other part of the panel is the P0 one (step 1 and 2 merged already)
     alone = Reducer(run="syncer-only")  # an SFT syncer tape: no RL island appears
     for off, rec in enumerate(extra):
         alone.feed(rec, source="yeto-tape.jsonl", offset=off)
@@ -587,3 +621,90 @@ def test_page_draws_the_follow_lanes(tmp_path):
     assert "trainer0/" in joined and "trainer1/" in joined and "sampler(s) on their own store lane trainer0/" in joined
     assert "same GPU" not in joined and "T+R" not in joined and "time-share" not in joined
     assert "not on its tape" in out["nodes"]
+
+
+def _replayed(name: str, until: float, extra: tuple = ()) -> Reducer:
+    """The reducer of ``name`` as a live page saw it at ``until`` (records up to then, plus extra)."""
+    recs = []
+    for src in (sources.make_source(p) for p in sources.discover(tapes(name))):
+        last = 0.0
+        for off, rec in src.read_new():
+            last = (_record_ts(rec) if isinstance(rec, dict) else None) or last
+            if last <= until:
+                recs.append((last, src, off, rec))
+    r = Reducer(run=name)
+    for _, src, off, rec in sorted(recs, key=lambda x: x[0]):
+        r.feed(rec, source=src.name, offset=off, island=src.island, node=src.node, island_fixed=src.island_fixed)
+    for off, rec in enumerate(extra):
+        r.feed(rec, source="yeto-tape.jsonl#p1", offset=off)
+    return r
+
+
+def _run_b_with_p1_records() -> tuple[Reducer, float, int]:
+    """Run B as a live page saw it mid-run, with the syncer's P1 records for a round ahead."""
+    merges = [m for m in lines(D / "run-b" / "yeto-tape.jsonl") if "step" in m]
+    mid = merges[9]["time_unix"]
+    ahead = merges[9]["step"] + 3  # no island has pushed it yet
+    extra = (
+        {"kind": "syncer_config", "fragments": 4, "shard_index": 0, "shard_count": 1, "learners": 2, "quorum": 1,
+         "pipeline": 2, "total_steps": 24, "last_step": 24, "outer_lr": 0.7, "time_unix": merges[0]["time_unix"] - 9},
+        {"kind": "round_open", "global_step": ahead, "fragment": (ahead - 1) % 4, "attempt": 1, "base_version": 0,
+         "members": [{"id": 0, "generation": 1}, {"id": 1, "generation": 1}], "quorum": 1, "time_unix": mid - 40},
+        {"kind": "round_attempt_timeout", "global_step": ahead, "fragment": (ahead - 1) % 4, "attempt": 1,
+         "reason": "quorum_timeout", "next": "new_attempt", "time_unix": mid - 20},
+        {"kind": "round_open", "global_step": ahead, "fragment": (ahead - 1) % 4, "attempt": 2, "base_version": 0,
+         "members": [{"id": 0, "generation": 1}], "quorum": 1, "time_unix": mid - 20},
+        {"kind": "member_disconnected", "learner_id": 1, "generation": 1, "phase": "training", "time_unix": mid - 5},
+    )
+    return _replayed("run-b", mid, extra), mid, ahead
+
+
+def test_round_open_shows_a_pull_without_push_and_its_timeouts():
+    """P1 syncer records: a round the syncer opened (PULL sent) shows before any island pushed
+    (state "pull"), with its attempt and quorum timeouts; the config fills T / tau / lr; a
+    disconnected island reads so on its card at once."""
+    reducer, mid, ahead = _run_b_with_p1_records()
+    d = diloco(reducer, now=mid)
+    r = next(x for x in d["rounds"] if x["step"] == ahead)
+    assert (r["state"], r["attempt"], r["timeouts"], r["pushed"], r["pulled"]) == ("pull", 2, 1, [], ["0"])
+    assert r["since"] == mid - 20 and r["age_s"] == 20  # the current attempt's PULL
+    assert (d["config"]["T"], d["config"]["tau"], d["config"]["lr"]) == (24, 2, 0.7)
+    links = {t["id"]: t["syncer_link"] for t in d["trainers"]}
+    assert links["0"] is None and links["1"]["state"] == "disconnected" and links["1"]["since"] == mid - 5
+
+
+def test_bcast_flows_use_the_syncer_and_island_stamps(tmp_path):
+    """Merge bcast_unix starts a BCAST window and the island's received_unix ends it (older tapes:
+    the merge time and the apply record minus its queue time)."""
+    out = tmp_path / "run-b"
+    shutil.copytree(D / "run-b", out)
+    rows = lines(out / "yeto-tape.jsonl")
+    for m in rows:
+        if "step" in m:
+            m["bcast_unix"], m["bcast_bytes"] = m["time_unix"] - 0.25, 4096
+    (out / "yeto-tape.jsonl").write_text("".join(json.dumps(m) + "\n" for m in rows))
+    for f in (out / "events").glob("*.jsonl"):
+        recs = lines(f)
+        for e in recs:
+            if e.get("event") == "rl_fragment_bcast":
+                e["received_unix"] = e["time_unix"] - 0.5
+                e["applied_unix"] = e["time_unix"]
+        f.write_text("".join(json.dumps(e) + "\n" for e in recs))
+    r = Reducer(run="stamps")
+    load_all(r, [str(p) for p in sources.discover([str(out), str(out / "events")])])
+    d = diloco(r)
+    stamped = {m["step"]: m["bcast_unix"] for m in rows if "step" in m}
+    bflows = [f for f in d["flows"] if f["k"] == "b"]
+    assert bflows and all(any(abs(f["t0"] - t) < 1e-6 for t in stamped.values()) for f in bflows)
+    applied = [f for f in bflows if not f["a"]]
+    assert applied and all(f["t1"] >= f["t0"] + 0.3 for f in applied)
+    assert all(f["b"] == 4096 for f in bflows if f["a"])
+    lb = next(t["last_bcast"] for t in d["trainers"] if t["last_bcast"])
+    assert lb["applied_ts"] - lb["received_ts"] == pytest.approx(0.5)
+
+
+def test_page_draws_the_pull_the_config_and_the_lost_link(tmp_path):
+    reducer, mid, ahead = _run_b_with_p1_records()
+    joined = " | ".join(_smoke(tmp_path, reducer)["texts"])
+    assert f"t{ahead} f{(ahead - 1) % 4}: PULL sent, no PUSH yet" in joined and "1 quorum timeout" in joined
+    assert "τ 2 · T 24 · lr 0.7" in joined and "syncer link ✕" in joined

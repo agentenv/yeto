@@ -294,6 +294,41 @@ def syncer_state(merges: list[dict], p: int | None, n: int) -> dict:
     }
 
 
+def syncer_records(reducer) -> dict:
+    """The syncer's own records (P1 tapes; empty on older tapes): its config per shard, the
+    attempts it opened (PULL sent) per global step, its quorum timeouts per step and each
+    island's last connection record (by learner id)."""
+    configs: dict[int, dict] = {}
+    opens: dict[int, dict] = {}
+    timeouts: dict[int, list[dict]] = {}
+    members: dict[str, dict] = {}
+    for r in getattr(reducer, "syncer_records", ()):
+        k = r.get("kind")
+        if k == "syncer_config":
+            configs[_int(r.get("shard_index")) or 0] = r
+        elif k == "round_open" and _int(r.get("global_step")) is not None:
+            step = _int(r["global_step"])
+            if (_int(r.get("attempt")) or 1) >= (_int((opens.get(step) or {}).get("attempt")) or 0):
+                opens[step] = r
+        elif k == "round_attempt_timeout" and _int(r.get("global_step")) is not None:
+            timeouts.setdefault(_int(r["global_step"]), []).append(r)
+        elif k in ("member_connected", "member_disconnected") and r.get("learner_id") is not None:
+            members[str(r["learner_id"])] = r
+    return {"configs": configs, "opens": opens, "timeouts": timeouts, "members": members}
+
+
+def config_summary(configs: dict[int, dict]) -> dict | None:
+    """``syncer_config`` as the panel shows it (shard 0's, or the first one on the tapes)."""
+    if not configs:
+        return None
+    c = configs.get(0) or configs[min(configs)]
+    return {"P": _int(c.get("fragments")), "tau": _int(c.get("pipeline")), "quorum": _int(c.get("quorum")),
+            "learners": _int(c.get("learners")), "T": _int(c.get("total_steps")), "last_step": _int(c.get("last_step")),
+            "lr": _f(c.get("outer_lr")), "momentum": _f(c.get("outer_momentum")),
+            "H": _f(c.get("sync_interval_steps")) or None, "quorum_timeout_s": _f(c.get("quorum_timeout_s")),
+            "shards": _int(c.get("shard_count")), "resumed": bool(c.get("resumed")), "ts": c.get("_ts")}
+
+
 def stuck_fragments(sy: dict, *, running: bool, behind: bool, any_merge: bool, now: float) -> list[int]:
     """Fragments with no merge for max(STUCK_MIN_S, 3 x the fragment period) while the run runs."""
     return [f for f, ts in enumerate(sy["last_merge_ts"]) if running and any_merge and not behind and ts is not None
@@ -344,8 +379,13 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
     isl = _fold(reducer, set(trainer_ids), now)
     n = shard_count(reducer)
     merges = merge_rows(reducer, now, n)
-    p = max([len(v) for v, _ in (x.vector() for x in isl.values()) if v] + [m["frag"] + 1 for m in merges] + [0]) or None
+    srec = syncer_records(reducer)
+    config = config_summary(srec["configs"])
+    p = max([len(v) for v, _ in (x.vector() for x in isl.values()) if v] + [m["frag"] + 1 for m in merges]
+            + [(config or {}).get("P") or 0]) or None
     sy = syncer_state(merges, p, n)
+    if sy["quorum"] is None and config:
+        sy["quorum"] = config["quorum"]
     versions, committed, merged_steps, expected = sy["versions"], sy["committed"], sy["merged_steps"], sy["expected"]
     m_size = len(expected) or len(trainer_ids)
     live = [i for i in trainer_ids if (states.get(i) or {}).get("alive")]
@@ -363,11 +403,22 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
             r["since"] = min(r["since"], ps["_ts"])
             r["attempt"] = max(r["attempt"], _int(ps.get("round_attempt")) or 1)
             r["pushed"].append(iid)
+    # the syncer's round_open: a PULL sent and not merged yet, also before any PUSH ("PULL out")
+    for step, op in srec["opens"].items():
+        if step in merged_steps or step <= committed.get((step - 1) % n, 0) or op.get("_ts") is None:
+            continue
+        r = inflight.setdefault(step, {"step": step, "frag": _int(op.get("fragment")), "shard": (step - 1) % n,
+                                       "since": op["_ts"], "attempt": 1, "pushed": []})
+        r["since"] = min(r["since"], op["_ts"])
+        r["attempt"] = max(r["attempt"], _int(op.get("attempt")) or 1)
+        r["opened_ts"] = op["_ts"]
+        r["pulled"] = sorted(str(x.get("id")) for x in op.get("members") or [] if isinstance(x, dict))
     rounds = []
     for r in sorted(inflight.values(), key=lambda r: r["step"]):
         r["pushed"] = sorted(set(r["pushed"]))
         r["age_s"] = now - r["since"]
-        r["state"] = "merging" if len(r["pushed"]) >= m_size else "gathering"
+        r["state"] = "merging" if len(r["pushed"]) >= m_size else "gathering" if r["pushed"] else "pull"
+        r["timeouts"] = len(srec["timeouts"].get(r["step"], ()))
         r["blocked"] = r["state"] != "merging" and r["age_s"] > sy["open_limit_s"]
         r["missing"] = [i for i in (expected or trainer_ids) if i not in r["pushed"]]
         rounds.append(r)
@@ -388,11 +439,19 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
     # the run ended: no trainer is up and one of them finished (others may have failed at the end)
     done = bool(trainer_ids) and not live and any((states.get(i) or {}).get("status") in ("done", "stopped")
                                                   for i in trainer_ids)
+    if done:  # PULLs nobody answered before the end are not rounds in flight
+        rounds = [r for r in rounds if r["pushed"]]
+    for t in trainers:  # the syncer's word on the island's connection (P1 tapes)
+        mrec = srec["members"].get(t["id"])
+        t["syncer_link"] = {"state": "disconnected" if mrec["kind"] == "member_disconnected" else "connected",
+                            "since": mrec.get("_ts"), "generation": _int(mrec.get("generation")),
+                            "phase": mrec.get("phase")} if mrec else None
     pushes5 = [ps for x in isl.values() for ps in x.pushes if ps["_ts"] > now - RATE_S]
     bcasts5 = [b for x in isl.values() for b in x.bcasts if b["_ts"] > now - RATE_S]
     hs = [_int(ps.get("realized_h")) for x in isl.values() for ps in x.pushes if _int(ps.get("realized_h"))]
     return {
-        "kind": kind_, "P": p, "M": m_size, "N": n, "H": min(hs) if hs else None,
+        "kind": kind_, "P": p, "M": m_size, "N": n, "H": min(hs) if hs else (config or {}).get("H"),
+        "config": config,
         "quorum": sy["quorum"], "versions": versions, "last_merge_ts": sy["last_merge_ts"], "behind": behind,
         "stuck": stuck, "period_s": sy["period_s"], "merge_gap_s": sy["merge_gap_s"], "quorum_p50_s": sy["quorum_p50_s"],
         "roster": len(live), "expected": expected, "shards": shard_rows(p, n, merges, rounds, committed, done),
@@ -532,6 +591,7 @@ def _trainer(iid: str, x: _Island, card: dict, st: dict, merges: list[dict], ver
                       "ts": lp["_ts"]} if lp else None,
         "last_bcast": {"frag": _int(lb.get("fragment_id")), "v": _int(lb.get("version")),
                        "bytes": _f(lb.get("payload_bytes")), "queue_s": _f(lb.get("queue_seconds")),
+                       "received_ts": _f(lb.get("received_unix")), "applied_ts": _f(lb.get("applied_unix")),
                        "ts": lb["_ts"]} if lb else None,
         "apply_s": _f((x.apply or {}).get("sync/apply_seconds")), "apply_ts": (x.apply or {}).get("_ts"),
         "full_push": {"count": _int(full.get("sync/push_count")), "bytes": _f(full.get("sync/upload_bytes")),
@@ -661,9 +721,12 @@ def _flows(isl: dict[str, _Island], merges: list[dict], now: float, rollout: set
             if iid not in isl:
                 continue
             b = bc.get((iid, m["frag"], m["step"]))
-            t1 = b["_ts"] - (_f(b.get("queue_seconds")) or 0) if b else m["ts"] + 1.5
-            out.append({"k": "b", "i": iid, "sh": m["shard"], "f": m["frag"], "t0": m["ts"], "t1": max(m["ts"] + 0.3, t1),
-                        "b": _f(b.get("payload_bytes")) if b else None, "a": b is None})
+            # P1 stamps: the syncer queued the frames at bcast_unix, the island received them at
+            # received_unix; older tapes: the merge time and the apply record minus its queue time
+            t0 = _f(m["rec"].get("bcast_unix")) or m["ts"]
+            t1 = (_f(b.get("received_unix")) or b["_ts"] - (_f(b.get("queue_seconds")) or 0)) if b else t0 + 1.5
+            out.append({"k": "b", "i": iid, "sh": m["shard"], "f": m["frag"], "t0": t0, "t1": max(t0 + 0.3, t1),
+                        "b": _f(b.get("payload_bytes")) if b else _f(m["rec"].get("bcast_bytes")), "a": b is None})
     for iid, x in isl.items():
         if iid not in rollout:
             continue
