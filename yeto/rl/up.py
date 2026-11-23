@@ -19,8 +19,10 @@ type, run as a subprocess with the run config's environment:
                growing for max(4 x --rl-stall-timeout, budget.silence_min) (preflight
                refuses --rl-stall-timeout 0); trainer starvation (``yeto.rl.starvation``:
                no new buffer object for ``starvation.alert_min`` alerts; for ``stop_min``
-               with no healthy sampler stops the trainer through the STOP flag); the
-               sandbox host's container count of this run is a warning only.
+               with no healthy sampler stops the trainer through the STOP flag); no new
+               policy release after the first one (``yeto.rl.release_stall``: an alert,
+               a stop with ``breakers.run.release_stall.action: stop``); the sandbox
+               host's container count of this run is a warning only.
 
 The NC sampler pool is never released by an automatic decision of ``up``: a breach (trainer
 failure, budget, wall clock, first-group timeout) stops the trainer only
@@ -51,7 +53,16 @@ Run config (JSON; paths may use ``~``)::
      "first_group": {"timeout_s": 5400, "poll_s": 60},
      "dashboard": {"port": 8795},
      "budget": {"usd": 450, "wall_h": 3.0, "nc_usd_per_h": 24,  # per NC node
-                "silence_min": 30, "release_nc_on_breach": false}}
+                "silence_min": 30, "release_nc_on_breach": false},
+     # the same limits in the unified form (yeto.breakers; the keys above stay its aliases):
+     "breakers": {"run": {"budget": {"usd": 450}, "wall_clock": {"hours": 3.0}}}}
+
+The monitor's limits are the run layer of the breaker registry (``yeto.breakers.layers.run``:
+``run.budget``, ``run.wall_clock``, ``run.trainer_silence``, ``run.first_group``,
+``run.starvation``, ``run.release_stall``, ...), resolved from the ``breakers:`` section and the
+legacy keys; ``yeto breaker show --config <run.json>`` prints them. Each trip is an ``rl_breaker``
+line in ``events.jsonl`` of the state directory, and a stop records its ``stop_reason``
+(``breaker:<name>``) in ``state.json``; exit codes are unchanged.
 
 State: ``~/.yeto/rl-up/<run>/state.json`` (pids, logs, step times). ``up`` resumes: a step
 whose process is alive is not started again. One ``up`` per run at a time (``up.lock``, an ``flock``
@@ -100,6 +111,10 @@ STATE_ROOT = Path(os.environ.get("YETO_STATE_DIR") or "~/.yeto/rl-up").expanduse
 FORCE_FACTOR = 1.2
 _FORMAT_WARNED: set[str] = set()  # pool state files of a newer format already reported
 DEFAULT_STALL_TIMEOUT_S = 900.0  # yeto.launch.fleet.DEFAULT_RL_STALL_TIMEOUT_S
+# the defaults of the run layer's breakers (yeto.breakers.layers.run declares them from these)
+DEFAULT_FIRST_GROUP_TIMEOUT_S = 5400.0
+DEFAULT_SILENCE_MIN = 30.0  # the trainer silence limit is max(SILENCE_STALL_FACTOR x stall, this)
+SILENCE_STALL_FACTOR = 4
 # ``yeto launch --cluster-prefix`` default (yeto.cli): the trainer's run name without the flag
 LAUNCH_DEFAULT_NAME = "yeto"
 SEAL_OWNER = "run-up-data-end"  # the incarnation the data-end seal claims an owned shard as
@@ -201,12 +216,19 @@ def load_config(path: str) -> dict[str, Any]:
     if "pool" not in cfg and "samplers" not in cfg:
         raise ValueError("run config: missing 'samplers' (the rollout pools) or 'pool' (one pool config)")
     known = {"run", "store", "env", "preflight", "sandbox", "pool", "samplers", "trainer", "first_group",
-             "dashboard", "budget", "comment", "syncer", "controller", "rollout", "starvation"}
+             "dashboard", "budget", "comment", "syncer", "controller", "rollout", "starvation", "breakers"}
     unknown = set(cfg) - known
     if unknown:
         raise ValueError(f"run config: unknown keys {sorted(unknown)} (known: {sorted(known)})")
     rollout_section(cfg)
     check_sections(cfg)
+    if cfg.get("breakers") is not None:
+        from yeto.breakers import BreakerConfigError, parse_section  # noqa: PLC0415
+
+        try:
+            parse_section(cfg["breakers"])
+        except BreakerConfigError as error:
+            raise ValueError(f"run config: {error}") from None
     return cfg
 
 
@@ -663,6 +685,44 @@ class Run:
             return None
         return os.path.expanduser(sb["envs"]) if sb.get("envs") else None
 
+    # -- breakers (yeto.breakers; the run layer: yeto.breakers.layers.run)
+    @property
+    def breakers(self) -> Any:
+        """The run config's resolved breakers: the ``breakers:`` section over the legacy keys
+        (``budget.*``, ``starvation.*``, ...). Resolved again when the config changes; a
+        conflict never raises here (the preflight refuses it, :meth:`breakers_problem`)."""
+        from yeto import breakers  # noqa: PLC0415
+
+        key = json.dumps(self.cfg, sort_keys=True, default=str)
+        memo = getattr(self, "_breakers_memo", None)
+        if memo is None or memo[0] != key:
+            memo = self._breakers_memo = (key, breakers.resolve(breakers.Sources.from_run_config(self.cfg),
+                                                                strict=False, layers=("run", "launch")))
+        return memo[1]
+
+    def breaker_param(self, name: str, param: str) -> Any:
+        """``param`` of the resolved breaker ``name``; None when the breaker is off."""
+        return self.breakers.get(f"{name}.{param}") if self.breakers.enabled(name) else None
+
+    def breaker_event(self, name: str, *, value: float | None, limit: float | None, detail: str = "",
+                      state: str = "trip", legacy_event: str | None = None) -> dict[str, Any]:
+        """Report a run-layer breaker (``rl_breaker``) on the run's tape, ``events.jsonl`` in
+        its state directory. A stop trip carries (and records) the run's ``stop_reason``;
+        the caller still decides and acts as before. Never raises."""
+        from yeto import breakers  # noqa: PLC0415
+
+        try:
+            entry = self.breakers.entry(name)
+            action, source = entry.action, entry.source.location
+        except Exception:  # noqa: BLE001 - a view only: the event still goes out
+            action = source = None
+        return breakers.trip(name, value, limit, action, state=state, emit=self._append_event, detail=detail,
+                             legacy_event=legacy_event, config_source=source, run=self.run)
+
+    def _append_event(self, event: dict[str, Any]) -> None:
+        with open(self.dir / "events.jsonl", "a") as fh:
+            fh.write(json.dumps(event, default=str) + "\n")
+
     # -- steps
     def preflight(self) -> bool:
         from yeto.launch_preflight import modal_sdk_problem  # noqa: PLC0415
@@ -682,6 +742,14 @@ class Run:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
             return False
+        problem = self.breakers_problem()
+        if problem is not None:
+            _log(f"preflight: {problem}")
+            self.mark("preflight", ok=False)
+            return False
+        for line in self.breakers.deprecations():
+            _log(f"preflight: deprecated: {line}")
+        self.log_release_stall()
         if self.stall_timeout_s() <= 0:
             _log("preflight: --rl-stall-timeout 0 disables the trainer's hang detection; run up refuses it "
                  "(the monitor's silence backstop is 4x this timeout)")
@@ -913,7 +981,7 @@ class Run:
         now = time.time() if now is None else now
         out = up_segments.uptime_summary(self.state, now)
         out["spend_usd_estimate"] = round(self.spend_usd(), 1)
-        wall_h = up_consistency.budget_wall_h(self.cfg.get("budget"))
+        wall_h = self.breaker_param("run.wall_clock", "hours")
         out["wall_h"] = wall_h
         out["wall_h_left"] = None  # None: no wall-clock cap, or no open up
         if wall_h is not None and out["current_up_open"] and "t0" in self.state:
@@ -933,7 +1001,7 @@ class Run:
         """One :class:`~yeto.launch.pool.controller.RolloutController` over every pool
         (each built like its ``nc pool`` loop: state, events, scale file, lock), started
         in a thread of this process. ``ops``: per pool name, for tests."""
-        from yeto.launch.pool.controller import DEFAULT_STALL_S, RolloutController, nc_pool  # noqa: PLC0415
+        from yeto.launch.pool.controller import RolloutController, nc_pool  # noqa: PLC0415
 
         slots = {}
         try:
@@ -947,7 +1015,7 @@ class Run:
             raise
         interval = min(r.interval_s for r in self.pools)
         section = rollout_section(self.cfg)
-        kw.setdefault("stall_s", float(section.get("stall_alert_s", DEFAULT_STALL_S)))
+        kw.setdefault("stall_s", float(self.breaker_param("run.rollout_stall_alert", "limit_s") or 0))
         kw.setdefault("drain_on_exit", bool(section.get("drain_on_exit", True)))
         self.controller = RolloutController(slots, stop_flag=self.dir / "STOP", interval=interval, log=_log, **kw)
         self.controller.start()
@@ -980,7 +1048,9 @@ class Run:
     def wait_first_group(self) -> str | None:
         """None once the store holds a group; else why the wait ended (a breach, the timeout)."""
         fg = self.cfg.get("first_group") or {}
-        deadline = time.monotonic() + float(fg.get("timeout_s", 5400))  # a local interval: an NTP step must not end/stretch it
+        timeout = self.breaker_param("run.first_group", "timeout_s")
+        start = time.monotonic()  # a local interval: an NTP step must not end/stretch it
+        deadline = math.inf if timeout is None else start + timeout
         while time.monotonic() < deadline:
             n = self.buffer_objects()
             if n:
@@ -991,6 +1061,8 @@ class Run:
                 return why
             time.sleep(float(fg.get("poll_s", 60)))
         _log("first group: timed out")
+        self.breaker_event("run.first_group", value=time.monotonic() - start, limit=timeout,
+                           detail="no sample-buffer object reached the store")
         return "first group timed out"
 
     def trainer_restart(self) -> bool:
@@ -1167,6 +1239,8 @@ class Run:
         argv = ["--store", self.cfg["store"], "--run", self.trainer_launch_name(),
                 "--up-state", str(self.state_path)]
         usd = (self.cfg.get("budget") or {}).get("usd")
+        if usd is None and self.breaker_param("run.budget", "usd") is not None:  # set by the breakers section
+            usd = f"{self.breaker_param('run.budget', 'usd'):g}"
         if usd:
             argv += ["--budget", str(usd)]
         if dash.get("prices"):
@@ -1329,9 +1403,8 @@ class Run:
     def container_limit(self) -> int | None:
         """The sandbox container alert line: ``max_run_containers``, raised to
         ``max_containers_per_sampler`` x the pool's billed nodes (it follows a scale)."""
-        sb = self.cfg.get("sandbox") or {}
-        fixed = int(sb["max_run_containers"]) if sb.get("max_run_containers") else None
-        per = int(sb["max_containers_per_sampler"]) if sb.get("max_containers_per_sampler") else None
+        fixed = self.breaker_param("run.sandbox_containers", "max_run_n") or None
+        per = self.breaker_param("run.sandbox_containers", "max_per_sampler_n") or None
         if per is None:
             return fixed
         nodes = self.billed_nodes()
@@ -1408,17 +1481,22 @@ class Run:
     def breach(self, *, trainer: bool = True) -> str | None:
         """Why the run must stop, else None. ``trainer=False`` (the first-group wait, before
         this invocation starts the trainer) skips the trainer log: on a resumed ``run up`` it is
-        the log of the previous, stopped launcher, whose failure is already handled."""
-        b = self.cfg.get("budget") or {}
+        the log of the previous, stopped launcher, whose failure is already handled. Each
+        reason is one run-layer breaker (``yeto.breakers.layers.run``), reported as an
+        ``rl_breaker`` trip."""
         why = None
+        tripped: tuple[str, float | None, float | None] | None = None  # breaker, value, limit
         controller = getattr(self, "controller", None)
         if controller is not None and controller.check():  # the in-process pools stopped being driven
-            return controller.check()
-        wall_h = up_consistency.budget_wall_h(b)
+            why = controller.check()
+            self.breaker_event("run.controller_exit", value=None, limit=None, detail=why)
+            return why
+        wall_h = self.breaker_param("run.wall_clock", "hours")
+        usd = self.breaker_param("run.budget", "usd")
         if wall_h is not None and "t0" in self.state and self.wall_elapsed_s() > wall_h * 3600:
-            why = "wall clock"
-        elif self.spend_usd() > up_consistency.budget_usd(b):
-            why = f"budget ${self.spend_usd():.0f}"
+            why, tripped = "wall clock", ("run.wall_clock", self.wall_elapsed_s() / 3600, wall_h)
+        elif (spend := self.spend_usd()) > (up_consistency.NO_CAP_USD if usd is None else usd):
+            why, tripped = f"budget ${spend:.0f}", ("run.budget", spend, usd)
         # the trainer: only its launcher's exit. An OOM or a fatal island error ends the
         # launcher; a hang is Miles' --rl-stall-timeout and the launcher's own business.
         tr = (self.state.get("procs") or {}).get("trainer") if trainer else None
@@ -1431,11 +1509,14 @@ class Run:
             if done and done[-1][0] == "SUCCEEDED" and done[-1][1] == "0":
                 self.state["trainer_finished"] = self.state.get("trainer_finished") or _now()
             if not done and not _worker_alive(self.trainer_launch_name()):  # a killed log streamer: the worker may still run
-                why = "trainer: launcher exited without a result"
+                why, tripped = "trainer: launcher exited without a result", ("run.trainer_exit", None, None)
             elif done and (done[-1][0] == "FAILED" or done[-1][1] != "0"):
                 why = f"trainer: launcher finished {done[-1][0]} (exit code {done[-1][1]})"
+                tripped = ("run.trainer_exit", float(done[-1][1]), 0.0)
         if why is None and tr and _alive(tr["pid"]):
             why = self.silence(time.time())
+            if why:
+                tripped = ("run.trainer_silence", self._quiet_s, self.silence_limit_s())
         limit = n = None
         if why is None:
             # a view only: an envs file or pool config that does not read this poll must not
@@ -1450,13 +1531,21 @@ class Run:
             # an alert, not a breach: the containers belong to the NC samplers, so stopping the
             # trainer frees none of them; an evicted island's trials outlive it while its
             # replacement starts its own, so the count passes the limit in a normal replacement
-            if n is not None and n > int(limit):
+            over = n is not None and n > int(limit)
+            if over:
                 _log(f"WARNING: {n} sandbox containers of this run > {limit} (not a breach)")
                 self.state["sandbox_over"] = {"at": _now(), "containers": n}
                 self.save()
+            if over != getattr(self, "_containers_over", False):
+                self.breaker_event("run.sandbox_containers", value=n, limit=limit, state="trip" if over else "clear",
+                                   detail=f"{n} sandbox containers of this run")
+            self._containers_over = over
         if why:
             _log(f"BREAKER: {why}")
+            event = self.breaker_event(tripped[0], value=tripped[1], limit=tripped[2], detail=why) if tripped else {}
             self.state["breaker"] = {"at": _now(), "why": why}
+            if event.get("stop_reason"):
+                self.state["breaker"]["stop_reason"] = event["stop_reason"]
             self.save()
         return why
 
@@ -1585,31 +1674,34 @@ class Run:
 
     def budget_problem(self) -> str | None:
         """A budget that would stop the run at once: ``budget.usd`` 0 (the guide's
-        template value) with a price set, so the first estimated dollar is a breach."""
+        template value) with a price set, so the first estimated dollar is a breach.
+        Logs the wall clock's implicit 3 h default (decision 2: shown, never silent)."""
         b = self.cfg.get("budget") or {}
-        try:
-            capped = up_consistency.budget_capped(b)
+        try:  # the legacy keys' own checks (their messages name the key)
+            up_consistency.budget_capped(b)
+            up_consistency.budget_wall_h(b)
         except ValueError as exc:
             return str(exc)
-        try:
-            wall_h = up_consistency.budget_wall_h(b)
-        except ValueError as exc:
-            return str(exc)
+        usd = self.breaker_param("run.budget", "usd")
+        wall = self.breakers.entry("run.wall_clock")
+        wall_h = wall.params["hours"] if wall.enabled else None
         if "usd" in b and b["usd"] is None:
             _log("preflight: budget.usd is null: no spend cap (as if unset); the wall clock still applies")
-        if "wall_h" not in b:
+        if wall.enabled and wall.sources["hours"].kind == "default":
             _log(f"preflight: WARNING: budget.wall_h is not set: the default {wall_h:g} h wall clock stops the "
                  f"trainer {wall_h:g} h after this run up starts the pools (and the breaker forces the sampler "
-                 f"pools down at {wall_h * FORCE_FACTOR:g} h). For a long run set budget.wall_h to its hours, "
-                 "or to null for no wall-clock cap")
+                 f"pools down at {wall_h * self.breakers.get('run.budget.force_pools_ratio'):g} h). For a long run "
+                 "set budget.wall_h to its hours, or to null for no wall-clock cap")
         elif wall_h is None:
-            _log("preflight: budget.wall_h is null: no wall-clock cap; only budget.usd (if set) stops the run")
+            off = "budget.wall_h is null" if "wall_h" in b else "breakers.run.wall_clock is off"
+            _log(f"preflight: {off}: no wall-clock cap; only budget.usd (if set) stops the run")
         priced = (up_consistency.number_or_default(self.cfg["trainer"], "usd_per_h", 0) > 0
                   or up_consistency.number_or_default(b, "nc_usd_per_h", 24) > 0)
-        if capped and up_consistency.budget_usd(b) <= 0 and priced:
-            return (f"budget.usd is {b['usd']} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "
+        if usd is not None and usd <= 0 and priced:
+            shown = f"budget.usd is {b['usd']}" if b.get("usd") is not None else f"breakers.run.budget.usd is {usd:g}"
+            return (f"{shown} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "
                     "the first estimated dollar would stop the run; set the spend cap")
-        if capped:
+        if usd is not None:
             for ref in self.pools:
                 try:
                     pool_cfg = ref.load()
@@ -1620,8 +1712,27 @@ class Run:
                     return problem
         return None
 
+    def breakers_problem(self) -> str | None:
+        """The ``breakers:`` section against the legacy keys it replaces: a disagreement (or
+        two legacy places that disagree) is refused, both locations named. Without the
+        section the legacy keys are read as before: a disagreement is only logged."""
+        conflicts = [c for c in self.breakers.conflicts if c.name.startswith("run.")]  # launch: its dry run
+        if not conflicts:
+            return None
+        lines = [f"{c.message} ({', '.join(c.locations)})" for c in conflicts]
+        if self.breakers.has_section:
+            return "breakers: " + "; ".join(lines)
+        for line in lines:
+            _log(f"preflight: WARNING: breakers: {line} (refused once the run config has a breakers: section)")
+        return None
+
     def stall_timeout_s(self) -> float:
-        """The trainer's ``--rl-stall-timeout`` (seconds; the launcher's default when unset)."""
+        """The trainer's ``--rl-stall-timeout`` (seconds; the launcher's default when unset):
+        the launch layer's ``launch.stall`` once it is registered, else the argv itself."""
+        from yeto.breakers import default_registry  # noqa: PLC0415
+
+        if "launch.stall" in default_registry():
+            return float(self.breaker_param("launch.stall", "timeout_s") or 0)
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
         value = None
         for i, a in enumerate(argv):
@@ -1635,8 +1746,12 @@ class Run:
             return DEFAULT_STALL_TIMEOUT_S
 
     def silence_limit_s(self) -> float:
-        b = self.cfg.get("budget") or {}
-        return max(4 * self.stall_timeout_s(), up_consistency.number_or_default(b, "silence_min", 30) * 60)
+        """``run.trainer_silence``: its ``limit_s``, else derived from the stall timeout
+        (``max(stall_factor_n x --rl-stall-timeout, floor_s)``; ``budget.silence_min`` is the floor)."""
+        entry = self.breakers.entry("run.trainer_silence")
+        if entry.params["limit_s"] is not None:
+            return float(entry.params["limit_s"])
+        return max(entry.params["stall_factor_n"] * self.stall_timeout_s(), entry.params["floor_s"])
 
     def progress_paths(self) -> list[Path]:
         """What grows while the trainer works: its launcher log and any
@@ -1660,14 +1775,22 @@ class Run:
         if seen is None or seen[0] != sig:
             self._progress = (sig, now)
             return None
-        quiet = now - seen[1]
-        if quiet > self.silence_limit_s():
+        quiet = self._quiet_s = now - seen[1]
+        if self.breakers.enabled("run.trainer_silence") and quiet > self.silence_limit_s():
             return f"trainer: log / tape silent {quiet / 60:.0f} min (limit {self.silence_limit_s() / 60:.0f} min)"
         return None
 
     @property
     def release_nc_on_breach(self) -> bool:
-        return bool((self.cfg.get("budget") or {}).get("release_nc_on_breach", False))
+        """``run.budget.release_pools_on_trip`` (legacy ``budget.release_nc_on_breach``): a
+        budget or wall-clock breach runs the full down."""
+        return bool(self.breakers.get("run.budget.release_pools_on_trip"))
+
+    @staticmethod
+    def limit_breach(why: str) -> bool:
+        """A budget or wall-clock breach (the pools may be released / forced down), not a
+        trainer failure or a first-group timeout."""
+        return why.startswith(("wall clock", "budget"))
 
     def trainer_down(self, why: str) -> None:
         """Stop the trainer only: the NC pool, its nodes and the sandboxes stay (a node setup
@@ -1684,8 +1807,9 @@ class Run:
     def on_breach(self, why: str) -> None:
         """Budget / wall clock with ``release_nc_on_breach``: the full ``down``; anything
         else (and by default): the trainer only."""
-        if self.release_nc_on_breach and why.startswith(("wall clock", "budget")):
-            _log(f"{why}: budget.release_nc_on_breach is set: full down ({self.pools_phrase()} included)")
+        if self.release_nc_on_breach and self.limit_breach(why):
+            _log(f"{why}: run.budget.release_pools_on_trip (budget.release_nc_on_breach) is set: full down "
+                 f"({self.pools_phrase()} included)")
             self.down()
             return
         self.trainer_down(why)
@@ -1704,21 +1828,29 @@ class Run:
         warned = getattr(self, "_rollout_stall_warned", False)
         if why and not warned:
             _log(f"WARNING: rollout stalled: {why}; see yeto run status and the pool events")
+            self.breaker_event("run.rollout_stall_alert", value=None, limit=getattr(controller, "stall_s", None),
+                               detail=why)
         elif not why and warned:
             _log("rollout: sampler progress resumed")
+            self.breaker_event("run.rollout_stall_alert", value=None, limit=getattr(controller, "stall_s", None),
+                               state="clear", detail="sampler progress resumed")
         self._rollout_stall_warned = bool(why)
         return why
 
     # -- trainer starvation (yeto.rl.starvation)
     @property
     def starvation_config(self) -> Any:
+        """The resolved ``run.starvation`` breaker (legacy: the ``starvation`` section)."""
         from yeto.rl.starvation import StarvationConfig  # noqa: PLC0415
 
-        return StarvationConfig.from_section(self.cfg.get("starvation"))
+        return StarvationConfig.from_resolved(self.breakers)
 
     def starvation_problem(self) -> str | None:
+        from yeto.rl.starvation import StarvationConfig  # noqa: PLC0415
+
         try:
-            self.starvation_config  # noqa: B018 - validates the section
+            StarvationConfig.from_section(self.cfg.get("starvation"))  # the legacy section, its own messages
+            self.starvation_config  # noqa: B018 - validates the resolved breaker
         except ValueError as error:
             return str(error)
         return None
@@ -1994,13 +2126,18 @@ class Run:
                                     listed=self._starvation_list_ok)
         if verdict.recovered:
             _log(f"{RECOVERED_EVENT}: a new group reached the buffer")
+            self.breaker_event("run.starvation", value=verdict.starved_s, limit=cfg.alert_s or None, state="clear",
+                               detail="a new group reached the buffer", legacy_event=RECOVERED_EVENT)
             self.state.pop("starvation", None)
             self.save()
         if verdict.new_alert:
             _log(f"CRITICAL {ALERT_EVENT}: {verdict.reason}")
+            self.breaker_event("run.starvation", value=verdict.starved_s, limit=cfg.alert_s or None, state="warn",
+                               detail=verdict.reason, legacy_event=ALERT_EVENT)
             self.state["starvation"] = {"at": _now(), "event": ALERT_EVENT, "starved_min": round(verdict.starved_s / 60),
                                         "why": verdict.reason}
             self.save()
+        self._starvation_trip = (verdict.starved_s, cfg.stop_s)  # what a stop reports
         return verdict.reason if verdict.state == STOP else None
 
     def trainer_launch_name(self) -> str:
@@ -2021,25 +2158,111 @@ class Run:
         trainer island keeps its latest round cut), then, once the launcher exited or
         ``stop_grace_min`` passed, :meth:`trainer_down`. The sampler pools stay; ``yeto run
         up`` of this config resumes the trainer from its latest cut."""
-        from yeto import runs  # noqa: PLC0415
         from yeto.rl.starvation import STOP_EVENT  # noqa: PLC0415
 
-        _log(f"CRITICAL {STOP_EVENT}: {why}; stopping the trainer (STOP flag, then yeto down)")
-        self.state["starvation"] = {"at": _now(), "event": STOP_EVENT, "why": why}
+        value, limit = getattr(self, "_starvation_trip", (None, None))
+        self.flag_stop("run.starvation", "starvation", STOP_EVENT, why, grace_s=self.starvation_config.stop_grace_s,
+                       poll_s=poll_s, value=value, limit=limit,
+                       after="once a sampler is healthy again, `yeto run up --config <run.json>` resumes "
+                             "the trainer from its latest cut")
+
+    def flag_stop(self, name: str, key: str, event: str, why: str, *, grace_s: float, poll_s: float = 30.0,
+                  value: float | None = None, limit: float | None = None, after: str = "") -> None:
+        """Stop the trainer for breaker ``name`` through the run's STOP flag, then
+        :meth:`trainer_down` once the launcher exited or ``grace_s`` passed. ``state[key]``
+        records the stop (``event``, ``why``, ``stop_reason``)."""
+        from yeto import runs  # noqa: PLC0415
+
+        _log(f"CRITICAL {event}: {why}; stopping the trainer (STOP flag, then yeto down)")
+        trip = self.breaker_event(name, value=value, limit=limit, detail=why, legacy_event=event)
+        self.state[key] = {"at": _now(), "event": event, "why": why}
+        if trip.get("stop_reason"):
+            self.state[key]["stop_reason"] = trip["stop_reason"]
         self.save()
         tr = (self.state.get("procs") or {}).get("trainer")
-        deadline = time.monotonic() + self.starvation_config.stop_grace_s
+        deadline = time.monotonic() + grace_s
         try:
             flag = runs.request_stop(self.trainer_launch_name())
-            _log(f"{STOP_EVENT}: STOP flag written: {flag}")
+            _log(f"{event}: STOP flag written: {flag}")
         except OSError as error:  # no graceful drain to wait for: the yeto down below still stops it
-            _log(f"{STOP_EVENT}: STOP flag not written ({type(error).__name__}: {error}); stopping the trainer now")
+            _log(f"{event}: STOP flag not written ({type(error).__name__}: {error}); stopping the trainer now")
             deadline = time.monotonic()
         while tr and _alive(tr["pid"]) and time.monotonic() < deadline:
             time.sleep(poll_s)
-        self.trainer_down(f"{STOP_EVENT}: {why}")
-        _log(f"{STOP_EVENT}: once a sampler is healthy again, `yeto run up --config <run.json>` resumes "
-             "the trainer from its latest cut")
+        self.trainer_down(f"{event}: {why}")
+        if after:
+            _log(f"{event}: {after}")
+
+    # -- release stall (yeto.rl.release_stall)
+    def latest_release(self) -> tuple[Any, bool]:
+        """The identity of the store's LATEST policy release (None: no release yet) and
+        whether it was read (False: a failed read, no evidence)."""
+        from yeto.rl.quant.schemes import RELEASE_DIR  # noqa: PLC0415
+        from yeto.rl.release_stall import LATEST, release_identity  # noqa: PLC0415
+
+        try:
+            raw = self._objects().read(f"{RELEASE_DIR}/{LATEST}")
+            return (None if raw is None else release_identity(json.loads(raw))), True
+        except Exception:  # noqa: BLE001 - checked again next poll
+            return None, False
+
+    def log_release_stall(self) -> None:
+        """The preflight line of ``run.release_stall``: on by default, so it is stated."""
+        from yeto.rl.release_stall import ALERT_EVENT, limit_phrase  # noqa: PLC0415
+
+        entry = self.breakers.entry("run.release_stall")
+        if not entry.enabled:
+            _log(f"preflight: run.release_stall is off ({entry.sources['enabled'].location})")
+            return
+        what = "stops the trainer (STOP flag)" if entry.action == "stop" else f"logs {ALERT_EVENT} (no stop)"
+        _log(f"preflight: run.release_stall is on: after the first policy release, no new release for "
+             f"{limit_phrase(entry.params['limit_s'])} {what}. Set breakers.run.release_stall "
+             '{"limit_s": N}, {"action": "stop"} to stop the trainer, or {"enabled": false} to turn it off')
+
+    def release_stall_check(self, now: float) -> str | None:
+        """Alert on a trainer that stopped publishing releases (``run.release_stall``);
+        with ``action: stop`` the reason to stop it, else None."""
+        from yeto.rl.release_stall import ALERT_EVENT, RECOVERED_EVENT, STOP, ReleaseStallConfig, ReleaseStallWatch  # noqa: PLC0415
+
+        entry = self.breakers.entry("run.release_stall")
+        if not entry.enabled:
+            return None
+        watch = getattr(self, "_release_stall", None)
+        if watch is None:
+            watch = self._release_stall = ReleaseStallWatch(ReleaseStallConfig(
+                limit_s=entry.params["limit_s"], check_s=entry.params["check_s"], stop=entry.action == "stop"))
+            self._release_read: tuple[float, Any, bool] | None = None
+        if self._release_read is None or now - self._release_read[0] >= watch.config.check_s:
+            self._release_read = (now, *self.latest_release())
+        _, release, read = self._release_read
+        tr = (self.state.get("procs") or {}).get("trainer") or {}
+        verdict = watch.observe(now, release=release, incarnation=(tr.get("pid"), tr.get("started")), read=read)
+        if verdict.recovered:
+            _log(f"{RECOVERED_EVENT}: a new policy release reached the store")
+            self.breaker_event("run.release_stall", value=verdict.stalled_s, limit=verdict.limit_s, state="clear",
+                               detail="a new policy release reached the store", legacy_event=RECOVERED_EVENT)
+            self.state.pop("release_stall", None)
+            self.save()
+        if verdict.new_alert:
+            _log(f"CRITICAL {ALERT_EVENT}: {verdict.reason}")
+            if verdict.state != STOP:  # a stop reports its own trip (flag_stop)
+                self.breaker_event("run.release_stall", value=verdict.stalled_s, limit=verdict.limit_s,
+                                   detail=verdict.reason, legacy_event=ALERT_EVENT)
+            self.state["release_stall"] = {"at": _now(), "event": ALERT_EVENT,
+                                           "stalled_min": round(verdict.stalled_s / 60), "why": verdict.reason}
+            self.save()
+        self._release_stalled = verdict
+        return verdict.reason if verdict.state == STOP else None
+
+    def release_stall_stop(self, why: str, poll_s: float = 30.0) -> None:
+        """``run.release_stall`` with ``action: stop``: the STOP flag, as a starvation stop."""
+        from yeto.rl.release_stall import STOP_EVENT  # noqa: PLC0415
+
+        verdict = getattr(self, "_release_stalled", None)
+        self.flag_stop("run.release_stall", "release_stall", STOP_EVENT, why,
+                       grace_s=self.breakers.get("run.release_stall.stop_grace_s"), poll_s=poll_s,
+                       value=getattr(verdict, "stalled_s", None), limit=getattr(verdict, "limit_s", None),
+                       after="`yeto run up --config <run.json>` resumes the trainer from its latest cut")
 
     def monitor(self, poll_s: float = 60.0) -> None:
         # from here a state.json write that fails (ENOSPC / EROFS / EIO) is logged and kept
@@ -2051,7 +2274,7 @@ class Run:
             why = self.breach()
             if why:
                 self.on_breach(why)
-                if why.startswith(("wall clock", "budget")) and not self.release_nc_on_breach:
+                if self.limit_breach(why) and not self.release_nc_on_breach:
                     self.watch_nc_after_breach(why, poll_s)
                 return
             tr = (self.state.get("procs") or {}).get("trainer")
@@ -2062,6 +2285,11 @@ class Run:
                 why = self.starvation_check(time.time())
                 if why:
                     self.starvation_stop(why)
+                    return
+            if tr and _alive(tr["pid"]) and not self.state.get("trainer_finished"):
+                why = self.release_stall_check(time.time())
+                if why:
+                    self.release_stall_stop(why)
                     return
             if tr and not _alive(tr["pid"]) and not self.state.get("trainer_exit_seen"):
                 _log(f"trainer launcher PID {tr['pid']} exited")
@@ -2101,10 +2329,11 @@ class Run:
         still bills: stay up, print the billing banner every poll, and once the spend passes
         ``FORCE_FACTOR`` x ``budget.usd`` (or the wall time ``FORCE_FACTOR`` x ``wall_h``)
         release the pool (``pool-stop``). Returns when no member bills any more."""
-        b = self.cfg.get("budget") or {}
-        usd_cap = up_consistency.budget_usd(b) * FORCE_FACTOR
-        wall_h = up_consistency.budget_wall_h(b)
-        wall_cap = float("inf") if wall_h is None else wall_h * 3600 * FORCE_FACTOR
+        usd = self.breaker_param("run.budget", "usd")
+        factor = self.breakers.get("run.budget.force_pools_ratio")
+        usd_cap = (up_consistency.NO_CAP_USD if usd is None else usd) * factor
+        wall_h = self.breaker_param("run.wall_clock", "hours")
+        wall_cap = float("inf") if wall_h is None else wall_h * 3600 * factor
         forced: set[str] = set()
         failed = 0
         while True:
@@ -2129,7 +2358,12 @@ class Run:
             if spend > usd_cap or elapsed > wall_cap:
                 cap = f"spend ${spend:.0f} > ${usd_cap:.0f}" if spend > usd_cap else \
                     f"wall {elapsed / 3600:.1f} h > {wall_cap / 3600:.1f} h"
-                _log(f"BREAKER: {cap} ({FORCE_FACTOR}x the budget): forcing pool-stop")
+                _log(f"BREAKER: {cap} ({factor}x the budget): forcing pool-stop")
+                if "nc_forced_stop" not in forced:
+                    self.breaker_event("run.budget" if spend > usd_cap else "run.wall_clock", state="trip",
+                                       value=spend if spend > usd_cap else elapsed / 3600,
+                                       limit=usd_cap if spend > usd_cap else wall_cap / 3600,
+                                       detail=f"{cap}: forced pool-stop of {self.pools_phrase()}")
                 rc = max(self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800)
                          for path in self.pool_configs)
                 if "nc_forced_stop" not in forced:
@@ -2319,8 +2553,8 @@ class Run:
         if breaker and not (resumed and str(resumed) > str(breaker.get("at"))):  # a later run up resumed it
             return (f"the run's breaker fired ({breaker.get('why')} at {breaker.get('at')}): no node is added "
                     f"to a stopped run")
-        b = self.cfg.get("budget") or {}
-        cap = up_consistency.budget_usd(b)
+        usd = self.breaker_param("run.budget", "usd")
+        cap = up_consistency.NO_CAP_USD if usd is None else usd
         spent = self.spend_usd()
         add = new * self.node_usd_per_h(i)
         if spent + add > cap:

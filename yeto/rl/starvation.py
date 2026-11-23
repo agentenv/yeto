@@ -27,7 +27,9 @@ check, which also count as waiting) must still alert, ``alert_min`` after the ho
   sampler) holds the stop too. Pool state that cannot be read (any pool's) and a failed buffer listing
   are no evidence either way: no stop.
 
-``0`` turns a verdict off. Neutral: no store, no pool, no clock of its own.
+The thresholds are the run layer's ``run.starvation`` breaker (:meth:`StarvationConfig.from_resolved`);
+the run config's ``starvation`` section (minutes, ``0`` turns a verdict off) is its legacy alias,
+still checked here. Neutral: no store, no pool, no clock of its own.
 """
 
 from __future__ import annotations
@@ -88,6 +90,27 @@ class StarvationConfig:
         if cfg.alert_s > 0 and cfg.stop_s > 0 and cfg.stop_s < cfg.alert_s:
             raise ValueError(f"starvation.stop_min ({cfg.stop_s / 60:g}) must be >= alert_min "
                              f"({cfg.alert_s / 60:g}) (or 0: no stop)")
+        return cfg
+
+    @classmethod
+    def from_resolved(cls, resolved: Any) -> StarvationConfig:
+        """The resolved ``run.starvation`` breaker (``yeto.breakers``; seconds, ``alert_s`` /
+        ``stop_s`` None: that verdict off; the breaker off: both). Raises ValueError on a bad
+        combination."""
+        entry = resolved.entry("run.starvation")
+        p = entry.params
+
+        def verdict(key: str) -> float:
+            return 0.0 if not entry.enabled or p[key] is None else float(p[key])
+
+        cfg = cls(alert_s=verdict("alert_s"), stop_s=verdict("stop_s"), unhealthy_s=float(p["unhealthy_s"]),
+                  check_s=float(p["check_s"]), stop_grace_s=float(p["stop_grace_s"]),
+                  trainer_wait_max_s=float(p["trainer_wait_max_s"]))
+        if cfg.check_s <= 0 and cfg.enabled:
+            raise ValueError("run.starvation.check_s must be > 0")
+        if cfg.alert_s > 0 and cfg.stop_s > 0 and cfg.stop_s < cfg.alert_s:
+            raise ValueError(f"run.starvation.stop_s ({cfg.stop_s:g}) must be >= alert_s ({cfg.alert_s:g}) "
+                             "(or null: no stop)")
         return cfg
 
 

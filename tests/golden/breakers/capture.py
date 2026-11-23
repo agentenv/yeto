@@ -112,14 +112,16 @@ def run_values(cfg: dict[str, Any], state_root: Path) -> dict[str, Any]:
         out["run.wall_clock.hours"] = wall_h
         out["run.wall_clock.implicit"] = "wall_h" not in b
     out["run.trainer_silence.enabled"] = True
-    out["run.trainer_silence.limit_s"] = run.silence_limit_s()
+    out["run.trainer_silence.effective_limit_s"] = run.silence_limit_s()
+    out["run.trainer_silence.floor_s"] = up_consistency.number_or_default(b, "silence_min", 30) * 60
+    out["run.trainer_silence.stall_factor_n"] = 4  # the silence limit is max(4 x --rl-stall-timeout, floor_s)
     out["run.first_group.enabled"] = True
     out["run.first_group.timeout_s"] = float((cfg.get("first_group") or {}).get("timeout_s", 5400))
     starve = run.starvation_config
     out["run.starvation.enabled"] = starve.enabled
     if starve.enabled:
-        out["run.starvation.alert_s"] = starve.alert_s
-        out["run.starvation.stop_s"] = starve.stop_s
+        out["run.starvation.alert_s"] = starve.alert_s or None  # 0 (minutes): that verdict off
+        out["run.starvation.stop_s"] = starve.stop_s or None
         out["run.starvation.unhealthy_s"] = starve.unhealthy_s
         out["run.starvation.stop_grace_s"] = starve.stop_grace_s
         out["run.starvation.trainer_wait_max_s"] = starve.trainer_wait_max_s
