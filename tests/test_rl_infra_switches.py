@@ -41,19 +41,26 @@ def test_default_launch_command_is_unchanged(monkeypatch):
 
 
 def test_default_learner_leaves_miles_args_and_environment_untouched():
+    # an outer-synced island heartbeats by default (rl_heartbeat every 30 s); with that
+    # turned off nothing else is set
     args = learner.parse_args(_learner_argv())
     assert not args.rl_overlap_eval and not args.rl_elastic
     miles_args, environ = SimpleNamespace(), {}
     learner.apply_ports_infra_switches(args, miles_args, environ)
-    assert vars(miles_args) == {} and environ == {}
+    assert vars(miles_args) == {"yeto_rl_heartbeat_interval_s": 30.0} and environ == {}
     assert entry.elastic_wiring_for(miles_args, profile=None, fingerprint="f") is None
+    args = learner.parse_args(_learner_argv(("--rl-heartbeat-interval", "0")))
+    miles_args, environ = SimpleNamespace(), {}
+    learner.apply_ports_infra_switches(args, miles_args, environ)
+    assert vars(miles_args) == {} and environ == {}
 
 
 def test_learner_overlap_eval_sets_miles_args():
     args = learner.parse_args(_learner_argv(("--rl-overlap-eval",)))
     miles_args, environ = SimpleNamespace(), {}
     learner.apply_ports_infra_switches(args, miles_args, environ)
-    assert vars(miles_args) == {"yeto_rl_overlap_eval": True} and environ == {}
+    assert vars(miles_args) == {"yeto_rl_overlap_eval": True, "yeto_rl_heartbeat_interval_s": 30.0}
+    assert environ == {}
 
 
 def test_learner_elastic_sets_wiring_metadata_and_env():
