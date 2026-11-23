@@ -14,7 +14,12 @@ name weights the trainer does not hold, and its next release would follow weight
 other than vK). Every node of the island runs :func:`prepare` before its Ray
 starts (``python -m yeto.rl.engine.init_from_release``): it downloads the release
 with the store's object API (``PolicyReleaseStore.resolve``: the files in
-parallel, sizes checked) and lays it over the base checkpoint
+parallel, sizes checked), checks the files against the digests the record
+carries (:func:`resolve_checked`: ``file_sha256`` of a full release in a delta
+chain, ``sha256`` of a LoRA release; ``YETO_VERIFY`` full / fast / off, as a
+sampler before it loads; a delta release's rebuilt files were checked against
+the record while they were rebuilt and are not hashed again) and lays it over
+the base checkpoint
 (``release_overlay.overlay_release`` into :data:`MODEL_SUBDIR` for a partial-experts
 release; a full release is used as it is) and writes :data:`RECORD` (the release
 record) beside it; the island entry takes that model directory (:func:`island_model_path`) and the
@@ -41,7 +46,16 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from .policy_release import FULL, LORA, PolicyRelease, PolicyReleaseStore, trained_releases
+from .policy_release import (
+    FULL,
+    LORA,
+    PolicyRelease,
+    PolicyReleaseError,
+    PolicyReleaseStore,
+    check_release_files,
+    trained_releases,
+)
+from .release_delta import ReleaseDeltaError
 from .release_overlay import is_partial_release, overlay_release
 
 RECORD = "INIT_RELEASE.json"
@@ -136,23 +150,59 @@ def check_selection(release: PolicyRelease, expected_selection_sha256: str | Non
                                    f"the trainer runs {expected_selection_sha256}")
 
 
+def resolve_checked(releases: PolicyReleaseStore, release: PolicyRelease, *,
+                    verify: str | None = None) -> Path:
+    """``releases.resolve(release)``, its weight files checked against the record's
+    digests (``check_release_files``; ``verify``: ``YETO_VERIFY`` full / fast /
+    off, None reads the environment). A delta release is not hashed again: its
+    rebuild checked every file against the record (``ReleaseDeltaError``
+    otherwise). A downloaded copy that fails is downloaded once more from the
+    store (an earlier, damaged download on this node's disk); raises
+    :class:`InitFromReleaseError` when the files still differ."""
+    weights = Path(releases.resolve(release))
+    if release.delta is not None:
+        return weights
+    try:
+        check_release_files(release, weights, mode=verify)
+        return weights
+    except (PolicyReleaseError, ReleaseDeltaError) as error:
+        if releases.store.objects is None:  # the store's own files: nothing to fetch again
+            raise _mismatch(release, error) from error
+    weights = Path(releases.resolve(release, from_store=True))
+    try:
+        check_release_files(release, weights, mode=verify)
+    except (PolicyReleaseError, ReleaseDeltaError) as error:
+        raise _mismatch(release, error, downloads=2) from error
+    return weights
+
+
+def _mismatch(release: PolicyRelease, error: BaseException, *, downloads: int = 1) -> InitFromReleaseError:
+    again = " (also after a fresh download from the store)" if downloads > 1 else ""
+    return InitFromReleaseError(
+        f"release {release.path}: the weight files differ from the digests in its record{again}: "
+        f"{error}; the trainer does not start from them")
+
+
 def prepare(releases: PolicyReleaseStore, selector: str, base_dir: str | os.PathLike[str],
-            out_dir: str | os.PathLike[str], *, expected_selection_sha256: str | None = None) -> dict[str, Any]:
-    """Download the selected release and make ``out_dir`` the trainer's model
-    directory (module doc). Returns the record written to ``out_dir/RECORD``."""
+            out_dir: str | os.PathLike[str], *, expected_selection_sha256: str | None = None,
+            verify: str | None = None) -> dict[str, Any]:
+    """Download the selected release, check its files (:func:`resolve_checked`,
+    ``verify``) and make ``out_dir`` the trainer's model directory (module doc).
+    Returns the record written to ``out_dir/RECORD``; a preparation that fails
+    leaves no record (nor the overlay of an earlier one)."""
     release = select_release(releases.records(), selector)
     check_selection(release, expected_selection_sha256)
-    weights = releases.resolve(release)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    (out / RECORD).unlink(missing_ok=True)
+    (out / RECORD).unlink(missing_ok=True)  # before any download: a failure leaves none
+    _remove_model_dir(out)
+    weights = resolve_checked(releases, release, verify=verify)
     if is_partial_release(release.manifest):
         # the record stays outside the model directory: the trainer's exports copy
         # its non-weight files into every release
         directory = _replace_model_dir(out, lambda tmp: overlay_release(base_dir, weights, tmp))
     else:
-        _remove_model_dir(out)  # an earlier overlay must not outlive this preparation
-        directory = Path(weights)
+        directory = Path(weights)  # an earlier overlay was removed above
     record = {"path": release.path, "seq": int(release.seq), "version": int(release.version),
               "policy_hash": release.policy_hash, "model_dir": str(directory),
               "weights": str(release.weights or FULL),
@@ -195,7 +245,8 @@ def _replace_model_dir(out: Path, build: Callable[[Path], Any]) -> Path:
 
 def prepare_if_released(releases: PolicyReleaseStore, base_dir: str | os.PathLike[str] | Callable[[], str],
                         out_dir: str | os.PathLike[str], *,
-                        expected_selection_sha256: str | None = None) -> dict[str, Any] | None:
+                        expected_selection_sha256: str | None = None,
+                        verify: str | None = None) -> dict[str, Any] | None:
     """``--rl-round-cuts off`` without ``--rl-init-from-release``: prepare the newest
     release when the store holds a trained one (a relaunch: :func:`prepare` with
     ``latest``), else write :data:`NO_RELEASE` (the run's first start, from the base).
@@ -215,7 +266,8 @@ def prepare_if_released(releases: PolicyReleaseStore, base_dir: str | os.PathLik
     print("[yeto-init-release] --rl-round-cuts off: the store holds policy releases; adding "
           "--rl-init-from-release latest (the newest release's weights, a fresh optimizer)", flush=True)
     base = base_dir() if callable(base_dir) else base_dir
-    return prepare(releases, LATEST_SELECTOR, base, out, expected_selection_sha256=expected_selection_sha256)
+    return prepare(releases, LATEST_SELECTOR, base, out, expected_selection_sha256=expected_selection_sha256,
+                   verify=verify)
 
 
 def read_record(out_dir: str | os.PathLike[str]) -> dict[str, Any]:
@@ -359,14 +411,17 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     for leftover in mirror.clear_interrupted():
         print(f"[yeto-init-release] removed an interrupted rebuild: {leftover.name}", flush=True)
     releases = PolicyReleaseStore(store_for(store_path, environ=env), cache_dir=out / "files", mirror=mirror)
+    from .file_verify import verify_mode
+
+    verify = verify_mode(env)  # YETO_VERIFY of this node, as its samplers check a release
     if args.if_released:
         record = prepare_if_released(releases, lambda: _base_path(args.model, args.model_revision), out,
-                                     expected_selection_sha256=selection)
+                                     expected_selection_sha256=selection, verify=verify)
         if record is None:
             return 0
     else:
         record = prepare(releases, args.release, _base_path(args.model, args.model_revision), out,
-                         expected_selection_sha256=selection)
+                         expected_selection_sha256=selection, verify=verify)
     print(f"[yeto-init-release] {json.dumps(record, sort_keys=True)}", flush=True)
     return 0
 

@@ -1276,7 +1276,11 @@ class PolicyFollower:
 
     ``last_timings``: seconds per phase of the last refresh that loaded a
     release; ``seen_at``: the wall time this follower first read the newest
-    release (``last_seen``) in ``LATEST``."""
+    release (``last_seen``) in ``LATEST``; ``loaded_seen_at``: the wall time it
+    first read the release the last refresh loaded. Each release keeps its own
+    first time: a release loaded after a newer one appeared (the follower loads
+    the release it downloaded, or drained for, then the newer one) reports when
+    it was itself first read, not when the newer one was."""
 
     def __init__(self, releases: PolicyReleaseStore,
                  load: Callable[[PolicyRelease, Path], None], *, version: int = 0,
@@ -1305,6 +1309,8 @@ class PolicyFollower:
         self.timer = timer
         self.wall = wall
         self.seen_at: float | None = None
+        self.loaded_seen_at: float | None = None
+        self._first_seen: dict[int, float] = {}  # seq -> first wall read, releases above the served one
         self.last_timings: dict[str, float] = {}
         # Background download (class doc): the files of the newest release are fetched
         # by a thread while the engines keep generating on the served weights.
@@ -1408,9 +1414,7 @@ class PolicyFollower:
             return False
         if latest is None or latest.seq <= self._served_seq():
             return True
-        if self.last_seen is None or latest.seq != self.last_seen.seq:
-            self.seen_at = round(self.wall(), 3)
-        self.last_seen = latest
+        self._note_seen(latest)
         if self.scheme is not None:
             try:
                 check_release_scheme(latest, self.scheme)
@@ -1445,9 +1449,7 @@ class PolicyFollower:
         if self.last_seen is not None and latest.seq < self.last_seen.seq:
             self.counters.stale_reads += 1
             latest = self.last_seen
-        if self.last_seen is None or latest.seq != self.last_seen.seq:
-            self.seen_at = round(self.wall(), 3)
-        self.last_seen = latest
+        self._note_seen(latest)
         if self.release is not None and latest.seq <= self.release.seq:
             return None
         if self.scheme is not None:
@@ -1514,8 +1516,18 @@ class PolicyFollower:
                 self.counters.lineage_resets += 1
         self.version = latest.version
         self.release = latest
+        self.loaded_seen_at = self._first_seen.get(int(latest.seq), self.seen_at)
+        self._first_seen = {seq: at for seq, at in self._first_seen.items() if seq > int(latest.seq)}
         self.last_timings = timer.as_dict()
         return latest
+
+    def _note_seen(self, latest: PolicyRelease) -> None:
+        """``latest`` was read in ``LATEST`` (or is the newest seen): ``seen_at`` and
+        ``last_seen`` follow it, and its first read time is kept per release (class doc)."""
+        if self.last_seen is None or latest.seq != self.last_seen.seq:
+            self.seen_at = round(self.wall(), 3)
+        self._first_seen.setdefault(int(latest.seq), self.seen_at)
+        self.last_seen = latest
 
     def _fetched(self, latest: PolicyRelease, *, report: bool = True) -> "_Fetch | None":
         """The finished background download of ``latest``, else None after starting

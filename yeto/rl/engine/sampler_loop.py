@@ -38,7 +38,8 @@ post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flig
 :class:`~.policy_release.ReleaseNotLoaded` stops the island after the round.
 
 ``rl_sampler_policy_loaded`` carries the release latency fields: the trainer's
-``released_at``, the follower's ``seen_at`` (both wall clock, of two hosts) and
+``released_at``, ``seen_at`` (when the follower first read that release, not a
+newer one that appeared before it was loaded; both wall clock, of two hosts) and
 ``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`),
 and ``deferred_s`` (how long the in-flight rule deferred it) and ``forced``
 True when the follower's deferral bound (``max_defer_s``) loaded it.
@@ -87,6 +88,13 @@ DEFAULT_MAX_DAMAGED_LATEST_READS = 120  # reads in a row of a LATEST that does n
 # the longest one poll of the loop may keep failing before the island ends on it: past the
 # read outage it rides out (DEFAULT_WRITE_DEFER_MAX_S, 10 min), well short of "forever"
 DEFAULT_MAX_READ_OUTAGE_S = 1800.0
+
+
+def _loaded_seen_at(follower: Any) -> float | None:
+    """When ``follower`` first read the release it just loaded
+    (``PolicyFollower.loaded_seen_at``); ``seen_at`` for a follower without it."""
+    at = getattr(follower, "loaded_seen_at", None)
+    return getattr(follower, "seen_at", None) if at is None else at
 
 
 class StoreReadOutage(RuntimeError):
@@ -280,7 +288,8 @@ class SamplerLoop:
             self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,
                       policy_hash=loaded.policy_hash, buffer_selected=loaded.buffer_selected,
                       weights=loaded.weights, sha256=loaded.sha256,
-                      released_at=loaded.released_at, seen_at=self.follower.seen_at,
+                      # when this follower first read the loaded release (not a newer one)
+                      released_at=loaded.released_at, seen_at=_loaded_seen_at(self.follower),
                       follower_timings=self.follower.last_timings,
                       **({"in_flight": True} if in_flight else {}),
                       **({"forced": True} if getattr(self.follower, "last_forced", False) else {}),
