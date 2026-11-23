@@ -595,6 +595,12 @@ class AsyncState:
             t["rounds"] and any("ages" in r or "stale_groups" in r for r in t["rounds"].values())
             for t in self.trainer.values()))
 
+    def last_write_ts(self, iid: str) -> float | None:
+        """When the sampler last wrote groups (a round with groups > 0)."""
+        ts = [r.get("ts") for r in (self.sampler.get(iid) or {}).get("rounds", {}).values()
+              if r.get("ts") is not None and (_f(r.get("groups")) or 0) > 0]
+        return max(ts) if ts else None
+
     def view(self) -> dict | None:
         if not self.active():
             return None

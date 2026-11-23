@@ -240,3 +240,56 @@ def test_hot_reload_names_the_drain_it_waited_for():
     (rel,) = [x for x in r.page_view()["async"]["releases"] if x["policy_version"] == 3]
     ld = rel["loads"]["s0"]
     assert (ld["latency_s"], ld["drain_s"], ld["drain_in_flight"], ld["drain_cut"], ld["pause_s"]) == (140.0, 44.5, 12, 1, 1.1)
+
+
+def _launch(name: str, t0: float, *, finish: bool, pv0: int = 0) -> list[tuple[str, dict]]:
+    src = f"store:trainer/{name}"
+    recs = [{"event": "trainer_start_phase", "island_id": 0, "phase": "submitted", "time_unix": t0},
+            {"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "time_unix": t0 + 30}]
+    if finish:
+        recs += [{"event": "rl_driver_start", "island_id": 0, "time_unix": t0 + 60},
+                 {"event": "rl_publication", "island_id": 0, "policy_version": pv0 + 20, "time_unix": t0 + 900},
+                 {"event": "rl_driver_phase", "island_id": 0, "phase": "finish", "policy_version": pv0 + 20,
+                  "time_unix": t0 + 950},
+                 {"event": "rl_learner_finalized", "island_id": 0, "time_unix": t0 + 951}]
+    return [(src, x) for x in recs]
+
+
+def _sampler_writing(until: float) -> list[tuple[str, dict]]:
+    recs = [{"event": "rl_sampler_join", "sampler_id": "s0", "incarnation": "a1", "time_unix": T0}]
+    t, rid = T0 + 60, 0
+    while t <= until:
+        recs.append({"event": "rl_sampler_round", "sampler_id": "s0", "rollout_id": rid, "groups": 2,
+                     "policy_version": 20, "time_unix": t})
+        t, rid = t + 60, rid + 1
+    return [("store:s0/a1", x) for x in recs]
+
+
+def _cards(recs, now):
+    r = Reducer(run="r")
+    for i, (src, rec) in enumerate(recs):
+        r.feed(rec, source=src, offset=i)
+    return {c["id"]: c for c in r.overview(now=now)["islands"]}
+
+
+def test_relaunched_trainer_after_a_finished_launch_is_starting_not_done():
+    # launch A finishes at T0+951; launch B starts at T0+1300 (resuming): B is starting, its policy
+    # unknown until it reports one; the samplers that keep writing are running, not done
+    recs = _launch("l0-modal-A", T0, finish=True) + _launch("l0-modal-B", T0 + 1300, finish=False)
+    cards = _cards(recs + _sampler_writing(T0 + 1400), T0 + 1420)
+    assert cards["0"]["status"] == "starting" and cards["0"]["policy_version"] is None
+    assert cards["s0"]["status"] == "ok"
+
+
+def test_samplers_end_with_their_trainers_only_once_they_go_quiet():
+    fin = _launch("l0-modal-A", T0, finish=True)
+    assert _cards(fin + _sampler_writing(T0 + 1400), T0 + 1400)["s0"]["status"] == "ok"  # still writing
+    # the round in flight when the trainers ended may land a few minutes later: still done
+    assert _cards(fin + _sampler_writing(T0 + 1150), T0 + 2000)["s0"]["status"] == "done"
+    assert _cards(fin + _sampler_writing(T0 + 1000), T0 + 2000)["s0"]["status"] == "done"  # quiet since
+
+
+def test_an_older_launch_read_late_does_not_finish_or_rewind_the_newer_one():
+    old, new = _launch("l0-modal-A", T0, finish=True), _launch("l0-modal-B", T0 + 1300, finish=True, pv0=20)
+    cards = _cards(new + old, T0 + 2300)  # the newer folder read first
+    assert cards["0"]["policy_version"] == 40

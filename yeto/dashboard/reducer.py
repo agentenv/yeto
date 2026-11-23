@@ -552,7 +552,11 @@ class Reducer:
                 "rl_round_cut", "rl_member_publication", "rl_resume",
                 # a sampler's policy is the version it serves
                 "rl_sampler_round", "rl_sampler_policy_loaded"):
-            isl["policy_version"] = r.get("policy_version")
+            # the newest record wins, whatever order the tapes are read in (a run store lists a
+            # trainer's launch folders and an echo directory its rotated files by name)
+            if ts is None or isl.get("policy_version_ts") is None or ts >= isl["policy_version_ts"]:
+                isl["policy_version"] = r.get("policy_version")
+                isl["policy_version_ts"] = ts
         if event == "rl_island_hardware":  # decoupling 7.7: recorded, never a refusal reason
             isl["hardware"] = {k: r.get(k) for k in ("compat_group", "driver_version", "cuda_version")}
         if getattr(self, "_superseded", False) and (
@@ -571,8 +575,8 @@ class Reducer:
             isl.setdefault("driver_starts", []).append(ts)
         if event == "rl_driver_start" or (event in DRIVER_RUNNING_EVENTS and r.get("phase") != "startup"):
             isl["driver_started"] = True
-        if event == "rl_driver_phase":
-            isl["phase"] = r.get("phase")
+        if event == "rl_driver_phase" and (ts is None or isl.get("phase_ts") is None or ts >= isl["phase_ts"]):
+            isl["phase"], isl["phase_ts"] = r.get("phase"), ts
             if ts is not None and len(isl["phase_marks"]) < NODE_SERIES_MAX:
                 isl["phase_marks"].append((ts, r.get("phase"), r.get("rollout_id")))
         elif event == "rl_startup_step":
@@ -643,7 +647,10 @@ class Reducer:
                                 "bytes": r.get("cut_bytes"), "save_s": r.get("save_s"),
                                 "total_s": r.get("total_s")})
         elif event == "rl_learner_finalized":
-            isl["finalized"] = True
+            # a launch's finalize read after a newer launch began belongs to the older launch
+            if ts is None or isl.get("launch_ts") is None or ts >= isl["launch_ts"]:
+                isl["finalized"] = True
+                isl["finalized_ts"] = ts
         elif event == "rl_island_override":
             isl["negative_test"] = negative_test_label(r.get("overrides"))
         elif event == "rl_reconfiguration":
@@ -1212,7 +1219,11 @@ class Reducer:
         warn_s = self.thresholds["heartbeat_warn_s"]
         if not isl["heartbeat_seen"] and gap is not None:
             warn_s = max(warn_s, gap)
-        trainers_done = role == "sampler" and self._trainers_done()
+        # a sampler "runs until its trainers end": done once they ended and it stopped writing groups;
+        # one still writing groups after the trainers finished is running (and billed), not done
+        trainers_done = role == "sampler" and self._trainers_done() and (
+            (self.async_.last_write_ts(isl["id"]) or 0) <= (self._trainers_end_ts() or float("inf"))
+            + SAMPLER_AFTER_TRAINERS_S)
         if stopped and not isl["finalized"]:
             status = "stopped"
             starting = False
@@ -1349,6 +1360,18 @@ class Reducer:
         if isl["fleet_state"] is not None or not types:
             return None
         return "unrecognized"
+
+    def _trainers_end_ts(self) -> float | None:
+        """When the last trainer ended (its finalize, leave or last event); None if unknown."""
+        ends = []
+        for i, role in self.async_.roles.items():
+            if role != "trainer" or i not in self.islands:
+                continue
+            isl = self.islands[i]
+            left = self._trainer_left(isl)
+            ends.append(isl.get("finalized_ts") or (left or {}).get("ts") or isl["last_event_ts"])
+        ends = [t for t in ends if t is not None]
+        return max(ends) if ends else None
 
     def _trainers_done(self) -> bool:
         ids = [i for i, role in self.async_.roles.items() if role == "trainer" and i in self.islands]
@@ -1583,6 +1606,8 @@ def _gpu_from_mem(mb: float | None) -> str | None:
 # island_leave reasons that end a run on purpose; a failed trainer (INFRA_FAILED ...)
 # is relaunched, so its samplers keep running and are not "done"
 CLEAN_LEAVE = frozenset({"STOPPED", "DONE", "FINISHED", "COMPLETED", "DRAINED"})
+# a sampler that still writes groups this long after its trainers ended is running, not done
+SAMPLER_AFTER_TRAINERS_S = 300.0  # its last round in flight may finish a few minutes after
 
 
 def _restart(isl: dict, since: float | None) -> None:
@@ -1600,6 +1625,14 @@ def _restart(isl: dict, since: float | None) -> None:
         isl["startup_step"], isl["startup_step_ts"] = None, None
     if old(isl.get("start_phase_ts")):
         isl["start_phase"], isl["start_phase_ts"] = None, None
+    # an earlier launch that finished (rl_learner_finalized) does not finish this one, and its
+    # policy version is not this launch's until this launch reports one
+    if isl.get("finalized") and old(isl.get("finalized_ts")):
+        isl["finalized"], isl["finalized_ts"] = False, None
+    if isl.get("policy_version") is not None and old(isl.get("policy_version_ts")):
+        isl["policy_version"], isl["policy_version_ts"] = None, since
+    if old(isl.get("phase_ts")):
+        isl["phase"] = None
     isl["launch_ts"] = since
 
 
