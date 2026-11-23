@@ -1115,6 +1115,11 @@ def _prepare_rl_args(
     if callable(extra_env_check):
         extra_env_check(recipe=getattr(args, "rl_model_recipe", None),
                         env_pairs=getattr(args, "modal_env", None) or ())
+    # A backend without the model recipes (verl: generic models only) refuses them
+    # instead of its island silently training the generic recipe.
+    recipe_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_model_recipe", None)
+    if callable(recipe_check):
+        recipe_check(args)
     # A backend without the Miles agentic wiring refuses its flags.
     agentic_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_agentic", None)
     if callable(agentic_check):

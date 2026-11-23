@@ -263,3 +263,37 @@ def island_sync_preset_problem(preset: str | None, *, parameter_mode: str) -> st
         return ("--sync-preset decoupled needs --parameter-mode lora (full parameters: --sync-preset "
                 "full-parameter --full-parameter-rounds async)")
     return None
+
+
+# The verl island trains the generic recipe only: no code on verl reads
+# --rl-model-recipe, the Kimi-K3.1 expert selection or the DeepSeek V4 expert-full
+# hybrid (all Miles recipes).
+GENERIC_RECIPE = "generic"
+
+
+def model_recipe_problems(*, recipe: str | None, expert_selection: str | None,
+                          expert_full_count: int) -> list[str]:
+    """What a verl island would silently ignore of the model recipe ([] when nothing)."""
+    problems = []
+    if recipe not in (None, GENERIC_RECIPE):
+        problems.append(f"--rl-model-recipe {recipe}")
+    if expert_selection:
+        problems.append("--rl-expert-selection (Kimi-K3.1 partial routed experts)")
+    if int(expert_full_count or 0):
+        problems.append("--expert-full-count (the DeepSeek V4 expert-full hybrid)")
+    return problems
+
+
+def model_recipe_refusal(problems: list[str]) -> str:
+    return ("the verl backend trains the generic recipe only and would ignore "
+            + ", ".join(problems) + "; use --rl-backend miles")
+
+
+def check_model_recipe(args) -> None:
+    """Launcher side: refuse a model recipe the verl island has no code for (it used to
+    drop these flags and train the generic recipe)."""
+    problems = model_recipe_problems(recipe=getattr(args, "rl_model_recipe", None),
+                                     expert_selection=getattr(args, "rl_expert_selection", None),
+                                     expert_full_count=getattr(args, "expert_full_count", 0) or 0)
+    if problems:
+        raise ValueError(model_recipe_refusal(problems))
