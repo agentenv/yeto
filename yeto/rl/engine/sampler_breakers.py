@@ -18,7 +18,8 @@ site does; a stop action also records the process's ``stop_reason``.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+import os
+from collections.abc import Callable, Mapping, MutableMapping
 from typing import Any
 
 from yeto import breakers
@@ -34,6 +35,25 @@ def spec_breakers(spec: Mapping[str, Any]) -> "breakers.ResolvedBreakers":
     section = spec.get("breakers")
     return breakers.resolve(breakers.Sources(spec=spec, section=section if isinstance(section, Mapping) else None),
                             layers=LAYERS)
+
+
+def apply_harness_env(spec: Mapping[str, Any], environ: MutableMapping[str, str] | None = None) -> list[str]:
+    """Bring the spec section's ``harness`` settings into the harness: its readers
+    (``yeto.rl.harness.harbor.breaker_settings``) resolve from their env aliases only, so
+    every harness value the section sets is written to its env variable in ``environ``
+    (default: this process's environment) before a trial runs. Returns the changes
+    (``"env HARBOR_SETUP_RETRIES 6"``); none without a ``breakers`` key. A section value
+    that disagrees with a variable already set is refused (a ``ValueError``)."""
+    section = spec.get("breakers")
+    if not isinstance(section, Mapping):
+        return []
+    environ = os.environ if environ is None else environ
+    sources = breakers.Sources(spec=spec, section=section, env=dict(environ))
+    out = breakers.materialize(breakers.resolve(sources, layers=("harness",)), sources, surfaces=("env",))
+    for name, value in (out.env or {}).items():
+        if environ.get(name) != value:
+            environ[name] = value
+    return list(out.changes)  # breaker_settings caches per env value: the readers see these at once
 
 
 def dispense_limits(resolved: "breakers.ResolvedBreakers") -> tuple[float, int]:

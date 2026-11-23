@@ -54,6 +54,7 @@ class PoolRef:
     interval_s: float = 30.0
     usd_per_h: float | None = None
     data_path: str = "r2"
+    spec_carried: tuple[str, ...] = ()  # breakers: settings the pool's spec carries to the sampler (with_breakers)
 
     def load(self) -> dict[str, Any]:
         return json.loads(Path(self.config).read_text())
@@ -163,14 +164,23 @@ def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) 
 
 
 POOL_LAYERS = ("pool", "sampler")  # the layers whose knobs a pool config holds
+SPEC_LAYERS = ("sampler", "harness")  # the layers a sampler resolves from its spec (sampler_breakers)
 
 
 def with_breakers(cfg: dict[str, Any], ref: PoolRef, state_dir: Path) -> PoolRef:
     """The pool with the run's ``breakers:`` section written into its native knobs (``elastic``,
     ``sampler.dispense``, the lease keys; ``breakers.pools.<name>`` before ``breakers.pool``):
     a copy at ``<run state dir>/pools/<name>.json`` when that changes anything, else the ref as
-    it is (always without a section). A section that disagrees with the pool config is refused."""
-    if not cfg.get("breakers"):
+    it is (always without a section). A section that disagrees with the pool config, its
+    spec or its env files is refused.
+
+    The section's ``sampler`` and ``harness`` entries run in the sampler process, which
+    reads only its spec: they go into the pool's ``sampler.breakers`` knob, which every
+    rendered spec carries as its ``breakers`` key (``tasks.apply_sampler_overrides``) and
+    the sampler resolves (``sampler_breakers``). ``ref.spec_carried`` names every setting
+    that goes that way, so none is dropped without a word."""
+    section = cfg.get("breakers")
+    if not section:
         return ref
     from yeto import breakers  # noqa: PLC0415
     from yeto.breakers.rules_facts import pool_sources  # noqa: PLC0415
@@ -178,7 +188,7 @@ def with_breakers(cfg: dict[str, Any], ref: PoolRef, state_dir: Path) -> PoolRef
     doc = ref.load()
     sources = pool_sources(doc, run_config=cfg)  # the spec as the pool renders it (read only)
     try:
-        resolved = breakers.resolve(sources, pool=ref.name, layers=POOL_LAYERS)
+        resolved = breakers.resolve(sources, pool=ref.name, layers=(*POOL_LAYERS, "harness"))
         out = breakers.materialize(resolved, sources, surfaces=("pool_config", "pool_elastic", "pool_dispense"))
     except breakers.BreakerConfigError as error:
         raise ValueError(f"run config: pool {ref.name!r}: {error}") from None
@@ -187,12 +197,63 @@ def with_breakers(cfg: dict[str, Any], ref: PoolRef, state_dir: Path) -> PoolRef
         new["elastic"] = out.pool_elastic
     if out.pool_dispense is not None and out.pool_dispense != sources.pool_dispense:
         new["sampler"] = dict(doc.get("sampler") or {}, dispense=out.pool_dispense)
+    carried = spec_carried(resolved)
+    if carried:
+        new["sampler"] = dict(new.get("sampler") or {}, breakers=_spec_section(new, resolved, carried, ref.name))
     if new == doc:
         return ref
     path = state_dir / "pools" / f"{ref.name}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(new, indent=1, sort_keys=True))
-    return replace(ref, config=str(path))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(new, indent=1, sort_keys=True))
+    except OSError as error:
+        raise ValueError(f"run config: pool {ref.name!r}: cannot write {path} ({error})") from None
+    return replace(ref, config=str(path), spec_carried=carried)
+
+
+def spec_carried(resolved: Any) -> tuple[str, ...]:
+    """``<entry>.<key>`` of every sampler / harness setting the ``breakers:`` section sets
+    (directly, by inheritance or by a switch): the settings only the sampler's spec can carry."""
+    return tuple(f"{entry.name}.{key}" for layer in SPEC_LAYERS for entry in resolved.entries(layer)
+                 for key, source in entry.sources.items() if source.kind in ("breakers", "inherit", "switch"))
+
+
+def _spec_section(doc: dict[str, Any], resolved: Any, carried: tuple[str, ...], name: str) -> dict[str, Any]:
+    """The pool's ``sampler.breakers`` knob with the ``carried`` settings at their resolved
+    values (inherited and switched ones included). The pool has to have a spec that loads; the
+    spec's own ``breakers`` key and an earlier ``sampler.breakers`` may repeat a value, never
+    contradict one; and the spec it renders has to resolve every carried setting to the same
+    value in the sampler (``sampler_breakers.spec_breakers``). Raises ValueError."""
+    from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
+    from yeto.launch.nc import tasks  # noqa: PLC0415
+    from yeto.rl.engine.sampler_breakers import spec_breakers  # noqa: PLC0415
+
+    carry: dict[str, Any] = {}
+    for path in carried:
+        layer, entry, key = path.split(".")
+        carry.setdefault(layer, {}).setdefault(entry, {})[key] = resolved.get(path)
+    where = f"run config: pool {name!r}: breakers.{'/'.join(carry)}"
+    if not doc.get("spec"):
+        raise ValueError(f"{where} run in the sampler, which reads them from its spec, but the pool has no spec")
+    source = Path(os.path.expanduser(str(doc["spec"])))
+    try:
+        text = source.read_text().replace("__RUN_PREFIX__", str(doc.get("run_prefix") or "").strip("/"))
+        spec = json.loads(text)
+        if not isinstance(spec, dict):
+            raise ValueError("not a JSON object")
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{where}: the pool's spec {source} does not load ({error})") from None
+    try:
+        knob = tasks.merge_breakers((doc.get("sampler") or {}).get("breakers") or {}, carry)
+        sampler = nc_cli._overrides(dict(doc.get("sampler") or {}, breakers=knob))
+        seen = spec_breakers(tasks.apply_sampler_overrides(spec, **sampler))
+    except ValueError as error:  # BreakerConfigError is one
+        raise ValueError(f"{where}: {error}") from None
+    differ = [f"{p} {seen.get(p)!r} (the run resolves {resolved.get(p)!r})" for p in carried
+              if seen.get(p) != resolved.get(p)]
+    if differ:
+        raise ValueError(f"{where}: the sampler would resolve {', '.join(differ)}")
+    return knob
 
 
 def _number(entry: dict[str, Any], where: str, key: str, default: float | None) -> float | None:

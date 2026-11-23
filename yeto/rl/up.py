@@ -767,6 +767,9 @@ class Run:
                 self.mark("preflight", ok=False)
                 return False
             self.log_compaction(i)
+            if self.pools[i].spec_carried:  # breakers.sampler / .harness: no pool knob, the sampler spec has them
+                _log(f"preflight: breakers: pool {self.pools[i].name}: applied in the sampler spec "
+                     f"(sampler.breakers of {self.pools[i].config}): {', '.join(self.pools[i].spec_carried)}")
         ok = True
         for path in self.pool_configs:
             ok &= self._cmd(self.nc("pool", "--config", path, "--dry-run"), log="preflight.log") == 0
