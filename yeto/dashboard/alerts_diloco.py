@@ -156,6 +156,6 @@ RULES = (roster, trainer_lost, rounds_open, bcast_backlog, strict_failures, stuc
 
 def evaluate(reducer, now: float, cards: list[dict]) -> list[dict[str, Any]]:
     d = topology_diloco.current(reducer, cards, now)
-    if d is None:
+    if d is None or d["kind"] == "sft":  # the SFT page has its own island status and syncer problems
         return []
     return [a for rule in RULES for a in rule(d, now)]

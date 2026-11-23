@@ -673,6 +673,8 @@ function render(view,offline){
   var RL=!S&&!!$("rlmRoot");
   if(document.body&&document.body.classList)document.body.classList.toggle("sftmode",!!S||RL);
   if(sroot)sroot.hidden=!S;if(rroot)rroot.hidden=!!S;
+  // one topology panel: under the SFT page's islands for a DiLoCo SFT run, else in the RL page
+  var tb=$("topoBox"),slot=$(S?"sTopoSlot":"rTopoSlot");if(tb&&slot&&tb.parentNode!==slot)slot.appendChild(tb);
   controls(offline,onReload);
   var run=(V.overview||{}).run;
   if(S){$("title").innerHTML='yeto metrics <span class="tg">'+esc(run||"unnamed run")+'</span><span class="tg">SFT · decoupled DiLoCo</span>';

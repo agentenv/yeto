@@ -9,7 +9,9 @@ event and no request. Which drawing the page uses follows from the run (``kind``
 * ``synced_group``: a syncer and cross-island sampler islands: samplers -> store ->
   trainers <-> syncer;
 * ``island``: a syncer and no sampler island: every island runs its own rollout
-  (colocated or fixed-partition), trainers <-> syncer.
+  (colocated or fixed-partition), trainers <-> syncer;
+* ``sft``: decoupled DiLoCo SFT, learner islands (no rollout) <-> syncer (``topology_sft``);
+  ``none``: an SFT run without a syncer, no drawing.
 
 Sources, all of them on the tapes today:
 
@@ -98,14 +100,22 @@ def layout(reducer) -> dict:
     then the tape kinds (syncer merge records, fragment-version vectors on trainer events).
     Sampler islands (``rl_sampler_*`` events) split a syncer run into ``synced_group`` /
     ``island``. Once the trainers declared it, a late (or stray) syncer tape changes nothing:
-    the drawing does not flip during a run."""
+    the drawing does not flip during a run. A run with no RL trainer island and records only
+    an SFT island writes is ``sft`` with a syncer (``topology_sft``), else ``none``; the shared
+    syncer tape and syncer.log never count as SFT records, so an RL run is never ``sft``."""
     declared = _outer_sync(reducer)
     roles = reducer.async_.roles
     samplers = sum(1 for i in reducer.islands if roles.get(i) == "sampler")
-    if not any(roles.get(i) == "trainer" for i in reducer.islands):
-        # an SFT run's syncer tape, or a run whose trainers have not written yet: nothing to draw
-        return {"kind": "async", "reason": f"no RL trainer island, sampler islands {samplers}"}
     merges = sum(1 for m in reducer.merges if "fragment" in m)
+    if not any(roles.get(i) == "trainer" for i in reducer.islands):
+        if reducer.sft.sft_records:  # records only an SFT island writes (ms-swift logs, yeto plugin steps)
+            n = len(reducer.sft.islands)
+            if merges or reducer.sft.syncer_meta or reducer.sft.outer:
+                return {"kind": "sft", "reason": f"SFT islands {n} (ms-swift logs), no RL trainer island, "
+                                                 f"{merges} syncer merge record(s)"}
+            return {"kind": "none", "reason": f"SFT islands {n}, no syncer: nothing to draw"}
+        # a syncer tape alone, or a run whose trainers have not written yet: nothing to draw
+        return {"kind": "async", "reason": f"no RL trainer island, sampler islands {samplers}"}
     if declared:
         syncer = any(declared.values())
         why = (f"trainer(s) {', '.join(sorted(i for i, v in declared.items() if v))} declare outer sync"
@@ -125,7 +135,7 @@ def layout(reducer) -> dict:
 
 
 def kind(reducer) -> str:
-    """``async`` / ``synced_group`` / ``island`` (module docstring, ``layout``)."""
+    """``async`` / ``synced_group`` / ``island`` / ``sft`` / ``none`` (module docstring, ``layout``)."""
     return layout(reducer)["kind"]
 
 
@@ -201,7 +211,8 @@ def _fold(reducer, ids: set[str], now: float) -> dict[str, _Island]:
     return out
 
 
-def _merges(reducer, now: float, n: int) -> list[dict]:
+def merge_rows(reducer, now: float, n: int) -> list[dict]:
+    """The syncer's merge records up to ``now``, by step, with the shard that merged each."""
     rows = []
     for m in reducer.merges:
         step, frag, ts = _int(m.get("step")), _int(m.get("fragment")), _f(m.get("time_unix"))
@@ -224,10 +235,89 @@ def current(reducer, cards: list[dict], now: float) -> dict | None:
     if hit is not None and hit[0] == key:
         return hit[1]
     lay = layout(reducer)
-    out = view(reducer, cards, now, lay["kind"]) if lay["kind"] != "async" else None
+    if lay["kind"] == "sft":
+        from . import topology_sft  # imports this module's helpers
+
+        out = topology_sft.view(reducer, now)
+    else:
+        out = view(reducer, cards, now, lay["kind"]) if lay["kind"] in ("island", "synced_group") else None
     if out is not None:
         out["layout_reason"] = lay["reason"]
     reducer._diloco_view = (key, out)
+    return out
+
+
+def syncer_state(merges: list[dict], p: int | None, n: int) -> dict:
+    """What the merge records alone say: each fragment's committed version (the global step of
+    its last merge) and time, each shard's committed step, the roster the merges expected (the
+    widest: a later merge without a lost island expects fewer) and the merge cadence (the
+    recent interval, and each fragment's period: the time between its merges)."""
+    versions, last_ts = [0] * (p or 0), [None] * (p or 0)
+    for m in merges:
+        if m["frag"] < (p or 0):
+            versions[m["frag"]] = max(versions[m["frag"]], m["step"])
+            last_ts[m["frag"]] = m["ts"]
+    mts = [m["ts"] for m in merges if m["ts"] is not None]
+    gaps = [b - a for a, b in zip(mts[-MERGE_HISTORY - 1:], mts[-MERGE_HISTORY:])]
+    merge_gap = _median(gaps)
+    prev: dict[int, float] = {}
+    fgaps: list[float] = []
+    for m in merges:
+        if m["ts"] is None:
+            continue
+        if m["frag"] in prev:
+            fgaps.append(m["ts"] - prev[m["frag"]])
+        prev[m["frag"]] = m["ts"]
+    walls = [_f(m["rec"].get("ms")) / 1000 for m in merges[-MERGE_HISTORY:] if _f(m["rec"].get("ms")) is not None]
+    qwait = [_f(m["rec"].get("quorum_ms")) / 1000 for m in merges[-MERGE_HISTORY:] if _f(m["rec"].get("quorum_ms")) is not None]
+    return {
+        "versions": versions, "last_merge_ts": last_ts,
+        "committed": {i: max((m["step"] for m in merges if m["shard"] == i), default=0) for i in range(n)} if p else {},
+        "merged_steps": {m["step"] for m in merges},
+        "expected": max((_members(m["rec"]) for m in merges), key=len, default=[]),
+        "merge_gap_s": merge_gap, "period_s": _median(fgaps[-2 * (p or 1):]) or ((merge_gap or 0) * (p or 0) or None),
+        "open_limit_s": max(ROUND_OPEN_WARN_S, 3 * (_median(walls) or 0)), "quorum_p50_s": _median(qwait),
+        "quorum": _int(merges[-1]["rec"].get("quorum")) if merges else None,
+        "last_merge_ts_any": mts[-1] if mts else None,
+    }
+
+
+def stuck_fragments(sy: dict, *, running: bool, behind: bool, any_merge: bool, now: float) -> list[int]:
+    """Fragments with no merge for max(STUCK_MIN_S, 3 x the fragment period) while the run runs."""
+    return [f for f, ts in enumerate(sy["last_merge_ts"]) if running and any_merge and not behind and ts is not None
+            and now - ts > max(STUCK_MIN_S, 3 * (sy["period_s"] or 0))]
+
+
+def shard_rows(p: int | None, n: int, merges: list[dict], rounds: list[dict], committed: dict[int, int],
+               done: bool) -> list[dict]:
+    """One row per syncer shard: its fragments, committed step, merges, state and last merge."""
+    out = []
+    for i in range(n if p else 0):
+        mine = [m for m in merges if m["shard"] == i]
+        own = [r for r in rounds if r["shard"] == i]
+        state = ("done" if done else "waiting for quorum" if any(r["blocked"] for r in own)
+                 else "merging" if any(r["state"] == "merging" for r in own) else "gathering" if own else "idle")
+        out.append({"index": i, "lo": i * p // n, "hi": (i + 1) * p // n, "step": committed[i], "merges": len(mine),
+                    "state": state, "attempt_max": max((_int(r["attempt"]) or 1 for r in own), default=1),
+                    "last": _merge_row(mine[-1]) if mine else None})
+    return out
+
+
+def push_flows(merges: list[dict], lo: float, push_bytes: dict) -> list[dict]:
+    """PUSH windows: each responder's wire window on the merge record (arrived - recv_seconds)."""
+    out = []
+    for m in merges:
+        if m["ts"] is None or m["ts"] < lo - 120:
+            continue
+        for r in m["rec"].get("responders") or []:
+            if not isinstance(r, dict):
+                continue
+            arr, rs = _f(r.get("arrived_unix")), _f(r.get("recv_seconds"))
+            if arr is None or arr < lo:
+                continue
+            iid = str(r.get("id"))
+            out.append({"k": "p", "i": iid, "sh": m["shard"], "f": m["frag"], "t0": arr - (rs or 0.5), "t1": arr,
+                        "b": push_bytes.get((iid, m["step"]))})
     return out
 
 
@@ -241,19 +331,10 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
     by_id = {c["id"]: c for c in cards}
     isl = _fold(reducer, set(trainer_ids), now)
     n = shard_count(reducer)
-    merges = _merges(reducer, now, n)
+    merges = merge_rows(reducer, now, n)
     p = max([len(v) for v, _ in (x.vector() for x in isl.values()) if v] + [m["frag"] + 1 for m in merges] + [0]) or None
-    shards = [{"index": i, "lo": i * p // n, "hi": (i + 1) * p // n} for i in range(n)] if p else []
-    versions, last_ts = [0] * (p or 0), [None] * (p or 0)
-    for m in merges:
-        if m["frag"] < (p or 0):
-            versions[m["frag"]] = max(versions[m["frag"]], m["step"])
-            last_ts[m["frag"]] = m["ts"]
-    committed = {s["index"]: max((m["step"] for m in merges if m["shard"] == s["index"]), default=0) for s in shards}
-    merged_steps = {m["step"] for m in merges}
-    # the roster: the widest membership a merge expected (a later merge without a lost island
-    # expects fewer), else the trainer islands
-    expected = max((_members(m["rec"]) for m in merges), key=len, default=[])
+    sy = syncer_state(merges, p, n)
+    versions, committed, merged_steps, expected = sy["versions"], sy["committed"], sy["merged_steps"], sy["expected"]
     m_size = len(expected) or len(trainer_ids)
     live = [i for i in trainer_ids if (states.get(i) or {}).get("alive")]
 
@@ -270,65 +351,37 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
             r["since"] = min(r["since"], ps["_ts"])
             r["attempt"] = max(r["attempt"], _int(ps.get("round_attempt")) or 1)
             r["pushed"].append(iid)
-    walls = [_f(m["rec"].get("ms")) / 1000 for m in merges[-MERGE_HISTORY:] if _f(m["rec"].get("ms")) is not None]
-    open_limit = max(ROUND_OPEN_WARN_S, 3 * (_median(walls) or 0))
     rounds = []
     for r in sorted(inflight.values(), key=lambda r: r["step"]):
         r["pushed"] = sorted(set(r["pushed"]))
         r["age_s"] = now - r["since"]
         r["state"] = "merging" if len(r["pushed"]) >= m_size else "gathering"
-        r["blocked"] = r["state"] != "merging" and r["age_s"] > open_limit
+        r["blocked"] = r["state"] != "merging" and r["age_s"] > sy["open_limit_s"]
         r["missing"] = [i for i in (expected or trainer_ids) if i not in r["pushed"]]
         rounds.append(r)
 
-    # merge cadence: the recent interval, and each fragment's period (time between its merges)
-    mts = [m["ts"] for m in merges if m["ts"] is not None]
-    gaps = [b - a for a, b in zip(mts[-MERGE_HISTORY - 1:], mts[-MERGE_HISTORY:])]
-    merge_gap = _median(gaps)
-    prev: dict[int, float] = {}
-    fgaps: list[float] = []
-    for m in merges:
-        if m["ts"] is None:
-            continue
-        if m["frag"] in prev:
-            fgaps.append(m["ts"] - prev[m["frag"]])
-        prev[m["frag"]] = m["ts"]
-    period = _median(fgaps[-2 * (p or 1):]) or ((merge_gap or 0) * (p or 0) or None)
     running = bool(live) and not all(by_id.get(i, {}).get("finalized") for i in trainer_ids)
     trainers = [_trainer(iid, isl[iid], by_id.get(iid) or {}, states.get(iid) or {}, merges, versions, committed,
                          merged_steps, p, n, now, kind_) for iid in trainer_ids]
     # a trainer anchored past the syncer's committed version: the syncer tape lags (it is copied
     # from the syncer's host); no negative lag, and no "not advancing" from a stale copy
     behind = any(t["versions"] and any(a > b for a, b in zip(t["versions"], versions)) for t in trainers)
-    stuck = [f for f in range(p or 0) if running and merges and not behind and last_ts[f] is not None
-             and now - last_ts[f] > max(STUCK_MIN_S, 3 * (period or 0))]
+    stuck = stuck_fragments(sy, running=running, behind=behind, any_merge=bool(merges), now=now)
     for t in trainers:
         t["outer"] = t["outer"] if t["outer"] is not None else _outer(t["versions"], p)
 
-    out_shards = []
     # the run ended: no trainer is up and one of them finished (others may have failed at the end)
     done = bool(trainer_ids) and not live and any((states.get(i) or {}).get("status") in ("done", "stopped")
                                                   for i in trainer_ids)
-    for s in shards:
-        mine = [m for m in merges if m["shard"] == s["index"]]
-        last = mine[-1] if mine else None
-        own = [r for r in rounds if r["shard"] == s["index"]]
-        state = ("done" if done else "waiting for quorum" if any(r["blocked"] for r in own)
-                 else "merging" if any(r["state"] == "merging" for r in own) else "gathering" if own else "idle")
-        out_shards.append({**s, "step": committed[s["index"]], "merges": len(mine), "state": state,
-                           "attempt_max": max((_int(r["attempt"]) or 1 for r in own), default=1),
-                           "last": _merge_row(last) if last else None})
     pushes5 = [ps for x in isl.values() for ps in x.pushes if ps["_ts"] > now - RATE_S]
     bcasts5 = [b for x in isl.values() for b in x.bcasts if b["_ts"] > now - RATE_S]
-    qwait = [_f(m["rec"].get("quorum_ms")) / 1000 for m in merges[-MERGE_HISTORY:] if _f(m["rec"].get("quorum_ms")) is not None]
     hs = [_int(ps.get("realized_h")) for x in isl.values() for ps in x.pushes if _int(ps.get("realized_h"))]
     return {
         "kind": kind_, "P": p, "M": m_size, "N": n, "H": min(hs) if hs else None,
-        "quorum": _int(merges[-1]["rec"].get("quorum")) if merges else None,
-        "versions": versions, "last_merge_ts": last_ts, "behind": behind, "stuck": stuck,
-        "period_s": period, "merge_gap_s": merge_gap, "quorum_p50_s": _median(qwait),
-        "roster": len(live), "expected": expected, "shards": out_shards, "rounds": rounds,
-        "last_merge_ts_any": mts[-1] if mts else None, "running": running, "done": done,
+        "quorum": sy["quorum"], "versions": versions, "last_merge_ts": sy["last_merge_ts"], "behind": behind,
+        "stuck": stuck, "period_s": sy["period_s"], "merge_gap_s": sy["merge_gap_s"], "quorum_p50_s": sy["quorum_p50_s"],
+        "roster": len(live), "expected": expected, "shards": shard_rows(p, n, merges, rounds, committed, done),
+        "rounds": rounds, "last_merge_ts_any": sy["last_merge_ts_any"], "running": running, "done": done,
         "traffic": {"push": len(pushes5), "push_bytes": sum(_f(x.get("payload_bytes")) or 0 for x in pushes5),
                     "bcast": len(bcasts5)},
         "trainers": trainers,
@@ -551,23 +604,14 @@ def _flows(isl: dict[str, _Island], merges: list[dict], now: float, rollout: set
     an approximate window when the island wrote no rl_fragment_bcast), ``q`` rollout groups
     handed to the trainer (generate -> train), ``s`` snapshot publish (publish phase)."""
     lo = now - WINDOW_S
-    out: list[dict] = []
     push_bytes = {(iid, _int(ps.get("global_step"))): _f(ps.get("payload_bytes")) for iid, x in isl.items() for ps in x.pushes}
+    out = push_flows(merges, lo, push_bytes)
     bc = {(iid, _int(b.get("fragment_id")), _int(b.get("version"))): b for iid, x in isl.items() for b in x.bcasts}
     for m in merges:
-        if m["ts"] is None or m["ts"] < lo - 120:
+        if m["ts"] is None or m["ts"] < lo:
             continue
-        for r in m["rec"].get("responders") or []:
-            if not isinstance(r, dict):
-                continue
-            arr, rs = _f(r.get("arrived_unix")), _f(r.get("recv_seconds"))
-            if arr is None or arr < lo:
-                continue
-            iid = str(r.get("id"))
-            out.append({"k": "p", "i": iid, "sh": m["shard"], "f": m["frag"], "t0": arr - (rs or 0.5), "t1": arr,
-                        "b": push_bytes.get((iid, m["step"]))})
         for iid in (_members(m["rec"]) or list(isl)):
-            if iid not in isl or m["ts"] < lo:
+            if iid not in isl:
                 continue
             b = bc.get((iid, m["frag"], m["step"]))
             t1 = b["_ts"] - (_f(b.get("queue_seconds")) or 0) if b else m["ts"] + 1.5

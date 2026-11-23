@@ -228,6 +228,7 @@ The data is inside the file; no network access is needed.</div>
 <div id="sftRoot" hidden>
   <section class="krow" id="sKpis" aria-label="Key figures"></section>
   <section class="blk"><div class="bh"><b>Islands now</b><span id="sNodesNote"></span></div><div id="sNodes"></div></section>
+  <div id="sTopoSlot"></div>
   <div class="sh"><h2 id="sFleetH">Fleet</h2><div class="cs">per island and in total; points are training steps, syncer merges and collector samples</div></div>
   <div class="cg" id="sFleet"></div>
   <div class="sh"><h2 id="sDistH">Distribution</h2><div class="cs">share of steps per bin on a log axis; dashed lines p10 / p90 / p99, solid p50; the outer 0.2% tails are not drawn</div></div>
@@ -245,11 +246,11 @@ The data is inside the file; no network access is needed.</div>
 <section class="kpis" id="kpis" aria-label="Key figures" hidden></section>
 <section class="panel alerts" id="alertBox" hidden></section>
 <section class="blk"><div class="bh"><b>Islands now</b><span id="rNodesNote"></span></div><div id="rNodes"></div></section>
-<section class="blk" id="topoBox" hidden aria-label="Live topology"><div class="bh"><b>Live topology</b><span id="topoNote"></span></div>
+<div id="rTopoSlot"><section class="blk" id="topoBox" hidden aria-label="Live topology"><div class="bh"><b>Live topology</b><span id="topoNote"></span></div>
   <div class="lg" id="topoLg"><span style="color:var(--traj)"><i class="ln"></i>Trajectories + log-probabilities (sampler → store → trainer)</span><span style="color:var(--wt)"><i class="ln"></i>New weights (trainer → store → sampler)</span>
   <span><i style="background:var(--arch-ampere)"></i>Ampere</span><span><i style="background:var(--arch-ada)"></i>Ada</span><span><i style="background:var(--arch-hopper)"></i>Hopper</span><span><i style="background:var(--arch-blackwell)"></i>Blackwell</span><span><i style="background:var(--arch-cdna4)"></i>CDNA</span>
   <span><i class="cd" style="background:var(--good)"></i>sampling</span><span><i class="cd" style="background:var(--wt)"></i>reloading / loading</span><span><i class="cd" style="background:var(--warn)"></i>backlog full / starting</span><span style="color:var(--warn)">v12 −1 = behind LATEST</span></div>
-  <div id="topo"></div><div class="tip" id="topoTip"></div></section>
+  <div id="topo"></div><div class="tip" id="topoTip"></div></section></div>
 <section class="blk" id="brkBox" hidden aria-label="Breakers"><div class="bh"><b>Breakers</b><span id="brkNote"></span></div><div id="brk"></div></section>
 <div class="sh"><h2 id="rFleetH">Fleet</h2><div class="cs">per island; points are trainer rounds, sampler rounds and releases</div></div>
 <div class="cg" id="rFleet"></div>

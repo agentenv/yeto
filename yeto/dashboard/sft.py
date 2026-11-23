@@ -560,6 +560,7 @@ class SftState:
         self.syncer_meta: dict = {}
         self.rss: deque = deque(maxlen=SAMPLES_MAX)
         self.outer: list[list] = []
+        self.accepted: deque = deque(maxlen=EVENTS_MAX)  # [ts, island]: syncer tape delta_accepted (PUSH accepted)
         self.events: deque = deque(maxlen=EVENTS_MAX)  # [ts, category, learner, origin]
         self.eval: list[dict] = []  # held-out eval rows by step (eval/rows.jsonl, replaced whole)
         self.log_rounds: dict[int, dict] = {}  # syncer.log round timing by outer step
@@ -636,6 +637,8 @@ class SftState:
                                bool(r.get("timed_out")), r.get("arrived")])
             if r.get("timed_out"):
                 self.events.append([ts, "timeout", None, "tape", None])
+        elif kind == "delta_accepted":
+            self.accepted.append([ts, r.get("island_id", r.get("learner_id"))])
         elif kind == "delta_rejected":
             self.events.append([ts, "rejected", r.get("island_id", r.get("learner_id")), "tape", None])
         elif kind == "delta_carried_over":
