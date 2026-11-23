@@ -33,7 +33,14 @@ island (``adapters/miles/island_entry.py``):
 * ``--rl-observe-timeline``: ``IslandDriver.observe`` (timeline spans, load
   samples), with the heartbeat and resource sampler at their defaults;
 * ``--rl-resource-sample-interval S``: the driver's NVML resource sampler
-  period (0: off).
+  period (0: off);
+* ``--rl-heartbeat-interval S`` (:func:`heartbeat_plan`): the driver's
+  ``rl_heartbeat`` period (0: off). Unset, an outer-synced island (LoRA or full
+  parameters) heartbeats every 30 s and prints an ``[auto]`` line naming the
+  opt-out, the Miles island's rule: its rounds wait for the other islands
+  without writing anything, which reads as a stalled island. A no-sync island
+  keeps its default: on only with ``--rl-observe-timeline``. The launcher
+  forwards the option only when given.
 """
 
 from __future__ import annotations
@@ -60,6 +67,7 @@ def add_island_flags(parser) -> None:
         ("--rl-activation-recompute", {"action": "store_true"}),
         ("--rl-observe-timeline", {"action": "store_true"}),
         ("--rl-resource-sample-interval", {"type": float, "default": None}),
+        ("--rl-heartbeat-interval", {"type": float, "default": None}),
         # The publication checks (verify_plan)
         ("--rl-verify-every-round", {"action": "store_true"}),
         ("--rl-verify-every", {"type": int, "default": None}),
@@ -121,12 +129,33 @@ def apply_training_options(args: Any, overrides: Sequence[str], asserted_keys: S
     return out, tuple(dict.fromkeys(asserted))
 
 
-def observation_plan(args: Any) -> dict[str, Any]:
-    """The plan keys of the observation options (absent when off): ``observe_timeline``
-    and the driver's ``heartbeat_interval_s`` / ``resource_sample_interval_s``,
-    with Miles' defaults (30 s / 60 s) when the timeline is observed."""
+def heartbeat_plan(args: Any, *, synced: bool) -> dict[str, Any]:
+    """``{"heartbeat_interval_s": S}`` (absent when off): ``--rl-heartbeat-interval``
+    when given, else 30 s on an outer-synced island (with an ``[auto]`` line) or
+    with ``--rl-observe-timeline``; the rule of the Miles island
+    (``adapters/miles/island_entry.apply_ports_infra_switches``)."""
 
-    from yeto.rl.engine.telemetry import DEFAULT_HEARTBEAT_INTERVAL_S, DEFAULT_RESOURCE_INTERVAL_S
+    from yeto.rl.engine.telemetry import DEFAULT_HEARTBEAT_INTERVAL_S
+
+    observe = bool(getattr(args, "rl_observe_timeline", False))
+    value = getattr(args, "rl_heartbeat_interval", None)
+    if value is None:
+        if synced and not observe:
+            print(f"[auto] rl_heartbeat every {DEFAULT_HEARTBEAT_INTERVAL_S:g} s on this outer-synced island "
+                  "(--rl-heartbeat-interval 0 turns it off)", flush=True)
+        value = DEFAULT_HEARTBEAT_INTERVAL_S if observe or synced else None
+    elif float(value) < 0:
+        raise ValueError("--rl-heartbeat-interval must be >= 0")
+    return {"heartbeat_interval_s": float(value)} if value else {}
+
+
+def observation_plan(args: Any, *, synced: bool = False) -> dict[str, Any]:
+    """The plan keys of the observation options (absent when off): ``observe_timeline``
+    and the driver's ``heartbeat_interval_s`` (:func:`heartbeat_plan`) /
+    ``resource_sample_interval_s``, with Miles' defaults (30 s / 60 s) when the
+    timeline is observed."""
+
+    from yeto.rl.engine.telemetry import DEFAULT_RESOURCE_INTERVAL_S
 
     observe = bool(getattr(args, "rl_observe_timeline", False))
     out: dict[str, Any] = {"observe_timeline": True} if observe else {}
@@ -134,8 +163,7 @@ def observation_plan(args: Any) -> dict[str, Any]:
     if sample is not None and float(sample) < 0:
         raise ValueError("--rl-resource-sample-interval must be >= 0")
     resource = (DEFAULT_RESOURCE_INTERVAL_S if observe else None) if sample is None else float(sample)
-    if observe:
-        out["heartbeat_interval_s"] = DEFAULT_HEARTBEAT_INTERVAL_S
+    out.update(heartbeat_plan(args, synced=synced))
     if resource:
         out["resource_sample_interval_s"] = resource
     return out

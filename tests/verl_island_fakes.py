@@ -103,17 +103,29 @@ def full_plan(tmp_path, **extra) -> dict:
             "event_tape": str(tmp_path / "tape.jsonl"), "thresholds_key": [], **extra}
 
 
-def drive_trainer(monkeypatch, tmp_path, path: str, *, plan: dict | None = None, buffer_ports=None):
+def drive_trainer(monkeypatch, tmp_path, path: str, *, plan: dict | None = None, buffer_ports=None,
+                  until: str = "IslandDriver"):
     """Run ``trainer.run_island`` (``path="sync"``) or ``trainer.run_fully_async_island``
     (``"fully_async"``) on a full-parameter plan up to ``IslandDriver(...)``; the
-    island-side objects are fakes. Returns the driver's keyword arguments."""
+    island-side objects are fakes. Returns the driver's keyword arguments.
+    ``until="wire_round_cuts"`` goes on with a namespace driver to the round cuts'
+    wiring and returns ``{"driver": driver}`` (the driver as wired by then)."""
     (fully_async_full, fully_async_ports, fully_async_round, identity, ports_impl, round_cuts, separate,
      trainer, driver_module, catalog) = modules(*(f"yeto.rl.adapters.verl.{name}" for name in (
          "fully_async_full", "fully_async_ports", "fully_async_round", "identity", "ports_impl",
          "round_cuts", "separate", "trainer")), "yeto.rl.engine.driver", "yeto.hw.catalog")
 
     def driver(**kwargs):
-        raise Reached("IslandDriver", **kwargs)
+        if until == "IslandDriver":
+            raise Reached("IslandDriver", **kwargs)
+        return types.SimpleNamespace(observe=False, heartbeat_interval_s=None, resource_sample_interval_s=None,
+                                     **kwargs)
+
+    if until == "wire_round_cuts":
+        def wire_round_cuts(driver, *a, **k):
+            raise Reached("wire_round_cuts", driver=driver)
+
+        monkeypatch.setattr(round_cuts, "wire_round_cuts", wire_round_cuts)
 
     island = types.SimpleNamespace(layout_hash="d" * 64)
     monkeypatch.setattr(driver_module, "IslandDriver", driver)
