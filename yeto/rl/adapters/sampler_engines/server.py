@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -74,10 +75,17 @@ def popen_spawn(argv: Sequence[str], env: Mapping[str, str]) -> Process:
     The server runs in its own process group (its pid is the group id), so the
     island can end the server's workers with it and a later island process on
     the same machine can end a server an island killed with SIGKILL left behind
-    (:func:`reap_stale_server`)."""
-    return subprocess.Popen(list(argv), env={**os.environ, **env},  # noqa: S603
+    (:func:`reap_stale_server`). The group's leader is :mod:`.parent_guard`
+    (the returned process): it runs the server, forwards SIGTERM, exits with
+    the server's status, and ends the whole group once this process is gone, so
+    a SIGKILLed sampler no longer leaves its engine on the GPUs."""
+    guard = [sys.executable, "-I", str(PARENT_GUARD), "--parent", str(os.getpid()), "--"]
+    return subprocess.Popen([*guard, *argv], env={**os.environ, **env},  # noqa: S603
                             preexec_fn=_ignore_sigint,  # noqa: PLW1509 - only resets one signal
                             start_new_session=True)
+
+
+PARENT_GUARD = Path(__file__).with_name("parent_guard.py")
 
 
 def server_group_file(engine: str, port: int) -> Path:
@@ -307,14 +315,15 @@ class ServerEngine:
         self.preflight(model_dir)
         began = self._clock()
         self.stop()
-        self._check_host_memory()
-        self._stopping = False
-        self._version = None
         if self._spawn is popen_spawn:
+            # before the host memory check: a server an earlier island left holds host memory too
             stale = reap_stale_server(self.ENGINE, self.config.port)
             if stale is not None:
                 print(f"[{self.ENGINE}-server] ended the process group {stale} an earlier island left "
                       f"on port {self.config.port}", flush=True)
+        self._check_host_memory()
+        self._stopping = False
+        self._version = None
         self._process = self._spawn(self.argv(model_dir), self.env())
         if self._spawn is popen_spawn:
             server_group_file(self.ENGINE, self.config.port).write_text(str(self._process.pid))
