@@ -83,3 +83,12 @@ def test_unmapped_choices_are_refused(dense_model, monkeypatch):
     monkeypatch.setattr(export, "target_modules", lambda choice, config: r"model\.layers\.0\..*")
     with pytest.raises(vconf.VerlConfigError, match="no verl target_modules list form"):
         lora_targets.verl_target_modules("attention", None)
+
+
+def test_gated_attention_maps_to_its_output_projections():
+    # yeto narrows attention to o_proj / out_proj on gated-attention models
+    # (yeto.rl.export._GATED_ATTENTION_TARGETS); verl gets the same two names
+    from types import SimpleNamespace
+
+    gated = SimpleNamespace(attn_output_gate=True)
+    assert lora_targets.verl_target_modules("attention", gated) == "[o_proj,out_proj]"
