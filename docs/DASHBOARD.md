@@ -81,6 +81,13 @@ A failing store read is shown, not hidden: `/api/overview` and `/api/view` carry
 unreadable" and, with no island yet, the global status says so instead of "no
 data". The "Islands now" note shows the tapes read and the last clean read.
 
+One record often reaches the dashboard more than once: the launcher's echoed tape
+(`~/.yeto/runs/<run>/events`) and the trainer's store upload carry the same records,
+and a restarted trainer uploads its whole local tape again under its new launch. A
+timestamped event equal to one already folded for the same island is dropped
+(`overview.duplicates` counts them), so counts are not inflated and a restart is
+dated by its own first record.
+
 A dashboard may start before the run: the run's own paths under `--run`
 (`~/.yeto/runs/<run>/events`, `fleet.jsonl`) and the `--tapes` paths are followed
 once they appear. `export` still refuses when none of its paths exists and no
@@ -152,6 +159,7 @@ and the budget can be passed to the launcher with the environment variables
 | RECOVERY_REQUIRED (journal phase or tape `rl_reconfiguration`) | — | 0 |
 | ssh mirror source lost | — | 1 |
 | Run store unreadable (`--store` reads failing since the last clean poll) | — | 1 |
+| Trainer launches ending in a failure leave (`island_leave` not STOPPED / DONE ...) in the last hour; the detail names the root-cause error line | 1: warning, >= 2: critical | 1/0 |
 | Samplers up without any trainer island on the tapes (async run; since the first sampler event) | > 1200 s warning, > 1800 s critical | 1/0 |
 | Agentic sampler trials (current incarnation, last 10 rounds in which trials ended, >= 8 trials): none with a verdict (ok / policy limit); aborted (infrastructure) share | none: critical; > 50%: warning | 0/1 |
 | Compaction `summary_ok` share (per sampler, last 5 rounds with compaction, >= 5 summaries) | < 90% warning, < 50% critical | 1/0 |

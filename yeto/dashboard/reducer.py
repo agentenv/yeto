@@ -22,6 +22,8 @@ Anything else is passed through to the events view. Missing values stay
 from __future__ import annotations
 
 import bisect
+import hashlib
+import json
 import math
 import re
 import time
@@ -296,6 +298,8 @@ class Reducer:
         self._superseded = False  # the record being fed is from a superseded trainer launch
         # set by serve / export when --store is given: () -> StoreTapes.status() (store_tapes.py)
         self.store_status: Any = None
+        self._seen_digests: set[bytes] = set()  # timestamped events folded so far (_duplicate)
+        self.duplicates = 0  # records dropped as already folded from another source
         # the dashboard's own command line, for the page's "Commands" box (cli.page_commands)
         self.commands: dict[str, str] | None = None
 
@@ -314,17 +318,25 @@ class Reducer:
             return False
         if record.get("event") == HOST_SAMPLE_EVENT:
             return self._feed_host(record, island, node)
+        kind = classify(record)
+        iid = (_iid(island) if island_fixed and island is not None and kind == "learner" else None) \
+            or _iid(record.get("island_id", record.get("learner_id"))) or island \
+            or (_iid(record.get("sampler_id")) if kind == "learner" else None)
+        if self._duplicate(record, iid):
+            launch = _store_launch(source)
+            if kind == "learner" and iid is not None and launch is not None:
+                # the launch exists (a leave older than a later launch is that launch's), but a
+                # re-uploaded record must not date it: its first own record does (_launch)
+                self.island(iid)["launches"].setdefault(launch, {"launch": launch, "first_ts": None,
+                                                                 "last_ts": None})
+            return False
         if record.get("event") in SPOT_EVENTS:
             self.spot.append(_spot_row(record))
-        kind = classify(record)
         self.counts[kind] = self.counts.get(kind, 0) + 1
         ts = record_ts(record) if kind != "pool" else async_rl.pool_ts(record)
         if ts is not None:
             self.max_ts = ts if self.max_ts is None else max(self.max_ts, ts)
             self.min_ts = ts if self.min_ts is None else min(self.min_ts, ts)
-        iid = (_iid(island) if island_fixed and island is not None and kind == "learner" else None) \
-            or _iid(record.get("island_id", record.get("learner_id"))) or island \
-            or (_iid(record.get("sampler_id")) if kind == "learner" else None)
         if record.get("event") in ("dashboard_source_lost", "dashboard_source_restored") and source.endswith(
                 ".source.jsonl"):
             # a mirror's status file names the island by the mirror's --island label; the
@@ -441,19 +453,46 @@ class Reducer:
         elif ts is not None:
             row["first_ts"] = ts if row["first_ts"] is None else min(row["first_ts"], ts)
             row["last_ts"] = ts if row["last_ts"] is None else max(row["last_ts"], ts)
+        restart = {"driver_started": False, "startup_steps": {}, "startup_step": None,
+                   "startup_step_ts": None, "start_phase": None, "start_phase_ts": None,
+                   "launch_ts": row["first_ts"]}
         cur = isl["launches"].get(isl["launch"]) if isl["launch"] is not None else None
         if cur is None:
             isl["launch"], isl["launch_ts"] = launch, row["first_ts"]
+            if any(k != launch for k in isl["launches"]):
+                # an earlier launch is known only from records the echoed tape folded first
+                # (feed: duplicates): this one is its restart
+                isl.update(restart)
             return False
         if launch == isl["launch"]:
             return False
         if row["first_ts"] is not None and (cur["first_ts"] is None or row["first_ts"] > cur["first_ts"]):
             isl["launch"] = launch  # a restart: a new launch of the same island
-            isl.update({"driver_started": False, "startup_steps": {}, "startup_step": None,
-                        "startup_step_ts": None, "start_phase": None, "start_phase_ts": None,
-                        "launch_ts": row["first_ts"]})
+            isl.update(restart)
             return False
         return True
+
+    def _duplicate(self, record: dict, iid: str | None) -> bool:
+        """True for a timestamped event of island ``iid`` already folded from another source. One record
+        reaches the dashboard more than once: the launcher's echoed tape
+        (``~/.yeto/runs/<run>/events``) and the trainer's store upload carry the same
+        records, and a restarted trainer uploads its whole local tape again under its new
+        launch. Counted once, the restart's own first record dates the new launch, so the
+        restart is recognised (``_launch``). Records without ``time_unix`` (which may repeat
+        legitimately) are never dropped; equal records of two islands (whose tapes name
+        the island by file name only) are two records."""
+        if not isinstance(record.get("event"), str) or not isinstance(record.get("time_unix"), (int, float)):
+            return False
+        try:
+            text = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            return False
+        digest = hashlib.blake2b(f"{iid}\x00{text}".encode("utf-8", "surrogatepass"), digest_size=16).digest()
+        if digest in self._seen_digests:
+            self.duplicates += 1
+            return True
+        self._seen_digests.add(digest)
+        return False
 
     def island(self, iid: str) -> dict:
         isl = self.islands.get(iid)
@@ -1330,7 +1369,7 @@ class Reducer:
             "round_marks": [{"round": r["round"], "missed": bool(r["missed"]), "resend": r["resend"]}
                             for r in rounds],
             "counts": dict(self.counts), "events_total": self.event_seq,
-            "store": store, "commands": self.commands,
+            "store": store, "commands": self.commands, "duplicates": self.duplicates,
         }
 
     def _run_meta(self) -> tuple:

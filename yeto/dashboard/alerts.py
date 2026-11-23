@@ -76,6 +76,10 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # launch failed, or it was torn down): seconds since the first sampler event
     "trainer_missing_warn_s": 1200.0,
     "trainer_missing_severe_s": 1800.0,
+    # trainer launches that ended with a failure leave (island_leave not STOPPED / DONE ...)
+    # in the last trainer_fail_window_s: one is a warning, trainer_fail_loop or more critical
+    "trainer_fail_window_s": 3600.0,
+    "trainer_fail_loop": 2,
 }
 
 
@@ -400,13 +404,35 @@ def trainer_missing(reducer, th: dict, now: float, cards: list[dict]) -> list[di
                    island=live[0]["id"])]
 
 
+def trainer_failed(reducer, th: dict, now: float) -> list[dict]:
+    from .reducer import CLEAN_LEAVE
+
+    out = []
+    state = getattr(reducer, "async_", None)
+    for iid, t in sorted((state.trainer if state is not None else {}).items()):
+        bad = [x for x in t.get("leaves") or []
+               if str(x.get("reason") or "").upper() not in CLEAN_LEAVE
+               and x.get("ts") is not None and now - x["ts"] <= th["trainer_fail_window_s"]]
+        if not bad:
+            continue
+        last = bad[-1]
+        why = last.get("cause") or last.get("error_type") or "no error text"
+        detail = (f"{len(bad)} failed launch(es) in the last {th['trainer_fail_window_s'] / 60:.0f} min, "
+                  f"last {last.get('reason')}: {why}")
+        if len(bad) >= th["trainer_fail_loop"]:
+            out.append(_alert(0, "trainer_failed", f"trainer {iid} keeps failing", detail, island=iid))
+        else:
+            out.append(_alert(1, "trainer_failed", f"trainer {iid} failed", detail, island=iid))
+    return out
+
+
 def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict],
              store: dict | None = None) -> list[dict]:
     th = reducer.thresholds
     alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
               + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
-              + trainer_missing(reducer, th, now, cards)
+              + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
     alerts.sort(key=lambda a: a["sev"])
     for i, a in enumerate(alerts):

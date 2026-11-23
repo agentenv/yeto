@@ -189,3 +189,58 @@ def test_samplers_without_a_trainer_warn_then_go_critical():
 def test_no_trainer_alert_once_a_trainer_is_on_the_tapes():
     recs = _sampler_up(2000) + [{"event": "rl_driver_start", "island_id": "trainer", "time_unix": T0 + 1990}]
     assert not _missing_alerts(recs, T0 + 2010)
+
+
+OOM = ("Traceback (most recent call last):\n  File \"x.py\", line 1, in f\n"
+       "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 47.05 GiB.\n\n"
+       "The above exception was the direct cause of the following exception:\n\n"
+       "miles.utils.retry_utils.NonRetryableError: All cells failed in this training attempt")
+
+
+def _trainer_launch(t0, *, leave=True):
+    recs = [{"event": "trainer_start_phase", "island_id": 0, "phase": "submitted", "time_unix": t0},
+            {"event": "rl_driver_start", "island_id": 0, "time_unix": t0 + 100}]
+    if leave:
+        recs.append({"event": "island_leave", "island_id": 0, "reason": 4, "reason_name": "INFRA_FAILED",
+                     "error_type": "RayTaskError(NonRetryableError)", "error": OOM, "time_unix": t0 + 120})
+    return recs
+
+
+def test_one_record_from_echo_and_store_and_a_restart_reupload_counts_once():
+    first = _trainer_launch(T0)
+    second = [{"event": "trainer_start_phase", "island_id": 0, "phase": "submitted", "time_unix": T0 + 200},
+              {"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "seq": 1, "time_unix": T0 + 230}]
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(first):  # the launcher's echoed tape
+        reducer.feed(rec, source="/runs/r/events/r-l0-modal.jsonl", offset=i)
+    for i, rec in enumerate(first):  # the first launch's store upload
+        reducer.feed(rec, source="store:trainer/l0-modal-A", offset=i)
+    for i, rec in enumerate(first + second):  # the restart uploads its whole tape again
+        reducer.feed(rec, source="store:trainer/l0-modal-B", offset=i)
+    assert reducer.duplicates == 2 * len(first)
+    types = [e["type"] for e in reducer.events]
+    assert types.count("island_leave") == 1 and types.count("rl_driver_start") == 1
+    card = next(c for c in reducer.overview(now=T0 + 240)["islands"] if c["id"] == "0")
+    assert card["status"] == "starting"  # the restart is the current launch, not "left"
+
+
+def test_trainer_failures_alert_with_the_root_cause():
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(_trainer_launch(T0)):
+        reducer.feed(rec, source="store:trainer/l0-modal-A", offset=i)
+    one = [a for a in reducer.overview(now=T0 + 300)["alerts"] if a["rule"] == "trainer_failed"]
+    assert len(one) == 1 and one[0]["sev"] == 1
+    assert "torch.OutOfMemoryError: CUDA out of memory" in one[0]["detail"] and "INFRA_FAILED" in one[0]["detail"]
+    for i, rec in enumerate(_trainer_launch(T0 + 600)):
+        reducer.feed(rec, source="store:trainer/l0-modal-B", offset=i)
+    loop = [a for a in reducer.overview(now=T0 + 900)["alerts"] if a["rule"] == "trainer_failed"]
+    assert len(loop) == 1 and loop[0]["sev"] == 0 and loop[0]["title"] == "trainer 0 keeps failing"
+    assert not [a for a in reducer.overview(now=T0 + 8000)["alerts"] if a["rule"] == "trainer_failed"]
+
+
+def test_a_clean_trainer_leave_is_not_a_failure():
+    reducer = Reducer(run="r")
+    reducer.feed({"event": "rl_driver_start", "island_id": 0, "time_unix": T0}, source="s", offset=0)
+    reducer.feed({"event": "island_leave", "island_id": 0, "reason_name": "DONE", "time_unix": T0 + 10},
+                 source="s", offset=1)
+    assert not [a for a in reducer.overview(now=T0 + 20)["alerts"] if a["rule"] == "trainer_failed"]

@@ -14,6 +14,7 @@ Health of each role is judged by its own cadence (see ``expected_gap_s``).
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 POOL_PREFIX = "nc_elastic_"
@@ -158,6 +159,20 @@ def compaction_total(rows: list[dict]) -> dict | None:
     out.update({k: last.get(k) for k in ("reward_mean_trial", "reward_mean_segment",
                                          "policy_tokens_mean_trial", "policy_tokens_mean_segment")})
     return out
+
+
+_ERROR_LINE = re.compile(r"^\s*([A-Za-z_][\w.]*(?:Error|Exception)): (.+)$")
+
+
+def root_cause(error: Any) -> str | None:
+    """The first ``SomeError: message`` line of a leave's error text: with chained
+    exceptions ("The above exception was the direct cause ...") that is the root cause
+    (a CUDA OOM), not the wrapper raised last (miles' NonRetryableError)."""
+    for line in str(error or "").splitlines():
+        m = _ERROR_LINE.match(line)
+        if m:
+            return f"{m.group(1)}: {m.group(2)}"[:240]
+    return None
 
 
 def trial_outcomes(agentic: dict) -> dict:
@@ -387,7 +402,9 @@ class AsyncState:
         rid = _int(r.get("rollout_id"))
         if ev == "island_leave":
             t["left"] = {"ts": ts, "reason": r.get("reason_name") or r.get("reason"),
-                         "error_type": r.get("error_type")}
+                         "error_type": r.get("error_type"), "cause": root_cause(r.get("error"))}
+            t.setdefault("leaves", []).append(t["left"])
+            del t["leaves"][:-50]
             return
         if ev == "rl_buffer_unidentified_policy_starved":
             # the reader reads groups and keeps none (groups of versions no record names)
