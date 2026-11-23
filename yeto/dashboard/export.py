@@ -17,6 +17,7 @@ STATIC = Path(__file__).with_name("static")
 PAGE = STATIC / "index.html"
 APP = STATIC / "app.js"
 EXT = STATIC / "sft.js"  # loaded first: app.js calls YetoExt.render
+TOPO = STATIC / "topology.js"  # loaded before app.js too: app.js calls YetoTopo.render
 MARKER = "<!--YETO-DATA-->"
 APP_MARKER = "<!--YETO-APP-->"
 
@@ -29,11 +30,11 @@ def inline_json(data: dict) -> str:
 
 
 def build_id() -> str:
-    """Short hash of the page code (index.html + sft.js + app.js). The live server sends it with
+    """Short hash of the page code (index.html + sft.js + topology.js + app.js). The live server sends it with
     every /api/view so an open tab notices a redeploy and reloads instead of drawing new data
     with old code."""
     h = hashlib.sha256()
-    for f in (PAGE, EXT, APP):
+    for f in (PAGE, EXT, TOPO, APP):
         h.update(f.read_bytes())
     return h.hexdigest()[:12]
 
@@ -41,7 +42,7 @@ def build_id() -> str:
 def render_page(data: dict | None) -> str:
     html = PAGE.read_text(encoding="utf-8").replace(
         APP_MARKER, "<script>\nvar YETO_BUILD=" + json.dumps(build_id()) + ";\n" + EXT.read_text(encoding="utf-8")
-        + "\n" + APP.read_text(encoding="utf-8") + "\n</script>")
+        + "\n" + TOPO.read_text(encoding="utf-8") + "\n" + APP.read_text(encoding="utf-8") + "\n</script>")
     if data is None:
         return html.replace(MARKER, "")
     block = f'<script type="application/json" id="yeto-data">{inline_json(data)}</script>'
