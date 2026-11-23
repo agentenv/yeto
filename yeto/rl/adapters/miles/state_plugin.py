@@ -100,6 +100,10 @@ class AdapterBinding:
     # One parameter holding several experts; ``name`` is its representative
     # and the policy tensors come from :class:`PackedAdapterPolicy`.
     packed: bool = False
+    # One expert of a grouped-expert adapter (Bridge ``GroupedExpertLinearAdapter``,
+    # parameter ``[local experts, ...]``): its local index. Every local expert
+    # has its own binding and canonical name; they share ``parameter``.
+    slot: int | None = None
 
 
 # --------------------------------------------------------------------------
@@ -264,11 +268,14 @@ def _no_conversion(_tensor: Any) -> Any:
 
 
 # Megatron-Bridge members the bindings use beyond its collective export, kept in
-# these two functions so a Bridge upgrade is checked in one place. Verified
-# against the pinned Megatron-Bridge a0c6d6e09b0bd4d208c2d936608319d5ab456d87
-# (``models/conversion/param_mapping.py``): ``MegatronParamMapping.local_hf_param_specs``
-# (the collective-free HF view of one local parameter) and ``_local_hf_sharding``
-# with ``tp_rank`` (how ``local_hf_params`` describes a TP/ETP shard).
+# the ``_bridge_*`` functions below so a Bridge upgrade is checked in one place.
+# Verified against the pinned Megatron-Bridge a0c6d6e09b0bd4d208c2d936608319d5ab456d87:
+# ``MegatronParamMapping.local_hf_param_specs`` (the collective-free HF view of one
+# local parameter), ``_local_hf_sharding`` with ``tp_rank`` / ``ep_rank`` (how
+# ``local_hf_params`` describes a TP/ETP shard; ``models/conversion/param_mapping.py``)
+# and ``MegatronPeftBridge._resolve_hf_adapter_param_name`` (the HF name of one
+# expert's adapter, as ``build_adapter_conversion_tasks`` resolves expert 0;
+# ``models/conversion/peft_bridge.py``).
 
 
 def _bridge_hf_name(mapping: Any) -> str:
@@ -300,6 +307,102 @@ def _bridge_local_shard(mapping: Any, parameter: Any, tensor: Any) -> Any:
     return tensor.chunk(size, dim=dim)[mapping.tp_rank]
 
 
+_ADAPTER_SUFFIX = {"linear_in": ".linear_in.weight", "linear_out": ".linear_out.weight"}
+
+
+def _bridge_expert_hf_names(model_bridge: Any, task: Any, which: str, num_local: int,
+                            ep_rank: int) -> list[str]:
+    """HF names of this rank's local experts of one grouped-expert adapter side.
+
+    Bridge names expert ``g`` of a grouped linear ``<prefix>.weight<g>``; local
+    expert ``i`` on EP rank ``r`` is ``g = r * num_local + i`` (Megatron's
+    ``local_expert_indices_offset``), the order Bridge's export gathers them in.
+    """
+
+    registry = model_bridge.mapping_registry()
+    names = [
+        model_bridge._resolve_hf_adapter_param_name(
+            registry, task.global_base_prefix, _ADAPTER_SUFFIX[which],
+            f".weight{ep_rank * num_local + local}", task.adapter_key)
+        for local in range(num_local)
+    ]
+    if None in names or len(set(names)) != num_local:
+        # e.g. an HF checkpoint that stores all experts in one tensor: Bridge then
+        # exports one stacked adapter tensor, not one per expert
+        raise StatePluginError(
+            f"grouped-expert LoRA of {task.global_base_prefix!r} has no per-expert HF names "
+            f"(got {names[:2]}); only checkpoints with one HF tensor per expert are supported")
+    return names
+
+
+def _collective_only(_tensor: Any) -> Any:
+    raise StatePluginError("a grouped-expert adapter exports through the Bridge collective export")
+
+
+def _grouped_expert_bindings(model_bridge: Any, task: Any, side: Any, which: str) -> list[AdapterBinding]:
+    """One binding per local expert of a grouped-expert adapter side.
+
+    Miles builds expert LoRA with ``share_expert_adapters=False``: Bridge's
+    ``GroupedExpertLinearAdapter`` holds one low-rank pair per local expert in a
+    ``[local experts, ...]`` parameter. Expert tensor parallelism is 1 (Miles and
+    the launcher pin it), so a local expert's slice is the complete canonical tensor.
+    """
+
+    param, mapping = side.param_weight, side.mapping
+    if mapping.tp_size != 1:
+        raise StatePluginError(
+            f"grouped-expert LoRA of {task.global_base_prefix!r} needs expert tensor parallel size 1, "
+            f"not {mapping.tp_size}")
+    num_local = int(param.shape[0])
+    names = _bridge_expert_hf_names(model_bridge, task, which, num_local, int(mapping.ep_rank))
+    shape = tuple(param.shape[1:])
+
+    def from_hf(tensor, _shape=shape, _base=task.global_base_prefix):
+        if tuple(tensor.shape) != _shape:
+            raise StatePluginError(f"expert LoRA of {_base!r} expects {_shape}, got {tuple(tensor.shape)}")
+        return tensor
+
+    return [AdapterBinding(_canonical(name), param, _collective_only, from_hf, slot=local)
+            for local, name in enumerate(names)]
+
+
+def _refuse_unsupported_expert_layout(task: Any) -> None:
+    """Grouped experts must carry one adapter per expert (Bridge
+    ``select_grouped_expert_adapter`` with ``share_expert_adapters=False`` and no
+    ``experts_shared_outer_loras``, Miles' default). The other two Bridge layouts
+    have no per-expert canonical tensor for both factors:
+
+    * shared (``share_expert_adapters=True``): one ``ParallelLinearAdapter`` for all
+      local experts of an EP rank;
+    * shared-outer (``--experts-shared-outer-loras``, ``SharedOuterGroupedExpertAdapter``):
+      one factor per expert, the other shared by every expert.
+    """
+
+    prefix = getattr(task, "global_base_prefix", "")
+    if ".experts.linear_fc" not in prefix or ".local_experts." in prefix:
+        return
+    if not getattr(task, "requires_expert_splits", False):
+        raise StatePluginError(
+            f"expert LoRA of {prefix!r} shares one adapter across the local experts "
+            "(Bridge share_expert_adapters=True); canonical sync needs one adapter per expert")
+    weights = [getattr(t, "param_weight", None) for t in (task.linear_in_task, task.linear_out_task)]
+    if all(w is not None for w in weights) and weights[0].ndim != weights[1].ndim:
+        raise StatePluginError(
+            f"expert LoRA of {prefix!r} uses shared outer factors (--experts-shared-outer-loras); "
+            "canonical sync needs one adapter per expert for both factors")
+
+
+def _refuse_ungathered_experts(task: Any, side: Any) -> None:
+    """Bridge exports the adapters of SequentialMLP experts (``local_experts``)
+    without an EP gather, so the main rank would miss the other ranks' experts."""
+
+    if ".local_experts." in getattr(task, "global_base_prefix", "") and int(side.mapping.ep_size) > 1:
+        raise StatePluginError(
+            f"expert LoRA on SequentialMLP experts ({task.global_base_prefix!r}) under expert "
+            "parallelism: Megatron-Bridge exports only each rank's own experts; use grouped GEMM "
+            "experts (--moe-grouped-gemm) or EP 1")
+
+
 def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
     """Resolve (and cache) adapter bindings via Megatron-Bridge conversion tasks.
 
@@ -323,6 +426,8 @@ def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
     tasks_by_base = build_tasks(actor.model)
     for base_name in sorted(tasks_by_base):
         for task in sorted(tasks_by_base[base_name], key=lambda t: t.adapter_key or ""):
+            if policy is None:
+                _refuse_unsupported_expert_layout(task)
             for side in (task.linear_in_task, task.linear_out_task):
                 if side.param_weight is None:
                     continue
@@ -331,6 +436,11 @@ def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
                     bindings.append(AdapterBinding(_canonical(packed_name), side.param_weight,
                                                    _no_conversion, _no_conversion, packed=True))
                     continue
+                if getattr(task, "requires_expert_splits", False):
+                    which = "linear_in" if side is task.linear_in_task else "linear_out"
+                    bindings.extend(_grouped_expert_bindings(model_bridge, task, side, which))
+                    continue
+                _refuse_ungathered_experts(task, side)
                 name = _canonical(_bridge_hf_name(side.mapping))
 
                 def to_hf(tensor, _side=side):
@@ -803,11 +913,12 @@ def _export_state(actor: Any, *, policy_version: int, staging: Any = None) -> di
     if is_native_slots(actor):
         return _export_native_slots(actor, policy_version=policy_version, staging=staging)
     bindings = adapter_bindings(actor)
-    params = [b.parameter for b in bindings]
+    params = _unique_parameters(bindings)
     tensors: dict[str, Any] = {}
     with torch.no_grad():
-        # Packed parameters export one tensor per expert only through the Bridge.
-        if _model_parallel(actor) or _packed_policy_for(actor, bindings) is not None:
+        # Packed and grouped-expert parameters export one tensor per expert only through the Bridge.
+        if (_model_parallel(actor) or _packed_policy_for(actor, bindings) is not None
+                or any(b.slot is not None for b in bindings)):
             tensors = _collective_export(actor, bindings)
         else:
             masters = full_masters(getattr(actor, "optimizer", None), params)
@@ -823,6 +934,15 @@ def _export_state(actor: Any, *, policy_version: int, staging: Any = None) -> di
     return {"policy_version": int(policy_version), "tensors": out}
 
 
+def _unique_parameters(bindings: Sequence[AdapterBinding]) -> list[Any]:
+    """Each bound parameter once, in binding order (grouped experts share one)."""
+
+    seen: dict[int, Any] = {}
+    for b in bindings:
+        seen.setdefault(id(b.parameter), b.parameter)
+    return list(seen.values())
+
+
 def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[str, Any]:
     """TP/PP/EP: Bridge adapter export is collective; masters exposed per rank."""
 
@@ -835,7 +955,7 @@ def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[s
     expected = {b.name for b in bindings}
     tensors: dict[str, Any] = {}
     names: set[str] = set()
-    params = [b.parameter for b in bindings]
+    params = _unique_parameters(bindings)
     opt = getattr(actor, "optimizer", None)
     policy = _packed_policy_for(actor, bindings)
     if policy is not None:
@@ -846,9 +966,10 @@ def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[s
     if policy is not None:
         # Frozen slots are checked once in the packed masters; the per-expert
         # copies of frozen experts are dropped from the export below.
-        for b, master in zip(bindings, masters or [master_of(p) for p in params], strict=True):
+        by_param = dict(zip((id(p) for p in params), masters or [master_of(p) for p in params], strict=True))
+        for b in bindings:
             if b.packed:
-                policy.check_frozen_slots(b.name, master)
+                policy.check_frozen_slots(b.name, by_param[id(b.parameter)])
         carried = policy.carried_names()
         expected = {b.name for b in bindings if not b.packed}
     with masters_as_module_parameters(actor.model, params, masters):
@@ -982,7 +1103,7 @@ def _apply_state(
         return _apply_native_slots(actor, tensors=tensors, policy_version=policy_version,
                                    local_step=local_step, optimizer=optimizer)
     bindings = adapter_bindings(actor)
-    params = [b.parameter for b in bindings]
+    params = _unique_parameters(bindings)
     policy = _packed_policy_for(actor, bindings)
     unpacked = [b for b in bindings if not b.packed]
     packed = [b for b in bindings if b.packed]
@@ -1001,19 +1122,15 @@ def _apply_state(
         for name, value in tensors.items():
             if value.dtype != torch.float32 or not torch.isfinite(value).all().item():
                 raise StatePluginError(f"{name!r} is not finite FP32")
-        targets = {}
-        for b in unpacked:
-            target = b.from_hf(tensors[b.name].to(device=b.parameter.device))
-            if target.numel() != b.parameter.numel():
-                raise StatePluginError(f"global LoRA shape mismatch for {b.name!r}")
-            targets[b.name] = target.reshape(b.parameter.shape)
+        targets = _apply_targets(unpacked, tensors)
         slot_writes = [
             (master_of(b.parameter), policy.slot_writes(b.name, tuple(b.parameter.shape), tensors))
             for b in packed
         ]
         scheduler_samples = align_scheduler(actor, local_step)
         opt = getattr(actor, "optimizer", None)
-        sharded = write_masters(opt, [b.parameter for b in unpacked], [targets[b.name] for b in unpacked])
+        written = _unique_parameters(unpacked)
+        sharded = write_masters(opt, written, [targets[id(p)] for p in written])
         for master, writes in slot_writes:
             master[writes.frozen].zero_()
             for slot, value in writes.updates:
@@ -1031,6 +1148,36 @@ def _apply_state(
         "optimizer": optimizer,
         "scheduler_samples": scheduler_samples,
     }
+
+
+def _apply_targets(bindings: Sequence[AdapterBinding], tensors: Mapping[str, Any]) -> dict[int, Any]:
+    """This rank's master value of every bound parameter (keyed by ``id``).
+
+    A grouped-expert parameter stacks its local experts' tensors in slot order;
+    every slot must be bound exactly once.
+    """
+
+    import torch
+
+    singles: dict[int, Any] = {}
+    slots: dict[int, dict[int, Any]] = {}
+    for b in bindings:
+        value = b.from_hf(tensors[b.name].to(device=b.parameter.device))
+        if b.slot is None:
+            singles[id(b.parameter)] = (b, value)
+        else:
+            slots.setdefault(id(b.parameter), {})[b.slot] = value
+    targets = {}
+    for key, (b, value) in singles.items():
+        if value.numel() != b.parameter.numel():
+            raise StatePluginError(f"global LoRA shape mismatch for {b.name!r}")
+        targets[key] = value.reshape(b.parameter.shape)
+    shapes = {id(b.parameter): tuple(b.parameter.shape) for b in bindings}
+    for key, by_slot in slots.items():
+        if sorted(by_slot) != list(range(shapes[key][0])):
+            raise StatePluginError(f"grouped-expert LoRA slots {sorted(by_slot)} do not cover {shapes[key][0]} experts")
+        targets[key] = torch.stack([by_slot[i] for i in range(len(by_slot))])
+    return targets
 
 
 def _apply_native_slots(actor: Any, *, tensors: Mapping[str, Any], policy_version: int,
