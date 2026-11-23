@@ -535,6 +535,9 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
 
     for finding in breaker_findings(cfg):  # the drain cut (D1), the dispense lease (D10), ...
         (problems if finding.level == "error" else notes).append(format_finding(finding))
+    from yeto.breakers.rules_facts import env_file_problems  # noqa: PLC0415
+
+    problems += env_file_problems(cfg)  # an unreadable agentic_env_file, a quoted breaker value
     print(f"WARNING: {lease_warning(cfg, config_path)}")
     print("The control loop runs in the foreground on this host: keep it up for the whole run "
           "(tmux / systemd on an always-on machine).")

@@ -1248,6 +1248,39 @@ def relay_supervisor_argv(r: RelaySpec, relay_dir: str, python: str) -> list[str
 
 # -- env files ---------------------------------------------------------------------
 
+QUOTES = ("'", '"')
+
+
+def read_docker_env_file(path: str | os.PathLike[str]) -> dict[str, str]:
+    """An operator env file as ``docker run --env-file`` reads it (the agentic sampler's
+    ``agentic_env_file`` on the docker route; :func:`shell_env_file` makes the process
+    route read the same): leading whitespace trimmed, blank and ``#`` lines skipped,
+    ``KEY=VALUE`` taken literally (quotes are kept, nothing is expanded), a bare ``KEY``
+    left out (docker takes it from its own environment). A name with whitespace (an
+    ``export KEY=...`` line) or an empty name is a ValueError, as docker refuses it;
+    an unreadable file is an OSError."""
+    out: dict[str, str] = {}
+    text = Path(path).read_text(encoding="utf-8").removeprefix("\ufeff")
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.lstrip()
+        if not line or line.startswith("#"):
+            continue
+        name, eq, value = line.partition("=")
+        if not name:
+            raise ValueError(f"{path}:{n}: no variable name before '='")
+        if any(c.isspace() for c in name):
+            raise ValueError(f"{path}:{n}: variable {name!r} contains whitespace (docker --env-file refuses it; "
+                             "write KEY=VALUE without 'export')")
+        if eq:
+            out[name] = value
+    return out
+
+
+def quoted(value: str) -> bool:
+    """Whether ``value`` is wrapped in a pair of quotes, which docker keeps as part of it."""
+    return len(value) >= 2 and value[0] in QUOTES and value[-1] == value[0]
+
+
 def env_file_text(env: Mapping[str, str], *, style: str) -> str:
     """``KEY=VALUE`` lines of ``env`` (sorted) for one reader:
 

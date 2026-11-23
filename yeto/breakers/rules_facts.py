@@ -363,16 +363,44 @@ def _drains(spec: Mapping[str, Any]) -> bool:
 
 
 def _env_file(cfg: Mapping[str, Any]) -> dict[str, str]:
-    """The pool's ``agentic_env_file`` (the env its samplers' harness sees; {} when unreadable)."""
+    """The pool's ``agentic_env_file`` as its samplers' harness sees it (docker
+    ``--env-file`` semantics: :func:`yeto.launch.agentic_setup.read_docker_env_file`);
+    {} when it cannot be read, which :func:`env_file_problems` names."""
     path = cfg.get("agentic_env_file")
     if not path:
         return {}
-    from yeto.launch.nc import elastic  # noqa: PLC0415
+    from yeto.launch import agentic_setup  # noqa: PLC0415
 
     try:
-        return {str(k): str(v) for k, v in elastic.read_env_file(os.path.expanduser(str(path))).items()}
+        return agentic_setup.read_docker_env_file(os.path.expanduser(str(path)))
     except (OSError, ValueError):
         return {}
+
+
+def env_file_problems(cfg: Mapping[str, Any]) -> list[str]:
+    """Why the pool's ``agentic_env_file`` would not give its samplers what the breaker
+    views show: it cannot be read (or docker refuses a line of it), or a variable a
+    breaker reads has a quoted value (docker keeps the quotes, so the harness reads
+    ``"6"`` and refuses it). [] when there is no env file or it is fine. ``yeto run up``
+    and the pool dry run refuse these; ``yeto breaker show`` / ``check`` print them."""
+    path = cfg.get("agentic_env_file")
+    if not path:
+        return []
+    from yeto.breakers.registry import default_registry  # noqa: PLC0415
+    from yeto.launch import agentic_setup  # noqa: PLC0415
+
+    try:
+        env = agentic_setup.read_docker_env_file(os.path.expanduser(str(path)))
+    except OSError as error:
+        return [f"agentic_env_file {path} unreadable ({error.strerror or error}): the samplers cannot start "
+                "with it, and the harness values shown are defaults"]
+    except ValueError as error:
+        return [f"agentic_env_file {error}: the samplers cannot start with it, and the harness values shown "
+                "are defaults"]
+    names = {a.path for b in default_registry() for a in b.aliases if a.surface == "env"}
+    return [f"agentic_env_file {path}: {name}={value} is quoted: docker --env-file keeps the quotes, so the "
+            f"sampler reads {value} (quotes included) and refuses it; write {name}={value[1:-1]}"
+            for name, value in env.items() if name in names and agentic_setup.quoted(value)]
 
 
 def _pool_dispense(cfg: Mapping[str, Any]) -> dict[str, Any] | None:

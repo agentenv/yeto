@@ -115,6 +115,7 @@ def _sources(args: argparse.Namespace, *, view: bool = False) -> tuple[Any, Mapp
 
             seen = run_view_sources(cfg, pool=getattr(args, "pool", None), spec=spec)
             args.pool, args.view_pools = seen.pool, seen.pools
+            args.view_notes = _env_notes(cfg, [seen.pool] if seen.pool is not None else [])
             return seen.sources, cfg
         return Sources.from_run_config(cfg, spec=spec), cfg
     if args.breakers:
@@ -125,6 +126,19 @@ def _sources(args: argparse.Namespace, *, view: bool = False) -> tuple[Any, Mapp
             return Sources.from_run_config(data, spec=spec), data
         return Sources(section=data, spec=spec), None
     return Sources(spec=spec), None
+
+
+def _env_notes(cfg: Mapping[str, Any], pools: list[str] | None = None) -> list[str]:
+    """The env file problems of the run's pools (``pools``: these names; None: every pool),
+    one line each: the values they would give are shown as defaults (or refused)."""
+    from yeto.breakers.rules_facts import env_file_problems, run_pools  # noqa: PLC0415
+
+    try:
+        found = run_pools(cfg)
+    except ValueError:
+        return []
+    return [f"WARNING: {p}" + (f" (pool {name})" if len(found) > 1 else "")
+            for name, pool_cfg, _ in found if pools is None or name in pools for p in env_file_problems(pool_cfg)]
 
 
 def cmd_rules(args: argparse.Namespace) -> int:
@@ -140,6 +154,7 @@ def cmd_rules(args: argparse.Namespace) -> int:
     except (BreakerConfigError, RegistryError, ValueError) as error:
         print(f"[breaker] {error}", file=sys.stderr)
         return 2
+    notes = _env_notes(cfg) if cfg is not None else []
     rules = load_rules()
     fmt = getattr(rules, "format_finding", None) or (lambda f: f"{f.rule:<4} {f.level:<6} {f.message}")
     if args.json:
@@ -150,6 +165,8 @@ def cmd_rules(args: argparse.Namespace) -> int:
             print(fmt(f))
         for c in rb.conflicts:
             print(f"conflict {c.name}: {c.message}")
+    for note in notes:
+        print(note, file=sys.stderr if args.json else sys.stdout)
     return 1 if rb.conflicts or any(f.level == "error" for f in findings) else 0
 
 
@@ -157,16 +174,21 @@ def cmd_show(args: argparse.Namespace) -> int:
     from yeto.breakers.resolve import preflight, resolve  # noqa: PLC0415
     from yeto.breakers.spec import BreakerConfigError, RegistryError  # noqa: PLC0415
 
+    args.view_notes = []
     try:
         sources, cfg = _sources(args, view=True)
         rb = resolve(sources, pool=args.pool, strict=False)
         findings = preflight(rb, run_config=cfg, sources=sources)
     except (BreakerConfigError, RegistryError, ValueError) as error:
         print(f"[breaker] {error}", file=sys.stderr)
+        for note in args.view_notes:
+            print(note, file=sys.stderr)
         return 2
     data = rb.to_json(findings)
     if args.layer:
         data["entries"] = [e for e in data["entries"] if e["layer"] == args.layer]
+    for note in args.view_notes:  # ahead of the rows they are about (stderr: --json stays one object)
+        print(note, file=sys.stderr if args.json else sys.stdout)
     if args.json:
         print(json.dumps(data, sort_keys=True, default=str))
     else:

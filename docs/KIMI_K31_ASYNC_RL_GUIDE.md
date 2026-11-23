@@ -2608,6 +2608,13 @@ under the table says so. `--spec FILE` replaces only the pool's spec. The
 pool's knobs and env file are still read. A spec with
 `max_backlog_groups: "auto"` shows the cap `yeto run up` derives for it.
 
+The env file is read the way `docker run --env-file` reads it: values are
+literal. Write `HARBOR_SETUP_RETRIES=6`, not `HARBOR_SETUP_RETRIES="6"`.
+Docker keeps the quotes, and the harness then refuses the value. `show` and
+`check` print a `WARNING` line when the env file cannot be read (the harness
+rows are then defaults) or when a breaker variable in it is quoted. `yeto run
+up` and the pool dry run refuse both, because the samplers could not start.
+
 Exit codes: `0` no error, `1` an error finding or a conflict, `2` bad input
 (also a `--pool` the run does not have, or a pool file that does not load).
 
