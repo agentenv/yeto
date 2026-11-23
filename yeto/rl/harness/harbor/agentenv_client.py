@@ -52,6 +52,12 @@ REQUEST_TIMEOUT_ENV = "YETO_AGENTENV_REQUEST_TIMEOUT_S"
 # refused ("smaller than base virtual size; shrinking is disabled").
 DISK_SIZE_MB_ENV = "YETO_AGENTENV_DISK_SIZE_MB"
 DEFAULT_DISK_SIZE_MB = 131072
+# Secure sandboxes (the default): AgentENV returns an ``envdAccessToken`` and envd
+# (exec/files) refuses requests without it in ``X-Access-Token``.  Without
+# secure mode anyone who can reach the gateway can run commands in the microVM.
+# "1" opts out explicitly (e.g. a gateway too old to issue tokens).
+INSECURE_ENV = "YETO_AGENTENV_INSECURE"
+ENVD_TOKEN_HEADER = "X-Access-Token"
 
 # Account caps.  AgentENV has no published fixed cap (TODO(verify on hardware):
 # confirm the cluster's real concurrency/rate limits and tune these defaults;
@@ -175,16 +181,22 @@ class SdkAgentenvClient:
     set_timeout/get_info) use the SDK's by-id static variants, so they need no
     cached connection.
 
-    TODO(verify on hardware): the exact SDK behaviour against a real AgentENV
-    gateway (data-plane routing via ``sandbox_url`` vs wildcard domain,
-    background-command polling, ``kill`` actually stopping the guest process
-    tree, cold-start REST shape, usage, fork fan-out limit) is unverified until
-    the cluster is up.
+    Creates (template and cold) go through the control-plane REST with
+    ``secure: true``: the E2B SDK (2.x) treats ``secure`` as deprecated and never
+    sends it, and AgentENV creates an *insecure* sandbox when the field is
+    absent.  The create response's ``envdAccessToken`` is kept per sandbox and
+    every data-plane connection is checked to carry it as ``X-Access-Token``
+    (fail closed).  The token is never logged or put in an exception.
+
+    Verified against a real AgentENV gateway (envd behind a guard that rejects
+    requests without ``X-Access-Token``): secure cold create from an OCI image,
+    exec, file upload/download and delete.  Still unverified: ``kill`` stopping
+    the whole guest process tree, usage, and the fork fan-out limit.
     """
 
     def __init__(self, *, api_key: str | None = None, api_url: str | None = None,
                  sandbox_url: str | None = None, request_timeout_s: float | None = None,
-                 cold_start: bool | None = None) -> None:
+                 cold_start: bool | None = None, secure: bool | None = None) -> None:
         from e2b import Sandbox  # noqa: F401  (import check; lazy so core has no e2b dep)
 
         self._api_key = api_key or load_token()
@@ -196,6 +208,9 @@ class SdkAgentenvClient:
         self._request_timeout_s = request_timeout_s
         self._cold = (os.environ.get(COLD_START_ENV, "").strip() == "1"
                       if cold_start is None else cold_start)
+        self._secure = (os.environ.get(INSECURE_ENV, "").strip() != "1"
+                        if secure is None else secure)
+        self._tokens: dict[str, str] = {}  # sandbox_id -> envdAccessToken (never logged)
         self._boxes: dict[str, object] = {}  # sandbox_id -> e2b.Sandbox (data plane)
         self._handles: dict[tuple[str, int], object] = {}  # (sandbox_id, pid) -> CommandHandle
         self._done: dict[tuple[str, int], CommandStatus] = {}
@@ -214,11 +229,32 @@ class SdkAgentenvClient:
         box = self._boxes.get(sandbox_id)
         if box is None:
             from e2b import Sandbox
-            box = Sandbox.connect(sandbox_id=sandbox_id, **self._opts())  # resumes a paused microVM
+            from e2b.exceptions import SandboxException
+            try:
+                box = Sandbox.connect(sandbox_id=sandbox_id, **self._opts())  # resumes a paused microVM
+            except SandboxException as exc:
+                raise self._wrap("connect", exc) from None
+            self._check_secure(sandbox_id, box)
             self._boxes[sandbox_id] = box
         return box
 
+    def _check_secure(self, sandbox_id: str, box) -> None:
+        """Fail closed: in secure mode the envd connection must carry the access token.
+
+        ``Sandbox.connect`` fetches the token from the authenticated control
+        plane and sends it as ``X-Access-Token``; a sandbox that comes back
+        without one was created insecure and is refused.
+        """
+        if not self._secure:
+            return
+        token = getattr(box, "_envd_access_token", None)
+        if not isinstance(token, str) or not token:
+            raise AgentenvError(f"agentenv sandbox {sandbox_id} has no envd access token "
+                                f"(not a secure sandbox; set {INSECURE_ENV}=1 to allow)")
+        self._tokens.setdefault(sandbox_id, token)
+
     def _adopt(self, box) -> str:
+        self._check_secure(box.sandbox_id, box)
         self._boxes[box.sandbox_id] = box
         return box.sandbox_id
 
@@ -228,31 +264,22 @@ class SdkAgentenvClient:
                env: dict[str, str] | None, idempotency_key: str) -> str:
         if self._cold:
             return self._create_cold(template, ttl_seconds, metadata, env)
-        from e2b import Sandbox
-        from e2b.exceptions import SandboxException
-
-        try:
-            box = Sandbox.create(template=template, timeout=ttl_seconds, metadata=metadata or None,
-                                 envs=env or None, idempotency_key=idempotency_key, **self._opts())
-        except SandboxException as exc:
-            raise self._wrap("create", exc) from None
-        return self._adopt(box)
+        body: dict[str, object] = {"templateID": template, "timeout": ttl_seconds}
+        if metadata:
+            body["metadata"] = metadata
+        if env:
+            body["envVars"] = env
+        return self._rest_create("/sandboxes", body, "create",
+                                 headers={"Idempotency-Key": idempotency_key} if idempotency_key else None)
 
     def _create_cold(self, image: str, ttl_seconds: int, metadata: dict[str, str] | None,
                      env: dict[str, str] | None) -> str:
         """Build a microVM from a raw OCI image via the control plane ``/sandboxes-cold``.
 
-        The SDK exposes no cold-start method, so this is the one place the client
-        speaks the control-plane REST directly; the returned id is then handed to
-        ``Sandbox.connect`` for the data plane on the first exec/file call.
-        TODO(verify on hardware): the exact ``NewColdSandbox`` body, the base URL
-        shape, and whether AgentENV instead accepts an OCI ref as a ``template``.
+        The SDK exposes no cold-start method; the body is AgentENV's
+        ``NewColdSandbox`` (verified on a real gateway).  The returned id is
+        handed to ``Sandbox.connect`` for the data plane on the first exec/file call.
         """
-        import httpx
-
-        base = self._api_url
-        if not base:
-            raise AgentenvError("cold start needs AGENTENV_API_URL (the control-plane base URL)")
         body: dict[str, object] = {"image": image, "timeout": ttl_seconds,
                                    "cpuCount": int(os.environ.get("YETO_AGENTENV_CPU_COUNT", "2")),
                                    "memoryMB": int(os.environ.get("YETO_AGENTENV_MEMORY_MB", "4096")),
@@ -261,27 +288,57 @@ class SdkAgentenvClient:
             body["metadata"] = metadata
         if env:
             body["envVars"] = env
+        return self._rest_create("/sandboxes-cold", body, "cold start")
+
+    def _rest_create(self, path: str, body: dict[str, object], op: str, *,
+                     headers: dict[str, str] | None = None) -> str:
+        """POST a create to the control plane with ``secure`` set; returns the sandbox id.
+
+        In secure mode the response must carry ``envdAccessToken`` (kept per
+        sandbox, never logged); a gateway that ignores ``secure`` is refused.
+        """
+        import httpx
+
+        base = self._api_url
+        if not base:
+            raise AgentenvError(f"agentenv {op} needs {API_URL_ENV} (the control-plane base URL)")
+        body = {**body, "secure": self._secure}
         try:
             # trust_env=False: the control plane is a cluster endpoint, not a web
             # service to reach through the user's proxy.  Default httpx honours
             # ALL_PROXY/HTTPS_PROXY, so on a host with a Clash SOCKS proxy set this
             # call tries to go through SOCKS and crashes with an ImportError when
             # the 'socksio' extra is absent.
-            resp = httpx.post(f"{base.rstrip('/')}/sandboxes-cold", json=body,
-                              headers={"X-API-Key": self._api_key}, timeout=self._request_timeout_s,
-                              trust_env=False)
+            resp = httpx.post(f"{base.rstrip('/')}{path}", json=body,
+                              headers={**(headers or {}), "X-API-Key": self._api_key},
+                              timeout=self._request_timeout_s, trust_env=False)
             resp.raise_for_status()
             data = resp.json()
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             cls = AgentenvQuotaError if status in (402, 429) else AgentenvError
-            raise cls(f"agentenv cold start failed: HTTP {status}") from None
+            raise cls(f"agentenv {op} failed: HTTP {status}") from None
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
-            raise AgentenvError(f"agentenv cold start failed: {type(exc).__name__}") from None
-        sandbox_id = data.get("sandboxID") or data.get("sandbox_id")
+            raise AgentenvError(f"agentenv {op} failed: {type(exc).__name__}") from None
+        sandbox_id = data.get("sandboxID") or data.get("sandbox_id") if isinstance(data, dict) else None
         if not sandbox_id:
-            raise AgentenvError("agentenv cold start returned no sandbox id")
-        return str(sandbox_id)
+            raise AgentenvError(f"agentenv {op} returned no sandbox id")
+        sandbox_id = str(sandbox_id)
+        token = data.get("envdAccessToken")
+        if self._secure:
+            if not isinstance(token, str) or not token:
+                self._kill_quietly(sandbox_id)
+                raise AgentenvError(f"agentenv {op} returned no envd access token for {sandbox_id} "
+                                    f"(gateway ignored secure; set {INSECURE_ENV}=1 to allow)")
+            self._tokens[sandbox_id] = token
+        return sandbox_id
+
+    def _kill_quietly(self, sandbox_id: str) -> None:
+        try:
+            from e2b import Sandbox
+            Sandbox.kill(sandbox_id=sandbox_id, **self._opts())
+        except Exception:  # noqa: BLE001  best effort; the create already failed
+            pass
 
     def fork(self, sandbox_id: str, count: int, *, ttl_seconds: int) -> list[str]:
         """Snapshot-fork ``count`` new microVMs off ``sandbox_id`` (AgentENV ``/fork``).
@@ -336,6 +393,7 @@ class SdkAgentenvClient:
 
     def delete(self, sandbox_id: str) -> None:
         self._boxes.pop(sandbox_id, None)
+        self._tokens.pop(sandbox_id, None)
         for key in [k for k in self._handles if k[0] == sandbox_id]:
             self._handles.pop(key, None)
             self._done.pop(key, None)
