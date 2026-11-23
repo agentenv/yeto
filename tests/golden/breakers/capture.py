@@ -240,6 +240,7 @@ def sampler_values(spec: dict[str, Any]) -> dict[str, Any]:
     from yeto.rl.engine import agentic_round, sampler_loop, store_dispense
     from yeto.rl.engine.engine_sampler import DEFAULT_WRITE_DEFER_MAX_S
     from yeto.rl.engine.incarnation_lease import DEFAULT_MAX_UNREAD_S
+    from yeto.rl.harness.harbor import trial
 
     out: dict[str, Any] = {}
     out["sampler.load_failures.enabled"] = True
@@ -274,6 +275,9 @@ def sampler_values(spec: dict[str, Any]) -> dict[str, Any]:
         defaults = dict(agentic.get("task_defaults") or {})
         out["sampler.trial_wall_clock.enabled"] = True
         out["sampler.trial_wall_clock.limit_s"] = float(defaults.get("wall_clock_s", AgentBudget.wall_clock_s))
+        # the TTL an AgentENV trial microVM gets (build_trial_config): its wall clock + harness.sandbox_ttl.margin_s
+        out["harness.sandbox_ttl.effective_agentenv_s"] = float(trial.sandbox_ttl_s(
+            "agentenv", out["sampler.trial_wall_clock.limit_s"], trial.HarborSettings(tasks_dir=Path("."))))
     dispense = (spec.get("prompts") or {}).get("dispense") if isinstance(spec.get("prompts"), Mapping) else None
     if isinstance(dispense, Mapping) and dispense.get("backend") == "store":
         out["sampler.dispense_redo.enabled"] = True
