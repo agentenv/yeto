@@ -308,6 +308,8 @@ class AsyncState:
                 s["incarnations"].append({"incarnation": inc, "first_ts": ts, "last_ts": ts})
             elif ts is not None:
                 row["first_ts"] = ts if row["first_ts"] is None else min(row["first_ts"], ts)
+            if inc != s.get("incarnation"):
+                s["ended"] = False  # a restart: the earlier incarnation's stop is not this one's
             s["incarnation"] = inc
         if s["incarnations"] and ts is not None:
             cur = next((x for x in s["incarnations"] if x["incarnation"] == s.get("incarnation")), None)
@@ -387,15 +389,22 @@ class AsyncState:
                                "released_at": None, "seen_at": None, "loaded_at": ts, "resolve_s": None,
                                "load_s": None, "pause_s": None, "buffer_selected": None, "load_wall_s": None,
                                "at_start": True})
-        elif ev in ("rl_sampler_backlog_full", "rl_sampler_admitted"):
+        elif ev in ("rl_sampler_backlog_full", "rl_sampler_admitted") or (
+                ev == "rl_sampler_waiting" and r.get("reason") == "backlog_full"):
+            # rl_sampler_waiting repeats the backlog the sampler sees while it waits
             b = _f(r.get("backlog_groups"))
             if ts is not None and b is not None:
-                s["backlog"].append([ts, b, ev == "rl_sampler_backlog_full"])
+                s["backlog"].append([ts, b, ev != "rl_sampler_admitted"])
+                del s["backlog"][:-2000]
             if r.get("max_backlog_groups") is not None:
                 s["max_backlog_groups"] = r.get("max_backlog_groups")
         if ev in SAMPLER_END_EVENTS:
             s["ended"] = True
-        s["last_wait"] = SAMPLER_WAIT_EVENTS.get(ev)
+        if ev == "rl_sampler_waiting":
+            reason = str(r.get("reason") or "")
+            s["last_wait"] = SAMPLER_WAIT_EVENTS.get(f"rl_sampler_{reason}", f"waiting ({reason or 'no reason'})")
+        else:
+            s["last_wait"] = SAMPLER_WAIT_EVENTS.get(ev)
 
     def _fold_trainer(self, r: dict, iid: str, ts: float | None, ev: str) -> None:
         t = self._t(iid)

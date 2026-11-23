@@ -80,6 +80,9 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # in the last trainer_fail_window_s: one is a warning, trainer_fail_loop or more critical
     "trainer_fail_window_s": 3600.0,
     "trainer_fail_loop": 2,
+    # a sampler waiting on a full backlog (as it counts it) while the trainers' read
+    # position leaves less than its cap: it reported within this many seconds
+    "stale_read_recent_s": 300.0,
 }
 
 
@@ -431,6 +434,32 @@ def trainer_failed(reducer, th: dict, now: float) -> list[dict]:
     return out
 
 
+def stale_read_position(reducer, th: dict, now: float) -> list[dict]:
+    state = getattr(reducer, "async_", None)
+    if state is None or not state.sampler:
+        return []
+    series = state.backlog_series() or {}
+    pts = [p for p in series.get("points") or [] if p[3] is not None]
+    if not pts:
+        return []
+    out = []
+    for iid, s in sorted(state.sampler.items()):
+        cap = s.get("max_backlog_groups")
+        rep = s["backlog"][-1] if s["backlog"] else None
+        if s.get("ended") or cap is None or rep is None or not rep[2] or now - rep[0] > th["stale_read_recent_s"]:
+            continue
+        seen = [p for p in pts if p[0] <= rep[0]]  # what the trainers had read when the sampler reported
+        if not seen or seen[-1][3] >= float(cap) or rep[1] < float(cap):
+            continue
+        p = seen[-1]
+        out.append(_alert(1, "stale_read_position", f"sampler {iid} waits on a stale read position",
+                          f"it counts {rep[1]:g} groups unread (cap {cap}) and stops generating, but the trainers "
+                          f"have read {p[2]:g} of the {p[1]:g} groups written ({p[3]:g} left): a sampler learns the "
+                          "read position from a policy release or the trainer's read heartbeat "
+                          "(sample-buffer/read-position.json), and none came since", island=iid))
+    return out
+
+
 def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict],
              store: dict | None = None) -> list[dict]:
     th = reducer.thresholds
@@ -438,6 +467,7 @@ def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
               + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
               + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)
+              + stale_read_position(reducer, th, now)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
     alerts.sort(key=lambda a: a["sev"])
     for i, a in enumerate(alerts):

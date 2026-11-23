@@ -258,3 +258,95 @@ def test_a_trainer_relaunched_after_its_failures_is_a_warning():
     assert len(alert) == 1 and alert[0]["sev"] == 1 and "relaunched" in alert[0]["title"]
     assert "OutOfMemoryError" in alert[0]["detail"]
 
+
+
+def test_a_restart_the_echo_delivered_first_is_still_the_current_launch():
+    # the echoed tape carries both launches before the store uploads are read
+    first = _trainer_launch(T0)
+    second = [{"event": "trainer_start_phase", "island_id": 0, "phase": "submitted", "time_unix": T0 + 200},
+              {"event": "rl_driver_start", "island_id": 0, "time_unix": T0 + 300},
+              {"event": "rl_heartbeat", "island_id": 0, "phase": "train", "seq": 1, "time_unix": T0 + 330}]
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(first + second):
+        reducer.feed(rec, source="/runs/r/events/r-l0-modal.jsonl", offset=i)
+    for i, rec in enumerate(first):
+        reducer.feed(rec, source="store:trainer/l0-modal-A", offset=i)
+    for i, rec in enumerate(first + second):  # the restart's upload starts with A's history
+        reducer.feed(rec, source="store:trainer/l0-modal-B", offset=i)
+    isl = reducer.islands["0"]
+    assert isl["launch"] == "l0-modal-B" and isl["launch_ts"] == T0 + 200
+    assert reducer.duplicates == len(first) + len(first + second)
+    card = next(c for c in reducer.overview(now=T0 + 340)["islands"] if c["id"] == "0")
+    assert card["status"] != "left"
+    alert = [a for a in reducer.overview(now=T0 + 340)["alerts"] if a["rule"] == "trainer_failed"]
+    assert alert and alert[0]["sev"] == 1  # failed earlier, relaunched
+
+
+def test_a_restart_keeps_the_state_its_own_echoed_records_set():
+    first = _trainer_launch(T0)
+    second = [{"event": "trainer_start_phase", "island_id": 0, "phase": "submitted", "time_unix": T0 + 200},
+              {"event": "rl_driver_start", "island_id": 0, "time_unix": T0 + 300},
+              {"event": "rl_round_trained", "island_id": 0, "rollout_id": 0, "local_round_id": 0,
+               "time_unix": T0 + 330, "reward_mean": 0.4}]
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(first + second):  # the echo first, then both store uploads
+        reducer.feed(rec, source="/runs/r/events/r-l0-modal.jsonl", offset=i)
+    for i, rec in enumerate(first):
+        reducer.feed(rec, source="store:trainer/l0-modal-A", offset=i)
+    for i, rec in enumerate(first + second):
+        reducer.feed(rec, source="store:trainer/l0-modal-B", offset=i)
+    isl = reducer.islands["0"]
+    assert isl["launch"] == "l0-modal-B" and isl["driver_started"]
+    card = next(c for c in reducer.overview(now=T0 + 340)["islands"] if c["id"] == "0")
+    assert card["status"] == "ok" and not card["starting"]
+
+
+def _stale_read_records(*, sampler_backlog=17.0, trainer_reads=16):
+    recs = [{"event": "rl_sampler_start", "sampler_id": "s1", "incarnation": "a1", "max_backlog_groups": 16,
+             "time_unix": T0}]
+    for rid in range(9):
+        recs.append({"event": "rl_sampler_round", "sampler_id": "s1", "incarnation": "a1", "rollout_id": rid,
+                     "groups": 2, "time_unix": T0 + 10 + rid})
+    recs.append({"event": "rl_driver_start", "island_id": 0, "time_unix": T0 + 30})
+    for k in range(trainer_reads // 8):
+        recs.append({"event": "rl_buffer_stale_skipped", "island_id": 0, "rollout_id": k, "stale_groups": 0,
+                     "max_policy_age": 12, "time_unix": T0 + 40 + k})
+        recs.append({"event": "rl_group_policies", "island_id": 0, "rollout_id": k, "time_unix": T0 + 40 + k,
+                     "groups": [[f"g{i}", "yeto:0:x", [0]] for i in range(8)], "ages": {"0": 8}})
+    recs.append({"event": "rl_sampler_waiting", "sampler_id": "s1", "incarnation": "a1", "rollout_id": 9,
+                 "reason": "backlog_full", "backlog_groups": sampler_backlog, "time_unix": T0 + 60})
+    return recs
+
+
+def test_sampler_blocked_on_a_read_position_the_trainers_passed_warns():
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(_stale_read_records()):
+        reducer.feed(rec, source="t", offset=i)
+    ov = reducer.overview(now=T0 + 90)
+    alert = [a for a in ov["alerts"] if a["rule"] == "stale_read_position"]
+    assert len(alert) == 1 and alert[0]["sev"] == 1 and "counts 17 groups unread (cap 16)" in alert[0]["detail"]
+    card = next(c for c in ov["islands"] if c["id"] == "s1")
+    assert card["status"] != "done"
+
+
+def test_no_stale_read_alert_when_the_trainers_are_behind_too():
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(_stale_read_records(trainer_reads=0)):
+        reducer.feed(rec, source="t", offset=i)
+    assert not [a for a in reducer.overview(now=T0 + 90)["alerts"] if a["rule"] == "stale_read_position"]
+
+
+def test_a_new_sampler_incarnation_is_not_done():
+    reducer = Reducer(run="r")
+    recs = [{"event": "rl_sampler_start", "sampler_id": "s1", "incarnation": "a1", "time_unix": T0},
+            {"event": "rl_sampler_round", "sampler_id": "s1", "incarnation": "a1", "rollout_id": 0, "groups": 2,
+             "time_unix": T0 + 10},
+            {"event": "rl_sampler_stopped", "sampler_id": "s1", "rounds": 1, "time_unix": T0 + 20},
+            {"event": "rl_sampler_join", "sampler_id": "s1", "incarnation": "a2", "time_unix": T0 + 100},
+            {"event": "rl_sampler_start", "sampler_id": "s1", "incarnation": "a2", "time_unix": T0 + 101},
+            {"event": "rl_sampler_waiting", "sampler_id": "s1", "incarnation": "a2", "reason": "backlog_full",
+             "backlog_groups": 17, "time_unix": T0 + 130}]
+    for i, rec in enumerate(recs):
+        reducer.feed(rec, source="t", offset=i)
+    card = next(c for c in reducer.overview(now=T0 + 140)["islands"] if c["id"] == "s1")
+    assert card["status"] not in ("done", "stopped", "left")

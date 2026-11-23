@@ -159,6 +159,7 @@ and the budget can be passed to the launcher with the environment variables
 | RECOVERY_REQUIRED (journal phase or tape `rl_reconfiguration`) | — | 0 |
 | ssh mirror source lost | — | 1 |
 | Run store unreadable (`--store` reads failing since the last clean poll) | — | 1 |
+| A sampler waiting on a full backlog (as it counts it, reported in the last 5 min) while the trainers' read position leaves less than its cap: it learns the read position only from a policy release or the trainer's read heartbeat | — | 1 |
 | Trainer launches ending in a failure leave (`island_leave` not STOPPED / DONE ...) in the last hour; the detail names the root-cause error line | 1: warning, >= 2: critical | 1/0 |
 | Samplers up without any trainer island on the tapes (async run; since the first sampler event) | > 1200 s warning, > 1800 s critical | 1/0 |
 | Agentic sampler trials (current incarnation, last 10 rounds in which trials ended, >= 8 trials): none with a verdict (ok / policy limit); aborted (infrastructure) share | none: critical; > 50%: warning | 0/1 |
