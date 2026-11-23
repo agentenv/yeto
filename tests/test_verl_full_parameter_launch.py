@@ -34,7 +34,7 @@ ENTRY = "-m yeto.rl.adapters.verl.island_entry"
 GPU = "modal:1xh200,modal:1xh200"
 # Island argv the verl island leaves to the Miles island (parsed and not used):
 # provenance, the Miles trainer shape and engine knobs.  Nothing of the sync.
-MILES_ONLY = {"--rl-model-recipe", "--reward-sha256", "--source-sha256", "--sync-preset",
+MILES_ONLY = {"--rl-model-recipe", "--reward-sha256", "--source-sha256",
               "--over-sampling-batch-size", "--rl-distributed-timeout-minutes", "--optimizer-steps",
               "--completed-groups-path", "--actor-num-nodes", "--actor-num-gpus-per-node",
               "--tensor-parallel", "--pipeline-parallel", "--rollout-num-gpus-per-engine",

@@ -77,6 +77,9 @@ def parse_args(argv):
     p.add_argument("--rl-fsdp-offload", choices=("none", "param", "optimizer", "both"),
                    default="none")
     p.add_argument("--rl-algorithm-spec", default=None)
+    # the launcher's sync preset; one the island does not run is refused
+    # (run_config_rules.island_sync_preset_problem), never dropped
+    p.add_argument("--sync-preset", default=None)
     p.add_argument("--rl-island-pool", action="store_true")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
     p.add_argument("--rl-sync-island-lease-s", type=float, default=None)
@@ -689,6 +692,11 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
 def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
     run_config_rules.refuse_agentic_argv(ignored)  # never ignore agentic flags
+    if not args.rl_single_island_no_sync:
+        problem = run_config_rules.island_sync_preset_problem(args.sync_preset,
+                                                              parameter_mode=args.parameter_mode)
+        if problem is not None:
+            raise SystemExit(problem)
     if getattr(args, "rl_onpolicy_old_logprob", None):  # forwarded to Ray (YETO_)
         from .onpolicy_old_logprob import ENV as _OPLP_ENV
 
