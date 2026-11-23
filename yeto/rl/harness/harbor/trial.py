@@ -24,6 +24,8 @@ import logging
 import os
 import random
 import re
+import threading
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -33,6 +35,7 @@ from yeto.rl.agentic import AgentTask, HarnessConfigError, TrialVerdict
 from yeto.rl.agentic.trust import check_agent_env, task_dir
 
 from ...agentic.outcome import POLICY_LIMIT_EXCEPTIONS
+from . import breaker_settings
 from .capacity import SandboxLimits, process_limits
 from .pins import CODEX_VERSION, PI_VERSION
 from .codex_provider import use_yeto_codex
@@ -114,6 +117,11 @@ class HarborSettings:
     # The records proxy's signed per-turn max_tokens; agents that send max_tokens
     # on every call (pi) must send this value.  Set by the agentic round.
     turn_max_tokens: int | None = None
+    # harness.sandbox_ttl (:func:`sandbox_ttl_s`): every trial sandbox's TTL (None: derived), the
+    # margin an AgentENV trial gets over its wall clock, a boat trial's TTL
+    sandbox_ttl_s: int | None = None
+    sandbox_ttl_margin_s: float = 900.0
+    sandbox_ttl_default_s: int = 3 * 3600
 
     @classmethod
     def from_env(cls) -> HarborSettings:
@@ -121,8 +129,9 @@ class HarborSettings:
 
         ``HARBOR_TASKS_DIR`` (required), ``HARBOR_TRIALS_DIR`` (default
         ``/tmp/harbor_trials``), ``HARBOR_ENV_KWARGS`` (JSON object, provider
-        kwargs), ``HARBOR_TIMEOUT_MULTIPLIER`` (default 1.0),
-        ``HARBOR_SETUP_RETRIES`` (default 0).
+        kwargs), ``HARBOR_TIMEOUT_MULTIPLIER`` (default 1.0).  The setup retries
+        and the sandbox TTL are the ``harness.setup_retries`` / ``harness.sandbox_ttl``
+        breakers (:mod:`.breaker_settings`; env ``HARBOR_SETUP_RETRIES`` is their alias).
         """
         tasks_dir = os.environ.get("HARBOR_TASKS_DIR", "").strip()
         if not tasks_dir:
@@ -134,28 +143,30 @@ class HarborSettings:
             raise HarnessConfigError(f"bad Harbor environment variable: {exc}") from exc
         if not isinstance(provider_kwargs, dict):
             raise HarnessConfigError("HARBOR_ENV_KWARGS must be a JSON object")
+        ttl_s = breaker_settings.setting("harness.sandbox_ttl.limit_s")
+        if ttl_s is not None and provider_kwargs.get("ttl_s") not in (None, ttl_s):
+            raise HarnessConfigError(f"HARBOR_ENV_KWARGS ttl_s {provider_kwargs['ttl_s']} disagrees with "
+                                     f"harness.sandbox_ttl.limit_s {ttl_s} "
+                                     f"({breaker_settings.source('harness.sandbox_ttl.limit_s')})")
         return cls(
             tasks_dir=Path(tasks_dir),
             trials_dir=Path(os.environ.get("HARBOR_TRIALS_DIR", "") or "/tmp/harbor_trials"),
             provider_kwargs=provider_kwargs,
             timeout_multiplier=multiplier,
             setup_retries=setup_retries_from_env(),
+            sandbox_ttl_s=ttl_s,
+            sandbox_ttl_margin_s=float(breaker_settings.setting("harness.sandbox_ttl.margin_s")),
+            sandbox_ttl_default_s=int(breaker_settings.setting("harness.sandbox_ttl.default_s")),
         )
 
 
-SETUP_RETRIES_ENV = "HARBOR_SETUP_RETRIES"
+SETUP_RETRIES_ENV = "HARBOR_SETUP_RETRIES"  # alias of harness.setup_retries.max_n
 
 
 def setup_retries_from_env() -> int:
-    """``HARBOR_SETUP_RETRIES`` (default 0): retries of a trial that failed before the agent ran."""
-    raw = os.environ.get(SETUP_RETRIES_ENV, "").strip() or "0"
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise HarnessConfigError(f"bad {SETUP_RETRIES_ENV}: {raw!r}") from exc
-    if value < 0:
-        raise HarnessConfigError(f"{SETUP_RETRIES_ENV} must be >= 0")
-    return value
+    """``harness.setup_retries.max_n`` (default 0, env ``HARBOR_SETUP_RETRIES``): retries of
+    a trial that failed before the agent ran."""
+    return int(breaker_settings.setting("harness.setup_retries.max_n"))
 
 
 def agent_env(agent: str, endpoint: str) -> dict[str, str]:
@@ -216,10 +227,9 @@ def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings)
     elif task.agent == "pi":
         use_yeto_pi(agent, max_tokens=settings.turn_max_tokens)
     env_kwargs = dict(settings.provider_kwargs)
-    if task.provider == "agentenv" and "ttl_s" not in env_kwargs:
-        # the microVM's TTL is the backstop for a lost delete (a killed sampler): the trial's
-        # wall clock plus room for its create and teardown, not a fixed three hours
-        env_kwargs["ttl_s"] = agentenv_ttl_s(task.budget.wall_clock_s)
+    ttl_s = sandbox_ttl_s(task.provider, task.budget.wall_clock_s, settings)
+    if ttl_s is not None and "ttl_s" not in env_kwargs:
+        env_kwargs["ttl_s"] = ttl_s
     return TrialConfig(
         task=TaskConfig(path=path),
         agent=agent,
@@ -230,12 +240,30 @@ def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings)
 
 
 AGENTENV_TTL_MARGIN_S = 900  # create (cold start, setup retries), verifier upload, delete
+# providers whose environment takes a ``ttl_s`` kwarg (yeto's own); Harbor's would refuse it
+TTL_PROVIDERS = frozenset({"agentenv", "boat"})
 
 
-def agentenv_ttl_s(wall_clock_s: float) -> int:
+def agentenv_ttl_s(wall_clock_s: float, margin_s: float = AGENTENV_TTL_MARGIN_S) -> int:
     """An AgentENV trial microVM's TTL: the trial wall clock (the outer cap of the whole
-    trial) plus :data:`AGENTENV_TTL_MARGIN_S`."""
-    return int(float(wall_clock_s)) + AGENTENV_TTL_MARGIN_S
+    trial) plus ``margin_s`` (``harness.sandbox_ttl.margin_s``)."""
+    return int(float(wall_clock_s)) + int(margin_s)
+
+
+def sandbox_ttl_s(provider: str, wall_clock_s: float, settings: HarborSettings) -> int | None:
+    """The ``ttl_s`` kwarg a trial's environment gets (``harness.sandbox_ttl``), None for none.
+
+    The TTL is the backstop for a lost delete (a killed sampler).  An explicit
+    ``limit_s`` applies to every :data:`TTL_PROVIDERS` provider; without it an AgentENV
+    microVM lives the trial's wall clock plus the margin, not a fixed three hours, and a
+    boat VM ``default_s`` (3 h, ``boat_sandbox.DEFAULT_TTL_S``)."""
+    if provider not in TTL_PROVIDERS:
+        return None
+    if settings.sandbox_ttl_s is not None:
+        return int(settings.sandbox_ttl_s)
+    if provider == "agentenv":
+        return agentenv_ttl_s(wall_clock_s, settings.sandbox_ttl_margin_s)
+    return int(settings.sandbox_ttl_default_s)
 
 
 def verdict_from_result(result: Any, *, trial_dir: str | None = None) -> TrialVerdict:
@@ -299,24 +327,56 @@ def retryable_setup_failure(result: Any) -> str | None:
 class HarborHarness:
     """``AgentHarness`` over Harbor ``Trial``; one sandbox per call.
 
-    ``setup_retries`` (default 0 = off): a trial that failed before
-    the agent ran (:func:`retryable_setup_failure`) runs again from a new
-    ``TrialConfig``, after ``retry_backoff_s * 2**attempt`` seconds (with
-    jitter, capped at 60 s).  The verdict says how many attempts ran
+    ``setup_retries`` (``harness.setup_retries``, default 0 = off): a trial that failed
+    before the agent ran (:func:`retryable_setup_failure`) runs again from a new
+    ``TrialConfig``, after ``retry_backoff_s * 2**attempt`` seconds (with jitter, capped
+    at ``retry_backoff_max_s``).  ``None`` takes the registry value
+    (:mod:`.breaker_settings`).  The verdict says how many attempts ran
     (``agent_metrics["setup_attempts"]``) and which exceptions were retried.
+
+    Trips (setup retries spent, failed reach checks) are counted for the round's
+    ``rl_breaker`` events (:meth:`take_trips`, :func:`.breaker_settings.trip_events`).
     """
 
-    def __init__(self, build_config: TrialConfigBuilder, *, trial_cls: Any = None, setup_retries: int = 0,
-                 retry_backoff_s: float = 5.0, sleep: Callable[[float], Any] = asyncio.sleep,
-                 limits: SandboxLimits | None = None) -> None:
+    def __init__(self, build_config: TrialConfigBuilder, *, trial_cls: Any = None, setup_retries: int | None = None,
+                 retry_backoff_s: float | None = None, retry_backoff_max_s: float | None = None,
+                 sleep: Callable[[float], Any] = asyncio.sleep, limits: SandboxLimits | None = None) -> None:
+        if setup_retries is None:
+            setup_retries = int(breaker_settings.setting("harness.setup_retries.max_n"))
+        if retry_backoff_s is None:
+            retry_backoff_s = float(breaker_settings.setting("harness.setup_retries.backoff_initial_s"))
+        if retry_backoff_max_s is None:
+            retry_backoff_max_s = float(breaker_settings.setting("harness.setup_retries.backoff_max_s"))
         if setup_retries < 0:
             raise ValueError("setup_retries must be >= 0")
-        self._limits = limits  # None: the process-wide HARBOR_MAX_SANDBOXES caps (.capacity)
+        self._limits = limits  # None: the process-wide sandbox caps (.capacity)
         self._build_config = build_config
         self._trial_cls = trial_cls
         self._setup_retries = setup_retries
         self._retry_backoff_s = retry_backoff_s
+        self._retry_backoff_max_s = retry_backoff_max_s
         self._sleep = sleep
+        self._trips: Counter[str] = Counter()
+        self._trips_lock = threading.Lock()  # trials run on several loops' threads
+
+    @property
+    def setup_retries(self) -> int:
+        return self._setup_retries
+
+    def take_trips(self) -> dict[str, int]:
+        """Breaker trips since the last call, by registry name (and reset them)."""
+        with self._trips_lock:
+            trips, self._trips = dict(self._trips), Counter()
+        return trips
+
+    def _count_trips(self, failure: str | None, retried: list[str]) -> None:
+        reach = sum(1 for name in [*retried, failure] if name == breaker_settings.REACH_FAILURE)
+        spent = failure is not None and self._setup_retries > 0
+        with self._trips_lock:
+            if reach:
+                self._trips["harness.reach_check"] += reach
+            if spent:
+                self._trips["harness.setup_retries"] += 1
 
     def _trial(self) -> Any:
         if self._trial_cls is None:
@@ -349,11 +409,12 @@ class HarborHarness:
             if failure is None or attempt >= self._setup_retries:
                 break
             retried.append(failure)
-            delay = min(60.0, self._retry_backoff_s * 2 ** attempt) * random.uniform(0.5, 1.0)
+            delay = min(self._retry_backoff_max_s, self._retry_backoff_s * 2 ** attempt) * random.uniform(0.5, 1.0)
             logger.warning("Harbor trial of %s failed before the agent ran (%s); retry %d/%d in %.1f s",
                            task.task_id, failure, attempt + 1, self._setup_retries, delay)
             attempt += 1
             await self._sleep(delay)
+        self._count_trips(failure, retried)
         paths = getattr(trial, "paths", None)
         trial_dir = getattr(paths, "trial_dir", None)
         verdict = verdict_from_result(result, trial_dir=None if trial_dir is None else str(trial_dir))

@@ -18,7 +18,6 @@ import argparse
 import ast
 import contextlib
 import copy
-import inspect
 import json
 import os
 import re
@@ -241,6 +240,7 @@ def sampler_values(spec: dict[str, Any]) -> dict[str, Any]:
     from yeto.rl.engine import agentic_round, sampler_loop, store_dispense
     from yeto.rl.engine.engine_sampler import DEFAULT_WRITE_DEFER_MAX_S
     from yeto.rl.engine.incarnation_lease import DEFAULT_MAX_UNREAD_S
+    from yeto.rl.harness.harbor import trial
 
     out: dict[str, Any] = {}
     out["sampler.load_failures.enabled"] = True
@@ -275,6 +275,9 @@ def sampler_values(spec: dict[str, Any]) -> dict[str, Any]:
         defaults = dict(agentic.get("task_defaults") or {})
         out["sampler.trial_wall_clock.enabled"] = True
         out["sampler.trial_wall_clock.limit_s"] = float(defaults.get("wall_clock_s", AgentBudget.wall_clock_s))
+        # the TTL an AgentENV trial microVM gets (build_trial_config): its wall clock + harness.sandbox_ttl.margin_s
+        out["harness.sandbox_ttl.effective_agentenv_s"] = float(trial.sandbox_ttl_s(
+            "agentenv", out["sampler.trial_wall_clock.limit_s"], trial.HarborSettings(tasks_dir=Path("."))))
     dispense = (spec.get("prompts") or {}).get("dispense") if isinstance(spec.get("prompts"), Mapping) else None
     if isinstance(dispense, Mapping) and dispense.get("backend") == "store":
         out["sampler.dispense_redo.enabled"] = True
@@ -311,8 +314,7 @@ def harness_values(env: Mapping[str, str]) -> dict[str, Any]:
     with _environ(env):
         out["harness.setup_retries.enabled"] = True
         out["harness.setup_retries.max_n"] = setup_retries_from_env()
-        out["harness.setup_retries.backoff_initial_s"] = (
-            inspect.signature(HarborHarness.__init__).parameters["retry_backoff_s"].default)
+        out["harness.setup_retries.backoff_initial_s"] = HarborHarness(lambda task, url: None)._retry_backoff_s
         skip = os.environ.get(agentenv_env.SKIP_REACH_ENV, "").strip() == "1"
         out["harness.reach_check.enabled"] = not skip
         if not skip:
@@ -329,7 +331,8 @@ def harness_values(env: Mapping[str, str]) -> dict[str, Any]:
         out["harness.sandbox_caps.agentenv_create_timeout_s"] = float(
             os.environ.get(agentenv_client.REQUEST_TIMEOUT_ENV, "") or agentenv_client.DEFAULT_REQUEST_TIMEOUT_S)
         out["harness.sandbox_ttl.enabled"] = True
-        out["harness.sandbox_ttl.limit_s"] = float(agentenv_client.DEFAULT_TTL_S)
+        # a sandbox without a trial wall clock (a boat trial); an AgentENV trial gets wall clock + 900 s
+        out["harness.sandbox_ttl.default_s"] = float(agentenv_client.DEFAULT_TTL_S)
     return out
 
 

@@ -37,6 +37,8 @@ from typing import Protocol
 
 from yeto.rl.agentic.loop_local import LoopLocal
 
+from . import breaker_settings
+
 API_KEY_ENV = "AGENTENV_API_KEY"
 SDK_API_KEY_ENV = "E2B_API_KEY"  # the SDK's own name; accepted as a fallback
 API_URL_ENV = "AGENTENV_API_URL"
@@ -68,6 +70,7 @@ ENVD_TOKEN_HEADER = "X-Access-Token"
 # miles ran 16 concurrent creates on one 64-microVM node).
 MAX_ACTIVE_SANDBOXES = 64
 MAX_STARTS_PER_MINUTE = 60
+# The defaults of harness.sandbox_caps.agentenv_* (.breaker_settings); the env names are its aliases.
 MAX_ACTIVE_ENV = "YETO_AGENTENV_MAX_ACTIVE"
 MAX_STARTS_ENV = "YETO_AGENTENV_STARTS_PER_MINUTE"
 MAX_STARTS_HOUR_ENV = "YETO_AGENTENV_STARTS_PER_HOUR"  # unset = not held here
@@ -233,7 +236,7 @@ class SdkAgentenvClient:
         self._sandbox_url = (sandbox_url if sandbox_url is not None
                              else _env_url(SANDBOX_URL_ENV, SDK_SANDBOX_URL_ENV))
         if request_timeout_s is None:
-            request_timeout_s = float(os.environ.get(REQUEST_TIMEOUT_ENV, "") or DEFAULT_REQUEST_TIMEOUT_S)
+            request_timeout_s = float(_cap("create_timeout_s"))
         self._request_timeout_s = request_timeout_s
         self._cold = (os.environ.get(COLD_START_ENV, "").strip() == "1"
                       if cold_start is None else cold_start)
@@ -526,12 +529,17 @@ def _now_like(reference):
     return _dt.datetime.now(tz=getattr(reference, "tzinfo", None))
 
 
+def _cap(param: str) -> float | None:
+    """``harness.sandbox_caps.agentenv_<param>`` (:mod:`.breaker_settings`)."""
+    return breaker_settings.setting(f"harness.sandbox_caps.agentenv_{param}")
+
+
 def check_in_flight_cap(max_in_flight: int) -> int:
     """Refuse an admission gate that would hold more sandboxes than AgentENV allows."""
-    cap = int(os.environ.get(MAX_ACTIVE_ENV, MAX_ACTIVE_SANDBOXES))
+    cap = int(_cap("max_active_n"))
     if max_in_flight > cap:
         raise ValueError(f"max_in_flight={max_in_flight} exceeds the agentenv active-sandbox cap "
-                         f"{cap} ({MAX_ACTIVE_ENV})")
+                         f"{cap} (harness.sandbox_caps.agentenv_max_active_n, env {MAX_ACTIVE_ENV})")
     return max_in_flight
 
 
@@ -558,10 +566,9 @@ class AgentenvQuota:
 
     @classmethod
     def from_env(cls) -> AgentenvQuota:
-        hourly = os.environ.get(MAX_STARTS_HOUR_ENV, "").strip()
-        return cls(int(os.environ.get(MAX_ACTIVE_ENV, MAX_ACTIVE_SANDBOXES)),
-                   int(os.environ.get(MAX_STARTS_ENV, MAX_STARTS_PER_MINUTE)),
-                   starts_per_hour=int(hourly) if hourly else None)
+        hourly = _cap("starts_per_hour_n")
+        return cls(int(_cap("max_active_n")), int(_cap("starts_per_minute_n")),
+                   starts_per_hour=None if hourly is None else int(hourly))
 
     def _wait_s(self, now: float) -> float:
         horizon = 3600.0 if self.starts_per_hour is not None else 60.0

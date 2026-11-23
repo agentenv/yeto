@@ -36,6 +36,7 @@ from typing import Any, TypeVar
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.capabilities import EnvironmentCapabilities
 
+from . import breaker_settings
 from .agentenv_client import AgentenvQuota, process_client, process_quota
 from .agentenv_pool import POOL_ENV, AgentenvSandboxPool, process_pool
 from .agentenv_sandbox import AgentenvSandbox, SandboxSpec
@@ -66,12 +67,12 @@ REACH_URL_ENV_VARS: tuple[tuple[str, str], ...] = (
     ("TASK_SERVER_URL", "task-server"),
     ("YETO_RECORDS_PROXY_PUBLIC_BASE", "records-proxy"),
 )
-# Set to "1" to skip the fail-loud reachability self-check (escape hatch only;
-# skipping it re-exposes the silent-zero-burn failure mode).
-SKIP_REACH_ENV = "YETO_AGENTENV_SKIP_REACH_CHECK"
-# Optional tuning of the in-microVM curl self-check (defaults from agentenv_network).
-REACH_TRIES_ENV = "YETO_AGENTENV_REACH_TRIES"
-REACH_TIMEOUT_ENV = "YETO_AGENTENV_REACH_TIMEOUT_S"
+# The self-check is the ``harness.reach_check`` breaker (:mod:`.breaker_settings`); these
+# env vars are its aliases.  Skipping it (escape hatch only) re-exposes the
+# silent-zero-burn failure mode.
+SKIP_REACH_ENV = "YETO_AGENTENV_SKIP_REACH_CHECK"  # "1": enabled false
+REACH_TRIES_ENV = "YETO_AGENTENV_REACH_TRIES"  # attempts_n
+REACH_TIMEOUT_ENV = "YETO_AGENTENV_REACH_TIMEOUT_S"  # timeout_s
 
 
 class AgentenvEnvironment(BaseEnvironment):
@@ -214,9 +215,10 @@ class AgentenvEnvironment(BaseEnvironment):
         The probe needs ``curl`` in the task image; a image without it reports
         the endpoint as a ``curl error`` and also fails loud (fix the image).
         """
-        if os.environ.get(SKIP_REACH_ENV, "").strip() == "1":
-            logger.warning("agentenv reachability self-check skipped (%s=1): a misconfigured "
-                           "judge/records endpoint will silently zero-score", SKIP_REACH_ENV)
+        if not breaker_settings.enabled("harness.reach_check"):
+            logger.warning("agentenv reachability self-check skipped (harness.reach_check off, %s): a "
+                           "misconfigured judge/records endpoint will silently zero-score",
+                           breaker_settings.source("harness.reach_check.enabled"))
             return
         try:
             from . import agentenv_network
@@ -228,12 +230,10 @@ class AgentenvEnvironment(BaseEnvironment):
                         "(%s); nothing to probe", ", ".join(n for n, _ in REACH_URL_ENV_VARS))
             return
 
-        timeout_s = float(os.environ.get(REACH_TIMEOUT_ENV, "").strip()
-                          or agentenv_network.DEFAULT_TIMEOUT_S)
-        kwargs: dict[str, Any] = {"timeout_s": timeout_s}
-        tries = os.environ.get(REACH_TRIES_ENV, "").strip()
-        if tries:
-            kwargs["tries"] = int(tries)
+        timeout_s = float(breaker_settings.setting("harness.reach_check.timeout_s"))
+        kwargs: dict[str, Any] = {"timeout_s": timeout_s,
+                                  "tries": int(breaker_settings.setting("harness.reach_check.attempts_n")),
+                                  "sleep_s": float(breaker_settings.setting("harness.reach_check.interval_s"))}
 
         box = self._box()
 

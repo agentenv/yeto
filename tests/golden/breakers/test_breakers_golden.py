@@ -43,6 +43,7 @@ DERIVED = {
     "run.trainer_silence.effective_limit_s",  # limit_s, or max(stall_factor_n x launch.stall.timeout_s, floor_s)
     "launch.budget.effective_warn_usd",  # warn_usd, or 80 % of usd when null
     "launch.idle.effective_load_grace_s",  # load_grace_s, or the recipe default (45 / 90 min) when null
+    "harness.sandbox_ttl.effective_agentenv_s",  # trial wall clock + margin_s while limit_s is null
 }
 # golden keys a layer chose not to declare as a registry param, with the reason (append here;
 # never drop a key from capture.py: it still locks today's reader)
