@@ -157,7 +157,8 @@ presets merge LoRA. Partial experts exist for two recipes today:
       an island, TP x PP divides the trainer GPUs.
 - [ ] The LoRA targets exist and are adaptable: `attention` everywhere;
       `all-linear` on MoE adds per-expert LoRA only where the experts are
-      separate modules, and needs EP 1 on the generic recipe.
+      separate modules (one adapter per expert); under EP > 1 the experts must
+      be grouped-GEMM, BF16 and without capacity padding.
 - [ ] The layout agrees across islands: LoRA layouts follow from the config;
       full-parameter layouts are bound by the syncer (`--rl-parameter-layout-sha256 auto`, Miles)
       or planned offline (verl).
@@ -255,8 +256,8 @@ Qwen3, OLMoE-1B-7B for a generic MoE) with the flags the check printed:
 ### 5. Hardware
 
 - LoRA on a model that fits one island: two or more 8-GPU islands, TP / PP from
-  the memory line; MoE LoRA keeps EP 1 on the generic recipe when routed
-  experts carry LoRA.
+  the memory line; MoE LoRA with routed experts under EP > 1 needs grouped-GEMM
+  experts (the island refuses it otherwise).
 - Full parameters: Miles islands run `--rl-placement fixed-partition` (half the
   GPUs train, half roll out, by default in the printed flags); the fragment
   count grows with the model (`P >= 1.25 x FP32 bytes / 2 GiB`).

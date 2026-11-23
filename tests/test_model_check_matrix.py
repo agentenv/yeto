@@ -174,6 +174,7 @@ def _provider(cfg: dict) -> argparse.Namespace:
         fields["moe_layer_freq"] = [1 if i in geometry.moe_layers else 0 for i in range(layers)]
         fields["moe_ffn_hidden_size"] = t.get("moe_intermediate_size") or t.get("intermediate_size")
         fields["moe_router_topk"] = geometry.router_topk
+        fields["moe_grouped_gemm"] = True  # the Megatron-Bridge MoE bridges set it (qwen3_moe_bridge.py)
     return argparse.Namespace(**fields)
 
 

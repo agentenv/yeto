@@ -48,14 +48,14 @@ DSV4_EXPERT_FULL_COUNT = 4  # --expert-full-count of the deepseek-v4-flash exper
 # Failing cells that open work turns into runs (printed as "not on main yet"). Remove an
 # entry in the change that flips its cell: tests/test_model_check_matrix.py requires every
 # key to still reach a failing cell. Open work per key, for maintainers: decoupled/* #653,
-# partial-moe/generic #649 wiring, decoupled/kimi_k31-lora #666, lora/expert-ep #666.
+# partial-moe/generic: launcher wiring of #649's in-place selections; decoupled/kimi_k31-lora:
+# K3.1 offline LoRA specs (the generic ones landed in #666).
 PENDING = {
     "decoupled/full": "--rl-sync-preset decoupled --tuning full routed to full-parameter async rounds",
     "decoupled/partial-moe": "decoupled partial experts (K3.1 selection, DSV4 expert-full) routed to "
                              "full-parameter async rounds",
     "partial-moe/generic": "in-place routed-expert selections on any MoE (generic recipe)",
     "decoupled/kimi_k31-lora": "kimi_k31 LoRA under decoupled, from an offline canonical LoRA layout",
-    "lora/expert-ep": "routed-expert LoRA under EP>1 on the generic recipe",
 }
 
 
@@ -147,8 +147,6 @@ def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> li
                  "to kimi_k31, --expert-full-count to deepseek-v4-flash (yeto/launch/rl_args.py)",
                  "train the routed experts with full parameters, or register a PartialExpertModelConfig "
                  "(template below)", "partial-moe/generic")
-        elif backend == "verl" and recipe == "deepseek-v4-flash":
-            fail(f"the {recipe} partial-expert recipe is a Miles recipe", "--rl-backend miles")
         elif recipe == "deepseek-v4-flash" and preset != "full-parameter":
             fail("expert-full tuning needs --rl-sync-preset full-parameter (yeto/rl/engine/selection.py)",
                  "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async",
@@ -157,11 +155,6 @@ def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> li
             fail("--tuning full behind a syncer needs --rl-sync-preset full-parameter (yeto/launch/rl_args.py)",
                  "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async",
                  "decoupled/partial-moe" if preset == "decoupled" else None)
-        elif backend == "verl" and recipe == "kimi_k31":
-            # the launcher accepts it; no verl code reads --rl-model-recipe or --rl-expert-selection
-            fail("verl islands ignore --rl-model-recipe kimi_k31 and --rl-expert-selection (no verl code reads "
-                 "them): the selection would not be trained as partial experts", "--rl-backend miles",
-                 source=ISLAND)
     elif form == "full":
         if recipe == "kimi_k31":
             fail("--rl-model-recipe kimi_k31 trains full parameters on a routed-expert selection only "
@@ -230,8 +223,6 @@ def _recommended_ep(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -
         return 1
     if recipe in ("kimi_k31", "deepseek-v4-flash"):
         return 8
-    if req.form == "lora" and req.lora_targets == "all-linear" and recipe == "generic":
-        return 1  # expert LoRA is replicated (EP>1 refused on the generic recipe)
     world = actor_gpus(req, recipe) // (req.tensor_parallel * req.pipeline_parallel) or 1
     return max(e for e in range(1, min(world, profile.num_routed_experts, 8) + 1)
                if profile.num_routed_experts % e == 0 and world % e == 0)
@@ -309,9 +300,10 @@ def _lora_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> li
             out.append(CheckItem("lora-targets", FAIL, f"routed-expert LoRA: {profile.expert_lora}",
                                  "--lora-targets attention", ISLAND))
         elif recipe == "generic" and _ep(req, profile) > 1:
-            out.append(CheckItem("lora-targets", FAIL, "EP>1 requires replicated attention LoRA, not "
-                                 "expert-sharded all-linear LoRA (yeto/rl/engine/run_config.py)",
-                                 "--expert-parallel 1, or --lora-targets attention", ISLAND, "lora/expert-ep"))
+            out.append(CheckItem("lora-targets", WARN, "routed-expert LoRA under EP>1 needs grouped-GEMM experts "
+                                 "(the provider's moe_grouped_gemm), BF16 experts and no capacity padding: the "
+                                 "island refuses it otherwise (run_config.check_generic_expert_lora)",
+                                 "--expert-parallel 1, or --lora-targets attention", ISLAND))
         if recipe == "kimi_k31" and req.preset != "single-island":
             out.append(CheckItem("lora-targets", FAIL, "kimi_k31 synced LoRA trainers take --lora-targets "
                                  "attention only (yeto/rl/engine/kimi_k31_lora.py)", "--lora-targets attention",
@@ -347,8 +339,9 @@ def _backend_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) ->
                                  "_convert_to_hf_core)", "--rl-backend verl, or --form lora, or a converter in "
                                  "the yeto Miles adapter (template below)", UPSTREAM))
     if req.backend == "verl" and recipe != "generic":
-        out.append(CheckItem("backend", FAIL, f"--rl-model-recipe {recipe} is a Miles recipe",
-                             "--rl-backend miles", UPSTREAM))
+        out.append(CheckItem("backend", FAIL, f"verl trains the generic recipe only: --rl-model-recipe {recipe} "
+                             "(and its expert selection) is refused (yeto/rl/adapters/verl/run_config_rules.py "
+                             "check_model_recipe)", "--rl-backend miles", LAUNCHER))
     if not out:
         out.append(CheckItem("backend", OK, f"{req.backend} loads {'/'.join(profile.architectures) or '?'}"
                              + (f" (converter {profile.miles_converter})" if req.backend == "miles"
