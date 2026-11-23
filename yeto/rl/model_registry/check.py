@@ -48,8 +48,7 @@ DSV4_EXPERT_FULL_COUNT = 4  # --expert-full-count of the deepseek-v4-flash exper
 # Failing cells that open work turns into runs (printed as "not on main yet"). Remove an
 # entry in the change that flips its cell: tests/test_model_check_matrix.py requires every
 # key to still reach a failing cell. Open work per key, for maintainers: decoupled/* #653,
-# partial-moe/generic #649 wiring, decoupled/kimi_k31-lora #666, lora/expert-ep #658 #666,
-# verl/decoupled-lora #657 #662.
+# partial-moe/generic #649 wiring, decoupled/kimi_k31-lora #666, lora/expert-ep #666.
 PENDING = {
     "decoupled/full": "--rl-sync-preset decoupled --tuning full routed to full-parameter async rounds",
     "decoupled/partial-moe": "decoupled partial experts (K3.1 selection, DSV4 expert-full) routed to "
@@ -57,7 +56,6 @@ PENDING = {
     "partial-moe/generic": "in-place routed-expert selections on any MoE (generic recipe)",
     "decoupled/kimi_k31-lora": "kimi_k31 LoRA under decoupled, from an offline canonical LoRA layout",
     "lora/expert-ep": "routed-expert LoRA under EP>1 on the generic recipe",
-    "verl/decoupled-lora": "decoupled LoRA fragments on the verl island",
 }
 
 
@@ -184,9 +182,6 @@ def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> li
             fail(f"kimi_k31 LoRA behind the syncer runs strict-avg (got {preset}): its LoRA layout is learned "
                  "from the first export (yeto/rl/engine/kimi_k31_lora.py)", "--rl-sync-preset strict-avg",
                  "decoupled/kimi_k31-lora" if preset == "decoupled" else None)
-        if backend == "verl" and preset == "decoupled":
-            fail("verl islands run no decoupled LoRA fragments (yeto/rl/adapters/verl/run_config_rules.py "
-                 "check_sync_preset)", "--rl-backend miles, or --rl-sync-preset strict-avg", "verl/decoupled-lora")
         if recipe == "deepseek-v4-flash":
             fail("the deepseek-v4-flash recipe pins its LoRA targets and TP8/EP8 shape; this check covers its "
                  "expert-full form (--form partial-moe)", "--form partial-moe")
