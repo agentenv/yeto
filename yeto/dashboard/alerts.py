@@ -419,7 +419,12 @@ def trainer_failed(reducer, th: dict, now: float) -> list[dict]:
         why = last.get("cause") or last.get("error_type") or "no error text"
         detail = (f"{len(bad)} failed launch(es) in the last {th['trainer_fail_window_s'] / 60:.0f} min, "
                   f"last {last.get('reason')}: {why}")
-        if len(bad) >= th["trainer_fail_loop"]:
+        isl = reducer.islands.get(iid) or {}
+        relaunched = isl.get("launch_ts") is not None and isl["launch_ts"] > last["ts"]
+        if relaunched:  # the current launch started after the last failure: say so, not critical
+            out.append(_alert(1, "trainer_failed", f"trainer {iid} failed earlier, relaunched",
+                              detail + "; the current launch started after it", island=iid))
+        elif len(bad) >= th["trainer_fail_loop"]:
             out.append(_alert(0, "trainer_failed", f"trainer {iid} keeps failing", detail, island=iid))
         else:
             out.append(_alert(1, "trainer_failed", f"trainer {iid} failed", detail, island=iid))

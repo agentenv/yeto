@@ -244,3 +244,17 @@ def test_a_clean_trainer_leave_is_not_a_failure():
     reducer.feed({"event": "island_leave", "island_id": 0, "reason_name": "DONE", "time_unix": T0 + 10},
                  source="s", offset=1)
     assert not [a for a in reducer.overview(now=T0 + 20)["alerts"] if a["rule"] == "trainer_failed"]
+
+
+def test_a_trainer_relaunched_after_its_failures_is_a_warning():
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(_trainer_launch(T0) + _trainer_launch(T0 + 600)):
+        reducer.feed(rec, source=f"store:trainer/l0-modal-{'A' if i < 3 else 'B'}", offset=i)
+    later = [{"event": "trainer_start_phase", "island_id": 0, "phase": "submitted", "time_unix": T0 + 900},
+             {"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "seq": 1, "time_unix": T0 + 930}]
+    for i, rec in enumerate(later):
+        reducer.feed(rec, source="store:trainer/l0-modal-C", offset=i)
+    alert = [a for a in reducer.overview(now=T0 + 940)["alerts"] if a["rule"] == "trainer_failed"]
+    assert len(alert) == 1 and alert[0]["sev"] == 1 and "relaunched" in alert[0]["title"]
+    assert "OutOfMemoryError" in alert[0]["detail"]
+

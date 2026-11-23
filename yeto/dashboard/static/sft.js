@@ -60,7 +60,7 @@ function controls(offline,reload){
   onReload=reload;var box=$("rangeBox");if(!box)return;
   box.innerHTML='<div class="seg">'+RANGES.map(function(r){return '<button class="'+(r[1]===RANGE_H?"on":"")+'" data-h="'+r[1]+'">'+r[0]+'</button>'}).join("")+'</div>'+
     '<button class="btn rl" id="reloadBtn" title="'+(offline?"offline export: data is fixed":"fetch now")+'"'+(offline?" disabled":"")+'>&#x21bb; Reload</button>';
-  Array.prototype.forEach.call(box.querySelectorAll?box.querySelectorAll(".seg button"):[],function(b){b.onclick=function(){RANGE_H=+b.dataset.h;try{localStorage.setItem("yeto-range",RANGE_H)}catch(e){}render(V,OFF)}});
+  Array.prototype.forEach.call(box.querySelectorAll?box.querySelectorAll(".seg button"):[],function(b){b.onclick=function(){RANGE_H=+b.dataset.h;RANGE_SET=true;try{localStorage.setItem("yeto-range",RANGE_H)}catch(e){}render(V,OFF)}});
   var rb=$("reloadBtn");if(rb)rb.onclick=function(){if(onReload)onReload()};
 }
 function rangeLabel(){return RANGE_H>=48?(RANGE_H/24)+" days":RANGE_H===1?"hour":RANGE_H+" hours"}
@@ -546,8 +546,11 @@ function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
 function render(view,offline){
   V=view;OFF=offline;if(!V)return;var S=V.sft;
   NOW=offline?((S&&S.now)||(V.overview||{}).now||Date.now()/1000):Date.now()/1000;
-  if(offline&&!RANGE_SET&&!S){var o0=V.overview||{},sp=fin(o0.data_ts)&&fin(o0.first_ts)?(o0.data_ts-o0.first_ts)/3600:null; // an export shows its whole run in the smallest window
-    if(fin(sp))RANGE_H=(RANGES.filter(function(r){return r[1]>=sp})[0]||RANGES[RANGES.length-1])[1];RANGE_SET=true}
+  // until the viewer picks a range, show the whole run in the smallest window that holds it:
+  // an export once (its data is fixed), the live page on every render (1h, then 6h ... as the
+  // run grows), so a run younger than an hour is not squeezed into the right edge of 24h
+  if(!RANGE_SET&&!S){var o0=V.overview||{},end=offline?o0.data_ts:NOW,sp=fin(end)&&fin(o0.first_ts)?(end-o0.first_ts)/3600:null;
+    if(fin(sp))RANGE_H=(RANGES.filter(function(r){return r[1]>=sp})[0]||RANGES[RANGES.length-1])[1];if(offline)RANGE_SET=true}
   var sroot=$("sftRoot"),rroot=$("rlRoot");
   var RL=!S&&!!$("rlmRoot");
   if(document.body&&document.body.classList)document.body.classList.toggle("sftmode",!!S||RL);
