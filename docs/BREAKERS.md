@@ -173,6 +173,17 @@ later (see [CHANGELOG.md](../CHANGELOG.md)).
 | `sampler.max_backlog_groups` | semantic | groups_n=null | - | yes | spec max_backlog_groups | unread groups at which the sampler pauses generating (rl_sampler_backlog_full); "auto": derived by yeto run up from the release cadence (sample_roles) |
 | `sampler.max_compactions` | semantic | - | - | yes | - | compactions of one trial before ContextFull (POLICY_LIMIT, kept) |
 
+### harness
+
+| Name | Kind | Default | Action | Can disable | Legacy knobs | Notes |
+|---|---|---|---|---|---|---|
+| `harness.setup_retries` | retry_budget | max_n=0 backoff_initial_s=5 backoff_max_s=60 | - | yes | env HARBOR_SETUP_RETRIES (deprecated), env HARBOR_SETUP_BACKOFF_S, env HARBOR_SETUP_BACKOFF_MAX_S | sandbox start, image pull and agent install failures are retried on a new sandbox; once spent the trial is ABORTED (infra) |
+| `harness.reach_check` | guard | attempts_n=15 timeout_s=5 interval_s=2 | drop | yes | env YETO_AGENTENV_SKIP_REACH_CHECK (deprecated), env YETO_AGENTENV_REACH_TRIES (deprecated), env YETO_AGENTENV_REACH_TIMEOUT_S (deprecated), env YETO_AGENTENV_REACH_INTERVAL_S | an AgentENV microVM that cannot reach its judge / records endpoints fails its start (NetworkError, counted as infra) instead of scoring a silent zero |
+| `harness.sandbox_caps` | breaker | max_sandboxes=null agentenv_max_active_n=64 agentenv_starts_per_minute_n=60 agentenv_starts_per_hour_n=null agentenv_create_timeout_s=120 boat_max_active_n=100 boat_starts_per_minute_n=12 boat_starts_per_hour_n=null | pause | no | env HARBOR_MAX_SANDBOXES (deprecated), env YETO_AGENTENV_MAX_ACTIVE (deprecated), env YETO_AGENTENV_STARTS_PER_MINUTE (deprecated), env YETO_AGENTENV_STARTS_PER_HOUR (deprecated), env YETO_AGENTENV_REQUEST_TIMEOUT_S (deprecated), env YETO_BOAT_MAX_ACTIVE (deprecated), env YETO_BOAT_STARTS_PER_MINUTE (deprecated), env YETO_BOAT_STARTS_PER_HOUR (deprecated) | a sampler whose max_in_flight exceeds a cap refuses to start; at run time a create above a cap or start rate waits |
+| `harness.sandbox_ttl` | breaker | limit_s=null margin_s=900 default_s=10800 | - | no | env HARBOR_SANDBOX_TTL_S, env HARBOR_SANDBOX_TTL_MARGIN_S, env HARBOR_SANDBOX_TTL_DEFAULT_S | the provider reclaims a sandbox after its TTL: the backstop for a lost delete (a killed sampler); HARBOR_ENV_KWARGS ttl_s still wins over it |
+| `harness.turn_max_tokens` | semantic | - | - | yes | - | the records proxy's signed max_tokens of one model call; a longer reply is cut (finish length) and the agent goes on |
+| `harness.agent_call` | semantic | - | - | yes | - | pi's own per-call idle timeout (1800 s, 3600 s with proxy compaction) and model-call retries (8); a retried call forks the token chain |
+
 ### pool
 
 | Name | Kind | Default | Action | Can disable | Legacy knobs | Notes |

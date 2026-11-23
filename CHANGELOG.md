@@ -15,6 +15,8 @@ Added:
   `monitor`), per pool with `breakers.pools.<name>`. `yeto launch --breakers
   FILE` applies the `launch` and `trainer` layers without `run up`. A sampler
   spec may carry its own `breakers` key for the `sampler` and `harness` layers.
+  `run up` hands the run's `sampler` and `harness` values to every sampler in
+  the pool config's new `sampler.breakers` knob.
 - `yeto breaker show --config run.json`: every breaker's effective value and
   where it came from. `yeto breaker list --markdown`: the registry.
   `yeto breaker check` is the new name of the health check.

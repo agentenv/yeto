@@ -2565,8 +2565,11 @@ pool `elastic` fields and environment variables. See 7.8.
 
 Where each layer applies:
 
-- `yeto run up` applies every layer: it writes the values into the trainer
-  argv, the pool config and the sampler spec copy it hands on.
+- `yeto run up` applies every layer. It writes the values into the trainer
+  argv and a copy of each pool config. The `sampler` and `harness` values go
+  into the copy's `sampler.breakers` knob. Every sampler spec it renders
+  carries them. The spec file itself is not changed. Preflight prints them:
+  `breakers: pool <name>: applied in the sampler spec (...)`.
 - `yeto launch --breakers FILE` applies the `launch` and `trainer` layers. The
   file holds a bare `breakers:` object or a whole run config.
 - A sampler spec may carry its own `breakers` key. The sampler applies its
