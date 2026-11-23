@@ -53,7 +53,7 @@ The supported model and runtime contract is deliberately narrow:
 | rollout | colocated SGLang (`--rl-placement fixed-partition` is also available for LoRA and is used by the multi-node and elastic paths) |
 | optimization | GRPO plus the declared GRPO-family mechanisms (see [RL_ALGORITHMS.md](RL_ALGORITHMS.md)); critic algorithms (PPO, VAPO, SAO, CompactionRL) run on a single island without outer sync only |
 | island size | one or more nodes and one or more GPUs per node |
-| parallelism | the recipe sets TP/PP (the multi-node and Flash-Next profiles use TP > 1); canonical LoRA export and apply work at any TP/PP (see [LoRA under model parallelism](#lora-under-model-parallelism)); dense EP = 1; MoE EP may divide the island world size when LoRA tensors remain replicated |
+| parallelism | the recipe sets TP/PP (the multi-node and Flash-Next profiles use TP > 1); canonical LoRA export and apply work at any TP/PP (see [LoRA under model parallelism](#lora-under-model-parallelism)); dense EP = 1; MoE EP may divide the island world size, with routed-expert LoRA on the generic recipe (see [Routed-expert LoRA](#routed-expert-lora)) |
 | membership | fixed logical island IDs `0..M-1`, `M >= 1` |
 | wire format | f32 |
 | global weighting | complete roster, equal learner weight |
@@ -68,7 +68,8 @@ fallback.
 The following remain outside this boundary:
 
 - critic LoRA (`critic.param_mode=lora` is refused) or diffusion RL;
-- expert-sharded LoRA tensors;
+- expert LoRA with shared or shared-outer factors (`--experts-shared-outer-loras`)
+  behind the syncer, and routed-expert LoRA on SequentialMLP experts at EP > 1;
 - trajectory migration across policy snapshots;
 - same-fragment stale updates, dynamic quorum, or learner weighting;
 - RDA, IsoLoCo, HeLoCo, delta correction, or broadcast blending;
@@ -143,6 +144,33 @@ except the per-rank FP32 write:
 Megatron-Core and Megatron-Bridge (TP2, PP2 with uneven stages, TP2xPP2,
 TP2xDP2): the export matches the single-rank names and shapes, and
 apply-then-export is bit-exact FP32.
+
+## Routed-expert LoRA
+
+On the generic recipe, `--lora-targets all-linear` on a mixture-of-experts
+model adapts attention, dense and shared-expert projections and every routed
+expert, one adapter per expert (Miles builds Bridge's grouped-expert adapter
+with `share_expert_adapters=False`, the layout SGLang serves). Canonical names
+are the per-expert PEFT names
+`model.layers.L.mlp.experts.E.{gate,up,down}_proj.lora_{A,B}.weight`; routers
+are never adapted.
+
+- Offline layout: PEFT, on the model built with empty weights, gives every
+  `nn.Linear` adapter. Transformers stores routed experts as fused
+  `experts.gate_up_proj` / `experts.down_proj` parameters that PEFT's
+  `target_modules` cannot reach, and PEFT's `target_parameters` gives a stacked
+  layout, not Bridge's; `yeto.rl.lora_layout` writes the per-expert specs from
+  the fused shapes. The island's first export through Bridge must match.
+- Export and apply: each local expert has its own binding and global name
+  (expert `ep_rank * local_experts + i`). Bridge's collective export gathers the
+  grouped-expert adapters over EP, so the main rank assembles the policy, and
+  every EP rank applies only its own experts, without a collective.
+- Limits (checked at launch and in the state plugin): expert tensor parallel
+  size 1, grouped-GEMM experts under EP, BF16 experts (no fp8/fp4), no capacity
+  padding, one adapter per expert (no shared or shared-outer factors), and HF
+  checkpoints with one tensor per expert. A synced island refuses a canonical
+  LoRA above 8 GiB in FP32; larger trainable states belong on the
+  full-parameter stack.
 
 ## Canonical LoRA Identity
 

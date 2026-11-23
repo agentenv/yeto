@@ -32,7 +32,8 @@ from yeto.rl.engine.run_flags import (
     rl_option_pairs,
 )
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
-from yeto.rl.export import adapter_targets, derive_peft_lora_specs
+from yeto.rl.export import adapter_targets
+from yeto.rl.lora_layout import check_canonical_size, offline_canonical_specs
 from yeto.rl.adapters.miles.revision import verify_miles_revision
 from yeto.rl.adapters.miles.island_args import as_island, miles_config, override_fork_field, override_native
 
@@ -2081,13 +2082,17 @@ def run_miles(
         )
         provider = model_bridge.to_megatron_provider(load_weights=False)
         provider.finalize()
-        attention_specs = () if full_parameter else derive_peft_lora_specs(
-            model_path,
+        # all-linear on a MoE model adapts the routed experts one adapter per expert,
+        # the layout Megatron-Bridge exports (yeto.rl.lora_layout)
+        attention_specs = () if full_parameter else offline_canonical_specs(
             None,
             rank=args.lora_r,
             targets=args.lora_targets,
+            model_path=model_path,
             trust_remote_code=args.trust_remote_code,
         )
+        if attention_specs and yeto_policy_sync:
+            check_canonical_size(attention_specs)
         specs = tuple(attention_specs)
         if expert_full:
             from transformers import AutoConfig

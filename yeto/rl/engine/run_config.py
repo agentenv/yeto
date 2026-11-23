@@ -796,6 +796,33 @@ def _validate_callable_spec(spec: str) -> None:
         raise ValueError("RL callable must be package.module:function")
 
 
+def check_generic_expert_lora(provider, *, expert_parallel: int) -> None:
+    """Routed-expert LoRA on the generic recipe (Megatron-Bridge grouped-expert
+    adapters, one per expert; the state plugin exports them through Bridge).
+
+    The same model limits as Miles' ``_validate_multi_lora_moe_support``
+    (``miles/backends/megatron_utils/lora/bridge.py``) where they apply to one
+    adapter: expert tensor parallel size 1 (the launcher pins it), grouped-GEMM
+    experts under EP (Bridge gathers only grouped expert adapters over EP), BF16
+    experts (no fp8/fp4: quantization padding reorders the dispatched tokens) and
+    no capacity padding. Gate, up and down are all adapted (``all-linear``), as
+    SGLang needs to wrap a fused MoE layer.
+    """
+
+    problems = []
+    if expert_parallel > 1 and not getattr(provider, "moe_grouped_gemm", False):
+        problems.append("grouped-GEMM experts (moe_grouped_gemm) under expert parallelism")
+    if getattr(provider, "fp8", None) or getattr(provider, "fp4", None):
+        problems.append("BF16 experts (no fp8/fp4)")
+    if getattr(provider, "moe_pad_expert_input_to_capacity", False):
+        problems.append("no --moe-pad-expert-input-to-capacity")
+    if problems:
+        raise ValueError(
+            "--lora-targets all-linear adapts every routed expert, one adapter per expert, "
+            "and needs " + "; ".join(problems) + ". Use --lora-targets attention, or "
+            "--tuning full for the experts")
+
+
 def resolve_rl_run_config(
     args,
     *,
@@ -882,15 +909,21 @@ def resolve_rl_run_config(
     rules.check_expert_parallel(actor_gpus, expert_parallel)
     fn_variant = qwen3_8_next_variant(args, provider)
     recipe = getattr(args, "rl_model_recipe", RECIPE_GENERIC)
-    # the native Flash-Next plugin and the Kimi-K3.1 plugin (shared-outer expert LoRA)
-    # shard routed-expert LoRA by EP themselves
-    # (deepseek_v41 all-linear = attention + the replicated shared expert, routed experts excluded);
+    # Routed-expert LoRA under EP: the generic recipe exports it through Megatron-Bridge
+    # (grouped-expert adapters, one per expert, gathered over EP; state_plugin), the
+    # native Flash-Next plugin and the Kimi-K3.1 plugin (shared-outer expert LoRA)
+    # shard it by EP themselves (deepseek_v41 all-linear = attention + the replicated
+    # shared expert, routed experts excluded). The other recipes keep it replicated;
     # full-parameter runs build no LoRA, whatever --lora-targets says
-    if (parameter_mode != "full" and fn_variant is None and recipe not in (RECIPE_KIMI_K31, RECIPE_DEEPSEEK_V41)
+    if (parameter_mode != "full" and fn_variant is None
+            and recipe not in (RECIPE_GENERIC, RECIPE_KIMI_K31, RECIPE_DEEPSEEK_V41)
             and is_moe and expert_parallel > 1 and args.lora_targets == "all-linear"):
         raise ValueError(
             "EP>1 requires replicated attention LoRA, not expert-sharded all-linear LoRA"
         )
+    if (recipe == RECIPE_GENERIC and fn_variant is None and is_moe and parameter_mode != "full"
+            and args.lora_targets == "all-linear"):
+        check_generic_expert_lora(provider, expert_parallel=expert_parallel)
     expert_selection = getattr(args, "rl_expert_selection", None) or None
     if expert_selection is not None and recipe != RECIPE_KIMI_K31:
         raise ValueError("--rl-expert-selection belongs to --rl-model-recipe kimi_k31")

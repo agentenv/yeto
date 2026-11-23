@@ -1288,7 +1288,7 @@ def _stub_full_parameter_island(monkeypatch, tmp_path, *, miles_fields=None, **o
         "megatron.bridge",
         types.SimpleNamespace(AutoBridge=AutoBridge),
     )
-    monkeypatch.setattr(rl_learner, "derive_peft_lora_specs", forbidden)
+    monkeypatch.setattr(rl_learner, "offline_canonical_specs", forbidden)
     monkeypatch.setattr(rl_learner, "adapter_targets", forbidden)
     from yeto.rl.adapters.miles import config as miles_config
     from yeto.rl.adapters.miles import state as miles_state

@@ -243,6 +243,25 @@ def _spawn(tmp_path, tp: int, pp: int, ep: int, dp: int, *extra: str, timeout: i
     return proc, out
 
 
+def _offline(tmp_path, *, moe: bool) -> list:
+    """The offline canonical specs (``lora_layout``) of the round trip's model, as
+    the JSON ``shapes`` rows; the HF config mirrors ``megatron_lora_roundtrip.HF``."""
+
+    from transformers import Qwen3Config, Qwen3MoeConfig
+
+    from yeto.rl.lora_layout import offline_canonical_specs
+
+    hf = dict(vocab_size=128, hidden_size=64, intermediate_size=96, num_hidden_layers=3, num_attention_heads=4,
+              num_key_value_heads=2, head_dim=16, tie_word_embeddings=False)
+    path = tmp_path / ("hf-moe" if moe else "hf-dense")
+    config = (Qwen3MoeConfig(**hf, moe_intermediate_size=32, num_experts=4, num_experts_per_tok=2,
+                             architectures=["Qwen3MoeForCausalLM"]) if moe
+              else Qwen3Config(**hf, architectures=["Qwen3ForCausalLM"]))
+    config.save_pretrained(path)
+    specs = offline_canonical_specs(None, rank=4, targets="all-linear", model_path=str(path))
+    return sorted([spec.name, list(spec.shape)] for spec in specs)
+
+
 def _run(tmp_path, tp: int, pp: int, ep: int, dp: int) -> dict:
     proc, out = _spawn(tmp_path, tp, pp, ep, dp)
     assert proc.returncode == 0, proc.stderr[-4000:]
@@ -256,6 +275,7 @@ def test_real_canonical_lora_round_trip_matches_across_tp_and_pp(tmp_path):
 
     reference = _run(tmp_path, 1, 1, 0, 1)
     assert reference["ok"] and reference["names"] == 3 * 7 * 2
+    assert reference["shapes"] == _offline(tmp_path, moe=False)
     for tp, pp, dp in ((2, 1, 1), (1, 2, 1), (2, 2, 1), (2, 1, 2)):
         result = _run(tmp_path, tp, pp, 0, dp)
         assert result["ok"] and result["ranks"] == tp * pp * dp
@@ -271,6 +291,7 @@ def test_real_grouped_expert_lora_round_trip_matches_across_ep_tp_and_pp(tmp_pat
     reference = _run(tmp_path, 1, 1, 1, 1)
     experts = 3 * 4 * 6  # layers x experts x (gate, up, down) x (A, B)
     assert reference["ok"] and reference["grouped_adapters"] and reference["names"] == 3 * 4 * 2 + experts
+    assert reference["shapes"] == _offline(tmp_path, moe=True)  # offline layout == Bridge's export
     for tp, pp, ep, dp in ((1, 1, 2, 2), (2, 1, 2, 1), (1, 2, 2, 2), (2, 2, 2, 1)):
         result = _run(tmp_path, tp, pp, ep, dp)
         assert result["ok"] and result["grouped_adapters"], (tp, pp, ep, dp)
