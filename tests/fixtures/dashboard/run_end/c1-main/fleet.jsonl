@@ -1,0 +1,2 @@
+{"event": "island_ready", "island": "c1-main-l0-modal", "island_id": 0, "cloud": "modal", "gpu": "H100", "gpus": 1, "cpus": 16, "memory_gib": 128.0, "initial": true, "time_unix": 1795459089.381284}
+{"event": "island_stop", "island": "c1-main-l0-modal", "island_id": 0, "cloud": "modal", "gpu": "H100", "gpus": 1, "cpus": 16, "memory_gib": 128.0, "reason": "SUCCEEDED", "time_unix": 1795462540.6222541}

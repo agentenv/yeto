@@ -1,0 +1,1 @@
+{"event": "island_ready", "island": "c1-dl-l0-modal", "island_id": 0, "cloud": "modal", "gpu": "H100", "gpus": 1, "cpus": 16, "memory_gib": 128.0, "initial": true, "time_unix": 1795463345.503124}

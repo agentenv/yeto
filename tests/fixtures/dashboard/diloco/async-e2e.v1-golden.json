@@ -72,6 +72,7 @@
      "phase_since": 1795424772.6878877,
      "policy_version": 25,
      "reason": "STOPPED",
+     "released_version": 21,
      "starting": false,
      "status": "done",
      "step": 25
@@ -376,6 +377,7 @@
      "phase_since": 1795422885.479153,
      "policy_version": 25,
      "reason": "STOPPED",
+     "released_version": 21,
      "starting": false,
      "status": "done",
      "step": 25

@@ -15,6 +15,8 @@ function $(id){return document.getElementById(id)}
 (function(){var nj=document.getElementById("nojs");if(nj)nj.style.display="none"})();
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
 function fin(v){return typeof v==="number"&&isFinite(v)}
+// a trainer releasing every N rounds runs ahead of its last release: name both, never two bare numbers
+function pvTxt(v,rel){if(!fin(v))return fin(rel)?"released v"+rel:"n/a";return fin(rel)&&rel!==v?"local v"+v+" · released v"+rel:"v"+v}
 function f(v,d){if(!fin(v))return "n/a";if(d==null)d=3;return Math.abs(v)>=100?v.toFixed(0):v.toFixed(d)}
 function pct(v){return fin(v)?(v*100).toFixed(1)+"%":"n/a"}
 function hm(s){return !fin(s)?"n/a":(s>=3600?(s/3600).toFixed(1)+" h":(s/60).toFixed(0)+" min")}
@@ -91,7 +93,7 @@ function wall(){
   if(multi)$("wall").innerHTML=(O.islands||[]).map(function(c){return '<div class="card'+(c.id===SEL?" sel":"")+'" data-id="'+esc(c.id)+'" tabindex="0">'+
     '<div style="display:flex;justify-content:space-between"><b><i class="sw" style="background:'+islColor(c.id)+'"></i>'+islName(c)+'</b>'+negBadge(c)+stBadge(c.status,c)+'</div>'+
     '<div class="note mono">'+esc(platform(c))+' · '+esc(c.gpu||"")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</div>'+
-    '<div class="kv"><span>policy version</span><span class="num">'+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span><span>reward</span><span class="num">'+f(islReward(c))+'</span><span>phase</span><span class="num">'+esc(islPhase(c)||"n/a")+'</span><span>role</span><span class="num">'+esc(c.role||"n/a")+'</span></div></div>'}).join("");
+    '<div class="kv"><span>policy version</span><span class="num">'+esc(pvTxt(c.policy_version,c.released_version))+'</span><span>reward</span><span class="num">'+f(islReward(c))+'</span><span>phase</span><span class="num">'+esc(islPhase(c)||"n/a")+'</span><span>role</span><span class="num">'+esc(c.role||"n/a")+'</span></div></div>'}).join("");
   Array.prototype.forEach.call(document.querySelectorAll(".card"),function(d){d.onclick=d.onkeydown=function(e){if(e.type==="keydown"&&e.key!=="Enter")return;SEL=d.dataset.id;cur=null;render()}});
   if(multi&&V.usage.syncer){var rows=(V.rounds_syncer||[]).slice(-30).reverse();
     $("syncer").innerHTML='<table class="c"><tr><th>global round</th><th>expected/responded</th><th>missed</th><th>quorum ms</th><th>merge ms</th><th>resends</th></tr>'+rows.map(function(r){

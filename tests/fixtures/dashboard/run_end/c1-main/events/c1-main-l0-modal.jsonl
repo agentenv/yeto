@@ -1,0 +1,226 @@
+{"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "policy_version": null, "rollout_id": null, "seq": 1, "time_unix": 1795459282.2502196}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "policy_version": null, "rollout_id": null, "seq": 2, "time_unix": 1795459312.2509432}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "policy_version": null, "rollout_id": null, "seq": 3, "time_unix": 1795459342.2525911}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "policy_version": null, "rollout_id": null, "seq": 4, "time_unix": 1795459372.253262}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "policy_version": null, "rollout_id": null, "seq": 5, "time_unix": 1795459402.2547598}
+{"event": "rl_driver_start", "island_id": 0, "time_unix": 1795459419.3046145}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 0, "time_unix": 1795459434.7067134}
+{"event": "rl_publication", "island_id": 0, "policy_version": 0, "time_unix": 1795459435.4568331}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 0, "rollout_id": 0, "time_unix": 1795459435.4582105}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 0, "time_unix": 1795459445.6209533}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 0, "rollout_id": 0, "seq": 1, "rounds_completed": 0, "time_unix": 1795459449.3026505}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 0, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.4545453125, "grad_norm": 1.2419779300689697, "step_seconds": 27.004391905999967, "tok_per_s": 201.5227752190513, "policy_age_mean": 0.0, "policy_age_max": 0, "time_unix": 1795459472.6265645}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 0, "time_unix": 1795459472.6480162}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 0, "rollout_id": 0, "seq": 2, "rounds_completed": 0, "time_unix": 1795459479.3037171}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 1, "time_unix": 1795459483.4279072}
+{"event": "rl_publication", "island_id": 0, "policy_version": 1, "time_unix": 1795459491.9884214}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 1, "rollout_id": 1, "time_unix": 1795459491.989761}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 1, "time_unix": 1795459498.3181627}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 1, "rollout_id": 1, "seq": 3, "rounds_completed": 1, "time_unix": 1795459509.3061178}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 1, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.171875, "grad_norm": 3.092191696166992, "step_seconds": 17.787073459, "tok_per_s": 247.98908095632217, "policy_age_mean": 1.0, "policy_age_max": 1, "time_unix": 1795459516.1299584}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 1, "time_unix": 1795459516.2815247}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 1, "local_version": 1, "seq": 1, "released_at": 1795459526.599, "release_bytes": 8060901581, "release_timings": {"digest_s": 2.593, "latest_s": 3.427, "prune_s": 0.59, "read_latest_s": 0.74, "stage_export_s": 8.54, "upload_s": 30.852, "wait_previous_s": 0.0}, "buffer_selected": 17, "time_unix": 1795459530.6169548}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 2, "time_unix": 1795459532.1521766}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "publish", "policy_version": 1, "rollout_id": null, "seq": 4, "rounds_completed": 1, "time_unix": 1795459539.307412}
+{"event": "rl_publication", "island_id": 0, "policy_version": 2, "time_unix": 1795459541.4507854}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 2, "rollout_id": 2, "time_unix": 1795459541.4523456}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 2, "local_version": 2, "seq": 2, "released_at": 1795459557.958, "release_bytes": 340625769, "release_timings": {"delta_s": 7.091, "digest_s": 0.001, "latest_s": 4.203, "prune_s": 0.34, "read_latest_s": 0.342, "stage_export_s": 9.285, "upload_s": 9.075, "wait_previous_s": 0.0}, "buffer_selected": 17, "time_unix": 1795459562.5012882}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 2, "rollout_id": 2, "seq": 5, "rounds_completed": 2, "time_unix": 1795459569.3089032}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 2, "time_unix": 1795459597.981277}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 2, "rollout_id": 2, "seq": 6, "rounds_completed": 2, "time_unix": 1795459599.3096542}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 2, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.15625, "grad_norm": 0.07832486927509308, "step_seconds": 20.610155599999985, "tok_per_s": 1475.58323140462, "policy_age_mean": 2.0, "policy_age_max": 2, "time_unix": 1795459618.592017}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 2, "time_unix": 1795459618.6083546}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 2, "rollout_id": 2, "seq": 7, "rounds_completed": 2, "time_unix": 1795459629.3105416}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 3, "time_unix": 1795459629.3587315}
+{"event": "rl_publication", "island_id": 0, "policy_version": 3, "time_unix": 1795459637.0995195}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "time_unix": 1795459637.1010528}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "seq": 8, "rounds_completed": 3, "time_unix": 1795459659.311826}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 3, "local_version": 3, "seq": 3, "released_at": 1795459669.956, "release_bytes": 8060901581, "release_timings": {"digest_s": 2.617, "latest_s": 2.684, "prune_s": 0.923, "read_latest_s": 0.353, "stage_export_s": 7.726, "upload_s": 29.889, "wait_previous_s": 0.0}, "buffer_selected": 25, "time_unix": 1795459673.5642593}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "seq": 9, "rounds_completed": 3, "time_unix": 1795459689.3144975}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "seq": 10, "rounds_completed": 3, "time_unix": 1795459719.3163984}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "seq": 11, "rounds_completed": 3, "time_unix": 1795459749.3174717}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "seq": 12, "rounds_completed": 3, "time_unix": 1795459779.318953}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "seq": 13, "rounds_completed": 3, "time_unix": 1795459809.3207552}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "seq": 14, "rounds_completed": 3, "time_unix": 1795459839.3216197}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 3, "rollout_id": 3, "seq": 15, "rounds_completed": 3, "time_unix": 1795459869.3235385}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 3, "time_unix": 1795459887.7308488}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 3, "rollout_id": 3, "seq": 16, "rounds_completed": 3, "time_unix": 1795459899.3261144}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 3, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.375, "grad_norm": 0.0, "step_seconds": 18.301379742999984, "tok_per_s": 309.86734768831167, "policy_age_mean": 1.75, "policy_age_max": 3, "time_unix": 1795459906.0328703}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 3, "time_unix": 1795459906.0547945}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 4, "time_unix": 1795459918.1071017}
+{"event": "rl_publication", "island_id": 0, "policy_version": 4, "time_unix": 1795459926.8311946}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "time_unix": 1795459926.833152}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 17, "rounds_completed": 4, "time_unix": 1795459929.327544}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 18, "rounds_completed": 4, "time_unix": 1795459959.3295572}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 4, "local_version": 4, "seq": 4, "released_at": 1795459949.417, "release_bytes": 266300851, "release_timings": {"delta_s": 9.947, "digest_s": 0.001, "latest_s": 2.619, "prune_s": 17.254, "read_latest_s": 0.321, "stage_export_s": 8.708, "upload_s": 12.321, "wait_previous_s": 0.0}, "buffer_selected": 33, "time_unix": 1795459969.2919548}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 19, "rounds_completed": 4, "time_unix": 1795459989.3308628}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 20, "rounds_completed": 4, "time_unix": 1795460019.332269}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 21, "rounds_completed": 4, "time_unix": 1795460049.333318}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 22, "rounds_completed": 4, "time_unix": 1795460079.3344789}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 23, "rounds_completed": 4, "time_unix": 1795460109.3358395}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 4, "rollout_id": 4, "seq": 24, "rounds_completed": 4, "time_unix": 1795460139.336601}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 4, "time_unix": 1795460168.5490763}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 4, "rollout_id": 4, "seq": 25, "rounds_completed": 4, "time_unix": 1795460169.3375835}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 4, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.453125, "grad_norm": 0.8585287928581238, "step_seconds": 19.02284382799985, "tok_per_s": 460.44640218869745, "policy_age_mean": 0.625, "policy_age_max": 1, "time_unix": 1795460187.5725477}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 4, "time_unix": 1795460187.5887725}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 5, "time_unix": 1795460199.235832}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "publish", "policy_version": 4, "rollout_id": null, "seq": 26, "rounds_completed": 4, "time_unix": 1795460199.3394825}
+{"event": "rl_publication", "island_id": 0, "policy_version": 5, "time_unix": 1795460207.9164495}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "time_unix": 1795460207.9185424}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "seq": 27, "rounds_completed": 5, "time_unix": 1795460229.340582}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 5, "local_version": 5, "seq": 5, "released_at": 1795460244.394, "release_bytes": 8060901581, "release_timings": {"digest_s": 2.662, "latest_s": 1.501, "prune_s": 0.693, "read_latest_s": 0.252, "stage_export_s": 8.666, "upload_s": 33.569, "wait_previous_s": 0.0}, "buffer_selected": 41, "time_unix": 1795460246.5893111}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "seq": 28, "rounds_completed": 5, "time_unix": 1795460259.3420734}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 5, "rollout_id": 5, "seq": 29, "rounds_completed": 5, "time_unix": 1795460289.34385}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 5, "time_unix": 1795460308.9073434}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 5, "rollout_id": 5, "seq": 30, "rounds_completed": 5, "time_unix": 1795460319.3447433}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 5, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.319196875, "grad_norm": 1.1035808324813843, "step_seconds": 20.83087775199988, "tok_per_s": 393.9824378841685, "policy_age_mean": 1.0, "policy_age_max": 1, "time_unix": 1795460329.7387516}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 5, "time_unix": 1795460329.7611458}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 6, "time_unix": 1795460342.9627411}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "publish", "policy_version": 5, "rollout_id": null, "seq": 31, "rounds_completed": 5, "time_unix": 1795460349.3463275}
+{"event": "rl_publication", "island_id": 0, "policy_version": 6, "time_unix": 1795460351.6377037}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "time_unix": 1795460351.6393795}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 6, "local_version": 6, "seq": 6, "released_at": 1795460368.974, "release_bytes": 315749021, "release_timings": {"delta_s": 7.948, "digest_s": 0.001, "latest_s": 1.429, "prune_s": 8.194, "read_latest_s": 0.305, "stage_export_s": 8.659, "upload_s": 9.084, "wait_previous_s": 0.0}, "buffer_selected": 49, "time_unix": 1795460378.597684}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 32, "rounds_completed": 6, "time_unix": 1795460379.3471735}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 33, "rounds_completed": 6, "time_unix": 1795460409.3482778}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 34, "rounds_completed": 6, "time_unix": 1795460439.3492603}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 35, "rounds_completed": 6, "time_unix": 1795460469.3506742}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 36, "rounds_completed": 6, "time_unix": 1795460499.3521333}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 37, "rounds_completed": 6, "time_unix": 1795460529.3531191}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 6, "rollout_id": 6, "seq": 38, "rounds_completed": 6, "time_unix": 1795460559.354732}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 6, "time_unix": 1795460577.9313037}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 6, "rollout_id": 6, "seq": 39, "rounds_completed": 6, "time_unix": 1795460589.356077}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 6, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.265625, "grad_norm": 0.7432973384857178, "step_seconds": 18.662605031999874, "tok_per_s": 370.6342168277018, "policy_age_mean": 0.75, "policy_age_max": 2, "time_unix": 1795460596.594501}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 6, "time_unix": 1795460596.6137462}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 7, "time_unix": 1795460609.8896236}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "publish", "policy_version": 6, "rollout_id": null, "seq": 40, "rounds_completed": 6, "time_unix": 1795460619.3571503}
+{"event": "rl_publication", "island_id": 0, "policy_version": 7, "time_unix": 1795460620.224124}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "time_unix": 1795460620.226957}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 41, "rounds_completed": 7, "time_unix": 1795460649.359124}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 7, "local_version": 7, "seq": 7, "released_at": 1795460663.261, "release_bytes": 8060901581, "release_timings": {"digest_s": 2.829, "latest_s": 2.28, "prune_s": 1.009, "read_latest_s": 0.27, "stage_export_s": 10.317, "upload_s": 39.943, "wait_previous_s": 0.0}, "buffer_selected": 57, "time_unix": 1795460666.5512223}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 42, "rounds_completed": 7, "time_unix": 1795460679.3612213}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 43, "rounds_completed": 7, "time_unix": 1795460709.3623257}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 44, "rounds_completed": 7, "time_unix": 1795460739.3642201}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 7, "rollout_id": 7, "seq": 45, "rounds_completed": 7, "time_unix": 1795460769.3661168}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 7, "time_unix": 1795460770.2868137}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 7, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.390625, "grad_norm": 1.8142316341400146, "step_seconds": 18.73746237399996, "tok_per_s": 516.2918973181561, "policy_age_mean": 1.0, "policy_age_max": 1, "time_unix": 1795460789.0250158}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 7, "time_unix": 1795460789.0427752}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 7, "rollout_id": 7, "seq": 46, "rounds_completed": 7, "time_unix": 1795460799.3674412}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 8, "time_unix": 1795460802.5709438}
+{"event": "rl_publication", "island_id": 0, "policy_version": 8, "time_unix": 1795460812.95855}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "time_unix": 1795460812.9602447}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "seq": 47, "rounds_completed": 8, "time_unix": 1795460829.3685572}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 8, "local_version": 8, "seq": 8, "released_at": 1795460832.393, "release_bytes": 260404412, "release_timings": {"delta_s": 7.592, "digest_s": 0.002, "latest_s": 2.24, "prune_s": 7.865, "read_latest_s": 0.265, "stage_export_s": 10.372, "upload_s": 11.579, "wait_previous_s": 0.0}, "buffer_selected": 65, "time_unix": 1795460842.4992142}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "seq": 48, "rounds_completed": 8, "time_unix": 1795460859.3696353}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "seq": 49, "rounds_completed": 8, "time_unix": 1795460889.3710837}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "seq": 50, "rounds_completed": 8, "time_unix": 1795460919.3721552}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "seq": 51, "rounds_completed": 8, "time_unix": 1795460949.3732889}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "seq": 52, "rounds_completed": 8, "time_unix": 1795460979.3746393}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "seq": 53, "rounds_completed": 8, "time_unix": 1795461009.3767312}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 8, "rollout_id": 8, "seq": 54, "rounds_completed": 8, "time_unix": 1795461039.3781283}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 8, "time_unix": 1795461044.5130777}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 8, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.5625, "grad_norm": 2.4663825035095215, "step_seconds": 18.968228511000007, "tok_per_s": 280.41627592768714, "policy_age_mean": 0.625, "policy_age_max": 1, "time_unix": 1795461063.4820435}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 8, "time_unix": 1795461063.4985816}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 8, "rollout_id": 8, "seq": 55, "rounds_completed": 8, "time_unix": 1795461069.37914}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 9, "time_unix": 1795461074.4225185}
+{"event": "rl_publication", "island_id": 0, "policy_version": 9, "time_unix": 1795461082.2442632}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 9, "rollout_id": 9, "time_unix": 1795461082.24607}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 9, "rollout_id": 9, "seq": 56, "rounds_completed": 9, "time_unix": 1795461099.3853292}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 9, "local_version": 9, "seq": 9, "released_at": 1795461114.231, "release_bytes": 8060901581, "release_timings": {"digest_s": 2.59, "latest_s": 1.407, "prune_s": 0.652, "read_latest_s": 0.272, "stage_export_s": 7.809, "upload_s": 29.129, "wait_previous_s": 0.0}, "buffer_selected": 73, "time_unix": 1795461116.2907715}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 9, "rollout_id": 9, "seq": 57, "rounds_completed": 9, "time_unix": 1795461129.394175}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 9, "rollout_id": 9, "seq": 58, "rounds_completed": 9, "time_unix": 1795461159.3955736}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 9, "rollout_id": 9, "seq": 59, "rounds_completed": 9, "time_unix": 1795461189.3973105}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 9, "rollout_id": 9, "seq": 60, "rounds_completed": 9, "time_unix": 1795461219.399379}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 9, "rollout_id": 9, "seq": 61, "rounds_completed": 9, "time_unix": 1795461249.4005983}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 9, "time_unix": 1795461277.207833}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 9, "rollout_id": 9, "seq": 62, "rounds_completed": 9, "time_unix": 1795461279.4015284}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 9, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.375, "grad_norm": 1.6554925441741943, "step_seconds": 19.640334878999965, "tok_per_s": 302.43883500943895, "policy_age_mean": 1.0, "policy_age_max": 1, "time_unix": 1795461296.8488975}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 9, "time_unix": 1795461296.865106}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 9, "rollout_id": 9, "seq": 63, "rounds_completed": 9, "time_unix": 1795461309.4028819}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 10, "time_unix": 1795461309.875569}
+{"event": "rl_publication", "island_id": 0, "policy_version": 10, "time_unix": 1795461319.516949}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "time_unix": 1795461319.520951}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "seq": 64, "rounds_completed": 10, "time_unix": 1795461339.4050593}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 10, "local_version": 10, "seq": 10, "released_at": 1795461337.975, "release_bytes": 239020205, "release_timings": {"delta_s": 9.279, "digest_s": 0.002, "latest_s": 1.523, "prune_s": 8.109, "read_latest_s": 0.226, "stage_export_s": 9.624, "upload_s": 8.955, "wait_previous_s": 0.0}, "buffer_selected": 81, "time_unix": 1795461347.6075947}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "seq": 65, "rounds_completed": 10, "time_unix": 1795461369.4059572}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "seq": 66, "rounds_completed": 10, "time_unix": 1795461399.4068904}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "seq": 67, "rounds_completed": 10, "time_unix": 1795461429.4076097}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "seq": 68, "rounds_completed": 10, "time_unix": 1795461459.408924}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 10, "rollout_id": 10, "seq": 69, "rounds_completed": 10, "time_unix": 1795461489.4098}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 10, "time_unix": 1795461508.3372166}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 10, "rollout_id": 10, "seq": 70, "rounds_completed": 10, "time_unix": 1795461519.4115846}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 10, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.40625, "grad_norm": 1.094576358795166, "step_seconds": 18.1561512090002, "tok_per_s": 252.9721165641758, "policy_age_mean": 0.875, "policy_age_max": 2, "time_unix": 1795461526.4939342}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 10, "time_unix": 1795461526.5103724}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 11, "time_unix": 1795461537.3863993}
+{"event": "rl_publication", "island_id": 0, "policy_version": 11, "time_unix": 1795461545.4226174}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 11, "rollout_id": 11, "time_unix": 1795461545.4248328}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 11, "rollout_id": 11, "seq": 71, "rounds_completed": 11, "time_unix": 1795461549.4301445}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 11, "local_version": 11, "seq": 11, "released_at": 1795461576.716, "release_bytes": 8060901581, "release_timings": {"digest_s": 2.641, "latest_s": 1.458, "prune_s": 0.701, "read_latest_s": 0.271, "stage_export_s": 8.022, "upload_s": 28.385, "wait_previous_s": 0.0}, "buffer_selected": 89, "time_unix": 1795461578.8764393}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 11, "rollout_id": 11, "seq": 72, "rounds_completed": 11, "time_unix": 1795461579.444509}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 11, "rollout_id": 11, "seq": 73, "rounds_completed": 11, "time_unix": 1795461609.4454727}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 11, "rollout_id": 11, "seq": 74, "rounds_completed": 11, "time_unix": 1795461639.4464371}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 11, "rollout_id": 11, "seq": 75, "rounds_completed": 11, "time_unix": 1795461669.4473095}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 11, "rollout_id": 11, "seq": 76, "rounds_completed": 11, "time_unix": 1795461699.448789}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 11, "time_unix": 1795461701.1965947}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 11, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.25, "grad_norm": 0.0, "step_seconds": 17.199657644000126, "tok_per_s": 332.7391811194796, "policy_age_mean": 1.0, "policy_age_max": 1, "time_unix": 1795461718.3968754}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 11, "time_unix": 1795461718.4130752}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "sync", "policy_version": 11, "rollout_id": 11, "seq": 77, "rounds_completed": 11, "time_unix": 1795461729.4498017}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 12, "time_unix": 1795461731.9312284}
+{"event": "rl_publication", "island_id": 0, "policy_version": 12, "time_unix": 1795461742.3111126}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 12, "rollout_id": 12, "time_unix": 1795461742.3133938}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 12, "rollout_id": 12, "seq": 78, "rounds_completed": 12, "time_unix": 1795461759.4519522}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 12, "local_version": 12, "seq": 12, "released_at": 1795461761.022, "release_bytes": 225999765, "release_timings": {"delta_s": 9.002, "digest_s": 0.001, "latest_s": 1.568, "prune_s": 7.825, "read_latest_s": 0.228, "stage_export_s": 10.362, "upload_s": 9.483, "wait_previous_s": 0.0}, "buffer_selected": 97, "time_unix": 1795461770.415674}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 12, "rollout_id": 12, "seq": 79, "rounds_completed": 12, "time_unix": 1795461789.4535453}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 12, "rollout_id": 12, "seq": 80, "rounds_completed": 12, "time_unix": 1795461819.454369}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 12, "rollout_id": 12, "seq": 81, "rounds_completed": 12, "time_unix": 1795461849.455759}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 12, "rollout_id": 12, "seq": 82, "rounds_completed": 12, "time_unix": 1795461879.4570274}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 12, "rollout_id": 12, "seq": 83, "rounds_completed": 12, "time_unix": 1795461909.4584112}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 12, "time_unix": 1795461922.7464926}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 12, "rollout_id": 12, "seq": 84, "rounds_completed": 12, "time_unix": 1795461939.4596}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 12, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.609375, "grad_norm": 0.26509004831314087, "step_seconds": 19.220134185999996, "tok_per_s": 545.9899446302442, "policy_age_mean": 2.0, "policy_age_max": 2, "time_unix": 1795461941.9673471}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 12, "time_unix": 1795461941.9885046}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 13, "time_unix": 1795461955.1664388}
+{"event": "rl_publication", "island_id": 0, "policy_version": 13, "time_unix": 1795461964.855311}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "time_unix": 1795461964.8568745}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "seq": 85, "rounds_completed": 13, "time_unix": 1795461969.4767575}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "seq": 86, "rounds_completed": 13, "time_unix": 1795461999.501428}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 13, "local_version": 13, "seq": 13, "released_at": 1795461998.928, "release_bytes": 8060901581, "release_timings": {"digest_s": 2.651, "latest_s": 1.664, "prune_s": 0.735, "read_latest_s": 0.263, "stage_export_s": 9.672, "upload_s": 31.161, "wait_previous_s": 0.0}, "buffer_selected": 105, "time_unix": 1795462001.3278983}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "seq": 87, "rounds_completed": 13, "time_unix": 1795462029.502637}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "seq": 88, "rounds_completed": 13, "time_unix": 1795462059.5041559}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 13, "rollout_id": 13, "seq": 89, "rounds_completed": 13, "time_unix": 1795462089.5057604}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 13, "time_unix": 1795462108.5823784}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 13, "rollout_id": 13, "seq": 90, "rounds_completed": 13, "time_unix": 1795462119.5069487}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 13, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.40625, "grad_norm": 0.5814648270606995, "step_seconds": 20.75986555899999, "tok_per_s": 329.19288328614766, "policy_age_mean": 3.0, "policy_age_max": 3, "time_unix": 1795462129.3431606}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 13, "time_unix": 1795462129.3628416}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 14, "time_unix": 1795462141.4341063}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "publish", "policy_version": 13, "rollout_id": null, "seq": 91, "rounds_completed": 13, "time_unix": 1795462149.5082357}
+{"event": "rl_publication", "island_id": 0, "policy_version": 14, "time_unix": 1795462150.671957}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "time_unix": 1795462150.6736758}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 14, "local_version": 14, "seq": 14, "released_at": 1795462167.942, "release_bytes": 209826719, "release_timings": {"delta_s": 7.786, "digest_s": 0.002, "latest_s": 1.534, "prune_s": 7.743, "read_latest_s": 0.289, "stage_export_s": 9.222, "upload_s": 9.196, "wait_previous_s": 0.0}, "buffer_selected": 113, "time_unix": 1795462177.2207146}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "seq": 92, "rounds_completed": 14, "time_unix": 1795462179.5096986}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "seq": 93, "rounds_completed": 14, "time_unix": 1795462209.512167}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "seq": 94, "rounds_completed": 14, "time_unix": 1795462239.5140316}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "seq": 95, "rounds_completed": 14, "time_unix": 1795462269.5154753}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 14, "rollout_id": 14, "seq": 96, "rounds_completed": 14, "time_unix": 1795462299.5171738}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 14, "time_unix": 1795462316.368193}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 14, "rollout_id": 14, "seq": 97, "rounds_completed": 14, "time_unix": 1795462329.517953}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 14, "trained_groups": 8, "trained_samples": 64, "reward_mean": 0.171875, "grad_norm": 0.3396693170070648, "step_seconds": 18.054690558000402, "tok_per_s": 412.5243784197475, "policy_age_mean": 2.5, "policy_age_max": 4, "time_unix": 1795462334.423519}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 14, "time_unix": 1795462334.4409454}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 15, "time_unix": 1795462345.5614223}
+{"event": "rl_publication", "island_id": 0, "policy_version": 15, "time_unix": 1795462354.1903253}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 15, "rollout_id": 15, "time_unix": 1795462354.193026}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 15, "rollout_id": 15, "seq": 98, "rounds_completed": 15, "time_unix": 1795462359.528108}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 15, "rollout_id": 15, "seq": 99, "rounds_completed": 15, "time_unix": 1795462389.5696626}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 15, "local_version": 15, "seq": 15, "released_at": 1795462394.707, "release_bytes": 8060901581, "release_timings": {"digest_s": 2.67, "latest_s": 2.296, "prune_s": 0.767, "read_latest_s": 0.272, "stage_export_s": 8.612, "upload_s": 37.579, "wait_previous_s": 0.0}, "buffer_selected": 121, "time_unix": 1795462397.7705855}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "generate", "policy_version": 15, "rollout_id": 15, "seq": 100, "rounds_completed": 15, "time_unix": 1795462419.5708325}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "train", "rollout_id": 15, "time_unix": 1795462445.0932653}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "train", "policy_version": 15, "rollout_id": 15, "seq": 101, "rounds_completed": 15, "time_unix": 1795462449.5717688}
+{"event": "rl_round_trained", "island_id": 0, "rollout_id": 15, "trained_groups": 3, "trained_samples": 24, "reward_mean": 0.25, "grad_norm": 1.946314811706543, "step_seconds": 17.478073472000233, "tok_per_s": 202.53948501080845, "policy_age_mean": 1.0, "policy_age_max": 1, "time_unix": 1795462462.5718975}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "sync", "rollout_id": 15, "time_unix": 1795462462.5787296}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "publish", "policy_version": 16, "time_unix": 1795462473.62329}
+{"event": "rl_heartbeat", "island_id": 0, "phase": "publish", "policy_version": 15, "rollout_id": null, "seq": 102, "rounds_completed": 15, "time_unix": 1795462479.5730238}
+{"event": "rl_publication", "island_id": 0, "policy_version": 16, "time_unix": 1795462481.60664}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "generate", "policy_version": 16, "rollout_id": 16, "time_unix": 1795462481.6081061}
+{"event": "rl_policy_released", "island_id": 0, "policy_version": 16, "local_version": 16, "seq": 16, "released_at": 1795462496.643, "release_bytes": 210538169, "release_timings": {"delta_s": 7.004, "digest_s": 0.001, "latest_s": 1.604, "prune_s": 8.224, "read_latest_s": 0.252, "stage_export_s": 7.969, "upload_s": 7.782, "wait_previous_s": 0.0}, "buffer_selected": 124, "time_unix": 1795462506.4715304}
+{"event": "rl_run_end", "island_id": 0, "reason": "data_ended", "source": "buffer_exhausted", "rollout_id": 16, "time_unix": 1795462506.473545}
+{"event": "rl_driver_phase", "island_id": 0, "phase": "finish", "rollout_id": 16, "time_unix": 1795462506.4742937}
+{"event": "rl_learner_finalized", "island_id": 0, "time_unix": 1795462507.6893697}
