@@ -85,6 +85,23 @@ on a :class:`BackgroundReleaser` thread, so the trainer trains its next step
 while the samplers' release is written; releases stay in version order (the next
 one waits for the upload of the previous one).
 
+The exporter's completion marker (``.complete``, :data:`.hf_export.COMPLETE_MARKER`:
+Miles' ``write_checkpoint_dir`` leaves it once every rank finished writing) is
+taken out of a release directory before it is listed and put: no reader of a
+release looks for it (``LATEST`` and the record's ``files`` are the commit
+point), and put with the weights it became visible first (a store push moves a
+directory's data files in name order, and an empty file lands at once), so the
+store showed a "complete" release whose weights were still uploading.
+
+Orphans: a trainer stopped between the weight upload and the record leaves a
+release directory without ``RELEASE.json``. A release prunes every such
+directory at or below the ``seq`` it just committed (the store's seq continues
+from ``LATEST``, so no writer is still uploading there) that no kept release
+needs as a delta base; one above that ``seq`` is left alone (it may be another
+writer's upload in flight). A directory without a record never takes a kept
+place. :attr:`PolicyReleaseStore.last_orphans_removed` names what a release
+pruned this way.
+
 Delta releases (``--rl-release-delta-full-every N``): a staged full
 release may be uploaded as the bf16 delta against the trainer's previous release
 (:class:`DeltaBase`, its files kept on the trainer's local disk;
@@ -99,6 +116,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -114,6 +132,7 @@ from typing import Any
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
 from . import file_verify
+from .hf_export import COMPLETE_MARKER
 from .object_store import DOWNLOAD_SUFFIX, ObjectStore, download_file, is_fatal_store_error, object_size
 from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory
 from .resume import CheckpointStore, _write_json_atomic, commit_paths
@@ -146,10 +165,27 @@ MAX_DELTA_RATIO = 0.5
 # release in the store, downloaded again; a full release's file_sha256)
 MAX_REBUILD_FAILURES = 3
 DIGEST_WORKERS = 8  # files hashed at a time (file_digests)
+_log = logging.getLogger(__name__)
+
+
+def _release_seq(name: str) -> int:
+    """The ``seq`` of a release directory name ``r<seq>-v<version>``."""
+    return int(_RELEASE_NAME.fullmatch(name).group(1))
 
 
 class PolicyReleaseError(RuntimeError):
     pass
+
+
+def drop_writer_marker(directory: Path) -> bool:
+    """Remove the exporter's completion marker (:data:`.hf_export.COMPLETE_MARKER`)
+    from a release directory before it is listed and put (module doc); True when
+    there was one."""
+    marker = Path(directory) / COMPLETE_MARKER
+    if not marker.is_file():
+        return False
+    marker.unlink()
+    return True
 
 
 @dataclass(frozen=True)
@@ -518,6 +554,11 @@ class PolicyReleaseStore:
         # release directory names in the store, oldest first (staged releases prune by it:
         # the mount of a store that bypasses it does not list them); None: not read yet
         self._names: list[str] | None = None
+        # of ``_names``: the directories that held no RELEASE.json when listed (orphans,
+        # module doc); a release this process put always has its record
+        self._recordless: set[str] = set()
+        # the directories without a record the last release removed (module doc, orphans)
+        self.last_orphans_removed: list[str] = []
         # how the last release() found LATEST: "cached", "reloaded" (first release,
         # after a failure, or cached_latest off) or "other_writer"
         self.last_latest_source: str | None = None
@@ -838,7 +879,7 @@ class PolicyReleaseStore:
         self._written = None  # until this release is in the store
         # the mount was just reloaded (first release of this process, or after a failed one)
         if self._names is None:
-            names = self._listed_names()
+            names = self._listed_names()  # and self._recordless
             # LATEST again after the listing (one read per process): a release another
             # writer published between the first read and the listing is in the listing
             # but above that read's seq; taken for a partial upload, it would be removed
@@ -851,12 +892,14 @@ class PolicyReleaseStore:
         else:
             names = self._names
         self._names = None  # until this release is in the store: a failed one lists again
+        self.last_orphans_removed = []
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
         if name in names:  # a partial upload of a killed or failed attempt (no LATEST names it):
             # its files are not all replaced by this upload (a staged store's push deletes
             # only what its own stage uploaded), and a reader downloads every object under it
             self.store.remove_tree(f"{self.release_dir}/{name}")
+        drop_writer_marker(staged)  # never put: module doc
         upload, delta = staged, None
         if delta_base is not None and weights == FULL:
             with timer.phase("delta_s"):
@@ -886,20 +929,22 @@ class PolicyReleaseStore:
         with timer.phase("latest_s"):
             self.store.put_files({f"{self.release_dir}/{name}/{RECORD}": text,
                                   f"{self.release_dir}/{LATEST}": text})
-        # a directory at this seq or above is a partial upload no LATEST named (the
-        # store's seq continues from LATEST): oldest, so it never takes a kept place
-        def orphan(n: str) -> bool:
-            return n != name and int(_RELEASE_NAME.fullmatch(n).group(1)) >= seq
-        names = [n for n in names if orphan(n)] + [n for n in names if n != name and not orphan(n)] + [name]
         if delta is not None:
             self._bases[name] = str(delta["base_path"])
+        recordless = {n for n in self._recordless if n != name}
+        released = [n for n in names if n != name and n not in recordless] + [name]
         with timer.phase("prune_s"):
-            kept = self._kept_names(names)
-            for old in names:
+            kept = self._kept_names(released)
+            for old in released:
                 if old not in kept:
                     self.store.remove_tree(f"{self.release_dir}/{old}")
                     self._bases.pop(old, None)
-            self._names = [n for n in names if n in kept]
+            orphans = self._orphans(sorted(recordless, key=_release_seq), seq, kept)
+            for old in orphans:
+                self.store.remove_tree(f"{self.release_dir}/{old}")
+            self._report_orphans(orphans, seq)
+            self._recordless = recordless - set(orphans)
+            self._names = [n for n in released if n in kept] + sorted(self._recordless, key=_release_seq)
         self._written = record
         self.last_timings = timer.as_dict()
         self.last_visible_at = round(self.clock(), 3)  # LATEST names it
@@ -954,7 +999,9 @@ class PolicyReleaseStore:
         if name in self._bases:
             return self._bases[name]
         try:
-            record = self._record_at(f"{self.release_dir}/{name}")
+            # the name under the release directory (``_record_at`` adds that directory;
+            # with it twice no record was ever found and a restarted writer dropped bases)
+            record = self._record_at(name)
         except Exception:  # noqa: BLE001 -- unreadable: treat as "may have a base"
             return None
         base = None if record.delta is None else str(record.delta.get("base_path") or "") or None
@@ -968,10 +1015,21 @@ class PolicyReleaseStore:
         the releases of an earlier process (each upload is evicted from the stage,
         and a restarted trainer may run on another node): listed from the stage
         alone, a restarted trainer never pruned them, nor knew a partial upload
-        of a killed one under the name it writes next."""
-        found = set()
+        of a killed one under the name it writes next. Keeps those without a record
+        in ``_recordless`` (module doc, orphans)."""
+        names, self._recordless = self._scan_names()
+        return names
+
+    def _scan_names(self) -> tuple[list[str], set[str]]:
+        """(:meth:`_listed_names`, those of them that hold no ``RELEASE.json``
+        under the root nor as an object): the second are the orphans (module doc)."""
+        found, recorded = set(), set()
         if self.root.is_dir():
-            found |= {p.name for p in self.root.iterdir() if p.is_dir() and _RELEASE_NAME.fullmatch(p.name)}
+            for p in self.root.iterdir():
+                if p.is_dir() and _RELEASE_NAME.fullmatch(p.name):
+                    found.add(p.name)
+                    if (p / RECORD).is_file():
+                        recorded.add(p.name)
         objects = self.store.objects
         if objects is not None:
             prefix = f"{self.release_dir}/"
@@ -979,8 +1037,24 @@ class PolicyReleaseStore:
                 head = key[len(prefix):].split("/", 1)
                 if len(head) == 2 and _RELEASE_NAME.fullmatch(head[0]):
                     found.add(head[0])
-        named = sorted((int(m.group(1)), name) for name in found if (m := _RELEASE_NAME.fullmatch(name)))
-        return [name for _, name in named]
+                    if head[1] == RECORD:
+                        recorded.add(head[0])
+        names = sorted(found, key=lambda n: (_release_seq(n), n))
+        return names, found - recorded
+
+    def _orphans(self, recordless: Iterable[str], seq: int, kept: set[str]) -> list[str]:
+        """The directories of ``recordless`` a release at ``seq`` removes (module
+        doc): at or below ``seq``, no kept release's delta base, not pinned."""
+        pinned = self._pinned_names()
+        return [n for n in recordless if _release_seq(n) <= int(seq) and n not in kept and n not in pinned]
+
+    def _report_orphans(self, orphans: list[str], seq: int) -> None:
+        self.last_orphans_removed = list(orphans)
+        if orphans:
+            _log.warning("policy releases: removed %d director%s without %s at or below seq %d "
+                         "(a release whose writer stopped before its record): %s",
+                         len(orphans), "y" if len(orphans) == 1 else "ies", RECORD, int(seq),
+                         ", ".join(orphans))
 
     def _latest_without_reload(self) -> PolicyRelease | None:
         path = self.root / LATEST
@@ -1014,11 +1088,13 @@ class PolicyReleaseStore:
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
         directory = self.root / name
+        self.last_orphans_removed = []
         with timer.phase("export_s"):
             if directory.exists():  # a partial release of an earlier attempt (no LATEST names it)
                 shutil.rmtree(directory)
             directory.mkdir(parents=True)
             write(directory)
+            drop_writer_marker(directory)  # never put: module doc
         with timer.phase("digest_s"):
             sha256 = directory_digest(directory) if weights == LORA else None
             files = file_sizes(directory)
@@ -1049,18 +1125,33 @@ class PolicyReleaseStore:
             self._prune()
         return record
 
-    def _prune(self) -> list[str]:
+    def _prune(self, seq: int | None = None) -> list[str]:
         """Delete all but the newest ``keep`` releases (a sampler that is loading
-        one of them fails the load and retries with the next LATEST)."""
-        named = sorted((int(m.group(1)), p.name) for p in self.root.iterdir()
-                       if p.is_dir() and (m := _RELEASE_NAME.fullmatch(p.name)))
+        one of them fails the load and retries with the next LATEST), and the
+        directories without a record at or below ``seq`` (module doc, orphans;
+        None: the highest seq with a record, the release just committed). A store
+        with an object API is listed too: the releases of an earlier process on
+        another node are not under this host's root."""
+        names, recordless = self._scan_names()
+        released = [n for n in names if n not in recordless]
         pinned = self._pinned_names()
-        removed = [name for _, name in named[:-self.keep] if name not in pinned]
-        for name in removed:
-            shutil.rmtree(self.root / name, ignore_errors=True)
-        if removed:
-            commit_paths(self.store, [f"{self.release_dir}/{name}" for name in removed])
-        return removed
+        removed = [name for name in released[:-self.keep] if name not in pinned]
+        if seq is None:
+            seq = max((_release_seq(n) for n in released), default=0)
+        # a kept release's delta base is never an orphan (a base without its record)
+        orphans = self._orphans(sorted(recordless, key=_release_seq), seq,
+                                self._kept_names(released) if recordless else set())
+        gone = removed + orphans
+        if self.store.objects is not None:
+            for name in gone:  # also the objects this host never put
+                self.store.remove_tree(f"{self.release_dir}/{name}")
+        else:
+            for name in gone:
+                shutil.rmtree(self.root / name, ignore_errors=True)
+            if gone:
+                commit_paths(self.store, [f"{self.release_dir}/{name}" for name in gone])
+        self._report_orphans(orphans, seq)
+        return gone
 
 
 class BackgroundReleaser:
