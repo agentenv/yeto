@@ -260,10 +260,14 @@ def evaluate(trainer: Sequence[Mapping[str, Any]], sampler: Sequence[Mapping[str
 
 
 def add_parser(sub: Any) -> argparse.ArgumentParser:
-    p = sub.add_parser(
-        "breaker", help="check a run's event tapes against health limits (exit 1 on a trip)",
-        description="Read-only health breakers over a run's event tapes; exit 1 when one trips. "
-                    "See docs/BREAKER.md.")
+    """The ``yeto breaker`` command group (``check`` is this module; :mod:`yeto.breakers.cli`)."""
+    from yeto.breakers.cli import add_parser as add_group  # noqa: PLC0415
+
+    return add_group(sub)
+
+
+def add_check_args(p: argparse.ArgumentParser) -> None:
+    """The flags of ``yeto breaker check`` (also accepted without ``check``)."""
     p.add_argument("--trainer-log", required=True, nargs="+",
                    help="trainer events: launcher log(s) with YETO_RL_EVENT lines, JSONL tapes or directories")
     p.add_argument("--sampler-tapes", nargs="*", default=[],
@@ -277,7 +281,6 @@ def add_parser(sub: Any) -> argparse.ArgumentParser:
     p.add_argument("--logprob-warn", type=float, help="override the logprob_diff warn limit")
     p.add_argument("--logprob-act", type=float, help="override the logprob_diff trip limit")
     p.add_argument("--json", action="store_true", help="print one JSON object instead of the table")
-    return p
 
 
 def cmd_breaker(args: argparse.Namespace) -> int:

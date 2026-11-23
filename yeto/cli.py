@@ -1087,7 +1087,7 @@ def build_parser() -> argparse.ArgumentParser:
     from .cost.report import add_parsers as _add_cost_parsers
 
     _add_cost_parsers(sub)
-    from .rl.breaker import add_parser as _add_breaker_parser
+    from .breakers.cli import add_parser as _add_breaker_parser
 
     _add_breaker_parser(sub)
     from .rl.model_registry.cli import add_parser as _add_adapt_parser
@@ -1432,8 +1432,11 @@ def cmd_launch(args) -> int:
     except KeyboardInterrupt:
         _print_detach_hints(name)
         return 0
-    state, code = _final_state(runs.load_run(name) or {"name": name})
-    print(f"[yeto] run '{name}' finished: {state} (exit code {code})")
+    meta = runs.load_run(name) or {"name": name}
+    state, code = _final_state(meta)
+    # a breaker that stopped the run names itself; the exit code stays the component's own
+    reason = f" stop_reason={meta['stop_reason']}" if meta.get("stop_reason") else ""
+    print(f"[yeto] run '{name}' finished: {state} (exit code {code}){reason}")
     return code
 
 
@@ -2589,6 +2592,10 @@ def main(argv=None) -> int:
     if not argv:
         parser.print_help()
         return 0
+    if argv[0] == "breaker":  # `yeto breaker --trainer-log ...`: the check, before the command group
+        from .breakers.cli import normalize_argv
+
+        argv = normalize_argv(argv)
     args = parser.parse_args(argv)
     if args.command == "launch":
         return cmd_launch(args)
@@ -2648,9 +2655,9 @@ def main(argv=None) -> int:
 
         return cmd_adapt(args)
     if args.command == "breaker":
-        from .rl.breaker import cmd_breaker
+        from .breakers.cli import main as breaker_main
 
-        return cmd_breaker(args)
+        return breaker_main(args)
     if args.command == "cost":
         from .cost.report import cmd_cost
 
