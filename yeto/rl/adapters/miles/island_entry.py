@@ -2087,9 +2087,14 @@ def run_miles(
         attention_specs = specs = ()
         canonical_targets = [] if full_parameter else list(kimi_k31_lora.target_modules(args.lora_targets))
         if full_parameter:
-            # the trainer-side optimizer patch (sitecustomize path, as the DSV4 runtime): Ray
-            # workers inherit the flag; the patch arms the import hook in this process. It
-            # checks the partial experts' masters, which a LoRA run does not have.
+            # the trainer-side optimizer patch (FP32 master check + optional expert LR group).
+            # KNOWN LIMITATION: the flag and the patch take effect in this driver process
+            # only. Ray started before this line and the optimizer is built in the trainer
+            # actors, which inherit the raylet's environment plus the job runtime_env:
+            # connect_island_ray does not forward the flag and sitecustomize has no K3.1
+            # branch, so the check does not run there (pinned by
+            # tests/test_rl_partial_experts_ray_env.py; docs/MILES_RL.md). The freeze
+            # itself is Miles' --partial-experts-selection argv and does reach the actors.
             _require_env(kimi_k31_runtime.ENV_FLAG, "1")
             kimi_k31_runtime.install()
     elif getattr(args, "rl_model_recipe", "generic") == "deepseek_v41":

@@ -11,6 +11,11 @@ The cross-process test builds a worker environment the way Ray does (a
 raylet environment without the switches, plus ``runtime_env``), starts a
 fresh interpreter in it, and checks that the repo's ``sitecustomize`` armed
 the model-provider hook on a stand-in Miles module.
+
+The K3.1 optimizer patch (``models/kimi_k31/ports_runtime.py``) has the same
+shape and is NOT forwarded today: its flag and the FP32 master check take
+effect in the island driver only (docs/MILES_RL.md, known limitation). The
+last test pins that, so a fix has to change it deliberately.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ import textwrap
 from pathlib import Path
 
 from yeto.rl.adapters.miles.entry import connect_island_ray
+from yeto.rl.adapters.miles.models.kimi_k31 import ports_runtime as k31_runtime
 from yeto.rl.adapters.miles.models.partial_experts import in_place
 from yeto.rl.adapters.miles.models.partial_experts import selection as sel
 
@@ -41,6 +47,17 @@ WORKER = textwrap.dedent("""
         "wrapped": model_provider.get_model_provider_func is not model_provider.ORIGINAL,
     }))
 """)
+# The K3.1 variant: does the worker see the flag, and is Miles' optimizer factory wrapped?
+K31_WORKER = textwrap.dedent("""
+    import json, os, sys
+    import sitecustomize
+    from miles.backends.megatron_utils import model
+    print(json.dumps({
+        "env": {k: os.environ.get(k) for k in sys.argv[1:]},
+        "wrapped": model.get_megatron_optimizer is not model.ORIGINAL,
+    }))
+""")
+K31_KEYS = (k31_runtime.ENV_FLAG, k31_runtime.EXPERT_LR_ENV)
 
 
 class _FakeRay:
@@ -74,6 +91,12 @@ def _fake_miles(tmp_path: Path) -> Path:
 
         ORIGINAL = get_model_provider_func
     """))
+    (pkg / "model.py").write_text(textwrap.dedent("""
+        def get_megatron_optimizer(*args, **kwargs):
+            raise AssertionError("not called here")
+
+        ORIGINAL = get_megatron_optimizer
+    """))
     return root
 
 
@@ -90,9 +113,9 @@ def _raylet_env() -> dict[str, str]:
             if k not in KEYS and not k.startswith("YETO_") and k not in ("PYTHONPATH", "PYTHONSTARTUP")}
 
 
-def _run_worker(env_vars: dict[str, str]) -> dict:
+def _run_worker(env_vars: dict[str, str], *, body: str = WORKER, keys=KEYS) -> dict:
     env = {**_raylet_env(), **env_vars}  # Ray merges the job's runtime_env env_vars over the raylet's
-    proc = subprocess.run([sys.executable, "-c", WORKER, *KEYS], env=env, cwd=str(ROOT.parent),
+    proc = subprocess.run([sys.executable, "-c", body, *keys], env=env, cwd=str(ROOT.parent),
                           capture_output=True, text=True, timeout=120, check=False)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip().splitlines()[-1])
@@ -139,4 +162,25 @@ def test_a_ray_worker_process_arms_the_freeze_from_the_runtime_env(tmp_path):
     stale = {k: v for k, v in env_vars.items() if k not in KEYS}
     report = _run_worker(stale)
     assert report["env"] == dict.fromkeys(KEYS)
+    assert report["wrapped"] is False
+
+
+def test_k31_optimizer_patch_does_not_reach_the_workers_today(tmp_path):
+    """KNOWN LIMITATION, pinned on purpose (owner decision pending: forward the flag, add a
+    sitecustomize K3.1 branch, and choose whether a failed master check raises or warns).
+    The island driver sets the flag after Ray started; the customer K3.1 runtime_env must
+    stay without it until that decision, and a worker must keep Miles' default optimizer.
+    Fixing it means changing this test deliberately (and the customer behavior with it)."""
+
+    environ = {"RAY_ADDRESS": ADDRESS, "PYTHONPATH": os.pathsep.join([str(ROOT), str(_fake_miles(tmp_path))]),
+               k31_runtime.ENV_FLAG: "1", k31_runtime.EXPERT_LR_ENV: "1e-5"}
+    env_vars = _runtime_env(environ)
+    assert not set(K31_KEYS) & set(env_vars)
+    assert env_vars == _runtime_env({k: v for k, v in environ.items() if k not in K31_KEYS})
+    assert k31_runtime.ENV_FLAG not in (ROOT / "sitecustomize.py").read_text()
+
+    report = _run_worker(env_vars, body=K31_WORKER, keys=K31_KEYS)
+    assert report == {"env": dict.fromkeys(K31_KEYS), "wrapped": False}
+    # Even a worker that did get the flag would not arm the patch: no sitecustomize branch.
+    report = _run_worker({**env_vars, k31_runtime.ENV_FLAG: "1"}, body=K31_WORKER, keys=K31_KEYS)
     assert report["wrapped"] is False
