@@ -1,6 +1,8 @@
 # Run health breakers
 
-Two pieces watch an RL run's numerics:
+Two pieces watch an RL run's numerics. Both are registered breakers
+(`monitor.health_*` and `trainer.xhw_guard`); every breaker of yeto, with its
+defaults and config, is in [BREAKERS.md](BREAKERS.md).
 
 - `yeto breaker`: a read-only check over a run's event tapes. It prints every
   breaker with its window value and limit and exits 1 when one trips, so a cron
@@ -10,10 +12,14 @@ Two pieces watch an RL run's numerics:
   sampler source every trained round and can warn, quarantine, down-weight or
   stop.
 
-## `yeto breaker`
+## `yeto breaker check`
+
+`yeto breaker check` is the health check. The old spelling `yeto breaker
+--trainer-log ...` still runs it. `yeto breaker show` and `yeto breaker list`
+are described in [BREAKERS.md](BREAKERS.md).
 
 ```bash
-yeto breaker --trainer-log ~/.yeto/runs/<run>/launcher.log \
+yeto breaker check --trainer-log ~/.yeto/runs/<run>/launcher.log \
   --sampler-tapes <dir-of-pulled-sampler-tapes> [--window 3] \
   [--sampler-hardware auto|amd|nvidia|ascend] [--noise-floor X] \
   [--logprob-warn X] [--logprob-act Y] [--flips flips.json] [--json]

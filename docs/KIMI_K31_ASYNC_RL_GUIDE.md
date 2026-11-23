@@ -13,6 +13,7 @@ repeated here:
 | NC sampler pool: every `pool.json` field, `pool-*` commands, billing | [NC_POOL.md](NC_POOL.md) |
 | Store task dispenser (`sampler.dispense`) | [DISPENSER.md](DISPENSER.md) |
 | Sandbox hosts, `yeto sandbox`, `agentic.envs` | [SANDBOX_HOSTS.md](SANDBOX_HOSTS.md) |
+| Every breaker: registry, defaults, `breakers:` section, events | [BREAKERS.md](BREAKERS.md) |
 | Run health breakers, log-prob guards | [BREAKER.md](BREAKER.md) |
 | Resource ledger, budget breaker, cleanup | [COST_GUARD.md](COST_GUARD.md) |
 | Trainer flags, rounds, cuts, releases, padding | [MILES_RL.md](MILES_RL.md) |
@@ -2515,12 +2516,256 @@ budget or wall-clock breach perform the full `yeto run down` immediately.
 The pool also has its own guards (`elastic.max_nodes`, `max_orders`,
 `max_run_spend_ucr`, order breaker); see [NC_POOL.md](NC_POOL.md). Log-prob
 and health breakers inside the run are described in [BREAKER.md](BREAKER.md).
-Run `yeto breaker` on a K3.1 run with `--sampler-tapes` (the MI355X sampler
+Run `yeto breaker check` on a K3.1 run with `--sampler-tapes` (the MI355X sampler
 tapes) or `--sampler-hardware amd`: without either the sampler hardware is
 unknown and the breaker fails closed to the `nvidia` limits (act 0.052), so the
 healthy MI355X mismatch band (0.076-0.099) trips `logprob_diff`.
 The resource ledger, idle shutdown and cleanup are described in
 [COST_GUARD.md](COST_GUARD.md).
+
+### 7.1 One place for every breaker: the `breakers:` section
+
+Every automatic stop, drop, pause or refusal in yeto is a registered breaker.
+The registry gives each one a name, `<layer>.<entry>`, and records its
+parameters, units, defaults, actions and old spellings. There are seven layers:
+`run`, `launch`, `trainer`, `sampler`, `harness`, `pool` and `monitor`. The full
+list, with defaults, is in [BREAKERS.md](BREAKERS.md).
+
+You can now set any breaker in one section of `run.json`:
+
+```json
+"breakers": {
+  "run":     {"budget": {"usd": 20000}, "wall_clock": {"hours": 72},
+              "release_stall": {"action": "warn"}},
+  "trainer": {"sample_wait": {"timeout_s": 7200}},
+  "sampler": {"dispense_redo": {"max_n": 6}, "infra_streak": {"max_n": 5}},
+  "harness": {"setup_retries": {"max_n": 6}},
+  "pool":    {"engine_stall": {"limit_s": 900}},
+  "pools":   {"pool": {"start_timeout": {"limit_s": 5400}}},
+  "deps":    {"outage_tolerance_s": 3600}
+}
+```
+
+The rules:
+
+- Each entry takes `enabled`, `action` and its parameters. Parameter names end
+  in their unit: `_s` (seconds), `_usd`, `_n` (a count), `_ratio`.
+- `0` is always the number 0. Only `enabled: false` turns an entry off.
+- An entry you do not write keeps its default.
+- `pool` sets every pool. `pools.<name>` overrides one pool. The name is
+  `pool` for a run config with one `pool` section, else the pool's `name` in
+  `samplers`.
+- An unknown key, a wrong type or an out-of-range value refuses the config.
+  The error names the path, for example `breakers.sampler.drain.timeout_s`.
+- A config without `breakers:` behaves exactly as before. A golden test locks
+  this for every example config.
+
+The old knobs still work: flags in `trainer.argv`, `budget.*`, spec fields,
+pool `elastic` fields and environment variables. See 7.8.
+
+### 7.2 See what is in force: `yeto breaker show`
+
+```bash
+yeto breaker show --config run.json            # every entry, its value and where it came from
+yeto breaker show --config run.json --layer sampler --pool <name>
+yeto breaker show --config run.json --json     # the breakers.resolved.json format
+yeto breaker list --markdown                   # the registry, no config needed
+yeto breaker check --trainer-log LOG ...       # the health check (was: yeto breaker --trainer-log)
+```
+
+`show` prints one row per entry: name, layer, kind, on/off, action, effective
+value and source. The source is `breakers` (your section), `legacy` (an old
+knob, with its location), `switch`, `inherit` or `default`. A `!` marks an
+implicit default, a redundant old knob or a dependency finding. Below the table
+come the switch groups, the dependency findings and any conflicts.
+
+With `--config`, `show` also reads the run's pool: its config file, its
+`elastic` and `sampler.dispense` sections, and the sampler spec as the pool
+merges it. A run with several pools needs `--pool NAME`. Without it the
+sampler, harness and pool rows show defaults, and a note says so. `--spec FILE`
+reads that spec instead of the pool's. A spec with `max_backlog_groups: "auto"`
+shows the cap `yeto run up` derives for it.
+
+Exit codes: `0` no error, `1` an error finding or a conflict, `2` bad input.
+
+`yeto run up` saves the same data as `breakers.resolved.json` in its state
+directory. The dashboard reads it for the Breakers panel. The old spelling
+`yeto breaker --trainer-log ...` still runs `check`.
+
+### 7.3 Switch groups
+
+A switch group turns several entries off at once. `show` lists each group and
+its members.
+
+| Group | Members | Old switch |
+|---|---|---|
+| `cost_guard` | `launch.budget`, `launch.idle`, `launch.nc_lease_overdue` | `--no-cost-guard` |
+
+Turn a group off with the old switch or in the section:
+
+```json
+"breakers": {"switches": {"cost_guard": false}}
+```
+
+Turning a group off while the section enables one of its members is a conflict.
+
+### 7.4 Invariants cannot be disabled
+
+Some entries are data-correctness checks, not limits: token alignment, buffer
+group integrity, the compaction startup check, the trainer launcher's exit and
+others. They are registered as `kind: invariant`. `show` lists them as
+`(cannot disable)`. Writing `enabled: false` for one refuses the config. The
+error names where the check is configured.
+
+`semantic` entries (`agent_timeout_s`, `max_prompt_len`, dispense `passes`,
+`max_backlog_groups`, `max_compactions`) are also shown. The dependency rules
+read them. You still set them in their usual place, not in `breakers:`.
+
+### 7.5 One budget
+
+Write the budget once, as `breakers.run.budget.usd`. `launch.budget.usd` and
+`pool.spend_cap.usd` inherit it. You can still set a layer's own value. Write
+`"usd": "inherit"` to make inheritance explicit.
+
+- Inheritance starts only from the `breakers:` section. A config that sets only
+  the old `budget.usd` keeps its old launch and pool budgets.
+- If `run.budget` is off, or its value is null, the children get no budget
+  from it (never 0).
+- A child budget larger than the run budget is a warning (rule D11).
+- `run.budget.warn_ratio` (default 0.8) is the one warn line. The launch budget
+  and the dashboard use it.
+
+### 7.6 Dependency rules
+
+Some limits only make sense together. `yeto breaker show`, the `yeto run up`
+preflight, `yeto launch --dry-run` and the pool dry run check them all.
+
+| Rule | Checks | Level |
+|---|---|---|
+| D1 | drain cut = min(`drain_timeout_s`, `reload_max_defer_s`) | info / warn |
+| D2 | trial wall clock > agent timeout + 60 s (warn below 300 s) | error / warn |
+| D3 | sandbox TTL > trial wall clock + abandon grace | error |
+| D4 | sample wait covers the longest group and `outage_tolerance_s` | warn |
+| D5 | launch stall >= sample wait | warn |
+| D6 | trainer silence >= launch stall; stall off needs silence on | error |
+| D7 | starvation alert < stop | warn |
+| D8 | rows x passes cover the trained groups (warn below 10 % margin) | error / warn |
+| D9 | the outage one dispense slot survives | info / warn |
+| D10 | dispense lease > write defer | warn |
+| D11 | launch and pool budgets <= run budget | warn |
+| D12 | one warn ratio | warn |
+| D13 | provider timeout >= run wall clock | info / warn |
+| D14 | first-group timeout >= pool start timeout | warn |
+| D15 | policy age <= the algorithm's staleness | error |
+| D16 | `min_samples` <= `sampling.n`, >= 2 for GRPO | error |
+| D17 | xhw act limits >= warn limits | warn |
+| D18 | NaN skip thresholds match the health check | warn |
+| D19 | the samplers' backlog covers the trainer's release cadence | error / warn |
+| D20 | store read outage >= `outage_tolerance_s` | warn |
+| D21 | every enabled breaker has a finite, positive limit | error (warn for an old knob) |
+
+An `error` refuses the start. A `warn` or `info` is printed. D21 only warns
+when the value comes from an old knob, so an existing config still starts.
+
+`deps.outage_tolerance_s` declares how long an outage (gateway, store, sandbox
+provider) the run must survive. With it, D4, D9 and D20 give a number. Without
+it they only check structure.
+
+`deps.overrides` changes one rule's level to `error`, `warn`, `info` or `off`:
+`{"D8": "warn"}`. `show` highlights every override.
+
+`yeto breaker check --config run.json` runs the rules alone.
+
+### 7.7 Native breakers that replace hand-written scripts
+
+Two breakers watch what external watchdog scripts used to watch. Both are on by
+default and only alert. Stopping or pausing is opt-in.
+
+**`run.release_stall`.** After the first policy release, no new release for
+the limit. The `yeto run up` monitor reads the store's `LATEST` pointer.
+
+- The clock starts at the first release of this trainer launch. Releases that
+  were already in the store do not count. The clock restarts at every new
+  release. A trainer restart resets everything, so load time does not count.
+- Default limit: the larger of 60 min and 2 x the wait from the trainer's
+  start to its first release. After 3 releases (2 intervals) it becomes the
+  larger of 30 min and 5 x the median interval. Set `limit_s` (seconds) to fix
+  it.
+- Default action `warn`: the `trainer_release_stall_alert` log line, an
+  `rl_breaker` event and `release_stall` in `state.json`. A new release logs
+  `trainer_release_stall_recovered`.
+- With `"action": "stop"` the monitor stops the trainer through the STOP flag,
+  like a starvation stop. It waits `stop_grace_s` (default 1200) before
+  `yeto down`. The stop reason is `breaker:run.release_stall`.
+- The store's `LATEST` pointer is read at most every `check_s` (300 s). A failed
+  read is not evidence and never stops the run.
+- `yeto run up` prints one line at start: the limit, how to stop, how to turn
+  it off.
+
+**`sampler.infra_streak`.** Agentic groups in a row lost to infrastructure
+(every trial failed before the model ran, so the group is dropped as
+`below_min_samples`).
+
+- Default: 5 groups in a row. A written group ends the streak.
+- A group that lost a trial to a release drain cut or a weight switch does not
+  count. It does not end the streak either. Other drop reasons are ignored.
+- Default action `warn`: one `rl_breaker` event per streak. Nothing else
+  changes.
+- With `"action": "pause"` the store dispenser claims no new task. Trials in
+  flight go on. Claiming resumes when a group is written, or `cooldown_s`
+  (default 300) after the trip, whichever comes first. This stops a gateway
+  outage from burning the task list. Without the store dispenser, `pause` only
+  warns.
+- To hold or release one sampler by hand, use `yeto run pause` and
+  `yeto run resume`.
+- Set it in the spec (`agentic.infra_streak.{enabled, max_n, cooldown_s,
+  action}`) or in `breakers.sampler.infra_streak`. If both are set they must
+  agree.
+- The sampler prints one line at start: the limit, how to pause, how to turn
+  it off.
+
+Map from the old e2e watchdog scripts:
+
+| Script check | Native breaker |
+|---|---|
+| B1 spend cap | `run.budget` (`yeto run up`) and `launch.budget` (the cost guard) |
+| B2 consecutive infra-failed groups | `sampler.infra_streak` |
+| B3 release version unchanged | `run.release_stall` |
+
+### 7.8 Old knobs and their removal
+
+Every old place a breaker could be set is now an alias of its registry entry.
+The tables in [BREAKERS.md](BREAKERS.md) list them in the "Legacy knobs" column.
+
+- An old knob alone works as before. `show` marks it `legacy`.
+- An old knob that agrees with the section is redundant. `show` marks it.
+- With a `breakers:` section, an old knob that disagrees with the section, or
+  with another old knob, is a conflict. The start is refused, and both
+  locations are named.
+- Without a `breakers:` section, two old knobs that disagree keep their old
+  behavior. `yeto run up` logs a warning and `show` lists the conflict.
+- Old "off" spellings still mean off: `--idle-warn-minutes 0`,
+  `--rl-stall-timeout 0`, `budget.usd: null`, `budget.wall_h: null`,
+  `starvation.alert_min: 0`, `rollout.stall_alert_s: 0`, `YETO_RL_XHW_GUARD=off`,
+  `YETO_AGENTENV_SKIP_REACH_CHECK=1`, `engine_stall_s: null`.
+  `max_sampler_restarts: 0` is not off: it means 0 restarts.
+
+Deprecation:
+
+- Old knobs that repeat another place, or that only an environment variable
+  could set, are deprecated. They are marked "(deprecated)" in
+  [BREAKERS.md](BREAKERS.md). Examples: `HARBOR_SETUP_RETRIES`,
+  `HARBOR_MAX_SANDBOXES`, the `YETO_AGENTENV_*` caps and
+  `YETO_AGENTENV_SKIP_REACH_CHECK`.
+- `yeto run up`, `yeto launch`, the pool CLI and `yeto breaker show` print a
+  note for each deprecated knob in use.
+- They are deprecated from 0.2.0, the release that adds the `breakers:`
+  section. They will be removed in 0.4.0, two minor releases later. Move these
+  settings into `breakers:` before then. See [CHANGELOG.md](../CHANGELOG.md).
+- Not deprecated: the native keys of a sampler spec (`max_backlog_groups`,
+  `agentic.*`, `prompts.dispense.*`, `reload_max_defer_s`, ...). A spec is
+  complete on its own, so these keys are its normal form. `yeto launch` flags
+  without the mark also stay.
 
 ## 8. Troubleshooting FAQ
 
