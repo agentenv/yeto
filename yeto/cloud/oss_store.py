@@ -252,6 +252,12 @@ def store_from_env(path: str | os.PathLike[str], *, environ: Mapping[str, str], 
     uri = environ.get(URI_ENV)
     if not uri:
         raise ValueError(f"oss checkpoint store selected but {URI_ENV} is not set")
+    from .s3_store import sub_store_uri
+
+    # a directory below the island's store path (yeto.launch.storage: the default stage)
+    # is a sub-store (s3_store.sub_store_uri)
+    bucket, prefix = parse_oss_uri(uri)
+    uri = sub_store_uri(uri, path, Path(DEFAULT_STAGE) / bucket / prefix, SCHEME)
     return OssStore(uri, environ=environ, stage=environ.get(STAGE_ENV) or DEFAULT_STAGE, client=client)
 
 
