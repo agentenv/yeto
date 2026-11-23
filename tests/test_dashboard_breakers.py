@@ -9,6 +9,7 @@ import pytest
 
 from yeto.dashboard import alerts, sources
 from yeto.dashboard.breakers import (
+    LEGACY_TRIPS,
     RESOLVED_FILE,
     STORE_RESOLVED_KEY,
     BreakerState,
@@ -271,16 +272,94 @@ def test_serve_poll_reads_the_resolved_file():
     assert r.breakers.resolved is not None and r.page_view(now=NOW)["breakers"]["trip_total"] >= 5
 
 
-def test_legacy_events_map_to_their_entry(monkeypatch):
-    monkeypatch.setattr("yeto.dashboard.breakers.legacy_event_names", lambda: {"nan_skip_breaker": "trainer.nan"})
+R2_HEALTHY = FX / "breakers_r2_healthy"
+
+
+def legacy(event, t=T0, **kw):
+    return {"event": event, "sampler_id": "s-0", "time_unix": t, **kw}
+
+
+def test_legacy_table_names_entries_that_declare_the_event():
+    from yeto.breakers.registry import default_registry
+
+    reg = default_registry()
+    for event, rule in LEGACY_TRIPS.items():
+        probe = {"event": event, "written": False, "dropped_reason": "below_min_samples", "lost": {"wall_clock_cap": 1},
+                 "abandoned_trials": 1, "state": "exhausted", "stale_groups": 1}
+        hits = rule(probe)
+        assert hits, event
+        for name, state in hits:
+            assert name in reg and event in reg.get(name).legacy_events, (event, name)
+            assert state in ("trip", "warn", "clear")
+
+
+def test_healthy_replay_shows_no_trip():
+    """A trimmed slice of a healthy run's tapes (every group written, drains clean, tasks
+    trained, no stale group, lease expiries recovered): routine telemetry, not trips."""
     r = Reducer()
-    r.feed({"event": "nan_skip_breaker", "island_id": 0, "time_unix": T0, "detail": "2 NaN rounds in a row"})
+    sources.load_all(r, [str(R2_HEALTHY)])
+    assert r.counts["learner"] == 79
+    v = r.page_view(now=T0)
+    assert "breakers" not in v  # nothing to show: no trip, no setting, no snapshot
+    assert not [a for a in v["overview"]["alerts"] if a["rule"] == "breaker"]
+
+
+@pytest.mark.parametrize("record,entry", [
+    (legacy("rl_agentic_group", written=False, dropped_reason="below_min_samples", kept=1, trials=8), "sampler.min_samples"),
+    (legacy("rl_agentic_group", written=True, dropped_reason=None, lost={"wall_clock_cap": 2}), "sampler.trial_wall_clock"),
+    (legacy("rl_agentic_drain", abandoned_trials=0, detached_trials=3), "sampler.drain"),
+    (legacy("rl_agentic_drain", abandoned_trials=1, detached_trials=0), "sampler.drain"),
+    (legacy("rl_dispense_settle", state="exhausted", slot=4), "sampler.dispense_redo"),
+    (legacy("rl_dispense_settle", state="expired", slot=4), "sampler.dispense_redo"),
+    ({"event": "rl_buffer_stale_skipped", "island_id": 0, "time_unix": T0, "stale_groups": 3}, "trainer.policy_age"),
+])
+def test_legacy_record_that_acted_is_a_trip(record, entry):
+    r = Reducer()
+    r.feed(record)
     v = r.page_view(now=T0 + 1)["breakers"]
     t = v["trips"][0]
-    assert (t["name"], t["legacy"], t["legacy_event"], t["scope"]) == ("trainer.nan", True, "nan_skip_breaker", "island 0")
-    # an entry with an rl_breaker of its own does not list its legacy events again
-    r.feed(brk("trainer.nan", "trip", T0 + 2))
-    assert [x["legacy"] for x in r.page_view(now=T0 + 3)["breakers"]["trips"]] == [False]
+    assert (t["name"], t["state"], t["legacy"], t["legacy_event"]) == (entry, "trip", True, record["event"])
+    row = rows(v)[entry]
+    assert row["tripped"] and row["last"]["legacy_event"] == record["event"]
+
+
+@pytest.mark.parametrize("record", [
+    legacy("rl_agentic_group", written=True, dropped_reason=None, lost={}),
+    legacy("rl_agentic_group", written=False, dropped_reason="fenced"),  # not the minimum: another entry's
+    legacy("rl_agentic_drain", abandoned_trials=0, detached_trials=0, detached_in_flight=0, timed_out=False),
+    legacy("rl_dispense_settle", state="trained"),
+    legacy("rl_dispense_settle", state="dropped"),
+    {"event": "rl_buffer_stale_skipped", "island_id": 0, "time_unix": T0, "stale_groups": 0},
+    legacy("rl_dispense_expired", slot=3),  # the lease noticed; the settle tells whether it cost a redo
+    legacy("rl_dispense_lease", slot=3),
+    legacy("rl_sampler_vram_ok"),
+])
+def test_routine_legacy_record_is_not_a_trip(record):
+    r = Reducer()
+    r.feed(record)
+    assert "breakers" not in r.page_view(now=T0 + 1)
+
+
+def test_legacy_warn_and_clear_states():
+    r = Reducer()
+    r.feed({"event": "trainer_starvation_alert", "time_unix": T0, "island_id": 0})
+    r.feed({"event": "trainer_starvation_recovered", "time_unix": T0 + 5, "island_id": 0})
+    v = r.page_view(now=T0 + 10)["breakers"]
+    assert [t["state"] for t in v["trips"]] == ["clear", "warn"]
+    assert not rows(v)["run.starvation"]["tripped"]
+
+
+def test_layer_with_rl_breaker_ignores_its_legacy_events():
+    r = Reducer()
+    drop = legacy("rl_agentic_group", written=False, dropped_reason="below_min_samples")
+    r.feed(drop)
+    r.feed({"event": "rl_buffer_stale_skipped", "island_id": 0, "time_unix": T0, "stale_groups": 2})
+    r.feed(brk("sampler.drain", "warn", T0 + 1, action="drop", scope={"sampler_id": "s-0"}))
+    v = r.page_view(now=T0 + 2)["breakers"]
+    # the sampler layer writes rl_breaker: its legacy rows go; the trainer layer's stay
+    assert sorted((t["name"], t["legacy"]) for t in v["trips"]) == [("sampler.drain", False),
+                                                                      ("trainer.policy_age", True)]
+    assert "sampler.min_samples" not in rows(v)
 
 
 def test_run_status_summary():

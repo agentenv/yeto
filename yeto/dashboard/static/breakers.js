@@ -52,7 +52,7 @@ function layer(L){
   return '<div class="blay">'+head+main.map(row).join("")+more+'</div>'}
 function trips(B){var t=B.trips||[];if(!t.length)return '<div class="note">no trips on the tapes</div>';
   return '<div class="btrips">'+t.slice(0,30).map(function(x){var cls=TRIP_CLS[x.state]||"mu";
-    return '<div><span class="t">'+esc(clock(x.ts))+'</span><span class="x"><span class="st '+cls+'"><i></i>'+esc(x.legacy?"trip":x.state)+'</span> <span class="mono">'+esc(x.name)+'</span>'+
+    return '<div><span class="t">'+esc(clock(x.ts))+'</span><span class="x"><span class="st '+cls+'"><i></i>'+esc(x.state)+'</span> <span class="mono">'+esc(x.name)+'</span>'+
       (x.action?' <span class="tag">'+esc(x.action)+'</span>':"")+(x.scope?' <span class="note">'+esc(x.scope)+'</span>':"")+
       (fin(x.value)&&fin(x.limit)?' <span class="num note">'+esc(fmt(x.value,x.unit))+" / "+esc(fmt(x.limit,x.unit))+(x.count>1?" ×"+x.count:"")+'</span>':"")+
       (x.stop_reason?'<div class="mono bsr">stop_reason='+esc(x.stop_reason)+'</div>':"")+

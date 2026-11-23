@@ -10,9 +10,11 @@ Three inputs, each optional:
   sampler, pool);
 * ``rl_breaker`` events: warns, trips, clears, shadow trips and config mismatches.
 
-Tapes written before the registry existed carry none of these; their legacy trip
-events (the registry's ``legacy_events``) are listed under the entry they belong to,
-for entries that have no ``rl_breaker`` of their own.
+Tapes written before the registry existed carry none of these. Their legacy events
+(``LEGACY_TRIPS``) are listed under the entry they belong to, and only when the record
+says the breaker acted: most of them are routine telemetry (one ``rl_agentic_group``
+per group, one ``rl_dispense_settle`` per task, ...). On a tape whose layer writes
+``rl_breaker`` the new events are the record and that layer's legacy events are not used.
 
 Pure observation, like the rest of the dashboard: missing stays None.
 """
@@ -62,19 +64,57 @@ def _scope_key(scope: Any) -> str:
     return json.dumps({k: v for k, v in scope.items() if v is not None}, sort_keys=True, default=str)
 
 
-def legacy_event_names() -> dict[str, str]:
-    """Legacy event name -> registry entry (``Breaker.legacy_events``); {} when the
-    registry does not load (a page must render without it)."""
-    try:
-        from yeto.breakers.registry import default_registry  # noqa: PLC0415
+def _n(r: Any, key: str) -> float:
+    v = _f(r.get(key)) if isinstance(r, dict) else None
+    return 0.0 if v is None else v
 
-        out: dict[str, str] = {}
-        for b in default_registry():
-            for ev in b.legacy_events:
-                out.setdefault(ev, b.name)
-        return out
-    except Exception:  # noqa: BLE001
-        return {}
+
+def _when(entry: str, state: str = "trip", test: Callable[[dict], bool] | None = None) -> Callable[[dict], list]:
+    return lambda r: [(entry, state)] if test is None or test(r) else []
+
+
+def _group(r: dict) -> list[tuple[str, str]]:
+    """``rl_agentic_group`` is written for every group: a trip only for a group dropped
+    below its kept-trial minimum, or with trials cut by the trial wall clock."""
+    out = []
+    if r.get("written") is False and r.get("dropped_reason") == "below_min_samples":
+        out.append(("sampler.min_samples", "trip"))
+    if _n(r.get("lost"), "wall_clock_cap") > 0:
+        out.append(("sampler.trial_wall_clock", "trip"))
+    return out
+
+
+# Legacy event -> (record -> [(entry, state)]): when a record of a pre-registry event is
+# a breaker acting. An event not listed here is never shown as a trip (routine telemetry,
+# or one that does not say which entry acted). tests check each entry declares the event.
+LEGACY_TRIPS: dict[str, Callable[[dict], list]] = {
+    # routine records: a trip only under their condition
+    "rl_agentic_group": _group,
+    "rl_agentic_drain": _when("sampler.drain", test=lambda r: (
+        _n(r, "abandoned_trials") > 0 or _n(r, "detached_trials") > 0 or _n(r, "detached_in_flight") > 0)),
+    "rl_dispense_settle": _when("sampler.dispense_redo",
+                                test=lambda r: r.get("state") in ("exhausted", "expired", "redo")),
+    "rl_buffer_stale_skipped": _when("trainer.policy_age", test=lambda r: _n(r, "stale_groups") > 0),
+    # one record per warn / trip / recovery
+    "trainer_starvation_alert": _when("run.starvation", "warn"),
+    "trainer_starvation_recovered": _when("run.starvation", "clear"),
+    "trainer_starvation_stop": _when("run.starvation"),
+    "cost_budget_warn": _when("launch.budget", "warn"),
+    "cost_budget_exceeded": _when("launch.budget"),
+    "idle_warn": _when("launch.idle", "warn"),
+    "idle_cleared": _when("launch.idle", "clear"),
+    "idle_shutdown": _when("launch.idle"),
+    "RunStalled": _when("launch.stall"),
+    "TrainerLoopGaveUp": _when("launch.trainer_failures"),
+    "SampleBufferRolloutError": _when("trainer.sample_wait"),
+    "DamagedPayloadLimit": _when("trainer.buffer_damaged"),
+    "rl_nan_skip": _when("trainer.nan"),
+    "SamplerLoadFatal": _when("sampler.load_failures"),
+    "StoreReadOutage": _when("sampler.store_read_outage"),
+    "nc_elastic_breaker_tripped": _when("pool.provision_breaker"),
+    "nc_elastic_sampler_crash_loop": _when("pool.crash_loop"),
+    "nc_elastic_engine_stalled": _when("pool.engine_stall"),
+}
 
 
 def best_source(sources: Any) -> dict | None:
@@ -98,8 +138,9 @@ def entry_state(kind: Any, enabled: Any, implicit: Any) -> str:
     return "armed"
 
 
-def _trip_row(r: dict, ts: float | None, *, legacy: str | None = None, name: str | None = None) -> dict:
-    state = r.get("state") if legacy is None else "trip"
+def _trip_row(r: dict, ts: float | None, *, legacy: str | None = None, name: str | None = None,
+              state: str | None = None) -> dict:
+    state = r.get("state") if legacy is None else state
     action = r.get("action")
     stop = r.get("stop_reason")
     if stop is None and legacy is None and state == "trip" and action in STOP_ACTIONS:
@@ -127,13 +168,9 @@ class BreakerState:
         self.last: dict[str, dict] = {}  # entry -> its newest rl_breaker row
         self.latest: dict[tuple[str, str], dict] = {}  # (entry, scope key) -> newest rl_breaker row
         self.seen = False
-        self._legacy_names: dict[str, str] | None = None
+        self.breaker_layers: set[str] = set()  # layers with an rl_breaker on the tapes
 
     # -- folding --------------------------------------------------------------------
-    def legacy_names(self) -> dict[str, str]:
-        if self._legacy_names is None:
-            self._legacy_names = legacy_event_names()
-        return self._legacy_names
 
     def fold(self, r: dict, iid: str | None, ts: float | None, *, cost_guard: bool = False) -> bool:
         """Fold one record; False for a record that is none of the breaker inputs.
@@ -157,6 +194,7 @@ class BreakerState:
             self.seen = True
             row = _trip_row(r, ts)
             self.trips.append(row)
+            self.breaker_layers.add(str(row["layer"] or str(row["name"]).split(".")[0]))
             key = (str(row["name"]), row["scope_key"])
             if ts is None or (self.latest.get(key) or {}).get("ts") is None or ts >= self.latest[key]["ts"]:
                 self.latest[key] = row
@@ -180,13 +218,14 @@ class BreakerState:
                     self.settings[name] = {k: it.get(k) for k in ("layer", "kind", "enabled", "action", "params",
                                                                   "source", "implicit")} | {"ts": ts}
             return True
-        if isinstance(event, str):
-            name = self.legacy_names().get(event)
-            if name is not None:
-                self.seen = True
-                self.legacy.append(_trip_row(r, ts, legacy=event, name=name))
-                return True
-        return False
+        rule = LEGACY_TRIPS.get(event) if isinstance(event, str) else None
+        if rule is None:
+            return False
+        hits = rule(r)
+        for name, state in hits:
+            self.seen = True
+            self.legacy.append(_trip_row(r, ts, legacy=event, name=name, state=state))
+        return bool(hits)
 
     def load_resolved(self, doc: Any, source: str) -> bool:
         """Take a ``breakers.resolved.json`` document; False when it is not one."""
@@ -220,7 +259,8 @@ class BreakerState:
                               "redundant": [], "depends_on": [], "switch_groups": [], "from": "status"}
             elif s.get("params") and row["params"] and s.get("params") != row["params"]:
                 row["runtime_params"] = s["params"]  # the process runs with other values (config_mismatch)
-        for name in set(self.last) | {t["name"] for t in self.legacy} | {k[0] for k in self.status}:
+        legacy = {t["name"] for t in self.legacy if str(t["name"]).split(".")[0] not in self.breaker_layers}
+        for name in set(self.last) | legacy | {k[0] for k in self.status}:
             if name not in rows:
                 trip = self.last.get(name) or {}
                 rows[name] = {"name": name, "layer": trip.get("layer") or name.split(".")[0], "kind": None,
@@ -247,8 +287,8 @@ class BreakerState:
         estimate), used for an entry no process reports a value for."""
         if not self.seen:
             return None
-        named_trips = {t["name"] for t in self.trips}
-        legacy = [t for t in self.legacy if t["name"] not in named_trips]
+        # a layer that writes rl_breaker is told by it alone (its legacy events are telemetry)
+        legacy = [t for t in self.legacy if str(t["name"]).split(".")[0] not in self.breaker_layers]
         layers: dict[str, list[dict]] = {}
         for name, row in self._rows().items():
             row["state"] = entry_state(row["kind"], row["enabled"], row["implicit"])
