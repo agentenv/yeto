@@ -466,6 +466,29 @@ def breakers(reducer, now: float) -> list[dict]:
     return out
 
 
+def guard_drops(reducer, th: dict) -> list[dict]:
+    """A guard that drops data (trainer.policy_age, sampler.min_samples) acts as designed
+    on a single group, so its trips raise no alert of their own (``breakers``): this rule
+    judges the share of the groups it dropped over its last ``guard_drop_window_rounds``
+    rounds instead, once it dropped in ``guard_drop_min_rounds`` of them (a one-off burst,
+    e.g. a backlog aging out at a trainer restart, stays on the guard's card): a warning
+    from ``guard_drop_warn_ratio``, critical from ``guard_drop_alert_ratio``."""
+    out = []
+    for name, rate in sorted(reducer.guard_drop_rates().items()):
+        if rate["drop_rounds"] < th["guard_drop_min_rounds"]:
+            continue
+        if rate["ratio"] >= th["guard_drop_alert_ratio"]:
+            sev = 0
+        elif rate["ratio"] >= th["guard_drop_warn_ratio"]:
+            sev = 1
+        else:
+            continue
+        out.append(_alert(sev, "guard_drops", f"breaker {name} dropped {rate['ratio'] * 100:.0f}% of the groups",
+                          f"{rate['dropped']:g} of {rate['total']:g} groups over the last {rate['rounds']} rounds "
+                          f"({rate['scope']})"))
+    return out
+
+
 def _with_release(reducer, th: dict, now: float) -> list[dict]:
     stale = stale_read_position(reducer, th, now)
     return stale + release_stalled(reducer, th, now, stale)
@@ -480,7 +503,7 @@ def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
               + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
               + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)
-              + _with_release(reducer, th, now) + breakers(reducer, now)
+              + _with_release(reducer, th, now) + breakers(reducer, now) + guard_drops(reducer, th)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown")
               + alerts_diloco.evaluate(reducer, now, cards))
     # an alert whose monitor entry the run config switched off (``breakers.monitor.<entry>.enabled``)

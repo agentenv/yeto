@@ -155,6 +155,9 @@ TODAY = {
     "trial_fail_window_rounds": 10, "trial_fail_min_trials": 8, "trial_fail_warn": 0.5,
     "trainer_missing_warn_s": 1200.0, "trainer_missing_severe_s": 1800.0, "trainer_fail_window_s": 3600.0,
     "trainer_fail_loop": 2, "stale_read_recent_s": 300.0, "release_stall_warn_s": 600.0,
+    # new in the guard drop-rate rule (not a changed value)
+    "guard_drop_window_rounds": 10, "guard_drop_min_groups": 20, "guard_drop_min_rounds": 3, "guard_drop_warn_ratio": 0.1,
+    "guard_drop_alert_ratio": 0.25,
 }
 
 

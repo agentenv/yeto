@@ -33,6 +33,12 @@ function gauge(r){var g=r.gauge;if(!g)return '<span class="note">no live value</
   return '<span class="num">'+esc(txt)+'</span>'+(g.scope?' <span class="note">'+esc(g.scope)+(g.scopes>1?" (worst of "+g.scopes+")":"")+'</span>':"")+(g.detail?' <span class="note">· '+esc(g.detail)+'</span>':"")}
 function last(t){if(!t)return "";var cls=TRIP_CLS[t.state]||"mu";
   return '<span class="st '+cls+'"><i></i>'+esc(t.legacy?"legacy "+t.legacy_event:t.state)+'</span> <span class="note">'+esc(clock(t.ts))+(t.scope?" · "+esc(t.scope):"")+(t.stop_reason?" · "+esc(t.stop_reason):"")+'</span>'}
+/* a guard that drops data acted as designed: amber count on its card; red once it drops too much */
+function acted(r){var a=r.acted;if(!a)return "";var n=a.acts||0,rt=a.rate,cls=r.tripped?"bd":"wn";
+  var parts=[];if(n)parts.push("acted "+n+" time"+(n===1?"":"s")+" · "+fmt(a.dropped,"n")+" "+esc(a.unit)+(fin(a.last_ts)?" · last at "+clock(a.last_ts):"")+(a.scope?" ("+esc(a.scope)+")":""));
+  if(rt)parts.push(Math.round(rt.ratio*1000)/10+"% of "+fmt(rt.total,"n")+" groups over the last "+rt.rounds+" rounds"+(rt.scope?" ("+esc(rt.scope)+")":""));
+  if(!n&&!r.tripped)return parts.length?'<div class="bt2"><span class="note">no drops · '+parts.join(" · ")+'</span></div>':"";
+  return '<div class="bt2"><span class="st '+cls+'"><i></i>'+(r.tripped?"dropping too much":"acted")+'</span> <span class="note">'+parts.join(" · ")+(a.last_detail?" · "+esc(a.last_detail):"")+'</span></div>'}
 function row(r){
   var st=r.state,mismatch=r.runtime_params?' <span class="st wn" title="'+esc(JSON.stringify(r.runtime_params))+'"><i></i>runs with other values</span>':"";
   return '<div class="brow'+(r.tripped?" btrip":"")+'">'+
@@ -41,7 +47,7 @@ function row(r){
     '<div class="bv">'+(params(r)||'<span class="note">'+(st==="invariant"?"cannot be disabled":"no parameters")+'</span>')+'</div>'+
     '<div class="bg">'+bar(r.gauge,r.tripped)+gauge(r)+'</div>'+
     '<div class="bs">'+source(r.source)+(r.redundant&&r.redundant.length?' <span class="note">(repeated at '+esc(r.redundant.join(", "))+')</span>':"")+'</div>'+
-    (r.last?'<div class="bt2">last: '+last(r.last)+(r.last.detail?' <span class="note">'+esc(r.last.detail)+'</span>':"")+'</div>':"")+
+    (r.last?'<div class="bt2">last: '+last(r.last)+(r.last.detail?' <span class="note">'+esc(r.last.detail)+'</span>':"")+'</div>':"")+acted(r)+
   '</div>'}
 function layer(L){
   var main=L.rows.filter(function(r){return r.state==="armed"||r.state==="implicit"||r.tripped}),rest=L.rows.filter(function(r){return main.indexOf(r)<0});
@@ -50,8 +56,9 @@ function layer(L){
   var more="";if(rest.length){var on=!!open[L.layer];
     more='<button class="btn bmore" data-layer="'+esc(L.layer)+'" aria-expanded="'+on+'">'+(on?"hide":"show")+" "+rest.length+" off / invariant</button>"+(on?rest.map(row).join(""):"")}
   return '<div class="blay">'+head+main.map(row).join("")+more+'</div>'}
-function trips(B){var t=B.trips||[];if(!t.length)return '<div class="note">no trips on the tapes</div>';
-  return '<div class="btrips">'+t.slice(0,30).map(function(x){var cls=TRIP_CLS[x.state]||"mu";
+function trips(B){var t=B.trips||[],g=B.acted_total?'<div class="note">guards that drop a group or a trial acted '+B.acted_total+' time'+(B.acted_total===1?"":"s")+': counted on their cards, not listed here</div>':"";
+  if(!t.length)return g+'<div class="note">no trips on the tapes</div>';
+  return g+'<div class="btrips">'+t.slice(0,30).map(function(x){var cls=TRIP_CLS[x.state]||"mu";
     return '<div><span class="t">'+esc(clock(x.ts))+'</span><span class="x"><span class="st '+cls+'"><i></i>'+esc(x.state)+'</span> <span class="mono">'+esc(x.name)+'</span>'+
       (x.action?' <span class="tag">'+esc(x.action)+'</span>':"")+(x.scope?' <span class="note">'+esc(x.scope)+'</span>':"")+
       (fin(x.value)&&fin(x.limit)?' <span class="num note">'+esc(fmt(x.value,x.unit))+" / "+esc(fmt(x.limit,x.unit))+(x.count>1?" ×"+x.count:"")+'</span>':"")+
@@ -72,7 +79,7 @@ function render(V){
   var box=$("brkBox"),B=V&&V.breakers;if(!box)return;box.hidden=!B;var nav=$("navBrk");if(nav)nav.style.display=B?"":"none";if(!B)return;
   var c=B.counts||{};
   $("brkNote").textContent=["armed","implicit","off","invariant"].filter(function(k){return c[k]}).map(function(k){return c[k]+" "+k}).join(" · ")+
-    (B.trip_total?" · "+B.trip_total+" trips":"")+" · "+(B.resolved_from?"settings from "+B.resolved_from.split("/").slice(-2).join("/"):B.status_scopes?"settings from "+B.status_scopes+" process report(s)":"events only");
+    (B.trip_total?" · "+B.trip_total+" trips":"")+(B.acted_total?" · "+B.acted_total+" guard acts":"")+" · "+(B.resolved_from?"settings from "+B.resolved_from.split("/").slice(-2).join("/"):B.status_scopes?"settings from "+B.status_scopes+" process report(s)":"events only");
   $("brk").innerHTML=banners(B)+switches(B)+'<div class="bgrid"><div>'+(B.layers||[]).map(layer).join("")+'</div><div><h3>Recent trips</h3>'+trips(B)+findings(B)+'</div></div>';
   var bs=box.querySelectorAll?box.querySelectorAll(".bmore"):[];
   for(var i=0;i<bs.length;i++)bs[i].addEventListener("click",function(e){var k=e.currentTarget.getAttribute("data-layer");open[k]=!open[k];render(V)});

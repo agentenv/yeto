@@ -123,6 +123,21 @@ DASHBOARD: tuple[Breaker, ...] = (
         # release since the first skip of the streak, for this long
         _s("release_stall_warn_s", 600.0),),
         "elapsed", "a policy release stuck uploading (critical when samplers wait on it)"),
+    _alert("dashboard_guard_drops", (
+        # a guard that drops data (trainer.policy_age: groups older than the age window;
+        # sampler.min_samples: groups below the kept-trial minimum) does its job on a single
+        # group, so only its share of the groups over recent rounds is judged. 10 rounds smooth
+        # a release landing mid-round (it can age out the groups in flight at once); at least
+        # 20 groups, so one or two drops in a short window are no alert. A healthy async run
+        # drops a few % at most (none on the reference replays); 10 % is worth a look, and a
+        # quarter of the generated data thrown away over 10 rounds is systematic (samplers
+        # behind the trainer, an age window or a minimum too tight) and wastes sampler time.
+        # Only a sustained rate counts: drops in at least 3 of the rounds; a one-off burst (a
+        # backlog aging out at once after a trainer restart: 25 groups in one round of a real
+        # replay) stays on the guard's card.
+        _n("guard_drop_window_rounds", 10), _n("guard_drop_min_groups", 20), _n("guard_drop_min_rounds", 3),
+        _x("guard_drop_warn_ratio", 0.1), _x("guard_drop_alert_ratio", 0.25)),
+        "ratio", "share of the groups a data-dropping guard dropped over its recent rounds"),
 )
 
 # alert ``rule`` (yeto.dashboard.alerts) -> the entry whose params judge it; rules without a
@@ -148,6 +163,7 @@ DASHBOARD_RULES: dict[str, str] = {
     "trainer_failed": "monitor.dashboard_trainer_failed",
     "stale_read_position": "monitor.dashboard_stale_read_position",
     "release_stalled": "monitor.dashboard_release_stalled",
+    "guard_drops": "monitor.dashboard_guard_drops",
 }
 
 

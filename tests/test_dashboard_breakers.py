@@ -89,6 +89,11 @@ def test_fixture_trips_with_stop_reason_and_findings():
     assert r["trainer.sample_wait"]["tripped"] and r["trainer.sample_wait"]["last"]["state"] == "trip"
     assert not r["sampler.drain"]["tripped"] and r["sampler.drain"]["last"]["state"] == "warn"
     assert [f["rule"] for f in v["findings"]] == ["D1", "D8", "D9"]
+    # guards that drop data did their job: counted on their card, not listed as trips
+    assert ("trainer.policy_age", "trip") not in names and ("sampler.min_samples", "trip") not in names
+    assert not r["trainer.policy_age"]["tripped"] and not r["sampler.min_samples"]["tripped"]
+    assert r["trainer.policy_age"]["acted"]["acts"] == 1 and r["trainer.policy_age"]["acted"]["dropped"] == 3
+    assert r["sampler.min_samples"]["acted"]["dropped"] == 4 and v["acted_total"] == 2
 
 
 def test_no_panel_on_tapes_without_breakers():
@@ -269,7 +274,7 @@ def test_serve_poll_reads_the_resolved_file():
     r = Reducer(run="brk-demo")
     state = DashboardState(r, [str(BRK)], resolved=ResolvedFile(resolved_candidates([str(BRK)])))
     state.poll()
-    assert r.breakers.resolved is not None and r.page_view(now=NOW)["breakers"]["trip_total"] >= 5
+    assert r.breakers.resolved is not None and r.page_view(now=NOW)["breakers"]["trip_total"] >= 4
 
 
 R2_HEALTHY = FX / "breakers_r2_healthy"
@@ -288,7 +293,8 @@ def test_legacy_table_names_entries_that_declare_the_event():
                  "abandoned_trials": 1, "state": "exhausted", "stale_groups": 1}
         hits = rule(probe)
         assert hits, event
-        for name, state in hits:
+        for name, state, count in hits:
+            assert count > 0
             assert name in reg and event in reg.get(name).legacy_events, (event, name)
             assert state in ("trip", "warn", "clear")
 
@@ -304,23 +310,38 @@ def test_healthy_replay_shows_no_trip():
     assert not [a for a in v["overview"]["alerts"] if a["rule"] == "breaker"]
 
 
+@pytest.mark.parametrize("record,entry,dropped", [
+    (legacy("rl_agentic_group", written=False, dropped_reason="below_min_samples", kept=1, trials=8),
+     "sampler.min_samples", 1),
+    (legacy("rl_agentic_group", written=True, dropped_reason=None, lost={"wall_clock_cap": 2}), "sampler.trial_wall_clock", 2),
+    (legacy("rl_agentic_drain", abandoned_trials=0, detached_trials=3), "sampler.drain", 3),
+    (legacy("rl_agentic_drain", abandoned_trials=1, detached_trials=0), "sampler.drain", 1),
+    ({"event": "rl_buffer_stale_skipped", "island_id": 0, "time_unix": T0, "stale_groups": 3}, "trainer.policy_age", 3),
+])
+def test_legacy_record_of_a_dropping_guard_is_counted_on_its_card(record, entry, dropped):
+    r = Reducer()
+    r.feed(record)
+    v = r.page_view(now=T0 + 1)["breakers"]
+    assert v["trips"] == [] and v["acted_total"] == 1  # the guard acted as designed: no red trip row
+    row = rows(v)[entry]
+    assert not row["tripped"] and row["last"] is None
+    assert (row["acted"]["acts"], row["acted"]["dropped"], row["acted"]["last_ts"]) == (1, dropped, T0)
+    assert row["acted"]["legacy_event"] == record["event"]
+    assert not [a for a in r.overview(now=T0 + 1)["alerts"] if a["rule"] in ("breaker", "guard_drops")]
+
+
 @pytest.mark.parametrize("record,entry", [
-    (legacy("rl_agentic_group", written=False, dropped_reason="below_min_samples", kept=1, trials=8), "sampler.min_samples"),
-    (legacy("rl_agentic_group", written=True, dropped_reason=None, lost={"wall_clock_cap": 2}), "sampler.trial_wall_clock"),
-    (legacy("rl_agentic_drain", abandoned_trials=0, detached_trials=3), "sampler.drain"),
-    (legacy("rl_agentic_drain", abandoned_trials=1, detached_trials=0), "sampler.drain"),
     (legacy("rl_dispense_settle", state="exhausted", slot=4), "sampler.dispense_redo"),
     (legacy("rl_dispense_settle", state="expired", slot=4), "sampler.dispense_redo"),
-    ({"event": "rl_buffer_stale_skipped", "island_id": 0, "time_unix": T0, "stale_groups": 3}, "trainer.policy_age"),
+    ({"event": "trainer_starvation_stop", "time_unix": T0, "island_id": 0}, "run.starvation"),
 ])
-def test_legacy_record_that_acted_is_a_trip(record, entry):
+def test_legacy_record_of_a_breaker_is_a_trip(record, entry):
     r = Reducer()
     r.feed(record)
     v = r.page_view(now=T0 + 1)["breakers"]
     t = v["trips"][0]
     assert (t["name"], t["state"], t["legacy"], t["legacy_event"]) == (entry, "trip", True, record["event"])
-    row = rows(v)[entry]
-    assert row["tripped"] and row["last"]["legacy_event"] == record["event"]
+    assert rows(v)[entry]["tripped"]
 
 
 @pytest.mark.parametrize("record", [
@@ -354,12 +375,14 @@ def test_layer_with_rl_breaker_ignores_its_legacy_events():
     drop = legacy("rl_agentic_group", written=False, dropped_reason="below_min_samples")
     r.feed(drop)
     r.feed({"event": "rl_buffer_stale_skipped", "island_id": 0, "time_unix": T0, "stale_groups": 2})
+    r.feed(legacy("rl_dispense_settle", state="exhausted", slot=1))
+    r.feed({"event": "trainer_starvation_stop", "time_unix": T0, "island_id": 0})
     r.feed(brk("sampler.drain", "warn", T0 + 1, action="drop", scope={"sampler_id": "s-0"}))
     v = r.page_view(now=T0 + 2)["breakers"]
-    # the sampler layer writes rl_breaker: its legacy rows go; the trainer layer's stay
-    assert sorted((t["name"], t["legacy"]) for t in v["trips"]) == [("sampler.drain", False),
-                                                                      ("trainer.policy_age", True)]
-    assert "sampler.min_samples" not in rows(v)
+    # the sampler layer writes rl_breaker: its legacy rows and acts go; the other layers' stay
+    assert sorted((t["name"], t["legacy"]) for t in v["trips"]) == [("run.starvation", True),
+                                                                      ("sampler.drain", False)]
+    assert "sampler.min_samples" not in rows(v) and rows(v)["trainer.policy_age"]["acted"]["dropped"] == 2
 
 
 def test_run_status_summary():
@@ -436,9 +459,10 @@ def test_exported_page_draws_the_panel(tmp_path):
     assert res.returncode == 0, res.stderr
     out = json.loads(res.stdout)
     assert out["hidden"] is False and out["nav"] == ""
-    assert "13 armed" in out["note"] and "6 trips" in out["note"]
+    assert "13 armed" in out["note"] and "4 trips" in out["note"] and "2 guard acts" in out["note"]
     html = out["html"]
     for want in ("trainer.sample_wait", "stop_reason=breaker:trainer.sample_wait", "Dependency checks", "D8",
+                 "acted 1 time · 3 groups dropped", "acted 1 time · 4 groups dropped",
                  "default (implicit)", "show 1 off / invariant", "55 min / 60 min (92%)", "cost_guard"):
         assert want in html, want
     assert "undefined" not in html and "NaN" not in html
@@ -464,3 +488,154 @@ def test_cost_guard_tape_name_matches_the_guard():
     from yeto.cost.guard import EVENTS_FILE
 
     assert sources.COST_EVENTS_FILE == EVENTS_FILE  # launch trips go there too (yeto.launch.trips)
+
+
+def trainer_rounds(r, n, *, trained=8, stale=0, island=0, t0=T0, every_stale=1):
+    """``n`` trainer rounds: the reader's per-round record, then the trained round."""
+    for i in range(n):
+        t = t0 + 60 * i
+        s = stale if i % every_stale == 0 else 0
+        r.feed({"event": "rl_buffer_stale_skipped", "island_id": island, "time_unix": t, "rollout_id": i,
+                "stale_groups": s, "max_policy_age": 2})
+        r.feed({"event": "rl_round_trained", "island_id": island, "time_unix": t + 30, "rollout_id": i,
+                "trained_groups": trained})
+
+
+def guard_alerts(r, now):
+    return [(a["sev"], a["title"]) for a in r.overview(now=now)["alerts"] if a["rule"] in ("breaker", "guard_drops")]
+
+
+def test_occasional_stale_drops_stay_amber():
+    """An async run trims a group now and then at a release boundary: the guard's card counts
+    it (amber), no trip row, no alert."""
+    r = Reducer()
+    trainer_rounds(r, 12, stale=1, every_stale=6)  # 2 groups of 98 over 12 rounds
+    v = r.page_view(now=T0 + 3600)["breakers"]
+    row = rows(v)["trainer.policy_age"]
+    assert v["trips"] == [] and not row["tripped"]
+    assert row["acted"]["acts"] == 2 and row["acted"]["dropped"] == 2
+    assert row["acted"]["rate"]["rounds"] == 10 and row["acted"]["rate"]["ratio"] < 0.1
+    assert guard_alerts(r, T0 + 3600) == []
+
+
+def test_large_stale_drops_go_red():
+    r = Reducer()
+    trainer_rounds(r, 12, trained=6, stale=4)  # 40 % of the groups aged out, every round
+    v = r.page_view(now=T0 + 3600)["breakers"]
+    row = rows(v)["trainer.policy_age"]
+    assert row["tripped"] and row["acted"]["rate"]["ratio"] == 0.4 and row["acted"]["rate"]["scope"] == "island 0"
+    assert guard_alerts(r, T0 + 3600) == [(0, "breaker trainer.policy_age dropped 40% of the groups")]
+
+
+def test_drop_rate_warning_and_window():
+    r = Reducer()
+    trainer_rounds(r, 10, trained=8, stale=1)  # 1 of 9: 11 %
+    assert guard_alerts(r, T0 + 3600) == [(1, "breaker trainer.policy_age dropped 11% of the groups")]
+    trainer_rounds(r, 10, trained=8, stale=0, t0=T0 + 1000)  # 10 clean rounds push them out of the window
+    assert guard_alerts(r, T0 + 3600) == []
+
+
+def test_one_off_burst_stays_on_the_card():
+    """Shape of a real replay: 25 stale groups in one round (a backlog aging out at once), none
+    before or after; over 20 % of the window, but in one round only: counted on the card, no alert."""
+    r = Reducer()
+    for i in range(12):
+        t = T0 + 60 * i
+        r.feed({"event": "rl_buffer_stale_skipped", "island_id": 0, "time_unix": t, "rollout_id": i,
+                "stale_groups": 25 if i == 8 else 0, "max_policy_age": 2})
+        r.feed({"event": "rl_round_trained", "island_id": 0, "time_unix": t + 30, "rollout_id": i, "trained_groups": 8})
+    row = rows(r.page_view(now=T0 + 900)["breakers"])["trainer.policy_age"]
+    rate = row["acted"]["rate"]
+    assert rate["drop_rounds"] == 1 and rate["ratio"] > 0.2 and not row["tripped"]
+    assert row["acted"]["dropped"] == 25
+    assert guard_alerts(r, T0 + 900) == []
+
+
+def test_too_few_groups_are_not_judged():
+    r = Reducer()
+    trainer_rounds(r, 2, trained=2, stale=3)  # 6 of 10 groups, but only 10 groups
+    assert guard_alerts(r, T0 + 600) == [] and not rows(r.page_view(now=T0 + 600)["breakers"])["trainer.policy_age"]["tripped"]
+
+
+def test_thresholds_come_from_the_monitor_entry():
+    from yeto.breakers.layers.monitor import DASHBOARD_RULES
+
+    assert DASHBOARD_RULES["guard_drops"] == "monitor.dashboard_guard_drops"
+    assert {k: alerts.DEFAULT_THRESHOLDS[k] for k in ("guard_drop_window_rounds", "guard_drop_min_groups",
+                                                       "guard_drop_min_rounds", "guard_drop_warn_ratio",
+                                                       "guard_drop_alert_ratio")} == {
+        "guard_drop_window_rounds": 10, "guard_drop_min_groups": 20, "guard_drop_min_rounds": 3,
+        "guard_drop_warn_ratio": 0.1, "guard_drop_alert_ratio": 0.25}
+    r = Reducer(thresholds={"guard_drop_alert_ratio": 0.5})
+    trainer_rounds(r, 12, trained=6, stale=4)
+    assert guard_alerts(r, T0 + 3600) == [(1, "breaker trainer.policy_age dropped 40% of the groups")]
+
+
+def sampler_round(r, rid, groups, dropped, sid="s-0", t0=T0):
+    for g in range(groups):
+        bad = g < dropped
+        r.feed({"event": "rl_agentic_group", "sampler_id": sid, "time_unix": t0 + rid * 60 + g, "rollout_id": rid,
+                "written": not bad, "dropped_reason": "below_min_samples" if bad else None, "kept": 1 if bad else 8})
+
+
+def test_sampler_groups_below_minimum_rate():
+    r = Reducer()
+    for rid in range(4):
+        sampler_round(r, rid, 8, 1)  # 1 of 8 per round: 12.5 %
+    v = r.page_view(now=T0 + 600)["breakers"]
+    row = rows(v)["sampler.min_samples"]
+    assert row["acted"]["acts"] == 4 and row["acted"]["rate"]["ratio"] == 0.125 and not row["tripped"]
+    assert guard_alerts(r, T0 + 600) == [(1, "breaker sampler.min_samples dropped 12% of the groups")]
+    for rid in range(4, 8):
+        sampler_round(r, rid, 8, 5)
+    assert (0, "breaker sampler.min_samples dropped 38% of the groups") in guard_alerts(r, T0 + 900)
+
+
+def test_rl_breaker_acts_of_a_dropping_guard():
+    r = Reducer()
+    for i in range(3):
+        r.feed({**brk("trainer.policy_age", "trip", T0 + i, action="drop", value=None, limit=2, scope={"island": "0"},
+                      detail=f"rollout {i}: 2 groups older than 2 versions"), "kind": "guard", "count": 2})
+    v = r.page_view(now=T0 + 10)["breakers"]
+    row = rows(v)["trainer.policy_age"]
+    assert v["trips"] == [] and (row["acted"]["acts"], row["acted"]["dropped"]) == (3, 6)
+    assert row["acted"]["last_detail"] == "rollout 2: 2 groups older than 2 versions"
+    assert guard_alerts(r, T0 + 10) == []
+
+
+def _f1_reducer(tmp_path, stale=None) -> Reducer:
+    """The f1 follow-trainer replay (22 rl_buffer_stale_skipped records, all 0); with ``stale``,
+    every one of them is rewritten to drop that many groups."""
+    src = FX / "diloco" / "f1-follow"
+    if stale is not None:
+        dst = tmp_path / "f1"
+        shutil.copytree(src, dst)
+        for f in (dst / "events").glob("*.jsonl"):
+            out = []
+            for line in f.read_text().splitlines():
+                d = json.loads(line) if line.strip() else None
+                if d and d.get("event") == "rl_buffer_stale_skipped":
+                    d["stale_groups"] = stale
+                out.append(json.dumps(d) if d else line)
+            f.write_text("\n".join(out) + "\n")
+        src = dst
+    r = Reducer()
+    sources.load_all(r, [str(src)])
+    return r
+
+
+def test_f1_replay_is_clean(tmp_path):
+    r = _f1_reducer(tmp_path)
+    v = r.page_view()["breakers"]
+    assert v["trips"] == [] and v["acted_total"] == 0
+    assert not any(x["tripped"] for L in v["layers"] for x in L["rows"])
+    assert [a for a in r.overview()["alerts"] if a["rule"] in ("breaker", "guard_drops")] == []
+
+
+def test_f1_replay_with_real_stale_drops_goes_red(tmp_path):
+    r = _f1_reducer(tmp_path, stale=4)  # 4 groups aged out next to 8 trained, every round
+    v = r.page_view()["breakers"]
+    row = rows(v)["trainer.policy_age"]
+    assert v["trips"] == [] and row["tripped"] and row["acted"]["acts"] == 22
+    assert [(a["sev"], a["rule"]) for a in r.overview()["alerts"] if a["rule"] in ("breaker", "guard_drops")] == [
+        (0, "guard_drops")]

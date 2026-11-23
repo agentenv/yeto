@@ -39,6 +39,13 @@ STOP_ACTIONS = ("halt", "stop")  # yeto.breakers.spec.STOP_ACTIONS (the page doe
 # an alert for a trip of an entry that drops / quarantines / pauses (it happens every round in a
 # bad stretch) lasts this long after the trip; a stop / halt trip stays until the run restarts
 RECENT_TRIP_S = 3600.0
+# a guard whose action drops data (a group, a trial) acts as designed when it trips: its trips
+# are counted on its card ("acted"), not listed as red trips; the page alerts on the share of
+# the data it dropped over recent rounds instead (DROP_RATES, alerts.guard_drops)
+DROP_ACTIONS = ("drop", "downweight", "quarantine")
+ROUNDS_KEPT = 200  # per-round drop tallies kept per trainer island / sampler
+# what one act of a guard drops (the card's "M <unit>"); groups unless named here
+DROP_UNITS = {"sampler.drain": "trials cut", "sampler.trial_wall_clock": "trials cut"}
 
 
 def _f(v: Any) -> float | None:
@@ -69,32 +76,39 @@ def _n(r: Any, key: str) -> float:
     return 0.0 if v is None else v
 
 
-def _when(entry: str, state: str = "trip", test: Callable[[dict], bool] | None = None) -> Callable[[dict], list]:
-    return lambda r: [(entry, state)] if test is None or test(r) else []
+def _when(entry: str, state: str = "trip", test: Callable[[dict], bool] | None = None,
+          count: Callable[[dict], float] | None = None) -> Callable[[dict], list]:
+    return lambda r: [(entry, state, count(r) if count else 1)] if test is None or test(r) else []
 
 
-def _group(r: dict) -> list[tuple[str, str]]:
+def _group(r: dict) -> list[tuple[str, str, float]]:
     """``rl_agentic_group`` is written for every group: a trip only for a group dropped
     below its kept-trial minimum, or with trials cut by the trial wall clock."""
     out = []
     if r.get("written") is False and r.get("dropped_reason") == "below_min_samples":
-        out.append(("sampler.min_samples", "trip"))
-    if _n(r.get("lost"), "wall_clock_cap") > 0:
-        out.append(("sampler.trial_wall_clock", "trip"))
+        out.append(("sampler.min_samples", "trip", 1))
+    cut = _n(r.get("lost"), "wall_clock_cap")
+    if cut > 0:
+        out.append(("sampler.trial_wall_clock", "trip", cut))
     return out
 
 
-# Legacy event -> (record -> [(entry, state)]): when a record of a pre-registry event is
-# a breaker acting. An event not listed here is never shown as a trip (routine telemetry,
-# or one that does not say which entry acted). tests check each entry declares the event.
+def _drain_cut(r: dict) -> float:
+    return _n(r, "abandoned_trials") + _n(r, "detached_trials") + _n(r, "detached_in_flight")
+
+
+# Legacy event -> (record -> [(entry, state, count)]): when a record of a pre-registry event
+# is a breaker acting, and how much it dropped. An event not listed here is never shown as a
+# trip (routine telemetry, or one that does not say which entry acted). tests check each
+# entry declares the event.
 LEGACY_TRIPS: dict[str, Callable[[dict], list]] = {
     # routine records: a trip only under their condition
     "rl_agentic_group": _group,
-    "rl_agentic_drain": _when("sampler.drain", test=lambda r: (
-        _n(r, "abandoned_trials") > 0 or _n(r, "detached_trials") > 0 or _n(r, "detached_in_flight") > 0)),
+    "rl_agentic_drain": _when("sampler.drain", test=lambda r: _drain_cut(r) > 0, count=_drain_cut),
     "rl_dispense_settle": _when("sampler.dispense_redo",
                                 test=lambda r: r.get("state") in ("exhausted", "expired", "redo")),
-    "rl_buffer_stale_skipped": _when("trainer.policy_age", test=lambda r: _n(r, "stale_groups") > 0),
+    "rl_buffer_stale_skipped": _when("trainer.policy_age", test=lambda r: _n(r, "stale_groups") > 0,
+                                     count=lambda r: _n(r, "stale_groups")),
     # one record per warn / trip / recovery
     "trainer_starvation_alert": _when("run.starvation", "warn"),
     "trainer_starvation_recovered": _when("run.starvation", "clear"),
@@ -115,6 +129,43 @@ LEGACY_TRIPS: dict[str, Callable[[dict], list]] = {
     "nc_elastic_sampler_crash_loop": _when("pool.crash_loop"),
     "nc_elastic_engine_stalled": _when("pool.engine_stall"),
 }
+
+
+def _per_round_stale(st: "BreakerState", r: dict, iid: str | None) -> None:
+    st.pending_drop(("trainer", str(iid)), _n(r, "stale_groups"))
+
+
+def _per_round_trained(st: "BreakerState", r: dict, iid: str | None) -> None:
+    trained = _f(r.get("trained_groups"))
+    if trained is not None:
+        st.close_round("trainer.policy_age", ("trainer", str(iid)), trained)
+
+
+def _per_group(st: "BreakerState", r: dict, iid: str | None) -> None:
+    if isinstance(r.get("written"), bool):
+        st.group("sampler.min_samples", ("sampler", str(r.get("sampler_id") or iid)), r.get("rollout_id"),
+                 dropped=r.get("written") is False and r.get("dropped_reason") == "below_min_samples")
+
+
+# Drop rate of a data-dropping guard over recent rounds, from the per-round records every run
+# writes (also with 0 dropped): event -> folder. trainer.policy_age: stale groups against
+# trained + stale groups per trainer round; sampler.min_samples: groups dropped below the
+# minimum against all groups per sampler round. Other drop guards have no rate (card only).
+DROP_RATES: dict[str, Callable[["BreakerState", dict, str | None], None]] = {
+    "rl_buffer_stale_skipped": _per_round_stale,
+    "rl_round_trained": _per_round_trained,
+    "rl_agentic_group": _per_group,
+}
+
+
+def registry_kinds() -> dict[str, tuple[str, str | None]]:
+    """Entry -> (kind, default action) from the registry; {} when it does not load."""
+    try:
+        from yeto.breakers.registry import default_registry  # noqa: PLC0415
+
+        return {b.name: (b.kind, b.default_action) for b in default_registry()}
+    except Exception:  # noqa: BLE001 - the page renders without the registry
+        return {}
 
 
 def best_source(sources: Any) -> dict | None:
@@ -169,8 +220,75 @@ class BreakerState:
         self.latest: dict[tuple[str, str], dict] = {}  # (entry, scope key) -> newest rl_breaker row
         self.seen = False
         self.breaker_layers: set[str] = set()  # layers with an rl_breaker on the tapes
+        self.acts: dict[str, dict] = {}  # entry -> rl_breaker trips of a data-dropping guard, summed
+        self.legacy_acts: dict[str, dict] = {}  # the same from legacy events
+        # drop rates: (entry, (layer, island / sampler)) -> closed rounds [(dropped, total)]
+        self.rounds: dict[tuple, deque] = {}
+        self._pending: dict[tuple, float] = {}  # (layer, island) -> dropped in the round not closed yet
+        self._open: dict[tuple, dict] = {}  # (entry, scope) -> {"rid", "dropped", "total"} of a sampler round
+        self._kinds: dict[str, tuple[str, str | None]] | None = None
 
     # -- folding --------------------------------------------------------------------
+    def kind_of(self, name: str, kind: Any = None, action: Any = None) -> tuple[Any, Any]:
+        if kind is not None and action is not None:
+            return kind, action
+        if self._kinds is None:
+            self._kinds = registry_kinds()
+        reg = self._kinds.get(name, (None, None))
+        return kind if kind is not None else reg[0], action if action is not None else reg[1]
+
+    def drops_data(self, name: str, kind: Any = None, action: Any = None) -> bool:
+        kind, action = self.kind_of(name, kind, action)
+        return kind == "guard" and action in DROP_ACTIONS
+
+    @staticmethod
+    def _act(acts: dict[str, dict], row: dict, count: float) -> None:
+        a = acts.setdefault(str(row["name"]), {"acts": 0, "dropped": 0.0, "last_ts": None, "last_detail": None,
+                                              "scope": None, "legacy_event": row.get("legacy_event")})
+        a["acts"] += 1
+        a["dropped"] += count
+        if row["ts"] is None or a["last_ts"] is None or row["ts"] >= a["last_ts"]:
+            a.update({"last_ts": row["ts"], "last_detail": row.get("detail"), "scope": row.get("scope")})
+
+    def pending_drop(self, scope: tuple, dropped: float) -> None:
+        self._pending[scope] = self._pending.get(scope, 0.0) + dropped
+
+    def close_round(self, name: str, scope: tuple, kept: float) -> None:
+        dropped = self._pending.pop(scope, 0.0)
+        self.rounds.setdefault((name, scope), deque(maxlen=ROUNDS_KEPT)).append((dropped, kept + dropped))
+
+    def group(self, name: str, scope: tuple, rid: Any, *, dropped: bool) -> None:
+        key = (name, scope)
+        cur = self._open.get(key)
+        if cur is not None and cur["rid"] != rid:  # the sampler's next round: the previous one is closed
+            self.rounds.setdefault(key, deque(maxlen=ROUNDS_KEPT)).append((cur["dropped"], cur["total"]))
+            cur = None
+        if cur is None:
+            cur = self._open[key] = {"rid": rid, "dropped": 0, "total": 0}
+        cur["total"] += 1
+        cur["dropped"] += int(dropped)
+
+    def drop_rates(self, window: int, min_total: float) -> dict[str, dict]:
+        """Entry -> the worst scope's share of data dropped over its last ``window`` rounds
+        (the open sampler round included), when that scope saw at least ``min_total``;
+        ``drop_rounds``: the rounds of the window that dropped anything."""
+        out: dict[str, dict] = {}
+        keys = set(self.rounds) | set(self._open)
+        for name, scope in keys:
+            rows = list(self.rounds.get((name, scope)) or ())
+            cur = self._open.get((name, scope))
+            if cur is not None:
+                rows.append((cur["dropped"], cur["total"]))
+            rows = rows[-max(1, int(window)):]
+            dropped, total = sum(r[0] for r in rows), sum(r[1] for r in rows)
+            if total < max(1.0, float(min_total)):
+                continue
+            rate = {"ratio": round(dropped / total, 4), "dropped": dropped, "total": total, "rounds": len(rows),
+                    "drop_rounds": sum(1 for r in rows if r[0] > 0),
+                    "scope": f"{'island ' if scope[0] == 'trainer' else ''}{scope[1]}"}
+            if name not in out or rate["ratio"] > out[name]["ratio"]:
+                out[name] = rate
+        return out
 
     def fold(self, r: dict, iid: str | None, ts: float | None, *, cost_guard: bool = False) -> bool:
         """Fold one record; False for a record that is none of the breaker inputs.
@@ -193,8 +311,11 @@ class BreakerState:
                 return False
             self.seen = True
             row = _trip_row(r, ts)
-            self.trips.append(row)
             self.breaker_layers.add(str(row["layer"] or str(row["name"]).split(".")[0]))
+            if row["state"] == "trip" and self.drops_data(row["name"], r.get("kind"), r.get("action")):
+                self._act(self.acts, row, _f(r.get("count")) or 1)  # the guard did its job: counted, not a trip
+                return True
+            self.trips.append(row)
             key = (str(row["name"]), row["scope_key"])
             if ts is None or (self.latest.get(key) or {}).get("ts") is None or ts >= self.latest[key]["ts"]:
                 self.latest[key] = row
@@ -218,13 +339,20 @@ class BreakerState:
                     self.settings[name] = {k: it.get(k) for k in ("layer", "kind", "enabled", "action", "params",
                                                                   "source", "implicit")} | {"ts": ts}
             return True
+        rate = DROP_RATES.get(event) if isinstance(event, str) else None
+        if rate is not None:
+            rate(self, r, iid)
         rule = LEGACY_TRIPS.get(event) if isinstance(event, str) else None
         if rule is None:
             return False
         hits = rule(r)
-        for name, state in hits:
+        for name, state, count in hits:
             self.seen = True
-            self.legacy.append(_trip_row(r, ts, legacy=event, name=name, state=state))
+            row = _trip_row(r, ts, legacy=event, name=name, state=state)
+            if state == "trip" and self.drops_data(name):
+                self._act(self.legacy_acts, row, count)
+            else:
+                self.legacy.append(row)
         return bool(hits)
 
     def load_resolved(self, doc: Any, source: str) -> bool:
@@ -260,7 +388,7 @@ class BreakerState:
             elif s.get("params") and row["params"] and s.get("params") != row["params"]:
                 row["runtime_params"] = s["params"]  # the process runs with other values (config_mismatch)
         legacy = {t["name"] for t in self.legacy if str(t["name"]).split(".")[0] not in self.breaker_layers}
-        for name in set(self.last) | legacy | {k[0] for k in self.status}:
+        for name in set(self.last) | legacy | set(self.acted()) | {k[0] for k in self.status}:
             if name not in rows:
                 trip = self.last.get(name) or {}
                 rows[name] = {"name": name, "layer": trip.get("layer") or name.split(".")[0], "kind": None,
@@ -281,12 +409,25 @@ class BreakerState:
                 "ratio": _f(worst.get("ratio")), "gauge": worst.get("gauge"), "detail": worst.get("detail"),
                 "scope": worst.get("scope"), "scopes": len(rows), "ts": worst.get("ts")}
 
-    def view(self, gauges: dict[str, dict] | None = None) -> dict | None:
+    def acted(self) -> dict[str, dict]:
+        """Data-dropping guards' acts: from rl_breaker, else (for a layer without
+        rl_breaker on the tapes) from legacy events."""
+        out = dict(self.acts)
+        for name, a in self.legacy_acts.items():
+            if name not in out and name.split(".")[0] not in self.breaker_layers:
+                out[name] = a
+        return out
+
+    def view(self, gauges: dict[str, dict] | None = None, rates: dict[str, dict] | None = None,
+             alert_ratio: float | None = None, min_rounds: int = 1) -> dict | None:
         """The panel's data; None when no input has anything (older tapes, no file).
         ``gauges``: entry -> gauge the page derives itself (the run budget from the cost
-        estimate), used for an entry no process reports a value for."""
+        estimate), used for an entry no process reports a value for. ``rates``:
+        :meth:`drop_rates`; a guard at or above ``alert_ratio`` in at least ``min_rounds``
+        rounds of the window is drawn red."""
         if not self.seen:
             return None
+        acted = self.acted()
         # a layer that writes rl_breaker is told by it alone (its legacy events are telemetry)
         legacy = [t for t in self.legacy if str(t["name"]).split(".")[0] not in self.breaker_layers]
         layers: dict[str, list[dict]] = {}
@@ -301,6 +442,13 @@ class BreakerState:
                 "ts", "state", "action", "value", "limit", "unit", "scope", "detail", "stop_reason",
                 "legacy_event", "legacy")}
             row["tripped"] = bool(last and last.get("state") == "trip")
+            act, rate = acted.get(name), (rates or {}).get(name)
+            if act is not None or rate is not None:
+                row["acted"] = {**(act or {"acts": 0, "dropped": 0.0, "last_ts": None}),
+                                "unit": DROP_UNITS.get(name, "groups dropped"), "rate": rate}
+                if (rate is not None and alert_ratio is not None and rate["ratio"] >= alert_ratio
+                        and rate["drop_rounds"] >= min_rounds):
+                    row["tripped"] = True  # dropping too much: red (alerts.guard_drops)
             layers.setdefault(str(row["layer"] or "?"), []).append(row)
         try:
             from yeto.breakers.spec import LAYERS  # noqa: PLC0415
@@ -320,6 +468,7 @@ class BreakerState:
         return {"layers": out_layers, "counts": counts,
                 "trips": [{k: v for k, v in t.items() if k != "scope_key"} for t in trips[:TRIPS_VIEW]],
                 "trip_total": len(self.trips) + len(legacy),
+                "acted_total": sum(a["acts"] for a in acted.values()),
                 "findings": [f for f in doc.get("findings") or () if isinstance(f, dict)],
                 "conflicts": [c for c in doc.get("conflicts") or () if isinstance(c, dict)],
                 "switches": doc.get("switches") if isinstance(doc.get("switches"), dict) else {},
