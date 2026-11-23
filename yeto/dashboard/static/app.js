@@ -82,7 +82,7 @@ function platform(c){if(c.cloud)return c.cloud;var p=(spOf(c)||{}).provenance||{
   return p.engine||p.device_family?[p.engine,p.device_family].filter(Boolean).join(" on ")+" (cloud not on the tape)":"n/a"}
 function islReward(c){if(c.reward!=null)return c.reward;var sp=spOf(c);return sp?sp.reward_mean_last:null}
 /* a sampler writes no rl_heartbeat phase: its latest event says what it is doing */
-function islPhase(c){if(c.phase)return c.phase;var sp=spOf(c);if(!sp)return null;if(sp.ended)return "stopped";var lt=String(sp.last_type||"");
+function islPhase(c){if(c.phase)return c.phase;var sp=spOf(c);if(!sp)return null;if(sp.ended||/^(done|stopped|left|lost|finished)$/.test(String(c.status||"")))return "stopped";var lt=String(sp.last_type||"");
   if(/drain/.test(lt))return "draining";if(/policy_load|load_checked|start_on_latest/.test(lt))return "loading policy";
   if(/backlog_full|_waiting$/.test(lt))return "waiting (backlog full)";if(/_start$|_join$|_lease$/.test(lt))return "starting";return "sampling"}
 function wall(){
@@ -519,7 +519,7 @@ function aRel(A){
   if(rows.length)box2.innerHTML='<table class="c"><tr><th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>sampler '+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>'+
     // a sampler starting on the base weights makes a v0 row with no trainer release: "base"
     rows.slice(-30).reverse().map(function(r){var base=r.trainer==null&&!fin(r.released_at);return '<tr><td class="num">v'+esc(r.policy_version)+'</td><td>'+(base?'<span class="note">base</span>':esc(r.trainer==null?"n/a":r.trainer))+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base?"—":f(r.upload_s,1))+'</td>'+
-      sids.map(function(k){var ld=(r.loads||{})[k];return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"):"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>';
+      sids.map(function(k){var ld=(r.loads||{})[k];return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"+(fin(ld.drain_s)?'<div class="note">drain '+f(ld.drain_s,0)+" s"+(ld.drain_cut?", "+f(ld.drain_cut,0)+" cut":"")+'</div>':"")):"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>';
 }
 function render(){
   if(!V)return;O=V.overview;

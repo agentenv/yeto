@@ -224,3 +224,19 @@ def test_many_samplers_draw_one_aggregate_with_a_toggle(tmp_path):
     out = json.loads(res.stdout)
     assert "all 4 samplers (mean of last 32 groups)" in out["rew"] and "show each sampler (4)" in out["rew"]
     assert "sampler s1 (mean of last 8 groups)" not in out["rew"]  # each sampler only behind the toggle
+
+
+def test_hot_reload_names_the_drain_it_waited_for():
+    recs = [{"event": "rl_policy_released", "island_id": 0, "policy_version": 3, "time_unix": T0, "released_at": T0},
+            {"event": "rl_agentic_drain", "sampler_id": "s0", "policy_version": 2, "time_unix": T0 - 300, "waited_s": 9.0},
+            {"event": "rl_agentic_drain", "sampler_id": "s0", "policy_version": 2, "time_unix": T0 + 60, "waited_s": 44.5,
+             "in_flight": 12, "abandoned_trials": 0, "detached_trials": 1},
+            {"event": "rl_sampler_policy_loaded", "sampler_id": "s0", "policy_version": 3, "time_unix": T0 + 140,
+             "released_at": T0, "seen_at": T0 + 4, "pause_s": 1.1,
+             "follower_timings": {"resolve_s": 37.9, "load_s": 31.8}}]
+    r = Reducer(run="r")
+    for i, rec in enumerate(recs):
+        r.feed(rec, source="t", offset=i)
+    (rel,) = [x for x in r.page_view()["async"]["releases"] if x["policy_version"] == 3]
+    ld = rel["loads"]["s0"]
+    assert (ld["latency_s"], ld["drain_s"], ld["drain_in_flight"], ld["drain_cut"], ld["pause_s"]) == (140.0, 44.5, 12, 1, 1.1)

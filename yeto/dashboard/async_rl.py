@@ -243,6 +243,7 @@ class AsyncState:
         self.trainer: dict[str, dict] = {}
         self.releases: list[dict] = []
         self.loads: list[dict] = []
+        self.drains: list[dict] = []  # rl_agentic_drain: the weight switch's wait for in-flight trials
         self.pool: list[dict] = []
         self.pool_shards: set[str] = set()  # every shard a pool event named (trimmed events too)
         self._pool_kept = 0  # self.pool[:_pool_kept] are all state events: the trim scan starts here
@@ -301,11 +302,17 @@ class AsyncState:
             if ev in TRAINER_EVENTS and self.roles.get(iid) != "sampler":
                 self.roles[iid] = "trainer"
             self._fold_trainer(r, iid, ts, ev)
-        elif ev == "rl_agentic_drain" and isinstance(r.get("drained_by_segments"), dict):
-            # compaction on: the trials each drain cut, by segment count (agentic_round)
-            d = self._s(iid).setdefault("drained", {})
-            for b, n in _reasons(r["drained_by_segments"]).items():
-                d[b] = d.get(b, 0) + n
+        elif ev == "rl_agentic_drain":
+            if ts is not None:  # matched to the policy load it preceded (releases view)
+                self.drains.append({"sampler": iid, "ts": ts, "waited_s": _f(r.get("waited_s")),
+                                    "in_flight": r.get("in_flight"), "timed_out": bool(r.get("timed_out")),
+                                    "cut": sum(_f(r.get(k)) or 0 for k in ("abandoned_trials", "detached_trials"))})
+                del self.drains[:-2000]
+            if isinstance(r.get("drained_by_segments"), dict):
+                # compaction on: the trials each drain cut, by segment count (agentic_round)
+                d = self._s(iid).setdefault("drained", {})
+                for b, n in _reasons(r["drained_by_segments"]).items():
+                    d[b] = d.get(b, 0) + n
         elif ev == "rl_resource_sample" and iid in self.sampler:
             self.sampler[iid]["resource"] = {"available": r.get("available"), "reason": r.get("reason"),
                                              "source": r.get("source")}
@@ -782,7 +789,13 @@ class AsyncState:
             if row.get("released_at") is None:
                 row["released_at"] = ld["released_at"]
             rel = row.get("released_at")
+            # the drain this load waited for: the sampler's drain between seeing the release and loading it
+            dr = [d for d in self.drains if d["sampler"] == ld["sampler"] and ld["seen_at"] is not None
+                  and ld["loaded_at"] is not None and ld["seen_at"] <= d["ts"] <= ld["loaded_at"]]
             row["loads"][ld["sampler"]] = {
+                "drain_s": dr[-1]["waited_s"] if dr else None, "drain_in_flight": dr[-1]["in_flight"] if dr else None,
+                "drain_cut": dr[-1]["cut"] if dr else None, "drain_timed_out": dr[-1]["timed_out"] if dr else None,
+                "pause_s": ld["pause_s"],
                 "loaded_at": ld["loaded_at"], "seen_at": ld["seen_at"], "load_wall_s": ld["load_wall_s"],
                 "resolve_s": ld["resolve_s"], "load_s": ld["load_s"], "at_start": bool(ld.get("at_start")),
                 "latency_s": (round(ld["loaded_at"] - rel, 3) if ld["loaded_at"] is not None and rel is not None

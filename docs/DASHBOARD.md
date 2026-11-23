@@ -112,6 +112,8 @@ arguments (port, store, tapes ...), so a copied command reproduces it.
   folders by name, not by time). An incarnation starts at its engine start (before its join).
 - **Card time** of a sampler outside `fleet.jsonl` is the union of its incarnations' first ->
   last event: a lower bound, since boot before the first event is not on the tapes.
+- **Hot reload**: each release's load lists its parts (resolve, the drain of in-flight trials it
+  waited for from `rl_agentic_drain`, load, pause) in Islands now and the release table.
 - **Trainer waiting for data** includes the round still waiting (Islands now shows it as
   "current round N waiting for data").
 - **Zero-variance groups**: from samplers' drops when they report them, else the trainer's

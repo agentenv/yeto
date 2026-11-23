@@ -456,6 +456,10 @@ function curWait(V,c){if(!rlLive(c.status))return null;var rr=(((V.islands||{})[
 function evenGrid(box,n){if(!box||!n)return;var w=box.clientWidth||box.getBoundingClientRect().width||0;if(!w)return;
   var fit=Math.max(1,Math.floor((w+12)/(150+12))),rows=Math.ceil(n/fit),cols=Math.ceil(n/rows);
   box.style.gridTemplateColumns="repeat("+cols+",minmax(0,1fr))"}
+// a hot reload's parts: seen after the release, resolve (fetch / merge), drain (in-flight trials), load, pause
+function loadParts(l){var p=[["resolve",l.resolve_s],["drain",l.drain_s],["load",l.load_s],["pause",l.pause_s]].filter(function(x){return fin(x[1])});
+  return p.length?'<div class="ns" title="sampler follower timings (rl_sampler_policy_loaded) and the drain before the switch (rl_agentic_drain)'+(fin(l.drain_in_flight)?": "+l.drain_in_flight+" trials in flight":"")+(l.drain_cut?", "+l.drain_cut+" cut":"")+'">'+
+    p.map(function(x){return x[0]+" "+dur(x[1])}).join(" · ")+(l.drain_cut?' · <b>'+l.drain_cut+' cut</b>':"")+'</div>':""}
 function rlm(V){
   var O=V.overview||{},A=V.async||{},S=A.samplers||{},TR=A.trainers||{},X=V.islands||{},cs=rlCards(V);
   var t1=NOW,t0=NOW-RANGE_H*3600,tp=t0-RANGE_H*3600;
@@ -508,7 +512,7 @@ function rlm(V){
       if(c.role==="sampler"&&s){var sr=s.rounds||[],l=s.last_round||sr[sr.length-1]||{},ld=(A.releases||[]).map(function(x){return (x.loads||{})[c.id]?[x.policy_version,x.loads[c.id]]:null}).filter(Boolean).pop();
         return row+'<td title="'+esc(k(s.n_rounds-(s.empty_rounds||0),0)+" rounds wrote groups"+(s.empty_rounds?", "+k(s.empty_rounds,0)+" wrote none (backlog full, all trials lost or drained)":"")+"; generating with policy "+(s.policy_version==null?"n/a":"v"+s.policy_version))+'">'+
           k(s.n_rounds-(s.empty_rounds||0),0)+(s.empty_rounds?' <span class="ns">(+'+k(s.empty_rounds,0)+' empty)</span>':'')+' / '+(s.policy_version==null?"n/a":"v"+s.policy_version)+'<div class="ns">'+ago(l.ts)+' · age p50 '+k(s.lag_p50,1)+'</div></td><td>'+k(s.reward_mean_last,3)+(fin(s.reward_last_ts)?'<div class="ns">round '+esc(s.reward_last_rollout_id)+' · '+ago(s.reward_last_ts)+'</div>':"")+'</td>'+'<td title="samplers do not train">—</td>'.repeat(3)+'<td>'+dur(l.generate_s)+'<div class="ns">generate, p50 '+dur(s.generate_p50_s)+'</div></td><td>'+(fin(l.response_tokens)&&l.generate_s?k(l.response_tokens/l.generate_s):"n/a")+'</td>'+hb+
-          '<td>'+(ld?(ld[1].at_start?"at start":dur(ld[1].load_wall_s))+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+(ld[1].at_start?"loaded when the sampler started":dur(ld[1].latency_s)+' after release')+'</div>':"none yet")+'</td><td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
+          '<td>'+(ld?(ld[1].at_start?"at start":dur(ld[1].load_wall_s))+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+(ld[1].at_start?"loaded when the sampler started":dur(ld[1].latency_s)+' after release')+'</div>'+(ld[1].at_start?"":loadParts(ld[1])):"none yet")+'</td><td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
       var mr=(A.releases||[]).filter(function(x){return String(x.trainer)===String(c.id)}).pop(),kl=lastW(rr,"kl_tr")||lastW(rr,"kl")||{},cw=curWait(V,c);
       return row+'<td>'+(r.round==null?"n/a":r.round)+' / '+(c.policy_version==null?"n/a":"v"+c.policy_version)+'<div class="ns">'+ago(r.ts)+'</div></td><td>'+k((lastW(rr,"reward")||{}).reward,3)+'</td><td>'+(fin(kl.kl_tr)?k(kl.kl_tr,4)+(fin(kl.kl)?'<div class="ns">PPO '+k(kl.kl,4)+'</div>':""):fin(kl.kl)?'n/a<div class="ns">PPO '+k(kl.kl,4)+'</div>':"n/a")+'</td><td>'+k((lastW(rr,"logprob_diff")||{}).logprob_diff,4)+'</td><td>'+k((lastW(rr,"grad_norm")||{}).grad_norm,3)+'</td>'+
         '<td>'+dur(r.step_s)+'<div class="ns">round '+dur(r.round_s)+'</div>'+(cw&&cw.s>=60?'<div class="ns wt">current round'+(cw.round!=null?" "+cw.round:"")+' waiting for data '+dur(cw.s)+'</div>':"")+'</td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td><td>trainer '+esc(c.id)+'<div class="ns">'+esc((c.left||{}).reason||"")+'</div></td></tr>'};
@@ -635,7 +639,7 @@ function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
   chart("rcW",{kind:"bars",bucket:3600,series:trs.map(function(c){return {name:c.label,color:c.color,pts:((X[c.id]||{}).rounds||[]).filter(function(r){return r.phases&&r.phases.R}).map(function(r){return [r.phases.R[1],r.dur.R]})}})
     .concat(trs.filter(function(c){return CW[c.id]}).map(function(c){return {name:c.label+" current round (in progress)",color:"#eab308",pts:cwPts(c)}})),yfmt:dur});
   var pv={};sps.forEach(function(c){SR(c).forEach(function(r){var v=r.policy_version==null?"?":"v"+r.policy_version;(pv[v]=pv[v]||[]).push([r.ts,r.groups])})});
-  chart("rcPv",{kind:"bars",bucket:3600,series:Object.keys(pv).sort().map(function(v,i){return {name:v,color:PAL[i%PAL.length],pts:pv[v]}}),yfmt:k});
+  chart("rcPv",{kind:"bars",bucket:3600,series:Object.keys(pv).sort(function(a,b){return (parseInt(a.slice(1),10)||-1)-(parseInt(b.slice(1),10)||-1)}).map(function(v,i){return {name:v,color:PAL[i%PAL.length],pts:pv[v]}}),yfmt:k});
   foldEmpty([["rcG","Groups per hour","stacked by sampler"],["rcCh","Card-hours per hour",""],["rcW","Trainer waiting per hour",""],["rcPv","Groups by policy version",""]],"rCostNone");balanceGrid("rCost",340,4);
 }
 function render(view,offline){
