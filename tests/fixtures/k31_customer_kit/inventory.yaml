@@ -1,0 +1,42 @@
+# Trainer island: 6 x 8 B300 bare metal over SSH + Docker. Rendered by render.py
+# from inputs.json (TRAINER_NODES, TRAINER_INTERFACE, TRAINER_FABRIC,
+# TRAINER_NCCL_IB_HCA, TRAINER_HOST_MEMORY_GIB, TRAINER_SCRATCH_DIR,
+# TRAINER_MODELS_DIR). Node 0 is the Ray head and the rendezvous address.
+#
+# host:      what the control machine can SSH to (user@ip or an ~/.ssh/config alias)
+# address:   the node's IP on the cluster network carried by `interface`
+# NCCL_IB_HCA: only the 8 compute HCAs, with a leading "=" for an exact match
+# extra env:  TRAINER_EXTRA_NODE_ENV (e.g. RoCE: NCCL_IB_GID_INDEX, NCCL_IB_TC)
+# nofile 1048576: dockerd's default 1024 starves a multi-node raylet
+#                 ("Too many open files"); yeto adds the same value when absent.
+# scratch:   run data under <scratch>/<run>, mounted in the container as /yeto-scratch
+# mounts:    host weights directory -> /data/models (--model-store local:///data/models)
+nodes:
+  - &b300
+    name: b300-0
+    host: ops@192.0.2.20
+    address: 198.51.100.20
+    interface: bond0
+    device_family: cuda
+    cpu_arch: x86_64
+    card: B300
+    cards_per_node: 8
+    hbm_gib: 288
+    host_memory_gib: 2048
+    fabric: ib
+    runtime: docker
+    docker_args: [--gpus, all, --device, /dev/infiniband,
+                  --ulimit, "memlock=-1:-1", --ulimit, "nofile=1048576:1048576",
+                  --ulimit, stack=67108864, --cap-add, IPC_LOCK]
+    scratch: /mnt/nvme/yeto
+    scratch_min_free_gib: 2000
+    mounts:
+      /mnt/nvme/models: /data/models
+    env:
+      NCCL_IB_HCA: "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+
+  - {<<: *b300, name: b300-1, host: ops@192.0.2.21, address: 198.51.100.21}
+  - {<<: *b300, name: b300-2, host: ops@192.0.2.22, address: 198.51.100.22}
+  - {<<: *b300, name: b300-3, host: ops@192.0.2.23, address: 198.51.100.23}
+  - {<<: *b300, name: b300-4, host: ops@192.0.2.24, address: 198.51.100.24}
+  - {<<: *b300, name: b300-5, host: ops@192.0.2.25, address: 198.51.100.25}

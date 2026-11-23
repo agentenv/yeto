@@ -491,6 +491,23 @@ def rl_sync_mode_off_reasons(args) -> list[str]:
     return reasons
 
 
+def _apply_sync_route(args) -> None:
+    """Route ``--rl-sync-preset`` by trainable form (``yeto.rl.engine.sync_route``).
+
+    ``decoupled`` with full parameters (``--tuning full``, partial experts) or
+    the expert-full LoRA hybrid runs the full-parameter preset's asynchronous
+    rounds; every other combination keeps its preset. Runs before every rule
+    that reads the preset, so they all see the canonical one."""
+    from ..rl.engine.sync_route import SyncRouteError, apply_sync_route
+
+    try:
+        route = apply_sync_route(args)
+    except SyncRouteError as exc:
+        raise ValueError(str(exc)) from None
+    if route is not None and route.rerouted:
+        print(route.line(), flush=True)
+
+
 def _apply_rl_sync_mode(args) -> None:
     """Resolve ``--rl-sync-mode`` into concrete option values.
 
@@ -928,6 +945,7 @@ def _prepare_rl_args(
 
     _validate_quant_tier(args)  # refused before any cloud spend
     _prepare_node_inventory(args)
+    _apply_sync_route(args)
     _apply_rl_sync_mode(args)
     _default_spot_island_pool(args)
     _default_peer_recovery(args)
@@ -994,12 +1012,12 @@ def _prepare_rl_args(
         # islands on a full-parameter preset (the syncer merges their pseudo-gradients); or a
         # synced K3.1 trainer (whole-checkpoint releases, checked on the island)
         raise ValueError(
-            "RL v0 requires --tuning lora unless --tuning full has a full-parameter sync preset "
-            f"(--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} or {SAO_STREAMING_SYNC_PRESET}; "
-            f"--rl-sync-full-parameter-rounds async is the asynchronous multi-fragment "
-            "counterpart of decoupled), --rl-single-island-no-sync, or --rl-model-recipe kimi_k31 "
-            "on a synced trainer; strict-avg and decoupled merge the canonical LoRA layout "
-            "(requires --tuning lora)")
+            "RL v0 requires --tuning lora unless --tuning full has a full-parameter sync: "
+            "--rl-sync-preset decoupled (routed to the full-parameter stack: "
+            f"{FULL_PARAMETER_SYNC_PRESET} with --rl-sync-full-parameter-rounds async), "
+            f"{FULL_PARAMETER_SYNC_PRESET} or {SAO_STREAMING_SYNC_PRESET}; "
+            "or --rl-single-island-no-sync, or --rl-model-recipe kimi_k31 on a synced trainer; "
+            "strict-avg merges the canonical LoRA layout (requires --tuning lora)")
     if full_tuning and int(getattr(args, "expert_full_count", 0) or 0):
         raise ValueError("--expert-full-count is the attention-LoRA hybrid: it needs --tuning lora")
     if args.tuning != "lora" and not full_tuning:
@@ -1500,6 +1518,13 @@ def _prepare_rl_args(
     provenance = getattr(args, "_provenance", None)
     if provenance:
         provenance["rl_engine"] = "ports"
+        route = getattr(args, "rl_sync_route", None)
+        if route is not None and route.rerouted:
+            # only a rerouted run adds the fields (every other provenance is unchanged)
+            provenance["sync_preset_requested"] = route.requested
+            provenance["sync_route"] = {"preset": route.preset, "transport": route.transport,
+                                        "full_parameter_rounds": route.full_parameter_rounds,
+                                        "reason": route.reason}
     if provenance:
         for name in ("model", "dataset"):
             source = provenance.get(name) or {}

@@ -255,15 +255,27 @@ def test_tuning_full_island_command_passes_the_island_checks():
     island_entry._check_dense_full_sweep(parsed, yeto_policy_sync=True)
 
 
-@pytest.mark.parametrize("preset", ["strict-avg", "decoupled"])
-def test_tuning_full_on_a_lora_layout_preset_names_the_full_parameter_preset(preset, monkeypatch):
+def test_tuning_full_on_a_lora_layout_preset_names_the_full_parameter_preset(monkeypatch):
     from yeto.launcher import _prepare_rl_args
 
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
-    args = _launcher_args("ports", ("--tuning", "full", "--rl-sync-preset", preset,
+    args = _launcher_args("ports", ("--tuning", "full", "--rl-sync-preset", "strict-avg",
                                     "--fragments", "2"), gpu=TWO_ISLANDS)
-    with pytest.raises(ValueError, match="--rl-sync-full-parameter-rounds async"):
+    with pytest.raises(ValueError, match="decoupled .*--rl-sync-full-parameter-rounds async"):
         _prepare_rl_args(args)
+
+
+def test_tuning_full_with_decoupled_is_routed_to_the_full_parameter_preset(monkeypatch):
+    """decoupled + --tuning full runs the full-parameter preset's async rounds
+    (yeto.rl.engine.sync_route), so that preset's own rules apply."""
+    from yeto.launcher import _prepare_rl_args
+
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    args = _launcher_args("ports", ("--tuning", "full", "--rl-sync-preset", "decoupled",
+                                    "--fragments", "2"), gpu=TWO_ISLANDS)
+    with pytest.raises(ValueError, match="--rl-sync-preset full-parameter requires --rl-placement fixed-partition"):
+        _prepare_rl_args(args)
+    assert args.rl_sync_preset == "full-parameter" and args.rl_sync_preset_requested == "decoupled"
 
 
 def test_tuning_full_refuses_the_expert_full_hybrid(monkeypatch):
