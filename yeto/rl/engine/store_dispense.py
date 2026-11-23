@@ -22,8 +22,10 @@ loser, one winner per key under 32-way races; ``O_EXCL`` on a local directory).
 A store without it (a FUSE bucket mount, an S3 endpoint answering
 ``NotImplemented``) is refused. Ledger keys under ``<namespace>/``::
 
-    plan.json                  rows, fingerprint, seed, passes, streams, max_redo, lease_s, holdout sha
-    claims/<i>/<a>             attempt a of slot i (one winner per attempt; holder, incarnation)
+    plan.json                  rows, fingerprint, seed, passes, streams, max_redo, lease_s (the first
+                               sampler's, for reference), holdout sha
+    claims/<i>/<a>             attempt a of slot i (one winner per attempt; holder, incarnation,
+                               lease_s: the holder's lease of that slot)
     beats/<i>/<a>              the holder's lease renewal (rewritten; its time is the server's)
     fail/<i>/<a>.<kind>        why attempt a ended without a trained group (infra / expired / release)
     done/<i>.<kind>            the slot is settled (trained / exhausted / dropped)
@@ -39,6 +41,21 @@ Rules:
   header), never from a host clock. The holder rewrites its beat every
   ``lease / 3`` from its own thread, so a trial running for hours stays alive (a
   row's ``metadata.dispense_lease_s`` overrides the lease for that task);
+* the lease is a runtime setting, not part of the plan: each sampler uses the
+  ``lease_s`` of its own spec (``plan.json`` keeps the first sampler's value for
+  reference only; a sampler whose lease differs says so, ``rl_dispense_lease``),
+  so a restart with a new ``lease_s`` takes effect. The lease does not limit how
+  long a trial runs; it only sets how long a dead sampler's tasks wait before
+  another sampler takes them. The holder records its lease of the slot in the
+  claim body, and a scanner ends an attempt ``expired`` only when both its own
+  lease and the holder's recorded one have run out: a live holder renewing every
+  ``its lease / 3`` is never expired by a sampler with a shorter lease, and a
+  scanner with a longer lease only waits longer. The body is read only for a
+  claim past the scanner's own lease. A claim body without ``lease_s`` (older
+  code), or one that does not read, is judged with the plan's lease (the lease
+  older code renews by). Samplers of older code judge every claim by the plan's
+  lease: while one still runs, raise ``lease_s`` above the plan's only on all
+  samplers at once;
 * an attempt ends ``infra`` (the group could not be written whole because its
   trials failed on infrastructure), ``expired`` (its holder stopped renewing:
   the sampler died) or ``release`` (fenced, restarted, closing, unwritten: not
@@ -144,6 +161,9 @@ LEGACY_PLAN_VERSIONS = (2,)
 BACKEND = "store"
 DEFAULT_NAMESPACE = "task-dispense"
 DEFAULT_LEASE_S = 900.0
+# A lease above this gets a warning (dry run, sampler start): it holds a dead sampler's
+# tasks that long and buys nothing, a trial of any length is renewed every lease / 3.
+LEASE_WARN_S = 1800.0
 DEFAULT_MAX_REDO = 2
 DEFAULT_SCAN_S = 30.0
 DEFAULT_MAX_SCAN_S = 120.0
@@ -169,6 +189,26 @@ def check_store_config(config: Any) -> None:
         # open() read 0 as 1 pass and 2.5 as 2; -1 was refused only on the node
         raise DispenseError(f"prompts.dispense (backend store): passes must be a whole number >= 1 "
                             f"or null (got {passes!r})")
+    lease = config.get("lease_s")
+    if lease is not None and (isinstance(lease, bool) or not isinstance(lease, (int, float)) or not lease > 0):
+        raise DispenseError(f"prompts.dispense (backend store): lease_s must be a number of seconds > 0 "
+                            f"(got {lease!r})")
+
+
+def lease_warning(lease_s: Any) -> str | None:
+    """The warning for a store dispenser ``lease_s`` above :data:`LEASE_WARN_S`
+    (None: no warning)."""
+    try:
+        lease = float(lease_s if lease_s is not None else DEFAULT_LEASE_S)
+    except (TypeError, ValueError):
+        return None
+    if lease <= LEASE_WARN_S:
+        return None
+    return (f"prompts.dispense.lease_s is {lease:g} s: the lease does not limit how long a trial runs "
+            f"(the holder renews it every lease/3 = {lease / 3:g} s); it only sets how long the tasks of a "
+            f"sampler that died wait before another sampler takes them. Keep the default {DEFAULT_LEASE_S:g} s")
+
+
 CLAIM_STAGGER_SLOTS = 64  # a contended claim spreads over this many next candidates
 # A scan lists two unsettled slots in one range when at most this many settled slots
 # lie between them: reading past them (about 3 keys a slot, 1000 keys a request) costs
@@ -193,6 +233,7 @@ RELEASE_EVENT = "rl_dispense_release"
 RECOVER_EVENT = "rl_dispense_recover"
 SCAN_FAILED_EVENT = "rl_dispense_scan_failed"  # a scan the store did not answer (and the scan after: recovered)
 DRAIN_EVENT = "rl_dispense_drain"
+LEASE_EVENT = "rl_dispense_lease"  # at start: this sampler's lease (and the plan's when it differs)
 DRAIN_DIR, DRAINED_DIR = "drain", "drained"
 
 
@@ -614,6 +655,9 @@ class StoreLedger:
         self.holder, self.incarnation = str(holder), str(incarnation)
         self.seed, self.passes = int(seed), int(passes)
         self.lease_s, self.max_redo = float(lease_s), int(max_redo)
+        # the plan's lease_s (open): the lease older code renews by, used for a claim body
+        # that records none; this process renews and judges with its own ``lease_s``
+        self.plan_lease_s = self.lease_s
         self.holdout_sha256 = holdout_sha256
         self.slots = slots or SlotMap(self.rows, seed=self.seed, passes=self.passes)
         self.limit = self.slots.size
@@ -633,12 +677,36 @@ class StoreLedger:
     def key(self, *parts: str) -> str:
         return "/".join((self.ns, *parts))
 
-    def lease_of(self, slot: int) -> float:
+    def _row_lease(self, slot: int) -> float | None:
         if self._leases:
             value = self._leases[self.slots.row(slot)]
             if value:
                 return float(value)
-        return self.lease_s
+        return None
+
+    def lease_of(self, slot: int) -> float:
+        """This process's lease of ``slot``: the row's ``dispense_lease_s``, else its
+        own ``lease_s`` (the spec's, never the plan's: module doc)."""
+        row = self._row_lease(slot)
+        return self.lease_s if row is None else row
+
+    def holder_lease(self, slot: int, attempt: int) -> float:
+        """The lease the holder of ``attempt`` renews by: ``lease_s`` of its claim body.
+        A body without it (older code), not JSON, or a read that failed: the row's
+        lease, else the plan's (the rule before claim bodies recorded a lease: a
+        claim whose body does not read still expires)."""
+        body: dict[str, Any] = {}
+        try:
+            body = self.claim_body(slot, attempt)
+        except Exception as error:  # noqa: BLE001 - judged by the plan's lease (docstring)
+            if is_fatal_store_error(error):
+                raise
+            logger.warning("store dispenser: claim %d/%d not read for its lease: %r", slot, attempt, error)
+        value = body.get("lease_s")
+        if not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0:
+            return float(value)
+        row = self._row_lease(slot)
+        return self.plan_lease_s if row is None else row
 
     def plan(self) -> dict[str, Any]:
         return {"version": PLAN_VERSION, "rows": self.rows, "fingerprint": self.fingerprint.hex(),
@@ -666,7 +734,12 @@ class StoreLedger:
                 raise DispenseMismatch(f"dispense mismatch: {name} is {mine[name]!r} here, "
                                        f"{theirs.get(name)!r} in {self.key('plan.json')}")
         self.max_redo = int(theirs.get("max_redo", self.max_redo))
-        self.lease_s = float(theirs.get("lease_s", self.lease_s))
+        # lease_s is not adopted (module doc): this process keeps its own; the plan's is
+        # the lease of claims whose body records none (older code)
+        try:
+            self.plan_lease_s = float(theirs.get("lease_s", self.lease_s))
+        except (TypeError, ValueError):
+            self.plan_lease_s = self.lease_s
         self.plan_version = int(theirs["version"])
         if self.plan_version not in LEGACY_PLAN_VERSIONS:
             self.lease_of_holder = None  # module doc: retire markers and recover free a fenced claim
@@ -742,9 +815,12 @@ class StoreLedger:
         return self._create(self.key("done", f"{_pkey(slot)}.{kind}"), self._body(**detail))
 
     def claim(self, slot: int, attempt: int, **detail: Any) -> bool:
-        won = self._create(self.key("claims", _pkey(slot), _akey(attempt)), self._body(attempt=attempt, **detail))
+        lease = self.lease_of(slot)  # the other samplers judge this attempt's expiry by it (module doc)
+        won = self._create(self.key("claims", _pkey(slot), _akey(attempt)),
+                           self._body(attempt=attempt, lease_s=lease, **detail))
         if won:
-            self._bodies[(int(slot), int(attempt))] = {"holder": self.holder, "incarnation": self.incarnation}
+            self._bodies[(int(slot), int(attempt))] = {"holder": self.holder, "incarnation": self.incarnation,
+                                                       "lease_s": lease}
         return won
 
     def beat(self, slot: int, attempt: int) -> None:
@@ -819,17 +895,24 @@ class StoreLedger:
             if a is None:
                 continue
             if a not in state.fails:
-                alive = state.last_seen(a) + self.lease_of(p) > now
+                lease = self.lease_of(p)
+                alive = state.last_seen(a) + lease > now
+                if not alive:
+                    # past this process's lease: the holder may renew by a longer one (another
+                    # spec, or a sampler restarted with a new lease_s). Expired only when its
+                    # recorded lease ran out too (module doc); one read per such claim
+                    lease = max(lease, self.holder_lease(p, a))
+                    alive = state.last_seen(a) + lease > now
                 by = self._fenced_claim(p, a, leases) if alive else None
                 if alive and by is None:
                     continue
                 kind = "expired" if not alive else "release"
-                detail = ({"seen": state.last_seen(a), "now": now} if not alive
+                detail = ({"seen": state.last_seen(a), "now": now, "lease_s": lease} if not alive
                           else {"reason": "retired"} if by == "retired"
                           else {"reason": "fenced", "superseded_by": by})
                 if self.fail(p, a, kind, **detail):
                     logger.warning("store dispenser: slot %d attempt %d %s", p, a,
-                                   f"expired (lease {self.lease_of(p):.0f} s)" if not alive else f"fenced by {by}")
+                                   f"expired (lease {lease:.0f} s)" if not alive else f"fenced by {by}")
                     if on_end is not None:
                         on_end(EXPIRED_EVENT if not alive else RELEASE_EVENT, slot=p, attempt=a, **detail)
                 state.fails[a] = kind
@@ -927,7 +1010,8 @@ class StoreDispensedPrompts:
         self.drawn = 0
         self.stats = {"scans": 0, "claimed": 0, "claim_lost": 0, "trained": 0, "requeued": 0, "released": 0,
                       "dropped": 0, "lost": 0, "recovered": 0, "not_ready": 0, "capacity_waits": 0,
-                      "scans_failed": 0, "hold_checks_failed": 0, "renew_checks_failed": 0}
+                      "scans_failed": 0, "hold_checks_failed": 0, "renew_checks_failed": 0,
+                      "deferred_busy_task": 0}
         self._scan_failing = 0  # failed scans in a row
         self._stop = threading.Event()
         self._renewer: threading.Thread | None = None
@@ -999,10 +1083,29 @@ class StoreDispensedPrompts:
                              lease_of_holder=lease_of_holder,
                              full_scan=None if config.get("full_scan") is None else bool(config["full_scan"]))
         ledger.open()
-        return cls(path, ledger, input_key=input_key, label_key=label_key, groups_per_round=groups_per_round,
-                   render=render, task_key=task_key, rows=rows, accept_streams=accept,
-                   scan_s=float(config.get("scan_s", DEFAULT_SCAN_S)),
-                   max_scan_s=float(config.get("max_scan_s", DEFAULT_MAX_SCAN_S)), gate=gate, **kwargs)
+        prompts = cls(path, ledger, input_key=input_key, label_key=label_key, groups_per_round=groups_per_round,
+                      render=render, task_key=task_key, rows=rows, accept_streams=accept,
+                      scan_s=float(config.get("scan_s", DEFAULT_SCAN_S)),
+                      max_scan_s=float(config.get("max_scan_s", DEFAULT_MAX_SCAN_S)), gate=gate, **kwargs)
+        prompts._announce_lease()
+        return prompts
+
+    def _announce_lease(self) -> None:
+        """One ``rl_dispense_lease`` event at start: the lease this sampler renews and
+        judges by (its spec's), the plan's when it differs, and the warning of a lease
+        above :data:`LEASE_WARN_S`."""
+        ledger = self.ledger
+        fields: dict[str, Any] = {"lease_s": ledger.lease_s, "renew_s": round(ledger.lease_s / 3.0, 3)}
+        if ledger.plan_lease_s != ledger.lease_s:
+            fields["plan_lease_s"] = ledger.plan_lease_s
+            print(f"[store-dispense] lease_s {ledger.lease_s:g} s from the spec is used; "
+                  f"{ledger.key('plan.json')} was created with {ledger.plan_lease_s:g} s (the plan's value is "
+                  "kept for reference only)", flush=True)
+        warning = lease_warning(ledger.lease_s)
+        if warning is not None:
+            fields["warning"] = warning
+            print(f"[store-dispense] WARNING: {warning}", flush=True)
+        self._emit(LEASE_EVENT, **fields)
 
     @property
     def plan_id(self) -> str:
@@ -1165,6 +1268,7 @@ class StoreDispensedPrompts:
         if view is not None and view.host is not None:  # affinity: tasks ready on this sampler's host first
             candidates.sort(key=lambda c: not view.classify(
                 row_task_id(self.rows[self.slots.row(c[0])], self.task_key))[2])
+        candidates, spread = self._spread_tasks(candidates, states)  # then: tasks not in flight first
         got: list[int] = []
         queue, staggered, i = candidates, False, 0
         while i < len(queue):
@@ -1205,10 +1309,12 @@ class StoreDispensedPrompts:
                     # holder-specific offset within the next CLAIM_STAGGER_SLOTS candidates
                     # instead; an uncontended holder keeps the plan order exactly.
                     staggered = True
+                    # (within the slots of tasks not in flight: those of tasks in flight stay last)
                     rest = queue[i:]
-                    if rest:
-                        k = self._stagger % min(len(rest), CLAIM_STAGGER_SLOTS)
-                        queue, i = rest[k:] + rest[:k], 0
+                    head = rest[:max(0, spread - i)] or rest
+                    if head:
+                        k = self._stagger % min(len(head), CLAIM_STAGGER_SLOTS)
+                        queue, i = head[k:] + head[:k] + rest[len(head):], 0
         retired = False
         if got:
             try:
@@ -1233,6 +1339,43 @@ class StoreDispensedPrompts:
                     self._emit(RELEASE_EVENT, slot=p, attempt=h.attempt, reason="retired")
             return [], False
         return got, ended
+
+    def _task_of(self, slot: int) -> Any:
+        """The task of ``slot``: its row's task id, else the row."""
+        tasks = getattr(self, "_row_tasks", None)
+        if tasks is None:
+            tasks = self._row_tasks = [row_task_id(r, self.task_key) for r in self.rows]
+        row = self.slots.row(slot)
+        return ("row", row) if tasks[row] is None else tasks[row]
+
+    def _spread_tasks(self, candidates: list[tuple[int, int]],
+                      states: Mapping[int, TaskState]) -> tuple[list[tuple[int, int]], int]:
+        """``(candidates, n)``: ``candidates`` with the slots of a task that already has an attempt in
+        flight (any sampler's open claim, or an earlier candidate of this list) moved
+        behind the others, each part in its order. Passes of one task meet at a pass
+        boundary (later passes are reshuffled) and a redo can meet a later pass: run
+        together they compete for the same sandbox image and, for a task with state,
+        may disturb each other. Only the claim order changes (the plan, its
+        fingerprint and the slot sequence stay): a deferred slot is claimed as soon as
+        nothing else is left to claim or its task's attempt in flight ends, so no slot
+        starves and the last slots of a run may still run together. ``n``: the slots
+        not deferred (the head of the list)."""
+        busy = {self._task_of(p) for p, st in states.items()
+                if 0 <= p < self.ledger.limit and st.open_attempt() is not None}
+        with self._lock:
+            busy.update(self._task_of(p) for p in self._held)
+        front: list[tuple[int, int]] = []
+        back: list[tuple[int, int]] = []
+        for c in candidates:
+            task = self._task_of(c[0])
+            if task in busy:
+                back.append(c)
+            else:
+                busy.add(task)
+                front.append(c)
+        if back and front:
+            self.stats["deferred_busy_task"] += len(back)
+        return front + back, len(front)
 
     def _settle_unsure(self, states: Mapping[int, TaskState]) -> None:
         """Read back the claims whose create raised: one this process wrote is
@@ -1631,12 +1774,18 @@ def status(objects: Any, namespace: str = DEFAULT_NAMESPACE, *, details: bool = 
     for p in sorted(states):
         s = states[p]
         a = s.latest
+        claim: dict[str, Any] | None = None
         if s.done is not None:
             state = s.done
         elif a is None or a in s.fails:
             state = "queued"
         else:
-            state = "running" if s.last_seen(a) + lease > now else "stale"
+            # the holder's own lease (its claim body; module doc), else the plan's
+            claim = _json(objects, f"{ns}/claims/{_pkey(p)}/{_akey(a)}")
+            held = claim.get("lease_s")
+            held = float(held) if isinstance(held, (int, float)) and not isinstance(held, bool) and held > 0 \
+                else lease
+            state = "running" if s.last_seen(a) + held > now else "stale"
         totals[state] = totals.get(state, 0) + 1
         if s.done is not None and not settled:
             continue
@@ -1645,9 +1794,10 @@ def status(objects: Any, namespace: str = DEFAULT_NAMESPACE, *, details: bool = 
                                "fails": {str(k): v for k, v in sorted(s.fails.items())},
                                "age_s": None if a is None else round(now - s.claims[a], 1),
                                "beat_age_s": None if a is None else round(now - s.last_seen(a), 1)}
-        claim = _json(objects, f"{ns}/claims/{_pkey(p)}/{_akey(a)}") if a is not None else {}
+        if claim is None:
+            claim = _json(objects, f"{ns}/claims/{_pkey(p)}/{_akey(a)}") if a is not None else {}
         row.update(task_id=claim.get("task_id"), row=claim.get("row"), holder=claim.get("holder"),
-                   incarnation=claim.get("incarnation"))
+                   incarnation=claim.get("incarnation"), lease_s=claim.get("lease_s"))
         if details:
             done = _json(objects, f"{ns}/done/{_pkey(p)}.{s.done}") if s.done else {}
             reasons = []
