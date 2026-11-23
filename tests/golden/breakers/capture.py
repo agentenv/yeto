@@ -346,7 +346,8 @@ def pool_values(pool_cfg: dict[str, Any]) -> dict[str, Any]:
         out["pool.spend_cap.usd"] = e.max_run_spend_usd
         out["pool.spend_cap.ucr"] = e.max_run_spend_ucr
     out["pool.node_cap.enabled"] = True
-    out["pool.node_cap.max_nodes_n"] = e.max_nodes if e.max_nodes is not None else 2 * target
+    out["pool.node_cap.max_nodes_n"] = e.max_nodes  # null: 2 x target, applied by Budget at run time
+    out["pool.node_cap.effective_max_nodes_n"] = e.max_nodes if e.max_nodes is not None else 2 * target
     out["pool.node_cap.max_orders_n"] = e.max_orders
     out["pool.crash_loop.enabled"] = True
     out["pool.crash_loop.action"] = e.crash_loop_before_ready
@@ -371,6 +372,13 @@ def pool_values(pool_cfg: dict[str, Any]) -> dict[str, Any]:
     out["pool.lease_overdue.grace_s"] = e.overdue_grace_s
     out["pool.control_plane_alert.enabled"] = True
     out["pool.control_plane_alert.limit_s"] = e.control_plane_alert_s
+    out["pool.fence_alert.enabled"] = True
+    out["pool.fence_alert.failures_n"] = e.fence_alert_failures
+    out["pool.fence_alert.limit_s"] = e.fence_alert_s
+    # yeto.launch.nc.cli.pool_config: the top-level lease-end knobs
+    out["pool.lease_end.enabled"] = True
+    out["pool.lease_end.replace_lead_s"] = float(pool_cfg.get("replace_lead_s", 3600))
+    out["pool.lease_end.end_margin_s"] = float(pool_cfg.get("end_margin_s", 600))
     return out
 
 

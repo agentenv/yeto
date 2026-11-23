@@ -39,6 +39,7 @@ DERIVED = {
     "sampler.drain.effective_cut_s",  # min(timeout_s, reload_max_defer_s): the drain cut rule prints it
     "run.sandbox_containers.limit_n",  # max_run_n raised to max_per_sampler_n x billed nodes, at run time
     "monitor.dashboard.budget_usd",  # the dashboard's --budget, passed from run.budget.usd by run up
+    "pool.node_cap.effective_max_nodes_n",  # max_nodes_n, or 2 x the pool target when null
 }
 # golden keys a layer chose not to declare as a registry param, with the reason (append here;
 # never drop a key from capture.py: it still locks today's reader)
