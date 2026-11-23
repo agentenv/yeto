@@ -178,3 +178,15 @@ def test_driver_keeps_the_last_step_cut_only_when_asked():
     action, observation = on.segments[1].prompt[-2:]
     assert action["role"] == "assistant" and action["content"] == " ".join(["a1"] * 5)  # the action whole
     assert "tokens truncated" in observation["content"] and len(observation["content"].split()) < 80
+
+
+def test_summary_prompt_asks_for_brevity_and_verbatim_identifiers():
+    """The prose stays short (a few lines per section, no restated tool output) while
+    identifiers are copied verbatim, once each."""
+    prompt = cp.SUMMARY_PROMPT
+    assert "a few short lines per section" in prompt and "no restated tool output" in prompt
+    assert "Copy verbatim, once each" in prompt
+    for item in ("goal and constraints", "file paths with full directories", "commands", "IDs", "URLs",
+                 "key numbers"):
+        assert item in prompt
+    assert prompt.endswith("Do not call any tool in this turn.")

@@ -45,7 +45,8 @@ SAMPLER_STAT_KEYS = ("reward_mean", "reward_std", "reward_p10", "reward_p50", "r
 COMPACTION_COUNT_KEYS = ("trials", "samples", "compacted_trials", "compactions", "segment_samples", "summaries",
                          "summary_ok", "truncated_trials", "truncated_compacted_trials", "exhausted_trials",
                          "exhausted_truncated_trials", "context_full_trials", "trainable_tokens", "summary_tokens",
-                         "retry_replays", "retry_replay_trials", "fork_lost_trials", "compaction_exposed_trials")
+                         "retry_replays", "retry_replay_trials", "fork_lost_trials", "compaction_exposed_trials",
+                         "summary_truncated")
 COMPACTION_RATIOS = {"compacted_frac": ("compacted_trials", "trials"),
                      "compactions_mean": ("compactions", "trials"),
                      "samples_per_trial": ("samples", "trials"),
@@ -53,7 +54,8 @@ COMPACTION_RATIOS = {"compacted_frac": ("compacted_trials", "trials"),
                      "summary_ok_frac": ("summary_ok", "summaries"),
                      "truncated_compacted_frac": ("truncated_compacted_trials", "compacted_trials"),
                      "summary_token_frac": ("summary_tokens", "trainable_tokens"),
-                     "fork_lost_frac": ("fork_lost_trials", "compaction_exposed_trials")}
+                     "fork_lost_frac": ("fork_lost_trials", "compaction_exposed_trials"),
+                     "summary_truncated_frac": ("summary_truncated", "summaries")}
 # per-round scalars shown as is (not summed): per-trial vs per-segment means, xhw_guard
 COMPACTION_ROUND_KEYS = ("reward_mean_trial", "reward_mean_segment", "policy_tokens_mean_trial",
                          "policy_tokens_mean_segment", "xhw_downweighted_groups", "xhw_downweighted_trials",

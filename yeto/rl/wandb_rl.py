@@ -88,7 +88,7 @@ _TRAIN_STEP_ALIASES = (TRAIN_STEP_KEY, "train_step")
 # these scalars become ``train/compaction/<key>``; absent without compaction data.
 _COMPACTION_WANDB_KEYS = (
     "trials", "samples", "samples_per_trial", "segment_sample_frac", "compacted_trials",
-    "compacted_frac", "compactions_mean", "summary_ok_frac", "truncated_compacted_trials",
+    "compacted_frac", "compactions_mean", "summary_ok_frac", "summary_truncated_frac", "truncated_compacted_trials",
     "truncated_compacted_frac", "summary_token_frac", "reward_mean_trial", "reward_mean_segment",
     "xhw_trial_mean_shift",
 )

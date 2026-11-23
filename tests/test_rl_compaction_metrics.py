@@ -65,6 +65,21 @@ def test_round_summary_counts_trials_segments_summaries_and_truncation():
     assert "summary_ok=66.7%" in compaction_log_line(s)
 
 
+def test_cut_summaries_are_counted_apart_from_summary_ok():
+    """summary_truncated (the summary turn hit its max_tokens) is its own count and
+    share of the summaries; summary_ok stays the share of complete summaries. Samples
+    without the field (an older records proxy) leave it null."""
+    samples = [seg("a", 0, 3, ok=True, summary_truncated=False, index=0),
+               seg("a", 1, 3, ok=False, summary_truncated=True, index=0), seg("a", 2, 3, index=0),
+               seg("b", 0, 2, ok=False, summary_truncated=False, index=1), seg("b", 1, 2, index=1)]
+    s = compaction_stats(samples)
+    assert (s["summaries"], s["summary_ok"], s["summary_truncated"]) == (3, 1, 1)
+    assert s["summary_ok_frac"] == pytest.approx(0.3333) and s["summary_truncated_frac"] == pytest.approx(0.3333)
+    assert "summary_truncated=33.3%" in compaction_log_line(s)
+    old = compaction_stats(round_samples())
+    assert old["summary_truncated"] is None and old["summary_truncated_frac"] is None
+
+
 def test_segments_arriving_out_of_order_take_the_last_segments_status():
     samples = round_samples()
     s = compaction_stats([samples[2], samples[0], samples[1]])
@@ -333,11 +348,17 @@ def _samples(rid, *, ok=True, truncated=False):
             for j in range(4) for i in range(2)] + [whole(f"{rid}-w", index=9)]
 
 
-def _tapes(rounds, *, compaction=True, ok=True, truncated=False, lost_long=0, forks=0):
+def _tapes(rounds, *, compaction=True, ok=True, truncated=False, lost_long=0, forks=0, cut=False):
     recs = [{"event": "rl_sampler_start", "sampler_id": "nc-c1", "max_backlog_groups": 8, "time_unix": T0}]
     for rid in range(rounds):
         tally = CompactionTally()
-        tally.add(_samples(rid, ok=ok, truncated=truncated))
+        samples = _samples(rid, ok=ok, truncated=truncated)
+        if cut:  # every summary hit its max_tokens
+            for sample in samples:
+                comp = sample["metadata"].get("compaction")
+                if comp and comp["summary_ok"] is not None:
+                    comp["summary_truncated"] = True
+        tally.add(samples)
         for _ in range(lost_long):
             tally.lose(SimpleNamespace(num_segments=3), "drain_timeout")
         for _ in range(forks):
@@ -407,6 +428,16 @@ def test_dashboard_alerts_on_failing_summaries_and_truncation():
     rules = {a["rule"]: a for a in _tapes(3, ok=False, truncated=True)["overview"]["alerts"]}
     assert rules["compaction_summary"]["sev"] == 0 and rules["compaction_summary"]["island"] == "nc-c1"
     assert rules["compaction_truncated"]["sev"] == 1 and "100%" in rules["compaction_truncated"]["detail"]
+    assert "summary_max_tokens" not in rules["compaction_summary"]["detail"]  # no cut summary reported
+
+
+def test_dashboard_names_cut_summaries_in_the_summary_alert():
+    view = _tapes(3, ok=False, cut=True)
+    c = view["page"]["async"]["samplers"]["nc-c1"]["compaction"]
+    assert (c["summaries"], c["summary_truncated"], c["summary_truncated_frac"]) == (12, 12, 1.0)
+    rules = {a["rule"]: a for a in view["overview"]["alerts"]}
+    detail = rules["compaction_summary"]["detail"]
+    assert "100% of the summaries hit the summary turn's max_tokens" in detail and "summary_max_tokens" in detail
 
 
 def test_dashboard_without_compaction_keeps_its_keys():

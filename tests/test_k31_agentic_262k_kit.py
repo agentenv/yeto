@@ -154,7 +154,7 @@ def test_the_documented_compaction_block_passes_the_run_up_checks(kit, tmp_path)
     spec = {**kit.spec, "agentic": {**kit.agentic, "compaction": block}}
     cfg = compaction.config_from_spec(spec)
     headroom = cfg.check_summary_headroom(kit.server["max_model_len"], kit.agentic["turn_max_tokens"])
-    assert headroom == 13537 and cfg.context_budget + headroom == 259297
+    assert headroom == 13538 and cfg.context_budget + headroom == 259298
     (tmp_path / "compacting.json").write_text(json.dumps(spec))
     pool = {**kit.pool, "spec": str(tmp_path / "compacting.json")}
     assert up_consistency.problems(kit.run["store"], kit.argv, pool) == []

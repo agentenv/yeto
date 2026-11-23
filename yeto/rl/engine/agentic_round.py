@@ -243,6 +243,9 @@ COMPACTION_NO_ROOM = "compaction_no_room"  # records.COMPACTION_NO_ROOM (not imp
 # ``keep_last_step_max_tokens``). The round event counts the segments with each set
 # (``agentic.compaction_<flag>``, only when there are any).
 COMPACTION_REBUILD_FLAGS = ("task_truncated", "last_step_truncated")
+# Optional boolean of a segment that ends with a summary: it hit the summary turn's max_tokens
+# before a complete summary (``summary_ok`` is False then; the turn trains as generated).
+COMPACTION_SUMMARY_FLAGS = ("summary_truncated",)
 
 
 def agentic_samples(item: PromptItem, finished: Any, *, version: int, provenance: Mapping[str, str],
@@ -296,7 +299,7 @@ def agentic_samples(item: PromptItem, finished: Any, *, version: int, provenance
                               "summary_tokens": int(part.summary_tokens), "retry_replays": part.retry_replays}
         if max_model_len is not None:
             meta["compaction"]["max_model_len"] = int(max_model_len)
-        for key in COMPACTION_REBUILD_FLAGS:  # only from a records proxy that reports them
+        for key in (*COMPACTION_SUMMARY_FLAGS, *COMPACTION_REBUILD_FLAGS):  # only from a records proxy that reports them
             if getattr(part, key, None) is not None:
                 meta["compaction"][key] = bool(getattr(part, key))
         samples.append(sample)
@@ -1428,12 +1431,16 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         raise HarnessConfigError("a public records-proxy base needs a path secret (the tunnel is public)")
     compaction = spec_compaction(spec, engine)
     if compaction is not None:
-        from yeto.rl.compaction import describe, segment_width
+        from yeto.rl.compaction import describe, segment_width, summary_length_note
 
         logger.info("agentic.compaction: %s", describe(compaction))
         _width, width_warning = segment_width(spec, compaction, max_model_len=getattr(engine, "max_model_len", None))
         if width_warning is not None:
             logger.warning(width_warning)
+        length_note = summary_length_note(compaction, int(section["turn_max_tokens"]),
+                                          getattr(engine, "max_model_len", None))
+        if length_note is not None:
+            logger.info(length_note)
     proxy = RecordsProxy(engine, template, model=model, signed_sampling=signed,
                          sampler_id=str(spec.get("sampler_id", "records-proxy")),
                          compaction=compaction,  # None (no agentic.compaction): as before

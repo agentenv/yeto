@@ -60,6 +60,7 @@ from yeto.rl.compaction import (
     CompactionConfig,
     extract_summary,
     first_task_message,
+    salvage_summary,
     should_compact,
     truncate_middle,
 )
@@ -162,6 +163,8 @@ class Segment:
     last_finish: str | None = None
     kept_steps: int | None = None
     summary_ok: bool | None = None
+    # the summary the segment ends with hit its max_tokens without a closed <summary> tag (None: no summary)
+    summary_truncated: bool | None = None
     # rebuilt context (index > 0; None on the first segment): the task message was cut
     # (None: no task message kept), the kept last step's tool output was cut
     task_truncated: bool | None = None
@@ -175,6 +178,7 @@ class Segment:
     def sample(self) -> dict[str, Any]:
         return {"segment": self.index, "token_ids": list(self.token_ids), "loss_mask": list(self.loss_mask),
                 "logprobs": list(self.logprobs), "kept_steps": self.kept_steps, "summary_ok": self.summary_ok,
+                "summary_truncated": self.summary_truncated,
                 "task_truncated": self.task_truncated, "last_step_truncated": self.last_step_truncated,
                 "turns": [vars(t).copy() for t in self.turns]}
 
@@ -480,7 +484,11 @@ class RecordingBackend:
         the reasoning text is kept, ``summary_ok`` False. A reply cut
         at its length, without a closed ``<summary>``, with tool calls (not run)
         or that does not parse still opens the next segment, with ``summary_ok``
-        False and a counter."""
+        False and a counter. ``summary_ok`` means a complete summary; a reply cut
+        at its ``max_tokens`` before one is ``summary_truncated`` (counter
+        ``summary_truncated``, apart from ``summary_not_ok``) and the next
+        segment resumes from the sections it got to
+        (:func:`~yeto.rl.compaction.salvage_summary`)."""
         cfg = self.compaction
         assert cfg is not None
         counters = self._counters(session)
@@ -499,8 +507,6 @@ class RecordingBackend:
                                                  f"tokens; max_model_len is {self.engine.max_model_len}")
         completion = await self._sample(session, segment, pending, params, kind=KIND_SUMMARY)
         self._check_alive(session)  # forgotten while the engine wrote it
-        if completion.finish_reason == FINISH_LENGTH:
-            counters["summary_truncated"] += 1
         try:
             reply: Message | None = self._parse(completion)
         except TemplateError:
@@ -518,8 +524,16 @@ class RecordingBackend:
         summary, ok = extract_summary(text)
         segment.summary_ok = (ok and bool(summary) and reply is not None and not from_reasoning
                               and not reply.get("tool_calls"))
+        # cut at its max_tokens before a complete summary: counted apart from a malformed one, and the
+        # next segment resumes from the sections it got to (the turn trains as generated either way)
+        segment.summary_truncated = completion.finish_reason == FINISH_LENGTH and not segment.summary_ok
         counters["compactions"] += 1
-        if not segment.summary_ok:
+        if segment.summary_truncated:
+            counters["summary_truncated"] += 1
+            summary, sections = salvage_summary(text)
+            if sections:
+                counters["summary_truncated_sections"] += sections
+        elif not segment.summary_ok:
             counters["summary_not_ok"] += 1
 
         systems = list(itertools.takewhile(lambda m: m.get("role") == "system", context))

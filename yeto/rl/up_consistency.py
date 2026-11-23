@@ -385,14 +385,16 @@ def compaction_lines(pool_cfg: dict[str, Any], trainer_argv: list[str] | None = 
         return []
     if cfg is None:
         return []
-    from yeto.rl.compaction import segment_width  # noqa: PLC0415
+    from yeto.rl.compaction import segment_width, spec_summary_length_note  # noqa: PLC0415
 
     args = trainer_args(trainer_argv) if trainer_argv is not None else None
     _width, width_warning = segment_width(spec, cfg)
     micro = micro_batch_warning(args)
+    length_note = spec_summary_length_note(spec, cfg)
     return [f"agentic.compaction {describe(cfg)}"] + [
         f"WARNING: {w}" for w in [*([width_warning] if width_warning else []), *([micro] if micro else []),
-                                  *compaction_switch_warnings(spec, args)]]
+                                  *compaction_switch_warnings(spec, args)]] + (
+        [f"NOTE: {length_note}"] if length_note else [])
 
 
 def micro_batch_warning(args: Any | None) -> str | None:

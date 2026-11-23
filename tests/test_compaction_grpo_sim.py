@@ -71,11 +71,17 @@ def check_trial_samples(r: sim.SimRun) -> None:
             continue
         metas = [x["metadata"]["compaction"] for x in t.samples]
         k = len(t.samples)
-        assert all(set(m) == COMPACTION_KEYS for m in metas[:1])
-        # a rebuilt segment also says whether its rebuild cut the task message (keep_task_message is on
-        # by default; keep_last_step_max_tokens is off, so last_step_truncated is not reported)
-        assert all(set(m) == COMPACTION_KEYS | {"task_truncated"} for m in metas[1:])
+        # a segment that ends with a summary says whether the summary turn hit its max_tokens
+        # (summary_truncated); a rebuilt segment whether its rebuild cut the task message
+        # (keep_task_message is on by default; keep_last_step_max_tokens is off, so
+        # last_step_truncated is not reported)
+        for number, m in enumerate(metas):
+            extra = {"summary_truncated"} if number < k - 1 else set()
+            extra |= {"task_truncated"} if number else set()
+            assert set(m) == COMPACTION_KEYS | extra
         assert all(m["task_truncated"] is False for m in metas[1:])  # the sim's task messages are short
+        # summary_ok is a complete summary; a cut one is summary_truncated, never both
+        assert not any(m["summary_ok"] and m["summary_truncated"] for m in metas[:-1])
         assert [m["segment_index"] for m in metas] == list(range(k))
         assert {m["num_segments"] for m in metas} == {k} and {m["schema"] for m in metas} == {1}
         assert {m["trajectory_id"] for m in metas} == {t.trajectory_id}

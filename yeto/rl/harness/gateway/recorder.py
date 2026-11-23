@@ -124,7 +124,8 @@ def segments_from_records(records: Mapping[str, Any], *,
     ``<summary>`` tag (None: it ended without one); ``summary_tokens``: the
     tokens its summary turn generated (0 without one); ``retry_replays``: the
     gateway's count for the whole trajectory (None: replay is off), on every
-    segment; ``task_truncated`` / ``last_step_truncated``: the segment's rebuilt
+    segment; ``summary_truncated``: the summary it ended with hit its max_tokens
+    before a complete summary (None: no summary); ``task_truncated`` / ``last_step_truncated``: the segment's rebuilt
     context cut the task message / the kept last step's tool output (None: not
     rebuilt, or the option is off)."""
     groups: list[CompactionSegment] = []
@@ -140,10 +141,12 @@ def segments_from_records(records: Mapping[str, Any], *,
                 last = groups[-1]
                 groups[-1] = dataclasses.replace(last, turns=(*last.turns, *turns),
                                                  summary_ok=sample.get("summary_ok"),
+                                                 summary_truncated=sample.get("summary_truncated"),
                                                  summary_tokens=last.summary_tokens + summary)
                 continue
             groups.append(CompactionSegment(turns=tuple(turns), kept_steps=sample.get("kept_steps"),
                                             summary_ok=sample.get("summary_ok"),
+                                            summary_truncated=sample.get("summary_truncated"),
                                             task_truncated=sample.get("task_truncated"),
                                             last_step_truncated=sample.get("last_step_truncated"),
                                             context_budget=context_budget, summary_tokens=summary,

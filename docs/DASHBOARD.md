@@ -234,7 +234,8 @@ compacted trial is written as one buffer sample per segment
 | `compactions` / `compactions_mean` / `compactions_max` | summary turns in total, per trial, the most in one trial (`max_compactions`: the configured limit) |
 | `segments_hist` | trials by segment count (`{"1": n1, "2": n2, ...}`) |
 | `segment_samples` / `segment_sample_frac` | samples of compacted trials, and their share of `samples` |
-| `summaries` / `summary_ok` / `summary_ok_frac` | summary turns, those with a `<summary>` block, the share |
+| `summaries` / `summary_ok` / `summary_ok_frac` | summary turns, those with a complete `<summary>` block, the share |
+| `summary_truncated` / `summary_truncated_frac` | summary turns that hit the summary turn's `max_tokens` before `</summary>`, their share of `summaries`; null when the samples do not report it. The summary alert names this share and suggests a larger `summary_max_tokens` |
 | `truncated_trials` / `truncated_compacted_trials` / `truncated_compacted_frac` | trials whose last segment is `truncated`; those that compacted; their share of `compacted_trials` |
 | `exhausted_trials` / `exhausted_truncated_trials` | trials that used every allowed compaction (and also ended truncated); null when the limit is unknown |
 | `context_full_trials` | trials the records proxy stopped for a full context; null when not reported |
