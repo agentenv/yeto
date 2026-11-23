@@ -15,11 +15,15 @@ import threading
 import time
 from pathlib import Path
 
+from yeto.rl.engine.merge_metrics import MergeMetricsFolder
+from yeto.wandb_logger import NullRun
 from yeto.wandb_tape import (
     OffsetStore,
     TapeForwarder,
     follow_jsonl,
+    forward_record,
     offset_path_for,
+    record_metrics,
     replay,
     tape_metrics,
 )
@@ -176,8 +180,9 @@ def test_every_rust_tape_field_is_consumed_or_deliberately_skipped():
     # The responders literal is built first, the record literal last.
     responder_fmt, record_fmt = body.split("let line = format!(", 1)
     top_level = set(re.findall(r'\\"(\w+)\\":', record_fmt))
-    optional = source.split("fn checkpoint_tape_field(", 1)[1].split("\nfn ", 1)[0]
-    top_level |= set(re.findall(r'\\"(\w+)\\":', optional))
+    for helper in ("fn checkpoint_tape_field(", "fn bcast_tape_fields("):
+        optional = source.split(helper, 1)[1].split("\nfn ", 1)[0]
+        top_level |= set(re.findall(r'\\"(\w+)\\":', optional))
     responder_keys = set(re.findall(r'\\"(\w+)\\":', responder_fmt))
     assert responder_keys, "could not find the responder literal in append_tape"
 
@@ -185,6 +190,7 @@ def test_every_rust_tape_field_is_consumed_or_deliberately_skipped():
         "step", "fragment", "attempt", "gnorm", "ms", "sync_ms", "quorum",
         "expected", "responded", "missed_grace", "launch_base_version",
         "quorum_ms", "grace_ms", "responders", "checkpoint_ms", "carried",
+        "bcast_bytes",
     }
     # Constants and the member-identity mirrors of the id lists: nothing a
     # time series can be drawn from.
@@ -192,6 +198,7 @@ def test_every_rust_tape_field_is_consumed_or_deliberately_skipped():
         "protocol_version", "delta_semantics",
         "expected_members", "responded_members", "missed_members",
         "time_unix",  # wall clock of the line, for offline timing analysis
+        "bcast_unix",  # wall clock the BCAST frames were queued, for offline timing analysis
     }
     unhandled = top_level - consumed_top - skipped_top
     assert not unhandled, f"new syncer tape field(s) not routed to W&B: {unhandled}"
@@ -536,3 +543,17 @@ def test_replay_skips_a_non_object_record(tmp_path):
     run = _RecordingRun()
     assert replay(tape, run) == 1
     assert run.logged[-1]["global_step"] == 8
+
+
+def test_bcast_stamp_and_the_syncers_kind_records():
+    """``bcast_bytes`` of a merge is logged; the syncer's ``kind`` records (config, round
+    opens / timeouts, connections) carry no ``step`` and are neither merges nor metrics."""
+    merge = {"step": 3, "fragment": 0, "responders": [], "bcast_unix": 1792000001.75, "bcast_bytes": 41}
+    assert tape_metrics(merge)["sync/bcast_bytes"] == 41.0
+    assert "sync/bcast_bytes" not in tape_metrics({"step": 4, "fragment": 1, "responders": []})
+    folder = MergeMetricsFolder()
+    for kind in ("syncer_config", "round_open", "round_attempt_timeout", "member_connected",
+                 "member_disconnected"):
+        rec = {"kind": kind, "global_step": 3, "learner_id": 0, "time_unix": 1.0}
+        assert record_metrics(rec, folder) is None
+        assert forward_record(rec, folder, NullRun()) is False

@@ -23,10 +23,16 @@ def validate_consolidation_tape(
     budget_steps: int,
 ) -> None:
     """Require one full-participation ordinary round per terminal fragment."""
+    # merge records only: the syncer's ``kind`` records (config, rounds,
+    # members, pool) carry no ``step``
     records = [
-        json.loads(line)
-        for line in Path(path).read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        record
+        for record in (
+            json.loads(line)
+            for line in Path(path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+        if "step" in record
     ]
     terminal = [
         record

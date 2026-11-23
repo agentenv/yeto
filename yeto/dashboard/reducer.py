@@ -43,6 +43,10 @@ from .sources import COST_EVENTS_FILE
 FLEET_EVENTS = frozenset({"island_launch", "island_ready", "island_lost", "island_stop", "island_done",
                           "cost_tick"})
 POLICY_SWEEP_LEDGER_EVENT = "policy_sweep_ledger"
+# the syncer's own records (``kind``, no ``step``): its config, round opens / timeouts and
+# the island connections it saw; a ``learner_id`` there is not a sign of life of that island
+SYNCER_RECORD_KINDS = frozenset({"syncer_config", "round_open", "round_attempt_timeout",
+                                 "member_connected", "member_disconnected"})
 SYNCER_ISLAND_EVENTS = frozenset({"rl_fragment_push", "rl_policy_apply", "rl_pull_resend",
                                   "rl_member_publication"})
 TERMINAL_TX_PHASES = ("COMMITTED", "SUCCEEDED", "CANCELLED", "REBUILT_OLD", "RECOVERY_REQUIRED",
@@ -1203,7 +1207,7 @@ class Reducer:
         return out
 
     def _feed_other(self, r: dict, iid: str | None, ts: float | None) -> None:
-        if iid is not None:
+        if iid is not None and r.get("kind") not in SYNCER_RECORD_KINDS:
             self._touch(self.island(iid), ts)
 
     # -- views ------------------------------------------------------------------

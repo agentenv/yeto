@@ -345,6 +345,7 @@ def test_two_launcher_built_verl_islands_run_decoupled_fragments_through_the_rea
         assert sorted(saved["fragment_versions"]) == [total - 1, total]
     assert len(hashes) == 1  # both islands end on the syncer's final cut
     rows = [json.loads(line) for line in (tmp_path / "tape.jsonl").read_text().splitlines() if line.strip()]
+    rows = [r for r in rows if "step" in r]  # merges; the syncer's own records are keyed by "kind"
     # one merge per fragment step, both islands in every merge, each fragment in turn
     assert [(r["step"], r["fragment"]) for r in rows] == [(t, (t - 1) % 2) for t in range(1, total + 1)]
     responded = [sorted(r["responded"]) for r in rows]

@@ -440,7 +440,7 @@ def test_learner_budget_restart_freezes_exactly_and_marks_complete_checkpoint(tm
         )
         records = [json.loads(line) for line in tape.read_text().splitlines()]
         terminal_steps = {version for version, _params, _momentum in parsed.fragments}
-        terminal = [record for record in records if record["step"] in terminal_steps]
+        terminal = [record for record in records if record.get("step") in terminal_steps]
         assert {record["fragment"] for record in terminal} == {0, 1}
         for record in terminal:
             assert {responder["id"] for responder in record["responders"]} == {0, 1}
