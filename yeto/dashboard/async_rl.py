@@ -320,7 +320,8 @@ class AsyncState:
     def _fold_sampler(self, r: dict, iid: str, ts: float | None, ev: str, hint: str | None = None,
                       boot_ts: float | None = None) -> None:
         s = self._s(iid)
-        s["last_type"], s["last_ts"] = ev, ts
+        if ts is None or s["last_ts"] is None or ts >= s["last_ts"]:  # the newest record, not the last read
+            s["last_type"], s["last_ts"] = ev, ts
         rid = _int(r.get("rollout_id"))
         inc = r.get("incarnation")
         if inc is not None and (ev in ("rl_sampler_join", "rl_sampler_start")
