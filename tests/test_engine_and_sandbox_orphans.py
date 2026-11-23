@@ -248,8 +248,10 @@ def test_the_trial_config_passes_the_ttl_to_an_agentenv_environment(tmp_path):
     (tmp_path / "t1" / "task.toml").write_text("[task]\n")
     task = AgentTask(task_id="t1", provider="agentenv", agent="pi", model_name="m",
                      budget=AgentBudget(agent_timeout_s=3600, wall_clock_s=3900))
-    cfg = build_trial_config(task, "http://127.0.0.1:1/v1", HarborSettings(tasks_dir=tmp_path))
+    settings = HarborSettings(tasks_dir=tmp_path, turn_max_tokens=512)
+    cfg = build_trial_config(task, "http://127.0.0.1:1/v1", settings)
     assert cfg.environment.kwargs["ttl_s"] == agentenv_ttl_s(3900)
     pinned = build_trial_config(task, "http://127.0.0.1:1/v1",
-                                HarborSettings(tasks_dir=tmp_path, provider_kwargs={"ttl_s": 600}))
+                                HarborSettings(tasks_dir=tmp_path, provider_kwargs={"ttl_s": 600},
+                                               turn_max_tokens=512))
     assert pinned.environment.kwargs["ttl_s"] == 600  # an operator's HARBOR_ENV_KWARGS wins
