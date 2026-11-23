@@ -127,17 +127,18 @@ The flags an async GRPO buffer trainer needs beyond the model and data:
 
 Several islands each run GRPO on their own; the syncer merges their weights in
 fragments (`P`), each island keeps training `H` local rounds per sync, and up
-to `tau` fragment rounds are in flight at once. The trainable form decides
-which sync stack runs:
+to `tau` fragment rounds are in flight at once. `--rl-sync-preset decoupled`
+names this for every trainable form; the form decides which sync stack runs it
+(the launch prints `[sync-route] ...` when it reroutes):
 
-| Form | `--rl-sync-preset` | What is synced |
+| Form | Stack under `--rl-sync-preset decoupled` | What is synced |
 |---|---|---|
-| LoRA | `decoupled` (or `strict-avg`, one fragment per round) | the canonical LoRA layout, bin-packed into `--fragments P` (2 <= P <= LoRA tensors) |
-| Full parameters | `full-parameter --rl-sync-full-parameter-rounds async` (the full-parameter counterpart of `decoupled`) | every parameter, owner-affine fragments of at most 2 GiB in FP32 |
-| Partial experts (MoE) | `full-parameter` with the recipe's selection | the parameters the recipe trains (the selected routed experts and the trainable dense part) |
+| LoRA | LoRA fragments (`decoupled`; `strict-avg` is one fragment per round) | the canonical LoRA layout, bin-packed into `--fragments P` (2 <= P <= LoRA tensors) |
+| Full parameters | full-parameter asynchronous rounds (the same as `--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async`) | every parameter, owner-affine fragments of at most 2 GiB in FP32 |
+| Partial experts (MoE) | full-parameter asynchronous rounds, with the recipe's selection | the parameters the recipe trains (the selected routed experts and the trainable dense part) |
 
-`--tuning full` with `strict-avg` or `decoupled` is refused at launch: those
-presets merge LoRA. Partial experts exist for two recipes today:
+`--tuning full` with `strict-avg` is refused at launch: that preset merges
+LoRA. Partial experts exist for two recipes today:
 `--rl-model-recipe kimi_k31 --tuning full --rl-expert-selection <file>` and
 `--rl-model-recipe deepseek-v4-flash --expert-full-count N`.
 

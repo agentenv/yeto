@@ -47,13 +47,10 @@ PARTIAL_RECIPES = {"kimi_k31", "deepseek-v4-flash"}
 DSV4_EXPERT_FULL_COUNT = 4  # --expert-full-count of the deepseek-v4-flash expert-full form
 # Failing cells that open work turns into runs (printed as "not on main yet"). Remove an
 # entry in the change that flips its cell: tests/test_model_check_matrix.py requires every
-# key to still reach a failing cell. Open work per key, for maintainers: decoupled/* #653,
-# partial-moe/generic: launcher wiring of #649's in-place selections; decoupled/kimi_k31-lora:
-# K3.1 offline LoRA specs (the generic ones landed in #666).
+# key to still reach a failing cell. Open work per key, for maintainers: partial-moe/generic:
+# the launcher wiring of in-place selections on any MoE; decoupled/kimi_k31-lora: K3.1 offline
+# LoRA specs (the generic ones are on main).
 PENDING = {
-    "decoupled/full": "--rl-sync-preset decoupled --tuning full routed to full-parameter async rounds",
-    "decoupled/partial-moe": "decoupled partial experts (K3.1 selection, DSV4 expert-full) routed to "
-                             "full-parameter async rounds",
     "partial-moe/generic": "in-place routed-expert selections on any MoE (generic recipe)",
     "decoupled/kimi_k31-lora": "kimi_k31 LoRA under decoupled, from an offline canonical LoRA layout",
 }
@@ -148,13 +145,11 @@ def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> li
                  "train the routed experts with full parameters, or register a PartialExpertModelConfig "
                  "(template below)", "partial-moe/generic")
         elif recipe == "deepseek-v4-flash" and preset != "full-parameter":
-            fail("expert-full tuning needs --rl-sync-preset full-parameter (yeto/rl/engine/selection.py)",
-                 "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async",
-                 "decoupled/partial-moe" if preset == "decoupled" else None)
-        elif recipe == "kimi_k31" and preset in ("strict-avg", "decoupled"):
-            fail("--tuning full behind a syncer needs --rl-sync-preset full-parameter (yeto/launch/rl_args.py)",
-                 "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async",
-                 "decoupled/partial-moe" if preset == "decoupled" else None)
+            fail("expert-full tuning needs --rl-sync-preset full-parameter or decoupled "
+                 "(yeto/rl/engine/selection.py)", "--rl-sync-preset decoupled")
+        elif recipe == "kimi_k31" and preset == "strict-avg":
+            fail("--tuning full behind a syncer needs --rl-sync-preset decoupled or full-parameter "
+                 "(yeto/launch/rl_args.py)", "--rl-sync-preset decoupled")
     elif form == "full":
         if recipe == "kimi_k31":
             fail("--rl-model-recipe kimi_k31 trains full parameters on a routed-expert selection only "
@@ -162,11 +157,9 @@ def _form_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> li
         elif recipe == "deepseek-v4-flash":
             fail("the deepseek-v4-flash recipe trains LoRA or expert-full experts, with its TP8/EP8 shape",
                  "--form partial-moe")
-        elif preset in ("strict-avg", "decoupled"):
-            fail(f"--tuning full with --rl-sync-preset {preset}: strict-avg and decoupled merge the canonical "
-                 "LoRA layout (yeto/launch/rl_args.py)",
-                 "--rl-sync-preset full-parameter --rl-sync-full-parameter-rounds async (the asynchronous "
-                 "multi-fragment counterpart of decoupled)", "decoupled/full" if preset == "decoupled" else None)
+        elif preset == "strict-avg":
+            fail("--tuning full with --rl-sync-preset strict-avg: strict-avg merges the canonical LoRA layout "
+                 "(yeto/launch/rl_args.py)", "--rl-sync-preset decoupled (routed to the full-parameter stack)")
     else:  # lora
         if preset == "full-parameter":
             items.append(CheckItem("form", WARN, "the full-parameter preset syncs and trains every parameter "
@@ -607,11 +600,20 @@ def check_model(hf_config: dict, request: CheckRequest, *, model: str = "<model>
     recipe = request.recipe or family_recipe(hf_config)
     profile = _derive(hf_config, recipe=recipe)
     req = request
+    # decoupled with full parameters (dense, partial experts, DSV4 expert-full) runs the
+    # full-parameter stack's asynchronous rounds (yeto/rl/engine/sync_route.py); the cell is
+    # checked, recommended and flagged as that preset, launched as decoupled
+    routed = req.preset == "decoupled" and req.form != "lora"
+    if routed:
+        req = replace(req, preset="full-parameter")
     if req.expert_parallel is None:
         req = replace(req, expert_parallel=_recommended_ep(req, recipe, profile) if profile.moe else None)
     if recipe == "deepseek-v4-flash" and req.form == "partial-moe" and req.tensor_parallel == 1:
         req = replace(req, tensor_parallel=8)
     items: list[CheckItem] = []
+    if routed:
+        items.append(CheckItem("route", OK, "--rl-sync-preset decoupled with full parameters runs the full-parameter "
+                               "stack's asynchronous rounds (yeto/rl/engine/sync_route.py)", "", LAUNCHER))
     if profile.missing:
         items.append(CheckItem("contract", FAIL, "missing: " + "; ".join(profile.missing),
                                "a --rl-model-recipe that supplies them", UPSTREAM))
@@ -625,7 +627,8 @@ def check_model(hf_config: dict, request: CheckRequest, *, model: str = "<model>
     items += _lora_items(req, recipe, profile)
     items.append(_layout_item(req, recipe, profile))
     items.append(_naming_item(profile, weight_names))
-    report = CheckReport(model=model, request=req, recipe=recipe, profile=profile, items=items)
+    report = CheckReport(model=model, request=replace(req, preset="decoupled") if routed else req, recipe=recipe,
+                         profile=profile, items=items)
     report._config = hf_config  # type: ignore[attr-defined]
     sync = recommend_sync(req, profile, hf_config)
     try:
@@ -644,6 +647,9 @@ def check_model(hf_config: dict, request: CheckRequest, *, model: str = "<model>
         report.items.append(CheckItem("memory", WARN, reason, "more TP/PP/EP, more GPUs per island, a shorter "
                                       "--seq-len, or a larger card (see min_trainer)", ESTIMATE))
     report.launch_argv = launch_argv(req, recipe, sync)
+    if routed:
+        at = report.launch_argv.index("--rl-sync-preset") + 1
+        report.launch_argv[at] = "decoupled"
     report.templates = _templates(report)
     return report
 
