@@ -1714,11 +1714,38 @@ def lazy_cut_shards(environ: Mapping[str, str]):
     return manifest_shard_keys
 
 
+# the island path of an s3:// store's bucket (yeto.launch.storage.ELASTIC_CHECKPOINT_STORE_MOUNT);
+# the store URI's prefix is a directory below it
+ISLAND_MOUNT = "~/yeto-checkpoint-store"
+
+
+def sub_store_uri(uri: str, path: str | os.PathLike[str], mount: str | os.PathLike[str],
+                  scheme: str = "s3") -> str:
+    """The store URI of the island store path ``path``: ``uri`` (the run's store,
+    :data:`URI_ENV`) when ``path`` is its island path ``mount`` (or lies elsewhere),
+    and ``uri`` plus the sub-path when ``path`` is a directory below ``mount``. A
+    synced trainer whose samplers follow it reads its own sub-store
+    (``sample_roles.trainer_substore``) through the run's store URI: without this its
+    object API (and a staged root) named the run root, while its samplers wrote below
+    ``trainer<k>``."""
+    bucket, prefix = parse_s3_uri(uri, scheme)
+    try:
+        below = Path(path).expanduser().relative_to(Path(mount).expanduser())
+    except ValueError:
+        return uri
+    if not below.parts or ".." in below.parts:
+        return uri
+    return f"{scheme}://{bucket}/" + "/".join(p for p in (prefix, below.as_posix()) if p)
+
+
 def store_from_env(path: str | os.PathLike[str], *, environ: Mapping[str, str], client: Any = None) -> S3Store:
-    """``resume.store_for`` hook: the store URI comes from :data:`URI_ENV`."""
+    """``resume.store_for`` hook: the store URI comes from :data:`URI_ENV`, plus the
+    sub-path of ``path`` below the island's store path (:func:`sub_store_uri`)."""
     uri = environ.get(URI_ENV)
     if not uri:
         raise ValueError(f"s3 checkpoint store selected but {URI_ENV} is not set")
+    _bucket, prefix = parse_s3_uri(uri)
+    uri = sub_store_uri(uri, path, Path(ISLAND_MOUNT) / prefix)
     return S3Store(path, uri, environ=environ, client=client, stage=environ.get(STAGE_ENV) or None)
 
 
