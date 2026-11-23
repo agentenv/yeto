@@ -1804,22 +1804,22 @@ class ModalOps:
         modal = self._modal()
         if self._app is None:
             raise RuntimeError("define() at least one island before deploy()")
+        from .cost.billing import modal_shapes_rate
         from .cost.ledger import record_safely
 
-        record_safely("intent", "modal_app", self.app_name, ledger=self.ledger)
+        shapes = list(getattr(self, "_ledger_gpus", {}).values())
+        gpu = shapes[0][0] if shapes else None
+        gpus = sum(n for _, n in shapes) or None
+        extra = {"gpu": gpu, "gpus": gpus} if gpu else {}
+        rate = modal_shapes_rate(shapes)  # every function's GPUs, mixed types summed
+        if rate is not None:
+            extra["usd_per_hour"] = rate
+        # the intent carries the GPU shape so the budget counts the deploy span too
+        record_safely("intent", "modal_app", self.app_name, ledger=self.ledger, **extra)
         with modal.enable_output():
             self._app.deploy(name=self.app_name)
         app_id = getattr(self._app, "app_id", None)
         if app_id:
-            from .cost.billing import default_modal_rate
-
-            shapes = list(getattr(self, "_ledger_gpus", {}).values())
-            gpu = shapes[0][0] if shapes else None
-            gpus = sum(n for _, n in shapes) or None
-            extra = {"gpu": gpu, "gpus": gpus} if gpu else {}
-            rate = default_modal_rate(gpu, gpus) if len({g for g, _ in shapes}) == 1 else None
-            if rate is not None:
-                extra["usd_per_hour"] = rate
             record_safely("created", "modal_app", app_id, self.app_name,
                           functions=sorted(str(k) for k in self._functions), ledger=self.ledger,
                           **extra)

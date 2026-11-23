@@ -37,15 +37,31 @@ NC_UCR_PER_GPU_HOUR_ENV = "YETO_NC_UCR_PER_GPU_HOUR"
 # 3e6 ucr per GPU-hour (24e6 ucr/h, ~24 USD/h); the env above overrides either
 DEFAULT_NC_USD_PER_UCR = 1e-6
 DEFAULT_NC_UCR_PER_GPU_HOUR = 3_000_000
-# Modal list price per GPU-hour, used when neither the ledger nor a price table
-# gives a rate (2x8 B300 ~ 136 USD/h). Keys are lower-case Modal gpu names.
+# Modal price per GPU-hour, used when neither the ledger nor a price table gives a
+# rate. Keys are lower-case Modal gpu names. Source: https://modal.com/pricing,
+# per-second list prices x 3600, checked 2026-11-23 (base region-agnostic rate;
+# Modal bills 1.15-1.75x when a region is pinned). B300 lists at 0.001972 USD/s
+# (7.10 USD/h); it stays at the earlier 8.5 so a region-pinned 2x8 B300 trainer
+# (~136 USD/h) does not overrun its budget before the billing report catches up.
+MODAL_PRICES_SOURCE = "https://modal.com/pricing (checked 2026-11-23)"
 DEFAULT_MODAL_USD_PER_GPU_HOUR = {"b300": 8.5, "b200": 6.25, "h200": 4.54, "h100": 3.95,
-                                  "a100-80gb": 2.5, "a100": 2.1, "l40s": 1.95}
+                                  "rtx-pro-6000": 3.03, "a100-80gb": 2.5, "a100": 2.1,
+                                  "a100-40gb": 2.1, "l40s": 1.95, "a10": 1.10, "a10g": 1.10,
+                                  "l4": 0.80, "t4": 0.59}
 
 
 def default_modal_rate(gpu: Any, gpus: Any) -> float | None:
     unit = DEFAULT_MODAL_USD_PER_GPU_HOUR.get(str(gpu or "").lower().split(":")[0].rstrip("!"))
     return None if unit is None or not gpus else unit * float(gpus)
+
+
+def modal_shapes_rate(shapes: Iterable[tuple[Any, Any]]) -> float | None:
+    """USD/h of an app whose functions hold ``(gpu, gpus)`` each; None when any GPU type
+    is missing from :data:`DEFAULT_MODAL_USD_PER_GPU_HOUR` (or there is no GPU at all)."""
+    rates = [default_modal_rate(gpu, gpus) for gpu, gpus in shapes]
+    if not rates or any(r is None for r in rates):
+        return None
+    return sum(rates)
 
 
 def _ts(value: Any) -> float | None:
@@ -284,6 +300,14 @@ def _modal_app_cost(r: Resource, rows: Iterable[BillingRow], now: float, rates: 
     return item
 
 
+def _intent_app_rate(r: Resource, rates: Rates) -> float | None:
+    rate = r.attrs.get("usd_per_hour")
+    if rate is not None:
+        return float(rate)
+    rate = rates.table_rate("modal", r.attrs)
+    return rate if rate is not None else default_modal_rate(r.attrs.get("gpu"), r.attrs.get("gpus"))
+
+
 def _nc_rate(r: Resource, rates: Rates) -> float | None:
     gpus = float(r.attrs.get("gpus") or 8)
     if r.attrs.get("usd_per_gpu_hour") is not None:
@@ -365,7 +389,13 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
     for r in resources:
         if r.kind == "modal_app":
             if r.id is None:
-                items.append(_span_cost(r, r.created_at, now, None, "app id unknown (intent only)"))
+                # deploying (image build): no app id yet, so no billing rows; the app's
+                # GPU shape (recorded with the intent) prices the span, conservatively
+                rate = _intent_app_rate(r, rates)
+                items.append(_span_cost(
+                    r, r.created_at, now, rate,
+                    "app id unknown (deploying): priced at its GPU rate" if rate is not None
+                    else "app id unknown (intent only) and no GPU shape / rate recorded"))
             else:
                 items.append(_modal_app_cost(r, rows, now, rates, tail_by_calls=r.key in rollout_keys))
         elif _pool_call_rate(r) is not None:

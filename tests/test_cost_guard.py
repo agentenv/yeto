@@ -357,6 +357,52 @@ def test_unpriced_resource_is_reported_once(tmp_path):
     assert events(tmp_path).count("cost_unpriced") == 1
 
 
+def test_unpriced_warning_names_the_budget_and_is_a_warning(tmp_path):
+    clock = Clock(T0 + H)
+    logs: list[str] = []
+    g, led, _ = make_guard(tmp_path, clock, budget=35.0)
+    g.log = logs.append
+    ledger_at(led.path, T0).created("sky_cluster", "c-1", "nc")  # no rate anywhere
+    g.tick()
+    recs = [json.loads(x) for x in (tmp_path / "cost-events.jsonl").read_text().splitlines()]
+    (rec,) = [r for r in recs if r["event"] == "cost_unpriced"]
+    assert rec["severity"] == "warning" and rec["budget_usd"] == 35.0
+    assert "--budget-usd 35 does not see its spend" in rec["detail"]
+    assert any(line.startswith("[cost-guard] WARNING cost_unpriced:") for line in logs)
+
+
+def test_a_deploying_modal_app_counts_against_the_budget_at_its_gpu_rate(tmp_path):
+    # the trainer's app is an intent (image build, no app id yet): its recorded GPU
+    # shape prices the span, so the guard neither skips it nor warns it is unpriced
+    clock = Clock(T0 + H)
+    g, led, _ = make_guard(tmp_path, clock, budget=35.0)
+    ledger_at(led.path, T0).intent("modal_app", "yeto-r1", gpu="H100", gpus=1)
+    s = g.tick()
+    assert not s.unpriced
+    assert s.total_usd == pytest.approx(3.95)
+    assert "cost_unpriced" not in events(tmp_path)
+
+
+def test_an_intent_without_a_gpu_shape_stays_unpriced(tmp_path):
+    clock = Clock(T0 + H)
+    g, led, _ = make_guard(tmp_path, clock, budget=35.0)
+    ledger_at(led.path, T0).intent("modal_app", "yeto-r1")
+    s = g.tick()
+    assert [i.key for i in s.unpriced] == ["modal_app:intent:yeto-r1"]
+    assert events(tmp_path).count("cost_unpriced") == 1
+
+
+def test_modal_price_table_covers_mixed_shapes():
+    from yeto.cost.billing import DEFAULT_MODAL_USD_PER_GPU_HOUR, default_modal_rate, modal_shapes_rate
+
+    assert default_modal_rate("H100!", 8) == pytest.approx(8 * 3.95)
+    assert default_modal_rate("A100-80GB:2", 2) == pytest.approx(5.0)
+    assert modal_shapes_rate([("H100", 1), ("L40S", 2)]) == pytest.approx(3.95 + 2 * 1.95)
+    assert modal_shapes_rate([("H100", 1), ("MI999", 1)]) is None
+    assert modal_shapes_rate([]) is None
+    assert all(v > 0 for v in DEFAULT_MODAL_USD_PER_GPU_HOUR.values())
+
+
 def test_overdue_nc_lease_is_reported_not_released_by_default(tmp_path):
     """The NC pool owns its leases: a trainer's cost guard only alerts on an overdue one."""
     clock = Clock(T0 + 4 * H + 6 * MIN)
@@ -691,6 +737,44 @@ def test_modal_ops_record_deploy_spawn_cancel_and_stop(tmp_path, monkeypatch):
     monkeypatch.setattr(modal_runner.subprocess, "run", lambda *a, **k: Proc())
     ops.stop_app()
     assert led.open_resources() == []
+
+
+def test_modal_deploy_intent_carries_the_gpu_shape_and_rate(tmp_path, monkeypatch):
+    # an image build can take many minutes: the budget prices it from the intent
+    from yeto import modal_runner
+
+    led = ResourceLedger(tmp_path / "r.jsonl")
+    seen: list[list] = []
+
+    class App:
+        app_id = "ap-8"
+
+        def deploy(self, name):
+            seen.append([r.to_json() for r in led.resources()])
+
+    class Ctx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeModal:
+        @staticmethod
+        def enable_output():
+            return Ctx()
+
+    ops = modal_runner.ModalOps("yeto-r")
+    ops.ledger = led
+    ops._app = App()
+    ops._functions = {"island-0": object(), "island-1": object()}
+    ops._ledger_gpus = {"island-0": ("H100", 1), "island-1": ("L40S", 2)}
+    monkeypatch.setattr(ops, "_modal", lambda: FakeModal)
+    ops.deploy()
+    (intent,) = seen[0]
+    assert intent["intent_only"] and intent["attrs"]["usd_per_hour"] == pytest.approx(3.95 + 2 * 1.95)
+    (app,) = led.resources()
+    assert app.key == "modal_app:ap-8" and app.attrs["usd_per_hour"] == pytest.approx(7.85)
 
 
 def test_engine_sampler_launch_records_its_ephemeral_app_and_call(tmp_path, monkeypatch):
