@@ -24,7 +24,9 @@ for the run's spend estimate; default ``budget.nc_usd_per_h``), ``data_path``
 ``syncer``: weights from the syncer broadcast and samples through the relay, the
 sampler spec says how). An entry that changes nothing of its file uses the file
 as it is; any other is written to ``<run state dir>/pools/<name>.json`` and the
-pool commands run on that file.
+pool commands run on that file. A run config with a ``breakers:`` section has the
+pool-layer values written into each pool's ``elastic`` (and ``sampler.dispense``, the
+lease keys) the same way (:func:`with_breakers`).
 
 Every pool keeps its own state (``pool-<shard_base>.json``), so ``shard_base`` is
 unique across the pools of a run; all pools of a run use one data path (a trainer
@@ -36,7 +38,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +94,8 @@ def resolve(cfg: dict[str, Any], state_dir: Path) -> list[PoolRef]:
         pool = cfg["pool"] or {}
         if "config" not in pool:
             raise ValueError("run config: pool.config (the pool config file) is required")
-        return [PoolRef("pool", os.path.expanduser(str(pool["config"])), _number(pool, "pool", "interval_s", 30))]
+        ref = PoolRef("pool", os.path.expanduser(str(pool["config"])), _number(pool, "pool", "interval_s", 30))
+        return [with_breakers(cfg, ref, state_dir)]
     entries = cfg.get("samplers")
     if not isinstance(entries, list) or not entries:
         raise ValueError("run config: 'samplers' must be a non-empty list of pools (or use 'pool')")
@@ -104,6 +107,7 @@ def resolve(cfg: dict[str, Any], state_dir: Path) -> list[PoolRef]:
     names = [r.name for r in refs]
     if len(set(names)) != len(names):
         raise ValueError(f"samplers: pool names repeat {names}; set 'name' on each")
+    refs = [with_breakers(cfg, ref, state_dir) for ref in refs]
     paths = {r.data_path for r in refs}
     if len(paths) > 1:
         raise ValueError(f"samplers: one data path per run (got {sorted(paths)}): a trainer that reads R2 buffer "
@@ -156,6 +160,53 @@ def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) 
         target = str(out)
     interval = _number(entry, f"samplers[{i}]", "interval_s", 30)
     return PoolRef(name, target, interval, _number(entry, f"samplers[{i}]", "usd_per_h", None), data_path)
+
+
+def pool_sources(doc: dict[str, Any], run_config: dict[str, Any] | None = None) -> Any:
+    """The breaker sources one pool config shows: its top level, ``elastic``, ``sampler.dispense``
+    and the sampler spec as the pool renders it (the pool's ``sampler`` knobs laid over the spec
+    file: a raw spec next to the pool's dispense would read as two disagreeing knobs). The spec is
+    read only; ``run_config`` adds the run's ``breakers:`` section and its other surfaces."""
+    from yeto import breakers  # noqa: PLC0415
+    from yeto.rl.up_consistency import effective_spec  # noqa: PLC0415
+
+    surfaces = {"pool_config": doc, "pool_elastic": doc.get("elastic") or {},
+                "pool_dispense": (doc.get("sampler") or {}).get("dispense") or {}, "spec": effective_spec(doc)}
+    if run_config is None:
+        return breakers.Sources(**surfaces)
+    return breakers.Sources.from_run_config(run_config, **surfaces)
+
+
+POOL_LAYERS = ("pool", "sampler")  # the layers whose knobs a pool config holds
+
+
+def with_breakers(cfg: dict[str, Any], ref: PoolRef, state_dir: Path) -> PoolRef:
+    """The pool with the run's ``breakers:`` section written into its native knobs (``elastic``,
+    ``sampler.dispense``, the lease keys; ``breakers.pools.<name>`` before ``breakers.pool``):
+    a copy at ``<run state dir>/pools/<name>.json`` when that changes anything, else the ref as
+    it is (always without a section). A section that disagrees with the pool config is refused."""
+    if not cfg.get("breakers"):
+        return ref
+    from yeto import breakers  # noqa: PLC0415
+
+    doc = ref.load()
+    sources = pool_sources(doc, cfg)
+    try:
+        resolved = breakers.resolve(sources, pool=ref.name, layers=POOL_LAYERS)
+        out = breakers.materialize(resolved, sources, surfaces=("pool_config", "pool_elastic", "pool_dispense"))
+    except breakers.BreakerConfigError as error:
+        raise ValueError(f"run config: pool {ref.name!r}: {error}") from None
+    new = dict(out.pool_config if out.pool_config is not None else doc)
+    if out.pool_elastic is not None and out.pool_elastic != sources.pool_elastic:
+        new["elastic"] = out.pool_elastic
+    if out.pool_dispense is not None and out.pool_dispense != sources.pool_dispense:
+        new["sampler"] = dict(doc.get("sampler") or {}, dispense=out.pool_dispense)
+    if new == doc:
+        return ref
+    path = state_dir / "pools" / f"{ref.name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(new, indent=1, sort_keys=True))
+    return replace(ref, config=str(path))
 
 
 def _number(entry: dict[str, Any], where: str, key: str, default: float | None) -> float | None:
