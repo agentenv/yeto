@@ -203,6 +203,17 @@ def test_grouped_expert_lora_refuses_stacked_names_and_expert_tp(monkeypatch):
         sp.adapter_bindings(actor)
 
 
+def test_shared_and_shared_outer_expert_layouts_are_refused(monkeypatch):
+    actor, a, _b = _expert_actor(monkeypatch, ep_rank=0)
+    (task,) = next(iter(_actor_tasks(actor).values()))
+    task.linear_out_task.param_weight = torch.nn.Parameter(torch.zeros(6, 4))  # one factor shared by all experts
+    with pytest.raises(sp.StatePluginError, match="shared outer factors"):
+        sp.adapter_bindings(actor)
+    task.requires_expert_splits = False  # one ParallelLinearAdapter for all local experts
+    with pytest.raises(sp.StatePluginError, match="share_expert_adapters=True"):
+        sp.adapter_bindings(actor)
+
+
 def test_sequential_expert_lora_under_ep_is_refused(monkeypatch):
     actor = _actor_with_stage(monkeypatch, range(1))
     (task,) = next(iter(_actor_tasks(actor).values()))

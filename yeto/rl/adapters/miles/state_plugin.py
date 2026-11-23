@@ -366,6 +366,32 @@ def _grouped_expert_bindings(model_bridge: Any, task: Any, side: Any, which: str
             for local, name in enumerate(names)]
 
 
+def _refuse_unsupported_expert_layout(task: Any) -> None:
+    """Grouped experts must carry one adapter per expert (Bridge
+    ``select_grouped_expert_adapter`` with ``share_expert_adapters=False`` and no
+    ``experts_shared_outer_loras``, Miles' default). The other two Bridge layouts
+    have no per-expert canonical tensor for both factors:
+
+    * shared (``share_expert_adapters=True``): one ``ParallelLinearAdapter`` for all
+      local experts of an EP rank;
+    * shared-outer (``--experts-shared-outer-loras``, ``SharedOuterGroupedExpertAdapter``):
+      one factor per expert, the other shared by every expert.
+    """
+
+    prefix = getattr(task, "global_base_prefix", "")
+    if ".experts.linear_fc" not in prefix or ".local_experts." in prefix:
+        return
+    if not getattr(task, "requires_expert_splits", False):
+        raise StatePluginError(
+            f"expert LoRA of {prefix!r} shares one adapter across the local experts "
+            "(Bridge share_expert_adapters=True); canonical sync needs one adapter per expert")
+    weights = [getattr(t, "param_weight", None) for t in (task.linear_in_task, task.linear_out_task)]
+    if all(w is not None for w in weights) and weights[0].ndim != weights[1].ndim:
+        raise StatePluginError(
+            f"expert LoRA of {prefix!r} uses shared outer factors (--experts-shared-outer-loras); "
+            "canonical sync needs one adapter per expert for both factors")
+
+
 def _refuse_ungathered_experts(task: Any, side: Any) -> None:
     """Bridge exports the adapters of SequentialMLP experts (``local_experts``)
     without an EP gather, so the main rank would miss the other ranks' experts."""
@@ -400,6 +426,8 @@ def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
     tasks_by_base = build_tasks(actor.model)
     for base_name in sorted(tasks_by_base):
         for task in sorted(tasks_by_base[base_name], key=lambda t: t.adapter_key or ""):
+            if policy is None:
+                _refuse_unsupported_expert_layout(task)
             for side in (task.linear_in_task, task.linear_out_task):
                 if side.param_weight is None:
                     continue
