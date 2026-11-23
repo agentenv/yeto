@@ -51,7 +51,7 @@ function rolloutState(tr,tn){
   return[r.colocated?"offloaded · GPU is training":"idle · trainer step (serial)","mute"]}
 function col(k){return{good:C.good,warn:C.warn,bad:C.bad,wt:C.wt,mute:C.ink2,delta:C.delta}[k]||C.ink2}
 function shardOf(f){var sh=D.shards;for(var i=0;i<sh.length;i++)if(f>=sh[i].lo&&f<sh[i].hi)return i;return 0}
-function behind(tr,f){return tr.versions&&fin(tr.versions[f])&&D.versions[f]>tr.versions[f]}
+function behind(tr,f){return !D.done&&tr.versions&&fin(tr.versions[f])&&D.versions[f]>tr.versions[f]}
 function lag(tr,f){return (tr.pending||{})[String(f)]||0}
 
 // -- layout ------------------------------------------------------------------------
@@ -277,10 +277,10 @@ function paint(){
     if(tr.versions){var parts=[["frag [",""]];tr.versions.forEach(function(v,f){var b=behind(tr,f);parts.push([String(v),b?"fill:"+C.warn+";font-weight:700":""]);if(f<tr.versions.length-1)parts.push([" ",""])});parts.push(["]",""]);rich(L0[1],parts)}
     else L0[1].textContent="fragment versions not on the tape";
     var old=fin(tr.pending_oldest_ts)?tn-tr.pending_oldest_ts:0;
-    L0[2].textContent=(tr.pending_n?"↓ BCAST pending "+tr.pending_n+" · oldest "+dur(old):"↓ every merged fragment applied")+(fin(tr.apply_s)?" · apply "+tr.apply_s.toFixed(2)+"s":"");
-    L0[2].style.fill=sft()?C.ink2:tr.live&&old>BCAST_BAD_S?C.bad:tr.live&&old>BCAST_WARN_S?C.warn:C.ink2;
+    L0[2].textContent=(tr.pending_n&&D.done?"↓ run ended: the last "+tr.pending_n+" merge(s) went to the final cut":tr.pending_n?"↓ BCAST pending "+tr.pending_n+" · oldest "+dur(old):"↓ every merged fragment applied")+(fin(tr.apply_s)?" · apply "+tr.apply_s.toFixed(2)+"s":"");
+    L0[2].style.fill=sft()||D.done?C.ink2:tr.live&&old>BCAST_BAD_S?C.bad:tr.live&&old>BCAST_WARN_S?C.warn:C.ink2;
     var up=Object.keys(tr.pushed||{});
-    L0[3].textContent=tr.full_push?"↑ "+(tr.full_push.count||0)+" PUSH last round · "+mb(tr.full_push.bytes)+(fin(tr.full_push.inflight)?" · in flight "+tr.full_push.inflight:""):
+    L0[3].textContent=tr.full_push?"↑ "+(tr.full_push.count||0)+" PUSH last round · "+(tr.full_push.total||0)+" in run"+(tr.full_push.overwritten?" · "+tr.full_push.overwritten+" overwritten":fin(tr.full_push.inflight)&&tr.full_push.inflight?" · in flight "+tr.full_push.inflight:""):
       "↑ unmerged PUSH "+up.length+(up.length?" ("+up.slice(0,3).map(function(f){return "f"+f+" t"+tr.pushed[f]}).join(", ")+")":"");
     L0[4].textContent=fin(tr.gpu_util)?"GPU "+Math.round(tr.gpu_util)+"%"+(fin(tr.mem_pct)?" · HBM "+Math.round(tr.mem_pct)+"%":""):"";
     var ap=fin(tr.apply_ts)&&T.live&&td-tr.apply_ts>=0&&td-tr.apply_ts<3;tc.flash.style.stroke=C.wt;tc.flash.setAttribute("opacity",ap?0.9:0);
@@ -300,9 +300,9 @@ function paint(){
       ln.cnt.setAttribute("display",red&&T.live?"inline":"none");
       if(red&&T.live)ln.cnt.textContent=D.flows.filter(function(f){return f.i===tr.id&&f.sh===s&&f.k==="p"&&f.t1>tn-300}).length+" PUSH / 5 min"});
     var lp=tr.last_push,lb=tr.last_bcast;
-    pr.lab[0].textContent=lp?"↑ f"+lp.frag+" t"+lp.step+" base v"+lp.base+" · "+mb(lp.bytes):tr.full_push?"↑ full-parameter PUSH (no per-fragment record yet)":"↑ no PUSH yet";
+    pr.lab[0].textContent=lp?"↑ f"+lp.frag+" t"+lp.step+" base v"+lp.base+" · "+mb(lp.bytes):tr.full_push?"↑ full-parameter PUSH (aggregate only)":"↑ no PUSH yet";
     pr.lab[1].textContent=lp?"  PULL→PUSH "+dur(lp.p2p_s)+(lp.h?" · H "+lp.h:""):"";
-    pr.lab[2].textContent=lb?"↓ f"+lb.frag+" v"+lb.v+" · "+mb(lb.bytes):tr.full_push?"↓ BCAST applied in the round (no per-fragment record yet)":"↓ no BCAST applied yet";
+    pr.lab[2].textContent=lb?"↓ f"+lb.frag+" v"+lb.v+" · "+mb(lb.bytes):tr.full_push?"↓ BCAST applied in the round (aggregate)":"↓ no BCAST applied yet";
     pr.lab[3].textContent=lb?"  queue "+dur(lb.queue_s)+(fin(tr.apply_s)?" · apply "+tr.apply_s.toFixed(2)+"s":""):"";
     if(sft())paintLearner(tr,tc.l,pr.lab,tn)});
   L.syn.forEach(function(o,s){var sh=D.shards[s],mine=D.rounds.filter(function(r){return r.shard===s}),st=sh.state,last=sh.last;
@@ -347,7 +347,8 @@ function paintRollout(tr,o,tn,td){var r=tr.island,ro=o.ro,st=rolloutState(tr,tn)
     rich(ro.sub,[["GPU phase: ",""],["rollout",on&&live?"fill:"+C.traj+";font-weight:700":""],[" ⇄ ",""],["train",!on&&live&&tr.phase_raw==="train"?"fill:"+C.delta+";font-weight:700":""]])}
   var sv=r.served;
   ro.l[0].textContent=sv?"serving yeto:"+sv.v+":"+sv.hash:"serving the initial weights";
-  ro.l[1].textContent=fin(r.groups)?r.groups+" groups · "+(r.traj||0)+" traj · "+(fin(r.tokens)?(r.tokens/1000).toFixed(1)+"k":"n/a")+" tok / round":"no round yet";
+  ro.l[1].textContent=r.groups_src==="trained"?(fin(r.groups)?r.groups+" groups / round (trainer side)":"groups not reported by the rollout"):
+    fin(r.groups)?r.groups+" groups · "+(r.traj||0)+" traj · "+(fin(r.tokens)?(r.tokens/1000).toFixed(1)+"k":"n/a")+" tok / round":"no round yet";
   ro.l[2].textContent=fin(r.p50_s)?"group p50 "+r.p50_s.toFixed(1)+"s · p95 "+(fin(r.p95_s)?r.p95_s.toFixed(1)+"s":"—"):fin(r.rollout_p50_s)?"rollout "+r.rollout_p50_s.toFixed(1)+"s (median of the last rounds)":"";
   ro.l[3].textContent=[fin(r.reward)?"reward "+r.reward.toFixed(2):null,fin(r.zero_var)?"zero-var "+Math.round(r.zero_var*100)+"%":null,T.live?(r.groups_5m/5).toFixed(1)+" g/min":null].filter(Boolean).join(" · ");
   var ld=sv&&fin(sv.ts)&&T.live&&td-sv.ts>=0&&td-sv.ts<3;ro.flash.style.stroke=C.wt;ro.flash.setAttribute("opacity",ld&&!ro.co?0.9:0);
@@ -368,15 +369,15 @@ function matrix(tn){
   h+="</tr>";
   if(sft())h+=learnerRows(tn);else D.trainers.forEach(function(tr){var off=!tr.live&&!(tr.status==="done"||tr.finalized);
     h+='<tr><th class="rh">Trainer '+esc(tr.id)+'<span class="ns">'+esc((tr.gpu||"")+" · step "+(fin(tr.step)?tr.step:"n/a")+(off?" · "+(tr.status||"lost"):tr.failure?" · failed":""))+"</span></th>";
-    for(var f=0;f<P;f++){var v=tr.versions?tr.versions[f]:null,lg=lag(tr,f),s=tr.since?tr.since[f]:null,pushed=(tr.pushed||{})[String(f)]!=null;
+    for(var f=0;f<P;f++){var v=tr.versions?tr.versions[f]:null,lg=D.done?0:lag(tr,f),s=tr.since?tr.since[f]:null,pushed=(tr.pushed||{})[String(f)]!=null;
       var cls=off||tr.failure?"off":lg>=2?"lag2":lg===1?"lag1":"",ready=fin(s)&&H&&s>=H;
       var mk=pushed?'<span class="mk dl">↑</span>':lg&&tr.live?'<span class="mk wt">↓'+lg+"</span>":"";
       var ahead=fin(v)&&v>D.versions[f];
       h+='<td class="'+cls+'" title="'+esc("anchor v"+(fin(v)?v:"n/a")+(lg?", "+lg+" merge(s) not applied":"")+(ahead?", ahead of the syncer tape":"")+(fin(s)?", "+s+" local step(s) since the anchor":"")+(pushed?", pushed t"+tr.pushed[String(f)]+", waiting for the merge":""))+'">'+mk+'<div class="v">'+(fin(v)?"v"+v:"—")+(lg?' <span class="'+(lg>=2?"bd":"wn")+'">−'+lg+"</span>":"")+"</div>"+
-        (fin(s)?'<div class="s">'+s+(H?"/"+H:"")+' since anchor</div><div class="b"><i class="'+(ready?"rdy":"")+'" style="width:'+Math.min(100,H?100*s/H:0)+'%"></i></div>':'<div class="s">since anchor —</div>')+"</td>"}
+        (fin(s)?'<div class="s">'+s+(H?"/"+H:"")+' since anchor</div><div class="b"><i class="'+(ready?"rdy":"")+'" style="width:'+Math.min(100,H?100*s/H:0)+'%"></i></div>':(tr.since?'<div class="s">since anchor —</div>':""))+"</td>"}
     h+="</tr>"});
   h+='</table><div class="fmlg">'+(sft()?'<span><b>v41</b> committed version (syncer) = global step of the fragment\'s last merge</span><span><b>t203</b> the island\'s last contribution: the merge its delta went into, base v = the version it was computed on</span><span class="dl">↑ PUSH accepted, waiting for the merge</span><span class="wt">↓n merged after the island\'s last applying step</span>':
-    '<span><b>v41</b> committed (syncer) / anchor (trainer) version = global step of the fragment\'s last merge</span><span>bar = local steps since anchor / H (green: ≥ H)</span><span class="dl">↑ pushed, waiting for the merge</span><span class="wt">↓n merged, not applied yet (on the wire or queued for the safe boundary)</span><span>tint: 1 / ≥ 2 merges behind</span>')+'</div>';
+    '<span><b>v41</b> committed (syncer) / anchor (trainer) version = global step of the fragment\'s last merge</span>'+(D.trainers.some(function(t){return t.since})?'<span>bar = local steps since anchor / H (green: ≥ H)</span>':"")+'<span class="dl">↑ pushed, waiting for the merge</span><span class="wt">↓n merged, not applied yet (on the wire or queued for the safe boundary)</span><span>tint: 1 / ≥ 2 merges behind</span>')+'</div>';
   if(h!==fmKey){L.fm.innerHTML=h;fmKey=h}}
 
 // an SFT learner has no anchor vector: its last contribution per fragment (responders[] of the merges)
@@ -501,8 +502,9 @@ function kpis(view,kp){
   var out=[];
   kp.forEach(function(c){var k=c[0];
     if(k==="Islands active / total"){if(isl)c=[k,c[1],"trainers "+live+"/"+trs.length+" · in-island rollout engines "+(eng||rolls.length)+" ("+(pl.join(", ")||"placement n/a")+(co?", shared GPU":"")+")"];out.push(c)}
-    else if(k==="Groups trained / written"){if(isl){var gt=trs.reduce(function(a,x){return a+(x.trained_groups||0)},0),gr=rolls.reduce(function(a,x){return a+(x.island.groups_total||0)},0);
-      out.push(["Groups trained / rolled out",gt+" / "+gr,trs.map(function(x){return "island "+x.id+" "+(x.trained_groups||0)+"/"+(x.island?x.island.groups_total:0)}).join(" · ")+" · in-island rollout, whole run"])}else out.push(c)}
+    else if(k==="Groups trained / written"){if(isl){var gt=trs.reduce(function(a,x){return a+(x.trained_groups||0)},0),nr=rolls.some(function(x){return x.island.groups_src==="trained"}),gr=rolls.reduce(function(a,x){return a+(x.island.groups_total||0)},0);
+      out.push(["Groups trained / rolled out",gt+" / "+(nr?"—":gr),nr?"in-island rollout does not report its groups (full parameter): every trained group came from it · "+trs.map(function(x){return "island "+x.id+" trained "+(x.trained_groups||0)}).join(" · "):
+        trs.map(function(x){return "island "+x.id+" "+(x.trained_groups||0)+"/"+(x.island?x.island.groups_total:0)}).join(" · ")+" · in-island rollout, whole run"])}else out.push(c)}
     else if(k==="Policy version / releases"){var steps=trs.map(function(x){return fin(x.step)?x.step:"—"}).join(" · "),outs={};trs.forEach(function(x){if(fin(x.outer))outs[x.outer]=1});
       out.push(["Syncer step / local steps",d.shards.map(function(s){return s.step}).join("+")+" / "+steps,"outer "+(Object.keys(outs).length?"v"+Object.keys(outs).join(", v"):"n/a")+" · "+trs.map(function(x){return "trainer "+x.id+" local "+(fin(x.step)?x.step:"—")}).join(" · ")+" (local steps are per island, not comparable)"])}
     else if(k.indexOf("Rejected")===0){if(isl){var zv=rolls.map(function(x){return x.island.zero_var_recent}).filter(fin),tr=trs.map(function(x){return x.truncated}).filter(fin);
@@ -518,7 +520,7 @@ function table(view){var d=view&&view.topology&&view.topology.diloco;if(!d)retur
   return{trainers:by,P:d.P,
     step:function(c){var t=by[c.id];return t?(fin(t.step)?t.step:"—")+" / "+(fin(t.outer)?"outer v"+t.outer:"outer —"):null},
     push:function(c,tn){var t=by[c.id];if(!t)return null;var p=t.last_push,b=t.last_bcast;
-      return (p?"↑ f"+p.frag+" t"+p.step+" · "+dur(tn-p.ts)+" ago":t.full_push?"↑ "+(t.full_push.count||0)+" PUSH last round":"↑ none")+'<div class="ns">'+(b?"↓ f"+b.frag+" v"+b.v+" applied"+(fin(t.apply_s)?" · apply "+t.apply_s.toFixed(2)+"s":""):t.full_push?"↓ applied in the round (no per-fragment record yet)":"↓ no BCAST applied yet")+"</div>"+
+      return (p?"↑ f"+p.frag+" t"+p.step+" · "+dur(tn-p.ts)+" ago":t.full_push?"↑ "+(t.full_push.count||0)+" PUSH last round, "+(t.full_push.total||0)+" in the run"+(t.full_push.overwritten?" · overwritten "+t.full_push.overwritten:""):"↑ none")+'<div class="ns">'+(b?"↓ f"+b.frag+" v"+b.v+" applied"+(fin(t.apply_s)?" · apply "+t.apply_s.toFixed(2)+"s":""):t.full_push?"↓ applied in the round (no per-fragment record yet)":"↓ no BCAST applied yet")+"</div>"+
         '<div class="ns">frag ['+(t.versions||[]).join(" ")+"]</div>"}}}
 
 return{render:render,kpis:kpis,table:table};

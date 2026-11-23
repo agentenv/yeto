@@ -157,15 +157,23 @@ class _Island:
         self.truncated: list[float] = []
         self.readies: list[float] = []  # fleet island_ready: one per machine (re)launch
         self.losses: list[dict] = []
+        self.walls: list[dict] = []  # rl_round_wall: the in-island rollout's time per round
+        self.trained: list[tuple[float, int]] = []  # (time, groups) of each rl_round_trained
+        self.full_pushes = 0  # full parameter: PUSHes over the run (sync/push_count per round)
+        self.terminal = False  # full parameter: a terminal round (the run is finalizing)
 
     def feed(self, ev: str, rec: dict, ts: float) -> None:
         if ev in ("rl_driver_start", "rl_engine_selected", "rl_round_wall") and rec.get("placement"):
             self.placement = rec["placement"]
             self.exec_mode = rec.get("execution_mode") or self.exec_mode
+        if ev == "rl_round_wall":
+            self.walls.append(dict(rec, _ts=ts))
         elif ev == "rl_local_round":
             self.rounds.append(dict(rec, _ts=ts))
         elif ev == "rl_full_parameter_round":
             self.full = dict(rec, _ts=ts)
+            self.full_pushes += _int(rec.get("sync/push_count")) or 0
+            self.terminal = self.terminal or rec.get("terminal") is True
         elif ev == "rl_policy_snapshot":
             self.snapshot = dict(rec, _ts=ts)
         elif ev == "rl_publication":
@@ -186,6 +194,7 @@ class _Island:
             self.losses.append({"ts": ts, "reason": rec.get("reason")})
         elif ev == "rl_round_trained":
             self.trained_groups += _int(rec.get("trained_groups")) or 0
+            self.trained.append((ts, _int(rec.get("trained_groups")) or 0))
             if _f(rec.get("truncated_frac")) is not None:
                 self.truncated.append(_f(rec["truncated_frac"]))
 
@@ -360,7 +369,10 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         r["missing"] = [i for i in (expected or trainer_ids) if i not in r["pushed"]]
         rounds.append(r)
 
-    running = bool(live) and not all(by_id.get(i, {}).get("finalized") for i in trainer_ids)
+    # a terminal full-parameter round: the islands wait for each other and the syncer for its
+    # final cut (terminal grace), no fragment is expected to advance
+    running = (bool(live) and not all(by_id.get(i, {}).get("finalized") for i in trainer_ids)
+               and not any(x.terminal for x in isl.values()))
     trainers = [_trainer(iid, isl[iid], by_id.get(iid) or {}, states.get(iid) or {}, merges, versions, committed,
                          merged_steps, p, n, now, kind_) for iid in trainer_ids]
     # a trainer anchored past the syncer's committed version: the syncer tape lags (it is copied
@@ -416,6 +428,8 @@ def _samplers(reducer, trainer_ids: list[str], by_id: dict, states: dict) -> dic
         if m and m.group(1) in trainer_ids:
             follows[sid] = m.group(1)
     follow = bool(sids) and len(follows) == len(sids)
+    if follow:
+        publisher = None  # every trainer publishes to its own lane (its release origin counts within the lane)
     lanes = {}
     if follow:
         for tid in trainer_ids:
@@ -490,7 +504,10 @@ def _trainer(iid: str, x: _Island, card: dict, st: dict, merges: list[dict], ver
     if lr is None and isinstance(last.get("applied_lrs"), list) and last["applied_lrs"]:
         lr = _f(last["applied_lrs"][0])
     ph = x.phases[-1] if x.phases else None
-    roll = _rollout(x, now) if kind_ == "island" or any("rl/rollout_seconds" in r for r in x.rounds) else None
+    # a synced group's rollout runs on its sampler islands: its trainers are buffer trainers (their
+    # placement field still reads "colocated", and their rounds carry buffer read stats), never
+    # drawn with an in-island rollout or a shared GPU
+    roll = _rollout(x, now) if kind_ == "island" else None
     oldest = min((t for ts in pending.values() for t in ts), default=None)
     return {
         "id": iid, "name": card.get("name"), "gpu": card.get("gpu"), "gpus": card.get("gpus"),
@@ -515,7 +532,8 @@ def _trainer(iid: str, x: _Island, card: dict, st: dict, merges: list[dict], ver
                        "ts": lb["_ts"]} if lb else None,
         "apply_s": _f((x.apply or {}).get("sync/apply_seconds")), "apply_ts": (x.apply or {}).get("_ts"),
         "full_push": {"count": _int(full.get("sync/push_count")), "bytes": _f(full.get("sync/upload_bytes")),
-                      "inflight": _int(full.get("sync/inflight_pairs"))} if full else None,
+                      "inflight": _int(full.get("sync/inflight_pairs")), "total": x.full_pushes,
+                      "overwritten": _int(full.get("sync/overwritten_rounds"))} if full else None,
         "failure": x.failure, "gpu_util": card.get("gpu_util_pct"), "mem_pct": card.get("mem_pct"),
         "trained_groups": x.trained_groups,
         "truncated": x.truncated[-1] if x.truncated else None,
@@ -567,7 +585,12 @@ def _publish_s(x: _Island, at: float) -> float | None:
 
 
 def _rollout(x: _Island, now: float) -> dict:
-    """The island's own rollout (decoupled): placement, engines, last round, served snapshot."""
+    """The island's own rollout: placement, engines, last round, served snapshot. Decoupled
+    islands report the rollout per round (``rl_local_round`` rl/*); a full-parameter island
+    does not: its round and time come from ``rl_round_wall`` and its groups per round are the
+    ones the trainer trained (``groups_src`` "trained"; the run total is not reported)."""
+    if not x.rounds and (x.walls or x.trained):
+        return _rollout_from_trainer(x, now)
     last = x.rounds[-1] if x.rounds else {}
     get = lambda k: last.get("rl/" + k, last.get(k))  # noqa: E731
     # group latency 0.0: the rollout did not time its groups (a group never takes 0 s)
@@ -589,12 +612,33 @@ def _rollout(x: _Island, now: float) -> dict:
         "rollout_s": _f(get("rollout_seconds")), "p50_s": lat("group_p50_seconds"),
         "p95_s": lat("group_p95_seconds"), "reward": _f(get("reward_mean")),
         "zero_var": _f(get("zero_variance_group_ratio")), "zero_var_recent": _median(zv),
-        "rollout_p50_s": _median(secs), "groups_total": groups,
+        "rollout_p50_s": _median(secs), "groups_total": groups, "groups_src": "rollout",
         "served": {"v": _int(pub.get("policy_version")), "hash": token.rsplit(":", 1)[-1][:8] if token else None,
                    "token": token or None, "ts": pub.get("_ts"), "bytes": _f(pub.get("sync/publication_payload_bytes")),
                    "publish_s": _publish_s(x, pub["_ts"]) if pub else None} if pub else None,
         "groups_5m": sum(_int(r.get("rl/completed_groups", r.get("completed_groups"))) or 0
                          for r in x.rounds if r["_ts"] > now - RATE_S),
+    }
+
+
+def _rollout_from_trainer(x: _Island, now: float) -> dict:
+    pub = x.publication or {}
+    token = str(pub.get("rl/policy_token") or "")
+    members = [str(m) for m in pub.get("sync/publication_members") or []]
+    w = x.walls[-1] if x.walls else {}
+    secs = [s for s in (_f(r.get("rollout_seconds")) for r in x.walls[-8:]) if s is not None]
+    return {
+        "placement": x.placement, "exec_mode": x.exec_mode,
+        "colocated": (x.placement or "").startswith("coloc") or (x.exec_mode or "").startswith("colocated"),
+        "engines": sum(1 for m in members if m.startswith("engine:")) or None,
+        "round": _int(w.get("rollout_id")), "groups": x.trained[-1][1] if x.trained else None, "traj": None,
+        "tokens": None, "rollout_s": _f(w.get("rollout_seconds")), "p50_s": None, "p95_s": None, "reward": None,
+        "zero_var": None, "zero_var_recent": None, "rollout_p50_s": _median(secs), "groups_total": None,
+        "groups_src": "trained",
+        "served": {"v": _int(pub.get("policy_version")), "hash": token.rsplit(":", 1)[-1][:8] if token else None,
+                   "token": token or None, "ts": pub.get("_ts"), "bytes": _f(pub.get("sync/publication_payload_bytes")),
+                   "publish_s": _publish_s(x, pub["_ts"]) if pub else None} if pub else None,
+        "groups_5m": sum(g for ts, g in x.trained if ts > now - RATE_S),
     }
 
 
@@ -626,23 +670,10 @@ def _flows(isl: dict[str, _Island], merges: list[dict], now: float, rollout: set
             if a == "generate":  # the groups of the round that follows (its rl_local_round)
                 g = next((_int(r.get("rl/completed_groups", r.get("completed_groups"))) for r in x.rounds
                           if r["_ts"] >= t1), None)
+                if g is None:  # full parameter: the groups the trainer trained from it
+                    g = next((n for ts, n in x.trained if ts >= t1), None)
                 out.append({"k": "q", "i": iid, "t0": t1, "t1": t1 + 1.2, "m": g})
             elif a == "publish":
                 out.append({"k": "s", "i": iid, "t0": t0, "t1": max(t1, t0 + 0.5)})
     out.sort(key=lambda f: f["t0"])
     return out[-MAX_FLOWS:]
-
-
-def summary(d: dict) -> dict:
-    """The figures the page's top cards show for a DiLoCo run (``YetoTopoD.kpis``)."""
-    trs = d["trainers"]
-    rolls = [t["island"] for t in trs if t["island"]]
-    return {
-        "rollout_groups": sum(r["groups_total"] for r in rolls) if rolls else None,
-        "trained_groups": sum(t["trained_groups"] for t in trs),
-        "engines": sum(r["engines"] or 0 for r in rolls) or None,
-        "placements": sorted({r["placement"] for r in rolls if r["placement"]}),
-        "pending_bcast": sum(t["pending_n"] for t in trs if t["live"]),
-        "pending_oldest_ts": min((t["pending_oldest_ts"] for t in trs if t["live"] and t["pending_oldest_ts"]),
-                                 default=None),
-    }
