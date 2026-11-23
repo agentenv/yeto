@@ -746,3 +746,11 @@ def test_trainer_env_write_back(island_reg):
     sources = Sources(env={}, section=section)
     out = materialize(resolve(sources, registry=island_reg), sources, registry=island_reg)
     assert out.env == {"YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN": "3"}
+
+
+def test_list_marks_deprecated_aliases(caps_reg, monkeypatch, capsys):
+    monkeypatch.setattr(registry_mod, "_DEFAULT", caps_reg)
+    assert _run(["breaker", "list", "--markdown"]) == 0
+    assert "env HARBOR_MAX_SANDBOXES (deprecated)" in capsys.readouterr().out
+    assert _run(["breaker", "list"]) == 0
+    assert "env HARBOR_MAX_SANDBOXES (deprecated)" in capsys.readouterr().out
