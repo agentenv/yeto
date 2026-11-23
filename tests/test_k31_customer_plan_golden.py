@@ -13,7 +13,11 @@ the launch dry-run plan of that argv. This test pins that plan for:
 
 The golden (``tests/fixtures/k31_customer_kit/plans.json``) was generated on
 main before the sync-route wiring; the source tree hash is fixed, everything
-else is compared. Regenerate only for an intended change:
+else is compared. The test is hermetic: ``HOME`` is a temporary directory
+holding a placeholder Hugging Face token file (the customer form: the token
+is mounted onto every node), and the variables the launcher forwards from the
+operator's environment are cleared, so the plan does not depend on the machine
+that runs it. Regenerate only for an intended change:
 ``YETO_UPDATE_K31_PLAN_GOLDEN=1 pytest tests/test_k31_customer_plan_golden.py``.
 """
 
@@ -36,6 +40,10 @@ CASES = {
     "examples/run.baremetal-b300-262k.json": K31 / "run.baremetal-b300-262k.json",
     "kit/run.json": KIT / "run.json",
 }
+PLACEHOLDER_TOKEN = "hf_placeholder_token_for_the_plan_golden"
+# the launcher copies these from the operator's environment into the plan (island env, mounts)
+FORWARDED_PREFIXES = ("HF_", "HUGGING_FACE_", "WANDB_", "CYBERGYM_", "NCCL_", "YETO_", "SKYPILOT_", "AWS_",
+                      "MODAL_")
 
 
 def _selection(tmp_path: Path) -> Path:
@@ -68,10 +76,24 @@ def _argv(run: Path, tmp_path: Path) -> list[str]:
 
 
 def _normalize(text: str, tmp_path: Path) -> str:
-    for real, label in ((str(tmp_path), "<TMP>"), (str(KIT), "<KIT>"), (str(ROOT), "<REPO>"),
-                        (str(Path.home()), "<HOME>")):
+    for real, label in ((str(tmp_path / "home"), "<HOME>"), (str(tmp_path), "<TMP>"), (str(KIT), "<KIT>"),
+                        (str(ROOT), "<REPO>")):
         text = text.replace(real, label)
     return text
+
+
+def _hermetic_env(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    token = home / ".cache" / "huggingface" / "token"
+    token.parent.mkdir(parents=True)
+    token.write_text(PLACEHOLDER_TOKEN)
+    for key in list(os.environ):
+        if key.startswith(FORWARDED_PREFIXES):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("HOME", str(home))
+    import yeto.runs as runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", home / ".yeto" / "runs")  # resolved from HOME at import
 
 
 def _plan(run: Path, tmp_path: Path, monkeypatch, capsys) -> dict:
@@ -80,13 +102,14 @@ def _plan(run: Path, tmp_path: Path, monkeypatch, capsys) -> dict:
     import yeto.modal_runner as modal_runner
     from yeto.cloud import s3_store
 
+    _hermetic_env(tmp_path, monkeypatch)
     for key, value in (("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test"), ("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test"),
                        ("HF_HUB_OFFLINE", "1"), ("HF_HUB_CACHE", str(tmp_path / "hf")),
                        ("HF_HOME", str(tmp_path / "hf-home"))):
         monkeypatch.setenv(key, value)
     for key in (s3_store.ENDPOINT_ENV, s3_store.REGION_ENV, s3_store.PROFILE_ENV, "AWS_ENDPOINT_URL",
                 "AWS_PROFILE"):
-        monkeypatch.setenv(key, "")
+        monkeypatch.setenv(key, "")  # records the variable, so the launcher's own setting is undone too
         monkeypatch.delenv(key)
     monkeypatch.setattr(modal_runner, "modal_available", lambda: True)
     # the source tree hash changes with every commit; the plan is pinned for everything else
@@ -102,14 +125,17 @@ def _plan(run: Path, tmp_path: Path, monkeypatch, capsys) -> dict:
     assert cli.cmd_launch(args) == 0 and calls == []
     out = capsys.readouterr().out
     plan = json.loads(out[:out.rindex("}") + 1])
-    return json.loads(_normalize(json.dumps({"argv": argv, "plan": plan}, sort_keys=True), tmp_path))
+    text = json.dumps({"argv": argv, "plan": plan}, sort_keys=True)
+    assert PLACEHOLDER_TOKEN not in text  # the token file is mounted, never copied into the plan
+    return json.loads(_normalize(text, tmp_path))
 
 
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_k31_customer_plan_is_unchanged(case, tmp_path, monkeypatch, capsys):
+    update = os.environ.get("YETO_UPDATE_K31_PLAN_GOLDEN") == "1"  # read before the environment is cleared
     got = _plan(CASES[case], tmp_path, monkeypatch, capsys)
     assert "--rl-single-island-no-sync" in got["argv"]  # the customer form: no syncer, never routed
-    if os.environ.get("YETO_UPDATE_K31_PLAN_GOLDEN") == "1":
+    if update:
         golden = json.loads(GOLDEN.read_text()) if GOLDEN.exists() else {}
         golden[case] = got
         GOLDEN.write_text(json.dumps(golden, indent=1, sort_keys=True) + "\n")
