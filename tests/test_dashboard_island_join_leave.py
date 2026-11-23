@@ -29,7 +29,8 @@ def ended(tmp_path):
     """The real tapes of a stopped run (sanitized): a Modal trainer island known only
     from fleet.jsonl, one NC sampler mirrored by hand (its mirror lost the ssh
     follow), the NC pool tape. The launcher's teardown.json closes the run dir."""
-    os.utime(FX / "run" / "teardown.json", (T0 + 3000, T0 + 3000))
+    # after the trainer's last island_ready (T0+3134): a teardown before it would be an older launch's
+    os.utime(FX / "run" / "teardown.json", (T0 + 3200, T0 + 3200))
     r = Reducer(run="run")
     load_all(r, [str(FX / "run"), str(FX / "mirror"), str(FX / "pool")])
     return r
