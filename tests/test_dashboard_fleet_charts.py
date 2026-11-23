@@ -305,3 +305,23 @@ def test_island_states_is_the_shared_rule():
     assert {k: v["status"] for k, v in st.items()} == cards
     assert st["0"]["alive"] and st["0"]["starting"] and st["0"]["launch"] == "l0-modal-B"
     assert st["s0"]["alive"] and st["s0"]["incarnation"] == "a1"
+
+
+def test_a_relaunch_after_a_teardown_is_starting_not_stopped():
+    # launch A is torn down while still starting; the launcher relaunches the trainer and the
+    # new container is ready, but its tape is not in the store yet: starting, not stopped
+    hb = {"event": "rl_heartbeat", "island_id": 0, "phase": "startup", "time_unix": T0 + 200}
+    ready = {"event": "island_ready", "island": "r-l0-modal", "island_id": 0, "cloud": "modal", "gpu": "H100",
+             "gpus": 1, "initial": True}
+
+    def status(relaunched: bool) -> str:
+        r = Reducer(run="r")
+        r.feed({**ready, "time_unix": T0}, source="fleet", offset=0)
+        r.feed(hb, source="store:trainer/l0-modal-A", offset=0)
+        r.feed_operator_stop({"event": "operator_stop", "time_unix": T0 + 240, "cause": "teardown", "path": "t"})
+        if relaunched:
+            r.feed({**ready, "time_unix": T0 + 360}, source="fleet", offset=1)
+        return {c["id"]: c["status"] for c in r.overview(now=T0 + 400)["islands"]}["0"]
+
+    assert status(False) == "stopped"
+    assert status(True) == "starting"

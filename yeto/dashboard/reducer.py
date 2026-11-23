@@ -241,7 +241,7 @@ def _new_island(iid: str) -> dict:
         "price_key": None, "cpus": None, "memory_gib": None, "driver_started": False,
         "nodes": {}, "node_series": {}, "spans": [], "pubs": {}, "first_ts": None, "last_event_ts": None, "last_heartbeat_ts": None,
         "heartbeat_seen": False, "round": None, "rollout_id": None, "policy_version": None,
-        "phase": None, "finalized": False, "fleet_state": None, "ready_ts": None, "stop_ts": None,
+        "phase": None, "finalized": False, "fleet_state": None, "ready_ts": None, "last_ready_ts": None, "stop_ts": None,
         "lost_ts": None, "open_ts": None, "closed_s": 0.0, "points": {}, "nonfinite": [], "resource": None, "host": None, "staleness": None,
         "contribution": None, "reconfig": [], "cells": None, "cells_source": None,
         "transactions": {}, "tx_order": [], "recovery_required": [], "source_lost": None,
@@ -451,6 +451,8 @@ class Reducer:
             return False
         if stop.get("cause") == "teardown" and (isl["last_event_ts"] or 0) > stop["time_unix"] + 60:
             return False  # an older launch's teardown.json: this island ran after it
+        if stop.get("cause") == "teardown" and (isl["last_ready_ts"] or 0) > stop["time_unix"] + STOP_SLACK_S:
+            return False  # relaunched after that teardown: the new container is up, its tapes may not be yet
         fails = [x["ts"] for x in isl["recovery_required"] if x.get("ts") is not None]
         if isl["lost_ts"] is not None:
             fails.append(isl["lost_ts"])
@@ -1093,6 +1095,7 @@ class Reducer:
         if event == "island_ready" and ts is not None:
             if isl["ready_ts"] is None:
                 isl["ready_ts"] = ts
+            isl["last_ready_ts"] = max(ts, isl["last_ready_ts"] or ts)
             if isl["open_ts"] is None:
                 isl["open_ts"] = ts
             isl["stop_ts"] = None
