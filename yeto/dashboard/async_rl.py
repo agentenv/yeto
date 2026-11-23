@@ -160,6 +160,24 @@ def compaction_total(rows: list[dict]) -> dict | None:
     return out
 
 
+def trial_outcomes(agentic: dict) -> dict:
+    """One ``rl_sampler_engine_round.agentic``: trials that ended in the round by outcome
+    (``outcomes.harness_outcome_<o>_total`` are counts since the previous round event,
+    yeto.rl.engine.agentic_round._outcomes: ok / policy_limit carry a verdict, aborted is
+    an infrastructure failure), plus the incarnation's running infra-retry and lost totals
+    by reason. The per-round ``lost_trials`` only counts when a group ends, so a sampler
+    whose every trial fails shows it here first (the trial-failure alert)."""
+    out: dict = {}
+    oc = agentic.get("outcomes") if isinstance(agentic.get("outcomes"), dict) else {}
+    for key in ("ok", "policy_limit", "aborted"):
+        if _f(oc.get(f"harness_outcome_{key}_total")) is not None:
+            out[f"trials_{key}"] = _f(oc.get(f"harness_outcome_{key}_total"))
+    for key, src in (("infra_retries_by", "infra_retries_total"), ("lost_by", "lost_total")):
+        if isinstance(agentic.get(src), dict):
+            out[key] = _reasons(agentic[src])
+    return out
+
+
 def _f(v: Any) -> float | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
@@ -319,6 +337,8 @@ class AsyncState:
             for k in ("retried_trials", "lost_trials"):
                 if agentic and _f(agentic.get(k)) is not None:
                     row[k] = _f(agentic.get(k))
+            if agentic:  # trials ended this round by outcome; infra retries / lost so far
+                row.update(trial_outcomes(agentic))
             if agentic and row.get("reward_mean") is None and _f(agentic.get("reward_mean")) is not None:
                 row["reward_mean"] = _f(agentic.get("reward_mean"))
             comp = compaction_row((agentic or {}).get("compaction"))
@@ -535,6 +555,9 @@ class AsyncState:
                 "zero_variance_dropped": tot("zero_variance_dropped"), "zero_variance_seen": tot("zero_variance_seen"),
                 "dropped_groups": tot("dropped_groups"),
                 "retried_trials": tot("retried_trials"), "lost_trials": tot("lost_trials"),
+                # trials ended by outcome over every round (trial_outcomes)
+                "trials_ok": tot("trials_ok"), "trials_policy_limit": tot("trials_policy_limit"),
+                "trials_aborted": tot("trials_aborted"),
                 # the last round that carried a reward (empty rounds carry none)
                 "reward_mean_last": rew.get("reward_mean") if rew else None,
                 "reward_last_ts": rew.get("ts") if rew else None,

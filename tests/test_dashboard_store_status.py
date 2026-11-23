@@ -107,3 +107,50 @@ def test_export_of_a_run_with_no_tapes_still_refuses(tmp_path, monkeypatch):
     else:
         raise AssertionError("export without any tape must refuse")
     assert dcli._paths(_args()) == [str(tmp_path / "nope" / "events"), str(tmp_path / "nope" / "fleet.jsonl")]
+
+
+def test_store_run_name_labels_a_store_only_dashboard():
+    assert dcli.store_run_name("s3://bucket/runs/r9") == "r9"
+    assert dcli.store_run_name("/data/store/runs/r9/") == "r9"
+    assert dcli.store_run_name("s3://bucket/other") is None and dcli.store_run_name(None) is None
+    assert dcli._reducer(_args(run=None, store="s3://b/runs/r9")).run_name() == ("r9", False)
+
+
+def _engine_round(rid, t, *, ok=0, limit=0, aborted=0, retries=None, lost=None, inc="a1"):
+    return {"event": "rl_sampler_engine_round", "sampler_id": "s1", "incarnation": inc, "rollout_id": rid,
+            "groups": 0, "samples": 0, "dropped_groups": 0, "time_unix": t,
+            "agentic": {"trials": 0, "kept": 0, "lost_trials": 0, "retried_trials": 0,
+                        "outcomes": {"harness_outcome_ok_total": ok, "harness_outcome_policy_limit_total": limit,
+                                     "harness_outcome_aborted_total": aborted},
+                        "infra_retries_total": retries or {}, "lost_total": lost or {}}}
+
+
+def _trial_alerts(*records):
+    reducer = Reducer(run="r")
+    for i, rec in enumerate(records):
+        reducer.feed(rec, source="t", offset=i)
+    return [a for a in reducer.overview(now=T0 + 600)["alerts"] if a["rule"] == "trial_fail"]
+
+
+def test_every_trial_aborted_is_critical():
+    # the shape of a real run whose sandbox gateway answered 502: aborted trials, no verdict
+    recs = [_engine_round(0, T0, aborted=24, retries={"AgentenvError": 23}),
+            _engine_round(1, T0 + 5, aborted=8, retries={"AgentenvError": 31}),
+            _engine_round(2, T0 + 10)]
+    alerts = _trial_alerts(*recs)
+    assert len(alerts) == 1 and alerts[0]["sev"] == 0 and alerts[0]["island"] == "s1"
+    assert "32 of 32 trials ended aborted" in alerts[0]["detail"] and "AgentenvError 31" in alerts[0]["detail"]
+
+
+def test_mostly_aborted_warns_and_healthy_or_few_trials_stay_quiet():
+    warn = _trial_alerts(_engine_round(0, T0, ok=3, aborted=7))
+    assert len(warn) == 1 and warn[0]["sev"] == 1
+    assert not _trial_alerts(_engine_round(0, T0, ok=12, limit=2, aborted=2))
+    assert not _trial_alerts(_engine_round(0, T0, aborted=5))  # below trial_fail_min_trials
+
+
+def test_trial_alert_reads_only_the_current_incarnation():
+    recs = [_engine_round(0, T0, aborted=20, inc="a1"),
+            {"event": "rl_sampler_start", "sampler_id": "s1", "incarnation": "a2", "time_unix": T0 + 50},
+            _engine_round(0, T0 + 60, ok=10, inc="a2")]
+    assert not _trial_alerts(*recs)

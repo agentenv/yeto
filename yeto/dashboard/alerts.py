@@ -65,6 +65,13 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # trials the gateway invalidated for a fork / history rewrite of a compacted session
     # (compaction_fork_lost), as a share of the compacted trials (written + fork-lost)
     "compaction_fork_lost_warn": 0.05,
+    # agentic samplers: trials that ended over the last trial_fail_window_rounds rounds of the
+    # current incarnation in which any trial ended, once trial_fail_min_trials ended: none
+    # with a verdict (ok / policy_limit) is critical, an aborted (infra) share above warn
+    # a warning. Mirrors the run breaker's "every group INFRA" rule on the page.
+    "trial_fail_window_rounds": 10,
+    "trial_fail_min_trials": 8,
+    "trial_fail_warn": 0.5,
 }
 
 
@@ -335,12 +342,40 @@ def store_unreadable(store: dict | None) -> list[dict]:
                    f"{(store.get('last_error') or '')[:200]}")]
 
 
+def trial_failures(reducer, th: dict) -> list[dict]:
+    from .async_rl import _row_order
+
+    out = []
+    state = getattr(reducer, "async_", None)
+    for iid, s in sorted((state.sampler if state is not None else {}).items()):
+        inc = s.get("incarnation")
+        rows = [r for r in sorted(s["rounds"].values(), key=_row_order)
+                if r.get("incarnation") == inc and any(r.get(f"trials_{k}") for k in ("ok", "policy_limit", "aborted"))]
+        rows = rows[-int(th["trial_fail_window_rounds"]):]
+        tot = {k: sum(r.get(f"trials_{k}") or 0 for r in rows) for k in ("ok", "policy_limit", "aborted")}
+        ended = sum(tot.values())
+        if not rows or ended < th["trial_fail_min_trials"]:
+            continue
+        last = rows[-1]
+        why = ", ".join(f"{k} {v:g}" for k, v in sorted((last.get("infra_retries_by") or {}).items()))
+        lost = ", ".join(f"{k} {v:g}" for k, v in sorted((last.get("lost_by") or {}).items()))
+        detail = (f"{tot['aborted']:g} of {ended:g} trials ended aborted (infrastructure) in the last {len(rows)} "
+                  f"round(s), ok {tot['ok']:g}, policy limit {tot['policy_limit']:g}"
+                  + (f"; infra retries so far: {why}" if why else "") + (f"; lost: {lost}" if lost else ""))
+        if tot["ok"] + tot["policy_limit"] == 0:
+            out.append(_alert(0, "trial_fail", f"sampler {iid}: no trial is finishing", detail, island=iid))
+        elif tot["aborted"] / ended > th["trial_fail_warn"]:
+            out.append(_alert(1, "trial_fail", f"sampler {iid}: most trials fail on infrastructure", detail,
+                              island=iid))
+    return out
+
+
 def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict],
              store: dict | None = None) -> list[dict]:
     th = reducer.thresholds
     alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
-              + budget(cost, th) + compaction(reducer, th)
+              + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
     alerts.sort(key=lambda a: a["sev"])
     for i, a in enumerate(alerts):

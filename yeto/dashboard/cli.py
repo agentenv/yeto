@@ -55,6 +55,13 @@ def add_parser(sub) -> None:
     m.add_argument("--island", default=None, help="island id recorded on dashboard_source_lost events")
 
 
+def store_run_name(store: str | None) -> str | None:
+    """The run of a ``--store .../runs/<run>`` URI or directory (the page's run label when
+    no ``--run`` is given); None for any other layout."""
+    parts = [p for p in str(store or "").split("://")[-1].strip("/").split("/") if p]
+    return parts[-1] if len(parts) >= 2 and parts[-2] == "runs" else None
+
+
 def page_commands(args) -> dict[str, str]:
     """The page's "Commands" box: this dashboard's own serve / export command lines,
     rebuilt from its arguments (not the defaults), so a copied command reproduces it."""
@@ -89,7 +96,8 @@ def _reducer(args):
     from .reducer import Reducer
 
     thresholds = json.loads(Path(args.thresholds).read_text()) if args.thresholds else None
-    reducer = Reducer(run=args.run, prices=load_prices(args.prices), budget_usd=args.budget,
+    reducer = Reducer(run=args.run or store_run_name(getattr(args, "store", None)),
+                      prices=load_prices(args.prices), budget_usd=args.budget,
                       thresholds=thresholds)
     reducer.up_state = getattr(args, "up_state", None)
     reducer.commands = page_commands(args)
