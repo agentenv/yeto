@@ -456,7 +456,7 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         "stuck": stuck, "period_s": sy["period_s"], "merge_gap_s": sy["merge_gap_s"], "quorum_p50_s": sy["quorum_p50_s"],
         "roster": len(live), "expected": expected, "shards": shard_rows(p, n, merges, rounds, committed, done),
         "rounds": rounds, "last_merge_ts_any": sy["last_merge_ts_any"], "running": running, "done": done,
-        "traffic": {"push": len(pushes5), "push_bytes": sum(_f(x.get("payload_bytes")) or 0 for x in pushes5),
+        "traffic": {"push": len(pushes5), "push_bytes": sum(_push_bytes(x) or 0 for x in pushes5),
                     "bcast": len(bcasts5)},
         "trainers": trainers,
         "flows": _flows(isl, merges, now, {t["id"] for t in trainers if t["island"]}),
@@ -586,13 +586,19 @@ def _trainer(iid: str, x: _Island, card: dict, st: dict, merges: list[dict], ver
         "phase": DRIVER_PHASES.get(ph[1], ph[1]) if ph else None, "phase_raw": ph[1] if ph else None,
         "phase_since": ph[0] if ph else None,
         "last_push": {"frag": _int(lp.get("fragment_id")), "step": _int(lp.get("global_step")),
-                      "base": _int(lp.get("base_version")), "bytes": _f(lp.get("payload_bytes")),
+                      "base": _int(lp.get("base_version")), "bytes": _push_bytes(lp),
+                      "wire": _f(lp.get("wire_bytes")) is not None, "payload_bytes": _f(lp.get("payload_bytes")),
                       "p2p_s": _f(lp.get("pull_to_push_seconds")), "h": _int(lp.get("realized_h")),
                       "ts": lp["_ts"]} if lp else None,
+        # a full-parameter island marks a BCAST of a round that closed without its PUSH
+        # (partial quorum: ``overwrite``) or one it fetched to catch up (``catch_up``)
         "last_bcast": {"frag": _int(lb.get("fragment_id")), "v": _int(lb.get("version")),
                        "bytes": _f(lb.get("payload_bytes")), "queue_s": _f(lb.get("queue_seconds")),
                        "received_ts": _f(lb.get("received_unix")), "applied_ts": _f(lb.get("applied_unix")),
+                       "overwrite": lb.get("overwrite") is True, "catch_up": lb.get("catch_up") is True,
                        "ts": lb["_ts"]} if lb else None,
+        "bcast_overwrites": sum(1 for b in x.bcasts if b.get("overwrite") is True),
+        "bcast_catch_ups": sum(1 for b in x.bcasts if b.get("catch_up") is True),
         "apply_s": _f((x.apply or {}).get("sync/apply_seconds")), "apply_ts": (x.apply or {}).get("_ts"),
         "full_push": {"count": _int(full.get("sync/push_count")), "bytes": _f(full.get("sync/upload_bytes")),
                       "inflight": _int(full.get("sync/inflight_pairs")), "total": x.full_pushes,
@@ -705,13 +711,20 @@ def _rollout_from_trainer(x: _Island, now: float) -> dict:
     }
 
 
+def _push_bytes(rec: dict) -> float | None:
+    """A PUSH's bytes on the wire: ``wire_bytes`` when the island encoded it ahead (a
+    full-parameter background push / prefetch, e.g. int4), else ``payload_bytes``."""
+    wire = _f(rec.get("wire_bytes"))
+    return wire if wire is not None else _f(rec.get("payload_bytes"))
+
+
 def _flows(isl: dict[str, _Island], merges: list[dict], now: float, rollout: set[str]) -> list[dict]:
     """Timed windows the page replays: ``p`` PUSH (the responder's wire window on the merge
     record), ``b`` BCAST (merge -> received = applied record time - queue_seconds; ``a`` marks
     an approximate window when the island wrote no rl_fragment_bcast), ``q`` rollout groups
     handed to the trainer (generate -> train), ``s`` snapshot publish (publish phase)."""
     lo = now - WINDOW_S
-    push_bytes = {(iid, _int(ps.get("global_step"))): _f(ps.get("payload_bytes")) for iid, x in isl.items() for ps in x.pushes}
+    push_bytes = {(iid, _int(ps.get("global_step"))): _push_bytes(ps) for iid, x in isl.items() for ps in x.pushes}
     out = push_flows(merges, lo, push_bytes)
     bc = {(iid, _int(b.get("fragment_id")), _int(b.get("version"))): b for iid, x in isl.items() for b in x.bcasts}
     for m in merges:
