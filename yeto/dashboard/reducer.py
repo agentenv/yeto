@@ -977,6 +977,7 @@ class Reducer:
         topo = topology_mod.view(self, ov["islands"], now)
         if topo is not None:
             view["topology"] = topo
+        view["layout"] = topology_mod.layout(self)  # which drawing and why (topology_diloco.layout)
         brk = self.breakers_view(ov.get("cost"))
         if brk is not None:
             view["breakers"] = brk
@@ -1005,6 +1006,11 @@ class Reducer:
         values = {key: first_finite(r, paths) for key, _label, paths in METRICS}
         values.update({key: first_finite(r, paths) for key, paths in EXTRA_SERIES})
         values["kl"] = ppo_kl(r)
+        if event == "rl_local_round" and values.get("kl_tr") is not None \
+                and values["kl_tr"] == finite(r.get("mean_kl")):
+            # the ports engine writes its loss-dict KL (``mean_kl``) under train/train_rollout_kl too;
+            # the round's train-rollout KL is on its rl_round_trained (0.0 here is not a measurement)
+            values["kl_tr"] = None
         if values.get("tok_s") is None and isl["points"].get(x, {}).get("tok_s_derived") is not False \
                 and isl["points"].get(x, {}).get("tok_s") is None:
             toks = finite(r.get("action_tokens"))
@@ -1223,6 +1229,7 @@ class Reducer:
                 "responded": len(responded) if responded or expected
                 else finite(rec.get("sync/responders")),
                 "expected_ids": expected, "responded_ids": responded, "missed": missed,
+                "quorum": finite(rec.get("quorum")),
                 "quorum_ms": finite(rec.get("quorum_ms")), "grace_ms": finite(rec.get("grace_ms")),
                 "sync_ms": finite(rec.get("sync_ms")),
                 "merge_ms": round(merge_s * 1000, 1) if merge_s is not None else None,

@@ -18,6 +18,7 @@ PAGE = STATIC / "index.html"
 APP = STATIC / "app.js"
 EXT = STATIC / "sft.js"  # loaded first: app.js calls YetoExt.render
 TOPO = STATIC / "topology.js"  # loaded before app.js too: app.js calls YetoTopo.render
+TOPO_D = STATIC / "topology_diloco.js"  # after topology.js: a run with a syncer (YetoTopoD)
 BRK = STATIC / "breakers.js"  # and this one: app.js calls YetoBrk.render
 MARKER = "<!--YETO-DATA-->"
 APP_MARKER = "<!--YETO-APP-->"
@@ -31,11 +32,11 @@ def inline_json(data: dict) -> str:
 
 
 def build_id() -> str:
-    """Short hash of the page code (index.html + sft.js + topology.js + breakers.js + app.js). The live server sends it with
-    every /api/view so an open tab notices a redeploy and reloads instead of drawing new data
+    """Short hash of the page code (index.html + sft.js + topology*.js + breakers.js + app.js). The live server
+    sends it with every /api/view so an open tab notices a redeploy and reloads instead of drawing new data
     with old code."""
     h = hashlib.sha256()
-    for f in (PAGE, EXT, TOPO, BRK, APP):
+    for f in (PAGE, EXT, TOPO, TOPO_D, BRK, APP):
         h.update(f.read_bytes())
     return h.hexdigest()[:12]
 
@@ -43,7 +44,8 @@ def build_id() -> str:
 def render_page(data: dict | None) -> str:
     html = PAGE.read_text(encoding="utf-8").replace(
         APP_MARKER, "<script>\nvar YETO_BUILD=" + json.dumps(build_id()) + ";\n" + EXT.read_text(encoding="utf-8")
-        + "\n" + TOPO.read_text(encoding="utf-8") + "\n" + BRK.read_text(encoding="utf-8")
+        + "\n" + TOPO.read_text(encoding="utf-8") + "\n" + TOPO_D.read_text(encoding="utf-8")
+        + "\n" + BRK.read_text(encoding="utf-8")
         + "\n" + APP.read_text(encoding="utf-8") + "\n</script>")
     if data is None:
         return html.replace(MARKER, "")

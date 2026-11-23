@@ -64,14 +64,24 @@ def make_source(path):
     return SftSource(path, kind) if kind else TapeSource(path)
 
 
+SYNCER_TAPE = "yeto-tape.jsonl"
+
+
+def syncer_shard_tapes(path: Path) -> list[Path]:
+    """The other shards' tapes of a fragment-sharded syncer next to its shard-0 tape
+    (``yeto-tape.shard<i>.jsonl``, ``yeto.launch.syncer._shard_path``)."""
+    return sorted(path.parent.glob(path.stem + ".shard*" + path.suffix)) if path.name == SYNCER_TAPE else []
+
+
 def discover(paths: list[str], max_depth: int = 2) -> list[Path]:
-    """Files given directly plus ``*.jsonl`` up to ``max_depth`` below each dir."""
+    """Files given directly (a syncer tape with its shard tapes) plus ``*.jsonl`` up to
+    ``max_depth`` below each dir."""
     out: list[Path] = []
     seen: set[Path] = set()
     for raw in paths:
         p = Path(os.path.expanduser(raw))
         if p.is_file():
-            cands = [p]
+            cands = [p] + syncer_shard_tapes(p)
         elif p.is_dir():
             cands = []
             for depth in range(max_depth + 1):
@@ -196,13 +206,12 @@ def run_sources(run: str) -> list[str]:
     d = runs_mod.run_dir(run)
     # the run's own paths are kept even before they exist: serve re-discovers them every
     # poll, so a dashboard started before the run follows them once they appear; the cost
-    # guard's and the ``run up`` monitor's tapes feed the Breakers panel only
+    # guard's and the ``run up`` monitor's tapes feed the Breakers panel only; the host-wide
+    # syncer tape too: a syncer that starts after the dashboard (or a tape the launcher copies
+    # from the syncer's host later) is followed once it appears, with its shards
     up = Path(os.environ.get("YETO_STATE_DIR") or "~/.yeto/rl-up").expanduser() / run
-    out = [str(d / "events"), str(d / "fleet.jsonl"), str(d / COST_EVENTS_FILE), str(up / UP_EVENTS_FILE)]
-    syncer = Path(os.path.expanduser(RL_SYNCER_EVENT_TAPE))
-    if syncer.exists():  # host-wide, not the run's: only when present at start
-        out.append(str(syncer))
-    return out
+    return [str(d / "events"), str(d / "fleet.jsonl"), str(d / COST_EVENTS_FILE), str(up / UP_EVENTS_FILE),
+            str(Path(os.path.expanduser(RL_SYNCER_EVENT_TAPE)))]
 
 
 _RUN_FROM_TAPE_DIR = re.compile(r"^yeto-(.+)$")

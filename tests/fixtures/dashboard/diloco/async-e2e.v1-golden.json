@@ -1,0 +1,335 @@
+{
+ "end": {
+  "alerts": [],
+  "now": 1795425412.582735,
+  "topology": {
+   "buffer": {
+    "backlog": 12.0,
+    "read": 193.0,
+    "read_source": "buffer_selected",
+    "written": 205.0
+   },
+   "flows": [],
+   "last_release": {
+    "bytes": 8060901581.0,
+    "delta_ratio": null,
+    "kind": "full",
+    "ts": 1795424745.8559241,
+    "upload_s": 47.845,
+    "v": 21
+   },
+   "latest": 21,
+   "now": 1795425412.582735,
+   "rate_s": 300.0,
+   "samplers": [
+    {
+     "arch": "Ada",
+     "card": "L40S",
+     "engine": "vLLM",
+     "gpus": 1,
+     "id": "qwen4b-e2e-1123-0",
+     "lag": 1,
+     "last_group_ts": 1795424538.2237048,
+     "live": false,
+     "policy_version": 20,
+     "precision": "BF16",
+     "rate_gpm": 0.0,
+     "reason": null,
+     "reload": null,
+     "since_ts": 1795419942.211471,
+     "state": "offline",
+     "status": "done"
+    },
+    {
+     "arch": "Ada",
+     "card": "L40S",
+     "engine": "vLLM",
+     "gpus": 1,
+     "id": "qwen4b-e2e-1123-1",
+     "lag": 1,
+     "last_group_ts": 1795424600.4969368,
+     "live": false,
+     "policy_version": 20,
+     "precision": "BF16",
+     "rate_gpm": 0.0,
+     "reason": null,
+     "reload": null,
+     "since_ts": 1795423868.7784696,
+     "state": "offline",
+     "status": "done"
+    }
+   ],
+   "store": null,
+   "trainers": [
+    {
+     "arch": "Hopper",
+     "gpu": "H100",
+     "gpus": 1,
+     "id": "0",
+     "live": false,
+     "name": "qwen4b-e2e-1123-l0-modal",
+     "phase": "waiting for data",
+     "phase_since": 1795424772.6878877,
+     "policy_version": 25,
+     "reason": "STOPPED",
+     "starting": false,
+     "status": "left",
+     "step": 25
+    }
+   ],
+   "window_s": 600.0
+  }
+ },
+ "mid": {
+  "alerts": [],
+  "now": 1795422891.332,
+  "topology": {
+   "buffer": {
+    "backlog": 12.0,
+    "read": 193.0,
+    "read_source": "buffer_selected",
+    "written": 205.0
+   },
+   "flows": [
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422322.2253993
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422326.8582377
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422382.3890443
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422387.1048586
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422392.081138
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422443.9417238
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422450.3536263
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422536.7941482
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422541.1175003
+    },
+    {
+     "k": "d",
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422541.118397,
+     "w": 85.291
+    },
+    {
+     "k": "l",
+     "ls": 31.869,
+     "rs": 35.974,
+     "s": "qwen4b-e2e-1123-0",
+     "seen": 1795422398.135,
+     "t": 1795422576.282501,
+     "v": 12
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422616.3855028
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422620.8329968
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422668.8615663
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422688.3424125
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422727.3176498
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422732.1691058
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422737.195598
+    },
+    {
+     "k": "d",
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422737.196684,
+     "w": 33.29
+    },
+    {
+     "k": "l",
+     "ls": 30.309,
+     "rs": 11.969,
+     "s": "qwen4b-e2e-1123-0",
+     "seen": 1795422674.878,
+     "t": 1795422768.201687,
+     "v": 13
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422804.6631856
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422811.0334635
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422862.7789712
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422867.314766
+    },
+    {
+     "k": "g",
+     "m": 1,
+     "n": 8,
+     "s": "qwen4b-e2e-1123-0",
+     "t": 1795422872.1547046
+    }
+   ],
+   "last_release": null,
+   "latest": null,
+   "now": 1795422891.332,
+   "rate_s": 300.0,
+   "samplers": [
+    {
+     "arch": "Ada",
+     "card": "L40S",
+     "engine": "vLLM",
+     "gpus": 1,
+     "id": "qwen4b-e2e-1123-0",
+     "lag": null,
+     "last_group_ts": 1795422872.1547046,
+     "live": false,
+     "policy_version": 20,
+     "precision": "BF16",
+     "rate_gpm": 2.4,
+     "reason": null,
+     "reload": null,
+     "since_ts": 1795419942.211471,
+     "state": "offline",
+     "status": "done"
+    },
+    {
+     "arch": "Ada",
+     "card": "L40S",
+     "engine": "vLLM",
+     "gpus": 1,
+     "id": "qwen4b-e2e-1123-1",
+     "lag": null,
+     "last_group_ts": 1795424601.1152625,
+     "live": false,
+     "policy_version": 20,
+     "precision": "BF16",
+     "rate_gpm": 4.8,
+     "reason": null,
+     "reload": null,
+     "since_ts": 1795423868.7784696,
+     "state": "offline",
+     "status": "done"
+    }
+   ],
+   "store": null,
+   "trainers": [
+    {
+     "arch": "Hopper",
+     "gpu": "H100",
+     "gpus": 1,
+     "id": "0",
+     "live": false,
+     "name": "qwen4b-e2e-1123-l0-modal",
+     "phase": null,
+     "phase_since": null,
+     "policy_version": 25,
+     "reason": "STOPPED",
+     "starting": false,
+     "status": "left",
+     "step": 25
+    }
+   ],
+   "window_s": 600.0
+  }
+ }
+}
