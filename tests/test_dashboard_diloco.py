@@ -462,3 +462,54 @@ def test_page_draws_the_sft_islands_on_the_sft_page(tmp_path):
     assert "t210" in out["matrix"] and "base v146" in out["matrix"] and "Island 9" in out["matrix"]
     assert "learner → syncer" in out["legend"]
     assert out["kpis"] == ""  # the SFT page keeps its own cards (sKpis), the RL cards stay empty
+
+
+# -- full-parameter islands (g5-fullparam) and samplers following their trainer (f1-follow) ---------
+def test_full_parameter_island_rollout_comes_from_the_trainer_side():
+    """A full-parameter island writes no rl_local_round: its rollout round and time come from
+    rl_round_wall, its groups per round from rl_round_trained; the run total is not reported."""
+    r = load("g5-fullparam")
+    d = diloco(r)
+    assert d["kind"] == "island" and d["done"] and d["versions"] == [9, 10, 11, 12]
+    t0, t1 = d["trainers"]
+    for t, rnd in ((t0, 71), (t1, 46)):
+        isl = t["island"]
+        assert isl["groups_src"] == "trained" and isl["groups_total"] is None and isl["round"] == rnd
+        assert isl["groups"] == 8 and isl["rollout_p50_s"] > 0 and isl["served"]["v"] is not None
+    assert (t0["full_push"]["total"], t1["full_push"]["total"], t1["full_push"]["overwritten"]) == (12, 2, 3)
+    assert t0["trained_groups"] + t1["trained_groups"] == 952
+
+
+def test_a_terminal_full_parameter_round_stops_the_not_advancing_rules():
+    r = load("g5-fullparam")
+    first_terminal = 1795451975.2608376  # island 0's terminal rl_full_parameter_round
+    d = diloco(r, now=first_terminal + 60)
+    assert not d["running"] and d["stuck"] == []
+
+
+def test_page_full_parameter_island_labels_its_gaps(tmp_path):
+    out = _smoke(tmp_path, load("g5-fullparam"))
+    joined = " | ".join(out["texts"])
+    assert "round 71" in joined and "8 groups / round (trainer side)" in joined and "no round yet" not in joined
+    assert "run ended: the last 7 merge(s) went to the final cut" in joined and "BCAST pending" not in joined
+    assert "2 in run · 3 overwritten" in joined
+    assert "Groups trained / rolled out" in out["kpis"] and "952 / —" in out["kpis"]
+    assert "not recorded" in out["kpis"] and "not trained yet" not in out["kpis"]
+    assert "lag1" not in out["matrix"] and "lag2" not in out["matrix"] and "since anchor" not in out["matrix"]
+
+
+def test_synced_group_trainers_following_samplers_are_buffer_trainers():
+    r = load("f1-follow")
+    d = diloco(r)
+    assert d["kind"] == "synced_group" and d["follow"] and d["publisher"] is None
+    assert {k: v["samplers"] for k, v in d["lanes"].items()} == {"0": ["2"], "1": ["3"]}
+    for t in d["trainers"]:  # placement reads "colocated", yet the rollout runs on the samplers
+        assert t["island"] is None and [n["roles"] for n in t["nodes"]] == [["T"]]
+
+
+def test_page_draws_the_follow_lanes(tmp_path):
+    out = _smoke(tmp_path, load("f1-follow"))
+    joined = " | ".join(out["texts"])
+    assert "trainer0/" in joined and "trainer1/" in joined and "sampler(s) on their own store lane trainer0/" in joined
+    assert "same GPU" not in joined and "T+R" not in joined and "time-share" not in joined
+    assert "not on its tape" in out["nodes"]
