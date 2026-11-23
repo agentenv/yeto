@@ -148,3 +148,93 @@ def test_the_module_is_import_light():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
                          cwd=Path(__file__).resolve().parent.parent)
     assert out.stdout.strip() == "[]"
+
+
+def test_the_converter_table_names_the_miles_pin():
+    """The converter table was read at the fork pin: a pin move must re-read it."""
+    from yeto.rl.adapters.miles import pins
+
+    assert upstream.MILES_COMMIT == pins.MILES_NEXT_COMMIT, (
+        "MILES_NEXT_COMMIT moved: re-read megatron_to_hf/_convert_to_hf_core and the Megatron-Bridge pin "
+        "of the new fork commit, then update yeto/rl/model_registry/upstream.py")
+
+
+# Fixtures transformers builds without remote code (kimi_k2 needs it; DeepSeek V4 needs its recipe).
+PEFT_FAMILIES = ("deepseek_v3", "deepseek_v32", "gemma2_9b", "gemma3_12b", "glm4_5_air", "glm4_9b", "llama3_1_8b",
+                 "mistral_7b", "mixtral_8x7b", "olmoe_1b_7b", "qwen3_0p6b", "qwen3_30b_a3b", "qwen3_8b")
+
+
+PEFT_MOVES_MLP_TO_FUSED_EXPERTS = frozenset({"deepseek_v3", "deepseek_v32", "glm4_5_air"})
+
+
+def _small(cfg: dict) -> dict:
+    """The same per-layer shapes with few layers and experts (meta-device build stays fast)."""
+    cfg = json.loads(json.dumps(cfg))
+    text = cfg.get("text_config", cfg)
+    text["num_hidden_layers"] = max(2, int(text.get("first_k_dense_replace") or 0) + 2)
+    for key in ("n_routed_experts", "num_experts", "num_local_experts"):
+        if text.get(key):
+            text[key] = 8
+    if text.get("num_experts_per_tok"):
+        text["num_experts_per_tok"] = min(text["num_experts_per_tok"], 2)
+    if isinstance(text.get("layer_types"), list):
+        text["layer_types"] = text["layer_types"][: text["num_hidden_layers"]]
+    return cfg
+
+
+@pytest.mark.parametrize("name", PEFT_FAMILIES)
+def test_linear_modules_equal_what_peft_finds_on_empty_weights(name, tmp_path):
+    """Names and shapes of every non-expert linear module equal PEFT's LoRA
+    contract (``derive_peft_lora_specs``, all-linear) on the transformers model;
+    the routed experts are fused there and keep their checkpoint names here."""
+    pytest.importorskip("peft")
+    pytest.importorskip("accelerate")
+    import re
+
+    from yeto.rl.export import derive_peft_lora_specs
+
+    import torch
+    from accelerate import init_empty_weights
+    from transformers import AutoConfig
+
+    from yeto.rl.export import _rl_model_from_config
+
+    cfg = _small(_cfg(name))
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    rank = 4
+    # Every nn.Linear but the LM head, named explicitly: PEFT's "all-linear"
+    # shorthand finds no target on a transformers-5 MoE (fused experts).
+    with init_empty_weights():
+        model = _rl_model_from_config(AutoConfig.from_pretrained(str(tmp_path)), trust_remote_code=False)
+    linear = sorted(n for n, m in model.named_modules() if isinstance(m, torch.nn.Linear) and n != "lm_head")
+    specs = derive_peft_lora_specs(str(tmp_path), None, rank=rank, targets=linear)
+    profile = derive_model_sync_profile(cfg)
+    prefix = profile.linear_modules[0].path.split("{layer}")[0]
+    peft: set[tuple[str, int, int]] = set()
+    shapes: dict[str, dict[str, tuple[int, ...]]] = {}
+    for spec in specs:
+        module, side = re.match(r"(?:base_model\.model\.)?(.+)\.(lora_[AB])\.weight$", spec.name).groups()
+        shapes.setdefault(module, {})[side] = tuple(spec.shape)
+    for module, sides in shapes.items():
+        if not module.startswith(prefix) or re.search(r"\.mlp\.experts(\.base_layer)?$", module):
+            # a vision tower; the fused routed experts (PEFT 0.19 also wraps the fused
+            # experts parameters of DeepSeek-V3 / GLM-4.5 layouts: not a per-expert contract)
+            continue
+        layer = int(module[len(prefix):].split(".", 1)[0])
+        template = module.replace(f"{prefix}{layer}.", prefix + "{layer}.", 1)
+        assert sides["lora_A"][0] == sides["lora_B"][1] == rank
+        peft.add((template, layer, sides["lora_A"][1], sides["lora_B"][0]))
+    ours = {(m.path, layer, m.in_features, m.out_features)
+            for m in profile.linear_modules if m.source == "hf-module" for layer in m.layers}
+    if name in PEFT_MOVES_MLP_TO_FUSED_EXPERTS:
+        # PEFT 0.19 on these transformers-5 layouts puts the MLP-named targets on the
+        # fused routed experts and drops the dense and shared-expert MLP LoRA: only
+        # attention is a PEFT contract there (pinned here so a PEFT change shows up).
+        attention = {x for x in ours if ".self_attn." in x[0]}
+        assert {x for x in peft if ".self_attn." in x[0]} == attention
+        assert not {x for x in peft if ".mlp." in x[0]}
+        return
+    assert ours == peft
+    experts = [m for m in profile.linear_modules if m.kind == "experts"]
+    assert all(m.source == "checkpoint" for m in experts)
+    assert bool(experts) == profile.moe

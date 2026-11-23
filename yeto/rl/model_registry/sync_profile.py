@@ -14,6 +14,17 @@ A field that cannot be derived is a named missing contract item: the derive
 raises :class:`ModelContractError` listing them, never a silent fallback;
 :func:`profile_problems` returns them without raising.
 
+Which source of LoRA shapes wins: for an architecture transformers can build,
+the LoRA tensor contract is what PEFT discovers on empty weights
+(``yeto.rl.export.derive_peft_lora_specs``); ``linear_modules`` is the offline
+description for provider models transformers cannot build (Kimi-K3.1 and the
+other recipe provider views) and for planning without torch. A test keeps the
+two equal, names and shapes, for every fixture family transformers builds.
+Routed experts are the exception: transformers 5 fuses them into one module
+(``mlp.experts.gate_up_proj``), so their ``linear_modules`` carry the
+checkpoint's per-expert names (``source="checkpoint"``), the names
+Megatron-Bridge maps expert tensors to.
+
 Import-light: stdlib, :mod:`yeto.rl.moe_geometry` and the model registry only;
 the partial-expert registry is imported on demand.
 """
@@ -69,6 +80,9 @@ class LinearModule:
     path: str
     layers: tuple[int, ...]
     experts: int = 0  # routed experts per layer (kind == "experts")
+    # "hf-module": an nn.Linear of the transformers model (PEFT finds it);
+    # "checkpoint": a per-expert weight name of the checkpoint (transformers fuses it)
+    source: str = "hf-module"
 
 
 @dataclass(frozen=True)
@@ -164,6 +178,11 @@ def _attention_modules(text: Any, prefix: str, layers: tuple[int, ...], kind: st
         out = ([LinearModule("attention", "q_a_proj", h, int(q_rank), path + "q_a_proj", layers),
                 LinearModule("attention", "q_b_proj", int(q_rank), heads * (nope + rope), path + "q_b_proj", layers)]
                if q_rank else [LinearModule("attention", "q_proj", h, heads * (nope + rope), path + "q_proj", layers)])
+        if kind == "dsa":  # the sparse-attention indexer (DeepSeek V3.2); not an "attention" target
+            n, d = int(_get(text, "index_n_heads")), int(_get(text, "index_head_dim"))
+            out += [LinearModule("indexer", "wq_b", int(q_rank or h), n * d, path + "indexer.wq_b", layers),
+                    LinearModule("indexer", "wk", h, d, path + "indexer.wk", layers),
+                    LinearModule("indexer", "weights_proj", h, n, path + "indexer.weights_proj", layers)]
         return out + [
             LinearModule("attention", "kv_a_proj_with_mqa", h, kv_rank + rope, path + "kv_a_proj_with_mqa", layers),
             LinearModule("attention", "kv_b_proj", kv_rank, heads * (nope + v_dim), path + "kv_b_proj", layers),
@@ -186,12 +205,13 @@ def _mlp_modules(kind: str, path: str, h_in: int, inner: int, layers: tuple[int,
                  leaves: tuple[str, str, str] = ("gate_proj", "up_proj", "down_proj"),
                  fused_gate_up: bool = False, experts: int = 0) -> list[LinearModule]:
     gate, up, down = leaves
+    source = "checkpoint" if kind == "experts" else "hf-module"
     if fused_gate_up:
-        return [LinearModule(kind, "gate_up_proj", h_in, 2 * inner, path + "gate_up_proj", layers, experts),
-                LinearModule(kind, down, inner, h_in, path + down, layers, experts)]
-    return [LinearModule(kind, gate, h_in, inner, path + gate, layers, experts),
-            LinearModule(kind, up, h_in, inner, path + up, layers, experts),
-            LinearModule(kind, down, inner, h_in, path + down, layers, experts)]
+        return [LinearModule(kind, "gate_up_proj", h_in, 2 * inner, path + "gate_up_proj", layers, experts, source),
+                LinearModule(kind, down, inner, h_in, path + down, layers, experts, source)]
+    return [LinearModule(kind, gate, h_in, inner, path + gate, layers, experts, source),
+            LinearModule(kind, up, h_in, inner, path + up, layers, experts, source),
+            LinearModule(kind, down, inner, h_in, path + down, layers, experts, source)]
 
 
 def _layer_prefix(config: Any, text: Any) -> str:
@@ -378,7 +398,7 @@ def profile_dict(profile: ModelSyncProfile) -> dict[str, Any]:
         "experts_per_token": profile.experts_per_token,
         "lora_target_modules": {k: list(v) for k, v in sorted(profile.lora_target_modules.items())},
         "linear_modules": [{"kind": m.kind, "name": m.name, "in": m.in_features, "out": m.out_features,
-                            "path": m.path, "layers": len(m.layers), "experts": m.experts}
+                            "path": m.path, "layers": len(m.layers), "experts": m.experts, "source": m.source}
                            for m in profile.linear_modules],
         "expert_lora": profile.expert_lora,
         "partial_experts": None if partial is None else {

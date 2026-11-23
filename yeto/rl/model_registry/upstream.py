@@ -4,11 +4,12 @@ Read once from the pinned sources (no import of them here; stdlib only):
 
 * Megatron-Bridge ``a0c6d6e09b0bd4d208c2d936608319d5ab456d87`` (the commit the
   pinned Miles image installs, ``docker/Dockerfile`` of Miles
-  ``778794a807``): every ``@MegatronModelBridge.register_bridge(source=...)``
+  ``9fa600b9`` and its base ``778794a807``): every ``@MegatronModelBridge.register_bridge(source=...)``
   under ``src/megatron/bridge/models``. Miles builds its Megatron model and
   maps LoRA adapters through ``AutoBridge``, so an architecture without a
   bridge does not load on the Miles trainer.
-* Miles ``778794a807`` ``miles/backends/megatron_utils/megatron_to_hf/__init__.py``
+* the pinned Miles fork (``MILES_NEXT_COMMIT``, ``MILES_COMMIT`` below)
+  ``miles/backends/megatron_utils/megatron_to_hf/__init__.py``
   ``_convert_to_hf_core``: the Megatron -> HF converters ``update_weights`` uses
   to publish full-parameter weights to the rollout engine. It dispatches on
   ``type(hf_config).__name__.lower()`` (``converter_model_name``) unless the
@@ -16,13 +17,19 @@ Read once from the pinned sources (no import of them here; stdlib only):
   ``Unsupported model`` otherwise. LoRA publication goes through the bridge
   instead and does not need a converter.
 
-Update the tables when a pin moves (``MILES_K31_UPSTREAM_COMMIT``).
+The fork's dispatch is the upstream base's (``778794a807``): between the two,
+the fork commits that touch ``megatron_to_hf`` change converters, not the
+dispatch (``02b43a22`` kimi_k3 slot permutation, ``88358095`` MXFP4 packed rows,
+``329565db`` the Kimi-K3.1 DSA indexer). Re-read both tables when
+``MILES_NEXT_COMMIT`` moves; ``tests/test_model_sync_profile.py`` fails until
+``MILES_COMMIT`` names the new pin.
 """
 
 from __future__ import annotations
 
 MEGATRON_BRIDGE_COMMIT = "a0c6d6e09b0bd4d208c2d936608319d5ab456d87"
-MILES_UPSTREAM_COMMIT = "778794a807866a4f51f34d5e87dda3e55d9e85ad"
+MILES_COMMIT = "9fa600b9ae9d8c4024f3c2e4cd23a8ed433b2b54"  # the fork pin the tables were read at
+MILES_UPSTREAM_COMMIT = "778794a807866a4f51f34d5e87dda3e55d9e85ad"  # its upstream base
 
 MEGATRON_BRIDGE_ARCHITECTURES = frozenset({
     "BailingMoeV2ForCausalLM", "DeciLMForCausalLM", "DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM",
