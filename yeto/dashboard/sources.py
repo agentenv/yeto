@@ -194,7 +194,17 @@ def load_all(reducer, paths: list[str]) -> list[TapeSource]:
     return sources
 
 
-def run_sources(run: str) -> list[str]:
+def up_events_path(run: str | None = None, up_state: str | None = None) -> str | None:
+    """The ``run up`` monitor's tape: next to ``--up-state`` (the state file ``run up`` hands the
+    dashboard it starts), else ``$YETO_STATE_DIR/<run>`` (default ``~/.yeto/rl-up``)."""
+    if up_state:
+        return str(Path(os.path.expanduser(str(up_state))).parent / UP_EVENTS_FILE)
+    if run:
+        return str(Path(os.environ.get("YETO_STATE_DIR") or "~/.yeto/rl-up").expanduser() / run / UP_EVENTS_FILE)
+    return None
+
+
+def run_sources(run: str, up_state: str | None = None) -> list[str]:
     """Default tape locations for a run registered under ``~/.yeto/runs``."""
     from .. import runs as runs_mod
 
@@ -209,8 +219,7 @@ def run_sources(run: str) -> list[str]:
     # guard's and the ``run up`` monitor's tapes feed the Breakers panel only; the host-wide
     # syncer tape too: a syncer that starts after the dashboard (or a tape the launcher copies
     # from the syncer's host later) is followed once it appears, with its shards
-    up = Path(os.environ.get("YETO_STATE_DIR") or "~/.yeto/rl-up").expanduser() / run
-    return [str(d / "events"), str(d / "fleet.jsonl"), str(d / COST_EVENTS_FILE), str(up / UP_EVENTS_FILE),
+    return [str(d / "events"), str(d / "fleet.jsonl"), str(d / COST_EVENTS_FILE), up_events_path(run, up_state),
             str(Path(os.path.expanduser(RL_SYNCER_EVENT_TAPE)))]
 
 

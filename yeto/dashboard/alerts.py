@@ -204,9 +204,12 @@ def budget(cost: dict, th: dict) -> list[dict]:
         sev = 1
     else:
         return []
+    spend = f"${cost['total_usd']:.2f} / ${cost['budget_usd']:.2f} ({pct:.0f}%)"
+    if pct >= 100 or cost["total_usd"] >= cost["budget_usd"]:  # over: no time left to reach it
+        return [_alert(0, "budget", "over budget", f"over budget: {spend} (estimate, not billing data)")]
     eta = cost.get("hours_to_cap")
     detail = f"${cost['total_usd']:.2f} / ${cost['budget_usd']:.2f} (estimate, not billing data)"
-    if pct >= 100 or (eta is not None and eta <= 0):
+    if eta is not None and eta <= 0:  # at the cap this instant
         detail += ", cap reached"
     elif eta is not None and math.isfinite(eta):
         detail += f", reached in about {eta:.1f} h at ${cost['burn_usd_h']:.2f}/h"

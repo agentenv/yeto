@@ -194,3 +194,77 @@ def test_page_reads_stopped_by_us(tmp_path):
 
 def test_running_page_has_no_end(tmp_path):
     assert " · run " not in smoke(tmp_path, load(RUN_END / "c1-dl"))["sub"]
+
+
+# -- the run up monitor's tape and the cost bar -------------------------------------------------
+def dashboard_args(*argv):
+    import argparse
+
+    from yeto.dashboard import cli
+
+    p = argparse.ArgumentParser()
+    cli.add_parser(p.add_subparsers(dest="command"))
+    return p.parse_args(["dashboard", "export", "-o", "x.html", *argv])
+
+
+def from_args(monkeypatch, name, *argv, state_dir=None):
+    """A dashboard over the ``run_end/<name>`` fixture: its run directory, its ``run up`` state."""
+    from yeto.dashboard import cli
+
+    base = RUN_END / name
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: base / "run-dirs" / run)
+    monkeypatch.setattr("yeto.launcher.RL_SYNCER_EVENT_TAPE", str(base / "no-syncer.jsonl"), raising=False)
+    if state_dir is not None:
+        monkeypatch.setenv("YETO_STATE_DIR", str(state_dir))
+    args = dashboard_args("--run", name, *argv)
+    r = cli._reducer(args)
+    paths = cli._paths(args)
+    load_all(r, paths)
+    return r, paths
+
+
+def test_up_state_dir_feeds_the_run_layer_breakers(monkeypatch, tmp_path):
+    """Only --up-state names the run up state (YETO_STATE_DIR points elsewhere, or is unset):
+    the run-layer trip of its events.jsonl reaches the Breakers panel."""
+    state = RUN_END / "c1-wc" / "rl-up" / "c1-wc" / "state.json"
+    r, paths = from_args(monkeypatch, "c1-wc", "--up-state", str(state), state_dir=tmp_path / "elsewhere")
+    assert str(state.parent / "events.jsonl") in paths
+    assert not any(str(tmp_path) in p for p in paths)
+    assert [(t["name"], t["state"]) for t in r.page_view()["breakers"]["trips"]] == [("run.wall_clock", "trip")]
+    assert r.overview()["global_status"]["text"] == "stopped (stopped by us: breaker:run.wall_clock)"
+
+
+def test_state_dir_is_the_fallback_without_up_state(monkeypatch):
+    r, paths = from_args(monkeypatch, "c1-wc", state_dir=RUN_END / "c1-wc" / "rl-up")
+    assert str(RUN_END / "c1-wc" / "rl-up" / "c1-wc" / "events.jsonl") in paths
+    assert [t["name"] for t in r.page_view()["breakers"]["trips"]] == ["run.wall_clock"]
+
+
+def test_up_state_without_run(monkeypatch):
+    from yeto.dashboard import cli
+
+    state = RUN_END / "c1-bk" / "rl-up" / "c1-bk" / "state.json"
+    args = dashboard_args("--tapes", str(RUN_END / "c1-bk" / "run-dirs" / "c1-bk"), "--up-state", str(state))
+    assert cli._paths(args)[-1] == str(state.parent / "events.jsonl")
+
+
+def test_over_budget_reads_over_without_an_eta(monkeypatch):
+    state = RUN_END / "c1-bk" / "rl-up" / "c1-bk" / "state.json"
+    r, _ = from_args(monkeypatch, "c1-bk", "--up-state", str(state), "--budget", "0.5")
+    ov = r.overview()
+    budget = [a for a in ov["alerts"] if a["rule"] == "budget"]
+    assert len(budget) == 1 and budget[0]["sev"] == 0 and budget[0]["title"] == "over budget"
+    assert budget[0]["detail"].startswith("over budget: $0.") and "/ $0.50 (1" in budget[0]["detail"]
+    assert "reached in" not in budget[0]["detail"]
+    assert [t["name"] for t in r.page_view()["breakers"]["trips"]] == ["run.budget"]
+    assert ov["global_status"]["text"] == "stopped (stopped by us: breaker:run.budget)"
+
+
+def test_budget_below_the_cap_keeps_its_eta():
+    from yeto.dashboard import alerts
+
+    th = alerts.DEFAULT_THRESHOLDS
+    cost = {"budget_pct": 85.0, "total_usd": 0.85, "budget_usd": 1.0, "hours_to_cap": 0.4, "burn_usd_h": 0.375}
+    assert alerts.budget(cost, th)[0]["detail"].endswith("reached in about 0.4 h at $0.38/h")
+    cost.update(hours_to_cap=0.0)  # at the cap this instant: no "about 0.0 h"
+    assert "reached in" not in alerts.budget(cost, th)[0]["detail"]

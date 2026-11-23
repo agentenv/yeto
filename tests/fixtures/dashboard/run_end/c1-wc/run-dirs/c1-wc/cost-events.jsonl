@@ -1,0 +1,6 @@
+{"event": "cost_tick", "run": "c1-wc", "time_unix": 1795466105.809828, "total_usd": 0, "budget_usd": 30.0, "unpriced": [], "billing_error": null}
+{"event": "cost_tick", "run": "c1-wc", "time_unix": 1795466166.331595, "total_usd": 0.0656, "budget_usd": 30.0, "unpriced": [], "billing_error": null}
+{"event": "cost_tick", "run": "c1-wc", "time_unix": 1795466226.342902, "total_usd": 0.1321, "budget_usd": 30.0, "unpriced": [], "billing_error": null}
+{"event": "cost_tick", "run": "c1-wc", "time_unix": 1795466286.345057, "total_usd": 0.1979, "budget_usd": 30.0, "unpriced": [], "billing_error": null}
+{"event": "cost_tick", "run": "c1-wc", "time_unix": 1795466346.356456, "total_usd": 0.2637, "budget_usd": 30.0, "unpriced": [], "billing_error": null}
+{"event": "cost_tick", "run": "c1-wc", "time_unix": 1795466406.368063, "total_usd": 0.3296, "budget_usd": 30.0, "unpriced": [], "billing_error": null}

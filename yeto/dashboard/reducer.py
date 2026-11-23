@@ -1623,7 +1623,8 @@ class Reducer:
                     or (c["status"] == "lost" and not torn_down))  # after teardown a lost node is expected
         sev0 = sum(1 for a in alerts if a["sev"] == 0)
         stop = self.operator_stop()
-        ended = self.run_end_status() if cards and all(c["status"] in ("stopped", "done") for c in cards) else None
+        # every island ended (a trainer leaving on a STOP flag reads "left"): how the run ended
+        ended = self.run_end_status() if cards and all(c["status"] in ("stopped", "done", "left") for c in cards) else None
         if not cards and store and store.get("failing"):
             global_status = {"level": "bad", "text": "run store unreadable"}
         elif not cards:
