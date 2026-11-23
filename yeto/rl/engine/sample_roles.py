@@ -870,6 +870,43 @@ def sampler_backlog_rounds(explicit: int | None = None) -> int:
     return _max_backlog_rounds(SimpleNamespace(rl_sampler_max_backlog_rounds=explicit), SAMPLER)
 
 
+# Release cadence vs the samplers' backlog cap (one buffer trainer, no sync).
+# A sampler counts its backlog from the read position of the newest release it
+# sees (0 before the first one; sampler_loop.SamplerLoop.backlog), so its cap
+# moves only when a release lands, not as the trainer reads. Groups trained and
+# skipped (stale, damaged) take buffer positions alike: the margin covers those.
+RELEASE_BACKLOG_MARGIN_GROUPS = 8
+# rounds a staged upload is assumed to last (the preflight does not know the
+# upload or the step time; re-derive with the measured upload / step ratio)
+ASSUMED_UPLOAD_ROUNDS = 2
+
+
+def release_record_rounds(*, release_every: int, staged: bool, skip_busy: bool,
+                          upload_rounds: int = ASSUMED_UPLOAD_ROUNDS) -> int:
+    """``m``: the training rounds the trainer starts between a policy's publication
+    and its release record (the record carries the read position the samplers'
+    caps then move to). 0 for a release written inline; a staged upload: the
+    round started right after the publication plus the rounds the upload lasts,
+    at most ``release_every`` when the next release waits for the upload (no
+    ``--rl-release-skip-busy``)."""
+    if not staged:
+        return 0
+    rounds = 1 + max(0, int(upload_rounds))
+    return rounds if skip_busy else min(max(1, int(release_every)), rounds)
+
+
+def release_backlog_need(*, groups_per_round: int, release_every: int, record_rounds: int,
+                         margin: int = RELEASE_BACKLOG_MARGIN_GROUPS) -> int:
+    """Groups the samplers of a single trainer must be allowed to hold, all
+    together, past the newest release's read position so that none waits at its
+    cap between two releases: ``(release_every + m + 1) x groups_per_round +
+    margin`` (``m``: :func:`release_record_rounds`). A sampler's
+    ``max_backlog_groups`` is this over the samplers that keep writing, rounded up.
+    The first release, at version ``release_every``, needs ``release_every x
+    groups_per_round`` groups below the cap before it can be trained at all."""
+    return (max(1, int(release_every)) + max(0, int(record_rounds)) + 1) * int(groups_per_round) + int(margin)
+
+
 def _max_backlog_rounds(args: Any, role: str) -> int | None:
     rounds = getattr(args, "rl_sampler_max_backlog_rounds", None)
     if role == SAMPLER:

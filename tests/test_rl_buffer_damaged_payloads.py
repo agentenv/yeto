@@ -330,7 +330,8 @@ def test_reader_round_reports_the_damaged_payloads_of_all_its_takes_as_round_met
     round_ = plugin._BufferRound.__new__(plugin._BufferRound)
     round_.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path="all")
     round_.groups, round_.samples_per_group = 1, 2
-    round_.reader = SimpleNamespace(take=lambda rid, n, current_version: next(takes))
+    round_.reader = SimpleNamespace(buffer=SimpleNamespace(read_cursor=0, shard_positions=lambda cursor: {}),
+                                    take=lambda rid, n, current_version: next(takes))
     out = round_(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=4))
     assert calls[0]["buffer_damaged_payload_groups"] == 2 and calls[0]["buffer_damaged_payloads"] == damaged
     assert out["metrics"]["sample_buffer/damaged_payload_groups"] == 2.0

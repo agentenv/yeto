@@ -594,6 +594,7 @@ def test_reader_round_reports_its_duplicate_tasks_as_round_metadata(monkeypatch)
     round_.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path="all")
     round_.groups, round_.samples_per_group = 1, 2
     round_.reader = SimpleNamespace(
+        buffer=SimpleNamespace(read_cursor=0, shard_positions=lambda cursor: {}),
         take=lambda rid, n, current_version: ([(2, [sample(0, 0, 4), sample(1, 0, 4)])], report))
     out = round_(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=4))
     assert calls[0]["buffer_duplicate_task_groups"] == 1 and calls[0]["buffer_duplicate_tasks"] == [record]

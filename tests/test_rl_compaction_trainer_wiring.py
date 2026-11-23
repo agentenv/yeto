@@ -126,7 +126,8 @@ def test_the_reader_round_reports_stale_buckets_and_xhw_metrics_show(monkeypatch
     reader.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path=None,
                                   use_dynamic_batch_size=True, seq_length=64, grpo_std_normalization=False)
     reader.groups, reader.samples_per_group = 2, N
-    reader.reader = SimpleNamespace(take=lambda rid, n, current_version: (groups, report),
+    reader.reader = SimpleNamespace(buffer=SimpleNamespace(read_cursor=0, shard_positions=lambda cursor: {}),
+                                    take=lambda rid, n, current_version: (groups, report),
                                     xhw_actions={"src-a": {"action": "downweight", "weight": 0.5}})
     out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=6))
     assert calls[0]["buffer_stale_by_segments"] == {"3": 2}

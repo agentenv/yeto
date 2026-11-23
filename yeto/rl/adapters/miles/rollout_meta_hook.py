@@ -93,7 +93,10 @@ BUFFER_COMPACTED_KEYS = ("buffer_compacted_groups", "buffer_compacted_trials", "
 # trainer process did not judge itself (below a restored watermark)
 # buffer_unidentified_groups: groups of a version no record names, passed over by a
 # trainer that resumed behind its releases (BatchReader.set_unidentified_gate)
+# buffer_read_cursor / buffer_read_shards {shard: position}: where the trainer's buffer
+# reader stands after the round's takes (the driver's cache for the policy releases)
 ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups", "buffer_unidentified_groups",
+                                 "buffer_read_cursor",
                                  "buffer_xhw_quarantined", "buffer_xhw_downweighted",
                                  "buffer_damaged_payload_groups", "buffer_duplicate_task_groups",
                                  "buffer_duplicate_task_unverified_groups", *BUFFER_FILL_KEYS,
@@ -101,7 +104,8 @@ ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups", "b
 # buffer_source_tokens {source: tokens}, buffer_source_stats {source: {stat: value}}: the
 # per-source composition and rollout-side statistics of the round (xhw guard)
 # buffer_stale_by_segments {segment bucket: stale trials} (with compaction only)
-ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats", "buffer_stale_by_segments"})
+ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats", "buffer_stale_by_segments",
+                                      "buffer_read_shards"})
 # buffer_stale_positions: the task-dispenser positions of those groups,
 # as row runs (data_split.row_runs); only groups whose sampler had a dispenser
 # buffer_unidentified_versions: [[version, groups], ...]; buffer_unidentified_positions:

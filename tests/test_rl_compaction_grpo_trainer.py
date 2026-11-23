@@ -322,7 +322,8 @@ def test_the_reader_round_pads_missing_trials_one_rollout_each(monkeypatch, caps
     reader.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path="all",
                                   use_dynamic_batch_size=True, seq_length=64)
     reader.groups, reader.samples_per_group = 2, N
-    reader.reader = SimpleNamespace(take=lambda rid, n, current_version: (groups, report))
+    reader.reader = SimpleNamespace(buffer=SimpleNamespace(read_cursor=0, shard_positions=lambda cursor: {}),
+                                    take=lambda rid, n, current_version: (groups, report))
     out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=6))
     assert calls[0]["buffer_padded_samples"] == 1 and calls[1] == 12  # the hooks see the 12 real samples
     assert {k: calls[0][k] for k in ("buffer_compacted_groups", "buffer_compacted_trials",
@@ -383,7 +384,8 @@ def test_an_uncompacted_round_reports_no_compaction_keys(monkeypatch, capsys):
     reader = plugin._BufferRound.__new__(plugin._BufferRound)
     reader.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path=None)
     reader.groups, reader.samples_per_group = 1, N
-    reader.reader = SimpleNamespace(take=lambda rid, n, current_version: (groups, report))
+    reader.reader = SimpleNamespace(buffer=SimpleNamespace(read_cursor=0, shard_positions=lambda cursor: {}),
+                                    take=lambda rid, n, current_version: (groups, report))
     out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=6))
     assert not any(k.startswith("buffer_compacted") for k in calls[0])
     assert "compaction_batch" not in capsys.readouterr().out

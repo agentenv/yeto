@@ -71,7 +71,8 @@ def test_miles_reader_rebuilds_prompts_and_reports_per_source_metrics(monkeypatc
     report = types.SimpleNamespace(metrics=lambda: {"sample_buffer/groups": 1.0}, stale_groups=0)
     monkeypatch.setattr(plugin, "record_round_metadata", lambda args, rid, **counts: None)
     group = [_record(index=0), _record(finish=FINISH_LENGTH, index=1)]
-    reader.reader = types.SimpleNamespace(take=lambda rollout_id, groups, current_version: ([(5, group)], report))
+    reader.reader = types.SimpleNamespace(buffer=types.SimpleNamespace(read_cursor=0, shard_positions=lambda cursor: {}),
+                                          take=lambda rollout_id, groups, current_version: ([(5, group)], report))
     reader.groups = 1
 
     samples, metrics = reader(types.SimpleNamespace(evaluation=False, rollout_id=2, weight_version=3))

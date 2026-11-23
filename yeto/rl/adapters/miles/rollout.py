@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -736,6 +737,10 @@ class PendingGeneration:
     task: Any
 
 
+# MilesRolloutPool.buffer_read_positions: written on the driver's thread, read on the upload thread
+_BUFFER_POSITIONS_LOCK = threading.Lock()
+
+
 class MilesRolloutPool:
     """``RolloutPool`` port. ``expected_policy`` returns the published (version, hash)."""
 
@@ -796,6 +801,7 @@ class MilesRolloutPool:
         self._runner = runner or LoopRunner()
         self._run = self._runner.run
         self._last_cursor: dict[str, int] | None = None
+        self._buffer_read_positions: tuple[int, dict[str, int] | None] | None = None
         # test-only start delay (INJECT_START_DELAY_ENV); applied once per process
         self._inject_start_delay = injected_start_delay()
         self.injected_start_delays: list[float] = []
@@ -1103,7 +1109,33 @@ class MilesRolloutPool:
             _release(data_pack)
             raise
         self._last_cursor = dict(handle.data_cursor) if handle.data_cursor else None
+        if "buffer_read_cursor" in payload:  # a buffer reader's round (buffer_rollout_miles)
+            self.note_buffer_read_positions((payload["buffer_read_cursor"], payload.get("buffer_read_shards")))
         return handle
+
+    def note_buffer_read_positions(self, positions: Any) -> None:
+        """Keep ``(read cursor, {shard: position} or None)`` of the trainer's buffer
+        reader (None: forget it): reported with each finished round's metadata, and
+        after a restore moved the cursor (``buffer_rollout.BufferCutLink``)."""
+        value = None
+        if positions is not None:
+            cursor, shards = positions
+            value = (int(cursor), {str(k): int(v) for k, v in shards.items()} if shards else None)
+        with _BUFFER_POSITIONS_LOCK:
+            self._buffer_read_positions = value
+
+    def buffer_read_positions(self) -> tuple[int, dict[str, int] | None] | None:
+        """Where the trainer's buffer reader stood after the last round it finished
+        taking (None before the first one), callable from any thread. The policy
+        releases read it instead of the rollout executor: the executor's event loop is
+        held by a take for as long as it waits for groups, and the samplers it waits
+        for may be held at their backlog cap until the release is written."""
+        with _BUFFER_POSITIONS_LOCK:
+            value = getattr(self, "_buffer_read_positions", None)
+        if value is None:
+            return None
+        cursor, shards = value
+        return cursor, None if shards is None else dict(shards)
 
     #: min seconds between two "load_sample unavailable" diagnostics
     LOAD_DIAG_INTERVAL_S = 60.0

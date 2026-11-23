@@ -21,8 +21,13 @@
   upload, so releases stay in order and at most one is in flight; the driver
   waits for the last one before the run ends (``drain_releases``). The release
   records the trainer's buffer read position after the weights are uploaded, so
-  it includes the round the trainer took meanwhile: a sampler at its backlog
-  cap starts its next round with this release instead of the next one.
+  it includes the rounds the trainer finished taking meanwhile: a sampler at its
+  backlog cap starts its next round with this release instead of the next one.
+  That position is the driver's cache of where the reader stood after its last
+  finished round (``MilesRolloutPool.buffer_read_positions``), never a call into
+  the rollout executor: a take holds the executor's event loop while it waits for
+  groups, and the samplers it waits for can be held at their backlog cap until this
+  release is written (no release, no groups, no end of the take).
 
   The base policy: the samplers' engines start with the base weights (version
   0), so a non-synced full-parameter trainer releases nothing for version 0 while
@@ -724,8 +729,14 @@ class ReleasingPublisher:
                  timer: Callable[[], float] = time.perf_counter,
                  manifest: Mapping[str, Any] | None = None,
                  release_every: int = 1, skip_busy: bool = False,
-                 read_trained: Callable[[int], int | None] | None = None) -> None:
-        """``read_trained(version)``: the buffer position the policy ``version`` is
+                 read_trained: Callable[[int], int | None] | None = None,
+                 read_positions: Callable[[], tuple[int, dict[str, int] | None] | None] | None = None
+                 ) -> None:
+        """``read_positions()``: ``(read position, per shard)`` in one read, callable
+        from any thread without the rollout executor (module doc, staged full releases;
+        None: nothing read yet). When given, every release records it instead of
+        ``read_position`` / ``read_shards`` and their ``_from_thread`` variants.
+        ``read_trained(version)``: the buffer position the policy ``version`` is
         trained up to (``BatchReader.trained_before``), read on the caller's thread
         at the publication and recorded as the release's ``buffer_trained``.
         ``manifest``: every release record's ``manifest`` (``PolicyRelease``:
@@ -767,6 +778,7 @@ class ReleasingPublisher:
         self.read_position = read_position
         self.read_shards = read_shards
         self.read_trained = read_trained
+        self.read_positions = read_positions
         self.emit = emit
         self.weights = weights
         self.staging = None if staging is None else Path(staging)
@@ -889,8 +901,11 @@ class ReleasingPublisher:
                    read_shards: Callable[[], dict[str, int] | None] | None
                    ) -> tuple[int | None, dict[str, int] | None]:
         """The trainer's buffer read position (and per shard) for a release record."""
-        position = read_position()
-        shards = read_shards() if read_shards is not None and position is not None else None
+        if self.read_positions is not None:
+            position, shards = self.read_positions() or (None, None)
+        else:
+            position = read_position()
+            shards = read_shards() if read_shards is not None and position is not None else None
         if position is None:  # nothing read yet in this process: keep the last known positions
             latest = self.releases.latest()
             position = None if latest is None else latest.buffer_selected
@@ -1094,6 +1109,9 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         shutil.rmtree(staging, ignore_errors=True)  # an earlier process's partial stages
     # the upload thread may not drive the driver's event loop (it may be running)
     from_thread = getattr(driver.rollout, "_in_executor_from_thread", None) or in_executor
+    # module doc (staged full releases): the reader's position as of its last finished
+    # round, kept by the driver; no release reads it from the rollout executor
+    cached_positions = getattr(driver.rollout, "buffer_read_positions", None)
     delta_every = int(getattr(config, "release_delta_full_every", 0) or 0)
     publisher = ReleasingPublisher(driver.publisher, release_store(config, environ), export,
                                    read_position=lambda: in_executor(executor_read_cursor),
@@ -1109,6 +1127,7 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
                                    manifest=getattr(miles_args, "yeto_rl_release_manifest", None),
                                    release_every=int(getattr(config, "release_every", 1) or 1),
                                    skip_busy=bool(staged and getattr(config, "release_skip_busy", False)),
+                                   read_positions=cached_positions if callable(cached_positions) else None,
                                    **synced)
     driver.publisher = publisher
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:

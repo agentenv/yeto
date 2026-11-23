@@ -65,6 +65,7 @@ from .buffer_rollout import (
     padding_samples,
     r3_layer_layout,
     r3_num_experts,
+    reader_positions,
     register_reader,
     reader_basis_version,
     stamp_merged_release_cuts,
@@ -265,6 +266,10 @@ class _BufferRound:
             raise SampleBufferRolloutError(
                 f"rollout {input.rollout_id}: {MAX_UNCONVERTIBLE_TAKES} takes in a row with no group that "
                 f"converts to Miles samples: {unconvertible[-1]}")
+        # where this round's takes left the reader: the driver keeps it for the policy
+        # releases (MilesRolloutPool.buffer_read_positions), which then never call into
+        # this process while a later take holds its event loop
+        read_cursor, read_shards = reader_positions(self.reader)
         if problems:  # left out of the round (padded instead): the padding copies kept groups only
             kept_positions = {position for position, _ in converted}
             groups = [(position, group) for position, group in groups if position in kept_positions]
@@ -335,7 +340,8 @@ class _BufferRound:
                                       len(t) for g in compacted for t in trial_rows(g) if len(t) > 1)}
                                  if compacted else {}),
                               # the stale trials by segment count (with compaction only)
-                              **({"buffer_stale_by_segments": stale_by_segments} if stale_by_segments else {}))
+                              **({"buffer_stale_by_segments": stale_by_segments} if stale_by_segments else {}),
+                              buffer_read_cursor=read_cursor, buffer_read_shards=read_shards or {})
         if getattr(self, "relay_pump", None) is not None or merged_cuts:
             # the round's evidence names external merged cuts and bounds
             # their age by the merged version this take gated on
