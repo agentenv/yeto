@@ -164,8 +164,11 @@ def test_budget_helper_keeps_frozen_params_and_uses_reordered_cutoff_base():
 def test_terminal_tape_requires_every_budgeted_learner_and_fragment(tmp_path):
     tape = tmp_path / "tape.jsonl"
     tape.write_text(
-        """{"step":8,"fragment":1,"responders":[]}
+        """{"kind":"syncer_config","fragments":2,"time_unix":1.0}
+{"step":8,"fragment":1,"responders":[]}
+{"kind":"round_open","global_step":9,"fragment":0,"attempt":1,"time_unix":2.0}
 {"step":9,"fragment":0,"responders":[{"id":0,"c_steps":4},{"id":1,"c_steps":4}]}
+{"kind":"member_disconnected","learner_id":1,"generation":1,"phase":"budget","time_unix":3.0}
 {"step":10,"fragment":1,"responders":[{"id":0,"c_steps":4},{"id":1,"c_steps":4}]}
 """,
         encoding="utf-8",

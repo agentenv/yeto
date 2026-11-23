@@ -132,6 +132,8 @@ def tape_metrics(rec: dict) -> dict:
             metrics[metric] = int(rec[source])
     if "checkpoint_ms" in rec:  # per-round checkpoint wall time
         metrics["sync/checkpoint_ms"] = float(rec["checkpoint_ms"])
+    if "bcast_bytes" in rec:  # one BCAST frame of the merged fragment (not on the terminal round)
+        metrics["sync/bcast_bytes"] = float(rec["bcast_bytes"])
     if "sweep_complete" in rec:
         metrics["sync/sweep_complete"] = int(bool(rec["sweep_complete"]))
     if expected:

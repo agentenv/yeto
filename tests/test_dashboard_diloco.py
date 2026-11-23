@@ -121,6 +121,39 @@ def test_a_stray_syncer_tape_does_not_turn_async_into_diloco(tmp_path):
     assert r.page_view(now=r.max_ts)["layout"]["kind"] == "async"
 
 
+def test_the_syncers_own_records_change_nothing_on_the_page():
+    """The syncer's config, round open / timeout and connection records (``kind``, no ``step``)
+    are not merges, and a ``learner_id`` there is no sign of life of that island: run B's page
+    with them on its syncer tape equals the page without them."""
+    before = load("run-b")
+    tape = lines(D / "run-b" / "yeto-tape.jsonl")
+    first, last = tape[0]["time_unix"], tape[-1]["time_unix"]
+    extra = [
+        {"kind": "member_connected", "learner_id": 0, "generation": 1, "phase": "init", "time_unix": first - 1},
+        {"kind": "member_connected", "learner_id": 1, "generation": 1, "phase": "init", "time_unix": first - 1},
+        {"kind": "syncer_config", "fragments": 4, "owned_fragments": [0, 4], "shard_index": 0, "shard_count": 1,
+         "learners": 2, "quorum": 1, "pipeline": 2, "total_steps": 24, "time_unix": first - 0.5},
+        {"kind": "round_open", "global_step": 1, "fragment": 0, "attempt": 1, "base_version": 0,
+         "members": [{"id": 0, "generation": 1}, {"id": 1, "generation": 1}], "quorum": 1, "time_unix": first - 0.2},
+        {"kind": "round_attempt_timeout", "global_step": 2, "fragment": 1, "attempt": 1, "reason": "quorum_timeout",
+         "next": "new_attempt", "time_unix": first + 1},
+        {"kind": "member_disconnected", "learner_id": 1, "generation": 1, "phase": "final", "time_unix": last},
+    ]
+    after = load("run-b")
+    for off, rec in enumerate(extra):
+        after.feed(rec, source="extra/yeto-tape.jsonl", offset=off)
+    assert after.island_ids() == before.island_ids()
+    now = before.max_ts
+    a, b = (json.loads(json.dumps(r.page_view(now=now), default=str)) for r in (before, after))
+    for key in ("layout", "topology", "islands"):
+        assert a.get(key) == b.get(key), key
+    assert a["overview"]["alerts"] == b["overview"]["alerts"]
+    alone = Reducer(run="syncer-only")  # an SFT syncer tape: no RL island appears
+    for off, rec in enumerate(extra):
+        alone.feed(rec, source="yeto-tape.jsonl", offset=off)
+    assert alone.island_ids() == []
+
+
 def test_a_late_syncer_tape_keeps_the_drawing():
     """Run B's islands declare outer sync before any merge: the panel is the island drawing from the
     start, versions stay 0 and read "syncer tape behind" until the tape arrives, then match it."""

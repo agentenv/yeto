@@ -277,6 +277,23 @@ def test_sharded_head_matches_numpy_replay(syncer_binary, tmp_path, shards, quor
             if "fragment" in record and "responders" in record:
                 assert record["fragment"] == (record["step"] - 1) % lay.num_fragments
                 assert record["fragment"] in owned
+        # Each shard writes its own syncer_config, and a round_open before
+        # each of its merges (records keyed by ``kind`` carry no ``step``).
+        configs = [r for r in steps if r.get("kind") == "syncer_config"]
+        assert len(configs) == 1
+        assert configs[0]["shard_index"] == index and configs[0]["shard_count"] == shards
+        assert configs[0]["owned_fragments"] == [owned.start, owned.stop]
+        assert configs[0]["fragments"] == lay.num_fragments and configs[0]["total_steps"] == total_steps
+        assert all("step" not in r for r in steps if "kind" in r)
+        opened: set[tuple[int, int]] = set()
+        for record in steps:
+            if record.get("kind") == "round_open":
+                assert record["fragment"] in owned
+                opened.add((record["global_step"], record["attempt"]))
+            elif "responders" in record:
+                assert (record["step"], record["attempt"]) in opened, record["step"]
+                if record["step"] < total_steps - lay.num_fragments + 1:
+                    assert record["bcast_bytes"] > 0 and record["bcast_unix"] >= record["time_unix"] - 60
 
     # Head state: each shard holds only its own fragments; together they
     # equal the numpy replay up to f32 rounding.
