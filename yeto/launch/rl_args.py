@@ -1013,8 +1013,9 @@ def _prepare_rl_args(
         # synced K3.1 trainer (whole-checkpoint releases, checked on the island)
         raise ValueError(
             "RL v0 requires --tuning lora unless --tuning full has a full-parameter sync: "
-            "--rl-sync-preset decoupled (asynchronous fragment rounds, routed to the "
-            f"full-parameter stack), {FULL_PARAMETER_SYNC_PRESET} or {SAO_STREAMING_SYNC_PRESET}; "
+            "--rl-sync-preset decoupled (routed to the full-parameter stack: "
+            f"{FULL_PARAMETER_SYNC_PRESET} with --rl-sync-full-parameter-rounds async), "
+            f"{FULL_PARAMETER_SYNC_PRESET} or {SAO_STREAMING_SYNC_PRESET}; "
             "or --rl-single-island-no-sync, or --rl-model-recipe kimi_k31 on a synced trainer; "
             "strict-avg merges the canonical LoRA layout (requires --tuning lora)")
     if full_tuning and int(getattr(args, "expert_full_count", 0) or 0):
