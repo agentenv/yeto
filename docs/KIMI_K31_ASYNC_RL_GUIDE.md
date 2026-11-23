@@ -2674,7 +2674,7 @@ preflight, `yeto launch --dry-run` and the pool dry run check them all.
 | D2 | trial wall clock > agent timeout + 60 s (warn below 300 s) | error / warn |
 | D3 | sandbox TTL > trial wall clock + abandon grace | error |
 | D4 | sample wait covers the longest group and `outage_tolerance_s` | warn |
-| D5 | launch stall >= sample wait | warn |
+| D5 | launch stall >= sample wait, unless the trainer heartbeats while it waits | warn |
 | D6 | trainer silence >= launch stall; stall off needs silence on | error |
 | D7 | starvation alert < stop | warn |
 | D8 | rows x passes cover the trained groups (warn below 10 % margin) | error / warn |
@@ -2694,6 +2694,13 @@ preflight, `yeto launch --dry-run` and the pool dry run check them all.
 
 An `error` refuses the start. A `warn` or `info` is printed. D21 only warns
 when the value comes from an old knob, so an existing config still starts.
+
+D5 and the wait heartbeat: a Miles buffer trainer writes an `rl_sample_wait`
+event every max(60 s, stall / 4) while it waits for groups. That keeps the
+stall clock fed. So its `--rl-stall-timeout` no longer has to be at least
+`--rl-sample-wait-s`. Example: stall 3600 s with sample wait 10800 s passes
+(a heartbeat every 900 s). A real hang still trips the stall clock at the
+configured time. A verl buffer trainer does not beat, so D5 still applies.
 
 `deps.outage_tolerance_s` declares how long an outage (gateway, store, sandbox
 provider) the run must survive. With it, D4, D9 and D20 give a number. Without

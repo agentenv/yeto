@@ -39,6 +39,10 @@ Added:
   - `sampler.infra_streak`: agentic groups in a row lost to infrastructure.
     `action: pause` stops claiming new tasks until a group is written or a
     cool-down passes.
+- A Miles buffer trainer writes an `rl_sample_wait` heartbeat while it waits
+  for groups, every max(60 s, stall / 4). D5 accepts a sample wait longer than
+  the stall timeout for it. The K3.1 examples now set `--rl-sample-wait-s
+  10800` (their stall timeout stays 7200).
 - New knobs that used to be constants or env only: sampler spec
   `max_read_outage_s` and `max_damaged_latest_reads`, `--nc-lease-overdue-minutes`,
   `--budget-usd off`, `harness.sandbox_ttl.limit_s`.
