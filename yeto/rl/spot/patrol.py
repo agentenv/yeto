@@ -352,7 +352,7 @@ def boat_alerts(doc: dict[str, Any] | None, th: Thresholds) -> list[Alert]:
     keep = doc.get("keepGoing") or {}
     spent, extra_cap = _num(keep.get("usedDollars")), _num(keep.get("capDollars"))
     if spent is not None and extra_cap and spent / extra_cap >= th.boat_quota:
-        alerts.append(Alert("boat_quota", "stop", f"boat extra starts ${spent:.2f} of the ${extra_cap:.0f} cap",
+        alerts.append(Alert("boat_quota", "stop", f"boat extra starts ${spent:.2f} of the ${extra_cap:.2f} cap",
                             round(spent / extra_cap, 3), th.boat_quota))
     return alerts
 
@@ -361,7 +361,7 @@ def spend_alerts(spent: float | None, budget: float | None, th: Thresholds) -> l
     if spent is None or not budget:
         return []
     share = spent / budget
-    return [Alert("spend_budget", "stop", f"spent ${spent:.0f} of ${budget:.0f}", round(share, 3), th.spend)] \
+    return [Alert("spend_budget", "stop", f"spent ${spent:.2f} of ${budget:.2f}", round(share, 3), th.spend)] \
         if share >= th.spend else []
 
 

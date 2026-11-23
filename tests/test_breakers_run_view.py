@@ -7,6 +7,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+from pathlib import Path
+
+import pytest
 
 from yeto.breakers import cli as bcli
 
@@ -70,12 +74,15 @@ def test_show_applies_the_pools_breakers_overrides(tmp_path, capsys):
 
 
 def test_an_explicit_spec_wins_over_the_pools(tmp_path, capsys):
+    """``--spec`` replaces the pool's spec file only: the pool's own knobs still count."""
     path = _run_config(tmp_path, pool={"config": _pool(tmp_path)})
     spec = tmp_path / "other-spec.json"
     spec.write_text(json.dumps({"reload_max_defer_s": 1800}))
     rc, data = _show_json(capsys, "--config", str(path), "--spec", str(spec))
-    assert rc == 0 and data["pool"] is None
+    assert rc == 0 and data["pool"] == "pool"
     assert _entry(data, "sampler.drain")["params"]["reload_max_defer_s"] == 1800
+    assert _entry(data, "pool.engine_stall")["params"]["limit_s"] == 900
+    assert _entry(data, "sampler.dispense_lease")["params"]["lease_s"] == 7200  # the pool's sampler.dispense
 
 
 def test_several_pools_need_a_name(tmp_path, capsys):
@@ -148,3 +155,56 @@ def test_an_auto_backlog_shows_the_cap_run_up_derives(tmp_path, capsys):
     want = up_consistency.auto_backlog(argv, [(json.loads(pool.read_text()), "r2")])["groups"]
     rc, data = _show_json(capsys, "--config", str(path))
     assert _entry(data, "sampler.max_backlog_groups")["params"]["groups_n"] == want != 256
+
+
+def _k31_kit(tmp_path):
+    """The K3.1 agentic kit (run config, pool, sampler spec) with an agentic env file that sets
+    harness knobs, as a customer kit does (placeholders the views read filled)."""
+    root = Path(__file__).resolve().parents[1] / "examples" / "k31"
+    spec = tmp_path / "sampler-spec.json"
+    shutil.copy(root / "sampler-spec.nc-mi355x-vllm-agentic-262k.json", spec)
+    env = tmp_path / "agentic.env"
+    env.write_text("# the sampler's harness settings\nHARBOR_SETUP_RETRIES=6\nYETO_AGENTENV_MAX_ACTIVE=32\n")
+    pool = json.loads((root / "pool.nc-mi355x-agentic-262k.json").read_text())
+    pool.update(spec=str(spec), run_prefix="k31/run1", agentic_env_file=str(env))
+    (tmp_path / "pool.json").write_text(json.dumps(pool))
+    run = json.loads((root / "run.agentic-262k.json").read_text())
+    run["pool"] = {"config": str(tmp_path / "pool.json")}
+    run["trainer"]["argv"] = ["100" if a == "<total-steps>" else a for a in run["trainer"]["argv"]]
+    run["breakers"] = {"deps": {"outage_tolerance_s": 3600}}
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps(run))
+    return path, spec, pool
+
+
+@pytest.mark.parametrize("with_spec", [False, True], ids=["pool-spec", "explicit-spec"])
+def test_show_reads_the_pools_agentic_env_file(tmp_path, capsys, with_spec):
+    """The harness rows show what the samplers run with: the pool's agentic_env_file (read like
+    every other breaker view, rules_facts.pool_sources), with or without ``--spec``."""
+    path, spec, _pool_cfg = _k31_kit(tmp_path)
+    rc, data = _show_json(capsys, "--config", str(path), *(["--spec", str(spec)] if with_spec else []))
+    retries = _entry(data, "harness.setup_retries")
+    assert retries["params"]["max_n"] == 6
+    assert retries["sources"]["max_n"]["kind"] == "legacy" and "HARBOR_SETUP_RETRIES" in retries["sources"]["max_n"]["location"]
+    assert _entry(data, "harness.sandbox_caps")["params"]["agentenv_max_active_n"] == 32
+    d9 = [f for f in data["findings"] if f["rule"] == "D9"]
+    assert d9 and all("setup_retries 6" in f["message"] for f in d9)
+
+
+def test_every_rules_path_reads_the_pools_agentic_env_file(tmp_path, capsys):
+    """D9 names the env file's setup retries in ``check --config``, run up's preflight and the
+    pool dry run alike."""
+    from yeto import breakers
+    from yeto.breakers.rules_facts import pool_sources
+    from yeto.launch.nc import pool_run
+
+    path, _spec, pool_cfg = _k31_kit(tmp_path)
+    rc = _run(["breaker", "check", "--config", str(path)])
+    out = capsys.readouterr().out
+    assert "D9" in out and "setup_retries 6" in out and "setup_retries 0" not in out
+    run = json.loads(path.read_text())
+    found = breakers.preflight(breakers.resolved(run, strict=False), run_config=run)
+    assert [f for f in found if f.rule == "D9"] and all("setup_retries 6" in f.message for f in found if f.rule == "D9")
+    sources = pool_sources(pool_cfg)
+    assert sources.env == {"HARBOR_SETUP_RETRIES": "6", "YETO_AGENTENV_MAX_ACTIVE": "32"}
+    assert all("setup_retries 0" not in f.message for f in pool_run.breaker_findings(pool_cfg))

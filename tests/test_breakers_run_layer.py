@@ -195,10 +195,19 @@ def test_a_wall_clock_breach_reports_its_stop_reason(make_run, monkeypatch):
     assert event["config_source"] == "run config budget.wall_h"
 
 
+def test_a_small_budget_breach_shows_its_cents(make_run, monkeypatch):
+    """A sub-dollar budget trips at its real spend, not a rounded "$1"."""
+    run = make_run(budget={"usd": 0.5, "wall_h": None})
+    monkeypatch.setattr(up.Run, "spend_usd", lambda self: 0.57)
+    assert run.breach(trainer=False) == "budget $0.57"
+    (event,) = _events(run)
+    assert event["detail"] == "budget $0.57" and event["value"] == 0.57
+
+
 def test_a_budget_breach_reports_its_stop_reason(make_run, monkeypatch):
     run = make_run(budget={"usd": 100, "wall_h": None})
     monkeypatch.setattr(up.Run, "spend_usd", lambda self: 150.0)
-    assert run.breach(trainer=False) == "budget $150"
+    assert run.breach(trainer=False) == "budget $150.00"
     (event,) = _events(run)
     assert (event["name"], event["value"], event["limit"]) == ("run.budget", 150.0, 100.0)
     assert run.state["breaker"]["stop_reason"] == "breaker:run.budget"
@@ -243,7 +252,7 @@ def test_the_forced_pool_stop_factor_is_the_budget_breakers(make_run, monkeypatc
     run.watch_nc_after_breach("budget $130", poll_s=60)
     stops = [argv for argv in run.calls if "pool-stop" in argv]
     assert len(stops) == 1  # not at 130 (> 1.2 x 100), at 160 (> 1.5 x 100)
-    assert run.state["steps"]["nc_forced_stop"]["why"] == "spend $160 > $150"
+    assert run.state["steps"]["nc_forced_stop"]["why"] == "spend $160.00 > $150.00"
 
 
 # ----------------------------------------------------------------------------- starvation
