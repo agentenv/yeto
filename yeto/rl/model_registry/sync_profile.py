@@ -345,8 +345,9 @@ def _derive(config: Mapping[str, Any], *, recipe: str) -> ModelSyncProfile:
             constraints.append("synced LoRA trainers take --lora-targets attention only "
                                "(yeto/rl/engine/kimi_k31_lora.py check_tuning)")
         elif recipe == RECIPE_GENERIC:
-            constraints.append("routed-expert LoRA (all-linear) needs ep=1 on the generic recipe "
-                               "(yeto/rl/engine/run_config.py: EP>1 requires replicated attention LoRA)")
+            constraints.append("routed-expert LoRA (all-linear): one adapter per expert; under EP>1 grouped-GEMM "
+                               "experts, BF16 experts, no capacity padding (yeto/rl/engine/run_config.py "
+                               "check_generic_expert_lora)")
     # upstream trainer stack (generic recipe: AutoBridge and the converter of the config class)
     bridge = upstream.has_megatron_bridge(architectures)
     converter = next((c for c in (upstream.miles_full_parameter_converter(upstream.config_class_name(a))

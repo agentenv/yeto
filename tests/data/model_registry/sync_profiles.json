@@ -7,7 +7,7 @@
    "tp divides num_attention_heads=128",
    "ep divides num_routed_experts=256",
    "MTP layers (num_nextn_predict_layers) are not trained",
-   "routed-expert LoRA (all-linear) needs ep=1 on the generic recipe (yeto/rl/engine/run_config.py: EP>1 requires replicated attention LoRA)"
+   "routed-expert LoRA (all-linear): one adapter per expert; under EP>1 grouped-GEMM experts, BF16 experts, no capacity padding (yeto/rl/engine/run_config.py check_generic_expert_lora)"
   ],
   "expert_lora": "supported",
   "experts_per_token": 8,
@@ -566,7 +566,7 @@
    "tp divides num_attention_heads=32",
    "tp divides num_key_value_heads=4 (Megatron num_query_groups)",
    "ep divides num_routed_experts=128",
-   "routed-expert LoRA (all-linear) needs ep=1 on the generic recipe (yeto/rl/engine/run_config.py: EP>1 requires replicated attention LoRA)"
+   "routed-expert LoRA (all-linear): one adapter per expert; under EP>1 grouped-GEMM experts, BF16 experts, no capacity padding (yeto/rl/engine/run_config.py check_generic_expert_lora)"
   ],
   "expert_lora": "supported",
   "experts_per_token": 8,

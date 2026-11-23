@@ -933,7 +933,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="command",
         metavar="{launch,shape,merge,rl,sample-diffusion,engine-sampler-modal,status,"
-        "dashboard,logs,down,stop-run,preflight}",
+        "dashboard,logs,down,stop-run,preflight,adapt,model}",
     )
 
     launch = sub.add_parser(
@@ -1098,9 +1098,11 @@ def build_parser() -> argparse.ArgumentParser:
     from .breakers.cli import add_parser as _add_breaker_parser
 
     _add_breaker_parser(sub)
+    from .rl.model_registry.cli import add_model_parser as _add_model_parser
     from .rl.model_registry.cli import add_parser as _add_adapt_parser
 
     _add_adapt_parser(sub)
+    _add_model_parser(sub)
     reaper = sub.add_parser("_reaper")
     reaper.add_argument("run")
     reaper.add_argument("pid", type=int)
@@ -2696,6 +2698,10 @@ def main(argv=None) -> int:
         from .rl.model_registry.cli import cmd_adapt
 
         return cmd_adapt(args)
+    if args.command == "model":
+        from .rl.model_registry.cli import cmd_model
+
+        return cmd_model(args)
     if args.command == "breaker":
         from .breakers.cli import main as breaker_main
 
