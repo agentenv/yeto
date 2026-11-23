@@ -116,7 +116,11 @@ def prepare_launch_args(
     resolve_default_rl_image(args)
     apply_object_store_endpoint(args)
     if getattr(args, "gpu", None):
-        check_cloud_prerequisites(parse_gpu_spec(args.gpu), args=args)
+        specs = parse_gpu_spec(args.gpu)
+        from .syncer_region import resolve_syncer_region
+
+        resolve_syncer_region(args, specs)  # before anything reads --syncer-region
+        check_cloud_prerequisites(specs, args=args)
     _prepare_rl_args(
         args,
         allow_local_data=allow_local_rl_data,

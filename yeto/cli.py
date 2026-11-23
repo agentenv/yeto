@@ -32,6 +32,7 @@ import time
 from . import runs
 from .losses import LOSS_FUNCTIONS
 from .rl.engine.run_flags import CLI, add_rl_flags
+from .launch.syncer_region import default_syncer_region
 from .status_metrics import render_tape_summary
 
 SUBCOMMANDS = (
@@ -721,8 +722,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     infra.add_argument(
         "--syncer-region",
-        default="us-west-2",
-        help="syncer VM placement: 'region' (AWS) or 'cloud/region', e.g. gcp/us-central1",
+        default=default_syncer_region(),
+        help="syncer VM placement: 'region' (AWS) or 'cloud/region', e.g. gcp/us-central1 "
+        "(default us-west-2; a synced launch whose Modal/AWS islands all pin one @region "
+        "follows them there, printed; setting this flag opts out)",
     )
     infra.add_argument("--syncer-memory", type=int, default=32, help="syncer RAM (GB)")
     infra.add_argument(

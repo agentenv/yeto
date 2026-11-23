@@ -467,6 +467,11 @@ def pre_cloud_checks(args, *, counter=None, sleep=None, clock=time.monotonic, ou
     xhw = xhw_family_advice(args, specs, out=out)
     if xhw is not None:  # only a launch over several device families gets the record
         preflight["xhw"] = xhw
+    from .launch.downlink_demand import downlink_preflight
+
+    downlink = downlink_preflight(args, out=out)  # a WARNING only, never a refusal
+    if downlink is not None:  # only a launch with a syncer gets the record
+        preflight["downlink"] = downlink
     check_policy_age_spec(args)  # global flag (island copies: island_overrides.check_island_args)
     num_islands = len(specs) + max(0, getattr(args, "external_learners", 0) or 0)
     overrides = io.overrides_of(args, len(specs))
