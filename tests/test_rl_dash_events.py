@@ -44,6 +44,16 @@ def test_step_metrics_fill_round_means_from_loss_dict():
     assert t.last_step_losses is None and m.clip_fraction is None
 
 
+def test_step_metrics_kl_is_the_train_rollout_kl_not_the_zero_ppo_kl():
+    # one optimizer step per rollout: ppo_kl is 0 by construction; the recorded
+    # current-vs-rollout KL (train/train_rollout_kl of rl_local_round) must be Miles'
+    # train_rollout_kl, not that 0
+    t = _train_with_losses([
+        {"loss": 0.2, "pg_loss": 0.1, "ppo_kl": 0.0, "train_rollout_kl": 4e-4, "ess_ratio": 1.0},
+    ])
+    assert t.step_metrics().mean_kl == pytest.approx(4e-4)
+
+
 def test_step_metrics_without_kl_key_is_none_and_mean_over_steps():
     from yeto.rl.adapters.miles.trainer import mean_step_metrics
 

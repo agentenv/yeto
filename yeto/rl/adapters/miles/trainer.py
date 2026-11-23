@@ -198,8 +198,11 @@ def mean_step_metrics(step_losses: list[dict[str, Any]] | None) -> dict[str, flo
     return {k: sum(v) / len(v) for k, v in sums.items()}
 
 
-# Miles loss-dict KL keys, in preference order (first present wins).
-KL_METRIC_KEYS = ("mean_kl", "kl_loss", "kl", "ppo_kl", "train_rollout_kl")
+# Miles loss-dict KL keys, in preference order (first present wins). ``mean_kl`` is
+# recorded as the current-vs-rollout KL (``train/train_rollout_kl``,
+# ``rl/current_vs_rollout_kl``), so Miles' train_rollout_kl wins over kl_loss and
+# ppo_kl: with one optimizer step per rollout ppo_kl is 0 by construction.
+KL_METRIC_KEYS = ("mean_kl", "train_rollout_kl", "kl_loss", "kl", "ppo_kl")
 
 
 def _metric(round_metrics: dict[str, float], *names: str) -> float | None:
