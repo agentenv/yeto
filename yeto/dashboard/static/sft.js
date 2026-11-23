@@ -5,11 +5,12 @@
 var YetoExt=(function(){
 "use strict";
 var PAL=["#3b82f6","#f97316","#14b8a6","#8b5cf6","#ec4899","#eab308","#22c55e","#06b6d4","#ef4444","#a3e635"];
-var GREY="#9ca3af",RANGES=[["1h",1],["6h",6],["24h",24],["7d",168],["30d",720]];
-var RANGE_H=24,CH={},V=null,OFF=false,NOW=0,onReload=null;
-try{var sr=localStorage.getItem("yeto-range");if(sr&&+sr>0)RANGE_H=+sr}catch(e){}
-try{var hm=/range=(\d+)/.exec(location.hash||"");if(hm)RANGE_H=+hm[1]}catch(e){}
-var RANGE_SET=false;try{RANGE_SET=!!localStorage.getItem("yeto-range")||/range=/.test(location.hash||"")}catch(e){}
+var GREY="#9ca3af",RANGES=[["run",0],["1h",1],["6h",6],["24h",24],["7d",168],["30d",720]];
+// "run" (the RL default; SFT keeps 24 h): the window is the run itself, first event -> now, so a one-hour run fills the charts
+var RANGE_H=24,RANGE_RUN=null,CH={},V=null,OFF=false,NOW=0,onReload=null,EXPAND={};
+try{var sr=localStorage.getItem("yeto-range");if(sr&&sr!=="run"&&+sr>0){RANGE_H=+sr;RANGE_RUN=false}}catch(e){}
+try{var hm=/range=(\d+|run)/.exec(location.hash||"");if(hm&&hm[1]!=="run"){RANGE_H=+hm[1];RANGE_RUN=false}else if(hm)RANGE_RUN=true}catch(e){}
+var RANGE_SET=RANGE_RUN!==null;
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
 function fin(v){return typeof v==="number"&&isFinite(v)}
@@ -58,30 +59,52 @@ function interpStack(list,grid,fallbackGap,minBrk){var acc=grid.map(function(){r
 /* ---------- header controls ---------- */
 function controls(offline,reload){
   onReload=reload;var box=$("rangeBox");if(!box)return;
-  box.innerHTML='<div class="seg">'+RANGES.map(function(r){return '<button class="'+(r[1]===RANGE_H?"on":"")+'" data-h="'+r[1]+'">'+r[0]+'</button>'}).join("")+'</div>'+
+  box.innerHTML='<div class="seg">'+RANGES.map(function(r){var on=r[1]===0?RANGE_RUN:!RANGE_RUN&&r[1]===RANGE_H;
+    return '<button class="'+(on?"on":"")+'" data-h="'+r[1]+'"'+(r[1]===0?' title="the whole run: first event to now"':"")+'>'+r[0]+'</button>'}).join("")+'</div>'+
     '<button class="btn rl" id="reloadBtn" title="'+(offline?"offline export: data is fixed":"fetch now")+'"'+(offline?" disabled":"")+'>&#x21bb; Reload</button>';
-  Array.prototype.forEach.call(box.querySelectorAll?box.querySelectorAll(".seg button"):[],function(b){b.onclick=function(){RANGE_H=+b.dataset.h;RANGE_SET=true;try{localStorage.setItem("yeto-range",RANGE_H)}catch(e){}render(V,OFF)}});
+  Array.prototype.forEach.call(box.querySelectorAll?box.querySelectorAll(".seg button"):[],function(b){b.onclick=function(){var h=+b.dataset.h;RANGE_RUN=h===0;if(h)RANGE_H=h;RANGE_SET=true;try{localStorage.setItem("yeto-range",h?h:"run")}catch(e){}render(V,OFF)}});
   var rb=$("reloadBtn");if(rb)rb.onclick=function(){if(onReload)onReload()};
 }
-function rangeLabel(){return RANGE_H>=48?(RANGE_H/24)+" days":RANGE_H===1?"hour":RANGE_H+" hours"}
+function rangeLabel(){if(RANGE_RUN){var m=RANGE_H*60;return (m<120?Math.round(m)+" min":m<2880?(RANGE_H).toFixed(1)+" h":(RANGE_H/24).toFixed(1)+" days")+" (whole run)"}
+  return RANGE_H>=48?(RANGE_H/24)+" days":RANGE_H===1?"hour":RANGE_H+" hours"}
 
 /* ---------- charts ---------- */
 var W=380,H=170,M={l:46,r:10,t:10,b:22};
 function axisX(t0,t1){var span=t1-t0,steps=[60,300,600,900,1800,3600,7200,10800,21600,43200,86400,172800,604800],st=steps[steps.length-1];
   for(var i=0;i<steps.length;i++)if(span/steps[i]<=5){st=steps[i];break}
   var off=new Date().getTimezoneOffset()*60,out=[];for(var t=Math.ceil((t0-off)/st)*st+off;t<=t1;t+=st)out.push(t);return {ticks:out,fmt:st>=86400?function(t){var d=new Date(t*1000);return (d.getMonth()+1)+"/"+d.getDate()}:function(t){return clock(t)}}}
-/* opts: series [{name,color,pts:[[t,v]],dash,width}], kind line|stack|bars, refs [{y,label}], yfmt, y0 (force 0 baseline), bucket (bars, s) */
-function chart(id,opts){
+/* restart / pool marks -> clusters for the marker strip above the plot: marks closer than 2 min
+   (or than 6 px at this range) merge into one, whatever island they belong to; the labels go to
+   the hover tooltip, never into the plot */
+var MARK_MERGE_S=120,MARK_STRIP=12,REW_WIN=8,SAMPLER_LINES=2;
+function markClusters(list,t0,t1,pxS){var out=[],gap=Math.max(MARK_MERGE_S,6*(pxS||0));
+  (list||[]).filter(function(m){return fin(m.t)&&m.t>=t0&&m.t<=t1}).sort(function(a,b){return a.t-b.t}).forEach(function(m){var g=out[out.length-1];
+    if(g&&m.t-g.last<=gap){g.items.push(m);g.last=m.t;if(g.colors.indexOf(m.color||GREY)<0)g.colors.push(m.color||GREY)}
+    else out.push({t:m.t,last:m.t,items:[m],colors:[m.color||GREY]})});return out}
+/* a line series splits where two neighbours are further apart than 3x its median spacing, or
+   where the incarnation (third element of a point, when given) changes: no line across a gap */
+function segments(P,all){var g=[];for(var i=1;i<all.length;i++)g.push(all[i][0]-all[i-1][0]);g.sort(function(a,b){return a-b});
+  var med=g.length>=2?g[Math.floor(g.length/2)]:0,out=[],cur=[];
+  P.forEach(function(p,i){var q=P[i-1];if(q&&((med>0&&p[0]-q[0]>3*med)||(typeof p[2]==="string"&&typeof q[2]==="string"&&p[2]!==q[2]))){out.push(cur);cur=[]}cur.push(p)});
+  if(cur.length)out.push(cur);return out}
+/* opts: series [{name,color,pts:[[t,v(,incarnation)]],dash,width,dots,faint}], kind line|stack|bars, refs [{y,label}], yfmt, y0 (force 0 baseline),
+   bucket (bars, s), vmarks [{t,color,label}] (marker strip above the plot) */
+function chart(id,opts){return chartTs(id,opts)}
+function chartTs(id,opts){
   var box=$(id);if(!box)return;var t1=NOW,t0=NOW-RANGE_H*3600;
-  var ser=(opts.series||[]).map(function(s){var all=(s.pts||[]).filter(function(p){return fin(p[0])&&fin(p[1])}).sort(function(a,b){return a[0]-b[0]});
-    return {name:s.name,color:s.color,dash:s.dash,width:s.width,legend:s.legend!==false,all:all,
+  // opts.extra: per-island series behind an aggregate, drawn when the legend toggle is open
+  var xs0=opts.extra||[],xon=xs0.length&&(EXPAND[id]!=null?EXPAND[id]:!!opts.extraOpen);
+  var ser=(opts.series||[]).concat(xon?xs0:[]).map(function(s){var all=(s.pts||[]).filter(function(p){return fin(p[0])&&fin(p[1])}).sort(function(a,b){return a[0]-b[0]});
+    return {name:s.name,color:s.color,dash:s.dash,width:s.width,dots:s.dots,band:s.band,empty:s.empty,legend:s.legend!==false,all:all,
     pts:all.filter(function(p){return p[0]>=t0&&p[0]<=t1})}});
   var leg='<div class="lg">'+ser.filter(function(s){return s.legend}).map(function(s){return s.pts.length?'<span><i style="background:'+s.color+'"></i>'+esc(s.name)+'</span>':
-    '<span class="nd"><i style="background:#4b4b52"></i>'+esc(s.name)+' (no data)</span>'}).join("")+
-    (opts.refs||[]).filter(function(r){return r.legend}).map(function(r){return '<span><i style="background:'+(r.color||GREY)+'"></i>'+esc(r.legend)+'</span>'}).join("")+'</div>';
+    '<span class="nd"><i style="background:#4b4b52"></i>'+esc(s.name)+' ('+esc(s.empty||"no data")+')</span>'}).join("")+
+    (opts.refs||[]).filter(function(r){return r.legend}).map(function(r){return '<span><i style="background:'+(r.color||GREY)+'"></i>'+esc(r.legend)+'</span>'}).join("")+
+    (xs0.length?'<span class="lgx" role="button" tabindex="0">'+(xon?"\u25be hide ":"\u25b8 show ")+esc(opts.extraLabel||"each island")+' ('+xs0.length+')</span>':"")+'</div>';
   var any=ser.some(function(s){return s.pts.length});
   ser=ser.filter(function(s){return s.pts.length}); // series without data are neither stacked nor drawn
-  if(!any){box.innerHTML='<div class="empty">no data in the last '+rangeLabel()+'</div>'+leg;CH[id]=null;return}
+  var bindX=function(){var b=box.querySelector&&box.querySelector(".lgx");if(b)b.onclick=b.onkeydown=function(e){if(e&&e.type==="keydown"&&e.key!=="Enter")return;EXPAND[id]=!xon;chartTs(id,opts)}};
+  if(!any){box.innerHTML='<div class="empty">no data in the last '+rangeLabel()+'</div>'+leg;CH[id]=null;bindX();return}
   var stack=opts.kind==="stack"||opts.kind==="bars",span=t1-t0,bk=opts.bucket||Math.max(60,span/72);
   if(span/bk<4)bk=span<=3600?300:600; // range shorter than a few buckets: 5-10 min buckets
   if(opts.kind==="stack"&&opts.interp){ // interpolate every series on one grid, then stack
@@ -94,48 +117,61 @@ function chart(id,opts){
     var xs=Object.keys(keys).map(Number).sort(function(a,b){return a-b}),acc={};
     ser.forEach(function(s){s.pts=xs.map(function(x){var lo=acc[x]||0,v=s.b[x]||0;acc[x]=lo+v;return [Math.min(t1,Math.max(t0,x+bk/2)),lo+v,lo,v]})});var NB=xs.length;
   }
-  var vals=[];ser.forEach(function(s){s.pts.forEach(function(p){vals.push(p[1]);if(p.length>2)vals.push(p[2])})});(opts.refs||[]).forEach(function(r){if(fin(r.y))vals.push(r.y)});
+  var vals=[];ser.forEach(function(s){s.pts.forEach(function(p){vals.push(p[1]);if((stack||s.band)&&p.length>2)vals.push(p[2])})});(opts.refs||[]).forEach(function(r){if(fin(r.y))vals.push(r.y)});
   var off=null;if(opts.clip&&!stack&&vals.length>=10){var sv=vals.slice().sort(function(a,b){return a-b}),q9=rank(sv,0.9),mx=sv[sv.length-1];
     if(q9>0&&mx>4*q9){var cap=1.5*q9;off={cap:cap,max:mx,n:0};vals=vals.filter(function(v){return v<=cap});vals.push(cap)}} // a few huge values (8 h first round) would flatten the rest
   var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),dlo=lo,dhi=hi;if(opts.y0!==false&&(stack||opts.y0||lo>=0&&lo<hi*0.35))lo=Math.min(0,lo);
   if(!stack&&hi>lo&&(lo>0||hi<0)){var pd=(hi-lo)*0.12;lo=(lo>0&&lo-pd<0)?0:lo-pd;hi=(hi<0&&hi+pd>0)?0:hi+pd} // headroom: no point on the frame
   var zoom=!stack&&(lo>0||hi<0)&&dhi>dlo&&(dhi-dlo)<0.2*Math.max(Math.abs(dhi),Math.abs(dlo))?"axis not from 0 \u00b7 spread "+(100*(dhi-dlo)/Math.max(Math.abs(dhi),Math.abs(dlo))).toFixed(1)+"% of max":"";if(fin(opts.ymin))lo=Math.min(lo,opts.ymin);if(hi-lo<=Math.abs(hi)*0.02||hi===lo){var c=(hi+lo)/2,dd=Math.abs(c)*0.1||1;hi=c+dd;lo=(c>=0&&c-dd<0)?0:c-dd}
   var ticks=(opts.yfmt===dur?durTicks:nice)(lo,hi,4);lo=ticks[0];hi=ticks[ticks.length-1];
+  if(opts.yint&&ticks.length>1&&ticks[1]-ticks[0]<1){var ia=Math.floor(lo),ib=Math.max(ia+1,Math.ceil(hi)),ist=Math.max(1,Math.ceil((ib-ia)/5));ticks=[];
+    for(var iv=ia;iv<ib+ist;iv+=ist)ticks.push(iv);lo=ticks[0];hi=ticks[ticks.length-1]} // counts / policy ages: whole numbers only
   var yf=opts.yfmt||function(v){return k(v)},yl=yf===dur?durAxis(ticks):(opts.yaxis||!opts.yfmt||opts.yfmt===k)?numAxis(ticks):yf;
   var ML=Math.max(30,Math.min(96,Math.ceil(8+5.4*Math.max.apply(null,ticks.map(function(v){return String(yl(v)).length})))));
-  var x=function(t){return ML+(t-t0)*(W-ML-M.r)/(t1-t0)},y=function(v){return M.t+(hi-Math.min(v,off?hi:v))/(hi-lo)*(H-M.t-M.b)};
-  var o=['<svg viewBox="0 0 '+W+' '+H+'" class="ch" role="img" aria-label="'+esc(opts.title||id)+'"><defs><clipPath id="cp-'+id+'"><rect x="'+(ML-4)+'" y="'+(M.t-4)+'" width="'+(W-ML-M.r+8)+'" height="'+(H-M.t-M.b+8)+'"/></clipPath></defs>'];
+  var MK=markClusters(opts.vmarks,t0,t1,(t1-t0)/(W-ML-M.r)),MT=M.t+(MK.length?MARK_STRIP:0); // marks: a strip above the plot
+  var x=function(t){return ML+(t-t0)*(W-ML-M.r)/(t1-t0)},y=function(v){return MT+(hi-Math.min(v,off?hi:v))/(hi-lo)*(H-MT-M.b)};
+  var o=['<svg viewBox="0 0 '+W+' '+H+'" class="ch" role="img" aria-label="'+esc(opts.title||id)+'"><defs><clipPath id="cp-'+id+'"><rect x="'+(ML-4)+'" y="'+(MT-4)+'" width="'+(W-ML-M.r+8)+'" height="'+(H-MT-M.b+8)+'"/></clipPath></defs>'];
   ticks.forEach(function(v){o.push('<line class="gl" x1="'+ML+'" x2="'+(W-M.r)+'" y1="'+y(v).toFixed(1)+'" y2="'+y(v).toFixed(1)+'"/><text x="'+(ML-6)+'" y="'+(y(v)+3.5).toFixed(1)+'" text-anchor="end">'+esc(yl(v))+'</text>')});
   var ax=axisX(t0,t1);ax.ticks.forEach(function(t){o.push('<text x="'+x(t).toFixed(1)+'" y="'+(H-6)+'" text-anchor="middle">'+esc(ax.fmt(t))+'</text>')});
   var PW=W-ML-M.r,bw=Math.max(1,Math.min(PW*bk/span*0.8,PW/Math.max(1,NB||1)*0.8));
+  if(MK.length){o.push('<g class="mks"><line class="gl" x1="'+ML+'" x2="'+(W-M.r)+'" y1="'+(MARK_STRIP+1)+'" y2="'+(MARK_STRIP+1)+'"/>'); // restarts / joins / exits: one small triangle per island color
+    MK.forEach(function(g){var mx0=x(g.t),cols=g.colors.slice(0,3);o.push('<g class="mk"><title>'+esc(g.items.map(function(m){return clock(m.t,true)+" "+(m.label||"")}).join("\n"))+'</title>'+
+      '<rect x="'+(mx0-6).toFixed(1)+'" y="1" width="12" height="'+MARK_STRIP+'" fill="transparent"/>'+cols.map(function(cl,j){var cx0=mx0+(j-(cols.length-1)/2)*5;
+        return '<path d="M'+(cx0-3).toFixed(1)+',4L'+(cx0+3).toFixed(1)+',4L'+cx0.toFixed(1)+','+(MARK_STRIP-1)+'Z" fill="'+cl+'"/>'}).join("")+
+      (g.items.length>1?'<text x="'+(mx0+3+2.5*cols.length).toFixed(1)+'" y="'+(MARK_STRIP-2)+'" font-size="8" fill="'+GREY+'">'+g.items.length+'</text>':"")+'</g>')});o.push('</g>')}
   o.push('<g clip-path="url(#cp-'+id+')">');
-  (opts.vmarks||[]).filter(function(m){return fin(m.t)&&m.t>=t0&&m.t<=t1}).sort(function(a,b){return a.t-b.t}).forEach(function(m,i){var mx0=x(m.t).toFixed(1),cl=m.color||GREY; // restarts / joins / exits
-    o.push('<g><title>'+esc(m.label||"")+'</title><line x1="'+mx0+'" x2="'+mx0+'" y1="'+M.t+'" y2="'+(H-M.b)+'" stroke="transparent" stroke-width="8"/><line x1="'+mx0+'" x2="'+mx0+'" y1="'+M.t+'" y2="'+(H-M.b)+'" stroke="'+cl+'" stroke-width="1" stroke-dasharray="2 3"/><text x="'+(+mx0+2)+'" y="'+(M.t+9+10*(i%3))+'" font-size="9" fill="'+cl+'">'+esc(m.short||"")+'</text></g>')});
-  ser.forEach(function(s){var P=s.pts;if(!P.length)return;
+  ser.forEach(function(s){var P=s.pts;if(!P.length)return;var SG=opts.kind?[P]:segments(P,s.all);
+    if(s.band){SG.forEach(function(G){if(G.length<2)return;o.push('<path d="'+G.map(function(p,i){return (i?"L":"M")+x(p[0]).toFixed(1)+","+y(p[1]).toFixed(1)}).join("")+
+      G.slice().reverse().map(function(p){return "L"+x(p[0]).toFixed(1)+","+y(p[2]).toFixed(1)}).join("")+'Z" fill="'+s.color+'" fill-opacity=".16"/>')});return} // p10-p90 band
     if(opts.kind==="bars"){P.forEach(function(p){if(p[3]>0)o.push('<rect x="'+Math.min(W-M.r-bw,Math.max(ML,x(p[0])-bw/2)).toFixed(1)+'" y="'+y(p[1]).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+Math.max(0.5,y(p[2])-y(p[1])).toFixed(1)+'" fill="'+s.color+'"/>')});return}
-    var line=P.map(function(p,i){return (i?"L":"M")+x(p[0]).toFixed(1)+","+y(p[1]).toFixed(1)}).join("");
+    var line=SG.map(function(G){return G.map(function(p,i){return (i?"L":"M")+x(p[0]).toFixed(1)+","+y(p[1]).toFixed(1)}).join("")}).join("");
     if(opts.kind==="stack"){var base=P.slice().reverse().map(function(p){return "L"+x(p[0]).toFixed(1)+","+y(p[2]).toFixed(1)}).join("");
       o.push('<path d="'+line+base+'Z" fill="'+s.color+'" fill-opacity=".32"/>')}
-    var sparse=P.length<=SPARSE&&opts.kind!=="stack";
-    if(sparse&&P.length>1&&!opts.dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-opacity=".35" stroke-width="1"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+'/>');
-    if(sparse||opts.dots)P.forEach(function(p){if(off&&p[1]>hi){off.n++;var cx0=x(p[0]),cy0=M.t+1;
+    var sparse=P.length<=SPARSE&&opts.kind!=="stack",dots=opts.dots||s.dots;
+    if(sparse&&P.length>1&&!dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-opacity=".35" stroke-width="1"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+'/>');
+    if(sparse||dots)P.forEach(function(p){if(off&&p[1]>hi){off.n++;var cx0=x(p[0]),cy0=M.t+1;
         o.push('<path class="off" d="M'+(cx0-3.5).toFixed(1)+','+(cy0+6)+'L'+(cx0+3.5).toFixed(1)+','+(cy0+6)+'L'+cx0.toFixed(1)+','+cy0+'Z" fill="'+s.color+'"/>');return}
       o.push('<circle cx="'+x(p[0]).toFixed(1)+'" cy="'+y(p[1]).toFixed(1)+'" r="'+(sparse?(s.dash?2.4:3):1.6)+'" fill="'+(s.dash&&sparse?"var(--panel)":s.color)+'" stroke="'+s.color+'" stroke-width="'+(s.dash&&sparse?1.4:0)+'"/>')});
-    if(!sparse&&P.length>1&&!opts.dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-width="'+(s.width||1.5)+'"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+' stroke-linejoin="round"/>')});
+    if(!sparse&&P.length>1&&!dots){o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-width="'+(s.width||1.5)+'"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+' stroke-linejoin="round"/>');
+      SG.forEach(function(G){if(G.length===1)o.push('<circle cx="'+x(G[0][0]).toFixed(1)+'" cy="'+y(G[0][1]).toFixed(1)+'" r="1.8" fill="'+s.color+'"/>')})}}); // a lone point between gaps
   o.push('</g>');
-  if(off&&off.n)o.push('<text x="'+(ML+4)+'" y="'+(M.t+16)+'" class="rt offn">\u25b2 '+off.n+' off scale \u00b7 max '+esc(yf(off.max))+'</text>');
-  if(zoom)o.push('<text x="'+(W-M.r-2)+'" y="'+(M.t+8)+'" text-anchor="end" class="rt">'+esc(zoom)+'</text>');
+  if(off&&off.n)o.push('<text x="'+(ML+4)+'" y="'+(MT+16)+'" class="rt offn">\u25b2 '+off.n+' off scale \u00b7 max '+esc(yf(off.max))+'</text>');
+  if(zoom)o.push('<text x="'+(W-M.r-2)+'" y="'+(MT+8)+'" text-anchor="end" class="rt">'+esc(zoom)+'</text>');
   (opts.refs||[]).forEach(function(r){if(!fin(r.y)||r.y<lo||r.y>hi)return;o.push('<line x1="'+ML+'" x2="'+(W-M.r)+'" y1="'+y(r.y).toFixed(1)+'" y2="'+y(r.y).toFixed(1)+'" stroke="'+(r.color||GREY)+'" stroke-dasharray="4 3" stroke-width="1"/>'+
     (r.label?'<text x="'+(W-M.r-2)+'" y="'+(y(r.y)-4).toFixed(1)+'" text-anchor="end" class="rt">'+esc(r.label)+'</text>':""))});
-  o.push('<line class="cx" x1="0" x2="0" y1="'+M.t+'" y2="'+(H-M.b)+'" visibility="hidden"/></svg>');
-  box.innerHTML='<div class="cw">'+o.join("")+'<div class="tt"></div></div>'+leg;
-  CH[id]={ser:ser,x:x,t0:t0,t1:t1,yf:yf,stack:stack,ml:ML};
+  o.push('<line class="cx" x1="0" x2="0" y1="'+MT+'" y2="'+(H-M.b)+'" visibility="hidden"/></svg>');
+  box.innerHTML='<div class="cw">'+o.join("")+'<div class="tt"></div></div>'+leg;bindX();
+  CH[id]={ser:ser,x:x,t0:t0,t1:t1,yf:yf,stack:stack,ml:ML,mk:MK};
   box.onmousemove=function(e){hover(id,box,e)};box.onmouseleave=function(){var t=box.querySelector&&box.querySelector(".tt");if(t)t.style.display="none";var c=box.querySelector&&box.querySelector(".cx");if(c)c.setAttribute("visibility","hidden")};
 }
 function hover(id,box,e){var c=CH[id];if(!c||!box.querySelector)return;var svg=box.querySelector("svg"),tt=box.querySelector(".tt"),cx=box.querySelector(".cx");if(!svg||!tt)return;
   var b=svg.getBoundingClientRect(),vx=(e.clientX-b.left)*W/b.width;var t=c.t0+(vx-c.ml)*(c.t1-c.t0)/(W-c.ml-M.r);if(t<c.t0||t>c.t1){tt.style.display="none";return}
   var rows=[],bestT=null;c.ser.forEach(function(s){var best=null,bd=1e18;s.pts.forEach(function(p){var d=Math.abs(p[0]-t);if(d<bd){bd=d;best=p}});
-    if(best&&bd<(c.t1-c.t0)/20){bestT=best[0];rows.push('<div><i style="background:'+s.color+'"></i>'+esc(s.name)+'<b>'+esc(c.yf(c.stack?best[3]:best[1]))+'</b></div>')}});
+    if(best&&bd<(c.t1-c.t0)/20){bestT=best[0];rows.push('<div><i style="background:'+s.color+'"></i>'+esc(s.name)+'<b>'+esc(s.band?c.yf(best[2])+" \u2013 "+c.yf(best[1]):c.yf(c.stack?best[3]:best[1]))+'</b>'+
+      (fin(best.raw)?'<b class="rw">round '+esc(c.yf(best.raw))+'</b>':"")+'</div>')}}); // a smoothed point also names its round's own value
+  // marks within 8 px of the cursor: their labels (the plot itself carries none)
+  var mg=null,md=8;(c.mk||[]).forEach(function(g){var d=Math.abs(c.x(g.t)-vx);if(d<=md){md=d;mg=g}});
+  if(mg){if(bestT==null)bestT=mg.t;rows=mg.items.map(function(m){return '<div class="mkr"><i style="background:'+(m.color||GREY)+'"></i>'+esc(clock(m.t,true)+" "+(m.label||""))+'</div>'}).concat(rows)}
   if(!rows.length){tt.style.display="none";return}
   cx.setAttribute("x1",c.x(bestT));cx.setAttribute("x2",c.x(bestT));cx.setAttribute("visibility","visible");
   tt.innerHTML='<div class="th">'+esc(day(bestT))+'</div>'+rows.join("");tt.style.display="block";
@@ -396,15 +432,34 @@ function inR(t,a,b){return fin(t)&&t>a&&t<=b}
 function rlCards(V){var O=V.overview||{},cs=(O.islands||[]).map(function(c,i){var o={};for(var key in c)o[key]=c[key];o.i=i;o.color=PAL[i%PAL.length];
   o.label=({sampler:"sampler ",trainer:"trainer ",unrecognized:"unrecognized tape "}[o.role]||"island ")+o.id;var sp=((V.async||{}).samplers||{})[o.id],topo=sp&&sp.provenance&&sp.provenance.topology;
   o.cards=fin(c.gpus)?c.gpus:(topo&&/tp(\d+)/.test(topo)?+/tp(\d+)/.exec(topo)[1]:1);return o});return cs}
-/* billed hours: fleet ready -> stop wall clock (cost view) when the island is in fleet.jsonl, else its first -> last event (NC leases are not in fleet.jsonl) */
+/* billed hours: fleet ready -> stop wall clock (cost view) when the island is in fleet.jsonl, else
+   (a sampler outside the fleet ledger: NC lease, Modal / Daytona sandbox) the union of its
+   incarnations' first -> last event, or the island's first -> last event without incarnations.
+   A lower bound: boot before an incarnation's first event is not on the tapes. */
+function spanUnion(sp){var a=sp.filter(function(x){return fin(x[0])&&fin(x[1])&&x[1]>=x[0]}).sort(function(p,q){return p[0]-q[0]}),out=[];
+  a.forEach(function(x){var l=out[out.length-1];if(l&&x[0]<=l[1])l[1]=Math.max(l[1],x[1]);else out.push([x[0],x[1]])});return out}
 function rlBilled(V,c){var ci=(((V.overview||{}).cost||{}).islands||[]).filter(function(r){return String(r.id)===String(c.id)})[0],ex=(V.islands||{})[c.id]||{};
-  if(ci&&fin(ci.hours)&&ci.hours>0)return {h:ci.hours,src:"fleet"};var sp=((V.async||{}).samplers||{})[c.id]||{},a=fin(sp.first_ts)?sp.first_ts:ex.first_ts,b=fin(sp.last_ts)?sp.last_ts:ex.last_ts;
-  return fin(a)&&fin(b)?{h:(b-a)/3600,src:"events",a:a,b:b}:{h:null,src:"none"}}
+  if(ci&&fin(ci.hours)&&ci.hours>0)return {h:ci.hours,src:"fleet"};var sp=((V.async||{}).samplers||{})[c.id]||{};
+  var spans=spanUnion((sp.incarnations||[]).map(function(x){return [x.first_ts,x.last_ts]}));
+  if(!spans.length)spans=spanUnion([[ex.first_ts,ex.last_ts]]);
+  return spans.length?{h:sum(spans.map(function(x){return x[1]-x[0]}))/3600,src:"events",spans:spans}:{h:null,src:"none"}}
+function spanOverlap(spans,a,b){return sum(spans.map(function(x){return Math.max(0,Math.min(b,x[1])-Math.max(a,x[0]))}))}
+/* the trainer round in progress: a live trainer whose last round ended (train / sync / publish
+   done) and that has not read a new batch since is waiting on the buffer right now. Completed
+   rounds alone hide a round stuck for many minutes. */
+function curWait(V,c){if(!rlLive(c.status)||c.status==="starting"||c.starting)return null;/* a launch still starting is not waiting on the buffer */var rr=(((V.islands||{})[c.id]||{}).rounds||[]),l=rr[rr.length-1];if(!l)return null;
+  var end=fin(l.ts)?l.ts:null;Object.keys(l.phases||{}).forEach(function(p){var e=(l.phases[p]||[])[1];if(fin(e)&&(end==null||e>end))end=e});if(end==null)return null;
+  var tr=((((V.async||{}).trainers||{})[c.id]||{}).rounds||[]),rd=tr.length?tr[tr.length-1].read_ts:null;if(fin(rd)&&rd>end)return null;
+  return NOW>end?{since:end,s:NOW-end,round:fin(l.round)?l.round+1:null}:null}
 // a card row in rows of equal length: as many columns as fit (cards >= 150 px), then the
 // cards spread evenly over the rows, so a row of 8 never ends with one card alone on a line
 function evenGrid(box,n){if(!box||!n)return;var w=box.clientWidth||box.getBoundingClientRect().width||0;if(!w)return;
   var fit=Math.max(1,Math.floor((w+12)/(150+12))),rows=Math.ceil(n/fit),cols=Math.ceil(n/rows);
   box.style.gridTemplateColumns="repeat("+cols+",minmax(0,1fr))"}
+// a hot reload's parts: seen after the release, resolve (fetch / merge), drain (in-flight trials), load, pause
+function loadParts(l){var p=[["resolve",l.resolve_s],["drain",l.drain_s],["load",l.load_s],["pause",l.pause_s]].filter(function(x){return fin(x[1])});
+  return p.length?'<div class="ns" title="sampler follower timings (rl_sampler_policy_loaded) and the drain before the switch (rl_agentic_drain)'+(fin(l.drain_in_flight)?": "+l.drain_in_flight+" trials in flight":"")+(l.drain_cut?", "+l.drain_cut+" cut":"")+'">'+
+    p.map(function(x){return x[0]+" "+dur(x[1])}).join(" · ")+(l.drain_cut?' · <b>'+l.drain_cut+' cut</b>':"")+'</div>':""}
 function rlm(V){
   var O=V.overview||{},A=V.async||{},S=A.samplers||{},TR=A.trainers||{},X=V.islands||{},cs=rlCards(V);
   var t1=NOW,t0=NOW-RANGE_H*3600,tp=t0-RANGE_H*3600;
@@ -413,6 +468,10 @@ function rlm(V){
   var RR=function(c){return ((X[c.id]||{}).rounds||[]).filter(function(r){return fin(r.ts)})},SR=function(c){return ((S[c.id]||{}).rounds||[]).filter(function(r){return fin(r.ts)})};
   var tsum=function(key){var v=0,n=0;Object.keys(TR).forEach(function(i){if(fin(TR[i][key])){v+=TR[i][key];n++}});return n?v:null};
   var ssum=function(key){var v=0,n=0;Object.keys(S).forEach(function(i){if(fin(S[i][key])){v+=S[i][key];n++}});return n?v:null};
+  // zero-variance groups the trainer saw: rl_local_round.zero_variance_group_ratio × the round's trained groups
+  var zvT=function(c){var tg={};((TR[c.id]||{}).rounds||[]).forEach(function(r){tg[r.rollout_id]=r.trained_groups});
+    return RR(c).filter(function(r){return fin(r.zero_var_ratio)&&fin(tg[r.round])}).map(function(r){return [r.ts,Math.round(r.zero_var_ratio*tg[r.round])]})};
+  var zvTot=null,zvTr=0;trs.forEach(function(c){zvT(c).forEach(function(p){zvTot=(zvTot||0)+p[1]})});zvTr=tsum("trained_groups")||0;
   // KPIs
   var liveTr=trs.filter(function(c){return rlLive(c.status)}),tokS=sum((liveTr.length?liveTr:trs).map(function(c){var r=lastW(RR(c),"tok_s");return r?r.tok_s:null}));
   var f0=trs[0],fs=f0?RR(f0).filter(function(r){return inR(r.ts,t0,t1)}).map(function(r){return fin(r.step_s)?r.step_s:null}).filter(fin).sort(function(a,b){return a-b}):[];
@@ -431,7 +490,8 @@ function rlm(V){
     // releases = versions a trainer released; a sampler starting on the base weights (v0, no
     // trainer, no release time) makes a release row for its load but is not a release
     ["Policy version / releases",(pvs.length?"v"+Math.max.apply(null,pvs):"n/a")+" / "+trel.length,ltr?"last release v"+ltr.policy_version+" "+ago(ltr.released_at):"no trainer release yet"+(spv.length?" · samplers on v"+Math.max.apply(null,spv)+(Math.max.apply(null,spv)===0?" (base weights)":""):"")],
-    ["Rejected: stale / zero-var / trunc / infra",[tsum("stale_groups"),ssum("zero_variance_dropped"),ssum("truncated"),ssum("dropped_groups")].map(function(v){return fin(v)?k(v,0):"n/a"}).join(" / "),"groups / groups / samples / groups, whole run"+
+    ["Rejected: stale / zero-var / trunc / infra",[tsum("stale_groups"),fin(ssum("zero_variance_dropped"))?ssum("zero_variance_dropped"):zvTot,ssum("truncated"),ssum("dropped_groups")].map(function(v){return fin(v)?k(v,0):"n/a"}).join(" / "),"groups / groups / samples / groups, whole run"+
+      (!fin(ssum("zero_variance_dropped"))&&fin(zvTot)?" · zero-var: "+k(zvTot,0)+" of "+k(zvTr,0)+" trained groups ("+(zvTr?(100*zvTot/zvTr).toFixed(0):"?")+"%) had all-equal rewards, trained with zero advantage (trainer)":"")+
       // trials that never formed a group (aborted on infrastructure) are not in the group counts
       (fin(ssum("trials_aborted"))||fin(ssum("trials_ok"))?" · trials aborted "+k(ssum("trials_aborted")||0,0)+" of "+k((ssum("trials_aborted")||0)+(ssum("trials_ok")||0)+(ssum("trials_policy_limit")||0),0)+" ended":"")],
     ["Buffer backlog",blp&&fin(blp[3])?k(blp[3],0):"n/a",bl?"written "+k(bl.written,0)+" · read "+k(bl.read,0)+(caps.length?" · cap "+caps.join("+"):""):"no sampler rounds"]];
@@ -450,11 +510,12 @@ function rlm(V){
       var row='<tr'+(liv?'':' class="off"')+'><td><div class="nn">'+rlDot(c.status)+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null].filter(Boolean).join(" · ")||"n/a")+' · '+esc(c.status+(c.waiting_reason?": "+c.waiting_reason:"")+(c.left?" ("+(c.left.reason||"")+")":"")+(c.starting&&c.startup_stage?": "+c.startup_stage.label+(fin(c.startup_stage.age_s)?" "+dur(c.startup_stage.age_s):"")+(fin(c.startup_s)?" · start "+dur(c.startup_s):""):"")+((c.launches||[]).length>1?" · launch "+(c.launches.length)+" ("+(c.launches.length-1)+" superseded)":""))+'</div></td>';
       var hb='<td class="bar"><div class="bl">'+(fin(h)?h.toFixed(1)+" GiB"+(fin(lim)?" of "+lim+" GiB":""):"not sampled")+'</div><div class="bt"><div class="bf'+(liv?"":" idle")+'" style="width:'+pc.toFixed(1)+'%"></div>'+(fin(lim)?'<div class="bm" style="left:'+(100*lim/mx).toFixed(1)+'%"></div>':"")+'</div>'+(fin(h)?"":'<div class="ns" title="'+esc(ex.gpu_mem_note||"")+'">'+(/unavailable/.test(ex.gpu_mem_note||"")?"telemetry library missing":"enable --rl-resource-sample-interval")+'</div>')+'</td>';
       if(c.role==="sampler"&&s){var sr=s.rounds||[],l=s.last_round||sr[sr.length-1]||{},ld=(A.releases||[]).map(function(x){return (x.loads||{})[c.id]?[x.policy_version,x.loads[c.id]]:null}).filter(Boolean).pop();
-        return row+'<td>'+k(s.n_rounds-(s.empty_rounds||0),0)+' rounds with groups'+(s.empty_rounds?' (+'+k(s.empty_rounds,0)+' without groups)':'')+' / '+(s.policy_version==null?"n/a":"v"+s.policy_version)+'<div class="ns">'+ago(l.ts)+' · age p50 '+k(s.lag_p50,1)+'</div></td><td>'+k(s.reward_mean_last,3)+(fin(s.reward_last_ts)?'<div class="ns">round '+esc(s.reward_last_rollout_id)+' · '+ago(s.reward_last_ts)+'</div>':"")+'</td><td>n/a</td><td>n/a</td><td>n/a</td><td>'+dur(l.generate_s)+'<div class="ns">generate, p50 '+dur(s.generate_p50_s)+'</div></td><td>'+(fin(l.response_tokens)&&l.generate_s?k(l.response_tokens/l.generate_s):"n/a")+'</td>'+hb+
-          '<td>'+(ld?(ld[1].at_start?"at start":dur(ld[1].load_wall_s))+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+(ld[1].at_start?"loaded when the sampler started":dur(ld[1].latency_s)+' after release')+'</div>':"none yet")+'</td><td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
-      var mr=(A.releases||[]).filter(function(x){return String(x.trainer)===String(c.id)}).pop(),kl=lastW(rr,"kl_tr")||lastW(rr,"kl")||{};
-      return row+'<td>'+(r.round==null?"n/a":r.round)+' / '+(c.policy_version==null?"n/a":"v"+c.policy_version)+'<div class="ns">'+ago(r.ts)+'</div></td><td>'+k((lastW(rr,"reward")||{}).reward,3)+'</td><td>'+(fin(kl.kl_tr)?k(kl.kl_tr,4)+(fin(kl.kl)?'<div class="ns">PPO '+k(kl.kl,4)+'</div>':""):fin(kl.kl)?'n/a<div class="ns">PPO '+k(kl.kl,4)+'</div>':"n/a")+'</td><td>'+k((lastW(rr,"logprob_diff")||{}).logprob_diff,4)+'</td><td>'+k((lastW(rr,"grad_norm")||{}).grad_norm,3)+'</td>'+
-        '<td>'+dur(r.step_s)+'<div class="ns">round '+dur(r.round_s)+'</div></td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td><td>trainer '+esc(c.id)+'<div class="ns">'+esc((c.left||{}).reason||"")+'</div></td></tr>'};
+        return row+'<td title="'+esc(k(s.n_rounds-(s.empty_rounds||0),0)+" rounds wrote groups"+(s.empty_rounds?", "+k(s.empty_rounds,0)+" wrote none (backlog full, all trials lost or drained)":"")+"; generating with policy "+(s.policy_version==null?"n/a":"v"+s.policy_version))+'">'+
+          k(s.n_rounds-(s.empty_rounds||0),0)+(s.empty_rounds?' <span class="ns">(+'+k(s.empty_rounds,0)+' empty)</span>':'')+' / '+(s.policy_version==null?"n/a":"v"+s.policy_version)+'<div class="ns">'+ago(l.ts)+' · age p50 '+k(s.lag_p50,1)+'</div></td><td>'+k(s.reward_mean_last,3)+(fin(s.reward_last_ts)?'<div class="ns">round '+esc(s.reward_last_rollout_id)+' · '+ago(s.reward_last_ts)+'</div>':"")+'</td>'+'<td title="samplers do not train">—</td>'.repeat(3)+'<td>'+dur(l.generate_s)+'<div class="ns">generate, p50 '+dur(s.generate_p50_s)+'</div></td><td>'+(fin(l.response_tokens)&&l.generate_s?k(l.response_tokens/l.generate_s):"n/a")+'</td>'+hb+
+          '<td>'+(ld?(ld[1].at_start?"at start":dur(ld[1].load_wall_s))+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+(ld[1].at_start?"loaded when the sampler started":dur(ld[1].latency_s)+' after release')+'</div>'+(ld[1].at_start?"":loadParts(ld[1])):"none yet")+'</td><td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
+      var mr=(A.releases||[]).filter(function(x){return String(x.trainer)===String(c.id)}).pop(),kl=lastW(rr,"kl_tr")||lastW(rr,"kl")||{},cw=curWait(V,c);
+      return row+'<td>'+(r.round==null?"n/a":r.round)+' / '+(c.policy_version==null?'<span title="no policy version reported by the current launch yet">—</span>':"v"+c.policy_version)+'<div class="ns">'+ago(r.ts)+'</div></td><td>'+k((lastW(rr,"reward")||{}).reward,3)+'</td><td>'+(fin(kl.kl_tr)?k(kl.kl_tr,4)+(fin(kl.kl)?'<div class="ns">PPO '+k(kl.kl,4)+'</div>':""):fin(kl.kl)?'n/a<div class="ns">PPO '+k(kl.kl,4)+'</div>':"n/a")+'</td><td>'+k((lastW(rr,"logprob_diff")||{}).logprob_diff,4)+'</td><td>'+k((lastW(rr,"grad_norm")||{}).grad_norm,3)+'</td>'+
+        '<td>'+dur(r.step_s)+'<div class="ns">round '+dur(r.round_s)+'</div>'+(cw&&cw.s>=60?'<div class="ns wt">current round'+(cw.round!=null?" "+cw.round:"")+' waiting for data '+dur(cw.s)+'</div>':"")+'</td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td><td>trainer '+esc(c.id)+'<div class="ns">'+esc((c.left||{}).reason||"")+'</div></td></tr>'};
   var unkRow=function(c){var ex=X[c.id]||{};return '<tr class="off"><td><div class="nn">'+rlDot("unknown")+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">no trainer or sampler events in this tape; not counted</div></td><td colspan="10">'+
     esc(c.source_lost?"tape source lost: "+String(c.source_lost.error||"").slice(0,120):"")+'</td></tr>'};
   var liveC=act.filter(function(c){return rlLive(c.status)||c.status==="stale"}),endC=act.filter(function(c){return liveC.indexOf(c)<0});
@@ -463,50 +524,86 @@ function rlm(V){
     (unk.length?'<details class="ended"><summary class="ns">'+unk.length+' unrecognized tape(s)</summary><table class="nt">'+unk.map(unkRow).join("")+'</table></details>':"");
   // fleet charts
   $("rFleetH").textContent="Fleet over the last "+rangeLabel();
-  var ser=function(L,key,f){return L.map(function(c){return {name:c.label,color:c.color,pts:RR(c).map(function(r){return [r.ts,f?f(r):r[key]]})}})};
-  var sser=function(key,f){return sps.map(function(c){return {name:c.label,color:c.color,dash:true,pts:SR(c).map(function(r){return [r.ts,f?f(r):r[key]]})}})};
+  // a trainer point carries the launch that trained it (the newest launch started before it): a relaunch breaks the line
+  var lOf=function(c,t){var ls=(c.launches||[]).filter(function(x){return fin(x.first_ts)&&x.first_ts<=t}).sort(function(a,b){return a.first_ts-b.first_ts});return ls.length?ls[ls.length-1].launch:"-"};
+  var ser=function(L,key,f){return L.map(function(c){return {name:c.label,color:c.color,pts:RR(c).map(function(r){return [r.ts,f?f(r):r[key],lOf(c,r.ts)]})}})};
+  var sser=function(key,f){return sps.map(function(c){return {name:c.label,color:c.color,dash:true,pts:SR(c).map(function(r){return [r.ts,f?f(r):r[key],r.incarnation]})}})};
+  // sampler reward: group-weighted rolling mean over the last n groups (whole rounds, newest first);
+  // each point keeps its own round's mean (.raw) for the tooltip
+  var roll=function(rows,n,inc){var w=[],out=[];rows.forEach(function(r){if(!fin(r.reward_mean)||!(r.groups>0))return;w.push(r);var g=0,v=0;
+    for(var j=w.length-1;j>=0&&g<n;j--){g+=w[j].groups;v+=w[j].groups*w[j].reward_mean}var p=inc?[r.ts,v/g,r.incarnation]:[r.ts,v/g];p.raw=r.reward_mean;out.push(p)});return out};
+  // many samplers (more than SAMPLER_LINES): one aggregate per chart, each sampler's own line behind
+  // the legend toggle; up to SAMPLER_LINES they are drawn one by one
+  var MANY=sps.length>SAMPLER_LINES,SC="#fb923c",XL="each sampler";
+  var pooled=function(get){var b={},bk=Math.max(120,RANGE_H*3600/40);sps.forEach(function(c){get(c).forEach(function(p){if(fin(p[0])&&fin(p[1])){var x=Math.floor(p[0]/bk)*bk;(b[x]=b[x]||[]).push(p[1])}})});
+    var xs=Object.keys(b).map(Number).sort(function(a,c){return a-c}),mid=[],band=[];
+    xs.forEach(function(x){var v=b[x].sort(function(a,c){return a-c});mid.push([x+bk/2,pctl(v,0.5)]);band.push([x+bk/2,pctl(v,0.9),pctl(v,0.1)])});return {mid:mid,band:band}};
+  // sampler series of a chart: [aggregate series], [per-sampler series]
+  var spSeries=function(name,get,o){o=o||{};var each=sps.map(function(c){return {name:c.label+(o.suffix||""),color:c.color,dash:o.dash,pts:get(c)}});
+    if(!MANY)return {series:each,extra:[]};var q=pooled(get);
+    return {series:[{name:"samplers p50 ("+sps.length+")"+(o.suffix||""),color:SC,dash:o.dash,pts:q.mid}].concat(o.noBand?[]:[{name:"samplers p10–p90",color:SC,band:true,legend:false,pts:q.band}]),extra:each}};
   var evs=cs.filter(function(c){return ((X[c.id]||{}).evals||[]).length});
   var g=[];if(evs.length)g.push(["rfEval","Held-out eval","rl_eval: "+esc(((X[evs[0].id].evals[0])||[])[2]||"")]);
-  g=g.concat([["rfRew","Reward","trained batch mean per trainer round (solid); sampler round mean (dashed), one line per shard across its restarts. Dotted marks: −sN NC pool took sampler shard N out (restart / fenced / released / lost), +sN shard N ready again (#k = k-th restart), ↻ new sampler incarnation / trainer relaunch; hover a mark for the reason"],["rfKl","train-rollout KL","trainer vs sampler logprobs (train_metrics.train_rollout_kl) per trainer round"],["rfPkl","PPO KL","trainer policy vs the old logprobs of the batch (train_metrics.ppo_kl); near 0 with one optimizer step per batch"],
-    ["rfLp","logprob |diff|","train vs rollout logprob abs diff per round"],["rfTis","TIS clipfrac","share of tokens whose IS weight was clipped"],["rfGn","grad_norm","per trainer round"],
-    ["rfLr","Learning rate","applied lr per round"],["rfStep","Trainer step time","train step seconds (solid); round wall time (dashed)"],["rfTps","Tokens / s","stacked by trainer; tok_per_s interpolated onto one time grid, then summed"],
-    ["rfHbm","HBM","mean used GiB over each island's GPUs (NVML / host probe)"],["rfHost","Host memory","per node, from the Modal host probe (YETO_MODAL_HOSTMEM_SAMPLE_S)"],
-    ["rfRound","Sampler round time","generate seconds per sampler round"],["rfAge","Group policy age","trained groups' mean policy age per trainer round (solid); sampler version lag (dashed)"],
+  g=g.concat([["rfRew","Reward","trainer: batch mean per trained step (solid). Samplers: group-weighted mean of the last "+(sps.length>1?REW_WIN+"×"+sps.length+" groups over all samplers (dashed; each sampler's own line from the legend toggle"+(MANY?")":", open by default)"):REW_WIN+" groups (dashed)")+"; hover shows the round's own mean. Triangles above every fleet chart: restarts and pool events (merged within 2 min), hover for details. Lines break at gaps over 3× the usual spacing and at a new incarnation"],["rfKl","train-rollout KL","trainer vs sampler logprobs (train_metrics.train_rollout_kl) per trainer round"],["rfPkl","PPO KL","trainer policy vs the old logprobs of the batch (train_metrics.ppo_kl); near 0 with one optimizer step per batch"],
+    ["rfLp","logprob |diff|","train vs rollout logprob abs diff per round"],["rfTis","TIS / IS clipped","share of tokens whose IS weight was clipped: mismatch.tis_clipfrac, with score centering train_metrics.sc_is_clipped"],["rfGn","grad_norm","per trainer round"],
+    ["rfLr","Learning rate","rl_round_trained.applied_lrs[0] (applied_lr): the lr the trainer reports per round; the engine's own log line (e.g. Miles lr-pg_0) is not on the tapes"],["rfStep","Trainer step time","train step seconds (solid); round wall time (dashed)"],["rfTps","Tokens / s","stacked by trainer; tok_per_s interpolated onto one time grid, then summed"],
+    ["rfHbm","HBM","mean used GiB over each island's GPUs (NVML / host probe)"+(MANY?"; samplers: p50 and p10–p90 band":"")],["rfHost","Host memory","per node, from the Modal host probe (YETO_MODAL_HOSTMEM_SAMPLE_S)"],
+    ["rfRound","Sampler round time","generate seconds per sampler round"+(MANY?"; p50 and p10–p90 band over samplers":"")],["rfAge","Group policy age","trained groups' mean policy age per trainer round (rl_round_trained.policy_age_groups); sampler version lag per round"],
     ["rfResp","Response length","mean tokens per sample. Trainer (solid): model-generated tokens only (loss mask); trainer full (dotted, newer tapes) and sampler (dashed): whole response incl. tool / env tokens"],["rfBl","Buffer backlog","groups written − trainers' read position (solid); sampler-reported (dots)"],
-    ["rfRel","Release → load latency","per sampler: load done − trainer release, one point per policy version"],["rfDrop","Rejected groups / samples","per bucket: stale (trainers), zero-variance, truncated, infra drops (samplers)"]]);
+    ["rfRel","Release → load latency","per sampler: load done − trainer release, one point per policy version"],["rfDrop","Rejected groups / samples","counts per time bucket: groups (stale, zero-variance, infra drops) and samples (truncated); hover for each count. Zero-variance from the trainer (rl_local_round ratio × trained groups) is trained with zero advantage, from samplers it is dropped"]]);
   $("rFleet").innerHTML=g.map(function(x){return card(x[0],x[1],x[2])}).join("");
   var axs=function(o){o.yaxis=true;return o},mag=function(o){o.yaxis=true;o.y0=true;return o}; // magnitudes / fractions: the axis starts at 0
   var f3=function(v){return k(v,3)},f4=function(v){return v.toPrecision(3)};
   if(evs.length)chart("rfEval",{series:evs.map(function(c){return {name:c.label,color:c.color,pts:X[c.id].evals.map(function(e){return [e[0],e[1]]})}}),yfmt:f3,y0:false,dots:true});
   var shN=function(x){var m=/-(\d+)$/.exec(String(x==null?"":x));return m?"s"+m[1]:String(x==null?"?":x)};
-  var vm=[];sps.forEach(function(c){((S[c.id]||{}).restarts||[]).forEach(function(x){vm.push({t:x.ts,color:c.color,short:"↻"+shN(c.id),label:c.label+" restarted (incarnation "+x.incarnation+")"})})});
-  trs.forEach(function(c){(c.launches||[]).slice(1).forEach(function(x){vm.push({t:x.first_ts,color:c.color,short:"↻trainer",label:c.label+" relaunched ("+x.launch+")"})})});
+  var vm=[];sps.forEach(function(c){((S[c.id]||{}).restarts||[]).forEach(function(x){vm.push({t:x.ts,color:c.color,label:"↻ "+c.label+" restarted (incarnation "+x.incarnation+")"})})});
+  trs.forEach(function(c){(c.launches||[]).slice(1).forEach(function(x){vm.push({t:x.first_ts,color:c.color,label:"↻ "+c.label+" relaunched ("+x.launch+")"})})});
   var PMK={member_ready:["+","ready"],sampler_restart:["−","restart"],released:["−","released"],released_externally:["−","released"],shard_fenced:["−","fenced"],
     evicted:["−","evicted"],expired:["−","expired"],node_lost:["−","node lost"],sampler_crash_loop:["−","crash loop"],scaled_down:["−","scaled down"],manual_release_detected:["−","released by hand"],manual_pause:["−","paused by hand"],manual_resume:["+","resumed by hand"],scale_draining:["−","draining (scale down)"],start_failed:["−","start failed"],start_retry:["↻","start retry"],sampler_vram_high:["!","VRAM high"],stale_handoff_set_aside:["+","stale stop request set aside"],node_reachable_again:["+","reachable"]};
   (A.pool||[]).forEach(function(p){var e=String(p.event||"").replace("nc_elastic_",""),m=PMK[e];if(!m)return;var why=p.detail||p.why||p.reason||p.error||(p.max_frac!=null?"max "+(100*p.max_frac).toFixed(1)+"% of a GPU":"");
-    var sc=sps.filter(function(c){return String(c.id)===String(p.shard)})[0];vm.push({t:p.ts,color:sc?sc.color:null,short:m[0]+shN(p.shard)+" "+m[1]+(e==="member_ready"&&fin(p.restarts)&&p.restarts>0?" #"+p.restarts:""),
-      label:"NC pool: sampler shard "+(p.shard==null?"?":p.shard)+" "+m[1]+(p.ticket?" · ticket "+p.ticket:"")+(fin(p.restarts)?" · restarts "+p.restarts:"")+(why?" · "+String(why).slice(0,160):"")})});
-  chart("rfRew",{series:ser(trs,"reward").concat(sser("reward_mean")),yfmt:f3,y0:false,vmarks:vm});
-  chart("rfKl",mag({series:ser(trs,"kl_tr"),yfmt:f4}));chart("rfPkl",mag({series:ser(trs,"kl"),yfmt:f4}));
-  chart("rfLp",mag({series:ser(trs,"logprob_diff"),yfmt:f4}));chart("rfTis",mag({series:ser(trs,"tis_clip"),yfmt:f4}));chart("rfGn",mag({series:ser(trs,"grad_norm"),yfmt:f3}));
-  chart("rfLr",axs({series:ser(trs,"lr"),yfmt:function(v){return v.toExponential(2)}}));
-  chart("rfStep",{series:ser(trs,"step_s").concat(trs.map(function(c){return {name:c.label+" round",color:c.color,dash:true,legend:false,pts:RR(c).map(function(r){return [r.ts,r.round_s]})}})),yfmt:dur});
-  chart("rfTps",{kind:"stack",interp:600,series:ser(trs,"tok_s"),yfmt:k});
-  chart("rfHbm",{series:cs.map(function(c){var ns=(X[c.id]||{}).node_series||{},n=Object.keys(ns)[0];return {name:c.label,color:c.color,pts:n?ns[n].map(function(p){return [p[0],p[1]]}):[]}}),yfmt:function(v){return v.toFixed(0)+" G"}});
-  chart("rfHost",{series:[]});
-  chart("rfRound",{series:sps.map(function(c){return {name:c.label,color:c.color,pts:SR(c).map(function(r){return [r.ts,r.generate_s]})}}),yfmt:dur});
-  var ageMean=function(r){var a=(TR[r._c]||{}),h=r.ages||{},n=0,s=0;Object.keys(h).forEach(function(x){if(fin(h[x])&&!isNaN(+x)){n+=h[x];s+=h[x]*(+x)}});return n?s/n:null};
-  chart("rfAge",{series:trs.map(function(c){return {name:c.label,color:c.color,pts:((TR[c.id]||{}).rounds||[]).map(function(r){return [r.ts,ageMean(r)]})}}).concat(sser("version_lag")),yfmt:function(v){return v.toFixed(1)},dots:true});
-  chart("rfResp",mag({series:trs.map(function(c){return {name:c.label+" generated (loss mask)",color:c.color,pts:RR(c).map(function(r){return [r.ts,r.resp_mean]})}})
-    .concat(trs.map(function(c){return {name:c.label+" full",color:c.color,dash:"1 3",pts:RR(c).map(function(r){return [r.ts,r.resp_full_mean]})}}).filter(function(x){return x.pts.some(function(p){return fin(p[1])})}))
-    .concat(sps.map(function(c){return {name:c.label+" full",color:c.color,dash:true,pts:SR(c).map(function(r){return [r.ts,r.resp_len_mean]})}})),yfmt:k}));
-  chart("rfBl",{series:[{name:"backlog",color:PAL[3],pts:bl?bl.points.map(function(p){return [p[0],p[3]]}):[]}].concat(sps.map(function(c){return {name:c.label+" reported",color:c.color,pts:((S[c.id]||{}).backlog||[]).map(function(p){return [p[0],p[1]]}),legend:true}})),yfmt:k,
+    var sc=sps.filter(function(c){return String(c.id)===String(p.shard)})[0];vm.push({t:p.ts,color:sc?sc.color:null,
+      label:m[0]+shN(p.shard)+" NC pool: sampler shard "+(p.shard==null?"?":p.shard)+" "+m[1]+(p.ticket?" · ticket "+p.ticket:"")+(fin(p.restarts)?" · restarts "+p.restarts:"")+(why?" · "+String(why).slice(0,160):"")})});
+  var fc=function(id,o){o.vmarks=vm;return chartTs(id,o)}; // every fleet time chart carries the same marker strip
+  var each=sps.map(function(c){return {name:c.label+" (mean of last "+REW_WIN+" groups)",color:c.color,dash:true,pts:roll(SR(c),REW_WIN,true)}});
+  var allR=[];sps.forEach(function(c){allR=allR.concat(SR(c))});allR.sort(function(a,b){return a.ts-b.ts});
+  // two or more samplers: the pooled mean is the line to read; each sampler's own line is open by default up to SAMPLER_LINES
+  var POOL=sps.length>1;
+  fc("rfRew",{series:ser(trs,"reward").concat(POOL?[{name:"all "+sps.length+" samplers (mean of last "+REW_WIN*sps.length+" groups)",color:SC,dash:true,width:2,pts:roll(allR,REW_WIN*sps.length,false)}]:each),
+    extra:POOL?each:[],extraOpen:!MANY,extraLabel:XL,yfmt:f3,y0:false});
+  fc("rfKl",mag({series:ser(trs,"kl_tr"),yfmt:f4}));fc("rfPkl",mag({series:ser(trs,"kl"),yfmt:f4}));
+  fc("rfLp",mag({series:ser(trs,"logprob_diff"),yfmt:f4}));fc("rfTis",mag({series:ser(trs,"tis_clip",function(r){return fin(r.tis_clip)?r.tis_clip:r.is_clip}),yfmt:f4}));fc("rfGn",mag({series:ser(trs,"grad_norm"),yfmt:f3}));
+  fc("rfLr",axs({series:ser(trs,"lr"),yfmt:function(v){return v.toExponential(2)}}));
+  fc("rfStep",{series:ser(trs,"step_s").concat(trs.map(function(c){return {name:c.label+" round",color:c.color,dash:true,legend:false,pts:RR(c).map(function(r){return [r.ts,r.round_s,lOf(c,r.ts)]})}})),yfmt:dur});
+  fc("rfTps",{kind:"stack",interp:600,series:ser(trs,"tok_s"),yfmt:k});
+  var hbmPts=function(c){var ns=(X[c.id]||{}).node_series||{},n=Object.keys(ns)[0];return n?ns[n].map(function(p){return [p[0],p[1]]}):[]};
+  var hs=spSeries("HBM",hbmPts);
+  fc("rfHbm",{series:cs.filter(function(c){return c.role!=="sampler"}).map(function(c){return {name:c.label,color:c.color,pts:hbmPts(c)}}).concat(hs.series),extra:hs.extra,extraLabel:XL,yfmt:function(v){return v.toFixed(0)+" G"}});
+  fc("rfHost",{series:[]});
+  var rs=spSeries("round",function(c){return SR(c).map(function(r){return [r.ts,r.generate_s,r.incarnation]})});
+  fc("rfRound",{series:rs.series,extra:rs.extra,extraLabel:XL,yfmt:dur});
+  // trained groups' mean policy age: the round's age histogram, else the trainer's own mean (rl_round_trained.policy_age_mean; newer tapes carry no histogram)
+  var ageMean=function(r){var h=r.ages||{},n=0,s=0;Object.keys(h).forEach(function(x){if(fin(h[x])&&!isNaN(+x)){n+=h[x];s+=h[x]*(+x)}});return n?s/n:fin(r.policy_age_mean)?r.policy_age_mean:null};
+  var ls=spSeries("lag",function(c){return SR(c).map(function(r){return [r.ts,r.version_lag,r.incarnation]})},{suffix:" version lag",noBand:true});
+  fc("rfAge",{series:trs.map(function(c){return {name:c.label+" trained groups",color:c.color,pts:((TR[c.id]||{}).rounds||[]).map(function(r){return [r.ts,ageMean(r)]})}}).concat(ls.series),extra:ls.extra,extraLabel:XL,
+    yfmt:function(v){return v.toFixed(1)},yaxis:true,yint:true,y0:true,dots:true});
+  var rsp=spSeries("resp",function(c){return SR(c).map(function(r){return [r.ts,r.resp_len_mean,r.incarnation]})},{suffix:" full",dash:true});
+  fc("rfResp",mag({series:trs.map(function(c){return {name:c.label+" generated (loss mask)",color:c.color,pts:RR(c).map(function(r){return [r.ts,r.resp_mean,lOf(c,r.ts)]})}})
+    .concat(trs.map(function(c){return {name:c.label+" full",color:c.color,dash:"1 3",pts:RR(c).map(function(r){return [r.ts,r.resp_full_mean,lOf(c,r.ts)]})}}).filter(function(x){return x.pts.some(function(p){return fin(p[1])})}))
+    .concat(rsp.series),extra:rsp.extra,extraLabel:XL,yfmt:k}));
+  var bls=sps.map(function(c){return {name:c.label+" reported",color:c.color,pts:((S[c.id]||{}).backlog||[]).map(function(p){return [p[0],p[1]]}),empty:"never full in range"}}); // it reports only when its backlog is full
+  fc("rfBl",{series:[{name:"backlog",color:PAL[3],pts:bl?bl.points.map(function(p){return [p[0],p[3]]}):[]}].concat(MANY?[]:bls),extra:MANY?bls:[],extraLabel:"each sampler's own count",yfmt:k,
     refs:caps.length?[{y:sum(caps),label:"caps "+sum(caps),legend:"sum of backlog caps",color:"#eab308"}]:[]});
-  chart("rfRel",{dots:true,series:sps.map(function(c){return {name:c.label,color:c.color,pts:(A.releases||[]).map(function(x){var l=(x.loads||{})[c.id];return l&&!l.at_start?[l.loaded_at,l.latency_s]:null}).filter(Boolean)}}),yfmt:dur});
+  var rel=sps.map(function(c){return {name:c.label,color:c.color,pts:(A.releases||[]).map(function(x){var l=(x.loads||{})[c.id];return l&&!l.at_start?[l.loaded_at,l.latency_s]:null}).filter(Boolean)}});
+  fc("rfRel",{dots:true,series:MANY?[{name:"all samplers",color:SC,pts:[].concat.apply([],rel.map(function(x){return x.pts}))}]:rel,extra:MANY?rel:[],extraLabel:XL,yfmt:dur});
   var tb=function(key){var o=[];trs.forEach(function(c){((TR[c.id]||{}).rounds||[]).forEach(function(r){if(fin(r.ts)&&r[key]>0)o.push([r.ts,r[key]])})});return o};
   var sb=function(key){var o=[];sps.forEach(function(c){SR(c).forEach(function(r){if(r[key]>0)o.push([r.ts,r[key]])})});return o};
-  chart("rfDrop",{kind:"bars",series:[{name:"stale",color:PAL[3],pts:tb("stale_groups")},{name:"zero-variance",color:PAL[5],pts:sb("zero_variance_dropped").length?sb("zero_variance_dropped"):sb("zero_variance_seen")},
-    {name:"truncated (samples)",color:PAL[1],pts:sb("truncated")},{name:"infra",color:PAL[8],pts:sb("dropped_groups")}],yfmt:function(v){return +v.toFixed(1)+""}});
+  // the source reports the count (zeros included) in range: an empty series is "0 so far", not "no data"
+  var tz=function(key){return trs.some(function(c){return ((TR[c.id]||{}).rounds||[]).some(function(r){return fin(r[key])&&inR(r.ts,t0,t1)})})?"0 so far":null};
+  var sz=function(key){return sps.some(function(c){return SR(c).some(function(r){return fin(r[key])&&inR(r.ts,t0,t1)})})?"0 so far":null};
+  var zvs=sb("zero_variance_dropped").length?sb("zero_variance_dropped"):sb("zero_variance_seen"),zvt=[].concat.apply([],trs.map(zvT)).filter(function(p){return p[1]>0});
+  fc("rfDrop",{kind:"bars",series:[{name:"stale groups",color:PAL[3],pts:tb("stale_groups"),empty:tz("stale_groups")},
+    {name:zvs.length?"zero-variance groups (samplers, dropped)":"zero-variance groups (trainer, zero advantage)",color:PAL[5],pts:zvs.length?zvs:zvt},
+    {name:"truncated samples",color:PAL[1],pts:sb("truncated"),empty:sz("truncated")},{name:"infra-dropped groups",color:PAL[8],pts:sb("dropped_groups"),empty:sz("dropped_groups")}],yfmt:function(v){return +v.toFixed(1)+""},yaxis:true,yint:true});
   foldEmpty(g,"rFleetNone");balanceGrid("rFleet",340,4);
   rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp);
 }
@@ -514,34 +611,40 @@ function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
   $("rCostH").textContent="Cost / efficiency over the last "+rangeLabel();
   var X=V.islands||{};
   var waitS=function(c,a,b){return sum(((X[c.id]||{}).rounds||[]).filter(function(r){return r.phases&&r.phases.R&&inR(r.phases.R[1],a,b)}).map(function(r){return r.dur.R}))};
-  function agg(a,b){var o={groups:0,tok:0,billT:0,billS:0,effT:0,effS:0,wait:0,wall:0};
-    cs.forEach(function(c){var bh=rlBilled(V,c),span=bh.src==="events"?[bh.a,bh.b]:[((X[c.id]||{}).ready_ts)||(X[c.id]||{}).first_ts,(X[c.id]||{}).last_ts];
-      var ov=fin(span[0])&&fin(span[1])?Math.max(0,Math.min(b,span[1])-Math.max(a,span[0])):0,cards=c.cards;
+  var CW={};trs.forEach(function(c){var w=curWait(V,c);if(w)CW[c.id]=w});
+  function agg(a,b){var o={groups:0,tok:0,billT:0,billS:0,effT:0,effS:0,wait:0,wall:0,cur:0};
+    cs.forEach(function(c){var bh=rlBilled(V,c),span=bh.src==="events"?null:[((X[c.id]||{}).ready_ts)||(X[c.id]||{}).first_ts,(X[c.id]||{}).last_ts];
+      var ov=span?(fin(span[0])&&fin(span[1])?Math.max(0,Math.min(b,span[1])-Math.max(a,span[0])):0):spanOverlap(bh.spans||[],a,b),cards=c.cards;
       if(c.role==="sampler"){o.billS+=ov*cards;SR(c).forEach(function(r){if(inR(r.ts,a,b)){o.effS+=(r.generate_s||0)*cards;o.groups+=r.groups||0}})}
-      else{o.billT+=ov*cards;RR(c).forEach(function(r){if(inR(r.ts,a,b)){o.effT+=(r.step_s||0)*cards;o.tok+=r.tokens||0;o.wall+=r.round_s||0}});o.wait+=waitS(c,a,b)}});
-    o.bill=o.billT+o.billS;o.eff=o.effT+o.effS;o.util=o.bill?o.eff/o.bill:null;o.tpc=o.billT?o.tok/o.billT:null;o.ws=o.wall?o.wait/o.wall:null;return o}
+      else{o.billT+=ov*cards;RR(c).forEach(function(r){if(inR(r.ts,a,b)){o.effT+=(r.step_s||0)*cards;o.tok+=r.tokens||0;o.wall+=r.round_s||0}});o.wait+=waitS(c,a,b);
+        var w=CW[c.id];if(w)o.cur+=spanOverlap([[w.since,NOW]],a,b)}}); // the round in progress, still waiting
+    o.bill=o.billT+o.billS;o.eff=o.effT+o.effS;o.util=o.bill?o.eff/o.bill:null;o.tpc=o.billT?o.tok/o.billT:null;o.wsDone=o.wall?o.wait/o.wall:null;o.ws=o.wall+o.cur?(o.wait+o.cur)/(o.wall+o.cur):null;return o}
   var A=agg(t0,t1),B=agg(tp,t0);
   function delta(a,b,fmt){if(!fin(a)||!fin(b)||!b)return '<span class="dl">no previous '+rangeLabel()+'</span>';var d=a-b,p=100*d/b;
     return '<span class="dl '+(d>=0?"up":"dn")+'">'+(d>=0?"&uarr; +":"&darr; ")+esc(fmt(d))+' · '+(p>=0?"+":"")+p.toFixed(0)+'% vs previous '+rangeLabel()+'</span>'}
   var pc=function(v){return fin(v)?(100*v).toFixed(1)+"%":"n/a"},ch=function(s){return k(s/3600,1)};
   var nc=sps.some(function(c){return rlBilled(V,c).src==="events"});
   var ck=[["Groups / tokens",k(A.groups,0)+" / "+k(A.tok),"groups written by samplers / tokens trained",delta(A.groups,B.groups,function(v){return k(v,0)})],
-    ["Card-hours",ch(A.billT)+" + "+ch(A.billS),"trainers + samplers"+(nc?"; NC samplers: first → last event (lease not on the tapes)":""),delta(A.bill,B.bill,ch)],
+    ["Card-hours",ch(A.billT)+" + "+ch(A.billS),"trainers + samplers"+(nc?"; samplers outside the fleet ledger: union of their incarnations' first → last event (a lower bound: boot before the first event is not on the tapes)":""),delta(A.bill,B.bill,ch)],
     ["Tokens / card·s",k(A.tpc),"trained tokens ÷ trainer card-seconds",delta(A.tpc,B.tpc,k)],
     ["MFU","n/a","the RL tapes carry no FLOP counts",""],
     ["GPU effective utilization",pc(A.util),"(train step + generate time) × cards ÷ billed card time · trainers "+pc(A.billT?A.effT/A.billT:null)+" · samplers "+pc(A.billS?A.effS/A.billS:null),delta(A.util,B.util,function(v){return (100*v).toFixed(1)+" pt"})],
-    ["Trainer waiting for data",pc(A.ws),"rollout phase (waiting on the buffer) ÷ round wall time",delta(A.ws,B.ws,function(v){return (100*v).toFixed(1)+" pt"})],
+    ["Trainer waiting for data",pc(A.ws),"rollout phase (waiting on the buffer) ÷ round wall time, including the round in progress"+
+      (Object.keys(CW).length?" · now: "+Object.keys(CW).map(function(i){return "trainer "+i+" waiting "+dur(CW[i].s)}).join(", ")+" · completed rounds only "+pc(A.wsDone):""),delta(A.ws,B.ws,function(v){return (100*v).toFixed(1)+" pt"})],
     ["Projected finish","n/a","the tapes carry no total round count",""]];
   $("rCostK").innerHTML=ck.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div>'+x[3]+'</div>'}).join("");
   $("rCost").innerHTML=card("rcG","Groups per hour","stacked by sampler")+card("rcCh","Card-hours per hour","billed card time vs effective (train step / generate)")+
-    card("rcW","Trainer waiting per hour","rollout-phase seconds (waiting on the buffer) per trainer")+card("rcPv","Groups by policy version","per hour, stacked by the version the sampler generated with (no task labels on the tapes)");
+    card("rcW","Trainer waiting per hour","rollout-phase seconds (waiting on the buffer) per trainer; yellow: the round still waiting now")+card("rcPv","Groups by policy version","per hour, stacked by the version the sampler generated with (no task labels on the tapes)");
   chart("rcG",{kind:"bars",bucket:3600,series:sps.map(function(c){return {name:c.label,color:c.color,pts:SR(c).map(function(r){return [r.ts,r.groups]})}}),yfmt:k});
   var HB=RANGE_H<=1?600:3600,hrs=[];for(var h=Math.floor(t0/HB)*HB;h<t1;h+=HB)hrs.push(h);
   var bill=hrs.map(function(h){var a=agg(h,h+HB);return [[h+HB/2,a.bill/3600],[h+HB/2,a.eff/3600]]});
   chart("rcCh",{series:[{name:"Card-hours",color:PAL[0],pts:bill.map(function(x){return x[0]}).filter(function(p){return p[1]>0})},{name:"Effective",color:PAL[2],pts:bill.map(function(x){return x[1]}).filter(function(p,i){return bill[i][0][1]>0})}],yfmt:function(v){return k(v,2)}});
-  chart("rcW",{kind:"bars",bucket:3600,series:trs.map(function(c){return {name:c.label,color:c.color,pts:((X[c.id]||{}).rounds||[]).filter(function(r){return r.phases&&r.phases.R}).map(function(r){return [r.phases.R[1],r.dur.R]})}}),yfmt:dur});
+  // the round in progress: its waiting so far, split per hour bucket, in a lighter bar on top
+  var cwPts=function(c){var w=CW[c.id],o=[];if(!w)return o;for(var h=Math.floor(w.since/3600)*3600;h<NOW;h+=3600){var v=spanOverlap([[w.since,NOW]],h,h+3600);if(v>0)o.push([Math.min(NOW,Math.max(w.since,h+1)),v])}return o};
+  chart("rcW",{kind:"bars",bucket:3600,series:trs.map(function(c){return {name:c.label,color:c.color,pts:((X[c.id]||{}).rounds||[]).filter(function(r){return r.phases&&r.phases.R}).map(function(r){return [r.phases.R[1],r.dur.R]})}})
+    .concat(trs.filter(function(c){return CW[c.id]}).map(function(c){return {name:c.label+" current round (in progress)",color:"#eab308",pts:cwPts(c)}})),yfmt:dur});
   var pv={};sps.forEach(function(c){SR(c).forEach(function(r){var v=r.policy_version==null?"?":"v"+r.policy_version;(pv[v]=pv[v]||[]).push([r.ts,r.groups])})});
-  chart("rcPv",{kind:"bars",bucket:3600,series:Object.keys(pv).sort().map(function(v,i){return {name:v,color:PAL[i%PAL.length],pts:pv[v]}}),yfmt:k});
+  chart("rcPv",{kind:"bars",bucket:3600,series:Object.keys(pv).sort(function(a,b){return (parseInt(a.slice(1),10)||-1)-(parseInt(b.slice(1),10)||-1)}).map(function(v,i){return {name:v,color:PAL[i%PAL.length],pts:pv[v]}}),yfmt:k});
   foldEmpty([["rcG","Groups per hour","stacked by sampler"],["rcCh","Card-hours per hour",""],["rcW","Trainer waiting per hour",""],["rcPv","Groups by policy version",""]],"rCostNone");balanceGrid("rCost",340,4);
 }
 function render(view,offline){
@@ -550,8 +653,9 @@ function render(view,offline){
   // until the viewer picks a range, show the whole run in the smallest window that holds it:
   // an export once (its data is fixed), the live page on every render (1h, then 6h ... as the
   // run grows), so a run younger than an hour is not squeezed into the right edge of 24h
-  if(!RANGE_SET&&!S){var o0=V.overview||{},end=offline?o0.data_ts:NOW,sp=fin(end)&&fin(o0.first_ts)?(end-o0.first_ts)/3600:null;
-    if(fin(sp))RANGE_H=(RANGES.filter(function(r){return r[1]>=sp})[0]||RANGES[RANGES.length-1])[1];if(offline)RANGE_SET=true}
+  if(RANGE_RUN===null)RANGE_RUN=!S;
+  if(RANGE_RUN){var o0=V.overview||{},end=offline?(o0.data_ts||NOW):NOW,sp=fin(end)&&fin(o0.first_ts)?(end-o0.first_ts)/3600:null;
+    if(fin(sp))RANGE_H=Math.max(0.25,sp*1.03+2/60)} // a little room before the first event
   var sroot=$("sftRoot"),rroot=$("rlRoot");
   var RL=!S&&!!$("rlmRoot");
   if(document.body&&document.body.classList)document.body.classList.toggle("sftmode",!!S||RL);
@@ -565,5 +669,5 @@ function render(view,offline){
   else{rlDist(V);if(RL){var lay=String((($("title")||{}).innerHTML)||"").replace(/<[^>]*>/g,"").split(" · ")[0],tg=(V.async?"RL · async GRPO":"RL")+(lay?" · "+lay:"");$("title").innerHTML='yeto metrics <span class="tg">'+esc(run||"unnamed run")+'</span><span class="tg">'+tg+'</span>';
     document.title="yeto metrics · "+(run||"RL");$("sub").textContent="updated "+clock(offline?NOW:Date.now()/1000,true)+" · times in your local zone"+(offline?" · offline export, data as of "+day(NOW):" · live");rlm(V)}}
 }
-return {bins:bins,evalTip:evalTip,durAxis:durAxis,durTicks:durTicks,numAxis:numAxis,nice:nice,interpStack:interpStack,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
+return {markClusters:markClusters,segments:segments,spanUnion:spanUnion,spanOverlap:spanOverlap,bins:bins,evalTip:evalTip,durAxis:durAxis,durTicks:durTicks,numAxis:numAxis,nice:nice,interpStack:interpStack,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
 })();

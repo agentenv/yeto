@@ -96,6 +96,8 @@ EXTRA_SERIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("logprob_diff", ("train_metrics.train_rollout_logprob_abs_diff", "train/train_rollout_logprob_abs_diff")),
     ("train_step", ("train_step",)),
     ("step_s", ("step_seconds",)),
+    # share of the round's groups whose rewards were all equal (zero advantage; rl_local_round)
+    ("zero_var_ratio", ("zero_variance_group_ratio",)),
 )
 
 
@@ -301,6 +303,9 @@ class Reducer:
         self._seen_digests: set[bytes] = set()  # timestamped events folded so far (_digest)
         self._launch_owner: dict[bytes, str] = {}  # store record -> the trainer launch that carried it first
         self.duplicates = 0  # records dropped as already folded from another source
+        self._source: str = "-"  # the source of the record being fed
+        self._source_inc: dict[str, str] = {}  # source -> sampler incarnation its last join named
+        self._source_pre: dict[str, float] = {}  # source -> earliest record time before its first join
         # the dashboard's own command line, for the page's "Commands" box (cli.page_commands)
         self.commands: dict[str, str] | None = None
 
@@ -357,6 +362,7 @@ class Reducer:
         elif kind == "learner" and iid is not None and source != "-":
             self._source_island[source] = iid
         self._superseded = False
+        self._source = source
         launch = _store_launch(source)
         if kind == "learner" and iid is not None and launch is not None:
             self._superseded = self._launch(self.island(iid), launch, ts)
@@ -531,13 +537,26 @@ class Reducer:
         if event in ("rl_sampler_join", "rl_sampler_start") and r.get("incarnation") is not None \
                 and str(r["incarnation"]) != (self.async_.sampler.get(iid) or {}).get("incarnation"):
             isl["finalized"] = False  # a new sampler incarnation: an earlier one's end is not this one's
-        self.async_.fold(r, iid, ts)
+        # a sampler tape names its incarnation in rl_sampler_join; the records before it (the
+        # engine start, the model load) belong to that incarnation too: its boot time
+        src, boot = self._source, None
+        if src != "-":
+            if event in ("rl_sampler_join", "rl_sampler_start") and r.get("incarnation") is not None:
+                self._source_inc[src] = str(r["incarnation"])
+                boot = self._source_pre.pop(src, None)
+            elif src not in self._source_inc and ts is not None and r.get("incarnation") is None:
+                self._source_pre[src] = min(ts, self._source_pre.get(src, ts))
+        self.async_.fold(r, iid, ts, self._source_inc.get(src, "" if src != "-" else None), boot)
         if r.get("policy_version") is not None and event in (
                 "rl_policy_apply", "rl_publication", "rl_driver_phase", "rl_heartbeat",
                 "rl_round_cut", "rl_member_publication", "rl_resume",
                 # a sampler's policy is the version it serves
                 "rl_sampler_round", "rl_sampler_policy_loaded"):
-            isl["policy_version"] = r.get("policy_version")
+            # the newest record wins, whatever order the tapes are read in (a run store lists a
+            # trainer's launch folders and an echo directory its rotated files by name)
+            if ts is None or isl.get("policy_version_ts") is None or ts >= isl["policy_version_ts"]:
+                isl["policy_version"] = r.get("policy_version")
+                isl["policy_version_ts"] = ts
         if event == "rl_island_hardware":  # decoupling 7.7: recorded, never a refusal reason
             isl["hardware"] = {k: r.get(k) for k in ("compat_group", "driver_version", "cuda_version")}
         if getattr(self, "_superseded", False) and (
@@ -556,8 +575,8 @@ class Reducer:
             isl.setdefault("driver_starts", []).append(ts)
         if event == "rl_driver_start" or (event in DRIVER_RUNNING_EVENTS and r.get("phase") != "startup"):
             isl["driver_started"] = True
-        if event == "rl_driver_phase":
-            isl["phase"] = r.get("phase")
+        if event == "rl_driver_phase" and (ts is None or isl.get("phase_ts") is None or ts >= isl["phase_ts"]):
+            isl["phase"], isl["phase_ts"] = r.get("phase"), ts
             if ts is not None and len(isl["phase_marks"]) < NODE_SERIES_MAX:
                 isl["phase_marks"].append((ts, r.get("phase"), r.get("rollout_id")))
         elif event == "rl_startup_step":
@@ -628,7 +647,10 @@ class Reducer:
                                 "bytes": r.get("cut_bytes"), "save_s": r.get("save_s"),
                                 "total_s": r.get("total_s")})
         elif event == "rl_learner_finalized":
-            isl["finalized"] = True
+            # a launch's finalize read after a newer launch began belongs to the older launch
+            if ts is None or isl.get("launch_ts") is None or ts >= isl["launch_ts"]:
+                isl["finalized"] = True
+                isl["finalized_ts"] = ts
         elif event == "rl_island_override":
             isl["negative_test"] = negative_test_label(r.get("overrides"))
         elif event == "rl_reconfiguration":
@@ -716,6 +738,7 @@ class Reducer:
             if j < len(pubs):
                 ph["P"] = [pubs[j]["start"], pubs[j]["end"]]
         pts = isl["points"]
+        shares = self.sampler_shares(isl)
         ids = sorted(set(rounds) | {x - 1 for x in pts})
         out = []
         for rid in ids:
@@ -729,13 +752,49 @@ class Reducer:
                 "resp_mean": pt.get("resp_len"), "resp_p95": pt.get("resp_p95"), "tok_s": pt.get("tok_s"),
                 "resp_full_mean": pt.get("resp_full"),
                 "grad_norm": pt.get("grad_norm"), "kl": pt.get("kl"), "kl_tr": pt.get("kl_tr"),
-                "tis_clip": pt.get("tis_clip"), "resp_derived": bool(pt.get("resp_len_derived")),
+                "tis_clip": pt.get("tis_clip"), "is_clip": pt.get("is_clip"),
+                "resp_derived": bool(pt.get("resp_len_derived")),
                 "ts": pt.get("t"), "lr": pt.get("lr"), "step_s": pt.get("step_s"), "round_s": pt.get("round_s"),
-                "tokens": pt.get("tokens"),
+                "tokens": pt.get("tokens"), "zero_var_ratio": pt.get("zero_var_ratio"),
                 "phases": ph, "dur": {k: round(v[1] - v[0], 1) for k, v in ph.items()},
                 "discarded_trainings": self.discarded_trainings(isl, rid),
+                "by_sampler": shares.get(rid),
             })
         return out
+
+    def sampler_shares(self, isl: dict) -> dict[int, dict]:
+        """Async buffer trainer: per trained round, what each sampler contributed: groups, samples,
+        the policy versions they were generated with, their mean age and mean reward. A sampler
+        names its trajectories ``<incarnation>-r<round>-row<row>-<sample>``, so the incarnation
+        prefix of rl_trajectory_reward.trajectory_id gives the sampler."""
+        owner = {x["incarnation"]: iid for iid, s in self.async_.sampler.items() for x in s.get("incarnations") or ()}
+        if not owner or not isl["trajs"]:
+            return {}
+        acc: dict[int, dict] = {}
+        for t in isl["trajs"]:
+            m = TRAJ_ID_RE.match(str(t.get("id") or ""))
+            sid = owner.get(m.group(1)) if m else None
+            if sid is None or t.get("rid") is None:
+                continue
+            a = acc.setdefault(t["rid"], {}).setdefault(sid, {"groups": set(), "samples": 0, "versions": set(),
+                                                             "rewards": [], "ages": []})
+            a["samples"] += 1
+            if t.get("group") is not None:
+                a["groups"].add(t["group"])
+            # generated with: the version segments of the trajectory ([version, from, to] per segment);
+            # rl_trajectory_reward.policy_version is the trainer's own version
+            gen = [x[0] if isinstance(x, list) and x else x for x in (t.get("versions") or ())]
+            gen = [v for v in gen if isinstance(v, int) and not isinstance(v, bool)]
+            if gen:
+                a["versions"].update(gen)
+                a["ages"].append(t["rid"] - min(gen))
+            if t.get("reward") is not None:
+                a["rewards"].append(t["reward"])
+        return {rid: {sid: {"groups": len(a["groups"]) or None, "samples": a["samples"],
+                            "versions": sorted(a["versions"]),
+                            "age_mean": round(sum(a["ages"]) / len(a["ages"]), 3) if a["ages"] else None,
+                            "reward_mean": round(sum(a["rewards"]) / len(a["rewards"]), 4) if a["rewards"] else None}
+                      for sid, a in by.items()} for rid, by in acc.items()}
 
     @staticmethod
     def discarded_trainings(isl: dict, rid: int) -> int:
@@ -820,7 +879,7 @@ class Reducer:
     def node_series(self, isl: dict) -> dict:
         out = {}
         for rank, ser in isl["node_series"].items():
-            rows = list(ser)
+            rows = sorted(ser, key=lambda p: p[0])  # tapes of several launches / incarnations interleave
             step = max(1, len(rows) // NODE_SERIES_POINTS)
             out[rank] = rows[::step]
         return out
@@ -1160,7 +1219,11 @@ class Reducer:
         warn_s = self.thresholds["heartbeat_warn_s"]
         if not isl["heartbeat_seen"] and gap is not None:
             warn_s = max(warn_s, gap)
-        trainers_done = role == "sampler" and self._trainers_done()
+        # a sampler "runs until its trainers end": done once they ended and it stopped writing groups;
+        # one still writing groups after the trainers finished is running (and billed), not done
+        trainers_done = role == "sampler" and self._trainers_done() and (
+            (self.async_.last_write_ts(isl["id"]) or 0) <= (self._trainers_end_ts() or float("inf"))
+            + SAMPLER_AFTER_TRAINERS_S)
         if stopped and not isl["finalized"]:
             status = "stopped"
             starting = False
@@ -1298,6 +1361,18 @@ class Reducer:
             return None
         return "unrecognized"
 
+    def _trainers_end_ts(self) -> float | None:
+        """When the last trainer ended (its finalize, leave or last event); None if unknown."""
+        ends = []
+        for i, role in self.async_.roles.items():
+            if role != "trainer" or i not in self.islands:
+                continue
+            isl = self.islands[i]
+            left = self._trainer_left(isl)
+            ends.append(isl.get("finalized_ts") or (left or {}).get("ts") or isl["last_event_ts"])
+        ends = [t for t in ends if t is not None]
+        return max(ends) if ends else None
+
     def _trainers_done(self) -> bool:
         ids = [i for i, role in self.async_.roles.items() if role == "trainer" and i in self.islands]
         return bool(ids) and all(
@@ -1418,6 +1493,24 @@ class Reducer:
                 isl["cpus"], isl["memory_gib"] = shape["cpus"], shape["memory_gib"]
                 isl["host_shape_source"] = "meta.json"
 
+    def island_states(self, now: float | None = None, *, live: bool = False) -> dict[str, dict]:
+        """Each island's state, one rule for every view (overview cards, Islands now, topology):
+        ``status`` (ok / waiting / starting / stale / stopped / left / lost / done / ...), ``alive``
+        (status in ALIVE_STATUSES), role, current launch and sampler incarnation, last event time.
+        A relaunched trainer is its new launch's state; a sampler is done only once its trainers
+        ended and it stopped writing groups (_island_card)."""
+        now = self.now(live) if now is None else now
+        out = {}
+        for iid in self.island_ids():
+            isl = self.islands[iid]
+            card = self._island_card(isl, now)
+            samp = self.async_.sampler.get(iid) or {}
+            out[iid] = {"status": card["status"], "alive": card["status"] in ALIVE_STATUSES,
+                        "role": card.get("role"), "starting": bool(card.get("starting")),
+                        "launch": isl.get("launch"), "incarnation": samp.get("incarnation"),
+                        "last_event_ts": isl.get("last_event_ts")}
+        return out
+
     def island_ids(self) -> list[str]:
         def key(i: str):
             return (0, int(i), "") if i.lstrip("-").isdigit() else (1, 0, i)
@@ -1531,6 +1624,10 @@ def _gpu_from_mem(mb: float | None) -> str | None:
 # island_leave reasons that end a run on purpose; a failed trainer (INFRA_FAILED ...)
 # is relaunched, so its samplers keep running and are not "done"
 CLEAN_LEAVE = frozenset({"STOPPED", "DONE", "FINISHED", "COMPLETED", "DRAINED"})
+# island statuses that mean the island is up (island_states / topology); everything else ended or is unknown
+ALIVE_STATUSES = frozenset({"ok", "waiting", "starting", "stale"})
+# a sampler that still writes groups this long after its trainers ended is running, not done
+SAMPLER_AFTER_TRAINERS_S = 300.0  # its last round in flight may finish a few minutes after
 
 
 def _restart(isl: dict, since: float | None) -> None:
@@ -1548,6 +1645,14 @@ def _restart(isl: dict, since: float | None) -> None:
         isl["startup_step"], isl["startup_step_ts"] = None, None
     if old(isl.get("start_phase_ts")):
         isl["start_phase"], isl["start_phase_ts"] = None, None
+    # an earlier launch that finished (rl_learner_finalized) does not finish this one, and its
+    # policy version is not this launch's until this launch reports one
+    if isl.get("finalized") and old(isl.get("finalized_ts")):
+        isl["finalized"], isl["finalized_ts"] = False, None
+    if isl.get("policy_version") is not None and old(isl.get("policy_version_ts")):
+        isl["policy_version"], isl["policy_version_ts"] = None, since
+    if old(isl.get("phase_ts")):
+        isl["phase"] = None
     isl["launch_ts"] = since
 
 
@@ -1596,6 +1701,9 @@ _SUMMARY_KEYS = ("phase", "rollout_id", "local_round_id", "policy_version", "rew
                  "grad_norm", "result", "global_step", "fragment_id", "error")
 
 
+TRAJ_ID_RE = re.compile(r"^(.+)-r\d+-row\d+-\d+$")  # <sampler incarnation>-r<round>-row<row>-<sample>
+
+
 def _traj(r: dict) -> dict:
     """Compact per-trajectory record. Missing = None."""
     out = {"rid": r.get("rollout_id") if isinstance(r.get("rollout_id"), int) else None,
@@ -1610,6 +1718,8 @@ def _traj(r: dict) -> dict:
     out["started_rid"] = sr if isinstance(sr, int) and not isinstance(sr, bool) else None
     pv = r.get("policy_versions")
     out["versions"] = pv if isinstance(pv, list) and pv else None
+    gi = r.get("group_index")
+    out["group"] = gi if isinstance(gi, int) and not isinstance(gi, bool) else None
     return out
 
 

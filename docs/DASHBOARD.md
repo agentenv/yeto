@@ -94,6 +94,36 @@ once they appear. `export` still refuses when none of its paths exists and no
 `--store` is given. The page's "Commands" box repeats this dashboard's own
 arguments (port, store, tapes ...), so a copied command reproduces it.
 
+## RL metrics page: fleet charts
+
+- **Window**: the header's `run` button (the RL default) spans the run itself, first event to
+  now; `1h` ... `30d` are fixed windows. The choice is remembered per browser.
+- **Marks**: restarts, relaunches and NC pool events are small triangles in a strip above every
+  fleet chart, one per island color; marks within 2 minutes merge into one (the count is shown)
+  and their labels are in the hover tooltip only.
+- **Line breaks**: a line breaks where two points are more than 3x the series' median spacing
+  apart, or where the sampler incarnation changes; node memory charts follow the same rule.
+- **Samplers**: up to two samplers are drawn one line each. With more, a chart draws one
+  aggregate (reward: the group-weighted mean of the last 8 x N groups over all samplers; round
+  time, response length, HBM: p50 with a p10-p90 band) and each sampler's line opens from the
+  legend toggle. The sampler reward is a group-weighted rolling mean of its last 8 groups; the
+  tooltip names the round's own mean.
+- **Incarnations** are read from the tape that carried a record (a run store lists incarnation
+  folders by name, not by time). An incarnation starts at its engine start (before its join).
+- **Card time** of a sampler outside `fleet.jsonl` is the union of its incarnations' first ->
+  last event: a lower bound, since boot before the first event is not on the tapes.
+- **Hot reload**: each release's load lists its parts (resolve, the drain of in-flight trials it
+  waited for from `rl_agentic_drain`, load, pause) in Islands now and the release table.
+- **Trainer waiting for data** includes the round still waiting (Islands now shows it as
+  "current round N waiting for data").
+- **Zero-variance groups**: from samplers' drops when they report them, else the trainer's
+  `rl_local_round.zero_variance_group_ratio` x the round's trained groups (trained with zero
+  advantage, not dropped). **Policy age** of trained groups: `rl_round_trained.policy_age_groups`.
+- **Round tooltip, async buffer mode**: a sampler row lists what the trainer took from it in that
+  round (groups, generation versions and age, mean reward), matched by the incarnation prefix of
+  `rl_trajectory_reward.trajectory_id`; samplers keep their own round numbers, so there is no
+  "missed" row (that and the consecutive-missed alert belong to synchronous multi-island runs).
+
 ## Offline export
 
 ```bash

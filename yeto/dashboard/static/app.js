@@ -75,13 +75,23 @@ function kpis(){
   var al=O.alerts||[];$("alertBox").hidden=!al.length;
   $("alertBox").innerHTML="<h2>Alerts</h2>"+al.map(function(a){return '<div><span class="st '+(a.sev===0?"bd":a.sev===1?"wn":"mu")+'"><i></i>'+["critical","warning","info"][a.sev]+'</span> <b>'+esc(a.title)+'</b> <span class="note">'+esc(a.detail)+'</span></div>'}).join("");
 }
+/* a sampler without a fleet record: its platform from rl_sampler_start provenance (engine on device
+   family; the cloud is not on its tape) and its reward from its last round with groups */
+function spOf(c){return c&&c.role==="sampler"?(((V.async||{}).samplers||{})[c.id]||null):null}
+function platform(c){if(c.cloud)return c.cloud;var p=(spOf(c)||{}).provenance||{};
+  return p.engine||p.device_family?[p.engine,p.device_family].filter(Boolean).join(" on ")+" (cloud not on the tape)":"n/a"}
+function islReward(c){if(c.reward!=null)return c.reward;var sp=spOf(c);return sp?sp.reward_mean_last:null}
+/* a sampler writes no rl_heartbeat phase: its latest event says what it is doing */
+function islPhase(c){if(c.phase)return c.phase;var sp=spOf(c);if(!sp)return null;if(sp.ended||/^(done|stopped|left|lost|finished)$/.test(String(c.status||"")))return "stopped";var lt=String(sp.last_type||"");
+  if(/drain/.test(lt))return "draining";if(/policy_load|load_checked|start_on_latest/.test(lt))return "loading policy";
+  if(/backlog_full|_waiting$/.test(lt))return "waiting (backlog full)";if(/_start$|_join$|_lease$/.test(lt))return "starting";return "sampling"}
 function wall(){
   var multi=kind()==="multi_island";$("islandWall").hidden=!multi;$("navWall").style.display=multi?"":"none";
   $("syncerBox").hidden=!(multi&&V.usage.syncer);
   if(multi)$("wall").innerHTML=(O.islands||[]).map(function(c){return '<div class="card'+(c.id===SEL?" sel":"")+'" data-id="'+esc(c.id)+'" tabindex="0">'+
     '<div style="display:flex;justify-content:space-between"><b><i class="sw" style="background:'+islColor(c.id)+'"></i>'+islName(c)+'</b>'+negBadge(c)+stBadge(c.status,c)+'</div>'+
-    '<div class="note mono">'+esc(c.cloud||"n/a")+' · '+esc(c.gpu||"")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</div>'+
-    '<div class="kv"><span>policy version</span><span class="num">'+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span><span>reward</span><span class="num">'+f(c.reward)+'</span><span>phase</span><span class="num">'+esc(c.phase||(c.role==="sampler"?"sampling":"n/a"))+'</span><span>role</span><span class="num">'+esc(c.role||"n/a")+'</span></div></div>'}).join("");
+    '<div class="note mono">'+esc(platform(c))+' · '+esc(c.gpu||"")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</div>'+
+    '<div class="kv"><span>policy version</span><span class="num">'+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span><span>reward</span><span class="num">'+f(islReward(c))+'</span><span>phase</span><span class="num">'+esc(islPhase(c)||"n/a")+'</span><span>role</span><span class="num">'+esc(c.role||"n/a")+'</span></div></div>'}).join("");
   Array.prototype.forEach.call(document.querySelectorAll(".card"),function(d){d.onclick=d.onkeydown=function(e){if(e.type==="keydown"&&e.key!=="Enter")return;SEL=d.dataset.id;cur=null;render()}});
   if(multi&&V.usage.syncer){var rows=(V.rounds_syncer||[]).slice(-30).reverse();
     $("syncer").innerHTML='<table class="c"><tr><th>global round</th><th>expected/responded</th><th>missed</th><th>quorum ms</th><th>merge ms</th><th>resends</th></tr>'+rows.map(function(r){
@@ -169,8 +179,16 @@ function highlight(){
 function row(k,v){return '<div class="row"><span>'+k+'</span><span>'+v+'</span></div>'}
 function tipHtml(r){
   var h='<div class="h">Round '+r.round+' · trained on policy v'+r.policy_version+' → published '+(r.published_version==null?"n/a":"v"+r.published_version)+'</div>';
-  if(kind()==="multi_island"){return h+(O.islands||[]).map(function(c){var rr=((V.islands[c.id]||{}).rounds||[]).find(function(x){return x.round===r.round});
-    return row('<i class="sw" style="background:'+islColor(c.id)+'"></i>Island '+esc(c.id),rr?f(rr.reward)+" · truncated "+pct(rr.trunc):"missed")}).join("")}
+  // async buffer mode: samplers keep their own round numbers and never take part in a trainer round,
+  // so a sampler row says what the trainer took from it this round (no "missed"); nothing taken, no row
+  var asy=Object.keys((V.async||{}).samplers||{}).length>0;
+  if(kind()==="multi_island"){return h+(O.islands||[]).map(function(c){var sw='<i class="sw" style="background:'+islColor(c.id)+'"></i>';
+    if(asy&&c.role==="sampler"){var b=(r.by_sampler||{})[c.id];if(!b)return "";var vs=b.versions||[];
+      return row(sw+"sampler "+esc(c.id),(b.groups!=null?f(b.groups,0)+" groups":f(b.samples,0)+" samples")+(vs.length?" · v"+vs[0]+(vs.length>1?"–v"+vs[vs.length-1]:""):"")+
+        (fin(b.age_mean)?" (age "+f(b.age_mean,1)+")":"")+(fin(b.reward_mean)?" · reward "+f(b.reward_mean,3):""))}
+    var rr=((V.islands[c.id]||{}).rounds||[]).find(function(x){return x.round===r.round});
+    if(!rr&&asy)return "";
+    return row(sw+"Island "+esc(c.id),rr?f(rr.reward)+" · truncated "+pct(rr.trunc):"missed")}).join("")}
   return h+row("reward mean",f(r.reward))+row("train-rollout KL / TIS clipfrac",f(r.kl_tr,5)+" / "+f(r.tis_clip,4))+row("p10 / p50 / p90",f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2))+row("truncation",pct(r.trunc))+
     row("logprob diff",f(r.logprob_diff,4))+row("response length mean / p95",f(r.resp_mean,0)+" / "+f(r.resp_p95,0))+row("grad_norm",f(r.grad_norm,4))+
     PH.map(function(p){return row('<i class="sw" style="background:var(--'+p[0]+')"></i>'+p[1],fin(r.dur[p[0]])?f(r.dur[p[0]],0)+" s":"n/a")}).join("")}
@@ -312,16 +330,18 @@ function chartNodes(){
   var W=boxW(box,560),H=210,m={l:44,r:14,t:8,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"GPU memory per node"},box),g=el("g",{"class":"grid"},s);
   [0,.5,1].forEach(function(q){el("line",{x1:m.l,x2:W-m.r,y1:sy(vm*q),y2:sy(vm*q)},g);el("text",{x:m.l-6,y:sy(vm*q)+4,"text-anchor":"end"},s).textContent=(vm*q).toFixed(0)});
-  ks.forEach(function(k){el("path",{d:"M"+ns[k].map(function(p){return sx(p[0])+","+sy(p[1])}).join("L"),fill:"none",stroke:col(k),"stroke-width":2},s)});
+  // no line across a gap (3x the usual spacing): an island down or restarted draws two pieces, not a diagonal
+  ks.forEach(function(k){var P=ns[k].slice().sort(function(a,b){return a[0]-b[0]});
+    el("path",{d:YetoExt.segments(P,P).map(function(G){return "M"+G.map(function(p){return sx(p[0])+","+sy(p[1])}).join("L")}).join(""),fill:"none",stroke:col(k),"stroke-width":2},s)});
   [t0,(t0+t1)/2,t1].forEach(function(t){el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)});
   var hasU=ks.some(function(k){return ns[k].some(function(p){return fin(p[2])})});
-  $("nodesNote").textContent="Source: per-node host probe."+(hasU?"":" GPU utilization: not sampled in this tape (older probes record memory only).");
+  $("nodesNote").textContent="Source: per-node host probe or the island's NVML samples (rl_resource_sample)."+(hasU?"":" GPU utilization: not sampled in this tape (older probes record memory only).");
 }
 function islands(){
   $("islands").innerHTML=(O.islands||[]).map(function(c){var ex=V.islands[c.id]||{},re=ex.ray_embed||{};
     return '<details class="isl"'+(c.id===SEL?" open":"")+'><summary><span><b>'+islName(c)+'</b> <span class="note">'+esc(c.name||"")+'</span></span>'+negBadge(c)+stBadge(c.status,c)+'</summary>'+
-    '<div class="kv"><span>cloud / GPU</span><span class="num">'+esc(c.cloud||"n/a")+' · '+esc(c.gpu||"n/a")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</span>'+
-    '<span>phase / policy</span><span class="num">'+esc(c.phase||"n/a")+' · '+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span>'+
+    '<div class="kv"><span>cloud / GPU</span><span class="num">'+esc(platform(c))+' · '+esc(c.gpu||"n/a")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</span>'+
+    '<span>phase / policy</span><span class="num">'+esc(islPhase(c)||"n/a")+' · '+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span>'+
     '<span>last event</span><span class="num">'+(fin(c.last_event_age_s)?f(c.last_event_age_s,0)+" s ago":"n/a")+'</span>'+
     (c.starting?'<span>startup elapsed</span><span class="num">'+hm(c.startup_s)+'</span>':"")+
     (Object.keys(c.startup_steps||{}).length?'<span>startup steps</span><span class="num">'+
@@ -382,6 +402,29 @@ function spot(){
   $("spot").innerHTML='<table class="c"><tr><th>event</th><th>island</th><th>cloud / region</th><th>source</th><th>seconds left</th><th>saved</th><th>outcome</th><th>candidates/rejected</th></tr>'+rows.map(function(r){
     return '<tr><td>'+esc(r.event)+'</td><td>'+esc(r.island)+'</td><td class="mono">'+esc(r.cloud||"n/a")+' / '+esc(r.region||"n/a")+'</td><td>'+esc(r.source||"")+'</td><td class="num">'+f(r.remaining_s,1)+'</td><td>'+(r.saved==null?"":(r.saved?"yes":"no"))+'</td><td>'+esc(r.outcome||(r.auto_launch===false?"advice only":""))+'</td><td class="num">'+(r.candidates==null?"":esc(r.candidates)+' / '+esc(r.rejected))+'</td></tr>'}).join("")+'</table>'}
 /* async GRPO: trainer rounds, samplers, buffer backlog, releases, NC pool */
+// trainer rounds table: [header, title, cell(r, a), has(r, a) or null = always shown]; a column no shown
+// round has a value for (an algorithm that does not report it, e.g. PPO KL with score centering) is hidden
+// and named under the table
+var isClip=function(r){return fin(r.tis_clip)?r.tis_clip:r.is_clip};
+var TR_COLS=[["round","",function(r){return r.round},null],
+  ["reward mean ± std","",function(r){return f(r.reward)+(fin(r.reward_std)?" ± "+f(r.reward_std):"")},null],
+  ["p10 / p50 / p90","",function(r){return f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2)},function(r){return fin(r.p50)}],
+  ["train-rollout KL","train_metrics.train_rollout_kl: trainer vs sampler logprobs",function(r){return f(r.kl_tr,5)},function(r){return fin(r.kl_tr)}],
+  ["PPO KL","train_metrics.ppo_kl: trainer policy vs the old logprobs of the batch",function(r){return fin(r.kl)&&Math.abs(r.kl)<1e-3&&r.kl!==0?r.kl.toExponential(2):f(r.kl,5)},function(r){return fin(r.kl)}],
+  ["logprob |diff|","",function(r){return f(r.logprob_diff,4)},function(r){return fin(r.logprob_diff)}],
+  ["TIS / IS clipped","mismatch.tis_clipfrac (TIS); with score centering train_metrics.sc_is_clipped (share of tokens whose IS weight was clipped)",function(r){return f(isClip(r),4)},function(r){return fin(isClip(r))}],
+  ["grad_norm","",function(r){return f(r.grad_norm,4)},function(r){return fin(r.grad_norm)}],
+  ["generated tokens mean / p95","model-generated tokens per trained sample (loss mask); full = whole response incl. tool / env tokens, when the tape has it",
+   function(r){return f(r.resp_mean,0)+(r.resp_derived?"*":"")+" / "+f(r.resp_p95,0)+(fin(r.resp_full_mean)?'<div class="note">full '+f(r.resp_full_mean,0)+'</div>':"")},function(r){return fin(r.resp_mean)}],
+  ["truncated","",function(r){return pct(r.trunc)},function(r){return fin(r.trunc)}],["tok/s","",function(r){return f(r.tok_s,0)},function(r){return fin(r.tok_s)}],
+  ["groups","",function(r,a){return f(a.trained_groups,0)},null],
+  ["zero-variance","rl_local_round.zero_variance_group_ratio: groups whose rewards were all equal (trained with zero advantage)",function(r,a){return fin(r.zero_var_ratio)?pct(r.zero_var_ratio)+(fin(a.trained_groups)?" ("+f(Math.round(r.zero_var_ratio*a.trained_groups),0)+")":""):"n/a"},function(r){return fin(r.zero_var_ratio)}],
+  ["stale dropped","",function(r,a){return f(a.stale_groups,0)},null],
+  ["policy ages","rl_round_trained.policy_age_groups: trained groups by policy age",function(r,a){return hist(a.ages)+(fin(a.policy_age_mean)?' <span class="note">mean '+f(a.policy_age_mean,2)+'</span>':"")},null]];
+function trTable(rows,ar){var cols=TR_COLS.filter(function(c){return !c[3]||rows.some(function(r){return c[3](r,ar[r.round]||{})})}),gone=TR_COLS.filter(function(c){return cols.indexOf(c)<0});
+  return '<table class="c"><tr>'+cols.map(function(c){return '<th'+(c[1]?' title="'+esc(c[1])+'"':"")+'>'+esc(c[0])+'</th>'}).join("")+'</tr>'+
+    rows.map(function(r){var a=ar[r.round]||{};return '<tr>'+cols.map(function(c,i){return '<td'+(i===cols.length-1?"":' class="num"')+'>'+c[2](r,a)+'</td>'}).join("")+'</tr>'}).join("")+'</table>'+
+    (gone.length?'<div class="note">hidden: '+gone.map(function(c){return esc(c[0])}).join(", ")+' (not reported by this algorithm / run)</div>':"")}
 function hist(h){var ks=Object.keys(h||{});return ks.length?ks.map(function(k){return "age "+esc(k)+": "+f(h[k],0)}).join(" · "):"n/a"}
 function asyncPanel(){
   var A=V.async;$("async").hidden=!A;$("navAsync").style.display=A?"":"none";if(!A)return;
@@ -392,17 +435,19 @@ function asyncPanel(){
   var T=(A.trainers||{})[tid]||{};
   $("aTrainer").innerHTML=!rr.length?'<div class="note">no trained rounds on this trainer</div>':
     '<div class="note">totals: trained groups '+f(T.trained_groups,0)+' · dropped as stale (older than max_policy_age) '+f(T.stale_groups,0)+' · no policy identity (dropped after a resume) '+f(T.unidentified_policy_groups,0)+(T.unidentified_starved?' <b>[reader starved: '+f(T.unidentified_starved.selections,0)+' selections kept no group]</b>':'')+' · off-policy gate dropped '+f(T.gate_dropped,0)+' · short groups trained '+f(T.incomplete_groups,0)+' · too small dropped '+f(T.dropped_small_groups,0)+' · carried over '+f(T.carried_over_groups,0)+' · padded samples '+f(T.padded_samples,0)+' · policy ages of trained groups: '+hist(T.age_hist)+'</div>'+
-    '<table class="c"><tr><th>round</th><th>reward mean ± std</th><th>p10 / p50 / p90</th><th title="train_metrics.train_rollout_kl: trainer vs sampler logprobs">train-rollout KL</th><th title="train_metrics.ppo_kl: trainer policy vs the old logprobs of the batch">PPO KL</th><th>logprob |diff|</th><th>TIS clipfrac</th><th>grad_norm</th><th title="model-generated tokens per trained sample (loss mask); full = whole response incl. tool / env tokens, when the tape has it">generated tokens mean / p95</th><th>truncated</th><th>tok/s</th><th>groups</th><th>stale dropped</th><th>policy ages</th></tr>'+
-    rr.slice(-40).reverse().map(function(r){var a=ar[r.round]||{};return '<tr><td class="num">'+r.round+'</td><td class="num">'+f(r.reward)+(fin(r.reward_std)?" ± "+f(r.reward_std):"")+'</td><td class="num">'+f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2)+
-      '</td><td class="num">'+f(r.kl_tr,5)+'</td><td class="num">'+(fin(r.kl)&&Math.abs(r.kl)<1e-3&&r.kl!==0?r.kl.toExponential(2):f(r.kl,5))+'</td><td class="num">'+f(r.logprob_diff,4)+'</td><td class="num">'+f(r.tis_clip,4)+'</td><td class="num">'+f(r.grad_norm,4)+'</td><td class="num">'+f(r.resp_mean,0)+(r.resp_derived?"*":"")+" / "+f(r.resp_p95,0)+(fin(r.resp_full_mean)?'<div class="note">full '+f(r.resp_full_mean,0)+'</div>':"")+
-      '</td><td class="num">'+pct(r.trunc)+'</td><td class="num">'+f(r.tok_s,0)+'</td><td class="num">'+f(a.trained_groups,0)+'</td><td class="num">'+f(a.stale_groups,0)+'</td><td>'+hist(a.ages)+'</td></tr>'}).join("")+'</table>'+
+    trTable(rr.slice(-40).reverse(),ar)+
     (rr.some(function(r){return r.resp_derived})?'<div class="note">* mean response length = trained response tokens ÷ trained samples (rl_rollout_carry_over), the tape has no batch summary</div>':"");
   var S=A.samplers||{};
+  // zero-variance groups the trainer saw (rl_local_round ratio x trained groups), for samplers that report none
+  var zg=0,zt=0;Object.keys(A.trainers||{}).forEach(function(i){var tg={};((A.trainers[i]||{}).rounds||[]).forEach(function(x){tg[x.rollout_id]=x.trained_groups});
+    ((V.islands[i]||{}).rounds||[]).forEach(function(r){if(fin(r.zero_var_ratio)&&fin(tg[r.round])){zg+=r.zero_var_ratio*tg[r.round];zt+=tg[r.round]}})});
+  var zvCell=function(x){return fin(x.zero_variance_seen)||fin(x.zero_variance_dropped)?f(x.zero_variance_seen,0)+" / "+f(x.zero_variance_dropped,0):
+    zt?'<span class="note" title="the sampler tape has no per-trial rewards; rl_local_round.zero_variance_group_ratio of the trainer">trainer: '+pct(zg/zt)+' of '+f(zt,0)+' trained</span>':"not reported"};
   $("aSamplers").innerHTML=!sps.length?'<div class="note">no sampler islands on the tapes</div>':'<table class="c"><tr><th>sampler</th><th>status</th><th>policy</th><th>rounds</th><th>policy age p50 / max</th><th>age histogram (rounds)</th><th>generate s p50 / max</th><th>groups written</th><th>zero-variance groups seen / dropped</th><th>truncated samples</th><th>dropped groups</th><th>trials retried / lost</th><th>reward (last round)</th><th>backlog cap</th></tr>'+
     sps.map(function(c){var x=S[c.id]||{};return '<tr><td>Island '+esc(c.id)+(c.name?' <span class="note">'+esc(c.name)+'</span>':"")+'</td><td>'+stBadge(c.status,c)+'</td><td class="num">'+(x.policy_version==null?"n/a":"v"+esc(x.policy_version))+'</td><td class="num">'+f(x.n_rounds,0)+
-      '</td><td class="num">'+f(x.lag_p50,1)+" / "+f(x.lag_max,0)+'</td><td>'+hist(x.lag_hist)+'</td><td class="num">'+f(x.generate_p50_s,0)+" / "+f(x.generate_max_s,0)+'</td><td class="num">'+f(x.groups,0)+'</td><td class="num">'+f(x.zero_variance_seen,0)+" / "+f(x.zero_variance_dropped,0)+
+      '</td><td class="num">'+f(x.lag_p50,1)+" / "+f(x.lag_max,0)+'</td><td>'+hist(x.lag_hist)+'</td><td class="num">'+f(x.generate_p50_s,0)+" / "+f(x.generate_max_s,0)+'</td><td class="num">'+f(x.groups,0)+'</td><td class="num">'+zvCell(x)+
       '</td><td class="num">'+f(x.truncated,0)+(fin(x.samples)&&fin(x.truncated)?" ("+pct(x.truncated/x.samples)+")":"")+'</td><td class="num">'+f(x.dropped_groups,0)+'</td><td class="num">'+f(x.retried_trials,0)+" / "+f(x.lost_trials,0)+'</td><td class="num">'+f(x.reward_mean_last)+'</td><td class="num">'+f(x.max_backlog_groups,0)+'</td></tr>'}).join("")+'</table>'+
-    (sps.some(function(c){var x=S[c.id]||{};return !fin(x.samples)})?'<div class="note">n/a in zero-variance / truncated / reward: the sampler did not write rl_sampler_engine_round with these fields (Miles-generating samplers and older yeto versions do not)</div>':"");
+    (sps.some(function(c){var x=S[c.id]||{};return !fin(x.samples)})?'<div class="note">n/a in truncated / reward: the sampler did not write rl_sampler_engine_round with these fields (Miles-generating samplers and older yeto versions do not); zero-variance then comes from the trainer</div>':"");
   aBacklog(A);aRel(A);aComp(A);
   var pl=(A.pool||[]).slice(-100).reverse();$("aPoolBox").hidden=!pl.length;
   var sc=A.pool_scale;$("aPoolScale").textContent=sc?("samplers: "+sc.ready.length+" ready"+(sc.draining.length?", "+sc.draining.length+" draining ("+sc.draining.join(", ")+")":"")+(sc.paused&&sc.paused.length?", "+sc.paused.length+" paused by hand ("+sc.paused.join(", ")+")":"")+(sc.target!=null?" · target "+sc.target+(sc.manual?" (set by hand)":""):"")+(sc.ready.length?" · shards "+sc.ready.join(", "):"")):"";
@@ -411,11 +456,16 @@ function asyncPanel(){
 }
 /* CompactionRL: per island totals and the samplers' recent rounds (hidden without compaction data) */
 function segHist(h){var ks=Object.keys(h||{});return ks.length?ks.map(function(k){return esc(k)+" seg: "+f(h[k],0)}).join(" · "):"n/a"}
-function compCells(c){return '<td class="num">'+f(c.trials,0)+'</td><td class="num">'+f(c.samples,0)+" ("+f(c.samples_per_trial,2)+'/trial)</td><td class="num">'+f(c.compacted_trials,0)+" ("+pct(c.compacted_frac)+')</td><td class="num">'+f(c.compactions_mean,2)+" (max "+f(c.compactions_max,0)+(fin(c.max_compactions)?" / limit "+f(c.max_compactions,0):"")+')</td><td>'+segHist(c.segments_hist)+
-  '</td><td class="num">'+pct(c.summary_ok_frac)+" of "+f(c.summaries,0)+'</td><td class="num">'+f(c.truncated_compacted_trials,0)+" ("+pct(c.truncated_compacted_frac)+")"+(fin(c.exhausted_truncated_trials)?" · used up "+f(c.exhausted_truncated_trials,0):"")+'</td><td class="num">'+pct(c.summary_token_frac)+'</td><td class="num">'+f(c.fork_lost_trials,0)+" ("+pct(c.fork_lost_frac)+")"+'</td><td class="num">'+(c.retry_replays==null?"n/a":f(c.retry_replays,0)+" in "+f(c.retry_replay_trials,0)+" trials")+'</td>'}
+// without a single compaction the summary / after-compaction columns have nothing to measure: "—"
+function compCells(c,short){var no=!(c.compacted_trials>0||c.compactions>0||c.summaries>0),NO='<span class="note" title="no trial was compacted">'+(short?"—":"— (no compaction)")+'</span>';
+  return '<td class="num">'+f(c.trials,0)+'</td><td class="num">'+f(c.samples,0)+" ("+f(c.samples_per_trial,2)+'/trial)</td><td class="num">'+f(c.compacted_trials,0)+" ("+pct(c.compacted_frac)+')</td><td class="num">'+f(c.compactions_mean,2)+" (max "+f(c.compactions_max,0)+(fin(c.max_compactions)?" / limit "+f(c.max_compactions,0):"")+')</td><td>'+segHist(c.segments_hist)+
+  '</td><td class="num">'+(no?NO:pct(c.summary_ok_frac)+" of "+f(c.summaries,0))+'</td><td class="num">'+(no?NO:f(c.truncated_compacted_trials,0)+" ("+pct(c.truncated_compacted_frac)+")"+(fin(c.exhausted_truncated_trials)?" · used up "+f(c.exhausted_truncated_trials,0):""))+'</td><td class="num">'+(no?NO:pct(c.summary_token_frac))+'</td><td class="num">'+(no?NO:f(c.fork_lost_trials,0)+" ("+pct(c.fork_lost_frac)+")")+'</td><td class="num">'+(c.retry_replays==null?(no?NO:"n/a"):f(c.retry_replays,0)+" in "+f(c.retry_replay_trials,0)+" trials")+'</td>'}
 function reasons(o){var ks=Object.keys(o||{});return ks.length?ks.map(function(k){return esc(k)+" "+f(o[k],0)}).join(" · "):"0"}
-function fateRows(rows){var out=[];rows.forEach(function(x){var by=x[2].by_segments||{};Object.keys(by).forEach(function(b){var v=by[b];
-  out.push('<tr><td>'+esc(x[0])+" "+esc(x[1])+'</td><td>'+esc(b)+'</td><td class="num">'+f(v.written,0)+'</td><td>'+reasons(v.lost)+'</td><td>'+reasons(v.dropped)+'</td><td class="num">'+(v.stale==null?"n/a":f(v.stale,0))+'</td><td class="num">'+pct(v.not_written_frac)+'</td></tr>')})});return out}
+// stale (trainer): a trainer row without stale_by_segments shows 0 when the trainer dropped no stale group
+// at all (rl_buffer_stale_skipped.stale_groups); a sampler never drops stale groups itself ("—")
+function fateRows(rows,A){var out=[];rows.forEach(function(x){var by=x[2].by_segments||{},ts=x[0]==="trainer"?(((A||{}).trainers||{})[x[1]]||{}).stale_groups:null;Object.keys(by).forEach(function(b){var v=by[b];
+  var st=v.stale!=null?f(v.stale,0):x[0]!=="trainer"?"—":ts===0?"0":fin(ts)?'<span class="note">'+f(ts,0)+' in all (not by segment)</span>':"n/a";
+  out.push('<tr><td>'+esc(x[0])+" "+esc(x[1])+'</td><td>'+esc(b)+'</td><td class="num">'+f(v.written,0)+'</td><td>'+reasons(v.lost)+'</td><td>'+reasons(v.dropped)+'</td><td class="num">'+st+'</td><td class="num">'+pct(v.not_written_frac)+'</td></tr>')})});return out}
 var COMP_HEAD='<th>trials</th><th>samples</th><th>compacted trials</th><th>compactions / trial</th><th>segments per trial</th><th>summary_ok</th><th>truncated after compaction</th><th>summary tokens / trainable</th><th>lost to forks after compaction</th><th>retry replays</th>';
 function aComp(A){
   var rows=[],recent=[];
@@ -424,12 +474,12 @@ function aComp(A){
   Object.keys(A.trainers||{}).sort().forEach(function(k){var x=A.trainers[k];if(x.compaction)rows.push(["trainer",k,x.compaction])});
   $("aCompBox").hidden=!rows.length;if(!rows.length){$("aComp").innerHTML="";return}
   recent.sort(function(a,b){return (a[1].ts||0)-(b[1].ts||0)});
-  var fr=fateRows(rows);
+  var fr=fateRows(rows,A);
   $("aComp").innerHTML='<table class="c"><tr><th>island</th><th>rounds</th>'+COMP_HEAD+'<th>reward mean per trial / per segment (last round)</th><th>xhw downweighted groups (max trial-mean shift)</th></tr>'+rows.map(function(x){var c=x[2];return '<tr><td>'+esc(x[0])+" "+esc(x[1])+'</td><td class="num">'+f(c.rounds,0)+'</td>'+compCells(c)+'<td class="num">'+f(c.reward_mean_trial)+" / "+f(c.reward_mean_segment)+'</td><td class="num">'+(c.xhw_downweighted_groups==null?"n/a":f(c.xhw_downweighted_groups,0)+" ("+f(c.xhw_trial_mean_shift_max,4)+")")+'</td></tr>'}).join("")+'</table>'+
     rows.filter(function(x){return x[2].drained_by_segments}).map(function(x){return '<div class="note">'+esc(x[0])+" "+esc(x[1])+': trials cut by drains, by segment count: '+reasons(x[2].drained_by_segments)+'</div>'}).join("")+
     (fr.length?'<div class="note">trials by segment count: written (trainer: trained), lost before the group was written (drain timeout, other version, aborted), dropped with their group, stale-dropped by the trainer; a much higher share for long trials biases the GRPO baseline to short ones</div><table class="c"><tr><th>island</th><th>segments</th><th>written</th><th>lost</th><th>dropped with group</th><th>stale (trainer)</th><th>not written</th></tr>'+fr.join("")+'</table>':"")+
-    (recent.length?'<div class="note">recent sampler rounds</div><table class="c"><tr><th>sampler</th><th>round</th><th>time</th>'+COMP_HEAD+'</tr>'+recent.slice(-20).reverse().map(function(x){return '<tr><td>'+esc(x[0])+'</td><td class="num">'+esc(x[1].rollout_id)+'</td><td class="num">'+clock(x[1].ts)+'</td>'+compCells(x[1].compaction)+'</tr>'}).join("")+'</table>':"")+
-    '<div class="note">alert cards fire on a low summary_ok share and on many compacted trials ending truncated (docs/DASHBOARD.md, compaction_* thresholds); summary tokens n/a = the samples do not report summary_tokens</div>';
+    (recent.length?'<div class="note">recent sampler rounds</div><table class="c"><tr><th>sampler</th><th>round</th><th>time</th>'+COMP_HEAD+'</tr>'+recent.slice(-20).reverse().map(function(x){return '<tr><td>'+esc(x[0])+'</td><td class="num">'+esc(x[1].rollout_id)+'</td><td class="num">'+clock(x[1].ts)+'</td>'+compCells(x[1].compaction,true)+'</tr>'}).join("")+'</table>':"")+
+    '<div class="note">alert cards fire on a low summary_ok share and on many compacted trials ending truncated (docs/DASHBOARD.md, compaction_* thresholds); summary tokens n/a = the samples do not report summary_tokens; — = no trial was compacted</div>';
 }
 function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t,i){el("text",{x:sx(t),y:H-6,"text-anchor":["start","middle","end"][i]},s).textContent=clock(t)})}
 function aBacklog(A){
@@ -467,8 +517,9 @@ function aRel(A){
   tAxis(s,t0,t1,sx,H);
   $("legRel").innerHTML='<span><i class="sw" style="background:var(--P)"></i>release → load done</span>'+(pool.length?'<span><i class="sw" style="background:var(--warn)"></i>NC pool event</span><span><i class="sw" style="background:var(--bad)"></i>NC pool failure (evicted / lost / crash loop)</span>':"");
   if(rows.length)box2.innerHTML='<table class="c"><tr><th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>sampler '+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>'+
-    rows.slice(-30).reverse().map(function(r){return '<tr><td class="num">v'+esc(r.policy_version)+'</td><td>'+esc(r.trainer==null?"n/a":r.trainer)+'</td><td class="num">'+clock(r.released_at)+'</td><td class="num">'+f(r.upload_s,1)+'</td>'+
-      sids.map(function(k){var ld=(r.loads||{})[k];return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"):"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>';
+    // a sampler starting on the base weights makes a v0 row with no trainer release: "base"
+    rows.slice(-30).reverse().map(function(r){var base=r.trainer==null&&!fin(r.released_at);return '<tr><td class="num">v'+esc(r.policy_version)+'</td><td>'+(base?'<span class="note">base</span>':esc(r.trainer==null?"n/a":r.trainer))+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base?"—":f(r.upload_s,1))+'</td>'+
+      sids.map(function(k){var ld=(r.loads||{})[k];return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"+(fin(ld.drain_s)?'<div class="note">drain '+f(ld.drain_s,0)+" s"+(ld.drain_cut?", "+f(ld.drain_cut,0)+" cut":"")+'</div>':"")):"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>';
 }
 function render(){
   if(!V)return;O=V.overview;
