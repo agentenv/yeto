@@ -52,9 +52,27 @@ def test_a_moe_model_gets_the_attention_modules_the_island_specs_name(moe_model,
     assert all("self_attn" in spec.name for spec in island)
 
 
-def test_all_linear_on_a_moe_model_stays_all_linear(moe_model):
-    # verl and the island hand PEFT the same "all-linear"
-    assert lora_targets.island_target_modules("all-linear", str(moe_model)) == "all-linear"
+@pytest.mark.parametrize("config", [
+    transformers.Qwen3MoeConfig(num_experts=4),
+    transformers.MixtralConfig(num_local_experts=4),
+    transformers.DeepseekV3Config(n_routed_experts=4),
+])
+def test_all_linear_on_a_moe_model_is_refused(tmp_path, config):
+    # PEFT 0.19.1 (the island's pin) raises on all-linear over Transformers 5 fused experts, and
+    # yeto's per-expert layout is not what verl trains or vLLM loads: refuse before verl starts
+    path = _save(tmp_path, config, config.model_type)
+    with pytest.raises(vconf.VerlConfigError, match="--lora-targets attention, or --rl-backend miles"):
+        lora_targets.island_target_modules("all-linear", str(path))
+    assert lora_targets.island_target_modules("attention", str(path)).startswith("[")
+
+
+def test_the_refusal_reads_a_multimodal_text_config():
+    from types import SimpleNamespace
+
+    vlm = SimpleNamespace(text_config=SimpleNamespace(num_experts=8))
+    assert lora_targets.moe_all_linear_problem("all-linear", vlm) is not None
+    assert lora_targets.moe_all_linear_problem("attention", vlm) is None
+    assert lora_targets.moe_all_linear_problem("all-linear", SimpleNamespace(text_config=None)) is None
 
 
 @pytest.mark.parametrize("choice, expected", [("auto", "all-linear"), ("all-linear", "all-linear")])

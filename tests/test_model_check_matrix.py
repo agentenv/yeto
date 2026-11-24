@@ -237,6 +237,34 @@ def test_run_config_verdicts_match_the_island(model):
             + render_text(report))
 
 
+def _namespace(value):
+    if isinstance(value, dict):
+        return types.SimpleNamespace(**{k: _namespace(v) for k, v in value.items()})
+    return value
+
+
+@pytest.mark.parametrize("model", sorted(MODELS))
+def test_verl_lora_target_verdicts_match_the_island(model):
+    """The verl island maps --lora-targets through ``lora_targets.peft_targets`` before it builds
+    PEFT (``island_entry.fsdp_island_run``); its refusal of all-linear on a MoE model and the
+    check's verl ``lora-targets`` failure must agree on every fixture."""
+
+    from yeto.rl.adapters.verl import lora_targets
+
+    cfg = _config(model)
+    for choice in lora_targets.CHOICES:
+        report = check_model(cfg, CheckRequest(form="lora", preset="strict-avg", backend="verl",
+                                               lora_targets=choice), model=model)
+        check_refuses = any(i.name == "lora-targets" and i.status == FAIL and "verl" in i.reason
+                            for i in report.items)
+        island_refuses = lora_targets.moe_all_linear_problem(choice, _namespace(cfg)) is not None
+        assert check_refuses == island_refuses, f"{model} --lora-targets {choice}\n" + render_text(report)
+        if island_refuses:
+            assert not report.runnable
+        miles = check_model(cfg, CheckRequest(form="lora", preset="strict-avg", lora_targets=choice), model=model)
+        assert not any(i.name == "lora-targets" and "verl" in i.reason for i in miles.items)
+
+
 # ----------------------------------------------------------------------------- report shape
 def test_three_onboarding_examples():
     qwen = check_model(_config("qwen3_0p6b"), CheckRequest(form="full", preset="full-parameter"))
