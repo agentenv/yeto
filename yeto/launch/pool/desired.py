@@ -33,6 +33,8 @@ Member kinds:
 The control plane acts on a *change*: a new generation is compared with the one it
 applied before, pool by pool (a target change, a pool added, removed or reconfigured).
 A pool's own target changes in between (a manual release it detected) are not undone.
+What the controller applied is kept in ``fleet/applied.json`` (:meth:`DesiredStore.write_applied`):
+a controller that starts later applies every generation written since.
 """
 
 from __future__ import annotations
@@ -48,6 +50,8 @@ from typing import Any
 
 SCHEMA = "yeto.fleet.desired/v1"
 DESIRED_KEY = "fleet/desired.json"
+APPLIED_KEY = "fleet/applied.json"  # what the controller applied (FleetReconciler): generation, pools, removals
+APPLIED_SCHEMA = "yeto.fleet.applied/v1"
 GENERATIONS_DIR = "fleet/desired"
 KINDS = ("sampler_pool", "trainer")
 _GEN = re.compile(r"(\d{8,})\.json")
@@ -205,6 +209,24 @@ class DesiredStore:
         except Exception:  # noqa: BLE001 - the generation record is the truth
             pass
         return new
+
+    # -- what the controller applied (one writer: the controller of the run)
+    def read_applied(self) -> dict[str, Any] | None:
+        """The generation the controller last applied, with its sampler pools (``members``)
+        and the pools it was still removing (``removing``); None before the first apply."""
+        data = self.objects.read(APPLIED_KEY)
+        if data is None:
+            return None
+        doc = json.loads(data)
+        if not isinstance(doc, dict) or doc.get("schema") != APPLIED_SCHEMA:
+            return None
+        return doc
+
+    def write_applied(self, generation: int, pools: dict[str, dict[str, Any]],
+                      removing: dict[str, dict[str, Any]]) -> None:
+        doc = {"schema": APPLIED_SCHEMA, "generation": int(generation), "members": list(pools.values()),
+               "removing": list(removing.values()), "at": self.clock()}
+        self.objects.write(APPLIED_KEY, json.dumps(doc, indent=1, sort_keys=True, default=str).encode())
 
     def update(self, change: Callable[[dict[str, Any]], None], *, seed: dict[str, Any] | None = None,
                note: str | None = None, attempts: int = 1) -> dict[str, Any]:
