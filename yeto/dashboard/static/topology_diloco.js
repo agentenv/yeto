@@ -110,9 +110,13 @@ function poolCard(p){var ss=(T.samplers||[]).filter(function(s){return p.sampler
     lag:lg.length?Math.max.apply(null,lg):null,rate_gpm:ss.reduce(function(a,x){return a+(x.rate_gpm||0)},0),n:p.samplers.length,nlive:lv.length}}
 // the sampler (or pool) a card shows, from the newest view (a card is built once per layout)
 function fresh(s){if(s.pool){var p=fpool(s.id);return p?poolCard(p):s}return (T.samplers||[]).filter(function(x){return x.id===s.id})[0]||s}
+// the drawing's width in user units: the page width itself (one unit = one CSS pixel, so its
+// text keeps the page's size) between the layout's minimum and a cap (wider: centred at the cap);
+// narrower pages scale it down
+function vw(W){return W<640?400:Math.max(1480,Math.min(2000,Math.round(W)))}
 function layout(W){
   var narrow=W<640,trs=D.trainers,isl=D.kind==="island",fw=follow(),samp=D.kind==="synced_group"&&!fw?(T.samplers||[]):[],N=D.shards.length||1;
-  var g={narrow:narrow,VW:narrow?400:1480,boxes:[],syn:[],samp:[],store:null};
+  var g={narrow:narrow,VW:vw(W),boxes:[],syn:[],samp:[],store:null};
   if(!narrow&&sft()&&trs.length>4)hub(g,trs);
   else if(!narrow){
     // a fleet: no machine column, its pool and trainer cards carry the machine (card, count, provider, GPU use)
@@ -157,6 +161,8 @@ function build(host){
   host.innerHTML="";
   var wrap=document.createElement("div");wrap.className="tpw";host.appendChild(wrap);
   var svg=el("svg",{viewBox:"0 0 "+g.VW+" "+g.VH,role:"img","aria-label":isl?"islands (trainer + in-island rollout) to syncer":sft()?"learner islands to syncer":"samplers to store to trainers to syncer"},wrap);
+  // never drawn larger than one unit per CSS pixel: a page wider than the cap centres the drawing
+  if(!g.narrow){wrap.style.maxWidth=g.VW+"px";wrap.style.margin="0 auto"}
   var wires=el("g",{},svg),labels=el("g",{},svg),nd=el("g",{},svg);
   var lay={host:host,svg:svg,g:g,W:W,boxes:[],syn:[],pair:[],inl:[],samp:[],trunk:[],store:null,shape:shape()};
   D.trainers.forEach(function(tr,k){lay.boxes.push(islandBox(nd,wires,labels,g.boxes[k],tr,g.narrow))});
@@ -564,7 +570,7 @@ function render(view,offline){
   if(!(D.shards||[]).length)D.shards=[{index:0,lo:0,hi:0,step:0,merges:0,state:"idle",attempt_max:1,last:null}];
   legend(true);
   var W=host.clientWidth||800;
-  if(!L||L.shape!==shape()||(L.W<640)!==(W<640)||(host.contains&&!host.contains(L.svg)))build(host);
+  if(!L||L.shape!==shape()||vw(L.W)!==vw(W)||(host.contains&&!host.contains(L.svg)))build(host);
   var live=D.trainers.filter(function(x){return x.live}).length,rolls=D.trainers.filter(function(x){return x.island}).length;
   $("topoNote").textContent="layout: "+D.kind.replace("_"," ")+" ("+D.layout_reason+") · "+(sft()?D.trainers.length+" learner island(s), no rollout":D.kind==="island"?rolls+" island(s): trainer + in-island rollout":(t.samplers||[]).filter(function(s){return s.live}).length+" live sampler(s)"+(D.fleet?" in "+D.fleet.islands.length+" island(s)":""))+" · "+live+"/"+D.M+(sft()?" learner(s)":" trainer(s)")+" live · syncer "+(D.shards.length>1?D.shards.length+" shards":"1 process")+
     (t.live?" · replayed "+DELAY_S+" s behind the newest tape data":" · offline snapshot");
@@ -572,7 +578,7 @@ function render(view,offline){
   if(!bound){bound=true;host.addEventListener("mousemove",tip);host.addEventListener("mouseleave",function(){var tp=$("topoTip");if(tp)tp.style.display="none"});
     if(document.addEventListener)document.addEventListener("visibilitychange",kick);
     if(typeof MutationObserver!=="undefined"){var mo=new MutationObserver(function(){C=colors();if(T&&L)paint()});mo.observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]})}
-    var rt=null;if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("resize",function(){clearTimeout(rt);rt=setTimeout(function(){if(!T||!L)return;var w=host.clientWidth;if((w<640)!==(L.W<640))build(host);else fit();paint()},150)})}
+    var rt=null;if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("resize",function(){clearTimeout(rt);rt=setTimeout(function(){if(!T||!L)return;var w=host.clientWidth;if(vw(w)!==vw(L.W))build(host);else fit();paint()},150)})}
   return true}
 
 // -- the page's top cards and "Islands now" table for a DiLoCo run (sft.js) ----------------------
