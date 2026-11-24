@@ -877,6 +877,7 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
         setattr(out, name, None)
     out.rl_syncer_epoch = None
     out.rl_sampler_node = node_name(island)
+    out.rl_tape_island_id = island  # its records name its launch island, not learner 0
     if getattr(args, "rl_data_split", None) == "dispense":
         # The sampler claims its rows from the group's actor syncer (no slot)
         out.rl_sampler_dispense_island = island
@@ -1431,5 +1432,7 @@ def island_flags(args: Any) -> str:
         flags += f" --rl-sampler-until-trainers-end {int(args.rl_sampler_until_trainers_end)}"
     if role == SAMPLER and getattr(args, "rl_sampler_feeds_learner", None) is not None:
         flags += f" --rl-sampler-feeds-learner {int(args.rl_sampler_feeds_learner)}"
+    if role == SAMPLER and getattr(args, "rl_tape_island_id", None) is not None:
+        flags += f" --rl-tape-island-id {int(args.rl_tape_island_id)}"
     return flags
 

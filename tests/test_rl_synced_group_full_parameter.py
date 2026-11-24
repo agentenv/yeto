@@ -220,6 +220,46 @@ def test_a_sampler_that_follows_its_trainer_names_that_learner(follow):
     assert feeds == ({2: 0, 3: 1} if follow == "trainer" else {})
 
 
+@pytest.mark.parametrize("follow", ["trainer", "merged"])
+def test_a_group_sampler_island_tapes_under_its_launch_island(follow, tmp_path):
+    """A synced group's sampler island runs as learner 0 of 1; its tape records name its
+    launch island (P5: the Miles sampler of launch island 2 wrote island_id 0 and its
+    events read as learner 0's trainer). Trainers keep their learner id."""
+    import json
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.events import append_tape_event
+
+    _, plan = _plan(("--rl-sampler-follow", follow))
+    for island, parsed in _islands(plan):
+        m = island["learner_id"]
+        if island["sample_role"] == "sampler":
+            assert f"--rl-tape-island-id {m}" in island["learner_command"] and parsed.rl_tape_island_id == m
+            assert parsed.learner_id == 0  # still learner 0 of 1 (no syncer)
+        else:
+            assert "--rl-tape-island-id" not in island["learner_command"] and parsed.rl_tape_island_id is None
+        miles_args = SimpleNamespace()
+        miles_args.yeto_rl_learner_id = parsed.learner_id
+        island_entry._set_tape_island(parsed, miles_args)
+        miles_args.yeto_rl_event_tape = str(tmp_path / f"tape{m}.jsonl")
+        append_tape_event(miles_args, {"event": "rl_sampler_start"})
+        record = json.loads((tmp_path / f"tape{m}.jsonl").read_text())
+        assert record["island_id"] == (m if island["sample_role"] == "sampler" else parsed.learner_id)
+
+
+def test_a_tape_without_a_tape_island_names_the_learner(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.events import append_tape_event
+
+    tape = tmp_path / "tape.jsonl"
+    append_tape_event(SimpleNamespace(yeto_rl_learner_id=1, yeto_rl_event_tape=str(tape)), {"event": "x"})
+    append_tape_event(SimpleNamespace(yeto_rl_learner_id=0, yeto_rl_tape_island_id=2,
+                                      yeto_rl_event_tape=str(tape)), {"event": "y"})
+    assert [json.loads(line)["island_id"] for line in tape.read_text().splitlines()] == [1, 2]
+
+
 def test_samplers_outside_a_full_parameter_group_keep_their_rounds():
     pair = _ns(rl_island_sample_role=["0:sampler", "1:trainer"])
     assert sample_roles.sampler_stop_trainers(pair, 2) == {}

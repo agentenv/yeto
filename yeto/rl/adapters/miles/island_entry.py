@@ -636,11 +636,20 @@ def install_event_echo() -> bool:
     return True
 
 
+def _set_tape_island(args, miles_args) -> None:
+    """``--rl-tape-island-id M`` (a synced group's sampler island, which runs as learner
+    0 of 1): its tape records name launch island M, not learner 0. Unset: unchanged."""
+    island = getattr(args, "rl_tape_island_id", None)
+    if island is not None:
+        miles_args.yeto_rl_tape_island_id = int(island)
+
+
 def _append_ports_event(args, miles_args, event: dict) -> None:
     from yeto.rl.engine.events import append_tape_event as _append_rl_event
 
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
+    _set_tape_island(args, miles_args)
     _append_rl_event(miles_args, event)
 
 
@@ -2261,6 +2270,7 @@ def run_miles(
         miles_args.yeto_rl_completed_groups_path = args.completed_groups_path
         miles_args.yeto_rl_event_tape = args.event_tape
         miles_args.yeto_rl_learner_id = args.learner_id
+        _set_tape_island(args, miles_args)
         # W&B reads the same namespace the rest of the yeto context rides in;
         # yeto.rl.wandb_rl starts the island's run off these.
         miles_args.wandb = getattr(args, "wandb", False)
@@ -2647,6 +2657,7 @@ def _run_ports(
     # The event tape and island identity are needed even without outer sync.
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
+    _set_tape_island(args, miles_args)
     # fleet-dashboard 1.4: the ports EventTape tees into W&B (wandb_rl.tee)
     # off the same namespace fields as run_miles.
     miles_args.wandb = getattr(args, "wandb", False)
