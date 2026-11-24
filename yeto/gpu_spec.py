@@ -158,6 +158,41 @@ def normalize_family(name: str) -> str:
     return hw_family(name).family
 
 
+# --- unified device-family names (unified-sampler-pool) ---------------------
+#
+# The node profile (``yeto.launch.node_inventory.NodeProfile``) and the engine
+# image catalog (``yeto.launch.engine_images``) name the families
+# ``cuda | rocm | ascend | ppu``; the launcher family above keeps ``npu`` for
+# Ascend. These are aliases only: :func:`hw_family` and every launcher value
+# are unchanged.
+UNIFIED_FAMILIES = ("cuda", "rocm", "ascend", "ppu")
+_UNIFIED_OF_LAUNCHER = {"cuda": "cuda", "rocm": "rocm", "npu": "ascend", "ppu": "ppu"}
+_UNIFIED_EXTRA_ALIASES = {"gpu": "cuda"}  # engine_images' old alias
+
+
+def unified_family(name: str) -> str:
+    """``cuda`` / ``rocm`` / ``ascend`` / ``ppu`` of any family or vendor spelling
+    (``npu`` and ``ascend`` -> ``ascend``, ``nvidia`` / ``gpu`` -> ``cuda``, ``amd`` ->
+    ``rocm``, ``thead`` -> ``ppu``). ``cpu`` and unknown names are refused."""
+    key = name.strip().lower() if isinstance(name, str) else ""
+    key = _UNIFIED_EXTRA_ALIASES.get(key, key)
+    try:
+        launcher = hw_family(key).family
+    except UnknownFamily:
+        launcher = ""
+    if launcher not in _UNIFIED_OF_LAUNCHER:
+        raise UnknownFamily(f"unknown device family {name!r} (known: {list(UNIFIED_FAMILIES)} "
+                            f"and the aliases {sorted(set(_HW_BY_NAME) - {'cpu'} | set(_UNIFIED_EXTRA_ALIASES))})")
+    return _UNIFIED_OF_LAUNCHER[launcher]
+
+
+def launcher_family(name: str) -> str:
+    """The launcher family (``cuda`` / ``rocm`` / ``npu`` / ``ppu``: the inventory's
+    ``device_family``, ``$YETO_DEVICE_FAMILY``) of any spelling :func:`unified_family` reads."""
+    unified = unified_family(name)
+    return next(k for k, v in _UNIFIED_OF_LAUNCHER.items() if v == unified)
+
+
 def hw_family_or(name: str | None, default: str = "cuda") -> HwFamily:
     """:func:`hw_family`, falling back to ``default`` for a missing/unknown name.
 

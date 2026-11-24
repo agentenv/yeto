@@ -3,6 +3,11 @@
 Pinned apart from the Miles training image (``yeto.rl.adapters.miles.pins``) and kept neutral, so the
 sampler adapters (``yeto.rl.adapters.sampler_engines``) read them without importing a training
 adapter. Stdlib-only constants, like the Miles pins.
+
+The engine image catalog (``yeto.launch.engine_images.engine_images``) records each sampler
+image pinned here as an ``EngineImage`` (family, card architectures, engine version, the
+per-model reload modes and rollout fields) whose ``ref`` reads the constant below: the
+digests stay here, a moved pin moves the catalog with it.
 """
 
 from __future__ import annotations
