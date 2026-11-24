@@ -7,6 +7,7 @@ from __future__ import annotations
 import threading
 
 from yeto.rl.adapters.miles import buffer_rollout as br
+from yeto.rl.engine import batch_reader  # the reader lives in the core; its module globals are patched there
 from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
 
@@ -58,7 +59,7 @@ def test_concurrent_stops_do_not_join_a_cleared_prefetcher(tmp_path):
 def test_settle_warns_on_a_long_read_and_keeps_waiting(monkeypatch, capsys):
     from concurrent.futures import Future
 
-    monkeypatch.setattr(br, "SETTLE_WARN_S", 0.05)
+    monkeypatch.setattr(batch_reader, "SETTLE_WARN_S", 0.05)
     read: Future = Future()
     threading.Timer(0.2, read.set_result, args=(None,)).start()
     reader = br.BatchReader.__new__(br.BatchReader)

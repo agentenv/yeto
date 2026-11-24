@@ -74,7 +74,7 @@ def flatten_groups(groups, group_size: int) -> list[dict[str, Any]]:
 
 class _Reader:
     def __init__(self) -> None:
-        from yeto.rl.adapters.miles.buffer_rollout import BatchReader, open_buffer
+        from yeto.rl.engine.batch_reader import BatchReader, open_buffer
 
         self.buffer = open_buffer(batch_size=1, reader=True, create_index=False)
         self.reader = BatchReader(self.buffer,
