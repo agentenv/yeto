@@ -1,0 +1,340 @@
+"""Store records of the node runtime: assignments and node state.
+
+Under the run's store root (the root that holds ``sample-buffer/``):
+
+* ``assignments/<ticket>.json``: the control plane's assignment of one machine
+  (:class:`Assignment`): the shard, the shard it continues, the rendered spec,
+  the code hash, the model plan, the node profile, a ``generation`` that grows
+  with each rewrite, and the sha256 of the ticket's token. A node reads its
+  assignment with the token (:func:`read_assignment`); a machine opened by hand
+  joins the same way, so the pool's fence and handoff rules hold for it as for
+  an ordered one;
+* ``nodes/<ticket>/ready.json``: the sampler joined its shard;
+* ``nodes/<ticket>/heartbeat.json``: rewritten every ``heartbeat_s`` with the
+  stage (``preflight``, ``code``, ``model``, ``starting``, ``engine``,
+  ``running``, ``left``) and an engine summary (generation tokens, running /
+  queued requests, rounds);
+* ``nodes/<ticket>/exit.json``: exit code and reason.
+
+The control plane judges a node from these records alone (:func:`node_status`,
+:func:`probe_of`): a node behind NAT that only dials out is as visible as one
+that answers SSH. Every node record carries the assignment's ``generation``;
+a record of another generation (a node still running an older assignment of
+the same ticket) is not this assignment's.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import secrets
+import socket
+import time
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
+ASSIGNMENTS_DIR = "assignments"
+NODES_DIR = "nodes"
+NODE_RECORDS = ("ready", "heartbeat", "exit")
+TOKEN_ENV = "YETO_NODE_TOKEN"
+DEFAULT_STALE_S = 300.0  # a heartbeat older than this, without an exit record: stuck
+
+# the stages a heartbeat reports, in order; the sampler writes ``engine`` on, the
+# node runtime the ones before
+BOOT_STAGES = ("assigned", "preflight", "code", "model", "spec", "starting")
+SAMPLER_STAGES = ("engine", "running", "left")
+
+
+class AssignmentError(RuntimeError):
+    """No assignment for the ticket, or the token is not the ticket's."""
+
+
+def _safe(part: str, what: str) -> str:
+    text = str(part)
+    if not text or "/" in text or text in (".", "..") or any(c.isspace() for c in text):
+        raise ValueError(f"{what} {part!r} must be one plain word (no '/', no blanks)")
+    return text
+
+
+def assignment_key(ticket: str) -> str:
+    return f"{ASSIGNMENTS_DIR}/{_safe(ticket, 'ticket')}.json"
+
+
+def ticket_of_key(key: str) -> str:
+    """``assignments/<ticket>.json`` or a bare ticket -> the ticket."""
+    text = str(key).strip()
+    if text.startswith(f"{ASSIGNMENTS_DIR}/"):
+        text = text[len(ASSIGNMENTS_DIR) + 1:]
+    return _safe(text.removesuffix(".json"), "ticket")
+
+
+def node_key(ticket: str, record: str) -> str:
+    if record not in NODE_RECORDS:
+        raise ValueError(f"node record {record!r} is not one of {NODE_RECORDS}")
+    return f"{NODES_DIR}/{_safe(ticket, 'ticket')}/{record}.json"
+
+
+def new_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def token_digest(token: str) -> str:
+    return hashlib.sha256(f"yeto-node:{token}".encode()).hexdigest()
+
+
+def _read_json(objects: Any, key: str) -> dict[str, Any] | None:
+    raw = objects.read(key)
+    if raw is None:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return {"torn": True}
+    return doc if isinstance(doc, dict) else {"torn": True}
+
+
+def _write_json(objects: Any, key: str, doc: Mapping[str, Any]) -> None:
+    objects.write(key, (json.dumps(dict(doc), sort_keys=True) + "\n").encode())
+
+
+# -- assignments -------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CodeRef:
+    """The yeto tree a node runs: ``sha`` (short commit or content hash), the store
+    ``key`` of its tar and the tar's ``sha256``."""
+
+    sha: str
+    key: str
+    sha256: str
+    bytes: int = 0
+
+
+@dataclass(frozen=True)
+class ModelPlan:
+    """How the node gets the model. ``source``: ``store`` (``key`` under the bucket),
+    ``volume`` / ``preset`` (already at ``dest``), ``hf`` (``repo`` at ``revision``),
+    ``none``. ``dest``: a node path (container paths ``/models/...`` map to the
+    profile's ``models``)."""
+
+    source: str = "none"
+    key: str | None = None
+    dest: str | None = None
+    include: str | None = None
+    repo: str | None = None
+    revision: str | None = None
+    max_mb_s: int = 2500
+    jobs: int = 16
+    timeout_s: float = 3600.0
+
+
+@dataclass(frozen=True)
+class Assignment:
+    ticket: str
+    shard: str
+    spec: Mapping[str, Any]
+    code: CodeRef
+    token_sha256: str
+    generation: int = 1
+    run: str | None = None
+    pool: str | None = None
+    source: str | None = None  # the provider kind (nc, daytona, sky, modal, ssh, manual)
+    continues_shard: str | None = None
+    data_slot: str | None = None
+    model: ModelPlan = field(default_factory=ModelPlan)
+    profile: Mapping[str, Any] | None = None
+    env: Mapping[str, str] = field(default_factory=dict)  # non-secret environment of the sampler
+    store_uri: str | None = None  # the run store as the node reaches it (None: the node's --store)
+    image: str | None = None  # a container launch's image (None: the profile's)
+    python: str | None = None  # the sampler interpreter (None: the image's, or this runtime's)
+    sudo: bool = False  # the container engine needs sudo
+    cards: tuple[int, ...] | None = None  # the cards the sampler gets (None: every card)
+    preflight: Mapping[str, Any] = field(default_factory=dict)  # yeto.node.preflight.Requirements fields
+    created_at: float = 0.0
+
+    def doc(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> "Assignment":
+        known = set(cls.__dataclass_fields__)
+        values = {k: v for k, v in doc.items() if k in known}  # newer fields: ignored
+        values["code"] = CodeRef(**{k: v for k, v in dict(doc["code"]).items()
+                                    if k in CodeRef.__dataclass_fields__})
+        values["model"] = ModelPlan(**{k: v for k, v in dict(doc.get("model") or {}).items()
+                                       if k in ModelPlan.__dataclass_fields__})
+        if values.get("cards") is not None:
+            values["cards"] = tuple(int(c) for c in values["cards"])
+        return cls(**values)
+
+
+def write_assignment(objects: Any, assignment: Assignment) -> str:
+    key = assignment_key(assignment.ticket)
+    _write_json(objects, key, assignment.doc())
+    return key
+
+
+def assign(objects: Any, *, ticket: str, shard: str, spec: Mapping[str, Any], code: CodeRef,
+           token: str | None = None, clock: Any = time.time, **fields_: Any) -> tuple[Assignment, str]:
+    """Write ``assignments/<ticket>.json`` (generation one past the one there) and
+    return it with the ticket's token (a new token unless ``token``). The token goes
+    to the node by the transport, or to an operator for a machine opened by hand."""
+    if spec.get("sampler_id") not in (None, shard):
+        raise ValueError(f"spec sampler_id {spec.get('sampler_id')!r} is not the shard {shard!r}")
+    token = token or new_token()
+    previous = _read_json(objects, assignment_key(ticket)) or {}
+    generation = int(previous.get("generation") or 0) + 1 if not previous.get("torn") else 1
+    assignment = Assignment(ticket=ticket, shard=shard, spec=dict(spec), code=code, token_sha256=token_digest(token),
+                            generation=generation, created_at=float(clock()), **fields_)
+    write_assignment(objects, assignment)
+    return assignment, token
+
+
+def read_assignment(objects: Any, key: str, token: str) -> Assignment:
+    """The assignment of ``key`` (a ticket or ``assignments/<ticket>.json``) when
+    ``token`` is the ticket's; :class:`AssignmentError` otherwise."""
+    ticket = ticket_of_key(key)
+    doc = _read_json(objects, assignment_key(ticket))
+    if doc is None:
+        raise AssignmentError(f"no assignment for ticket {ticket} in the store")
+    if doc.get("torn"):
+        raise AssignmentError(f"the assignment of ticket {ticket} is not readable JSON")
+    if not token or not secrets.compare_digest(str(doc.get("token_sha256") or ""), token_digest(token)):
+        raise AssignmentError(f"the token is not the token of ticket {ticket}")
+    return Assignment.from_doc(doc)
+
+
+def revoke_assignment(objects: Any, ticket: str) -> None:
+    objects.delete(assignment_key(ticket))
+
+
+# -- node records --------------------------------------------------------------------
+
+
+class NodeReporter:
+    """Writes this node's ``ready`` / ``heartbeat`` / ``exit`` records. Every write is
+    best effort for the caller (:meth:`safe`): a store outage never stops a sampler."""
+
+    def __init__(self, objects: Any, ticket: str, generation: int, *, clock: Any = time.time,
+                 base: Mapping[str, Any] | None = None) -> None:
+        self.objects, self.ticket, self.generation, self.clock = objects, ticket, int(generation), clock
+        self.base = dict(base or {})
+        self.failures = 0
+
+    def _doc(self, **fields_: Any) -> dict[str, Any]:
+        return {"ticket": self.ticket, "generation": self.generation, "time": float(self.clock()),
+                "host": socket.gethostname(), "pid": os.getpid(), **self.base, **fields_}
+
+    def write(self, record: str, **fields_: Any) -> dict[str, Any]:
+        doc = self._doc(**fields_)
+        _write_json(self.objects, node_key(self.ticket, record), doc)
+        return doc
+
+    def safe(self, record: str, **fields_: Any) -> dict[str, Any] | None:
+        try:
+            return self.write(record, **fields_)
+        except Exception as error:  # noqa: BLE001 - observation only
+            self.failures += 1
+            if self.failures == 1:
+                print(f"[yeto-node] {record} record not written: {type(error).__name__}: {error}", flush=True)
+            return None
+
+    def ready(self, **fields_: Any) -> dict[str, Any] | None:
+        return self.safe("ready", **fields_)
+
+    def heartbeat(self, stage: str, **fields_: Any) -> dict[str, Any] | None:
+        return self.safe("heartbeat", stage=stage, **fields_)
+
+    def exit(self, code: int | None, reason: str, **fields_: Any) -> dict[str, Any] | None:
+        return self.safe("exit", exit_code=code, reason=str(reason), **fields_)
+
+
+def clear_node_records(objects: Any, ticket: str) -> None:
+    """Remove the node records of ``ticket`` (a new assignment starts clean)."""
+    for record in NODE_RECORDS:
+        try:
+            objects.delete(node_key(ticket, record))
+        except Exception:  # noqa: BLE001 - absent is fine
+            pass
+
+
+@dataclass(frozen=True)
+class NodeStatus:
+    """What the store says about one ticket's node. ``state``: ``unassigned``,
+    ``assigned`` (nothing written yet), ``booting`` (heartbeats, no ready),
+    ``ready``, ``stuck`` (no heartbeat for ``stale_s``, no exit), ``exited``."""
+
+    ticket: str
+    state: str
+    generation: int | None = None
+    stage: str | None = None
+    heartbeat_age_s: float | None = None
+    exit_code: int | None = None
+    reason: str | None = None
+    ready: Mapping[str, Any] | None = None
+    heartbeat: Mapping[str, Any] | None = None
+    exit: Mapping[str, Any] | None = None
+
+    @property
+    def engine(self) -> Mapping[str, Any]:
+        return dict((self.heartbeat or {}).get("engine") or {})
+
+
+def node_status(objects: Any, ticket: str, *, now: float | None = None, stale_s: float = DEFAULT_STALE_S,
+                generation: int | None = None) -> NodeStatus:
+    """The node of ``ticket`` from the store alone. ``generation``: the assignment's
+    (default: read from it); records of another generation are ignored."""
+    if generation is None:
+        assignment = _read_json(objects, assignment_key(ticket))
+        if assignment is None or assignment.get("torn"):
+            return NodeStatus(ticket, "unassigned")
+        generation = int(assignment.get("generation") or 1)
+    now = time.time() if now is None else float(now)
+    docs = {}
+    for record in NODE_RECORDS:
+        doc = _read_json(objects, node_key(ticket, record))
+        if doc is not None and not doc.get("torn") and int(doc.get("generation") or 0) == int(generation):
+            docs[record] = doc
+    ready, beat, ended = docs.get("ready"), docs.get("heartbeat"), docs.get("exit")
+    newest = max((float(d.get("time") or 0.0) for d in docs.values()), default=None)
+    age = None if newest is None else max(0.0, now - newest)
+    stage = None if beat is None else beat.get("stage")
+    common = {"generation": generation, "stage": stage, "heartbeat_age_s": age, "ready": ready, "heartbeat": beat,
+              "exit": ended}
+    if ended is not None:
+        code = ended.get("exit_code")
+        return NodeStatus(ticket, "exited", exit_code=None if code is None else int(code),
+                          reason=ended.get("reason"), **common)
+    if not docs:
+        return NodeStatus(ticket, "assigned", **common)
+    if age is not None and age > float(stale_s):
+        return NodeStatus(ticket, "stuck", reason=f"no heartbeat for {age:.0f}s (stage {stage})", **common)
+    return NodeStatus(ticket, "ready" if ready is not None else "booting", **common)
+
+
+def probe_of(status: NodeStatus) -> Any:
+    """The pool's :class:`yeto.launch.pool.status.Probe` of a store status: the same
+    reading an SSH probe gives, from the store (``progress_age_s`` is the heartbeat's
+    age; a stuck node reads as a running sampler without progress)."""
+    from yeto.launch.pool.status import PROBE_UNREACHABLE, Probe  # noqa: PLC0415
+
+    if status.state in ("unassigned",):
+        return Probe(node=PROBE_UNREACHABLE)
+    engine = status.engine
+    if status.state == "exited":
+        return Probe(node="ok", sampler="exited", exit_code=status.exit_code, joined=status.ready is not None)
+    if status.state == "assigned":
+        return Probe(node="ok", sampler="absent")
+
+    def num(key: str) -> float | None:
+        value = engine.get(key)
+        return None if value is None else float(value)
+
+    running, queued = num("running"), num("queued")
+    return Probe(node="ok", sampler="running", joined=status.ready is not None,
+                 progress_age_s=status.heartbeat_age_s, gen_tokens=num("gen_tokens"),
+                 running=None if running is None else int(running), queued=None if queued is None else int(queued),
+                 trainer_wait=bool((status.heartbeat or {}).get("trainer_wait")))

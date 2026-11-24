@@ -1280,6 +1280,12 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         install_marker_signals(env)
     buffer.refresh()
     member_store = data_path.member_store
+    from yeto.node import report as node_report  # noqa: PLC0415
+
+    # nodes/<ticket>/{ready,heartbeat,exit} in the store: only a start that names its ticket
+    # (YETO_NODE_TICKET, the node runtime) writes them; every other start writes nothing new
+    node = node_report.from_env(env, member_store, spec)
+    node_exit: list[Any] = [None, None]  # exit code, reason of an unsupervised start
     from .sampler_breakers import spec_breakers  # noqa: PLC0415
 
     limits = spec_breakers(spec)  # the registry's sampler entries (yeto.breakers.layers.sampler)
@@ -1293,7 +1299,8 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         if getattr(prompts, "emit", False) is None:
             prompts.emit = emit
         prompts.recover(buffer.entries())
-    membership = SamplerMembership(member_store, config.sampler_id, incarnation, resume, emit)
+    membership = SamplerMembership(member_store, config.sampler_id, incarnation, resume, emit,
+                                   node=None if node is None else node.member_fields())
     reclaimed = lambda: reclaim_requested(env)  # noqa: E731
     until = until_trainers_end(spec)
     trainers_ended = TrainersEndWatch(member_store, until, emit)  # no new round once they ended
@@ -1331,6 +1338,9 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
     def leave(reason: LeaveReason, **detail: Any) -> None:
         version = None if island is None else island.follower.version
         membership.leave(reason.name, policy_version=version, buffer_end=len(buffer), **detail)
+        if node is not None:
+            node.left(reason.name, rounds=detail.get("rounds"), policy_version=version)
+            node_exit[1] = reason.name
 
     engine = build_engine(spec)
     check_score_centering(spec, engine, env)  # the environment the engine server inherits, too
@@ -1356,6 +1366,8 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
     if reclaim_deadline is not None:
         reclaim_deadline.add_cleanup("engine", engine.stop)
     watcher = ReclaimWatcher(reclaimed, on_reclaim).start()
+    if node is not None:  # stopped in the finally below
+        node.start()
     fence_watcher = None
     # the dashboard reads every island's tape from the store (tapes/<sampler>/<incarnation>/)
     from .tape_upload import TapeUploader, store_objects, upload_interval_s  # noqa: PLC0415
@@ -1394,6 +1406,10 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         latest = releases.latest()
         membership.join(tape=str(tape), latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
+        if node is not None:
+            node.progress = lambda: {"rounds": int(getattr(island.loop, "rounds_done", 0) or 0),
+                                     "policy_version": island.follower.version}
+            node.ready(shard=config.sampler_id, incarnation=incarnation, tape=str(tape))
         if lease is not None:  # this incarnation now owns the island's shard
             from yeto.rl.engine.incarnation_lease import claim_patiently  # noqa: PLC0415
 
@@ -1506,8 +1522,10 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
             # a launcher island's complete tape ends with this record (yeto.launch.tapes);
             # a reclaimed incarnation's tape stays open: the next incarnation continues
             emit(FINALIZED_EVENT, rounds=rounds)
+        node_exit[0] = RECLAIM_EXIT_CODE if preempted else 0 if not_run is None else NOT_RUN_EXIT_CODE
         return rounds if not_run is None else NotRun(rounds, not_run[0])
     except BaseException as error:
+        node_exit[0] = RECLAIM_EXIT_CODE if reclaimed() else 1
         from .sampler_breakers import stop_reason_of  # noqa: PLC0415
 
         tripped = stop_reason_of(error)  # a breaker that stops the sampler: "breaker:<name>"
@@ -1521,6 +1539,9 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         raise
     finally:
         watcher.stop()
+        if node is not None:
+            node.stop()
+            node.exit(node_exit[0], node_exit[1])
         if uploader is not None:
             uploader.stop()
         if fence_watcher is not None:

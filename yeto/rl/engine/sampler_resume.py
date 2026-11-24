@@ -251,6 +251,10 @@ class Member:
     leave_reason: str | None = None
     rounds: int | None = None  # rounds this incarnation completed
     detail: dict[str, Any] = field(default_factory=dict)
+    # the machine this incarnation runs on (yeto.node: ticket, generation, source, profile
+    # summary); written only when known, so a record without a node is byte for byte the
+    # record before this field (older readers take the record as a mapping)
+    node: dict[str, Any] | None = None
 
 
 def member_key(member: Member) -> str:
@@ -280,7 +284,10 @@ def write_member(store: Any, member: Member) -> Path:
     """Write (or rewrite) the incarnation's member record and commit the store.
     One file per incarnation: an old and a new incarnation never write the same
     file (a Modal Volume keeps the last commit of a file)."""
-    return _put_record(store, member_key(member), asdict(member))
+    record = asdict(member)
+    if record.get("node") is None:
+        record.pop("node", None)
+    return _put_record(store, member_key(member), record)
 
 
 def write_trainer_end(store: Any, trainer: str, **fields: Any) -> Path:
@@ -316,17 +323,20 @@ class SamplerMembership:
     both call it); later calls return False."""
 
     def __init__(self, store: Any, sampler: str, incarnation: str, resume: SamplerResume,
-                 emit: Callable[..., None], clock: Callable[[], float] = time.time) -> None:
+                 emit: Callable[..., None], clock: Callable[[], float] = time.time,
+                 node: Mapping[str, Any] | None = None) -> None:
         self.store = store
         self.emit = emit
         self.clock = clock
         self.member = Member(sampler=sampler, incarnation=incarnation, joined_at=clock(),
-                             resume=resume.fields())
+                             resume=resume.fields(), node=None if node is None else dict(node))
         self._lock = threading.Lock()
         self.left = False
 
     def join(self, **fields: Any) -> None:
         m = self.member
+        if m.node is not None:  # the machine (ticket, source, card) of a node runtime start
+            fields = {**fields, "node": m.node}
         self.emit(JOIN_EVENT, sampler=m.sampler, incarnation=m.incarnation, **m.resume, **fields)
         write_member(self.store, m)
 
