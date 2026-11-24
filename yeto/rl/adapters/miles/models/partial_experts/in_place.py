@@ -228,13 +228,24 @@ def _check_router_bias(model: Any) -> None:
 
 
 def wrap_model_provider(provider: Callable[..., Any], selection: ExpertSelection) -> Callable[..., Any]:
-    """A Miles model provider that freezes each chunk it builds (before DDP wraps it)."""
+    """A Miles model provider that freezes each chunk it builds (before DDP wraps it).
+
+    The frozen embedding's output is made to require grad (the kimi_k31
+    ``first_stage_grad`` hook): under full recompute (``--recompute-granularity
+    full``, Megatron's reentrant ``tensor_parallel.checkpoint``) a checkpoint whose
+    inputs need no grad builds no graph, so with every dense parameter frozen the
+    first pipeline stage's selected experts got no gradient at all (at PP=1: the
+    whole model, ``grad_norm`` 0).
+    """
+
+    from yeto.rl.adapters.miles.models.kimi_k31 import first_stage_grad  # noqa: PLC0415
 
     def model_provider(*args: Any, **kwargs: Any) -> Any:
         model = provider(*args, **kwargs)
         _check_router_bias(model)
         coords = _rank_coordinates(model, kwargs.get("vp_stage"))
         trainable, frozen = freeze_chunk(model, selection=selection, coords=coords)
+        first_stage_grad.install(model)  # a no-op on a chunk without the embedding (later PP stages)
         print(f"[yeto] {LABEL}: {trainable} trainable expert weights, {frozen} frozen parameters on EP rank "
               f"{coords.ep_rank} (layer offset {coords.layer_offset})", flush=True)
         return model
