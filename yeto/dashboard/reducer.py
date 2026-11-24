@@ -171,6 +171,15 @@ def record_ts(record: dict) -> float | None:
     return None
 
 
+def pool_record(record: dict) -> dict:
+    """A pool event under its neutral name (``rl_pool_<x>``, the unified sampler pool's) read
+    as ``nc_elastic_<x>``: the views match the legacy names, records of either kind fold alike."""
+    event = record.get("event")
+    if isinstance(event, str) and event.startswith(NEUTRAL_POOL_PREFIX):
+        return {**record, "event": async_rl.POOL_PREFIX + event[len(NEUTRAL_POOL_PREFIX):]}
+    return record
+
+
 def classify(record: dict) -> str:
     event = record.get("event")
     if isinstance(event, str) and event.startswith("sft_"):
@@ -191,6 +200,7 @@ def classify(record: dict) -> str:
 
 
 HOST_SAMPLE_EVENT = "modal_host_sample"
+NEUTRAL_POOL_PREFIX = "rl_pool_"  # yeto.launch.pool.status.NEUTRAL_PREFIX (no import: the dashboard stands alone)
 STOP_SLACK_S = 5.0
 NODE_SERIES_MAX = 20000
 NODE_SERIES_POINTS = 300
@@ -360,6 +370,7 @@ class Reducer:
             return False
         if record.get("event") == HOST_SAMPLE_EVENT:
             return self._feed_host(record, island, node)
+        record = pool_record(record)
         kind = classify(record)
         iid = (_iid(island) if island_fixed and island is not None and kind == "learner" else None) \
             or _iid(record.get("island_id", record.get("learner_id"))) or island \

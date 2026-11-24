@@ -387,4 +387,10 @@ def run_up_view(path: str | None, now: float) -> dict | None:
         state = json.loads(Path(path).expanduser().read_text())
     except (OSError, ValueError):
         return None
-    return uptime_summary(state, now) if isinstance(state, dict) else None
+    if not isinstance(state, dict):
+        return None
+    out = uptime_summary(state, now)
+    degraded = state.get("degraded_pools")
+    if isinstance(out, dict) and isinstance(degraded, dict) and degraded:
+        out = dict(out, degraded_pools={str(k): str(v) for k, v in degraded.items()})
+    return out
