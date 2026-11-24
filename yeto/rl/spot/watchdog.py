@@ -583,12 +583,14 @@ class Watchdog:
 
 
 def provider_ops(a: argparse.Namespace, cands: list[Candidate], envs: list[str], *, sky: Any = None) -> ProviderOps:
-    """The ``--via-provider`` ops: one SkyProvider slot, this watchdog's cluster prefix."""
+    """The ``--via-provider`` ops: one SkyProvider slot, this watchdog's cluster prefix. The
+    provider's start timeout (order to UP) is the launch bound ``--launch-timeout-s``: an
+    on-demand 8 x H100 took 15 min to come up (``--starting-timeout-s`` is shorter)."""
     from yeto.launch.nc.sky_provider import SkyProvider  # noqa: PLC0415
 
     provider = SkyProvider(a.run_id, slots=[1], offers=[c.offer() for c in cands], exact_prefix=a.cluster_prefix,
                            task_yaml=a.yaml, envs=dict(e.split("=", 1) for e in envs),
-                           secrets={s: s for s in a.secret}, start_timeout_s=a.starting_timeout_s, sky=sky,
+                           secrets={s: s for s in a.secret}, start_timeout_s=a.launch_timeout_s, sky=sky,
                            record=Path(a.dir) / f"{a.cluster_prefix}.clusters.json")
     return ProviderOps(provider, own_name=a.own_name_re)
 
