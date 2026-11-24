@@ -16,6 +16,10 @@ vllm-ascend on 910B. Per round (:class:`EngineRound`):
    (:class:`~.sampler_engine.Provenance`) in the index entry;
 6. write ``rl_sampler_engine_round`` (finish reasons, tokens, provenance key).
 
+``rl_sampler_start`` names the sampler's ``island`` (the learner id of the trainer
+it feeds, None outside a fleet of islands) and its ``store``, so a dashboard and
+the run's data-end check bind it to its trainer without parsing the store path.
+
 Replacement (the engine-sampler side of C1's :mod:`.sampler_resume`):
 each group's sample id carries the incarnation, the round and the prompt row,
 so a new incarnation never writes an earlier one's payload name; each index
@@ -527,6 +531,11 @@ class EngineSamplerConfig:
     expert_trainable_sha256: str | None = None
     # skip groups whose samples all score the same reward (DAPO dynamic sampling)
     drop_zero_variance_groups: bool = False
+    # the learner id of the trainer this sampler feeds (an external pool of a synced
+    # trainer: its sub-directory trainer<k>); None: no island. Identity only: the
+    # start event carries it, with the store the sampler reads and writes
+    island: int | None = None
+    store: str | None = None
 
 
 @dataclass
@@ -581,7 +590,8 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
          max_backlog_groups=int(config.max_backlog_groups), sampling=sampling.to_dict(),
          sampling_digest=sampling.digest(), allow_penalties=sampling.allow_penalties,
          max_prompt_tokens=int(config.max_prompt_tokens), provenance=provenance.to_record(),
-         loop_guard=None if config.loop_guard is None else vars(config.loop_guard).copy())
+         loop_guard=None if config.loop_guard is None else vars(config.loop_guard).copy(),
+         island=config.island, store=config.store)
     loader = PortReleaseLoader(engine, checks or PostLoadChecks(), emit,
                                max_consecutive_failures=config.max_consecutive_load_failures,
                                expected_selection_sha256=config.expert_selection_sha256,

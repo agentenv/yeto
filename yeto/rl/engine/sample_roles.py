@@ -50,6 +50,18 @@ releases), the trainer reads that whole buffer (its own lane, 0 of 1) and
 releases every local policy version for its samplers
 (``merged_release`` module doc). The trainers still merge through the syncer.
 
+External sampler pools that follow their own trainer (``--rl-sampler-follow
+trainer`` with ``--rl-island-buffer-shards K:A,B``, no ``--rl-island-sample-role``):
+every island of the launch is a synced trainer, learner k of K in island order,
+and its samplers are pools outside the launch (engine samplers on any cloud,
+``yeto run up``) that read and write its sub-directory ``trainer<k>``. The flag
+names, per trainer island, the buffer shards its pools write
+(:func:`island_buffer_shards`); the trainer reads that whole buffer (its own
+lane) as in a synced group. ``--rl-island-release-every K:N`` /
+``--rl-island-max-policy-age K:N`` give one trainer its own release cadence and
+policy-age limit (:func:`external_pool_island_args`). The sub-directory number
+is the learner id in every follow-trainer launch (:func:`trainer_substore`).
+
 Decoupled groups (``--rl-sync-preset decoupled``, Miles): a decoupled trainer
 has one version per fragment, merged at different times, so its group needs
 ``--rl-sampler-follow trainer`` (:func:`check_decoupled_group`); its samplers
@@ -75,6 +87,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -370,9 +383,108 @@ def _shards_of(samplers: list[int]) -> list[str] | None:
 
 
 def follows_trainer(args: Any) -> bool:
-    """Whether a synced group's samplers follow their own trainer
-    (``--rl-sampler-follow trainer``, module doc)."""
-    return is_synced_group(args) and getattr(args, "rl_sampler_follow", FOLLOW_MERGED) == FOLLOW_TRAINER
+    """Whether a synced group's samplers, or the external pools of synced trainers,
+    follow their own trainer (``--rl-sampler-follow trainer``, module doc)."""
+    return ((is_synced_group(args) or is_external_pool_group(args))
+            and getattr(args, "rl_sampler_follow", FOLLOW_MERGED) == FOLLOW_TRAINER)
+
+
+# A buffer shard name of --rl-island-buffer-shards: it reaches the island command
+# unquoted (island_flags, comma separated) and names a buffer file or prefix.
+_SHARD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+# Per-island trainer options of synced trainers fed by external pools:
+# (launch flag, its args name, the island option it sets)
+ISLAND_TRAINER_OVERRIDES = (
+    ("--rl-island-release-every", "rl_island_release_every", "rl_release_every"),
+    ("--rl-island-max-policy-age", "rl_island_max_policy_age", "rl_max_policy_age"),
+)
+EXTERNAL_POOL_FLAGS = (("--rl-island-buffer-shards", "rl_island_buffer_shards"),
+                       *((flag, dest) for flag, dest, _name in ISLAND_TRAINER_OVERRIDES))
+
+
+def uses_external_pools(args: Any) -> bool:
+    """Whether the launch names its trainers' buffer shards
+    (``--rl-island-buffer-shards``): their samplers are pools outside the launch."""
+    return bool(getattr(args, "rl_island_buffer_shards", None))
+
+
+def is_external_pool_group(args: Any) -> bool:
+    """Synced trainers fed by external pools that follow their own trainer (module
+    doc): ``--rl-sample-role trainer`` with a syncer, ``--rl-sampler-follow trainer``
+    and ``--rl-island-buffer-shards``, no sampler island."""
+    return (uses_external_pools(args) and is_synced_trainer(args)
+            and not getattr(args, "rl_island_sample_role", None)
+            and getattr(args, "rl_sampler_follow", FOLLOW_MERGED) == FOLLOW_TRAINER)
+
+
+def _island_entries(args: Any, dest: str, flag: str, num_islands: int) -> dict[int, str]:
+    """{island: value} of a repeatable ``ISLAND:VALUE`` flag; raises ValueError on a
+    malformed, out-of-range or repeated entry."""
+    out: dict[int, str] = {}
+    for item in getattr(args, dest, None) or ():
+        island, sep, value = str(item).partition(":")
+        if not sep or not island.strip().isdigit():
+            raise ValueError(f"{flag} takes ISLAND:VALUE, got {item!r}")
+        m = int(island)
+        if not 0 <= m < int(num_islands):
+            raise ValueError(f"{flag} {item!r}: --gpu has {num_islands} island(s)")
+        if m in out:
+            raise ValueError(f"{flag} names island {m} twice")
+        out[m] = value.strip()
+    return out
+
+
+def island_buffer_shards(args: Any, num_islands: int) -> dict[int, list[str]]:
+    """{trainer island: the buffer shards its pools write} of
+    ``--rl-island-buffer-shards K:A,B`` (repeatable); {} without it. Raises
+    ValueError on a malformed, out-of-range or repeated entry, an island without a
+    shard, a name that is not a plain shard name, or a shard named twice (every
+    pool writes its own shard, so a name is unique in the launch)."""
+    out: dict[int, list[str]] = {}
+    owner: dict[str, int] = {}
+    entries = _island_entries(args, "rl_island_buffer_shards", "--rl-island-buffer-shards", num_islands)
+    for m, value in sorted(entries.items()):
+        shards = [s.strip() for s in value.split(",") if s.strip()]
+        if not shards:
+            raise ValueError(f"--rl-island-buffer-shards {m}:{value}: island {m} names no shard")
+        for shard in shards:
+            if not _SHARD_NAME.fullmatch(shard):
+                raise ValueError(f"--rl-island-buffer-shards: island {m} shard {shard!r} is not a shard "
+                                 "name (letters, digits, '_', '.', '-')")
+            if shard in owner:
+                raise ValueError(f"--rl-island-buffer-shards: shard {shard!r} is named for island "
+                                 f"{owner[shard]} and island {m}; every pool writes its own shard")
+            owner[shard] = m
+        out[m] = shards
+    return out
+
+
+def island_trainer_overrides(args: Any, num_islands: int) -> dict[int, dict[str, int]]:
+    """{trainer island: {island option: value}} of ``--rl-island-release-every K:N``
+    and ``--rl-island-max-policy-age K:N`` (:data:`ISLAND_TRAINER_OVERRIDES`); {}
+    without them. Raises ValueError on an entry that is not ``ISLAND:N``, N >= 1."""
+    out: dict[int, dict[str, int]] = {}
+    for flag, dest, name in ISLAND_TRAINER_OVERRIDES:
+        for m, value in _island_entries(args, dest, flag, num_islands).items():
+            if not value.isdigit() or int(value) < 1:
+                raise ValueError(f"{flag} {m}:{value}: the value must be an integer >= 1")
+            out.setdefault(m, {})[name] = int(value)
+    return out
+
+
+def external_pool_island_args(args: Any, island: int, num_islands: int) -> Any:
+    """Island args of a synced trainer fed by external pools (module doc): a copy
+    with its sub-store ``trainer<k>`` (k: its learner id, which is its island index:
+    every island is a trainer), its own lane (the launcher forwards
+    ``--rl-sample-lanes 1``), the buffer shards of its pools, and its own release
+    cadence and policy-age limit when the launch gives them."""
+    out = copy.copy(args)
+    out.rl_synced_trainers = int(num_islands)
+    out.rl_sample_substore = trainer_substore(island)
+    out.rl_buffer_shards = island_buffer_shards(args, num_islands).get(island)
+    for name, value in island_trainer_overrides(args, num_islands).get(island, {}).items():
+        setattr(out, name, value)
+    return out
 
 
 def sampler_bindings(args: Any, num_islands: int) -> dict[int, int]:
@@ -386,8 +498,21 @@ def sampler_bindings(args: Any, num_islands: int) -> dict[int, int]:
 
 def trainer_substore(learner: int) -> str:
     """The store sub-directory of trainer ``learner`` and its samplers (buffer and
-    releases) when the samplers follow their trainer."""
+    releases) when the samplers follow their trainer. ``learner`` is the trainer's
+    learner id (k of K in island order), not its island index: in a synced group
+    the sampler islands may come first."""
     return f"trainer{int(learner)}"
+
+
+def island_substore(args: Any, island: int, num_islands: int) -> str | None:
+    """The store sub-directory island ``island`` reads and writes when samplers
+    follow their trainer: a trainer's own ``trainer<k>``, a sampler island's that of
+    the trainer it feeds; None in every other launch."""
+    if is_external_pool_group(args):
+        return trainer_substore(island) if 0 <= int(island) < int(num_islands) else None
+    learners = synced_group_learners(args, num_islands) if follows_trainer(args) else {}
+    trainer = sampler_bindings(args, num_islands).get(island, island)
+    return trainer_substore(learners[trainer]) if trainer in learners else None
 
 
 def substore_uri(store: str, name: str) -> str:
@@ -422,19 +547,69 @@ def describe_sampler_stop(args: Any, num_islands: int) -> str | None:
 
 def check_sampler_follow(args: Any, num_islands: int) -> None:
     """Launch checks of ``--rl-sampler-follow trainer``: a synced group on Miles
-    whose samplers split evenly over its trainers."""
+    whose samplers split evenly over its trainers, or synced trainers on Miles fed
+    by external pools (:func:`check_external_pools`); the external-pool flags
+    belong to the latter (:func:`check_external_pool_flags`)."""
+    check_external_pool_flags(args)
     if getattr(args, "rl_sampler_follow", FOLLOW_MERGED) != FOLLOW_TRAINER:
         return
-    if not is_synced_group(args):
+    if not is_synced_group(args) and not is_external_pool_group(args):
         raise ValueError("--rl-sampler-follow trainer needs a synced group (--rl-sample-role "
-                         "trainer --rl-island-sample-role M:sampler, a syncer)")
+                         "trainer --rl-island-sample-role M:sampler, a syncer), or synced "
+                         "trainers fed by external sampler pools (--rl-sample-role trainer, a "
+                         "syncer, --rl-island-buffer-shards K:SHARDS for every trainer island)")
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
         raise ValueError("--rl-sampler-follow trainer is wired for --rl-backend miles only")
+    if is_external_pool_group(args):
+        check_external_pools(args, num_islands)
+        return
     trainers = len(synced_group_learners(args, num_islands))
     samplers = len(sampler_islands(args, num_islands))
     if samplers % trainers:
         raise ValueError(f"--rl-sampler-follow trainer: {samplers} sampler islands do not split "
                          f"evenly over {trainers} trainers (each trainer needs the same count)")
+
+
+def check_external_pool_flags(args: Any) -> None:
+    """``--rl-island-buffer-shards`` / ``--rl-island-release-every`` /
+    ``--rl-island-max-policy-age`` belong to synced trainers fed by external pools
+    (module doc); any other launch refuses them."""
+    given = [flag for flag, dest in EXTERNAL_POOL_FLAGS if getattr(args, dest, None)]
+    if not given or is_external_pool_group(args):
+        return
+    if not uses_external_pools(args):
+        raise ValueError(f"{', '.join(given)} need --rl-island-buffer-shards K:SHARDS (synced trainers "
+                         "fed by external sampler pools)")
+    raise ValueError(f"{', '.join(given)}: synced trainers fed by external sampler pools need "
+                     "--rl-sample-role trainer with a syncer (no --rl-single-island-no-sync), "
+                     "--rl-sampler-follow trainer and no --rl-island-sample-role (the pools are "
+                     "the samplers; there is no sampler island)")
+
+
+def check_external_pools(args: Any, num_islands: int) -> None:
+    """Launch checks of synced trainers fed by external pools (module doc): every
+    island names its buffer shards (the pools that write them follow that trainer
+    only), and every trainer passes its own role checks with its release cadence
+    and policy-age limit (``--rl-release-every`` <= ``--rl-max-policy-age``)."""
+    if getattr(args, "rl_buffer_shards", None):
+        raise ValueError("--rl-buffer-shards: synced trainers fed by external sampler pools take each "
+                         "trainer's shards from --rl-island-buffer-shards K:SHARDS")
+    shards = island_buffer_shards(args, num_islands)
+    missing = [m for m in range(int(num_islands)) if m not in shards]
+    if missing:
+        raise ValueError(f"--rl-island-buffer-shards: trainer island(s) {missing} name no buffer shard; "
+                         "every trainer island needs K:SHARDS (the shards of the pools bound to it)")
+    if getattr(args, "rl_sync_preset", None) == DECOUPLED_SYNC_PRESET:
+        check_decoupled_group(args)
+    if int(getattr(args, "external_learners", 0) or 0):
+        raise ValueError("synced trainers fed by external sampler pools do not take external learners")
+    if getattr(args, "rl_trainer_scheduler", None) not in (None, "off"):
+        raise ValueError("--rl-trainer-scheduler does not combine with external sampler pools")
+    for m in range(int(num_islands)):
+        try:
+            check_launch(external_pool_island_args(args, m, num_islands))
+        except ValueError as error:
+            raise ValueError(f"trainer island {m}: {error}") from None
 
 
 def is_store_coupled(args: Any) -> bool:
@@ -447,7 +622,10 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     """``args`` as island ``island`` of a pair sees it: a copy with its
     ``rl_sample_role``, keeping only its own role's option (the sampler's backlog
     cap, the trainer's wait; a convertible node keeps the backlog cap and the
-    wait); ``args`` itself outside a pair."""
+    wait); ``args`` itself outside a pair. A synced trainer fed by external pools
+    gets its sub-store and shards (:func:`external_pool_island_args`)."""
+    if is_external_pool_group(args):
+        return external_pool_island_args(args, island, num_islands)
     roles = island_roles(args, num_islands)
     if not roles:
         return args

@@ -460,7 +460,21 @@ def add_cli_args(p) -> None:
                    "feeds every trainer's buffer lane. trainer (Miles): sampler j feeds trainer "
                    "j %% K only and loads that trainer's own local policy, released every "
                    "version; each trainer and its samplers share a sub-directory "
-                   "trainer<k> of --rl-checkpoint-store (sample_roles module doc)")
+                   "trainer<k> of --rl-checkpoint-store (sample_roles module doc). With "
+                   "--rl-island-buffer-shards and no sampler island, the samplers are external "
+                   "pools bound to trainer k through trainer<k>")
+    g.add_argument("--rl-island-buffer-shards", action="append", default=None, metavar="K:A,B",
+                   help="synced trainers fed by external sampler pools (--rl-sample-role trainer, "
+                   "a syncer, --rl-sampler-follow trainer, no --rl-island-sample-role): the buffer "
+                   "shards the pools bound to trainer island K write in trainer<K>/ of "
+                   "--rl-checkpoint-store; repeatable, one entry per trainer island, every island "
+                   "named; trainer K reads exactly these shards (--rl-buffer-shards)")
+    g.add_argument("--rl-island-release-every", action="append", default=None, metavar="K:N",
+                   help="with --rl-island-buffer-shards: trainer island K releases every N-th local "
+                   "version (its own --rl-release-every); repeatable")
+    g.add_argument("--rl-island-max-policy-age", action="append", default=None, metavar="K:N",
+                   help="with --rl-island-buffer-shards: trainer island K's own --rl-max-policy-age "
+                   "(at least its release cadence); repeatable")
     g.add_argument("--rl-sampler-spot", action="store_true",
                    help="with --rl-island-sample-role: the sampler islands use spot (preemptible) "
                    "capacity, the trainer island stays on demand; a reclaimed sampler island is "
@@ -637,11 +651,20 @@ def check_policy_age_spec(args) -> None:
     and its A1 preflight, now checked before any cloud resource (a run once failed this check
     only on the island). The dependency rule D15
     (:func:`yeto.breakers.rules_data.policy_age_problem`).
-    Needs prepared args (``rl_algorithm_spec_json`` resolved)."""
+    Needs prepared args (``rl_algorithm_spec_json`` resolved). A trainer island's
+    own limit (``--rl-island-max-policy-age K:N``, synced trainers fed by external
+    pools) goes through the same rule."""
     if getattr(args, "training_mode", "sft") != "rl":
         return
-    age = int(getattr(args, "rl_max_policy_age", 0) or 0)
-    if age == 0:
+    ages = {None: int(getattr(args, "rl_max_policy_age", 0) or 0)}
+    if getattr(args, "rl_island_max_policy_age", None) and getattr(args, "gpu", None):
+        from .gpu_spec import parse_gpu_spec
+        from .rl.engine.sample_roles import island_trainer_overrides
+
+        for island, kv in island_trainer_overrides(args, len(parse_gpu_spec(args.gpu))).items():
+            if "rl_max_policy_age" in kv:
+                ages[island] = kv["rl_max_policy_age"]
+    if not any(ages.values()):
         return
     import json as _json
 
@@ -650,9 +673,10 @@ def check_policy_age_spec(args) -> None:
 
     raw = getattr(args, "rl_algorithm_spec_json", None)
     tolerated = policy_staleness(_json.loads(raw)) if raw else 0
-    problem = policy_age_problem(age, tolerated, backend=getattr(args, "rl_backend", None))
-    if problem is not None:
-        raise PreflightError(problem)
+    for island, age in ages.items():
+        problem = age and policy_age_problem(age, tolerated, backend=getattr(args, "rl_backend", None))
+        if problem:
+            raise PreflightError(problem if island is None else f"trainer island {island}: {problem}")
 
 
 def breaker_findings(args) -> list:

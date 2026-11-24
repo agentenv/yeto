@@ -22,7 +22,7 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
 * ``platform`` (optional): ``cuda`` (default) / ``rocm`` / ``ppu`` / ``npu``, the
   accelerator the engine runs on; handed to the engine factory the same way
   (``rocm`` turns on the SGLang ROCm environment preset and the AMD card check);
-* ``num_rollouts``, ``max_backlog_groups``, ``max_prompt_tokens``;
+* ``num_rollouts`` (optional with ``until_trainers_end``), ``max_backlog_groups``, ``max_prompt_tokens``;
   optional ``base_version`` (0), ``base_dir`` (the engine's base weights),
   ``start_on_latest`` (false: start on ``base_dir``; true: on the store's newest
   release, ``role_switch.sampler_spec_on_release``, so a restarted sampler does
@@ -88,6 +88,17 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   entry (``yeto.breakers.layers.sampler``) whose spec alias is the key named here;
   a section value that disagrees with the key refuses the start. Each trip writes
   ``rl_breaker`` on the tape next to its own event;
+* ``until_trainers_end`` (optional, default 0: off): generate until this many
+  trainers that read the store wrote their end record in its
+  ``sample-buffer/trainers-ended/`` (the record a Miles trainer writes when its run
+  ends normally, ``sampler_resume.write_trainer_end``; the convention of a Miles
+  sampler island with ``--rl-sampler-until-trainers-end``): no round starts after
+  that, the round in flight writes its groups, and the sampler leaves FINISHED
+  after ``rl_sampler_trainers_ended``. Only the store's own records count (an
+  external pool of trainer k reads ``trainer<k>/``); ``num_rollouts`` may then be
+  left out (no round limit). r2 data path only;
+* ``island`` (optional, default null): the learner id of the trainer the sampler
+  feeds; ``rl_sampler_start`` carries it with the ``store``;
 * ``event_tape``: the JSONL tape file of the island's events; each
   incarnation writes its own file next to it (``events.<incarnation>.jsonl``),
   so a replacement container never overwrites an earlier one's tape.
@@ -143,6 +154,8 @@ ROLLOUT_FIELD_KEYS = ("routed_experts", "top_logprobs_num", "fp32_lm_head")
 PLATFORM = "platform"
 PLATFORMS = ("cuda", "rocm", "ppu", "npu")
 REWARD_KINDS = ("neutral", "miles")
+UNTIL_TRAINERS_END = "until_trainers_end"
+ISLAND = "island"
 
 
 class SamplerSpecError(ValueError):
@@ -661,17 +674,95 @@ def backlog_cap(spec: Mapping[str, Any]) -> tuple[int, str | None]:
     return int(cap), note
 
 
+def _count(spec: Mapping[str, Any], key: str) -> int:
+    """``spec[key]``: an integer >= 0 (absent: 0)."""
+    value = spec.get(key, 0)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SamplerSpecError(f"spec.{key} must be an integer >= 0, got {value!r}")
+    return value
+
+
+def until_trainers_end(spec: Mapping[str, Any]) -> int:
+    """``spec["until_trainers_end"]`` (0: off): the sampler generates until this many
+    trainers that read its store wrote their end record, as a Miles sampler island
+    of a synced group does (``sample_roles`` module doc); it needs the r2 data path
+    (the records are in the store's ``sample-buffer/trainers-ended/``)."""
+    from .rollout_data_path import R2, resolve_data_path  # noqa: PLC0415
+
+    count = _count(spec, UNTIL_TRAINERS_END)
+    if count and resolve_data_path(spec) != R2:
+        raise SamplerSpecError(f"spec.{UNTIL_TRAINERS_END} needs the r2 data path (the trainers' end "
+                               "records are in the store; on the syncer path the syncer ends the run)")
+    return count
+
+
+class TrainersEndWatch:
+    """The ``should_stop`` part of a sampler that runs until ``trainers`` trainers
+    that read ``store`` ended (``sampler_resume.stop_when_trainers_ended``; never
+    for 0). Sticky: once they ended the store is not listed again (``seen``). A
+    listing that fails counts as not ended (the sampler keeps generating and the
+    next poll lists again); ``emit`` gets one ``rl_sampler_store_read_failed`` per
+    outage and one ``rl_sampler_store_read_ok`` at its end."""
+
+    def __init__(self, store: Any, trainers: int, emit: Callable[..., None] | None = None) -> None:
+        from .sampler_resume import stop_when_trainers_ended  # noqa: PLC0415
+
+        self._ended = stop_when_trainers_ended(store, trainers)
+        self.emit = emit
+        self.seen = False
+        self.failed_reads = 0
+
+    def __call__(self) -> bool:
+        if self.seen:
+            return True
+        try:
+            self.seen = bool(self._ended())
+        except Exception as error:  # noqa: BLE001 - unknown: keep generating, list again later
+            self.failed_reads += 1
+            if self.failed_reads == 1 and self.emit is not None:
+                self.emit("rl_sampler_store_read_failed", what="trainers_ended",
+                          error=f"{type(error).__name__}: {error}"[:300])
+            return False
+        if self.failed_reads:
+            if self.emit is not None:
+                self.emit("rl_sampler_store_read_ok", what="trainers_ended", failed_reads=self.failed_reads)
+            self.failed_reads = 0
+        return self.seen
+
+
+def sampler_island(spec: Mapping[str, Any]) -> int | None:
+    """``spec["island"]``: the learner id of the trainer the sampler feeds (an
+    integer >= 0), or None."""
+    value = spec.get(ISLAND)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SamplerSpecError(f"spec.{ISLAND} must be a learner id (an integer >= 0) or null, got {value!r}")
+    return value
+
+
 def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
     """The island's config; its breaker limits come from the registry
-    (:func:`~.sampler_breakers.spec_breakers`)."""
+    (:func:`~.sampler_breakers.spec_breakers`). A sampler that runs until its
+    trainers end (:func:`until_trainers_end`) may leave ``num_rollouts`` out (no
+    round limit)."""
+    from .rollout_data_path import NO_LIMIT_ROUNDS  # noqa: PLC0415
     from .sampler_breakers import spec_breakers  # noqa: PLC0415
 
     resolved = spec_breakers(spec)
     sampling = dict(_require(spec, "sampling"))
     sampling["stop"] = tuple(sampling.get("stop") or ())
     base_dir = spec.get("base_dir")
+    num_rollouts = spec.get("num_rollouts")
+    if until_trainers_end(spec) and num_rollouts is None:  # a bad value fails here, before any engine starts
+        num_rollouts = NO_LIMIT_ROUNDS  # the trainers' end stops it
+    if num_rollouts is None:
+        raise SamplerSpecError(f"spec.num_rollouts is required (only a sampler with {UNTIL_TRAINERS_END} "
+                               "may leave it out)")
     return EngineSamplerConfig(
-        sampler_id=str(_require(spec, "sampler_id")), num_rollouts=int(_require(spec, "num_rollouts")),
+        sampler_id=str(_require(spec, "sampler_id")), num_rollouts=int(num_rollouts),
         max_backlog_groups=backlog_cap(spec)[0],
         sampling=SamplingParams(**sampling), max_prompt_tokens=int(_require(spec, "max_prompt_tokens")),
         base_version=int(spec.get("base_version", 0)), base_dir=None if base_dir is None else Path(base_dir),
@@ -683,7 +774,8 @@ def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
                                  else str(spec["expert_selection_sha256"])),
         expert_trainable_sha256=(None if spec.get("expert_trainable_sha256") is None
                                  else str(spec["expert_trainable_sha256"])),
-        drop_zero_variance_groups=bool(spec.get("drop_zero_variance_groups", False)))
+        drop_zero_variance_groups=bool(spec.get("drop_zero_variance_groups", False)),
+        island=sampler_island(spec), store=None if spec.get("store") is None else str(spec["store"]))
 
 
 def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
@@ -1015,6 +1107,8 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         prompts.recover(buffer.entries())
     membership = SamplerMembership(member_store, config.sampler_id, incarnation, resume, emit)
     reclaimed = lambda: reclaim_requested(env)  # noqa: E731
+    until = until_trainers_end(spec)
+    trainers_ended = TrainersEndWatch(member_store, until, emit)  # no new round once they ended
     # the shard writer's own verdict too: a write refused by the shard's ownership records
     fenced = lambda: (lease is not None and lease.fenced) or bool(getattr(buffer, "fenced", False))  # noqa: E731
     island = None
@@ -1092,6 +1186,7 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer, emit=emit,
                                       prompts=prompts, reward=reward, checks=checks,
                                       should_stop=lambda: (reclaimed() or fenced() or handed_off()
+                                                           or trainers_ended()
                                                            or (stop is not None and stop())),
                                       reclaimed=lambda: reclaimed() or fenced(), incarnation=incarnation,
                                       resume=resume,
@@ -1165,6 +1260,10 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
             rounds = int(getattr(island.loop, "rounds_done", 0))
         if lease is not None and not lease.fenced:
             lease.poll()  # a fenced incarnation does not end the shard: its owner may still write
+        if until and trainers_ended.seen and not reclaimed():
+            from .sampler_resume import TRAINERS_ENDED_EVENT  # noqa: PLC0415
+
+            emit(TRAINERS_ENDED_EVENT, trainers=until, rounds=rounds)  # as the Miles sampler island
         if handed_off() and not buffer.data_ended and not reclaimed() and not fenced():
             # a successor continues the prompts in its own shard: this shard gets no more
             # groups, so it ends (the trainer's merged index ends once every shard has)

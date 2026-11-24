@@ -276,3 +276,52 @@ def test_the_lease_lives_on_the_object_api_of_a_store_or_on_its_directory(tmp_pa
 
     with pytest.raises(TrainerLeaseError, match="bucket mount"):
         lease_objects(BucketMountStore(tmp_path / "mount"))
+
+
+# ------------------------------------------- one lease per trainer sub-store
+# Synced trainers whose samplers follow them (--rl-sampler-follow trainer, external
+# pools of a fleet of islands) each read their own sub-store trainer<k> of the run's
+# store; the lease a merging trainer claims at its buffer open lives in that sub-store.
+MOUNT = "~/yeto-checkpoint-store/runs/a"
+
+
+def _sub_store(client, stage, name):
+    """The store a synced trainer opens from ``--rl-sample-store <mount>/<name>`` in a
+    container staged at ``stage``, as the island resolves it (``resume.store_for``)."""
+    from yeto.rl.engine.resume import STORE_IMPL_ENV, store_for
+
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: URI, s3_store.STAGE_ENV: str(stage)}
+    return store_for(f"{MOUNT}/{name}", environ=env, client=client)
+
+
+def _trainer_lease(store):
+    from yeto.rl.engine.sample_buffer import open_trainer_buffer
+
+    lease = open_trainer_buffer(store, batch_size=1, shards=["pool-0"]).trainer_lease
+    assert lease is not None
+    return lease
+
+
+def test_trainers_of_two_sub_stores_do_not_fence_each_other(tmp_path):
+    client = FakeS3()
+    first0 = _trainer_lease(_sub_store(client, tmp_path / "c0", "trainer0"))
+    first1 = _trainer_lease(_sub_store(client, tmp_path / "c1", "trainer1"))
+    assert (first0.generation, first1.generation) == (1, 1)  # one generation chain per sub-store
+    assert ("bkt", f"runs/a/trainer0/{lease_key(1)}") in client.objects
+    assert ("bkt", f"runs/a/trainer1/{lease_key(1)}") in client.objects
+    assert not any(key.startswith(f"runs/a/{LEASE_DIR}/") for _bucket, key in client.objects)
+    first0.check(force=True)
+    first1.check(force=True)
+
+
+def test_a_second_trainer_of_the_same_sub_store_is_still_fenced(tmp_path):
+    client = FakeS3()
+    first0 = _trainer_lease(_sub_store(client, tmp_path / "c0", "trainer0"))
+    first1 = _trainer_lease(_sub_store(client, tmp_path / "c1", "trainer1"))
+    # another container of trainer 0 (a retry, a second launch): generation 2 of trainer0/
+    second0 = _trainer_lease(_sub_store(client, tmp_path / "c2", "trainer0"))
+    assert second0.generation == 2
+    with pytest.raises(TrainerFenced, match="generation 2 claimed"):
+        first0.check(force=True)
+    second0.check(force=True)
+    first1.check(force=True)  # trainer 1 keeps its store

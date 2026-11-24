@@ -784,7 +784,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             flags += f" --rl-cut-keep {int(args.rl_cut_keep)}"
     if resume_store is not None and sample_role_is_synced_trainer(args):
         # Synced trainers mount the store for the buffer and the releases; a
-        # trainer whose samplers follow it reads its own sub-store (one lane)
+        # trainer whose samplers follow it (sampler islands or external pools)
+        # reads its own sub-store trainer<learner id> (one lane)
         substore = getattr(args, "rl_sample_substore", None)
         sample_store = resume_store[0] if substore is None else substore_uri(resume_store[0], substore)
         # A relay trainer reads its own relay channel through a local buffer
