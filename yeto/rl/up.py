@@ -1492,6 +1492,12 @@ class Run:
         continue) sets aside the ledger the earlier launch left on the island's volume
         (``ledger.before-<ts>``) instead of failing on it (LedgerError) after the start-up."""
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        if rollout_section(self.cfg).get("control_plane") == "store":
+            from yeto.rl.engine.member_table import MEMBER_TABLE_ENV  # noqa: PLC0415
+
+            flag = f"{MEMBER_TABLE_ENV}=1"  # the trainer follows the pools' member tables
+            if flag not in argv:
+                argv += ["--island-env", flag]
         if self.trainer_restart() and not any(a.startswith("--rl-ledger-set-aside-before") for a in argv):
             argv += ["--rl-ledger-set-aside-before", f"{time.time() if now is None else now:.0f}"]
         if self.continue_from_release(argv):

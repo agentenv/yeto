@@ -683,6 +683,22 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
     return PoolSlot(pool, state_path=state, lock=held, on_close=close, after_tick=after_tick)
 
 
+def _member_table(ops: Any, name: str, shard_base: str) -> Any:
+    """The pool's member table writer on the store its samplers write their shards to (the
+    trainer's buffer store: ``ops.data_path().records``); None when the ops have none."""
+    from yeto.rl.engine.member_table import MemberTableWriter  # noqa: PLC0415
+
+    data_path = getattr(ops, "data_path", None)
+    try:
+        records = data_path().records if callable(data_path) else None
+    except Exception:  # noqa: BLE001 - no store credentials yet: no table (the trainer keeps its list)
+        return None
+    objects = getattr(records, "objects", None)
+    if objects is None or not callable(getattr(objects, "list", None)):
+        return None
+    return MemberTableWriter(objects, name, shard_base)
+
+
 def _store_pool(cfg: dict[str, Any], pc: Any, ops: Any, objects: Any, name: str, state: Path, events: Any,
                 held: Any, ttl_s: float | None) -> IslandPool:
     """:func:`nc_pool`'s pool on the store control plane (its ``control_objects``)."""
@@ -698,8 +714,13 @@ def _store_pool(cfg: dict[str, Any], pc: Any, ops: Any, objects: Any, name: str,
         raise SystemExit(f"pool {cfg['shard_base']}: refused: {error}") from None
     try:
         doc = control.state.load(legacy=state)
-        if pc.index_limit is None:  # the allocator replaces next_shard; the trainer's shard list still bounds it
-            pc.index_limit = pc.shard_limit
+        control.members = _member_table(ops, name, str(cfg["shard_base"]))
+        if pc.index_limit is None:
+            # the allocator replaces next_shard. With the member table the trainer follows every
+            # shard the pool publishes: only the tunnel ports bound the index; without one the
+            # trainer's --rl-buffer-shards list still does
+            pc.index_limit = (cli.pool_shard_limit(dict(cfg, shard_limit=None)) if control.members is not None
+                              else pc.shard_limit)
         pool = IslandPool.from_doc(doc, pc, ops, control=control, where=control.state.key,
                                    log=cli._log, events=events)  # noqa: SLF001
     except BaseException:

@@ -343,6 +343,7 @@ class IslandPool:
     _releases: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background release
     _release_pool: Any = None
     release_wait_s: float = 60.0  # the stop's wait for a background release still running
+    retired_shards: list[str] = field(default_factory=list)  # shards ended for good (a removed pool's)
 
     def _control_stamp(self) -> Any:
         if self.scale_path is None:
@@ -817,7 +818,25 @@ class IslandPool:
         if self._save_failures:
             self._event("state_save_recovered", path=self.control.state.key, failures=self._save_failures)
             self._save_failures = 0
+        self._publish_members()
         return True
+
+    def member_shards(self) -> list[str]:
+        """Every shard this pool assigned (a gone member's too: its groups may not be merged yet)."""
+        return [m.shard for m in self.members if m.shard]
+
+    def _publish_members(self) -> None:
+        """The pool's member table (``control.members``) when its shards changed; a store that
+        does not answer is tried again at the next save."""
+        writer = getattr(self.control, "members", None)
+        if writer is None:
+            return
+        try:
+            if writer.publish(self.member_shards(), self.retired_shards):
+                self._event("member_table", epoch=writer.epoch, shards=len(self.member_shards()),
+                            retired=len(self.retired_shards))
+        except Exception as error:  # noqa: BLE001 - the trainer keeps the shards it has
+            self.log(f"pool: member table not written ({error!r}); tried again at the next save")
 
     def detach(self, why: str) -> None:
         """Stop driving this pool without draining it (module doc of ``controller``): its
@@ -2548,6 +2567,7 @@ class IslandPool:
                 "target": self.config.target, "scale_seq": self.scale_seq, "shrink": self.shrink,
                 "members": [asdict(m) for m in self.members], "pending": list(self.pending),
                 "breaker": asdict(self.breaker), "budget": asdict(self.budget),
+                **({"retired_shards": list(self.retired_shards)} if self.retired_shards else {}),
                 **({"owner": dict(self.owner)} if self.owner is not None else {})}
 
     def save(self, path: Path) -> None:
@@ -2588,6 +2608,7 @@ class IslandPool:
         pool.budget = el.Budget(**doc.get("budget", {}))
         pool.scale_seq = int(doc.get("scale_seq", 0))
         pool.shrink = int(doc.get("shrink", 0))
+        pool.retired_shards = list(doc.get("retired_shards") or [])
         if pool.owner is None and isinstance(doc.get("owner"), dict):
             pool.owner = dict(doc["owner"])
         for m in pool.members:  # a start cut off by the restart: probed first (``_watch``)
