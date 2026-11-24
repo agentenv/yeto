@@ -1474,28 +1474,9 @@ def _miles_callable(spec: str) -> str:
     return f"{module}.{function}"
 
 
-def _column(row: dict[str, Any], column: str, flag: str) -> Any:
-    """A user-named column; a row without it is an error naming the flag,
-    never a silent fallback to another column."""
-    if column not in row:
-        raise ValueError(f"RL rows have no column {column!r} ({flag})")
-    return row[column]
-
-
-def _messages(row: dict[str, Any], prompt_column: str | None = None) -> list[dict[str, Any]]:
-    if prompt_column is not None:
-        value = _column(row, prompt_column, "--rl-prompt-column")
-    else:
-        value = row.get("messages", row.get("prompt", row.get("input")))
-    if isinstance(value, str):
-        value = [{"role": "user", "content": value}]
-    if (
-        not isinstance(value, list)
-        or not value
-        or any(not isinstance(item, dict) for item in value)
-    ):
-        raise ValueError("RL rows must contain messages or a string prompt/input")
-    return value
+# The prompt / label rules every backend shares (yeto.rl.prompt_rows)
+from yeto.rl.prompt_rows import column as _column  # noqa: E402
+from yeto.rl.prompt_rows import messages as _messages  # noqa: E402
 
 
 def _prompt_split(source, revision: str | None) -> str:

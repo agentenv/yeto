@@ -14,7 +14,8 @@ is a combination no engine runs; each one names its reason below.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 # ``--rl-engine`` keeps accepting its one value so existing commands parse.
 RL_ENGINES = ("ports",)
@@ -200,3 +201,36 @@ def require_ports_supported(**kwargs) -> None:
     if reasons:
         raise UnsupportedPortsCombination("unsupported RL run: " + "; ".join(reasons))
 
+
+
+ENGINE_SELECTED_EVENT = "rl_engine_selected"
+
+
+def engine_selected_event(*, algorithm: Any, placement: str, backend_fields: Mapping[str, Any],
+                          absorbed_flags: Mapping[str, Any] | None = None, unverified_mechanisms: Any = (),
+                          outer_sync: bool | None = None) -> dict[str, Any]:
+    """The island tape's ``rl_engine_selected`` record: the algorithm identity
+    (canonical AlgorithmSpec JSON and its hash, what ``yeto-rl-export
+    --rl-event-tape`` and the SSH harness export read), the placement, the
+    unverified-mechanism allowances and the outer-sync flag (the dashboard's
+    topology). ``backend_fields`` names the backend's own pin (Miles:
+    ``miles_commit``; verl: ``rl_backend`` and ``verl_commit``); every
+    backend writes the same keys otherwise.
+
+    ``absorbed_flags`` lists flags absorbed from extra argv; an unknown
+    ``outer_sync`` (None) is the R0 default: outer sync on."""
+
+    event = {
+        "event": ENGINE_SELECTED_EVENT,
+        "rl_engine": "ports",
+        **backend_fields,
+        "rl/algorithm_spec_sha256": algorithm.sha256(),
+        "rl/algorithm_spec": algorithm.canonical_json(),
+        "rl/algorithm_absorbed_flags": dict(absorbed_flags or {}),
+        "placement": placement,
+    }
+    if unverified_mechanisms:
+        event["rl/unverified_mechanisms"] = sorted(unverified_mechanisms)
+        event["rl/contains_unverified_mechanisms"] = True
+    event["rl/outer_sync"] = True if outer_sync is None else bool(outer_sync)
+    return event

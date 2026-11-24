@@ -52,6 +52,9 @@ def parse_args(argv):
     p.add_argument("--model-revision", required=True)
     p.add_argument("--data", required=True)
     p.add_argument("--data-revision", default=None)
+    # the prompt / label columns of --data (yeto.rl.prompt_rows; the launcher forwards them when given)
+    p.add_argument("--rl-prompt-column", default=None)
+    p.add_argument("--rl-label-column", default=None)
     p.add_argument("--syncer", default=None)
     p.add_argument("--rl-single-island-no-sync", action="store_true")
     p.add_argument("--learner-id", type=int, required=True)
@@ -345,9 +348,84 @@ def agentic_rows(frame: Any) -> bool:
     return "agent_name" in columns and "extra_info" in columns and "messages" not in columns
 
 
+def _plain(value: Any) -> Any:
+    """A parquet cell as plain Python (pandas reads a list column as a numpy array)."""
+    return value.tolist() if hasattr(value, "tolist") and not isinstance(value, (str, bytes)) else value
+
+
+def _prompt_frame(frame: Any, prompt_column: str | None, label_column: str | None) -> Any:
+    """``frame`` with the ``messages`` / ``label`` columns the conversion below reads,
+    taken by the rules every backend shares (:mod:`yeto.rl.prompt_rows`); every
+    other column is kept (task labels, metadata)."""
+    import pandas as pd
+
+    from yeto.rl import prompt_rows
+
+    rows = []
+    for _, row in frame.iterrows():
+        raw = {key: _plain(value) for key, value in row.items()}
+        label = prompt_rows.label(raw, label_column)
+        if label is None:
+            raise ValueError("RL rows have no 'label' column; name the label column with --rl-label-column")
+        rows.append({**raw, "messages": prompt_rows.messages(raw, prompt_column), "label": label})
+    return pd.DataFrame(rows)
+
+
+def _dataset_frame(data: str, revision: str | None) -> Any:
+    """``data`` read as the Miles island reads it (``yeto.data.load_rows``): a Hub
+    dataset (``repo`` or ``repo:config``, its ``train`` split, else its only split)
+    or a local directory."""
+    import pandas as pd
+
+    from yeto.data import load_rows, prompt_split
+
+    return pd.DataFrame([dict(row) for row in load_rows(data, split=prompt_split(data, revision),
+                                                          revision=revision)])
+
+
+def _source_frames(data: str, revision: str | None) -> tuple[Any, Any, bool]:
+    """``(train frame, test frame, normalize)`` of ``data``:
+
+    * a local JSONL task file: the file for both (its head is the test split);
+    * a Hub dataset with ``train.parquet`` / ``test.parquet`` at its root (yeto's
+      prepared datasets, ``messages`` / ``label`` columns): those files;
+    * any other Hub dataset (``openai/gsm8k:main``, a dataset without root
+      parquet files) or a local directory: read as the Miles island reads it,
+      with the test split the head of the train rows, as for a local file.
+
+    ``normalize``: the rows still need the prompt / label rules (the last form)."""
+    import pandas as pd
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError
+
+    from yeto.data import split_hub_config
+
+    local = Path(os.path.expanduser(data))
+    if local.is_file():  # parsed with json, not pd.read_json: pandas would turn a label "34" into 34.0
+        frame = pd.DataFrame([json.loads(line) for line in local.read_text().splitlines() if line.strip()])
+        return frame, frame, False
+    if not local.exists() and split_hub_config(data)[1] is None:
+        try:
+            train = pd.read_parquet(hf_hub_download(data, "train.parquet", repo_type="dataset", revision=revision))
+        except EntryNotFoundError:
+            train = None
+        if train is not None:
+            try:
+                test = pd.read_parquet(hf_hub_download(data, "test.parquet", repo_type="dataset",
+                                                       revision=revision))
+            except EntryNotFoundError:
+                test = train
+            return train, test, False
+    frame = _dataset_frame(data, revision)
+    return frame, frame, True
+
+
 def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64,
-                 slot: Any = None, number_rows: bool = False) -> tuple[str, str]:
-    """``data``'s train and test splits as verl parquet files. ``slot``
+                 slot: Any = None, number_rows: bool = False, prompt_column: str | None = None,
+                 label_column: str | None = None) -> tuple[str, str]:
+    """``data``'s train and test splits as verl parquet files (the forms of
+    :func:`_source_frames`; ``--rl-prompt-column`` / ``--rl-label-column`` name the
+    prompt and label columns, :mod:`yeto.rl.prompt_rows`). ``slot``
     (``data_split.DataSlot``, task assignment): the train file keeps only the
     slot's rows, in data order, each with its row number in the unsplit data as
     ``extra_info["yeto_data_row"]``; the validation rows stay whole.
@@ -357,20 +435,19 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
     A file of agentic rows (:func:`agentic_rows`) is written through
     unchanged -- the rows are already in verl's schema."""
     import pandas as pd
-    from huggingface_hub import hf_hub_download
 
     from yeto.rl.engine.data_split import DATA_ROW_KEY
 
     root.mkdir(parents=True, exist_ok=True)
     out = {}
-    local = Path(os.path.expanduser(data))
+    train, test, normalize = _source_frames(data, revision)
+    if (normalize or prompt_column is not None or label_column is not None) and not agentic_rows(train):
+        same = test is train
+        train = _prompt_frame(train, prompt_column, label_column)
+        test = train if same else _prompt_frame(test, prompt_column, label_column)
+    frames = {"train": train, "test": test}
     for split in ("train", "test"):
-        if local.is_file():  # a local JSONL task file (one file: train; its head: test)
-            # parsed with json, not pd.read_json: pandas would turn a label "34" into 34.0
-            frame = pd.DataFrame([json.loads(line) for line in local.read_text().splitlines() if line.strip()])
-        else:
-            src = hf_hub_download(data, f"{split}.parquet", repo_type="dataset", revision=revision)
-            frame = pd.read_parquet(src)
+        frame = frames[split]
         if agentic_rows(frame):  # already verl's schema, keep every field
             rows = [{**row, "extra_info": {**(row["extra_info"] or {}), "split": split, "index": int(i)}}
                     for i, row in frame.iterrows()]
@@ -781,8 +858,12 @@ def main(argv=None) -> int:
     # a directory on this node is used as is (on-prem nodes may have no route to the hub)
     model_path = island_model_path(args.model, args.model_revision)
     work = Path(os.path.expanduser("~/yeto-verl"))
-    train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
-                                        slot=island_data_slot(args), number_rows=dispense)
+    try:
+        train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
+                                            slot=island_data_slot(args), number_rows=dispense,
+                                            prompt_column=args.rl_prompt_column, label_column=args.rl_label_column)
+    except ValueError as error:  # a named column a row lacks, rows without a prompt or label
+        raise SystemExit(str(error)) from None
     try:
         dispense_plan = (dispense_section(args, work / "data" / "train-dispense.jsonl",
                                           block=args.groups_per_round) if dispense else None)
@@ -964,6 +1045,7 @@ def main(argv=None) -> int:
         **({"ascend_plugin_stack": megatron["ascend_plugin_stack"]}
            if megatron is not None and megatron["ascend_plugin_stack"] else {}),
         **({"separate": pools.to_dict()} if pools is not None else {}),
+        "placement": args.rl_placement or "colocated",  # rl_engine_selected (driver_extras.engine_selected)
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
         # task assignment (rl_driver_start); "dispense": the rows come from the dispenser

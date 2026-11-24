@@ -11,6 +11,22 @@ import sys
 import time
 from collections.abc import Callable
 
+def engine_selected(plan: dict, spec) -> dict:
+    """The island tape's ``rl_engine_selected`` record (the schema every backend
+    writes, ``yeto.rl.engine.selection.engine_selected_event``): the algorithm
+    ``spec`` the island runs, its placement and whether it is outer-synced, with
+    the verl pin in place of Miles' commit. ``yeto-rl-export --rl-event-tape``
+    and the SSH harness read the algorithm from it; the dashboard the outer sync."""
+    from yeto.rl.engine.selection import engine_selected_event
+
+    from .pins import VERL_COMMIT
+
+    return engine_selected_event(
+        algorithm=spec, placement=str(plan.get("placement") or "colocated"),
+        backend_fields={"rl_backend": "verl", "verl_commit": VERL_COMMIT},
+        outer_sync=str(plan.get("sync") or "none") != "none")
+
+
 # Set by the Modal runner: 0 for an island's first container, k for its k-th
 # re-run (the engine driver's fault injection reads the same variable).
 from yeto.rl.engine.driver import MODAL_INCARNATION_ENV
