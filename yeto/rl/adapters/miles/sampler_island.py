@@ -989,6 +989,22 @@ class GateVersionPublisher:
         return getattr(self.inner, name)
 
 
+TRAINER_PROBE_ENV = "YETO_RL_TRAINER_PROBE_S"  # seconds between trainer rank probes; 0: off
+DEFAULT_TRAINER_PROBE_S = 30.0
+
+
+def trainer_probe_s(environ: Any = None) -> float | None:
+    """Seconds between the driver's liveness probes of the train ranks while a trainer
+    island waits for its batch (``IslandDriver.trainer_probe_s``): :data:`TRAINER_PROBE_ENV`,
+    default :data:`DEFAULT_TRAINER_PROBE_S`; None when it is 0 (no probe)."""
+    env = os.environ if environ is None else environ
+    raw = (env.get(TRAINER_PROBE_ENV) or "").strip()
+    value = DEFAULT_TRAINER_PROBE_S if not raw else float(raw)
+    if value < 0:
+        raise ValueError(f"{TRAINER_PROBE_ENV}={raw!r}: expected seconds >= 0")
+    return value or None
+
+
 def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runner: Any,
                          environ: Any = None) -> ReleasingPublisher | None:
     """A trainer island (``--rl-sample-role trainer``) releases every publish; so does
@@ -1012,6 +1028,11 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         driver.xhw_actions_sink = lambda actions: in_executor(executor_set_xhw_actions, dict(actions))
     lane = getattr(miles_args, "yeto_rl_sample_lane", None)
     env = os.environ if environ is None else environ
+    if config.role == TRAINER:
+        # its train ranks idle while a round waits for sampler groups: the driver probes
+        # them, so a rank that dies then ends the island now (relaunched), not at the next
+        # train call after the sample wait limit
+        driver.trainer_probe_s = trainer_probe_s(env)
     from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV
 
     if env.get(RELAY_ADDR_ENV) and config.role == TRAINER:

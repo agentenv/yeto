@@ -1816,7 +1816,76 @@ def read_read_position(buffer_root: str | Path) -> dict[str, Any] | None:
     """The trainer's read heartbeat (:func:`write_read_position`), or None when it
     is missing or unreadable (the caller keeps the release position)."""
     try:
-        data = json.loads((Path(buffer_root) / READ_POSITION).read_text(encoding="utf-8"))
+        return _parse_read_position((Path(buffer_root) / READ_POSITION).read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+READ_POSITION_KEY = f"{BUFFER_DIR}/{READ_POSITION}"  # the heartbeat's key on an object store
+
+
+def buffer_objects(buffer: Any) -> Any:
+    """The object API of ``buffer``'s store (None for a plain directory)."""
+    store = getattr(buffer, "store", None)
+    if store is None:
+        return None
+    if isinstance(store, CheckpointStore):
+        return store.objects
+    if callable(getattr(store, "read", None)) and callable(getattr(store, "write", None)):
+        return store  # the buffer opened on a bare object store
+    return getattr(store, "objects", None)
+
+
+def write_buffer_read_position(buffer: Any, *, buffer_selected: int, buffer_shards: dict[str, int] | None,
+                               train_step: int | None, release: Mapping[str, Any] | None,
+                               clock: Callable[[], float] = time.time) -> str:
+    """:func:`write_read_position` for any store: the heartbeat object
+    (:data:`READ_POSITION_KEY`) on an object store, else the local file. The
+    samplers read it with :func:`read_buffer_read_position`. Returns where it went."""
+    objects = buffer_objects(buffer)
+    if objects is None:
+        root = buffer_dir(buffer)
+        if root is None:
+            raise SampleBufferError("the buffer has neither an object store nor a local directory")
+        return str(write_read_position(root, buffer_selected=buffer_selected, buffer_shards=buffer_shards,
+                                       train_step=train_step, release=release, clock=clock))
+    payload = {"buffer_selected": int(buffer_selected),
+               "buffer_shards": {str(k): int(v) for k, v in (buffer_shards or {}).items()},
+               "train_step": None if train_step is None else int(train_step),
+               "time_unix": round(float(clock()), 3),
+               "release": None if release is None else {
+                   "seq": int(release["seq"]), "policy_hash": str(release["policy_hash"])}}
+    objects.write(READ_POSITION_KEY, json.dumps(payload, sort_keys=True).encode("utf-8"))
+    return READ_POSITION_KEY
+
+
+def read_buffer_read_position(buffer: Any) -> dict[str, Any] | None:
+    """The trainer's read heartbeat of ``buffer``'s store: the local file
+    (:func:`read_read_position`) when there is one, else the object
+    :data:`READ_POSITION_KEY` of an object store; None when neither is there or it
+    cannot be read (the caller keeps the release position)."""
+    root = buffer_dir(buffer)
+    beat = None if root is None else read_read_position(root)
+    if beat is not None:
+        return beat
+    objects = buffer_objects(buffer)
+    if objects is None:
+        return None
+    try:
+        raw = objects.read(READ_POSITION_KEY)
+    except Exception:  # noqa: BLE001 - a heartbeat that cannot be read is no heartbeat
+        return None
+    if raw is None:
+        return None
+    try:
+        return _parse_read_position(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+    except UnicodeDecodeError:
+        return None
+
+
+def _parse_read_position(text: str) -> dict[str, Any] | None:
+    try:
+        data = json.loads(text)
         shards = data.get("buffer_shards") or {}
         beat = {"buffer_selected": int(data.get("buffer_selected") or 0),
                 "buffer_shards": {str(k): int(v) for k, v in dict(shards).items()},

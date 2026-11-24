@@ -52,6 +52,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 # The payload format and the group writer are engine-neutral (the
@@ -135,6 +136,10 @@ ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_A
 DEFAULT_WAIT_S = 3600.0
 DEFAULT_POLL_S = 2.0
 TRAINER_CONSUMER = "trainer"
+# reader: while a take waits for groups, the trainer's read heartbeat (where it reads, the
+# groups it passed over included) is written again at least this often (seconds)
+DEFAULT_READ_HEARTBEAT_S = 30.0
+READ_HEARTBEAT_FAILED_EVENT = "rl_buffer_read_position_failed"
 
 _MODULE = "yeto.rl.adapters.miles.buffer_rollout_miles"
 _DEFER = object()  # BatchReader._gate_verdict: the lease could not be read
@@ -1339,7 +1344,9 @@ class BatchReader:
                  read_workers: int = DEFAULT_READ_WORKERS, prefetch: bool = True,
                  incarnation_gate: Any = "auto", group_size: int | None = None,
                  max_damaged_run: int = DEFAULT_MAX_DAMAGED_RUN, one_group_per_task: bool = True,
-                 max_inflight_bytes: Any = "auto", heartbeat_s: float = DEFAULT_HEARTBEAT_S) -> None:
+                 max_inflight_bytes: Any = "auto", heartbeat_s: float = DEFAULT_HEARTBEAT_S,
+                 read_heartbeat: Callable[[int, dict[str, int] | None], Any] | None = None,
+                 read_heartbeat_s: float = DEFAULT_READ_HEARTBEAT_S) -> None:
         """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
         the reader continues after its last line and appends one per round.
         ``read_workers`` < 2 reads the payloads one by one; ``prefetch`` needs a
@@ -1368,7 +1375,15 @@ class BatchReader:
         ``heartbeat_s``: while a take waits for new groups (the ``wait_s`` bound), one
         :data:`WAIT_EVENT` record per ``heartbeat_s`` seconds, so the launcher's stall clock
         (``launch.stall``, any island event) does not take the wait for a hang; a wait for
-        unreadable leases (no ``wait_s`` bound) gets none. 0: no heartbeat."""
+        unreadable leases (no ``wait_s`` bound) gets none. 0: no heartbeat.
+        ``read_heartbeat``: ``callable(read cursor, {shard: position} or None)``, called
+        while a take waits for new groups whenever the read cursor moved since its last
+        call, and at least every ``read_heartbeat_s`` seconds: it publishes where this
+        trainer reads to the samplers (:func:`trainer_read_heartbeat`). Without it a
+        sampler counts its backlog from the read position of the newest policy release,
+        which only a trained round moves: groups the take passed over (too old, fenced,
+        a duplicate task) then hold the sampler at its backlog cap while the take waits
+        for groups the sampler no longer generates. None: nothing is published."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
@@ -1448,6 +1463,11 @@ class BatchReader:
         self._source_bad: dict[str, dict[str, int]] = {}
         self._rollout_id = 0
         self.emit: Callable[..., None] = _echo_event
+        self.read_heartbeat = read_heartbeat
+        self.read_heartbeat_s = float(read_heartbeat_s)
+        self._beat_cursor: int | None = None  # the read cursor read_heartbeat got last
+        self._beat_at = -float("inf")  # ... and when (on ``clock``)
+        self._beat_failed = False  # the last call raised (reported once per outage)
 
     def set_unidentified_gate(self, start_version: int, known_versions: Any) -> None:
         """A relaunched trainer starts at vK and reads the buffer on from an earlier
@@ -1814,6 +1834,31 @@ class BatchReader:
         self._report_round(report)  # after the take: a report never undoes a round
         return out, report
 
+    def _beat_read_position(self) -> None:
+        """While a take waits for new groups: hand the read cursor (every group below it
+        is selected: chosen for this round or passed over) to ``read_heartbeat`` when it
+        moved since the last call or ``read_heartbeat_s`` passed (the class doc). A
+        failure is reported once per outage and never stops the take."""
+        publish = self.read_heartbeat
+        if publish is None:
+            return
+        cursor = int(self._cursor())
+        now = self.clock()
+        due = now - self._beat_at >= self.read_heartbeat_s
+        if not due and (cursor == self._beat_cursor or self._beat_failed):
+            return  # unchanged, or the last try failed: tried again after read_heartbeat_s
+        positions = getattr(self.buffer, "shard_positions", None)
+        try:
+            shards = positions(cursor) if callable(positions) else None
+            publish(cursor, {str(k): int(v) for k, v in shards.items()} if shards else None)
+        except Exception as error:  # noqa: BLE001 - the heartbeat never stops a take
+            if not self._beat_failed:
+                self.emit(READ_HEARTBEAT_FAILED_EVENT, rollout_id=self._rollout_id, read_cursor=cursor,
+                          error=f"{type(error).__name__}: {error}"[:300])
+            self._beat_failed, self._beat_at = True, now
+            return
+        self._beat_cursor, self._beat_at, self._beat_failed = cursor, now, False
+
     def _report_round(self, report: TakeReport) -> None:
         """One ``rl_breaker`` record per round for each guard that passed groups over:
         ``trainer.policy_age`` (too old) and ``trainer.group_integrity`` (too few or too many
@@ -2010,6 +2055,7 @@ class BatchReader:
                 beat = self.clock()
                 self.emit(WAIT_EVENT, rollout_id=rollout_id, waited_s=round(waited, 3), limit_s=self.wait_s,
                           groups=len(chosen), needed=groups, heartbeat_s=self.heartbeat_s)
+            self._beat_read_position()
             self.sleep(self.poll_s)
         self._deferred.sort(key=lambda pending: pending[0])
         end = self._cursor()
@@ -2623,6 +2669,45 @@ def executor_read_shards(_executor: Any) -> dict[str, int] | None:
     if reader is None:
         return None
     return reader.buffer.shard_positions(reader.buffer.read_cursor) or None
+
+
+def newest_release_identity(buffer: Any) -> dict[str, Any] | None:
+    """``{"seq", "policy_hash"}`` of the newest policy release in ``buffer``'s store
+    (``policy-releases/LATEST.json``, where a trainer island releases), None when there
+    is none yet. A read the store does not answer raises."""
+    from yeto.rl.engine.policy_release import LATEST
+    from yeto.rl.engine.sample_buffer import buffer_objects
+    from yeto.rl.quant.schemes import RELEASE_DIR
+
+    objects = buffer_objects(buffer)
+    if objects is not None:
+        raw = objects.read(f"{RELEASE_DIR}/{LATEST}")
+    else:
+        root = getattr(getattr(buffer, "store", None), "root", None)
+        path = None if root is None else Path(root) / RELEASE_DIR / LATEST
+        raw = path.read_bytes() if path is not None and path.is_file() else None
+    if raw is None:
+        return None
+    record = json.loads(raw)
+    return {"seq": int(record["seq"]), "policy_hash": str(record["policy_hash"])}
+
+
+def trainer_read_heartbeat(buffer: Any, *, clock: Callable[[], float] = time.time
+                           ) -> Callable[[int, dict[str, int] | None], str]:
+    """The ``read_heartbeat`` of a trainer island's :class:`BatchReader`: writes the
+    read heartbeat (``sample_buffer.write_buffer_read_position``: the object
+    ``sample-buffer/read-position.json`` on an object store, else the file) naming the
+    newest release of the store, so a sampler that follows this trainer counts its
+    backlog from where the trainer reads (``sampler_loop.heartbeat_read``) instead of
+    from the read position the newest release recorded."""
+    from yeto.rl.engine.sample_buffer import write_buffer_read_position
+
+    def beat(cursor: int, shards: dict[str, int] | None) -> str:
+        return write_buffer_read_position(buffer, buffer_selected=int(cursor), buffer_shards=shards,
+                                          train_step=None, release=newest_release_identity(buffer),
+                                          clock=clock)
+
+    return beat
 
 
 def reader_positions(reader: BatchReader) -> tuple[int, dict[str, int] | None]:

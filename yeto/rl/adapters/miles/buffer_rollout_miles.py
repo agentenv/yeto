@@ -53,6 +53,7 @@ from .buffer_rollout import (
     apply_data_slot,
     check_segmented_round,
     stale_segment_buckets,
+    trainer_read_heartbeat,
     compaction_batch_line,
     check_xhw_downweight,
     convertible_mode,
@@ -238,7 +239,15 @@ class _BufferRound:
             max_damaged_run=limits.max_damaged_run,
             heartbeat_s=float(os.environ.get(HEARTBEAT_ENV) or DEFAULT_HEARTBEAT_S),
             one_group_per_task=(os.environ.get(ONE_GROUP_PER_TASK_ENV) or "1").strip().lower()
-            not in ("0", "off", "false"))
+            not in ("0", "off", "false"),
+            # the trainer island tells its samplers where it reads while it waits (groups it
+            # passed over included), not only at a release; not through a relay (the
+            # relay counts what it handed over), not on a convertible node, and not by one
+            # of several synced trainers sharing the buffer (their samplers count from the
+            # furthest lane, merged_release.fastest_lane_read)
+            read_heartbeat=(trainer_read_heartbeat(buffer)
+                            if merge_shards and self.relay_pump is None
+                            and getattr(getattr(buffer, "lane", None), "count", 1) == 1 else None))
         register_reader(self.reader)
         self._tokenizer: Any = None
         # score_centering: the sampling each group's engine.version_fields must name

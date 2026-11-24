@@ -17,8 +17,11 @@ loss and Miles' logged post-step lr are not surfaced by upstream
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import hashlib
 import json
+import threading
 import time
 import math
 from collections.abc import Callable, Mapping
@@ -38,12 +41,24 @@ from .state_plugin import (
     CRITIC_RECORDERS,
     CRITIC_STATE_SUMMARY,
     GRAD_NORM,
+    PING_WORKER,
     STEP_LOSSES,
 )
 
 
 class TrainStepError(RuntimeError):
     pass
+
+
+# seconds a liveness ping of the train ranks may take before its answer counts as unknown
+WORKER_PROBE_TIMEOUT_S = 120.0
+
+
+class WorkerLoss:
+    """``reason``: why a train rank is gone (None while every rank answers)."""
+
+    def __init__(self) -> None:
+        self.reason: str | None = None
 
 
 
@@ -324,7 +339,8 @@ class MilesTrainerGroup:
         self._algorithm = algorithm
         self._release = release_refs or _default_release
         self._check_tokens = check_policy_tokens
-        self._run = (runner or LoopRunner()).run
+        self._runner = runner or LoopRunner()
+        self._run = self._runner.run
         self.last_grad_norm: float | None = None
         self.last_applied_lrs: tuple[float, ...] | None = None
         self.last_masked_fraction: float | None = None
@@ -343,6 +359,70 @@ class MilesTrainerGroup:
         # the publisher calls before the first step; a full-parameter actor
         # calls none of them, so the trainer installs the recorders itself.
         self._actor_recorders_installed = not install_actor_recorders
+
+    def probe_workers(self, timeout_s: float = WORKER_PROBE_TIMEOUT_S) -> str | None:
+        """Ping every train rank (``run_plugin`` of :data:`PING_WORKER`) on the island
+        loop while another call holds it (the round's wait for its batch): None when
+        every rank answered or the answer is unknown (no answer within ``timeout_s``, the
+        loop not running), else why a rank is gone. Upstream's ``run_plugin`` raises on a
+        dead rank (and tears its cell down), as a train call into it would."""
+        loop = self._runner.loop
+        if loop.is_closed() or not loop.is_running():
+            return None  # nothing would answer the ping: unknown
+
+        async def ping() -> Any:
+            return await self._actor.run_plugin(PING_WORKER, {})
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(ping(), loop)
+        except RuntimeError:  # the loop is closed: unknown
+            return None
+        try:
+            future.result(timeout=float(timeout_s))
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return None
+        except concurrent.futures.CancelledError:
+            return None
+        except Exception as error:  # noqa: BLE001 - a rank that cannot be called is gone
+            return f"trainer worker lost while the round waited for its batch: {type(error).__name__}: {error}"[:500]
+        return None
+
+    @contextmanager
+    def watch_workers(self, interval_s: float, *, timeout_s: float = WORKER_PROBE_TIMEOUT_S):
+        """Around a wait for the round's batch (the driver's ``_trainer_watch``): a
+        thread calls :meth:`probe_workers` every ``interval_s``; on a lost rank it sets
+        ``loss.reason`` and cancels the tasks of the island loop, so the wait raises
+        instead of lasting until the sample-wait limit. Yields ``loss``."""
+        loss = WorkerLoss()
+        stop = threading.Event()
+        loop = self._runner.loop
+
+        def interrupt() -> None:
+            if stop.is_set():  # the wait is over: never cancel a later call
+                return
+            for task in asyncio.all_tasks(loop):
+                task.cancel()
+
+        def monitor() -> None:
+            while not stop.wait(float(interval_s)):
+                reason = self.probe_workers(timeout_s)
+                if reason is None:
+                    continue
+                loss.reason = reason
+                try:
+                    loop.call_soon_threadsafe(interrupt)
+                except RuntimeError:  # the loop is closed
+                    pass
+                return
+
+        thread = threading.Thread(target=monitor, name="yeto-trainer-probe", daemon=True)
+        thread.start()
+        try:
+            yield loss
+        finally:
+            stop.set()
+            thread.join(timeout=1.0)
 
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt:
         if batch.payload is None:
