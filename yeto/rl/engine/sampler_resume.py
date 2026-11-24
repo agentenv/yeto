@@ -401,7 +401,16 @@ class ReclaimWatcher:
 # LEAVE record, and starts at the round after the predecessor's newest written
 # round. Prompts are drawn by rollout id within the data slot, so the rounds
 # continue the predecessor's rows with no repeat. The predecessor's shard keeps
-# its groups; the trainer reads them as before.
+# its groups; the trainer reads them as before. A pool fence writes the same
+# request (successor ``pool-fence:<ticket>``) next to its ownership record.
+#
+# The request stops the incarnation it was meant for; it outlives it. A sampler
+# that joins on a shard with a request judges it (:func:`judge_handoff`) after its
+# lease claim: a request the store proves was meant for an earlier incarnation
+# (a fence its claim superseded, a successor that is this shard, a successor that
+# never joined) is set aside and the shard taken over; any other is obeyed and the
+# sampler says so (``engine_sampler_entry.NOT_RUN_EVENT``). The single writer of a
+# shard never rests on this request: the lease / ownership record fences.
 HANDOFF_DIR = "sample-buffer/handoffs"
 HANDOFF_EVENT = "rl_sampler_handoff"
 DEFAULT_HANDOFF_WAIT_S = 900.0
@@ -434,16 +443,19 @@ def request_handoff(store: Any, predecessor: str, successor: str, clock: Callabl
                 {"predecessor": predecessor, "successor": successor, "requested_at": clock()})
 
 
-def handoff_requested(store: Any, sampler: str, *, on_error: Callable[[BaseException], None] | None = None) -> bool:
-    """Whether a successor asked ``sampler`` to stop (its loop starts no new round).
-    The sampler loop polls this before every round: a read that fails is no answer
-    (False now, read again at the next poll; ``on_error(error)`` hears of it), never
-    a reason to stop or to end the sampler. A record that is there but torn counts
-    as a request."""
+TORN_HANDOFF = {"successor": None, "torn": True}  # read_handoff: a record that is there but not JSON
+
+
+def read_handoff(store: Any, sampler: str, *,
+                 on_error: Callable[[BaseException], None] | None = None) -> dict[str, Any] | None:
+    """The stop request of ``sampler`` (``handoffs/<sampler>.json``), None without one.
+    A read that fails is no answer (None now, read again at the next poll;
+    ``on_error(error)`` hears of it), never a reason to stop or to end the sampler.
+    A record that is there but torn is a request (:data:`TORN_HANDOFF`)."""
     try:
-        return _read_record(store, f"{HANDOFF_DIR}/{sampler}.json") is not None
+        record = _read_record(store, f"{HANDOFF_DIR}/{sampler}.json")
     except ValueError:
-        return True
+        return dict(TORN_HANDOFF)
     except Exception as error:  # noqa: BLE001 - unknown this time
         from .object_store import is_fatal_store_error  # noqa: PLC0415
 
@@ -451,7 +463,99 @@ def handoff_requested(store: Any, sampler: str, *, on_error: Callable[[BaseExcep
             raise
         if on_error is not None:
             on_error(error)
-        return False
+        return None
+    if record is None:
+        return None
+    return dict(record) if isinstance(record, dict) else dict(TORN_HANDOFF)
+
+
+def handoff_requested(store: Any, sampler: str, *, on_error: Callable[[BaseException], None] | None = None) -> bool:
+    """Whether a successor asked ``sampler`` to stop (its loop starts no new round):
+    :func:`read_handoff` found a record."""
+    return read_handoff(store, sampler, on_error=on_error) is not None
+
+
+def handoff_identity(record: Mapping[str, Any] | None) -> tuple[str, str] | None:
+    """What tells one stop request from a later one on the same shard: its successor
+    and the time it was requested (a new request rewrites both)."""
+    if record is None or record.get("torn"):
+        return None
+    return str(record.get("successor")), repr(record.get("requested_at"))
+
+
+POOL_FENCE_SUCCESSOR = "pool-fence:"  # yeto.launch.nc.elastic.FENCE_PREFIX: a pool fence's stop request
+
+
+@dataclass(frozen=True)
+class HandoffVerdict:
+    """What a sampler that finds a stop request on its shard at its join does with it.
+
+    ``obey``: stop (no round; the request stands). Otherwise the request is stale -
+    it was meant for an earlier incarnation - and this incarnation takes the shard
+    over. ``why``: one word for the tape; ``successor_state`` (a real successor):
+    ``running`` / ``left`` / ``never_joined``."""
+
+    obey: bool
+    why: str
+    successor: str | None
+    successor_state: str | None = None
+
+
+def successor_state(store: Any, successor: str) -> str:
+    """``running`` (an incarnation of ``successor`` without its LEAVE), ``left`` (it
+    joined, every incarnation left), or ``never_joined`` (no member record and no
+    incarnation lease: no sampler of that name ever started in this store)."""
+    from .incarnation_lease import read_lease  # noqa: PLC0415
+
+    records = [_read_record(store, key) for key in _list_records(store, f"{MEMBERS_DIR}/{successor}")]
+    records = [r for r in records if r is not None]
+    if any(r.get("left_at") is None for r in records):
+        return "running"
+    if records:
+        return "left"
+    return "left" if read_lease(store, successor) else "never_joined"
+
+
+def judge_handoff(store: Any, sampler: str, record: Mapping[str, Any], *,
+                  superseded: Iterable[str] | None) -> HandoffVerdict:
+    """Whether the stop request ``record`` found on ``sampler``'s shard at this
+    incarnation's join was meant for this incarnation (module doc: handoff).
+
+    The request exists so that a shard has one writer and its prompts one owner: a
+    successor that continues the shard asks the running incarnation to stop. It is
+    stale - this incarnation takes the shard over - only when the store proves it
+    was meant for an earlier one:
+
+    * it names this shard itself as the successor (a shard never continues itself);
+    * it is a pool fence (``pool-fence:<ticket>``) and this incarnation's lease claim
+      superseded that fence (``superseded``: the claim's list): the fence was in the
+      store before this incarnation took the shard, so it stopped an earlier one. The
+      pool never starts a sampler on a shard it fenced; one that does (a pool that
+      lost its state, an operator) means this shard to run again. A later stop
+      request (a fence, a successor) is a new record and is obeyed;
+    * it names another shard that never joined and never claimed a lease (a successor
+      writes the request after its JOIN and its claim, so a real one always has them).
+
+    Anything else is obeyed: a successor that joined continues this shard's prompts
+    (running or not: its rounds took them), and a pool fence this incarnation's claim
+    did not supersede (no lease, or the fence came later) still holds. ``superseded``
+    None: no lease claim (nothing proves the order). A store read that fails raises
+    (the caller obeys)."""
+    if record.get("torn"):
+        return HandoffVerdict(True, "torn_record", None)
+    successor = None if record.get("successor") is None else str(record["successor"])
+    if successor is None:
+        return HandoffVerdict(True, "no_successor", None)
+    if successor == sampler:
+        return HandoffVerdict(False, "successor_is_this_shard", successor)
+    if successor.startswith(POOL_FENCE_SUCCESSOR):
+        if superseded is not None and successor in {str(s) for s in superseded}:
+            return HandoffVerdict(False, "fence_before_this_claim", successor)
+        return HandoffVerdict(True, "pool_fence" if superseded is not None else "pool_fence_no_lease", successor)
+    state = successor_state(store, successor)
+    if state == "never_joined":
+        return HandoffVerdict(False, "successor_never_joined", successor, state)
+    return HandoffVerdict(True, "successor_joined", successor, state)
 
 
 HANDOFF_ASIDE_DIR = "sample-buffer/handoffs-aside"
@@ -466,16 +570,21 @@ def _delete_record(store: Any, key: str) -> None:
 
 
 def set_aside_handoff(store: Any, sampler: str, *, keep: Iterable[str] = (), reason: str = "",
-                      clock: Callable[[], float] = time.time) -> dict[str, Any] | None:
+                      clock: Callable[[], float] = time.time,
+                      only: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
     """Move the stop request of ``sampler`` (``handoffs/<sampler>.json``) to
     ``handoffs-aside/`` unless its successor is in ``keep``; returns the record set
     aside (None: no record, or one that stays). A fenced shard of an earlier attempt
     of the run leaves its request behind; a new sampler started on the same shard
     name would obey it and stop. The record is copied before it is removed, so
-    nothing is lost; only ``store`` (one run's store) is touched."""
+    nothing is lost; only ``store`` (one run's store) is touched. ``only``: set it
+    aside only while it is still that record (:func:`handoff_identity`): a newer
+    request written meanwhile stays."""
     key = f"{HANDOFF_DIR}/{sampler}.json"
     record = _read_record(store, key)
     if record is None or str(record.get("successor")) in {str(k) for k in keep}:
+        return None
+    if only is not None and handoff_identity(record) != handoff_identity(only):
         return None
     stamp = int(float(record.get("requested_at") or 0) * 1000)
     _put_record(store, f"{HANDOFF_ASIDE_DIR}/{sampler}-{stamp}.json",

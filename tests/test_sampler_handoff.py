@@ -10,8 +10,8 @@ from tests.test_stage1_gaps import _sampler_spec
 from yeto.rl.engine import engine_sampler_entry as entry
 from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index
-from yeto.rl.engine.sampler_resume import (MEMBERS_DIR, handoff_requested, handoff_start, request_handoff,
-                                           resume_point)
+from yeto.rl.engine.sampler_resume import (MEMBERS_DIR, Member, handoff_requested, handoff_start, request_handoff,
+                                           resume_point, write_member)
 
 
 def _spec(tmp_path: Path, shard: str, rounds: int, **over) -> dict:
@@ -68,8 +68,15 @@ def test_a_handed_off_shard_ends_so_the_merged_data_can_end(tmp_path):
     assert FileSampleBuffer(store, batch_size=1, merge_shards=True, expected_shards=["a", "b"]).data_ended
 
 
+def _joined(store, sampler: str, *, left: bool = False) -> None:
+    """A member record of ``sampler``: it joined (and left)."""
+    write_member(store, Member(sampler=sampler, incarnation="inc-b", joined_at=1.0, resume={},
+                               left_at=2.0 if left else None, leave_reason="FINISHED" if left else None))
+
+
 def test_a_handed_off_sampler_starts_no_new_round(tmp_path):
     store = CheckpointStore(tmp_path / "store")
+    _joined(store, "b")  # the successor runs: it continues a's prompts
     request_handoff(store, "a", "b")
     assert entry.run(_spec(tmp_path, "a", 3), resource_sampler=lambda emit: None) == 0
 

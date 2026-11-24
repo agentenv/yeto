@@ -949,6 +949,7 @@ class FileSampleBuffer:
         # history before this process: no arrival (-inf), or a restart reads as a burst.
         self._seen_at: list[float] = []
         self._ended = False
+        self.end_record: dict[str, Any] | None = None  # the record that ended the data (its writer, why)
         self._consumer: str | None = None
         self._read = 0  # next position select() returns
         self._watermark = 0  # positions below are consumed (committed)
@@ -1014,15 +1015,21 @@ class FileSampleBuffer:
         with hold() if callable(hold) else nullcontext():
             yield
 
-    def mark_data_end(self, *, dispense: Mapping[str, Any] | None = None) -> None:
+    def mark_data_end(self, *, dispense: Mapping[str, Any] | None = None,
+                      why: Mapping[str, Any] | None = None) -> None:
         """The samplers will append nothing more. A shard writer that lost its shard
         (:class:`ShardFenced`) cannot end it: the owner may still write.
         ``dispense``: the shard ends because its store dispenser settled every task
         (``StoreDispensedPrompts.end_detail``: namespace, plan); the merger then ends
-        the shards that cannot get a group of that plan any more (module doc)."""
+        the shards that cannot get a group of that plan any more (module doc).
+        ``why``: why the shard ends early (e.g. ``{"reason": "shard_handed_off",
+        "successor": ...}``), for whoever later finds the shard ended; readers that
+        do not know it pass it over."""
         who = {} if self._writer is None else {"incarnation": self._writer}
         if dispense:
             who["dispense"] = dict(dispense)
+        if why:
+            who["why"] = dict(why)
         self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "end": True, **who})
 
     def _write_record(self, make: Callable[[int], dict]) -> None:
@@ -1199,6 +1206,7 @@ class FileSampleBuffer:
                 continue
             if record.get("end"):
                 self._ended = True
+                self.end_record = {k: v for k, v in record.items() if k not in ("schema", "pos", "end")}
                 continue
             shard, shard_pos = record.get("shard"), None
             if shard is not None:

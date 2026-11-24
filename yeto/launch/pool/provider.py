@@ -245,6 +245,8 @@ class ProviderPoolOps:
                 self.clear_stale_handoff = self._clear_stale_handoff
             if getattr(fencer, "exit_evidence", None) is not None:
                 self.exit_evidence = self._exit_evidence
+            if getattr(fencer, "shard_ended", None) is not None:
+                self.shard_ended = fencer.shard_ended
 
     def route_of(self, member: Any) -> Any:
         if self.routes is None or not isinstance(self.routes, Mapping):

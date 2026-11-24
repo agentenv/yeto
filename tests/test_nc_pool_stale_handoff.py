@@ -78,30 +78,39 @@ def test_the_handoff_of_this_pools_own_replacement_is_kept_at_a_pool_retry():
 
 # -- the real engine sampler: what a stale stop request does to a new sampler ---------
 
-def test_a_real_sampler_started_on_a_stale_handoff_exits_zero_at_once_and_the_pool_sets_it_aside_first(tmp_path):
+def test_a_real_sampler_takes_over_a_stale_handoff_whose_successor_never_joined(tmp_path):
     from tests.test_stage1_gaps import _sampler_spec
     from yeto.rl.engine import engine_sampler_entry as entry
     from yeto.rl.engine.resume import CheckpointStore
     from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index
 
     store = CheckpointStore(tmp_path / "store")
-    request_handoff(store, "nc-0", "nc-2")  # left by an earlier attempt of the run
+    request_handoff(store, "nc-0", "nc-2")  # left by an earlier attempt of the run; nc-2 never ran
 
     spec = _sampler_spec(tmp_path, sampler_id="nc-0", num_rollouts=2, buffer_shards=["nc-0", "nc-2"])
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(spec))
-    # the new sampler obeys the stale request: no round, its shard marked ended, exit code 0
+    # the new sampler sees the request was meant for no running successor: it runs its rounds
     code = entry.main(["--spec", str(path)])
     [tape] = (tmp_path / "tape").glob("events.*.jsonl")
-    leave = next(e for e in map(json.loads, tape.read_text().splitlines()) if e["event"] == "rl_sampler_leave")
-    assert code == 0 and leave["rounds"] == 0 and leave["reason"] == "FINISHED"
+    events = list(map(json.loads, tape.read_text().splitlines()))
+    leave = next(e for e in events if e["event"] == "rl_sampler_leave")
+    assert code == 0 and leave["rounds"] == 2 and leave["reason"] == "FINISHED"
+    (stale,) = [e for e in events if e["event"] == "rl_sampler_handoff_stale"]
+    assert stale["successor"] == "nc-2" and stale["why"] == "successor_never_joined" and stale["set_aside"]
+    assert not handoff_requested(store, "nc-0") and [r["successor"] for r in _aside_local(store, "nc-0")] == ["nc-2"]
     shard = FileSampleBuffer(store, batch_size=1, index=shard_index("nc-0"), create_index=False)
-    assert shard.data_ended and len(shard) == 0
+    assert len(shard) == 4
     # what the pool does before the start on that shard name: nc-2 does not continue nc-0 in this pool
+    request_handoff(store, "nc-1", "nc-2")
     clock = Clock()
     cloud = CloudWithHandoffs(clock)
     cloud.store = store
     pool = _pool(clock, cloud, target=3, accounts=(1, 4, 5))
     _run(pool, clock, 180)
-    assert [m.shard for m in pool.members] == ["nc-0", "nc-1", "nc-2"] and pool.members[0].started is not None
-    assert not handoff_requested(store, "nc-0") and "stale_handoff_set_aside" in _names(pool)
+    assert [m.shard for m in pool.members][:2] == ["nc-0", "nc-1"] and pool.members[1].started is not None
+    assert not handoff_requested(store, "nc-1") and "stale_handoff_set_aside" in _names(pool)
+
+
+def _aside_local(store, shard):
+    return [json.loads(p.read_text()) for p in (store.root / "sample-buffer" / "handoffs-aside").glob(f"{shard}-*.json")]

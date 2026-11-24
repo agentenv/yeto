@@ -103,6 +103,9 @@ from .tunnel import state_dir
 KIND, LEDGER_KIND = "modal", "modal_call"
 FUNCTION = "rollout_sampler"
 RUNNING, SUCCEEDED, FAILED = "RUNNING", "SUCCEEDED", "FAILED"
+# the call returned with the sampler's "did not run" exit (a stop request on its shard it
+# obeyed, or a shard whose data ended: engine_sampler_entry.NOT_RUN_EXIT_CODE)
+NOT_RUN = "NOT_RUN"
 STAGE = "/tmp/stage"
 CODE_ROOT = "/root"
 READY_PREFIX = "pool-ready"
@@ -356,7 +359,7 @@ class ModalProvider:
         return {"app": getattr(self.client, "app_name", None), "app_id": app_id, "result": result}
 
     def call_state(self, ticket: str) -> str | None:
-        """RUNNING / SUCCEEDED / FAILED of the island's call (None: not spawned)."""
+        """RUNNING / SUCCEEDED / NOT_RUN / FAILED of the island's call (None: not spawned)."""
         call = self.call_id(ticket)
         return None if call is None else self.client.status(call)
 
@@ -371,10 +374,10 @@ class ModalProvider:
             return LeaseStatus("active")
         if row.get("cancelled") == row["call"]:
             return LeaseStatus("ended", end_reason="released")
-        if state == SUCCEEDED:
+        if state in (SUCCEEDED, NOT_RUN):
             # the call returned with its sampler's exit 0 (the run finished, the data
-            # ended): the island is not lost; the probe reads the exited sampler, the
-            # pool drains it and orders no replacement
+            # ended) or its "did not run" exit: the island is not lost; the probe reads
+            # the exited sampler and the pool decides (drain, or a new shard)
             return LeaseStatus("active")
         return LeaseStatus("ended", end_reason="lost", detail=self._failure(row["call"]))
 
@@ -471,6 +474,7 @@ class ModalPoolOps:
         prefix = str(self.cfg["run_prefix"]).strip("/")
         bucket = self.provider.config.get("bucket") or ""
         spec["store"] = spec["buffer_root"] = f"{STAGE}/{bucket}/runs/{prefix}"
+        spec["store_uri"] = f"s3://{bucket}/runs/{prefix}"  # what rl_sampler_start names (not the stage)
         out = {"spec": spec, "shard": m.shard, "run_prefix": prefix, "bucket": bucket,
                "python": self.provider.config.get("python", "python3"),
                "env": dict(self.provider.config.get("env") or {})}
@@ -510,7 +514,8 @@ class ModalPoolOps:
             return island_status.Probe(node="ok", sampler="absent")
         if state == RUNNING:
             return island_status.Probe(node="ok", sampler="running", joined=self._reported_ready(m))
-        return island_status.Probe(node="ok", sampler="exited", exit_code=0 if state == SUCCEEDED else 1)
+        code = 0 if state == SUCCEEDED else min(island_status.NOT_RUN_EXIT_CODES) if state == NOT_RUN else 1
+        return island_status.Probe(node="ok", sampler="exited", exit_code=code)
 
     def _fence_store(self) -> Any:
         if self._store is None:
@@ -540,6 +545,21 @@ class ModalPoolOps:
 
     def fence_incarnation(self, m) -> Any:
         return self.data_path().fence_incarnation(m.shard, by=m.ticket)
+
+    # what the run's store says of a shard, as on the SSH route (NcSshOps): a stale stop
+    # request is set aside before a start, an exit is checked against the store, and a
+    # shard whose data ended is not given to a new member
+    def clear_stale_handoff(self, m, keep: Any) -> Any:
+        clear = getattr(self.data_path(), "clear_stale_handoff", None)  # the syncer path keeps no handoff record
+        return None if clear is None else clear(m.shard, keep=keep)
+
+    def exit_evidence(self, m) -> Any:
+        read = getattr(self.data_path(), "exit_evidence", None)
+        return None if read is None else read(m.shard)
+
+    def shard_ended(self, shard: str) -> Any:
+        read = getattr(self.data_path(), "shard_ended", None)
+        return None if read is None else read(shard)
 
     def request_drain(self, m) -> None:
         import time as _time  # noqa: PLC0415
@@ -653,8 +673,9 @@ class ModalSdkClient:
             return str(fn.spawn(payload).object_id)
 
     def status(self, call_id: str) -> str:
-        """RUNNING; SUCCEEDED: the body returned and its sampler exited 0; FAILED: it
-        raised (cancelled, function timeout) or its sampler exited non-zero."""
+        """RUNNING; SUCCEEDED: the body returned and its sampler exited 0; NOT_RUN: its
+        sampler exited with the "did not run" code; FAILED: it raised (cancelled,
+        function timeout) or its sampler exited with any other non-zero code."""
         call = self.modal.FunctionCall.from_id(call_id)
         try:
             result = call.get(timeout=0)
@@ -664,6 +685,8 @@ class ModalSdkClient:
             if "timeout" in str(exc).lower() and type(exc).__name__ in ("TimeoutError", "OutputExpiredError"):
                 return RUNNING
             return FAILED
+        if isinstance(result, dict) and result.get("rc") in island_status.NOT_RUN_EXIT_CODES:
+            return NOT_RUN
         if isinstance(result, dict) and result.get("rc") not in (0, None):
             return FAILED  # rollout_sampler_body returns the sampler's exit code
         return SUCCEEDED
