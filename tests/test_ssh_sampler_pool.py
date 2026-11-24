@@ -294,8 +294,14 @@ def _priced_cfg(tmp_path, provider):
             "slots": [0, 1], "provider": provider}
 
 
-@pytest.mark.parametrize("provider", [{"kind": "daytona"},
-                                      {"kind": "modal", "image": "i", "secret": "s", "bucket": "b"}])
+def test_a_modal_pool_without_a_price_takes_the_unified_price_table(tmp_path, monkeypatch, capsys):
+    """A Modal pool's B300 x 8 (its default GPUs) at the Modal list price the trainer is billed at."""
+    cfg = _priced_cfg(tmp_path, {"kind": "modal", "image": "i", "secret": "s", "bucket": "b"})
+    assert _dry_run_spend(cfg, tmp_path, monkeypatch, capsys) == [
+        "estimated spend: $68.00 per node hour; steady $136.00/h; up to $136.00/h while replacements overlap"]
+
+
+@pytest.mark.parametrize("provider", [{"kind": "daytona"}])
 def test_unpriced_pools_keep_the_mi355x_rate_word_for_word(provider, tmp_path, monkeypatch, capsys):
     from yeto.launch.nc.client import hourly_cost_ucr
 
