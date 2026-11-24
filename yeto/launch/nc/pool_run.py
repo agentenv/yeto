@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ...config_errors import ConfigError
 from ..pool import status as island_status
 from ..pool.island_pool import GONE, IslandPool, Member
 from . import cli, elastic, ssh_sampler, tunnel
@@ -304,10 +305,23 @@ def check_sampler_spec(cfg: dict[str, Any], pc=None) -> dict[str, Any]:
             raise ValueError("spec.event_tape is required")
         build_engine(checked)  # engine section, server + options dataclasses, rollout_fields (no process)
         build_reward(checked)  # reward_kind and the reward function import
+        check_probe_window(checked)  # the post-load probe fits the engine context
     except Exception as error:  # noqa: BLE001 - every refusal is a config error here
-        raise ValueError(f"sampler spec {cfg.get('spec')!r} is refused by the sampler: "
-                         f"{type(error).__name__}: {error}"[:1500]) from None
+        raise ConfigError(f"sampler spec {cfg.get('spec')!r} is refused by the sampler: "
+                          f"{type(error).__name__}: {error}"[:1500]) from None
     return spec
+
+
+def check_probe_window(spec: dict[str, Any]) -> None:
+    """Refuse a spec whose post-load probe (``checks``: ``fixed_max_tokens`` after a fixed
+    prompt) does not fit its engine's ``max_model_len``: the sampler would fail its
+    start checks on every machine, after the machine is up and billing."""
+    from yeto.rl.compaction import spec_max_model_len  # noqa: PLC0415
+    from yeto.rl.engine.sampler_checks import PostLoadChecks  # noqa: PLC0415
+
+    problem = PostLoadChecks(**dict(spec.get("checks") or {})).probe_window_problem(spec_max_model_len(spec))
+    if problem is not None:
+        raise ConfigError(problem)
 
 
 def pool_process(cfg: dict[str, Any]) -> dict[str, Any] | None:
