@@ -815,6 +815,15 @@ PAYLOAD_WARN_BYTES = 4 * 2**30  # GroupWriter warns from here (a group near the 
 K31_PAYLOAD_BYTES_PER_TOKEN = {"json": 5324, "raw": 4001, "zstd": 2353}
 
 
+# The raw (v2) K3.1 bytes per token by field: R3 (92 MoE layers x top-16 x uint16), the
+# top-128 int32 ids + float32 log-probs, and the rest (token lists, log-probs, masks).
+K31_R3_BYTES_PER_TOKEN = 92 * 16 * 2
+K31_TOP_LOGPROBS_NUM = 128
+TOP_LOGPROB_BYTES = 8
+OTHER_BYTES_PER_TOKEN = (K31_PAYLOAD_BYTES_PER_TOKEN["raw"] - K31_R3_BYTES_PER_TOKEN
+                         - K31_TOP_LOGPROBS_NUM * TOP_LOGPROB_BYTES)
+
+
 def k31_group_payload_bytes(trials: int, context_budget: int, *, max_compactions: int = 0,
                             codec: str = "json") -> int:
     """Upper bound of one K3.1 group payload: ``trials`` trials whose
@@ -822,6 +831,22 @@ def k31_group_payload_bytes(trials: int, context_budget: int, *, max_compactions
     preflight bound; compare with :data:`SINGLE_PUT_LIMIT_BYTES`)."""
     per_token = K31_PAYLOAD_BYTES_PER_TOKEN[payload_codec({PAYLOAD_CODEC_ENV: codec})]
     return int(trials) * (1 + int(max_compactions)) * int(context_budget) * per_token
+
+
+def group_payload_bytes(trials: int, context_budget: int, *, r3_bytes_per_token: int | None,
+                        top_logprobs_num: int = K31_TOP_LOGPROBS_NUM, max_compactions: int = 0,
+                        codec: str = "json") -> int:
+    """Upper bound of one group payload of any MoE model: the raw bytes per token are the
+    model's R3 row (``r3_bytes_per_token``: MoE layers x top-k x 2 bytes), the
+    ``top_logprobs_num`` ids and log-probs and the K3.1 rest; the other codecs keep the
+    ratio to raw measured on K3.1. ``r3_bytes_per_token`` None: the K3.1 bound
+    (:func:`k31_group_payload_bytes`)."""
+    if r3_bytes_per_token is None:
+        return k31_group_payload_bytes(trials, context_budget, max_compactions=max_compactions, codec=codec)
+    name = payload_codec({PAYLOAD_CODEC_ENV: codec})
+    raw = int(r3_bytes_per_token) + int(top_logprobs_num) * TOP_LOGPROB_BYTES + OTHER_BYTES_PER_TOKEN
+    per_token = raw * K31_PAYLOAD_BYTES_PER_TOKEN[name] / K31_PAYLOAD_BYTES_PER_TOKEN["raw"]
+    return int(int(trials) * (1 + int(max_compactions)) * int(context_budget) * per_token)
 
 
 class GroupWriter:

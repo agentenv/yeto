@@ -802,3 +802,52 @@ def test_run_up_preflight_warns_without_an_engine_context(setup, capsys):  # noq
     assert run.consistency_problem() is None
     run.log_compaction(0)
     assert "preflight: WARNING: agentic.compaction: the spec gives no engine max_model_len" in capsys.readouterr().out
+
+
+QWEN3_30B_A3B_CONFIG = {"model_type": "qwen3_moe", "num_hidden_layers": 48, "hidden_size": 2048,
+                        "intermediate_size": 6144, "moe_intermediate_size": 768, "num_experts": 128,
+                        "num_experts_per_tok": 8, "decoder_sparse_step": 1, "mlp_only_layers": [],
+                        "vocab_size": 151936, "num_attention_heads": 32, "num_key_value_heads": 4, "head_dim": 128}
+K31_LIKE_CONFIG = {"num_hidden_layers": 93, "first_k_dense_replace": 1, "n_routed_experts": 896,
+                   "num_experts_per_tok": 16, "hidden_size": 7168, "vocab_size": 163840}
+
+
+def _trainer_argv(model):
+    return ["--training-mode", "rl", "--model", str(model), "--data", "d"]
+
+
+def test_the_r3_row_comes_from_the_model_config():
+    from yeto import memory_estimate
+    from yeto.rl.engine import buffer_payload
+
+    assert memory_estimate.r3_bytes_per_token(QWEN3_30B_A3B_CONFIG) == 48 * 8 * 2 == 768
+    k31 = memory_estimate.r3_bytes_per_token(K31_LIKE_CONFIG)
+    assert k31 == buffer_payload.K31_R3_BYTES_PER_TOKEN == 92 * 16 * 2
+    assert memory_estimate.r3_bytes_per_token({"num_hidden_layers": 4, "hidden_size": 8, "vocab_size": 8}) is None
+    assert memory_estimate.r3_bytes_per_token(None) is None
+    # the K3.1 row and top-128 give the K3.1 bound back, codec by codec
+    for codec in ("json", "raw", "zstd"):
+        assert buffer_payload.group_payload_bytes(8, 262144, r3_bytes_per_token=k31, max_compactions=3,
+                                                  codec=codec) == _expected_size(8, 262144, max_compactions=3,
+                                                                                 codec=codec)
+        assert buffer_payload.group_payload_bytes(8, 262144, r3_bytes_per_token=None, codec=codec) == \
+            _expected_size(8, 262144, codec=codec)
+
+
+def test_a_qwen3_moe_group_is_sized_by_its_own_r3_row(tmp_path):
+    from yeto.rl.up_consistency import payload_size_warning
+
+    model = tmp_path / "qwen3-30b-a3b"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(QWEN3_30B_A3B_CONFIG))
+    spec = {**K31_ROWS, "agentic": {"max_prompt_len": 16384, "max_response_len": 262144 - 16384}}
+    # 768 + 128 x 8 + 33 raw bytes per token (K3.1: 4001): 8 x 262144 tokens stay under one PUT
+    assert payload_size_warning(_pool(tmp_path, spec), _trainer_argv(model), environ={}) is None
+    compacting = {**K31_ROWS, "agentic": {**AGENTIC, "max_response_len": 262144,
+                                          "compaction": {"context_budget": 262144, "max_compactions": 3}}}
+    warning = payload_size_warning(_pool(tmp_path, compacting), _trainer_argv(model), environ={})
+    assert "19.0 GiB (8 trials x 4 segments x 262144 tokens (agentic.compaction), codec json)" in warning
+    # no readable config (or no trainer argv): the K3.1 bytes per token, as before
+    for argv in (_trainer_argv(tmp_path / "missing"), None):
+        assert "one buffer group can reach 10.4 GiB" in payload_size_warning(_pool(tmp_path, spec), argv,
+                                                                            environ={})

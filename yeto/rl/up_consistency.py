@@ -433,18 +433,33 @@ def _group_tokens(spec: dict[str, Any]) -> int | None:
     return min(known) if known else None
 
 
+def _r3_bytes_per_token(args: Any | None) -> int | None:
+    """R3 bytes per token of the trainer's ``--model`` (``memory_estimate.r3_bytes_per_token``
+    of its local or cached ``config.json``); None when there is no trainer argv or no config."""
+    if args is None or not getattr(args, "model", None):
+        return None
+    from yeto import memory_estimate  # noqa: PLC0415
+
+    try:
+        _arch, _repo, _source, cfg = memory_estimate._resolve(str(args.model))
+    except Exception:  # noqa: BLE001 - advisory warning: fall back to the K3.1 bytes
+        return None
+    return memory_estimate.r3_bytes_per_token(cfg)
+
+
 def payload_size_warning(pool_cfg: dict[str, Any], trainer_argv: list[str] | None = None,
                          environ: dict[str, str] | None = None) -> str | None:
     """A warning when one buffer group of the pool's samplers can exceed one object
     PUT (5 GiB on S3 / R2 / OSS): ``sampling.n`` trials x (1 + ``max_compactions``)
     segments x the segment width (:func:`yeto.rl.compaction.segment_width`) with compaction, else x the row tokens
-    (:func:`_group_tokens`), sized by ``buffer_payload.k31_group_payload_bytes`` (the
-    K3.1 bytes per token: R3 + top-128). Only for specs that return routed experts
-    (R3 is most of the bytes). The codec is ``YETO_SAMPLE_BUFFER_PAYLOAD_CODEC`` of
-    ``environ`` (the run's env). None: below the limit or not a K3.1-shaped spec."""
+    (:func:`_group_tokens`), sized by ``buffer_payload.group_payload_bytes``: the R3 row
+    of the trainer's ``--model`` (MoE layers x top-k x 2 bytes, from its ``config.json``)
+    and the spec's ``top_logprobs_num``; without a readable config, the K3.1 bytes per
+    token (R3 + top-128). Only for specs that return routed experts (R3 is most of the
+    bytes). The codec is ``YETO_SAMPLE_BUFFER_PAYLOAD_CODEC`` of ``environ`` (the run's
+    env). None: below the limit or a spec without routed experts."""
     from yeto.rl.engine import buffer_payload  # noqa: PLC0415
 
-    size_of = buffer_payload.k31_group_payload_bytes
     limit = buffer_payload.SINGLE_PUT_LIMIT_BYTES
     spec = effective_spec(pool_cfg)
     if spec is None or not (spec.get("rollout_fields") or {}).get("routed_experts"):
@@ -465,6 +480,14 @@ def payload_size_warning(pool_cfg: dict[str, Any], trainer_argv: list[str] | Non
     compactions = 0 if cfg is None else cfg.max_compactions
     env_name = buffer_payload.PAYLOAD_CODEC_ENV
     codec = str((environ or {}).get(env_name) or "json").strip().lower()
+    r3 = _r3_bytes_per_token(args)
+    top = (spec.get("rollout_fields") or {}).get("top_logprobs_num")
+
+    def size_of(trials: int, tokens: int, *, max_compactions: int, codec: str) -> int:
+        return buffer_payload.group_payload_bytes(trials, tokens, r3_bytes_per_token=r3,
+                                                  top_logprobs_num=int(top or 0), max_compactions=max_compactions,
+                                                  codec=codec)
+
     try:
         size = size_of(int(trials), int(tokens), max_compactions=compactions, codec=codec)
         zstd = size_of(int(trials), int(tokens), max_compactions=compactions, codec="zstd")
