@@ -1301,6 +1301,11 @@ class Run:
                 if lock is None:
                     continue
                 locks.append(lock)
+                try:  # another run's state (same shard_base): archived when stopped, else refused
+                    if pool_run.claim_state(cfg) is not None:
+                        continue
+                except pool_run.PoolStateOwnerError as error:
+                    raise RunUpRefused(f"pool {ref.name}: {error}") from None
                 pool = IslandPool.restore(state, cli.pool_config(cfg, allowed=None), None,  # type: ignore[arg-type]
                                           log=cli._log, events=pool_run.event_log(cfg))  # noqa: SLF001
                 if not pool.stopped or getattr(pool, "finished", None):
@@ -1436,6 +1441,10 @@ class Run:
             pool_cfg = self.pools[i].load()
             path = self._nc_dir() / f"pool-{pool_cfg['shard_base']}.json"
             doc = json.loads(path.read_text())
+            from yeto.launch.nc.pool_run import foreign_owner  # noqa: PLC0415
+
+            if foreign_owner(pool_cfg, doc) is not None:
+                return None  # another run's state (same shard_base): not this run's members or spend
         except Exception:  # noqa: BLE001
             return None
         from yeto.launch.pool.island_pool import PoolStateFormatError, check_state_format  # noqa: PLC0415

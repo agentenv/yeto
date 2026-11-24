@@ -170,6 +170,98 @@ def scale_lock_path(cfg: dict[str, Any]) -> Path:
     return tunnel.state_dir() / f"pool-{cfg['shard_base']}.scale.lock"
 
 
+# -- whose state file ------------------------------------------------------------
+# The state file is named after shard_base only (``pool-<shard_base>.json``): a later run
+# that keeps the shard_base in the same state dir finds the file of an earlier run. The
+# file records its run (``owner``); a pool of another run never takes it over: a stopped
+# one is archived (renamed into ``archive/``, never deleted), any other is refused. A file
+# with no owner (written before it was recorded, or by an older yeto) is this run's, as
+# before: a pool such a file belongs to is never cut off from it.
+
+class PoolStateOwnerError(RuntimeError):
+    """The pool state file belongs to another run (its nodes, leases and spend)."""
+
+
+def state_owner(cfg: dict[str, Any]) -> dict[str, Any]:
+    """The run a pool config's state belongs to: its run tag and ``run_prefix`` (the run store)."""
+    owner: dict[str, Any] = {"run": cli.run_id(cfg)}
+    if cfg.get("run_prefix"):
+        owner["run_prefix"] = str(cfg["run_prefix"]).strip("/")
+    return owner
+
+
+def foreign_owner(cfg: dict[str, Any], doc: dict[str, Any]) -> dict[str, Any] | None:
+    """The owner of state document ``doc`` when it is another run than ``cfg``'s (None:
+    this run's, or no owner recorded). Another run tag, or another ``run_prefix`` when
+    both record one."""
+    owner = doc.get("owner") if isinstance(doc, dict) else None
+    if not isinstance(owner, dict) or not owner.get("run"):
+        return None
+    mine = state_owner(cfg)
+    if owner["run"] != mine["run"]:
+        return owner
+    if owner.get("run_prefix") and mine.get("run_prefix") and owner["run_prefix"] != mine["run_prefix"]:
+        return owner
+    return None
+
+
+def _owner_text(owner: dict[str, Any]) -> str:
+    return f"run {owner.get('run')!r}" + (f" (run_prefix {owner['run_prefix']!r})" if owner.get("run_prefix") else "")
+
+
+def check_state_owner(cfg: dict[str, Any]) -> None:
+    """Raise :class:`PoolStateOwnerError` when the pool's state file belongs to another run:
+    a command that acts on it (stop, retry, scale, pause, downgrade) would act on that run's nodes."""
+    state = cli.pool_state_path(cfg)
+    try:
+        doc = json.loads(state.read_text()) if state.exists() else {}
+    except (OSError, ValueError):
+        return
+    owner = foreign_owner(cfg, doc)
+    if owner is not None:
+        raise PoolStateOwnerError(
+            f"pool state {state} belongs to {_owner_text(owner)}, not to {_owner_text(state_owner(cfg))} of this "
+            "config (same shard_base in the same state dir); run the command with that run's pool config")
+
+
+def claim_state(cfg: dict[str, Any], *, now: float | None = None) -> Path | None:
+    """Before a pool of ``cfg`` restores its state (under the pool lock): a state file of
+    another run that says stopped and holds no billed member is archived (renamed to
+    ``archive/pool-<shard_base>.<run>.<UTC time>.json``; the path is returned); one of another
+    run that is not stopped, or still holds members, raises :class:`PoolStateOwnerError`
+    (nothing changed). A state of this run, or with no owner recorded, is left as it is."""
+    state = cli.pool_state_path(cfg)
+    try:
+        doc = json.loads(state.read_text()) if state.exists() else {}
+    except (OSError, ValueError):
+        return None  # unreadable: the restore reports it
+    owner = foreign_owner(cfg, doc)
+    if owner is None:
+        return None
+    left = billed_members(doc)
+    if not doc.get("stopped") or left:
+        tickets = [m.get("ticket") for m in left]
+        raise PoolStateOwnerError(
+            f"pool state {state} belongs to {_owner_text(owner)}, not to {_owner_text(state_owner(cfg))} of this "
+            f"config (same shard_base in the same state dir), and that pool is "
+            + ("not stopped" if not doc.get("stopped") else f"stopped ({doc.get('stopped')})")
+            + (f" with billed member(s) {tickets}" if tickets else "")
+            + ": its nodes, leases and spend are not taken over. Stop it with its own pool config (pool-stop), "
+              "or give this pool another shard_base or state dir (YETO_NC_STATE_DIR); nothing changed")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
+    run = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(owner.get("run")))
+    dest = state.parent / "archive" / f"{state.stem}.{run}.{stamp}.json"
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = dest.with_name(f"{state.stem}.{run}.{stamp}-{n}.json")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    state.replace(dest)
+    _say(f"pool state {state} belonged to {_owner_text(owner)} and says stopped ({doc.get('stopped')}) with no "
+         f"billed member: archived to {dest}; this pool of {_owner_text(state_owner(cfg))} starts fresh")
+    return dest
+
+
 def read_scale(cfg: dict[str, Any]) -> dict[str, Any] | None:
     """The scale file of this run; one another run (same shard_base) left behind, or one
     without a run id, is ignored."""
@@ -616,6 +708,20 @@ def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: Is
         lock.close()
 
 
+def stopped_state_hint(state: Any, pool: IslandPool, cfg: dict[str, Any]) -> str:
+    """What a pool loop prints when its state file (of this run, or with no owner recorded)
+    says stopped: why, and what each way out does. A stopped state of another run never
+    gets here: :func:`claim_state` archived it."""
+    base = str(cfg.get("shard_base") or pool.config.shard_base)
+    used = ", ".join(sorted({m.shard for m in pool.members if m.shard})) or "none"
+    by = _owner_text(pool.owner) if pool.owner else "a run it does not record (an older state file)"
+    return (f"pool state {state} says stopped ({pool.stopped}) by an earlier stop of {by}; this loop starts "
+            "nothing. `yeto run up` drives a stopped pool of its own run again (when no member is live). To start a new pool by hand for the "
+            f"same run, move the file away: the new pool forgets this one and numbers its shards from {base}-0 "
+            f"again in the same store (this one used: {used}). A stopped state of another run (another run or "
+            "run_prefix) is archived automatically; for a clean slate use a new run_prefix.")
+
+
 def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: float, pool: IslandPool | None,
                      signals: _Signals | None) -> int:
     if cfg.get("route", "ssh") == "ssh":
@@ -624,6 +730,10 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         except ValueError as error:
             raise SystemExit(f"pool: CONFIGURATION ERROR, nothing ordered: {error}") from None
     state = cli.pool_state_path(cfg)
+    try:
+        claim_state(cfg)
+    except PoolStateOwnerError as error:
+        raise SystemExit(f"pool: refused, nothing ordered: {error}") from None
     if pool is None:
         pool = IslandPool.restore(state, pc, cli.pool_ops(cfg), log=cli._log, events=event_log(cfg))
     if pool.scale_path is None:
@@ -631,13 +741,14 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         pool.scale_run = cli.run_id(cfg)
     pool.apply_scale()
     if pool.stopped:
-        _say(f"pool state {state} says stopped ({pool.stopped}); move it away to start a new pool")
+        _say(stopped_state_hint(state, pool, cfg))
         left = [m.__dict__ for m in pool.live()]
         if left:
             _print_banner(billing_banner(config_path, left, why="stopped pool with members left",
                                          national=is_national_compute(cfg), kind=provider_kind(cfg)))
             return 1
         return 0
+    pool.owner = state_owner(cfg)  # this run's from now on (a file with no owner is stamped)
     signals = signals or _Signals()
     _write_pid(cfg, config_path)
     _remove(stop_path(cfg))
@@ -1263,6 +1374,10 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
                       "state": doc,
                       "events": [json.loads(x) for x in lines[-events:]]}, indent=1))
     print_attention(attention)
+    owner = foreign_owner(cfg, doc)
+    if owner is not None:
+        print(f"WARNING: the state file {state} belongs to {_owner_text(owner)}, not to this config's "
+              f"{_owner_text(state_owner(cfg))}: what it shows is that run's pool", file=sys.stderr)
     if left and (proc is None or not proc.get("alive")):
         _print_banner(billing_banner(config_path, left, why="no pool process is alive to drain them",
                                      national=is_national_compute(cfg), kind=provider_kind(cfg)))
@@ -1285,11 +1400,12 @@ def protected_accounts(cfg: dict[str, Any]) -> frozenset[int]:
 
 
 def _pool_state_doc(cfg: dict[str, Any]) -> dict[str, Any]:
+    """The pool's state document; {} when unreadable or another run's (its members are not this run's)."""
     try:
         doc = json.loads(cli.pool_state_path(cfg).read_text())
     except (OSError, ValueError):
         return {}
-    return doc if isinstance(doc, dict) else {}
+    return doc if isinstance(doc, dict) and foreign_owner(cfg, doc) is None else {}
 
 
 def _ticket_evidence(cfg: dict[str, Any], ticket: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
