@@ -289,6 +289,17 @@ def test_a_fleet_policy_age_disagreeing_with_the_run_config_is_refused(files):
         up.load_config(_write(files, raw))
 
 
+def test_run_down_opens_a_fleet_whose_trainer_values_conflict(files, monkeypatch, capsys):
+    raw = _cfg(files, breakers={"trainer": {"policy_age": {"max_versions": 4}}})
+    raw["fleet"]["trainer_argv"] += ["--rl-max-policy-age", "2"]
+    path = _write(files, raw)
+    monkeypatch.setattr(up.Run, "down", lambda self: True)
+    assert up.main(types.SimpleNamespace(config=path, rl_command="down")) == 0
+    assert "WARNING" in capsys.readouterr().err
+    assert up.main(_main_args(path)) == 2
+    assert "policy_age.max_versions = 4 but fleet.trainer_argv --rl-max-policy-age = 2" in capsys.readouterr().err
+
+
 def test_the_run_configs_launch_values_reach_the_fleets_launch(files):
     raw = _cfg(files, breakers={"launch": {"stall": {"timeout_s": 1800}}})
     argv = up.load_config(_write(files, raw))["trainer"]["argv"]

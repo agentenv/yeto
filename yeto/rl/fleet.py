@@ -103,6 +103,7 @@ import dataclasses
 import json
 import math
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -780,7 +781,7 @@ def form_problem(form: dict[str, Any]) -> str | None:
 
 # ---------------------------------------------------------------------- compile
 
-def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
+def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple[dict[str, Any], FleetPlan]:
     """The single-trainer run config of an island fleet and its plan (module doc).
     Raises ValueError (``run config: ...``) on a bad ``islands`` / ``fleet`` section.
     The input is not changed; the output keeps ``islands`` and ``fleet`` as they were
@@ -871,7 +872,14 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     miles_rows = [(i, m) for i in rows for m in i.miles_samplers]
     argv = [*trainer_argv, "--gpu", ",".join([i.gpu for i in rows] + [m.gpu for _i, m in miles_rows]),
             "--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer"]
-    argv += _trainer_section_argv(cfg, trainer_argv)  # every trainer island's, unless the island sets its own
+    try:  # every trainer island's, unless the island sets its own
+        argv += _trainer_section_argv(cfg, trainer_argv)
+    except ValueError as error:
+        if strict_breakers:
+            raise
+        # run down / status: never blocked by a breakers value (yeto run up refuses it)
+        print(f"WARNING: {error}: not written into the trainer argv (yeto run up refuses this config)",
+              file=sys.stderr, flush=True)
     for i in rows:
         if i.pools:  # an island with Miles samplers only names no pool shard
             argv += ["--rl-island-buffer-shards", f"{i.index}:{','.join(i.pool_shards())}"]

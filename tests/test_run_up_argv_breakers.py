@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import types
 from pathlib import Path
 
 import pytest
@@ -255,3 +256,54 @@ def test_a_launch_budget_setting_without_its_usd_is_refused(tmp_path):
 def test_a_conflicting_launch_value_is_refused(tmp_path, extra, section, match):
     with pytest.raises(ValueError, match=match):
         up.load_config(str(_write(tmp_path, argv=[*ARGV, *extra], breakers={"launch": section})))
+
+
+# ------------------------------------------------------------------ never block a stop
+CONFLICT = {"trainer": {"sample_wait": {"timeout_s": 1200}}, "launch": {"stall": {"timeout_s": 1800}}}
+
+
+def _conflicting(tmp_path: Path) -> Path:
+    """A config an earlier yeto accepted: its section disagrees with its argv."""
+    return _write(tmp_path, argv=[*ARGV, "--rl-sample-wait-s", "900", "--rl-stall-timeout", "600"], breakers=CONFLICT)
+
+
+def test_run_down_and_status_open_a_conflicting_config_run_up_refuses_it(tmp_path, monkeypatch, capsys):
+    """A breakers value the argv disagrees with refuses `run up` / `scale`, never `run down`:
+    a refused down would leave the samplers billing. down / status warn and read the argv as
+    written."""
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
+    path = str(_conflicting(tmp_path))
+    downs = []
+    monkeypatch.setattr(up.Run, "down", lambda self: downs.append(list(self.cfg["trainer"]["argv"])) or True)
+    assert up.main(types.SimpleNamespace(config=path, rl_command="down")) == 0
+    assert downs == [[*ARGV, "--rl-sample-wait-s", "900", "--rl-stall-timeout", "600"]]  # as written
+    err = capsys.readouterr().out
+    assert "WARNING" in err and "timeout_s = 1200 but trainer.argv --rl-sample-wait-s = 900" in err
+    (tmp_path / "rl-up" / "r").mkdir(parents=True, exist_ok=True)  # status reads a run brought up here
+    monkeypatch.setattr(up.Run, "status", lambda self: {"run": self.run})
+    assert up.main(types.SimpleNamespace(config=path, rl_command="status")) == 0
+    assert "WARNING" in capsys.readouterr().out
+    for command in ("up", "scale"):
+        rc = up.main(types.SimpleNamespace(config=path, rl_command=command, skip_preflight=False, dry_run=True,
+                                           no_monitor=True, allow_after_forced_stop=False))
+        assert rc == 2
+        assert "timeout_s = 1200 but trainer.argv --rl-sample-wait-s = 900" in capsys.readouterr().err
+
+
+def test_load_config_warns_without_strict_breakers(tmp_path):
+    path = str(_conflicting(tmp_path))
+    with pytest.raises(ValueError, match="but trainer.argv --rl-stall-timeout = 600"):
+        up.load_config(path)
+    cfg = up.load_config(path, strict_breakers=False)
+    assert cfg["trainer"]["argv"] == json.loads(Path(path).read_text())["trainer"]["argv"]
+    # a launch budget setting without its usd: a warning too
+    bad = _write(tmp_path, breakers={"run": {"budget": {"usd": 450}}, "launch": {"budget": {"warn_usd": 40}}})
+    assert up.load_config(str(bad), strict_breakers=False)["trainer"]["argv"] == ARGV
+
+
+def test_rollout_status_opens_a_conflicting_config(tmp_path, monkeypatch):
+    from yeto.launch.rollout import entry
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
+    refs, _env = entry._status_refs(types.SimpleNamespace(pool_config=None, config=str(_conflicting(tmp_path))))
+    assert [r.name for r in refs] == ["pool"]

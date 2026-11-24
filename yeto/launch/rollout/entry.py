@@ -182,7 +182,7 @@ def _status_refs(args) -> tuple[list[rollout_pools.PoolRef], dict[str, str]]:
         return [rollout_pools.PoolRef("pool", os.path.expanduser(args.pool_config))], {}
     from yeto.rl.up import STATE_ROOT, load_config  # noqa: PLC0415
 
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, strict_breakers=False)  # a status: never blocked by a breakers value
     state_dir = STATE_ROOT / str(cfg["run"])
     state_dir.mkdir(parents=True, exist_ok=True)
     return rollout_pools.resolve(cfg, state_dir), dict(cfg.get("env") or {})
