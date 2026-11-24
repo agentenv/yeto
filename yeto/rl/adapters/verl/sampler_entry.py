@@ -160,7 +160,9 @@ def run_sampler_island(args: Any, *, manifest: Mapping[str, Any], card: str, out
 
     model_path = snapshot_download(args.model, revision=args.model_revision)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    chat = json.loads(args.apply_chat_template_kwargs) if args.apply_chat_template_kwargs else {}
+    from .run_flags import chat_template_kwargs
+
+    chat = chat_template_kwargs(args.apply_chat_template_kwargs)
     frame = pd.read_parquet(hf_hub_download(args.data, "train.parquet", repo_type="dataset",
                                             revision=args.data_revision))
     work = Path(os.path.expanduser("~/yeto-verl/sampler"))

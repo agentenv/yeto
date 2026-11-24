@@ -205,17 +205,14 @@ def test_the_island_refuses_exports_and_data_positions_where_they_do_not_apply(e
         vfs.full_parameter_extras(_parsed(extra), sync=sync)
 
 
-def test_the_export_flags_are_defined_once_when_the_island_parser_has_them():
-    """The verl Megatron island parses the export flags in its own
-    parser; add_island_flags then adds only the data position store."""
-    import argparse
+def test_the_export_and_data_position_flags_come_from_the_island_schema():
+    """The verl island parses the export flags and the data position store once, from
+    the island flag schema (yeto.rl.engine.run_flags), and reads all three."""
+    from yeto.rl.adapters.verl import run_flags as verl_flags
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--rl-export-hf-rounds", default=None)
-    parser.add_argument("--rl-export-hf-store", default=None)
-    vfs.add_island_flags(parser)
-    args = parser.parse_args(["--rl-export-hf-rounds", "final", "--rl-data-position-store", "/s"])
+    args = _parsed(["--rl-export-hf-rounds", "final", "--rl-data-position-store", "/s"])
     assert (args.rl_export_hf_rounds, args.rl_data_position_store) == ("final", "/s")
+    assert {"rl_export_hf_rounds", "rl_export_hf_store", "rl_data_position_store"} <= verl_flags.READ
 
 
 def test_the_driver_gets_the_data_position_log_and_the_exports(tmp_path, model_dir):
@@ -613,7 +610,9 @@ def test_options_a_verl_full_parameter_island_would_ignore_are_refused(extra):
 def test_every_refused_option_is_one_the_verl_island_does_not_parse(tmp_path):
     from yeto.rl.adapters.verl import launch_flags
 
-    parser_options = set(island_entry.parse_args(_parsed_argv())[0].__dict__)
+    from yeto.rl.adapters.verl.run_flags import READ
+
+    parser_options = set(READ)  # the island flags the verl island reads
     # The Megatron island parses these two for itself (megatron_island_plan);
     # the FSDP2 path still never reads them, so the launcher keeps refusing them there.
     megatron_only = {"rl_lr_schedule", "rl_max_tokens_per_gpu"}
@@ -632,7 +631,7 @@ def test_every_refused_option_is_one_the_verl_island_does_not_parse(tmp_path):
             algo=island_entry.algorithm_options(None), chat={}, ray_info={}, max_prompt=512, limit=0)
         return run.to_dict(), overrides
 
-    assert fsdp_run("--rl-lr-schedule", "cosine", "--rl-max-tokens-per-gpu", "4096") == fsdp_run()
+    assert fsdp_run("--rl-lr-schedule", "linear", "--rl-max-tokens-per-gpu", "4096") == fsdp_run()
 
 
 def _parsed_argv():

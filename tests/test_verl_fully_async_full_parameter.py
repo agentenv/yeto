@@ -135,7 +135,7 @@ def test_a_synced_plan_needs_the_full_parameter_section(tmp_path):
 
 
 FULL = ("--parameter-mode", "full")
-FIXED = ("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1")
+FIXED = ("--rl-placement", "fixed-partition")
 BUFFER = ("--rl-sample-role", "trainer", "--rl-resume-store", "/tmp/yeto-buffer")
 
 

@@ -2,8 +2,9 @@
 
 The launcher runs this instead of the Miles island entry when
 ``--rl-backend verl`` (``launch_flags.ISLAND_ENTRY_MODULE``), with the same
-command-line flags; only the flags verl needs are read, the Miles-only ones are
-ignored.  Steps:
+command-line flags (the island flag schema, ``run_flags``); an unknown flag stops the
+island, and the Miles-only ones are accepted but not read (recorded in the runtime
+manifest, the agentic and unmapped ones refused).  Steps:
 
 1. runtime check: verl commit and library versions against ``pins``; runtime
    manifest + pip freeze written next to the tape;
@@ -17,7 +18,6 @@ ignored.  Steps:
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shlex
@@ -30,12 +30,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from yeto.rl.engine import run_flags
 from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 
 from . import config as vconf
 from . import megatron_engine
 from . import run_config_rules
+from . import run_flags
 from .pins import VERL_COMMIT, expected_versions_for_engine, verl_root
 from .reward_fn import function_for
 
@@ -47,184 +47,13 @@ TEST_FILE = Path(os.path.expanduser("~/.yeto-verl-test.json"))  # TEST ONLY swit
 
 
 def parse_args(argv):
-    p = argparse.ArgumentParser(prog="yeto.rl.adapters.verl.island_entry")
-    p.add_argument("--model", required=True)
-    p.add_argument("--model-revision", required=True)
-    p.add_argument("--data", required=True)
-    p.add_argument("--data-revision", default=None)
-    # the prompt / label columns of --data (yeto.rl.prompt_rows; the launcher forwards them when given)
-    p.add_argument("--rl-prompt-column", default=None)
-    p.add_argument("--rl-label-column", default=None)
-    p.add_argument("--syncer", default=None)
-    p.add_argument("--rl-single-island-no-sync", action="store_true")
-    p.add_argument("--learner-id", type=int, required=True)
-    p.add_argument("--reward-function", required=True)
-    p.add_argument("--global-rounds", type=int, required=True, help=run_flags.GLOBAL_ROUNDS_HELP)
-    p.add_argument("--groups-per-round", type=int, required=True)
-    p.add_argument("--samples-per-group", type=int, required=True)
-    p.add_argument("--rollout-max-response-len", type=int, required=True)
-    p.add_argument("--event-tape", required=True)
-    p.add_argument("--lora-r", type=int, default=32)
-    p.add_argument("--lora-targets", default="all-linear")
-    p.add_argument("--inner-lr", type=float, required=True)
-    p.add_argument("--seq-len", type=int, required=True)
-    p.add_argument("--seed", type=int, required=True)
-    p.add_argument("--wan-streams", type=int, default=4)
-    # bf16 downlink deltas (yeto/downlink.py; the syncer runs --bcast-delta-full-every)
-    p.add_argument("--bcast-delta", action="store_true")
-    p.add_argument("--apply-chat-template-kwargs", default=None)
-    # the launcher passes this to every island; the verl island used to
-    # ignore it, so a model whose HF support ships with the checkpoint could not load
-    p.add_argument("--trust-remote-code", action="store_true")
-    # FSDP2 host-memory offload (e.g. 64 GiB Ascend cards with 30B full parameters)
-    p.add_argument("--rl-fsdp-offload", choices=("none", "param", "optimizer", "both"),
-                   default="none")
-    p.add_argument("--rl-algorithm-spec", default=None)
-    # the launcher's sync preset; one the island does not run is refused
-    # (run_config_rules.island_sync_preset_problem), never dropped. "decoupled"
-    # runs the LoRA fragment session (.decoupled_session) with the flags below
-    p.add_argument("--sync-preset", default=None)
-    p.add_argument("--completed-groups-path", default=None)
-    p.add_argument("--source-sha256", default=None)
-    p.add_argument("--reward-sha256", default=None)
-    p.add_argument("--initial-adapter", default=None)
-    p.add_argument("--initial-adapter-sha256", default=None)
-    # the model recipe flags the launcher forwards; anything but the generic
-    # recipe is refused (run_config_rules.model_recipe_problems), never dropped
-    p.add_argument("--rl-model-recipe", default=None)
-    p.add_argument("--rl-expert-selection", default=None)
-    p.add_argument("--expert-full-count", type=int, default=0)
-    p.add_argument("--rl-island-pool", action="store_true")
-    p.add_argument("--rl-syncer-epoch", type=int, default=0)
-    p.add_argument("--rl-sync-island-lease-s", type=float, default=None)
-    p.add_argument("--rl-echo-events", action="store_true")
-    p.add_argument("--rl-max-policy-age", type=int, default=0)
-    # the separate-mode island generates one batch ahead
-    p.add_argument("--rl-rollout-ahead", type=int, default=0)
-    # a trainer island over the sample buffer (sample_roles; the sampler is
-    # the engine sampler island, yeto.rl.engine.engine_sampler). --rl-resume-store
-    # names the buffer's store there, and the round-cut store otherwise
-    p.add_argument("--rl-sample-role", default=None)
-    p.add_argument("--rl-resume-store", default=None)
-    p.add_argument("--rl-sample-wait-s", type=float, default=None)
-    # staged bf16 delta releases on a full-parameter buffer trainer
-    # (sample_roles._check_release_delta; 0 turns them off)
-    p.add_argument("--rl-release-delta-full-every", type=int, default=0)
-    # a memory / MFU measurement run on a buffer trainer writes no policy
-    # release (one 120B release is about 225 GB and a dozen minutes per round)
-    p.add_argument("--rl-measure-no-release", action="store_true")
-    # encode, digest and upload each staged (delta) release on a worker thread
-    # while the next rounds train; needs --rl-release-delta-full-every
-    p.add_argument("--rl-release-background", action="store_true")
-    # a measurement run also skips the full policy hash of the first and the last
-    # round (about 480 GB of FP32 masters, ~30 min each on the 120B island); needs
-    # --rl-measure-no-release and --rl-verify-every (train_options.verify_plan)
-    p.add_argument("--rl-measure-no-verify", action="store_true")
-    # release only these policy versions (comma-separated), e.g. "2": a
-    # multi-step run trains on the samples it has and releases once for the samplers
-    p.add_argument("--rl-release-only-versions", default=None,
-                   type=lambda text: [int(v) for v in text.split(",") if v.strip()])
-    # the pair flags the launcher forwards per island (sample_roles.island_flags);
-    # a sampler island of a verl launch runs the engine sampler (.sampler_entry)
-    p.add_argument("--rl-sampler-node", default=None)
-    p.add_argument("--rl-buffer-shards", default=None, type=lambda text: [s for s in text.split(",") if s])
-    p.add_argument("--rl-sampler-data-slot", default=None)
-    # a sampler island claims its rows from the task dispenser (the launcher
-    # sets these; yeto.rl.engine.task_dispense.DispensedPrompts)
-    p.add_argument("--rl-data-dispense", action="store_true", default=False)
-    p.add_argument("--rl-dispense-addr", default=None)
-    p.add_argument("--rl-dispense-prefetch-blocks", type=int, default=2)
-    p.add_argument("--rl-dispense-mix", default=None)
-    p.add_argument("--rl-dispense-by-label", action="store_true", default=False)
-    p.add_argument("--rl-dispense-labels", default=None)
-    # the rollout runs Harbor trials; the rows select
-    # yeto's agent loop (``agent_name: yeto_harbor``).
-    p.add_argument("--rl-agentic-harbor", action="store_true", default=False)
-    # task assignment: this training island's row slot of --data (data_split)
-    p.add_argument("--rl-data-slot", default=None)
-    p.add_argument("--rl-sampler-max-backlog-rounds", type=int, default=None)
-    p.add_argument("--rl-sampler-min-round-seconds", type=float, default=None)
-    # a synced trainer island (syncer, learner m of N) reads lane m of the
-    # buffer in this store; the launcher forwards both (yeto.rl.engine.merged_release)
-    p.add_argument("--rl-sample-store", default=None)
-    p.add_argument("--rl-sample-lanes", type=int, default=None)
-    # a relay trainer (spot samplers through the head's sample relay,
-    # .relay_trainer) and the layout board for the spot subscribers (island 0)
-    p.add_argument("--rl-sample-relay", action="store_true")
-    p.add_argument("--rl-sample-relay-prefetch", type=int, default=None)
-    p.add_argument("--rl-spot-subscribers", type=int, default=0)
-    # round cuts (same flags as the Miles island)
-    p.add_argument("--rl-resume-state-dir", default=None)
-    p.add_argument("--rl-cut-every", type=int, default=None)
-    p.add_argument("--rl-cut-keep", type=int, default=None)
-    p.add_argument("--rl-stop-after-rounds", type=int, default=None)
-    p.add_argument("--rl-resume-allow-config-change", action="store_true")
-    # island cuts of a synced island and the timed cut interval
-    p.add_argument("--rl-island-cut-store", default=None)
-    p.add_argument("--rl-cut-auto-mtbf-s", type=float, default=None)
-    p.add_argument("--rl-cut-max-interval-s", type=float, default=None)
-    p.add_argument("--rl-round-cuts", choices=("auto", "off"), default="auto")
-    # rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
-    p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
-    # the Megatron engine island (megatron_engine; EP/TP/PP > 1 select it);
-    # --parameter-mode comes from add_island_flags below (choices lora/full, default lora)
-    p.add_argument("--tensor-parallel", type=int, default=1)
-    p.add_argument("--pipeline-parallel", type=int, default=1)
-    p.add_argument("--expert-parallel", type=int, default=None)
-    # the launcher's neutral --context-parallel (rl_island_task forwards it
-    # when > 1); parse_known_args used to drop it, so the island trained at CP=1
-    p.add_argument("--context-parallel", type=int, default=1)
-    p.add_argument("--actor-num-nodes", type=int, default=1)
-    p.add_argument("--actor-num-gpus-per-node", type=int, default=None)
-    p.add_argument("--rl-island-gpus-per-node", type=int, default=None)
-    p.add_argument("--rl-placement", default=None)
-    p.add_argument("--rollout-num-gpus", type=int, default=None)
-    p.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
-    p.add_argument("--sglang-mem-fraction-static", type=float, default=None)
-    p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
-    # the Ascend recipe's plugin stack (yeto.rl.ascend_plugin_stack), Megatron only
-    p.add_argument("--rl-ascend-plugin-stack", default=None)
-    # which recipe's plugin list to load; the 18.60 list adds five numerics-changing plugins
-    p.add_argument("--rl-ascend-plugin-recipe", default=None, choices=("18.44", "18.60"))
-    # Megatron's per-bucket non-finite gradient check is on unless this says otherwise
-    p.add_argument("--rl-no-grad-nan-check", action="store_true")
-    # host share of the Megatron optimizer state (the engine-neutral flag the
-    # launcher already forwards; megatron_engine.optimizer_memory_overrides maps it)
-    p.add_argument("--rl-optimizer-offload-fraction", type=float, default=0.0)
-    # precision-aware optimizer on the card, bf16 Adam moments, FP32 master
-    p.add_argument("--rl-megatron-bf16-moments", action="store_true")
-    # uneven pipeline stages and full-layer recompute (megatron_engine.MegatronShape)
-    p.add_argument("--rl-megatron-first-stage-layers", type=int, default=None)
-    p.add_argument("--rl-megatron-last-stage-layers", type=int, default=None)
-    p.add_argument("--rl-megatron-recompute-full-layers", type=int, default=None)
-    # verl's fused log-prob kernels. Off unless asked for: on the 120B model they
-    # are 47.8% of the activation per token, and they do not yet run on Ascend.
-    p.add_argument("--rl-megatron-fused-logprob-kernels", action="store_true")
-    # the SFT recipe's communication overlap (args.json: overlap_grad_reduce,
-    # overlap_param_gather, tp_comm_overlap all true); verl's DDP default is off
-    p.add_argument("--rl-megatron-comm-overlap", action="store_true")
-    # verl's old-log-prob pass computes the token entropy only for the
-    # "actor/entropy" metric; it is that pass's memory peak (megatron_engine.MegatronShape)
-    p.add_argument("--rl-no-old-logprob-entropy", action="store_true")
-    # skip the old-log-prob recompute when old == current (onpolicy_old_logprob;
-    # refused unless one optimizer step per round). measure = keep it, log the difference
-    p.add_argument("--rl-onpolicy-old-logprob", choices=("off", "on", "measure"), default=None)
-    # PP > 1 in a full-parameter session is refused unless this lifts the gate
-    p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
-    p.add_argument("--use-rollout-routing-replay", action="store_true")
-    p.add_argument("--rl-lr-schedule", default=None)
-    p.add_argument("--rl-export-hf-rounds", default=None)
-    p.add_argument("--rl-export-hf-store", default=None)
-    # a full-parameter island and its outer sync (Miles island spellings)
-    from .full_parameter_stream import add_island_flags
+    """``(args, unread)``: the island flags (``run_flags``; an unknown flag stops the
+    island) and the tokens of the given schema options this island does not read."""
+    from .run_flags import build_parser, unread_flags
 
-    add_island_flags(p)
-    # the Miles island's heldout eval flags (.eval_port)
-    from .eval_port import add_island_flags as add_eval_flags
-
-    add_eval_flags(p)
-    args, ignored = p.parse_known_args(argv)
-    return args, ignored
+    parser = build_parser()
+    argv = list(argv)
+    return parser.parse_args(argv), unread_flags(parser, argv)
 
 
 def algorithm_options(spec_dict: dict | None) -> dict:
@@ -872,7 +701,7 @@ def main(argv=None) -> int:
     spec_dict = json.loads(Path(os.path.expanduser(args.rl_algorithm_spec)).read_text()) \
         if args.rl_algorithm_spec else None
     algo = algorithm_options(spec_dict)
-    chat = json.loads(args.apply_chat_template_kwargs) if args.apply_chat_template_kwargs else {}
+    chat = run_flags.chat_template_kwargs(args.apply_chat_template_kwargs)
     # 512 is enough for a single-turn data prompt (one question). On the agentic
     # path the row's prompt is only a label: what verl receives as the prompt is
     # the joined agent conversation, which is tens of thousands of tokens, so the

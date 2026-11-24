@@ -57,27 +57,6 @@ LOG_PROB_DYNAMIC_KEY = "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz"
 VERL_LR_SCHEDULES = ("constant",)
 
 
-def add_island_flags(parser) -> None:
-    """The options above, in Miles island spellings.  An island parser that
-    already defines one (the verl Megatron island) keeps its own."""
-
-    for flag, kwargs in (
-        ("--rl-lr-schedule", {"default": None}),
-        ("--rl-max-tokens-per-gpu", {"type": int, "default": None}),
-        ("--rl-activation-recompute", {"action": "store_true"}),
-        ("--rl-observe-timeline", {"action": "store_true"}),
-        ("--rl-resource-sample-interval", {"type": float, "default": None}),
-        ("--rl-heartbeat-interval", {"type": float, "default": None}),
-        # The publication checks (verify_plan)
-        ("--rl-verify-every-round", {"action": "store_true"}),
-        ("--rl-verify-every", {"type": int, "default": None}),
-        # Miles' debug dump (debug_plan)
-        ("--rl-debug-dump", {"action": "store_true"}),
-    ):
-        if flag not in parser._option_string_actions:
-            parser.add_argument(flag, **kwargs)
-
-
 def _replace(overrides: Sequence[str], key: str, value: Any) -> list[str]:
     """``overrides`` with ``key`` set to ``value`` (replaced in place, else appended)."""
 
