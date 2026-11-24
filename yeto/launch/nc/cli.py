@@ -249,6 +249,12 @@ class NcSshOps:
     def run_tickets(self) -> list[tuple[int, str]]:
         return self.provider.run_tickets()
 
+    def has_fallback_offer(self) -> bool:
+        """A provider with several offers (sky): a failed order is that offer's while another
+        is open, not the pool breaker's. National Compute has none: always False."""
+        fallback = getattr(self.provider, "has_fallback_offer", None)
+        return bool(fallback is not None and fallback())
+
     def slot_halt(self, account: Any) -> dict[str, Any] | None:
         """The ledger's halt of a National Compute account (None: not halted, or not NC)."""
         book = getattr(self.provider, "ledger", None)

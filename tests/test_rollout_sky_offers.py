@@ -13,59 +13,13 @@ from yeto.launch.nc import cli, provider as prov
 from yeto.launch.nc.sky_provider import SkyProvider, from_config, offline_problems
 from yeto.launch.rollout import offers
 from yeto.rl.spot import watchdog as wd
+from tests.test_nc_sky_provider import FakeSky, ResourcesUnavailableError
 
 
 @pytest.fixture(autouse=True)
 def _state(tmp_path, monkeypatch):
     monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("YETO_RESOURCE_LEDGER", raising=False)
-
-
-class FakeSky:
-    def __init__(self):
-        self.clusters, self.calls, self.fail_launch = {}, [], set()
-
-    class Task:
-        def __init__(self, name=None, run=None):
-            self.name, self.run, self.resources, self.envs, self.secrets = name, run, None, {}, {}
-
-        @classmethod
-        def from_yaml(cls, path):
-            task = cls(name=f"yaml:{path}")
-            return task
-
-        def set_resources(self, r):
-            self.resources = r
-
-        def update_envs(self, envs):
-            self.envs.update(envs)
-
-        def update_secrets(self, secrets):
-            self.secrets.update(secrets)
-
-    @staticmethod
-    def Resources(**kw):  # noqa: N802 - sky's name
-        return dict(kw)
-
-    def launch(self, task, cluster_name, **kw):
-        self.calls.append(("launch", cluster_name, task))
-        if task.resources.get("infra") in self.fail_launch:
-            raise RuntimeError("ResourcesUnavailableError: no capacity")
-        self.clusters[cluster_name] = {"name": cluster_name, "status": "INIT",
-                                       "handle": SimpleNamespace(head_ip=None, ssh_user="ubuntu")}
-
-    def status(self, names):
-        if names is None:
-            return list(self.clusters.values())
-        return [self.clusters[n] for n in names if n in self.clusters]
-
-    def down(self, name):
-        self.calls.append(("down", name))
-        self.clusters.pop(name, None)
-
-    @staticmethod
-    def get(value):
-        return value
 
 
 def _cfg(**provider):
@@ -101,27 +55,32 @@ def test_a_failed_launch_moves_to_the_next_offer_and_a_success_resets():
                                  {"resources": {"infra": "nebius/eu-west1", "accelerators": "H200:8",
                                                 "use_spot": True}, "price_usd_h": 11.2}]), "run-k", sky=sky)
     sky.fail_launch.add("nebius/eu-north1")
-    with pytest.raises(RuntimeError, match="capacity"):
-        p.order(1)  # the pool's breaker counts it
+    first = p.order(1)
+    status = p.status(1, first)  # the launch request failed: the pool releases it (offer_failed)
+    assert status.state == "ended" and "capacity" in status.detail
     assert p.cursor == 1
     name = p.order(1)
-    assert sky.calls[-1][2].resources["infra"] == "nebius/eu-west1" and p.hourly_cost(name) == 11.2
+    assert [c for c in sky.calls if c[0] == "launch"][-1][2].resources["infra"] == "nebius/eu-west1"
+    assert p.hourly_cost(name) == 11.2
+    sky.up(name)
+    assert p.status(1, name).state == "active"
     assert p.cursor == 0  # the next order starts at the cheapest offer again
-    first = sky.calls[0][1]
     assert (1, first) not in p.run_tickets()  # it left no cluster: nothing bills, nothing to release
 
 
 def test_a_failed_launch_that_left_a_cluster_stays_open_for_release():
     sky = FakeSky()
     p = from_config(_cfg(resources={"infra": "nebius/eu-north1"}), "run-k", sky=sky)
+    original = sky.launch
 
     def half_made(task, cluster_name, **kw):
-        sky.clusters[cluster_name] = {"name": cluster_name, "status": "INIT"}
-        raise RuntimeError("provisioning interrupted")
+        rid = original(task, cluster_name, **kw)
+        sky.requests[rid].update(status="FAILED", error=RuntimeError("provisioning interrupted"))
+        return rid
 
     sky.launch = half_made
-    with pytest.raises(RuntimeError):
-        p.order(1)
+    name = p.order(1)
+    assert p.status(1, name).end_reason == "lost"
     assert p.run_tickets() == [(1, "yeto-smp-run-k-1")] and not p.account_free(1)
     assert p.release(1, "yeto-smp-run-k-1")["state"] == "ended" and not sky.clusters
 
@@ -163,7 +122,7 @@ def test_task_yaml_envs_and_secrets_go_on_the_launched_task(tmp_path, monkeypatc
     p = from_config(_cfg(resources={"cloud": "aws"}, task_yaml=str(yaml), envs={"TP": "8"},
                          secrets={"ISLAND_TOKEN": "LOCAL_TOKEN"}), "run-k", sky=sky)
     p.order(1)
-    task = sky.calls[-1][2]
+    task = [c for c in sky.calls if c[0] == "launch"][-1][2]
     assert task.name == f"yaml:{yaml}" and task.envs == {"TP": "8"}
     assert task.secrets == {"ISLAND_TOKEN": "value-not-printed"}
 
@@ -194,6 +153,8 @@ def test_sky_orders_and_releases_write_the_resource_ledger(tmp_path, monkeypatch
     sky = FakeSky()
     p = from_config(_cfg(resources={"cloud": "aws"}, price_usd_h=9.5), "run-k", sky=sky)
     name = p.order(1)
+    sky.up(name)
+    assert p.status(1, name).state == "active"  # the launch is confirmed: "created"
     p.release(1, name)
     rows = [json.loads(line) for line in ledger.read_text().splitlines()]
     kinds = [(r.get("event") or r.get("op"), r.get("kind")) for r in rows]
@@ -208,14 +169,17 @@ def test_the_watchdog_runs_its_loop_over_the_sky_provider(tmp_path):
     sky = FakeSky()
     sky.fail_launch.add("nebius/eu-north1")  # no on-demand / spot H100 capacity
     args = SimpleNamespace(run_id="runw", cluster_prefix="spot-w", yaml=None, secret=[], starting_timeout_s=600,
-                           dir=str(tmp_path), own_name_re="spot")
+                           launch_timeout_s=1800, dir=str(tmp_path), own_name_re="spot")
     cands = wd.candidates(spot_only=True)
     ops = wd.provider_ops(args, cands, ["RUN_ID=runw"], sky=sky)
+    assert ops.provider.start_timeout_s == 1800  # the launch bound, not the 600 s STARTING one
     original = sky.launch
 
     def launch_up(task, cluster_name, **kw):
-        original(task, cluster_name, **kw)
-        sky.clusters[cluster_name]["status"] = "UP"
+        rid = original(task, cluster_name, **kw)
+        if cluster_name in sky.clusters:  # not a refused launch
+            sky.up(cluster_name)
+        return rid
 
     sky.launch = launch_up
     cfg = wd.Config(cluster_prefix="spot-w", run_id="runw", island="spot-0", budget_usd=1000.0,
@@ -223,7 +187,8 @@ def test_the_watchdog_runs_its_loop_over_the_sky_provider(tmp_path):
                     stop_file=str(tmp_path / "wd.stop"), poll_s=60.0, round_sleep_s=300.0, max_rounds=1)
     w = wd.Watchdog(cfg, cands, ops, clock=clock, sleep=lambda s: t.__setitem__(0, t[0] + s))
     assert w.acquire() is None and w.cluster == "spot-w-2"  # the H100 launch failed, H200 eu-west1 is up
-    assert sky.calls[-1][2].envs["CARD"] == "H200" and sky.calls[-1][2].envs["RUN_ID"] == "runw"
+    last = [c for c in sky.calls if c[0] == "launch"][-1]
+    assert last[2].envs["CARD"] == "H200" and last[2].envs["RUN_ID"] == "runw"
     assert ops.state("spot-w-2", "eu-west1") == "RUNNING"
     del sky.clusters["spot-w-2"]  # reclaimed
     w.watch_once()
@@ -242,18 +207,19 @@ def test_a_failing_offer_cools_down_alone_and_the_pool_breaker_counts_only_witho
     p = SkyProvider("run-k", slots=[1, 2], offers=offers.offers_from_config({"offers": two}), sky=sky,
                     clock=lambda: t[0])
     sky.fail_launch.add("nebius/eu-north1")
-    with pytest.raises(RuntimeError):
-        p.order(1)
+    assert p.status(1, p.order(1)).end_reason == "lost"
     assert p.has_fallback_offer() and ProviderPoolOps(p).has_fallback_offer()
+    assert cli.NcSshOps({"run": "run-k"}, provider=p).has_fallback_offer()  # the pool route's ops ask it too
     a = p.order(1)
     b = p.order(2)  # the cursor is back at the cheapest, but it is cooling: the next offer again
     assert p.offer_of(a) == p.offer_of(b) == p.offers[1].key
     assert p.offer_breakers()[p.offers[0].key]["fails"] == 1
     sky.fail_launch.add("nebius/eu-west1")
-    with pytest.raises(RuntimeError):
-        p.order(1)
+    assert p.status(1, p.order(1)).end_reason == "lost"
     assert not p.has_fallback_offer()  # every offer cools down: now the pool's breaker counts
     t[0] += 601
     sky.fail_launch.clear()
     c = p.order(1)
+    sky.up(c)
+    assert p.status(1, c).state == "active"
     assert p.offer_of(c) == p.offers[0].key and p.offers[0].key not in p.offer_breakers()

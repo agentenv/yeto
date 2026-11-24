@@ -21,6 +21,9 @@ import sys
 
 TARGET_MODULE = "sky.provision.nebius.utils"
 VERIFIED_SKY_VERSIONS = frozenset({"0.13.0", "0.14.3"})
+# sky versions whose own Nebius provisioner sends no pricing model: there the patch
+# must also be in the sky API server (the .pth hook), where provisioning runs.
+SERVER_HOOK_SKY_VERSIONS = frozenset({"0.13.0"})
 PATCH_MARK = "_yeto_nebius_pricing_patched"
 PRICING_FIELDS = ("on_demand", "follows_spot_price", "spot_pricing_policy")
 
