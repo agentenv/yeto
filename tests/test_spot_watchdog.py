@@ -278,35 +278,21 @@ def test_the_doomed_cluster_counts_against_the_budget(tmp_path):
     assert dog.spent >= 50.0 - cand.price_hr and dog.doomed
 
 
-def test_ops_survive_a_hung_subprocess(monkeypatch):
+def test_the_ready_probe_survives_a_hung_or_missing_ssh(monkeypatch):
     def hang(*a, **k):
         raise wd.subprocess.TimeoutExpired(a[0], k.get("timeout", 0))
 
-    ops = wd.Ops(yaml="x.yaml", envs=[], secrets=[])
     monkeypatch.setattr(wd.subprocess, "run", hang)
-    assert ops.ready("spot-t-h100-1", "true") is False
-    assert ops.ip("spot-t-h100-1") == ""
-    assert ops.down("spot-t-h100-1") is False
-
-    def missing(*a, **k):
-        raise FileNotFoundError("ssh")
-
-    monkeypatch.setattr(wd.subprocess, "run", missing)
-    assert ops.ready("spot-t-h100-1", "true") is False and ops.ip("spot-t-h100-1") == ""
-    assert ops.down("spot-t-h100-1") is False
+    assert wd.ssh_ready("spot-t-h100-1", "true") is False
+    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("ssh")))
+    assert wd.ssh_ready("spot-t-h100-1", "true") is False
+    assert wd.ssh_ready("spot-t-h100-1", "") is True  # no ready command: ready at once
 
 
-def test_ops_down_reports_a_failed_sky_down(monkeypatch):
-    class Done:
-        def __init__(self, rc):
-            self.returncode, self.stdout, self.stderr = rc, "", ""
-
-    ops = wd.Ops(yaml="x.yaml", envs=[], secrets=[])
-    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: Done(1))
-    assert ops.down("spot-t-h100-1") is False
-    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: Done(0))
-    assert ops.down("spot-t-h100-1") is True
-
+def test_the_sky_and_nebius_cli_paths_are_gone():
+    """The machine calls go through the rollout SkyProvider only (unified-sampler-pool 7.2)."""
+    for name in ("Ops", "SKY", "NEBIUS", "SKY_CONFIG", "project_ids"):
+        assert not hasattr(wd, name), name
 
 
 def test_price_file_and_own_name_are_parameters(tmp_path):
@@ -333,7 +319,7 @@ def test_orphan_sweep_error_does_not_kill_the_watchdog(tmp_path, monkeypatch):
 
     monkeypatch.setattr(wd.subprocess, "run", hung)
     with pytest.raises(RuntimeError, match="TimeoutExpired"):  # a failure, retried with backoff
-        wd.Ops(yaml="x", envs=[], secrets=[]).sweep("runt", "spot-0")
+        wd.boat_sweep("runt", "spot-0")
 
     class Raising(FakeOps):
         def sweep(self, run, island):
@@ -378,28 +364,17 @@ def test_a_hung_sweep_backs_off_and_does_not_slow_the_relaunch(tmp_path):
     assert first_pass[-1] - first_pass[0] < 600.0 + 30.0 * len(cands) + 1
 
 
-@pytest.mark.parametrize("error", [FileNotFoundError(2, "No such file or directory", "sky"),
-                                   PermissionError(13, "Permission denied", "sky")])
-def test_ops_launch_reports_an_unrunnable_sky_as_a_config_error(monkeypatch, error):
-    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(error))
-    with pytest.raises(wd.LaunchConfigError):
-        wd.Ops(yaml="x.yaml", envs=[], secrets=[]).launch("spot-t-h100-1", wd.candidates()[0], 600.0)
-
-
-def test_ops_launch_that_could_not_fork_is_not_started(monkeypatch):
-    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError(11, "EAGAIN")))
-    with pytest.raises(wd.LaunchNotStarted):
-        wd.Ops(yaml="x.yaml", envs=[], secrets=[]).launch("spot-t-h100-1", wd.candidates()[0], 600.0)
-
-
 def test_a_missing_sky_exits_at_once_with_no_fake_doomed_clusters(tmp_path, monkeypatch):
     """No sky: config_error before any candidate; no delete, no doomed record, no spend.
     (Before: every candidate 'failed', its delete failed too, and 50 phantom clusters billed
     the whole budget into a state file that then broke the restart.)"""
-    monkeypatch.setattr(wd, "SKY", str(tmp_path / "no-such-sky"))
-    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "x")))
+    monkeypatch.setattr(wd.importlib.util, "find_spec", lambda name: None)  # no sky package
     clk = Clock()
-    ops = wd.Ops(yaml="x.yaml", envs=[], secrets=[])
+
+    class Provider:  # never called: the preflight stops first
+        _sky = None
+
+    ops = wd.ProviderOps(Provider())
     cfg = _cfg(tmp_path, budget_usd=500.0)
     w = wd.Watchdog(cfg, wd.candidates(), ops, clock=clk, sleep=clk.sleep)
     assert w.run() == "config_error"

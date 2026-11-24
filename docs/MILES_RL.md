@@ -1503,7 +1503,7 @@ Spot rollout islands on Nebius have four operator tools in
 | module | role |
 | --- | --- |
 | `python -m yeto.rl.spot.spot_plan` | write the sampler spec and environment of one rollout island VM |
-| `python -m yeto.rl.spot.watchdog` | launch and keep one island VM alive: walks GPU x region x on-demand/spot candidates, deletes stuck or preempted VMs, stops at `--budget-usd` or a stop file (`--dry-run` prints the candidate order) |
+| `python -m yeto.rl.spot.watchdog` | launch and keep one island VM alive: walks GPU x region x on-demand/spot candidates, deletes stuck or preempted VMs, stops at `--budget-usd` or a stop file (`--dry-run` prints the candidate order). The machine calls go through the sky rollout provider (sky SDK); for new runs prefer a sky rollout pool (`"provider": {"kind": "sky"}`) |
 | `python -m yeto.rl.spot.s3_delivery` | `publish-loop` on the trainer host and `pull-loop` on the VM: deliver releases through S3 with sha256-checked manifests |
 | `python -m yeto.rl.spot.patrol` | read trainer/sampler tapes, VM and sandbox usage and spend; exit 0/1/2 for quiet/warn/stop, `--act` runs the stop-loss |
 

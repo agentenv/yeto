@@ -21,10 +21,13 @@ One process owns one island (one sky cluster name at a time). It
 * appends every event (launch phases, preemption time, cold start, spend) to a
   JSONL log; the spend total survives a watchdog restart (``--state``).
 
-The external calls (sky, nebius, boat sweep, ready probe) sit behind
-:class:`Ops`; tests inject a fake. ``--via-provider`` puts the machine calls behind the
-rollout :class:`~yeto.launch.nc.sky_provider.SkyProvider` instead (:class:`ProviderOps`);
-the candidate list is the shared one of :mod:`yeto.launch.rollout.offers`.
+The machine calls (launch, state, IP, delete) go through the rollout
+:class:`~yeto.launch.nc.sky_provider.SkyProvider` (:class:`ProviderOps`: the sky SDK,
+its cluster record and the run's resource ledger); the watchdog keeps only its loop
+(candidates, budget, stop marker, orphan sweep, ready probe). Tests inject a fake ops
+object. The candidate list is the shared one of :mod:`yeto.launch.rollout.offers`.
+The former sky / nebius CLI path is gone; ``--via-provider`` is accepted and is the
+default.
 
 Deprecated for new runs: a sky rollout pool (``"provider": {"kind": "sky", "candidates":
 {...}}``, ``yeto rollout scale --provider sky``) runs the same candidate rotation under the
@@ -34,9 +37,7 @@ shared pool policy (several islands, fencing, scale, one budget).
         --island spot-0 --budget-usd 120 --env CARD=H100 --env TP=8 --env BOAT_STARTS_PER_HOUR=60 \\
         --secret MODAL_TOKEN_ID --secret MODAL_TOKEN_SECRET --secret BOAT_API_KEY
 
-Environment: YETO_SPOT_SKY (sky CLI, default ``sky``), YETO_SPOT_NEBIUS (nebius CLI,
-default ``nebius``), YETO_SPOT_SKY_CONFIG (default ``~/.sky/config.yaml``: the Nebius
-project per region), YETO_SPOT_SKY_YAML (default of ``--yaml``), YETO_SPOT_OWN_NAME_RE
+Environment: YETO_SPOT_SKY_YAML (default of ``--yaml``), YETO_SPOT_OWN_NAME_RE
 (default of ``--own-name-re``), YETO_SPOT_PRICES (default of ``--prices``).
 """
 from __future__ import annotations
@@ -44,8 +45,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import importlib.util
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,9 +59,6 @@ from typing import Any
 from yeto.launch.rollout.offers import PRICES_8GPU, Candidate, candidates, load_prices  # noqa: F401 - re-exported
 
 REPO = Path(__file__).resolve().parents[3]
-SKY = os.path.expanduser(os.environ.get("YETO_SPOT_SKY") or "sky")
-NEBIUS = os.path.expanduser(os.environ.get("YETO_SPOT_NEBIUS") or "nebius")
-SKY_CONFIG = os.path.expanduser(os.environ.get("YETO_SPOT_SKY_CONFIG") or "~/.sky/config.yaml")
 
 DEFAULT_OWN_NAME = r"spot"  # only ever touch our own clusters (--own-name-re)
 
@@ -71,125 +69,86 @@ UP, FAILED, RECLAIMED, STOPPED = "up", "failed", "reclaimed", "stopped"
 
 
 class LaunchConfigError(RuntimeError):
-    """The launcher cannot run at all (no sky, not executable): exit, do not try candidates."""
+    """The launcher cannot run at all (no sky package): exit, do not try candidates."""
 
 
 class LaunchNotStarted(RuntimeError):
-    """sky was never run (e.g. fork failed): no cluster exists, nothing to delete or bill."""
+    """The launch never reached the cloud: no cluster exists, nothing to delete or bill."""
 
 
-class Ops:
-    """The real external calls. Every method is synchronous and returns plain data."""
+def boat_sweep(run: str, island: str) -> str:
+    """Delete the island's boat sandboxes (``boat_labels sweep``); raises on a failure
+    (the watchdog retries it with a backoff)."""
+    try:
+        p = subprocess.run([sys.executable, "-m", "yeto.rl.harness.harbor.boat_labels", "sweep", "--run", run,
+                            "--island", island], capture_output=True, text=True, timeout=600, cwd=REPO,
+                           env={**os.environ, "PYTHONPATH": str(REPO)})
+    except (subprocess.TimeoutExpired, OSError) as error:  # a failed sweep: retried with backoff
+        raise RuntimeError(f"{type(error).__name__}: {error}"[:300]) from error
+    return (p.stdout + p.stderr).strip()[-300:]
 
-    def __init__(self, *, yaml: str, envs: list[str], secrets: list[str], extra: list[str] | None = None,
-                 own_name: str = DEFAULT_OWN_NAME):
-        self.yaml, self.envs, self.secrets, self.extra = yaml, envs, secrets, extra or []
-        self.own_name = re.compile(own_name)
 
-    def launch(self, cluster: str, cand: Candidate, timeout_s: float) -> tuple[bool, str]:
-        cmd = [SKY, "launch", "-c", cluster, self.yaml, "--infra", f"nebius/{cand.region}",
-               "--gpus", f"{cand.gpu}:{cand.count}", "--use-spot" if cand.spot else "--no-use-spot", "-d", "-y"]
-        for e in self.envs:
-            cmd += ["--env", e]
-        for s in self.secrets:
-            cmd += ["--secret", s]
-        cmd += self.extra
-        try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, cwd=REPO)
-        except subprocess.TimeoutExpired:
-            return False, f"launch timeout after {timeout_s:.0f}s"
-        except (FileNotFoundError, PermissionError) as error:  # a configuration error, not a launch
-            raise LaunchConfigError(f"cannot run {SKY}: {error}") from error
-        except OSError as error:  # fork/exec failed: sky never ran, no cluster was made
-            raise LaunchNotStarted(f"could not start {SKY}: {error}") from error
-        out = p.stdout + p.stderr
-        if p.returncode == 0 and "Job submitted" in out:
-            return True, ""
-        errs = [ln for ln in out.splitlines() if re.search(r"Error|Failed|exhausted|capacity", ln, re.I)]
-        tail = errs or out.strip().splitlines() or [f"rc={p.returncode}"]
-        return False, tail[-1][:300]
-
-    def preflight(self) -> None:
-        """Raise :class:`LaunchConfigError` when sky cannot be run at all."""
-        if shutil.which(SKY) is None:
-            raise LaunchConfigError(f"sky executable {SKY!r} not found or not executable")
-
-    def ip(self, cluster: str) -> str:
-        """The head's IP, "" when sky does not answer (the IP is only logged)."""
-        try:
-            p = subprocess.run([SKY, "status", "--ip", cluster], capture_output=True, text=True, timeout=120)
-        except (subprocess.TimeoutExpired, OSError):
-            return ""
-        return (p.stdout.strip().splitlines() or [""])[-1]
-
-    def state(self, cluster: str, region: str) -> str | None:
-        """The Nebius instance state of the cluster's head (RUNNING, STARTING, STOPPED, ...),
-        None if no instance carries the name (deleted / reclaimed)."""
-        project = project_ids().get(region)
-        if not project:
-            return None
-        p = subprocess.run([NEBIUS, "compute", "instance", "list", "--parent-id", project, "--format", "json"],
-                           capture_output=True, text=True, timeout=120)
-        if p.returncode != 0:
-            raise RuntimeError(p.stderr.strip()[:200])
-        items = json.loads(p.stdout or "{}").get("items", [])
-        states = [i["status"].get("state") for i in items if cluster in i["metadata"].get("name", "")]
-        return states[0] if states else None
-
-    def down(self, cluster: str) -> bool:
-        """True once sky reports the cluster deleted; False on an error or a timeout
-        (the VM may still be up and billing)."""
-        assert self.own_name.search(cluster), cluster
-        try:
-            p = subprocess.run([SKY, "down", "-y", "--purge", cluster], capture_output=True, text=True,
-                               timeout=900)
-        except (subprocess.TimeoutExpired, OSError):
-            return False
-        return p.returncode == 0
-
-    def sweep(self, run: str, island: str) -> str:
-        try:
-            p = subprocess.run([sys.executable, "-m", "yeto.rl.harness.harbor.boat_labels", "sweep", "--run", run,
-                                "--island", island], capture_output=True, text=True, timeout=600, cwd=REPO,
-                               env={**os.environ, "PYTHONPATH": str(REPO)})
-        except (subprocess.TimeoutExpired, OSError) as error:  # a failed sweep: retried with backoff
-            raise RuntimeError(f"{type(error).__name__}: {error}"[:300]) from error
-        return (p.stdout + p.stderr).strip()[-300:]
-
-    def ready(self, cluster: str, cmd: str) -> bool:
-        if not cmd:
-            return True
-        try:
-            p = subprocess.run(["ssh", "-o", "ConnectTimeout=15", cluster, cmd], capture_output=True,
-                               timeout=120)
-        except (subprocess.TimeoutExpired, OSError):
-            return False  # a hung ssh is "not ready yet", not a reason to stop watching
-        return p.returncode == 0
+def ssh_ready(cluster: str, cmd: str) -> bool:
+    """``ssh <cluster> CMD`` exits 0 (the sampler is ready); no command: ready."""
+    if not cmd:
+        return True
+    try:
+        p = subprocess.run(["ssh", "-o", "ConnectTimeout=15", cluster, cmd], capture_output=True,
+                           timeout=120)
+    except (subprocess.TimeoutExpired, OSError):
+        return False  # a hung ssh is "not ready yet", not a reason to stop watching
+    return p.returncode == 0
 
 
 class ProviderOps:
-    """:class:`Ops` over :class:`yeto.launch.nc.sky_provider.SkyProvider` (``--via-provider``):
+    """The watchdog's ops over :class:`yeto.launch.nc.sky_provider.SkyProvider`:
     the watchdog keeps its loop (candidates, budget, stop marker, orphan sweep, ready
     probe) and the machine calls go through the rollout provider (sky SDK launch / status /
     down, its record and resource ledger, the own-name guard). The rollout pool
-    (``yeto rollout scale --provider sky``) uses the same provider."""
+    (``yeto rollout scale --provider sky``) uses the same provider.
+
+    The provider calls: ``launch_cluster(name, offer, slot=1, wait=False)`` then
+    ``status(1, name)`` until the cluster is ``active`` or ``ended`` or ``timeout_s``
+    passes (the launch request is confirmed by the provider; a hung request ends as a
+    timeout, as the old CLI subprocess did); ``_record(name, refresh=True)`` for the
+    state (refreshed from the cloud: a reclaimed spot VM reads gone, not a stale UP);
+    ``node(1, name).ip``; ``run_tickets()`` + ``release(1, name)`` for a delete (it
+    cancels a launch still in flight and confirms the cluster gone)."""
 
     STATES = {"UP": "RUNNING", "INIT": "STARTING", "STOPPED": "STOPPED"}
 
     def __init__(self, provider: Any, *, own_name: str = DEFAULT_OWN_NAME, sweep: Callable[[str, str], str] | None = None,
-                 ready: Callable[[str, str], bool] | None = None):
+                 ready: Callable[[str, str], bool] | None = None, clock: Callable[[], float] = time.time,
+                 sleep: Callable[[float], None] = time.sleep, poll_s: float = 10.0):
         self.provider, self.own_name = provider, re.compile(own_name)
-        legacy = Ops(yaml="", envs=[], secrets=[], own_name=own_name)
-        self._sweep, self._ready = sweep or legacy.sweep, ready or legacy.ready
+        self._sweep, self._ready = sweep or boat_sweep, ready or ssh_ready
+        self.clock, self.sleep, self.poll_s = clock, sleep, float(poll_s)
+
+    def preflight(self) -> None:
+        """Raise :class:`LaunchConfigError` when the provider has no sky SDK to call."""
+        if getattr(self.provider, "_sky", None) is None and importlib.util.find_spec("sky") is None:
+            raise LaunchConfigError("the 'sky' Python package (SkyPilot) is not installed")
 
     def launch(self, cluster: str, cand: Candidate, timeout_s: float) -> tuple[bool, str]:
         assert self.own_name.search(cluster), cluster
         self.provider.envs = {**self.provider.envs, "CARD": cand.gpu}  # CARD follows the candidate's GPU kind
+        t0 = self.clock()
         try:
-            self.provider.launch_cluster(cluster, cand.offer(), slot=1)
-        except Exception as error:  # noqa: BLE001 - a failed launch: the next candidate
+            self.provider.launch_cluster(cluster, cand.offer(), slot=1, wait=False)
+        except Exception as error:  # noqa: BLE001 - the submit failed: the next candidate
             return False, f"{type(error).__name__}: {error}"[:300]
-        return True, ""
+        while True:
+            try:
+                status = self.provider.status(1, cluster)
+            except Exception:  # noqa: BLE001 - a control-plane blip: ask again until the timeout
+                status = None
+            if status is not None and status.state == "active":
+                return True, ""
+            if status is not None and status.state == "ended":
+                return False, str(status.detail or status.end_reason or "ended")[:300]
+            if self.clock() - t0 > timeout_s:
+                return False, f"launch timeout after {timeout_s:.0f}s"
+            self.sleep(self.poll_s)
 
     def ip(self, cluster: str) -> str:
         try:
@@ -198,7 +157,7 @@ class ProviderOps:
             return ""
 
     def state(self, cluster: str, region: str) -> str | None:
-        record = self.provider._record(cluster)  # raises on an API error: not a preemption
+        record = self.provider._record(cluster, refresh=True)  # raises on an API error: not a preemption
         if record is None:
             return None
         from yeto.launch.nc.sky_provider import _status_name  # noqa: PLC0415
@@ -220,15 +179,6 @@ class ProviderOps:
 
     def ready(self, cluster: str, cmd: str) -> bool:
         return self._ready(cluster, cmd)
-
-
-def project_ids() -> dict[str, str]:
-    try:
-        import yaml  # noqa: PLC0415
-        cfg = yaml.safe_load(open(SKY_CONFIG))
-    except Exception:  # noqa: BLE001
-        return {}
-    return {r: v["project_id"] for r, v in (cfg.get("nebius", {}).get("region_configs") or {}).items()}
 
 
 @dataclass
@@ -582,17 +532,18 @@ class Watchdog:
         return None
 
 
-def provider_ops(a: argparse.Namespace, cands: list[Candidate], envs: list[str], *, sky: Any = None) -> ProviderOps:
-    """The ``--via-provider`` ops: one SkyProvider slot, this watchdog's cluster prefix. The
-    provider's start timeout (order to UP) is the launch bound ``--launch-timeout-s``: an
-    on-demand 8 x H100 took 15 min to come up (``--starting-timeout-s`` is shorter)."""
+def provider_ops(a: argparse.Namespace, cands: list[Candidate], envs: list[str], *, sky: Any = None,
+                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep) -> ProviderOps:
+    """The watchdog's ops: one SkyProvider slot, this watchdog's cluster prefix. The
+    provider's start timeout (order to UP) is ``--launch-timeout-s``, the bound of the old
+    ``sky launch`` call; ``--starting-timeout-s`` stays the watchdog's own STARTING bound."""
     from yeto.launch.nc.sky_provider import SkyProvider  # noqa: PLC0415
 
     provider = SkyProvider(a.run_id, slots=[1], offers=[c.offer() for c in cands], exact_prefix=a.cluster_prefix,
                            task_yaml=a.yaml, envs=dict(e.split("=", 1) for e in envs),
                            secrets={s: s for s in a.secret}, start_timeout_s=a.launch_timeout_s, sky=sky,
-                           record=Path(a.dir) / f"{a.cluster_prefix}.clusters.json")
-    return ProviderOps(provider, own_name=a.own_name_re)
+                           record=Path(a.dir) / f"{a.cluster_prefix}.clusters.json", clock=clock)
+    return ProviderOps(provider, own_name=a.own_name_re, clock=clock, sleep=sleep)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -614,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--allow-ondemand-h200", action="store_true")
     p.add_argument("--yaml", default=os.environ.get("YETO_SPOT_SKY_YAML") or None,
                    help="sky task of the island VM (default $YETO_SPOT_SKY_YAML); required unless --dry-run")
-    p.add_argument("--env", action="append", default=[], help="KEY=VALUE passed to sky launch (CARD is set per candidate)")
+    p.add_argument("--env", action="append", default=[], help="KEY=VALUE on the launched task (CARD is set per candidate)")
     p.add_argument("--secret", action="append", default=[])
     p.add_argument("--launch-timeout-s", type=float, default=1800)
     p.add_argument("--starting-timeout-s", type=float, default=600)
@@ -627,8 +578,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dir", default="/tmp/vm-watchdog")
     p.add_argument("--dry-run", action="store_true", help="print the candidate order and exit")
     p.add_argument("--via-provider", action="store_true",
-                   help="machine calls through the rollout SkyProvider (sky SDK, its record and resource "
-                        "ledger) instead of the sky / nebius CLIs")
+                   help="accepted for old command lines: the machine calls always go through the rollout "
+                        "SkyProvider (sky SDK, its record and resource ledger)")
     a = p.parse_args(argv)
     cands = candidates(gpus=a.gpus.split(","), regions=[r for r in a.regions.split(",") if r] or None,
                        count=a.gpu_count, prices=load_prices(a.prices) if a.prices else None,
@@ -647,14 +598,7 @@ def main(argv: list[str] | None = None) -> int:
                  poll_s=a.poll_s, round_sleep_s=a.round_sleep_s, orphan_sweep_min=a.orphan_sweep_min,
                  max_rounds=a.max_rounds, own_name=a.own_name_re)
     envs = [e for e in a.env if not e.startswith("RUN_ID=")] + [f"RUN_ID={a.run_id}"]
-
-    class _Ops(Ops):  # CARD follows the candidate's GPU kind
-        def launch(self, cluster: str, cand: Candidate, timeout_s: float) -> tuple[bool, str]:
-            self.envs = [e for e in envs if not e.startswith("CARD=")] + [f"CARD={cand.gpu}"]
-            return super().launch(cluster, cand, timeout_s)
-
-    ops = provider_ops(a, cands, envs) if a.via_provider else \
-        _Ops(yaml=a.yaml, envs=envs, secrets=a.secret, own_name=a.own_name_re)
+    ops = provider_ops(a, cands, envs)
     wd = Watchdog(cfg, cands, ops)
     print(f"log {cfg.log}; stop marker: touch {cfg.stop_file}", flush=True)
     reason = wd.run()
