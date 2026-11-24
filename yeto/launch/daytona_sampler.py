@@ -47,8 +47,23 @@ import tarfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
+from yeto.node.store import STORE_URI_SHELL, reclaim_marker_env, sampler_route_env
+# the exec / upload handles live in yeto.node.transport (one copy for every route); re-exported here
+from yeto.node.transport import (  # noqa: F401
+    NO_SUDO_SHIM,
+    ExecResult,
+    SandboxExec,
+    SdkExec,
+    SshExec,
+    StoreUploadExec,
+    _err,
+    check_copy,
+    put,
+    sh,
+    size_sha256_command,
+)
 from yeto.rl.sampler_pins import VLLM_SAMPLER_IMAGE_ROCM, VLLM_SAMPLER_ROCM_VERSION
 
 from . import agentic_setup
@@ -60,6 +75,7 @@ MODELS = "/models"
 MODEL_DIR = f"{MODELS}/kimi-k3.1-pro"
 CACHE = f"{WORK}/cache"
 SAMPLER_DIR = f"{WORK}/sampler"
+SAMPLER_DIR_DEFAULT = SAMPLER_DIR  # the reclaim marker's directory (fixed: the spec's container path)
 LOG_DIR = f"{WORK}/logs"
 CODE_DIR = f"{WORK}/yeto"
 STORE_ENV = f"{SAMPLER_DIR}/store.env"
@@ -70,203 +86,6 @@ BASE_IMAGE = VLLM_SAMPLER_IMAGE_ROCM.removeprefix("docker:")
 GPU_ARCH = "gfx950"  # MI355X; the in-place expert reload is verified on gfx950 only
 REQUIRED_MODULES = ("vllm", "aiter", "torch", "boto3", "safetensors", "zstandard", "httpx", "numpy")
 GIB = 1 << 30
-# a shell without sudo (the sandbox user is root) runs ``sudo X`` as ``X``
-NO_SUDO_SHIM = 'command -v sudo >/dev/null 2>&1 || sudo() { while [ "${1#-}" != "$1" ]; do shift; done; "$@"; }; '
-
-
-# -- the exec handle (the provider layer supplies it) ---------------------------
-
-@dataclass(frozen=True)
-class ExecResult:
-    returncode: int
-    stdout: str = ""
-    stderr: str = ""
-
-
-class SandboxExec(Protocol):
-    """What this module needs of a sandbox. ``name``: for messages and events.
-
-    ``exec``: run ``command`` with ``bash -c`` in the sandbox and wait (up to
-    ``timeout`` s); the exit code and output. A command that starts the sampler
-    detaches it itself (``setsid``), so a handle without background support works.
-    ``upload``: write ``data`` to the absolute sandbox path ``remote`` (parents
-    created; the caller sets the mode)."""
-
-    name: str
-
-    def exec(self, command: str, *, timeout: float = 600) -> ExecResult: ...
-    def upload(self, data: bytes, remote: str) -> None: ...
-
-
-@dataclass
-class SshExec:
-    """:class:`SandboxExec` over ``ssh``: ``target`` is the argv after ``ssh``'s options
-    that names the sandbox (Daytona: ``["<token>@ssh.app.daytona.io"]``)."""
-
-    name: str
-    target: Sequence[str]
-    options: Sequence[str] = ("-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30")
-    run: Callable[..., Any] = subprocess.run
-    chunk_bytes: int | None = None  # None: one ssh session per upload (as before)
-    chunk_attempts: int = 3
-
-    def exec(self, command: str, *, timeout: float = 600) -> ExecResult:
-        out = self.run(["ssh", "-n", *self.options, *self.target, "bash -c " + shlex.quote(command)],
-                       capture_output=True, text=True, timeout=timeout, check=False)
-        return ExecResult(out.returncode, out.stdout or "", out.stderr or "")
-
-    def upload(self, data: bytes, remote: str) -> None:
-        if self.chunk_bytes and len(data) > self.chunk_bytes:
-            self._upload_chunked(data, remote)
-            return
-        q = shlex.quote(remote)
-        out = self.run(["ssh", *self.options, *self.target,
-                        f"mkdir -p \"$(dirname {q})\" && cat > {q}.part && mv -f {q}.part {q}"],
-                       input=data, capture_output=True, timeout=1800, check=False)
-        if out.returncode != 0:
-            raise RuntimeError(f"upload to {self.name}:{remote} failed: {_err(out)}")
-
-    def _upload_chunked(self, data: bytes, remote: str) -> None:
-        """``data`` in ``chunk_bytes`` pieces, one ssh session each (retried alone), then
-        joined and checked by size: a gateway that cuts long sessions (Daytona's ssh
-        gateway closed every 13 MB stream) costs one piece, not the whole file."""
-        q = shlex.quote(remote)
-        n = -(-len(data) // self.chunk_bytes)
-        for i in range(n):
-            piece = data[i * self.chunk_bytes:(i + 1) * self.chunk_bytes]
-            for attempt in range(self.chunk_attempts):
-                out = self.run(["ssh", *self.options, *self.target,
-                                f"mkdir -p \"$(dirname {q})\" && cat > {q}.chunk.{i}"],
-                               input=piece, capture_output=True, timeout=600, check=False)
-                if out.returncode == 0:
-                    break
-            else:
-                raise RuntimeError(f"upload to {self.name}:{remote} failed at chunk {i + 1} of {n}: {_err(out)}")
-        parts = " ".join(f"{q}.chunk.{i}" for i in range(n))
-        out = self.run(["ssh", "-n", *self.options, *self.target,
-                        f"cat {parts} > {q}.part && rm -f {parts} && test $(wc -c < {q}.part) -eq {len(data)} "
-                        f"&& mv -f {q}.part {q}"], capture_output=True, timeout=600, check=False)
-        if out.returncode != 0:
-            raise RuntimeError(f"upload to {self.name}:{remote} failed joining {n} chunks: {_err(out)}")
-
-
-@dataclass
-class SdkExec:
-    """:class:`SandboxExec` over the Daytona SDK (toolbox API over HTTPS), no ssh:
-    ``process.exec`` runs the command, ``fs.upload_file`` writes files (credentials
-    included: they never leave the API). ``sandbox()`` returns the SDK sandbox (looked
-    up on each call: a token or a sandbox object may go stale). Daytona's ssh gateway
-    closed sessions on fresh GPU sandboxes again and again; the toolbox API is the
-    provider's own control path."""
-
-    name: str
-    sandbox: Callable[[], Any]
-    attempts: int = 3
-
-    def _retry(self, fn: Callable[[], Any]) -> Any:
-        for attempt in range(self.attempts):
-            try:
-                return fn()
-            except Exception:  # noqa: BLE001 - a dropped API call: tried again, the last error raised
-                if attempt + 1 == self.attempts:
-                    raise
-
-    def exec(self, command: str, *, timeout: float = 600) -> ExecResult:
-        try:
-            out = self._retry(lambda: self.sandbox().process.exec("bash -c " + shlex.quote(command),
-                                                                  timeout=max(1, int(timeout))))
-        except Exception as error:  # noqa: BLE001 - reads like an unreachable node
-            return ExecResult(255, "", f"daytona exec: {error!r}"[:500])
-        text = str(getattr(out, "result", "") or "")
-        code = int(getattr(out, "exit_code", 1))
-        return ExecResult(code, text, "" if code == 0 else text[-2000:])
-
-    def upload(self, data: bytes, remote: str) -> None:
-        q = shlex.quote(remote)
-        made = self.exec(f"mkdir -p \"$(dirname {q})\"", timeout=60)
-        if made.returncode != 0:
-            raise RuntimeError(f"upload to {self.name}:{remote} failed: {made.stderr[-300:]}")
-        try:
-            self._retry(lambda: self.sandbox().fs.upload_file(data, remote))
-        except Exception as error:  # noqa: BLE001
-            raise RuntimeError(f"upload to {self.name}:{remote} failed: {error!r}"[:400]) from error
-
-
-@dataclass
-class StoreUploadExec:
-    """A :class:`SandboxExec` whose large uploads go through the object store: the launcher
-    puts the bytes at ``<prefix>/_upload/<sha256>`` and the sandbox fetches a presigned URL
-    with ``curl`` (checked by sha256). Daytona's ssh gateway closes long sessions (a 13 MB
-    ``cat`` over ssh was cut after about 45 s, every time); small files still go over ssh,
-    retried. ``env_file``: the pool's store env file (``AWS_*``, ``R2_BUCKET``)."""
-
-    inner: SandboxExec
-    env_file: str
-    prefix: str
-    threshold: int = 1 << 20
-    attempts: int = 3
-    client: Any = None
-
-    @property
-    def name(self) -> str:
-        return self.inner.name
-
-    def exec(self, command: str, *, timeout: float = 600) -> ExecResult:
-        return self.inner.exec(command, timeout=timeout)
-
-    def _store(self) -> tuple[Any, str]:
-        env = dict(line.split("=", 1) for line in Path(self.env_file).expanduser().read_text().splitlines()
-                   if "=" in line and not line.lstrip().startswith("#"))
-        env = {k.strip().removeprefix("export "): v.strip().strip("'\"") for k, v in env.items()}
-        if self.client is None:
-            import boto3  # noqa: PLC0415
-
-            self.client = boto3.client("s3", endpoint_url=env.get("AWS_ENDPOINT_URL"),
-                                       aws_access_key_id=env.get("AWS_ACCESS_KEY_ID"),
-                                       aws_secret_access_key=env.get("AWS_SECRET_ACCESS_KEY"),
-                                       region_name=env.get("AWS_REGION") or "auto")
-        return self.client, env["R2_BUCKET"]
-
-    def upload(self, data: bytes, remote: str) -> None:
-        if len(data) <= self.threshold:
-            for attempt in range(self.attempts):
-                try:
-                    return self.inner.upload(data, remote)
-                except RuntimeError:
-                    if attempt + 1 == self.attempts:
-                        raise
-        import hashlib  # noqa: PLC0415
-
-        digest = hashlib.sha256(data).hexdigest()
-        client, bucket = self._store()
-        key = f"{self.prefix.strip('/')}/_upload/{digest}"
-        client.put_object(Bucket=bucket, Key=key, Body=data)
-        url = client.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600)
-        q = shlex.quote(remote)
-        cmd = (f"mkdir -p \"$(dirname {q})\" && curl -fsS --retry 5 --retry-connrefused -o {q}.part {shlex.quote(url)} "
-               f"&& echo '{digest}  {remote}.part' | sha256sum -c --quiet - && mv -f {q}.part {q}")
-        out = self.inner.exec(cmd, timeout=1800)
-        if out.returncode != 0:
-            raise RuntimeError(f"upload to {self.name}:{remote} through the store failed: {out.stderr.strip()[-300:]}")
-
-
-def _err(out: Any) -> str:
-    err = out.stderr.decode(errors="replace") if isinstance(out.stderr, bytes) else str(out.stderr or "")
-    return err.strip()[-300:]
-
-
-def sh(box: SandboxExec, command: str, *, timeout: float = 600) -> ExecResult:
-    return box.exec(NO_SUDO_SHIM + command, timeout=timeout)
-
-
-def put(box: SandboxExec, data: bytes | str, remote: str, *, mode: str = "600") -> None:
-    """Upload and set the mode (written to a temporary name first: never half a file)."""
-    raw = data.encode() if isinstance(data, str) else data
-    box.upload(raw, remote + ".up")
-    q = shlex.quote(remote)
-    out = sh(box, f"chmod {mode} {q}.up && mv -f {q}.up {q}", timeout=120)
-    if out.returncode != 0:
-        raise RuntimeError(f"{box.name}: placing {remote}: {out.stderr.strip()[-300:]}")
 
 
 # -- sizing ----------------------------------------------------------------------
@@ -609,8 +428,7 @@ def start_script(env: Mapping[str, str], *, spec_path: str, env_files: Sequence[
     lines += [f"export {k}={shlex.quote(v)}" for k, v in sorted(env.items())]
     lines += [f"if [ -f {CA_BUNDLE} ]; then export AWS_CA_BUNDLE={CA_BUNDLE} REQUESTS_CA_BUNDLE={CA_BUNDLE} "
               f"SSL_CERT_FILE={CA_BUNDLE}; fi",
-              'export YETO_RL_STORE_S3_URI="s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}" '
-              'YETO_RL_STORE_S3_ENDPOINT_URL="$AWS_ENDPOINT_URL"',
+              STORE_URI_SHELL,
               SSH_HOME_LINK.rstrip(),
               f"mkdir -p {WORK}/stage {CACHE}",
               f"cd {WORK}",
@@ -681,17 +499,10 @@ def upload_prompts(box: SandboxExec, local: str | Path, remote: str) -> dict[str
     if not str(remote).startswith("/"):
         raise ValueError(f"prompts.path {remote!r} must be an absolute path on the sampler host")
     data = Path(local).expanduser().read_bytes()
-    import hashlib  # noqa: PLC0415
-
-    digest = hashlib.sha256(data).hexdigest()
     put(box, data, remote, mode="644")
-    q = shlex.quote(remote)
-    out = sh(box, f"echo YETO_PROMPTS $(wc -c < {q}) $(sha256sum {q} | cut -d' ' -f1)", timeout=120)
-    have = next((ln.split()[1:] for ln in out.stdout.splitlines() if ln.startswith("YETO_PROMPTS ")), [])
-    if have != [str(len(data)), digest]:
-        raise RuntimeError(f"{box.name}: prompts file {remote} does not match {local} after the upload "
-                           f"(sandbox size/sha256 {' '.join(have) or 'unreadable'}, local {len(data)} {digest[:12]})")
-    return {"path": remote, "bytes": len(data), "sha256": digest}
+    out = sh(box, size_sha256_command(remote), timeout=120)
+    return {"path": remote, **check_copy(out.stdout, data, node=box.name, remote=remote, local=local,
+                                         where="sandbox", after="the upload")}
 
 
 def prompts_path(spec: Mapping[str, Any]) -> str | None:
@@ -704,7 +515,7 @@ def reclaim_env(shard: str, sampler_dir: str = SAMPLER_DIR) -> dict[str, str]:
     """``YETO_SPOT_RECLAIM_MARKER`` of a sampler, as every other route sets it: SIGTERM
     writes the marker and the sampler leaves in order (stops the engine, frees its
     claims, exits) instead of dying in its round."""
-    return {"YETO_SPOT_RECLAIM_MARKER": f"{sampler_dir}/{shard}.reclaim"}
+    return reclaim_marker_env(shard, sampler_dir)
 
 
 def start_sampler(box: SandboxExec, *, spec: Mapping[str, Any], shard: str, run_prefix: str,
@@ -756,9 +567,8 @@ def start_sampler(box: SandboxExec, *, spec: Mapping[str, Any], shard: str, run_
     spec = {"start_on_latest": True, **spec}
     put(box, json.dumps(agentic_setup.strip(spec), indent=1), p["spec"], mode="644")
     env = process_env(prefix, yeto_dir, gpus=gpus)
-    env.update(reclaim_env(shard))
-    # the release download's start spread is keyed per shard, as on the NC route
-    env["YETO_RL_RELEASE_SPREAD_KEY"] = f"{prefix}/{shard}"
+    # the reclaim marker and the release download's spread key, as on every route
+    env.update(sampler_route_env(prefix, shard, SAMPLER_DIR_DEFAULT))
     env_files = [STORE_ENV]
     report: dict[str, str] = {}
     if setup is not None:

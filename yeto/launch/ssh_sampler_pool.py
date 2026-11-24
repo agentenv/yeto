@@ -104,6 +104,7 @@ from .node_inventory import (
 from .pool import status as island_status
 from .pool.provider import ProviderCaps
 from .pool.status import LeaseStatus
+from yeto.node.store import STORE_URI_SHELL, pool_fence_store, reclaim_marker_env, sampler_route_env
 
 KIND = "ssh"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -511,8 +512,7 @@ def start_script(conf: SshPoolConf, *, yeto_dir: str, spec_path: str, pid_path: 
     return "\n".join(lines) + "\n"
 
 
-_STORE_URI = ('export YETO_RL_STORE_S3_URI="s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}" '
-              'YETO_RL_STORE_S3_ENDPOINT_URL="$AWS_ENDPOINT_URL"')
+_STORE_URI = STORE_URI_SHELL  # the bucket and endpoint are only known on the node (its env file)
 
 
 def venv_launch_command(p: Mapping[str, str], marker: str) -> str:
@@ -865,16 +865,15 @@ class SshSamplerPoolOps:
         return spec
 
     def sampler_env(self, node: Node, m) -> dict[str, str]:
-        env = {"PYTHONUNBUFFERED": "1",
-               # SIGTERM is the orderly leave (sampler_resume.install_marker_signals)
-               "YETO_SPOT_RECLAIM_MARKER": f"{self.conf.workdir}/sampler/{m.shard}.reclaim"}
+        # SIGTERM is the orderly leave (sampler_resume.install_marker_signals)
+        env = {"PYTHONUNBUFFERED": "1", **reclaim_marker_env(m.shard, f"{self.conf.workdir}/sampler")}
         env.update(device_env(node, self.conf))
         if self._uses_r2():
             prefix = str(self.cfg["run_prefix"]).strip("/")
             env.update({"YETO_RL_STORE_IMPL": "yeto.cloud.s3_store:store_from_env",
                         "YETO_RL_STORE_S3_STAGE": f"{self.conf.workdir}/stage", "YETO_RL_STORE_S3_REGION": "auto",
                         "YETO_RL_STORE_S3_CREDENTIALS": "aws-env", "YETO_NC_RUN_PREFIX": prefix,
-                        "YETO_RL_RELEASE_SPREAD_KEY": f"{prefix}/{m.shard}"})
+                        **sampler_route_env(prefix, m.shard, f"{self.conf.workdir}/sampler")})
         env.update(self.conf.env)
         return env
 
@@ -1008,14 +1007,9 @@ class SshSamplerPoolOps:
         return cli.pool_data_path(self.cfg, self._fence_store, lambda: None)
 
     def _fence_store(self) -> Any:
-        from .nc import cli, elastic  # noqa: PLC0415
+        from .nc import cli  # noqa: PLC0415
 
-        env = elastic.read_env_file(self.cfg["r2_env_file"])
-        bucket = env.get(self.cfg.get("bucket_env", "R2_BUCKET"))
-        if not bucket:
-            raise cli.NcError(f"no {self.cfg.get('bucket_env', 'R2_BUCKET')} in the store env file")
-        return elastic.s3_fence_store(f"s3://{bucket}/runs/{self.cfg['run_prefix'].strip('/')}",
-                                      self.cfg["r2_env_file"])
+        return pool_fence_store(self.cfg, error=cli.NcError)
 
     def fence(self, m) -> Any:
         if self.conf.store:
