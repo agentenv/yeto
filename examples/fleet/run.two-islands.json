@@ -3,7 +3,7 @@
   "run": "<run>",
   "store": "s3://<bucket>/runs/<run>",
   "budget": {"usd": 40, "wall_h": 4, "nc_usd_per_h": 0},
-  "first_group": {"timeout_s": 3600, "poll_s": 60},
+  "first_group": {"timeout_s": 4800, "poll_s": 60},
   "fleet": {
     "dispense": "fleet",
     "trainer_argv": [
@@ -12,12 +12,14 @@
       "--model", "Qwen/Qwen3-4B",
       "--data", "openai/gsm8k",
       "--reward-function", "yeto.rl.gsm8k_reward:score",
+      "--trust-remote-code",
       "--tuning", "full",
       "--rl-sync-preset", "decoupled",
       "--fragments", "4",
       "--rl-parameter-layout-sha256", "auto",
       "--local-rl-rounds-per-sync", "4",
       "--rl-max-policy-age", "2",
+      "--rl-algorithm-spec", "examples/k31/algorithm-spec.async-age2-tis.json",
       "--rollout-batch-size", "16",
       "--n-samples-per-prompt", "8",
       "--rollout-max-response-len", "2048",

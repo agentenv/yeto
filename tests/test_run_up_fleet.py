@@ -23,6 +23,7 @@ EXAMPLE = ROOT / "examples" / "fleet" / "run.two-islands.json"
 STORE = "s3://b/runs/r"
 TRAINER_ARGV = ["--training-mode", "rl", "--model", "Qwen/Qwen3-4B", "--data", "openai/gsm8k", "--tuning", "full",
                 "--rl-sync-preset", "decoupled", "--local-rl-rounds-per-sync", "4", "--fragments", "4",
+                "--n-samples-per-prompt", "8",
                 "--rl-checkpoint-store", STORE]
 
 
