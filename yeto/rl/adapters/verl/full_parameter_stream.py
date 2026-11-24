@@ -1346,62 +1346,6 @@ class VerlFullParameterLocalState:
                            "(a round-cut resume restores the trainer's rank files instead)")
 
 
-def add_island_flags(parser) -> None:
-    """The full-parameter flags of the verl island entry (Miles island spellings)."""
-
-    parser.add_argument("--parameter-mode", choices=("lora", "full"), default="lora")
-    parser.add_argument("--num-learners", type=int, default=1)
-    parser.add_argument("--learner-generation", type=int, default=0)
-    parser.add_argument("--fragments", type=int, default=1)
-    parser.add_argument("--parameter-layout-sha256", default=None)
-    parser.add_argument("--syncer-profile-sha256", default=None)
-    parser.add_argument("--full-parameter-rounds", choices=("sweep", "async"), default="sweep")
-    parser.add_argument("--init-mode", choices=("auto", "local", "upload"), default="auto")
-    parser.add_argument("--local-init-fallback", action="store_true")
-    parser.add_argument("--sweep-push-dtype", choices=("f32", "bf16", "int8", "int4", "int4-log"),
-                        default="f32")
-    parser.add_argument("--sweep-fragment-max-bytes", type=int, default=DEFAULT_MAX_FRAGMENT_BYTES)
-    parser.add_argument("--sweep-wait-timeout-s", type=float, default=900.0)
-    parser.add_argument("--sweep-final-cut", choices=("download", "ack"), default="download")
-    parser.add_argument("--pipeline", type=int, default=1)
-    parser.add_argument("--local-horizon", type=int, default=1)
-    parser.add_argument("--total-fragment-steps", type=int, default=None)
-    parser.add_argument("--rl-sync-matrix-merge", choices=("avg", "rda"), default="avg")
-    # The rest of the launcher's full-parameter island flags
-    # (launch.rl_island_task._rl_trainable_island_flags), so none is ignored:
-    # engine-neutral push and transport options go to the stream config; the
-    # options the verl stream does not offer are parsed only to be refused.
-    parser.add_argument("--sweep-push-int8-block", type=int, default=128)
-    parser.add_argument("--sweep-push-int4-block", type=int, default=128)
-    parser.add_argument("--sweep-push-int4-stochastic", action="store_true")
-    parser.add_argument("--sweep-push-int4-error-feedback", choices=("off", "bf16", "f32"), default="off")
-    parser.add_argument("--sweep-push-no-tensor-blocks", action="store_true")
-    parser.add_argument("--sweep-max-local-rounds-ahead", type=int, default=None)
-    parser.add_argument("--wan-stream-schedule", default="rr")
-    parser.add_argument("--wan-stall-timeout", type=float, default=0.0)
-    parser.add_argument("--sweep-overlap", action="store_true")
-    parser.add_argument("--sweep-expert-token-weights", action="store_true")
-    parser.add_argument("--rl-peer-recovery-store", default=None)
-    # Peer recovery (launch.peer_recovery.island_flags; Miles island spellings)
-    parser.add_argument("--rl-peer-recovery-ttl-s", type=float, default=None)
-    parser.add_argument("--rl-peer-recover", action="store_true")
-    parser.add_argument("--rl-peer-recovery-staging", default=None)
-    # The
-    # MANIFEST re-read wait; the donor write mode (no capture on verl: inline either way)
-    parser.add_argument("--rl-peer-recovery-manifest-wait-s", type=float, default=None)
-    parser.add_argument("--rl-peer-recovery-donor-write", choices=("background", "inline"), default=None)
-    # The island's HF exports and data position (Miles island spellings;
-    # see full_parameter_extras). Added only when the island parser has none yet:
-    # the verl Megatron island parses the export flags itself.
-    for flag in ("--rl-export-hf-rounds", "--rl-export-hf-store", "--rl-data-position-store"):
-        if flag not in parser._option_string_actions:
-            parser.add_argument(flag, default=None)
-    # The Miles training and observation options verl can express.
-    from .train_options import add_island_flags as add_train_option_flags
-
-    add_train_option_flags(parser)
-
-
 def full_parameter_extras(args: Any, *, sync: str) -> dict[str, Any]:
     """The plan keys of a full-parameter island's HF exports and data
     position, both absent when off (the plans of other runs are unchanged);

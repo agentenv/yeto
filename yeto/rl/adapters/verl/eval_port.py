@@ -50,38 +50,20 @@ VAL_KWARGS = "actor_rollout_ref.rollout.val_kwargs"
 ASSERTED_KEYS = (VAL_FILES_KEY, f"{VAL_KWARGS}.n", f"{VAL_KWARGS}.temperature",
                  f"{VAL_KWARGS}.top_p", f"{VAL_KWARGS}.top_k", f"{VAL_KWARGS}.do_sample")
 
-# The Miles island's eval flags (adapters/miles: island_entry + Miles' own parser).
-_FLAGS = (
-    ("--eval-interval", {"type": int, "default": None}),
-    ("--eval-data", {"default": None}),
-    ("--eval-data-sha256", {"default": None}),
-    ("--eval-dataset-name", {"default": None}),
-    ("--eval-samples-per-prompt", {"type": int, "default": None}),
-    ("--eval-temperature", {"type": float, "default": None}),
-    ("--eval-top-p", {"type": float, "default": None}),
-    ("--eval-max-prompt-len", {"type": int, "default": None}),
-    ("--eval-max-response-len", {"type": int, "default": None}),
-    ("--eval-max-context-len", {"type": int, "default": None}),
-)
+# The island's eval flags (the island flag schema, yeto.rl.engine.run_flags).
+_FLAGS = ("--eval-interval", "--eval-data", "--eval-data-sha256", "--eval-dataset-name",
+          "--eval-samples-per-prompt", "--eval-temperature", "--eval-top-p", "--eval-max-prompt-len",
+          "--eval-max-response-len", "--eval-max-context-len")
 
 
 class EvalPortError(ValueError):
     """The eval flags ask for something the verl island cannot run."""
 
 
-def add_island_flags(parser) -> None:
-    """The eval flags, in the Miles island spellings; a parser that already
-    defines one keeps its own."""
-
-    for flag, kwargs in _FLAGS:
-        if flag not in parser._option_string_actions:
-            parser.add_argument(flag, **kwargs)
-
-
 def eval_requested(args: Any) -> bool:
     """True when the island got any eval flag (``--eval-interval`` or another)."""
 
-    return any(getattr(args, flag[2:].replace("-", "_"), None) is not None for flag, _ in _FLAGS)
+    return any(getattr(args, flag[2:].replace("-", "_"), None) is not None for flag in _FLAGS)
 
 
 def refuse_unwired(args: Any, path: str) -> None:

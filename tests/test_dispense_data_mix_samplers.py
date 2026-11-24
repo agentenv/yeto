@@ -849,14 +849,12 @@ def test_a_verl_sampler_spec_claims_from_the_dispenser():
 
 def _verl_required():
     """The verl island entry's required flags (whatever this checkout requires)."""
-    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.adapters.verl.run_flags import build_parser
 
-    parser_src = open(island_entry.__file__).read()
     out = []
-    for line in parser_src.splitlines():
-        line = line.strip()
-        if line.startswith('p.add_argument("--') and "required=True" in line:
-            out += [line.split('"')[1], "1"]
+    for action in build_parser()._actions:
+        if action.required:
+            out += [action.option_strings[0], "1"]
     return out
 
 
