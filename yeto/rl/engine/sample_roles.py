@@ -109,6 +109,7 @@ This module is engine-neutral; the Miles mapping is in
 from __future__ import annotations
 
 import copy
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -426,7 +427,10 @@ _SHARD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 ISLAND_TRAINER_OVERRIDES = (
     ("--rl-island-release-every", "rl_island_release_every", "rl_release_every"),
     ("--rl-island-max-policy-age", "rl_island_max_policy_age", "rl_max_policy_age"),
+    ("--rl-island-sample-wait-s", "rl_island_sample_wait_s", "rl_sample_wait_s"),
 )
+# island options whose value is seconds (a number > 0) rather than an integer >= 1
+_SECONDS_OPTIONS = frozenset({"rl_sample_wait_s"})
 EXTERNAL_POOL_FLAGS = (("--rl-island-buffer-shards", "rl_island_buffer_shards"),
                        *((flag, dest) for flag, dest, _name in ISLAND_TRAINER_OVERRIDES))
 # --rl-island-sampler-follows M:K: a mixed group's explicit sampler binding (module doc)
@@ -523,13 +527,23 @@ def island_buffer_shards(args: Any, num_islands: int) -> dict[int, list[str]]:
     return out
 
 
-def island_trainer_overrides(args: Any, num_islands: int) -> dict[int, dict[str, int]]:
-    """{trainer island: {island option: value}} of ``--rl-island-release-every K:N``
-    and ``--rl-island-max-policy-age K:N`` (:data:`ISLAND_TRAINER_OVERRIDES`); {}
-    without them. Raises ValueError on an entry that is not ``ISLAND:N``, N >= 1."""
-    out: dict[int, dict[str, int]] = {}
+def island_trainer_overrides(args: Any, num_islands: int) -> dict[int, dict[str, Any]]:
+    """{trainer island: {island option: value}} of ``--rl-island-release-every K:N``,
+    ``--rl-island-max-policy-age K:N`` and ``--rl-island-sample-wait-s K:S``
+    (:data:`ISLAND_TRAINER_OVERRIDES`); {} without them. Raises ValueError on an entry
+    that is not ``ISLAND:N``, N an integer >= 1 (seconds > 0 for the sample wait)."""
+    out: dict[int, dict[str, Any]] = {}
     for flag, dest, name in ISLAND_TRAINER_OVERRIDES:
         for m, value in _trainer_entries(args, dest, flag, num_islands).items():
+            if name in _SECONDS_OPTIONS:
+                try:
+                    seconds = float(value)
+                except ValueError:
+                    seconds = math.nan
+                if not math.isfinite(seconds) or seconds <= 0:
+                    raise ValueError(f"{flag} {m}:{value}: the value must be a number of seconds > 0")
+                out.setdefault(m, {})[name] = seconds
+                continue
             if not value.isdigit() or int(value) < 1:
                 raise ValueError(f"{flag} {m}:{value}: the value must be an integer >= 1")
             out.setdefault(m, {})[name] = int(value)
@@ -742,7 +756,8 @@ def check_sampler_follow(args: Any, num_islands: int) -> None:
 
 def check_external_pool_flags(args: Any) -> None:
     """``--rl-island-buffer-shards`` / ``--rl-island-release-every`` /
-    ``--rl-island-max-policy-age`` belong to synced trainers fed by external pools,
+    ``--rl-island-max-policy-age`` / ``--rl-island-sample-wait-s`` belong to synced
+    trainers fed by external pools,
     with or without sampler islands, and ``--rl-island-sampler-follows`` to a mixed
     group (module doc); any other launch refuses them."""
     if getattr(args, SAMPLER_FOLLOWS_FLAG[1], None) and not is_mixed_group(args):

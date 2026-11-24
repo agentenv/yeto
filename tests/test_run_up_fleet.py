@@ -182,6 +182,76 @@ def test_the_compiled_trainer_argv(files):
     assert fleet.plan_of(cfg) is cfg[fleet.PLAN_KEY]
 
 
+def _island_waits(cfg):
+    """{island: trainer.sample_wait.timeout_s} as the run's preflight resolves each island."""
+    from yeto.breakers.fleet import resolve_islands
+
+    return {i.index: r.entry("trainer.sample_wait").params["timeout_s"] for i, r in resolve_islands(cfg)}
+
+
+def _launch_waits(argv):
+    """{learner id: --rl-sample-wait-s} each trainer island of the compiled launch runs with."""
+    from yeto.rl.engine import sample_roles
+
+    from yeto import cli
+
+    args = cli.build_parser().parse_args(["launch", *argv])
+    shared = getattr(args, "rl_sample_wait_s", None)
+    overrides = sample_roles.island_trainer_overrides(args, 2)
+    return {k: overrides.get(k, {}).get("rl_sample_wait_s", shared) for k in range(2)}
+
+
+def test_the_run_configs_sample_wait_reaches_every_trainer_island(files):
+    """The preflight resolves breakers.trainer.sample_wait per island; every trainer reads
+    --rl-sample-wait-s, so the compile passes the section's value as the flag."""
+    raw = _cfg(files, breakers={"trainer": {"sample_wait": {"timeout_s": 1200}}})
+    argv = up.load_config(_write(files, raw))["trainer"]["argv"]
+    follow = argv.index("--rl-sampler-follow")
+    assert argv[follow + 2:follow + 4] == ["--rl-sample-wait-s", "1200"]
+    assert "--rl-island-sample-wait-s" not in argv
+    assert _island_waits(raw) == {0: 1200, 1: 1200} and _launch_waits(argv) == {0: 1200.0, 1: 1200.0}
+
+
+def test_an_islands_own_sample_wait_wins_over_the_run_configs(files):
+    raw = _cfg(files, breakers={"trainer": {"sample_wait": {"timeout_s": 1200}}})
+    raw["islands"][1]["trainer"]["argv"] += ["--rl-sample-wait-s", "900"]
+    cfg = up.load_config(_write(files, raw))
+    argv = cfg["trainer"]["argv"]
+    assert argv.count("--rl-sample-wait-s") == 1 and argv[argv.index("--rl-sample-wait-s") + 1] == "1200"
+    assert argv[-2:] == ["--rl-island-sample-wait-s", "1:900"]
+    assert _island_waits(raw) == {0: 1200, 1: 900.0} and _launch_waits(argv) == {0: 1200.0, 1: 900.0}
+    west = fleet.plan_of(cfg).islands[1]
+    assert west.sample_wait_s == 900.0 and fleet.plan_of(cfg).islands[0].sample_wait_s is None
+    assert fleet.FleetPlan.from_json(fleet.plan_of(cfg).to_json()).islands[1].sample_wait_s == 900.0
+    assert any("west" in line and "sample_wait_s 900" in line for line in fleet.plan_of(cfg).lines())
+    # an island's own value also wins over the fleet's flag
+    raw2 = _cfg(files)
+    raw2["fleet"]["trainer_argv"] += ["--rl-sample-wait-s", "1800"]
+    raw2["islands"][0]["trainer"]["argv"] += ["--rl-sample-wait-s=600"]
+    argv2 = up.load_config(_write(files, raw2))["trainer"]["argv"]
+    assert _island_waits(raw2) == {0: 600.0, 1: 1800.0} and _launch_waits(argv2) == {0: 600.0, 1: 1800.0}
+
+
+def test_without_a_sample_wait_the_compiled_argv_is_unchanged(files):
+    for extra in ({}, {"breakers": {"run": {"starvation": {"stop_s": 900}}}}):
+        argv = up.load_config(_write(files, _cfg(files, **extra)))["trainer"]["argv"]
+        assert "--rl-sample-wait-s" not in argv and "--rl-island-sample-wait-s" not in argv
+
+
+@pytest.mark.parametrize("edit, match", [
+    (lambda c: c["fleet"]["trainer_argv"].extend(["--rl-sample-wait-s", "900"]),
+     r"breakers.trainer.sample_wait.timeout_s = 1200 but fleet.trainer_argv --rl-sample-wait-s = 900"),
+    (lambda c: c["islands"][0]["trainer"]["argv"].extend(["--rl-sample-wait-s", "0"]), "seconds > 0"),
+    (lambda c: c["islands"][0]["trainer"]["argv"].extend(["--rl-sample-wait-s", "1", "--rl-sample-wait-s", "2"]),
+     "repeats"),
+])
+def test_a_conflicting_or_bad_sample_wait_is_refused(files, edit, match):
+    cfg = _cfg(files, breakers={"trainer": {"sample_wait": {"timeout_s": 1200}}})
+    edit(cfg)
+    with pytest.raises(ValueError, match=match):
+        up.load_config(_write(files, cfg))
+
+
 def test_the_compiled_pools(files):
     cfg = up.load_config(_write(files, _cfg(files)))
     run = up.Run(cfg)

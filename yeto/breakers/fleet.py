@@ -30,6 +30,8 @@ FLEET_LAYERS: tuple[str, ...] = ("launch",)  # the fleet's one yeto launch
 FLEET_RULES = frozenset({"D11", "D12"})
 # flags the fleet derives for each island's trainer (they never come from fleet.trainer_argv)
 ISLAND_TRAINER_FLAGS = ("--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer")
+# a trainer flag an island may set for itself over the fleet's (the compile's --rl-island-sample-wait-s)
+SAMPLE_WAIT_FLAG = "--rl-sample-wait-s"
 
 Scope = Literal["fleet", "island", "component"]
 
@@ -97,13 +99,38 @@ def fleet_trainer_argv(run_config: Mapping[str, Any]) -> list[str]:
     return _strings(fleet.get("trainer_argv")) if isinstance(fleet, Mapping) else []
 
 
+def _sets(argv: Sequence[str], flag: str) -> bool:
+    return any(a == flag or a.startswith(f"{flag}=") for a in argv)
+
+
+def _without(argv: Sequence[str], flag: str) -> list[str]:
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a == flag:
+            skip = True
+        elif not a.startswith(f"{flag}="):
+            out.append(a)
+    return out
+
+
+def _island_own_argv(run_config: Mapping[str, Any], index: int) -> list[str]:
+    entry = _entries(run_config)[index]
+    trainer = entry.get("trainer") if isinstance(entry.get("trainer"), Mapping) else {}
+    return _strings(trainer.get("argv"))
+
+
 def island_trainer_argv(run_config: Mapping[str, Any], index: int) -> list[str]:
     """Island ``index``'s trainer as one ``yeto launch`` argv: the shared
     ``fleet.trainer_argv``, the island's GPU, the fleet's buffer-trainer role, then the
-    island's own ``trainer.argv`` (its release cadence and policy age)."""
+    island's own ``trainer.argv`` (its release cadence, policy age and sample wait; its
+    ``--rl-sample-wait-s`` replaces the fleet's)."""
     entry = _entries(run_config)[index]
     trainer = entry.get("trainer") if isinstance(entry.get("trainer"), Mapping) else {}
     argv = fleet_trainer_argv(run_config)
+    if _sets(_island_own_argv(run_config, index), SAMPLE_WAIT_FLAG):
+        argv = _without(argv, SAMPLE_WAIT_FLAG)
     if trainer.get("gpu"):
         argv += ["--gpu", str(trainer["gpu"])]
     return [*argv, *ISLAND_TRAINER_FLAGS, *_strings(trainer.get("argv"))]
@@ -175,7 +202,22 @@ def island_run_config(run_config: Mapping[str, Any], index: int) -> dict[str, An
     raw = entry.get("trainer") if isinstance(entry.get("trainer"), Mapping) else {}
     if raw.get("usd_per_h") is not None:
         trainer["usd_per_h"] = raw["usd_per_h"]
-    return {**_base(run_config), "trainer": trainer, "samplers": _island_samplers(run_config, index)}
+    base = _base(run_config)
+    if _sets(_island_own_argv(run_config, index), SAMPLE_WAIT_FLAG):
+        base = _without_section_sample_wait(base)  # the island's own sample wait wins over the run's
+    return {**base, "trainer": trainer, "samplers": _island_samplers(run_config, index)}
+
+
+def _without_section_sample_wait(base: dict[str, Any]) -> dict[str, Any]:
+    """``base`` without ``breakers.trainer.sample_wait.timeout_s`` (copied where changed)."""
+    section = base.get("breakers")
+    trainer = section.get("trainer") if isinstance(section, Mapping) else None
+    wait = trainer.get("sample_wait") if isinstance(trainer, Mapping) else None
+    if not isinstance(wait, Mapping) or "timeout_s" not in wait:
+        return base
+    wait = {k: v for k, v in wait.items() if k != "timeout_s"}
+    trainer = {**trainer, "sample_wait": wait} if wait else {k: v for k, v in trainer.items() if k != "sample_wait"}
+    return {**base, "breakers": {**section, "trainer": trainer}}
 
 
 def fleet_run_config(run_config: Mapping[str, Any]) -> dict[str, Any]:

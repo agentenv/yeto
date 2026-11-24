@@ -491,6 +491,9 @@ def add_cli_args(p) -> None:
                    "execution.max_policy_staleness); repeatable. It gates only that trainer's own "
                    "buffer: every trainer binds the launch-wide --rl-max-policy-age into its syncer "
                    "session contract, so trainers with different limits merge")
+    g.add_argument("--rl-island-sample-wait-s", action="append", default=None, metavar="K:S",
+                   help="with --rl-island-buffer-shards: the trainer with learner id K's own "
+                   "--rl-sample-wait-s (seconds without a new group while a round fills); repeatable")
     g.add_argument("--rl-sampler-spot", action="store_true",
                    help="with --rl-island-sample-role: the sampler islands use spot (preemptible) "
                    "capacity, the trainer island stays on demand; a reclaimed sampler island is "
