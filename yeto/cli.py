@@ -772,6 +772,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="leave a learner cluster up when the controller abandons it (default: tear it down, even with --keep)",
     )
     infra.add_argument(
+        "--island-lifecycle", choices=["auto", "on", "off"], default="auto",
+        help="keep each trainer island's state in the run store (fleet/trainers/<k>/state.json), adopt "
+        "running islands after a launcher restart and stop one island on its own fleet/trainers/<k>/STOP: "
+        "'auto' (default) for an RL launch of two or more trainer islands, 'on' for any launch with a run "
+        "store, 'off' never",
+    )
+    infra.add_argument(
         "--retry-until-up",
         action="store_true",
         help="keep retrying learner provisioning until capacity is found",

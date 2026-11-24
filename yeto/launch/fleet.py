@@ -8,6 +8,7 @@ import threading
 from dataclasses import dataclass
 
 from ..config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER  # noqa: F401 - registered exit code
+from . import island_lifecycle as lifecycle
 from .syncer import island_pool
 from .sky_ops import SYNCER_REFUSAL_MARKERS
 
@@ -114,6 +115,9 @@ TEARDOWN_UNVERIFIED_EXIT = 5
 CONTAINER_CHANGED_EXIT = 7
 # The trainer scheduler stopped after too many failed trainer incarnations in a row.
 TRAINER_GAVE_UP_EXIT = 8
+# The exit of an island its own STOP ended (``fleet/trainers/<k>/STOP``): a stop on request,
+# not a failure of the run.
+ISLAND_STOPPED_PREFIX = "STOPPED"
 
 
 class RunStopRequested(RuntimeError):
@@ -200,6 +204,8 @@ class FleetController:
         followers=(),
         follower_grace_s: float = 120.0,
         rollout=None,
+        recorder=None,
+        adopted=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -302,6 +308,17 @@ class FleetController:
         # drain (machines released) when run() returns or raises, the STOP flag included.
         self.rollout = rollout
         self._rollout_warned = False
+        # yeto.launch.island_lifecycle.FleetRecorder or None: every island state change is
+        # written to the run store (fleet/trainers/<k>/state.json), and each island's own
+        # STOP there ends that island only. None (a single-trainer launch by default):
+        # nothing is written or read.
+        self.recorder = recorder
+        # name -> the incarnation of an island this controller adopted from a dead
+        # launcher (its record in the store): it keeps that incarnation.
+        for name, incarnation in dict(adopted or {}).items():
+            if name in self.learners:
+                self.learners[name]["incarnation"] = int(incarnation)
+                self.learners[name]["adopted"] = True
 
     def _fleet(self, kind: str, name: str | None = None, *, force: bool = False, **fields) -> None:
         if self.fleet_log is None:
@@ -327,6 +344,8 @@ class FleetController:
             "failed_at": None,
             "attempt": None,
             "exit": None,
+            "incarnation": 0,
+            "relaunches": 0,
         }
 
     def abort(self, error: BaseException) -> None:
@@ -395,8 +414,9 @@ class FleetController:
         stops the trainer with a cut and tears the run down; before, the
         worker kept supervising the live islands until it was killed).
         """
-        for name in self.learners:
+        for name, rec in self.learners.items():
             self._fleet("island_ready", name, initial=True)
+            self._record(rec, reason="adopted from an earlier launcher" if rec.get("adopted") else "launched")
         while True:
             if self._abort_error is not None:
                 raise self._abort_error
@@ -407,7 +427,7 @@ class FleetController:
             elif self.syncer_probe is not None:
                 self._poll_local_syncer()
             for rec in self.learners.values():
-                self._poll(rec, is_syncer=False)
+                self._poll_recorded(rec)
             self._end_followers()
             if all(r["state"] in (DONE, ABANDONED) for r in self.learners.values()):
                 break
@@ -437,6 +457,111 @@ class FleetController:
                 )
             raise RuntimeError("all learners abandoned; nothing left to train")
         return exit_codes
+
+    # -- the island records (yeto.launch.island_lifecycle) -------------------------------
+    @staticmethod
+    def _unified_state(rec) -> str:
+        """The lifecycle state of a controller record (an island dropped for a
+        configuration error or a strict failure is ``failed``: never relaunched)."""
+        state = rec["state"]
+        if state == ABANDONED:
+            decision = rec.get("decision")
+            return lifecycle.FAILED if decision is not None and decision.action == lifecycle.FAIL \
+                else lifecycle.ABANDONED
+        if state == DONE:
+            return lifecycle.DONE
+        if state == RECOVERING:
+            return lifecycle.RECOVERING
+        return lifecycle.DRAINING if rec.get("draining") else lifecycle.RUNNING
+
+    def _record(self, rec, state: str | None = None, **fields) -> None:
+        """Write the island's record (state, machine handle, incarnation, relaunches, last
+        exit and decision) to the store; never raises."""
+        if self.recorder is None:
+            return
+        try:
+            ref = self.recorder.ref(rec["name"])
+            if ref is None:
+                return
+            decision = rec.get("decision")
+            self.recorder.record(
+                rec["name"], state or self._unified_state(rec),
+                handle=lifecycle.handle_of(ref.source, rec["name"], rec["job_id"]),
+                incarnation=int(rec.get("incarnation") or 0), relaunches=int(rec.get("relaunches") or 0),
+                exit=None if rec.get("exit") is None else str(rec["exit"])[:500],
+                decision=None if decision is None else decision.to_json(), **fields)
+        except Exception as e:  # noqa: BLE001 - the record is a view; supervision goes on
+            print(f"[launcher] island record of {rec.get('name')}: {e}", file=sys.stderr)
+
+    def _poll_recorded(self, rec) -> None:
+        """:meth:`_poll` one learner, with its island STOP first; a state, machine or
+        incarnation change is written to its record (a raise too: the island ``failed``
+        or, for a fixed roster, ``abandoned``)."""
+        before = (rec["state"], rec["job_id"], rec["name"], rec.get("draining"))
+        try:
+            if not self._island_stop(rec):
+                self._poll(rec, is_syncer=False)
+        except BaseException as error:
+            if self.recorder is not None and rec["state"] != DONE:  # a stopped island stays done
+                state = lifecycle.ABANDONED if isinstance(error, FixedRosterIslandAbandoned) else lifecycle.FAILED
+                if rec.get("decision") is None and state == lifecycle.FAILED:
+                    rec["decision"] = lifecycle.classify(log_text=str(error), detail=str(error))
+                self._record(rec, state, reason=f"{type(error).__name__}: {error}"[:300])
+            raise
+        if (rec["state"], rec["job_id"], rec["name"], rec.get("draining")) != before:
+            decision = rec.get("decision")
+            if rec["state"] == DONE and (decision is None or decision.relaunch):
+                rec["decision"] = lifecycle.classify(succeeded=True, detail=str(rec.get("exit") or ""))
+            elif rec["state"] == RUNNING and decision is not None and decision.relaunch:
+                rec["decision"] = None  # relaunched: the failure is history (kept in the record's history)
+            decision = rec.get("decision")
+            reason = rec.get("exit") if rec.get("exit") is not None else (
+                decision.detail if decision is not None else None)
+            self._record(rec, reason=None if reason is None else str(reason)[:300])
+
+    def _island_stop(self, rec) -> bool:
+        """Island ``rec``'s own STOP (``fleet/trainers/<k>/STOP``): it ends this island only.
+        The island drains (no relaunch from here on), is released, and is ``done`` with
+        the request as its exit; the fleet goes on. True when the island is stopped now."""
+        if self.recorder is None or rec["state"] in (DONE, ABANDONED):
+            return False
+        try:
+            request = self.recorder.stop_requested(rec["name"])
+        except Exception:  # noqa: BLE001 - asked again next poll
+            return False
+        if request is None:
+            return False
+        why = str(request.get("reason") or "STOP")
+        by = request.get("by")
+        rec["draining"] = True
+        self._record(rec, lifecycle.DRAINING, reason=f"island STOP: {why}")
+        print(f"[launcher] {rec['name']}: island STOP ({why}{', by ' + str(by) if by else ''}); stopping "
+              "this island only, the fleet goes on", file=sys.stderr)
+        rec["stopped"] = True  # an in-flight relaunch tears its cluster down when it ends
+        attempt = rec.get("attempt")
+        if attempt is not None and attempt.thread is not None and not attempt.finished:
+            attempt.thread.join(RELAUNCH_JOIN_S)
+        if attempt is not None and attempt.finished and attempt.result is not None \
+                and attempt.name and attempt.name != rec["name"]:
+            self._down(attempt.name)  # relaunched under a new name meanwhile
+        rec["attempt"] = None
+        rec["state"] = DONE
+        rec["exit"] = f"{ISLAND_STOPPED_PREFIX} (island STOP: {why})"
+        rec["decision"] = lifecycle.classify(stopped=True, detail=why)
+        rec["draining"] = False
+        self._fleet("island_stop", rec["name"], reason=f"island STOP: {why}"[:500])
+        if self.keep_abandoned:
+            print(f"[launcher] keeping stopped cluster {rec['name']} (--keep-abandoned)")
+        else:
+            self._down(rec["name"])
+        self._record(rec, lifecycle.DONE, reason=f"island STOP: {why}", stop=dict(request))
+        if self.fixed_roster:
+            # the syncer of a fixed roster waits for every learner: one island stopped ends the run
+            message = (f"fixed roster: island {rec['name']} stopped on its island STOP ({why}); a fixed-roster "
+                       "fleet cannot go on without it")
+            print(f"[launcher] ERROR: {message}", file=sys.stderr)
+            raise FixedRosterIslandAbandoned(message)
+        return True
 
     def _poll_local_syncer(self) -> None:
         """Subprocess syncer: never abandoned — a dead process is restarted
@@ -520,6 +645,7 @@ class FleetController:
             else:
                 config_error = None if is_syncer else self._config_error(rec)
                 if config_error is not None:
+                    rec["decision"] = lifecycle.classify(log_text=config_error)
                     # the island refused its launch options: a relaunch fails the same way
                     self._fleet("island_lost", rec["name"], reason=f"configuration error: {config_error}"[:500])
                     if self.elastic:
@@ -530,6 +656,10 @@ class FleetController:
                     raise IslandConfigError(f"island {rec['name']} refused its configuration "
                                             f"(not relaunched): {config_error}")
                 strict_failure = self._strict_failure(rec)
+                if strict_failure is not None and not is_syncer:
+                    rec["decision"] = lifecycle.classify(log_text=strict_failure, detail=strict_failure)
+                    if rec["decision"].action != lifecycle.FAIL:  # a strict line without its marker
+                        rec["decision"] = lifecycle.decision(lifecycle.STRICT, strict_failure)
                 if strict_failure is not None and self.elastic and not is_syncer:
                     # Elastic: a refused or strictly failed island is a deterministic
                     # error -- relaunching it cannot help. Tear down only this island,
@@ -762,6 +892,10 @@ class FleetController:
         rec["failed_at"] = self.ops.now()
         if not is_syncer:
             self._fleet("island_lost", rec["name"], reason=str(reason))
+            text = str(reason)
+            rec["decision"] = lifecycle.classify(
+                detail=text, preempted="preempt" in text.lower(),
+                lost=any(w in text for w in ("not UP", "unavailable", "left the elastic pool")))
         # Fixed-roster RL: the recovery budget is cumulative over relaunches
         # (an island that fails again right after every relaunch must not be
         # relaunched forever while the rest of the fleet waits on the syncer).
@@ -802,6 +936,8 @@ class FleetController:
             if attempt.result is not None and attempt.name and attempt.name != rec["name"]:
                 old = rec["name"]
                 rec["name"] = attempt.name
+                if self.recorder is not None:
+                    self.recorder.rename(old, attempt.name)
                 print(f"[launcher] {old} relaunched under a new cluster name: {attempt.name}")
                 if self.on_rename is not None:
                     try:
@@ -811,6 +947,8 @@ class FleetController:
             if attempt.result is not None:
                 rec["job_id"] = attempt.result
                 rec["state"] = RUNNING
+                rec["incarnation"] = int(rec.get("incarnation") or 0) + 1
+                rec["relaunches"] = int(rec.get("relaunches") or 0) + 1
                 # time spent recovering counts toward the window's budget
                 rec["recovering_s"] = rec.get("recovering_s", 0.0) + (
                     self.ops.now() - rec["failed_at"])
@@ -946,7 +1084,7 @@ class FleetController:
                 attempt.result = None
             finally:
                 attempt.finished = True
-            if attempt.result is not None and rec["state"] == ABANDONED:
+            if attempt.result is not None and (rec["state"] == ABANDONED or rec.get("stopped")):
                 # Abandoned while this attempt was in flight, but the
                 # relaunch re-provisioned the cluster anyway: tear it back
                 # down so nothing is left running unattended.
