@@ -183,6 +183,7 @@ class SshIslandOps:
         self.log = log or (lambda m: print(m, file=sys.stderr, flush=True))
         self.islands: dict[str, _Island] = {}
         self._lock = threading.Lock()
+        self.reattached: set[str] = set()  # islands whose start followed a running incarnation
 
     # -- registry -------------------------------------------------------------------
     def owns(self, name: str) -> bool:
@@ -280,6 +281,7 @@ class SshIslandOps:
 
     def _attach(self, rec: _Island, incarnation: int) -> int:
         job = rec.islands.attach(incarnation)  # its ledger row is open since its start
+        self.reattached.add(rec.name)
         return self._reset(rec, job, incarnation)
 
     # -- the fleet controller's ops -----------------------------------------------------

@@ -210,6 +210,7 @@ def classify_error(error: BaseException | None, *, detail: str = "") -> Decision
 # -- the state record in the store ---------------------------------------------------------------
 STATE_DIR = "fleet/trainers"
 HISTORY = 20  # transitions kept in a record
+SYNCER_KEY = "fleet/syncer.json"
 
 
 def state_key(island: int) -> str:
@@ -329,6 +330,23 @@ class IslandStateStore:
         except Exception as error:  # noqa: BLE001
             self._warn("write", error)
         return record
+
+    # -- the syncer's record (fleet/syncer.json: its cluster, job and address)
+    def write_syncer(self, **fields: Any) -> None:
+        body = {**fields, "updated": round(self.clock(), 3), "controller": self.controller}
+        try:
+            self.objects.write(SYNCER_KEY, json.dumps(body, sort_keys=True, default=str).encode())
+        except Exception as error:  # noqa: BLE001
+            self._warn("syncer write", error)
+
+    def read_syncer(self) -> dict[str, Any] | None:
+        try:
+            raw = self.objects.read(SYNCER_KEY)
+            record = None if raw is None else json.loads(raw)
+        except Exception as error:  # noqa: BLE001
+            self._warn("syncer read", error)
+            return None
+        return record if isinstance(record, dict) else None
 
     # -- the stop channel
     def stop_requested(self, island: int) -> dict[str, Any] | None:
