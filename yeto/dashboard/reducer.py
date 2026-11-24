@@ -36,6 +36,7 @@ from . import alerts as alerts_mod
 from . import async_rl
 from . import breakers as breakers_mod
 from . import cost as cost_mod
+from . import fleet_islands
 from . import sft as sft_mod
 from . import topology as topology_mod
 from .sources import COST_EVENTS_FILE, up_state_stops
@@ -330,6 +331,10 @@ class Reducer:
         self._source_pre: dict[str, float] = {}  # source -> earliest record time before its first join
         # the dashboard's own command line, for the page's "Commands" box (cli.page_commands)
         self.commands: dict[str, str] | None = None
+        # <store>/fleet/plan.json of a fleet of async islands (fleet_islands.PlanFile); None otherwise
+        self.fleet_plan: dict | None = None
+        self.fleet_plan_source: str | None = None
+        self.fleet_plan_seq = 0  # bumped by every plan change (the cached views key on it)
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
@@ -568,6 +573,16 @@ class Reducer:
         warn = finite(self.breakers.section_param("run.budget", "warn_ratio"))
         if warn is not None and "budget_warn_pct" not in self.threshold_overrides:
             self.thresholds["budget_warn_pct"] = round(warn * 100.0, 6)
+        return True
+
+    def load_fleet_plan(self, doc: Any, source: str) -> bool:
+        """Take a fleet's ``fleet/plan.json`` (``fleet_islands.PlanFile``); False when ``doc``
+        is not a fleet plan or did not change."""
+        plan = fleet_islands.load_plan(doc)
+        if plan is None or plan == self.fleet_plan:
+            return False
+        self.fleet_plan, self.fleet_plan_source = plan, source
+        self.fleet_plan_seq += 1
         return True
 
     def guard_drop_rates(self) -> dict[str, dict]:
@@ -1077,8 +1092,11 @@ class Reducer:
                  "transactions": any(v["transactions"] for v in isl_extra.values())}
         view = {"overview": ov, "islands": isl_extra, "rounds_syncer": self.rounds(), "usage": usage,
                 "label": self.label, "spot": list(self.spot)}
-        asy = self.async_.view()
+        fleet = fleet_islands.resolve(self)  # None unless a fleet of async islands
+        asy = self.async_.view(fleet=fleet)
         if asy is not None:
+            if fleet is not None:  # per-pool train-rollout mismatch (fleet_islands.pool_mismatch)
+                fleet_islands.attach_mismatch(self, asy, {i: x["rounds"] for i, x in isl_extra.items()}, fleet)
             view["async"] = asy
         topo = topology_mod.view(self, ov["islands"], now)
         if topo is not None:

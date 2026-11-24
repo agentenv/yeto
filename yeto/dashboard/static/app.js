@@ -450,7 +450,7 @@ function asyncPanel(){
       '</td><td class="num">'+f(x.lag_p50,1)+" / "+f(x.lag_max,0)+'</td><td>'+hist(x.lag_hist)+'</td><td class="num">'+f(x.generate_p50_s,0)+" / "+f(x.generate_max_s,0)+'</td><td class="num">'+f(x.groups,0)+'</td><td class="num">'+zvCell(x)+
       '</td><td class="num">'+f(x.truncated,0)+(fin(x.samples)&&fin(x.truncated)?" ("+pct(x.truncated/x.samples)+")":"")+'</td><td class="num">'+f(x.dropped_groups,0)+'</td><td class="num">'+f(x.retried_trials,0)+" / "+f(x.lost_trials,0)+'</td><td class="num">'+f(x.reward_mean_last)+'</td><td class="num">'+f(x.max_backlog_groups,0)+'</td></tr>'}).join("")+'</table>'+
     (sps.some(function(c){var x=S[c.id]||{};return !fin(x.samples)})?'<div class="note">n/a in truncated / reward: the sampler did not write rl_sampler_engine_round with these fields (Miles-generating samplers and older yeto versions do not); zero-variance then comes from the trainer</div>':"");
-  aBacklog(A);aRel(A);aComp(A);aDisp(A,cards);
+  aBacklog(A);aRel(A);aComp(A);aDisp(A,cards);aFleet(A);
   var pl=(A.pool||[]).slice(-100).reverse();$("aPoolBox").hidden=!pl.length;
   var sc=A.pool_scale;$("aPoolScale").textContent=sc?("samplers: "+sc.ready.length+" ready"+(sc.draining.length?", "+sc.draining.length+" draining ("+sc.draining.join(", ")+")":"")+(sc.paused&&sc.paused.length?", "+sc.paused.length+" paused by hand ("+sc.paused.join(", ")+")":"")+(sc.target!=null?" · target "+sc.target+(sc.manual?" (set by hand)":""):"")+(sc.ready.length?" · shards "+sc.ready.join(", "):"")):"";
   $("aPool").innerHTML=pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>'+(/^nc_elastic_manual_/.test(e.event||"")?"manual":"pool")+'</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
@@ -485,7 +485,10 @@ function aComp(A){
 }
 function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t,i){el("text",{x:sx(t),y:H-6,"text-anchor":["start","middle","end"][i]},s).textContent=clock(t)})}
 function aBacklog(A){
-  var box=$("aBacklog"),b=A.backlog;box.innerHTML="";$("legBacklog").innerHTML="";
+  if(A.islands){$("aBacklog").innerHTML='<div class="note">one backlog per island (each trainer reads its own store lane): see Islands above</div>';$("legBacklog").innerHTML="";return}
+  blChart($("aBacklog"),$("legBacklog"),A.backlog)}
+function blChart(box,leg,b){
+  box.innerHTML="";leg.innerHTML="";
   if(!b||!(b.points||[]).length){box.innerHTML='<div class="note">no data (no rl_sampler_round with groups)</div>';return}
   var pts=b.points,rep=b.reported||{},rk=Object.keys(rep),all=pts.map(function(p){return p[0]});rk.forEach(function(k){rep[k].forEach(function(p){all.push(p[0])})});
   var t0=Math.min.apply(null,all),t1=Math.max.apply(null,all),vm=Math.max.apply(null,pts.map(function(p){return fin(p[3])?p[3]:0}).concat([1]));
@@ -497,7 +500,7 @@ function aBacklog(A){
   if(bp.length)el("path",{d:"M"+bp.map(function(p){return sx(p[0])+","+sy(p[3])}).join("L"),fill:"none",stroke:"var(--T)","stroke-width":2},s);
   rk.forEach(function(k,i){rep[k].forEach(function(p){el("circle",{cx:sx(p[0]),cy:sy(p[1]),r:3.5,fill:p[2]?"var(--bad)":RUN_COLORS[(i+1)%4]},s)})});
   tAxis(s,t0,t1,sx,H);
-  $("legBacklog").innerHTML='<span><i class="sw" style="background:var(--T)"></i>backlog (written '+f(b.written,0)+' · read position '+f(b.read,0)+')</span>'+(rk.length?'<span><i class="sw" style="background:var(--bad)"></i>sampler reported: backlog full</span><span><i class="sw" style="background:var(--i1)"></i>sampler reported: admitted</span>':"")+
+  leg.innerHTML='<span><i class="sw" style="background:var(--T)"></i>backlog (written '+f(b.written,0)+' · read position '+f(b.read,0)+')</span>'+(rk.length?'<span><i class="sw" style="background:var(--bad)"></i>sampler reported: backlog full</span><span><i class="sw" style="background:var(--i1)"></i>sampler reported: admitted</span>':"")+
     (b.has_reads&&b.read_source&&b.read_source!=="buffer_selected"?'<span>read position = '+esc(b.read_source)+' (no rl_policy_released.buffer_selected yet)</span>':"")+(b.has_reads?"":'<span>no read position on the tapes (no rl_policy_released.buffer_selected): backlog unknown</span>');
 }
 function aDisp(A,cards){
@@ -534,11 +537,38 @@ function aRel(A){
       el("line",{x1:x0,y1:ly(0),x2:x1,y2:ly(i+1),stroke:"var(--P)","stroke-opacity":.5},s);el("circle",{cx:x1,cy:ly(i+1),r:4,fill:"var(--P)"},s)})});
   tAxis(s,t0,t1,sx,H);
   $("legRel").innerHTML='<span><i class="sw" style="background:var(--P)"></i>release → load done</span>'+(pool.length?'<span><i class="sw" style="background:var(--warn)"></i>NC pool event</span><span><i class="sw" style="background:var(--bad)"></i>NC pool failure (evicted / lost / crash loop)</span>':"");
-  if(rows.length)box2.innerHTML='<table class="c"><tr><th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>sampler '+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>'+
-    // a sampler starting on the base weights makes a v0 row with no trainer release: "base"
-    rows.slice(-30).reverse().map(function(r){var base=r.trainer==null&&!fin(r.released_at);return '<tr><td class="num">v'+esc(r.policy_version)+'</td><td>'+(base?'<span class="note">base</span>':esc(r.trainer==null?"n/a":r.trainer))+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base?"—":f(r.upload_s,1))+'</td>'+
-      sids.map(function(k){var ld=(r.loads||{})[k];return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"+(fin(ld.drain_s)?'<div class="note">drain '+f(ld.drain_s,0)+" s"+(ld.drain_cut?", "+f(ld.drain_cut,0)+" cut":"")+'</div>':"")):"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>';
+  if(rows.length)box2.innerHTML=relTable(rows,fleetSamplers(A));
 }
+// a fleet's samplers -> their island: a release row of another island is no load the sampler missed
+function fleetSamplers(A){var o={};(A.islands||[]).forEach(function(x){x.pools.forEach(function(p){p.samplers.forEach(function(s){o[s]=x.island})})});return o}
+function relTable(rows,sIsl){
+  var sids=[];rows.forEach(function(r){Object.keys(r.loads||{}).forEach(function(k){if(sids.indexOf(k)<0)sids.push(k)})});sids.sort();
+  // a fleet: one row per (island, version), both islands may release v4
+  var il=rows.some(function(r){return r.island!=null});sIsl=sIsl||{};
+  return '<table class="c"><tr>'+(il?'<th>island</th>':"")+'<th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>sampler '+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>'+
+    // a sampler starting on the base weights makes a v0 row with no trainer release: "base"
+    rows.slice(-30).reverse().map(function(r){var base=r.trainer==null&&!fin(r.released_at);return '<tr>'+(il?'<td class="num">'+esc(r.island==null?"—":r.island)+'</td>':"")+'<td class="num">v'+esc(r.policy_version)+'</td><td>'+(base?'<span class="note">base</span>':esc(r.trainer==null?"n/a":r.trainer))+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base?"—":f(r.upload_s,1))+'</td>'+
+      sids.map(function(k){var ld=(r.loads||{})[k];if(!ld&&il&&sIsl[k]!=null&&sIsl[k]!==r.island)return '<td class="num note">—</td>';return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"+(fin(ld.drain_s)?'<div class="note">drain '+f(ld.drain_s,0)+" s"+(ld.drain_cut?", "+f(ld.drain_cut,0)+" cut":"")+'</div>':"")):"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>'}
+/* a fleet of async islands (async.islands, fleet_islands.py): per island its pools, backlog, policy ages and releases */
+var ENG={vllm:"vLLM",sglang:"SGLang"};
+function engName(e){return e?(ENG[String(e).toLowerCase()]||String(e)):null}
+function mmCell(m){return m?f(m.value,4)+'<div class="note">'+esc(m.method)+" · "+m.rounds+" round"+(m.rounds===1?"":"s")+"</div>":'<span class="note">not reported</span>'}
+function poolTable(x){
+  return '<table class="c"><tr><th>pool</th><th>engine · precision</th><th>cards · provider</th><th>samplers</th><th>policy</th><th>policy age p50 / max</th><th>groups written</th>'+
+    '<th title="train_metrics.train_rollout_logprob_abs_diff of the steps this pool fed">logprob |diff|</th><th title="train_metrics.tis_clipfrac (mismatch.tis_clipfrac) of the steps this pool fed">TIS clipfrac</th></tr>'+
+    x.pools.map(function(p){var pr=p.provenance||{},mm=p.mismatch||{},prec=String(p.rollout_quant||pr.precision||"").toUpperCase();
+      return '<tr><td>'+esc(p.name)+(p.source_name&&p.source_name!==p.name?' <span class="note">'+esc(p.source_name)+'</span>':"")+'</td><td>'+esc([engName(p.engine||pr.engine),prec].filter(Boolean).join(" · ")||"not reported")+
+        '</td><td>'+esc([pr.card_model,pr.topology,p.provider].filter(Boolean).join(" · ")||"not reported")+'</td><td>'+esc(p.samplers.join(", ")||"none yet")+'</td><td class="num">'+(fin(p.policy_version)?"v"+esc(p.policy_version):"n/a")+
+        '</td><td class="num">'+f(p.lag_p50,1)+" / "+f(p.lag_max,0)+'</td><td class="num">'+f(p.groups,0)+'</td><td class="num">'+mmCell(mm.logprob_diff)+'</td><td class="num">'+mmCell(mm.tis_clip)+'</td></tr>'}).join("")+'</table>'}
+function aFleet(A){
+  var box=$("aFleetBox"),I=A.islands;if(!box)return;box.hidden=!I;if(!I)return;
+  $("aFleet").innerHTML=I.map(function(x,i){var pa=x.policy_age||{},b=x.backlog||{},pts=b.points||[],last=pts.length?pts[pts.length-1]:null;
+    return '<h3>Island '+esc(x.island)+(x.name?" · "+esc(x.name):"")+' <span class="note">'+esc([x.trainer!=null?"trainer island "+x.trainer:"trainer not on the tapes yet",x.gpu,"R2 lane "+(x.substore||"trainer"+x.island)+"/",
+      fin(x.release_every)?"release every "+x.release_every:null,fin(x.max_policy_age)?"max policy age "+x.max_policy_age:null].filter(Boolean).join(" · "))+'</span></h3>'+
+      '<div class="note">backlog '+(last&&fin(last[3])?f(last[3],0)+" groups":"n/a")+" (written "+f(b.written,0)+" · read position "+f(b.read,0)+") · latest release "+(fin(x.latest)?"v"+x.latest:"none")+
+      " · trained groups "+f(x.trained_groups,0)+" · stale dropped "+f(pa.stale_groups,0)+" · policy age of trained groups: "+hist(pa.hist)+(fin(pa.mean_last)?" (last round mean "+f(pa.mean_last,2)+", max "+f(pa.max_last,0)+")":"")+'</div>'+
+      poolTable(x)+'<div style="max-width:760px"><div class="legend" id="legFl'+i+'"></div><div id="aFl'+i+'"></div></div>'+((x.releases||[]).length?relTable(x.releases):"")}).join("");
+  I.forEach(function(x,i){blChart($("aFl"+i),$("legFl"+i),x.backlog)})}
 function render(){
   if(!V)return;O=V.overview;
   var ids=(O.islands||[]).map(function(c){return c.id});if(ids.indexOf(SEL)<0)SEL=ids[0]||null;

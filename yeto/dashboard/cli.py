@@ -142,6 +142,14 @@ def _resolved(args, paths: list[str], store=None):
                         getattr(store, "objects", None))
 
 
+def _plan(paths: list[str], store=None, interval_s: float = 0.0):
+    """A fleet's ``fleet/plan.json``: under a local store directory given as a tape path, or
+    under the run store (``fleet_islands.PlanFile``); also reads the islands' lane tapes."""
+    from .fleet_islands import PlanFile, plan_candidates
+
+    return PlanFile(plan_candidates(paths), getattr(store, "objects", None), tape_interval_s=interval_s)
+
+
 def _attach_compare(reducer, args) -> None:
     """load the --compare run into its own reducer."""
     if not getattr(args, "compare", None):
@@ -176,7 +184,8 @@ def main(args) -> int:
         try:
             st = _store(args)
             return serve(paths, reducer=reducer, host=args.host, port=args.port,
-                         interval=args.poll, head=args.head, store=st, resolved=_resolved(args, paths, st))
+                         interval=args.poll, head=args.head, store=st, resolved=_resolved(args, paths, st),
+                         plan=_plan(paths, st, float(getattr(args, "store_poll", None) or 0.0)))
         except ValueError as exc:
             print(f"[dashboard] {exc}", file=sys.stderr)
             return 2
@@ -187,10 +196,13 @@ def main(args) -> int:
         sources = load_all(reducer, paths)
         st = _store(args)
         _resolved(args, paths, st).pump(reducer)
+        plan = _plan(paths, st)
+        plan.pump(reducer)
         if st is not None:
             reducer.store_status = st.status
             st.pump(reducer)
-            sources = list(sources) + sorted(st.sources)
+            plan.pump_tapes(reducer)
+            sources = list(sources) + sorted(st.sources) + sorted(x for t in plan.tapes() for x in t.sources)
         out = export_html(reducer, args.out)
         print(f"[dashboard] {len(sources)} tape(s), {reducer.event_seq} record(s) -> {out}")
         return 0

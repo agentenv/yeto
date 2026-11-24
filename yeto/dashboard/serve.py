@@ -47,9 +47,12 @@ def check_loopback(host: str) -> None:
 class DashboardState:
     """Reducer + followed sources behind one lock."""
 
-    def __init__(self, reducer: Reducer, paths: list[str], store: Any = None, resolved: Any = None):
+    def __init__(self, reducer: Reducer, paths: list[str], store: Any = None, resolved: Any = None,
+                 plan: Any = None):
         self.store = store  # store_tapes.StoreTapes: island tapes uploaded to the run store
         self.resolved = resolved  # breakers.ResolvedFile: the run's breakers.resolved.json
+        # fleet_islands.PlanFile: a fleet's fleet/plan.json and its islands' store lane tapes
+        self.plan = plan
         self.reducer = reducer
         if store is not None and callable(getattr(store, "status", None)):
             reducer.store_status = store.status  # read failures reach the page and the alerts
@@ -73,6 +76,9 @@ class DashboardState:
                 self.reducer.feed_operator_stop(rec)
             if self.resolved is not None:  # written by run up at start; read again when it changes
                 self.resolved.pump(self.reducer)
+            if self.plan is not None:  # a fleet: its plan, then the pools' tapes under trainer<k>/tapes/
+                self.plan.pump(self.reducer)
+                n += self.plan.pump_tapes(self.reducer)
             self.last_poll = time.time()
         return n
 
@@ -171,9 +177,10 @@ def tunnel_hint(port: int, head: str | None = None) -> str:
 
 
 def serve(paths: list[str], *, reducer: Reducer, host: str = "127.0.0.1", port: int = 8787,
-          interval: float = 2.0, head: str | None = None, store: Any = None, resolved: Any = None) -> int:
+          interval: float = 2.0, head: str | None = None, store: Any = None, resolved: Any = None,
+          plan: Any = None) -> int:
     check_loopback(host)
-    state = DashboardState(reducer, paths, store=store, resolved=resolved)
+    state = DashboardState(reducer, paths, store=store, resolved=resolved, plan=plan)
     # Bind the port before the first (potentially very slow) full reduce: a run
     # store that already holds many tapes makes the first poll() take minutes,
     # and serving would never come up. Serve immediately and let the follow
