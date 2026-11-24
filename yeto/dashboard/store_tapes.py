@@ -31,10 +31,12 @@ PAGE_KEYS = 1000  # keys of one listing request (S3 ListObjectsV2)
 DEFAULT_STORE_POLL_S = 10.0  # ``serve``: seconds between two polls of the store
 
 
-def tape_of(key: str) -> str | None:
-    """``tapes/<island>/<incarnation>/`` of a chunk key; None for any other key."""
-    parts = key.split("/")
-    return "/".join(parts[:3]) + "/" if len(parts) == 4 and key.startswith(PREFIX) else None
+def tape_of(key: str, prefix: str = PREFIX) -> str | None:
+    """``<prefix><island>/<incarnation>/`` of a chunk key; None for any other key."""
+    if not key.startswith(prefix):
+        return None
+    parts = key[len(prefix):].split("/")
+    return prefix + "/".join(parts[:2]) + "/" if len(parts) == 3 else None
 
 
 def open_objects(store: str, environ: Any = None) -> Any:
@@ -51,9 +53,13 @@ def open_objects(store: str, environ: Any = None) -> Any:
 
 class StoreTapes:
     def __init__(self, objects: Any, *, label: str = "store", interval_s: float = 0.0,
-                 clock: Callable[[], float] = time.monotonic, page_keys: int = PAGE_KEYS) -> None:
+                 clock: Callable[[], float] = time.monotonic, page_keys: int = PAGE_KEYS,
+                 prefix: str = PREFIX) -> None:
         self.objects = objects
         self.label = label
+        # ``tapes/`` of the run store; ``trainer<k>/tapes/`` for the samplers of a fleet island
+        # (they upload under their island's store lane, fleet_islands.PlanFile)
+        self.prefix = prefix
         self.interval_s = float(interval_s)
         self.page_keys = int(page_keys)
         self._clock = clock
@@ -72,7 +78,7 @@ class StoreTapes:
         self.last_error_at: float | None = None
 
     def _done(self, key: str) -> bool:
-        tape = tape_of(key)
+        tape = tape_of(key, self.prefix)
         return key in self.seen if tape is None else key <= self.cursors.get(tape, "")
 
     def _new_keys(self) -> list[str]:
@@ -80,17 +86,17 @@ class StoreTapes:
         page = getattr(self.objects, "list_page", None)
         if not callable(page):  # an object API without paged listings: everything, every poll
             self.requests += 1
-            return sorted(k for k in self.objects.list(PREFIX) if k.endswith(".jsonl") and not self._done(k))
+            return sorted(k for k in self.objects.list(self.prefix) if k.endswith(".jsonl") and not self._done(k))
         new: list[str] = []
         cursor = ""
         while True:
-            keys, last = page(PREFIX, start_after=cursor, limit=self.page_keys)
+            keys, last = page(self.prefix, start_after=cursor, limit=self.page_keys)
             self.requests += 1
             new += [k for k in keys if k.endswith(".jsonl") and not self._done(k)]
             if last is None:
                 return sorted(new)
             # the page ended inside a known tape: the rest of it up to its cursor is consumed
-            cursor = max(last, self.cursors.get(tape_of(last) or "", ""))
+            cursor = max(last, self.cursors.get(tape_of(last, self.prefix) or "", ""))
 
     def pump(self, reducer) -> int:
         now = self._clock()
@@ -104,7 +110,7 @@ class StoreTapes:
             return 0
         n, blocked = 0, set()
         for key in keys:
-            parts = key[len(PREFIX):].split("/")
+            parts = key[len(self.prefix):].split("/")
             if len(parts) != 3:
                 self.seen.add(key)
                 continue
@@ -118,7 +124,7 @@ class StoreTapes:
                 self._failed(error)
                 blocked.add((island, inc))
                 continue  # retried at the next poll
-            self.cursors[tape_of(key)] = key  # keys come sorted: the cursor only moves forward
+            self.cursors[tape_of(key, self.prefix)] = key  # keys come sorted: the cursor only moves forward
             if data is None:
                 continue
             source = f"{self.label}:{island}/{inc}"

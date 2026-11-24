@@ -673,7 +673,11 @@ class AsyncState:
               if r.get("ts") is not None and (_f(r.get("groups")) or 0) > 0]
         return max(ts) if ts else None
 
-    def view(self) -> dict | None:
+    def view(self, fleet: dict | None = None) -> dict | None:
+        """The async GRPO section. ``fleet`` (``fleet_islands.resolve``): a fleet of async
+        islands; the releases are then keyed by (island, version), the shared backlog is
+        replaced by one per island and ``islands`` holds each island's own block
+        (:meth:`island_blocks`). Without it the view is the single-trainer one."""
         if not self.active():
             return None
         samplers = {}
@@ -763,10 +767,60 @@ class AsyncState:
                     comp["by_segments"] = segment_fate([r["compaction"].get("by_segments") or {} for r in rows
                                                         if r.get("compaction")], stale)
                 trainers[iid]["compaction"] = comp
-        return {"samplers": samplers, "trainers": trainers, "backlog": self.backlog_series(),
-                "releases": self.release_rows(), "pool": self.pool[-500:], "pool_scale": self.pool_scale(),
-                "dispense": self.dispense_view(),
-                "roles": dict(self.roles)}
+        out = {"samplers": samplers, "trainers": trainers, "backlog": self.backlog_series(),
+               "releases": self.release_rows(), "pool": self.pool[-500:], "pool_scale": self.pool_scale(),
+               "dispense": self.dispense_view(),
+               "roles": dict(self.roles)}
+        if fleet is not None:
+            # one read position per store lane: a shared backlog would subtract one lane's
+            # position from every lane's writes
+            out["backlog"] = None
+            out["releases"] = self.release_rows(island_of=fleet["island_of"])
+            out["islands"] = self.island_blocks(fleet, samplers, trainers, out["releases"])
+        return out
+
+    def island_blocks(self, fleet: dict, samplers: dict, trainers: dict, releases: list[dict]) -> list[dict]:
+        """One block per fleet island: its trainer, its pools (samplers pooled: written groups,
+        policy age of the rounds they generated), its own backlog (its samplers' writes minus
+        its trainer's read position on its lane), its policy ages and its releases."""
+        out = []
+        for isl in fleet["islands"]:
+            k, tid = isl["learner"], isl.get("trainer")
+            sids = [sid for p in isl["pools"] for sid in p["samplers"]]
+            pools = []
+            for p in isl["pools"]:
+                lags = [_f(r.get("version_lag")) for sid in p["samplers"]
+                        for r in (self.sampler.get(sid) or {}).get("rounds", {}).values()
+                        if _f(r.get("version_lag")) is not None]
+                rows = [samplers[sid] for sid in p["samplers"] if sid in samplers]
+                vers = [_int(x.get("policy_version")) for x in rows if _int(x.get("policy_version")) is not None]
+                groups = [x["groups"] for x in rows if x.get("groups") is not None]
+                pools.append({**{key: p.get(key) for key in ("name", "source_name", "provider", "shard_base",
+                                                            "engine", "rollout_quant")},
+                              "samplers": list(p["samplers"]),
+                              "provenance": next((x["provenance"] for x in rows if x.get("provenance")), None),
+                              "policy_version": max(vers) if vers else None,
+                              "lag_p50": quantile(lags, 0.5), "lag_max": max(lags) if lags else None,
+                              "groups": sum(groups) if groups else None,
+                              "ended": bool(rows) and all(x.get("ended") for x in rows)})
+            t = trainers.get(tid) or {}
+            last = next((r for r in reversed(t.get("rounds") or []) if r.get("policy_age_mean") is not None), {})
+            cap = next((r.get("max_policy_age") for r in reversed(t.get("rounds") or [])
+                        if r.get("max_policy_age") is not None), None)
+            mine = [r for r in releases if r.get("island") == k]
+            out.append({"island": k, "name": isl.get("name"), "trainer": tid, "gpu": isl.get("gpu"),
+                        "substore": isl.get("substore"), "release_every": isl.get("release_every"),
+                        "max_policy_age": isl.get("max_policy_age") if isl.get("max_policy_age") is not None else cap,
+                        "pools": pools,
+                        "backlog": self.backlog_series(samplers=set(sids), trainers={tid} if tid else set()),
+                        "policy_age": {"hist": t.get("age_hist") or {}, "mean_last": last.get("policy_age_mean"),
+                                       "max_last": last.get("policy_age_max"), "stale_groups": t.get("stale_groups")},
+                        "trained_groups": t.get("trained_groups"),
+                        "latest": max((_int(r["policy_version"]) for r in mine
+                                       if r.get("trainer") is not None and _int(r["policy_version"]) is not None),
+                                      default=None),
+                        "releases": mine})
+        return out
 
     def pool_scale(self) -> dict | None:
         """The NC pool's sampler count over time: the target (``target_changed``, the
@@ -812,28 +866,33 @@ class AsyncState:
                 "ready": sorted(live), "draining": sorted(draining), "paused": sorted(paused),
                 "manual_events": manual[-50:], "points": points[-500:]}
 
-    def backlog_series(self) -> dict | None:
+    def backlog_series(self, samplers: set[str] | None = None, trainers: set[str] | None = None) -> dict | None:
         """Groups in the buffer not yet read by the trainers: groups written by all
         samplers (``rl_sampler_round.groups``) minus the trainers' read position
         (``buffer_selected`` of ``rl_policy_released`` / ``rl_sampler_policy_loaded``,
         the position the samplers' own backlog rule starts from). Points at every
-        write and every read-position update; None without sampler rounds."""
+        write and every read-position update; None without sampler rounds.
+        ``samplers`` / ``trainers``: only those islands (one store lane of a fleet)."""
         flow = [(r["ts"], 0, _f(r.get("groups")))
-                for s in self.sampler.values() for r in s["rounds"].values()
+                for sid, s in self.sampler.items() if samplers is None or sid in samplers
+                for r in s["rounds"].values()
                 if r.get("ts") is not None and _f(r.get("groups"))]
         if not flow:
             return None
         reads = [(x["ts"], 1, _f(x["buffer_selected"])) for x in self.releases
-                 if x["ts"] is not None and _f(x.get("buffer_selected")) is not None]
+                 if x["ts"] is not None and _f(x.get("buffer_selected")) is not None
+                 and (trainers is None or x["trainer"] in trainers)]
         reads += [(x["loaded_at"], 1, _f(x["buffer_selected"])) for x in self.loads
-                  if x["loaded_at"] is not None and _f(x.get("buffer_selected")) is not None]
+                  if x["loaded_at"] is not None and _f(x.get("buffer_selected")) is not None
+                  and (samplers is None or x["sampler"] in samplers)]
         source = "buffer_selected" if reads else None
         if not reads:
             # no buffer_selected on the tapes (e.g. no release yet): the trainers' read
             # position is the groups they consumed (rl_group_policies + stale skipped)
             done = 0.0
             for ts, n in sorted((r.get("ts") or r.get("read_ts"), (r.get("groups_read") or 0) + (_f(r.get("stale_groups")) or 0))
-                                for t in self.trainer.values() for r in t["rounds"].values()
+                                for tid, t in self.trainer.items() if trainers is None or tid in trainers
+                                for r in t["rounds"].values()
                                 if (r.get("ts") or r.get("read_ts")) is not None and r.get("groups_read") is not None):
                 done += n
                 reads.append((ts, 1, done))
@@ -850,21 +909,38 @@ class AsyncState:
         out = pts[::step]
         if out[-1] is not pts[-1]:
             out.append(pts[-1])
-        reported = {iid: s["backlog"] for iid, s in self.sampler.items() if s["backlog"]}
+        reported = {iid: s["backlog"] for iid, s in self.sampler.items() if s["backlog"]
+                    and (samplers is None or iid in samplers)}
         return {"points": out, "written": written, "read": read, "has_reads": read is not None, "read_source": source,
                 "reported": reported}
 
-    def release_rows(self) -> list[dict]:
+    def release_rows(self, island_of: dict[str, int] | None = None) -> list[dict]:
         """One row per released policy version: when the trainer released it and
-        when each sampler finished loading it (loaded_at - released_at = latency)."""
+        when each sampler finished loading it (loaded_at - released_at = latency).
+        ``island_of`` (a fleet: island id -> island): one row per (island, version), each
+        island's trainer releasing its own local versions and its samplers loading them;
+        islands outside the map are left out."""
         by_v: dict[Any, dict] = {}
+
+        def key(v: Any, iid: str) -> Any:
+            return v if island_of is None else (island_of.get(iid), v)
+
+        def new(v: Any, iid: str) -> dict:
+            if island_of is None:
+                return {"policy_version": v, "loads": {}}
+            return {"island": island_of.get(iid), "policy_version": v, "loads": {}}
+
         for rel in self.releases:
             v = rel["policy_version"]
-            row = by_v.setdefault(v, {"policy_version": v, "loads": {}})
+            if island_of is not None and rel["trainer"] not in island_of:
+                continue
+            row = by_v.setdefault(key(v, rel["trainer"]), new(v, rel["trainer"]))
             row.update({k: rel[k] for k in ("trainer", "released_at", "upload_s", "bytes", "origin", "local_version")})
         for ld in self.loads:
             v = ld["policy_version"]
-            row = by_v.setdefault(v, {"policy_version": v, "loads": {}, "released_at": ld["released_at"]})
+            if island_of is not None and ld["sampler"] not in island_of:
+                continue
+            row = by_v.setdefault(key(v, ld["sampler"]), {**new(v, ld["sampler"]), "released_at": ld["released_at"]})
             if row.get("released_at") is None:
                 row["released_at"] = ld["released_at"]
             rel = row.get("released_at")
@@ -879,6 +955,9 @@ class AsyncState:
                 "resolve_s": ld["resolve_s"], "load_s": ld["load_s"], "at_start": bool(ld.get("at_start")),
                 "latency_s": (round(ld["loaded_at"] - rel, 3) if ld["loaded_at"] is not None and rel is not None
                               and not ld.get("at_start") else None)}
+        if island_of is not None:
+            return [by_v[k] for k in sorted(by_v, key=lambda iv: (iv[1] is None, iv[1] if isinstance(iv[1], int) else 0,
+                                                                  iv[0] is None, iv[0] or 0))]
         return [by_v[k] for k in sorted(by_v, key=lambda v: (v is None, v if isinstance(v, int) else 0))]
 
 

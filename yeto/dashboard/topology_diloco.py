@@ -41,7 +41,8 @@ import re
 import statistics
 from typing import Any
 
-from .topology import DRIVER_PHASES, RATE_S, WINDOW_S, arch_of
+from . import fleet_islands
+from .topology import DRIVER_PHASES, RATE_S, WINDOW_S, _engine, arch_of
 
 # shard i > 0 of the syncer: its local tape yeto-tape.shard<i>.jsonl, or its store upload
 # tapes/syncer-shard<i>/<incarnation>/ (source "store:syncer-shard<i>/<incarnation>")
@@ -132,6 +133,10 @@ def layout(reducer) -> dict:
         syncer, why = False, "no syncer tape"
     if not syncer:
         return {"kind": "async", "reason": f"{why}, sampler islands {samplers}"}
+    plan = getattr(reducer, "fleet_plan", None)
+    if plan:  # a fleet of async islands: external pools only, drawn as one before they write
+        return {"kind": "synced_group", "reason": f"{why}, fleet plan: {len(plan['islands'])} island(s) with "
+                                                  f"external sampler pools, {samplers} sampler(s) on the tapes"}
     k = "synced_group" if samplers else "island"
     return {"kind": k, "reason": f"{why}, " + (f"sampler islands {samplers}" if samplers
                                                else "no sampler island: rollout runs inside the islands")}
@@ -242,7 +247,7 @@ def _members(rec: dict) -> list[str]:
 def current(reducer, cards: list[dict], now: float) -> dict | None:
     """``view`` of a run with a syncer, else None; computed once per reducer state and time
     (the alert rules and the topology panel of one page view share it)."""
-    key = (reducer.event_seq, len(reducer.merges), now)
+    key = (reducer.event_seq, len(reducer.merges), now, getattr(reducer, "fleet_plan_seq", 0))
     hit = getattr(reducer, "_diloco_view", None)
     if hit is not None and hit[0] == key:
         return hit[1]
@@ -469,10 +474,12 @@ SUBSTORE = re.compile(r"/trainer(\d+)/?$")
 
 def _samplers(reducer, trainer_ids: list[str], by_id: dict, states: dict) -> dict:
     """The sampler side of a synced group. With ``--rl-sampler-follow trainer`` every trainer
-    and its samplers share the store sub-directory ``trainer<k>`` (``sample_roles.trainer_substore``):
-    a sampler's ``rl_sampler_start.store`` ends in it, and each pair is drawn as one island with
-    its own lane of the store. Otherwise all samplers share one store and load the publisher's
-    releases (``rl_policy_release_role.publisher``)."""
+    and its samplers share the store sub-directory ``trainer<k>`` (``sample_roles.trainer_substore``,
+    k = the trainer's learner id): a sampler's ``rl_sampler_start.store`` ends in it, and each
+    pair is drawn as one island with its own lane of the store. A fleet of async islands
+    (``fleet_islands``) binds external pools the same way, by ``rl_sampler_start.island`` or its
+    plan first. Otherwise all samplers share one store and load the publisher's releases
+    (``rl_policy_release_role.publisher``)."""
     asy = reducer.async_
     store: dict[str, str] = {}
     publisher = None
@@ -484,12 +491,20 @@ def _samplers(reducer, trainer_ids: list[str], by_id: dict, states: dict) -> dic
             publisher = iid
     sids = sorted((i for i in reducer.islands if asy.roles.get(i) == "sampler"),
                   key=lambda i: (0, int(i)) if i.isdigit() else (1, i))
+    fleet = fleet_islands.resolve(reducer, trainer_ids)
+    learners = fleet_islands.learner_trainers(trainer_ids, getattr(reducer, "fleet_plan", None))
     follows = {}
     for sid in sids:
-        m = SUBSTORE.search(store.get(sid, ""))
-        if m and m.group(1) in trainer_ids:
-            follows[sid] = m.group(1)
+        if fleet is not None:
+            k = fleet["island_of"].get(sid)
+        else:  # the sub-directory names the learner id, not the trainer's island id
+            m = SUBSTORE.search(store.get(sid, ""))
+            k = int(m.group(1)) if m else None
+        if k is not None and learners.get(k) is not None:
+            follows[sid] = learners[k]
     follow = bool(sids) and len(follows) == len(sids)
+    if fleet is not None:  # a pool whose trainer has not written yet does not unbind the others
+        follow = True
     if follow:
         publisher = None  # every trainer publishes to its own lane (its release origin counts within the lane)
     lanes = {}
@@ -499,7 +514,9 @@ def _samplers(reducer, trainer_ids: list[str], by_id: dict, states: dict) -> dic
             written = sum(_f(r.get("groups")) or 0 for s in mine for r in (asy.sampler.get(s) or {}).get("rounds", {}).values())
             rel = [x for x in asy.releases if x.get("trainer") == tid and _int(x.get("policy_version")) is not None]
             read = max((_f(x.get("buffer_selected")) for x in rel if _f(x.get("buffer_selected")) is not None), default=None)
-            lanes[tid] = {"substore": f"trainer{tid}", "samplers": mine, "written": written, "read": read,
+            k = next((k for k, t in learners.items() if t == tid), None)
+            lanes[tid] = {"substore": f"trainer{tid if k is None else k}", "samplers": mine, "written": written,
+                          "read": read,
                           "backlog": max(0.0, written - read) if read is not None else None,
                           "latest": max((_int(x["policy_version"]) for x in rel), default=None)}
     nodes = []
@@ -508,7 +525,34 @@ def _samplers(reducer, trainer_ids: list[str], by_id: dict, states: dict) -> dic
         nodes.append({"id": sid, "trainer": follows.get(sid), "gpu": c.get("gpu"), "gpus": _int(c.get("gpus")),
                       "cloud": c.get("cloud"), "machine_full": c.get("name"), "live": bool((states.get(sid) or {}).get("alive")),
                       "status": (states.get(sid) or {}).get("status")})
-    return {"follow": follow, "publisher": publisher, "lanes": lanes, "sampler_nodes": nodes}
+        if fleet is not None:
+            nodes[-1].update(island=fleet["island_of"].get(sid), pool=fleet["pool_of"].get(sid))
+    out = {"follow": follow, "publisher": publisher, "lanes": lanes, "sampler_nodes": nodes}
+    if fleet is not None:
+        out["fleet"] = _fleet_part(fleet, asy)
+    return out
+
+
+def _fleet_part(fleet: dict, asy) -> dict:
+    """The islands and pools the page draws in each island box: the pool's engine and
+    rollout precision (plan, else the samplers' ``rl_sampler_start.provenance``), its provider,
+    card and the samplers it runs."""
+    islands = []
+    for isl in fleet["islands"]:
+        pools = []
+        for p in isl["pools"]:
+            prov = next(((asy.sampler.get(sid) or {}).get("provenance") for sid in p["samplers"]
+                         if (asy.sampler.get(sid) or {}).get("provenance")), None) or {}
+            quant = p.get("rollout_quant") or prov.get("precision")
+            pools.append({"name": p["name"], "source_name": p.get("source_name"), "provider": p.get("provider"),
+                          "engine": _engine(p.get("engine") or prov.get("engine")),
+                          "precision": str(quant).upper() if quant else None,
+                          "card": prov.get("card_model"), "arch": arch_of(prov.get("card_model")),
+                          "topology": prov.get("topology"),
+                          "samplers": list(p["samplers"])})
+        islands.append({"island": isl["learner"], "trainer": isl.get("trainer"), "name": isl.get("name"),
+                        "gpu": isl.get("gpu"), "substore": isl.get("substore"), "pools": pools})
+    return {"source": fleet["source"], "islands": islands, "unbound": list(fleet["unbound"])}
 
 
 def _merge_row(m: dict) -> dict:

@@ -4,6 +4,8 @@
 // tape window DELAY_S behind the newest data, as in topology.js. kind "island" draws a group
 // box per island (machine labels, rollout and trainer sub-cards, the in-island groups /
 // snapshot lanes); kind "synced_group" draws the samplers and the store left of the trainers.
+// A fleet of async islands (diloco.fleet, fleet_islands.py) draws one box per island: its trainer,
+// one card per external pool (engine, rollout precision, card, provider) and its R2 lane trainer<k>/.
 // The fragment matrix (P columns x syncer + trainers) sits under the graph.
 var YetoTopoD=(function(){
 "use strict";
@@ -63,8 +65,22 @@ function follow(){return D.kind==="synced_group"&&D.follow}
 // decoupled DiLoCo SFT (topology_sft.py): learner islands, no rollout, no fragment-version vector
 function sft(){return D.kind==="sft"}
 function nh(){return sft()?62:86} // machine label pitch
-function mine(tr){var ids=((D.lanes||{})[tr.id]||{}).samplers||[];return (T.samplers||[]).filter(function(s){return ids.indexOf(s.id)>=0})}
+function mine(tr){if(fleet()){var fi=fisland(tr);return fi?fi.pools.map(poolCard):[]}
+  var ids=((D.lanes||{})[tr.id]||{}).samplers||[];return (T.samplers||[]).filter(function(s){return ids.indexOf(s.id)>=0})}
 function snode(id){return (D.sampler_nodes||[]).filter(function(n){return n.id===id})[0]||{id:id}}
+function laneName(tr){return (((D.lanes||{})[tr.id]||{}).substore||"trainer"+tr.id)+"/"}
+// a fleet of async islands: each island's external pools, one card per pool (its samplers pooled)
+function fleet(){return follow()&&D.fleet?D.fleet:null}
+function fisland(tr){var F=fleet();return F?F.islands.filter(function(x){return x.trainer===tr.id})[0]||null:null}
+function fpool(name){var F=fleet(),hit=null;if(F)F.islands.forEach(function(x){x.pools.forEach(function(p){if(p.name===name)hit=p})});return hit}
+function poolCard(p){var ss=(T.samplers||[]).filter(function(s){return p.samplers.indexOf(s.id)>=0}),lv=ss.filter(function(s){return s.live}),f0=ss[0]||{};
+  var vs=lv.map(function(s){return s.policy_version}).filter(fin),lg=lv.map(function(s){return s.lag}).filter(fin);
+  var st=lv.some(function(s){return s.state==="sampling"})?"sampling":lv.length?(lv[0].state||"starting"):null;
+  return{id:p.name,pool:p,ids:p.samplers,card:p.card||f0.card||null,precision:p.precision||f0.precision||null,engine:p.engine||f0.engine||null,arch:p.arch||f0.arch||null,
+    gpus:f0.gpus||null,live:lv.length>0,state:st,status:ss.length?(f0.status||"ended"):"not started",policy_version:vs.length?Math.max.apply(null,vs):null,
+    lag:lg.length?Math.max.apply(null,lg):null,rate_gpm:ss.reduce(function(a,x){return a+(x.rate_gpm||0)},0),n:p.samplers.length,nlive:lv.length}}
+// the sampler (or pool) a card shows, from the newest view (a card is built once per layout)
+function fresh(s){if(s.pool){var p=fpool(s.id);return p?poolCard(p):s}return (T.samplers||[]).filter(function(x){return x.id===s.id})[0]||s}
 function layout(W){
   var narrow=W<640,trs=D.trainers,isl=D.kind==="island",fw=follow(),samp=D.kind==="synced_group"&&!fw?(T.samplers||[]):[],N=D.shards.length||1;
   var g={narrow:narrow,VW:narrow?400:1480,boxes:[],syn:[],samp:[],store:null};
@@ -83,11 +99,11 @@ function layout(W){
     g.VH=Math.max(H,yy+N*(yh+16)+44)}
   else{var yN=6;
     if(samp.length){samp.forEach(function(sp,k){g.samp.push({x:4,y:yN+k*56,w:250,h:50})});g.store={cx:330,cy:yN+Math.max(50,samp.length*56)/2,r:34};yN+=Math.max(110,samp.length*56+14)}
-    trs.forEach(function(tr){var ms=fw?mine(tr):[],nl=((tr.nodes||[]).length||1)+ms.length,roll=isl&&!!tr.island,sh=ms.length*58,h=30+nl*62+(roll?182:0)+sh+(fw?20:0)+240,B;
+    trs.forEach(function(tr){var ms=fw?mine(tr):[],nl=((tr.nodes||[]).length||1)+ms.length,roll=isl&&!!tr.island,sh=ms.length*64,h=30+nl*62+(roll?182:0)+sh+(fw?20:0)+240,B;
       var ry=yN+28+nl*62;
       B={x:4,y:yN,w:392,h:h,lx:12,ly:yN+28,lw:376,rx:12,ry:ry,rw:376,rh:172,tx:12,ty:ry+(roll?182:0)+sh+(fw?20:0),tw:376,th:sft()?170:196,
         co:!!(tr.island&&tr.island.colocated),roll:roll,samp:[]};
-      if(fw){ms.forEach(function(sp,j){B.samp.push({x:12,y:ry+j*58,w:300,h:50,s:sp})});B.lane={cx:360,cy:ry+Math.max(sh,50)/2,r:22}}
+      if(fw){ms.forEach(function(sp,j){B.samp.push({x:12,y:ry+j*64,w:300,h:56,s:sp})});B.lane={cx:360,cy:ry+Math.max(sh,56)/2,r:22}}
       g.boxes.push(B);yN+=h+12});
     for(var q=0;q<N;q++){g.syn.push({x:4,y:yN+30,w:392,h:N===1?300:236});yN+=(N===1?300:236)+36}
     g.VH=yN+36}
@@ -102,7 +118,8 @@ function hub(g,trs){var lw=124,tw=300,cw=12+lw+26+tw+12,yw=336,xr=g.VW-10-cw,y=1
   var yh=N===1?318:250,yx=(g.VW-yw)/2,yy=Math.max(14,(y-(N*(yh+16)-16))/2);
   for(var s=0;s<N;s++)g.syn.push({x:yx,y:yy+s*(yh+16),w:yw,h:yh});
   g.VH=Math.max(y,yy+N*(yh+16)+44)}
-function shape(){return D.kind+"|"+D.trainers.map(function(t){return t.id+":"+(t.nodes||[]).length+":"+!!t.island}).join(",")+"|"+D.shards.length+"|"+(D.kind==="synced_group"?(T.samplers||[]).map(function(s){return s.id}).join(","):"")+"|"+D.P+"|"+!!D.follow}
+function shape(){return D.kind+"|"+D.trainers.map(function(t){return t.id+":"+(t.nodes||[]).length+":"+!!t.island}).join(",")+"|"+D.shards.length+"|"+(D.kind==="synced_group"?(T.samplers||[]).map(function(s){return s.id}).join(","):"")+"|"+D.P+"|"+!!D.follow+
+  (D.fleet?"|"+D.fleet.islands.map(function(x){return x.trainer+":"+x.pools.map(function(p){return p.name}).join("+")}).join(","):"")}
 
 // -- build ---------------------------------------------------------------------------
 function build(host){
@@ -149,14 +166,17 @@ function fit(){if(!L||!L.svg.getBoundingClientRect)return;var r=L.svg.getBoundin
 function islandBox(nd,wires,labels,B,tr,narrow){
   var isl=D.kind==="island",r=tr.island,o={B:B};
   el("rect",{x:B.x,y:B.y,width:B.w,height:B.h,rx:14,"class":"tpgrp"},nd);
-  el("text",{x:B.x+14,y:B.y+20,"class":"tpt"},labels,(isl||sft()?"Island ":"Trainer island ")+tr.id);
-  el("text",{x:B.x+(isl||sft()?78:120),y:B.y+20,"class":"tpm"},labels,boxTitle(tr,narrow));
+  var short=isl||sft()||!!fleet();
+  el("text",{x:B.x+14,y:B.y+20,"class":"tpt"},labels,(short?"Island ":"Trainer island ")+tr.id);
+  el("text",{x:B.x+(short?78:120),y:B.y+20,"class":"tpm"},labels,fleet()?clip(boxTitle(tr,narrow),Math.floor((B.w-92)/6.3)):boxTitle(tr,narrow));
   o.nodes=(tr.nodes||[]).map(function(n,j){return nodeLabel(nd,B.lx,B.ly+j*(narrow?62:nh()),narrow?Math.min(B.lw,250):B.lw,narrow?54:nh()-8,n,tr,j)});
   // --rl-sampler-follow trainer: this trainer's samplers, its lane of the store (trainer<k>/) and the V1 flows inside the box
   o.samp=[];
   if(B.lane){var j0=o.nodes.length,LN=B.lane;
-    B.samp.forEach(function(S,j){var sn=snode(S.s.id);
+    B.samp.forEach(function(S,j){var sn=snode(S.s.id),pl=S.s.pool;
       o.nodes.push(nodeLabel(nd,B.lx,B.ly+(j0+j)*(narrow?62:86),narrow?Math.min(B.lw,250):B.lw,narrow?54:78,
+        pl?{id:"p"+j,machine:pl.source_name||pl.name,machine_full:pl.name,gpu:S.s.card||"GPU",gpus:S.s.gpus,cloud:pl.provider,
+            roles:pl.samplers.slice(0,6).map(function(){return "R"}),incarnation:1,pool:pl.name}:
         {id:"s"+j,machine:sn.machine_full?String(sn.machine_full).split("-").slice(-2).join("-"):S.s.id,machine_full:sn.machine_full,gpu:sn.gpu||S.s.card,gpus:sn.gpus,roles:["R"],
          cloud:sn.cloud,incarnation:1,sampler:S.s.id},tr,"s"+j));
       var p=narrow?U.poly([[S.x+S.w,S.y+S.h/2],[LN.cx-LN.r-4,LN.cy]]):U.bez([S.x+S.w,S.y+S.h/2],[S.x+S.w+30,S.y+S.h/2],[LN.cx-LN.r-30,LN.cy],[LN.cx-LN.r-4,LN.cy],24);
@@ -165,7 +185,7 @@ function islandBox(nd,wires,labels,B,tr,narrow){
     o.read=U.offset(lp,-3);o.up=U.rev(U.offset(lp,3));
     el("path",{d:U.dpath(o.read),"class":"tpwire tpbold"},wires);el("path",{d:U.dpath(U.offset(lp,3)),"class":"tpwire tpbold"},wires);
     var lg=el("g",{"data-td":"lane:"+tr.id},nd);el("circle",{cx:LN.cx,cy:LN.cy,r:LN.r,"class":"tpbox"},lg);
-    el("text",{x:LN.cx,y:LN.cy-3,"text-anchor":"middle","class":"tpm",style:"font-size:9.5px"},lg,"trainer"+tr.id+"/");
+    el("text",{x:LN.cx,y:LN.cy-3,"text-anchor":"middle","class":"tpm",style:"font-size:9.5px"},lg,laneName(tr));
     o.lat=el("text",{x:LN.cx,y:LN.cy+10,"text-anchor":"middle","class":"tpv tpwtc",style:"font-size:10px"},lg,"");
     o.buf=el("text",{x:LN.cx,y:LN.cy+LN.r+14,"text-anchor":"middle","class":"tpm"},lg,"")}
   if(B.co){o.merged=el("rect",{x:B.rx,y:B.ry,width:B.tx+B.tw-B.rx,height:B.th,rx:10,"class":"tpbox"},nd);el("rect",{x:B.rx,y:B.ry,width:4,height:B.th,rx:2,fill:arch(tr.arch)},nd);
@@ -187,7 +207,9 @@ function islandBox(nd,wires,labels,B,tr,narrow){
   return o}
 function boxTitle(tr,narrow){var r=tr.island,n=tr.gpus,g=tr.gpu||"GPU",pl=r&&r.placement,eng=r&&fin(r.engines)?r.engines+" rollout engine"+(r.engines>1?"s":""):null;
   if(sft()){var ln=tr.learner||{};return [tr.name,ln.layout,fin(n)?n+" cards":null,!narrow&&ln.dataset?"data "+ln.dataset:null].filter(Boolean).join(" · ")}
-  if(!r){var ms=follow()?mine(tr):[];return [fin(n)?n+" × "+g:g,tr.arch,ms.length?ms.length+" sampler(s) on their own store lane trainer"+tr.id+"/":null].filter(Boolean).join(" · ")}
+  if(!r&&fleet()){var fi=fisland(tr)||{},np=(fi.pools||[]).length;
+    return [fi.name,fin(n)?n+" × "+g:fi.gpu||g,narrow?np+" pool(s)":np+" external pool(s) · R2 lane "+laneName(tr)].filter(Boolean).join(" · ")}
+  if(!r){var ms=follow()?mine(tr):[];return [fin(n)?n+" × "+g:g,tr.arch,ms.length?ms.length+" sampler(s) on their own store lane "+laneName(tr):null].filter(Boolean).join(" · ")}
   var parts=[pl,fin(n)?n+" × "+g:g];
   if(r.colocated)parts.push(narrow?"shared GPU":"rollout and train time-share the GPU");else if(eng)parts.push(narrow?eng:"trainer + "+eng+" (split not on the tape)");
   return parts.filter(Boolean).join(" · ")}
@@ -256,7 +278,8 @@ function samplerCard(nd,B,s,sn){
   var g=el("g",{transform:"translate("+B.x+","+B.y+")","data-td":"smp:"+s.id},nd);sn=sn||snode(s.id);
   el("rect",{width:B.w,height:B.h,rx:9,"class":"tpbox"},g);el("rect",{x:0,y:0,width:4,height:B.h,rx:2,fill:arch(s.arch)},g);
   el("text",{x:13,y:18,"class":"tpt"},g,clip([s.card,s.precision,s.engine].filter(Boolean).join(" · ")||s.id,Math.floor((B.w-50)/6.5)));
-  el("text",{x:13,y:33,"class":"tpm"},g,clip(["sampler "+s.id,s.gpus?s.gpus+" GPU":null,sn.cloud].filter(Boolean).join(" · "),Math.floor((B.w-20)/6.3)));
+  el("text",{x:13,y:33,"class":"tpm"},g,clip(s.pool?s.id+" · "+s.n+" sampler"+(s.n===1?"":"s"):
+    ["sampler "+s.id,s.gpus?s.gpus+" GPU":null,sn.cloud].filter(Boolean).join(" · "),Math.floor((B.w-20)/6.3)));
   return{ver:el("text",{x:B.w-10,y:18,"text-anchor":"end","class":"tpv"},g,""),dot:el("circle",{cx:16.5,cy:B.h-12.5,r:3.5},g),
     st:el("text",{x:25,y:B.h-9,"class":"tps2"},g,""),rate:el("text",{x:B.w-10,y:B.h-9,"text-anchor":"end","class":"tpm"},g,""),s:s}}
 function store(nd,R){var g=el("g",{"data-td":"store"},nd);
@@ -289,8 +312,8 @@ function paint(){
     var ap=fin(tr.apply_ts)&&T.live&&td-tr.apply_ts>=0&&td-tr.apply_ts<3;tc.flash.style.stroke=C.wt;tc.flash.setAttribute("opacity",ap?0.9:0);
     if(o.ro)paintRollout(tr,o,tn,td);
     if(o.lat){var ln=(D.lanes||{})[tr.id]||{};o.lat.textContent=fin(ln.latest)?"v"+ln.latest:"no release";o.buf.textContent=fin(ln.backlog)?"buffer "+Math.round(ln.backlog):"written "+Math.round(ln.written||0);
-      o.samp.forEach(function(x){paintSampler(x.card)})}
-    o.nodes.forEach(function(n){var sp=n.n.sampler?snode(n.n.sampler):null,nc=n.old?C.ink2:sp?(sp.live?C.good:C.ink2):dead||tr.failure?C.bad:tr.live?C.good:C.ink2;n.dot.setAttribute("fill",nc);
+      o.samp.forEach(function(x){x.card.s=fresh(x.card.s);paintSampler(x.card)})}
+    o.nodes.forEach(function(n){var pl=n.n.pool?fpool(n.n.pool):null,sp=pl?poolCard(pl):n.n.sampler?snode(n.n.sampler):null,nc=n.old?C.ink2:sp?(sp.live?C.good:C.ink2):dead||tr.failure?C.bad:tr.live?C.good:C.ink2;n.dot.setAttribute("fill",nc);
       n.info.textContent=n.old?"replaced"+(n.n.reason?": "+String(n.n.reason).slice(0,18):""):fin(n.n.util)?"GPU "+Math.round(n.n.util)+"%"+(fin(n.n.mem_pct)?" · HBM "+Math.round(n.n.mem_pct)+"%":""):"";
       n.box.style.stroke=n.old?"":dead?C.bad:"";n.box.style.strokeDasharray=n.old?"4 3":""});
     // lanes to each shard
@@ -327,7 +350,7 @@ function paint(){
   if(L.store){var b=T.buffer||{};L.store.lat.textContent=fin(T.latest)?"LATEST v"+T.latest:"no release";
     L.store.info.textContent=fin(b.backlog)?"buffer "+Math.round(b.backlog)+" groups":"buffer n/a";
     L.store.pub.textContent=D.publisher!=null?"samplers load trainer "+D.publisher+"'s weights":"";
-    L.samp.forEach(function(x){paintSampler(x.card)})}
+    L.samp.forEach(function(x){x.card.s=fresh(x.card.s);paintSampler(x.card)})}
   matrix(tn)}
 // an SFT learner: loss / tokens per step instead of policy and rollout; PUSH from the merge records' responders
 function paintLearner(tr,l,lab,tn){var ln=tr.learner||{},lp=tr.last_push,la=tr.last_apply;
@@ -340,9 +363,9 @@ function paintLearner(tr,l,lab,tn){var ln=tr.learner||{},lp=tr.last_push,la=tr.l
   lab[1].textContent=lp?"  recv "+dur(lp.recv_s)+(fin(lp.staleness)?" · staleness "+lp.staleness:""):"";
   lab[2].textContent=la?"↓ applied at step "+la.step+(fin(la.apply_s)?" · "+la.apply_s.toFixed(1)+"s":""):"↓ no apply yet";
   lab[3].textContent=la?"  "+dur(tn-la.ts)+" ago":""}
-function paintSampler(o){var s=o.s;o.ver.textContent=fin(s.policy_version)?"v"+s.policy_version+(s.lag>0?" −"+s.lag:""):"v?";
+function paintSampler(o){var s=o.s;o.ver.textContent=fin(s.policy_version)?"v"+s.policy_version+(s.lag>0?" −"+s.lag:""):s.pool&&!s.live?"":"v?";
   o.ver.style.fill=s.lag>=2?C.bad:s.lag===1?C.warn:C.ink;var c=s.live?(s.state==="sampling"?C.good:s.state==="waiting"?C.warn:C.wt):C.ink2;
-  o.dot.setAttribute("fill",c);o.st.textContent=s.live?s.state:(s.status||"ended");o.rate.textContent=(s.rate_gpm||0).toFixed(1)+" g/min"}
+  o.dot.setAttribute("fill",c);o.st.textContent=(s.live?s.state:(s.status||"ended"))+(s.pool&&s.n?" · "+s.nlive+"/"+s.n+" up":"");o.rate.textContent=(s.rate_gpm||0).toFixed(1)+" g/min"}
 function paintRollout(tr,o,tn,td){var r=tr.island,ro=o.ro,st=rolloutState(tr,tn),c=col(st[1]);
   ro.big.textContent=fin(r.round)?"round "+r.round:"round n/a";ro.st.textContent=st[0];ro.st.style.fill=st[1]==="good"?C.ink:c;ro.dot.setAttribute("fill",c);
   ro.barf.setAttribute("width",st[2]!=null?(ro.barW*st[2]/100).toFixed(1):0);
@@ -403,7 +426,7 @@ function pathOf(f){var k=-1;D.trainers.forEach(function(t,i){if(t.id===f.i)k=i})
 // read (store -> trainer) and release uploads (trainer -> store) on the shared store or the island's lane
 function bufferPath(f){var k=-1;
   if(f.k==="g"){if(L.store){(T.samplers||[]).forEach(function(s,i){if(s.id===f.s)k=i});return k>=0&&L.samp[k]?L.samp[k].lane:null}
-    var hit=null;L.boxes.forEach(function(o){(o.samp||[]).forEach(function(x){if(x.card.s.id===f.s)hit=x.lane})});return hit}
+    var hit=null;L.boxes.forEach(function(o){(o.samp||[]).forEach(function(x){if(x.card.s.id===f.s||(x.card.s.ids||[]).indexOf(f.s)>=0)hit=x.lane})});return hit}
   D.trainers.forEach(function(t,i){if(t.id===f.i)k=i});if(k<0)return null;
   var tk=L.store?L.trunk[k]:L.boxes[k];return tk?(f.k==="r"?tk.read:f.k==="u"?tk.up:null):null}
 function bufferParticles(ctx,td){(T.flows||[]).forEach(function(f){var t0=f.k==="u"&&fin(f.u0)?f.u0:f.t,d=f.k==="u"&&fin(f.u0)?Math.max(1.2,f.t-f.u0):1.8,u=(td-t0)/d;
@@ -441,9 +464,13 @@ function tipHtml(key){var a=key.split(":"),tn=now(),tr=null;D.trainers.forEach(f
     row("serving",r.served?r.served.token:null)+row("groups / traj / tokens",[r.groups,r.traj,r.tokens].join(" / "))+row("rollout seconds",fin(r.rollout_s)?r.rollout_s.toFixed(1):null)+
     row("group p50 / p95",fin(r.p50_s)?r.p50_s.toFixed(1)+"s / "+(fin(r.p95_s)?r.p95_s.toFixed(1)+"s":"—"):"not timed")+row("snapshot publish",r.served&&fin(r.served.publish_s)?r.served.publish_s.toFixed(1)+"s (publish phase)":null)+
     row("source","rl_local_round rl/* · rl_publication · rl_driver_phase")+'<div class="ns">trainer / rollout GPU split and generation progress are not on the tapes yet</div>'}
+  if(a[0]==="node"&&tr&&a[2].charAt(0)==="s"&&fleet()){var pc=mine(tr)[+a[2].slice(1)]||{},pp=pc.pool||{};return '<div class="h">Pool '+esc(pc.id||"")+"</div>"+
+    row("pool in run.json",pp.source_name)+row("provider",pp.provider)+row("engine",pc.engine)+row("rollout precision",pc.precision)+row("cards",(pc.card||"GPU")+(fin(pc.gpus)?" × "+pc.gpus:""))+
+    row("samplers (up / all)",pc.nlive+" / "+pc.n+(pp.samplers&&pp.samplers.length?" · "+pp.samplers.join(", "):""))+row("serving",fin(pc.policy_version)?"v"+pc.policy_version:"no release loaded")+
+    row("feeds","trainer "+tr.id+" (R2 lane "+laneName(tr)+")")+row("source",(D.fleet.source==="plan"?"fleet/plan.json · ":"")+"rl_sampler_start.island / .store / .provenance")}
   if(a[0]==="node"&&tr&&a[2].charAt(0)==="s"){var sp=mine(tr)[+a[2].slice(1)]||{},sn=snode(sp.id);return '<div class="h">'+esc(a[2]+" · "+(sn.machine_full||"machine not on the tape"))+"</div>"+
-    row("sampler",sp.id)+row("cards",(sn.gpu||sp.card||"GPU")+(fin(sn.gpus)?" × "+sn.gpus:""))+row("cloud",sn.cloud)+row("feeds","trainer "+tr.id+" (store lane trainer"+tr.id+"/)")+row("status",sn.status)}
-  if(a[0]==="lane"&&tr){var ln=(D.lanes||{})[tr.id]||{};return '<div class="h">Store lane trainer'+esc(tr.id)+"/</div>"+row("samplers",(ln.samplers||[]).join(", "))+row("groups written",ln.written)+
+    row("sampler",sp.id)+row("cards",(sn.gpu||sp.card||"GPU")+(fin(sn.gpus)?" × "+sn.gpus:""))+row("cloud",sn.cloud)+row("feeds","trainer "+tr.id+" (store lane "+laneName(tr)+")")+row("status",sn.status)}
+  if(a[0]==="lane"&&tr){var ln=(D.lanes||{})[tr.id]||{};return '<div class="h">Store lane '+esc(laneName(tr))+"</div>"+row("samplers",(ln.samplers||[]).join(", "))+row("groups written",ln.written)+
     row("trainer read position",ln.read)+row("buffer",ln.backlog)+row("latest release","v"+ln.latest)+row("source","rl_sampler_start.store · rl_sampler_round · rl_policy_released")}
   if(a[0]==="node"&&tr){var n=(tr.nodes||[])[+a[2]]||{};return '<div class="h">'+esc(n.id+" · "+(n.machine_full||"machine not on the tape"))+"</div>"+row("cards",(n.gpu||"GPU")+(fin(n.gpus)?" × "+n.gpus:""))+
     row("roles",(n.roles||[]).join(" ")||"not on the tape")+(n.inferred?'<div class="ns">* inferred: a fixed-partition machine with 2 cards runs one trainer and one rollout card</div>':"")+row("incarnation",n.incarnation)+
@@ -488,7 +515,7 @@ function render(view,offline){
   var W=host.clientWidth||800;
   if(!L||L.shape!==shape()||(L.W<640)!==(W<640)||(host.contains&&!host.contains(L.svg)))build(host);
   var live=D.trainers.filter(function(x){return x.live}).length,rolls=D.trainers.filter(function(x){return x.island}).length;
-  $("topoNote").textContent="layout: "+D.kind.replace("_"," ")+" ("+D.layout_reason+") · "+(sft()?D.trainers.length+" learner island(s), no rollout":D.kind==="island"?rolls+" island(s): trainer + in-island rollout":(t.samplers||[]).filter(function(s){return s.live}).length+" live sampler(s)")+" · "+live+"/"+D.M+(sft()?" learner(s)":" trainer(s)")+" live · syncer "+(D.shards.length>1?D.shards.length+" shards":"1 process")+
+  $("topoNote").textContent="layout: "+D.kind.replace("_"," ")+" ("+D.layout_reason+") · "+(sft()?D.trainers.length+" learner island(s), no rollout":D.kind==="island"?rolls+" island(s): trainer + in-island rollout":(t.samplers||[]).filter(function(s){return s.live}).length+" live sampler(s)"+(D.fleet?" in "+D.fleet.islands.length+" island(s)":""))+" · "+live+"/"+D.M+(sft()?" learner(s)":" trainer(s)")+" live · syncer "+(D.shards.length>1?D.shards.length+" shards":"1 process")+
     (t.live?" · replayed "+DELAY_S+" s behind the newest tape data":" · offline snapshot");
   paint();kick();
   if(!bound){bound=true;host.addEventListener("mousemove",tip);host.addEventListener("mouseleave",function(){var tp=$("topoTip");if(tp)tp.style.display="none"});
