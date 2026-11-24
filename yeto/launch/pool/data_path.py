@@ -104,10 +104,38 @@ class R2DataPath:
                    for key in sampler_resume._list_records(records, f"{sampler_resume.MEMBERS_DIR}/{shard}")]  # noqa: SLF001
         newest = max((m for m in members if m), key=lambda m: float(m.get("joined_at") or 0.0), default={})
         holder = None if lease.get("incarnation") is None else str(lease["incarnation"])
-        return {"handoff": None if handoff is None else str(handoff.get("successor")),
-                "lease": holder, "pool_fenced": bool(holder and holder.startswith(f"{FENCE_PREFIX}:")),
-                "incarnation": newest.get("incarnation"), "leave": newest.get("leave_reason"),
-                "superseded": str(newest.get("incarnation")) in [str(i) for i in lease.get("superseded") or ()]}
+        out = {"handoff": None if handoff is None else str(handoff.get("successor")),
+               "lease": holder, "pool_fenced": bool(holder and holder.startswith(f"{FENCE_PREFIX}:")),
+               "incarnation": newest.get("incarnation"), "leave": newest.get("leave_reason"),
+               "superseded": str(newest.get("incarnation")) in [str(i) for i in lease.get("superseded") or ()]}
+        detail = newest.get("detail") if isinstance(newest.get("detail"), dict) else {}
+        if detail.get("not_run"):  # it did not run (engine_sampler_entry.NOT_RUN_EVENT): why, and for whom
+            out.update(not_run=str(detail["not_run"]), not_run_successor=detail.get("successor"),
+                       not_run_why=detail.get("why") or detail.get("end_why"),
+                       not_run_ended_by=detail.get("ended_by"))
+        return out
+
+    def shard_ended(self, shard: str) -> dict[str, Any] | None:
+        """Read only: whether ``shard``'s data already ended in the run's store (an end
+        record its owner wrote; final for the trainer). None: it did not (or the shard
+        has no record yet); else who ended it and why (``ended_by``, ``end_why``,
+        ``successor``). A store error raises."""
+        from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index, shard_prefix  # noqa: PLC0415
+
+        records = self.records
+        store = getattr(records, "objects", None)
+        if store is not None and not callable(getattr(store, "list", None)):
+            return None  # an object API without LIST holds no shard index the trainer could read
+        if store is not None and not store.list(shard_prefix(str(shard))):
+            return None  # no record in the shard (a fresh shard name): one LIST
+        if store is None:  # a store on a shared directory (tests, a bucket mount)
+            store = records
+        buffer = FileSampleBuffer(store, batch_size=1, index=shard_index(str(shard)), create_index=False)
+        if not buffer.data_ended:
+            return None
+        end = dict(buffer.end_record or {})
+        why = end.get("why") if isinstance(end.get("why"), dict) else {}
+        return {"ended_by": end.get("incarnation"), "end_why": why.get("reason"), "successor": why.get("successor")}
 
     def request_drain(self, shard: str, seq: str) -> str:
         from yeto.rl.engine import store_dispense  # noqa: PLC0415

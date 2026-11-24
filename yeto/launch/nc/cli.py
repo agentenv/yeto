@@ -497,6 +497,12 @@ class NcSshOps:
         read = getattr(self.data_path(), "exit_evidence", None)  # the syncer path has no such record
         return None if read is None else read(m.shard)
 
+    def shard_ended(self, shard: str) -> Any:
+        """Whether ``shard``'s data already ended in the run's store (the pool skips such a
+        shard name for a new member; the syncer path keeps no shard end: None)."""
+        read = getattr(self.data_path(), "shard_ended", None)
+        return None if read is None else read(shard)
+
     def data_path(self) -> Any:
         """The work contract's data path of this pool (:func:`pool_data_path`)."""
         return pool_data_path(self.cfg, self._fence_store,

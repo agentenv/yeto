@@ -272,6 +272,11 @@ FINISHED = "sampler_finished"  # the sampler exited 0 (its run is over)
 CONFIG_ERROR = "sampler_config_error"  # the sampler refused its spec (exit 2): the same on any node
 # exit codes of a deterministic refusal (engine_sampler: spec rejected / bad arguments)
 CONFIG_EXIT_CODES = frozenset({2})
+# the sampler did not run at all: a stop request (handoff record) on its shard that it
+# obeyed at its join, or a shard whose data already ended (engine_sampler_entry
+# NOT_RUN_EXIT_CODE). Not the end of the data: the shard cannot be sampled again
+NOT_RUN = "sampler_not_run"
+NOT_RUN_EXIT_CODES = frozenset({3})
 EVICTED = "evicted"  # ended: preempted / lost / admin
 PREEMPT_NOTICE = "preempt_notice"  # active with preempt_at set
 EXPIRED = "expired"  # ended at / after its lease end
@@ -353,6 +358,9 @@ def classify(status: LeaseStatus, probe: Probe | None, *, now: float, unreachabl
         return Verdict(FINISHED)
     if probe is not None and probe.sampler == "exited" and probe.exit_code in CONFIG_EXIT_CODES:
         return Verdict(CONFIG_ERROR, f"sampler exit={probe.exit_code} (spec or arguments refused)")
+    if probe is not None and probe.sampler == "exited" and probe.exit_code in NOT_RUN_EXIT_CODES:
+        return Verdict(NOT_RUN, f"sampler exit={probe.exit_code} (did not run: its shard was handed off or "
+                                "had ended)")
     if probe is not None and joined:
         if probe.sampler != "running":
             return Verdict(CRASHED, f"sampler {probe.sampler} exit={probe.exit_code}")

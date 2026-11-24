@@ -170,6 +170,9 @@ class PoolOps(Protocol):
     # slot_halt(account) -> why the slot takes no order / release now (None: it does);
     # exit_evidence(member) -> what the run's store says about a sampler that ended with
     # exit 0 (R2DataPath.exit_evidence; None: this data path keeps no such record);
+    # shard_ended(shard) -> None, or who ended that shard's data in the run's store (a new
+    # member never gets such a shard name: R2DataPath.shard_ended);
+    # clear_stale_handoff(member, keep) -> the stop request set aside before a start, or None;
     # scale down in "drain" mode: request_drain(member) (its sampler claims no new task),
     # drained(member) -> bool (it holds no task claim any more), cancel_drain(member);
     # pool_ended(why) -> the pool is stopped (nothing is started or replaced any more):
@@ -261,6 +264,8 @@ class IslandPool:
     _save_failures: int = 0  # consecutive failed saves (state_save_failing once per streak)
     _short: Any = None  # the halted slots of the last ``slots_below_target`` alert
     _starts: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background start
+    _skipped_shards: list[str] = field(default_factory=list)  # shards passed over: their data had ended
+    _shard_check_refused: str | None = None  # the last "store did not say" refusal reported
     _executor: Any = None
     state_path: Path | None = None  # saved right after every order
     _recheck: set[str] = field(default_factory=set)  # restored STARTING members: probe before a new start
@@ -505,9 +510,14 @@ class IslandPool:
                     self._event("order_refused", why=refused)
                 self._refused = refused
                 return None
+        if not self._skip_ended_shards():  # the store did not say: nothing ordered this tick
+            return None
         if self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
             refused = (f"shard {self.config.shard_base}-{self.next_shard} is past shard_limit "
                        f"{self.config.shard_limit} (the trainer's buffer shards / the tunnel ports)")
+            if self._skipped_shards:
+                refused += (f"; skipped because their data already ended in the run's store: "
+                            f"{', '.join(self._skipped_shards)} (a new run_prefix gives fresh shards)")
             if refused != self._refused:
                 self.log(f"pool: {refused}: not ordering")
                 self._event("order_refused", why=refused)
@@ -559,6 +569,43 @@ class IslandPool:
         self._event("ordered", ticket=ticket, account=account, shard=shard, data_slot=slot,
                     continues_shard=continues, replaces=replaces.ticket if replaces else None)
         return member
+
+    def _skip_ended_shards(self) -> bool:
+        """Move ``next_shard`` past every shard whose data already ended in the run's
+        store (``ops.shard_ended``: an end record in the shard; ops without it: no
+        check). A pool that starts without its state (the file was moved away) numbers
+        its shards from 0 again, and an end record is final for the trainer (it never
+        reads a shard again once it ended), so a sampler there would not run. Such a
+        shard is skipped (``shard_skipped``) rather than reopened; a stop request a
+        fence left on a shard that did not end is set aside before the start instead
+        (:meth:`_clear_stale_handoff`). False: the store did not answer (one
+        ``order_refused`` per streak); nothing is ordered this tick."""
+        check = getattr(self.ops, "shard_ended", None)
+        if check is None:
+            return True
+        while self.config.shard_limit is None or self.next_shard < self.config.shard_limit:
+            shard = f"{self.config.shard_base}-{self.next_shard}"
+            try:
+                ended = check(shard)
+            except Exception as error:  # noqa: BLE001 - unknown this tick: no order on a shard that may have ended
+                refused = f"the run's store did not say whether shard {shard} already ended"
+                if refused != self._shard_check_refused:  # once per streak
+                    self.log(f"pool: {refused} ({error!r}); not ordering this tick")
+                    self._event("order_refused", why=refused, error=repr(error)[:300])
+                self._shard_check_refused = refused
+                return False
+            self._shard_check_refused = None
+            if not ended:
+                return True
+            detail = ended if isinstance(ended, dict) else {}
+            self.log(f"pool: shard {shard} skipped: its data already ended in the run's store "
+                     f"(ended by {detail.get('ended_by')}, why {detail.get('end_why')}); a sampler there "
+                     "would not run")
+            self._event("shard_skipped", shard=shard, why="data ended in the store",
+                        ended_by=detail.get("ended_by"), end_why=detail.get("end_why"))
+            self._skipped_shards.append(shard)
+            self.next_shard += 1
+        return True
 
     def _save_now(self) -> bool:
         """Persist the state now (after an order): a crash before the tick's save must
@@ -1560,6 +1607,9 @@ class IslandPool:
             if self.ecfg.stop_on_finish:
                 self.stop(f"sampler {m.shard} finished (exit 0)")
             return
+        if kind == el.NOT_RUN:
+            self._not_run(m, now, verdict.detail)
+            return
         if kind == el.CRASHED:
             if m.state == READY and probe is not None and probe.sampler == "absent" and not m.absent_seen:
                 # a restart removes the container first: one reading that it is not there
@@ -1648,6 +1698,45 @@ class IslandPool:
                 self._event("start_timeout", ticket=m.ticket, shard=m.shard, waited_s=round(now - m.created))
                 self._fail(now, f"sampler on {m.ticket} not up")
                 self._retire(m, "start timeout", lost=False)
+
+    def _not_run(self, m: Member, now: float, detail: str) -> None:
+        """The sampler exited with the "did not run" code (``el.NOT_RUN``): a stop request
+        on its shard it obeyed at its join, or a shard whose data had already ended. Not
+        the end of the data, never a normal finish: ``sampler_not_run`` (with the reason
+        and successor the run's store records, ``ops.exit_evidence``) and a WARNING line.
+        A live member of this pool that continues the shard: the designed handoff. Else
+        the member is retired (its shard fenced, a new order continues its prompts on
+        the next shard; the provisioning breaker counts it, so a loop stops ordering)."""
+        if m.retiring_since is not None:  # scaled down: nothing is handed on
+            self._finish_retire(m, now, outcome="sampler did not run")
+            return
+        seen: dict[str, Any] = {}
+        read = getattr(self.ops, "exit_evidence", None)
+        if read is not None:
+            try:
+                seen = dict(read(m) or {})
+            except Exception as error:  # noqa: BLE001 - the verdict stands without the detail
+                seen = {"evidence_error": repr(error)[:300]}
+        reason = seen.get("not_run")
+        successor = seen.get("not_run_successor") or seen.get("handoff")
+        if "not_run" not in m.alerted:
+            self.log(f"pool: WARNING: the sampler on {m.ticket} (shard {m.shard}) did not run: "
+                     f"{reason or 'its shard was handed off or had ended'}"
+                     + (f" (stop request for {successor})" if successor else "")
+                     + "; this is not the end of the data")
+        self._once(m, "not_run", "sampler_not_run", reason=reason, successor=successor, detail=detail,
+                   why=seen.get("not_run_why"), ended_by=seen.get("not_run_ended_by"),
+                   evidence_error=seen.get("evidence_error"))
+        live = successor is not None and any(s is not m and s.state != GONE and s.shard == successor
+                                             for s in self.members)
+        if live:  # it stopped for its successor in this pool (sampler_resume handoff)
+            m.handed_off = True
+            if not any(s.state != GONE and s.replaces == m.ticket for s in self.members):
+                self._once(m, "handed_off", "sampler_handed_off")
+                self._retire(m, "handed off", lost=False)
+            return
+        self._fail(now, f"sampler on {m.ticket} did not run")
+        self._retire(m, f"sampler did not run ({reason or 'handed off or ended'})", lost=False)
 
     def _config_error(self, m: Member, detail: str) -> None:
         """A deterministic refusal (the same config fails on every node): keep the node
@@ -2046,6 +2135,7 @@ class IslandPool:
         members (an extra node billed for nothing)."""
         why = None
         slot = None
+        self._skip_ended_shards()  # a store that did not say: the sampler reports an ended shard itself
         if self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
             why = (f"shard {self.config.shard_base}-{self.next_shard} is past shard_limit "
                    f"{self.config.shard_limit}")

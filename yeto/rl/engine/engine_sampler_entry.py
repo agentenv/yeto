@@ -123,6 +123,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import importlib
 import inspect
 import json
@@ -956,6 +957,112 @@ def sweep_agentenv_orphans(spec: Mapping[str, Any], env: Any, emit: Callable[...
 
 POOL_FENCE_PREFIX = "pool-fence:"  # yeto.launch.nc.elastic.FENCE_PREFIX: the lease a pool fence writes
 
+# An incarnation that does not run at all - a stop request (handoff record) on its shard
+# that it obeys, or a shard whose data already ended - says why on its tape
+# (``rl_sampler_not_run``: reason, the successor the request names / who ended the shard),
+# in its member record's LEAVE (``not_run``), and with its exit code: the pool tells it
+# from a sampler that ran to the end of its data (exit 0; yeto.launch.pool.status
+# NOT_RUN_EXIT_CODES). A stop request it obeys while it runs is the designed handoff:
+# ``rl_sampler_handed_off`` and exit 0. One it takes over as stale at its join
+# (``sampler_resume.judge_handoff``): ``rl_sampler_handoff_stale``.
+NOT_RUN_EVENT = "rl_sampler_not_run"
+HANDED_OFF_EVENT = "rl_sampler_handed_off"
+STALE_HANDOFF_EVENT = "rl_sampler_handoff_stale"
+SHARD_HANDED_OFF = "shard_handed_off"
+SHARD_ENDED = "shard_ended"
+NOT_RUN_EXIT_CODE = 3
+JOIN_READ_ATTEMPTS = 3  # reads of the shard's stop request at the join before the sampler fails
+JOIN_READ_PAUSE_S = 2.0  # the first pause between them (doubled after each)
+
+
+def store_identity(spec: Mapping[str, Any], data_path: Any) -> tuple[str | None, str | None]:
+    """``(store, local_store)`` of ``rl_sampler_start``: the URI of the spec's store
+    (``spec["store_uri"]``, else the opened store's own ``uri``: an s3 / OSS store
+    over a staging directory) and the spec's store path when it differs; a store
+    without a URI (a shared directory, a bucket mount): ``(path, None)``."""
+    local = None if spec.get("store") is None else str(spec["store"])
+    uri = spec.get("store_uri")
+    if not uri:
+        candidate = getattr(getattr(getattr(data_path, "weights", None), "store", None), "uri", None)
+        uri = candidate if isinstance(candidate, str) and "://" in candidate else None
+    if not uri:
+        return local, None
+    return str(uri), (local if local is not None and local != str(uri) else None)
+
+
+def _successor_of(record: Mapping[str, Any] | None) -> str | None:
+    return None if not record or record.get("successor") is None else str(record["successor"])
+
+
+def _leave_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
+    """The not-run detail for the member record (no key that LEAVE sets itself)."""
+    return {k: v for k, v in detail.items() if k not in ("reason", "rounds", "policy_version")}
+
+
+def _mark_end(buffer: Any, why: Mapping[str, Any]) -> None:
+    """``buffer.mark_data_end`` with the reason the shard ends early, where the buffer
+    records one (the syncer path's relay buffer does not)."""
+    try:
+        takes_why = "why" in inspect.signature(buffer.mark_data_end).parameters
+    except (TypeError, ValueError):
+        takes_why = False
+    if takes_why:
+        buffer.mark_data_end(why=dict(why))
+    else:
+        buffer.mark_data_end()
+
+
+def join_check(buffer: Any, member_store: Any, sampler: str, incarnation: str, superseded: Any,
+               emit: Callable[..., None]) -> tuple[tuple[str, dict[str, Any]] | None, Any]:
+    """At the join, after the lease claim: ``(not_run, stale)``. ``not_run``: ``(reason,
+    detail)`` when this incarnation must not run - its shard's data already ended
+    (``shard_ended``: who ended it and why, from the end record), or a stop request on
+    its shard that it obeys (``shard_handed_off``: the successor, why it is obeyed);
+    None: it runs. ``stale``: the identity of a stop request it took over as stale
+    (:func:`~.sampler_resume.judge_handoff`; set aside here, and ignored by the
+    sampler's later polls if that failed). ``superseded``: the lease claim's list
+    (None: no lease). A store read that fails while the request is judged raises: the
+    sampler crashes and its restart judges again (never a stop on an unread store)."""
+    from .sampler_resume import handoff_identity, judge_handoff, read_handoff, set_aside_handoff  # noqa: PLC0415
+
+    if buffer.data_ended:
+        end = dict(getattr(buffer, "end_record", None) or {})
+        why = end.get("why") if isinstance(end.get("why"), Mapping) else {}
+        return (SHARD_ENDED, {"ended_by": end.get("incarnation"), "end_why": why.get("reason"),
+                              "successor": why.get("successor"),
+                              "dispense_end": bool(end.get("dispense"))}), None
+    def unread(error: BaseException) -> None:  # unjudged, a stale request would stop a later poll
+        raise error
+
+    for attempt in range(JOIN_READ_ATTEMPTS):
+        try:
+            record = read_handoff(member_store, sampler, on_error=unread)
+            break
+        except Exception as error:  # noqa: BLE001 - read again, then the sampler fails (and restarts)
+            if attempt + 1 == JOIN_READ_ATTEMPTS:
+                raise
+            print(f"[engine-sampler] stop request of {sampler} not read at the join ({type(error).__name__}: "
+                  f"{error}); reading again"[:300], flush=True)
+            time.sleep(JOIN_READ_PAUSE_S * 2 ** attempt)
+    if record is None:
+        return None, None
+    verdict = judge_handoff(member_store, sampler, record, superseded=superseded)
+    if verdict.obey:
+        return (SHARD_HANDED_OFF, {"successor": verdict.successor, "why": verdict.why,
+                                   "successor_state": verdict.successor_state,
+                                   "requested_at": record.get("requested_at")}), None
+    try:
+        aside = set_aside_handoff(member_store, sampler, only=record,
+                                  reason=f"stale at the join of incarnation {incarnation}: {verdict.why}")
+        set_aside = aside is not None
+    except Exception as error:  # noqa: BLE001 - its polls ignore that record anyway
+        print(f"[engine-sampler] the stale stop request of {sampler} was not set aside: "
+              f"{type(error).__name__}: {error}"[:300], flush=True)
+        set_aside = False
+    emit(STALE_HANDOFF_EVENT, successor=verdict.successor, why=verdict.why,
+         successor_state=verdict.successor_state, requested_at=record.get("requested_at"), set_aside=set_aside)
+    return None, handoff_identity(record)
+
 
 def sweep_gate(spec: Mapping[str, Any], environ: Any = None) -> Any:
     """A sandbox gate of ``spec["agentic"]["envs"]`` for the predecessor sweep only
@@ -1180,9 +1287,11 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
     # the shard writer's own verdict too: a write refused by the shard's ownership records
     fenced = lambda: (lease is not None and lease.fenced) or bool(getattr(buffer, "fenced", False))  # noqa: E731
     island = None
-    from .sampler_resume import handoff_requested  # noqa: PLC0415
+    from .sampler_resume import handoff_identity, read_handoff  # noqa: PLC0415
 
     handoff_unread = [0]  # failed reads of the handoff record in a row
+    stale_handoff: list[Any] = [None]  # identity of the stop request this incarnation took over at its join
+    last_handoff: list[Any] = [None]  # the stop request handed_off() last obeyed
 
     def handed_off() -> bool:
         def unread(error: BaseException) -> None:
@@ -1192,11 +1301,15 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
                      error=f"{type(error).__name__}: {error}"[:300])
 
         failed = handoff_unread[0]
-        requested = handoff_requested(member_store, config.sampler_id, on_error=unread)
+        record = read_handoff(member_store, config.sampler_id, on_error=unread)
         if failed and handoff_unread[0] == failed:  # read again
             handoff_unread[0] = 0
             emit("rl_sampler_store_read_ok", what="handoff", failed_reads=failed)
-        return requested
+        if record is not None and stale_handoff[0] is not None and handoff_identity(record) == stale_handoff[0]:
+            return False  # the stale request it took over (its set-aside failed): no stop
+        if record is not None:
+            last_handoff[0] = record
+        return record is not None
 
     predecessor = spec.get("continues_shard")
     if predecessor is not None and str(predecessor) == config.sampler_id:
@@ -1252,6 +1365,8 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
                 from yeto.rl.harness.harbor.boat_pool import close_pools_now  # noqa: PLC0415
 
                 reclaim_deadline.add_cleanup("boat_sandboxes", close_pools_now)
+        store, local_store = store_identity(spec, data_path)
+        config = dataclasses.replace(config, store=store, local_store=local_store)
         island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer, emit=emit,
                                       prompts=prompts, reward=reward, checks=checks,
                                       should_stop=lambda: (reclaimed() or fenced() or handed_off()
@@ -1310,13 +1425,23 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
 
             fence_watcher = ReclaimWatcher(poll_lease, on_fenced, poll_s=lease_poll_s,
                                            name="sampler-lease-watcher").start()
+        not_run = None
+        if not unclaimed:  # before a replacement asks its predecessor to stop: this one may not run
+            superseded = None if lease is None else list(claimed.get("superseded") or ())
+            not_run, stale_handoff[0] = join_check(buffer, member_store, config.sampler_id, incarnation,
+                                                   superseded, emit)
+        if not_run is not None:
+            why, detail = not_run
+            print(f"[engine-sampler] not running: {why} {dict(detail)} (exit {NOT_RUN_EXIT_CODE})", flush=True)
+            emit(NOT_RUN_EVENT, reason=why, **detail)
         start = None
-        if predecessor and not resume.resumed and not unclaimed:  # a fresh replacement: continue the predecessor's prompts
+        if predecessor and not resume.resumed and not unclaimed and not_run is None:
+            # a fresh replacement: continue the predecessor's prompts
             start = continue_predecessor(data_path, spec, prompts, str(predecessor), config.sampler_id, emit,
                                          environ=env)
         dispense_fence = None
         try:
-            rounds = 0 if buffer.data_ended or unclaimed else island.run(start)
+            rounds = 0 if buffer.data_ended or unclaimed or not_run is not None else island.run(start)
         except BaseException as error:
             dispense_fence = dispense_fence_detail(error)
             if dispense_fence is None:
@@ -1333,26 +1458,35 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
             from .sampler_resume import TRAINERS_ENDED_EVENT  # noqa: PLC0415
 
             emit(TRAINERS_ENDED_EVENT, trainers=until, rounds=rounds)  # as the Miles sampler island
-        if handed_off() and not buffer.data_ended and not reclaimed() and not fenced():
+        handed = handed_off()
+        if handed and not_run is None and not reclaimed() and not fenced():
+            # stopped for a successor while it ran (the designed handoff): said with the successor
+            emit(HANDED_OFF_EVENT, reason=SHARD_HANDED_OFF, successor=_successor_of(last_handoff[0]),
+                 rounds=rounds)
+        if handed and not buffer.data_ended and not reclaimed() and not fenced():
             # a successor continues the prompts in its own shard: this shard gets no more
             # groups, so it ends (the trainer's merged index ends once every shard has)
             from .sample_buffer import ShardFenced  # noqa: PLC0415
 
             try:
-                buffer.mark_data_end()
+                _mark_end(buffer, {"reason": SHARD_HANDED_OFF, "successor": _successor_of(last_handoff[0]),
+                                   "incarnation": incarnation})
             except ShardFenced as error:  # fenced between the poll and the write: nothing written
                 print(f"[engine-sampler] the shard's data end was not written: {error}", flush=True)
         preempted = reclaimed()
         fence = None if preempted else (LeaveReason.FENCED, lease.detail()) if fenced() \
             else (LeaveReason.FENCED, dispense_fence) if dispense_fence is not None \
             else None if stop_reason is None else stop_reason()
+        # the member record says why this incarnation did not run (the pool reads it)
+        not_run_detail = {} if not_run is None else {"not_run": not_run[0], **_leave_detail(not_run[1])}
         if fence is not None:  # E.g. FENCED, fenced="other run"
             reason, detail = fence
             print(f"[engine-sampler] leaving {reason.name}: {dict(detail)}", flush=True)
-            leave(reason, rounds=rounds, dropped_groups=island.round.dropped_groups, **dict(detail))
+            leave(reason, rounds=rounds, dropped_groups=island.round.dropped_groups,
+                  **{**not_run_detail, **dict(detail)})
         else:
             leave(LeaveReason.PREEMPTED if preempted else LeaveReason.FINISHED, rounds=rounds,
-                  dropped_groups=island.round.dropped_groups)
+                  dropped_groups=island.round.dropped_groups, **not_run_detail)
         if not preempted:
             from yeto.rl.event_echo import FINALIZED_EVENT  # noqa: PLC0415
 
@@ -1584,11 +1718,17 @@ def main(argv: Sequence[str] | None = None, *, default_data_path: str | None = N
     parser.add_argument("--spec", required=True, help="the sampler spec JSON (module doc)")
     args = parser.parse_args(argv)
     deadline = ReclaimDeadline()
+    not_run: list[str] = []  # the reason of an incarnation that did not run (NOT_RUN_EVENT)
+
+    def on_event(event: str, **fields: Any) -> None:
+        if event == NOT_RUN_EVENT:
+            not_run.append(str(fields.get("reason")))
+
     try:
         spec = load_spec(args.spec)
         if default_data_path is not None:
             spec.setdefault("data_path", default_data_path)
-        rounds = run(spec, reclaim_deadline=deadline)
+        rounds = run(spec, reclaim_deadline=deadline, on_event=on_event)
     except SamplerSpecError as error:
         print(f"[engine-sampler] spec rejected: {error}", file=sys.stderr)
         return 2
@@ -1612,6 +1752,9 @@ def main(argv: Sequence[str] | None = None, *, default_data_path: str | None = N
     print(f"[engine-sampler] done: {rounds} round(s)", flush=True)
     if hold_after_reclaim(deadline=deadline):
         reclaim_exit("held")
+    if not_run:  # not the end of the data: the pool must not read it as a normal finish
+        print(f"[engine-sampler] did not run: {not_run[0]} (exit {NOT_RUN_EXIT_CODE})", file=sys.stderr, flush=True)
+        return NOT_RUN_EXIT_CODE
     return 0
 
 

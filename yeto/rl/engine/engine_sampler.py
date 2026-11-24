@@ -19,6 +19,9 @@ vllm-ascend on 910B. Per round (:class:`EngineRound`):
 ``rl_sampler_start`` names the sampler's ``island`` (the learner id of the trainer
 it feeds, None outside a fleet of islands) and its ``store``, so a dashboard and
 the run's data-end check bind it to its trainer without parsing the store path.
+``store`` is the store's URI (``s3://bucket/runs/<run>/trainer<k>``, what the launch
+plan names) wherever the store has one, never a host's staging directory; that
+directory is ``local_store`` then.
 
 Replacement (the engine-sampler side of C1's :mod:`.sampler_resume`):
 each group's sample id carries the incarnation, the round and the prompt row,
@@ -535,7 +538,10 @@ class EngineSamplerConfig:
     # trainer: its sub-directory trainer<k>); None: no island. Identity only: the
     # start event carries it, with the store the sampler reads and writes
     island: int | None = None
+    # the store's URI where it has one (s3://..., the key a dashboard matches against the
+    # launch plan's ``store``), else the spec's store path
     store: str | None = None
+    local_store: str | None = None  # the spec's store path on this host, when ``store`` is its URI
 
 
 @dataclass
@@ -591,7 +597,8 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
          sampling_digest=sampling.digest(), allow_penalties=sampling.allow_penalties,
          max_prompt_tokens=int(config.max_prompt_tokens), provenance=provenance.to_record(),
          loop_guard=None if config.loop_guard is None else vars(config.loop_guard).copy(),
-         island=config.island, store=config.store)
+         island=config.island, store=config.store,
+         **({} if config.local_store is None else {"local_store": config.local_store}))
     loader = PortReleaseLoader(engine, checks or PostLoadChecks(), emit,
                                max_consecutive_failures=config.max_consecutive_load_failures,
                                expected_selection_sha256=config.expert_selection_sha256,

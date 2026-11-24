@@ -711,15 +711,24 @@ def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: Is
 def stopped_state_hint(state: Any, pool: IslandPool, cfg: dict[str, Any]) -> str:
     """What a pool loop prints when its state file (of this run, or with no owner recorded)
     says stopped: why, and what each way out does. A stopped state of another run never
-    gets here: :func:`claim_state` archived it."""
+    gets here: :func:`claim_state` archived it. A pool started after the file was moved
+    away remembers nothing of this one: it numbers its shards from ``<shard_base>-0``
+    again in the same run store, skips a shard whose data already ended there (final for
+    the trainer), sets aside a stop request a fence left on a shard before a sampler
+    starts on it, and adopts this run's open machines."""
     base = str(cfg.get("shard_base") or pool.config.shard_base)
     used = ", ".join(sorted({m.shard for m in pool.members if m.shard})) or "none"
     by = _owner_text(pool.owner) if pool.owner else "a run it does not record (an older state file)"
+    limit = pool.config.shard_limit
     return (f"pool state {state} says stopped ({pool.stopped}) by an earlier stop of {by}; this loop starts "
             "nothing. `yeto run up` drives a stopped pool of its own run again (when no member is live). To start a new pool by hand for the "
             f"same run, move the file away: the new pool forgets this one and numbers its shards from {base}-0 "
-            f"again in the same store (this one used: {used}). A stopped state of another run (another run or "
-            "run_prefix) is archived automatically; for a clean slate use a new run_prefix.")
+            f"again in the same store (this one used: {used}). Shards whose data already ended there are skipped "
+            "(the trainer never reads an ended shard again)"
+            + (f", so it needs a free shard index below shard_limit {limit}" if limit is not None else "")
+            + "; a stop request a fence left on a shard is set aside before a sampler starts on it; open machines "
+              "of this run are adopted. A stopped state of another run (another run or run_prefix) is archived "
+              "automatically; for a clean slate use a new run_prefix.")
 
 
 def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: float, pool: IslandPool | None,
