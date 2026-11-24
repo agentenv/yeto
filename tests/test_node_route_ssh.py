@@ -31,11 +31,21 @@ class _NoArchive:
         return 0
 
 
+class NodeRun(FakeRun):
+    """FakeRun with a node store that holds nothing yet (``cat`` of an absent file)."""
+
+    def __call__(self, argv, **kw):
+        out = super().__call__(argv, **kw)
+        if argv[0] == "ssh" and "YETO_NODE_ABSENT_" in argv[-1]:
+            return SimpleNamespace(returncode=0, stdout="YETO_NODE_ABSENT_1\n", stderr="")
+        return out
+
+
 def _start(tmp_path, monkeypatch, **section):
     monkeypatch.setattr(sp.subprocess, "Popen", _NoArchive)
     monkeypatch.setattr(cli.tasks, "sampler_spec", lambda spec, sampler_id, shards: dict(spec, sampler_id=sampler_id))
     monkeypatch.setattr(cli.tasks, "apply_sampler_overrides", lambda spec, **kw: spec)
-    run = FakeRun()
+    run = NodeRun()
     ops = sp.SshSamplerPoolOps(pool_cfg(tmp_path), conf=conf(**section), run=run, state_dir=tmp_path)
     t = ops.order(0)
     m = SimpleNamespace(account=0, ticket=t, shard="f09-0", data_slot=None, replaces_shard=None,
