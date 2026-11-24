@@ -16,8 +16,9 @@ or as a list, one entry per pool (any number of providers)::
 An entry names a pool config file (``config``) and/or carries pool config keys
 inline (``target``, ``spec``, ``slots``, ``shard_base``, ``elastic``, ...: the
 ``pool.json`` format of docs/NC_POOL.md, unchanged); inline keys override the
-file's. ``provider`` is a kind (``nc`` | ``daytona`` | ``sky`` | ``modal``) or a full
-provider section. Entry-only keys: ``name`` (default: the provider kind),
+file's. ``provider`` is a registered kind (``nc`` | ``daytona`` | ``sky`` | ``modal`` |
+``ssh``, :func:`provider_kinds`: the provider registry of :mod:`yeto.launch.pool.provider`)
+or a full provider section. Entry-only keys: ``name`` (default: the provider kind),
 ``interval_s`` (the pool loop's tick, default 30), ``usd_per_h`` (one node's price
 for the run's spend estimate; default ``budget.nc_usd_per_h``), ``data_path``
 (``r2``, the default: buffer shards and policy releases in the run store; or
@@ -44,7 +45,17 @@ from typing import Any
 
 DATA_PATHS = ("r2", "syncer")
 ENTRY_KEYS = frozenset({"name", "provider", "config", "interval_s", "usd_per_h", "data_path"})
-PROVIDER_KINDS = ("nc", "daytona", "sky", "modal")
+
+
+def provider_kinds() -> tuple[str, ...]:
+    """The provider kinds a pool entry may name: every kind of the provider registry
+    (:func:`yeto.launch.pool.provider.kinds`; the registry imports no cloud code)."""
+    from yeto.launch.pool import provider as registry  # noqa: PLC0415
+
+    return tuple(registry.kinds())
+
+
+PROVIDER_KINDS = provider_kinds()  # the kinds registered at import (the --provider choices)
 
 
 @dataclass(frozen=True)
@@ -74,8 +85,9 @@ def _provider_section(value: Any, base: dict[str, Any] | None) -> dict[str, Any]
     if isinstance(value, dict):
         return dict(value)
     kind = str(value)
-    if kind not in PROVIDER_KINDS:
-        raise ValueError(f"samplers: provider {kind!r} is not one of {', '.join(PROVIDER_KINDS)} "
+    kinds = provider_kinds()
+    if kind not in kinds:
+        raise ValueError(f"samplers: provider {kind!r} is not one of {', '.join(kinds)} "
                          "(or a provider section)")
     if base is not None:
         from yeto.launch.nc.provider import provider_kind  # noqa: PLC0415

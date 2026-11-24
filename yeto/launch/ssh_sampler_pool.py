@@ -11,9 +11,12 @@ sampler and marks the ticket ended. Only a pool config that names
 
 What runs on a node, for each start (all idempotent):
 
-* preflight: the card tool (``npu-smi info`` on an npu node; the inventory's
-  card check), the number of cards against the inventory, optionally no other
-  process on the cards (``require_idle``), and the free space of ``workdir``
+* preflight: the card tool of the node's family (``nvidia-smi``, ``amd-smi`` /
+  ``rocm-smi``, ``npu-smi info``; the inventory's card check), the number of cards
+  against the inventory, optionally no other process on the cards
+  (``require_idle``: the compute apps of ``nvidia-smi`` / ``ppu-smi``, ``amd-smi
+  process``, the process table of ``npu-smi info``), the host devices a rocm
+  container needs (``/dev/kfd``, ``/dev/dri``), and the free space of ``workdir``
   (``min_free_gib``); a failed check refuses the start before anything runs;
 * the yeto tree of the launcher's commit (``git archive``) under
   ``<workdir>/yeto/<sha>``, the member's rendered spec under
@@ -31,6 +34,19 @@ with ``YETO_SPOT_RECLAIM_MARKER`` set, so SIGTERM is its orderly leave: it stops
 the engine and exits), waits ``grace_s``, and only then kills what is left of
 the process group of that start. A container is stopped with ``<engine> stop -t
 grace_s`` (SIGTERM to its PID 1, the sampler).
+
+Device defaults by family (:class:`~yeto.launch.node_inventory.NodeProfile`, an
+inventory ``docker_args`` wins): cuda ``--gpus`` (docker) or CDI
+``nvidia.com/gpu=<i>`` (podman) and ``CUDA_VISIBLE_DEVICES`` as the container numbers
+the cards; rocm ``/dev/kfd``, ``/dev/dri``, the video group and seccomp off, with
+``HIP_VISIBLE_DEVICES``; ascend ``/dev/davinci<i>`` plus the host devices and driver
+mounts the preflight found, with ``ASCEND_RT_VISIBLE_DEVICES`` when ``devices`` is
+set. Every sampler gets ``YETO_DEVICE_FAMILY`` (torch reads ROCm as ``cuda``).
+
+``container.image: "auto"`` takes each node's image from the engine image catalog
+(:func:`yeto.launch.engine_images.resolve` with what the sampler spec asks: model,
+engine, reload mode, precision, rollout fields), so a pool of mixed rocm and cuda
+nodes runs one spec; ``pool --dry-run`` refuses a node no image serves.
 
 Container runtime knobs (what an old podman on Ascend needs, A02 of hetero-1114):
 ``security_opt`` (``["seccomp=unconfined"]``: the default seccomp profile of
@@ -70,8 +86,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import ssh_transport
-from .node_inventory import Node, load_inventory, nodes_by_name
+from . import engine_images, ssh_transport
+from .node_inventory import (
+    NPU_HOST_DEVICES,  # noqa: F401 - re-exported (they lived here)
+    NPU_HOST_MOUNTS,  # noqa: F401
+    Node,
+    NodeProfile,
+    load_profiles,
+    nodes_by_name,
+    profile_of,
+)
 from .pool import status as island_status
 from .pool.provider import ProviderCaps
 from .pool.status import LeaseStatus
@@ -89,11 +113,9 @@ CONTAINER_KEYS = frozenset({"engine", "image", "pull_ref", "pull", "security_opt
                             "shm_size", "mounts"})
 VENV_KEYS = frozenset({"python", "source", "ld_preload", "pythonpath"})
 PREFLIGHT_KEYS = frozenset({"min_free_gib", "require_idle", "min_cards"})
-# what an Ascend container needs from the host besides the cards (A02: npu-smi inside
-# the container is what the TP check and the memory guard read)
-NPU_HOST_DEVICES = ("/dev/davinci_manager", "/dev/devmm_svm", "/dev/hisi_hdc")
-NPU_HOST_MOUNTS = ("/usr/local/Ascend/driver", "/usr/local/dcmi", "/usr/local/bin/npu-smi",
-                   "/usr/local/sbin/npu-smi", "/etc/ascend_install.info", "/etc/vnpu.cfg")
+AUTO_IMAGE = "auto"  # container.image: each node's image from the engine image catalog
+# NPU_HOST_DEVICES / NPU_HOST_MOUNTS (what an Ascend container needs from the host besides
+# the cards) now live in node_inventory with the other per-family defaults; imported above.
 
 
 class SshSamplerError(RuntimeError):
@@ -131,7 +153,7 @@ class VenvConf:
 
 @dataclass(frozen=True)
 class SshPoolConf:
-    nodes: tuple[Node, ...]
+    nodes: tuple[NodeProfile, ...]
     workdir: str
     runtime: str
     container: ContainerConf | None
@@ -167,7 +189,8 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
     if inventory is None:
         if not section.get("inventory"):
             raise ValueError("ssh provider: inventory (an SSH node inventory file) is required")
-        inventory = load_inventory(os.path.expanduser(str(section["inventory"])))
+        inventory = load_profiles(os.path.expanduser(str(section["inventory"])))
+    inventory = [profile_of(n) for n in inventory]
     by_name = nodes_by_name(list(inventory))
     names = section.get("nodes")
     if names is None:
@@ -263,15 +286,43 @@ def container_name(shard: str) -> str:
     return f"yeto-sampler-{shard}"
 
 
+def pool_profile(node: Node, conf: SshPoolConf) -> NodeProfile:
+    """The node's profile as this pool starts it: the pool's container engine
+    (``runtime: container``) or a host process (``runtime: venv``)."""
+    engine = conf.container.engine if conf.runtime == "container" and conf.container else "process"
+    return NodeProfile.from_node(profile_of(node), container=engine)
+
+
+# require_idle: the command that lists the processes on the cards, per unified family
+# (ascend reads the process table of ``npu-smi info``, the card tool's own output)
+def idle_command(node: Node) -> str | None:
+    family = profile_of(node).family
+    if family in ("cuda", "ppu"):
+        smi = profile_of(node).hw.smi
+        return (f"{smi} --query-gpu=index,pci.bus_id --format=csv,noheader; echo YETO_SSH_APPS; "
+                f"{smi} --query-compute-apps=gpu_bus_id,pid --format=csv,noheader")
+    if family == "rocm":
+        return "amd-smi process --json"
+    return None
+
+
 def preflight_script(node: Node, conf: SshPoolConf) -> str:
-    """Node shell: card tool, ``uname -m``, free GiB of the workdir's file system.
+    """Node shell: card tool, ``uname -m``, the family's host paths, free GiB of the
+    workdir's file system, and with ``require_idle`` the processes on the cards.
     Prints sections the launcher checks (:func:`check_preflight`)."""
-    tools = " || ".join(shlex.join(c) for c in node.preflight_commands()[:1]) or "true"
+    profile = profile_of(node)
+    commands = node.preflight_commands()
+    # npu: npu-smi info only (its process table is the idle check); rocm: amd-smi, else rocm-smi
+    commands = commands if profile.family == "rocm" else commands[:1]
+    tools = " || ".join(shlex.join(c) for c in commands) or "true"
+    paths = profile.host_paths()
+    probe = (f"for f in {' '.join(paths)}; do [ -e $f ] && echo YETO_SSH_HOSTPATH $f; done; " if paths else "")
+    idle = idle_command(node) if conf.require_idle else None
+    idle_part = f"; echo YETO_SSH_IDLE_BEGIN; {{ {idle}; }} 2>&1; echo YETO_SSH_IDLE_END rc=$?" if idle else ""
     return (f"set -u; mkdir -p {shlex.quote(conf.workdir)}/sampler {shlex.quote(conf.workdir)}/logs || exit 3; "
-            f"echo YETO_SSH_ARCH $(uname -m); "
-            f"for f in {' '.join(NPU_HOST_DEVICES + NPU_HOST_MOUNTS)}; do [ -e $f ] && echo YETO_SSH_HOSTPATH $f; done; "
+            f"echo YETO_SSH_ARCH $(uname -m); {probe}"
             f"echo YETO_SSH_FREE_GIB $(df -Pk {shlex.quote(conf.workdir)} | awk 'NR==2{{printf \"%d\", $4/1048576}}'); "
-            f"echo YETO_SSH_CARDS_BEGIN; {tools} 2>&1; echo YETO_SSH_CARDS_END rc=$?")
+            f"echo YETO_SSH_CARDS_BEGIN; {tools} 2>&1; echo YETO_SSH_CARDS_END rc=$?{idle_part}")
 
 
 def check_preflight(node: Node, conf: SshPoolConf, text: str) -> dict[str, Any]:
@@ -280,6 +331,7 @@ def check_preflight(node: Node, conf: SshPoolConf, text: str) -> dict[str, Any]:
     problems: list[str] = []
     facts: dict[str, Any] = {}
     cards_text = text.partition("YETO_SSH_CARDS_BEGIN")[2].partition("YETO_SSH_CARDS_END")[0]
+    idle_text = text.partition("YETO_SSH_IDLE_BEGIN")[2].partition("YETO_SSH_IDLE_END")[0]
     for line in text.splitlines():
         if line.startswith("YETO_SSH_HOSTPATH "):
             facts.setdefault("host_paths", []).append(line.split(" ", 1)[1].strip())
@@ -306,13 +358,28 @@ def check_preflight(node: Node, conf: SshPoolConf, text: str) -> dict[str, Any]:
     want = conf.min_cards if conf.min_cards is not None else len(conf.devices or ()) or None
     if want is not None and cards and len(cards) < want:
         problems.append(f"{len(cards)} cards, the provider asks {want}")
-    if conf.require_idle and node.device_family == "npu":
-        busy = busy_npus(cards_text)
-        mine = set(conf.devices) if conf.devices is not None else None
-        busy = [b for b in busy if mine is None or b in mine]
-        facts["busy"] = busy
-        if busy:
-            problems.append(f"cards {busy} run other processes (npu-smi); preflight.require_idle is on")
+    missing = [p for p in pool_profile(node, conf).required_host_paths()
+               if not node.docker_args and p not in facts.get("host_paths", ())]
+    if missing:
+        problems.append(f"{', '.join(missing)} missing on the host: a {profile_of(node).family} container "
+                        "cannot reach the cards")
+    if conf.require_idle:
+        family = profile_of(node).family
+        if family == "ascend":
+            busy, tool = busy_npus(cards_text), "npu-smi"
+        elif family == "rocm":
+            busy, tool = busy_amd(idle_text), "amd-smi process"
+        else:
+            busy, tool = busy_cuda(idle_text), f"{profile_of(node).hw.smi} compute apps"
+        if busy is None:  # the tool did not answer: not checked (the card check above still ran)
+            facts["busy"] = None
+            facts["idle"] = f"not checked: {tool} gave no process list"
+        else:
+            mine = set(conf.devices) if conf.devices is not None else None
+            busy = [b for b in busy if mine is None or b in mine]
+            facts["busy"] = busy
+            if busy:
+                problems.append(f"cards {busy} run other processes ({tool}); preflight.require_idle is on")
     if problems:
         raise PreflightError(f"node {node.name}: preflight refused: " + "; ".join(problems))
     return facts
@@ -333,6 +400,54 @@ def busy_npus(text: str) -> list[int]:
             head = cells[0].split()
             if head and head[0].isdigit():
                 busy.add(int(head[0]))
+    return sorted(busy)
+
+
+def busy_cuda(text: str) -> list[int] | None:
+    """Card indexes with a compute process in the output of :func:`idle_command` for
+    ``nvidia-smi`` / ``ppu-smi`` (``index, bus id`` rows, ``YETO_SSH_APPS``, then ``bus id,
+    pid`` rows); None when the tool listed no card (not installed, no driver)."""
+    head, sep, apps = text.partition("YETO_SSH_APPS")
+    index_of: dict[str, int] = {}
+    for line in head.splitlines():
+        cells = [c.strip() for c in line.split(",")]
+        if len(cells) == 2 and cells[0].isdigit() and ":" in cells[1]:
+            index_of[cells[1].lower()] = int(cells[0])
+    if not sep or not index_of:
+        return None
+    busy = set()
+    for line in apps.splitlines():
+        cells = [c.strip() for c in line.split(",")]
+        if len(cells) == 2 and cells[1].isdigit() and cells[0].lower() in index_of:
+            busy.add(index_of[cells[0].lower()])
+    return sorted(busy)
+
+
+def busy_amd(text: str) -> list[int] | None:
+    """Card indexes with a process in ``amd-smi process --json`` (a list of ``{"gpu": i,
+    "process_list": [...]}``; an entry is ``{"process_info": {..."pid"...}}`` up to ROCm
+    6.3 and a flat ``{"pid": ...}`` later; "No running processes detected" is idle).
+    None when the output is not that JSON (amd-smi missing or failing)."""
+    start = text.find("[")
+    if start < 0:
+        start = text.find("{")
+    try:
+        doc = json.loads(text[start:]) if start >= 0 else None
+    except ValueError:
+        return None
+    if isinstance(doc, dict):  # a wrapper object: its first list value
+        doc = next((v for v in doc.values() if isinstance(v, list)), None)
+    if not isinstance(doc, list):
+        return None
+    busy = set()
+    for entry in doc:
+        if not isinstance(entry, dict) or not str(entry.get("gpu", "")).isdigit():
+            continue
+        for proc in entry.get("process_list") or []:
+            info = proc.get("process_info", proc) if isinstance(proc, dict) else None
+            pid = info.get("pid") if isinstance(info, dict) else None
+            if pid not in (None, "", "N/A"):
+                busy.add(int(entry["gpu"]))
     return sorted(busy)
 
 
@@ -469,26 +584,17 @@ def container_run_argv(conf: SshPoolConf, node: Node, *, name: str, image: str, 
                        env: Mapping[str, str], env_file: str | None, cards: Sequence[int],
                        host_paths: Sequence[str] | None = None) -> list[str]:
     """``<engine> run -d``: the node's device flags (the inventory's ``docker_args``,
-    else the npu defaults for ``cards``), ``security_opt``, the workdir and mounts at
-    the same paths as on the host, then ``exec`` of the engine sampler as PID 1."""
+    else the defaults of its family for ``cards``: :meth:`NodeProfile.devices`),
+    ``security_opt``, the workdir and mounts at the same paths as on the host, then
+    ``exec`` of the engine sampler as PID 1."""
     c = conf.container
     assert c is not None
     argv = [*(["sudo", "-n"] if c.sudo else []), c.engine, "run", "-d", "--name", name,
             "--network", "host", "--ipc", "host", "--shm-size", c.shm_size]
     for opt in c.security_opt:
         argv += ["--security-opt", opt]
-    if node.docker_args:
-        argv += list(node.docker_args)
-    elif node.device_family == "npu":
-        for i in cards:
-            argv += ["--device", f"/dev/davinci{i}"]
-        present = set(NPU_HOST_DEVICES + NPU_HOST_MOUNTS) if host_paths is None else set(host_paths)
-        for dev in NPU_HOST_DEVICES:  # what the preflight found on the host (a missing -v source fails the run)
-            if dev in present:
-                argv += ["--device", dev]
-        for path in NPU_HOST_MOUNTS:
-            if path in present:
-                argv += ["-v", f"{path}:{path}:ro"]
+    # what the preflight found on the host is passed (a missing -v source fails the run)
+    argv += list(pool_profile(node, conf).devices(cards, engine=c.engine, host_paths=host_paths).args)
     mounts = {conf.workdir: conf.workdir, **dict(node.mounts), **dict(c.mounts)}
     if conf.store and not conf.store.startswith(conf.workdir + "/"):
         mounts.setdefault(conf.store, conf.store)
@@ -706,8 +812,10 @@ class SshSamplerPoolOps:
         env = {"PYTHONUNBUFFERED": "1",
                # SIGTERM is the orderly leave (sampler_resume.install_marker_signals)
                "YETO_SPOT_RECLAIM_MARKER": f"{self.conf.workdir}/sampler/{m.shard}.reclaim"}
-        if node.device_family == "npu" and self.conf.devices is not None:
-            env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(str(i) for i in self.conf.devices)
+        profile = pool_profile(node, self.conf)
+        if profile.family != "ascend" or self.conf.devices is not None:  # ascend: only an explicit card list
+            env.update(profile.devices(self.cards(node)).env)
+        env.update(profile.family_env())
         if self._uses_r2():
             prefix = str(self.cfg["run_prefix"]).strip("/")
             env.update({"YETO_RL_STORE_IMPL": "yeto.cloud.s3_store:store_from_env",
@@ -741,7 +849,7 @@ class SshSamplerPoolOps:
                                         env=env, env_file=env_file), p["script"], mode="700")
             out = self.ssh(node, venv_launch_command(p, marker), timeout=120)
         else:
-            image = self.conf.container.image or node.image  # type: ignore[union-attr]
+            image = self.image_for(node)
             name = container_name(m.shard)
             argv = container_run_argv(self.conf, node, name=name, image=str(image), yeto_dir=yeto_dir,
                                       spec_path=p["spec"], env=env, env_file=env_file, cards=self.cards(node),
@@ -754,6 +862,11 @@ class SshSamplerPoolOps:
             raise SshSamplerError(f"sampler {m.shard} on {node.name} did not start (exit {out.returncode}): "
                                   f"{(text + _text(out.stderr))[-800:]}")
         _log(f"ssh pool: {m.shard} on {node.name}: {text.strip().splitlines()[-1]}")
+
+    def image_for(self, node: Node) -> str:
+        """The image a node runs: ``container.image`` (``auto``: the node's inventory
+        image, else the catalog's for what the spec asks), else the node's image."""
+        return node_image(self.conf, node, spec_of(self.cfg))
 
     def restart(self, m, shards: list[str]) -> None:
         self.start(m, shards)
@@ -892,7 +1005,49 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
         problems.append("ssh provider: a node-local store (provider.store) serves one sampler; target must be 1")
     if not conf.store and cfg.get("data_path", "r2") == "r2" and not cfg.get("r2_env_file"):
         problems.append("ssh provider: data_path r2 needs r2_env_file (or set provider.store, or data_path syncer)")
+    problems += image_problems(conf, spec_of(cfg))
     return problems
+
+
+def spec_of(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """The pool's sampler spec file as written (``{}`` when it cannot be read: the
+    pool's own checks report that)."""
+    try:
+        return json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text())
+    except (KeyError, OSError, ValueError, TypeError):
+        return {}
+
+
+def node_image(conf: SshPoolConf, node: Node, spec: Mapping[str, Any]) -> str:
+    """The image ``node`` runs (container runtime): ``container.image`` unless it is
+    ``auto``; then the node's inventory image, else the engine image catalog's choice
+    for what ``spec`` asks (raises ``ImageIncompatible`` when none serves it)."""
+    assert conf.container is not None
+    if conf.container.image and conf.container.image != AUTO_IMAGE:
+        return conf.container.image
+    if node.image:
+        return node.image
+    needs = engine_images.spec_needs(spec)
+    return engine_images.resolve(profile_of(node), needs.pop("model"), needs.pop("engine_pref"),
+                                 **needs).image.pull_ref  # type: ignore[union-attr]
+
+
+def image_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
+    """``pool --dry-run``: every node's image serves the spec (a catalog image is held to
+    the node's family, card architecture and HBM and to the spec's model, reload mode,
+    precision and rollout fields; a site image is the site's)."""
+    if conf.runtime != "container" or conf.container is None:
+        return []
+    needs = engine_images.spec_needs(spec)
+    model, pref = needs.pop("model"), needs.pop("engine_pref")
+    out = []
+    for node in conf.nodes:
+        try:
+            image = node_image(conf, node, spec)
+            engine_images.resolve(profile_of(node), model, pref, image=image, **needs)
+        except engine_images.ImageIncompatible as error:
+            out.append(f"ssh provider: node {node.name}: {error}")
+    return out
 
 
 def required_pool_keys(cfg: Mapping[str, Any]) -> tuple[str, ...]:

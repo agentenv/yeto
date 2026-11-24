@@ -81,7 +81,7 @@ def test_config_refusals():
 
 
 def test_offline_problems_refuse_a_shared_local_store(tmp_path, monkeypatch):
-    monkeypatch.setattr(sp, "load_inventory", lambda _p: [npu_node()])
+    monkeypatch.setattr(sp, "load_profiles", lambda _p: [npu_node()])
     cfg = pool_cfg(tmp_path, inventory="inv.yaml")
     assert sp.offline_problems(cfg) == []
     assert any("target must be 1" in p for p in sp.offline_problems(dict(cfg, target=2)))
@@ -322,7 +322,7 @@ def test_a_stated_price_is_unchanged(tmp_path, monkeypatch, capsys):
 
 
 def test_an_ssh_pool_dry_runs_at_zero_usd(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(sp, "load_inventory", lambda _p: [npu_node()])
+    monkeypatch.setattr(sp, "load_profiles", lambda _p: [npu_node()])
     cfg = pool_cfg(tmp_path, inventory="inv.yaml")
     assert cli.pool_config(cfg).hourly() == 0
     assert _dry_run_spend(cfg, tmp_path, monkeypatch, capsys) == [
@@ -413,3 +413,224 @@ def test_a_marker_is_plain_words():
     assert sp.start_marker("r", "s", "r-node-a-1") == "yeto-ssh-sampler:r:s:r-node-a-1"
     with pytest.raises(ValueError):
         sp.start_marker("r x", "s", "t")
+
+
+# -- device defaults by family (unified-sampler-pool 3.1)
+
+K31_SPEC = Path(__file__).resolve().parents[1] / "examples" / "k31" / "sampler-spec.nc-mi355x-vllm.json"
+# origin/main's rendering of an Ascend start (podman, cards 0 and 3, every host path / two of them)
+MAIN_NPU_ARGV_HEAD = ['podman', 'run', '-d', '--name', 'yeto-sampler-f09-0', '--network', 'host', '--ipc', 'host',
+                      '--shm-size', '16g', '--security-opt', 'seccomp=unconfined']
+MAIN_NPU_DEVICES_ALL = ['--device', '/dev/davinci0', '--device', '/dev/davinci3', '--device', '/dev/davinci_manager',
+                        '--device', '/dev/devmm_svm', '--device', '/dev/hisi_hdc',
+                        '-v', '/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro',
+                        '-v', '/usr/local/dcmi:/usr/local/dcmi:ro', '-v', '/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro',
+                        '-v', '/usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro',
+                        '-v', '/etc/ascend_install.info:/etc/ascend_install.info:ro', '-v', '/etc/vnpu.cfg:/etc/vnpu.cfg:ro']
+MAIN_NPU_DEVICES_TWO = ['--device', '/dev/davinci0', '--device', '/dev/davinci3', '--device', '/dev/davinci_manager',
+                        '-v', '/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro']
+MAIN_NPU_ARGV_TAIL = ['-v', '/srv/yeto/run0:/srv/yeto/run0', '-v', '/srv/yeto/shared:/srv/yeto/shared',
+                      '--env-file', '/w/.store.env', '-e', 'K=V', '--entrypoint', 'bash', '3a7d901460ab', '-c',
+                      'export PYTHONPATH=/y"${PYTHONPATH:+:$PYTHONPATH}"; export YETO_RL_STORE_S3_URI="s3://${R2_BUCKET}'
+                      '/runs/${YETO_NC_RUN_PREFIX}" YETO_RL_STORE_S3_ENDPOINT_URL="$AWS_ENDPOINT_URL"; '
+                      'exec python3 -m yeto.rl.engine.engine_sampler --spec /w/a.json']
+MAIN_NPU_PREFLIGHT = (
+    "set -u; mkdir -p /srv/yeto/run0/sampler /srv/yeto/run0/logs || exit 3; echo YETO_SSH_ARCH $(uname -m); "
+    "for f in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc /usr/local/Ascend/driver /usr/local/dcmi "
+    "/usr/local/bin/npu-smi /usr/local/sbin/npu-smi /etc/ascend_install.info /etc/vnpu.cfg; do [ -e $f ] && "
+    "echo YETO_SSH_HOSTPATH $f; done; echo YETO_SSH_FREE_GIB $(df -Pk /srv/yeto/run0 | awk 'NR==2{printf \"%d\", "
+    "$4/1048576}'); echo YETO_SSH_CARDS_BEGIN; npu-smi info 2>&1; echo YETO_SSH_CARDS_END rc=$?")
+
+
+def test_an_ascend_start_renders_as_on_main():
+    c = conf(devices=[0, 3])
+    for host_paths, devices in ((None, MAIN_NPU_DEVICES_ALL),
+                                (["/dev/davinci_manager", "/usr/local/Ascend/driver"], MAIN_NPU_DEVICES_TWO)):
+        argv = sp.container_run_argv(c, npu_node(), name="yeto-sampler-f09-0", image="3a7d901460ab", yeto_dir="/y",
+                                     spec_path="/w/a.json", env={"K": "V"}, env_file="/w/.store.env", cards=[0, 3],
+                                     host_paths=host_paths)
+        assert argv == MAIN_NPU_ARGV_HEAD + devices + MAIN_NPU_ARGV_TAIL
+    assert sp.preflight_script(npu_node(), c) == MAIN_NPU_PREFLIGHT
+    assert sp.NPU_HOST_DEVICES == ("/dev/davinci_manager", "/dev/devmm_svm", "/dev/hisi_hdc")
+
+
+def cuda_node(**kw):
+    raw = {"name": "node-a", "host": "node-a", "device_family": "cuda", "cpu_arch": "x86_64", "card": "H200",
+           "cards_per_node": 8, "hbm_gib": 141, "host_memory_gib": 1024, **kw}
+    return parse_node(raw, index=0)
+
+
+def rocm_node(**kw):
+    return cuda_node(device_family="rocm", card="MI355X", hbm_gib=288, **kw)
+
+
+def family_conf(node, **section):
+    sec = provider_section(**{"container": {"engine": "docker", "image": "img"}, **section})
+    return sp.parse_config({"provider": sec}, inventory=[node])
+
+
+def _env(node, c, tmp_path):
+    ops = sp.SshSamplerPoolOps(pool_cfg(tmp_path), conf=c, run=FakeRun(), state_dir=tmp_path)
+    return ops.sampler_env(node, SimpleNamespace(shard="f09-0"))
+
+
+def test_cuda_containers_get_the_gpus_and_no_rocm_devices(tmp_path):
+    node = cuda_node()
+    c = family_conf(node, devices=[2, 3])
+    argv = sp.container_run_argv(c, node, name="n", image="img", yeto_dir="/y", spec_path="/s", env={},
+                                 env_file=None, cards=sp.SshSamplerPoolOps(pool_cfg(tmp_path), conf=c, run=FakeRun(),
+                                                                           state_dir=tmp_path).cards(node))
+    joined = " ".join(argv)
+    assert '--gpus "device=2,3"' in joined and "/dev/kfd" not in joined and "davinci" not in joined
+    env = _env(node, c, tmp_path)
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1" and env["YETO_DEVICE_FAMILY"] == "cuda"
+    assert "HIP_VISIBLE_DEVICES" not in env and "ASCEND_RT_VISIBLE_DEVICES" not in env
+    podman = sp.parse_config({"provider": provider_section(container={"engine": "podman", "image": "img"})},
+                             inventory=[node])
+    cdi = sp.container_run_argv(podman, node, name="n", image="img", yeto_dir="/y", spec_path="/s", env={},
+                                env_file=None, cards=[0])
+    assert "--device nvidia.com/gpu=0" in " ".join(cdi)
+    venv = family_conf(node, runtime="venv", container=None, venv={"python": "/e/bin/python"}, devices=[2, 3])
+    assert _env(node, venv, tmp_path)["CUDA_VISIBLE_DEVICES"] == "2,3"  # a host process: host numbers
+
+
+def test_rocm_containers_get_kfd_dri_video_and_seccomp(tmp_path):
+    node = rocm_node()
+    c = family_conf(node, devices=None)
+    argv = " ".join(sp.container_run_argv(c, node, name="n", image="img", yeto_dir="/y", spec_path="/s", env={},
+                                          env_file=None, cards=list(range(8))))
+    assert ("--device /dev/kfd --device /dev/dri --group-add video --security-opt seccomp=unconfined" in argv)
+    assert "--gpus" not in argv
+    env = _env(node, c, tmp_path)
+    assert env["HIP_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7" and env["YETO_DEVICE_FAMILY"] == "rocm"
+    site = rocm_node(docker_args=["--device", "/dev/kfd", "--device", "/dev/dri/renderD128"])
+    argv = sp.container_run_argv(family_conf(site), site, name="n", image="img", yeto_dir="/y", spec_path="/s",
+                                 env={}, env_file=None, cards=[0])
+    assert "--device /dev/kfd --device /dev/dri/renderD128" in " ".join(argv) and "video" not in " ".join(argv)
+
+
+AMD_STATIC = json.dumps([{"gpu": i, "asic": {"market_name": "AMD Instinct MI355X"},
+                          "vram": {"size": {"value": 294896, "unit": "MB"}}} for i in range(8)])
+AMD_IDLE_OLD = json.dumps([{"gpu": i, "process_list": [{"process_info": "No running processes detected"}]}
+                           for i in range(8)])
+AMD_BUSY_OLD = json.dumps([{"gpu": 0, "process_list": [{"process_info": "No running processes detected"}]},
+                           {"gpu": 5, "process_list": [{"process_info": {"name": "python3", "pid": 4242}}]}])
+AMD_BUSY_NEW = json.dumps([{"gpu": 1, "process_list": [{"name": "python3", "pid": 77, "mem": 1}]},
+                           {"gpu": 2, "process_list": []}])
+NV_IDLE = "0, 00000000:18:00.0\n1, 00000000:2A:00.0\nYETO_SSH_APPS\n"
+NV_BUSY = NV_IDLE + "00000000:2A:00.0, 31337\n"
+
+
+def test_busy_cards_from_nvidia_smi_and_amd_smi():
+    assert sp.busy_cuda(NV_IDLE) == [] and sp.busy_cuda(NV_BUSY) == [1]
+    assert sp.busy_cuda("bash: nvidia-smi: command not found\nYETO_SSH_APPS\n") is None
+    assert sp.busy_amd(AMD_IDLE_OLD) == [] and sp.busy_amd(AMD_BUSY_OLD) == [5] and sp.busy_amd(AMD_BUSY_NEW) == [1]
+    assert sp.busy_amd("bash: amd-smi: command not found") is None
+
+
+def _preflight_text(cards, idle=None, paths=()):
+    out = "YETO_SSH_ARCH x86_64\nYETO_SSH_FREE_GIB 300\n" + "".join(f"YETO_SSH_HOSTPATH {p}\n" for p in paths)
+    out += f"YETO_SSH_CARDS_BEGIN\n{cards}\nYETO_SSH_CARDS_END rc=0\n"
+    if idle is not None:
+        out += f"YETO_SSH_IDLE_BEGIN\n{idle}\nYETO_SSH_IDLE_END rc=0\n"
+    return out
+
+
+def test_require_idle_reads_nvidia_smi_on_cuda():
+    node = cuda_node()
+    script = sp.preflight_script(node, family_conf(node))
+    assert "nvidia-smi --query-compute-apps=gpu_bus_id,pid" in script and "YETO_SSH_HOSTPATH" not in script
+    assert "npu-smi" not in script and "amd-smi" not in script
+    cards = "\n".join(f"{i}, NVIDIA H200, 143771" for i in range(8))
+    facts = sp.check_preflight(node, family_conf(node, devices=[0]), _preflight_text(cards, NV_BUSY))
+    assert facts["busy"] == []  # card 1 is not this pool's
+    with pytest.raises(sp.PreflightError, match=r"cards \[1\] run other processes \(nvidia-smi compute apps\)"):
+        sp.check_preflight(node, family_conf(node, devices=[1]), _preflight_text(cards, NV_BUSY))
+    unread = sp.check_preflight(node, family_conf(node, devices=[1]), _preflight_text(cards, "no driver"))
+    assert unread["busy"] is None and "not checked" in unread["idle"]
+    off = family_conf(node, preflight={"require_idle": False})
+    assert "YETO_SSH_IDLE_BEGIN" not in sp.preflight_script(node, off)
+
+
+def test_require_idle_reads_amd_smi_and_a_rocm_container_needs_kfd():
+    node = rocm_node()
+    c = family_conf(node, devices=[5])
+    script = sp.preflight_script(node, c)
+    assert "amd-smi static --json || rocm-smi" in script and "amd-smi process --json" in script
+    assert "for f in /dev/kfd /dev/dri;" in script
+    ok = _preflight_text(AMD_STATIC, AMD_IDLE_OLD, paths=("/dev/kfd", "/dev/dri"))
+    assert sp.check_preflight(node, c, ok)["busy"] == []
+    with pytest.raises(sp.PreflightError, match=r"cards \[5\] run other processes \(amd-smi process\)"):
+        sp.check_preflight(node, c, ok.replace(AMD_IDLE_OLD, AMD_BUSY_OLD))
+    with pytest.raises(sp.PreflightError, match="/dev/kfd missing on the host"):
+        sp.check_preflight(node, c, _preflight_text(AMD_STATIC, AMD_IDLE_OLD, paths=("/dev/dri",)))
+    venv = family_conf(node, runtime="venv", container=None, venv={"python": "/e/bin/python"})
+    sp.check_preflight(node, venv, _preflight_text(AMD_STATIC, AMD_IDLE_OLD))  # a host process needs no flags
+
+
+def test_auto_image_picks_per_node_and_the_dry_run_refuses_what_no_image_serves(tmp_path):
+    from yeto.rl import sampler_pins as pins
+
+    spec = json.loads(K31_SPEC.read_text())
+    a = rocm_node(name="mi355x", host="mi355x")
+    b = cuda_node(name="b300", host="b300", card="B300", hbm_gib=288)
+    sec = provider_section(nodes=["mi355x", "b300"], container={"engine": "docker", "image": "auto"})
+    c = sp.parse_config({"provider": sec}, inventory=[a, b])
+    assert sp.node_image(c, c.nodes[0], spec) == pins.VLLM_SAMPLER_IMAGE_ROCM.removeprefix("docker:")
+    # K3.1 in place: the vLLM CUDA image restarts, so the B300 node has no image for this spec
+    problems = sp.image_problems(c, spec)
+    assert len(problems) == 1 and "node b300" in problems[0] and "load in_place" in problems[0]
+    restart = dict(spec, engine=dict(spec["engine"], server=dict(spec["engine"]["server"], in_place_reload=False)))
+    assert sp.image_problems(c, restart) == []
+    assert sp.node_image(c, c.nodes[1], restart) == pins.VLLM_SAMPLER_IMAGE_CUDA.removeprefix("docker:")
+    # a named catalog image is held to the node too; a site image is the site's
+    named = sp.parse_config({"provider": provider_section(nodes=["b300"], container={
+        "engine": "docker", "image": pins.VLLM_SAMPLER_IMAGE_ROCM.removeprefix("docker:")})}, inventory=[a, b])
+    assert "it is a rocm image" in sp.image_problems(named, restart)[0]
+    assert sp.image_problems(family_conf(cuda_node()), spec) == []
+
+
+def test_the_dry_run_reports_an_incompatible_image(tmp_path, monkeypatch):
+    from yeto.rl import sampler_pins as pins
+
+    monkeypatch.setattr(sp, "load_profiles", lambda _p: [cuda_node()])
+    cfg = pool_cfg(tmp_path, inventory="inv.yaml",
+                   container={"engine": "docker", "image": pins.VLLM_SAMPLER_IMAGE_ROCM.removeprefix("docker:")})
+    assert any("node node-a" in p and "rocm image" in p for p in sp.offline_problems(cfg))
+
+
+# -- run.json shorthand (unified-sampler-pool 3.4)
+
+
+def test_a_run_config_may_name_provider_ssh_and_its_pool_dry_runs(tmp_path, monkeypatch, capsys):
+    from yeto.launch.nc.provider import provider_kind
+    from yeto.launch.rollout import pools as rollout_pools
+
+    assert "ssh" in rollout_pools.PROVIDER_KINDS
+    assert set(rollout_pools.provider_kinds()) == set(providers.kinds())
+    monkeypatch.setattr(sp, "load_profiles", lambda _p: [npu_node()])
+    pool = tmp_path / "pool.ssh.json"
+    pool.write_text(json.dumps(pool_cfg(tmp_path, inventory="inv.yaml")))
+    run = {"samplers": [{"name": "own", "provider": "ssh", "config": str(pool)}]}
+    (ref,) = rollout_pools.resolve(run, tmp_path / "state")
+    assert ref.config == str(pool) and ref.kind() == "ssh" and provider_kind(ref.load()) == "ssh"
+    assert _dry_run_spend(ref.load(), tmp_path, monkeypatch, capsys) == [
+        "estimated spend: $0.00 per node hour; steady $0.00/h; up to $0.00/h while replacements overlap"]
+    with pytest.raises(ValueError, match="provider 'ssh' but the pool config's provider is 'nc'"):
+        nc_pool = tmp_path / "pool.nc.json"
+        nc_pool.write_text(json.dumps({"target": 1, "shard_base": "x"}))
+        rollout_pools.resolve({"samplers": [{"provider": "ssh", "config": str(nc_pool)}]}, tmp_path / "state")
+    with pytest.raises(ValueError, match="is not one of daytona, modal, nc, sky, ssh"):
+        rollout_pools.resolve({"samplers": [{"provider": "k8s", "config": str(pool)}]}, tmp_path / "state")
+
+
+def test_rollout_commands_accept_provider_ssh():
+    import argparse
+
+    from yeto.launch.rollout import entry
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="cmd")
+    entry.add_parser(sub)
+    args = parser.parse_args(["rollout", "status", "--config", "run.json", "--provider", "ssh"])
+    assert args.provider == "ssh"
