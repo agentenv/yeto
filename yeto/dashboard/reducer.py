@@ -1658,6 +1658,13 @@ class Reducer:
             "store": store, "commands": self.commands, "duplicates": self.duplicates,
         }
 
+    def run_meta_fresh(self) -> dict | None:
+        """The run's ``meta.json`` read now (its state / ``finished_at`` change when the run
+        ends; :meth:`_run_meta` caches the first read)."""
+        from .sources import run_meta_near
+
+        return next((m for m in (run_meta_near(s) for s in self.sources_seen) if m), None)
+
     def _run_meta(self) -> tuple:
         if self._run_meta_cache is None:
             from .sources import infer_run_name, run_meta_near

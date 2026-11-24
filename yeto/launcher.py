@@ -1122,6 +1122,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             print(f"[launcher] keeping clusters: {remaining}")
         else:
             unverified = []
+            unverified_modal: list[str] = []
             collect_diagnostics_parallel(
                 [n for n in remaining if n not in modal_cfgs and n not in ssh_names], head=head_mode
             )
@@ -1163,9 +1164,14 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 if not _verify_modal_app_stopped(modal_ops, args,
                                                  run_started_unix=run_started_unix):
                     teardown_unverified = True
+                    unverified_modal = list(modal_cfgs)
                 if modal_cfgs:
                     # The final at-exit commits land once the containers are gone.
                     pull_modal_tapes(modal_ops, modal_cfgs, _modal_tape_run_dir(args))
+            # The islands this teardown stopped get their island_stop in fleet.jsonl (a normal
+            # end wrote it already; a STOP flag, breaker or signal did not), so the page stops
+            # billing them; an island whose stop is not confirmed stays open. Never raises.
+            _close_fleet_islands(prefix, skip=[*unverified, *unverified_modal])
             if unverified:
                 # The head must NOT self-terminate: it is the only thing that
                 # can still reach these orphaned learner clusters via sky.
@@ -1215,6 +1221,18 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             trips.trip(prefix, "launch.teardown_verify", None, None,
                        detail=f"teardown not confirmed (exit {TEARDOWN_UNVERIFIED_EXIT})")
             return TEARDOWN_UNVERIFIED_EXIT  # noqa: B012
+
+
+def _close_fleet_islands(run: str, *, skip=()) -> list[str]:
+    """``island_stop`` for the run's islands still open in its ``fleet.jsonl`` (best effort)."""
+    try:
+        from . import runs
+        from .dashboard.fleet import FLEET_FILE, close_open_islands, teardown_stop_reason
+
+        return close_open_islands(runs.run_dir(run) / FLEET_FILE, teardown_stop_reason(), skip=skip)
+    except Exception as e:  # noqa: BLE001 - telemetry never breaks the teardown
+        print(f"[launcher] fleet.jsonl: island_stop not written ({e})", file=sys.stderr)
+        return []
 
 
 def _start_cost_guard(args, events_dir):

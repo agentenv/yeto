@@ -142,3 +142,57 @@ def from_env(path: str | os.PathLike, tasks: dict[str, Any]) -> FleetLog:
     return FleetLog(path, {name: meta_from_task(t) for name, t in tasks.items()},
                     prices=load_prices(os.environ.get("YETO_DASHBOARD_PRICES") or None),
                     budget_usd=float(budget) if budget else None)
+
+
+FLEET_FILE = "fleet.jsonl"
+_LIFECYCLE = ("island_ready", "island_lost", "island_stop", "island_done")
+_SHAPE = ("cloud", "region", "gpu", "gpus", "price_key")
+
+
+def close_open_islands(path: str | os.PathLike, reason: str, *, skip: Any = (),
+                       clock: Callable[[], float] = time.time) -> list[str]:
+    """Append ``island_stop`` (``reason``) for every island whose last lifecycle record in
+    the ``fleet.jsonl`` at ``path`` is ``island_ready``: a teardown that did not pass the
+    launcher's normal end (``yeto down``, a breaker stop, a signalled launcher) left it open,
+    and the page would bill it to "now". Islands in ``skip`` (teardown not confirmed) stay
+    open. Idempotent; best effort: an error is printed, never raised. Returns the names closed."""
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return []
+        last: dict[str, dict] = {}
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("event") in _LIFECYCLE and isinstance(rec.get("island"), str):
+                last[rec["island"]] = rec
+        skip = set(skip or ())
+        todo = [rec for name, rec in last.items() if rec["event"] == "island_ready" and name not in skip]
+        if not todo:
+            return []
+        now = clock()
+        with open(p, "a", encoding="utf-8") as fh:
+            for rec in todo:
+                out = {"event": "island_stop", "time_unix": now, "island": rec["island"],
+                       "island_id": rec.get("island_id", island_id_of(rec["island"])),
+                       **{k: rec.get(k) for k in _SHAPE},
+                       **{k: rec[k] for k in ("cpus", "memory_gib") if rec.get(k) is not None},
+                       "reason": reason}
+                fh.write(json.dumps(out, ensure_ascii=False, default=str) + "\n")
+        return [rec["island"] for rec in todo]
+    except Exception as exc:  # noqa: BLE001 - telemetry never slows or breaks a teardown
+        print(f"[yeto] fleet.jsonl: island_stop not written ({exc})", file=sys.stderr)
+        return []
+
+
+def teardown_stop_reason() -> str:
+    """``breaker:<name>`` when a breaker of this process (or the parent that handed it
+    down) stopped the run, else ``teardown``."""
+    try:
+        from ..breakers import current_stop_reason, stop_reason_from_env
+
+        return current_stop_reason() or stop_reason_from_env() or "teardown"
+    except Exception:  # noqa: BLE001
+        return "teardown"

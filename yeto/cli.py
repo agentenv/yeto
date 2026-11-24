@@ -2413,6 +2413,7 @@ def _cmd_down_clusters(args) -> int:
     clusters = meta.get("clusters") or []
     if not clusters:
         print("[yeto] no clusters recorded for this run")
+        _close_fleet_islands(name)
         runs.update_run(name, state=runs.DOWN, finished_at=meta.get("finished_at") or time.time())
         print(f"[yeto] run '{name}' is down")
         return 0
@@ -2495,6 +2496,9 @@ def _cmd_down_clusters(args) -> int:
     if unconfirmed:
         return _teardown_incomplete(name, meta, unconfirmed)
     _nebius_sg_cleanup(name, meta)
+    # every cluster is confirmed down: the islands a killed launcher left open in fleet.jsonl
+    # (a breaker stop, `yeto down`, kill -9) get their island_stop, so the page stops billing them
+    _close_fleet_islands(name)
     runs.update_run(
         name,
         state=runs.DOWN,
@@ -2502,6 +2506,16 @@ def _cmd_down_clusters(args) -> int:
     )
     print(f"[yeto] run '{name}' is down")
     return 0
+
+
+def _close_fleet_islands(name: str) -> list[str]:
+    try:
+        from .dashboard.fleet import FLEET_FILE, close_open_islands, teardown_stop_reason
+
+        return close_open_islands(runs.run_dir(name) / FLEET_FILE, teardown_stop_reason())
+    except Exception as e:  # noqa: BLE001 - telemetry never fails a down
+        print(f"[yeto] fleet.jsonl: island_stop not written ({e})", file=sys.stderr)
+        return []
 
 
 def _nebius_sg_cleanup(name: str, meta: dict) -> list[str]:
