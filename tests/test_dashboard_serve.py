@@ -144,9 +144,10 @@ def test_old_tape_renders_no_data_in_the_page(tmp_path):
     page = json.loads(res.stdout)
     assert "Multi-island overview" in page["title"] and page["wall_hidden"] is False  # run_kind multi_island
     assert "n/a" in page["islands"] and "n/a" in page["kpis"]  # no fleet.jsonl / resource samples: "n/a", never 0
-    assert "Island 3" in page["wall"] and page["svg_nodes"] > 0
-    assert "Round 0" in page["tip_key"] and "Island 1" in page["tip_key"]  # keyboard -> per-island tooltip rows
-    assert "Single-island overview" in page["title_after_switch"] and page["wall_hidden_after_switch"] is True
+    assert "trainer 3" in page["wall"] and page["svg_nodes"] > 0  # the island switch above the details
+    assert "Round 0" in page["tip_key"] and "trainer 1" in page["tip_key"]  # keyboard -> per-island tooltip rows
+    # the single-island layout draws one island; the switch stays to pick which
+    assert "Single-island overview" in page["title_after_switch"] and page["wall_hidden_after_switch"] is False
 
 
 def test_view_carries_the_page_build_so_open_tabs_reload(server, tmp_path, monkeypatch):

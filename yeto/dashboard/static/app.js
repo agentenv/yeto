@@ -8,7 +8,6 @@ if(node){try{INLINE=JSON.parse(node.textContent)}catch(e){INLINE=null}}
 var OFFLINE=!!INLINE,POLL_MS=5000,NS="http:"+"//www.w3.org/2000/svg"; // SVG namespace id, not a request
 var V=null,O=null,RS=[],SEL=null,cur=null,layout="auto",metric="reward",themeI=2,pinned=false,alertBound=false;
 var PH=[["R","rollout"],["T","training"],["S","post-train sync"],["P","publish"]];
-var ISL_COLORS=["var(--i0)","var(--i1)","var(--i2)"];
 var METRICS=[["reward","reward"],["trunc","truncation"],["logprob_diff","logprob diff"],["kl","PPO KL"],["kl_tr","train-rollout KL"],["tis_clip","TIS clipfrac"],["grad_norm","grad_norm"],
   ["clip","clip"],["entropy","entropy"],["resp_len","response length"],["tok_s","tok/s"]];
 function $(id){return document.getElementById(id)}
@@ -21,11 +20,6 @@ function f(v,d){if(!fin(v))return "n/a";if(d==null)d=3;return Math.abs(v)>=100?v
 function pct(v){return fin(v)?(v*100).toFixed(1)+"%":"n/a"}
 function hm(s){return !fin(s)?"n/a":(s>=3600?(s/3600).toFixed(1)+" h":(s/60).toFixed(0)+" min")}
 function clock(t){if(!fin(t))return "n/a";var d=new Date(t*1000);function p(n){return (n<10?"0":"")+n}return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
-/* short island label (s0 / s1 / trainer 0) with the full id as tooltip: shard ids are long run names */
-function islShort(c){var id=String(c.id),m=/-(\d+)$/.exec(id),async=((V||{}).async||{}).samplers;
-  // s<n> unless another sampler ends in the same number (a fleet's pools: fpv-i0-0, fps-i1-0): then its id
-  if(c.role==="sampler"){if(!m)return id;var twin=Object.keys(async||{}).some(function(k){return k!==id&&/-(\d+)$/.test(k)&&/-(\d+)$/.exec(k)[1]===m[1]});return twin?id:"s"+m[1]}if(c.role==="trainer"&&async&&Object.keys(async).length)return "trainer "+(m?m[1]:id);return m&&id.length>12?"island "+m[1]:"Island "+id}
-function islName(c){return '<span title="'+esc(String(c.id)+(c.name?" ("+c.name+")":""))+'">'+esc(islShort(c))+'</span>'}
 function el(tag,a,parent){var e=document.createElementNS(NS,tag);for(var k in a)e.setAttribute(k,a[k]);
   /* a fixed viewBox stretched to a full-width panel scales its text 3-4x: cap the drawn width at 1.4x the viewBox */
   if(tag==="svg"&&a&&a.viewBox){var vw=+String(a.viewBox).split(" ")[2];if(vw>0)e.style.maxWidth=Math.round(vw*1.4)+"px"}
@@ -35,7 +29,43 @@ function el(tag,a,parent){var e=document.createElementNS(NS,tag);for(var k in a)
 function boxW(box,def){var p=box&&box.parentNode,w=p&&p.clientWidth;return w>=240?Math.floor(w):def}
 // launch-preflight-guards 3.5: negative-test island badge (rl_island_override)
 function negBadge(c){return c&&c.negative_test?' <span class="st wn" title="'+esc(c.negative_test.label)+'"><i></i>'+esc(c.negative_test.label)+'</span> ':""}
-function islColor(id){var ids=(O.islands||[]).map(function(c){return c.id}),i=ids.indexOf(id);return i>=0&&i<3?ISL_COLORS[i]:"var(--i3)"}
+/* an island's colour mark and name as Islands now draws them (sft.js rlCards: PAL by tape order, "sampler 2" / "trainer 0") */
+var PAL=["#3b82f6","#f97316","#14b8a6","#8b5cf6","#ec4899","#eab308","#22c55e","#06b6d4","#ef4444","#a3e635"];
+function cardOf(id){var s=String(id);return (O.islands||[]).filter(function(c){return String(c.id)===s})[0]||null}
+function islColor(id){var i=(O.islands||[]).map(function(c){return String(c.id)}).indexOf(String(id));return i<0?"var(--ink2)":PAL[i%PAL.length]}
+function lbl(id){var c=cardOf(id),r=c&&c.role;return (r==="sampler"?"sampler ":r==="trainer"?"trainer ":"island ")+id}
+function nameCell(id){var c=cardOf(id)||{};return '<span class="nn nc"><i class="sq" style="background:'+islColor(id)+'"></i><span title="'+esc(String(id)+(c.name?" ("+c.name+")":"")+(c.role?" · "+c.role:""))+'">'+esc(lbl(id))+'</span></span>'}
+/* the island switch above the details: a fleet's islands + "Fleet", an async run's trainers, a synchronous run's
+   islands; none for a run with one trainer / one island. PICK survives every redraw (poll, resize) and a reload */
+var FLEET="fleet",PICK=null,FOLDS=[];
+function fleetOn(){return !!(V.async&&V.async.islands&&V.async.islands.length)}
+function fleetView(){return fleetOn()&&PICK===FLEET}
+function pickItems(){var A=V.async,cards=O.islands||[],one=function(c){return {key:String(c.id),label:lbl(c.id),title:c.name||"",color:islColor(c.id),tid:String(c.id)}};
+  if(fleetOn())return A.islands.map(function(x){var t=x.trainer!=null?String(x.trainer):null;
+    return {key:"i"+x.island,label:"Island "+x.island,title:[x.name,t!=null?"trainer "+t:"trainer not on the tapes yet"].filter(Boolean).join(" · "),color:t!=null&&cardOf(t)?islColor(t):"var(--ink2)",tid:t}}).concat(
+    [{key:FLEET,label:"Fleet",title:"every island side by side: trainer metrics, syncer merges, task ledger, pool events"}]);
+  var trs=cards.filter(function(c){return c.role==="trainer"});
+  if(A&&trs.length>1)return trs.map(one);
+  if(!A&&cards.length>1)return cards.map(one);
+  return []}
+function pickStore(){return "yeto-pick-v1:"+(O.run||"")}
+function resolvePick(){var it=pickItems(),keys=it.map(function(x){return x.key}),ids=(O.islands||[]).map(function(c){return String(c.id)});
+  if(keys.indexOf(PICK)<0){var s=null;try{s=localStorage.getItem(pickStore())}catch(e){}PICK=keys.indexOf(s)>=0?s:(keys[0]||null)}
+  var cur=it.filter(function(x){return x.key===PICK})[0];
+  if(cur&&cur.tid!==undefined)SEL=cur.tid!=null&&ids.indexOf(cur.tid)>=0?cur.tid:null;
+  else if(PICK===FLEET){var best=null,bn=-1;(V.async.islands||[]).forEach(function(x){var t=x.trainer!=null?String(x.trainer):null,n=t!=null&&ids.indexOf(t)>=0?((V.islands[t]||{}).rounds||[]).length:-1;if(n>bn){bn=n;best=t}});
+    SEL=best!=null&&bn>=0?best:(ids[0]||null)} // the trainer with the most rounds anchors the hover tips
+  else{var tr=(O.islands||[]).filter(function(c){return c.role==="trainer"})[0];SEL=ids.indexOf(String(SEL))>=0?String(SEL):(V.async&&tr?String(tr.id):(ids[0]||null))}
+  return it}
+function picker(){
+  var it=resolvePick(),sw=$("islSw"),fl=fleetOn();sw.hidden=it.length<2;
+  sw.innerHTML=it.map(function(x){return '<button type="button" role="tab" aria-selected="'+(x.key===PICK)+'"'+(x.key===PICK?' class="on"':"")+' data-k="'+esc(x.key)+'" title="'+esc(x.title||"")+'">'+
+    (x.color?'<i class="sq" style="background:'+x.color+'"></i>':"")+esc(x.label)+'</button>'}).join("");
+  Array.prototype.forEach.call(sw.querySelectorAll("button"),function(b){b.onclick=function(){PICK=b.dataset.k;try{localStorage.setItem(pickStore(),PICK)}catch(e){}cur=null;pinned=false;$("tip").style.display="none";render()}});
+  $("detailsCs").textContent=fl?(fleetView()?"every island of the fleet: per-island summary, trainer metrics side by side, syncer merges, task ledger, pool events":
+    "the picked island: trainer rounds, its releases, samplers and pools, backlog, release timeline, per-round drill-down; Fleet = run-wide ledgers"):
+    V.async?"trainer rounds, releases, samplers, backlog, release timeline, per-round drill-down, events":it.length?"per-round charts of the picked island, island health, events":"per-round charts, island health, events";
+}
 function kind(){return layout==="auto"?O.run_kind:layout}
 /* why an island left: "left: evicted (preempted) at 05:09, replaced by <ticket>" */
 function leftText(s,l){return (s==="lost"?"lost":"left")+": "+(l.reason||"?")+(fin(l.ts)?" at "+clock(l.ts).slice(0,5):"")+(l.replaced_by?", replaced by "+l.replaced_by:"")}
@@ -90,37 +120,41 @@ function islReward(c){if(c.reward!=null)return c.reward;var sp=spOf(c);return sp
 function islPhase(c){if(c.phase)return c.phase;var sp=spOf(c);if(!sp)return null;if(sp.ended||/^(done|stopped|left|lost|finished)$/.test(String(c.status||"")))return "stopped";var lt=String(sp.last_type||"");
   if(/drain/.test(lt))return "draining";if(/policy_load|load_checked|start_on_latest/.test(lt))return "loading policy";
   if(/backlog_full|_waiting$/.test(lt))return "waiting (backlog full)";if(/_start$|_join$|_lease$/.test(lt))return "starting";return "sampling"}
-function wall(){
-  var multi=kind()==="multi_island";$("islandWall").hidden=!multi;$("navWall").style.display=multi?"":"none";
-  $("syncerBox").hidden=!(multi&&V.usage.syncer);
-  if(multi)$("wall").innerHTML=(O.islands||[]).map(function(c){return '<div class="card'+(c.id===SEL?" sel":"")+'" data-id="'+esc(c.id)+'" tabindex="0">'+
-    '<div style="display:flex;justify-content:space-between"><b><i class="sw" style="background:'+islColor(c.id)+'"></i>'+islName(c)+'</b>'+negBadge(c)+stBadge(c.status,c)+'</div>'+
-    '<div class="note mono">'+esc(platform(c))+' · '+esc(c.gpu||"")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</div>'+
-    '<div class="kv"><span>policy version</span><span class="num">'+esc(pvTxt(c.policy_version,c.released_version))+'</span><span>reward</span><span class="num">'+f(islReward(c))+'</span><span>phase</span><span class="num">'+esc(islPhase(c)||"n/a")+'</span><span>role</span><span class="num">'+esc(c.role||"n/a")+'</span></div></div>'}).join("");
-  Array.prototype.forEach.call(document.querySelectorAll(".card"),function(d){d.onclick=d.onkeydown=function(e){if(e.type==="keydown"&&e.key!=="Enter")return;SEL=d.dataset.id;cur=null;render()}});
-  if(multi&&V.usage.syncer){var all=V.rounds_syncer||[],sc=YetoTbl.cap("syncer-merges",all.slice().reverse(),{def:10,total:(V.table_totals||{}).rounds_syncer,unit:"merges"});
-    $("syncer").innerHTML=YetoTbl.spark([["quorum ms","quorum_ms"],["merge ms","merge_ms"],["responded","responded"]].map(function(x){return {label:x[0],vals:all.map(function(r){return r[x[1]]}),fmt:function(v){return f(v,0)}}}))+sc.bar+
-      YetoTbl.table('<tr><th>global round</th><th>expected/responded</th><th>missed</th><th>quorum ms</th><th>merge ms</th><th>resends</th></tr>',sc.rows.map(function(r){
-      return '<tr><td class="num">'+esc(r.round)+'</td><td class="num">'+f(r.expected,0)+' / '+f(r.responded,0)+'</td><td>'+(r.missed.length?'<span class="bd">'+esc(r.missed.join(","))+'</span>':"n/a")+'</td><td class="num">'+f(r.quorum_ms,0)+'</td><td class="num">'+f(r.merge_ms,0)+'</td><td class="num">'+esc(r.resend)+'</td></tr>'}).join(""))}
+/* syncer merges (a run with a syncer): a fleet shows them under "Fleet" */
+function syncerPanel(show){
+  var on=show&&kind()==="multi_island"&&!!V.usage.syncer;$("syncerBox").hidden=!on;if(!on)return;
+  var all=V.rounds_syncer||[],sc=YetoTbl.cap("syncer-merges",all.slice().reverse(),{def:10,total:(V.table_totals||{}).rounds_syncer,unit:"merges"});
+  $("syncer").innerHTML=YetoTbl.spark([["quorum ms","quorum_ms"],["merge ms","merge_ms"],["responded","responded"]].map(function(x){return {label:x[0],vals:all.map(function(r){return r[x[1]]}),fmt:function(v){return f(v,0)}}}))+sc.bar+
+    YetoTbl.table('<tr><th>global round</th><th>expected / responded</th><th>missed</th><th>quorum ms</th><th>merge ms</th><th>resends</th></tr>',sc.rows.map(function(r){
+    return '<tr><td class="num">'+esc(r.round)+'</td><td class="num">'+f(r.expected,0)+' / '+f(r.responded,0)+'</td><td>'+(r.missed.length?'<span class="bd">'+esc(r.missed.map(function(m){return cardOf(m)?lbl(m):m}).join(", "))+'</span>':'<span class="note">none</span>')+'</td><td class="num">'+f(r.quorum_ms,0)+'</td><td class="num">'+f(r.merge_ms,0)+'</td><td class="num">'+esc(r.resend)+'</td></tr>'}).join(""))
 }
 /* chart 1: metric per round; reward gets the p10-p90 band; < 5 points: dots only, no line */
 var xOf=null;
-var metricPicked=false;
+var metricWant="reward";
+/* the series the metric chart draws: the picked trainer; under "Fleet" every trainer of the fleet; a synchronous
+   multi-island run every island (they train the same rounds). Never a sampler: it has no trained rounds */
+function metricIds(){var A=V.async;
+  if(fleetView())return (A.islands||[]).map(function(x){return x.trainer!=null?String(x.trainer):null}).filter(function(t){return t!=null&&cardOf(t)});
+  if(!A&&kind()==="multi_island")return (O.islands||[]).map(function(c){return c.id});
+  return SEL!=null?[SEL]:[]}
 function hasMetric(k,ids){return ids.some(function(id){return k==="trunc"||k==="logprob_diff"?((V.islands[id]||{}).rounds||[]).some(function(r){return fin(r[k])}):(((O.series||{})[id]||{})[k]||[]).length})}
 function chartMetric(){
-  var ids0=kind()==="multi_island"?(O.islands||[]).map(function(c){return c.id}):[SEL];
-  if(!metricPicked&&!hasMetric(metric,ids0)){var alt=METRICS.filter(function(m){return hasMetric(m[0],ids0)})[0];if(alt)metric=alt[0]}
-  $("tabs").innerHTML=METRICS.map(function(m){return '<button class="btn'+(m[0]===metric?" on":"")+'" data-m="'+m[0]+'">'+m[1]+'</button>'}).join("");
-  Array.prototype.forEach.call($("tabs").querySelectorAll("button"),function(b){b.onclick=function(){metric=b.dataset.m;metricPicked=true;chartMetric();highlight()}});
-  var multi=kind()==="multi_island",ids=multi?(O.islands||[]).map(function(c){return c.id}):[SEL];
+  var ids=metricIds(),multi=ids.length>1,avail=METRICS.filter(function(m){return hasMetric(m[0],ids)});
+  var hasK=function(k){return avail.some(function(m){return m[0]===k})}; // the viewer's metric when this trainer has it, else the first it has
+  metric=hasK(metricWant)?metricWant:avail.length?avail[0][0]:metricWant;
+  // only the metrics this trainer reports: a tab per metric of the algorithm list was mostly empty charts
+  $("tabs").innerHTML=avail.map(function(m){return '<button class="btn'+(m[0]===metric?" on":"")+'" data-m="'+m[0]+'">'+m[1]+'</button>'}).join("");
+  Array.prototype.forEach.call($("tabs").querySelectorAll("button"),function(b){b.onclick=function(){metric=metricWant=b.dataset.m;chartMetric();highlight()}});
   var series=ids.map(function(id){return {id:id,pts:((O.series||{})[id]||{})[metric==="trunc"||metric==="logprob_diff"?"_":metric]||[]}});
   if(metric==="trunc"||metric==="logprob_diff"){series=ids.map(function(id){var rr=(V.islands[id]||{}).rounds||[];return {id:id,pts:rr.filter(function(r){return fin(r[metric])}).map(function(r){return [r.round+1,r[metric]]})}})}
   var all=[];series.forEach(function(s){s.pts.forEach(function(p){all.push(p)})});
   var band=metric==="reward"&&!multi?RS.filter(function(r){return fin(r.p10)&&fin(r.p90)}):[];
-  var box=$("cMetric");box.innerHTML="";var W=boxW(box,560),H=250,m={l:52,r:14,t:12,b:26};
-  $("legMetric").innerHTML=(multi?ids.map(function(id){return '<span><i class="sw" style="background:'+islColor(id)+'"></i>Island '+esc(id)+'</span>'}).join(""):'<span><i class="sw" style="background:var(--T)"></i>'+esc(METRICS.find(function(x){return x[0]===metric})[1])+'</span>')+
+  var box=$("cMetric");box.innerHTML="";var W=boxW(box,560),H=250,m={l:52,r:16,t:12,b:26};
+  var mname=(METRICS.filter(function(x){return x[0]===metric})[0]||[0,metric])[1];
+  $("legMetric").innerHTML=(multi?ids.map(function(id){return '<span><i class="sw" style="background:'+islColor(id)+'"></i>'+esc(lbl(id))+'</span>'}).join("")+'<span>'+esc(mname)+'</span>':
+    '<span><i class="sw" style="background:var(--T)"></i>'+esc(mname)+(ids.length?" · "+esc(lbl(ids[0])):"")+'</span>')+
     (band.length?'<span><i class="sw" style="background:var(--band)"></i>p10–p90</span>':"");
-  if(!all.length){box.innerHTML='<div class="note">no data</div>';xOf=null;return}
+  if(!all.length){box.innerHTML='<div class="nodata">'+(ids.length?(avail.length?"no data":"no per-round metric on the tapes of "+esc(ids.map(lbl).join(", "))):"no trainer on the tapes yet")+'</div>';xOf=null;return}
   var xs=all.map(function(p){return p[0]}),x0=Math.min.apply(null,xs),x1=Math.max.apply(null,xs);
   var vs=all.map(function(p){return p[1]});band.forEach(function(r){vs.push(r.p10,r.p90)});
   var lo=Math.min.apply(null,vs),hi=Math.max.apply(null,vs);if(metric==="reward"||metric==="trunc"){lo=Math.min(lo,0);hi=Math.max(hi,1)}if(hi===lo){hi+=1;lo-=1}
@@ -128,14 +162,17 @@ function chartMetric(){
   xOf=function(round){return x(round+1)};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Per-round metrics"},box),g=el("g",{"class":"grid"},s);
   for(var j=0;j<=4;j++){var v=lo+(hi-lo)*j/4;el("line",{x1:m.l,x2:W-m.r,y1:y(v),y2:y(v)},g);el("text",{x:m.l-6,y:y(v)+4,"text-anchor":"end"},s).textContent=+v.toPrecision(3)}
-  var ticks={};xs.forEach(function(r){ticks[r]=1});var tk=Object.keys(ticks).map(Number),every=Math.ceil(tk.length/10);
-  tk.forEach(function(r,i){if(i%every===0)el("text",{x:x(r),y:H-8,"text-anchor":"middle"},s).textContent="round "+(r-1)});
+  // round numbers on the axis, as many as fit at ~7.3 px per digit (the caption "round" sits under the value axis)
+  var ticks={};xs.forEach(function(r){ticks[r]=1});var tk=Object.keys(ticks).map(Number).sort(function(a,b){return a-b});
+  var lw=7.3*String(Math.max.apply(null,tk)-1).length+16,fit=Math.max(2,Math.floor((W-m.l-m.r)/lw)),every=Math.max(1,Math.ceil(tk.length/fit));
+  el("text",{x:m.l-6,y:H-8,"text-anchor":"end"},s).textContent="round";
+  tk.forEach(function(r,i){if(i%every===0)el("text",{x:x(r),y:H-8,"text-anchor":"middle"},s).textContent=String(r-1)});
   var connect=series.some(function(sr){return sr.pts.length>=5});
   if(band.length>=2&&connect)el("path",{d:"M"+band.map(function(r){return x(r.round+1)+","+y(r.p90)}).join("L")+"L"+band.slice().reverse().map(function(r){return x(r.round+1)+","+y(r.p10)}).join("L")+"Z",fill:"var(--band)"},s);
   else band.forEach(function(r){el("line",{x1:x(r.round+1),x2:x(r.round+1),y1:y(r.p10),y2:y(r.p90),stroke:"var(--band)","stroke-width":10,"stroke-linecap":"round"},s)});
   series.forEach(function(sr){var col=multi?islColor(sr.id):"var(--T)";
     if(sr.pts.length>=5)el("path",{d:"M"+sr.pts.map(function(p){return x(p[0])+","+y(p[1])}).join("L"),fill:"none",stroke:col,"stroke-width":2},s);
-    sr.pts.forEach(function(p){el("circle",{cx:x(p[0]),cy:y(p[1]),r:sr.pts.length>60?2.5:5,fill:col,stroke:"var(--panel)","stroke-width":2,"class":"rdot","data-r":p[0]-1},s)})});
+    sr.pts.forEach(function(p){el("circle",{cx:x(p[0]),cy:y(p[1]),r:sr.pts.length>60?2.5:4,fill:col,stroke:"var(--panel)","stroke-width":2,"class":"rdot","data-r":p[0]-1},s)})});
   if(!connect)el("text",{x:W-m.r,y:m.t+10,"text-anchor":"end"},s).textContent="fewer than 5 points: dots only, no lines";
   el("line",{id:"vline",y1:m.t,y2:H-m.b,stroke:"var(--ink2)","stroke-dasharray":"3 3",visibility:"hidden"},s);
   var hit=el("rect",{x:m.l-10,y:0,width:W-m.l-m.r+20,height:H,fill:"transparent"},s);
@@ -160,17 +197,20 @@ function chartDur(){
     var hit=el("rect",{x:0,y:y0,width:W,height:rowH,fill:"transparent"},s);
     hit.addEventListener("mousemove",function(e){setCur(r.round,e)});hit.addEventListener("mouseleave",hideTip);hit.addEventListener("click",function(e){pinned=!pinned;setCur(r.round,e)})});
 }
-/* chart 3: phase timeline on the wall clock, startup segment first */
+/* chart 3: phase timeline on the wall clock from the first round's first phase; the startup before it is a note,
+   not a grey block (it was most of the axis on a run whose rounds took minutes after a long boot) */
+function durTxt(s){return !fin(s)?"n/a":s<90?f(s,0)+" s":s<5400?(s/60).toFixed(1)+" min":(s/3600).toFixed(1)+" h"}
 function chartTl(){
   var ex=V.islands[SEL]||{},box=$("cTl");box.innerHTML="";
-  $("legTl").innerHTML=PH.map(function(p){return '<span><i class="sw" style="background:var(--'+p[0]+')"></i>'+p[1]+'</span>'}).join("")+'<span><i class="sw" style="background:var(--line)"></i>startup (load weights, form Ray cluster, start inference engine)</span>';
+  var su=fin(ex.first_ts)&&fin(ex.driver_start_ts)&&ex.driver_start_ts>ex.first_ts?ex.driver_start_ts-ex.first_ts:null;
+  $("legTl").innerHTML=PH.map(function(p){return '<span><i class="sw" style="background:var(--'+p[0]+')"></i>'+p[1]+'</span>'}).join("")+
+    (su!=null?'<span title="first event of the island to its driver start: load weights, form the Ray cluster, start the inference engine">startup before the first round: '+durTxt(su)+'</span>':"");
   var segs=[];RS.forEach(function(r){Object.keys(r.phases).forEach(function(k){segs.push([k,r.phases[k][0],r.phases[k][1],r.round])})});
-  if(!segs.length){box.innerHTML='<div class="note">no phase data</div>';return}
-  var t0=Math.min.apply(null,segs.map(function(q){return q[1]}).concat(fin(ex.first_ts)?[ex.first_ts]:[])),t1=Math.max.apply(null,segs.map(function(q){return q[2]}));
-  var W=boxW(box,1000),LH=30,H=4+2*LH+24,m={l:70,r:16,t:4,b:24},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)};
+  if(!segs.length){box.innerHTML='<div class="nodata">no phase data (no rl_timeline_span / rl_driver_phase in the tapes)</div>';return}
+  var t0=Math.min.apply(null,segs.map(function(q){return q[1]})),t1=Math.max.apply(null,segs.map(function(q){return q[2]}));
+  var W=boxW(box,1000),LH=26,m={l:70,r:16,t:4,b:22},H=m.t+2*LH+m.b,sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Phase timeline"},box);
-  el("text",{x:m.l-8,y:m.t+LH/2+3,"text-anchor":"end"},s).textContent="rollout";el("text",{x:m.l-8,y:m.t+LH*1.5+3,"text-anchor":"end"},s).textContent="training";
-  if(fin(ex.first_ts)&&fin(ex.driver_start_ts))el("rect",{x:sx(ex.first_ts),y:m.t,width:Math.max(sx(ex.driver_start_ts)-sx(ex.first_ts),1),height:2*LH-4,fill:"var(--line)",rx:3},s);
+  el("text",{x:m.l-8,y:m.t+LH/2+4,"text-anchor":"end"},s).textContent="rollout";el("text",{x:m.l-8,y:m.t+LH*1.5+4,"text-anchor":"end"},s).textContent="training";
   segs.forEach(function(q){var rc=el("rect",{x:sx(q[1]),y:q[0]==="R"?m.t:m.t+LH,width:Math.max(sx(q[2])-sx(q[1])-1,1),height:LH-6,rx:3,fill:"var(--"+q[0]+")","class":"tseg","data-r":q[3]},s);
     rc.addEventListener("mousemove",function(e){setCur(q[3],e)});rc.addEventListener("mouseleave",hideTip);rc.addEventListener("click",function(e){pinned=!pinned;setCur(q[3],e)})});
   var nT=Math.max(2,Math.min(8,Math.floor((W-m.l-m.r)/110)));for(var j=0;j<=nT;j++){var t=t0+(t1-t0)*j/nT;el("text",{x:sx(t),y:H-6,"text-anchor":j===0?"start":j===nT?"end":"middle"},s).textContent=clock(t)}
@@ -186,20 +226,23 @@ function highlight(){
 function row(k,v){return '<div class="row"><span>'+k+'</span><span>'+v+'</span></div>'}
 function tipHtml(r){
   var h='<div class="h">Round '+r.round+' · trained on policy v'+r.policy_version+' → published '+(r.published_version==null?"n/a":"v"+r.published_version)+'</div>';
-  // async buffer mode: samplers keep their own round numbers and never take part in a trainer round,
-  // so a sampler row says what the trainer took from it this round (no "missed"); nothing taken, no row
-  var asy=Object.keys((V.async||{}).samplers||{}).length>0;
-  if(kind()==="multi_island"){return h+(O.islands||[]).map(function(c){var sw='<i class="sw" style="background:'+islColor(c.id)+'"></i>';
-    if(asy&&c.role==="sampler"){var b=(r.by_sampler||{})[c.id];if(!b)return "";var vs=b.versions||[];
-      return row(sw+"sampler "+esc(c.id),(b.groups!=null?f(b.groups,0)+" groups":f(b.samples,0)+" samples")+(vs.length?" · v"+vs[0]+(vs.length>1?"–v"+vs[vs.length-1]:""):"")+
-        (fin(b.age_mean)?" (age "+f(b.age_mean,1)+")":"")+(fin(b.reward_mean)?" · reward "+f(b.reward_mean,3):""))}
-    var rr=((V.islands[c.id]||{}).rounds||[]).find(function(x){return x.round===r.round});
-    if(!rr&&asy)return "";
-    return row(sw+"Island "+esc(c.id),rr?f(rr.reward)+" · truncated "+pct(rr.trunc):"missed")}).join("")}
+  var ids=metricIds(),asy=!!V.async;
+  if(ids.length>1){return '<div class="h">Round '+r.round+'</div>'+ids.map(function(id){var sw='<i class="sw" style="background:'+islColor(id)+'"></i>';
+    var rr=((V.islands[id]||{}).rounds||[]).filter(function(x){return x.round===r.round})[0];
+    if(!rr&&asy)return row(sw+esc(lbl(id)),'<span class="note">no round '+r.round+'</span>');
+    return row(sw+esc(lbl(id)),rr?f(rr.reward)+" · truncated "+pct(rr.trunc):"missed")}).join("")}
+  // async buffer mode: what the trainer took from each sampler this round (samplers keep their own round numbers)
+  var bs=asy?Object.keys(r.by_sampler||{}).map(function(k){var b=r.by_sampler[k],vs=b.versions||[];
+    return row('<i class="sw" style="background:'+islColor(k)+'"></i>from '+esc(lbl(k)),(b.groups!=null?f(b.groups,0)+" groups":f(b.samples,0)+" samples")+(vs.length?" · v"+vs[0]+(vs.length>1?"–v"+vs[vs.length-1]:""):"")+
+      (fin(b.age_mean)?" (age "+f(b.age_mean,1)+")":"")+(fin(b.reward_mean)?" · reward "+f(b.reward_mean,3):""))}).join(""):"";
   return h+row("reward mean",f(r.reward))+row("train-rollout KL / TIS clipfrac",f(r.kl_tr,5)+" / "+f(r.tis_clip,4))+row("p10 / p50 / p90",f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2))+row("truncation",pct(r.trunc))+
     row("logprob diff",f(r.logprob_diff,4))+row("response length mean / p95",f(r.resp_mean,0)+" / "+f(r.resp_p95,0))+row("grad_norm",f(r.grad_norm,4))+
-    PH.map(function(p){return row('<i class="sw" style="background:var(--'+p[0]+')"></i>'+p[1],fin(r.dur[p[0]])?f(r.dur[p[0]],0)+" s":"n/a")}).join("")}
-function showTip(e){var r=RS.find(function(x){return x.round===cur});if(!r)return;var t=$("tip"),p=$("rounds").getBoundingClientRect();
+    PH.map(function(p){return row('<i class="sw" style="background:var(--'+p[0]+')"></i>'+p[1],fin(r.dur[p[0]])?f(r.dur[p[0]],0)+" s":"n/a")}).join("")+bs}
+/* the round under the cursor: the anchor island's, else the first drawn series that has it (a fleet's trainers
+   count their own rounds) */
+function roundOf(rd){var r=RS.filter(function(x){return x.round===rd})[0];if(r)return r;var ids=metricIds();
+  for(var i=0;i<ids.length;i++){r=((V.islands[ids[i]]||{}).rounds||[]).filter(function(x){return x.round===rd})[0];if(r)return r}return null}
+function showTip(e){var r=roundOf(cur);if(!r)return;var t=$("tip"),p=$("rounds").getBoundingClientRect();
   t.innerHTML=tipHtml(r);t.style.display="block";var x=e.clientX-p.left+14,y=e.clientY-p.top+14,w=t.offsetWidth,h=t.offsetHeight;
   if(x+w>p.width-8)x=e.clientX-p.left-w-14;if(y+h>p.height-8)y=Math.max(8,e.clientY-p.top-h-14);t.style.left=Math.max(8,x)+"px";t.style.top=y+"px"}
 function hideTip(){if(!pinned)$("tip").style.display="none"}
@@ -216,11 +259,18 @@ function utilRuns(){
   (V.compare||[]).forEach(function(c){var u=c.util||{},k=u[SEL]?SEL:Object.keys(u)[0];runs.push({label:c.label,run:c.run,util:k!=null?u[k]:null})});
   return runs}
 function runHead(r,i,n){return n>1?'<div class="rl"><i class="sw" style="background:'+RUN_COLORS[i]+'"></i>'+esc(r.label)+' · <span class="mono">'+esc(r.run||"unnamed run")+'</span></div>':""}
-function util(){
-  var runs=utilRuns(),has=runs.some(function(r){return r.util});
-  $("util").hidden=false;$("utilEmpty").hidden=has;$("utilBody").hidden=!has;
-  $("utilIsl").textContent=SEL!=null&&(O.islands||[]).length>1?"· island "+SEL:"";
-  if(!has){$("uCarryBox").hidden=true;return}
+/* which utilization charts have data: a chart without any is not drawn, it is named under "Panels not used in this run" */
+var USEC=[["uCutBox","Cutoff drop / carry-over","no rl_rollout_cutoff on the tapes",function(u){return (u.rounds||[]).some(function(x){return x.cutoff})}],
+  ["uDoneBox","Trajectory completion curve","no trajectory start / end times (rl_trajectory_reward timing fields)",function(u){return (u.rounds||[]).some(function(x){return (x.done||[]).length})}],
+  ["uPhBox","Four-part timing","trajectory events lack the generation / tool / judge / sandbox timing fields",function(u){return (u.rounds||[]).some(function(x){return UPH.some(function(p){return fin((x.phases||{})[p[0]])})})}],
+  ["uTrBox","Trajectories of a round","no per-trajectory timing on the tapes",function(u){return (u.trajectories||[]).some(function(t){return UPH.some(function(p){return fin(t[p[0]])})})}],
+  ["uLoadBox","KV usage and queueing","no rl_load_sample (engine load probe)",function(u){return (u.load||[]).some(function(p){return fin(p[0])})}]];
+function util(show){
+  var runs=utilRuns(),secs=USEC.map(function(c){return runs.some(function(r){return r.util&&c[3](r.util)})}),has=secs.some(Boolean);
+  USEC.forEach(function(c,i){$(c[0]).hidden=!secs[i];if(!secs[i])FOLDS.push(["Generation-phase utilization · "+c[1],c[2]])});
+  $("util").hidden=!show||!has;$("utilEmpty").hidden=true;$("utilBody").hidden=!has;
+  $("utilIsl").textContent=SEL!=null&&(O.islands||[]).length>1?"· "+lbl(SEL):"";
+  if(!has||!show){$("uCarryBox").hidden=true;return}
   var rids={};runs.forEach(function(r){((r.util||{}).rounds||[]).forEach(function(x){rids[x.round]=1})});
   var ids=Object.keys(rids).map(Number).sort(function(a,b){return a-b});
   if(uRound!=="all"&&ids.indexOf(uRound)<0)uRound="all";
@@ -344,19 +394,21 @@ function chartNodes(){
   $("legNodes").innerHTML=ks.map(function(k){return '<span><i class="sw" style="background:'+col(k)+'"></i>node '+esc(k)+(k==="0"?" (driver)":"")+'</span>'}).join("");
   var all=[];ks.forEach(function(k){ns[k].forEach(function(p){all.push(p)})});
   var t0=Math.min.apply(null,all.map(function(p){return p[0]})),t1=Math.max.apply(null,all.map(function(p){return p[0]})),vm=Math.max.apply(null,all.map(function(p){return p[1]}).concat([1]));
-  var W=boxW(box,560),H=210,m={l:44,r:14,t:8,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
+  var W=boxW(box,560),H=210,m={l:44,r:16,t:8,b:26},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"GPU memory per node"},box),g=el("g",{"class":"grid"},s);
   [0,.5,1].forEach(function(q){el("line",{x1:m.l,x2:W-m.r,y1:sy(vm*q),y2:sy(vm*q)},g);el("text",{x:m.l-6,y:sy(vm*q)+4,"text-anchor":"end"},s).textContent=(vm*q).toFixed(0)});
   // no line across a gap (3x the usual spacing): an island down or restarted draws two pieces, not a diagonal
   ks.forEach(function(k){var P=ns[k].slice().sort(function(a,b){return a[0]-b[0]});
     el("path",{d:YetoExt.segments(P,P).map(function(G){return "M"+G.map(function(p){return sx(p[0])+","+sy(p[1])}).join("L")}).join(""),fill:"none",stroke:col(k),"stroke-width":2},s)});
-  [t0,(t0+t1)/2,t1].forEach(function(t){el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)});
+  tAxis(s,t0,t1,sx,H);
   var hasU=ks.some(function(k){return ns[k].some(function(p){return fin(p[2])})});
   $("nodesNote").textContent="Source: per-node host probe or the island's NVML samples (rl_resource_sample)."+(hasU?"":" GPU utilization: not sampled in this tape (older probes record memory only).");
 }
+/* island health of a synchronous run; an async run has it in its island block (header, Samplers & pools) */
 function islands(){
+  $("nodes").hidden=!!V.async;if(V.async)return;
   $("islands").innerHTML=(O.islands||[]).map(function(c){var ex=V.islands[c.id]||{},re=ex.ray_embed||{};
-    return '<details class="isl"'+(c.id===SEL?" open":"")+'><summary><span><b>'+islName(c)+'</b> <span class="note">'+esc(c.name||"")+'</span></span>'+negBadge(c)+stBadge(c.status,c)+'</summary>'+
+    return '<details class="isl"'+(String(c.id)===String(SEL)?" open":"")+'><summary><span><b>'+nameCell(c.id)+'</b> <span class="note">'+esc(c.name||"")+'</span></span>'+negBadge(c)+stBadge(c.status,c)+'</summary>'+
     '<div class="kv"><span>cloud / GPU</span><span class="num">'+esc(platform(c))+' · '+esc(c.gpu||"n/a")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</span>'+
     '<span>phase / policy</span><span class="num">'+esc(islPhase(c)||"n/a")+' · '+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span>'+
     '<span>last event</span><span class="num">'+(fin(c.last_event_age_s)?f(c.last_event_age_s,0)+" s ago":"n/a")+'</span>'+
@@ -377,12 +429,12 @@ function cost(){
   var ni=(O.islands||[]).length;
   if(!ci.length){$("costBox").innerHTML='<div class="note">'+(ni?'no cost data for the '+ni+' island(s): cost needs island_ready in fleet.jsonl or the cloud and GPU type on the tapes':'no island has reported yet, so nothing is priced')+
     (fin(c.budget_usd)?' · budget $'+f(c.budget_usd,0):'')+'. Prices: '+esc(c.prices_source||"")+'</div>';return}
-  $("costBox").innerHTML='<table class="c"><tr><th></th><th>GPU/h</th><th>CPU+memory/h</th><th>total/h</th><th>duration</th><th>cumulative</th></tr>'+ci.map(function(r){
+  $("costBox").innerHTML='<div class="tw"><table class="c cpt"><tr><th></th><th>GPU/h</th><th>CPU+memory/h</th><th>total/h</th><th>duration</th><th>cumulative</th></tr>'+ci.map(function(r){
     // a fleet's rows (cost.fleet_rows): each island's trainer, its pools' samplers and the syncer
     var lab=r.kind==="syncer"?"Syncer":r.kind==="pool sampler"?"Island "+esc(r.island)+" pool "+esc(r.pool)+' <span class="note">'+esc(r.id)+'</span>':r.kind==="trainer"?"Island "+esc(r.island)+" trainer":"Island "+esc(r.id);
     var rs=r.rate_source?' title="'+esc(r.rate_source+(r.billed_from?"; hours: "+r.billed_from:""))+'"':"";
     if(r.kind)return '<tr><td'+rs+'>'+lab+'</td><td class="num">'+(fin(r.gpu_rate_usd_h)?"$"+f(r.gpu_rate_usd_h,2):r.kind==="syncer"?"—":"unpriced")+'</td><td class="num">'+(fin(r.host_rate_usd_h)?"$"+f(r.host_rate_usd_h,2):fin(r.rate_usd_h)&&r.rate_source?"in total":r.kind==="syncer"?"—":"GPU only")+'</td><td class="num">'+(fin(r.rate_usd_h)?"$"+f(r.rate_usd_h,2):"unpriced")+'</td><td class="num">'+f(r.hours,2)+' h</td><td class="num">'+(fin(r.cost_usd)?"$"+f(r.cost_usd,2):"n/a")+'</td></tr>';
-    return '<tr><td>Island '+esc(r.id)+'</td><td class="num">'+(fin(r.gpu_rate_usd_h)?"$"+f(r.gpu_rate_usd_h,2):"unpriced")+'</td><td class="num">'+(fin(r.host_rate_usd_h)?"$"+f(r.host_rate_usd_h,2):"GPU only")+'</td><td class="num">'+(fin(r.rate_usd_h)?"$"+f(r.rate_usd_h,2):"n/a")+'</td><td class="num">'+f(r.hours,2)+' h</td><td class="num">'+(fin(r.cost_usd)?"$"+f(r.cost_usd,1):"n/a")+'</td></tr>'}).join("")+'</table>'+
+    return '<tr><td>Island '+esc(r.id)+'</td><td class="num">'+(fin(r.gpu_rate_usd_h)?"$"+f(r.gpu_rate_usd_h,2):"unpriced")+'</td><td class="num">'+(fin(r.host_rate_usd_h)?"$"+f(r.host_rate_usd_h,2):"GPU only")+'</td><td class="num">'+(fin(r.rate_usd_h)?"$"+f(r.rate_usd_h,2):"n/a")+'</td><td class="num">'+f(r.hours,2)+' h</td><td class="num">'+(fin(r.cost_usd)?"$"+f(r.cost_usd,1):"n/a")+'</td></tr>'}).join("")+'</table></div>'+
     '<div class="note" style="margin-top:6px">'+(c.fleet?esc("fleet spend = pools $"+f(c.fleet.pools_usd,2)+" + trainers $"+f(c.fleet.trainers_usd,2)+" + syncer "+(fin(c.fleet.syncer_usd)?"$"+f(c.fleet.syncer_usd,2):"unpriced")+" (hover a row for its price and hours source). "):"")+esc(c.note||"")+(function(){var sp=ci.filter(function(r){return !r.kind||r.cpus!=null});return sp.length?'. Specs: '+sp.map(function(r){return "island "+esc(r.id)+" "+(r.cpus==null?"n/a":r.cpus)+" cores, "+(r.memory_gib==null?"n/a":r.memory_gib)+" GiB"}).join("; "):""})()+'. Prices: '+esc(c.prices_source||"")+'</div>';
 }
 var EV_KEEP={rl_engine_selected:1,rl_driver_start:1,rl_driver_phase:1,rl_publication:1,rl_round_trained:1,rl_reconfiguration:1,rl_learner_finalized:1,
@@ -398,7 +450,7 @@ function evText(e){var r=e.record||{},keys=["phase","rollout_id","policy_version
   return keys.filter(function(k){return r[k]!=null}).map(function(k){return k+"="+String(r[k]).slice(0,80)}).join(" ")}
 function events(){
   var ec=YetoTbl.cap("event-stream",EVENTS.filter(function(e){return keepEv(e.type)}).reverse(),{def:15,unit:"events"}),list=ec.rows;
-  $("evs").innerHTML=ec.bar+list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" island "+esc(e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
+  $("evs").innerHTML=ec.bar+list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" "+esc(cardOf(e.island)?lbl(e.island):"island "+e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
 }
 function cmds(){
   var run=O.run||"<run>",cm=O.commands||{};
@@ -416,7 +468,10 @@ function folds(){
   if(!u.transactions)items.push(["Reconfiguration transactions","no journal transactions"]);
   if(!multi)items.push(["Inter-island elasticity / leases","only one island"]);
   if((O.islands||[]).every(function(c){return (c.cloud||"")==="modal"}))items.push(["Ray dashboard embed","Modal containers have no inbound port"]);
-  $("foldBox").innerHTML=items.map(function(x){return '<div class="fold"><span>'+x[0]+'</span><span>not used in this run ('+x[1]+')</span></div>'}).join("")||'<div class="note">none</div>';
+  items=items.concat(FOLDS);
+  // one line, opened on demand: each panel and the tape event it would need
+  $("foldBox").innerHTML=items.length?'<details class="ufold"><summary><b>Panels not used in this run</b> · '+items.length+': '+esc(items.map(function(x){return x[0].replace(/^Generation-phase utilization · /,"")}).join(" · "))+'</summary>'+
+    items.map(function(x){return '<div class="fold"><span>'+esc(x[0])+'</span><span>not used in this run ('+esc(x[1])+')</span></div>'}).join("")+'</details>':'<div class="note">Panels not used in this run: none</div>';
 }
 function spot(){
   var rows=(V.spot||[]).slice().reverse();$("spotBox").hidden=!rows.length;if(!rows.length)return;
@@ -442,7 +497,7 @@ var TR_COLS=[["round","",function(r){return r.round},null],
   ["groups","",function(r,a){return f(a.trained_groups,0)},null],
   ["zero-variance","rl_local_round.zero_variance_group_ratio: groups whose rewards were all equal (trained with zero advantage)",function(r,a){return fin(r.zero_var_ratio)?pct(r.zero_var_ratio)+(fin(a.trained_groups)?" ("+f(Math.round(r.zero_var_ratio*a.trained_groups),0)+")":""):"n/a"},function(r){return fin(r.zero_var_ratio)}],
   ["stale dropped","",function(r,a){return f(a.stale_groups,0)},null],
-  ["policy ages","rl_round_trained.policy_age_groups: trained groups by policy age",function(r,a){return hist(a.ages)+(fin(a.policy_age_mean)?' <span class="note">· mean '+f(a.policy_age_mean,2)+'</span>':"")},null]];
+  ["policy ages","rl_round_trained.policy_age_groups: trained groups by policy age (age:groups)",function(r,a){return histS(a.ages)+(fin(a.policy_age_mean)?' <span class="note">· mean '+f(a.policy_age_mean,2)+'</span>':"")},null]];
 /* a quantile in a one-line cell: 0, 1, 0.5 (two decimals at most) */
 function cq(v){return fin(v)?String(+v.toFixed(2)):"n/a"}
 /* mean policy age of a round's trained groups: its age histogram, else the trainer's own mean */
@@ -457,33 +512,136 @@ function trTable(rows,ar,key){var cols=TR_COLS.filter(function(c){return !c[3]||
     c.rows.map(function(r){var a=A(r);return '<tr>'+cols.map(function(c,i){return '<td'+(i===cols.length-1?"":' class="num"')+'>'+c[2](r,a)+'</td>'}).join("")+'</tr>'}).join(""))+
     (gone.length?'<div class="note">hidden: '+gone.map(function(c){return esc(c[0])}).join(", ")+' (not reported by this algorithm / run)</div>':"")}
 function hist(h){var ks=Object.keys(h||{});return ks.length?ks.map(function(k){return "age "+esc(k)+": "+f(h[k],0)}).join(" · "):"n/a"}
-function asyncPanel(){
-  var A=V.async;$("async").hidden=!A;$("navAsync").style.display=A?"":"none";if(!A)return;
-  var cards=O.islands||[],trs=cards.filter(function(c){return c.role==="trainer"}),sps=cards.filter(function(c){return c.role==="sampler"});
-  var tid=trs.some(function(c){return c.id===SEL})?SEL:(trs[0]||{}).id;$("aTrNote").textContent=tid!=null?"· island "+tid+(trs.length>1?" (pick another trainer on the island wall)":""):"";
-  var rr=((V.islands[tid]||{}).rounds||[]).filter(function(r){return fin(r.reward)||fin(r.kl_tr)||fin(r.kl)||fin(r.tok_s)}),ar={};
-  (((A.trainers||{})[tid]||{}).rounds||[]).forEach(function(x){ar[x.rollout_id]=x});
-  var T=(A.trainers||{})[tid]||{};
-  $("aTrainer").innerHTML=!rr.length?'<div class="note">no trained rounds on this trainer</div>':
-    '<div class="note">totals: trained groups '+f(T.trained_groups,0)+' · dropped as stale (older than max_policy_age) '+f(T.stale_groups,0)+' · no policy identity (dropped after a resume) '+f(T.unidentified_policy_groups,0)+(T.unidentified_starved?' <b>[reader starved: '+f(T.unidentified_starved.selections,0)+' selections kept no group]</b>':'')+' · off-policy gate dropped '+f(T.gate_dropped,0)+' · short groups trained '+f(T.incomplete_groups,0)+' · too small dropped '+f(T.dropped_small_groups,0)+' · carried over '+f(T.carried_over_groups,0)+' · padded samples '+f(T.padded_samples,0)+' · policy ages of trained groups: '+hist(T.age_hist)+'</div>'+
-    trTable(rr,ar,"trainer-rounds")+
-    (rr.some(function(r){return r.resp_derived})?'<div class="note">* mean response length = trained response tokens ÷ trained samples (rl_rollout_carry_over), the tape has no batch summary</div>':"");
-  var S=A.samplers||{};
-  // zero-variance groups the trainer saw (rl_local_round ratio x trained groups), for samplers that report none
-  var zg=0,zt=0;Object.keys(A.trainers||{}).forEach(function(i){var tg={};((A.trainers[i]||{}).rounds||[]).forEach(function(x){tg[x.rollout_id]=x.trained_groups});
-    ((V.islands[i]||{}).rounds||[]).forEach(function(r){if(fin(r.zero_var_ratio)&&fin(tg[r.round])){zg+=r.zero_var_ratio*tg[r.round];zt+=tg[r.round]}})});
+/* a policy-age histogram in a one-line cell: "age:groups", e.g. "11:2 12:6" */
+function histS(h){var ks=Object.keys(h||{});return ks.length?ks.map(function(k){return esc(k)+":"+f(h[k],0)}).join(" "):"n/a"}
+/* the picked island of an async run: a fleet island (its pools' samplers, its releases and backlog), else the picked
+   trainer of a buffer run with every sampler of the run (they share the buffer). One drawing path for both */
+function asyncCtx(){var A=V.async,cards=O.islands||[];
+  if(fleetOn()){var x=A.islands.filter(function(i){return "i"+i.island===PICK})[0]||A.islands[0],sids=[];
+    x.pools.forEach(function(p){p.samplers.forEach(function(id){sids.push(String(id))})});
+    return {fleet:true,x:x,tid:x.trainer!=null?String(x.trainer):null,sids:sids,pools:x.pools,rel:x.releases||[],relTotal:((V.table_totals||{}).island_releases||{})[x.island],backlog:x.backlog,key:"-island-"+x.island}}
+  var trs=cards.filter(function(c){return c.role==="trainer"}),tid=trs.some(function(c){return String(c.id)===String(SEL)})?String(SEL):trs.length?String(trs[0].id):null;
+  var sids=cards.filter(function(c){return c.role==="sampler"}).map(function(c){return String(c.id)});
+  Object.keys(A.samplers||{}).forEach(function(k){if(sids.indexOf(k)<0)sids.push(k)});
+  var rel=A.releases||[],multi=trs.length>1;if(multi)rel=rel.filter(function(r){return r.trainer==null||String(r.trainer)===tid});
+  return {fleet:false,tid:tid,sids:sids,pools:null,rel:rel,relTotal:multi?null:(V.table_totals||{}).releases,backlog:A.backlog,key:multi?"-trainer-"+tid:""}}
+var ENG={vllm:"vLLM",sglang:"SGLang"},ENG_S={vllm:"vLLM",sglang:"SGL"};
+function engName(e){return e?(ENG[String(e).toLowerCase()]||String(e)):null}
+function poolOf(ctx){var o={};(ctx.pools||[]).forEach(function(p){p.samplers.forEach(function(s){o[String(s)]=p})});return o}
+/* a sampler's short tag in the release table and timeline: its engine ("vLLM", "SGL", "Miles"), numbered when two
+   samplers of the island share one ("SGL 0", "SGL 1"); without an engine the tail of its id */
+function samplerTags(ctx){var S=V.async.samplers||{},pool=poolOf(ctx),out={},cnt={};
+  ctx.sids.forEach(function(id){var p=pool[id],pr=(S[id]||{}).provenance||{},e=p&&p.source==="miles"?"Miles":(p&&(p.engine||(p.provenance||{}).engine))||pr.engine;
+    e=e?(ENG_S[String(e).toLowerCase()]||String(e)):null;out[id]=e;if(e)cnt[e]=(cnt[e]||0)+1});
+  // samplers sharing an engine: numbered by their shard number when those differ, else 1, 2, ... in table order
+  var tail=function(id){var m=/-(\d+)$/.exec(id);return m?m[1]:null},grp={};
+  ctx.sids.forEach(function(id){var e=out[id];if(e&&cnt[e]>1)(grp[e]=grp[e]||[]).push(id)});
+  Object.keys(grp).forEach(function(e){var t=grp[e].map(tail),uniq=t.every(function(x,i){return x!=null&&t.indexOf(x)===i});
+    grp[e].forEach(function(id,i){out[id]=e+" "+(uniq?t[i]:i+1)})});
+  ctx.sids.forEach(function(id){if(!out[id])out[id]=/^\d+$/.test(id)?"s"+id:id.length>10?id.split("-").slice(-2).join("-"):id});
+  var seen={};ctx.sids.forEach(function(id){if(seen[out[id]])out[id]=id;seen[out[id]]=1});return out}
+/* a timeline lane: the tag and the id, unless the tag is made from the id */
+function laneName(tag,id){return tag===id||tag==="s"+id||id.slice(-tag.length)===tag?lbl(id):tag+" · "+id}
+function loadTag(ld,lab,id,v){var who=lbl(id);
+  if(!ld)return '<span class="lt no" title="'+esc(who+" never loaded v"+v)+'">'+esc(lab)+'</span>';
+  var t=who+" loaded v"+v+" at "+clock(ld.loaded_at)+(ld.at_start?" (started on it)":fin(ld.latency_s)?", "+f(ld.latency_s,0)+" s after the release":"")+
+    [["resolve",ld.resolve_s],["drain",ld.drain_s],["load",ld.load_s],["pause",ld.pause_s]].filter(function(x){return fin(x[1])}).map(function(x){return " · "+x[0]+" "+f(x[1],1)+" s"}).join("")+
+    (fin(ld.drain_in_flight)?" · "+ld.drain_in_flight+" trials in flight at the drain":"")+(ld.drain_cut?" · "+ld.drain_cut+" cut by the drain":"");
+  return '<span class="lt'+(ld.at_start?" st":"")+'" title="'+esc(t)+'">'+esc(lab)+" "+(ld.at_start?"at start":fin(ld.latency_s)?f(ld.latency_s,0)+"s":clock(ld.loaded_at))+(ld.drain_cut?" · "+ld.drain_cut+" cut":"")+'</span>'}
+/* releases of the picked island: version, release time, upload, then one load tag per sampler of the island */
+function relTable(rows,sids,tags,key,total){
+  var c=YetoTbl.cap(key,rows.slice().reverse(),{def:10,total:total,unit:"releases"});
+  var leg=sids.length?'<div class="ltk">'+sids.map(function(id){return '<span><span class="lt">'+esc(tags[id])+'</span>'+esc(lbl(id))+'</span>'}).join("")+'<span><span class="lt no">not loaded</span></span></div>':"";
+  return leg+c.bar+YetoTbl.table('<tr><th class="l">policy</th><th>released</th><th>upload</th><th class="l" title="seconds from the release to the sampler\'s load done; hover a tag for resolve / drain / load / pause">loaded by (s after release)</th></tr>',
+    // a sampler starting on the base weights makes a v0 row with no trainer release: "base weights"
+    c.rows.map(function(r){var base=r.trainer==null&&!fin(r.released_at);
+      return '<tr><td class="l num">v'+esc(r.policy_version)+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base||!fin(r.upload_s)?"—":f(r.upload_s,1)+" s")+'</td><td class="l">'+
+        (sids.length?sids.map(function(id){return loadTag((r.loads||{})[id],tags[id],id,r.policy_version)}).join(""):'<span class="note">no sampler</span>')+'</td></tr>'}).join(""))}
+function mmCell(m){return m?f(m.value,4)+' <span class="note" title="'+esc(m.method)+'">'+m.rounds+" round"+(m.rounds===1?"":"s")+"</span>":'<span class="note">not reported</span>'}
+var SRC_TAG={miles:["Miles native","var(--delta)"],external:["external pool","var(--traj)"]};
+function srcTag(s){var t=SRC_TAG[s];return t?' <span class="tag" style="border-color:'+t[1]+';color:'+t[1]+';font-weight:600;white-space:nowrap">'+t[0]+'</span>':""}
+function poolEngine(p){var pr=p.provenance||{},prec=String(p.rollout_quant||pr.precision||"").toUpperCase();
+  // a Miles pool: the cards of its --gpu cluster when its sampler reports no provenance
+  var card=pr.card_model||(p.card?p.card+(fin(p.gpus)?" × "+p.gpus:""):null);
+  return [engName(p.engine||pr.engine),prec,card,pr.topology,p.provider].filter(Boolean).join(" · ")||"not reported"}
+function samplerEngine(id){var pr=((V.async.samplers||{})[id]||{}).provenance||{},c=cardOf(id)||{};
+  return [engName(pr.engine),String(pr.precision||"").toUpperCase(),pr.card_model||c.gpu?(pr.card_model||c.gpu)+(fin(c.gpus)?" × "+c.gpus:""):null,pr.topology,c.cloud].filter(Boolean).join(" · ")||"not reported"}
+/* zero-variance groups the trainers saw (rl_local_round ratio × trained groups), for samplers that report none */
+function zeroVarTrainer(){var A=V.async,zg=0,zt=0;Object.keys(A.trainers||{}).forEach(function(i){var tg={};((A.trainers[i]||{}).rounds||[]).forEach(function(x){tg[x.rollout_id]=x.trained_groups});
+  ((V.islands[i]||{}).rounds||[]).forEach(function(r){if(fin(r.zero_var_ratio)&&fin(tg[r.round])){zg+=r.zero_var_ratio*tg[r.round];zt+=tg[r.round]}})});return [zg,zt]}
+/* Samplers & pools: one row per sampler of the island, grouped by pool (pool, engine and the pool's mismatch
+   metrics span its rows). A column no sampler reports is hidden and named under the table */
+function spTable(ctx){
+  var S=V.async.samplers||{},zv=zeroVarTrainer(),fl=!!ctx.pools;
+  var groups=fl?ctx.pools.map(function(p){return {p:p,s:p.samplers.map(String)}}):ctx.sids.map(function(id){return {p:null,s:[id]}});
+  if(!ctx.sids.length)return '<div class="nodata">no sampler on the tapes'+(fl?" for this island yet":"")+'</div>';
   var zvCell=function(x){return fin(x.zero_variance_seen)||fin(x.zero_variance_dropped)?f(x.zero_variance_seen,0)+" / "+f(x.zero_variance_dropped,0):
-    zt?'<span class="note" title="the sampler tape has no per-trial rewards; rl_local_round.zero_variance_group_ratio of the trainer">trainer: '+pct(zg/zt)+' of '+f(zt,0)+' trained</span>':"not reported"};
-  $("aSamplers").innerHTML=!sps.length?'<div class="note">no sampler islands on the tapes</div>':'<table class="c"><tr><th>sampler</th><th>status</th><th>policy</th><th>rounds</th><th>policy age p50 / max</th><th>age histogram (rounds)</th><th>generate s p50 / max</th><th>groups written</th><th>zero-variance groups seen / dropped</th><th>truncated samples</th><th>dropped groups</th><th>trials retried / lost</th><th>reward (last round)</th><th>backlog cap</th></tr>'+
-    sps.map(function(c){var x=S[c.id]||{};return '<tr><td>Island '+esc(c.id)+(c.name?' <span class="note">'+esc(c.name)+'</span>':"")+'</td><td>'+stBadge(c.status,c)+'</td><td class="num">'+(x.policy_version==null?"n/a":"v"+esc(x.policy_version))+'</td><td class="num">'+f(x.n_rounds,0)+
-      '</td><td class="num">'+f(x.lag_p50,1)+" / "+f(x.lag_max,0)+'</td><td>'+hist(x.lag_hist)+'</td><td class="num">'+f(x.generate_p50_s,0)+" / "+f(x.generate_max_s,0)+'</td><td class="num">'+f(x.groups,0)+'</td><td class="num">'+zvCell(x)+
-      '</td><td class="num">'+f(x.truncated,0)+(fin(x.samples)&&fin(x.truncated)?" ("+pct(x.truncated/x.samples)+")":"")+'</td><td class="num">'+f(x.dropped_groups,0)+'</td><td class="num">'+f(x.retried_trials,0)+" / "+f(x.lost_trials,0)+'</td><td class="num">'+f(x.reward_mean_last)+'</td><td class="num">'+f(x.max_backlog_groups,0)+'</td></tr>'}).join("")+'</table>'+
-    (sps.some(function(c){var x=S[c.id]||{};return !fin(x.samples)})?'<div class="note">n/a in truncated / reward: the sampler did not write rl_sampler_engine_round with these fields (Miles-generating samplers and older yeto versions do not); zero-variance then comes from the trainer</div>':"");
-  aBacklog(A);aRel(A);aComp(A);aDisp(A,cards);aFleet(A);
-  var pc=YetoTbl.cap("pool-events",(A.pool||[]).slice().reverse(),{def:10,unit:"pool events"}),pl=pc.rows;$("aPoolBox").hidden=!pl.length;
-  var sc=A.pool_scale;$("aPoolScale").textContent=sc?("samplers: "+sc.ready.length+" ready"+(sc.draining.length?", "+sc.draining.length+" draining ("+sc.draining.join(", ")+")":"")+(sc.paused&&sc.paused.length?", "+sc.paused.length+" paused by hand ("+sc.paused.join(", ")+")":"")+(sc.target!=null?" · target "+sc.target+(sc.manual?" (set by hand)":""):"")+(sc.ready.length?" · shards "+sc.ready.join(", "):"")):"";
-  $("aPool").innerHTML=pc.bar+pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>'+(/^nc_elastic_manual_/.test(e.event||"")?"manual":"pool")+'</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
-    esc(["ticket","slot","shard","why","reason","detail","error","old","new","outcome","waited_s","source","by"].filter(function(k){return k=="slot"?(e.slot!=null||e.account!=null):e[k]!=null}).map(function(k){var v=e[k],n=k;if(k=="slot"){n=e.slot_name||"account";v=e.slot!=null?e.slot:e.account}return n+"="+String(v).slice(0,80)}).join(" "))+'</span></div>'}).join("");
+    zv[1]?'<span class="note" title="the sampler tape has no per-trial rewards; rl_local_round.zero_variance_group_ratio of the trainer">trainer: '+pct(zv[0]/zv[1])+' of '+f(zv[1],0)+'</span>':"n/a"};
+  var COLS=[["policy","version the sampler generates with",function(x){return x.policy_version==null?"n/a":"v"+esc(x.policy_version)},function(x){return x.policy_version!=null}],
+    ["age p50 / max","policy age of its rounds; hover for the histogram",function(x){return '<span title="'+esc("rounds by policy age: "+hist(x.lag_hist).replace(/&#39;/g,"'"))+'">'+f(x.lag_p50,1)+" / "+f(x.lag_max,0)+'</span>'},function(x){return fin(x.lag_p50)||fin(x.lag_max)}],
+    ["rounds","",function(x){return f(x.n_rounds,0)},function(x){return fin(x.n_rounds)}],
+    ["generate s p50 / max","",function(x){return f(x.generate_p50_s,0)+" / "+f(x.generate_max_s,0)},function(x){return fin(x.generate_p50_s)}],
+    ["groups written","",function(x){return f(x.groups,0)},function(x){return fin(x.groups)}],
+    ["zero-var seen / dropped","groups whose rewards were all equal",zvCell,function(x){return fin(x.zero_variance_seen)||fin(x.zero_variance_dropped)||zv[1]>0}],
+    ["truncated","truncated samples (share of the samples it wrote)",function(x){return f(x.truncated,0)+(fin(x.samples)&&fin(x.truncated)&&x.samples?' <span class="note">'+pct(x.truncated/x.samples)+'</span>':"")},function(x){return fin(x.truncated)}],
+    ["dropped groups","",function(x){return f(x.dropped_groups,0)},function(x){return fin(x.dropped_groups)}],
+    ["trials retried / lost","",function(x){return f(x.retried_trials,0)+" / "+f(x.lost_trials,0)},function(x){return fin(x.retried_trials)||fin(x.lost_trials)}],
+    ["reward","mean reward of its last round with groups",function(x){return f(x.reward_mean_last)},function(x){return fin(x.reward_mean_last)}],
+    ["backlog cap","max_backlog_groups",function(x){return f(x.max_backlog_groups,0)},function(x){return fin(x.max_backlog_groups)}]];
+  var cols=COLS.filter(function(c){return ctx.sids.some(function(id){return c[3](S[id]||{})})}),gone=COLS.filter(function(c){return cols.indexOf(c)<0});
+  var mm=fl&&ctx.pools.some(function(p){var m=p.mismatch||{};return m.logprob_diff||m.tis_clip});
+  var head='<tr><th class="l">sampler</th>'+(fl?'<th class="l">pool</th>':"")+'<th class="l">engine · cards</th><th class="l">status</th>'+cols.map(function(c){return '<th'+(c[1]?' title="'+esc(c[1])+'"':"")+'>'+esc(c[0])+'</th>'}).join("")+
+    (mm?'<th title="train_metrics.train_rollout_logprob_abs_diff of the steps this pool fed">logprob |diff|</th><th title="train_metrics.tis_clipfrac (mismatch.tis_clipfrac) of the steps this pool fed">TIS clipfrac</th>':"")+'</tr>';
+  var body=groups.map(function(g,gi){var p=g.p,n=g.s.length,rs=n>1?' rowspan="'+n+'"':"",mmv=p&&p.mismatch||{};
+    if(!n)return '<tr'+(gi?' class="pg"':"")+'><td class="l note">none yet</td>'+(fl?'<td class="l">'+esc(p.name)+srcTag(p.source)+'</td>':"")+'<td class="l">'+esc(poolEngine(p))+'</td><td></td>'+cols.map(function(){return "<td></td>"}).join("")+(mm?"<td></td><td></td>":"")+'</tr>';
+    return g.s.map(function(id,i){var x=S[id]||{},c=cardOf(id)||{};
+      return '<tr'+(gi&&!i?' class="pg"':"")+'><td class="l">'+nameCell(id)+'</td>'+
+        (i===0&&fl?'<td class="l"'+rs+'>'+esc(p.name)+(p.source_name&&p.source_name!==p.name&&String(p.name).slice(-String(p.source_name).length-1)!=="-"+p.source_name?' <span class="note">'+esc(p.source_name)+'</span>':"")+srcTag(p.source)+'</td>':"")+
+        (i===0?'<td class="l"'+rs+'>'+esc(p?poolEngine(p):samplerEngine(id))+'</td>':"")+
+        '<td class="l" title="'+esc(fin(c.last_event_age_s)?"last event "+f(c.last_event_age_s,0)+" s ago":"")+'">'+(c.status?stBadge(c.status,c):'<span class="note">not on the tapes</span>')+'</td>'+
+        cols.map(function(cl){return '<td class="num">'+cl[2](x)+'</td>'}).join("")+
+        (mm&&i===0?'<td class="num"'+rs+'>'+mmCell(mmv.logprob_diff)+'</td><td class="num"'+rs+'>'+mmCell(mmv.tis_clip)+'</td>':"")+'</tr>'}).join("")}).join("");
+  var notes=[];
+  if(gone.length)notes.push("hidden: "+gone.map(function(c){return c[0]}).join(", ")+" (no sampler of this island reports it)");
+  if(fl&&!mm)notes.push("logprob |diff| / TIS clipfrac per pool: not reported (the trainer steps carry no per-pool mismatch split)");
+  if(ctx.sids.some(function(id){var x=S[id]||{};return !fin(x.samples)}))notes.push("a sampler without rl_sampler_engine_round (Miles-generating samplers, older yeto versions) has no truncated / reward counts; zero-variance then comes from the trainer");
+  return YetoTbl.table(head,body)+(notes.length?'<div class="note">'+esc(notes.join(" · "))+'</div>':"")}
+/* trainer totals as one row of chips: zero and missing counts are named once at the end, not one chip each */
+function trChips(T){
+  var it=[["trained groups",T.trained_groups,""],["dropped as stale",T.stale_groups,"older than max_policy_age"],["no policy identity",T.unidentified_policy_groups,"dropped after a resume"],
+    ["off-policy gate dropped",T.gate_dropped,""],["short groups trained",T.incomplete_groups,""],["too small dropped",T.dropped_small_groups,""],["carried over",T.carried_over_groups,""],["padded samples",T.padded_samples,""]];
+  var show=[],zero=[],na=[];it.forEach(function(x,i){if(!fin(x[1]))na.push(x[0]);else if(x[1]===0&&i>0)zero.push(x[0]);else show.push(x)});
+  return '<div class="chips">'+show.map(function(x){return '<span'+(x[2]?' title="'+esc(x[2])+'"':"")+'>'+esc(x[0])+'<b>'+f(x[1],0)+'</b></span>'}).join("")+
+    (T.unidentified_starved?'<span class="wn">reader starved<b>'+f(T.unidentified_starved.selections,0)+' selections kept no group</b></span>':"")+
+    '<span title="policy ages of the trained groups, whole run (age:groups)">policy ages<b>'+histS(T.age_hist)+'</b></span>'+
+    (zero.length?'<span>0: '+esc(zero.join(", "))+'</span>':"")+(na.length?'<span>n/a: '+esc(na.join(", "))+'</span>':"")+'</div>'}
+function asyncPanel(){
+  var A=V.async,show=!!A&&!fleetView();$("async").hidden=!show;$("navAsync").style.display=A?"":"none";if(!A)return;
+  if(!show){aComp(A,null);return}
+  var ctx=asyncCtx(),tid=ctx.tid,tc=tid!=null?cardOf(tid)||{}:{},x=ctx.x,tags=samplerTags(ctx);
+  // header: the island (fleet) or the trainer, its machine and lane, its status
+  var meta=(ctx.fleet?[tid!=null?lbl(tid):"trainer not on the tapes yet",x.gpu,"R2 lane "+(x.substore||"trainer"+x.island)+"/",fin(x.release_every)?"release every "+x.release_every:null,fin(x.max_policy_age)?"max policy age "+x.max_policy_age:null]:
+    [tid!=null?lbl(tid):"no trainer on the tapes yet",tc.cloud?tc.cloud+" "+(tc.gpu||"")+(fin(tc.gpus)?" × "+tc.gpus:""):null]).filter(Boolean);
+  if(fin(tc.policy_version)||fin(tc.released_version))meta.push("policy "+pvTxt(tc.policy_version,tc.released_version));
+  var su=Object.keys(tc.startup_steps||{}).map(function(k){var v=tc.startup_steps[k];return ({ray_connected:"Ray",engine_ready:"engine",weights_loaded:"weights"}[k]||k)+" "+(fin(v.step_s)?f(v.step_s,0)+" s":"?")});
+  if(su.length)meta.push("startup: "+su.join(" · "));
+  $("aHead").innerHTML=(ctx.fleet?"Island "+esc(x.island)+(x.name?" · "+esc(x.name):""):"Async GRPO")+' <span class="note">'+esc(meta.join(" · "))+'</span>';
+  $("aMeta").innerHTML=(tc.status?negBadge(tc)+stBadge(tc.status,tc):"")+(fin(tc.last_event_age_s)?'<span>last event '+esc(hm(tc.last_event_age_s))+' ago</span>':"");
+  // trainer rounds
+  var rr=((V.islands[tid]||{}).rounds||[]).filter(function(r){return fin(r.reward)||fin(r.kl_tr)||fin(r.kl)||fin(r.tok_s)}),ar={};
+  (((A.trainers||{})[tid]||{}).rounds||[]).forEach(function(q){ar[q.rollout_id]=q});
+  var T=(A.trainers||{})[tid]||{};
+  $("aTrNote").textContent=tid!=null?lbl(tid):"";
+  $("aTrainer").innerHTML=!rr.length?'<div class="nodata">no trained rounds on '+(tid!=null?esc(lbl(tid)):"this island")+' yet</div>'+(tid!=null?trChips(T):""):
+    trChips(T)+trTable(rr,ar,"trainer-rounds"+ctx.key)+
+    (rr.some(function(r){return r.resp_derived})?'<div class="note">* mean response length = trained response tokens ÷ trained samples (rl_rollout_carry_over), the tape has no batch summary</div>':"");
+  // releases of this island
+  var nRel=fin(ctx.relTotal)?ctx.relTotal:ctx.rel.length;
+  $("aRelNote").textContent=ctx.fleet?(fin(x.latest)?"latest v"+x.latest+" · ":"")+nRel+" on this island":nRel?nRel+" in total":"";
+  $("aRelTable").innerHTML=ctx.rel.length?relTable(ctx.rel,ctx.sids,tags,"releases"+ctx.key,ctx.relTotal):'<div class="nodata">no release yet</div>';
+  $("aSamplers").innerHTML=spTable(ctx);
+  blChart($("aBacklog"),$("legBacklog"),ctx.backlog);
+  aRelChart(ctx,tags);aComp(A,ctx);
 }
 /* CompactionRL: per island totals and the samplers' recent rounds (hidden without compaction data) */
 function segHist(h){var ks=Object.keys(h||{});return ks.length?ks.map(function(k){return esc(k)+" seg: "+f(h[k],0)}).join(" · "):"n/a"}
@@ -498,122 +656,126 @@ function fateRows(rows,A){var out=[];rows.forEach(function(x){var by=x[2].by_seg
   var st=v.stale!=null?f(v.stale,0):x[0]!=="trainer"?"—":ts===0?"0":fin(ts)?'<span class="note">'+f(ts,0)+' in all (not by segment)</span>':"n/a";
   out.push('<tr><td>'+esc(x[0])+" "+esc(x[1])+'</td><td>'+esc(b)+'</td><td class="num">'+f(v.written,0)+'</td><td>'+reasons(v.lost)+'</td><td>'+reasons(v.dropped)+'</td><td class="num">'+st+'</td><td class="num">'+pct(v.not_written_frac)+'</td></tr>')})});return out}
 var COMP_HEAD='<th>trials</th><th>samples</th><th>compacted trials</th><th>compactions / trial</th><th>segments per trial</th><th>summary_ok</th><th>truncated after compaction</th><th>summary tokens / trainable</th><th>lost to forks after compaction</th><th>retry replays</th>';
-function aComp(A){
-  var rows=[],recent=[];
-  Object.keys(A.samplers||{}).sort().forEach(function(k){var x=A.samplers[k];if(x.compaction)rows.push(["sampler",k,x.compaction]);
+/* ctx: the picked island (a fleet island: only its trainer and samplers); null = not drawn */
+function aComp(A,ctx){
+  var rows=[],recent=[],inS=function(k){return !ctx||!ctx.fleet||ctx.sids.indexOf(String(k))>=0},inT=function(k){return !ctx||!ctx.fleet||String(k)===ctx.tid};
+  if(ctx){Object.keys(A.samplers||{}).sort().forEach(function(k){var x=A.samplers[k];if(!inS(k))return;if(x.compaction)rows.push(["sampler",k,x.compaction]);
     (x.rounds||[]).forEach(function(r){if(r.compaction)recent.push([k,r])})});
-  Object.keys(A.trainers||{}).sort().forEach(function(k){var x=A.trainers[k];if(x.compaction)rows.push(["trainer",k,x.compaction])});
+  Object.keys(A.trainers||{}).sort().forEach(function(k){var x=A.trainers[k];if(x.compaction&&inT(k))rows.push(["trainer",k,x.compaction])})}
   $("aCompBox").hidden=!rows.length;if(!rows.length){$("aComp").innerHTML="";return}
   recent.sort(function(a,b){return (a[1].ts||0)-(b[1].ts||0)});
   var fr=fateRows(rows,A);
-  $("aComp").innerHTML='<table class="c"><tr><th>island</th><th>rounds</th>'+COMP_HEAD+'<th>reward mean per trial / per segment (last round)</th><th>xhw downweighted groups (max trial-mean shift)</th></tr>'+rows.map(function(x){var c=x[2];return '<tr><td>'+esc(x[0])+" "+esc(x[1])+'</td><td class="num">'+f(c.rounds,0)+'</td>'+compCells(c)+'<td class="num">'+f(c.reward_mean_trial)+" / "+f(c.reward_mean_segment)+'</td><td class="num">'+(c.xhw_downweighted_groups==null?"n/a":f(c.xhw_downweighted_groups,0)+" ("+f(c.xhw_trial_mean_shift_max,4)+")")+'</td></tr>'}).join("")+'</table>'+
+  $("aComp").innerHTML='<div class="tw"><table class="c"><tr><th>island</th><th>rounds</th>'+COMP_HEAD+'<th>reward mean per trial / per segment (last round)</th><th>xhw downweighted groups (max trial-mean shift)</th></tr>'+rows.map(function(x){var c=x[2];return '<tr><td>'+esc(x[0])+" "+esc(x[1])+'</td><td class="num">'+f(c.rounds,0)+'</td>'+compCells(c)+'<td class="num">'+f(c.reward_mean_trial)+" / "+f(c.reward_mean_segment)+'</td><td class="num">'+(c.xhw_downweighted_groups==null?"n/a":f(c.xhw_downweighted_groups,0)+" ("+f(c.xhw_trial_mean_shift_max,4)+")")+'</td></tr>'}).join("")+'</table></div>'+
     rows.filter(function(x){return x[2].drained_by_segments}).map(function(x){return '<div class="note">'+esc(x[0])+" "+esc(x[1])+': trials cut by drains, by segment count: '+reasons(x[2].drained_by_segments)+'</div>'}).join("")+
-    (fr.length?'<div class="note">trials by segment count: written (trainer: trained), lost before the group was written (drain timeout, other version, aborted), dropped with their group, stale-dropped by the trainer; a much higher share for long trials biases the GRPO baseline to short ones</div><table class="c"><tr><th>island</th><th>segments</th><th>written</th><th>lost</th><th>dropped with group</th><th>stale (trainer)</th><th>not written</th></tr>'+fr.join("")+'</table>':"")+
+    (fr.length?'<div class="note">trials by segment count: written (trainer: trained), lost before the group was written (drain timeout, other version, aborted), dropped with their group, stale-dropped by the trainer; a much higher share for long trials biases the GRPO baseline to short ones</div><div class="tw"><table class="c"><tr><th>island</th><th>segments</th><th>written</th><th>lost</th><th>dropped with group</th><th>stale (trainer)</th><th>not written</th></tr>'+fr.join("")+'</table></div>':"")+
     (recent.length?'<div class="note">recent sampler rounds</div>'+(function(){var c=YetoTbl.cap("compaction-rounds",recent.slice().reverse(),{def:10,unit:"sampler rounds"});
       return c.bar+YetoTbl.table('<tr><th>sampler</th><th>round</th><th>time</th>'+COMP_HEAD+'</tr>',c.rows.map(function(x){return '<tr><td>'+esc(x[0])+'</td><td class="num">'+esc(x[1].rollout_id)+'</td><td class="num">'+clock(x[1].ts)+'</td>'+compCells(x[1].compaction,true)+'</tr>'}).join(""))})():"")+
     '<div class="note">alert cards fire on a low summary_ok share and on many compacted trials ending truncated (docs/DASHBOARD.md, compaction_* thresholds); summary tokens n/a = the samples do not report summary_tokens; — = no trial was compacted</div>';
 }
 function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t,i){el("text",{x:sx(t),y:H-6,"text-anchor":["start","middle","end"][i]},s).textContent=clock(t)})}
-function aBacklog(A){
-  if(A.islands){$("aBacklog").innerHTML='<div class="note">one backlog per island (each trainer reads its own store lane): see Islands above</div>';$("legBacklog").innerHTML="";return}
-  blChart($("aBacklog"),$("legBacklog"),A.backlog)}
 function blChart(box,leg,b){
   box.innerHTML="";leg.innerHTML="";
-  if(!b||!(b.points||[]).length){box.innerHTML='<div class="note">no data (no rl_sampler_round with groups)</div>';return}
+  if(!b||!(b.points||[]).length){box.innerHTML='<div class="nodata">no data (no rl_sampler_round with groups)</div>';return}
   var pts=b.points,rep=b.reported||{},rk=Object.keys(rep),all=pts.map(function(p){return p[0]});rk.forEach(function(k){rep[k].forEach(function(p){all.push(p[0])})});
   var t0=Math.min.apply(null,all),t1=Math.max.apply(null,all),vm=Math.max.apply(null,pts.map(function(p){return fin(p[3])?p[3]:0}).concat([1]));
   rk.forEach(function(k){rep[k].forEach(function(p){vm=Math.max(vm,p[1])})});
-  var W=boxW(box,560),H=220,m={l:44,r:14,t:10,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
+  var W=boxW(box,560),H=210,m={l:44,r:16,t:10,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Buffer backlog"},box),g=el("g",{"class":"grid"},s);
   [0,.5,1].forEach(function(q){el("line",{x1:m.l,x2:W-m.r,y1:sy(vm*q),y2:sy(vm*q)},g);el("text",{x:m.l-6,y:sy(vm*q)+4,"text-anchor":"end"},s).textContent=Math.round(vm*q)});
   var bp=pts.filter(function(p){return fin(p[3])});
   if(bp.length)el("path",{d:"M"+bp.map(function(p){return sx(p[0])+","+sy(p[3])}).join("L"),fill:"none",stroke:"var(--T)","stroke-width":2},s);
-  rk.forEach(function(k,i){rep[k].forEach(function(p){el("circle",{cx:sx(p[0]),cy:sy(p[1]),r:3.5,fill:p[2]?"var(--bad)":RUN_COLORS[(i+1)%4]},s)})});
+  // what each sampler reported about its own backlog: full (it stopped writing) or admitted (it resumed)
+  var nf=0,na=0;rk.forEach(function(k){rep[k].forEach(function(p){if(p[2])nf++;else na++;
+    el("title",{},el("circle",{cx:sx(p[0]),cy:sy(p[1]),r:3.5,fill:p[2]?"var(--bad)":"var(--good)"},s)).textContent=lbl(k)+": "+(p[2]?"backlog_full":"admitted")+" at "+clock(p[0])+" ("+f(p[1],0)+" groups)"})});
   tAxis(s,t0,t1,sx,H);
-  leg.innerHTML='<span><i class="sw" style="background:var(--T)"></i>backlog (written '+f(b.written,0)+' · read position '+f(b.read,0)+')</span>'+(rk.length?'<span><i class="sw" style="background:var(--bad)"></i>sampler reported: backlog full</span><span><i class="sw" style="background:var(--i1)"></i>sampler reported: admitted</span>':"")+
+  leg.innerHTML='<span><i class="sw" style="background:var(--T)"></i>backlog (written '+f(b.written,0)+' · read position '+f(b.read,0)+')</span>'+(nf?'<span><i class="sw" style="background:var(--bad);border-radius:50%"></i>sampler reported backlog_full ('+nf+')</span>':"")+(na?'<span><i class="sw" style="background:var(--good);border-radius:50%"></i>admitted ('+na+')</span>':"")+
     (b.has_reads&&b.read_source&&b.read_source!=="buffer_selected"?'<span>read position = '+esc(b.read_source)+' (no rl_policy_released.buffer_selected yet)</span>':"")+(b.has_reads?"":'<span>no read position on the tapes (no rl_policy_released.buffer_selected): backlog unknown</span>');
 }
-function aDisp(A,cards){
-  // task dispense ledger (rl_dispense_*): slots by state, claims still held and who holds them
-  var D=A.dispense,box=$("aDispBox");box.hidden=!D;if(!D)return;
+/* the task dispense ledger (rl_dispense_*): slots by state, claims still held and who holds them. A sampler hands
+   back the slots it did not write as "release" events on every reload: counted, not listed */
+function aDisp(A,cards,show){
+  var D=A&&A.dispense,box=$("aDispBox");box.hidden=!D||!show;if(!D||!show)return;
   var st={};(cards||[]).forEach(function(c){st[c.id]=c.status});
   var dead=function(id){return ["stale","lost","left","stopped","done","recovery"].indexOf(st[id])>=0};
   var kv=function(o){var k=Object.keys(o||{});return k.length?k.map(function(x){return esc(x)+" "+o[x]}).join(" · "):"0"};
   var now=fin(O.now)?O.now:Date.now()/1e3,held=D.held||[],by={};held.forEach(function(h){(by[h.by]=by[h.by]||[]).push(h)});
-  var html='<div class="note">slots seen '+D.slots+' · settled: '+kv(D.settled)+' · attempts ended unsettled: '+kv(D.ends)+' (expired = lease ran out, the slot is claimed again) · re-claimed slots '+D.reclaimed_slots+' · held now '+held.length+'</div>';
+  var evs=(D.events||[]).filter(function(e){return e.kind!=="drain"}),odd=evs.filter(function(e){return e.kind!=="release"}),nrel=evs.length-odd.length;
+  var html='<div class="chips"><span>slots seen<b>'+D.slots+'</b></span><span>settled<b>'+kv(D.settled)+'</b></span><span title="expired = the lease ran out and the slot is claimed again; release = handed back unwritten">ended unsettled<b>'+kv(D.ends)+'</b></span><span>re-claimed slots<b>'+D.reclaimed_slots+'</b></span><span>held now<b>'+held.length+'</b></span></div>';
   html+=Object.keys(by).sort().map(function(k){var hs=by[k],bad=dead(k);
-    return '<div class="note">'+(bad?'<span class="st bd"><i></i>'+esc(st[k])+'</span> ':"")+'sampler '+esc(k)+' holds '+hs.length+': '+hs.map(function(h){return "slot "+h.slot+(h.attempt?" (attempt "+h.attempt+")":"")+" claimed "+clock(h.claim_ts)+(fin(h.claim_ts)?" ("+f((now-h.claim_ts)/60,0)+" min ago)":"")}).join(", ")+
+    return '<div class="note">'+(bad?'<span class="st bd"><i></i>'+esc(st[k])+'</span> ':"")+esc(lbl(k))+' holds '+hs.length+': '+hs.map(function(h){return "slot "+h.slot+(h.attempt?" (attempt "+h.attempt+")":"")+" claimed "+clock(h.claim_ts)+(fin(h.claim_ts)?" ("+f((now-h.claim_ts)/60,0)+" min ago)":"")}).join(", ")+
       (bad?' — <b>its island is '+esc(st[k])+': these slots wait for their lease to expire, then another sampler re-claims them</b>':"")+'</div>'}).join("");
-  var ev=YetoTbl.cap("dispense-events",(D.events||[]).filter(function(e){return e.kind!=="drain"}).reverse(),{def:10,unit:"events"});
-  if(ev.rows.length)html+=ev.bar+YetoTbl.table('<tr><th>time</th><th>event</th><th>slot</th><th>attempt</th><th>noticed by</th><th>detail</th></tr>',ev.rows.map(function(e){
-    return '<tr><td class="num">'+clock(e.ts)+'</td><td>'+esc(e.kind)+'</td><td class="num">'+(e.slot==null?"—":e.slot)+'</td><td class="num">'+(e.attempt==null?"—":e.attempt)+'</td><td>'+esc(e.by)+'</td><td class="note wrap">'+esc([e.reason,e.state,e.superseded_by?"superseded by "+e.superseded_by:null,fin(e.seen)?"last renewed "+clock(e.seen):null].filter(Boolean).join(" · "))+'</td></tr>'}).join(""));
+  var ev=YetoTbl.cap("dispense-events",odd.slice().reverse(),{def:10,unit:"events"});
+  html+='<div class="note">'+(odd.length?"":"no recover / expired event")+(nrel?(odd.length?"":" · ")+nrel+" unwritten slot"+(nrel===1?" was":"s were")+" handed back on a reload (release): counted above, not listed":"")+'</div>';
+  var det=function(e){return [e.reason,e.state,e.superseded_by?"superseded by "+e.superseded_by:null,fin(e.seen)?"last renewed "+clock(e.seen):null].filter(Boolean).join(" · ")},hasDet=ev.rows.some(function(e){return det(e)});
+  if(ev.rows.length)html+=ev.bar+YetoTbl.table('<tr><th>time</th><th class="l">event</th><th>slot</th><th>attempt</th><th class="l">noticed by</th>'+(hasDet?'<th class="l">detail</th>':"")+'</tr>',ev.rows.map(function(e){
+    return '<tr><td class="num">'+clock(e.ts)+'</td><td class="l">'+esc(e.kind)+'</td><td class="num">'+(e.slot==null?"—":e.slot)+'</td><td class="num">'+(e.attempt==null?"—":e.attempt)+'</td><td class="l">'+esc(e.by?(cardOf(e.by)?lbl(e.by):e.by):"")+'</td>'+(hasDet?'<td class="l note wrap">'+esc(det(e))+'</td>':"")+'</tr>'}).join(""));
   $("aDisp").innerHTML=html;
 }
-function aRel(A){
-  var box=$("aRelChart"),rows=A.releases||[],pool=(A.pool||[]).filter(function(e){return fin(e.ts)}),box2=$("aRelTable");box.innerHTML="";box2.innerHTML="";
-  var sids=[];rows.forEach(function(r){Object.keys(r.loads||{}).forEach(function(k){if(sids.indexOf(k)<0)sids.push(k)})});sids.sort();
-  var ts=[];rows.forEach(function(r){if(fin(r.released_at))ts.push(r.released_at);Object.keys(r.loads||{}).forEach(function(k){if(fin(r.loads[k].loaded_at))ts.push(r.loads[k].loaded_at)})});pool.forEach(function(e){ts.push(e.ts)});
-  if(!ts.length){box.innerHTML='<div class="note">no data (no rl_policy_released / rl_sampler_policy_loaded / nc_elastic_* events)</div>';$("legRel").innerHTML="";return}
-  var t0=Math.min.apply(null,ts),t1=Math.max.apply(null,ts),lanes=["trainer release"].concat(sids.map(function(k){return "sampler "+k}));
-  var W=boxW(box,560),rowH=34,ml=Math.min(Math.round(W*0.4),Math.max(86,14+6.7*Math.max.apply(null,lanes.map(function(n){return n.length})))),m={l:ml,r:16,t:14,b:22},H=m.t+m.b+rowH*lanes.length,sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},ly=function(i){return m.t+rowH*i+rowH/2};
-  var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Policy release timeline"},box);
-  lanes.forEach(function(n,i){el("text",{x:m.l-8,y:ly(i)+4,"text-anchor":"end"},s).textContent=n;el("line",{x1:m.l,x2:W-m.r,y1:ly(i),y2:ly(i),stroke:"var(--line)"},s)});
-  pool.forEach(function(e){var x=sx(e.ts),bad=POOL_BAD.test(e.event||"");el("line",{x1:x,x2:x,y1:m.t,y2:H-m.b,stroke:bad?"var(--bad)":"var(--warn)","stroke-dasharray":"3 3"},s);
-    el("title",{},el("rect",{x:x-3,y:m.t,width:6,height:H-m.t-m.b,fill:"transparent"},s)).textContent=e.event+" "+clock(e.ts)});
-  rows.forEach(function(r){if(!fin(r.released_at))return;var x0=sx(r.released_at);
-    el("rect",{x:x0-4,y:ly(0)-4,width:8,height:8,fill:"var(--P)",transform:"rotate(45 "+x0+" "+ly(0)+")"},s);
-    el("text",{x:x0,y:ly(0)-8,"text-anchor":"middle"},s).textContent="v"+r.policy_version;
-    sids.forEach(function(k,i){var ld=(r.loads||{})[k];if(!ld||!fin(ld.loaded_at))return;var x1=sx(ld.loaded_at);
-      el("line",{x1:x0,y1:ly(0),x2:x1,y2:ly(i+1),stroke:"var(--P)","stroke-opacity":.5},s);el("circle",{cx:x1,cy:ly(i+1),r:4,fill:"var(--P)"},s)})});
-  tAxis(s,t0,t1,sx,H);
-  $("legRel").innerHTML='<span><i class="sw" style="background:var(--P)"></i>release → load done</span>'+(pool.length?'<span><i class="sw" style="background:var(--warn)"></i>NC pool event</span><span><i class="sw" style="background:var(--bad)"></i>NC pool failure (evicted / lost / crash loop)</span>':"");
-  if(rows.length)box2.innerHTML=relTable(rows,fleetSamplers(A),milesSamplers(A),"releases",(V.table_totals||{}).releases);
+/* NC pool events (nc_elastic_*): run-wide, a fleet shows them under "Fleet" */
+function aPool(A,show){
+  var pc=YetoTbl.cap("pool-events",((A&&A.pool)||[]).slice().reverse(),{def:10,unit:"pool events"}),pl=pc.rows;$("aPoolBox").hidden=!pl.length||!show;if(!pl.length||!show)return;
+  var sc=A.pool_scale;$("aPoolScale").textContent=sc?("samplers: "+sc.ready.length+" ready"+(sc.draining.length?", "+sc.draining.length+" draining ("+sc.draining.join(", ")+")":"")+(sc.paused&&sc.paused.length?", "+sc.paused.length+" paused by hand ("+sc.paused.join(", ")+")":"")+(sc.target!=null?" · target "+sc.target+(sc.manual?" (set by hand)":""):"")+(sc.ready.length?" · shards "+sc.ready.join(", "):"")):"";
+  $("aPool").innerHTML=pc.bar+pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>'+(/^nc_elastic_manual_/.test(e.event||"")?"manual":"pool")+'</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
+    esc(["ticket","slot","shard","why","reason","detail","error","old","new","outcome","waited_s","source","by"].filter(function(k){return k=="slot"?(e.slot!=null||e.account!=null):e[k]!=null}).map(function(k){var v=e[k],n=k;if(k=="slot"){n=e.slot_name||"account";v=e.slot!=null?e.slot:e.account}return n+"="+String(v).slice(0,80)}).join(" "))+'</span></div>'}).join("");
 }
-// a fleet's samplers -> their island: a release row of another island is no load the sampler missed
-function fleetSamplers(A){var o={};(A.islands||[]).forEach(function(x){x.pools.forEach(function(p){p.samplers.forEach(function(s){o[s]=x.island})})});return o}
-// a fleet's Miles sampler islands of the launch: their release-load column says so (an external pool's keeps its id)
-function milesSamplers(A){var o={};(A.islands||[]).forEach(function(x){x.pools.forEach(function(p){if(p.source==="miles")p.samplers.forEach(function(s){o[s]=1})})});return o}
-/* key: the table's YetoTbl key; total: release rows of the run when the page holds only the newest */
-function relTable(rows,sIsl,ml,key,total){ml=ml||{};
-  var sids=[];rows.forEach(function(r){Object.keys(r.loads||{}).forEach(function(k){if(sids.indexOf(k)<0)sids.push(k)})});sids.sort();
-  // a fleet: one row per (island, version), both islands may release v4
-  var il=rows.some(function(r){return r.island!=null});sIsl=sIsl||{};
-  var c=YetoTbl.cap(key||"releases",rows.slice().reverse(),{def:10,total:total,unit:"releases"});
-  return c.bar+YetoTbl.table('<tr>'+(il?'<th>island</th>':"")+'<th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>'+(ml[k]?"Miles sampler island ":"sampler ")+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>',
-    // a sampler starting on the base weights makes a v0 row with no trainer release: "base"
-    c.rows.map(function(r){var base=r.trainer==null&&!fin(r.released_at);return '<tr>'+(il?'<td class="num">'+esc(r.island==null?"—":r.island)+'</td>':"")+'<td class="num">v'+esc(r.policy_version)+'</td><td>'+(base?'<span class="note">base</span>':esc(r.trainer==null?"n/a":r.trainer))+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base?"—":f(r.upload_s,1))+'</td>'+
-      sids.map(function(k){var ld=(r.loads||{})[k];if(!ld&&il&&sIsl[k]!=null&&sIsl[k]!==r.island)return '<td class="num note">—</td>';return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"+(fin(ld.drain_s)?' <span class="note">· drain '+f(ld.drain_s,0)+" s"+(ld.drain_cut?", "+f(ld.drain_cut,0)+" cut":"")+'</span>':"")):"not loaded")+'</td>'}).join("")+'</tr>'}).join(""))}
-/* a fleet of async islands (async.islands, fleet_islands.py): per island its pools, backlog, policy ages and releases */
-var ENG={vllm:"vLLM",sglang:"SGLang"};
-function engName(e){return e?(ENG[String(e).toLowerCase()]||String(e)):null}
-function mmCell(m){return m?f(m.value,4)+'<div class="note">'+esc(m.method)+" · "+m.rounds+" round"+(m.rounds===1?"":"s")+"</div>":'<span class="note">not reported</span>'}
-// a fleet with Miles sampler islands of the launch: each sampler row's source
-var SRC_TAG={miles:["Miles native","var(--delta)"],external:["external pool","var(--traj)"]};
-function srcTag(s){var t=SRC_TAG[s];return t?' <span class="tag" style="border-color:'+t[1]+';color:'+t[1]+';font-weight:600;white-space:nowrap">'+t[0]+'</span>':""}
-function poolTable(x){
-  return '<table class="c"><tr><th>pool</th><th>engine · precision</th><th>cards · provider</th><th>samplers</th><th>policy</th><th>policy age p50 / max</th><th>groups written</th>'+
-    '<th title="train_metrics.train_rollout_logprob_abs_diff of the steps this pool fed">logprob |diff|</th><th title="train_metrics.tis_clipfrac (mismatch.tis_clipfrac) of the steps this pool fed">TIS clipfrac</th></tr>'+
-    x.pools.map(function(p){var pr=p.provenance||{},mm=p.mismatch||{},prec=String(p.rollout_quant||pr.precision||"").toUpperCase(),ml=p.source==="miles";
-      // a Miles row: cards of its --gpu cluster when its sampler reports no provenance
-      var card=pr.card_model||(p.card?p.card+(fin(p.gpus)?" × "+p.gpus:""):null);
-      return '<tr><td>'+esc(p.name)+(p.source_name&&p.source_name!==p.name?' <span class="note">'+esc(p.source_name)+'</span>':"")+srcTag(p.source)+'</td><td>'+esc([engName(p.engine||pr.engine),prec].filter(Boolean).join(" · ")||"not reported")+
-        '</td><td>'+esc([card,pr.topology,p.provider].filter(Boolean).join(" · ")||"not reported")+'</td><td>'+esc(p.samplers.map(function(s){return ml?"launch island "+s:s}).join(", ")||"none yet")+'</td><td class="num">'+(fin(p.policy_version)?"v"+esc(p.policy_version):"n/a")+
-        '</td><td class="num">'+f(p.lag_p50,1)+" / "+f(p.lag_max,0)+'</td><td class="num">'+f(p.groups,0)+'</td><td class="num">'+mmCell(mm.logprob_diff)+'</td><td class="num">'+mmCell(mm.tis_clip)+'</td></tr>'}).join("")+'</table>'}
-function aFleet(A){
-  var box=$("aFleetBox"),I=A.islands;if(!box)return;box.hidden=!I;if(!I)return;
-  $("aFleet").innerHTML=I.map(function(x,i){var pa=x.policy_age||{},b=x.backlog||{},pts=b.points||[],last=pts.length?pts[pts.length-1]:null;
-    return '<h3>Island '+esc(x.island)+(x.name?" · "+esc(x.name):"")+' <span class="note">'+esc([x.trainer!=null?"trainer island "+x.trainer:"trainer not on the tapes yet",x.gpu,"R2 lane "+(x.substore||"trainer"+x.island)+"/",
-      fin(x.release_every)?"release every "+x.release_every:null,fin(x.max_policy_age)?"max policy age "+x.max_policy_age:null].filter(Boolean).join(" · "))+'</span></h3>'+
-      '<div class="note">backlog '+(last&&fin(last[3])?f(last[3],0)+" groups":"n/a")+" (written "+f(b.written,0)+" · read position "+f(b.read,0)+") · latest release "+(fin(x.latest)?"v"+x.latest:"none")+
-      " · trained groups "+f(x.trained_groups,0)+" · stale dropped "+f(pa.stale_groups,0)+" · policy age of trained groups: "+hist(pa.hist)+(fin(pa.mean_last)?" (last round mean "+f(pa.mean_last,2)+", max "+f(pa.max_last,0)+")":"")+'</div>'+
-      poolTable(x)+'<div style="max-width:760px"><div class="legend" id="legFl'+i+'"></div><div id="aFl'+i+'"></div></div>'+((x.releases||[]).length?relTable(x.releases,null,milesSamplers({islands:[x]}),"releases-island-"+x.island,((V.table_totals||{}).island_releases||{})[x.island]):"")}).join("");
-  I.forEach(function(x,i){blChart($("aFl"+i),$("legFl"+i),x.backlog)})}
+/* release timeline of the picked island: the trainer's releases (version labels on two rows, a label that fits on
+   neither is left out, its diamond keeps a tooltip) and each sampler's load done */
+function aRelChart(ctx,tags){
+  var box=$("aRelChart"),rows=ctx.rel,sids=ctx.sids,A=V.async;box.innerHTML="";
+  var pool=(A.pool||[]).filter(function(e){return fin(e.ts)&&(!ctx.fleet||sids.indexOf(String(e.shard))>=0)});
+  var ts=[];rows.forEach(function(r){if(fin(r.released_at))ts.push(r.released_at);sids.forEach(function(k){var ld=(r.loads||{})[k];if(ld&&fin(ld.loaded_at))ts.push(ld.loaded_at)})});pool.forEach(function(e){ts.push(e.ts)});
+  if(!ts.length){box.innerHTML='<div class="nodata">no data (no rl_policy_released / rl_sampler_policy_loaded'+(ctx.fleet?" on this island":" / nc_elastic_* events")+')</div>';$("legRel").innerHTML="";return}
+  var W=boxW(box,560),long=function(k){return laneName(tags[k],k)},full=sids.map(long).concat(["trainer "+ctx.tid]);
+  var CW=7.4,useLong=18+CW*Math.max.apply(null,full.map(function(n){return n.length}))<=W*0.36; // 12px mono
+  var lanes=[ctx.tid!=null?lbl(ctx.tid):"trainer"].concat(sids.map(function(k){return useLong?long(k):tags[k]}));
+  var t0=Math.min.apply(null,ts),t1=Math.max.apply(null,ts),rowH=30,ml=Math.min(Math.round(W*0.4),Math.max(64,18+CW*Math.max.apply(null,lanes.map(function(n){return n.length})))),
+    m={l:ml,r:18,t:38,b:22},H=m.t+m.b+rowH*lanes.length,sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},ly=function(i){return m.t+rowH*i+rowH/2-6};
+  var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Policy release timeline"},box);
+  lanes.forEach(function(n,i){var tx=el("text",{x:m.l-10,y:ly(i)+4,"text-anchor":"end"},s);tx.textContent=n;if(i)el("title",{},tx).textContent=lbl(sids[i-1]);el("line",{x1:m.l,x2:W-m.r,y1:ly(i),y2:ly(i),stroke:"var(--line)"},s)});
+  pool.forEach(function(e){var x=sx(e.ts),bad=POOL_BAD.test(e.event||"");el("line",{x1:x,x2:x,y1:m.t-6,y2:H-m.b,stroke:bad?"var(--bad)":"var(--warn)","stroke-dasharray":"3 3"},s);
+    el("title",{},el("rect",{x:x-3,y:m.t,width:6,height:H-m.t-m.b,fill:"transparent"},s)).textContent=e.event+" "+clock(e.ts)});
+  var rel=rows.filter(function(r){return fin(r.released_at)}).slice().sort(function(a,b){return a.released_at-b.released_at}),right=[-1e9,-1e9];
+  rel.forEach(function(r){var x0=sx(r.released_at);
+    el("title",{},el("rect",{x:x0-4,y:ly(0)-4,width:8,height:8,fill:"var(--P)",transform:"rotate(45 "+x0+" "+ly(0)+")"},s)).textContent="v"+r.policy_version+" released "+clock(r.released_at);
+    var lab="v"+r.policy_version,w=7.3*lab.length,lv=-1;for(var q=0;q<2;q++)if(x0-w/2>right[q]+4&&x0+w/2<=W-2){lv=q;break}
+    if(lv>=0){right[lv]=x0+w/2;el("text",{x:x0,y:ly(0)-10-lv*15,"text-anchor":"middle"},s).textContent=lab}
+    sids.forEach(function(k,i){var ld=(r.loads||{})[k];if(!ld||!fin(ld.loaded_at))return;var x1=sx(ld.loaded_at);
+      el("line",{x1:x0,y1:ly(0),x2:x1,y2:ly(i+1),stroke:"var(--P)","stroke-opacity":.45},s);
+      el("title",{},el("circle",{cx:x1,cy:ly(i+1),r:4,fill:"var(--P)"},s)).textContent=lbl(k)+" loaded v"+r.policy_version+" at "+clock(ld.loaded_at)+(fin(ld.latency_s)?" ("+f(ld.latency_s,0)+" s)":"")})});
+  // a sampler that started on a version (no release on the chart): a hollow dot at its load
+  rows.forEach(function(r){sids.forEach(function(k,i){var ld=(r.loads||{})[k];if(ld&&ld.at_start&&fin(ld.loaded_at)&&!fin(r.released_at))
+    el("title",{},el("circle",{cx:sx(ld.loaded_at),cy:ly(i+1),r:4,fill:"var(--panel)",stroke:"var(--P)","stroke-width":1.5},s)).textContent=lbl(k)+" started on v"+r.policy_version+" at "+clock(ld.loaded_at)})});
+  tAxis(s,t0,t1,sx,H);
+  $("legRel").innerHTML='<span><i class="sw" style="background:var(--P)"></i>release → load done</span>'+(rows.some(function(r){return !fin(r.released_at)})?'<span><i class="sw" style="background:transparent;border:1.5px solid var(--P);border-radius:50%"></i>started on the version</span>':"")+
+    (pool.length?'<span><i class="sw" style="background:var(--warn)"></i>NC pool event</span><span><i class="sw" style="background:var(--bad)"></i>NC pool failure (evicted / lost / crash loop)</span>':"");
+}
+/* "Fleet": one row per island of the fleet (the summary each island block opens with) */
+function fleetBox(){
+  var on=fleetView();$("fleetBox").hidden=!on;if(!on)return;
+  var I=V.async.islands||[];
+  $("fleetTbl").innerHTML=YetoTbl.table('<tr><th class="l">island</th><th class="l">trainer</th><th class="l">pools</th><th>latest release</th><th>backlog</th><th>trained groups</th><th>stale dropped</th><th title="policy age of the trained groups, last round">policy age (last round)</th><th>release every</th><th>max policy age</th></tr>',
+    I.map(function(x){var b=x.backlog||{},pts=b.points||[],last=pts.length?pts[pts.length-1]:null,pa=x.policy_age||{},t=x.trainer!=null?String(x.trainer):null,tc=t!=null?cardOf(t):null;
+      return '<tr><td class="l"><b>Island '+esc(x.island)+'</b>'+(x.name?' <span class="note">'+esc(x.name)+'</span>':"")+'</td><td class="l">'+(tc?nameCell(t)+" "+stBadge(tc.status,tc):'<span class="note">not on the tapes yet</span>')+'</td><td class="l">'+
+        x.pools.map(function(p){return esc(p.name)+' <span class="note">'+p.samplers.length+'</span>'}).join(", ")+'</td><td class="num">'+(fin(x.latest)?"v"+x.latest:"none")+'</td><td class="num">'+(last&&fin(last[3])?f(last[3],0):"n/a")+'</td><td class="num">'+f(x.trained_groups,0)+
+        '</td><td class="num">'+f(pa.stale_groups,0)+'</td><td class="num">'+(fin(pa.mean_last)?"mean "+f(pa.mean_last,2)+" · max "+f(pa.max_last,0):"n/a")+'</td><td class="num">'+(fin(x.release_every)?x.release_every:"n/a")+'</td><td class="num">'+(fin(x.max_policy_age)?x.max_policy_age:"n/a")+'</td></tr>'}).join(""));
+}
+/* the run-wide ledgers: two to a row, one alone takes the row */
+function runWide(){
+  var A=V.async,show=!fleetOn()||fleetView();
+  syncerPanel(show);aDisp(A,O.islands||[],show);aPool(A,show);
+  var n=["syncerBox","aDispBox","aPoolBox"].filter(function(id){return !$(id).hidden}).length;
+  $("runWide").className="dg2"+(n<2?" one":"");$("runWide").hidden=!n;
+}
+/* the per-round drill-down follows the picked island; "Fleet" keeps only the trainers' metric chart */
+function roundsPanel(){var fv=fleetView();
+  $("rDurBox").hidden=fv;$("rNodesBox").hidden=fv;$("rTlBox").hidden=fv;$("rMetricBox").className=fv?"full":"";
+  $("roundsIsl").textContent=fv?"· every trainer of the fleet":SEL!=null&&(O.islands||[]).length>1?"· "+lbl(SEL):"";
+  chartMetric();if(!fv){chartDur();chartTl();chartNodes()}highlight()}
 function render(){
-  if(!V)return;O=V.overview;
-  var ids=(O.islands||[]).map(function(c){return c.id});if(ids.indexOf(SEL)<0)SEL=ids[0]||null;
+  if(!V)return;O=V.overview;FOLDS=[];
+  picker();
   RS=SEL!=null?((V.islands[SEL]||{}).rounds||[]):[];
-  $("roundsIsl").textContent=SEL!=null&&ids.length>1?"· island "+SEL:"";
-  header();kpis();wall();chartMetric();chartDur();chartTl();highlight();asyncPanel();util();chartNodes();islands();cost();events();cmds();folds();spot();
+  header();kpis();fleetBox();asyncPanel();roundsPanel();util(!fleetView());islands();runWide();cost();events();cmds();folds();spot();
   if(typeof YetoExt!=="undefined")YetoExt.render(V,OFFLINE);
   if(typeof YetoTopo!=="undefined")YetoTopo.render(V,OFFLINE);
   if(typeof YetoBrk!=="undefined")YetoBrk.render(V);

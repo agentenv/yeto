@@ -118,4 +118,7 @@ def test_page_draws_utilization_and_unknowns(tmp_path):
 
 def test_page_hides_utilization_for_old_tapes(tmp_path):
     u = _smoke(tmp_path, four_island_reducer())
-    assert u["empty_hidden"] is False and u["body_hidden"] is True and u["carry_hidden"] is not False
+    # no utilization data at all: the panel is not drawn, each chart is named under "Panels not used in this run"
+    assert u["panel_hidden"] is True and u["body_hidden"] is True and u["carry_hidden"] is not False
+    for want in ("Cutoff drop / carry-over", "Trajectory completion curve", "Four-part timing", "KV usage and queueing", "no rl_load_sample"):
+        assert want in u["folds"], want

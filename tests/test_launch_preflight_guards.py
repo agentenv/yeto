@@ -556,7 +556,8 @@ def test_page_renders_negative_badge():
     import yeto.dashboard as d
 
     js = (Path(d.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
-    assert "function negBadge(c)" in js and js.count("negBadge(c)+stBadge(c.status,c)") == 2
+    # island health (a synchronous run) and the island block header of an async run
+    assert "function negBadge(c)" in js and "negBadge(c)+stBadge(c.status,c)" in js and "negBadge(tc)+stBadge(tc.status,tc)" in js
 
 
 # --- 3.6 resume / merge refusal ---------------------------------------------------------

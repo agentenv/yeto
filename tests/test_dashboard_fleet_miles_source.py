@@ -317,7 +317,10 @@ def _page(tmp_path, r: Reducer, width: int) -> dict:
     script = tmp_path / "smoke.js"
     marker = "legend: mk(\"topoLg\").innerHTML"
     assert marker in SMOKE
-    script.write_text(SMOKE.replace(marker, marker + ", fleet: mk(\"aFleet\").innerHTML"))
+    # the island switch on island 1 (its pick is kept in localStorage): its samplers, pools and releases
+    js = SMOKE.replace(marker, marker + ", fleet: mk(\"aSamplers\").innerHTML, rel: mk(\"aRelTable\").innerHTML, sw: mk(\"islSw\").innerHTML")
+    js = js.replace("getItem() { return null; }", "getItem(k) { return /^yeto-pick/.test(k) ? \"i1\" : null; }")
+    script.write_text(js)
     res = subprocess.run([node, str(script), str(page), str(width)], capture_output=True, text=True, timeout=60,
                          check=False)
     assert res.returncode == 0, res.stderr
@@ -337,11 +340,14 @@ def test_page_tags_each_sampler_with_its_source(tmp_path, width):
     # a fleet box has no machine labels: its pool and trainer cards carry the machine
     assert "m0 · miles-l40s" not in joined and "p1 · sgl-l40s" not in joined
     assert "n/a" not in joined, [t for t in out["texts"] if "n/a" in t]
-    # the island panel's sampler table: both sources tagged, the Miles row with its cards
-    assert "Miles native</span>" in out["fleet"] and out["fleet"].count("external pool</span>") == 2
-    assert "L40S × 1 · modal" in out["fleet"] and "launch island 2" in out["fleet"]
-    assert "Miles sampler island 2 loaded (latency)" in out["fleet"] and "sampler qa-s-i1-0 loaded" in out["fleet"]
-    assert "n/a" not in out["fleet"]
+    # island 1's Samplers & pools table: both sources tagged, the Miles row with its cards, names as Islands now
+    assert ">Island 0<" in out["sw"] and ">Island 1<" in out["sw"] and ">Fleet<" in out["sw"]
+    assert "Miles native</span>" in out["fleet"] and out["fleet"].count("external pool</span>") == 1
+    assert "L40S × 1 · modal" in out["fleet"] and ">sampler 2<" in out["fleet"] and ">sampler qa-s-i1-0<" in out["fleet"]
+    assert "qa-v-i0-0" not in out["fleet"]  # island 0's pool is on island 0's tab
+    # island 1's releases: one load tag per sampler of the island (Miles / SGLang), none of island 0
+    assert '<span class="lt">Miles</span>sampler 2' in out["rel"] and '<span class="lt">SGL</span>sampler qa-s-i1-0' in out["rel"]
+    assert "qa-v-i0-0" not in out["rel"] and "n/a" not in out["rel"]
 
 
 def test_page_of_a_fleet_of_pools_alone_has_no_source_tags(tmp_path):

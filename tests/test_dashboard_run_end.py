@@ -132,7 +132,7 @@ global.document = { documentElement: node("html"), getElementById: mk, querySele
 global.navigator = {}; global.localStorage = { getItem() { return null; }, setItem() {} };
 global.setInterval = () => 0; global.setTimeout = () => 0;
 eval(app);
-console.log(JSON.stringify({ status: mk("navSub").textContent, sub: mk("sub").textContent, wall: mk("wall").innerHTML, kpis: mk("rKpis").innerHTML,
+console.log(JSON.stringify({ status: mk("navSub").textContent, sub: mk("sub").textContent, wall: mk("aHead").innerHTML, kpis: mk("rKpis").innerHTML,
   nodes: mk("rNodes").innerHTML, texts: svg.map((n) => String(n.textContent || "")).filter(Boolean) }));
 """
 
@@ -150,8 +150,8 @@ def smoke(tmp_path, reducer):
 
 
 def with_sampler(tmp_path):
-    """c1-dl plus a sampler tape generating with the last release: a multi-island page (the
-    island wall is drawn), as the live page with the sampler tapes from the run store."""
+    """c1-dl plus a sampler tape generating with the last release: an async page (the trainer's
+    versions are in its island block header), as the live page with the sampler tapes from the run store."""
     run = copy_run(tmp_path, "c1-dl")
     rows = [json.loads(x) for x in (run / "events" / "c1-dl-l0-modal.jsonl").read_text().splitlines()]
     t0 = rows[0]["time_unix"]
