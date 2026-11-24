@@ -250,25 +250,48 @@ def install(executor: Any, config: Mapping[str, Any], key: bytes | None) -> dict
             "filtered_rows": wrapped.filtered_rows}
 
 
+def _norm_uri(uri: str) -> str:
+    uri = str(uri).strip().rstrip("/")
+    return "s3://" + uri[len("r2://"):] if uri.startswith("r2://") else uri
+
+
+def ledger_store(location: str) -> Any:
+    """The store of the ledger at ``location``: a store URI (the launcher passes an
+    object store's) is opened by the island's store implementation as a store of its
+    own (``resume.store_at``), a path as the island's store path. The island's store
+    hook maps a path only below the island's own store and maps any other path back to
+    it (``s3_store.sub_store_uri``), so a store that names a URI other than the one
+    asked for is refused (DispenseInstallError) instead of claiming from another ledger."""
+    from yeto.rl.engine.resume import store_at
+
+    store = store_at(location)
+    opened = getattr(store, "uri", None)
+    if "://" in location and opened is not None and _norm_uri(opened) != _norm_uri(location):
+        raise DispenseInstallError(f"the ledger store {location} opened as {opened}: the island's store "
+                                   "implementation does not reach it")
+    return store
+
+
 def _install_store(executor: Any, source: Any, config: Mapping[str, Any]) -> dict[str, Any]:
     """The store ledger branch of :func:`install` (module doc). ``config``:
-    ``store`` (the island path of the ledger's store), ``path`` (the prompt file the
-    ledger's plan pins: ``--data``), ``holder`` (the sampler id), ``dispense`` (the
+    ``store`` (the ledger's store: an object store URI or an island path,
+    :func:`ledger_store`), ``path`` (the prompt file the ledger's plan pins:
+    ``--data``), ``holder`` (the sampler id), ``dispense`` (the
     pools' ``prompts.dispense``), ``block`` and ``recover`` (``[slot, plan]`` of the
     groups this sampler already has in its buffer)."""
     global _CURRENT
     import os
     import types
 
-    from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.store_dispense import StoreDispensedPrompts, StoreTaskSource
     from yeto.rl.engine.task_dispense import SAMPLER_INCARNATION_ENV, DispenseError
 
     holder = str(config["holder"])
     incarnation = os.environ.get(SAMPLER_INCARNATION_ENV) or os.urandom(8).hex()
+    store = ledger_store(str(config["store"]))
     try:
         prompts = StoreDispensedPrompts.open(
-            str(config["path"]), dict(config["dispense"]), store=store_for(str(config["store"])),
+            str(config["path"]), dict(config["dispense"]), store=store,
             holder=holder, incarnation=incarnation, input_key="messages", label_key=None,
             groups_per_round=int(config["block"]),
             emit=lambda kind, **fields: logger.info("%s %s", kind, fields))

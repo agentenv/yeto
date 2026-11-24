@@ -1649,7 +1649,7 @@ def _island_dispense(args) -> bool:
 
 def _store_dispense_config(args, miles_args) -> dict[str, Any]:
     """The store ledger config of a sampler island (``adapters.miles.task_dispense``
-    module doc): the ledger's store (an island path), ``--data`` (the pools' prompt
+    module doc): the ledger's store (a store URI or an island path), ``--data`` (the pools' prompt
     file, which the ledger's plan pins), the sampler's shard name as the holder and
     the pools' ``prompts.dispense``."""
 

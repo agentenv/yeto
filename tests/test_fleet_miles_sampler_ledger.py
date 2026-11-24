@@ -193,23 +193,54 @@ def test_a_miles_sampler_and_a_pool_give_out_every_prompt_once_on_a_local_ledger
     assert not (run / "trainer1").exists() and not (run / "trainer0" / NS).exists()
 
 
-def test_the_same_epoch_on_an_s3_ledger(tmp_path, monkeypatch):
-    """The island path of ``<store>/fleet/dispense`` on both sides, through the s3 store
-    hook (``store_from_env``) and one fake S3 bucket."""
-    client = LedgerS3()
+def _island_store_env(monkeypatch, tmp_path, own: str, client) -> dict:
+    """The store environment of a Modal island whose own store is ``own`` (a sampler
+    island of fleet island k: ``<run store>/trainer<k>``), staged on local disk."""
     monkeypatch.setattr(s3_store, "_client", lambda *a, **k: client)
-    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: S3_URI}
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: own,
+           s3_store.STAGE_ENV: str(tmp_path / f"stage-{own.rsplit('/', 1)[1]}")}
     for name, value in env.items():
         monkeypatch.setenv(name, value)
+    return env
+
+
+def test_the_same_epoch_on_an_s3_ledger_from_islands_that_own_trainer_substores(tmp_path, monkeypatch):
+    """As on Modal: the Miles sampler's island store is ``<run>/trainer1``, the pool's
+    ``<run>/trainer0``; both open ``<run>/fleet/dispense`` by its URI through the s3
+    store hook and claim from that one ledger (one fake S3 bucket)."""
+    client = LedgerS3()
     prompts = _prompts(tmp_path)
-    ledger = f"{MOUNT}/fleet/dispense"
+    ledger = f"{S3_URI}/fleet/dispense"
+    _island_store_env(monkeypatch, tmp_path, f"{S3_URI}/trainer1", client)
     fake, installed = _miles(ledger, prompts)
-    pool = _pool(f"{MOUNT}/trainer0", ledger, prompts, environ=env)
+    assert hook.current().tasks.prompts.ledger.objects.prefix == "runs/r/fleet/dispense"
+    pool_env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: f"{S3_URI}/trainer0"}
+    pool = _pool(f"{MOUNT}/trainer0", ledger, prompts, environ=pool_env)
     miles_rows, pool_rows, end = _epoch(fake, pool)
     _check_once(miles_rows, pool_rows)
     assert end["plan"] == installed["plan"]
-    done = [k for (bucket, k) in client.objects if bucket == "bkt" and "/done/" in k]
-    assert len(done) == ROWS and all(k.startswith(f"runs/r/fleet/dispense/{NS}/done/") for k in done)
+    keys = [k for (bucket, k) in client.objects if bucket == "bkt" and f"/{NS}/" in k]
+    assert keys and all(k.startswith(f"runs/r/fleet/dispense/{NS}/") for k in keys), "one ledger, nowhere else"
+    done = [k for k in keys if "/done/" in k]
+    assert len(done) == ROWS
+    holders = {json.loads(client.objects[("bkt", k)])["holder"] for k in keys if f"/{NS}/claims/" in k}
+    assert holders == {"island1", "sg-i0-0"}
+
+
+def test_an_island_path_outside_the_islands_own_store_is_why_the_ledger_goes_by_uri(tmp_path, monkeypatch):
+    """The island's store hook maps a path only below its own store; the mount path of
+    ``<run>/fleet/dispense`` maps back to ``<run>/trainer1`` (a second ledger, every slot
+    given out twice). The launcher passes the URI, and a store that opens elsewhere than
+    the URI asked for is refused."""
+    from yeto.rl.engine.resume import store_for
+
+    _island_store_env(monkeypatch, tmp_path, f"{S3_URI}/trainer1", LedgerS3())
+    assert store_for(f"{MOUNT}/fleet/dispense").uri == f"{S3_URI}/trainer1"
+    assert hook.ledger_store(f"{S3_URI}/fleet/dispense").uri == f"{S3_URI}/fleet/dispense"
+    assert hook.ledger_store("r2://bkt/runs/r/fleet/dispense").uri == f"{S3_URI}/fleet/dispense"
+    monkeypatch.setattr("yeto.rl.engine.resume.store_at", lambda location: SimpleNamespace(uri=f"{S3_URI}/trainer1"))
+    with pytest.raises(hook.DispenseInstallError, match="opened as .*trainer1"):
+        hook.ledger_store(f"{S3_URI}/fleet/dispense")
 
 
 def test_a_slot_the_ledger_gave_to_another_sampler_is_not_written(tmp_path):
@@ -359,9 +390,22 @@ def test_the_sampler_island_takes_the_ledger_instead_of_its_slot():
     assert sampler.rl_dispense_store == f"{S3_URI}/fleet/dispense" and sampler.rl_sampler_data_slot is None
     assert trainer.rl_dispense_store is None and store_dispense_flags(trainer) == ""
     words = shlex.split(store_dispense_flags(sampler))
-    # the island path of the ledger under the store's mount (an island takes no store URI)
-    assert words[0] == "--rl-dispense-store" and words[1].endswith("/runs/r/fleet/dispense") and "://" not in words[1]
+    # an object store ledger goes by its URI: the island's store hook maps paths only below
+    # its own store (trainer<k>), the island opens the URI itself (resume.store_at)
+    assert words[:2] == ["--rl-dispense-store", f"{S3_URI}/fleet/dispense"]
     assert words[2] == "--rl-store-dispense" and json.loads(words[3]) == {"backend": "store", "namespace": NS}
+    # a ledger on another bucket than the run store is refused at launch
+    other = sample_roles._synced_group_island_args(
+        _group(rl_checkpoint_store=S3_URI, total_steps=4, rl_sync_preset="decoupled",
+               rl_island_dispense_store=["1:s3://other/runs/r/fleet/dispense"]), 1, 2, roles)
+    with pytest.raises(ValueError, match="--rl-island-dispense-store"):
+        store_dispense_flags(other)
+    # a Volume store has no object API on the island: the ledger goes as the island path
+    volume = sample_roles._synced_group_island_args(
+        _group(rl_checkpoint_store="modal-volume://vol/runs/r", total_steps=4, rl_sync_preset="decoupled",
+               rl_island_dispense_store=["1:modal-volume://vol/runs/r/fleet/dispense"]), 1, 2, roles)
+    words = shlex.split(store_dispense_flags(volume))
+    assert "://" not in words[1] and words[1].endswith("/runs/r/fleet/dispense")
 
 
 def _island(tmp_path, **kw):

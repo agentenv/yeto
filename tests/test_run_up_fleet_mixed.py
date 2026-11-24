@@ -304,8 +304,8 @@ def _check_launch(cfg):
             assert sampler.rl_sampler_node == miles.shard
             if miles.dispense_store:  # its rows from the pools' ledger, not a data slot
                 assert request["dispense_store"] == miles.dispense_store
-                prefix = miles.dispense_store.split("://", 1)[1].split("/", 1)[1]
-                assert str(sampler.rl_dispense_store).endswith(f"/{prefix}") and "://" not in sampler.rl_dispense_store
+                # by its URI: the island's store hook reaches no path outside trainer<k>
+                assert sampler.rl_dispense_store == miles.dispense_store
                 assert json.loads(sampler.rl_store_dispense) == json.loads(STORE_DISPENSE)
                 assert not sampler.rl_sampler_data_slot and not sampler.rl_data_dispense
     return plan, parsed

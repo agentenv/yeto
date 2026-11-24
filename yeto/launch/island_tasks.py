@@ -308,10 +308,19 @@ def sampler_dispense_addr(args) -> str:
     return shlex.quote(str(addr)) if addr else "$SYNCER_ADDR"
 
 
+OBJECT_STORE_SCHEMES = ("s3://", "r2://", "oss://")
+
+
 def store_dispense_flags(args) -> str:
     """The store ledger flags of a mixed group's sampler island (``args``: its island
-    args, ``rl_dispense_store`` set by ``sample_roles``): the island path of the
-    ledger's store and the pools' settings; empty for every other island."""
+    args, ``rl_dispense_store`` set by ``sample_roles``): where the ledger's store is
+    and the pools' settings; empty for every other island.
+
+    An object store ledger goes to the island as its URI: the island's store hook maps
+    a path only below its own store (``<run store>/trainer<k>``) and maps any other path
+    back to that store without a word (``s3_store.sub_store_uri``), so the island opens
+    the URI itself (``resume.store_at``). A Volume or a shared path goes as the island
+    path (``storage.island_store_path``, which also checks the store is the run's)."""
 
     import json
     import shlex
@@ -323,7 +332,9 @@ def store_dispense_flags(args) -> str:
         return ""
     from ..rl.engine.sample_roles import DISPENSE_STORE_FLAG
 
-    path = island_store_path(args, str(store), flag=DISPENSE_STORE_FLAG[0])
+    path = island_store_path(args, str(store), flag=DISPENSE_STORE_FLAG[0])  # same bucket or Volume
+    if str(store).startswith(OBJECT_STORE_SCHEMES):
+        path = str(store).rstrip("/")
     config = json.dumps(json.loads(args.rl_store_dispense), sort_keys=True, separators=(",", ":"))
     return (f" {rl_option('rl_dispense_store')} {shlex.quote(path)}"
             f" {rl_option('rl_store_dispense')} {shlex.quote(config)}")
