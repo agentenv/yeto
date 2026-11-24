@@ -434,3 +434,73 @@ def test_generic_partial_experts_through_decoupled_equal_the_explicit_async_laun
     assert "[sync-route] decoupled -> full-parameter (async rounds)" in capsys.readouterr().out
     routed = dry_run_plan(args)
     assert json.dumps(routed, sort_keys=True, default=str) == json.dumps(explicit, sort_keys=True, default=str)
+
+
+class _Embedding(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.word_embeddings = torch.nn.Module()
+        self.word_embeddings.weight = _param(32, HIDDEN)
+
+    def forward(self, tokens):
+        return torch.nn.functional.embedding(tokens, self.word_embeddings.weight)
+
+
+def _recompute_forward(chunk, tokens, n_local):
+    """Embedding, then every layer's experts under a reentrant checkpoint (Megatron full recompute)."""
+
+    hidden = chunk.embedding(tokens)
+    for block in chunk.decoder.layers:
+        experts = block.mlp.experts
+
+        def layer(h, experts=experts):
+            out = h
+            for i in range(n_local):
+                up = h @ getattr(experts.linear_fc1, f"weight{i}").t()
+                out = out + torch.relu(up[..., :FFN]) @ getattr(experts.linear_fc2, f"weight{i}").t()
+            return out
+
+        hidden = torch.utils.checkpoint.checkpoint(layer, hidden, use_reentrant=True)
+    return hidden
+
+
+def test_selected_experts_get_gradients_under_full_recompute(monkeypatch):
+    structure = STRUCTURES["qwen3_moe"]
+    selection = _selection(structure)
+    n_local = selection.num_experts // structure["ep"]
+    monkeypatch.setattr(in_place, "_rank_coordinates", lambda model, vp_stage: in_place.RankCoordinates(0, 0, 2))
+    monkeypatch.setattr(in_place, "_check_router_bias", lambda model: None)
+
+    def build():
+        chunk = _chunk(structure, 0)
+        chunk.embedding = _Embedding()
+        return chunk
+
+    tokens = torch.tensor([[1, 2, 3, 4]])
+    bare = build()  # the failure mode: frozen embedding, nothing in the checkpoint's inputs needs grad
+    in_place.freeze_chunk(bare, selection=selection, coords=in_place.RankCoordinates(0, 0, 2))
+    with pytest.warns(UserWarning, match="requires_grad"):
+        assert not _recompute_forward(bare, tokens, n_local).requires_grad
+
+    chunk = in_place.wrap_model_provider(lambda **kw: build(), selection)(vp_stage=None)
+    chunk.train()
+    _recompute_forward(chunk, tokens, n_local).sum().backward()
+    trainable = {name: p for name, p in chunk.named_parameters() if p.requires_grad}
+    assert trainable and all(p.grad is not None and p.grad.abs().sum() > 0 for p in trainable.values())
+    assert chunk.embedding.word_embeddings.weight.grad is None, "the embedding itself stays frozen"
+
+
+def test_without_a_generic_selection_the_model_provider_is_untouched(monkeypatch):
+    """kimi_k31 (and every run without an in_place selection) never sets ENV_SELECTION: the generic
+    hook leaves Miles' provider as it is, so neither the freeze nor the embedding hook reaches it."""
+
+    monkeypatch.delenv(in_place.ENV_SELECTION, raising=False)
+    in_place._cached_selection.cache_clear()
+
+    def get_model_provider_func(args, role="actor"):
+        return lambda **kw: None
+
+    fake = types.ModuleType(in_place._PROVIDER_MODULE)
+    fake.get_model_provider_func = get_model_provider_func
+    in_place._patch(fake)
+    assert fake.get_model_provider_func is get_model_provider_func
