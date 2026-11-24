@@ -1,0 +1,50 @@
+{
+ "rcs": [
+  0,
+  0,
+  0,
+  0,
+  2
+ ],
+ "calls": [
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/pool.json",
+   "--target",
+   "3"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/rl-up/run-a/pools/modal.json",
+   "--add",
+   "1"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/pool.json",
+   "--remove",
+   "t1",
+   "--drain"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/pool.json",
+   "--target",
+   "2",
+   "--dry-run"
+  ]
+ ],
+ "out": "<T> [rl up] scale: pool nc (nc)\n<T> [rl up] scale: pool modal (modal)\n<T> [rl up] scale: pool nc (nc)\n<T> [rl up] scale: pool nc (nc)\n<T> [rl up] scale: refused, nothing changed: name one pool with --pool (pools: nc (nc), modal (modal))\n"
+}
