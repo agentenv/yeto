@@ -1,0 +1,201 @@
+"""A single-writer lock on an object store, with a fencing token.
+
+The fleet control plane keeps each pool's state in the run's store
+(``fleet/pools/<pool>/state.json``, :mod:`.store_state`) so a controller on any
+host can take a pool over. Two controllers must never drive one pool at once:
+both would order machines, fence shards and write the state. The lock uses the
+one primitive the store linearizes, an object that is created once
+(``ObjectStore.create``, S3 / R2 ``If-None-Match: *``), the same way the
+trainer generation lease does (``yeto.rl.engine.trainer_lease``).
+
+Layout under ``<prefix>`` (e.g. ``fleet/pools/<pool>/lock``)::
+
+    <prefix>/<token:08d>.json    created once, never rewritten:
+        {"schema", "token", "holder", "nonce", "claimed_at"}
+    <prefix>/<token:08d>.lease   rewritten by the token's holder only:
+        {"token", "holder", "until", "released"}
+
+* :meth:`StoreLock.acquire` lists the tokens and takes the highest one ``t``.
+  When ``t``'s lease is still running (``until`` in the future, not
+  ``released``) the lock is held: nothing is written, None is returned. Else
+  it creates ``t + 1``; a lost create means another claimer won: None.
+* The token is the fencing token. :meth:`StoreLock.check` (before every write
+  of the guarded state) lists the tokens again: a higher one means this holder
+  lost the lock for good (:class:`LockLost`, sticky); it must stop changing the
+  pool and its machines.
+* :meth:`StoreLock.renew` (every tick) moves the lease end forward;
+  :meth:`StoreLock.release` marks it released, so the next controller takes the
+  lock at once (a detach, :mod:`.controller`). A holder that died lets its
+  lease run out (``ttl_s``) before anyone else takes over.
+
+Clocks: a lease end is the holder's clock plus ``ttl_s``; a claimer compares it
+with its own clock. Keep ``ttl_s`` well above the clock skew between control
+hosts (minutes, not seconds). A store without an atomic create is refused.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import socket
+import time
+import uuid
+from collections.abc import Callable
+from typing import Any
+
+SCHEMA = "yeto.fleet.store-lock/v1"
+DEFAULT_TTL_S = 600.0
+DEFAULT_CHECK_CACHE_S = 5.0
+_TOKEN = re.compile(r"(\d{8,})\.json")
+
+
+class StoreLockError(RuntimeError):
+    """The lock cannot be used on this store (no atomic create, an unreadable record)."""
+
+
+class LockLost(RuntimeError):
+    """A higher token exists: this holder no longer owns what the lock guards."""
+
+    def __init__(self, what: str, token: int, by: int) -> None:
+        super().__init__(f"{what}: lock token {token} is fenced by token {by} (another controller took over)")
+        self.token, self.by = int(token), int(by)
+
+
+def holder_id() -> str:
+    """``<host>:<pid>:<random>``: who holds a lock (information only)."""
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def require_atomic_create(objects: Any) -> None:
+    from yeto.rl.engine.object_store import atomic_create  # noqa: PLC0415
+
+    if not atomic_create(objects):
+        raise StoreLockError("the object store has no atomic exclusive create (If-None-Match refused, or a "
+                             "check-then-write store): the fleet control plane cannot lock a pool there")
+
+
+class StoreLock:
+    """One claim on ``prefix`` (module doc). Build it with :meth:`acquire`."""
+
+    def __init__(self, objects: Any, prefix: str, token: int, holder: str, *, ttl_s: float = DEFAULT_TTL_S,
+                 clock: Callable[[], float] = time.time, check_cache_s: float = DEFAULT_CHECK_CACHE_S) -> None:
+        self.objects, self.prefix, self.token, self.holder = objects, prefix.rstrip("/"), int(token), holder
+        self.ttl_s, self.clock, self.check_cache_s = float(ttl_s), clock, float(check_cache_s)
+        self.lost: LockLost | None = None
+        self.released = False
+        self._checked_at: float | None = None
+
+    # -- keys
+    @staticmethod
+    def record_key(prefix: str, token: int) -> str:
+        return f"{prefix.rstrip('/')}/{int(token):08d}.json"
+
+    @staticmethod
+    def lease_key(prefix: str, token: int) -> str:
+        return f"{prefix.rstrip('/')}/{int(token):08d}.lease"
+
+    @staticmethod
+    def tokens(objects: Any, prefix: str) -> list[int]:
+        """Every token claimed under ``prefix``, ascending (one LIST)."""
+        base = prefix.rstrip("/") + "/"
+        out = []
+        for key in objects.list(base):
+            match = _TOKEN.fullmatch(key[len(base):])
+            if match is not None:
+                out.append(int(match.group(1)))
+        return sorted(out)
+
+    @staticmethod
+    def _doc(objects: Any, key: str) -> dict[str, Any] | None:
+        data = objects.read(key)
+        if data is None:
+            return None
+        try:
+            doc = json.loads(data)
+        except ValueError:
+            return None
+        return doc if isinstance(doc, dict) else None
+
+    @classmethod
+    def holder_of(cls, objects: Any, prefix: str, *, now: float | None = None) -> dict[str, Any] | None:
+        """The current holder (``token``, ``holder``, ``until``) while its lease runs, else None."""
+        tokens = cls.tokens(objects, prefix)
+        if not tokens:
+            return None
+        top = tokens[-1]
+        lease = cls._doc(objects, cls.lease_key(prefix, top))
+        record = cls._doc(objects, cls.record_key(prefix, top)) or {}
+        if lease is None:  # claimed, the first lease write not (yet) done: the record's time counts
+            until = float(record.get("claimed_at") or 0.0) + float(record.get("ttl_s") or DEFAULT_TTL_S)
+            lease = {"token": top, "holder": record.get("holder"), "until": until, "released": False}
+        now = time.time() if now is None else now
+        if lease.get("released") or float(lease.get("until") or 0.0) <= now:
+            return None
+        return {"token": top, "holder": lease.get("holder") or record.get("holder"),
+                "until": float(lease.get("until") or 0.0)}
+
+    # -- claim
+    @classmethod
+    def acquire(cls, objects: Any, prefix: str, *, holder: str | None = None, ttl_s: float = DEFAULT_TTL_S,
+                clock: Callable[[], float] = time.time) -> StoreLock | None:
+        """Claim the lock: a new :class:`StoreLock` with the next token, or None when a
+        running lease holds it or another claimer won the create."""
+        require_atomic_create(objects)
+        holder = holder or holder_id()
+        now = clock()
+        if cls.holder_of(objects, prefix, now=now) is not None:
+            return None
+        tokens = cls.tokens(objects, prefix)
+        token = (tokens[-1] if tokens else 0) + 1
+        nonce = uuid.uuid4().hex
+        record = {"schema": SCHEMA, "token": token, "holder": holder, "nonce": nonce, "claimed_at": now,
+                  "ttl_s": float(ttl_s)}
+        created = objects.create(cls.record_key(prefix, token), json.dumps(record).encode())
+        if not created:
+            mine = cls._doc(objects, cls.record_key(prefix, token)) or {}
+            if mine.get("nonce") != nonce:  # a lost race (a lost answer of our own create reads back our nonce)
+                return None
+        lock = cls(objects, prefix, token, holder, ttl_s=ttl_s, clock=clock)
+        lock.renew()
+        return lock
+
+    # -- holding
+    def check(self, *, force: bool = False) -> None:
+        """Raise :class:`LockLost` once a higher token exists (sticky). Listed at most every
+        ``check_cache_s`` unless ``force``."""
+        if self.lost is not None:
+            raise self.lost
+        now = self.clock()
+        if not force and self._checked_at is not None and now - self._checked_at < self.check_cache_s:
+            return
+        tokens = self.tokens(self.objects, self.prefix)
+        top = tokens[-1] if tokens else 0
+        if top > self.token:
+            self.lost = LockLost(self.prefix, self.token, top)
+            raise self.lost
+        self._checked_at = now
+
+    def renew(self) -> None:
+        """Move the lease end ``ttl_s`` past now (the holder's heartbeat). Raises :class:`LockLost`."""
+        self.check(force=True)
+        self.objects.write(self.lease_key(self.prefix, self.token), json.dumps(
+            {"token": self.token, "holder": self.holder, "until": self.clock() + self.ttl_s,
+             "released": False}).encode())
+
+    def release(self) -> None:
+        """Give the lock up now (the next claimer does not wait for the lease). Never raises."""
+        if self.released or self.lost is not None:
+            return
+        try:
+            self.check(force=True)
+            self.objects.write(self.lease_key(self.prefix, self.token), json.dumps(
+                {"token": self.token, "holder": self.holder, "until": 0.0, "released": True}).encode())
+            self.released = True
+        except Exception:  # noqa: BLE001 - the lease then runs out on its own
+            pass
+
+    close = release
+
+    def detail(self) -> dict[str, Any]:
+        return {"prefix": self.prefix, "token": self.token, "holder": self.holder, "ttl_s": self.ttl_s}

@@ -191,6 +191,9 @@ class PoolConfig:
     stop_below_ucr: int = 20_000_000
     min_balance_to_order_ucr: int | None = None  # default: one hour of a node + the stop line
     shard_limit: int | None = None  # shard indexes 0..N-1 only (buffer shards, tunnel ports)
+    # with the store shard allocator (``IslandPool.control``): shard indexes below N only (one
+    # tunnel port per index); ``shard_limit`` (a lifelong order cap) does not apply there
+    index_limit: int | None = None
     data_slots: int | None = None  # N: members split the prompts "I/N" (None: every member reads all)
     elastic: el.ElasticConfig = field(default_factory=el.ElasticConfig)
     # an open ticket of this run that no member owns is adopted; True deletes it instead
@@ -299,6 +302,14 @@ class IslandPool:
     start_retry_s: float = START_RETRY_S
     _scale_stamp: Any = None  # (mtime_ns, size) of the control file at its last read
     _ended_done: bool = False  # ops.pool_ended succeeded for the current stop
+    # the store control plane (``store_state.PoolControl``: the pool's store lock, state
+    # document and shard allocator). None (the default): the local state file and the
+    # pool's own ``next_shard`` / ``shard_limit``, as before
+    control: Any = None
+    # why this pool stopped driving without a drain (its store lock went to another
+    # controller, or a detach): its machines are someone else's to drive now
+    detached: str | None = None
+    _reserved_shard: int | None = None  # a number the allocator issued that no order took yet
 
     def _control_stamp(self) -> Any:
         if self.scale_path is None:
@@ -510,8 +521,18 @@ class IslandPool:
                     self._event("order_refused", why=refused)
                 self._refused = refused
                 return None
-        self._skip_ended_shards()
-        if self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
+        if self.control is not None:
+            number = self._store_shard()
+            if isinstance(number, str):
+                if number != self._refused:
+                    self.log(f"pool: {number}: not ordering")
+                    self._event("order_refused", why=number)
+                self._refused = number
+                return None
+            self.next_shard = number
+        else:
+            self._skip_ended_shards()
+        if self.control is None and self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
             refused = (f"shard {self.config.shard_base}-{self.next_shard} is past shard_limit "
                        f"{self.config.shard_limit} (the trainer's buffer shards / the tunnel ports)")
             if self._skipped_shards:
@@ -546,6 +567,7 @@ class IslandPool:
         if account in self._slot_halts and getattr(self.ops, "slot_halt", None) is None:
             self._halt_lifted(account)  # ops that cannot tell: an order went through again
         self.next_shard += 1
+        self._reserved_shard = None
         self.budget.orders += 1
         if handoff is not None:
             self.pending.remove(handoff)
@@ -568,6 +590,39 @@ class IslandPool:
         self._event("ordered", ticket=ticket, account=account, shard=shard, data_slot=slot,
                     continues_shard=continues, replaces=replaces.ticket if replaces else None)
         return member
+
+    def _store_shard(self) -> int | str:
+        """The shard number of the next member from the store allocator (``control``): the
+        number reserved by an earlier order that did not go through, else a fresh one (at
+        least ``next_shard``), skipping numbers whose data already ended in the run's store.
+        A string: why there is none (the store did not answer, or the number is past
+        ``config.index_limit``, the tunnel ports). The allocator never issues a number twice,
+        so there is no lifelong ``shard_limit`` here."""
+        check = getattr(self.ops, "shard_ended", None)
+        for _ in range(64):
+            if self._reserved_shard is None:
+                try:
+                    self._reserved_shard = self.control.allocator.allocate(
+                        floor=self.next_shard, token=self.control.lock.token, base=self.config.shard_base)
+                except Exception as error:  # noqa: BLE001 - nothing is ordered without a number
+                    return f"the store shard allocator did not answer ({error!r})"[:300]
+            number = self._reserved_shard
+            limit = getattr(self.config, "index_limit", None)
+            if limit is not None and number >= limit:
+                return (f"shard {self.config.shard_base}-{number} is past the pool's index limit {limit} "
+                        "(one tunnel port per shard index)")
+            shard = f"{self.config.shard_base}-{number}"
+            try:
+                ended = check(shard) if check is not None else None
+            except Exception:  # noqa: BLE001 - a sampler on an ended shard reports it itself
+                ended = None
+            if not ended:
+                return number
+            self._event("shard_skipped", shard=shard, why="data ended in the store")
+            self._skipped_shards.append(shard)
+            self._reserved_shard = None
+            self.next_shard = number + 1
+        return "64 shard numbers in a row had ended data"
 
     def _skip_ended_shards(self) -> None:
         """Move ``next_shard`` past every shard whose data already ended in the run's
@@ -609,6 +664,15 @@ class IslandPool:
         """Persist the state now (after an order): a crash before the tick's save must
         not leave a billed ticket that no state file knows. False: the save failed (logged);
         a caller whose next step relies on the saved state does not take it."""
+        if self.control is not None:
+            if not self._save_store():
+                return False
+            if self.state_path is not None:  # the local file: a mirror for local readers (status, run up)
+                try:
+                    self.save(self.state_path)
+                except Exception as error:  # noqa: BLE001 - the store holds the state
+                    self.log(f"pool: local state mirror {self.state_path} not written: {error!r}")
+            return True
         if self.state_path is None:
             return True
         try:
@@ -627,6 +691,36 @@ class IslandPool:
                 self._event("state_save_recovered", path=str(self.state_path), failures=self._save_failures)
             self._save_failures = 0
         return True
+
+    def _save_store(self) -> bool:
+        """The state document to the store (``control``). A lost lock detaches the pool (no
+        drain: the controller that took the lock drives the machines now)."""
+        from .store_lock import LockLost  # noqa: PLC0415
+
+        try:
+            self.control.state.save(self.snapshot())
+        except LockLost as error:
+            self.detach(f"store lock lost: {error}")
+            return False
+        except Exception as error:  # noqa: BLE001 - kept like a failed local save
+            self.log(f"pool: could not save the store state: {error!r}")
+            self._save_failures += 1
+            if self._save_failures == 1:
+                self._event("state_save_failing", path=self.control.state.key, error=repr(error)[:300])
+            return False
+        if self._save_failures:
+            self._event("state_save_recovered", path=self.control.state.key, failures=self._save_failures)
+            self._save_failures = 0
+        return True
+
+    def detach(self, why: str) -> None:
+        """Stop driving this pool without draining it (module doc of ``controller``): its
+        members keep running and writing their shards; a controller that adopts the pool
+        later continues them under the same shards."""
+        if self.detached is None:
+            self.detached = why
+            self.log(f"pool: detached: {why}")
+            self._event("pool_detached", why=why, members=[m.ticket for m in self.live()])
 
     def _fail(self, now: float, what: str) -> None:
         outcome = self.breaker.failure(now, self.ecfg)
@@ -1231,6 +1325,22 @@ class IslandPool:
                 self.log(f"pool: tick took {self.last_tick_s:.0f} s ({len(self.live())} members); decisions "
                          "wait for the slowest ticket read or probe")
 
+    def _renew_lock(self) -> bool:
+        """Renew the pool's store lock (``control``); a lost lock detaches the pool. A store
+        that does not answer skips this tick's actions (the lease outlives a few ticks)."""
+        from .store_lock import LockLost  # noqa: PLC0415
+
+        try:
+            self.control.lock.renew()
+        except LockLost as error:
+            self.detach(f"store lock lost: {error}")
+            return False
+        except Exception as error:  # noqa: BLE001 - no state-changing action without the lock
+            self.log(f"pool: store lock not renewed ({error!r}): this tick changes nothing")
+            self._event("lock_renew_failed", error=repr(error)[:300])
+            return False
+        return True
+
     def _prefetch(self) -> None:
         """Read the tickets and probe the nodes of the watched members at once (the
         ``_watch`` pass then decides on the results member by member, in order). A
@@ -1267,7 +1377,9 @@ class IslandPool:
 
     def _tick(self) -> None:
         now = self.clock()
-        if self.stopped:
+        if self.stopped or self.detached:
+            return
+        if self.control is not None and not self._renew_lock():
             return
         self.apply_scale()
         balance = self.ops.balance()
@@ -2133,8 +2245,17 @@ class IslandPool:
         members (an extra node billed for nothing)."""
         why = None
         slot = None
-        self._skip_ended_shards()
-        if self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
+        if self.control is not None:
+            number = self._store_shard()
+            if isinstance(number, str):
+                why = number
+            else:
+                self.next_shard = number
+        else:
+            self._skip_ended_shards()
+        if why is not None:
+            pass
+        elif self.control is None and self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
             why = (f"shard {self.config.shard_base}-{self.next_shard} is past shard_limit "
                    f"{self.config.shard_limit}")
         elif len(self.counted()) >= self.config.target:
@@ -2155,6 +2276,7 @@ class IslandPool:
             return extra
         shard = f"{self.config.shard_base}-{self.next_shard}"
         self.next_shard += 1
+        self._reserved_shard = None
         member = Member(account, ticket, shard, created=now, data_slot=slot)
         self.members.append(member)
         self.log(f"pool: adopted {ticket} on {self.config.slot_name} {account} as shard {shard} (a ticket of this run "
@@ -2238,30 +2360,42 @@ class IslandPool:
         pool = cls(config, ops, **kw)
         pool.state_path = path
         if path.exists():
-            doc = json.loads(path.read_text())
-            check_state_format(doc, path)
-            pool.members = [Member(**m) for m in doc.get("members", [])]
-            for m in pool.members:  # a state file from before ever_ready: a joined sampler was ready once
-                m.ever_ready = m.ever_ready or m.joined
-                m.unreachable_seen = None  # the pool was down: that time is not part of a grace
-            pool.next_shard = doc.get("next_shard", 0)
-            pool.stopped = doc.get("stopped")
-            pool.finished = doc.get("finished")
-            pool.halted = doc.get("halted")
-            pool.pending = list(doc.get("pending", []))
-            pool.breaker = el.Breaker(**doc.get("breaker", {}))
-            pool.budget = el.Budget(**doc.get("budget", {}))
-            pool.scale_seq = int(doc.get("scale_seq", 0))
-            pool.shrink = int(doc.get("shrink", 0))
-            if pool.owner is None and isinstance(doc.get("owner"), dict):
-                pool.owner = dict(doc["owner"])
-            for m in pool.members:  # a start cut off by the restart: probed first (``_watch``)
-                if m.state == STARTING and not m.joined:
-                    if getattr(ops, "probe", None) is not None:
-                        pool._recheck.add(m.ticket)
-                    else:  # no probe: run the start again (every step is idempotent)
-                        pool._rerun_start(m, pool.clock())
+            pool._load(json.loads(path.read_text()), path)
         return pool
+
+    @classmethod
+    def from_doc(cls, doc: dict[str, Any] | None, config: PoolConfig, ops: PoolOps, *, control: Any = None,
+                 where: Any = None, **kw) -> IslandPool:
+        """A pool from a state document (the store's, ``store_state``; None: a new pool)."""
+        pool = cls(config, ops, control=control, **kw)
+        if doc is not None:
+            pool._load(doc, where)
+        return pool
+
+    def _load(self, doc: dict[str, Any], path: Any) -> None:
+        pool, ops = self, self.ops
+        check_state_format(doc, path)
+        pool.members = [Member(**m) for m in doc.get("members", [])]
+        for m in pool.members:  # a state file from before ever_ready: a joined sampler was ready once
+            m.ever_ready = m.ever_ready or m.joined
+            m.unreachable_seen = None  # the pool was down: that time is not part of a grace
+        pool.next_shard = doc.get("next_shard", 0)
+        pool.stopped = doc.get("stopped")
+        pool.finished = doc.get("finished")
+        pool.halted = doc.get("halted")
+        pool.pending = list(doc.get("pending", []))
+        pool.breaker = el.Breaker(**doc.get("breaker", {}))
+        pool.budget = el.Budget(**doc.get("budget", {}))
+        pool.scale_seq = int(doc.get("scale_seq", 0))
+        pool.shrink = int(doc.get("shrink", 0))
+        if pool.owner is None and isinstance(doc.get("owner"), dict):
+            pool.owner = dict(doc["owner"])
+        for m in pool.members:  # a start cut off by the restart: probed first (``_watch``)
+            if m.state == STARTING and not m.joined:
+                if getattr(ops, "probe", None) is not None:
+                    pool._recheck.add(m.ticket)
+                else:  # no probe: run the start again (every step is idempotent)
+                    pool._rerun_start(m, pool.clock())
 
 
 # -- state file format ---------------------------------------------------------
