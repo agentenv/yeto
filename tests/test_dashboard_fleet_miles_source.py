@@ -178,6 +178,33 @@ def test_island1_holds_the_miles_sampler_and_the_external_pool(plan):
     assert box[0]["pools"][0]["source"] == "external" and "launch_island" not in box[0]["pools"][0]
 
 
+@pytest.mark.parametrize("old_plan", [False, True])
+def test_a_miles_start_naming_its_island_is_still_a_miles_sampler(old_plan):
+    """A Miles sampler that follows its trainer names its island (learner id) and its store URI
+    in rl_sampler_start, as an external pool does. Without a plan (or with one written before
+    Miles samplers) it is still a Miles sampler (its start has no sampler_id) in island 1."""
+    recs = records()
+    for rec in recs:
+        if rec.get("event") == "rl_sampler_start" and rec.get("island_id") == int(MILES_SID):
+            rec.update(island=1, store=f"{STORE}/trainer1")
+    r = Reducer(run="mixed-qa")
+    for rec in recs:
+        r.feed(rec)
+    if old_plan:
+        doc = plan_doc()
+        for isl in doc["islands"]:
+            isl.pop("miles_samplers")
+        assert r.load_fleet_plan(doc, "old")
+    fl = fleet_islands.resolve(r)
+    assert fleet_islands.is_miles_sampler(MILES_SID, {"island": 1, "store": f"{STORE}/trainer1"}, None)
+    assert not fleet_islands.is_miles_sampler("qa-s-i1-0", {"sampler_id": "qa-s-i1-0", "island": 1}, None)
+    assert fl["island_of"][MILES_SID] == 1 and fl["island_of"]["qa-s-i1-0"] == 1
+    assert fl["pool_of"][MILES_SID] == "island2"
+    rows = {x["learner"]: [(p["name"], p["source"], p["samplers"]) for p in x["pools"]] for x in fl["islands"]}
+    assert rows[1][0] == ("island2", "miles", [MILES_SID])
+    assert [row[1] for row in rows[1][1:]] == ["external"] and rows[0][0][1] == "external"
+
+
 def test_miles_sampler_does_not_need_the_plan_to_draw_before_it_writes():
     """The plan lists the Miles sampler: its row is drawn (not started) before its tape arrives."""
     r = Reducer(run="mixed-qa")

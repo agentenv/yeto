@@ -275,11 +275,12 @@ def _plan_miles(plan: dict | None, sid: str) -> tuple[int, dict] | None:
 def is_miles_sampler(sid: str, start: dict, plan: dict | None) -> bool:
     """Whether sampler ``sid`` is a Miles sampler island of the launch (``--rl-island-sample-role``),
     not an external pool: the plan names its launch island; else it is a launch island (its id
-    is the island index of the launch's tape, a pool's is its shard) that names no ``island`` in
-    its start record (every external pool of a fleet does) and no plan pool owns."""
+    is the island index of the launch's tape, a pool's is its shard) whose start record has no
+    ``sampler_id`` (an external pool's sampler always names one; a Miles sampler that follows
+    its trainer names its ``island`` too, as a pool does) and no plan pool owns."""
     if _plan_miles(plan, sid) is not None:
         return True
-    return sid.isdigit() and _int(start.get("island")) is None and _plan_pool(plan, sid) is None
+    return sid.isdigit() and start.get("sampler_id") is None and _plan_pool(plan, sid) is None
 
 
 def _gpu_parts(spec: str | None) -> dict:
