@@ -158,7 +158,11 @@ The token binds a machine to one ticket; it is not an authentication.
   under (a document copied between tickets) and an assignment past its deadline
   (`expires_at`). A hand-opened machine's token expires after a day by default
   (`assign_manual(..., token_ttl_s=...)`, None for no deadline); issue a new
-  assignment to rejoin later.
+  assignment to rejoin later. A pool-ordered machine's token has no deadline: the
+  pool hands it over at each start and writes a new assignment and token on the
+  next one.
+- The token stays with the runtime: the sampler's environment never carries
+  `YETO_NODE_TOKEN`.
 - Anyone who can write the run store can write an assignment, and anyone who
   holds a ticket's token can read that ticket's assignment (spec, code hash, model
   plan; no store credentials are in it). The store credentials are the security
