@@ -391,8 +391,10 @@ class ModalSdkClient:
         return self._modal
 
     def build_app(self):
+        from yeto.cloud.modal_images import engine_registry_image  # noqa: PLC0415
+
         modal, c = self.modal, self.cfg
-        image = (modal.Image.from_registry(c["image"]).entrypoint([])
+        image = (engine_registry_image(modal, c["image"]).entrypoint([])
                  .env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
                  .add_local_python_source("yeto", copy=False, ignore=["**/__pycache__", "**/*.pyc"]))
         app = modal.App(self.app_name)

@@ -303,7 +303,9 @@ def build_app(c: SamplerConfig) -> tuple[Any, Any]:
     """(app, sampler GPU function running :func:`sampler_body`)."""
     import modal
 
-    image = (modal.Image.from_registry(c.image).entrypoint([])  # the image's version-assert entrypoint off
+    from .modal_images import engine_registry_image
+
+    image = (engine_registry_image(modal, c.image).entrypoint([])  # the image's version-assert entrypoint off
              .env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})   # no PYTHONPATH: it shadows Modal's runtime
              .add_local_file(c.prompts, PROMPTS_MOUNT, copy=False)
              .add_local_python_source("yeto", copy=False, ignore=CODE_IGNORE))
