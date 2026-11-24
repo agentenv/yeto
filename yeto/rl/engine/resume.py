@@ -379,6 +379,43 @@ def store_for(path: str | os.PathLike[str], *, environ: Mapping[str, str] | None
     return CheckpointStore(path)
 
 
+#: The function of a store implementation's module that opens a store by URI
+#: (:func:`store_at`), next to the factory :data:`STORE_IMPL_ENV` names.
+STORE_URI_HOOK = "store_from_uri"
+
+
+def _uri_hook(spec: str) -> Callable[..., CheckpointStore] | None:
+    import importlib
+
+    if spec in _STORE_IMPLS:
+        module = importlib.import_module(_STORE_IMPLS[spec].__module__)
+    else:
+        module = importlib.import_module(spec.partition(":")[0])
+    hook = getattr(module, STORE_URI_HOOK, None)
+    return hook if callable(hook) else None
+
+
+def store_at(location: str | os.PathLike[str], *, environ: Mapping[str, str] | None = None,
+             **impl_kwargs: Any) -> CheckpointStore:
+    """:func:`store_for` for a store path; a store URI is opened by the island's store
+    implementation the way it opens the island's own store (its settings, credentials
+    and stage), through the implementation module's :data:`STORE_URI_HOOK`. For a store
+    the island reaches only by its URI, outside its own store (a fleet's shared task
+    ledger ``<run store>/fleet/dispense``, ``store_dispense``: the island's own store is
+    ``<run store>/trainer<k>``). Without such an implementation a URI is refused as
+    :func:`store_for` refuses it."""
+    if "://" not in str(location):
+        return store_for(location, environ=environ, **impl_kwargs)
+    env = os.environ if environ is None else environ
+    spec = env.get(STORE_IMPL_ENV)
+    hook = _uri_hook(spec) if spec else None
+    if hook is None:
+        raise ValueError(f"store {str(location)!r} is a URI and the island's store implementation "
+                         f"({STORE_IMPL_ENV}={spec!r}) opens none: name the path of the store's mount "
+                         "(yeto.launch.storage), or run the island with an object store implementation")
+    return hook(str(location), environ=env, **impl_kwargs)
+
+
 # ---------------------------------------------------------------------------
 # snapshots + LATEST
 # ---------------------------------------------------------------------------

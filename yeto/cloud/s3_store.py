@@ -1749,6 +1749,26 @@ def store_from_env(path: str | os.PathLike[str], *, environ: Mapping[str, str], 
     return S3Store(path, uri, environ=environ, client=client, stage=environ.get(STAGE_ENV) or None)
 
 
+def s3_uri(uri: str) -> str:
+    """``uri`` with an ``r2://`` scheme written ``s3://`` (R2 is reached through its S3 API),
+    without a trailing slash."""
+    text = str(uri).strip().rstrip("/")
+    return "s3://" + text[len("r2://"):] if text.startswith("r2://") else text
+
+
+def store_from_uri(uri: str, *, environ: Mapping[str, str], client: Any = None) -> S3Store:
+    """``resume.store_at`` hook: a store the island reaches by its URI, outside its own
+    store (a fleet's shared task ledger ``<run store>/fleet/dispense``; the island's own
+    store is ``<run store>/trainer<k>``, which :func:`sub_store_uri` cannot leave). It is
+    opened like the island's own store (:func:`store_from_env`): the same store settings
+    and credentials, and with a stage (:data:`STAGE_ENV`) its root is that store's own
+    directory there (``<stage>/<bucket>/<prefix>``). ``r2://`` is the same object store."""
+    uri = s3_uri(uri)
+    _bucket, prefix = parse_s3_uri(uri)
+    return S3Store(Path(ISLAND_MOUNT) / prefix, uri, environ=environ, client=client,
+                   stage=environ.get(STAGE_ENV) or None)
+
+
 def head_objects(uri: str, *, environ: Mapping[str, str] | None = None, client: Any = None) -> S3ObjectStore:
     """The launcher's object API of the store."""
     env = os.environ if environ is None else environ

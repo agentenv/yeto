@@ -165,7 +165,7 @@ def s3_fence_store(uri: str, env_file: str | os.PathLike[str] | None,
     if env.get(s3_store.AWS_ENDPOINT_ENV):
         env.setdefault(s3_store.ENDPOINT_ENV, env[s3_store.AWS_ENDPOINT_ENV])
     env.setdefault(s3_store.REGION_ENV, "auto")
-    return ObjectRecords(s3_store.head_objects(uri, environ=env))
+    return ObjectRecords(s3_store.head_objects(s3_store.s3_uri(uri), environ=env))  # r2:// is the S3 API
 
 
 def read_env_file(path: str | os.PathLike[str]) -> dict[str, str]:

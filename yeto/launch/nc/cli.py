@@ -517,12 +517,12 @@ class NcSshOps:
         dispense = pool_dispense(self.cfg)
         if dispense is None:
             raise NcError("no store dispenser (prompts.dispense.backend store) in this pool: nothing to drain")
+        namespace = str(dispense.get("namespace") or store_dispense.DEFAULT_NAMESPACE)
         shared = pool_dispense_store(self.cfg)  # a ledger outside the run store (a fleet's shared one)
-        if shared:
-            store = elastic.s3_fence_store(shared, self.cfg["r2_env_file"])
-        else:
-            store = self._fence_store()
-        return store.objects, str(dispense.get("namespace") or store_dispense.DEFAULT_NAMESPACE)
+        if shared and "://" not in shared:  # a store path, as the samplers' spec takes one (a local run)
+            return store_dispense.DirObjects(shared), namespace
+        store = elastic.s3_fence_store(shared, self.cfg["r2_env_file"]) if shared else self._fence_store()
+        return store.objects, namespace
 
     def request_drain(self, m: Member) -> None:
         if self.cfg.get("data_path", "r2") == "r2" and pool_dispense(self.cfg) is None:

@@ -193,7 +193,19 @@ class ModalProvider:
             # ended): the island is not lost; the probe reads the exited sampler, the
             # pool drains it and orders no replacement
             return LeaseStatus("active")
-        return LeaseStatus("ended", end_reason="lost")
+        return LeaseStatus("ended", end_reason="lost", detail=self._failure(row["call"]))
+
+    def _failure(self, call: str) -> str | None:
+        """Why the call failed, as its client tells it (``ModalSdkClient.failure``: the
+        sampler's exit code and stderr tail, or the raised error); None when unknown. A
+        sampler that exits on a configuration error otherwise reads only ``lost``."""
+        failure = getattr(self.client, "failure", None)
+        if failure is None:
+            return None
+        try:
+            return failure(call)
+        except Exception as error:  # noqa: BLE001 - the reason is a courtesy, the end stands
+            return f"failure not read: {type(error).__name__}: {error}"[:FAILURE_DETAIL_CHARS]
 
     def release(self, account: int, ticket: str) -> dict[str, Any]:
         if not self._ours(ticket):
@@ -442,8 +454,39 @@ class ModalSdkClient:
             return FAILED  # rollout_sampler_body returns the sampler's exit code
         return SUCCEEDED
 
+    def failure(self, call_id: str) -> str | None:
+        """Why a call that ended failed (:func:`failure_detail` of its result or error)."""
+        call = self.modal.FunctionCall.from_id(call_id)
+        try:
+            result = call.get(timeout=0)
+        except TimeoutError:
+            return None  # still running
+        except Exception as exc:  # noqa: BLE001 - the call raised: that is the reason
+            return failure_detail(None, exc)
+        return failure_detail(result)
+
     def cancel(self, call_id: str) -> None:
         self.modal.FunctionCall.from_id(call_id).cancel(terminate_containers=True)
+
+
+STDERR_TAIL_LINES = 20  # the sampler's last stderr lines in the call result (a traceback's end)
+FAILURE_DETAIL_CHARS = 1500  # the reason in the pool's ended event, at most
+
+
+def failure_detail(result: Any, error: BaseException | None = None) -> str | None:
+    """A failed call's reason in one line for the pool's ended event: the raised error,
+    or the sampler's exit code, run time and the last lines of its stderr
+    (:func:`rollout_sampler_body`'s result). None for a result that is no failure."""
+    if error is not None:
+        text = f"call raised {type(error).__name__}: {error}"
+    elif isinstance(result, dict) and result.get("rc") not in (0, None):
+        tail = [str(line).rstrip() for line in result.get("stderr_tail") or () if str(line).strip()]
+        text = f"sampler exited rc={result.get('rc')} after {result.get('secs')} s"
+        if tail:
+            text += "; stderr tail: " + " | ".join(tail)
+    else:
+        return None
+    return text if len(text) <= FAILURE_DETAIL_CHARS else "..." + text[-(FAILURE_DETAIL_CHARS - 3):]
 
 
 def store_env(payload: dict[str, Any], environ: dict[str, str]) -> dict[str, str]:
@@ -502,7 +545,9 @@ def rollout_sampler_body(payload: dict[str, Any], *, popen: Any = None, objects:
     env = dict(os.environ, **store_env(payload, dict(os.environ)))
     before = tape_files(payload["spec"])  # a reused container keeps an earlier call's tapes
     proc = (popen or subprocess.Popen)([payload.get("python", "python3"), "-m", "yeto.rl.engine.engine_sampler",
-                                        "--spec", str(out / "spec.json")], env=env)
+                                        "--spec", str(out / "spec.json")], env=env,
+                                       stderr=subprocess.PIPE, text=True, errors="replace", bufsize=1)
+    tail = _StderrTail(getattr(proc, "stderr", None))
     key, reported = payload.get("ready_key"), False
     while proc.poll() is None:
         if key and not reported and join_seen(payload["spec"], before=before):
@@ -516,7 +561,36 @@ def rollout_sampler_body(payload: dict[str, Any], *, popen: Any = None, objects:
             except Exception as error:  # noqa: BLE001 - retried next poll; the pool's start timeout bounds it
                 print(f"rollout_sampler: ready marker not written yet: {error}", flush=True)
         sleep(poll_s)
-    return {"rc": proc.returncode, "secs": round(time.time() - t0, 1), "reported_ready": reported}
+    return {"rc": proc.returncode, "secs": round(time.time() - t0, 1), "reported_ready": reported,
+            "stderr_tail": tail.lines()}
+
+
+class _StderrTail:
+    """Copies the sampler's stderr to the container's (Modal's app log keeps it) and
+    keeps its last :data:`STDERR_TAIL_LINES` lines for the call result."""
+
+    def __init__(self, stream: Any) -> None:
+        import collections  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+
+        self._lines: collections.deque[str] = collections.deque(maxlen=STDERR_TAIL_LINES)
+        self._thread = None
+        if stream is not None and callable(getattr(stream, "readline", None)):
+            self._thread = threading.Thread(target=self._copy, args=(stream,), daemon=True)
+            self._thread.start()
+
+    def _copy(self, stream: Any) -> None:
+        import sys  # noqa: PLC0415
+
+        for line in iter(stream.readline, ""):
+            sys.stderr.write(line)
+            sys.stderr.flush()
+            self._lines.append(line.rstrip("\n"))
+
+    def lines(self) -> list[str]:
+        if self._thread is not None:
+            self._thread.join(timeout=10.0)  # the pipe closes as the sampler exits
+        return list(self._lines)
 
 
 # -- config ---------------------------------------------------------------------------

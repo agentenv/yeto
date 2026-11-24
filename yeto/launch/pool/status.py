@@ -40,6 +40,10 @@ class LeaseStatus:
     preempt_at: float | None = None
     gpus: int | None = None
     rate_ucr_per_gpu_hour: int | None = None
+    # why the island ended, when the provider knows more than ``end_reason`` (a Modal
+    # call: its sampler's exit code and the tail of its stderr); the pool's ended event
+    # carries it. Not part of the status's identity.
+    detail: str | None = field(default=None, compare=False)
 
     @classmethod
     def of(cls, value: Any) -> LeaseStatus:

@@ -403,7 +403,8 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
     """The engine sampler's prompts from the store ledger (``prompts.dispense``
     with ``backend: "store"``; ``store_dispense.StoreDispensedPrompts``): the
     ledger lives under ``namespace`` of the run's store (``dispense.store``, else the
-    spec's ``dispense_store``, else ``buffer_root`` / ``store``), so samplers that
+    spec's ``dispense_store``, else ``buffer_root`` / ``store``; the first two a store
+    path or URI, ``resume.store_at``), so samplers that
     share only the bucket share the tasks; ``dispense_store`` (a fleet's shared
     ledger) moves only the ledger, the sandbox gate and the lease records stay in
     the sampler's own store. The holder is the sampler id, the incarnation this process's.
@@ -412,7 +413,7 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
     plan version 3 on the pool's retire marker and the new incarnation's recover
     do, and the lease record is not read (``store_dispense`` module doc)."""
     from .incarnation_lease import read_lease  # noqa: PLC0415
-    from .resume import store_for  # noqa: PLC0415
+    from .resume import store_at, store_for  # noqa: PLC0415
     from .sampler_breakers import dispense_limits, spec_breakers  # noqa: PLC0415
     from .store_dispense import StoreDispensedPrompts, spec_dispense_store  # noqa: PLC0415
     from .task_dispense import SAMPLER_INCARNATION_ENV, DispenseError  # noqa: PLC0415
@@ -429,7 +430,12 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
     except DispenseError as error:
         raise SamplerSpecError(str(error)) from error
     root = str(shared or spec.get("buffer_root") or _require(spec, "store"))
-    store = store_for(root, environ=environ)
+    try:
+        # a shared ledger may be a store URI (a fleet's <run store>/fleet/dispense, which no
+        # island path names): the island's store implementation opens it like its own store
+        store = store_at(root, environ=environ)
+    except ValueError as error:
+        raise SamplerSpecError(f"the task ledger's store {root}: {error}") from error
     # dispense_store moves the ledger only: the gate's manifest and the lease records stay in the own store
     own = store if config.get("store") or not spec.get("dispense_store") else store_for(
         str(spec.get("buffer_root") or _require(spec, "store")), environ=environ)

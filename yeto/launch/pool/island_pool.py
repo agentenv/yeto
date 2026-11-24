@@ -1509,7 +1509,8 @@ class IslandPool:
             self._event({el.EVICTED: "evicted", el.EXPIRED: "expired",
                          el.RELEASED: "released_by_earlier_pool" if ours else "released_externally",
                          el.BALANCE: "ended_for_balance"}[kind], ticket=m.ticket, account=m.account,
-                        shard=m.shard, end_reason=status.end_reason, state_was=m.state)
+                        shard=m.shard, end_reason=status.end_reason, state_was=m.state,
+                        **({"detail": status.detail} if getattr(status, "detail", None) else {}))
             fallback = getattr(self.ops, "has_fallback_offer", None)
             # never granted (e.g. lost in provisioning). A granted member back in PROVISIONING
             # (a start retry, a start rerun after a pool restart) was evicted after its grant:
