@@ -15,15 +15,21 @@ import json
 import re
 from pathlib import Path
 
-EXAMPLE_PRICES = Path(__file__).with_name("prices.example.json")
 INFERRED_RUNNING_S = 900.0  # an inferred island with an event this recent is still billed
 LOCAL_CLOUDS = ("local", "\u672c\u5730")  # "local" in Chinese, as older tapes wrote it
 
 
 def load_prices(path: str | None) -> dict:
-    p = Path(path) if path else EXAMPLE_PRICES
+    """A price file (``--prices``), else the unified price table (:mod:`yeto.cost.prices`)."""
+    if not path:
+        from yeto.cost import prices  # noqa: PLC0415
+
+        data = prices.dashboard_table()
+        data["_source"] = f"unified price table ({prices.TABLE_NAME}, built in: list prices, not billing data)"
+        return data
+    p = Path(path)
     data = json.loads(p.read_text(encoding="utf-8"))
-    data["_source"] = str(p) if path else "example price table (built in, not billing data)"
+    data["_source"] = str(p)
     return data
 
 

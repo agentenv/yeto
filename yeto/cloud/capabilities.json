@@ -12,7 +12,7 @@
       "spot": {"value": "always_preemptible_gpu", "status": "checked",
                "note": "GPU functions cannot be nonpreemptible",
                "source": "https://modal.com/docs/guide/preemption", "checked_on": "2026-10-09"},
-      "price_source": {"value": "yeto.shape.providers.modal_node_price_per_hour", "status": "unchecked",
+      "price_source": {"value": "yeto.cost.prices", "status": "unchecked",
                        "source": null, "checked_on": null}
     },
     "aws": {
@@ -43,6 +43,59 @@
       "durable_store": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
       "spot": {"value": "yes", "status": "checked", "note": "is_spot; OS volume after eviction set by os_volume.on_spot_discontinue: keep_detached (default) | move_to_trash (deleted after 96 h) | delete_permanently; block volume/shared filesystem behaviour on eviction: not in the official docs", "source": "https://api.datacrunch.io/v1/docs", "checked_on": "2026-10-09", "also": "https://docs.verda.com/cpu-and-gpu-instances/set-up-a-gpu-instance/"},
       "price_source": {"value": null, "status": "unchecked", "source": null, "checked_on": null}
+    }
+  },
+  "providers": {
+    "_doc": "What the pool may assume of each provider kind's machines (yeto.launch.pool.provider.provider_caps reads this; nothing else keeps a copy). Each field: value + source + as_of. notice_s with from_cloud: the notice of the cloud the offer runs on (clouds.<cloud>.notice_s). hard_end: what bounds a machine's life (lease: the lease end; function_timeout: the Modal function timeout; null: nothing).",
+    "nc": {
+      "lease_bounded": {"value": true, "source": "National Compute order terms: a node lease runs up to 4 h and is not renewable (yeto.launch.nc.client.LEASE_HOURS)", "as_of": "2026-11-24"},
+      "lease_s": {"value": 14400, "source": "National Compute order terms: a node lease runs up to 4 h and is not renewable (yeto.launch.nc.client.LEASE_HOURS)", "as_of": "2026-11-24"},
+      "renewable": {"value": false, "source": "National Compute order terms: a node lease runs up to 4 h and is not renewable (yeto.launch.nc.client.LEASE_HOURS)", "as_of": "2026-11-24"},
+      "notice_s": {"value": 0, "source": "a lease ends at its known lease_until; National Compute does not preempt a granted lease", "as_of": "2026-11-24"},
+      "cold_start_s": {"value": 3600, "source": "yeto prior until the offer ledger has measurements (yeto.launch.pool.offer_ledger)", "as_of": "2026-11-24", "note": "K3.1 MI355X: about 28 min order to ready"},
+      "hard_end": {"value": "lease", "source": "National Compute order terms: a node lease runs up to 4 h and is not renewable (yeto.launch.nc.client.LEASE_HOURS)", "as_of": "2026-11-24"},
+      "currency": {"value": "ucr", "source": "National Compute bills in micro-credits (ucr)", "as_of": "2026-11-24"},
+      "balance": {"value": true, "source": "the NC tools read the organisation's ucr balance", "as_of": "2026-11-24"}
+    },
+    "daytona": {
+      "lease_bounded": {"value": false, "source": "Daytona sandboxes run until deleted (auto-stop off)", "as_of": "2026-11-24"},
+      "lease_s": {"value": null, "source": "no lease", "as_of": "2026-11-24"},
+      "renewable": {"value": false, "source": "no lease", "as_of": "2026-11-24"},
+      "notice_s": {"value": 0, "source": "no reclaim notice", "as_of": "2026-11-24"},
+      "cold_start_s": {"value": 0, "source": "yeto prior until the offer ledger has measurements (yeto.launch.pool.offer_ledger)", "as_of": "2026-11-24", "note": "no prior recorded"},
+      "hard_end": {"value": null, "source": "no lease", "as_of": "2026-11-24"},
+      "currency": {"value": "usd", "source": "price_usd_h in the pool config", "as_of": "2026-11-24"},
+      "balance": {"value": false, "source": "no balance API used", "as_of": "2026-11-24"}
+    },
+    "sky": {
+      "lease_bounded": {"value": false, "source": "a sky cluster runs until released", "as_of": "2026-11-24"},
+      "lease_s": {"value": null, "source": "no lease", "as_of": "2026-11-24"},
+      "renewable": {"value": false, "source": "no lease", "as_of": "2026-11-24"},
+      "notice_s": {"value": null, "source": "the cloud of the offer (clouds.<cloud>.notice_s)", "as_of": "2026-11-24", "from_cloud": true},
+      "cold_start_s": {"value": 1800, "source": "yeto prior until the offer ledger has measurements (yeto.launch.pool.offer_ledger)", "as_of": "2026-11-24"},
+      "hard_end": {"value": null, "source": "no lease", "as_of": "2026-11-24"},
+      "currency": {"value": "usd", "source": "offers carry price_usd_h (or the unified price table)", "as_of": "2026-11-24"},
+      "balance": {"value": false, "source": "no balance API used", "as_of": "2026-11-24"}
+    },
+    "modal": {
+      "lease_bounded": {"value": false, "source": "a call has no lease; it ends at its function timeout (hard_end)", "as_of": "2026-11-24"},
+      "lease_s": {"value": null, "source": "the function timeout comes from the pool config (provider.timeout_h)", "as_of": "2026-11-24"},
+      "renewable": {"value": false, "source": "a function timeout cannot be extended for a running call", "as_of": "2026-11-24"},
+      "notice_s": {"value": 30, "source": "https://modal.com/docs/guide/lifecycle-functions", "as_of": "2026-10-09", "note": "clouds.modal.notice_s: SIGINT, then 30 s grace"},
+      "cold_start_s": {"value": 900, "source": "yeto prior until the offer ledger has measurements (yeto.launch.pool.offer_ledger)", "as_of": "2026-11-24"},
+      "hard_end": {"value": "function_timeout", "source": "yeto.launch.nc.modal_provider: the sampler function is deployed with timeout = provider.timeout_h x 3600 s", "as_of": "2026-11-24"},
+      "currency": {"value": "usd", "source": "price_usd_h in the pool config, else the unified price table", "as_of": "2026-11-24"},
+      "balance": {"value": false, "source": "no balance API used", "as_of": "2026-11-24"}
+    },
+    "ssh": {
+      "lease_bounded": {"value": false, "source": "the operator's own nodes", "as_of": "2026-11-24"},
+      "lease_s": {"value": null, "source": "no lease", "as_of": "2026-11-24"},
+      "renewable": {"value": false, "source": "no lease", "as_of": "2026-11-24"},
+      "notice_s": {"value": 0, "source": "no reclaim notice", "as_of": "2026-11-24"},
+      "cold_start_s": {"value": 300, "source": "yeto prior until the offer ledger has measurements (yeto.launch.pool.offer_ledger)", "as_of": "2026-11-24"},
+      "hard_end": {"value": null, "source": "no lease", "as_of": "2026-11-24"},
+      "currency": {"value": "usd", "source": "price_per_card_hour in the inventory (0 by default)", "as_of": "2026-11-24"},
+      "balance": {"value": false, "source": "no balance", "as_of": "2026-11-24"}
     }
   }
 }

@@ -81,7 +81,7 @@ from typing import Any
 
 from yeto.launch.rollout.offers import Offer, offers_from_config
 
-from ..pool.provider import ProviderCaps
+from ..pool.provider import provider_caps
 from ..pool.status import LeaseStatus
 from .client import NodeLease
 from .tunnel import state_dir
@@ -153,7 +153,7 @@ def _record_ledger(fn: str, *args: Any, **kw: Any) -> None:
 class SkyProvider:
     kind = KIND
     ledger_kind = LEDGER_KIND
-    caps = ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=1800)
+    caps = provider_caps(KIND)  # yeto/cloud/capabilities.json
 
     def __init__(self, run_id: str, *, slots: list[int], resources: dict[str, Any] | None = None,
                  offers: list[Offer] | None = None, cluster_prefix: str = "yeto-smp", ssh_key: str | None = None,

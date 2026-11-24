@@ -48,7 +48,7 @@ from __future__ import annotations
 import importlib
 import inspect
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .status import LeaseStatus
@@ -58,14 +58,17 @@ from .status import LeaseStatus
 
 @dataclass(frozen=True)
 class ProviderCaps:
-    """What the pool may assume of a provider's machines.
+    """What the pool may assume of a provider's machines. The built-in kinds read it from
+    ``yeto/cloud/capabilities.json`` (:func:`provider_caps`; each value with its source).
 
     ``lease_bounded``: a machine has a lease end (``lease_until``) and must be
-    replaced before it (National Compute: 4 h, not renewable); ``renewable``: the
+    replaced before it (National Compute: ``lease_s`` 4 h, not renewable); ``renewable``: the
     lease can be extended in place; ``notice_s``: warning before a preemption (0:
-    none, e.g. Daytona spot); ``cold_start_s``: order to a ready sampler, a hint for
-    ``replace_lead_s``; ``currency``: the unit of ``balance`` / ``hourly_cost``;
-    ``balance``: ``balance()`` reads a real (shared) balance."""
+    none, e.g. Daytona spot; ``notice_from_cloud``: the cloud of the offer decides, see
+    :func:`notice_s_of`); ``cold_start_s``: order to a ready sampler, the prior of the
+    replacement lead before the offer ledger has measurements; ``hard_end``: what bounds a
+    machine's life (``"lease"``, ``"function_timeout"``: Modal, None); ``currency``: the unit of
+    ``balance`` / ``hourly_cost``; ``balance``: ``balance()`` reads a real (shared) balance."""
 
     lease_bounded: bool = False
     renewable: bool = False
@@ -73,6 +76,31 @@ class ProviderCaps:
     cold_start_s: float = 0.0
     currency: str = "usd"
     balance: bool = False
+    lease_s: float | None = None
+    hard_end: str | None = None
+    notice_from_cloud: bool = False
+
+
+def provider_caps(kind: str) -> ProviderCaps:
+    """The capabilities of a provider kind as ``yeto/cloud/capabilities.json`` declares them
+    (a kind it does not declare: the defaults, no lease, no notice)."""
+    from yeto.cloud import capabilities  # noqa: PLC0415
+
+    row = capabilities.provider_row(kind)
+    if row is None:
+        return ProviderCaps()
+    return ProviderCaps(lease_bounded=bool(row["lease_bounded"]), renewable=bool(row["renewable"]),
+                        notice_s=float(row["notice_s"] or 0.0), cold_start_s=float(row["cold_start_s"] or 0.0),
+                        currency=str(row["currency"]), balance=bool(row["balance"]),
+                        lease_s=None if row["lease_s"] is None else float(row["lease_s"]),
+                        hard_end=row["hard_end"], notice_from_cloud=bool(row["notice_from_cloud"]))
+
+
+def notice_s_of(kind: str, cloud: str | None = None) -> float:
+    """Seconds of reclaim notice of a machine of ``kind`` on ``cloud`` (sky: the offer's cloud)."""
+    from yeto.cloud import capabilities  # noqa: PLC0415
+
+    return capabilities.provider_notice_seconds(kind, cloud)
 
 
 class IslandProvider(Protocol):
@@ -374,11 +402,15 @@ class ProviderKind:
     resource_cost: str | Callable[..., Any] | None = None
     pool_owned: bool = True
     cleanup_order: int = 2
-    caps: ProviderCaps = field(default_factory=ProviderCaps)
     # ``(cfg) -> PoolOps`` for machines that are not SSH nodes (None: the SSH / sky route)
     pool_ops: str | Callable[..., Any] | None = None
     # ``(cfg) -> [problem]`` checked by ``pool --dry-run`` without an API call
     offline_problems: str | Callable[..., Any] | None = None
+
+    @property
+    def caps(self) -> ProviderCaps:
+        """The kind's capabilities: ``yeto/cloud/capabilities.json`` (:func:`provider_caps`)."""
+        return provider_caps(self.kind)
 
 
 _REGISTRY: dict[str, ProviderKind] = {}
@@ -446,28 +478,24 @@ def load(cfg: Mapping[str, Any], run_id: str, *, factories: Mapping[str, Callabl
     return factory(cfg, run_id, section)
 
 
-# built-in kinds (imported lazily: the registry itself imports no cloud code)
+# built-in kinds (imported lazily: the registry itself imports no cloud code; their caps are
+# yeto/cloud/capabilities.json's, read by ProviderKind.caps)
 register(ProviderKind(
     "nc", "yeto.launch.nc.provider:registry_factory", national=True, ledger_kind="nc_lease",
-    release_resource="yeto.launch.nc.provider:cleanup_release", resource_cost="yeto.launch.nc.provider:ledger_cost",
-    caps=ProviderCaps(lease_bounded=True, renewable=False, currency="ucr", balance=True, cold_start_s=3600)))
+    release_resource="yeto.launch.nc.provider:cleanup_release", resource_cost="yeto.launch.nc.provider:ledger_cost"))
 register(ProviderKind(
     "daytona", "yeto.launch.nc.daytona_provider:registry_factory", ledger_kind="daytona_sandbox",
     release_resource="yeto.launch.nc.daytona_provider:cleanup_release",
     resource_cost="yeto.launch.nc.daytona_provider:ledger_cost",
-    offline_problems="yeto.launch.nc.pool_run:daytona_problems",
-    caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd")))
+    offline_problems="yeto.launch.nc.pool_run:daytona_problems"))
 register(ProviderKind(
     "sky", "yeto.launch.nc.sky_provider:registry_factory",
-    offline_problems="yeto.launch.nc.sky_provider:offline_problems",
-    caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=1800)))
+    offline_problems="yeto.launch.nc.sky_provider:offline_problems"))
 register(ProviderKind(
     "modal", "yeto.launch.nc.modal_provider:registry_factory",
     pool_ops="yeto.launch.nc.modal_provider:pool_ops",
-    offline_problems="yeto.launch.nc.modal_provider:offline_problems",
-    caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=900)))
+    offline_problems="yeto.launch.nc.modal_provider:offline_problems"))
 register(ProviderKind(
     "ssh", "yeto.launch.ssh_sampler_pool:registry_factory",
     pool_ops="yeto.launch.ssh_sampler_pool:pool_ops",
-    offline_problems="yeto.launch.ssh_sampler_pool:offline_problems",
-    caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=300)))
+    offline_problems="yeto.launch.ssh_sampler_pool:offline_problems"))

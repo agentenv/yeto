@@ -605,7 +605,10 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
         spare = pc.accounts[pc.target:]
         print(f"replacement accounts (a lease is granted for up to {LEASE_HOURS:g} h and must be released; "
               f"a replacement is ordered "
-              f"{pc.replace_lead_s:.0f} s before its end): {spare if spare else 'none (gaps at every lease end)'}")
+              f"{pc.replace_lead_s:.0f} s before its end"
+              + (", or its offer's measured p90 start + margin once the offer ledger has enough starts"
+                 if pc.replace_lead_auto else "")
+              + f"): {spare if spare else 'none (gaps at every lease end)'}")
     else:
         print(f"pool {cli.run_id(cfg)}: provider {provider_kind(cfg)}, data path {cfg.get('data_path', 'r2')}, "
               f"target {pc.target} sampler(s) on {len(pc.accounts)} slot(s) (one {w['unit']} per slot)")
@@ -624,6 +627,9 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
         print(f"estimated spend: {cli.pool_hourly_text(cfg, hourly)} per node hour; steady "
               f"{cli.pool_hourly_text(cfg, pc.target * hourly)}/h; up to "
               f"{cli.pool_hourly_text(cfg, peak * hourly)}/h while replacements overlap")
+        from yeto.cost import prices  # noqa: PLC0415
+
+        notes += prices.stale(cli.pool_price_rows(cfg))  # a table price read too long ago: its source and date
     if ecfg.max_run_spend_ucr is None and ecfg.max_run_spend_usd is None:
         notes.append("elastic.max_run_spend_ucr is unset (and max_run_spend_usd): the run's spend has no cap")
     if ecfg.max_run_spend_ucr is not None:
@@ -759,6 +765,50 @@ def _refused_banner(cfg: dict[str, Any], config_path: str) -> None:
                                      national=is_national_compute(cfg), kind=provider_kind(cfg)))
 
 
+def offer_key(cfg: dict[str, Any]) -> str:
+    """The offer a pool's machines are counted under in the offer ledger when its provider
+    names none per machine (a sky pool names each cluster's offer): the provider kind and,
+    for a Modal pool, its GPUs (``modal:B300x8``)."""
+    kind = provider_kind(cfg)
+    section = cfg.get("provider") or {}
+    if kind == "modal":
+        from .modal_provider import DEFAULT_GPU, DEFAULT_GPUS  # noqa: PLC0415
+
+        return f"modal:{section.get('gpu', DEFAULT_GPU)}x{section.get('gpus', DEFAULT_GPUS)}"
+    if kind == "nc":
+        return f"nc:{cli.machine_type(cfg)}"
+    return str(kind)
+
+
+def attach_offer_ledger(cfg: dict[str, Any], pool: IslandPool, store: Any = None) -> Any:
+    """``replace_lead_auto``: read the offer ledger from the store's bucket root
+    (:data:`yeto.launch.pool.offer_ledger.DEFAULT_KEY`; ``store``: an object store with
+    ``read`` / ``write``), feed it this pool's events and let the pool read its leads. An
+    unreadable ledger: an empty one, written back from this run on (said once)."""
+    from ..pool import offer_ledger as ol  # noqa: PLC0415
+
+    if store is None:
+        try:
+            env = elastic.read_env_file(cfg["r2_env_file"])
+            bucket = env.get(cfg.get("bucket_env", "R2_BUCKET"))
+            store = elastic.s3_fence_store(f"s3://{bucket}", cfg["r2_env_file"]).objects if bucket else None
+        except Exception as error:  # noqa: BLE001 - no store: the ledger is kept for this run only
+            _say(f"pool: offer ledger kept in memory only (no store: {error!r})"[:300])
+            store = None
+    ledger = ol.OfferLedger()
+    if store is not None:
+        try:
+            ledger = ol.OfferLedger.load(store)
+        except Exception as error:  # noqa: BLE001
+            _say(f"pool: offer ledger not read, starting an empty one: {error!r}"[:300])
+    provider = getattr(pool.ops, "provider", None)
+    offer_of = getattr(provider, "offer_of", None)
+    sink = ol.PoolLedger(ledger, default_offer=offer_key(cfg), offer_of=offer_of, store=store, log=_say)
+    pool.offer_ledger = sink
+    pool.events.sinks.append(sink)
+    return sink
+
+
 def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: float, pool: IslandPool | None,
                      signals: _Signals | None) -> int:
     if cfg.get("route", "ssh") == "ssh":
@@ -778,6 +828,8 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         pool.scale_path = scale_path(cfg)
         pool.scale_run = cli.run_id(cfg)
     pool.apply_scale()
+    if pc.replace_lead_auto and pool.offer_ledger is None:
+        attach_offer_ledger(cfg, pool)
     if pool.stopped:
         _say(stopped_state_hint(state, pool, cfg))
         left = [m.__dict__ for m in pool.live()]

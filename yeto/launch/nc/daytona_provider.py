@@ -102,7 +102,7 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-from ..pool.provider import ProviderCaps
+from ..pool.provider import provider_caps
 from ..pool.status import LeaseStatus
 from .client import NodeLease, state_file_lock, write_json_atomic
 from .tunnel import state_dir
@@ -155,7 +155,7 @@ def _not_found(error: BaseException) -> bool:
 
 class DaytonaProvider:
     kind = "daytona"
-    caps = ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd")
+    caps = provider_caps("daytona")  # yeto/cloud/capabilities.json
 
     def __init__(self, run_id: str, *, slots: list[int], image: str | None = None, snapshot: str | None = None,
                  gpus: int = 8, gpu_type: str = "MI355X", spot: bool = True, cpu: int | None = None,

@@ -40,6 +40,9 @@ class LeaseStatus:
     preempt_at: float | None = None
     gpus: int | None = None
     rate_ucr_per_gpu_hour: int | None = None
+    # the machine's hard end when it is not a lease (a Modal call's function timeout): the
+    # pool replaces it before, as before a lease end, and its end there is an expiry
+    hard_end: float | None = None
     # why the island ended, when the provider knows more than ``end_reason`` (a Modal
     # call: its sampler's exit code and the tail of its stderr); the pool's ended event
     # carries it. Not part of the status's identity.
@@ -324,9 +327,49 @@ class Verdict:
     detail: str = ""
 
 
+# -- lifetime ------------------------------------------------------------------
+#
+# A machine's life is three numbers: ``hard_end``, a known end
+# (a National Compute lease_until, a Modal function timeout; None: none), ``preempt_at``,
+# set once a reclaim notice arrived, and ``hazard_per_h`` (lambda), the offer's measured
+# reclaims per ready hour, for planning only. A known end is met by a replacement ordered
+# a lead before it (make before break); a notice by a refill and a drain at once; a loss
+# without notice by a fence, then a refill.
+
+# a call that ends this close to its hard end ended at it (the platform's kill is not to the second)
+HARD_END_SLACK_S = 120.0
+
+
+@dataclass(frozen=True)
+class Lifetime:
+    hard_end: float | None = None
+    preempt_at: float | None = None
+    hazard_per_h: float | None = None
+
+    @property
+    def end(self) -> float | None:
+        """The first known end (None: the machine may live on until it is reclaimed)."""
+        ends = [t for t in (self.hard_end, self.preempt_at) if t is not None]
+        return min(ends) if ends else None
+
+
+def lifetime(status: LeaseStatus, hazard_per_h: float | None = None) -> Lifetime:
+    """The lifetime of a machine from its status (its lease end or its hard end, the
+    earlier) and its offer's measured hazard."""
+    hard = [t for t in (status.lease_until, status.hard_end) if t is not None]
+    return Lifetime(hard_end=min(hard) if hard else None, preempt_at=status.preempt_at, hazard_per_h=hazard_per_h)
+
+
 def effective_end(status: LeaseStatus) -> float | None:
-    ends = [t for t in (status.lease_until, status.preempt_at) if t is not None]
-    return min(ends) if ends else None
+    """When the machine ends at the latest as far as is known: its lease end, its hard end
+    or its reclaim time, the earliest."""
+    return lifetime(status).end
+
+
+def ended_at_hard_end(status: LeaseStatus, now: float) -> bool:
+    """An ended machine that ended at its (non-lease) hard end: an expiry, not an eviction."""
+    return (status.hard_end is not None and now >= status.hard_end - HARD_END_SLACK_S
+            and status.end_reason in (None, "lost", "ended"))
 
 
 def classify(status: LeaseStatus, probe: Probe | None, *, now: float, unreachable_since: float | None,
@@ -338,6 +381,8 @@ def classify(status: LeaseStatus, probe: Probe | None, *, now: float, unreachabl
         return Verdict(CONTROL_BLIP)
     if status.state == "ended":
         reason = status.end_reason
+        if ended_at_hard_end(status, now):
+            return Verdict(EXPIRED, reason or "hard end")
         if reason in EVICTION_REASONS:
             return Verdict(EVICTED, reason)
         if reason == "balance":

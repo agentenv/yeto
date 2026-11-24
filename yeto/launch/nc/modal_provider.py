@@ -98,7 +98,7 @@ from pathlib import Path
 from typing import Any
 
 from ..pool import status as island_status
-from ..pool.provider import ProviderCaps
+from ..pool.provider import provider_caps
 from ..pool.status import LeaseStatus
 from .client import NodeLease, state_file_lock, write_json_atomic
 from .tunnel import state_dir
@@ -122,6 +122,8 @@ def ready_key(shard: str, ticket: str, n: int) -> str:
 CONFIG_KEYS = frozenset({"kind", "factory", "app_name", "image", "gpu", "gpus", "cpu", "memory_gib", "secret",
                          "secrets", "bucket", "model_volume", "model_mount", "log_volume", "timeout_h",
                          "python", "name_prefix", "env", "price_usd_h", "scaledown_window_s", "tasks_dir"})
+DEFAULT_GPU, DEFAULT_GPUS = "B300", 8  # a pool config without gpu / gpus
+DEFAULT_TIMEOUT_H = 24  # the sampler function's timeout without timeout_h: each call's hard end
 # seconds a container whose call returned stays up for the next call (billed idle).
 # A restart or replacement spawns on the pool's next tick (60 s by default), after a
 # longer window would mostly have run out anyway; 2 s is the least Modal takes.
@@ -205,8 +207,8 @@ def _record_ledger(fn: str, *args: Any, **kw: Any) -> None:
 class ModalProvider:
     kind = KIND
     ledger_kind = LEDGER_KIND
-    # no lease end (a call ends at the function timeout; the pool refills it as lost)
-    caps = ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=900)
+    # no lease: a call ends at its function timeout, its hard end (status hard_end: replaced before it)
+    caps = provider_caps(KIND)  # yeto/cloud/capabilities.json
 
     def __init__(self, run_id: str, *, slots: list[int], client: Any = None, name_prefix: str = "yeto-smp",
                  price_usd_h: float | None = None, record: Path | None = None, clock=time.time,
@@ -412,20 +414,31 @@ class ModalProvider:
         if not row.get("call"):
             return LeaseStatus("active", billing=False)  # nothing runs (or bills) until the pool starts it
         state = self.client.status(row["call"])  # raises: a blip to the pool, never an end
+        hard_end = self.hard_end(row)
         if state == RUNNING:
             if row.get("scheduled_at") is None and not self._note_scheduled(ticket, row["call"]):
                 return LeaseStatus("active", billing=False,
                                    detail=f"Modal call {row['call']} waits to be scheduled on a "
                                           f"{self.config.get('gpu', 'GPU')} worker (no task yet: not billed)")
-            return LeaseStatus("active")
+            return LeaseStatus("active", hard_end=hard_end)
         if row.get("cancelled") == row["call"]:
             return LeaseStatus("ended", end_reason="released")
         if state in (SUCCEEDED, NOT_RUN):
             # the call returned with its sampler's exit 0 (the run finished, the data
             # ended) or its "did not run" exit: the island is not lost; the probe reads
             # the exited sampler and the pool decides (drain, or a new shard)
-            return LeaseStatus("active")
-        return LeaseStatus("ended", end_reason="lost", detail=self._failure(row["call"]))
+            return LeaseStatus("active", hard_end=hard_end)
+        # a call that failed at its function timeout expired (hard_end), any other failure is lost
+        return LeaseStatus("ended", end_reason="lost", detail=self._failure(row["call"]), hard_end=hard_end)
+
+    def timeout_s(self) -> float:
+        """The sampler function's timeout (``timeout_h``, default 24 h), as deployed."""
+        return float(int(float(self.config.get("timeout_h", DEFAULT_TIMEOUT_H)) * 3600))
+
+    def hard_end(self, row: dict[str, Any]) -> float | None:
+        """When the island's current call reaches its function timeout (None: spawn time unknown)."""
+        spawned = row.get("spawned_at")
+        return None if spawned is None else float(spawned) + self.timeout_s()
 
     def _scheduled(self, call: str) -> bool:
         """Modal placed the call on a worker (it has a task). True when the client cannot
@@ -708,9 +721,9 @@ class ModalSdkClient:
         if c.get("model_volume"):
             volumes[c.get("model_mount", DEFAULT_MODEL_MOUNT)] = modal.Volume.from_name(c["model_volume"]).read_only()
         secrets = [modal.Secret.from_name(name) for name in [c["secret"], *(c.get("secrets") or ())]]
-        app.function(image=image, gpu=f"{c.get('gpu', 'B300')}:{int(c.get('gpus', 8))}",
+        app.function(image=image, gpu=f"{c.get('gpu', DEFAULT_GPU)}:{int(c.get('gpus', DEFAULT_GPUS))}",
                      cpu=int(c.get("cpu", 64)), memory=int(c.get("memory_gib", 1024)) * 1024,
-                     timeout=int(float(c.get("timeout_h", 24)) * 3600), volumes=volumes,
+                     timeout=int(float(c.get("timeout_h", DEFAULT_TIMEOUT_H)) * 3600), volumes=volumes,
                      scaledown_window=scaledown_window_s(c),
                      secrets=secrets, name=FUNCTION)(rollout_sampler_body)
         return app
@@ -1052,8 +1065,17 @@ def from_config(cfg: dict[str, Any], run_id: str, *, client: Any = None) -> Moda
 
     return ModalProvider(run_id, slots=cli.slot_list(cfg), client=client,
                          name_prefix=str(section.get("name_prefix", "yeto-smp")),
-                         price_usd_h=section.get("price_usd_h"), config=section,
+                         price_usd_h=section.get("price_usd_h") if section.get("price_usd_h") is not None
+                         else table_price(section), config=section,
                          harbor=agentic_provider(pool_spec(cfg), section.get("env")))
+
+
+def table_price(section: dict[str, Any]) -> float | None:
+    """One sampler container hour (its GPUs) at the unified price table's Modal rate: the
+    price a Modal trainer of the same GPUs is billed at (None: the GPU is not in the table)."""
+    from yeto.cost import prices  # noqa: PLC0415
+
+    return prices.node_usd_h("modal", section.get("gpu", DEFAULT_GPU), section.get("gpus", DEFAULT_GPUS))
 
 
 def pool_spec(cfg: dict[str, Any]) -> dict[str, Any] | None:

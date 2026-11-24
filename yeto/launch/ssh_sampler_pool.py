@@ -119,7 +119,7 @@ from .node_inventory import (
     profile_of,
 )
 from .pool import status as island_status
-from .pool.provider import ProviderCaps
+from .pool.provider import provider_caps
 from .pool.status import LeaseStatus
 from yeto.node.store import STORE_URI_SHELL, pool_fence_store, reclaim_marker_env, sampler_route_env
 from yeto.node.transport import ReachError, node_ssh_options
@@ -747,7 +747,7 @@ class SshNodeProvider:
     not stopped, until an operator stops it."""
 
     kind = KIND
-    caps = ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=300)
+    caps = provider_caps(KIND)  # yeto/cloud/capabilities.json
 
     def __init__(self, run_id: str, conf: SshPoolConf, *, slots: Sequence[int], state_path: Path,
                  clock: Callable[[], float] = time.time):

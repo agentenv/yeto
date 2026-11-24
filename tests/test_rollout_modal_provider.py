@@ -96,10 +96,12 @@ def test_provider_maps_call_states_and_releases_only_its_own_tickets(tmp_path):
     assert p.status(1, ticket).state == "active" and not p.account_free(1) and p.account_free(2)
     call = p.spawn(ticket, {"shard": "m-0"})
     assert p.status(1, ticket).state == "active"
+    end = p.hard_end(p._rows()[ticket])  # its function timeout: spawned_at + timeout_h
+    assert end == pytest.approx(p._rows()[ticket]["spawned_at"] + 24 * 3600)
     client.states[call] = SUCCEEDED  # the sampler exited 0 (the run finished): not lost
-    assert p.status(1, ticket) == el.LeaseStatus("active")
+    assert p.status(1, ticket) == el.LeaseStatus("active", hard_end=end)
     client.states[call] = FAILED  # it crashed, was cancelled outside, or hit the function timeout
-    assert p.status(1, ticket) == el.LeaseStatus("ended", end_reason="lost")
+    assert p.status(1, ticket) == el.LeaseStatus("ended", end_reason="lost", hard_end=end)
     client.fail_status = True
     with pytest.raises(ConnectionError):  # a blip to the pool, never an end
         p.status(1, ticket)
@@ -387,7 +389,8 @@ def test_a_failed_call_tells_the_pool_its_samplers_exit_code_and_stderr_tail(tmp
     client.results[call] = {"rc": 1, "secs": 15.1, "reported_ready": False, "stderr_tail": ["Traceback", *TRACEBACK]}
     client.states[call] = FAILED
     status = ops.provider.status(m.account, m.ticket)
-    assert status == el.LeaseStatus("ended", end_reason="lost")  # the detail is no part of its identity
+    assert status == el.LeaseStatus("ended", end_reason="lost", hard_end=ops.provider.hard_end(
+        ops.provider._rows()[m.ticket]))  # the detail is no part of its identity
     assert status.detail.startswith("sampler exited rc=1 after 15.1 s; stderr tail: Traceback | ")
     assert "is a URI" in status.detail
     pool.tick()
@@ -1135,3 +1138,36 @@ def test_the_sdk_client_reads_scheduled_from_the_call_graph():
     assert client.scheduled("fc-1") is False
     assert client.scheduled("fc-2") is True and client.scheduled("fc-3") is True
     assert client.scheduled("fc-4") is True  # no input info: billed, never free
+
+
+def test_a_call_near_its_function_timeout_gets_a_successor_before_it_is_retired(tmp_path):
+    """The function timeout is the call's hard end: a successor is ordered replace_lead_s before
+    it on a free slot, the old call is drained once the successor is ready (make before break),
+    and a call that ends at its timeout is an expiry, not an eviction."""
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    ops, client, _ = _ops(tmp_path, provider={**_cfg(tmp_path)["provider"], "timeout_h": 2})
+    ops.provider.clock = clock
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 2], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, replace_lead_s=1800, end_margin_s=300),
+                      ops, clock=clock, log=lambda m: None, events=events)
+    ops.start_in_background = False
+    for _ in range(3):
+        pool.tick()
+        t[0] += 60
+    [first] = [m for m in pool.members if m.state == READY]
+    assert first.lease_until == pytest.approx(ops.provider._rows()[first.ticket]["spawned_at"] + 7200)
+    assert len(pool.members) == 1
+    t[0] = first.lease_until - 1800 + 1  # inside the lead: a successor on the free slot
+    for _ in range(3):
+        pool.tick()
+        t[0] += 60
+    successor = next(m for m in pool.members if m.ticket != first.ticket)
+    assert successor.replaces is None or successor.replaces == first.ticket
+    assert successor.state == READY and first.state == GONE  # drained after its successor came up
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert "evicted" not in names and "lease_end_without_ready_replacement" not in names
+    timed_out = el.LeaseStatus("ended", end_reason="lost", hard_end=successor.lease_until)
+    assert el.classify(timed_out, None, now=successor.lease_until + 1, unreachable_since=None,
+                       cfg=el.ElasticConfig(), joined=True).kind == el.EXPIRED

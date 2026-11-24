@@ -58,11 +58,60 @@ def validate(table: dict[str, Any]) -> None:
                 raise CapabilityTableError(f"{cloud}.{name}: unchecked must have value null")
 
 
+PROVIDER_FIELDS = ("lease_bounded", "lease_s", "renewable", "notice_s", "cold_start_s", "hard_end", "currency",
+                   "balance")
+HARD_ENDS = (None, "lease", "function_timeout")
+
+
+def validate_providers(table: dict[str, Any]) -> None:
+    """Raise if a provider kind's row misses a field, a field misses its source / date, or a
+    ``from_cloud`` notice carries a value of its own."""
+    for kind, row in (table.get("providers") or {}).items():
+        if kind.startswith("_"):
+            continue
+        for name in PROVIDER_FIELDS:
+            cell = row.get(name)
+            if not isinstance(cell, dict) or "value" not in cell:
+                raise CapabilityTableError(f"providers.{kind}.{name}: missing")
+            if not (cell.get("source") and cell.get("as_of")):
+                raise CapabilityTableError(f"providers.{kind}.{name}: no source and date")
+        if row["notice_s"].get("from_cloud") and row["notice_s"]["value"] is not None:
+            raise CapabilityTableError(f"providers.{kind}.notice_s: from_cloud must have value null")
+        if row["hard_end"]["value"] not in HARD_ENDS:
+            raise CapabilityTableError(f"providers.{kind}.hard_end: one of {list(HARD_ENDS)}")
+        if row["lease_bounded"]["value"] and not row["lease_s"]["value"]:
+            raise CapabilityTableError(f"providers.{kind}: lease_bounded without lease_s")
+
+
 @lru_cache(maxsize=4)
 def load_table(path: str | None = None) -> dict[str, Any]:
     table = json.loads(Path(path or TABLE_PATH).read_text())
     validate(table)
+    validate_providers(table)
     return table
+
+
+def provider_row(kind: str, *, path: str | None = None) -> dict[str, Any] | None:
+    """``{field: value}`` of a provider kind (``nc``, ``sky``, ``modal``, ...), plus
+    ``notice_from_cloud``; None for a kind the table does not declare."""
+    row = (load_table(path).get("providers") or {}).get(kind)
+    if row is None or kind.startswith("_"):
+        return None
+    out = {name: row[name]["value"] for name in PROVIDER_FIELDS}
+    out["notice_from_cloud"] = bool(row["notice_s"].get("from_cloud"))
+    return out
+
+
+def provider_notice_seconds(kind: str, cloud: str | None = None, *, path: str | None = None) -> float:
+    """Seconds of warning before a machine of ``kind`` is reclaimed: the kind's own notice,
+    or (``from_cloud``: sky) the checked notice of the cloud the machine runs on; 0 when
+    neither is known (treat as no notice)."""
+    row = provider_row(kind, path=path)
+    if row is None:
+        return 0.0
+    if row["notice_from_cloud"]:
+        return (notice_seconds(cloud, path=path) or 0.0) if cloud else 0.0
+    return float(row["notice_s"] or 0.0)
 
 
 def clouds(path: str | None = None) -> list[str]:

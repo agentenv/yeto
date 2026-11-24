@@ -213,6 +213,9 @@ class PoolConfig:
     shard_base: str
     lease_s: float = LEASE_HOURS * 3600
     replace_lead_s: float = 60 * 60
+    # replace_lead_s "auto": the lead is the member's offer's measured p90 order-to-ready time
+    # plus a margin (IslandPool.offer_ledger); replace_lead_s is the prior until it has enough
+    replace_lead_auto: bool = False
     end_margin_s: float = 10 * 60
     stop_below_ucr: int = 20_000_000
     min_balance_to_order_ucr: int | None = None  # default: one hour of a node + the stop line
@@ -345,6 +348,8 @@ class IslandPool:
     _release_pool: Any = None
     release_wait_s: float = 60.0  # the stop's wait for a background release still running
     retired_shards: list[str] = field(default_factory=list)  # shards ended for good (a removed pool's)
+    # the offer ledger as this pool feeds and reads it (offer_ledger.PoolLedger; None: not kept)
+    offer_ledger: Any = None
 
     def _control_stamp(self) -> Any:
         if self.scale_path is None:
@@ -1674,7 +1679,7 @@ class IslandPool:
         # replacements for members close to their lease end
         for m in self.live():
             if (m.state == READY and not m.replaced_by and m.retiring_since is None and not m.paused
-                    and m.lease_until is not None and now >= m.lease_until - self.config.replace_lead_s):
+                    and m.lease_until is not None and now >= m.lease_until - self._replace_lead(m)):
                 self._order(replaces=m)
 
         # fill up to target (members waiting for a replacement count until they go)
@@ -1687,6 +1692,13 @@ class IslandPool:
         self._slots_short()
         if self.breaker.tripped and not self.live():
             self.stop("breaker tripped and no member left")
+
+    def _replace_lead(self, m: Member) -> float:
+        """How long before ``m``'s known end (lease end, hard end) its replacement is ordered:
+        ``replace_lead_s``, or with ``replace_lead_auto`` its offer's measured lead."""
+        if not self.config.replace_lead_auto or self.offer_ledger is None:
+            return self.config.replace_lead_s
+        return float(self.offer_ledger.lead_s(m.ticket, self.config.replace_lead_s))
 
     def _watch_paused(self, m: Member, now: float) -> bool:
         """A paused member: only its ticket is read (spend, lease end). True: nothing else

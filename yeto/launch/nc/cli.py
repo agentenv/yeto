@@ -636,6 +636,7 @@ def run_id(cfg: dict[str, Any]) -> str:
 
 
 POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base", "run", "route", "replace_lead_s", "end_margin_s",
+                       "replace_lead_auto",
                        "stop_below_ucr", "min_balance_to_order_ucr", "data_slots", "elastic", "event_command",
                        "machine_type", "model", "spec", "run_prefix", "r2_env_file", "bucket_env", "image",
                        "engine", "platform",
@@ -997,12 +998,15 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         raise ValueError("pool config: node_profile must be a map of node profile fields")
     run_id(cfg)
     lead, margin = (_seconds(cfg, "replace_lead_s", 3600), _seconds(cfg, "end_margin_s", 600))
+    auto = cfg.get("replace_lead_auto", False)
+    if not isinstance(auto, bool):
+        raise ValueError(f"pool config: replace_lead_auto must be true or false, not {auto!r}")
     price = pool_price(cfg)[0]
     if price is not None and not (math.isfinite(price) and price >= 0):
         raise ValueError(f"pool config: provider price_usd_h {price!r} must be a finite number >= 0")
     return PoolConfig(target=target, accounts=accounts, shard_base=cfg["shard_base"],
                       shard_limit=pool_shard_limit(cfg),
-                      replace_lead_s=lead, end_margin_s=margin,
+                      replace_lead_s=lead, end_margin_s=margin, replace_lead_auto=auto,
                       stop_below_ucr=int(cfg.get("stop_below_ucr", 20_000_000)),
                       min_balance_to_order_ucr=cfg.get("min_balance_to_order_ucr"),
                       data_slots=slots, elastic=island_status.ElasticConfig.from_dict(cfg.get("elastic")),
@@ -1021,8 +1025,11 @@ def _seconds(cfg: dict[str, Any], key: str, default: float) -> float:
 
 def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
     """One node hour of a pool as its provider config states it, and the currency:
-    sky ``price_usd_h`` (or the first offer's), modal / daytona ``price_usd_h`` in USD;
-    None for National Compute (the MI355X rate in ucr applies)."""
+    sky ``price_usd_h`` (else the dearest of its offers, each priced as stated or by the
+    unified price table: an order may land on any of them; None when one is unpriced),
+    modal ``price_usd_h`` (else the unified price table's price of its ``gpu`` x ``gpus``),
+    daytona ``price_usd_h`` in USD; None for National Compute (the MI355X rate in ucr applies).
+    What a member costs once ordered is its own offer's price (the provider's ``hourly_cost``)."""
     from ..pool import provider as providers  # noqa: PLC0415
 
     kind = providers.kind_of(cfg) or "factory"
@@ -1031,12 +1038,16 @@ def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
     section = cfg.get("provider") or {}
     price = section.get("price_usd_h")
     if price is None and kind == "sky":
-        from yeto.launch.rollout.offers import offers_from_config  # noqa: PLC0415
+        from yeto.launch.rollout.offers import max_price, offers_from_config  # noqa: PLC0415
 
         try:
-            price = offers_from_config(section)[0].price_usd_h
+            price = max_price(offers_from_config(section))
         except ValueError:
             price = None
+    if price is None and kind == "modal":
+        from .modal_provider import table_price  # noqa: PLC0415
+
+        price = table_price(section)
     if price is None and kind == "ssh":
         price = 0.0  # the operator's own nodes: no rental price unless the config states one
     if price is None:
@@ -1047,6 +1058,32 @@ def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
         return float(price), currency
     except (TypeError, ValueError):
         raise ValueError(f"pool config: provider price_usd_h must be a number, not {price!r}") from None
+
+
+def pool_price_rows(cfg: dict[str, Any]) -> list[Any]:
+    """The unified price table rows a pool's price comes from where its config states none
+    (sky offers without ``price_usd_h``, a modal pool without it); National Compute's rate
+    and stated prices are not table prices. For the dry-run's stale-price note."""
+    from yeto.cost import prices  # noqa: PLC0415
+
+    from ..pool import provider as providers  # noqa: PLC0415
+
+    kind, section = providers.kind_of(cfg), cfg.get("provider") or {}
+    if section.get("price_usd_h") is not None:
+        return []
+    if kind == "sky":
+        if section.get("candidates") is not None:
+            return []  # the watchdog's Nebius table (or its own prices file)
+        docs = section.get("offers") if section.get("offers") is not None else [section]
+        rows = [prices.offer_row(d["resources"]) for d in docs
+                if isinstance(d, dict) and d.get("price_usd_h") is None and isinstance(d.get("resources"), dict)]
+        return [r for r in rows if r is not None]
+    if kind == "modal":
+        from .modal_provider import DEFAULT_GPU  # noqa: PLC0415
+
+        row = prices.lookup("modal", section.get("gpu", DEFAULT_GPU))
+        return [] if row is None else [row]
+    return []
 
 
 def pool_hourly_ucr(cfg: dict[str, Any]) -> float:

@@ -1360,27 +1360,36 @@ def _float_or_none(value: Any) -> float | None:
 
 # --- Modal -------------------------------------------------------------------
 #
-# Modal is serverless: no catalog API, no stock API, no spot. Prices are a
-# table copied from modal.com/pricing (dated; the planner warns when it is
-# older than 90 days), a container is priced as GPU + the CPU and memory
-# the runner reserves for it, and a region hint multiplies the whole
-# thing. Availability is a constant "will run, may queue" pseudo-score.
+# Modal is serverless: no catalog API, no stock API, no spot. Prices are the
+# Modal rows of the unified price table (yeto.cost.prices: modal.com/pricing,
+# each row dated; the planner warns when the oldest is older than 90 days), a
+# container is priced as GPU + the CPU and memory the runner reserves for it,
+# and a region hint multiplies the whole thing. Availability is a constant
+# "will run, may queue" pseudo-score. A Modal trainer and a Modal sampler pool
+# of the same GPUs are priced from the same rows.
 
-MODAL_PRICES_RECORDED = "2026-09-23"
-# $/second, as printed on the pricing page (per GPU; per physical core;
-# per GiB). Multiply by 3600 for $/hr.
-MODAL_GPU_USD_PER_SECOND: dict[str, float] = {
-    "B200": 0.001736,
-    "H200": 0.001261,
-    "H100": 0.001097,
-    "A100-80GB": 0.000694,
-    "L40S": 0.000542,
-    "A10G": 0.000306,
-    "L4": 0.000222,
-    "T4": 0.000164,
-}
-MODAL_CPU_USD_PER_CORE_SECOND = 0.0000131
-MODAL_MEMORY_USD_PER_GIB_SECOND = 0.00000222
+# the GPUs the planner offers on Modal (the table may price more)
+MODAL_PLANNER_GPUS = ("B200", "H200", "H100", "A100-80GB", "L40S", "A10G", "L4", "T4")
+
+
+def _modal_prices() -> tuple[dict[str, float], float, float, str]:
+    from yeto.cost import prices
+
+    rows = {g: prices.lookup("modal", g) for g in MODAL_PLANNER_GPUS}
+    missing = [g for g, r in rows.items() if r is None]
+    if missing:
+        raise prices.PriceTableError(f"{prices.TABLE_NAME}: no Modal row for {missing}")
+    host = prices.host("modal")
+    if host is None:
+        raise prices.PriceTableError(f"{prices.TABLE_NAME}: no host.modal row")
+    recorded = min([r.as_of for r in rows.values()] + [host.as_of])
+    return ({g: r.usd_per_gpu_h / 3600 for g, r in rows.items()}, host.cpu_core_h / 3600, host.mem_gib_h / 3600,
+            recorded)
+
+
+# $/second (per GPU; per physical core; per GiB). Multiply by 3600 for $/hr.
+(MODAL_GPU_USD_PER_SECOND, MODAL_CPU_USD_PER_CORE_SECOND, MODAL_MEMORY_USD_PER_GIB_SECOND,
+ MODAL_PRICES_RECORDED) = _modal_prices()
 MODAL_BROAD_REGIONS = frozenset({"us", "eu", "ap"})
 MODAL_NARROW_REGIONS = frozenset({
     "us-east", "us-central", "us-south", "us-west",
