@@ -93,7 +93,8 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -101,8 +102,12 @@ from ..gpu_spec import (
     DEVICE_FAMILIES,
     DEVICE_FAMILY_ENV,
     UnknownCard,
+    UnknownFamily,
     canonical_card,
     device_family_of,
+    hw_family,
+    launcher_family,
+    unified_family,
 )
 from ..hw import card_tools
 from ..hw.catalog import UnknownCardType, compat_group
@@ -120,6 +125,8 @@ _REQUIRED = ("name", "host", "device_family", "cpu_arch", "card", "cards_per_nod
 _KNOWN = _REQUIRED + ("proxy_jump", "fabric", "interface", "address", "mounts", "image", "runtime",
                       "docker_args", "env", "price_per_card_hour", "roles", "scratch", "scratch_min_free_gib",
                       "store_env_file")
+# node profile keys (unified-sampler-pool): parse_profile reads them, parse_node accepts and ignores them
+_PROFILE_KEYS = ("card_arch", "container", "paths", "model_source", "reach")
 # characters a host path field (scratch, store_env_file) may not hold: it is spliced
 # into shell lines and `docker run` options
 _SCRATCH_FORBIDDEN = frozenset("$`\\\"' :,;&|<>*?\n\t")
@@ -136,7 +143,7 @@ class Node:
 
     name: str
     host: str  # SSH target, "user@host" or a host alias
-    device_family: str  # "cuda", "npu" or "ppu"
+    device_family: str  # launcher family: "cuda", "rocm", "npu" or "ppu" (NodeProfile.family: unified)
     cpu_arch: str  # "x86_64" or "aarch64" (``uname -m``)
     card: str  # canonical catalog name, e.g. "910B4"
     cards_per_node: int
@@ -274,7 +281,7 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
         raise InventoryError(f"inventory entry {index} must be a mapping, got {type(raw).__name__}")
     name = raw.get("name")
     name = _require_text(name, f"#{index}", "name") if name is not None else f"node{index}"
-    unknown = sorted(set(raw) - set(_KNOWN))
+    unknown = sorted(set(raw) - set(_KNOWN) - set(_PROFILE_KEYS))
     if unknown:
         raise InventoryError(f"node {name}: unknown inventory field(s) {unknown} "
                              f"(known: {sorted(_KNOWN)})")
@@ -284,8 +291,11 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
                                  f"default")
     family = _require_text(raw["device_family"], name, "device_family")
     if family not in DEVICE_FAMILIES:
-        raise InventoryError(f"node {name}: device_family {family!r} is unknown "
-                             f"(known: {list(DEVICE_FAMILIES)})")
+        try:  # an alias (ascend, amd, nvidia, thead) is the launcher family it names
+            family = launcher_family(family)
+        except UnknownFamily:
+            raise InventoryError(f"node {name}: device_family {family!r} is unknown "
+                                 f"(known: {list(DEVICE_FAMILIES)})") from None
     cpu_arch = _cpu_arch(raw["cpu_arch"], name)
     try:
         card = canonical_card(_require_text(raw["card"], name, "card"))
@@ -443,3 +453,335 @@ def nodes_by_name(nodes: list[Node]) -> dict[str, Node]:
 def island_nodes(nodes: list[Node], role: str) -> list[Node]:
     """The nodes of one role (``roles:`` in the file); nodes without roles match."""
     return [node for node in nodes if not node.roles or role in node.roles]
+
+
+# --- node profile (unified-sampler-pool D5) ----------------------------------
+#
+# A NodeProfile is a Node plus what a sampler start needs to know about the
+# machine whatever its source (own SSH node, NC lease, Daytona sandbox, Modal
+# function, sky VM): the unified device family, the card architecture, how the
+# sampler is started (container engine, plain process, Modal function), the
+# node's directories, where the model comes from and how the node is reached.
+# Device flags and the visible-card variable are derived from the family here,
+# not written into each route.
+
+CONTAINERS = ("docker", "podman", "process", "modal-fn")
+"""How the sampler starts: a ``docker`` / ``podman`` container, a ``process`` on
+the host (a venv), or a Modal function container (``modal-fn``: the platform
+gives it its cards, no device flags)."""
+MODEL_SOURCES = ("store", "volume", "hf", "preset")
+"""Where the node gets the model: the run's object store, a platform volume, the
+Hugging Face hub, or already on the node (``preset``)."""
+REACH_MODES = ("direct", "jump", "relay", "outbound", "function")
+"""How the control host reaches the node: SSH ``direct``, through a ``jump`` host
+(``ProxyJump``), through a ``relay``, not at all (``outbound``: the node only
+dials the store), or through the platform's function calls (``function``)."""
+PATH_KEYS = ("work", "models", "cache")
+
+# card -> architecture (CUDA ``sm<major><minor>``, ROCm ``gfx...``, Ascend SoC
+# family). None: not known (the PPU cards).
+CARD_ARCHES: dict[str, str | None] = {
+    "V100": "sm70", "T4": "sm75", "A100": "sm80", "A100-80GB": "sm80", "A10G": "sm86",
+    "L4": "sm89", "L40S": "sm89", "RTX-6000-Ada": "sm89", "H100": "sm90", "H200": "sm90",
+    "B200": "sm100", "B300": "sm103", "RTX-PRO-6000": "sm120",
+    "MI300X": "gfx942", "MI325X": "gfx942", "MI355X": "gfx950",
+    "910B": "ascend910b", "910B2": "ascend910b", "910B3": "ascend910b", "910B4": "ascend910b",
+    "910C": "ascend910c", "810E": None, "M890": None,
+}
+
+# What an Ascend container needs from the host besides its /dev/davinci<i> cards:
+# npu-smi inside the container is what the TP check and the memory guard read
+# (hetero-1114 A02). Only the ones the node has are passed (a missing -v source
+# fails the run).
+NPU_HOST_DEVICES = ("/dev/davinci_manager", "/dev/devmm_svm", "/dev/hisi_hdc")
+NPU_HOST_MOUNTS = ("/usr/local/Ascend/driver", "/usr/local/dcmi", "/usr/local/bin/npu-smi",
+                   "/usr/local/sbin/npu-smi", "/etc/ascend_install.info", "/etc/vnpu.cfg")
+# What a ROCm container needs: the compute (kfd) and render (dri) device nodes, the
+# video group that owns them, and seccomp off (the amdgpu user space issues calls the
+# default profile blocks); the NC route's ROCM_DOCKER_ARGS carry the same four.
+ROCM_DEVICES = ("/dev/kfd", "/dev/dri")
+ROCM_CONTAINER_ARGS = ("--device", "/dev/kfd", "--device", "/dev/dri", "--group-add", "video",
+                       "--security-opt", "seccomp=unconfined")
+
+
+def card_arch_of(card: str) -> str | None:
+    """The architecture of a catalog card (``B300`` -> ``sm103``, ``MI355X`` ->
+    ``gfx950``); None when the catalog does not know it."""
+    return CARD_ARCHES.get(canonical_card(card))
+
+
+@dataclass(frozen=True)
+class NodePaths:
+    """The node's directories (absolute host paths; None: not declared): ``work``
+    (the run's work tree: code, specs, logs), ``models`` (model checkpoints and
+    releases), ``cache`` (engine caches: compiled kernels, graphs)."""
+
+    work: str | None = None
+    models: str | None = None
+    cache: str | None = None
+
+    def record(self) -> dict[str, str | None]:
+        return {"work": self.work, "models": self.models, "cache": self.cache}
+
+
+@dataclass(frozen=True)
+class Reach:
+    """How the control host reaches the node: ``mode`` (:data:`REACH_MODES`) and
+    ``via`` (the jump host of ``jump``, the relay address of ``relay``)."""
+
+    mode: str = "direct"
+    via: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in REACH_MODES:
+            raise InventoryError(f"reach mode {self.mode!r} is unknown (known: {list(REACH_MODES)})")
+        if self.mode in ("jump", "relay") and not self.via:
+            raise InventoryError(f"reach {self.mode} needs via (the {self.mode} host)")
+
+    @property
+    def inbound(self) -> bool:
+        """The control host can open a connection to the node (SSH probes work)."""
+        return self.mode in ("direct", "jump", "relay")
+
+
+@dataclass(frozen=True)
+class DeviceSetup:
+    """The cards of one start: ``args`` are the container engine's device options
+    (empty for a process or a Modal function), ``env`` the variables the sampler
+    gets (the visible-card variable of the family, numbered as the sampler sees
+    the cards: renumbered from 0 when the engine passes only those cards)."""
+
+    args: tuple[str, ...]
+    env: dict[str, str]
+
+
+@dataclass(frozen=True)
+class NodeProfile(Node):
+    """A :class:`Node` plus what a sampler start needs, for a node of any source.
+
+    Read with :func:`parse_profile` / :func:`load_profiles` (an inventory entry may
+    carry the profile keys ``card_arch``, ``container``, ``paths``, ``model_source``,
+    ``reach``), built with :meth:`for_card` for a rented node, or wrapped around a
+    parsed node with :meth:`from_node`. A NodeProfile is a Node: every Node consumer
+    (card check, ``ssh_options``, ``record``) takes it unchanged.
+
+    ``device_family`` stays the launcher spelling (``npu`` for Ascend, what
+    ``$YETO_DEVICE_FAMILY`` and the card tools take); :attr:`family` is the unified
+    one (``cuda`` / ``rocm`` / ``ascend`` / ``ppu``) the engine image catalog uses.
+
+    Fields beyond Node:
+
+    - ``card_arch``: ``sm90`` / ``sm103`` / ``gfx950`` / ``ascend910b`` ...; derived from
+      the card (:data:`CARD_ARCHES`) when not given;
+    - ``container``: :data:`CONTAINERS`; derived from ``runtime`` (``docker`` ->
+      ``docker``, ``rootfs`` -> ``process``) when not given;
+    - ``paths``: :class:`NodePaths` (``work`` defaults to ``scratch``);
+    - ``model_source``: :data:`MODEL_SOURCES` or None (not declared);
+    - ``reach``: :class:`Reach`; ``jump`` via ``proxy_jump`` when the node has one,
+      else ``direct``.
+
+    Derived per family (:meth:`devices`): the container device flags (cuda:
+    ``--gpus`` with docker, CDI ``nvidia.com/gpu=<i>`` with podman; rocm:
+    ``/dev/kfd``, ``/dev/dri``, the video group, seccomp off; ascend:
+    ``/dev/davinci<i>`` plus the host devices and driver mounts the node has) and
+    the visible-card variable of :data:`yeto.gpu_spec.HW_FAMILIES`
+    (``CUDA_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` / ``ASCEND_RT_VISIBLE_DEVICES``).
+    An inventory ``docker_args`` replaces the derived flags (the site knows its
+    hardware); the variable then numbers the host's cards."""
+
+    card_arch: str | None = None
+    container: str = ""
+    paths: NodePaths = field(default_factory=NodePaths)
+    model_source: str | None = None
+    reach: Reach | None = None
+
+    def __post_init__(self) -> None:
+        set_ = lambda key, value: object.__setattr__(self, key, value)  # noqa: E731 - frozen dataclass
+        if self.card_arch is None:
+            set_("card_arch", CARD_ARCHES.get(self.card))
+        if not self.container:
+            set_("container", "process" if self.runtime == "rootfs" else "docker")
+        if self.container not in CONTAINERS:
+            raise InventoryError(f"node {self.name}: container {self.container!r} is unknown "
+                                 f"(known: {list(CONTAINERS)})")
+        if self.model_source is not None and self.model_source not in MODEL_SOURCES:
+            raise InventoryError(f"node {self.name}: model_source {self.model_source!r} is unknown "
+                                 f"(known: {list(MODEL_SOURCES)})")
+        if self.paths.work is None and self.scratch:
+            set_("paths", replace(self.paths, work=self.scratch))
+        if self.reach is None:
+            set_("reach", Reach("jump", self.proxy_jump) if self.proxy_jump else Reach())
+
+    # -- construction
+    @classmethod
+    def from_node(cls, node: Node, **profile: Any) -> NodeProfile:
+        """``node`` with the profile fields ``profile`` (the rest derived)."""
+        if isinstance(node, NodeProfile) and not profile:
+            return node
+        base = {f.name: getattr(node, f.name) for f in fields(Node)}
+        if isinstance(node, NodeProfile):
+            base.update({k: getattr(node, k) for k in _PROFILE_KEYS})
+        return cls(**{**base, **profile})
+
+    @classmethod
+    def for_card(cls, name: str, card: str, cards_per_node: int, *, hbm_gib: float, host: str = "",
+                 cpu_arch: str = "x86_64", host_memory_gib: float = 0.0, **fields_: Any) -> NodeProfile:
+        """A profile of a rented node that has no inventory entry (an NC lease, a
+        Daytona sandbox, a Modal function, a sky VM): the family comes from the card.
+        ``host`` may be empty when the node is not reached by SSH (``reach``
+        ``function`` / ``outbound``)."""
+        card = canonical_card(card)
+        return cls(name=name, host=host, device_family=device_family_of(card),
+                   cpu_arch=image_catalog.canonical_cpu_arch(cpu_arch), card=card, cards_per_node=int(cards_per_node),
+                   hbm_gib=float(hbm_gib), host_memory_gib=float(host_memory_gib), **fields_)
+
+    # -- family
+    @property
+    def family(self) -> str:
+        """``cuda`` / ``rocm`` / ``ascend`` / ``ppu`` (the engine image catalog's names)."""
+        return unified_family(self.device_family)
+
+    @property
+    def hw(self):  # -> yeto.gpu_spec.HwFamily
+        return hw_family(self.device_family)
+
+    @property
+    def visible_devices_env(self) -> str | None:
+        """The variable that limits the visible cards (:data:`yeto.gpu_spec.HW_FAMILIES`)."""
+        return self.hw.visible_devices_env
+
+    def family_env(self) -> dict[str, str]:
+        """``$YETO_DEVICE_FAMILY``: torch reports ``cuda`` on ROCm and PPU, so the
+        sampler's card telemetry and memory guard read the family from here."""
+        return {DEVICE_FAMILY_ENV: self.device_family}
+
+    # -- devices
+    def host_paths(self) -> tuple[str, ...]:
+        """Host paths the device flags may name (a preflight reports which exist)."""
+        if self.family == "ascend":
+            return NPU_HOST_DEVICES + NPU_HOST_MOUNTS
+        if self.family == "rocm":
+            return ROCM_DEVICES
+        return ()
+
+    def required_host_paths(self) -> tuple[str, ...]:
+        """Host paths a container of this family cannot start without."""
+        return ROCM_DEVICES if self.family == "rocm" and self.container in ("docker", "podman") else ()
+
+    def devices(self, cards: Sequence[int] | None = None, *, engine: str | None = None,
+                host_paths: Sequence[str] | None = None) -> DeviceSetup:
+        """Device flags and visible-card variable for a start on ``cards`` (None: every
+        card of the node) with container engine ``engine`` (default :attr:`container`).
+
+        ``host_paths``: the paths the node's preflight found (None: assume every
+        path of :meth:`host_paths`); only those are passed. ``docker_args`` of the
+        inventory replace the derived flags."""
+        engine = engine or self.container
+        every = list(range(self.cards_per_node))
+        chosen = list(every if cards is None else cards)
+        var = self.visible_devices_env
+        host_numbers = {var: ",".join(str(i) for i in chosen)} if var else {}
+        if engine not in ("docker", "podman"):  # a process sees the host's cards; a Modal function its own
+            return DeviceSetup((), host_numbers if engine == "process" else {})
+        if self.docker_args:
+            return DeviceSetup(tuple(self.docker_args), host_numbers)
+        family = self.family
+        if family == "cuda":
+            whole = chosen == every
+            if engine == "docker":
+                value = "all" if whole else f'"device={",".join(str(i) for i in chosen)}"'
+                args: tuple[str, ...] = ("--gpus", value)
+            else:  # podman: the NVIDIA Container Toolkit's CDI devices
+                args = tuple(a for i in (["all"] if whole else chosen) for a in ("--device", f"nvidia.com/gpu={i}"))
+            renumbered = {var: ",".join(str(i) for i in range(len(chosen)))} if var else {}
+            return DeviceSetup(args, renumbered)
+        if family == "rocm":  # every render node is passed: HIP_VISIBLE_DEVICES picks by host number
+            return DeviceSetup(ROCM_CONTAINER_ARGS, host_numbers)
+        if family == "ascend":
+            present = set(self.host_paths()) if host_paths is None else set(host_paths)
+            out: list[str] = []
+            for i in chosen:
+                out += ["--device", f"/dev/davinci{i}"]
+            for dev in NPU_HOST_DEVICES:
+                if dev in present:
+                    out += ["--device", dev]
+            for path in NPU_HOST_MOUNTS:
+                if path in present:
+                    out += ["-v", f"{path}:{path}:ro"]
+            return DeviceSetup(tuple(out), host_numbers)
+        # ppu: no flags are known (vendor docs only); the inventory's docker_args must give them
+        return DeviceSetup((), host_numbers)
+
+    def summary(self) -> dict[str, Any]:
+        """What a member record and the dashboard show of the machine (no host, no paths)."""
+        return {"family": self.family, "card": self.card, "card_arch": self.card_arch,
+                "cards": self.cards_per_node, "hbm_gib": self.hbm_gib, "cpu_arch": self.cpu_arch,
+                "container": self.container, "reach": self.reach.mode if self.reach else None,
+                "model_source": self.model_source}
+
+    def record(self) -> dict[str, Any]:
+        """:meth:`Node.record` plus :meth:`summary`'s profile keys."""
+        return {**super().record(), "family": self.family, "card_arch": self.card_arch,
+                "container": self.container, "model_source": self.model_source,
+                "reach": self.reach.mode if self.reach else None}
+
+
+def _profile_fields(raw: dict[str, Any], node: Node) -> dict[str, Any]:
+    """The profile keys of an inventory entry, validated."""
+    name = node.name
+    out: dict[str, Any] = {}
+    if raw.get("card_arch") is not None:
+        out["card_arch"] = _require_text(raw["card_arch"], name, "card_arch")
+    if raw.get("container") is not None:
+        out["container"] = _require_text(raw["container"], name, "container")
+    if raw.get("model_source") is not None:
+        out["model_source"] = _require_text(raw["model_source"], name, "model_source")
+    paths = raw.get("paths")
+    if paths is not None:
+        if not isinstance(paths, dict) or set(paths) - set(PATH_KEYS):
+            raise InventoryError(f"node {name}: paths must be a map with keys {list(PATH_KEYS)}, got {paths!r}")
+        out["paths"] = NodePaths(**{k: _host_path(paths, name, k) for k in PATH_KEYS if k in paths})
+    reach = raw.get("reach")
+    if reach is not None:
+        if isinstance(reach, str):
+            reach = {"mode": reach}
+        if not isinstance(reach, dict) or set(reach) - {"mode", "via"} or "mode" not in reach:
+            raise InventoryError(f"node {name}: reach must be a mode or {{mode, via}}, got {reach!r}")
+        via = reach.get("via") or (node.proxy_jump if reach["mode"] == "jump" else None)
+        try:
+            out["reach"] = Reach(str(reach["mode"]), str(via) if via else None)
+        except InventoryError as exc:
+            raise InventoryError(f"node {name}: {exc}") from None
+    return out
+
+
+def parse_profile(raw: Any, *, index: int, images: Mapping[str, str] | None = None) -> NodeProfile:
+    """One inventory entry as a :class:`NodeProfile` (:func:`parse_node`, then the
+    profile keys)."""
+    node = parse_node(raw, index=index, images=images)
+    return NodeProfile.from_node(node, **_profile_fields(raw, node))
+
+
+def parse_profiles(document: Any) -> list[NodeProfile]:
+    """:func:`parse_inventory` with every node as a :class:`NodeProfile`."""
+    nodes = parse_inventory(document)  # every check of the inventory, the duplicate names included
+    entries = document if isinstance(document, list) else document.get("nodes")
+    return [NodeProfile.from_node(node, **_profile_fields(raw, node)) for node, raw in zip(nodes, entries)]
+
+
+def load_profiles(path: str | Path) -> list[NodeProfile]:
+    """:func:`load_inventory` with every node as a :class:`NodeProfile`."""
+    import yaml  # noqa: PLC0415
+
+    nodes = load_inventory(path)
+    document = yaml.safe_load(Path(path).read_text())
+    entries = document if isinstance(document, list) else document.get("nodes")
+    try:
+        return [NodeProfile.from_node(node, **_profile_fields(raw, node)) for node, raw in zip(nodes, entries)]
+    except InventoryError as exc:
+        raise InventoryError(f"{path}: {exc}") from None
+
+
+def profile_of(node: Node) -> NodeProfile:
+    """``node`` as a :class:`NodeProfile` (itself when it is one)."""
+    return NodeProfile.from_node(node)
