@@ -9,18 +9,27 @@ Under the run's store root (the root that holds ``sample-buffer/``):
   assignment with the token (:func:`read_assignment`); a machine opened by hand
   joins the same way, so the pool's fence and handoff rules hold for it as for
   an ordered one;
-* ``nodes/<ticket>/ready.json``: the sampler joined its shard;
-* ``nodes/<ticket>/heartbeat.json``: rewritten every ``heartbeat_s`` with the
-  stage (``preflight``, ``code``, ``model``, ``starting``, ``engine``,
-  ``running``, ``left``) and an engine summary (generation tokens, running /
-  queued requests, rounds);
-* ``nodes/<ticket>/exit.json``: exit code and reason.
+* ``nodes/<ticket>/g<generation>/ready.json``: the sampler joined its shard;
+* ``nodes/<ticket>/g<generation>/heartbeat.json``: rewritten every
+  ``heartbeat_s`` with the stage (``preflight``, ``code``, ``model``,
+  ``starting``, ``engine``, ``running``, ``left``) and an engine summary
+  (generation tokens, running / queued requests, rounds);
+* ``nodes/<ticket>/g<generation>/exit.json``: exit code and reason.
 
 The control plane judges a node from these records alone (:func:`node_status`,
 :func:`probe_of`): a node behind NAT that only dials out is as visible as one
-that answers SSH. Every node record carries the assignment's ``generation``;
-a record of another generation (a node still running an older assignment of
-the same ticket) is not this assignment's.
+that answers SSH. Node records live under their assignment's generation: a
+node still running an older assignment of the same ticket writes under its own
+generation and never overwrites the records of a newer one; the control plane
+reads the generation of the assignment in the store (the highest written).
+
+The token is a ticket binding, not an authentication: anyone who can write the
+run store can write an assignment, and anyone holding a ticket's token can read
+its assignment (spec, code hash, model plan). It keeps a node from starting on
+another ticket's assignment by mistake and keeps the token itself out of the
+store (only its salted sha256 is there). Store credentials are the security
+boundary. A token can carry a deadline (``expires_at``): an expired assignment
+is refused at read.
 """
 
 from __future__ import annotations
@@ -70,10 +79,13 @@ def ticket_of_key(key: str) -> str:
     return _safe(text.removesuffix(".json"), "ticket")
 
 
-def node_key(ticket: str, record: str) -> str:
+def node_key(ticket: str, record: str, generation: int) -> str:
+    """``nodes/<ticket>/g<generation>/<record>.json``: each assignment generation has its own records."""
     if record not in NODE_RECORDS:
         raise ValueError(f"node record {record!r} is not one of {NODE_RECORDS}")
-    return f"{NODES_DIR}/{_safe(ticket, 'ticket')}/{record}.json"
+    if int(generation) < 1:
+        raise ValueError(f"generation {generation!r} must be >= 1")
+    return f"{NODES_DIR}/{_safe(ticket, 'ticket')}/g{int(generation)}/{record}.json"
 
 
 def new_token() -> str:
@@ -154,6 +166,7 @@ class Assignment:
     cards: tuple[int, ...] | None = None  # the cards the sampler gets (None: every card)
     preflight: Mapping[str, Any] = field(default_factory=dict)  # yeto.node.preflight.Requirements fields
     created_at: float = 0.0
+    expires_at: float | None = None  # the token's deadline (None: none); read refuses after it
 
     def doc(self) -> dict[str, Any]:
         return asdict(self)
@@ -193,9 +206,11 @@ def assign(objects: Any, *, ticket: str, shard: str, spec: Mapping[str, Any], co
     return assignment, token
 
 
-def read_assignment(objects: Any, key: str, token: str) -> Assignment:
+def read_assignment(objects: Any, key: str, token: str, *, clock: Any = time.time) -> Assignment:
     """The assignment of ``key`` (a ticket or ``assignments/<ticket>.json``) when
-    ``token`` is the ticket's; :class:`AssignmentError` otherwise."""
+    ``token`` is the ticket's, the document is that ticket's and its deadline has
+    not passed; :class:`AssignmentError` otherwise. A ticket binding, not an
+    authentication (see the module notes)."""
     ticket = ticket_of_key(key)
     doc = _read_json(objects, assignment_key(ticket))
     if doc is None:
@@ -204,6 +219,10 @@ def read_assignment(objects: Any, key: str, token: str) -> Assignment:
         raise AssignmentError(f"the assignment of ticket {ticket} is not readable JSON")
     if not token or not secrets.compare_digest(str(doc.get("token_sha256") or ""), token_digest(token)):
         raise AssignmentError(f"the token is not the token of ticket {ticket}")
+    if doc.get("ticket") != ticket:  # a document copied under another ticket's key
+        raise AssignmentError(f"the assignment under ticket {ticket} names ticket {doc.get('ticket')!r}")
+    if doc.get("expires_at") is not None and float(clock()) > float(doc["expires_at"]):
+        raise AssignmentError(f"the assignment of ticket {ticket} expired (its token is no longer valid)")
     return Assignment.from_doc(doc)
 
 
@@ -230,7 +249,7 @@ class NodeReporter:
 
     def write(self, record: str, **fields_: Any) -> dict[str, Any]:
         doc = self._doc(**fields_)
-        _write_json(self.objects, node_key(self.ticket, record), doc)
+        _write_json(self.objects, node_key(self.ticket, record, self.generation), doc)
         return doc
 
     def safe(self, record: str, **fields_: Any) -> dict[str, Any] | None:
@@ -252,11 +271,12 @@ class NodeReporter:
         return self.safe("exit", exit_code=code, reason=str(reason), **fields_)
 
 
-def clear_node_records(objects: Any, ticket: str) -> None:
-    """Remove the node records of ``ticket`` (a new assignment starts clean)."""
+def clear_node_records(objects: Any, ticket: str, generation: int) -> None:
+    """Remove the node records of one generation of ``ticket`` (a replaced assignment's;
+    a node still running it writes them again under its own generation, never the new one's)."""
     for record in NODE_RECORDS:
         try:
-            objects.delete(node_key(ticket, record))
+            objects.delete(node_key(ticket, record, generation))
         except Exception:  # noqa: BLE001 - absent is fine
             pass
 
@@ -286,7 +306,7 @@ class NodeStatus:
 def node_status(objects: Any, ticket: str, *, now: float | None = None, stale_s: float = DEFAULT_STALE_S,
                 generation: int | None = None) -> NodeStatus:
     """The node of ``ticket`` from the store alone. ``generation``: the assignment's
-    (default: read from it); records of another generation are ignored."""
+    (default: read from it, the highest generation written); only its records count."""
     if generation is None:
         assignment = _read_json(objects, assignment_key(ticket))
         if assignment is None or assignment.get("torn"):
@@ -295,7 +315,7 @@ def node_status(objects: Any, ticket: str, *, now: float | None = None, stale_s:
     now = time.time() if now is None else float(now)
     docs = {}
     for record in NODE_RECORDS:
-        doc = _read_json(objects, node_key(ticket, record))
+        doc = _read_json(objects, node_key(ticket, record, int(generation)))
         if doc is not None and not doc.get("torn") and int(doc.get("generation") or 0) == int(generation):
             docs[record] = doc
     ready, beat, ended = docs.get("ready"), docs.get("heartbeat"), docs.get("exit")

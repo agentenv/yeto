@@ -1,4 +1,4 @@
-"""Node records in the store (``nodes/<ticket>/{ready,heartbeat,exit}``): the control plane
+"""Node records in the store (``nodes/<ticket>/g<generation>/{ready,heartbeat,exit}``): the control plane
 judges ready / stuck / exited from them alone; a machine opened by hand joins with its
 token and is fenced and handed off like an ordered one."""
 
@@ -59,6 +59,57 @@ def test_records_of_another_generation_are_not_this_assignment(tmp_path):
     assert node_status(objects, "t").state == "assigned"
 
 
+def test_an_older_generation_never_overwrites_the_newer_ones_records(tmp_path):
+    """A node still running generation 1 keeps heartbeating after the ticket was
+    reassigned: the healthy generation-2 node stays ready, not stuck."""
+    objects = DirectoryObjectStore(tmp_path)
+    code = records.CodeRef("abc", "node-code/abc.tar", "0" * 64)
+    records.assign(objects, ticket="t", shard="s", spec={}, code=code)
+    old = NodeReporter(objects, "t", 1, clock=lambda: 900.0)
+    old.ready(shard="s")
+    assignment, _ = assign_member(objects, {"run_prefix": "r"}, type("M", (), {"ticket": "t", "shard": "s"})(),
+                                  ["s"], _profile(tmp_path), code, spec={"sampler_id": "s"})
+    assert assignment.generation == 2
+    assert objects.read(records.node_key("t", "ready", 1)) is None  # the replaced generation's records: removed
+    new = NodeReporter(objects, "t", 2, clock=lambda: 1000.0)
+    new.ready(shard="s")
+    new.heartbeat("running", engine={"running": 2})
+    old.heartbeat("running")  # the old node, after the new one: its own generation's key
+    old.exit(1, "error")
+    status = node_status(objects, "t", now=1010.0)
+    assert status.state == "ready" and status.generation == 2 and status.engine["running"] == 2
+    assert node_status(objects, "t", now=1010.0, generation=1).state == "exited"
+    assert records.node_key("t", "heartbeat", 2) == "nodes/t/g2/heartbeat.json"
+
+
+def test_the_token_is_bound_to_its_ticket_and_its_deadline(tmp_path):
+    objects = DirectoryObjectStore(tmp_path)
+    code = records.CodeRef("abc", "node-code/abc.tar", "0" * 64)
+    _, token = records.assign(objects, ticket="a", shard="s", spec={}, code=code, expires_at=100.0)
+    assert records.read_assignment(objects, "a", token, clock=lambda: 99.0).ticket == "a"
+    with pytest.raises(records.AssignmentError, match="expired"):
+        records.read_assignment(objects, "a", token, clock=lambda: 101.0)
+    with pytest.raises(records.AssignmentError, match="not the token"):
+        records.read_assignment(objects, "a", "guess", clock=lambda: 99.0)
+    objects.write(records.assignment_key("b"), objects.read(records.assignment_key("a")))  # copied under b
+    with pytest.raises(records.AssignmentError, match="names ticket 'a'"):
+        records.read_assignment(objects, "b", token, clock=lambda: 99.0)
+    member, manual, manual_token = assign_manual(objects, {"run_prefix": "r"}, shard="m-0", shards=["m-0"],
+                                                 profile=_profile(tmp_path), code=code, run_id="r",
+                                                 spec={"sampler_id": "m-0"}, clock=lambda: 1000.0,
+                                                 member_factory=lambda **kw: type("M", (), kw)())
+    assert manual.expires_at == 1000.0 + 24 * 3600
+    with pytest.raises(records.AssignmentError, match="expired"):
+        records.read_assignment(objects, member.ticket, manual_token, clock=lambda: 1000.0 + 24 * 3600 + 1)
+
+
+def _profile(tmp_path):
+    from yeto.launch.node_inventory import NodePaths, NodeProfile  # noqa: PLC0415
+
+    return NodeProfile.for_card("box", "L4", 1, hbm_gib=24.0, container="process",
+                                paths=NodePaths(work=str(tmp_path / "w"), models=str(tmp_path / "m")))
+
+
 def test_engine_metrics_summary_of_vllm_and_sglang():
     vllm = ("# HELP x\nvllm:generation_tokens_total{model_name=\"m\"} 120.0\n"
             "vllm:num_requests_running{model_name=\"m\"} 4.0\nvllm:num_requests_waiting{model_name=\"m\"} 2.0\n"
@@ -75,12 +126,12 @@ def test_sampler_heartbeat_carries_the_engine_summary(tmp_path):
     report.start()
     report.ready(shard="s")
     report.stop()
-    beat = json.loads((tmp_path / "nodes" / "t" / "heartbeat.json").read_text())
+    beat = json.loads((tmp_path / "nodes" / "t" / "g1" / "heartbeat.json").read_text())
     assert beat["stage"] == "running" and beat["engine"] == {"gen_tokens": 5.0, "running": 1.0}
     assert report.member_fields() == {"ticket": "t", "generation": 1, "source": "sky",
                                       "profile": {"card": "L4", "source": "sky"}}
     report.exit(0)
-    assert json.loads((tmp_path / "nodes" / "t" / "exit.json").read_text())["reason"] == "finished"
+    assert json.loads((tmp_path / "nodes" / "t" / "g1" / "exit.json").read_text())["reason"] == "finished"
 
 
 def test_a_member_record_without_a_node_is_unchanged(tmp_path):

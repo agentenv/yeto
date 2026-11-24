@@ -15,7 +15,7 @@ own SSH node, a machine opened by hand), in order:
    container in the foreground; SIGTERM / SIGINT are passed on (the sampler's
    orderly leave); its exit code becomes this process's.
 
-Each step heartbeats ``nodes/<ticket>/heartbeat.json`` with its stage; the
+Each step heartbeats ``nodes/<ticket>/g<generation>/heartbeat.json`` with its stage; the
 sampler then writes ``ready`` at its JOIN and its own heartbeats; this process
 writes ``exit.json`` with the exit code and the reason. A refused step writes
 the exit record too (reason ``preflight`` / ``code`` / ``model`` / ``image``),

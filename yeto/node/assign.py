@@ -47,18 +47,24 @@ def assign_member(objects: Any, cfg: Mapping[str, Any], member: Any, shards: Seq
                   token: str | None = None, **extra: Any) -> tuple[Assignment, str]:
     """Write the assignment of pool member ``member`` and return it with its token.
     ``spec``: the rendered spec (default: the pool's ``render_spec`` of the member);
-    the node records of an earlier assignment of the ticket are cleared first."""
+    the node records of the assignment it replaces are removed (each generation has its own)."""
     if spec is None:
         if render is None:
             from yeto.launch.nc.cli import render_spec as render  # noqa: PLC0415
         spec = render(dict(cfg), member, list(shards))
     spec = {"start_on_latest": True, **dict(spec)}
-    clear_node_records(objects, member.ticket)
-    return assign(objects, ticket=member.ticket, shard=member.shard, spec=spec, code=code, token=token,
-                  run=str(cfg.get("run_prefix") or "").strip("/") or None, pool=cfg.get("name") or cfg.get("run"),
-                  source=source, continues_shard=getattr(member, "replaces_shard", None),
-                  data_slot=getattr(member, "data_slot", None), model=model_plan(cfg, profile),
-                  profile=profile_doc(profile), store_uri=store_uri, **extra)
+    assignment, token = assign(objects, ticket=member.ticket, shard=member.shard, spec=spec, code=code, token=token,
+                               run=str(cfg.get("run_prefix") or "").strip("/") or None,
+                               pool=cfg.get("name") or cfg.get("run"), source=source,
+                               continues_shard=getattr(member, "replaces_shard", None),
+                               data_slot=getattr(member, "data_slot", None), model=model_plan(cfg, profile),
+                               profile=profile_doc(profile), store_uri=store_uri, **extra)
+    if assignment.generation > 1:
+        clear_node_records(objects, member.ticket, assignment.generation - 1)
+    return assignment, token
+
+
+MANUAL_TOKEN_TTL_S = 24 * 3600.0  # a hand-opened machine reads its assignment within a day
 
 
 def manual_ticket(run_id: str, name: str, clock: Callable[[], float] = time.time) -> str:
@@ -67,14 +73,19 @@ def manual_ticket(run_id: str, name: str, clock: Callable[[], float] = time.time
 
 def assign_manual(objects: Any, cfg: Mapping[str, Any], *, shard: str, shards: Sequence[str], profile: NodeProfile,
                   code: CodeRef, run_id: str, continues_shard: str | None = None, data_slot: str | None = None,
-                  member_factory: Callable[..., Any] | None = None, **kw: Any) -> tuple[Any, Assignment, str]:
+                  member_factory: Callable[..., Any] | None = None, token_ttl_s: float | None = MANUAL_TOKEN_TTL_S,
+                  clock: Callable[[], float] = time.time, **kw: Any) -> tuple[Any, Assignment, str]:
     """A member for a machine opened by hand and its assignment: ``(member, assignment,
     token)``. The member is the pool's own record type, so the pool fences and hands
-    off its shard by the same rules."""
+    off its shard by the same rules. The token is refused after ``token_ttl_s`` (None:
+    never): a token handed to an operator does not stay valid forever. The token binds
+    the machine to this ticket; it is not an authentication (``yeto.node.records``)."""
     if member_factory is None:
         from yeto.launch.pool.island_pool import Member as member_factory  # noqa: PLC0415,N813
     member = member_factory(account=-1, ticket=manual_ticket(run_id, profile.name), shard=shard,
                             replaces_shard=continues_shard, data_slot=data_slot)
+    if token_ttl_s is not None:
+        kw.setdefault("expires_at", float(clock()) + float(token_ttl_s))
     assignment, token = assign_member(objects, cfg, member, shards, profile, code, source="manual", **kw)
     return member, assignment, token
 
