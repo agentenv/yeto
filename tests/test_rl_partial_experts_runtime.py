@@ -488,3 +488,19 @@ def test_selected_experts_get_gradients_under_full_recompute(monkeypatch):
     trainable = {name: p for name, p in chunk.named_parameters() if p.requires_grad}
     assert trainable and all(p.grad is not None and p.grad.abs().sum() > 0 for p in trainable.values())
     assert chunk.embedding.word_embeddings.weight.grad is None, "the embedding itself stays frozen"
+
+
+def test_without_a_generic_selection_the_model_provider_is_untouched(monkeypatch):
+    """kimi_k31 (and every run without an in_place selection) never sets ENV_SELECTION: the generic
+    hook leaves Miles' provider as it is, so neither the freeze nor the embedding hook reaches it."""
+
+    monkeypatch.delenv(in_place.ENV_SELECTION, raising=False)
+    in_place._cached_selection.cache_clear()
+
+    def get_model_provider_func(args, role="actor"):
+        return lambda **kw: None
+
+    fake = types.ModuleType(in_place._PROVIDER_MODULE)
+    fake.get_model_provider_func = get_model_provider_func
+    in_place._patch(fake)
+    assert fake.get_model_provider_func is get_model_provider_func
