@@ -772,6 +772,72 @@ class Run:
         self.mark("fleet_plan", object=uri)
         return True
 
+    def _pool_suffix(self, i: int) -> str:
+        """Where a per-pool preflight line points: ``(pool <name>)`` with several pools;
+        in a fleet ``(island k (name), pool i<k>-<name>)``."""
+        plan = self.fleet_plan()
+        if plan is not None:
+            from yeto.rl import up_fleet  # noqa: PLC0415
+
+            return f" ({up_fleet.pool_where(plan, self.pools[i].name)})"
+        return f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""
+
+    def _fleet_specs(self) -> list[tuple[str, dict[str, Any] | None]]:
+        """``(pool name, rendered sampler spec)`` of every pool (None: no spec / unreadable)."""
+        out = []
+        for ref in self.pools:
+            try:
+                out.append((ref.name, up_consistency.effective_spec(ref.load())))
+            except (OSError, ValueError):
+                out.append((ref.name, None))  # the pool dry-run reports an unreadable pool config
+        return out
+
+    def fleet_preflight(self) -> str | None:
+        """The checks only an island fleet has (:mod:`yeto.rl.up_fleet`), island by island:
+        each island's pools record the same ``rollout_fields`` as its trainer trains on,
+        their engines load the fleet's release form, each island's release cost and cadence, the
+        syncer's region and price, and the fleet's budget estimate (logged). The reason
+        to refuse the run (every island and pool named), else None. None at once without
+        a fleet."""
+        plan = self.fleet_plan()
+        if plan is None:
+            return None
+        from yeto.rl import up_fleet  # noqa: PLC0415
+
+        argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        specs = self._fleet_specs()
+        problems = up_fleet.rollout_fields_problems(plan, argv, specs)
+        refused, notes = up_fleet.release_form_lines(plan, specs, argv)
+        problems += refused
+        from yeto.rl import fleet  # noqa: PLC0415
+
+        cadence = up_fleet.release_every_warnings(plan, argv, specs, step_s=fleet.island_step_s(self.cfg))
+        for line in notes + cadence:
+            _log(f"preflight: {line}")
+        for line in up_fleet.syncer_lines(plan, argv, self.cfg.get("syncer")):
+            _log(f"preflight: {line}")
+        for line in self.fleet_budget_lines():
+            _log(f"preflight: {line}")
+        return "; ".join(problems) if problems else None
+
+    def fleet_budget_lines(self) -> list[str]:
+        """The fleet's hourly estimate (each pool's target x node price, each island's
+        trainer, the syncer) over the wall clock, against ``budget.usd``."""
+        from yeto.breakers import fleet as breakers_fleet  # noqa: PLC0415
+        from yeto.rl import up_fleet  # noqa: PLC0415
+
+        rows = []
+        for i, ref in enumerate(self.pools):
+            try:
+                target = self.pool_target(None, i)
+            except Exception:  # noqa: BLE001 - an unreadable pool config: the pool dry-run says so
+                target = 0
+            rows.append((ref.name, target, self.node_usd_per_h(i)))
+        return up_fleet.budget_lines(self.fleet_plan(), pools=rows,
+                                     syncer_usd_per_h=breakers_fleet.syncer_price(self.cfg),
+                                     usd=self.breaker_param("run.budget", "usd"),
+                                     wall_h=self.breaker_param("run.wall_clock", "hours"))
+
     # -- steps
     def preflight(self) -> bool:
         from yeto.launch_preflight import modal_sdk_problem  # noqa: PLC0415
@@ -817,18 +883,23 @@ class Run:
         for i in range(len(self.pools)):
             problem = self.shard_problem(i)
             if problem is not None:
-                _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
+                _log(f"preflight: {problem}" + self._pool_suffix(i))
                 self.mark("preflight", ok=False)
                 return False
             problem = self.rollout_fields_problem(i) or self.consistency_problem(i)
             if problem is not None:
-                _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
+                _log(f"preflight: {problem}" + self._pool_suffix(i))
                 self.mark("preflight", ok=False)
                 return False
             self.log_compaction(i)
             if self.pools[i].spec_carried:  # breakers.sampler / .harness: no pool knob, the sampler spec has them
                 _log(f"preflight: breakers: pool {self.pools[i].name}: applied in the sampler spec "
                      f"(sampler.breakers of {self.pools[i].config}): {', '.join(self.pools[i].spec_carried)}")
+        problem = self.fleet_preflight()
+        if problem is not None:
+            _log(f"preflight: {problem}")
+            self.mark("preflight", ok=False)
+            return False
         ok = True
         for path in self.pool_configs:
             ok &= self._cmd(self.nc("pool", "--config", path, "--dry-run"), log="preflight.log") == 0
@@ -1647,8 +1718,15 @@ class Run:
         it is never trained on), so the pool may only order shards the trainer names: with
         that flag set, the pool needs a ``shard_limit`` and every ``<shard_base>-<i>`` below
         it in the trainer's list (each node and each lease-end replacement takes a new
-        shard; plan the list for the largest scale plus the replacements)."""
+        shard; plan the list for the largest scale plus the replacements). In a fleet the
+        pool's island trainer reads its ``--rl-island-buffer-shards k:...``
+        (:func:`yeto.rl.up_fleet.shard_problem`)."""
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        plan = self.fleet_plan()
+        if plan is not None:
+            from yeto.rl import up_fleet  # noqa: PLC0415
+
+            return up_fleet.shard_problem(plan, argv, self.pools[pool].name, self.pools[pool].load())
         named = None
         for i, a in enumerate(argv):
             if a == "--rl-buffer-shards" and i + 1 < len(argv):
@@ -1722,6 +1800,11 @@ class Run:
             return None  # the pool dry-run reports an unreadable pool config
         found = up_consistency.problems(str(self.cfg["store"]), [str(a) for a in self.cfg["trainer"]["argv"]],
                                         pool_cfg, data_path=self.pools[pool].data_path)
+        plan = self.fleet_plan()
+        if plan is not None:  # a fleet pool writes its own island's trainer<k>, not any trainer<k>
+            from yeto.rl import up_fleet  # noqa: PLC0415
+
+            found += [p for p in (up_fleet.store_problem(plan, self.pools[pool].name, pool_cfg),) if p]
         return "; ".join(found) if found else None
 
     def env_file_problem(self) -> str | None:

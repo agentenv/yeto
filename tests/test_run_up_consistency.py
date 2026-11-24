@@ -157,6 +157,30 @@ def test_expert_selection_of_another_file_is_refused(setup):
     assert setup.make().consistency_problem() is None
 
 
+def test_a_generic_partial_experts_trainer_refuses_a_spec_bound_to_its_selection(setup):
+    """A generic partial-experts release is a whole HF checkpoint without a manifest:
+    a sampler spec with either selection sha256 refuses every release (even one of the
+    same selection file), so the preflight refuses the spec and names the fix."""
+    _set(setup.argv, "--rl-model-recipe", "generic")
+    setup.argv += ["--tuning", "full"]
+    assert setup.spec["expert_selection_sha256"] == setup.sel.sha256  # the trainer's own selection
+    problem = _refused(setup.make(), "the sampler spec sets expert_selection_sha256",
+                       "carry no expert selection", "remove expert_selection_sha256 from the sampler spec")
+    assert "expert_trainable_sha256" not in problem
+    del setup.spec["expert_selection_sha256"]
+    setup.spec["expert_trainable_sha256"] = setup.sel.trainable_sha256
+    _refused(setup.make(), "remove expert_trainable_sha256 from the sampler spec")
+    setup.spec["expert_selection_sha256"] = setup.sel.sha256
+    _refused(setup.make(), "remove expert_selection_sha256 / expert_trainable_sha256 from the sampler spec")
+    # without the two fields the sampler loads every release
+    del setup.spec["expert_selection_sha256"], setup.spec["expert_trainable_sha256"]
+    assert setup.make().consistency_problem() is None
+    # a path that is only on the trainer node: still refused (the release form, not the file, decides)
+    _set(setup.argv, "--rl-expert-selection", "/remote/expert_selection.json")
+    setup.spec["expert_selection_sha256"] = setup.sel.sha256
+    assert "carry no expert selection" in setup.make().consistency_problem()
+
+
 def test_a_pool_writing_to_another_store_is_refused(setup):
     setup.pool["run_prefix"] = "r1-typo"
     _refused(setup.make(), "s3://bkt/runs/r1-typo", f"trainer reads {STORE}")
