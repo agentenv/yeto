@@ -115,7 +115,8 @@ function card(parent,x,y,w,h,c){
   var compact=w<230,g=el("g",{transform:"translate("+x+","+y+")","data-tp":c.key},parent),one=c.one,s0=c.members[0];
   var box=el("rect",{width:w,height:h,rx:9,"class":"tpbox"},g);
   var archs={};c.members.forEach(function(s){archs[s.arch||"?"]=1});var al=Object.keys(archs);
-  al.forEach(function(a,i){el("rect",{x:0,y:i*h/al.length,width:4,height:h/al.length,rx:2,fill:archColor(a)},g)});
+  // the colour mark: an inset pill inside the rounded corners, one segment per card architecture
+  var ah=Math.max(6,h-18)/al.length;al.forEach(function(a,i){el("rect",{x:5,y:9+i*ah,width:3,height:Math.max(2,ah-(al.length>1?2:0)),rx:1.5,fill:archColor(a)},g)});
   var title=c.key==="other"?"Other samplers":(compact?[s0.card,s0.precision].filter(Boolean).join(" · ")||s0.id:label(s0));
   el("text",{x:13,y:18,"class":compact?"tpt tps":"tpt"},g,title+(c.members.length>1?" ×"+c.members.length:""));
   var sub=one?(compact?[one.engine,one.arch].filter(Boolean).join(" · ")||one.id:[one.id,one.arch,one.gpus?one.gpus+" GPU":null].filter(Boolean).join(" · "))
@@ -124,7 +125,7 @@ function card(parent,x,y,w,h,c){
   var ver=el("text",{x:w-10,y:18,"text-anchor":"end","class":"tpv"},g,"");
   var dot=el("circle",{cx:16.5,cy:h-12.5,r:3.5},g),st=el("text",{x:25,y:h-9,"class":"tps2"},g,""),rate=el("text",{x:w-10,y:h-9,"text-anchor":"end","class":"tpm"},g,"");
   var flash=el("rect",{width:w,height:h,rx:9,fill:"none","stroke-width":1.5,opacity:0},g);
-  return{g:g,box:box,ver:ver,dot:dot,st:st,rate:rate,flash:flash,c:c,compact:compact}}
+  return{g:g,box:box,ver:ver,dot:dot,st:st,rate:rate,flash:flash,c:c,compact:compact,w:w}}
 
 function store(parent,R,narrow){
   var g=el("g",{},parent),cx=R.cx,cy=R.cy,r=R.r;
@@ -142,7 +143,7 @@ function store(parent,R,narrow){
 function trainer(parent,B,tr){
   var g=el("g",{transform:"translate("+B.x+","+B.y+")"},parent),w=B.w,h=B.h;
   var box=el("rect",{width:w,height:h,rx:10,"class":"tpbox"},g);
-  el("rect",{x:0,y:0,width:4,height:h,rx:2,fill:archColor(tr&&tr.arch)},g);
+  el("rect",{x:5,y:9,width:3,height:Math.max(6,h-18),rx:1.5,fill:archColor(tr&&tr.arch)},g);  // inset, inside the rounded corners
   el("text",{x:14,y:20,"class":"tpt"},g,"Trainer"+(tr&&tr.name?" · "+tr.name:""));
   el("text",{x:14,y:36,"class":"tpm"},g,tr&&tr.gpu?(tr.gpus?tr.gpus+" × ":"")+tr.gpu:(tr?tr.id:""));
   var step=el("text",{x:14,y:66,"class":"tpbig2"},g,""),ver=el("text",{x:w-12,y:66,"text-anchor":"end","class":"tpm"},g,"");
@@ -164,9 +165,11 @@ function paint(){
       var ord=["sampling","reloading","loading","waiting","starting"];st=ord.filter(function(k){return cnt[k]}).map(function(k){return cnt[k]+" "+k}).join(" · ");
       col=cnt.reloading||cnt.loading?C.wt:cnt.waiting||cnt.starting?C.warn:C.good}
     if(o.compact&&st.length>19)st=st.replace("reloading","reload").replace(" · "," ");
+    var rate=ms.reduce(function(a,s){return a+(s.rate_gpm||0)},0),rt=rate.toFixed(1)+" g/min";o.rate.textContent=rt;
+    // the status stops short of the rate at the card's right edge (the hover tip has the whole text)
+    var cap=Math.floor((o.w-25-14-rt.length*6.3)/6.3);if(st.length>cap)st=st.slice(0,Math.max(4,cap-1))+"…";
     o.st.textContent=st;o.st.style.fill=(one?one.state==="sampling":col===C.good)?C.ink:col;
     o.dot.setAttribute("fill",col);
-    var rate=ms.reduce(function(a,s){return a+(s.rate_gpm||0)},0);o.rate.textContent=rate.toFixed(1)+" g/min";
     o.g.setAttribute("opacity",ms.some(function(s){return s.live})?1:0.55);
     var stale=ms.some(function(s){return s.status==="stale"});
     o.box.style.stroke=stale?C.bad:lag>=2?C.warn:"";o.box.style.strokeDasharray=stale?"4 3":"";
