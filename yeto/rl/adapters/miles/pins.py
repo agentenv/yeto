@@ -29,14 +29,16 @@ class MilesRevisionPins(NamedTuple):
 
 MILES_PEFT_VERSION = "0.20.0"
 
-# Ports engine (the only Miles engine): upstream Miles plus yeto compatibility
-# commits on michaellchung/miles ``yeto/ports``; fetched directly, no bundle.
-MILES_NEXT_REPOSITORY = "https://github.com/michaellchung/miles"
+# Ports engine (the only Miles engine): upstream Miles plus the yeto fork
+# commits (the k31/* branches and the frozen ports-v1 yeto/* branches) on
+# agentenv/miles; fetched directly, no bundle. Every commit this file registers
+# is reachable from an agentenv/miles branch.
+MILES_NEXT_REPOSITORY = "https://github.com/agentenv/miles"
 # Earlier homes of the fork that pinned images may still carry as their
-# /root/miles origin. Empty while the newer commits (d1616ba12 and its lineage)
-# live only on michaellchung/miles; the move to agentenv/miles lists the
-# michaellchung URL here.
-MILES_NEXT_FORMER_REPOSITORIES: tuple[str, ...] = ()
+# /root/miles origin. The fork moved from michaellchung/miles (kept, with the
+# same branches): every image built before the move (MILES_K31_IMAGE,
+# MILES_K31_NEXT9_IMAGE, MILES_PORTS_V1_IMAGE, ...) has that origin.
+MILES_NEXT_FORMER_REPOSITORIES: tuple[str, ...] = ("https://github.com/michaellchung/miles",)
 # Upstream radixark/miles base of the frozen ports-v1 lineage (yeto/ports ..
 # yeto/next2; the DiLoCo image 28bc6cc-2fa8801 runs it).
 MILES_PORTS_V1_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
@@ -252,7 +254,7 @@ SGLANG_K31_COMMIT = "35708f76dfb720f831f7028ddb68250b6caa8f12"
 # The sampler-side SGLang / vLLM pins (engine sampler, apart from the Miles image) live in
 # ``yeto/rl/sampler_pins.py``: the sampler adapters read them without importing this adapter.
 
-# Fork lineage on michaellchung/miles yeto/ports, oldest first (the ports-v1
+# Fork lineage on agentenv/miles yeto/ports, oldest first (the ports-v1
 # lineage, FROZEN: the DiLoCo runs keep this fork and image). Each entry is the
 # previous one plus the change named here; the newest is MILES_PORTS_V1_COMMIT.
 # Feature and GPU-evidence sets are derived from it through
