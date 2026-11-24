@@ -730,11 +730,14 @@ class NodeProfile(Node):
         return DeviceSetup((), host_numbers)
 
     def ssh_options(self) -> list[str]:
-        """``ssh`` options through :attr:`reach` (``ProxyJump`` for ``jump``, the relay's
-        ``ProxyCommand`` for ``relay``: :func:`yeto.node.transport.reach_options`)."""
-        from yeto.node.transport import reach_options  # noqa: PLC0415 - yeto.node imports this module
+        """``ssh`` options through :attr:`reach`: the relay's ``ProxyCommand`` for ``relay``
+        (:func:`yeto.node.transport.reach_options`); otherwise :meth:`Node.ssh_options`
+        (``ProxyJump``: a ``jump`` reach sets ``proxy_jump``)."""
+        if self.reach is not None and self.reach.mode == "relay":
+            from yeto.node.transport import reach_options  # noqa: PLC0415 - yeto.node imports this module
 
-        return reach_options(self.reach)
+            return reach_options(self.reach)
+        return super().ssh_options()
 
     def summary(self) -> dict[str, Any]:
         """What a member record and the dashboard show of the machine (no host, no paths)."""
