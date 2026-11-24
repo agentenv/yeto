@@ -604,6 +604,69 @@ def test_page_full_parameter_island_labels_its_gaps(tmp_path):
     assert "Groups trained / rolled out" in out["kpis"] and "952 / —" in out["kpis"]
     assert "not recorded" in out["kpis"] and "not trained yet" not in out["kpis"]
     assert "lag1" not in out["matrix"] and "lag2" not in out["matrix"] and "since anchor" not in out["matrix"]
+    # the final-cut ack: an island's anchor below the syncer's committed version is its last applied one
+    assert "last applied · final v12 on the syncer" in out["matrix"]
+    assert "the final version is on the syncer" in out["matrix"]
+
+
+FP_L0 = D / "g5-fullparam" / "events" / "g5-v1-a-l0-modal.jsonl"
+
+
+def _with_trajectory_rewards(rewards: list[tuple[float, bool]]) -> tuple[Reducer, int]:
+    """g5-fullparam plus rl_trajectory_reward records of island 0's last trained round."""
+    r = load("g5-fullparam")
+    rid = max(x["rollout_id"] for x in lines(FP_L0) if x["event"] == "rl_round_trained")
+    t = r.max_ts
+    for i, (reward, aborted) in enumerate(rewards):
+        r.feed({"event": "rl_trajectory_reward", "island_id": 0, "rollout_id": rid, "sample_index": i,
+                "reward": reward, "aborted": aborted, "time_unix": t - 1}, source=str(FP_L0), offset=10**9 + i)
+    return r, rid
+
+
+def test_full_parameter_reward_reads_the_round_trajectory_mean(tmp_path):
+    """A full-parameter island's rl_round_trained has no reward_mean; its own rl_trajectory_reward
+    records of the round give the mean (an aborted trajectory is not counted)."""
+    r, rid = _with_trajectory_rewards([(1.0, False), (0.0, False), (0.0, False), (1.0, False), (1.0, True)])
+    view = r.page_view(now=r.max_ts)
+    row = next(x for x in view["islands"]["0"]["rounds"] if x["round"] == rid)
+    assert row["reward"] == pytest.approx(0.5) and row["reward_src"] == "trajectories"
+    card = next(c for c in view["overview"]["islands"] if c["id"] == "0")
+    assert card["reward"] == pytest.approx(0.5)
+    assert next(c for c in view["overview"]["islands"] if c["id"] == "1")["reward"] is None
+    out = _smoke(tmp_path, r)
+    assert "not recorded" not in out["kpis"] and "mean of its trajectory rewards" in out["kpis"]
+
+
+def test_a_reported_reward_mean_wins_over_the_trajectory_mean():
+    r, rid = _with_trajectory_rewards([(1.0, False), (0.0, False)])
+    r.page_view(now=r.max_ts)  # the trajectory mean filled in first
+    r.feed({"event": "rl_round_trained", "island_id": 0, "rollout_id": rid, "reward_mean": 0.9,
+            "time_unix": r.max_ts}, source=str(FP_L0), offset=10**9 + 99)
+    row = next(x for x in r.page_view(now=r.max_ts)["islands"]["0"]["rounds"] if x["round"] == rid)
+    assert row["reward"] == pytest.approx(0.9) and row["reward_src"] is None
+
+
+def _without_kl(rec: dict) -> dict:
+    rec = copy.deepcopy(rec)
+    for k in ("train_rollout_kl", "ppo_kl"):
+        (rec.get("train_metrics") or {}).pop(k, None)
+    return rec
+
+
+@pytest.mark.parametrize("marker", [
+    {"event": "rl_verl_island_start", "island_id": 0},
+    {"event": "rl_engine_selected", "island_id": 0, "rl_engine": "ports", "rl_backend": "verl"},
+])
+def test_a_verl_island_kl_reads_not_reported_by_verl(tmp_path, marker):
+    r = load("g5-fullparam", skip=lambda p: p.name == FP_L0.name)
+    recs = lines(FP_L0)
+    r.feed(dict(marker, time_unix=recs[0]["time_unix"]), source=str(FP_L0), offset=0)
+    for off, rec in enumerate(recs, start=1):
+        r.feed(_without_kl(rec), source=str(FP_L0), offset=off)
+    cards = {c["id"]: c for c in r.page_view(now=r.max_ts)["overview"]["islands"]}
+    assert cards["0"]["backend"] == "verl" and cards["1"]["backend"] is None
+    out = _smoke(tmp_path, r)
+    assert out["nodes"].count("not reported by verl") == 1
 
 
 def _fullparam_fragments(tmp_path, *, wire=None, overwrite=False) -> Reducer:
@@ -706,7 +769,9 @@ def _run_b_with_p1_records() -> tuple[Reducer, float, int]:
     ahead = merges[9]["step"] + 3  # no island has pushed it yet
     extra = (
         {"kind": "syncer_config", "fragments": 4, "shard_index": 0, "shard_count": 1, "learners": 2, "quorum": 1,
-         "pipeline": 2, "total_steps": 24, "last_step": 24, "outer_lr": 0.7, "time_unix": merges[0]["time_unix"] - 9},
+         "pipeline": 2, "total_steps": 24, "last_step": 24,
+         "outer_lr": 0.699999988079071,  # the float32 0.7 as a real syncer tape writes it
+         "time_unix": merges[0]["time_unix"] - 9},
         {"kind": "round_open", "global_step": ahead, "fragment": (ahead - 1) % 4, "attempt": 1, "base_version": 0,
          "members": [{"id": 0, "generation": 1}, {"id": 1, "generation": 1}], "quorum": 1, "time_unix": mid - 40},
         {"kind": "round_attempt_timeout", "global_step": ahead, "fragment": (ahead - 1) % 4, "attempt": 1,
@@ -727,7 +792,7 @@ def test_round_open_shows_a_pull_without_push_and_its_timeouts():
     r = next(x for x in d["rounds"] if x["step"] == ahead)
     assert (r["state"], r["attempt"], r["timeouts"], r["pushed"], r["pulled"]) == ("pull", 2, 1, [], ["0"])
     assert r["since"] == mid - 20 and r["age_s"] == 20  # the current attempt's PULL
-    assert (d["config"]["T"], d["config"]["tau"], d["config"]["lr"]) == (24, 2, 0.7)
+    assert (d["config"]["T"], d["config"]["tau"]) == (24, 2) and d["config"]["lr"] == pytest.approx(0.7)
     links = {t["id"]: t["syncer_link"] for t in d["trainers"]}
     assert links["0"] is None and links["1"]["state"] == "disconnected" and links["1"]["since"] == mid - 5
 
