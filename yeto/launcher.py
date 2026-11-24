@@ -1398,12 +1398,17 @@ def dry_run_plan(args) -> dict:
 
                 entry["island_role"] = {"role": role, "billing": billing(role),
                                         "rejoin": rejoin_source(role)}
-            if sample_roles.is_store_coupled(args) or sample_roles.is_synced_group(args):
-                # per-island role, learner 0 of 1; synced group
+            if (sample_roles.is_store_coupled(args) or sample_roles.is_synced_group(args)
+                    or sample_roles.is_external_pool_group(args)):
+                # per-island role, learner 0 of 1; synced group; trainers of external pools
                 entry["sample_role"] = sample_roles.island_args(
                     args, learner_id, len(specs)).rl_sample_role
             if learner_id in (bindings := sample_roles.sampler_bindings(args, len(specs))):
                 entry["feeds_trainer"] = bindings[learner_id]  # --rl-sampler-follow trainer
+            if (substore := sample_roles.island_substore(args, learner_id, len(specs))) is not None:
+                entry["sample_substore"] = substore  # trainer<k>, k the trainer's learner id
+            if learner_id in (pool_shards := sample_roles.island_buffer_shards(args, len(specs))):
+                entry["buffer_shards"] = pool_shards[learner_id]  # the external pools' shards
             if learner_id in (stops := sample_roles.sampler_stop_trainers(args, len(specs))):
                 entry["sampler_until_trainers_end"] = stops[learner_id]  # no fixed round count
             if learner_id == trainer_loop.held_island(args):
