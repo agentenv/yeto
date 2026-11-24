@@ -121,8 +121,9 @@ class Fleet:
     """A controller with a reconciler over pools on fake providers and one local store
     (the run store and the trainer's buffer store alike)."""
 
-    def __init__(self, tmp_path, members, *, slots=3):
+    def __init__(self, tmp_path, members, *, slots=3, data_path=False):
         self.objects = DirectoryObjectStore(tmp_path / "store")
+        self.data_path = data_path  # the pools' data path writes the store (in-shard end records)
         self.clock = Clock()
         self.store = dz.DesiredStore(self.objects)
         self.slots_n = slots
@@ -145,6 +146,12 @@ class Fleet:
         self.routes[name] = [FakeRoute()]
         self.fencers[name] = FakeFencer()
         ops = ProviderPoolOps(self.providers[name], self.routes[name][-1], self.fencers[name])
+        if self.data_path:
+            from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
+            from yeto.launch.pool.data_path import R2DataPath  # noqa: PLC0415
+
+            path = R2DataPath(ObjectRecords(self.objects))
+            ops.data_path = lambda: path
         config = PoolConfig(target=dz.pool_target(member) or 0, accounts=list(range(self.slots_n)), shard_base=name,
                             elastic=quiet_elastic())
         return IslandPool.from_doc(None, config, ops, control=control, clock=self.clock, log=lambda _m: None,
@@ -156,7 +163,7 @@ class Fleet:
         from yeto.launch.pool.island_pool import GuardedOps  # noqa: PLC0415
 
         slot.pool.ops = GuardedOps(ProviderPoolOps(self.providers[name], route, self.fencers[name]),
-                                   slot.pool.control.lock.guard)
+                                   slot.pool._guard_store)  # noqa: SLF001
 
     def change(self, fn):
         self.store.update(fn)
@@ -175,6 +182,7 @@ class Fleet:
 
 def test_a_pool_added_while_the_run_trains_is_consumed_without_a_trainer_restart(tmp_path, monkeypatch):
     monkeypatch.setenv(mt.MEMBER_TABLE_ENV, "1")
+    monkeypatch.setenv(mt.MEMBER_LANES_ENV, "*")  # run up sets it for a single trainer (its store is its lane)
     f = Fleet(tmp_path, [_member("nc", 1)])
     f.ticks()
     trainer = FileSampleBuffer(f.objects, batch_size=1, merge_shards=True, expected_shards=["nc-0"])
@@ -200,7 +208,7 @@ def test_a_target_change_in_the_desired_state_scales_the_pool(tmp_path):
 
 def test_a_removed_pool_drains_retires_its_shards_and_releases_every_machine(tmp_path, monkeypatch):
     monkeypatch.setenv(mt.MEMBER_TABLE_ENV, "1")
-    f = Fleet(tmp_path, [_member("nc", 1), _member("old", 2)])
+    f = Fleet(tmp_path, [_member("nc", 1), _member("old", 2)], data_path=True)
     f.ticks()
     old_pool = f.c.slots["old"].pool
     control = old_pool.control
@@ -217,6 +225,12 @@ def test_a_removed_pool_drains_retires_its_shards_and_releases_every_machine(tmp
         assert control.allocator.ended(shard) is not None  # never issued again
     table = json.loads(f.objects.read(mt.table_key("old")))
     assert set(table["retired"]) == {"old-0", "old-1", "old-2"}
+    from yeto.rl.engine.sample_buffer import shard_index as _index  # noqa: PLC0415
+
+    # REV #758: the never ordered number got its in-shard data end before its end record
+    assert FileSampleBuffer(f.objects, batch_size=1, index=_index("old-2")).data_ended
+    applied = f.store.read_applied()
+    assert applied["generation"] == 2 and applied["removing"] == []  # the removal is recorded as done
     # the trainer's data end does not wait for the removed pool's shards
     trainer = FileSampleBuffer(f.objects, batch_size=1, merge_shards=True,
                                expected_shards=["old-0", "old-1", "old-2", "nc-0"])
@@ -246,6 +260,39 @@ def test_a_config_change_rolls_the_pool_one_member_at_a_time(tmp_path, spare):
     assert not pool.roll_tickets and any(e["event"].endswith("roll_done") for e in pool.events.events)
     replaced = [m for m in pool.members if m.state == GONE]
     assert len(replaced) == 4
+
+
+def test_a_lost_lock_while_removing_detaches_and_ends_nothing(tmp_path):
+    """REV #758: another controller took the removed pool's lock: this one detaches it (no
+    drain, no end record) and keeps the removal in fleet/applied.json for the new holder."""
+    f = Fleet(tmp_path, [_member("nc", 1), _member("old", 2)])
+    f.ticks()
+    old_pool = f.c.slots["old"].pool
+    f.change(lambda d: d["members"].pop(1))
+    f.clock.t += 601
+    store_state.open_pool_control(f.objects, "old", "old", clock=f.clock)  # the lease ran out: taken over
+    f.ticks(4)
+    assert old_pool.detached and not old_pool.stopped
+    assert f.providers["old"].released == []  # nothing drained from here
+    assert all(old_pool.control.allocator.ended(s) is None for s in ("old-0", "old-1"))
+    assert "old" in f.reconciler.removing
+    assert [m["name"] for m in f.store.read_applied()["removing"]] == ["old"]
+    assert len(f.c.slots["nc"].pool.live()) == 1
+
+
+def test_a_removal_waits_for_a_busy_tick_lock_and_never_blocks_the_reconcile(tmp_path):
+    f = Fleet(tmp_path, [_member("nc", 1), _member("old", 1)])
+    f.ticks()
+    f.change(lambda d: d["members"][1]["pool"].update(spec="v2.json"))
+    lock = f.c.slots["old"].tick_lock
+    lock.acquire()  # a tick of "old" in flight
+    try:
+        f.reconciler.step(f.c, force=True)  # returns at once: the new config waits for the lock
+        assert "old" in f.reconciler.pending_rolls
+    finally:
+        lock.release()
+    f.reconciler.step(f.c)
+    assert "old" not in f.reconciler.pending_rolls and f.c.slots["old"].pool.roll_tickets
 
 
 def test_a_pool_whose_build_fails_is_reported_and_the_others_go_on(tmp_path):
@@ -307,6 +354,93 @@ def test_run_up_store_mode_drives_the_desired_pools(tmp_path, monkeypatch):
         assert set(c.slots) == {"nc"}
     finally:
         c.stop("test end")
+
+
+def test_desired_changes_made_while_detached_are_applied_by_the_next_controller(tmp_path, monkeypatch):
+    """REV #758: the applied generation is kept in the store; a controller started after a detach
+    applies what changed meanwhile: a removed pool is drained and retired, a target is applied."""
+    from tests.test_rollout_entry import _NoThread  # noqa: PLC0415
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    up, cfg, _ = _store_run(tmp_path, monkeypatch, objects)
+    clock = Clock()
+    providers = {name: FakeProvider(name, clock) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(providers[name], FakeRoute(), FakeFencer()) for name in providers}
+    c = up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+    for _ in range(3):
+        c.tick()
+        clock.t += 30
+    assert all(p.live() for p in c.pools.values())
+    c.detach("test")
+    store = dz.DesiredStore(objects)
+    assert store.read_applied()["generation"] == 1
+
+    def change(d):
+        d["members"] = [m for m in d["members"] if m["name"] != "modal"]
+        d["members"][0]["pool"]["target"] = 2
+
+    store.update(change)  # generation 2, written while no controller runs
+    run = up.Run(cfg)
+    again = run.start_controller(ops=ops, thread_cls=_NoThread)
+    try:
+        assert set(again.slots) == {"nc", "modal"}  # the applied pools: modal is still billed
+        assert again.reconciler.applied == 1
+        again.reconciler.poll_s = 0
+        for _ in range(8):
+            again.tick()
+            clock.t += 30
+        assert set(again.slots) == {"nc"} and len(again.pools["nc"].live()) == 2
+        assert sorted(providers["modal"].released) == sorted(providers["modal"].machines)
+        assert store.read_applied()["generation"] == 2 and store.read_applied()["removing"] == []
+        assert [r.name for r in run.pools] == ["nc"]
+    finally:
+        again.stop("test end")
+
+
+def test_run_down_stops_every_pool_the_fleet_drives(tmp_path, monkeypatch, capsys):
+    """REV #758: run down on the store control plane stops a pool `yeto fleet apply` added and one
+    still being removed, and reports a store pool with live members that no config names."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    up, cfg, _ = _store_run(tmp_path, monkeypatch, objects)
+    store = dz.DesiredStore(objects)
+    seed = store.apply(dz.from_run_config(cfg), expect=0)
+    modal = dz.sampler_pools(seed)["modal"]
+    added = {**modal, "name": "modal2", "pool": {**modal["pool"], "shard_base": "mod2"}}
+    store.apply({"members": [m for m in seed["members"] if m["name"] != "modal"] + [added]}, expect=1)
+    store.write_applied(1, dz.sampler_pools(seed), {})  # the controller still drives "modal" (being removed)
+    objects.write(store_state.state_key("ghost"), json.dumps(
+        {"members": [{"ticket": "g1", "state": "ready"}]}).encode())
+    run = up.Run(cfg)
+    calls = []
+    monkeypatch.setattr(run, "_cmd", lambda argv, **kw: calls.append([str(a) for a in argv]) or 0)
+    monkeypatch.setattr(run, "lock_for_down", lambda *a, **kw: True)
+    monkeypatch.setattr(run, "sandbox_hosts", lambda: [])
+    assert run.down() is False  # the ghost pool's live member is reported, not silently left
+    out = capsys.readouterr().out
+    assert "pool ghost of the store holds live member(s) ['g1']" in out
+    assert "NOT verified (pool ghost (store state only: 1 live member(s) not stopped))" in out
+    stopped = [a[a.index("--config") + 1] for a in calls if "pool-stop" in a]
+    assert sorted(ref.name for ref in run.pools) == ["modal", "modal2", "nc"]
+    assert sorted(stopped) == sorted(ref.config for ref in run.pools)
+
+
+def test_fleet_apply_refuses_a_scale_up_the_run_would_refuse(tmp_path, monkeypatch, capsys):
+    from yeto.cli import build_parser  # noqa: PLC0415
+    from yeto.launch.pool import fleet_cli  # noqa: PLC0415
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    up, cfg, path = _store_run(tmp_path, monkeypatch, objects)
+    store = dz.DesiredStore(objects)
+    seed = store.apply(dz.from_run_config(cfg), expect=0)
+    monkeypatch.setattr(up.Run, "scale_refusal",
+                        lambda self, wanted, i=0: "budget" if self.pools[i].name == "nc" and wanted > 1 else None)
+    doc = json.loads(json.dumps(seed))
+    doc["members"][0]["pool"]["target"] = 5
+    doc_path = tmp_path / "d.json"
+    doc_path.write_text(json.dumps(doc))
+    args = build_parser().parse_args(["fleet", "apply", "--config", path, "--file", str(doc_path)])
+    assert fleet_cli.main(args) == 4 and store.generation() == 1
+    assert "refused: pool nc target 5: budget" in capsys.readouterr().err
 
 
 def test_fleet_apply_refuses_a_stale_generation_and_dry_runs(tmp_path, monkeypatch, capsys):
@@ -401,3 +535,16 @@ def test_run_scale_without_the_store_control_plane_is_byte_for_byte_as_before(tm
     assert rcs == golden["rcs"]
     assert [[str(a).replace(str(tmp_path), "<T>") for a in c] for c in calls] == golden["calls"]
     assert out == golden["out"]
+
+
+def test_run_scale_branches_without_the_store_control_plane_match_main(tmp_path):
+    """REV #758: more branches of the default control plane's run scale (retire, force-static,
+    source, provider, ticket lookup, an unknown pool, rc passthrough, a single `pool` run,
+    state.scales), against a golden captured on main before the desired state."""
+    from pathlib import Path  # noqa: PLC0415
+
+    from tests.fleet_run_scale_branches import run_scale_branches  # noqa: PLC0415
+
+    golden = json.loads((Path(__file__).parent / "fixtures" / "run_scale_local_control_plane_branches.json")
+                        .read_text())
+    assert run_scale_branches(tmp_path) == golden

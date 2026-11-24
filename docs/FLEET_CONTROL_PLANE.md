@@ -30,6 +30,7 @@ customer path (`examples/k31/`) does not use it.
 | Key | Written by | Content |
 |---|---|---|
 | `fleet/desired.json`, `fleet/desired/<generation>.json` | `yeto fleet apply`, `yeto run scale`, the first `run up` | The fleet's desired state (below). |
+| `fleet/applied.json` | The controller | The generation it applied last, its pools, and the pools it is still removing. |
 | `fleet/pools/<pool>/state.json` | The holder of the pool's lock | The pool state: members, orders, shards, budget use, pending handoffs. |
 | `fleet/pools/<pool>/lock/<token>.json`, `.lease` | The controller | The pool's single-writer lock. The token is a fencing token. |
 | `fleet/shards/<shard_base>/<n>.json`, `ended/<shard>.json` | The pool's lock holder | The shard number allocator. Each number is issued once. End records of shards that ended for good. |
@@ -77,18 +78,38 @@ A pool on the store control plane publishes every shard it has ever assigned in
 `fleet/members/<pool>.json`. `epoch` goes up by one on each change.
 
 `run up` starts the trainer with `--island-env YETO_RL_MEMBER_TABLE=1`. With that
-variable set, the trainer reads the tables before each round and adds new shards to the
+variable set, the trainer reads the tables (at most every 15 s) and adds new shards to the
 shards it consumes. `--rl-buffer-shards` is still the initial set. The trainer never
 drops a shard, and a shard listed as `retired` never holds the data end.
+
+The trainer follows only the tables of its own lanes:
+
+- `YETO_RL_MEMBER_LANES` lists them: lane prefixes separated by commas, or `*` for every
+  table in the trainer's store. A table's `shard_base` is in a lane `L` when it is `L` or
+  starts with `L-`.
+- Without the variable, the lanes are the bases of the initial `--rl-buffer-shards`.
+- A single trainer gets `*` from `run up`: its store prefix is its one lane, and a pool
+  added while it trains has a new `shard_base`.
+- A table outside the lanes is ignored and reported once (`rl_member_table_ignored`).
+
+At the end of the data, `run up` also ends every member-table shard that did not end (a
+sampler that was fenced or lost).
 
 ## Pool workers, blocked pools, detach
 
 On the store control plane the controller is a supervisor:
 
 - **One worker thread per pool.** A pool whose provider call hangs is reported once as
-  `pool_blocked` (`run status`: `blocked_s`) while the others tick on.
-- **A worker that dies is restarted.** The pool reloads its state from the store first.
-- **Releases run in the background.** A tick only decides.
+  `pool_blocked` (`run status`: `blocked_s`; the dashboard shows a warning until
+  `pool_unblocked`) while the others tick on.
+- **A worker that dies is restarted** after a backoff, without holding the other pools.
+  The pool reloads its state from the store and keeps every member it holds that the store
+  copy does not (one ordered after a failed save).
+- **Releases run in the background.** A tick only decides. A stop waits at most 60 s for a
+  release still running; a hung one stays draining and is reported as left.
+- **A stop or detach that gives up on a blocked tick** (after `join_s`) detaches that pool:
+  when the tick returns it orders, starts and fences nothing more. Its state is saved and
+  its store lock released only then, so whatever the tick did is recorded.
 
 ```bash
 yeto run detach --config run.json   # the controller stops driving the pools; no drain
@@ -100,9 +121,10 @@ locks, so the next `run up` does not wait for the lease to run out.
 
 ## Starting with the pools that pass
 
-A `samplers` entry may set `"required": false`. If such a pool fails its preflight (the
-shard, field or consistency checks, or its pool dry-run), it is **degraded**: it is left
-out of this `run up`, and the run starts with the other pools.
+A `samplers` entry may set `"required": false`. If such a pool fails its pool dry-run
+(credentials, capacity, the provider not answering), it is **degraded**: it is left out of
+this `run up`, and the run starts with the other pools. A config error (the shard, field or
+consistency checks) still refuses the start. The key works on both control planes.
 
 You can see a degraded pool in:
 
@@ -113,6 +135,9 @@ You can see a degraded pool in:
 
 `run up` still refuses to start when a `required` pool fails (the default), when no pool
 is left, or when a fleet island is left without any pool.
+
+The dashboard reads both the legacy and the neutral event names (below), so a tape written
+before, during or after the compatibility window folds the same way.
 
 ## Pool event names
 
@@ -167,8 +192,16 @@ The controller compares the new generation with the one it applied before, pool 
 |---|---|
 | A pool added | A worker starts and orders. The trainer consumes the pool's shards from the member table without a restart. |
 | `target` changed | The new target goes through `pool-scale` with its usual checks. |
-| Anything else of the pool entry changed | **Rolling replacement.** New members start with the new config. Old members are replaced one at a time: make before break when a slot is free, otherwise one member is fenced and handed on at a time. At most one member is short at any time. `shard_base` cannot change in place (remove the pool and add a new one). |
-| A pool removed | Its target goes to 0, and the scale-down fences and drains its members (their claims go back to the ledger). Then every shard the pool was issued is ended for good (allocator end records, `retired` in the member table), its machines are released and confirmed ended, and the pool is dropped. |
+| Anything else of the pool entry changed | **Rolling replacement.** New members start with the new config. Old members are replaced one at a time: make before break when a slot is free, otherwise one member is fenced and handed on at a time. At most one member is short at any time. The `shard_base`, the provider and the slots (`accounts`) cannot change in place: remove the pool and add a new one. |
+| A pool removed | Its target goes to 0, and the scale-down fences and drains its members (their claims go back to the ledger). Then every shard the pool was issued is ended for good: a number never ordered gets a data end record in its shard, every shard gets an allocator end record and `retired` in the member table. Then its machines are released and confirmed ended, and the pool is dropped. |
+
+The controller records each applied generation in `fleet/applied.json`. A controller that
+starts after a detach or a crash builds the pools of that generation, including the ones it
+was still removing, and then applies every newer generation. A change made while no
+controller ran is never lost: a removed pool is still drained, retired and released.
+
+The reconcile never waits for a pool's tick. A new config waits until the pool's tick lock
+is free. The end of a removal runs on the pool's own worker.
 
 A pool's own target changes between two generations are not undone. Examples are a
 manual release the pool detected, or an automatic scaler.
@@ -187,6 +220,14 @@ yeto run scale --config run.json --pool nc --remove <ticket>
 
 `yeto fleet apply` exits with 3 when the store is no longer at `--generation`. Run
 `yeto fleet show` again and apply your change to that generation.
+
+A scale up (a target raised, a pool added) goes through the run's own check first, like
+`yeto run scale`: the run's breaker and the budget. If the check refuses it, `fleet apply`
+exits with 4 and writes nothing.
+
+`yeto run down` stops every pool the fleet drives: the desired state's, the ones it is
+still removing, and the run config's. A pool state in the store with live members that
+none of them names is reported, and `run down` is then not verified.
 
 ### Adding a pool
 

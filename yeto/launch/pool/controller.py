@@ -96,6 +96,9 @@ class PoolSlot:
     # pool is detached (nothing more is ordered, started or fenced), and its state save and
     # store lock release run when that tick returns, so whatever it did is recorded
     close_pending: str | None = None
+    # the end of a removal (the desired state's reconcile): run by the pool's own tick, in
+    # place of a tick, so a provider call that hangs there holds this pool only
+    pending_finish: Callable[[], Any] | None = None
 
 
 class RolloutController:
@@ -205,6 +208,13 @@ class RolloutController:
             if self.stopped or self.detached or pool.stopped or pool.detached:
                 if pool.detached and not slot.closed:
                     self._close_slot(name, slot)  # its store lock went to another controller
+                return
+            finish, slot.pending_finish = slot.pending_finish, None
+            if finish is not None:
+                try:
+                    finish()
+                except Exception as error:  # noqa: BLE001 - the reconcile asks again at its next pass
+                    self.log(f"rollout: pool {name}: the end of its removal failed: {error!r}")
                 return
             slot.tick_began = time.monotonic()
             try:

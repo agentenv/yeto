@@ -602,6 +602,7 @@ class Run:
         self.controller: Any = None  # controller: in_process -> the RolloutController of every pool
         # why run up refuses this config's breakers section (set by scale: a scale that adds nodes is refused)
         self.breakers_refusal: str | None = None
+        self.applied_desired: dict[str, Any] | None = None  # store control plane: fleet/applied.json (adopt_desired)
         self.auto_backlog = self._derive_auto_backlog()
 
     def _derive_auto_backlog(self) -> dict[str, Any] | None:
@@ -1533,8 +1534,22 @@ class Run:
         if names != [ref.name for ref in self.pools]:
             _log(f"fleet: the desired state (generation {doc['generation']}) drives pool(s) {names}; the run config "
                  f"lists {[ref.name for ref in self.pools]}: the desired state wins (`yeto fleet show`)")
-        if names:
-            self.pools = resolve(self._desired_cfg(doc), self.dir)
+        try:  # what the controller applied: pools it still drives or removes that the desired state dropped
+            self.applied_desired = store.read_applied()
+        except Exception as error:  # noqa: BLE001 - the desired state's pools only
+            _log(f"fleet: the applied state was not read ({type(error).__name__}: {error})")
+            self.applied_desired = None
+        members = list(sampler_pools(doc).values())
+        if self.applied_desired is not None:
+            extra = {m["name"]: m for m in [*(self.applied_desired.get("members") or ()),
+                                            *(self.applied_desired.get("removing") or ())]
+                     if m.get("kind") == "sampler_pool" and m.get("name") not in sampler_pools(doc)}
+            if extra:
+                _log(f"fleet: pool(s) {sorted(extra)} are no longer desired but still applied (being removed): "
+                     "driven until drained")
+            members += list(extra.values())
+        if members:
+            self.pools = resolve(self._desired_cfg({"members": members}), self.dir)
         return doc
 
     def _reconciler(self, store_kw: dict[str, Any], doc: dict[str, Any] | None, ops: Any) -> Any:
@@ -1561,13 +1576,14 @@ class Run:
             self.pools = [r for r in self.pools if r.name != name] + [ref]
             return slot
 
-        def set_target(name: str, slot: Any, target: int, retire: list[str], mode: Any) -> None:
+        def set_target(name: str, slot: Any, target: int, retire: list[str], mode: Any, *,
+                       generation: int | None = None) -> None:
             ref = next((r for r in self.pools if r.name == name), None)
             if ref is None or slot.pool.scale_path is None:
                 slot.pool.set_target(target, retire=retire, mode=mode, source="desired")
                 return
             rc = pool_run.scale_pool(ref.load(), ref.config, target, retire=retire, mode=mode, source="manual",
-                                     extra={"desired_generation": reconciler.applied + 1})
+                                     extra={"desired_generation": generation})
             if rc != 0:
                 raise RuntimeError(f"pool-scale refused target {target} (rc={rc}; its log line says why)")
 
@@ -1577,12 +1593,20 @@ class Run:
             pool = slot.pool
             if str(cfg.get("shard_base")) != pool.config.shard_base:
                 raise ValueError("shard_base cannot change in place: remove the pool and add a new one")
+            old_ref = next((r for r in self.pools if r.name == name), None)
+            if old_ref is not None and old_ref.kind() != ref.kind():
+                raise ValueError(f"the provider cannot change in place ({old_ref.kind()} -> {ref.kind()}): its old "
+                                 "members would be released through the new provider; remove the pool and add a "
+                                 "new one")
             pc = nc_cli.pool_config(cfg, allowed=None if not pool_run.is_national_compute(cfg)
                                     else nc_cli.allowed_accounts())
+            if list(pc.accounts) != list(pool.config.accounts):
+                raise ValueError(f"the {pool.config.slot_name}s cannot change in place ({pool.config.accounts} -> "
+                                 f"{pc.accounts}); remove the pool and add a new one")
             pc.target, pc.index_limit = pool.config.target, pool.config.index_limit
             new_ops = (ops or {}).get(name) or nc_cli.pool_ops(cfg)
-            pool.config = pc
-            pool.ops = GuardedOps(new_ops, pool.control.lock.guard) if pool.control is not None else new_ops
+            pool.config = pc  # under the pool's tick lock (the reconcile): no tick runs with the old ones
+            pool.ops = GuardedOps(new_ops, pool._guard_store) if pool.control is not None else new_ops  # noqa: SLF001
             self.pools = [ref if r.name == name else r for r in self.pools]
 
         def removed(name: str) -> None:
@@ -1590,7 +1614,8 @@ class Run:
 
         reconciler = FleetReconciler(store, ReconcileHooks(add=add, set_target=set_target, reconfigure=reconfigure,
                                                            removed=removed), log=_log)
-        reconciler.start_from(doc)
+        # from what the last controller applied (a detach, a crash): the changes made since are applied
+        reconciler.start_from(doc, applied=self.applied_desired)
         return reconciler
 
     def _undriven_banner(self) -> None:
@@ -3157,6 +3182,8 @@ class Run:
             time.sleep(10)
         if self._cmd(self.yeto("down", "--missing-ok", self.trainer_launch_name()), log="down.log", timeout=900) != 0:
             failed.append("trainer (yeto down: cloud/Modal teardown not confirmed)")
+        if rollout_section(self.cfg).get("control_plane") == "store":
+            failed += self._store_pools_for_down()
         for path in self.pool_configs:
             if self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) != 0:
                 failed.append(f"pool-stop {path}")
@@ -3185,6 +3212,38 @@ class Run:
         self.mark("down", ok=ok)
         _log("down: " + ("verified" if ok else f"NOT verified ({'; '.join(failed)}), see down.log"))
         return bool(ok)
+
+    def _store_pools_for_down(self) -> list[str]:
+        """Store control plane: ``run down`` stops every pool the fleet drives (the desired
+        state's, a pool ``yeto fleet apply`` added, one still being removed), not only the run
+        config's. A pool whose store state holds live members that none of them names is
+        reported (its config is unknown here: ``nc pool-stop`` needs it)."""
+        try:
+            self.adopt_desired()
+        except Exception as error:  # noqa: BLE001 - the run config's pools are stopped; the verdict says so
+            _log(f"down: the fleet's desired state was not read ({type(error).__name__}: {error})")
+            return ["the fleet's desired state was not read: pools added with `yeto fleet apply` may be left"]
+        from yeto.launch.pool import store_state  # noqa: PLC0415
+
+        known = {ref.name for ref in self.pools}
+        out = []
+        try:
+            objects = self._objects()
+            names = sorted({key.split("/")[2] for key in objects.list("fleet/pools/")
+                            if key.endswith("/state.json") and key.count("/") == 3})
+            for name in names:
+                if name in known:
+                    continue
+                doc = store_state.read_state(objects, name) or {}
+                live = [m.get("ticket") for m in doc.get("members") or () if m.get("state") != "gone"]
+                if live:
+                    _log(f"down: CRITICAL: pool {name} of the store holds live member(s) {live} but no config names "
+                         "it: not stopped (`yeto fleet show`, then `yeto fleet apply` it back and run down again)")
+                    out.append(f"pool {name} (store state only: {len(live)} live member(s) not stopped)")
+        except Exception as error:  # noqa: BLE001
+            _log(f"down: the store's pool states were not listed ({type(error).__name__}: {error})")
+            out.append("the store's pool states were not listed")
+        return out
 
     def status(self) -> dict[str, Any]:
         if rollout_section(self.cfg).get("control_plane") == "store":
