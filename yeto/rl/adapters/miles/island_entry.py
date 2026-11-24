@@ -1097,11 +1097,15 @@ def _private_trajectory_evidence_dir(args) -> Path:
 
 
 def _roster_generations(args) -> tuple[int, ...]:
-    """The launcher's island roster: every peer at generation 0, this island at its own."""
+    """The launcher's island roster: every peer at generation 0, this island at its own;
+    ``--sync-max-learners`` (island pool) spans every admissible id instead."""
+    from yeto.rl.engine.full_parameter_stream import roster_generations
 
-    generations = [0] * int(getattr(args, "num_learners", 1))
-    generations[args.learner_id] = int(getattr(args, "learner_generation", 0))
-    return tuple(generations)
+    if getattr(args, "sync_max_learners", None) is not None and not getattr(args, "rl_island_pool", False):
+        raise ValueError("--sync-max-learners needs an island pool (--rl-island-pool)")
+    return roster_generations(args.learner_id, int(getattr(args, "num_learners", 1)),
+                              int(getattr(args, "learner_generation", 0)),
+                              getattr(args, "sync_max_learners", None))
 
 
 def _full_parameter_async(args) -> bool:

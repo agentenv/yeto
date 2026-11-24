@@ -99,10 +99,17 @@ def test_quorum_theta_replaces_the_count_quorum(preset):
         _plan(preset + ("--rl-sync-quorum-theta", "0.75") + QUORUM)
 
 
-@pytest.mark.parametrize("preset", [(), DECOUPLED], ids=["strict-avg", "decoupled"])
+@PRESETS
 def test_max_learners_reaches_the_syncer(preset):
+    _, baseline = _plan(preset + QUORUM + ("--rl-sync-island-lease-s", "150"))
     _, plan = _plan(preset + QUORUM + ("--rl-sync-max-learners", "5"))
     assert " --island-lease-s 150.0 --max-learners 5 --syncer-epoch 0" in _syncer(plan)
+    assert _syncer(plan).replace(" --max-learners 5", "", 1) == _syncer(baseline)
+    # full-parameter islands bind the roster 0..4 into their session contract;
+    # the other presets' islands carry no roster, so their commands stay the same
+    roster = " --sync-max-learners 5" if preset == FULL_ASYNC else ""
+    for pooled, fixed in zip(_islands(plan), _islands(baseline), strict=True):
+        assert roster in pooled and pooled.replace(roster, "", 1) == fixed
     with pytest.raises(ValueError, match="at least the 3 islands"):
         _plan(preset + QUORUM + ("--rl-sync-max-learners", "2"))
 
@@ -132,12 +139,10 @@ def test_pool_island_configs_carry_the_lease_and_epoch():
     [
         (FULL_PARAMETER + ("--rl-sync-island-lease-s", "30"),
          "membership options need --rl-sync-full-parameter-rounds async"),
-        (FULL_ASYNC + QUORUM + ("--rl-sync-max-learners", "4"),
-         "--rl-sync-max-learners does not apply to full-parameter"),
         (("--rl-sync-quorum-theta", "1.5"), r"in \(0, 1\]"),
         (QUORUM + ("--rl-sync-q-min", "0"), "q-min must be >= 1"),
     ],
-    ids=["full-parameter-sweep", "full-parameter-max-learners", "theta-range", "q-min"],
+    ids=["full-parameter-sweep", "theta-range", "q-min"],
 )
 def test_refusals(extra, message):
     from yeto.launcher import _prepare_rl_args, syncer_command

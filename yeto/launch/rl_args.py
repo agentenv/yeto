@@ -222,6 +222,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_local_init_fallback", False, "--rl-sync-local-init-fallback"),
     ("rl_sync_wait_timeout_s", 900.0, "--rl-sync-wait-timeout-s"),
     ("rl_sync_max_local_rounds_ahead", None, "--rl-sync-max-local-rounds-ahead"),
+    ("rl_fleet_trainer_shape", None, "--rl-fleet-trainer-shape"),
 )
 
 
@@ -824,9 +825,8 @@ def _check_island_pool(args, *, num_islands: int) -> None:
     check_stale_lag(args)
     max_learners = getattr(args, "rl_sync_max_learners", None)
     if max_learners is not None:
-        if preset == FULL_PARAMETER_SYNC_PRESET:
-            raise ValueError(f"--rl-sync-max-learners does not apply to {FULL_PARAMETER_SYNC_PRESET}: "
-                             "its island session binds the launched roster")
+        # full-parameter: the islands bind the roster 0..N-1 into their session
+        # contract (--sync-max-learners), so a later island joins the same session
         if int(max_learners) < num_islands:
             raise ValueError(f"--rl-sync-max-learners must be at least the {num_islands} islands")
     if getattr(args, "rl_sync_quorum_theta", None) is not None:
@@ -1516,9 +1516,10 @@ def _prepare_rl_args(
         args.rl_total_fragment_steps = args.total_steps * args.fragments
     elif args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET:
         _prepare_dense_full_sweep(args, num_islands=learners)
-        from .fragment_preflight import check_fragment_layout
+        from .fragment_preflight import check_fleet_shape, check_fragment_layout
 
         check_fragment_layout(args, per_island, specs)  # Miles: the island checks it after boot
+        check_fleet_shape(args)  # a new or migrated fleet island: its layout is the fleet's
     elif args.rl_sync_preset == SAO_STREAMING_SYNC_PRESET:
         _prepare_sao_streaming(args, num_islands=len(specs))
     elif not args.experimental_rl_sync:

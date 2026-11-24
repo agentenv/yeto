@@ -88,6 +88,30 @@ def initial_cut_timeout(configured: float, model_bytes: int, islands: int, *, lo
     moved = model_bytes * (1 if local_init else 1 + islands)
     return max(configured, moved / INITIAL_CUT_MIN_BYTES_PER_SECOND)
 
+
+def roster_generations(learner_id: int, num_learners: int, generation: int = 0,
+                       max_learners: int | None = None) -> tuple[int, ...]:
+    """The island roster a full-parameter session contract binds: every peer at
+    generation 0, this island at its own.
+
+    Without ``max_learners`` the roster is the ``num_learners`` launched islands
+    (the contract every existing run carries, unchanged). With the syncer's
+    ``--max-learners`` (launcher ``--rl-sync-max-learners``, an island pool) it
+    spans every admissible id ``0..max_learners``, so an island launched after
+    the run started (or relaunched under another id) binds the same contract as
+    the launched ones and the syncer admits it through re-JOIN and catch-up."""
+
+    size = int(num_learners) if max_learners is None else int(max_learners)
+    if max_learners is not None and size < int(num_learners):
+        raise ValueError(f"--sync-max-learners {size} is below --num-learners {num_learners}")
+    if not 0 <= int(learner_id) < size:
+        raise ValueError(f"learner id {learner_id} is outside the island roster 0..{size - 1}"
+                         + ("" if max_learners is not None else
+                            " (an island pool admits later ids with --rl-sync-max-learners)"))
+    generations = [0] * size
+    generations[int(learner_id)] = int(generation)
+    return tuple(generations)
+
 # Threads that hash local-init fragments (hashlib releases the GIL on large
 # buffers). SHA-256 itself is sequential, so the parallelism is across
 # fragments. Opt-in: unset or 1 keeps the serial hash (the default);

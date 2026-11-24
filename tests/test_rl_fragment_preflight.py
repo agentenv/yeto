@@ -156,3 +156,60 @@ def test_an_estimated_layout_warns_instead_of_refusing(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "[launcher] WARNING: --fragments 4 may not match: by estimate" in err
     assert "TP2 x PP2" in err
+
+
+# -- a new or migrated fleet island: its layout must be the fleet's (--rl-fleet-trainer-shape)
+
+TP4_ISLAND = "modal:8xh100"  # 4 trainer GPUs (--rl-rollout-gpus 4): TP4, DP1
+
+
+def _tp4_fragments() -> int:
+    return L.offline_layout(QWEN3_4B, tp=4, minimum_fragments=10, matrix_merge="avg").fragments
+
+
+def test_an_island_of_another_shape_is_refused_at_dry_run_with_both_layouts(monkeypatch):
+    fragments = _tp4_fragments()
+    tp2 = L.offline_layout(QWEN3_4B, tp=2, minimum_fragments=fragments, matrix_merge="avg")
+    with pytest.raises(ValueError) as refused:
+        _prepare(fragments, monkeypatch, gpu=TP4_ISLAND,
+                 extra=("--tensor-parallel", "4", "--rl-rollout-gpus", "4", "--rl-fleet-trainer-shape", "2"))
+    message = str(refused.value)
+    assert "differs from the fleet's" in message
+    assert f"fleet islands TP2 x PP1: {tp2.fragments} fragments over 2 trainer rank(s)" in message
+    assert f"this island TP4 x PP1: {fragments} fragments over 4 trainer rank(s)" in message
+    assert message.endswith("launch it at TP2 x PP1")
+
+
+def test_an_island_of_the_fleet_shape_launches_exactly_as_before(monkeypatch, capsys):
+    from yeto.launcher import dry_run_plan
+
+    def launch(extra):
+        args, _ = _prepare(10, monkeypatch, extra=extra)
+        return json.dumps(dry_run_plan(args), sort_keys=True, default=str), capsys.readouterr()
+
+    assert launch(("--rl-fleet-trainer-shape", "2x1")) == launch(())
+
+
+def test_without_the_model_config_the_shapes_themselves_are_compared(monkeypatch):
+    with pytest.raises(ValueError, match=r"trainer shape TP4 x PP1 differs from the fleet's TP2 x PP1 "
+                                         r"\(the layouts are not computable offline"):
+        _prepare(4, monkeypatch, config=None, gpu=TP4_ISLAND,
+                 extra=("--tensor-parallel", "4", "--rl-rollout-gpus", "4", "--rl-fleet-trainer-shape", "2"))
+    args, _ = _prepare(4, monkeypatch, config=None, extra=("--rl-fleet-trainer-shape", "2"))
+    assert args.rl_fleet_trainer_shape == "2"
+
+
+def test_the_fleet_shape_needs_the_full_parameter_preset_and_a_valid_shape(monkeypatch):
+    from yeto.launch.fragment_preflight import parse_trainer_shape
+    from yeto.launcher import _prepare_rl_args
+
+    assert parse_trainer_shape("2") == (2, 1) and parse_trainer_shape("4x2") == (4, 2)
+    for bad in ("", "0", "2x", "tp2", "2x2x2"):
+        with pytest.raises(ValueError, match="must be TP or TPxPP"):
+            parse_trainer_shape(bad)
+    args = _launcher_args("ports", ("--rl-sync-preset", "decoupled", "--fragments", "4",
+                                    "--local-rl-rounds-per-sync", "2", "--rl-fleet-trainer-shape", "2"),
+                          gpu=TWO_ISLANDS)
+    args.controller = "local"
+    with pytest.raises(ValueError, match="--rl-fleet-trainer-shape only applies to --rl-sync-preset full-parameter"):
+        _prepare_rl_args(args)
