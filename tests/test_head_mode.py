@@ -220,7 +220,10 @@ def test_launch_head_records_registry(fake_sky, fake_aws_env, monkeypatch, capsy
     # Pinned (yeto.sky_patches are verified per sky version) and the patch
     # hook is installed as a .pth for every head process, sky's API server
     # included (fix-verda-provider 2.3).
-    assert 'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]==0.14.3"' in head_task.setup
+    assert f'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]=={cli.HEAD_SKYPILOT_VERSION}"' in head_task.setup
+    from importlib.metadata import version
+
+    assert cli.HEAD_SKYPILOT_VERSION == version("skypilot")  # the head runs the sky this tree pins
     assert "from yeto.sky_patches import PTH_NAME, pth_line" in head_task.setup
     assert "cargo build --release --quiet" in head_task.setup
     assert "touch ~/.yeto_head_ready" in head_task.setup

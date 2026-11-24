@@ -31,16 +31,18 @@ def test_a_local_sky_api_server_of_another_version_is_refused_with_the_way_out()
     import sky
 
     mine = sky.__version__
+    other = "0.13.0"  # an older server: any version but this Python's
+    assert other != mine
     assert sky_patches.api_server_version_problem(_ServerCommon(mine), environ={}) is None
     assert sky_patches.api_server_version_problem(_ServerCommon(None, status="unhealthy"), environ={}) is None
-    msg, refuse = sky_patches.api_server_version_problem(_ServerCommon("0.13.0"), environ={})
-    assert refuse and "runs 0.13.0" in msg and f"runs SkyPilot {mine}" in msg
+    msg, refuse = sky_patches.api_server_version_problem(_ServerCommon(other), environ={})
+    assert refuse and f"runs {other}" in msg and f"runs SkyPilot {mine}" in msg
     assert "sky api stop; sky api start" in msg and "sky api start --port" in msg and "SKY_RUNTIME_DIR" in msg
-    msg, refuse = sky_patches.api_server_version_problem(_ServerCommon("0.13.0"),
+    msg, refuse = sky_patches.api_server_version_problem(_ServerCommon(other),
                                                          environ={"YETO_SKY_SERVER_MISMATCH": "allow"})
     assert not refuse and "proceeding" in msg
     msg, refuse = sky_patches.api_server_version_problem(
-        _ServerCommon("0.13.0", local=False, endpoint="https://sky.example"), environ={})
+        _ServerCommon(other, local=False, endpoint="https://sky.example"), environ={})
     assert not refuse and "https://sky.example" in msg  # a remote server: sky's supported setup, a warning
 
 

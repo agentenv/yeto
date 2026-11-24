@@ -5,8 +5,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from yeto import sky_patches
 from yeto.sky_patches import nebius as n
+
+VERIFIED = sorted(n.VERIFIED_SKY_VERSIONS)  # each verified sky version
 
 
 class _Compute:
@@ -22,9 +26,10 @@ def _module():
     return SimpleNamespace(nebius=adaptor, launch=lambda: None)
 
 
-def test_preemptible_spec_gets_follows_spot_price():
+@pytest.mark.parametrize("version", VERIFIED)
+def test_preemptible_spec_gets_follows_spot_price(version):
     m = _module()
-    assert n.apply(m, version="0.13.0") == (True, "")
+    assert n.apply(m, version=version) == (True, "")
     spec = m.nebius.compute().InstanceSpec(preemptible="P", resources="R")
     assert isinstance(spec["follows_spot_price"], _Compute.FollowsSpotPriceSpec)
     assert spec["preemptible"] == "P" and spec["resources"] == "R"
@@ -33,7 +38,7 @@ def test_preemptible_spec_gets_follows_spot_price():
 
 def test_on_demand_and_explicit_pricing_untouched():
     m = _module()
-    n.apply(m, version="0.13.0")
+    n.apply(m, version=VERIFIED[0])
     c = m.nebius.compute()
     assert c.InstanceSpec(preemptible=None, resources="R") == {"preemptible": None, "resources": "R"}
     assert "follows_spot_price" not in c.InstanceSpec(preemptible="P", spot_pricing_policy="X")
@@ -41,9 +46,9 @@ def test_on_demand_and_explicit_pricing_untouched():
 
 def test_version_guard_and_idempotent():
     m = _module()
-    ok, why = n.apply(m, version="0.14.0")  # verified: 0.13.0 and 0.14.3 only
-    assert not ok and "not in verified" in why
-    assert n.apply(m, version="0.13.0")[0] and n.apply(m, version="0.13.0") == (True, "already applied")
+    ok, why = n.apply(m, version="0.14.0")  # a version between the verified ones
+    assert "0.14.0" not in n.VERIFIED_SKY_VERSIONS and not ok and "not in verified" in why
+    assert n.apply(m, version=VERIFIED[0])[0] and n.apply(m, version=VERIFIED[0]) == (True, "already applied")
 
 
 def test_registered_and_in_pth_hook():
@@ -53,8 +58,11 @@ def test_registered_and_in_pth_hook():
 
 def test_sky_0143_spec_with_its_own_pricing_passes_unchanged():
     """sky 0.14.3 builds a spot spec with follows_spot_price itself: the patch adds nothing."""
+    from importlib.metadata import version
+
     m = _module()
-    assert n.apply(m, version="0.14.3") == (True, "")
+    assert version("skypilot") in n.VERIFIED_SKY_VERSIONS  # the pinned sky is a verified one
+    assert n.apply(m, version=version("skypilot")) == (True, "")
     own = object()
     spec = m.nebius.compute().InstanceSpec(preemptible="P", follows_spot_price=own)
     assert spec["follows_spot_price"] is own

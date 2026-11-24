@@ -400,7 +400,7 @@ def _patched(instances, **kw):
     from yeto.sky_patches import verda as vp
 
     m, fake = _fake_module(instances, **kw)
-    ok, why = vp.apply(m, version="0.13.0")
+    ok, why = vp.apply(m, version=min(vp.VERIFIED_SKY_VERSIONS))
     assert ok, why
     return m, fake
 
@@ -483,6 +483,7 @@ def test_patch_version_guard_leaves_sky_alone():
 
     m, _ = _fake_module([])
     before = (m.run_instances, m.query_instances, m.terminate_instances, m._filter_instances)
+    assert "0.14.0" not in vp.VERIFIED_SKY_VERSIONS
     ok, why = vp.apply(m, version="0.14.0")
     assert not ok and "0.14.0" in why
     assert (m.run_instances, m.query_instances, m.terminate_instances, m._filter_instances) == before
@@ -568,7 +569,7 @@ def test_install_patches_on_import_of_the_target(monkeypatch, ids_file):
 
     monkeypatch.setattr(patches, "_STATUS", {})
     m, _ = _fake_module([])
-    monkeypatch.setitem(sys.modules, "sky", SimpleNamespace(__version__="0.13.0"))
+    monkeypatch.setitem(sys.modules, "sky", SimpleNamespace(__version__=max(vp.VERIFIED_SKY_VERSIONS)))
     monkeypatch.setitem(sys.modules, vp.TARGET_MODULE, m)
     assert patches.install()[vp.TARGET_MODULE] == "applied"
     assert vp.is_patched(m)
@@ -733,7 +734,7 @@ def test_unverified_sky_disables_verda_recovery_only(monkeypatch, capsys):
     from yeto.sky_patches import verda as vp
     from tests.test_controller import FakeOps, RUNNING, SUCCEEDED
 
-    monkeypatch.setattr(vp, "verified_for_current_sky", lambda: (False, "sky 0.14.0 not in verified ['0.13.0']"))
+    monkeypatch.setattr(vp, "verified_for_current_sky", lambda: (False, f"sky 0.14.0 not in verified {sorted(vp.VERIFIED_SKY_VERSIONS)}"))
     monkeypatch.setattr("yeto.shape.providers.write_verda_sky_catalog", lambda: "/tmp/x.csv")
     prep = launcher.prepare_verda_islands(["l0"])
     err = capsys.readouterr().err
