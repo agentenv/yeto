@@ -562,6 +562,26 @@ What `run up` makes of it:
   `expert_selection_sha256` or `expert_trainable_sha256` refuses every release
   without that manifest, so the preflight refuses such a spec next to a
   generic partial-experts trainer (fleet or not): remove the two fields.
+- The preflight checks each island: its pools' shards are in its
+  `--rl-island-buffer-shards`, they write `trainer<k>` of their own island, they
+  record the same `rollout_fields` (and what the trainer trains on: R3 routed
+  experts, score_centering top-K), and their engine is a vLLM / SGLang server
+  that loads the release form (above). It prints the syncer's region and the
+  fleet's hourly budget estimate (pools + each island's trainer +
+  `syncer.usd_per_h`), and refuses a `breakers.pools` key that is not a
+  compiled pool name (`i<k>-<name>`).
+- The monitor judges each island in its own `trainer<k>`: the first-group wait
+  waits only for the islands without a group; `run.first_group`,
+  `run.starvation` and `run.release_stall` use each island's own thresholds and
+  report with the island's scope; each island's data ends once its pools
+  finished and the task ledger has nothing left for it (its shards are sealed),
+  and the fleet's once every island's did. `run.budget` (pools + every island
+  trainer for the launch's hours + the syncer) and `run.wall_clock` stop the
+  whole fleet. A stop trip of one island stops that island only: the fleet's one
+  `yeto launch` cannot end a single trainer island, so its pools are stopped
+  (`pool-stop`) and its trainer starves until its `trainer.sample_wait` ends it
+  and the launcher gives it up; once no island runs, the launch is stopped.
+  `yeto run status` shows each island under `fleet`.
 
 #### Miles sampler islands next to external pools
 
