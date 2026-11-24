@@ -15,7 +15,8 @@ from types import SimpleNamespace
 import pytest
 
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
-from test_rl_external_pool_follow import MOUNT, SHARDS, TWO, _islands, _prepared
+from test_rl_external_pool_follow import (MOUNT, SHARDS, TWO, _age_base, _identities, _islands, _prepared,
+                                         _session)
 from yeto.rl.engine import sample_roles
 from yeto.rl.engine.merged_release import OWN_LANE
 
@@ -170,3 +171,22 @@ def test_an_island_policy_age_of_a_mixed_group_names_the_learner():
     args.rl_island_max_policy_age = ["1:64"]
     with pytest.raises(PreflightError, match="trainer island 1: "):
         check_policy_age_spec(args)
+
+
+def test_trainers_of_a_mixed_group_with_different_policy_ages_share_one_session_contract():
+    """Learner 0 runs the launch limit 1, learner 1 its own 2: both bind the launch
+    limit, so the syncer admits both; the sampler island does not sync."""
+    from yeto.rl.adapters.miles import island_entry
+
+    args = _prepared(*MIXED, gpu=THREE, base=_age_base(1))
+    plan, _ = _islands(args)
+    (sampler, _sid), (t0, id0), (t1, id1) = _identities(args)
+    assert (t0.rl_max_policy_age, t1.rl_max_policy_age) == (1, 2)
+    assert t0.rl_contract_max_policy_age == t1.rl_contract_max_policy_age == 1
+    assert getattr(sampler, "rl_contract_max_policy_age", None) is None
+    commands = [f"{r['learner_command']} " for r in plan["island_requests"]]
+    assert "--rl-contract-max-policy-age" not in commands[0]
+    assert all(" --rl-contract-max-policy-age 1 " in c for c in commands[1:])
+    assert id0 == id1 == island_entry._backend_identity_sha256(
+        SimpleNamespace(rl_engine="ports", rl_max_policy_age=1))
+    assert _session(id0) == _session(id1)

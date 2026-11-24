@@ -50,6 +50,12 @@ SUPPORT = PolicyAgeSupport(backend="miles", stage=3, max_policy_age=4,
 MAX_ROLLOUT_AHEAD = 1
 
 PARTIAL_ROLLOUT_FLAGS = ("--partial-rollout",)
+# Every Miles flag policy_age_argv derives from the limit (one value each) and every
+# switch. A trainer of external pools with per-island limits leaves them out of its
+# training contract (island_entry._dense_shared_miles_argv).
+POLICY_AGE_MILES_FLAGS = frozenset({"--agentic-suspend-max-rounds", "--max-weight-staleness"})
+POLICY_AGE_MILES_SWITCHES = frozenset({*PARTIAL_ROLLOUT_FLAGS, "--agentic-suspend-between-turns",
+                                       "--fully-async"})
 AGENTIC_GENERATE = "miles.rollout.generate_hub.agentic_tool_call.generate"
 # Agent functions whose module defines the suspend()/resume() hooks Miles calls
 # under --agentic-suspend-between-turns (model-turn gate, survival limit).

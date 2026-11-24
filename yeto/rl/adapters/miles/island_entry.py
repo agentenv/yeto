@@ -1361,12 +1361,16 @@ def _lora_config_hash(args: Any, canonical_targets: Sequence[str]) -> str:
 
 
 def _dense_shared_miles_argv(
-    miles_argv: Sequence[str], *, per_island_placement: bool = False, shape_free: bool = False
+    miles_argv: Sequence[str], *, per_island_placement: bool = False, shape_free: bool = False,
+    island_policy_age: bool = False,
 ) -> list[str]:
     """``miles_argv`` without the island-local flags and their values.
 
     ``per_island_placement`` also drops the placement flags and switches;
-    ``shape_free`` (a shape-free full-parameter layout) the parallel-shape ones.
+    ``shape_free`` (a shape-free full-parameter layout) the parallel-shape ones;
+    ``island_policy_age`` (per-island policy-age limits, ``--rl-contract-max-policy-age``)
+    the Miles flags derived from the island's own limit (``policy_age_argv``): the
+    launch-wide limit bound into the backend identity stands for them.
     """
 
     local_flags = _DENSE_ISLAND_LOCAL_MILES_FLAGS | _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS
@@ -1377,6 +1381,11 @@ def _dense_shared_miles_argv(
     if shape_free:
         local_flags |= _SHAPE_FREE_PARALLEL_MILES_FLAGS
         local_switches |= _SHAPE_FREE_PARALLEL_MILES_SWITCHES
+    if island_policy_age:
+        from .policy_age import POLICY_AGE_MILES_FLAGS, POLICY_AGE_MILES_SWITCHES
+
+        local_flags |= POLICY_AGE_MILES_FLAGS
+        local_switches |= POLICY_AGE_MILES_SWITCHES
     shared_argv = []
     index = 0
     while index < len(miles_argv):
@@ -1417,7 +1426,8 @@ def _dense_full_training_contract_sha256(
     per_island_placement = bool(getattr(args, "rl_per_island_placement", False))
     shape_free = shape_free_layout_contract(args)
     shared_argv = _dense_shared_miles_argv(
-        miles_argv, per_island_placement=per_island_placement, shape_free=shape_free is not None
+        miles_argv, per_island_placement=per_island_placement, shape_free=shape_free is not None,
+        island_policy_age=getattr(args, "rl_contract_max_policy_age", None) is not None,
     )
     explicit_rollout_seed = getattr(args, "rollout_seed", None)
     rollout_seed_contract = (
@@ -1702,12 +1712,24 @@ def _backend_identity_sha256(args) -> str:
     from yeto.rl.engine.policy_age import bind_policy_age
 
     # agentic-rollout-utilization 2.1: a non-zero policy-age limit is bound into
-    # the identity the syncer compares (limit 0: unchanged).
+    # the identity the syncer compares (limit 0: unchanged). A trainer of external
+    # pools with per-island limits binds the launch-wide one instead
+    # (--rl-contract-max-policy-age; sample_roles.external_pool_island_args).
     identity = backend_identity(compat_group=getattr(args, "rl_compat_group", None))
     # hetero-1114: full identity (default) or semantic hash (--rl-identity relaxed)
     mode = getattr(args, "rl_identity", None)
     return bind_policy_age(identity.contract_sha256(None if mode is None else mode != "relaxed"),
-                           int(getattr(args, "rl_max_policy_age", 0) or 0))
+                           _contract_max_policy_age(args))
+
+
+def _contract_max_policy_age(args) -> int:
+    """The policy-age limit the island binds into its syncer session contract: its
+    own ``--rl-max-policy-age``, or ``--rl-contract-max-policy-age`` when the launch
+    gives synced trainers of external pools per-island limits."""
+    contract = getattr(args, "rl_contract_max_policy_age", None)
+    if contract is not None:
+        return int(contract)
+    return int(getattr(args, "rl_max_policy_age", 0) or 0)
 
 
 from yeto.hw.catalog import HARDWARE_EVENT  # noqa: E402

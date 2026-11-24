@@ -481,7 +481,10 @@ def add_cli_args(p) -> None:
                    "N-th local version (its own --rl-release-every); repeatable")
     g.add_argument("--rl-island-max-policy-age", action="append", default=None, metavar="K:N",
                    help="with --rl-island-buffer-shards: the trainer with learner id K's own "
-                   "--rl-max-policy-age (at least its release cadence); repeatable")
+                   "--rl-max-policy-age (at least its release cadence, at most the algorithm spec's "
+                   "execution.max_policy_staleness); repeatable. It gates only that trainer's own "
+                   "buffer: every trainer binds the launch-wide --rl-max-policy-age into its syncer "
+                   "session contract, so trainers with different limits merge")
     g.add_argument("--rl-sampler-spot", action="store_true",
                    help="with --rl-island-sample-role: the sampler islands use spot (preemptible) "
                    "capacity, the trainer island stays on demand; a reclaimed sampler island is "

@@ -12,7 +12,14 @@ policy versions a trained sample may lag behind the version being trained:
 The limit is part of the island's contract: :func:`bind_policy_age` folds a
 non-zero limit into the identity the syncer compares (HELLO session contract
 and elastic JOIN), so islands with different limits are refused per connection
-while limit 0 keeps the identity byte-identical. Each backend declares how far
+while limit 0 keeps the identity byte-identical. One exception: synced trainers
+fed by external sampler pools that follow their own trainer may each take their
+own limit (``--rl-island-max-policy-age``). There the limit only gates the
+trainer's own lane, counted in its local versions (no sample crosses islands),
+the shared algorithm spec's ``execution.max_policy_staleness`` bounds every
+island's limit (launch preflight) and the syncer merges by outer step, so each
+trainer binds the launch-wide limit instead (``--rl-contract-max-policy-age``,
+Miles ``island_entry._contract_max_policy_age``). Each backend declares how far
 it supports the limit (:class:`PolicyAgeSupport`, adapter role ``policy_age``);
 the launcher refuses an unsupported limit before any machine starts.
 """
