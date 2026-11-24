@@ -162,7 +162,8 @@ All are Miles-only.
 - [ ] The LoRA targets exist and are adaptable: `attention` everywhere;
       `all-linear` on MoE adds per-expert LoRA only where the experts are
       separate modules (one adapter per expert); under EP > 1 the experts must
-      be grouped-GEMM, BF16 and without capacity padding.
+      be grouped-GEMM, BF16 and without capacity padding. That is the Miles
+      layout: verl refuses `all-linear` on a MoE model (use `attention`).
 - [ ] The layout agrees across islands: LoRA layouts follow from the config;
       full-parameter layouts are bound by the syncer (`--rl-parameter-layout-sha256 auto`, Miles)
       or planned offline (verl).
@@ -270,5 +271,7 @@ Qwen3, OLMoE-1B-7B for a generic MoE) with the flags the check printed:
   world size (and TP / PP / EP) that holds the model state; size each island to
   at least that, and treat the number as an upper bound.
 - verl: TP / PP / EP > 1 runs only full parameters on the verl Megatron island,
-  PP 1 for full-parameter sync.
+  PP 1 for full-parameter sync. verl LoRA on a MoE model adapts attention only:
+  its PEFT cannot build routed-expert LoRA on Transformers 5 fused experts, and
+  vLLM loads per-expert adapters, so `all-linear` is refused at island start.
 

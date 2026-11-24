@@ -294,7 +294,13 @@ def _lora_items(req: CheckRequest, recipe: str, profile: ModelSyncProfile) -> li
         out.append(CheckItem("lora-targets", WARN, "gated attention: 'attention' adapts the output projection "
                              "only (Megatron cannot split a gated q_proj, yeto/rl/export.py)", "", ISLAND))
     if targets == "all-linear" and profile.moe:
-        if not profile.expert_lora.startswith(EXPERT_LORA_SUPPORTED):
+        if req.backend == "verl":  # the per-expert layout below is the Miles (Megatron-Bridge) one
+            out.append(CheckItem("lora-targets", FAIL, "verl trains no routed-expert LoRA: its PEFT 0.19.1 cannot "
+                                 "build all-linear on Transformers 5 fused experts, and the per-expert adapters "
+                                 "are not what verl trains or vLLM loads (yeto/rl/adapters/verl/lora_targets.py "
+                                 "moe_all_linear_problem)", "--lora-targets attention, or --rl-backend miles",
+                                 ISLAND))
+        elif not profile.expert_lora.startswith(EXPERT_LORA_SUPPORTED):
             out.append(CheckItem("lora-targets", FAIL, f"routed-expert LoRA: {profile.expert_lora}",
                                  "--lora-targets attention", ISLAND))
         elif recipe == "generic" and _ep(req, profile) > 1:
