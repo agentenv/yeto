@@ -786,6 +786,16 @@ class Run:
         self.mark("fleet_plan", object=uri)
         return True
 
+    def fleet_rt(self) -> Any:
+        """The fleet's per-island runtime (:class:`yeto.rl.up_fleet_runtime.FleetRuntime`);
+        call only when :meth:`fleet_plan` is set."""
+        rt = getattr(self, "_fleet_rt", None)
+        if rt is None:
+            from yeto.rl.up_fleet_runtime import FleetRuntime  # noqa: PLC0415
+
+            rt = self._fleet_rt = FleetRuntime(self)
+        return rt
+
     def _pool_suffix(self, i: int) -> str:
         """Where a per-pool preflight line points: ``(pool <name>)`` with several pools;
         in a fleet ``(island k (name), pool i<k>-<name>)``."""
@@ -820,7 +830,8 @@ class Run:
 
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
         specs = self._fleet_specs()
-        problems = up_fleet.rollout_fields_problems(plan, argv, specs)
+        problems = up_fleet.breaker_pool_problems(plan, self.cfg.get("breakers"))
+        problems += up_fleet.rollout_fields_problems(plan, argv, specs)
         refused, notes = up_fleet.release_form_lines(plan, specs, argv)
         problems += refused
         from yeto.rl import fleet  # noqa: PLC0415
@@ -1301,7 +1312,10 @@ class Run:
         return len(self.buffer_keys() or ())
 
     def wait_first_group(self) -> str | None:
-        """None once the store holds a group; else why the wait ended (a breach, the timeout)."""
+        """None once the store holds a group; else why the wait ended (a breach, the timeout).
+        A fleet waits island by island (:meth:`FleetRuntime.wait_first_group`)."""
+        if self.fleet_plan() is not None:
+            return self.fleet_rt().wait_first_group()
         fg = self.cfg.get("first_group") or {}
         timeout = self.breaker_param("run.first_group", "timeout_s")
         start = time.monotonic()  # a local interval: an NTP step must not end/stretch it
@@ -1351,6 +1365,8 @@ class Run:
             return False
         if any(a == "--rl-init-from-release" or a.startswith("--rl-init-from-release=") for a in argv):
             return False
+        if self.fleet_plan() is not None:
+            return self._fleet_continue_from_release()
         if not self.store_has_release():
             _log("trainer restart with --rl-round-cuts off: the store holds no policy release yet, "
                  "so the trainer starts from the base checkpoint")
@@ -1362,6 +1378,26 @@ class Run:
                  "RNG start fresh)")
             self.mark("trainer_init_from_release", selector="latest")
         return True
+
+    def _fleet_continue_from_release(self) -> bool:
+        """A fleet's ``--rl-round-cuts off`` restart: each island's releases are in its own
+        ``trainer<k>/``, but ``--rl-init-from-release`` makes every trainer node read the
+        run store's root (``init_from_release``), which holds none, so the flag would fail
+        every node. It is not added; the islands holding a release are logged (once)."""
+        if getattr(self, "_init_release_logged", False):
+            return False
+        self._init_release_logged = True
+        found = self.fleet_rt().releases()
+        held = [self.fleet_rt().label(k) for k, has in sorted(found.items()) if has]
+        if not held:
+            _log("trainer restart with --rl-round-cuts off: no island's sub-directory holds a policy release yet, "
+                 "so the trainers start from the base checkpoint")
+            return False
+        _log(f"WARNING: trainer restart with --rl-round-cuts off: {', '.join(held)} hold(s) policy releases in their "
+             "trainer<k>/, but --rl-init-from-release reads the run store's root, not an island's sub-directory: "
+             "it is not added, and the trainers start from the base checkpoint (their release numbering goes on)")
+        self.mark("trainer_init_from_release", selector=None, islands_with_release=held)
+        return False
 
     def store_has_release(self) -> bool:
         """The run store holds a trained policy release, judged as ``--rl-init-from-release
@@ -1515,6 +1551,8 @@ class Run:
 
     # -- guards
     def spend_usd(self) -> float:
+        if self.fleet_plan() is not None:  # pools + each island's trainer + the syncer
+            return self.fleet_rt().spend().total_usd
         now = time.time()
         nc = sum(self.node_hours(i, now) * self.node_usd_per_h(i) for i in range(len(self.pools)))
         rate = up_consistency.number_or_default(self.cfg.get("trainer"), "usd_per_h", 0)
@@ -1807,7 +1845,12 @@ class Run:
             self._containers_over = over
         if why:
             _log(f"BREAKER: {why}")
-            event = self.breaker_event(tripped[0], value=tripped[1], limit=tripped[2], detail=why) if tripped else {}
+            if self.fleet_plan() is not None and tripped:  # the fleet's one launch: every island stops
+                event = (self.fleet_rt().budget_event(tripped[1], tripped[2], why) if tripped[0] == "run.budget"
+                         else self.breaker_event(tripped[0], value=tripped[1], limit=tripped[2], detail=why))
+                self.fleet_rt().record(event)
+            else:
+                event = self.breaker_event(tripped[0], value=tripped[1], limit=tripped[2], detail=why) if tripped else {}
             self.state["breaker"] = {"at": _now(), "why": why}
             if event.get("stop_reason"):
                 self.state["breaker"]["stop_reason"] = event["stop_reason"]
@@ -2182,44 +2225,17 @@ class Run:
         failed, or this was the first call: the baseline). Incremental: one page after
         the last key seen per known shard; every ``SHARD_SCAN_EVERY`` calls, the shard
         names, and a new shard's keys once."""
-        from yeto.rl.engine.sample_buffer import BUFFER_DIR, SHARD_NAMES, shard_prefix  # noqa: PLC0415
-
-        last: dict[str, str] | None = getattr(self, "_shard_last", None)
-        baseline = last is None
-        last = {} if last is None else last
         calls = getattr(self, "_shard_calls", 0)
         self._shard_calls = calls + 1
-        found = 0
-        try:
-            objects = self._objects()
-            if baseline or calls % self.SHARD_SCAN_EVERY == 0:
-                names_prefix = f"{BUFFER_DIR}/{SHARD_NAMES}/"
-                for key in objects.list(names_prefix):
-                    shard = key[len(names_prefix):]
-                    if shard and shard not in last:
-                        keys = objects.list(shard_prefix(shard))
-                        last[shard] = max(keys) if keys else ""
-                        found += 0 if baseline else len(keys)
-            for shard, after in list(last.items()):
-                prefix = shard_prefix(shard)
-                if hasattr(objects, "list_page"):
-                    keys, _more = objects.list_page(prefix, start_after=after or "", limit=1000)
-                else:
-                    keys = objects.list(prefix, start_after=after or "")
-                if keys:
-                    last[shard] = max(keys)
-                    found += 0 if baseline else len(keys)
-        except Exception as error:  # noqa: BLE001
-            _log(f"store list failed: {type(error).__name__}: {error}"[:300])
-            self._shard_last = None if baseline else last  # a failed baseline is taken again
-            return None
-        self._shard_last = last
-        return None if baseline else found
+        found, self._shard_last = new_buffer_groups(self._objects, getattr(self, "_shard_last", None), calls,
+                                                    self.SHARD_SCAN_EVERY)
+        return found
 
-    def sampler_health(self, now: float | None = None) -> Any:
+    def sampler_health(self, now: float | None = None, pools: Any = None) -> Any:
         """Ready, unpaused members of the pools whose loop runs (the pool state files and
         the pool lock / pid file; no provider call). A pool whose loop does not run counts
-        no healthy member: nothing replaces or restarts its samplers."""
+        no healthy member: nothing replaces or restarts its samplers. ``pools``: the pool
+        indices to count (an island's pools; None: every pool)."""
         from yeto.launch.nc import pool_run  # noqa: PLC0415
         from yeto.rl.starvation import SamplerHealth  # noqa: PLC0415
 
@@ -2233,6 +2249,8 @@ class Run:
         notes = []
         controller = getattr(self, "controller", None)
         for i, ref in enumerate(self.pools):
+            if pools is not None and i not in pools:
+                continue
             members = self._members(i)
             if members is None:
                 notes.append(f"{ref.name}: no state")
@@ -2301,7 +2319,12 @@ class Run:
         ``IslandPool.finished``) and holds no member that is not gone: no sampler of
         this run runs or will start, so no shard gets another group. Only pools whose
         samplers write the run's store (``data_path`` r2, no other store): an end
-        record the trainer does not read would only switch the starvation watch off."""
+        record the trainer does not read would only switch the starvation watch off.
+        A fleet judges each island against its own sub-directory
+        (:meth:`FleetRuntime.pools_finished`): its pools write ``trainer<k>``, not the run
+        store, which the check below would refuse."""
+        if self.fleet_plan() is not None:
+            return self.fleet_rt().pools_data_ended()
         if not self.pools:
             return False
         from yeto.rl.up_consistency import _norm_store, pool_store  # noqa: PLC0415
@@ -2324,7 +2347,10 @@ class Run:
 
     def data_end_shards(self) -> list[str]:
         """The shards whose end the trainer waits for: its ``--rl-buffer-shards`` (every
-        shard index the pools may have used), else the shards the store names."""
+        shard index the pools may have used), else the shards the store names. A fleet:
+        every island's ``--rl-island-buffer-shards``."""
+        if self.fleet_plan() is not None:
+            return self.fleet_rt().data_end_shards()
         named = self._trainer_flag("--rl-buffer-shards")
         if named is not None:
             return [s.strip() for s in named.split(",") if s.strip()]  # as the trainer reads it
@@ -2341,9 +2367,13 @@ class Run:
         trainer's merged index never ends and the trainer waits for groups that cannot
         come (the starvation stop then ends it as a failure). No writer of these shards
         is left (every member is gone), so the end record (the format a sampler writes)
-        is safe here. True once every shard ended (``state["data_ended"]``)."""
+        is safe here. True once every shard ended (``state["data_ended"]``). A fleet seals
+        island by island, each in its own sub-directory, and its data ended once every
+        island's did (:meth:`FleetRuntime.seal_data_end`)."""
         if self.state.get("data_ended"):
             return True
+        if self.fleet_plan() is not None:
+            return self.fleet_rt().seal_data_end()
         if not self.pools_data_ended():
             return False
         if not self.dispense_settled():
@@ -2380,7 +2410,10 @@ class Run:
         (``totals["ended"]``), none queued, running, stale or unclaimed. A pool finished
         with tasks left (a sampler ended early, the rest went at their lease end) is no
         data end: a CRITICAL ``data_end_incomplete`` is logged (once per count) and the
-        starvation watch stays on. A status that does not read: not settled."""
+        starvation watch stays on. A status that does not read: not settled. A fleet:
+        every island settled (:meth:`FleetRuntime.settled`)."""
+        if self.fleet_plan() is not None:
+            return self.fleet_rt().dispense_settled()
         from yeto.rl.engine import store_dispense  # noqa: PLC0415
 
         left, pools = 0, []
@@ -2417,7 +2450,11 @@ class Run:
         return False
 
     def starvation_check(self, now: float) -> str | None:
-        """Alert on a starving trainer; the reason to stop it, else None."""
+        """Alert on a starving trainer; the reason to stop it, else None. A fleet watches
+        each island (a stop stops that island; :meth:`fleet_all_stopped` ends the launch)."""
+        if self.fleet_plan() is not None:
+            self.fleet_rt().starvation_check(now)
+            return None
         from yeto.rl.starvation import ALERT_EVENT, RECOVERED_EVENT, STOP, StarvationWatch  # noqa: PLC0415
 
         cfg = self.starvation_config
@@ -2512,14 +2549,15 @@ class Run:
             _log(f"{event}: {after}")
 
     # -- release stall (yeto.rl.release_stall)
-    def latest_release(self) -> tuple[Any, bool]:
+    def latest_release(self, objects: Any = None) -> tuple[Any, bool]:
         """The identity of the store's LATEST policy release (None: no release yet) and
-        whether it was read (False: a failed read, no evidence)."""
+        whether it was read (False: a failed read, no evidence). ``objects``: another
+        store's object API (an island's ``trainer<k>``; None: the run's store)."""
         from yeto.rl.quant.schemes import RELEASE_DIR  # noqa: PLC0415
         from yeto.rl.release_stall import LATEST, release_identity  # noqa: PLC0415
 
         try:
-            raw = self._objects().read(f"{RELEASE_DIR}/{LATEST}")
+            raw = (self._objects() if objects is None else objects).read(f"{RELEASE_DIR}/{LATEST}")
             return (None if raw is None else release_identity(json.loads(raw))), True
         except Exception:  # noqa: BLE001 - checked again next poll
             return None, False
@@ -2539,7 +2577,11 @@ class Run:
 
     def release_stall_check(self, now: float) -> str | None:
         """Alert on a trainer that stopped publishing releases (``run.release_stall``);
-        with ``action: stop`` the reason to stop it, else None."""
+        with ``action: stop`` the reason to stop it, else None. A fleet watches each
+        island's ``trainer<k>/`` release (a stop stops that island)."""
+        if self.fleet_plan() is not None:
+            self.fleet_rt().release_stall_check(now)
+            return None
         from yeto.rl.release_stall import ALERT_EVENT, RECOVERED_EVENT, STOP, ReleaseStallConfig, ReleaseStallWatch  # noqa: PLC0415
 
         entry = self.breakers.entry("run.release_stall")
@@ -2571,6 +2613,25 @@ class Run:
             self.save()
         self._release_stalled = verdict
         return verdict.reason if verdict.state == STOP else None
+
+    def fleet_all_stopped(self) -> str | None:
+        """A fleet whose every island a trip stopped: the fleet's stop reason (None: an
+        island still runs, or no fleet)."""
+        if self.fleet_plan() is None:
+            return None
+        return self.fleet_rt().all_stopped()
+
+    def fleet_stop(self, reason: str, poll_s: float = 30.0) -> None:
+        """No island of the fleet runs any more: stop the one trainer launch (STOP flag,
+        then ``yeto down``), as a starvation stop of one trainer does."""
+        from yeto.breakers.events import STOP_REASON_PREFIX  # noqa: PLC0415
+
+        rows = (self.state.get("fleet_stops") or {}).get("islands") or ()
+        why = "every island stopped (" + ", ".join(f"island {r['index']} ({r['name']}): {r['stop_reason']}"
+                                                  for r in rows) + ")"
+        self.flag_stop(reason.removeprefix(STOP_REASON_PREFIX), "fleet_stop", "fleet_all_islands_stopped", why,
+                       grace_s=self.starvation_config.stop_grace_s, poll_s=poll_s,
+                       after="`yeto run up --config <run.json>` resumes the trainers from their latest cut")
 
     def release_stall_stop(self, why: str, poll_s: float = 30.0) -> None:
         """``run.release_stall`` with ``action: stop``: the STOP flag, as a starvation stop."""
@@ -2608,6 +2669,10 @@ class Run:
                 why = self.release_stall_check(time.time())
                 if why:
                     self.release_stall_stop(why)
+                    return
+                why = self.fleet_all_stopped()
+                if why:
+                    self.fleet_stop(why)
                     return
             if tr and not _alive(tr["pid"]) and not self.state.get("trainer_exit_seen"):
                 _log(f"trainer launcher PID {tr['pid']} exited")
@@ -2829,6 +2894,8 @@ class Run:
             out["dispense_ledgers"] = ledgers
         out["trainer_buffer"] = self.trainer_buffer_counts()
         out["breakers"] = self.breaker_status()
+        if self.fleet_plan() is not None:
+            out["fleet"] = self.fleet_rt().status()
         return out
 
     def breaker_status(self) -> dict[str, Any]:
@@ -3028,6 +3095,43 @@ class Run:
 
             return DirObjects(store)
         return head_objects(str(store).replace("r2://", "s3://", 1), environ=self.env)
+
+
+def new_buffer_groups(objects_of: Any, last: dict[str, str] | None, calls: int,
+                      scan_every: int) -> tuple[int | None, dict[str, str] | None]:
+    """:meth:`Run.buffer_new_groups` over one store: ``(found, last)``. ``objects_of()``
+    gives the store's object API; ``last`` maps each known shard to the last key seen
+    (None: no baseline yet); ``calls`` counts the earlier calls. ``found`` is None on the
+    baseline call or a failed listing; ``last`` comes back None when a failed baseline is
+    to be taken again."""
+    from yeto.rl.engine.sample_buffer import BUFFER_DIR, SHARD_NAMES, shard_prefix  # noqa: PLC0415
+
+    baseline = last is None
+    last = {} if last is None else last
+    found = 0
+    try:
+        objects = objects_of()
+        if baseline or calls % scan_every == 0:
+            names_prefix = f"{BUFFER_DIR}/{SHARD_NAMES}/"
+            for key in objects.list(names_prefix):
+                shard = key[len(names_prefix):]
+                if shard and shard not in last:
+                    keys = objects.list(shard_prefix(shard))
+                    last[shard] = max(keys) if keys else ""
+                    found += 0 if baseline else len(keys)
+        for shard, after in list(last.items()):
+            prefix = shard_prefix(shard)
+            if hasattr(objects, "list_page"):
+                keys, _more = objects.list_page(prefix, start_after=after or "", limit=1000)
+            else:
+                keys = objects.list(prefix, start_after=after or "")
+            if keys:
+                last[shard] = max(keys)
+                found += 0 if baseline else len(keys)
+    except Exception as error:  # noqa: BLE001
+        _log(f"store list failed: {type(error).__name__}: {error}"[:300])
+        return None, (None if baseline else last)  # a failed baseline is taken again
+    return (None if baseline else found), last
 
 
 def _worker_alive(run: str) -> bool:

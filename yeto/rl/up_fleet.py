@@ -370,6 +370,26 @@ def release_every_warnings(plan: Any, trainer_argv: Sequence[str],
     return out
 
 
+def breaker_pool_problems(plan: Any, section: Any) -> list[str]:
+    """``breakers.pools.<name>`` keys of a fleet must be compiled pool names
+    (``i<k>-<name>``: the name each island's copy of a pool runs under, and the key its
+    pool resolves its overrides by); a key that names no pool would be ignored."""
+    pools = section.get("pools") if isinstance(section, dict) else None
+    if not isinstance(pools, dict):
+        return []
+    rows = [p for island in plan.islands for p in island.pools]
+    names = {p.name for p in rows}
+    out = []
+    for key in pools:
+        if key in names:
+            continue
+        meant = [p.name for p in rows if p.source_name == key]
+        out.append(f"breakers.pools.{key}: no pool of the fleet is named {key!r}; a fleet's pools run as i<k>-<name>"
+                   + (f" (this one as {' / '.join(meant)}): name each island's copy" if meant
+                      else f" ({', '.join(sorted(names))})"))
+    return out
+
+
 def syncer_lines(plan: Any, trainer_argv: Sequence[str], syncer: dict[str, Any] | None) -> list[str]:
     """The syncer's region as the launch resolves it (it follows islands pinned to one
     area unless ``--syncer-region`` is set) and the launch's warnings for islands placed
