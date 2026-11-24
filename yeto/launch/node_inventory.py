@@ -729,6 +729,13 @@ class NodeProfile(Node):
         # ppu: no flags are known (vendor docs only); the inventory's docker_args must give them
         return DeviceSetup((), host_numbers)
 
+    def ssh_options(self) -> list[str]:
+        """``ssh`` options through :attr:`reach` (``ProxyJump`` for ``jump``, the relay's
+        ``ProxyCommand`` for ``relay``: :func:`yeto.node.transport.reach_options`)."""
+        from yeto.node.transport import reach_options  # noqa: PLC0415 - yeto.node imports this module
+
+        return reach_options(self.reach)
+
     def summary(self) -> dict[str, Any]:
         """What a member record and the dashboard show of the machine (no host, no paths)."""
         return {"family": self.family, "card": self.card, "card_arch": self.card_arch,
