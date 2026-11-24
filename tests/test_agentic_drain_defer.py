@@ -355,12 +355,17 @@ def test_the_warmup_cap_holds_until_the_trainer_has_trained(monkeypatch, tmp_pat
     rnd, events = _built_round({"agentic": {"warmup_max_in_flight": 4}}, tmp_path)
     try:
         trained = [False]
-        rnd.trainer_trained = lambda: trained[0]
-        assert rnd.in_flight_cap() == 4 and rnd.in_flight_cap() == 4
+        asked = []
+        rnd.trainer_trained = lambda: asked.append(1) or trained[0]
+        assert rnd.in_flight_cap() == 4 and asked == []  # the loop thread only reads the flag
+        rnd._poll_warmup()
+        assert rnd.in_flight_cap() == 4 and len(asked) == 1
         trained[0] = True
+        rnd._poll_warmup()
         assert rnd.in_flight_cap() == 8
-        trained[0] = False  # sticky: once trained, the full cap stays
-        assert rnd.in_flight_cap() == 8
+        trained[0] = False  # sticky: once trained, the full cap stays and the store is not asked again
+        rnd._poll_warmup()
+        assert rnd.in_flight_cap() == 8 and len(asked) == 2
         assert [name for name, _ in events].count("rl_agentic_warmup_done") == 1
     finally:
         rnd.close()
@@ -373,6 +378,7 @@ def test_a_store_error_keeps_the_warmup_cap(monkeypatch, tmp_path):
         def broken():
             raise OSError("store")
         rnd.trainer_trained = broken
+        rnd._poll_warmup()
         assert rnd.in_flight_cap() == 8  # min(max_in_flight, warmup)
         rnd.warmup_max_in_flight = 2
         assert rnd.in_flight_cap() == 2

@@ -60,7 +60,7 @@ from .buffer_payload import (
     routed_experts_uint16,
 )
 from .loop_guard import LoopGuard
-from .policy_release import PolicyFollower, PolicyReleaseStore, ReleaseNotLoaded
+from .policy_release import PolicyFollower, PolicyReleaseStore, ReleaseNotLoaded, checkpoint_fingerprint
 from .policy_versions import engine_weight_version
 from .sampler_breakers import trip
 from .sampler_checks import PortReleaseLoader, PostLoadChecks, SamplerLoadFatal, check_sampling_fits
@@ -611,7 +611,10 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
     # trainer step, and the engines idled through it
     follower = PolicyFollower(releases, loader, version=int(config.base_version),
                               live_update=updates_during_generation(engine), background_download=True,
-                              max_defer_s=config.reload_max_defer_s)
+                              max_defer_s=config.reload_max_defer_s,
+                              # a synced trainer's v0 of this very checkpoint is adopted, not loaded
+                              base_fingerprint=checkpoint_fingerprint(
+                                  config.base_dir or getattr(getattr(engine, "config", None), "base_dir", None)))
     follower.release = started_on_release(releases, int(config.base_version))
     engine_round = (make_round or EngineRound)(engine, GroupWriter(buffer, config.sampler_id), prompts=prompts,
                                reward=reward, sampling=sampling, provenance=provenance, emit=emit,

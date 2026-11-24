@@ -866,19 +866,27 @@ class AgenticRound(EngineRound):
         return self.reclaimed() or (not self._queue and len(self._running) < self.in_flight_cap())
 
     def in_flight_cap(self) -> int:
-        """``max_in_flight``, or the warm-up cap until the trainer has trained (round_factory doc)."""
-        if not self._warm:
-            try:
-                trained = bool(self.trainer_trained())
-            except Exception:  # noqa: BLE001 - a store that cannot say: keep the warm-up cap
-                trained = False
-            if trained:
-                self._warm = True
-                self.emit("rl_agentic_warmup_done", max_in_flight=self.max_in_flight,
-                          warmup_max_in_flight=self.warmup_max_in_flight)
-            else:
-                return min(self.max_in_flight, int(self.warmup_max_in_flight))
-        return self.max_in_flight
+        """``max_in_flight``, or the warm-up cap until the trainer has trained (round_factory
+        doc). Reads a flag only: the trials' loop thread calls it, and the store is asked on
+        the calling thread (:meth:`_poll_warmup`)."""
+        if self._warm:
+            return self.max_in_flight
+        return min(self.max_in_flight, int(self.warmup_max_in_flight))
+
+    def _poll_warmup(self) -> None:
+        """Calling thread: ask whether the trainer has trained; lift the warm-up cap once
+        (``rl_agentic_warmup_done``) and let the loop start the trials it now may."""
+        if self._warm:
+            return
+        try:
+            trained = bool(self.trainer_trained())
+        except Exception:  # noqa: BLE001 - a store that cannot say: keep the warm-up cap
+            trained = False
+        if trained:
+            self._warm = True
+            self.emit("rl_agentic_warmup_done", max_in_flight=self.max_in_flight,
+                      warmup_max_in_flight=self.warmup_max_in_flight)
+            self._on_loop(self._fill)
 
     def _stream(self, tally: _Tally, *, final: bool) -> None:
         """Settle the groups that end until the stream wants the next round's
@@ -886,6 +894,7 @@ class AgenticRound(EngineRound):
         beat = self.clock()
         while True:
             self._wake.clear()
+            self._poll_warmup()
             while self._retry_events:
                 self.emit(RETRY_EVENT, **self._retry_events.popleft())
             if self._paused and self._error is None:
@@ -1436,11 +1445,13 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
       longer stream is cut / ABORTED);
     * ``max_in_flight``: concurrent trials; ``min_samples`` (default 2);
     * ``warmup_max_in_flight`` (optional, absent: off): until the trainer has
-      trained a round (a release above v0 in the store), at most this many
-      trials run (min with ``max_in_flight``): a trainer that never trains does
-      not cost a full pool of sandboxes (a fleet run opened 52 boat sandboxes
-      while its trainers failed their first step). Once it has trained, the
-      full cap holds for good;
+      released trained weights (a release above v0 in the store: with
+      ``--rl-release-every N`` that is N rounds after its first trained round),
+      at most this many trials run (min with ``max_in_flight``): a trainer that
+      never trains does not cost a full pool of sandboxes (a fleet run opened 52
+      boat sandboxes while its trainers failed their first step). Once it has,
+      the full cap holds for good. The store is read on the sampler's calling
+      thread, never on the trials' loop;
     * ``weight_switch``: ``auto`` (default: ``live`` on a live-update engine,
       else ``drain``), ``drain`` or ``live``; ``drain_timeout_s``
       (default None); in drain mode the drain is cut at

@@ -1245,15 +1245,45 @@ class FollowerCounters:
 
 
 BASE_CHECKPOINT_KEY = "base_checkpoint"  # PolicyRelease.origin: the v0 weights are the base checkpoint
+BASE_FINGERPRINT_KEY = "base_fingerprint"  # PolicyRelease.origin: checkpoint_fingerprint of that checkpoint
+_FINGERPRINT_FILES = ("config.json", "model.safetensors.index.json")
+
+
+def checkpoint_fingerprint(directory: str | Path | None) -> str | None:
+    """A cheap identity of an HF checkpoint directory: sha256 over its ``config.json``,
+    its safetensors index and the name and size of every ``*.safetensors`` file (no
+    weight bytes are read). Two copies of one checkpoint revision agree; None when
+    ``directory`` is no readable checkpoint (no config.json or no weight file)."""
+    if directory is None:
+        return None
+    root = Path(directory)
+    try:
+        if not (root / "config.json").is_file():
+            return None
+        weights = sorted((p.name, p.stat().st_size) for p in root.glob("*.safetensors"))
+        if not weights:
+            return None
+        digest = hashlib.sha256()
+        for name in _FINGERPRINT_FILES:
+            path = root / name
+            if path.is_file():
+                digest.update(name.encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+        digest.update(json.dumps(weights).encode())
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 def is_base_checkpoint_release(release: "PolicyRelease") -> bool:
     """``release`` is v0 and its trainer declares the weights are the base
-    checkpoint the samplers start on (``origin[BASE_CHECKPOINT_KEY]``: a synced
-    trainer that loaded the base checkpoint, no release and no LoRA; a single
-    trainer releases nothing for v0)."""
+    checkpoint the samplers start on (``origin[BASE_CHECKPOINT_KEY]`` with that
+    checkpoint's ``origin[BASE_FINGERPRINT_KEY]``: a synced trainer that loaded the
+    base checkpoint, no release, no warm start and no LoRA; a single trainer
+    releases nothing for v0)."""
+    origin = release.origin or {}
     return (int(release.version) == 0 and release.derived_from is None and release.delta is None
-            and release.weights == FULL and (release.origin or {}).get(BASE_CHECKPOINT_KEY) is True)
+            and release.weights == FULL and origin.get(BASE_CHECKPOINT_KEY) is True
+            and bool(origin.get(BASE_FINGERPRINT_KEY)))
 
 
 DOWNLOAD_RETRY_S = 60.0  # a failed background download is tried again after this
@@ -1397,7 +1427,9 @@ class PolicyFollower:
     the engines already serve -- the same version and policy hash as the served
     release, or, while the engines still serve the base checkpoint they started
     on, a v0 release its trainer declares is that checkpoint
-    (:func:`is_base_checkpoint_release`) -- is adopted as served without a
+    (:func:`is_base_checkpoint_release`) whose fingerprint is the one of the
+    checkpoint the engines started from (``base_fingerprint``,
+    :func:`checkpoint_fingerprint`; None: never adopted) -- is adopted as served without a
     download or a load (``counters.adopted``, ``last_adopted``), so a drain-mode
     sampler never drains its trials for weights it serves. A version alone never
     makes two releases the same: synced trainers' lanes may number two sets of
@@ -1411,7 +1443,7 @@ class PolicyFollower:
                  max_rebuild_failures: int = MAX_REBUILD_FAILURES,
                  background_download: bool = False,
                  download_retry_s: float = DOWNLOAD_RETRY_S,
-                 max_defer_s: float | None = None) -> None:
+                 max_defer_s: float | None = None, base_fingerprint: str | None = None) -> None:
         if int(max_rebuild_failures) < 1:
             raise ValueError("max_rebuild_failures must be >= 1")
         self.max_rebuild_failures = int(max_rebuild_failures)
@@ -1447,6 +1479,7 @@ class PolicyFollower:
         self.latest_read_failures = 0  # polls of LATEST the store did not answer
         self.last_deferred_s: float | None = None  # how long the last load was deferred
         self.last_adopted: PolicyRelease | None = None  # the last release adopted without a load
+        self.base_fingerprint = base_fingerprint  # checkpoint_fingerprint of the engines' start checkpoint
 
     @contextmanager
     def generating(self) -> Iterator[None]:
@@ -1474,8 +1507,9 @@ class PolicyFollower:
         if int(release.version) != int(self.version):
             return False
         served = self.release
-        if served is None:  # the base checkpoint the engines started on
-            return is_base_checkpoint_release(release)
+        if served is None:  # the base checkpoint the engines started on: the trainer's claim, checked
+            return (self.base_fingerprint is not None and is_base_checkpoint_release(release)
+                    and (release.origin or {}).get(BASE_FINGERPRINT_KEY) == self.base_fingerprint)
         return (bool(release.policy_hash) and release.policy_hash == served.policy_hash
                 and release.weights == served.weights and release.manifest == served.manifest)
 
@@ -1522,7 +1556,9 @@ class PolicyFollower:
         """The seq of a release newer than the served one in the store (one read
         of ``LATEST``; nothing is loaded), else None. Once :meth:`prefetch` has
         reported a release on disk it is that release's seq (the one the next
-        :meth:`refresh` loads), also when the store has a newer one by then."""
+        :meth:`refresh` loads), also when the store has a newer one by then. A
+        newer release that holds the served weights is adopted here instead
+        (:meth:`same_weights`) and None is returned: no drain starts for it."""
         ready = self._ready_fetch()
         if ready is not None:
             return int(ready.release.seq)

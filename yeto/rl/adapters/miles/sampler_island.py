@@ -34,8 +34,9 @@
   the store holds no release (``rl_policy_release_skipped``, reason
   ``base_policy``). Synced trainers release it (a restarted trainer restores its
   published versions from the store's releases); a synced trainer that loaded the
-  base checkpoint marks that first v0 release ``origin.base_checkpoint``, so the
-  samplers already serving the checkpoint adopt it without a load or a drain.
+  base checkpoint marks that first v0 release ``origin.base_checkpoint`` with the
+  checkpoint's fingerprint, so samplers that started from the same checkpoint
+  adopt it without a load or a drain.
 
   Relaunch of a single trainer (no lane, no syncer; as the verl buffer trainer,
   ``merged_release.ResumedReleases``): the version account continues above the
@@ -84,6 +85,7 @@ from typing import Any
 
 from yeto.rl.engine.policy_release import (
     BASE_CHECKPOINT_KEY,
+    BASE_FINGERPRINT_KEY,
     FULL,
     LORA,
     BackgroundReleaser,
@@ -779,7 +781,7 @@ class ReleasingPublisher:
                  release_every: int = 1, skip_busy: bool = False,
                  read_trained: Callable[[int], int | None] | None = None,
                  read_positions: Callable[[], tuple[int, dict[str, int] | None] | None] | None = None,
-                 base_is_checkpoint: bool = False,
+                 base_fingerprint: str | None = None,
                  ) -> None:
         """``read_positions()``: ``(read position, per shard)`` in one read, callable
         from any thread without the rollout executor (module doc, staged full releases;
@@ -801,12 +803,13 @@ class ReleasingPublisher:
         callable from the upload thread (default: ``read_position`` / ``read_shards``).
         ``resumed_base``: a relaunched single trainer's vK (module doc, relaunch):
         versions up to it are the store's already and are not released again.
-        ``base_is_checkpoint``: this trainer's v0 is the base checkpoint the samplers
-        start on (a synced trainer that loaded no release, full weights): its first
-        release, when it is v0, says so in ``origin`` (``base_checkpoint`` True), and
-        a sampler serving that checkpoint adopts it without a load
-        (``PolicyFollower.same_weights``). A single trainer releases nothing for v0
-        (``skip_base``)."""
+        ``base_fingerprint``: this trainer's v0 is the base checkpoint the samplers
+        start on, and this is that checkpoint's ``checkpoint_fingerprint`` (a synced
+        trainer that loaded it: no release, no warm start, full weights). Its first
+        release, when it is v0, says so in ``origin`` (``base_checkpoint`` True and
+        the fingerprint), and a sampler that started from a checkpoint of the same
+        fingerprint adopts it without a load (``PolicyFollower.same_weights``). A
+        single trainer releases nothing for v0 (``skip_base``)."""
         if (staging is None) != (releaser is None):
             raise ValueError("staging and releaser go together")
         if int(release_every) < 1:
@@ -839,7 +842,7 @@ class ReleasingPublisher:
         self.staging = None if staging is None else Path(staging)
         self.releaser = releaser
         self.skip_base = bool(skip_base)
-        self.base_is_checkpoint = bool(base_is_checkpoint)
+        self.base_fingerprint = base_fingerprint or None
         self.resumed_base = None if resumed_base is None else int(resumed_base)
         self.timer = timer
         self.manifest = None if manifest is None else dict(manifest)
@@ -904,9 +907,9 @@ class ReleasingPublisher:
                       reason="base_policy")
             return
         origin = None if self.origin is None else self.origin(state)
-        if (self.base_is_checkpoint and version == BASE_POLICY_VERSION and int(state.policy_version) == 0
-                and self.releases.latest() is None):
-            origin = {**(origin or {}), BASE_CHECKPOINT_KEY: True}
+        if (self.base_fingerprint is not None and version == BASE_POLICY_VERSION
+                and int(state.policy_version) == 0 and self.releases.latest() is None):
+            origin = {**(origin or {}), BASE_CHECKPOINT_KEY: True, BASE_FINGERPRINT_KEY: self.base_fingerprint}
         fields = {"weights": self.weights, "engine_checksum": self._engine_checksum(),
                   "origin": origin,
                   "manifest": self.manifest,
@@ -1221,8 +1224,7 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
                                    read_positions=cached_positions if callable(cached_positions) else None,
                                    # a synced lane releases v0 (module doc): mark it as the
                                    # base checkpoint when this process loaded that checkpoint
-                                   base_is_checkpoint=(not lora and lane is not None and getattr(
-                                       miles_args, "yeto_rl_init_release", None) is None),
+                                   base_fingerprint=base_checkpoint_fingerprint(miles_args, lora=lora, lane=lane),
                                    **synced)
     driver.publisher = publisher
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:
@@ -1239,6 +1241,20 @@ def staged_export_by_all_ranks(miles_args: Any, env: Mapping[str, str], *, stage
     writes them (``export_hf``), as ``hf_exports_for`` does for round exports."""
     one_node = int(getattr(miles_args, "actor_num_nodes", 1) or 1) == 1
     return staged and one_node and env.get(STAGED_EXPORT_ENV, "") != "miles"
+
+
+def base_checkpoint_fingerprint(miles_args: Any, *, lora: bool, lane: Any) -> str | None:
+    """The ``checkpoint_fingerprint`` of the base checkpoint a synced lane trainer's v0
+    is (``ReleasingPublisher(base_fingerprint=...)``), else None: no lane (a single
+    trainer releases no v0), LoRA, weights from a release (``--rl-init-from-release``)
+    or a warm start (Megatron ``--load``), or no local ``--hf-checkpoint`` directory."""
+    from yeto.rl.engine.policy_release import checkpoint_fingerprint
+
+    if lora or lane is None or getattr(miles_args, "yeto_rl_init_release", None) is not None:
+        return None
+    if getattr(miles_args, "load", None):
+        return None
+    return checkpoint_fingerprint(_local_dir(getattr(miles_args, "hf_checkpoint", None)))
 
 
 def _local_dir(path: Any) -> Path | None:

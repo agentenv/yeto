@@ -1098,3 +1098,35 @@ def test_a_release_published_during_the_drain_leaves_the_drain_its_load(tmp_path
     groups = {f["prompt_id"]: f for n, f in events if n == GROUP_EVENT}
     assert groups["a"]["written"] and groups["a"]["versions"] == [0, 0]
     assert all(g["written"] and g["versions"][0] == g["versions"][1] for g in groups.values())
+
+
+# ---------------------------------------------------------------------- warm-up cap
+def test_the_warmup_cap_bounds_the_trials_started_until_the_trainer_has_trained(tmp_path):
+    harness = Harness()
+    for prompt in ("a", "b", "c"):
+        harness.gates[prompt] = threading.Event()
+    rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a", "b", "c"]}), max_in_flight=6,
+                                 warmup_max_in_flight=2)
+    trained = threading.Event()
+    rnd.trainer_trained = trained.is_set
+    seen: list[int] = []
+
+    def trainer():  # releases trained weights while the round call waits for a free slot
+        _wait(lambda: len(harness.started) >= 2)
+        time.sleep(0.1)
+        seen.append(len(harness.started))
+        trained.set()
+        _wait(lambda: len(harness.started) == 6)
+        seen.append(len(harness.started))
+        for gate in harness.gates.values():
+            gate.set()
+    thread = threading.Thread(target=trainer)
+    thread.start()
+    try:
+        rnd(0)
+        thread.join(30)
+        rnd.flush()
+    finally:
+        rnd.close()
+    assert seen == [2, 6]  # one group of N=2 trials until trained, then the 6 max_in_flight allows
+    assert [n for n, _ in events].count("rl_agentic_warmup_done") == 1

@@ -9,9 +9,11 @@ import threading
 from yeto.rl.engine import policy_release
 from yeto.rl.engine.policy_release import (
     BASE_CHECKPOINT_KEY,
+    BASE_FINGERPRINT_KEY,
     FollowerCounters,
     PolicyFollower,
     PolicyRelease,
+    checkpoint_fingerprint,
     is_base_checkpoint_release,
 )
 from yeto.rl.engine.sampler_loop import SamplerLoop
@@ -42,14 +44,16 @@ class Store:
         self.served.append(release.seq)
 
 
+FP = "f" * 64
 BASE = {"origin": {"kind": "local", "learner_id": 0, "num_learners": 2, "local_version": 0,
-                   BASE_CHECKPOINT_KEY: True}}
+                   BASE_CHECKPOINT_KEY: True, BASE_FINGERPRINT_KEY: FP}}
 
 
 def _follower(tmp_path, monkeypatch, *, background=True, **kwargs):
     monkeypatch.setattr(policy_release, "DOWNLOAD_WAIT_S", 5.0)
     store = Store(tmp_path)
     loaded: list[int] = []
+    kwargs.setdefault("base_fingerprint", FP)
     follower = PolicyFollower(store, lambda release, directory: loaded.append(release.seq), version=0,
                               background_download=background, **kwargs)
     return store, follower, loaded
@@ -113,7 +117,8 @@ def test_a_lora_or_derived_or_delta_v0_is_never_a_base_checkpoint():
     assert not is_base_checkpoint_release(release(delta={"base_seq": 0}, **BASE))
     assert not is_base_checkpoint_release(PolicyRelease(seq=2, version=2, policy_hash="h", path="r2-v2", **BASE))
     assert not is_base_checkpoint_release(release(origin={"kind": "local"}))
-    assert not is_base_checkpoint_release(release(origin={BASE_CHECKPOINT_KEY: "yes"}))
+    assert not is_base_checkpoint_release(release(origin={BASE_CHECKPOINT_KEY: "yes", BASE_FINGERPRINT_KEY: FP}))
+    assert not is_base_checkpoint_release(release(origin={BASE_CHECKPOINT_KEY: True}))  # no fingerprint
 
 
 def test_the_counters_keep_their_fields_until_a_release_is_adopted():
@@ -191,14 +196,14 @@ def test_a_synced_lane_marks_its_first_v0_release_as_the_base_checkpoint(tmp_pat
     events = []
     lane = {"kind": "local", "learner_id": 0, "num_learners": 2}
     publisher = _publisher(tmp_path, events, origin=lambda state: {**lane, "local_version": int(state.policy_version)},
-                           base_is_checkpoint=True)
+                           base_fingerprint=FP)
     for version in range(0, 2):  # the store keeps the newest two releases
         publisher.publish(_State(version, f"h{version}"))
     publisher.drain_releases()
     records = _records(tmp_path)
     assert sorted(records) == [0, 1]  # the lane still releases v0 (restarts restore it)
     assert is_base_checkpoint_release(records[0])
-    assert records[0].origin == {**lane, "local_version": 0, BASE_CHECKPOINT_KEY: True}
+    assert records[0].origin == {**lane, "local_version": 0, BASE_CHECKPOINT_KEY: True, BASE_FINGERPRINT_KEY: FP}
     assert BASE_CHECKPOINT_KEY not in (records[1].origin or {})
 
 
@@ -206,7 +211,7 @@ def test_a_lane_that_loaded_a_release_or_a_v0_after_releases_is_not_marked(tmp_p
     from tests.test_rl_sampler_island import _State
 
     events = []
-    publisher = _publisher(tmp_path / "a", events, origin=lambda state: {"kind": "local"}, base_is_checkpoint=False)
+    publisher = _publisher(tmp_path / "a", events, origin=lambda state: {"kind": "local"}, base_fingerprint=None)
     publisher.publish(_State(0, "h0"))
     publisher.drain_releases()
     assert not is_base_checkpoint_release(_records(tmp_path / "a")[0])
@@ -226,11 +231,92 @@ def test_a_single_trainer_still_releases_nothing_for_v0(tmp_path):
     assert ("rl_policy_release_skipped", "base_policy") in [(e, f.get("reason")) for e, f in events]
 
 
-def test_wire_policy_releases_marks_only_a_synced_full_weight_lane_without_an_init_release():
+def _checkpoint(root, *, sizes=(10, 20), config='{"model_type": "qwen3"}'):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.json").write_text(config)
+    for n, size in enumerate(sizes):
+        (root / f"model-{n:05d}.safetensors").write_bytes(b"x" * size)
+    return root
+
+
+def test_checkpoint_fingerprints_agree_for_copies_and_differ_otherwise(tmp_path):
+    a = checkpoint_fingerprint(_checkpoint(tmp_path / "a"))
+    assert a and a == checkpoint_fingerprint(_checkpoint(tmp_path / "b"))
+    assert a != checkpoint_fingerprint(_checkpoint(tmp_path / "c", sizes=(10, 21)))
+    assert a != checkpoint_fingerprint(_checkpoint(tmp_path / "d", config='{"model_type": "other"}'))
+    assert checkpoint_fingerprint(tmp_path / "missing") is None and checkpoint_fingerprint(None) is None
+    (tmp_path / "empty").mkdir()
+    (tmp_path / "empty" / "config.json").write_text("{}")
+    assert checkpoint_fingerprint(tmp_path / "empty") is None  # no weight file
+
+
+def test_a_base_release_of_another_checkpoint_or_without_a_sampler_fingerprint_is_loaded(tmp_path, monkeypatch):
+    store, follower, loaded = _follower(tmp_path, monkeypatch, background=False, base_fingerprint="e" * 64)
+    store.publish(1, 0, "h-base", **BASE)  # the trainer's checkpoint is not the sampler's (a misconfigured base)
+    assert follower.refresh().seq == 1 and loaded == [1] and follower.counters.adopted == 0
+    (tmp_path / "x").mkdir()
+    store2, follower2, loaded2 = _follower(tmp_path / "x", monkeypatch, background=False, base_fingerprint=None)
+    store2.publish(1, 0, "h-base", **BASE)
+    assert follower2.refresh().seq == 1 and loaded2 == [1]
+
+
+def test_an_empty_hash_or_another_manifest_is_never_the_same_weights(tmp_path, monkeypatch):
+    store, follower, loaded = _follower(tmp_path, monkeypatch, background=False)
+    store.publish(1, 4, "")
+    follower.version = 4
+    assert follower.refresh().seq == 1
+    store.publish(2, 4, "")  # no hash: nothing proves the weights are the served ones
+    assert follower.refresh().seq == 2
+    store.publish(3, 4, "h4", manifest={"expert_selection_sha256": "a"})
+    assert follower.refresh().seq == 3
+    store.publish(4, 4, "h4", manifest={"expert_selection_sha256": "b"})  # same hash, other declared selection
+    assert follower.refresh().seq == 4 and loaded == [1, 2, 3, 4] and follower.counters.adopted == 0
+
+
+def test_a_restarted_sampler_adopts_the_marked_v0_already_in_the_store(tmp_path, monkeypatch):
+    """A sampler that (re)starts on its base checkpoint while the store's newest release is the
+    marked v0 takes it on its first poll, as one that saw it published."""
+    store, follower, loaded = _follower(tmp_path, monkeypatch)
+    store.publish(1, 0, "h-base", **BASE)
+    assert follower.prefetch() is True and follower.release.seq == 1 and loaded == [] and store.resolved == []
+
+
+def test_base_checkpoint_fingerprint_marks_only_a_cold_synced_full_weight_lane(tmp_path):
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.sampler_island import base_checkpoint_fingerprint
+
+    ckpt = _checkpoint(tmp_path / "hf")
+    fp = checkpoint_fingerprint(ckpt)
+    lane = object()
+    args = SimpleNamespace(hf_checkpoint=str(ckpt), load=None, yeto_rl_init_release=None)
+    assert base_checkpoint_fingerprint(args, lora=False, lane=lane) == fp
+    assert base_checkpoint_fingerprint(args, lora=False, lane=None) is None  # a single trainer: no v0 release
+    assert base_checkpoint_fingerprint(args, lora=True, lane=lane) is None
+    warm = SimpleNamespace(hf_checkpoint=str(ckpt), load=str(tmp_path / "megatron"), yeto_rl_init_release=None)
+    assert base_checkpoint_fingerprint(warm, lora=False, lane=lane) is None  # Megatron --load warm start
+    released = SimpleNamespace(hf_checkpoint=str(ckpt), load=None, yeto_rl_init_release={"seq": 3})
+    assert base_checkpoint_fingerprint(released, lora=False, lane=lane) is None
+    remote = SimpleNamespace(hf_checkpoint="Qwen/Qwen3-4B", load=None, yeto_rl_init_release=None)
+    assert base_checkpoint_fingerprint(remote, lora=False, lane=lane) is None  # no local directory
+
+
+def test_wire_policy_releases_marks_only_a_synced_full_weight_lane():
     import inspect
 
     from yeto.rl.adapters.miles import sampler_island as si
     source = inspect.getsource(si.wire_policy_releases)
     assert "skip_base=not lora and lane is None" in source  # the single trainer's v0 skip is unchanged
-    assert ('base_is_checkpoint=(not lora and lane is not None and getattr(\n'
-            '                                       miles_args, "yeto_rl_init_release", None) is None)') in source
+    assert "base_fingerprint=base_checkpoint_fingerprint(miles_args, lora=lora, lane=lane)" in source
+
+
+def test_the_dashboard_shows_an_adopted_release_on_its_sampler():
+    from yeto.dashboard.async_rl import AsyncState
+
+    asy = AsyncState()
+    asy.fold({"event": "rl_policy_released", "policy_version": 0, "seq": 1, "released_at": 100.0},
+             "trainer", 100.0, "", None)
+    asy.fold({"event": "rl_sampler_policy_adopted", "seq": 1, "policy_version": 0, "policy_hash": "h",
+              "released_at": 100.0, "reason": "base_checkpoint", "buffer_selected": 3}, "p5-i0-0", 105.0, "", None)
+    loads = [ld for ld in asy.loads if ld["sampler"] == "p5-i0-0"]
+    assert loads and loads[0]["adopted"] and loads[0]["pause_s"] == 0.0 and loads[0]["policy_version"] == 0

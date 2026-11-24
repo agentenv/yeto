@@ -730,7 +730,7 @@ class Reducer:
                 "rl_policy_apply", "rl_publication", "rl_driver_phase", "rl_heartbeat",
                 "rl_round_cut", "rl_member_publication", "rl_resume",
                 # a sampler's policy is the version it serves
-                "rl_sampler_round", "rl_sampler_policy_loaded"):
+                "rl_sampler_round", "rl_sampler_policy_loaded", "rl_sampler_policy_adopted"):
             # the newest record wins, whatever order the tapes are read in (a run store lists a
             # trainer's launch folders and an echo directory its rotated files by name)
             if ts is None or isl.get("policy_version_ts") is None or ts >= isl["policy_version_ts"]:
