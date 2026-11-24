@@ -263,6 +263,8 @@ class _BufferRound:
         self.sampling = trainer_sampling(args)
 
     def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
+        from .full_parameter.evidence import evidence_enabled
+
         if input.evaluation:
             raise SampleBufferRolloutError("the sample buffer reader does not evaluate; "
                                            "set --eval-function-path or disable eval")
@@ -279,9 +281,12 @@ class _BufferRound:
             duplicates += list(getattr(report, "duplicate_tasks", None) or ())
             groups = [(position, [complete_prompt_tokens(d, self._tokenize) for d in group])
                       for position, group in groups]
+            # a full-parameter island binds every trained token to its behavior policy
+            # (full_parameter.evidence): a group of unknown-version tokens is left out
             converted, problems = miles_groups(groups, samples_per_group=self.samples_per_group,
                                                r3_layers=r3_layers, r3_num_experts=num_experts,
-                                               sampling=getattr(self, "sampling", None), stats=stats)
+                                               sampling=getattr(self, "sampling", None), stats=stats,
+                                               require_known_versions=evidence_enabled(self.args))
             unconvertible += problems
             if converted:
                 break

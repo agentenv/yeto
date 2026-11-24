@@ -370,8 +370,14 @@ def miles_sample_dict(sample: Mapping[str, Any], *,
       Miles ``WeightVersionsPerCall`` whose single output span covers the response
       tokens at that version, so Miles' per-token version accounting (and the
       full-parameter trajectory evidence) sees the behavior version. A sample whose
-      ``final_weight_version`` differs (an in-place update mid-generation) has no
-      per-token split and is left without spans (refused downstream as unknown).
+      ``final_weight_version`` differs (an in-place update mid-generation: a live
+      agentic trial, or a generate call a live reload fell inside) has no per-token
+      split; its span covers the response at the oldest of the two, the version the
+      sampler names as its behavior version (``metadata.weight_version``: the
+      trainer's ``max_policy_age`` gate counts its age from there, and TIS on
+      ``rollout_log_probs`` corrects every token for the policy that actually
+      sampled it). Without that span the full-parameter evidence found tokens of
+      unknown version after the batch was taken and stopped the island.
     """
     import numpy
 
@@ -420,8 +426,12 @@ def _engine_weight_version_call(sample: Mapping[str, Any]) -> dict[str, Any] | N
     if version is None or engine_version_number(version) is None:
         return None
     final = metadata.get("final_weight_version")
-    if final is not None and engine_version_number(final) != engine_version_number(version):
-        return None
+    if final is not None:
+        newest = engine_version_number(final)
+        if newest is None:
+            return None
+        if newest < engine_version_number(version):
+            version = final  # the oldest of the two (miles_sample_dict doc)
     tokens = len(sample.get("tokens") or ())
     response = int(sample.get("response_length") or 0)
     if response <= 0 or response > tokens:
@@ -622,6 +632,23 @@ def payload_is_missing(buffer: Any, ref: str, error: BaseException) -> bool:
     if not callable(has_payload):
         return isinstance(error, SampleBufferError) and "is missing" in str(error)
     return not has_payload(ref)
+
+
+def unknown_version_tokens(sample: Mapping[str, Any]) -> int:
+    """Response tokens of ``sample`` (a :func:`miles_sample_dict`) that no
+    ``weight_versions`` span names a numeric version for: the tokens the
+    full-parameter trajectory evidence would find of unknown policy version."""
+    response = int(sample.get("response_length") or 0)
+    start = len(sample.get("tokens") or ()) - response
+    known = [False] * max(0, response)
+    for call in sample.get("weight_versions") or ():
+        spans = call.get("spans") if isinstance(call, Mapping) else call
+        for span in spans or ():
+            if engine_version_number(span.get("version")) is None:
+                continue
+            for pos in range(max(int(span["abs_start"]), start), min(int(span["abs_end"]), start + response)):
+                known[pos - start] = True
+    return len(known) - sum(known)
 
 
 def _sample_versions(sample: Mapping[str, Any]) -> list[int]:

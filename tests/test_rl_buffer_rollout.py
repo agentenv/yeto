@@ -556,7 +556,7 @@ def test_reader_round_pads_a_short_round_to_exactly_the_global_batch(monkeypatch
 def test_engine_sampler_sample_gets_one_miles_version_span():
     """An engine-sampler sample (metadata.weight_version only) reaches Miles with one
     WeightVersionsPerCall covering its response tokens; Miles' own spans are kept and
-    a mid-generation version change gets none."""
+    a mid-generation version change gets one span at the oldest version."""
     from types import SimpleNamespace
 
     from yeto.rl.adapters.miles.carry_over import sample_versions
@@ -573,7 +573,8 @@ def test_engine_sampler_sample_gets_one_miles_version_span():
                                        "prefill_spans": [], "output_start": 3}]}
     assert buffer_payload.miles_sample_dict(miles)["weight_versions"] == miles["weight_versions"]
     moved = {**s, "metadata": {"weight_version": "4", "final_weight_version": "5"}}
-    assert "weight_versions" not in buffer_payload.miles_sample_dict(moved)
+    assert buffer_payload.miles_sample_dict(moved)["weight_versions"][0]["spans"] == [
+        {"version": "4", "abs_start": 3, "abs_end": 5}]
 
 
 

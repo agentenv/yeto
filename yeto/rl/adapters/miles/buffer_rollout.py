@@ -339,7 +339,8 @@ def check_version_fields(group: Sequence[Mapping[str, Any]], sampling: Mapping[s
 
 def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samples_per_group: int,
                  r3_layers: tuple[int, int] | None = None, r3_num_experts: int | None = None,
-                 sampling: Mapping[str, Any] | None = None, stats: dict[str, int] | None = None
+                 sampling: Mapping[str, Any] | None = None, stats: dict[str, int] | None = None,
+                 require_known_versions: bool = False,
                  ) -> tuple[list[tuple[int, list[dict[str, Any]]]], list[str]]:
     """The taken groups renumbered (:func:`renumber_group`) and in Miles' sample form
     (``buffer_payload.miles_sample_dict``), and why each group that cannot be converted
@@ -349,17 +350,30 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
     takes again when no group of a take converts, and fails after a few such takes).
     ``sampling``: a score_centering trainer's (:func:`trainer_sampling`); a group whose
     ``engine.version_fields`` differ is left out the same way (:func:`check_version_fields`),
-    and a group without them is kept and counted in ``stats["no_version_fields_groups"]``."""
-    from yeto.rl.engine.buffer_payload import miles_sample_dict  # noqa: PLC0415
+    and a group without them is kept and counted in ``stats["no_version_fields_groups"]``.
+    ``require_known_versions`` (a full-parameter island, whose trajectory evidence
+    names the behavior policy of every trained token): a group with a response token
+    of unknown policy version is left out the same way, before it is trained, and
+    counted in ``stats["unknown_version_groups"]``; the evidence would otherwise stop
+    the island after the take."""
+    from yeto.rl.engine.buffer_payload import miles_sample_dict, unknown_version_tokens  # noqa: PLC0415
 
     kept, problems = [], []
     unstamped = 0
     for position, group in groups:
         try:
             stamped = sampling is None or check_version_fields(group, sampling)
-            kept.append((position, [miles_sample_dict(d, r3_layers=r3_layers, r3_num_experts=r3_num_experts)
-                                    for d in renumber_group(group, position=position,
-                                                            samples_per_group=samples_per_group)]))
+            converted = [miles_sample_dict(d, r3_layers=r3_layers, r3_num_experts=r3_num_experts)
+                         for d in renumber_group(group, position=position, samples_per_group=samples_per_group)]
+            if require_known_versions:
+                unknown = sum(unknown_version_tokens(d) for d in converted)
+                if unknown:
+                    if stats is not None:
+                        stats["unknown_version_groups"] = stats.get("unknown_version_groups", 0) + 1
+                    raise SampleBufferRolloutError(
+                        f"{unknown} response token(s) of unknown policy version (no weight_versions span "
+                        "names them): the full-parameter evidence cannot name their behavior policy")
+            kept.append((position, converted))
             unstamped += not stamped
         except SampleBufferRolloutError as error:
             problems.append(f"buffer position {position}: {error}")
