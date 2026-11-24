@@ -168,6 +168,9 @@ class Assignment:
     sudo: bool = False  # the container engine needs sudo
     cards: tuple[int, ...] | None = None  # the cards the sampler gets (None: every card)
     preflight: Mapping[str, Any] = field(default_factory=dict)  # yeto.node.preflight.Requirements fields
+    # "container": the spec is written in container paths (/work, /models: moved for a process
+    # launch); "host": in the node's own paths (only the placeholders are filled)
+    spec_paths: str = "container"
     created_at: float = 0.0
     expires_at: float | None = None  # the token's deadline (None: none); read refuses after it
 

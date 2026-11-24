@@ -278,7 +278,7 @@ class NcSshOps:
         else:
             attach_ssh(lease)
         pull = self.cfg.get("model_pull")
-        if pull:
+        if pull and self.node_route is None:  # on the node runtime the node pulls it (its model plan)
             self._pull(lease, pull)
         self._hooks(lease, m)
         self._start_sampler(lease, m, shards)
@@ -326,7 +326,31 @@ class NcSshOps:
             self._route = route
         return self._route
 
+    @property
+    def node_route(self) -> Any:
+        """The node runtime (``yeto.node.route``) on the sky route: the node runs ``python -m
+        yeto.node run`` in the sampler image, with the node's own family flags (a CUDA VM gets
+        CUDA flags, not the MI355X ones). Default on for ``provider.kind: sky`` on the r2 data
+        path; ``node_runtime: false`` keeps the docker route of :mod:`.ssh_sampler`. National
+        Compute and Daytona stay on their routes (``yeto.node.shadow`` compares them)."""
+        if not hasattr(self, "_node_route"):
+            from yeto.node import route as node_route  # noqa: PLC0415
+
+            on = (getattr(self.provider, "kind", None) == "sky" and self.sampler_route is None
+                  and self.cfg.get("data_path", "r2") == "r2" and node_route.enabled(self.cfg, default=True))
+            self._node_route = None
+            if on:
+                from yeto.node.store import pool_fence_store, run_store_uri  # noqa: PLC0415
+
+                self._node_route = node_route.NodeRoute(
+                    self.cfg, kind="sky", objects=lambda: pool_fence_store(self.cfg, error=NcError).objects,
+                    store=lambda: run_store_uri(self.cfg["r2_env_file"], self.cfg["run_prefix"],
+                                                bucket_env=self.cfg.get("bucket_env", "R2_BUCKET")), run=self._run)
+        return self._node_route
+
     def probe(self, m: Member) -> island_status.Probe:
+        if self.node_route is not None:  # the node's records in the store: no ssh round trip
+            return self.node_route.probe(m)
         alias = node_pool.host_alias(m.ticket)
         if self.sampler_route is not None:
             script = self.sampler_route.probe_script(m.shard, self._tape_glob(m.shard), self.metrics_port)
@@ -416,6 +440,9 @@ class NcSshOps:
         if m.shard and leases_path().exists() and m.ticket in json.loads(leases_path().read_text()):
             name = ssh_sampler.container_name(m.shard)
             stop = (self.sampler_route.stop_command(m.shard, grace_s=30) if self.sampler_route is not None else
+                    f"sudo docker stop -t 30 {name} >/dev/null 2>&1; mkdir -p ~/yeto/logs; sudo docker logs "
+                    f"--tail 500 {name} > ~/yeto/logs/{name}.last.log 2>&1; sudo docker rm -f {name} >/dev/null 2>&1; "
+                    "echo stopped" if self.node_route is not None else
                     f"sudo docker stop -t 30 {name} >/dev/null 2>&1; sudo docker logs --tail 500 {name} "
                     f"> {ssh_sampler.NVME}/logs/{name}.last.log 2>&1; sudo docker rm -f {name} "
                     ">/dev/null 2>&1; echo stopped")
@@ -480,6 +507,11 @@ class NcSshOps:
         # the prompts file goes to every node at every start (checked by size and sha256 there)
         prompts = {"prompts_file": str(Path(str(self.cfg["prompts_file"])).expanduser())} \
             if self.cfg.get("prompts_file") else {}
+        if self.node_route is not None:
+            from yeto.node import ssh_docker  # noqa: PLC0415
+
+            ssh_docker.start(self, lease, m, shards, run=self._run, **prompts)
+            return
         if self.sampler_route is not None:
             self.sampler_route.start(node_pool.host_alias(lease.ticket), spec=self._spec(m, shards), shard=m.shard,
                                      run_prefix=self.cfg["run_prefix"], r2_env_file=self.cfg["r2_env_file"],
@@ -609,7 +641,7 @@ POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base
                        "engine", "platform",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "comment", "sampler_route", "data_path", "syncer", "protected_accounts",
-                       "prompts_file"})
+                       "prompts_file", "node_runtime", "node_profile"})
 DATA_PATHS = ("r2", "syncer")  # buffer shards + releases in the run store | syncer broadcast + sample relay
 REQUIRED_KEYS = ("target", "shard_base")  # and "accounts" (or "slots" off National Compute)
 # the keys of the removed sky route (a SkyPilot SSH node pool with k3s on the node): refused by name
@@ -949,6 +981,10 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         _unknown("syncer", cfg["syncer"], SYNCER_KEYS)
     if cfg.get("data_path", "r2") == "syncer":
         syncer_address((cfg.get("syncer") or {}).get("address"))
+    if cfg.get("node_runtime") is not None and not isinstance(cfg["node_runtime"], bool):
+        raise ValueError(f"pool config: node_runtime must be true or false, not {cfg['node_runtime']!r}")
+    if cfg.get("node_profile") is not None and not isinstance(cfg["node_profile"], dict):
+        raise ValueError("pool config: node_profile must be a map of node profile fields")
     run_id(cfg)
     lead, margin = (_seconds(cfg, "replace_lead_s", 3600), _seconds(cfg, "end_margin_s", 600))
     price = pool_price(cfg)[0]

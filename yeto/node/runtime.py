@@ -94,12 +94,15 @@ class NodeRuntime:
                  environ: Mapping[str, str] | None = None, env_file: str | None = None,
                  heartbeat_s: float | None = None, run: Callable[..., Any] = subprocess.run,
                  popen: Callable[..., Any] = subprocess.Popen, log: Callable[[str], None] | None = None,
-                 skip_preflight: bool = False) -> None:
+                 skip_preflight: bool = False, sampler_log: str | None = None,
+                 child_pid_file: str | None = None) -> None:
         self.objects, self.assignment, self.profile = objects, assignment, profile
         self.store_uri, self.env_file, self.heartbeat_s = store_uri, env_file, heartbeat_s
         self.environ = dict(os.environ if environ is None else environ)
         self.secrets = read_env_file(env_file) if env_file else {}
         self.run_, self.popen, self.skip_preflight = run, popen, skip_preflight
+        # "-": the sampler writes to this process's stdout (a container's log); else a file
+        self.sampler_log, self.child_pid_file = sampler_log, child_pid_file
         self.log = log or (lambda line: print(f"[yeto-node] {line}", flush=True))
         self.reporter = NodeReporter(objects, assignment.ticket, assignment.generation,
                                      base={"sampler": assignment.shard, "source": assignment.source})
@@ -153,11 +156,11 @@ class NodeRuntime:
             chosen = engine_images.resolve(self.profile, model, pref, image=named, **needs)
         except engine_images.ImageIncompatible as error:
             raise BootError("image", EXIT_IMAGE, str(error)) from None
-        return chosen.ref, self.assignment.python or chosen.python or "python3"
+        return chosen.ref.removeprefix("docker:"), self.assignment.python or chosen.python or "python3"
 
     def plan(self, yeto_dir: str, facts: Mapping[str, Any] | None = None) -> Plan:
         a, p = self.assignment, self.profile
-        spec = node_paths.fill_spec(a.spec, p, run_prefix=a.run)
+        spec = node_paths.fill_spec(a.spec, p, run_prefix=a.run, move=a.spec_paths != "host")
         if a.continues_shard and not spec.get("continues_shard"):
             spec["continues_shard"] = a.continues_shard
         image, python = self.image(spec)
@@ -225,8 +228,9 @@ class NodeRuntime:
         child_env = {**self.environ, **self.secrets, **plan.env} if not is_container(self.profile) \
             else dict(self.environ)
         child_env.pop(TOKEN_ENV, None)  # the ticket's token stays with the runtime
-        log = Path(plan.log_host_path)
-        log.parent.mkdir(parents=True, exist_ok=True)
+        log = None if self.sampler_log == "-" else Path(self.sampler_log or plan.log_host_path)
+        if log is not None:
+            log.parent.mkdir(parents=True, exist_ok=True)
         self._stage("starting", argv0=plan.argv[0], image=plan.image)
         handlers = {}
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -234,12 +238,19 @@ class NodeRuntime:
                 handlers[sig] = signal.signal(sig, self._forward)
             except ValueError:  # not the main thread (tests): no forwarding
                 pass
+        out = None
         try:
-            with log.open("ab") as out:
-                self.child = self.popen(plan.argv, env=child_env, stdout=out, stderr=subprocess.STDOUT,
-                                        cwd=node_dirs(self.profile)["work"], start_new_session=False)
-                code = self.child.wait()
+            if log is not None:
+                out = log.open("ab")
+            sys.stdout.flush()
+            self.child = self.popen(plan.argv, env=child_env, stdout=out, stderr=subprocess.STDOUT if out else None,
+                                    cwd=node_dirs(self.profile)["work"], start_new_session=False)
+            if self.child_pid_file:  # the sampler's own PID (a route that stops it by PID)
+                Path(self.child_pid_file).write_text(f"{self.child.pid}\n")
+            code = self.child.wait()
         finally:
+            if out is not None:
+                out.close()
             for sig, old in handlers.items():
                 signal.signal(sig, old)
         return int(code)
@@ -336,7 +347,7 @@ def run_cli(args: Any, *, environ: Mapping[str, str] | None = None, run: Callabl
     profile = profile_from_doc({**dict(assignment.profile or {}), **override})
     runtime = NodeRuntime(objects, assignment, profile, store_uri=store if "://" in store else None, environ=env,
                           env_file=args.env_file, heartbeat_s=args.heartbeat_s, run=run, popen=popen,
-                          skip_preflight=args.skip_preflight)
+                          skip_preflight=args.skip_preflight, sampler_log=args.log, child_pid_file=args.child_pid_file)
     return runtime.main(dry_run=args.dry_run)
 
 
@@ -352,5 +363,8 @@ def add_run_args(parser: Any) -> None:
     parser.add_argument("--cache", help="this node's cache directory (profile paths.cache)")
     parser.add_argument("--heartbeat-s", type=float, default=None, help="the sampler's heartbeat period")
     parser.add_argument("--skip-preflight", action="store_true", help="start without the node preflight")
+    parser.add_argument("--log", help="the sampler's log file ('-': this process's stdout; default "
+                                      "<work>/logs/<shard>.log)")
+    parser.add_argument("--child-pid-file", help="write the sampler process's PID here")
     parser.add_argument("--dry-run", action="store_true", help="print the plan; run nothing")
 

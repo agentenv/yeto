@@ -104,7 +104,7 @@ def container_name(shard: str) -> str:
 def docker_run_argv(node: Node, *, name: str, command: Sequence[str], env: Mapping[str, str],
                     yeto_dir: str | None, env_file: str | None, detach: bool,
                     mounts: Mapping[str, str] | None = None,
-                    extra_env_files: Sequence[str] = ()) -> list[str]:
+                    extra_env_files: Sequence[str] = (), ro_models: bool = True) -> list[str]:
     """``docker run`` on ``node``: its device flags and mounts, env values by ``-e K=V``
     (non-secret only; secrets come from ``--env-file`` on the node). ``extra_env_files``:
     further env files on the node, read after ``env_file`` (e.g. the Harbor settings
@@ -112,7 +112,7 @@ def docker_run_argv(node: Node, *, name: str, command: Sequence[str], env: Mappi
     argv = ["sudo", "docker", "run", "-d" if detach else "--rm", "--name", name, "--restart=no",
             "--network", "host", "--ipc", "host", *node.docker_args]
     for host_path, container_path in sorted((mounts or node.mounts).items()):
-        ro = ":ro" if container_path.startswith("/models") else ""
+        ro = ":ro" if ro_models and container_path.startswith("/models") else ""
         argv += ["-v", f"{host_path}:{container_path}{ro}"]
     if yeto_dir:
         argv += ["-v", f"{yeto_dir}:/yeto:ro"]
@@ -183,11 +183,13 @@ def probe_command(spec_in_container: str | None, *, python: str = PYTHON) -> lis
     return ["bash", "-c", script]
 
 
-def upload_code(alias: str, *, ref: str = "HEAD", run: Callable[..., Any] = subprocess.run) -> str:
-    """``git archive`` of ``yeto/`` at ``ref`` into ``/mnt/nvme/yeto/<sha>`` (idempotent)."""
+def upload_code(alias: str, *, ref: str = "HEAD", run: Callable[..., Any] = subprocess.run,
+                root: str = f"{NVME}/yeto") -> str:
+    """``git archive`` of ``yeto/`` at ``ref`` into ``<root>/<sha>`` (default ``/mnt/nvme/yeto``;
+    idempotent)."""
     sha = run(["git", "-C", str(REPO_ROOT), "rev-parse", "--short=12", ref], capture_output=True,
               text=True, check=True).stdout.strip()
-    dest = f"{NVME}/yeto/{sha}"
+    dest = f"{root}/{sha}"
     archive = subprocess.Popen(["git", "-C", str(REPO_ROOT), "archive", "--format=tar", ref, "yeto"],
                                stdout=subprocess.PIPE)
     try:
