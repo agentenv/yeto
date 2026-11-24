@@ -242,3 +242,16 @@ def test_a_stop_during_the_boot_writes_the_exit_record(tmp_path, code_tar):
     status = records.node_status(objects, "t-stop")
     assert status.state == "exited" and status.reason == "stopped"
     assert signal.getsignal(signal.SIGTERM) is not None  # the handler before main is back
+
+
+def test_container_mounts_add_the_profiles_mounts_to_the_nodes_directories(tmp_path):
+    from yeto.node.profile import container_mounts
+
+    profile = _profile(tmp_path, container="docker", mounts={"/shared/datasets": "/datasets",
+                                                             "/nvme/models/K": "/models/k"})
+    mounts = container_mounts(profile)
+    assert mounts[f"{tmp_path}/work"] == "/work" and mounts[f"{tmp_path}/models"] == "/models"
+    assert mounts[f"{tmp_path}/work/cache"] == "/root/.cache"
+    assert mounts["/shared/datasets"] == "/datasets" and mounts["/nvme/models/K"] == "/models/k"
+    replaced = container_mounts(_profile(tmp_path, container="docker", mounts={"/big/cache": "/root/.cache"}))
+    assert replaced["/big/cache"] == "/root/.cache" and f"{tmp_path}/work/cache" not in replaced

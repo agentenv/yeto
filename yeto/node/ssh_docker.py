@@ -204,7 +204,8 @@ def start(ops: Any, lease: Any, m: Any, shards: list[str], *, run: Callable[...,
                                 mode="600", run=run)
     # the yeto tree in front of the image's own PYTHONPATH (-e PYTHONPATH= would drop it)
     tree = f"{CONTAINER_WORK}/yeto/{assignment.code.sha}"
-    command = (f'export PYTHONPATH={shlex.quote(tree)}"${{PYTHONPATH:+:$PYTHONPATH}}"; '
+    # the docker route's prelude: an agentic HOME's .ssh linked into the passwd home (OpenSSH reads that)
+    command = (ssh_sampler.SSH_HOME_LINK + f'export PYTHONPATH={shlex.quote(tree)}"${{PYTHONPATH:+:$PYTHONPATH}}"; '
                + runtime_command(python, assignment.ticket, route.store, env_file=f"{inside}/.store.env",
                                  token_file=f"{inside}/{m.shard}.token",
                                  profile_file=f"{inside}/{m.shard}.profile.json", log="-"))

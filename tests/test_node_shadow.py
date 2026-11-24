@@ -91,10 +91,12 @@ def test_nc_shadow_of_the_customer_spec_pins_what_is_left(tmp_path, monkeypatch)
         assert new.env[key] == old.env[key], key
     differences = shadow.compare(old, new)
     assert not shadow.switchable(differences)  # NC stays on its route
-    # what is left: the code tree (the route mounts it at /yeto and sets -e PYTHONPATH=/yeto, which
-    # drops an image's own entries; the runtime prepends its tree inside the container) and the
-    # store URI (the route builds it on the node from the env file's bucket)
+    # what is left: the node's whole model directory (the runtime mounts it under the route's
+    # per-model mounts), the code tree (the route mounts it at /yeto and sets -e PYTHONPATH=/yeto,
+    # which drops an image's own entries; the runtime prepends its tree inside the container) and
+    # the store URI (the route builds it on the node from the env file's bucket)
     assert differences == [
+        "mount /models: (none) -> /mnt/nvme/models:ro",
         "mount /yeto: /mnt/nvme/yeto/abcdef123456:ro -> (none)",
         "env PYTHONPATH: /yeto -> (unset)",
         "env YETO_RL_STORE_S3_URI: (unset) -> s3://b/runs/runs1",

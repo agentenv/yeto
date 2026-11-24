@@ -203,7 +203,8 @@ def test_the_container_keeps_the_images_pythonpath_and_the_routes_tuning(tmp_pat
     argv = shlex.split(docker.split("; ", 1)[1])
     assert not any(a.startswith("PYTHONPATH=") for a in argv)  # an -e would drop the image's own entries
     inner = shlex.split(argv[-1])[2]  # bash -c '<line>'
-    assert inner.startswith(f'export PYTHONPATH=/work/yeto/{SHA}"${{PYTHONPATH:+:$PYTHONPATH}}"; exec ')
+    assert inner.startswith(ssh_sampler.SSH_HOME_LINK)  # the docker route's prelude
+    assert f'export PYTHONPATH=/work/yeto/{SHA}"${{PYTHONPATH:+:$PYTHONPATH}}"; exec ' in inner
     for key, value in ssh_sampler.sampler_env("runs1").items():
         if key not in ("PYTHONPATH", "HIP_VISIBLE_DEVICES"):
             assert f"{key}={value}" in argv, key
@@ -212,19 +213,26 @@ def test_the_container_keeps_the_images_pythonpath_and_the_routes_tuning(tmp_pat
     assert any(c[0][0] == "scp" and str(agentic) in c[0] for c in run.calls)
 
 
-def test_an_offer_without_an_image_is_refused_before_ordering(tmp_path, monkeypatch):
-    ops, run, m, _cfg = _ops(tmp_path, monkeypatch, accelerators="910B4:8")
-    _store_route(ops, tmp_path, run)
-    monkeypatch.setattr(ops, "_spec", lambda m, shards: dict(SPEC, engine={"adapter": "sglang-server"}))
-    ordered = []
-    ops.provider.order = lambda account: ordered.append(account) or "t"
-    with pytest.raises(cli.NcError, match="refused before ordering.*910B4|refused before ordering.*ascend"):
-        ops.order(0)
-    assert ordered == []
-    (tmp_path / "ok").mkdir()
-    ok = _ops(tmp_path / "ok", monkeypatch)[0]
-    ok.provider.order = lambda account: ordered.append(account) or "t"
-    assert ok.order(0) == "t" and ordered == [0]
+def test_an_offer_without_an_image_is_refused_before_the_pool_starts(tmp_path, monkeypatch):
+    cfg = _ops(tmp_path, monkeypatch, accelerators="910B4:8")[3]
+    monkeypatch.setattr(cli, "render_spec", lambda cfg, m, shards: dict(SPEC, engine={"adapter": "sglang-server"}))
+    with pytest.raises(cli.NcError, match="910B4|ascend"):
+        cli.node_image_lines(cfg)
+    monkeypatch.setattr(cli, "render_spec", lambda cfg, m, shards: dict(SPEC))
+    ok = _ops(tmp_path, monkeypatch)[3]
+    [line] = cli.node_image_lines(ok)
+    assert line.startswith("node runtime image: offer ") and "rocm" not in line
+    assert cli.node_image_lines(dict(ok, node_runtime=False)) == []
+    assert cli.node_image_lines(dict(ok, provider={"kind": "nc"})) == []
+
+
+def test_the_sky_switch_is_the_pool_configs_own(tmp_path, monkeypatch):
+    cfg = _ops(tmp_path, monkeypatch)[3]
+    with pytest.raises(ValueError, match="top level"):
+        cli.pool_config(dict(cfg, provider={**cfg["provider"], "node_runtime": False}))
+    with pytest.raises(ValueError, match="keeps its own sampler start"):
+        cli.pool_config({**{k: v for k, v in cfg.items() if k != "slots"}, "accounts": [1],
+                         "provider": {"kind": "nc", "node_runtime": True}})
 
 
 def test_node_runtime_true_is_refused_where_the_route_keeps_its_own_start(tmp_path, monkeypatch):

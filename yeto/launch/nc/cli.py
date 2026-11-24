@@ -231,30 +231,7 @@ class NcSshOps:
 
     # -- supply (the provider)
     def order(self, account: int) -> str:
-        self._check_node_images()
         return self.provider.order(account)
-
-    def _check_node_images(self) -> None:
-        """On the node runtime route: every offer's machine has an image for the spec, checked
-        before the first order (not after a machine is up)."""
-        if getattr(self, "_images_checked", False) or self.node_route is None:
-            return
-        from types import SimpleNamespace  # noqa: PLC0415
-
-        from yeto.node import ssh_docker  # noqa: PLC0415
-
-        slots = slot_list(self.cfg)
-        probe = SimpleNamespace(account=slots[0], ticket="check", shard=f"{self.cfg['shard_base']}-0",
-                                data_slot=None, replaces_shard=None, predecessor_lost=False)
-        try:
-            spec = self._spec(probe, [probe.shard])
-        except (OSError, ValueError, KeyError) as error:
-            raise NcError(f"pool: the sampler spec does not render ({error})") from None
-        try:
-            ssh_docker.check_offers(self.cfg, self.provider, spec)
-        except ssh_docker.SshDockerError as error:
-            raise NcError(str(error)) from None
-        self._images_checked = True
 
     def poll(self, m: Member) -> island_status.LeaseStatus:
         status = self.provider.status(m.account, m.ticket)
@@ -360,7 +337,7 @@ class NcSshOps:
             from yeto.node import route as node_route  # noqa: PLC0415
 
             on = (getattr(self.provider, "kind", None) == "sky" and self.sampler_route is None
-                  and self.cfg.get("data_path", "r2") == "r2" and node_route.enabled(self.cfg, default=True))
+                  and self.cfg.get("data_path", "r2") == "r2" and node_runtime_on(self.cfg))
             self._node_route = None
             if on:
                 from yeto.node.store import pool_fence_store, run_store_uri  # noqa: PLC0415
@@ -1006,7 +983,13 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         syncer_address((cfg.get("syncer") or {}).get("address"))
     if cfg.get("node_runtime") is not None and not isinstance(cfg["node_runtime"], bool):
         raise ValueError(f"pool config: node_runtime must be true or false, not {cfg['node_runtime']!r}")
-    kind = str((cfg.get("provider") or {}).get("kind") or "nc")
+    section = cfg.get("provider") or {}
+    kind = str(section.get("kind") or "nc")
+    if kind == "sky" and section.get("node_runtime") is not None:  # the sky provider section has no such key
+        raise ValueError("pool config: provider.node_runtime: the sky route's switch is the pool config's own "
+                         "node_runtime (top level)")
+    if kind not in ("ssh", "sky") and section.get("node_runtime") is not None:
+        raise ValueError(f"pool config: provider.node_runtime: provider kind {kind!r} keeps its own sampler start")
     if cfg.get("node_runtime") is True and kind not in ("sky", "ssh"):
         raise ValueError(f"pool config: node_runtime true: provider kind {kind!r} keeps its own sampler start "
                          "(the node runtime runs on the sky and ssh routes)")
@@ -1108,6 +1091,37 @@ def pool_state_path(cfg: dict[str, Any]) -> Path:
 
 def pool_events_path(cfg: dict[str, Any]) -> Path:
     return tunnel.state_dir() / f"events-{run_id(cfg)}.jsonl"
+
+
+def node_runtime_on(cfg: dict[str, Any]) -> bool:
+    """The sky route's switch: the pool config's ``node_runtime`` (default on);
+    ``provider.node_runtime`` is refused on sky by :func:`pool_config`."""
+    from yeto.node.route import enabled  # noqa: PLC0415
+
+    return enabled(cfg, default=True, section=cfg.get("provider") or {})
+
+
+def node_image_lines(cfg: dict[str, Any]) -> list[str]:
+    """The sky route on the node runtime: the image of every offer's machine for the pool's
+    spec, one line each; :class:`NcError` when an offer has none (refused before the pool
+    starts, and in ``pool --dry-run``). Nothing for any other pool."""
+    section = cfg.get("provider") or {}
+    if (str(section.get("kind") or "") != "sky" or cfg.get("sampler_route") not in (None, "docker")
+            or cfg.get("data_path", "r2") != "r2" or not node_runtime_on(cfg)):
+        return []
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from yeto.launch.rollout.offers import offers_from_config  # noqa: PLC0415
+    from yeto.node import ssh_docker  # noqa: PLC0415
+
+    probe = SimpleNamespace(account=slot_list(cfg)[0], ticket="check", shard=f"{cfg['shard_base']}-0", data_slot=None,
+                            replaces_shard=None, predecessor_lost=False)
+    try:
+        spec = render_spec(cfg, probe, [probe.shard])
+        chosen = ssh_docker.check_offers(cfg, SimpleNamespace(offers=offers_from_config(section)), spec)
+    except (OSError, ValueError, KeyError, ssh_docker.SshDockerError) as error:
+        raise NcError(f"pool: node runtime images: {error}") from None
+    return [f"node runtime image: offer {key}: {image}" for key, image in chosen]
 
 
 def pool_ops(cfg: dict[str, Any]):
@@ -1517,6 +1531,12 @@ def _pool_command(args: Any) -> int:
         if args.cmd == "pool-stop":
             return pool_run.stop_pool(cfg, args.config, wait_s=args.wait)
         _print_breaker_deprecations(cfg)
+        try:  # the sky route's images, before the pool orders anything (and in the dry run)
+            for line in node_image_lines(cfg):
+                print(line)
+        except NcError as error:
+            print(f"pool: {error}", file=sys.stderr)
+            return 2
         if args.dry_run:
             return pool_run.dry_run(cfg, args.config)
         return pool_run.run_pool(cfg, args.config, interval=args.interval)
