@@ -296,7 +296,8 @@ def test_run_up_writes_the_plan_the_dry_run_printed(files, no_subprocess, monkey
         "index": 0, "name": "east", "learner": 0, "substore": "trainer0", "store": f"{STORE}/trainer0",
         "gpu": "modal:1x2xh100", "usd_per_h": 8.0, "release_every": 2, "max_policy_age": None}
     assert east["buffer_shards"] == ["vl-i0-0", "vl-i0-1", "vl-i0-2", "sg-i0-0", "sg-i0-1"]
-    assert east["pools"][0] == {"name": "i0-vllm", "source_name": "vllm", "provider": "modal", "shard_base": "vl-i0",
+    assert east["pools"][0] == {"name": "i0-vllm", "source_name": "vllm", "source": "external",
+                                "provider": "modal", "shard_base": "vl-i0",
                                 "shard_limit": 3, "run_prefix": "r/trainer0", "target": 1, "engine": "vllm",
                                 "rollout_quant": None}
     assert east["pools"][1]["engine"] == "sglang" and east["pools"][1]["rollout_quant"] == 1

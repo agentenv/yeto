@@ -158,7 +158,8 @@ def test_release_every_above_the_island_policy_age_is_refused_for_that_island():
 @pytest.mark.parametrize(("over", "match"), [
     ({"rl_island_buffer_shards": None, "rl_island_release_every": ["0:2"]},
      "need --rl-island-buffer-shards"),
-    ({"rl_island_sample_role": ["1:sampler"]}, "no --rl-island-sample-role"),
+    # with a sampler island K is a learner id (a mixed group: test_rl_mixed_sampler_group)
+    ({"rl_island_sample_role": ["1:sampler"]}, "K is a trainer's learner id; the launch has 1 trainer"),
     ({"rl_single_island_no_sync": True}, "with a syncer"),
     ({"rl_sampler_follow": "merged"}, "--rl-sampler-follow trainer"),
     ({"rl_buffer_shards": ["a", "b"]}, "take each trainer's shards from --rl-island-buffer-shards"),

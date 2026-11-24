@@ -62,6 +62,23 @@ lane) as in a synced group. ``--rl-island-release-every K:N`` /
 policy-age limit (:func:`external_pool_island_args`). The sub-directory number
 is the learner id in every follow-trainer launch (:func:`trainer_substore`).
 
+Sampler islands and external pools together (a *mixed group*: a synced group
+with ``--rl-sampler-follow trainer`` and ``--rl-island-buffer-shards K:A,B``;
+:func:`is_mixed_group`): a trainer reads the shards of the sampler islands bound
+to it (each writes the shard named by its node name, ``island<M>``) and the shards
+of the external pools of its ``K:A,B`` entry, all in its sub-directory
+``trainer<k>``. In a mixed group the ``K`` of ``--rl-island-buffer-shards`` /
+``--rl-island-release-every`` / ``--rl-island-max-policy-age`` is the trainer's
+learner id (0..K-1 in island order, sampler islands skipped), not its island index;
+without sampler islands the two are the same. ``--rl-island-sampler-follows M:K``
+binds sampler island M to the trainer with learner id K (every sampler island
+named once); without it sampler j feeds trainer j % K as in a synced group. The
+binding flag alone (no pool) takes the same form: each trainer reads the shards of
+its own sampler islands. A trainer may have only sampler islands or only pools,
+not neither. The sampler
+islands generate until their own trainer ended (full-parameter or decoupled
+preset), like the pools (:func:`check_mixed_group`).
+
 Decoupled groups (``--rl-sync-preset decoupled``, Miles): a decoupled trainer
 has one version per fragment, merged at different times, so its group needs
 ``--rl-sampler-follow trainer`` (:func:`check_decoupled_group`); its samplers
@@ -222,7 +239,9 @@ def check_synced_group(args: Any, num_islands: int) -> None:
         raise ValueError("--rl-island-sample-role with --rl-sample-role trainer names the sampler "
                          f"islands only (every other island is a synced trainer); got {listed}")
     trainers = len(synced_group_learners(args, num_islands))
-    if trainers < 2:
+    # a mixed group of one full-parameter trainer is one learner behind the syncer,
+    # as synced trainers fed by external pools only may be
+    if trainers < 2 and not (trainers == 1 and is_mixed_group(args) and synced_full_parameter_trainer(args)):
         raise ValueError(f"a synced group needs at least two trainer islands (got {trainers}); "
                          "one trainer with samplers is a pair (--rl-single-island-no-sync)")
     samplers = len(listed)
@@ -400,6 +419,11 @@ ISLAND_TRAINER_OVERRIDES = (
 )
 EXTERNAL_POOL_FLAGS = (("--rl-island-buffer-shards", "rl_island_buffer_shards"),
                        *((flag, dest) for flag, dest, _name in ISLAND_TRAINER_OVERRIDES))
+# --rl-island-sampler-follows M:K: a mixed group's explicit sampler binding (module doc)
+SAMPLER_FOLLOWS_FLAG = ("--rl-island-sampler-follows", "rl_island_sampler_follows")
+# launch-only flags a mixed group's island args drop (the island command never takes them)
+_MIXED_LAUNCH_DESTS = ("rl_island_buffer_shards", SAMPLER_FOLLOWS_FLAG[1],
+                       *(dest for _flag, dest, _name in ISLAND_TRAINER_OVERRIDES))
 
 
 def uses_external_pools(args: Any) -> bool:
@@ -417,9 +441,34 @@ def is_external_pool_group(args: Any) -> bool:
             and getattr(args, "rl_sampler_follow", FOLLOW_MERGED) == FOLLOW_TRAINER)
 
 
-def _island_entries(args: Any, dest: str, flag: str, num_islands: int) -> dict[int, str]:
+def is_mixed_group(args: Any) -> bool:
+    """A synced group whose samplers follow their trainer and whose trainers also
+    read external pools (module doc): ``--rl-island-sample-role M:sampler`` with
+    ``--rl-island-buffer-shards K:SHARDS`` (K: learner id) and ``--rl-sampler-follow
+    trainer``. A group that binds its sampler islands explicitly
+    (``--rl-island-sampler-follows``) takes this form too, also when no trainer has
+    a pool (an island fleet whose islands have only Miles samplers)."""
+    return ((uses_external_pools(args) or bool(getattr(args, SAMPLER_FOLLOWS_FLAG[1], None)))
+            and is_synced_group(args)
+            and getattr(args, "rl_sampler_follow", FOLLOW_MERGED) == FOLLOW_TRAINER)
+
+
+def _trainer_entries(args: Any, dest: str, flag: str, num_islands: int) -> dict[int, str]:
+    """{K: value} of a repeatable ``K:VALUE`` trainer flag of external pools: K is
+    the island index without sampler islands (every island is a trainer) and the
+    trainer's learner id in a synced group with sampler islands (module doc)."""
+    if not is_synced_group(args):
+        return _island_entries(args, dest, flag, num_islands)
+    trainers = len(synced_group_learners(args, num_islands))
+    return _island_entries(args, dest, flag, trainers,
+                           unit=f"K is a trainer's learner id; the launch has {trainers} trainer(s)")
+
+
+def _island_entries(args: Any, dest: str, flag: str, num_islands: int,
+                    unit: str | None = None) -> dict[int, str]:
     """{island: value} of a repeatable ``ISLAND:VALUE`` flag; raises ValueError on a
-    malformed, out-of-range or repeated entry."""
+    malformed, out-of-range or repeated entry (``unit``: what the range counts,
+    by default the --gpu islands)."""
     out: dict[int, str] = {}
     for item in getattr(args, dest, None) or ():
         island, sep, value = str(item).partition(":")
@@ -427,7 +476,7 @@ def _island_entries(args: Any, dest: str, flag: str, num_islands: int) -> dict[i
             raise ValueError(f"{flag} takes ISLAND:VALUE, got {item!r}")
         m = int(island)
         if not 0 <= m < int(num_islands):
-            raise ValueError(f"{flag} {item!r}: --gpu has {num_islands} island(s)")
+            raise ValueError(f"{flag} {item!r}: {unit or f'--gpu has {num_islands} island(s)'}")
         if m in out:
             raise ValueError(f"{flag} names island {m} twice")
         out[m] = value.strip()
@@ -435,14 +484,15 @@ def _island_entries(args: Any, dest: str, flag: str, num_islands: int) -> dict[i
 
 
 def island_buffer_shards(args: Any, num_islands: int) -> dict[int, list[str]]:
-    """{trainer island: the buffer shards its pools write} of
-    ``--rl-island-buffer-shards K:A,B`` (repeatable); {} without it. Raises
+    """{K: the buffer shards the pools of trainer K write} of
+    ``--rl-island-buffer-shards K:A,B`` (repeatable; K: the trainer island, which
+    is its learner id, or the learner id in a mixed group); {} without it. Raises
     ValueError on a malformed, out-of-range or repeated entry, an island without a
     shard, a name that is not a plain shard name, or a shard named twice (every
     pool writes its own shard, so a name is unique in the launch)."""
     out: dict[int, list[str]] = {}
     owner: dict[str, int] = {}
-    entries = _island_entries(args, "rl_island_buffer_shards", "--rl-island-buffer-shards", num_islands)
+    entries = _trainer_entries(args, "rl_island_buffer_shards", "--rl-island-buffer-shards", num_islands)
     for m, value in sorted(entries.items()):
         shards = [s.strip() for s in value.split(",") if s.strip()]
         if not shards:
@@ -465,7 +515,7 @@ def island_trainer_overrides(args: Any, num_islands: int) -> dict[int, dict[str,
     without them. Raises ValueError on an entry that is not ``ISLAND:N``, N >= 1."""
     out: dict[int, dict[str, int]] = {}
     for flag, dest, name in ISLAND_TRAINER_OVERRIDES:
-        for m, value in _island_entries(args, dest, flag, num_islands).items():
+        for m, value in _trainer_entries(args, dest, flag, num_islands).items():
             if not value.isdigit() or int(value) < 1:
                 raise ValueError(f"{flag} {m}:{value}: the value must be an integer >= 1")
             out.setdefault(m, {})[name] = int(value)
@@ -489,11 +539,54 @@ def external_pool_island_args(args: Any, island: int, num_islands: int) -> Any:
 
 def sampler_bindings(args: Any, num_islands: int) -> dict[int, int]:
     """{sampler island: trainer island} of a synced group whose samplers follow
-    their trainer: sampler j (in island order) feeds trainer j % K; {} otherwise."""
+    their trainer: sampler j (in island order) feeds trainer j % K, or the trainer
+    ``--rl-island-sampler-follows`` names (a mixed group); {} otherwise."""
     if not follows_trainer(args):
         return {}
     trainers = sorted(synced_group_learners(args, num_islands))
+    if getattr(args, SAMPLER_FOLLOWS_FLAG[1], None):
+        return {m: trainers[k] for m, k in _sampler_follows(args, num_islands).items()}
     return {m: trainers[j % len(trainers)] for j, m in enumerate(sampler_islands(args, num_islands))}
+
+
+def _sampler_follows(args: Any, num_islands: int) -> dict[int, int]:
+    """{sampler island: trainer learner id} of ``--rl-island-sampler-follows M:K``
+    (a mixed group, module doc): every sampler island named once, K a learner id."""
+    flag, dest = SAMPLER_FOLLOWS_FLAG
+    samplers = sampler_islands(args, num_islands)
+    trainers = len(synced_group_learners(args, num_islands))
+    out: dict[int, int] = {}
+    for m, value in _island_entries(args, dest, flag, num_islands).items():
+        if m not in samplers:
+            raise ValueError(f"{flag} {m}:{value}: island {m} is not a sampler island "
+                             f"(sampler islands {samplers})")
+        if not value.isdigit() or int(value) >= trainers:
+            raise ValueError(f"{flag} {m}:{value}: K must be a trainer's learner id, 0..{trainers - 1}")
+        out[m] = int(value)
+    if sorted(out) != samplers:
+        raise ValueError(f"{flag}: name every sampler island once (sampler islands {samplers}, "
+                         f"named {sorted(out)})")
+    return out
+
+
+def mixed_trainer_shards(args: Any, trainer: int, num_islands: int) -> list[str]:
+    """The buffer shards trainer island ``trainer`` of a mixed group reads (and its
+    sampler islands are told): the node names of the sampler islands bound to it,
+    then the shards of its external pools (the ``--rl-island-buffer-shards`` entry
+    of its learner id)."""
+    learners = synced_group_learners(args, num_islands)
+    own = [node_name(m) for m, t in sorted(sampler_bindings(args, num_islands).items()) if t == trainer]
+    return own + island_buffer_shards(args, num_islands).get(learners[trainer], [])
+
+
+def plan_buffer_shards(args: Any, island: int, num_islands: int) -> list[str] | None:
+    """The ``buffer_shards`` the dry-run plan records for island ``island``: the
+    shards a trainer fed by external pools reads (in a mixed group, its sampler
+    islands' shards first); None for every other island."""
+    if is_mixed_group(args):
+        learners = synced_group_learners(args, num_islands)
+        return mixed_trainer_shards(args, island, num_islands) if island in learners else None
+    return island_buffer_shards(args, num_islands).get(island)
 
 
 def trainer_substore(learner: int) -> str:
@@ -547,9 +640,10 @@ def describe_sampler_stop(args: Any, num_islands: int) -> str | None:
 
 def check_sampler_follow(args: Any, num_islands: int) -> None:
     """Launch checks of ``--rl-sampler-follow trainer``: a synced group on Miles
-    whose samplers split evenly over its trainers, or synced trainers on Miles fed
-    by external pools (:func:`check_external_pools`); the external-pool flags
-    belong to the latter (:func:`check_external_pool_flags`)."""
+    whose samplers split evenly over its trainers, synced trainers on Miles fed
+    by external pools (:func:`check_external_pools`), or both together (a mixed
+    group, :func:`check_mixed_group`); the external-pool flags belong to the
+    latter two (:func:`check_external_pool_flags`)."""
     check_external_pool_flags(args)
     if getattr(args, "rl_sampler_follow", FOLLOW_MERGED) != FOLLOW_TRAINER:
         return
@@ -563,6 +657,9 @@ def check_sampler_follow(args: Any, num_islands: int) -> None:
     if is_external_pool_group(args):
         check_external_pools(args, num_islands)
         return
+    if is_mixed_group(args):
+        check_mixed_group(args, num_islands)
+        return
     trainers = len(synced_group_learners(args, num_islands))
     samplers = len(sampler_islands(args, num_islands))
     if samplers % trainers:
@@ -572,18 +669,55 @@ def check_sampler_follow(args: Any, num_islands: int) -> None:
 
 def check_external_pool_flags(args: Any) -> None:
     """``--rl-island-buffer-shards`` / ``--rl-island-release-every`` /
-    ``--rl-island-max-policy-age`` belong to synced trainers fed by external pools
-    (module doc); any other launch refuses them."""
+    ``--rl-island-max-policy-age`` belong to synced trainers fed by external pools,
+    with or without sampler islands, and ``--rl-island-sampler-follows`` to a mixed
+    group (module doc); any other launch refuses them."""
+    if getattr(args, SAMPLER_FOLLOWS_FLAG[1], None) and not is_mixed_group(args):
+        raise ValueError(f"{SAMPLER_FOLLOWS_FLAG[0]} binds the sampler islands of a synced group whose "
+                         "samplers follow their trainer (--rl-sample-role trainer, a syncer, "
+                         "--rl-sampler-follow trainer, --rl-island-sample-role M:sampler)")
     given = [flag for flag, dest in EXTERNAL_POOL_FLAGS if getattr(args, dest, None)]
-    if not given or is_external_pool_group(args):
+    if not given or is_external_pool_group(args) or is_mixed_group(args):
         return
     if not uses_external_pools(args):
         raise ValueError(f"{', '.join(given)} need --rl-island-buffer-shards K:SHARDS (synced trainers "
                          "fed by external sampler pools)")
     raise ValueError(f"{', '.join(given)}: synced trainers fed by external sampler pools need "
                      "--rl-sample-role trainer with a syncer (no --rl-single-island-no-sync), "
-                     "--rl-sampler-follow trainer and no --rl-island-sample-role (the pools are "
-                     "the samplers; there is no sampler island)")
+                     "and --rl-sampler-follow trainer (the pools follow their own trainer, as "
+                     "sampler islands named by --rl-island-sample-role M:sampler then do)")
+
+
+def check_mixed_group(args: Any, num_islands: int) -> None:
+    """Launch checks of a mixed group (module doc), after the synced-group checks:
+    no global ``--rl-buffer-shards``, the external shards named per learner id, the
+    sampler bindings, no shard named twice (a sampler island writes ``island<M>``),
+    at least one source per trainer, and sampler islands that generate until their
+    own trainer ended (the full-parameter or decoupled preset on Miles, as the
+    pools do)."""
+    if getattr(args, "rl_buffer_shards", None):
+        raise ValueError("--rl-buffer-shards: a synced group with external sampler pools takes each "
+                         "trainer's shards from its sampler islands and --rl-island-buffer-shards K:SHARDS")
+    learners = synced_group_learners(args, num_islands)
+    pools = island_buffer_shards(args, num_islands)
+    island_trainer_overrides(args, num_islands)  # K: a learner id (each trainer's own checks: check_synced_group)
+    bindings = sampler_bindings(args, num_islands)
+    for m in sorted(bindings):
+        owner = next((k for k, shards in sorted(pools.items()) if node_name(m) in shards), None)
+        if owner is not None:
+            raise ValueError(f"--rl-island-buffer-shards: shard {node_name(m)!r} of trainer {owner} is "
+                             f"the shard sampler island {m} writes; every sampler writes its own shard")
+    fed = {learners[t] for t in bindings.values()} | set(pools)
+    missing = sorted(set(learners.values()) - fed)
+    if missing:
+        raise ValueError(f"trainer(s) with learner id {missing} have no sampler: bind a sampler island "
+                         f"({SAMPLER_FOLLOWS_FLAG[0]} M:K) or name pool shards (--rl-island-buffer-shards "
+                         "K:SHARDS)")
+    if not sampler_stop_trainers(args, num_islands):
+        raise ValueError("a synced group with sampler islands and external sampler pools needs "
+                         f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} or {DECOUPLED_SYNC_PRESET} on "
+                         "--rl-backend miles: its sampler islands generate until their own trainer "
+                         "ended, as the pools do")
 
 
 def check_external_pools(args: Any, num_islands: int) -> None:
@@ -696,6 +830,15 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
         trainer = island if out.rl_sample_role == TRAINER else bindings[island]
         out.rl_buffer_shards = _shards_of([m for m, t in sorted(bindings.items()) if t == trainer])
         out.rl_sample_substore = trainer_substore(learners[trainer])
+    if is_mixed_group(args):
+        # its sampler islands' shards and its pools' shards (a sampler island writes the
+        # one of its node name); the trainer's own release cadence and policy-age limit
+        out.rl_buffer_shards = mixed_trainer_shards(args, trainer, num_islands)
+        if out.rl_sample_role == TRAINER:
+            for name, value in island_trainer_overrides(args, num_islands).get(learners[island], {}).items():
+                setattr(out, name, value)
+        for dest in _MIXED_LAUNCH_DESTS:
+            setattr(out, dest, None)
     if out.rl_sample_role == TRAINER:
         out.rl_sampler_node = None
         out.rl_sampler_data_slot = None

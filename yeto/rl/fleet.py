@@ -41,6 +41,20 @@ in island order), ``--rl-sample-role trainer --rl-sampler-follow trainer``, one
 the island's ``--rl-island-release-every`` / ``--rl-island-max-policy-age``. Its
 ``usd_per_h`` is the sum of the islands'.
 
+Miles sampler islands in a fleet island. An island's ``samplers`` may also list
+``{"kind": "miles", "name": ..., "gpu": "modal:1x1xl40s", "usd_per_h": ...}``
+entries (:data:`MILES_KEYS`; ``usd_per_h`` optional): a Miles sampler island of the
+same launch, which writes the island's ``trainer<k>/`` and follows its trainer
+(``sample_roles`` module doc, mixed groups). The launch's islands are the trainers
+first (launch island k = learner id k = fleet island k, as without Miles samplers)
+and then the Miles samplers in fleet-island and list order (launch island
+``K + j``). Each adds its cluster to ``--gpu``, ``--rl-island-sample-role
+<K + j>:sampler`` and ``--rl-island-sampler-follows <K + j>:<k>``; it writes the
+buffer shard ``island<K + j>``, which its trainer reads with its pools' shards.
+An island needs one sampler of either kind; one without pools gets no
+``--rl-island-buffer-shards`` entry. A Miles sampler's ``usd_per_h`` counts to its
+island (the island's ``usd_per_h`` in the plan and the launch's).
+
 Supported training forms: full parameters or partial experts on Miles, synchronized
 by asynchronous full-parameter rounds (``--rl-sync-preset decoupled`` routes there);
 :func:`form_problem` refuses the rest (LoRA, verl) in the preflight.
@@ -75,6 +89,12 @@ GENERATED_FLAGS = ("--gpu", "--rl-sample-role", "--rl-sampler-follow", "--rl-buf
 GENERATED_PREFIX = "--rl-island-"
 EXCLUSIVE_KEYS = ("trainer", "pool", "samplers")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# an island's samplers entry of a Miles sampler island of the fleet's launch (module doc)
+MILES_KIND = "miles"
+MILES_KEYS = frozenset({"kind", "name", "gpu", "usd_per_h"})
+MILES_ENGINE = "sglang"  # Miles rolls out with SGLang
+# FleetPool.source / FleetMilesSampler.source: where a sampler of the island runs
+SOURCE_EXTERNAL, SOURCE_MILES = "external", MILES_KIND
 
 
 def substore(k: int) -> str:
@@ -105,9 +125,33 @@ class FleetPool:
         return [f"{self.shard_base}-{n}" for n in range(self.shard_limit)]
 
     def to_json(self) -> dict[str, Any]:
-        return {"name": self.name, "source_name": self.source_name, "provider": self.provider,
-                "shard_base": self.shard_base, "shard_limit": self.shard_limit, "run_prefix": self.run_prefix,
-                "target": self.target, "engine": self.engine, "rollout_quant": self.rollout_quant}
+        return {"name": self.name, "source_name": self.source_name, "source": SOURCE_EXTERNAL,
+                "provider": self.provider, "shard_base": self.shard_base, "shard_limit": self.shard_limit,
+                "run_prefix": self.run_prefix, "target": self.target, "engine": self.engine,
+                "rollout_quant": self.rollout_quant}
+
+
+@dataclass(frozen=True)
+class FleetMilesSampler:
+    """A Miles sampler island of the fleet's launch, in fleet island ``learner``'s
+    ``samplers`` (module doc)."""
+
+    name: str  # i<k>-<source_name>
+    source_name: str  # its name in the island's samplers list
+    gpu: str  # its --gpu cluster
+    usd_per_h: float | None
+    launch_island: int  # its index in the launch's --gpu (after every trainer)
+    engine: str = MILES_ENGINE
+
+    @property
+    def shard(self) -> str:
+        """The buffer shard it writes: its node name (``sample_roles.node_name``)."""
+        return f"island{self.launch_island}"
+
+    def to_json(self) -> dict[str, Any]:
+        return {"name": self.name, "source_name": self.source_name, "source": SOURCE_MILES, "gpu": self.gpu,
+                "usd_per_h": self.usd_per_h, "launch_island": self.launch_island, "shard": self.shard,
+                "engine": self.engine}
 
 
 @dataclass(frozen=True)
@@ -115,28 +159,37 @@ class FleetIsland:
     index: int
     name: str
     gpu: str
-    usd_per_h: float | None
+    usd_per_h: float | None  # the island's launch price: its trainer and its Miles samplers
     store: str  # <store>/trainer<k>
     release_every: int | None = None
     max_policy_age: int | None = None
     pools: tuple[FleetPool, ...] = ()
+    miles_samplers: tuple[FleetMilesSampler, ...] = ()
+    trainer_usd_per_h: float | None = None  # its trainer alone (usd_per_h without Miles samplers)
 
     @property
     def learner(self) -> int:
-        return self.index  # no sampler island in the fleet's launch: island = learner id
+        return self.index  # the trainers come first in the fleet's launch: island = learner id
 
     @property
     def substore(self) -> str:
         return substore(self.index)
 
-    def buffer_shards(self) -> list[str]:
+    def pool_shards(self) -> list[str]:
+        """The shards of its external pools (its ``--rl-island-buffer-shards`` entry)."""
         return [s for pool in self.pools for s in pool.shards()]
+
+    def buffer_shards(self) -> list[str]:
+        """Every shard its trainer reads: its Miles samplers' (in launch order), then its pools'."""
+        return [m.shard for m in self.miles_samplers] + self.pool_shards()
 
     def to_json(self) -> dict[str, Any]:
         return {"index": self.index, "name": self.name, "learner": self.learner, "substore": self.substore,
                 "store": self.store, "gpu": self.gpu, "usd_per_h": self.usd_per_h,
+                "trainer_usd_per_h": self.trainer_usd_per_h,
                 "release_every": self.release_every, "max_policy_age": self.max_policy_age,
-                "buffer_shards": self.buffer_shards(), "pools": [p.to_json() for p in self.pools]}
+                "buffer_shards": self.buffer_shards(), "pools": [p.to_json() for p in self.pools],
+                "miles_samplers": [m.to_json() for m in self.miles_samplers]}
 
 
 @dataclass(frozen=True)
@@ -171,13 +224,19 @@ class FleetPlan:
                + (f" (ledger {self.dispense_store})" if self.dispense_store else " (one ledger per island)")
                + f"; plan {substore_uri(self.store, PLAN_OBJECT)}"]
         for i in self.islands:
-            price = "?" if i.usd_per_h is None else f"${i.usd_per_h:g}/h"
+            trainer_price = i.trainer_usd_per_h if i.miles_samplers else i.usd_per_h  # the trainer alone
+            price = "?" if trainer_price is None else f"${trainer_price:g}/h"
             extra = "".join(f", {flag} {value}" for flag, value in (("release_every", i.release_every),
                                                                     ("max_policy_age", i.max_policy_age))
                             if value is not None)
+            miles = (f", Miles samplers {', '.join(m.name for m in i.miles_samplers)}" if i.miles_samplers else "")
             out.append(f"fleet: island {i.index} {i.name}: learner {i.learner}, store {i.substore}/ ({i.store}), "
                        f"trainer {i.gpu} at {price}{extra}, {len(i.buffer_shards())} buffer shard(s), "
-                       f"pools {', '.join(p.name for p in i.pools)}")
+                       f"pools {', '.join(p.name for p in i.pools) or '-'}{miles}")
+            for m in i.miles_samplers:
+                cost = "?" if m.usd_per_h is None else f"${m.usd_per_h:g}/h"
+                out.append(f"fleet:   Miles sampler {m.name} (from {m.source_name}): launch island {m.launch_island}, "
+                           f"{m.gpu} at {cost}, {m.engine}, shard {m.shard}, follows learner {i.learner}")
             for p in i.pools:
                 out.append(f"fleet:   pool {p.name} (from {p.source_name}): {p.provider}"
                            f"{', ' + p.engine if p.engine else ''}"
@@ -196,7 +255,14 @@ class FleetPlan:
                                               shard_limit=int(p["shard_limit"]), run_prefix=str(p["run_prefix"]),
                                               engine=p.get("engine"), rollout_quant=p.get("rollout_quant"),
                                               target=p.get("target"))
-                                    for p in i.get("pools") or ()))
+                                    for p in i.get("pools") or ()),
+                        miles_samplers=tuple(FleetMilesSampler(name=str(m["name"]), source_name=str(m["source_name"]),
+                                                               gpu=str(m["gpu"]), usd_per_h=m.get("usd_per_h"),
+                                                               launch_island=int(m["launch_island"]),
+                                                               engine=str(m.get("engine") or MILES_ENGINE))
+                                             for m in i.get("miles_samplers") or ()),
+                        # a plan written before Miles samplers: the island's price is its trainer's
+                        trainer_usd_per_h=i.get("trainer_usd_per_h", i.get("usd_per_h")))
             for i in doc.get("islands") or ())
         return cls(run=str(doc["run"]), store=str(doc["store"]), dispense=str(doc["dispense"]), islands=islands,
                    dispense_store=doc.get("dispense_store"), sync=dict(doc.get("sync") or {}),
@@ -305,6 +371,37 @@ def _argv_value(argv: list[str], flag: str) -> str | None:
     return value
 
 
+def _gpu(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "," in value:
+        raise _err(f"{where} must be one --gpu cluster, e.g. modal:2x8xh100@<region> (got {value!r})")
+    return value.strip()
+
+
+def _price(value: Any, where: str) -> float | None:
+    if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                              or not math.isfinite(value) or value < 0):
+        raise _err(f"{where} must be a number >= 0 (got {value!r})")
+    return None if value is None else float(value)
+
+
+def is_miles_entry(entry: Any) -> bool:
+    """Whether an island's samplers entry is a Miles sampler island (``kind: miles``)."""
+    return isinstance(entry, dict) and entry.get("kind") == MILES_KIND
+
+
+def _miles_sampler(entry: dict[str, Any], k: int, j: int, island_where: str) -> tuple[str, str, float | None]:
+    """``(source name, gpu, usd_per_h)`` of Miles sampler entry j of island k."""
+    where = f"{island_where}.samplers[{j}]"
+    unknown = set(entry) - MILES_KEYS
+    if unknown:
+        raise _err(f"unknown {where} keys {sorted(unknown)} (a Miles sampler takes {sorted(MILES_KEYS)}; its "
+                   "sampler options are the launch's, in fleet.trainer_argv)")
+    name = entry.get("name")
+    if not isinstance(name, str) or not NAME.fullmatch(name):
+        raise _err(f"{where}: a Miles sampler needs a name of letters, digits, '.', '_' or '-' (got {name!r})")
+    return name, _gpu(entry.get("gpu"), f"{where}.gpu"), _price(entry.get("usd_per_h"), f"{where}.usd_per_h")
+
+
 def _island_trainer(island: dict[str, Any], where: str) -> tuple[str, float | None, dict[str, int]]:
     if "trainer" not in island:
         raise _err(f"{where}: missing 'trainer' (every island runs one trainer: gpu, usd_per_h, argv)")
@@ -314,15 +411,10 @@ def _island_trainer(island: dict[str, Any], where: str) -> tuple[str, float | No
     unknown = set(tr) - ISLAND_TRAINER_KEYS
     if unknown:
         raise _err(f"unknown {where}.trainer keys {sorted(unknown)} (known: {sorted(ISLAND_TRAINER_KEYS)})")
-    gpu = tr.get("gpu")
-    if not isinstance(gpu, str) or not gpu.strip() or "," in gpu:
-        raise _err(f"{where}.trainer.gpu must be one --gpu cluster, e.g. modal:2x8xh100@<region> (got {gpu!r})")
-    price = tr.get("usd_per_h")
-    if price is not None and (isinstance(price, bool) or not isinstance(price, (int, float))
-                              or not math.isfinite(price) or price < 0):
-        raise _err(f"{where}.trainer.usd_per_h must be a number >= 0 (got {price!r})")
+    gpu = _gpu(tr.get("gpu"), f"{where}.trainer.gpu")
+    price = _price(tr.get("usd_per_h"), f"{where}.trainer.usd_per_h")
     flags = _flag_values(_string_list(tr.get("argv", []), f"{where}.trainer.argv"), f"{where}.trainer.argv")
-    return gpu.strip(), None if price is None else float(price), flags
+    return gpu, price, flags
 
 
 def _spec_facts(doc: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, Any]:
@@ -487,6 +579,8 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     rows: list[FleetIsland] = []
     samplers: list[dict[str, Any]] = []
     names: set[str] = set()
+    # Miles samplers come after every trainer in the launch: count the trainers first
+    launch_island = len(islands)
     for k, island in enumerate(islands):
         where = f"islands[{k}]"
         if not isinstance(island, dict):
@@ -504,22 +598,41 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
         gpu, price, flags = _island_trainer(island, where)
         entries = island.get("samplers")
         if not isinstance(entries, list) or not entries:
-            raise _err(f"{where}: samplers must be a non-empty list of pools (every island has its own)")
+            raise _err(f"{where}: samplers must be a non-empty list of pools or Miles samplers (every island has "
+                       "its own)")
         pools = []
+        miles = []
         for j, entry in enumerate(entries):
+            if is_miles_entry(entry):
+                source, sampler_gpu, sampler_price = _miles_sampler(entry, k, j, where)
+                miles.append(FleetMilesSampler(name=f"i{k}-{source}", source_name=source, gpu=sampler_gpu,
+                                               usd_per_h=sampler_price, launch_island=launch_island))
+                launch_island += 1
+                continue
             out, row = _pool(entry, k, j, where, dispense_store)
             samplers.append(out)
             pools.append(row)
-        seen = [p.name for p in pools]
+        seen = [p.name for p in pools] + [m.name for m in miles]
         if len(set(seen)) != len(seen):
-            raise _err(f"{where}: pool names repeat {seen}; set 'name' on each")
-        rows.append(FleetIsland(index=k, name=name, gpu=gpu, usd_per_h=price, store=substore_uri(store, substore(k)),
+            raise _err(f"{where}: pool names repeat {seen} (Miles samplers included); set 'name' on each")
+        parts = [price, *(m.usd_per_h for m in miles)]
+        total = None if all(p is None for p in parts) else float(sum(p or 0.0 for p in parts))
+        rows.append(FleetIsland(index=k, name=name, gpu=gpu, usd_per_h=total, store=substore_uri(store, substore(k)),
                                 release_every=flags.get("release_every"),
-                                max_policy_age=flags.get("max_policy_age"), pools=tuple(pools)))
-    argv = [*trainer_argv, "--gpu", ",".join(i.gpu for i in rows),
+                                max_policy_age=flags.get("max_policy_age"), pools=tuple(pools),
+                                miles_samplers=tuple(miles), trainer_usd_per_h=price))
+    if not samplers:
+        raise _err("an island fleet needs at least one external pool: `yeto run up` drives the pools (a fleet of "
+                   "Miles samplers only is a `yeto launch` synced group with --rl-sampler-follow trainer)")
+    miles_rows = [(i, m) for i in rows for m in i.miles_samplers]
+    argv = [*trainer_argv, "--gpu", ",".join([i.gpu for i in rows] + [m.gpu for _i, m in miles_rows]),
             "--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer"]
     for i in rows:
-        argv += ["--rl-island-buffer-shards", f"{i.index}:{','.join(i.buffer_shards())}"]
+        if i.pools:  # an island with Miles samplers only names no pool shard
+            argv += ["--rl-island-buffer-shards", f"{i.index}:{','.join(i.pool_shards())}"]
+    for i, m in miles_rows:  # each Miles sampler island follows its own island's trainer
+        argv += ["--rl-island-sample-role", f"{m.launch_island}:sampler",
+                 "--rl-island-sampler-follows", f"{m.launch_island}:{i.learner}"]
     for i in rows:
         if i.release_every is not None:
             argv += ["--rl-island-release-every", f"{i.index}:{i.release_every}"]
