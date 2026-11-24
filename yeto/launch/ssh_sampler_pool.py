@@ -14,8 +14,9 @@ What runs on a node, for each start (all idempotent):
 * preflight: the card tool of the node's family (``nvidia-smi``, ``amd-smi`` /
   ``rocm-smi``, ``npu-smi info``; the inventory's card check), the number of cards
   against the inventory, optionally no other process on the cards
-  (``require_idle``: the compute apps of ``nvidia-smi`` / ``ppu-smi``, ``amd-smi
-  process``, the process table of ``npu-smi info``), the host devices a rocm
+  (``require_idle``: the process table of ``npu-smi info``, on by default for an
+  ascend node; the compute apps of ``nvidia-smi`` / ``ppu-smi`` and ``amd-smi
+  process`` when the config sets ``require_idle: true``), the host devices a rocm
   container needs (``/dev/kfd``, ``/dev/dri``), and the free space of ``workdir``
   (``min_free_gib``); a failed check refuses the start before anything runs;
 * the yeto tree of the launcher's commit (``git archive``) under
@@ -35,18 +36,22 @@ the engine and exits), waits ``grace_s``, and only then kills what is left of
 the process group of that start. A container is stopped with ``<engine> stop -t
 grace_s`` (SIGTERM to its PID 1, the sampler).
 
-Device defaults by family (:class:`~yeto.launch.node_inventory.NodeProfile`, an
-inventory ``docker_args`` wins): cuda ``--gpus`` (docker) or CDI
-``nvidia.com/gpu=<i>`` (podman) and ``CUDA_VISIBLE_DEVICES`` as the container numbers
-the cards; rocm ``/dev/kfd``, ``/dev/dri``, the video group and seccomp off, with
-``HIP_VISIBLE_DEVICES``; ascend ``/dev/davinci<i>`` plus the host devices and driver
-mounts the preflight found, with ``ASCEND_RT_VISIBLE_DEVICES`` when ``devices`` is
-set. Every sampler gets ``YETO_DEVICE_FAMILY`` (torch reads ROCm as ``cuda``).
+Device defaults by family (:class:`~yeto.launch.node_inventory.NodeProfile`) for a
+node without ``docker_args``: cuda ``--gpus`` (docker) or CDI ``nvidia.com/gpu=<i>``
+(podman); rocm the NC route's ``ROCM_DOCKER_ARGS`` (``/dev/kfd``, ``/dev/dri``, the video
+group, seccomp off, ...; the pool's ``container.shm_size`` stays the one shm size);
+ascend ``/dev/davinci<i>`` plus the host devices and driver mounts the preflight found.
+The visible-card variable (``CUDA_VISIBLE_DEVICES`` as the container numbers the
+cards, ``HIP_VISIBLE_DEVICES``, ``ASCEND_RT_VISIBLE_DEVICES``) is set only when
+``devices`` is; a cuda / rocm / ppu node also gets ``YETO_DEVICE_FAMILY`` (torch reads
+ROCm and PPU as ``cuda``). A node with ``docker_args`` and an ascend node start
+exactly as before (no added flag or variable).
 
 ``container.image: "auto"`` takes each node's image from the engine image catalog
 (:func:`yeto.launch.engine_images.resolve` with what the sampler spec asks: model,
-engine, reload mode, precision, rollout fields), so a pool of mixed rocm and cuda
-nodes runs one spec; ``pool --dry-run`` refuses a node no image serves.
+engine, reload mode, precision, rollout fields). ``pool --dry-run`` refuses a node no
+image serves, and a node whose family or card the spec's ``platform`` /
+``engine.server.device_family`` / ``card_model`` name otherwise.
 
 Container runtime knobs (what an old podman on Ascend needs, A02 of hetero-1114):
 ``security_opt`` (``["seccomp=unconfined"]``: the default seccomp profile of
@@ -162,7 +167,7 @@ class SshPoolConf:
     devices: tuple[int, ...] | None
     store: str | None
     min_free_gib: float
-    require_idle: bool
+    require_idle: bool | None  # None: the default (on for an ascend node, off for the others)
     min_cards: int | None
     grace_s: int
     price_usd_h: float | None
@@ -202,11 +207,11 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
         nodes = [by_name[n] for n in names]
     if not nodes:
         raise ValueError("ssh provider: no sampler node (nodes, or inventory nodes with role sampler)")
-    unreachable = [f"{n.name} ({n.reach.mode})" for n in nodes if n.reach is not None and n.reach.mode not in
-                   ("direct", "jump")]
+    unreachable = [f"{n.name} ({n.reach.mode})" for n in nodes if n.reach is not None and n.reach.mode in
+                   ("outbound", "function")]
     if unreachable:
-        raise ValueError(f"ssh provider: nodes {unreachable} are not reached by SSH directly or through a jump "
-                         "host; this pool starts samplers over SSH only")
+        raise ValueError(f"ssh provider: nodes {unreachable} take no SSH connection; this pool starts samplers "
+                         "over SSH")
     workdir = str(section.get("workdir") or "")
     if not workdir.startswith("/") or workdir.rstrip("/") in ("", "/tmp", "/data", "/root", "/home"):
         raise ValueError(f"ssh provider: workdir {workdir!r} must be an absolute directory of this run")
@@ -224,6 +229,8 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
         if pull not in PULL_POLICIES:
             raise ValueError(f"ssh provider: container.pull {pull!r} must be one of {PULL_POLICIES}")
         image = raw.get("image") or raw.get("pull_ref")
+        if image == AUTO_IMAGE and raw.get("pull_ref"):
+            raise ValueError("ssh provider: container.image auto pulls the catalog image itself; drop pull_ref")
         if not image and not all(n.image for n in nodes):
             raise ValueError("ssh provider: container.image (or pull_ref, or the inventory's image) is required")
         mounts = raw.get("mounts") or {}
@@ -261,7 +268,7 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
     return SshPoolConf(nodes=tuple(nodes), workdir=workdir.rstrip("/"), runtime=runtime, container=container,
                        venv=venv, env={str(k): str(v) for k, v in env.items()}, devices=devices,
                        store=str(store) if store else None, min_free_gib=float(pre.get("min_free_gib", 20)),
-                       require_idle=bool(pre.get("require_idle", True)),
+                       require_idle=(bool(pre["require_idle"]) if pre.get("require_idle") is not None else None),
                        min_cards=int(pre["min_cards"]) if pre.get("min_cards") is not None else None,
                        grace_s=int(section.get("grace_s", 120)),
                        price_usd_h=float(price) if price is not None else None)
@@ -300,6 +307,12 @@ def pool_profile(node: Node, conf: SshPoolConf) -> NodeProfile:
 
 # require_idle: the command that lists the processes on the cards, per unified family
 # (ascend reads the process table of ``npu-smi info``, the card tool's own output)
+def idle_required(node: Node, conf: SshPoolConf) -> bool:
+    """``preflight.require_idle`` for this node: as set, else on for an ascend node only
+    (the npu-smi check of before; the nvidia-smi / amd-smi checks are opt-in)."""
+    return profile_of(node).family == "ascend" if conf.require_idle is None else conf.require_idle
+
+
 def idle_command(node: Node) -> str | None:
     family = profile_of(node).family
     if family in ("cuda", "ppu"):
@@ -322,7 +335,7 @@ def preflight_script(node: Node, conf: SshPoolConf) -> str:
     tools = " || ".join(shlex.join(c) for c in commands) or "true"
     paths = profile.host_paths()
     probe = (f"for f in {' '.join(paths)}; do [ -e $f ] && echo YETO_SSH_HOSTPATH $f; done; " if paths else "")
-    idle = idle_command(node) if conf.require_idle else None
+    idle = idle_command(node) if idle_required(node, conf) else None
     idle_part = f"; echo YETO_SSH_IDLE_BEGIN; {{ {idle}; }} 2>&1; echo YETO_SSH_IDLE_END rc=$?" if idle else ""
     return (f"set -u; mkdir -p {shlex.quote(conf.workdir)}/sampler {shlex.quote(conf.workdir)}/logs || exit 3; "
             f"echo YETO_SSH_ARCH $(uname -m); {probe}"
@@ -368,7 +381,7 @@ def check_preflight(node: Node, conf: SshPoolConf, text: str) -> dict[str, Any]:
     if missing:
         problems.append(f"{', '.join(missing)} missing on the host: a {profile_of(node).family} container "
                         "cannot reach the cards")
-    if conf.require_idle:
+    if idle_required(node, conf):
         family = profile_of(node).family
         if family == "ascend":
             busy, tool = busy_npus(cards_text), "npu-smi"
@@ -422,8 +435,12 @@ def busy_cuda(text: str) -> list[int] | None:
         return None
     busy = set()
     for line in apps.splitlines():
+        if not line.strip():
+            continue
         cells = [c.strip() for c in line.split(",")]
-        if len(cells) == 2 and cells[1].isdigit() and cells[0].lower() in index_of:
+        if len(cells) != 2 or not cells[1].isdigit():
+            return None  # the compute-apps query failed: not "idle"
+        if cells[0].lower() in index_of:
             busy.add(index_of[cells[0].lower()])
     return sorted(busy)
 
@@ -433,11 +450,9 @@ def busy_amd(text: str) -> list[int] | None:
     "process_list": [...]}``; an entry is ``{"process_info": {..."pid"...}}`` up to ROCm
     6.3 and a flat ``{"pid": ...}`` later; "No running processes detected" is idle).
     None when the output is not that JSON (amd-smi missing or failing)."""
-    start = text.find("[")
-    if start < 0:
-        start = text.find("{")
-    try:
-        doc = json.loads(text[start:]) if start >= 0 else None
+    starts = [i for i in (text.find("["), text.find("{")) if i >= 0]
+    try:  # raw_decode: a stderr line after the JSON does not spoil it
+        doc = json.JSONDecoder().raw_decode(text[min(starts):])[0] if starts else None
     except ValueError:
         return None
     if isinstance(doc, dict):  # a wrapper object: its first list value
@@ -600,7 +615,10 @@ def container_run_argv(conf: SshPoolConf, node: Node, *, name: str, image: str, 
         argv += ["--security-opt", opt]
     # what the preflight found on the host is passed (a missing -v source fails the run); the pool's
     # container.shm_size above is the one shm size (the rocm defaults carry the NC route's 64g)
-    argv += _without_shm(pool_profile(node, conf).devices(cards, engine=c.engine, host_paths=host_paths).args)
+    if node.docker_args:  # the site's flags, verbatim (as before)
+        argv += list(node.docker_args)
+    else:
+        argv += _without_shm(pool_profile(node, conf).devices(cards, engine=c.engine, host_paths=host_paths).args)
     mounts = {conf.workdir: conf.workdir, **dict(node.mounts), **dict(c.mounts)}
     if conf.store and not conf.store.startswith(conf.workdir + "/"):
         mounts.setdefault(conf.store, conf.store)
@@ -617,6 +635,24 @@ def container_run_argv(conf: SshPoolConf, node: Node, *, name: str, image: str, 
         ((_STORE_URI + "; ") if env_file else "") + \
         f"exec {shlex.quote(c.python)} -m yeto.rl.engine.engine_sampler --spec {shlex.quote(spec_path)}"
     return [*argv, "--entrypoint", "bash", image, "-c", body]
+
+
+def device_env(node: Node, conf: SshPoolConf) -> dict[str, str]:
+    """The sampler's card variables: the visible-card variable only for an explicit
+    ``devices`` list (numbered as the container sees the cards; a venv's own env
+    scripts are not overridden otherwise), ``YETO_DEVICE_FAMILY`` on a cuda / rocm / ppu
+    node. A node with ``docker_args`` gets only the ascend variable it always got."""
+    profile = pool_profile(node, conf)
+    env: dict[str, str] = {}
+    if conf.devices is not None:
+        if node.docker_args:  # as before: the site's flags pass the cards, only ascend was numbered
+            if profile.family == "ascend":
+                env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(str(i) for i in conf.devices)
+        else:
+            env.update(profile.devices(list(conf.devices)).env)
+    if profile.family != "ascend" and not node.docker_args:
+        env.update(profile.family_env())
+    return env
 
 
 def _without_shm(args: Sequence[str]) -> list[str]:
@@ -832,10 +868,7 @@ class SshSamplerPoolOps:
         env = {"PYTHONUNBUFFERED": "1",
                # SIGTERM is the orderly leave (sampler_resume.install_marker_signals)
                "YETO_SPOT_RECLAIM_MARKER": f"{self.conf.workdir}/sampler/{m.shard}.reclaim"}
-        profile = pool_profile(node, self.conf)
-        if profile.family != "ascend" or self.conf.devices is not None:  # ascend: only an explicit card list
-            env.update(profile.devices(self.cards(node)).env)
-        env.update(profile.family_env())
+        env.update(device_env(node, self.conf))
         if self._uses_r2():
             prefix = str(self.cfg["run_prefix"]).strip("/")
             env.update({"YETO_RL_STORE_IMPL": "yeto.cloud.s3_store:store_from_env",
@@ -852,9 +885,13 @@ class SshSamplerPoolOps:
         node = self.provider.node_of_ticket(m.ticket)
         self._shard_of[m.ticket] = m.shard
         p = node_paths(self.conf.workdir, m.shard)
+        # this shard's earlier sampler first (a restarted pool, an in-place restart): never two samplers of
+        # one shard, and the idle check must not see this shard's own cards as another's
+        self._stop_on(node, m.shard)
         facts = self.preflight(node)
         _log(f"ssh pool: {node.name} preflight ok {facts}")
-        self._stop_on(node, m.shard)  # a restarted pool: never two samplers of one shard
+        if facts.get("idle"):
+            self.event("ssh_pool_idle_unchecked", node=node.name, shard=m.shard, detail=facts["idle"])
         yeto_dir = self.upload_code(node)
         self.put(node, json.dumps(self.spec_for(m, shards), indent=1), p["spec"])
         env_file = None
@@ -882,6 +919,17 @@ class SshSamplerPoolOps:
             raise SshSamplerError(f"sampler {m.shard} on {node.name} did not start (exit {out.returncode}): "
                                   f"{(text + _text(out.stderr))[-800:]}")
         _log(f"ssh pool: {m.shard} on {node.name}: {text.strip().splitlines()[-1]}")
+
+    def event(self, name: str, **detail: Any) -> None:
+        """One event of the pool's event log (and its ``event_command`` hook), as the NC route writes them."""
+        from .nc import cli  # noqa: PLC0415
+
+        hook = island_status.command_hook(self.cfg["event_command"]) if self.cfg.get("event_command") else None
+        try:
+            island_status.EventLog(path=cli.pool_events_path(self.cfg), run=self.run_id, log=_log, hook=hook)(
+                name, **detail)
+        except (OSError, KeyError, ValueError) as error:  # an event never stops a start
+            _log(f"ssh pool: event {name} not written: {error}")
 
     def image_for(self, node: Node) -> str:
         """The image a node runs: ``container.image`` (``auto``: the node's inventory
@@ -1025,8 +1073,40 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
         problems.append("ssh provider: a node-local store (provider.store) serves one sampler; target must be 1")
     if not conf.store and cfg.get("data_path", "r2") == "r2" and not cfg.get("r2_env_file"):
         problems.append("ssh provider: data_path r2 needs r2_env_file (or set provider.store, or data_path syncer)")
+    problems += spec_node_problems(conf, spec_of(cfg))
     problems += image_problems(conf, spec_of(cfg))
     return problems
+
+
+def spec_node_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
+    """``pool --dry-run``: the spec's per-platform keys fit every node (a pool's nodes run
+    one spec): ``platform`` and ``engine.server.device_family`` name the node's family,
+    ``engine.server.card_model`` its card. Absent, placeholder or unknown values are not checked."""
+    from ..gpu_spec import UnknownCard, UnknownFamily, canonical_card, unified_family  # noqa: PLC0415
+
+    server = (spec.get("engine") or {}).get("server") or {}
+    out = []
+    for node in conf.nodes:
+        profile = profile_of(node)
+        for key, value in (("platform", spec.get("platform")), ("engine.server.device_family",
+                                                                server.get("device_family"))):
+            if not isinstance(value, str) or not value or "<" in value:
+                continue
+            try:
+                family = unified_family(value)
+            except UnknownFamily:
+                continue
+            if family != profile.family:
+                out.append(f"ssh provider: node {node.name} is a {profile.family} node, the spec's {key} is {value}")
+        card = server.get("card_model")
+        if isinstance(card, str) and card and "<" not in card:
+            try:
+                if canonical_card(card) != node.card:
+                    out.append(f"ssh provider: node {node.name} has {node.card} cards, the spec's "
+                               f"engine.server.card_model is {card}")
+            except UnknownCard:
+                pass
+    return out
 
 
 def spec_of(cfg: Mapping[str, Any]) -> dict[str, Any]:

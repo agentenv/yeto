@@ -504,7 +504,8 @@ def test_rocm_containers_get_kfd_dri_video_and_seccomp(tmp_path):
     assert argv.count("--shm-size") == 1 and "--shm-size 16g" in argv  # the pool's container.shm_size
     assert "--gpus" not in argv
     env = _env(node, c, tmp_path)
-    assert env["HIP_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7" and env["YETO_DEVICE_FAMILY"] == "rocm"
+    assert "HIP_VISIBLE_DEVICES" not in env and env["YETO_DEVICE_FAMILY"] == "rocm"  # no devices: not numbered
+    assert _env(node, family_conf(node, devices=[1, 6]), tmp_path)["HIP_VISIBLE_DEVICES"] == "1,6"
     site = rocm_node(docker_args=["--device", "/dev/kfd", "--device", "/dev/dri/renderD128"])
     argv = sp.container_run_argv(family_conf(site), site, name="n", image="img", yeto_dir="/y", spec_path="/s",
                                  env={}, env_file=None, cards=[0])
@@ -540,15 +541,18 @@ def _preflight_text(cards, idle=None, paths=()):
 
 def test_require_idle_reads_nvidia_smi_on_cuda():
     node = cuda_node()
-    script = sp.preflight_script(node, family_conf(node))
+    assert "YETO_SSH_IDLE_BEGIN" not in sp.preflight_script(node, family_conf(node))  # opt-in off ascend
+    on = {"require_idle": True}
+    script = sp.preflight_script(node, family_conf(node, preflight=on))
     assert "nvidia-smi --query-compute-apps=gpu_bus_id,pid" in script and "YETO_SSH_HOSTPATH" not in script
     assert "npu-smi" not in script and "amd-smi" not in script
     cards = "\n".join(f"{i}, NVIDIA H200, 143771" for i in range(8))
-    facts = sp.check_preflight(node, family_conf(node, devices=[0]), _preflight_text(cards, NV_BUSY))
+    facts = sp.check_preflight(node, family_conf(node, devices=[0], preflight=on), _preflight_text(cards, NV_BUSY))
     assert facts["busy"] == []  # card 1 is not this pool's
     with pytest.raises(sp.PreflightError, match=r"cards \[1\] run other processes \(nvidia-smi compute apps\)"):
-        sp.check_preflight(node, family_conf(node, devices=[1]), _preflight_text(cards, NV_BUSY))
-    unread = sp.check_preflight(node, family_conf(node, devices=[1]), _preflight_text(cards, "no driver"))
+        sp.check_preflight(node, family_conf(node, devices=[1], preflight=on), _preflight_text(cards, NV_BUSY))
+    sp.check_preflight(node, family_conf(node, devices=[1]), _preflight_text(cards, NV_BUSY))  # default: off
+    unread = sp.check_preflight(node, family_conf(node, devices=[1], preflight=on), _preflight_text(cards, "no driver"))
     assert unread["busy"] is None and "not checked" in unread["idle"]
     off = family_conf(node, preflight={"require_idle": False})
     assert "YETO_SSH_IDLE_BEGIN" not in sp.preflight_script(node, off)
@@ -556,7 +560,7 @@ def test_require_idle_reads_nvidia_smi_on_cuda():
 
 def test_require_idle_reads_amd_smi_and_a_rocm_container_needs_kfd():
     node = rocm_node()
-    c = family_conf(node, devices=[5])
+    c = family_conf(node, devices=[5], preflight={"require_idle": True})
     script = sp.preflight_script(node, c)
     assert "amd-smi static --json || rocm-smi" in script and "amd-smi process --json" in script
     assert "for f in /dev/kfd /dev/dri;" in script
@@ -641,8 +645,99 @@ def test_rollout_commands_accept_provider_ssh():
 def test_nodes_the_pool_cannot_ssh_to_are_refused():
     from yeto.launch.node_inventory import NodeProfile, Reach
 
-    relay = NodeProfile.from_node(cuda_node(), reach=Reach("relay", "relay.example:2222"))
-    with pytest.raises(ValueError, match=r"nodes \['node-a \(relay\)'\] are not reached by SSH"):
-        family_conf(relay)
+    outbound = NodeProfile.from_node(cuda_node(), reach=Reach("outbound"))
+    with pytest.raises(ValueError, match=r"nodes \['node-a \(outbound\)'\] take no SSH connection"):
+        family_conf(outbound)
+    family_conf(NodeProfile.from_node(cuda_node(), reach=Reach("relay", "relay.example:2222")))  # task 3.2's
     jump = NodeProfile.from_node(cuda_node(), reach=Reach("jump", "ops@bastion"))
     assert family_conf(jump).nodes[0].ssh_options() == ["-o", "ProxyJump=ops@bastion"]
+
+
+# -- review of the defaults: existing kind ssh users keep their behaviour
+
+
+def test_require_idle_defaults_on_for_ascend_only():
+    assert conf().require_idle is None and sp.idle_required(npu_node(), conf())
+    assert not sp.idle_required(cuda_node(), family_conf(cuda_node()))
+    assert not sp.idle_required(rocm_node(), family_conf(rocm_node()))
+    assert not sp.idle_required(npu_node(), conf(preflight={"require_idle": False}))
+
+
+def test_a_node_with_docker_args_starts_exactly_as_on_main(tmp_path):
+    flags = ["--gpus", '"device=4,5,6,7"', "--shm-size", "32g"]
+    node = cuda_node(docker_args=flags)
+    c = family_conf(node, devices=[4, 5, 6, 7])
+    argv = sp.container_run_argv(c, node, name="n", image="img", yeto_dir="/y", spec_path="/s", env={},
+                                 env_file=None, cards=[4, 5, 6, 7])
+    assert argv[argv.index("--gpus"):argv.index("--gpus") + 4] == flags  # verbatim, its --shm-size kept
+    env = _env(node, c, tmp_path)
+    assert "CUDA_VISIBLE_DEVICES" not in env and "YETO_DEVICE_FAMILY" not in env
+    npu = npu_node(docker_args=["--device", "/dev/davinci4"])
+    assert sp.device_env(npu, conf(devices=[4])) == {"ASCEND_RT_VISIBLE_DEVICES": "4"}  # as on main
+
+
+def test_ascend_env_is_unchanged_and_a_venv_keeps_its_own_card_variable(tmp_path):
+    assert sp.device_env(npu_node(), conf(devices=None)) == {}
+    assert sp.device_env(npu_node(), conf(devices=[0, 3])) == {"ASCEND_RT_VISIBLE_DEVICES": "0,3"}
+    venv = family_conf(cuda_node(), runtime="venv", container=None, venv={"python": "/e/bin/python"}, devices=None)
+    assert sp.device_env(cuda_node(), venv) == {"YETO_DEVICE_FAMILY": "cuda"}  # no CUDA_VISIBLE_DEVICES over source
+
+
+def test_a_restart_stops_its_own_shard_before_the_idle_check(tmp_path, monkeypatch):
+    class Pop:
+        stdout = None
+
+        def __init__(self, *a, **k):
+            pass
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(sp.subprocess, "Popen", Pop)
+    monkeypatch.setattr(cli.tasks, "sampler_spec", lambda spec, sampler_id, shards: dict(spec, sampler_id=sampler_id))
+    monkeypatch.setattr(cli.tasks, "apply_sampler_overrides", lambda spec, **kw: spec)
+    run = FakeRun()
+    ops = sp.SshSamplerPoolOps(pool_cfg(tmp_path), conf=conf(), run=run, state_dir=tmp_path)
+    m = SimpleNamespace(account=0, ticket=ops.order(0), shard="f09-0", data_slot=None, replaces_shard=None,
+                        predecessor_lost=False)
+    ops.restart(m, ["f09-0"])
+    cmds = [c[0][-1] for c in run.calls if c[0][0] == "ssh"]
+    stop = next(i for i, c in enumerate(cmds) if "kill --signal TERM" in c)
+    pre = next(i for i, c in enumerate(cmds) if "YETO_SSH_CARDS_BEGIN" in c)
+    assert stop < pre
+
+
+def test_an_unchecked_idle_is_an_event(tmp_path, monkeypatch):
+    events = []
+    monkeypatch.setattr(sp.SshSamplerPoolOps, "event", lambda self, name, **d: events.append((name, d)))
+    node = cuda_node()
+    c = family_conf(node, devices=[0], preflight={"require_idle": True})
+    ops = sp.SshSamplerPoolOps(pool_cfg(tmp_path), conf=c, run=FakeRun(), state_dir=tmp_path)
+    cards = "\n".join(f"{i}, NVIDIA H200, 143771" for i in range(8))
+    monkeypatch.setattr(ops, "ssh", lambda *a, **k: SimpleNamespace(returncode=0, stderr="",
+                                                                    stdout=_preflight_text(cards, "no driver")))
+    monkeypatch.setattr(ops, "upload_code", lambda node: (_ for _ in ()).throw(RuntimeError("stop here")))
+    m = SimpleNamespace(account=0, ticket=ops.order(0), shard="f09-0")
+    with pytest.raises(RuntimeError, match="stop here"):
+        ops.start(m, ["f09-0"])
+    assert events and events[0][0] == "ssh_pool_idle_unchecked" and "not checked" in events[0][1]["detail"]
+
+
+def test_idle_parsers_do_not_read_a_failure_as_idle():
+    assert sp.busy_amd(AMD_BUSY_OLD + "\nWARNING: amd-smi: unknown field\n") == [5]  # stderr after the JSON
+    assert sp.busy_cuda(NV_IDLE + "Failed to initialize NVML: Driver/library version mismatch\n") is None
+
+
+def test_auto_image_takes_no_pull_ref():
+    with pytest.raises(ValueError, match="drop pull_ref"):
+        family_conf(cuda_node(), container={"engine": "docker", "image": "auto", "pull_ref": "x@sha256:1"})
+
+
+def test_a_spec_for_another_platform_or_card_is_refused_per_node():
+    spec = json.loads(K31_SPEC.read_text())  # platform rocm, device_family rocm, card_model MI355X
+    b300 = cuda_node(card="B300", hbm_gib=288)
+    problems = sp.spec_node_problems(family_conf(b300), spec)
+    assert any("cuda node, the spec's platform is rocm" in p for p in problems)
+    assert any("B300 cards, the spec's engine.server.card_model is MI355X" in p for p in problems)
+    assert sp.spec_node_problems(family_conf(rocm_node()), spec) == []
+    assert sp.spec_node_problems(family_conf(b300), {"engine": {"server": {"card_model": "<card>"}}}) == []
