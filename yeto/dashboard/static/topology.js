@@ -62,13 +62,16 @@ function stText(s,tn){
 function stColor(st){return{sampling:C.good,reloading:C.wt,loading:C.wt,waiting:C.warn,starting:C.warn,offline:C.bad}[st]||C.ink2}
 
 // -- build the svg (on data shape / width change) -------------------------------------
+// the drawing's width in user units: the page width itself (text at the page's size) between
+// the layout's minimum and a cap (wider: centred at the cap); a narrower page scales it down
+function vw(W){return W<640?400:Math.max(1200,Math.min(1800,Math.round(W)))}
 function build(host){
   var t=T,N=nodes(t),n=N.cards.length,W=host.clientWidth||800,narrow=W<640;
   var trs=t.trainers.filter(function(x){return x.live});if(!trs.length&&t.trainers.length)trs=[t.trainers[0]];
   var VW,VH,cw,ch,gap,xs=[],ys=[],R2,TRS=[];
-  if(!narrow){VW=1200;cw=272;ch=62;gap=10;VH=Math.max(250,24+n*(ch+gap),trs.length*160+(trs.length===1?100:20));
+  if(!narrow){VW=vw(W);cw=272;ch=62;gap=10;VH=Math.max(250,24+n*(ch+gap),trs.length*160+(trs.length===1?100:20));
     for(var i=0;i<n;i++){xs.push(10+(n>2?40*Math.sin(Math.PI*(i+0.5)/n):0));ys.push(VH/2-(n*(ch+gap)-gap)/2+i*(ch+gap))}
-    R2={cx:650,cy:VH/2-(n<=2?4:16),r:54};
+    R2={cx:Math.round(VW*0.54),cy:VH/2-(n<=2?4:16),r:54};
     trs.forEach(function(x,k){TRS.push({x:VW-302,y:(trs.length===1?Math.max(10,VH/2-120):VH/2-(trs.length*160-10)/2)+k*160,w:292,h:150})})}
   else{VW=400;cw=200;ch=58;gap=8;var colH=Math.max(n*(ch+gap),200);
     for(var j=0;j<n;j++){xs.push(4+(n>2?12*Math.sin(Math.PI*(j+0.5)/n):0));ys.push(6+j*(ch+gap))}
@@ -77,6 +80,7 @@ function build(host){
   host.innerHTML="";
   var wrap=document.createElement("div");wrap.className="tpw";host.appendChild(wrap);
   var svg=el("svg",{viewBox:"0 0 "+VW+" "+VH,role:"img","aria-label":"samplers to run store to trainers"},wrap);
+  if(!narrow){wrap.style.maxWidth=VW+"px";wrap.style.margin="0 auto"}  // at most one unit per CSS pixel, centred
   var wires=el("g",{},svg),labels=el("g",{},svg),nd=el("g",{},svg);
   var traj=[],wt=[],lanes=[],cards=[],counters=[],idx={};
   N.cards.forEach(function(c,k){c.members.forEach(function(s){idx[s.id]=k});
@@ -259,7 +263,7 @@ function render(view,offline){
   t.live=!offline&&((view.overview||{}).mode==="live");
   var old=T;T=t;V=view;recvAt=clock();C=colors();
   var W=host.clientWidth||800;
-  if(!L||L.shape!==shape(t)||(L.W<640)!==(W<640)||(host.contains&&!host.contains(L.svg)))build(host);
+  if(!L||L.shape!==shape(t)||vw(L.W)!==vw(W)||(host.contains&&!host.contains(L.svg)))build(host);
   $("topoNote").textContent=t.samplers.filter(function(s){return s.live}).length+" live sampler(s) · "+t.trainers.filter(function(x){return x.live}).length+" trainer(s)"+
     (t.live?" · groups and releases replayed "+DELAY_S+" s behind the newest tape data":" · offline snapshot");
   paint();
@@ -269,7 +273,7 @@ function render(view,offline){
     if(document.addEventListener)document.addEventListener("visibilitychange",kick);
     if(typeof MutationObserver!=="undefined"){var mo=new MutationObserver(function(){C=colors();if(T)paint()});mo.observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]})}
     if(typeof matchMedia==="function"){var mq=matchMedia("(prefers-color-scheme: light)");if(mq&&mq.addEventListener)mq.addEventListener("change",function(){C=colors();if(T)paint()})}
-    var rt=null;if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("resize",function(){clearTimeout(rt);rt=setTimeout(function(){if(!T)return;var w=host.clientWidth;if((w<640)!==(L.W<640))build(host);else fit();paint()},150)})}}
+    var rt=null;if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("resize",function(){clearTimeout(rt);rt=setTimeout(function(){if(!T)return;var w=host.clientWidth;if(vw(w)!==vw(L.W))build(host);else fit();paint()},150)})}}
 
 return{render:render,_nodes:nodes,_label:label,_particles:function(){return P.length},
   util:{el:el,bez:bez,poly:poly,offset:offset,rev:rev,dpath:dpath,at:at,dur:dur,bytes:bytes,esc:esc,fin:fin,reduced:reduced,clock:clock}};
