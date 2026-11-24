@@ -357,6 +357,85 @@ def test_pool_over_modal_refills_a_lost_island_and_scales_down(tmp_path):
     assert len(ops.provider.run_tickets()) == 1 and cancelled
 
 
+TRACEBACK = ['  File "/root/yeto/rl/engine/resume.py", line 372, in store_for',
+             "ValueError: store path 's3://b/runs/r/fleet/dispense' is a URI"]
+
+
+def test_a_failed_call_tells_the_pool_its_samplers_exit_code_and_stderr_tail(tmp_path):
+    """A sampler that exits on a configuration error 15 s in: the pool's evicted event
+    carries the call's rc and the last stderr lines, not only ``end_reason=lost``."""
+    from yeto.launch.nc.modal_provider import failure_detail  # noqa: PLC0415
+
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    client = FakeClient()
+    client.results = {}
+    client.failure = lambda call: failure_detail(client.results.get(call))
+    ops, client, _ = _ops(tmp_path, client=client)
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 2], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=4)),
+                      ops, clock=clock, log=lambda m: None, events=events)
+    ops.start_in_background = False
+    for _ in range(3):
+        pool.tick()
+        t[0] += 30
+    [m] = [m for m in pool.members if m.state == READY]
+    call = ops.provider.call_id(m.ticket)
+    client.results[call] = {"rc": 1, "secs": 15.1, "reported_ready": False, "stderr_tail": ["Traceback", *TRACEBACK]}
+    client.states[call] = FAILED
+    status = ops.provider.status(m.account, m.ticket)
+    assert status == el.LeaseStatus("ended", end_reason="lost")  # the detail is no part of its identity
+    assert status.detail.startswith("sampler exited rc=1 after 15.1 s; stderr tail: Traceback | ")
+    assert "is a URI" in status.detail
+    pool.tick()
+    [evicted] = [e for e in events.events if e["event"].endswith("_evicted")]
+    assert evicted["end_reason"] == "lost" and "rc=1" in evicted["detail"] and "is a URI" in evicted["detail"]
+
+
+def test_failure_detail_reads_a_raised_call_and_bounds_its_length():
+    from yeto.launch.nc.modal_provider import FAILURE_DETAIL_CHARS, failure_detail  # noqa: PLC0415
+
+    assert failure_detail({"rc": 0, "secs": 3}) is None and failure_detail(None) is None
+    assert failure_detail({"rc": 2, "secs": 1.0}) == "sampler exited rc=2 after 1.0 s"
+    assert failure_detail(None, RuntimeError("function timeout")) == "call raised RuntimeError: function timeout"
+    long = failure_detail({"rc": 1, "secs": 1, "stderr_tail": ["x" * 5000, "the end"]})
+    assert len(long) == FAILURE_DETAIL_CHARS and long.startswith("...") and long.endswith("the end")
+    p = ModalProvider("run-m", slots=[1], client=SimpleNamespace(
+        status=lambda call: FAILED, spawn=lambda payload: "fc-1",
+        failure=lambda call: (_ for _ in ()).throw(ConnectionError("modal"))))
+    ticket = p.order(1)
+    p.spawn(ticket, {"shard": "m-0"})
+    assert p.status(1, ticket).detail == "failure not read: ConnectionError: modal"
+
+
+def test_the_call_body_returns_the_samplers_stderr_tail(tmp_path, monkeypatch, capsys):
+    import io  # noqa: PLC0415
+
+    from yeto.launch.nc.modal_provider import STDERR_TAIL_LINES, rollout_sampler_body  # noqa: PLC0415
+
+    lines = [f"log {i}" for i in range(40)] + TRACEBACK
+    got = {}
+
+    class Proc:
+        returncode = 1
+        stderr = io.StringIO("".join(line + "\n" for line in lines))
+
+        def poll(self):
+            return 1
+
+    def popen(argv, **kwargs):
+        got.update(kwargs)
+        return Proc()
+
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://e")
+    out = rollout_sampler_body({"shard": "m-0", "bucket": "b", "run_prefix": "r", "spec": {}}, popen=popen,
+                               objects=Objects(), sleep=lambda s: None, root=str(tmp_path / "rollout"))
+    assert got["stderr"] is not None and got["text"]
+    assert out["rc"] == 1 and out["stderr_tail"] == lines[-STDERR_TAIL_LINES:]
+    assert "log 0" in capsys.readouterr().err, "every line still reaches the container's log"
+
+
 def test_a_retired_modal_island_drains_then_fences_then_stops(tmp_path):
     """--retire T with the drain scale down: the sampler is asked to claim no new task,
     stays billed until it answers drained, then is fenced and its call cancelled."""
@@ -463,6 +542,15 @@ def test_the_sdk_client_spawns_through_a_deployed_function():
     results = {"fc-0": {"rc": 0}, "fc-1": {"rc": 1}}
     modal.FunctionCall = SimpleNamespace(from_id=lambda c: SimpleNamespace(get=lambda timeout=None: results[c]))
     assert client.status("fc-0") == SUCCEEDED and client.status("fc-1") == FAILED
+    results["fc-1"] = {"rc": 1, "secs": 15.1, "stderr_tail": ["ValueError: bad spec"]}
+    assert client.failure("fc-0") is None
+    assert client.failure("fc-1") == "sampler exited rc=1 after 15.1 s; stderr tail: ValueError: bad spec"
+
+    def raised(timeout=None):
+        raise RuntimeError("container OOM")
+
+    modal.FunctionCall = SimpleNamespace(from_id=lambda c: SimpleNamespace(get=raised))
+    assert client.failure("fc-2") == "call raised RuntimeError: container OOM"
 
 
 def test_concurrent_spawns_keep_every_call_in_the_record(tmp_path):

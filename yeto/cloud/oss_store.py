@@ -261,6 +261,14 @@ def store_from_env(path: str | os.PathLike[str], *, environ: Mapping[str, str], 
     return OssStore(uri, environ=environ, stage=environ.get(STAGE_ENV) or DEFAULT_STAGE, client=client)
 
 
+def store_from_uri(uri: str, *, environ: Mapping[str, str], client: Any = None) -> OssStore:
+    """``resume.store_at`` hook: a store the island reaches by its URI, outside its own
+    (a fleet's shared task ledger, ``s3_store.store_from_uri``), with the island's store
+    settings, credentials and stage."""
+    parse_oss_uri(uri)
+    return OssStore(uri, environ=environ, stage=environ.get(STAGE_ENV) or DEFAULT_STAGE, client=client)
+
+
 def head_objects(uri: str, *, environ: Mapping[str, str] | None = None, client: Any = None) -> OssObjectStore:
     """The launcher's object API of the store (the same credentials as the islands)."""
     env = os.environ if environ is None else environ

@@ -304,3 +304,126 @@ def test_run_up_keeps_the_run_store_ledger_of_a_plain_run(tmp_path, monkeypatch)
     assert run.dispense_ledgers() == [("s3://b/runs/r1/", "k31/d", ["pool"])]
     monkeypatch.setattr(up.up_consistency, "pool_store", lambda cfg: "s3://b/runs/r1")
     assert run.dispense_ledger(0) == ("s3://b/runs/r1/", "k31/d")
+
+
+# ------------------------------------------------------------------ a ledger by store URI
+# A fleet compiles dispense_store as a store URI (<run store>/fleet/dispense); on a pool
+# island the sampler's own store is an s3 store (store_from_env: <run store>/trainer<k>,
+# by URI_ENV, staged), and no island path names the fleet's ledger. The sampler opens it
+# by URI with its own store implementation, credentials and stage.
+
+BUCKET = "bkt"
+RUN_URI = f"s3://{BUCKET}/runs/fleet-r"
+
+
+def _s3_island(monkeypatch, tmp_path, s3, island: int) -> dict[str, str]:
+    """The environment of a pool island whose sampler writes ``<run>/trainer<island>``
+    (modal_provider.store_env / ssh_sampler.sampler_env), with ``s3`` as the store."""
+    from yeto.cloud import s3_store
+    from yeto.rl.engine.resume import STORE_IMPL_ENV
+
+    monkeypatch.setattr(s3_store, "_client", lambda environ, require_credentials: s3)
+    return {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: f"{RUN_URI}/trainer{island}",
+            s3_store.STAGE_ENV: str(tmp_path / f"stage{island}"), SAMPLER_INCARNATION_ENV: "inc-1"}
+
+
+def _uri_spec(tmp_path, island: int, shard: str, prompts: Path, ledger: str | None, **dispense) -> dict:
+    own = tmp_path / f"stage{island}" / BUCKET / "runs" / "fleet-r" / f"trainer{island}"
+    spec = {"sampler_id": shard, "store": str(own),
+            "prompts": {"path": str(prompts), "input_key": "text", "label_key": "label", "groups_per_round": 2,
+                        "dispense": {"backend": "store", "namespace": NS, "scan_s": 0.0, "max_scan_s": 0.0,
+                                     **dispense}}}
+    if ledger is not None:
+        spec["dispense_store"] = ledger
+    return spec
+
+
+def test_a_sampler_opens_a_fleet_ledger_named_by_store_uri_and_two_pools_share_it(tmp_path, monkeypatch):
+    from tests.test_sampler_store_read_failures import OutageS3
+    from yeto.cloud.s3_store import S3ObjectStore
+
+    s3, path = OutageS3(), _prompts(tmp_path)
+    fleet = sd.fleet_dispense_store(RUN_URI)
+    samplers = {}
+    for shard, island, ledger in (("vllm-i0-0", 0, fleet), ("sgl-i1-0", 1, fleet.replace("s3://", "r2://", 1))):
+        env = _s3_island(monkeypatch, tmp_path, s3, island)
+        prompts = entry.build_prompts(_uri_spec(tmp_path, island, shard, path, ledger), env)
+        assert isinstance(prompts, sd.StoreDispensedPrompts)
+        samplers[shard] = prompts
+    try:
+        got = _drain(samplers)
+    finally:
+        for s in samplers.values():
+            s.close()
+    slots = [p for ps in got.values() for p in ps]
+    assert sorted(slots) == list(range(ROWS)), "every slot once across the two pools, none twice"
+    assert all(got.values()), "both pools took a share"
+    keys = {k for b, k in s3.objects if b == BUCKET}
+    assert "runs/fleet-r/fleet/dispense/task-dispense/plan.json" in keys
+    assert not [k for k in keys if k.startswith(("runs/fleet-r/trainer0/task-dispense",
+                                                 "runs/fleet-r/trainer1/task-dispense"))]
+    totals = sd.status(S3ObjectStore(fleet, client=s3), NS, details=False)["totals"]
+    assert totals["trained"] == ROWS and totals["ended"]
+
+
+def test_prompts_dispense_store_takes_a_store_uri_as_dispense_store_does(tmp_path, monkeypatch):
+    from tests.test_sampler_store_read_failures import OutageS3
+
+    s3 = OutageS3()
+    env = _s3_island(monkeypatch, tmp_path, s3, 0)
+    spec = _uri_spec(tmp_path, 0, "nc-0", _prompts(tmp_path), None, store=f"{RUN_URI}/shared")
+    s = entry.build_prompts(spec, env)
+    try:
+        assert (BUCKET, "runs/fleet-r/shared/task-dispense/plan.json") in s3.objects
+    finally:
+        s.close()
+
+
+def test_a_ledger_uri_without_an_object_store_implementation_is_a_spec_error(tmp_path):
+    spec = _uri_spec(tmp_path, 0, "nc-0", _prompts(tmp_path), sd.fleet_dispense_store(RUN_URI))
+    with pytest.raises(entry.SamplerSpecError, match="fleet/dispense.*is a URI"):
+        entry.build_prompts(spec, {SAMPLER_INCARNATION_ENV: "inc-1"})
+
+
+def test_store_at_opens_a_uri_like_the_islands_own_store(tmp_path):
+    from tests.test_rl_object_store import FakeS3
+    from yeto.cloud import s3_store
+    from yeto.rl.engine.resume import STORE_IMPL_ENV, CheckpointStore, store_at
+
+    s3 = FakeS3()
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: f"{RUN_URI}/trainer0"}
+    plain = store_at(tmp_path / "x", environ={})
+    assert type(plain) is CheckpointStore and plain.root == tmp_path / "x"
+    mounted = store_at(f"{RUN_URI}/fleet/dispense", environ=env, client=s3)
+    assert isinstance(mounted, s3_store.S3Store) and mounted.uri == f"{RUN_URI}/fleet/dispense"
+    assert not mounted.staged
+    staged_env = {**env, s3_store.STAGE_ENV: str(tmp_path / "stage")}
+    staged = store_at(f"r2://{BUCKET}/runs/fleet-r/fleet/dispense/", environ=staged_env, client=s3)
+    assert staged.uri == f"{RUN_URI}/fleet/dispense" and staged.staged
+    assert staged.root == tmp_path / "stage" / BUCKET / "runs" / "fleet-r" / "fleet" / "dispense"
+    staged.objects.write("k", b"v")
+    assert s3.objects[(BUCKET, "runs/fleet-r/fleet/dispense/k")] == b"v"
+    with pytest.raises(ValueError, match="opens none"):
+        store_at(f"{RUN_URI}/fleet/dispense", environ={})
+
+
+def test_the_pool_opens_a_shared_ledger_by_s3_or_r2_uri_or_path(tmp_path, monkeypatch):
+    from tests.test_rl_object_store import FakeS3
+    from yeto.cloud import s3_store
+    from yeto.launch.nc import cli as nc_cli
+
+    s3 = FakeS3()
+    monkeypatch.setattr(s3_store, "_client", lambda environ, require_credentials: s3)
+    env_file = tmp_path / "r2.env"
+    env_file.write_text("R2_BUCKET=bkt\nAWS_ENDPOINT_URL=https://e\n")
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps({"prompts": {"dispense": {"backend": "store", "namespace": NS}}}))
+    for shared in (f"{RUN_URI}/fleet/dispense", f"r2://{BUCKET}/runs/fleet-r/fleet/dispense"):
+        ops = types.SimpleNamespace(cfg={"spec": str(spec_path), "r2_env_file": str(env_file),
+                                         "sampler": {"dispense_store": shared}})
+        objects, ns = nc_cli.NcSshOps._dispense_ledger(ops)
+        assert ns == NS and (objects.bucket, objects.prefix) == (BUCKET, "runs/fleet-r/fleet/dispense")
+    ops = types.SimpleNamespace(cfg={"spec": str(spec_path), "r2_env_file": str(env_file),
+                                     "sampler": {"dispense_store": str(tmp_path / "ledger")}})
+    objects, _ns = nc_cli.NcSshOps._dispense_ledger(ops)
+    assert isinstance(objects, sd.DirObjects)
