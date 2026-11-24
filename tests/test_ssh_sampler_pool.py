@@ -500,6 +500,8 @@ def test_rocm_containers_get_kfd_dri_video_and_seccomp(tmp_path):
     argv = " ".join(sp.container_run_argv(c, node, name="n", image="img", yeto_dir="/y", spec_path="/s", env={},
                                           env_file=None, cards=list(range(8))))
     assert ("--device /dev/kfd --device /dev/dri --group-add video --security-opt seccomp=unconfined" in argv)
+    assert "--cap-add SYS_PTRACE" in argv and "--ulimit memlock=-1" in argv  # the NC route's flags
+    assert argv.count("--shm-size") == 1 and "--shm-size 16g" in argv  # the pool's container.shm_size
     assert "--gpus" not in argv
     env = _env(node, c, tmp_path)
     assert env["HIP_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7" and env["YETO_DEVICE_FAMILY"] == "rocm"
@@ -634,3 +636,13 @@ def test_rollout_commands_accept_provider_ssh():
     entry.add_parser(sub)
     args = parser.parse_args(["rollout", "status", "--config", "run.json", "--provider", "ssh"])
     assert args.provider == "ssh"
+
+
+def test_nodes_the_pool_cannot_ssh_to_are_refused():
+    from yeto.launch.node_inventory import NodeProfile, Reach
+
+    relay = NodeProfile.from_node(cuda_node(), reach=Reach("relay", "relay.example:2222"))
+    with pytest.raises(ValueError, match=r"nodes \['node-a \(relay\)'\] are not reached by SSH"):
+        family_conf(relay)
+    jump = NodeProfile.from_node(cuda_node(), reach=Reach("jump", "ops@bastion"))
+    assert family_conf(jump).nodes[0].ssh_options() == ["-o", "ProxyJump=ops@bastion"]

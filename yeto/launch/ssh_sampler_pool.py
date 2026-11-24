@@ -202,6 +202,11 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
         nodes = [by_name[n] for n in names]
     if not nodes:
         raise ValueError("ssh provider: no sampler node (nodes, or inventory nodes with role sampler)")
+    unreachable = [f"{n.name} ({n.reach.mode})" for n in nodes if n.reach is not None and n.reach.mode not in
+                   ("direct", "jump")]
+    if unreachable:
+        raise ValueError(f"ssh provider: nodes {unreachable} are not reached by SSH directly or through a jump "
+                         "host; this pool starts samplers over SSH only")
     workdir = str(section.get("workdir") or "")
     if not workdir.startswith("/") or workdir.rstrip("/") in ("", "/tmp", "/data", "/root", "/home"):
         raise ValueError(f"ssh provider: workdir {workdir!r} must be an absolute directory of this run")
@@ -593,8 +598,9 @@ def container_run_argv(conf: SshPoolConf, node: Node, *, name: str, image: str, 
             "--network", "host", "--ipc", "host", "--shm-size", c.shm_size]
     for opt in c.security_opt:
         argv += ["--security-opt", opt]
-    # what the preflight found on the host is passed (a missing -v source fails the run)
-    argv += list(pool_profile(node, conf).devices(cards, engine=c.engine, host_paths=host_paths).args)
+    # what the preflight found on the host is passed (a missing -v source fails the run); the pool's
+    # container.shm_size above is the one shm size (the rocm defaults carry the NC route's 64g)
+    argv += _without_shm(pool_profile(node, conf).devices(cards, engine=c.engine, host_paths=host_paths).args)
     mounts = {conf.workdir: conf.workdir, **dict(node.mounts), **dict(c.mounts)}
     if conf.store and not conf.store.startswith(conf.workdir + "/"):
         mounts.setdefault(conf.store, conf.store)
@@ -611,6 +617,20 @@ def container_run_argv(conf: SshPoolConf, node: Node, *, name: str, image: str, 
         ((_STORE_URI + "; ") if env_file else "") + \
         f"exec {shlex.quote(c.python)} -m yeto.rl.engine.engine_sampler --spec {shlex.quote(spec_path)}"
     return [*argv, "--entrypoint", "bash", image, "-c", body]
+
+
+def _without_shm(args: Sequence[str]) -> list[str]:
+    """``args`` without ``--shm-size X`` / ``--shm-size=X`` (the pool sets its own)."""
+    out: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg == "--shm-size":
+            skip = True
+        elif not arg.startswith("--shm-size="):
+            out.append(arg)
+    return out
 
 
 # -- the provider ---------------------------------------------------------------
