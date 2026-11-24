@@ -60,11 +60,11 @@ def test_trainer_stop_paths_use_the_trainer_launch_name(make_run, monkeypatch):
     run = make_run()
     assert run.trainer_launch_name() == "r1-trainer"
     run.trainer_down("budget $600")
-    assert ["down", "r1-trainer"] == run.calls[-1][-2:]
+    assert ["down", "--missing-ok", "r1-trainer"] == run.calls[-1][-3:]
     run.calls.clear()
     run.down()
-    assert any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
-    assert not any(argv[-2:] == ["down", "r1"] for argv in run.calls)
+    assert any(argv[-3:] == ["down", "--missing-ok", "r1-trainer"] for argv in run.calls)
+    assert not any(argv[-3:] == ["down", "--missing-ok", "r1"] for argv in run.calls)
     asked = []
     monkeypatch.setattr(up, "_worker_alive", lambda name: asked.append(name) or True)
     log = run.dir / "trainer.log"
@@ -200,7 +200,7 @@ def test_run_down_does_not_wait_forever_for_a_run_up_that_ignores_sigterm(make_r
         assert (424242, signal.SIGTERM) in sent
         run.calls.clear()
         run.down()
-        assert any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
+        assert any(argv[-3:] == ["down", "--missing-ok", "r1-trainer"] for argv in run.calls)
         assert any("pool-stop" in argv for argv in run.calls)
     finally:
         held._up_lock.close()
@@ -271,7 +271,7 @@ def test_run_down_shuts_down_with_a_truncated_state_json(make_run, monkeypatch):
     assert run.state["procs"]["trainer"]["log"] == "t.log"  # the copy in memory
     run.calls.clear()
     run.down()
-    assert any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
+    assert any(argv[-3:] == ["down", "--missing-ok", "r1-trainer"] for argv in run.calls)
 
 
 def test_run_down_waits_for_another_run_down_without_sigterm(make_run, monkeypatch):
@@ -333,7 +333,7 @@ def test_run_down_names_the_check_that_did_not_verify(make_run, capsys):
     """NOT verified says which check failed (q06: the trainer's Modal app had not
     converged yet), not only "see down.log"."""
     run = make_run()
-    run._cmd = lambda argv, *, log, timeout=None: 1 if argv[-2:] == ["down", "r1-trainer"] else 0
+    run._cmd = lambda argv, *, log, timeout=None: 1 if argv[-3:] == ["down", "--missing-ok", "r1-trainer"] else 0
     assert run.down() is False
     out = capsys.readouterr()
     text = out.out + out.err
@@ -353,7 +353,7 @@ def test_run_down_goes_on_past_a_step_that_hangs(make_run, monkeypatch):
 
     def cmd(argv, *, log, timeout=None):
         seen.append(argv)
-        if "export" in argv or argv[-2:] == ["down", "r1-trainer"]:
+        if "export" in argv or argv[-3:] == ["down", "--missing-ok", "r1-trainer"]:
             return real(run, ["sleep", "30"], log=log, timeout=0.2)
         return 0
 
@@ -400,8 +400,8 @@ def test_a_process_exiting_between_the_alive_check_and_the_kill_does_not_abort_t
     run = make_run()
     run.state["procs"] = {"trainer": {"pid": 424242}, "dashboard": {"pid": 434343}}
     run.trainer_down("budget $600")
-    assert ["down", "r1-trainer"] == run.calls[-1][-2:]
+    assert ["down", "--missing-ok", "r1-trainer"] == run.calls[-1][-3:]
     assert run.state["steps"]["trainer_down"]["why"] == "budget $600"
     run.calls.clear()
     run.down()
-    assert any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
+    assert any(argv[-3:] == ["down", "--missing-ok", "r1-trainer"] for argv in run.calls)

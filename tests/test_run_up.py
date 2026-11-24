@@ -53,7 +53,7 @@ def _stops_pool(run) -> bool:
 
 
 def _stops_trainer(run) -> bool:
-    return any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
+    return any(argv[-3:] == ["down", "--missing-ok", "r1-trainer"] for argv in run.calls)
 
 
 @pytest.mark.parametrize("why", ["budget $600", "wall clock", "trainer: Traceback / OOM",
