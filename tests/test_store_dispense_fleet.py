@@ -403,6 +403,12 @@ def test_store_at_opens_a_uri_like_the_islands_own_store(tmp_path):
     assert staged.root == tmp_path / "stage" / BUCKET / "runs" / "fleet-r" / "fleet" / "dispense"
     staged.objects.write("k", b"v")
     assert s3.objects[(BUCKET, "runs/fleet-r/fleet/dispense/k")] == b"v"
+    # the store the island's own hook (store_from_env, as on a Modal r2 pool: staged) builds
+    # when pointed at the ledger: the same URI, root and stage
+    via_env = s3_store.store_from_env(tmp_path / "stage" / BUCKET / "runs" / "fleet-r" / "fleet" / "dispense",
+                                      environ={**staged_env, s3_store.URI_ENV: f"{RUN_URI}/fleet/dispense"},
+                                      client=s3)
+    assert (via_env.uri, via_env.root, via_env.staged) == (staged.uri, staged.root, staged.staged)
     with pytest.raises(ValueError, match="opens none"):
         store_at(f"{RUN_URI}/fleet/dispense", environ={})
 
