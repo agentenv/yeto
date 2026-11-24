@@ -1278,6 +1278,7 @@ class Run:
         _log(f"pool {name}: its state says stopped ({pool.stopped}) by an earlier stop of this run and no "
              "member is live: this run up drives it again")
         pool.stopped = None
+        pool._ended_done = False  # noqa: SLF001 - its next stop frees the pool's app again
         pool._event("pool_restarted", why="run up")  # noqa: SLF001
 
     def _restart_stopped_pool_states(self, refs: list[Any]) -> None:
