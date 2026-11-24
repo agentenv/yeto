@@ -308,6 +308,27 @@ def sampler_dispense_addr(args) -> str:
     return shlex.quote(str(addr)) if addr else "$SYNCER_ADDR"
 
 
+def store_dispense_flags(args) -> str:
+    """The store ledger flags of a mixed group's sampler island (``args``: its island
+    args, ``rl_dispense_store`` set by ``sample_roles``): the island path of the
+    ledger's store and the pools' settings; empty for every other island."""
+
+    import json
+    import shlex
+
+    from .storage import island_store_path
+
+    store = getattr(args, "rl_dispense_store", None)
+    if not store:
+        return ""
+    from ..rl.engine.sample_roles import DISPENSE_STORE_FLAG
+
+    path = island_store_path(args, str(store), flag=DISPENSE_STORE_FLAG[0])
+    config = json.dumps(json.loads(args.rl_store_dispense), sort_keys=True, separators=(",", ":"))
+    return (f" {rl_option('rl_dispense_store')} {shlex.quote(path)}"
+            f" {rl_option('rl_store_dispense')} {shlex.quote(config)}")
+
+
 def stream_island_flags(args, island: int) -> str:
     """The island flags of the dispenser's streams: the mix weights and
     the label split for every claiming island, its own labels when it has some."""
@@ -391,6 +412,7 @@ def island_task_data(args, learner_id: int) -> tuple[str, str, dict[str, str]]:
             if prefetch != 2:
                 flags += f" {rl_option('rl_dispense_prefetch_blocks')} {prefetch}"
             flags += stream_island_flags(args, island)
+        flags += store_dispense_flags(args)
         return learner_data_arg(args.data), flags, learner_file_mounts(args.data)
     if learner_id not in plan:
         raise ValueError(f"{rl_option('rl_island_tasks', CLI)} has no task list for learner "

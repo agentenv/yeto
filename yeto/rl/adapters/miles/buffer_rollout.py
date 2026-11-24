@@ -720,11 +720,14 @@ class SamplerRoundWriter:
 
     def write_round(self, rollout_id: int, groups: Sequence[tuple[str, list[dict[str, Any]]]],
                     data_cursor: Mapping[str, int] | None,
-                    positions: Sequence[int | None] | None = None) -> int:
+                    positions: Sequence[int | None] | None = None,
+                    extra: Sequence[Mapping[str, Any] | None] | None = None) -> int:
         """Write ``groups`` (``(group key, samples)``, aborted groups already left
         out) of round ``rollout_id``, with one store commit at the end; returns the
         groups written (the first ones, in order). ``positions``: each
-        group's task-dispenser position, kept in its round record."""
+        group's task-dispenser position, kept in its round record; ``extra``: each
+        group's further round record fields (a store ledger slot's
+        ``dispense_attempt`` and ``dispense_plan``)."""
         from yeto.rl.engine.sampler_resume import SamplerRound
 
         if self.guard is not None:
@@ -738,9 +741,12 @@ class SamplerRoundWriter:
                 if self.reclaimed():
                     self.dropped_groups += len(groups) - i
                     break
+                fields = dict((extra[i] if extra is not None else None) or {})
                 record = SamplerRound(self.sampler_id, self.incarnation, int(rollout_id),
                                       data_cursor=data_cursor, last=i == len(groups) - 1,
-                                      dispense_position=None if positions is None else positions[i])
+                                      dispense_position=None if positions is None else positions[i],
+                                      dispense_attempt=fields.get("dispense_attempt"),
+                                      dispense_plan=fields.get("dispense_plan"))
                 self._writer.write(samples, group_key=key, sampler_round=record.record())
                 written += 1
         if written and self.guard is not None:

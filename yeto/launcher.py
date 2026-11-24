@@ -1405,6 +1405,9 @@ def dry_run_plan(args) -> dict:
                     args, learner_id, len(specs)).rl_sample_role
             if learner_id in (bindings := sample_roles.sampler_bindings(args, len(specs))):
                 entry["feeds_trainer"] = bindings[learner_id]  # --rl-sampler-follow trainer
+                if sample_roles.is_mixed_group(args) and learner_id in (
+                        ledgers := sample_roles.sampler_dispense_stores(args, len(specs))):
+                    entry["dispense_store"] = ledgers[learner_id]  # its rows from the pools' store ledger
             if (substore := sample_roles.island_substore(args, learner_id, len(specs))) is not None:
                 entry["sample_substore"] = substore  # trainer<k>, k the trainer's learner id
             if (pool_shards := sample_roles.plan_buffer_shards(args, learner_id, len(specs))) is not None:

@@ -476,6 +476,12 @@ def add_cli_args(p) -> None:
                    help="with --rl-island-sample-role M:sampler and --rl-island-buffer-shards: "
                    "sampler island M feeds the trainer with learner id K only (default: sampler "
                    "j feeds trainer j %% K); repeatable, every sampler island named once")
+    g.add_argument("--rl-island-dispense-store", action="append", default=None, metavar="M:STORE",
+                   help="with --rl-island-sampler-follows and --rl-store-dispense: sampler island M "
+                   "claims its rows from the store ledger under STORE (a URI on the bucket of "
+                   "--rl-checkpoint-store, e.g. an island fleet's <store>/fleet/dispense) that the "
+                   "external pools claim from, under its shard name island<M>, instead of its data "
+                   "slot; repeatable")
     g.add_argument("--rl-island-release-every", action="append", default=None, metavar="K:N",
                    help="with --rl-island-buffer-shards: the trainer with learner id K releases every "
                    "N-th local version (its own --rl-release-every); repeatable")

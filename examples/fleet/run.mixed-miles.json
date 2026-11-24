@@ -1,5 +1,5 @@
 {
-  "comment": "Island fleet with a Miles sampler island and an external pool in one island: island 0 is a 2xH100 Miles trainer with a Modal vLLM pool; island 1 is a 2xH100 Miles trainer with a Miles sampler island (launch island 2, SGLang on one L40S) and a Modal SGLang pool. Qwen3-4B, full parameters, decoupled, one syncer. docs/MILES_RL.md, 'Island fleet'. yeto run up --config THIS.json --dry-run, then without --dry-run.",
+  "comment": "Island fleet with a Miles sampler island and an external pool in one island: island 0 is a 2xH100 Miles trainer with a Modal vLLM pool; island 1 is a 2xH100 Miles trainer with a Miles sampler island (launch island 2, SGLang on one L40S) and a Modal SGLang pool. Qwen3-4B, full parameters, decoupled, one syncer. dispense fleet: the Miles sampler and both pools claim their prompts from one task ledger (fleet/dispense of the run store), so --data is the pools' prompt file (the same JSONL as the specs' prompts.path). docs/MILES_RL.md, 'Island fleet'. yeto run up --config THIS.json --dry-run, then without --dry-run.",
   "run": "<run>",
   "store": "s3://<bucket>/runs/<run>",
   "budget": {"usd": 40, "wall_h": 4, "nc_usd_per_h": 0},
@@ -10,7 +10,9 @@
       "--training-mode", "rl",
       "--cluster-prefix", "<run>",
       "--model", "Qwen/Qwen3-4B",
-      "--data", "openai/gsm8k",
+      "--data", "<prompts.jsonl>",
+      "--rl-prompt-column", "q",
+      "--rl-label-column", "a",
       "--reward-function", "yeto.rl.gsm8k_reward:score",
       "--trust-remote-code",
       "--tuning", "full",

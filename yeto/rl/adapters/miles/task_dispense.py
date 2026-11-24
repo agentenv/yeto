@@ -52,6 +52,20 @@ own cursor (``yeto.rl.engine.task_dispense`` module doc):
   sampler id comes back, else at the end of the lease). Every other row the
   round took is dropped unless Miles put its group back into its buffer.
 
+* The store ledger (a sampler island of an island fleet, ``--rl-dispense-store``;
+  config ``backend: "store"``): the same wrapped data source over
+  :class:`~yeto.rl.engine.store_dispense.StoreTaskSource`, so the sampler claims
+  the slots of the ledger the fleet's external pools claim from
+  (``<store>/fleet/dispense``, or its island's own ledger) under its shard name
+  (``island<M>``, unique in the fleet). A position is a ledger slot; it maps to the
+  row of ``--data`` (which is the pools' prompt file: the ledger's plan pins its
+  rows and SHA-256). Before a group is written the sampler checks it still holds
+  the slot (:func:`write_fields`: a slot the ledger gave to another sampler is not
+  written) and records the slot's attempt and the ledger's plan in the round
+  record, so the trainer's reader trains one group per slot as for an engine
+  sampler. A restarted sampler first settles the slots its buffer already holds
+  (``recover``).
+
 Runs inside the rollout executor actor (``__ray_call__``), installed once
 before the first draw by ``MilesRolloutPool``. Import-light.
 """
@@ -201,6 +215,8 @@ def install(executor: Any, config: Mapping[str, Any], key: bytes | None) -> dict
         return {"installed": False, "incarnation": f"{current.tasks.incarnation:016x}"}
     if getattr(getattr(source, "args", None), "fully_async", False):
         raise DispenseInstallError("the dispenser does not cover fully_async rollouts yet")
+    if config.get("backend") == "store":
+        return _install_store(executor, source, config)
     rows = int(config["rows"])
     # The streams of --data-mix / task labels (None: the single default stream)
     table = StreamTable.from_config(config["streams"]) if config.get("streams") else None
@@ -234,8 +250,102 @@ def install(executor: Any, config: Mapping[str, Any], key: bytes | None) -> dict
             "filtered_rows": wrapped.filtered_rows}
 
 
+def _install_store(executor: Any, source: Any, config: Mapping[str, Any]) -> dict[str, Any]:
+    """The store ledger branch of :func:`install` (module doc). ``config``:
+    ``store`` (the island path of the ledger's store), ``path`` (the prompt file the
+    ledger's plan pins: ``--data``), ``holder`` (the sampler id), ``dispense`` (the
+    pools' ``prompts.dispense``), ``block`` and ``recover`` (``[slot, plan]`` of the
+    groups this sampler already has in its buffer)."""
+    global _CURRENT
+    import os
+    import types
+
+    from yeto.rl.engine.resume import store_for
+    from yeto.rl.engine.store_dispense import StoreDispensedPrompts, StoreTaskSource
+    from yeto.rl.engine.task_dispense import SAMPLER_INCARNATION_ENV, DispenseError
+
+    holder = str(config["holder"])
+    incarnation = os.environ.get(SAMPLER_INCARNATION_ENV) or os.urandom(8).hex()
+    try:
+        prompts = StoreDispensedPrompts.open(
+            str(config["path"]), dict(config["dispense"]), store=store_for(str(config["store"])),
+            holder=holder, incarnation=incarnation, input_key="messages", label_key=None,
+            groups_per_round=int(config["block"]),
+            emit=lambda kind, **fields: logger.info("%s %s", kind, fields))
+    except DispenseError as error:
+        raise DispenseInstallError(f"store ledger {config['store']}: {error}") from error
+    tasks = StoreTaskSource(prompts)
+    try:
+        plan = prompts.plan_id
+        written = [types.SimpleNamespace(sampler_round={"sampler": holder, "dispense_position": int(slot)})
+                   for slot, group_plan in config.get("recover") or () if group_plan in (None, plan)]
+        recovered = prompts.recover(written)
+        wrapped = DispensedSource(source, tasks, prompts.slots, executor=executor)
+    except BaseException:
+        tasks.close()
+        raise
+    setattr(source, _ATTR, wrapped)
+    _CURRENT = wrapped
+    atexit.register(tasks.close)
+    logger.info("store ledger: sampler %s claims its rows from %s/%s (plan %s, incarnation %s, %d rows, "
+                "%d filtered at load)", holder, config["store"], prompts.ledger.ns, plan, incarnation,
+                prompts.ledger.rows, wrapped.filtered_rows)
+    return {"installed": True, "backend": "store", "incarnation": incarnation, "holder": holder,
+            "namespace": prompts.ledger.ns, "plan": plan, "slots": int(prompts.ledger.limit),
+            "filtered_rows": wrapped.filtered_rows, **recovered}
+
+
+def ended_detail(executor: Any) -> dict[str, Any] | None:
+    """Runs INSIDE the rollout executor actor: the store ledger's end detail
+    (``StoreDispensedPrompts.end_detail``) once its task source saw every slot settled,
+    for the shard's end record; None otherwise (no store ledger, or a rollout given up
+    while other samplers still hold slots)."""
+    from yeto.rl.engine.store_dispense import StoreTaskSource
+
+    del executor
+    source = _CURRENT
+    tasks = None if source is None else source.tasks
+    return tasks.ended if isinstance(tasks, StoreTaskSource) else None
+
+
 def current() -> DispensedSource | None:
     return _CURRENT
+
+
+def write_fields(positions: Sequence[int | None]) -> list[dict[str, Any] | None]:
+    """The sampler's buffer writer, before it writes a round (in the rollout
+    executor): per group of ``positions``, the extra round record fields (``{}``: none)
+    or None when the group must not be written. Only a store ledger answers None: the
+    slot went to another sampler (superseded, fenced, retired) or the store did not
+    say (then the slot is released at once, another claim takes it); a held slot
+    gives its ``dispense_attempt`` and ``dispense_plan``. Never raises."""
+    from yeto.rl.engine.store_dispense import StoreTaskSource
+
+    source = _CURRENT
+    tasks = None if source is None else source.tasks
+    if not isinstance(tasks, StoreTaskSource):
+        return [{} for _ in positions]
+    prompts = tasks.prompts
+    out: list[dict[str, Any] | None] = []
+    for position in positions:
+        if position is None:
+            out.append({})
+            continue
+        try:
+            verdict = prompts.hold_verdict(int(position))
+        except Exception as error:  # noqa: BLE001 - not written; the slot goes back below
+            logger.warning("store ledger: hold check of slot %s failed: %r", position, error)
+            verdict = None
+        if verdict:
+            out.append({"dispense_attempt": prompts.attempt_of(int(position)), "dispense_plan": prompts.plan_id})
+            continue
+        if verdict is None:  # unknown: neither written nor kept; give it back now
+            try:
+                tasks.report(release=[int(position)])
+            except Exception as error:  # noqa: BLE001 - its lease gives it out anyway
+                logger.warning("store ledger: release of slot %s failed: %r", position, error)
+        out.append(None)
+    return out
 
 
 def on_trained(kept: Iterable[Sequence[Any]]) -> dict[str, int] | None:

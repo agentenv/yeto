@@ -1592,10 +1592,39 @@ def _verify_island_task_data(args) -> dict[str, Any] | None:
     return verify_island_data(args.data, expected)
 
 
+def _store_dispense(args) -> bool:
+    """The sampler island claims its rows from a store ledger (``--rl-dispense-store``
+    with ``--rl-store-dispense``: an island fleet's ledger, shared with its external
+    pools). Refused where it does not apply."""
+
+    if not getattr(args, "rl_dispense_store", None):
+        if getattr(args, "rl_store_dispense", None):
+            raise ValueError("--rl-store-dispense needs --rl-dispense-store (set by the launcher)")
+        return False
+    from yeto.rl.engine import sample_roles
+
+    if not getattr(args, "rl_store_dispense", None):
+        raise ValueError("--rl-dispense-store needs --rl-store-dispense (the pools' prompts.dispense)")
+    if sample_roles.sample_role(args) != sample_roles.SAMPLER:
+        raise ValueError("--rl-dispense-store belongs to a sampler island")
+    for name, flag in (("rl_data_dispense", "--rl-data-dispense"), ("rl_data_slot", "--rl-data-slot"),
+                       ("rl_sampler_data_slot", "--rl-sampler-data-slot"), ("data_sha256", "--data-sha256")):
+        if getattr(args, name, None):
+            raise ValueError(f"--rl-dispense-store and {flag} exclude each other")
+    path = Path(str(args.data)).expanduser()
+    if not path.is_file():
+        raise ValueError(f"--rl-dispense-store: --data {args.data!r} is not a local prompt file; the store "
+                         "ledger pins the rows and SHA-256 of the pools' prompt file, so --data must be that file")
+    return True
+
+
 def _island_dispense(args) -> bool:
     """The island claims its rows from the actor syncer's dispenser
-    (``--rl-data-dispense``). Refused where it does not apply (as the slot)."""
+    (``--rl-data-dispense``) or a store ledger (:func:`_store_dispense`). Refused
+    where it does not apply (as the slot)."""
 
+    if _store_dispense(args):
+        return True
     if not getattr(args, "rl_data_dispense", False):
         return False
     from yeto.rl.engine import sample_roles
@@ -1618,6 +1647,34 @@ def _island_dispense(args) -> bool:
     return True
 
 
+def _store_dispense_config(args, miles_args) -> dict[str, Any]:
+    """The store ledger config of a sampler island (``adapters.miles.task_dispense``
+    module doc): the ledger's store (an island path), ``--data`` (the pools' prompt
+    file, which the ledger's plan pins), the sampler's shard name as the holder and
+    the pools' ``prompts.dispense``."""
+
+    from yeto.rl.engine.store_dispense import DispenseError, check_store_config
+
+    try:
+        dispense = json.loads(args.rl_store_dispense)
+        check_store_config(dispense)
+    except (ValueError, DispenseError) as error:
+        raise ValueError(f"--rl-store-dispense: {error}") from None
+    if str(dispense.get("backend") or "store") != "store":
+        raise ValueError(f"--rl-store-dispense: backend {dispense.get('backend')!r} (the store ledger takes "
+                         "backend store)")
+    if dispense.get("store"):
+        raise ValueError("--rl-store-dispense: drop 'store' (--rl-dispense-store names the ledger's store)")
+    if dispense.get("holdout"):
+        raise ValueError("--rl-store-dispense: holdout is a path on the pools' nodes; give holdout_ids")
+    block = int(getattr(miles_args, "over_sampling_batch_size", None)
+                or getattr(miles_args, "rollout_batch_size"))
+    return {"backend": "store", "store": str(args.rl_dispense_store),
+            "path": str(Path(str(args.data)).expanduser()),
+            "holder": getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}",
+            "dispense": dispense, "block": block, "learner_id": int(args.learner_id)}
+
+
 def _dispense_config(args, miles_args, prompt_path) -> dict[str, Any] | None:
     """``miles_args.yeto_rl_data_dispense``: what the rollout executor needs to
     open its dispenser connection (``adapters.miles.task_dispense.install``)."""
@@ -1626,6 +1683,8 @@ def _dispense_config(args, miles_args, prompt_path) -> dict[str, Any] | None:
         return None
     if getattr(miles_args, "fully_async", False):
         raise ValueError("--rl-data-dispense does not cover Miles fully_async rollouts yet")
+    if _store_dispense(args):
+        return _store_dispense_config(args, miles_args)
     from yeto.rl.engine.task_dispense import file_fingerprint
 
     from yeto.rl.engine import sample_roles
