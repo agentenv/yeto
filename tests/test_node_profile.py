@@ -58,7 +58,8 @@ def test_an_inventory_may_spell_ascend_and_keeps_the_launcher_name():
 def test_parse_node_accepts_and_ignores_the_profile_keys():
     entry = raw(card_arch="sm90", container="podman", paths={"work": "/srv/w", "models": "/srv/m"},
                 model_source="store", reach="direct")
-    node = parse_node(entry, index=0)
+    with pytest.warns(UserWarning, match="are node profile keys"):
+        node = parse_node(entry, index=0)  # the trainer island's reader says it ignores them
     assert type(node) is inv.Node
     profile = parse_profile(entry, index=0)
     assert isinstance(profile, inv.Node) and profile.container == "podman"
@@ -94,7 +95,8 @@ def test_a_profile_file_loads_and_the_trainer_reader_still_takes_it(tmp_path):
                     "     reach: {mode: relay, via: relay.example:2222}, model_source: preset}\n")
     (p,) = inv.load_profiles(path)
     assert p.container == "podman" and p.reach == inv.Reach("relay", "relay.example:2222") and p.reach.inbound
-    (node,) = inv.load_inventory(path)  # the trainer's reader: a Node, the profile keys ignored
+    with pytest.warns(UserWarning, match="are node profile keys"):
+        (node,) = inv.load_inventory(path)  # the trainer's reader: a Node, the profile keys ignored
     assert type(node) is inv.Node and node.card == "MI355X"
 
 
@@ -188,3 +190,21 @@ def test_a_profile_is_a_node_for_every_node_consumer():
     assert p.compat_group == parse_node(raw(), index=0).compat_group
     row = p.record()
     assert row["name"] == "n0" and row["family"] == "cuda" and row["card_arch"] == "sm90"
+
+
+def test_profile_readers_do_not_warn_and_reach_jump_dials_through_its_host(recwarn):
+    p = parse_profile(raw(reach={"mode": "jump", "via": "ops@bastion"}), index=0)
+    assert p.proxy_jump == "ops@bastion" and p.ssh_options() == ["-o", "ProxyJump=ops@bastion"]
+    assert p.reach == inv.Reach("jump", "ops@bastion")
+    assert parse_profile(raw(proxy_jump="ops@b", reach="jump"), index=0).reach == inv.Reach("jump", "ops@b")
+    assert not [w for w in recwarn if "profile keys" in str(w.message)]
+    with pytest.raises(InventoryError, match="two jump hosts"):
+        parse_profile(raw(proxy_jump="ops@a", reach={"mode": "jump", "via": "ops@b"}), index=0)
+
+
+def test_ascend_profile_preflights_with_npu_smi():
+    a = parse_profile(raw(**ASCEND), index=0)
+    assert a.preflight_commands()[0] == ("npu-smi", "info")
+    assert a.hw.smi == "npu-smi" and a.visible_devices_env == "ASCEND_RT_VISIBLE_DEVICES"
+    r = NodeProfile.for_card("r", "MI355X", 8, hbm_gib=288)
+    assert r.preflight_commands()[0][0] == "amd-smi" and r.preflight_commands()[-1][0] == "rocm-smi"

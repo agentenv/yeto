@@ -102,7 +102,8 @@ def image_mismatch(reference: str, *, cpu_arch: str, device_family: str, card_ar
     keywords after it check a pinned :class:`EngineImage`: ``card_arch`` against
     its card architectures, and with ``model`` the model's :class:`Recipe`
     (precision, the reload mode ``load``, the ``rollout`` fields, the node's HBM).
-    Without them the check is the one it always was (architecture and family)."""
+    Without any of them the answers are the old ones: only the built images of
+    :data:`IMAGES` are checked, a pinned sampler image is accepted as before."""
     spec = catalog_image(reference)
     if spec is not None:
         if spec.cpu_arch != cpu_arch:
@@ -112,11 +113,15 @@ def image_mismatch(reference: str, *, cpu_arch: str, device_family: str, card_ar
             return (f"image {reference} is the {spec.device_family} image {spec.name}; "
                     f"the node is device_family {device_family}")
         return None
+    rollout = tuple(rollout)
+    if card_arch is None and model is None and load is None and precision is None and not rollout \
+            and hbm_gib_per_node is None:
+        return None
     engine = engine_image_of(reference)
     if engine is None:
         return None
     reasons = engine.problems(family=device_family, cpu_arch=cpu_arch, card_arch=card_arch, model=model,
-                              load=load, precision=precision, rollout=tuple(rollout),
+                              load=load, precision=precision, rollout=rollout,
                               hbm_gib_per_node=hbm_gib_per_node)
     if not reasons:
         return None

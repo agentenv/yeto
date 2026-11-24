@@ -91,8 +91,10 @@ trainer preflight fills ``/mnt/nvme/models`` on every node, :mod:`.ssh_weights`)
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import re
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -285,6 +287,10 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
     if unknown:
         raise InventoryError(f"node {name}: unknown inventory field(s) {unknown} "
                              f"(known: {sorted(_KNOWN)})")
+    ignored = sorted(set(raw) & set(_PROFILE_KEYS))
+    if ignored:
+        warnings.warn(f"node {name}: {ignored} are node profile keys: read by parse_profile / load_profiles "
+                      "(the ssh sampler pool), ignored here (the trainer island)", stacklevel=2)
     for key in _REQUIRED:
         if raw.get(key) is None:
             raise InventoryError(f"node {name}: {key} is required; the inventory states no "
@@ -617,6 +623,11 @@ class NodeProfile(Node):
             set_("paths", replace(self.paths, work=self.scratch))
         if self.reach is None:
             set_("reach", Reach("jump", self.proxy_jump) if self.proxy_jump else Reach())
+        elif self.reach.mode == "jump" and self.proxy_jump != self.reach.via:
+            if self.proxy_jump:
+                raise InventoryError(f"node {self.name}: reach via {self.reach.via} and proxy_jump "
+                                     f"{self.proxy_jump} name two jump hosts")
+            set_("proxy_jump", self.reach.via)  # ssh_options dials through it
 
     # -- construction
     @classmethod
@@ -761,16 +772,26 @@ def _profile_fields(raw: dict[str, Any], node: Node) -> dict[str, Any]:
     return out
 
 
+@contextlib.contextmanager
+def _profile_reader():
+    """The profile readers consume the profile keys: no "ignored" warning from parse_node."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r"node .*: \[.*\] are node profile keys")
+        yield
+
+
 def parse_profile(raw: Any, *, index: int, images: Mapping[str, str] | None = None) -> NodeProfile:
     """One inventory entry as a :class:`NodeProfile` (:func:`parse_node`, then the
     profile keys)."""
-    node = parse_node(raw, index=index, images=images)
+    with _profile_reader():
+        node = parse_node(raw, index=index, images=images)
     return NodeProfile.from_node(node, **_profile_fields(raw, node))
 
 
 def parse_profiles(document: Any) -> list[NodeProfile]:
     """:func:`parse_inventory` with every node as a :class:`NodeProfile`."""
-    nodes = parse_inventory(document)  # every check of the inventory, the duplicate names included
+    with _profile_reader():
+        nodes = parse_inventory(document)  # every check of the inventory, the duplicate names included
     entries = document if isinstance(document, list) else document.get("nodes")
     return [NodeProfile.from_node(node, **_profile_fields(raw, node)) for node, raw in zip(nodes, entries)]
 
@@ -779,7 +800,8 @@ def load_profiles(path: str | Path) -> list[NodeProfile]:
     """:func:`load_inventory` with every node as a :class:`NodeProfile`."""
     import yaml  # noqa: PLC0415
 
-    nodes = load_inventory(path)
+    with _profile_reader():
+        nodes = load_inventory(path)
     document = yaml.safe_load(Path(path).read_text())
     entries = document if isinstance(document, list) else document.get("nodes")
     try:

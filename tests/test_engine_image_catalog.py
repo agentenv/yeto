@@ -134,7 +134,9 @@ def test_image_mismatch_refuses_at_dry_run_and_keeps_its_old_answers():
     assert images.image_mismatch(customer, cpu_arch="x86_64", device_family="rocm", card_arch="gfx950",
                                  model="kimi_k31", load="in_place", precision="mxfp4",
                                  rollout=K31_ROLLOUT, hbm_gib_per_node=2304) is None
-    why = images.image_mismatch(customer, cpu_arch="x86_64", device_family="cuda")
+    # no model / card keyword: the old answer (a pinned sampler image was never checked here)
+    assert images.image_mismatch(customer, cpu_arch="x86_64", device_family="cuda") is None
+    why = images.image_mismatch(customer, cpu_arch="x86_64", device_family="cuda", card_arch="sm90")
     assert why and "it is a rocm image, the node is cuda" in why
     why = images.image_mismatch(pins.VLLM_SAMPLER_IMAGE_CUDA, cpu_arch="x86_64", device_family="cuda",
                                 card_arch="sm90", model="kimi_k31", load="in_place")
