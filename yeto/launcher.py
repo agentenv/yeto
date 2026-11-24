@@ -463,6 +463,46 @@ def _record_call(recorder, name: str, call_id: str, adoption: dict) -> None:
         print(f"[launcher] island record of {name}: {e}", file=sys.stderr)
 
 
+ISLAND_RECORDS_LOCK = "fleet/trainers/lock"  # the island records' single-writer lock (StoreLock)
+ISLAND_RECORDS_LOCK_TTL_S = 120.0  # a dead launcher's lease runs out this long after its last renewal
+ISLAND_RECORDS_LOCKED_EXIT = 12  # another live launcher holds the island records of this run
+
+
+def _claim_island_records(states, *, wait_s: float | None = None, sleep=None, clock=None):
+    """Claim the run store's single-writer lock on the island records
+    (``yeto.launch.pool.store_lock.StoreLock``, prefix :data:`ISLAND_RECORDS_LOCK`) and make
+    it the store's fence; a lease that runs (a launcher that just died, or a live one) is
+    waited on up to ``wait_s``. Returns ``(lock, None)``; ``(None, why)`` when a live
+    launcher keeps it; ``(None, None)`` on a store without an atomic create (records are
+    kept, nothing is adopted)."""
+    from .launch.pool.store_lock import StoreLock, StoreLockError
+
+    sleep, clock = sleep or time.sleep, clock or time.time
+    deadline = clock() + (ISLAND_RECORDS_LOCK_TTL_S + 30.0 if wait_s is None else float(wait_s))
+    while True:
+        try:
+            lock = StoreLock.acquire(states.objects, ISLAND_RECORDS_LOCK, ttl_s=ISLAND_RECORDS_LOCK_TTL_S,
+                                     clock=clock)
+        except StoreLockError as error:
+            print(f"[launcher] island records: no single-writer lock on this store ({error}); records are "
+                  "kept, no island is adopted", file=sys.stderr)
+            return None, None
+        if lock is not None:
+            states.fence = lock
+            print(f"[launcher] island records: lock token {lock.token} held by this launcher", flush=True)
+            return lock, None
+        holder = StoreLock.holder_of(states.objects, ISLAND_RECORDS_LOCK, now=clock()) or {}
+        now = clock()
+        if now >= deadline:
+            return None, (f"another launcher holds the island records of this run (lock token "
+                          f"{holder.get('token')}, {holder.get('holder')}, lease until "
+                          f"{time.strftime('%H:%M:%S', time.gmtime(float(holder.get('until') or now)))} UTC)")
+        until = float(holder.get("until") or now)
+        print(f"[launcher] island records: lock token {holder.get('token')} held by {holder.get('holder')} "
+              f"(lease {max(0.0, until - now):.0f} s left); waiting for it", flush=True)
+        sleep(max(1.0, min(10.0, until - now + 1.0, deadline - now)))
+
+
 def _island_state_store(args):
     """The run store's island records (None: no object API for the store, or none)."""
     from .launch.island_lifecycle import open_state_store
@@ -599,6 +639,18 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     run_started_unix = time.time()  # Modal rows created after this are this run's app
     # Every billed resource of this run goes into its crash-safe ledger; the cost guard
     # (budget breaker, idle shutdown, NC lease expiry) runs until the teardown below.
+    # yeto.launch.island_lifecycle: each trainer island's record and STOP in the run store
+    # (an island fleet by default; None for a single trainer island: nothing changes). One
+    # launcher writes them: the run store's single-writer lock is claimed first (a dead
+    # launcher's lease is waited out); held by a live launcher, nothing is launched.
+    island_states = _island_state_store(args) if island_lifecycle_enabled(args, specs) else None
+    island_lock = None
+    if island_states is not None:
+        island_lock, refusal = _claim_island_records(island_states)
+        if refusal is not None:
+            print(f"[launcher] ERROR: {refusal}; nothing is launched (exit {ISLAND_RECORDS_LOCKED_EXIT})",
+                  file=sys.stderr)
+            return ISLAND_RECORDS_LOCKED_EXIT
     cost_ledger, cost_guard = _start_cost_guard(args, events_dir)
     verda_names = [n for n, sp in zip(learner_names, specs) if sp.cloud == "verda"]
     verda = prepare_verda_islands(verda_names, on_instance_ids) if verda_names else None
@@ -612,16 +664,17 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     # The log streams and their echo-tape collectors (an ssh: island streams from its start).
     tail_threads: list[threading.Thread] = []
     event_collectors: dict[str, EventCollector] = {}
-    # yeto.launch.island_lifecycle: each trainer island's record and STOP in the run store
-    # (an island fleet by default; None for a single trainer island: nothing changes).
-    island_states = _island_state_store(args) if island_lifecycle_enabled(args, specs) else None
     recorder = None
     adoption: dict = {}  # name -> island_adopt.Adoption (a relaunch of the same run)
     if island_states is not None:
         from .launch import island_adopt
         from .launch.island_lifecycle import FleetRecorder
 
-        if not relaunch:
+        # Adoption goes by the run store's records (the local run manifest is only a cache: a
+        # launcher restarted on another machine finds the islands there too).
+        records = island_states.read_all(range(len(specs)))  # also what the writes merge into
+        restart = relaunch or any(r.get("state") in island_adopt.ADOPTABLE for r in records.values())
+        if not restart:
             for m in range(len(specs)):  # a new run: an island STOP an earlier run of this name left is void
                 island_states.clear_stop(m)
         refs = _island_refs(args, specs, learner_cluster_names(args.cluster_prefix, specs),
@@ -630,8 +683,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                             ssh_names=ssh_names, events_dir=events_dir, echo_names=echo_names)
         refs.pop(held_name, None)  # the trainer scheduler's island has its own journal
         recorder = FleetRecorder(island_states, refs)
-        if relaunch:  # the records read here are also what the relaunch's writes merge into
-            adoption = island_adopt.plan(island_states.read_all(range(len(specs))), refs, probes=_adopt_probes(args))
+        if restart and island_lock is not None:  # adopt only under the lock
+            adoption = island_adopt.plan(records, refs, probes=_adopt_probes(args))
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -1374,6 +1427,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             ssh_islands.close()  # streams and locks; a kept island is reattached by the next launch
         if island_states is not None:
             island_states.close()  # the queued island records, bounded (never holds the exit)
+        if island_lock is not None:
+            island_lock.release()  # the next launcher of this run takes the records at once
         if getattr(args, "training_mode", None) == "rl" and not getattr(args, "dry_run", False):
             # the dispenser log of a syncer on this machine, with its check
             from .launch.dispense_evidence import collect_dispense_log

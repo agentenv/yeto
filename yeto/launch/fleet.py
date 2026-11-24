@@ -1000,6 +1000,13 @@ class FleetController:
                 if not is_syncer:  # the syncer is never abandoned; it just is not relaunched
                     self._abandon(rec, elapsed, reason="STOP flag")
                 return
+            fenced = None if self.recorder is None else getattr(self.recorder.store, "fenced", None)
+            if fenced is not None:  # another launcher took the island records over: it orders, not this one
+                if not rec.get("fenced_logged"):
+                    rec["fenced_logged"] = True
+                    print(f"[launcher] {rec['name']}: NOT relaunching: this launcher lost the island records' "
+                          f"lock ({fenced}); the launcher that holds it supervises this island", file=sys.stderr)
+                return
             if not is_syncer and self.replacement_planner is not None and not rec.get("replace_planned"):
                 rec["replace_planned"] = True
                 planned = self._plan_replacement(rec)

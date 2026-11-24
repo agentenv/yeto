@@ -169,6 +169,15 @@ class TapeCollector:
         # JOINED_EVENTS record since: it is still waiting for the syncer.
         self.awaiting_syncer = False
         self.closed = False
+        if not fresh and self.path.exists():
+            # A tape this run already wrote (a restarted launcher that adopted the island,
+            # whose log stream replays): its records are seen, the tape continues without
+            # writing one twice.
+            try:
+                with self.path.open(encoding="utf-8") as handle:
+                    self._seen.update(line.rstrip("\n") for line in handle if line.strip())
+            except OSError:
+                pass
 
     @property
     def incomplete_marker(self) -> Path:
