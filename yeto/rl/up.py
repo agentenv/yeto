@@ -816,9 +816,69 @@ class Run:
             _log(f"preflight: {line}")
         for line in up_fleet.syncer_lines(plan, argv, self.cfg.get("syncer")):
             _log(f"preflight: {line}")
+        refused, notes = self.fleet_sandbox_findings()
+        problems += refused
+        for line in notes:
+            _log(f"preflight: {line}")
         for line in self.fleet_budget_lines():
             _log(f"preflight: {line}")
         return "; ".join(problems) if problems else None
+
+    def fleet_sandbox_pools(self) -> list[Any]:
+        """The fleet's agentic pools as :mod:`yeto.rl.fleet_sandbox` sees them: the rendered
+        spec, the env their harness sees, their samplers at the target and the elastic
+        maximum, and their ``harness.sandbox_caps`` as each pool resolves them."""
+        from yeto.breakers.rules_facts import pool_facts, pool_sources  # noqa: PLC0415
+        from yeto.rl import fleet_sandbox, up_fleet  # noqa: PLC0415
+
+        plan = self.fleet_plan()
+        out = []
+        for i, ref in enumerate(self.pools):
+            try:
+                cfg = ref.load()
+                spec = up_consistency.effective_spec(cfg)
+                target = self.pool_target(None, i)
+            except (OSError, ValueError):
+                continue  # the pool dry-run reports an unreadable pool config
+            if not isinstance((spec or {}).get("agentic"), dict):
+                continue
+            island = plan.island_of_pool(ref.name) if plan is not None else None
+            elastic = cfg.get("elastic") if isinstance(cfg.get("elastic"), dict) else {}
+            max_nodes = elastic.get("max_nodes") if isinstance(elastic.get("max_nodes"), int) else target
+            resolved = pool_facts(ref.name, cfg, ref.data_path, run_config=self.cfg).resolved
+            caps = {key: resolved.get(f"harness.sandbox_caps.{key}")
+                    for key in ("max_sandboxes", "agentenv_max_active_n", "boat_max_active_n",
+                                "boat_starts_per_minute_n")}
+            env = dict(pool_sources(cfg, run_config=self.cfg).env or {})
+            row = fleet_sandbox.pool_of(
+                ref.name, up_fleet.pool_where(plan, ref.name) if plan is not None else f"pool {ref.name}",
+                None if island is None else island.index, spec, env=env,
+                shards=[f"{cfg.get('shard_base')}-{n}" for n in range(max(0, int(target)))],
+                max_nodes=int(max_nodes), caps=caps)
+            if row is not None:
+                out.append(row)
+        return out
+
+    def fleet_sandbox_findings(self) -> tuple[list[str], list[str]]:
+        """``(problems, notes)`` of the fleet's agentic pools' sandboxes
+        (:mod:`yeto.rl.fleet_sandbox`): providers, the caps of what they share, spend."""
+        from yeto.breakers import fleet as breakers_fleet  # noqa: PLC0415
+        from yeto.rl import fleet_sandbox  # noqa: PLC0415
+
+        pools = self.fleet_sandbox_pools()
+        if not pools:
+            return [], []
+        run_envs = None
+        if self.envs:
+            from yeto.sandbox.envs import EnvsError, load_envs  # noqa: PLC0415
+
+            try:
+                run_envs = load_envs(self.envs, run=self.run if fleet_sandbox.LABEL.fullmatch(self.run) else None)
+            except (EnvsError, OSError, ValueError):
+                run_envs = None  # yeto sandbox status (the preflight's next step) names why
+        problems, notes = fleet_sandbox.provider_findings(pools, sandbox=self.cfg.get("sandbox"))
+        refused, more = fleet_sandbox.capacity_findings(pools, run_envs=run_envs)
+        return problems + refused, notes + more + fleet_sandbox.spend_lines(pools, breakers_fleet.sandbox_price(self.cfg))
 
     def fleet_budget_lines(self) -> list[str]:
         """The fleet's hourly estimate (each pool's target x node price, each island's
@@ -836,7 +896,8 @@ class Run:
         return up_fleet.budget_lines(self.fleet_plan(), pools=rows,
                                      syncer_usd_per_h=breakers_fleet.syncer_price(self.cfg),
                                      usd=self.breaker_param("run.budget", "usd"),
-                                     wall_h=self.breaker_param("run.wall_clock", "hours"))
+                                     wall_h=self.breaker_param("run.wall_clock", "hours"),
+                                     sandbox_usd_per_h=breakers_fleet.sandbox_price(self.cfg))
 
     # -- steps
     def preflight(self) -> bool:

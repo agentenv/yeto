@@ -142,6 +142,13 @@ def island_prices(run_config: Mapping[str, Any]) -> tuple[float, ...]:
     return tuple(island_price(run_config, k) for k in range(len(_entries(run_config))))
 
 
+def sandbox_price(run_config: Mapping[str, Any]) -> float:
+    """``fleet.sandbox_usd_per_h``: the hourly price of the fleet's sandboxes (its agentic
+    pools' boat sandboxes, docker hosts); 0 when unset."""
+    section = run_config.get("fleet")
+    return _price(section.get("sandbox_usd_per_h") if isinstance(section, Mapping) else None)
+
+
 def syncer_price(run_config: Mapping[str, Any]) -> float:
     """``syncer.usd_per_h`` (0 when unset: a syncer on the control host bills nothing)."""
     syncer = run_config.get("syncer")
@@ -276,6 +283,7 @@ class FleetSpend:
     pools_usd: float
     islands_usd: tuple[float, ...]
     syncer_usd: float
+    sandbox_usd: float = 0.0  # the agentic pools' sandboxes (fleet.sandbox_usd_per_h)
 
     @property
     def trainers_usd(self) -> float:
@@ -283,18 +291,23 @@ class FleetSpend:
 
     @property
     def total_usd(self) -> float:
-        return self.pools_usd + self.trainers_usd + self.syncer_usd
+        return self.pools_usd + self.trainers_usd + self.syncer_usd + self.sandbox_usd
 
     def to_json(self) -> dict[str, Any]:
-        return {"usd": round(self.total_usd, 2), "pools_usd": round(self.pools_usd, 2),
-                "islands_usd": [round(u, 2) for u in self.islands_usd], "syncer_usd": round(self.syncer_usd, 2)}
+        out = {"usd": round(self.total_usd, 2), "pools_usd": round(self.pools_usd, 2),
+               "islands_usd": [round(u, 2) for u in self.islands_usd], "syncer_usd": round(self.syncer_usd, 2)}
+        if self.sandbox_usd:  # a fleet without priced sandboxes keeps its record as it was
+            out["sandbox_usd"] = round(self.sandbox_usd, 2)
+        return out
 
 
 def fleet_spend(*, pool_node_hours: Iterable[tuple[float, float]], island_hours: Sequence[float],
                 island_usd_per_h: Sequence[float], syncer_hours: float = 0.0,
-                syncer_usd_per_h: float = 0.0) -> FleetSpend:
+                syncer_usd_per_h: float = 0.0, sandbox_hours: float = 0.0,
+                sandbox_usd_per_h: float = 0.0) -> FleetSpend:
     """The fleet's spend: Σ pool node hours × that pool's node price, plus Σ island trainer
-    hours × its ``usd_per_h``, plus syncer hours × ``syncer.usd_per_h``.
+    hours × its ``usd_per_h``, plus syncer hours × ``syncer.usd_per_h``, plus the sandboxes'
+    hours (while the agentic pools run) × ``fleet.sandbox_usd_per_h`` (:func:`sandbox_price`).
 
     ``pool_node_hours``: ``(billed node hours, usd per node hour)`` of each pool (``run up``'s
     ``node_hours(i)`` and ``node_usd_per_h(i)``); ``island_hours``: each island trainer's billed
@@ -305,7 +318,8 @@ def fleet_spend(*, pool_node_hours: Iterable[tuple[float, float]], island_hours:
         raise ValueError(f"fleet spend: {len(island_hours)} island hours for {len(island_usd_per_h)} island prices")
     pools = sum(_amount(hours) * _amount(price) for hours, price in pool_node_hours)
     trainers = tuple(_amount(h) * _amount(p) for h, p in zip(island_hours, island_usd_per_h))
-    return FleetSpend(pools, trainers, _amount(syncer_hours) * _amount(syncer_usd_per_h))
+    return FleetSpend(pools, trainers, _amount(syncer_hours) * _amount(syncer_usd_per_h),
+                      _amount(sandbox_hours) * _amount(sandbox_usd_per_h))
 
 
 def _amount(value: Any) -> float:
