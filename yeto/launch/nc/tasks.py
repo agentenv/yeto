@@ -1,102 +1,16 @@
-"""sky tasks on a National Compute node pool (``infra: ssh/nc-<ticket>``).
-
-Each builder returns the task as a sky YAML dict (``sky.Task.from_yaml_config``
-takes it), so the task is plain data the tests can read:
-
-* ``hello_task``: the GPUs the pod sees (``/dev/kfd``, render nodes) and the NVMe
-  host path;
-* ``model_pull_task``: the base model from the object store onto
-  ``/mnt/nvme/models`` with the bandwidth cap (``aws s3`` ``max_bandwidth``,
-  default 2500 MB/s: at ~7 GB/s an MI355X node drops off the network within two
-  minutes and does not come back, GPU-B report section 4.1);
-* ``sampler_task``: ``python -m yeto.rl.engine.engine_sampler --spec`` in the
-  serving image (vLLM ``kimi-k31`` with the ``amd-article`` preset in the spec),
-  writing its own buffer shard (``sampler_id``) of the run prefix.
-
-Object store credentials go in as sky ``secrets`` read from an env file
-(``--r2-env-file``) at submit time; they are not in the task file or the repo.
+"""The sampler spec of one pool member: the base engine-sampler spec with the
+member's shard (:func:`sampler_spec`), the run knobs laid over it
+(:func:`apply_sampler_overrides`, :func:`dispense_config`, :func:`merge_breakers`)
+and its backlog cap (:func:`backlog_groups`). Shared by every pool route (the
+SSH + docker route of :mod:`.ssh_sampler`, Daytona, Modal, own SSH nodes) and by
+``yeto run up``.
 """
 
 from __future__ import annotations
 
 import json
-import shlex
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
-
-from yeto.rl.sampler_pins import VLLM_SAMPLER_IMAGE_ROCM
-
-from .node_pool import SKY_ACCELERATOR
-
-NVME = "/mnt/nvme"
-SERVING_IMAGE = VLLM_SAMPLER_IMAGE_ROCM.removeprefix("docker:")  # pinned digest, not the tag
-MAX_PULL_MB_S = 2500
-HARD_PULL_LIMIT_MB_S = 3000
-SECRET_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT_URL", "AWS_REGION", "R2_BUCKET")
-
-
-def read_env_file(path: str | Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for line in Path(path).expanduser().read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.removeprefix("export ").partition("=")
-        out[key.strip()] = value.strip().strip("'\"")
-    return out
-
-
-def _nvme_pod_config(mount: str = NVME) -> dict[str, Any]:
-    return {"ssh": {"pod_config": {"spec": {
-        "containers": [{"volumeMounts": [{"name": "nvme", "mountPath": mount}]}],
-        "volumes": [{"name": "nvme", "hostPath": {"path": NVME, "type": "Directory"}}],
-    }}}}
-
-
-def _resources(pool: str, gpus: int, image: str | None = None) -> dict[str, Any]:
-    res: dict[str, Any] = {"infra": f"ssh/{pool}", "accelerators": f"{SKY_ACCELERATOR}:{gpus}"}
-    if image:
-        res["image_id"] = f"docker:{image}"
-    return res
-
-
-def hello_task(pool: str, *, gpus: int = 8) -> dict[str, Any]:
-    run = (
-        "set -u; echo YETO_NC_HELLO host=$(hostname) cpus=$(nproc) "
-        "mem_gb=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo); "
-        "test -e /dev/kfd && echo kfd=yes || echo kfd=no; "
-        "echo render_nodes=$(ls /dev/dri 2>/dev/null | grep -c renderD); "
-        f"df -h {NVME} | tail -1; ls {NVME}"
-    )
-    return {"name": "yeto-nc-hello", "resources": _resources(pool, gpus), "run": run,
-            "config": _nvme_pod_config()}
-
-
-def model_pull_task(pool: str, *, src: str, dest: str, max_mb_s: int = MAX_PULL_MB_S,
-                    include: str | None = None, gpus: int = 8) -> dict[str, Any]:
-    if max_mb_s > HARD_PULL_LIMIT_MB_S:
-        raise ValueError(f"pull cap {max_mb_s} MB/s exceeds the node limit {HARD_PULL_LIMIT_MB_S} MB/s")
-    if not dest.startswith(f"{NVME}/"):
-        raise ValueError(f"dest must be on {NVME}")
-    sync = ["aws", "s3", "sync", src, dest, "--only-show-errors"]
-    if include:
-        sync += ["--exclude", "*", "--include", include]
-    # aws CLI v1 before 1.29 ignores AWS_ENDPOINT_URL (it would go to AWS): a fresh
-    # install is pinned past it and the sync names the endpoint, for a preinstalled old aws
-    setup = "command -v aws >/dev/null || python3 -m pip install -q 'awscli>=1.29'"
-    run = "\n".join([
-        "set -eu",
-        'export AWS_CONFIG_FILE="$HOME/.yeto-nc-aws-config"',
-        ("printf '[default]\\nregion = %s\\ns3 =\\n  max_concurrent_requests = 32\\n"
-        f"  max_bandwidth = {max_mb_s}MB/s\\n' \"${{AWS_REGION:-auto}}\" > \"$AWS_CONFIG_FILE\""),
-        f"mkdir -p {shlex.quote(dest)}",
-        'echo "YETO_NC_PULL start $(date -u +%FT%TZ) cap=' + f'{max_mb_s}MB/s"',
-        shlex.join(sync) + ' --endpoint-url "$AWS_ENDPOINT_URL"',
-        f'echo "YETO_NC_PULL done $(date -u +%FT%TZ) $(du -sh {shlex.quote(dest)} | cut -f1)"',
-    ])
-    return {"name": "yeto-nc-model-pull", "resources": _resources(pool, gpus), "setup": setup,
-            "run": run, "config": _nvme_pod_config()}
 
 
 def sampler_spec(base: Mapping[str, Any], *, sampler_id: str, shards: list[str]) -> dict[str, Any]:
@@ -233,51 +147,6 @@ def apply_sampler_overrides(spec: Mapping[str, Any], *, data_slot: str | None = 
         raise ValueError(f"max_tokens {sampling['max_tokens']} + max_prompt_tokens "
                          f"{out.get('max_prompt_tokens')} exceed max_model_len {limit}")
     return out
-
-
-def sampler_task(pool: str, *, spec_path: str, run_prefix: str, workdir: str,
-                 image: str = SERVING_IMAGE, python: str = "/opt/runtime-venv/bin/python3",
-                 gpus: int = 8, protected: frozenset[str] = frozenset()) -> dict[str, Any]:
-    run_prefix = run_prefix.strip("/")
-    if not run_prefix:
-        raise ValueError("run_prefix is required")
-    if run_prefix in protected:
-        raise ValueError(f"run prefix {run_prefix!r} is protected (a buffer in use)")
-    envs = {
-        "PYTHONUNBUFFERED": "1",
-        "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
-        "YETO_RL_STORE_IMPL": "yeto.cloud.s3_store:store_from_env",
-        "YETO_RL_STORE_S3_STAGE": f"{NVME}/work/stage",
-        "YETO_RL_STORE_S3_REGION": "auto",
-        "YETO_RL_STORE_S3_CREDENTIALS": "aws-env",
-        "YETO_NC_RUN_PREFIX": run_prefix,
-    }
-    run = "\n".join([
-        "set -eu",
-        f"mkdir -p {NVME}/work/stage",
-        'export YETO_RL_STORE_S3_URI="s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}"',
-        'export YETO_RL_STORE_S3_ENDPOINT_URL="$AWS_ENDPOINT_URL"',
-        'export PYTHONPATH="$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH}"',
-        f"exec {shlex.quote(python)} -m yeto.rl.engine.engine_sampler --spec ~/yeto-nc-spec.json",
-    ])
-    return {"name": "yeto-nc-sampler", "resources": _resources(pool, gpus, image), "workdir": workdir,
-            "file_mounts": {"~/yeto-nc-spec.json": spec_path}, "envs": envs, "run": run,
-            "config": _nvme_pod_config()}
-
-
-def with_secrets(task: dict[str, Any], env_file: str | Path | None) -> dict[str, Any]:
-    if not env_file:
-        return task
-    env = read_env_file(env_file)
-    missing = [k for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT_URL") if not env.get(k)]
-    if missing:
-        raise ValueError(f"{env_file}: missing {missing}")
-    return {**task, "secrets": {k: env[k] for k in SECRET_KEYS if env.get(k)}}
-
-
-def write_spec(spec: Mapping[str, Any], path: str | Path) -> str:
-    Path(path).write_text(json.dumps(spec, indent=1))
-    return str(path)
 
 
 def backlog_groups(*, groups_per_round: int, synced: bool, trainers: int = 1, samplers: int = 1,

@@ -1,4 +1,4 @@
-"""National Compute as sky SSH node pools (yeto.launch.nc): CPU tests with fake tools."""
+"""National Compute nodes for yeto samplers (yeto.launch.nc): CPU tests with fake tools."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from yeto.launch.nc import client as ncc
 from yeto.launch.nc import node_pool, tasks, tunnel
@@ -181,7 +180,7 @@ def _lease():
                          "2026-11-09T16:00:00Z", 8, 3_000_000)
 
 
-def test_ssh_alias_and_pool(tmp_path):
+def test_ssh_alias(tmp_path):
     cfg = tmp_path / "ssh_config"
     cfg.write_text("Host other\n  HostName 1.2.3.4\n")
     alias = node_pool.write_ssh_alias(_lease(), ssh_config=cfg)
@@ -193,87 +192,13 @@ def test_ssh_alias_and_pool(tmp_path):
     node_pool.write_ssh_alias(_lease(), ssh_config=cfg)
     assert cfg.read_text().count("Include ") == 1
     assert (tunnel.state_dir() / "known_hosts").read_text() == "192.0.2.7 ssh-ed25519 HOSTKEY\n"
-    pools = tmp_path / "pools.yaml"
-    pools.write_text(yaml.safe_dump({"onprem": {"hosts": ["a"]}}))
-    assert node_pool.write_pool("t1", path=pools) == "nc-t1"
-    doc = yaml.safe_load(pools.read_text())
-    assert doc == {"onprem": {"hosts": ["a"]}, "nc-t1": {"hosts": ["yeto-nc-t1"]}}
-    node_pool.remove_pool("t1", path=pools)
-    assert yaml.safe_load(pools.read_text()) == {"onprem": {"hosts": ["a"]}}
     node_pool.remove_ssh_alias("t1")
     assert "yeto-nc-t1" not in (tunnel.state_dir() / "ssh_config").read_text()
 
 
-def test_host_bootstrap_and_gpu_scripts():
-    s = node_pool.host_bootstrap_script()
-    for d in ("/var/lib/rancher", "/var/lib/kubelet", "/var/lib/containerd"):
-        assert d in s
-    assert "a k3s not installed by sky" in s
-    assert s.index("a k3s not installed by sky") < s.index("systemctl stop")
-    assert "mountpoint -q" in s and "mount --bind" in s and "YETO_NC_BOOTSTRAP_OK" in s
-    subprocess.run(["bash", "-n"], input=s, text=True, check=True)
-    g = node_pool.amd_gpu_script(8)
-    assert "skypilot.co/accelerator=mi355x" in g and "amd.com/gpu" in g
-    subprocess.run(["bash", "-n"], input=g, text=True, check=True)
-
-
-def test_sky_ssh_up_argv():
-    seen = []
-    node_pool.sky_ssh_up("nc-t1", run=lambda argv, **kw: seen.append(argv))
-    assert seen[0][-4:] == ["ssh", "up", "--infra", "nc-t1"]
-
-
-# -- tasks -------------------------------------------------------------------
-
-def test_hello_and_pull_tasks():
-    h = tasks.hello_task("nc-t1")
-    assert h["resources"] == {"infra": "ssh/nc-t1", "accelerators": "MI355X:8"}
-    vol = h["config"]["ssh"]["pod_config"]["spec"]["volumes"][0]
-    assert vol["hostPath"]["path"] == "/mnt/nvme"
-    p = tasks.model_pull_task("nc-t1", src="s3://b/models/m", dest="/mnt/nvme/models/m", include="config.json")
-    assert "max_bandwidth = 2500MB/s" in p["run"] and "--include config.json" in p["run"]
-    with pytest.raises(ValueError, match="exceeds"):
-        tasks.model_pull_task("nc-t1", src="s3://b/m", dest="/mnt/nvme/m", max_mb_s=7000)
-    with pytest.raises(ValueError, match="dest"):
-        tasks.model_pull_task("nc-t1", src="s3://b/m", dest="/root/m")
-
-
-def test_pull_task_passes_endpoint_explicitly():
-    # aws CLI v1 before 1.29 ignores AWS_ENDPOINT_URL and would go to AWS, so the
-    # node's sync names the endpoint itself and a fresh install is pinned past 1.29
-    p = tasks.model_pull_task("nc-t1", src="s3://b/models/m", dest="/mnt/nvme/models/m")
-    (sync,) = [line for line in p["run"].splitlines() if line.startswith("aws s3 sync")]
-    assert sync.endswith('--endpoint-url "$AWS_ENDPOINT_URL"')
-    assert "'awscli>=1.29'" in p["setup"]
-
-
-def test_sampler_task_and_spec(tmp_path):
+def test_sampler_spec_adds_the_member_shard():
     spec = tasks.sampler_spec({"sampler_id": "old", "engine": {}}, sampler_id="nc-1", shards=["nc-0"])
     assert spec["sampler_id"] == "nc-1" and spec["buffer_shards"] == ["nc-0", "nc-1"]
-    t = tasks.sampler_task("nc-t1", spec_path="/x/spec.json", run_prefix="nc-sky-test", workdir="/repo")
-    assert t["resources"]["image_id"] == f"docker:{tasks.SERVING_IMAGE}" and "@sha256:" in tasks.SERVING_IMAGE
-    assert "yeto.rl.engine.engine_sampler --spec" in t["run"]
-    assert "secrets" not in t and "AWS_SECRET_ACCESS_KEY" not in json.dumps(t)
-    with pytest.raises(ValueError, match="protected"):
-        tasks.sampler_task("nc-t1", spec_path="/x", run_prefix="live-run", workdir="/r",
-                           protected=frozenset({"live-run"}))
-    env = tmp_path / "r2.env"
-    env.write_text("AWS_ACCESS_KEY_ID=a\nAWS_SECRET_ACCESS_KEY=b\nAWS_ENDPOINT_URL=https://e\nR2_BUCKET=k\nOTHER=z\n")
-    s = tasks.with_secrets(t, env)
-    assert s["secrets"] == {"AWS_ACCESS_KEY_ID": "a", "AWS_SECRET_ACCESS_KEY": "b",
-                            "AWS_ENDPOINT_URL": "https://e", "R2_BUCKET": "k"}
-    env.write_text("AWS_ACCESS_KEY_ID=a\n")
-    with pytest.raises(ValueError, match="missing"):
-        tasks.with_secrets(t, env)
-
-
-def test_tasks_parse_as_sky_tasks():
-    sky = pytest.importorskip("sky")
-    for doc in (tasks.hello_task("nc-t1"),
-                tasks.model_pull_task("nc-t1", src="s3://b/m", dest="/mnt/nvme/m")):
-        task = sky.Task.from_yaml_config(json.loads(json.dumps(doc)))
-        (res,) = task.resources
-        assert res.accelerators == {"MI355X": 8}
 
 
 # -- lease pool --------------------------------------------------------------

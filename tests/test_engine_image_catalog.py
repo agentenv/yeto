@@ -50,7 +50,7 @@ def test_catalog_refs_are_the_pins_constants_byte_for_byte():
 
 
 def test_the_customer_k31_sampler_resolves_to_the_image_it_always_pulled():
-    from yeto.launch.nc import ssh_sampler, tasks
+    from yeto.launch.nc import ssh_sampler
 
     needs = images.spec_needs(json.loads(K31_SPEC.read_text()))
     assert needs == {"model": "kimi_k31", "engine_pref": "vllm", "load": "in_place", "precision": "mxfp4",
@@ -58,7 +58,7 @@ def test_the_customer_k31_sampler_resolves_to_the_image_it_always_pulled():
     model, pref = needs.pop("model"), needs.pop("engine_pref")
     chosen = images.resolve(mi355x(), model, pref, **needs)
     assert chosen.ref == pins.VLLM_SAMPLER_IMAGE_ROCM
-    assert chosen.image.pull_ref == ssh_sampler.IMAGE == tasks.SERVING_IMAGE  # the NC route's constants
+    assert chosen.image.pull_ref == ssh_sampler.IMAGE  # the NC route's constant
     assert chosen.python == ssh_sampler.PYTHON and chosen.load == "in_place"
     assert chosen.recipe.verified_on == ("MI355X",)
     # no engine preference: the catalog order puts the same image first

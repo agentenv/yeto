@@ -1,22 +1,17 @@
-"""``python -m yeto.launch.nc``: National Compute nodes as sky SSH node pools.
+"""``python -m yeto.launch.nc``: National Compute nodes for yeto samplers (SSH + docker).
 
     proxy    --account N HOST PORT        ssh ProxyCommand through the workspace relay
-    preflight --account N                 tools, account free, balance, relay, sky
-    up       --account N --yes [--route ssh|sky]  order -> active -> alias -> docker on NVMe (ssh, default)
-                                          or host bootstrap -> sky ssh up -> AMD GPUs (sky; refused on
-                                          nodes with the provider's health k3s)
+    preflight --account N                 tools, account free, balance, relay
+    up       --account N --yes            order -> active -> alias -> docker on NVMe
     probe    --ticket T [--spec F]        card check, image pull, vllm --version, rocm-smi, spec preflight
     ssh-pull start|status --ticket T      rate-limited model pull (aws-cli container, <= 3000 MB/s)
     ssh-sampler start|stop|status --ticket T --shard S   engine sampler container
     register-node --name N --host USER@IP  a node an operator brought up by hand: ticket ext-N for the
                                           per-node commands above; never released by this tool
     unregister-node --name N              drop that record and alias (the node is not touched)
-    hello    --ticket T                   sky hello task on the node's pool, then the cluster goes down
-    pull     --ticket T --src S3 --dest D rate-limited model pull as a sky task
-    sampler  --ticket T --spec F ...      engine sampler as a sky task (own buffer shard)
-    down     --account N --ticket T       sky clusters + pool down, delete the ticket (only ours), confirm ended
+    down     --account N --ticket T       drop the alias, delete the ticket (only ours), confirm ended
     pool     --config F [--dry-run]       lease-aware, eviction-tolerant sampler pool loop
-                                          (``route: ssh`` default; ``elastic`` knobs: .elastic);
+                                          (SSH + docker; ``elastic`` knobs: .elastic);
                                           --dry-run validates and prints orders + spend, orders nothing
     pool-stop --config F                  release every node the pool created (running or not)
     pool-retry --config F                 after a configuration error: restart in place, same node(s)
@@ -29,7 +24,7 @@ and billed until its ticket is deleted. See docs/NC_POOL.md.
 Environment: ``NC_MANAGE`` / ``NC_QUERY`` (the order tools), ``NC_TOOL_DIR``
 (the controller tool, for ``port.open`` and the workspace shell), ``NC_NODE_BIN``,
 ``YETO_NC_STATE_DIR`` (default ``~/.yeto/nc``), ``YETO_NC_ACCOUNTS`` (accounts
-this tool may order on, e.g. ``1``; required for ``up``/``pool``), ``YETO_SKY_BIN``.
+this tool may order on, e.g. ``1``; required for ``up``/``pool``).
 """
 
 from __future__ import annotations
@@ -129,9 +124,8 @@ def ensure_relay(account: int, *, run=subprocess.run) -> None:
 
 def preflight(account: int) -> dict[str, Any]:
     checks: dict[str, Any] = {}
-    for tool in ("nc-manage", "nc-query", "ssh", "kubectl"):
+    for tool in ("nc-manage", "nc-query", "ssh"):
         checks[f"tool:{tool}"] = bool(shutil.which(tool))
-    checks["tool:sky"] = bool(shutil.which(node_pool.sky_cmd()[0]))
     checks["nc_tool_dir"] = Path(tunnel.tool_dir(), "tool", "core.mjs").exists()
     st = client(account).status()
     own = NcClient.own_ticket(st)
@@ -143,7 +137,7 @@ def preflight(account: int) -> dict[str, Any]:
     return checks
 
 
-def up(account: int, *, model: str = "mi355x", wait_s: float = 3600, route: str = "ssh") -> NodeLease:
+def up(account: int, *, model: str = "mi355x", wait_s: float = 3600) -> NodeLease:
     c = client(account, ordering=True)
     pub = node_pool.ensure_key()
     ensure_relay(account)  # the relay is up before the order: no billed minutes spent on it
@@ -158,7 +152,7 @@ def up(account: int, *, model: str = "mi355x", wait_s: float = 3600, route: str 
     save_lease(lease)
     _log(f"active {lease.ip} lease_until {lease.lease_until}")
     try:
-        attach_ssh(lease) if route == "ssh" else attach(lease)
+        attach_ssh(lease)
     except Exception as exc:
         _log(f"attach failed on {ticket}: {exc} (the node stays up; `down` deletes it)")
         raise
@@ -206,79 +200,8 @@ def attach_ssh(lease: NodeLease) -> str:
     return alias
 
 
-def attach(lease: NodeLease) -> str:
-    """sky SSH node pool route: reach, host bootstrap, sky pool, AMD GPUs (idempotent).
-    Refused on nodes with the provider's health k3s (node_pool)."""
-    alias = reach(lease)
-    out = node_pool.ssh_run(alias, node_pool.host_bootstrap_script())
-    _log(out.stdout.strip().splitlines()[-1] if out.stdout.strip() else f"bootstrap: {out.stderr[-300:]}")
-    if "YETO_NC_BOOTSTRAP_OK" not in out.stdout:
-        raise NcError("host bootstrap failed")
-    pool = node_pool.write_pool(lease.ticket)
-    res = node_pool.sky_ssh_up(pool)
-    _log(f"sky ssh up {pool}: exit {res.returncode} {(res.stdout or '')[-400:]} {(res.stderr or '')[-400:]}")
-    if res.returncode != 0:
-        raise NcError(f"sky ssh up {pool} failed")
-    gpu = node_pool.ssh_run(alias, node_pool.amd_gpu_script(lease.gpus or 8), timeout=600)
-    _log((gpu.stdout or "").strip()[-300:])
-    if "YETO_NC_AMD_GPU_OK" not in gpu.stdout:
-        raise NcError("AMD device plugin did not report the GPUs")
-    return pool
-
-
-def _sky():
-    import sky
-
-    return sky
-
-
-def cluster_name(kind: str, ticket: str) -> str:
-    return f"yeto-nc-{kind}-{ticket}"
-
-
-def launch(task_doc: dict[str, Any], name: str, *, down: bool) -> int:
-    sky = _sky()
-    task = sky.Task.from_yaml_config(task_doc)
-    _record_cluster(name)
-    job_id, _handle = sky.stream_and_get(sky.launch(task, cluster_name=name))
-    code = sky.tail_logs(name, job_id, follow=True)
-    if down:
-        sky.stream_and_get(sky.down(name))
-        _forget_cluster(name)
-    return int(code or 0)
-
-
-def _clusters_path() -> Path:
-    return tunnel.state_dir() / "clusters.json"
-
-
-def _record_cluster(name: str) -> None:
-    names = set(json.loads(_clusters_path().read_text())) if _clusters_path().exists() else set()
-    names.add(name)
-    _clusters_path().write_text(json.dumps(sorted(names)))
-
-
-def _forget_cluster(name: str) -> None:
-    if _clusters_path().exists():
-        names = set(json.loads(_clusters_path().read_text())) - {name}
-        _clusters_path().write_text(json.dumps(sorted(names)))
-
-
 def down(account: int, ticket: str) -> dict[str, Any]:
-    """Our sky clusters on the pool, the pool, the alias, then the ticket (guarded)."""
-    if _clusters_path().exists():
-        for name in json.loads(_clusters_path().read_text()):
-            if name.endswith(f"-{ticket}"):
-                try:
-                    _sky().stream_and_get(_sky().down(name))
-                except Exception as exc:  # noqa: BLE001  (the ticket goes regardless)
-                    _log(f"sky down {name}: {exc}")
-                _forget_cluster(name)
-    pool = node_pool.pool_name(ticket)
-    if node_pool.SKY_POOLS_FILE.exists() and pool in (node_pool.SKY_POOLS_FILE.read_text()):
-        res = node_pool.sky_ssh_down(pool)
-        _log(f"sky ssh down {pool}: exit {res.returncode}")
-        node_pool.remove_pool(ticket)
+    """The node's alias, then the ticket (guarded: only this tool's own, confirmed ended)."""
     node_pool.remove_ssh_alias(ticket)
     result = client(account).delete(ticket)
     _log(f"ticket {ticket}: {result}")
@@ -286,71 +209,6 @@ def down(account: int, ticket: str) -> dict[str, Any]:
 
 
 # -- pool ops ----------------------------------------------------------------
-
-class NcSkyOps:
-    """:class:`~.lease_pool.PoolOps` over National Compute and sky."""
-
-    def __init__(self, cfg: dict[str, Any]):
-        self.cfg = cfg
-
-    def order(self, account: int) -> str:
-        c = client(account, ordering=True)
-        ensure_relay(account)
-        return c.create(model=machine_type(self.cfg), pubkey=node_pool.ensure_key(), run=run_id(self.cfg))
-
-    def poll(self, m: Member):
-        t = client(m.account).status().get("ticket") or {}
-        if t.get("id") != m.ticket or t.get("state") in ("ended", None):
-            return "ended", None
-        if t.get("state") == "active" and (t.get("node") or {}).get("public_ip"):
-            if not leases_path().exists() or m.ticket not in json.loads(leases_path().read_text()):
-                save_lease(client(m.account).wait_active(m.ticket, timeout_s=60))
-            return "active", parse_time(t.get("lease_until"))
-        return "waiting", None
-
-    def start(self, m: Member, shards: list[str]) -> None:
-        lease = load_lease(m.ticket)
-        pool = attach(lease)
-        if self.cfg.get("model_src"):
-            launch(tasks.with_secrets(tasks.model_pull_task(pool, src=self.cfg["model_src"],
-                                                            dest=self.cfg["model_dest"]),
-                                      self.cfg.get("r2_env_file")), cluster_name("pull", m.ticket), down=True)
-        base = json.loads(Path(self.cfg["spec"]).read_text())
-        spec_path = tunnel.state_dir() / f"spec-{m.shard}.json"
-        spec = tasks.apply_sampler_overrides(tasks.sampler_spec(base, sampler_id=m.shard, shards=shards),
-                                             data_slot=m.data_slot, continues_shard=m.replaces_shard,
-                                             **_overrides(self.cfg.get("sampler") or {}))
-        if agentic_setup.parse(spec) is not None:  # agentic setup hook: ssh route only
-            raise ValueError("agentic.setup runs through ssh_sampler.start_sampler (the ssh route); "
-                             "the sky route cannot prepare an agentic node")
-        check_spec_engine(self.cfg, spec)
-        tasks.write_spec(spec, spec_path)
-        image = pool_sampler_image(self.cfg)  # None: the sky route's old default image
-        doc = tasks.with_secrets(tasks.sampler_task(
-            pool, spec_path=str(spec_path), run_prefix=self.cfg["run_prefix"], workdir=self.cfg["workdir"],
-            protected=frozenset(self.cfg.get("protected_prefixes", ())),
-            **({"image": image} if image else {})), self.cfg.get("r2_env_file"))
-        sky = _sky()
-        _record_cluster(cluster_name("sampler", m.ticket))
-        sky.launch(sky.Task.from_yaml_config(doc), cluster_name=cluster_name("sampler", m.ticket))
-
-    def ready(self, m: Member) -> bool:
-        sky = _sky()
-        try:
-            records = sky.get(sky.status([cluster_name("sampler", m.ticket)]))
-        except Exception:  # noqa: BLE001
-            return False
-        return bool(records) and str(records[0].get("status")).endswith("UP")
-
-    def drain(self, m: Member) -> None:
-        down(m.account, m.ticket)
-
-    def balance(self) -> int | None:
-        return client(slot_list(self.cfg)[0]).balance()
-
-    def account_free(self, account: int) -> bool:
-        return client(account).account_free()
-
 
 class NcSshOps:
     """:class:`~.lease_pool.PoolOps` over National Compute and the SSH + docker
@@ -747,11 +605,30 @@ POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base
                        "machine_type", "model", "spec", "run_prefix", "r2_env_file", "bucket_env", "image",
                        "engine", "platform",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
-                       "probe_timeout_s", "probe_connect_timeout_s", "provider", "model_src", "model_dest",
-                       "workdir", "comment", "sampler_route", "data_path", "syncer", "protected_accounts",
+                       "probe_timeout_s", "probe_connect_timeout_s", "provider", "comment", "sampler_route", "data_path", "syncer", "protected_accounts",
                        "prompts_file"})
 DATA_PATHS = ("r2", "syncer")  # buffer shards + releases in the run store | syncer broadcast + sample relay
 REQUIRED_KEYS = ("target", "shard_base")  # and "accounts" (or "slots" off National Compute)
+# the keys of the removed sky route (a SkyPilot SSH node pool with k3s on the node): refused by name
+REMOVED_SKY_ROUTE_KEYS = ("model_src", "model_dest", "workdir")
+
+
+def removed_route_problem(cfg: dict[str, Any]) -> None:
+    """Refuse a pool config of the removed ``route: sky`` (or any route but ``ssh``) with
+    the way out, instead of an unknown-key or missing-key error that hides the cause."""
+    route = cfg.get("route", "ssh")
+    stale = [k for k in REMOVED_SKY_ROUTE_KEYS if k in cfg]
+    if route == "ssh" and not stale:
+        return
+    if route not in ("ssh", "sky"):
+        raise ValueError(f"pool config: route {route!r} is not supported; the only route is 'ssh' "
+                         f"(SSH + docker on the node, the default): drop the 'route' key")
+    raise ValueError("pool config: the 'sky' route (a SkyPilot SSH node pool, k3s on the node) was removed: it "
+                     "broke the provider's health k3s on National Compute nodes. Drop "
+                     + ("'route' " if route == "sky" else "")
+                     + (f"{stale} " if stale else "")
+                     + "to use the default SSH + docker route ('route': 'ssh'), which needs 'spec', 'run_prefix' "
+                       "and 'r2_env_file' and pulls the model with 'model_pull' (docs/NC_POOL.md)")
 
 
 def slot_list(cfg: dict[str, Any]) -> list[int]:
@@ -1006,19 +883,19 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
     required keys, accounts outside ``YETO_NC_ACCOUNTS`` (``allowed``), a ``target``
     above the number of accounts (one node per account) and ``model`` together with
     ``machine_type``."""
+    removed_route_problem(cfg)
     unknown = set(cfg) - POOL_KEYS
     if unknown:
         raise ValueError(f"pool config: unknown keys {sorted(unknown)} (known: {sorted(POOL_KEYS)})")
     missing = [k for k in REQUIRED_KEYS if k not in cfg]
     if "accounts" not in cfg and "slots" not in cfg:
         missing.insert(1, "accounts")
-    if cfg.get("route", "ssh") == "ssh":
-        required = REQUIRED_SSH_KEYS
-        if (cfg.get("provider") or {}).get("kind") == "ssh":  # own SSH nodes: r2_env_file only on the r2 path
-            from ..ssh_sampler_pool import required_pool_keys  # noqa: PLC0415
+    required = REQUIRED_SSH_KEYS
+    if (cfg.get("provider") or {}).get("kind") == "ssh":  # own SSH nodes: r2_env_file only on the r2 path
+        from ..ssh_sampler_pool import required_pool_keys  # noqa: PLC0415
 
-            required = required_pool_keys(cfg)
-        missing += [k for k in required if not cfg.get(k)]
+        required = required_pool_keys(cfg)
+    missing += [k for k in required if not cfg.get(k)]
     if missing:
         raise ValueError(f"pool config: missing required keys {missing}")
     if "model" in cfg and "machine_type" in cfg:
@@ -1069,8 +946,6 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         _unknown("syncer", cfg["syncer"], SYNCER_KEYS)
     if cfg.get("data_path", "r2") == "syncer":
         syncer_address((cfg.get("syncer") or {}).get("address"))
-    if cfg.get("route", "ssh") not in ("ssh", "sky"):
-        raise ValueError(f"pool config: route {cfg.get('route')!r} is not ssh or sky")
     run_id(cfg)
     lead, margin = (_seconds(cfg, "replace_lead_s", 3600), _seconds(cfg, "end_margin_s", 600))
     price = pool_price(cfg)[0]
@@ -1172,19 +1047,15 @@ def pool_events_path(cfg: dict[str, Any]) -> Path:
 def pool_ops(cfg: dict[str, Any]):
     """The pool ops of a pool config: a registered provider kind's own ``pool_ops``
     (a machine that is not an SSH node, e.g. a Modal FunctionCall), else the SSH +
-    docker route (``route: ssh``) or the sky route."""
+    docker route (:class:`NcSshOps`)."""
     from ..pool import provider as providers  # noqa: PLC0415
 
     kind = providers.kind_of(cfg)
     entry = providers.registered(kind) if kind is not None else None
     if entry is not None and entry.pool_ops is not None:
         return providers.resolve(entry.pool_ops)(cfg)
-    route = cfg.get("route", "ssh")
-    if route == "ssh":
-        return NcSshOps(cfg)
-    if route == "sky":
-        return NcSkyOps(cfg)
-    raise ValueError(f"pool config: route {route!r} is not ssh or sky")
+    removed_route_problem(cfg)
+    return NcSshOps(cfg)
 
 
 def agentic_setup_cmd(args) -> int:
@@ -1240,7 +1111,6 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--yes", action="store_true")
     u.add_argument("--machine-type", "--model", dest="machine_type", default=DEFAULT_MACHINE_TYPE,
                    help="National Compute machine type (--model is its deprecated name)")
-    u.add_argument("--route", choices=("ssh", "sky"), default="ssh")
     pr = sub.add_parser("probe", help="card check, image pull, engine version, spec preflight on a node")
     pr.add_argument("--ticket", required=True)
     pr.add_argument("--spec")
@@ -1291,26 +1161,6 @@ def main(argv: list[str] | None = None) -> int:
     rr.add_argument("--identity-file", help="ssh key of the admin login (default: the operator's own keys)")
     rr.add_argument("--persist-firewall", action="store_true", help="netfilter-persistent save after a change")
     rr.add_argument("--dry-run", action="store_true", help="print the plan; no SSH")
-    a = sub.add_parser("attach", help="sky route: host bootstrap and sky SSH node pool on a node")
-    a.add_argument("--ticket", required=True)
-    h = sub.add_parser("hello", help="sky route: a hello task on the node's pool")
-    h.add_argument("--ticket", required=True)
-    pl = sub.add_parser("pull", help="sky route: rate-limited model pull as a sky task")
-    pl.add_argument("--ticket", required=True)
-    pl.add_argument("--src", required=True)
-    pl.add_argument("--dest", required=True)
-    pl.add_argument("--include")
-    pl.add_argument("--max-mb-s", type=int, default=tasks.MAX_PULL_MB_S)
-    pl.add_argument("--r2-env-file", required=True)
-    sm = sub.add_parser("sampler", help="sky route: engine sampler as a sky task")
-    sm.add_argument("--ticket", required=True)
-    sm.add_argument("--spec", required=True)
-    sm.add_argument("--sampler-id", required=True)
-    sm.add_argument("--shards", default="")
-    sm.add_argument("--run-prefix", required=True)
-    sm.add_argument("--workdir", default=str(Path(__file__).resolve().parents[3]))
-    sm.add_argument("--r2-env-file", required=True)
-    _add_sampler_override_args(sm)
     d = sub.add_parser("down", help="release one node this tool created (by ticket id, confirmed ended)")
     d.add_argument("--account", type=int, required=True)
     d.add_argument("--ticket", required=True)
@@ -1435,8 +1285,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "up":
         if not args.yes:
             raise SystemExit("up orders a billed node: pass --yes")
-        lease = up(args.account, model=args.machine_type, route=args.route)
-        print(json.dumps({"ticket": lease.ticket, "pool": node_pool.pool_name(lease.ticket),
+        lease = up(args.account, model=args.machine_type)
+        print(json.dumps({"ticket": lease.ticket, "alias": node_pool.host_alias(lease.ticket),
                           "lease_until": lease.lease_until}))
         print(f"WARNING: National Compute does NOT end this lease at lease_until ({lease.lease_until}): the node "
               f"stays active and billed until it is deleted: python -m yeto.launch.nc down --account "
@@ -1494,27 +1344,6 @@ def main(argv: list[str] | None = None) -> int:
         return records_relay.main_cmd(args.spec, shards=args.shards, label=args.label, ssh_target=args.ssh_target,
                                       identity_file=args.identity_file, dry_run=args.dry_run,
                                       persist_firewall=args.persist_firewall)
-    if args.cmd == "attach":
-        print(attach(load_lease(args.ticket)))
-        return 0
-    if args.cmd == "hello":
-        pool = node_pool.pool_name(args.ticket)
-        return launch(tasks.hello_task(pool), cluster_name("hello", args.ticket), down=True)
-    if args.cmd == "pull":
-        pool = node_pool.pool_name(args.ticket)
-        doc = tasks.with_secrets(tasks.model_pull_task(pool, src=args.src, dest=args.dest, include=args.include,
-                                                       max_mb_s=args.max_mb_s), args.r2_env_file)
-        return launch(doc, cluster_name("pull", args.ticket), down=True)
-    if args.cmd == "sampler":
-        pool = node_pool.pool_name(args.ticket)
-        spec_path = tunnel.state_dir() / f"spec-{args.sampler_id}.json"
-        shards = [s for s in args.shards.split(",") if s]
-        tasks.write_spec(tasks.apply_sampler_overrides(
-            tasks.sampler_spec(json.loads(Path(args.spec).read_text()), sampler_id=args.sampler_id, shards=shards),
-            **_arg_overrides(args)), spec_path)
-        doc = tasks.with_secrets(tasks.sampler_task(pool, spec_path=str(spec_path), run_prefix=args.run_prefix,
-                                                    workdir=args.workdir), args.r2_env_file)
-        return launch(doc, cluster_name("sampler", args.ticket), down=False)
     if args.cmd == "adopt":
         if not args.yes:
             print(f"adopt records ticket {args.ticket} (account {args.account}) as this tool's own, to be released "

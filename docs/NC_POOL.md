@@ -160,10 +160,10 @@ error, never silently ignored.
 | `protected_accounts` | Extra NC accounts `delete-ticket` refuses to delete on. Accounts 2 and 3 (production) are always protected. | `[]` (+ 2, 3) |
 | `machine_type` | NC machine type to order. This is **not** a Hugging Face model; the served model is set in the sampler spec. A value containing `/` is refused. | `mi355x` |
 | `model` | Deprecated name of `machine_type`. It still works but prints a deprecation note; it cannot be set together with `machine_type`. | none |
-| `route` | `ssh`: SSH + docker on the node (the verified route). `sky`: SkyPilot SSH node pool (refused on nodes with the provider's health k3s). | `ssh` |
-| `spec` | Sampler spec file. `__RUN_PREFIX__` in it is replaced by `run_prefix`. | required (ssh) |
-| `run_prefix` | The run's path under `s3://<bucket>/runs/`. | required (ssh) |
-| `r2_env_file` | Store env file (mode `0600`), see above. | required (ssh) |
+| `route` | `ssh`: SSH + docker on the node, the only route. The former `sky` route (a SkyPilot SSH node pool with k3s on the node) was removed: it broke the provider's health k3s on NC nodes. A config with `route: sky` (or its keys `model_src`, `model_dest`, `workdir`) is refused with the way out: drop them, set `spec`, `run_prefix`, `r2_env_file`, and pull the model with `model_pull`. | `ssh` |
+| `spec` | Sampler spec file. `__RUN_PREFIX__` in it is replaced by `run_prefix`. | required |
+| `run_prefix` | The run's path under `s3://<bucket>/runs/`. | required |
+| `r2_env_file` | Store env file (mode `0600`), see above. | required |
 | `bucket_env` | Name of the bucket variable in the store env file. | `R2_BUCKET` |
 | `image` | Sampler container image. | the pinned digest of the K3.1 ROCm vLLM image (`yeto.rl.sampler_pins.VLLM_SAMPLER_IMAGE_ROCM`) |
 | `protected_prefixes` | Run prefixes the sampler must never write to (for example, another live run's prefix in the same bucket). | `[]` |
@@ -181,7 +181,6 @@ error, never silently ignored.
 | `event_command` | Shell command that gets each pool event as JSON on stdin (a pager, a chat hook). A failure is logged and never stops the pool. | none |
 | `probe_timeout_s`, `probe_connect_timeout_s` | Time limits of the per-tick SSH probe of each node. | `90`, `20` |
 | `provider` | `{"kind": "nc", "manage": ..., "query": ..., "tool_dir": ..., "node_bin": ...}` overrides the NC tools. `{"factory": "package.module:function"}` plugs in another supply of nodes. | `{"kind": "nc"}` |
-| `model_src`, `model_dest`, `workdir` | Model pull and work directory of the `sky` route. | none |
 | `comment` | Free text, ignored. | none |
 
 ### `sampler`
