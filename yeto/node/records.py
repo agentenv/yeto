@@ -29,7 +29,10 @@ its assignment (spec, code hash, model plan). It keeps a node from starting on
 another ticket's assignment by mistake and keeps the token itself out of the
 store (only its salted sha256 is there). Store credentials are the security
 boundary. A token can carry a deadline (``expires_at``): an expired assignment
-is refused at read.
+is refused at read. A hand-opened machine's token has one by default; the token
+of a pool-ordered machine has none (the transport hands it over at the start and
+the runtime reads it then; a later start writes a new assignment and token).
+The runtime keeps the token out of the sampler's environment.
 """
 
 from __future__ import annotations
@@ -198,12 +201,39 @@ def assign(objects: Any, *, ticket: str, shard: str, spec: Mapping[str, Any], co
     if spec.get("sampler_id") not in (None, shard):
         raise ValueError(f"spec sampler_id {spec.get('sampler_id')!r} is not the shard {shard!r}")
     token = token or new_token()
-    previous = _read_json(objects, assignment_key(ticket)) or {}
-    generation = int(previous.get("generation") or 0) + 1 if not previous.get("torn") else 1
+    generation = next_generation(objects, ticket)
     assignment = Assignment(ticket=ticket, shard=shard, spec=dict(spec), code=code, token_sha256=token_digest(token),
                             generation=generation, created_at=float(clock()), **fields_)
     write_assignment(objects, assignment)
     return assignment, token
+
+
+def _listed_generation(objects: Any, ticket: str) -> int | None:
+    """The highest ``g<N>`` under ``nodes/<ticket>/`` (0: none); None when the store cannot list."""
+    lister = getattr(objects, "list", None)
+    if lister is None:
+        return None
+    prefix = f"{NODES_DIR}/{_safe(ticket, 'ticket')}/g"
+    found = 0
+    for key in lister(prefix):  # a listing failure raises: no guess at the generation
+        head = str(key)[len(prefix):].split("/", 1)[0]
+        if head.isdigit():
+            found = max(found, int(head))
+    return found
+
+
+def next_generation(objects: Any, ticket: str) -> int:
+    """One past every generation the ticket has had: the assignment's (a revoked one keeps
+    its tombstone) and every ``nodes/<ticket>/g<N>`` a node wrote. A read failure raises
+    and an unreadable assignment is refused: a generation that went back would let an
+    old node's records pass for the new assignment's."""
+    previous = _read_json(objects, assignment_key(ticket))  # a store error raises here
+    listed = _listed_generation(objects, ticket)
+    if previous is not None and previous.get("torn"):  # a node of the lost generation may still be booting
+        raise AssignmentError(f"the assignment of ticket {ticket} is not readable JSON: its generation is "
+                              "unknown, not reassigned (revoke_assignment writes a tombstone past every "
+                              "generation its node records show; then assign again)")
+    return max(int((previous or {}).get("generation") or 0), listed or 0) + 1
 
 
 def read_assignment(objects: Any, key: str, token: str, *, clock: Any = time.time) -> Assignment:
@@ -217,6 +247,8 @@ def read_assignment(objects: Any, key: str, token: str, *, clock: Any = time.tim
         raise AssignmentError(f"no assignment for ticket {ticket} in the store")
     if doc.get("torn"):
         raise AssignmentError(f"the assignment of ticket {ticket} is not readable JSON")
+    if doc.get("revoked"):
+        raise AssignmentError(f"the assignment of ticket {ticket} was revoked")
     if not token or not secrets.compare_digest(str(doc.get("token_sha256") or ""), token_digest(token)):
         raise AssignmentError(f"the token is not the token of ticket {ticket}")
     if doc.get("ticket") != ticket:  # a document copied under another ticket's key
@@ -227,7 +259,13 @@ def read_assignment(objects: Any, key: str, token: str, *, clock: Any = time.tim
 
 
 def revoke_assignment(objects: Any, ticket: str) -> None:
-    objects.delete(assignment_key(ticket))
+    """Replace the assignment with a tombstone that keeps its generation (a later
+    assignment of the ticket continues from it; a node can no longer read it)."""
+    doc = _read_json(objects, assignment_key(ticket))
+    listed = _listed_generation(objects, ticket) or 0
+    known = 0 if doc is None or doc.get("torn") else int(doc.get("generation") or 0)
+    generation = max(known, listed) + (1 if doc is not None and doc.get("torn") else 0)  # past a torn one
+    _write_json(objects, assignment_key(ticket), {"ticket": ticket, "revoked": True, "generation": generation})
 
 
 # -- node records --------------------------------------------------------------------
@@ -309,7 +347,7 @@ def node_status(objects: Any, ticket: str, *, now: float | None = None, stale_s:
     (default: read from it, the highest generation written); only its records count."""
     if generation is None:
         assignment = _read_json(objects, assignment_key(ticket))
-        if assignment is None or assignment.get("torn"):
+        if assignment is None or assignment.get("torn") or assignment.get("revoked"):
             return NodeStatus(ticket, "unassigned")
         generation = int(assignment.get("generation") or 1)
     now = time.time() if now is None else float(now)

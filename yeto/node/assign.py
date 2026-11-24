@@ -24,7 +24,7 @@ from typing import Any
 from yeto.launch.node_inventory import NodeProfile
 
 from .profile import profile_doc
-from .records import Assignment, CodeRef, ModelPlan, assign, clear_node_records
+from .records import Assignment, CodeRef, ModelPlan, assign
 
 MANUAL_PREFIX = "manual"
 
@@ -47,7 +47,7 @@ def assign_member(objects: Any, cfg: Mapping[str, Any], member: Any, shards: Seq
                   token: str | None = None, **extra: Any) -> tuple[Assignment, str]:
     """Write the assignment of pool member ``member`` and return it with its token.
     ``spec``: the rendered spec (default: the pool's ``render_spec`` of the member);
-    the node records of the assignment it replaces are removed (each generation has its own)."""
+    every generation keeps its own node records (the next generation is past all of them)."""
     if spec is None:
         if render is None:
             from yeto.launch.nc.cli import render_spec as render  # noqa: PLC0415
@@ -59,8 +59,6 @@ def assign_member(objects: Any, cfg: Mapping[str, Any], member: Any, shards: Seq
                                continues_shard=getattr(member, "replaces_shard", None),
                                data_slot=getattr(member, "data_slot", None), model=model_plan(cfg, profile),
                                profile=profile_doc(profile), store_uri=store_uri, **extra)
-    if assignment.generation > 1:
-        clear_node_records(objects, member.ticket, assignment.generation - 1)
     return assignment, token
 
 

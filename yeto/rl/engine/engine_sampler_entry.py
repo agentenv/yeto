@@ -1280,11 +1280,13 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         install_marker_signals(env)
     buffer.refresh()
     member_store = data_path.member_store
-    from yeto.node import report as node_report  # noqa: PLC0415
-
     # nodes/<ticket>/g<generation>/{ready,heartbeat,exit} in the store: only a start that names its ticket
-    # (YETO_NODE_TICKET, the node runtime) writes them; every other start writes nothing new
-    node = node_report.from_env(env, member_store, spec)
+    # (YETO_NODE_TICKET, the node runtime) writes them (and imports yeto.node); every other start is unchanged
+    node = None
+    if str(env.get("YETO_NODE_TICKET") or "").strip():
+        from yeto.node import report as node_report  # noqa: PLC0415
+
+        node = node_report.from_env(env, member_store, spec)
     node_exit: list[Any] = [None, None]  # exit code, reason of an unsupervised start
     from .sampler_breakers import spec_breakers  # noqa: PLC0415
 

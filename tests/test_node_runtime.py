@@ -210,3 +210,35 @@ def test_python_m_yeto_node_has_a_run_command():
     out = subprocess.run([sys.executable, "-m", "yeto.node", "run", "--help"], capture_output=True, text=True,
                          check=True, cwd=REPO)
     assert "--assignment" in out.stdout and "--store" in out.stdout
+
+
+def test_the_token_stays_out_of_the_samplers_environment(tmp_path, code_tar):
+    objects, code, profile, spec = _setup(tmp_path, code_tar)
+    assignment, token = records.assign(objects, ticket="t-tok", shard="s0", spec=spec, code=code)
+    seen = {}
+
+    class Child:
+        def __init__(self, argv, env, **kw):
+            seen.update(env)
+
+        def wait(self):
+            return 0
+
+    rt = NodeRuntime(objects, assignment, profile, store_uri=None, skip_preflight=True, popen=Child,
+                     environ={"YETO_NODE_TOKEN": token, "PATH": "/usr/bin"})
+    assert rt.main() == 0
+    assert "YETO_NODE_TOKEN" not in seen and seen["PATH"] == "/usr/bin"
+
+
+def test_a_stop_during_the_boot_writes_the_exit_record(tmp_path, code_tar):
+    import os
+    import signal
+
+    objects, code, profile, spec = _setup(tmp_path, code_tar)
+    assignment, _ = records.assign(objects, ticket="t-stop", shard="s0", spec=spec, code=code)
+    rt = NodeRuntime(objects, assignment, profile, store_uri=None, skip_preflight=True)
+    rt.model = lambda: os.kill(os.getpid(), signal.SIGTERM) or {}  # SIGTERM while the model is prepared
+    assert rt.main() == 128 + signal.SIGTERM
+    status = records.node_status(objects, "t-stop")
+    assert status.state == "exited" and status.reason == "stopped"
+    assert signal.getsignal(signal.SIGTERM) is not None  # the handler before main is back

@@ -57,6 +57,12 @@ EXIT_IMAGE = 8
 EXIT_REASONS = {0: "finished", 3: "not_run", 2: "spec_rejected", 75: "reclaimed"}
 
 
+class _Stopped(BaseException):  # SIGTERM / SIGINT during the boot (not caught by an except Exception)
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
 class BootError(RuntimeError):
     def __init__(self, stage: str, code: int, message: str):
         super().__init__(message)
@@ -218,6 +224,7 @@ class NodeRuntime:
     def start(self, plan: Plan) -> int:
         child_env = {**self.environ, **self.secrets, **plan.env} if not is_container(self.profile) \
             else dict(self.environ)
+        child_env.pop(TOKEN_ENV, None)  # the ticket's token stays with the runtime
         log = Path(plan.log_host_path)
         log.parent.mkdir(parents=True, exist_ok=True)
         self._stage("starting", argv0=plan.argv[0], image=plan.image)
@@ -251,8 +258,22 @@ class NodeRuntime:
                               "generation": self.assignment.generation, "profile": self.profile.summary(),
                               **plan.record()}, indent=1, sort_keys=True))
             return 0
+        handlers = {}
+
+        def stopped(signum: int, _frame: Any) -> None:
+            raise _Stopped(signum)
+
+        for sig in (signal.SIGTERM, signal.SIGINT):  # a stop during the boot: an exit record, then out
+            try:
+                handlers[sig] = signal.signal(sig, stopped)
+            except ValueError:  # not the main thread (tests)
+                pass
         try:
             plan = self.boot()
+        except _Stopped as stop:
+            self.log(f"{self.assignment.ticket}: stopped during the boot (signal {stop.signum})")
+            self.reporter.exit(128 + stop.signum, "stopped", detail="signal during the boot")
+            return 128 + stop.signum
         except BootError as error:
             self.log(f"{self.assignment.ticket}: {error.stage} refused: {error}")
             self.reporter.exit(error.code, error.stage, detail=str(error)[:2000])
@@ -260,6 +281,9 @@ class NodeRuntime:
         except Exception as error:  # noqa: BLE001 - written to the store, then raised
             self.reporter.exit(1, "boot", detail=f"{type(error).__name__}: {error}"[:2000])
             raise
+        finally:
+            for sig, old in handlers.items():
+                signal.signal(sig, old)
         code = self.start(plan)
         self.log(f"{self.assignment.ticket}: sampler exit {code}")
         self.reporter.exit(code, self.exit_reason(code))

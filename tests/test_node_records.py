@@ -70,7 +70,7 @@ def test_an_older_generation_never_overwrites_the_newer_ones_records(tmp_path):
     assignment, _ = assign_member(objects, {"run_prefix": "r"}, type("M", (), {"ticket": "t", "shard": "s"})(),
                                   ["s"], _profile(tmp_path), code, spec={"sampler_id": "s"})
     assert assignment.generation == 2
-    assert objects.read(records.node_key("t", "ready", 1)) is None  # the replaced generation's records: removed
+    assert objects.read(records.node_key("t", "ready", 1)) is not None  # each generation keeps its own
     new = NodeReporter(objects, "t", 2, clock=lambda: 1000.0)
     new.ready(shard="s")
     new.heartbeat("running", engine={"running": 2})
@@ -80,6 +80,41 @@ def test_an_older_generation_never_overwrites_the_newer_ones_records(tmp_path):
     assert status.state == "ready" and status.generation == 2 and status.engine["running"] == 2
     assert node_status(objects, "t", now=1010.0, generation=1).state == "exited"
     assert records.node_key("t", "heartbeat", 2) == "nodes/t/g2/heartbeat.json"
+
+
+class _ReadFails(DirectoryObjectStore):
+    def read(self, key):
+        if key.startswith(records.ASSIGNMENTS_DIR):
+            raise OSError("store outage")
+        return super().read(key)
+
+
+def test_a_generation_never_goes_back(tmp_path):
+    """gen1 -> gen2 -> the old gen1 node writes its exit -> the assignment does not read:
+    no new gen1 (a healthy node would be read as exited); a lost assignment continues past
+    every generation its node records show; a revoked one keeps its generation."""
+    objects = DirectoryObjectStore(tmp_path)
+    code = records.CodeRef("abc", "node-code/abc.tar", "0" * 64)
+    records.assign(objects, ticket="t", shard="s", spec={}, code=code)
+    records.assign(objects, ticket="t", shard="s", spec={}, code=code)
+    NodeReporter(objects, "t", 1).exit(1, "error")
+    NodeReporter(objects, "t", 2).ready(shard="s")
+    with pytest.raises(OSError, match="outage"):
+        records.assign(_ReadFails(tmp_path), ticket="t", shard="s", spec={}, code=code)
+    objects.write(records.assignment_key("t"), b"{not json")
+    with pytest.raises(records.AssignmentError, match="not reassigned"):
+        records.assign(objects, ticket="t", shard="s", spec={}, code=code)
+    assert node_status(objects, "t").state == "unassigned"
+    records.revoke_assignment(objects, "t")  # the torn one: a tombstone past g2 (its node may still boot)
+    assert json.loads(objects.read(records.assignment_key("t")))["generation"] == 3
+    again, token = records.assign(objects, ticket="t", shard="s", spec={}, code=code)
+    assert again.generation == 4
+    records.revoke_assignment(objects, "t")
+    with pytest.raises(records.AssignmentError, match="revoked"):
+        records.read_assignment(objects, "t", token)
+    assert node_status(objects, "t").state == "unassigned"
+    objects.delete(records.assignment_key("t"))  # lost out of band: the node records still count
+    assert records.assign(objects, ticket="t", shard="s", spec={}, code=code)[0].generation == 3
 
 
 def test_the_token_is_bound_to_its_ticket_and_its_deadline(tmp_path):
