@@ -207,3 +207,115 @@ def test_sampler_islands_first_trainers_after_number_sub_stores_by_learner_id():
     assert s0.rl_resume_store == f"{MOUNT}/trainer0" and s1.rl_resume_store == f"{MOUNT}/trainer1"
     assert [r["sample_substore"] for r in (r0, r1, r2, r3)] == ["trainer0", "trainer1", "trainer0", "trainer1"]
     assert "buffer_shards" not in r2  # its sampler island writes the index itself
+
+
+# ------------------------------------------------ per-island limits share one session
+def _age_base(age):
+    return tuple(str(age) if TRAINERS[i - 1] == "--rl-max-policy-age" else a
+                 for i, a in enumerate(TRAINERS))
+
+
+def _identity(**args):
+    return island_entry._backend_identity_sha256(SimpleNamespace(rl_engine="ports", **args))
+
+
+def _identities(args):
+    """[(parsed island args, the backend identity its session contract binds)]."""
+    _plan, islands = _islands(args)
+    return [(trainer, island_entry._backend_identity_sha256(trainer)) for _request, trainer in islands]
+
+
+def _session(identity):
+    from yeto.rl.engine.backend_identity import session_contract_hash
+
+    return session_contract_hash(bytes(32), identity)
+
+
+def _commands(args):
+    plan, _ = _islands(args)
+    return [f"{i['learner_command']} " for i in plan["island_requests"]]
+
+
+def test_trainers_that_differ_only_in_policy_age_share_one_session_contract():
+    """--rl-island-max-policy-age 0:2 / 1:4 made the syncer refuse island 1's HELLO
+    (Modal smoke; here 0:1 / 1:2 under the spec's staleness 2):
+    each island bound its own limit. Each trainer now binds the launch-wide limit;
+    its own limit still gates its own buffer."""
+    args = _prepared(*SHARDS, "--rl-island-max-policy-age", "0:1", "--rl-island-max-policy-age", "1:2")
+    (t0, id0), (t1, id1) = _identities(args)
+    assert (t0.rl_max_policy_age, t1.rl_max_policy_age) == (1, 2)
+    assert t0.rl_contract_max_policy_age == t1.rl_contract_max_policy_age == 2
+    assert all(" --rl-contract-max-policy-age 2 " in c for c in _commands(args))
+    assert id0 == id1 == _identity(rl_max_policy_age=2)
+    assert _session(id0) == _session(id1)
+    # the bug: binding each island's own limit gives two session contracts
+    assert _session(_identity(rl_max_policy_age=1)) != _session(_identity(rl_max_policy_age=2))
+
+
+def test_an_island_without_its_own_limit_binds_the_launch_limit_too():
+    args = _prepared(*SHARDS, "--rl-island-max-policy-age", "1:2", base=_age_base(1))
+    (t0, id0), (t1, id1) = _identities(args)
+    assert (t0.rl_max_policy_age, t1.rl_max_policy_age) == (1, 2)
+    assert all(" --rl-contract-max-policy-age 1 " in c for c in _commands(args))
+    assert id0 == id1 == _identity(rl_max_policy_age=1)
+
+
+def test_release_every_alone_never_enters_the_contract():
+    args = _prepared(*SHARDS, "--rl-island-release-every", "0:1", "--rl-island-release-every", "1:2")
+    assert all("--rl-contract-max-policy-age" not in c for c in _commands(args))
+    (t0, id0), (t1, id1) = _identities(args)
+    assert t0.rl_contract_max_policy_age is None and t1.rl_contract_max_policy_age is None
+    assert sample_roles.resolve(t1, groups_per_round=4).release_every == 2
+    assert id0 == id1 == _identity(rl_max_policy_age=2)  # the binding of before, byte for byte
+
+
+def test_without_island_limits_the_bound_identity_is_unchanged():
+    from yeto.rl.adapters.miles.identity import backend_identity
+    from yeto.rl.engine.policy_age import bind_policy_age
+
+    args = _prepared(*SHARDS)
+    assert all("--rl-contract-max-policy-age" not in c for c in _commands(args))
+    for trainer, identity in _identities(args):
+        assert trainer.rl_contract_max_policy_age is None
+        assert identity == bind_policy_age(backend_identity().contract_sha256(), 2)
+
+
+def test_a_negative_test_override_of_the_launch_limit_is_still_refused():
+    """--rl-island-override K:rl_max_policy_age (a negative-test run) changes that
+    island's launch-wide limit: its contract limit differs, the syncer refuses it."""
+    args = _prepared(*SHARDS, "--rl-island-max-policy-age", "0:1", "--rl-negative-test-run",
+                     "--rl-island-override", "1:rl_max_policy_age=1")
+    (t0, id0), (t1, id1) = _identities(args)
+    assert (t0.rl_contract_max_policy_age, t1.rl_contract_max_policy_age) == (2, 1)
+    assert _session(id0) != _session(id1)
+
+
+def test_the_training_contract_leaves_out_the_limit_derived_miles_flags_with_island_limits():
+    """The dense full-parameter training contract (inside the role-stream session
+    contract) hashes the shared Miles argv. An agentic trainer's argv carries its own
+    limit (``policy_age_argv``); with per-island limits those flags leave the
+    contract (the launch-wide limit in the bound identity stands for them), and
+    only then."""
+    from yeto.rl.adapters.miles.policy_age import (POLICY_AGE_MILES_FLAGS, POLICY_AGE_MILES_SWITCHES,
+                                                   policy_age_argv)
+
+    for limit in (1, 4):
+        for kw in ({}, {"agentic": True}, {"overlap": True}):
+            assert ({t for t in policy_age_argv(limit, **kw) if t.startswith("--")}
+                    <= POLICY_AGE_MILES_FLAGS | POLICY_AGE_MILES_SWITCHES)
+    base = ["--rollout-batch-size", "8", "--advantage-estimator", "grpo"]
+
+    def contract(age, contract_age=None):
+        args = SimpleNamespace(rl_engine="ports", rl_max_policy_age=age,
+                               rl_contract_max_policy_age=contract_age, seed=1, model="m",
+                               model_revision="A" * 40, source_sha256="b" * 64, reward_sha256="c" * 64)
+        argv = base + list(policy_age_argv(age, agentic=True))
+        return island_entry._dense_full_training_contract_sha256(args, argv, model_config_sha256="d" * 64)
+
+    assert contract(2, 4) == contract(4, 4)  # per-island limits: one contract
+    assert contract(2) != contract(4)  # one limit per launch: a different limit is still refused
+    assert contract(4) != contract(4, 4)
+    shared = island_entry._dense_shared_miles_argv
+    argv = base + list(policy_age_argv(3, agentic=True))
+    assert shared(argv) == argv
+    assert shared(argv, island_policy_age=True) == base

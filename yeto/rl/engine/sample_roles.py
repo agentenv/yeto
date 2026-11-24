@@ -522,16 +522,30 @@ def island_trainer_overrides(args: Any, num_islands: int) -> dict[int, dict[str,
     return out
 
 
+def _bind_launch_policy_age(out: Any, args: Any) -> None:
+    """Per-island limits (``--rl-island-max-policy-age``): the trainer ``out`` binds
+    the launch-wide limit into its syncer session contract instead of its own
+    (``--rl-contract-max-policy-age``, ``policy_age.bind_policy_age``). Its own limit
+    gates only its own lane, counted in its local versions, and the shared algorithm
+    spec bounds every island's limit (launch preflight), so trainers with different
+    limits merge. Without the flag nothing changes."""
+    if getattr(args, "rl_island_max_policy_age", None):
+        out.rl_contract_max_policy_age = int(getattr(args, "rl_max_policy_age", 0) or 0)
+
+
 def external_pool_island_args(args: Any, island: int, num_islands: int) -> Any:
     """Island args of a synced trainer fed by external pools (module doc): a copy
     with its sub-store ``trainer<k>`` (k: its learner id, which is its island index:
     every island is a trainer), its own lane (the launcher forwards
     ``--rl-sample-lanes 1``), the buffer shards of its pools, and its own release
-    cadence and policy-age limit when the launch gives them."""
+    cadence and policy-age limit when the launch gives them. With per-island
+    limits every trainer also carries the launch-wide limit as the one its session
+    contract binds (``--rl-contract-max-policy-age``)."""
     out = copy.copy(args)
     out.rl_synced_trainers = int(num_islands)
     out.rl_sample_substore = trainer_substore(island)
     out.rl_buffer_shards = island_buffer_shards(args, num_islands).get(island)
+    _bind_launch_policy_age(out, args)
     for name, value in island_trainer_overrides(args, num_islands).get(island, {}).items():
         setattr(out, name, value)
     return out
@@ -835,6 +849,7 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
         # one of its node name); the trainer's own release cadence and policy-age limit
         out.rl_buffer_shards = mixed_trainer_shards(args, trainer, num_islands)
         if out.rl_sample_role == TRAINER:
+            _bind_launch_policy_age(out, args)
             for name, value in island_trainer_overrides(args, num_islands).get(learners[island], {}).items():
                 setattr(out, name, value)
         for dest in _MIXED_LAUNCH_DESTS:

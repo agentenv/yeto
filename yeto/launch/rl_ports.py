@@ -744,6 +744,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-boot-only"
     if getattr(args, "rl_max_policy_age", 0):  # 0 (default) adds nothing
         flags += f" --rl-max-policy-age {int(args.rl_max_policy_age)}"
+    if getattr(args, "rl_contract_max_policy_age", None) is not None:  # per-island ages only
+        flags += f" --rl-contract-max-policy-age {int(args.rl_contract_max_policy_age)}"
     if getattr(args, "rl_async_buffer_rounds", None) is not None:  # None adds nothing
         flags += f" --rl-async-buffer-rounds {int(args.rl_async_buffer_rounds)}"
     if getattr(args, "rl_rollout_ahead", 0):  # 0 (default) adds nothing
