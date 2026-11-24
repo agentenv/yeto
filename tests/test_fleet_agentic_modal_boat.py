@@ -440,7 +440,8 @@ def test_the_agentic_app_image_carries_pinned_harbor_and_every_secret(tmp_path, 
     assert fake.functions[0]["volumes"] == {"/mnt/yeto-models": "volume:models"}
     install = next(c for c in fake.commands if "pip install" in c)
     assert HARBOR_COMMIT in install and su.BOAT_SDK_REQUIREMENT in install and mp.HARBOR_SITE in install
-    assert "e2b" not in install and any("YETO_SETUP_PRUNED" in c for c in fake.commands)
+    assert "e2b" not in install and len(fake.commands) == 3
+    assert all("\n" not in c for c in fake.commands), "each command is one Dockerfile RUN line"
     fake2 = _FakeModal()
     monkeypatch.setattr(modal_images, "engine_registry_image", lambda modal, ref: fake2.image)
     mp.ModalSdkClient({"image": "i", "secret": "store"}, run_id="r", modal=fake2).build_app()
@@ -465,3 +466,19 @@ def test_the_dry_run_names_what_an_agentic_modal_pool_lacks(tmp_path):
     plain = _modal_pool(tmp_path)
     plain["spec"] = None
     assert mp.agentic_problems(plain, plain["provider"]) == []
+
+
+def test_the_harbor_layer_prune_command_runs_as_one_shell_line(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    site = tmp_path / "site"
+    (site / "empty_pkg").mkdir(parents=True)
+    monkeypatch.setattr(mp, "HARBOR_SITE", str(site))
+    fake = _FakeModal()
+    mp.agentic_harbor_layer(fake.image, python=sys.executable, provider="boat")
+    prune = fake.commands[-1]
+    assert "\n" not in prune
+    out = subprocess.run(["sh", "-c", prune], capture_output=True, text=True, check=True).stdout
+    assert out.strip() == "YETO_SETUP_PRUNED"
+    assert not (site / "empty_pkg").exists(), "the prune script itself ran (it removes empty package dirs)"

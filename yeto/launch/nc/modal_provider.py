@@ -172,18 +172,24 @@ def agentic_harbor_layer(image: Any, *, python: str, provider: str | None) -> An
     """``image`` (a ``modal.Image``) with Harbor and the provider's SDK in :data:`HARBOR_SITE`
     (module doc): the NC route's install (``agentic_setup.Provisioner.harbor``) at image
     build time, pinned to the same commit and SDK versions."""
+    import base64  # noqa: PLC0415
     import shlex  # noqa: PLC0415
 
     from yeto.launch import agentic_setup as su  # noqa: PLC0415
     from yeto.rl.harness.harbor.pins import HARBOR_COMMIT, HARBOR_REPO  # noqa: PLC0415
 
-    req = f"harbor @ git+{HARBOR_REPO}@{HARBOR_COMMIT}"
-    dash = f"server-dashboard @ git+{HARBOR_REPO}@{HARBOR_COMMIT}#subdirectory=server-dashboard"
+    # the commit's source archive, not git+: the engine images have no git (pip would need it to clone)
+    archive = f"{HARBOR_REPO}/archive/{HARBOR_COMMIT}.tar.gz"
+    req = f"harbor @ {archive}"
+    dash = f"server-dashboard @ {archive}#subdirectory=server-dashboard"
     sdk = {"boat": su.BOAT_SDK_REQUIREMENT, "agentenv": su.E2B_REQUIREMENT}.get(str(provider))
     py, site = shlex.quote(python), shlex.quote(HARBOR_SITE)
     install = (f"{py} -m pip install --quiet --disable-pip-version-check --target {site} {shlex.quote(req)} "
                f"{shlex.quote(dash)}" + (f" {shlex.quote(sdk)}" if sdk else ""))
-    prune = f"PYTHONPATH= {py} -c {shlex.quote(su.HARBOR_PRUNE)} {site} {shlex.quote(','.join(su.HARBOR_KEEP))}"
+    # each command becomes one Dockerfile RUN line: the multi-line prune script travels base64-encoded
+    script = base64.b64encode(su.HARBOR_PRUNE.encode()).decode()
+    runner = f"import base64; exec(base64.b64decode('{script}').decode())"
+    prune = f"PYTHONPATH= {py} -c {shlex.quote(runner)} {site} {shlex.quote(','.join(su.HARBOR_KEEP))}"
     return image.run_commands(f"mkdir -p {site}", install, prune)
 
 
