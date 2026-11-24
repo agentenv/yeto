@@ -462,19 +462,26 @@ def add_cli_args(p) -> None:
                    "version; each trainer and its samplers share a sub-directory "
                    "trainer<k> of --rl-checkpoint-store (sample_roles module doc). With "
                    "--rl-island-buffer-shards and no sampler island, the samplers are external "
-                   "pools bound to trainer k through trainer<k>")
+                   "pools bound to trainer k through trainer<k>; with both, a trainer reads its "
+                   "sampler islands and its pools")
     g.add_argument("--rl-island-buffer-shards", action="append", default=None, metavar="K:A,B",
                    help="synced trainers fed by external sampler pools (--rl-sample-role trainer, "
-                   "a syncer, --rl-sampler-follow trainer, no --rl-island-sample-role): the buffer "
-                   "shards the pools bound to trainer island K write in trainer<K>/ of "
-                   "--rl-checkpoint-store; repeatable, one entry per trainer island, every island "
-                   "named; trainer K reads exactly these shards (--rl-buffer-shards)")
+                   "a syncer, --rl-sampler-follow trainer): the buffer shards the pools bound to "
+                   "the trainer with learner id K write in trainer<K>/ of --rl-checkpoint-store; "
+                   "repeatable. Without --rl-island-sample-role every island is a trainer (K: its "
+                   "island index), every island named, and trainer K reads exactly these shards "
+                   "(--rl-buffer-shards). With sampler islands (--rl-island-sample-role M:sampler) "
+                   "trainer K also reads the shards of the sampler islands bound to it")
+    g.add_argument("--rl-island-sampler-follows", action="append", default=None, metavar="M:K",
+                   help="with --rl-island-sample-role M:sampler and --rl-island-buffer-shards: "
+                   "sampler island M feeds the trainer with learner id K only (default: sampler "
+                   "j feeds trainer j %% K); repeatable, every sampler island named once")
     g.add_argument("--rl-island-release-every", action="append", default=None, metavar="K:N",
-                   help="with --rl-island-buffer-shards: trainer island K releases every N-th local "
-                   "version (its own --rl-release-every); repeatable")
+                   help="with --rl-island-buffer-shards: the trainer with learner id K releases every "
+                   "N-th local version (its own --rl-release-every); repeatable")
     g.add_argument("--rl-island-max-policy-age", action="append", default=None, metavar="K:N",
-                   help="with --rl-island-buffer-shards: trainer island K's own --rl-max-policy-age "
-                   "(at least its release cadence); repeatable")
+                   help="with --rl-island-buffer-shards: the trainer with learner id K's own "
+                   "--rl-max-policy-age (at least its release cadence); repeatable")
     g.add_argument("--rl-sampler-spot", action="store_true",
                    help="with --rl-island-sample-role: the sampler islands use spot (preemptible) "
                    "capacity, the trainer island stays on demand; a reclaimed sampler island is "

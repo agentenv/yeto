@@ -113,19 +113,29 @@ def _base(run_config: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in run_config.items() if k not in ("islands", "fleet", "trainer", "pool", "samplers")}
 
 
+def is_miles_sampler(entry: Any) -> bool:
+    """Whether an island's samplers entry is a Miles sampler island of the fleet's launch
+    (``"kind": "miles"``, ``yeto.rl.fleet``): no pool, no pool breakers; it bills with
+    its island (:func:`island_price`)."""
+    return isinstance(entry, Mapping) and entry.get("kind") == "miles"
+
+
 def _island_samplers(run_config: Mapping[str, Any], index: int) -> list[dict[str, Any]]:
     entry = _entries(run_config)[index]
     out = []
     for i, pool in enumerate(entry.get("samplers") or ()):
-        if isinstance(pool, Mapping):
+        if isinstance(pool, Mapping) and not is_miles_sampler(pool):
             out.append({**pool, "name": pool_name(index, pool, i)})
     return out
 
 
 def island_price(run_config: Mapping[str, Any], index: int) -> float:
-    """Island ``index``'s trainer ``usd_per_h`` (0 when unset or null)."""
-    trainer = _entries(run_config)[index].get("trainer")
-    return _price(trainer.get("usd_per_h") if isinstance(trainer, Mapping) else None)
+    """Island ``index``'s ``usd_per_h`` in the launch: its trainer's plus its Miles samplers'
+    (0 when unset or null)."""
+    entry = _entries(run_config)[index]
+    trainer = entry.get("trainer")
+    miles = sum(_price(s.get("usd_per_h")) for s in entry.get("samplers") or () if is_miles_sampler(s))
+    return _price(trainer.get("usd_per_h") if isinstance(trainer, Mapping) else None) + miles
 
 
 def island_prices(run_config: Mapping[str, Any]) -> tuple[float, ...]:

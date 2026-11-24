@@ -513,7 +513,7 @@ A complete example: `examples/fleet/run.two-islands.json`.
 | `islands[].trainer.gpu` | The island trainer's cluster, one `--gpu` entry (`cloud:[NODESx]COUNTxGPU[@region]`). Islands may use different GPUs and regions. Required. |
 | `islands[].trainer.usd_per_h` | The island trainer's price per hour (the spend estimate sums the islands). |
 | `islands[].trainer.argv` | Only `--rl-release-every N` and `--rl-max-policy-age N`: this island's values (they override `fleet.trainer_argv`). |
-| `islands[].samplers` | The island's pools, each an entry of the run config's `samplers` list format. Every pool needs `shard_base`, `run_prefix` and `shard_limit`, and uses the store data path (`data_path` `r2`). A pool config file may serve several islands. |
+| `islands[].samplers` | The island's pools, each an entry of the run config's `samplers` list format. Every pool needs `shard_base`, `run_prefix` and `shard_limit`, and uses the store data path (`data_path` `r2`). A pool config file may serve several islands. An entry with `"kind": "miles"` is a Miles sampler island of the launch instead (see below). |
 | `fleet.trainer_argv` | The `yeto launch` arguments every trainer shares. It must name `--rl-checkpoint-store` (the run's `store`) and must not set `--gpu`, `--rl-sample-role`, `--rl-sampler-follow`, `--rl-buffer-shards`, `--rl-island-*` or `--rl-single-island-no-sync`: `run up` writes those. Required. |
 | `fleet.dispense` | `fleet` (default): one task ledger for the fleet, `<store>/fleet/dispense`, so no two islands train on the same prompt in an epoch. `island`: each island keeps its own ledger under `trainer<k>/`. |
 
@@ -543,6 +543,40 @@ What `run up` makes of it:
   quantization tier read from each pool's spec), and the sync route. `run up`
   writes the same table to `<store>/fleet/plan.json` before it orders anything
   (a dry run writes nothing).
+
+#### Miles sampler islands next to external pools
+
+An island's `samplers` may also list Miles sampler islands of the fleet's own
+launch, next to its pools:
+
+```json
+{"name": "mixed", "trainer": {"gpu": "modal:1x2xh100", "usd_per_h": 8.0},
+ "samplers": [{"kind": "miles", "name": "miles-l40s", "gpu": "modal:1x1xl40s", "usd_per_h": 2.0},
+              {"name": "sglang-l40s", "config": "<pool.json>"}]}
+```
+
+A `kind: miles` entry takes only `name` (unique among the island's samplers),
+`gpu` (one `--gpu` cluster) and `usd_per_h` (optional); its sampler options are
+the launch's, in `fleet.trainer_argv`. The launch lists the trainers first
+(launch island k is learner id k and fleet island k, as without Miles
+samplers), then the Miles samplers in island and list order: launch island
+`K + j` for the j-th Miles sampler of the fleet. Each one adds its cluster to
+`--gpu`, `--rl-island-sample-role <K+j>:sampler` and
+`--rl-island-sampler-follows <K+j>:<k>` (it follows island k's trainer only:
+it loads that trainer's releases from `trainer<k>/`, writes the buffer shard
+`island<K+j>` there, and stops once that trainer ended). Island k's trainer
+reads the union of its Miles samplers' shards and its pools' shards
+(`--rl-island-buffer-shards k:` names the pools' shards only; K of the
+`--rl-island-*` trainer flags is the learner id). An island needs a sampler of
+either kind, and the fleet at least one external pool. A Miles sampler's
+`usd_per_h` counts to its island: the plan's island `usd_per_h` is its trainer
+plus its Miles samplers (`trainer_usd_per_h`: the trainer alone), and the
+launch's price sums them. `plan.json` lists them per island under
+`miles_samplers` with `source: "miles"` (their `launch_island`, `gpu`, `shard`,
+`engine` `sglang`); every pool row carries `source: "external"`. A Miles
+sampler draws its prompts from the launch's `--data` (its own slot among the
+launch's sampler islands), not from the fleet's task ledger. A complete
+example: `examples/fleet/run.mixed-miles.json`.
 
 ## Launching
 
