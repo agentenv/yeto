@@ -569,8 +569,10 @@ def resolve(profile: Any, model: str | None, engine_pref: str | Sequence[str] | 
     (``vllm`` / ``sglang`` / ``vllm-ascend``) or engines in order; ``load``: the
     reload mode the pool needs (:data:`LOAD_MODES`; None: the recipe's default);
     ``precision`` and ``rollout``: what the sampler spec asks for; ``image``: a
-    reference the pool or the inventory names: a catalog image is checked like any
-    other (and is the only candidate), a site image is returned unchecked.
+    reference the pool or the inventory names (else the profile's ``image``): a
+    catalog image is checked like any other and is the only candidate (an
+    ``engine_pref`` it does not match is refused, never ignored); a site image is
+    returned unchecked.
 
     Raises :class:`ImageIncompatible` (with every image's reason and what would work
     instead) when nothing fits; the caller refuses before ordering anything."""
@@ -586,6 +588,11 @@ def resolve(profile: Any, model: str | None, engine_pref: str | Sequence[str] | 
     else:
         candidates = engine_images()
     order = _engine_order(engine_pref)
+    if order is not None and named and candidates[0].engine not in order:
+        chosen = candidates[0]
+        raise ImageIncompatible(
+            f"image {named} is the {chosen.engine} image {chosen.name}, the engine asked for is {'/'.join(order)}",
+            reasons={chosen.name: [f"engine {chosen.engine}, not {'/'.join(order)}"]})
     if order is not None and not named:
         candidates = tuple(i for e in order for i in candidates if i.engine == e)
     reasons: dict[str, list[str]] = {}

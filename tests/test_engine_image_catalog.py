@@ -122,6 +122,10 @@ def test_a_named_catalog_image_is_checked_like_any_other():
         images.resolve(h200(), "Qwen/Qwen3-0.6B", image=pins.VLLM_SAMPLER_IMAGE_ROCM)
     ok = images.resolve(h200(), "Qwen/Qwen3-0.6B", image=pins.VLLM_SAMPLER_IMAGE_CUDA.removeprefix("docker:"))
     assert ok.image.name == "vllm-cuda-k31" and ok.recipe.model == images.ANY_MODEL and ok.load == "restart"
+    with pytest.raises(images.ImageIncompatible, match="the engine asked for is sglang"):
+        images.resolve(h200(), "Qwen/Qwen3-0.6B", "sglang", image=pins.VLLM_SAMPLER_IMAGE_CUDA)
+    site = images.resolve(h200(), "Qwen/Qwen3-0.6B", "sglang", image="site/sglang:1")  # a site image: the site's
+    assert site.image is None and site.ref == "site/sglang:1"
 
 
 def test_image_mismatch_refuses_at_dry_run_and_keeps_its_old_answers():
@@ -148,7 +152,11 @@ def test_a_node_profile_carrying_a_catalog_image_is_held_to_it():
                        "cards_per_node": 8, "hbm_gib": 141, "host_memory_gib": 512,
                        "image": pins.SGLANG_SAMPLER_IMAGE_CUDA}, index=0)
     profile = NodeProfile.from_node(node)
-    assert images.resolve(profile, "Qwen/Qwen3-0.6B", "vllm").image.name == "sglang-cuda-k31"  # its own wins
+    assert images.resolve(profile, "Qwen/Qwen3-0.6B").image.name == "sglang-cuda-k31"  # its own wins
+    assert images.resolve(profile, "Qwen/Qwen3-0.6B", ("vllm", "sglang")).engine == "sglang"
+    with pytest.raises(images.ImageIncompatible, match="is the sglang image sglang-cuda-k31, the engine asked "
+                                                       "for is vllm"):
+        images.resolve(profile, "Qwen/Qwen3-0.6B", "vllm")  # never silently ignored
     with pytest.raises(images.ImageIncompatible, match="sglang-cuda-k31"):
         images.resolve(profile, "kimi_k31", load="restart")  # its own image cannot hold K3.1 on 8 x H200
 

@@ -496,12 +496,18 @@ CARD_ARCHES: dict[str, str | None] = {
 NPU_HOST_DEVICES = ("/dev/davinci_manager", "/dev/devmm_svm", "/dev/hisi_hdc")
 NPU_HOST_MOUNTS = ("/usr/local/Ascend/driver", "/usr/local/dcmi", "/usr/local/bin/npu-smi",
                    "/usr/local/sbin/npu-smi", "/etc/ascend_install.info", "/etc/vnpu.cfg")
-# What a ROCm container needs: the compute (kfd) and render (dri) device nodes, the
-# video group that owns them, and seccomp off (the amdgpu user space issues calls the
-# default profile blocks); the NC route's ROCM_DOCKER_ARGS carry the same four.
 ROCM_DEVICES = ("/dev/kfd", "/dev/dri")
-ROCM_CONTAINER_ARGS = ("--device", "/dev/kfd", "--device", "/dev/dri", "--group-add", "video",
-                       "--security-opt", "seccomp=unconfined")
+
+
+def rocm_container_args() -> tuple[str, ...]:
+    """The device flags of a ROCm container: the NC route's own constant
+    (``yeto.launch.nc.ssh_sampler.ROCM_DOCKER_ARGS``: ``/dev/kfd``, ``/dev/dri``, the
+    video group, seccomp off, ``SYS_PTRACE``, unlimited memlock, ``--shm-size 64g``),
+    the very tuple the customer's MI355X sampler starts with. Read on use: that module
+    imports this one."""
+    from .nc.ssh_sampler import ROCM_DOCKER_ARGS  # noqa: PLC0415
+
+    return tuple(ROCM_DOCKER_ARGS)
 
 
 def card_arch_of(card: str) -> str | None:
@@ -581,8 +587,8 @@ class NodeProfile(Node):
       else ``direct``.
 
     Derived per family (:meth:`devices`): the container device flags (cuda:
-    ``--gpus`` with docker, CDI ``nvidia.com/gpu=<i>`` with podman; rocm:
-    ``/dev/kfd``, ``/dev/dri``, the video group, seccomp off; ascend:
+    ``--gpus`` with docker, CDI ``nvidia.com/gpu=<i>`` with podman; rocm: the NC
+    route's ``ROCM_DOCKER_ARGS`` (:func:`rocm_container_args`); ascend:
     ``/dev/davinci<i>`` plus the host devices and driver mounts the node has) and
     the visible-card variable of :data:`yeto.gpu_spec.HW_FAMILIES`
     (``CUDA_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` / ``ASCEND_RT_VISIBLE_DEVICES``).
@@ -696,7 +702,7 @@ class NodeProfile(Node):
             renumbered = {var: ",".join(str(i) for i in range(len(chosen)))} if var else {}
             return DeviceSetup(args, renumbered)
         if family == "rocm":  # every render node is passed: HIP_VISIBLE_DEVICES picks by host number
-            return DeviceSetup(ROCM_CONTAINER_ARGS, host_numbers)
+            return DeviceSetup(rocm_container_args(), host_numbers)
         if family == "ascend":
             present = set(self.host_paths()) if host_paths is None else set(host_paths)
             out: list[str] = []

@@ -134,23 +134,36 @@ def test_cuda_gets_gpus_or_cdi_and_never_rocm_devices():
     assert p.host_paths() == () and p.required_host_paths() == ()
 
 
-def test_rocm_gets_kfd_dri_video_and_seccomp():
+def test_rocm_gets_the_nc_routes_flags():
+    from yeto.launch.nc.ssh_sampler import ROCM_DOCKER_ARGS
+
     p = NodeProfile.for_card("r", "MI355X", 8, hbm_gib=288)
     s = p.devices([1, 6])
-    assert s.args == ("--device", "/dev/kfd", "--device", "/dev/dri", "--group-add", "video",
-                      "--security-opt", "seccomp=unconfined")
+    assert s.args == ROCM_DOCKER_ARGS  # the very tuple: kfd, dri, video, seccomp, SYS_PTRACE, memlock, shm
+    for flag in ("/dev/kfd", "/dev/dri", "video", "seccomp=unconfined", "SYS_PTRACE", "memlock=-1", "64g"):
+        assert flag in s.args
     assert s.env == {"HIP_VISIBLE_DEVICES": "1,6"}  # every render node is passed: host numbers
     assert p.required_host_paths() == ("/dev/kfd", "/dev/dri")
     assert NodeProfile.for_card("r", "MI355X", 8, hbm_gib=288, container="process").required_host_paths() == ()
 
 
-def test_rocm_flags_match_the_nc_route():
-    from yeto.launch.nc.ssh_sampler import ROCM_DOCKER_ARGS
+def test_the_customer_nc_mi355x_docker_command_is_unchanged_through_a_profile():
+    """Shadow: an NC lease's node as a NodeProfile renders the NC route's docker run word for word,
+    and the derived rocm flags of a bare MI355X profile are the ones that node carries."""
+    from yeto.launch.nc import ssh_sampler
+    from yeto.launch.nc.client import NodeLease
 
-    flags = inv.ROCM_CONTAINER_ARGS
-    pairs = {(flags[i], flags[i + 1]) for i in range(0, len(flags), 2)}
-    nc = {(ROCM_DOCKER_ARGS[i], ROCM_DOCKER_ARGS[i + 1]) for i in range(0, len(ROCM_DOCKER_ARGS), 2)}
-    assert pairs <= nc
+    lease = NodeLease(account=1, ticket="t-1", ip="192.0.2.7", user="ubuntu", host_key="k", granted_at=None,
+                      lease_until=None, gpus=8, rate_ucr_per_gpu_hour=None)
+    node = ssh_sampler.node_of(lease)
+    profile = inv.profile_of(node)
+    kw = dict(name="yeto-sampler-k31-0", command=["python", "-m", "yeto.rl.engine.engine_sampler"],
+              env={"HIP_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7", "PYTHONPATH": "/yeto"}, yeto_dir="/nvme/yeto/abc",
+              env_file="/nvme/work/.store.env", detach=True)
+    assert ssh_sampler.docker_run_argv(profile, **kw) == ssh_sampler.docker_run_argv(node, **kw)
+    assert profile.devices().args == tuple(node.docker_args) == ssh_sampler.ROCM_DOCKER_ARGS
+    bare = NodeProfile.for_card("x", "MI355X", 8, hbm_gib=288)
+    assert bare.devices().args == tuple(node.docker_args)
 
 
 def test_ascend_gets_its_cards_and_only_the_host_paths_the_node_has():
