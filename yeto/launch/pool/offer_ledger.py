@@ -242,17 +242,32 @@ class OfferLedger:
         return out
 
     @classmethod
-    def load(cls, store: Any, key: str) -> OfferLedger:
-        """One shard from ``store`` (``read(key) -> bytes | None``): absent is an empty ledger;
-        a failed read, unreadable JSON or a newer format raises (never taken for empty)."""
+    def load(cls, store: Any, key: str | None = None) -> OfferLedger:
+        """One shard ``key`` from ``store`` (``read(key) -> bytes | None``): absent is an empty
+        ledger; a failed read, unreadable JSON or a newer format raises (never taken for
+        empty). Without ``key``: every writer's shard merged (:meth:`load_all`)."""
+        if key is None:
+            return cls.load_all(store)
         raw = store.read(key)
         return cls() if raw is None else cls.from_doc(json.loads(raw))
 
     @classmethod
-    def load_all(cls, store: Any, *, prefix: str = PREFIX, skip: str | None = None) -> OfferLedger:
-        """Every writer's shard under ``prefix`` merged (``skip``: one shard key left out); any
-        failed read raises."""
-        return cls.merged(cls.load(store, key) for key in store.list(prefix) if key != skip and key.endswith(".json"))
+    def load_all(cls, store: Any, *, prefix: str = PREFIX, skip: str | None = None,
+                 unreadable: dict[str, str] | None = None) -> OfferLedger:
+        """Every writer's shard under ``prefix`` merged (``skip``: one shard key left out). A
+        shard that does not read raises, or with ``unreadable`` (a dict) is left out and
+        recorded there (key -> error); a failed LIST raises either way."""
+        parts = []
+        for key in store.list(prefix):
+            if key == skip or not key.endswith(".json"):
+                continue
+            try:
+                parts.append(cls.load(store, key))
+            except Exception as error:  # noqa: BLE001
+                if unreadable is None:
+                    raise
+                unreadable[key] = repr(error)[:300]
+        return cls.merged(parts)
 
     def save(self, store: Any, key: str) -> None:
         """Write this ledger as the shard ``key`` (``write(key, bytes)``): only its own writer does."""
@@ -306,6 +321,9 @@ class PoolLedger:
     store: Any = None
     log: Callable[[str], None] = print
     event: Callable[..., Any] | None = None  # EventLog: event(name, **detail)
+    # () -> whether this writer may write now (False: the pool lost its store lock: a newer
+    # controller drives it and writes the shard); None: always
+    may_write: Callable[[], bool] | None = None
     background: bool = True
     prefix: str = PREFIX
     others: OfferLedger = field(default_factory=OfferLedger)
@@ -314,8 +332,10 @@ class PoolLedger:
     _lock: Any = field(default_factory=threading.Lock, repr=False)
     _dirty: bool = False
     _thread: Any = None
-    _unreadable: str | None = None  # the read error not reported yet
+    _unreadable: str | None = None  # the read error of its own shard, not reported yet
     _reported: bool = False
+    _foreign: dict[str, str] = field(default_factory=dict)  # other writers' shards that did not read
+    _foreign_reported: set[str] = field(default_factory=set)
 
     @property
     def key(self) -> str:
@@ -338,13 +358,24 @@ class PoolLedger:
 
     def _kick(self) -> None:
         if not self.background:
-            self.flush()
+            self._run()
             return
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+        with self._lock:  # one worker at a time; it clears _thread under this lock before it exits
+            if self._thread is not None:
                 return
-            self._thread = threading.Thread(target=self.flush, name="yeto-offer-ledger", daemon=True)
+            self._thread = threading.Thread(target=self._run, name="yeto-offer-ledger", daemon=True)
             self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            self.flush()
+        finally:
+            with self._lock:
+                self._thread = None
+                again = (self._dirty and self.loaded and self.save_error is None
+                         and (self.may_write is None or self.may_write()))
+            if again and self.background:  # dirtied between the last write and the exit
+                self._kick()
 
     def flush(self) -> None:
         """Read the store if not read yet, then write this writer's shard while it is dirty."""
@@ -354,6 +385,8 @@ class PoolLedger:
             with self._lock:
                 if not self._dirty:
                     return
+                if self.may_write is not None and not self.may_write():
+                    return  # the pool lost its store lock: the controller that took it writes now
                 self._dirty = False
                 doc = OfferLedger.from_doc(self.own.to_doc())
             try:
@@ -367,31 +400,56 @@ class PoolLedger:
                     self._dirty = True  # the next event tries again
                 return
 
+    def close(self, timeout: float = 10.0) -> None:
+        """At the pool's end: wait for the background worker, then write what is left."""
+        with self._lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+        if self.store is not None:
+            self.save_error = None
+            self.flush()
+
     def _read(self) -> bool:
+        """Read this writer's own shard (it alone decides whether the writer may write) and the
+        other writers' (one that does not read is left out and reported by its key)."""
         try:
             stored = OfferLedger.load(self.store, self.key)
-            others = OfferLedger.load_all(self.store, prefix=self.prefix, skip=self.key)
         except Exception as error:  # noqa: BLE001 - never taken for an empty ledger: nothing is written
             with self._lock:
                 if not self._reported:
                     self._unreadable = repr(error)[:300]
             return False
+        foreign: dict[str, str] = {}
+        try:
+            others = OfferLedger.load_all(self.store, prefix=self.prefix, skip=self.key, unreadable=foreign)
+        except Exception as error:  # noqa: BLE001 - no LIST: this writer still writes its own shard
+            others, foreign = OfferLedger(), {f"{self.prefix}*": repr(error)[:300]}
         with self._lock:
             self.own = OfferLedger.merged([stored, self.own])  # this run's counts on top of the stored ones
             self.others = others
+            self._foreign.update({k: v for k, v in foreign.items() if k not in self._foreign_reported})
             self.loaded = True
         return True
 
     def _report(self) -> None:
         with self._lock:
             why, self._unreadable = self._unreadable, None
-            if why is None or self._reported:
-                return
-            self._reported = True
-        self.log(f"pool: offer ledger {self.key} not read ({why}): nothing is written to it until it reads")
+            report = why is not None and not self._reported
+            if report:
+                self._reported = True
+            foreign, self._foreign = self._foreign, {}
+            self._foreign_reported.update(foreign)
+        if report:
+            self._emit(self.key, why, "nothing is written to it until it reads")
+        for key, error in sorted(foreign.items()):
+            self._emit(key, error, "another writer's shard: left out of the merged history")
+
+    def _emit(self, key: str, error: str, what: str) -> None:
+        self.log(f"pool: offer ledger {key} not read ({error}): {what}")
         if self.event is not None:
             try:
-                self.event("offer_ledger_unreadable", key=self.key, error=why)
+                self.event("offer_ledger_unreadable", key=key, error=error, own=key == self.key)
             except Exception:  # noqa: BLE001
                 pass
 

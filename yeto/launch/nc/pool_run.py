@@ -794,13 +794,17 @@ def offer_ledger_store(cfg: dict[str, Any]) -> Any:
 
 
 def attach_offer_ledger(cfg: dict[str, Any], pool: IslandPool, store: Any = None, *, background: bool = True) -> Any:
-    """Keep the offer ledger for this pool (every pool, whatever ``replace_lead_auto`` says):
-    its events are counted into this pool's own shard of the ledger in ``store`` (default:
-    :func:`offer_ledger_store`), and with ``replace_lead_auto`` the pool reads its leads from
-    every writer's measurements. Store reads and writes run off the pool's tick."""
+    """Keep the offer ledger for this pool (every pool, whatever ``replace_lead_auto`` says;
+    ``offer_ledger``: ``"store"`` default, ``"memory"``, ``"off"``): its events are counted into
+    this pool's own shard of the ledger in ``store`` (default: :func:`offer_ledger_store`), and
+    with ``replace_lead_auto`` the pool reads its leads from every writer's measurements. Store
+    reads and writes run off the pool's tick. None: ``offer_ledger: "off"``."""
     from ..pool import offer_ledger as ol  # noqa: PLC0415
 
-    if store is None:
+    mode = cfg.get("offer_ledger", "store")
+    if mode == "off":
+        return None
+    if store is None and mode == "store":
         try:
             store = offer_ledger_store(cfg)
         except Exception as error:  # noqa: BLE001 - no store: the ledger is kept for this run only
@@ -809,7 +813,8 @@ def attach_offer_ledger(cfg: dict[str, Any], pool: IslandPool, store: Any = None
     provider = getattr(pool.ops, "provider", None)
     sink = ol.PoolLedger(ol.OfferLedger(), writer=f"{cli.run_id(cfg)}-{cfg['shard_base']}",
                          default_offer=offer_key(cfg), offer_of=getattr(provider, "offer_of", None), store=store,
-                         log=_say, event=pool.events, background=background)
+                         log=_say, event=pool.events, background=background,
+                         may_write=lambda: pool.detached is None)  # a pool that lost its store lock writes nothing
     pool.offer_ledger = sink
     pool.events.sinks.append(sink)
     sink.start()
@@ -879,6 +884,11 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         clean = True
     finally:
         signals.restore()
+        if pool.offer_ledger is not None:
+            try:
+                pool.offer_ledger.close()  # what the last events counted
+            except Exception as error:  # noqa: BLE001
+                _say(f"pool: offer ledger not closed: {error!r}"[:300])
         try:
             pool.save(state)
         except Exception as error:  # noqa: BLE001 - the banner below matters more

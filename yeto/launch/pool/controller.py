@@ -672,6 +672,11 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
         return "pool-stop requested" if pool_run.stop_path(cfg).exists() else None
 
     def close(left: list[Member]) -> None:
+        if pool.offer_ledger is not None:
+            try:
+                pool.offer_ledger.close()  # what the last events counted
+            except Exception as error:  # noqa: BLE001
+                cli._log(f"pool: offer ledger not closed: {error!r}"[:300])  # noqa: SLF001
         if pool.control is not None:
             pool.control.close()  # the store lock: released (a detach or a drain alike)
         pool_run._remove(pool_run.pid_path(cfg))  # noqa: SLF001

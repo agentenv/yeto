@@ -329,6 +329,7 @@ class SkyProvider:
 
     # -- IslandProvider
     def order(self, account: int) -> str:
+        self.last_offer_key = None  # set again once this order picked its offer
         doc = self._doc()
         n = 1 + max([int(r.get("n", 0)) for r in doc["clusters"].values()] or [0])
         offer = self._pick(doc)

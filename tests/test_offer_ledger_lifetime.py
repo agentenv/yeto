@@ -359,3 +359,106 @@ def test_every_pool_feeds_the_ledger_whether_or_not_it_reads_its_leads_from_it(t
     from yeto.launch.pool.island_pool import Member
 
     assert pool._replace_lead(Member(account=1, ticket="t1", shard="s-0")) == 3600  # leads untouched
+
+
+def test_load_without_a_key_merges_every_writers_shard():
+    """The capacity broker reads the whole history with load(store)."""
+    store = Store()
+    for writer, took in (("run1-a", 1500.0), ("run2-b", 1900.0)):
+        led = ol.OfferLedger()
+        led.observe(_ev("ordered", 0, "t", offer="nc"))
+        led.observe(_ev("member_ready", took, "t", order_to_ready_s=took))
+        led.save(store, ol.shard_key(writer))
+    merged = ol.OfferLedger.load(store)
+    assert merged.get("nc").ready == 2 and sorted(merged.get("nc").start_s) == [1500.0, 1900.0]
+    assert merged.to_doc() == ol.OfferLedger.load_all(store).to_doc()
+
+
+def test_an_unreadable_foreign_shard_is_left_out_and_reported_by_its_key_and_the_writer_keeps_writing():
+    store = Store()
+    good = ol.OfferLedger()
+    good.observe(_ev("ordered", 0, "t", offer="nc"))
+    good.observe(_ev("member_ready", 1500, "t", order_to_ready_s=1500))
+    good.save(store, ol.shard_key("other-good"))
+    store[ol.shard_key("other-broken")] = b"{broken"
+    events, logs = [], []
+    sink = ol.PoolLedger(ol.OfferLedger(), writer="me", default_offer="nc", store=store, background=False,
+                         log=logs.append, event=lambda name, **kw: events.append((name, kw)))
+    sink.start()
+    assert sink.loaded and sink.others.get("nc").ready == 1
+    _ready(sink, "a", 1700.0)
+    assert ol.OfferLedger.load(store, ol.shard_key("me")).get("nc").ready == 1  # it writes its own shard
+    assert events == [("offer_ledger_unreadable", {"key": ol.shard_key("other-broken"), "error": events[0][1]["error"],
+                                                   "own": False})]
+    assert ol.shard_key("other-broken") in logs[0] and ol.shard_key("me") not in logs[0]
+    _ready(sink, "b", 1800.0)
+    assert len(events) == 1  # reported once
+    with pytest.raises(ValueError):
+        ol.OfferLedger.load_all(store)  # a strict reader still refuses it
+
+
+def test_a_writer_that_lost_its_store_lock_writes_nothing():
+    store = Store()
+    held = [True]
+    sink = ol.PoolLedger(ol.OfferLedger(), writer="me", default_offer="nc", store=store, background=False,
+                         may_write=lambda: held[0])
+    sink.start()
+    _ready(sink, "a", 1700.0)
+    assert ol.shard_key("me") in store
+    before = dict(store)
+    held[0] = False  # another controller took the pool's lock: it drives and writes now
+    _ready(sink, "b", 1800.0)
+    sink.close()
+    assert dict(store) == before
+
+
+def test_close_waits_for_the_worker_and_writes_what_is_left():
+    import threading
+
+    gate = threading.Event()
+
+    class Slow(Store):
+        def write(self, key, data):
+            gate.wait(5)
+            super().write(key, data)
+
+    store = Slow()
+    sink = ol.PoolLedger(ol.OfferLedger(), writer="me", default_offer="nc", store=store)
+    sink.start()
+    _ready(sink, "a", 1700.0)  # the worker blocks in its write
+    _ready(sink, "b", 1800.0)  # dirtied again while it writes: never lost
+    gate.set()
+    sink.close()
+    assert ol.OfferLedger.load(store, ol.shard_key("me")).get("nc").ready == 2
+    assert sink._thread is None
+
+
+@pytest.mark.parametrize("mode, kept, stored", [("store", True, True), ("memory", True, False), ("off", False, False)])
+def test_the_offer_ledger_switch(tmp_path, mode, kept, stored):
+    from yeto.launch.nc import cli, pool_run
+    from yeto.launch.pool.island_pool import IslandPool, PoolConfig
+
+    env = tmp_path / "r2.env"
+    env.write_text("R2_BUCKET=b\n")
+    cfg = {"shard_base": "s", "run": "r", "run_prefix": "r", "r2_env_file": str(env), "provider": {"kind": "nc"},
+           "machine_type": "mi355x", "offer_ledger": mode}
+    pool = IslandPool(PoolConfig(target=1, accounts=[1], shard_base="s"), ops=object(), log=lambda _m: None,
+                      events=el.EventLog(log=lambda _m: None))
+    store = Store()
+    monkey = pool_run.offer_ledger_store
+    try:
+        pool_run.offer_ledger_store = lambda _cfg: store
+        sink = pool_run.attach_offer_ledger(cfg, pool, background=False)
+    finally:
+        pool_run.offer_ledger_store = monkey
+    assert (sink is not None) == kept and (pool.offer_ledger is sink)
+    pool.events("ordered", ticket="t1")
+    pool.events("member_ready", ticket="t1", order_to_ready_s=100)
+    assert (ol.shard_key("r-s") in store) == stored
+    spec = tmp_path / "s.json"
+    spec.write_text(json.dumps({"sampler_id": "x", "store": "/s", "prompts": {"groups_per_round": 2},
+                                "engine": {"factory": "f:g"}}))
+    full = dict(cfg, spec=str(spec), accounts=[1], target=1)
+    assert cli.pool_config(full, allowed=None).target == 1
+    with pytest.raises(ValueError, match="offer_ledger must be one of"):
+        cli.pool_config(dict(full, offer_ledger="bucket"), allowed=None)

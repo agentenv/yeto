@@ -636,7 +636,7 @@ def run_id(cfg: dict[str, Any]) -> str:
 
 
 POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base", "run", "route", "replace_lead_s", "end_margin_s",
-                       "replace_lead_auto",
+                       "replace_lead_auto", "offer_ledger",
                        "stop_below_ucr", "min_balance_to_order_ucr", "data_slots", "elastic", "event_command",
                        "machine_type", "model", "spec", "run_prefix", "r2_env_file", "bucket_env", "image",
                        "engine", "platform",
@@ -1001,6 +1001,9 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
     auto = cfg.get("replace_lead_auto", False)
     if not isinstance(auto, bool):
         raise ValueError(f"pool config: replace_lead_auto must be true or false, not {auto!r}")
+    if cfg.get("offer_ledger", "store") not in OFFER_LEDGER_MODES:
+        raise ValueError(f"pool config: offer_ledger must be one of {list(OFFER_LEDGER_MODES)}, "
+                         f"not {cfg.get('offer_ledger')!r}")
     price = pool_price(cfg)[0]
     if price is not None and not (math.isfinite(price) and price >= 0):
         raise ValueError(f"pool config: provider price_usd_h {price!r} must be a finite number >= 0")
@@ -1021,6 +1024,11 @@ def _seconds(cfg: dict[str, Any], key: str, default: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         raise ValueError(f"pool config: {key} must be a finite number of seconds >= 0, not {value!r}")
     return float(value)
+
+
+# offer_ledger: "store" (default): this pool's shard of the offer ledger at the store's bucket
+# root (fleet/offer_ledger/); "memory": counted for this run only; "off": not kept
+OFFER_LEDGER_MODES = ("store", "memory", "off")
 
 
 def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
