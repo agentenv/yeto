@@ -95,9 +95,10 @@ function wall(){
     '<div class="note mono">'+esc(platform(c))+' · '+esc(c.gpu||"")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</div>'+
     '<div class="kv"><span>policy version</span><span class="num">'+esc(pvTxt(c.policy_version,c.released_version))+'</span><span>reward</span><span class="num">'+f(islReward(c))+'</span><span>phase</span><span class="num">'+esc(islPhase(c)||"n/a")+'</span><span>role</span><span class="num">'+esc(c.role||"n/a")+'</span></div></div>'}).join("");
   Array.prototype.forEach.call(document.querySelectorAll(".card"),function(d){d.onclick=d.onkeydown=function(e){if(e.type==="keydown"&&e.key!=="Enter")return;SEL=d.dataset.id;cur=null;render()}});
-  if(multi&&V.usage.syncer){var rows=(V.rounds_syncer||[]).slice(-30).reverse();
-    $("syncer").innerHTML='<table class="c"><tr><th>global round</th><th>expected/responded</th><th>missed</th><th>quorum ms</th><th>merge ms</th><th>resends</th></tr>'+rows.map(function(r){
-      return '<tr><td class="num">'+esc(r.round)+'</td><td class="num">'+f(r.expected,0)+' / '+f(r.responded,0)+'</td><td>'+(r.missed.length?'<span class="bd">'+esc(r.missed.join(","))+'</span>':"n/a")+'</td><td class="num">'+f(r.quorum_ms,0)+'</td><td class="num">'+f(r.merge_ms,0)+'</td><td class="num">'+esc(r.resend)+'</td></tr>'}).join("")+'</table>'}
+  if(multi&&V.usage.syncer){var all=V.rounds_syncer||[],sc=YetoTbl.cap("syncer-merges",all.slice().reverse(),{def:10,total:(V.table_totals||{}).rounds_syncer,unit:"merges"});
+    $("syncer").innerHTML=YetoTbl.spark([["quorum ms","quorum_ms"],["merge ms","merge_ms"],["responded","responded"]].map(function(x){return {label:x[0],vals:all.map(function(r){return r[x[1]]}),fmt:function(v){return f(v,0)}}}))+sc.bar+
+      YetoTbl.table('<tr><th>global round</th><th>expected/responded</th><th>missed</th><th>quorum ms</th><th>merge ms</th><th>resends</th></tr>',sc.rows.map(function(r){
+      return '<tr><td class="num">'+esc(r.round)+'</td><td class="num">'+f(r.expected,0)+' / '+f(r.responded,0)+'</td><td>'+(r.missed.length?'<span class="bd">'+esc(r.missed.join(","))+'</span>':"n/a")+'</td><td class="num">'+f(r.quorum_ms,0)+'</td><td class="num">'+f(r.merge_ms,0)+'</td><td class="num">'+esc(r.resend)+'</td></tr>'}).join(""))}
 }
 /* chart 1: metric per round; reward gets the p10-p90 band; < 5 points: dots only, no line */
 var xOf=null;
@@ -142,15 +143,16 @@ function chartMetric(){
 /* chart 2: per-round time split (stacked R/T/S/P) */
 function chartDur(){
   $("legDur").innerHTML=PH.map(function(p){return '<span><i class="sw" style="background:var(--'+p[0]+')"></i>'+p[1]+'</span>'}).join("");
-  var box=$("cDur");box.innerHTML="";var rows=RS.slice(-20);
-  if(!rows.some(function(r){return Object.keys(r.dur).length})){box.innerHTML='<div class="note">no phase data (no rl_timeline_span in the tapes)</div>';return}
-  var W=boxW(box,420),rowH=30,m={l:64,r:60,t:4,b:4},H=m.t+m.b+rowH*rows.length;
+  var box=$("cDur");box.innerHTML="";
+  if(!RS.some(function(r){return Object.keys(r.dur).length})){box.innerHTML='<div class="note">no phase data (no rl_timeline_span in the tapes)</div>';return}
+  var dc=YetoTbl.cap("round-time",RS,{def:10,tail:true,unit:"rounds"}),rows=dc.rows;box.innerHTML=dc.bar;
+  var W=boxW(box,420),rowH=24,m={l:64,r:60,t:2,b:2},H=m.t+m.b+rowH*rows.length;
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Per-round time breakdown"},box);
   var tot=rows.map(function(r){return PH.reduce(function(a,p){return a+(r.dur[p[0]]||0)},0)}),mx=Math.max.apply(null,tot.concat([1]));
   rows.forEach(function(r,i){var y0=m.t+i*rowH,x0=m.l;
     el("rect",{x:0,y:y0,width:W,height:rowH,fill:"transparent","class":"drow","data-r":r.round},s);
     el("text",{x:m.l-8,y:y0+rowH/2+4,"text-anchor":"end"},s).textContent="round "+r.round;
-    PH.forEach(function(p){var w=(r.dur[p[0]]||0)*(W-m.l-m.r)/mx;if(w>0){el("rect",{x:x0,y:y0+5,width:Math.max(w-2,1),height:rowH-10,rx:3,fill:"var(--"+p[0]+")"},s);x0+=w}});
+    PH.forEach(function(p){var w=(r.dur[p[0]]||0)*(W-m.l-m.r)/mx;if(w>0){el("rect",{x:x0,y:y0+4,width:Math.max(w-2,1),height:rowH-8,rx:3,fill:"var(--"+p[0]+")"},s);x0+=w}});
     el("text",{x:x0+6,y:y0+rowH/2+4},s).textContent=(tot[i]/60).toFixed(1)+"m";
     var hit=el("rect",{x:0,y:y0,width:W,height:rowH,fill:"transparent"},s);
     hit.addEventListener("mousemove",function(e){setCur(r.round,e)});hit.addEventListener("mouseleave",hideTip);hit.addEventListener("click",function(e){pinned=!pinned;setCur(r.round,e)})});
@@ -219,20 +221,28 @@ function util(){
   var rids={};runs.forEach(function(r){((r.util||{}).rounds||[]).forEach(function(x){rids[x.round]=1})});
   var ids=Object.keys(rids).map(Number).sort(function(a,b){return a-b});
   if(uRound!=="all"&&ids.indexOf(uRound)<0)uRound="all";
-  var btns=[["all","all rounds overlaid"]].concat(ids.map(function(i){return [i,"round "+i]}));
-  var ctl=btns.map(function(b){return '<button class="btn'+(b[0]===uRound?" on":"")+'" data-u="'+b[0]+'">'+b[1]+'</button>'}).join("");
+  // one button for all rounds, one menu for a single round (newest first): a button per round grew with the run
+  var ctl='<button class="btn'+(uRound==="all"?" on":"")+'" data-u="all">all rounds overlaid</button>'+
+    '<select id="utilRound" aria-label="pick a round"><option value="">'+(uRound==="all"?"pick a round…":"all rounds")+'</option>'+
+    ids.slice().reverse().map(function(i){return '<option value="'+i+'"'+(i===uRound?" selected":"")+'>round '+i+'</option>'}).join("")+'</select>';
   if(runs.length>1)ctl+=' <button class="btn'+(uMode==="side"?" on":"")+'" data-mode="side">side by side</button><button class="btn'+(uMode==="overlay"?" on":"")+'" data-mode="overlay">overlay</button>';
   $("utilCtl").innerHTML=ctl;
   Array.prototype.forEach.call($("utilCtl").querySelectorAll("button"),function(b){b.onclick=function(){
-    if(b.dataset.mode)uMode=b.dataset.mode;else uRound=b.dataset.u==="all"?"all":+b.dataset.u;util()}});
+    if(b.dataset.mode)uMode=b.dataset.mode;else uRound="all";util()}});
+  var us=$("utilRound");if(us&&us.addEventListener)us.onchange=function(){uRound=us.value===""?"all":+us.value;util()};
   uCut(runs);uDone(runs);uPh(runs);uTr(runs);uLoad(runs);uCarry(runs);
 }
 function uCut(runs){
   $("uCut").innerHTML=runs.map(function(r,i){var rr=((r.util||{}).rounds||[]);
     if(!rr.some(function(x){return x.cutoff}))return '<div>'+runHead(r,i,runs.length)+'<div class="note">no data (no rl_rollout_cutoff)</div></div>';
-    return '<div>'+runHead(r,i,runs.length)+'<table class="c"><tr><th>round</th><th>generation s</th><th>submitted groups</th><th>target groups</th><th>dropped groups</th><th>dropped trajectories</th><th>dropped tokens</th><th>filtered groups</th></tr>'+
-      rr.map(function(x){var c=x.cutoff||{};return '<tr'+(x.round===uRound?' class="hl"':"")+'><td class="num">'+x.round+'</td><td class="num">'+unk(x.gen_s)+'</td><td class="num">'+unk(c.submitted_groups)+'</td><td class="num">'+unk(c.target_groups)+
-        '</td><td class="num">'+unk(c.discarded_groups)+'</td><td class="num">'+unk(c.discarded_trajectories)+'</td><td class="num">'+unk(c.discarded_tokens)+'</td><td class="num">'+unk(c.filtered_groups)+'</td></tr>'}).join("")+'</table></div>'}).join("");
+    // newest rounds first; a picked round stays in the table even when it is older than the shown ones
+    var tc=YetoTbl.cap("cutoff-rounds",rr.slice().reverse(),{def:10,total:(r.util||{}).rounds_total,unit:"rounds"}),shown=tc.rows.slice();
+    if(uRound!=="all"&&shown.every(function(x){return x.round!==uRound}))shown=shown.concat(rr.filter(function(x){return x.round===uRound}));
+    return '<div>'+runHead(r,i,runs.length)+YetoTbl.spark([["generation s",function(x){return x.gen_s}],["dropped groups",function(x){return (x.cutoff||{}).discarded_groups}],["dropped trajectories",function(x){return (x.cutoff||{}).discarded_trajectories}]].map(function(s){
+        return {label:s[0],vals:rr.map(s[1]),fmt:function(v){return unk(v)}}}))+tc.bar+
+      YetoTbl.table('<tr><th>round</th><th>generation s</th><th>submitted groups</th><th>target groups</th><th>dropped groups</th><th>dropped trajectories</th><th>dropped tokens</th><th>filtered groups</th></tr>',
+      shown.map(function(x){var c=x.cutoff||{};return '<tr'+(x.round===uRound?' class="hl"':"")+'><td class="num">'+x.round+'</td><td class="num">'+unk(x.gen_s)+'</td><td class="num">'+unk(c.submitted_groups)+'</td><td class="num">'+unk(c.target_groups)+
+        '</td><td class="num">'+unk(c.discarded_groups)+'</td><td class="num">'+unk(c.discarded_trajectories)+'</td><td class="num">'+unk(c.discarded_tokens)+'</td><td class="num">'+unk(c.filtered_groups)+'</td></tr>'}).join(""))+'</div>'}).join("");
 }
 function uSel(rr){return uRound==="all"?rr:rr.filter(function(x){return x.round===uRound})}
 function uDone(runs){
@@ -266,7 +276,8 @@ function uPh(runs){
   runs.forEach(function(r,i){var div=document.createElement?document.createElement("div"):box;if(div!==box)box.appendChild(div);
     var rr=((r.util||{}).rounds||[]).filter(function(x){return UPH.some(function(p){return fin(x.phases[p[0]])})});
     if(!rr.length){div.innerHTML=runHead(r,i,runs.length)+'<div class="note">no data (trajectory events lack the four-part timing fields)</div>';return}
-    div.innerHTML=runHead(r,i,runs.length);
+    var pc=YetoTbl.cap("timing-rounds",rr,{def:10,tail:true,unit:"rounds"});rr=pc.rows;
+    div.innerHTML=runHead(r,i,runs.length)+pc.bar;
     var W=480,rowH=24,m={l:52,r:110,t:4,b:4},H=m.t+m.b+rowH*rr.length;
     var mx=Math.max.apply(null,rr.map(function(x){return UPH.reduce(function(a,p){return a+(x.phases[p[0]]||0)},0)}).concat([1]));
     var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Four-part timing"},div);
@@ -283,7 +294,8 @@ function uTr(runs){
   runs.forEach(function(r,i){var div=document.createElement?document.createElement("div"):box;if(div!==box)box.appendChild(div);
     var tr=((r.util||{}).trajectories||[]).filter(function(t){return t.rid===uRound}).sort(function(a,b){return (b.dur||0)-(a.dur||0)});
     if(!tr.length){div.innerHTML=runHead(r,i,runs.length)+'<div class="note">no data</div>';return}
-    div.innerHTML=runHead(r,i,runs.length);
+    var tcap=YetoTbl.cap("round-trajectories",tr,{def:20,unit:"trajectories"});tr=tcap.rows;
+    div.innerHTML=runHead(r,i,runs.length)+tcap.bar.replace("latest ","longest ");
     var W=480,rowH=14,m={l:8,r:70,t:2,b:2},H=m.t+m.b+rowH*tr.length;
     var mx=Math.max.apply(null,tr.map(function(t){return UPH.reduce(function(a,p){return a+(t[p[0]]||0)},0)}).concat([1]));
     var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Four-part timing per trajectory"},div);
@@ -317,8 +329,8 @@ function uLoad(runs){
 }
 function uCarry(runs){
   var any=runs.some(function(r){return (r.util||{}).carry});$("uCarryBox").hidden=!any;if(!any){$("uCarry").innerHTML="";return}
-  $("uCarry").innerHTML=runs.map(function(r,i){var c=(r.util||{}).carry||[];
-    return '<div>'+runHead(r,i,runs.length)+(c.length?'<table class="c"><tr><th>trajectory</th><th>task</th><th>start round → training round</th><th>version spans</th></tr>'+c.slice(-50).map(function(x){
+  $("uCarry").innerHTML=runs.map(function(r,i){var c=(r.util||{}).carry||[],cc=YetoTbl.cap("carried-trajectories",c.slice().reverse(),{def:10,total:(r.util||{}).carry_total,unit:"trajectories"});
+    return '<div>'+runHead(r,i,runs.length)+(c.length?cc.bar+'<table class="c"><tr><th>trajectory</th><th>task</th><th>start round → training round</th><th>version spans</th></tr>'+cc.rows.map(function(x){
       return '<tr><td class="mono">'+esc(String(x.id||"").slice(-10))+'</td><td>'+esc(x.task||"")+'</td><td class="num">'+(x.from==null?"unknown":x.from)+' → '+(x.to==null?"unknown":x.to)+'</td><td class="mono">'+esc((x.versions||[]).map(function(v){return Array.isArray(v)?"v"+v[0]+"["+v[1]+","+v[2]+")":"v"+v}).join(" "))+'</td></tr>'}).join("")+'</table>':'<div class="note">no carried-over trajectories</div>')+'</div>'}).join("");
 }
 /* nodes */
@@ -378,8 +390,8 @@ function evLevel(t,rec){if(t==="operator_stop")return ["mu","stop"];
 function evText(e){var r=e.record||{},keys=["phase","rollout_id","policy_version","result","cause","recommendation","marker","reason_name","backlog_groups","buffer_selected","ticket","shard","why","detail"];
   return keys.filter(function(k){return r[k]!=null}).map(function(k){return k+"="+String(r[k]).slice(0,80)}).join(" ")}
 function events(){
-  var list=EVENTS.filter(function(e){return keepEv(e.type)}).slice(-200).reverse();
-  $("evs").innerHTML=list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" island "+esc(e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
+  var ec=YetoTbl.cap("event-stream",EVENTS.filter(function(e){return keepEv(e.type)}).reverse(),{def:15,unit:"events"}),list=ec.rows;
+  $("evs").innerHTML=ec.bar+list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" island "+esc(e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
 }
 function cmds(){
   var run=O.run||"<run>",cm=O.commands||{};
@@ -400,9 +412,10 @@ function folds(){
   $("foldBox").innerHTML=items.map(function(x){return '<div class="fold"><span>'+x[0]+'</span><span>not used in this run ('+x[1]+')</span></div>'}).join("")||'<div class="note">none</div>';
 }
 function spot(){
-  var rows=(V.spot||[]).slice(-50).reverse();$("spotBox").hidden=!rows.length;if(!rows.length)return;
-  $("spot").innerHTML='<table class="c"><tr><th>event</th><th>island</th><th>cloud / region</th><th>source</th><th>seconds left</th><th>saved</th><th>outcome</th><th>candidates/rejected</th></tr>'+rows.map(function(r){
-    return '<tr><td>'+esc(r.event)+'</td><td>'+esc(r.island)+'</td><td class="mono">'+esc(r.cloud||"n/a")+' / '+esc(r.region||"n/a")+'</td><td>'+esc(r.source||"")+'</td><td class="num">'+f(r.remaining_s,1)+'</td><td>'+(r.saved==null?"":(r.saved?"yes":"no"))+'</td><td>'+esc(r.outcome||(r.auto_launch===false?"advice only":""))+'</td><td class="num">'+(r.candidates==null?"":esc(r.candidates)+' / '+esc(r.rejected))+'</td></tr>'}).join("")+'</table>'}
+  var rows=(V.spot||[]).slice().reverse();$("spotBox").hidden=!rows.length;if(!rows.length)return;
+  var sc=YetoTbl.cap("spot",rows,{def:10,unit:"events"});
+  $("spot").innerHTML=sc.bar+YetoTbl.table('<tr><th>event</th><th>island</th><th>cloud / region</th><th>source</th><th>seconds left</th><th>saved</th><th>outcome</th><th>candidates/rejected</th></tr>',sc.rows.map(function(r){
+    return '<tr><td>'+esc(r.event)+'</td><td>'+esc(r.island)+'</td><td class="mono">'+esc(r.cloud||"n/a")+' / '+esc(r.region||"n/a")+'</td><td>'+esc(r.source||"")+'</td><td class="num">'+f(r.remaining_s,1)+'</td><td>'+(r.saved==null?"":(r.saved?"yes":"no"))+'</td><td>'+esc(r.outcome||(r.auto_launch===false?"advice only":""))+'</td><td class="num">'+(r.candidates==null?"":esc(r.candidates)+' / '+esc(r.rejected))+'</td></tr>'}).join(""))}
 /* async GRPO: trainer rounds, samplers, buffer backlog, releases, NC pool */
 // trainer rounds table: [header, title, cell(r, a), has(r, a) or null = always shown]; a column no shown
 // round has a value for (an algorithm that does not report it, e.g. PPO KL with score centering) is hidden
@@ -410,22 +423,31 @@ function spot(){
 var isClip=function(r){return fin(r.tis_clip)?r.tis_clip:r.is_clip};
 var TR_COLS=[["round","",function(r){return r.round},null],
   ["reward mean ± std","",function(r){return f(r.reward)+(fin(r.reward_std)?" ± "+f(r.reward_std):"")},null],
-  ["p10 / p50 / p90","",function(r){return f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2)},function(r){return fin(r.p50)}],
+  ["p10 · p50 · p90","reward quantiles of the round's samples",function(r){return cq(r.p10)+" · "+cq(r.p50)+" · "+cq(r.p90)},function(r){return fin(r.p50)}],
   ["train-rollout KL","train_metrics.train_rollout_kl: trainer vs sampler logprobs",function(r){return f(r.kl_tr,5)},function(r){return fin(r.kl_tr)}],
   ["PPO KL","train_metrics.ppo_kl: trainer policy vs the old logprobs of the batch",function(r){return fin(r.kl)&&Math.abs(r.kl)<1e-3&&r.kl!==0?r.kl.toExponential(2):f(r.kl,5)},function(r){return fin(r.kl)}],
   ["logprob |diff|","",function(r){return f(r.logprob_diff,4)},function(r){return fin(r.logprob_diff)}],
   ["TIS / IS clipped","mismatch.tis_clipfrac (TIS); with score centering train_metrics.sc_is_clipped (share of tokens whose IS weight was clipped)",function(r){return f(isClip(r),4)},function(r){return fin(isClip(r))}],
   ["grad_norm","",function(r){return f(r.grad_norm,4)},function(r){return fin(r.grad_norm)}],
   ["generated tokens mean / p95","model-generated tokens per trained sample (loss mask); full = whole response incl. tool / env tokens, when the tape has it",
-   function(r){return f(r.resp_mean,0)+(r.resp_derived?"*":"")+" / "+f(r.resp_p95,0)+(fin(r.resp_full_mean)?'<div class="note">full '+f(r.resp_full_mean,0)+'</div>':"")},function(r){return fin(r.resp_mean)}],
+   function(r){return f(r.resp_mean,0)+(r.resp_derived?"*":"")+" / "+f(r.resp_p95,0)+(fin(r.resp_full_mean)?' <span class="note">· full '+f(r.resp_full_mean,0)+'</span>':"")},function(r){return fin(r.resp_mean)}],
   ["truncated","",function(r){return pct(r.trunc)},function(r){return fin(r.trunc)}],["tok/s","",function(r){return f(r.tok_s,0)},function(r){return fin(r.tok_s)}],
   ["groups","",function(r,a){return f(a.trained_groups,0)},null],
   ["zero-variance","rl_local_round.zero_variance_group_ratio: groups whose rewards were all equal (trained with zero advantage)",function(r,a){return fin(r.zero_var_ratio)?pct(r.zero_var_ratio)+(fin(a.trained_groups)?" ("+f(Math.round(r.zero_var_ratio*a.trained_groups),0)+")":""):"n/a"},function(r){return fin(r.zero_var_ratio)}],
   ["stale dropped","",function(r,a){return f(a.stale_groups,0)},null],
-  ["policy ages","rl_round_trained.policy_age_groups: trained groups by policy age",function(r,a){return hist(a.ages)+(fin(a.policy_age_mean)?' <span class="note">mean '+f(a.policy_age_mean,2)+'</span>':"")},null]];
-function trTable(rows,ar){var cols=TR_COLS.filter(function(c){return !c[3]||rows.some(function(r){return c[3](r,ar[r.round]||{})})}),gone=TR_COLS.filter(function(c){return cols.indexOf(c)<0});
-  return '<table class="c"><tr>'+cols.map(function(c){return '<th'+(c[1]?' title="'+esc(c[1])+'"':"")+'>'+esc(c[0])+'</th>'}).join("")+'</tr>'+
-    rows.map(function(r){var a=ar[r.round]||{};return '<tr>'+cols.map(function(c,i){return '<td'+(i===cols.length-1?"":' class="num"')+'>'+c[2](r,a)+'</td>'}).join("")+'</tr>'}).join("")+'</table>'+
+  ["policy ages","rl_round_trained.policy_age_groups: trained groups by policy age",function(r,a){return hist(a.ages)+(fin(a.policy_age_mean)?' <span class="note">· mean '+f(a.policy_age_mean,2)+'</span>':"")},null]];
+/* a quantile in a one-line cell: 0, 1, 0.5 (two decimals at most) */
+function cq(v){return fin(v)?String(+v.toFixed(2)):"n/a"}
+/* mean policy age of a round's trained groups: its age histogram, else the trainer's own mean */
+function ageMean(a){var h=a.ages||{},n=0,s=0;Object.keys(h).forEach(function(x){if(fin(h[x])&&!isNaN(+x)){n+=h[x];s+=h[x]*(+x)}});return n?s/n:fin(a.policy_age_mean)?a.policy_age_mean:null}
+/* rows: every trained round, oldest first; the table shows the newest (YetoTbl), the sparklines all of them */
+function trTable(rows,ar,key){var cols=TR_COLS.filter(function(c){return !c[3]||rows.some(function(r){return c[3](r,ar[r.round]||{})})}),gone=TR_COLS.filter(function(c){return cols.indexOf(c)<0});
+  var A=function(r){return ar[r.round]||{}},sp=[["reward",function(r){return r.reward},3],["train-rollout KL",function(r){return r.kl_tr},5],["logprob |diff|",function(r){return r.logprob_diff},4],
+    ["grad_norm",function(r){return r.grad_norm},3],["TIS / IS clipped",isClip,4],["tok/s",function(r){return r.tok_s},0],["policy age",function(r){return ageMean(A(r))},2]];
+  var c=YetoTbl.cap(key,rows.slice().reverse(),{def:10,unit:"rounds"});
+  return YetoTbl.spark(sp.map(function(x){return {label:x[0],vals:rows.map(x[1]),fmt:function(v){return f(v,x[2])},title:x[0]+" per round, whole run"}}))+c.bar+
+    YetoTbl.table('<tr>'+cols.map(function(c){return '<th'+(c[1]?' title="'+esc(c[1])+'"':"")+'>'+esc(c[0])+'</th>'}).join("")+'</tr>',
+    c.rows.map(function(r){var a=A(r);return '<tr>'+cols.map(function(c,i){return '<td'+(i===cols.length-1?"":' class="num"')+'>'+c[2](r,a)+'</td>'}).join("")+'</tr>'}).join(""))+
     (gone.length?'<div class="note">hidden: '+gone.map(function(c){return esc(c[0])}).join(", ")+' (not reported by this algorithm / run)</div>':"")}
 function hist(h){var ks=Object.keys(h||{});return ks.length?ks.map(function(k){return "age "+esc(k)+": "+f(h[k],0)}).join(" · "):"n/a"}
 function asyncPanel(){
@@ -437,7 +459,7 @@ function asyncPanel(){
   var T=(A.trainers||{})[tid]||{};
   $("aTrainer").innerHTML=!rr.length?'<div class="note">no trained rounds on this trainer</div>':
     '<div class="note">totals: trained groups '+f(T.trained_groups,0)+' · dropped as stale (older than max_policy_age) '+f(T.stale_groups,0)+' · no policy identity (dropped after a resume) '+f(T.unidentified_policy_groups,0)+(T.unidentified_starved?' <b>[reader starved: '+f(T.unidentified_starved.selections,0)+' selections kept no group]</b>':'')+' · off-policy gate dropped '+f(T.gate_dropped,0)+' · short groups trained '+f(T.incomplete_groups,0)+' · too small dropped '+f(T.dropped_small_groups,0)+' · carried over '+f(T.carried_over_groups,0)+' · padded samples '+f(T.padded_samples,0)+' · policy ages of trained groups: '+hist(T.age_hist)+'</div>'+
-    trTable(rr.slice(-40).reverse(),ar)+
+    trTable(rr,ar,"trainer-rounds")+
     (rr.some(function(r){return r.resp_derived})?'<div class="note">* mean response length = trained response tokens ÷ trained samples (rl_rollout_carry_over), the tape has no batch summary</div>':"");
   var S=A.samplers||{};
   // zero-variance groups the trainer saw (rl_local_round ratio x trained groups), for samplers that report none
@@ -451,9 +473,9 @@ function asyncPanel(){
       '</td><td class="num">'+f(x.truncated,0)+(fin(x.samples)&&fin(x.truncated)?" ("+pct(x.truncated/x.samples)+")":"")+'</td><td class="num">'+f(x.dropped_groups,0)+'</td><td class="num">'+f(x.retried_trials,0)+" / "+f(x.lost_trials,0)+'</td><td class="num">'+f(x.reward_mean_last)+'</td><td class="num">'+f(x.max_backlog_groups,0)+'</td></tr>'}).join("")+'</table>'+
     (sps.some(function(c){var x=S[c.id]||{};return !fin(x.samples)})?'<div class="note">n/a in truncated / reward: the sampler did not write rl_sampler_engine_round with these fields (Miles-generating samplers and older yeto versions do not); zero-variance then comes from the trainer</div>':"");
   aBacklog(A);aRel(A);aComp(A);aDisp(A,cards);aFleet(A);
-  var pl=(A.pool||[]).slice(-100).reverse();$("aPoolBox").hidden=!pl.length;
+  var pc=YetoTbl.cap("pool-events",(A.pool||[]).slice().reverse(),{def:10,unit:"pool events"}),pl=pc.rows;$("aPoolBox").hidden=!pl.length;
   var sc=A.pool_scale;$("aPoolScale").textContent=sc?("samplers: "+sc.ready.length+" ready"+(sc.draining.length?", "+sc.draining.length+" draining ("+sc.draining.join(", ")+")":"")+(sc.paused&&sc.paused.length?", "+sc.paused.length+" paused by hand ("+sc.paused.join(", ")+")":"")+(sc.target!=null?" · target "+sc.target+(sc.manual?" (set by hand)":""):"")+(sc.ready.length?" · shards "+sc.ready.join(", "):"")):"";
-  $("aPool").innerHTML=pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>'+(/^nc_elastic_manual_/.test(e.event||"")?"manual":"pool")+'</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
+  $("aPool").innerHTML=pc.bar+pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>'+(/^nc_elastic_manual_/.test(e.event||"")?"manual":"pool")+'</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
     esc(["ticket","slot","shard","why","reason","detail","error","old","new","outcome","waited_s","source","by"].filter(function(k){return k=="slot"?(e.slot!=null||e.account!=null):e[k]!=null}).map(function(k){var v=e[k],n=k;if(k=="slot"){n=e.slot_name||"account";v=e.slot!=null?e.slot:e.account}return n+"="+String(v).slice(0,80)}).join(" "))+'</span></div>'}).join("");
 }
 /* CompactionRL: per island totals and the samplers' recent rounds (hidden without compaction data) */
@@ -480,7 +502,8 @@ function aComp(A){
   $("aComp").innerHTML='<table class="c"><tr><th>island</th><th>rounds</th>'+COMP_HEAD+'<th>reward mean per trial / per segment (last round)</th><th>xhw downweighted groups (max trial-mean shift)</th></tr>'+rows.map(function(x){var c=x[2];return '<tr><td>'+esc(x[0])+" "+esc(x[1])+'</td><td class="num">'+f(c.rounds,0)+'</td>'+compCells(c)+'<td class="num">'+f(c.reward_mean_trial)+" / "+f(c.reward_mean_segment)+'</td><td class="num">'+(c.xhw_downweighted_groups==null?"n/a":f(c.xhw_downweighted_groups,0)+" ("+f(c.xhw_trial_mean_shift_max,4)+")")+'</td></tr>'}).join("")+'</table>'+
     rows.filter(function(x){return x[2].drained_by_segments}).map(function(x){return '<div class="note">'+esc(x[0])+" "+esc(x[1])+': trials cut by drains, by segment count: '+reasons(x[2].drained_by_segments)+'</div>'}).join("")+
     (fr.length?'<div class="note">trials by segment count: written (trainer: trained), lost before the group was written (drain timeout, other version, aborted), dropped with their group, stale-dropped by the trainer; a much higher share for long trials biases the GRPO baseline to short ones</div><table class="c"><tr><th>island</th><th>segments</th><th>written</th><th>lost</th><th>dropped with group</th><th>stale (trainer)</th><th>not written</th></tr>'+fr.join("")+'</table>':"")+
-    (recent.length?'<div class="note">recent sampler rounds</div><table class="c"><tr><th>sampler</th><th>round</th><th>time</th>'+COMP_HEAD+'</tr>'+recent.slice(-20).reverse().map(function(x){return '<tr><td>'+esc(x[0])+'</td><td class="num">'+esc(x[1].rollout_id)+'</td><td class="num">'+clock(x[1].ts)+'</td>'+compCells(x[1].compaction,true)+'</tr>'}).join("")+'</table>':"")+
+    (recent.length?'<div class="note">recent sampler rounds</div>'+(function(){var c=YetoTbl.cap("compaction-rounds",recent.slice().reverse(),{def:10,unit:"sampler rounds"});
+      return c.bar+YetoTbl.table('<tr><th>sampler</th><th>round</th><th>time</th>'+COMP_HEAD+'</tr>',c.rows.map(function(x){return '<tr><td>'+esc(x[0])+'</td><td class="num">'+esc(x[1].rollout_id)+'</td><td class="num">'+clock(x[1].ts)+'</td>'+compCells(x[1].compaction,true)+'</tr>'}).join(""))})():"")+
     '<div class="note">alert cards fire on a low summary_ok share and on many compacted trials ending truncated (docs/DASHBOARD.md, compaction_* thresholds); summary tokens n/a = the samples do not report summary_tokens; — = no trial was compacted</div>';
 }
 function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t,i){el("text",{x:sx(t),y:H-6,"text-anchor":["start","middle","end"][i]},s).textContent=clock(t)})}
@@ -514,9 +537,9 @@ function aDisp(A,cards){
   html+=Object.keys(by).sort().map(function(k){var hs=by[k],bad=dead(k);
     return '<div class="note">'+(bad?'<span class="st bd"><i></i>'+esc(st[k])+'</span> ':"")+'sampler '+esc(k)+' holds '+hs.length+': '+hs.map(function(h){return "slot "+h.slot+(h.attempt?" (attempt "+h.attempt+")":"")+" claimed "+clock(h.claim_ts)+(fin(h.claim_ts)?" ("+f((now-h.claim_ts)/60,0)+" min ago)":"")}).join(", ")+
       (bad?' — <b>its island is '+esc(st[k])+': these slots wait for their lease to expire, then another sampler re-claims them</b>':"")+'</div>'}).join("");
-  var ev=(D.events||[]).filter(function(e){return e.kind!=="drain"}).slice(-12).reverse();
-  if(ev.length)html+='<table class="c"><tr><th>time</th><th>event</th><th>slot</th><th>attempt</th><th>noticed by</th><th>detail</th></tr>'+ev.map(function(e){
-    return '<tr><td class="num">'+clock(e.ts)+'</td><td>'+esc(e.kind)+'</td><td class="num">'+(e.slot==null?"—":e.slot)+'</td><td class="num">'+(e.attempt==null?"—":e.attempt)+'</td><td>'+esc(e.by)+'</td><td class="note">'+esc([e.reason,e.state,e.superseded_by?"superseded by "+e.superseded_by:null,fin(e.seen)?"last renewed "+clock(e.seen):null].filter(Boolean).join(" · "))+'</td></tr>'}).join("")+'</table>';
+  var ev=YetoTbl.cap("dispense-events",(D.events||[]).filter(function(e){return e.kind!=="drain"}).reverse(),{def:10,unit:"events"});
+  if(ev.rows.length)html+=ev.bar+YetoTbl.table('<tr><th>time</th><th>event</th><th>slot</th><th>attempt</th><th>noticed by</th><th>detail</th></tr>',ev.rows.map(function(e){
+    return '<tr><td class="num">'+clock(e.ts)+'</td><td>'+esc(e.kind)+'</td><td class="num">'+(e.slot==null?"—":e.slot)+'</td><td class="num">'+(e.attempt==null?"—":e.attempt)+'</td><td>'+esc(e.by)+'</td><td class="note wrap">'+esc([e.reason,e.state,e.superseded_by?"superseded by "+e.superseded_by:null,fin(e.seen)?"last renewed "+clock(e.seen):null].filter(Boolean).join(" · "))+'</td></tr>'}).join(""));
   $("aDisp").innerHTML=html;
 }
 function aRel(A){
@@ -537,20 +560,22 @@ function aRel(A){
       el("line",{x1:x0,y1:ly(0),x2:x1,y2:ly(i+1),stroke:"var(--P)","stroke-opacity":.5},s);el("circle",{cx:x1,cy:ly(i+1),r:4,fill:"var(--P)"},s)})});
   tAxis(s,t0,t1,sx,H);
   $("legRel").innerHTML='<span><i class="sw" style="background:var(--P)"></i>release → load done</span>'+(pool.length?'<span><i class="sw" style="background:var(--warn)"></i>NC pool event</span><span><i class="sw" style="background:var(--bad)"></i>NC pool failure (evicted / lost / crash loop)</span>':"");
-  if(rows.length)box2.innerHTML=relTable(rows,fleetSamplers(A),milesSamplers(A));
+  if(rows.length)box2.innerHTML=relTable(rows,fleetSamplers(A),milesSamplers(A),"releases",(V.table_totals||{}).releases);
 }
 // a fleet's samplers -> their island: a release row of another island is no load the sampler missed
 function fleetSamplers(A){var o={};(A.islands||[]).forEach(function(x){x.pools.forEach(function(p){p.samplers.forEach(function(s){o[s]=x.island})})});return o}
 // a fleet's Miles sampler islands of the launch: their release-load column says so (an external pool's keeps its id)
 function milesSamplers(A){var o={};(A.islands||[]).forEach(function(x){x.pools.forEach(function(p){if(p.source==="miles")p.samplers.forEach(function(s){o[s]=1})})});return o}
-function relTable(rows,sIsl,ml){ml=ml||{};
+/* key: the table's YetoTbl key; total: release rows of the run when the page holds only the newest */
+function relTable(rows,sIsl,ml,key,total){ml=ml||{};
   var sids=[];rows.forEach(function(r){Object.keys(r.loads||{}).forEach(function(k){if(sids.indexOf(k)<0)sids.push(k)})});sids.sort();
   // a fleet: one row per (island, version), both islands may release v4
   var il=rows.some(function(r){return r.island!=null});sIsl=sIsl||{};
-  return '<table class="c"><tr>'+(il?'<th>island</th>':"")+'<th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>'+(ml[k]?"Miles sampler island ":"sampler ")+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>'+
+  var c=YetoTbl.cap(key||"releases",rows.slice().reverse(),{def:10,total:total,unit:"releases"});
+  return c.bar+YetoTbl.table('<tr>'+(il?'<th>island</th>':"")+'<th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>'+(ml[k]?"Miles sampler island ":"sampler ")+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>',
     // a sampler starting on the base weights makes a v0 row with no trainer release: "base"
-    rows.slice(-30).reverse().map(function(r){var base=r.trainer==null&&!fin(r.released_at);return '<tr>'+(il?'<td class="num">'+esc(r.island==null?"—":r.island)+'</td>':"")+'<td class="num">v'+esc(r.policy_version)+'</td><td>'+(base?'<span class="note">base</span>':esc(r.trainer==null?"n/a":r.trainer))+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base?"—":f(r.upload_s,1))+'</td>'+
-      sids.map(function(k){var ld=(r.loads||{})[k];if(!ld&&il&&sIsl[k]!=null&&sIsl[k]!==r.island)return '<td class="num note">—</td>';return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"+(fin(ld.drain_s)?'<div class="note">drain '+f(ld.drain_s,0)+" s"+(ld.drain_cut?", "+f(ld.drain_cut,0)+" cut":"")+'</div>':"")):"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>'}
+    c.rows.map(function(r){var base=r.trainer==null&&!fin(r.released_at);return '<tr>'+(il?'<td class="num">'+esc(r.island==null?"—":r.island)+'</td>':"")+'<td class="num">v'+esc(r.policy_version)+'</td><td>'+(base?'<span class="note">base</span>':esc(r.trainer==null?"n/a":r.trainer))+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base?"—":f(r.upload_s,1))+'</td>'+
+      sids.map(function(k){var ld=(r.loads||{})[k];if(!ld&&il&&sIsl[k]!=null&&sIsl[k]!==r.island)return '<td class="num note">—</td>';return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"+(fin(ld.drain_s)?' <span class="note">· drain '+f(ld.drain_s,0)+" s"+(ld.drain_cut?", "+f(ld.drain_cut,0)+" cut":"")+'</span>':"")):"not loaded")+'</td>'}).join("")+'</tr>'}).join(""))}
 /* a fleet of async islands (async.islands, fleet_islands.py): per island its pools, backlog, policy ages and releases */
 var ENG={vllm:"vLLM",sglang:"SGLang"};
 function engName(e){return e?(ENG[String(e).toLowerCase()]||String(e)):null}
@@ -574,7 +599,7 @@ function aFleet(A){
       fin(x.release_every)?"release every "+x.release_every:null,fin(x.max_policy_age)?"max policy age "+x.max_policy_age:null].filter(Boolean).join(" · "))+'</span></h3>'+
       '<div class="note">backlog '+(last&&fin(last[3])?f(last[3],0)+" groups":"n/a")+" (written "+f(b.written,0)+" · read position "+f(b.read,0)+") · latest release "+(fin(x.latest)?"v"+x.latest:"none")+
       " · trained groups "+f(x.trained_groups,0)+" · stale dropped "+f(pa.stale_groups,0)+" · policy age of trained groups: "+hist(pa.hist)+(fin(pa.mean_last)?" (last round mean "+f(pa.mean_last,2)+", max "+f(pa.max_last,0)+")":"")+'</div>'+
-      poolTable(x)+'<div style="max-width:760px"><div class="legend" id="legFl'+i+'"></div><div id="aFl'+i+'"></div></div>'+((x.releases||[]).length?relTable(x.releases,null,milesSamplers({islands:[x]})):"")}).join("");
+      poolTable(x)+'<div style="max-width:760px"><div class="legend" id="legFl'+i+'"></div><div id="aFl'+i+'"></div></div>'+((x.releases||[]).length?relTable(x.releases,null,milesSamplers({islands:[x]}),"releases-island-"+x.island,((V.table_totals||{}).island_releases||{})[x.island]):"")}).join("");
   I.forEach(function(x,i){blChart($("aFl"+i),$("legFl"+i),x.backlog)})}
 function render(){
   if(!V)return;O=V.overview;
@@ -598,6 +623,7 @@ function load(){
     V=x[0];EVENTS=EVENTS.concat(x[1].events||[]).slice(-3000);EV_CURSOR=x[1].cursor||EV_CURSOR;render()}).catch(function(e){$("sub").textContent="fetch failed: "+e})
 }
 if(typeof YetoExt!=="undefined")YetoExt.setReload(load);
+if(typeof YetoTbl!=="undefined")YetoTbl.setRender(render); // "+50" / "all" under a long table: draw again from the data in hand
 var resizeT=null;if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("resize",function(){clearTimeout(resizeT);resizeT=setTimeout(render,250)}); // charts drawn at the box width
 load();if(!OFFLINE)setInterval(load,POLL_MS);
 })();

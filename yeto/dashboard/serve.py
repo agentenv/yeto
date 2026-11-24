@@ -4,6 +4,7 @@
 use an SSH tunnel), follows the tapes in a background thread and answers:
 
   GET /                         v7 page (same static file as the export)
+  GET /api/view?limit=N|all     everything the page draws (table-only lists: newest N rows)
   GET /api/overview
   GET /api/islands/<id>
   GET /api/rounds?only_bad=1
@@ -24,7 +25,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import export as export_mod
-from .reducer import Reducer
+from .reducer import VIEW_TABLE_MAX, Reducer
 from .sources import TapeSource, discover, make_source, operator_stops_near
 
 LOOPBACK_NAMES = ("localhost",)
@@ -122,7 +123,19 @@ class _Handler(BaseHTTPRequestHandler):
                 body = export_mod.render_page(None).encode("utf-8")
                 return self._send(200, body, "text/html; charset=utf-8")
             if path == "/api/view":  # everything the page draws (section 9)
-                return self._json(r.page_view(live=self.live), extra={"X-Yeto-Build": export_mod.build_id()})
+                # ?limit=N: rows of each table-only list (newest first kept); ?limit=all: every row
+                lim = q.get("limit")
+                if lim is None:
+                    table_limit: int | None = VIEW_TABLE_MAX
+                elif lim in ("all", "0"):
+                    table_limit = None
+                else:
+                    try:
+                        table_limit = max(1, int(lim))
+                    except ValueError:
+                        return self._json({"error": "limit must be an integer or 'all'"}, 400)
+                return self._json(r.page_view(live=self.live, table_limit=table_limit),
+                                  extra={"X-Yeto-Build": export_mod.build_id()})
             if path == "/api/overview":
                 return self._json(r.overview(live=self.live))
             if path.startswith("/api/islands/"):
