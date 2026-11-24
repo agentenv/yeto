@@ -389,9 +389,11 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
                             task_key: str | None = None, environ: Any = None) -> "Any":
     """The engine sampler's prompts from the store ledger (``prompts.dispense``
     with ``backend: "store"``; ``store_dispense.StoreDispensedPrompts``): the
-    ledger lives under ``namespace`` of the run's store (``dispense.store``, else
-    ``buffer_root`` / ``store``), so samplers that share only the bucket share
-    the tasks. The holder is the sampler id, the incarnation this process's.
+    ledger lives under ``namespace`` of the run's store (``dispense.store``, else the
+    spec's ``dispense_store``, else ``buffer_root`` / ``store``), so samplers that
+    share only the bucket share the tasks; ``dispense_store`` (a fleet's shared
+    ledger) moves only the ledger, the sandbox gate and the lease records stay in
+    the sampler's own store. The holder is the sampler id, the incarnation this process's.
     On a plan written by older code (version 2) the incarnation lease records of
     the other samplers (same store) free the claims of a fenced one at once; from
     plan version 3 on the pool's retire marker and the new incarnation's recover
@@ -399,7 +401,7 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
     from .incarnation_lease import read_lease  # noqa: PLC0415
     from .resume import store_for  # noqa: PLC0415
     from .sampler_breakers import dispense_limits, spec_breakers  # noqa: PLC0415
-    from .store_dispense import StoreDispensedPrompts  # noqa: PLC0415
+    from .store_dispense import StoreDispensedPrompts, spec_dispense_store  # noqa: PLC0415
     from .task_dispense import SAMPLER_INCARNATION_ENV, DispenseError  # noqa: PLC0415
 
     prompts = spec["prompts"]
@@ -409,9 +411,16 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
     if not incarnation:
         raise SamplerSpecError("prompts.dispense backend store needs the sampler incarnation "
                                f"({SAMPLER_INCARNATION_ENV}; set by engine_sampler_entry.run)")
-    root = str(config.get("store") or spec.get("buffer_root") or _require(spec, "store"))
+    try:
+        shared = spec_dispense_store(spec)  # dispense_store / dispense.store: a ledger shared across stores
+    except DispenseError as error:
+        raise SamplerSpecError(str(error)) from error
+    root = str(shared or spec.get("buffer_root") or _require(spec, "store"))
     store = store_for(root, environ=environ)
-    lease_store = store
+    # dispense_store moves the ledger only: the gate's manifest and the lease records stay in the own store
+    own = store if config.get("store") or not spec.get("dispense_store") else store_for(
+        str(spec.get("buffer_root") or _require(spec, "store")), environ=environ)
+    lease_store = own
     section = spec.get("incarnation_lease", True)
     if isinstance(section, Mapping) and section.get("store"):
         lease_store = store_for(str(section["store"]), environ=environ)
@@ -433,7 +442,7 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
             from yeto.sandbox.docker import DockerError  # noqa: PLC0415
 
             try:
-                gate = gate_from_spec(spec, ledger_objects(store), environ=env)
+                gate = gate_from_spec(spec, ledger_objects(own), environ=env)
                 if gate is not None:
                     gate.check_docker()  # an unreachable daemon fails the start, not a silent capacity wait
             except (EnvsError, DockerError) as error:

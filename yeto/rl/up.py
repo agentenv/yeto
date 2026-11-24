@@ -2132,10 +2132,16 @@ class Run:
         left, pools = 0, []
         try:
             objects = store_dispense.ledger_objects(self._objects())
+            seen: dict[tuple[str, str], dict[str, Any]] = {}  # pools sharing one ledger read it once
             for i in range(len(self.pools)):
                 cfg = self.pools[i].load()
-                ns = str(((cfg.get("sampler") or {}).get("dispense") or {}).get("namespace") or "task-dispense")
-                totals = store_dispense.status(objects, ns, details=False, settled=False)["totals"]
+                store, ns = self.dispense_ledger(i, cfg)
+                key = (up_consistency._norm_store(store), ns)
+                if key not in seen:
+                    ledger = objects if store == self.cfg["store"] else store_dispense.ledger_objects(
+                        self._objects_of(store))
+                    seen[key] = store_dispense.status(ledger, ns, details=False, settled=False)["totals"]
+                totals = seen[key]
                 if not totals.get("ended"):
                     n = sum(int(totals.get(k) or 0) for k in ("queued", "running", "stale", "unclaimed"))
                     left += n if n else 1  # no plan / no slots: not known to be settled
@@ -2558,10 +2564,15 @@ class Run:
                 "members": [m for r in pools for m in (r.get("samplers") or {}).get("members") or ()]}
         if len(pools) > 1:
             out["pools"] = pools
-        p = subprocess.run([self.py, "-m", "yeto.rl.engine.store_dispense", "status", "--store", self.cfg["store"],
-                            "--namespace", self._namespace(), "--brief"],
-                           env=self.env, capture_output=True, text=True, timeout=300, check=False)
-        out["dispense"] = _output_tail(p)
+        ledgers = []
+        for store, ns, names in self.dispense_ledgers():
+            p = subprocess.run([self.py, "-m", "yeto.rl.engine.store_dispense", "status", "--store", store,
+                                "--namespace", ns, "--brief"],
+                               env=self.env, capture_output=True, text=True, timeout=300, check=False)
+            ledgers.append({"store": store, "namespace": ns, "pools": names, "status": _output_tail(p)})
+        out["dispense"] = ledgers[0]["status"]  # the first (or only) ledger, as before
+        if len(ledgers) > 1:  # pools with a ledger each (a fleet's islands): every one
+            out["dispense_ledgers"] = ledgers
         out["trainer_buffer"] = self.trainer_buffer_counts()
         out["breakers"] = self.breaker_status()
         return out
@@ -2721,8 +2732,48 @@ class Run:
         return rc
 
     def _namespace(self) -> str:
-        cfg = self.pools[0].load()
-        return str(((cfg.get("sampler") or {}).get("dispense") or {}).get("namespace") or "task-dispense")
+        return self.dispense_ledger(0)[1]
+
+    def dispense_ledger(self, i: int, cfg: dict[str, Any] | None = None) -> tuple[str, str]:
+        """``(store, namespace)`` of pool ``i``'s store-dispenser ledger: the store its
+        dispense config or spec names (``dispense_store``: a fleet's shared ledger,
+        ``nc_cli.pool_dispense_store``), else the store its samplers write when that is
+        not the run's (a trainer substore: an island's own ledger), else the run's
+        store (the value of the run config, as before)."""
+        from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
+
+        cfg = self.pools[i].load() if cfg is None else cfg
+        ns = str(((cfg.get("sampler") or {}).get("dispense") or {}).get("namespace") or "task-dispense")
+        store = nc_cli.pool_dispense_store(cfg)
+        if store is None:
+            try:
+                written = up_consistency.pool_store(cfg)
+            except Exception:  # noqa: BLE001 - not known: the run's store
+                written = None
+            if written is not None and up_consistency._norm_store(written) != up_consistency._norm_store(
+                    self.cfg["store"]):
+                store = written
+        return (self.cfg["store"] if store is None else str(store)), ns
+
+    def dispense_ledgers(self) -> list[tuple[str, str, list[str]]]:
+        """The distinct ledgers of the run's pools, ``(store, namespace, [pool names])`` in
+        pool order (pools sharing one ledger are one entry); the run store's default
+        ledger when the run has no pool."""
+        out: dict[tuple[str, str], tuple[str, str, list[str]]] = {}
+        for i, ref in enumerate(self.pools):
+            store, ns = self.dispense_ledger(i)
+            out.setdefault((up_consistency._norm_store(store), ns), (store, ns, []))[2].append(ref.name)
+        return list(out.values()) or [(self.cfg["store"], "task-dispense", [])]
+
+    def _objects_of(self, store: str):
+        """The object API of a store other than the run's (a fleet's shared ledger)."""
+        from yeto.cloud.s3_store import head_objects  # noqa: PLC0415
+
+        if not str(store).startswith(("s3://", "r2://")):
+            from yeto.rl.engine.store_dispense import DirObjects  # noqa: PLC0415
+
+            return DirObjects(store)
+        return head_objects(str(store).replace("r2://", "s3://", 1), environ=self.env)
 
 
 def _worker_alive(run: str) -> bool:

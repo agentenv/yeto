@@ -517,8 +517,9 @@ class NcSshOps:
         dispense = pool_dispense(self.cfg)
         if dispense is None:
             raise NcError("no store dispenser (prompts.dispense.backend store) in this pool: nothing to drain")
-        if dispense.get("store"):
-            store = elastic.s3_fence_store(str(dispense["store"]), self.cfg["r2_env_file"])
+        shared = pool_dispense_store(self.cfg)  # a ledger outside the run store (a fleet's shared one)
+        if shared:
+            store = elastic.s3_fence_store(shared, self.cfg["r2_env_file"])
         else:
             store = self._fence_store()
         return store.objects, str(dispense.get("namespace") or store_dispense.DEFAULT_NAMESPACE)
@@ -943,6 +944,23 @@ def pool_dispense(cfg: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(found, dict) and found.get("backend", "store") == "store" and found.get("backend"):
         return dict(found)
     return None
+
+
+def pool_dispense_store(cfg: dict[str, Any]) -> str | None:
+    """The store of a pool's store-dispenser ledger when it is not the pool's run store:
+    ``store`` of :func:`pool_dispense`, else the spec's ``dispense_store`` (a fleet's
+    shared ledger, ``store_dispense.spec_dispense_store``); None: the run store."""
+    dispense = pool_dispense(cfg)
+    if dispense is None:
+        return None
+    if dispense.get("store"):
+        return str(dispense["store"])
+    try:
+        spec = json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text()) if cfg.get("spec") else {}
+    except (OSError, ValueError):
+        return None
+    shared = spec.get("dispense_store") if isinstance(spec, dict) else None
+    return str(shared).strip() if isinstance(shared, str) and shared.strip() else None
 
 
 def _unknown(section: str, doc: Any, known: frozenset[str]) -> None:

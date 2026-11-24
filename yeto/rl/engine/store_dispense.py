@@ -114,6 +114,25 @@ Rules:
   (:meth:`StoreDispensedPrompts.hold_verdict`: the group is neither written nor
   released, the sampler asks again). Only a failed write ends a round.
 
+Shared ledger (a fleet of trainer islands). The ledger lives under ``namespace``
+of the sampler's own store unless the spec names another one
+(:func:`spec_dispense_store`: ``dispense_store``, or ``prompts.dispense.store``).
+Pools whose samplers write different stores (each island's ``<store>/trainer<k>``)
+and name one ``dispense_store`` (``<store>/fleet/dispense``,
+:func:`fleet_dispense_store`) share one slot sequence: every slot is claimed by one
+sampler of the whole fleet, so a prompt is given out once per pass whichever island
+takes it. Nothing in the ledger is per pool: the holder is the sampler id (its
+shard, unique across the fleet since every pool's ``shard_base`` is), and every
+sampler checks the one ``plan.json`` (rows, fingerprint, seed, passes, streams,
+hold-out), so the pools sharing a ledger need the same prompt file and dispense
+settings (a sampler of another file is refused: ``DispenseMismatch``). Only the
+ledger moves: the sampler's buffer shard, its releases, its incarnation lease and
+the sandbox readiness manifest stay in its own store, so a restarted sampler
+recovers from its own shard (:meth:`StoreDispensedPrompts.recover`) and a pool
+retires a replaced sampler in the shared ledger (:func:`retire`): its unconfirmed
+slots go to any sampler of the fleet, its trained ones stay settled. Pools
+without ``dispense_store`` keep a ledger each in their own store (one per island).
+
 This is the reference implementation of the WorkContract
 (:mod:`yeto.rl.engine.work_contract`; conformance cases in
 ``tests/fixtures/work_contract_cases.json``).
@@ -172,6 +191,46 @@ DEFAULT_MAX_SCAN_S = 120.0
 STORE_CONFIG_KEYS = frozenset({
     "backend", "namespace", "store", "seed", "passes", "lease_s", "max_redo", "holdout", "holdout_ids",
     "require_holdout", "mix", "by_label", "labels", "scan_s", "max_scan_s", "full_scan"})
+
+
+#: Sampler spec key: the store the ledger lives in when it is not the sampler's own
+#: (module doc, shared ledger). Only the ledger moves there.
+DISPENSE_STORE_KEY = "dispense_store"
+#: A fleet's shared ledger, relative to the run's store (:func:`fleet_dispense_store`).
+FLEET_DISPENSE_DIR = "fleet/dispense"
+
+
+def fleet_dispense_store(store: str) -> str:
+    """The shared ledger store of a fleet whose run store is ``store``:
+    ``<store>/fleet/dispense`` (a path or a ``scheme://`` URI)."""
+    return f"{str(store).rstrip('/')}/{FLEET_DISPENSE_DIR}"
+
+
+def _same_store(a: str, b: str) -> bool:
+    def norm(uri: str) -> str:
+        uri = str(uri).strip().rstrip("/")
+        return "s3://" + uri[len("r2://"):] if uri.startswith("r2://") else uri
+
+    return norm(a) == norm(b)
+
+
+def spec_dispense_store(spec: Mapping[str, Any]) -> str | None:
+    """The store of the ledger a sampler spec names when it is not the sampler's own:
+    ``prompts.dispense.store``, else the spec's ``dispense_store``; None: the sampler's
+    own store (``buffer_root`` / ``store``). Both set to different stores, or a
+    ``dispense_store`` that is not a non-empty string, is refused (DispenseError)."""
+    prompts = spec.get("prompts")
+    dispense = prompts.get("dispense") if isinstance(prompts, Mapping) else None
+    named = dispense.get("store") if isinstance(dispense, Mapping) else None
+    shared = spec.get(DISPENSE_STORE_KEY)
+    if shared is not None and (not isinstance(shared, str) or not shared.strip()):
+        raise DispenseError(f"{DISPENSE_STORE_KEY} must be a store path or URI (got {shared!r})")
+    if named and shared and not _same_store(str(named), shared):
+        raise DispenseError(f"{DISPENSE_STORE_KEY} {shared!r} and prompts.dispense.store {named!r} name two "
+                            "ledgers: set one")
+    if named:
+        return str(named)
+    return shared.strip() if shared else None
 
 
 def check_store_config(config: Any) -> None:
