@@ -93,7 +93,16 @@ def test_score_reads_the_sources_before_the_stated_values():
     spot = b.Offer(pool="sky", name="h100", island="0", tier=b.SPOT, provider="sky", cloud="nebius",
                    region="eu-north1", gpu="H100", gpus=8, ledger_key="H100:8@eu-north1/spot")
     prices = Prices({("nebius", "H100", True): 6.32})
-    assert b.node_price(spot, prices) == 6.32 and prices.asked == [("nebius", "H100", 8, True, "eu-north1")]
+    assert b.node_price(spot, prices) == (6.32, "table") and prices.asked == [("nebius", "H100", 8, True, "eu-north1")]
+    # no row: the stated price is a second source: used, but flagged in the risks and the decision's notes
+    stated = b.Offer(pool="sky", name="h200", island="0", tier=b.SPOT, provider="sky", cloud="nebius", gpu="H200",
+                     gpus=8, usd_h=11.0)
+    assert b.node_price(stated, prices) == (11.0, "stated")
+    assert "not in the price table: stated usd_h 11.0 used" in b.score_offer(stated, prices=prices).risks
+    d = b.decide([stated], [b.Demand("0", want=1)], prices=prices)
+    assert d.targets == {"sky/h200": 1} and d.notes[0] == "sky/h200: not in the price table: stated usd_h 11.0 used"
+    assert all("not in the price" not in r for r in b.score_offer(stated).risks), \
+        "no table given (stated prices only): nothing to flag"
     assert b.score_offer(spot, ledger=Ledger({"H100:8@eu-north1/spot": Row(success=0.4)})).risks[-1] == \
         "order success rate 40%", "the ledger is read by the offer's ledger key"
     assert b.score_offer(offer("p", "x", b.SPOT, usd=None)).score is None, "unknown price: not scored"
@@ -118,7 +127,7 @@ def test_the_real_sources_fit_the_protocols():
     s = b.score_offer(nc, **real)
     assert s.usd_h == pytest.approx(24.0) and s.terms["throughput"]["value"] == pytest.approx(1000.0)
     assert s.availability == pytest.approx((14400.0 - 1680.0) / 14400.0)
-    assert b.node_price(spot, real["prices"]) == pytest.approx(6.32)
+    assert b.node_price(spot, real["prices"])[0] == pytest.approx(6.32)
     d = b.decide([nc, spot], [b.Demand("0", want=4)], **real)
     assert d.targets == {"nc/nc": 2, "sky/h100": 2}
 
@@ -348,3 +357,33 @@ def test_scale_file_sink_writes_an_automatic_scale():
     assert seen == [({"run": "r"}, "/x/p.json", 3,
                      {"source": "auto", "extra": {"broker": {"offers": {"p/a": 3}, "refill": "p/a"}}})]
     assert not sink.set_target("other", 1, offers={}, refill=None)
+
+
+def test_through_pool_scale_only_the_total_takes_effect_today(tmp_path, monkeypatch):
+    """The pool applies the scale file's target; the offer mix and refill ride along under
+    ``broker`` and change nothing yet (TODO with the NodePool split: the pool orders at the
+    refill offer). This pins today's behaviour."""
+    import json
+    import subprocess
+
+    from tests.test_nc_pool_scale import _ready, _scaled_pool
+    from yeto.launch.nc import pool_run
+
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("YETO_NC_ACCOUNTS", "1,2,3,4")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)))
+    cfg, path, clock, cloud, pool = _scaled_pool(tmp_path, target=2)
+    sink = b.ScaleFileSink({"nc": (cfg, path)})
+    orders = len(cloud.kinds("order"))
+    assert sink.set_target("nc", 3, offers={"nc/a": 2, "nc/b": 1}, refill="nc/b")
+    doc = json.loads(pool_run.scale_path(cfg).read_text())
+    assert doc["target"] == 3 and doc["source"] == "auto"
+    assert doc["broker"] == {"offers": {"nc/a": 2, "nc/b": 1}, "refill": "nc/b"}
+    pool.tick()
+    assert pool.config.target == 3 and len(cloud.kinds("order")) == orders + 1
+    # same total, another mix: the pool keeps its target and orders nothing
+    assert sink.set_target("nc", 3, offers={"nc/a": 0, "nc/b": 3}, refill="nc/b")
+    orders = len(cloud.kinds("order"))
+    pool.tick()
+    assert pool.config.target == 3 and len(cloud.kinds("order")) == orders
+    assert len(_ready(pool)) >= 2

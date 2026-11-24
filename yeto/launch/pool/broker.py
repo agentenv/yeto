@@ -233,17 +233,20 @@ class Decision:
 # -- scoring -----------------------------------------------------------------------
 
 
-def node_price(offer: Offer, prices: PriceTable | None) -> float | None:
-    """The offer's whole-node USD/h: the price table's row (by cloud, gpu, gpus, spot-ness,
-    region), else the stated ``usd_h``; an own machine costs nothing."""
-    usd_h = None
+def node_price(offer: Offer, prices: PriceTable | None) -> tuple[float | None, str]:
+    """The offer's whole-node USD/h and where it came from: the price table's row (by cloud,
+    gpu, gpus, spot-ness, region); with no row, the stated ``usd_h`` (``"stated"``: with a
+    table given this is a second price source, so the decision says so in its notes and
+    the offer carries a risk); an own machine costs nothing."""
+    if offer.tier == OWN and offer.usd_h is None:
+        return 0.0, "own"
     if prices is not None and offer.tier != OWN and offer.gpus and offer.gpu:
         spot = {SPOT: True, ON_DEMAND: False}.get(offer.tier)
         usd_h = prices.node_usd_h(offer.cloud or offer.provider, offer.gpu, offer.gpus, spot=spot,
                                   region=offer.region or None)
-    if usd_h is None:
-        usd_h = offer.usd_h
-    return 0.0 if usd_h is None and offer.tier == OWN else usd_h
+        if usd_h is not None:
+            return usd_h, "table"
+    return offer.usd_h, "stated" if offer.usd_h is not None else "unknown"
 
 
 def _row(offer: Offer, ledger: OfferLedger | None) -> LedgerRow | None:
@@ -294,7 +297,7 @@ def score_offer(offer: Offer, *, prices: PriceTable | None = None, ledger: Offer
     (score 0). Unknown price: no score (the offer is not used)."""
     row = _row(offer, ledger)
     kind_caps = caps(offer.provider) if caps is not None else None
-    usd_h = node_price(offer, prices)
+    usd_h, price_source = node_price(offer, prices)
     tput, tput_source = _tput(offer, row)
     cold, cold_source = cold_start_s(offer, row, kind_caps)
     life = expected_life_s(offer, row, kind_caps)
@@ -314,6 +317,8 @@ def score_offer(offer: Offer, *, prices: PriceTable | None = None, ledger: Offer
     elif value is not None:
         risks.append("throughput unknown: ranked per useful node hour" if not tput
                      else "another offer has no throughput: ranked per useful node hour")
+    if prices is not None and price_source == "stated":
+        risks.append(f"not in the price table: stated usd_h {usd_h} used")
     rate = row.start_success_rate if row is not None else None
     if rate is not None and rate < 0.5:
         risks.append(f"order success rate {rate:.0%}")
@@ -343,7 +348,7 @@ def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mappi
     scored = {o.key: score_offer(o, prices=prices, ledger=ledger, caps=caps, per_token=per_token) for o in offers}
     demand = {d.island: d for d in demands}
     ceiling = budget.hourly_ceiling(policy.usd_per_h)
-    notes: list[str] = []
+    notes: list[str] = [f"{k}: {r}" for k, s in scored.items() for r in s.risks if r.startswith("not in the price")]
     targets = {k: 0 for k in scored}
     spread: dict[tuple[str, str, str], int] = {}
     usd_h = 0.0
@@ -625,7 +630,12 @@ class Broker:
 class ScaleFileSink:
     """A :class:`TargetSink` over each pool's ``pool-scale`` control file
     (``yeto.launch.nc.pool_run.scale_pool`` with ``source="auto"``: refused for
-    ``elastic.manual_hold_s`` after a manual change, so a person's scale wins)."""
+    ``elastic.manual_hold_s`` after a manual change, so a person's scale wins).
+
+    Only the total takes effect today: the file's ``target`` is what the pool applies;
+    the offer mix and the refill offer ride along under ``broker`` for the record. TODO
+    (with the NodePool split): the pool orders its refills at ``broker.refill`` and
+    moves toward ``broker.offers`` at its natural boundaries."""
 
     def __init__(self, pools: Mapping[str, tuple[dict[str, Any], str]], *,
                  scale: Callable[..., int] | None = None) -> None:
