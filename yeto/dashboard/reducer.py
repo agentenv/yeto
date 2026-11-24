@@ -267,6 +267,8 @@ def _new_island(iid: str) -> dict:
         "startup_steps": {}, "startup_step": None, "startup_step_ts": None,
         # cutoff per round, per-trajectory timing, load samples
         "cutoffs": {}, "trajs": [], "load": deque(maxlen=NODE_SERIES_MAX),
+        # rl_trajectory_reward per round on the island's own tape: rid -> [reward sum, count]
+        "traj_reward": {},
         # rl_driver_phase marks (wall clock): phase spans when the tape has no rl_timeline_span
         "phase_marks": [],
         # launch-preflight-guards 3.5: rl_island_override (negative-test island)
@@ -656,6 +658,8 @@ class Reducer:
 
     def _point(self, isl: dict, x: int, values: dict) -> None:
         pt = isl["points"].setdefault(x, {})
+        if values.get("reward") is not None:
+            pt.pop("reward_src", None)  # a reported reward_mean wins over the trajectory mean
         for k, v in values.items():
             if v is not None:
                 pt[k] = v
@@ -767,7 +771,12 @@ class Reducer:
             if isinstance(rid, int):
                 isl["cutoffs"][rid] = {k: r.get(k) for k in CUTOFF_KEYS}
         elif event == "rl_trajectory_reward":
-            isl["trajs"].append(_traj(r))
+            t = _traj(r)
+            isl["trajs"].append(t)
+            if t["rid"] is not None and t["reward"] is not None and t["aborted"] is not True:
+                acc = isl["traj_reward"].setdefault(t["rid"], [0.0, 0])
+                acc[0] += t["reward"]
+                acc[1] += 1
         elif event == "rl_load_sample":
             if ts is not None:
                 isl["load"].append([ts] + [finite(r.get(k)) for k in LOAD_KEYS])
@@ -797,6 +806,8 @@ class Reducer:
                 isl["finalized_ts"] = ts
         elif event == "rl_island_override":
             isl["negative_test"] = negative_test_label(r.get("overrides"))
+        elif event == "rl_verl_island_start" or (event == "rl_engine_selected" and r.get("rl_backend") == "verl"):
+            isl["backend"] = "verl"  # verl reports no train-rollout / PPO KL on its rounds
         elif event == "rl_reconfiguration":
             isl["reconfig"].append({"ts": ts, "result": r.get("result"), "rollout_id": r.get("rollout_id"),
                                     "cause": r.get("cause"), "error": r.get("error")})
@@ -864,10 +875,23 @@ class Reducer:
         off = t - b
         isl["spans"].append({"phase": task, "rollout_id": r.get("rollout_id"), "start": a + off, "end": b + off})
 
+    @staticmethod
+    def _fill_traj_reward(isl: dict) -> None:
+        """A trained round whose rl_round_trained carries no reward_mean (a full-parameter island
+        logs per-trajectory rewards; the batch summary needs the buffer reader) reads the mean
+        of the island's own rl_trajectory_reward records of that round instead."""
+        for rid, (total, n) in isl["traj_reward"].items():
+            pt = isl["points"].get(rid + 1)
+            if n and pt is not None and rid in isl["trained_ts"] \
+                    and (pt.get("reward") is None or pt.get("reward_src") == "trajectories"):
+                pt["reward"] = total / n
+                pt["reward_src"] = "trajectories"
+
     def round_records(self, isl: dict) -> list[dict]:
         """Per-round record for the page: metrics + phase spans + time split.
         A publish span has no rollout_id: it belongs to the round whose sync it follows
         (it publishes policy rollout_id+1). Missing values stay None."""
+        self._fill_traj_reward(isl)
         rounds: dict[int, dict] = {}
         spans = self.phase_spans(isl)
         pubs = sorted((s for s in spans if s["phase"] == "P"), key=lambda s: s["start"])
@@ -890,7 +914,7 @@ class Reducer:
             out.append({
                 "round": rid, "policy_version": rid,
                 "published_version": rid + 1 if (rid + 1) in isl["pubs"] else None,
-                "reward": pt.get("reward"), "reward_std": pt.get("reward_std"),
+                "reward": pt.get("reward"), "reward_src": pt.get("reward_src"), "reward_std": pt.get("reward_std"),
                 "p10": pt.get("reward_p10"), "p50": pt.get("reward_p50"), "p90": pt.get("reward_p90"),
                 "trunc": pt.get("trunc"), "logprob_diff": pt.get("logprob_diff"),
                 "resp_mean": pt.get("resp_len"), "resp_p95": pt.get("resp_p95"), "tok_s": pt.get("tok_s"),
@@ -1353,6 +1377,7 @@ class Reducer:
         return rows
 
     def _island_card(self, isl: dict, now: float) -> dict:
+        self._fill_traj_reward(isl)
         pts = isl["points"]
         last = pts[max(pts)] if pts else {}
         last_any = max([t for t in (isl["last_event_ts"], isl["last_heartbeat_ts"]) if t is not None],
@@ -1488,6 +1513,7 @@ class Reducer:
             "resumes": list(isl["resumes"]), "cuts_saved": len(isl["cuts"]),
             "segments": self.resume_segments(isl),
             "negative_test": isl["negative_test"],
+            "backend": isl.get("backend"),
         }
 
     def infer_hardware(self) -> None:
@@ -1583,6 +1609,7 @@ class Reducer:
         return left
 
     def series(self, isl: dict) -> dict:
+        self._fill_traj_reward(isl)
         out: dict[str, list] = {}
         xs = sorted(isl["points"])
         keys = [m[0] for m in METRICS] + [m[0] for m in EXTRA_SERIES]

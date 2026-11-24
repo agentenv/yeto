@@ -11,7 +11,9 @@ var DELAY_S=45,BCAST_WARN_S=90,BCAST_BAD_S=300,ROUND_WARN_S=120;
 var U=null,T=null,D=null,V=null,L=null,C=null,recvAt=0,raf=null,lastTick=null,acc=0,bound=false,v1Legend=null,fmKey="";
 
 function $(id){return document.getElementById(id)}
-function cfgBits(c){return c?[fin(c.tau)?"τ "+c.tau:null,fin(c.T)?"T "+c.T:null,fin(c.lr)?"lr "+c.lr:null]:[]}
+function cfgBits(c){return c?[fin(c.tau)?"τ "+c.tau:null,fin(c.T)?"T "+c.T:null,fin(c.lr)?"lr "+sig(c.lr):null]:[]}
+// the syncer config's float32 lr (0.6999999) at 4 significant figures (0.7)
+function sig(x){return String(Number(x.toPrecision(4)))}
 function fin(x){return typeof x==="number"&&isFinite(x)}
 function dur(s){return U.dur(s)}
 function mb(b){return U.bytes(b)}
@@ -368,17 +370,19 @@ function matrix(tn){
     var fresh=T.live&&fin(lt2)&&tn-DELAY_S-lt2>=0&&tn-DELAY_S-lt2<4;
     h+='<td class="'+cls+(fresh?" flash":"")+'" title="'+esc("committed v"+D.versions[f]+" (global step of the last merge)"+(r?"; step "+r.step+" open "+dur(r.age_s)+", pushed by "+(r.pushed.join(", ")||"none"):""))+'"><div class="v">v'+D.versions[f]+'</div><div class="s">'+s2+"</div></td>"}
   h+="</tr>";
+  var finalOnSyncer=false;
   if(sft())h+=learnerRows(tn);else D.trainers.forEach(function(tr){var off=!tr.live&&!(tr.status==="done"||tr.finalized);
     h+='<tr><th class="rh">Trainer '+esc(tr.id)+'<span class="ns">'+esc((tr.gpu||"")+" · step "+(fin(tr.step)?tr.step:"n/a")+(off?" · "+(tr.status||"lost"):tr.failure?" · failed":""))+"</span></th>";
     for(var f=0;f<P;f++){var v=tr.versions?tr.versions[f]:null,lg=D.done?0:lag(tr,f),s=tr.since?tr.since[f]:null,pushed=(tr.pushed||{})[String(f)]!=null;
       var cls=off||tr.failure?"off":lg>=2?"lag2":lg===1?"lag1":"",ready=fin(s)&&H&&s>=H;
       var mk=pushed?'<span class="mk dl">↑</span>':lg&&tr.live?'<span class="mk wt">↓'+lg+"</span>":"";
-      var ahead=fin(v)&&v>D.versions[f];
-      h+='<td class="'+cls+'" title="'+esc("anchor v"+(fin(v)?v:"n/a")+(lg?", "+lg+" merge(s) not applied":"")+(ahead?", ahead of the syncer tape":"")+(fin(s)?", "+s+" local step(s) since the anchor":"")+(pushed?", pushed t"+tr.pushed[String(f)]+", waiting for the merge":""))+'">'+mk+'<div class="v">'+(fin(v)?"v"+v:"—")+(lg?' <span class="'+(lg>=2?"bd":"wn")+'">−'+lg+"</span>":"")+"</div>"+
+      var ahead=fin(v)&&v>D.versions[f],fin_=D.done&&fin(v)&&fin(D.versions[f])&&v<D.versions[f];if(fin_)finalOnSyncer=true;
+      h+='<td class="'+cls+'" title="'+esc("anchor v"+(fin(v)?v:"n/a")+(fin_?": the island's last applied version; the final version v"+D.versions[f]+" is on the syncer (final cut)":"")+(lg?", "+lg+" merge(s) not applied":"")+(ahead?", ahead of the syncer tape":"")+(fin(s)?", "+s+" local step(s) since the anchor":"")+(pushed?", pushed t"+tr.pushed[String(f)]+", waiting for the merge":""))+'">'+mk+'<div class="v">'+(fin(v)?"v"+v:"—")+(lg?' <span class="'+(lg>=2?"bd":"wn")+'">−'+lg+"</span>":"")+"</div>"+
+        (fin_?'<div class="s">last applied · final v'+D.versions[f]+' on the syncer</div>':"")+
         (fin(s)?'<div class="s">'+s+(H?"/"+H:"")+' since anchor</div><div class="b"><i class="'+(ready?"rdy":"")+'" style="width:'+Math.min(100,H?100*s/H:0)+'%"></i></div>':(tr.since?'<div class="s">since anchor —</div>':""))+"</td>"}
     h+="</tr>"});
   h+='</table><div class="fmlg">'+(sft()?'<span><b>v41</b> committed version (syncer) = global step of the fragment\'s last merge</span><span><b>t203</b> the island\'s last contribution: the merge its delta went into, base v = the version it was computed on</span><span class="dl">↑ PUSH accepted, waiting for the merge</span><span class="wt">↓n merged after the island\'s last applying step</span>':
-    '<span><b>v41</b> committed (syncer) / anchor (trainer) version = global step of the fragment\'s last merge</span>'+(D.trainers.some(function(t){return t.since})?'<span>bar = local steps since anchor / H (green: ≥ H)</span>':"")+'<span class="dl">↑ pushed, waiting for the merge</span><span class="wt">↓n merged, not applied yet (on the wire or queued for the safe boundary)</span><span>tint: 1 / ≥ 2 merges behind</span>')+'</div>';
+    '<span><b>v41</b> committed (syncer) / anchor (trainer) version = global step of the fragment\'s last merge</span>'+(D.trainers.some(function(t){return t.since})?'<span>bar = local steps since anchor / H (green: ≥ H)</span>':"")+'<span class="dl">↑ pushed, waiting for the merge</span><span class="wt">↓n merged, not applied yet (on the wire or queued for the safe boundary)</span><span>tint: 1 / ≥ 2 merges behind</span>'+(finalOnSyncer?'<span><b>last applied</b> the island\'s last applied version; the final version is on the syncer (final cut)</span>':""))+'</div>';
   if(h!==fmKey){L.fm.innerHTML=h;fmKey=h}}
 
 // an SFT learner has no anchor vector: its last contribution per fragment (responders[] of the merges)
