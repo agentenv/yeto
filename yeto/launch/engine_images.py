@@ -17,7 +17,7 @@ An image reference that is not in the catalog (a site image) is accepted as
 it is: yeto cannot tell its architecture from the name, and the node
 preflight (``uname -m``) still checks the node itself.
 
-Engine images as capability records (unified-sampler-pool D6, bottom of this
+Engine images as capability records (unified-sampler-pool, bottom of this
 module): :class:`EngineImage` records what a pinned sampler image runs on
 (device family, CPU architecture, card architectures), its engine and version,
 its interpreter, and per model a :class:`Recipe` (precision, the reload modes
@@ -223,7 +223,7 @@ def default_image(device_family: str, role: str, engine: str | None = None) -> s
     return resolve_ref(row.ref)
 
 
-# --- engine images as capability records (unified-sampler-pool D6) ----------
+# --- engine images as capability records (unified-sampler-pool) -------------
 #
 # One :class:`EngineImage` per pinned sampler image. The digests stay in
 # ``yeto.rl.sampler_pins`` (its constants are read by the NC, Daytona and Modal
@@ -350,7 +350,7 @@ def _digest(reference: str) -> str | None:
 
 @dataclass(frozen=True)
 class EngineImage:
-    """A pinned sampler image and what it serves (unified-sampler-pool D6).
+    """A pinned sampler image and what it serves (unified-sampler-pool).
 
     ``pin``: ``"module:CONSTANT"`` of the reference (:attr:`ref` reads it, so the
     pins module stays the single source of the digest); ``family``: ``cuda`` /
@@ -561,7 +561,7 @@ def _profile_facts(profile: Any) -> dict[str, Any]:
 def resolve(profile: Any, model: str | None, engine_pref: str | Sequence[str] | None = None, *,
             load: str | None = None, precision: str | None = None, rollout: Iterable[str] = (),
             image: str | None = None) -> Resolution:
-    """The engine image for one node (unified-sampler-pool D6).
+    """The engine image for one node (unified-sampler-pool).
 
     ``profile``: a :class:`~yeto.launch.node_inventory.NodeProfile` (a plain
     ``Node`` works: no card architecture is then checked); ``model``: a model name

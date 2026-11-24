@@ -455,7 +455,7 @@ def island_nodes(nodes: list[Node], role: str) -> list[Node]:
     return [node for node in nodes if not node.roles or role in node.roles]
 
 
-# --- node profile (unified-sampler-pool D5) ----------------------------------
+# --- node profile (unified-sampler-pool) ----------------------------------------
 #
 # A NodeProfile is a Node plus what a sampler start needs to know about the
 # machine whatever its source (own SSH node, NC lease, Daytona sandbox, Modal
