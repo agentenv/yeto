@@ -408,8 +408,8 @@ function sft(S){
   var dsets={};isls.forEach(function(I){var d=I.dataset||"unknown";(dsets[d]=dsets[d]||[]).push(I)});
   chart("cDs",{kind:"stack",bucket:3600,series:Object.keys(dsets).sort().map(function(d,i){return {name:d,color:PAL[[0,1,2,3][i%4]],pts:flat(dsets[d].map(function(I){return I.rows.map(function(r){return [r[1],r[C("tokens")]]})}))}}),yfmt:k});
   // syncer events
-  var pe=ev.filter(function(e){return e[1]!=="joined"}).slice(-40).reverse();
-  $("sEvents").innerHTML=pe.length?'<table class="nt ev"><tr><th>Time</th><th>Category</th><th>Learner</th><th>Source</th></tr>'+pe.map(function(e){return '<tr><td>'+esc(day(e[0]))+'</td><td>'+esc(e[1])+'</td><td>'+(e[2]==null?"":esc(e[2]))+'</td><td>'+esc(e[3])+'</td></tr>'}).join("")+'</table>':'<div class="empty">no syncer events</div>';
+  var pc=YetoTbl.cap("syncer-events",ev.filter(function(e){return e[1]!=="joined"}).reverse(),{def:10,unit:"events"}),pe=pc.rows;
+  $("sEvents").innerHTML=pe.length?pc.bar+'<table class="nt ev"><tr><th>Time</th><th>Category</th><th>Learner</th><th>Source</th></tr>'+pe.map(function(e){return '<tr><td>'+esc(day(e[0]))+'</td><td>'+esc(e[1])+'</td><td>'+(e[2]==null?"":esc(e[2]))+'</td><td>'+esc(e[3])+'</td></tr>'}).join("")+'</table>':'<div class="empty">no syncer events</div>';
 }
 function bucketFor(isls){var s=[];isls.forEach(function(I){I.rows.forEach(function(r){if(fin(r[5]))s.push(r[5])})});s.sort(function(a,b){return a-b});var p=pctl(s,0.5);return Math.max(fin(p)?p*1.05:600,RANGE_H*3600/120)}
 
@@ -497,7 +497,7 @@ function rlm(V){
     ["Latest reward",lastRew?k(lastRew.reward,3):trained?"not recorded":"not trained yet",(lastRew?(lastRew.reward_src==="trajectories"?"trainer round: mean of its trajectory rewards (no batch summary on the tape)":"trainer batch"):trained?"reward not recorded on this run (trainer batch summary off: --rl-observe-timeline)":"trainer has no trained batch yet")+(rew.length?" · "+rew.join(" · "):lastRew||!trained?(cs.length?" · no reward reported yet (trainers report it per trained batch, samplers per round)":" · no island has reported yet"):"")],
     // releases = versions a trainer released; a sampler starting on the base weights (v0, no
     // trainer, no release time) makes a release row for its load but is not a release
-    ["Policy version / releases",(pvs.length?(trs.some(function(c){return fin(c.released_version)&&c.released_version!==c.policy_version})?"local v":"v")+Math.max.apply(null,pvs):"n/a")+" / "+trel.length,ltr?"last release v"+ltr.policy_version+" "+ago(ltr.released_at):"no trainer release yet"+(spv.length?" · samplers on v"+Math.max.apply(null,spv)+(Math.max.apply(null,spv)===0?" (base weights)":""):"")],
+    ["Policy version / releases",(pvs.length?(trs.some(function(c){return fin(c.released_version)&&c.released_version!==c.policy_version})?"local v":"v")+Math.max.apply(null,pvs):"n/a")+" / "+(fin((V.table_totals||{}).releases_trainer)?V.table_totals.releases_trainer:trel.length),ltr?"last release v"+ltr.policy_version+" "+ago(ltr.released_at):"no trainer release yet"+(spv.length?" · samplers on v"+Math.max.apply(null,spv)+(Math.max.apply(null,spv)===0?" (base weights)":""):"")],
     ["Rejected: stale / zero-var / trunc / infra",[tsum("stale_groups"),fin(ssum("zero_variance_dropped"))?ssum("zero_variance_dropped"):zvTot,ssum("truncated"),ssum("dropped_groups")].map(function(v){return fin(v)?k(v,0):"n/a"}).join(" / "),"groups / groups / samples / groups, whole run"+
       (!fin(ssum("zero_variance_dropped"))&&fin(zvTot)?" · zero-var: "+k(zvTot,0)+" of "+k(zvTr,0)+" trained groups ("+(zvTr?(100*zvTot/zvTr).toFixed(0):"?")+"%) had all-equal rewards, trained with zero advantage (trainer)":"")+
       // trials that never formed a group (aborted on infrastructure) are not in the group counts

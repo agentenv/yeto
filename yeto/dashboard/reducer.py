@@ -207,6 +207,11 @@ TRAJ_PHASES = (("gen", "generation_seconds"), ("tool", "tool_seconds"), ("judge"
 LOAD_KEYS = ("kv_used_tokens", "kv_capacity_tokens", "queued_requests", "running_requests",
              "tool_wait_trajectories")
 UTIL_TRAJ_MAX = 400  # per-trajectory rows sent to the page (most recent)
+# rows of a list the page draws only as a table (syncer merges, releases, per-round cutoff tallies,
+# carried-over trajectories) that the page view sends: the newest ones; the run's totals are in
+# ``table_totals`` (utilization: ``rounds_total`` / ``carry_total``). The page shows the newest 10 rows of a table by default; the chart
+# sources (per-round records of each island) are not cut. ``/api/view?limit=`` overrides it.
+VIEW_TABLE_MAX = 500
 # Events only written once driver.run() is going (older tapes may lack rl_driver_start).
 DRIVER_RUNNING_EVENTS = frozenset({"rl_driver_phase", "rl_heartbeat", "rl_local_round", "rl_round_trained",
                                    "rl_resource_sample", "rl_publication",
@@ -1067,8 +1072,11 @@ class Reducer:
             out[rank] = rows[::step]
         return out
 
-    def page_view(self, *, live: bool = False, now: float | None = None) -> dict:
-        """Everything the redesigned page (section 9) draws, in one object."""
+    def page_view(self, *, live: bool = False, now: float | None = None,
+                  table_limit: int | None = VIEW_TABLE_MAX) -> dict:
+        """Everything the redesigned page (section 9) draws, in one object. Lists drawn only as
+        tables keep their newest ``table_limit`` rows (None: all); ``table_totals`` names their full
+        length (the async section keeps the keys of ``AsyncState.view``)."""
         now = self.now(live) if now is None else now
         ov = self.overview(live=live, now=now)
         isl_extra = {}
@@ -1090,13 +1098,19 @@ class Reducer:
         usage = {"syncer": self.counts["syncer"] > 0, "journal": self.counts["journal"] > 0,
                  "cells": any(v["cells"] for v in isl_extra.values()),
                  "transactions": any(v["transactions"] for v in isl_extra.values())}
-        view = {"overview": ov, "islands": isl_extra, "rounds_syncer": self.rounds(), "usage": usage,
-                "label": self.label, "spot": list(self.spot)}
+        rounds_syncer = self.rounds()
+        totals: dict = {"rounds_syncer": len(rounds_syncer)}
+        view = {"overview": ov, "islands": isl_extra, "rounds_syncer": _tail(rounds_syncer, table_limit),
+                "usage": usage, "label": self.label, "spot": list(self.spot),
+                "table_limit": table_limit, "table_totals": totals}
+        for x in isl_extra.values():
+            _cap_util(x["util"], table_limit)
         fleet = fleet_islands.resolve(self)  # None unless a fleet of async islands
         asy = self.async_.view(fleet=fleet)
         if asy is not None:
             if fleet is not None:  # per-pool train-rollout mismatch (fleet_islands.pool_mismatch)
                 fleet_islands.attach_mismatch(self, asy, {i: x["rounds"] for i, x in isl_extra.items()}, fleet)
+            totals.update(_cap_releases(asy, table_limit))
             view["async"] = asy
         topo = topology_mod.view(self, ov["islands"], now)
         if topo is not None:
@@ -1111,7 +1125,8 @@ class Reducer:
         if self.compare:
             # other runs, utilization only (side by side / overlay)
             view["compare"] = [{"label": c.label, "run": c.run_name()[0],
-                                "util": {i: c.utilization(c.islands[i]) for i in c.island_ids()}}
+                                "util": {i: _cap_util(c.utilization(c.islands[i]), table_limit)
+                                         for i in c.island_ids()}}
                                for c in self.compare]
         return view
 
@@ -1819,6 +1834,41 @@ class Reducer:
             "page": self.page_view(live=live, now=now),
             "events": {"events": evs, "cursor": evs[-1]["seq"] if evs else 0, "more": False},
         }
+
+
+def _tail(rows: list, limit: int | None) -> list:
+    """The newest ``limit`` rows of a list kept oldest first (all of them for None)."""
+    return rows if limit is None or len(rows) <= limit else rows[-limit:]
+
+
+def _cap_util(util: dict | None, limit: int | None) -> dict | None:
+    """Per-round cutoff tallies and carried-over trajectories of a utilization view: the newest rows."""
+    if util is None:
+        return None
+    util["rounds_total"] = len(util["rounds"])
+    util["rounds"] = _tail(util["rounds"], limit)
+    if util.get("carry"):
+        util["carry_total"] = len(util["carry"])
+        util["carry"] = _tail(util["carry"], limit)
+    return util
+
+
+def _cap_releases(asy: dict, limit: int | None) -> dict:
+    """Release rows of the async view (and of each fleet island): the newest versions. Returns the
+    totals: every row, the rows a trainer released (a sampler's base-weights v0 row is none) and
+    each fleet island's rows."""
+    rows = asy.get("releases") or []
+    out: dict = {"releases": len(rows), "releases_trainer": sum(1 for r in rows if r.get("trainer") is not None
+                                                                 or r.get("released_at") is not None)}
+    if rows:
+        asy["releases"] = _tail(rows, limit)
+    if asy.get("islands"):
+        out["island_releases"] = {}
+        for x in asy["islands"]:
+            out["island_releases"][str(x["island"])] = len(x.get("releases") or [])
+            if x.get("releases"):
+                x["releases"] = _tail(x["releases"], limit)
+    return out
 
 
 def modal_host_shape(args: dict) -> dict | None:
