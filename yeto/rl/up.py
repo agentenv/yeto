@@ -1119,18 +1119,14 @@ class Run:
             return False
         degraded: dict[str, str] = {}
         for i in range(len(self.pools)):
+            # a config error (shards, fields, consistency) refuses the run even for a pool that
+            # is not required: only what the environment decides (its pool dry-run) degrades
             problem = self.shard_problem(i)
-            if problem is not None and not self.pools[i].required:
-                degraded[self.pools[i].name] = problem
-                continue
             if problem is not None:
                 _log(f"preflight: {problem}" + self._pool_suffix(i))
                 self.mark("preflight", ok=False)
                 return False
             problem = self.rollout_fields_problem(i) or self.consistency_problem(i)
-            if problem is not None and not self.pools[i].required:
-                degraded[self.pools[i].name] = problem
-                continue
             if problem is not None:
                 _log(f"preflight: {problem}" + self._pool_suffix(i))
                 self.mark("preflight", ok=False)
