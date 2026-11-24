@@ -643,8 +643,8 @@ def test_a_starvation_stop_downs_the_trainer_by_its_launch_name(run_up, monkeypa
     monkeypatch.setattr(up.time, "sleep", sleep)
     run.monitor(poll_s=60)
     assert runs.stop_flag_path("r1-trainer").exists() and not runs.stop_flag_path("r1").exists()
-    downs = [argv[-2:] for argv in run.calls if "down" in argv]
-    assert downs == [["down", "r1-trainer"]]
+    downs = [argv[-3:] for argv in run.calls if "down" in argv]
+    assert downs == [["down", "--missing-ok", "r1-trainer"]]
     assert not any("pool-stop" in argv for argv in run.calls)
 
 
@@ -831,4 +831,4 @@ def test_a_starvation_stop_still_downs_the_trainer_when_the_stop_flag_cannot_be_
     monkeypatch.setattr(up.time, "sleep", slept.append)
     run.starvation_stop("no sampler", poll_s=60)
     assert killed == [42] and 60 not in slept  # no grace wait for a drain that was never asked for
-    assert [argv[-2:] for argv in run.calls if "down" in argv] == [["down", "r1-trainer"]]
+    assert [argv[-3:] for argv in run.calls if "down" in argv] == [["down", "--missing-ok", "r1-trainer"]]

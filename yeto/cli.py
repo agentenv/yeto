@@ -1147,6 +1147,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     down = sub.add_parser("down", help="stop a run's worker and tear down its clusters")
     down.add_argument("run", help="run name (its --cluster-prefix)")
+    down.add_argument("--missing-ok", action="store_true",
+                      help="exit 0 when no such run is registered: nothing to stop (run up's "
+                      "teardown of a launcher that exited before it registered the run)")
 
     stop_run = sub.add_parser(
         "stop-run",
@@ -2380,6 +2383,9 @@ def _cmd_down_clusters(args) -> int:
     name = args.run
     meta = runs.load_run(name)
     if meta is None:
+        if getattr(args, "missing_ok", False):
+            print(f"[yeto] no run '{name}' registered: nothing to stop")
+            return 0
         known = ", ".join(m.get("name", "?") for m in runs.list_runs()) or "(none)"
         print(f"[yeto] unknown run '{name}'. Known runs: {known}", file=sys.stderr)
         return 1

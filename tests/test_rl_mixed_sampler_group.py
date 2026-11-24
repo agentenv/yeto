@@ -61,6 +61,10 @@ def test_a_trainer_reads_its_sampler_islands_and_its_pools_in_its_own_sub_store(
     assert sampler.rl_resume_store == f"{MOUNT}/trainer1"
     assert sampler.rl_sampler_node == "island0" and "island0" in sampler.rl_buffer_shards
     assert sampler.rl_sampler_until_trainers_end == 1
+    # its rl_sampler_start names learner 1 as its island (an external pool's sampler does too)
+    assert sampler.rl_sampler_feeds_learner == 1 and "--rl-sampler-feeds-learner 1" in r0["learner_command"]
+    assert sample_roles.resolve(sampler, groups_per_round=4).feeds_learner == 1
+    assert t0.rl_sampler_feeds_learner is None and t1.rl_sampler_feeds_learner is None
     for request in (r0, r1, r2):
         for flag in ("--rl-island-buffer-shards", "--rl-island-sampler-follows", "--rl-island-release-every"):
             assert flag not in request["learner_command"]  # launch flags, never island flags
@@ -74,6 +78,7 @@ def test_without_the_binding_flag_sampler_j_feeds_trainer_j_mod_k():
     _plan, islands = _islands(args)
     assert [r["buffer_shards"] for r, _ in islands[:2]] == [["island2", "poolA-i0-0"], ["island3", "poolB-i1-0"]]
     assert [s.rl_resume_store for _, s in islands[2:]] == [f"{MOUNT}/trainer0", f"{MOUNT}/trainer1"]
+    assert [s.rl_sampler_feeds_learner for _, s in islands[2:]] == [0, 1]
 
 
 def test_one_full_parameter_trainer_with_a_sampler_island_and_a_pool():

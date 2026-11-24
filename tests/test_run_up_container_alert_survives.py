@@ -71,4 +71,4 @@ def test_the_monitor_keeps_enforcing_the_wall_clock_after_a_bad_container_poll(r
     monkeypatch.setattr(run, "watch_nc_after_breach", lambda why, poll_s=60.0: None)
     run.monitor(poll_s=1)
     assert run.state["breaker"]["why"] == "wall clock"
-    assert any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
+    assert any(argv[-3:] == ["down", "--missing-ok", "r1-trainer"] for argv in run.calls)

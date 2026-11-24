@@ -431,6 +431,17 @@ def test_down_unknown_run(capsys):
     assert "unknown run" in capsys.readouterr().err
 
 
+def test_down_missing_ok_has_nothing_to_stop_for_an_unregistered_run(capsys):
+    # run up's teardown of a launcher that exited before it registered the run (P5)
+    assert cli.main(["down", "--missing-ok", "ghost"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "[yeto] no run 'ghost' registered: nothing to stop\n"
+    assert "unknown run" not in out.err
+    # a mistyped name without the flag is still an error
+    assert cli.main(["down", "ghost"]) == 1
+    assert "unknown run 'ghost'" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # status + logs (registry only, instant)
 

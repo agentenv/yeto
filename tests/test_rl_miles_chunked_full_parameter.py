@@ -47,6 +47,7 @@ from yeto.protocol import (
 )
 from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
+    FullParameterLayoutMismatch,
     LAYOUT_PROBE_LOG_PREFIX,
     MilesChunkedFullParameterAdapter,
     layout_attestation_record,
@@ -187,8 +188,8 @@ def test_initialize_rejects_probe_layout_drift_before_install_or_export():
 
     group = Group()
     with pytest.raises(
-        RuntimeError,
-        match=r"expected_fragments=2, actual_fragments=3",
+        FullParameterLayoutMismatch,
+        match=r"expected_fragments=2, actual_fragments=3.*; set --fragments 3$",
     ):
         asyncio.run(
             MilesChunkedFullParameterAdapter.initialize(

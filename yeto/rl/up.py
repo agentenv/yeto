@@ -2068,7 +2068,7 @@ class Run:
         tr = (self.state.get("procs") or {}).get("trainer")
         if tr and _alive(tr["pid"]) and _signal(tr["pid"], signal.SIGINT):
             time.sleep(10)
-        self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900)
+        self._cmd(self.yeto("down", "--missing-ok", self.trainer_launch_name()), log="down.log", timeout=900)
         self.mark("trainer_down", why=why)
         stops = " / ".join(f"python -m yeto.launch.nc pool-stop --config {path}" for path in self.pool_configs)
         _log(f"trainer stopped ({why}); {self.pools_phrase()} and the sandboxes are KEPT and still bill. "
@@ -2713,7 +2713,7 @@ class Run:
         tr = (self.state.get("procs") or {}).get("trainer")
         if tr and _alive(tr["pid"]) and _signal(tr["pid"], signal.SIGINT):
             time.sleep(10)
-        if self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900) != 0:
+        if self._cmd(self.yeto("down", "--missing-ok", self.trainer_launch_name()), log="down.log", timeout=900) != 0:
             failed.append("trainer (yeto down: cloud/Modal teardown not confirmed)")
         for path in self.pool_configs:
             if self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) != 0:

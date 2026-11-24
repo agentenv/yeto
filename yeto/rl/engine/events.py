@@ -24,8 +24,11 @@ EventWriter = Callable[[Any, dict[str, Any]], None]
 def append_tape_event(args, event: dict[str, Any]) -> None:
     path = Path(ext_attr(args, "rl_event_tape")).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
+    # A synced group's sampler island runs as learner 0 of 1; its records name its
+    # launch island (rl_tape_island_id) so they do not read as learner 0's trainer.
+    island = ext_attr(args, "rl_tape_island_id", None)
     event = {
-        "island_id": int(ext_attr(args, "rl_learner_id")),
+        "island_id": int(ext_attr(args, "rl_learner_id") if island is None else island),
         "time_unix": time.time(),
         **event,
     }

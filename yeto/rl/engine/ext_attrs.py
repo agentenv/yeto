@@ -50,6 +50,7 @@ WIRE_KEYS: frozenset[str] = frozenset({
     "rl_reward_sha256",
     "rl_rollout_ahead",
     "rl_seq_adv",
+    "rl_tape_island_id",
     "rl_trajectory_evidence_dir",
     "rl_trajectory_evidence_kind",
     "rl_trajectory_evidence_schema_version",

@@ -202,6 +202,64 @@ def test_samplers_run_until_the_trainers_they_feed_ended(capsys, follow, trainer
     assert sample_roles.sampler_stop_trainers(args, 4) == {2: trainers, 3: trainers}
 
 
+@pytest.mark.parametrize("follow", ["trainer", "merged"])
+def test_a_sampler_that_follows_its_trainer_names_that_learner(follow):
+    """Its ``rl_sampler_start`` names the island (learner id) it feeds, as an external
+    pool's sampler does; a sampler of the merged releases names none (command unchanged)."""
+    _, plan = _plan(("--rl-sampler-follow", follow))
+    feeds = {}
+    for island, parsed in _islands(plan):
+        config = sample_roles.resolve(parsed, groups_per_round=4)
+        if island["sample_role"] == "sampler" and follow == "trainer":
+            assert f"--rl-sampler-feeds-learner {config.feeds_learner}" in island["learner_command"]
+            assert config.store.endswith(f"/trainer{config.feeds_learner}")
+            feeds[island["learner_id"]] = config.feeds_learner
+        else:
+            assert "--rl-sampler-feeds-learner" not in island["learner_command"]
+            assert config.feeds_learner is None
+    assert feeds == ({2: 0, 3: 1} if follow == "trainer" else {})
+
+
+@pytest.mark.parametrize("follow", ["trainer", "merged"])
+def test_a_group_sampler_island_tapes_under_its_launch_island(follow, tmp_path):
+    """A synced group's sampler island runs as learner 0 of 1; its tape records name its
+    launch island (P5: the Miles sampler of launch island 2 wrote island_id 0 and its
+    events read as learner 0's trainer). Trainers keep their learner id."""
+    import json
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.events import append_tape_event
+
+    _, plan = _plan(("--rl-sampler-follow", follow))
+    for island, parsed in _islands(plan):
+        m = island["learner_id"]
+        if island["sample_role"] == "sampler":
+            assert f"--rl-tape-island-id {m}" in island["learner_command"] and parsed.rl_tape_island_id == m
+            assert parsed.learner_id == 0  # still learner 0 of 1 (no syncer)
+        else:
+            assert "--rl-tape-island-id" not in island["learner_command"] and parsed.rl_tape_island_id is None
+        miles_args = SimpleNamespace()
+        miles_args.yeto_rl_learner_id = parsed.learner_id
+        island_entry._set_tape_island(parsed, miles_args)
+        miles_args.yeto_rl_event_tape = str(tmp_path / f"tape{m}.jsonl")
+        append_tape_event(miles_args, {"event": "rl_sampler_start"})
+        record = json.loads((tmp_path / f"tape{m}.jsonl").read_text())
+        assert record["island_id"] == (m if island["sample_role"] == "sampler" else parsed.learner_id)
+
+
+def test_a_tape_without_a_tape_island_names_the_learner(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.events import append_tape_event
+
+    tape = tmp_path / "tape.jsonl"
+    append_tape_event(SimpleNamespace(yeto_rl_learner_id=1, yeto_rl_event_tape=str(tape)), {"event": "x"})
+    append_tape_event(SimpleNamespace(yeto_rl_learner_id=0, yeto_rl_tape_island_id=2,
+                                      yeto_rl_event_tape=str(tape)), {"event": "y"})
+    assert [json.loads(line)["island_id"] for line in tape.read_text().splitlines()] == [1, 2]
+
+
 def test_samplers_outside_a_full_parameter_group_keep_their_rounds():
     pair = _ns(rl_island_sample_role=["0:sampler", "1:trainer"])
     assert sample_roles.sampler_stop_trainers(pair, 2) == {}
@@ -267,3 +325,17 @@ def test_the_group_samplers_are_fleet_followers():
     args, _ = _plan()
     names = [f"gbg-group-l{m}" for m in range(4)]
     assert _follower_islands(args, parse_gpu_spec(GROUP_GPU), names) == names[2:]
+
+
+def test_the_sampler_start_binding_names_the_island_and_the_store_uri():
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.sampler_island import fleet_binding
+
+    SampleBufferConfig = sample_roles.SampleBufferConfig
+    follows = SampleBufferConfig(role="sampler", store=f"{MOUNT}/trainer1", feeds_learner=1)
+    s3 = SimpleNamespace(uri="s3://bucket/runs/r/trainer1")
+    assert fleet_binding(follows, s3) == {"island": 1, "store": "s3://bucket/runs/r/trainer1"}
+    assert fleet_binding(follows, SimpleNamespace()) == {"island": 1}  # a mount: no URI, path kept
+    # any other sampler: its rl_sampler_start record is unchanged
+    assert fleet_binding(SampleBufferConfig(role="sampler", store=MOUNT), s3) == {}

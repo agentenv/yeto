@@ -473,7 +473,7 @@ LEAF_POLICY: dict[str, _Check] = {
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
                     "fused_stage", "release_legacy", "release_inline",
                     "release_delta_full_every", "release_every", "release_skip_busy",
-                    "until_trainers_end")},
+                    "until_trainers_end", "feeds_learner")},
 }
 
 

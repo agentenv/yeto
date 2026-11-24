@@ -1516,6 +1516,9 @@ def _prepare_rl_args(
         args.rl_total_fragment_steps = args.total_steps * args.fragments
     elif args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET:
         _prepare_dense_full_sweep(args, num_islands=learners)
+        from .fragment_preflight import check_fragment_layout
+
+        check_fragment_layout(args, per_island, specs)  # Miles: the island checks it after boot
     elif args.rl_sync_preset == SAO_STREAMING_SYNC_PRESET:
         _prepare_sao_streaming(args, num_islands=len(specs))
     elif not args.experimental_rl_sync:
