@@ -204,6 +204,19 @@ class PoolConfigError(RunConfigError):
 BREAKERS_STRICT_COMMANDS = frozenset({"up", "scale"})
 
 
+def scale_lowers_only(args: Any) -> bool:
+    """A ``scale`` that only releases nodes (``--remove``, ``--retire``, or a target of 0): it
+    saves money, so a breakers value the argv disagrees with warns instead of refusing it."""
+    return bool(getattr(args, "remove", None) or getattr(args, "retire", None)
+                or (getattr(args, "target", None) == 0 and not getattr(args, "add", 0)))
+
+
+def breakers_strict(args: Any) -> bool:
+    """Whether ``yeto run <command>`` refuses a breakers value the argv disagrees with."""
+    command = getattr(args, "rl_command", None)
+    return command in BREAKERS_STRICT_COMMANDS and not (command == "scale" and scale_lowers_only(args))
+
+
 def load_config(path: str, *, strict_breakers: bool = True) -> dict[str, Any]:
     """The run config at ``path``, checked and compiled. ``strict_breakers``: a ``breakers:``
     value that disagrees with ``trainer.argv`` (or that no knob carries) raises; without it
@@ -3579,7 +3592,7 @@ def main(args: Any) -> int:
     try:
         run = open_run(args.config, create=args.rl_command != "status",
                        missing="temp" if args.rl_command == "down" else None,
-                       strict_breakers=args.rl_command in BREAKERS_STRICT_COMMANDS)
+                       strict_breakers=breakers_strict(args))
     except RunConfigError as error:
         print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
         return 2

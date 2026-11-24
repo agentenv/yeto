@@ -307,3 +307,37 @@ def test_rollout_status_opens_a_conflicting_config(tmp_path, monkeypatch):
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
     refs, _env = entry._status_refs(types.SimpleNamespace(pool_config=None, config=str(_conflicting(tmp_path))))
     assert [r.name for r in refs] == ["pool"]
+
+
+@pytest.mark.parametrize("how, strict", [
+    ({"target": 3, "add": 0, "remove": [], "retire": []}, True),
+    ({"target": None, "add": 2, "remove": [], "retire": []}, True),
+    ({"target": None, "add": 0, "remove": ["t1"], "retire": []}, False),
+    ({"target": 1, "add": 0, "remove": [], "retire": ["t1"]}, False),
+    ({"target": 0, "add": 0, "remove": [], "retire": []}, False),
+])
+def test_a_scale_that_only_releases_nodes_is_never_blocked(tmp_path, monkeypatch, capsys, how, strict):
+    """Releasing nodes saves money: like run down it warns on a conflicting breakers value."""
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
+    path = str(_conflicting(tmp_path))
+    scaled = []
+    monkeypatch.setattr(up.Run, "scale", lambda self, *a, **k: scaled.append(a) or 0)
+    args = types.SimpleNamespace(config=path, rl_command="scale", mode=None, force_static=False, dry_run=False,
+                                 source="manual", **how)
+    assert up.breakers_strict(args) is strict
+    assert up.main(args) == (2 if strict else 0)
+    assert bool(scaled) is not strict
+    out = capsys.readouterr()
+    assert ("timeout_s = 1200 but trainer.argv --rl-sample-wait-s = 900" in out.err) is strict
+    assert ("WARNING" in out.out) is not strict
+
+
+def test_rollout_scale_down_opens_a_conflicting_config(tmp_path, monkeypatch):
+    from yeto.launch.rollout import entry
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
+    monkeypatch.setattr(up.Run, "scale", lambda self, *a, **k: 0)
+    base = dict(config=str(_conflicting(tmp_path)), pool_config=None, provider=None, pool=None, add=0, mode=None,
+                force_static=False, dry_run=False, source="manual")
+    assert entry.scale(types.SimpleNamespace(**base, target=None, remove=["t1"], retire=[])) == 0
+    assert entry.scale(types.SimpleNamespace(**base, target=3, remove=[], retire=[])) == 2

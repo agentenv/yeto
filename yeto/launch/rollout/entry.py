@@ -76,8 +76,8 @@ def scale(args: Any) -> int:
         return nc_cli.main(pool_scale_argv(ref.config, args))
     from yeto.rl import up  # noqa: PLC0415
 
-    try:
-        run = up.open_run(args.config)
+    try:  # a scale that only releases nodes is never blocked by a breakers value (up.scale_lowers_only)
+        run = up.open_run(args.config, strict_breakers=False) if up.scale_lowers_only(args) else up.open_run(args.config)
     except up.RunConfigError as error:
         print(f"rollout scale: {error}", file=sys.stderr)
         return 2
