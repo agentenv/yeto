@@ -50,6 +50,9 @@ Run config (JSON; paths may use ``~``)::
      # "samplers": [{"name": "nc", "provider": "nc", "config": "<pool.json>"},
      #              {"name": "modal", "provider": {"kind": "modal", ...}, "target": 1, ...}],
      "trainer": {"argv": ["--training-mode", "rl", ...], "usd_per_h": 136},
+     # or an island fleet (yeto.rl.fleet): "islands" (one trainer and its pools per island) and
+     # "fleet" (the trainers' shared argv, the dispense mode) instead of trainer / samplers / pool;
+     # load_config compiles them into the trainer and samplers sections and the FleetPlan
      "first_group": {"timeout_s": 5400, "poll_s": 60},
      "dashboard": {"port": 8795},
      "budget": {"usd": 450, "wall_h": 3.0, "nc_usd_per_h": 24,  # per NC node
@@ -210,16 +213,25 @@ def load_config(path: str) -> dict[str, Any]:
         raise RunConfigError(f"run config {file}: not valid JSON ({error})") from None
     if not isinstance(cfg, dict):
         raise RunConfigError(f"run config {file}: must be a JSON object")
-    for key in ("run", "store", "trainer"):
+    fleet = "islands" in cfg or "fleet" in cfg  # an island fleet (yeto.rl.fleet): no trainer / samplers
+    if fleet:
+        from yeto.rl import fleet as fleet_mod  # noqa: PLC0415
+
+        fleet_mod.check_exclusive(cfg)
+    for key in ("run", "store") if fleet else ("run", "store", "trainer"):
         if key not in cfg:
             raise ValueError(f"run config: missing {key!r}")
-    if "pool" not in cfg and "samplers" not in cfg:
+    if not fleet and "pool" not in cfg and "samplers" not in cfg:
         raise ValueError("run config: missing 'samplers' (the rollout pools) or 'pool' (one pool config)")
     known = {"run", "store", "env", "preflight", "sandbox", "pool", "samplers", "trainer", "first_group",
-             "dashboard", "budget", "comment", "syncer", "controller", "rollout", "starvation", "breakers"}
+             "dashboard", "budget", "comment", "syncer", "controller", "rollout", "starvation", "breakers",
+             "islands", "fleet"}
     unknown = set(cfg) - known
     if unknown:
         raise ValueError(f"run config: unknown keys {sorted(unknown)} (known: {sorted(known)})")
+    if fleet:
+        # one synced-group trainer launch and every island's pools, from here on a run like any other
+        cfg, _plan = fleet_mod.compile_fleet(cfg)
     rollout_section(cfg)
     check_sections(cfg)
     if cfg.get("breakers") is not None:
@@ -723,10 +735,52 @@ class Run:
         with open(self.dir / "events.jsonl", "a") as fh:
             fh.write(json.dumps(event, default=str) + "\n")
 
+    # -- island fleet (yeto.rl.fleet): the run config compiled to one trainer launch and its pools
+    def fleet_plan(self) -> Any:
+        """The run's :class:`yeto.rl.fleet.FleetPlan`; None for a single-trainer run."""
+        from yeto.rl import fleet  # noqa: PLC0415
+
+        return fleet.plan_of(self.cfg)
+
+    def log_fleet_plan(self) -> None:
+        """Each island's learner id, store sub-directory, trainer cluster and price, and pools."""
+        plan = self.fleet_plan()
+        for line in plan.lines() if plan is not None else ():
+            _log(line)
+
+    def fleet_problem(self) -> str | None:
+        """Why the fleet's training form cannot run (:func:`yeto.rl.fleet.form_problem`)."""
+        from yeto.rl import fleet  # noqa: PLC0415
+
+        plan = self.fleet_plan()
+        return None if plan is None else fleet.form_problem(plan.sync)
+
+    def write_fleet_plan(self) -> bool:
+        """``<store>/fleet/plan.json`` (the island table the dashboard and the monitor read),
+        written before anything is ordered; False (logged) when the store refuses it."""
+        from yeto.rl import fleet  # noqa: PLC0415
+
+        plan = self.fleet_plan()
+        if plan is None:
+            return True
+        uri = fleet.substore_uri(self.cfg["store"], fleet.PLAN_OBJECT)
+        try:
+            self._objects().write(fleet.PLAN_OBJECT, plan.dumps().encode())
+        except Exception as error:  # noqa: BLE001 - reported, nothing is ordered
+            _log(f"CRITICAL: the fleet plan could not be written to {uri} ({type(error).__name__}: {error})"[:400])
+            return False
+        self.mark("fleet_plan", object=uri)
+        return True
+
     # -- steps
     def preflight(self) -> bool:
         from yeto.launch_preflight import modal_sdk_problem  # noqa: PLC0415
 
+        problem = self.fleet_problem()
+        if problem is not None:
+            _log(f"preflight: {problem}")
+            self.mark("preflight", ok=False)
+            return False
         problem = modal_sdk_problem(self.env) if "modal:" in " ".join(self.cfg["trainer"]["argv"]) else None
         if problem is not None:
             _log(f"preflight: {problem}")
@@ -3135,6 +3189,7 @@ def main(args: Any) -> int:
     if refused:
         _log(refused)
         return 2
+    run.log_fleet_plan()
     if not args.skip_preflight and not run.preflight():
         log = run.dir / "preflight.log"
         _log("preflight failed: nothing ordered" + (f" (see {log})" if log.exists() else
@@ -3148,8 +3203,11 @@ def main(args: Any) -> int:
     if args.dry_run:
         _log("dry run: preflight ok, nothing ordered" + (
             "; a dry run does not acknowledge the forced stop" if allow_forced and unacknowledged_forced_stop(run)
-            else ""))
+            else "") + ("; the fleet plan is not written" if run.fleet_plan() is not None else ""))
         return 0
+    if not run.write_fleet_plan():
+        _log("fleet plan not written: nothing ordered")
+        return 2
     if not run.sandbox_prepare():
         _log("sandbox prepare failed: nothing ordered")
         return 2

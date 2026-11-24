@@ -126,7 +126,10 @@ def resolve(cfg: dict[str, Any], state_dir: Path) -> list[PoolRef]:
     return refs
 
 
-def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) -> PoolRef:
+def entry_doc(entry: dict[str, Any], where: str) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """``(doc, base, path)`` of one pool entry: the pool config the entry declares (its
+    file's keys, the provider section, the inline keys over them), the file's own keys
+    and the file's path (None: no file). ``where`` names the entry in an error."""
     inline = {k: v for k, v in entry.items() if k not in ENTRY_KEYS}
     path = os.path.expanduser(str(entry["config"])) if entry.get("config") else None
     base = json.loads(Path(path).read_text()) if path else {}
@@ -137,7 +140,12 @@ def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) 
             doc.pop("provider")
     doc.update(inline)
     if not doc:
-        raise ValueError(f"samplers[{i}]: no pool config (set 'config' or the pool keys inline)")
+        raise ValueError(f"{where}: no pool config (set 'config' or the pool keys inline)")
+    return doc, base, path
+
+
+def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) -> PoolRef:
+    doc, base, path = entry_doc(entry, f"samplers[{i}]")
     from yeto.launch.nc.provider import provider_kind  # noqa: PLC0415
 
     kind = provider_kind(doc)
