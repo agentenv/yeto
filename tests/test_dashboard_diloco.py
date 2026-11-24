@@ -606,7 +606,7 @@ def test_page_full_parameter_island_labels_its_gaps(tmp_path):
     assert "not recorded" in out["kpis"] and "not trained yet" not in out["kpis"]
     assert "lag1" not in out["matrix"] and "lag2" not in out["matrix"] and "since anchor" not in out["matrix"]
     # the final-cut ack: an island's anchor below the syncer's committed version is its last applied one
-    assert "last applied · final v12 on the syncer" in out["matrix"]
+    assert "final v12</div>" in out["matrix"]
     assert "the final version is on the syncer" in out["matrix"]
 
 
