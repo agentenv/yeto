@@ -5,7 +5,9 @@
 <desired.json> [--generation N]`` writes the file as the next generation: with
 ``--generation`` only when the store is still at N (else refused: read again), without
 it on top of the generation read just before. ``--dry-run`` checks the document and
-prints what would change, pool by pool. Needs ``rollout.control_plane: "store"``.
+prints what would change, pool by pool. A scale up (a target raised, a pool added) goes
+through the run's own check first, as ``yeto run scale`` does (the run's breaker, the
+budget): refused with exit code 4. Needs ``rollout.control_plane: "store"``.
 """
 
 from __future__ import annotations
@@ -61,6 +63,35 @@ def changes(old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
     return out or ["no change"]
 
 
+def scale_refusals(run: Any, old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
+    """The run's own check of every scale up in ``new`` (``Run.scale_refusal``: the run's
+    breaker fired, the budget), as ``yeto run scale`` does: a pool added counts its whole target."""
+    from yeto.launch.rollout.pools import resolve  # noqa: PLC0415
+
+    before, after = dz.sampler_pools(old), dz.sampler_pools(new)
+    ups = {n: dz.pool_target(m) for n, m in after.items() if dz.pool_target(m)
+           and (n not in before or (dz.pool_target(before[n]) or 0) < (dz.pool_target(m) or 0))}
+    if not ups:
+        return []
+    try:
+        run.pools = resolve(run._desired_cfg(new), run.dir)  # noqa: SLF001 - priced as the new generation's pools
+    except Exception as error:  # noqa: BLE001 - validate() passed; a pool the controller cannot build adds nothing
+        print(f"fleet apply: WARNING: scale ups not checked against the run's budget ({error})", file=sys.stderr)
+        return []
+    out = []
+    for i, ref in enumerate(run.pools):
+        if ref.name not in ups:
+            continue
+        try:
+            why = run.scale_refusal(int(ups[ref.name]), i)
+        except Exception as error:  # noqa: BLE001 - its config cannot be read: the controller cannot build it either
+            print(f"fleet apply: WARNING: pool {ref.name}: scale up not checked ({error})", file=sys.stderr)
+            continue
+        if why:
+            out.append(f"pool {ref.name} target {ups[ref.name]}: {why}")
+    return out
+
+
 def main(args: Any) -> int:
     run, store = _store(args.config)
     if args.fleet_command == "show":
@@ -83,6 +114,11 @@ def main(args: Any) -> int:
         return 3
     for line in changes(current, new):
         print(f"fleet apply: {line}")
+    refused = scale_refusals(run, current, new)
+    for line in refused:
+        print(f"fleet apply: refused: {line}", file=sys.stderr)
+    if refused:
+        return 4
     if args.dry_run:
         print(f"fleet apply: dry run: generation {expect + 1} would be written; nothing changed")
         return 0

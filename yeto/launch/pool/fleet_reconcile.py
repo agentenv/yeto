@@ -18,6 +18,17 @@ than the one applied, compares its sampler pools with the applied ones:
   the member table's ``retired``: the trainer's data end never waits for them), the pool
   is stopped (its machines released, confirmed ended) and dropped (``hooks.removed``).
 
+What was applied (the generation, its pools, the pools still being removed) is kept in
+``fleet/applied.json`` (``DesiredStore.write_applied``). A controller that starts (after
+a detach, a crash) builds the applied pools and the removals in progress and starts from
+that generation, so every change made to the desired state meanwhile is applied: a pool
+removed is drained and retired, a target change and a new config are applied.
+
+The reconcile never waits for a pool's tick: what needs the pool's tick lock (a new config,
+the end of a removal) is tried without blocking and again at the next pass. The end of a
+removal runs on the pool's own worker (``PoolSlot.pending_finish``), so a provider call
+that hangs there never holds the supervisor.
+
 Trainer members (``kind: trainer``) are left to the trainer worker of the
 ``unified-trainer-islands`` change. A pool's own target changes between two
 generations (a manual release it detected, an automatic scaler) are not undone: only a
@@ -37,9 +48,10 @@ from . import desired as dz
 @dataclass
 class ReconcileHooks:
     """What the reconciler cannot do alone. ``add(name, member) -> PoolSlot``;
-    ``set_target(name, slot, target, retire, mode) -> None`` (None: the pool's own
-    :meth:`set_target`); ``reconfigure(name, slot, member) -> None`` (gives the pool its new
-    config and ops); ``removed(name) -> None`` (after the pool is gone)."""
+    ``set_target(name, slot, target, retire, mode, generation=g) -> None`` (None: the pool's
+    own :meth:`set_target`); ``reconfigure(name, slot, member) -> None`` (gives the pool its new
+    config and ops; called under the pool's tick lock; raises to refuse); ``removed(name) ->
+    None`` (after the pool is gone)."""
 
     add: Callable[[str, dict[str, Any]], Any] | None = None
     set_target: Callable[..., None] | None = None
@@ -50,7 +62,8 @@ class ReconcileHooks:
 @dataclass
 class _Removal:
     since: float
-    shards_ended: bool = False
+    member: dict[str, Any] = field(default_factory=dict)  # its entry in the generation before the removal
+    generation: int = 0
 
 
 @dataclass
@@ -63,17 +76,36 @@ class FleetReconciler:
     applied: int = 0
     applied_pools: dict[str, dict[str, Any]] = field(default_factory=dict)
     removing: dict[str, _Removal] = field(default_factory=dict)
+    pending_rolls: dict[str, tuple[dict[str, Any], int]] = field(default_factory=dict)  # tick lock was busy
     _polled_at: float | None = None
+    _resume: list[str] = field(default_factory=list)  # restored removals: target 0 asked again
+    _dirty: bool = False  # the applied state changed and is not in the store yet
     errors: int = 0
 
-    def start_from(self, doc: dict[str, Any] | None) -> None:
-        """The generation the controller was built from (its pools are that generation's)."""
-        if doc is not None:
+    def start_from(self, doc: dict[str, Any] | None, applied: dict[str, Any] | None = None) -> None:
+        """Where the controller starts: what was applied before (``fleet/applied.json``: its
+        generation, pools and removals in progress), else the generation the controller was
+        built from (``doc``: its pools are that generation's)."""
+        if applied is not None:
+            self.applied = int(applied.get("generation") or 0)
+            self.applied_pools = dz.sampler_pools(applied)
+            self.removing = {m["name"]: _Removal(since=self.clock(), member=m, generation=self.applied)
+                             for m in applied.get("removing") or () if m.get("kind") == "sampler_pool"}
+            self._resume = sorted(self.removing)
+        elif doc is not None:
             self.applied = int(doc.get("generation") or 0)
             self.applied_pools = dz.sampler_pools(doc)
+            self._dirty = True
 
     def step(self, controller: Any, *, force: bool = False) -> None:
         """One reconcile pass: a newer generation is applied; removals in progress advance."""
+        self._persist()
+        for name in self._resume:  # a removal another controller began: drained to 0 again
+            self._set_target(controller, name, 0, (), None, self.removing[name].generation if name in self.removing
+                             else self.applied)
+        self._resume = []
+        for name, (member, gen) in list(self.pending_rolls.items()):
+            self._reconfigure(controller, name, member, gen)
         self._advance_removals(controller)
         now = self.clock()
         if not force and self._polled_at is not None and now - self._polled_at < self.poll_s:
@@ -97,10 +129,8 @@ class FleetReconciler:
         for name in sorted(set(new) - set(old)):
             self._add(controller, name, new[name], gen)
         for name in sorted(set(old) - set(new)):
-            self._remove(controller, name, gen)
+            self._remove(controller, name, old[name], gen)
         for name in sorted(set(new) & set(old)):
-            if name in self.removing:  # brought back while draining: driven again
-                self.removing.pop(name)
             if dz.pool_shape(new[name]) != dz.pool_shape(old[name]):
                 self._reconfigure(controller, name, new[name], gen)
             target = dz.pool_target(new[name])
@@ -108,9 +138,29 @@ class FleetReconciler:
                 self._set_target(controller, name, target, new[name].get("retire") or (), new[name].get("mode"),
                                  gen)
         self.applied, self.applied_pools = gen, new
+        self._dirty = True
+        self._persist()
+
+    def _persist(self) -> None:
+        """``fleet/applied.json`` when it changed (a store that does not answer: the next pass)."""
+        if not self._dirty:
+            return
+        try:
+            self.store.write_applied(self.applied, self.applied_pools,
+                                     {name: r.member for name, r in self.removing.items() if r.member})
+            self._dirty = False
+        except Exception as error:  # noqa: BLE001
+            self.log(f"fleet: applied state not written ({error!r}); tried again at the next pass")
 
     # -- the changes
     def _add(self, controller: Any, name: str, member: dict[str, Any], gen: int) -> None:
+        if name in self.removing:  # brought back while it drained: driven again at its new target
+            self.removing.pop(name)
+            self.log(f"fleet: pool {name} is back in generation {gen}: its removal stops")
+            target = dz.pool_target(member)
+            if target is not None:
+                self._set_target(controller, name, target, (), None, gen)
+            return
         if name in controller.slots and not controller.slots[name].pool.stopped:
             return  # already driven (built from this generation)
         if self.hooks.add is None:
@@ -132,7 +182,7 @@ class FleetReconciler:
             return
         try:
             if self.hooks.set_target is not None:
-                self.hooks.set_target(name, slot, target, list(retire), mode)
+                self.hooks.set_target(name, slot, target, list(retire), mode, generation=gen)
             else:
                 slot.pool.set_target(target, retire=retire, mode=mode, source="desired", generation=gen)
         except Exception as error:  # noqa: BLE001
@@ -141,34 +191,46 @@ class FleetReconciler:
         controller.wake()
 
     def _reconfigure(self, controller: Any, name: str, member: dict[str, Any], gen: int) -> None:
+        """The new config and ops are swapped in under the pool's tick lock (never while a tick
+        runs with the old ones); a busy lock is tried again at the next pass."""
         slot = controller.slots.get(name)
         if slot is None:
+            self.pending_rolls.pop(name, None)
             return
+        if not slot.tick_lock.acquire(blocking=False):
+            self.pending_rolls[name] = (member, gen)
+            return
+        self.pending_rolls.pop(name, None)
         try:
             if self.hooks.reconfigure is not None:
                 self.hooks.reconfigure(name, slot, member)
+            slot.pool.start_roll(f"desired state generation {gen}")
         except Exception as error:  # noqa: BLE001 - the pool keeps its old config
             self.log(f"fleet: pool {name}: new config (generation {gen}) refused: {error!r}")
             controller.note(name, "reconfigure_refused", generation=gen, error=repr(error)[:300])
-            return
-        with slot.tick_lock:
-            slot.pool.start_roll(f"desired state generation {gen}")
+        finally:
+            slot.tick_lock.release()
         controller.wake()
 
-    def _remove(self, controller: Any, name: str, gen: int) -> None:
+    def _remove(self, controller: Any, name: str, member: dict[str, Any], gen: int) -> None:
+        self.pending_rolls.pop(name, None)
         slot = controller.slots.get(name)
         if slot is None:
             return
-        self.removing[name] = _Removal(since=self.clock())
+        self.removing[name] = _Removal(since=self.clock(), member=member, generation=gen)
         self.log(f"fleet: pool {name} removed in generation {gen}: target 0, draining")
         slot.pool._event("pool_removing", generation=gen)  # noqa: SLF001
         self._set_target(controller, name, 0, (), None, gen)
 
     def _advance_removals(self, controller: Any) -> None:
+        """A removed pool with no member left (the scale-down drained them on its worker):
+        its end runs on its worker (``pending_finish``) at its next tick; a pool that no
+        worker ticks any more (stopped) ends here, when its tick lock is free."""
         for name in list(self.removing):
             slot = controller.slots.get(name)
             if slot is None:
-                self.removing.pop(name)
+                self.removing.pop(name, None)
+                self._dirty = True
                 continue
             pool = slot.pool
             if pool.detached:
@@ -176,49 +238,69 @@ class FleetReconciler:
             busy = [m for m in pool.live() if m.state != "gone"]
             if busy and not pool.stopped:
                 continue  # the scale-down drains them (fence, claims back, release)
-            with slot.tick_lock:
-                self._finish_removal(controller, name, slot)
-            self.removing.pop(name)
+            if not pool.stopped:
+                if getattr(slot, "pending_finish", None) is None:
+                    slot.pending_finish = lambda n=name, s=slot: self.finish_removal(controller, n, s)
+                    controller.wake()
+                continue
+            if not slot.tick_lock.acquire(blocking=False):
+                continue
+            try:
+                self.finish_removal(controller, name, slot)
+            finally:
+                slot.tick_lock.release()
 
-    def _finish_removal(self, controller: Any, name: str, slot: Any) -> None:
-        """Every shard of the drained pool ends for good, then the pool stops and is dropped."""
+    def finish_removal(self, controller: Any, name: str, slot: Any) -> bool:
+        """Every shard of the drained pool ends for good, then the pool stops and is dropped.
+        Runs under the pool's tick lock. False: not finished (tried again at the next pass)."""
+        if name not in self.removing:
+            return False  # brought back meanwhile
         pool = slot.pool
-        shards = {m.shard for m in pool.members if m.shard}
         control = getattr(pool, "control", None)
+        shards = {m.shard for m in pool.members if m.shard}
         if control is not None:
-            try:  # every number the allocator issued to the pool, a never ordered one too
-                shards |= {str(d["shard"]) for d in control.allocator.issued() if d.get("shard")}
-            except Exception as error:  # noqa: BLE001 - the members' shards are retired anyway
-                self.log(f"fleet: pool {name}: issued shard numbers not read ({error!r})")
-        shards = sorted(shards)
-        if control is not None:
-            for shard in shards:
-                try:
-                    control.allocator.mark_ended(shard, why="pool removed from the desired state")
-                except Exception as error:  # noqa: BLE001 - the member table still retires it
-                    self.log(f"fleet: pool {name}: end record of {shard} not written ({error!r})")
             from .store_lock import LockLost, LockUnconfirmed  # noqa: PLC0415
 
-            try:
+            pool._reserved_shard = None  # noqa: SLF001 - the pool orders nothing more: an unused number
+            try:  # first: a number issued but never ordered gets its in-shard data end (and end record)
                 pool.end_unused_shards()
             except LockLost as error:  # another controller holds the pool: it finishes the removal
                 pool.detach(f"store lock lost while removing the pool: {error}")
-                return
-            except LockUnconfirmed as error:  # the allocator's records hold; the member table retires them
-                self.log(f"fleet: pool {name}: unused shards not ended now ({error})")
-        pool.retired_shards = sorted(set(pool.retired_shards) | set(shards))
-        pool._event("shards_retired", shards=shards)  # noqa: SLF001
-        pool._save_now()  # noqa: SLF001 - publishes the member table with every shard retired
+                return False
+            except LockUnconfirmed as error:
+                self.log(f"fleet: pool {name}: removal waits for the store ({error})")
+                return False
+            try:  # every number the allocator issued to the pool, a never ordered one too
+                shards |= {str(d["shard"]) for d in control.allocator.issued() if d.get("shard")}
+            except Exception as error:  # noqa: BLE001
+                self.log(f"fleet: pool {name}: issued shard numbers not read ({error!r}); tried again")
+                return False
+            for shard in sorted(shards):
+                try:
+                    control.allocator.mark_ended(shard, why="pool removed from the desired state")
+                except Exception as error:  # noqa: BLE001
+                    self.log(f"fleet: pool {name}: end record of {shard} not written ({error!r}); tried again")
+                    return False
+        shards_sorted = sorted(shards)
+        pool.retired_shards = sorted(set(pool.retired_shards) | set(shards_sorted))
+        if not pool._save_now() or not pool._publish_members():  # noqa: SLF001
+            # the member table must retire them before the slot goes (the trainer's data end)
+            self.log(f"fleet: pool {name}: state / member table not written; the removal is tried again")
+            return False
+        pool._event("shards_retired", shards=shards_sorted)  # noqa: SLF001
         left = pool.drain_all("removed from the fleet's desired state", wait_s=controller.drain_wait_s,
                               sleep=controller.sleep)
         controller._save(slot)  # noqa: SLF001
         slot.left = list(left)
         controller._close_slot(name, slot)  # noqa: SLF001
         controller.drop_slot(name)
+        self.removing.pop(name, None)
+        self._dirty = True
         if self.hooks.removed is not None:
             try:
                 self.hooks.removed(name)
             except Exception as error:  # noqa: BLE001
                 self.log(f"fleet: pool {name}: removal hook failed ({error!r})")
-        self.log(f"fleet: pool {name} removed: {len(shards)} shard(s) retired, "
+        self.log(f"fleet: pool {name} removed: {len(shards_sorted)} shard(s) retired, "
                  f"{len(left)} member(s) left billed")
+        return True
