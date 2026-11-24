@@ -115,7 +115,9 @@ class RolloutController:
                 return
             for name, slot in self.slots.items():
                 pool = slot.pool
-                if pool.stopped:
+                if pool.stopped or pool.detached:
+                    if pool.detached and not slot.closed:
+                        self._close_slot(name, slot)  # its store lock went to another controller
                     continue
                 try:
                     pool.tick()
@@ -187,7 +189,7 @@ class RolloutController:
         return self._wake.is_set()
 
     def all_stopped(self) -> bool:
-        return all(s.pool.stopped for s in self.slots.values())
+        return all(s.pool.stopped or s.pool.detached for s in self.slots.values())
 
     def check(self) -> str | None:
         """Why the controller needs attention (its thread died), None when healthy."""
@@ -220,6 +222,9 @@ class RolloutController:
         try:
             for name, slot in self.slots.items():
                 pool = slot.pool
+                if pool.detached:  # another controller drives its machines: never drained from here
+                    self._close_slot(name, slot)
+                    continue
                 if pool.live() or not pool.stopped:
                     slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
                 self._save(slot)
@@ -289,6 +294,7 @@ class RolloutController:
             pool = slot.pool
             out[name] = {
                 "target": pool.config.target, "stopped": pool.stopped, "halted": pool.halted,
+                **({"detached": pool.detached} if pool.detached else {}),
                 "finished": pool.finished, "pending": list(pool.pending),
                 "breaker": {"tripped": pool.breaker.tripped, "trips": pool.breaker.trips},
                 "slot_name": pool.config.slot_name,
@@ -321,10 +327,17 @@ atexit.register(lambda: drain_active("process exit"))
 
 # -- the National Compute / Daytona pool of a pool.json --------------------------
 
-def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: bool = True) -> PoolSlot:
+def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: bool = True,
+            control_objects: Any = None, name: str | None = None, lock_ttl_s: float | None = None) -> PoolSlot:
     """The pool ``python -m yeto.launch.nc pool --config <pool.json>`` runs, built the
     same way (state file restored, event log, scale control file, the pool lock) for a
-    :class:`RolloutController`. Raises ``SystemExit`` when another loop holds the lock."""
+    :class:`RolloutController`. Raises ``SystemExit`` when another loop holds the lock.
+
+    ``control_objects`` (the run store's object API; None: off, as before): the store
+    control plane (:mod:`.store_state`). The pool's state is ``fleet/pools/<name>/state.json``
+    (the local state file imported once when the store has none, then written as a mirror
+    only), guarded by the pool's store lock, and its shard numbers come from the store's
+    allocator. Another controller holding the store lock raises ``SystemExit`` too."""
     from ..nc import cli, pool_run  # noqa: PLC0415
 
     external = not pool_run.is_national_compute(cfg)
@@ -345,8 +358,12 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
         if held is not None:
             held.close()
         raise SystemExit(f"pool {cfg['shard_base']}: refused: {error}") from None
-    pool = IslandPool.restore(state, pc, ops if ops is not None else cli.pool_ops(cfg), log=cli._log,  # noqa: SLF001
-                              events=events)
+    pool_ops = ops if ops is not None else cli.pool_ops(cfg)
+    if control_objects is None:
+        pool = IslandPool.restore(state, pc, pool_ops, log=cli._log, events=events)  # noqa: SLF001
+    else:
+        pool = _store_pool(cfg, pc, pool_ops, control_objects, name or str(cfg["shard_base"]), state, events,
+                           held, lock_ttl_s)
     pool.owner = pool_run.state_owner(cfg)  # this run's from now on (a file with no owner is stamped)
     pool.scale_path, pool.scale_run = pool_run.scale_path(cfg), cli.run_id(cfg)
     pool.apply_scale()
@@ -359,6 +376,8 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
         return "pool-stop requested" if pool_run.stop_path(cfg).exists() else None
 
     def close(left: list[Member]) -> None:
+        if pool.control is not None:
+            pool.control.close()  # the store lock: released (a detach or a drain alike)
         pool_run._remove(pool_run.pid_path(cfg))  # noqa: SLF001
         pool_run._remove(pool_run.stop_path(cfg))  # noqa: SLF001
         if left:
@@ -367,3 +386,39 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
                 national=not external, kind=pool_run.provider_kind(cfg)))
 
     return PoolSlot(pool, state_path=state, lock=held, on_close=close, after_tick=after_tick)
+
+
+def _store_pool(cfg: dict[str, Any], pc: Any, ops: Any, objects: Any, name: str, state: Path, events: Any,
+                held: Any, ttl_s: float | None) -> IslandPool:
+    """:func:`nc_pool`'s pool on the store control plane (its ``control_objects``)."""
+    from ..nc import cli  # noqa: PLC0415
+    from . import store_state  # noqa: PLC0415
+
+    kw = {} if ttl_s is None else {"ttl_s": float(ttl_s)}
+    try:
+        control = store_state.open_pool_control(objects, name, str(cfg["shard_base"]), **kw)
+    except store_state.PoolLocked as error:
+        if held is not None:
+            held.close()
+        raise SystemExit(f"pool {cfg['shard_base']}: refused: {error}") from None
+    try:
+        doc = control.state.load(legacy=state)
+        if pc.index_limit is None:  # the allocator replaces next_shard; the trainer's shard list still bounds it
+            pc.index_limit = pc.shard_limit
+        pool = IslandPool.from_doc(doc, pc, ops, control=control, where=control.state.key,
+                                   log=cli._log, events=events)  # noqa: SLF001
+    except BaseException:
+        control.close()
+        if held is not None:
+            held.close()
+        raise
+    pool.state_path = state  # the local mirror (status, run up's readers)
+    try:
+        pool.end_unused_shards()  # numbers issued before a crash / detach that no order took
+    except BaseException as error:  # noqa: BLE001 - a lost lock detaches the pool at its first tick anyway
+        pool.log(f"pool {name}: unused shards not checked ({error!r})")
+    if control.state.imported_from:
+        pool.log(f"pool {name}: imported the local state {control.state.imported_from} into the store once "
+                 f"({control.state.key}); the store holds it from now on")
+        pool._event("state_imported", source=control.state.imported_from, key=control.state.key)  # noqa: SLF001
+    return pool

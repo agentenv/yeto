@@ -447,7 +447,10 @@ def boat_account(sandbox: dict[str, Any] | None) -> dict[str, int | None]:
     from yeto.rl.fleet_sandbox import boat_account as account  # noqa: PLC0415
 
     return account(sandbox)
-ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit"}
+ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit", "control_plane", "lock_ttl_s"}
+# rollout.control_plane: "local" (default: pool state files on this host, as before) or "store"
+# (the pool state, its single-writer lock and the shard allocator in the run store, fleet/pools/)
+CONTROL_PLANES = ("local", "store")
 CONTROLLERS = ("subprocess", "in_process")
 
 
@@ -467,6 +470,15 @@ def rollout_section(cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"run config: unknown rollout keys {sorted(unknown)} (known: {sorted(ROLLOUT_KEYS)})")
     if "drain_on_exit" in section and not isinstance(section["drain_on_exit"], bool):
         raise ValueError("run config: rollout.drain_on_exit must be true or false")
+    if section.get("control_plane", "local") not in CONTROL_PLANES:
+        raise ValueError(f"run config: rollout.control_plane {section['control_plane']!r} is not one of "
+                         f"{', '.join(CONTROL_PLANES)}")
+    if section.get("control_plane") == "store" and str(cfg.get("controller") or "subprocess") != "in_process":
+        raise ValueError("run config: rollout.control_plane \"store\" needs controller \"in_process\" "
+                         "(the pool workers of one controller hold the pools' store locks)")
+    ttl = section.get("lock_ttl_s")
+    if ttl is not None and (isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl < 60):
+        raise ValueError("run config: rollout.lock_ttl_s must be a number of seconds >= 60")
     return dict(section)
 
 
@@ -1353,9 +1365,15 @@ class Run:
         from yeto.launch.pool.controller import RolloutController, nc_pool  # noqa: PLC0415
 
         slots = {}
+        section = rollout_section(self.cfg)
+        store_kw: dict[str, Any] = {}
+        if section.get("control_plane") == "store":
+            store_kw = {"control_objects": kw.pop("control_objects", None) or self._objects(),
+                        "lock_ttl_s": section.get("lock_ttl_s")}
         try:
             for ref in self.pools:
-                slots[ref.name] = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(ref.name))
+                more = dict(store_kw, name=ref.name) if store_kw else {}
+                slots[ref.name] = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(ref.name), **more)
                 self._restart_stopped_pool(ref.name, slots[ref.name].pool)
         except BaseException:
             for slot in slots.values():
@@ -1363,7 +1381,6 @@ class Run:
                     slot.lock.close()
             raise
         interval = min(r.interval_s for r in self.pools)
-        section = rollout_section(self.cfg)
         kw.setdefault("stall_s", float(self.breaker_param("run.rollout_stall_alert", "limit_s") or 0))
         kw.setdefault("drain_on_exit", bool(section.get("drain_on_exit", True)))
         self.controller = RolloutController(slots, stop_flag=self.dir / "STOP", interval=interval, log=_log, **kw)
