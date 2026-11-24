@@ -581,7 +581,11 @@ What `run up` makes of it:
   `yeto launch` cannot end a single trainer island, so its pools are stopped
   (`pool-stop`) and its trainer starves until its `trainer.sample_wait` ends it
   and the launcher gives it up; once no island runs, the launch is stopped.
-  `yeto run status` shows each island under `fleet`.
+  A later `yeto run up` of the run keeps such an island stopped (its pools are
+  not driven again; remove `fleet_island_stops.<k>` from the run's
+  `state.json` to run it again), while a fleet-wide stop (`run.trainer_exit`,
+  `run.budget`, ...) ended only the launch it replaces. `yeto run status` shows
+  each island under `fleet`.
 
 #### Miles sampler islands next to external pools
 

@@ -27,6 +27,12 @@ pools are stopped (``nc pool-stop``); its trainer then starves inside the launch
 until its own ``trainer.sample_wait`` ends it and the launcher's recovery gives it
 up. Once no island runs, the whole launch is stopped (the STOP flag).
 
+A restarted ``run up`` (same run) replays only the islands' own trips
+(``state["fleet_island_stops"]``): those islands stay stopped and their pools are not
+driven again. A fleet-scoped trip (``run.trainer_exit``, ``run.budget``, the launch)
+ended the launch that the restart replaces, so it is not replayed; a new trainer
+launch also drops every fleet-scoped stop of this process (:meth:`on_trainer_start`).
+
 Import-light: no torch, ray or miles.
 """
 
@@ -86,20 +92,51 @@ class FleetRuntime:
         return self._resolved[k]
 
     def stops(self) -> Any:
-        """The fleet's :class:`~yeto.breakers.fleet.FleetStops`, replayed from
-        ``state["fleet_stops"]`` (a restarted ``run up`` keeps what earlier trips stopped)."""
+        """The fleet's :class:`~yeto.breakers.fleet.FleetStops`. A new runtime (a restarted
+        ``run up``) replays the islands' own trips only (``state["fleet_island_stops"]``,
+        written by :meth:`stop_island`), never a fleet-scoped one (module doc)."""
         if self._stops is None:
             from yeto.breakers import fleet as breakers_fleet  # noqa: PLC0415
-            from yeto.breakers.events import STOP_REASON_PREFIX  # noqa: PLC0415
+            from yeto.breakers.events import stop_reason_for  # noqa: PLC0415
 
             self._stops = breakers_fleet.FleetStops(breakers_fleet.Island(i.index, i.name) for i in self.plan.islands)
-            for row in (self.run.state.get("fleet_stops") or {}).get("islands") or ():
-                reason = row.get("stop_reason")
-                if reason:
-                    name = str(reason).removeprefix(STOP_REASON_PREFIX)
-                    self._stops.record({"event": "rl_breaker", "state": "trip", "name": name,
-                                        "stop_reason": reason}, island=int(row["index"]))
+            known = {i.index for i in self.plan.islands}
+            for key, row in sorted((self.run.state.get("fleet_island_stops") or {}).items()):
+                name = str((row or {}).get("breaker") or "")
+                if not name or not str(key).isdigit() or int(key) not in known:
+                    continue
+                self._stops.record({"event": "rl_breaker", "state": "trip", "name": name,
+                                    "stop_reason": stop_reason_for(name)}, island=int(key))
         return self._stops
+
+    def island_stopped(self, k: int) -> str | None:
+        """Why island k is stopped (None: it runs)."""
+        return self.stops().stop_reason(k)
+
+    def on_trainer_start(self) -> None:
+        """A new trainer launch of this run: the stops come back to the islands' own trips
+        (a fleet-scoped stop ended the launch this one replaces); ``state["fleet_stops"]``
+        is written again (logged when that dropped any)."""
+        before = (self.run.state.get("fleet_stops") or {}).get("islands") or ()
+        self._stops = None
+        stops = self.stops()
+        dropped = [f"{self.label(int(r['index']))}: {r['stop_reason']}" for r in before
+                   if r.get("stop_reason") and stops.stop_reason(int(r["index"])) != r["stop_reason"]]
+        if dropped:
+            _log(f"fleet: a new trainer launch: the earlier fleet-wide stop(s) no longer hold ({'; '.join(dropped)})")
+        self.run.state["fleet_stops"] = stops.to_json()
+        self.run.save()
+
+    def pool_restart_refusal(self, pool: str) -> str | None:
+        """Why ``run up`` must not drive pool ``pool`` again: its island is stopped by its
+        own earlier trip (None: drive it)."""
+        island = self.plan.island_of_pool(pool)
+        reason = None if island is None else self.island_stopped(island.index)
+        if reason is None:
+            return None
+        return (f"{self.label(island.index)} stays stopped ({reason}, an earlier trip of this run), so its pool "
+                f"{pool} is not driven again; to run that island again, remove fleet_island_stops.{island.index} "
+                f"from {self.run.state_path} (or start a new run name)")
 
     def ended(self, k: int) -> bool:
         return str(k) in (self.run.state.get("fleet_data_ended") or {})

@@ -1092,6 +1092,12 @@ class Run:
         from yeto.launch.nc import pool_run  # noqa: PLC0415
 
         os.environ.update({k: v for k, v in self.env.items() if k.startswith(("YETO_NC_", "NC_"))})
+        if self.fleet_plan() is not None and self.fleet_rt().all_stopped() is not None:
+            stopped = "; ".join(f"{self.fleet_rt().label(i.index)}: {self.fleet_rt().island_stopped(i.index)}"
+                                for i in self.fleet_plan().islands)
+            raise RunUpRefused(f"every island of the fleet stays stopped by an earlier trip of its own ({stopped}): "
+                               "nothing would sample. Remove fleet_island_stops from "
+                               f"{self.state_path} for the islands to run again (or start a new run name)")
         if self.in_process:
             flag = self.dir / "STOP"
             if flag.exists():  # left by an earlier stop: the new controller would drain every pool at once
@@ -1106,6 +1112,8 @@ class Run:
             proc = pool_run.pool_process(ref.load())
             if proc and proc.get("alive"):
                 _log(f"pool {ref.name}: loop already running (PID {proc.get('pid')})")
+            elif self.fleet_plan() is not None and self.fleet_rt().pool_restart_refusal(ref.name):
+                _log(f"pool {ref.name}: {self.fleet_rt().pool_restart_refusal(ref.name)}")
             else:
                 down.append((i, ref))
         # every stopped pool is checked before any is restarted or spawned: a refusal of a
@@ -1419,6 +1427,8 @@ class Run:
         self._spawn("trainer", self.yeto("launch", *self.trainer_argv()))
         for key in ("trainer_exit_seen", "trainer_finished"):  # of an earlier launcher of this run
             self.state.pop(key, None)
+        if self.fleet_plan() is not None:  # a fleet-wide stop of the launch this one replaces no longer holds
+            self.fleet_rt().on_trainer_start()
         self.state.setdefault("trainer_t0", time.time())
         self.mark("trainer")
 
@@ -1460,9 +1470,15 @@ class Run:
         exit drain) and with no live member: this ``run up`` drives it again. Kept
         stopped, the controller skips it at every tick, so no sampler is ordered and the
         trainer waits for samples that never come. A pool with live members is left as
-        it is (the stop has not finished), and so is one that finished its run."""
+        it is (the stop has not finished), and so is one that finished its run, and (a
+        fleet) one whose island an earlier trip of its own stopped."""
         if not pool.stopped or getattr(pool, "finished", None):
             return
+        if self.fleet_plan() is not None:
+            refused = self.fleet_rt().pool_restart_refusal(name)
+            if refused:
+                _log(f"pool {name}: {refused}")
+                return
         released = getattr(pool, "manual_released", None) or {}
         # a member released by hand (`nc down` / `delete-ticket` with no loop running) is no
         # unfinished stop: the first tick reads its ticket ended and drops it
