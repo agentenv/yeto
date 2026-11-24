@@ -561,7 +561,9 @@ def _fleet_part(fleet: dict, asy) -> dict:
             if p.get("source") == "miles":
                 row.update(launch_island=p.get("launch_island"), shard=p.get("shard"), gpus=p.get("gpus"))
             pools.append(row)
-        islands.append({"island": isl["learner"], "trainer": isl.get("trainer"), "name": isl.get("name"),
+        # index: the island's place in the fleet (the plan's; bound from the events, its learner id)
+        index = isl.get("index") if isl.get("index") is not None else isl["learner"]
+        islands.append({"island": isl["learner"], "index": index, "trainer": isl.get("trainer"), "name": isl.get("name"),
                         "gpu": isl.get("gpu"), "substore": isl.get("substore"), "pools": pools})
     return {"source": fleet["source"], "islands": islands, "unbound": list(fleet["unbound"])}
 

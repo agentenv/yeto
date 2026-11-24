@@ -75,14 +75,32 @@ function banners(B){var out=[];
   return out.join("")}
 function switches(B){var s=B.switches||{},ks=Object.keys(s);if(!ks.length)return "";
   return '<div class="note bsw">switches: '+ks.map(function(k){var g=s[k]||{};return '<span class="mono">'+esc(k)+'</span> '+(g.on===false?'<b>off</b>':"on")+' ('+esc((g.members||[]).join(", "))+')'}).join(" · ")+'</div>'}
+/* the dependency checks a viewer must not miss: warn and error level */
+function loud(B){return (B.findings||[]).filter(function(x){return x.level==="warn"||x.level==="error"})}
+/* the one line the collapsed panel shows: entry states, the newest trip, loud dependency checks */
+function summary(B){var c=B.counts||{},t=(B.trips||[])[0],f=loud(B),ne=f.filter(function(x){return x.level==="error"}).length;
+  var states=["armed","implicit","off","invariant"].filter(function(k){return c[k]}).map(function(k){return c[k]+" "+k}).join(" · ")||"no entries";
+  var trip=t?'<span class="st '+(TRIP_CLS[t.state]||"mu")+'"><i></i>'+esc(B.trip_total)+" trip"+(B.trip_total===1?"":"s")+'</span> <span class="note">newest '+esc(t.name)+" "+esc(t.state)+" at "+esc(clock(t.ts))+'</span>':'<span class="note">no trips</span>';
+  var dep=f.length?'<span class="st '+(ne?"bd":"wn")+'"><i></i>'+(ne?ne+" failing":"")+(ne&&f.length>ne?" · ":"")+(f.length>ne?(f.length-ne)+" warn":"")+" dependency check"+(f.length===1?"":"s")+'</span>':'<span class="note">no warn / fail dependency checks</span>';
+  return '<b>'+esc(states)+'</b> · '+trip+' · '+dep}
+/* Alerts rows for the top of the page: the loud dependency checks (trips are alerts already),
+   each with a link down to this panel (it sits at the bottom, collapsed) */
+function alertRows(V){var B=V&&V.breakers;if(!B)return "";
+  return loud(B).map(function(x){return '<div><span class="st '+(x.level==="error"?"bd":"wn")+'"><i></i>'+(x.level==="error"?"critical":"warning")+'</span> <b>breaker dependency check '+esc(x.rule)+'</b> <span class="note">'+esc(x.message)+'</span> '+link()+'</div>'}).join("")}
+function link(){return '<a href="#brkBox" class="brkjump" data-brk="1">Breakers ↓</a>'}
+var detOpen=false;  // the viewer opened the panel (kept across the 5 s redraws)
+function openPanel(){detOpen=true;var d=$("brkDet");if(d&&!d.open)d.open=true}
 function render(V){
   var box=$("brkBox"),B=V&&V.breakers;if(!box)return;box.hidden=!B;var nav=$("navBrk");if(nav)nav.style.display=B?"":"none";if(!B)return;
   var c=B.counts||{};
   $("brkNote").textContent=["armed","implicit","off","invariant"].filter(function(k){return c[k]}).map(function(k){return c[k]+" "+k}).join(" · ")+
     (B.trip_total?" · "+B.trip_total+" trips":"")+(B.acted_total?" · "+B.acted_total+" guard acts":"")+" · "+(B.resolved_from?"settings from "+B.resolved_from.split("/").slice(-2).join("/"):B.status_scopes?"settings from "+B.status_scopes+" process report(s)":"events only");
-  $("brk").innerHTML=banners(B)+switches(B)+'<div class="bgrid"><div>'+(B.layers||[]).map(layer).join("")+'</div><div><h3>Recent trips</h3>'+trips(B)+findings(B)+'</div></div>';
+  if(typeof location!=="undefined"&&location&&location.hash==="#brkBox")detOpen=true;
+  $("brk").innerHTML='<details class="bdet" id="brkDet"'+(detOpen?" open":"")+'><summary class="bsum">'+summary(B)+' <span class="note">(click for every entry)</span></summary>'+
+    banners(B)+switches(B)+'<div class="bgrid"><div>'+(B.layers||[]).map(layer).join("")+'</div><div><h3>Recent trips</h3>'+trips(B)+findings(B)+'</div></div></details>';
+  var d=$("brkDet");if(d&&d.addEventListener)d.addEventListener("toggle",function(){detOpen=!!d.open});
   var bs=box.querySelectorAll?box.querySelectorAll(".bmore"):[];
   for(var i=0;i<bs.length;i++)bs[i].addEventListener("click",function(e){var k=e.currentTarget.getAttribute("data-layer");open[k]=!open[k];render(V)});
 }
-return {render:render};
+return {render:render,alertRows:alertRows,link:link,open:openPanel};
 })();

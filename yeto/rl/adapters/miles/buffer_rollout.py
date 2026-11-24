@@ -120,10 +120,13 @@ SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the
 SHARDS_ENV = "YETO_SAMPLE_BUFFER_SHARDS"
 DATA_SLOT_ENV = "YETO_SAMPLE_BUFFER_DATA_SLOT"  # sampler: "index/count" of the prompt data
 INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"  # set by the sampler island before Ray starts
+# trainer: its learner id, the island_id of the records its rollout process echoes
+# (rl_sample_wait, the reader's breaker trips): a fleet bills them to their island
+ISLAND_ID_ENV = "YETO_SAMPLE_BUFFER_ISLAND_ID"
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
 ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, HEARTBEAT_ENV, SHARD_ENV,
-               SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV,
+               SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV, ISLAND_ID_ENV,
                # the trainer's relay pump (yeto.rl.spot_rollout.relay_buffer.RELAY_ENVS)
                "YETO_SAMPLE_RELAY_ADDR", "YETO_SAMPLE_RELAY_CHANNEL", "YETO_SAMPLE_RELAY_PREFETCH",
                # the pump's boat orphan watchdog (yeto.rl.harness.harbor.boat_labels)
@@ -171,7 +174,8 @@ def rollout_argv(role: str | None, *, max_policy_age: int, fully_async: bool = F
 def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
                max_policy_age: int | None = None, wait_s: float | None = None,
                shard: str | None = None, shards: Sequence[str] | None = None,
-               lane: BufferLane | None = None, data_slot: str | None = None) -> dict[str, str]:
+               lane: BufferLane | None = None, data_slot: str | None = None,
+               island_id: int | None = None) -> dict[str, str]:
     """The environment the launch layer exports on the island (read in the rollout
     process). A convertible node writes like a sampler, into its own ``shard`` of
     the index, and reads like a trainer. ``shards``: the sampler shards of a
@@ -179,7 +183,8 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
     sampler id, the trainer merges them all). ``lane``: a synced trainer's
     buffer lane. ``data_slot``: a sampler's or a convertible node's slot of the
     prompt data (``sample_roles.DataSlot``; several sampler islands, or the nodes of
-    a convertible pool, draw disjoint prompts)."""
+    a convertible pool, draw disjoint prompts). ``island_id``: a trainer's learner id
+    (:data:`ISLAND_ID_ENV`)."""
     if role not in ROLES:
         raise ValueError(f"sample buffer role {role!r}: expected one of {ROLES}")
     env = {BUFFER_ROOT_ENV: str(store_root)}
@@ -211,6 +216,8 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
         if role not in (SAMPLER, CONVERTIBLE):
             raise ValueError("only a sampler island or a convertible node draws a data slot")
         env[DATA_SLOT_ENV] = DataSlot.parse(data_slot).env()
+    if island_id is not None and role == TRAINER:
+        env[ISLAND_ID_ENV] = str(int(island_id))
     return env
 
 
@@ -1005,12 +1012,23 @@ def _source_bad_streak_limit(environ: Mapping[str, str] | None = None) -> int:
         return DEFAULT_SOURCE_BAD_STREAK
 
 
+def _echo_island_id(environ: Mapping[str, str] | None = None) -> int | None:
+    """The trainer's learner id (:data:`ISLAND_ID_ENV`); None when unset or not a number."""
+    raw = ((os.environ if environ is None else environ).get(ISLAND_ID_ENV) or "").strip()
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
+
+
 def _echo_event(event: str, **fields: Any) -> None:
     """One ``YETO_RL_EVENT`` stdout record from the rollout executor's process (it has
-    no event tape of its own; the island's log stream carries the record)."""
+    no event tape of its own; the island's log stream carries the record). Its
+    ``island_id`` is the trainer's learner id (:data:`ISLAND_ID_ENV`) unless given."""
     from yeto.rl.event_echo import format_record
 
-    print(format_record({"island_id": fields.pop("island_id", None), "time_unix": time.time(),
+    island = fields.pop("island_id", None)
+    print(format_record({"island_id": _echo_island_id() if island is None else island, "time_unix": time.time(),
                          "event": str(event), **fields}), flush=True)
 
 

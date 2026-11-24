@@ -487,7 +487,8 @@ def test_page_draws_the_synced_group(tmp_path):
     out = _smoke(tmp_path, load("k31-synced-group"))
     joined = " | ".join(out["texts"])
     assert out["label"].startswith("samplers to store to trainers to syncer") and "layout: synced group" in out["note"]
-    for want in ("Trainer island 0", "Store", "samplers load trainer 0's weights", "syncer tape behind the islands: no negative lag drawn"):
+    for want in ("Trainer island 0", "Store", "samplers load trainer 0's weights", "syncer tape behind the islands",
+                 "  no negative lag drawn"):  # one syncer line folded at its " · " to stay inside the card
         assert want in joined, want
     assert "Buffer backlog" in out["kpis"] and "Fragment rounds in flight" in out["kpis"]
 
@@ -599,7 +600,7 @@ def test_page_full_parameter_island_labels_its_gaps(tmp_path):
     out = _smoke(tmp_path, load("g5-fullparam"))
     joined = " | ".join(out["texts"])
     assert "round 71" in joined and "8 groups / round (trainer side)" in joined and "no round yet" not in joined
-    assert "run ended: the last 7 merge(s) went to the final cut" in joined and "BCAST pending" not in joined
+    assert "run ended · last 7 merge(s) → final cut" in joined and "BCAST pending" not in joined
     assert "2 in run · 3 overwritten" in joined
     assert "Groups trained / rolled out" in out["kpis"] and "952 / —" in out["kpis"]
     assert "not recorded" in out["kpis"] and "not trained yet" not in out["kpis"]

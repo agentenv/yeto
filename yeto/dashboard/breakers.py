@@ -21,6 +21,7 @@ Pure observation, like the rest of the dashboard: missing stays None.
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -168,6 +169,38 @@ def registry_kinds() -> dict[str, tuple[str, str | None]]:
         return {b.name: (b.kind, b.default_action) for b in default_registry()}
     except Exception:  # noqa: BLE001 - the page renders without the registry
         return {}
+
+
+@functools.lru_cache(maxsize=1)
+def _registry_specs() -> dict[str, Any]:
+    """Entry -> its registry spec; {} when the registry does not load."""
+    try:
+        from yeto.breakers.registry import default_registry  # noqa: PLC0415
+
+        return {b.name: b for b in default_registry()}
+    except Exception:  # noqa: BLE001 - the page renders without the registry
+        return {}
+
+
+def unit_limit(item: dict) -> dict:
+    """A status item whose gauge has no value of its own got its limit from the entry's
+    params; snapshots written before ``status.primary_limit`` read the gauge's unit took
+    the first numeric non-ratio param, so a ratio gauge (``sampler.vram_guard``: unit
+    ratio, ``realert_s`` 600 first among the numbers) showed "60000%". Such an item gets
+    the param in its gauge's unit, its ratio unknown; every other item is unchanged."""
+    params, limit = item.get("params"), _f(item.get("limit"))
+    if item.get("value") is not None or limit is None or not isinstance(params, dict):
+        return item
+    spec = _registry_specs().get(str(item.get("name")))
+    if spec is None or not spec.params or item.get("unit") != spec.params[0].unit:
+        return item
+    units = {p.name: p.unit for p in spec.params}
+    if not any(_f(v) == limit and units.get(k) not in (None, spec.params[0].unit) for k, v in params.items()):
+        return item  # the limit is not a param of another unit: the process chose it
+    from yeto.breakers.status import primary_limit  # noqa: PLC0415
+
+    right = primary_limit(params, spec)
+    return item if right is None or right == limit else {**item, "limit": right, "ratio": None}
 
 
 def best_source(sources: Any) -> dict | None:
@@ -336,7 +369,7 @@ class BreakerState:
                 prev = self.status.get(key)
                 if prev is not None and ts is not None and prev.get("ts") is not None and ts < prev["ts"]:
                     continue  # an older snapshot read after a newer one (tapes read in any order)
-                self.status[key] = {**it, "ts": ts, "scope": scope_label(scope), "layer": it.get("layer") or r.get("layer")}
+                self.status[key] = {**unit_limit(it), "ts": ts, "scope": scope_label(scope), "layer": it.get("layer") or r.get("layer")}
                 if "enabled" in it or "params" in it:
                     self.settings[name] = {k: it.get(k) for k in ("layer", "kind", "enabled", "action", "params",
                                                                   "source", "implicit")} | {"ts": ts}

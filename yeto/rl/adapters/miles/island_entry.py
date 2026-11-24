@@ -371,7 +371,8 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
         config.role, store_root=config.store, sampler_id=sampler,
         max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
         shard=node, shards=getattr(args, "rl_buffer_shards", None),
-        lane=sample_roles.buffer_lane(args), data_slot=getattr(args, "rl_sampler_data_slot", None)))
+        lane=sample_roles.buffer_lane(args), data_slot=getattr(args, "rl_sampler_data_slot", None),
+        island_id=int(getattr(args, "learner_id", 0) or 0)))
     miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # None off a synced trainer
     if getattr(args, "rl_sample_relay", False) and config.role == sample_roles.TRAINER:
         env.update(sample_relay_env(args))

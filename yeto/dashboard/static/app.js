@@ -6,7 +6,7 @@
 var node=document.getElementById("yeto-data"),INLINE=null;
 if(node){try{INLINE=JSON.parse(node.textContent)}catch(e){INLINE=null}}
 var OFFLINE=!!INLINE,POLL_MS=5000,NS="http:"+"//www.w3.org/2000/svg"; // SVG namespace id, not a request
-var V=null,O=null,RS=[],SEL=null,cur=null,layout="auto",metric="reward",themeI=2,pinned=false;
+var V=null,O=null,RS=[],SEL=null,cur=null,layout="auto",metric="reward",themeI=2,pinned=false,alertBound=false;
 var PH=[["R","rollout"],["T","training"],["S","post-train sync"],["P","publish"]];
 var ISL_COLORS=["var(--i0)","var(--i1)","var(--i2)"];
 var METRICS=[["reward","reward"],["trunc","truncation"],["logprob_diff","logprob diff"],["kl","PPO KL"],["kl_tr","train-rollout KL"],["tis_clip","TIS clipfrac"],["grad_norm","grad_norm"],
@@ -23,7 +23,8 @@ function hm(s){return !fin(s)?"n/a":(s>=3600?(s/3600).toFixed(1)+" h":(s/60).toF
 function clock(t){if(!fin(t))return "n/a";var d=new Date(t*1000);function p(n){return (n<10?"0":"")+n}return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
 /* short island label (s0 / s1 / trainer 0) with the full id as tooltip: shard ids are long run names */
 function islShort(c){var id=String(c.id),m=/-(\d+)$/.exec(id),async=((V||{}).async||{}).samplers;
-  if(c.role==="sampler")return m?"s"+m[1]:id;if(c.role==="trainer"&&async&&Object.keys(async).length)return "trainer "+(m?m[1]:id);return m&&id.length>12?"island "+m[1]:"Island "+id}
+  // s<n> unless another sampler ends in the same number (a fleet's pools: fpv-i0-0, fps-i1-0): then its id
+  if(c.role==="sampler"){if(!m)return id;var twin=Object.keys(async||{}).some(function(k){return k!==id&&/-(\d+)$/.test(k)&&/-(\d+)$/.exec(k)[1]===m[1]});return twin?id:"s"+m[1]}if(c.role==="trainer"&&async&&Object.keys(async).length)return "trainer "+(m?m[1]:id);return m&&id.length>12?"island "+m[1]:"Island "+id}
 function islName(c){return '<span title="'+esc(String(c.id)+(c.name?" ("+c.name+")":""))+'">'+esc(islShort(c))+'</span>'}
 function el(tag,a,parent){var e=document.createElementNS(NS,tag);for(var k in a)e.setAttribute(k,a[k]);
   /* a fixed viewBox stretched to a full-width panel scales its text 3-4x: cap the drawn width at 1.4x the viewBox */
@@ -74,8 +75,10 @@ function kpis(){
     ["Run uptime",ru&&fin(ru.cumulative_runtime_h)?hm(ru.cumulative_runtime_h*3600):"n/a",ru?(ru.ups+" up(s)"+(fin(ru.current_up_runtime_h)?" · this up "+hm(ru.current_up_runtime_h*3600):"")+(fin(ru.spend_usd_estimate)?" · spend $"+f(ru.spend_usd_estimate,1):"")):"no run up state"],
     ["Throughput",f(last.tok_s,0),"tok/s, last round"]];
   $("kpis").innerHTML=cards.map(function(x){return '<div class="kpi'+(x[3]?" main":"")+'"><div class="k">'+x[0]+'</div><div class="v">'+x[1]+'</div><div class="s">'+esc(x[2])+'</div></div>'}).join("");
-  var al=O.alerts||[];$("alertBox").hidden=!al.length;
-  $("alertBox").innerHTML="<h2>Alerts</h2>"+al.map(function(a){return '<div><span class="st '+(a.sev===0?"bd":a.sev===1?"wn":"mu")+'"><i></i>'+["critical","warning","info"][a.sev]+'</span> <b>'+esc(a.title)+'</b> <span class="note">'+esc(a.detail)+'</span></div>'}).join("");
+  // breaker trips and loud dependency checks stay up here, each linked to the Breakers panel at the bottom
+  var al=O.alerts||[],brk=typeof YetoBrk!=="undefined"&&V&&V.breakers,extra=brk?YetoBrk.alertRows(V):"";$("alertBox").hidden=!al.length&&!extra;
+  $("alertBox").innerHTML="<h2>Alerts</h2>"+al.map(function(a){return '<div><span class="st '+(a.sev===0?"bd":a.sev===1?"wn":"mu")+'"><i></i>'+["critical","warning","info"][a.sev]+'</span> <b>'+esc(a.title)+'</b> <span class="note">'+esc(a.detail)+'</span>'+(brk&&(a.rule==="breaker"||a.rule==="guard_drops")?" "+YetoBrk.link():"")+'</div>'}).join("")+extra;
+  if(brk&&!alertBound){alertBound=true;$("alertBox").addEventListener("click",function(e){var t=e.target;if(t&&t.getAttribute&&t.getAttribute("data-brk"))YetoBrk.open()})}
 }
 /* a sampler without a fleet record: its platform from rl_sampler_start provenance (engine on device
    family; the cloud is not on its tape) and its reward from its last round with groups */
@@ -375,8 +378,12 @@ function cost(){
   if(!ci.length){$("costBox").innerHTML='<div class="note">'+(ni?'no cost data for the '+ni+' island(s): cost needs island_ready in fleet.jsonl or the cloud and GPU type on the tapes':'no island has reported yet, so nothing is priced')+
     (fin(c.budget_usd)?' · budget $'+f(c.budget_usd,0):'')+'. Prices: '+esc(c.prices_source||"")+'</div>';return}
   $("costBox").innerHTML='<table class="c"><tr><th></th><th>GPU/h</th><th>CPU+memory/h</th><th>total/h</th><th>duration</th><th>cumulative</th></tr>'+ci.map(function(r){
+    // a fleet's rows (cost.fleet_rows): each island's trainer, its pools' samplers and the syncer
+    var lab=r.kind==="syncer"?"Syncer":r.kind==="pool sampler"?"Island "+esc(r.island)+" pool "+esc(r.pool)+' <span class="note">'+esc(r.id)+'</span>':r.kind==="trainer"?"Island "+esc(r.island)+" trainer":"Island "+esc(r.id);
+    var rs=r.rate_source?' title="'+esc(r.rate_source+(r.billed_from?"; hours: "+r.billed_from:""))+'"':"";
+    if(r.kind)return '<tr><td'+rs+'>'+lab+'</td><td class="num">'+(fin(r.gpu_rate_usd_h)?"$"+f(r.gpu_rate_usd_h,2):r.kind==="syncer"?"—":"unpriced")+'</td><td class="num">'+(fin(r.host_rate_usd_h)?"$"+f(r.host_rate_usd_h,2):fin(r.rate_usd_h)&&r.rate_source?"in total":r.kind==="syncer"?"—":"GPU only")+'</td><td class="num">'+(fin(r.rate_usd_h)?"$"+f(r.rate_usd_h,2):"unpriced")+'</td><td class="num">'+f(r.hours,2)+' h</td><td class="num">'+(fin(r.cost_usd)?"$"+f(r.cost_usd,2):"n/a")+'</td></tr>';
     return '<tr><td>Island '+esc(r.id)+'</td><td class="num">'+(fin(r.gpu_rate_usd_h)?"$"+f(r.gpu_rate_usd_h,2):"unpriced")+'</td><td class="num">'+(fin(r.host_rate_usd_h)?"$"+f(r.host_rate_usd_h,2):"GPU only")+'</td><td class="num">'+(fin(r.rate_usd_h)?"$"+f(r.rate_usd_h,2):"n/a")+'</td><td class="num">'+f(r.hours,2)+' h</td><td class="num">'+(fin(r.cost_usd)?"$"+f(r.cost_usd,1):"n/a")+'</td></tr>'}).join("")+'</table>'+
-    '<div class="note" style="margin-top:6px">'+esc(c.note||"")+'. Specs: '+ci.map(function(r){return "island "+esc(r.id)+" "+(r.cpus==null?"n/a":r.cpus)+" cores, "+(r.memory_gib==null?"n/a":r.memory_gib)+" GiB"}).join("; ")+'. Prices: '+esc(c.prices_source||"")+'</div>';
+    '<div class="note" style="margin-top:6px">'+(c.fleet?esc("fleet spend = pools $"+f(c.fleet.pools_usd,2)+" + trainers $"+f(c.fleet.trainers_usd,2)+" + syncer "+(fin(c.fleet.syncer_usd)?"$"+f(c.fleet.syncer_usd,2):"unpriced")+" (hover a row for its price and hours source). "):"")+esc(c.note||"")+(function(){var sp=ci.filter(function(r){return !r.kind||r.cpus!=null});return sp.length?'. Specs: '+sp.map(function(r){return "island "+esc(r.id)+" "+(r.cpus==null?"n/a":r.cpus)+" cores, "+(r.memory_gib==null?"n/a":r.memory_gib)+" GiB"}).join("; "):""})()+'. Prices: '+esc(c.prices_source||"")+'</div>';
 }
 var EV_KEEP={rl_engine_selected:1,rl_driver_start:1,rl_driver_phase:1,rl_publication:1,rl_round_trained:1,rl_reconfiguration:1,rl_learner_finalized:1,
   island_ready:1,island_lost:1,island_stop:1,island_done:1,island_leave:1,operator_stop:1,dashboard_source_lost:1,rl_elastic_recommendation:1,

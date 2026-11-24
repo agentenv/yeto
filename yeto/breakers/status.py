@@ -50,11 +50,20 @@ def band(ratio: float | None) -> int:
     return sum(1 for b in BANDS if ratio >= b)
 
 
-def primary_limit(params: Mapping[str, Any]) -> float | None:
+def primary_limit(params: Mapping[str, Any], spec: Any = None) -> float | None:
     """The limit a gauge without one of its own is compared with: the entry's first
-    numeric parameter that is not a ratio or a switch (``timeout_s``, ``max_n``, ``usd``)."""
+    numeric parameter that is not a ratio or a switch (``timeout_s``, ``max_n``, ``usd``).
+    With the entry's ``spec``, the first numeric parameter in the gauge's unit (its first
+    param's, ``events._unit``): a ratio gauge (``sampler.vram_guard``) is compared with
+    its ratio, never with a duration that happens to come first among the numbers."""
+    units = {p.name: p.unit for p in getattr(spec, "params", None) or ()}
+    want = spec.params[0].unit if units else None
     for name, value in params.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if want is not None and name in units:
+            if units[name] == want:
+                return float(value)
             continue
         if name.endswith("_ratio") or name == "warn_ratio":
             continue
@@ -176,7 +185,7 @@ class StatusEmitter:
             seen.add(name)
             value, limit, detail = self._read(name)
             if limit is None and e.enabled:
-                limit = primary_limit(e.params)
+                limit = primary_limit(e.params, e.spec)
             extra: dict[str, Any] = {"layer": e.spec.layer, "kind": e.spec.kind, "enabled": bool(e.enabled),
                                      "action": e.action, "params": dict(e.params), "source": _source(e)}
             if e.spec.implicit and (_source(e) or {}).get("kind") == "default":

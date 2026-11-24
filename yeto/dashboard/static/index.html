@@ -193,6 +193,7 @@ table.qt td:first-child,table.qt th:first-child{text-align:left;color:var(--ink2
 #topoBox .lg .ln{display:inline-block;width:18px;height:0;border-top:3px solid currentColor;margin-right:6px;vertical-align:middle}
 #topoBox .lg .cd{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
 /* Breakers panel (breakers.js): rows wrap at any width, nothing scrolls sideways */
+.bdet>summary.bsum{cursor:pointer;padding:4px 0;line-height:1.7;list-style-position:inside}.bdet[open]>summary.bsum{margin-bottom:8px}a.brkjump{margin-left:6px;white-space:nowrap}
 #brkBox{overflow-x:visible}#brkBox .bh{flex-wrap:wrap}#brkBox[hidden]{display:none}
 .bgrid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:4px 24px;align-items:start}.bgrid>div{min-width:0}
 .blay{margin-bottom:12px}.blh{border-bottom:1px solid var(--line);padding:4px 0;font-size:12.5px;overflow-wrap:anywhere}
@@ -226,8 +227,8 @@ The data is inside the file; no network access is needed.</div>
 <div class="app">
 <nav aria-label="Page navigation">
   <div class="brand">yeto dashboard</div>
-  <a href="#overview">Overview</a><a href="#islandWall" id="navWall">Islands</a><a href="#rounds">Per round</a><a href="#async" id="navAsync" style="display:none">Async GRPO</a><a href="#brkBox" id="navBrk" style="display:none">Breakers</a><a href="#util">Generation utilization</a><a href="#nodes">Nodes</a><a href="#cost">Cost</a>
-  <a href="#events">Events</a><a href="#cmds">Commands</a><a href="#unused">Unused panels</a>
+  <a href="#overview">Overview</a><a href="#islandWall" id="navWall">Islands</a><a href="#rounds">Per round</a><a href="#async" id="navAsync" style="display:none">Async GRPO</a><a href="#util">Generation utilization</a><a href="#nodes">Nodes</a><a href="#cost">Cost</a>
+  <a href="#events">Events</a><a href="#cmds">Commands</a><a href="#unused">Unused panels</a><a href="#brkBox" id="navBrk" style="display:none">Breakers</a>
   <div class="sub" id="navSub"></div>
 </nav>
 <main>
@@ -262,7 +263,6 @@ The data is inside the file; no network access is needed.</div>
   <span><i style="background:var(--arch-ampere)"></i>Ampere</span><span><i style="background:var(--arch-ada)"></i>Ada</span><span><i style="background:var(--arch-hopper)"></i>Hopper</span><span><i style="background:var(--arch-blackwell)"></i>Blackwell</span><span><i style="background:var(--arch-cdna4)"></i>CDNA</span>
   <span><i class="cd" style="background:var(--good)"></i>sampling</span><span><i class="cd" style="background:var(--wt)"></i>reloading / loading</span><span><i class="cd" style="background:var(--warn)"></i>backlog full / starting</span><span style="color:var(--warn)">v12 −1 = behind LATEST</span></div>
   <div id="topo"></div><div class="tip" id="topoTip"></div></section></div>
-<section class="blk" id="brkBox" hidden aria-label="Breakers"><div class="bh"><b>Breakers</b><span id="brkNote"></span></div><div id="brk"></div></section>
 <div class="sh"><h2 id="rFleetH">Fleet</h2><div class="cs">per island; points are trainer rounds, sampler rounds and releases</div></div>
 <div class="cg" id="rFleet"></div>
 <div class="cfold" id="rFleetNone" hidden></div>
@@ -332,6 +332,8 @@ The data is inside the file; no network access is needed.</div>
 </div>
 <section class="panel" id="cmds"><h2>Commands</h2><div id="cmdBox"></div></section>
 <section class="panel" id="unused"><h2>Panels not used in this run</h2><div id="foldBox"></div></section>
+<!-- Breakers last: collapsed to one line, its trips and loud dependency checks are in Alerts at the top -->
+<section class="blk" id="brkBox" hidden aria-label="Breakers"><div class="bh"><b>Breakers</b><span id="brkNote"></span></div><div id="brk"></div></section>
 </div>
 </main>
 </div>
