@@ -926,6 +926,8 @@ class IslandPool:
             return False
         del self._releases[member.ticket]
         error = future.exception()
+        if error is not None and not isinstance(error, Exception):
+            raise error  # the store lock lost / not confirmed before the release: the tick ends
         if error is not None:
             return self._drain_failed(member, why, error, now)
         self._released(member, why)

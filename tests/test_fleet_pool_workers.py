@@ -239,3 +239,26 @@ def test_the_serial_controller_stays_the_default(workers):
         assert (c.slots["p"].worker is not None) is workers
     finally:
         c.stop("test end", join_s=5)
+
+
+def test_a_background_release_under_a_lost_lock_is_no_failed_release():
+    from tests.test_rl_object_store import FakeS3  # noqa: PLC0415
+
+    client, clock = FakeS3(), Clock()
+    control = store_state.open_pool_control(_objects(client), "p", "p", ttl_s=600, clock=clock)
+    provider = FakeProvider("p", clock)
+    pool = _pool("p", provider, clock, control=control, target=1)
+    pool.async_release = True
+    pool.tick()
+    victim = pool.live()[0]
+    clock.t += 601
+    store_state.open_pool_control(_objects(client), "p", "p", clock=clock)  # another controller took it
+    pool._drain(victim, "test")  # noqa: SLF001 - the release thread's guard finds the higher token
+    assert _wait_for(lambda: pool._releases[victim.ticket].done())  # noqa: SLF001
+    from yeto.launch.pool.store_lock import LockLost  # noqa: PLC0415
+
+    with pytest.raises(LockLost):  # the release's outcome is the lost lock, not a failed release
+        pool._drain(victim, "retry")  # noqa: SLF001
+    pool.tick()
+    assert pool.detached and provider.released == []
+    assert not any(e["event"].endswith("drain_failed") for e in pool.events.events)
