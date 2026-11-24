@@ -1079,6 +1079,12 @@ class Run:
     def preflight(self) -> bool:
         from yeto.launch_preflight import modal_sdk_problem  # noqa: PLC0415
 
+        if rollout_section(self.cfg).get("control_plane") == "store":
+            try:
+                self.adopt_desired()  # the desired state's pools are checked (read only: nothing is seeded)
+            except Exception as error:  # noqa: BLE001 - the run config's pools are checked instead
+                _log(f"preflight: the fleet's desired state was not read ({type(error).__name__}: {error}); "
+                     "checking the run config's pools")
         problem = self.fleet_problem()
         if problem is not None:
             _log(f"preflight: {problem}")
@@ -1461,6 +1467,10 @@ class Run:
             # the samplers running for the next run up to adopt
             kw.setdefault("pool_workers", True)
             kw.setdefault("detach_flag", self.dir / "DETACH")
+            # the fleet's desired state (fleet/desired.json): seeded from the run config once,
+            # then the pools are its pools; `yeto fleet apply` / `yeto run scale` change it
+            doc = self.adopt_desired(store_kw["control_objects"], seed=True)
+            kw.setdefault("reconciler", self._reconciler(store_kw, doc, ops))
         environ = self.pool_environ()
         try:
             for ref in self.pools:
@@ -1508,6 +1518,105 @@ class Run:
         overlay: dict[str, str | None] = {k: v for k, v in self.env.items() if os.environ.get(k) != v}
         overlay.update({k: None for k in os.environ if k not in self.env})
         return overlay
+
+    # -- the fleet's desired state (rollout.control_plane store)
+    def desired_store(self, objects: Any = None) -> Any:
+        from yeto.launch.pool.desired import DesiredStore  # noqa: PLC0415
+
+        return DesiredStore(objects if objects is not None else self._objects())
+
+    def _desired_cfg(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """The run config with the desired state's sampler pools as its ``samplers`` list."""
+        from yeto.launch.pool.desired import sampler_pools  # noqa: PLC0415
+
+        cfg = {k: v for k, v in self.cfg.items() if k not in ("pool", "samplers")}
+        cfg["samplers"] = [{**m.get("pool", {}), "name": name, "required": bool(m.get("required", True))}
+                           for name, m in sampler_pools(doc).items()]
+        return cfg
+
+    def adopt_desired(self, objects: Any = None, *, seed: bool = False) -> dict[str, Any] | None:
+        """On the store control plane: the pools of the fleet's desired state replace the run
+        config's (the desired state wins once it exists; ``seed``: written from the run config
+        when there is none yet). Returns the desired state (None: off, or none and no seed)."""
+        if rollout_section(self.cfg).get("control_plane") != "store":
+            return None
+        from yeto.launch.pool.desired import DesiredConflict, from_run_config, sampler_pools  # noqa: PLC0415
+        from yeto.launch.rollout.pools import resolve  # noqa: PLC0415
+
+        store = self.desired_store(objects)
+        doc = store.read()
+        if doc is None and seed:
+            try:
+                doc = store.apply(from_run_config(self.cfg), expect=0, note="seeded from the run config")
+                _log(f"fleet: desired state seeded from the run config (generation {doc['generation']}, "
+                     f"{len(sampler_pools(doc))} pool(s)); change it with `yeto fleet apply`")
+            except DesiredConflict:
+                doc = store.read()
+        if doc is None:
+            return None
+        names = list(sampler_pools(doc))
+        if names != [ref.name for ref in self.pools]:
+            _log(f"fleet: the desired state (generation {doc['generation']}) drives pool(s) {names}; the run config "
+                 f"lists {[ref.name for ref in self.pools]}: the desired state wins (`yeto fleet show`)")
+        if names:
+            self.pools = resolve(self._desired_cfg(doc), self.dir)
+        return doc
+
+    def _reconciler(self, store_kw: dict[str, Any], doc: dict[str, Any] | None, ops: Any) -> Any:
+        """The desired state's reconcile for this run's controller (pools added, removed,
+        rescaled, reconfigured while it trains)."""
+        from yeto.launch.nc import cli as nc_cli, pool_run  # noqa: PLC0415
+        from yeto.launch.pool.controller import nc_pool  # noqa: PLC0415
+        from yeto.launch.pool.fleet_reconcile import FleetReconciler, ReconcileHooks  # noqa: PLC0415
+        from yeto.launch.pool.island_pool import GuardedOps  # noqa: PLC0415
+        from yeto.launch.rollout.pools import resolve  # noqa: PLC0415
+
+        store = self.desired_store(store_kw["control_objects"])
+        reconciler: Any = None
+
+        def ref_of(name: str, member: dict[str, Any]) -> Any:
+            current = store.read() or {"members": []}
+            refs = resolve(self._desired_cfg(current), self.dir)
+            return next(ref for ref in refs if ref.name == name)
+
+        def add(name: str, member: dict[str, Any]) -> Any:
+            ref = ref_of(name, member)
+            slot = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(name), name=name, **store_kw)
+            self._restart_stopped_pool(name, slot.pool)
+            self.pools = [r for r in self.pools if r.name != name] + [ref]
+            return slot
+
+        def set_target(name: str, slot: Any, target: int, retire: list[str], mode: Any) -> None:
+            ref = next((r for r in self.pools if r.name == name), None)
+            if ref is None or slot.pool.scale_path is None:
+                slot.pool.set_target(target, retire=retire, mode=mode, source="desired")
+                return
+            rc = pool_run.scale_pool(ref.load(), ref.config, target, retire=retire, mode=mode, source="manual",
+                                     extra={"desired_generation": reconciler.applied + 1})
+            if rc != 0:
+                raise RuntimeError(f"pool-scale refused target {target} (rc={rc}; its log line says why)")
+
+        def reconfigure(name: str, slot: Any, member: dict[str, Any]) -> None:
+            ref = ref_of(name, member)
+            cfg = ref.load()
+            pool = slot.pool
+            if str(cfg.get("shard_base")) != pool.config.shard_base:
+                raise ValueError("shard_base cannot change in place: remove the pool and add a new one")
+            pc = nc_cli.pool_config(cfg, allowed=None if not pool_run.is_national_compute(cfg)
+                                    else nc_cli.allowed_accounts())
+            pc.target, pc.index_limit = pool.config.target, pool.config.index_limit
+            new_ops = (ops or {}).get(name) or nc_cli.pool_ops(cfg)
+            pool.config = pc
+            pool.ops = GuardedOps(new_ops, pool.control.lock.guard) if pool.control is not None else new_ops
+            self.pools = [ref if r.name == name else r for r in self.pools]
+
+        def removed(name: str) -> None:
+            self.pools = [r for r in self.pools if r.name != name]
+
+        reconciler = FleetReconciler(store, ReconcileHooks(add=add, set_target=set_target, reconfigure=reconfigure,
+                                                           removed=removed), log=_log)
+        reconciler.start_from(doc)
+        return reconciler
 
     def _undriven_banner(self) -> None:
         """At exit with ``rollout.drain_on_exit`` false: what is left running, undriven."""
@@ -3153,6 +3262,11 @@ class Run:
         return bool(ok)
 
     def status(self) -> dict[str, Any]:
+        if rollout_section(self.cfg).get("control_plane") == "store":
+            try:
+                self.adopt_desired()  # the pools the fleet's desired state drives now
+            except Exception as error:  # noqa: BLE001 - the run config's pools are shown instead
+                _log(f"status: the fleet's desired state was not read ({type(error).__name__}: {error})")
         keys = self.buffer_keys()  # None: the listing failed (no credentials, ...): unknown, not 0
         out: dict[str, Any] = {"run": self.run, "state": self.state,
                                "buffer_objects": None if keys is None else len(keys),
@@ -3320,10 +3434,13 @@ class Run:
                       remove: list[str] | None, mode: str | None, force_static: bool, dry_run: bool,
                       source: str) -> int:
         """:meth:`scale` of pool ``i`` under the run's ``scale.lock``."""
+        base = self._desired_target(i) if samplers is None else None
+        if base is None and samplers is None:
+            base = self.pool_target(self.pool_doc(i), i)
         if samplers is None and add:
-            wanted = self.pool_target(self.pool_doc(i), i) + int(add)
+            wanted = base + int(add)
         elif samplers is None:
-            wanted = self.pool_target(self.pool_doc(i), i) - len(remove or [])
+            wanted = base - len(remove or [])
         else:
             wanted = int(samplers)
         why = self.scale_refusal(wanted, i)
@@ -3332,6 +3449,8 @@ class Run:
             return 2
         if len(self.pools) > 1:
             _log(f"scale: pool {self.pools[i].name} ({self.pools[i].kind()})")
+        if rollout_section(self.cfg).get("control_plane") == "store" and not dry_run:
+            return self._scale_desired(i, wanted, list(retire or []) + list(remove or []), mode)
         argv = self.nc("pool-scale", "--config", self.pools[i].config)
         if samplers is not None:
             argv += ["--target", str(int(samplers))]
@@ -3356,6 +3475,46 @@ class Run:
                                                         "pool": self.pools[i].name})
             self.save()
         return rc
+
+    def _desired_target(self, i: int) -> int | None:
+        """Pool ``i``'s target in the fleet's desired state (store control plane), None: off / not set."""
+        if rollout_section(self.cfg).get("control_plane") != "store":
+            return None
+        from yeto.launch.pool.desired import pool_target, sampler_pools  # noqa: PLC0415
+
+        try:
+            member = sampler_pools(self.desired_store().read()).get(self.pools[i].name)
+        except Exception:  # noqa: BLE001 - the pool's own view decides
+            return None
+        return None if member is None else pool_target(member)
+
+    def _scale_desired(self, i: int, wanted: int, retire: list[str], mode: str | None) -> int:
+        """``run scale`` on the store control plane: the pool's target in the fleet's desired
+        state (a new generation; the controller applies it through ``pool-scale``)."""
+        from yeto.launch.pool.desired import DesiredConflict, DesiredError, from_run_config  # noqa: PLC0415
+
+        name = self.pools[i].name
+
+        def change(doc: dict[str, Any]) -> None:
+            member = next((m for m in doc["members"] if m.get("kind") == "sampler_pool" and m["name"] == name), None)
+            if member is None:
+                raise DesiredError(f"pool {name} is not in the fleet's desired state")
+            member["pool"] = dict(member.get("pool") or {}, target=int(wanted))
+            if retire:
+                member["retire"], member["mode"] = list(retire), mode
+
+        try:
+            doc = self.desired_store().update(change, seed=from_run_config(self.cfg), note=f"run scale {name}")
+        except (DesiredConflict, DesiredError) as error:
+            _log(f"scale: refused, nothing changed: {error}")
+            return 2
+        _log(f"scale: pool {name} target {wanted} in the fleet's desired state (generation {doc['generation']}); "
+             "the controller applies it within seconds")
+        self.state.setdefault("scales", []).append({"at": _now(), "samplers": wanted, "pool": name,
+                                                    "desired_generation": doc["generation"],
+                                                    "remove": retire or None, "mode": mode})
+        self.save()
+        return 0
 
     def _namespace(self) -> str:
         return self.dispense_ledger(0)[1]
