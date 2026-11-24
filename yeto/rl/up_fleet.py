@@ -16,10 +16,13 @@ island, from the :class:`~yeto.rl.fleet.FleetPlan` and the pool configs:
   ``rollout_fields`` (one trainer trains on all of them), and what the trainer
   trains on (R3 routed experts, score_centering top-K log-probs) is in them;
 * :func:`release_form_lines`: the pool's engine loads releases of the fleet's
-  training form (full parameters / partial experts: a whole checkpoint, laid
-  over the engine's base for partial experts, reloaded in place);
-* :func:`release_every_warnings`: an island with a vLLM pool (its in-place
-  reload drains the engine) whose trainer releases every local version;
+  training form (full parameters, and partial experts of the generic recipe: a
+  whole HF checkpoint per release, reloaded whole; only the ``kimi_k31`` recipe
+  releases the trained experts with a manifest, laid over the engine's base);
+* :func:`release_every_warnings`: what a release costs each island's pools in
+  sampling (fetch, load and, on a draining engine, the drain), estimated from the
+  release size and the engine, and the ``--rl-release-every`` that keeps it
+  within one step when the island's step time is known;
 * :func:`syncer_lines`: the syncer's region against the islands' (the launch's
   own rule, :mod:`yeto.launch.syncer_region`) and its price;
 * :func:`budget_lines`: the fleet's hourly estimate (pools, each island's
@@ -31,13 +34,20 @@ Import-light: no torch, ray or miles; only local files are read.
 from __future__ import annotations
 
 import io
+import math
 from collections.abc import Sequence
 from typing import Any
 
 SERVER_ENGINES = ("vllm", "sglang")  # external engines that load a release from the store
 CPU_ENGINES = ("fake",)  # the CPU engine of the tests and dry rehearsals
-# MI355X (K3.1, vLLM ROCm): a drain-mode in-place reload costs 9-12 minutes of sampling
-VLLM_DRAIN_MIN = "9-12 min"
+KIMI_K31 = "kimi_k31"  # the one recipe whose partial-experts release is an expert overlay with a manifest
+# the release cost estimate (release_every_warnings): a bf16 release of every parameter,
+# fetched from the store at about 200 MB/s and loaded by the engine at about 1 GB/s
+RELEASE_BYTES_PER_PARAM = 2
+FETCH_BYTES_PER_S = 200e6
+LOAD_BYTES_PER_S = 1e9
+MIN_SUGGESTED_RELEASE_EVERY = 2
+POLICY_AGE_MARGIN = 2  # the suggested --rl-max-policy-age is at least release_every + this
 
 
 def island_label(island: Any) -> str:
@@ -202,15 +212,32 @@ def _engine(spec: dict[str, Any] | None) -> tuple[str | None, dict[str, Any]]:
     return (str(adapter).removesuffix("-server") if adapter else None), server
 
 
-def release_form_lines(plan: Any, pools: Sequence[tuple[str, dict[str, Any] | None]]
-                       ) -> tuple[list[str], list[str]]:
+def trainer_recipe(trainer_argv: Sequence[str]) -> str:
+    """``--rl-model-recipe`` of the trainers as the ``yeto launch`` parser reads it
+    (``generic`` when unset or when the argv does not parse)."""
+    from yeto.rl.up_consistency import trainer_args  # noqa: PLC0415
+
+    args = trainer_args([str(a) for a in trainer_argv])
+    return str(getattr(args, "rl_model_recipe", None) or "generic") if args is not None else "generic"
+
+
+def release_form_lines(plan: Any, pools: Sequence[tuple[str, dict[str, Any] | None]],
+                       trainer_argv: Sequence[str] = ()) -> tuple[list[str], list[str]]:
     """``(problems, notes)``: whether each pool's engine loads releases of the fleet's
-    training form. Full parameters and partial experts release a whole checkpoint
-    (partial experts: the trained experts, laid over the engine's ``base_dir``), which
-    an external vLLM / SGLang server reloads (in place with ``server.in_place_reload``,
-    else by a restart per release). Another engine adapter loads no store release."""
+    training form. An external vLLM / SGLang server reloads each release (in place
+    with ``server.in_place_reload``, else by a restart per release); another engine
+    adapter loads no store release.
+
+    What a release is: full parameters, and partial experts of the generic recipe,
+    release a whole HF safetensors checkpoint each time
+    (``release_plugin.save_hf_pretrained``) with no release manifest and no expert
+    overlay, which the pool reloads whole; ``--rl-release-delta-full-every`` applies
+    to them. Only the ``kimi_k31`` recipe releases the trained experts with a
+    manifest, laid over the engine's ``base_dir`` (on vLLM its expert reload loads
+    the selected experts alone)."""
     form = (plan.sync or {}).get("form")
     kind = {"full parameters": "full-parameter", "partial experts": "partial-experts"}.get(form or "", "policy")
+    k31 = form == "partial experts" and trainer_recipe(trainer_argv) == KIMI_K31
     problems, notes = [], []
     for name, spec in pools:
         _island, where = _where(plan, name)
@@ -225,36 +252,121 @@ def release_form_lines(plan: Any, pools: Sequence[tuple[str, dict[str, Any] | No
             notes.append(f"WARNING: {where}: engine.server.in_place_reload is off: every {kind} release restarts "
                          f"the {engine} server (a cold start per release); turn it on once its on-card reload "
                          "test passed")
-        if form == "partial experts" and engine == "vllm":
-            notes.append(f"{where}: partial experts on vLLM: each release is laid over engine.server.base_dir and "
-                         "reloaded whole (only the Kimi-K3.1 expert overlay reloads the selected experts alone)")
+        if form != "partial experts":
+            continue
+        if k31:
+            notes.append(f"{where}: partial experts (kimi_k31 recipe): each release carries the trained experts "
+                         "and a release manifest, laid over engine.server.base_dir (the expert overlay)"
+                         + (" and reloaded expert by expert with engine.options.expert_reload"
+                            if engine == "vllm" else ""))
+        else:
+            notes.append(f"{where}: partial experts (generic recipe): each release is a whole HF safetensors "
+                         "checkpoint with no release manifest and no expert overlay, and the "
+                         f"{engine} server reloads it whole; --rl-release-delta-full-every applies to it")
     return problems, notes
 
 
+def release_bytes(trainer_argv: Sequence[str]) -> tuple[float | None, str]:
+    """``(bytes, source)``: the size of one release estimated as the parameter count
+    of the trainers' ``--model`` config x 2 bytes (bf16), the config read locally (a
+    model directory, the HF cache or the built-in table,
+    :func:`yeto.memory_estimate.param_breakdown`); None when no config is found."""
+    from yeto import memory_estimate  # noqa: PLC0415
+
+    model = _argv_value([str(a) for a in trainer_argv], "--model")
+    if not model:
+        return None, "no --model"
+    try:
+        _arch, repo, source, cfg = memory_estimate._resolve(model)  # noqa: SLF001
+        params = memory_estimate.param_breakdown(cfg)["total"] if cfg is not None else None
+    except (KeyError, TypeError, ValueError):
+        params = None
+    if not params:
+        return None, f"no local config.json of --model {model}"
+    return float(params) * RELEASE_BYTES_PER_PARAM, f"{params / 1e9:.1f}B parameters of {repo} x 2 B"
+
+
+def pool_drain_s(engine: str | None, spec: dict[str, Any] | None) -> tuple[float | None, str]:
+    """``(seconds, why)``: the most sampling a release's drain may take from a pool.
+    vLLM reloads drain-only (no request runs while the release waits for the running
+    ones and loads): up to min(``agentic.drain_timeout_s``, ``reload_max_defer_s``),
+    the sampler's drain cut. SGLang with ``engine.options.live_update`` loads during
+    a generation: no drain; without it, it drains as vLLM does. None: no cut (both
+    unset) or a setting the pool dry-run refuses."""
+    from yeto.rl.engine import agentic_round as ar  # noqa: PLC0415
+
+    if engine == "sglang" and ar.spec_live_engine(spec or {}):
+        return 0.0, "live_update: no drain"
+    try:
+        cut, _grace = ar.drain_settings(spec or {}, drain=True)
+    except Exception:  # noqa: BLE001 - the pool dry-run reports a bad drain setting
+        return None, "drain cut unreadable"
+    if cut is None:
+        return None, "drain with no cut (drain_timeout_s and reload_max_defer_s unset)"
+    return float(cut), f"drain up to {_dur(float(cut))} (min of drain_timeout_s, reload_max_defer_s)"
+
+
+def _dur(seconds: float) -> str:
+    return f"{seconds:.0f} s" if seconds < 120 else f"{seconds / 60:.1f} min"
+
+
 def release_every_warnings(plan: Any, trainer_argv: Sequence[str],
-                           pools: Sequence[tuple[str, dict[str, Any] | None]]) -> list[str]:
-    """An island with a vLLM pool whose trainer releases every local version: vLLM's
-    in-place reload drains the engine (no request runs while it reloads), so each
-    release costs sampling time; the warning suggests an ``--rl-release-every`` for
-    the island (at most its ``--rl-max-policy-age``, the launcher's rule)."""
+                           pools: Sequence[tuple[str, dict[str, Any] | None]],
+                           step_s: dict[int, float] | None = None) -> list[str]:
+    """What a release costs each island in sampling, and the release cadence that keeps
+    it within the island's steps. Per pool of an external engine: fetching the release
+    (:func:`release_bytes` at about 200 MB/s), loading it (about 1 GB/s) and the drain
+    (:func:`pool_drain_s`); the island's cost is its costliest pool's. With the island's
+    step time (``step_s``: island -> seconds of one local version) the suggested
+    ``--rl-release-every`` is N = max(2, ceil(cost / step)), and the island's
+    ``--rl-max-policy-age`` should be at least N + 2; a warning when the island
+    releases more often than N. Without a step time the line reports the cost alone
+    (a warning when the island releases every local version)."""
     specs = dict(pools)
     argv = [str(a) for a in trainer_argv]
-    rounds = _argv_value(argv, "--local-rl-rounds-per-sync")
-    rounds = int(rounds) if rounds and rounds.isdigit() and int(rounds) > 0 else 2
+    size, size_why = release_bytes(argv)
     out = []
     for island in plan.islands:
-        vllm = [p.name for p in island.pools if _engine(specs.get(p.name))[0] == "vllm"]
-        if not vllm or island_release_every(island, argv) > 1:
+        costs = []
+        for p in island.pools:
+            engine = _engine(specs.get(p.name))[0]
+            if engine not in SERVER_ENGINES:
+                continue
+            drain, drain_why = pool_drain_s(engine, specs.get(p.name))
+            costs.append((p.name, engine, drain, drain_why))
+        if not costs:
             continue
+        move = 0.0 if size is None else size / FETCH_BYTES_PER_S + size / LOAD_BYTES_PER_S
+        name, engine, drain, drain_why = max(costs, key=lambda c: c[2] if c[2] is not None else 0.0)
+        cost = move + (drain or 0.0)
+        bound = "at least " if size is None or drain is None else ""
+        moved = (f"fetch {_dur(size / FETCH_BYTES_PER_S)} + load {_dur(size / LOAD_BYTES_PER_S)} of a "
+                 f"{size / 1e9:.0f} GB release ({size_why})" if size is not None
+                 else f"fetch + load not estimated ({size_why})")
+        head = (f"{island_label(island)}: a release costs {bound}{_dur(cost)} of sampling on pool {name} "
+                f"({engine}): {moved} + {drain_why}")
+        every = island_release_every(island, argv)
         age = island_max_policy_age(island, argv)
-        suggest = max(2, rounds) if age is None else max(2, min(rounds, age))
-        raise_age = age is not None and age < suggest
-        out.append(f"WARNING: {island_label(island)}: pool(s) {', '.join(vllm)} run vLLM, whose in-place reload drains "
-                   f"the engine (about {VLLM_DRAIN_MIN} of sampling per release measured on MI355X), and the island's "
-                   f"trainer releases every local version (--rl-release-every 1): set islands[{island.index}]."
-                   f"trainer.argv [\"--rl-release-every\", \"{suggest}\"]"
-                   + (f" and raise --rl-max-policy-age to at least {suggest} (it is {age}; release_every <= "
-                      "max_policy_age)" if raise_age else ""))
+        step = (step_s or {}).get(island.index)
+        if not step or step <= 0:
+            if every <= 1:
+                out.append(f"WARNING: {head}; the island releases every local version (--rl-release-every 1); "
+                           f"set islands[{island.index}].trainer.step_s (or fleet.step_s), the seconds of one "
+                           "local version, for a suggested --rl-release-every")
+            else:
+                out.append(f"{head}; release every {every} local versions (set step_s for a suggested cadence)")
+            continue
+        suggest = max(MIN_SUGGESTED_RELEASE_EVERY, math.ceil(cost / step))
+        if every >= suggest:
+            continue
+        want_age = suggest + POLICY_AGE_MARGIN
+        age_note = ("" if age is not None and age >= want_age else
+                    f" and [\"--rl-max-policy-age\", \"{want_age}\"] (at least N + {POLICY_AGE_MARGIN}; it is "
+                    f"{'the default' if age is None else age})")
+        out.append(f"WARNING: {head}; at a step of about {_dur(step)} the island's --rl-release-every {every} "
+                   f"releases faster than its pools take a release in: set islands[{island.index}].trainer.argv "
+                   f"[\"--rl-release-every\", \"{suggest}\"]{age_note} (N = max(2, ceil({cost:.0f} s / "
+                   f"{step:g} s)))")
     return out
 
 

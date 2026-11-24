@@ -22,7 +22,9 @@ surface after the trainer island loaded its weights (a K3.1 B300 island: about
   in the ``kimi_k31`` recipe) needs ``rollout_fields.routed_experts`` in the spec;
 * expert selection: the sha256 of ``--rl-expert-selection`` vs the spec's
   ``expert_selection_sha256`` / ``expert_trainable_sha256`` (the sampler refuses
-  every release of another selection and keeps serving the base policy);
+  every release of another selection and keeps serving the base policy); only the
+  ``kimi_k31`` recipe's releases record the selection, so next to a generic
+  partial-experts trainer either field is refused outright;
 * the store: ``run.json`` ``store``, the trainer's ``--rl-checkpoint-store`` and
   each pool's ``s3://<bucket>/runs/<run_prefix>`` must be one store (the trainer
   reads the buffer and writes the releases under its own; the first-group wait
@@ -200,6 +202,18 @@ def selection_problem(args: Any, spec: dict[str, Any]) -> str | None:
     want_sel, want_tr = _sha256(spec.get("expert_selection_sha256")), _sha256(spec.get("expert_trainable_sha256"))
     if not path or not (want_sel or want_tr):
         return None
+    if getattr(args, "rl_model_recipe", None) != "kimi_k31":
+        # only the kimi_k31 recipe's releases carry the selection in their manifest
+        # (expert_selection_sha256, partial_experts.trainable_sha256); a generic
+        # partial-experts release is a whole HF checkpoint with no manifest, which a
+        # sampler bound to a selection refuses every time (sampler_checks.PortReleaseLoader)
+        fields = " / ".join(k for k, v in (("expert_selection_sha256", want_sel),
+                                           ("expert_trainable_sha256", want_tr)) if v)
+        return (f"the sampler spec sets {fields}, but the trainer's partial-experts releases (--rl-model-recipe "
+                f"{getattr(args, 'rl_model_recipe', None) or 'generic'}) carry no expert "
+                "selection: the sampler refuses every release and keeps serving the base policy, so the trainer "
+                f"waits on --rl-max-policy-age; remove {fields} from the sampler spec (only --rl-model-recipe "
+                "kimi_k31 releases record the selection)")
     local = Path(os.path.expanduser(str(path)))
     if not local.is_file():
         return None  # a path on the trainer node: the launch checks it there

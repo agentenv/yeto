@@ -795,7 +795,7 @@ class Run:
     def fleet_preflight(self) -> str | None:
         """The checks only an island fleet has (:mod:`yeto.rl.up_fleet`), island by island:
         each island's pools record the same ``rollout_fields`` as its trainer trains on,
-        their engines load the fleet's release form, a vLLM island's release cadence, the
+        their engines load the fleet's release form, each island's release cost and cadence, the
         syncer's region and price, and the fleet's budget estimate (logged). The reason
         to refuse the run (every island and pool named), else None. None at once without
         a fleet."""
@@ -807,9 +807,12 @@ class Run:
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
         specs = self._fleet_specs()
         problems = up_fleet.rollout_fields_problems(plan, argv, specs)
-        refused, notes = up_fleet.release_form_lines(plan, specs)
+        refused, notes = up_fleet.release_form_lines(plan, specs, argv)
         problems += refused
-        for line in notes + up_fleet.release_every_warnings(plan, argv, specs):
+        from yeto.rl import fleet  # noqa: PLC0415
+
+        cadence = up_fleet.release_every_warnings(plan, argv, specs, step_s=fleet.island_step_s(self.cfg))
+        for line in notes + cadence:
             _log(f"preflight: {line}")
         for line in up_fleet.syncer_lines(plan, argv, self.cfg.get("syncer")):
             _log(f"preflight: {line}")
