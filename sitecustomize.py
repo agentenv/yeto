@@ -31,6 +31,13 @@ if os.environ.get("YETO_PARTIAL_EXPERTS_SELECTION"):
     _install_partial_experts()
 
 
+if os.environ.get("YETO_WEIGHT_UPDATE_NCCL_CHANNELS"):
+    # The trainer's weight-update NCCL group takes the SGLang engines' pinned channel count.
+    from yeto.rl.adapters.miles.weight_update_channels import install as _install_weight_update_channels
+
+    _install_weight_update_channels()
+
+
 if os.environ.get("YETO_SGLANG_MXFP4_INPLACE") == "1":
     # In-place reload of MXFP4 routed experts on SGLang's SM100 trtllm-gen path
     # (every SGLang process, including the spawned schedulers).
