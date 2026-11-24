@@ -30,7 +30,9 @@ class FakeClient:
         self.n = 0
         self.report_ready = None  # () -> object store: the call writes its ready marker at once
 
-    def spawn(self, payload):
+    def spawn(self, payload, *, wanted=None):
+        if wanted is not None and not wanted():
+            raise RuntimeError("the island was released")
         self.n += 1
         call = f"fc-{self.n}"
         self.calls[call], self.states[call] = payload, RUNNING
@@ -630,11 +632,13 @@ class AppClient(FakeClient):
         self.app_name, self.next_app_id, self.app_id = "yeto-rollout-run-m", app_id, None
         self.stops, self.stop_error = [], stop_error
 
-    def spawn(self, payload):
+    def spawn(self, payload, *, wanted=None):
         self.app_id = self.app_id or self.next_app_id  # the first spawn deploys
-        return super().spawn(payload)
+        return super().spawn(payload, wanted=wanted)
 
-    def stop_app(self, *, expect_id=None):
+    def stop_app(self, *, expect_id=None, by_name=True):
+        if self.app_id is None and not by_name:
+            return "not deployed"  # nothing of ours to stop, nothing looked up
         self.stops.append(expect_id)
         if self.stop_error is not None:
             error, self.stop_error = self.stop_error, None
@@ -787,6 +791,108 @@ def test_a_released_island_spawns_no_call(tmp_path):
     with pytest.raises(RuntimeError, match="released"):
         ops.provider.spawn(ticket, {"shard": "m-0"})
     assert client.n == 0
+
+
+class DeployingModal:
+    """A fake ``modal`` for :class:`ModalSdkClient`: the app's deploy blocks until
+    ``finish`` is set (a slow image build), spawns and stops are recorded."""
+
+    def __init__(self, app_id="ap-5"):
+        import threading
+
+        self.started, self.finish = threading.Event(), threading.Event()
+        self.spawned, self.stopped, self.apps = [], [], {}
+        outer = self
+
+        class App:
+            def __init__(self):
+                self.app_id = None
+
+            def deploy(self, name):
+                outer.started.set()
+                assert outer.finish.wait(10), "the test never let the deploy finish"
+                self.app_id = app_id
+                outer.apps[name] = self
+
+            def stop(self):
+                outer.stopped.append(self.app_id)
+
+        def lookup(name):
+            if name not in outer.apps:
+                raise type("NotFoundError", (Exception,), {})(f"App '{name}' not found")
+            return outer.apps[name]
+
+        self.new_app = App
+        fn = SimpleNamespace(spawn=lambda payload: outer.spawned.append(payload) or SimpleNamespace(object_id="fc-1"))
+        self.Function = SimpleNamespace(from_name=lambda app, name: fn)
+        self.App = SimpleNamespace(lookup=lookup)
+
+
+def test_a_pool_stopped_while_its_app_deploys_stops_the_app_and_spawns_nothing(tmp_path):
+    """The pool stopped (process exit) while the first island's background start was
+    still deploying the app (a slow image build): the stop saw no app id and logged
+    "not deployed"; the deploy then finished, the call was spawned and one GPU container
+    billed on. Now the stop waits for the deploy, the start spawns nothing for its
+    released island, and the app is stopped."""
+    import threading
+
+    modal = DeployingModal()
+    cfg = _cfg(tmp_path)
+    sdk = ModalSdkClient(cfg["provider"], run_id="run-m", modal=modal)
+    sdk.build_app = modal.new_app
+    provider = from_config(cfg, "run-m", client=sdk)
+    ops = ModalPoolOps(cfg, provider=provider, fence_store=SimpleNamespace(objects=Objects()))
+    t = [0.0]
+    events = el.EventLog(log=lambda m: None, clock=lambda: t[0], run="run-m")
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 2], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=4)),
+                      ops, clock=lambda: t[0], log=lambda m: None, events=events)
+    for _ in range(3):  # ordered, then started on a background thread
+        pool.tick()
+        t[0] += 30
+        if modal.started.is_set():
+            break
+    assert modal.started.wait(5), "the background start did not reach the deploy"
+    threading.Timer(0.3, modal.finish.set).start()  # the image build ends while the stop waits
+    pool.stop("process exit")
+    assert modal.stopped == ["ap-5"] and modal.spawned == []
+    [ended] = [e for e in events.events if e["event"].endswith("pool_ended")]
+    assert ended["result"] == "stopped" and ended["app_id"] == "ap-5"
+    assert not pool.live()
+
+
+def test_a_start_that_reaches_the_deploy_after_the_release_deploys_nothing():
+    modal = DeployingModal()
+    modal.finish.set()
+    sdk = ModalSdkClient({"image": "i", "secret": "s"}, run_id="run-m", modal=modal)
+    sdk.build_app = modal.new_app
+    with pytest.raises(RuntimeError, match="released"):
+        sdk.spawn({"shard": "m-0"}, wanted=lambda: False)
+    assert not modal.started.is_set() and modal.spawned == [] and not modal.apps
+
+
+def test_pool_stop_after_a_process_died_during_its_deploy_stops_the_app_by_name(tmp_path):
+    """The pool process died during its first deploy: no app id was recorded, but the
+    record says a spawn may have deployed. pool-stop stops the app of that name."""
+    cfg = _cfg(tmp_path)
+
+    class DiesInDeploy(AppClient):
+        def spawn(self, payload, *, wanted=None):
+            raise KeyboardInterrupt  # the process ends inside the deploy
+
+    provider = from_config(cfg, "run-m", client=DiesInDeploy())
+    ticket = provider.order(1)
+    with pytest.raises(KeyboardInterrupt):
+        provider.spawn(ticket, {"shard": "m-0"})
+    doc = json.loads(provider.app_record.read_text())
+    assert doc["intent_at"] is not None and "app_id" not in doc
+    modal = DeployingModal()
+    modal.finish.set()
+    modal.new_app().deploy("yeto-rollout-run-m")  # what the dead process left deployed
+    later = from_config(cfg, "run-m", client=ModalSdkClient(cfg["provider"], run_id="run-m", modal=modal))
+    out = later.stop_app("pool-stop")
+    assert out["result"] == "stopped" and out["app_id"] == "ap-5" and modal.stopped == ["ap-5"]
+    assert later.stop_app("pool-stop")["result"] == "already stopped"
 
 
 def test_the_sdk_client_stops_its_own_app_by_handle_and_a_recorded_one_by_name():
