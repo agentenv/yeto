@@ -680,6 +680,7 @@ class IslandPool:
         Returns the shards ended."""
         if self.control is None:
             return []
+        self.control.lock.guard()  # raises when another controller holds the pool: nothing is ended
         used = {m.shard for m in self.members if m.shard}
         if self._reserved_shard is not None:
             used.add(f"{self.config.shard_base}-{self._reserved_shard}")
@@ -2384,13 +2385,28 @@ class IslandPool:
         self._save_now()
         return member
 
-    def stop(self, why: str) -> None:
+    def stop(self, why: str, *, unconfirmed_retries: int = 3, retry_s: float = 5.0,
+             sleep: Callable[[float], None] | None = None) -> None:
+        """Stop the pool: fence and drain every member. On the store control plane a lost
+        lock detaches (another controller drives the machines); a store that does not confirm
+        the lock is waited out (``unconfirmed_retries`` times ``retry_s``, doubled), never a
+        detach: the members are drained once it answers, or left for ``drain_all`` to report."""
         from .store_lock import LockLost, LockUnconfirmed  # noqa: PLC0415
 
-        try:
-            self._stop(why)
-        except (LockLost, LockUnconfirmed) as error:  # another controller drives the machines now
-            self.detach(f"store lock lost during the stop: {error}")
+        sleep = sleep or time.sleep
+        for attempt in range(unconfirmed_retries + 1):
+            try:
+                self._stop(why)
+                return
+            except LockLost as error:  # another controller drives the machines now
+                self.detach(f"store lock lost during the stop: {error}")
+                return
+            except LockUnconfirmed as error:
+                self.log(f"pool: stop: {error}; retrying" if attempt < unconfirmed_retries
+                         else f"pool: CRITICAL: stop: {error}; members left undrained")
+                self._event("lock_unconfirmed", error=str(error)[:300], during="stop", attempt=attempt + 1)
+                if attempt < unconfirmed_retries:
+                    sleep(retry_s * (2 ** attempt))
 
     def _stop(self, why: str) -> None:
         self.stopped = why
@@ -2427,10 +2443,23 @@ class IslandPool:
         """Stop the pool (drain every member) and retry failed drains ``attempts - 1``
         more times; the patrol then releases this run's machines no member owns.
         Returns the members left (still billed: the caller prints the banner)."""
+        from .store_lock import LockLost, LockUnconfirmed  # noqa: PLC0415
+
         sleep = sleep or time.sleep
-        self.stop(why)
+        self.stop(why, sleep=sleep)
         if self.detached:
             return self.live()
+        try:
+            self._drain_retries(why, attempts, wait_s, sleep)
+        except LockLost as error:
+            self.detach(f"store lock lost during the drain: {error}")
+        except LockUnconfirmed as error:
+            self.log(f"pool: CRITICAL: drain: {error}; members left undrained")
+            self._event("lock_unconfirmed", error=str(error)[:300], during="drain")
+        return self.live()
+
+    def _drain_retries(self, why: str, attempts: int, wait_s: float, sleep: Callable[[float], None]) -> None:
+        """:meth:`drain_all` after the stop: failed drains and owed fences again, then the patrol."""
         for _ in range(attempts - 1):
             left = self.live()
             owed = [m for m in self.members if m.fence_pending is not None]
@@ -2450,7 +2479,6 @@ class IslandPool:
                            state=m.state)
         self._patrol(self.clock())
         self._pool_ended(why)  # retried here when the stop's call failed
-        return self.live()
 
     def snapshot(self) -> dict:
         return {"format": STATE_FORMAT, "stopped": self.stopped, "finished": self.finished, "halted": self.halted, "next_shard": self.next_shard,

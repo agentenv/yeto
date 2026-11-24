@@ -196,19 +196,37 @@ class StoreLock:
              "released": False}).encode())
         self.renewed_at = now
 
+    def lease_left(self) -> float:
+        """Seconds of this holder's own lease left (by its last renew; 0 before the first)."""
+        if self.renewed_at is None:
+            return 0.0
+        return self.renewed_at + self.ttl_s - self.clock()
+
     def guard(self) -> None:
         """Before an action that changes what the lock guards: the token is still the highest
         (one LIST; :class:`LockLost` otherwise), and the lease is renewed once half of it is
-        gone (a long tick never acts on a lease that ran out). A store that does not answer
-        raises :class:`LockUnconfirmed`."""
+        gone (a long tick never acts on a lease that ran out).
+
+        A store that does not answer does not stop the action while this holder's own lease
+        still runs (more than :attr:`margin_s` left): by the lock's definition nobody else
+        can hold it then. Past that, :class:`LockUnconfirmed`. Only a higher token seen is
+        :class:`LockLost`."""
         try:
             self.check(force=True)
             if self.renewed_at is None or self.clock() - self.renewed_at > self.ttl_s / 2:
                 self.renew()
         except LockLost:
             raise
-        except Exception as error:  # noqa: BLE001 - not confirmed: no action
-            raise LockUnconfirmed(f"{self.prefix}: lock not confirmed ({error!r})"[:300]) from error
+        except Exception as error:  # noqa: BLE001 - not confirmed: allowed only inside our own lease
+            if self.lease_left() > self.margin_s:
+                return
+            raise LockUnconfirmed(f"{self.prefix}: lock not confirmed and the lease is (nearly) over "
+                                  f"({error!r})"[:300]) from error
+
+    @property
+    def margin_s(self) -> float:
+        """The part of the lease end a store outage may not act into (clock skew, latency)."""
+        return min(60.0, self.ttl_s * 0.1)
 
     def release(self) -> None:
         """Give the lock up now (the next claimer does not wait for the lease). Never raises."""

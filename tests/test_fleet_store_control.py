@@ -286,7 +286,7 @@ def test_an_unconfirmed_lock_ends_the_tick_without_an_action():
             raise ConnectionError("store down")
         return real(prefix, **kw)
 
-    ctl.lock.renewed_at = clock()  # renewed: the tick's first action asks the store
+    ctl.lock.renewed_at = clock() - 590  # the lease is nearly over: an unanswered check may not act
     pool._renew_lock = lambda: True  # noqa: SLF001 - the renew at the tick start passed just before the outage
     ctl.lock.objects.list = down
     pool.tick()
@@ -354,3 +354,48 @@ def test_an_exhausted_index_budget_says_so_once_with_the_counts():
         clock.t += 60
     found = [e for e in pool.events.events if e["event"].endswith("pool_shard_budget_exhausted")]
     assert len(found) == 1 and (found[0]["used"], found[0]["limit"]) == (1, 1) and found[0]["ended"] == 0
+
+
+def test_a_store_blip_during_the_drain_releases_every_member_and_is_no_lost_lock():
+    """REV #739: a LIST of the lock that fails while the holder's own lease runs is no reason
+    to stop: by the lock's definition nobody else holds it. The drain releases everything."""
+    client, clock = FakeS3(), Clock()
+    provider = FakeProvider("p", clock)
+    ctl = store_state.open_pool_control(_objects(client), "nc", "smp", ttl_s=600, clock=clock)
+    pool = _pool(provider, clock, control=ctl)
+    pool.tick()
+    real = ctl.lock.objects.list
+
+    def flaky(prefix, **kw):
+        if prefix.startswith("fleet/pools/nc/lock"):
+            raise ConnectionError("store blip")
+        return real(prefix, **kw)
+
+    ctl.lock.objects.list = flaky
+    left = pool.drain_all("run down", wait_s=0, sleep=lambda _s: None)
+    assert left == [] and not pool.detached
+    assert sorted(provider.released) == sorted(provider.machines)
+    assert not any("lock" in str(e.get("why", "")) for e in pool.events.events if e["event"].endswith("detached"))
+
+
+def test_past_its_own_lease_an_unconfirmed_lock_is_waited_out_never_a_detach():
+    client, clock = FakeS3(), Clock()
+    provider = FakeProvider("p", clock)
+    ctl = store_state.open_pool_control(_objects(client), "nc", "smp", ttl_s=600, clock=clock)
+    pool = _pool(provider, clock, control=ctl)
+    pool.tick()
+    real = ctl.lock.objects.list
+    down = {"n": 0}
+
+    def outage(prefix, **kw):
+        if prefix.startswith("fleet/pools/nc/lock") and down["n"] < 2:
+            down["n"] += 1
+            raise ConnectionError("store down")
+        return real(prefix, **kw)
+
+    clock.t += 590  # the lease is nearly over: an outage now must not act
+    ctl.lock.objects.list = outage
+    waits = []
+    left = pool.drain_all("run down", wait_s=0, sleep=waits.append)
+    assert waits and not pool.detached and left == []  # waited out, then drained
+    assert sorted(provider.released) == sorted(provider.machines)
