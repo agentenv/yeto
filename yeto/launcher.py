@@ -360,6 +360,57 @@ def _relaunch_of_same_run(args) -> bool:
     return _previous_manifest(args.cluster_prefix) is not None
 
 
+def island_lifecycle_enabled(args, specs) -> bool:
+    """Whether this launch records its islands in the run store and honors each island's
+    own STOP (``yeto.launch.island_lifecycle``; ``--island-lifecycle``). ``auto`` (the
+    default): an RL launch of two or more trainer islands (an island fleet); a launch of
+    one trainer island records nothing, reads nothing and behaves as before. ``on``: any
+    launch with a run store; ``off``: none."""
+    mode = getattr(args, "island_lifecycle", None) or "auto"
+    if mode == "off" or getattr(args, "dry_run", False):
+        return False
+    if mode == "on":
+        return True
+    if getattr(args, "training_mode", "sft") != "rl":
+        return False
+    from .rl.engine import sample_roles
+
+    samplers = set(sample_roles.sampler_islands(args, len(specs)))
+    return sum(1 for m in range(len(specs)) if m not in samplers) >= 2
+
+
+def _island_refs(args, specs, names, *, modal_names=(), ssh_names=(), events_dir=None, echo_names=()) -> dict:
+    """Launch island name -> :class:`~yeto.launch.island_lifecycle.IslandRef` (learner id =
+    the island's position in ``--gpu``; ``tape``: its echoed event tape, when it has one)."""
+    from .launch.island_lifecycle import IslandRef
+    from .rl.engine import sample_roles
+
+    samplers = set(sample_roles.sampler_islands(args, len(specs)))
+    out = {}
+    for m, (name, spec) in enumerate(zip(names, specs)):
+        source = "modal" if name in modal_names else "ssh" if name in ssh_names else str(spec.cloud or "sky")
+        tape = str(Path(events_dir) / f"{name}.jsonl") if events_dir is not None and name in echo_names else None
+        out[name] = IslandRef(m, source, "sampler" if m in samplers else "trainer", tape)
+    return out
+
+
+def _island_state_store(args):
+    """The run store's island records (None: no object API for the store, or none)."""
+    from .launch.island_lifecycle import open_state_store
+    from .launch.storage import store_client_environ
+
+    store = getattr(args, "rl_checkpoint_store", None)
+    if not store:
+        print("[launcher] --island-lifecycle: no --rl-checkpoint-store; island records are not kept",
+              file=sys.stderr)
+        return None
+    states = open_state_store(store, store_client_environ(args))
+    if states is None:
+        print(f"[launcher] --island-lifecycle: the store {store} has no object API here; island records "
+              "are not kept", file=sys.stderr)
+    return states
+
+
 def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     """Provision and supervise the fleet; returns the run's exit code.
 
@@ -491,6 +542,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     # The log streams and their echo-tape collectors (an ssh: island streams from its start).
     tail_threads: list[threading.Thread] = []
     event_collectors: dict[str, EventCollector] = {}
+    # yeto.launch.island_lifecycle: each trainer island's record and STOP in the run store
+    # (an island fleet by default; None for a single trainer island: nothing changes).
+    island_states = _island_state_store(args) if island_lifecycle_enabled(args, specs) else None
+    if island_states is not None and not relaunch:
+        for m in range(len(specs)):  # a new run: an island STOP an earlier run of this name left is void
+            island_states.clear_stop(m)
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -846,6 +903,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         sky_sdk_ops = SkySDKOps()
         # the failure-path teardown verifies every node instance
         sky_sdk_ops.nodes_by_cluster = dict(nodes_by_cluster)
+        recorder = None
+        if island_states is not None:
+            from .launch.island_lifecycle import FleetRecorder
+
+            recorder = FleetRecorder(island_states, _island_refs(
+                args, specs, learner_names, modal_names=set(modal_cfgs), ssh_names=ssh_names,
+                events_dir=events_dir, echo_names=echo_names))
         controller = FleetController(
             learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
             syncer=None if syncer_cluster is None else (syncer_cluster, syncer_task, syncer_job),
@@ -894,6 +958,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             island_relaunch_envs=peer_recovery_relaunch_envs(args),
             followers=_follower_islands(args, specs, learner_names),
             rollout=_rollout_controller(args),
+            recorder=recorder,
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
