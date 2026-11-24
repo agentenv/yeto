@@ -467,8 +467,8 @@ sampler pool: the group needs `--rl-sampler-follow trainer`.
   checkpoint until the first release, so version 0 must be the base policy).
 - Trainer and sampler islands may use different GPU types or clouds (for
   example H100 trainers with L40S samplers). The samplers of this form are
-  Miles sampler islands of the same launch; an engine sampler pool
-  (`yeto run up`) feeds synced trainers through the merged releases only.
+  Miles sampler islands of the same launch; external engine pools feed the
+  trainers of an island fleet (next section).
 
 ```bash
 yeto launch --training-mode rl --tuning lora --lora-targets attention \
@@ -479,6 +479,70 @@ yeto launch --training-mode rl --tuning lora --lora-targets attention \
   --rl-algorithm-spec examples/k31/algorithm-spec.async-age2-tis.json \
   --rl-checkpoint-store s3://BUCKET/runs/RUN ...
 ```
+
+### Island fleet (`yeto run up` with `islands`)
+
+A fleet is a decoupled synced group whose samplers are external engine pools
+(vLLM / SGLang on Modal, National Compute, SSH nodes, ...) instead of Miles
+sampler islands: each island is a complete async GRPO run (one trainer and its
+own pools), and the trainers merge through one syncer. One run config and one
+`yeto run up` start it. The run config replaces `trainer` and
+`samplers` / `pool` with two sections:
+
+```json
+{"run": "<run>", "store": "s3://<bucket>/runs/<run>", "budget": {"usd": 40, "wall_h": 4},
+ "fleet": {"dispense": "fleet",
+           "trainer_argv": ["--training-mode", "rl", "--model", "Qwen/Qwen3-4B", "--tuning", "full",
+                            "--rl-sync-preset", "decoupled", "--rl-max-policy-age", "2", "...",
+                            "--rl-checkpoint-store", "s3://<bucket>/runs/<run>"]},
+ "islands": [
+   {"name": "mixed", "trainer": {"gpu": "modal:1x2xh100", "usd_per_h": 8.0, "argv": ["--rl-release-every", "2"]},
+    "samplers": [{"name": "vllm-h100", "provider": {"kind": "modal", "...": "..."}, "shard_base": "<run>-vllm",
+                  "shard_limit": 4, "run_prefix": "<run>", "...": "..."},
+                 {"name": "sglang-l40s", "config": "<pool.json>"}]},
+   {"name": "sglang", "trainer": {"gpu": "modal:1x2xh100@<region>", "usd_per_h": 8.0},
+    "samplers": [{"name": "sglang-l40s", "config": "<pool.json>"}]}]}
+```
+
+A complete example: `examples/fleet/run.two-islands.json`.
+
+| Key | Meaning |
+|---|---|
+| `islands` | One entry per island. Island k (its position) is its trainer's learner id and its store sub-directory `trainer<k>`. Excludes `trainer`, `samplers` and `pool`. |
+| `islands[].name` | The island's name (letters, digits, `.`, `_`, `-`; unique). |
+| `islands[].trainer.gpu` | The island trainer's cluster, one `--gpu` entry (`cloud:[NODESx]COUNTxGPU[@region]`). Islands may use different GPUs and regions. Required. |
+| `islands[].trainer.usd_per_h` | The island trainer's price per hour (the spend estimate sums the islands). |
+| `islands[].trainer.argv` | Only `--rl-release-every N` and `--rl-max-policy-age N`: this island's values (they override `fleet.trainer_argv`). |
+| `islands[].samplers` | The island's pools, each an entry of the run config's `samplers` list format. Every pool needs `shard_base`, `run_prefix` and `shard_limit`, and uses the store data path (`data_path` `r2`). A pool config file may serve several islands. |
+| `fleet.trainer_argv` | The `yeto launch` arguments every trainer shares. It must name `--rl-checkpoint-store` (the run's `store`) and must not set `--gpu`, `--rl-sample-role`, `--rl-sampler-follow`, `--rl-buffer-shards`, `--rl-island-*` or `--rl-single-island-no-sync`: `run up` writes those. Required. |
+| `fleet.dispense` | `fleet` (default): one task ledger for the fleet, `<store>/fleet/dispense`, so no two islands train on the same prompt in an epoch. `island`: each island keeps its own ledger under `trainer<k>/`. |
+
+What `run up` makes of it:
+
+- One `yeto launch`: `fleet.trainer_argv` plus `--gpu` (the islands' clusters
+  in island order), `--rl-sample-role trainer --rl-sampler-follow trainer`, one
+  `--rl-island-buffer-shards k:<shards>` per island and the islands'
+  `--rl-island-release-every` / `--rl-island-max-policy-age`. Its price is the
+  sum of the islands' `usd_per_h`.
+- Pool `<name>` of island k runs as `i<k>-<name>`. Its `run_prefix` gets the
+  segment `trainer<k>` (its samplers read the island's releases and write the
+  island's buffer; a spec's `__RUN_PREFIX__` follows), its `shard_base`
+  becomes `<shard_base>-i<k>` (shards `<shard_base>-i<k>-0` up to its
+  `shard_limit`, which are exactly the shards island k's trainer reads), and
+  its `sampler` knobs get `island` k, `until_trainers_end` 1 (a sampler stops
+  once its own trainer ended) and, with `dispense: fleet`, `dispense_store`.
+  The merged pool configs are in `~/.yeto/rl-up/<run>/pools/`.
+- Training forms: full parameters or partial experts (`--tuning full`, with
+  `--rl-expert-selection` for partial experts) on Miles, with
+  `--rl-sync-preset decoupled` (routed to the full-parameter preset's
+  asynchronous rounds). The preflight refuses a LoRA fleet (`--tuning lora`,
+  `--expert-full-count`: external engines do not load LoRA releases in place),
+  another backend (`--rl-backend verl`) and the strict full-parameter sweep.
+- `run up --dry-run` prints each island's learner id, store sub-directory,
+  trainer cluster and price, buffer shards and pools (engine and rollout
+  quantization tier read from each pool's spec), and the sync route. `run up`
+  writes the same table to `<store>/fleet/plan.json` before it orders anything
+  (a dry run writes nothing).
 
 ## Launching
 

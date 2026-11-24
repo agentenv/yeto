@@ -948,13 +948,18 @@ def pool_dispense(cfg: dict[str, Any]) -> dict[str, Any] | None:
 
 def pool_dispense_store(cfg: dict[str, Any]) -> str | None:
     """The store of a pool's store-dispenser ledger when it is not the pool's run store:
-    ``store`` of :func:`pool_dispense`, else the spec's ``dispense_store`` (a fleet's
-    shared ledger, ``store_dispense.spec_dispense_store``); None: the run store."""
+    ``store`` of :func:`pool_dispense`, else the pool's ``sampler.dispense_store`` knob
+    (``yeto run up`` sets it for a fleet's pools; the rendered spec carries it), else the
+    spec's ``dispense_store`` (a fleet's shared ledger, ``store_dispense.spec_dispense_store``);
+    None: the run store."""
     dispense = pool_dispense(cfg)
     if dispense is None:
         return None
     if dispense.get("store"):
         return str(dispense["store"])
+    own = (cfg.get("sampler") or {}).get("dispense_store")  # the pool knob over the spec (a fleet's pools)
+    if isinstance(own, str) and own.strip():
+        return own.strip()
     try:
         spec = json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text()) if cfg.get("spec") else {}
     except (OSError, ValueError):
@@ -1632,7 +1637,8 @@ def _print_breaker_deprecations(cfg: dict[str, Any]) -> None:
 
 _OVERRIDE_KEYS = ("data_slot", "drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens",
                   "continues_shard")
-_POOL_KEYS = ("drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens", "dispense", "breakers")
+_POOL_KEYS = ("drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens", "dispense", "breakers",
+              "island", "until_trainers_end", "dispense_store")
 
 
 def _add_sampler_override_args(p) -> None:
@@ -1688,6 +1694,13 @@ def _overrides(cfg) -> dict:
             parse_section(cfg["breakers"])
         except BreakerConfigError as error:
             raise ValueError(f"pool sampler config: breakers: {error}") from error
+    for key in ("island", "until_trainers_end"):  # an island fleet's pool (yeto run up, yeto.rl.fleet)
+        value = cfg.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(f"pool sampler config: {key} must be a whole number >= 0 or null (got {value!r})")
+    store = cfg.get("dispense_store")
+    if store is not None and (not isinstance(store, str) or not store.strip()):
+        raise ValueError(f"pool sampler config: dispense_store must be a store URI or null (got {store!r})")
     return {k: cfg.get(k) for k in _POOL_KEYS}
 
 

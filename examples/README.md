@@ -70,3 +70,6 @@ Each is passed as `--reward-function <module>:<function>` and ships with the
 - [`custom_reward/`](custom_reward/README.md): a minimal framework-neutral
   reward plugin.
 - `rl_algorithms/`: `AlgorithmSpec` JSON files for `--rl-algorithm-spec`.
+- `fleet/run.two-islands.json`: an island fleet for `yeto run up` (two async
+  GRPO islands, each a trainer with its own Modal vLLM / SGLang pools, merged
+  by one syncer); see [docs/MILES_RL.md](../docs/MILES_RL.md#island-fleet-yeto-run-up-with-islands).

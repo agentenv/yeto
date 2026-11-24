@@ -196,6 +196,7 @@ These knobs override the sampler spec on every node of the pool:
 | `thinking_effort` | Thinking effort passed to the engine. |
 | `drop_zero_variance` | Drop groups whose rewards are all equal. |
 | `reload` | How a new policy release is loaded: `hot` or `restart`. |
+| `island`, `until_trainers_end`, `dispense_store` | Written by `yeto run up` for the pools of an island fleet ([MILES_RL.md](MILES_RL.md#island-fleet-yeto-run-up-with-islands)): the island the samplers feed, how many trainer end records of their store stop them, the task ledger's store. Leave them unset. |
 
 ### `model_pull`
 

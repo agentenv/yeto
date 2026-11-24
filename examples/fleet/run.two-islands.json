@@ -1,0 +1,65 @@
+{
+  "comment": "Island fleet: two async GRPO islands (Qwen3-4B, full parameters, decoupled), each a 2xH100 Miles trainer with its own Modal sampler pools, merged by one syncer. docs/MILES_RL.md, 'Island fleet'. yeto run up --config THIS.json --dry-run, then without --dry-run.",
+  "run": "<run>",
+  "store": "s3://<bucket>/runs/<run>",
+  "budget": {"usd": 40, "wall_h": 4, "nc_usd_per_h": 0},
+  "first_group": {"timeout_s": 4800, "poll_s": 60},
+  "fleet": {
+    "dispense": "fleet",
+    "trainer_argv": [
+      "--training-mode", "rl",
+      "--cluster-prefix", "<run>",
+      "--model", "Qwen/Qwen3-4B",
+      "--data", "openai/gsm8k",
+      "--reward-function", "yeto.rl.gsm8k_reward:score",
+      "--trust-remote-code",
+      "--tuning", "full",
+      "--rl-sync-preset", "decoupled",
+      "--fragments", "4",
+      "--rl-parameter-layout-sha256", "auto",
+      "--local-rl-rounds-per-sync", "4",
+      "--rl-max-policy-age", "2",
+      "--rl-algorithm-spec", "examples/k31/algorithm-spec.async-age2-tis.json",
+      "--rollout-batch-size", "16",
+      "--n-samples-per-prompt", "8",
+      "--rollout-max-response-len", "2048",
+      "--seq-len", "4096",
+      "--inner-lr", "1e-6",
+      "--total-steps", "40",
+      "--rl-stall-timeout", "1800",
+      "--rl-checkpoint-store", "s3://<bucket>/runs/<run>"
+    ]
+  },
+  "islands": [
+    {
+      "name": "mixed",
+      "trainer": {"gpu": "modal:1x2xh100", "usd_per_h": 8.0, "argv": ["--rl-release-every", "2"]},
+      "samplers": [
+        {"name": "vllm-h100",
+         "provider": {"kind": "modal", "image": "<sampler-image>", "secret": "<modal-secret>", "bucket": "<bucket>",
+                      "gpu": "H100", "gpus": 1, "model_volume": "<volume>"},
+         "usd_per_h": 4.0, "target": 1, "slots": [1, 2], "shard_base": "<run>-vllm", "shard_limit": 4,
+         "spec": "<sampler-spec.vllm.json>", "run_prefix": "<run>", "r2_env_file": "<store.env>",
+         "sampler": {"dispense": {"backend": "store", "namespace": "task-dispense"}}},
+        {"name": "sglang-l40s",
+         "provider": {"kind": "modal", "image": "<sampler-image>", "secret": "<modal-secret>", "bucket": "<bucket>",
+                      "gpu": "L40S", "gpus": 1, "model_volume": "<volume>"},
+         "usd_per_h": 2.0, "target": 1, "slots": [1, 2], "shard_base": "<run>-sglang", "shard_limit": 4,
+         "spec": "<sampler-spec.sglang.json>", "run_prefix": "<run>", "r2_env_file": "<store.env>",
+         "sampler": {"dispense": {"backend": "store", "namespace": "task-dispense"}}}
+      ]
+    },
+    {
+      "name": "sglang",
+      "trainer": {"gpu": "modal:1x2xh100", "usd_per_h": 8.0},
+      "samplers": [
+        {"name": "sglang-l40s",
+         "provider": {"kind": "modal", "image": "<sampler-image>", "secret": "<modal-secret>", "bucket": "<bucket>",
+                      "gpu": "L40S", "gpus": 1, "model_volume": "<volume>"},
+         "usd_per_h": 2.0, "target": 2, "slots": [1, 2, 3], "shard_base": "<run>-sglang", "shard_limit": 6,
+         "spec": "<sampler-spec.sglang.json>", "run_prefix": "<run>", "r2_env_file": "<store.env>",
+         "sampler": {"dispense": {"backend": "store", "namespace": "task-dispense"}}}
+      ]
+    }
+  ]
+}
