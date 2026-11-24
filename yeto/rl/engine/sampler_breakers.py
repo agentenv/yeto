@@ -56,6 +56,17 @@ def apply_harness_env(spec: Mapping[str, Any], environ: MutableMapping[str, str]
     return list(out.changes)  # breaker_settings caches per env value: the readers see these at once
 
 
+def spec_harness_resolved(spec: Mapping[str, Any], environ: Mapping[str, str] | None = None
+                          ) -> "breakers.ResolvedBreakers":
+    """The harness settings a sampler of ``spec`` runs with: its spec's ``breakers``
+    section over the env it sees, resolved as :func:`apply_harness_env` resolves them
+    (a fleet preflight reads a pool's sandbox caps from here)."""
+    section = spec.get("breakers")
+    sources = breakers.Sources(spec=spec, section=section if isinstance(section, Mapping) else None,
+                               env=dict(environ or {}))
+    return breakers.resolve(sources, layers=("harness",))
+
+
 def dispense_limits(resolved: "breakers.ResolvedBreakers") -> tuple[float, int]:
     """``(lease_s, max_redo)`` of the store dispenser (``prompts.dispense``)."""
     return float(resolved.get("sampler.dispense_lease.lease_s")), int(resolved.get("sampler.dispense_redo.max_n"))

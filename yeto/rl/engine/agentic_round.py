@@ -456,7 +456,8 @@ class AgenticRound(EngineRound):
                  drain_timeout_s: float | None = None, release_poll_s: float = 5.0, wait_s: float = 0.5,
                  abandon_grace_s: float = ABANDON_GRACE_S,
                  infra_retries: int = DEFAULT_INFRA_RETRIES, infra_streak: Any = None,
-                 clock: Callable[[], float] = time.monotonic, **kwargs: Any) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 warmup_max_in_flight: int | None = None, **kwargs: Any) -> None:
         kwargs.setdefault("reward", lambda item, completion: 0.0)  # the verifier's reward is used
         super().__init__(engine, writer, **kwargs)
         if int(min_samples) < 1 or int(min_samples) > int(self.sampling.n):
@@ -470,6 +471,10 @@ class AgenticRound(EngineRound):
         self.recorder = recorder
         self.harness = harness
         self.max_in_flight = int(max_in_flight)
+        # round_factory doc: until the trainer has trained (trainer_trained), at most this many trials
+        self.warmup_max_in_flight = None if warmup_max_in_flight is None else int(warmup_max_in_flight)
+        self.trainer_trained: Callable[[], bool] = lambda: True  # the sampler wires the store's answer
+        self._warm = self.warmup_max_in_flight is None
         self.max_response_len = int(max_response_len)
         self.max_prompt_len = None if max_prompt_len is None else int(max_prompt_len)
         self.min_samples = int(min_samples)
@@ -636,7 +641,7 @@ class AgenticRound(EngineRound):
         """Start queued trials up to ``max_in_flight``: the rest of a started group
         always, a new group unless draining or reclaimed."""
         # a detached trial still holds its admission slot and its sandbox until it ends
-        while len(self._running) + len(self._detached) < self.max_in_flight and self._error is None:
+        while len(self._running) + len(self._detached) < self.in_flight_cap() and self._error is None:
             fresh = not self._paused and not self.reclaimed()
             group = next((g for g in self._queue if g.started_at is not None or fresh), None)
             if group is None:
@@ -858,7 +863,22 @@ class AgenticRound(EngineRound):
         return group.weights_mark is None or self.weights_state()[1] != group.weights_mark
 
     def _wants_work(self) -> bool:
-        return self.reclaimed() or (not self._queue and len(self._running) < self.max_in_flight)
+        return self.reclaimed() or (not self._queue and len(self._running) < self.in_flight_cap())
+
+    def in_flight_cap(self) -> int:
+        """``max_in_flight``, or the warm-up cap until the trainer has trained (round_factory doc)."""
+        if not self._warm:
+            try:
+                trained = bool(self.trainer_trained())
+            except Exception:  # noqa: BLE001 - a store that cannot say: keep the warm-up cap
+                trained = False
+            if trained:
+                self._warm = True
+                self.emit("rl_agentic_warmup_done", max_in_flight=self.max_in_flight,
+                          warmup_max_in_flight=self.warmup_max_in_flight)
+            else:
+                return min(self.max_in_flight, int(self.warmup_max_in_flight))
+        return self.max_in_flight
 
     def _stream(self, tally: _Tally, *, final: bool) -> None:
         """Settle the groups that end until the stream wants the next round's
@@ -1415,6 +1435,12 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
     * ``max_response_len`` / ``max_prompt_len``: the trainer's row widths (a
       longer stream is cut / ABORTED);
     * ``max_in_flight``: concurrent trials; ``min_samples`` (default 2);
+    * ``warmup_max_in_flight`` (optional, absent: off): until the trainer has
+      trained a round (a release above v0 in the store), at most this many
+      trials run (min with ``max_in_flight``): a trainer that never trains does
+      not cost a full pool of sandboxes (a fleet run opened 52 boat sandboxes
+      while its trainers failed their first step). Once it has trained, the
+      full cap holds for good;
     * ``weight_switch``: ``auto`` (default: ``live`` on a live-update engine,
       else ``drain``), ``drain`` or ``live``; ``drain_timeout_s``
       (default None); in drain mode the drain is cut at
@@ -1479,6 +1505,9 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
                 **spec_.template_kwargs, **dict(section["template_kwargs"])}), template.tokenizer)
         model = str(section.get("model", "model"))
         max_in_flight = int(section["max_in_flight"])
+        warmup = section.get("warmup_max_in_flight")
+        if warmup is not None and (isinstance(warmup, bool) or not isinstance(warmup, int) or warmup < 1):
+            raise ValueError(f"warmup_max_in_flight {warmup!r} (an int >= 1, or absent)")
         max_response_len = int(section["max_response_len"])
         switch = str(section.get("weight_switch", "auto"))
     except (KeyError, TypeError, ValueError) as exc:
@@ -1564,6 +1593,7 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
                             sampling_params={"temperature": signed["temperature"], "top_p": signed["top_p"]},
                             weight_switch=switch, drain_timeout_s=drain_timeout_s, loop=loop,
                             abandon_grace_s=abandon_grace_s,
-                            infra_retries=infra_retries, infra_streak=InfraStreak.of(limits), **kwargs)
+                            infra_retries=infra_retries, infra_streak=InfraStreak.of(limits),
+                            warmup_max_in_flight=warmup, **kwargs)
 
     return make

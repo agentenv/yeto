@@ -33,7 +33,9 @@
   0), so a non-synced full-parameter trainer releases nothing for version 0 while
   the store holds no release (``rl_policy_release_skipped``, reason
   ``base_policy``). Synced trainers release it (a restarted trainer restores its
-  published versions from the store's releases).
+  published versions from the store's releases); a synced trainer that loaded the
+  base checkpoint marks that first v0 release ``origin.base_checkpoint``, so the
+  samplers already serving the checkpoint adopt it without a load or a drain.
 
   Relaunch of a single trainer (no lane, no syncer; as the verl buffer trainer,
   ``merged_release.ResumedReleases``): the version account continues above the
@@ -81,6 +83,7 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl.engine.policy_release import (
+    BASE_CHECKPOINT_KEY,
     FULL,
     LORA,
     BackgroundReleaser,
@@ -775,7 +778,8 @@ class ReleasingPublisher:
                  manifest: Mapping[str, Any] | None = None,
                  release_every: int = 1, skip_busy: bool = False,
                  read_trained: Callable[[int], int | None] | None = None,
-                 read_positions: Callable[[], tuple[int, dict[str, int] | None] | None] | None = None
+                 read_positions: Callable[[], tuple[int, dict[str, int] | None] | None] | None = None,
+                 base_is_checkpoint: bool = False,
                  ) -> None:
         """``read_positions()``: ``(read position, per shard)`` in one read, callable
         from any thread without the rollout executor (module doc, staged full releases;
@@ -796,7 +800,13 @@ class ReleasingPublisher:
         ``read_position_from_thread`` / ``read_shards_from_thread``: the same reads,
         callable from the upload thread (default: ``read_position`` / ``read_shards``).
         ``resumed_base``: a relaunched single trainer's vK (module doc, relaunch):
-        versions up to it are the store's already and are not released again."""
+        versions up to it are the store's already and are not released again.
+        ``base_is_checkpoint``: this trainer's v0 is the base checkpoint the samplers
+        start on (a synced trainer that loaded no release, full weights): its first
+        release, when it is v0, says so in ``origin`` (``base_checkpoint`` True), and
+        a sampler serving that checkpoint adopts it without a load
+        (``PolicyFollower.same_weights``). A single trainer releases nothing for v0
+        (``skip_base``)."""
         if (staging is None) != (releaser is None):
             raise ValueError("staging and releaser go together")
         if int(release_every) < 1:
@@ -829,6 +839,7 @@ class ReleasingPublisher:
         self.staging = None if staging is None else Path(staging)
         self.releaser = releaser
         self.skip_base = bool(skip_base)
+        self.base_is_checkpoint = bool(base_is_checkpoint)
         self.resumed_base = None if resumed_base is None else int(resumed_base)
         self.timer = timer
         self.manifest = None if manifest is None else dict(manifest)
@@ -892,8 +903,12 @@ class ReleasingPublisher:
                       local_version=int(state.policy_version), latest_version=None,
                       reason="base_policy")
             return
+        origin = None if self.origin is None else self.origin(state)
+        if (self.base_is_checkpoint and version == BASE_POLICY_VERSION and int(state.policy_version) == 0
+                and self.releases.latest() is None):
+            origin = {**(origin or {}), BASE_CHECKPOINT_KEY: True}
         fields = {"weights": self.weights, "engine_checksum": self._engine_checksum(),
-                  "origin": None if self.origin is None else self.origin(state),
+                  "origin": origin,
                   "manifest": self.manifest,
                   # read now, on this thread: a staged upload ends rounds later
                   "buffer_trained": None if self.read_trained is None else self.read_trained(version)}
@@ -1204,6 +1219,10 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
                                    release_every=int(getattr(config, "release_every", 1) or 1),
                                    skip_busy=bool(staged and getattr(config, "release_skip_busy", False)),
                                    read_positions=cached_positions if callable(cached_positions) else None,
+                                   # a synced lane releases v0 (module doc): mark it as the
+                                   # base checkpoint when this process loaded that checkpoint
+                                   base_is_checkpoint=(not lora and lane is not None and getattr(
+                                       miles_args, "yeto_rl_init_release", None) is None),
                                    **synced)
     driver.publisher = publisher
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:

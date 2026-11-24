@@ -636,6 +636,8 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
                        poll_s=config.poll_s, should_stop=should_stop,
                        min_round_s=config.min_round_s, loaded_fields=loader.loaded_fields,
                        ready=lambda: loader.ready, live_poll_s=config.live_poll_s, **extra)
+    if getattr(engine_round, "warmup_max_in_flight", None) is not None:  # agentic warm-up cap
+        engine_round.trainer_trained = loop.trainer_trained
     return EngineSamplerIsland(loop=loop, loader=loader, follower=follower, round=engine_round,
                                resume=resume)
 

@@ -42,7 +42,10 @@ post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flig
 newer one that appeared before it was loaded; both wall clock, of two hosts) and
 ``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`),
 and ``deferred_s`` (how long the in-flight rule deferred it) and ``forced``
-True when the follower's deferral bound (``max_defer_s``) loaded it.
+True when the follower's deferral bound (``max_defer_s``) loaded it. A release
+the follower adopts without a load (it holds the served weights,
+:meth:`~.policy_release.PolicyFollower.same_weights`) is reported once as
+``rl_sampler_policy_adopted`` (``reason`` ``base_checkpoint`` or ``same_hash``).
 
 Store reads of the loop are polls: the newest release (``LATEST``), the
 buffer's own index (the backlog, the round's group count). One that fails is no
@@ -167,6 +170,7 @@ class SamplerLoop:
         self.loaded_fields = loaded_fields  # extra fields of rl_sampler_policy_loaded
         self.ready = ready  # False: the engine may not generate (failed post-load check)
         self._not_loaded: tuple[Any, ...] | None = None  # (seq, reason, fields) last reported
+        self._adopted_reported: int | None = None  # seq of the last rl_sampler_policy_adopted
         self.live_poll_s = self.poll_s if live_poll_s is None else float(live_poll_s)
         self.unchecked_in_flight = False  # this round generated on weights that failed a check
         # while it waits (no trainer reading: backlog at the cap, or no release yet) the
@@ -254,6 +258,39 @@ class SamplerLoop:
             return int(groups_from(read))
         return max(0, len(self.buffer) - read)
 
+    def trainer_trained(self) -> bool:
+        """Whether the trainer has released trained weights (a release above v0 in the
+        store: it trained at least one round). True stays True; it reads only the
+        follower's newest seen release (a streaming agentic round's warm-up cap,
+        ``agentic_round.round_factory``). The base checkpoint's v0 release of a synced
+        trainer is no trained round."""
+        seen = self.follower.last_seen
+        if seen is not None and int(seen.version) > 0:
+            return True
+        # nothing seen yet (the loop reads LATEST each poll): the store itself, not every call
+        now = self.clock()
+        if now - getattr(self, "_trained_polled", float("-inf")) < self.poll_s:
+            return False
+        self._trained_polled = now
+        try:
+            latest = self.follower.releases.latest()
+        except Exception:  # noqa: BLE001 - a store that cannot say: not yet
+            return False
+        return latest is not None and int(latest.version) > 0
+
+    def _report_adopted(self) -> None:
+        """One ``rl_sampler_policy_adopted`` per release the follower adopted (module doc)."""
+        adopted = getattr(self.follower, "last_adopted", None)
+        if adopted is None or adopted.seq == self._adopted_reported:
+            return
+        self._adopted_reported = int(adopted.seq)
+        from .policy_release import is_base_checkpoint_release
+
+        self.emit("rl_sampler_policy_adopted", seq=int(adopted.seq), policy_version=int(adopted.version),
+                  policy_hash=adopted.policy_hash, released_at=adopted.released_at,
+                  reason="base_checkpoint" if is_base_checkpoint_release(adopted) else "same_hash",
+                  buffer_selected=adopted.buffer_selected)
+
     def _load_newest(self, *, in_flight: bool = False) -> None:
         try:
             loaded = self.follower.refresh()
@@ -288,6 +325,7 @@ class SamplerLoop:
             return
         self._damaged_latest = 0
         self._latest_unread_since = None
+        self._report_adopted()
         if self._not_loaded is not None and self._not_loaded[1] == LATEST_UNREAD:
             self._not_loaded = None  # read again: a later outage is reported anew
         if loaded is not None:

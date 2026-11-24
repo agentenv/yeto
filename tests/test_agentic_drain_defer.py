@@ -317,3 +317,97 @@ def test_a_stale_latest_after_the_download_keeps_the_ready_release(tmp_path, mon
     store.read = r4
     assert follower.prefetch() == 5 and follower.pending_seq() == 5
     assert follower.refresh().seq == 5 and store.resolved == [5] and loaded == [5]
+
+
+# ---------------------------------------------------------------------- warm-up cap
+def _built_round(spec, tmp_path):
+    from yeto.rl.adapters.sampler_engines.fake import FakeEngine
+    from yeto.rl.engine.buffer_payload import GroupWriter
+    from yeto.rl.engine.resume import CheckpointStore
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+    from yeto.rl.engine.sampler_engine import Provenance, SamplingParams
+
+    engine = FakeEngine()
+    engine.start(None, 0)
+    spec = {"sampling": {}, **spec, "agentic": {"turn_max_tokens": 8, "template": "t", "max_in_flight": 8,
+                                                "max_response_len": 16, **spec.get("agentic", {})}}
+    events = []
+    sampling = SamplingParams(max_tokens=8, n=2)
+    rnd = ar.round_factory(spec, engine, {})(
+        engine, GroupWriter(FileSampleBuffer(CheckpointStore(tmp_path), batch_size=1), "s"),
+        prompts=lambda rollout_id: [], sampling=sampling, emit=lambda name, **fields: events.append((name, fields)),
+        provenance=Provenance.of(engine.identity, sampler_id="s", sampling=sampling))
+    return rnd, events
+
+
+def test_without_a_warmup_the_cap_is_max_in_flight(monkeypatch, tmp_path):
+    _factory_world(monkeypatch)
+    rnd, _ = _built_round({}, tmp_path)
+    try:
+        rnd.trainer_trained = lambda: False  # never asked
+        assert rnd.warmup_max_in_flight is None and rnd.in_flight_cap() == 8
+    finally:
+        rnd.close()
+
+
+def test_the_warmup_cap_holds_until_the_trainer_has_trained(monkeypatch, tmp_path):
+    _factory_world(monkeypatch)
+    rnd, events = _built_round({"agentic": {"warmup_max_in_flight": 4}}, tmp_path)
+    try:
+        trained = [False]
+        rnd.trainer_trained = lambda: trained[0]
+        assert rnd.in_flight_cap() == 4 and rnd.in_flight_cap() == 4
+        trained[0] = True
+        assert rnd.in_flight_cap() == 8
+        trained[0] = False  # sticky: once trained, the full cap stays
+        assert rnd.in_flight_cap() == 8
+        assert [name for name, _ in events].count("rl_agentic_warmup_done") == 1
+    finally:
+        rnd.close()
+
+
+def test_a_store_error_keeps_the_warmup_cap(monkeypatch, tmp_path):
+    _factory_world(monkeypatch)
+    rnd, _ = _built_round({"agentic": {"warmup_max_in_flight": 12}}, tmp_path)
+    try:
+        def broken():
+            raise OSError("store")
+        rnd.trainer_trained = broken
+        assert rnd.in_flight_cap() == 8  # min(max_in_flight, warmup)
+        rnd.warmup_max_in_flight = 2
+        assert rnd.in_flight_cap() == 2
+    finally:
+        rnd.close()
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "4", 2.5])
+def test_a_bad_warmup_cap_is_a_config_error(monkeypatch, tmp_path, bad):
+    from yeto.rl.agentic import HarnessConfigError
+
+    _factory_world(monkeypatch)
+    with pytest.raises(HarnessConfigError, match="warmup_max_in_flight"):
+        _built_round({"agentic": {"warmup_max_in_flight": bad}}, tmp_path)
+
+
+def test_the_sampler_loop_says_trained_once_a_release_above_v0_exists():
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.sampler_loop import SamplerLoop
+
+    now = [0.0]
+    store = SimpleNamespace(latest=lambda: None)
+    loop = SamplerLoop.__new__(SamplerLoop)
+    loop.follower = SimpleNamespace(last_seen=None, releases=store)
+    loop.clock = lambda: now[0]
+    loop.poll_s = 5.0
+    assert loop.trainer_trained() is False
+    store.latest = lambda: SimpleNamespace(version=2)
+    assert loop.trainer_trained() is False  # throttled: the store is read once per poll_s
+    now[0] = 6.0
+    assert loop.trainer_trained() is True
+    loop.follower.last_seen = SimpleNamespace(version=0)  # the base checkpoint's v0: no trained round
+    store.latest = lambda: SimpleNamespace(version=0)
+    now[0] = 20.0
+    assert loop.trainer_trained() is False
+    loop.follower.last_seen = SimpleNamespace(version=3)
+    assert loop.trainer_trained() is True
