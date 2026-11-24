@@ -133,8 +133,12 @@ class ShellObjects:
         return shlex.quote(f"{self.root}/{key}")
 
     def read(self, key: str) -> bytes | None:
+        """The object, or None when the file is absent; an ssh failure raises (it is not
+        an absent object: the assignment's generation would restart at 1)."""
         out = self.sh(f"cat {self._path(key)} 2>/dev/null || echo YETO_NODE_ABSENT_$?", None)
         text = out.stdout if isinstance(out.stdout, str) else (out.stdout or b"").decode()
+        if out.returncode != 0:
+            raise RuntimeError(f"reading {self.root}/{key} on the node failed (exit {out.returncode})")
         return None if text.startswith("YETO_NODE_ABSENT_") else text.encode()
 
     def write(self, key: str, data: bytes) -> None:

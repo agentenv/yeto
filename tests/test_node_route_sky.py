@@ -126,7 +126,8 @@ def test_the_probe_reads_the_store_without_ssh(tmp_path, monkeypatch):
     route = _store_route(ops, tmp_path, run)
     ops.start(m, ["sky-0"])
     before = len(run.calls)
-    assert ops.probe(m).sampler != "running"  # assigned, not ready
+    starting = ops.probe(m)  # assigned: a starting sampler, as a started container reads
+    assert starting.sampler == "running" and not starting.joined and starting.progress_age_s is None
     assignment = records.read_assignment(route.objects, m.ticket, next(
         c[1]["input"] for c in run.calls if c[0][0] == "ssh" and "sky-0.token" in c[0][-1]))
     records.NodeReporter(route.objects, assignment.ticket, assignment.generation).ready(shard="sky-0")
@@ -189,3 +190,45 @@ def test_the_pool_configs_node_profile_replaces_offer_fields(tmp_path, monkeypat
     assert "/data/w:/work" in docker and "/home/ubuntu/yeto/models:/models" in docker
     profile = json.loads(next(c[1]["input"] for c in run.calls if c[0][0] == "ssh" and "profile.json" in c[0][-1]))
     assert profile["card"] == "H200" and profile["hbm_gib"] == 141.0
+
+
+def test_the_container_keeps_the_images_pythonpath_and_the_routes_tuning(tmp_path, monkeypatch):
+    agentic = tmp_path / "agentic.env"
+    agentic.write_text("HARBOR_X=1\n")
+    ops, run, m, _cfg = _ops(tmp_path, monkeypatch, agentic_env_file=str(agentic))
+    _store_route(ops, tmp_path, run)
+    monkeypatch.setattr(ops, "_spec", lambda m, shards: dict(SPEC, agentic={"x": 1}))
+    ops.start(m, ["sky-0"])
+    docker = next(c for c in run.ssh() if "docker run -d" in c)
+    argv = shlex.split(docker.split("; ", 1)[1])
+    assert not any(a.startswith("PYTHONPATH=") for a in argv)  # an -e would drop the image's own entries
+    inner = shlex.split(argv[-1])[2]  # bash -c '<line>'
+    assert inner.startswith(f'export PYTHONPATH=/work/yeto/{SHA}"${{PYTHONPATH:+:$PYTHONPATH}}"; exec ')
+    for key, value in ssh_sampler.sampler_env("runs1").items():
+        if key not in ("PYTHONPATH", "HIP_VISIBLE_DEVICES"):
+            assert f"{key}={value}" in argv, key
+    files = [argv[i + 1] for i, a in enumerate(argv) if a == "--env-file"]
+    assert files == ["/home/ubuntu/yeto/work/sampler/.store.env", "/home/ubuntu/yeto/work/sampler/sky-0.agentic.env"]
+    assert any(c[0][0] == "scp" and str(agentic) in c[0] for c in run.calls)
+
+
+def test_an_offer_without_an_image_is_refused_before_ordering(tmp_path, monkeypatch):
+    ops, run, m, _cfg = _ops(tmp_path, monkeypatch, accelerators="910B4:8")
+    _store_route(ops, tmp_path, run)
+    monkeypatch.setattr(ops, "_spec", lambda m, shards: dict(SPEC, engine={"adapter": "sglang-server"}))
+    ordered = []
+    ops.provider.order = lambda account: ordered.append(account) or "t"
+    with pytest.raises(cli.NcError, match="refused before ordering.*910B4|refused before ordering.*ascend"):
+        ops.order(0)
+    assert ordered == []
+    (tmp_path / "ok").mkdir()
+    ok = _ops(tmp_path / "ok", monkeypatch)[0]
+    ok.provider.order = lambda account: ordered.append(account) or "t"
+    assert ok.order(0) == "t" and ordered == [0]
+
+
+def test_node_runtime_true_is_refused_where_the_route_keeps_its_own_start(tmp_path, monkeypatch):
+    cfg = _ops(tmp_path, monkeypatch)[3]
+    with pytest.raises(ValueError, match="keeps its own sampler start"):
+        cli.pool_config({**{k: v for k, v in cfg.items() if k != "slots"}, "accounts": [1], "node_runtime": True,
+                         "provider": {"kind": "nc"}})

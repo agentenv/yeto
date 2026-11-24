@@ -334,6 +334,7 @@ class NodeStatus:
     generation: int | None = None
     stage: str | None = None
     heartbeat_age_s: float | None = None
+    progress_age_s: float | None = None  # since the sampler joined or last finished a round (None: unknown)
     exit_code: int | None = None
     reason: str | None = None
     ready: Mapping[str, Any] | None = None
@@ -364,8 +365,10 @@ def node_status(objects: Any, ticket: str, *, now: float | None = None, stale_s:
     newest = max((float(d.get("time") or 0.0) for d in docs.values()), default=None)
     age = None if newest is None else max(0.0, now - newest)
     stage = None if beat is None else beat.get("stage")
-    common = {"generation": generation, "stage": stage, "heartbeat_age_s": age, "ready": ready, "heartbeat": beat,
-              "exit": ended}
+    progress_at = None if beat is None else beat.get("progress_at")
+    progress_age = None if progress_at is None else max(0.0, now - float(progress_at))
+    common = {"generation": generation, "stage": stage, "heartbeat_age_s": age, "progress_age_s": progress_age,
+              "ready": ready, "heartbeat": beat, "exit": ended}
     if ended is not None:
         code = ended.get("exit_code")
         return NodeStatus(ticket, "exited", exit_code=None if code is None else int(code),
@@ -379,8 +382,11 @@ def node_status(objects: Any, ticket: str, *, now: float | None = None, stale_s:
 
 def probe_of(status: NodeStatus) -> Any:
     """The pool's :class:`yeto.launch.pool.status.Probe` of a store status: the same
-    reading an SSH probe gives, from the store (``progress_age_s`` is the heartbeat's
-    age; a stuck node reads as a running sampler without progress)."""
+    reading an SSH probe gives, from the store. ``progress_age_s`` is the age of the
+    sampler's last progress (joined, or a round done), not of its heartbeat: a sampler
+    that heartbeats without rounds reads as stalled, as its event tape would. A node
+    assigned or booting reads as a starting sampler (running, not joined), as a
+    started container does; a stuck node as a running sampler without progress."""
     from yeto.launch.pool.status import PROBE_UNREACHABLE, Probe  # noqa: PLC0415
 
     if status.state in ("unassigned",):
@@ -388,15 +394,16 @@ def probe_of(status: NodeStatus) -> Any:
     engine = status.engine
     if status.state == "exited":
         return Probe(node="ok", sampler="exited", exit_code=status.exit_code, joined=status.ready is not None)
-    if status.state == "assigned":
-        return Probe(node="ok", sampler="absent")
 
     def num(key: str) -> float | None:
         value = engine.get(key)
         return None if value is None else float(value)
 
     running, queued = num("running"), num("queued")
+    progress = status.progress_age_s
+    if status.state == "stuck" and progress is None:
+        progress = status.heartbeat_age_s
     return Probe(node="ok", sampler="running", joined=status.ready is not None,
-                 progress_age_s=status.heartbeat_age_s, gen_tokens=num("gen_tokens"),
+                 progress_age_s=progress, gen_tokens=num("gen_tokens"),
                  running=None if running is None else int(running), queued=None if queued is None else int(queued),
                  trainer_wait=bool((status.heartbeat or {}).get("trainer_wait")))

@@ -79,7 +79,8 @@ def test_nc_shadow_of_the_customer_spec_pins_what_is_left(tmp_path, monkeypatch)
     profile = shadow.nc_profile(lease)
     plan = shadow.node_plan(profile, spec={"start_on_latest": True, **spec}, shard="nc-0", run_prefix="runs1",
                             code_sha=SHA, store_uri="s3://b/runs/runs1", env_file="/home/ubuntu/.yeto-nc-r2.env",
-                            image=ssh_sampler.IMAGE, python=ssh_sampler.PYTHON, source="nc")
+                            image=ssh_sampler.IMAGE, python=ssh_sampler.PYTHON, source="nc",
+                            env={"YETO_NC_RUN_PREFIX": "runs1"})
     new = shadow.plan_launch(plan)
     # what already matches: device flags, image, interpreter, sampler, spec, env file, store, marker, spread key
     for name in ("devices", "image", "python", "module", "spec", "env_files"):
@@ -90,17 +91,12 @@ def test_nc_shadow_of_the_customer_spec_pins_what_is_left(tmp_path, monkeypatch)
         assert new.env[key] == old.env[key], key
     differences = shadow.compare(old, new)
     assert not shadow.switchable(differences)  # NC stays on its route
+    # what is left: the code tree (the route mounts it at /yeto and sets -e PYTHONPATH=/yeto, which
+    # drops an image's own entries; the runtime prepends its tree inside the container) and the
+    # store URI (the route builds it on the node from the env file's bucket)
     assert differences == [
-        "mount /models: (none) -> /mnt/nvme/models:ro",
-        "mount /models/deepseek-v4.1-flash: /mnt/nvme/models/DeepSeek-V4.1-Flash:ro -> (none)",
-        "mount /models/kimi-k3.1-pro: /mnt/nvme/models/Kimi-K3.1-Pro:ro -> (none)",
         "mount /yeto: /mnt/nvme/yeto/abcdef123456:ro -> (none)",
-        "env PYTHONPATH: /yeto -> /work/yeto/abcdef123456",
-        "env VLLM_USE_BREAKABLE_CUDAGRAPH: 1 -> (unset)",
-        "env YETO_NC_RUN_PREFIX: runs1 -> (unset)",
-        "env YETO_RL_RELEASE_SPREAD_S: 30 -> (unset)",
-        "env YETO_RL_STORE_DOWNLOAD_PROCESSES: 8 -> (unset)",
-        "env YETO_RL_STORE_FILE_CONCURRENCY: 32 -> (unset)",
+        "env PYTHONPATH: /yeto -> (unset)",
         "env YETO_RL_STORE_S3_URI: (unset) -> s3://b/runs/runs1",
     ]
 
@@ -128,7 +124,7 @@ def test_daytona_shadow_pins_what_is_left(tmp_path):
     assert old.module == "yeto.rl.engine.engine_sampler" and old.env_files == (ds.STORE_ENV,)
     plan = shadow.node_plan(shadow.daytona_profile("box"), spec={"start_on_latest": True, **spec}, shard="d-0",
                             run_prefix="runs1", code_sha=SHA, store_uri="s3://b/runs/runs1", python=ds.PYTHON,
-                            source="daytona")
+                            source="daytona", env={"YETO_NC_RUN_PREFIX": "runs1"})
     new = shadow.plan_launch(plan)
     assert (new.module, new.spec, new.python) == (old.module, old.spec, old.python)
     for key in ("HIP_VISIBLE_DEVICES", "PYTHONPATH", "YETO_SPOT_RECLAIM_MARKER", "YETO_RL_RELEASE_SPREAD_KEY",
@@ -136,11 +132,11 @@ def test_daytona_shadow_pins_what_is_left(tmp_path):
         assert new.env[key] == old.env[key], key
     differences = shadow.compare(old, new)
     assert not shadow.switchable(differences)  # Daytona stays on its route
-    assert {d.split(":")[0] for d in differences} == {
-        "env_files", "env AITER_JIT_DIR", "env TRITON_CACHE_DIR", "env VLLM_CACHE_ROOT",
-        "env VLLM_USE_BREAKABLE_CUDAGRAPH", "env XDG_CACHE_HOME", "env YETO_CACHE_DIR", "env YETO_NC_RUN_PREFIX",
-        "env YETO_RL_RELEASE_SPREAD_S", "env YETO_RL_STORE_DOWNLOAD_PROCESSES", "env YETO_RL_STORE_FILE_CONCURRENCY",
-        "env YETO_RL_STORE_S3_URI", "env YETO_RL_STORE_S3_ENDPOINT_URL"}
+    assert differences == [  # the store env file is read by the runtime, the URI built from it there
+        "env_files: ('/work/sampler/store.env',) -> ()",
+        "env YETO_RL_STORE_S3_ENDPOINT_URL: $AWS_ENDPOINT_URL -> (unset)",
+        "env YETO_RL_STORE_S3_URI: s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX} -> s3://b/runs/runs1",
+    ]
 
 
 def test_plan_launch_of_a_process_plan():

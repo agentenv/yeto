@@ -31,6 +31,11 @@ from yeto.launch.node_inventory import NodePaths, NodeProfile
 from .launch import GENERATION_ENV, HEARTBEAT_ENV, PROFILE_ENV, SUPERVISED_ENV, TICKET_ENV
 from .records import Assignment, CodeRef
 
+# the route-specific tuning a route's node profile carries (``env``), not derived by the runtime
+NC_TUNING_ENV = ("VLLM_USE_BREAKABLE_CUDAGRAPH", "YETO_RL_STORE_DOWNLOAD_PROCESSES", "YETO_RL_STORE_FILE_CONCURRENCY",
+                 "YETO_RL_RELEASE_SPREAD_S")
+DAYTONA_TUNING_ENV = (*NC_TUNING_ENV, "XDG_CACHE_HOME", "VLLM_CACHE_ROOT", "TRITON_CACHE_DIR", "AITER_JIT_DIR",
+                      "YETO_CACHE_DIR")
 # only the node runtime sets these (its records, the family for the sampler's telemetry)
 NODE_ONLY_ENV = frozenset({TICKET_ENV, GENERATION_ENV, PROFILE_ENV, SUPERVISED_ENV, HEARTBEAT_ENV,
                            "YETO_DEVICE_FAMILY"})
@@ -166,7 +171,8 @@ def nc_profile(lease: Any, *, image: str | None = None) -> NodeProfile:
 
     node = ssh_sampler.node_of(lease, **({"image": image} if image else {}))
     root = ssh_sampler.NVME
-    return NodeProfile.from_node(node, container="docker", model_source="store",
+    tuning = {k: v for k, v in ssh_sampler.sampler_env("-").items() if k in NC_TUNING_ENV}
+    return NodeProfile.from_node(node, container="docker", model_source="store", env=tuning,
                                  paths=NodePaths(work=f"{root}/work", models=f"{root}/models",
                                                  cache=f"{root}/cache/vllm"))
 
@@ -175,13 +181,15 @@ def daytona_profile(name: str, *, gpus: int = 8) -> NodeProfile:
     """A Daytona sandbox as a node profile: MI355X, a process in the sandbox's image."""
     from yeto.launch import daytona_sampler as ds  # noqa: PLC0415
 
-    return NodeProfile.for_card(name, "MI355X", gpus, hbm_gib=288.0, container="process",
+    tuning = {k: v for k, v in ds.process_env("-", "-", gpus=gpus).items() if k in DAYTONA_TUNING_ENV}
+    return NodeProfile.for_card(name, "MI355X", gpus, hbm_gib=288.0, container="process", env=tuning,
                                 paths=NodePaths(work=ds.WORK, models=ds.MODELS, cache=ds.CACHE))
 
 
 def node_plan(profile: NodeProfile, *, spec: Mapping[str, Any], shard: str, run_prefix: str, code_sha: str,
               store_uri: str | None = None, env_file: str | None = None, image: str | None = None,
-              python: str | None = None, source: str | None = None, environ: Mapping[str, str] | None = None) -> Any:
+              python: str | None = None, source: str | None = None, environ: Mapping[str, str] | None = None,
+              env: Mapping[str, str] | None = None, cards: tuple[int, ...] | None = None) -> Any:
     """The plan the node runtime would start ``shard`` with on ``profile`` (its dry run;
     no store, nothing written)."""
     from .runtime import NodeRuntime  # noqa: PLC0415
@@ -189,7 +197,8 @@ def node_plan(profile: NodeProfile, *, spec: Mapping[str, Any], shard: str, run_
     assignment = Assignment(ticket=f"shadow-{shard}", shard=shard, spec=dict(spec),
                             code=CodeRef(sha=code_sha, key=f"node-code/{code_sha}.tar", sha256=""), token_sha256="",
                             run=run_prefix.strip("/"), source=source, image=image, python=python,
-                            store_uri=store_uri)
+                            store_uri=store_uri, env=dict(env or {}),
+                            cards=tuple(range(profile.cards_per_node)) if cards is None else cards)
     runtime = NodeRuntime(None, assignment, profile, store_uri=store_uri, environ=dict(environ or {}),
                           skip_preflight=True, log=lambda line: None)
     runtime.env_file = env_file

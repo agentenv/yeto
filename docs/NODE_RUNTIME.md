@@ -87,8 +87,9 @@ The image a container sampler runs is chosen per node by
 rollout=, image=)`: the first catalog image whose device family, card
 architecture, CPU architecture, engine, model recipe, reload mode, precision and
 rollout fields fit the node. When nothing fits, it raises `ImageIncompatible` with
-each image's reason and what would work instead, and the launcher refuses before
-`docker run` (the node runtime exits 8, `image`, in its exit record). A pool that
+each image's reason and what would work instead. The sky route checks every offer
+of the pool this way before it orders the first machine; the node runtime checks
+again before it starts a container (it exits 8, `image`, in its exit record). A pool that
 names an image (`image`, or `engine` / `platform`) gets that image checked the same
 way; an image outside the catalog is used unchecked.
 
@@ -186,14 +187,21 @@ own (a JSON or YAML map, e.g. `{"paths": {"work": "/data/work"}}`); `--work`,
 | route | sampler start | rollback |
 |---|---|---|
 | SSH + docker pool on `provider.kind: sky` | node runtime (default) | `"node_runtime": false` in the pool config |
-| SSH inventory pool (`provider.kind: ssh`) | node runtime (default) | `"node_runtime": false` in the `provider` section |
-| National Compute | its own docker route | (shadow only) |
-| Daytona | its own process route | (shadow only) |
+| SSH inventory pool (`provider.kind: ssh`) | its own start; node runtime opt-in | `"node_runtime": true` in the `provider` section (or the pool config) turns it on |
+| National Compute | its own docker route | (shadow only; `node_runtime: true` is refused) |
+| Daytona | its own process route | (shadow only; `node_runtime: true` is refused) |
+
+On the ssh pool the node runtime keeps the sampler's environment as the route's own
+start leaves it: the yeto tree goes in front of the inherited `PYTHONPATH` (the
+venv's `pythonpath`, its `source` scripts' entries and an image's own entries such
+as CANN's stay), and `provider.env` is applied last, as before.
 
 On the sky route the node's profile comes from the offer's accelerators
 (`H100:8` -> family cuda, 8 cards) with the directories under the ssh user's
 home (`~/yeto/{work,models,cache}`); the pool config's `node_profile` section
-replaces any field:
+replaces any field. The container keeps the image's own `PYTHONPATH` behind the yeto
+tree, gets the docker route's tuning variables (release download, start spread)
+and the pool's `agentic_env_file` as a second `--env-file`:
 
 <!-- doc-test: sky-pool -->
 ```json
@@ -220,4 +228,6 @@ National Compute (the MI355X vLLM pool) and Daytona keep their own sampler start
 `yeto.node.shadow` renders the node runtime's launch on the same node and lists
 each difference from the route's own (device flags, mounts, env files,
 environment, image, interpreter, sampler, spec path); a route switches only when
-that list is empty.
+that list is empty. On a National Compute node it is down to the code tree (the
+route mounts it at `/yeto` with `-e PYTHONPATH=/yeto`) and the store URI (the route
+builds it on the node from the env file's bucket).

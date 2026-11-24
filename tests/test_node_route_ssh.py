@@ -45,7 +45,7 @@ def _start(tmp_path, monkeypatch, **section):
 
 
 def test_the_container_runs_the_node_runtime_with_the_routes_own_flags(tmp_path, monkeypatch):
-    new, t = _start(tmp_path, monkeypatch)
+    new, t = _start(tmp_path, monkeypatch, node_runtime=True)
     (tmp_path / "old").mkdir()
     old, _ = _start(tmp_path / "old", monkeypatch, node_runtime=False)
     run_new = next(c[0][-1] for c in new.calls if c[0][0] == "ssh" and "run -d" in c[0][-1])
@@ -66,8 +66,11 @@ def test_the_container_runs_the_node_runtime_with_the_routes_own_flags(tmp_path,
     assert profile["container"] == "process" and profile["paths"]["work"] == "/srv/yeto/run0"
 
 
-def test_node_runtime_false_keeps_the_sampler_start(tmp_path, monkeypatch):
-    old, _ = _start(tmp_path, monkeypatch, node_runtime=False)
+def test_node_runtime_is_opt_in_and_false_keeps_the_sampler_start(tmp_path, monkeypatch):
+    default, _ = _start(tmp_path, monkeypatch)
+    assert not any("yeto.node" in c[0][-1] for c in default.calls if c[0][0] == "ssh")
+    (tmp_path / "off").mkdir()
+    old, _ = _start(tmp_path / "off", monkeypatch, node_runtime=False)
     cmds = [c[0][-1] for c in old.calls if c[0][0] == "ssh"]
     assert any("yeto.rl.engine.engine_sampler --spec" in c for c in cmds)
     assert not any("yeto.node" in c or "assignments/" in c for c in cmds)
@@ -116,7 +119,7 @@ def test_a_venv_node_runs_the_node_runtime_and_the_sampler_end_to_end(tmp_path, 
     (tmp_path / "spec.json").write_text(json.dumps(spec))
     cfg = {"target": 1, "slots": [0], "shard_base": "e2e", "spec": str(tmp_path / "spec.json"), "run_prefix": "e2e",
            "provider": {"kind": "ssh", "workdir": str(work), "runtime": "venv", "venv": {"python": sys.executable},
-                        "store": str(store)}}
+                        "store": str(store), "node_runtime": True}}
     node = parse_node({"name": "local", "host": "localhost", "device_family": "cuda", "cpu_arch": "x86_64",
                        "card": "L4", "cards_per_node": 1, "hbm_gib": 24, "host_memory_gib": 64,
                        "runtime": "rootfs"}, index=0)
@@ -136,3 +139,106 @@ def test_a_venv_node_runs_the_node_runtime_and_the_sampler_end_to_end(tmp_path, 
     [member] = [json.loads(p.read_text()) for p in (store / MEMBERS_DIR / "e2e-0").glob("*.json")]
     assert member["node"]["ticket"] == t and member["node"]["source"] == "ssh"
     assert member["leave_reason"] == "FINISHED" and member["rounds"] == 2
+
+
+# -- the sampler's final environment, the route's own start against the node runtime ---------
+
+IMAGE_ENV = {"PYTHONPATH": "/usr/local/Ascend/cann/python/site-packages", "ASCEND_HOME_PATH": "/usr/local/Ascend",
+             "LD_LIBRARY_PATH": "/usr/local/Ascend/lib64"}
+# the shell's own, and what a Python interpreter adds to its environment at start (PEP 538 locale
+# coercion; macOS) - the sampler, a Python process too, adds the same at its own start
+SHELL_VARS = {"PWD", "OLDPWD", "SHLVL", "_", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
+NODE_ONLY = {"YETO_NODE_TICKET", "YETO_NODE_GENERATION", "YETO_NODE_PROFILE", "YETO_NODE_SUPERVISED",
+             "YETO_DEVICE_FAMILY", "YETO_RL_RELEASE_SPREAD_KEY"}
+
+
+class EmulatedNode(LocalNode):
+    """LocalNode plus a container engine: ``<engine> run -d`` runs its ``bash -c`` body here,
+    under the image's environment, its ``--env-file`` and its ``-e`` values (nothing else)."""
+
+    def __call__(self, argv, **kw):
+        if argv[0] == "ssh" and " run -d " in argv[-1]:
+            import shlex  # noqa: PLC0415
+
+            tokens = shlex.split(argv[-1])
+            start = next(i for i in range(len(tokens) - 1) if tokens[i] == "run" and tokens[i + 1] == "-d")
+            run = tokens[start:tokens.index("&&", start)]
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), **IMAGE_ENV}
+            for i, a in enumerate(run):
+                if a == "--env-file":
+                    env.update(dict(line.split("=", 1) for line in Path(run[i + 1]).read_text().splitlines() if line))
+                elif a == "-e":
+                    env.update([run[i + 1].split("=", 1)])
+            out = subprocess.run(["bash", "-c", run[-1]], env=env, capture_output=True, text=True, timeout=600)
+            return SimpleNamespace(returncode=0 if out.returncode == 0 else 1,
+                                   stdout="YETO_SSH_STARTED container=x\n", stderr=out.stdout + out.stderr)
+        return super().__call__(argv, **kw)
+
+
+def _final_env(tmp_path, monkeypatch, *, runtime: str, family: str, node_runtime: bool) -> dict:
+    work, store, dump = tmp_path / "work", tmp_path / "store", tmp_path / "sampler-env"
+    stub = tmp_path / "python"  # the node runtime runs for real; the sampler only records its environment
+    stub.write_text(f'#!/bin/bash\nif [ "$2" = yeto.node ]; then exec {sys.executable} "$@"; fi\n'
+                    f'env -0 > {dump}\n')
+    stub.chmod(0o755)
+    source = tmp_path / "set_env.sh"
+    source.write_text('export CANN_TOOLKIT=/usr/local/Ascend/toolkit\nexport PYTHONPATH=/cann/acl"${PYTHONPATH:+:$PYTHONPATH}"\n')
+    (tmp_path / "spec.json").write_text(json.dumps({"sampler_id": "x", "prompts": {"groups_per_round": 2},
+                                                    "buffer_shards": ["e-0"]}))
+    provider = {"kind": "ssh", "workdir": str(work), "runtime": runtime, "store": str(store), "devices": [0],
+                "node_runtime": node_runtime, "env": {"PYTHONUNBUFFERED": "0", "OPERATOR_KNOB": "7"}}
+    if runtime == "venv":
+        provider["venv"] = {"python": str(stub), "pythonpath": ["/opt/extra"], "source": [str(source)]}
+    else:
+        provider["container"] = {"engine": "podman", "image": "img", "python": str(stub)}
+    cfg = {"target": 1, "slots": [0], "shard_base": "e", "spec": str(tmp_path / "spec.json"), "run_prefix": "e",
+           "provider": provider}
+    node = parse_node({"name": "local", "host": "localhost", "device_family": family,
+                       "cpu_arch": "x86_64", "card": "910B4" if family == "npu" else "L4", "cards_per_node": 1,
+                       "hbm_gib": 64 if family == "npu" else 24, "host_memory_gib": 64,
+                       "runtime": "docker" if runtime == "container" else "rootfs"}, index=0)
+    ops = sp.SshSamplerPoolOps(cfg, conf=sp.parse_config(cfg, inventory=[node]), run=EmulatedNode(),
+                               state_dir=tmp_path)
+    monkeypatch.setattr(ops, "preflight", lambda node: [(work / d).mkdir(parents=True, exist_ok=True)
+                                                        for d in ("sampler", "logs")] and {})
+    monkeypatch.setattr(sp.ssh_transport, "mux_options", lambda route: [])
+    monkeypatch.setattr(sp, "container_pull_command", lambda conf, image: "true")
+    monkeypatch.setattr(cli.tasks, "sampler_spec", lambda spec, sampler_id, shards: dict(spec, sampler_id=sampler_id))
+    monkeypatch.setattr(cli.tasks, "apply_sampler_overrides", lambda spec, **kw: spec)
+    m = SimpleNamespace(account=0, ticket=ops.order(0), shard="e-0", data_slot=None, replaces_shard=None,
+                        predecessor_lost=False)
+    ops.start(m, ["e-0"])
+    assert dump.exists(), (work / "logs" / "e-0.log").read_text()[-2000:] if (work / "logs" / "e-0.log").exists() else ""
+    env = dict(item.split("=", 1) for item in dump.read_text().split("\0") if "=" in item)
+    return {k: v for k, v in env.items() if k not in SHELL_VARS and not k.startswith("YETO_SSH_START")}
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("runtime,family", [("venv", "npu"), ("venv", "cuda"), ("container", "npu")])
+def test_the_samplers_final_environment_is_the_routes_own(tmp_path, monkeypatch, runtime, family):
+    (tmp_path / "old").mkdir()
+    (tmp_path / "new").mkdir()
+    old = _final_env(tmp_path / "old", monkeypatch, runtime=runtime, family=family, node_runtime=False)
+    new = _final_env(tmp_path / "new", monkeypatch, runtime=runtime, family=family, node_runtime=True)
+    rel = lambda env, root: {k: v.replace(str(tmp_path / root), "<T>") for k, v in env.items()}  # noqa: E731
+    old, new = rel(old, "old"), rel(new, "new")
+    assert {k: v for k, v in new.items() if k not in NODE_ONLY or k in old} == old
+    assert new["YETO_NODE_TICKET"] and new["PYTHONUNBUFFERED"] == "0" and new["OPERATOR_KNOB"] == "7"
+    if family == "npu":
+        assert new["ASCEND_RT_VISIBLE_DEVICES"] == "0"
+    if runtime == "container":  # the image's own PYTHONPATH (CANN) stays behind the yeto tree
+        assert new["PYTHONPATH"].endswith(":" + IMAGE_ENV["PYTHONPATH"]) and new["ASCEND_HOME_PATH"]
+    else:  # the venv's pythonpath and the source script's entry stay
+        assert ":/opt/extra:/cann/acl" in new["PYTHONPATH"] and new["CANN_TOOLKIT"]
+
+
+def test_shell_objects_raise_on_an_ssh_failure_instead_of_reading_absent():
+    from yeto.node.route import ShellObjects  # noqa: PLC0415
+
+    answers = {"absent": SimpleNamespace(returncode=0, stdout="YETO_NODE_ABSENT_1\n"),
+               "down": SimpleNamespace(returncode=255, stdout="")}
+    assert ShellObjects(lambda cmd, text: answers["absent"], "/s").read("assignments/t.json") is None
+    with pytest.raises(RuntimeError, match="exit 255"):
+        ShellObjects(lambda cmd, text: answers["down"], "/s").read("assignments/t.json")

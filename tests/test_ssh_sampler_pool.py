@@ -195,8 +195,7 @@ def test_ops_start_probe_drain(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.tasks, "apply_sampler_overrides", lambda spec, **kw: spec)
     run = FakeRun()
     cfg = pool_cfg(tmp_path)
-    # the route's own sampler start (node_runtime: false, kept for one release); the node runtime: below
-    ops = sp.SshSamplerPoolOps(cfg, conf=conf(node_runtime=False), run=run, state_dir=tmp_path)
+    ops = sp.SshSamplerPoolOps(cfg, conf=conf(), run=run, state_dir=tmp_path)
     t = ops.order(0)
     m = SimpleNamespace(account=0, ticket=t, shard="f09-0", data_slot=None, replaces_shard=None,
                         predecessor_lost=False)

@@ -49,8 +49,15 @@ def node_dirs(profile: NodeProfile) -> dict[str, str]:
 
 
 def container_mounts(profile: NodeProfile) -> dict[str, str]:
-    """Host directory -> container path of a container launch."""
+    """Host directory -> container path of a container launch: the profile's own ``mounts``
+    when it names any (a route's fixed layout, e.g. one mount per model), with the work
+    directory added when they leave it out; else the node's three directories."""
     dirs = node_dirs(profile)
+    if profile.mounts:
+        out = {str(k): str(v) for k, v in profile.mounts.items()}
+        if CONTAINER_WORK not in out.values():
+            out[dirs["work"]] = CONTAINER_WORK
+        return out
     return {dirs["work"]: CONTAINER_WORK, dirs["models"]: CONTAINER_MODELS, dirs["cache"]: CONTAINER_CACHE}
 
 

@@ -149,6 +149,26 @@ def _profile(tmp_path):
                                 paths=NodePaths(work=str(tmp_path / "w"), models=str(tmp_path / "m")))
 
 
+def test_progress_age_is_the_last_round_not_the_last_heartbeat(tmp_path):
+    objects = DirectoryObjectStore(tmp_path)
+    code = records.CodeRef("abc", "node-code/abc.tar", "0" * 64)
+    records.assign(objects, ticket="t", shard="s", spec={}, code=code)
+    assert probe_of(node_status(objects, "t")).sampler == "running"  # assigned: starting, not absent
+    now = [1000.0]
+    rounds = [0]
+    report = SamplerNodeReport(NodeReporter(objects, "t", 1, clock=lambda: now[0]), heartbeat_s=3600,
+                               metrics=lambda port: {}, clock=lambda: now[0])
+    report.progress = lambda: {"rounds": rounds[0]}
+    report.ready(shard="s")  # joined at 1000
+    now[0] = 1100.0
+    rounds[0] = 1
+    report._beat()  # a round done at 1100  # noqa: SLF001
+    now[0] = 1500.0
+    report._beat()  # alive, no new round  # noqa: SLF001
+    probe = probe_of(node_status(objects, "t", now=1510.0))
+    assert probe.joined and probe.progress_age_s == 410.0  # since the round, not since the heartbeat (10 s)
+
+
 def test_engine_metrics_summary_of_vllm_and_sglang():
     vllm = ("# HELP x\nvllm:generation_tokens_total{model_name=\"m\"} 120.0\n"
             "vllm:num_requests_running{model_name=\"m\"} 4.0\nvllm:num_requests_waiting{model_name=\"m\"} 2.0\n"

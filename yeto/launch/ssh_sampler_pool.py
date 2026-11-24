@@ -188,7 +188,7 @@ class SshPoolConf:
     lost_node_hold_s: float = 1800.0
     # the node starts ``python -m yeto.node run`` (yeto.node.route), which starts the sampler;
     # false: the sampler directly, as before (kept for one release)
-    node_runtime: bool = True
+    node_runtime: bool = False  # opt-in: python -m yeto.node run starts the sampler
 
 
 def _strs(value: Any, key: str) -> tuple[str, ...]:
@@ -286,9 +286,12 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
     hold = section.get("lost_node_hold_s", 1800)
     if isinstance(hold, bool) or not isinstance(hold, (int, float)) or hold < 0:
         raise ValueError(f"ssh provider: lost_node_hold_s must be a number of seconds >= 0, not {hold!r}")
-    node_runtime = section.get("node_runtime", True)
-    if not isinstance(node_runtime, bool):
-        raise ValueError(f"ssh provider: node_runtime must be true or false, not {node_runtime!r}")
+    from yeto.node.route import enabled as node_runtime_enabled  # noqa: PLC0415
+
+    try:  # provider.node_runtime, else the pool config's: opt-in (default false)
+        node_runtime = node_runtime_enabled(cfg, default=False, section=section)
+    except ValueError as error:
+        raise ValueError(f"ssh provider: {error}") from None
     return SshPoolConf(nodes=tuple(nodes), workdir=workdir.rstrip("/"), runtime=runtime, container=container,
                        venv=venv, env={str(k): str(v) for k, v in env.items()}, devices=devices,
                        store=str(store) if store else None, min_free_gib=float(pre.get("min_free_gib", 20)),
@@ -1091,8 +1094,13 @@ class SshSamplerPoolOps:
 
         p = node_paths(self.conf.workdir, m.shard)
         profile = self.node_profile(node)
-        assignment, token = route.assign(m, shards, profile, spec, spec_paths="host",
-                                         cards=tuple(self.conf.devices) if self.conf.devices is not None else None)
+        # provider.env goes in the assignment's environment (applied last by the runtime, as the
+        # route applies it last); PYTHONPATH stays the route's (its start line prepends the tree)
+        env = {k: v for k, v in self.conf.env.items() if k != "PYTHONPATH"}
+        # the cards the route limits (sampler_env: Ascend only); elsewhere the sampler sees every card, as before
+        cards = tuple(self.conf.devices) if self.conf.devices is not None and node.device_family == "npu" else None
+        assignment, token = route.assign(m, shards, profile, spec, spec_paths="host", python=python, env=env,
+                                         cards=cards)
         token_file, profile_file = f"{p['dir']}/{m.shard}.token", f"{p['dir']}/{m.shard}.profile.json"
         self.put(node, token, token_file, mode="600")
         self.put(node, route.profile_file_text(profile), profile_file, mode="644")

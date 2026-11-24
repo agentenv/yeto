@@ -231,7 +231,30 @@ class NcSshOps:
 
     # -- supply (the provider)
     def order(self, account: int) -> str:
+        self._check_node_images()
         return self.provider.order(account)
+
+    def _check_node_images(self) -> None:
+        """On the node runtime route: every offer's machine has an image for the spec, checked
+        before the first order (not after a machine is up)."""
+        if getattr(self, "_images_checked", False) or self.node_route is None:
+            return
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from yeto.node import ssh_docker  # noqa: PLC0415
+
+        slots = slot_list(self.cfg)
+        probe = SimpleNamespace(account=slots[0], ticket="check", shard=f"{self.cfg['shard_base']}-0",
+                                data_slot=None, replaces_shard=None, predecessor_lost=False)
+        try:
+            spec = self._spec(probe, [probe.shard])
+        except (OSError, ValueError, KeyError) as error:
+            raise NcError(f"pool: the sampler spec does not render ({error})") from None
+        try:
+            ssh_docker.check_offers(self.cfg, self.provider, spec)
+        except ssh_docker.SshDockerError as error:
+            raise NcError(str(error)) from None
+        self._images_checked = True
 
     def poll(self, m: Member) -> island_status.LeaseStatus:
         status = self.provider.status(m.account, m.ticket)
@@ -983,6 +1006,10 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         syncer_address((cfg.get("syncer") or {}).get("address"))
     if cfg.get("node_runtime") is not None and not isinstance(cfg["node_runtime"], bool):
         raise ValueError(f"pool config: node_runtime must be true or false, not {cfg['node_runtime']!r}")
+    kind = str((cfg.get("provider") or {}).get("kind") or "nc")
+    if cfg.get("node_runtime") is True and kind not in ("sky", "ssh"):
+        raise ValueError(f"pool config: node_runtime true: provider kind {kind!r} keeps its own sampler start "
+                         "(the node runtime runs on the sky and ssh routes)")
     if cfg.get("node_profile") is not None and not isinstance(cfg["node_profile"], dict):
         raise ValueError("pool config: node_profile must be a map of node profile fields")
     run_id(cfg)

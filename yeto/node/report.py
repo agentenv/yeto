@@ -91,6 +91,10 @@ class SamplerNodeReport:
         self.metrics, self.clock = metrics, clock
         self.stage = "engine"
         self.progress: Callable[[], Mapping[str, Any]] | None = None
+        # when the sampler last made progress (joined, then each new round): the pool's
+        # progress age, the same reading as an event tape that last grew then
+        self.progress_at: float | None = None
+        self._rounds: Any = None
         self.leave_reason: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -133,6 +137,10 @@ class SamplerNodeReport:
                 fields.update(dict(self.progress()))
             except Exception:  # noqa: BLE001 - observation only
                 pass
+        if "rounds" in fields and fields["rounds"] != self._rounds:
+            self._rounds, self.progress_at = fields["rounds"], float(self.clock())
+        if self.progress_at is not None:
+            fields["progress_at"] = self.progress_at
         engine = dict(self.metrics(self.metrics_port)) if self.stage in ("engine", "running") else {}
         if engine:
             fields["engine"] = engine
@@ -153,7 +161,7 @@ class SamplerNodeReport:
 
     def ready(self, **fields: Any) -> None:
         self.reporter.ready(profile=self.profile, **fields)
-        self.stage = "running"
+        self.stage, self.progress_at = "running", float(self.clock())
         self._beat()
 
     def left(self, reason: str, **fields: Any) -> None:
