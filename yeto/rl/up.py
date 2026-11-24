@@ -1117,13 +1117,20 @@ class Run:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
             return False
+        degraded: dict[str, str] = {}
         for i in range(len(self.pools)):
             problem = self.shard_problem(i)
+            if problem is not None and not self.pools[i].required:
+                degraded[self.pools[i].name] = problem
+                continue
             if problem is not None:
                 _log(f"preflight: {problem}" + self._pool_suffix(i))
                 self.mark("preflight", ok=False)
                 return False
             problem = self.rollout_fields_problem(i) or self.consistency_problem(i)
+            if problem is not None and not self.pools[i].required:
+                degraded[self.pools[i].name] = problem
+                continue
             if problem is not None:
                 _log(f"preflight: {problem}" + self._pool_suffix(i))
                 self.mark("preflight", ok=False)
@@ -1138,8 +1145,18 @@ class Run:
             self.mark("preflight", ok=False)
             return False
         ok = True
-        for path in self.pool_configs:
-            ok &= self._cmd(self.nc("pool", "--config", path, "--dry-run"), log="preflight.log") == 0
+        for ref in self.pools:
+            if ref.name in degraded:
+                continue
+            rc = self._cmd(self.nc("pool", "--config", ref.config, "--dry-run"), log="preflight.log")
+            if rc != 0 and not ref.required:
+                degraded[ref.name] = f"its pool dry-run failed (rc={rc}; see {self.dir / 'preflight.log'})"
+                continue
+            ok &= rc == 0
+        if degraded and not self.degrade_pools(degraded):
+            ok = False
+        elif not degraded and self.state.get("degraded_pools"):
+            self.state["degraded_pools"] = {}  # every pool passed this time
         if self.envs:
             ok &= self._cmd(self.yeto("sandbox", "status", "--envs", self.envs, "--store", self.cfg["store"]),
                             log="preflight.log") == 0
@@ -1153,6 +1170,37 @@ class Run:
         self.write_breakers_resolved()
         self.mark("preflight", ok=bool(ok))
         return bool(ok)
+
+    def degrade_pools(self, degraded: dict[str, str]) -> bool:
+        """Leave the pools whose preflight failed and that are not ``required`` out of this
+        run up (named in the log, ``state.json``'s ``degraded_pools`` and ``run status``); the
+        others start. False (logged): nothing would sample (no pool left, or a fleet island
+        lost every pool)."""
+        for name, why in degraded.items():
+            i = next(k for k, ref in enumerate(self.pools) if ref.name == name)
+            _log(f"preflight: pool {name} is not required and its preflight failed: DEGRADED, left out of this "
+                 f"run up ({why})" + self._pool_suffix(i))
+        left = [ref for ref in self.pools if ref.name not in degraded]
+        self.state["degraded_pools"] = {name: why[:400] for name, why in degraded.items()}
+        for name, why in degraded.items():
+            try:
+                self._append_event({"t": time.time(), "event": "rl_pool_degraded", "run": self.run, "pool": name,
+                                    "why": why[:400]})
+            except OSError:
+                pass
+        if not left:
+            _log("preflight: every sampler pool is degraded: nothing would sample")
+            return False
+        plan = self.fleet_plan()
+        if plan is not None:
+            names = {ref.name for ref in left}
+            empty = [island.index for island in plan.islands
+                     if island.pools and not any(p.name in names for p in island.pools)]
+            if empty:
+                _log(f"preflight: island(s) {empty} would have no sampler pool left (every one degraded)")
+                return False
+        self.pools = left
+        return True
 
     def write_breakers_resolved(self) -> None:
         """``breakers.resolved.json`` in the state directory: every layer's settings as this
