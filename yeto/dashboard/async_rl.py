@@ -482,6 +482,14 @@ class AsyncState:
                                "load_wall_s": round(ts - seen, 3) if ts is not None and seen is not None else None,
                                "memory_guard": (r.get("memory_guard") or {}).get("mode")
                                if isinstance(r.get("memory_guard"), dict) else None})
+        elif ev == "rl_sampler_policy_adopted":
+            # a release of the weights the sampler already served (a synced trainer's base v0):
+            # taken without a load, so the release row shows the island on it at no pause
+            self.loads.append({"sampler": iid, "policy_version": r.get("policy_version"), "seq": r.get("seq"),
+                               "released_at": _f(r.get("released_at")), "seen_at": None, "loaded_at": ts,
+                               "resolve_s": None, "load_s": None, "pause_s": 0.0,
+                               "buffer_selected": r.get("buffer_selected"), "load_wall_s": None,
+                               "adopted": True})
         elif ev == "rl_sampler_start_on_latest" and r.get("base_version") is not None:
             # a new or replacement island starts on the newest release: a load of that
             # version (at start, not a hot reload), so the release row shows the island
@@ -958,6 +966,7 @@ class AsyncState:
                 "pause_s": ld["pause_s"],
                 "loaded_at": ld["loaded_at"], "seen_at": ld["seen_at"], "load_wall_s": ld["load_wall_s"],
                 "resolve_s": ld["resolve_s"], "load_s": ld["load_s"], "at_start": bool(ld.get("at_start")),
+                **({"adopted": True} if ld.get("adopted") else {}),
                 "latency_s": (round(ld["loaded_at"] - rel, 3) if ld["loaded_at"] is not None and rel is not None
                               and not ld.get("at_start") else None)}
         if island_of is not None:

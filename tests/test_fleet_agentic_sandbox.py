@@ -443,3 +443,24 @@ def test_an_islands_run_prefix_names_owners_that_never_cross_islands(tmp_path):
     write = entry.tape_writer(sorted(tapes)[0], "ag-i0-0")
     write("x")
     assert sorted(tapes)[0].is_file()
+
+
+def test_the_preflight_reads_the_boat_shares_run_up_wrote_into_each_pool(fleet_files):
+    """Run up splits the boat account over the fleet's boat pools (each pool's
+    spec breakers section); the preflight summed the defaults instead and warned
+    "together 12 > the account's 12" style for shares that add up to the account."""
+    spec = json.loads((fleet_files / "agentic.json").read_text())
+    spec["agentic"]["task_defaults"] = {"provider": "boat"}
+    spec["agentic"].pop("envs")
+    (fleet_files / "boat.json").write_text(json.dumps(spec))
+    cfg = _fleet_cfg(fleet_files)
+    for island in cfg["islands"]:
+        for pool in island["samplers"]:
+            pool["spec"] = str(fleet_files / ("boat.json" if pool["name"] == "agent" else "plain.json"))
+    run = up.Run(up.load_config(_write_cfg(fleet_files, cfg)))
+    pools = run.fleet_sandbox_pools()
+    assert [p.name for p in pools] == ["i0-agent", "i1-agent"]
+    rates = [p.caps["boat_starts_per_minute_n"] for p in pools]
+    assert sum(rates) <= 12 and all(r < 12 for r in rates), rates
+    _problems, notes = run.fleet_sandbox_findings()
+    assert not any("each boat sampler may start" in n for n in notes), notes

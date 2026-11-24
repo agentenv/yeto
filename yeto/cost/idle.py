@@ -27,7 +27,7 @@ from typing import Any, Mapping
 PROGRESS_EVENTS = frozenset({
     "rl_round_trained", "rl_local_round", "rl_sampler_round", "rl_sampler_admitted",
     "rl_cut_saved", "rl_round_cut", "rl_publication", "rl_member_publication",
-    "rl_policy_release_delta", "rl_policy_release_role", "rl_sampler_policy_loaded",
+    "rl_policy_release_delta", "rl_policy_release_role", "rl_sampler_policy_loaded", "rl_sampler_policy_adopted",
     "rl_fragment_push", "rl_policy_apply", "rl_dispense_commit", "rl_learner_finalized",
     "rl_trajectory_reward", "sft_step", "step",
 })

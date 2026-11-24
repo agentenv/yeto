@@ -941,6 +941,7 @@ class Run:
         maximum, and their ``harness.sandbox_caps`` as each pool resolves them."""
         from yeto.breakers.rules_facts import pool_facts, pool_sources  # noqa: PLC0415
         from yeto.rl import fleet_sandbox, up_fleet  # noqa: PLC0415
+        from yeto.rl.engine import sampler_breakers  # noqa: PLC0415
 
         plan = self.fleet_plan()
         out = []
@@ -956,11 +957,17 @@ class Run:
             island = plan.island_of_pool(ref.name) if plan is not None else None
             elastic = cfg.get("elastic") if isinstance(cfg.get("elastic"), dict) else {}
             max_nodes = elastic.get("max_nodes") if isinstance(elastic.get("max_nodes"), int) else target
-            resolved = pool_facts(ref.name, cfg, ref.data_path, run_config=self.cfg).resolved
+            env = dict(pool_sources(cfg, run_config=self.cfg).env or {})
+            if isinstance(spec.get("breakers"), dict):
+                # the sampler resolves its harness caps from its spec's breakers section
+                # (sampler_breakers.apply_harness_env), where run up writes the pool's
+                # share of a shared account (pools.with_boat_shares): read them the same way
+                resolved = sampler_breakers.spec_harness_resolved(spec, env)
+            else:
+                resolved = pool_facts(ref.name, cfg, ref.data_path, run_config=self.cfg).resolved
             caps = {key: resolved.get(f"harness.sandbox_caps.{key}")
                     for key in ("max_sandboxes", "agentenv_max_active_n", "boat_max_active_n",
                                 "boat_starts_per_minute_n")}
-            env = dict(pool_sources(cfg, run_config=self.cfg).env or {})
             row = fleet_sandbox.pool_of(
                 ref.name, up_fleet.pool_where(plan, ref.name) if plan is not None else f"pool {ref.name}",
                 None if island is None else island.index, spec, env=env,
