@@ -67,6 +67,7 @@ from .buffer_rollout import (
     register_reader,
     reader_basis_version,
     stamp_merged_release_cuts,
+    trainer_sampling,
     unconvertible_round,
     with_reader_edits,
     xhw_round,
@@ -240,6 +241,8 @@ class _BufferRound:
             not in ("0", "off", "false"))
         register_reader(self.reader)
         self._tokenizer: Any = None
+        # score_centering: the sampling each group's engine.version_fields must name
+        self.sampling = trainer_sampling(args)
 
     def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
         if input.evaluation:
@@ -250,6 +253,7 @@ class _BufferRound:
         unconvertible: list[str] = []
         damaged: list[dict[str, Any]] = []  # of every take of this round
         duplicates: list[dict[str, Any]] = []
+        stats: dict[str, int] = {}
         for _attempt in range(MAX_UNCONVERTIBLE_TAKES):
             groups, report = self.reader.take(input.rollout_id, self.groups,
                                               current_version=self._basis_version(input))
@@ -258,7 +262,8 @@ class _BufferRound:
             groups = [(position, [complete_prompt_tokens(d, self._tokenize) for d in group])
                       for position, group in groups]
             converted, problems = miles_groups(groups, samples_per_group=self.samples_per_group,
-                                               r3_layers=r3_layers, r3_num_experts=num_experts)
+                                               r3_layers=r3_layers, r3_num_experts=num_experts,
+                                               sampling=getattr(self, "sampling", None), stats=stats)
             unconvertible += problems
             if converted:
                 break
@@ -358,6 +363,8 @@ class _BufferRound:
                                                                r3_num_experts=num_experts))] for d in pads)
         return RolloutFnTrainOutput(samples=samples, metrics={
             **report.metrics(), "sample_buffer/unconvertible_groups": float(len(unconvertible)),
+            **({"sample_buffer/no_version_fields_groups": float(stats["no_version_fields_groups"])}
+               if stats.get("no_version_fields_groups") else {}),
             **flat_metrics(source)})
 
     @staticmethod

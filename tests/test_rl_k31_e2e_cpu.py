@@ -818,18 +818,46 @@ def test_full_release_without_a_change_manifest_reloads_in_full(tmp_path):
     assert checked and checked[0]["expert_update_fallback"] == "no_change_manifest"
     assert sorted(v for v, _ in _read_groups(bucket, "trainer-2")) == [0, 0, 1, 1]
 
+def test_a_score_centering_sampler_refuses_a_log_prob_mode_switch_in_its_environment(tmp_path):
+    """The engine server inherits the sampler's environment: a true
+    SGLANG_RETURN_ORIGINAL_LOGPROB there stops the sampler before it starts the engine."""
+    bucket = Bucket(tmp_path)
+    with pytest.raises(entry.SamplerSpecError, match="SGLANG_RETURN_ORIGINAL_LOGPROB=1"):
+        _run_sampler(_spec(tmp_path, num_rollouts=1), bucket, "sampler-a",
+                     environ={"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
+    assert _run_sampler(_spec(tmp_path, num_rollouts=1), bucket, "sampler-a",
+                        environ={"SGLANG_RETURN_ORIGINAL_LOGPROB": "0"})[0] == 1
+
+
 def test_version_fields_of_the_buffer_match_the_score_centering_argv(tmp_path):
     """The trainer's score_centering check (Y3): the sampler stamped ``engine.version_fields``
-    equal to the argv's --rollout-temperature / --rollout-top-p / --rollout-top-k, fp32 head on."""
+    equal to the argv's --rollout-temperature / --rollout-top-p / --rollout-top-k, fp32 head on,
+    and the trainer's reader (``buffer_rollout.miles_groups`` with the Miles args of that argv)
+    keeps those groups and leaves out a group stamped with another temperature."""
+    from yeto.rl.adapters.miles import buffer_rollout as br
+
     bucket = Bucket(tmp_path)
     _run_sampler(_spec(tmp_path, num_rollouts=1), bucket, "sampler-a")
     argv = _k31_argv(_k31_config("/run/s.json"), sc.score_centering_spec())
     want = {"temperature": float(_value(argv, "--rollout-temperature")), "top_p": float(_value(argv, "--rollout-top-p")),
             "top_k": int(_value(argv, "--rollout-top-k")), "fp32_lm_head": True}
-    for _, samples in _read_groups(bucket, "trainer"):
+    groups = _read_groups(bucket, "trainer")
+    for _, samples in groups:
         for sample in samples:
             assert sample["metadata"]["engine"]["version_fields"] == want
             assert sample["metadata"]["engine"]["top_logprobs_num"] == int(_value(argv, "--rollout-top-logprobs-num"))
+    miles_args = SimpleNamespace(loss_type=_value(argv, "--loss-type"), rollout_temperature=want["temperature"],
+                                 rollout_top_p=want["top_p"], rollout_top_k=want["top_k"])
+    sampling = br.trainer_sampling(miles_args)
+    assert sampling == {k: want[k] for k in ("temperature", "top_p", "top_k")}
+    taken = [(i, samples) for i, (_, samples) in enumerate(groups)]
+    converted, problems = br.miles_groups(taken, samples_per_group=len(taken[0][1]), sampling=sampling)
+    assert problems == [] and len(converted) == len(taken)
+    hot = [dict(s, metadata={**s["metadata"], "engine": {**s["metadata"]["engine"],
+                                                          "version_fields": {**want, "temperature": 0.7}}})
+           for s in taken[0][1]]
+    converted, problems = br.miles_groups([(0, hot)], samples_per_group=len(hot), sampling=sampling)
+    assert converted == [] and "temperature 0.7 (trainer 1.0)" in problems[0]
 
 
 # ------------------------------------------------------------------ 6. near-region peers

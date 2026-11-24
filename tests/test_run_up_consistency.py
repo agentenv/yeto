@@ -363,3 +363,98 @@ def test_the_k31_examples_pass_the_consistency_checks(tmp_path, spec_name, env_o
 def test_a_help_argv_prints_nothing(capsys):
     assert up_consistency.trainer_args(["--help"]) is None
     assert capsys.readouterr().out == ""
+
+
+# ------------------------------------------------------------------ score_centering
+def _score_centering(setup, **sampling):
+    setup.argv += ["--rl-loss", "score_centering"]
+    setup.spec["rollout_fields"] = {"routed_experts": True, "top_logprobs_num": 128, "fp32_lm_head": True}
+    setup.spec["sampling"].update({"temperature": 1.0, "top_p": 1.0, "top_k": -1, **sampling})
+
+
+def test_score_centering_with_the_recipe_sampling_passes(setup):
+    _score_centering(setup)
+    run = setup.make()
+    assert run.rollout_fields_problem() is None and run.consistency_problem() is None
+    assert run.preflight() is True
+    setup.spec["sampling"]["top_k"] = 0  # 0: no top-k limit, as -1
+    del setup.spec["sampling"]["top_p"]  # unset: the default 1
+    assert setup.make().consistency_problem() is None
+
+
+@pytest.mark.parametrize("field,value", [("temperature", 0.7), ("top_p", 0.95), ("top_k", 50),
+                                         ("presence_penalty", 0.5), ("frequency_penalty", 0.1),
+                                         ("repetition_penalty", 1.05)])
+def test_score_centering_refuses_sampling_its_log_probs_do_not_hold_at(setup, field, value):
+    _score_centering(setup, **{field: value})
+    _refused(setup.make(), "score_centering", f"sampling.{field} {value!r}", "temperature 1, top_p 1, top_k -1")
+
+
+def test_a_policy_loss_trainer_takes_any_sampling(setup):
+    setup.spec["sampling"].update({"temperature": 0.7, "top_p": 0.9, "top_k": 50})
+    setup.spec["engine"]["server"]["extra_args"] = ["--logprobs-mode", "processed_logprobs"]
+    assert setup.make().consistency_problem() is None
+
+
+def test_score_centering_refuses_the_log_prob_mode_switches(setup):
+    _score_centering(setup)
+    for args in (["--logprobs-mode", "raw_logprobs"], ["--logprobs-mode=processed_logprobs"]):
+        setup.spec["engine"]["server"]["extra_args"] = args
+        _refused(setup.make(), "vLLM --logprobs-mode in extra_args")
+    setup.spec["engine"]["server"]["extra_args"] = []
+    setup.spec["engine"]["server"]["extra_env"] = {"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"}
+    _refused(setup.make(), "SGLANG_RETURN_ORIGINAL_LOGPROB=1")
+    setup.spec["engine"]["server"]["extra_env"] = {"SGLANG_RETURN_ORIGINAL_LOGPROB": "0"}
+    assert setup.make().consistency_problem() is None
+    env = setup.tmp / "agentic.env"
+    env.write_text("SGLANG_RETURN_ORIGINAL_LOGPROB=true\n")
+    setup.spec["engine"]["server"]["extra_env"] = {}
+    setup.pool["agentic_env_file"] = str(env)
+    _refused(setup.make(), "SGLANG_RETURN_ORIGINAL_LOGPROB=true")
+
+
+def test_score_centering_without_a_readable_spec_is_refused(setup):
+    """Fail closed: the top-K, sampling and switch checks cannot run without the spec."""
+    _score_centering(setup)
+    setup.pool["spec"] = str(setup.tmp / "absent.json")
+    run = setup.make()
+    assert "cannot be read" in run.rollout_fields_problem()
+    assert "cannot be read" in run.consistency_problem()
+    assert run.preflight() is False and run.calls == []
+    del setup.pool["spec"]
+    assert "(none) cannot be read" in setup.make().rollout_fields_problem()
+    # without score_centering an unreadable spec stays the pool dry-run's to report
+    setup.argv.remove("--rl-loss")
+    setup.argv.remove("score_centering")
+    run = setup.make()
+    assert run.rollout_fields_problem() is None and run.consistency_problem() is None
+
+
+def test_an_algorithm_spec_that_selects_score_centering_is_checked(setup):
+    from yeto.rl.algos.score_centering import score_centering_spec
+
+    path = setup.tmp / "algorithm.json"
+    path.write_text(json.dumps(score_centering_spec(top_logprobs=64).structured_dict()))
+    setup.argv += ["--rl-algorithm-spec", str(path)]
+    setup.spec["sampling"]["temperature"] = 0.8
+    _refused(setup.make(), "sampling.temperature 0.8", "top-64")
+    setup.spec["sampling"]["temperature"] = 1.0
+    setup.spec["rollout_fields"]["top_logprobs_num"] = 64
+    assert setup.make().consistency_problem() is None
+
+
+def test_score_centering_without_the_fp32_head_only_warns(setup, capsys):
+    _score_centering(setup)
+    del setup.spec["rollout_fields"]["fp32_lm_head"]
+    run = setup.make()
+    assert run.consistency_problem() is None
+    assert run.preflight() is True
+    assert "no rollout_fields.fp32_lm_head" in capsys.readouterr().out
+    setup.spec["rollout_fields"]["fp32_lm_head"] = True
+    assert setup.make().preflight() is True
+    assert "fp32_lm_head" not in capsys.readouterr().out
+    pool = json.loads((setup.tmp / "pool.json").read_text())
+    setup.spec["rollout_fields"]["fp32_lm_head"] = False  # a policy_loss trainer: no warning
+    setup.make()
+    plain = [a for a in setup.argv if a not in ("--rl-loss", "score_centering")]
+    assert up_consistency.score_centering_warnings(pool, plain) == []

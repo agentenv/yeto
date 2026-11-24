@@ -149,6 +149,25 @@ def test_launcher_helper_from_rl_loss_args():
         sc.spec_from_rl_loss_args(SimpleNamespace(rl_loss="sft"))
 
 
+def test_rl_loss_without_an_option_keeps_the_spec_file_value():
+    """--rl-loss score_centering over a spec file that selects tis: an option not given
+    keeps the file's value (it used to reset score_centering_is to none), as for the
+    clip and K; a given option wins; no file value: the default."""
+    base = sc.score_centering_spec(importance_sampling="tis", tis_clip=3.0, top_logprobs=64)
+    spec = sc.spec_from_rl_loss_args(SimpleNamespace(rl_loss="score_centering"), base)
+    assert spec.loss.score_centering_is == "tis" and spec.loss.score_centering_tis_clip == 3.0
+    assert spec.loss.rollout_top_logprobs_num == 64 and spec.rejections() == []
+    spec = sc.spec_from_rl_loss_args(SimpleNamespace(rl_loss="score_centering", rl_score_centering_is="none",
+                                                     rl_score_centering_tis_clip=None), sc.score_centering_spec(
+                                         importance_sampling="tis"))
+    assert spec.loss.score_centering_is == "none"
+    mis = sc.score_centering_spec(importance_sampling="mis", mis_low=0.2, mis_high=4.0)
+    spec = sc.spec_from_rl_loss_args(SimpleNamespace(rl_loss="score_centering", rl_score_centering_is=None), mis)
+    assert (spec.loss.score_centering_is, spec.loss.score_centering_mis_low) == ("mis", 0.2)
+    plain = sc.spec_from_rl_loss_args(SimpleNamespace(rl_loss="score_centering"), AlgorithmSpec())
+    assert plain.loss.score_centering_is == sc.DEFAULT_IS
+
+
 def test_spec_file_std_normalization_true_is_overridden_with_a_warning(capsys, monkeypatch):
     monkeypatch.setattr(sc, "_WARNED", set())
     base = AlgorithmSpec.from_dict({**AlgorithmSpec().structured_dict(),

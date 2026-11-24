@@ -28,6 +28,11 @@ surface after the trainer island loaded its weights (a K3.1 B300 island: about
   reads the buffer and writes the releases under its own; the first-group wait
   lists the run config's);
 * the release directory a sampler follows must be one the trainer side writes;
+* score_centering (:func:`score_centering_problems`): a trainer that trains on the
+  samplers' log-probs as its behavior distribution needs a readable spec with its
+  top-K count, temperature 1 / top_p 1 / no top-k / neutral penalties and no log-prob
+  mode switch (vLLM ``--logprobs-mode``, ``SGLANG_RETURN_ORIGINAL_LOGPROB``); no
+  ``rollout_fields.fp32_lm_head`` is a warning (:func:`score_centering_warnings`);
 * context compaction: a spec with ``agentic.compaction`` needs a Miles trainer with a
   GRPO-family estimator, the rollout-side schedule (dynamic batch size, none of
   :data:`SPLIT_BY_SAMPLE_FLAGS`) and rows of at least ``context_budget``
@@ -632,6 +637,94 @@ def store_problems(run_store: str, args: Any, pool_cfg: dict[str, Any], *, data_
     return problems
 
 
+def score_centering_top_k(args: Any) -> int | None:
+    """K of the trainer's rollout top-K log-probs when it trains with score_centering
+    (``--rl-loss score_centering``, or an ``--rl-algorithm-spec`` that selects
+    ``loss.variant`` ``score_centering``); None otherwise, or when the spec file
+    cannot be read here (``yeto launch --dry-run`` checks it on its host)."""
+    from yeto.rl.algos.score_centering import (  # noqa: PLC0415
+        DEFAULT_TOP_LOGPROBS,
+        SCORE_CENTERING,
+        selected,
+        spec_from_rl_loss_args,
+    )
+    from yeto.rl.engine.algorithm import resolve_ports_algorithm  # noqa: PLC0415
+
+    try:  # as the launch resolves it (rl_ports): the spec file, then --rl-loss over it
+        spec = spec_from_rl_loss_args(args, resolve_ports_algorithm(args))
+    except Exception:  # noqa: BLE001 - an unreadable or rejected spec: yeto launch --dry-run reports it
+        spec = None
+    if spec is not None:
+        return int(spec.loss.rollout_top_logprobs_num) if selected(spec) else None
+    if getattr(args, "rl_loss", None) == SCORE_CENTERING:
+        return int(getattr(args, "rl_rollout_top_logprobs_num", None) or DEFAULT_TOP_LOGPROBS)
+    return None
+
+
+def _pool_env(pool_cfg: dict[str, Any]) -> dict[str, str]:
+    """The pool's ``agentic_env_file`` variables (the samplers' environment); {} when it
+    has none or it does not read (:func:`yeto.breakers.rules_facts.env_file_problems`)."""
+    path = pool_cfg.get("agentic_env_file")
+    if not path:
+        return {}
+    from yeto.launch import agentic_setup  # noqa: PLC0415
+
+    try:
+        return dict(agentic_setup.read_docker_env_file(os.path.expanduser(str(path))))
+    except (OSError, ValueError):
+        return {}
+
+
+def score_centering_problems(args: Any, spec: dict[str, Any] | None, pool_cfg: dict[str, Any]) -> list[str]:
+    """A score_centering trainer takes the samplers' log-probs and top-K log-probs as
+    the behavior distribution at temperature 1, top_p 1, no top-k (``score_centering.
+    SAMPLING_ARGV``). Refused: a sampler spec that cannot be read (fail closed: nothing
+    below can be checked), a top-K count other than the trainer's, sampling other than
+    temperature 1 / top_p 1 / top_k -1 or 0 / neutral penalties, vLLM ``--logprobs-mode``
+    in ``engine.server.extra_args``, a true ``SGLANG_RETURN_ORIGINAL_LOGPROB`` in
+    ``engine.server.extra_env`` or the pool's ``agentic_env_file``. Each passes both dry
+    runs and trains on a wrong gradient whose metrics look normal."""
+    want = score_centering_top_k(args)
+    if want is None:
+        return []
+    if spec is None:
+        return [f"the trainer trains with score_centering but the pool's sampler spec "
+                f"{pool_cfg.get('spec') or '(none)'} cannot be read: its sampling and top-K log-probs cannot be "
+                "checked against the trainer's; give the pool a readable sampler spec"]
+    out = []
+    fields = spec.get("rollout_fields") if isinstance(spec.get("rollout_fields"), dict) else {}
+    have = int(fields.get("top_logprobs_num") or 0)
+    if have != want:
+        out.append(f"the trainer's score_centering trains on the rollout top-{want} log-probs but the sampler spec "
+                   f"has rollout_fields.top_logprobs_num {have or 'unset'}: set it to {want}")
+    from yeto.rl.engine.engine_sampler_entry import score_centering_problems as spec_problems  # noqa: PLC0415
+
+    found = spec_problems(spec, _pool_env(pool_cfg))
+    if found:
+        out.append(f"the trainer trains with score_centering (temperature 1, top_p 1, top_k -1: the samplers' "
+                   f"log-probs are its behavior distribution) but the sampler spec has {'; '.join(found)}: the "
+                   "returned log-probs would not be the distribution the tokens were sampled from and the gradient "
+                   "would be wrong; set sampling temperature 1, top_p 1, top_k -1, neutral penalties and drop the "
+                   "log-prob mode switches")
+    return out
+
+
+def score_centering_warnings(pool_cfg: dict[str, Any], trainer_argv: list[str]) -> list[str]:
+    """Preflight warnings of a score_centering trainer's pool: a sampler spec without
+    ``rollout_fields.fp32_lm_head`` (the bf16 head's log-probs are noisier; the
+    gradient stays right, so it is not refused)."""
+    args = trainer_args(trainer_argv)
+    spec = effective_spec(pool_cfg)
+    if args is None or spec is None or score_centering_top_k(args) is None:
+        return []
+    fields = spec.get("rollout_fields") if isinstance(spec.get("rollout_fields"), dict) else {}
+    if fields.get("fp32_lm_head") is True:
+        return []
+    return ["the trainer trains with score_centering but the sampler spec has no rollout_fields.fp32_lm_head: "
+            "the log-probs of a bf16 lm-head are noisier (the gradient is still right); set it true where the "
+            "engine serves an fp32 head"]
+
+
 def problems(run_store: str, trainer_argv: list[str], pool_cfg: dict[str, Any], *,
              data_path: str = "r2") -> list[str]:
     """Every trainer / sampler mismatch of one pool (empty: consistent, or not checkable)."""
@@ -644,6 +737,7 @@ def problems(run_store: str, trainer_argv: list[str], pool_cfg: dict[str, Any], 
     args._argv = [str(a).split("=", 1)[0] for a in trainer_argv]
     out = store_problems(run_store, args, pool_cfg, data_path=data_path)
     spec = effective_spec(pool_cfg)
+    out += score_centering_problems(args, spec, pool_cfg)
     if spec is None:
         return out
     out += [p for p in (group_problem(args, spec), r3_problem(args, spec), selection_problem(args, spec),

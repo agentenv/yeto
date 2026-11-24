@@ -118,26 +118,89 @@ def test_vllm_top_logprobs_from_the_openai_shape(tmp_path):
         vllm_top({}, k=2)
 
 
-def _fake_spec(**fields):
+def _fake_spec(sampling=None, **fields):
     spec = {"engine": {"factory": from_spec.FACTORY, "adapter": "fake", "kwargs": {}},
-            "sampling": {"max_tokens": 8, "temperature": 0.9, "top_k": 20}}
+            "sampling": {"max_tokens": 8, "temperature": 0.9, "top_k": 20} if sampling is None else sampling}
     if fields:
         spec["rollout_fields"] = fields
     return spec
 
 
+SC_SAMPLING = {"max_tokens": 8, "temperature": 1.0, "top_p": 1.0, "top_k": -1}
+
+
 def test_rollout_fields_reach_the_fake_engine_and_version_fields(tmp_path):
-    engine = build_engine(_fake_spec(routed_experts=True, fp32_lm_head=True))
+    engine = build_engine(_fake_spec(SC_SAMPLING, routed_experts=True, fp32_lm_head=True))
     assert isinstance(engine, FakeEngine) and engine.returns_routed_experts and engine.top_logprobs_num == 128
-    have = check_rollout_fields(_fake_spec(routed_experts=True, fp32_lm_head=True), engine)
+    have = check_rollout_fields(_fake_spec(SC_SAMPLING, routed_experts=True, fp32_lm_head=True), engine)
+    assert have["version_fields"] == {"fp32_lm_head": True, "temperature": 1.0, "top_p": 1.0, "top_k": -1}
+    # without top-K log-probs the sampling is free and version_fields records it
+    plain = _fake_spec(routed_experts=True, fp32_lm_head=True, top_logprobs_num=0)
+    have = check_rollout_fields(plain, build_engine(plain))
     assert have["version_fields"] == {"fp32_lm_head": True, "temperature": 0.9, "top_p": 1.0, "top_k": 20}
     engine.start(None, 0)
     c = engine.generate(["p"], SamplingParams(max_tokens=4))[0][0]
     assert c.top_logprobs_ids.shape == (4, 128) and c.top_logprobs_ids[0, 0] == c.token_ids[0]
     # explicit K and an explicit "no"
-    assert build_engine(_fake_spec(top_logprobs_num=16)).top_logprobs_num == 16
+    assert build_engine(_fake_spec(SC_SAMPLING, top_logprobs_num=16)).top_logprobs_num == 16
     assert build_engine(_fake_spec(top_logprobs_num=0, routed_experts=False)).top_logprobs_num == 0
     assert build_engine(_fake_spec()).top_logprobs_num == 0  # no section: nothing changes
+
+
+@pytest.mark.parametrize("field,value", [("temperature", 0.7), ("top_p", 0.9), ("top_k", 20),
+                                         ("presence_penalty", 0.5), ("frequency_penalty", 0.2),
+                                         ("repetition_penalty", 1.1)])
+def test_top_k_log_probs_refuse_sampling_score_centering_cannot_train_on(field, value):
+    """Top-K log-probs serve score_centering only; its behavior distribution is the
+    returned log-probs at temperature 1, top_p 1, no top-k, neutral penalties."""
+    sampling = {**SC_SAMPLING, field: value, "allow_penalties": True}
+    with pytest.raises(SamplerSpecError, match=f"sampling.{field} {value!r}.*top_logprobs_num 0 if the trainer"):
+        build_engine(_fake_spec(sampling, routed_experts=True))  # K defaults to 128 with the section
+    with pytest.raises(SamplerSpecError, match=f"sampling.{field}"):
+        check_rollout_fields(_fake_spec(sampling), FakeEngine(top_logprobs_num=4))  # the engine returns top-K
+    # no top-K log-probs: not a score_centering sampler, any sampling
+    assert build_engine(_fake_spec(sampling, routed_experts=True, top_logprobs_num=0)).top_logprobs_num == 0
+    assert build_engine(_fake_spec({**SC_SAMPLING, "top_k": 0}, top_logprobs_num=8)).top_logprobs_num == 8
+
+
+def _server_spec(sampling=SC_SAMPLING, *, extra_args=(), extra_env=None, k=128):
+    return {"engine": {"adapter": "vllm-server", "server": {"extra_args": list(extra_args),
+                                                            "extra_env": dict(extra_env or {})}},
+            "sampling": dict(sampling), "rollout_fields": {"top_logprobs_num": k}}
+
+
+def test_top_k_log_probs_refuse_the_log_prob_mode_switches():
+    engine = FakeEngine(top_logprobs_num=128)
+    assert check_rollout_fields(_server_spec(), engine)["top_logprobs_num"] == 128
+    for args in (["--logprobs-mode", "raw_logprobs"], ["--logprobs-mode=processed_logits"], ["--logprobs_mode=x"]):
+        with pytest.raises(SamplerSpecError, match="vLLM --logprobs-mode in extra_args"):
+            check_rollout_fields(_server_spec(extra_args=["--max-logprobs", "128", *args]), engine)
+    with pytest.raises(SamplerSpecError, match="SGLANG_RETURN_ORIGINAL_LOGPROB=True"):
+        check_rollout_fields(_server_spec(extra_env={"SGLANG_RETURN_ORIGINAL_LOGPROB": "True"}), engine)
+    with pytest.raises(SamplerSpecError, match="SGLANG_RETURN_ORIGINAL_LOGPROB=1"):  # the sampler process env
+        check_rollout_fields(_server_spec(), engine, environ={"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
+    # false values pass; the engine's extra_env wins over the process env, as on the server
+    check_rollout_fields(_server_spec(extra_env={"SGLANG_RETURN_ORIGINAL_LOGPROB": "0"}), engine,
+                         environ={"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
+    check_rollout_fields(_server_spec(), engine, environ={"SGLANG_RETURN_ORIGINAL_LOGPROB": "false"})
+    # without top-K log-probs the switches change no trained distribution
+    check_rollout_fields(_server_spec(extra_args=["--logprobs-mode", "processed_logprobs"], k=0), FakeEngine(),
+                         environ={"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
+
+
+def test_the_sampler_entry_checks_its_process_environment(tmp_path, monkeypatch):
+    """The entry checks the sampler's environment (inherited by the engine server) after
+    build_engine; a pool dry run off the node builds the engine from the spec only."""
+    from yeto.rl.engine import engine_sampler_entry as entry
+
+    spec = _fake_spec(SC_SAMPLING, top_logprobs_num=8)
+    monkeypatch.setenv("SGLANG_RETURN_ORIGINAL_LOGPROB", "1")
+    engine = build_engine(spec)
+    assert engine.top_logprobs_num == 8
+    with pytest.raises(SamplerSpecError, match="SGLANG_RETURN_ORIGINAL_LOGPROB"):
+        entry.check_score_centering(spec, engine, {"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
+    entry.check_score_centering(_fake_spec(SC_SAMPLING, top_logprobs_num=0), FakeEngine(),
+                                {"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
 
 
 def test_rollout_fields_spec_errors():

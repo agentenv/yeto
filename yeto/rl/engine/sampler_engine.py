@@ -56,6 +56,64 @@ RELOAD_MODES = (RELOAD_IN_PLACE, RELOAD_RESTART)
 # Neutral values of the repetition penalties (no change to the distribution).
 NEUTRAL_PENALTIES = {"repetition_penalty": 1.0, "frequency_penalty": 0.0, "presence_penalty": 0.0}
 
+# score_centering (Miles ``--loss-type score_centering``) takes the sampled token's
+# log-prob and the top-K log-probs as the behavior distribution q, at the trainer's
+# fixed sampling (temperature 1, top_p 1, no top-k). vLLM returns raw log-probs
+# (before temperature, penalties, top-p / top-k), SGLang the temperature-scaled ones
+# before the top-p / top-k cut, penalties included (``SGLANG_RETURN_ORIGINAL_LOGPROB``
+# drops the temperature). At any other sampling, or with either log-prob mode switch,
+# q is not the distribution the tokens were sampled from: the gradient is wrong while
+# every metric looks normal.
+SCORE_CENTERING_SAMPLING = {"temperature": 1.0, "top_p": 1.0, "top_k": -1}
+NO_TOP_K = (-1, 0)  # top_k values that set no top-k limit (vLLM and SGLang)
+LOGPROBS_MODE_FLAG = "--logprobs-mode"  # vLLM: which log-probs the server returns
+SGLANG_ORIGINAL_LOGPROB_ENV = "SGLANG_RETURN_ORIGINAL_LOGPROB"
+TRUE_ENV_VALUES = ("1", "true", "yes", "on")
+
+
+def score_centering_sampling_problems(sampling: Mapping[str, Any]) -> list[str]:
+    """Why ``sampling`` (:class:`SamplingParams` fields; an absent or null field is
+    the default) is not the sampling score_centering's behavior distribution holds
+    at: temperature 1, top_p 1, top_k -1 / 0, neutral penalties ([] when it is)."""
+    out = []
+    for name, want in (("temperature", 1.0), ("top_p", 1.0), *NEUTRAL_PENALTIES.items()):
+        value = sampling.get(name)
+        if value is None:
+            continue
+        try:
+            same = not isinstance(value, bool) and float(value) == want
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            out.append(f"sampling.{name} {value!r} (needs {want:g})")
+    top_k = sampling.get("top_k")
+    if top_k is not None:
+        try:
+            same = not isinstance(top_k, bool) and float(top_k) in NO_TOP_K
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            out.append(f"sampling.top_k {top_k!r} (needs -1 or 0: no top-k limit)")
+    return out
+
+
+def score_centering_logprob_mode_problems(extra_args: Sequence[Any] = (),
+                                          env: Mapping[str, Any] | None = None) -> list[str]:
+    """The log-prob mode switches in an engine's ``extra_args`` / environment that make
+    the returned log-probs another distribution than the one sampled from: vLLM
+    ``--logprobs-mode`` (any value; its default ``raw_logprobs`` is what the
+    score_centering sampling needs) and a true ``SGLANG_RETURN_ORIGINAL_LOGPROB``."""
+    out = []
+    for arg in extra_args or ():
+        flag = str(arg).split("=", 1)[0].replace("_", "-")
+        if flag == LOGPROBS_MODE_FLAG:
+            out.append(f"vLLM {LOGPROBS_MODE_FLAG} in extra_args ({arg!r})")
+            break
+    value = (env or {}).get(SGLANG_ORIGINAL_LOGPROB_ENV)
+    if value is not None and str(value).strip().lower() in TRUE_ENV_VALUES:
+        out.append(f"{SGLANG_ORIGINAL_LOGPROB_ENV}={value}")
+    return out
+
 
 class SamplerEngineError(RuntimeError):
     """An engine call failed (start, load, generate, score)."""
@@ -297,6 +355,27 @@ def version_fields(engine: Any, sampling: SamplingParams) -> dict[str, Any]:
     return {"fp32_lm_head": getattr(engine, "fp32_lm_head", False) is True,
             "temperature": float(sampling.temperature), "top_p": float(sampling.top_p),
             "top_k": int(sampling.top_k)}
+
+
+def version_fields_mismatch(have: Mapping[str, Any], want: Mapping[str, Any]) -> list[str]:
+    """The sampling fields of a sample's ``engine.version_fields`` (``have``) that differ
+    from the trainer's (``want``: ``temperature``, ``top_p``, ``top_k``); top_k -1 and
+    0 both mean no limit. A field missing or unreadable in ``have`` differs."""
+    out = []
+    for name in ("temperature", "top_p", "top_k"):
+        if name not in want:
+            continue
+        value = have.get(name)
+        try:
+            got = float(value)
+            ref = float(want[name])
+            same = not isinstance(value, bool) and (got == ref or (name == "top_k" and got in NO_TOP_K
+                                                                   and ref in NO_TOP_K))
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            out.append(f"{name} {value!r} (trainer {want[name]!r})")
+    return out
 
 
 def completion_version(completion: Completion, served: int, *, live: bool) -> int:
