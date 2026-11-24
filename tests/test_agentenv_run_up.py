@@ -131,8 +131,9 @@ def test_run_up_sandbox_provider_agentenv_skips_the_docker_host(tmp_path):
 
 
 @pytest.mark.parametrize("sandbox, match", [
-    ({"provider": "boat"}, "sandbox.provider"),
+    ({"provider": "daytona"}, "sandbox.provider"),
     ({"provider": "agentenv", "docker_host": "ssh://h"}, "no docker host"),
+    ({"provider": "boat", "docker_host": "ssh://h"}, "no docker host"),
 ])
 def test_run_up_sandbox_provider_refusals(tmp_path, sandbox, match):
     with pytest.raises(ValueError, match=match):

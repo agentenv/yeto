@@ -90,6 +90,24 @@ file and no dry-run line). The microVMs deny private egress: the records proxy
 must be reached over a public HTTPS base; a missing or placeholder
 ``records_proxy.public_base`` is a warning in a dry run and a failure at setup.
 
+boat sandboxes (``"provider": "boat"``, or ``task_defaults.provider`` ``boat``):
+like AgentENV there is no docker host (``sandbox``, ``tunnel``, ``docker_cli``
+refused), the sandboxes are cloud VMs that reach the records proxy over a public
+base (``records_proxy`` or ``records_relay``, as for AgentENV)::
+
+    "setup": {
+      "provider": "boat",
+      "boat": {"api_key": {"path": "<local file with the boat token>"} | {"env": "<VAR>"}},  # required
+      "records_relay": {...} | "records_proxy": {"public_base": "https://..."},
+      "tasks": {...}, "records_secret": "generate"
+    }
+
+Steps: as for AgentENV, with the pinned ``boat-sdk`` (:data:`BOAT_SDK_REQUIREMENT`)
+instead of ``e2b`` and ``boat_key`` (``boat.key`` under ``<root>/home``, 0600, read
+through ``BOAT_API_KEY_FILE``) instead of ``agentenv_key``. The account's quota
+is shared by every boat sampler of the run (``yeto run up`` gives each pool its
+share, :func:`yeto.launch.rollout.pools.with_boat_shares`).
+
 A sampler node that is reachable on port 22 only (a National Compute node: a
 private address behind a 1:1 NAT whose cloud firewall passes 22 alone) cannot
 serve the records proxy at ``http://<node ip>:<port>``: the microVMs' SYNs never
@@ -163,9 +181,12 @@ AWS_IMAGE = "amazon/aws-cli:latest"
 
 REMOTE_DOCKER = "remote-docker"
 AGENTENV = "agentenv"
-PROVIDERS = (REMOTE_DOCKER, AGENTENV)
+BOAT = "boat"
+PROVIDERS = (REMOTE_DOCKER, AGENTENV, BOAT)
 E2B_REQUIREMENT = "e2b==2.64.0"  # the SDK version the AgentENV adapter was verified with
+BOAT_SDK_REQUIREMENT = "boat-sdk==1.10.0"  # docker/harbor-layer/versions.json boat_sdk (the engine images' pin)
 AGENTENV_KEY_FILE_ENV = "AGENTENV_API_KEY_FILE"  # yeto.rl.harness.harbor.agentenv_client.API_KEY_FILE_ENV
+BOAT_KEY_FILE_ENV = "BOAT_API_KEY_FILE"  # yeto.rl.harness.harbor.boat_client.API_KEY_FILE_ENV
 PLACEHOLDER = re.compile(r"__TODO|<[^>]*>")
 RELAY_UNIT = "yeto-records-relay.service"
 RELAY_UNIT_PATH = f"/etc/systemd/system/{RELAY_UNIT}"
@@ -177,8 +198,9 @@ SYSTEMD_PROBE = ('if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && command 
 
 _KEYS = {
     "": {"root", "harbor", "docker_cli", "sandbox", "tunnel", "tasks", "records_secret", "provider", "agentenv",
-         "records_proxy", "records_relay"},
+         "boat", "records_proxy", "records_relay"},
     "agentenv": {"gateway_url", "sandbox_url", "api_key", "machine_type", "max_sandboxes", "pool"},
+    "boat": {"api_key"},
     "records_proxy": {"public_base"},
     "records_relay": {"host", "user", "port", "key", "known_hosts", "listen_port", "public_host", "bind",
                       "allow_cidrs", "settle_s", "ready_timeout_s"},
@@ -314,7 +336,9 @@ class RelaySection:
     def key_of(self, shard: int) -> SecretRef:
         return SecretRef(path=self.key.path.replace("{shard}", str(shard))) if self.per_shard_key else self.key
 
-    def for_shard(self, sampler_id: Any, *, target_port: int) -> RelaySpec:
+    def for_shard(self, sampler_id: Any, *, target_port: int, offset: int = 0) -> RelaySpec:
+        """``offset``: the spec's ``shard_offset`` (an island fleet's pools that share one
+        relay range: :func:`yeto.rl.fleet.share_offsets`), added to the shard index."""
         if self.port_lo == self.port_hi and not self.per_shard_key:
             shard = None
             listen = self.port_lo
@@ -323,7 +347,7 @@ class RelaySection:
             if not tail.isdigit():
                 raise ValueError(f"agentic.setup.records_relay: a listen_port range or a {{shard}} key path needs "
                                  f"a sampler_id ending in -<shard index>, got {sampler_id!r}")
-            shard = int(tail)
+            shard = int(tail) + int(offset)
             listen = self.port_lo + shard
             if listen > self.port_hi:
                 raise ValueError(f"agentic.setup.records_relay.listen_port {self.port_lo}-{self.port_hi} has no "
@@ -379,6 +403,19 @@ class AgentenvSpec:
 
 
 @dataclass(frozen=True)
+class BoatSpec:
+    """``agentic.setup.boat``: the boat account the sampler's Harbor trials create sandboxes in."""
+
+    api_key: SecretRef
+    records_public_base: str | None  # agentic.setup.records_proxy.public_base (or the relay's)
+    relay: RelaySpec | None = None  # agentic.setup.records_relay
+
+    @property
+    def records_placeholder(self) -> bool:
+        return not self.records_public_base or bool(PLACEHOLDER.search(self.records_public_base))
+
+
+@dataclass(frozen=True)
 class AgenticSetup:
     root: str
     harbor_version: str
@@ -393,10 +430,16 @@ class AgenticSetup:
     notes: tuple[str, ...] = field(default=())
     sandbox_host: str | None = None  # the agentic.envs.hosts name of the sandbox host
     agentenv: AgentenvSpec | None = None
+    boat: BoatSpec | None = None
 
     @property
     def provider(self) -> str:
-        return AGENTENV if self.agentenv is not None else REMOTE_DOCKER
+        return AGENTENV if self.agentenv is not None else BOAT if self.boat is not None else REMOTE_DOCKER
+
+    @property
+    def remote(self) -> AgentenvSpec | BoatSpec | None:
+        """The cloud sandbox provider's section (AgentENV or boat): no docker host, a public records base."""
+        return self.agentenv if self.agentenv is not None else self.boat
 
     # -- container paths
     @property
@@ -420,8 +463,12 @@ class AgenticSetup:
         return f"{self.home}/agentenv.key"
 
     @property
+    def boat_key_file(self) -> str:
+        return f"{self.home}/boat.key"
+
+    @property
     def relay(self) -> RelaySpec | None:
-        return self.agentenv.relay if self.agentenv is not None else None
+        return self.remote.relay if self.remote is not None else None
 
     def container_env(self, *, python_bin: str = "/opt/runtime-venv/bin") -> dict[str, str]:
         """The sampler container's environment for this setup (an env file ahead of
@@ -444,6 +491,11 @@ class AgenticSetup:
                 env["YETO_AGENTENV_POOL"] = "1"
             if a.records_public_base:
                 env["YETO_RECORDS_PROXY_PUBLIC_BASE"] = a.records_public_base
+        if (b := self.boat) is not None:
+            # the token stays in its 0600 file on the node: never in an env file or a dry-run line
+            env[BOAT_KEY_FILE_ENV] = self.boat_key_file
+            if b.records_public_base:
+                env["YETO_RECORDS_PROXY_PUBLIC_BASE"] = b.records_public_base
         if self.records_secret is not None:
             env["YETO_RECORDS_PROXY_SECRET_FILE"] = self.secret_file
         if self.tunnel is not None:
@@ -482,11 +534,23 @@ def _section(doc: Mapping[str, Any], key: str) -> dict[str, Any]:
     return dict(value)
 
 
-def _shard_port(port_range: str, sampler_id: Any) -> int:
+def _shard_offset(spec: Mapping[str, Any]) -> int:
+    """The spec's ``shard_offset`` (0 without one): an island fleet's pools that share one
+    port range of a records relay or tunnel take consecutive blocks of it."""
+    value = spec.get("shard_offset")
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"shard_offset must be a whole number >= 0, got {value!r}")
+    return value
+
+
+def _shard_port(port_range: str, sampler_id: Any, offset: int = 0) -> int:
     """``tunnel.listen`` ``<ip>:<lo>-<hi>``: islands run at once and each holds its own
     reverse forward, so shard ``<run>-<k>`` listens on ``lo + k`` (a replacement node of
     the same shard takes the same port once the fenced node is gone). The tunnel key
-    needs a permitlisten for every port of the range."""
+    needs a permitlisten for every port of the range. ``offset``: the spec's
+    ``shard_offset`` (an island fleet's pools sharing the range), added to ``k``."""
     lo_s, _, hi_s = port_range.partition("-")
     lo = _port(lo_s, "agentic.setup.tunnel.listen port range start")
     hi = _port(hi_s, "agentic.setup.tunnel.listen port range end")
@@ -496,7 +560,7 @@ def _shard_port(port_range: str, sampler_id: Any) -> int:
     if not tail.isdigit():
         raise ValueError(f"agentic.setup.tunnel.listen is a port range but the spec's sampler_id "
                          f"{sampler_id!r} does not end in -<shard index>")
-    port = lo + int(tail)
+    port = lo + int(tail) + int(offset)
     if port > hi:
         raise ValueError(f"agentic.setup.tunnel.listen range {port_range!r} has no port for shard "
                          f"{sampler_id!r}: widen it to at least one port per shard")
@@ -554,13 +618,13 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
             raise ValueError(f"agentic.setup.{what} must be a pinned x.y.z version, got {v!r}")
 
     provider = _provider(doc, agentic)
-    if provider == AGENTENV:
+    if provider in (AGENTENV, BOAT):
         return _parse_agentenv(doc, root=root, version=version, commit=commit, keep=keep,
                                cli_version=cli_version, compose=compose, local=local, ref=ref,
-                               spec=spec, agentic=agentic)
-    for key in ("agentenv", "records_proxy", "records_relay"):
+                               spec=spec, agentic=agentic, provider=provider)
+    for key in ("agentenv", "boat", "records_proxy", "records_relay"):
         if doc.get(key):
-            raise ValueError(f"agentic.setup.{key} is for provider agentenv (agentic.setup.provider is "
+            raise ValueError(f"agentic.setup.{key} is for provider agentenv or boat (agentic.setup.provider is "
                              f"{provider!r})")
 
     sb = _section(doc, "sandbox")
@@ -610,7 +674,7 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
             notes.append("tunnel.key is unset: the tunnel uses the docker key; the guide (Sandbox host, SSH keys) recommends "
                          "two keys (the tunnel key never enters the sampler container)")
         if "-" in port:  # a port range: one listen port per sampler shard (several islands at once)
-            port = _shard_port(port, spec.get("sampler_id"))
+            port = _shard_port(port, spec.get("sampler_id"), _shard_offset(spec))
         tunnel = TunnelSpec(listen_host=host, listen_port=_port(port, "agentic.setup.tunnel.listen port"),
                             target_port=_port(target, "agentic.setup.tunnel.target_port"),
                             user=str(tn.get("user", sandbox.user)), host=str(tn.get("host", sandbox.host)),
@@ -665,13 +729,30 @@ def _url(value: Any, what: str) -> str:
 def _parse_agentenv(doc: Mapping[str, Any], *, root: str, version: str, commit: str,
                     keep: tuple[str, ...], cli_version: str, compose: str, local: Callable[[str], str],
                     ref: Callable[[Any, str], SecretRef], spec: Mapping[str, Any],
-                    agentic: Mapping[str, Any]) -> AgenticSetup:
-    """The ``agentic.setup`` of an AgentENV run: no docker host, no reverse tunnel."""
+                    agentic: Mapping[str, Any], provider: str = AGENTENV) -> AgenticSetup:
+    """The ``agentic.setup`` of an AgentENV or boat run: no docker host, no reverse tunnel."""
     for key in ("sandbox", "tunnel", "docker_cli"):
         if doc.get(key):
-            raise ValueError(f"agentic.setup.{key} is for remote-docker sandboxes; AgentENV microVMs have no "
-                             "docker host (drop it with provider agentenv)")
+            raise ValueError(f"agentic.setup.{key} is for remote-docker sandboxes; {provider} sandboxes have no "
+                             f"docker host (drop it with provider {provider})")
+    other = BOAT if provider == AGENTENV else AGENTENV
+    if doc.get(other):
+        raise ValueError(f"agentic.setup.{other} is for provider {other} (agentic.setup.provider is {provider!r})")
     notes: list[str] = []
+    if provider == BOAT:
+        bt = _section(doc, "boat")
+        if "api_key" not in bt:
+            raise ValueError("agentic.setup.boat.api_key is required ({\"path\": <file with the token>} or "
+                             "{\"env\": <VAR>})")
+        boat_key = ref(bt["api_key"], "agentic.setup.boat.api_key")
+        public, relay, notes = _records_base(doc, ref=ref, spec=spec, agentic=agentic, what="boat sandboxes")
+        b = BoatSpec(api_key=boat_key, records_public_base=public, relay=relay)
+        tasks = _tasks(doc, local)
+        raw = doc.get("records_secret", "generate")
+        secret = "generate" if raw == "generate" else ref(raw, "agentic.setup.records_secret")
+        return AgenticSetup(root=root, harbor_version=version, harbor_commit=commit, harbor_keep=keep,
+                            docker_cli_version=cli_version, compose_version=compose, sandbox=None, tunnel=None,
+                            tasks=tasks, records_secret=secret, notes=tuple(notes), boat=b)
     ae = _section(doc, "agentenv")
     gateway = _url(ae.get("gateway_url"), "agentic.setup.agentenv.gateway_url")
     sandbox_url = _url(ae.get("sandbox_url"), "agentic.setup.agentenv.sandbox_url") if ae.get("sandbox_url") \
@@ -694,7 +775,7 @@ def _parse_agentenv(doc: Mapping[str, Any], *, root: str, version: str, commit: 
         if not proxy_port:
             raise ValueError("agentic.setup.records_relay needs a fixed records proxy port: set agentic.proxy.port")
         relay = parse_relay(doc, ref=ref).for_shard(
-            spec.get("sampler_id"), target_port=_port(proxy_port, "agentic.proxy.port"))
+            spec.get("sampler_id"), target_port=_port(proxy_port, "agentic.proxy.port"), offset=_shard_offset(spec))
         public = relay.public_base
         if relay.known_hosts is None:
             notes.append("records_relay.known_hosts is unset: the first connection trusts the relay's host key "
@@ -724,6 +805,34 @@ def _parse_agentenv(doc: Mapping[str, Any], *, root: str, version: str, commit: 
     return AgenticSetup(root=root, harbor_version=version, harbor_commit=commit, harbor_keep=keep,
                         docker_cli_version=cli_version, compose_version=compose, sandbox=None, tunnel=None,
                         tasks=tasks, records_secret=secret, notes=tuple(notes), agentenv=a)
+
+
+def _records_base(doc: Mapping[str, Any], *, ref: Callable[[Any, str], SecretRef], spec: Mapping[str, Any],
+                  agentic: Mapping[str, Any], what: str) -> tuple[str | None, RelaySpec | None, list[str]]:
+    """``(public base, relay, notes)`` of the records proxy for cloud sandboxes: the
+    ``records_proxy.public_base`` or the ``records_relay`` (one of them)."""
+    notes: list[str] = []
+    public = _section(doc, "records_proxy").get("public_base")
+    proxy_port = (agentic.get("proxy") or {}).get("port")
+    relay = None
+    if doc.get("records_relay"):
+        if public:
+            raise ValueError("agentic.setup: give records_proxy.public_base or records_relay, not both (the relay "
+                             "sets the public base)")
+        if not proxy_port:
+            raise ValueError("agentic.setup.records_relay needs a fixed records proxy port: set agentic.proxy.port")
+        relay = parse_relay(doc, ref=ref).for_shard(
+            spec.get("sampler_id"), target_port=_port(proxy_port, "agentic.proxy.port"), offset=_shard_offset(spec))
+        public = relay.public_base
+    public = str(public).strip().rstrip("/") if public else None
+    if not public or PLACEHOLDER.search(public):
+        notes.append(f"WARNING: agentic.setup.records_proxy.public_base is {public!r}: {what} reach the records "
+                     "proxy over a public base only, so no trial is judged; set a public https base or a "
+                     "records_relay (the node setup refuses to start without one)")
+    elif relay is None and urlsplit(public).scheme != "https":
+        notes.append(f"records_proxy.public_base {public} is not https: the records secret travels in the URL path "
+                     "in clear text")
+    return public, relay, notes
 
 
 def parse_relay(doc: Mapping[str, Any], *, ref: Callable[[Any, str], SecretRef] | None = None) -> RelaySection:
@@ -889,6 +998,7 @@ def local_problems(setup: AgenticSetup, *, environ: Mapping[str, str] | None = N
                              ("sandbox.known_hosts", s.known_hosts if s else None, False),
                              ("tunnel.key", setup.tunnel.key if setup.tunnel else None, True),
                              ("agentenv.api_key", setup.agentenv.api_key if setup.agentenv else None, True),
+                             ("boat.api_key", setup.boat.api_key if setup.boat else None, True),
                              ("records_relay.key", setup.relay.key if setup.relay else None, True),
                              ("records_relay.known_hosts", setup.relay.known_hosts if setup.relay else None, False)):
         if r is not None and (p := r.problem(environ, private=private)):
@@ -945,6 +1055,11 @@ def staged_by_sandbox_prepare(path: Path) -> bool:
     return len(rel.parts) >= 2 and rel.parts[1] == "stage"
 
 
+def _sdk_requirement(setup: AgenticSetup) -> str | None:
+    """The provider SDK the harbor step installs next to Harbor (AgentENV: e2b, boat: boat-sdk)."""
+    return E2B_REQUIREMENT if setup.agentenv is not None else BOAT_SDK_REQUIREMENT if setup.boat is not None else None
+
+
 def describe(setup: AgenticSetup) -> list[str]:
     """The plan, one line per step (``--dry-run``)."""
     s, t, a = setup.sandbox, setup.tunnel, setup.agentenv
@@ -952,8 +1067,9 @@ def describe(setup: AgenticSetup) -> list[str]:
     if s is not None:
         lines.append(f"  docker_cli: docker {setup.docker_cli_version} + compose v{setup.compose_version} in "
                      f"{setup.root}/bin")
+    sdk = _sdk_requirement(setup)
     lines.append(f"  harbor: {setup.harbor_version} @ {setup.harbor_commit[:12]} into {setup.site} "
-                 f"(keep {list(setup.harbor_keep)})" + (f" + {E2B_REQUIREMENT}" if a else ""))
+                 f"(keep {list(setup.harbor_keep)})" + (f" + {sdk}" if sdk else ""))
     if s is not None:
         lines.append(f"  sandbox: DOCKER_HOST=ssh://{s.alias} -> {s.user}@{s.host}:{s.port}"
                      + (f" (agentic.envs host {setup.sandbox_host})" if setup.sandbox_host else "")
@@ -963,6 +1079,10 @@ def describe(setup: AgenticSetup) -> list[str]:
         lines.append(f"  agentenv: gateway {a.gateway_url}, data plane {a.sandbox_url}, key {a.api_key.describe()} "
                      f"-> {setup.agentenv_key_file} (0600, ${AGENTENV_KEY_FILE_ENV}); no docker host, no tunnel")
         lines.append(f"  records_proxy: public base {a.records_public_base or '-'}")
+    if (b := setup.boat) is not None:
+        lines.append(f"  boat: key {b.api_key.describe()} -> {setup.boat_key_file} (0600, ${BOAT_KEY_FILE_ENV}); "
+                     "no docker host, no tunnel")
+        lines.append(f"  records_proxy: public base {b.records_public_base or '-'}")
     if (r := setup.relay) is not None:
         lines.append(f"  records_relay: {RELAY_UNIT} (Restart=always; without systemd the reconnecting supervisor) "
                      f"ssh -N -R {r.forward} {r.user}@{r.host}:{r.port}"
@@ -1457,11 +1577,12 @@ class Provisioner:
         local = local_problems(self.setup, environ=self.environ)
         if local:
             raise self._fail("local", "; ".join(local))
-        a = self.setup.agentenv
+        a = self.setup.remote
         if a is not None and a.records_placeholder:
             raise self._fail("records_proxy", f"agentic.setup.records_proxy.public_base is "
-                                              f"{a.records_public_base!r}: AgentENV microVMs deny private egress, "
-                                              "so no trial could reach the records proxy; set the public https base")
+                                              f"{a.records_public_base!r}: {self.setup.provider} sandboxes reach the "
+                                              "records proxy over a public base only, so no trial could reach it; "
+                                              "set the public https base or a records_relay")
         self.layout()
         if self.setup.sandbox is not None:  # agentenv: no docker host
             self.docker_cli()
@@ -1471,6 +1592,7 @@ class Provisioner:
         self.records_secret()
         self.tasks()
         self.agentenv_key()
+        self.boat_key()
         self.records_relay()
         self.tunnel()
         return dict(self.report)
@@ -1594,6 +1716,15 @@ class Provisioner:
         self._done("agentenv_key", "changed" if changed else "ok", f"{a.api_key.describe()} -> "
                                                                    f"{self.setup.agentenv_key_file}")
 
+    def boat_key(self) -> None:
+        """The boat token file in ``<root>/home`` (0600): the sampler reads it through
+        ``BOAT_API_KEY_FILE``; the token is in no env file, no argv and no event."""
+        b = self.setup.boat
+        if b is None:
+            return
+        changed = self.node.put(b.api_key.read(self.environ), self.node.host(self.setup.boat_key_file))
+        self._done("boat_key", "changed" if changed else "ok", f"{b.api_key.describe()} -> {self.setup.boat_key_file}")
+
     # -- steps
     def layout(self) -> None:
         r = shlex.quote(self.node.host(self.setup.root))
@@ -1638,7 +1769,7 @@ class Provisioner:
         self._done("docker_cli", "changed", f"docker {want[0]}, compose v{want[1]}")
 
     def _harbor_state(self) -> dict[str, Any]:
-        extra = " e2b" if self.setup.agentenv is not None else ""
+        extra = " e2b" if self.setup.agentenv is not None else " boat_sdk" if self.setup.boat is not None else ""
         out = self.node.in_image(f"{shlex.quote(self.node.python)} -c {shlex.quote(HARBOR_CHECK)}{extra}",
                                  env=self._image_env(), timeout=600)
         for line in (out.stdout or "").splitlines():
@@ -1658,7 +1789,7 @@ class Provisioner:
         # the same commit's subdirectory in the same resolve
         dash = f"server-dashboard @ git+{HARBOR_REPO}@{self.setup.harbor_commit}#subdirectory=server-dashboard"
         py, site = shlex.quote(self.node.python), shlex.quote(self.setup.site)
-        sdk = f" {shlex.quote(E2B_REQUIREMENT)}" if self.setup.agentenv is not None else ""
+        sdk = f" {shlex.quote(_sdk_requirement(self.setup))}" if _sdk_requirement(self.setup) else ""
         out = self.node.in_image(
             f"set -e; {py} -m pip install --quiet --disable-pip-version-check --upgrade --target {site} "
             f"{shlex.quote(req)} {shlex.quote(dash)}{sdk}; PYTHONPATH= {py} -c {shlex.quote(HARBOR_PRUNE)} {site} "

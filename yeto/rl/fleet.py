@@ -37,7 +37,12 @@ island's trainer and the syncer; ``samplers`` lists every island's pools) plus a
   ``dispense_store`` (``<store>/fleet/dispense``: one task ledger for the fleet);
   for an agentic pool whose spec has ``agentic.envs`` (a sandbox gate) also
   ``sandbox_store`` (the run store): ``yeto sandbox prepare`` writes the readiness
-  manifest once in the run store, and the pool's own store is ``trainer<k>``.
+  manifest once in the run store, and the pool's own store is ``trainer<k>``;
+* gives pools that share one records relay or tunnel port range (the same
+  ``agentic.setup.records_relay`` host and ``listen_port`` range, or the same
+  ``agentic.setup.tunnel.listen`` range) consecutive blocks of it: the knob
+  ``shard_offset`` (spec key of the same name) is added to the shard index, so
+  ``<base>-i0-0`` and ``<base>-i1-0`` do not listen on one port (:func:`share_offsets`).
 
 The trainer argv is ``fleet.trainer_argv`` with ``--gpu`` (every island's cluster,
 in island order), ``--rl-sample-role trainer --rl-sampler-follow trainer``, one
@@ -472,6 +477,44 @@ def _spec_facts(doc: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None,
     return spec, engine, quant
 
 
+def port_share_key(spec: dict[str, Any] | None) -> tuple[str, ...] | None:
+    """The port range a pool's samplers take one port each of, by shard index: a
+    ``records_relay.listen_port`` range (with its relay host) or a ``tunnel.listen``
+    range (with its tunnel host); None without one. Pools with the same key share it."""
+    agentic = (spec or {}).get("agentic")
+    setup = agentic.get("setup") if isinstance(agentic, dict) else None
+    if not isinstance(setup, dict):
+        return None
+    relay = setup.get("records_relay")
+    if isinstance(relay, dict) and "-" in str(relay.get("listen_port") or ""):
+        return ("records_relay", str(relay.get("host") or ""), str(relay["listen_port"]))
+    tunnel = setup.get("tunnel")
+    listen = str(tunnel.get("listen") or "") if isinstance(tunnel, dict) else ""
+    if "-" in listen.rpartition(":")[2]:
+        sandbox = setup.get("sandbox") if isinstance(setup.get("sandbox"), dict) else {}
+        return ("tunnel", str(tunnel.get("host") or sandbox.get("docker_host") or ""), listen)
+    return None
+
+
+def share_offsets(rows: list[tuple[str, tuple[str, ...] | None, int]]) -> dict[str, int]:
+    """``{pool: shard_offset}`` of the pools that share a port range (``(pool, key,
+    shard_limit)`` in fleet order, :func:`port_share_key`): each takes the next
+    ``shard_limit`` ports of it. A pool alone on its range gets none."""
+    groups: dict[tuple[str, ...], list[tuple[str, int]]] = {}
+    for name, key, limit in rows:
+        if key is not None:
+            groups.setdefault(key, []).append((name, int(limit)))
+    out: dict[str, int] = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        offset = 0
+        for name, limit in members:
+            out[name] = offset
+            offset += limit
+    return out
+
+
 def has_sandbox_gate(doc: dict[str, Any]) -> bool:
     """Whether the pool's rendered spec has ``agentic.envs``: its samplers' dispenser
     reads the sandbox readiness manifest (``yeto.sandbox.gate``)."""
@@ -481,8 +524,9 @@ def has_sandbox_gate(doc: dict[str, Any]) -> bool:
 
 
 def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | None,
-          sandbox_store: str | None = None) -> tuple[dict[str, Any], FleetPool]:
-    """The compiled pool entry of pool j of island k, and its plan row."""
+          sandbox_store: str | None = None) -> tuple[dict[str, Any], FleetPool, tuple[str, ...] | None]:
+    """The compiled pool entry of pool j of island k, its plan row and the port range it
+    shares (:func:`port_share_key`)."""
     from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
     from yeto.launch.nc.provider import provider_kind  # noqa: PLC0415
     from yeto.launch.rollout import pools  # noqa: PLC0415
@@ -509,7 +553,7 @@ def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | N
     sampler = doc.get("sampler") or {}
     if not isinstance(sampler, dict):
         raise _err(f"{where} ({source}): sampler must be an object")
-    for key in ("island", "until_trainers_end", "dispense_store", "sandbox_store"):
+    for key in ("island", "until_trainers_end", "dispense_store", "sandbox_store", "shard_offset"):
         if key in sampler:
             raise _err(f"{where} ({source}): sampler.{key} is written by the fleet compile; drop it")
     if isinstance(sampler.get("dispense"), dict) and sampler["dispense"].get("store"):
@@ -532,7 +576,7 @@ def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | N
         raise _err(f"{where} ({source}): {error}") from None
     if limit is None or limit < 1:
         raise _err(f"{where} ({source}): shard_limit must be a whole number >= 1 (got {doc.get('shard_limit')!r})")
-    _spec, engine, quant = _spec_facts(compiled)
+    spec, engine, quant = _spec_facts(compiled)
     target = doc.get("target")
     price = _price(entry.get("usd_per_h"), f"{where}.usd_per_h")
     if price is None:  # what run up bills a node hour at (up.UpRun.node_usd_per_h), USD providers only
@@ -545,7 +589,7 @@ def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | N
                     shard_limit=int(limit), run_prefix=prefix, engine=engine, rollout_quant=quant,
                     target=target if isinstance(target, int) and not isinstance(target, bool) else None,
                     usd_per_h=price)
-    return out, row
+    return out, row, port_share_key(spec)
 
 
 def training_form(trainer_argv: list[str]) -> dict[str, Any]:
@@ -636,6 +680,7 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     dispense_store = fleet_dispense_store(store) if dispense == "fleet" else None
     rows: list[FleetIsland] = []
     samplers: list[dict[str, Any]] = []
+    shared: list[tuple[str, tuple[str, ...] | None, int]] = []
     names: set[str] = set()
     # Miles samplers come after every trainer in the launch: count the trainers first
     launch_island = len(islands)
@@ -667,9 +712,10 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
                                                usd_per_h=sampler_price, launch_island=launch_island))
                 launch_island += 1
                 continue
-            out, row = _pool(entry, k, j, where, dispense_store, store)
+            out, row, ports = _pool(entry, k, j, where, dispense_store, store)
             samplers.append(out)
             pools.append(row)
+            shared.append((row.name, ports, row.shard_limit))
         seen = [p.name for p in pools] + [m.name for m in miles]
         if len(set(seen)) != len(seen):
             raise _err(f"{where}: pool names repeat {seen} (Miles samplers included); set 'name' on each")
@@ -679,6 +725,10 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
                                 release_every=flags.get("release_every"),
                                 max_policy_age=flags.get("max_policy_age"), pools=tuple(pools),
                                 miles_samplers=tuple(miles), trainer_usd_per_h=price))
+    offsets = share_offsets(shared)
+    for out in samplers:
+        if out["name"] in offsets:  # a port range several pools share: one block of it each
+            out["sampler"] = dict(out["sampler"], shard_offset=offsets[out["name"]])
     if not samplers:
         raise _err("an island fleet needs at least one external pool: `yeto run up` drives the pools (a fleet of "
                    "Miles samplers only is a `yeto launch` synced group with --rl-sampler-follow trainer)")

@@ -335,7 +335,27 @@ def spec_max_model_len_of(spec: dict[str, Any]) -> int | None:
         return None
 
 
-def compaction_switch_warnings(spec: dict[str, Any], args: Any | None) -> list[str]:
+def island_view(args: Any | None, island: Any | None) -> Any | None:
+    """``args`` as the trainer of a fleet island runs it: its own ``--rl-island-max-policy-age``
+    / ``--rl-island-release-every`` (the plan's ``max_policy_age`` / ``release_every``, set
+    when the island overrides the fleet's) over the global flags. ``args`` itself without
+    an island or an override."""
+    if args is None or island is None:
+        return args
+    overrides = {name: int(value) for name, value in (("rl_max_policy_age", getattr(island, "max_policy_age", None)),
+                                                      ("rl_release_every", getattr(island, "release_every", None)))
+                 if value is not None}
+    if not overrides:
+        return args
+    import copy  # noqa: PLC0415
+
+    view = copy.copy(args)
+    for name, value in overrides.items():
+        setattr(view, name, value)
+    return view
+
+
+def compaction_switch_warnings(spec: dict[str, Any], args: Any | None, *, island: Any | None = None) -> list[str]:
     """Preflight warnings of a compacting spec that only the trainer and the sampler
     together decide. A compacted trial runs several segments, often longer than a
     release interval; a drain does not spare it. On a drain-mode sampler:
@@ -343,9 +363,13 @@ def compaction_switch_warnings(spec: dict[str, Any], args: Any | None) -> list[s
     ``--rl-max-policy-age`` at most 2 (a long group ages past it); (c) a release every
     version (no ``--rl-release-every N`` > 1, no ``--rl-release-skip-busy``), so a
     drain starts at every step. On any sampler: the trial wall clock
-    (``agentic.task_defaults.wall_clock_s``) left at the default."""
+    (``agentic.task_defaults.wall_clock_s``) left at the default. ``island``: the fleet
+    island (:class:`yeto.rl.fleet.FleetIsland`) whose trainer the pool feeds; its own
+    policy age and release cadence decide (b) and (c) (:func:`island_view`)."""
     from yeto.rl.agentic.types import AgentBudget  # noqa: PLC0415
     from yeto.rl.engine import agentic_round as ar  # noqa: PLC0415
+
+    args = island_view(args, island)
 
     section = spec.get("agentic") if isinstance(spec.get("agentic"), dict) else {}
     if section.get("compaction") is None:
@@ -365,13 +389,15 @@ def compaction_switch_warnings(spec: dict[str, Any], args: Any | None) -> list[s
                        "with all their segments; raise drain_timeout_s and reload_max_defer_s together, or use "
                        "weight_switch live on an engine with live_update")
         age = getattr(args, "rl_max_policy_age", None)
+        who = "the trainer's" if island is None else f"island {island.index}'s trainer's"
         if args is not None and age is not None and int(age) <= 2:
-            out.append(f"agentic.compaction on a drain-mode sampler with the trainer's --rl-max-policy-age "
+            out.append(f"agentic.compaction on a drain-mode sampler with {who} --rl-max-policy-age "
                        f"{int(age)}: a compacted group is as old as its oldest segment and ages past it; raise it to "
                        "about the release interval N + 6 (upload and download lag)")
         if args is not None and int(getattr(args, "rl_release_every", 1) or 1) <= 1 \
                 and not getattr(args, "rl_release_skip_busy", False):
-            out.append("agentic.compaction on a drain-mode sampler with a release every version: every step "
+            out.append(f"agentic.compaction on a drain-mode sampler with {'a' if island is None else who} release "
+                       "every version: every step "
                        "starts a drain that cuts the long trials; release less often (--rl-release-every N, N about "
                        "the compacted trials' p90 wall time / step time) or --rl-release-skip-busy")
     defaults = section.get("task_defaults") if isinstance(section.get("task_defaults"), dict) else {}
@@ -388,10 +414,12 @@ def compaction_switch_warnings(spec: dict[str, Any], args: Any | None) -> list[s
     return out
 
 
-def compaction_lines(pool_cfg: dict[str, Any], trainer_argv: list[str] | None = None) -> list[str]:
+def compaction_lines(pool_cfg: dict[str, Any], trainer_argv: list[str] | None = None, *,
+                     island: Any | None = None) -> list[str]:
     """Preflight log lines of the pool's ``agentic.compaction``: its effective values
     and the warnings of :func:`compaction_switch_warnings` (empty: off, or the spec
-    does not load; the pool dry-run reports a bad section)."""
+    does not load; the pool dry-run reports a bad section). ``island``: the fleet island
+    the pool feeds (its own policy age and release cadence)."""
     from yeto.rl.compaction import config_from_spec, describe  # noqa: PLC0415
 
     spec = effective_spec(pool_cfg)
@@ -409,7 +437,7 @@ def compaction_lines(pool_cfg: dict[str, Any], trainer_argv: list[str] | None = 
     length_note = spec_summary_length_note(spec, cfg)
     return [f"agentic.compaction {describe(cfg)}"] + [
         f"WARNING: {w}" for w in [*([width_warning] if width_warning else []), *([micro] if micro else []),
-                                  *compaction_switch_warnings(spec, args)]] + (
+                                  *compaction_switch_warnings(spec, args, island=island)]] + (
         [f"NOTE: {length_note}"] if length_note else [])
 
 

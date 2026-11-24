@@ -96,7 +96,7 @@ def resolve(cfg: dict[str, Any], state_dir: Path) -> list[PoolRef]:
         if "config" not in pool:
             raise ValueError("run config: pool.config (the pool config file) is required")
         ref = PoolRef("pool", os.path.expanduser(str(pool["config"])), _number(pool, "pool", "interval_s", 30))
-        return [with_breakers(cfg, ref, state_dir)]
+        return with_boat_shares(cfg, [with_breakers(cfg, ref, state_dir)], state_dir)
     entries = cfg.get("samplers")
     if not isinstance(entries, list) or not entries:
         raise ValueError("run config: 'samplers' must be a non-empty list of pools (or use 'pool')")
@@ -109,6 +109,7 @@ def resolve(cfg: dict[str, Any], state_dir: Path) -> list[PoolRef]:
     if len(set(names)) != len(names):
         raise ValueError(f"samplers: pool names repeat {names}; set 'name' on each")
     refs = [with_breakers(cfg, ref, state_dir) for ref in refs]
+    refs = with_boat_shares(cfg, refs, state_dir)
     paths = {r.data_path for r in refs}
     if len(paths) > 1:
         raise ValueError(f"samplers: one data path per run (got {sorted(paths)}): a trainer that reads R2 buffer "
@@ -217,6 +218,136 @@ def with_breakers(cfg: dict[str, Any], ref: PoolRef, state_dir: Path) -> PoolRef
     except OSError as error:
         raise ValueError(f"run config: pool {ref.name!r}: cannot write {path} ({error})") from None
     return replace(ref, config=str(path), spec_carried=carried)
+
+
+# harness.sandbox_caps.<param> of a boat sampler process -> the sandbox.boat limit it shares
+BOAT_SHARES = {"boat_max_active_n": "max_active_n", "boat_starts_per_minute_n": "starts_per_minute_n",
+               "boat_starts_per_hour_n": "starts_per_hour_n"}
+# their env aliases (yeto.breakers.layers.harness), as a pool may set them in a Modal provider's env
+BOAT_ENV = {"boat_max_active_n": "YETO_BOAT_MAX_ACTIVE", "boat_starts_per_minute_n": "YETO_BOAT_STARTS_PER_MINUTE",
+            "boat_starts_per_hour_n": "YETO_BOAT_STARTS_PER_HOUR"}
+
+
+def boat_pool(cfg: dict[str, Any], doc: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """A pool whose samplers run boat sandboxes: ``{"processes": samplers at the elastic
+    maximum, "max_in_flight", "explicit": {param: value the pool sets itself}}``; None
+    for any other pool (no agentic spec, another provider)."""
+    from yeto import breakers  # noqa: PLC0415
+    from yeto.breakers.rules_facts import pool_sources  # noqa: PLC0415
+
+    sources = pool_sources(doc, run_config=cfg)
+    agentic = (sources.spec or {}).get("agentic")
+    if not isinstance(agentic, dict):
+        return None
+    defaults = agentic.get("task_defaults") if isinstance(agentic.get("task_defaults"), dict) else {}
+    provider = defaults.get("provider") or str((sources.env or {}).get("HARBOR_ENV_TYPE") or "").strip().lower()
+    if provider != "boat":
+        return None
+    try:
+        resolved = breakers.resolve(sources, pool=name, layers=("harness",))
+    except breakers.BreakerConfigError as error:
+        raise ValueError(f"run config: pool {name!r}: {error}") from None
+    entry = resolved.entry("harness.sandbox_caps")
+    explicit = {p: entry.params[p] for p in BOAT_SHARES if entry.sources[p].kind != "default"}
+    provider_env = (doc.get("provider") or {}).get("env") if isinstance(doc.get("provider"), dict) else None
+    for param, env_name in BOAT_ENV.items():  # a Modal pool's provider.env reaches the sampler too
+        value = (provider_env or {}).get(env_name)
+        if value is not None and str(value).strip().isdigit():
+            explicit.setdefault(param, int(str(value).strip()))
+    target = doc.get("target") if isinstance(doc.get("target"), int) else 1
+    elastic = doc.get("elastic") if isinstance(doc.get("elastic"), dict) else {}
+    nodes = elastic.get("max_nodes") if isinstance(elastic.get("max_nodes"), int) else target
+    mif = agentic.get("max_in_flight")
+    return {"processes": max(1, int(nodes), int(target)), "explicit": explicit,
+            "max_in_flight": int(mif) if isinstance(mif, int) and not isinstance(mif, bool) else 1}
+
+
+def boat_shares(account: dict[str, Any], pools: dict[str, dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """``{pool: {param: per-process value}}``: the boat account's limits (``account``,
+    :func:`yeto.rl.fleet_sandbox.boat_account`) split over every boat sampler process of
+    the run (``pools``: :func:`boat_pool` of each). A value a pool sets itself is kept and
+    counted; the rest of the limit goes to the other pools' processes: the active
+    sandboxes in proportion to their ``max_in_flight`` (each gets at least that, or the
+    run is refused), the start rates evenly (at least one each, or refused). Raises
+    ValueError naming the pools."""
+    out: dict[str, dict[str, int]] = {name: {} for name in pools}
+    for param, limit_key in BOAT_SHARES.items():
+        limit = account.get(limit_key)
+        if limit is None:
+            continue  # not held (starts_per_hour_n null)
+        fixed = {n: p for n, p in pools.items() if param in p["explicit"]}
+        free = {n: p for n, p in pools.items() if param not in p["explicit"]}
+        used = sum(int(p["explicit"][param]) * p["processes"] for p in fixed.values())
+        left = int(limit) - used
+        listed = ", ".join(f"{n} ({p['processes']} sampler(s) x max_in_flight {p['max_in_flight']})"
+                           for n, p in pools.items())
+        if param == "boat_max_active_n":
+            need = sum(p["processes"] * p["max_in_flight"] for p in free.values())
+            if left < need or left < 0:
+                raise ValueError(f"run config: the boat account holds {limit} active sandboxes (sandbox.boat."
+                                 f"{limit_key}) and the run's boat samplers need {need + used} at their elastic "
+                                 f"maximum ({listed}): lower agentic.max_in_flight, the pools' targets / "
+                                 "elastic.max_nodes, or raise sandbox.boat.max_active_n to the account's plan")
+            for n, p in free.items():
+                out[n][param] = max(p["max_in_flight"], left * p["max_in_flight"] // max(1, need))
+        else:
+            count = sum(p["processes"] for p in free.values())
+            if not count:
+                continue
+            share = left // count
+            if share < 1:
+                raise ValueError(f"run config: the boat account starts {limit} sandboxes "
+                                 f"{'a minute' if 'minute' in param else 'an hour'} (sandbox.boat.{limit_key}) and the "
+                                 f"run has {count + len(fixed)} boat sampler process(es) ({listed}): each needs at "
+                                 "least one start; run fewer boat samplers or raise the limit to the account's plan")
+            for n in free:
+                out[n][param] = share
+    return out
+
+
+def with_boat_shares(cfg: dict[str, Any], refs: list[PoolRef], state_dir: Path) -> list[PoolRef]:
+    """The pools with each boat sampler process's share of the boat account (:func:`boat_shares`)
+    in their ``sampler.breakers`` knob (``harness.sandbox_caps.boat_*``: the samplers write
+    them to ``YETO_BOAT_*``, ``sampler_breakers.apply_harness_env``): each process holds its
+    quota alone, so their sum is the account's. Unchanged when the run has at most one
+    boat sampler process (the plan's limits are its own) or none."""
+    from yeto.launch.nc import tasks  # noqa: PLC0415
+    from yeto.rl.fleet_sandbox import boat_account  # noqa: PLC0415
+
+    found = {}
+    for ref in refs:
+        try:
+            doc = ref.load()
+        except (OSError, ValueError):
+            continue  # the pool dry-run reports an unreadable pool config
+        row = boat_pool(cfg, doc, ref.name)
+        if row is not None:
+            found[ref.name] = row
+    if sum(p["processes"] for p in found.values()) <= 1:
+        return refs
+    shares = boat_shares(boat_account(cfg.get("sandbox")), found)
+    out = []
+    for ref in refs:
+        share = shares.get(ref.name)
+        if not share:
+            out.append(ref)
+            continue
+        doc = ref.load()
+        sampler = dict(doc.get("sampler") or {})
+        try:
+            sampler["breakers"] = tasks.merge_breakers(sampler.get("breakers") or {},
+                                                       {"harness": {"sandbox_caps": share}})
+        except ValueError as error:
+            raise ValueError(f"run config: pool {ref.name!r}: boat share: {error}") from None
+        path = state_dir / "pools" / f"{ref.name}.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(dict(doc, sampler=sampler), indent=1, sort_keys=True))
+        except OSError as error:
+            raise ValueError(f"run config: pool {ref.name!r}: cannot write {path} ({error})") from None
+        carried = tuple(dict.fromkeys(ref.spec_carried + tuple(f"harness.sandbox_caps.{p}" for p in share)))
+        out.append(replace(ref, config=str(path), spec_carried=carried))
+    return out
 
 
 def spec_carried(resolved: Any) -> tuple[str, ...]:

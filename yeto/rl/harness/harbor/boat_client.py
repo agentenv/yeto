@@ -5,7 +5,9 @@
 ``boat_sdk.api.boat_api.BoatApi``); CPU tests pass a fake.  The SDK is
 imported lazily, so the yeto core does not depend on it.
 
-Credentials: ``BOAT_API_KEY``, else the token the boat CLI stores in
+Credentials: ``BOAT_API_KEY``, else the file ``BOAT_API_KEY_FILE`` names (a
+0600 file with the bare token or a ``BOAT_API_KEY=`` line: an NC node's
+``agentic.setup.boat``), else the token the boat CLI stores in
 ``~/.config/ascii/boat/config.json`` (``boat login``).  The token is never
 logged or put in an exception message.
 
@@ -40,6 +42,7 @@ from . import breaker_settings
 
 API_HOST = "https://boat.dev/api/v1"
 API_KEY_ENV = "BOAT_API_KEY"
+API_KEY_FILE_ENV = "BOAT_API_KEY_FILE"  # a file holding the token (agentic.setup.boat on an NC node)
 PROXY_ENV = "YETO_BOAT_PROXY"  # http://host:port of an HTTP(S) CONNECT proxy for the boat API
 CLI_CONFIG = Path("~/.config/ascii/boat/config.json")
 
@@ -89,9 +92,36 @@ class BoatClient(Protocol):
     # def list_sandboxes(self) -> list[boat_labels.SandboxInfo]
 
 
+def token_from_text(text: str) -> str | None:
+    """The token of a key file: a ``BOAT_API_KEY=`` line (``export`` and quotes allowed)
+    or the bare token alone; None when there is none."""
+    bare = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == API_KEY_ENV:
+            return value.strip().strip("'\"") or None
+        if not sep:
+            bare.append(line)
+    return bare[0] if len(bare) == 1 and " " not in bare[0] else None
+
+
 def load_token() -> str:
     token = os.environ.get(API_KEY_ENV)
     if token:
+        return token
+    key_file = os.environ.get(API_KEY_FILE_ENV, "").strip()
+    if key_file:
+        try:
+            token = token_from_text(Path(key_file).read_text())
+        except OSError as exc:
+            raise BoatError(f"{API_KEY_FILE_ENV}={key_file}: {type(exc).__name__}") from None
+        if not token:
+            raise BoatError(f"{API_KEY_FILE_ENV}={key_file} holds no {API_KEY_ENV}= line or bare token")
         return token
     path = CLI_CONFIG.expanduser()
     try:

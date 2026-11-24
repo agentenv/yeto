@@ -1641,7 +1641,7 @@ def _print_breaker_deprecations(cfg: dict[str, Any]) -> None:
 _OVERRIDE_KEYS = ("data_slot", "drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens",
                   "continues_shard")
 _POOL_KEYS = ("drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens", "dispense", "breakers",
-              "island", "until_trainers_end", "dispense_store", "sandbox_store")
+              "island", "until_trainers_end", "dispense_store", "sandbox_store", "shard_offset")
 
 
 def _add_sampler_override_args(p) -> None:
@@ -1697,7 +1697,7 @@ def _overrides(cfg) -> dict:
             parse_section(cfg["breakers"])
         except BreakerConfigError as error:
             raise ValueError(f"pool sampler config: breakers: {error}") from error
-    for key in ("island", "until_trainers_end"):  # an island fleet's pool (yeto run up, yeto.rl.fleet)
+    for key in ("island", "until_trainers_end", "shard_offset"):  # an island fleet's pool (yeto run up, yeto.rl.fleet)
         value = cfg.get(key)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise ValueError(f"pool sampler config: {key} must be a whole number >= 0 or null (got {value!r})")
