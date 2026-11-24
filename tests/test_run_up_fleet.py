@@ -212,6 +212,18 @@ def test_dispense_island_keeps_each_islands_own_ledger(files):
     assert all("dispense_store" not in s["sampler"] for s in compiled["samplers"])
     plan = fleet.plan_of(compiled)
     assert plan.dispense == "island" and plan.dispense_store is None
+    # run up (status, the data-end settlement) and the pool (retire / drain) read each island's ledger
+    run = up.Run(compiled)
+    assert [run.dispense_ledger(i)[0] for i in range(3)] == [f"{STORE}/trainer0", f"{STORE}/trainer0",
+                                                            f"{STORE}/trainer1"]
+    assert all(nc_cli.pool_dispense_store(r.load()) is None for r in run.pools)
+
+
+def test_dispense_fleet_shares_one_ledger_on_both_sides(files):
+    run = up.Run(up.load_config(_write(files, _cfg(files))))
+    shared = "s3://b/runs/r/fleet/dispense"
+    assert {nc_cli.pool_dispense_store(r.load()) for r in run.pools} == {shared}
+    assert run.dispense_ledgers() == [(shared, "task-dispense", ["i0-vllm", "i0-sglang", "i1-sglang"])]
 
 
 def test_the_sampler_knobs_change_nothing_unset():

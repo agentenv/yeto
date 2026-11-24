@@ -63,7 +63,7 @@ PLAN_VERSION = 1
 PLAN_KEY = "fleet_plan"  # the compiled run config's key holding the FleetPlan
 FLEET_DIR = "fleet"
 PLAN_OBJECT = f"{FLEET_DIR}/plan.json"  # the plan in the run store
-DISPENSE_DIR = f"{FLEET_DIR}/dispense"  # the fleet's task ledger root (dispense: fleet)
+DISPENSE_DIR = f"{FLEET_DIR}/dispense"  # the fleet's task ledger root (store_dispense.FLEET_DISPENSE_DIR)
 DISPENSE_MODES = ("fleet", "island")
 FLEET_KEYS = frozenset({"trainer_argv", "dispense"})
 ISLAND_KEYS = frozenset({"name", "trainer", "samplers"})
@@ -481,7 +481,9 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     islands = cfg["islands"]
     if not isinstance(islands, list) or not islands:
         raise _err("'islands' must be a non-empty list (one entry per island: name, trainer, samplers)")
-    dispense_store = substore_uri(store, DISPENSE_DIR) if dispense == "fleet" else None
+    from yeto.rl.engine.store_dispense import fleet_dispense_store  # noqa: PLC0415
+
+    dispense_store = fleet_dispense_store(store) if dispense == "fleet" else None
     rows: list[FleetIsland] = []
     samplers: list[dict[str, Any]] = []
     names: set[str] = set()

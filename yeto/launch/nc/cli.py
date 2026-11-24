@@ -948,13 +948,18 @@ def pool_dispense(cfg: dict[str, Any]) -> dict[str, Any] | None:
 
 def pool_dispense_store(cfg: dict[str, Any]) -> str | None:
     """The store of a pool's store-dispenser ledger when it is not the pool's run store:
-    ``store`` of :func:`pool_dispense`, else the spec's ``dispense_store`` (a fleet's
-    shared ledger, ``store_dispense.spec_dispense_store``); None: the run store."""
+    ``store`` of :func:`pool_dispense`, else the pool's ``sampler.dispense_store`` knob
+    (``yeto run up`` sets it for a fleet's pools; the rendered spec carries it), else the
+    spec's ``dispense_store`` (a fleet's shared ledger, ``store_dispense.spec_dispense_store``);
+    None: the run store."""
     dispense = pool_dispense(cfg)
     if dispense is None:
         return None
     if dispense.get("store"):
         return str(dispense["store"])
+    own = (cfg.get("sampler") or {}).get("dispense_store")  # the pool knob over the spec (a fleet's pools)
+    if isinstance(own, str) and own.strip():
+        return own.strip()
     try:
         spec = json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text()) if cfg.get("spec") else {}
     except (OSError, ValueError):
