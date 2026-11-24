@@ -173,6 +173,75 @@ def test_a_restarted_run_up_keeps_the_islands_an_earlier_trip_stopped(fleet_run)
     assert again.fleet_rt().active() == [0]
 
 
+def _trainer_exit(run):
+    """The launcher exited at once: breach() records run.trainer_exit for every island."""
+    run.state["procs"] = {"trainer": {"pid": 1, "log": "/nonexistent", "offset": 0}}
+    return run.breach()
+
+
+def test_a_restart_after_a_trainer_exit_does_not_stop_every_island(fleet_run, monkeypatch):
+    """P5-6: the previous launcher exited at once (run.trainer_exit, fleet-wide, recorded on
+    every island). The next run up of the same run starts a new trainer: it must not take
+    the old stop for its own and STOP the new launch, and it drives the pools again."""
+    run = fleet_run()
+    monkeypatch.setattr(up, "_alive", lambda pid: False)
+    monkeypatch.setattr(up, "_worker_alive", lambda name: False)
+    assert _trainer_exit(run) == "trainer: launcher exited without a result"
+    assert [r["stop_reason"] for r in run.state["fleet_stops"]["islands"]] == ["breaker:run.trainer_exit"] * 2
+    assert run.fleet_all_stopped() == "breaker:run.trainer_exit"
+    # the restarted run up
+    again = up.Run(run.cfg)
+    again._cmd = lambda argv, **kw: 0
+    assert again.fleet_all_stopped() is None and again.fleet_rt().active() == [0, 1]
+    assert [again.fleet_rt().pool_restart_refusal(r.name) for r in again.pools] == [None, None, None]
+    stopped = types.SimpleNamespace(stopped="process exit", finished=None, manual_released={}, budget=None,
+                                    live=lambda: [], _event=lambda *a, **k: None)
+    again._restart_stopped_pool("i1-sglang", stopped)
+    assert stopped.stopped is None  # driven again
+    monkeypatch.setattr(up.Run, "_spawn", lambda self, name, argv: 4242)
+    again.trainer()
+    assert [r["stop_reason"] for r in again.state["fleet_stops"]["islands"]] == [None, None]
+    assert again.fleet_all_stopped() is None
+
+
+def test_a_restart_replays_only_the_islands_own_trips(fleet_run, monkeypatch, capsys):
+    run = fleet_run()
+    run.fleet_rt().trip_island(1, "run.starvation", value=7200, limit=3600, why="no group")
+    monkeypatch.setattr(up, "_alive", lambda pid: False)
+    monkeypatch.setattr(up, "_worker_alive", lambda name: False)
+    _trainer_exit(run)  # then the launch died: every island recorded
+    assert run.fleet_all_stopped() is not None
+    again = up.Run(run.cfg)
+    again._cmd = lambda argv, **kw: 0
+    rt = again.fleet_rt()
+    assert rt.island_stopped(1) == "breaker:run.starvation" and rt.island_stopped(0) is None
+    assert again.fleet_all_stopped() is None
+    # island 1's pool stays stopped; island 0's are driven again
+    stopped = types.SimpleNamespace(stopped="breaker", finished=None, manual_released={}, budget=None,
+                                    live=lambda: [], _event=lambda *a, **k: None)
+    again._restart_stopped_pool("i1-sglang", stopped)
+    assert stopped.stopped == "breaker"
+    assert "island 1 (west) stays stopped (breaker:run.starvation" in _out(capsys)[-1]
+    again._restart_stopped_pool("i0-vllm", stopped)
+    assert stopped.stopped is None
+    # subprocess pools: island 1's loop is not spawned
+    monkeypatch.setattr("yeto.launch.nc.pool_run.pool_process", lambda cfg: {"alive": False})
+    spawned = []
+    monkeypatch.setattr(up.Run, "_spawn", lambda self, name, argv: spawned.append(argv[argv.index("--config") + 1]))
+    monkeypatch.setattr(up.Run, "_restart_stopped_pool_states", lambda self, refs: None)
+    again.pool()
+    assert spawned == [again.pools[0].config, again.pools[1].config]
+
+
+def test_a_run_up_whose_islands_all_stay_stopped_is_refused(fleet_run):
+    run = fleet_run()
+    for k in (0, 1):
+        run.fleet_rt().trip_island(k, "run.starvation", value=1, limit=1, why="x")
+    again = up.Run(run.cfg)
+    with pytest.raises(up.RunUpRefused, match="every island of the fleet stays stopped"):
+        again.pool()
+
+
 # -- starvation and release stall per island (2.6, 3.5 wiring) --------------------------------
 
 def test_a_starving_island_stops_alone_and_the_fleet_goes_on(fleet_run, capsys):
@@ -297,6 +366,10 @@ def test_an_island_with_a_miles_sampler_seals_only_its_pools(fleet_run, files, c
     cfg = _cfg(files)
     cfg["islands"][1]["samplers"].insert(0, {"kind": "miles", "name": "miles", "gpu": "modal:1x1xl40s",
                                              "usd_per_h": 1.5})
+    # a Miles sampler claiming from the pools' store ledger reads --data as their local prompt file
+    (files / "p.jsonl").write_text('{"q": "1 + 1"}\n')
+    argv = cfg["fleet"]["trainer_argv"]
+    argv[argv.index("--data") + 1] = str(files / "p.jsonl")
     run = fleet_run(cfg)
     west = run.fleet_plan().islands[1]
     (miles,) = west.miles_samplers
