@@ -379,6 +379,19 @@ def island_lifecycle_enabled(args, specs) -> bool:
     return sum(1 for m in range(len(specs)) if m not in samplers) >= 2
 
 
+def island_outcome(exit_codes) -> tuple[list[str], list[str], list[str]]:
+    """The islands that succeeded, those ended on their own island STOP (a stop by the
+    decision table: neither a success nor a failure; the fleet stopped only when every
+    island did) and those that failed, by the controller's exit strings."""
+    from .launch.fleet import ISLAND_STOPPED_PREFIX
+
+    done = [n for n, s in exit_codes.items() if "SUCCEEDED" in str(s)]
+    stopped = [n for n, s in exit_codes.items()
+               if n not in done and str(s).startswith(f"{ISLAND_STOPPED_PREFIX} (island STOP")]
+    failed = [n for n in exit_codes if n not in done and n not in stopped]
+    return done, stopped, failed
+
+
 def _island_refs(args, specs, names, *, modal_names=(), ssh_names=(), events_dir=None, echo_names=()) -> dict:
     """Launch island name -> :class:`~yeto.launch.island_lifecycle.IslandRef` (learner id =
     the island's position in ``--gpu``; ``tape``: its echoed event tape, when it has one)."""
@@ -404,7 +417,8 @@ def _island_state_store(args):
         print("[launcher] --island-lifecycle: no --rl-checkpoint-store; island records are not kept",
               file=sys.stderr)
         return None
-    states = open_state_store(store, store_client_environ(args))
+    # background: the fleet controller's poll loop never waits on the store
+    states = open_state_store(store, store_client_environ(args), background=True)
     if states is None:
         print(f"[launcher] --island-lifecycle: the store {store} has no object API here; island records "
               "are not kept", file=sys.stderr)
@@ -548,6 +562,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     if island_states is not None and not relaunch:
         for m in range(len(specs)):  # a new run: an island STOP an earlier run of this name left is void
             island_states.clear_stop(m)
+    if island_states is not None and relaunch:
+        island_states.read_all(range(len(specs)))  # the records a relaunch's writes merge into
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -1071,7 +1087,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 except Exception as e:  # noqa: BLE001 - summary is best effort
                     print(f"[launcher] WARN: could not record islands_left_pool ({e})",
                           file=sys.stderr)
-        failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
+        done, stopped, failed = island_outcome(exit_codes)
         if no_sync_incomplete:
             print(
                 f"[launcher] event tape incomplete for {no_sync_incomplete}; "
@@ -1084,7 +1100,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         # Secure the artifact BEFORE the finally block tears learners down:
         # fetch ~/yeto-output from the winning learner onto this machine
         # (the head, or the local worker), then deliver to --output.
-        done = [n for n, s in exit_codes.items() if "SUCCEEDED" in s]
+        if not done and stopped and not failed:
+            # every island ended on its own STOP (yeto.launch.island_lifecycle): the
+            # fleet stopped, as on the run's STOP flag
+            print(f"[launcher] every island ended on its island STOP ({', '.join(stopped)}): the fleet "
+                  f"stopped (exit {RUN_STOPPED_EXIT}); recover from the syncer checkpoint with "
+                  "yeto-export", file=sys.stderr)
+            return RUN_STOPPED_EXIT
         if not done:
             print("[launcher] no learner succeeded; recover from the syncer "
                   "checkpoint with yeto-export", file=sys.stderr)
@@ -1252,6 +1274,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 )
         if ssh_islands is not None:
             ssh_islands.close()  # streams and locks; a kept island is reattached by the next launch
+        if island_states is not None:
+            island_states.close()  # the queued island records, bounded (never holds the exit)
         if getattr(args, "training_mode", None) == "rl" and not getattr(args, "dry_run", False):
             # the dispenser log of a syncer on this machine, with its check
             from .launch.dispense_evidence import collect_dispense_log

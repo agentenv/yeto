@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from test_controller import FAILED, RUNNING, SUCCEEDED, SYNCER, FakeOps, ImmediateThread
+from test_rl_algorithm_provenance import _fake_sky  # noqa: F401  (fixture)
 from tests.test_rl_object_store import FakeS3
 from yeto.cloud import s3_store
 from yeto.config_errors import CONFIG_ERROR_EXIT, ConfigError, config_error_line
@@ -292,6 +293,166 @@ def test_cli_default_is_auto():
 
     args = parse_args(["--training-mode", "rl", "--gpu", "modal:1xl40s", "--model", "m", "--data", "d"])
     assert args.island_lifecycle == "auto"
+
+
+# -- review follow-ups: the launcher's exit, a store that hangs, the writer fence ---------------------
+
+def test_an_island_stop_is_neither_a_success_nor_a_failure():
+    from yeto.launcher import island_outcome
+
+    exits = {"r-l0": "JobStatus.SUCCEEDED", "r-l1": "STOPPED (island STOP: breaker:run.starvation)"}
+    assert island_outcome(exits) == (["r-l0"], ["r-l1"], [])
+    exits["r-l2"] = "ABANDONED after 1500s"
+    assert island_outcome(exits) == (["r-l0"], ["r-l1"], ["r-l2"])
+    assert island_outcome({"r-l0": "STOPPED (island STOP: x)", "r-l1": "STOPPED (island STOP: y)"}) == \
+        ([], ["r-l0", "r-l1"], [])
+    assert island_outcome({"r-l0": "STOPPED"}) == ([], [], ["r-l0"])  # not an island STOP: a failure
+
+
+def _sky_fleet(monkeypatch, tmp_path, stops):
+    """``launcher.run`` of a two-island sky fleet with no fixed roster (what ``yeto run up``
+    compiles), both islands succeeding unless an island STOP of ``stops`` ends them."""
+    import types as _types
+
+    import yeto.launcher as launcher
+    from test_rl_algorithm_provenance import _launcher_args
+    from test_rl_launcher_island_failure import Clock, _setup
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), succeeding={0, 1}, clock=clock, record=record)
+    monkeypatch.setattr(launcher.subprocess, "run",  # the syncer's island-pool status: not there
+                        lambda *a, **k: _types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+    states = lc.IslandStateStore(DirectoryObjectStore(tmp_path / "store"))
+    monkeypatch.setattr(launcher, "_island_state_store", lambda args: states)
+    monkeypatch.setattr(launcher, "_relaunch_of_same_run", lambda args: True)  # keep the STOPs below
+    for k in stops:
+        states.request_stop(k, "breaker:run.trainer_silence", by="yeto run up")
+    gpu = "aws:1xa100@us-east-1,aws:1xa100@us-east-1"
+    args = _launcher_args("ports", ("--controller", "local", "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64,
+                                    "--rl-sync-island-lease-s", "150", "--rl-sync-quorum", "1",
+                                    "--rl-syncer-epoch", "0"), gpu=gpu)
+    args.keep, args.recover_timeout, args.controller_poll = False, 600.0, 30.0
+    return launcher.run(args), states
+
+
+def test_one_island_stopped_does_not_fail_the_launch(monkeypatch, tmp_path, _fake_sky):  # noqa: F811
+    base, _ = _sky_fleet(monkeypatch, tmp_path / "a", stops=())
+    code, states = _sky_fleet(monkeypatch, tmp_path / "b", stops=(1,))
+    assert code == base != 1  # island 1's own STOP changes nothing in the launch's exit
+    records = states.read_all([0, 1])
+    assert records[1]["state"] == "done" and records[1]["decision"]["cause"] == "stopped"
+    assert records[0]["state"] == "done" and records[0]["decision"]["cause"] == "finished"
+
+
+def test_every_island_stopped_is_the_fleet_stop_exit(monkeypatch, tmp_path, _fake_sky):  # noqa: F811
+    from yeto.launch.fleet import RUN_STOPPED_EXIT
+
+    code, states = _sky_fleet(monkeypatch, tmp_path, stops=(0, 1))
+    assert code == RUN_STOPPED_EXIT  # the fleet stopped, as on the run's STOP flag; not a failure (1)
+    assert all(r["decision"]["cause"] == "stopped" for r in states.read_all([0, 1]).values())
+
+
+class _Hanging:
+    """A store whose every call blocks until ``release`` is set."""
+
+    def __init__(self):
+        import threading
+
+        self.release = threading.Event()
+        self.objects = {}
+
+    def read(self, key):
+        self.release.wait()
+        return self.objects.get(key)
+
+    def write(self, key, data):
+        self.release.wait()
+        self.objects[key] = data
+
+
+def test_a_background_store_never_blocks_the_poll_loop():
+    import time as _time
+
+    store = _Hanging()
+    states = lc.IslandStateStore(store, background=True, stop_poll_s=0.05)
+    t0 = _time.monotonic()
+    for _ in range(20):  # a poll loop: records and STOP checks while the store hangs
+        states.write(1, "running", name="r-l1")
+        assert states.stop_requested(1) is None
+    assert _time.monotonic() - t0 < 1.0
+    assert not states.flush(0.1)  # still queued
+    store.objects[lc.stop_key(1)] = json.dumps({"reason": "operator"}).encode()
+    store.release.set()
+    assert states.flush(5.0)
+    assert json.loads(store.objects[lc.state_key(1)])["state"] == "running"
+    deadline = _time.monotonic() + 5.0
+    while states.stop_requested(1) is None and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert states.stop_requested(1)["reason"] == "operator"  # the cache follows the store
+    assert states.close(5.0)
+
+
+def test_the_fleet_controller_reads_island_stops_from_the_cache():
+    store = _Hanging()
+    states = lc.IslandStateStore(store, background=True, stop_poll_s=0.05)
+    ops = FakeOps()
+    ops.status_seq["r-l0-modal"] = [RUNNING, SUCCEEDED]
+    ops.status_seq["r-l1-modal"] = [RUNNING, SUCCEEDED]
+    ops.status_seq[SYNCER] = [RUNNING]
+    refs = {"r-l0-modal": lc.IslandRef(0, "modal"), "r-l1-modal": lc.IslandRef(1, "modal")}
+    ctl = FleetController(learners={"r-l0-modal": ("t", 1), "r-l1-modal": ("t", 2)}, syncer=(SYNCER, "t", 1),
+                          sky_ops=ops, poll_interval=30, recover_timeout=600, thread_cls=ImmediateThread,
+                          elastic=True, recorder=lc.FleetRecorder(states, refs))
+    exits = ctl.run()  # the store hangs the whole time: the fleet still runs to its end
+    assert all(s.endswith("SUCCEEDED") for s in exits.values())
+    store.release.set()
+    assert states.close(5.0)
+
+
+class _Lost(BaseException):  # the shape of store_lock.LockLost
+    def __init__(self, token, by):
+        super().__init__(f"lock token {token} is fenced by token {by}")
+        self.token, self.by = token, by
+
+
+class _Unconfirmed(BaseException):  # the shape of store_lock.LockUnconfirmed
+    pass
+
+
+class _Lock:
+    def __init__(self, token):
+        self.token, self.raises = token, None
+
+    def guard(self):
+        if self.raises is not None:
+            raise self.raises
+
+
+def test_a_fenced_controller_writes_no_record(tmp_path):
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    objects = DirectoryObjectStore(tmp_path)
+    old_lock, logged = _Lock(1), []
+    old = lc.IslandStateStore(objects, fence=old_lock, log=logged.append)
+    old.write(0, "running", name="r-l0")
+    assert lc.IslandStateStore(objects).read(0)["fence_token"] == 1
+    old_lock.raises = _Unconfirmed("store did not answer")
+    old.write(0, "recovering")  # not confirmed: skipped, not fenced
+    assert lc.IslandStateStore(objects).read(0)["state"] == "running" and old.fenced is None
+    old_lock.raises = None
+    old.write(0, "recovering")
+    assert lc.IslandStateStore(objects).read(0)["state"] == "recovering"
+    new = lc.IslandStateStore(objects, fence=_Lock(2))  # a restarted launcher took the lock over
+    new.write(0, "running", name="r-l0", adopted=True)
+    old_lock.raises = _Lost(1, 2)
+    old.write(0, "abandoned")
+    old_lock.raises = None  # sticky: a fenced controller never writes again
+    old.write(0, "done")
+    record = lc.IslandStateStore(objects).read(0)
+    assert record["state"] == "running" and record["fence_token"] == 2
+    assert old.fenced is not None and any("fenced" in m for m in logged)
+    assert old.request_stop(0, "operator")  # the STOP channel is not fenced
 
 
 if __name__ == "__main__":

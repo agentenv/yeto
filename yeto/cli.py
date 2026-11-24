@@ -773,8 +773,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     infra.add_argument(
         "--island-lifecycle", choices=["auto", "on", "off"], default="auto",
-        help="keep each trainer island's state in the run store (fleet/trainers/<k>/state.json), adopt "
-        "running islands after a launcher restart and stop one island on its own fleet/trainers/<k>/STOP: "
+        help="keep each trainer island's state in the run store (fleet/trainers/<k>/state.json) and stop "
+        "one island on its own fleet/trainers/<k>/STOP: "
         "'auto' (default) for an RL launch of two or more trainer islands, 'on' for any launch with a run "
         "store, 'off' never",
     )
