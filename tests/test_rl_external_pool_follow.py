@@ -103,6 +103,22 @@ def test_an_island_trainer_option_reaches_only_its_island():
     assert sample_roles.resolve(t1, groups_per_round=4).release_every == 2
 
 
+def test_an_island_sample_wait_reaches_only_its_island():
+    args = _prepared(*SHARDS, "--rl-island-sample-wait-s", "1:1200")
+    plan, ((_r0, t0), (r1, t1)) = _islands(args)
+    assert t0.rl_sample_wait_s == 900 and t1.rl_sample_wait_s == 1200
+    assert sample_roles.resolve(t0, groups_per_round=4).wait_s == 900
+    assert sample_roles.resolve(t1, groups_per_round=4).wait_s == 1200
+    assert "--rl-sample-wait-s 1200.0" in r1["learner_command"]
+    assert "--rl-island-sample-wait-s" not in r1["learner_command"]  # a launch flag, never an island flag
+
+
+@pytest.mark.parametrize("value", ["1:0", "1:-5", "1:soon", "1:nan"])
+def test_a_bad_island_sample_wait_is_refused(value):
+    with pytest.raises(ValueError, match="--rl-island-sample-wait-s .*seconds > 0"):
+        sample_roles.island_trainer_overrides(_args(rl_island_sample_wait_s=[value]), 2)
+
+
 def test_without_the_flag_trainers_keep_the_shared_store_and_lanes():
     i = TRAINERS.index("--rl-sampler-follow")
     args = _prepared(base=TRAINERS[:i] + TRAINERS[i + 2:])

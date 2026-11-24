@@ -512,7 +512,7 @@ A complete example: `examples/fleet/run.two-islands.json`.
 | `islands[].name` | The island's name (letters, digits, `.`, `_`, `-`; unique). |
 | `islands[].trainer.gpu` | The island trainer's cluster, one `--gpu` entry (`cloud:[NODESx]COUNTxGPU[@region]`). Islands may use different GPUs and regions. Required. |
 | `islands[].trainer.usd_per_h` | The island trainer's price per hour (the spend estimate sums the islands). |
-| `islands[].trainer.argv` | Only `--rl-release-every N` and `--rl-max-policy-age N`: this island's values (they override `fleet.trainer_argv`). |
+| `islands[].trainer.argv` | Only `--rl-release-every N`, `--rl-max-policy-age N` and `--rl-sample-wait-s S`: this island's values (they override `fleet.trainer_argv`; the sample wait also overrides `breakers.trainer.sample_wait.timeout_s`, which the compile otherwise passes to every trainer as `--rl-sample-wait-s`). |
 | `islands[].trainer.step_s` | Optional: an estimate of one local version (training step) of this island's trainer, in seconds (overrides `fleet.step_s`). The preflight's release cadence check reads it; nothing else does. |
 | `islands[].samplers` | The island's pools, each an entry of the run config's `samplers` list format. Every pool needs `shard_base`, `run_prefix` and `shard_limit`, and uses the store data path (`data_path` `r2`). A pool config file may serve several islands. An entry with `"kind": "miles"` is a Miles sampler island of the launch instead (see below). |
 | `fleet.trainer_argv` | The `yeto launch` arguments every trainer shares. It must name `--rl-checkpoint-store` (the run's `store`) and must not set `--gpu`, `--rl-sample-role`, `--rl-sampler-follow`, `--rl-buffer-shards`, `--rl-island-*` or `--rl-single-island-no-sync`: `run up` writes those. Required. |
@@ -562,6 +562,30 @@ What `run up` makes of it:
   `expert_selection_sha256` or `expert_trainable_sha256` refuses every release
   without that manifest, so the preflight refuses such a spec next to a
   generic partial-experts trainer (fleet or not): remove the two fields.
+- The preflight checks each island: its pools' shards are in its
+  `--rl-island-buffer-shards`, they write `trainer<k>` of their own island, they
+  record the same `rollout_fields` (and what the trainer trains on: R3 routed
+  experts, score_centering top-K), and their engine is a vLLM / SGLang server
+  that loads the release form (above). It prints the syncer's region and the
+  fleet's hourly budget estimate (pools + each island's trainer +
+  `syncer.usd_per_h`), and refuses a `breakers.pools` key that is not a
+  compiled pool name (`i<k>-<name>`).
+- The monitor judges each island in its own `trainer<k>`: the first-group wait
+  waits only for the islands without a group; `run.first_group`,
+  `run.starvation` and `run.release_stall` use each island's own thresholds and
+  report with the island's scope; each island's data ends once its pools
+  finished and the task ledger has nothing left for it (its shards are sealed),
+  and the fleet's once every island's did. `run.budget` (pools + every island
+  trainer for the launch's hours + the syncer) and `run.wall_clock` stop the
+  whole fleet. A stop trip of one island stops that island only: the fleet's one
+  `yeto launch` cannot end a single trainer island, so its pools are stopped
+  (`pool-stop`) and its trainer starves until its `trainer.sample_wait` ends it
+  and the launcher gives it up; once no island runs, the launch is stopped.
+  A later `yeto run up` of the run keeps such an island stopped (its pools are
+  not driven again; remove `fleet_island_stops.<k>` from the run's
+  `state.json` to run it again), while a fleet-wide stop (`run.trainer_exit`,
+  `run.budget`, ...) ended only the launch it replaces. `yeto run status` shows
+  each island under `fleet`.
 
 #### Miles sampler islands next to external pools
 

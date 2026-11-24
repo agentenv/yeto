@@ -47,8 +47,11 @@ island's trainer and the syncer; ``samplers`` lists every island's pools) plus a
 The trainer argv is ``fleet.trainer_argv`` with ``--gpu`` (every island's cluster,
 in island order), ``--rl-sample-role trainer --rl-sampler-follow trainer``, one
 ``--rl-island-buffer-shards k:<shards>`` per island (the shards of its pools) and
-the island's ``--rl-island-release-every`` / ``--rl-island-max-policy-age``. Its
-``usd_per_h`` is the sum of the islands'.
+the island's ``--rl-island-release-every`` / ``--rl-island-max-policy-age`` /
+``--rl-island-sample-wait-s``. The run config's ``breakers.trainer.sample_wait.timeout_s``
+becomes ``--rl-sample-wait-s`` (every trainer reads the flag, not the section); an
+island's own ``--rl-sample-wait-s`` overrides it for that island. Its ``usd_per_h`` is
+the sum of the islands'.
 
 Miles sampler islands in a fleet island. An island's ``samplers`` may also list
 ``{"kind": "miles", "name": ..., "gpu": "modal:1x1xl40s", "usd_per_h": ...}``
@@ -112,7 +115,11 @@ FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h
 ISLAND_KEYS = frozenset({"name", "trainer", "samplers"})
 ISLAND_TRAINER_KEYS = frozenset({"gpu", "usd_per_h", "argv", "step_s"})
 # the only trainer flags an island sets for itself (each becomes --rl-island-<flag> k:N)
-ISLAND_FLAGS = {"--rl-release-every": "release_every", "--rl-max-policy-age": "max_policy_age"}
+ISLAND_FLAGS = {"--rl-release-every": "release_every", "--rl-max-policy-age": "max_policy_age",
+                "--rl-sample-wait-s": "sample_wait_s"}
+# island flags whose value is seconds (a number > 0) rather than a whole number >= 1
+SECONDS_FLAGS = frozenset({"--rl-sample-wait-s"})
+SAMPLE_WAIT_FLAG = "--rl-sample-wait-s"
 # flags the compile writes; fleet.trainer_argv must not set them
 GENERATED_FLAGS = ("--gpu", "--rl-sample-role", "--rl-sampler-follow", "--rl-buffer-shards")
 GENERATED_PREFIX = "--rl-island-"
@@ -202,6 +209,7 @@ class FleetIsland:
     pools: tuple[FleetPool, ...] = ()
     miles_samplers: tuple[FleetMilesSampler, ...] = ()
     trainer_usd_per_h: float | None = None  # its trainer alone (usd_per_h without Miles samplers)
+    sample_wait_s: float | None = None  # its trainer's own --rl-sample-wait-s (None: the fleet's)
 
     @property
     def learner(self) -> int:
@@ -224,7 +232,7 @@ class FleetIsland:
                 "store": self.store, "gpu": self.gpu, "usd_per_h": self.usd_per_h,
                 "trainer_usd_per_h": self.trainer_usd_per_h,
                 "release_every": self.release_every, "max_policy_age": self.max_policy_age,
-                "buffer_shards": self.buffer_shards(), "pools": [p.to_json() for p in self.pools],
+                "sample_wait_s": self.sample_wait_s, "buffer_shards": self.buffer_shards(), "pools": [p.to_json() for p in self.pools],
                 "miles_samplers": [m.to_json() for m in self.miles_samplers]}
 
 
@@ -264,8 +272,9 @@ class FleetPlan:
         for i in self.islands:
             trainer_price = i.trainer_usd_per_h if i.miles_samplers else i.usd_per_h  # the trainer alone
             price = "?" if trainer_price is None else f"${trainer_price:g}/h"
-            extra = "".join(f", {flag} {value}" for flag, value in (("release_every", i.release_every),
-                                                                    ("max_policy_age", i.max_policy_age))
+            extra = "".join(f", {flag} {value:g}" for flag, value in (("release_every", i.release_every),
+                                                                      ("max_policy_age", i.max_policy_age),
+                                                                      ("sample_wait_s", i.sample_wait_s))
                             if value is not None)
             miles = (f", Miles samplers {', '.join(m.name for m in i.miles_samplers)}" if i.miles_samplers else "")
             out.append(f"fleet: island {i.index} {i.name}: learner {i.learner}, store {i.substore}/ ({i.store}), "
@@ -289,7 +298,7 @@ class FleetPlan:
         islands = tuple(
             FleetIsland(index=int(i["index"]), name=str(i["name"]), gpu=str(i["gpu"]), usd_per_h=i.get("usd_per_h"),
                         store=str(i["store"]), release_every=i.get("release_every"),
-                        max_policy_age=i.get("max_policy_age"),
+                        max_policy_age=i.get("max_policy_age"), sample_wait_s=i.get("sample_wait_s"),
                         pools=tuple(FleetPool(name=str(p["name"]), source_name=str(p["source_name"]),
                                               provider=str(p["provider"]), shard_base=str(p["shard_base"]),
                                               shard_limit=int(p["shard_limit"]), run_prefix=str(p["run_prefix"]),
@@ -328,10 +337,11 @@ def _flag(arg: str) -> str:
     return arg.split("=", 1)[0]
 
 
-def _flag_values(argv: list[str], where: str) -> dict[str, int]:
+def _flag_values(argv: list[str], where: str) -> dict[str, Any]:
     """The island trainer argv: ``--rl-release-every N`` / ``--rl-max-policy-age N``
-    (or ``--flag=N``), each at most once, N a whole number >= 1."""
-    out: dict[str, int] = {}
+    (or ``--flag=N``), N a whole number >= 1, and ``--rl-sample-wait-s S`` (seconds > 0),
+    each at most once."""
+    out: dict[str, Any] = {}
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -345,13 +355,50 @@ def _flag_values(argv: list[str], where: str) -> dict[str, int]:
             raw, i = argv[i + 1], i + 2
         else:
             raise _err(f"{where}: {flag} needs a value")
-        if not raw.isdigit() or int(raw) < 1:
-            raise _err(f"{where}: {flag} must be a whole number >= 1 (got {raw!r})")
         key = ISLAND_FLAGS[flag]
         if key in out:
             raise _err(f"{where}: {flag} repeats")
-        out[key] = int(raw)
+        out[key] = _seconds(raw, f"{where}: {flag}") if flag in SECONDS_FLAGS else _whole(raw, f"{where}: {flag}")
     return out
+
+
+def _whole(raw: str, where: str) -> int:
+    if not raw.isdigit() or int(raw) < 1:
+        raise _err(f"{where} must be a whole number >= 1 (got {raw!r})")
+    return int(raw)
+
+
+def _seconds(raw: Any, where: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = math.nan
+    if isinstance(raw, bool) or not math.isfinite(value) or value <= 0:
+        raise _err(f"{where} must be a number of seconds > 0 (got {raw!r})")
+    return value
+
+
+def _sample_wait(cfg: dict[str, Any], trainer_argv: list[str]) -> float | None:
+    """The fleet's ``--rl-sample-wait-s`` the compile adds to the launch: the run config's
+    ``breakers.trainer.sample_wait.timeout_s`` (as the run's preflight resolves it), which
+    no trainer reads otherwise (each reads the flag); None when the section does not set it
+    or ``fleet.trainer_argv`` sets the flag itself (a disagreeing flag is refused)."""
+    section = cfg.get("breakers")
+    if not isinstance(section, dict) or not section:
+        return None
+    from yeto.breakers.resolve import Sources, resolve  # noqa: PLC0415
+
+    entry = resolve(Sources(section=section), layers=("trainer",), strict=False).entry("trainer.sample_wait")
+    if entry.source.kind != "breakers":
+        return None
+    wait = _seconds(entry.params["timeout_s"], entry.source.location)
+    named = _argv_value(trainer_argv, SAMPLE_WAIT_FLAG)
+    if named is None:
+        return wait
+    if _seconds(named, f"fleet.trainer_argv {SAMPLE_WAIT_FLAG}") != wait:
+        raise _err(f"{entry.source.location} = {wait:g} but fleet.trainer_argv {SAMPLE_WAIT_FLAG} = {named}: "
+                   f"set one (an island's own trainer.argv {SAMPLE_WAIT_FLAG} overrides both)")
+    return None
 
 
 def _string_list(value: Any, where: str) -> list[str]:
@@ -800,7 +847,8 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
         rows.append(FleetIsland(index=k, name=name, gpu=gpu, usd_per_h=total, store=substore_uri(store, substore(k)),
                                 release_every=flags.get("release_every"),
                                 max_policy_age=flags.get("max_policy_age"), pools=tuple(pools),
-                                miles_samplers=tuple(miles), trainer_usd_per_h=price))
+                                miles_samplers=tuple(miles), trainer_usd_per_h=price,
+                                sample_wait_s=flags.get("sample_wait_s")))
     offsets = share_offsets(shared)
     for out in samplers:
         if out["name"] in offsets:  # a port range several pools share: one block of it each
@@ -819,6 +867,9 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     miles_rows = [(i, m) for i in rows for m in i.miles_samplers]
     argv = [*trainer_argv, "--gpu", ",".join([i.gpu for i in rows] + [m.gpu for _i, m in miles_rows]),
             "--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer"]
+    wait = _sample_wait(cfg, trainer_argv)
+    if wait is not None:  # every trainer island's sample wait, unless the island sets its own
+        argv += [SAMPLE_WAIT_FLAG, f"{wait:g}"]
     for i in rows:
         if i.pools:  # an island with Miles samplers only names no pool shard
             argv += ["--rl-island-buffer-shards", f"{i.index}:{','.join(i.pool_shards())}"]
@@ -834,6 +885,8 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
             argv += ["--rl-island-release-every", f"{i.index}:{i.release_every}"]
         if i.max_policy_age is not None:
             argv += ["--rl-island-max-policy-age", f"{i.index}:{i.max_policy_age}"]
+        if i.sample_wait_s is not None:
+            argv += ["--rl-island-sample-wait-s", f"{i.index}:{i.sample_wait_s:g}"]
     prices = [i.usd_per_h for i in rows]
     syncer = cfg.get("syncer") if isinstance(cfg.get("syncer"), dict) else {}
     plan = FleetPlan(run=str(cfg["run"]), store=store, dispense=dispense, islands=tuple(rows),
