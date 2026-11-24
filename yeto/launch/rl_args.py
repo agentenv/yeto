@@ -688,8 +688,14 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
                          "(it takes the generic syncer flags)")
     quorum = args.rl_sync_quorum
     if quorum is not None:
-        if not 1 <= quorum <= num_islands:
-            raise ValueError(f"--rl-sync-quorum must be between 1 and the {num_islands} islands")
+        # --rl-sync-max-learners: the syncer's count quorum follows the islands in the
+        # pool (min(K, islands)), so K may be up to that hard cap
+        max_learners = getattr(args, "rl_sync_max_learners", None)
+        cap = num_islands if max_learners is None else max(num_islands, int(max_learners))
+        if not 1 <= quorum <= cap:
+            raise ValueError(f"--rl-sync-quorum must be between 1 and the {num_islands} islands"
+                             if max_learners is None else
+                             f"--rl-sync-quorum must be between 1 and --rl-sync-max-learners {cap}")
         args.quorum = quorum
     grace_ms = args.rl_sync_grace_ms
     if grace_ms is not None:

@@ -93,6 +93,11 @@ pub struct MembershipConfig {
     /// None: a push lagging more than `--max-base-lag` is refused
     /// (`carry_lag_exceeded`), the existing behavior.
     pub stale_lag: Option<StaleLag>,
+    /// The count quorum K follows the islands currently in the pool: a round
+    /// needs min(K, its expected islands), and K may be set up to
+    /// `max_learners` (the hard cap) instead of `--learners`. Needs
+    /// `max_learners` (islands join past the launch). Off: K is fixed.
+    pub quorum_follows_members: bool,
 }
 
 /// Soft lag window: a push whose base lags by `from < lag <= ceiling`
@@ -119,6 +124,7 @@ impl Default for MembershipConfig {
             max_learners: None,
             final_grace: None,
             stale_lag: None,
+            quorum_follows_members: false,
         }
     }
 }
@@ -140,6 +146,30 @@ impl MembershipConfig {
             QuorumRule::Count => 1,
             QuorumRule::Capacity { q_min, .. } => q_min.max(1) as usize,
         }
+    }
+
+    /// Largest count quorum: `max_learners` when the quorum follows the
+    /// members, else the launched `learners`.
+    pub fn quorum_cap(&self, learners: u32) -> u32 {
+        if self.quorum_follows_members { self.id_limit(learners) } else { learners }
+    }
+
+    /// The count quorum of a round expecting `members` islands: K, or with
+    /// `quorum_follows_members` min(K, members) (at least 1).
+    pub fn count_quorum(&self, quorum: u32, members: usize) -> usize {
+        if self.quorum_follows_members {
+            (quorum as usize).min(members).max(1)
+        } else {
+            quorum as usize
+        }
+    }
+
+    /// Fewest of the `active` connected islands needed to (re)launch a round:
+    /// [`Self::min_launch_members`], at most `active` when the quorum follows
+    /// the members.
+    pub fn launch_members(&self, quorum: u32, active: usize) -> usize {
+        let required = self.min_launch_members(quorum);
+        if self.quorum_follows_members { required.min(active.max(1)) } else { required }
     }
 
     /// Fewest connected islands needed to (re)launch a round.
@@ -208,6 +238,14 @@ impl MembershipConfig {
         }
         if let Some(max) = self.max_learners {
             ensure!(max >= learners, "--max-learners must be >= --learners");
+        }
+        if self.quorum_follows_members {
+            ensure!(self.max_learners.is_some(), "--quorum-follows-members needs --max-learners");
+            ensure!(
+                quorum <= self.id_limit(learners),
+                "--quorum {quorum} must not exceed --max-learners {}",
+                self.id_limit(learners)
+            );
         }
         if let Some(stale) = self.stale_lag {
             ensure!(stale.from > 0, "--stale-lag-ceiling needs a positive --max-base-lag");
@@ -754,6 +792,20 @@ mod tests {
         let caps = MembershipConfig { capacities: [(5, 1.0)].into_iter().collect(), ..Default::default() };
         assert!(caps.validate(2, 1).is_err());
         assert!(MembershipConfig { max_learners: Some(8), ..caps }.validate(2, 1).is_ok());
+    }
+
+    #[test]
+    fn a_following_quorum_tracks_the_members_up_to_max_learners() {
+        let fixed = MembershipConfig { max_learners: Some(4), ..Default::default() };
+        assert_eq!((fixed.quorum_cap(2), fixed.count_quorum(2, 1), fixed.launch_members(2, 1)), (2, 2, 2));
+        let follows = MembershipConfig { quorum_follows_members: true, ..fixed.clone() };
+        assert_eq!(follows.quorum_cap(2), 4);
+        assert_eq!((follows.count_quorum(3, 2), follows.count_quorum(3, 4), follows.count_quorum(3, 0)), (2, 3, 1));
+        assert_eq!((follows.launch_members(3, 2), follows.launch_members(3, 5)), (2, 3));
+        assert!(follows.validate(2, 4).is_ok());
+        assert!(follows.validate(2, 5).is_err(), "K is capped by --max-learners");
+        let unbounded = MembershipConfig { quorum_follows_members: true, ..Default::default() };
+        assert!(unbounded.validate(2, 1).is_err(), "needs --max-learners");
     }
 
     #[test]

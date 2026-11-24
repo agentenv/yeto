@@ -258,6 +258,11 @@ struct Args {
     /// first --learners). Unset = 0..--learners.
     #[arg(long)]
     max_learners: Option<u32>,
+    /// Fragment rounds with --max-learners: the count quorum follows the
+    /// islands in the pool (a round needs min(--quorum, its islands)) and
+    /// --quorum may be up to --max-learners.
+    #[arg(long, default_value_t = false)]
+    quorum_follows_members: bool,
     /// HMAC-SHA256 island key; falls back to the YETO_ISLAND_HMAC_KEY
     /// environment variable. Every HELLO must carry an HMAC under this key.
     #[arg(long)]
@@ -424,6 +429,7 @@ fn parse_membership(args: &Args) -> anyhow::Result<membership::MembershipConfig>
         carry_gamma: args.carry_gamma.unwrap_or(1.0),
         capacities,
         max_learners: args.max_learners,
+        quorum_follows_members: args.quorum_follows_members,
         final_grace: args.final_grace_s.map(std::time::Duration::from_secs),
         stale_lag: match (args.stale_lag_ceiling, args.stale_lag_half_life) {
             (Some(ceiling), Some(half_life)) => Some(membership::StaleLag {

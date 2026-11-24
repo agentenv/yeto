@@ -9,6 +9,7 @@ refuses the mismatch before anything is ordered.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -161,6 +162,7 @@ def test_an_estimated_layout_warns_instead_of_refusing(monkeypatch, capsys):
 # -- a new or migrated fleet island: its layout must be the fleet's (--rl-fleet-trainer-shape)
 
 TP4_ISLAND = "modal:8xh100"  # 4 trainer GPUs (--rl-rollout-gpus 4): TP4, DP1
+TP4 = ("--tensor-parallel", "4", "--rl-rollout-gpus", "4")
 
 
 def _tp4_fragments() -> int:
@@ -171,41 +173,89 @@ def test_an_island_of_another_shape_is_refused_at_dry_run_with_both_layouts(monk
     fragments = _tp4_fragments()
     tp2 = L.offline_layout(QWEN3_4B, tp=2, minimum_fragments=fragments, matrix_merge="avg")
     with pytest.raises(ValueError) as refused:
-        _prepare(fragments, monkeypatch, gpu=TP4_ISLAND,
-                 extra=("--tensor-parallel", "4", "--rl-rollout-gpus", "4", "--rl-fleet-trainer-shape", "2"))
+        _prepare(fragments, monkeypatch, gpu=TP4_ISLAND, extra=(*TP4, "--rl-fleet-trainer-shape", "2"))
     message = str(refused.value)
-    assert "differs from the fleet's" in message
+    assert "trainer shape differs from the fleet's: tp 2 (fleet) vs 4 (this island)" in message
     assert f"fleet islands TP2 x PP1: {tp2.fragments} fragments over 2 trainer rank(s)" in message
     assert f"this island TP4 x PP1: {fragments} fragments over 4 trainer rank(s)" in message
-    assert message.endswith("launch it at TP2 x PP1")
+    assert message.endswith("launch it with the fleet's shape")
 
 
 def test_an_island_of_the_fleet_shape_launches_exactly_as_before(monkeypatch, capsys):
+    from yeto.launch.fragment_preflight import trainer_shape_spec
     from yeto.launcher import dry_run_plan
 
     def launch(extra):
         args, _ = _prepare(10, monkeypatch, extra=extra)
-        return json.dumps(dry_run_plan(args), sort_keys=True, default=str), capsys.readouterr()
+        return args, json.dumps(dry_run_plan(args), sort_keys=True, default=str), capsys.readouterr()
 
-    assert launch(("--rl-fleet-trainer-shape", "2x1")) == launch(())
+    fleet, *unchecked = launch(())
+    spec = trainer_shape_spec(fleet)  # what a fleet passes for its next island
+    assert spec == "tp=2,pp=1,ep=1,cp=1,experts=0,expert_selection=none,expert_full=0"
+    for value in ("2x1", spec):
+        assert launch(("--rl-fleet-trainer-shape", value))[1:] == tuple(unchecked)
 
 
 def test_without_the_model_config_the_shapes_themselves_are_compared(monkeypatch):
-    with pytest.raises(ValueError, match=r"trainer shape TP4 x PP1 differs from the fleet's TP2 x PP1 "
-                                         r"\(the layouts are not computable offline"):
-        _prepare(4, monkeypatch, config=None, gpu=TP4_ISLAND,
-                 extra=("--tensor-parallel", "4", "--rl-rollout-gpus", "4", "--rl-fleet-trainer-shape", "2"))
+    with pytest.raises(ValueError, match=r"tp 2 \(fleet\) vs 4 \(this island\)\. Fleet islands TP2 x PP1 "
+                                         r"x EP1 x CP1; this island TP4 x PP1 x EP1 x CP1\. Islands"):
+        _prepare(4, monkeypatch, config=None, gpu=TP4_ISLAND, extra=(*TP4, "--rl-fleet-trainer-shape", "2"))
     args, _ = _prepare(4, monkeypatch, config=None, extra=("--rl-fleet-trainer-shape", "2"))
     assert args.rl_fleet_trainer_shape == "2"
+
+
+QWEN3_MOE = {**QWEN3_4B, "model_type": "qwen3_moe", "architectures": ["Qwen3MoeForCausalLM"],
+             "num_experts": 128, "num_experts_per_tok": 8, "moe_intermediate_size": 768}
+
+
+def _moe_args(tmp_path, **fields):
+    from types import SimpleNamespace
+
+    model = tmp_path / "moe"
+    model.mkdir(exist_ok=True)
+    (model / "config.json").write_text(json.dumps(fields.pop("config", QWEN3_MOE)))
+    base = dict(model=str(model), model_revision="a" * 40, rl_sync_preset="full-parameter",
+                rl_sync_layout="shape-bound", tensor_parallel=2, pipeline_parallel=1, expert_parallel=8,
+                context_parallel=1, rl_expert_selection=None, expert_full_count=0, fragments=4,
+                rl_backend="miles")
+    return SimpleNamespace(**{**base, **fields})
+
+
+def test_moe_islands_compare_ep_cp_experts_and_the_expert_selection(tmp_path):
+    from yeto.launch.fragment_preflight import check_fleet_shape, trainer_shape_spec
+
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps({"experts": [0, 1, 2, 3]}))
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps({"experts": [4, 5, 6, 7]}))
+    fleet = trainer_shape_spec(_moe_args(tmp_path, rl_expert_selection=str(selection)))
+    assert "ep=8" in fleet and "experts=128" in fleet and "expert_selection=" in fleet
+    check_fleet_shape(_moe_args(tmp_path, rl_expert_selection=str(selection), rl_fleet_trainer_shape=fleet))
+    for change, field in [(dict(expert_parallel=4), "ep 8 (fleet) vs 4"),
+                          (dict(context_parallel=2), "cp 1 (fleet) vs 2"),
+                          (dict(rl_expert_selection=str(other)), "expert_selection"),
+                          (dict(rl_expert_selection=None), "expert_selection"),
+                          (dict(expert_full_count=4), "expert_full 0 (fleet) vs 4"),
+                          (dict(config={**QWEN3_MOE, "num_experts": 64}), "experts 128 (fleet) vs 64")]:
+        island = _moe_args(tmp_path, **{"rl_expert_selection": str(selection), **change,
+                                        "rl_fleet_trainer_shape": fleet})
+        with pytest.raises(ValueError, match=re.escape(f"trainer shape differs from the fleet's: {field}")):
+            check_fleet_shape(island)
+    # a shape-free layout spans the parallel dims, not the trained experts
+    free = dict(rl_sync_layout="shape-free", rl_expert_selection=str(selection), rl_fleet_trainer_shape=fleet)
+    check_fleet_shape(_moe_args(tmp_path, **free, expert_parallel=4))
+    with pytest.raises(ValueError, match="expert_selection"):
+        check_fleet_shape(_moe_args(tmp_path, **{**free, "rl_expert_selection": str(other)}))
 
 
 def test_the_fleet_shape_needs_the_full_parameter_preset_and_a_valid_shape(monkeypatch):
     from yeto.launch.fragment_preflight import parse_trainer_shape
     from yeto.launcher import _prepare_rl_args
 
-    assert parse_trainer_shape("2") == (2, 1) and parse_trainer_shape("4x2") == (4, 2)
-    for bad in ("", "0", "2x", "tp2", "2x2x2"):
-        with pytest.raises(ValueError, match="must be TP or TPxPP"):
+    assert parse_trainer_shape("2")["tp"] == "2" and parse_trainer_shape("4x2")["pp"] == "2"
+    assert parse_trainer_shape("tp=2,ep=8")["ep"] == "8" and parse_trainer_shape("tp=2")["ep"] == "1"
+    for bad in ("", "0", "2x", "tp2", "2x2x2", "tp=0", "dp=2", "ep=x", "tp="):
+        with pytest.raises(ValueError, match="--rl-fleet-trainer-shape"):
             parse_trainer_shape(bad)
     args = _launcher_args("ports", ("--rl-sync-preset", "decoupled", "--fragments", "4",
                                     "--local-rl-rounds-per-sync", "2", "--rl-fleet-trainer-shape", "2"),

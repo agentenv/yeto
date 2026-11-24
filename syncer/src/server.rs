@@ -1831,8 +1831,12 @@ fn validate_config(cfg: &Config) -> Result<()> {
     if cfg.quorum == 0 {
         bail!("--quorum must be positive");
     }
-    if cfg.quorum > cfg.learners {
-        bail!("--quorum must not exceed --learners");
+    if cfg.quorum > cfg.membership.quorum_cap(cfg.learners) {
+        bail!(if cfg.membership.quorum_follows_members {
+            "--quorum must not exceed --max-learners"
+        } else {
+            "--quorum must not exceed --learners"
+        });
     }
     if cfg.quorum_timeout_s == 0 {
         bail!("--quorum-timeout-s must be positive");
@@ -4652,7 +4656,7 @@ async fn scheduler(
                     num_fragments as usize,
                     step_rates.max_step_secs_for(&expected_members),
                 );
-            let launch_quorum = cfg.quorum as usize;
+            let launch_quorum = cfg.membership.count_quorum(cfg.quorum, expected_members.len());
             if !send_pull_until_cutoff(&groups, &pull, &budget_cutoff).await {
                 cutoff_established = true;
                 break 'outer;
@@ -4682,6 +4686,7 @@ async fn scheduler(
                 pushes: HashMap::new(),
                 carried: Vec::new(),
                 carry_answers: cfg.carry_answers_round,
+                follow_members: cfg.membership.quorum_follows_members,
                 refused_ahead: Vec::new(),
             });
             if let Some(carry) = late_carry.as_mut() {
@@ -4803,7 +4808,7 @@ async fn scheduler(
                     let groups = ready_groups(groups, |group| group.member, |member| {
                         catch_ups.holds(member) || resends.holds(member)
                     });
-                    let required = cfg.membership.min_launch_members(cfg.quorum);
+                    let required = cfg.membership.launch_members(cfg.quorum, groups.len());
                     let reason = if Instant::now() < r.quorum_deadline { "refused_ahead" } else { "quorum_timeout" };
                     if groups.len() < required {
                         // Retried every second: one record per timed-out attempt.
@@ -4852,7 +4857,7 @@ async fn scheduler(
                     }
                     r.expected_members = groups.iter().map(|group| group.member).collect();
                     r.expected_members.sort_unstable();
-                    r.quorum_size = cfg.quorum as usize;
+                    r.quorum_size = cfg.membership.count_quorum(cfg.quorum, r.expected_members.len());
                     r.base_version = st.versions[r.p];
                     r.attempt += 1;
                     r.pull = encode_pull(r.p, r.t, r.attempt);
@@ -5960,6 +5965,9 @@ struct Round {
     carried: Vec<(Member, Push)>,
     /// `Config::carry_answers_round`, frozen at launch.
     carry_answers: bool,
+    /// `MembershipConfig::quorum_follows_members`, frozen at launch: an
+    /// island that leaves the round lowers its count quorum with it.
+    follow_members: bool,
     /// Expected islands whose push for this attempt was refused as
     /// `FutureBase`: its base is ahead of this round's, which happens only
     /// after the syncer resumed from a checkpoint older than the islands'
@@ -6003,6 +6011,9 @@ impl Round {
         }
         let before = self.expected_members.len();
         self.expected_members.retain(|expected| *expected != member);
+        if self.follow_members {
+            self.quorum_size = self.quorum_size.min(self.expected_members.len()).max(1);
+        }
         before != self.expected_members.len()
     }
 }
@@ -10911,6 +10922,7 @@ mod tests {
             fold: None,
             carried: Vec::new(),
             carry_answers: false,
+            follow_members: false,
             refused_ahead: Vec::new(),
             pushes: HashMap::from([(
                 member,
@@ -10997,6 +11009,7 @@ mod tests {
             fold: None,
             carried: Vec::new(),
             carry_answers: false,
+            follow_members: false,
             refused_ahead: Vec::new(),
             pushes: HashMap::from([(
                 member,
@@ -11064,6 +11077,7 @@ mod tests {
             fold: None,
             carried: Vec::new(),
             carry_answers: false,
+            follow_members: false,
             refused_ahead: Vec::new(),
             pushes,
         }
@@ -13686,6 +13700,7 @@ mod tests {
             fold: None,
             carried: Vec::new(),
             carry_answers: false,
+            follow_members: false,
             refused_ahead: Vec::new(),
             pushes: HashMap::new(),
         }
@@ -15257,6 +15272,23 @@ mod tests {
         let mut round = test_round(vec![answered]);
         round.pushes.insert(answered, test_push(5));
         assert!(!round.forget_unanswered(answered), "an accepted push keeps its slot");
+    }
+
+    #[test]
+    fn a_following_quorum_drops_with_an_island_that_leaves_the_round() {
+        let (a, b, c) = (member(0, 10), member(1, 20), member(2, 30));
+        for follow in [false, true] {
+            let mut round = test_round(vec![a, b, c]);
+            round.quorum_size = 3;
+            round.follow_members = follow;
+            round.pushes.insert(a, test_push(5));
+            round.pushes.insert(c, test_push(5));
+            assert!(!round.quorum_reached());
+            assert!(round.forget_unanswered(b));
+            // following: the two remaining islands both answered; fixed: K stays 3
+            assert_eq!(round.quorum_reached(), follow);
+            assert_eq!(round.quorum_size, if follow { 2 } else { 3 });
+        }
     }
 
     fn leased_registry(lease_s: u64) -> Registry {

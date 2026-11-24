@@ -103,8 +103,9 @@ def test_quorum_theta_replaces_the_count_quorum(preset):
 def test_max_learners_reaches_the_syncer(preset):
     _, baseline = _plan(preset + QUORUM + ("--rl-sync-island-lease-s", "150"))
     _, plan = _plan(preset + QUORUM + ("--rl-sync-max-learners", "5"))
-    assert " --island-lease-s 150.0 --max-learners 5 --syncer-epoch 0" in _syncer(plan)
-    assert _syncer(plan).replace(" --max-learners 5", "", 1) == _syncer(baseline)
+    follows = " --max-learners 5 --quorum-follows-members"
+    assert f" --island-lease-s 150.0{follows} --syncer-epoch 0" in _syncer(plan)
+    assert _syncer(plan).replace(follows, "", 1) == _syncer(baseline)
     # full-parameter islands bind the roster 0..4 into their session contract;
     # the other presets' islands carry no roster, so their commands stay the same
     roster = " --sync-max-learners 5" if preset == FULL_ASYNC else ""
@@ -112,6 +113,13 @@ def test_max_learners_reaches_the_syncer(preset):
         assert roster in pooled and pooled.replace(roster, "", 1) == fixed
     with pytest.raises(ValueError, match="at least the 3 islands"):
         _plan(preset + QUORUM + ("--rl-sync-max-learners", "2"))
+    # the count quorum follows the pool: K may be up to max learners, not past it
+    _, plan = _plan(preset + ("--rl-sync-quorum", "5", "--rl-sync-max-learners", "5"))
+    assert " --quorum 5 " in _syncer(plan) and follows in _syncer(plan)
+    with pytest.raises(ValueError, match="between 1 and --rl-sync-max-learners 5"):
+        _plan(preset + ("--rl-sync-quorum", "6", "--rl-sync-max-learners", "5"))
+    with pytest.raises(ValueError, match="between 1 and the 3 islands"):
+        _plan(preset + ("--rl-sync-quorum", "4", "--rl-sync-island-lease-s", "30"))
 
 
 @PRESETS

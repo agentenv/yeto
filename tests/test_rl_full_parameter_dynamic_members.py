@@ -39,9 +39,12 @@ from test_rl_full_parameter_async import (  # noqa: F401
 
 LAUNCHED = 2
 MAX_LEARNERS = 3
-# A count quorum of 2 (rounds may merge without an island: a base lag of 1 is
-# admitted); the soft deadline only bounds a hang of a broken run.
-POOL = ("--rl-sync-quorum", "2", "--rl-sync-max-base-lag", "1", "--rl-sync-island-lease-s", "5",
+# A count quorum of 3, above the 2 launched islands: with --rl-sync-max-learners the
+# syncer's quorum follows the islands in the pool (min(K, islands), K capped by
+# max learners), so every round waits for every island there: 2, then 3 after
+# the join, then 2 after the leave. A base lag of 1 is admitted (pipelined
+# rounds); the soft deadline only bounds a hang of a broken run.
+POOL = ("--rl-sync-quorum", "3", "--rl-sync-max-base-lag", "1", "--rl-sync-island-lease-s", "5",
         "--rl-sync-soft-deadline-s", "30", "--rl-sync-max-learners", str(MAX_LEARNERS))
 LR, MU = 0.7, 0.9  # the launcher's outer Nesterov step of the async rounds
 
@@ -133,13 +136,23 @@ def _values(data) -> np.ndarray:
 
 
 def _outer_steps(tape: str) -> list[dict]:
+    """The merged rounds; each weight entry gains the step its delta was pushed for
+    (a late delta carried into a later round of its fragment keeps its own step)."""
     records = [json.loads(line) for line in tape.splitlines() if line.strip()]
-    return sorted((r for r in records if r.get("kind") == "outer_step"), key=lambda r: r["step"])
+    carried = {(r["island_id"], r["step"]): r["missed_step"]
+               for r in records if r.get("kind") == "delta_carried_over"}
+    steps = sorted((r for r in records if r.get("kind") == "outer_step"), key=lambda r: r["step"])
+    for record in steps:
+        # a carried delta is merged against its own (older) base, next to the island's push
+        record["pushed_for"] = [
+            carried[(int(learner), record["step"])] if int(base) < record["base_version"] else record["step"]
+            for learner, base, _ in record["raw_weights"]]
+    return steps
 
 
 def _nesterov(steps: list[dict], *, upto: int | None = None) -> dict[int, np.ndarray]:
-    """The syncer's outer step in f32 over the merged rounds of the tape (in
-    learner order, its raw weights), up to global step ``upto``."""
+    """The syncer's outer step in f32 over the merged rounds of the tape (in its
+    merge order, with its raw weights), up to global step ``upto``."""
 
     lr32, mu32 = np.float32(LR), np.float32(MU)
     params = {fid: _initial(fid) for fid in range(P)}
@@ -148,11 +161,12 @@ def _nesterov(steps: list[dict], *, upto: int | None = None) -> dict[int, np.nda
         if upto is not None and record["step"] > upto:
             break
         fid = record["fragment"]
-        contributions = sorted((int(learner), float(weight)) for learner, _, weight in record["raw_weights"])
-        total = sum(weight for _, weight in contributions)
+        contributions = [(int(learner), float(weight), step) for (learner, _, weight), step
+                         in zip(record["raw_weights"], record["pushed_for"], strict=True)]
+        total = sum(weight for _, weight, _ in contributions)
         merged = np.zeros(NUMEL, dtype=np.float32)
-        for learner, weight in contributions:
-            merged += np.float32(weight / total) * -_delta(learner, record["step"])
+        for learner, weight, step in contributions:  # the syncer's order: pushes, then carried deltas
+            merged += np.float32(weight / total) * -_delta(learner, step)
         buffers[fid] = mu32 * buffers[fid] + merged
         params[fid] = params[fid] - lr32 * (merged + mu32 * buffers[fid])
     return params
@@ -167,7 +181,8 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
                                                       total_steps=total_steps, log_file=log_file)
     tape_path = tmp_path / "tape.jsonl"
     command = " ".join(process.args)
-    assert f"--learners {LAUNCHED} " in command and f"--max-learners {MAX_LEARNERS} " in command
+    assert f"--learners {LAUNCHED} " in command and "--quorum 3 " in command
+    assert f"--max-learners {MAX_LEARNERS} --quorum-follows-members " in command
     clients = {learner: _client(learner, port, profile_hash) for learner in range(LAUNCHED)}
     versions = {learner: [0] * P for learner in range(MAX_LEARNERS)}
     seen: dict[int, set] = {learner: set() for learner in range(MAX_LEARNERS)}
@@ -197,7 +212,13 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
 
     def join():
         """Island 2 (an id past the launch) joins: no INIT, the syncer's catch-up first."""
+        from yeto.launch.learner_ids import allocate_learner_id
+        from yeto.rl.engine.object_store import DirectoryObjectStore
+
         newest = list(versions[0])
+        # its id comes from the run store's island table, past the launched ones
+        assert allocate_learner_id(DirectoryObjectStore(tmp_path / "store"), launched=LAUNCHED,
+                                   max_learners=MAX_LEARNERS, island="joiner") == 2
         fresh = _client(2, port, profile_hash)
         fresh.start()
         caught: dict[int, tuple[int, np.ndarray]] = {}
@@ -219,13 +240,16 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
         versions[2] = [caught[fid][0] for fid in range(P)]
         state.update(joined=newest, catch_up=caught)
 
+    def merged_with_three() -> bool:
+        return any(record["arrived"] == 3 for record in _outer_steps(tape_path.read_text()))
+
     def poll():
         for learner in list(clients):
             drain(learner)
         if state["joined"] is None and min(versions[0]) >= join_at:
             join()
-        if state["joined"] is not None and not state["left"]:
-            # island 1 leaves once island 2 caught up: the rounds then need both 0 and 2
+        if state["joined"] is not None and not state["left"] and merged_with_three():
+            # island 1 leaves once a round merged all three: the rounds then need 0 and 2
             clients[1].send_leave(2)  # stopped: island 1 leaves the pool on purpose
             clients.pop(1).close()
             state["left"] = True
@@ -284,7 +308,9 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
     assert any({int(e[0]) for e in r["raw_weights"]} == {0, 2} for r in after)
     for record in steps:
         assert abs(sum(float(e[2]) for e in record["weights"]) - 1.0) < 1e-9
-        assert not record["timed_out"]
+        assert not record["timed_out"]  # quorum min(3, islands) was reached every round
+    assert all(r["arrived"] == 2 for r in steps[:join_at])  # K=3 over the two launched islands
+    assert any(r["arrived"] == 3 for r in steps)  # all three while island 2 and 1 overlap
 
     # One global cut, equal to the recomputation of every merged round.
     expected = _nesterov(steps)
@@ -315,3 +341,75 @@ def test_an_id_past_max_learners_is_still_refused(syncer_binary, tmp_path):
         outsider.close()
         process.terminate()
         process.wait(timeout=10)
+
+
+# -- learner ids of joining islands (yeto.launch.learner_ids) -----------------------
+
+
+def test_joining_islands_get_unique_ids_that_are_never_reused(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from yeto.launch.island_lifecycle import IslandStateStore
+    from yeto.launch.learner_ids import LearnerIdsExhausted, allocate_learner_id, claim_key
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    IslandStateStore(objects, log=lambda m: None).write(0, "running")  # a launched island's record
+    # eight islands join at once: every one gets its own id, none of the launched ones
+    with ThreadPoolExecutor(8) as pool:
+        ids = list(pool.map(lambda n: allocate_learner_id(objects, launched=2, max_learners=10,
+                                                          island=f"join{n}"), range(8)))
+    assert sorted(ids) == list(range(2, 10))
+    claims = {json.loads(objects.read(claim_key(k)))["island"] for k in ids}
+    assert claims == {f"join{n}" for n in range(8)}
+    with pytest.raises(LearnerIdsExhausted, match="never reused"):
+        allocate_learner_id(objects, launched=2, max_learners=10, island="late")
+    # an island that left keeps its claim: the next run of the table skips its id
+    assert allocate_learner_id(objects, launched=2, max_learners=11, island="later") == 10
+
+
+def test_a_stale_listing_still_cannot_hand_out_one_id_twice(tmp_path):
+    from yeto.launch.learner_ids import allocate_learner_id
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    class StaleListing(DirectoryObjectStore):
+        def list(self, prefix, *, start_after=""):
+            return []  # both joiners listed before either claimed
+
+    objects = StaleListing(tmp_path / "store")
+    first = allocate_learner_id(objects, launched=2, max_learners=4, island="a")
+    second = allocate_learner_id(objects, launched=2, max_learners=4, island="b")
+    assert (first, second) == (2, 3)  # the exclusive create decides, not the listing
+
+
+def test_learner_ids_refuse_a_store_without_an_exclusive_create(tmp_path):
+    from yeto.launch.learner_ids import allocate_learner_id
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    objects.atomic_create = False  # e.g. a check-then-write relay
+    with pytest.raises(ValueError, match="exclusive create"):
+        allocate_learner_id(objects, launched=2, max_learners=4, island="a")
+    with pytest.raises(ValueError, match="launched"):
+        allocate_learner_id(DirectoryObjectStore(tmp_path / "s2"), launched=5, max_learners=4, island="a")
+
+
+def test_the_profile_quorum_cap_lifts_the_learner_bound_without_changing_the_hash():
+    from test_rl_full_parameter_async import _plan
+
+    from yeto import launcher
+    from yeto.syncer_profile import SYNCER_SEMANTIC_PROFILE_SCHEMA, SyncerSemanticProfile
+
+    args, _ = _plan(("--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
+                     "--rl-rollout-gpus", "1", "--rl-parameter-layout-sha256", "e" * 64, "--fragments", "2",
+                     "--rl-sync-full-parameter-rounds", "async", *POOL))
+    profile = launcher.rl_syncer_profile(args, LAUNCHED)
+    assert (profile.learners, profile.quorum, profile.quorum_cap) == (2, 3, 3)
+    mapping = {**profile.__dict__, "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
+               "checkpoint_at_steps": list(profile.checkpoint_at_steps)}
+    plain = {k: v for k, v in mapping.items() if k != "quorum_cap"}
+    with pytest.raises(ValueError, match="quorum exceeds learners"):
+        SyncerSemanticProfile.from_mapping(plain)
+    same = SyncerSemanticProfile.from_mapping({**plain, "quorum": 2})
+    capped = SyncerSemanticProfile.from_mapping({**plain, "quorum": 2, "quorum_cap": 3})
+    assert same.sha256 == capped.sha256  # the syncer keeps membership options out of its hash
