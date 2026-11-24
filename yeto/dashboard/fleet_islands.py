@@ -15,7 +15,16 @@ Which island a sampler belongs to, strongest evidence first: its own ``island`` 
 plan pool whose shard base names its shard; the ``trainer<k>`` its store ends in. ``k`` is
 the learner id everywhere (``sample_roles.trainer_substore``); the trainer of learner ``k``
 is the ``k``-th trainer island in island order (``sample_roles.synced_group_learners``),
-which is island ``k`` itself in a fleet (no sampler island in its launch).
+which is island ``k`` itself in a fleet (its launch puts every trainer first).
+
+An island may also run Miles sampler islands of the launch (``--rl-island-sample-role``,
+plan ``miles_samplers[]``): their events come on the launch's tape under their launch island
+id (``island<M>`` is their buffer shard), not from ``<store>/trainer<k>/tapes/``. Each binds
+to the plan island that lists its ``launch_island``; without a plan, to the ``trainer<k>`` its
+store ends in (the launch's ``sample_substore``: a Miles sampler runs on its trainer's
+sub-store). It is drawn as its own sampler row of the island (``source: miles``), next to the
+external pools (``source: external``), and counts as a source of its own in the per-pool
+mismatch. A fleet without Miles samplers keeps its rows as they were (no ``source`` key).
 
 A run without a plan and without a sampler that names its island is no fleet: :func:`resolve`
 returns None and every view keeps its single-trainer form.
@@ -85,11 +94,21 @@ def load_plan(doc: Any) -> dict | None:
             pools.append({"name": p["name"], "source_name": _str(p.get("source_name")),
                           "provider": _str(p.get("provider")), "shard_base": _str(p.get("shard_base")),
                           "engine": _str(p.get("engine")), "rollout_quant": _str(p.get("rollout_quant"))})
+        miles = []
+        for m in isl.get("miles_samplers") or ():  # a plan written before Miles samplers has none
+            if not isinstance(m, dict) or not _str(m.get("name")) or _int(m.get("launch_island")) is None:
+                continue
+            miles.append({"name": m["name"], "source_name": _str(m.get("source_name")),
+                          "launch_island": m["launch_island"],
+                          "shard": _str(m.get("shard")) or f"island{m['launch_island']}",
+                          "engine": _str(m.get("engine")), "gpu": _str(m.get("gpu")),
+                          "usd_per_h": _f(m.get("usd_per_h"))})
         shards = [str(s) for s in isl.get("buffer_shards") or () if isinstance(s, (str, int))]
         islands.append({"index": index, "learner": learner, "name": _str(isl.get("name")),
                         "substore": _str(isl.get("substore")) or f"trainer{learner}", "gpu": _str(isl.get("gpu")),
                         "usd_per_h": _f(isl.get("usd_per_h")), "release_every": _int(isl.get("release_every")),
-                        "max_policy_age": _int(isl.get("max_policy_age")), "buffer_shards": shards, "pools": pools})
+                        "max_policy_age": _int(isl.get("max_policy_age")), "buffer_shards": shards, "pools": pools,
+                        "miles_samplers": miles})
     islands.sort(key=lambda x: x["learner"])
     return {"version": doc["version"], "run": _str(doc.get("run")), "store": _str(doc.get("store")),
             "dispense": _str(doc.get("dispense")), "islands": islands}
@@ -199,8 +218,9 @@ def trainer_ids(reducer) -> list[str]:
 
 def learner_trainers(tids: list[str], plan: dict | None = None) -> dict[int, str]:
     """{learner id: trainer island id}: the trainers in island order are learners 0..K-1
-    (``sample_roles.synced_group_learners``). A fleet's launch has no sampler island, so
-    there trainer island ``k`` is learner ``k`` (the plan's ``learner``)."""
+    (``sample_roles.synced_group_learners``). A fleet's launch puts its trainers first (its
+    Miles sampler islands after them), so there trainer island ``k`` is learner ``k`` (the
+    plan's ``learner``)."""
     out = {k: tid for k, tid in enumerate(tids)}
     for isl in (plan or {}).get("islands") or ():
         if str(isl["learner"]) in tids:
@@ -235,12 +255,63 @@ def _plan_pool(plan: dict | None, sid: str) -> tuple[int, dict] | None:
     return best
 
 
+def _plan_miles(plan: dict | None, sid: str) -> tuple[int, dict] | None:
+    """(learner, row) of the plan's Miles sampler running as launch island ``sid``."""
+    for isl in (plan or {}).get("islands") or ():
+        for m in isl.get("miles_samplers") or ():
+            if str(m["launch_island"]) == sid:
+                return isl["learner"], m
+    return None
+
+
+def is_miles_sampler(sid: str, start: dict, plan: dict | None) -> bool:
+    """Whether sampler ``sid`` is a Miles sampler island of the launch (``--rl-island-sample-role``),
+    not an external pool: the plan names its launch island; else it is a launch island (its id
+    is the island index of the launch's tape, a pool's is its shard) that names no ``island`` in
+    its start record (every external pool of a fleet does) and no plan pool owns."""
+    if _plan_miles(plan, sid) is not None:
+        return True
+    return sid.isdigit() and _int(start.get("island")) is None and _plan_pool(plan, sid) is None
+
+
+def _gpu_parts(spec: str | None) -> dict:
+    """``card`` / ``gpus`` / ``provider`` of a ``--gpu`` cluster (``modal:1x1xl40s``)."""
+    if not spec:
+        return {}
+    from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415 - import-light
+
+    try:
+        c = parse_gpu_spec(spec)[0]
+    except (ValueError, IndexError):
+        return {}
+    return {"card": c.gpu, "gpus": c.gpus_per_node, "provider": c.cloud}
+
+
+def miles_row(row: dict | None, sid: str | None) -> dict:
+    """A Miles sampler as a sampler row of its island (``source: miles``): the plan row, else
+    the launch island ``sid`` alone (named by its buffer shard ``island<M>``). Miles rolls out
+    with SGLang (``yeto.rl.fleet.MILES_ENGINE``)."""
+    from yeto.rl.fleet import MILES_ENGINE  # noqa: PLC0415 - import-light
+
+    if row is None:
+        name = f"island{sid}"
+        return {"name": name, "source_name": None, "source": "miles", "provider": None, "shard_base": None,
+                "engine": MILES_ENGINE, "rollout_quant": None, "launch_island": int(sid) if sid and sid.isdigit() else None,
+                "shard": name, "gpu": None, "card": None, "gpus": None, "samplers": []}
+    hw = _gpu_parts(row.get("gpu"))
+    return {"name": row["name"], "source_name": row.get("source_name"), "source": "miles",
+            "provider": hw.get("provider"), "shard_base": None, "engine": row.get("engine") or MILES_ENGINE,
+            "rollout_quant": None,
+            "launch_island": row["launch_island"], "shard": row.get("shard"), "gpu": row.get("gpu"),
+            "card": hw.get("card"), "gpus": hw.get("gpus"), "samplers": []}
+
+
 def sampler_learner(sid: str, start: dict, plan: dict | None) -> int | None:
     """The learner id (store lane ``trainer<k>``) sampler ``sid`` feeds (module doc)."""
     k = _int(start.get("island"))
     if k is not None:
         return k
-    hit = _plan_pool(plan, sid)
+    hit = _plan_pool(plan, sid) or _plan_miles(plan, sid)
     if hit is not None:
         return hit[0]
     m = SUBSTORE.search(str(start.get("store") or ""))
@@ -277,7 +348,9 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
     for isl in (plan or {}).get("islands") or ():
         islands[isl["learner"]] = {**{k: isl[k] for k in ("index", "learner", "name", "substore", "gpu", "usd_per_h",
                                                          "release_every", "max_policy_age")},
-                                   "pools": [dict(p, samplers=[]) for p in isl["pools"]]}
+                                   # Miles sampler islands first (their shards lead the trainer's), then the pools
+                                   "pools": [miles_row(m, None) for m in isl["miles_samplers"]]
+                                   + [dict(p, samplers=[]) for p in isl["pools"]]}
     island_of: dict[str, int] = {}
     pool_of: dict[str, str] = {}
     unbound: list[str] = []
@@ -290,6 +363,20 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
         island_of[sid] = k
         isl = islands.setdefault(k, {"index": k, "learner": k, "name": None, "substore": f"trainer{k}", "gpu": None,
                                      "usd_per_h": None, "release_every": None, "max_policy_age": None, "pools": []})
+        if is_miles_sampler(sid, start, plan):  # a launch-side Miles sampler island: its own row
+            hit = _plan_miles(plan, sid)
+            name = hit[1]["name"] if hit is not None and hit[0] == k else f"island{sid}"
+            pool = next((p for p in isl["pools"] if p["name"] == name), None)
+            if pool is None:
+                pool = miles_row(None, sid)
+                isl["pools"].insert(sum(p.get("source") == "miles" for p in isl["pools"]), pool)
+            card = reducer.islands.get(sid) or {}  # its launch island's card (island_ready)
+            for key, src in (("card", "gpu"), ("gpus", "gpus"), ("provider", "cloud")):
+                if pool.get(key) is None and card.get(src) is not None:
+                    pool[key] = card[src]
+            pool["samplers"].append(sid)
+            pool_of[sid] = name
+            continue
         hit = _plan_pool(plan, sid)
         name = hit[1]["name"] if hit is not None and hit[0] == k else SHARD_N.sub("", sid)
         pool = next((p for p in isl["pools"] if p["name"] == name), None)
@@ -300,6 +387,11 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
             isl["pools"].append(pool)
         pool["samplers"].append(sid)
         pool_of[sid] = name
+    if any(p.get("source") == "miles" for isl in islands.values() for p in isl["pools"]):
+        # both kinds in the fleet: every row names its source (a fleet of pools alone keeps its rows)
+        for isl in islands.values():
+            for p in isl["pools"]:
+                p.setdefault("source", "external")
     for k, isl in islands.items():
         isl["trainer"] = learners.get(k)
         for tid in [isl["trainer"]] if isl["trainer"] is not None else []:

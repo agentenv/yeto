@@ -134,9 +134,12 @@ def layout(reducer) -> dict:
     if not syncer:
         return {"kind": "async", "reason": f"{why}, sampler islands {samplers}"}
     plan = getattr(reducer, "fleet_plan", None)
-    if plan:  # a fleet of async islands: external pools only, drawn as one before they write
+    if plan:  # a fleet of async islands: drawn as one before its samplers write
+        miles = sum(len(isl.get("miles_samplers") or ()) for isl in plan["islands"])
         return {"kind": "synced_group", "reason": f"{why}, fleet plan: {len(plan['islands'])} island(s) with "
-                                                  f"external sampler pools, {samplers} sampler(s) on the tapes"}
+                                                  f"external sampler pools"
+                                                  + (f" and {miles} Miles sampler island(s)" if miles else "")
+                                                  + f", {samplers} sampler(s) on the tapes"}
     k = "synced_group" if samplers else "island"
     return {"kind": k, "reason": f"{why}, " + (f"sampler islands {samplers}" if samplers
                                                else "no sampler island: rollout runs inside the islands")}
@@ -536,7 +539,9 @@ def _samplers(reducer, trainer_ids: list[str], by_id: dict, states: dict) -> dic
 def _fleet_part(fleet: dict, asy) -> dict:
     """The islands and pools the page draws in each island box: the pool's engine and
     rollout precision (plan, else the samplers' ``rl_sampler_start.provenance``), its provider,
-    card and the samplers it runs."""
+    card and the samplers it runs. A Miles sampler island of the launch is a row too
+    (``source: miles``, its launch island and shard; the external pools then say
+    ``source: external``)."""
     islands = []
     for isl in fleet["islands"]:
         pools = []
@@ -544,12 +549,18 @@ def _fleet_part(fleet: dict, asy) -> dict:
             prov = next(((asy.sampler.get(sid) or {}).get("provenance") for sid in p["samplers"]
                          if (asy.sampler.get(sid) or {}).get("provenance")), None) or {}
             quant = p.get("rollout_quant") or prov.get("precision")
-            pools.append({"name": p["name"], "source_name": p.get("source_name"), "provider": p.get("provider"),
-                          "engine": _engine(p.get("engine") or prov.get("engine")),
-                          "precision": str(quant).upper() if quant else None,
-                          "card": prov.get("card_model"), "arch": arch_of(prov.get("card_model")),
-                          "topology": prov.get("topology"),
-                          "samplers": list(p["samplers"])})
+            card = prov.get("card_model") or p.get("card")  # a Miles row: its --gpu cluster's card
+            row = {"name": p["name"], "source_name": p.get("source_name"), "provider": p.get("provider"),
+                   "engine": _engine(p.get("engine") or prov.get("engine")),
+                   "precision": str(quant).upper() if quant else None,
+                   "card": card, "arch": arch_of(card),
+                   "topology": prov.get("topology"),
+                   "samplers": list(p["samplers"])}
+            if "source" in p:  # a fleet with Miles sampler islands: where each sampler row runs
+                row["source"] = p["source"]
+            if p.get("source") == "miles":
+                row.update(launch_island=p.get("launch_island"), shard=p.get("shard"), gpus=p.get("gpus"))
+            pools.append(row)
         islands.append({"island": isl["learner"], "trainer": isl.get("trainer"), "name": isl.get("name"),
                         "gpu": isl.get("gpu"), "substore": isl.get("substore"), "pools": pools})
     return {"source": fleet["source"], "islands": islands, "unbound": list(fleet["unbound"])}

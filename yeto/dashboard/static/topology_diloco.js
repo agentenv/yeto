@@ -71,13 +71,15 @@ function snode(id){return (D.sampler_nodes||[]).filter(function(n){return n.id==
 function laneName(tr){return (((D.lanes||{})[tr.id]||{}).substore||"trainer"+tr.id)+"/"}
 // a fleet of async islands: each island's external pools, one card per pool (its samplers pooled)
 function fleet(){return follow()&&D.fleet?D.fleet:null}
+// a fleet with Miles sampler islands of the launch (source "miles") next to external pools (source "external")
+var SRC={miles:["Miles native","var(--delta)"],external:["external pool","var(--traj)"]};
 function fisland(tr){var F=fleet();return F?F.islands.filter(function(x){return x.trainer===tr.id})[0]||null:null}
 function fpool(name){var F=fleet(),hit=null;if(F)F.islands.forEach(function(x){x.pools.forEach(function(p){if(p.name===name)hit=p})});return hit}
 function poolCard(p){var ss=(T.samplers||[]).filter(function(s){return p.samplers.indexOf(s.id)>=0}),lv=ss.filter(function(s){return s.live}),f0=ss[0]||{};
   var vs=lv.map(function(s){return s.policy_version}).filter(fin),lg=lv.map(function(s){return s.lag}).filter(fin);
   var st=lv.some(function(s){return s.state==="sampling"})?"sampling":lv.length?(lv[0].state||"starting"):null;
-  return{id:p.name,pool:p,ids:p.samplers,card:p.card||f0.card||null,precision:p.precision||f0.precision||null,engine:p.engine||f0.engine||null,arch:p.arch||f0.arch||null,
-    gpus:f0.gpus||null,live:lv.length>0,state:st,status:ss.length?(f0.status||"ended"):"not started",policy_version:vs.length?Math.max.apply(null,vs):null,
+  return{id:p.name,pool:p,ids:p.samplers,source:p.source||null,card:p.card||f0.card||null,precision:p.precision||f0.precision||null,engine:p.engine||f0.engine||null,arch:p.arch||f0.arch||null,
+    gpus:f0.gpus||p.gpus||null,live:lv.length>0,state:st,status:ss.length?(f0.status||"ended"):"not started",policy_version:vs.length?Math.max.apply(null,vs):null,
     lag:lg.length?Math.max.apply(null,lg):null,rate_gpm:ss.reduce(function(a,x){return a+(x.rate_gpm||0)},0),n:p.samplers.length,nlive:lv.length}}
 // the sampler (or pool) a card shows, from the newest view (a card is built once per layout)
 function fresh(s){if(s.pool){var p=fpool(s.id);return p?poolCard(p):s}return (T.samplers||[]).filter(function(x){return x.id===s.id})[0]||s}
@@ -175,7 +177,7 @@ function islandBox(nd,wires,labels,B,tr,narrow){
   if(B.lane){var j0=o.nodes.length,LN=B.lane;
     B.samp.forEach(function(S,j){var sn=snode(S.s.id),pl=S.s.pool;
       o.nodes.push(nodeLabel(nd,B.lx,B.ly+(j0+j)*(narrow?62:86),narrow?Math.min(B.lw,250):B.lw,narrow?54:78,
-        pl?{id:"p"+j,machine:pl.source_name||pl.name,machine_full:pl.name,gpu:S.s.card||"GPU",gpus:S.s.gpus,cloud:pl.provider,
+        pl?{id:(pl.source==="miles"?"m":"p")+j,machine:pl.source_name||pl.name,machine_full:pl.name,gpu:S.s.card||"GPU",gpus:S.s.gpus,cloud:pl.provider,
             roles:pl.samplers.slice(0,6).map(function(){return "R"}),incarnation:1,pool:pl.name}:
         {id:"s"+j,machine:sn.machine_full?String(sn.machine_full).split("-").slice(-2).join("-"):S.s.id,machine_full:sn.machine_full,gpu:sn.gpu||S.s.card,gpus:sn.gpus,roles:["R"],
          cloud:sn.cloud,incarnation:1,sampler:S.s.id},tr,"s"+j));
@@ -207,8 +209,9 @@ function islandBox(nd,wires,labels,B,tr,narrow){
   return o}
 function boxTitle(tr,narrow){var r=tr.island,n=tr.gpus,g=tr.gpu||"GPU",pl=r&&r.placement,eng=r&&fin(r.engines)?r.engines+" rollout engine"+(r.engines>1?"s":""):null;
   if(sft()){var ln=tr.learner||{};return [tr.name,ln.layout,fin(n)?n+" cards":null,!narrow&&ln.dataset?"data "+ln.dataset:null].filter(Boolean).join(" · ")}
-  if(!r&&fleet()){var fi=fisland(tr)||{},np=(fi.pools||[]).length;
-    return [fi.name,fin(n)?n+" × "+g:fi.gpu||g,narrow?np+" pool(s)":np+" external pool(s) · R2 lane "+laneName(tr)].filter(Boolean).join(" · ")}
+  if(!r&&fleet()){var fi=fisland(tr)||{},ps=fi.pools||[],nm=ps.filter(function(p){return p.source==="miles"}).length,np=ps.length-nm;
+    var what=nm?(narrow?nm+" Miles + "+np+" pool(s)":nm+" Miles sampler(s) + "+np+" external pool(s)"):narrow?np+" pool(s)":np+" external pool(s)";
+    return [fi.name,fin(n)?n+" × "+g:fi.gpu||g,narrow?what:what+" · R2 lane "+laneName(tr)].filter(Boolean).join(" · ")}
   if(!r){var ms=follow()?mine(tr):[];return [fin(n)?n+" × "+g:g,tr.arch,ms.length?ms.length+" sampler(s) on their own store lane "+laneName(tr):null].filter(Boolean).join(" · ")}
   var parts=[pl,fin(n)?n+" × "+g:g];
   if(r.colocated)parts.push(narrow?"shared GPU":"rollout and train time-share the GPU");else if(eng)parts.push(narrow?eng:"trainer + "+eng+" (split not on the tape)");
@@ -278,8 +281,12 @@ function samplerCard(nd,B,s,sn){
   var g=el("g",{transform:"translate("+B.x+","+B.y+")","data-td":"smp:"+s.id},nd);sn=sn||snode(s.id);
   el("rect",{width:B.w,height:B.h,rx:9,"class":"tpbox"},g);el("rect",{x:0,y:0,width:4,height:B.h,rx:2,fill:arch(s.arch)},g);
   el("text",{x:13,y:18,"class":"tpt"},g,clip([s.card,s.precision,s.engine].filter(Boolean).join(" · ")||s.id,Math.floor((B.w-50)/6.5)));
-  el("text",{x:13,y:33,"class":"tpm"},g,clip(s.pool?s.id+" · "+s.n+" sampler"+(s.n===1?"":"s"):
-    ["sampler "+s.id,s.gpus?s.gpus+" GPU":null,sn.cloud].filter(Boolean).join(" · "),Math.floor((B.w-20)/6.3)));
+  var src=s.pool&&SRC[s.source],x2=13;
+  // a fleet with Miles sampler islands: a source tag (Miles native / external pool) before the row's name
+  if(src){var tw=src[0].length*5.9+10;el("rect",{x:13,y:23.5,width:tw,height:13,rx:6.5,fill:src[1],"fill-opacity":0.2,stroke:src[1]},g);
+    el("text",{x:13+tw/2,y:33,"text-anchor":"middle","class":"tpm",style:"font-size:9px;font-weight:700;letter-spacing:.3px"},g,src[0].toUpperCase());x2=13+tw+6}
+  el("text",{x:x2,y:33,"class":"tpm"},g,clip(src?s.id:s.pool?s.id+" · "+s.n+" sampler"+(s.n===1?"":"s"):
+    ["sampler "+s.id,s.gpus?s.gpus+" GPU":null,sn.cloud].filter(Boolean).join(" · "),Math.floor((B.w-x2-7)/6.3)));
   return{ver:el("text",{x:B.w-10,y:18,"text-anchor":"end","class":"tpv"},g,""),dot:el("circle",{cx:16.5,cy:B.h-12.5,r:3.5},g),
     st:el("text",{x:25,y:B.h-9,"class":"tps2"},g,""),rate:el("text",{x:B.w-10,y:B.h-9,"text-anchor":"end","class":"tpm"},g,""),s:s}}
 function store(nd,R){var g=el("g",{"data-td":"store"},nd);
@@ -464,7 +471,12 @@ function tipHtml(key){var a=key.split(":"),tn=now(),tr=null;D.trainers.forEach(f
     row("serving",r.served?r.served.token:null)+row("groups / traj / tokens",[r.groups,r.traj,r.tokens].join(" / "))+row("rollout seconds",fin(r.rollout_s)?r.rollout_s.toFixed(1):null)+
     row("group p50 / p95",fin(r.p50_s)?r.p50_s.toFixed(1)+"s / "+(fin(r.p95_s)?r.p95_s.toFixed(1)+"s":"—"):"not timed")+row("snapshot publish",r.served&&fin(r.served.publish_s)?r.served.publish_s.toFixed(1)+"s (publish phase)":null)+
     row("source","rl_local_round rl/* · rl_publication · rl_driver_phase")+'<div class="ns">trainer / rollout GPU split and generation progress are not on the tapes yet</div>'}
-  if(a[0]==="node"&&tr&&a[2].charAt(0)==="s"&&fleet()){var pc=mine(tr)[+a[2].slice(1)]||{},pp=pc.pool||{};return '<div class="h">Pool '+esc(pc.id||"")+"</div>"+
+  if(a[0]==="node"&&tr&&a[2].charAt(0)==="s"&&fleet()&&((mine(tr)[+a[2].slice(1)]||{}).pool||{}).source==="miles"){var mc=mine(tr)[+a[2].slice(1)],mp=mc.pool;
+    return '<div class="h">Miles native sampler '+esc(mc.id)+"</div>"+row("source","Miles sampler island of the launch (--rl-island-sample-role)")+row("in run.json",mp.source_name||"no fleet plan")+
+      row("launch island",fin(mp.launch_island)?mp.launch_island+" · buffer shard "+(mp.shard||"island"+mp.launch_island):"not on the tape")+row("engine",mc.engine||"not on the tape")+row("cards",(mc.card||"GPU")+(fin(mc.gpus)?" × "+mc.gpus:""))+row("cloud",mp.provider||"not on the tape")+
+      row("status",mc.n?(mc.live?mc.state:mc.status):"not started")+row("serving",fin(mc.policy_version)?"v"+mc.policy_version:"no release loaded")+row("feeds","trainer "+tr.id+" (R2 lane "+laneName(tr)+")")+
+      row("source of the row",(D.fleet.source==="plan"?"fleet/plan.json miles_samplers · ":"")+"launch tape rl_sampler_start.store")}
+  if(a[0]==="node"&&tr&&a[2].charAt(0)==="s"&&fleet()){var pc=mine(tr)[+a[2].slice(1)]||{},pp=pc.pool||{};return '<div class="h">'+(pp.source?"External pool ":"Pool ")+esc(pc.id||"")+"</div>"+
     row("pool in run.json",pp.source_name)+row("provider",pp.provider)+row("engine",pc.engine)+row("rollout precision",pc.precision)+row("cards",(pc.card||"GPU")+(fin(pc.gpus)?" × "+pc.gpus:""))+
     row("samplers (up / all)",pc.nlive+" / "+pc.n+(pp.samplers&&pp.samplers.length?" · "+pp.samplers.join(", "):""))+row("serving",fin(pc.policy_version)?"v"+pc.policy_version:"no release loaded")+
     row("feeds","trainer "+tr.id+" (R2 lane "+laneName(tr)+")")+row("source",(D.fleet.source==="plan"?"fleet/plan.json · ":"")+"rl_sampler_start.island / .store / .provenance")}

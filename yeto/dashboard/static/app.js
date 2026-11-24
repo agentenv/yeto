@@ -537,15 +537,17 @@ function aRel(A){
       el("line",{x1:x0,y1:ly(0),x2:x1,y2:ly(i+1),stroke:"var(--P)","stroke-opacity":.5},s);el("circle",{cx:x1,cy:ly(i+1),r:4,fill:"var(--P)"},s)})});
   tAxis(s,t0,t1,sx,H);
   $("legRel").innerHTML='<span><i class="sw" style="background:var(--P)"></i>release → load done</span>'+(pool.length?'<span><i class="sw" style="background:var(--warn)"></i>NC pool event</span><span><i class="sw" style="background:var(--bad)"></i>NC pool failure (evicted / lost / crash loop)</span>':"");
-  if(rows.length)box2.innerHTML=relTable(rows,fleetSamplers(A));
+  if(rows.length)box2.innerHTML=relTable(rows,fleetSamplers(A),milesSamplers(A));
 }
 // a fleet's samplers -> their island: a release row of another island is no load the sampler missed
 function fleetSamplers(A){var o={};(A.islands||[]).forEach(function(x){x.pools.forEach(function(p){p.samplers.forEach(function(s){o[s]=x.island})})});return o}
-function relTable(rows,sIsl){
+// a fleet's Miles sampler islands of the launch: their release-load column says so (an external pool's keeps its id)
+function milesSamplers(A){var o={};(A.islands||[]).forEach(function(x){x.pools.forEach(function(p){if(p.source==="miles")p.samplers.forEach(function(s){o[s]=1})})});return o}
+function relTable(rows,sIsl,ml){ml=ml||{};
   var sids=[];rows.forEach(function(r){Object.keys(r.loads||{}).forEach(function(k){if(sids.indexOf(k)<0)sids.push(k)})});sids.sort();
   // a fleet: one row per (island, version), both islands may release v4
   var il=rows.some(function(r){return r.island!=null});sIsl=sIsl||{};
-  return '<table class="c"><tr>'+(il?'<th>island</th>':"")+'<th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>sampler '+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>'+
+  return '<table class="c"><tr>'+(il?'<th>island</th>':"")+'<th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>'+(ml[k]?"Miles sampler island ":"sampler ")+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>'+
     // a sampler starting on the base weights makes a v0 row with no trainer release: "base"
     rows.slice(-30).reverse().map(function(r){var base=r.trainer==null&&!fin(r.released_at);return '<tr>'+(il?'<td class="num">'+esc(r.island==null?"—":r.island)+'</td>':"")+'<td class="num">v'+esc(r.policy_version)+'</td><td>'+(base?'<span class="note">base</span>':esc(r.trainer==null?"n/a":r.trainer))+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base?"—":f(r.upload_s,1))+'</td>'+
       sids.map(function(k){var ld=(r.loads||{})[k];if(!ld&&il&&sIsl[k]!=null&&sIsl[k]!==r.island)return '<td class="num note">—</td>';return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"+(fin(ld.drain_s)?'<div class="note">drain '+f(ld.drain_s,0)+" s"+(ld.drain_cut?", "+f(ld.drain_cut,0)+" cut":"")+'</div>':"")):"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>'}
@@ -553,12 +555,17 @@ function relTable(rows,sIsl){
 var ENG={vllm:"vLLM",sglang:"SGLang"};
 function engName(e){return e?(ENG[String(e).toLowerCase()]||String(e)):null}
 function mmCell(m){return m?f(m.value,4)+'<div class="note">'+esc(m.method)+" · "+m.rounds+" round"+(m.rounds===1?"":"s")+"</div>":'<span class="note">not reported</span>'}
+// a fleet with Miles sampler islands of the launch: each sampler row's source
+var SRC_TAG={miles:["Miles native","var(--delta)"],external:["external pool","var(--traj)"]};
+function srcTag(s){var t=SRC_TAG[s];return t?' <span class="tag" style="border-color:'+t[1]+';color:'+t[1]+';font-weight:600;white-space:nowrap">'+t[0]+'</span>':""}
 function poolTable(x){
   return '<table class="c"><tr><th>pool</th><th>engine · precision</th><th>cards · provider</th><th>samplers</th><th>policy</th><th>policy age p50 / max</th><th>groups written</th>'+
     '<th title="train_metrics.train_rollout_logprob_abs_diff of the steps this pool fed">logprob |diff|</th><th title="train_metrics.tis_clipfrac (mismatch.tis_clipfrac) of the steps this pool fed">TIS clipfrac</th></tr>'+
-    x.pools.map(function(p){var pr=p.provenance||{},mm=p.mismatch||{},prec=String(p.rollout_quant||pr.precision||"").toUpperCase();
-      return '<tr><td>'+esc(p.name)+(p.source_name&&p.source_name!==p.name?' <span class="note">'+esc(p.source_name)+'</span>':"")+'</td><td>'+esc([engName(p.engine||pr.engine),prec].filter(Boolean).join(" · ")||"not reported")+
-        '</td><td>'+esc([pr.card_model,pr.topology,p.provider].filter(Boolean).join(" · ")||"not reported")+'</td><td>'+esc(p.samplers.join(", ")||"none yet")+'</td><td class="num">'+(fin(p.policy_version)?"v"+esc(p.policy_version):"n/a")+
+    x.pools.map(function(p){var pr=p.provenance||{},mm=p.mismatch||{},prec=String(p.rollout_quant||pr.precision||"").toUpperCase(),ml=p.source==="miles";
+      // a Miles row: cards of its --gpu cluster when its sampler reports no provenance
+      var card=pr.card_model||(p.card?p.card+(fin(p.gpus)?" × "+p.gpus:""):null);
+      return '<tr><td>'+esc(p.name)+(p.source_name&&p.source_name!==p.name?' <span class="note">'+esc(p.source_name)+'</span>':"")+srcTag(p.source)+'</td><td>'+esc([engName(p.engine||pr.engine),prec].filter(Boolean).join(" · ")||"not reported")+
+        '</td><td>'+esc([card,pr.topology,p.provider].filter(Boolean).join(" · ")||"not reported")+'</td><td>'+esc(p.samplers.map(function(s){return ml?"launch island "+s:s}).join(", ")||"none yet")+'</td><td class="num">'+(fin(p.policy_version)?"v"+esc(p.policy_version):"n/a")+
         '</td><td class="num">'+f(p.lag_p50,1)+" / "+f(p.lag_max,0)+'</td><td class="num">'+f(p.groups,0)+'</td><td class="num">'+mmCell(mm.logprob_diff)+'</td><td class="num">'+mmCell(mm.tis_clip)+'</td></tr>'}).join("")+'</table>'}
 function aFleet(A){
   var box=$("aFleetBox"),I=A.islands;if(!box)return;box.hidden=!I;if(!I)return;
@@ -567,7 +574,7 @@ function aFleet(A){
       fin(x.release_every)?"release every "+x.release_every:null,fin(x.max_policy_age)?"max policy age "+x.max_policy_age:null].filter(Boolean).join(" · "))+'</span></h3>'+
       '<div class="note">backlog '+(last&&fin(last[3])?f(last[3],0)+" groups":"n/a")+" (written "+f(b.written,0)+" · read position "+f(b.read,0)+") · latest release "+(fin(x.latest)?"v"+x.latest:"none")+
       " · trained groups "+f(x.trained_groups,0)+" · stale dropped "+f(pa.stale_groups,0)+" · policy age of trained groups: "+hist(pa.hist)+(fin(pa.mean_last)?" (last round mean "+f(pa.mean_last,2)+", max "+f(pa.max_last,0)+")":"")+'</div>'+
-      poolTable(x)+'<div style="max-width:760px"><div class="legend" id="legFl'+i+'"></div><div id="aFl'+i+'"></div></div>'+((x.releases||[]).length?relTable(x.releases):"")}).join("");
+      poolTable(x)+'<div style="max-width:760px"><div class="legend" id="legFl'+i+'"></div><div id="aFl'+i+'"></div></div>'+((x.releases||[]).length?relTable(x.releases,null,milesSamplers({islands:[x]})):"")}).join("");
   I.forEach(function(x,i){blChart($("aFl"+i),$("legFl"+i),x.backlog)})}
 function render(){
   if(!V)return;O=V.overview;

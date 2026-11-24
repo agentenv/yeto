@@ -781,8 +781,9 @@ class AsyncState:
 
     def island_blocks(self, fleet: dict, samplers: dict, trainers: dict, releases: list[dict]) -> list[dict]:
         """One block per fleet island: its trainer, its pools (samplers pooled: written groups,
-        policy age of the rounds they generated), its own backlog (its samplers' writes minus
-        its trainer's read position on its lane), its policy ages and its releases."""
+        policy age of the rounds they generated; a Miles sampler island of the launch is a row of
+        its own, ``source: miles``), its own backlog (its samplers' writes minus its trainer's
+        read position on its lane), its policy ages and its releases."""
         out = []
         for isl in fleet["islands"]:
             k, tid = isl["learner"], isl.get("trainer")
@@ -797,6 +798,9 @@ class AsyncState:
                 groups = [x["groups"] for x in rows if x.get("groups") is not None]
                 pools.append({**{key: p.get(key) for key in ("name", "source_name", "provider", "shard_base",
                                                             "engine", "rollout_quant")},
+                              # a fleet with Miles sampler islands: each row's source and a Miles row's cards
+                              **{key: p[key] for key in ("source", "launch_island", "shard", "gpu", "card", "gpus")
+                                 if key in p},
                               "samplers": list(p["samplers"]),
                               "provenance": next((x["provenance"] for x in rows if x.get("provenance")), None),
                               "policy_version": max(vers) if vers else None,
