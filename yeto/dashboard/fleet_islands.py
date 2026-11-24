@@ -93,7 +93,8 @@ def load_plan(doc: Any) -> dict | None:
                 continue
             pools.append({"name": p["name"], "source_name": _str(p.get("source_name")),
                           "provider": _str(p.get("provider")), "shard_base": _str(p.get("shard_base")),
-                          "engine": _str(p.get("engine")), "rollout_quant": _str(p.get("rollout_quant"))})
+                          "engine": _str(p.get("engine")), "rollout_quant": _str(p.get("rollout_quant")),
+                          "usd_per_h": _f(p.get("usd_per_h"))})
         miles = []
         for m in isl.get("miles_samplers") or ():  # a plan written before Miles samplers has none
             if not isinstance(m, dict) or not _str(m.get("name")) or _int(m.get("launch_island")) is None:
@@ -104,14 +105,21 @@ def load_plan(doc: Any) -> dict | None:
                           "engine": _str(m.get("engine")), "gpu": _str(m.get("gpu")),
                           "usd_per_h": _f(m.get("usd_per_h"))})
         shards = [str(s) for s in isl.get("buffer_shards") or () if isinstance(s, (str, int))]
+        trainer_price = _f(isl.get("trainer_usd_per_h"))
         islands.append({"index": index, "learner": learner, "name": _str(isl.get("name")),
                         "substore": _str(isl.get("substore")) or f"trainer{learner}", "gpu": _str(isl.get("gpu")),
-                        "usd_per_h": _f(isl.get("usd_per_h")), "release_every": _int(isl.get("release_every")),
+                        "usd_per_h": _f(isl.get("usd_per_h")),
+                        # a plan before Miles samplers: the island's price is its trainer's
+                        "trainer_usd_per_h": trainer_price if trainer_price is not None else _f(isl.get("usd_per_h")),
+                        "release_every": _int(isl.get("release_every")),
                         "max_policy_age": _int(isl.get("max_policy_age")), "buffer_shards": shards, "pools": pools,
                         "miles_samplers": miles})
     islands.sort(key=lambda x: x["learner"])
+    syncer = doc.get("syncer")
     return {"version": doc["version"], "run": _str(doc.get("run")), "store": _str(doc.get("store")),
-            "dispense": _str(doc.get("dispense")), "islands": islands}
+            "dispense": _str(doc.get("dispense")), "islands": islands,
+            # None: a plan older than the syncer price (unknown); {"usd_per_h": None}: unset ($0, as run up bills it)
+            "syncer": {"usd_per_h": _f(syncer.get("usd_per_h"))} if isinstance(syncer, dict) else None}
 
 
 def plan_candidates(paths: list[str], max_up: int = 3) -> list[str]:
@@ -346,10 +354,10 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
     learners = learner_trainers(tids, plan)
     islands: dict[int, dict] = {}
     for isl in (plan or {}).get("islands") or ():
-        islands[isl["learner"]] = {**{k: isl[k] for k in ("index", "learner", "name", "substore", "gpu", "usd_per_h",
-                                                         "release_every", "max_policy_age")},
+        islands[isl["learner"]] = {**{k: isl.get(k) for k in ("index", "learner", "name", "substore", "gpu", "usd_per_h",
+                                                             "trainer_usd_per_h", "release_every", "max_policy_age")},
                                    # Miles sampler islands first (their shards lead the trainer's), then the pools
-                                   "pools": [miles_row(m, None) for m in isl["miles_samplers"]]
+                                   "pools": [miles_row(m, None) for m in isl.get("miles_samplers") or ()]
                                    + [dict(p, samplers=[]) for p in isl["pools"]]}
     island_of: dict[str, int] = {}
     pool_of: dict[str, str] = {}
@@ -362,7 +370,8 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
             continue
         island_of[sid] = k
         isl = islands.setdefault(k, {"index": k, "learner": k, "name": None, "substore": f"trainer{k}", "gpu": None,
-                                     "usd_per_h": None, "release_every": None, "max_policy_age": None, "pools": []})
+                                     "usd_per_h": None, "trainer_usd_per_h": None, "release_every": None,
+                                     "max_policy_age": None, "pools": []})
         if is_miles_sampler(sid, start, plan):  # a launch-side Miles sampler island: its own row
             hit = _plan_miles(plan, sid)
             name = hit[1]["name"] if hit is not None and hit[0] == k else f"island{sid}"
@@ -383,7 +392,7 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
         if pool is None:  # no plan pool names it: the samplers sharing a shard base are one pool
             prov = (asy.sampler.get(sid) or {}).get("provenance") or {}
             pool = {"name": name, "source_name": None, "provider": None, "shard_base": name,
-                    "engine": _str(prov.get("engine")), "rollout_quant": None, "samplers": []}
+                    "engine": _str(prov.get("engine")), "rollout_quant": None, "usd_per_h": None, "samplers": []}
             isl["pools"].append(pool)
         pool["samplers"].append(sid)
         pool_of[sid] = name
@@ -399,7 +408,7 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
     return {"source": "plan" if plan else "events", "run": (plan or {}).get("run"),
             "dispense": (plan or {}).get("dispense"),
             "islands": [islands[k] for k in sorted(islands)], "island_of": island_of, "pool_of": pool_of,
-            "unbound": unbound}
+            "unbound": unbound, "syncer": (plan or {}).get("syncer")}
 
 
 # -- per-pool mismatch ---------------------------------------------------------------------
@@ -444,10 +453,13 @@ def _solve(a: list[list[float]], b: list[float]) -> list[float] | None:
     return [m[i][n] / m[i][i] for i in range(n)]
 
 
-def pool_mismatch(rounds: list[dict], pool_of: dict[str, str], xhw: dict[int, dict[str, float]] | None = None
-                  ) -> dict[str, dict]:
+def pool_mismatch(rounds: list[dict], pool_of: dict[str, str], xhw: dict[int, dict[str, float]] | None = None,
+                  only_pool: str | None = None) -> dict[str, dict]:
     """{pool: {metric: {"value", "method", "rounds", "last"}}} over a trainer's round records
-    (``Reducer.round_records``: ``round``, ``logprob_diff``, ``tis_clip``, ``by_sampler``)."""
+    (``Reducer.round_records``: ``round``, ``logprob_diff``, ``tis_clip``, ``by_sampler``).
+    ``only_pool``: the island's one sampler source. A round whose composition is not on the
+    tapes (no ``rl_xhw_mismatch``, trajectory ids without the sampler incarnation, as a
+    Miles trainer reading external pools writes them) was fed by it alone."""
     comp: list[tuple[dict[str, float], dict]] = []
     for r in rounds:
         rid = r.get("round")
@@ -458,6 +470,8 @@ def pool_mismatch(rounds: list[dict], pool_of: dict[str, str], xhw: dict[int, di
         for sid, w in src.items():
             if sid in pool_of and w > 0:
                 shares[pool_of[sid]] = shares.get(pool_of[sid], 0.0) + w
+        if not shares and only_pool is not None:
+            shares = {only_pool: 1.0}
         total = sum(shares.values())
         if total > 0:
             comp.append(({p: w / total for p, w in shares.items()}, r))
@@ -492,7 +506,10 @@ def attach_mismatch(reducer, asy: dict, rounds_by_island: dict[str, list[dict]],
         tid = block.get("trainer")
         if tid is None:
             continue
-        per = pool_mismatch(rounds_by_island.get(tid) or [], fleet["pool_of"], xhw_shares(reducer, tid))
+        # one source: every round of the island came from it (a Miles sampler island of the
+        # same fleet island is a pool of its own here, so two sources never take this path)
+        only = block["pools"][0]["name"] if len(block["pools"]) == 1 else None
+        per = pool_mismatch(rounds_by_island.get(tid) or [], fleet["pool_of"], xhw_shares(reducer, tid), only)
         for p in block["pools"]:
             if p["name"] in per:
                 p["mismatch"] = per[p["name"]]

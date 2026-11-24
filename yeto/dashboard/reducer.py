@@ -232,6 +232,10 @@ def negative_test_label(overrides: Any) -> dict:
             "overrides": [{k: o.get(k) for k in ("key", "name", "old", "new")} for o in rows]}
 
 
+# a tape a launch island uploads under a trainer lane (``store/trainer<k>:trainer/l<i>-…``)
+_SUBSTORE_TRAINER_TAPE = re.compile(r"^store/trainer(\d+):trainer/")
+
+
 def _iid(value: Any) -> str | None:
     if value is None:
         return None
@@ -360,6 +364,10 @@ class Reducer:
         iid = (_iid(island) if island_fixed and island is not None and kind == "learner" else None) \
             or _iid(record.get("island_id", record.get("learner_id"))) or island \
             or (_iid(record.get("sampler_id")) if kind == "learner" else None)
+        if kind == "learner" and self.fleet_plan:
+            sub = _SUBSTORE_TRAINER_TAPE.search(source)
+            if sub is not None:  # a Miles sampler island's tape uploaded under its trainer's lane: its launch island
+                iid = self._plan_miles_island(int(sub.group(1))) or iid
         digest = self._digest(record, iid, kind)
         duplicate = digest is not None and digest in self._seen_digests
         launch = _store_launch(source) if kind == "learner" and iid is not None else None
@@ -579,6 +587,14 @@ class Reducer:
         if warn is not None and "budget_warn_pct" not in self.threshold_overrides:
             self.thresholds["budget_warn_pct"] = round(warn * 100.0, 6)
         return True
+
+    def _plan_miles_island(self, learner: int) -> str | None:
+        """The launch island of the Miles sampler that feeds trainer ``learner`` (the plan's
+        first; a lane's own tapes name its launch-local island 0)."""
+        for isl in (self.fleet_plan or {}).get("islands") or ():
+            if isl["learner"] == learner and isl.get("miles_samplers"):
+                return str(isl["miles_samplers"][0]["launch_island"])
+        return None
 
     def load_fleet_plan(self, doc: Any, source: str) -> bool:
         """Take a fleet's ``fleet/plan.json`` (``fleet_islands.PlanFile``); False when ``doc``

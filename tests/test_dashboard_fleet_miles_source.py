@@ -298,10 +298,12 @@ def test_page_tags_each_sampler_with_its_source(tmp_path, width):
     joined = " | ".join(out["texts"])
     assert out["viewBox"].startswith("0 0 1480 " if width > 640 else "0 0 400 ")
     for want in ("Island 0", "Island 1", "trainer1/", "MILES NATIVE", "EXTERNAL POOL", "i1-miles-l40s",
-                 "i1-sgl-l40s", "L40S · SGLang", "L40S · BF16 · SGLang", "m0 · miles-l40s", "p1 · sgl-l40s",
+                 "i1-sgl-l40s · modal", "L40S · SGLang", "L40S · BF16 · SGLang",
                  "1 Miles" if width < 640 else "1 Miles sampler(s) + 1 external pool(s)"):
         assert want in joined, want
     assert joined.count("MILES NATIVE") == 1 and joined.count("EXTERNAL POOL") == 2
+    # a fleet box has no machine labels: its pool and trainer cards carry the machine
+    assert "m0 · miles-l40s" not in joined and "p1 · sgl-l40s" not in joined
     assert "n/a" not in joined, [t for t in out["texts"] if "n/a" in t]
     # the island panel's sampler table: both sources tagged, the Miles row with its cards
     assert "Miles native</span>" in out["fleet"] and out["fleet"].count("external pool</span>") == 2
@@ -315,5 +317,29 @@ def test_page_of_a_fleet_of_pools_alone_has_no_source_tags(tmp_path):
 
     out = _page(tmp_path, fleet_reducer(), 1200)
     joined = " | ".join(out["texts"])
-    assert "MILES NATIVE" not in joined and "EXTERNAL POOL" not in joined and "p0 · vllm-h100" in joined
+    assert "MILES NATIVE" not in joined and "EXTERNAL POOL" not in joined and "vllm-h100" in joined
     assert 'class="tag"' not in out["fleet"]
+
+
+def test_a_miles_sampler_tape_under_its_trainer_lane_binds_to_its_launch_island():
+    """A Miles sampler island runs as learner 0 of 1 and uploads its tape under its trainer's
+    lane (store/trainer1:trainer/l0-…) with island_id 0: its records are launch island 2's,
+    never trainer 0's (trainer 0 stays a trainer, island 2 a sampler)."""
+    r = Reducer()
+    assert r.load_fleet_plan(plan_doc(), "plan")
+    r.feed({"event": "rl_round_trained", "island_id": 0, "time_unix": T0 + 20, "round": 0, "groups": 4},
+           source="store:trainer/l0-modal-20261124T000000Z")
+    lane = "store/trainer1:trainer/l0-modal-20261124T000001Z"
+    r.feed({"event": "rl_sampler_start", "island_id": 0, "time_unix": T0 + 21, "weights": "full",
+            "store": "~/yeto-checkpoint-store/runs/mixed-qa/trainer1", "until_trainers_end": 1}, source=lane)
+    r.feed({"event": "rl_sampler_round", "island_id": 0, "time_unix": T0 + 60, "groups": 4, "policy_version": 1,
+            "generate_s": 30.0}, source=lane)
+    assert r.async_.role("0") == "trainer"
+    assert r.async_.role(MILES_SID) == "sampler"
+
+
+def test_a_lane_tape_without_a_plan_keeps_its_records_island():
+    r = Reducer()
+    r.feed({"event": "rl_sampler_round", "island_id": 0, "time_unix": T0 + 60, "groups": 4, "policy_version": 1,
+            "generate_s": 30.0}, source="store/trainer1:trainer/l0-modal-x")
+    assert r.async_.role("0") == "sampler"

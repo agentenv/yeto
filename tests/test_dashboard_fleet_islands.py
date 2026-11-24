@@ -328,9 +328,11 @@ def test_page_draws_one_box_per_island(tmp_path, width):
     out = _smoke(tmp_path, r, width=width)
     joined = " | ".join(out["texts"])
     assert out["viewBox"].startswith("0 0 1480 " if width > 640 else "0 0 400 ")
-    for want in ("Island 0", "Island 1", "trainer0/", "trainer1/", "i0-vllm-h100 · 1 sampler", "i1-sgl-b · 1 sampler",
-                 "H100 · BF16 · vLLM", "L40S · BF16 · SGLang", "Syncer", "p0 · vllm-h100", "p1 · sgl-l40s"):
+    for want in ("Island 0", "Island 1", "trainer0/", "trainer1/", "i0-vllm-h100 · modal · 1 sampler",
+                 "i1-sgl-b · modal · 1 sampler", "H100 · BF16 · vLLM", "L40S · BF16 · SGLang", "Syncer"):
         assert want in joined, want
+    # no machine labels in a fleet box (the pool and trainer cards carry the machine)
+    assert "p0 · vllm-h100" not in joined and "p1 · sgl-l40s" not in joined and "syncer · machine" not in joined
     assert "east-h100" in joined and "west-h100" in joined
     assert "n/a" not in joined, [t for t in out["texts"] if "n/a" in t]
     assert "in 2 island(s)" in out["note"]

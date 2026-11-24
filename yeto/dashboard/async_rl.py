@@ -812,7 +812,8 @@ class AsyncState:
             cap = next((r.get("max_policy_age") for r in reversed(t.get("rounds") or [])
                         if r.get("max_policy_age") is not None), None)
             mine = [r for r in releases if r.get("island") == k]
-            out.append({"island": k, "name": isl.get("name"), "trainer": tid, "gpu": isl.get("gpu"),
+            index = isl.get("index") if isl.get("index") is not None else k
+            out.append({"island": k, "index": index, "name": isl.get("name"), "trainer": tid, "gpu": isl.get("gpu"),
                         "substore": isl.get("substore"), "release_every": isl.get("release_every"),
                         "max_policy_age": isl.get("max_policy_age") if isl.get("max_policy_age") is not None else cap,
                         "pools": pools,

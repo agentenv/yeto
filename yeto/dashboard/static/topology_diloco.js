@@ -27,7 +27,34 @@ function colors(){var cs=typeof getComputedStyle==="function"?getComputedStyle(d
   ["ink","ink2","line","good","warn","bad","traj","wt","delta","bg"].forEach(function(k){o[k]=g("--"+k)});o.wire=g("--topo-wire");return o}
 function arch(a){return a?"var(--arch-"+String(a).toLowerCase()+")":"var(--ink2)"}
 function el(tag,attrs,parent,text){return U.el(tag,attrs,parent,text)}
+// a card's colour mark: a pill inset from the left edge, inside the rounded corners
+function accent(g,h,fill,x,y){return el("rect",{x:(x||0)+5,y:(y||0)+9,width:3,height:Math.max(6,h-18),rx:1.5,fill:fill},g)}
+// a launch cluster name without its run prefix (<run>-l1-modal -> l1-modal)
+function shortName(n){return String(n).split("-").slice(-2).join("-")}
 function clip(s,n){s=String(s==null?"":s);return s.length>n?s.slice(0,Math.max(1,n-1))+"…":s}
+// [[text, colour]] lines folded to maxW at their " · " seams (the continuation indented), at most
+// n lines (the rest is cut by fitText on the last one)
+function wrapLines(lines,maxW,n){var cw=6.3,cap=Math.max(8,Math.floor(maxW/cw)),out=[];
+  lines.forEach(function(ln){var s=ln[0];
+    while(s.length>cap){var cut=s.lastIndexOf(" · ",cap);if(cut<=2)break;out.push([s.slice(0,cut),ln[1]]);s="  "+s.slice(cut+3)}
+    out.push([s,ln[1]])});
+  if(out.length<=n)return out;
+  // too many: keep each source line whole on one row first (fitText cuts it), in order
+  return lines.slice(0,n)}
+// a card line that never leaves its card: cut to maxW (svg units) with an ellipsis, the whole
+// line on hover (<title>). Measured where the browser lays the text out, else by the monospace
+// advance (10.5 px mono ≈ 6.3, the bold 12 px value font ≈ 7.3)
+function fitText(e,s,maxW){s=String(s==null?"":s);if(e._full===s&&e._fitW===maxW)return;e._full=s;e._fitW=maxW;
+  e.textContent=s;if(!s||!(maxW>0))return;
+  var cw=/\btpv\b/.test(e.getAttribute&&e.getAttribute("class")||"")?7.3:6.3,len=null;
+  try{if(typeof e.getComputedTextLength==="function")len=e.getComputedTextLength()}catch(_){len=null}
+  if(!fin(len)||len<=0)len=s.length*cw;
+  if(len<=maxW)return;
+  var n=Math.max(1,Math.floor(s.length*maxW/len));
+  for(var k=0;k<12&&n>1;k++){e.textContent=s.slice(0,n-1)+"…";var l2=null;
+    try{if(typeof e.getComputedTextLength==="function")l2=e.getComputedTextLength()}catch(_){l2=null}
+    if(!fin(l2)||l2<=0||l2<=maxW)break;n--}
+  if(typeof document!=="undefined"&&document.createElementNS&&e.namespaceURI){var t=document.createElementNS(e.namespaceURI,"title");t.textContent=s;e.appendChild(t)}}
 // rich text in an svg <text>: tspans in a browser, the plain text where innerHTML does nothing
 function rich(e,parts){e.textContent=parts.map(function(p){return p[0]}).join("");
   if(typeof document.createElementNS==="function"&&e.namespaceURI)e.innerHTML=parts.map(function(p){return p[1]?'<tspan style="'+p[1]+'">'+esc(p[0])+'</tspan>':esc(p[0])}).join("")}
@@ -88,24 +115,25 @@ function layout(W){
   var g={narrow:narrow,VW:narrow?400:1480,boxes:[],syn:[],samp:[],store:null};
   if(!narrow&&sft()&&trs.length>4)hub(g,trs);
   else if(!narrow){
-    var x0=samp.length?420:10,lw=124,rx=x0+lw+26,rw=isl?262:0,tx=isl?rx+rw+124:fw?x0+lw+26+196+112:x0+lw+26,tw=isl?300:sft()?340:290,th=sft()?170:212,y=14;
-    trs.forEach(function(tr){var ms=fw?mine(tr):[],nl=((tr.nodes||[]).length||1)+ms.length,h=Math.max(th,nl*nh()-8,ms.length*64)+44,B;
+    // a fleet: no machine column, its pool and trainer cards carry the machine (card, count, provider, GPU use)
+    var fl=!!fleet(),x0=samp.length?420:10,lw=fl?0:124,lg=fl?16:26,sw=fl?292:196,rx=x0+lw+lg,rw=isl?262:0,tx=isl?rx+rw+124:fw?rx+sw+112:rx,tw=isl?330:sft()||fw?340:290,th=sft()?170:212,y=14;
+    trs.forEach(function(tr){var ms=fw?mine(tr):[],nl=fl?0:((tr.nodes||[]).length||1)+ms.length,h=Math.max(th,nl*nh()-8,ms.length*64)+44,B;
       B={x:x0,y:y,w:tx+tw-x0+12,h:h,lx:x0+12,ly:y+34,lw:lw,rx:rx,ry:y+34,rw:rw,rh:h-44,tx:tx,ty:y+34,tw:tw,th:h-44,
         co:!!(tr.island&&tr.island.colocated),roll:isl&&!!tr.island,samp:[]};
-      if(fw){var sy0=B.ty+(B.th-ms.length*64+8)/2;ms.forEach(function(sp,j){B.samp.push({x:rx,y:sy0+j*64,w:196,h:56,s:sp})});B.lane={cx:rx+196+56,cy:B.ty+B.th/2,r:26}}
+      if(fw){var sy0=B.ty+(B.th-ms.length*64+8)/2;ms.forEach(function(sp,j){B.samp.push({x:rx,y:sy0+j*64,w:sw,h:56,s:sp})});B.lane={cx:rx+sw+56,cy:B.ty+B.th/2,r:30}}
       g.boxes.push(B);y+=h+16});
-    var H=y,yw=336,yx=g.VW-yw-10,yh=N===1?318:250,yy=Math.max(14,(H-(N*(yh+16)-16))/2);
+    var H=y,yw=336,yx=g.VW-yw-10,yh=N===1?(fl?272:318):250,yy=Math.max(14,(H-(N*(yh+16)-16))/2);
     for(var s=0;s<N;s++)g.syn.push({x:yx,y:yy+s*(yh+16),w:yw,h:yh});
     if(samp.length){var sh=62,sy=Math.max(14,H/2-(samp.length*(sh+10))/2);samp.forEach(function(sp,k){g.samp.push({x:10,y:sy+k*(sh+10),w:228,h:sh})});
       g.store={cx:330,cy:H/2,r:46};H=Math.max(H,sy+samp.length*(sh+10)+20)}
     g.VH=Math.max(H,yy+N*(yh+16)+44)}
   else{var yN=6;
-    if(samp.length){samp.forEach(function(sp,k){g.samp.push({x:4,y:yN+k*56,w:250,h:50})});g.store={cx:330,cy:yN+Math.max(50,samp.length*56)/2,r:34};yN+=Math.max(110,samp.length*56+14)}
-    trs.forEach(function(tr){var ms=fw?mine(tr):[],nl=((tr.nodes||[]).length||1)+ms.length,roll=isl&&!!tr.island,sh=ms.length*64,h=30+nl*62+(roll?182:0)+sh+(fw?20:0)+240,B;
+    if(samp.length){samp.forEach(function(sp,k){g.samp.push({x:4,y:yN+k*62,w:250,h:56})});g.store={cx:330,cy:yN+Math.max(56,samp.length*62)/2,r:34};yN+=Math.max(110,samp.length*62+14)}
+    trs.forEach(function(tr){var ms=fw?mine(tr):[],nl=fleet()?0:((tr.nodes||[]).length||1)+ms.length,roll=isl&&!!tr.island,sh=ms.length*64,h=30+nl*62+(roll?182:0)+sh+(fw?20:0)+240,B;
       var ry=yN+28+nl*62;
       B={x:4,y:yN,w:392,h:h,lx:12,ly:yN+28,lw:376,rx:12,ry:ry,rw:376,rh:172,tx:12,ty:ry+(roll?182:0)+sh+(fw?20:0),tw:376,th:sft()?170:196,
         co:!!(tr.island&&tr.island.colocated),roll:roll,samp:[]};
-      if(fw){ms.forEach(function(sp,j){B.samp.push({x:12,y:ry+j*64,w:300,h:56,s:sp})});B.lane={cx:360,cy:ry+Math.max(sh,56)/2,r:22}}
+      if(fw){ms.forEach(function(sp,j){B.samp.push({x:12,y:ry+j*64,w:300,h:56,s:sp})});B.lane={cx:358,cy:ry+Math.max(sh,56)/2,r:27}}
       g.boxes.push(B);yN+=h+12});
     for(var q=0;q<N;q++){g.syn.push({x:4,y:yN+30,w:392,h:N===1?300:236});yN+=(N===1?300:236)+36}
     g.VH=yN+36}
@@ -133,7 +161,7 @@ function build(host){
   var lay={host:host,svg:svg,g:g,W:W,boxes:[],syn:[],pair:[],inl:[],samp:[],trunk:[],store:null,shape:shape()};
   D.trainers.forEach(function(tr,k){lay.boxes.push(islandBox(nd,wires,labels,g.boxes[k],tr,g.narrow))});
   g.syn.forEach(function(B,s){lay.syn.push(syncerCard(nd,B,D.shards[s]))});
-  syncerLabel(nd,g.syn[g.syn.length-1],g.narrow);
+  if(!fleet())syncerLabel(nd,g.syn[g.syn.length-1],g.narrow);  // a fleet: no machine labels
   // trainer <-> syncer shard lanes: upper PUSH (->), lower BCAST (<-)
   D.trainers.forEach(function(tr,k){var B=g.boxes[k],row=[];
     g.syn.forEach(function(S,s){var base,a,b;
@@ -146,9 +174,12 @@ function build(host){
       el("path",{d:U.dpath(base),"class":"tphit","data-td":"pair:"+k+":"+s},wires);
       var cnt=el("text",{x:m[0],y:m[1]-8,"text-anchor":"middle","class":"tpc",display:"none"},labels,"");
       row.push({push:a,bcast:U.rev(b),e:[ea,eb],x:x,cnt:cnt})});
-    var lx=B.tx+B.tw+12,y0=B.ty+B.th/2,yA=g.narrow?B.ty+B.th+12:(k%2===0?y0-66:y0+28),t=[];
+    // the lane labels sit in the gap between the card and the syncer, on the side the lanes
+    // leave free (above when they bend down to the syncer, below when they bend up), cut to the gap
+    var Sy0=g.syn[0],lx=B.tx+B.tw+12,y0=B.ty+B.th/2,y1=Sy0?Sy0.y+Sy0.h/2+(k-(D.trainers.length-1)/2)*24:y0,
+      yA=g.narrow?B.ty+B.th+12:(y1>=y0?y0-66:y0+28),t=[],labW=g.narrow?B.tw-8:(Sy0?Sy0.x:g.VW)-lx-10;
     for(var i=0;i<4;i++)t.push(el("text",{x:g.narrow?B.tx+4:lx,y:yA+i*13,"class":"tpm "+(i<2?"tpdl":"tpwtc"),display:B.hub||g.narrow&&i%2?"none":"inline"},labels,""));
-    lay.pair.push({row:row,lab:t})});
+    t.w=labW;lay.pair.push({row:row,lab:t})});
   if(g.store){lay.store=store(nd,g.store);
     (T.samplers||[]).forEach(function(sp,k){var B=g.samp[k],sx=B.x+B.w,sy=B.y+B.h/2,ex=g.store.cx-g.store.r-8,ey=g.store.cy+(k-((T.samplers.length-1)/2))*6,bend=(ex-sx)*0.55;
       var p=U.bez([sx,sy],[sx+bend,sy],[ex-bend,ey],[ex,ey],30);el("path",{d:U.dpath(U.offset(p,-2.4)),"class":"tpwire"},wires);
@@ -171,12 +202,12 @@ function islandBox(nd,wires,labels,B,tr,narrow){
   var short=isl||sft()||!!fleet();
   el("text",{x:B.x+14,y:B.y+20,"class":"tpt"},labels,(short?"Island ":"Trainer island ")+tr.id);
   el("text",{x:B.x+(short?78:120),y:B.y+20,"class":"tpm"},labels,fleet()?clip(boxTitle(tr,narrow),Math.floor((B.w-92)/6.3)):boxTitle(tr,narrow));
-  o.nodes=(tr.nodes||[]).map(function(n,j){return nodeLabel(nd,B.lx,B.ly+j*(narrow?62:nh()),narrow?Math.min(B.lw,250):B.lw,narrow?54:nh()-8,n,tr,j)});
+  o.nodes=fleet()?[]:(tr.nodes||[]).map(function(n,j){return nodeLabel(nd,B.lx,B.ly+j*(narrow?62:nh()),narrow?Math.min(B.lw,250):B.lw,narrow?54:nh()-8,n,tr,j)});
   // --rl-sampler-follow trainer: this trainer's samplers, its lane of the store (trainer<k>/) and the V1 flows inside the box
   o.samp=[];
   if(B.lane){var j0=o.nodes.length,LN=B.lane;
     B.samp.forEach(function(S,j){var sn=snode(S.s.id),pl=S.s.pool;
-      o.nodes.push(nodeLabel(nd,B.lx,B.ly+(j0+j)*(narrow?62:86),narrow?Math.min(B.lw,250):B.lw,narrow?54:78,
+      if(!fleet())o.nodes.push(nodeLabel(nd,B.lx,B.ly+(j0+j)*(narrow?62:86),narrow?Math.min(B.lw,250):B.lw,narrow?54:78,
         pl?{id:(pl.source==="miles"?"m":"p")+j,machine:pl.source_name||pl.name,machine_full:pl.name,gpu:S.s.card||"GPU",gpus:S.s.gpus,cloud:pl.provider,
             roles:pl.samplers.slice(0,6).map(function(){return "R"}),incarnation:1,pool:pl.name}:
         {id:"s"+j,machine:sn.machine_full?String(sn.machine_full).split("-").slice(-2).join("-"):S.s.id,machine_full:sn.machine_full,gpu:sn.gpu||S.s.card,gpus:sn.gpus,roles:["R"],
@@ -189,8 +220,8 @@ function islandBox(nd,wires,labels,B,tr,narrow){
     var lg=el("g",{"data-td":"lane:"+tr.id},nd);el("circle",{cx:LN.cx,cy:LN.cy,r:LN.r,"class":"tpbox"},lg);
     el("text",{x:LN.cx,y:LN.cy-3,"text-anchor":"middle","class":"tpm",style:"font-size:9.5px"},lg,laneName(tr));
     o.lat=el("text",{x:LN.cx,y:LN.cy+10,"text-anchor":"middle","class":"tpv tpwtc",style:"font-size:10px"},lg,"");
-    o.buf=el("text",{x:LN.cx,y:LN.cy+LN.r+14,"text-anchor":"middle","class":"tpm"},lg,"")}
-  if(B.co){o.merged=el("rect",{x:B.rx,y:B.ry,width:B.tx+B.tw-B.rx,height:B.th,rx:10,"class":"tpbox"},nd);el("rect",{x:B.rx,y:B.ry,width:4,height:B.th,rx:2,fill:arch(tr.arch)},nd);
+    o.buf=el("text",{x:LN.cx,y:LN.cy+LN.r+14,"text-anchor":"middle","class":"tpm"},labels,"")}  // under the circle, not in it
+  if(B.co){o.merged=el("rect",{x:B.rx,y:B.ry,width:B.tx+B.tw-B.rx,height:B.th,rx:10,"class":"tpbox"},nd);accent(nd,B.th,arch(tr.arch),B.rx,B.ry);
     if(!narrow)el("line",{x1:B.tx-14,y1:B.ry+12,x2:B.tx-14,y2:B.ry+B.th-12,stroke:"var(--line)","stroke-dasharray":"3 3"},nd)}
   if(B.roll){o.ro=rolloutCard(nd,B.rx,B.ry,B.rw,B.rh,tr,B.co);
     var x0=B.rx+B.rw+4,x1=B.tx-(B.co?18:4),yc=B.ry+B.rh/2,gp,sp;
@@ -227,46 +258,48 @@ function nodeLabel(nd,x,y,w,h,n,tr,j){
   roles.forEach(function(rl){var fill=rl==="R"?"var(--traj)":rl==="S"?"var(--ink2)":"var(--delta)";
     el("rect",{x:cx,y:37,width:cw,height:15,rx:3,fill:fill,opacity:old?0.3:0.22,stroke:fill},g);el("text",{x:cx+cw/2,y:48,"text-anchor":"middle","class":"tpm",style:"font-size:9.5px;font-weight:600"},g,rl+(n.inferred?"*":""));
     cells.push({role:rl,x:x+cx,y:y+44,w:cw});cx+=cw+4});
-  if(!roles.length)el("text",{x:9,y:48,"class":"tpm"},g,"roles not on the tape");
-  var dot=el("circle",{cx:w-12,cy:44,r:3.5},g),info=el("text",{x:9,y:h-8,"class":"tpm"},g,"");
+  if(!roles.length)fitText(el("text",{x:9,y:48,"class":"tpm"},g,""),"roles not on the tape",w-26);
+  // a short label (narrow page): the info line beside the role cells, not across them
+  var ix=h<70?cx+6:9,dot=el("circle",{cx:w-12,cy:44,r:3.5},g),info=el("text",{x:ix,y:h-8,"class":"tpm"},g,"");info._w=w-ix-(h<70?22:10);
   if(old)g.setAttribute("opacity",0.45);
   return{g:g,box:box,dot:dot,info:info,n:n,old:old,cells:cells}}
-function syncerLabel(nd,S,narrow){if(!S)return;var y=S.y+S.h+8,w=narrow?S.w:200;
+function syncerLabel(nd,S,narrow){if(!S)return;var y=S.y+S.h+8,w=S.w;
   var g=el("g",{transform:"translate("+S.x+","+y+")","data-td":"snode"},nd);el("rect",{width:w,height:28,rx:7,"class":"tpbox"},g);
   var cx=8;D.shards.forEach(function(s){var lab="S"+(D.shards.length>1?s.index:"");el("rect",{x:cx,y:7,width:22,height:14,rx:3,fill:"var(--ink2)",opacity:0.22,stroke:"var(--ink2)"},g);
     el("text",{x:cx+11,y:17.5,"text-anchor":"middle","class":"tpm",style:"font-size:9.5px;font-weight:600"},g,lab);cx+=26});
-  el("text",{x:cx+4,y:18,"class":"tpm"},g,"syncer · machine not on the tape")}
+  fitText(el("text",{x:cx+4,y:18,"class":"tpm"},g,""),"syncer · machine not on the tape",w-cx-12)}
 
 function trainerCard(nd,x,y,w,h,tr,co){
   var g=el("g",{transform:"translate("+x+","+y+")","data-td":"trn:"+tr.id},nd);
-  var box=el("rect",{width:w,height:h,rx:10,"class":"tpbox",visibility:co?"hidden":"visible"},g);if(!co)el("rect",{x:0,y:0,width:4,height:h,rx:2,fill:arch(tr.arch)},g);
-  el("text",{x:14,y:20,"class":"tpt"},g,clip((sft()?"Learner ":"Trainer ")+tr.id+(tr.name?" · "+tr.name:""),Math.floor((w-70)/7)));
+  var box=el("rect",{width:w,height:h,rx:10,"class":"tpbox",visibility:co?"hidden":"visible"},g);if(!co)accent(g,h,arch(tr.arch));
+  el("text",{x:14,y:20,"class":"tpt"},g,clip((sft()?"Learner ":"Trainer ")+tr.id+(tr.name?" · "+(fleet()?shortName(tr.name):tr.name):""),Math.floor((w-70)/7)));
   el("text",{x:14,y:36,"class":"tpm"},g,sft()?["ms-swift Megatron",(tr.learner||{}).layout].filter(Boolean).join(" · "):co?"Megatron · same GPU as the rollout":D.kind==="island"?"Megatron · "+(tr.gpu||"GPU"):[tr.gpus?tr.gpus+" × "+tr.gpu:tr.gpu,tr.arch].filter(Boolean).join(" · "));
   var o={g:g,box:box,co:co};
   o.badge=el("text",{x:w-12,y:20,"text-anchor":"end","class":"tpv"},g,"");
   o.step=el("text",{x:14,y:66,"class":"tpbig2"},g,"");o.outer=el("text",{x:w-12,y:66,"text-anchor":"end","class":"tpm"},g,"");
   o.dot=el("circle",{cx:18,cy:86,r:3.5},g);o.ph=el("text",{x:27,y:90},g,"");
   o.l=[];for(var i=0;i<5;i++){var ly=114+i*(h>200?18:16);o.l.push(el("text",{x:14,y:ly,"class":"tpm",display:ly>h-4?"none":"inline"},g,""))}
+  o.lw=w-26;o.phw=w-36;
   o.flash=el("rect",{width:w,height:h,rx:10,fill:"none","stroke-width":1.5,opacity:0},g);
   return o}
 function rolloutCard(nd,x,y,w,h,tr,co){
   var g=el("g",{transform:"translate("+x+","+y+")","data-td":"rol:"+tr.id},nd),r=tr.island;
-  var box=co?null:el("rect",{width:w,height:h,rx:10,"class":"tpbox"},g);if(!co)el("rect",{x:0,y:0,width:4,height:h,rx:2,fill:arch(tr.arch)},g);
+  var box=co?null:el("rect",{width:w,height:h,rx:10,"class":"tpbox"},g);if(!co)accent(g,h,arch(tr.arch));
   el("text",{x:14,y:20,"class":"tpt"},g,"Rollout"+(fin(r.engines)?" · "+r.engines+" engine"+(r.engines>1?"s":""):""));
   var o={g:g,box:box,co:co};
   o.sub=el("text",{x:14,y:36,"class":"tpm"},g,co?"":(tr.gpu||"GPU")+" · own GPU(s) · "+(r.exec_mode||r.placement||""));
   o.big=el("text",{x:14,y:64,"class":"tpbig2"},g,"");
   el("rect",{x:14,y:71,width:w-28,height:3,rx:1.5,fill:"var(--line)"},g);o.barf=el("rect",{x:14,y:71,width:0,height:3,rx:1.5,fill:"var(--traj)"},g);o.barW=w-28;
   o.dot=el("circle",{cx:18,cy:88,r:3.5},g);o.st=el("text",{x:27,y:92},g,"");
-  o.l=[];for(var i=0;i<4;i++)o.l.push(el("text",{x:14,y:114+i*(h>180?20:16),"class":"tpm"},g,""));
+  o.l=[];for(var i=0;i<4;i++)o.l.push(el("text",{x:14,y:114+i*(h>180?20:16),"class":"tpm"},g,""));o.lw=w-26;
   o.flash=el("rect",{width:w,height:h,rx:10,fill:"none","stroke-width":1.5,opacity:0},g);
   return o}
 function syncerCard(nd,B,sh){
   var g=el("g",{transform:"translate("+B.x+","+B.y+")","data-td":"syn:"+sh.index},nd),w=B.w,h=B.h,N=D.shards.length;
-  var box=el("rect",{width:w,height:h,rx:10,"class":"tpbox"},g);el("rect",{x:0,y:0,width:4,height:h,rx:2,fill:"var(--ink2)"},g);
+  var box=el("rect",{width:w,height:h,rx:10,"class":"tpbox"},g);accent(g,h,"var(--ink2)");
   el("text",{x:14,y:20,"class":"tpt"},g,N>1?"Syncer shard "+sh.index+" · fragments "+sh.lo+"–"+(sh.hi-1):"Syncer");
-  el("text",{x:14,y:36,"class":"tpm"},g,(N>1?"steps t ≡ "+(sh.index+1)+" (mod "+N+") · ":"")+["P "+D.P,D.quorum!=null?"quorum "+D.quorum+" of "+D.M:"M "+D.M,D.H?(D.H_exact?"H ":"H ≤ ")+D.H:null].concat(cfgBits(D.config)).filter(Boolean).join(" · "));
-  var o={g:g,box:box,sh:sh};
+  fitText(el("text",{x:14,y:36,"class":"tpm"},g,""),(N>1?"steps t ≡ "+(sh.index+1)+" (mod "+N+") · ":"")+["P "+D.P,D.quorum!=null?"quorum "+D.quorum+"/"+D.M:"M "+D.M,D.H?(D.H_exact?"H ":"H ≤ ")+D.H:null].concat(cfgBits(D.config)).filter(Boolean).join(" · "),w-26);
+  var o={g:g,box:box,sh:sh,lw:w-26};
   o.roster=el("text",{x:w-12,y:20,"text-anchor":"end","class":"tpv"},g,"");
   o.step=el("text",{x:14,y:66,"class":"tpbig2"},g,"");o.of=el("text",{x:w-12,y:66,"text-anchor":"end","class":"tpm"},g,"");
   el("rect",{x:14,y:74,width:w-28,height:4,rx:2,fill:"var(--line)"},g);o.barf=el("rect",{x:14,y:74,width:0,height:4,rx:2,fill:"var(--wt)"},g);o.barW=w-28;
@@ -279,49 +312,51 @@ function syncerCard(nd,B,sh){
   return o}
 function samplerCard(nd,B,s,sn){
   var g=el("g",{transform:"translate("+B.x+","+B.y+")","data-td":"smp:"+s.id},nd);sn=sn||snode(s.id);
-  el("rect",{width:B.w,height:B.h,rx:9,"class":"tpbox"},g);el("rect",{x:0,y:0,width:4,height:B.h,rx:2,fill:arch(s.arch)},g);
+  el("rect",{width:B.w,height:B.h,rx:9,"class":"tpbox"},g);accent(g,B.h,arch(s.arch));
   el("text",{x:13,y:18,"class":"tpt"},g,clip([s.card,s.precision,s.engine].filter(Boolean).join(" · ")||s.id,Math.floor((B.w-50)/6.5)));
   var src=s.pool&&SRC[s.source],x2=13;
   // a fleet with Miles sampler islands: a source tag (Miles native / external pool) before the row's name
   if(src){var tw=src[0].length*5.9+10;el("rect",{x:13,y:23.5,width:tw,height:13,rx:6.5,fill:src[1],"fill-opacity":0.2,stroke:src[1]},g);
     el("text",{x:13+tw/2,y:33,"text-anchor":"middle","class":"tpm",style:"font-size:9px;font-weight:700;letter-spacing:.3px"},g,src[0].toUpperCase());x2=13+tw+6}
-  el("text",{x:x2,y:33,"class":"tpm"},g,clip(src?s.id:s.pool?s.id+" · "+s.n+" sampler"+(s.n===1?"":"s"):
+  var prov=s.pool&&s.pool.provider?" · "+s.pool.provider:"";
+  el("text",{x:x2,y:33,"class":"tpm"},g,clip(src?s.id+prov:s.pool?s.id+prov+" · "+s.n+" sampler"+(s.n===1?"":"s"):
     ["sampler "+s.id,s.gpus?s.gpus+" GPU":null,sn.cloud].filter(Boolean).join(" · "),Math.floor((B.w-x2-7)/6.3)));
   return{ver:el("text",{x:B.w-10,y:18,"text-anchor":"end","class":"tpv"},g,""),dot:el("circle",{cx:16.5,cy:B.h-12.5,r:3.5},g),
     st:el("text",{x:25,y:B.h-9,"class":"tps2"},g,""),rate:el("text",{x:B.w-10,y:B.h-9,"text-anchor":"end","class":"tpm"},g,""),s:s}}
 function store(nd,R){var g=el("g",{"data-td":"store"},nd);
   el("circle",{cx:R.cx,cy:R.cy,r:R.r,"class":"tpbox"},g);el("text",{x:R.cx,y:R.cy-4,"text-anchor":"middle","class":"tpt tpbig"},g,"Store");
-  return{lat:el("text",{x:R.cx,y:R.cy+14,"text-anchor":"middle","class":"tpv tpwtc"},g,""),info:el("text",{x:R.cx,y:R.cy+R.r+18,"text-anchor":"middle","class":"tpm"},g,""),
-    pub:el("text",{x:R.cx,y:R.cy+R.r+32,"text-anchor":"middle","class":"tpm tpwtc"},g,"")}}
+  // the buffer and publisher lines sit under the circle: labels of the graph, not of the circle
+  return{lat:el("text",{x:R.cx,y:R.cy+14,"text-anchor":"middle","class":"tpv tpwtc"},g,""),info:el("text",{x:R.cx,y:R.cy+R.r+18,"text-anchor":"middle","class":"tpm"},nd,""),
+    pub:el("text",{x:R.cx,y:R.cy+R.r+32,"text-anchor":"middle","class":"tpm tpwtc"},nd,"")}}
 
 // -- paint (4 Hz) ------------------------------------------------------------------
 function lane(e,k){var c={delta:C.delta,wt:C.wt,warn:C.warn,bad:C.bad}[k];e.style.stroke=c||"";e.style.strokeDasharray=k==="warn"?"6 4":"";e.setAttribute("opacity",c?0.85:1)}
 function active(kk,iid,sh,td){return T.live&&D.flows.some(function(f){return f.k===kk&&f.i===iid&&(sh==null||f.sh===sh)&&f.t0<=td&&Math.max(f.t1,f.t0+1.3)>=td})}
 function paint(){
   var tn=now(),td=tn-DELAY_S,red=U.reduced();
-  D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.finalized);
+  D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.status==="stopped"||tr.finalized||D.done);  // a finished run: no trainer is lost
     tc.step.textContent=(fin(tr.step)?"step "+tr.step:"step n/a")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?"outer v"+tr.outer:"";
-    tc.ph.textContent=st[0];tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
+    fitText(tc.ph,st[0],tc.phw);tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
     tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done?"link ✕":"";tc.badge.style.fill=C.bad;
     [tc.co?o.merged:tc.box].forEach(function(b){if(b){b.style.stroke=dead||tr.failure?C.bad:"";b.style.strokeDasharray=dead?"5 4":""}});
     o.tc.g.setAttribute("opacity",dead?0.6:1);
-    var L0=tc.l;
-    L0[0].textContent="snapshot "+(tr.hash||"n/a")+(lr(tr.lr)!=null?" · lr "+lr(tr.lr):"");
+    var L0=tc.l,lw=tc.lw;
+    fitText(L0[0],"snapshot "+(tr.hash||"n/a")+(lr(tr.lr)!=null?" · lr "+lr(tr.lr):""),lw);
     if(tr.versions){var parts=[["frag [",""]];tr.versions.forEach(function(v,f){var b=behind(tr,f);parts.push([String(v),b?"fill:"+C.warn+";font-weight:700":""]);if(f<tr.versions.length-1)parts.push([" ",""])});parts.push(["]",""]);rich(L0[1],parts)}
     else L0[1].textContent="fragment versions not on the tape";
     var old=fin(tr.pending_oldest_ts)?tn-tr.pending_oldest_ts:0;
-    L0[2].textContent=(tr.pending_n&&D.done?"↓ run ended: the last "+tr.pending_n+" merge(s) went to the final cut":tr.pending_n?"↓ BCAST pending "+tr.pending_n+" · oldest "+dur(old):"↓ every merged fragment applied")+(fin(tr.apply_s)?" · apply "+tr.apply_s.toFixed(2)+"s":"");
+    fitText(L0[2],(tr.pending_n&&D.done?"↓ run ended · last "+tr.pending_n+" merge(s) → final cut":tr.pending_n?"↓ BCAST pending "+tr.pending_n+" · oldest "+dur(old):"↓ every merged fragment applied")+(fin(tr.apply_s)?" · apply "+tr.apply_s.toFixed(2)+"s":""),lw);
     L0[2].style.fill=sft()||D.done?C.ink2:tr.live&&old>BCAST_BAD_S?C.bad:tr.live&&old>BCAST_WARN_S?C.warn:C.ink2;
     var up=Object.keys(tr.pushed||{});
-    L0[3].textContent=tr.full_push?"↑ "+(tr.full_push.count||0)+" PUSH last round · "+(tr.full_push.total||0)+" in run"+(tr.full_push.overwritten?" · "+tr.full_push.overwritten+" overwritten":fin(tr.full_push.inflight)&&tr.full_push.inflight?" · in flight "+tr.full_push.inflight:""):
-      "↑ unmerged PUSH "+up.length+(up.length?" ("+up.slice(0,3).map(function(f){return "f"+f+" t"+tr.pushed[f]}).join(", ")+")":"");
-    L0[4].textContent=fin(tr.gpu_util)?"GPU "+Math.round(tr.gpu_util)+"%"+(fin(tr.mem_pct)?" · HBM "+Math.round(tr.mem_pct)+"%":""):"";
+    fitText(L0[3],tr.full_push?"↑ "+(tr.full_push.count||0)+" PUSH last round · "+(tr.full_push.total||0)+" in run"+(tr.full_push.overwritten?" · "+tr.full_push.overwritten+" overwritten":fin(tr.full_push.inflight)&&tr.full_push.inflight?" · in flight "+tr.full_push.inflight:""):
+      "↑ unmerged PUSH "+up.length+(up.length?" ("+up.slice(0,3).map(function(f){return "f"+f+" t"+tr.pushed[f]}).join(", ")+")":""),lw);
+    fitText(L0[4],fin(tr.gpu_util)?"GPU "+Math.round(tr.gpu_util)+"%"+(fin(tr.mem_pct)?" · HBM "+Math.round(tr.mem_pct)+"%":""):"",lw);
     var ap=fin(tr.apply_ts)&&T.live&&td-tr.apply_ts>=0&&td-tr.apply_ts<3;tc.flash.style.stroke=C.wt;tc.flash.setAttribute("opacity",ap?0.9:0);
     if(o.ro)paintRollout(tr,o,tn,td);
     if(o.lat){var ln=(D.lanes||{})[tr.id]||{};o.lat.textContent=fin(ln.latest)?"v"+ln.latest:"no release";o.buf.textContent=fin(ln.backlog)?"buffer "+Math.round(ln.backlog):"written "+Math.round(ln.written||0);
       o.samp.forEach(function(x){x.card.s=fresh(x.card.s);paintSampler(x.card)})}
     o.nodes.forEach(function(n){var pl=n.n.pool?fpool(n.n.pool):null,sp=pl?poolCard(pl):n.n.sampler?snode(n.n.sampler):null,nc=n.old?C.ink2:sp?(sp.live?C.good:C.ink2):dead||tr.failure?C.bad:tr.live?C.good:C.ink2;n.dot.setAttribute("fill",nc);
-      n.info.textContent=n.old?"replaced"+(n.n.reason?": "+String(n.n.reason).slice(0,18):""):fin(n.n.util)?"GPU "+Math.round(n.n.util)+"%"+(fin(n.n.mem_pct)?" · HBM "+Math.round(n.n.mem_pct)+"%":""):"";
+      fitText(n.info,n.old?"replaced"+(n.n.reason?": "+String(n.n.reason).slice(0,18):""):fin(n.n.util)?"GPU "+Math.round(n.n.util)+"%"+(fin(n.n.mem_pct)?" · HBM "+Math.round(n.n.mem_pct)+"%":""):"",n.info._w);
       n.box.style.stroke=n.old?"":dead?C.bad:"";n.box.style.strokeDasharray=n.old?"4 3":""});
     // lanes to each shard
     var pr=L.pair[k],failP=dead||(tr.failure&&/lr/.test(tr.failure.metric))||(tr.live&&tr.lr_zero),failB=dead||(tr.failure&&/hash/.test(tr.failure.metric));
@@ -333,25 +368,27 @@ function paint(){
       ln.cnt.setAttribute("display",red&&T.live?"inline":"none");
       if(red&&T.live)ln.cnt.textContent=D.flows.filter(function(f){return f.i===tr.id&&f.sh===s&&f.k==="p"&&f.t1>tn-300}).length+" PUSH / 5 min"});
     var lp=tr.last_push,lb=tr.last_bcast;
-    pr.lab[0].textContent=lp?"↑ f"+lp.frag+" t"+lp.step+" base v"+lp.base+" · "+mb(lp.bytes)+(lp.wire?" wire":""):tr.full_push?"↑ full-parameter PUSH (aggregate only)":"↑ no PUSH yet";
-    pr.lab[1].textContent=lp?"  PULL→PUSH "+dur(lp.p2p_s)+(lp.h?" · H "+lp.h:""):"";
-    pr.lab[2].textContent=lb?"↓ f"+lb.frag+" v"+lb.v+" · "+mb(lb.bytes)+(lb.overwrite?" · overwrite":lb.catch_up?" · catch-up":""):tr.full_push?"↓ BCAST applied in the round (aggregate)":"↓ no BCAST applied yet";
-    pr.lab[3].textContent=lb?"  queue "+dur(lb.queue_s)+(fin(tr.apply_s)?" · apply "+tr.apply_s.toFixed(2)+"s":""):"";
-    if(sft())paintLearner(tr,tc.l,pr.lab,tn)});
+    var lw2=pr.lab.w;
+    fitText(pr.lab[0],lp?"↑ f"+lp.frag+" t"+lp.step+" base v"+lp.base+" · "+mb(lp.bytes)+(lp.wire?" wire":""):tr.full_push?"↑ full-parameter PUSH (aggregate only)":"↑ no PUSH yet",lw2);
+    fitText(pr.lab[1],lp?"  PULL→PUSH "+dur(lp.p2p_s)+(lp.h?" · H "+lp.h:""):"",lw2);
+    fitText(pr.lab[2],lb?"↓ f"+lb.frag+" v"+lb.v+" · "+mb(lb.bytes)+(lb.overwrite?" · overwrite":lb.catch_up?" · catch-up":""):tr.full_push?"↓ BCAST applied in the round (aggregate)":"↓ no BCAST applied yet",lw2);
+    fitText(pr.lab[3],lb?"  queue "+dur(lb.queue_s)+(fin(tr.apply_s)?" · apply "+tr.apply_s.toFixed(2)+"s":""):"",lw2);
+    if(sft())paintLearner(tr,tc.l,pr.lab,tn,tc.lw)});
   L.syn.forEach(function(o,s){var sh=D.shards[s],mine=D.rounds.filter(function(r){return r.shard===s}),st=sh.state,last=sh.last;
     o.step.textContent="step "+sh.step;o.of.textContent=(fin(D.total_steps)?"of "+D.total_steps+" · ":"")+sh.merges+" merges · sweep "+(D.P?Math.floor(Math.max(0,sh.step-1)/D.P)+1:"n/a");
     o.barf.setAttribute("width",D.P?(o.barW*(((sh.step-1)%D.P+1)/D.P)).toFixed(1):0);
     o.roster.textContent=D.done?"run done · roster "+D.M:"roster "+D.roster+"/"+D.M;o.roster.style.fill=D.done?C.ink2:D.roster<D.M?C.bad:C.good;
     var c=st==="done"?C.ink2:st==="waiting for quorum"?(sh.attempt_max>1?C.bad:C.warn):st==="merging"?C.wt:st==="gathering"?C.good:C.ink2;
-    o.st.textContent=(st==="done"?"done (final cut)":st)+" · in flight "+mine.length+(D.behind?" · syncer tape behind":"");o.st.style.fill=c===C.good?C.ink:c;o.dot.setAttribute("fill",c);
+    fitText(o.st,(st==="done"?"done (final cut)":st)+" · in flight "+mine.length+(D.behind?" · syncer tape behind":""),o.lw-14);o.st.style.fill=c===C.good?C.ink:c;o.dot.setAttribute("fill",c);
     o.box.style.stroke=c===C.bad?C.bad:"";
     var lines=mine.slice(0,3).map(function(r){return["t"+r.step+" f"+r.frag+": "+(r.state==="merging"?"merging":r.state==="pull"?"PULL out":"PUSH "+r.pushed.length+"/"+D.M)+" · "+dur(tn-r.since)+(r.attempt>1?" · attempt "+r.attempt:"")+(r.timeouts?" · "+r.timeouts+" timeout"+(r.timeouts>1?"s":""):""),r.blocked||r.timeouts?C.warn:C.ink2]});
     lines.push([last?"last merge t"+last.step+" f"+last.frag+" · quorum "+dur(last.quorum_s)+" · merge "+(fin(last.merge_s)?last.merge_s.toFixed(2)+"s":"n/a"):"no merge yet",C.ink2]);
     if(last)lines.push(["checkpoint step "+last.step+(fin(last.checkpoint_s)?" · "+last.checkpoint_s.toFixed(2)+"s":"")+" · "+dur(tn-last.ts)+" ago (before BCAST)",C.ink2]);
     if(last&&last.missed.length)lines.push(["last merge without "+(sft()?"island ":"trainer ")+last.missed.join(", ")+" (quorum "+last.quorum+")",C.ink2]);
     if(D.shards.length===1)lines.push(["5 min: ↑ "+D.traffic.push+" PUSH"+(fin(D.traffic.push_bytes)?" "+mb(D.traffic.push_bytes):"")+" · ↓ "+D.traffic.bcast+" applied",C.ink2]);
-    if(D.behind)lines.push(["syncer tape behind the islands: no negative lag drawn",C.ink2]);
-    o.ln.forEach(function(e,i){e.textContent=lines[i]?lines[i][0]:"";e.style.fill=lines[i]?lines[i][1]:C.ink2});
+    if(D.behind)lines.push(["syncer tape behind the islands · no negative lag drawn",C.ink2]);
+    lines=wrapLines(lines,o.lw,o.ln.length);
+    o.ln.forEach(function(e,i){fitText(e,lines[i]?lines[i][0]:"",o.lw);e.style.fill=lines[i]?lines[i][1]:C.ink2});
     o.cells.forEach(function(cl,i){var f=sh.lo+i,r=mine.filter(function(x){return x.frag===f})[0],stuck=D.stuck.indexOf(f)>=0;
       cl.t.textContent="f"+f+" "+D.versions[f];cl.r.style.stroke=stuck?C.bad:r?(r.state==="merging"?C.wt:C.delta):"";cl.r.style.strokeWidth=r||stuck?1.6:1})});
   if(L.store){var b=T.buffer||{};L.store.lat.textContent=fin(T.latest)?"LATEST v"+T.latest:"no release";
@@ -360,30 +397,30 @@ function paint(){
     L.samp.forEach(function(x){x.card.s=fresh(x.card.s);paintSampler(x.card)})}
   matrix(tn)}
 // an SFT learner: loss / tokens per step instead of policy and rollout; PUSH from the merge records' responders
-function paintLearner(tr,l,lab,tn){var ln=tr.learner||{},lp=tr.last_push,la=tr.last_apply;
-  l[0].textContent=[fin(ln.loss)?"loss "+ln.loss.toFixed(4):"loss n/a",lr(tr.lr)!=null?"lr "+lr(tr.lr):null].filter(Boolean).join(" · ");
-  l[1].textContent="step "+(fin(ln.step_s)?dur(ln.step_s):"n/a")+" · "+kn(ln.tps)+" tok/s";
-  l[2].textContent=la?"↓ "+tr.pending_n+" merged since its apply at step "+la.step:"↓ no broadcast applied yet";
-  l[3].textContent=lp?"↑ f"+lp.frag+" → t"+lp.step+" · base v"+lp.base+(fin(lp.export_s)?" · export "+lp.export_s.toFixed(1)+"s":""):"↑ no PUSH on the syncer tape";
-  l[4].textContent=ln.dataset?"data "+ln.dataset:"";
-  lab[0].textContent=lp?"↑ f"+lp.frag+" t"+lp.step+" base v"+lp.base+" · "+kn(lp.tokens)+" tok":"↑ no PUSH yet";
-  lab[1].textContent=lp?"  recv "+dur(lp.recv_s)+(fin(lp.staleness)?" · staleness "+lp.staleness:""):"";
-  lab[2].textContent=la?"↓ applied at step "+la.step+(fin(la.apply_s)?" · "+la.apply_s.toFixed(1)+"s":""):"↓ no apply yet";
-  lab[3].textContent=la?"  "+dur(tn-la.ts)+" ago":""}
+function paintLearner(tr,l,lab,tn,lw){var ln=tr.learner||{},lp=tr.last_push,la=tr.last_apply;
+  fitText(l[0],[fin(ln.loss)?"loss "+ln.loss.toFixed(4):"loss n/a",lr(tr.lr)!=null?"lr "+lr(tr.lr):null].filter(Boolean).join(" · "),lw);
+  fitText(l[1],"step "+(fin(ln.step_s)?dur(ln.step_s):"n/a")+" · "+kn(ln.tps)+" tok/s",lw);
+  fitText(l[2],la?"↓ "+tr.pending_n+" merged since its apply at step "+la.step:"↓ no broadcast applied yet",lw);
+  fitText(l[3],lp?"↑ f"+lp.frag+" → t"+lp.step+" · base v"+lp.base+(fin(lp.export_s)?" · export "+lp.export_s.toFixed(1)+"s":""):"↑ no PUSH on the syncer tape",lw);
+  fitText(l[4],ln.dataset?"data "+ln.dataset:"",lw);
+  fitText(lab[0],lp?"↑ f"+lp.frag+" t"+lp.step+" base v"+lp.base+" · "+kn(lp.tokens)+" tok":"↑ no PUSH yet",lab.w);
+  fitText(lab[1],lp?"  recv "+dur(lp.recv_s)+(fin(lp.staleness)?" · staleness "+lp.staleness:""):"",lab.w);
+  fitText(lab[2],la?"↓ applied at step "+la.step+(fin(la.apply_s)?" · "+la.apply_s.toFixed(1)+"s":""):"↓ no apply yet",lab.w);
+  fitText(lab[3],la?"  "+dur(tn-la.ts)+" ago":"",lab.w)}
 function paintSampler(o){var s=o.s;o.ver.textContent=fin(s.policy_version)?"v"+s.policy_version+(s.lag>0?" −"+s.lag:""):s.pool&&!s.live?"":"v?";
   o.ver.style.fill=s.lag>=2?C.bad:s.lag===1?C.warn:C.ink;var c=s.live?(s.state==="sampling"?C.good:s.state==="waiting"?C.warn:C.wt):C.ink2;
   o.dot.setAttribute("fill",c);o.st.textContent=(s.live?s.state:(s.status||"ended"))+(s.pool&&s.n?" · "+s.nlive+"/"+s.n+" up":"");o.rate.textContent=(s.rate_gpm||0).toFixed(1)+" g/min"}
 function paintRollout(tr,o,tn,td){var r=tr.island,ro=o.ro,st=rolloutState(tr,tn),c=col(st[1]);
-  ro.big.textContent=fin(r.round)?"round "+r.round:"round n/a";ro.st.textContent=st[0];ro.st.style.fill=st[1]==="good"?C.ink:c;ro.dot.setAttribute("fill",c);
+  ro.big.textContent=fin(r.round)?"round "+r.round:"round n/a";fitText(ro.st,st[0],ro.lw-14);ro.st.style.fill=st[1]==="good"?C.ink:c;ro.dot.setAttribute("fill",c);
   ro.barf.setAttribute("width",st[2]!=null?(ro.barW*st[2]/100).toFixed(1):0);
   if(ro.co){var on=tr.phase_raw==="generate"||tr.phase_raw==="publish",live=tr.live;
     rich(ro.sub,[["GPU phase: ",""],["rollout",on&&live?"fill:"+C.traj+";font-weight:700":""],[" ⇄ ",""],["train",!on&&live&&tr.phase_raw==="train"?"fill:"+C.delta+";font-weight:700":""]])}
   var sv=r.served;
-  ro.l[0].textContent=sv?"serving yeto:"+sv.v+":"+sv.hash:"serving the initial weights";
-  ro.l[1].textContent=r.groups_src==="trained"?(fin(r.groups)?r.groups+" groups / round (trainer side)":"groups not reported by the rollout"):
-    fin(r.groups)?r.groups+" groups · "+(r.traj||0)+" traj · "+(fin(r.tokens)?(r.tokens/1000).toFixed(1)+"k":"n/a")+" tok / round":"no round yet";
-  ro.l[2].textContent=fin(r.p50_s)?"group p50 "+r.p50_s.toFixed(1)+"s · p95 "+(fin(r.p95_s)?r.p95_s.toFixed(1)+"s":"—"):fin(r.rollout_p50_s)?"rollout "+r.rollout_p50_s.toFixed(1)+"s (median of the last rounds)":"";
-  ro.l[3].textContent=[fin(r.reward)?"reward "+r.reward.toFixed(2):null,fin(r.zero_var)?"zero-var "+Math.round(r.zero_var*100)+"%":null,T.live?(r.groups_5m/5).toFixed(1)+" g/min":null].filter(Boolean).join(" · ");
+  fitText(ro.l[0],sv?"serving yeto:"+sv.v+":"+sv.hash:"serving the initial weights",ro.lw);
+  fitText(ro.l[1],r.groups_src==="trained"?(fin(r.groups)?r.groups+" groups / round (trainer side)":"groups not reported by the rollout"):
+    fin(r.groups)?r.groups+" groups · "+(r.traj||0)+" traj · "+(fin(r.tokens)?(r.tokens/1000).toFixed(1)+"k":"n/a")+" tok / round":"no round yet",ro.lw);
+  fitText(ro.l[2],fin(r.p50_s)?"group p50 "+r.p50_s.toFixed(1)+"s · p95 "+(fin(r.p95_s)?r.p95_s.toFixed(1)+"s":"—"):fin(r.rollout_p50_s)?"rollout "+r.rollout_p50_s.toFixed(1)+"s (median of last rounds)":"",ro.lw);
+  fitText(ro.l[3],[fin(r.reward)?"reward "+r.reward.toFixed(2):null,fin(r.zero_var)?"zero-var "+Math.round(r.zero_var*100)+"%":null,T.live?(r.groups_5m/5).toFixed(1)+" g/min":null].filter(Boolean).join(" · "),ro.lw);
   var ld=sv&&fin(sv.ts)&&T.live&&td-sv.ts>=0&&td-sv.ts<3;ro.flash.style.stroke=C.wt;ro.flash.setAttribute("opacity",ld&&!ro.co?0.9:0);
   if(ro.box){ro.box.style.stroke=!tr.live&&tr.status!=="done"&&!tr.finalized?C.bad:""}
   var gq=active("q",tr.id,null,td);o.e[0].style.stroke=gq?C.traj:"";o.e[0].setAttribute("opacity",gq?0.85:1);
@@ -408,7 +445,7 @@ function matrix(tn){
       var mk=pushed?'<span class="mk dl">↑</span>':lg&&tr.live?'<span class="mk wt">↓'+lg+"</span>":"";
       var ahead=fin(v)&&v>D.versions[f],fin_=D.done&&fin(v)&&fin(D.versions[f])&&v<D.versions[f];if(fin_)finalOnSyncer=true;
       h+='<td class="'+cls+'" title="'+esc("anchor v"+(fin(v)?v:"n/a")+(fin_?": the island's last applied version; the final version v"+D.versions[f]+" is on the syncer (final cut)":"")+(lg?", "+lg+" merge(s) not applied":"")+(ahead?", ahead of the syncer tape":"")+(fin(s)?", "+s+" local step(s) since the anchor":"")+(pushed?", pushed t"+tr.pushed[String(f)]+", waiting for the merge":""))+'">'+mk+'<div class="v">'+(fin(v)?"v"+v:"—")+(lg?' <span class="'+(lg>=2?"bd":"wn")+'">−'+lg+"</span>":"")+"</div>"+
-        (fin_?'<div class="s">last applied · final v'+D.versions[f]+' on the syncer</div>':"")+
+        (fin_?'<div class="s">final v'+D.versions[f]+'</div>':"")+
         (fin(s)?'<div class="s">'+s+(H?"/"+H:"")+' since anchor</div><div class="b"><i class="'+(ready?"rdy":"")+'" style="width:'+Math.min(100,H?100*s/H:0)+'%"></i></div>':(tr.since?'<div class="s">since anchor —</div>':""))+"</td>"}
     h+="</tr>"});
   h+='</table><div class="fmlg">'+(sft()?'<span><b>v41</b> committed version (syncer) = global step of the fragment\'s last merge</span><span><b>t203</b> the island\'s last contribution: the merge its delta went into, base v = the version it was computed on</span><span class="dl">↑ PUSH accepted, waiting for the merge</span><span class="wt">↓n merged after the island\'s last applying step</span>':
@@ -523,6 +560,8 @@ function render(view,offline){
   box.removeAttribute("title");
   U=YetoTopo.util;box.hidden=false;
   t.live=!offline&&((view.overview||{}).mode==="live");T=t;D=t.diloco;V=view;recvAt=U.clock();C=colors();
+  // a fleet drawn from its plan before any merge record (P unknown): one empty syncer card
+  if(!(D.shards||[]).length)D.shards=[{index:0,lo:0,hi:0,step:0,merges:0,state:"idle",attempt_max:1,last:null}];
   legend(true);
   var W=host.clientWidth||800;
   if(!L||L.shape!==shape()||(L.W<640)!==(W<640)||(host.contains&&!host.contains(L.svg)))build(host);

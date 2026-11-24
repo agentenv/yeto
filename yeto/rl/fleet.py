@@ -125,6 +125,9 @@ class FleetPool:
     engine: str | None = None  # vllm / sglang (the spec's engine adapter), None: unknown
     rollout_quant: Any = None  # the spec's rollout_quant tier, None: none / unknown
     target: int | None = None
+    # one node hour: the entry's usd_per_h, else its provider config's price_usd_h (USD
+    # providers); None: unknown (National Compute: the run's budget.nc_usd_per_h applies)
+    usd_per_h: float | None = None
 
     def shards(self) -> list[str]:
         return [f"{self.shard_base}-{n}" for n in range(self.shard_limit)]
@@ -133,7 +136,7 @@ class FleetPool:
         return {"name": self.name, "source_name": self.source_name, "source": SOURCE_EXTERNAL,
                 "provider": self.provider, "shard_base": self.shard_base, "shard_limit": self.shard_limit,
                 "run_prefix": self.run_prefix, "target": self.target, "engine": self.engine,
-                "rollout_quant": self.rollout_quant}
+                "rollout_quant": self.rollout_quant, "usd_per_h": self.usd_per_h}
 
 
 @dataclass(frozen=True)
@@ -206,10 +209,12 @@ class FleetPlan:
     dispense_store: str | None = None  # the fleet's ledger root (dispense: fleet), None: per island
     sync: dict[str, Any] = field(default_factory=dict)  # the trainers' sync route (training_form)
     version: int = PLAN_VERSION
+    syncer_usd_per_h: float | None = None  # the run config's syncer.usd_per_h (None: unset)
 
     def to_json(self) -> dict[str, Any]:
         return {"version": self.version, "run": self.run, "store": self.store, "dispense": self.dispense,
                 "dispense_store": self.dispense_store, "sync": dict(self.sync),
+                "syncer": {"usd_per_h": self.syncer_usd_per_h},
                 "islands": [i.to_json() for i in self.islands]}
 
     def dumps(self) -> str:
@@ -259,7 +264,7 @@ class FleetPlan:
                                               provider=str(p["provider"]), shard_base=str(p["shard_base"]),
                                               shard_limit=int(p["shard_limit"]), run_prefix=str(p["run_prefix"]),
                                               engine=p.get("engine"), rollout_quant=p.get("rollout_quant"),
-                                              target=p.get("target"))
+                                              target=p.get("target"), usd_per_h=p.get("usd_per_h"))
                                     for p in i.get("pools") or ()),
                         miles_samplers=tuple(FleetMilesSampler(name=str(m["name"]), source_name=str(m["source_name"]),
                                                                gpu=str(m["gpu"]), usd_per_h=m.get("usd_per_h"),
@@ -269,9 +274,10 @@ class FleetPlan:
                         # a plan written before Miles samplers: the island's price is its trainer's
                         trainer_usd_per_h=i.get("trainer_usd_per_h", i.get("usd_per_h")))
             for i in doc.get("islands") or ())
+        syncer = doc.get("syncer") if isinstance(doc.get("syncer"), dict) else {}
         return cls(run=str(doc["run"]), store=str(doc["store"]), dispense=str(doc["dispense"]), islands=islands,
                    dispense_store=doc.get("dispense_store"), sync=dict(doc.get("sync") or {}),
-                   version=int(doc.get("version", PLAN_VERSION)))
+                   version=int(doc.get("version", PLAN_VERSION)), syncer_usd_per_h=syncer.get("usd_per_h"))
 
 
 def plan_of(cfg: dict[str, Any]) -> FleetPlan | None:
@@ -513,9 +519,17 @@ def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | N
         raise _err(f"{where} ({source}): shard_limit must be a whole number >= 1 (got {doc.get('shard_limit')!r})")
     _spec, engine, quant = _spec_facts(compiled)
     target = doc.get("target")
+    price = _price(entry.get("usd_per_h"), f"{where}.usd_per_h")
+    if price is None:  # what run up bills a node hour at (up.UpRun.node_usd_per_h), USD providers only
+        try:
+            stated, currency = nc_cli.pool_price(doc)
+            price = None if currency == "ucr" or stated is None else _price(stated, f"{where} price_usd_h")
+        except (TypeError, ValueError, KeyError, IndexError):
+            price = None
     row = FleetPool(name=out["name"], source_name=source, provider=provider_kind(doc), shard_base=f"{base}-i{k}",
                     shard_limit=int(limit), run_prefix=prefix, engine=engine, rollout_quant=quant,
-                    target=target if isinstance(target, int) and not isinstance(target, bool) else None)
+                    target=target if isinstance(target, int) and not isinstance(target, bool) else None,
+                    usd_per_h=price)
     return out, row
 
 
@@ -668,8 +682,10 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
         if i.max_policy_age is not None:
             argv += ["--rl-island-max-policy-age", f"{i.index}:{i.max_policy_age}"]
     prices = [i.usd_per_h for i in rows]
+    syncer = cfg.get("syncer") if isinstance(cfg.get("syncer"), dict) else {}
     plan = FleetPlan(run=str(cfg["run"]), store=store, dispense=dispense, islands=tuple(rows),
-                     dispense_store=dispense_store, sync=training_form(trainer_argv))
+                     dispense_store=dispense_store, sync=training_form(trainer_argv),
+                     syncer_usd_per_h=_price(syncer.get("usd_per_h"), "syncer.usd_per_h"))
     out = copy.deepcopy({k: v for k, v in cfg.items() if k != PLAN_KEY})
     out["trainer"] = {"argv": argv, "usd_per_h": None if all(p is None for p in prices)
                       else float(sum(p or 0.0 for p in prices))}

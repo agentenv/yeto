@@ -12,6 +12,7 @@ are excluded from the efficiency ranking.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 EXAMPLE_PRICES = Path(__file__).with_name("prices.example.json")
@@ -240,19 +241,135 @@ def cost_view(reducer, now: float) -> dict:
                                  if len(rewards) >= 2 and row["cost_usd"] else None)
         row["ranked"] = bool(row["priced"] and not row["local"])
         rows.append(row)
+    fleet_note = fleet_rows(reducer, rows, now)
     priced = [r for r in rows if r["cost_usd"] is not None]
     total = sum(r["cost_usd"] for r in priced) if priced else None
     burn = sum(r["rate_usd_h"] for r in rows if r["running"] and r["rate_usd_h"] is not None) if rows else None
     cap = reducer.budget_usd
     pct = (total / cap * 100) if total is not None and cap else None
     hours_to_cap = ((cap - total) / burn) if cap and total is not None and burn else None
-    return {"islands": rows, "total_usd": total, "burn_usd_h": burn, "budget_usd": cap,
-            "budget_pct": pct, "hours_to_cap": hours_to_cap,
-            "unpriced": [r["id"] for r in rows if not r["priced"]],
-            "gpu_only": [r["id"] for r in rows if r.get("gpu_only")],
-            "note": "estimate: price table x (GPU + CPU + memory) x wall clock; not billing data"
-                    + ("; some islands lack CPU/memory specs, GPU only" if any(r.get("gpu_only") for r in rows) else ""),
-            "prices_source": reducer.prices.get("_source")}
+    out = {"islands": rows, "total_usd": total, "burn_usd_h": burn, "budget_usd": cap,
+           "budget_pct": pct, "hours_to_cap": hours_to_cap,
+           "unpriced": [r["id"] for r in rows if not r["priced"]],
+           "gpu_only": [r["id"] for r in rows if r.get("gpu_only")],
+           "note": "estimate: price table x (GPU + CPU + memory) x wall clock; not billing data"
+                   + ("; some islands lack CPU/memory specs, GPU only" if any(r.get("gpu_only") for r in rows) else ""),
+           "prices_source": reducer.prices.get("_source")}
+    if fleet_note is not None:
+        out["fleet"] = fleet_note
+        out["note"] += "; fleet: " + fleet_note["basis"]
+    return out
+
+
+def _spans_hours(spans) -> float | None:
+    """Hours covered by the union of ``(start, end)`` spans; None without one."""
+    spans = sorted((float(a), float(b)) for a, b in spans if a is not None and b is not None and b >= a)
+    if not spans:
+        return None
+    total, cur = 0.0, list(spans[0])
+    for a, b in spans[1:]:
+        if a > cur[1]:
+            total += cur[1] - cur[0]
+            cur = [a, b]
+        else:
+            cur[1] = max(cur[1], b)
+    return (total + cur[1] - cur[0]) / 3600.0
+
+
+def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
+    """A fleet of async islands bills its pools, each island's trainer and the syncer
+    (``breakers.fleet.fleet_spend``): pools + Σ island trainers + syncer. ``rows`` gets
+    each trainer's price from the plan (``trainer_usd_per_h``: the run config's, which
+    the launch bills, over the price table), one row per pool sampler (the plan pool's
+    node price, else the price table's for its provider and card; hours: the union of its
+    incarnations' first to last event, a lower bound) and one for the syncer (the plan's
+    ``syncer.usd_per_h``; unset: $0 as ``run up`` bills it; a plan without it: unpriced;
+    hours: the trainers' first to last event). None (``rows`` unchanged) off a fleet."""
+    from . import fleet_islands  # noqa: PLC0415
+
+    if getattr(reducer, "async_", None) is None:
+        return None
+    fleet = fleet_islands.resolve(reducer)
+    if fleet is None:
+        return None
+    by_id = {r["id"]: r for r in rows}
+    asy = reducer.async_
+    trainer_rows, pool_rows = [], []
+    for isl in fleet["islands"]:
+        tid, price = isl.get("trainer"), isl.get("trainer_usd_per_h")
+        row = by_id.get(tid) if tid is not None else None
+        if row is not None:
+            row.update(kind="trainer", island=isl["learner"])
+            if price is not None:
+                row.update(rate_usd_h=price, gpu_rate_usd_h=price, host_rate_usd_h=None, priced=True, gpu_only=False,
+                           rate_source="fleet plan trainer_usd_per_h (the whole trainer: GPU, CPU and memory)")
+                if row["hours"] is not None:
+                    row["cost_usd"] = price * row["hours"]
+            trainer_rows.append(row)
+        for pool in isl["pools"]:
+            for sid in pool["samplers"]:
+                if sid in by_id:  # already billed (an NC shard with its own lease)
+                    pool_rows.append(by_id[sid])
+                    by_id[sid].update(kind="pool sampler", island=isl["learner"], pool=pool["name"])
+                    continue
+                s = asy.sampler.get(sid) or {}
+                prov = s.get("provenance") or {}
+                card = prov.get("card_model")
+                m = re.search(r"tp(\d+)", str(prov.get("topology") or ""))
+                gpus = int(m.group(1)) if m else 1
+                rate, source = pool.get("usd_per_h"), "fleet plan pool usd_per_h (one node hour)"
+                if rate is None:
+                    cloud, why = pool.get("provider"), ""
+                    if not cloud:  # no plan: the provider is not on the tapes; the trainers' cloud
+                        cloud = next((reducer.islands[r["id"]].get("cloud") for r in trainer_rows
+                                      if (reducer.islands.get(r["id"]) or {}).get("cloud")), None)
+                        why = " (provider not on the tapes: the trainers' cloud)"
+                    unit = price_per_gpu_h(reducer.prices, cloud, card)
+                    rate = None if unit is None else unit * gpus
+                    source = f"price table {cloud}:{card} x {gpus}{why}"
+                incs = s.get("incarnations") or []
+                hours = _spans_hours((x.get("first_ts"), x.get("last_ts")) for x in incs)
+                isl_rec = reducer.islands.get(sid) or {}
+                if hours is None:
+                    hours = _spans_hours([(isl_rec.get("first_ts"), isl_rec.get("last_event_ts"))])
+                last = isl_rec.get("last_event_ts")
+                running = last is not None and now - last < INFERRED_RUNNING_S and not s.get("ended")
+                row = {"id": sid, "kind": "pool sampler", "island": isl["learner"], "pool": pool["name"],
+                       "unit_usd_gpu_h": None if rate is None else rate / gpus, "rate_usd_h": rate, "hours": hours,
+                       "gpu_rate_usd_h": rate, "host_rate_usd_h": None, "gpu_only": False, "cpus": None,
+                       "memory_gib": None, "cost_usd": rate * hours if rate is not None and hours is not None else None,
+                       "running": running, "local": False, "priced": rate is not None, "rate_source": source,
+                       "billed_from": "sampler tapes (first to last event of each incarnation; boot not on the tapes)",
+                       "usd_per_1m_tok": None, "reward_per_usd": None, "ranked": False}
+                rows.append(row)
+                pool_rows.append(row)
+    tr_recs = [reducer.islands[r["id"]] for r in trainer_rows if r["id"] in reducer.islands]
+    firsts = [x.get("first_ts") for x in tr_recs if x.get("first_ts") is not None]
+    lasts = [x.get("last_event_ts") for x in tr_recs if x.get("last_event_ts") is not None]
+    hours = (max(lasts) - min(firsts)) / 3600.0 if firsts and lasts and max(lasts) >= min(firsts) else None
+    syncer = fleet.get("syncer")
+    if syncer is None:
+        rate = None
+        source = ("the fleet plan has no syncer price (written before it)" if fleet.get("source") == "plan"
+                  else "no fleet plan: the syncer's price is unknown")
+    else:
+        rate = syncer.get("usd_per_h")
+        source = "fleet plan syncer.usd_per_h" if rate is not None else "syncer.usd_per_h unset: $0, as run up bills it"
+        rate = 0.0 if rate is None else rate
+    srow = {"id": "syncer", "kind": "syncer", "island": None, "unit_usd_gpu_h": None, "rate_usd_h": rate,
+            "hours": hours, "gpu_rate_usd_h": None, "host_rate_usd_h": None, "gpu_only": False, "cpus": None,
+            "memory_gib": None, "cost_usd": rate * hours if rate is not None and hours is not None else None,
+            "running": any(r.get("running") for r in trainer_rows), "local": False, "priced": rate is not None,
+            "rate_source": source, "billed_from": "the trainers' first to last event",
+            "usd_per_1m_tok": None, "reward_per_usd": None, "ranked": False}
+    rows.append(srow)
+
+    def part(rs: list[dict]) -> float | None:
+        vals = [r["cost_usd"] for r in rs if r.get("cost_usd") is not None]
+        return sum(vals) if vals else None
+
+    return {"pools_usd": part(pool_rows), "trainers_usd": part(trainer_rows), "syncer_usd": srow["cost_usd"],
+            "basis": "pools (node hours on the sampler tapes) + each island's trainer + the syncer"}
 
 
 def run_up_view(path: str | None, now: float) -> dict | None:
