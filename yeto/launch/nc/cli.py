@@ -1641,7 +1641,7 @@ def _print_breaker_deprecations(cfg: dict[str, Any]) -> None:
 _OVERRIDE_KEYS = ("data_slot", "drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens",
                   "continues_shard")
 _POOL_KEYS = ("drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens", "dispense", "breakers",
-              "island", "until_trainers_end", "dispense_store")
+              "island", "until_trainers_end", "dispense_store", "sandbox_store")
 
 
 def _add_sampler_override_args(p) -> None:
@@ -1701,9 +1701,10 @@ def _overrides(cfg) -> dict:
         value = cfg.get(key)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise ValueError(f"pool sampler config: {key} must be a whole number >= 0 or null (got {value!r})")
-    store = cfg.get("dispense_store")
-    if store is not None and (not isinstance(store, str) or not store.strip()):
-        raise ValueError(f"pool sampler config: dispense_store must be a store URI or null (got {store!r})")
+    for key in ("dispense_store", "sandbox_store"):  # an island fleet's pool: a store URI
+        store = cfg.get(key)
+        if store is not None and (not isinstance(store, str) or not store.strip()):
+            raise ValueError(f"pool sampler config: {key} must be a store URI or null (got {store!r})")
     return {k: cfg.get(k) for k in _POOL_KEYS}
 
 

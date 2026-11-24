@@ -403,12 +403,14 @@ def syncer_lines(plan: Any, trainer_argv: Sequence[str], syncer: dict[str, Any] 
 
 
 def budget_lines(plan: Any, *, pools: Sequence[tuple[str, int, float]], syncer_usd_per_h: float,
-                 usd: float | None, wall_h: float | None) -> list[str]:
+                 usd: float | None, wall_h: float | None, sandbox_usd_per_h: float = 0.0) -> list[str]:
     """The fleet's hourly cost estimate and what ``budget.usd`` buys of it. ``pools``:
-    ``(compiled name, target samplers, usd per node hour)`` of each pool."""
+    ``(compiled name, target samplers, usd per node hour)`` of each pool; ``sandbox_usd_per_h``:
+    the agentic pools' sandboxes (``fleet.sandbox_usd_per_h``)."""
     pool_h = sum(max(0, n) * max(0.0, price) for _name, n, price in pools)
     islands_h = sum(max(0.0, i.usd_per_h or 0.0) for i in plan.islands)
-    hourly = pool_h + islands_h + max(0.0, syncer_usd_per_h)
+    sandbox_h = max(0.0, sandbox_usd_per_h)
+    hourly = pool_h + islands_h + max(0.0, syncer_usd_per_h) + sandbox_h
     listed = ", ".join(f"{name} {n} x ${price:g}" for name, n, price in pools)
     def island_price(i: Any) -> str:
         if i.usd_per_h is None:
@@ -418,7 +420,8 @@ def budget_lines(plan: Any, *, pools: Sequence[tuple[str, int, float]], syncer_u
 
     trainers = ", ".join(island_price(i) for i in plan.islands)
     line = (f"fleet: budget estimate ${hourly:.2f}/h = pools ${pool_h:.2f}/h ({listed}) + trainers "
-            f"${islands_h:.2f}/h ({trainers}) + syncer ${max(0.0, syncer_usd_per_h):.2f}/h")
+            f"${islands_h:.2f}/h ({trainers}) + syncer ${max(0.0, syncer_usd_per_h):.2f}/h"
+            + (f" + sandboxes ${sandbox_h:.2f}/h" if sandbox_h else ""))
     if wall_h is not None:
         line += f"; over the {wall_h:g} h wall clock ${hourly * wall_h:.2f}"
     if usd is not None:

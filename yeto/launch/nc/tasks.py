@@ -162,7 +162,8 @@ def apply_sampler_overrides(spec: Mapping[str, Any], *, data_slot: str | None = 
                             dispense: Mapping[str, Any] | None = None,
                             breakers: Mapping[str, Any] | None = None,
                             island: int | None = None, until_trainers_end: int | None = None,
-                            dispense_store: str | None = None) -> dict[str, Any]:
+                            dispense_store: str | None = None,
+                            sandbox_store: str | None = None) -> dict[str, Any]:
     """The run knobs of one sampler laid over a base spec (None: keep the base value),
     with the same meaning as ``yeto engine-sampler-modal``: ``data_slot`` "I/N" (this
     sampler's prompt rows), ``drop_zero_variance`` (``drop_zero_variance_groups``),
@@ -173,8 +174,9 @@ def apply_sampler_overrides(spec: Mapping[str, Any], *, data_slot: str | None = 
     ``breakers``: merged into the spec's ``breakers`` section (:func:`merge_breakers`: the
     run's sampler / harness settings, ``yeto run up``). ``island`` (the fleet island this
     sampler feeds), ``until_trainers_end`` (stop after that many trainer end records of its
-    store) and ``dispense_store`` (the store ledger's root) are the spec keys of the same
-    name, set by ``yeto run up`` for the pools of an island fleet (``yeto.rl.fleet``).
+    store), ``dispense_store`` (the store ledger's root) and ``sandbox_store`` (the store
+    holding the sandbox readiness manifest, ``yeto.sandbox.gate``) are the spec keys of the
+    same name, set by ``yeto run up`` for the pools of an island fleet (``yeto.rl.fleet``).
     Refuses a ``max_tokens`` that does not fit ``max_model_len`` with the spec's
     ``max_prompt_tokens``."""
     from yeto.rl.engine.data_split import DataSlot
@@ -192,7 +194,7 @@ def apply_sampler_overrides(spec: Mapping[str, Any], *, data_slot: str | None = 
     if breakers:
         out["breakers"] = merge_breakers(out.get("breakers") or {}, breakers)
     for key, value in (("island", island), ("until_trainers_end", until_trainers_end),
-                       ("dispense_store", dispense_store)):
+                       ("dispense_store", dispense_store), ("sandbox_store", sandbox_store)):
         if value is not None:  # an island fleet's pool (yeto run up): unset keeps the spec as it is
             out[key] = value
     if continues_shard:  # a replacement: continue that shard's prompts (sampler_resume handoff)

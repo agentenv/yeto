@@ -27,6 +27,12 @@ asks before a claim pass:
 * ``sweep_stale()``: the same removal at sampler start (dispenser recover).
 * ``sweep_shard(shard)``: remove every container of a predecessor shard this
   sampler continues (:func:`.trial_labels.sweep_shard`).
+
+The manifest is read from the sampler's own store, or from the store the spec
+names in ``sandbox_store`` (:func:`spec_sandbox_store`): the pools of an island
+fleet write ``<run store>/trainer<k>`` while ``yeto sandbox prepare`` writes the
+manifest once in the run store, so the fleet compile names the run store there
+(:mod:`yeto.rl.fleet`). Without it nothing changes.
 """
 
 from __future__ import annotations
@@ -48,6 +54,20 @@ HOST_ENV = "YETO_SANDBOX_HOST"
 DEFAULT_TTL_S = 15.0
 # how long a claimed sandbox counts as in flight while its container has not appeared
 DEFAULT_START_GRACE_S = 300.0
+#: Sampler spec key: the store holding the readiness manifest when it is not the
+#: sampler's own (a store path or URI; module doc). Only the manifest read moves there.
+SANDBOX_STORE_KEY = "sandbox_store"
+
+
+def spec_sandbox_store(spec: Mapping[str, Any]) -> str | None:
+    """The spec's ``sandbox_store`` (None: the manifest is in the sampler's own store).
+    Raises ValueError when it is set but not a non-empty string."""
+    value = spec.get(SANDBOX_STORE_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{SANDBOX_STORE_KEY} must be a store path or URI (got {value!r})")
+    return value.strip()
 
 
 class SandboxGate:

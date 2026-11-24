@@ -443,6 +443,22 @@ def dispensed_prompts(path: str | Path, config: Mapping[str, Any], *, input_key:
                                  environ=environ, task_key=task_key)
 
 
+def sandbox_store(spec: Mapping[str, Any], own: Any, environ: Any = None) -> Any:
+    """The store whose ``agentic.envs.ready_key`` the sandbox gate reads: the spec's
+    ``sandbox_store`` (a store path or URI, ``resume.store_at``; an island fleet's pool
+    names the run store, where ``yeto sandbox prepare`` wrote the manifest, while its
+    own store is ``trainer<k>``), else ``own`` (the sampler's own store)."""
+    from yeto.sandbox.gate import spec_sandbox_store  # noqa: PLC0415
+
+    from .resume import store_at  # noqa: PLC0415
+
+    try:
+        location = spec_sandbox_store(spec)
+        return own if location is None else store_at(location, environ=environ)
+    except ValueError as error:
+        raise SamplerSpecError(f"the sandbox readiness manifest's store: {error}") from error
+
+
 def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], str] = str,
                             task_key: str | None = None, environ: Any = None) -> "Any":
     """The engine sampler's prompts from the store ledger (``prompts.dispense``
@@ -452,7 +468,8 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
     path or URI, ``resume.store_at``), so samplers that
     share only the bucket share the tasks; ``dispense_store`` (a fleet's shared
     ledger) moves only the ledger, the sandbox gate and the lease records stay in
-    the sampler's own store. The holder is the sampler id, the incarnation this process's.
+    the sampler's own store (the gate's manifest: ``sandbox_store`` when the spec
+    names one, :func:`sandbox_store`). The holder is the sampler id, the incarnation this process's.
     On a plan written by older code (version 2) the incarnation lease records of
     the other samplers (same store) free the claims of a fenced one at once; from
     plan version 3 on the pool's retire marker and the new incarnation's recover
@@ -506,7 +523,7 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
             from yeto.sandbox.docker import DockerError  # noqa: PLC0415
 
             try:
-                gate = gate_from_spec(spec, ledger_objects(own), environ=env)
+                gate = gate_from_spec(spec, ledger_objects(sandbox_store(spec, own, environ)), environ=env)
                 if gate is not None:
                     gate.check_docker()  # an unreachable daemon fails the start, not a silent capacity wait
             except (EnvsError, DockerError) as error:

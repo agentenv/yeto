@@ -7,7 +7,8 @@ sampler pools that feed it, and a ``fleet`` section with what the trainers share
      "fleet": {"trainer_argv": ["--training-mode", "rl", "--tuning", "full",
                                 "--rl-sync-preset", "decoupled", ...,
                                 "--rl-checkpoint-store", "s3://<bucket>/runs/<run>"],
-               "dispense": "fleet"},              # "fleet" (default) | "island"
+               "dispense": "fleet",               # "fleet" (default) | "island"
+               "sandbox_usd_per_h": 3.0},         # optional: the agentic pools' sandboxes in the spend
      "islands": [
        {"name": "east", "trainer": {"gpu": "modal:2x8xb300", "usd_per_h": 96.0,
                                     "argv": ["--rl-release-every", "2"]},
@@ -33,7 +34,10 @@ island's trainer and the syncer; ``samplers`` lists every island's pools) plus a
   are ``<shard_base>-i<k>-<n>`` for n below the pool's ``shard_limit`` (required);
 * sets the pool's sampler knobs ``island`` (k), ``until_trainers_end`` (1: the
   sampler stops after its own trainer ended) and, with ``dispense: fleet``,
-  ``dispense_store`` (``<store>/fleet/dispense``: one task ledger for the fleet).
+  ``dispense_store`` (``<store>/fleet/dispense``: one task ledger for the fleet);
+  for an agentic pool whose spec has ``agentic.envs`` (a sandbox gate) also
+  ``sandbox_store`` (the run store): ``yeto sandbox prepare`` writes the readiness
+  manifest once in the run store, and the pool's own store is ``trainer<k>``.
 
 The trainer argv is ``fleet.trainer_argv`` with ``--gpu`` (every island's cluster,
 in island order), ``--rl-sample-role trainer --rl-sampler-follow trainer``, one
@@ -84,7 +88,7 @@ FLEET_DIR = "fleet"
 PLAN_OBJECT = f"{FLEET_DIR}/plan.json"  # the plan in the run store
 DISPENSE_DIR = f"{FLEET_DIR}/dispense"  # the fleet's task ledger root (store_dispense.FLEET_DISPENSE_DIR)
 DISPENSE_MODES = ("fleet", "island")
-FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s"})
+FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h"})
 ISLAND_KEYS = frozenset({"name", "trainer", "samplers"})
 ISLAND_TRAINER_KEYS = frozenset({"gpu", "usd_per_h", "argv", "step_s"})
 # the only trainer flags an island sets for itself (each becomes --rl-island-<flag> k:N)
@@ -367,6 +371,7 @@ def _fleet_section(cfg: dict[str, Any]) -> tuple[list[str], str]:
             raise _err("fleet.trainer_argv: --rl-single-island-no-sync is a single buffer trainer; a fleet's "
                        "trainers merge through the syncer")
     _step(section.get("step_s"), "fleet.step_s")
+    _price(section.get("sandbox_usd_per_h"), "fleet.sandbox_usd_per_h")  # the sandboxes in the fleet spend
     dispense = section.get("dispense", "fleet")
     if dispense not in DISPENSE_MODES:
         raise _err(f"fleet.dispense must be one of {list(DISPENSE_MODES)} (got {dispense!r})")
@@ -467,8 +472,16 @@ def _spec_facts(doc: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None,
     return spec, engine, quant
 
 
-def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | None
-          ) -> tuple[dict[str, Any], FleetPool]:
+def has_sandbox_gate(doc: dict[str, Any]) -> bool:
+    """Whether the pool's rendered spec has ``agentic.envs``: its samplers' dispenser
+    reads the sandbox readiness manifest (``yeto.sandbox.gate``)."""
+    spec, _engine, _quant = _spec_facts(doc)
+    agentic = (spec or {}).get("agentic")
+    return isinstance(agentic, dict) and bool(agentic.get("envs"))
+
+
+def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | None,
+          sandbox_store: str | None = None) -> tuple[dict[str, Any], FleetPool]:
     """The compiled pool entry of pool j of island k, and its plan row."""
     from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
     from yeto.launch.nc.provider import provider_kind  # noqa: PLC0415
@@ -496,7 +509,7 @@ def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | N
     sampler = doc.get("sampler") or {}
     if not isinstance(sampler, dict):
         raise _err(f"{where} ({source}): sampler must be an object")
-    for key in ("island", "until_trainers_end", "dispense_store"):
+    for key in ("island", "until_trainers_end", "dispense_store", "sandbox_store"):
         if key in sampler:
             raise _err(f"{where} ({source}): sampler.{key} is written by the fleet compile; drop it")
     if isinstance(sampler.get("dispense"), dict) and sampler["dispense"].get("store"):
@@ -507,6 +520,8 @@ def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | N
     knobs = dict(sampler, island=k, until_trainers_end=1)
     if dispense_store:
         knobs["dispense_store"] = dispense_store
+    if sandbox_store and has_sandbox_gate(doc):
+        knobs["sandbox_store"] = sandbox_store  # the manifest yeto sandbox prepare writes in the run store
     out = dict(entry)  # its entry keys and inline pool keys, with the island's overrides
     out.update({"name": f"i{k}-{source}", "run_prefix": prefix, "shard_base": f"{base}-i{k}", "sampler": knobs})
     compiled = dict(doc, run_prefix=prefix, shard_base=f"{base}-i{k}", sampler=knobs)
@@ -652,7 +667,7 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
                                                usd_per_h=sampler_price, launch_island=launch_island))
                 launch_island += 1
                 continue
-            out, row = _pool(entry, k, j, where, dispense_store)
+            out, row = _pool(entry, k, j, where, dispense_store, store)
             samplers.append(out)
             pools.append(row)
         seen = [p.name for p in pools] + [m.name for m in miles]
