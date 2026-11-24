@@ -13,7 +13,7 @@ The six parts (design decision 2):
                       that share of the fp32 master weights and Adam moments sits in
                       host memory); LoRA: 16*P_lora
 3. activations        K_ACT * L/PP * T/(TP*CP) * H * 2
-4. logits block       K_LOGIT * min(T, C) * V/TP * 4
+4. logits block       K_LOGIT * min(T/CP, C) * V/TP * 4
 5. inference          SGLang mem_fraction_static * GPU memory, when the rollout
                       engine shares the GPU and is NOT released during training;
                       none on a buffer trainer (``--rl-sample-role trainer`` or
@@ -39,13 +39,21 @@ one GPU per island, colocated).
   max of the two islands, 132.36e9 bytes = 123.27 GiB) solved for K_ACT.
 
 Partial routed experts (``--tuning full`` with an ``in_place``
-``--rl-expert-selection``, any MoE model): the routed experts are split over
-EP ranks (weights 2*(P - P_exp + P_exp/EP)/(TP*PP)) and only the selected
-experts carry grads and optimizer state (P_train/(TP*PP*EP) per GPU, the
-optimizer sharded over the expert data-parallel group DP/EP when distributed);
-every other parameter is frozen. A fixed partition (``--rl-placement
+``--rl-expert-selection``, any MoE model): the Miles adapter runs expert tensor
+parallel 1, so the routed experts are split over EP ranks and PP stages only
+(weights 2*((P - P_exp)/(TP*PP) + P_exp/(EP*PP)), P counted exactly by
+:func:`param_breakdown`) and only the selected experts carry grads and optimizer
+state (P_train/(EP*PP) per GPU; the fp32 master and Adam moments sharded over the
+expert data-parallel group TP*CP*DP/EP when Megatron's distributed optimizer is on,
+which Miles defaults to and the adapter keeps unless the full-parameter sync needs
+whole masters); every other parameter is frozen. A fixed partition (``--rl-placement
 fixed-partition``) trains on the island's GPUs minus ``--rollout-num-gpus`` and
 ``--rl-standby-gpus``, with no rollout engine on them.
+
+Context parallel (``--context-parallel``) divides the activations and the logits
+rows over CP ranks and DP = trainer GPUs / (TP*PP*CP). T is one micro batch over
+the CP ranks: the longest row, or with ``--rl-max-tokens-per-gpu`` (Miles dynamic
+batch size: first-fit bins of max_tokens_per_gpu*CP tokens) the larger of the two.
 
 Sampler islands (``--rl-sample-role sampler``, or the ``sampler`` islands of a
 store-coupled pair or synced group) build no trainer: each GPU holds a share of
@@ -185,6 +193,22 @@ def param_breakdown(cfg: dict) -> dict[str, float]:
     return out
 
 
+def r3_bytes_per_token(cfg: dict | None) -> int | None:
+    """Bytes of one token's routed-expert ids (R3: ``uint16[L_moe, top_k]``) of a MoE HF
+    ``config.json``; None for a dense model or an unreadable config."""
+    if not cfg:
+        return None
+    try:
+        t = cfg.get("text_config") or cfg
+        topk = int(t.get("num_experts_per_tok") or t.get("num_experts_per_token") or 0)
+        moe_layers = int(param_breakdown(cfg)["moe_layers"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    if topk <= 0 or moe_layers <= 0 or not (t.get("num_experts") or t.get("n_routed_experts")):
+        return None
+    return moe_layers * topk * 2
+
+
 def arch_from_hf_config(cfg: dict, *, precise: bool = False) -> ModelArch:
     """``precise=False`` (default) keeps the historical upper-bound count every caller
     and calibration uses; ``precise=True`` takes the parameter count of
@@ -302,33 +326,72 @@ def lora_params(arch: ModelArch, rank: int, targets: str) -> float:
     return float(rank * per_layer * arch.layers)
 
 
-def estimate(req: MemoryRequest) -> dict[str, Any]:
+def _partial(req: MemoryRequest) -> bool:
+    return req.ep > 1 or req.expert_params > 0 or req.trainable_params is not None
+
+
+def model_state_bytes(req: MemoryRequest) -> dict[str, float]:
+    """Per-GPU bytes of the model state: bf16 ``weights``, fp32 ``grads`` (main grads),
+    the fp32 ``master`` copy and the two fp32 Adam ``moments`` (device share, before the
+    optimizer offload), each for what this rank holds. LoRA: the 16 B/param adapter
+    state, all of it under ``grads``.
+
+    Partial routed experts: the Miles adapter runs ``--expert-tensor-parallel-size 1``,
+    so the routed experts are split over EP (and PP by layer) only and the rest of the
+    model over TP x PP. The distributed optimizer shards an expert parameter's master
+    and moments over the expert data-parallel group, world / (ETP x EP x PP) =
+    TP x CP x DP / EP ranks, and a dense parameter's over the DP x CP group."""
     a = req.arch
     shard = req.tp * req.pp
+    if _partial(req):
+        dense_held = (a.params - req.expert_params) / shard
+        expert_held = req.expert_params / (req.ep * req.pp)
+        weights = 2 * (dense_held + expert_held)
+    else:
+        weights = 2 * a.params / shard
+    if req.tuning == "full" and _partial(req):
+        edp_shard = max(1, req.tp * req.cp * req.dp // req.ep) if req.distributed_optimizer else 1
+        if req.trainable_params is None:
+            dp_shard = req.dp * req.cp if req.distributed_optimizer else 1
+            grads = 4 * (dense_held + expert_held)
+            sharded = dense_held / dp_shard + expert_held / edp_shard
+        else:  # only the selected experts train: this rank's share of them
+            trainable = req.trainable_params / (req.ep * req.pp)
+            grads, sharded = 4 * trainable, trainable / edp_shard
+        return {"weights": weights, "grads": grads, "master": 4 * sharded, "moments": 8 * sharded}
+    if req.tuning == "full":
+        dp_shard = req.dp * req.cp if req.distributed_optimizer else 1
+        sharded = a.params / (shard * dp_shard)
+        return {"weights": weights, "grads": 4 * a.params / shard, "master": 4 * sharded,
+                "moments": 8 * sharded}
+    return {"weights": weights, "grads": 16 * lora_params(a, req.lora_rank, req.lora_targets),
+            "master": 0.0, "moments": 0.0}
+
+
+def static_after_init_gib(req: MemoryRequest) -> float:
+    """What a trainer GPU holds once Megatron built the model and optimizer, before the
+    first step allocates the Adam moments: weights, grads and the device share of the
+    fp32 masters (PyTorch ``allocated`` at that point)."""
+    state = model_state_bytes(req)
+    return (state["weights"] + state["grads"] + _kept(req) * state["master"]) / GIB
+
+
+def _kept(req: MemoryRequest) -> float:
+    """Device share of the fp32 masters and moments (``--rl-optimizer-offload-fraction``)."""
+    return 1.0 - min(1.0, max(0.0, req.optimizer_offload_fraction))
+
+
+def estimate(req: MemoryRequest) -> dict[str, Any]:
+    a = req.arch
     parts: dict[str, float] = {}
-    partial = req.ep > 1 or req.expert_params > 0 or req.trainable_params is not None
-    if partial:
-        held = a.params - req.expert_params + req.expert_params / req.ep
-        parts["weights"] = 2 * held / shard / GIB
-    else:
-        parts["weights"] = 2 * a.params / shard / GIB
-    if req.tuning == "full" and partial:
-        # only the selected experts train: grads and optimizer of this rank's share of them,
-        # the optimizer sharded over the expert data-parallel group when distributed
-        trainable = (held if req.trainable_params is None else req.trainable_params / req.ep) / shard
-        edp_shard = max(1, req.dp // req.ep) if req.distributed_optimizer else 1
-        kept = 1.0 - min(1.0, max(0.0, req.optimizer_offload_fraction))
-        parts["grads_optimizer"] = (4 * trainable + kept * 12 * trainable / edp_shard) / GIB
-    elif req.tuning == "full":
-        dp_shard = req.dp if req.distributed_optimizer else 1
-        kept = 1.0 - min(1.0, max(0.0, req.optimizer_offload_fraction))
-        parts["grads_optimizer"] = (4 * a.params / shard + kept * 12 * a.params / (shard * dp_shard)) / GIB
-    else:
-        parts["grads_optimizer"] = 16 * lora_params(a, req.lora_rank, req.lora_targets) / GIB
+    state = model_state_bytes(req)
+    parts["weights"] = state["weights"] / GIB
+    parts["grads_optimizer"] = (state["grads"] + _kept(req) * (state["master"] + state["moments"])) / GIB
     k_act = K_ACT_RECOMPUTE if req.recompute else K_ACT_NO_RECOMPUTE
     parts["activations"] = (k_act * a.layers / req.pp * req.tokens / (req.tp * req.cp)
                             * a.hidden * 2) / GIB
-    block = req.tokens if req.logits_chunk is None else min(req.tokens, req.logits_chunk)
+    rows = req.tokens / req.cp  # each CP rank computes the logits of its own tokens
+    block = rows if req.logits_chunk is None else min(rows, req.logits_chunk)
     parts["logits_block"] = K_LOGIT * block * a.vocab / req.tp * 4 / GIB
     train_alloc = sum(parts.values())
     engine = engine_static_gib(req.mem_fraction_static, req.gpu_mem_gib)
@@ -495,7 +558,7 @@ def _larger_gpus() -> dict[str, float]:
 
 
 def partial_experts_shape(args, cfg: dict | None) -> dict[str, float] | None:
-    """``{"ep", "expert_params", "trainable_params"}`` of a generic partial-experts launch
+    """``{"ep", "expert_params", "trainable_params", "total_params"}`` of a generic partial-experts launch
     (``--tuning full`` with an ``in_place`` ``--rl-expert-selection``), else None. Best
     effort: an unreadable selection or config gives None (the launch checks report it)."""
     path = getattr(args, "rl_expert_selection", None)
@@ -514,7 +577,45 @@ def partial_experts_shape(args, cfg: dict | None) -> dict[str, float] | None:
         return None
     ep = int(getattr(args, "expert_parallel", 0) or 0) or int(selection.ep_size)
     return {"ep": max(1, ep), "expert_params": float(breakdown["routed_experts"]),
-            "trainable_params": float(breakdown["per_expert"] * selected)}
+            "trainable_params": float(breakdown["per_expert"] * selected),
+            "total_params": float(breakdown["total"])}
+
+
+def micro_batch_tokens(args, longest: int, cp: int) -> int:
+    """Tokens of one micro batch over the CP ranks (``MemoryRequest.tokens``). Without
+    ``--rl-max-tokens-per-gpu`` Miles trains one row per micro batch: the longest row.
+    With it (Miles ``--use-dynamic-batch-size``) ``dp_schedule`` packs rows first-fit into
+    bins of ``max_tokens_per_gpu x CP`` tokens, and a row longer than a bin gets a bin of
+    its own: at most the larger of the two."""
+    try:
+        per_gpu = int(getattr(args, "rl_max_tokens_per_gpu", None) or 0)
+    except (TypeError, ValueError):
+        per_gpu = 0
+    return max(longest, per_gpu * cp) if per_gpu > 0 else longest
+
+
+def distributed_optimizer_for(args, dp: int) -> bool:
+    """Whether the Miles trainer of a full-parameter partial-experts island runs Megatron's
+    distributed optimizer: Miles turns it on for Adam (``set_default_megatron_args``) and
+    the adapter turns it off only where the full-parameter sync needs whole FP32 masters
+    (``_full_parameter_optimizer_attrs``). An argv the adapter refuses: False (replicated,
+    the larger estimate)."""
+    from types import SimpleNamespace
+
+    try:
+        from .rl.adapters.miles.config import _full_parameter_optimizer_attrs
+
+        attrs = _full_parameter_optimizer_attrs(
+            SimpleNamespace(parameter_mode="full"),
+            SimpleNamespace(optimizer_offload_fraction=float(getattr(args, "rl_optimizer_offload_fraction", 0.0)
+                                                             or 0.0),
+                            precision_aware_optimizer=bool(getattr(args, "rl_precision_aware_optimizer", False)),
+                            dp_optimizer=getattr(args, "rl_dp_optimizer", None) or "auto"),
+            full_parameter_sync=not bool(getattr(args, "rl_single_island_no_sync", False)),
+            data_parallel=dp)
+    except Exception:  # noqa: BLE001 - advisory estimate; the launch checks report a refused argv
+        return False
+    return bool(attrs.get("use_distributed_optimizer", True))
 
 
 def request_from_args(args, spec, arch: ModelArch, cfg: dict | None = None) -> MemoryRequest:
@@ -529,9 +630,11 @@ def request_from_args(args, spec, arch: ModelArch, cfg: dict | None = None) -> M
     train_gpus = max(1, total - rollout_gpus)
     tp = int(getattr(args, "tensor_parallel", 1) or 1)
     pp = int(getattr(args, "pipeline_parallel", 1) or 1)
+    cp = max(1, int(getattr(args, "context_parallel", 1) or 1))
+    dp = max(1, train_gpus // (tp * pp * cp))
     seq = int(getattr(args, "seq_len", 2048) or 2048)
     resp = getattr(args, "rollout_max_response_len", None)
-    tokens = max(seq, int(resp)) if (resp and getattr(args, "training_mode", "sft") == "rl") else seq
+    longest = max(seq, int(resp)) if (resp and getattr(args, "training_mode", "sft") == "rl") else seq
     model = str(getattr(args, "model", ""))
     # a buffer trainer reads groups the samplers wrote elsewhere: no rollout engine on its GPUs
     buffer_trainer = (str(getattr(args, "rl_sample_role", "") or "") == "trainer"
@@ -540,18 +643,23 @@ def request_from_args(args, spec, arch: ModelArch, cfg: dict | None = None) -> M
         offload_fraction = float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)
     except (TypeError, ValueError):
         offload_fraction = 0.0
+    partial = partial_experts_shape(args, cfg) or {}
+    if partial:
+        # the routed experts are counted exactly (param_breakdown): count the rest the same way
+        arch = replace(arch, params=float(partial.pop("total_params")))
+        partial["distributed_optimizer"] = distributed_optimizer_for(args, dp)
     return MemoryRequest(
-        arch=arch, gpu=str(spec.gpu), gpu_mem_gib=float(cap or 0), tokens=tokens,
+        arch=arch, gpu=str(spec.gpu), gpu_mem_gib=float(cap or 0), tokens=micro_batch_tokens(args, longest, cp),
         tuning=getattr(args, "tuning", "lora") or "lora",
         lora_rank=int(getattr(args, "lora_r", 16) or 16),
         lora_targets=str(getattr(args, "lora_targets", "attention") or "attention"),
-        tp=tp, pp=pp, dp=max(1, train_gpus // (tp * pp)),
+        tp=tp, pp=pp, cp=cp, dp=dp,
         recompute="deepseek" in model.lower() or bool(getattr(args, "rl_activation_recompute", False)),
         colocated=rollout_gpus == 0 and not buffer_trainer,
         offload=True if rollout_gpus == 0 or buffer_trainer else bool(getattr(args, "rl_offload_train", False)),
         mem_fraction_static=float(getattr(args, "sglang_mem_fraction_static", 0.4) or 0.4),
         optimizer_offload_fraction=offload_fraction,
-        **(partial_experts_shape(args, cfg) or {}),
+        **partial,
     )
 
 
