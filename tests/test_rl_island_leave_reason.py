@@ -57,6 +57,24 @@ def test_exception_to_reason(error, reason):
     assert leave_reason_for(error) is reason
 
 
+def test_a_full_parameter_layout_mismatch_is_a_config_error_never_relaunched():
+    # P5: --fragments 4 against a 10-fragment layout left INFRA_FAILED and the
+    # launcher relaunched the island into the same refusal.
+    from yeto.config_errors import CONFIG_ERROR_MARKER, ConfigError, config_error_in, config_error_line
+    from yeto.rl.adapters.miles.models.chunked_full_parameter import FullParameterLayoutMismatch
+
+    err = FullParameterLayoutMismatch("Miles full-parameter layout differs from the frozen probe: "
+                                      "expected_fragments=4, actual_fragments=10; set --fragments 10")
+    assert isinstance(err, RuntimeError) and isinstance(err, ConfigError)
+    assert leave_reason_for(err) is LeaveReason.CONFIG_MISMATCH
+    wrapped = DriverError("initialize failed")
+    wrapped.__cause__ = err
+    assert leave_reason_for(wrapped) is LeaveReason.CONFIG_MISMATCH
+    assert config_error_in(wrapped) is err
+    assert config_error_line(err).startswith(f"{CONFIG_ERROR_MARKER} FullParameterLayoutMismatch: ")
+    assert "set --fragments 10" in config_error_line(err)
+
+
 def test_strict_invariant_is_a_training_failure():
     from yeto.rl.core import StrictRlInvariantError
 

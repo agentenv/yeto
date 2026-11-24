@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
+from yeto.config_errors import ConfigError
 from yeto.rl.contracts import LocalStepReceipt
 from yeto.rl.hybrid_params import check_frozen_excluded
 from yeto.rl.local_learner import (
@@ -27,6 +28,15 @@ from yeto.rl.engine.shape_free_layout import (
 )
 from yeto.rl.moe_layout import ExpertSubset, check_expert_partition, describe_topology
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
+
+
+class FullParameterLayoutMismatch(ConfigError, RuntimeError):
+    """The island's full-parameter layout is not the one its launch options name
+    (``--fragments``, ``--rl-parameter-layout-sha256``). The layout follows from the
+    model, the parallelism and the fragment byte bound alone, so every attempt
+    fails the same way: a configuration error (island exit
+    :data:`~yeto.config_errors.CONFIG_ERROR_EXIT`, not relaunched; LEAVE reason
+    ``CONFIG_MISMATCH``). A ``RuntimeError`` too, as it was before."""
 
 
 class MilesChunkedFullParameterGroup(Protocol):
@@ -411,14 +421,19 @@ class MilesChunkedFullParameterAdapter:
                 ),
                 flush=True,
             )
-            raise RuntimeError(
+            hint = (
+                f"; set --fragments {actual_fragments}"
+                if expected_fragments is not None and actual_fragments != expected_fragments
+                else ""
+            )
+            raise FullParameterLayoutMismatch(
                 "Miles full-parameter layout differs from the frozen probe: "
                 f"expected_fragments={expected_fragments}, "
                 f"actual_fragments={actual_fragments}, "
                 f"expected_layout_hash={expected_layout_hash}, "
                 f"actual_layout_hash={adapter.layout.layout_hash}, "
                 f"topology={describe_topology([m.topology.shard_id for m in manifests])}, "
-                f"fragment_bytes={fragment_bytes}"
+                f"fragment_bytes={fragment_bytes}{hint}"
             )
         installed = await group.install_full_parameter_fragment_plans(adapter.plans)
         if installed != adapter.layout.fragments.num_fragments:

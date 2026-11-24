@@ -50,6 +50,8 @@ _TABLE: tuple[tuple[LeaveReason, tuple[tuple[str, str], ...]], ...] = (
         (_E + "multinode", "TopologyError"),
         (_E + "backends", "UnknownBackend"),
         (_E + "trainable_state", "UnsupportedLayoutError"),
+        # --fragments / --rl-parameter-layout-sha256 name another layout than the island's
+        ("yeto.rl.adapters.miles.models.chunked_full_parameter", "FullParameterLayoutMismatch"),
     )),
     (LeaveReason.TRAINING_FAILED, (
         (_E + "driver", "DriverError"),  # Publication/PolicyIdentity/RoundFailed and checks
