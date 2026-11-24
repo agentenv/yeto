@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
+from yeto.rl.engine.batch_reader import report_round_guards
 from yeto.rl.engine.host_memory import host_memory_mode
 from yeto.rl.engine.offpolicy_source import OFFPOLICY_SOURCE_EVENT
 from yeto.rl.engine.ports import PlacementDescription, PublicationResult, RolloutBatchHandle
@@ -209,6 +210,11 @@ class FullyAsyncRolloutPool:
                   **({} if isl.consume_map is isl.vmap
                      else {"behavior_map": isl.consume_map.to_dict()})}
         isl.append_jsonl(f"verl-fa-rollout-{isl.learner_id}.jsonl", record)
+        if self.queue_end_is_buffer_end:
+            # a buffer trainer's age gate is this collector: the same trainer.policy_age
+            # record as the Miles reader's (the core reader's report)
+            report_round_guards(isl.emit, rollout_id=rollout_id, max_policy_age=isl.limit,
+                                stale_groups=carry["over_age_discarded_groups"])
         isl.emit("rl_verl_fa_round", rollout_id=rollout_id, pulled=pulled, kept=len(groups),
                  discarded=len(collector.discarded), queue_size_after=queue.get("queue_size"),
                  nonzero_advantages=advantage["nonzero_advantages"],

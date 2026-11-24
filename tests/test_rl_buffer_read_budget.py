@@ -13,6 +13,7 @@ import pytest
 
 from tests.buffer_rollout_procs import sample
 from yeto.rl.adapters.miles import buffer_rollout as br
+from yeto.rl.engine import batch_reader  # the reader lives in the core; its module globals are patched there
 from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
 
@@ -134,7 +135,7 @@ def test_a_take_holds_at_most_the_budget_and_frees_each_payload_at_its_decode(tm
         alive_at_decode.append(len(Payload.live))
         return real(data)
 
-    monkeypatch.setattr(br, "decode_group", decode)
+    monkeypatch.setattr(batch_reader, "decode_group", decode)
     Payload.live.clear()
     groups, report = _take_in_time(reader, 0, 8, current_version=1)
     assert [pos for pos, _ in groups] == list(range(8))
@@ -298,7 +299,7 @@ def test_v2_payloads_decode_in_the_read_threads_and_v1_on_the_callers(tmp_path, 
 
     threads: list[str] = []
     real = br.decode_group
-    monkeypatch.setattr(br, "decode_group", lambda data: (threads.append(threading.current_thread().name),
+    monkeypatch.setattr(batch_reader, "decode_group", lambda data: (threads.append(threading.current_thread().name),
                                                           real(data))[1])
 
     def write(root, codec_now):

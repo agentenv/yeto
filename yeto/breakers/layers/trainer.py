@@ -1,6 +1,7 @@
 """Breakers of the trainer layer: the buffer reader, the round checks and the release drain.
 
-Owners: the Miles sample-buffer reader (:mod:`yeto.rl.adapters.miles.buffer_rollout`), the
+Owners: the backend-neutral sample-buffer reader (:mod:`yeto.rl.engine.batch_reader`; Miles,
+verl and ms-swift trainers read through it and report its entries under the same names), the
 driver's per-round checks (:mod:`yeto.rl.engine.driver`, :mod:`yeto.rl.engine.nan_skip`,
 :mod:`yeto.rl.engine.xhw_guard`) and the commanded trainer island
 (:mod:`yeto.rl.engine.trainer_remote`). The trainer reads its values through
@@ -21,7 +22,7 @@ from typing import Any
 
 from yeto.breakers.spec import Alias, Breaker, Param
 
-# yeto.rl.adapters.miles.buffer_rollout: WAIT_ENV / DEFAULT_WAIT_S, MAX_POLICY_AGE_ENV,
+# yeto.rl.engine.batch_reader: WAIT_ENV / DEFAULT_WAIT_S, MAX_POLICY_AGE_ENV,
 # MAX_DAMAGED_RUN_ENV / DEFAULT_MAX_DAMAGED_RUN
 SAMPLE_WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"
 DEFAULT_SAMPLE_WAIT_S = 3600.0
@@ -44,7 +45,7 @@ RELEASE_DRAIN_ENV = "YETO_TRAINER_RELEASE_DRAIN_S"
 DEFAULT_RELEASE_DRAIN_S = 1800.0
 
 STRICT = "none: a data-correctness check of the trainer (StrictRlInvariantError)"
-READER = "yeto.rl.adapters.miles.buffer_rollout"
+READER = "yeto.rl.engine.batch_reader"
 DRIVER = "yeto.rl.engine.driver"
 
 

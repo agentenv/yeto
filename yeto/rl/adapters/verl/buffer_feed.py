@@ -87,14 +87,26 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from yeto.rl.engine.batch_reader import (
+    TRAINER_CONSUMER,
+    check_compaction_round,
+    check_damaged_run,
+    max_damaged_run_limit,
+    report_round_guards,
+    report_unaligned,
+    trip_sample_wait,
+)
 from yeto.rl.engine.buffer_payload import (
     NONFINITE_LOGPROB,
+    DamagedPayload,
     SampleBufferRolloutError,
     complete_prompt_tokens,
     decode_group,
     finite_rewards,
     group_entry_fields,
+    has_siblings,
     nonfinite_logprob,
+    payload_is_missing,
 )
 
 from yeto.rl.engine.incarnation_lease import STALE_REASON
@@ -106,7 +118,14 @@ from .fully_async_translate import VerlTranslationError, VersionMap
 # verl's GRPO advantages of the whole group NaN, so it is dropped, never trained
 NONFINITE_REWARD_REASON = "nonfinite_reward"
 
-TRAINER_CONSUMER = "trainer"  # the buffer's single consumer name (as the Miles reader)
+# a group whose payload is missing or is not a group (``batch_reader.BatchReader``'s
+# damaged payload): dropped and recorded, up to the trainer.buffer_damaged bound
+DAMAGED_PAYLOAD_REASON = "damaged_payload"
+# a group whose samples are wider than the trainer's rows (trainer.sample_alignment)
+OVER_LENGTH_REASON = "over_length"
+# the drop reasons trainer.group_integrity counts (BatchReader's names in the record)
+GROUP_INTEGRITY_REASONS = {"short_group": "dropped_small", "nonfinite_reward": "nonfinite_reward",
+                           "nonfinite_logprob": "nonfinite_logprob"}
 QUEUE_METHODS = ("yeto_pull_sample", "yeto_keep_last", "yeto_drop_last")
 UID_PREFIX = "buf"
 # a group of a source the xhw guard quarantined (YETO_RL_XHW_GUARD, action=quarantine)
@@ -278,7 +297,7 @@ def print_feed_event(event: str, **fields: Any) -> None:
                          "event": str(event), **fields}), flush=True)
 
 
-# the stale-incarnation gate is shared with the Miles reader (buffer_rollout.BatchReader)
+# the stale-incarnation gate is shared with the core reader (yeto.rl.engine.batch_reader.BatchReader)
 from yeto.rl.engine.incarnation_lease import (  # noqa: E402
     INCARNATION_FENCE_ENV,
     LEASE_ROOT_ENV,
@@ -308,7 +327,8 @@ class BufferFeed:
                  group_size: int | None = None, emit: Callable[..., None] | None = None,
                  drop_window: int | None = None, drop_warn_ratio: float | None = None,
                  drop_stall_warn_s: float | None = None, incarnation_gate: Any = "auto",
-                 xhw: bool = False, round_of: Callable[[], int] | None = None) -> None:
+                 xhw: bool = False, round_of: Callable[[], int] | None = None,
+                 max_damaged_run: int | None = None) -> None:
         """``cursor_log``: a synced trainer's lane cursor log
         (``merged_release.lane_cursor_log``); ``merged``: a synced trainer's
         merged version pairing (module doc). ``emit(event, **fields)`` reports a
@@ -327,8 +347,24 @@ class BufferFeed:
         feed counts each round's trained response tokens per source
         (``xhw_guard.source_key``) for the driver's guard (:meth:`xhw_round`) and
         drops the groups of a source the guard quarantined (:meth:`set_xhw_actions`)
-        as ``xhw_quarantine`` until ``round_of()`` reaches its ``until_round``."""
+        as ``xhw_quarantine`` until ``round_of()`` reaches its ``until_round``.
+
+        The trainer breakers are the core reader's (``yeto.rl.engine.batch_reader``), with
+        the same names and events as on a Miles trainer: ``trainer.sample_wait`` (no group
+        within ``wait_s``), ``trainer.buffer_damaged`` (``max_damaged_run`` damaged payloads
+        in a row, or that many and more than half of a round's; None: from the
+        environment, ``YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN``; 0: no bound),
+        ``trainer.group_integrity`` and ``trainer.sample_alignment`` (one record per round
+        for the groups dropped as short, without a finite reward or log-prob, or wider
+        than the rows) and ``trainer.compaction_round`` (a group of compacted trials,
+        which this trainer would train sample by sample, stops the round)."""
         self.buffer = buffer
+        self.max_damaged_run = max_damaged_run_limit() if max_damaged_run is None else int(max_damaged_run)
+        self._damaged_run = 0  # damaged payloads in a row
+        self._round_damaged = 0  # damaged payloads, and payloads decoded, of the round being collected
+        self._round_decoded = 0
+        self._round_drops: dict[str, int] = {}  # reason -> groups the round dropped
+        self._round_unaligned: list[str] = []  # the round's over-length drops
         self.xhw = bool(xhw)
         self.round_of = round_of
         self.xhw_actions: dict[str, dict[str, Any]] = {}
@@ -399,8 +435,10 @@ class BufferFeed:
             if self.buffer.data_ended:
                 return None
             if self.clock() - started > self.wait_s:
-                raise BufferFeedError(f"no buffer group within {self.wait_s:g} s "
-                                      f"(read position {self.buffer.read_cursor})")
+                error = BufferFeedError(f"no buffer group within {self.wait_s:g} s "
+                                        f"(read position {self.buffer.read_cursor})")
+                trip_sample_wait(self.emit, waited_s=self.clock() - started, limit_s=self.wait_s, error=error)
+                raise error
             self.sleep(self.poll_s)
 
     def _gate_verdict(self, item: Any) -> str | None:
@@ -452,9 +490,20 @@ class BufferFeed:
                 self._xhw_quarantined += 1
                 self._dropped(XHW_QUARANTINE_REASON, int(item.position), detail)
                 continue
-            samples = decode_group(self.buffer.read_payload(item.entry.payload_ref))
+            samples = self._decode(item)
+            if samples is None:  # a damaged payload: recorded, dropped (within trainer.buffer_damaged)
+                continue
             if not samples:
                 raise BufferFeedError(f"buffer position {item.position}: empty group")
+            if has_siblings(samples):
+                # compaction segments: this trainer makes one row per sample, so a trial's
+                # segments would train as unrelated trajectories (trainer.compaction_round)
+                check_compaction_round(
+                    [(int(item.position), samples)], seq_length=None, emit=self.emit,
+                    schedule_refusal=lambda positions: (
+                        f"groups at buffer positions {positions[:8]} hold compacted trials (several samples "
+                        "per trial); the verl buffer trainer trains every sample as a trajectory of its own "
+                        "and cannot train a trial whole"))
             too_long = oversized(samples, self.shape, self.tokenize)
             if too_long is None and not finite_rewards(samples):
                 reason = NONFINITE_REWARD_REASON
@@ -466,7 +515,7 @@ class BufferFeed:
                 reason = "short_group"
                 too_long = f"{len(samples)} samples, the trainer trains groups of {self.group_size}"
             else:
-                reason = "over_length"
+                reason = OVER_LENGTH_REASON
             if too_long is None:
                 too_long = nonfinite_logprob(samples)
                 reason = NONFINITE_LOGPROB
@@ -495,6 +544,37 @@ class BufferFeed:
         return {"uid": f"{UID_PREFIX}{int(item.position)}", "min_steps": local, "max_steps": local,
                 "calls": (None,) * len(samples), "lengths": lengths,
                 "rewards": tuple(float(s.get("reward") or 0.0) for s in samples)}
+
+    def _decode(self, item: Any) -> list[dict[str, Any]] | None:
+        """The decoded group at ``item``; None for a payload that is missing or is not a
+        group (recorded and dropped as ``damaged_payload``). Past the
+        ``trainer.buffer_damaged`` bound the pull raises ``DamagedPayloadLimit`` (a
+        systematic fault, as on the Miles reader). A read the store failed raises."""
+        ref = item.entry.payload_ref
+        try:
+            samples = decode_group(self.buffer.read_payload(ref))
+        except DamagedPayload as error:
+            reason = str(error)
+        except Exception as error:  # noqa: BLE001 - only a payload that is gone is passed over
+            if not payload_is_missing(self.buffer, ref, error):
+                raise
+            reason = "payload is missing"
+        else:
+            self._damaged_run = 0
+            self._round_decoded += 1
+            return samples
+        position = int(item.position)
+        self._damaged_run += 1
+        self._round_damaged += 1
+        check_damaged_run(run=self._damaged_run, damaged=self._round_damaged, decoded=self._round_decoded,
+                          limit=self.max_damaged_run, position=position, sample_id=item.entry.sample_id,
+                          reason=reason, emit=self.emit)
+        self.record({"position": position, "sample_id": item.entry.sample_id, "kept": False,
+                     "dropped": DAMAGED_PAYLOAD_REASON, "detail": reason, "payload_ref": ref,
+                     "source": (item.entry.provenance or {}).get("sampler_id")})
+        self.pulled_positions.append(position)
+        self._dropped(DAMAGED_PAYLOAD_REASON, position, reason)
+        return None
 
     def _source(self, entry: Any, position: int) -> str:
         shard_at = getattr(self.buffer, "shard_at", None)
@@ -538,6 +618,9 @@ class BufferFeed:
 
     def _dropped(self, reason: str, position: int, detail: str) -> None:
         self.dropped[reason] = self.dropped.get(reason, 0) + 1
+        self._round_drops[reason] = self._round_drops.get(reason, 0) + 1
+        if reason == OVER_LENGTH_REASON:
+            self._round_unaligned.append(f"buffer position {position}: {detail}")
         self._outcomes.append(True)
         self._streak += 1
         total = sum(self.dropped.values())
@@ -656,8 +739,22 @@ class BufferFeed:
             self._xhw_quarantined = 0
         self._hand_over()
         self._lease_reads = {}
+        self._report_round(int(rollout_id))
         kept, self._round_kept = self._round_kept, []
         self._pending = (int(rollout_id), kept, int(self.buffer.read_cursor))
+
+    def _report_round(self, rollout_id: int) -> None:
+        """The round's breaker records, as the Miles reader writes them: one
+        ``trainer.group_integrity`` record for the groups dropped as short or without a
+        finite reward or log-prob, one ``trainer.sample_alignment`` record for those
+        wider than the rows (nothing when none was dropped). The age gate is the
+        collector's (``fully_async_ports`` reports ``trainer.policy_age``)."""
+        drops, self._round_drops = self._round_drops, {}
+        unaligned, self._round_unaligned = self._round_unaligned, []
+        self._round_damaged = self._round_decoded = 0
+        bad = {name: drops.get(reason, 0) for reason, name in GROUP_INTEGRITY_REASONS.items()}
+        report_round_guards(self.emit, rollout_id=rollout_id, max_policy_age=0, stale_groups=0, **bad)
+        report_unaligned(unaligned, emit=self.emit)
 
     def commit_round(self) -> tuple[int, list[int], int] | None:
         """Write the pending cursor record: the round trained, so a relaunch must not
