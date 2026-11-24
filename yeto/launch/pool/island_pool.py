@@ -350,6 +350,9 @@ class IslandPool:
     retired_shards: list[str] = field(default_factory=list)  # shards ended for good (a removed pool's)
     # the offer ledger as this pool feeds and reads it (offer_ledger.PoolLedger; None: not kept)
     offer_ledger: Any = None
+    # a rolling replacement (``yeto fleet apply`` changed the pool's config): members still on
+    # the old config, replaced one at a time (``_roll``)
+    roll_tickets: list[str] = field(default_factory=list)
 
     def _control_stamp(self) -> Any:
         if self.scale_path is None:
@@ -1683,6 +1686,8 @@ class IslandPool:
             if (m.state == READY and not m.replaced_by and m.retiring_since is None and not m.paused
                     and m.lease_until is not None and now >= m.lease_until - self._replace_lead(m)):
                 self._order(replaces=m)
+        if self.roll_tickets:
+            self._roll()
 
         # fill up to target (members waiting for a replacement count until they go)
         # (a member whose release its halted slot refuses may stay for hours: it fills no place)
@@ -1705,6 +1710,58 @@ class IslandPool:
         if m.lease_until is not None and born:  # never more than half its life: no successor of a successor
             lead = min(lead, max(0.0, (m.lease_until - born) / 2))
         return lead
+
+    def set_target(self, target: int, *, retire: Any = (), mode: str | None = None, source: str = "desired",
+                   **extra: Any) -> None:
+        """A new target from the fleet's desired state, for a pool without a scale control
+        file (a pool with one gets it through ``pool-scale``, so the file and the pool agree)."""
+        target = int(target)
+        if target < self.config.target:
+            self.shrink = max(self.shrink, len(self.counted()) - target)
+        if target != self.config.target:
+            self._event("target_changed", old=self.config.target, new=target, source=source, **extra)
+            self.config.target = target
+        if retire:
+            self._retire_req = [str(t) for t in retire]
+            self.scale_mode = str(mode) if mode in el.SCALE_DOWN_MODES else None
+
+    def start_roll(self, why: str) -> list[str]:
+        """Replace every live member one at a time (the pool's config changed: new members
+        start with the new one). The tickets to replace."""
+        self.roll_tickets = [m.ticket for m in self.live() if m.state not in (DRAINING, FENCING)]
+        self._event("roll_started", why=why, tickets=list(self.roll_tickets))
+        self._save_now()
+        return list(self.roll_tickets)
+
+    def _roll(self) -> None:
+        """One step of a rolling replacement (``start_roll``). Only when every counted member
+        is ready and no replacement is in flight: with a free slot, a replacement is ordered
+        for the next old member (make before break: the old one goes once its successor is
+        ready, as at a lease end); without one, the old member is fenced, its shard and data
+        slot handed on and it is released, and the fill-up orders its successor. Either way
+        at most one member is short at any time."""
+        live = {m.ticket: m for m in self.live()}
+        self.roll_tickets = [t for t in self.roll_tickets
+                             if t in live and live[t].state not in (DRAINING, FENCING)]
+        if not self.roll_tickets:
+            self._event("roll_done")
+            return
+        counted = [m for m in self.live() if m.retiring_since is None and m.state != DRAINING]
+        if any(m.state != READY for m in counted) or len(counted) < self.config.target:
+            return  # a member is still coming up (or a successor of the last step)
+        if any(m.replaced_by for m in counted):
+            return
+        m = next((live[t] for t in self.roll_tickets if live[t].state == READY and not live[t].paused), None)
+        if m is None:
+            return
+        if self._free_account() is not None:
+            if self._order(replaces=m) is not None:
+                self._event("roll_step", ticket=m.ticket, shard=m.shard, how="make_before_break")
+            return
+        self._event("roll_step", ticket=m.ticket, shard=m.shard, how="break_before_make")
+        if self._fence(m, "config rolled"):
+            self._handoff_slot(m)
+            self._drain(m, "config rolled")
 
     def _watch_paused(self, m: Member, now: float) -> bool:
         """A paused member: only its ticket is read (spend, lease end). True: nothing else
@@ -2638,6 +2695,7 @@ class IslandPool:
                 "members": [asdict(m) for m in self.members], "pending": list(self.pending),
                 "breaker": asdict(self.breaker), "budget": asdict(self.budget),
                 **({"retired_shards": list(self.retired_shards)} if self.retired_shards else {}),
+                **({"roll_tickets": list(self.roll_tickets)} if self.roll_tickets else {}),
                 **({"owner": dict(self.owner)} if self.owner is not None else {})}
 
     def save(self, path: Path) -> None:
@@ -2679,6 +2737,7 @@ class IslandPool:
         pool.scale_seq = int(doc.get("scale_seq", 0))
         pool.shrink = int(doc.get("shrink", 0))
         pool.retired_shards = list(doc.get("retired_shards") or [])
+        pool.roll_tickets = list(doc.get("roll_tickets") or [])
         if pool.owner is None and isinstance(doc.get("owner"), dict):
             pool.owner = dict(doc["owner"])
         for m in pool.members:  # a start cut off by the restart: probed first (``_watch``)
