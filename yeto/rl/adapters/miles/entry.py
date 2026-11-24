@@ -1447,7 +1447,9 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
     rollout metadata hook in the workers reports the data cursor;
     ``YETO_RL_BACKEND=miles`` so neutral rollout-side code finds this adapter;
     the generic partial-experts switches (only with an in-place selection) so
-    each worker's ``sitecustomize`` freezes all but the selected experts.
+    each worker's ``sitecustomize`` freezes all but the selected experts; the
+    weight-update channel count when the SGLang engines pin theirs
+    (:mod:`.weight_update_channels`).
     """
 
     environ = os.environ if environ is None else environ
@@ -1512,6 +1514,10 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
 
     # generic partial experts: set after ``ray start``, so only runtime_env reaches the workers
     env_vars.update(partial_experts_worker_env(environ))
+    from .weight_update_channels import island_env as weight_update_channels_env
+
+    # the trainer's weight-update NCCL group must match the engines' pinned channel count
+    env_vars.update(weight_update_channels_env(miles_args, environ))
     env_vars.update(quant_env)
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
