@@ -455,5 +455,76 @@ def test_a_fenced_controller_writes_no_record(tmp_path):
     assert old.request_stop(0, "operator")  # the STOP channel is not fenced
 
 
+def test_a_background_write_the_fence_or_the_store_did_not_take_is_tried_again(tmp_path):
+    """A terminal record (done / failed / abandoned) usually has no later write: a body the
+    fence could not confirm, or the store did not take, is queued again (unless a newer one
+    is queued) until it lands."""
+    import time as _time
+
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    objects = DirectoryObjectStore(tmp_path)
+    lock = _Lock(1)
+    states = lc.IslandStateStore(objects, fence=lock, background=True, stop_poll_s=0.05)
+    states.write(0, "running", name="r-l0")
+    assert states.flush(5.0)
+    lock.raises = _Unconfirmed("store did not answer")
+    states.write(0, "done", exit="SUCCEEDED")  # the last write of the island
+    _time.sleep(0.3)
+    assert lc.IslandStateStore(objects).read(0)["state"] == "running"  # not confirmed yet: not written
+    assert not states.flush(0.1)  # still queued
+    lock.raises = None
+    assert states.flush(5.0)
+    assert lc.IslandStateStore(objects).read(0)["state"] == "done"
+
+    class Flaky:
+        def __init__(self):
+            self.fail, self.objects = 2, {}
+
+        def read(self, key):
+            return self.objects.get(key)
+
+        def write(self, key, data):
+            if self.fail:
+                self.fail -= 1
+                raise OSError("store down")
+            self.objects[key] = data
+
+    flaky = Flaky()
+    states = lc.IslandStateStore(flaky, background=True, stop_poll_s=0.05, log=lambda m: None)
+    states.write(1, "failed", exit="config")
+    assert states.flush(5.0)
+    assert json.loads(flaky.objects[lc.state_key(1)])["state"] == "failed"
+    assert states.close(5.0)
+
+
+def test_a_write_left_behind_at_the_end_is_an_explicit_error(tmp_path):
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    lock, logged = _Lock(1), []
+    lock.raises = _Unconfirmed("store did not answer")
+    states = lc.IslandStateStore(DirectoryObjectStore(tmp_path), fence=lock, background=True, stop_poll_s=0.05,
+                                 log=logged.append)
+    states.write(1, "abandoned", exit="ABANDONED")
+    assert states.close(1.0) is False
+    error = [m for m in logged if "ERROR" in m]
+    assert error and "fleet/trainers/1/state.json (abandoned)" in error[0] and "did not land" in error[0]
+
+
+def test_a_fence_interrupt_never_ends_the_background_thread(tmp_path):
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    lock = _Lock(1)
+    lock.raises = KeyboardInterrupt()
+    states = lc.IslandStateStore(DirectoryObjectStore(tmp_path), fence=lock, background=True, stop_poll_s=0.05,
+                                 log=lambda m: None)
+    states.write(0, "running")
+    assert not states.flush(0.3)
+    lock.raises = None
+    assert states.flush(5.0) and states._thread.is_alive()
+    assert lc.IslandStateStore(DirectoryObjectStore(tmp_path)).read(0)["state"] == "running"
+    assert states.close(5.0)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

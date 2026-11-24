@@ -234,6 +234,7 @@ def controller_identity() -> dict[str, Any]:
 
 STOP_POLL_S = 15.0  # a background store re-reads the watched islands' STOP this often
 FLUSH_S = 10.0  # a background store's queued writes get this long at the launcher's end
+RETRY_MAX_S = 120.0  # the longest back-off between two tries of a write the store did not take
 
 
 class Fence(Protocol):
@@ -400,7 +401,10 @@ class IslandStateStore:
         try:
             self.fence.guard()
         except (KeyboardInterrupt, SystemExit):
-            raise
+            if threading.current_thread() is threading.main_thread():
+                raise
+            self._warn("fence check", RuntimeError("interrupted"))  # never ends the background thread
+            return False
         except BaseException as error:  # noqa: BLE001 - the lock's errors are BaseExceptions
             if hasattr(error, "by"):
                 self.fenced = error
@@ -411,13 +415,17 @@ class IslandStateStore:
             return False
         return True
 
-    def _store(self, key: str, data: bytes) -> None:
+    def _store(self, key: str, data: bytes) -> bool:
+        """Write one body; False when it should be tried again (the fence not confirmed, the
+        store did not take it); True once written, or for good not (the fence is lost)."""
         if not self._fence_holds():
-            return
+            return self.fenced is not None
         try:
             self.objects.write(key, data)
         except Exception as error:  # noqa: BLE001
             self._warn("write", error)
+            return False
+        return True
 
     def _start(self) -> None:  # under self._lock
         if self._thread is None and not self._closed:
@@ -426,6 +434,7 @@ class IslandStateStore:
 
     def _work(self) -> None:
         stops_at = float("-inf")
+        retry_at, backoff = float("-inf"), self.stop_poll_s
         while True:
             self._wake.wait(self.stop_poll_s)
             self._wake.clear()
@@ -433,8 +442,19 @@ class IslandStateStore:
                 pending, self._pending = self._pending, {}
                 watched = sorted(self._watched)
                 due, self._stops_due = self._stops_due, False
-            for key, data in pending.items():
-                self._store(key, data)
+                closing = self._closed
+            if pending and time.monotonic() < retry_at and not closing:
+                retry = pending  # backing off: nothing is tried before retry_at
+            else:
+                retry = {key: data for key, data in pending.items() if not self._store(key, data)}
+                if retry:  # the fence not confirmed, or the store did not take it: back off, try again
+                    retry_at, backoff = time.monotonic() + backoff, min(backoff * 2, RETRY_MAX_S)
+                else:
+                    backoff = self.stop_poll_s
+            if retry:
+                with self._lock:  # unless a newer body of the key is queued meanwhile
+                    for key, data in retry.items():
+                        self._pending.setdefault(key, data)
             if not pending:
                 self._fence_holds()  # the lease renewal of a quiet fleet
             if watched and (due or time.monotonic() - stops_at >= self.stop_poll_s):
@@ -444,8 +464,8 @@ class IslandStateStore:
             with self._lock:
                 if not self._pending:
                     self._idle.set()
-                if self._closed and not self._pending:
-                    return
+                if closing and (not self._pending or retry):
+                    return  # closing: a body the store does not take now is left behind (close() says which)
 
     def flush(self, timeout: float = FLUSH_S) -> bool:
         """Wait up to ``timeout`` s for the queued writes (True once none is left)."""
@@ -464,11 +484,22 @@ class IslandStateStore:
         self._wake.set()
         if thread is not None:
             thread.join(timeout)
-        done = self._idle.is_set()
-        if not done:
-            self.log(f"[launcher] island state store: queued record writes not done after {timeout:.0f} s; "
-                     "left behind")
-        return done
+        with self._lock:
+            left = {key: data for key, data in self._pending.items()}
+        if not left and self._idle.is_set():
+            return True
+        what = []
+        for key, data in sorted(left.items()):
+            try:
+                state = json.loads(data).get("state")
+            except (ValueError, AttributeError):
+                state = None
+            what.append(f"{key}" + (f" ({state})" if state else ""))
+        self.log(f"[launcher] ERROR: island state store: {len(left) or 'a'} record write(s) did not land "
+                 f"within {timeout:.0f} s at the end ({', '.join(what) or 'in flight'}"
+                 f"{'; fenced: ' + str(self.fenced) if self.fenced is not None else ''}): the run store shows "
+                 "an older state of these islands")
+        return False
 
     # -- the stop channel
     def stop_requested(self, island: int) -> dict[str, Any] | None:
