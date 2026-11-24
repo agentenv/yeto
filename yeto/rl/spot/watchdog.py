@@ -110,7 +110,7 @@ class ProviderOps:
     The provider calls: ``launch_cluster(name, offer, slot=1, wait=False)`` then
     ``status(1, name)`` until the cluster is ``active`` or ``ended`` or ``timeout_s``
     passes (the launch request is confirmed by the provider; a hung request ends as a
-    timeout, as the old CLI subprocess did); ``_record(name, refresh=True)`` for the
+    timeout, as the old CLI subprocess did); ``cluster_state(name)`` for the
     state (refreshed from the cloud: a reclaimed spot VM reads gone, not a stale UP);
     ``node(1, name).ip``; ``run_tickets()`` + ``release(1, name)`` for a delete (it
     cancels a launch still in flight and confirms the cluster gone)."""
@@ -125,9 +125,18 @@ class ProviderOps:
         self.clock, self.sleep, self.poll_s = clock, sleep, float(poll_s)
 
     def preflight(self) -> None:
-        """Raise :class:`LaunchConfigError` when the provider has no sky SDK to call."""
-        if getattr(self.provider, "_sky", None) is None and importlib.util.find_spec("sky") is None:
+        """Raise :class:`LaunchConfigError` when the provider has no sky SDK to call, or the
+        local sky API server runs another sky version (``sky_patches.require_matching_api_server``)."""
+        if getattr(self.provider, "_sky", None) is not None:
+            return  # an injected sky (tests)
+        if importlib.util.find_spec("sky") is None:
             raise LaunchConfigError("the 'sky' Python package (SkyPilot) is not installed")
+        from yeto import sky_patches  # noqa: PLC0415
+
+        try:
+            sky_patches.require_matching_api_server()
+        except ValueError as error:
+            raise LaunchConfigError(str(error)) from error
 
     def launch(self, cluster: str, cand: Candidate, timeout_s: float) -> tuple[bool, str]:
         assert self.own_name.search(cluster), cluster
@@ -157,13 +166,8 @@ class ProviderOps:
             return ""
 
     def state(self, cluster: str, region: str) -> str | None:
-        record = self.provider._record(cluster, refresh=True)  # raises on an API error: not a preemption
-        if record is None:
-            return None
-        from yeto.launch.nc.sky_provider import _status_name  # noqa: PLC0415
-
-        name = _status_name(record.get("status"))
-        return self.STATES.get(name, name)
+        name = self.provider.cluster_state(cluster)  # raises on an API error: not a preemption
+        return None if name is None else self.STATES.get(name, name)
 
     def down(self, cluster: str) -> bool:
         assert self.own_name.search(cluster), cluster

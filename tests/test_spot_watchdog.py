@@ -384,6 +384,22 @@ def test_a_missing_sky_exits_at_once_with_no_fake_doomed_clusters(tmp_path, monk
     assert wd.Watchdog(cfg, wd.candidates(), ops, clock=clk, sleep=clk.sleep).run() == "config_error"
 
 
+def test_a_mismatched_sky_api_server_exits_before_any_launch(tmp_path, monkeypatch):
+    """The preflight refuses a local sky API server of another sky version (as `yeto launch` does)."""
+    from yeto import sky_patches
+
+    monkeypatch.setattr(wd.importlib.util, "find_spec", lambda name: object())  # the sky package is there
+    monkeypatch.delenv(sky_patches.SERVER_CHECK_ENV, raising=False)  # the test suite turns the check off
+    monkeypatch.setattr(sky_patches, "api_server_version_problem", lambda: ("sky API server 0.13.0, client 0.14.3", True))
+
+    class Provider:  # never called: the preflight stops first
+        _sky = None
+
+    clk = Clock()
+    w = wd.Watchdog(_cfg(tmp_path), wd.candidates(), wd.ProviderOps(Provider()), clock=clk, sleep=clk.sleep)
+    assert w.run() == "config_error" and w.spent == 0.0 and w.doomed == {}
+
+
 def test_a_config_error_from_launch_also_exits_without_doomed(tmp_path):
     """sky vanished between the preflight and a launch."""
     clk = Clock()
