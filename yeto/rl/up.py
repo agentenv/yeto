@@ -1694,12 +1694,14 @@ class Run:
 
         want = int(self._trainer_flag("--rl-rollout-top-logprobs-num") or DEFAULT_TOP_LOGPROBS)
         pool_cfg = self.pools[pool].load()
+        unread = (f"the trainer's --rl-loss score_centering needs the sampler spec's top-{want} log-probs but the "
+                  f"pool's sampler spec {pool_cfg.get('spec') or '(none)'} cannot be read: nothing can be checked")
         if not pool_cfg.get("spec"):
-            return None
+            return unread  # fail closed
         try:
             spec = json.loads(Path(os.path.expanduser(str(pool_cfg["spec"]))).read_text())
         except (OSError, ValueError):
-            return None  # the pool dry-run reports an unreadable spec
+            return unread
         have = int(((spec.get("rollout_fields") or {}) if isinstance(spec, dict) else {}).get("top_logprobs_num") or 0)
         if have != want:
             return (f"the trainer's --rl-loss score_centering trains on the rollout top-{want} log-probs but the "
@@ -1791,6 +1793,8 @@ class Run:
                                                        [str(a) for a in self.cfg["trainer"]["argv"]], self.env)
         if warning is not None:
             lines.append(f"WARNING: {warning}")
+        lines += [f"WARNING: {w}" for w in up_consistency.score_centering_warnings(
+            self.pools[pool].load(), [str(a) for a in self.cfg["trainer"]["argv"]])]
         for line in lines:
             _log(f"preflight: {line}" + (f" (pool {self.pools[pool].name})" if len(self.pools) > 1 else ""))
 

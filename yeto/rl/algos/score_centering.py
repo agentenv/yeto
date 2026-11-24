@@ -306,7 +306,9 @@ def std_normalization_override_warning(args: Any, base: AlgorithmSpec) -> str | 
 def spec_from_rl_loss_args(args: Any, base: AlgorithmSpec | None = None) -> AlgorithmSpec:
     """Apply ``--rl-loss`` and ``--rl-score-centering-*`` launcher options to ``base``.
 
-    ``--rl-loss`` absent or ``policy_loss`` returns ``base`` unchanged.
+    ``--rl-loss`` absent or ``policy_loss`` returns ``base`` unchanged. An option not
+    given keeps ``base``'s value (``loss.score_centering_is: tis`` in the spec file
+    stays ``tis`` without ``--rl-score-centering-is``).
     """
 
     loss = getattr(args, "rl_loss", None) or DEFAULT_LOSS
@@ -323,9 +325,11 @@ def spec_from_rl_loss_args(args: Any, base: AlgorithmSpec | None = None) -> Algo
     if warning is not None and warning not in _WARNED:
         _WARNED.add(warning)
         print(f"[yeto] WARNING: {warning}", file=sys.stderr, flush=True)
+    # an option not given keeps the base spec's value (its default when the file has none),
+    # as for the clip, the MIS bounds and K
     return score_centering_spec(
         base=spec,
-        importance_sampling=getattr(args, "rl_score_centering_is", None) or DEFAULT_IS,
+        importance_sampling=getattr(args, "rl_score_centering_is", None) or spec.loss.score_centering_is,
         tis_clip=getattr(args, "rl_score_centering_tis_clip", None),
         mis_low=getattr(args, "rl_score_centering_mis_low", None),
         mis_high=getattr(args, "rl_score_centering_mis_high", None),

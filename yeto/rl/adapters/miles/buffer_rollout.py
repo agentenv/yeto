@@ -333,25 +333,76 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
     return out
 
 
+SCORE_CENTERING_LOSS = "score_centering"  # Miles --loss-type
+
+
+def trainer_sampling(args: Any) -> dict[str, Any] | None:
+    """The sampling a score_centering trainer's behavior distribution holds at (Miles
+    ``--rollout-temperature`` / ``--rollout-top-p`` / ``--rollout-top-k``); None when
+    the trainer's ``--loss-type`` is not score_centering (no check)."""
+    if getattr(args, "loss_type", None) != SCORE_CENTERING_LOSS:
+        return None
+    return {"temperature": float(getattr(args, "rollout_temperature", 1.0)),
+            "top_p": float(getattr(args, "rollout_top_p", 1.0)),
+            "top_k": int(getattr(args, "rollout_top_k", -1))}
+
+
+def check_version_fields(group: Sequence[Mapping[str, Any]], sampling: Mapping[str, Any]) -> bool:
+    """A score_centering trainer reads the samples' log-probs and top-K log-probs as the
+    behavior distribution of its own ``sampling`` (:func:`trainer_sampling`). Raises
+    :class:`SampleBufferRolloutError` when a sample's ``metadata.engine.version_fields``
+    (stamped by the engine sampler) name another temperature / top_p / top_k: its
+    log-probs are of another distribution than the trainer's. False when no sample of
+    the group carries them (a sampler before the stamp, a Miles sampler): let through."""
+    from yeto.rl.engine.buffer_payload import ENGINE_META  # noqa: PLC0415
+    from yeto.rl.engine.sampler_engine import version_fields_mismatch  # noqa: PLC0415
+
+    stamped = False
+    for sample in group:
+        fields = ((sample.get("metadata") or {}).get(ENGINE_META) or {}).get("version_fields")
+        if not isinstance(fields, Mapping):
+            continue
+        stamped = True
+        differ = version_fields_mismatch(fields, sampling)
+        if differ:
+            raise SampleBufferRolloutError(
+                f"sample {sample.get('index')}: engine.version_fields {', '.join(differ)}: score_centering "
+                "trains on the sampler's log-probs as the behavior distribution of the trainer's sampling; "
+                "fix the sampler spec's sampling")
+    return stamped
+
+
 def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samples_per_group: int,
-                 r3_layers: tuple[int, int] | None = None, r3_num_experts: int | None = None
+                 r3_layers: tuple[int, int] | None = None, r3_num_experts: int | None = None,
+                 sampling: Mapping[str, Any] | None = None, stats: dict[str, int] | None = None
                  ) -> tuple[list[tuple[int, list[dict[str, Any]]]], list[str]]:
     """The taken groups renumbered (:func:`renumber_group`) and in Miles' sample form
     (``buffer_payload.miles_sample_dict``), and why each group that cannot be converted
     was left out. One malformed sample (an R3 routing row that mixes pads and ids, an
     expert id past the model's, a layer count of another model) leaves its group out
     of the round, which is padded instead, rather than stopping the trainer (the caller
-    takes again when no group of a take converts, and fails after a few such takes)."""
+    takes again when no group of a take converts, and fails after a few such takes).
+    ``sampling``: a score_centering trainer's (:func:`trainer_sampling`); a group whose
+    ``engine.version_fields`` differ is left out the same way (:func:`check_version_fields`),
+    and a group without them is kept and counted in ``stats["no_version_fields_groups"]``."""
     from yeto.rl.engine.buffer_payload import miles_sample_dict  # noqa: PLC0415
 
     kept, problems = [], []
+    unstamped = 0
     for position, group in groups:
         try:
+            stamped = sampling is None or check_version_fields(group, sampling)
             kept.append((position, [miles_sample_dict(d, r3_layers=r3_layers, r3_num_experts=r3_num_experts)
                                     for d in renumber_group(group, position=position,
                                                             samples_per_group=samples_per_group)]))
+            unstamped += not stamped
         except SampleBufferRolloutError as error:
             problems.append(f"buffer position {position}: {error}")
+    if unstamped:
+        print(f"[sample-buffer] WARNING: {unstamped} group(s) carry no engine.version_fields: their sampling "
+              "is not checked against the score_centering trainer's", flush=True)
+        if stats is not None:
+            stats["no_version_fields_groups"] = stats.get("no_version_fields_groups", 0) + unstamped
     for problem in problems:
         print(f"[sample-buffer] WARNING: group left out of the round: {problem}", flush=True)
     if problems:

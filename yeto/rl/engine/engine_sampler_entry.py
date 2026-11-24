@@ -18,7 +18,9 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   (R3 routed experts; the top-K log-probs of score_centering, K default 128;
   the fp32 lm-head the trainer's ``engine.version_fields`` check expects). The
   section is handed to the engine factory inside the engine section and checked
-  against the built engine's capabilities (:func:`check_rollout_fields`);
+  against the built engine's capabilities (:func:`check_rollout_fields`); with
+  top-K log-probs the sampling must be score_centering's (temperature 1, top_p 1,
+  top_k -1, neutral penalties, no log-prob mode switch);
 * ``platform`` (optional): ``cuda`` (default) / ``rocm`` / ``ppu`` / ``npu``, the
   accelerator the engine runs on; handed to the engine factory the same way
   (``rocm`` turns on the SGLang ROCm environment preset and the AMD card check);
@@ -141,6 +143,8 @@ from .sampler_engine import (
     SamplerEngine,
     SamplingParams,
     returns_routed_experts,
+    score_centering_logprob_mode_problems,
+    score_centering_sampling_problems,
     top_logprobs_num,
     version_fields,
 )
@@ -177,10 +181,12 @@ def _import(target: str) -> Any:
 
 # ------------------------------------------------------------------- engine
 
-def build_engine(spec: Mapping[str, Any]) -> SamplerEngine:
+def build_engine(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None) -> SamplerEngine:
     """The engine adapter of ``spec["engine"]``: ``factory`` (``module:callable``,
     an adapter-layer function) builds it from the engine section. The neutral
-    core names no adapter (import boundaries, ``yeto/rl/engine/README.md``)."""
+    core names no adapter (import boundaries, ``yeto/rl/engine/README.md``).
+    ``environ``: the sampler process environment the engine inherits (None: the
+    spec's ``extra_env`` only, as in a pool dry run off the node)."""
     engine = dict(_require(spec, "engine"))
     fields = spec.get(ROLLOUT_FIELDS)
     if fields is not None:
@@ -201,15 +207,22 @@ def build_engine(spec: Mapping[str, Any]) -> SamplerEngine:
         built = factory(engine)
     except (KeyError, TypeError, ValueError) as error:
         raise SamplerSpecError(f"engine: {error}") from None
-    check_rollout_fields(spec, built)
+    check_rollout_fields(spec, built, environ=environ)
     return built
 
 
-def check_rollout_fields(spec: Mapping[str, Any], engine: Any) -> dict[str, Any]:
+def check_rollout_fields(spec: Mapping[str, Any], engine: Any, *,
+                         environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """The built engine must return every field ``spec["rollout_fields"]`` asks
     for (the trainer refuses a buffer without them much later, after GPU time
     was spent). Returns what the engine will write: the R3 flag, K and the
-    ``engine.version_fields`` of the spec's sampling."""
+    ``engine.version_fields`` of the spec's sampling.
+
+    Top-K log-probs (K > 0, asked for or returned) serve only score_centering, whose
+    behavior distribution is the returned log-probs at temperature 1, top_p 1, no
+    top-k and neutral penalties: any other sampling, vLLM ``--logprobs-mode`` in the
+    engine's ``extra_args`` or a true ``SGLANG_RETURN_ORIGINAL_LOGPROB`` in its
+    ``extra_env`` / ``environ`` is refused (:func:`score_centering_problems`)."""
     fields = spec.get(ROLLOUT_FIELDS) or {}
     sampling = dict(spec.get("sampling") or {"max_tokens": 1})
     sampling["stop"] = tuple(sampling.get("stop") or ())
@@ -224,7 +237,30 @@ def check_rollout_fields(spec: Mapping[str, Any], engine: Any) -> dict[str, Any]
                                f"{have['top_logprobs_num']}")
     if fields.get("fp32_lm_head") and not have["version_fields"]["fp32_lm_head"]:
         raise SamplerSpecError(f"{ROLLOUT_FIELDS}.fp32_lm_head: the engine serves no fp32 lm-head")
+    k = max(int(want_k), have["top_logprobs_num"])
+    if k > 0:
+        problems = score_centering_problems(spec, environ)
+        if problems:
+            raise SamplerSpecError(
+                f"{ROLLOUT_FIELDS}.top_logprobs_num {k}: the top-K log-probs are score_centering's behavior "
+                f"distribution, valid only at temperature 1, top_p 1, top_k -1 and neutral penalties with the "
+                f"engine's default log-probs; got {'; '.join(problems)}. The trainer would train on a "
+                f"distribution the tokens were not sampled from. Fix the sampling, or set {ROLLOUT_FIELDS}."
+                "top_logprobs_num 0 if the trainer does not train with score_centering")
     return have
+
+
+def score_centering_problems(spec: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> list[str]:
+    """Why the spec's sampling and engine section break score_centering's behavior
+    distribution ([] when they do not): :func:`.sampler_engine.score_centering_sampling_problems`
+    of ``spec["sampling"]`` and the log-prob mode switches of the engine's
+    ``server.extra_args`` / ``server.extra_env`` and of ``environ``."""
+    engine = spec.get("engine") if isinstance(spec.get("engine"), Mapping) else {}
+    server = engine.get("server") if isinstance(engine.get("server"), Mapping) else {}
+    problems = score_centering_sampling_problems(dict(spec.get("sampling") or {}))
+    env = {**dict(environ or {}), **dict(server.get("extra_env") or {})}  # extra_env wins, as on the server
+    problems += score_centering_logprob_mode_problems(server.get("extra_args") or (), env)
+    return problems
 
 
 def apply_rollout_quant(spec: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1144,7 +1180,7 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         version = None if island is None else island.follower.version
         membership.leave(reason.name, policy_version=version, buffer_end=len(buffer), **detail)
 
-    engine = build_engine(spec)
+    engine = build_engine(spec, environ=env)
     if resource_sampler is None:
         from .telemetry import ResourceSampler  # noqa: PLC0415
 

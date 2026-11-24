@@ -146,7 +146,8 @@ _ALGORITHM = (
         "--rl-score-centering-is",
         choices=["none", "tis", "mis"],
         default=None,
-        help="score_centering importance sampling: none (default), tis or mis",
+        help="score_centering importance sampling: none, tis or mis (default: the "
+        "--rl-algorithm-spec file's loss.score_centering_is, else none)",
     ),
     shared_flag("--rl-score-centering-tis-clip", type=float, default=None, metavar="C",
                 help="score_centering tis: the importance-ratio clip (default 2.0)"),

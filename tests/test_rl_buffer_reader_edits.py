@@ -103,6 +103,59 @@ def test_pruned_merged_groups_are_not_trained_and_kept_ones_carry_their_cut(monk
     assert sum(len(g) for g in out["samples"]) == 2 * 4
 
 
+def _stamped(group, **fields):
+    for d in group:
+        d["metadata"]["engine"] = {"version_fields": {"fp32_lm_head": True, "temperature": 1.0, "top_p": 1.0,
+                                                      "top_k": -1, **fields}}
+    return group
+
+
+SC_ARGS = SimpleNamespace(loss_type="score_centering", rollout_temperature=1.0, rollout_top_p=1.0, rollout_top_k=-1)
+
+
+def test_a_score_centering_trainer_leaves_out_groups_of_another_sampling(monkeypatch, capsys):
+    """The reader checks each group's engine.version_fields against the score_centering
+    trainer's --rollout-temperature / -top-p / -top-k: another sampling is left out and
+    padded like any group that does not convert (counted, sample_alignment); a group
+    without version_fields (an older sampler) is trained and counted."""
+    groups = [(0, _stamped(_group(0, (1, 0, 0, 1)))), (1, _stamped(_group(1, (1, 1, 0, 0)), temperature=0.7)),
+              (2, _group(2, (0, 1, 0, 1))), (3, _stamped(_group(3, (1, 0, 1, 0)), top_k=0))]
+    _plugin, reader = _reader(monkeypatch, groups)
+    reader.groups = 4
+    reader.sampling = br.trainer_sampling(SC_ARGS)
+    out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=4))
+    real = [g for g in out["samples"] if not br.is_padding(g[0])]
+    assert [g[0]["group_index"] for g in real] == [0, 2, 3]
+    assert sum(len(g) for g in out["samples"]) == 4 * 4  # group 1 is padding
+    assert out["metrics"]["sample_buffer/unconvertible_groups"] == 1.0
+    assert out["metrics"]["sample_buffer/no_version_fields_groups"] == 1.0
+    printed = capsys.readouterr().out
+    assert "engine.version_fields temperature 0.7 (trainer 1.0)" in printed
+    assert "1 group(s) carry no engine.version_fields" in printed
+
+
+def test_version_fields_are_not_checked_without_score_centering(monkeypatch):
+    assert br.trainer_sampling(SimpleNamespace(loss_type="policy_loss", rollout_temperature=0.7)) is None
+    assert br.trainer_sampling(SimpleNamespace()) is None
+    groups = [(0, _stamped(_group(0, (1, 0, 0, 1)), temperature=0.7, top_p=0.9))]
+    converted, problems = br.miles_groups(groups, samples_per_group=4)
+    assert problems == [] and len(converted) == 1
+    _plugin, reader = _reader(monkeypatch, groups)
+    out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=4))
+    assert "sample_buffer/no_version_fields_groups" not in out["metrics"]
+
+
+def test_check_version_fields_compares_the_trainer_sampling():
+    want = br.trainer_sampling(SC_ARGS)
+    assert br.check_version_fields(_stamped(_group(0, (1, 0))), want) is True
+    assert br.check_version_fields(_group(0, (1, 0)), want) is False  # unstamped: let through
+    assert br.check_version_fields(_stamped(_group(0, (1, 0)), top_k=0), want) is True  # 0 and -1: no limit
+    for fields, needle in (({"top_p": 0.95}, "top_p 0.95"), ({"top_k": 50}, "top_k 50"),
+                           ({"temperature": None}, "temperature None")):
+        with pytest.raises(br.SampleBufferRolloutError, match=needle):
+            br.check_version_fields(_stamped(_group(0, (1, 0)), **fields), want)
+
+
 def test_with_reader_edits_equals_converting_the_edited_groups():
     groups = [(5, _group(0, (1, 0, 0, 1)))]
     converted, _ = br.miles_groups(groups, samples_per_group=4)
