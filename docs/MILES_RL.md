@@ -513,9 +513,11 @@ A complete example: `examples/fleet/run.two-islands.json`.
 | `islands[].trainer.gpu` | The island trainer's cluster, one `--gpu` entry (`cloud:[NODESx]COUNTxGPU[@region]`). Islands may use different GPUs and regions. Required. |
 | `islands[].trainer.usd_per_h` | The island trainer's price per hour (the spend estimate sums the islands). |
 | `islands[].trainer.argv` | Only `--rl-release-every N` and `--rl-max-policy-age N`: this island's values (they override `fleet.trainer_argv`). |
+| `islands[].trainer.step_s` | Optional: an estimate of one local version (training step) of this island's trainer, in seconds (overrides `fleet.step_s`). The preflight's release cadence check reads it; nothing else does. |
 | `islands[].samplers` | The island's pools, each an entry of the run config's `samplers` list format. Every pool needs `shard_base`, `run_prefix` and `shard_limit`, and uses the store data path (`data_path` `r2`). A pool config file may serve several islands. An entry with `"kind": "miles"` is a Miles sampler island of the launch instead (see below). |
 | `fleet.trainer_argv` | The `yeto launch` arguments every trainer shares. It must name `--rl-checkpoint-store` (the run's `store`) and must not set `--gpu`, `--rl-sample-role`, `--rl-sampler-follow`, `--rl-buffer-shards`, `--rl-island-*` or `--rl-single-island-no-sync`: `run up` writes those. Required. |
 | `fleet.dispense` | `fleet` (default): one task ledger for the fleet, `<store>/fleet/dispense`, so no two islands train on the same prompt in an epoch. `island`: each island keeps its own ledger under `trainer<k>/`. |
+| `fleet.step_s` | Optional: the step time estimate (seconds) of every island without its own `trainer.step_s`. |
 
 What `run up` makes of it:
 
@@ -543,6 +545,23 @@ What `run up` makes of it:
   quantization tier read from each pool's spec), and the sync route. `run up`
   writes the same table to `<store>/fleet/plan.json` before it orders anything
   (a dry run writes nothing).
+- Release cost and cadence: the preflight estimates what a release costs each
+  island's pools in sampling: the release size (the parameter count of the
+  `--model` config, read locally, x 2 bytes), fetched at about 200 MB/s and
+  loaded at about 1 GB/s, plus the drain on an engine that drains: vLLM always
+  (up to min(`agentic.drain_timeout_s`, `reload_max_defer_s`) per release),
+  SGLang unless `engine.options.live_update` is on. With the island's
+  `step_s` it suggests `--rl-release-every` N = max(2, ceil(cost / step_s)) and
+  `--rl-max-policy-age` of at least N + 2, warning when the island releases more
+  often; without it, it reports the cost alone.
+- Release form: full parameters, and partial experts of the generic recipe,
+  release a whole HF safetensors checkpoint each time (no release manifest, no
+  expert overlay), which the pools reload whole; `--rl-release-delta-full-every`
+  applies. Only `--rl-model-recipe kimi_k31` releases the trained experts with a
+  manifest as an overlay of the engine's `base_dir`. A sampler spec that sets
+  `expert_selection_sha256` or `expert_trainable_sha256` refuses every release
+  without that manifest, so the preflight refuses such a spec next to a
+  generic partial-experts trainer (fleet or not): remove the two fields.
 
 #### Miles sampler islands next to external pools
 

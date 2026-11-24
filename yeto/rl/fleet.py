@@ -61,6 +61,11 @@ by asynchronous full-parameter rounds (``--rl-sync-preset decoupled`` routes the
 
 ``yeto run up`` writes :meth:`FleetPlan.to_json` to ``<store>/fleet/plan.json``.
 
+An island's step time (``islands[k].trainer.step_s``, else ``fleet.step_s``; optional,
+seconds of one local version) is an estimate the preflight's release cadence check
+reads (:func:`island_step_s`, :func:`yeto.rl.up_fleet.release_every_warnings`); the
+compile and the plan do not use it.
+
 Import-light: no torch, ray or miles.
 """
 
@@ -79,9 +84,9 @@ FLEET_DIR = "fleet"
 PLAN_OBJECT = f"{FLEET_DIR}/plan.json"  # the plan in the run store
 DISPENSE_DIR = f"{FLEET_DIR}/dispense"  # the fleet's task ledger root (store_dispense.FLEET_DISPENSE_DIR)
 DISPENSE_MODES = ("fleet", "island")
-FLEET_KEYS = frozenset({"trainer_argv", "dispense"})
+FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s"})
 ISLAND_KEYS = frozenset({"name", "trainer", "samplers"})
-ISLAND_TRAINER_KEYS = frozenset({"gpu", "usd_per_h", "argv"})
+ISLAND_TRAINER_KEYS = frozenset({"gpu", "usd_per_h", "argv", "step_s"})
 # the only trainer flags an island sets for itself (each becomes --rl-island-<flag> k:N)
 ISLAND_FLAGS = {"--rl-release-every": "release_every", "--rl-max-policy-age": "max_policy_age"}
 # flags the compile writes; fleet.trainer_argv must not set them
@@ -355,6 +360,7 @@ def _fleet_section(cfg: dict[str, Any]) -> tuple[list[str], str]:
         if flag == "--rl-single-island-no-sync":
             raise _err("fleet.trainer_argv: --rl-single-island-no-sync is a single buffer trainer; a fleet's "
                        "trainers merge through the syncer")
+    _step(section.get("step_s"), "fleet.step_s")
     dispense = section.get("dispense", "fleet")
     if dispense not in DISPENSE_MODES:
         raise _err(f"fleet.dispense must be one of {list(DISPENSE_MODES)} (got {dispense!r})")
@@ -382,6 +388,28 @@ def _price(value: Any, where: str) -> float | None:
                               or not math.isfinite(value) or value < 0):
         raise _err(f"{where} must be a number >= 0 (got {value!r})")
     return None if value is None else float(value)
+
+
+def _step(value: Any, where: str) -> float | None:
+    if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                              or not math.isfinite(value) or value <= 0):
+        raise _err(f"{where} must be a number of seconds > 0 (got {value!r})")
+    return None if value is None else float(value)
+
+
+def island_step_s(cfg: dict[str, Any]) -> dict[int, float]:
+    """Island index -> its step time estimate in seconds (``islands[k].trainer.step_s``,
+    else ``fleet.step_s``; module doc), for the islands that have one."""
+    section = cfg.get("fleet") if isinstance(cfg.get("fleet"), dict) else {}
+    shared = section.get("step_s")
+    out = {}
+    for k, island in enumerate(cfg.get("islands") or ()):
+        trainer = island.get("trainer") if isinstance(island, dict) else None
+        own = trainer.get("step_s") if isinstance(trainer, dict) else None
+        value = own if own is not None else shared
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+            out[k] = float(value)
+    return out
 
 
 def is_miles_entry(entry: Any) -> bool:
@@ -413,6 +441,7 @@ def _island_trainer(island: dict[str, Any], where: str) -> tuple[str, float | No
         raise _err(f"unknown {where}.trainer keys {sorted(unknown)} (known: {sorted(ISLAND_TRAINER_KEYS)})")
     gpu = _gpu(tr.get("gpu"), f"{where}.trainer.gpu")
     price = _price(tr.get("usd_per_h"), f"{where}.trainer.usd_per_h")
+    _step(tr.get("step_s"), f"{where}.trainer.step_s")
     flags = _flag_values(_string_list(tr.get("argv", []), f"{where}.trainer.argv"), f"{where}.trainer.argv")
     return gpu, price, flags
 
