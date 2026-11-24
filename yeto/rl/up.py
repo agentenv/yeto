@@ -241,7 +241,40 @@ def load_config(path: str) -> dict[str, Any]:
             parse_section(cfg["breakers"])
         except BreakerConfigError as error:
             raise ValueError(f"run config: {error}") from None
+        if not fleet:  # a fleet's compile passes its own (yeto.rl.fleet)
+            cfg = apply_trainer_breakers(cfg)
     return cfg
+
+
+TRAINER_SURFACES = ("trainer_flag", "trainer_env")  # the trainer layer's knobs in trainer.argv
+
+
+def apply_trainer_breakers(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``breakers.trainer.*`` written into ``trainer.argv``: the trainer reads its flags
+    (``--rl-sample-wait-s``, ``--rl-max-policy-age``) and its island env (``--island-env
+    K=V``), never the section, so without this the preflight showed the section's value
+    while the trainer ran its default. The write-back is the one ``yeto launch --breakers``
+    does (:func:`yeto.breakers.materialize`). A value ``trainer.argv`` already sets is left
+    as written; one that disagrees with the section is refused, as is a section value no
+    trainer knob carries. A config whose section sets no trainer entry (or only values
+    the argv already holds) is returned as it is, its argv unchanged byte for byte."""
+    section = cfg.get("breakers")
+    if not isinstance(section, dict) or not section.get("trainer"):
+        return cfg
+    from yeto import breakers  # noqa: PLC0415
+
+    trainer = cfg["trainer"]
+    sources = breakers.Sources.from_run_config(cfg, argv=list(trainer["argv"]), env=dict(cfg.get("env") or {}))
+    try:
+        resolved = breakers.resolve(sources, layers=("trainer",))
+        out = breakers.materialize(resolved, sources, surfaces=TRAINER_SURFACES)
+    except breakers.BreakerConfigError as error:
+        raise ValueError(f"run config: {error}") from None
+    if not out.changes:
+        return cfg
+    for change in out.changes:
+        _log(f"run config: breakers.trainer: {change}")
+    return {**cfg, "trainer": {**trainer, "argv": out.argv}}
 
 
 # Keys an earlier ``run up`` read and run configs still carry: ignored (with a log line), not
