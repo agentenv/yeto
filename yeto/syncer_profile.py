@@ -76,12 +76,7 @@ _EVAL_CHECKPOINTS_DOMAIN = b"yeto-syncer-eval-checkpoints-v1\0"
 # (byte-identical hash); true (syncer --carry-answers-round) appends its domain.
 _CARRY_ANSWERS_ROUND_FIELD = "carry_answers_round"
 _CARRY_ANSWERS_ROUND_DOMAIN = b"yeto-syncer-carry-answers-round-v1\0"
-# Optional, not hashed (the syncer keeps membership options out of its profile
-# hash): with --max-learners --quorum-follows-members the count quorum may be up
-# to max learners instead of the launched learners.
-_QUORUM_CAP_FIELD = "quorum_cap"
 _OPTIONAL_FIELDS = {
-    _QUORUM_CAP_FIELD,
     _CARRY_ANSWERS_ROUND_FIELD,
     _DELAYED_NESTEROV_FIELD,
     _EXPERT_TOKEN_WEIGHTS_FIELD,
@@ -185,7 +180,6 @@ class SyncerSemanticProfile:
     terminal_grace_ms: int = 0
     checkpoint_at_steps: tuple[int, ...] = ()
     carry_answers_round: bool = False
-    quorum_cap: int | None = None
 
     @classmethod
     def from_mapping(cls, raw: object) -> SyncerSemanticProfile:
@@ -280,19 +274,13 @@ class SyncerSemanticProfile:
             carry_answers_round=_boolean(
                 _CARRY_ANSWERS_ROUND_FIELD, raw.get(_CARRY_ANSWERS_ROUND_FIELD, False)
             ),
-            quorum_cap=_optional_integer(
-                _QUORUM_CAP_FIELD, raw.get(_QUORUM_CAP_FIELD), bits=32, minimum=1
-            ),
         )
         profile._validate_general()
         return profile
 
     def _validate_general(self) -> None:
-        if self.quorum_cap is not None and self.quorum_cap < self.learners:
-            raise ValueError("syncer profile quorum_cap is below learners")
-        if self.quorum > (self.learners if self.quorum_cap is None else self.quorum_cap):
-            raise ValueError("syncer profile quorum exceeds learners"
-                             + ("" if self.quorum_cap is None else " and quorum_cap"))
+        if self.quorum > self.learners:
+            raise ValueError("syncer profile quorum exceeds learners")
         if not 0.0 <= self.grace_gamma < 1.0 or self.grace_tau < 0.0:
             raise ValueError("syncer profile adaptive grace values are invalid")
         if not 0.0 <= self.grace_arrival_quantile <= 1.0:

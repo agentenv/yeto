@@ -688,14 +688,8 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
                          "(it takes the generic syncer flags)")
     quorum = args.rl_sync_quorum
     if quorum is not None:
-        # --rl-sync-max-learners: the syncer's count quorum follows the islands in the
-        # pool (min(K, islands)), so K may be up to that hard cap
-        max_learners = getattr(args, "rl_sync_max_learners", None)
-        cap = num_islands if max_learners is None else max(num_islands, int(max_learners))
-        if not 1 <= quorum <= cap:
-            raise ValueError(f"--rl-sync-quorum must be between 1 and the {num_islands} islands"
-                             if max_learners is None else
-                             f"--rl-sync-quorum must be between 1 and --rl-sync-max-learners {cap}")
+        if not 1 <= quorum <= num_islands:
+            raise ValueError(f"--rl-sync-quorum must be between 1 and the {num_islands} islands")
         args.quorum = quorum
     grace_ms = args.rl_sync_grace_ms
     if grace_ms is not None:
@@ -835,6 +829,11 @@ def _check_island_pool(args, *, num_islands: int) -> None:
         # contract (--sync-max-learners), so a later island joins the same session
         if int(max_learners) < num_islands:
             raise ValueError(f"--rl-sync-max-learners must be at least the {num_islands} islands")
+        if getattr(args, "rl_sync_quorum_theta", None) is None:
+            print(f"[launcher] note: --rl-sync-quorum {args.quorum} counts islands and stays fixed while "
+                  "islands join and leave the pool; --rl-sync-quorum-theta F follows the islands in "
+                  "the pool (F of the islands a round expects, at most --rl-sync-max-learners; 1.0: "
+                  "every one of them)", file=sys.stderr)
     if getattr(args, "rl_sync_quorum_theta", None) is not None:
         if getattr(args, "rl_sync_quorum", None) is not None:
             raise ValueError("--rl-sync-quorum-theta replaces --rl-sync-quorum; give one of them")

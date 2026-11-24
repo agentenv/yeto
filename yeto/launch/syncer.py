@@ -344,9 +344,6 @@ def rl_syncer_profile(args, num_learners: int):
         **({"terminal_grace_ms": _terminal_grace_ms(args)} if _terminal_grace_ms(args) else {}),
         **({"checkpoint_at_steps": list(_syncer_checkpoint_at_steps(args))}
            if _syncer_checkpoint_at_steps(args) else {}),
-        # --quorum-follows-members (not hashed): K may be up to --max-learners
-        **({"quorum_cap": int(args.rl_sync_max_learners)}
-           if getattr(args, "rl_sync_max_learners", None) is not None else {}),
         "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
         "learners": num_learners,
         "quorum": args.quorum,
@@ -567,8 +564,7 @@ def _syncer_island_pool(args) -> str:
         flags += f" --soft-deadline-s {int(soft)}"
     flags += f" --island-lease-s {island_lease_s(args)!r}"
     if max_learners is not None:
-        # islands may join past the launch: the count quorum follows the pool, capped by N
-        flags += f" --max-learners {int(max_learners)} --quorum-follows-members"
+        flags += f" --max-learners {int(max_learners)}"
     flags += f" --syncer-epoch {island_syncer_epoch(args)}"
     grace = _final_grace_s(args)
     if grace is not None:

@@ -290,7 +290,7 @@ _NON_RL_LITERALS = frozenset({
     "--output-dir",
     "--password-stdin", "--policy-sweep-fragments", "--porcelain", "--port", "--profile",
     "--prompt", "--q-min",
-    "--query-gpu", "--quiet", "--quorum-follows-members", "--quorum-theta", "--quorum-timeout-s", "--raid-devices",
+    "--query-gpu", "--quiet", "--quorum-theta", "--quorum-timeout-s", "--raid-devices",
     "--recovery-bound-steps", "--recovery-donor-timeout-s", "--recovery-max-donor-tries",
     "--relaxed-identity", "--release", "--require-profile-binding", "--resume", "--rl-eval", "--rl-test", "--rm", "--run",
     "--runtime", "--seed-column", "--shm-size", "--soft-deadline-s", "--stale-lag-ceiling", "--stale-lag-half-life",

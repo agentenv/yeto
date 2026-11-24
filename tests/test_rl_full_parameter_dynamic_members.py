@@ -18,6 +18,7 @@ training in the pool as before.
 from __future__ import annotations
 
 import json
+import time
 
 import numpy as np
 import pytest
@@ -39,12 +40,11 @@ from test_rl_full_parameter_async import (  # noqa: F401
 
 LAUNCHED = 2
 MAX_LEARNERS = 3
-# A count quorum of 3, above the 2 launched islands: with --rl-sync-max-learners the
-# syncer's quorum follows the islands in the pool (min(K, islands), K capped by
-# max learners), so every round waits for every island there: 2, then 3 after
-# the join, then 2 after the leave. A base lag of 1 is admitted (pipelined
-# rounds); the soft deadline only bounds a hang of a broken run.
-POOL = ("--rl-sync-quorum", "3", "--rl-sync-max-base-lag", "1", "--rl-sync-island-lease-s", "5",
+# The capacity quorum θ = 1.0 follows the islands in the pool: a round needs every
+# island it expects (2, then 3 after the join, then 2 after the leave), at most
+# --rl-sync-max-learners of them. A base lag of 1 is admitted (pipelined rounds);
+# the soft deadline only bounds a hang of a broken run.
+POOL = ("--rl-sync-quorum-theta", "1.0", "--rl-sync-max-base-lag", "1", "--rl-sync-island-lease-s", "5",
         "--rl-sync-soft-deadline-s", "30", "--rl-sync-max-learners", str(MAX_LEARNERS))
 LR, MU = 0.7, 0.9  # the launcher's outer Nesterov step of the async rounds
 
@@ -181,8 +181,8 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
                                                       total_steps=total_steps, log_file=log_file)
     tape_path = tmp_path / "tape.jsonl"
     command = " ".join(process.args)
-    assert f"--learners {LAUNCHED} " in command and "--quorum 3 " in command
-    assert f"--max-learners {MAX_LEARNERS} --quorum-follows-members " in command
+    assert f"--learners {LAUNCHED} " in command and "--quorum-theta 1.0 " in command
+    assert f"--max-learners {MAX_LEARNERS} " in command
     clients = {learner: _client(learner, port, profile_hash) for learner in range(LAUNCHED)}
     versions = {learner: [0] * P for learner in range(MAX_LEARNERS)}
     seen: dict[int, set] = {learner: set() for learner in range(MAX_LEARNERS)}
@@ -308,8 +308,8 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
     assert any({int(e[0]) for e in r["raw_weights"]} == {0, 2} for r in after)
     for record in steps:
         assert abs(sum(float(e[2]) for e in record["weights"]) - 1.0) < 1e-9
-        assert not record["timed_out"]  # quorum min(3, islands) was reached every round
-    assert all(r["arrived"] == 2 for r in steps[:join_at])  # K=3 over the two launched islands
+        assert not record["timed_out"]  # every island of the pool answered every round
+    assert all(r["arrived"] == 2 for r in steps[:join_at])  # θ = 1 over the two launched islands
     assert any(r["arrived"] == 3 for r in steps)  # all three while island 2 and 1 overlap
 
     # One global cut, equal to the recomputation of every merged round.
@@ -319,6 +319,65 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
         assert np.array_equal(finals[0][fid], finals[2][fid])
         np.testing.assert_allclose(finals[0][fid], expected[fid], rtol=0, atol=1e-6)
     assert "learner id" not in log_file.read_text()  # no id was refused
+
+
+@needs_cargo
+@pytest.mark.usefixtures("_hmac_key")
+def test_an_island_that_leaves_releases_its_open_round_at_once(syncer_binary, tmp_path):
+    """Island 1 holds a PULL it will never answer, sends LEAVE and closes: the
+    round closes on island 0 at once, not at the lease expiry (30 s here) or the
+    soft deadline (60 s)."""
+    pool = ("--rl-sync-quorum-theta", "1.0", "--rl-sync-max-base-lag", "1",
+            "--rl-sync-island-lease-s", "30", "--rl-sync-soft-deadline-s", "60")
+    process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *pool, total_steps=4,
+                                                      log_file=tmp_path / "syncer.log")
+    clients = {learner: _client(learner, port, profile_hash) for learner in range(LAUNCHED)}
+    versions = [0] * P
+    seen: dict[int, set] = {0: set(), 1: set()}
+    held: dict = {}
+
+    def poll():
+        for learner, client in list(clients.items()):
+            client.check_health()
+            for update in client.drain_updates():
+                if learner == 0:
+                    versions[update.fragment_id] = max(versions[update.fragment_id], update.version)
+            for permit in client.drain_pulls():
+                if (permit.global_step, permit.round_attempt) in seen[learner]:
+                    continue
+                seen[learner].add((permit.global_step, permit.round_attempt))
+                if learner == 1 and permit.global_step >= 3:
+                    held["step"] = permit.global_step  # answered never: island 1 leaves instead
+                    client.send_leave(2)
+                    clients.pop(1).close()
+                    break
+                client.push_fragment(permit.fragment_id, permit.global_step, permit.round_attempt,
+                                     versions[permit.fragment_id], permit.global_step, 1, 7,
+                                     _f32(_delta(learner, permit.global_step)))
+        return 1 not in clients and clients[0].finalizing.is_set()
+
+    try:
+        for client in clients.values():
+            client.start()
+        for fid in range(P):
+            clients[0].send_init(fid, _f32(_initial(fid)))
+        started = time.monotonic()
+        _wait(poll, "syncer never finalized", timeout=50)
+        assert time.monotonic() - started < 25  # no round waited for the lease (30 s)
+        manifest, _ = clients[0].wait_for_final_fragments(timeout=30)
+        clients[0].acknowledge_finalization(manifest)
+        assert process.wait(timeout=15) == 0
+    finally:
+        for client in clients.values():
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=10)
+    steps = {r["step"]: r for r in _outer_steps((tmp_path / "tape.jsonl").read_text())}
+    left = steps[held["step"]]
+    assert [int(e[0]) for e in left["raw_weights"]] == [0] and not left["timed_out"]
+    assert left["step_seconds"] < 10
+    assert '"reason":"stopped"' in (tmp_path / "tape.jsonl").read_text()
 
 
 @needs_cargo
@@ -392,24 +451,3 @@ def test_learner_ids_refuse_a_store_without_an_exclusive_create(tmp_path):
         allocate_learner_id(objects, launched=2, max_learners=4, island="a")
     with pytest.raises(ValueError, match="launched"):
         allocate_learner_id(DirectoryObjectStore(tmp_path / "s2"), launched=5, max_learners=4, island="a")
-
-
-def test_the_profile_quorum_cap_lifts_the_learner_bound_without_changing_the_hash():
-    from test_rl_full_parameter_async import _plan
-
-    from yeto import launcher
-    from yeto.syncer_profile import SYNCER_SEMANTIC_PROFILE_SCHEMA, SyncerSemanticProfile
-
-    args, _ = _plan(("--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
-                     "--rl-rollout-gpus", "1", "--rl-parameter-layout-sha256", "e" * 64, "--fragments", "2",
-                     "--rl-sync-full-parameter-rounds", "async", *POOL))
-    profile = launcher.rl_syncer_profile(args, LAUNCHED)
-    assert (profile.learners, profile.quorum, profile.quorum_cap) == (2, 3, 3)
-    mapping = {**profile.__dict__, "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
-               "checkpoint_at_steps": list(profile.checkpoint_at_steps)}
-    plain = {k: v for k, v in mapping.items() if k != "quorum_cap"}
-    with pytest.raises(ValueError, match="quorum exceeds learners"):
-        SyncerSemanticProfile.from_mapping(plain)
-    same = SyncerSemanticProfile.from_mapping({**plain, "quorum": 2})
-    capped = SyncerSemanticProfile.from_mapping({**plain, "quorum": 2, "quorum_cap": 3})
-    assert same.sha256 == capped.sha256  # the syncer keeps membership options out of its hash
