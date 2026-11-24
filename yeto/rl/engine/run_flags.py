@@ -1142,6 +1142,11 @@ _SCHEDULING = (
                 help="the dispenser this sampler island claims its rows from (set by the "
                 "launcher for a synced group's samplers: the actor syncer; a sampler launch "
                 "that joins a running group gives the group's actor syncer address)"),
+    # a sampler island claims its rows from a store ledger (an island fleet's, shared with its pools)
+    shared_flag("--rl-store-dispense", default=None, metavar="JSON",
+                help="with --rl-island-dispense-store: the store ledger settings of the external pools "
+                "the sampler islands share it with (their prompts.dispense, backend store: namespace, "
+                "seed, passes, lease_s, max_redo, ...); --data must be the pools' prompt file"),
     shared_flag("--rl-data-slot", default=None, metavar="I/N",
                 help="this training island reads only the rows i of --data with i %% N == I "
                 "(set by the launcher from --rl-data-split; not a launch option)"),

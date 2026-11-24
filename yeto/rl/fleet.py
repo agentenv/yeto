@@ -64,6 +64,20 @@ An island needs one sampler of either kind; one without pools gets no
 ``--rl-island-buffer-shards`` entry. A Miles sampler's ``usd_per_h`` counts to its
 island (the island's ``usd_per_h`` in the plan and the launch's).
 
+The task ledger of Miles samplers (:func:`miles_ledger`). When the pools claim from
+a store ledger, every Miles sampler claims its rows from the same ledger instead of
+a data slot of ``--data``: with ``dispense: fleet`` the fleet's ``<store>/fleet/dispense``,
+with ``dispense: island`` its island's ``<store>/trainer<k>``, under its shard name
+``island<K + j>`` (unique in the fleet), so a prompt is given out once per pass whichever
+sampler of either kind takes it. The compile adds ``--rl-island-dispense-store
+<K + j>:<ledger store>`` per Miles sampler and ``--rl-store-dispense <the pools'
+prompts.dispense>`` once; the plan records each Miles sampler's ``dispense_store`` and
+``dispense_namespace``. The ledger pins its prompt file (rows and SHA-256), so
+``fleet.trainer_argv`` ``--data`` must be the pools' prompt file (a local JSONL, equal
+to each pool's ``prompts_file`` where one is set) and the pools must share one setting;
+the compile refuses anything else (a Miles sampler on its own slot would give out the
+pools' prompts a second time).
+
 Supported training forms: full parameters or partial experts on Miles, synchronized
 by asynchronous full-parameter rounds (``--rl-sync-preset decoupled`` routes there);
 :func:`form_problem` refuses the rest (LoRA, verl) in the preflight.
@@ -81,6 +95,7 @@ Import-light: no torch, ray or miles.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import math
 import re
@@ -159,6 +174,9 @@ class FleetMilesSampler:
     usd_per_h: float | None
     launch_island: int  # its index in the launch's --gpu (after every trainer)
     engine: str = MILES_ENGINE
+    # the store of the task ledger it claims from with the pools (module doc), None: its data slot
+    dispense_store: str | None = None
+    dispense_namespace: str | None = None
 
     @property
     def shard(self) -> str:
@@ -168,7 +186,8 @@ class FleetMilesSampler:
     def to_json(self) -> dict[str, Any]:
         return {"name": self.name, "source_name": self.source_name, "source": SOURCE_MILES, "gpu": self.gpu,
                 "usd_per_h": self.usd_per_h, "launch_island": self.launch_island, "shard": self.shard,
-                "engine": self.engine}
+                "engine": self.engine, "dispense_store": self.dispense_store,
+                "dispense_namespace": self.dispense_namespace}
 
 
 @dataclass(frozen=True)
@@ -254,8 +273,10 @@ class FleetPlan:
                        f"pools {', '.join(p.name for p in i.pools) or '-'}{miles}")
             for m in i.miles_samplers:
                 cost = "?" if m.usd_per_h is None else f"${m.usd_per_h:g}/h"
+                rows = (f"rows from the task ledger {substore_uri(m.dispense_store, m.dispense_namespace or '')}"
+                        if m.dispense_store else "rows from its data slot of --data")
                 out.append(f"fleet:   Miles sampler {m.name} (from {m.source_name}): launch island {m.launch_island}, "
-                           f"{m.gpu} at {cost}, {m.engine}, shard {m.shard}, follows learner {i.learner}")
+                           f"{m.gpu} at {cost}, {m.engine}, shard {m.shard}, follows learner {i.learner}, {rows}")
             for p in i.pools:
                 out.append(f"fleet:   pool {p.name} (from {p.source_name}): {p.provider}"
                            f"{', ' + p.engine if p.engine else ''}"
@@ -278,7 +299,9 @@ class FleetPlan:
                         miles_samplers=tuple(FleetMilesSampler(name=str(m["name"]), source_name=str(m["source_name"]),
                                                                gpu=str(m["gpu"]), usd_per_h=m.get("usd_per_h"),
                                                                launch_island=int(m["launch_island"]),
-                                                               engine=str(m.get("engine") or MILES_ENGINE))
+                                                               engine=str(m.get("engine") or MILES_ENGINE),
+                                                               dispense_store=m.get("dispense_store"),
+                                                               dispense_namespace=m.get("dispense_namespace"))
                                              for m in i.get("miles_samplers") or ()),
                         # a plan written before Miles samplers: the island's price is its trainer's
                         trainer_usd_per_h=i.get("trainer_usd_per_h", i.get("usd_per_h")))
@@ -524,9 +547,10 @@ def has_sandbox_gate(doc: dict[str, Any]) -> bool:
 
 
 def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | None,
-          sandbox_store: str | None = None) -> tuple[dict[str, Any], FleetPool, tuple[str, ...] | None]:
-    """The compiled pool entry of pool j of island k, its plan row and the port range it
-    shares (:func:`port_share_key`)."""
+          sandbox_store: str | None = None
+          ) -> tuple[dict[str, Any], FleetPool, tuple[str, ...] | None, dict[str, Any]]:
+    """The compiled pool entry of pool j of island k, its plan row, the port range it
+    shares (:func:`port_share_key`) and its compiled pool config."""
     from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
     from yeto.launch.nc.provider import provider_kind  # noqa: PLC0415
     from yeto.launch.rollout import pools  # noqa: PLC0415
@@ -589,7 +613,57 @@ def _pool(entry: Any, k: int, j: int, island_where: str, dispense_store: str | N
                     shard_limit=int(limit), run_prefix=prefix, engine=engine, rollout_quant=quant,
                     target=target if isinstance(target, int) and not isinstance(target, bool) else None,
                     usd_per_h=price)
-    return out, row, port_share_key(spec)
+    return out, row, port_share_key(spec), compiled
+
+
+def _file_sha256(path: str) -> str:
+    import hashlib  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    return hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
+
+
+def miles_ledger(trainer_argv: list[str], pools: list[tuple[str, dict[str, Any]]]
+                 ) -> dict[str, Any] | None:
+    """The store dispenser settings the fleet's Miles samplers share with its pools
+    (module doc): the pools' ``prompts.dispense`` (``nc_cli.pool_dispense``), None when
+    no pool claims from a store ledger (every sampler keeps its data slot). ``pools``:
+    ``(compiled name, compiled pool config)``. Raises ValueError (``run config: ...``)
+    when the Miles samplers cannot join the ledger: pools with different settings, a
+    hold-out file (a path on the pools' nodes), or a ``--data`` that is not the pools'
+    prompt file (the ledger's plan pins the file's rows and SHA-256)."""
+    from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
+
+    found = [(name, nc_cli.pool_dispense(doc), doc) for name, doc in pools]
+    found = [(name, dispense, doc) for name, dispense, doc in found if dispense is not None]
+    if not found:
+        return None
+    settings = {json.dumps({k: v for k, v in d.items() if k != "store"}, sort_keys=True) for _n, d, _doc in found}
+    if len(settings) > 1:
+        raise _err(f"pools {[n for n, _d, _doc in found]} claim from store ledgers with different settings "
+                   f"({sorted(settings)}): the fleet's Miles samplers share one ledger setting with the pools; give "
+                   "every pool the same prompts.dispense")
+    config = {k: v for k, v in found[0][1].items() if k != "store"}
+    config.setdefault("backend", "store")
+    if config.get("holdout"):
+        raise _err("a fleet with Miles samplers: the pools' prompts.dispense.holdout is a file on the pools' nodes, "
+                   "which a Miles sampler cannot read; give the hold-out ids inline (holdout_ids)")
+    data = _argv_value(trainer_argv, "--data")
+    why = ("the fleet's Miles samplers claim their rows from the store ledger the pools claim from, and the "
+           "ledger pins the rows and SHA-256 of the pools' prompt file: fleet.trainer_argv --data must be that "
+           "file (a local JSONL with the same bytes as each pool's prompts_file)")
+    from pathlib import Path  # noqa: PLC0415
+
+    if not data or not Path(data).expanduser().is_file():
+        raise _err(f"fleet.trainer_argv --data {data!r} is not a local prompt file: {why}. Without it a Miles sampler "
+                   "and the pools would give out the same prompt in one epoch")
+    digest = _file_sha256(data)
+    for name, _dispense, doc in found:
+        local = doc.get("prompts_file")
+        if local and Path(str(local)).expanduser().is_file() and _file_sha256(str(local)) != digest:
+            raise _err(f"pool {name}: prompts_file {local} is not the file fleet.trainer_argv --data {data} names "
+                       f"(SHA-256 differs): {why}")
+    return config
 
 
 def training_form(trainer_argv: list[str]) -> dict[str, Any]:
@@ -681,6 +755,7 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     rows: list[FleetIsland] = []
     samplers: list[dict[str, Any]] = []
     shared: list[tuple[str, tuple[str, ...] | None, int]] = []
+    pool_docs: list[tuple[str, dict[str, Any]]] = []
     names: set[str] = set()
     # Miles samplers come after every trainer in the launch: count the trainers first
     launch_island = len(islands)
@@ -712,10 +787,11 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
                                                usd_per_h=sampler_price, launch_island=launch_island))
                 launch_island += 1
                 continue
-            out, row, ports = _pool(entry, k, j, where, dispense_store, store)
+            out, row, ports, doc = _pool(entry, k, j, where, dispense_store, store)
             samplers.append(out)
             pools.append(row)
             shared.append((row.name, ports, row.shard_limit))
+            pool_docs.append((row.name, doc))
         seen = [p.name for p in pools] + [m.name for m in miles]
         if len(set(seen)) != len(seen):
             raise _err(f"{where}: pool names repeat {seen} (Miles samplers included); set 'name' on each")
@@ -732,6 +808,14 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     if not samplers:
         raise _err("an island fleet needs at least one external pool: `yeto run up` drives the pools (a fleet of "
                    "Miles samplers only is a `yeto launch` synced group with --rl-sampler-follow trainer)")
+    ledger = miles_ledger(trainer_argv, pool_docs) if any(i.miles_samplers for i in rows) else None
+    if ledger is not None:  # every Miles sampler claims from its island's pools' ledger
+        from yeto.rl.engine.store_dispense import DEFAULT_NAMESPACE  # noqa: PLC0415
+
+        namespace = str(ledger.get("namespace") or DEFAULT_NAMESPACE)
+        rows = [dataclasses.replace(i, miles_samplers=tuple(
+            dataclasses.replace(m, dispense_store=dispense_store or i.store, dispense_namespace=namespace)
+            for m in i.miles_samplers)) for i in rows]
     miles_rows = [(i, m) for i in rows for m in i.miles_samplers]
     argv = [*trainer_argv, "--gpu", ",".join([i.gpu for i in rows] + [m.gpu for _i, m in miles_rows]),
             "--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer"]
@@ -741,6 +825,10 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     for i, m in miles_rows:  # each Miles sampler island follows its own island's trainer
         argv += ["--rl-island-sample-role", f"{m.launch_island}:sampler",
                  "--rl-island-sampler-follows", f"{m.launch_island}:{i.learner}"]
+        if m.dispense_store:
+            argv += ["--rl-island-dispense-store", f"{m.launch_island}:{m.dispense_store}"]
+    if ledger is not None:
+        argv += ["--rl-store-dispense", json.dumps(ledger, sort_keys=True, separators=(",", ":"))]
     for i in rows:
         if i.release_every is not None:
             argv += ["--rl-island-release-every", f"{i.index}:{i.release_every}"]

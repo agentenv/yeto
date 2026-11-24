@@ -31,9 +31,33 @@ def _island_env(monkeypatch):
     monkeypatch.setenv("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test-secret")
 
 
+LEDGER = f"{STORE}/fleet/dispense"
+STORE_DISPENSE = '{"backend":"store","namespace":"task-dispense"}'
+
+
+def _prompts(tmp_path):
+    """The pools' prompt file, which a Miles sampler on their ledger reads as --data."""
+    path = tmp_path / "prompts.jsonl"
+    path.write_text("".join(json.dumps({"q": f"question {n}", "a": str(n)}) + "\n" for n in range(6)))
+    return str(path)
+
+
+def _with_data(cfg, tmp_path):
+    """fleet.trainer_argv --data: the pools' prompt file (a Miles sampler shares their ledger)."""
+    argv = cfg["fleet"]["trainer_argv"]
+    argv[argv.index("--data") + 1] = _prompts(tmp_path)
+    return cfg
+
+
+def _argv(tmp_path):
+    argv = list(TRAINER_ARGV)
+    argv[argv.index("--data") + 1] = str(tmp_path / "prompts.jsonl")
+    return argv
+
+
 def _mixed(tmp_path):
     """Island 0 (east): vLLM + SGLang pools; island 1 (west): a Miles sampler and an SGLang pool."""
-    cfg = _cfg(tmp_path)
+    cfg = _with_data(_cfg(tmp_path), tmp_path)
     cfg["islands"][1]["samplers"].insert(0, dict(MILES))
     return cfg
 
@@ -50,11 +74,13 @@ def _launchable(cfg):
 def test_the_compiled_argv_binds_the_miles_sampler_to_its_islands_trainer(files):
     cfg = up.load_config(_write(files, _mixed(files)))
     assert cfg["trainer"] == {"usd_per_h": 17.5, "argv": [
-        *TRAINER_ARGV, "--gpu", "modal:1x2xh100,modal:1x2xh100@us-east,modal:1x1xl40s",
+        *_argv(files), "--gpu", "modal:1x2xh100,modal:1x2xh100@us-east,modal:1x1xl40s",
         "--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer",
         "--rl-island-buffer-shards", "0:vl-i0-0,vl-i0-1,vl-i0-2,sg-i0-0,sg-i0-1",
         "--rl-island-buffer-shards", "1:sg-i1-0,sg-i1-1",
         "--rl-island-sample-role", "2:sampler", "--rl-island-sampler-follows", "2:1",
+        # the Miles sampler claims from the fleet's ledger, as the pools do (their settings)
+        "--rl-island-dispense-store", f"2:{LEDGER}", "--rl-store-dispense", STORE_DISPENSE,
         "--rl-island-release-every", "0:2",
         "--rl-island-release-every", "1:1", "--rl-island-max-policy-age", "1:3"]}
     # the Miles sampler is no pool: run up drives the three external pools only
@@ -72,7 +98,8 @@ def test_the_plan_marks_each_samplers_source(files):
     w = doc["islands"][1]
     assert w["miles_samplers"] == [{"name": "i1-miles", "source_name": "miles", "source": "miles",
                                     "gpu": "modal:1x1xl40s", "usd_per_h": 1.5, "launch_island": 2,
-                                    "shard": "island2", "engine": "sglang"}]
+                                    "shard": "island2", "engine": "sglang", "dispense_store": LEDGER,
+                                    "dispense_namespace": "task-dispense"}]
     assert [p["source"] for i in doc["islands"] for p in i["pools"]] == ["external"] * 3
     assert doc["islands"][0]["miles_samplers"] == []
     # the Miles sampler's price counts to its island; the trainer's own price stays readable
@@ -82,7 +109,7 @@ def test_the_plan_marks_each_samplers_source(files):
     lines = plan.lines()
     assert any("pools i1-sglang, Miles samplers i1-miles" in line for line in lines)
     assert ("fleet:   Miles sampler i1-miles (from miles): launch island 2, modal:1x1xl40s at $1.5/h, sglang, "
-            "shard island2, follows learner 1") in lines
+            f"shard island2, follows learner 1, rows from the task ledger {LEDGER}/task-dispense") in lines
 
 
 def test_a_plan_written_before_miles_samplers_still_reads():
@@ -107,15 +134,87 @@ def test_a_pure_pool_fleet_compiles_as_before(files):
 
 
 def test_an_island_with_miles_samplers_only_names_no_pool_shard(files):
-    cfg = _cfg(files)
+    cfg = _with_data(_cfg(files), files)
     cfg["islands"][1]["samplers"] = [dict(MILES), dict(MILES, name="miles-b", usd_per_h=None)]
     compiled = up.load_config(_write(files, cfg))
     argv = compiled["trainer"]["argv"]
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--rl-island-buffer-shards"] == [
         "0:vl-i0-0,vl-i0-1,vl-i0-2,sg-i0-0,sg-i0-1"]
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--rl-island-sampler-follows"] == ["2:1", "3:1"]
+    # both claim from the fleet's ledger, with island 0's pools
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--rl-island-dispense-store"] == [
+        f"2:{LEDGER}", f"3:{LEDGER}"]
     west = fleet.plan_of(compiled).islands[1]
     assert west.buffer_shards() == ["island2", "island3"] and west.usd_per_h == 9.5
+
+
+# -- the task ledger -------------------------------------------------------------------------
+
+def _flag_values(argv, flag):
+    return [argv[i + 1] for i, a in enumerate(argv) if a == flag]
+
+
+def test_dispense_island_points_each_miles_sampler_at_its_islands_ledger(files):
+    cfg = _mixed(files)
+    cfg["fleet"]["dispense"] = "island"
+    compiled = up.load_config(_write(files, cfg))
+    argv = compiled["trainer"]["argv"]
+    assert _flag_values(argv, "--rl-island-dispense-store") == [f"2:{STORE}/trainer1"]
+    assert _flag_values(argv, "--rl-store-dispense") == [STORE_DISPENSE]
+    (miles,) = fleet.plan_of(compiled).islands[1].miles_samplers
+    assert (miles.dispense_store, miles.dispense_namespace) == (f"{STORE}/trainer1", "task-dispense")
+
+
+def test_pools_without_a_store_ledger_leave_the_miles_sampler_on_its_slot(files):
+    """No pool claims from a store ledger: there is no ledger to share, the Miles sampler
+    keeps its data slot of --data (and --data may be any dataset)."""
+    spec = json.loads((files / "vllm.json").read_text())
+    spec["prompts"].pop("dispense")
+    for name in ("vllm.json", "sglang.json"):
+        (files / name).write_text(json.dumps(dict(json.loads((files / name).read_text()), prompts=spec["prompts"])))
+    cfg = _cfg(files)
+    cfg["islands"][1]["samplers"].insert(0, dict(MILES))
+    compiled = up.load_config(_write(files, cfg))
+    assert "--rl-island-dispense-store" not in compiled["trainer"]["argv"]
+    assert "--rl-store-dispense" not in compiled["trainer"]["argv"]
+    assert fleet.plan_of(compiled).islands[1].miles_samplers[0].dispense_store is None
+
+
+def test_a_miles_sampler_on_a_ledger_needs_the_pools_prompt_file_as_data(files):
+    cfg = _cfg(files)  # --data openai/gsm8k: a Hub dataset, not the pools' prompt file
+    cfg["islands"][1]["samplers"].insert(0, dict(MILES))
+    with pytest.raises(ValueError, match="--data 'openai/gsm8k' is not a local prompt file"):
+        up.load_config(_write(files, cfg))
+
+
+def test_a_pool_prompts_file_other_than_data_is_refused(files):
+    cfg = _mixed(files)
+    other = files / "other.jsonl"
+    other.write_text('{"q": "x", "a": "1"}\n')
+    cfg["islands"][1]["samplers"][1]["prompts_file"] = str(other)
+    with pytest.raises(ValueError, match="prompts_file .* is not the file fleet.trainer_argv --data"):
+        up.load_config(_write(files, cfg))
+    cfg["islands"][1]["samplers"][1]["prompts_file"] = str(files / "prompts.jsonl")  # the same file: fine
+    assert "--rl-store-dispense" in up.load_config(_write(files, cfg))["trainer"]["argv"]
+
+
+def test_pools_with_different_ledger_settings_are_refused(files):
+    cfg = _mixed(files)
+    cfg["islands"][1]["samplers"][1]["sampler"] = {"dispense": {"backend": "store", "namespace": "task-dispense",
+                                                                "passes": 2}}
+    with pytest.raises(ValueError, match="different settings"):
+        up.load_config(_write(files, cfg))
+
+
+def test_a_hold_out_file_of_the_pools_is_refused(files):
+    cfg = _mixed(files)
+    for island in cfg["islands"]:
+        for entry in island["samplers"]:
+            if "kind" not in entry:
+                entry["sampler"] = {"dispense": {"backend": "store", "namespace": "task-dispense",
+                                                 "holdout": "/pool/node/holdout.txt"}}
+    with pytest.raises(ValueError, match="holdout_ids"):
+        up.load_config(_write(files, cfg))
 
 
 def test_the_breaker_budget_counts_the_miles_sampler_to_its_island(files):
@@ -203,6 +302,12 @@ def _check_launch(cfg):
             assert request["sample_substore"] == island.substore and request["sampler_until_trainers_end"] == 1
             assert str(sampler.rl_resume_store).endswith(f"/{island.substore}")
             assert sampler.rl_sampler_node == miles.shard
+            if miles.dispense_store:  # its rows from the pools' ledger, not a data slot
+                assert request["dispense_store"] == miles.dispense_store
+                # by its URI: the island's store hook reaches no path outside trainer<k>
+                assert sampler.rl_dispense_store == miles.dispense_store
+                assert json.loads(sampler.rl_store_dispense) == json.loads(STORE_DISPENSE)
+                assert not sampler.rl_sampler_data_slot and not sampler.rl_data_dispense
     return plan, parsed
 
 
@@ -212,7 +317,7 @@ def test_the_launcher_plan_of_a_mixed_fleet(files):
 
 def test_one_island_of_a_trainer_a_miles_sampler_and_a_pool(files):
     """The fleet island of the change: trainer + one Miles sampler + one external pool."""
-    cfg = _cfg(files)
+    cfg = _with_data(_cfg(files), files)
     cfg["islands"] = [{"name": "solo", "trainer": {"gpu": "modal:1x2xh100", "usd_per_h": 8.0},
                        "samplers": [dict(MILES), _modal_vllm(files)]}]
     plan, parsed = _check_launch(up.load_config(_write(files, _launchable(cfg))))
@@ -230,7 +335,8 @@ def _example(tmp_path):
                                ("<sampler-spec.vllm.json>", str(tmp_path / "vllm.json")),
                                ("<sampler-spec.sglang.json>", str(tmp_path / "sglang.json")),
                                ("<sampler-image>", "registry/sampler@sha256:" + "0" * 64),
-                               ("<modal-secret>", "store-secret"), ("<volume>", "weights")):
+                               ("<modal-secret>", "store-secret"), ("<volume>", "weights"),
+                               ("<prompts.jsonl>", _prompts(tmp_path))):
         text = text.replace(placeholder, value)
     assert "<" not in text, "an unfilled placeholder in the example"
     (tmp_path / "store.env").write_text("R2_BUCKET=b\n")
@@ -238,7 +344,8 @@ def _example(tmp_path):
         (tmp_path / f"{name}.json").write_text(json.dumps({
             "sampler_id": "x", "engine": {"adapter": adapter}, "sampling": {"n": 8},
             "store": "/tmp/stage/b/runs/__RUN_PREFIX__",
-            "prompts": {"path": "p.jsonl", "input_key": "q", "groups_per_round": 1}}))
+            "prompts": {"path": "/work/prompts.jsonl", "input_key": "q", "label_key": "a",
+                        "groups_per_round": 1}}))
     path = tmp_path / "run.json"
     path.write_text(text)
     return str(path)

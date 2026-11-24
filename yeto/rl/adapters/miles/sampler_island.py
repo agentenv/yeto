@@ -435,6 +435,19 @@ class EngineReleaseLoader:
 LEAVE_HOLD_S = 300.0  # after a reclaim LEAVE: wait this long for the cloud to stop the container
 
 
+def store_written_slots(entries: Any, sampler_id: str) -> list[list[Any]]:
+    """``[slot, plan]`` of every group ``sampler_id`` has in the buffer from a store
+    ledger (its round record names the slot's attempt): what a restarted sampler
+    settles before it claims (``StoreDispensedPrompts.recover``)."""
+    out = []
+    for entry in entries:
+        record = getattr(entry, "sampler_round", None) or {}
+        if (record.get("sampler") == sampler_id and record.get("dispense_position") is not None
+                and record.get("dispense_attempt") is not None):
+            out.append([int(record["dispense_position"]), record.get("dispense_plan")])
+    return out
+
+
 def end_leave(releases: Any) -> tuple[Any, dict[str, Any]]:
     """(LeaveReason, detail) of a sampler whose loop ended normally: FINISHED,
     or the store's fence reason when the syncer retired this member (a spot
@@ -464,6 +477,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     from yeto.rl.engine.events import append_tape_event
     from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.sampler_loop import SamplerLoop
+    from yeto.rl.engine.task_dispense import DispenseEnded
     from yeto.rl.engine.sampler_resume import (
         RECLAIM_MARKER_ENV,
         TRAINERS_ENDED_EVENT,
@@ -550,6 +564,21 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         progress["rounds"] += 1
         progress["rollout_id"] = None
 
+    def generate_round(rollout_id: int) -> None:
+        try:
+            runner.run(generate(rollout_id))
+        except DispenseEnded as error:
+            # every slot of the store ledger settled: its plan goes into the shard's end
+            # record (sampler_loop); a rollout given up short of the end writes a plain one
+            if dispense.get("store") and not getattr(error, "dispense", None):
+                try:
+                    detail = _in_executor(executor, runner.run, "ended_detail")
+                except Exception:  # noqa: BLE001 - a plain end record then
+                    detail = None
+                if detail:
+                    error.dispense = detail  # type: ignore[attr-defined]
+            raise
+
     def leave(reason: LeaveReason, **detail: Any) -> None:
         membership.leave(reason.name, rounds=progress["rounds"],
                          policy_version=None if follower is None else follower.version,
@@ -583,11 +612,14 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             # Before the first round, the data source claims its rows
             from yeto.protocol import island_hmac_key_from_env
 
-            installed = _in_executor(executor, runner.run, "install",
-                                     dict(miles_args.yeto_rl_data_dispense), island_hmac_key_from_env())
+            install = dict(miles_args.yeto_rl_data_dispense)
+            if install.get("backend") == "store":  # the slots its buffer already holds settle first
+                install["recover"] = store_written_slots(buffer.entries(), sampler_id)
+            installed = _in_executor(executor, runner.run, "install", install, island_hmac_key_from_env())
             dispense["installed"] = True
+            dispense["store"] = install.get("backend") == "store"
             emit("rl_dispense_install", sampler=sampler_id,
-                 dispense_island_id=int(miles_args.yeto_rl_data_dispense["learner_id"]), **dict(installed))
+                 dispense_island_id=int(install["learner_id"]), **dict(installed or {}))
         lora = lora_mode(miles_args)
         loader = EngineReleaseLoader(controller, executor, runner.run, lora=lora,
                                      fused_stage=bool(config.fused_stage))
@@ -614,7 +646,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
                                   version=BASE_POLICY_VERSION, scheme=scheme)
         loop = SamplerLoop(
             follower=follower, buffer=buffer, emit=emit,
-            generate=lambda rollout_id: runner.run(generate(rollout_id)),
+            generate=generate_round,
             num_rollouts=None if until else int(miles_args.num_rollout),
             max_backlog_groups=int(config.max_backlog_groups),
             min_round_s=config.min_round_s, require_release=lora,

@@ -674,6 +674,10 @@ _ISLAND = (
     # a synced group's sampler island (it runs as learner 0 of 1): the launch island id its
     # tape records carry as island_id, as every other island of the launch; None: learner id
     island_flag("--rl-tape-island-id", type=int, default=None, metavar="M"),
+    # a sampler island that claims its rows from a store ledger (an island fleet's,
+    # shared with its pools): the ledger's store URI or island path (set by the
+    # launcher from --rl-island-dispense-store), with --rl-store-dispense
+    island_flag("--rl-dispense-store", default=None, metavar="PATH"),
     # a synced trainer fed by external pools whose launch gives per-island policy-age
     # limits (--rl-island-max-policy-age): the launch-wide --rl-max-policy-age, bound
     # into the syncer session contract in place of the island's own limit (which only

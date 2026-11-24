@@ -452,6 +452,12 @@ class SlotMap:
                 seen[s] += 1
             self.size = len(self._slots)
 
+    @property
+    def rows(self) -> int:
+        """The rows of the prompt file (``PositionMap.rows``: what a backend port that
+        maps a slot to its row checks its own rows against)."""
+        return int(self.positions.rows)
+
     def position(self, slot: int) -> int:
         return int(slot) if self._slots is None else self._slots[int(slot)]
 
@@ -1075,6 +1081,10 @@ class StoreDispensedPrompts:
         self._next_scan = 0.0
         self._idle = self.scan_s
         self.drawn = 0
+        # the latest scan that read the ledger found no slot this process may claim: every
+        # slot is settled or held, alive, by some sampler (nothing fresh is left; a failed
+        # scan, a drain or a pause leaves it False). StoreTaskSource reads it.
+        self.starved = False
         self.stats = {"scans": 0, "claimed": 0, "claim_lost": 0, "trained": 0, "requeued": 0, "released": 0,
                       "dropped": 0, "lost": 0, "recovered": 0, "not_ready": 0, "capacity_waits": 0,
                       "scans_failed": 0, "hold_checks_failed": 0, "renew_checks_failed": 0,
@@ -1313,6 +1323,7 @@ class StoreDispensedPrompts:
                        error=f"{type(error).__name__}: {error}"[:300])
 
     def _claim(self, want: int) -> tuple[list[int], bool]:
+        self.starved = False
         try:
             states, now = self.ledger.scan()
         except DispenseError:
@@ -1368,6 +1379,7 @@ class StoreDispensedPrompts:
         except Exception as error:  # noqa: BLE001 - an attempt it could not end: the next scan ends it
             self._scan_failed(error)
             return [], False
+        self.starved = not candidates
         if view is not None and view.host is not None:  # affinity: tasks ready on this sampler's host first
             candidates.sort(key=lambda c: not view.classify(
                 row_task_id(self.rows[self.slots.row(c[0])], self.task_key))[2])
@@ -1667,6 +1679,42 @@ class StoreDispensedPrompts:
         read as "do not write" (the claim itself stays as it is)."""
         return bool(self.hold_verdict(slot))
 
+    def held(self) -> set[int]:
+        """The slots this process holds (claimed, not ended yet; a lost one included
+        until it is reported)."""
+        with self._lock:
+            return set(self._held)
+
+    def report(self, *, trained: Iterable[int] = (), dropped: Iterable[int] = (),
+               requeue: Iterable[int] = (), release: Iterable[int] = (),
+               reason: str = "released") -> dict[str, int]:
+        """End held slots one by one (a port that reports per slot, :class:`StoreTaskSource`):
+        ``trained`` and ``dropped`` settle the slot, ``requeue`` ends the attempt ``infra``
+        (counted toward ``max_redo``), ``release`` ends it ``release`` (``reason``). A slot
+        this process does not hold is counted ``unheld`` and changes nothing; a lost one
+        (superseded, fenced) ends here without touching the ledger (its new holder settles it)."""
+        counts = {"trained": 0, "dropped": 0, "requeue": 0, "release": 0, "unheld": 0}
+        for kind, slots, how in (("trained", trained, {"done": "trained"}),
+                                 ("dropped", dropped, {"done": "dropped", "reason": "dropped"}),
+                                 ("requeue", requeue, {"fail": "infra"}),
+                                 ("release", release, {"fail": "release", "reason": reason})):
+            for slot in slots:
+                if self._end(int(slot), **how) is None:
+                    counts["unheld"] += 1
+                    continue
+                counts[kind] += 1
+                if kind == "requeue":
+                    self.stats["requeued"] += 1
+                elif kind == "release":
+                    self.stats["released"] += 1
+        return counts
+
+    def attempt_of(self, slot: int) -> int | None:
+        """The attempt this process holds of ``slot`` (:data:`ATTEMPT_KEY`); None: not held."""
+        with self._lock:
+            held = self._held.get(int(slot))
+        return None if held is None else held.attempt
+
     def _end(self, slot: int, *, done: str | None = None, fail: str | None = None,
              **detail: Any) -> dict[str, Any] | None:
         with self._lock:
@@ -1786,6 +1834,118 @@ class StoreDispensedPrompts:
             except Exception as error:  # noqa: BLE001 - expiry gives it out anyway
                 logger.warning("store dispenser: release at close failed: %r", error)
         return {"released": len(held), "backend": BACKEND, **self.stats}
+
+
+# ------------------------------------------------------- the TaskSource port
+
+
+class StoreTaskSource:
+    """The store ledger behind the interface of the syncer's
+    :class:`~yeto.rl.engine.task_dispense.TaskSource`, so a backend port written for
+    the syncer's dispenser (:class:`~yeto.rl.engine.task_dispense.DispensedRows`: the
+    Miles data source, ``adapters.miles.task_dispense``) takes its rows from a store
+    ledger unchanged. A position is a slot of ``prompts`` (map it to its row with
+    ``prompts.slots``, a :class:`SlotMap`); the claim, lease, settle and retire rules
+    are the ledger's (module doc), so a Miles sampler island and the engine samplers of
+    external pools share one ledger (a fleet's ``<store>/fleet/dispense``).
+
+    Differences from the syncer's source: nothing is prefetched (:meth:`take` claims
+    what it hands out, one scan per attempt, at most one scan per ``scan_s`` while
+    nothing could be claimed); a report is written at once (:meth:`flush` has nothing
+    to wait for); the data ends when every slot is settled (:class:`DispenseEnded`
+    carries ``dispense``: :meth:`StoreDispensedPrompts.end_detail`), and a fenced or
+    retired process ends with :class:`DispenseFencedEnd`."""
+
+    def __init__(self, prompts: StoreDispensedPrompts, *, sleep: Callable[[float], None] | None = None,
+                 clock: Callable[[], float] | None = None) -> None:
+        self.prompts = prompts
+        self.incarnation = prompts.ledger.incarnation
+        self._sleep = sleep or prompts._sleep
+        self._clock = clock or prompts._clock
+        self._closing = False
+        self._closed = False
+        # every slot settled (the end :meth:`take` raised): the end detail, for the shard's end record
+        self.ended: dict[str, Any] | None = None
+        self.stats = {"claims": 0, "granted": 0, "waits": 0, "fenced": 0, "lost_reports": 0,
+                      "trained": 0, "dropped": 0, "requeue": 0, "release": 0}
+
+    def start(self) -> "StoreTaskSource":
+        return self
+
+    def _ended(self) -> DispenseEnded:
+        error = DispenseEnded("every task of the store dispenser is settled")
+        self.ended = error.dispense = self.prompts.end_detail()  # type: ignore[attr-defined]
+        return error
+
+    def take(self, count: int, *, timeout_s: float | None = None, drained_ok: bool = False) -> list[int]:
+        """Up to ``count`` slots, as ``TaskSource.take``: a short list when nothing fresh
+        is left (every unsettled slot is held by a live sampler) and this process already
+        took some, or holds rows (``drained_ok``); otherwise it waits for slots to come
+        back. :class:`DispenseEnded` when every slot is settled and none is held here."""
+        count = int(count)
+        out: list[int] = []
+        idle = self.prompts.scan_s
+        deadline = None if timeout_s is None else self._clock() + float(timeout_s)
+        while len(out) < count:
+            if self._closing:
+                if out:
+                    break
+                raise DispenseEnded("the store task source is closed")
+            state, got = self.prompts.poll(count - len(out))
+            self.stats["claims"] += 1
+            if state == "items":
+                out.extend(int(p) for p in got)
+                self.stats["granted"] += len(got)
+                idle = self.prompts.scan_s
+                continue
+            if state == "fenced":
+                self.stats["fenced"] += 1
+                raise DispenseFencedEnd("fenced: this incarnation takes no more tasks from the store ledger")
+            if state == "end":
+                raise self._ended()
+            if self.prompts.starved and (out or drained_ok):
+                break  # nothing fresh is left: hand back what there is (the caller decides)
+            self.stats["waits"] += 1
+            if deadline is not None and self._clock() >= deadline:
+                raise TimeoutError(f"no dispensed rows within {timeout_s} s ({len(out)} of {count} taken)")
+            self._sleep(idle)
+            idle = min(idle * 2, self.prompts.max_scan_s)
+        return out
+
+    def report(self, *, trained: Iterable[int] = (), dropped: Iterable[int] = (),
+               requeue: Iterable[int] = (), release: Iterable[int] = ()) -> None:
+        counts = self.prompts.report(trained=trained, dropped=dropped, requeue=requeue, release=release)
+        self.stats["lost_reports"] += counts.pop("unheld")
+        for kind, n in counts.items():
+            self.stats[kind] += n
+
+    def still_holds(self, position: int, *, timeout_s: float = 10.0) -> bool:
+        del timeout_s
+        return self.prompts.still_holds(int(position))
+
+    def taken(self) -> set[int]:
+        return self.prompts.held()
+
+    def ready_count(self) -> int:
+        return 0  # nothing is prefetched
+
+    def release_ready(self, *, stop_claims: bool = False) -> int:
+        if stop_claims:
+            self._closing = True
+        return 0
+
+    def flush(self, timeout_s: float = 30.0) -> bool:
+        del timeout_s
+        return True  # every report is written when it is made
+
+    def close(self, *, release: bool = True, timeout_s: float = 10.0) -> None:
+        """Stop the lease renewal; every held slot goes back (``release``, reason
+        ``closing``) whatever ``release`` says: an unreleased claim would wait out its lease."""
+        del release, timeout_s
+        self._closing = True
+        if not self._closed:
+            self._closed = True
+            self.prompts.close()
 
 
 # ------------------------------------------------------------------- retire

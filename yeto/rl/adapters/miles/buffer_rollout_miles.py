@@ -79,6 +79,7 @@ from yeto.rl.engine.task_dispense import DISPENSE_POSITION_KEY
 
 from .proc_state import set_proc_state
 from .rollout_meta_hook import current_policy_token, data_cursor, record_round_metadata
+from .task_dispense import write_fields as dispense_write_fields
 from .task_dispense import written as dispense_written
 
 # takes in a row whose every group is malformed before the round fails (a systematic cause)
@@ -203,7 +204,15 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
             position = (getattr(samples[0], "metadata", None) or {}).get(DISPENSE_POSITION_KEY)
             positions.append(position if isinstance(position, int) and not isinstance(position, bool)
                              else None)
-        written = self._rounds.write_round(rollout_id, finished, cursor, positions)
+        # a store ledger: only the groups whose slot this sampler still holds, with its attempt
+        fields = dispense_write_fields(positions)
+        keep = [i for i, f in enumerate(fields) if f is not None]
+        if len(keep) < len(fields):
+            print(f"[sample-buffer] round {int(rollout_id)}: {len(fields) - len(keep)} group(s) not written "
+                  "(their store ledger slot went to another sampler)", flush=True)
+            finished, positions = [finished[i] for i in keep], [positions[i] for i in keep]
+        written = self._rounds.write_round(rollout_id, finished, cursor, positions,
+                                           extra=[fields[i] for i in keep])
         # the rows of the groups now in the buffer are done for the dispenser
         dispense_written(rollout_id, [p for p in positions[:written] if p is not None])
 

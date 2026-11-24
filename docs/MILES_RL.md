@@ -592,10 +592,29 @@ either kind, and the fleet at least one external pool. A Miles sampler's
 plus its Miles samplers (`trainer_usd_per_h`: the trainer alone), and the
 launch's price sums them. `plan.json` lists them per island under
 `miles_samplers` with `source: "miles"` (their `launch_island`, `gpu`, `shard`,
-`engine` `sglang`); every pool row carries `source: "external"`. A Miles
-sampler draws its prompts from the launch's `--data` (its own slot among the
-launch's sampler islands), not from the fleet's task ledger. A complete
-example: `examples/fleet/run.mixed-miles.json`.
+`engine` `sglang`); every pool row carries `source: "external"`.
+
+When the pools claim from a store ledger (`prompts.dispense` with `backend:
+store`), every Miles sampler claims its prompts from the same ledger, so no
+prompt goes to both a Miles sampler and a pool in one pass: with `dispense:
+fleet` the fleet's `<store>/fleet/dispense`, with `dispense: island` its
+island's `<store>/trainer<k>`. It claims under its shard name `island<K+j>`
+(unique in the fleet) with the claim, lease, settle and retire rules of the
+engine samplers, checks before each group write that it still holds the slot,
+and records the slot's attempt and the ledger's plan in the group's round
+record (the trainer trains one group per slot). The compile passes
+`--rl-island-dispense-store <K+j>:<ledger store>` per Miles sampler and
+`--rl-store-dispense <the pools' prompts.dispense>` once, and `plan.json`
+records each Miles sampler's `dispense_store` and `dispense_namespace`. The
+ledger pins its prompt file (row count and SHA-256), so `fleet.trainer_argv`
+`--data` must be the pools' prompt file: a local JSONL with the same bytes as
+the specs' `prompts.path` (and each pool's `prompts_file`, which the compile
+compares), with `--rl-prompt-column` / `--rl-label-column` naming its columns
+for Miles. The compile refuses a Hub dataset or another file as `--data`,
+pools with different `prompts.dispense` settings, and a `holdout` file (give
+`holdout_ids` inline). Without a store ledger on the pools a Miles sampler
+draws from its own slot of `--data` among the launch's sampler islands. A
+complete example: `examples/fleet/run.mixed-miles.json`.
 
 ## Launching
 

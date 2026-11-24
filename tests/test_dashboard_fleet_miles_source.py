@@ -259,10 +259,15 @@ def test_island_panel_lists_the_miles_sampler_its_loads_and_its_own_mismatch():
 
 
 # -- the plan run up compiles from the mixed example ---------------------------------------------
-def test_plan_compiled_from_the_mixed_example_binds_both_kinds():
+def test_plan_compiled_from_the_mixed_example_binds_both_kinds(tmp_path):
     from yeto.rl.fleet import compile_fleet
 
     cfg = json.loads((Path(__file__).parents[1] / "examples" / "fleet" / "run.mixed-miles.json").read_text())
+    # --data: the pools' prompt file, a local JSONL (the Miles sampler claims from their ledger)
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text("".join(json.dumps({"q": f"question {n}", "a": str(n)}) + "\n" for n in range(6)))
+    argv = cfg["fleet"]["trainer_argv"]
+    argv[argv.index("--data") + 1] = str(prompts)
     _, plan = compile_fleet(cfg)
     doc = json.loads(plan.dumps())
     r = Reducer()

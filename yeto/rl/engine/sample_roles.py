@@ -77,7 +77,13 @@ binding flag alone (no pool) takes the same form: each trainer reads the shards 
 its own sampler islands. A trainer may have only sampler islands or only pools,
 not neither. The sampler
 islands generate until their own trainer ended (full-parameter or decoupled
-preset), like the pools (:func:`check_mixed_group`).
+preset), like the pools (:func:`check_mixed_group`). A sampler island draws its
+rows from its data slot among the launch's sampler islands, or, with
+``--rl-island-dispense-store M:STORE`` and ``--rl-store-dispense JSON`` (the pools'
+``prompts.dispense``), claims them from the store ledger under STORE that the pools
+claim from (an island fleet's ``<store>/fleet/dispense``), under its shard name
+``island<M>``, so no prompt goes to a pool and a sampler island in the same pass
+(:func:`check_store_dispense`; ``adapters.miles.task_dispense``).
 
 Decoupled groups (``--rl-sync-preset decoupled``, Miles): a decoupled trainer
 has one version per fragment, merged at different times, so its group needs
@@ -425,8 +431,12 @@ EXTERNAL_POOL_FLAGS = (("--rl-island-buffer-shards", "rl_island_buffer_shards"),
                        *((flag, dest) for flag, dest, _name in ISLAND_TRAINER_OVERRIDES))
 # --rl-island-sampler-follows M:K: a mixed group's explicit sampler binding (module doc)
 SAMPLER_FOLLOWS_FLAG = ("--rl-island-sampler-follows", "rl_island_sampler_follows")
+# --rl-island-dispense-store M:STORE: a mixed group's sampler island M claims its rows from
+# the store ledger under STORE (module doc), with the pools' settings of --rl-store-dispense
+DISPENSE_STORE_FLAG = ("--rl-island-dispense-store", "rl_island_dispense_store")
+STORE_DISPENSE_FLAG = ("--rl-store-dispense", "rl_store_dispense")
 # launch-only flags a mixed group's island args drop (the island command never takes them)
-_MIXED_LAUNCH_DESTS = ("rl_island_buffer_shards", SAMPLER_FOLLOWS_FLAG[1],
+_MIXED_LAUNCH_DESTS = ("rl_island_buffer_shards", SAMPLER_FOLLOWS_FLAG[1], DISPENSE_STORE_FLAG[1],
                        *(dest for _flag, dest, _name in ISLAND_TRAINER_OVERRIDES))
 
 
@@ -587,6 +597,51 @@ def _sampler_follows(args: Any, num_islands: int) -> dict[int, int]:
     return out
 
 
+def sampler_dispense_stores(args: Any, num_islands: int) -> dict[int, str]:
+    """{sampler island: the store of the ledger it claims from} of
+    ``--rl-island-dispense-store M:STORE`` (a mixed group, module doc); {} without it.
+    Raises ValueError on an entry that names no sampler island or no store."""
+    flag, dest = DISPENSE_STORE_FLAG
+    samplers = sampler_islands(args, num_islands)
+    out = _island_entries(args, dest, flag, num_islands)
+    for m, store in out.items():
+        if m not in samplers:
+            raise ValueError(f"{flag} {m}:{store}: island {m} is not a sampler island (sampler islands {samplers})")
+        if not store:
+            raise ValueError(f"{flag} {m}: name the ledger's store (M:STORE)")
+    return out
+
+
+def check_store_dispense(args: Any, num_islands: int) -> None:
+    """``--rl-island-dispense-store`` with ``--rl-store-dispense`` (a mixed group's
+    sampler islands on a store ledger): both or neither, the settings a store
+    dispenser config without ``store`` (the flag names it), and not with the syncer's
+    dispenser (``--rl-data-split dispense``: a sampler claims from one ledger)."""
+    import json  # noqa: PLC0415
+
+    stores = sampler_dispense_stores(args, num_islands)
+    raw = getattr(args, STORE_DISPENSE_FLAG[1], None)
+    if bool(stores) != bool(raw):
+        raise ValueError(f"{DISPENSE_STORE_FLAG[0]} and {STORE_DISPENSE_FLAG[0]} go together (the ledger's "
+                         "store per sampler island, and the pools' prompts.dispense settings)")
+    if not stores:
+        return
+    from .store_dispense import DispenseError, check_store_config  # noqa: PLC0415
+
+    try:
+        config = json.loads(raw)
+        check_store_config(config)
+    except (ValueError, DispenseError) as error:
+        raise ValueError(f"{STORE_DISPENSE_FLAG[0]}: {error}") from None
+    if str(config.get("backend") or "store") != "store" or config.get("store") or config.get("holdout"):
+        raise ValueError(f"{STORE_DISPENSE_FLAG[0]}: a store ledger config (backend store) without 'store' (named "
+                         f"by {DISPENSE_STORE_FLAG[0]}) and without 'holdout' (a path on the pools' nodes; give "
+                         "holdout_ids)")
+    if getattr(args, "rl_data_split", None) == "dispense":
+        raise ValueError(f"{DISPENSE_STORE_FLAG[0]}: the sampler islands claim from the store ledger; drop "
+                         "--rl-data-split dispense (the syncer's dispenser)")
+
+
 def mixed_trainer_shards(args: Any, trainer: int, num_islands: int) -> list[str]:
     """The buffer shards trainer island ``trainer`` of a mixed group reads (and its
     sampler islands are told): the node names of the sampler islands bound to it,
@@ -694,6 +749,10 @@ def check_external_pool_flags(args: Any) -> None:
         raise ValueError(f"{SAMPLER_FOLLOWS_FLAG[0]} binds the sampler islands of a synced group whose "
                          "samplers follow their trainer (--rl-sample-role trainer, a syncer, "
                          "--rl-sampler-follow trainer, --rl-island-sample-role M:sampler)")
+    for flag, dest in (DISPENSE_STORE_FLAG, STORE_DISPENSE_FLAG):
+        if getattr(args, dest, None) and not is_mixed_group(args):
+            raise ValueError(f"{flag} belongs to the sampler islands of a synced group whose samplers follow "
+                             "their trainer (--rl-island-sampler-follows, an island fleet)")
     given = [flag for flag, dest in EXTERNAL_POOL_FLAGS if getattr(args, dest, None)]
     if not given or is_external_pool_group(args) or is_mixed_group(args):
         return
@@ -731,6 +790,7 @@ def check_mixed_group(args: Any, num_islands: int) -> None:
         raise ValueError(f"trainer(s) with learner id {missing} have no sampler: bind a sampler island "
                          f"({SAMPLER_FOLLOWS_FLAG[0]} M:K) or name pool shards (--rl-island-buffer-shards "
                          "K:SHARDS)")
+    check_store_dispense(args, num_islands)
     if not sampler_stop_trainers(args, num_islands):
         raise ValueError("a synced group with sampler islands and external sampler pools needs "
                          f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} or {DECOUPLED_SYNC_PRESET} on "
@@ -838,7 +898,9 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
     samplers = sampler_islands(args, num_islands)
     learners = synced_group_learners(args, num_islands)
     bindings = sampler_bindings(args, num_islands)
+    ledgers = sampler_dispense_stores(args, num_islands) if is_mixed_group(args) else {}
     out = copy.copy(args)
+    out.rl_dispense_store = None
     out.rl_island_sample_role = None  # the island is no group: its role is below
     out.rl_sample_role = roles[island]
     out.rl_buffer_shards = buffer_shards(args, num_islands)
@@ -878,7 +940,11 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
     out.rl_syncer_epoch = None
     out.rl_sampler_node = node_name(island)
     out.rl_tape_island_id = island  # its records name its launch island, not learner 0
-    if getattr(args, "rl_data_split", None) == "dispense":
+    if island in ledgers:
+        # The sampler claims its rows from a store ledger, with the pools (no slot)
+        out.rl_dispense_store = ledgers[island]
+        out.rl_sampler_data_slot = None
+    elif getattr(args, "rl_data_split", None) == "dispense":
         # The sampler claims its rows from the group's actor syncer (no slot)
         out.rl_sampler_dispense_island = island
         out.rl_sampler_data_slot = None
