@@ -1538,7 +1538,7 @@ def cmd_sample_diffusion(args) -> int:
 HEAD_READY_MARKER = "~/.yeto_head_ready"
 # Pinned: yeto's runtime sky patches (yeto.sky_patches) are verified per
 # version, and the head must run the same sky the patches were checked on.
-HEAD_SKYPILOT_VERSION = "0.13.0"
+HEAD_SKYPILOT_VERSION = "0.14.3"
 HEAD_SETUP_PIP = (
     # Every cloud a fleet can name (pyproject launcher extra) plus gcp for gs:// outputs;
     # without a cloud's extra, the head's sky reports that cloud as not enabled.
@@ -1547,7 +1547,7 @@ HEAD_SETUP_PIP = (
     "pip install -q cloudpickle transformers==5.13.0"
 )
 # yeto needs Python >= 3.11 at runtime (typing.Self in the Codex harness the
-# launcher imports); stock images ship older (Nebius: miniconda 3.10). Setup
+# launcher imports); stock images ship older (Nebius: Python 3.10). Setup
 # then gives the head its own 3.12 venv, and every head job puts it first on
 # PATH, so pip, the sky patch hook, the controller and sky's API server all
 # share one interpreter.
@@ -2173,15 +2173,17 @@ def cmd_logs(args) -> int:
 # down
 
 
-# The head's sky lives in the Python its setup pip-installed into (sky's
-# ~/miniconda3 on its images); a non-interactive ssh shell does not run
-# conda's .bashrc hook, so plain `python3` is the system one without sky.
+# The head's sky lives in the Python its setup pip-installed into: sky >= 0.14
+# runs setup in its user venv ~/sky-user-env (sky no longer installs conda,
+# skypilot #10132), sky 0.13 in ~/miniconda3. A non-interactive ssh shell
+# activates neither, so plain `python3` is the system one without sky.
 HEAD_DOWN_ATTEMPTS = 3
 HEAD_DOWN_RETRY_S = 20.0
 # The head's sky lives in the interpreter its setup installed into: HEAD_VENV
 # when the stock Python was < 3.11 (Nebius: miniconda 3.10, which has NO sky —
-# "No module named 'sky'" on every Nebius head down), else miniconda/system.
-HEAD_DOWN_SCRIPT = """cd ~/sky_workdir && PY=$(for p in ~/yeto-head-py/bin/python3 ~/miniconda3/bin/python3; do [ -x "$p" ] && "$p" -c 'import sky' 2>/dev/null && {{ echo "$p"; break; }}; done) && PY=${{PY:-python3}} && "$PY" - <<'PY'
+# "No module named 'sky'" on every Nebius head down), else sky's user venv,
+# miniconda (a head set up by sky 0.13) or the system Python.
+HEAD_DOWN_SCRIPT = """cd ~/sky_workdir && PY=$(for p in ~/yeto-head-py/bin/python3 ~/sky-user-env/bin/python3 ~/miniconda3/bin/python3; do [ -x "$p" ] && "$p" -c 'import sky' 2>/dev/null && {{ echo "$p"; break; }}; done) && PY=${{PY:-python3}} && "$PY" - <<'PY'
 import sky
 from yeto.launcher import terminate_and_verify
 for c in {clusters!r}:

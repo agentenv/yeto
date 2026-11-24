@@ -9,7 +9,10 @@ preemptible instance``. The SDK's ``InstanceSpec`` has a ``pricing_model`` oneof
 The patch makes every preemptible ``InstanceSpec`` built by that module carry
 ``follows_spot_price`` ("the preemptible VM accepts the current spot price") when
 no pricing model was given. On-demand specs are untouched. Applied only on the
-verified SkyPilot version.
+verified SkyPilot versions. SkyPilot 0.14.3 sets ``follows_spot_price`` itself
+on a spot launch, so there the patch adds nothing (a spec that already carries a
+pricing model passes unchanged); it is kept as a guard for a spot spec built
+without one.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from __future__ import annotations
 import sys
 
 TARGET_MODULE = "sky.provision.nebius.utils"
-VERIFIED_SKY_VERSIONS = frozenset({"0.13.0"})
+VERIFIED_SKY_VERSIONS = frozenset({"0.13.0", "0.14.3"})
 PATCH_MARK = "_yeto_nebius_pricing_patched"
 PRICING_FIELDS = ("on_demand", "follows_spot_price", "spot_pricing_policy")
 

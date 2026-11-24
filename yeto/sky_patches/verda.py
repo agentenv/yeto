@@ -1,6 +1,6 @@
 """Runtime fix for SkyPilot's Verda provisioner (sky/provision/verda/instance.py).
 
-What SkyPilot 0.13.0 gets wrong, and what this replaces (fix-verda-provider design,
+What SkyPilot 0.13.0 and 0.14.3 get wrong, and what this replaces (fix-verda-provider design,
 archived outside the repo):
 
 * ``query_instances`` has the pre-0.13 signature, so the dispatcher's
@@ -33,7 +33,9 @@ import time as _time
 
 TARGET_MODULE = "sky.provision.verda.instance"
 PACKAGE_MODULE = "sky.provision.verda"
-VERIFIED_SKY_VERSIONS = frozenset({"0.13.0"})
+# 0.14.3 ships sky/provision/verda/instance.py byte-identical to 0.13.0, with
+# the same dispatcher signature (still the bugs listed above).
+VERIFIED_SKY_VERSIONS = frozenset({"0.13.0", "0.14.3"})
 # Functions whose shape the patch depends on; checked before patching.
 REQUIRED_ATTRS = (
     "verda", "run_instances", "terminate_instances", "query_instances",

@@ -143,6 +143,14 @@ def _no_real_model_preflight(monkeypatch):
 
 
 @_pytest.fixture(autouse=True)
+def _no_sky_server_version_check(monkeypatch):
+    """The launch preflight asks the running sky API server for its version (GET
+    /api/health); unit tests never depend on a server of this host. Tests of the
+    check clear the variable and pass a fake server_common."""
+    monkeypatch.setenv("YETO_SKY_SERVER_CHECK", "off")
+
+
+@_pytest.fixture(autouse=True)
 def _no_ssh_connection_reuse(monkeypatch):
     """The launcher's ssh calls reuse a master connection (ssh_transport), which reads
     the user's SSH configuration (``ssh -G``) and keeps sockets under ~/.yeto; unit
