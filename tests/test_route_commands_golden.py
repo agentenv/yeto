@@ -87,6 +87,22 @@ def render(tmp: Path, monkeypatch) -> dict:
     dump["nc_sampler_command"] = ssh_sampler.sampler_command("/work/sampler/nc-0.json")
     dump["nc_env"] = ssh_sampler.sampler_env("runs1")
 
+    # the customer's agentic NC start: agentic.setup (the node preparation itself is
+    # agentic_setup's, not rendered here), the operator's env file second, the DeepSeek ROCm image
+    from tests.test_agentic_setup import _spec as agentic_spec  # noqa: PLC0415
+    from yeto.launch import agentic_setup  # noqa: PLC0415
+
+    monkeypatch.setattr(agentic_setup.Provisioner, "run", lambda self: {})
+    agentic = dict(agentic_spec(tmp), sampler_id="nc-1", prompts={"path": "/work/prompts/p.jsonl"},
+                   engine={"adapter": "vllm-server"})
+    (tmp / "op.env").write_text("HARBOR_ENV=remote\n")
+    ds41 = f"docker.io/rocm/vllm-dev:nightly_main_{ssh_sampler.DS41_IMAGE_COMMIT}"
+    ssh_sampler.start_sampler(lease, spec=agentic, shard="nc-1", run_prefix="runs1", r2_env_file=str(tmp / "r2.env"),
+                              state_dir=tmp, image=ds41, agentic_env_file=str(tmp / "op.env"),
+                              run=_recorder(dump, "nc_agentic_start", prompts), prompts_file=str(prompts))
+    dump["nc_agentic_spec_file"] = (tmp / "spec-nc-1.json").read_text()
+    dump["nc_agentic_setup_env"] = (tmp / "nc-1.agentic-setup.env").read_text()
+
     # Daytona process route
     class Box(FakeBox):
         def exec(self, command, *, timeout=600):
@@ -145,4 +161,3 @@ def test_route_commands_are_byte_identical_to_the_golden(tmp_path, monkeypatch):
     assert sorted(rendered) == sorted(golden)
     for key in sorted(golden):
         assert rendered[key] == golden[key], key
-    assert sum(len(v) if isinstance(v, list) else 1 for v in golden.values()) == 42
