@@ -48,9 +48,10 @@ The trainer argv is ``fleet.trainer_argv`` with ``--gpu`` (every island's cluste
 in island order), ``--rl-sample-role trainer --rl-sampler-follow trainer``, one
 ``--rl-island-buffer-shards k:<shards>`` per island (the shards of its pools) and
 the island's ``--rl-island-release-every`` / ``--rl-island-max-policy-age`` /
-``--rl-island-sample-wait-s``. The run config's ``breakers.trainer.sample_wait.timeout_s``
-becomes ``--rl-sample-wait-s`` (every trainer reads the flag, not the section); an
-island's own ``--rl-sample-wait-s`` overrides it for that island. Its ``usd_per_h`` is
+``--rl-island-sample-wait-s``. The run config's ``breakers.trainer.*`` become their
+trainer knobs (``--rl-sample-wait-s``, ``--rl-max-policy-age``, ``--island-env K=V``: every
+trainer reads those, not the section); an island's own ``--rl-sample-wait-s`` /
+``--rl-max-policy-age`` overrides the section's for that island. Its ``usd_per_h`` is
 the sum of the islands'.
 
 Miles sampler islands in a fleet island. An island's ``samplers`` may also list
@@ -378,27 +379,30 @@ def _seconds(raw: Any, where: str) -> float:
     return value
 
 
-def _sample_wait(cfg: dict[str, Any], trainer_argv: list[str]) -> float | None:
-    """The fleet's ``--rl-sample-wait-s`` the compile adds to the launch: the run config's
-    ``breakers.trainer.sample_wait.timeout_s`` (as the run's preflight resolves it), which
-    no trainer reads otherwise (each reads the flag); None when the section does not set it
-    or ``fleet.trainer_argv`` sets the flag itself (a disagreeing flag is refused)."""
+def _trainer_section_argv(cfg: dict[str, Any], trainer_argv: list[str]) -> list[str]:
+    """The flags and island env pairs the compile adds to the launch for the run config's
+    ``breakers.trainer.*`` (``--rl-sample-wait-s``, ``--rl-max-policy-age``, ``--island-env
+    YETO_TRAINER_RELEASE_DRAIN_S=...``): no trainer reads the section, each reads its knob.
+    The write-back of a single trainer's run config (:func:`yeto.breakers.materialize`) over
+    ``fleet.trainer_argv``: a value it already sets adds nothing, one that disagrees is
+    refused, as is a section value no trainer knob carries. Every trainer island gets them;
+    an island's own ``--rl-sample-wait-s`` / ``--rl-max-policy-age`` wins for that island."""
     section = cfg.get("breakers")
-    if not isinstance(section, dict) or not section:
-        return None
-    from yeto.breakers.resolve import Sources, resolve  # noqa: PLC0415
+    if not isinstance(section, dict) or not section.get("trainer"):
+        return []
+    from yeto import breakers  # noqa: PLC0415
 
-    entry = resolve(Sources(section=section), layers=("trainer",), strict=False).entry("trainer.sample_wait")
-    if entry.source.kind != "breakers":
-        return None
-    wait = _seconds(entry.params["timeout_s"], entry.source.location)
-    named = _argv_value(trainer_argv, SAMPLE_WAIT_FLAG)
-    if named is None:
-        return wait
-    if _seconds(named, f"fleet.trainer_argv {SAMPLE_WAIT_FLAG}") != wait:
-        raise _err(f"{entry.source.location} = {wait:g} but fleet.trainer_argv {SAMPLE_WAIT_FLAG} = {named}: "
-                   f"set one (an island's own trainer.argv {SAMPLE_WAIT_FLAG} overrides both)")
-    return None
+    sources = breakers.Sources(argv=list(trainer_argv), env=dict(cfg.get("env") or {}), section=section)
+    try:
+        resolved = breakers.resolve(sources, layers=("trainer",))
+        out = breakers.materialize(resolved, sources, surfaces=("trainer_flag", "trainer_env"))
+    except breakers.BreakerConfigError as error:
+        raise _err(f"{str(error).replace('trainer.argv ', 'fleet.trainer_argv ')} (an island's own trainer.argv "
+                   f"{SAMPLE_WAIT_FLAG} / --rl-max-policy-age overrides the run's)") from None
+    wait = resolved.entry("trainer.sample_wait")
+    if wait.sources["timeout_s"].kind == "breakers":  # the trainers refuse a wait of 0
+        _seconds(wait.params["timeout_s"], wait.sources["timeout_s"].location)
+    return list(out.argv[len(trainer_argv):])
 
 
 def _string_list(value: Any, where: str) -> list[str]:
@@ -867,9 +871,7 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     miles_rows = [(i, m) for i in rows for m in i.miles_samplers]
     argv = [*trainer_argv, "--gpu", ",".join([i.gpu for i in rows] + [m.gpu for _i, m in miles_rows]),
             "--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer"]
-    wait = _sample_wait(cfg, trainer_argv)
-    if wait is not None:  # every trainer island's sample wait, unless the island sets its own
-        argv += [SAMPLE_WAIT_FLAG, f"{wait:g}"]
+    argv += _trainer_section_argv(cfg, trainer_argv)  # every trainer island's, unless the island sets its own
     for i in rows:
         if i.pools:  # an island with Miles samplers only names no pool shard
             argv += ["--rl-island-buffer-shards", f"{i.index}:{','.join(i.pool_shards())}"]

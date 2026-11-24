@@ -1,10 +1,12 @@
-"""``breakers.trainer.*`` of a single-trainer run config reaches the trainer.
+"""``breakers.trainer.*`` and ``breakers.launch.*`` of a run config reach the trainer and the launcher.
 
 The trainer reads its flags (``--rl-sample-wait-s``, ``--rl-max-policy-age``) and its
-island env, never the run config's ``breakers:`` section. ``load_config`` writes the
-section's trainer values into ``trainer.argv`` (as ``yeto launch --breakers`` does), so
-the value the preflight shows, the compiled argv and the value the launched trainer
-resolves are one value. A config without a trainer entry keeps its argv byte for byte.
+island env, the launcher its own flags (``--rl-stall-timeout``, ``--budget-usd``, ...), never
+the run config's ``breakers:`` section. ``load_config`` writes the section's values into
+``trainer.argv`` (as ``yeto launch --breakers`` does), so the value the preflight shows, the
+compiled argv and the value the launched trainer / launcher resolves are one value. A config
+without such an entry keeps its argv byte for byte. ``launch.budget.usd`` inherited from
+``run.budget.usd`` alone stays with run up (``enforced_by: run``).
 """
 
 from __future__ import annotations
@@ -17,6 +19,8 @@ import pytest
 
 from yeto import cli
 from yeto.breakers import cli as bcli
+from yeto.cost.guard import guard_config_from_args, guard_enabled
+from yeto.launch.fleet import effective_stall_timeout
 from yeto.launch.modal_islands import parse_island_env
 from yeto.rl import up
 from yeto.rl.adapters.miles import buffer_rollout
@@ -120,12 +124,16 @@ def test_a_disabled_policy_age_is_written_as_its_off_value(tmp_path):
 
 @pytest.mark.parametrize("sections", [
     {},
-    {"breakers": {"run": {"starvation": {"stop_s": 900}}, "launch": {"stall": {"timeout_s": 3600}}}},
-    {"breakers": {"trainer": {}}},
+    {"breakers": {"run": {"starvation": {"stop_s": 900}}}},
+    # run.budget alone: launch.budget inherits it in the view, run up keeps it (enforced_by run)
+    {"breakers": {"run": {"budget": {"usd": 450}}}},
+    {"breakers": {"trainer": {}, "launch": {}, "switches": {}}},
     # the argv already holds the section's values: nothing to add
     {"breakers": {"trainer": {"policy_age": {"max_versions": 2}}}},
+    {"breakers": {"launch": {"stall": {"timeout_s": 900}}, "switches": {"cost_guard": True}},
+     "argv": [*ARGV, "--rl-stall-timeout", "900"]},
 ])
-def test_without_a_new_trainer_value_the_argv_is_unchanged(tmp_path, sections):
+def test_without_a_new_value_the_argv_is_unchanged(tmp_path, sections):
     path = _write(tmp_path, **sections)
     raw = json.loads(path.read_text())
     assert up.load_config(str(path))["trainer"]["argv"] == raw["trainer"]["argv"]
@@ -136,7 +144,7 @@ def test_the_k31_examples_keep_their_argv(run):
     """The customer path: the K3.1 example run configs set no breakers section."""
     raw = json.loads(run.read_text())
     assert "breakers" not in raw
-    assert up.apply_trainer_breakers(raw) is raw
+    assert up.apply_argv_breakers(raw) is raw
 
 
 @pytest.mark.parametrize("extra, section, match", [
@@ -161,3 +169,89 @@ def test_the_run_env_conflicts_with_the_section_too(tmp_path):
                   breakers={"trainer": {"sample_wait": {"timeout_s": 1200}}})
     with pytest.raises(ValueError, match=r"timeout_s = 1200 but env YETO_SAMPLE_BUFFER_WAIT_S = 900"):
         up.load_config(str(path))
+
+
+# ------------------------------------------------------------------ the launch layer
+def _launcher(argv: list[str]) -> dict:
+    """What the launcher applies: its stall clock and its cost guard."""
+    args = cli.build_parser().parse_args(["launch", *argv])
+    guard = guard_config_from_args(args)
+    return {"stall_s": effective_stall_timeout(args), "guard": guard_enabled(args), "budget_usd": guard.budget_usd,
+            "warn_usd": guard.budget_warn_usd, "idle_warn_s": guard.idle.idle_after_s,
+            "idle_stop_s": guard.idle.stop_after_s}
+
+
+@pytest.mark.parametrize("section, param, value, flag, launcher", [
+    ({"launch": {"stall": {"timeout_s": 1800}}}, "launch.stall.timeout_s", 1800,
+     ["--rl-stall-timeout", "1800"], {"stall_s": 1800.0}),
+    ({"launch": {"idle": {"warn_s": 600, "stop_after_warn_s": 1200}}}, "launch.idle.warn_s", 600,
+     ["--idle-warn-minutes", "10", "--idle-stop-minutes", "20"], {"idle_warn_s": 600.0, "idle_stop_s": 1200.0}),
+    ({"launch": {"budget": {"usd": 50, "warn_usd": 40}}}, "launch.budget.usd", 50,
+     ["--budget-usd", "50", "--budget-warn-usd", "40"], {"budget_usd": 50.0, "warn_usd": 40.0}),
+    # written "inherit": the launch takes run.budget.usd as its own limit
+    ({"run": {"budget": {"usd": 450}}, "launch": {"budget": {"usd": "inherit"}}}, "launch.budget.usd", 450,
+     ["--budget-usd", "450"], {"budget_usd": 450.0}),
+])
+def test_the_preflight_the_argv_and_the_launcher_agree(tmp_path, capsys, section, param, value, flag, launcher):
+    path = _write(tmp_path, breakers=section)
+    cfg = up.load_config(str(path))
+    assert cfg["trainer"]["argv"] == [*ARGV, *flag]
+    name, key = param.rsplit(".", 1)
+    shown = _show(path, capsys)[name]
+    recorded = _resolved_file(cfg, tmp_path)[name]
+    assert shown["params"][key] == value and recorded["params"][key] == value
+    assert "enforced_by" not in shown and "enforced_by" not in recorded
+    applied = _launcher(cfg["trainer"]["argv"])
+    assert {k: applied[k] for k in launcher} == launcher and applied["guard"]
+
+
+def test_run_up_and_the_launcher_judge_one_stall_value(tmp_path):
+    """run up's silence backstop and the launcher's RunStalled clock read the same
+    launch.stall: neither runs on a value the other does not see."""
+    cfg = up.load_config(str(_write(tmp_path, breakers={"launch": {"stall": {"timeout_s": 1800}}})))
+    run = up.Run(cfg, state_root=tmp_path / "state")
+    assert run.stall_timeout_s() == _launcher(cfg["trainer"]["argv"])["stall_s"] == 1800.0
+
+
+def test_the_cost_guard_switch_is_written_as_no_cost_guard(tmp_path):
+    cfg = up.load_config(str(_write(tmp_path, breakers={"switches": {"cost_guard": False}})))
+    assert cfg["trainer"]["argv"] == [*ARGV, "--no-cost-guard"]
+    assert not _launcher(cfg["trainer"]["argv"])["guard"]
+
+
+def test_a_launch_budget_inherited_alone_is_enforced_by_run_up(tmp_path, capsys):
+    """run.budget.usd alone: the view shows launch.budget.usd inherited and marks it
+    enforced_by run; the launch is not given it (the launcher prices the shared resource
+    ledger, pool leases included, its own way: the same limit there could stop first)."""
+    path = _write(tmp_path, breakers={"run": {"budget": {"usd": 450}}, "launch": {"stall": {"timeout_s": 1800}}})
+    cfg = up.load_config(str(path))
+    assert cfg["trainer"]["argv"] == [*ARGV, "--rl-stall-timeout", "1800"]
+    for entry in (_show(path, capsys)["launch.budget"], _resolved_file(cfg, tmp_path)["launch.budget"]):
+        assert entry["params"]["usd"] == 450 and entry["sources"]["usd"]["kind"] == "inherit"
+        assert entry["enforced_by"] == "run"
+    assert _launcher(cfg["trainer"]["argv"])["budget_usd"] is None
+    bcli.main(_show_args(path))  # the table marks the row
+    assert "!enforced_by_run" in next(line for line in capsys.readouterr().out.splitlines()
+                                      if line.startswith("launch.budget "))
+
+
+def _show_args(path: Path) -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    bcli.add_parser(p.add_subparsers(dest="command"))
+    return p.parse_args(bcli.normalize_argv(["breaker", "show", "--config", str(path)]))
+
+
+def test_a_launch_budget_setting_without_its_usd_is_refused(tmp_path):
+    path = _write(tmp_path, breakers={"run": {"budget": {"usd": 450}}, "launch": {"budget": {"warn_usd": 40}}})
+    with pytest.raises(ValueError, match=r"breakers.launch.budget warn_usd needs breakers.launch.budget.usd"):
+        up.load_config(str(path))
+
+
+@pytest.mark.parametrize("extra, section, match", [
+    (["--rl-stall-timeout", "900"], {"stall": {"timeout_s": 1800}},
+     r"breakers.launch.stall.timeout_s = 1800 but trainer.argv --rl-stall-timeout = 900"),
+    (["--budget-usd", "20"], {"budget": {"usd": 50}}, r"breakers.launch.budget.usd = 50 but trainer.argv --budget-usd = 20"),
+])
+def test_a_conflicting_launch_value_is_refused(tmp_path, extra, section, match):
+    with pytest.raises(ValueError, match=match):
+        up.load_config(str(_write(tmp_path, argv=[*ARGV, *extra], breakers={"launch": section})))

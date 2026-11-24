@@ -241,39 +241,57 @@ def load_config(path: str) -> dict[str, Any]:
             parse_section(cfg["breakers"])
         except BreakerConfigError as error:
             raise ValueError(f"run config: {error}") from None
-        if not fleet:  # a fleet's compile passes its own (yeto.rl.fleet)
-            cfg = apply_trainer_breakers(cfg)
+        # a fleet's compile passes each island's trainer values itself (yeto.rl.fleet)
+        cfg = apply_argv_breakers(cfg, layers=("launch",) if fleet else ARGV_LAYERS)
     return cfg
 
 
-TRAINER_SURFACES = ("trainer_flag", "trainer_env")  # the trainer layer's knobs in trainer.argv
+ARGV_LAYERS = ("trainer", "launch")  # the layers whose knobs are yeto launch flags and island env
+ARGV_SURFACES = ("trainer_flag", "trainer_env", "launch_flag")
 
 
-def apply_trainer_breakers(cfg: dict[str, Any]) -> dict[str, Any]:
-    """``breakers.trainer.*`` written into ``trainer.argv``: the trainer reads its flags
-    (``--rl-sample-wait-s``, ``--rl-max-policy-age``) and its island env (``--island-env
-    K=V``), never the section, so without this the preflight showed the section's value
-    while the trainer ran its default. The write-back is the one ``yeto launch --breakers``
-    does (:func:`yeto.breakers.materialize`). A value ``trainer.argv`` already sets is left
-    as written; one that disagrees with the section is refused, as is a section value no
-    trainer knob carries. A config whose section sets no trainer entry (or only values
-    the argv already holds) is returned as it is, its argv unchanged byte for byte."""
+def apply_argv_breakers(cfg: dict[str, Any], *, layers: tuple[str, ...] = ARGV_LAYERS) -> dict[str, Any]:
+    """``breakers.trainer.*`` and ``breakers.launch.*`` (and ``breakers.switches.cost_guard``)
+    written into ``trainer.argv``. The trainer reads its flags (``--rl-sample-wait-s``,
+    ``--rl-max-policy-age``) and its island env, the launcher its own flags
+    (``--rl-stall-timeout``, ``--budget-usd``, ``--idle-warn-minutes``, ...), never the
+    section: without this the preflight showed the section's value while the trainer and
+    the launcher ran their defaults. The write-back is the one ``yeto launch --breakers``
+    does (:func:`yeto.breakers.materialize`): a flag becomes its flag, an island env knob
+    ``--island-env K=V``. A value the argv (or the run env) already sets is left as written;
+    one that disagrees with the section is refused, as is a section value no knob carries.
+
+    ``launch.budget.usd`` is written only when ``breakers.launch.budget.usd`` is (a number or
+    ``"inherit"``): the value it inherits from ``run.budget.usd`` alone stays with run up's
+    ``run.budget`` (:func:`yeto.breakers.rules_facts.launch_budget_inherited_only`). A config
+    whose section sets none of these (or only values the argv already holds) is returned as
+    it is, its argv unchanged byte for byte."""
     section = cfg.get("breakers")
-    if not isinstance(section, dict) or not section.get("trainer"):
+    if not isinstance(section, dict) or not any(section.get(key) for key in (*layers, "switches")):
         return cfg
     from yeto import breakers  # noqa: PLC0415
+    from yeto.breakers.rules_facts import launch_budget_inherited_only  # noqa: PLC0415
 
+    if launch_budget_inherited_only(section):  # no implicit inheritance: run.budget is run up's
+        budget = (section.get("launch") or {}).get("budget") or {}
+        extra = sorted(set(budget) - {"enabled", "action"})
+        if extra:  # a launch budget without its own usd is off: these would be dropped unseen
+            raise ValueError(f"run config: breakers.launch.budget {', '.join(extra)} needs breakers.launch.budget.usd "
+                             "(a number, or \"inherit\" for run.budget.usd): without it the launch has no budget "
+                             "of its own (run.budget stops the run)")
+        section = {key: value for key, value in section.items() if key != "run"}
     trainer = cfg["trainer"]
-    sources = breakers.Sources.from_run_config(cfg, argv=list(trainer["argv"]), env=dict(cfg.get("env") or {}))
+    sources = breakers.Sources.from_run_config(cfg, argv=list(trainer["argv"]), env=dict(cfg.get("env") or {}),
+                                               section=section)
     try:
-        resolved = breakers.resolve(sources, layers=("trainer",))
-        out = breakers.materialize(resolved, sources, surfaces=TRAINER_SURFACES)
+        resolved = breakers.resolve(sources, layers=layers)
+        out = breakers.materialize(resolved, sources, surfaces=ARGV_SURFACES)
     except breakers.BreakerConfigError as error:
         raise ValueError(f"run config: {error}") from None
     if not out.changes:
         return cfg
     for change in out.changes:
-        _log(f"run config: breakers.trainer: {change}")
+        _log(f"run config: breakers: {change}")
     return {**cfg, "trainer": {**trainer, "argv": out.argv}}
 
 
@@ -1069,7 +1087,7 @@ class Run:
         --json`` object; the dashboard's Breakers panel and ``run status`` read it). Never
         raises: a view only."""
         from yeto import breakers  # noqa: PLC0415
-        from yeto.breakers.rules_facts import run_view_sources  # noqa: PLC0415
+        from yeto.breakers.rules_facts import mark_run_enforced, run_view_sources  # noqa: PLC0415
 
         try:
             # the run's only pool fills the pool / sampler / harness rows (a view; Run.breakers,
@@ -1081,7 +1099,8 @@ class Run:
                 _log(f"preflight: breakers.resolved.json shows the run config alone ({error})")
                 sources, pool = breakers.Sources.from_run_config(self.cfg), None
             resolved = breakers.resolve(sources, pool=pool, strict=False)
-            doc = resolved.to_json(breakers.preflight(resolved, run_config=self.cfg, sources=sources))
+            doc = mark_run_enforced(resolved.to_json(breakers.preflight(resolved, run_config=self.cfg, sources=sources)),
+                                    self.cfg)
             tmp = self.dir / "breakers.resolved.json.tmp"
             tmp.write_text(json.dumps(doc, indent=1, default=str))
             os.replace(tmp, self.dir / "breakers.resolved.json")

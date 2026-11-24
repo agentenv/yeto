@@ -199,6 +199,10 @@ def cmd_show(args: argparse.Namespace) -> int:
             print(note, file=sys.stderr)
         return 2
     data = rb.to_json(findings)
+    if args.config:  # run up's view: what it leaves to run.budget (yeto launch --breakers applies it all)
+        from yeto.breakers.rules_facts import mark_run_enforced  # noqa: PLC0415
+
+        mark_run_enforced(data, cfg)
     if args.layer:
         data["entries"] = [e for e in data["entries"] if e["layer"] == args.layer]
     for note in args.view_notes:  # ahead of the rows they are about (stderr: --json stays one object)
@@ -221,7 +225,7 @@ def cmd_show_fleet(args: argparse.Namespace, cfg: Mapping[str, Any]) -> int:
     naming a pool ``i<k>-<name>``), then each island's run and trainer rows and its findings."""
     from yeto.breakers import fleet, rules  # noqa: PLC0415
     from yeto.breakers.resolve import resolve  # noqa: PLC0415
-    from yeto.breakers.rules_facts import collect, run_view_sources  # noqa: PLC0415
+    from yeto.breakers.rules_facts import collect, mark_run_enforced, run_view_sources  # noqa: PLC0415
     from yeto.breakers.spec import BreakerConfigError, RegistryError  # noqa: PLC0415
 
     view = fleet.fleet_run_config(cfg)
@@ -236,7 +240,7 @@ def cmd_show_fleet(args: argparse.Namespace, cfg: Mapping[str, Any]) -> int:
     except (BreakerConfigError, RegistryError, ValueError) as error:
         print(f"[breaker] {error}", file=sys.stderr)
         return 2
-    data = fleet_show_data(rb, facts.islands, findings, layer=args.layer)
+    data = mark_run_enforced(fleet_show_data(rb, facts.islands, findings, layer=args.layer), cfg)
     for note in notes:  # ahead of the rows they are about (stderr: --json stays one object)
         print(note, file=sys.stderr if args.json else sys.stdout)
     if args.json:
@@ -333,6 +337,8 @@ def _marks(entry: Mapping[str, Any], findings: Iterable[Mapping[str, Any]]) -> s
         marks.append("!")
     if entry.get("redundant"):
         marks.append("!redundant")
+    if entry.get("enforced_by"):  # applied by another layer's breaker, not by this entry's component
+        marks.append(f"!enforced_by_{entry['enforced_by']}")
     marks += [f"!{f['rule']}" for f in findings if entry["name"] in f.get("items", ())]
     return " ".join(dict.fromkeys(marks))
 
