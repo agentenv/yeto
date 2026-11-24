@@ -16,8 +16,23 @@ from .rl_backend import _rl_backend_module
 # truncated as "network-interfa"; "eth0" made gloo fail with "Unable to find
 # address for: eth0" in the SGLang scheduler).  "" leaves NCCL/gloo to their
 # own detection.  NCCL_SOCKET_IFNAME in the environment always wins.
-MULTINODE_IB_CLOUDS = frozenset({"modal"})
 MULTINODE_SOCKET_IFNAME = {"nebius": "auto", "aws": "", "gcp": "", "ssh": ""}
+
+# The inter-node fabric of a multi-node cloud island, from (device family, fabric,
+# source) instead of the cloud name alone (multinode_fabric):
+#  - "rdma": Modal clustered islands request RDMA (ModalIslandConfig.rdma);
+#  - "ib": a Nebius node ordered with sky's network_tier="best" (InfiniBand,
+#    multinode_network_tier: 8x H100 / H200 only);
+#  - "efa": an AWS node ordered with network_tier="best" (EFA; NCCL reaches it
+#    through the aws-ofi-nccl plugin, which NCCL_IB_DISABLE does not turn off);
+#  - "tcp": anything else (NCCL over sockets).
+# NCCL's IB transport stays on for "rdma" and "ib" and is off otherwise.
+FABRIC_RDMA, FABRIC_IB, FABRIC_EFA, FABRIC_TCP = "rdma", "ib", "efa", "tcp"
+MULTINODE_FABRICS = (FABRIC_RDMA, FABRIC_IB, FABRIC_EFA, FABRIC_TCP)
+IB_FABRICS = frozenset({FABRIC_RDMA, FABRIC_IB})
+# the fabric a cloud's network_tier="best" order gives a cuda node
+TIER_BEST_FABRIC = {"nebius": FABRIC_IB, "aws": FABRIC_EFA}
+MULTINODE_IB_CLOUDS = frozenset({"modal"})  # always ordered with RDMA, whatever the shape
 _DETECT_IFACE = (
     "YETO_IFACE=${NCCL_SOCKET_IFNAME:-}; [ -n \"$YETO_IFACE\" ] || "
     "YETO_IFACE=$(for d in /sys/class/net/*; do n=$(basename \"$d\"); "
@@ -85,15 +100,50 @@ def island_comm_env_prelude(device_family: str, fabric: str = "tcp",
     return "\n".join(lines) + "\n"
 
 
-def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
-    """Shell exports every island node runs before Ray starts; "" on one node."""
+def multinode_fabric(cloud: str, gpu: str | None = None, gpus_per_node: int | None = None, *,
+                     num_nodes: int = 2, network_tier: str = "auto") -> str:
+    """The inter-node fabric of a cloud island (one of :data:`MULTINODE_FABRICS`).
+
+    Derived from the source (``cloud``), the device family (``gpu``) and what the order
+    asked for: ``network_tier`` is the island's ``--rl-island-network-tier`` ("none"
+    orders no fabric tier), and the cloud's tier is the one :func:`multinode_network_tier`
+    requests for this shape. Without ``gpu`` the order is not known, so only Modal's
+    RDMA is assumed (the cloud-name rule of before)."""
+    if cloud in MULTINODE_IB_CLOUDS:
+        return FABRIC_RDMA
+    best = TIER_BEST_FABRIC.get(cloud)
+    if best is None or gpu is None or gpus_per_node is None or int(num_nodes) <= 1:
+        return FABRIC_TCP
+    from ..gpu_spec import device_family_of
+
+    if device_family_of(gpu) != "cuda" or network_tier == "none":
+        return FABRIC_TCP
+    return best if multinode_network_tier(cloud, gpu, gpus_per_node) == "best" else FABRIC_TCP
+
+
+def island_fabric(args, spec) -> str:
+    """:func:`multinode_fabric` of an island ``spec`` (a ``ClusterSpec``) under ``args``:
+    the same order ``rl_island_task`` places (``network_tier`` when it asks for one)."""
+    return multinode_fabric(spec.cloud, spec.gpu, spec.gpus_per_node, num_nodes=spec.num_nodes,
+                            network_tier=getattr(args, "rl_island_network_tier", "auto") or "auto")
+
+
+def multinode_env_prelude(cloud: str, num_nodes: int, *, fabric: str | None = None) -> str:
+    """Shell exports every island node runs before Ray starts; "" on one node.
+
+    ``fabric`` (:func:`island_fabric`): NCCL's IB transport stays on over RDMA or IB
+    and is off otherwise; over EFA libfabric is pointed at it (``FI_PROVIDER``). None:
+    :func:`multinode_fabric` of the cloud alone (Modal RDMA, TCP elsewhere)."""
     if num_nodes <= 1:
         return ""
-    # Modal clustered islands request RDMA (ModalIslandConfig.rdma): leave
-    # NCCL's IB transport on there; other clouds run NCCL over TCP.
-    ib_default = 0 if cloud in MULTINODE_IB_CLOUDS else 1
+    fabric = multinode_fabric(cloud, num_nodes=num_nodes) if fabric is None else fabric
+    if fabric not in MULTINODE_FABRICS:
+        raise ValueError(f"unknown multi-node fabric {fabric!r} (known: {MULTINODE_FABRICS})")
+    ib_default = 0 if fabric in IB_FABRICS else 1
     lines = [f"export NCCL_IB_DISABLE=${{NCCL_IB_DISABLE:-{ib_default}}}",
              "export NCCL_DEBUG=${NCCL_DEBUG:-WARN}"]
+    if fabric == FABRIC_EFA:
+        lines.append("export FI_PROVIDER=${FI_PROVIDER:-efa}")
     iface = MULTINODE_SOCKET_IFNAME.get(cloud, "")
     if iface == "auto":
         lines += [_DETECT_IFACE,
@@ -108,7 +158,8 @@ def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
 # offers the InfiniBand tier for H100:8 / H200:8 nodes only and REJECTS the
 # request for anything else ("Catalog does not contain any instances"), so a
 # 2x1xL40S island must not ask for it (the multi-node
-# prelude already runs NCCL over TCP with NCCL_IB_DISABLE=1 there).
+# prelude then runs NCCL over TCP with NCCL_IB_DISABLE=1 there; an 8x H100 / H200
+# island that orders the tier keeps NCCL's IB transport on, multinode_fabric).
 NETWORK_TIER_BEST_SHAPES = {"nebius": {("H100", 8), ("H200", 8)}}
 
 

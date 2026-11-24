@@ -374,6 +374,8 @@ EXPECTED_MILES_DECLARED = {
     "features:over_sampling",
     "features:overlong_filter",
     "features:clip_higher",
+    # k31 GPU evidence (entry.K31_SCORE_CENTERING_EVIDENCE): declared from FULL_D on
+    "losses:score_centering",
 }
 
 
@@ -382,9 +384,10 @@ def test_miles_and_fake_declarations():
 
     miles = miles_capabilities(FP)
     assert set(MILES_DECLARED) == EXPECTED_MILES_DECLARED
+    # the tests run on the ports-v1 head (conftest): the k31-only declaration is not on it
     assert miles.declared_mechanisms() == (
         R0_BUILTIN_MECHANISMS | EXPECTED_MILES_DECLARED
-    )
+    ) - {"losses:score_centering"}
     assert all(MILES_DECLARED[m] for m in MILES_DECLARED)  # every entry cites evidence
     # the fake declares every correction for CPU tests (and nothing else extra)
     fake = fake_capabilities()

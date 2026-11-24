@@ -134,6 +134,13 @@ MILES_DECLARED: dict[str, str] = {
     "features:kl_unbiased": "GPU run: kl_loss differs from k3",
     "corrections:opsm_rollout": "GPU run: opsm_clipfrac > 0 with opsm_old_logprob_source=rollout",
     "features:rollout_logprobs_as_old": "GPU run: use_rollout_logprobs=true in the event spec",
+    # k31 only (the loss exists on the k31 lineage alone; K31_SCORE_CENTERING_EVIDENCE)
+    "losses:score_centering": (
+        "GPU run (k31): K3.1-Pro 3x8 B300 with an MI355X vLLM sampler, TIS clip 2.0: step 0 "
+        "train/sc_correction 0.00229, sc_importance_weight 0.9979, sc_is_clipped 0.40% (0.47% at step 1), "
+        "no pg_clipfrac (the policy loss is not run); the 16-layer K3.1 run on the customer pin at CP 2 "
+        "reports sc_is_clipped 0.0175%"
+    ),
 }
 
 
@@ -177,6 +184,20 @@ _PORTS_V1_64B591A4B = EvidenceRef(
     "ports-v1", "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
     "rl-algo-supplement-phase1-gpu", "rl-algo-supplement/evidence/phase1-gpu (archived outside the repo)",
 )
+# k31 GPU runs (2026-11-10 and 2026-11-19). The 11-10 run's Miles c351a33c has the
+# source tree of FULL_D (9fa600b9; the fork's history was rewritten after the run).
+_K31_FULL_D_RL5 = EvidenceRef(
+    "k31", "9fa600b9ae9d8c4024f3c2e4cd23a8ed433b2b54",
+    "k31-rl-5 (2026-11-10, K3.1-Pro 3x8 B300, MI355X vLLM sampler, Miles c351a33c = FULL_D tree, 2 steps)",
+    "kimi-k31-rl-handoff ops/full/runs/k31-rl-5.log (archived outside the repo)",
+)
+_K31_NEXT9_X9 = EvidenceRef(
+    "k31", "f61eb35dd2d9e63323aea2f5bac7ef6ee5c3e912",
+    "k31-mfu16-x9 (2026-11-19, 16-layer K3.1 on 2x8 B300, TP8 CP2 EP16, replayed rollouts)",
+    "kimi-k31-rl-handoff ops/mfu-16l/runs/x9.log (archived outside the repo)",
+)
+K31_SCORE_CENTERING_EVIDENCE = (_K31_FULL_D_RL5, _K31_NEXT9_X9)
+
 MILES_DECLARED_EVIDENCE: dict[str, tuple[EvidenceRef, ...]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss
     # (grad_norm bit-identical to the baseline)
@@ -188,6 +209,8 @@ MILES_DECLARED_EVIDENCE: dict[str, tuple[EvidenceRef, ...]] = {
     **{m: (_PORTS_V1_64B591A4B,) for m in ("losses:cispo", "losses:sapo", "losses:gmpo", "features:dual_clip",
                                             "features:kl_unbiased", "corrections:opsm_rollout",
                                             "features:rollout_logprobs_as_old")},
+    # the loss exists on the k31 lineage only; FULL_D on (the customer pin NEXT9 included)
+    "losses:score_centering": K31_SCORE_CENTERING_EVIDENCE,
 }
 
 
@@ -229,6 +252,16 @@ def needs_k31_reverification(miles_commit: str | None = None) -> dict[str, str]:
         return {}
     return {m: why for m, why in K31_REVERIFY.items()
             if not any(evidence_covers(ref, commit) for ref in MILES_DECLARED_EVIDENCE.get(m, ()))}
+
+
+def undeclared_allowance(names: Any, miles_commit: str | None = None) -> tuple[str, ...]:
+    """The ``--rl-allow-unverified-mechanism`` names still undeclared on ``miles_commit``
+    (default :func:`pins.current_miles_commit`), sorted. An allowance for a mechanism the
+    pin declares is a no-op: it neither widens the capabilities nor marks the run's
+    artifacts as holding an unverified mechanism."""
+    declared = {f"{dimension}:{name}" for dimension, found in declared_by_dimension(miles_commit).items()
+                for name in found}
+    return tuple(sorted({str(name) for name in names or ()} - declared))
 
 
 def evidence_covers(ref: EvidenceRef, miles_commit: str) -> bool:
@@ -308,7 +341,9 @@ def miles_capabilities(
         **declared_by_dimension(),
     )
     if unverified_mechanisms:
-        capabilities = capabilities.with_unverified(unverified_mechanisms)
+        # an unknown name is refused (with_unverified); a declared one is a no-op
+        capabilities.with_unverified(unverified_mechanisms)
+        capabilities = capabilities.with_unverified(undeclared_allowance(unverified_mechanisms))
     return capabilities
 
 
@@ -1418,15 +1453,16 @@ def selection_event(
     (``yeto.rl.engine.selection.engine_selected_event``, the record every backend writes).
 
     ``rl/algorithm_absorbed_flags`` lists flags absorbed from extra argv;
-    ``rl/unverified_mechanisms`` the unverified-mechanism allowances (an artifact of
-    such a run contains unverified mechanisms).
+    ``rl/unverified_mechanisms`` the unverified-mechanism allowances still undeclared on
+    ``miles_commit`` (an artifact of such a run contains unverified mechanisms; an
+    allowance for a declared mechanism is a no-op, :func:`undeclared_allowance`).
     """
     from yeto.rl.engine.selection import engine_selected_event
 
     return engine_selected_event(
         algorithm=algorithm, placement=launch.placement.kind, backend_fields={"miles_commit": miles_commit},
-        absorbed_flags=getattr(launch, "absorbed_flags", None), unverified_mechanisms=unverified_mechanisms,
-        outer_sync=outer_sync)
+        absorbed_flags=getattr(launch, "absorbed_flags", None),
+        unverified_mechanisms=undeclared_allowance(unverified_mechanisms, miles_commit), outer_sync=outer_sync)
 
 
 def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str | None:
