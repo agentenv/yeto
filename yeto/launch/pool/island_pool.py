@@ -336,6 +336,12 @@ class IslandPool:
     # controller, or a detach): its machines are someone else's to drive now
     detached: str | None = None
     _reserved_shard: int | None = None  # a number the allocator issued that no order took yet
+    # releases run in the background (the fleet control plane's pool worker: a tick only
+    # decides; a release that hangs in a provider call never holds the tick). False (the
+    # default): ``ops.drain`` runs in the tick, as before. A stop always releases in line.
+    async_release: bool = False
+    _releases: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background release
+    _release_pool: Any = None
 
     def _control_stamp(self) -> Any:
         if self.scale_path is None:
@@ -886,41 +892,77 @@ class IslandPool:
                 return False
         self._drain_hold.pop(member.ticket, None)
         self._drain_on_halt.discard(member.ticket)
+        if self.async_release and not self.stopped:  # a stopping pool (the teardown) releases in line
+            return self._drain_in_background(member, why, now)
+        future = self._releases.pop(member.ticket, None)
+        if future is not None:  # a background release still running: the stop waits for it first
+            try:
+                future.result()
+                self._released(member, why)
+                return True
+            except Exception:  # noqa: BLE001 - released again in line below (idempotent)
+                pass
         try:
             self.ops.drain(member)
         except Exception as error:  # noqa: BLE001
-            member.drain_error = repr(error)[:300]
-            if error_is(error, DEFERRED_ERRORS + REFUSED_ERRORS) and self._ticket_ended(member):
-                # nothing to delete: the ticket ended on its own (evicted, expired, released
-                # in the console). The guard's refusal does not keep the member.
-                self._released(member, why, ended_already=True)
-                return True
-            if error_is(error, DEFERRED_ERRORS):  # it ends on its own shortly: asked again, not a failure
-                self._once(member, "release_deferred", "release_deferred", why=why, detail=str(error)[:300])
-                return False
-            if error_is(error, OWNERSHIP_ERRORS + REFUSED_ERRORS):
-                self._drain_hold[member.ticket] = now + SLOT_RETRY_S
-                action = (f"check the {self.config.slot_name}, then: python -m yeto.launch.nc clear-halt "
-                          f"--account {member.account} --yes; the pool then releases {member.ticket}")
-                if error_is(error, OWNERSHIP_ERRORS):
-                    self.log(f"pool: CRITICAL: releasing {member.ticket}: {error}"[:400])
-                    self._once(member, "release_ownership", "release_hit_foreign_ticket", level="critical", why=why,
-                               kind=type(error).__name__, error=str(error)[:300], action=action)
-                    self._note_halt(member.account, {"halt": str(error)[:300], "expected_ticket": member.ticket})
-                    self._drain_on_halt.add(member.ticket)
-                else:
-                    if error_is(error, HALTED_ERRORS):
-                        self._note_halt(member.account, {"halt": str(error)[:300]})
-                        self._drain_on_halt.add(member.ticket)
-                    self._once(member, "release_blocked", "release_blocked", level="alert", why=why,
-                               error=str(error)[:300], retry_in_s=SLOT_RETRY_S, action=action,
-                               detail="the member is kept as it is (still billed) until the release is allowed")
-                return False
-            self._event("drain_failed", ticket=member.ticket, account=member.account, why=why,
-                        error=member.drain_error)
-            return False
+            return self._drain_failed(member, why, error, now)
         self._released(member, why)
         return True
+
+    def _drain_in_background(self, member: Member, why: str, now: float) -> bool:
+        """:meth:`_drain` with ``async_release``: the release runs on a worker thread; each
+        tick looks at it once (False while it runs or after it failed, like a failed drain)."""
+        future = self._releases.get(member.ticket)
+        if future is None:
+            if self._release_pool is None:
+                from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+                self._release_pool = ThreadPoolExecutor(max_workers=max(2, len(self.config.accounts)),
+                                                        thread_name_prefix="pool-release")
+            self._releases[member.ticket] = self._release_pool.submit(self.ops.drain, member)
+            self._event("release_started", ticket=member.ticket, account=member.account, why=why)
+            return False
+        if not future.done():
+            return False
+        del self._releases[member.ticket]
+        error = future.exception()
+        if error is not None:
+            return self._drain_failed(member, why, error, now)
+        self._released(member, why)
+        return True
+
+    def _drain_failed(self, member: Member, why: str, error: BaseException, now: float) -> bool:
+        """A release that raised (in line or in the background): kept DRAINING, False."""
+        member.drain_error = repr(error)[:300]
+        if error_is(error, DEFERRED_ERRORS + REFUSED_ERRORS) and self._ticket_ended(member):
+            # nothing to delete: the ticket ended on its own (evicted, expired, released
+            # in the console). The guard's refusal does not keep the member.
+            self._released(member, why, ended_already=True)
+            return True
+        if error_is(error, DEFERRED_ERRORS):  # it ends on its own shortly: asked again, not a failure
+            self._once(member, "release_deferred", "release_deferred", why=why, detail=str(error)[:300])
+            return False
+        if error_is(error, OWNERSHIP_ERRORS + REFUSED_ERRORS):
+            self._drain_hold[member.ticket] = now + SLOT_RETRY_S
+            action = (f"check the {self.config.slot_name}, then: python -m yeto.launch.nc clear-halt "
+                      f"--account {member.account} --yes; the pool then releases {member.ticket}")
+            if error_is(error, OWNERSHIP_ERRORS):
+                self.log(f"pool: CRITICAL: releasing {member.ticket}: {error}"[:400])
+                self._once(member, "release_ownership", "release_hit_foreign_ticket", level="critical", why=why,
+                           kind=type(error).__name__, error=str(error)[:300], action=action)
+                self._note_halt(member.account, {"halt": str(error)[:300], "expected_ticket": member.ticket})
+                self._drain_on_halt.add(member.ticket)
+            else:
+                if error_is(error, HALTED_ERRORS):
+                    self._note_halt(member.account, {"halt": str(error)[:300]})
+                    self._drain_on_halt.add(member.ticket)
+                self._once(member, "release_blocked", "release_blocked", level="alert", why=why,
+                           error=str(error)[:300], retry_in_s=SLOT_RETRY_S, action=action,
+                           detail="the member is kept as it is (still billed) until the release is allowed")
+            return False
+        self._event("drain_failed", ticket=member.ticket, account=member.account, why=why,
+                    error=member.drain_error)
+        return False
 
     def _ticket_ended(self, member: Member) -> bool:
         """The provider reports the member's ticket ended (a failed read: not known, False)."""

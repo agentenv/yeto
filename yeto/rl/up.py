@@ -1197,6 +1197,10 @@ class Run:
             if flag.exists():  # left by an earlier stop: the new controller would drain every pool at once
                 _log(f"removing the STOP flag {flag} an earlier stop left: this run up drives the pools again")
                 flag.unlink(missing_ok=True)
+            detach = self.dir / "DETACH"
+            if detach.exists():  # left by `yeto run detach`: this run up adopts the pools
+                _log(f"removing the DETACH flag {detach}: this run up adopts and drives the pools again")
+                detach.unlink(missing_ok=True)
             self.start_controller()
             self.begin_up()
             self.mark("pool", controller="in_process", pools=[r.name for r in self.pools])
@@ -1377,6 +1381,10 @@ class Run:
         if section.get("control_plane") == "store":
             store_kw = {"control_objects": kw.pop("control_objects", None) or self._objects(),
                         "lock_ttl_s": section.get("lock_ttl_s")}
+            # one worker per pool under a supervisor; `yeto run detach` (the DETACH flag) leaves
+            # the samplers running for the next run up to adopt
+            kw.setdefault("pool_workers", True)
+            kw.setdefault("detach_flag", self.dir / "DETACH")
         try:
             for ref in self.pools:
                 more = dict(store_kw, name=ref.name) if store_kw else {}
@@ -1398,6 +1406,18 @@ class Run:
             atexit.register(self._undriven_banner)
         _log(f"rollout controller: {len(slots)} pool(s) in this process ({', '.join(slots)})")
         return self.controller
+
+    def request_detach(self) -> int:
+        """``yeto run detach``: the DETACH flag the store control plane's controller watches."""
+        if rollout_section(self.cfg).get("control_plane") != "store":
+            _log("detach: refused: needs rollout.control_plane \"store\" (the local control plane keeps "
+                 "rollout.drain_on_exit false and a process exit for that)")
+            return 2
+        flag = self.dir / "DETACH"
+        flag.write_text(_now() + "\n")
+        _log(f"detach: requested ({flag}); the controller stops driving the pools without a drain within a "
+             "second; the samplers keep running. `yeto run up --config <run.json>` adopts them under their shards")
+        return 0
 
     def _undriven_banner(self) -> None:
         """At exit with ``rollout.drain_on_exit`` false: what is left running, undriven."""
@@ -1542,6 +1562,10 @@ class Run:
         A drain that fails prints the billing banner and is not retried at exit (the
         controller leaves the active list either way). False: the drain failed."""
         controller = getattr(self, "controller", None)
+        if controller is not None and not controller.stopped and not controller.drain_on_exit \
+                and getattr(controller, "detached", None) is None \
+                and any(getattr(p, "control", None) is not None for p in controller.pools.values()):
+            controller.detach("process exit")  # the store locks: released for the next run up
         if controller is None or controller.stopped or not controller.drain_on_exit:
             return True
         from yeto.launch.pool import controller as ctl  # noqa: PLC0415
@@ -3346,7 +3370,7 @@ def pause_resume(run: Run, command: str, tickets: list[str], *, hold_tasks: bool
 def add_parser(sub: Any) -> None:
     p = sub.add_parser("run", help="one run config, one command: up / status / down of an async GRPO run "
                        "(yeto rl is the single-process CyberGym PPO path)")
-    rsub = p.add_subparsers(dest="rl_command", metavar="{up,status,down,scale,pause,resume}")
+    rsub = p.add_subparsers(dest="rl_command", metavar="{up,status,down,detach,scale,pause,resume}")
     rsub.required = True
     up = rsub.add_parser("up", help="preflight, sandbox, pool, first group, trainer, dashboard, monitor")
     up.add_argument("--config", required=True)
@@ -3362,6 +3386,9 @@ def add_parser(sub: Any) -> None:
     for name in ("status", "down"):
         q = rsub.add_parser(name)
         q.add_argument("--config", required=True)
+    q = rsub.add_parser("detach", help="rollout.control_plane store: the run up controller stops driving the pools "
+                        "without draining them (the samplers keep running); the next run up adopts them")
+    q.add_argument("--config", required=True)
     from yeto.launch.nc.scale_args import add_scale_args  # noqa: PLC0415 - no imports of its own
 
     sc = rsub.add_parser("scale", help="add or remove sampler nodes while the run trains (= yeto rollout scale)")
@@ -3588,6 +3615,8 @@ def main(args: Any) -> int:
         return 0
     if args.rl_command == "down":
         return 0 if run.down() else 1
+    if args.rl_command == "detach":
+        return run.request_detach()
     if args.rl_command == "scale":
         return run.scale(args.target, args.retire, add=args.add, remove=args.remove, mode=args.mode,
                          force_static=args.force_static, dry_run=args.dry_run, source=args.source,
