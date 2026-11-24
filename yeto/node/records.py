@@ -231,8 +231,9 @@ def next_generation(objects: Any, ticket: str) -> int:
     listed = _listed_generation(objects, ticket)
     if previous is not None and previous.get("torn"):  # a node of the lost generation may still be booting
         raise AssignmentError(f"the assignment of ticket {ticket} is not readable JSON: its generation is "
-                              "unknown, not reassigned (revoke_assignment writes a tombstone past every "
-                              "generation its node records show; then assign again)")
+                              "unknown, not reassigned. Revoke it (a tombstone past every generation its node "
+                              f"records show), then assign again: python -m yeto.node revoke --assignment {ticket} "
+                              "--store <run store> [--env-file <store env file>]")
     return max(int((previous or {}).get("generation") or 0), listed or 0) + 1
 
 

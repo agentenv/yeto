@@ -105,7 +105,11 @@ def test_a_generation_never_goes_back(tmp_path):
     with pytest.raises(records.AssignmentError, match="not reassigned"):
         records.assign(objects, ticket="t", shard="s", spec={}, code=code)
     assert node_status(objects, "t").state == "unassigned"
-    records.revoke_assignment(objects, "t")  # the torn one: a tombstone past g2 (its node may still boot)
+    from yeto.node.__main__ import main as node_main  # noqa: PLC0415
+
+    with pytest.raises(records.AssignmentError, match="python -m yeto.node revoke --assignment t "):
+        records.assign(objects, ticket="t", shard="s", spec={}, code=code)
+    assert node_main(["revoke", "--assignment", "t", "--store", str(tmp_path)]) == 0  # the command it names
     assert json.loads(objects.read(records.assignment_key("t")))["generation"] == 3
     again, token = records.assign(objects, ticket="t", shard="s", spec={}, code=code)
     assert again.generation == 4
