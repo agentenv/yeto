@@ -543,6 +543,9 @@ def pre_cloud_checks(args, *, counter=None, sleep=None, clock=time.monotonic, ou
     from .launch.model_check import preflight_trainer_model
 
     preflight["model"] = preflight_trainer_model(args, out=out)  # before any order
+    from .launch.trainer_image_check import check_trainer_images
+
+    check_trainer_images(args, specs, out=out)  # an image its cards cannot run: refused here
     xhw = xhw_family_advice(args, specs, out=out)
     if xhw is not None:  # only a launch over several device families gets the record
         preflight["xhw"] = xhw

@@ -616,20 +616,21 @@ def _plan(engine, extra=(), gpu="aws:1xa100@us-east-1"):
 
 
 def test_dry_run_no_sync_single_gpu_no_syncer():
+    # an sm90+ card: the Miles image is refused below it (trainer_image_check)
     plan = _plan("ports", ("--rl-single-island-no-sync", "--rl-allow-unverified-mechanism",
-                           "features:clip_higher"))
+                           "features:clip_higher"), gpu="aws:1xh100@us-east-1")
     assert plan["islands"] == 1 and plan["total_gpus"] == 1
     assert plan["syncer"] is None and plan["outer_sync"] is False
     assert plan["algorithm_spec_sha256"] == AlgorithmSpec().sha256()
     assert plan["unverified_mechanisms"] == ["features:clip_higher"]
     [island] = plan["island_requests"]
-    assert island["gpu"] == "A100" and island["total_gpus"] == 1
+    assert island["gpu"] == "H100" and island["total_gpus"] == 1
     assert "--rl-single-island-no-sync" in island["learner_command"]
     assert "--syncer" not in island["learner_command"]
 
 
 def test_dry_run_default_two_islands_with_syncer():
-    plan = _plan("ports", gpu="aws:1xa100@us-east-1,aws:1xa100@us-west-2")
+    plan = _plan("ports", gpu="aws:1xh100@us-east-1,aws:1xh100@us-west-2")
     assert plan["islands"] == 2 and plan["total_gpus"] == 2 and plan["outer_sync"]
     assert plan["syncer"].endswith("-syncer")
     assert all("--syncer $SYNCER_ADDR" in i["learner_command"] for i in plan["island_requests"])
@@ -655,7 +656,7 @@ def test_cli_dry_run_creates_nothing(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_spawn_worker", lambda *a, **k: calls.append("spawn"))
     monkeypatch.setattr(cli.runs, "create_run", lambda *a, **k: calls.append("create"))
     args = _launcher_args("ports", ("--rl-single-island-no-sync", "--dry-run",
-                                    "--controller", "local"))
+                                    "--controller", "local"), gpu="aws:1xh100@us-east-1")
     assert cli.cmd_launch(args) == 0
     plan = json.loads(capsys.readouterr().out)
     assert plan["dry_run"] and plan["total_gpus"] == 1 and plan["syncer"] is None
@@ -864,8 +865,9 @@ def test_no_sync_run_refuses_existing_tapes(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    # an sm90+ card: the Miles image is refused below it (trainer_image_check)
     args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local"),
-                          gpu="modal:1xa100")
+                          gpu="modal:1xh100")
     events = tmp_path / "runs" / args.cluster_prefix / "events"
     events.mkdir(parents=True)
     (events / "old.jsonl").write_text("{}\n")
@@ -1058,8 +1060,9 @@ def test_relaunch_of_the_same_run_moves_earlier_tapes_aside(monkeypatch, tmp_pat
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    # an sm90+ card: the Miles image is refused below it (trainer_image_check)
     args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local"),
-                          gpu="modal:1xa100")
+                          gpu="modal:1xh100")
     run_dir = tmp_path / "runs" / args.cluster_prefix
     (run_dir / "events").mkdir(parents=True)
     (run_dir / "events" / "old.jsonl").write_text("{}\n")

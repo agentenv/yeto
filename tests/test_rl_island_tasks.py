@@ -334,7 +334,8 @@ def test_non_ports_paths_refuse_island_tasks(factory):
 # --- with per-island placement (rl-mixed-island-placement) ---------------------------------
 
 
-MIXED_GPUS = "aws:1xa100@us-east-1,aws:2xa100@us-west-2"
+# an sm90+ card: the Miles image is refused below it (trainer_image_check)
+MIXED_GPUS = "aws:1xh100@us-east-1,aws:2xh100@us-west-2"
 MIXED_PLACEMENT = ("--rl-island-placement", "1:placement=fixed-partition",
                    "--rl-rollout-gpus", "1")
 ISLAND_POOL = ("--rl-sync-quorum-theta", "0.75", "--rl-sync-max-base-lag", "2")

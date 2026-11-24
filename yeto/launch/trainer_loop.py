@@ -104,6 +104,12 @@ def add_arguments(group) -> None:
         "Not needed when the run code pack is in an s3:// --rl-checkpoint-store (every node "
         "downloads it) or with --rl-code-pack release")
     group.add_argument(
+        "--rl-ssh-trainer-activate", action="append", default=None, metavar="SCRIPT",
+        help="with an ssh: trainer island on runtime: rootfs nodes: a script the job sources before the "
+        "trainer, e.g. a venv's bin/activate or CANN's set_env.sh (repeat it; sourced in order; a missing "
+        "script fails the job). Unset: an Ascend (npu) node sources CANN's ascend-toolkit and ATB "
+        "set_env.sh when it has them")
+    group.add_argument(
         "--rl-trainer-command-poll-seconds", type=float, default=None,
         help="seconds between two reads of the command file on the trainer island and of "
         "the island events on the head (default 5)")

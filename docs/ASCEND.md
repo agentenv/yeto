@@ -160,8 +160,9 @@ load and restores its original quantizer hooks afterwards.
 
 ## Running a pure-Ascend fleet
 
-SkyPilot cannot provision Huawei Cloud or on-prem Ascend, so `yeto launch` is
-not the entry point here: run the syncer and the learners directly.
+SkyPilot cannot provision Huawei Cloud or on-prem Ascend. For SFT, run the syncer
+and the learners directly; an RL trainer island can start from the node inventory
+(next section).
 
 ```bash
 # once, on any machine that can build Rust
@@ -194,6 +195,42 @@ Two flags are worth knowing before the first run:
   process may touch, the way `CUDA_VISIBLE_DEVICES` does. Do not confuse it with
   `ASCEND_VISIBLE_DEVICES`, the Docker-runtime knob that decides which cards are
   passed into the container in the first place.
+
+### An RL trainer island from the node inventory
+
+An RL run (`--rl-backend verl`) can start its trainer island on inventory nodes
+through `yeto launch`: declare the nodes in a `--rl-node-inventory` file and use an
+`ssh:` island in `--gpu`. Two 910B4 nodes, one island:
+
+```yaml
+nodes:
+  - {name: npu-0, host: ops@192.0.2.30, address: 198.51.100.30, interface: enp189s0f0,
+     device_family: npu, cpu_arch: aarch64, card: 910B4, cards_per_node: 8, hbm_gib: 32,
+     host_memory_gib: 1024, fabric: roce, runtime: rootfs}
+  - {name: npu-1, host: ops@192.0.2.31, address: 198.51.100.31, interface: enp189s0f0,
+     device_family: npu, cpu_arch: aarch64, card: 910B4, cards_per_node: 8, hbm_gib: 32,
+     host_memory_gib: 1024, fabric: roce, runtime: rootfs}
+```
+
+```bash
+yeto launch --training-mode rl --rl-backend verl --gpu ssh:2x8x910b4 \
+  --rl-node-inventory inventory.yaml --rl-ssh-trainer-workdir /opt/yeto \
+  --rl-ssh-trainer-activate /opt/verl-npu/bin/activate ... --dry-run
+```
+
+- **Environment.** No Ascend trainer image is pinned, so a `runtime: rootfs` node runs
+  the trainer in the node's own Python environment. Before the trainer, the job sources
+  each `--rl-ssh-trainer-activate` script in order (a missing one fails the job). Without
+  the flag, an `npu` node sources `/usr/local/Ascend/ascend-toolkit/set_env.sh` and
+  `/usr/local/Ascend/nnal/atb/set_env.sh` when they exist. A `runtime: docker` node needs
+  a registry image (`--rl-image docker:<registry>/<image>@sha256:<digest>`): the verl
+  default `verl-build:<commit>` is built on Modal and is refused there.
+- **HCCL.** A multi-node island exports `HCCL_CONNECT_TIMEOUT=1800` and, from the
+  node's `interface`, `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`; the node's `env`
+  adds what yeto cannot derive (e.g. `HCCL_BUFFSIZE`). A node without `interface` is
+  named in the dry-run warnings.
+- **What the dry-run shows.** `island_requests[0].ssh_island` lists every node's
+  command, the names of its environment, the activation scripts and the rank layout.
 
 ### Version matrix
 

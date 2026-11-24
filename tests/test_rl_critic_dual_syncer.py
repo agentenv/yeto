@@ -20,7 +20,8 @@ PPO = AlgorithmSpec(advantage_estimator="ppo")
 def _two_island_args(spec=None):
     from yeto.launcher import _prepare_rl_args
 
-    args = _launcher_args("ports", gpu="aws:1xa100@us-east-1,aws:1xa100@us-west-2")
+    # an sm90+ card: the Miles image is refused below it (trainer_image_check)
+    args = _launcher_args("ports", gpu="aws:1xh100@us-east-1,aws:1xh100@us-west-2")
     args.controller = "local"
     _prepare_rl_args(args)
     if spec is not None:

@@ -101,8 +101,10 @@ def test_cli_dry_run_fails_with_the_fix(monkeypatch, capsys):
     assert "--rl-max-tokens-per-gpu to at least 32768" in captured.err + captured.out
     assert calls == []
     # the same options with a budget that fits: a dry-run plan, rc 0
+    # an sm90+ card: the Miles image is refused below it (trainer_image_check)
     ok = _launcher_args("ports", ("--seq-len", "32768", "--rl-max-tokens-per-gpu", "32768",
-                                  "--rl-single-island-no-sync", "--dry-run", "--controller", "local"))
+                                  "--rl-single-island-no-sync", "--dry-run", "--controller", "local"),
+                        gpu="aws:1xh100@us-east-1")
     assert cli.cmd_launch(ok) == 0
     assert json.loads(capsys.readouterr().out)["dry_run"]
 

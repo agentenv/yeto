@@ -541,6 +541,14 @@ def dry_run_record(args: Any, spec: SshTrainerSpec, name: str, *, mode: str = "r
         nodes.append(entry)
     warnings = [f"file mount {t}: {local} is not a readable file" for t, local in sorted(spec.files.items())
                 if not Path(str(local)).expanduser().is_file()]
+    from .ssh_trainer_island import activation
+
+    scripts, required = activation(spec)
+    if len(spec.nodes) > 1 and spec.device_family == "npu":
+        bare = [n.name for n in spec.nodes if not n.interface]
+        if bare:
+            warnings.append(f"nodes {bare} declare no interface: HCCL_SOCKET_IFNAME and GLOO_SOCKET_IFNAME are not "
+                            "set, so HCCL picks the interface itself; set `interface` in the inventory")
     from .ssh_trainer_island import code_source
 
     source = code_source(args)
@@ -563,6 +571,7 @@ def dry_run_record(args: Any, spec: SshTrainerSpec, name: str, *, mode: str = "r
         "journal": str(runs.run_dir(spec.run_id) / RESIDENT_DIR / f"{name}-jobs.json") if mode == "resident" else None,
         "env_order": "fabric defaults < inventory node env < --island-env and the island task env",
         "image": spec.image or spec.nodes[0].image,
+        **({"activate": {"scripts": list(scripts), "required": required}} if scripts else {}),
         "files": sorted(spec.files),
         "nodes": nodes,
         "rank_layout": rank_layout(spec, tensor_parallel=int(getattr(args, "tensor_parallel", 1) or 1),
