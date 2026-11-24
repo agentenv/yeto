@@ -3,34 +3,47 @@ hysteresis, the spot gap clock, island floors, the run budget, the slow loop."""
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from yeto.cloud import replace as cloud_replace
 from yeto.launch.pool import broker as b
 
 
-class Prices:
-    def __init__(self, table):
-        self.table = table
+class Row:
+    """The shape of offer_ledger.OfferStats."""
 
-    def node_usd_h(self, offer):
-        return self.table.get(offer.key)
+    def __init__(self, p50=None, p90=None, success=None, hazard=None, tput=None):
+        self.start_p50_s, self.start_p90_s, self.start_success_rate, self.hazard_per_h = p50, p90, success, hazard
+        self._tput = tput
+
+    def tokens_per_s(self, model):
+        return (self._tput or {}).get(model)
 
 
 class Ledger:
     def __init__(self, rows):
         self.rows = rows
 
-    def stats(self, offer, model=None):
-        return self.rows.get(offer.key)
+    def get(self, offer):
+        return self.rows.get(offer)
 
 
-class Life:
-    def __init__(self, rows):
-        self.rows = rows
+class Prices:
+    """The shape of yeto.cost.prices.node_usd_h."""
 
-    def expected_life_s(self, offer, now):
-        return self.rows.get(offer.key)
+    def __init__(self, table):
+        self.table, self.asked = table, []
+
+    def node_usd_h(self, provider, gpu, gpus, *, spot=None, region=None):
+        self.asked.append((provider, gpu, gpus, spot, region))
+        return self.table.get((provider, gpu, spot))
+
+
+class Caps:
+    def __init__(self, cold_start_s=0.0, lease_s=None, hard_end=None):
+        self.cold_start_s, self.lease_s, self.hard_end = cold_start_s, lease_s, hard_end
 
 
 def offer(pool, name, tier, *, island="0", provider="sky", region="r1", gpu="L4", usd=1.0, cap=None,
@@ -56,20 +69,58 @@ def test_score_is_price_over_throughput_times_availability_via_replace_score():
     assert d.scores["p/spot"] == pytest.approx(same.score) and d.targets == {"p/spot": 0, "p/x": 1}
 
 
-def test_score_reads_the_protocols_before_the_stated_values():
-    o = offer("p", "nc", b.PREPAID, usd=99.0, tput=1.0, cold=1.0, life=1.0)
-    s = b.score_offer(o, prices=Prices({"p/nc": 10.0}),
-                      ledger=Ledger({"p/nc": b.OfferStats(cold_start_p50_s=1680.0, tokens_per_s=500.0)}),
-                      lifetimes=Life({"p/nc": 14400.0 - 1680.0}))
+def test_score_reads_the_sources_before_the_stated_values():
+    o = b.Offer(pool="p", name="nc", island="0", tier=b.PREPAID, provider="nc", gpu="MI355X", gpus=8,
+                usd_h=99.0, tokens_per_s=1.0, model="k31")
+    prices = Prices({("nc", "MI355X", None): 24.0})
+    caps = {"nc": Caps(cold_start_s=3600.0, lease_s=14400.0, hard_end="lease")}
+    s = b.score_offer(o, prices=prices, ledger=Ledger({"p/nc": Row(p50=1680.0, tput={"k31": 500.0})}),
+                      caps=caps.get)
     avail = (14400.0 - 1680.0) / 14400.0
-    assert s.usd_h == 10.0 and s.availability == pytest.approx(avail)
-    assert s.score == pytest.approx(10.0 / (500.0 * avail))
-    # no lifetime model: a measured reclaim rate gives E[life]
-    s = b.score_offer(o, ledger=Ledger({"p/nc": b.OfferStats(cold_start_p50_s=0.0, reclaim_per_h=2.0)}))
-    assert s.availability == pytest.approx(1.0)
+    assert prices.asked == [("nc", "MI355X", 8, None, None)], "prepaid: spot-ness not asked"
+    assert s.usd_h == 24.0 and s.availability == pytest.approx(avail), "NC: 4 h lease minus the measured start"
+    assert s.score == pytest.approx(24.0 / (500.0 * avail))
+    # no measurement: the capability table's cold start prior
+    assert b.score_offer(o, caps=caps.get).availability == pytest.approx((14400.0 - 3600.0) / 14400.0)
+    # a hazard cuts the life: (1 - exp(-lam T)) / lam; no hard end: 1 / lam
+    lam, span = 1.0 / 3600.0, 7200.0 - 200.0
+    modal = b.Offer(pool="m", name="l4", island="0", tier=b.SPOT, provider="modal", gpu="L4", gpus=1,
+                    hard_end_s=7200.0, usd_h=0.8)
+    row = Row(p50=200.0, hazard=1.0)
+    assert b.expected_life_s(modal, row, None) == pytest.approx((1 - math.exp(-lam * span)) / lam)
+    assert b.expected_life_s(offer("s", "a", b.SPOT, life=None), Row(hazard=2.0), None) == pytest.approx(1800.0)
+    assert b.expected_life_s(offer("s", "a", b.SPOT, life=None), None, None) == b.DEFAULT_LIFE_S
+    spot = b.Offer(pool="sky", name="h100", island="0", tier=b.SPOT, provider="sky", cloud="nebius",
+                   region="eu-north1", gpu="H100", gpus=8, ledger_key="H100:8@eu-north1/spot")
+    prices = Prices({("nebius", "H100", True): 6.32})
+    assert b.node_price(spot, prices) == 6.32 and prices.asked == [("nebius", "H100", 8, True, "eu-north1")]
+    assert b.score_offer(spot, ledger=Ledger({"H100:8@eu-north1/spot": Row(success=0.4)})).risks[-1] == \
+        "order success rate 40%", "the ledger is read by the offer's ledger key"
     assert b.score_offer(offer("p", "x", b.SPOT, usd=None)).score is None, "unknown price: not scored"
     own = b.score_offer(offer("p", "own", b.OWN, usd=None))
     assert own.score == 0.0 and own.usd_h == 0.0
+
+
+def test_the_real_sources_fit_the_protocols():
+    from yeto.launch.pool.offer_ledger import OfferLedger
+
+    ledger = OfferLedger.from_doc({"format": 1, "offers": {
+        "nc/nc": {"orders": 6, "ready": 5, "start_failed": 1, "ended": 5, "ready_s": 5 * 12000.0,
+                  "start_s": [1500.0, 1600.0, 1680.0, 1700.0, 1800.0],
+                  "throughput": {"k31": {"tokens": 3.6e6, "s": 3600.0}}}}})
+    real = b.real_sources()
+    assert real["ledger"] is None
+    real["ledger"] = ledger
+    nc = b.Offer(pool="nc", name="nc", island="0", tier=b.PREPAID, provider="nc", gpu="MI355X", gpus=8,
+                 capacity=2, model="k31")
+    spot = b.Offer(pool="sky", name="h100", island="0", tier=b.SPOT, provider="sky", cloud="nebius",
+                   region="eu-north1", gpu="H100", gpus=8, tokens_per_s=1000.0)
+    s = b.score_offer(nc, **real)
+    assert s.usd_h == pytest.approx(24.0) and s.terms["throughput"]["value"] == pytest.approx(1000.0)
+    assert s.availability == pytest.approx((14400.0 - 1680.0) / 14400.0)
+    assert b.node_price(spot, real["prices"]) == pytest.approx(6.32)
+    d = b.decide([nc, spot], [b.Demand("0", want=4)], **real)
+    assert d.targets == {"nc/nc": 2, "sky/h100": 2}
 
 
 # -- tier order -----------------------------------------------------------------------
@@ -260,6 +311,29 @@ def test_the_slow_loop_sends_changed_counts_only():
     sink.calls.clear()
     loop.tick()
     assert [c[0] for c in sink.calls] == ["own"], "an unchanged count is not sent again; a refused one is"
+
+
+def test_the_loop_sends_a_new_offer_mix_with_the_same_total():
+    offers = [offer("s", "a", b.SPOT, usd=1.0), offer("s", "b", b.SPOT, usd=2.0, region="r2")]
+    state = {"running": {}, "at_boundary": {}}
+    snap = lambda: b.Snapshot(offers=list(offers), demands=[b.Demand("0", want=2)], **state)  # noqa: E731
+    now, sink = [0.0], Sink()
+    loop = b.Broker(b.BrokerConfig(interval_s=10), snap, sink, clock=lambda: now[0])
+    loop.tick()
+    assert sink.calls == [("s", 2, {"s/a": 2, "s/b": 0}, "s/a")]
+    offers[0] = offer("s", "a", b.SPOT, usd=1.0, available=False)  # a sold out: same total, other mix
+    now[0] = 10.0
+    loop.tick()
+    assert sink.calls[-1] == ("s", 2, {"s/a": 0, "s/b": 2}, "s/b"), "the mix and the refill changed: sent"
+    now[0] = 20.0
+    loop.tick()
+    assert len(sink.calls) == 2, "nothing changed: nothing sent"
+    # only the refill offer changes (a node at its boundary, a much better offer)
+    offers[:] = [offer("s", "a", b.SPOT, usd=0.5), offer("s", "b", b.SPOT, usd=2.0, region="r2")]
+    state["running"] = {"s/b": 2}
+    now[0] = 30.0
+    loop.tick()
+    assert sink.calls[-1] == ("s", 2, {"s/a": 0, "s/b": 2}, "s/a")
 
 
 def test_scale_file_sink_writes_an_automatic_scale():

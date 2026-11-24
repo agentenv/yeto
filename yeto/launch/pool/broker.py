@@ -38,9 +38,13 @@ island no longer needs moves to an island short of nodes on the same offer
 without a new order: drain the old island's lane, load the new island's release,
 start a lane there (:func:`run_migration` over a :class:`LaneMover`).
 
-The price table, the offer ledger and the lifetime model are read through narrow
-protocols (:class:`PriceSource`, :class:`OfferLedger`, :class:`Lifetimes`) so the
-broker does not depend on how they are stored.
+The broker reads the unified price table (``yeto.cost.prices``), the offer ledger
+(``offer_ledger.OfferLedger``) and the provider capabilities (``provider.provider_caps``)
+through protocols of exactly their shapes (:class:`PriceTable`, :class:`OfferLedger`,
+:data:`CapsOf`; :func:`real_sources` hands over the real ones), so tests pass fakes.
+**Lifetime** (:func:`expected_life_s`): a node with a hard end ``H`` (a lease, a Modal
+function timeout) serves at most ``H - cold start``; a measured hazard ``lam`` makes it
+``(1 - exp(-lam x T)) / lam``; without a hard end ``1 / lam``.
 """
 
 from __future__ import annotations
@@ -62,32 +66,57 @@ DEFAULT_LIFE_S = 3600.0  # E[life] when neither the ledger nor the lifetime mode
 EVENT = "broker_decision"
 
 
-# -- what the broker reads (S3: price table, offer ledger, lifetime model) -------
+# -- what the broker reads (the shapes of yeto.cost.prices, offer_ledger, provider) ----
 
 
-class PriceSource(Protocol):
-    def node_usd_h(self, offer: Offer) -> float | None: ...  # whole node, USD/h; None: unknown
+class PriceTable(Protocol):
+    """``yeto.cost.prices`` (the module): a whole node's USD/h, None when not in the table."""
+
+    def node_usd_h(self, provider: str, gpu: Any, gpus: Any, *, spot: bool | None = None,
+                   region: str | None = None) -> float | None: ...
 
 
-@dataclass(frozen=True)
-class OfferStats:
-    """Measured facts of one offer (the offer ledger): cold start from order to a ready
-    member, order success rate, reclaims per node hour, tokens/s per node for the model."""
+class LedgerRow(Protocol):
+    """``offer_ledger.OfferStats``: one offer's measurements."""
 
-    cold_start_p50_s: float | None = None
-    cold_start_p90_s: float | None = None
-    success_rate: float | None = None
-    reclaim_per_h: float | None = None
-    tokens_per_s: float | None = None
-    samples: int = 0
+    @property
+    def start_p50_s(self) -> float | None: ...
+    @property
+    def start_p90_s(self) -> float | None: ...
+    @property
+    def start_success_rate(self) -> float | None: ...
+    @property
+    def hazard_per_h(self) -> float | None: ...
+    def tokens_per_s(self, model: str) -> float | None: ...
 
 
 class OfferLedger(Protocol):
-    def stats(self, offer: Offer, model: str | None = None) -> OfferStats | None: ...
+    """``offer_ledger.OfferLedger``: rows by offer key (the pool's offer / a sky offer key)."""
+
+    def get(self, offer: str) -> LedgerRow | None: ...
 
 
-class Lifetimes(Protocol):
-    def expected_life_s(self, offer: Offer, now: float) -> float | None: ...  # E[life] of a new node
+class Caps(Protocol):
+    """``provider.ProviderCaps``: the fields the lifetime model reads."""
+
+    cold_start_s: float
+    lease_s: float | None
+    hard_end: str | None
+
+
+CapsOf = Callable[[str], Caps]  # provider.provider_caps
+
+
+def real_sources(store: Any = None) -> dict[str, Any]:
+    """``prices`` / ``ledger`` / ``caps`` keyword arguments of :func:`decide` and
+    :class:`Broker` from the real modules (the ledger loaded from ``store``; None: no
+    ledger)."""
+    from yeto.cost import prices  # noqa: PLC0415
+
+    from .offer_ledger import OfferLedger as Ledger  # noqa: PLC0415
+    from .provider import provider_caps  # noqa: PLC0415
+
+    return {"prices": prices, "ledger": Ledger.load(store) if store is not None else None, "caps": provider_caps}
 
 
 # -- inputs and outputs ------------------------------------------------------------
@@ -114,6 +143,10 @@ class Offer:
     cold_start_s: float | None = None
     life_s: float | None = None
     model: str | None = None
+    gpus: int = 0  # GPUs of one node (the price table prices n / gpus of a row)
+    cloud: str = ""  # where a sky offer runs (nebius, aws, ...): its price row; "": the provider
+    ledger_key: str | None = None  # the offer's key in the offer ledger (None: ``key``)
+    hard_end_s: float | None = None  # a node's hard life (Modal: the function timeout; None: the provider's lease)
 
     def __post_init__(self) -> None:
         if self.tier not in TIERS:
@@ -200,55 +233,95 @@ class Decision:
 # -- scoring -----------------------------------------------------------------------
 
 
-def score_offer(offer: Offer, *, prices: PriceSource | None = None, ledger: OfferLedger | None = None,
-                lifetimes: Lifetimes | None = None, now: float = 0.0, per_token: bool = True) -> Scored:
+def node_price(offer: Offer, prices: PriceTable | None) -> float | None:
+    """The offer's whole-node USD/h: the price table's row (by cloud, gpu, gpus, spot-ness,
+    region), else the stated ``usd_h``; an own machine costs nothing."""
+    usd_h = None
+    if prices is not None and offer.tier != OWN and offer.gpus and offer.gpu:
+        spot = {SPOT: True, ON_DEMAND: False}.get(offer.tier)
+        usd_h = prices.node_usd_h(offer.cloud or offer.provider, offer.gpu, offer.gpus, spot=spot,
+                                  region=offer.region or None)
+    if usd_h is None:
+        usd_h = offer.usd_h
+    return 0.0 if usd_h is None and offer.tier == OWN else usd_h
+
+
+def _row(offer: Offer, ledger: OfferLedger | None) -> LedgerRow | None:
+    return ledger.get(offer.ledger_key or offer.key) if ledger is not None else None
+
+
+def cold_start_s(offer: Offer, row: LedgerRow | None, caps: Caps | None) -> tuple[float, str]:
+    if row is not None and row.start_p50_s is not None:
+        return float(row.start_p50_s), "offer ledger start p50"
+    if offer.cold_start_s is not None:
+        return float(offer.cold_start_s), "stated cold start"
+    if caps is not None and caps.cold_start_s:
+        return float(caps.cold_start_s), "capability table cold start prior"
+    return 0.0, "cold start unknown"
+
+
+def expected_life_s(offer: Offer, row: LedgerRow | None, caps: Caps | None) -> float:
+    """E[useful life] of a new node: ``H - cold`` under a hard end ``H`` (``offer.hard_end_s``,
+    else the provider's lease), cut by the measured hazard; ``1 / lam`` without a hard end;
+    else the stated ``life_s``, else :data:`DEFAULT_LIFE_S`."""
+    cold = cold_start_s(offer, row, caps)[0]
+    hard = offer.hard_end_s
+    if hard is None and caps is not None and caps.hard_end == "lease" and caps.lease_s:
+        hard = float(caps.lease_s)
+    lam = row.hazard_per_h / 3600.0 if row is not None and row.hazard_per_h else None
+    if hard is not None:
+        span = max(0.0, hard - cold)
+        return span if not lam else (1.0 - math.exp(-lam * span)) / lam
+    if lam:
+        return 1.0 / lam
+    return float(offer.life_s) if offer.life_s is not None else DEFAULT_LIFE_S
+
+
+def _tput(offer: Offer, row: LedgerRow | None) -> tuple[float | None, str]:
+    measured = row.tokens_per_s(offer.model) if row is not None and offer.model else None
+    if measured:
+        return measured, "offer ledger"
+    return offer.tokens_per_s, "stated tokens_per_s"
+
+
+def score_offer(offer: Offer, *, prices: PriceTable | None = None, ledger: OfferLedger | None = None,
+                caps: CapsOf | None = None, per_token: bool = True) -> Scored:
     """Cost per unit of work of one offer. :func:`yeto.cloud.replace.score` with the price,
     prep = cold start and stay = E[life] gives price x (1 + cold / life) = price /
     availability (USD per useful node hour); divided by tokens/s it is USD per unit of work.
     ``per_token`` False (some offer of the decision has no throughput) keeps USD per
     useful node hour, so every offer is ranked in one unit. An own machine costs nothing
     (score 0). Unknown price: no score (the offer is not used)."""
-    stats = ledger.stats(offer, offer.model) if ledger is not None else None
-    usd_h = prices.node_usd_h(offer) if prices is not None else None
-    if usd_h is None:
-        usd_h = offer.usd_h
-    if offer.tier == OWN and usd_h is None:
-        usd_h = 0.0
-    tput = (stats.tokens_per_s if stats and stats.tokens_per_s else None) or offer.tokens_per_s
-    measured_cold = stats is not None and stats.cold_start_p50_s is not None
-    cold = stats.cold_start_p50_s if measured_cold else offer.cold_start_s  # type: ignore[union-attr]
-    life = lifetimes.expected_life_s(offer, now) if lifetimes is not None else None
-    if life is None and stats and stats.reclaim_per_h:
-        life = 3600.0 / stats.reclaim_per_h
-    life = offer.life_s if life is None else life
-    life = DEFAULT_LIFE_S if life is None else float(life)
-    cold = 0.0 if cold is None else float(cold)
+    row = _row(offer, ledger)
+    kind_caps = caps(offer.provider) if caps is not None else None
+    usd_h = node_price(offer, prices)
+    tput, tput_source = _tput(offer, row)
+    cold, cold_source = cold_start_s(offer, row, kind_caps)
+    life = expected_life_s(offer, row, kind_caps)
     availability = life / (life + cold) if life + cold > 0 else 1.0
     if offer.tier == OWN:
         return Scored(offer, usd_h, 0.0, availability, {"price": {"value": 0.0, "source": "own machine"}}, ())
     c = cloud_replace.score(
-        cloud_replace.Offer(cloud=offer.provider, region=offer.region, gpu=offer.gpu, gpus=0,
+        cloud_replace.Offer(cloud=offer.provider, region=offer.region, gpu=offer.gpu, gpus=offer.gpus,
                             price_per_hour=usd_h, has_weights=True),
-        prep_s=cold, prep_source="offer ledger cold start p50" if measured_cold else "stated cold start",
-        expected_stay_s=life)
+        prep_s=cold, prep_source=cold_source, expected_stay_s=life)
     risks = [r for r in c.risks if r not in ("reclaim rate unknown", "effective compute unknown")]
     terms = dict(c.terms)
     value = c.score
     if value is not None and per_token and tput:
         value = value / tput
-        terms["throughput"] = {"value": tput, "source": "offer ledger" if stats and stats.tokens_per_s
-                               else "stated tokens_per_s"}
+        terms["throughput"] = {"value": tput, "source": tput_source}
     elif value is not None:
         risks.append("throughput unknown: ranked per useful node hour" if not tput
                      else "another offer has no throughput: ranked per useful node hour")
-    if stats is not None and stats.success_rate is not None and stats.success_rate < 0.5:
-        risks.append(f"order success rate {stats.success_rate:.0%}")
+    rate = row.start_success_rate if row is not None else None
+    if rate is not None and rate < 0.5:
+        risks.append(f"order success rate {rate:.0%}")
     return Scored(offer, usd_h, value, availability, terms, tuple(risks))
 
 
 def _throughput_known(offer: Offer, ledger: OfferLedger | None) -> bool:
-    stats = ledger.stats(offer, offer.model) if ledger is not None else None
-    return bool((stats and stats.tokens_per_s) or offer.tokens_per_s)
+    return bool(_tput(offer, _row(offer, ledger))[0])
 
 
 # -- the decision ------------------------------------------------------------------
@@ -256,8 +329,8 @@ def _throughput_known(offer: Offer, ledger: OfferLedger | None) -> bool:
 
 def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mapping[str, int] | None = None,
            at_boundary: Mapping[str, int] | None = None, policy: Policy = Policy(), budget: Budget = Budget(),
-           state: State | None = None, now: float = 0.0, prices: PriceSource | None = None,
-           ledger: OfferLedger | None = None, lifetimes: Lifetimes | None = None) -> Decision:
+           state: State | None = None, now: float = 0.0, prices: PriceTable | None = None,
+           ledger: OfferLedger | None = None, caps: CapsOf | None = None) -> Decision:
     """The node count of every offer. ``running``: nodes each offer holds now (ordered
     and alive); ``at_boundary``: how many of those are at a natural boundary and may be
     placed anew. ``state``: the previous tick's (spot gap clocks); the decision carries
@@ -267,8 +340,7 @@ def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mappi
     state = State(dict(state.spot_gap_since)) if state is not None else State()
     offers = list(offers)
     per_token = all(_throughput_known(o, ledger) for o in offers if o.tier != OWN)
-    scored = {o.key: score_offer(o, prices=prices, ledger=ledger, lifetimes=lifetimes, now=now, per_token=per_token)
-              for o in offers}
+    scored = {o.key: score_offer(o, prices=prices, ledger=ledger, caps=caps, per_token=per_token) for o in offers}
     demand = {d.island: d for d in demands}
     ceiling = budget.hourly_ceiling(policy.usd_per_h)
     notes: list[str] = []
@@ -486,13 +558,14 @@ class Snapshot:
     budget: Budget = Budget()
     nodes: list[Node] = field(default_factory=list)  # phase 2: the nodes a move may take
     ended: tuple[str, ...] = ()  # islands whose trainer ended (their nodes may move)
+    ledger: OfferLedger | None = None  # the offer ledger as read now (None: the broker's own)
 
 
 @dataclass
 class Broker:
     """The slow loop: every ``config.interval_s`` read a :class:`Snapshot`, decide, and
-    write each pool's count to the sink when it changed (a sink refusal, e.g. a manual
-    hold, is retried at the next tick).
+    write a pool's count, its offers' counts and its refill offer to the sink when any of
+    them changed (a sink refusal, e.g. a manual hold, is retried at the next tick).
 
     Phase 2 (``config.migrate`` and a ``mover``): the moves of :func:`plan_migrations`
     run before any count is sent, so neither pool orders or releases for a moved node:
@@ -504,14 +577,15 @@ class Broker:
     snapshot: Callable[[], Snapshot]
     sink: TargetSink
     emit: Callable[..., Any] = lambda *a, **k: None
-    prices: PriceSource | None = None
+    prices: PriceTable | None = None
     ledger: OfferLedger | None = None
-    lifetimes: Lifetimes | None = None
+    caps: CapsOf | None = None
     clock: Callable[[], float] = time.time
     mover: LaneMover | None = None
     compatible: Callable[[Offer, Offer], bool] | None = None
     state: State = field(default_factory=State)
-    sent: dict[str, int] = field(default_factory=dict)
+    # pool -> (nodes, its offers' counts, refill offer) last accepted by the sink
+    sent: dict[str, tuple[int, tuple[tuple[str, int], ...], str | None]] = field(default_factory=dict)
     last: Decision | None = None
     _next_at: float = 0.0
 
@@ -527,7 +601,8 @@ class Broker:
         demands = [replace(d, floor=max(d.floor, int(self.config.floors.get(d.island, 0)))) for d in snap.demands]
         dec = decide(snap.offers, demands, running=snap.running, at_boundary=snap.at_boundary,
                      policy=self.config.policy, budget=snap.budget, state=self.state, now=now,
-                     prices=self.prices, ledger=self.ledger, lifetimes=self.lifetimes)
+                     prices=self.prices, ledger=snap.ledger if snap.ledger is not None else self.ledger,
+                     caps=self.caps)
         self.state = dec.state
         self.last = dec
         if self.config.migrate and self.mover is not None:
@@ -538,10 +613,11 @@ class Broker:
                 run_migration(move, self.mover, self.emit)
         for pool, nodes in sorted(dec.pools.items()):
             offers = {k: n for k, n in dec.targets.items() if k.split("/", 1)[0] == pool}
-            if self.sent.get(pool) == nodes:
-                continue
+            wanted = (nodes, tuple(sorted(offers.items())), dec.refill.get(pool))
+            if self.sent.get(pool) == wanted:
+                continue  # a change of the total, of the offer mix or of the refill offer is sent
             if self.sink.set_target(pool, nodes, offers=offers, refill=dec.refill.get(pool)):
-                self.sent[pool] = nodes
+                self.sent[pool] = wanted
         self.emit(EVENT, **dec.record())
         return dec
 

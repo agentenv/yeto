@@ -14,7 +14,9 @@ for boat; the broker caps a pool's node count with :func:`split_nodes` /
 * :func:`split_nodes` - a node count per pool (Daytona): floors first, nodes a pool
   holds now are kept, the rest round robin up to each pool's want.
 * :func:`split_accounts` - disjoint account sets per pool (National Compute): the
-  protected accounts are never granted, accounts a pool holds now stay with it.
+  protected accounts (``pool_run.protected_accounts`` of every pool config: 2 and 3
+  always, plus each config's ``protected_accounts``) are never granted, accounts a pool
+  holds now stay with it.
 * :func:`transition` - adding or removing a pool at run time: processes started
   under the old split keep their old share until they restart, so a pool that grows
   gets only the headroom the account has now; the sum never passes the limit.
@@ -24,10 +26,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-
-# National Compute accounts 2 and 3 run production: never granted to any pool.
-NC_PROTECTED = frozenset({2, 3})
-
 
 class QuotaShort(ValueError):  # noqa: N818 - a ValueError, as the run config's other refusals
     """The account cannot give every unit its minimum. ``need``: what the free units need at
@@ -118,12 +116,19 @@ class AccountShares:
 
 def split_accounts(allowed: Iterable[int], wants: Mapping[str, int], *,
                    held: Mapping[str, Iterable[int]] | None = None,
-                   protected: Iterable[int] = NC_PROTECTED) -> AccountShares:
-    """Disjoint account sets per pool (one machine per account): the protected accounts are
-    never granted; accounts a pool holds now stay with it (an account two pools hold, or a
-    held account outside ``allowed`` or protected, raises ValueError); the rest go round
-    robin (pool name order, lowest account first) up to each pool's want."""
-    guard = {int(a) for a in protected}
+                   configs: Mapping[str, Mapping[str, object]] | None = None) -> AccountShares:
+    """Disjoint account sets per pool (one machine per account): an account protected by
+    any pool's config (``configs``: pool -> pool config; ``pool_run.protected_accounts``,
+    so 2 and 3 with no config at all) is never granted; accounts a pool holds now stay
+    with it (an account two pools hold, or a held account outside ``allowed`` or
+    protected, raises ValueError); the rest go round robin (pool name order, lowest
+    account first) up to each pool's want."""
+    from yeto.launch.nc.pool_run import protected_accounts  # noqa: PLC0415
+
+    protected: set[int] = set(protected_accounts({}))
+    for cfg in (configs or {}).values():
+        protected |= protected_accounts(dict(cfg))
+    guard = protected
     pool = sorted({int(a) for a in allowed} - guard)
     grants: dict[str, list[int]] = {n: [] for n in wants}
     owner: dict[int, str] = {}

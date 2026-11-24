@@ -66,7 +66,12 @@ def test_the_new_split_takes_effect_without_passing_the_limit_meanwhile():
 def test_nc_accounts_are_disjoint_and_never_protected():
     shares = q.split_accounts([1, 2, 3, 4, 5], {"i0": 2, "i1": 2})
     assert shares.grants == {"i0": (1, 5), "i1": (4,)} and shares.short == {"i1": 1}
-    assert not set(itertools.chain(*shares.grants.values())) & q.NC_PROTECTED
+    assert not set(itertools.chain(*shares.grants.values())) & {2, 3}, "2 and 3 without any config"
+    # a pool config's protected_accounts is never granted to any pool; 2 and 3 stay protected
+    shares = q.split_accounts([1, 2, 3, 4, 5], {"i0": 3, "i1": 3}, configs={"i1": {"protected_accounts": [4]}})
+    assert shares.grants == {"i0": (1,), "i1": (5,)}
+    from yeto.launch.nc.pool_run import PROTECTED_NC_ACCOUNTS
+    assert PROTECTED_NC_ACCOUNTS == {2, 3}
     # a pool that holds accounts keeps them; a new pool gets what is left
     shares = q.split_accounts([1, 4, 5, 6], {"i0": 2, "i1": 1, "new": 2}, held={"i0": [5, 6]})
     assert shares.grants == {"i0": (5, 6), "i1": (1,), "new": (4,)} and shares.short == {"new": 1}
