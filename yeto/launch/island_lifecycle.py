@@ -228,6 +228,10 @@ def stop_key(island: int) -> str:
     return f"{STATE_DIR}/{int(island)}/STOP"
 
 
+def start_key(island: int) -> str:
+    return f"{STATE_DIR}/{int(island)}/START"
+
+
 def controller_identity() -> dict[str, Any]:
     """Who supervises: host, PID and a fencing token unique to this process."""
     return {"host": socket.gethostname(), "pid": os.getpid(), "token": uuid.uuid4().hex[:16],
@@ -306,6 +310,7 @@ class IslandStateStore:
         self._pending: dict[str, bytes] = {}
         self._watched: set[int] = set()
         self._stops: dict[int, dict[str, Any] | None] = {}
+        self._starts: dict[int, dict[str, Any] | None] = {}
         self._stops_due = True
         self._wake = threading.Event()
         self._idle = threading.Event()
@@ -547,6 +552,7 @@ class IslandStateStore:
             if watched and (due or time.monotonic() - stops_at >= self.stop_poll_s):
                 for k in watched:
                     self._stops[k] = self._read_stop(k)
+                    self._starts[k] = self._read_request(start_key(k))
                 stops_at = time.monotonic()
             with self._lock:
                 if not self._pending:
@@ -625,9 +631,30 @@ class IslandStateStore:
                 self._wake.set()
         return self._stops.get(k)
 
-    def _read_stop(self, island: int) -> dict[str, Any] | None:
+    def start_requested(self, island: int) -> dict[str, Any] | None:
+        """Island ``island``'s START request (``yeto island start``), else None; a background
+        store answers from the cache it keeps with the STOP's."""
+        if not self.background:
+            return self._read_request(start_key(island))
+        self.stop_requested(island)  # watches the island
+        return self._starts.get(int(island))
+
+    def request_start(self, island: int, reason: str, *, by: str = "operator") -> bool:
+        """Write island ``island``'s START request (True once written)."""
+        body = {"reason": str(reason), "by": str(by), "at": round(self.clock(), 3)}
         try:
-            raw = self.objects.read(stop_key(island))
+            self.objects.write(start_key(island), json.dumps(body, sort_keys=True).encode())
+            return True
+        except Exception as error:  # noqa: BLE001
+            self._warn("start write", error)
+            return False
+
+    def _read_stop(self, island: int) -> dict[str, Any] | None:
+        return self._read_request(stop_key(island))
+
+    def _read_request(self, key: str) -> dict[str, Any] | None:
+        try:
+            raw = self.objects.read(key)
         except Exception as error:  # noqa: BLE001
             self._warn("stop read", error)
             return None
@@ -651,17 +678,24 @@ class IslandStateStore:
 
     def clear_stop(self, island: int) -> bool:
         """Remove island ``island``'s STOP (True when none is left)."""
+        return self._delete(stop_key(island), "stop clear")
+
+    def clear_start(self, island: int) -> bool:
+        """Remove island ``island``'s START request (True when none is left)."""
+        return self._delete(start_key(island), "start clear")
+
+    def _delete(self, key: str, what: str) -> bool:
         try:
             delete = getattr(self.objects, "delete", None)
             if callable(delete):
-                delete(stop_key(island))
-            elif self.objects.read(stop_key(island)) is not None:
+                delete(key)
+            elif self.objects.read(key) is not None:
                 raise RuntimeError("this store cannot delete objects")
             return True
         except FileNotFoundError:
             return True
         except Exception as error:  # noqa: BLE001
-            self._warn("stop clear", error)
+            self._warn(what, error)
             return False
 
 
@@ -736,6 +770,12 @@ class FleetRecorder:
         if ref is None or ref.role == "sampler":
             return None
         return self.store.stop_requested(ref.island)
+
+    def start_requested(self, name: str) -> dict[str, Any] | None:
+        ref = self.islands.get(name)
+        if ref is None or ref.role == "sampler":
+            return None
+        return self.store.start_requested(ref.island)
 
 
 def handle_of(source: str, name: str, job_id: Any) -> dict[str, Any]:

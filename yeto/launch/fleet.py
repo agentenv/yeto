@@ -520,6 +520,7 @@ class FleetController:
         """:meth:`_poll` one learner, with its island STOP first; a state, machine or
         incarnation change is written to its record (a raise too: the island ``failed``
         or, for a fixed roster, ``abandoned``)."""
+        self._island_start(rec)
         before = (rec["state"], rec["job_id"], rec["name"], rec.get("draining"))
         try:
             if not self._island_stop(rec):
@@ -541,6 +542,32 @@ class FleetController:
             reason = rec.get("exit") if rec.get("exit") is not None else (
                 decision.detail if decision is not None else None)
             self._record(rec, reason=None if reason is None else str(reason)[:300])
+
+    def _island_start(self, rec) -> bool:
+        """Island ``rec``'s START request (``yeto island start``) for an island this controller
+        stopped on its island STOP: it is ordered again (the next incarnation; recovery
+        drives the order). A request is acted on once (by its time). True when restarted."""
+        if self.recorder is None or rec["state"] != DONE or not rec.get("stopped"):
+            return False
+        try:
+            request = self.recorder.start_requested(rec["name"])
+            if request is None or self.recorder.stop_requested(rec["name"]) is not None:
+                return False  # no START, or a STOP still stands (yeto island start clears it first)
+        except Exception:  # noqa: BLE001 - asked again next poll
+            return False
+        if request.get("at") is not None and request.get("at") == rec.get("start_request_at"):
+            return False
+        why = str(request.get("reason") or "START")
+        rec["start_request_at"] = request.get("at")
+        rec.pop("stopped", None)
+        rec.update(state=RECOVERING, failed_at=self.ops.now(), attempt=None, failures=0, recovering_s=0.0,
+                   exit=None, decision=None, draining=False)
+        self.downed_clusters.discard(rec["name"])  # its next incarnation is torn down at the end again
+        print(f"[launcher] {rec['name']}: island START ({why}{', by ' + str(request.get('by')) if request.get('by') else ''}); "
+              "ordering it again as its next incarnation", file=sys.stderr)
+        self._fleet("island_ready", rec["name"], restarted=True)
+        self._record(rec, lifecycle.ORDERING, reason=f"island START: {why}", start=dict(request))
+        return True
 
     def _island_stop(self, rec) -> bool:
         """Island ``rec``'s own STOP (``fleet/trainers/<k>/STOP``): it ends this island only.

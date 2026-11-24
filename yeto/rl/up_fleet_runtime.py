@@ -223,7 +223,10 @@ class FleetRuntime:
                     "trainer" if miles else
                     "its trainer starves until its trainer.sample_wait ends it and the launcher gives it up"))
         else:
-            written = self.island_states().request_stop(k, stop_reason_for(name), by="yeto run up")
+            states = self.island_states()
+            # an island STOP already there (``yeto island stop``) is kept as written
+            written = states.stop_requested(k) is not None or states.request_stop(k, stop_reason_for(name),
+                                                                                  by="yeto run up")
             _log(f"CRITICAL fleet_island_stop: {self.label(k)}: {name}: {why}; "
                  + (f"its island STOP is written ({self.island_states().objects.__class__.__name__}: "
                     f"fleet/trainers/{k}/STOP): the launch releases its trainer"
@@ -333,6 +336,16 @@ class FleetRuntime:
                 why = (f"its trainer is {state}"
                        + (f" ({decision.get('cause')}: {decision.get('detail')})" if decision.get("cause") else "")
                        + (f"; exit {record.get('exit')}" if record.get("exit") else ""))[:500]
+                self.trip_island(k, "run.trainer_exit", value=None, limit=None, why=why)
+                continue
+            decision = record.get("decision") or {}
+            if state == "done" and decision.get("cause") == "stopped" and k not in self._exit_seen:
+                # stopped on an island STOP this run up did not write (``yeto island stop``): its
+                # trainer is released, so its pools follow; the other islands go on
+                self._exit_seen.add(k)
+                stop = record.get("stop") or {}
+                why = (f"its trainer was stopped on its island STOP ({stop.get('reason') or decision.get('detail')}, "
+                       f"by {stop.get('by') or 'an operator'}): its pools follow")[:500]
                 self.trip_island(k, "run.trainer_exit", value=None, limit=None, why=why)
                 continue
             if state != "running" or not record.get("tape"):

@@ -176,6 +176,39 @@ Inspect and end runs. Each takes the run name (its `--cluster-prefix`).
 apps, NC leases). The launch flags of the cost guard (`--budget-usd`, idle
 shutdown, `--no-cost-guard`) are in [COST_GUARD.md](COST_GUARD.md).
 
+### `yeto island`
+
+One trainer island of a fleet, through its record and requests in the run store
+(`fleet/trainers/<k>/state.json`, `STOP`, `START`). `K` is the island's learner id, its
+position in `--gpu`. Name the store with `--store URI` (`s3://`, `r2://`, `oss://` or a local
+directory) or with `--config RUN.json` (a `yeto run up` config: its `store`, and its `env` for
+the store credentials).
+
+| Command | Purpose | Flags |
+|---|---|---|
+| `yeto island status` | every island's state, source and machine (call id, job id or incarnation), incarnation, relaunches, last decision, pending STOP / START | `--json` |
+| `yeto island stop K` | stop island K only; the other islands go on | `--reason TEXT`, `--dry-run` |
+| `yeto island start K` | order island K again after its STOP | `--reason TEXT`, `--dry-run` |
+
+The records exist for launches with the island lifecycle on (`--island-lifecycle`: on by
+default for an RL launch of two or more trainer islands, off for a single trainer island
+unless set to `on`).
+
+- `stop K` writes island K's STOP and drops a pending START. At its next poll the launch's
+  fleet controller drains island K, releases its machines and records it `done` (decision
+  `stopped`). It is never relaunched, and it is not a launch failure: the launch exits 9
+  only when every island ended on its own STOP. A `yeto run up` of the run then stops
+  island K's sampler pools (`run.trainer_exit` of that island).
+- `start K` removes island K's STOP and writes its START. The fleet controller orders an
+  island it stopped on its STOP again, as its next incarnation (`ordering`, then
+  `running`). The sampler pools that `yeto run up` stopped for the island stay stopped in
+  that `run up` process. To sample for the island again, restart `yeto run up` after
+  removing the island's entry under `fleet_island_stops` in the run up state file.
+- `--dry-run` prints the object it would write and what follows, and changes nothing.
+
+Exit codes: 0 done; 1 the store did not take the request; 2 bad input (no store, a store
+without an object API here, an island with no record).
+
 ### `yeto merge`
 
 Merge a PEFT adapter into its base model and write SafeTensors shards.
