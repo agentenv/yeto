@@ -282,38 +282,36 @@ def boat_shares(account: dict[str, Any], pools: dict[str, dict[str, Any]]) -> di
     sandboxes in proportion to their ``max_in_flight`` (each gets at least that, or the
     run is refused), the start rates evenly (at least one each, or refused). Raises
     ValueError naming the pools."""
+    from yeto.launch.pool.quota import Claim, QuotaShort, split  # noqa: PLC0415
+
     out: dict[str, dict[str, int]] = {name: {} for name in pools}
     for param, limit_key in BOAT_SHARES.items():
         limit = account.get(limit_key)
         if limit is None:
             continue  # not held (starts_per_hour_n null)
-        fixed = {n: p for n, p in pools.items() if param in p["explicit"]}
-        free = {n: p for n, p in pools.items() if param not in p["explicit"]}
-        used = sum(int(p["explicit"][param]) * p["processes"] for p in fixed.values())
-        left = int(limit) - used
+        active = param == "boat_max_active_n"
+        claims = {n: Claim(units=int(p["processes"]), weight=int(p["max_in_flight"]) if active else 1,
+                           fixed=int(p["explicit"][param]) if param in p["explicit"] else None)
+                  for n, p in pools.items()}
+        if not active and not any(c.fixed is None and c.units for c in claims.values()):
+            continue  # every pool sets its own start rate
         listed = ", ".join(f"{n} ({p['processes']} sampler(s) x max_in_flight {p['max_in_flight']})"
                            for n, p in pools.items())
-        if param == "boat_max_active_n":
-            need = sum(p["processes"] * p["max_in_flight"] for p in free.values())
-            if left < need or left < 0:
+        try:
+            shares = split(f"sandbox.boat.{limit_key}", int(limit), claims)
+        except QuotaShort as short:
+            if active:
                 raise ValueError(f"run config: the boat account holds {limit} active sandboxes (sandbox.boat."
-                                 f"{limit_key}) and the run's boat samplers need {need + used} at their elastic "
-                                 f"maximum ({listed}): lower agentic.max_in_flight, the pools' targets / "
-                                 "elastic.max_nodes, or raise sandbox.boat.max_active_n to the account's plan")
-            for n, p in free.items():
-                out[n][param] = max(p["max_in_flight"], left * p["max_in_flight"] // max(1, need))
-        else:
-            count = sum(p["processes"] for p in free.values())
-            if not count:
-                continue
-            share = left // count
-            if share < 1:
-                raise ValueError(f"run config: the boat account starts {limit} sandboxes "
-                                 f"{'a minute' if 'minute' in param else 'an hour'} (sandbox.boat.{limit_key}) and the "
-                                 f"run has {count + len(fixed)} boat sampler process(es) ({listed}): each needs at "
-                                 "least one start; run fewer boat samplers or raise the limit to the account's plan")
-            for n in free:
-                out[n][param] = share
+                                 f"{limit_key}) and the run's boat samplers need {short.need + short.used} at their "
+                                 f"elastic maximum ({listed}): lower agentic.max_in_flight, the pools' targets / "
+                                 "elastic.max_nodes, or raise sandbox.boat.max_active_n to the account's plan") from None
+            fixed_n = sum(1 for c in claims.values() if c.fixed is not None)
+            raise ValueError(f"run config: the boat account starts {limit} sandboxes "
+                             f"{'a minute' if 'minute' in param else 'an hour'} (sandbox.boat.{limit_key}) and the "
+                             f"run has {short.need + fixed_n} boat sampler process(es) ({listed}): each needs at "
+                             "least one start; run fewer boat samplers or raise the limit to the account's plan") from None
+        for n, share in shares.items():
+            out[n][param] = share
     return out
 
 
