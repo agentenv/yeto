@@ -87,6 +87,9 @@ class TrainerLoopGaveUp(RuntimeError):
     round between them; the loop stopped starting new ones."""
 
 Record = Callable[..., Any]  # journal.append(kind, **fields)
+# classify_stop(leave_reason, error) -> (cause, relaunch): the decision table of
+# ``yeto.launch.island_lifecycle`` (the loop stays backend-free: the caller injects it)
+ClassifyStop = Callable[[Any, BaseException | None], tuple[str, bool]]
 
 
 def next_incarnation(records: Iterable[Mapping[str, Any]]) -> int:
@@ -109,7 +112,14 @@ class TrainerLoop:
     for a first policy release (a LoRA sampler serves no adapter before it): the
     buffer then stays empty and the scheduler would never start the trainer, so the loop
     starts one, and keeps it until it trained a round (no idle stop of a trainer
-    that only published the first policy)."""
+    that only published the first policy).
+
+    ``classify_stop(leave_reason, error) -> (cause, relaunch)``: the unified decision
+    table (``yeto.launch.island_lifecycle.loop_classifier``). With it, each failed
+    incarnation's ``stopped`` record carries its ``cause``, and a failure the table never
+    relaunches (a configuration error, a strict failure) ends the loop at once
+    (``gave_up``) instead of after ``max_consecutive_failures``. Without it (the default)
+    nothing changes."""
 
     def __init__(self, *, scheduler: TrainerScheduler, lifecycle: TrainerLifecycle,
                  buffer: DurableSampleBuffer, cuts: CutLog,
@@ -120,6 +130,7 @@ class TrainerLoop:
                  spec: Mapping[str, Any] | None = None,
                  rounds_per_tick: int = 1, ready_timeout_s: float = 1800.0,
                  max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+                 classify_stop: ClassifyStop | None = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         if rounds_per_tick < 1:
             raise ValueError("rounds_per_tick must be positive")
@@ -147,6 +158,7 @@ class TrainerLoop:
         self.max_consecutive_failures = int(max_consecutive_failures)
         self.consecutive_failures = 0
         self._trained_high_water = -1  # highest version a run of this loop trained
+        self._classify_stop = classify_stop
 
     # ------------------------------------------------------------ state
     @property
@@ -236,7 +248,8 @@ class TrainerLoop:
         except Exception as error:  # noqa: BLE001 - the lifecycle stopped it with its leave code
             self.handle = None
             self.consecutive_failures += 1
-            self._journal(STOPPED, plan.incarnation, reason=None, error=repr(error))
+            self._journal(STOPPED, plan.incarnation, reason=None, error=repr(error),
+                          **self._failure_cause(None, error))
             return
         if self.lifecycle.ready(self.handle, self._clock() + self.ready_timeout_s):
             self._journal(READY, plan.incarnation, version=self.handle.start_version)
@@ -285,17 +298,32 @@ class TrainerLoop:
 
     def _journal_stop(self, handle: TrainerHandle) -> None:
         self._journaled_stops.add(handle.incarnation)
+        cause: dict[str, Any] = {}
         if handle.error is not None or handle.leave_reason is LeaveReason.INFRA_FAILED:
             self.consecutive_failures += 1
+            cause = self._failure_cause(handle.leave_reason, handle.error)
         cut = handle.cut
         reason = handle.leave_reason
-        self._journal(STOPPED, handle.incarnation,
+        self._journal(STOPPED, handle.incarnation, **cause,
                       reason=None if reason is None else reason.name,
                       cut=None if cut is None else cut.cut_id,
                       trigger=None if cut is None else cut.trigger,
                       version=handle.trained_version,
                       released=getattr(handle, "released", None),
                       error=None if handle.error is None else repr(handle.error))
+
+    def _failure_cause(self, reason: Any, error: BaseException | None) -> dict[str, Any]:
+        """The failed incarnation's cause by the injected decision table (none without
+        one); a cause it never relaunches puts the loop at its failure limit."""
+        if self._classify_stop is None:
+            return {}
+        try:
+            cause, relaunch = self._classify_stop(reason, error)
+        except Exception:  # noqa: BLE001 - no table, the failure count decides as before
+            return {}
+        if not relaunch:
+            self.consecutive_failures = max(self.consecutive_failures, self.max_consecutive_failures)
+        return {"cause": str(cause)}
 
     # ------------------------------------------------------------ journal
     def _journal(self, event: str, incarnation: int | None, **fields: Any) -> None:
