@@ -273,6 +273,9 @@ class IslandPool:
     # the target was lowered for them already; paused tickets and those holding no tasks
     manual_released: dict[str, Any] = field(default_factory=dict)
     paused_req: set[str] = field(default_factory=set)
+    # the run this state belongs to (``{"run", "run_prefix"}``, :func:`yeto.launch.nc.pool_run.state_owner`):
+    # a pool of another run sharing the state dir and shard_base never takes it over. None: not recorded
+    owner: dict[str, Any] | None = None
     hold_req: set[str] = field(default_factory=set)
     _warned: set[str] = field(default_factory=set)
     # () -> why no order may be placed now (None: allowed): the controller's run budget
@@ -2110,7 +2113,8 @@ class IslandPool:
         return {"format": STATE_FORMAT, "stopped": self.stopped, "finished": self.finished, "halted": self.halted, "next_shard": self.next_shard,
                 "target": self.config.target, "scale_seq": self.scale_seq, "shrink": self.shrink,
                 "members": [asdict(m) for m in self.members], "pending": list(self.pending),
-                "breaker": asdict(self.breaker), "budget": asdict(self.budget)}
+                "breaker": asdict(self.breaker), "budget": asdict(self.budget),
+                **({"owner": dict(self.owner)} if self.owner is not None else {})}
 
     def save(self, path: Path) -> None:
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -2137,6 +2141,8 @@ class IslandPool:
             pool.budget = el.Budget(**doc.get("budget", {}))
             pool.scale_seq = int(doc.get("scale_seq", 0))
             pool.shrink = int(doc.get("shrink", 0))
+            if pool.owner is None and isinstance(doc.get("owner"), dict):
+                pool.owner = dict(doc["owner"])
             for m in pool.members:  # a start cut off by the restart: probed first (``_watch``)
                 if m.state == STARTING and not m.joined:
                     if getattr(ops, "probe", None) is not None:

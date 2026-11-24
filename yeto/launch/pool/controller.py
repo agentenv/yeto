@@ -339,8 +339,15 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
                              f"stop it with: {pool_run.stop_command(config_path)}")
     events = pool_run.event_log(cfg)
     state = cli.pool_state_path(cfg)
+    try:
+        pool_run.claim_state(cfg)  # another run's: archived when stopped, else refused
+    except pool_run.PoolStateOwnerError as error:
+        if held is not None:
+            held.close()
+        raise SystemExit(f"pool {cfg['shard_base']}: refused: {error}") from None
     pool = IslandPool.restore(state, pc, ops if ops is not None else cli.pool_ops(cfg), log=cli._log,  # noqa: SLF001
                               events=events)
+    pool.owner = pool_run.state_owner(cfg)  # this run's from now on (a file with no owner is stamped)
     pool.scale_path, pool.scale_run = pool_run.scale_path(cfg), cli.run_id(cfg)
     pool.apply_scale()
     pool_run._write_pid(cfg, config_path)  # noqa: SLF001 - pool-status / pool-scale see a live loop

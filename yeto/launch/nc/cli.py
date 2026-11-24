@@ -1576,9 +1576,12 @@ def main(argv: list[str] | None = None) -> int:
         from . import pool_run  # noqa: PLC0415
 
         try:
-            pool_run.check_state_file(json.loads(Path(args.config).read_text()))
+            cfg = json.loads(Path(args.config).read_text())
+            pool_run.check_state_file(cfg)
+            if args.cmd not in ("pool", "pool-status"):  # `pool` archives or refuses it itself; status reads
+                pool_run.check_state_owner(cfg)
             return _pool_command(args)
-        except PoolStateFormatError as error:  # one line, no traceback: the first thing an operator reads
+        except (PoolStateFormatError, pool_run.PoolStateOwnerError) as error:  # one line, no traceback
             print(f"{args.cmd}: refused, nothing changed: {error}", file=sys.stderr)
             return 2
     return 2
