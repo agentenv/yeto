@@ -76,6 +76,7 @@ def test_the_compiled_argv_binds_the_miles_sampler_to_its_islands_trainer(files)
     assert cfg["trainer"] == {"usd_per_h": 17.5, "argv": [
         *_argv(files), "--gpu", "modal:1x2xh100,modal:1x2xh100@us-east,modal:1x1xl40s",
         "--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer",
+        "--rl-sync-island-lease-s", "150", "--rl-sync-quorum", "1",  # no fixed roster (default)
         "--rl-island-buffer-shards", "0:vl-i0-0,vl-i0-1,vl-i0-2,sg-i0-0,sg-i0-1",
         "--rl-island-buffer-shards", "1:sg-i1-0,sg-i1-1",
         "--rl-island-sample-role", "2:sampler", "--rl-island-sampler-follows", "2:1",

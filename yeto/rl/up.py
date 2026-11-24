@@ -1833,7 +1833,8 @@ class Run:
             elif done and (done[-1][0] == "FAILED" or done[-1][1] != "0"):
                 why = f"trainer: launcher finished {done[-1][0]} (exit code {done[-1][1]})"
                 tripped = ("run.trainer_exit", float(done[-1][1]), 0.0)
-        if why is None and tr and _alive(tr["pid"]):
+        if why is None and tr and _alive(tr["pid"]) and self.fleet_plan() is None:
+            # a fleet judges each island's trainer by its own tape (FleetRuntime.trainer_check)
             why = self.silence(time.time())
             if why:
                 tripped = ("run.trainer_silence", self._quiet_s, self.silence_limit_s())
@@ -2644,8 +2645,12 @@ class Run:
         from yeto.breakers.events import STOP_REASON_PREFIX  # noqa: PLC0415
 
         rows = (self.state.get("fleet_stops") or {}).get("islands") or ()
-        why = "every island stopped (" + ", ".join(f"island {r['index']} ({r['name']}): {r['stop_reason']}"
-                                                  for r in rows) + ")"
+        stopped = [r for r in rows if r.get("stop_reason")]
+        minimum = int(getattr(self.fleet_plan(), "min_islands", 1) or 1)
+        head = ("every island stopped" if len(stopped) == len(rows)
+                else f"{len(rows) - len(stopped)} island(s) run, fewer than fleet.min_islands {minimum}")
+        why = head + " (" + ", ".join(f"island {r['index']} ({r['name']}): {r['stop_reason']}"
+                                      for r in stopped) + ")"
         self.flag_stop(reason.removeprefix(STOP_REASON_PREFIX), "fleet_stop", "fleet_all_islands_stopped", why,
                        grace_s=self.starvation_config.stop_grace_s, poll_s=poll_s,
                        after="`yeto run up --config <run.json>` resumes the trainers from their latest cut")
@@ -2687,6 +2692,8 @@ class Run:
                 if why:
                     self.release_stall_stop(why)
                     return
+                if self.fleet_plan() is not None:
+                    self.fleet_rt().trainer_check(time.time())
                 why = self.fleet_all_stopped()
                 if why:
                     self.fleet_stop(why)

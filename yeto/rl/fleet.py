@@ -111,7 +111,17 @@ FLEET_DIR = "fleet"
 PLAN_OBJECT = f"{FLEET_DIR}/plan.json"  # the plan in the run store
 DISPENSE_DIR = f"{FLEET_DIR}/dispense"  # the fleet's task ledger root (store_dispense.FLEET_DISPENSE_DIR)
 DISPENSE_MODES = ("fleet", "island")
-FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h"})
+FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h", "fixed_roster", "min_islands"})
+# The syncer membership options a fleet without a fixed roster (``fleet.fixed_roster``, default
+# false) gets when its trainer argv sets none (``yeto.launch.syncer`` island pool): a lease (an
+# island that stops or is given up leaves the merge when it expires) and the count quorum 1,
+# so the other islands keep merging (the syncer refuses membership options without rounds
+# that merge without some island).
+MEMBERSHIP_FLAGS = ("--rl-sync-quorum-theta", "--rl-sync-carry-gamma", "--rl-sync-soft-deadline-s", "--rl-sync-q-min",
+                    "--rl-sync-island-lease-s", "--rl-sync-max-learners", "--rl-sync-final-grace-s",
+                    "--rl-sync-stale-lag-ceiling", "--rl-sync-stale-lag-half-life")
+DEFAULT_ISLAND_LEASE_S = 150
+DEFAULT_MIN_ISLANDS = 1
 ISLAND_KEYS = frozenset({"name", "trainer", "samplers"})
 ISLAND_TRAINER_KEYS = frozenset({"gpu", "usd_per_h", "argv", "step_s"})
 # the only trainer flags an island sets for itself (each becomes --rl-island-<flag> k:N)
@@ -246,11 +256,14 @@ class FleetPlan:
     sync: dict[str, Any] = field(default_factory=dict)  # the trainers' sync route (training_form)
     version: int = PLAN_VERSION
     syncer_usd_per_h: float | None = None  # the run config's syncer.usd_per_h (None: unset)
+    fixed_roster: bool = False  # fleet.fixed_roster: one island given up ends the fleet (exit 4)
+    min_islands: int = DEFAULT_MIN_ISLANDS  # fleet.min_islands: fewer islands running stop the fleet
 
     def to_json(self) -> dict[str, Any]:
         return {"version": self.version, "run": self.run, "store": self.store, "dispense": self.dispense,
                 "dispense_store": self.dispense_store, "sync": dict(self.sync),
                 "syncer": {"usd_per_h": self.syncer_usd_per_h},
+                "roster": {"fixed": self.fixed_roster, "min_islands": self.min_islands},
                 "islands": [i.to_json() for i in self.islands]}
 
     def dumps(self) -> str:
@@ -268,7 +281,11 @@ class FleetPlan:
         out = [f"fleet: {len(self.islands)} island(s), one synced-group trainer launch and its syncer; "
                f"sync {route}; dispense {self.dispense}"
                + (f" (ledger {self.dispense_store})" if self.dispense_store else " (one ledger per island)")
-               + f"; plan {substore_uri(self.store, PLAN_OBJECT)}"]
+               + f"; plan {substore_uri(self.store, PLAN_OBJECT)}",
+               ("fleet: fixed roster (fleet.fixed_roster): an island given up ends the whole fleet (exit 4)"
+                if self.fixed_roster else
+                f"fleet: no fixed roster: an island given up or stopped leaves the merge and the others go on; "
+                f"the fleet stops once fewer than {self.min_islands} island(s) run (fleet.min_islands)")]
         for i in self.islands:
             trainer_price = i.trainer_usd_per_h if i.miles_samplers else i.usd_per_h  # the trainer alone
             price = "?" if trainer_price is None else f"${trainer_price:g}/h"
@@ -316,9 +333,13 @@ class FleetPlan:
                         trainer_usd_per_h=i.get("trainer_usd_per_h", i.get("usd_per_h")))
             for i in doc.get("islands") or ())
         syncer = doc.get("syncer") if isinstance(doc.get("syncer"), dict) else {}
+        # a plan written before fleet.fixed_roster: its launch had the fixed roster
+        roster = doc.get("roster") if isinstance(doc.get("roster"), dict) else {"fixed": True}
         return cls(run=str(doc["run"]), store=str(doc["store"]), dispense=str(doc["dispense"]), islands=islands,
                    dispense_store=doc.get("dispense_store"), sync=dict(doc.get("sync") or {}),
-                   version=int(doc.get("version", PLAN_VERSION)), syncer_usd_per_h=syncer.get("usd_per_h"))
+                   version=int(doc.get("version", PLAN_VERSION)), syncer_usd_per_h=syncer.get("usd_per_h"),
+                   fixed_roster=bool(roster.get("fixed", False)),
+                   min_islands=int(roster.get("min_islands") or DEFAULT_MIN_ISLANDS))
 
 
 def plan_of(cfg: dict[str, Any]) -> FleetPlan | None:
@@ -450,7 +471,39 @@ def _fleet_section(cfg: dict[str, Any]) -> tuple[list[str], str]:
     dispense = section.get("dispense", "fleet")
     if dispense not in DISPENSE_MODES:
         raise _err(f"fleet.dispense must be one of {list(DISPENSE_MODES)} (got {dispense!r})")
+    roster_options(cfg)
     return argv, str(dispense)
+
+
+def roster_options(cfg: dict[str, Any]) -> tuple[bool, int]:
+    """``(fleet.fixed_roster, fleet.min_islands)``: a fixed roster ends the fleet when one
+    island is given up (the launch's fixed-roster controller, exit 4); without it (the
+    default) the islands share a syncer island pool and the fleet stops once fewer than
+    ``min_islands`` (default 1) islands run."""
+    section = cfg.get("fleet") if isinstance(cfg.get("fleet"), dict) else {}
+    fixed = section.get("fixed_roster", False)
+    if not isinstance(fixed, bool):
+        raise _err(f"fleet.fixed_roster must be true or false (got {fixed!r})")
+    minimum = section.get("min_islands", DEFAULT_MIN_ISLANDS)
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+        raise _err(f"fleet.min_islands must be an integer >= 1 (got {minimum!r})")
+    islands = cfg.get("islands")
+    if isinstance(islands, list) and islands and minimum > len(islands):
+        raise _err(f"fleet.min_islands {minimum} > the fleet's {len(islands)} island(s)")
+    return fixed, int(minimum)
+
+
+def membership_argv(trainer_argv: list[str], fixed_roster: bool) -> list[str]:
+    """The syncer membership options a fleet without a fixed roster adds to its launch
+    (:data:`MEMBERSHIP_FLAGS`): none when the roster is fixed or the trainer argv sets one
+    (it is then taken as given); else a lease and ``--rl-sync-quorum 1`` (unless the argv
+    names a quorum)."""
+    if fixed_roster or any(_flag(a) in MEMBERSHIP_FLAGS for a in trainer_argv):
+        return []
+    out = ["--rl-sync-island-lease-s", str(DEFAULT_ISLAND_LEASE_S)]
+    if not any(_flag(a) == "--rl-sync-quorum" for a in trainer_argv):
+        out += ["--rl-sync-quorum", "1"]
+    return out
 
 
 def _argv_value(argv: list[str], flag: str) -> str | None:
@@ -865,11 +918,13 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
             dataclasses.replace(m, dispense_store=dispense_store or i.store, dispense_namespace=namespace)
             for m in i.miles_samplers)) for i in rows]
     miles_rows = [(i, m) for i in rows for m in i.miles_samplers]
+    fixed_roster, min_islands = roster_options(cfg)
     argv = [*trainer_argv, "--gpu", ",".join([i.gpu for i in rows] + [m.gpu for _i, m in miles_rows]),
             "--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer"]
     wait = _sample_wait(cfg, trainer_argv)
     if wait is not None:  # every trainer island's sample wait, unless the island sets its own
         argv += [SAMPLE_WAIT_FLAG, f"{wait:g}"]
+    argv += membership_argv(trainer_argv, fixed_roster)
     for i in rows:
         if i.pools:  # an island with Miles samplers only names no pool shard
             argv += ["--rl-island-buffer-shards", f"{i.index}:{','.join(i.pool_shards())}"]
@@ -891,7 +946,8 @@ def compile_fleet(cfg: dict[str, Any]) -> tuple[dict[str, Any], FleetPlan]:
     syncer = cfg.get("syncer") if isinstance(cfg.get("syncer"), dict) else {}
     plan = FleetPlan(run=str(cfg["run"]), store=store, dispense=dispense, islands=tuple(rows),
                      dispense_store=dispense_store, sync=training_form(trainer_argv),
-                     syncer_usd_per_h=_price(syncer.get("usd_per_h"), "syncer.usd_per_h"))
+                     syncer_usd_per_h=_price(syncer.get("usd_per_h"), "syncer.usd_per_h"),
+                     fixed_roster=fixed_roster, min_islands=min_islands)
     out = copy.deepcopy({k: v for k, v in cfg.items() if k != PLAN_KEY})
     out["trainer"] = {"argv": argv, "usd_per_h": None if all(p is None for p in prices)
                       else float(sum(p or 0.0 for p in prices))}
