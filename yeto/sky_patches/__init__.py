@@ -159,7 +159,7 @@ def _site_dir(site_dir: str | None) -> str:
 def ensure_local_pth(repo_dir: str, site_dir: str | None = None) -> tuple[str, bool]:
     """Make this machine's sky API server load the patches too.
 
-    sky 0.13 provisions inside its API server process (started from this
+    sky (0.13 and later) provisions inside its API server process (started from this
     same Python), not in the process that called sky.launch — so the hook
     must be in this environment's site-packages as a `.pth`. Returns
     (path, newly_written). A newly written hook is not in effect for a

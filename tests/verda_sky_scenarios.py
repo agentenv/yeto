@@ -1,7 +1,7 @@
 """Scenarios for yeto.sky_patches.verda against sky's REAL Verda provisioner.
 
-Run by tests/test_verda_provider.py in a Python that has SkyPilot 0.13
-installed (the yeto test venv has none): the real
+Run by tests/test_verda_provider.py in a Python that has a verified SkyPilot
+(0.13.0 or 0.14.3) (the yeto test venv has none): the real
 ``sky.provision.verda.instance`` module is imported, its Verda client is
 replaced by an in-memory fake, the patch is applied, and each scenario
 drives sky's own code paths. Prints one JSON object with the results.

@@ -41,7 +41,7 @@ def test_on_demand_and_explicit_pricing_untouched():
 
 def test_version_guard_and_idempotent():
     m = _module()
-    ok, why = n.apply(m, version="0.14.0")
+    ok, why = n.apply(m, version="0.14.0")  # verified: 0.13.0 and 0.14.3 only
     assert not ok and "not in verified" in why
     assert n.apply(m, version="0.13.0")[0] and n.apply(m, version="0.13.0") == (True, "already applied")
 
@@ -49,3 +49,12 @@ def test_version_guard_and_idempotent():
 def test_registered_and_in_pth_hook():
     assert n.TARGET_MODULE in sky_patches.status()
     assert "sky.provision.nebius.utils" in sky_patches.pth_line("/r")
+
+
+def test_sky_0143_spec_with_its_own_pricing_passes_unchanged():
+    """sky 0.14.3 builds a spot spec with follows_spot_price itself: the patch adds nothing."""
+    m = _module()
+    assert n.apply(m, version="0.14.3") == (True, "")
+    own = object()
+    spec = m.nebius.compute().InstanceSpec(preemptible="P", follows_spot_price=own)
+    assert spec["follows_spot_price"] is own

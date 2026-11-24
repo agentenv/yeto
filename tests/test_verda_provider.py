@@ -2,7 +2,7 @@
 
 No network, no cloud. Verda responses come from real captures
 (tests/fixtures/verda_rca/, 2026-09-29) or hand-written fixtures; sky's
-real Verda provisioner is exercised in a subprocess when a SkyPilot 0.13
+real Verda provisioner is exercised in a subprocess when a verified SkyPilot
 Python is available (tests/verda_sky_scenarios.py).
 """
 
@@ -176,7 +176,7 @@ def test_generated_catalog_is_what_sky_reads(tmp_path):
     assert path == str(tmp_path / ".sky" / "catalogs" / "v8" / "verda" / "vms.csv")
     py = _sky_python()
     if py is None:
-        pytest.skip("no SkyPilot 0.13 Python (set YETO_SKY_PYTHON)")
+        pytest.skip("no SkyPilot Python with a verified version (set YETO_SKY_PYTHON)")
     code = (
         "import json\n"
         "from sky.catalog import verda_catalog as c\n"
@@ -492,13 +492,15 @@ def test_patch_version_guard_leaves_sky_alone():
 def test_patch_against_real_sky_provisioner(tmp_path):
     py = _sky_python()
     if py is None:
-        pytest.skip("no SkyPilot 0.13 Python (set YETO_SKY_PYTHON)")
+        pytest.skip("no SkyPilot Python with a verified version (set YETO_SKY_PYTHON)")
     env = dict(os.environ, HOME=str(tmp_path), SKY_RUNTIME_DIR=str(tmp_path), **SKY_ENV)
     out = subprocess.run([py, str(Path(__file__).parent / "verda_sky_scenarios.py"), str(REPO)],
                          capture_output=True, text=True, env=env, timeout=300)
     assert out.returncode == 0, out.stderr[-3000:]
     r = json.loads(out.stdout.strip().splitlines()[-1])
-    assert r["sky_version"] == "0.13.0" and r["patched"] and r["package_reexports_patched"]
+    from yeto.sky_patches import verda as vp
+
+    assert r["sky_version"] in vp.VERIFIED_SKY_VERSIONS and r["patched"] and r["package_reexports_patched"]
     assert r["guard_rejects_other_version"]
     assert r["sibling_prefix"] == {"query": ["a"], "deleted": ["a"]}
     assert r["relaunch_running"] == {"result": "ok", "created": [], "deleted": [], "r1": "running"}

@@ -220,7 +220,7 @@ def test_launch_head_records_registry(fake_sky, fake_aws_env, monkeypatch, capsy
     # Pinned (yeto.sky_patches are verified per sky version) and the patch
     # hook is installed as a .pth for every head process, sky's API server
     # included (fix-verda-provider 2.3).
-    assert 'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]==0.13.0"' in head_task.setup
+    assert 'pip install -q "skypilot[aws,gcp,runpod,nebius,verda]==0.14.3"' in head_task.setup
     assert "from yeto.sky_patches import PTH_NAME, pth_line" in head_task.setup
     assert "cargo build --release --quiet" in head_task.setup
     assert "touch ~/.yeto_head_ready" in head_task.setup
@@ -586,7 +586,8 @@ def test_head_down_script_downs_each_learner():
     script = cli.HEAD_DOWN_SCRIPT.format(clusters=["a-l0", "a-l1"])
     assert "for c in ['a-l0', 'a-l1']:" in script
     assert 'print(f"[head] {c}: down", flush=True)' in script
-    # Non-interactive ssh has no conda hook; the system python3 has no sky.
+    # Non-interactive ssh activates no venv / conda; the system python3 has no sky.
+    assert script.index("~/sky-user-env/bin/python3") < script.index("import sky")
     assert script.index("~/miniconda3/bin/python3") < script.index("import sky")
 
 def _fake_py(path, has_sky: bool):
@@ -597,14 +598,16 @@ def _fake_py(path, has_sky: bool):
     path.chmod(0o755)
 
 
-@pytest.mark.parametrize("venv_sky,conda_sky,want", [
-    (True, False, "yeto-head-py"),   # Nebius: miniconda 3.10 without sky (a past bug)
-    (False, True, "miniconda3"),     # image whose own Python >= 3.11 got sky
+@pytest.mark.parametrize("venv_sky,user_env_sky,conda_sky,want", [
+    (True, False, False, "yeto-head-py"),   # Nebius: stock Python 3.10 without sky (a past bug)
+    (False, True, False, "sky-user-env"),   # sky >= 0.14: setup pip-installs into sky's user venv
+    (False, False, True, "miniconda3"),     # a head set up by sky 0.13 (conda base)
 ])
-def test_head_down_script_picks_the_python_that_has_sky(tmp_path, venv_sky, conda_sky, want):
+def test_head_down_script_picks_the_python_that_has_sky(tmp_path, venv_sky, user_env_sky, conda_sky, want):
     import subprocess
 
     _fake_py(tmp_path / "yeto-head-py/bin/python3", venv_sky)
+    _fake_py(tmp_path / "sky-user-env/bin/python3", user_env_sky)
     _fake_py(tmp_path / "miniconda3/bin/python3", conda_sky)
     (tmp_path / "sky_workdir").mkdir()
     script = cli.HEAD_DOWN_SCRIPT.format(clusters=["a-l0"])
