@@ -21,10 +21,13 @@ the ticket's token), and then, in order:
 5. starts the sampler as its child: a process, or a container of the engine image
    with the node family's device flags.
 
-The sampler writes `nodes/<ticket>/{ready,heartbeat,exit}.json` in the run store;
-the heartbeat carries the engine's metrics (generated tokens, running and queued
-requests, KV cache use). The pool reads a node's state (assigned, booting, ready,
-stuck, exited) from the store alone.
+The sampler writes `nodes/<ticket>/g<generation>/{ready,heartbeat,exit}.json` in
+the run store; the heartbeat carries the engine's metrics (generated tokens,
+running and queued requests, KV cache use). The pool reads a node's state
+(assigned, booting, ready, stuck, exited) from the store alone. Each rewrite of an
+assignment bumps its generation, and records live under their generation: a node
+still running an older assignment of the ticket cannot overwrite the records of
+the current one.
 
 ## Node profiles
 
@@ -141,6 +144,24 @@ member, assignment, token = assign_manual(objects, {"run_prefix": "demo"}, shard
 (demo / "ticket").write_text(assignment.ticket)
 print(node_command(assignment, str(demo / "store")), "--token-file", demo / "token")
 ```
+
+### What the token protects, and what it does not
+
+The token binds a machine to one ticket; it is not an authentication.
+
+- The store holds only the token's salted sha256. A node must present the token
+  to read its assignment, so a machine cannot start on another ticket's
+  assignment by mistake, and the token never appears in the store or on a command
+  line (it travels on stdin or in a `0600` file).
+- The node refuses an assignment that names another ticket than the key it sits
+  under (a document copied between tickets) and an assignment past its deadline
+  (`expires_at`). A hand-opened machine's token expires after a day by default
+  (`assign_manual(..., token_ttl_s=...)`, None for no deadline); issue a new
+  assignment to rejoin later.
+- Anyone who can write the run store can write an assignment, and anyone who
+  holds a ticket's token can read that ticket's assignment (spec, code hash, model
+  plan; no store credentials are in it). The store credentials are the security
+  boundary: give them only to machines you trust.
 
 On the machine (here: a dry run, which prints the plan and starts nothing):
 
