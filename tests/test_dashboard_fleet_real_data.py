@@ -279,8 +279,9 @@ def test_apply_sample_role_exports_the_learner_id(monkeypatch):
 # -- the page --------------------------------------------------------------------------------------
 def test_breakers_panel_is_last_and_the_topology_is_followed_by_the_metrics():
     html = render_page(None)
-    order = [html.index(f'id="{i}"') for i in ("alertBox", "topoBox", "rFleet", "rCost", "rounds", "async", "util",
-                                                "nodes", "cost", "events", "cmds", "unused", "brkBox")]
+    order = [html.index(f'id="{i}"') for i in ("alertBox", "topoBox", "rFleet", "rCost", "detailsH", "islSw", "fleetBox",
+                                                "async", "rounds", "util", "nodes", "runWide", "cost", "events", "cmds",
+                                                "unused", "brkBox")]
     assert order == sorted(order)
     assert html.index('id="navBrk"') > html.index('href="#unused"')
 

@@ -129,6 +129,30 @@ arguments (port, store, tapes ...), so a copied command reproduces it.
   island is stale / lost / stopped is flagged: its claims come back only when their lease expires
   and another sampler claims them again (attempt + 1). The lease itself is not on the tapes.
 
+## RL metrics page: details
+
+Below the fleet charts, the details follow an island switch: a fleet of async islands shows
+`Island 0 / Island 1 / ... / Fleet`, an async run with several trainers one button per trainer,
+a synchronous multi-island run one per island; a run with one trainer has no switch. The pick is
+kept per browser. For the picked island (async):
+
+- the island header: trainer, machine, store lane, release cadence, max policy age, policy
+  version, startup steps, status;
+- Trainer rounds (totals, sparklines, newest rows) next to Releases: the island's releases only,
+  one load tag per sampler of the island (`vLLM 157s`, `SGL 1 at start`; a grey dashed tag = not
+  loaded; hover a tag for resolve / drain / load / pause);
+- Samplers & pools: one row per sampler, grouped by pool (source, engine and cards, status,
+  version, policy age, groups, truncation, backlog cap, the pool's logprob |diff| / TIS
+  clipfrac); a column no sampler reports is hidden and named under the table;
+- Backlog (with the samplers' `backlog_full` / `admitted` reports) next to the release timeline;
+- the per-round drill-down of the island's trainer (metric, round time, node memory, phase
+  timeline from the first round; the startup before it is a note).
+
+`Fleet` holds one summary row per island, every trainer's metric overlaid, and the run-wide
+ledgers: syncer merges, the task dispense ledger (recover / expired events are listed; slots
+handed back unwritten on a reload are counted only) and NC pool events. Island health is drawn for
+synchronous runs; an async run carries it in the island header and the sampler table.
+
 ## Offline export
 
 ```bash
@@ -291,7 +315,9 @@ learner tape:
 - Cross-round carry-over: shown only when trajectory events carry a
   `started_rollout_id` that differs from the training round, or
   `policy_versions` with more than one version.
-- Older tapes without these events show "no data" in this block.
+- A chart without any data is not drawn; it is named, with the event it needs, in the one-line
+  "Panels not used in this run" fold at the bottom of the page (the whole block is hidden when
+  none of its charts has data, as on older tapes).
 
 Comparing two runs (this block only; the `--compare` tapes are read once at
 start and not followed):

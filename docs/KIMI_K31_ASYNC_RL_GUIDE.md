@@ -2345,6 +2345,10 @@ tapes.
 
 ### Async GRPO panel
 
+The details open with one block for the trainer: a header (machine, policy version, startup
+steps, status), Trainer rounds next to Releases, Samplers & pools, then Backlog next to the
+release timeline, followed by the per-round charts.
+
 **Trainer rounds.** One row per trained round:
 
 | Column | Meaning |
@@ -2359,7 +2363,7 @@ tapes.
 
 The totals line above the table sums trained groups, stale drops,
 off-policy-gate drops, short groups, carried-over groups and **padded
-samples**. Padding tops up a round that cannot be filled with whole groups,
+samples** (counts that are 0 or not on the tapes are named once at its end). Padding tops up a round that cannot be filled with whole groups,
 and the real samples' gradient is scaled by the padded fraction.
 The trainer reports the ratio as the metric `sample_buffer/padded_fraction`
 ([MILES_RL.md](MILES_RL.md)). Current scope: the dashboard shows the padded
@@ -2367,29 +2371,36 @@ sample count; the fraction is read from the trainer metrics. A fraction that
 stays high means samplers are not keeping up. Add samplers or raise
 `--rl-max-policy-age`.
 
-**Samplers.** One row per sampler island:
+**Samplers & pools.** One row per sampler island (samplers of one pool share
+its pool, engine and cards cells). A column no sampler reports is hidden and
+named under the table:
 
 | Column | Meaning |
 |---|---|
+| engine · cards | Engine, precision, card model and count, topology, provider. |
 | status | `healthy`; `starting`; `waiting: backlog full (trainers behind)`; `waiting: waiting for a policy release`; `stale`; `lost: <reason> at <HH:MM>`; `left: <reason> at <HH:MM>[, replaced by <ticket>]`; `finished`; `stopped`. |
 | policy | `v<policy_version>` the sampler currently generates with. |
-| policy age p50 / max, histogram | Trainer version minus the version a round was generated with. |
+| age p50 / max | Trainer version minus the version a round was generated with (hover for the histogram). |
 | generate s p50 / max | Seconds per generation round. |
 | groups written | Groups the sampler wrote to its shard. |
 | zero-variance seen / dropped, truncated, dropped groups | Group quality counters. |
 | trials retried / lost | Agentic trials retried, and trials lost (`rl_agentic_trial_lost`). |
 | reward | Last reward the sampler reported. |
+| backlog cap | `max_backlog_groups` of the sampler. |
 
-**Buffer backlog.** Groups written by all samplers minus the trainers' read
+**Backlog.** Groups written by all samplers minus the trainers' read
 position. A growing backlog means trainers are behind. A backlog near zero
-means samplers are the bottleneck.
+means samplers are the bottleneck. Red / green dots are the samplers' own
+`backlog_full` / `admitted` reports.
 
-**Policy releases.** Each trainer release and when each sampler finished
-loading it, with the latency from the release. A replacement island that
-started on the newest release shows `(at start)` instead of a latency. A
-release no running sampler loaded shows `not loaded` (with
-`--rl-max-policy-age` above 0 a sampler may skip versions). NC pool events
-appear as dashed lines.
+**Releases and release timeline.** Each trainer release with one tag per
+sampler: its engine and the latency from the release to its load, for example
+`vLLM 157s`. A replacement island that started on the newest release shows
+`at start` instead of a latency. A sampler that did not load the release shows
+a grey dashed tag (with `--rl-max-policy-age` above 0 a sampler may skip
+versions); hover a tag for the resolve / drain / load / pause parts. The
+timeline draws the same on the wall clock; NC pool events appear as dashed
+lines.
 
 **NC pool events.** The `nc_elastic_*` stream (ordered, member_ready,
 shard_fenced, evicted, node_lost, engine_stalled, released, target_changed,
@@ -2418,7 +2429,10 @@ first exit event of the node, not the fence and release that follow it:
 
 ### Other panels
 
-- **Island health**, **Event stream**: per-island state and the raw events.
+- **Event stream**: the raw events. Island health of an async run is in the
+  block header and the Samplers & pools table.
+- **Panels not used in this run**: one line at the bottom naming each panel
+  without data and the tape event it needs.
 - **Cost (estimate, not billing data)**: spend per resource from the resource
   ledger and the price table (`--prices`, from `dashboard.prices` in
   `run.json`). The cost bar uses `--budget` (`budget.usd`). An NC sampler is

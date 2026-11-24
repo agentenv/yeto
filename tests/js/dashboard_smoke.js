@@ -1,4 +1,5 @@
 // Minimal DOM stub: runs the dashboard page script (section 9 redesign) against an
+// ("wall" is the island switch above the details, which replaced the island wall)
 // exported HTML file: render, layout switch, metric tab, linked hover, keyboard.
 // Usage: node dashboard_smoke.js page.html  -> prints JSON with rendered HTML.
 const fs = require("fs");
@@ -37,10 +38,10 @@ global.setTimeout = () => 0;
 eval(appM[1]);
 const out = { title: els.title.innerHTML, kpis: els.kpis.innerHTML, islands: els.islands.innerHTML,
   cost: els.costBox.innerHTML, events: els.evs.innerHTML, folds: els.foldBox.innerHTML,
-  metric: els.cMetric.innerHTML, svg_nodes: svgNodes.length, wall_hidden: els.islandWall.hidden,
+  metric: els.cMetric.innerHTML, svg_nodes: svgNodes.length, wall_hidden: mk("islSw").hidden,
   nodes_note: (els.rNodesNote || {}).textContent };
 // generation-stage utilization panel
-out.util = { empty_hidden: mk("utilEmpty").hidden, body_hidden: mk("utilBody").hidden, ctl: mk("utilCtl").innerHTML,
+out.util = { panel_hidden: mk("util").hidden, folds: mk("foldBox").innerHTML, empty_hidden: mk("utilEmpty").hidden, body_hidden: mk("utilBody").hidden, ctl: mk("utilCtl").innerHTML,
   cut: mk("uCut").innerHTML, carry_hidden: mk("uCarryBox").hidden, carry: mk("uCarry").innerHTML,
   done_svg: svgNodes.filter((n) => n.attrs["class"] === "udone").length,
   cut_lines: svgNodes.filter((n) => n.attrs["class"] === "ucut").length };
@@ -51,5 +52,5 @@ if (hov) { hov.listeners.mousemove[0]({ clientX: 10, clientY: 10 }); out.tip = m
 const kd = (els.rounds.listeners.keydown || [])[0];
 if (kd) { kd({ key: "ArrowRight", preventDefault() {} }); out.tip_key = mk("tip").innerHTML; }
 els.layoutBtn.onclick();
-out.title_after_switch = els.title.innerHTML; out.wall_hidden_after_switch = els.islandWall.hidden; out.wall = els.wall.innerHTML;
+out.title_after_switch = els.title.innerHTML; out.wall_hidden_after_switch = mk("islSw").hidden; out.wall = mk("islSw").innerHTML;
 process.stdout.write(JSON.stringify(out));
