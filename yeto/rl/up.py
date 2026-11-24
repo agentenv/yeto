@@ -740,7 +740,8 @@ class Run:
         """The run's :class:`yeto.rl.fleet.FleetPlan`; None for a single-trainer run."""
         from yeto.rl import fleet  # noqa: PLC0415
 
-        return fleet.plan_of(self.cfg)
+        cfg = getattr(self, "cfg", None)  # a bare Run (pool helpers alone) has no config
+        return None if cfg is None else fleet.plan_of(cfg)
 
     def log_fleet_plan(self) -> None:
         """Each island's learner id, store sub-directory, trainer cluster and price, and pools."""
