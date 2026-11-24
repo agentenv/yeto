@@ -19,8 +19,14 @@ write their shards to (the trainer's buffer store)::
 The trainer (:class:`MemberTableReader`, used by ``sample_buffer.FileSampleBuffer``
 when :data:`MEMBER_TABLE_ENV` is set) reads the tables before each round and adds
 every new shard to the shards it merges; it never drops a shard (its unmerged groups
-stay trainable). A shard is taken only when it starts with its table's ``shard_base``
-followed by ``-``: a stray document cannot route another lane's shards here.
+stay trainable). Lanes: a table is followed only when its ``shard_base`` is in one of the
+trainer's lanes (:data:`MEMBER_LANES_ENV`: comma-separated lane prefixes, ``*`` every
+table of the store; unset: the bases of the trainer's initial ``--rl-buffer-shards``), its
+``pool`` names its own key, and a shard is taken only when it starts with the table's
+``shard_base`` followed by ``-``: a table of another lane is ignored (reported once), so
+it cannot route that lane's shards into this trainer. ``yeto run up`` sets ``*`` for a
+single trainer (its store prefix is its one lane, and a pool added while it trains has a
+new ``shard_base``); a fleet's island trainers keep their own bases (or a lane prefix).
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from typing import Any
 SCHEMA = "yeto.fleet.member-table/v1"
 MEMBERS_DIR = "fleet/members"
 MEMBER_TABLE_ENV = "YETO_RL_MEMBER_TABLE"  # "1": the trainer follows the member tables of its store
+MEMBER_LANES_ENV = "YETO_RL_MEMBER_LANES"  # the trainer's lanes (module doc); unset: its initial shard bases
 DEFAULT_REFRESH_S = 15.0
 
 
@@ -46,6 +53,26 @@ def enabled(environ: Any) -> bool:
     return str(environ.get(MEMBER_TABLE_ENV, "")).strip().lower() in ("1", "true", "yes", "on")
 
 
+def shard_base(shard: str) -> str:
+    """``<base>-<n>`` -> ``<base>`` (a name without a numbered tail is its own base)."""
+    base, _, tail = str(shard).rpartition("-")
+    return base if base and tail.isdigit() else str(shard)
+
+
+def lanes_from(environ: Any, initial_shards: Iterable[str]) -> frozenset[str] | None:
+    """The trainer's lanes: :data:`MEMBER_LANES_ENV` (``*``: None, every table), else the
+    bases of its initial shards."""
+    raw = str(environ.get(MEMBER_LANES_ENV, "")).strip()
+    if raw:
+        lanes = {part.strip() for part in raw.split(",") if part.strip()}
+        return None if "*" in lanes else frozenset(lanes)
+    return frozenset(shard_base(s) for s in initial_shards)
+
+
+def in_lanes(base: str, lanes: frozenset[str] | None) -> bool:
+    return lanes is None or any(base == lane or base.startswith(f"{lane}-") for lane in lanes)
+
+
 class MemberTableWriter:
     """One pool's table (module doc); :meth:`publish` writes it when it changed."""
 
@@ -55,25 +82,27 @@ class MemberTableWriter:
         self._last: tuple[tuple[str, ...], tuple[str, ...]] | None = None
         self.epoch: int | None = None
 
-    def _load_epoch(self) -> int:
+    def _stored(self) -> tuple[int, tuple[tuple[str, ...], tuple[str, ...]] | None]:
         data = self.objects.read(self.key)
         if data is None:
-            return 0
+            return 0, None
         try:
             doc = json.loads(data)
-            self._last = (tuple(doc.get("shards") or ()), tuple(doc.get("retired") or ()))
-            return int(doc.get("epoch") or 0)
+            return int(doc.get("epoch") or 0), (tuple(doc.get("shards") or ()), tuple(doc.get("retired") or ()))
         except (ValueError, TypeError, AttributeError):
-            return 0
+            return 0, None
 
     def publish(self, shards: Iterable[str], retired: Iterable[str] = ()) -> bool:
-        """Write the table when ``shards`` / ``retired`` changed (epoch + 1). True: written."""
+        """Write the table when ``shards`` / ``retired`` changed. The stored epoch is read
+        again before each write, so the epoch only grows even past a table another holder
+        wrote meanwhile (a reader never sees it go back). True: written."""
         if self.epoch is None:
-            self.epoch = self._load_epoch()
+            self.epoch, self._last = self._stored()
         now = (tuple(sorted({s for s in shards if s}, key=_order)), tuple(sorted({s for s in retired if s}, key=_order)))
         if now == self._last:
             return False
-        epoch = self.epoch + 1
+        stored, _ = self._stored()
+        epoch = max(self.epoch, stored) + 1
         doc = {"schema": SCHEMA, "pool": self.pool, "shard_base": self.shard_base, "epoch": epoch,
                "shards": list(now[0]), "retired": list(now[1]), "updated_at": self.clock()}
         self.objects.write(self.key, json.dumps(doc).encode())
@@ -87,7 +116,8 @@ def _order(shard: str) -> tuple[str, int]:
 
 
 def read_tables(objects: Any) -> list[dict[str, Any]]:
-    """Every member table of the store (unreadable or foreign documents left out)."""
+    """Every member table of the store (unreadable documents, other schemas and a table
+    whose ``pool`` is not its own key left out)."""
     out = []
     for key in objects.list(MEMBERS_DIR + "/"):
         if not key.endswith(".json"):
@@ -99,9 +129,16 @@ def read_tables(objects: Any) -> list[dict[str, Any]]:
             doc = json.loads(data)
         except ValueError:
             continue
-        if isinstance(doc, dict) and doc.get("schema") == SCHEMA:
+        if (isinstance(doc, dict) and doc.get("schema") == SCHEMA
+                and key.rsplit("/", 1)[-1] == f"{doc.get('pool')}.json"):
             out.append(doc)
     return out
+
+
+def table_shards(doc: dict[str, Any], field: str = "shards") -> list[str]:
+    """The shards of ``field`` that start with the table's ``shard_base`` and ``-``."""
+    prefix = f"{doc.get('shard_base')}-"
+    return [str(s) for s in doc.get(field) or () if str(s).startswith(prefix)]
 
 
 class MemberTableReader:
@@ -109,8 +146,11 @@ class MemberTableReader:
     (new since the last poll) and the shards the tables retired, at most every ``refresh_s``."""
 
     def __init__(self, objects: Any, *, refresh_s: float = DEFAULT_REFRESH_S,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, lanes: frozenset[str] | None = None) -> None:
         self.objects, self.refresh_s, self.clock = objects, float(refresh_s), clock
+        self.lanes = lanes  # None: every table of the store (module doc)
+        self.ignored: dict[str, str] = {}  # pool -> shard_base of a table outside the lanes
+        self.ignored_new: dict[str, str] = {}  # of them: first seen by the last poll
         self.epochs: dict[str, int] = {}
         self.shards: set[str] = set()
         self.retired: set[str] = set()
@@ -134,18 +174,22 @@ class MemberTableReader:
             return set(), set()
         added: set[str] = set()
         retired: set[str] = set()
+        self.ignored_new = {}
         for doc in tables:
             pool, epoch = str(doc.get("pool")), int(doc.get("epoch") or 0)
+            if not in_lanes(str(doc.get("shard_base")), self.lanes):
+                if pool not in self.ignored:
+                    self.ignored[pool] = self.ignored_new[pool] = str(doc.get("shard_base"))
+                continue
             if epoch <= self.epochs.get(pool, -1):
                 continue
             self.epochs[pool] = epoch
-            prefix = f"{doc.get('shard_base')}-"
-            for shard in doc.get("shards") or ():
-                if str(shard).startswith(prefix) and shard not in self.shards:
-                    self.shards.add(str(shard))
-                    added.add(str(shard))
-            for shard in doc.get("retired") or ():
-                if str(shard).startswith(prefix) and shard not in self.retired:
-                    self.retired.add(str(shard))
-                    retired.add(str(shard))
+            for shard in table_shards(doc):
+                if shard not in self.shards:
+                    self.shards.add(shard)
+                    added.add(shard)
+            for shard in table_shards(doc, "retired"):
+                if shard not in self.retired:
+                    self.retired.add(shard)
+                    retired.add(shard)
         return added, retired

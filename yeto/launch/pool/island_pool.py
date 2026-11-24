@@ -825,18 +825,21 @@ class IslandPool:
         """Every shard this pool assigned (a gone member's too: its groups may not be merged yet)."""
         return [m.shard for m in self.members if m.shard]
 
-    def _publish_members(self) -> None:
+    def _publish_members(self) -> bool:
         """The pool's member table (``control.members``) when its shards changed; a store that
-        does not answer is tried again at the next save."""
+        does not answer is tried again at the next save. True: the table is current (or the
+        pool has none)."""
         writer = getattr(self.control, "members", None)
         if writer is None:
-            return
+            return True
         try:
             if writer.publish(self.member_shards(), self.retired_shards):
                 self._event("member_table", epoch=writer.epoch, shards=len(self.member_shards()),
                             retired=len(self.retired_shards))
         except Exception as error:  # noqa: BLE001 - the trainer keeps the shards it has
             self.log(f"pool: member table not written ({error!r}); tried again at the next save")
+            return False
+        return True
 
     def detach(self, why: str) -> None:
         """Stop driving this pool without draining it (module doc of ``controller``): its

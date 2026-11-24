@@ -80,7 +80,7 @@ def test_a_retired_shard_never_holds_the_data_end(tmp_path):
     assert buffer.data_ended
 
 
-def test_only_the_tables_own_lane_prefix_is_followed(tmp_path):
+def test_only_the_tables_own_shard_base_is_followed(tmp_path):
     objects = DirectoryObjectStore(tmp_path)
     objects.write(mt.table_key("stray"), json.dumps(
         {"schema": mt.SCHEMA, "pool": "stray", "shard_base": "q", "epoch": 5, "shards": ["other-0", "q-0"]}).encode())
@@ -131,5 +131,78 @@ def test_run_up_store_mode_tells_the_trainer_to_follow_the_member_table(tmp_path
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
     run_cfg, _, _ = _two_pools(tmp_path)
     store = up.Run(dict(run_cfg, controller="in_process", rollout={"control_plane": "store"}))
-    assert store.trainer_argv()[-2:] == ["--island-env", f"{mt.MEMBER_TABLE_ENV}=1"]
+    argv = store.trainer_argv()
+    assert argv[-4:] == ["--island-env", f"{mt.MEMBER_TABLE_ENV}=1", "--island-env", f"{mt.MEMBER_LANES_ENV}=*"]
     assert "--island-env" not in up.Run(run_cfg).trainer_argv()
+
+
+def test_a_table_outside_the_trainers_lanes_is_ignored_and_reported_once(tmp_path, monkeypatch):
+    """REV #756: the lane is the trainer's (its initial shard bases, or YETO_RL_MEMBER_LANES),
+    not the table's own shard_base: another lane's table routes nothing here."""
+    objects = DirectoryObjectStore(tmp_path)
+    mine = mt.MemberTableWriter(objects, "mine", "i1-nc")
+    mine.publish(["i1-nc-0"])
+    events = []
+    buffer = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=["i1-nc-0"])
+    buffer.merge_events = lambda name, **kw: events.append((name, kw))
+    buffer._members.refresh_s = 0  # noqa: SLF001
+    mine.publish(["i1-nc-0", "i1-nc-1"])
+    mt.MemberTableWriter(objects, "theirs", "i2-nc").publish(["i2-nc-0"])
+    assert buffer.refresh_members() == ["i1-nc-1"]
+    assert "i2-nc-0" not in buffer._expected_shards  # noqa: SLF001
+    assert [e for e in events if e[0] == "rl_member_table_ignored"] == [
+        ("rl_member_table_ignored", {"pool": "theirs", "shard_base": "i2-nc"})]
+    buffer.refresh_members()
+    assert len([e for e in events if e[0] == "rl_member_table_ignored"]) == 1  # reported once
+    monkeypatch.setenv(mt.MEMBER_LANES_ENV, "i1")  # a lane prefix: a pool added to island 1 later
+    assert mt.lanes_from(__import__("os").environ, ["i1-nc-0"]) == frozenset({"i1"})
+    assert mt.in_lanes("i1-modal", frozenset({"i1"})) and not mt.in_lanes("i10-nc", frozenset({"i1"}))
+    monkeypatch.setenv(mt.MEMBER_LANES_ENV, "*")
+    assert mt.lanes_from(__import__("os").environ, ["i1-nc-0"]) is None
+
+
+def test_a_table_under_another_pools_key_is_not_followed(tmp_path):
+    objects = DirectoryObjectStore(tmp_path)
+    objects.write(mt.table_key("nc"), json.dumps(
+        {"schema": mt.SCHEMA, "pool": "modal", "shard_base": "p", "epoch": 1, "shards": ["p-0"]}).encode())
+    assert mt.read_tables(objects) == []
+
+
+def test_the_epoch_only_grows_past_a_table_another_holder_wrote():
+    from tests.test_fleet_store_control import _objects  # noqa: PLC0415
+
+    objects = _objects()
+    old = mt.MemberTableWriter(objects, "nc", "p")
+    old.publish(["p-0"])
+    new = mt.MemberTableWriter(objects, "nc", "p")
+    new.publish(["p-0", "p-1"])
+    new.publish(["p-0", "p-1", "p-2"])
+    assert old.publish(["p-0", "p-3"])  # a stale cache: the stored epoch is read again
+    assert json.loads(objects.read(mt.table_key("nc")))["epoch"] == 4
+
+
+def test_the_seal_covers_the_member_table_shards_past_the_initial_list(tmp_path, monkeypatch):
+    """REV #756: on the store control plane the trainer consumes member-table shards past its
+    --rl-buffer-shards; run up's seal ends them too (a fenced or lost sampler's never ends)."""
+    from tests.test_rollout_entry import _two_pools  # noqa: PLC0415
+    from yeto.rl import up  # noqa: PLC0415
+
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
+    run_cfg, _, _ = _two_pools(tmp_path)
+    objects = DirectoryObjectStore(tmp_path / "buffer")
+    run = up.Run(dict(run_cfg, controller="in_process", rollout={"control_plane": "store"}))
+    monkeypatch.setattr(run, "_objects", lambda: objects)
+    initial = run.data_end_shards()
+    mt.MemberTableWriter(objects, "nc", "late").publish(["late-0", "late-1"])
+    assert run.data_end_shards() == initial + ["late-0", "late-1"]
+    legacy = up.Run(run_cfg)
+    monkeypatch.setattr(legacy, "_objects", lambda: objects)
+    assert "late-0" not in legacy.data_end_shards()  # the default control plane: unchanged
+
+    def down():
+        raise ConnectionError("store down")
+
+    monkeypatch.setattr(run, "_objects", down)
+    with pytest.raises(ConnectionError):  # never a seal on a part of the shards
+        run.data_end_shards()

@@ -180,6 +180,7 @@ OWNER_EVENT = "rl_shard_owner"  # a claim or a fence of a shard: shard, incarnat
 # bad_record, duplicate_merged_record, unmerged_shard_gap, missing_shard_position), shard, ...
 MERGE_EVENT = "rl_buffer_merge_skipped"
 MEMBER_EVENT = "rl_member_table_epoch"  # the member table added shards: shards, epoch
+MEMBER_IGNORED_EVENT = "rl_member_table_ignored"  # a table outside the trainer's lanes: pool, shard_base
 FORMAT_MARKER = "shard-ownership"  # the merged index's format marker (module doc)
 _MARKER_NOTE = "written by yeto with shard ownership records: code older than them cannot read this buffer"
 BUFFER_DIR = "sample-buffer"
@@ -901,7 +902,8 @@ class FileSampleBuffer:
 
             objects = getattr(self.index, "objects", None)
             if objects is not None and member_table.enabled(os.environ):
-                self._members = member_table.MemberTableReader(objects)
+                self._members = member_table.MemberTableReader(
+                    objects, lanes=member_table.lanes_from(os.environ, expected_shards))
         self._shard_of: list[str | None] = []  # the shard of each position (merged records)
         self._shard_pos_of: list[int | None] = []  # its position in that shard
         self._shard_next: dict[str, int] = {}  # per shard: the highest merged shard position + 1
@@ -1322,12 +1324,22 @@ class FileSampleBuffer:
     # ---------------------------------------------------------------- reading
     def refresh_members(self, *, force: bool = False) -> list[str]:
         """Add the shards the member tables published since the last read (module
-        ``member_table``) to the expected shards; the shards added. Called before each
-        round (:meth:`select`): the round in flight is never interrupted."""
+        ``member_table``) to the expected shards; the shards added. Called from
+        :meth:`refresh` (at most every ``refresh_s``): a shard can join between two reads of
+        one round; a group is whole in its shard, so a round never gets a partial one. A
+        table outside the trainer's lanes is ignored and reported once."""
         if self._members is None:
             return []
         with self._lock:
             added, retired = self._members.poll(force=force)
+            for pool, base in sorted(self._members.ignored_new.items()):
+                print(f"[sample-buffer] member table of pool {pool} (shard_base {base}) is outside this "
+                      "trainer's lanes: ignored", flush=True)
+                if self.merge_events is not None:
+                    try:
+                        self.merge_events(MEMBER_IGNORED_EVENT, pool=pool, shard_base=base)
+                    except Exception:  # noqa: BLE001 - observation only
+                        pass
             names = {_shard_name(s) for s in added}
             new = sorted(names - set(self._expected_shards or ()))
             if new:
