@@ -384,3 +384,21 @@ def test_plan_written_by_run_up_binds_shards_to_their_pool():
     assert pools == {"i0-vllm-h100": (0, "vLLM", ["<run>-vllm-i0-2"]),
                      "i0-sglang-l40s": (0, "SGLang", ["<run>-sglang-i0-0"]),
                      "i1-sglang-l40s": (1, "SGLang", ["<run>-sglang-i1-5"])}
+
+
+def test_a_miles_sampler_island_is_bound_by_the_island_its_start_names():
+    """A Miles sampler island (launch island 2) that follows learner 1 names it in
+    ``rl_sampler_start.island`` with its store URI, as an external pool's sampler does
+    (``sampler_island.fleet_binding``): the dashboard binds it to trainer 1 by that field."""
+    r = Reducer(run="fleet-qa")
+    for k in (0, 1):
+        r.feed({"event": "rl_engine_selected", "island_id": k, "time_unix": T0, "rl/outer_sync": True})
+        r.feed({"event": "rl_round_trained", "island_id": k, "time_unix": T0 + 10, "rollout_id": 0, "trained_groups": 4})
+    r.feed({"event": "rl_sampler_start", "island_id": 2, "time_unix": T0 + 1, "num_rollouts": None,
+            "until_trainers_end": 1, "max_backlog_groups": 176, "start_rollout_id": 0,
+            "store": f"{STORE}/trainer1", "island": 1})
+    r.feed({"event": "rl_sampler_round", "island_id": 2, "time_unix": T0 + 5, "rollout_id": 0, "groups": 4})
+    fleet = fleet_islands.resolve(r)
+    assert fleet is not None and fleet["island_of"]["2"] == 1
+    d = _diloco(r)
+    assert d["lanes"]["1"]["samplers"] == ["2"] and d["lanes"]["0"]["samplers"] == []

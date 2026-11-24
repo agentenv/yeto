@@ -166,6 +166,19 @@ def _buffer_config(miles_args: Any, role: str) -> Any:
     return config if config is not None and config.role == role else None
 
 
+def fleet_binding(config: Any, store: Any) -> dict[str, Any]:
+    """The ``rl_sampler_start`` fields that bind a sampler to the trainer it follows
+    (``--rl-sampler-feeds-learner``): ``island``, that trainer's learner id, and
+    ``store``, the store URI when the island's store has one (an object store), as an
+    external pool's sampler names them (``engine_sampler``). {} for any other sampler:
+    its record is unchanged."""
+    learner = getattr(config, "feeds_learner", None)
+    if learner is None:
+        return {}
+    uri = getattr(store, "uri", None)
+    return {"island": int(learner), **({"store": str(uri)} if uri else {})}
+
+
 def release_store(config: Any, environ: Any = None, *, scheme: str = BF16,
                   mirror: DeltaMirror | None = None) -> PolicyReleaseStore:
     from yeto.rl.engine.resume import store_for
@@ -613,10 +626,10 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         latest = follower.releases.latest()
         membership.join(latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
-        emit("rl_sampler_start", store=config.store, num_rollouts=loop.num_rollouts,
-             until_trainers_end=until,
-             max_backlog_groups=int(config.max_backlog_groups), weights=loader.weights,
-             start_rollout_id=resume.next_rollout_id)
+        emit("rl_sampler_start", **{
+            "store": config.store, "num_rollouts": loop.num_rollouts, "until_trainers_end": until,
+            "max_backlog_groups": int(config.max_backlog_groups), "weights": loader.weights,
+            "start_rollout_id": resume.next_rollout_id, **fleet_binding(config, store)})
         if buffer.data_ended:  # an earlier incarnation finished and marked the data end
             rounds = 0
         else:

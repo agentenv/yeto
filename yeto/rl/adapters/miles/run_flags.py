@@ -668,6 +668,9 @@ _ISLAND = (
     # a sampler of a full-parameter synced group runs until its trainers
     # ended (sample_roles module doc); 0: the island's own rounds
     island_flag("--rl-sampler-until-trainers-end", type=int, default=0, metavar="N"),
+    # a sampler of a synced group whose samplers follow their trainer: the learner id of
+    # the trainer it feeds (its rl_sampler_start names it as island); None otherwise
+    island_flag("--rl-sampler-feeds-learner", type=int, default=None, metavar="K"),
     # a synced trainer fed by external pools whose launch gives per-island policy-age
     # limits (--rl-island-max-policy-age): the launch-wide --rl-max-policy-age, bound
     # into the syncer session contract in place of the island's own limit (which only

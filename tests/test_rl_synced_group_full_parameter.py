@@ -202,6 +202,24 @@ def test_samplers_run_until_the_trainers_they_feed_ended(capsys, follow, trainer
     assert sample_roles.sampler_stop_trainers(args, 4) == {2: trainers, 3: trainers}
 
 
+@pytest.mark.parametrize("follow", ["trainer", "merged"])
+def test_a_sampler_that_follows_its_trainer_names_that_learner(follow):
+    """Its ``rl_sampler_start`` names the island (learner id) it feeds, as an external
+    pool's sampler does; a sampler of the merged releases names none (command unchanged)."""
+    _, plan = _plan(("--rl-sampler-follow", follow))
+    feeds = {}
+    for island, parsed in _islands(plan):
+        config = sample_roles.resolve(parsed, groups_per_round=4)
+        if island["sample_role"] == "sampler" and follow == "trainer":
+            assert f"--rl-sampler-feeds-learner {config.feeds_learner}" in island["learner_command"]
+            assert config.store.endswith(f"/trainer{config.feeds_learner}")
+            feeds[island["learner_id"]] = config.feeds_learner
+        else:
+            assert "--rl-sampler-feeds-learner" not in island["learner_command"]
+            assert config.feeds_learner is None
+    assert feeds == ({2: 0, 3: 1} if follow == "trainer" else {})
+
+
 def test_samplers_outside_a_full_parameter_group_keep_their_rounds():
     pair = _ns(rl_island_sample_role=["0:sampler", "1:trainer"])
     assert sample_roles.sampler_stop_trainers(pair, 2) == {}
@@ -267,3 +285,17 @@ def test_the_group_samplers_are_fleet_followers():
     args, _ = _plan()
     names = [f"gbg-group-l{m}" for m in range(4)]
     assert _follower_islands(args, parse_gpu_spec(GROUP_GPU), names) == names[2:]
+
+
+def test_the_sampler_start_binding_names_the_island_and_the_store_uri():
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.sampler_island import fleet_binding
+
+    SampleBufferConfig = sample_roles.SampleBufferConfig
+    follows = SampleBufferConfig(role="sampler", store=f"{MOUNT}/trainer1", feeds_learner=1)
+    s3 = SimpleNamespace(uri="s3://bucket/runs/r/trainer1")
+    assert fleet_binding(follows, s3) == {"island": 1, "store": "s3://bucket/runs/r/trainer1"}
+    assert fleet_binding(follows, SimpleNamespace()) == {"island": 1}  # a mount: no URI, path kept
+    # any other sampler: its rl_sampler_start record is unchanged
+    assert fleet_binding(SampleBufferConfig(role="sampler", store=MOUNT), s3) == {}

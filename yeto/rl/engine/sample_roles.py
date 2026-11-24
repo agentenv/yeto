@@ -154,7 +154,10 @@ class SampleBufferConfig:
     ``ReleasingPublisher``);
     ``until_trainers_end``: sampler, generate until this many trainers that read
     the store have ended, with no fixed round count (module doc; 0: the
-    island's own rounds)."""
+    island's own rounds);
+    ``feeds_learner``: sampler of a synced group whose samplers follow their
+    trainer, the learner id of the trainer it feeds (``rl_sampler_start.island``,
+    as an external pool's sampler names it); None otherwise."""
 
     role: str
     store: str
@@ -168,6 +171,7 @@ class SampleBufferConfig:
     release_every: int = 1
     release_skip_busy: bool = False
     until_trainers_end: int = 0
+    feeds_learner: int | None = None
 
 
 def sample_role(args: Any) -> str:
@@ -867,6 +871,7 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
     if out.rl_sample_substore is not None:
         out.rl_checkpoint_store = substore_uri(args.rl_checkpoint_store, out.rl_sample_substore)
         out.rl_sample_substore = None  # a sampler's store is its trainer's sub-store
+        out.rl_sampler_feeds_learner = learners[bindings[island]]  # its rl_sampler_start.island
     out.rl_single_island_no_sync = True
     for name, _flag in _ISLAND_POOL_PARAMS:
         setattr(out, name, None)
@@ -1371,7 +1376,10 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
         release_every=_release_every(args) if role == TRAINER else 1,
         release_skip_busy=role == TRAINER and bool(getattr(args, "rl_release_skip_busy", False)),
         until_trainers_end=(int(getattr(args, "rl_sampler_until_trainers_end", 0) or 0)
-                            if role == SAMPLER else 0))
+                            if role == SAMPLER else 0),
+        feeds_learner=(int(args.rl_sampler_feeds_learner)
+                       if role == SAMPLER and getattr(args, "rl_sampler_feeds_learner", None) is not None
+                       else None))
 
 
 def island_env(args: Any) -> dict[str, str]:
@@ -1421,5 +1429,7 @@ def island_flags(args: Any) -> str:
         flags += f" --rl-sampler-data-slot {args.rl_sampler_data_slot}"
     if role == SAMPLER and int(getattr(args, "rl_sampler_until_trainers_end", 0) or 0):
         flags += f" --rl-sampler-until-trainers-end {int(args.rl_sampler_until_trainers_end)}"
+    if role == SAMPLER and getattr(args, "rl_sampler_feeds_learner", None) is not None:
+        flags += f" --rl-sampler-feeds-learner {int(args.rl_sampler_feeds_learner)}"
     return flags
 
