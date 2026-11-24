@@ -818,6 +818,17 @@ def test_full_release_without_a_change_manifest_reloads_in_full(tmp_path):
     assert checked and checked[0]["expert_update_fallback"] == "no_change_manifest"
     assert sorted(v for v, _ in _read_groups(bucket, "trainer-2")) == [0, 0, 1, 1]
 
+def test_a_score_centering_sampler_refuses_a_log_prob_mode_switch_in_its_environment(tmp_path):
+    """The engine server inherits the sampler's environment: a true
+    SGLANG_RETURN_ORIGINAL_LOGPROB there stops the sampler before it starts the engine."""
+    bucket = Bucket(tmp_path)
+    with pytest.raises(entry.SamplerSpecError, match="SGLANG_RETURN_ORIGINAL_LOGPROB=1"):
+        _run_sampler(_spec(tmp_path, num_rollouts=1), bucket, "sampler-a",
+                     environ={"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
+    assert _run_sampler(_spec(tmp_path, num_rollouts=1), bucket, "sampler-a",
+                        environ={"SGLANG_RETURN_ORIGINAL_LOGPROB": "0"})[0] == 1
+
+
 def test_version_fields_of_the_buffer_match_the_score_centering_argv(tmp_path):
     """The trainer's score_centering check (Y3): the sampler stamped ``engine.version_fields``
     equal to the argv's --rollout-temperature / --rollout-top-p / --rollout-top-k, fp32 head on,

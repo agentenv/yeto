@@ -189,13 +189,18 @@ def test_top_k_log_probs_refuse_the_log_prob_mode_switches():
 
 
 def test_the_sampler_entry_checks_its_process_environment(tmp_path, monkeypatch):
-    """build_engine of the entry passes the sampler's environment (inherited by the engine
-    server); a pool dry run off the node passes none and reads only the spec."""
+    """The entry checks the sampler's environment (inherited by the engine server) after
+    build_engine; a pool dry run off the node builds the engine from the spec only."""
+    from yeto.rl.engine import engine_sampler_entry as entry
+
     spec = _fake_spec(SC_SAMPLING, top_logprobs_num=8)
     monkeypatch.setenv("SGLANG_RETURN_ORIGINAL_LOGPROB", "1")
-    assert build_engine(spec).top_logprobs_num == 8
+    engine = build_engine(spec)
+    assert engine.top_logprobs_num == 8
     with pytest.raises(SamplerSpecError, match="SGLANG_RETURN_ORIGINAL_LOGPROB"):
-        build_engine(spec, environ={"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
+        entry.check_score_centering(spec, engine, {"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
+    entry.check_score_centering(_fake_spec(SC_SAMPLING, top_logprobs_num=0), FakeEngine(),
+                                {"SGLANG_RETURN_ORIGINAL_LOGPROB": "1"})
 
 
 def test_rollout_fields_spec_errors():

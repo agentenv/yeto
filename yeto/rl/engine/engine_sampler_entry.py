@@ -181,12 +181,10 @@ def _import(target: str) -> Any:
 
 # ------------------------------------------------------------------- engine
 
-def build_engine(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None) -> SamplerEngine:
+def build_engine(spec: Mapping[str, Any]) -> SamplerEngine:
     """The engine adapter of ``spec["engine"]``: ``factory`` (``module:callable``,
     an adapter-layer function) builds it from the engine section. The neutral
-    core names no adapter (import boundaries, ``yeto/rl/engine/README.md``).
-    ``environ``: the sampler process environment the engine inherits (None: the
-    spec's ``extra_env`` only, as in a pool dry run off the node)."""
+    core names no adapter (import boundaries, ``yeto/rl/engine/README.md``)."""
     engine = dict(_require(spec, "engine"))
     fields = spec.get(ROLLOUT_FIELDS)
     if fields is not None:
@@ -207,7 +205,7 @@ def build_engine(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None =
         built = factory(engine)
     except (KeyError, TypeError, ValueError) as error:
         raise SamplerSpecError(f"engine: {error}") from None
-    check_rollout_fields(spec, built, environ=environ)
+    check_rollout_fields(spec, built)
     return built
 
 
@@ -222,7 +220,9 @@ def check_rollout_fields(spec: Mapping[str, Any], engine: Any, *,
     behavior distribution is the returned log-probs at temperature 1, top_p 1, no
     top-k and neutral penalties: any other sampling, vLLM ``--logprobs-mode`` in the
     engine's ``extra_args`` or a true ``SGLANG_RETURN_ORIGINAL_LOGPROB`` in its
-    ``extra_env`` / ``environ`` is refused (:func:`score_centering_problems`)."""
+    ``extra_env`` / ``environ`` (the sampler process environment the engine server
+    inherits; None: the spec only, as in a pool dry run off the node) is refused
+    (:func:`check_score_centering`)."""
     fields = spec.get(ROLLOUT_FIELDS) or {}
     sampling = dict(spec.get("sampling") or {"max_tokens": 1})
     sampling["stop"] = tuple(sampling.get("stop") or ())
@@ -237,17 +237,26 @@ def check_rollout_fields(spec: Mapping[str, Any], engine: Any, *,
                                f"{have['top_logprobs_num']}")
     if fields.get("fp32_lm_head") and not have["version_fields"]["fp32_lm_head"]:
         raise SamplerSpecError(f"{ROLLOUT_FIELDS}.fp32_lm_head: the engine serves no fp32 lm-head")
-    k = max(int(want_k), have["top_logprobs_num"])
-    if k > 0:
-        problems = score_centering_problems(spec, environ)
-        if problems:
-            raise SamplerSpecError(
-                f"{ROLLOUT_FIELDS}.top_logprobs_num {k}: the top-K log-probs are score_centering's behavior "
-                f"distribution, valid only at temperature 1, top_p 1, top_k -1 and neutral penalties with the "
-                f"engine's default log-probs; got {'; '.join(problems)}. The trainer would train on a "
-                f"distribution the tokens were not sampled from. Fix the sampling, or set {ROLLOUT_FIELDS}."
-                "top_logprobs_num 0 if the trainer does not train with score_centering")
+    check_score_centering(spec, engine, environ)
     return have
+
+
+def check_score_centering(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, str] | None = None) -> None:
+    """Refuse a sampler whose top-K log-probs (K of ``rollout_fields`` or of the engine,
+    > 0: score_centering is their only consumer) would not be the distribution its tokens
+    are sampled from (:func:`score_centering_problems`). Nothing without top-K."""
+    fields = spec.get(ROLLOUT_FIELDS) or {}
+    k = max(int(fields.get("top_logprobs_num", 128 if fields else 0) or 0), top_logprobs_num(engine))
+    if k <= 0:
+        return
+    problems = score_centering_problems(spec, environ)
+    if problems:
+        raise SamplerSpecError(
+            f"{ROLLOUT_FIELDS}.top_logprobs_num {k}: the top-K log-probs are score_centering's behavior "
+            f"distribution, valid only at temperature 1, top_p 1, top_k -1 and neutral penalties with the "
+            f"engine's default log-probs; got {'; '.join(problems)}. The trainer would train on a "
+            f"distribution the tokens were not sampled from. Fix the sampling, or set {ROLLOUT_FIELDS}."
+            "top_logprobs_num 0 if the trainer does not train with score_centering")
 
 
 def score_centering_problems(spec: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> list[str]:
@@ -1180,7 +1189,8 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         version = None if island is None else island.follower.version
         membership.leave(reason.name, policy_version=version, buffer_end=len(buffer), **detail)
 
-    engine = build_engine(spec, environ=env)
+    engine = build_engine(spec)
+    check_score_centering(spec, engine, env)  # the environment the engine server inherits, too
     if resource_sampler is None:
         from .telemetry import ResourceSampler  # noqa: PLC0415
 
