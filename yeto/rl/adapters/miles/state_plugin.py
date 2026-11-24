@@ -81,6 +81,8 @@ STEP_LOSSES = f"{_PLUGIN_MODULE}.step_losses"
 ACTOR_RECORDERS = f"{_PLUGIN_MODULE}.install_actor_recorders"
 # rl-algo-critic-family 3.2: run in the critic's processes before its train.
 CRITIC_RECORDERS = f"{_PLUGIN_MODULE}.install_critic_recorders"
+# A liveness probe of every rank (the driver while a round waits for its batch)
+PING_WORKER = f"{_PLUGIN_MODULE}.ping_worker"
 EXPLAINED_VARIANCE_KEY = "explained_variance"
 
 
@@ -2086,6 +2088,12 @@ def align_weight_version(actor: Any, *, next_version: int) -> None:
     # k31/b2 Miles: full_parameter_state.set_model_weight_version (companions and
     # their CPU backup); older pins: the companions are filled by hand.
     set_model_weight_version(actor, int(next_version))
+
+
+def ping_worker(actor: Any) -> bool:
+    """Plugin: answers True. Its call proves the rank's process is alive
+    (``MilesTrainerGroup.watch_workers``); it touches no state."""
+    return True
 
 
 def grad_norm(actor: Any) -> float:

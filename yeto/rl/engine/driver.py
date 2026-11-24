@@ -693,6 +693,10 @@ class IslandDriver:
         self.node_loss_grace_s = 60.0
         self.node_loss_poll_s = 2.0
         self.sleep: Callable[[float], None] = time.sleep
+        # Trainer worker liveness while the round waits for its batch (a buffer trainer
+        # waits for sampler groups with idle trainer workers): seconds between probes of
+        # ``trainer.watch_workers``; None (default) or 0: no probe.
+        self.trainer_probe_s: float | None = None
         self.published_state: TrainableState | None = None
         # Published versions within the policy-age window (version -> hash)
         self.published_policies = PublishedPolicies()
@@ -1365,7 +1369,8 @@ class IslandDriver:
         republished, and the batch generated again."""
         outage = getattr(self, "engine_outage", None)
         if outage is None:
-            return self.rollout.generate(rollout_id, expected_policy_version=self.expected_token)
+            with self._trainer_watch(rollout_id, "generate"):
+                return self.rollout.generate(rollout_id, expected_policy_version=self.expected_token)
         while True:
             read = getattr(self.rollout, "data_cursor", None)
             cursor = read() if callable(read) else None
@@ -1382,6 +1387,36 @@ class IslandDriver:
                     return batch
             self._rewind_lost_batch(rollout_id, cursor)
             self._recover_engines(rollout_id, where="generate", error=error)
+
+    @contextmanager
+    def _trainer_watch(self, rollout_id: int, where: str):
+        """Around a wait for the round's batch: probe the trainer workers every
+        ``trainer_probe_s`` (``trainer.watch_workers``). A worker found dead ends the
+        wait (the backend interrupts it) and the island with RECOVERY_REQUIRED (LEAVE
+        INFRA_FAILED, the launcher relaunches it), as a train call into the dead worker
+        would have, instead of the island waiting with a dead trainer until the sample
+        wait limit. No probe without ``trainer_probe_s`` or a trainer without the verb."""
+        watch = getattr(self.trainer, "watch_workers", None)
+        probe_s = getattr(self, "trainer_probe_s", None)
+        if not callable(watch) or not probe_s or float(probe_s) <= 0:
+            yield
+            return
+        with watch(float(probe_s)) as loss:
+            try:
+                yield
+            except BaseException as error:
+                if loss.reason is None:
+                    raise
+                self._raise_trainer_lost(rollout_id, where, loss.reason, error)
+        if loss.reason is not None:  # the wait returned although a worker died meanwhile
+            self._raise_trainer_lost(rollout_id, where, loss.reason, None)
+
+    def _raise_trainer_lost(self, rollout_id: int, where: str, reason: str,
+                            error: BaseException | None) -> None:
+        self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
+                  error=str(reason), config_epoch=self.config_epoch, cause="trainer_worker_lost",
+                  where=where)
+        raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {reason}") from error
 
     def _rewind_lost_batch(self, rollout_id: int, cursor: Any) -> None:
         """The prompts of a lost batch are read again (best effort: the backend's
@@ -2268,7 +2303,8 @@ class IslandDriver:
         try:
             with pending.sampler:
                 if outage is None:
-                    batch = self.rollout.finish_generate(pending.handle)
+                    with self._trainer_watch(pending.rollout_id, "generate_wait"):
+                        batch = self.rollout.finish_generate(pending.handle)
                 else:
                     batch = self._finish_ahead_watched(pending, stop=stop)
             if not stop:

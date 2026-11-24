@@ -79,7 +79,7 @@ from .merged_release import fastest_lane_read
 from .object_store import is_fatal_store_error
 from .policy_release import LATEST_UNREAD, PolicyFollower, ReleaseNotLoaded
 from .sampler_breakers import trip
-from .sample_buffer import SampleBufferError, buffer_dir, read_read_position
+from .sample_buffer import SampleBufferError, read_buffer_read_position
 from .task_dispense import DispenseEnded, DispenseFencedEnd
 
 DEFAULT_POLL_S = 5.0
@@ -222,7 +222,8 @@ class SamplerLoop:
         (0 before any release: no trainer has read anything yet). A sampler that
         writes its own shard (``buffer.shard``) counts its shard only, from the
         trainer's read position in that shard (``buffer_shards``). The trainer's read
-        heartbeat (``sample-buffer/read-position.json``) refines it: see
+        heartbeat (``sample-buffer/read-position.json``, a file or an object of the
+        store: ``sample_buffer.read_buffer_read_position``) refines it: see
         :func:`heartbeat_read`; a missing, broken or foreign heartbeat leaves the
         release's position."""
         self.buffer.refresh()
@@ -237,8 +238,9 @@ class SamplerLoop:
             read = int((seen.buffer_shards or {}).get(shard, 0))
         else:
             read = 0 if seen.buffer_selected is None else int(seen.buffer_selected)
-        root = buffer_dir(self.buffer)
-        beat = None if root is None else read_read_position(root)
+        # the local file of a shared directory, else the object of an object store (the
+        # trainer writes it while a take waits: groups it passed over count as read)
+        beat = read_buffer_read_position(self.buffer)
         if beat is not None:
             read = heartbeat_read(beat, seen, shard, read)
         # synced trainers' lanes: count from the furthest one, so a stopped trainer's
