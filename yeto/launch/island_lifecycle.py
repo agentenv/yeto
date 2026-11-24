@@ -21,7 +21,8 @@ resident ``ssh:`` island) and wherever it runs (sky, Modal, an SSH inventory):
   id): state, source and its handle (cluster name and job id, Modal call id, SSH
   incarnation), incarnation, relaunch count, last exit, last resume point and the
   controller that wrote it. A launcher or a controller that dies leaves its islands
-  readable from any machine (the record is plain JSON in the run store). Writes are
+  readable from any machine (the record is plain JSON in the run store) and
+  adoptable by the next launcher of the run (``yeto.launch.island_adopt``). Writes are
   best effort: a store that does not answer never stops supervision. The launcher's
   store does its I/O on one background thread (``background=True``): the fleet
   controller's poll loop never waits on the store (a write is queued, newest wins; an
@@ -216,6 +217,7 @@ def classify_error(error: BaseException | None, *, detail: str = "") -> Decision
 # -- the state record in the store ---------------------------------------------------------------
 STATE_DIR = "fleet/trainers"
 HISTORY = 20  # transitions kept in a record
+SYNCER_KEY = "fleet/syncer.json"
 
 
 def state_key(island: int) -> str:
@@ -500,6 +502,22 @@ class IslandStateStore:
                  f"{'; fenced: ' + str(self.fenced) if self.fenced is not None else ''}): the run store shows "
                  "an older state of these islands")
         return False
+
+    # -- the syncer's record (fleet/syncer.json: its cluster, job and address)
+    def write_syncer(self, **fields: Any) -> None:
+        body = {**fields, "updated": round(self.clock(), 3), "controller": self.controller}
+        if self.fence is not None:
+            body["fence_token"] = int(self.fence.token)
+        self._put(SYNCER_KEY, json.dumps(body, sort_keys=True, default=str).encode())
+
+    def read_syncer(self) -> dict[str, Any] | None:
+        try:
+            raw = self.objects.read(SYNCER_KEY)
+            record = None if raw is None else json.loads(raw)
+        except Exception as error:  # noqa: BLE001
+            self._warn("syncer read", error)
+            return None
+        return record if isinstance(record, dict) else None
 
     # -- the stop channel
     def stop_requested(self, island: int) -> dict[str, Any] | None:

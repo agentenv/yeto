@@ -205,7 +205,7 @@ class FleetController:
         follower_grace_s: float = 120.0,
         rollout=None,
         recorder=None,
-        adopted=None,
+        incarnations=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -313,12 +313,14 @@ class FleetController:
         # STOP there ends that island only. None (a single-trainer launch by default):
         # nothing is written or read.
         self.recorder = recorder
-        # name -> the incarnation of an island this controller adopted from a dead
-        # launcher (its record in the store): it keeps that incarnation.
-        for name, incarnation in dict(adopted or {}).items():
+        # name -> {"incarnation", "relaunches", "adopted"} from the island's record of an
+        # earlier launcher of this run (yeto.launch.island_adopt): an adopted island keeps
+        # its incarnation; a relaunched one continues the count.
+        for name, known in dict(incarnations or {}).items():
             if name in self.learners:
-                self.learners[name]["incarnation"] = int(incarnation)
-                self.learners[name]["adopted"] = True
+                self.learners[name]["incarnation"] = int(known.get("incarnation") or 0)
+                self.learners[name]["relaunches"] = int(known.get("relaunches") or 0)
+                self.learners[name]["adopted"] = bool(known.get("adopted"))
 
     def _fleet(self, kind: str, name: str | None = None, *, force: bool = False, **fields) -> None:
         if self.fleet_log is None:
@@ -416,7 +418,10 @@ class FleetController:
         """
         for name, rec in self.learners.items():
             self._fleet("island_ready", name, initial=True)
-            self._record(rec, reason="adopted from an earlier launcher" if rec.get("adopted") else "launched")
+            if rec.get("adopted"):
+                self._record(rec, reason="adopted from an earlier launcher", adopted=True)
+            else:
+                self._record(rec, reason="launched", adopted=False)
         while True:
             if self._abort_error is not None:
                 raise self._abort_error
