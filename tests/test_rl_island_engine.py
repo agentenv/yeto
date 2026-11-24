@@ -12,7 +12,7 @@ from yeto.cli import parse_args as parse_cli
 from yeto.gpu_spec import parse_gpu_spec
 from yeto.launch import engine_images
 from yeto.launch.nc import cli as nc_cli
-from yeto.launch.nc import ssh_sampler, tasks
+from yeto.launch.nc import ssh_sampler
 from yeto.launch.topology import rl_island_args
 from yeto.launcher import _prepare_rl_args
 from yeto.rl import sampler_pins
@@ -142,7 +142,7 @@ def test_pool_without_engine_keys_keeps_its_old_image():
     assert nc_cli.pool_sampler_image(POOL) is None
     assert nc_cli.pool_sampler_image({**POOL, "image": "x@sha256:1"}) is None
     nc_cli.pool_config(POOL)
-    assert ssh_sampler.IMAGE == tasks.SERVING_IMAGE  # the two routes' old default
+    assert ssh_sampler.IMAGE == sampler_pins.VLLM_SAMPLER_IMAGE_ROCM.removeprefix("docker:")  # the old default
 
 
 def test_pool_engine_platform_select_the_default_row():

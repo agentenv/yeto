@@ -766,6 +766,32 @@ def test_pool_config_guards(tmp_path):
         cli.pool_ops(dict(base, route="other"))
 
 
+def test_removed_sky_route_is_refused_with_the_way_out(tmp_path, monkeypatch, capsys):
+    base = {"target": 1, "accounts": [7], "shard_base": "nc-x", "run": "run-x", "spec": "s.json",
+            "run_prefix": "run-x", "r2_env_file": "store.env"}
+    assert cli.pool_config(dict(base, route="ssh"), allowed={7}).target == 1  # the default route, spelled out
+    sky = {"target": 1, "accounts": [7], "shard_base": "nc-x", "route": "sky", "model_src": "s3://b/m",
+           "model_dest": "/mnt/nvme/models/m", "workdir": "/repo"}
+    for cfg in (sky, dict(base, route="sky"), dict(base, workdir="/repo")):
+        with pytest.raises(ValueError, match="'sky' route .* was removed") as error:
+            cli.pool_config(cfg, allowed={7})
+        assert "'route': 'ssh'" in str(error.value) and "model_pull" in str(error.value)
+        with pytest.raises(ValueError, match="was removed"):
+            cli.pool_ops(cfg)
+    with pytest.raises(ValueError, match="only route is 'ssh'"):
+        cli.pool_config(dict(base, route="k3s"), allowed={7})
+    assert not hasattr(cli, "NcSkyOps")
+    # the dry run says so instead of accepting the config
+    monkeypatch.setenv("YETO_NC_ACCOUNTS", "7")
+    path = tmp_path / "pool.json"
+    path.write_text(json.dumps(sky))
+    assert cli.main(["pool", "--config", str(path), "--dry-run"]) == 2
+    out = capsys.readouterr().out
+    assert "pool --dry-run: INVALID" in out and "'sky' route" in out and "was removed" in out
+    with pytest.raises(SystemExit):
+        cli.main(["up", "--account", "7", "--yes", "--route", "sky"])
+
+
 def test_pool_config_refuses_more_samplers_than_accounts_and_bad_sections():
     base = {"target": 1, "accounts": [1, 2], "shard_base": "nc", "spec": "s.json", "run_prefix": "r",
             "r2_env_file": "store.env"}
