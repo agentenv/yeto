@@ -88,7 +88,8 @@ def render(tmp: Path, monkeypatch) -> dict:
     dump["nc_env"] = ssh_sampler.sampler_env("runs1")
 
     # the customer's agentic NC start: agentic.setup (the node preparation itself is
-    # agentic_setup's, not rendered here), the operator's env file second, the DeepSeek ROCm image
+    # agentic_setup's, not rendered here), the operator's env file second, the K3.1 ROCm image the
+    # customer's pool runs (examples/k31 names none: the route's default)
     from tests.test_agentic_setup import _spec as agentic_spec  # noqa: PLC0415
     from yeto.launch import agentic_setup  # noqa: PLC0415
 
@@ -96,9 +97,8 @@ def render(tmp: Path, monkeypatch) -> dict:
     agentic = dict(agentic_spec(tmp), sampler_id="nc-1", prompts={"path": "/work/prompts/p.jsonl"},
                    engine={"adapter": "vllm-server"})
     (tmp / "op.env").write_text("HARBOR_ENV=remote\n")
-    ds41 = f"docker.io/rocm/vllm-dev:nightly_main_{ssh_sampler.DS41_IMAGE_COMMIT}"
     ssh_sampler.start_sampler(lease, spec=agentic, shard="nc-1", run_prefix="runs1", r2_env_file=str(tmp / "r2.env"),
-                              state_dir=tmp, image=ds41, agentic_env_file=str(tmp / "op.env"),
+                              state_dir=tmp, agentic_env_file=str(tmp / "op.env"),
                               run=_recorder(dump, "nc_agentic_start", prompts), prompts_file=str(prompts))
     dump["nc_agentic_spec_file"] = (tmp / "spec-nc-1.json").read_text()
     dump["nc_agentic_setup_env"] = (tmp / "nc-1.agentic-setup.env").read_text()
