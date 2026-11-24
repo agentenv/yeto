@@ -27,3 +27,18 @@ def cross_node_flags(allow_cross_node_tp: bool, allow_cross_node_engine_tp: bool
 # Module the launcher runs on every island node (rl-verl-backend: per backend).
 ISLAND_ENTRY_MODULE = "yeto.rl.adapters.miles.island_entry"
 NEEDS_MILES_SOURCE = True
+
+
+def offline_full_parameter_layout(config: Mapping, **layout_args):
+    """The full-parameter layout a Miles island builds, computed by the launcher from
+    the model's ``config.json`` (:func:`.models.dense_gpt_layout.offline_layout`:
+    ``tp``, ``pp``, ``minimum_fragments``, ``max_fragment_bytes``, ``matrix_merge``,
+    ``model_revision``, ``config_sha256``); None for a model or parallelism the offline
+    layout does not model. The launcher checks ``--fragments`` against it
+    (``yeto.launch.fragment_preflight``)."""
+    from .models.dense_gpt_layout import DenseLayoutError, offline_layout
+
+    try:
+        return offline_layout(config, **layout_args)
+    except (DenseLayoutError, RuntimeError, ValueError):
+        return None

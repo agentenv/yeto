@@ -5,8 +5,9 @@ A Miles full-parameter island refuses a layout whose fragment count is not
 knows the count after it has built the model: minutes of paid boot per island.
 The count follows from the model config, the trainer parallelism, the fragment
 byte bound (``--rl-sync-fragment-max-bytes``, FP32) and the matrix merge, so
-the launcher computes it here (:mod:`yeto.rl.adapters.miles.models.dense_gpt_layout`)
-and refuses a mismatch before anything is ordered.
+the launcher computes it here with the backend's offline planner (Miles:
+``launch_flags.offline_full_parameter_layout``, the dense Qwen3 layout of
+``models.dense_gpt_layout``) and refuses a mismatch before anything is ordered.
 
 Only the model's ``config.json`` is read, from a local model directory or the
 local Hugging Face cache; nothing is downloaded. Out of scope (no config in the
@@ -64,8 +65,8 @@ def _in_scope(args: Any, trainers: list[tuple[Any, Any]]) -> bool:
         return False
     group = int(args.tensor_parallel or 1) * int(getattr(args, "pipeline_parallel", 1) or 1)
     for iargs, spec in trainers:
-        if (getattr(iargs, "rl_backend", None) or "miles") != "miles":
-            return False
+        if getattr(iargs, "rl_backend", None) != getattr(args, "rl_backend", None):
+            return False  # an island of another backend (--rl-island-engine)
         try:
             nodes, gpus = rl_trainer_shape(iargs, spec)
         except ValueError:
@@ -79,30 +80,33 @@ def check_fragment_layout(args: Any, per_island: list, specs: list) -> None:
     """Refuse (ValueError) a ``--fragments`` the islands' full-parameter layout
     cannot have; warn on stderr when the count is an estimate (PP>1). Silent when
     the count matches or the check is out of scope (module doc)."""
+    from .rl_backend import _rl_backend_module
+
+    # the backend's offline planner (Miles: launch_flags.offline_full_parameter_layout)
+    plan = getattr(_rl_backend_module(args, "launch_flags"), "offline_full_parameter_layout", None)
     trainers = _trainer_islands(args, per_island, specs)
-    if not _in_scope(args, trainers):
+    if plan is None or not _in_scope(args, trainers):
         return
     raw = local_hf_config(args.model, getattr(args, "model_revision", None))
     if raw is None:
         return
     try:
         config = json.loads(raw)
-        from ..rl.adapters.miles.models.dense_gpt_layout import DenseLayoutError, offline_layout
-    except (ValueError, ImportError):
+    except ValueError:
         return
     tp = int(args.tensor_parallel or 1)
     pp = int(getattr(args, "pipeline_parallel", 1) or 1)
     max_bytes = int(getattr(args, "rl_sync_fragment_max_bytes", 2 << 30))
     merge = getattr(args, "rl_sync_matrix_merge", "avg")
     try:
-        layout = offline_layout(
+        layout = plan(
             config, tp=tp, pp=pp, minimum_fragments=int(args.fragments),
             max_fragment_bytes=max_bytes, matrix_merge=merge,
             model_revision=str(getattr(args, "model_revision", None) or ""),
             config_sha256=hashlib.sha256(raw).hexdigest())
-    except (DenseLayoutError, RuntimeError, ValueError):
+    except ImportError:  # the backend's planner needs a package the control host lacks
         return
-    if layout.fragments == int(args.fragments):
+    if layout is None or layout.fragments == int(args.fragments):
         return
     detail = (f"the Miles full-parameter layout of {args.model} at TP{tp} x PP{pp} "
               f"(config.json from the local model files), FP32 fragments of at most "

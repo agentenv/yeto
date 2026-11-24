@@ -637,7 +637,7 @@ def test_trainer_island_assembles_upstream_components_and_carries_every_wire_key
 
     assert "trainer_handles={}" in inspect.getsource(sampler_island.run_sampler_island)
     # yeto_ext: all 24 wire keys install and read back through ext_attr (new-pin carrier)
-    assert len(WIRE_KEYS) == 27
+    assert len(WIRE_KEYS) == 28
     values = {key: f"value:{key}" for key in sorted(WIRE_KEYS)}
     values["rl_max_policy_age"] = 2
     config = install_ext(SimpleNamespace(yeto_ext={}), values)
