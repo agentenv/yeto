@@ -990,6 +990,19 @@ def store_identity(spec: Mapping[str, Any], data_path: Any) -> tuple[str | None,
     return str(uri), (local if local is not None and local != str(uri) else None)
 
 
+class NotRun(int):
+    """What :func:`run` returns for an incarnation that did not run: its rounds (0), and
+    ``not_run``, the reason (:data:`SHARD_HANDED_OFF` / :data:`SHARD_ENDED`); ``main``
+    exits with :data:`NOT_RUN_EXIT_CODE` on it."""
+
+    not_run: str
+
+    def __new__(cls, rounds: int, reason: str) -> "NotRun":
+        out = super().__new__(cls, int(rounds))
+        out.not_run = str(reason)
+        return out
+
+
 def _successor_of(record: Mapping[str, Any] | None) -> str | None:
     return None if not record or record.get("successor") is None else str(record["successor"])
 
@@ -1493,7 +1506,7 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
             # a launcher island's complete tape ends with this record (yeto.launch.tapes);
             # a reclaimed incarnation's tape stays open: the next incarnation continues
             emit(FINALIZED_EVENT, rounds=rounds)
-        return rounds
+        return rounds if not_run is None else NotRun(rounds, not_run[0])
     except BaseException as error:
         from .sampler_breakers import stop_reason_of  # noqa: PLC0415
 
@@ -1718,17 +1731,11 @@ def main(argv: Sequence[str] | None = None, *, default_data_path: str | None = N
     parser.add_argument("--spec", required=True, help="the sampler spec JSON (module doc)")
     args = parser.parse_args(argv)
     deadline = ReclaimDeadline()
-    not_run: list[str] = []  # the reason of an incarnation that did not run (NOT_RUN_EVENT)
-
-    def on_event(event: str, **fields: Any) -> None:
-        if event == NOT_RUN_EVENT:
-            not_run.append(str(fields.get("reason")))
-
     try:
         spec = load_spec(args.spec)
         if default_data_path is not None:
             spec.setdefault("data_path", default_data_path)
-        rounds = run(spec, reclaim_deadline=deadline, on_event=on_event)
+        rounds = run(spec, reclaim_deadline=deadline)
     except SamplerSpecError as error:
         print(f"[engine-sampler] spec rejected: {error}", file=sys.stderr)
         return 2
@@ -1752,8 +1759,9 @@ def main(argv: Sequence[str] | None = None, *, default_data_path: str | None = N
     print(f"[engine-sampler] done: {rounds} round(s)", flush=True)
     if hold_after_reclaim(deadline=deadline):
         reclaim_exit("held")
+    not_run = getattr(rounds, "not_run", None)
     if not_run:  # not the end of the data: the pool must not read it as a normal finish
-        print(f"[engine-sampler] did not run: {not_run[0]} (exit {NOT_RUN_EXIT_CODE})", file=sys.stderr, flush=True)
+        print(f"[engine-sampler] did not run: {not_run} (exit {NOT_RUN_EXIT_CODE})", file=sys.stderr, flush=True)
         return NOT_RUN_EXIT_CODE
     return 0
 

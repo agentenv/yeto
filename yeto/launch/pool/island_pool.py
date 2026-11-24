@@ -265,7 +265,7 @@ class IslandPool:
     _short: Any = None  # the halted slots of the last ``slots_below_target`` alert
     _starts: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background start
     _skipped_shards: list[str] = field(default_factory=list)  # shards passed over: their data had ended
-    _shard_check_refused: str | None = None  # the last "store did not say" refusal reported
+    _shard_check_failed: bool = False  # a shard check failed (reported once)
     _executor: Any = None
     state_path: Path | None = None  # saved right after every order
     _recheck: set[str] = field(default_factory=set)  # restored STARTING members: probe before a new start
@@ -510,8 +510,7 @@ class IslandPool:
                     self._event("order_refused", why=refused)
                 self._refused = refused
                 return None
-        if not self._skip_ended_shards():  # the store did not say: nothing ordered this tick
-            return None
+        self._skip_ended_shards()
         if self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
             refused = (f"shard {self.config.shard_base}-{self.next_shard} is past shard_limit "
                        f"{self.config.shard_limit} (the trainer's buffer shards / the tunnel ports)")
@@ -570,7 +569,7 @@ class IslandPool:
                     continues_shard=continues, replaces=replaces.ticket if replaces else None)
         return member
 
-    def _skip_ended_shards(self) -> bool:
+    def _skip_ended_shards(self) -> None:
         """Move ``next_shard`` past every shard whose data already ended in the run's
         store (``ops.shard_ended``: an end record in the shard; ops without it: no
         check). A pool that starts without its state (the file was moved away) numbers
@@ -578,25 +577,25 @@ class IslandPool:
         reads a shard again once it ended), so a sampler there would not run. Such a
         shard is skipped (``shard_skipped``) rather than reopened; a stop request a
         fence left on a shard that did not end is set aside before the start instead
-        (:meth:`_clear_stale_handoff`). False: the store did not answer (one
-        ``order_refused`` per streak); nothing is ordered this tick."""
+        (:meth:`_clear_stale_handoff`). A store that does not answer orders the shard
+        anyway (``shard_check_failed`` once): a sampler on an ended shard does not run
+        and says so (``sampler_not_run``)."""
         check = getattr(self.ops, "shard_ended", None)
         if check is None:
-            return True
+            return
         while self.config.shard_limit is None or self.next_shard < self.config.shard_limit:
             shard = f"{self.config.shard_base}-{self.next_shard}"
             try:
                 ended = check(shard)
-            except Exception as error:  # noqa: BLE001 - unknown this tick: no order on a shard that may have ended
-                refused = f"the run's store did not say whether shard {shard} already ended"
-                if refused != self._shard_check_refused:  # once per streak
-                    self.log(f"pool: {refused} ({error!r}); not ordering this tick")
-                    self._event("order_refused", why=refused, error=repr(error)[:300])
-                self._shard_check_refused = refused
-                return False
-            self._shard_check_refused = None
+            except Exception as error:  # noqa: BLE001 - unknown: the sampler reports an ended shard itself
+                if not self._shard_check_failed:  # once per pool process
+                    self.log(f"pool: the run's store did not say whether shard {shard} already ended ({error!r}); "
+                             "ordering it anyway (a sampler on an ended shard exits as not run)")
+                    self._event("shard_check_failed", shard=shard, error=repr(error)[:300])
+                self._shard_check_failed = True
+                return
             if not ended:
-                return True
+                return
             detail = ended if isinstance(ended, dict) else {}
             self.log(f"pool: shard {shard} skipped: its data already ended in the run's store "
                      f"(ended by {detail.get('ended_by')}, why {detail.get('end_why')}); a sampler there "
@@ -605,7 +604,6 @@ class IslandPool:
                         ended_by=detail.get("ended_by"), end_why=detail.get("end_why"))
             self._skipped_shards.append(shard)
             self.next_shard += 1
-        return True
 
     def _save_now(self) -> bool:
         """Persist the state now (after an order): a crash before the tick's save must
@@ -2135,7 +2133,7 @@ class IslandPool:
         members (an extra node billed for nothing)."""
         why = None
         slot = None
-        self._skip_ended_shards()  # a store that did not say: the sampler reports an ended shard itself
+        self._skip_ended_shards()
         if self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
             why = (f"shard {self.config.shard_base}-{self.next_shard} is past shard_limit "
                    f"{self.config.shard_limit}")
