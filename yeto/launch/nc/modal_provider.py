@@ -55,8 +55,32 @@ Pool config::
 
     "provider": {"kind": "modal", "app_name": "yeto-rollout-<run>", "image": "<registry>/<image>@sha256:<d>",
                  "gpu": "B300", "gpus": 8, "secret": "<modal secret with the store credentials>",
+                 "secrets": ["<more modal secrets, e.g. the boat token>"],
                  "bucket": "<bucket>", "model_volume": "<volume>", "model_mount": "/mnt/yeto-models",
+                 "tasks_dir": "/mnt/yeto-models/<harbor task directories>",
                  "timeout_h": 24, "name_prefix": "yeto-smp", "scaledown_window_s": 2}
+
+Agentic pools (a sampler spec with ``agentic``: Harbor multi-turn trials in boat or
+AgentENV sandboxes). There is no node to set up (``agentic.setup`` is the NC ssh
+route's), so the function itself carries what the trials need:
+
+* Harbor and the provider SDK: an image layer installs the pinned Harbor commit
+  (``yeto.rl.harness.harbor.pins``) with ``server-dashboard`` and ``boat-sdk``
+  (boat) or ``e2b`` (AgentENV) into :data:`HARBOR_SITE`, then removes what the engine
+  image already has (``agentic_setup.HARBOR_PRUNE``, the NC route's install), so the
+  engine's packages stay as they are; the sampler's ``PYTHONPATH`` adds the site.
+* the records proxy: the cloud sandboxes post their model calls to it, so the call
+  forwards ``agentic.proxy.port`` through a Modal tunnel (``modal.forward``), binds
+  the proxy on all addresses, writes a fresh path secret into a 0600 file and gives
+  the sampler ``YETO_RECORDS_PROXY_PUBLIC_BASE`` / ``_SECRET_FILE``
+  (:func:`records_tunnel`).
+* credentials: the store Secret plus ``provider.secrets`` (the boat token as
+  ``BOAT_API_KEY``, the AgentENV key); ``provider.env`` travels in the call payload in
+  clear text, so a credential name there is refused.
+* tasks and prompts: ``provider.tasks_dir`` (``HARBOR_TASKS_DIR``) and the spec's
+  ``prompts.path`` are read from the model volume (under ``model_mount``).
+* the boat quota: the pool's samplers get their share of the account
+  (``yeto.launch.rollout.pools.with_boat_shares``) in the spec's ``breakers``.
 """
 
 from __future__ import annotations
@@ -90,8 +114,8 @@ def ready_key(shard: str, ticket: str, n: int) -> str:
     restarted call never reads the marker of the call before it)."""
     return f"{READY_PREFIX}/{shard}/{ticket}.{int(n)}.json"
 CONFIG_KEYS = frozenset({"kind", "factory", "app_name", "image", "gpu", "gpus", "cpu", "memory_gib", "secret",
-                         "bucket", "model_volume", "model_mount", "log_volume", "timeout_h", "python",
-                         "name_prefix", "env", "price_usd_h", "scaledown_window_s"})
+                         "secrets", "bucket", "model_volume", "model_mount", "log_volume", "timeout_h",
+                         "python", "name_prefix", "env", "price_usd_h", "scaledown_window_s", "tasks_dir"})
 # seconds a container whose call returned stays up for the next call (billed idle).
 # A restart or replacement spawns on the pool's next tick (60 s by default), after a
 # longer window would mostly have run out anyway; 2 s is the least Modal takes.
@@ -122,6 +146,44 @@ def _takes_kwarg(fn: Any, name: str) -> bool:
     return any(p.name == name or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
 
 
+DEFAULT_MODEL_MOUNT = "/mnt/yeto-models"
+HARBOR_SITE = "/opt/yeto-harbor/site"  # Harbor and the provider SDK of an agentic pool (agentic_harbor_layer)
+AGENTIC_PROVIDERS = ("boat", "agentenv")  # cloud sandboxes a Modal call reaches (no docker host, no ssh key)
+RECORDS_SECRET_NAME = "records-proxy.secret"
+# provider.env travels in the spawn payload in clear text: these belong in a Modal secret (provider.secrets)
+CREDENTIAL_ENV = re.compile(r"(^|_)(API_KEY|TOKEN|SECRET|PASSWORD|ACCESS_KEY|SECRET_ACCESS_KEY)($|_)|^BOAT_API_KEY",
+                            re.IGNORECASE)
+
+
+def agentic_provider(spec: dict[str, Any] | None, env: dict[str, Any] | None = None) -> str | None:
+    """The sandbox provider of an agentic spec (``agentic.task_defaults.provider``, else
+    ``HARBOR_ENV_TYPE`` of ``env``); None for a spec that is not agentic."""
+    agentic = (spec or {}).get("agentic")
+    if not isinstance(agentic, dict):
+        return None
+    defaults = agentic.get("task_defaults") if isinstance(agentic.get("task_defaults"), dict) else {}
+    return str(defaults.get("provider") or (env or {}).get("HARBOR_ENV_TYPE") or "").strip().lower() or "?"
+
+
+def agentic_harbor_layer(image: Any, *, python: str, provider: str | None) -> Any:
+    """``image`` (a ``modal.Image``) with Harbor and the provider's SDK in :data:`HARBOR_SITE`
+    (module doc): the NC route's install (``agentic_setup.Provisioner.harbor``) at image
+    build time, pinned to the same commit and SDK versions."""
+    import shlex  # noqa: PLC0415
+
+    from yeto.launch import agentic_setup as su  # noqa: PLC0415
+    from yeto.rl.harness.harbor.pins import HARBOR_COMMIT, HARBOR_REPO  # noqa: PLC0415
+
+    req = f"harbor @ git+{HARBOR_REPO}@{HARBOR_COMMIT}"
+    dash = f"server-dashboard @ git+{HARBOR_REPO}@{HARBOR_COMMIT}#subdirectory=server-dashboard"
+    sdk = {"boat": su.BOAT_SDK_REQUIREMENT, "agentenv": su.E2B_REQUIREMENT}.get(str(provider))
+    py, site = shlex.quote(python), shlex.quote(HARBOR_SITE)
+    install = (f"{py} -m pip install --quiet --disable-pip-version-check --target {site} {shlex.quote(req)} "
+               f"{shlex.quote(dash)}" + (f" {shlex.quote(sdk)}" if sdk else ""))
+    prune = f"PYTHONPATH= {py} -c {shlex.quote(su.HARBOR_PRUNE)} {site} {shlex.quote(','.join(su.HARBOR_KEEP))}"
+    return image.run_commands(f"mkdir -p {site}", install, prune)
+
+
 def _record_ledger(fn: str, *args: Any, **kw: Any) -> None:
     from yeto.cost.ledger import record_safely  # noqa: PLC0415
 
@@ -136,13 +198,15 @@ class ModalProvider:
 
     def __init__(self, run_id: str, *, slots: list[int], client: Any = None, name_prefix: str = "yeto-smp",
                  price_usd_h: float | None = None, record: Path | None = None, clock=time.time,
-                 config: dict[str, Any] | None = None, sleep=time.sleep, cancel_wait_s: float = 60.0):
+                 config: dict[str, Any] | None = None, sleep=time.sleep, cancel_wait_s: float = 60.0,
+                 harbor: str | None = None):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", name_prefix):
             raise ValueError("name_prefix: lower-case letters, digits and '-'")
         self.run_id, self.slots = run_id, list(slots)
         self.prefix = f"{name_prefix}-{re.sub(r'[^a-z0-9-]', '-', run_id.lower())}"
         self.price_usd_h = None if price_usd_h is None else float(price_usd_h)
         self.config = dict(config or {})
+        self.harbor = harbor  # an agentic pool's sandbox provider: the image carries Harbor and its SDK
         self._client, self.clock = client, clock
         # a cancel is asynchronous: the call reads RUNNING for some seconds after it
         self.sleep, self.cancel_wait_s = sleep, float(cancel_wait_s)
@@ -158,7 +222,7 @@ class ModalProvider:
     @property
     def client(self):
         if self._client is None:
-            self._client = ModalSdkClient(self.config, run_id=self.run_id)
+            self._client = ModalSdkClient(self.config, run_id=self.run_id, harbor=self.harbor)
         return self._client
 
     # -- record
@@ -407,9 +471,10 @@ class ModalPoolOps:
         prefix = str(self.cfg["run_prefix"]).strip("/")
         bucket = self.provider.config.get("bucket") or ""
         spec["store"] = spec["buffer_root"] = f"{STAGE}/{bucket}/runs/{prefix}"
-        return {"spec": spec, "shard": m.shard, "run_prefix": prefix, "bucket": bucket,
-                "python": self.provider.config.get("python", "python3"),
-                "env": dict(self.provider.config.get("env") or {})}
+        out = {"spec": spec, "shard": m.shard, "run_prefix": prefix, "bucket": bucket,
+               "python": self.provider.config.get("python", "python3"),
+               "env": dict(self.provider.config.get("env") or {})}
+        return agentic_payload(out, self.provider.config) if isinstance(spec.get("agentic"), dict) else out
 
     def start(self, m, shards: list[str]) -> None:
         self.provider.spawn(m.ticket, self.payload(m, shards))
@@ -513,8 +578,9 @@ class ModalSdkClient:
 
     deploy_wait_s = DEPLOY_WAIT_S
 
-    def __init__(self, cfg: dict[str, Any], *, run_id: str, modal: Any = None):
+    def __init__(self, cfg: dict[str, Any], *, run_id: str, modal: Any = None, harbor: str | None = None):
         self.cfg, self.run_id = dict(cfg), run_id
+        self.harbor = harbor  # an agentic pool's sandbox provider (agentic_harbor_layer)
         self.app_name = str(cfg.get("app_name") or f"yeto-rollout-{re.sub(r'[^a-z0-9-]', '-', run_id.lower())}")
         self._modal = modal
         self._deployed = False
@@ -535,18 +601,21 @@ class ModalSdkClient:
         from yeto.cloud.modal_images import engine_registry_image  # noqa: PLC0415
 
         modal, c = self.modal, self.cfg
-        image = (engine_registry_image(modal, c["image"]).entrypoint([])
-                 .env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
+        image = engine_registry_image(modal, c["image"]).entrypoint([])
+        if self.harbor:  # an agentic pool: Harbor and its sandbox SDK beside the engine (module doc)
+            image = agentic_harbor_layer(image, python=str(c.get("python", "python3")), provider=self.harbor)
+        image = (image.env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
                  .add_local_python_source("yeto", copy=False, ignore=["**/__pycache__", "**/*.pyc"]))
         app = modal.App(self.app_name)
         volumes = {}
         if c.get("model_volume"):
-            volumes[c.get("model_mount", "/mnt/yeto-models")] = modal.Volume.from_name(c["model_volume"]).read_only()
+            volumes[c.get("model_mount", DEFAULT_MODEL_MOUNT)] = modal.Volume.from_name(c["model_volume"]).read_only()
+        secrets = [modal.Secret.from_name(name) for name in [c["secret"], *(c.get("secrets") or ())]]
         app.function(image=image, gpu=f"{c.get('gpu', 'B300')}:{int(c.get('gpus', 8))}",
                      cpu=int(c.get("cpu", 64)), memory=int(c.get("memory_gib", 1024)) * 1024,
                      timeout=int(float(c.get("timeout_h", 24)) * 3600), volumes=volumes,
                      scaledown_window=scaledown_window_s(c),
-                     secrets=[modal.Secret.from_name(c["secret"])], name=FUNCTION)(rollout_sampler_body)
+                     secrets=secrets, name=FUNCTION)(rollout_sampler_body)
         return app
 
     def deploy(self) -> None:
@@ -693,6 +762,61 @@ def store_env(payload: dict[str, Any], environ: dict[str, str]) -> dict[str, str
     return env
 
 
+def agentic_payload(payload: dict[str, Any], section: dict[str, Any]) -> dict[str, Any]:
+    """An agentic pool's spawn payload (module doc): the records proxy bound on all
+    addresses and its port for the call's tunnel (``records_port``), the Harbor
+    directories and provider in ``env`` (``provider.env`` still wins) and the Harbor
+    site for the sampler's ``PYTHONPATH``."""
+    spec = json.loads(json.dumps(payload["spec"]))
+    agentic = spec["agentic"]
+    proxy = dict(agentic.get("proxy") or {})
+    proxy["host"] = "0.0.0.0"  # the Modal tunnel reaches the container, not its loopback; the path secret gates it
+    agentic["proxy"] = proxy
+    env = {"HARBOR_TASKS_DIR": str(section.get("tasks_dir") or ""),
+           "HARBOR_TRIALS_DIR": f"/tmp/rollout/{payload['shard']}/trials"}
+    provider = agentic_provider(spec)
+    if provider and provider != "?":
+        env["HARBOR_ENV_TYPE"] = provider
+    env.update(payload.get("env") or {})
+    return {**payload, "spec": spec, "env": env, "records_port": int(proxy.get("port") or 0),
+            "harbor_site": HARBOR_SITE}
+
+
+def records_tunnel(payload: dict[str, Any], env: dict[str, str], out: Path, *, forward: Any = None) -> Any:
+    """A context that forwards an agentic pool's records proxy port (``payload["records_port"]``)
+    through a Modal tunnel for the call's lifetime and gives the sampler its public base
+    and a fresh path secret (in a 0600 file under ``out``; only the path is in ``env``).
+    Nothing for another pool (``env`` unchanged)."""
+    import contextlib  # noqa: PLC0415
+    import secrets  # noqa: PLC0415
+
+    from yeto.rl.harness.gateway import records_env  # noqa: PLC0415
+
+    port = int(payload.get("records_port") or 0)
+
+    @contextlib.contextmanager
+    def tunnel():
+        if not port:
+            yield None
+            return
+        fwd = forward
+        if fwd is None:
+            import modal  # noqa: PLC0415
+
+            fwd = modal.forward
+        with fwd(port) as handle:
+            path = out / RECORDS_SECRET_NAME
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(secrets.token_urlsafe(24))
+            env[records_env.PROXY_PUBLIC_BASE_ENV] = str(handle.url).rstrip("/")
+            env[records_env.PROXY_SECRET_FILE_ENV] = str(path)
+            print(f"rollout_sampler: records proxy port {port} tunnelled at {handle.url}", flush=True)
+            yield handle
+
+    return tunnel()
+
+
 def tape_files(spec: dict[str, Any]) -> set[Path]:
     """Every incarnation's tape next to the spec's ``event_tape`` (``events.<inc>.jsonl``)."""
     tape = spec.get("event_tape")
@@ -717,17 +841,27 @@ def join_seen(spec: dict[str, Any], *, before: set[Path] | frozenset[Path] = fro
 
 
 def rollout_sampler_body(payload: dict[str, Any], *, popen: Any = None, objects: Any = None,
-                         poll_s: float = 5.0, sleep: Any = time.sleep, root: str = "/tmp/rollout") -> dict[str, Any]:
+                         poll_s: float = 5.0, sleep: Any = time.sleep, root: str = "/tmp/rollout",
+                         forward: Any = None) -> dict[str, Any]:
     """Runs INSIDE the Modal container: write the spec, run the engine sampler, and
     write the call's ready marker (``payload["ready_key"]``) in the run store once
-    the sampler's tape has the join event."""
-    import subprocess  # noqa: PLC0415
-
+    the sampler's tape has the join event. An agentic pool's call runs the sampler
+    inside its records tunnel (:func:`records_tunnel`; ``forward``: ``modal.forward``)."""
     t0 = time.time()
     out = Path(root) / str(payload["shard"])
     out.mkdir(parents=True, exist_ok=True)
     (out / "spec.json").write_text(json.dumps(payload["spec"], indent=1))
     env = dict(os.environ, **store_env(payload, dict(os.environ)))
+    if payload.get("harbor_site"):  # the agentic image layer's Harbor, after yeto's code
+        env["PYTHONPATH"] = f"{env.get('PYTHONPATH') or CODE_ROOT}:{payload['harbor_site']}"
+    with records_tunnel(payload, env, out, forward=forward):
+        return _run_sampler(payload, env, out, t0=t0, popen=popen, objects=objects, poll_s=poll_s, sleep=sleep)
+
+
+def _run_sampler(payload: dict[str, Any], env: dict[str, str], out: Path, *, t0: float, popen: Any, objects: Any,
+                 poll_s: float, sleep: Any) -> dict[str, Any]:
+    import subprocess  # noqa: PLC0415
+
     before = tape_files(payload["spec"])  # a reused container keeps an earlier call's tapes
     proc = (popen or subprocess.Popen)([payload.get("python", "python3"), "-m", "yeto.rl.engine.engine_sampler",
                                         "--spec", str(out / "spec.json")], env=env,
@@ -805,7 +939,61 @@ def from_config(cfg: dict[str, Any], run_id: str, *, client: Any = None) -> Moda
 
     return ModalProvider(run_id, slots=cli.slot_list(cfg), client=client,
                          name_prefix=str(section.get("name_prefix", "yeto-smp")),
-                         price_usd_h=section.get("price_usd_h"), config=section)
+                         price_usd_h=section.get("price_usd_h"), config=section,
+                         harbor=agentic_provider(pool_spec(cfg), section.get("env")))
+
+
+def pool_spec(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """The pool's sampler spec with its knobs laid over it (None: none or unreadable)."""
+    from yeto.rl.up_consistency import effective_spec  # noqa: PLC0415
+
+    return effective_spec(dict(cfg))
+
+
+def agentic_problems(cfg: dict[str, Any], section: dict[str, Any]) -> list[str]:
+    """``pool --dry-run`` checks of an agentic Modal pool (module doc); [] for another pool."""
+    spec = pool_spec(cfg)
+    provider = agentic_provider(spec, section.get("env"))
+    if provider is None:
+        return []
+    out = []
+    agentic = spec["agentic"]
+    if provider not in AGENTIC_PROVIDERS:
+        out.append(f"modal provider: agentic.task_defaults.provider {provider!r}: a Modal pool's trials run in cloud "
+                   f"sandboxes ({' / '.join(AGENTIC_PROVIDERS)}); a docker host needs the NC ssh route")
+    if agentic.get("setup"):
+        out.append("modal provider: agentic.setup is the NC ssh node setup; a Modal pool's Harbor comes from its "
+                   "image layer and the records proxy from a Modal tunnel: drop agentic.setup")
+    port = (agentic.get("proxy") or {}).get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
+        out.append("modal provider: an agentic pool needs a fixed agentic.proxy.port (the call forwards it through "
+                   "a Modal tunnel for the sandboxes)")
+    mount = str(section.get("model_mount", DEFAULT_MODEL_MOUNT)).rstrip("/")
+    tasks_dir = str(section.get("tasks_dir") or "")
+    if not tasks_dir:
+        out.append("modal provider: an agentic pool needs tasks_dir (the Harbor task directories, HARBOR_TASKS_DIR, "
+                   f"on the model volume under {mount})")
+    elif not section.get("model_volume") or not (tasks_dir + "/").startswith(mount + "/"):
+        out.append(f"modal provider: tasks_dir {tasks_dir} is not on the model volume (model_volume mounted at "
+                   f"{mount}): put the task directories there")
+    prompts = str(((spec.get("prompts") or {}).get("path")) or "")
+    if prompts and section.get("model_volume") and not (prompts + "/").startswith(mount + "/"):
+        out.append(f"modal provider: prompts.path {prompts} is not on the model volume ({mount}): the call reads "
+                   "the prompt file there")
+    leaked = sorted(k for k in (section.get("env") or {}) if CREDENTIAL_ENV.search(str(k)))
+    if leaked:
+        out.append(f"modal provider: env {leaked} travel in the call payload in clear text: put them in a Modal "
+                   "secret and list it in provider.secrets")
+    extra = section.get("secrets")
+    if extra is not None and not (isinstance(extra, list) and all(isinstance(s, str) and s for s in extra)):
+        out.append("modal provider: secrets must be a list of Modal secret names")
+    elif provider == "boat" and not extra:
+        out.append("modal provider: a boat pool needs the boat token as BOAT_API_KEY in a Modal secret listed in "
+                   "provider.secrets")
+    elif provider == "agentenv" and not extra:
+        out.append("modal provider: an AgentENV pool needs AGENTENV_API_KEY (and E2B_API_URL) in a Modal secret "
+                   "listed in provider.secrets")
+    return out
 
 
 def offline_problems(cfg: dict[str, Any]) -> list[str]:
@@ -822,6 +1010,7 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
         problems.append("modal provider: route must be ssh (the default); Modal islands have no sky route")
     if cfg.get("model_pull") or cfg.get("node_hooks"):
         problems.append("modal provider: model_pull / node_hooks need a node; use a Modal volume (model_volume)")
+    problems += agentic_problems(cfg, section)
     if importlib.util.find_spec("modal") is None:
         problems.append("the 'modal' Python package is not installed")
     return problems

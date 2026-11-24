@@ -329,13 +329,18 @@ def _check_run_sections(cfg: dict[str, Any]) -> None:
     if tr.get("usd_per_h") is not None:
         _number(tr, "trainer", "usd_per_h")
     sb = _section(cfg, "sandbox", {"envs", "docker_host", "max_run_containers", "max_containers_per_sampler",
-                                   "provider"})
+                                   "provider", "boat"})
     provider = sb.get("provider", SANDBOX_REMOTE_DOCKER)
     if provider not in SANDBOX_PROVIDERS:
         raise ValueError(f"run config: sandbox.provider must be one of {list(SANDBOX_PROVIDERS)} (got {provider!r})")
     if provider == SANDBOX_AGENTENV and sb.get("docker_host"):
         raise ValueError("run config: sandbox.docker_host is for remote-docker; AgentENV microVMs have no docker "
                          "host (drop it with sandbox.provider agentenv)")
+    if provider == SANDBOX_BOAT and (sb.get("docker_host") or sb.get("envs")):
+        raise ValueError("run config: sandbox.docker_host / sandbox.envs are for remote-docker; boat sandboxes have "
+                         "no docker host (drop them with sandbox.provider boat)")
+    if "boat" in sb:
+        boat_account(sb)  # the account's limits: whole numbers >= 1
     for key in ("max_run_containers", "max_containers_per_sampler"):
         if sb.get(key) is not None:
             _number(sb, "sandbox", key)
@@ -359,7 +364,16 @@ def _check_run_sections(cfg: dict[str, Any]) -> None:
 # or agentenv (E2B-compatible microVMs: nothing to prepare, the sampler's agentic.setup carries the gateway)
 SANDBOX_REMOTE_DOCKER = "remote-docker"
 SANDBOX_AGENTENV = "agentenv"
-SANDBOX_PROVIDERS = (SANDBOX_REMOTE_DOCKER, SANDBOX_AGENTENV)
+SANDBOX_BOAT = "boat"  # boat.dev cloud sandboxes: nothing to prepare; the account's quota is the run's (sandbox.boat)
+SANDBOX_PROVIDERS = (SANDBOX_REMOTE_DOCKER, SANDBOX_AGENTENV, SANDBOX_BOAT)
+
+
+
+def boat_account(sandbox: dict[str, Any] | None) -> dict[str, int | None]:
+    """:func:`yeto.rl.fleet_sandbox.boat_account` (``sandbox.boat``)."""
+    from yeto.rl.fleet_sandbox import boat_account as account  # noqa: PLC0415
+
+    return account(sandbox)
 ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit"}
 CONTROLLERS = ("subprocess", "in_process")
 
@@ -693,7 +707,7 @@ class Run:
         """The docker-host envs file ``yeto sandbox`` drives; None for agentenv (no docker host:
         no sandbox status / prepare / teardown)."""
         sb = self.cfg.get("sandbox") or {}
-        if sb.get("provider", SANDBOX_REMOTE_DOCKER) == SANDBOX_AGENTENV:
+        if sb.get("provider", SANDBOX_REMOTE_DOCKER) in (SANDBOX_AGENTENV, SANDBOX_BOAT):
             return None
         return os.path.expanduser(sb["envs"]) if sb.get("envs") else None
 
@@ -877,8 +891,34 @@ class Run:
             except (EnvsError, OSError, ValueError):
                 run_envs = None  # yeto sandbox status (the preflight's next step) names why
         problems, notes = fleet_sandbox.provider_findings(pools, sandbox=self.cfg.get("sandbox"))
-        refused, more = fleet_sandbox.capacity_findings(pools, run_envs=run_envs)
-        return problems + refused, notes + more + fleet_sandbox.spend_lines(pools, breakers_fleet.sandbox_price(self.cfg))
+        refused, more = fleet_sandbox.capacity_findings(pools, run_envs=run_envs,
+                                                        boat=boat_account(self.cfg.get("sandbox")))
+        problems += refused + fleet_sandbox.port_findings(self.fleet_port_rows())
+        return problems, notes + more + fleet_sandbox.spend_lines(pools, breakers_fleet.sandbox_price(self.cfg))
+
+    def fleet_port_rows(self) -> list[tuple[str, Any, int, int]]:
+        """``(where, port range, shard_offset, shard_limit)`` of each fleet pool whose
+        samplers take a records relay / tunnel port by shard index (:mod:`yeto.rl.fleet_sandbox`)."""
+        from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
+        from yeto.rl import fleet, up_fleet  # noqa: PLC0415
+
+        plan = self.fleet_plan()
+        out = []
+        for ref in self.pools:
+            try:
+                cfg = ref.load()
+                spec = up_consistency.effective_spec(cfg)
+                limit = nc_cli.pool_shard_limit(cfg)
+            except (OSError, ValueError, TypeError):
+                continue
+            key = fleet.port_share_key(spec)
+            if key is None or not limit:
+                continue
+            offset = (spec or {}).get("shard_offset")
+            where = up_fleet.pool_where(plan, ref.name) if plan is not None else f"pool {ref.name}"
+            out.append((where, key, offset if isinstance(offset, int) and not isinstance(offset, bool) else 0,
+                        int(limit)))
+        return out
 
     def fleet_budget_lines(self) -> list[str]:
         """The fleet's hourly estimate (each pool's target x node price, each island's
@@ -1928,9 +1968,11 @@ class Run:
         (:func:`yeto.rl.up_consistency.payload_size_warning`, with or without compaction)."""
         from yeto.rl import up_consistency  # noqa: PLC0415
 
+        plan = self.fleet_plan()
+        island = plan.island_of_pool(self.pools[pool].name) if plan is not None else None
         try:
             lines = up_consistency.compaction_lines(self.pools[pool].load(),
-                                                    [str(a) for a in self.cfg["trainer"]["argv"]])
+                                                    [str(a) for a in self.cfg["trainer"]["argv"]], island=island)
         except (OSError, ValueError):
             return  # the pool dry-run reports an unreadable pool config
         warning = up_consistency.payload_size_warning(self.pools[pool].load(),

@@ -24,6 +24,9 @@ Each check names the islands and pools it is about:
   refused above it) and each docker host (``max_sandboxes`` of ``agentic.envs.hosts``:
   a warning, the dispenser gate waits for room). The count at the pools' targets
   decides; at the elastic maximum (replacements overlap) it is a warning.
+* :func:`port_findings`: every shard of the pools that take a port of a records
+  relay or tunnel range by shard index (``lo + shard_offset + n``) gets a port of the
+  range, and no two shards of the fleet get the same one on one host.
 * :func:`spend_lines`: the sandboxes' hourly price in the fleet's spend
   (``fleet.sandbox_usd_per_h``, :func:`yeto.breakers.fleet.sandbox_price`).
 
@@ -39,8 +42,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 REMOTE_DOCKER, AGENTENV, BOAT = "remote-docker", "agentenv", "boat"
-# the boat plan (box_20, yeto.rl.harness.harbor.boat_client): one account for every sampler of the run
-BOAT_PLAN = {"max_active_n": 100, "starts_per_minute_n": 12}
+# the boat plan (box_20, yeto.rl.harness.harbor.boat_client): one account for every sampler of the run;
+# a run config's sandbox.boat replaces it (yeto.rl.up.boat_account)
+BOAT_PLAN: dict[str, int | None] = {"max_active_n": 100, "starts_per_minute_n": 12, "starts_per_hour_n": 60}
 LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")  # yeto.sandbox.envs: agentic.envs.run
 
 
@@ -84,6 +88,29 @@ class SandboxPool:
         if self.provider == AGENTENV and self.caps.get("agentenv_max_active_n"):
             held.append(int(self.caps["agentenv_max_active_n"]))
         return min(held) if held else 0
+
+
+def boat_account(sandbox: Mapping[str, Any] | None) -> dict[str, int | None]:
+    """``sandbox.boat`` of a run config: the boat account's limits that every boat sampler
+    of the run shares (``yeto.launch.rollout.pools.with_boat_shares``), over
+    :data:`BOAT_PLAN`; ``starts_per_hour_n`` may be null (not held). Raises ValueError."""
+    section = (sandbox or {}).get("boat")
+    if section is None:
+        return dict(BOAT_PLAN)
+    if not isinstance(section, Mapping):
+        raise ValueError("run config: sandbox.boat must be an object (the boat account's limits)")
+    unknown = set(section) - set(BOAT_PLAN)
+    if unknown:
+        raise ValueError(f"run config: unknown sandbox.boat keys {sorted(unknown)} (known: {sorted(BOAT_PLAN)})")
+    out = dict(BOAT_PLAN)
+    for key, value in section.items():
+        if value is None and key == "starts_per_hour_n":
+            out[key] = None
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"run config: sandbox.boat.{key} must be a whole number >= 1 (got {value!r})")
+        out[key] = value
+    return out
 
 
 def _int(value: Any) -> int | None:
@@ -139,7 +166,7 @@ def provider_findings(pools: Sequence[SandboxPool], *, sandbox: Mapping[str, Any
         return problems, notes
     sandbox = dict(sandbox or {})
     run_provider = sandbox.get("provider", REMOTE_DOCKER)
-    prepares = bool(sandbox.get("envs")) and run_provider != AGENTENV
+    prepares = bool(sandbox.get("envs")) and run_provider == REMOTE_DOCKER
     by_provider: dict[str, list[SandboxPool]] = {}
     for p in pools:
         by_provider.setdefault(p.provider or "?", []).append(p)
@@ -169,7 +196,8 @@ def provider_findings(pools: Sequence[SandboxPool], *, sandbox: Mapping[str, Any
                 problems.append(f"{p.where}: agentic.max_in_flight {p.max_in_flight} exceeds harness.sandbox_caps."
                                 f"{key} {limit}: its samplers refuse to start")
         if p.gated and not prepares:
-            why = ("sandbox.provider is agentenv" if run_provider == AGENTENV else "the run config has no sandbox.envs")
+            why = (f"sandbox.provider is {run_provider}" if run_provider != REMOTE_DOCKER
+                   else "the run config has no sandbox.envs")
             problems.append(f"{p.where}: its sampler spec has agentic.envs, so its dispenser takes only the tasks "
                             f"the readiness manifest of the run store marks ready, but {why}: `yeto run up` runs no "
                             "`yeto sandbox prepare` and the pool would never claim a task (set sandbox.envs to the "
@@ -224,10 +252,12 @@ def _host_rows(pools: Sequence[SandboxPool], run_envs: Any
     return out
 
 
-def capacity_findings(pools: Sequence[SandboxPool], *, run_envs: Any = None) -> tuple[list[str], list[str]]:
+def capacity_findings(pools: Sequence[SandboxPool], *, run_envs: Any = None,
+                      boat: Mapping[str, int | None] | None = None) -> tuple[list[str], list[str]]:
     """``(problems, notes)``: the sandboxes the pools sharing one resource hold at once
     against its limit (module doc). ``run_envs``: the run's ``sandbox.envs`` as an
-    :class:`yeto.sandbox.envs.EnvsConfig` (None: none), for pools without ``agentic.envs``."""
+    :class:`yeto.sandbox.envs.EnvsConfig` (None: none), for pools without ``agentic.envs``;
+    ``boat``: the boat account's limits (``sandbox.boat``, default :data:`BOAT_PLAN`)."""
     problems: list[str] = []
     notes: list[str] = []
 
@@ -237,12 +267,12 @@ def capacity_findings(pools: Sequence[SandboxPool], *, run_envs: Any = None) -> 
     def listed(rows: Sequence[SandboxPool]) -> str:
         return "; ".join(f"{p.where}: {p.nodes} sampler(s) x {p.per_sampler()}" for p in rows)
 
-    boat = [p for p in pools if p.provider == BOAT]
-    if boat:
-        limits = BOAT_PLAN
-        need, peak = total(boat), total(boat, peak=True)
+    boats = [p for p in pools if p.provider == BOAT]
+    if boats:
+        limits = dict(BOAT_PLAN, **(boat or {}))
+        need, peak = total(boats), total(boats, peak=True)
         line = (f"the boat account holds {limits['max_active_n']} active sandboxes and the fleet's boat pools hold "
-                f"{need} at once ({listed(boat)})")
+                f"{need} at once ({listed(boats)})")
         if need > limits["max_active_n"]:
             problems.append(f"{line}: creates above the account limit are refused (HTTP 429) and those trials "
                             "abort; lower agentic.max_in_flight or the pools' targets")
@@ -252,11 +282,11 @@ def capacity_findings(pools: Sequence[SandboxPool], *, run_envs: Any = None) -> 
         else:
             notes.append(f"fleet: {line}")
         rate = sum(p.nodes * int(p.caps.get("boat_starts_per_minute_n") or BOAT_PLAN["starts_per_minute_n"])
-                   for p in boat)
+                   for p in boats)
         if rate > limits["starts_per_minute_n"]:
             notes.append(f"WARNING: fleet: each boat sampler may start harness.sandbox_caps.boat_starts_per_minute_n "
                          f"sandboxes a minute; together {rate} > the account's {limits['starts_per_minute_n']} "
-                         f"({_islands(boat)}): a burst gets HTTP 429 (set YETO_BOAT_STARTS_PER_MINUTE per pool so "
+                         f"({_islands(boats)}): a burst gets HTTP 429 (set YETO_BOAT_STARTS_PER_MINUTE per pool so "
                          "the sum stays within the plan)")
     gateways: dict[str, list[SandboxPool]] = {}
     for p in pools:
@@ -291,6 +321,51 @@ def capacity_findings(pools: Sequence[SandboxPool], *, run_envs: Any = None) -> 
         else:
             notes.append(f"fleet: sandbox host {host}: {need} of {limit} trial containers ({shown})")
     return problems, notes
+
+
+# ---------------------------------------------------------------------- ports
+
+
+def _range(key: Sequence[str]) -> tuple[str, int, int] | None:
+    """``(listen host part, lo, hi)`` of a :func:`yeto.rl.fleet.port_share_key`."""
+    raw = str(key[2])
+    ip, _, ports = raw.rpartition(":") if key[0] == "tunnel" else ("", "", raw)
+    lo, _, hi = ports.partition("-")
+    try:
+        return ip, int(lo), int(hi or lo)
+    except ValueError:
+        return None  # the node setup names the bad range
+
+
+def port_findings(rows: Sequence[tuple[str, Sequence[str] | None, int, int]]) -> list[str]:
+    """Problems of the shards' listen ports. ``rows``: ``(where, port_share_key, shard_offset,
+    shard_limit)`` of each pool. A shard past the range, or two shards of the fleet on one
+    port of one relay / tunnel host, is named with its pools."""
+    problems: list[str] = []
+    taken: dict[tuple[str, str, str, int], list[str]] = {}
+    for where, key, offset, limit in rows:
+        if key is None:
+            continue
+        span = _range(key)
+        if span is None:
+            continue
+        ip, lo, hi = span
+        need = lo + int(offset) + int(limit) - 1
+        if need > hi:
+            problems.append(f"{where}: shards {offset}..{int(offset) + int(limit) - 1} of the {key[0]} port range "
+                            f"{key[2]} need ports up to {need}, past its end {hi}: widen it to one port per shard of "
+                            "every pool that shares it (the fleet gives each pool its own block, shard_offset)")
+        for n in range(int(limit)):
+            taken.setdefault((key[0], key[1], ip, lo + int(offset) + n), []).append(where)
+    clashes: dict[tuple[str, str], set[int]] = {}
+    for (kind, host, _ip, port), who in taken.items():
+        if len(set(who)) > 1:
+            clashes.setdefault((kind, " and ".join(sorted(set(who)))), set()).add(port)
+    for (kind, who), ports in sorted(clashes.items()):
+        problems.append(f"{who}: their shards listen on the same {kind} port(s) {sorted(ports)[:8]}: two nodes would "
+                        "forward one port (set one listen range for the pools, the fleet then gives each its own "
+                        "block of it, or give them ranges that do not overlap)")
+    return problems
 
 
 # ---------------------------------------------------------------------- spend
