@@ -262,3 +262,189 @@ def test_a_background_release_under_a_lost_lock_is_no_failed_release():
     pool.tick()
     assert pool.detached and provider.released == []
     assert not any(e["event"].endswith("drain_failed") for e in pool.events.events)
+
+
+# -- REV #755: a stop / detach that gives up on a blocked tick ---------------------------
+
+class HangingOrder(FakeProvider):
+    """A provider whose order hangs while ``gate`` is clear; ``inside`` is set once it hangs."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.gate, self.inside = threading.Event(), threading.Event()
+        self.gate.set()
+
+    def order(self, slot):
+        if not self.gate.is_set():
+            self.inside.set()
+            self.gate.wait(30)
+        return super().order(slot)
+
+
+def _blocked_in_an_order(client, clock):
+    from yeto.launch.pool.store_lock import StoreLock  # noqa: F401, PLC0415
+
+    control = store_state.open_pool_control(_objects(client), "p", "p", ttl_s=600, clock=clock)
+    provider, route = HangingOrder("p", clock), FakeRoute()
+    pool = _pool("p", provider, clock, control=control, target=1, route=route)
+    closed = []
+
+    def on_close(left):
+        closed.append(sorted(m.ticket for m in left))
+        control.close()
+
+    c = rc.RolloutController({"p": rc.PoolSlot(pool, on_close=on_close)}, interval=0.02, log=lambda _m: None,
+                             pool_workers=True, restart_backoff_s=0)
+    c.tick()  # the first member
+    provider.gate.clear()
+    pool.config.target = 2  # the next tick orders the second one and hangs in the order
+    c.start()
+    assert provider.inside.wait(5)
+    return c, pool, control, provider, route, closed
+
+
+@pytest.mark.parametrize("how", ["stop", "detach"])
+def test_a_tick_the_stop_or_detach_gave_up_on_changes_nothing_more_and_releases_the_lock_when_it_returns(how):
+    from yeto.launch.pool.store_lock import StoreLock  # noqa: PLC0415
+
+    client, clock = FakeS3(), Clock()
+    c, pool, control, provider, route, closed = _blocked_in_an_order(client, clock)
+    first = pool.live()[0].ticket
+    out = c.stop("test", join_s=0.2) if how == "stop" else c.detach("test", join_s=0.2)
+    assert pool.detached and "gave up on a blocked tick" in pool.detached
+    assert (out["p"] == [first]) if how == "detach" else ([m.ticket for m in out["p"]] == [first])
+    # the tick is still in flight: the store lock is kept (the order it is in gets recorded)
+    assert not control.lock.released and StoreLock.holder_of(_objects(client), control.lock.prefix, now=clock()) is not None
+    assert closed == []
+    provider.gate.set()  # the order returns
+    assert _wait_for(lambda: closed)
+    late = sorted(set(provider.machines) - {first})
+    assert len(provider.orders) == 2 and len(late) == 1  # nothing ordered after the stop gave up
+    saved = store_state.read_state(_objects(client), "p")
+    assert late[0] in {m["ticket"] for m in saved["members"]}  # the late order is in the store state
+    assert closed == [sorted([first, *late])] if how == "stop" else closed == [[]]
+    assert StoreLock.holder_of(_objects(client), control.lock.prefix, now=clock()) is None  # released once the tick returned
+    assert all(t != late[0] for t, *_ in route.started) and provider.released == []
+    assert "pool_tick_abandoned" in _names(pool)
+
+
+def test_a_released_lock_is_never_renewed_and_guards_nothing():
+    from yeto.launch.pool.store_lock import LockReleased, StoreLock  # noqa: PLC0415
+
+    objects, clock = _objects(), Clock()
+    lock = StoreLock.acquire(objects, "fleet/pools/p/lock", holder="a", clock=clock)
+    lock.release()
+    for call in (lock.guard, lock.renew, lock.check):
+        with pytest.raises(LockReleased):
+            call()
+    assert StoreLock.holder_of(objects, "fleet/pools/p/lock", now=clock()) is None  # the lease stays released
+    assert StoreLock.acquire(objects, "fleet/pools/p/lock", holder="b", clock=clock).token == 2
+
+
+def test_a_restart_after_a_failed_save_keeps_the_members_ordered_since():
+    client, clock = FakeS3(), Clock()
+    control = store_state.open_pool_control(_objects(client), "p", "p", clock=clock)
+    provider = FakeProvider("p", clock)
+    pool = _pool("p", provider, clock, control=control, target=1)
+    c = rc.RolloutController({"p": pool}, interval=0.02, log=lambda _m: None, pool_workers=True,
+                             restart_backoff_s=0, thread_cls=_ManualThread)
+    c.tick()
+    real = control.state.save
+
+    def failing(doc):
+        raise ConnectionError("store write failed")
+
+    control.state.save = failing
+    pool.config.target = 2
+    c.tick()  # the second member is ordered; its save fails
+    assert len(pool.live()) == 2
+    control.state.save = real
+    c.slots["p"].worker = _ManualThread(target=None, dead=True)
+    c.slots["p"].worker_error = RuntimeError("crash")
+    c.supervise()
+    assert sorted(m.ticket for m in pool.live()) == sorted(provider.machines)
+    saved = store_state.read_state(_objects(client), "p")
+    assert sorted(m["ticket"] for m in saved["members"]) == sorted(provider.machines)
+    assert "worker_state_merged" in _names(pool)
+    c.stop("test end")
+
+
+def test_a_restart_backoff_never_blocks_the_supervisor():
+    clock = Clock()
+    pool = _pool("p", FakeProvider("p", clock), clock)
+    c = rc.RolloutController({"p": pool}, interval=0.02, log=lambda _m: None, pool_workers=True,
+                             restart_backoff_s=5, thread_cls=_ManualThread)
+    c.slots["p"].worker = _ManualThread(target=None, dead=True)
+    began = time.monotonic()
+    c.supervise(now=100.0)
+    assert time.monotonic() - began < 1 and c.slots["p"].restart_at == 105.0
+    assert c.slots["p"].worker.dead  # not started during its backoff
+    c.supervise(now=104.0)
+    assert c.slots["p"].worker.dead
+    c.supervise(now=105.0)
+    assert not c.slots["p"].worker.dead and c.slots["p"].restarts == 1
+    c.slots["p"].worker = _ManualThread(target=None, dead=True)  # it ran past RESTART_RESET_S: the count starts over
+    c.supervise(now=105.0 + rc.RESTART_RESET_S)
+    assert c.slots["p"].restarts == 1
+    c.stop("test end")
+
+
+def test_an_unconfirmed_lock_in_a_background_release_ends_the_tick_and_the_release_goes_on_later():
+    client, clock = FakeS3(), Clock()
+    control = store_state.open_pool_control(_objects(client), "p", "p", ttl_s=600, clock=clock)
+    provider = FakeProvider("p", clock)
+    pool = _pool("p", provider, clock, control=control, target=1)
+    pool.async_release = True
+    pool.tick()
+    victim = pool.live()[0]
+    real = control.lock.objects.list
+    down = {"on": True}
+
+    def outage(prefix, **kw):
+        if down["on"] and prefix.startswith("fleet/pools/p/lock"):
+            raise ConnectionError("store down")
+        return real(prefix, **kw)
+
+    control.lock.renewed_at = clock() - 590  # the lease is nearly over: an unanswered check may not act
+    control.lock.objects.list = outage
+    pool._drain(victim, "test")  # noqa: SLF001
+    assert _wait_for(lambda: pool._releases[victim.ticket].done())  # noqa: SLF001
+    pool._renew_lock = lambda: True  # noqa: SLF001 - the tick start passed just before the outage
+    pool.tick()
+    assert not pool.detached and victim.state == DRAINING and provider.released == []
+    assert "lock_unconfirmed" in _names(pool)
+    assert not any(n.endswith("drain_failed") for n in _names(pool))
+    down["on"] = False
+    del pool._renew_lock  # noqa: SLF001
+    pool.tick()  # the release is started again
+    assert _wait_for(lambda: victim.ticket not in pool._releases or pool._releases[victim.ticket].done())  # noqa: SLF001
+    pool.tick()
+    assert victim.state == GONE and provider.released == [victim.ticket]
+
+
+def test_the_stop_waits_a_bounded_time_for_a_hung_background_release():
+    clock = Clock()
+    control = store_state.open_pool_control(_objects(), "p", "p", clock=clock)
+    provider = SlowRelease("p", clock)
+    pool = _pool("p", provider, clock, control=control, target=1)
+    pool.async_release, pool.release_wait_s = True, 0.2
+    pool.tick()
+    victim = pool.live()[0]
+    pool._drain(victim, "test")  # noqa: SLF001 - its release hangs
+    began = time.monotonic()
+    left = pool.drain_all("run down", attempts=1, wait_s=0, sleep=lambda _s: None)
+    assert time.monotonic() - began < 5 and [m.ticket for m in left] == [victim.ticket]
+    assert victim.state == DRAINING and "release_hung" in _names(pool)
+    provider.gate.set()
+
+
+def test_the_dashboard_warns_of_a_blocked_pool_until_its_tick_returns():
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from yeto.dashboard import alerts  # noqa: PLC0415
+
+    blocked = {"event": "nc_elastic_pool_blocked", "pool": "modal", "tick_s": 400}
+    reducer = SimpleNamespace(async_=SimpleNamespace(pool=[blocked]))
+    assert [a["title"] for a in alerts.blocked_pools(reducer)] == ["pool modal blocked"]
+    reducer.async_.pool.append({"event": "nc_elastic_pool_unblocked", "pool": "modal", "tick_s": 420})
+    assert alerts.blocked_pools(reducer) == []

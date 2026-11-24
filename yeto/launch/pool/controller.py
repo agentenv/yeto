@@ -60,6 +60,7 @@ from .island_pool import READY, IslandPool, Member
 
 DEFAULT_STALL_S = 1800.0  # every ready sampler silent this long: the rollout stall alert
 DEFAULT_BLOCKED_S = 300.0  # a pool tick running this long: the pool is reported blocked
+RESTART_RESET_S = 600.0  # a worker that ran this long before it died: its restart backoff starts over
 
 _ACTIVE: list[RolloutController] = []
 _ACTIVE_LOCK = threading.Lock()
@@ -88,6 +89,12 @@ class PoolSlot:
     worker_error: BaseException | None = None
     restarts: int = 0
     blocked_reported: bool = False
+    restart_at: float | None = None  # a dead worker is started again at this monotonic time
+    worker_started_at: float | None = None
+    # the stop or detach gave up waiting for the tick in flight ("stop" / "detach"): the
+    # pool is detached (nothing more is ordered, started or fenced), and its state save and
+    # store lock release run when that tick returns, so whatever it did is recorded
+    close_pending: str | None = None
 
 
 class RolloutController:
@@ -192,8 +199,25 @@ class RolloutController:
                     # this process, the ``yeto run up`` that waits for it, and time out).
                     self._close_slot(name, slot)
             finally:
+                if slot.blocked_reported and pool.events is not None:  # the dashboard's blocked view ends
+                    pool.events("pool_unblocked", pool=name, tick_s=round(time.monotonic() - slot.tick_began))
                 slot.tick_began = None
                 slot.blocked_reported = False
+                if slot.close_pending is not None and not slot.closed:
+                    self._close_after_tick(name, slot)
+
+    def _close_after_tick(self, name: str, slot: PoolSlot) -> None:
+        """The tick the stop / detach gave up on returned: save what it did, then close."""
+        how, slot.close_pending = slot.close_pending, None
+        pool = slot.pool
+        if how == "detach":
+            self._save_detached(slot)
+            slot.left = []
+        else:
+            self._save_detached(slot)
+            slot.left = pool.live()
+            self.log(f"rollout: pool {name}: its blocked tick returned; {len(slot.left)} member(s) left billed")
+        self._close_slot(name, slot)
 
     def _save(self, slot: PoolSlot) -> None:
         if slot.state_path is None:
@@ -270,10 +294,14 @@ class RolloutController:
                 continue
             worker = slot.worker
             if worker is None or not _alive(worker):
-                if worker is not None:
-                    self._restart_worker(name, slot)
+                if worker is not None and slot.restart_at is None:
+                    self._worker_died(name, slot, now)
+                if slot.restart_at is not None and now < slot.restart_at:
+                    continue  # its backoff: the supervisor never waits it out (the other pools go on)
+                slot.restart_at = None
                 slot.worker = self.thread_cls(target=self._work, args=(name, slot), name=f"pool-{name}",
                                               daemon=True)
+                slot.worker_started_at = now
                 slot.worker.start()
             began = slot.tick_began
             if began is not None and now - began > self.blocked_s and not slot.blocked_reported:
@@ -281,10 +309,14 @@ class RolloutController:
                 self.log(f"rollout: pool {name} is blocked: its tick has run {now - began:.0f}s (the other "
                          "pools tick on)")
                 if pool.events is not None:
-                    pool.events("pool_blocked", tick_s=round(now - began), blocked_s=self.blocked_s)
+                    pool.events("pool_blocked", pool=name, tick_s=round(now - began), blocked_s=self.blocked_s)
 
-    def _restart_worker(self, name: str, slot: PoolSlot) -> None:
-        """The worker of ``name`` died: report it; a store pool reloads its state first."""
+    def _worker_died(self, name: str, slot: PoolSlot, now: float) -> None:
+        """The worker of ``name`` died: report it, keep or reload the pool's state, and
+        schedule the restart (backoff ``restart_backoff_s`` times the restarts in a row, at
+        most 60 s; a worker that ran ``RESTART_RESET_S`` before it died starts the count over)."""
+        if slot.worker_started_at is not None and now - slot.worker_started_at >= RESTART_RESET_S:
+            slot.restarts = 0
         slot.restarts += 1
         error = slot.worker_error
         slot.worker_error = None
@@ -294,14 +326,32 @@ class RolloutController:
             pool.events("worker_restarted", error=repr(error)[:300], restarts=slot.restarts)
         control = getattr(pool, "control", None)
         if control is not None:
-            try:
-                doc = control.state.load()
-                if doc is not None:
-                    pool._load(doc, control.state.key)  # noqa: SLF001
-            except Exception as reload_error:  # noqa: BLE001 - the pool goes on with what it holds
-                self.log(f"rollout: pool {name}: state not reloaded from the store ({reload_error!r})")
+            self._restore_after_death(name, pool, control)
         if self.restart_backoff_s > 0:
-            slot.wake.wait(min(self.restart_backoff_s * slot.restarts, 60.0))
+            slot.restart_at = now + min(self.restart_backoff_s * slot.restarts, 60.0)
+
+    def _restore_after_death(self, name: str, pool: IslandPool, control: Any) -> None:
+        """A store pool whose worker died: the store copy replaces what a tick cut off may
+        have left in memory, and every member the memory holds that the store copy does not
+        (ordered after the last successful save: a save that failed, or the crash came
+        first) is kept, so no billed machine drops out of the pool; the result is saved at
+        once. The futures of background starts / releases are kept: they track threads
+        still running (dropping them would start or release a member twice)."""
+        held = {m.ticket: m for m in pool.members}
+        try:
+            doc = control.state.load()
+            if doc is not None:
+                pool._load(doc, control.state.key)  # noqa: SLF001
+        except Exception as reload_error:  # noqa: BLE001 - the pool goes on with what it holds
+            self.log(f"rollout: pool {name}: state not reloaded from the store ({reload_error!r})")
+            return
+        known = {m.ticket for m in pool.members}
+        extra = [m for ticket, m in held.items() if ticket not in known]
+        if extra:
+            pool.members.extend(extra)
+            self.log(f"rollout: pool {name}: kept {len(extra)} member(s) the store copy did not hold yet")
+            pool._event("worker_state_merged", tickets=[m.ticket for m in extra])  # noqa: SLF001
+        pool._save_now()  # noqa: SLF001
 
     def _work(self, name: str, slot: PoolSlot) -> None:
         """A pool's worker: tick, wait ``interval`` (a control file change or :meth:`wake`
@@ -359,6 +409,7 @@ class RolloutController:
             self.log(f"rollout: stopping every pool: {why}")
         self.wake()
         out: dict[str, list[Member]] = {}
+        deadline = time.monotonic() + max(0.0, join_s)  # one wait for all pools, not join_s per stuck pool
         try:
             for name, slot in self.slots.items():
                 pool = slot.pool
@@ -366,10 +417,13 @@ class RolloutController:
                     self._close_slot(name, slot)
                     continue
                 # the pool's tick in flight finishes first (its worker then sees the stop); a
-                # tick blocked past join_s is not raced: its members are reported as left
-                if not slot.tick_lock.acquire(timeout=max(0.0, join_s)):
+                # tick blocked past join_s is not raced: its members are reported as left, the
+                # pool is detached (the tick, once it returns, orders / starts / fences nothing
+                # more) and its store lock is released only when that tick returns
+                if not slot.tick_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
                     self.log(f"rollout: CRITICAL: pool {name} is blocked in a tick: not drained; its members "
                              "may still bill (`yeto run down` releases them)")
+                    self._give_up_on_tick(name, slot, "stop", why)
                     slot.left = pool.live()
                     out[name] = list(slot.left)
                     continue
@@ -394,6 +448,8 @@ class RolloutController:
         """``on_close`` once, then release the pool lock (idempotent)."""
         if slot.closed and not slot.left:
             return
+        if slot.close_pending is not None:
+            return  # a tick still in flight: closed when it returns (_close_after_tick)
         slot.closed = True
         if slot.on_close is not None:
             try:
@@ -419,9 +475,12 @@ class RolloutController:
             self.log(f"rollout: detaching every pool (no drain): {why}")
         self.wake()
         out: dict[str, list[str]] = {}
+        deadline = time.monotonic() + max(0.0, join_s)
         for name, slot in self.slots.items():
             pool = slot.pool
-            got = slot.tick_lock.acquire(timeout=max(0.0, join_s))
+            got = slot.tick_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+            if not got and not pool.stopped and not slot.closed:
+                self._give_up_on_tick(name, slot, "detach", why)
             try:
                 if not pool.stopped:
                     if getattr(pool, "detach", None) is not None:
@@ -438,6 +497,21 @@ class RolloutController:
             if self in _ACTIVE:
                 _ACTIVE.remove(self)
         return out
+
+    def _give_up_on_tick(self, name: str, slot: PoolSlot, how: str, why: str) -> None:
+        """The stop / detach does not wait any longer for the tick in flight of ``name``."""
+        slot.close_pending = how
+        if getattr(slot.pool, "detach", None) is not None:
+            slot.pool.detach(f"{how} gave up on a blocked tick: {why}")
+        if slot.pool.events is not None:
+            slot.pool.events("pool_tick_abandoned", during=how, tick_s=None if slot.tick_began is None
+                             else round(time.monotonic() - slot.tick_began))
+        if slot.tick_lock.acquire(blocking=False):  # the tick returned meanwhile: nobody else closes it
+            try:
+                if slot.close_pending is not None:
+                    self._close_after_tick(name, slot)
+            finally:
+                slot.tick_lock.release()
 
     def _save_detached(self, slot: PoolSlot) -> None:
         """Save a pool that is detached (its own save path skips nothing it must keep)."""

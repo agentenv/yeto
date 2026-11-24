@@ -342,6 +342,7 @@ class IslandPool:
     async_release: bool = False
     _releases: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background release
     _release_pool: Any = None
+    release_wait_s: float = 60.0  # the stop's wait for a background release still running
 
     def _control_stamp(self) -> Any:
         if self.scale_path is None:
@@ -381,7 +382,16 @@ class IslandPool:
         if self.events is None:
             self.events = el.EventLog(log=self.log, clock=self.clock)
         if self.control is not None and not isinstance(self.ops, GuardedOps):
-            self.ops = GuardedOps(self.ops, self.control.lock.guard)
+            self.ops = GuardedOps(self.ops, self._guard_store)
+
+    def _guard_store(self) -> None:
+        """:class:`GuardedOps`' check: a detached pool changes nothing any more (a tick that
+        resumes after the controller gave up on it, a background release), then the store lock."""
+        if self.detached is not None:
+            from .store_lock import LockReleased  # noqa: PLC0415
+
+            raise LockReleased(self.control.lock.prefix, self.control.lock.token, f"the pool is detached ({self.detached})")
+        self.control.lock.guard()
 
     @property
     def ecfg(self) -> el.ElasticConfig:
@@ -686,7 +696,7 @@ class IslandPool:
         Returns the shards ended."""
         if self.control is None:
             return []
-        self.control.lock.guard()  # raises when another controller holds the pool: nothing is ended
+        self._guard_store()  # raises when another controller holds the pool (or it is detached): nothing is ended
         used = {m.shard for m in self.members if m.shard}
         if self._reserved_shard is not None:
             used.add(f"{self.config.shard_base}-{self._reserved_shard}")
@@ -896,10 +906,16 @@ class IslandPool:
             return self._drain_in_background(member, why, now)
         future = self._releases.pop(member.ticket, None)
         if future is not None:  # a background release still running: the stop waits for it first
+            from concurrent.futures import TimeoutError as FutureTimeout  # noqa: PLC0415
+
             try:
-                future.result()
+                future.result(timeout=self.release_wait_s)
                 self._released(member, why)
                 return True
+            except FutureTimeout:  # a hung provider call: kept DRAINING (left, billed); never a second release
+                self._releases[member.ticket] = future
+                self._once(member, "release_hung", "release_hung", why=why, wait_s=self.release_wait_s)
+                return False
             except Exception:  # noqa: BLE001 - released again in line below (idempotent)
                 pass
         try:
@@ -2463,6 +2479,9 @@ class IslandPool:
             if m.state != DRAINING:
                 self._fence(m, "stop")
             self._drain(m, "stop")
+        if self._release_pool is not None:  # a stopping pool releases in line from here on
+            self._release_pool.shutdown(wait=False)
+            self._release_pool = None
         self._pool_ended(why)
 
     def _pool_ended(self, why: str) -> None:

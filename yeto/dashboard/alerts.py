@@ -194,6 +194,23 @@ def clip_kl(reducer, th: dict) -> list[dict]:
     return out
 
 
+BLOCKED_EVENTS = {"nc_elastic_pool_blocked": True, "nc_elastic_pool_unblocked": False}
+
+
+def blocked_pools(reducer) -> list[dict]:
+    """Sampler pools whose tick is stuck (the rollout controller's ``pool_blocked``, until the
+    ``pool_unblocked`` it writes when that tick returns): one warning each; the other pools
+    tick on (fleet control plane, ``pool_workers``)."""
+    state: dict[str, dict] = {}
+    for p in getattr(getattr(reducer, "async_", None), "pool", None) or ():
+        ev = p.get("event")
+        if ev in BLOCKED_EVENTS and p.get("pool"):
+            state[str(p["pool"])] = p if BLOCKED_EVENTS[ev] else {}
+    return [_alert(1, "pool_blocked", f"pool {name} blocked",
+                   f"its tick has run over {p.get('tick_s')}s (a provider call that hangs); the other pools tick on")
+            for name, p in sorted(state.items()) if p]
+
+
 def budget(cost: dict, th: dict) -> list[dict]:
     pct = cost.get("budget_pct")
     if pct is None:
@@ -504,7 +521,7 @@ def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list
     th = reducer.thresholds
     alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
-              + budget(cost, th) + compaction(reducer, th) + trial_failures(reducer, th)
+              + budget(cost, th) + blocked_pools(reducer) + compaction(reducer, th) + trial_failures(reducer, th)
               + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)
               + _with_release(reducer, th, now) + breakers(reducer, now) + guard_drops(reducer, th)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown")
