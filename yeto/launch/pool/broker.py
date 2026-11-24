@@ -109,14 +109,14 @@ CapsOf = Callable[[str], Caps]  # provider.provider_caps
 
 def real_sources(store: Any = None) -> dict[str, Any]:
     """``prices`` / ``ledger`` / ``caps`` keyword arguments of :func:`decide` and
-    :class:`Broker` from the real modules (the ledger loaded from ``store``; None: no
-    ledger)."""
+    :class:`Broker` from the real modules (the ledger: every writer's shard in ``store``
+    merged, ``OfferLedger.load_all``; None: no ledger)."""
     from yeto.cost import prices  # noqa: PLC0415
 
     from .offer_ledger import OfferLedger as Ledger  # noqa: PLC0415
     from .provider import provider_caps  # noqa: PLC0415
 
-    return {"prices": prices, "ledger": Ledger.load(store) if store is not None else None, "caps": provider_caps}
+    return {"prices": prices, "ledger": Ledger.load_all(store) if store is not None else None, "caps": provider_caps}
 
 
 # -- inputs and outputs ------------------------------------------------------------

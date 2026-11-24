@@ -131,6 +131,25 @@ def test_the_real_sources_fit_the_protocols():
     d = b.decide([nc, spot], [b.Demand("0", want=4)], **real)
     assert d.targets == {"nc/nc": 2, "sky/h100": 2}
 
+    class Store:  # two pools' ledger shards in the run store
+        def __init__(self, docs):
+            self.docs = docs
+
+        def list(self, prefix):
+            return [k for k in self.docs if k.startswith(prefix)]
+
+        def read(self, key):
+            return self.docs.get(key)
+
+    import json
+
+    half = {"format": 1, "offers": {"nc/nc": {"orders": 3, "ready": 3, "ended": 3, "ready_s": 36000.0,
+                                              "start_s": [1600.0, 1680.0, 1700.0]}}}
+    store = Store({"fleet/offer_ledger/a.json": json.dumps(half).encode(),
+                   "fleet/offer_ledger/b.json": json.dumps(half).encode()})
+    merged = b.real_sources(store)["ledger"]
+    assert merged.get("nc/nc").ready == 6, "every writer's shard is read"
+
 
 # -- tier order -----------------------------------------------------------------------
 
