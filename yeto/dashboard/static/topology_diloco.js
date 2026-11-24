@@ -301,9 +301,9 @@ function paint(){
       ln.cnt.setAttribute("display",red&&T.live?"inline":"none");
       if(red&&T.live)ln.cnt.textContent=D.flows.filter(function(f){return f.i===tr.id&&f.sh===s&&f.k==="p"&&f.t1>tn-300}).length+" PUSH / 5 min"});
     var lp=tr.last_push,lb=tr.last_bcast;
-    pr.lab[0].textContent=lp?"↑ f"+lp.frag+" t"+lp.step+" base v"+lp.base+" · "+mb(lp.bytes):tr.full_push?"↑ full-parameter PUSH (aggregate only)":"↑ no PUSH yet";
+    pr.lab[0].textContent=lp?"↑ f"+lp.frag+" t"+lp.step+" base v"+lp.base+" · "+mb(lp.bytes)+(lp.wire?" wire":""):tr.full_push?"↑ full-parameter PUSH (aggregate only)":"↑ no PUSH yet";
     pr.lab[1].textContent=lp?"  PULL→PUSH "+dur(lp.p2p_s)+(lp.h?" · H "+lp.h:""):"";
-    pr.lab[2].textContent=lb?"↓ f"+lb.frag+" v"+lb.v+" · "+mb(lb.bytes):tr.full_push?"↓ BCAST applied in the round (aggregate)":"↓ no BCAST applied yet";
+    pr.lab[2].textContent=lb?"↓ f"+lb.frag+" v"+lb.v+" · "+mb(lb.bytes)+(lb.overwrite?" · overwrite":lb.catch_up?" · catch-up":""):tr.full_push?"↓ BCAST applied in the round (aggregate)":"↓ no BCAST applied yet";
     pr.lab[3].textContent=lb?"  queue "+dur(lb.queue_s)+(fin(tr.apply_s)?" · apply "+tr.apply_s.toFixed(2)+"s":""):"";
     if(sft())paintLearner(tr,tc.l,pr.lab,tn)});
   L.syn.forEach(function(o,s){var sh=D.shards[s],mine=D.rounds.filter(function(r){return r.shard===s}),st=sh.state,last=sh.last;
@@ -429,8 +429,10 @@ function tipHtml(key){var a=key.split(":"),tn=now(),tr=null;D.trainers.forEach(f
     row("last PUSH",lp?"f"+lp.frag+" into t"+lp.step+" · base v"+lp.base+" · "+kn(lp.tokens)+" tok":null)+row("last apply",la?"step "+la.step+(fin(la.apply_s)?" · "+la.apply_s.toFixed(1)+"s":""):null)+row("merges since its last apply",tr.pending_n)+
     row("source","logging.jsonl · yeto_steps.jsonl · bench_metrics.jsonl · syncer tape responders")+'<div class="ns">an SFT learner writes no fragment-version vector and does not name the fragments it applied</div>'}
   if(a[0]==="trn"&&tr)return '<div class="h">Trainer '+esc(tr.id)+"</div>"+row("island status",tr.status)+row("local step",tr.step)+row("outer version",tr.outer)+row("policy hash",tr.hash)+
-    row("fragment versions",tr.versions?"["+tr.versions.join(", ")+"]":null)+row("merged, not applied",tr.pending_n)+row("applied lr",lr(tr.lr))+row("last event",fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":null)+
-    row("source","rl_local_round · rl_policy_snapshot · rl_fragment_*")+'<div class="ns">PULL permits held and live BCAST queueing are not on the tapes yet</div>';
+    row("fragment versions",tr.versions?"["+tr.versions.join(", ")+"]":null)+row("merged, not applied",tr.pending_n)+row("applied lr",lr(tr.lr))+
+    row("last PUSH",tr.last_push?"f"+tr.last_push.frag+" t"+tr.last_push.step+" · "+mb(tr.last_push.bytes)+(tr.last_push.wire?" on the wire ("+mb(tr.last_push.payload_bytes)+" f32)":""):null)+
+    row("BCAST overwrite / catch-up",tr.bcast_overwrites||tr.bcast_catch_ups?(tr.bcast_overwrites||0)+" / "+(tr.bcast_catch_ups||0):null)+row("last event",fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":null)+
+    row("source",tr.full_push?"rl_full_parameter_round · rl_fragment_*":"rl_local_round · rl_policy_snapshot · rl_fragment_*")+'<div class="ns">PULL permits held and live BCAST queueing are not on the tapes yet</div>';
   if(a[0]==="rol"&&tr&&tr.island){var r=tr.island;return '<div class="h">Island '+esc(tr.id)+" rollout ("+esc(r.placement||"placement n/a")+")</div>"+row("execution mode",r.exec_mode)+row("engines",r.engines)+row("rollout round",r.round)+
     row("serving",r.served?r.served.token:null)+row("groups / traj / tokens",[r.groups,r.traj,r.tokens].join(" / "))+row("rollout seconds",fin(r.rollout_s)?r.rollout_s.toFixed(1):null)+
     row("group p50 / p95",fin(r.p50_s)?r.p50_s.toFixed(1)+"s / "+(fin(r.p95_s)?r.p95_s.toFixed(1)+"s":"—"):"not timed")+row("snapshot publish",r.served&&fin(r.served.publish_s)?r.served.publish_s.toFixed(1)+"s (publish phase)":null)+

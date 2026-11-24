@@ -606,6 +606,65 @@ def test_page_full_parameter_island_labels_its_gaps(tmp_path):
     assert "lag1" not in out["matrix"] and "lag2" not in out["matrix"] and "since anchor" not in out["matrix"]
 
 
+def _fullparam_fragments(tmp_path, *, wire=None, overwrite=False) -> Reducer:
+    """Two full-parameter islands (strict sweeps through the real syncer; the per-fragment
+    rl_fragment_push / rl_fragment_bcast records of FullParameterSync). ``wire`` / ``overwrite``
+    mark island 0's last PUSH as encoded ahead and island 1's last BCAST as a partial-quorum
+    overwrite, as a background push and an async round write them."""
+    src = D / "fullparam-fragments"
+    dst = tmp_path / "fullparam-fragments"
+    shutil.copytree(src, dst)
+    for i, key in ((0, "rl_fragment_push"), (1, "rl_fragment_bcast")):
+        path = dst / "events" / f"fullparam-fragments-l{i}-modal.jsonl"
+        recs = lines(path)
+        last = max(j for j, x in enumerate(recs) if x["event"] == key)
+        if key == "rl_fragment_push" and wire is not None:
+            recs[last]["wire_bytes"] = wire
+        if key == "rl_fragment_bcast" and overwrite:
+            recs[last]["overwrite"] = True
+        path.write_text("".join(json.dumps(x) + "\n" for x in recs))
+    r = Reducer(run="fullparam-fragments")
+    load_all(r, [str(p) for p in sources.discover([str(dst), str(dst / "events")])])
+    return r
+
+
+def test_full_parameter_islands_draw_their_per_fragment_push_and_bcast(tmp_path):
+    r = _fullparam_fragments(tmp_path)
+    d = diloco(r)
+    assert d["kind"] == "island" and d["P"] == 6 and d["M"] == 2
+    for t in d["trainers"]:
+        recs = lines(D / "fullparam-fragments" / "events" / f"fullparam-fragments-l{t['id']}-modal.jsonl")
+        push = [x for x in recs if x["event"] == "rl_fragment_push"][-1]
+        bcast = [x for x in recs if x["event"] == "rl_fragment_bcast"][-1]
+        lp, lb = t["last_push"], t["last_bcast"]
+        assert (lp["frag"], lp["step"], lp["bytes"], lp["wire"]) == (
+            push["fragment_id"], push["global_step"], push["payload_bytes"], False)
+        assert (lb["frag"], lb["v"], lb["bytes"], lb["overwrite"], lb["catch_up"]) == (
+            bcast["fragment_id"], bcast["version"], bcast["payload_bytes"], False, False)
+        assert lb["received_ts"] == bcast["received_unix"] and t["full_push"] is not None
+    flows = d["flows"]
+    bcasts = [f for f in flows if f["k"] == "b"]
+    # every applied broadcast has its own record (exact window); the last sweep went out as FINAL
+    assert sum(1 for f in bcasts if not f["a"]) == 36 and all(f["b"] for f in bcasts if not f["a"])
+    assert {f["b"] for f in flows if f["k"] == "p"} <= {32.0, 48.0, 64.0}
+
+
+def test_a_full_parameter_push_encoded_ahead_counts_its_wire_bytes_and_an_overwrite_shows(tmp_path):
+    plain = diloco(_fullparam_fragments(tmp_path / "plain"))
+    r = _fullparam_fragments(tmp_path, wire=13, overwrite=True)
+    d = diloco(r)
+    t0, t1 = d["trainers"]
+    assert (t0["last_push"]["bytes"], t0["last_push"]["wire"]) == (13.0, True)
+    assert t0["last_push"]["payload_bytes"] == plain["trainers"][0]["last_push"]["bytes"]
+    assert (t1["last_bcast"]["overwrite"], t1["bcast_overwrites"], t0["bcast_overwrites"]) == (True, 1, 0)
+    step = t0["last_push"]["step"]
+    (pf,) = [f for f in d["flows"] if f["k"] == "p" and f["i"] == "0" and f["f"] == t0["last_push"]["frag"]
+             and f["t1"] == max(g["t1"] for g in d["flows"] if g["k"] == "p" and g["i"] == "0")]
+    assert pf["b"] == 13.0, (step, pf)
+    joined = " | ".join(_smoke(tmp_path, r)["texts"])
+    assert f"t{step} base v" in joined and "0 MB wire" in joined and " · overwrite" in joined
+
+
 def test_synced_group_trainers_following_samplers_are_buffer_trainers():
     r = load("f1-follow")
     d = diloco(r)
