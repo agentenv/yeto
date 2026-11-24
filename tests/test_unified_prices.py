@@ -21,15 +21,23 @@ def test_every_row_has_a_whole_node_usd_price_a_source_and_a_date():
     assert rows
     for r in rows:
         assert r.usd_h >= 0 and r.gpus >= 1 and r.source and dt.date.fromisoformat(r.as_of)
+        assert r.grade in prices.GRADES
+        assert (r.grade == prices.ILLUSTRATIVE) == ("illustrative" in r.source)
     for h in prices.table().host.values():
         assert h.source and dt.date.fromisoformat(h.as_of)
 
 
+G = {"grade": "billing"}
+
+
 @pytest.mark.parametrize("bad, why", [
-    ({"provider": "x", "gpu": "H100", "gpus": 8, "usd_h": 1.0, "source": "s"}, "as_of is required"),
-    ({"provider": "x", "gpu": "H100", "gpus": 8, "usd_h": 1.0, "source": "s", "as_of": "soon"}, "ISO date"),
-    ({"provider": "x", "gpu": "H100", "gpus": 0, "usd_h": 1.0, "source": "s", "as_of": "2026-01-01"}, "gpus"),
-    ({"provider": "x", "gpu": "H100", "gpus": 1, "usd_h": -1, "source": "s", "as_of": "2026-01-01"}, "usd_h"),
+    ({"provider": "x", "gpu": "H100", "gpus": 8, "usd_h": 1.0, "source": "s", **G}, "as_of is required"),
+    ({"provider": "x", "gpu": "H100", "gpus": 8, "usd_h": 1.0, "source": "s", "as_of": "soon", **G}, "ISO date"),
+    ({"provider": "x", "gpu": "H100", "gpus": 0, "usd_h": 1.0, "source": "s", "as_of": "2026-01-01", **G}, "gpus"),
+    ({"provider": "x", "gpu": "H100", "gpus": 1, "usd_h": -1, "source": "s", "as_of": "2026-01-01", **G}, "usd_h"),
+    ({"provider": "x", "gpu": "H100", "gpus": 1, "usd_h": 1, "source": "s", "as_of": "2026-01-01"}, "grade is"),
+    ({"provider": "x", "gpu": "H100", "gpus": 1, "usd_h": 1, "source": "s", "as_of": "2026-01-01",
+      "grade": "guess"}, "grade must be"),
 ])
 def test_a_row_without_its_source_date_or_a_sane_price_is_refused(bad, why):
     with pytest.raises(prices.PriceTableError, match=why):
@@ -37,7 +45,7 @@ def test_a_row_without_its_source_date_or_a_sane_price_is_refused(bad, why):
 
 
 def test_two_rows_for_the_same_node_are_refused():
-    row = {"provider": "x", "gpu": "H100", "gpus": 8, "usd_h": 1.0, "source": "s", "as_of": "2026-01-01"}
+    row = {"provider": "x", "gpu": "H100", "gpus": 8, "usd_h": 1.0, "source": "s", "as_of": "2026-01-01", **G}
     with pytest.raises(prices.PriceTableError, match="two rows"):
         prices.parse({"rows": [row, dict(row, gpu="h100")]})
 
@@ -45,12 +53,15 @@ def test_two_rows_for_the_same_node_are_refused():
 def test_lookup_prefers_the_region_and_spotness_asked_and_never_quotes_spot_for_unknown():
     assert prices.node_usd_h("nebius", "H100", 8, spot=True, region="eu-north1") == pytest.approx(6.32)
     assert prices.node_usd_h("nebius", "H100", 8, spot=False, region="eu-north1") == pytest.approx(36.0)
-    # no region: the region-less list row, scaled per GPU (never the regional spot price)
-    assert prices.node_usd_h("nebius", "H100", 8) == pytest.approx(8 * 2.95)
     assert prices.node_usd_h("nebius", "H100", 8, region="eu-north1") == pytest.approx(36.0)
     assert prices.node_usd_h("modal", "h100!", 2) == pytest.approx(7.9)
-    assert prices.node_usd_h("aws", "A100", 1) == pytest.approx(1.79)  # the "*" row
     assert prices.node_usd_h("modal", "MI999", 1) is None
+    # no region: only the illustrative list row matches, and that is no price to anything that
+    # counts money (never the regional spot price either)
+    assert prices.node_usd_h("nebius", "H100", 8) is None
+    assert prices.node_usd_h("aws", "A100", 1) is None  # the "*" row is illustrative
+    assert prices.lookup("nebius", "H100", grade=None).usd_h == pytest.approx(2.95)
+    assert prices.lookup("aws", "A100", grade=None).provider == "*"
 
 
 def test_the_older_tables_are_views_of_the_unified_one():
@@ -80,6 +91,17 @@ def test_the_dashboard_default_table_keeps_its_prices_and_names_its_source():
         assert table["prices"][key] == pytest.approx(usd), key
     assert price_per_gpu_h(table, "nc", "MI355X") == pytest.approx(3.0)
     assert table["host_prices"]["modal"] == {"cpu_core_h": 0.04716, "mem_gib_h": 0.007992}
+    # the illustrative rows are shown, marked as estimates
+    from yeto.dashboard.cost import is_estimate, island_cost
+
+    assert set(table["estimate_keys"]) == {"nebius:H100", "nebius:H200", "aws:H100", "verda:H100", "verda:H200",
+                                           "*:A100"}
+    assert "estimate" in table["_source"]
+    assert is_estimate(table, "nebius", "H100") and is_estimate(table, "gcp", "A100")
+    assert not is_estimate(table, "modal", "H100") and not is_estimate(table, "nc", "MI355X")
+    isl = {"id": "i", "cloud": "verda", "gpu": "H100", "gpus": 8}
+    assert island_cost(isl, table, 0.0)["estimate"] is True
+    assert island_cost(dict(isl, cloud="modal"), table, 0.0)["estimate"] is False
 
 
 def test_a_stale_price_is_named_with_its_source_and_date():
@@ -116,6 +138,25 @@ def test_the_shape_planner_prices_modal_gpus_from_the_same_rows():
 
 SPOT = {"infra": "nebius/eu-north1", "accelerators": "H100:8", "use_spot": True}
 ONDEMAND = {"infra": "nebius/eu-north1", "accelerators": "H100:8", "use_spot": False}
+
+
+def test_an_offer_priced_only_by_an_illustrative_row_stays_unpriced_and_a_capped_run_refuses_it(tmp_path):
+    """nebius H100:8 without a region matches only the illustrative list row: like on main (no
+    price), the offer is unpriced, and a run with a spend cap refuses the pool naming the offer."""
+    from yeto.launch.nc import cli
+    from yeto.rl import up_consistency
+
+    bare = {"infra": "nebius", "accelerators": "H100:8", "use_spot": False}
+    spot = dict(bare, use_spot=True)
+    assert [o.price_usd_h for o in offers.offers_from_config({"offers": [{"resources": bare}, {"resources": spot}]})] \
+        == [None, None]
+    cfg = {"shard_base": "s", "provider": {"kind": "sky", "offers": [{"resources": SPOT}, {"resources": bare}]}}
+    assert cli.pool_price(cfg) == (None, "usd")
+    assert cli.unpriced_offers(cfg) == ["H100:8@nebius/od"]
+    problem = up_consistency.price_problem("spot", None, cfg)
+    assert problem is not None and "H100:8@nebius/od" in problem and "no billing price" in problem
+    assert up_consistency.price_problem("spot", None, {"shard_base": "s", "provider": {
+        "kind": "sky", "offers": [{"resources": SPOT}, {"resources": ONDEMAND}]}}) is None
 
 
 def test_an_offer_without_a_price_takes_the_table_price_of_its_node():

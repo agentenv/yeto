@@ -780,32 +780,39 @@ def offer_key(cfg: dict[str, Any]) -> str:
     return str(kind)
 
 
-def attach_offer_ledger(cfg: dict[str, Any], pool: IslandPool, store: Any = None) -> Any:
-    """``replace_lead_auto``: read the offer ledger from the store's bucket root
-    (:data:`yeto.launch.pool.offer_ledger.DEFAULT_KEY`; ``store``: an object store with
-    ``read`` / ``write``), feed it this pool's events and let the pool read its leads. An
-    unreadable ledger: an empty one, written back from this run on (said once)."""
+def offer_ledger_store(cfg: dict[str, Any]) -> Any:
+    """The object store at the bucket root of the pool's run store, where the offer ledger
+    accumulates over runs (``yeto.launch.pool.offer_ledger.PREFIX``); None (the ledger is kept
+    for this run only) when the store env file holds no store credentials or names no bucket."""
+    if not cfg.get("r2_env_file"):
+        return None
+    env = elastic.read_env_file(cfg["r2_env_file"])
+    bucket = env.get(cfg.get("bucket_env", "R2_BUCKET"))
+    if not bucket or not env.get("AWS_ACCESS_KEY_ID"):
+        return None
+    return elastic.s3_fence_store(f"s3://{bucket}", cfg["r2_env_file"]).objects
+
+
+def attach_offer_ledger(cfg: dict[str, Any], pool: IslandPool, store: Any = None, *, background: bool = True) -> Any:
+    """Keep the offer ledger for this pool (every pool, whatever ``replace_lead_auto`` says):
+    its events are counted into this pool's own shard of the ledger in ``store`` (default:
+    :func:`offer_ledger_store`), and with ``replace_lead_auto`` the pool reads its leads from
+    every writer's measurements. Store reads and writes run off the pool's tick."""
     from ..pool import offer_ledger as ol  # noqa: PLC0415
 
     if store is None:
         try:
-            env = elastic.read_env_file(cfg["r2_env_file"])
-            bucket = env.get(cfg.get("bucket_env", "R2_BUCKET"))
-            store = elastic.s3_fence_store(f"s3://{bucket}", cfg["r2_env_file"]).objects if bucket else None
+            store = offer_ledger_store(cfg)
         except Exception as error:  # noqa: BLE001 - no store: the ledger is kept for this run only
             _say(f"pool: offer ledger kept in memory only (no store: {error!r})"[:300])
             store = None
-    ledger = ol.OfferLedger()
-    if store is not None:
-        try:
-            ledger = ol.OfferLedger.load(store)
-        except Exception as error:  # noqa: BLE001
-            _say(f"pool: offer ledger not read, starting an empty one: {error!r}"[:300])
     provider = getattr(pool.ops, "provider", None)
-    offer_of = getattr(provider, "offer_of", None)
-    sink = ol.PoolLedger(ledger, default_offer=offer_key(cfg), offer_of=offer_of, store=store, log=_say)
+    sink = ol.PoolLedger(ol.OfferLedger(), writer=f"{cli.run_id(cfg)}-{cfg['shard_base']}",
+                         default_offer=offer_key(cfg), offer_of=getattr(provider, "offer_of", None), store=store,
+                         log=_say, event=pool.events, background=background)
     pool.offer_ledger = sink
     pool.events.sinks.append(sink)
+    sink.start()
     return sink
 
 
@@ -828,7 +835,7 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         pool.scale_path = scale_path(cfg)
         pool.scale_run = cli.run_id(cfg)
     pool.apply_scale()
-    if pc.replace_lead_auto and pool.offer_ledger is None:
+    if pool.offer_ledger is None:
         attach_offer_ledger(cfg, pool)
     if pool.stopped:
         _say(stopped_state_hint(state, pool, cfg))

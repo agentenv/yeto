@@ -1146,7 +1146,7 @@ def test_a_call_near_its_function_timeout_gets_a_successor_before_it_is_retired(
     and a call that ends at its timeout is an expiry, not an eviction."""
     t = [0.0]
     clock = lambda: t[0]  # noqa: E731
-    ops, client, _ = _ops(tmp_path, provider={**_cfg(tmp_path)["provider"], "timeout_h": 2})
+    ops, client, _ = _ops(tmp_path, provider={**_cfg(tmp_path)["provider"], "timeout_h": 3})
     ops.provider.clock = clock
     events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
     pool = IslandPool(PoolConfig(target=1, accounts=[1, 2], shard_base="m", stop_below_ucr=0,
@@ -1157,7 +1157,7 @@ def test_a_call_near_its_function_timeout_gets_a_successor_before_it_is_retired(
         pool.tick()
         t[0] += 60
     [first] = [m for m in pool.members if m.state == READY]
-    assert first.lease_until == pytest.approx(ops.provider._rows()[first.ticket]["spawned_at"] + 7200)
+    assert first.lease_until == pytest.approx(ops.provider._rows()[first.ticket]["spawned_at"] + 10800)
     assert len(pool.members) == 1
     t[0] = first.lease_until - 1800 + 1  # inside the lead: a successor on the free slot
     for _ in range(3):

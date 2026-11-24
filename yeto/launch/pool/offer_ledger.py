@@ -8,22 +8,26 @@ lost) against those that ended any other way, the ready hours they ran (the recl
 rate per hour, the hazard ``lambda``), and the sampler throughput per model.
 
 The ledger is fed the pool's own events (:meth:`OfferLedger.observe`, any event
-prefix: ``nc_elastic_ordered`` and ``ordered`` are one event) and kept in the run
-store as one JSON document (:meth:`OfferLedger.load` / :meth:`OfferLedger.save`, at
-:data:`DEFAULT_KEY` of the store root, so it accumulates over runs). It decides
-nothing itself: the pool's replacement lead (:func:`replace_lead_s`) and the
-capacity broker read it.
+prefix: ``nc_elastic_ordered`` and ``ordered`` are one event) and kept in the store
+under :data:`PREFIX` at the bucket root, so it accumulates over runs: every writer (one
+pool of one run) writes only its own shard object (:func:`shard_key`), and a reader
+merges every shard (:meth:`OfferLedger.load_all`). Two pools or two runs never
+overwrite each other, and a shard that cannot be read is never replaced: its writer
+writes nothing until it has read it. The ledger decides nothing itself: the pool's
+replacement lead (:func:`replace_lead_s`) and the capacity broker read it.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Mapping
+import re
+import threading
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-DEFAULT_KEY = "fleet/offer_ledger.json"
+PREFIX = "fleet/offer_ledger/"
 FORMAT = 1
 MAX_SAMPLES = 200  # start-time samples kept per offer (the newest)
 MIN_SAMPLES = 5  # fewer measured starts: the replacement lead keeps its prior
@@ -103,6 +107,20 @@ class OfferStats:
                    start_s=[float(s) for s in doc.get("start_s") or ()][-MAX_SAMPLES:],
                    throughput={str(m): {"tokens": float(v.get("tokens", 0.0)), "s": float(v.get("s", 0.0))}
                                for m, v in (doc.get("throughput") or {}).items()})
+
+    def add(self, other: OfferStats) -> None:
+        """Add ``other``'s measurements (another writer's) to these."""
+        self.orders += other.orders
+        self.ready += other.ready
+        self.start_failed += other.start_failed
+        self.reclaimed += other.reclaimed
+        self.ended += other.ended
+        self.ready_s += other.ready_s
+        self.start_s = (self.start_s + other.start_s)[-MAX_SAMPLES:]
+        for model, row in other.throughput.items():
+            mine = self.throughput.setdefault(model, {"tokens": 0.0, "s": 0.0})
+            mine["tokens"] += float(row.get("tokens", 0.0))
+            mine["s"] += float(row.get("s", 0.0))
 
     def summary(self) -> dict[str, Any]:
         return {"offer": self.offer, "orders": self.orders, "starts_measured": len(self.start_s),
@@ -214,15 +232,36 @@ class OfferLedger:
                    tickets={str(k): dict(v) for k, v in (doc.get("tickets") or {}).items()})
 
     @classmethod
-    def load(cls, store: Any, key: str = DEFAULT_KEY) -> OfferLedger:
-        """Read the ledger from ``store`` (an object store: ``read(key) -> bytes | None``);
-        an absent document is an empty ledger."""
+    def merged(cls, ledgers: Iterable[OfferLedger]) -> OfferLedger:
+        """Every ledger's measurements added up (the tickets in flight of all of them)."""
+        out = cls()
+        for led in ledgers:
+            for key, stats in led.offers.items():
+                out.stats(key).add(stats)
+            out.tickets.update({k: dict(v) for k, v in led.tickets.items()})
+        return out
+
+    @classmethod
+    def load(cls, store: Any, key: str) -> OfferLedger:
+        """One shard from ``store`` (``read(key) -> bytes | None``): absent is an empty ledger;
+        a failed read, unreadable JSON or a newer format raises (never taken for empty)."""
         raw = store.read(key)
         return cls() if raw is None else cls.from_doc(json.loads(raw))
 
-    def save(self, store: Any, key: str = DEFAULT_KEY) -> None:
-        """Write the ledger to ``store`` (``write(key, bytes)``)."""
+    @classmethod
+    def load_all(cls, store: Any, *, prefix: str = PREFIX, skip: str | None = None) -> OfferLedger:
+        """Every writer's shard under ``prefix`` merged (``skip``: one shard key left out); any
+        failed read raises."""
+        return cls.merged(cls.load(store, key) for key in store.list(prefix) if key != skip and key.endswith(".json"))
+
+    def save(self, store: Any, key: str) -> None:
+        """Write this ledger as the shard ``key`` (``write(key, bytes)``): only its own writer does."""
         store.write(key, json.dumps(self.to_doc(), sort_keys=True).encode())
+
+
+def shard_key(writer: str, prefix: str = PREFIX) -> str:
+    """The shard object of one writer (one pool of one run)."""
+    return f"{prefix}{re.sub(r'[^A-Za-z0-9._-]', '_', writer)[:200]}.json"
 
 
 # -- the replacement lead ---------------------------------------------------------
@@ -247,31 +286,114 @@ def replace_lead_s(stats: OfferStats | None, *, prior_s: float, min_samples: int
 
 @dataclass
 class PoolLedger:
-    """The ledger as one pool uses it: an event sink (``EventLog.sinks``) that counts the
+    """The ledger as one pool keeps it: an event sink (``EventLog.sinks``) that counts the
     pool's events under the member's offer (``offer_of(ticket)``: a sky pool's offer key;
-    else ``default_offer``: the pool's one offer) and saves the ledger to ``store`` after
-    a machine came up or ended (best effort: a failed save is retried at the next one), and
-    the replacement lead of a member (:meth:`lead_s`)."""
+    else ``default_offer``: the pool's one offer) into ``own`` (this writer's shard
+    :func:`shard_key` of ``writer``), and the replacement lead of a member (:meth:`lead_s`,
+    from every writer's measurements).
 
-    ledger: OfferLedger
+    Store traffic never runs in the pool's tick: the first read (its own shard and every
+    other writer's, merged into ``others``) and each save after a machine came up or ended
+    run on a background thread (``background=False``: inline, for tests). Until its own
+    shard was read the writer writes nothing: a read that fails (a store blip, a newer
+    format) is tried again at the next save, and reported once as the pool event
+    ``offer_ledger_unreadable`` (sent from the pool's own thread, with its next event)."""
+
+    own: OfferLedger
+    writer: str
     default_offer: str | None = None
     offer_of: Callable[[str], str | None] | None = None
     store: Any = None
-    key: str = DEFAULT_KEY
     log: Callable[[str], None] = print
+    event: Callable[..., Any] | None = None  # EventLog: event(name, **detail)
+    background: bool = True
+    prefix: str = PREFIX
+    others: OfferLedger = field(default_factory=OfferLedger)
+    loaded: bool = False
     save_error: str | None = None
+    _lock: Any = field(default_factory=threading.Lock, repr=False)
+    _dirty: bool = False
+    _thread: Any = None
+    _unreadable: str | None = None  # the read error not reported yet
+    _reported: bool = False
+
+    @property
+    def key(self) -> str:
+        return shard_key(self.writer, self.prefix)
+
+    def start(self) -> None:
+        """Read the store now (in the background): the leads see the history before the first save."""
+        if self.store is not None:
+            self._kick()
 
     def __call__(self, doc: Mapping[str, Any]) -> None:
-        name = self.ledger.observe(doc, offer_of=self._offer_of, default_offer=self.default_offer)
+        self._report()
+        with self._lock:
+            name = self.own.observe(doc, offer_of=self._offer_of, default_offer=self.default_offer)
         if name is None or name == ORDERED or self.store is None:
             return
+        with self._lock:
+            self._dirty = True
+        self._kick()
+
+    def _kick(self) -> None:
+        if not self.background:
+            self.flush()
+            return
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self.flush, name="yeto-offer-ledger", daemon=True)
+            self._thread.start()
+
+    def flush(self) -> None:
+        """Read the store if not read yet, then write this writer's shard while it is dirty."""
+        if not self.loaded and not self._read():
+            return
+        while True:
+            with self._lock:
+                if not self._dirty:
+                    return
+                self._dirty = False
+                doc = OfferLedger.from_doc(self.own.to_doc())
+            try:
+                doc.save(self.store, self.key)
+                self.save_error = None
+            except Exception as error:  # noqa: BLE001 - the ledger never stops a pool
+                if self.save_error is None:
+                    self.log(f"pool: offer ledger not saved: {error!r}"[:300])
+                self.save_error = repr(error)
+                with self._lock:
+                    self._dirty = True  # the next event tries again
+                return
+
+    def _read(self) -> bool:
         try:
-            self.ledger.save(self.store, self.key)
-            self.save_error = None
-        except Exception as error:  # noqa: BLE001 - the ledger never stops a pool
-            if self.save_error is None:
-                self.log(f"pool: offer ledger not saved: {error!r}"[:300])
-            self.save_error = repr(error)
+            stored = OfferLedger.load(self.store, self.key)
+            others = OfferLedger.load_all(self.store, prefix=self.prefix, skip=self.key)
+        except Exception as error:  # noqa: BLE001 - never taken for an empty ledger: nothing is written
+            with self._lock:
+                if not self._reported:
+                    self._unreadable = repr(error)[:300]
+            return False
+        with self._lock:
+            self.own = OfferLedger.merged([stored, self.own])  # this run's counts on top of the stored ones
+            self.others = others
+            self.loaded = True
+        return True
+
+    def _report(self) -> None:
+        with self._lock:
+            why, self._unreadable = self._unreadable, None
+            if why is None or self._reported:
+                return
+            self._reported = True
+        self.log(f"pool: offer ledger {self.key} not read ({why}): nothing is written to it until it reads")
+        if self.event is not None:
+            try:
+                self.event("offer_ledger_unreadable", key=self.key, error=why)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _offer_of(self, ticket: str) -> str | None:
         if self.offer_of is None:
@@ -282,9 +404,21 @@ class PoolLedger:
             return None
 
     def offer(self, ticket: str) -> str | None:
-        known = self.ledger.tickets.get(ticket) or {}
+        with self._lock:
+            known = self.own.tickets.get(ticket) or {}
         return known.get("offer") or self._offer_of(ticket) or self.default_offer
+
+    def stats(self, offer: str) -> OfferStats | None:
+        """Every writer's measurements of ``offer`` (the others' as read, this writer's live)."""
+        with self._lock:
+            parts = [led.offers[offer] for led in (self.others, self.own) if offer in led.offers]
+        if not parts:
+            return None
+        out = OfferStats(offer)
+        for part in parts:
+            out.add(part)
+        return out
 
     def lead_s(self, ticket: str, prior_s: float) -> float:
         offer = self.offer(ticket)
-        return replace_lead_s(None if offer is None else self.ledger.get(offer), prior_s=prior_s)[0]
+        return replace_lead_s(None if offer is None else self.stats(offer), prior_s=prior_s)[0]

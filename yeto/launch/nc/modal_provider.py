@@ -124,6 +124,8 @@ CONFIG_KEYS = frozenset({"kind", "factory", "app_name", "image", "gpu", "gpus", 
                          "python", "name_prefix", "env", "price_usd_h", "scaledown_window_s", "tasks_dir"})
 DEFAULT_GPU, DEFAULT_GPUS = "B300", 8  # a pool config without gpu / gpus
 DEFAULT_TIMEOUT_H = 24  # the sampler function's timeout without timeout_h: each call's hard end
+# a call's timeout counts as its hard end only from twice (replace_lead_s + end_margin_s) on (pool defaults)
+DEFAULT_MIN_HARD_END_S = 2 * (3600 + 600)
 # seconds a container whose call returned stays up for the next call (billed idle).
 # A restart or replacement spawns on the pool's next tick (60 s by default), after a
 # longer window would mostly have run out anyway; 2 s is the least Modal takes.
@@ -220,6 +222,7 @@ class ModalProvider:
         self.prefix = f"{name_prefix}-{re.sub(r'[^a-z0-9-]', '-', run_id.lower())}"
         self.price_usd_h = None if price_usd_h is None else float(price_usd_h)
         self.config = dict(config or {})
+        self.min_hard_end_s = DEFAULT_MIN_HARD_END_S
         self.harbor = harbor  # an agentic pool's sandbox provider: the image carries Harbor and its SDK
         self._client, self.clock = client, clock
         # a cancel is asynchronous: the call reads RUNNING for some seconds after it
@@ -436,9 +439,14 @@ class ModalProvider:
         return float(int(float(self.config.get("timeout_h", DEFAULT_TIMEOUT_H)) * 3600))
 
     def hard_end(self, row: dict[str, Any]) -> float | None:
-        """When the island's current call reaches its function timeout (None: spawn time unknown)."""
+        """When the island's current call reaches its function timeout. None: spawn time unknown,
+        or a timeout shorter than ``min_hard_end_s`` (twice the pool's replacement lead plus its
+        end margin): a successor ordered a lead before so short a life would be replaced again
+        at once, so such a call keeps the old behaviour (refilled when it ends)."""
         spawned = row.get("spawned_at")
-        return None if spawned is None else float(spawned) + self.timeout_s()
+        if spawned is None or self.timeout_s() < self.min_hard_end_s:
+            return None
+        return float(spawned) + self.timeout_s()
 
     def _scheduled(self, call: str) -> bool:
         """Modal placed the call on a worker (it has a task). True when the client cannot
@@ -1063,11 +1071,15 @@ def from_config(cfg: dict[str, Any], run_id: str, *, client: Any = None) -> Moda
     scaledown_window_s(section)
     from . import cli  # noqa: PLC0415
 
-    return ModalProvider(run_id, slots=cli.slot_list(cfg), client=client,
+    provider = ModalProvider(run_id, slots=cli.slot_list(cfg), client=client,
                          name_prefix=str(section.get("name_prefix", "yeto-smp")),
                          price_usd_h=section.get("price_usd_h") if section.get("price_usd_h") is not None
                          else table_price(section), config=section,
                          harbor=agentic_provider(pool_spec(cfg), section.get("env")))
+    lead, margin = cfg.get("replace_lead_s", 3600), cfg.get("end_margin_s", 600)
+    if isinstance(lead, (int, float)) and isinstance(margin, (int, float)) and not isinstance(lead, bool):
+        provider.min_hard_end_s = 2 * (float(lead) + float(margin))
+    return provider
 
 
 def table_price(section: dict[str, Any]) -> float | None:

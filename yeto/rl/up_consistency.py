@@ -857,19 +857,26 @@ def price_problem(name: str, entry_usd_per_h: float | None, pool_cfg: dict[str, 
     entry = providers.registered(kind)
     if entry is None or entry.caps.currency != "usd":
         return None
+    unpriced = ""
     if entry_usd_per_h is not None:
         if entry_usd_per_h > 0:
             return None
         where, value = f"samplers[{name}].usd_per_h", entry_usd_per_h
     else:
-        where = "provider.price_usd_h" + (" (or offers[0].price_usd_h)" if kind == "sky" else "")
+        where = "provider.price_usd_h" + (" (or every offer's price_usd_h)" if kind == "sky" else "")
         try:
             value = pool_price(pool_cfg)[0]
         except (TypeError, ValueError):
             value = (pool_cfg.get("provider") or {}).get("price_usd_h")
         if isinstance(value, (int, float)) and value > 0:
             return None
-    state = "missing" if value is None else f"{value!r}"
+        from yeto.launch.nc.cli import unpriced_offers  # noqa: PLC0415
+
+        missing = unpriced_offers(pool_cfg)
+        if missing:  # name the offers: the unified price table has no billing price for them
+            unpriced = (f" (offer(s) {', '.join(missing)}: no price_usd_h and no billing price in the unified "
+                        "price table)")
+    state = ("missing" if value is None else f"{value!r}") + unpriced
     hint = f"; drop samplers[{name}].usd_per_h (it overrides the provider price) or" if where.startswith("samplers") \
         else "; set"
     return (f"pool {name} ({kind}, priced in USD): {where} is {state} while budget.usd caps the run: its islands "

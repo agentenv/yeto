@@ -606,7 +606,9 @@ class IslandPool:
                     if account is None:
                         return None
                     continue
-                self._event("order_failed", account=account, error=repr(error)[:300])
+                offer = getattr(getattr(self.ops, "provider", None), "last_offer_key", None)  # sky: the offer tried
+                self._event("order_failed", account=account, error=repr(error)[:300],
+                            **({"offer": offer} if isinstance(offer, str) else {}))
                 self._order_failed[account] = now
                 fallback = getattr(self.ops, "has_fallback_offer", None)
                 if fallback is not None and fallback():  # an (slot, offer) failure: that offer cools down
@@ -1698,7 +1700,11 @@ class IslandPool:
         ``replace_lead_s``, or with ``replace_lead_auto`` its offer's measured lead."""
         if not self.config.replace_lead_auto or self.offer_ledger is None:
             return self.config.replace_lead_s
-        return float(self.offer_ledger.lead_s(m.ticket, self.config.replace_lead_s))
+        lead = float(self.offer_ledger.lead_s(m.ticket, self.config.replace_lead_s))
+        born = m.granted if m.granted is not None else m.created
+        if m.lease_until is not None and born:  # never more than half its life: no successor of a successor
+            lead = min(lead, max(0.0, (m.lease_until - born) / 2))
+        return lead
 
     def _watch_paused(self, m: Member, now: float) -> bool:
         """A paused member: only its ticket is read (spend, lease end). True: nothing else

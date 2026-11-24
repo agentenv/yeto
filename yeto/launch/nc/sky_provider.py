@@ -383,6 +383,7 @@ class SkyProvider:
                                  **({"num_nodes": num_nodes} if num_nodes > 1 else {})}
         self._save_doc(doc)  # recorded before the launch: a crash mid-launch still leaves it ours to down
         _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id)
+        self.last_offer_key = offer.key  # the pool's order_failed event names it (offer ledger)
         try:
             task = self._task(name, offer, num_nodes)
             request = self.sky.launch(task, cluster_name=name, **self.launch_kwargs(task))

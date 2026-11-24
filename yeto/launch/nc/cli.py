@@ -1060,6 +1060,22 @@ def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
         raise ValueError(f"pool config: provider price_usd_h must be a number, not {price!r}") from None
 
 
+def unpriced_offers(cfg: dict[str, Any]) -> list[str]:
+    """The keys of a sky pool's offers that have no price: no ``price_usd_h`` and no billing
+    row of the unified price table (an illustrative row is no price). [] for other kinds."""
+    from ..pool import provider as providers  # noqa: PLC0415
+
+    section = cfg.get("provider") or {}
+    if providers.kind_of(cfg) != "sky" or section.get("price_usd_h") is not None:
+        return []
+    from yeto.launch.rollout.offers import offers_from_config  # noqa: PLC0415
+
+    try:
+        return [o.key for o in offers_from_config(section) if o.price_usd_h is None]
+    except ValueError:
+        return []
+
+
 def pool_price_rows(cfg: dict[str, Any]) -> list[Any]:
     """The unified price table rows a pool's price comes from where its config states none
     (sky offers without ``price_usd_h``, a modal pool without it); National Compute's rate

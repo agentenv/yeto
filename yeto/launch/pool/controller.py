@@ -662,8 +662,7 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
     pool.owner = pool_run.state_owner(cfg)  # this run's from now on (a file with no owner is stamped)
     pool.scale_path, pool.scale_run = pool_run.scale_path(cfg), cli.run_id(cfg)
     pool.apply_scale()
-    if pc.replace_lead_auto:  # the replacement lead from the offer ledger (opt-in)
-        pool_run.attach_offer_ledger(cfg, pool)
+    pool_run.attach_offer_ledger(cfg, pool)  # every pool feeds the offer ledger (leads from it: replace_lead_auto)
     pool_run._write_pid(cfg, config_path)  # noqa: SLF001 - pool-status / pool-scale see a live loop
     pool_run._remove(pool_run.stop_path(cfg))  # noqa: SLF001
 
