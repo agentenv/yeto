@@ -145,6 +145,8 @@ class Finding:
     values: Mapping[str, Any] = field(default_factory=dict)
     suggested: Mapping[str, Any] = field(default_factory=dict)  # "<entry>.<param>" -> a value that passes
     overridden: str | None = None  # the deps.overrides value that changed the level
+    # where the rule ran in a fleet ({"island": "1", "island_name": ...}); {}: the run (one trainer)
+    scope: Mapping[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         out = {"rule": self.rule, "level": self.level, "message": self.message,
@@ -153,6 +155,8 @@ class Finding:
             out["suggested"] = dict(self.suggested)
         if self.overridden is not None:
             out["overridden"] = self.overridden
+        if self.scope:
+            out["scope"] = dict(self.scope)
         return out
 
 

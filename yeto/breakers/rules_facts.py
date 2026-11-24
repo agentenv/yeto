@@ -11,6 +11,11 @@ files only, and a value that cannot be read is None (the rule then skips).
 Each pool gets its own resolve (``pool=<name>``, with its spec, elastic and
 dispense sections and its agentic env file) so per-pool rules see the values
 that pool's samplers run with.
+
+A fleet (a run config with ``islands``, :mod:`yeto.breakers.fleet`) has one trainer per
+island: :func:`collect` then gives one :class:`IslandFacts` per island (that island's
+resolve, trainer and pools), and the rules run once per island over them; the fleet's own
+facts keep every pool and no trainer (the one-budget rules read them).
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from yeto.breakers.fleet import Island
     from yeto.breakers.resolve import ResolvedBreakers, Sources
 
 AUTO = "auto"  # max_backlog_groups "auto": run up derives the cap from the release cadence (#628)
@@ -83,17 +89,32 @@ class PoolFacts:
 
 
 @dataclass(frozen=True)
+class IslandFacts:
+    """One island of a fleet: its resolve (the run and trainer entries over its own trainer
+    argv) and its facts (its trainer, its pools)."""
+    island: Island
+    resolved: ResolvedBreakers
+    facts: Facts
+
+
+@dataclass(frozen=True)
 class Facts:
     trainer: TrainerFacts | None
     pools: tuple[PoolFacts, ...] = ()
     outage_tolerance_s: float | None = None
     run_up: bool = False                 # a whole run config (yeto run up): the run-layer rules apply
+    islands: tuple[IslandFacts, ...] = ()  # a fleet: the rules run once per island (trainer is None)
 
 
 def collect(resolved: ResolvedBreakers, *, run_config: Mapping[str, Any] | None = None,
             sources: Sources | None = None,
             pools: Iterable[tuple[str, Mapping[str, Any], str]] | None = None) -> Facts:
-    """The facts of one run (see :func:`yeto.breakers.rules.check` for the arguments)."""
+    """The facts of one run (see :func:`yeto.breakers.rules.check` for the arguments); for a
+    fleet run config (and no ``pools``), :func:`collect_fleet`."""
+    from yeto.breakers import fleet  # noqa: PLC0415
+
+    if pools is None and fleet.is_fleet(run_config):
+        return collect_fleet(resolved, run_config)
     deps = getattr(resolved, "deps", None)
     tolerance = getattr(deps, "outage_tolerance_s", None)
     argv = _argv(run_config, sources)
@@ -113,6 +134,31 @@ def collect(resolved: ResolvedBreakers, *, run_config: Mapping[str, Any] | None 
                             str(cfg.get("data_path", "r2")), dispense=dispense))
     return Facts(trainer=trainer, pools=tuple(found), outage_tolerance_s=tolerance,
                  run_up=isinstance((run_config or {}).get("trainer"), Mapping))
+
+
+def collect_fleet(resolved: ResolvedBreakers, run_config: Mapping[str, Any], *,
+                  island_pools: Mapping[int, Iterable[tuple[str, Mapping[str, Any], str]]] | None = None,
+                  island_resolved: Mapping[int, ResolvedBreakers] | None = None) -> Facts:
+    """The facts of a fleet run config: one :class:`IslandFacts` per island, each collected
+    from :func:`yeto.breakers.fleet.island_run_config` like one trainer's run, and the fleet's
+    own facts (every pool, no trainer) for the fleet-wide rules. ``island_pools`` /
+    ``island_resolved``: an island's loaded pools / its resolve when the caller has them
+    (``yeto run up``), else they are read from the run config."""
+    from yeto.breakers import fleet  # noqa: PLC0415
+    from yeto.breakers.resolve import Sources, resolve  # noqa: PLC0415
+
+    found = []
+    for island in fleet.islands(run_config):
+        view = fleet.island_run_config(run_config, island.index)
+        rb = (island_resolved or {}).get(island.index)
+        if rb is None:
+            rb = resolve(Sources.from_run_config(view), strict=False)
+        mine = (island_pools or {}).get(island.index)
+        found.append(IslandFacts(island, rb, collect(rb, run_config=view, pools=mine)))
+    pools = tuple(p for i in found for p in i.facts.pools)
+    deps = getattr(resolved, "deps", None)
+    return Facts(trainer=None, pools=pools, outage_tolerance_s=getattr(deps, "outage_tolerance_s", None),
+                 run_up=True, islands=tuple(found))
 
 
 def _argv(run_config: Mapping[str, Any] | None, sources: Sources | None) -> list[str] | None:
@@ -214,10 +260,15 @@ def estimator_of(algorithm: Mapping[str, Any]) -> str:
 
 def run_pools(run_config: Mapping[str, Any], *, strict: bool = False) -> list[tuple[str, dict[str, Any], str]]:
     """``(name, pool config, data path)`` of a run config's pools (``pool`` or
-    ``samplers``), read like :func:`yeto.launch.rollout.pools.resolve` without writing
-    the merged inline configs; a pool whose file does not load is left out (the pool
-    dry-run reports it), or with ``strict`` raises ValueError naming the file."""
+    ``samplers``; a fleet: every island's pools, named ``i<k>-<name>``), read like
+    :func:`yeto.launch.rollout.pools.resolve` without writing the merged inline configs; a
+    pool whose file does not load is left out (the pool dry-run reports it), or with
+    ``strict`` raises ValueError naming the file."""
+    from yeto.breakers import fleet  # noqa: PLC0415
     from yeto.launch.rollout.pools import ENTRY_KEYS  # noqa: PLC0415
+
+    if fleet.is_fleet(run_config) and run_config.get("pool") is None and run_config.get("samplers") is None:
+        return run_pools(fleet.fleet_run_config(run_config), strict=strict)
 
     def load(path: Any) -> dict[str, Any] | None:
         doc = _load_json(path)
