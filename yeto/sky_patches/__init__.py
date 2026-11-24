@@ -215,3 +215,67 @@ def uninstall(site_dir: str | None = None) -> str | None:
         return None
     os.remove(path)
     return path
+
+
+# -- the sky API server this process talks to ------------------------------------
+
+SERVER_MISMATCH_ENV = "YETO_SKY_SERVER_MISMATCH"  # "allow": proceed on a mismatched local server
+SERVER_CHECK_ENV = "YETO_SKY_SERVER_CHECK"  # "off": no check (the unit tests)
+
+
+def api_server_version_problem(server_common=None, environ=None) -> tuple[str, bool] | None:
+    """(message, refuse) when the running sky API server is another sky version than
+    this Python's, else None. sky itself accepts any server from 0.11 on (its API
+    version negotiation), so a mismatch is silent there: requests would run on the
+    other version's server, where yeto's patches (and sky's own behaviour) are not
+    the verified ones, and this process's direct sky state reads would migrate the
+    shared state database to its own schema under the older server. ``refuse``: the
+    server is local (a remote one is sky's supported setup: a warning only). No
+    running server, or one not answering: None (sky starts one from this Python)."""
+    import os
+
+    environ = os.environ if environ is None else environ
+    try:
+        import sky
+
+        if server_common is None:
+            from sky.server import common as server_common
+        endpoint = server_common.get_server_url()
+        info = server_common.get_api_server_status(endpoint)
+    except Exception:  # noqa: BLE001 - sky absent or API drift: sky reports its own errors
+        return None
+    if getattr(info.status, "value", info.status) != "healthy" or not info.version:
+        return None
+    mine = getattr(sky, "__version__", None)
+    if info.version == mine:
+        return None
+    local = bool(server_common.is_api_server_local(endpoint))
+    msg = (f"this Python runs SkyPilot {mine}, but the sky API server at {endpoint} runs {info.version}. "
+           "sky does not refuse the mismatch, so every launch, status and down would run on that server "
+           "(yeto's sky patches are verified per version)")
+    if not local:
+        return msg + "; use a server of the same version for verified behaviour", False
+    msg += (", and this process would migrate the local sky state database to its own schema under it. "
+            f"Either restart the local server from this environment (sky api stop; sky api start), or keep it "
+            f"and start a separate {mine} server with its own state: SKY_RUNTIME_DIR=<dir> sky api start "
+            f"--port <port>, then run yeto with SKY_RUNTIME_DIR=<dir> "
+            f"SKYPILOT_API_SERVER_ENDPOINT=http://127.0.0.1:<port>")
+    if environ.get(SERVER_MISMATCH_ENV) == "allow":
+        return msg + f" ({SERVER_MISMATCH_ENV}=allow: proceeding)", False
+    return msg + f" (or set {SERVER_MISMATCH_ENV}=allow to proceed anyway)", True
+
+
+def require_matching_api_server(out=None) -> None:
+    """Refuse (ValueError) on a mismatched local sky API server; warn on a remote one.
+    Call before the first sky request of a launch that uses sky."""
+    import os
+
+    if os.environ.get(SERVER_CHECK_ENV) == "off":
+        return
+    problem = api_server_version_problem()
+    if problem is None:
+        return
+    msg, refuse = problem
+    if refuse:
+        raise ValueError(msg)
+    print(f"[yeto] WARNING: {msg}", file=out or sys.stderr, flush=True)

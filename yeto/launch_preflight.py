@@ -513,6 +513,17 @@ def launch_preflight(args, specs, *, counter=None, sleep=None, clock=time.monoto
     return {"threads": threads, "memory": memory}
 
 
+def launch_uses_sky(args, specs) -> bool:
+    """The launch sends sky requests: a head (a sky cluster), a syncer cluster (every
+    launch but ``--rl-single-island-no-sync``), or an island on a sky cloud (not
+    ``modal:`` / ``ssh:``)."""
+    if getattr(args, "controller", "local") == "head":
+        return True
+    if not getattr(args, "rl_single_island_no_sync", False):
+        return True
+    return any(s.cloud not in ("modal", "ssh") for s in specs)
+
+
 def pre_cloud_checks(args, *, counter=None, sleep=None, clock=time.monotonic, out=None,
                      threads: bool = True) -> dict:
     """Every launch-preflight-guards check that must pass before any cloud
@@ -541,6 +552,10 @@ def pre_cloud_checks(args, *, counter=None, sleep=None, clock=time.monotonic, ou
     if downlink is not None:  # only a launch with a syncer gets the record
         preflight["downlink"] = downlink
     check_policy_age_spec(args)  # global flag (island copies: island_overrides.check_island_args)
+    if launch_uses_sky(args, specs):  # its sky API server must run this Python's sky version
+        from . import sky_patches
+
+        sky_patches.require_matching_api_server(out=out)
     num_islands = len(specs) + max(0, getattr(args, "external_learners", 0) or 0)
     overrides = io.overrides_of(args, len(specs))
     for island in overrides:
