@@ -547,7 +547,7 @@ function loadTag(ld,lab,id,v){var who=lbl(id);
   var t=who+" loaded v"+v+" at "+clock(ld.loaded_at)+(ld.at_start?" (started on it)":fin(ld.latency_s)?", "+f(ld.latency_s,0)+" s after the release":"")+
     [["resolve",ld.resolve_s],["drain",ld.drain_s],["load",ld.load_s],["pause",ld.pause_s]].filter(function(x){return fin(x[1])}).map(function(x){return " · "+x[0]+" "+f(x[1],1)+" s"}).join("")+
     (fin(ld.drain_in_flight)?" · "+ld.drain_in_flight+" trials in flight at the drain":"")+(ld.drain_cut?" · "+ld.drain_cut+" cut by the drain":"");
-  return '<span class="lt'+(ld.at_start?" st":"")+'" title="'+esc(t)+'">'+esc(lab)+" "+(ld.at_start?"at start":fin(ld.latency_s)?f(ld.latency_s,0)+"s":clock(ld.loaded_at))+(ld.drain_cut?" · "+ld.drain_cut+" cut":"")+'</span>'}
+  return '<span class="lt'+(ld.at_start?" st":"")+'" title="'+esc(t)+'">'+esc(lab)+" "+(ld.at_start?"at start":fin(ld.latency_s)?f(ld.latency_s,0)+"s":clock(ld.loaded_at))+(fin(ld.drain_s)?" · drain "+f(ld.drain_s,0)+"s":"")+(ld.drain_cut?" · "+ld.drain_cut+" cut":"")+'</span>'}
 /* releases of the picked island: version, release time, upload, then one load tag per sampler of the island */
 function relTable(rows,sids,tags,key,total){
   var c=YetoTbl.cap(key,rows.slice().reverse(),{def:10,total:total,unit:"releases"});
@@ -566,6 +566,9 @@ function poolEngine(p){var pr=p.provenance||{},prec=String(p.rollout_quant||pr.p
   return [engName(p.engine||pr.engine),prec,card,pr.topology,p.provider].filter(Boolean).join(" · ")||"not reported"}
 function samplerEngine(id){var pr=((V.async.samplers||{})[id]||{}).provenance||{},c=cardOf(id)||{};
   return [engName(pr.engine),String(pr.precision||"").toUpperCase(),pr.card_model||c.gpu?(pr.card_model||c.gpu)+(fin(c.gpus)?" × "+c.gpus:""):null,pr.topology,c.cloud].filter(Boolean).join(" · ")||"not reported"}
+/* the engine's device family and cloud as the sampler's start record names them, on hover */
+function platTitle(p,id){var pr=(p&&p.provenance&&p.provenance.device_family?p.provenance:((V.async.samplers||{})[id]||{}).provenance)||{},c=cardOf(id)||{};
+  var t=[pr.engine||(p&&p.engine),pr.device_family?"on "+pr.device_family:null,c.cloud?"· "+c.cloud:"(cloud not on the tape)"].filter(Boolean).join(" ");return t?' title="'+esc(t)+'"':""}
 /* zero-variance groups the trainers saw (rl_local_round ratio × trained groups), for samplers that report none */
 function zeroVarTrainer(){var A=V.async,zg=0,zt=0;Object.keys(A.trainers||{}).forEach(function(i){var tg={};((A.trainers[i]||{}).rounds||[]).forEach(function(x){tg[x.rollout_id]=x.trained_groups});
   ((V.islands[i]||{}).rounds||[]).forEach(function(r){if(fin(r.zero_var_ratio)&&fin(tg[r.round])){zg+=r.zero_var_ratio*tg[r.round];zt+=tg[r.round]}})});return [zg,zt]}
@@ -597,7 +600,7 @@ function spTable(ctx){
     return g.s.map(function(id,i){var x=S[id]||{},c=cardOf(id)||{};
       return '<tr'+(gi&&!i?' class="pg"':"")+'><td class="l">'+nameCell(id)+'</td>'+
         (i===0&&fl?'<td class="l"'+rs+'>'+esc(p.name)+(p.source_name&&p.source_name!==p.name&&String(p.name).slice(-String(p.source_name).length-1)!=="-"+p.source_name?' <span class="note">'+esc(p.source_name)+'</span>':"")+srcTag(p.source)+'</td>':"")+
-        (i===0?'<td class="l"'+rs+'>'+esc(p?poolEngine(p):samplerEngine(id))+'</td>':"")+
+        (i===0?'<td class="l"'+rs+platTitle(p,id)+'>'+esc(p?poolEngine(p):samplerEngine(id))+'</td>':"")+
         '<td class="l" title="'+esc(fin(c.last_event_age_s)?"last event "+f(c.last_event_age_s,0)+" s ago":"")+'">'+(c.status?stBadge(c.status,c):'<span class="note">not on the tapes</span>')+'</td>'+
         cols.map(function(cl){return '<td class="num">'+cl[2](x)+'</td>'}).join("")+
         (mm&&i===0?'<td class="num"'+rs+'>'+mmCell(mmv.logprob_diff)+'</td><td class="num"'+rs+'>'+mmCell(mmv.tis_clip)+'</td>':"")+'</tr>'}).join("")}).join("");
@@ -611,9 +614,9 @@ function trChips(T){
   var it=[["trained groups",T.trained_groups,""],["dropped as stale",T.stale_groups,"older than max_policy_age"],["no policy identity",T.unidentified_policy_groups,"dropped after a resume"],
     ["off-policy gate dropped",T.gate_dropped,""],["short groups trained",T.incomplete_groups,""],["too small dropped",T.dropped_small_groups,""],["carried over",T.carried_over_groups,""],["padded samples",T.padded_samples,""]];
   var show=[],zero=[],na=[];it.forEach(function(x,i){if(!fin(x[1]))na.push(x[0]);else if(x[1]===0&&i>0)zero.push(x[0]);else show.push(x)});
-  return '<div class="chips">'+show.map(function(x){return '<span'+(x[2]?' title="'+esc(x[2])+'"':"")+'>'+esc(x[0])+'<b>'+f(x[1],0)+'</b></span>'}).join("")+
-    (T.unidentified_starved?'<span class="wn">reader starved<b>'+f(T.unidentified_starved.selections,0)+' selections kept no group</b></span>':"")+
-    '<span title="policy ages of the trained groups, whole run (age:groups)">policy ages<b>'+histS(T.age_hist)+'</b></span>'+
+  return '<div class="chips">'+show.map(function(x){return '<span'+(x[2]?' title="'+esc(x[2])+'"':"")+'>'+esc(x[0])+' <b>'+f(x[1],0)+'</b></span>'}).join("")+
+    (T.unidentified_starved?'<span class="wn">reader starved <b>'+f(T.unidentified_starved.selections,0)+' selections kept no group</b></span>':"")+
+    '<span title="policy ages of the trained groups, whole run (age:groups)">policy ages <b>'+histS(T.age_hist)+'</b></span>'+
     (zero.length?'<span>0: '+esc(zero.join(", "))+'</span>':"")+(na.length?'<span>n/a: '+esc(na.join(", "))+'</span>':"")+'</div>'}
 function asyncPanel(){
   var A=V.async,show=!!A&&!fleetView();$("async").hidden=!show;$("navAsync").style.display=A?"":"none";if(!A)return;
@@ -623,10 +626,19 @@ function asyncPanel(){
   var meta=(ctx.fleet?[tid!=null?lbl(tid):"trainer not on the tapes yet",x.gpu,"R2 lane "+(x.substore||"trainer"+x.island)+"/",fin(x.release_every)?"release every "+x.release_every:null,fin(x.max_policy_age)?"max policy age "+x.max_policy_age:null]:
     [tid!=null?lbl(tid):"no trainer on the tapes yet",tc.cloud?tc.cloud+" "+(tc.gpu||"")+(fin(tc.gpus)?" × "+tc.gpus:""):null]).filter(Boolean);
   if(fin(tc.policy_version)||fin(tc.released_version))meta.push("policy "+pvTxt(tc.policy_version,tc.released_version));
+  // what island health showed for the trainer: phase, hardware, cells / transactions, stop marker, Ray dashboard
+  var ex=tid!=null?V.islands[tid]||{}:{},hw=ex.hardware,re=ex.ray_embed||{},ph=tid!=null&&tc.id!=null?islPhase(tc):null;
+  if(ph)meta.push("phase "+ph);
+  if(hw)meta.push("GPU type / driver / CUDA "+(hw.compat_group||"not declared")+" / "+(hw.driver_version||"not recorded")+" / "+(hw.cuda_version||"not recorded"));
+  if(ex.cells||ex.transactions)meta.push("cells / transactions "+(ex.cells||0)+" / "+(ex.transactions||0));
+  if(tc.stopped_by_us)meta.push("stopped by us ("+((O.operator_stop||{}).cause||"?")+", marker "+((O.operator_stop||{}).marker||"?")+")");
+  if(!re.note&&(re.command||re.port))meta.push("Ray dashboard "+(re.command||"localhost :"+re.port));
   var su=Object.keys(tc.startup_steps||{}).map(function(k){var v=tc.startup_steps[k];return ({ray_connected:"Ray",engine_ready:"engine",weights_loaded:"weights"}[k]||k)+" "+(fin(v.step_s)?f(v.step_s,0)+" s":"?")});
   if(su.length)meta.push("startup: "+su.join(" · "));
   $("aHead").innerHTML=(ctx.fleet?"Island "+esc(x.island)+(x.name?" · "+esc(x.name):""):"Async GRPO")+' <span class="note">'+esc(meta.join(" · "))+'</span>';
-  $("aMeta").innerHTML=(tc.status?negBadge(tc)+stBadge(tc.status,tc):"")+(fin(tc.last_event_age_s)?'<span>last event '+esc(hm(tc.last_event_age_s))+' ago</span>':"");
+  var nodes=(tc.nodes||[]).map(function(n){var pk=Math.max.apply(null,(n.gpu_mem_used_mib_peak||[0]).concat([0]));return "node "+n.node+": peak memory "+(pk/1024).toFixed(1)+" GiB, utilization "+(fin(n.gpu_util_pct)?f(n.gpu_util_pct,0)+"%":"not sampled")});
+  if(re.note)nodes.push("Ray dashboard: "+re.note);if(!(ex.cells||ex.transactions)&&tid!=null)nodes.push("cells / transactions 0 / 0");
+  $("aMeta").innerHTML=((tc.nodes||[]).length||nodes.length?'<span class="note" title="'+esc(nodes.join("\n"))+'">'+((tc.nodes||[]).length?(tc.nodes.length+" node"+(tc.nodes.length>1?"s":"")):"health details")+'</span>':"")+(tc.status?negBadge(tc)+stBadge(tc.status,tc):"")+(fin(tc.last_event_age_s)?'<span>last event '+esc(hm(tc.last_event_age_s))+' ago</span>':"");
   // trainer rounds
   var rr=((V.islands[tid]||{}).rounds||[]).filter(function(r){return fin(r.reward)||fin(r.kl_tr)||fin(r.kl)||fin(r.tok_s)}),ar={};
   (((A.trainers||{})[tid]||{}).rounds||[]).forEach(function(q){ar[q.rollout_id]=q});
@@ -700,7 +712,7 @@ function aDisp(A,cards,show){
   var kv=function(o){var k=Object.keys(o||{});return k.length?k.map(function(x){return esc(x)+" "+o[x]}).join(" · "):"0"};
   var now=fin(O.now)?O.now:Date.now()/1e3,held=D.held||[],by={};held.forEach(function(h){(by[h.by]=by[h.by]||[]).push(h)});
   var evs=(D.events||[]).filter(function(e){return e.kind!=="drain"}),odd=evs.filter(function(e){return e.kind!=="release"}),nrel=evs.length-odd.length;
-  var html='<div class="chips"><span>slots seen<b>'+D.slots+'</b></span><span>settled<b>'+kv(D.settled)+'</b></span><span title="expired = the lease ran out and the slot is claimed again; release = handed back unwritten">ended unsettled<b>'+kv(D.ends)+'</b></span><span>re-claimed slots<b>'+D.reclaimed_slots+'</b></span><span>held now<b>'+held.length+'</b></span></div>';
+  var html='<div class="chips"><span>slots seen <b>'+D.slots+'</b></span><span>settled <b>'+kv(D.settled)+'</b></span><span title="expired = the lease ran out and the slot is claimed again; release = handed back unwritten">ended unsettled <b>'+kv(D.ends)+'</b></span><span>re-claimed slots <b>'+D.reclaimed_slots+'</b></span><span>held now <b>'+held.length+'</b></span></div>';
   html+=Object.keys(by).sort().map(function(k){var hs=by[k],bad=dead(k);
     return '<div class="note">'+(bad?'<span class="st bd"><i></i>'+esc(st[k])+'</span> ':"")+esc(lbl(k))+' holds '+hs.length+': '+hs.map(function(h){return "slot "+h.slot+(h.attempt?" (attempt "+h.attempt+")":"")+" claimed "+clock(h.claim_ts)+(fin(h.claim_ts)?" ("+f((now-h.claim_ts)/60,0)+" min ago)":"")}).join(", ")+
       (bad?' — <b>its island is '+esc(st[k])+': these slots wait for their lease to expire, then another sampler re-claims them</b>':"")+'</div>'}).join("");
