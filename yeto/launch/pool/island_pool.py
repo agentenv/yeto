@@ -171,7 +171,10 @@ class PoolOps(Protocol):
     # exit_evidence(member) -> what the run's store says about a sampler that ended with
     # exit 0 (R2DataPath.exit_evidence; None: this data path keeps no such record);
     # scale down in "drain" mode: request_drain(member) (its sampler claims no new task),
-    # drained(member) -> bool (it holds no task claim any more), cancel_drain(member)
+    # drained(member) -> bool (it holds no task claim any more), cancel_drain(member);
+    # pool_ended(why) -> the pool is stopped (nothing is started or replaced any more):
+    # free what outlives its members (a Modal pool's deployed app); called after the
+    # stop's drains, again by drain_all until it succeeds; it must be idempotent
 
 
 @dataclass
@@ -290,6 +293,7 @@ class IslandPool:
     start_retries: int = START_RETRIES
     start_retry_s: float = START_RETRY_S
     _scale_stamp: Any = None  # (mtime_ns, size) of the control file at its last read
+    _ended_done: bool = False  # ops.pool_ended succeeded for the current stop
 
     def _control_stamp(self) -> Any:
         if self.scale_path is None:
@@ -2082,6 +2086,24 @@ class IslandPool:
             if m.state != DRAINING:
                 self._fence(m, "stop")
             self._drain(m, "stop")
+        self._pool_ended(why)
+
+    def _pool_ended(self, why: str) -> None:
+        """``ops.pool_ended`` once the pool is stopped (best effort: a failure is an event,
+        tried again by the next ``drain_all`` / ``pool-stop``)."""
+        hook = getattr(self.ops, "pool_ended", None)
+        if hook is None or self._ended_done or not self.stopped:
+            return
+        try:
+            result = hook(why)
+        except Exception as error:  # noqa: BLE001 - the members are released; pool-stop retries this
+            self.log(f"pool: WARNING: the pool's end hook failed ({error!r}); pool-stop retries it")
+            self._event("pool_end_failed", why=why, error=repr(error)[:300])
+            return
+        self._ended_done = True
+        if result is not None:
+            detail = dict(result) if isinstance(result, dict) else {"result": result}
+            self._event("pool_ended", **{**detail, "why": why})
 
     def drain_all(self, why: str, *, attempts: int = 3, wait_s: float = 10.0,
                   sleep: Callable[[float], None] | None = None) -> list[Member]:
@@ -2108,6 +2130,7 @@ class IslandPool:
                            for_s=None if m.fence_since is None else round(self.clock() - m.fence_since),
                            state=m.state)
         self._patrol(self.clock())
+        self._pool_ended(why)  # retried here when the stop's call failed
         return self.live()
 
     def snapshot(self) -> dict:

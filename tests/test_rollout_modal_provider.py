@@ -617,3 +617,245 @@ def test_concurrent_orders_from_two_processes_keep_every_ticket(tmp_path):
     rows = json.loads(record.read_text())
     assert len(rows) == 20 and sorted(r["n"] for r in rows.values()) == list(range(1, 21))
     assert sorted(f.name for f in tmp_path.iterdir()) == ["modal-calls.json", "modal-calls.lock"]
+
+
+# -- the pool's deployed app (the app outlived the finished pool: idle GPU billed) ----
+
+class AppClient(FakeClient):
+    """A fake client with a deployed app: ``app_id`` once a spawn deployed it, and
+    ``stop_app`` like :meth:`ModalSdkClient.stop_app`."""
+
+    def __init__(self, app_id="ap-1", stop_error=None):
+        super().__init__()
+        self.app_name, self.next_app_id, self.app_id = "yeto-rollout-run-m", app_id, None
+        self.stops, self.stop_error = [], stop_error
+
+    def spawn(self, payload):
+        self.app_id = self.app_id or self.next_app_id  # the first spawn deploys
+        return super().spawn(payload)
+
+    def stop_app(self, *, expect_id=None):
+        self.stops.append(expect_id)
+        if self.stop_error is not None:
+            error, self.stop_error = self.stop_error, None
+            raise error
+        for call, state in self.states.items():  # stopping the app ends every container
+            if state == RUNNING:
+                self.states[call] = FAILED
+        self.app_id = None
+        return "stopped"
+
+
+def _app_pool(tmp_path, client, *, target=1, **over):
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    ops, client, _ = _ops(tmp_path, client=client, **over)
+    ops.start_in_background = False
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
+    pool = IslandPool(PoolConfig(target=target, accounts=[1, 2, 3], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=5)),
+                      ops, clock=clock, log=lambda m: None, events=events)
+
+    def ticks(n):
+        for _ in range(n):
+            pool.tick()
+            t[0] += 60
+
+    return pool, ops, events, ticks
+
+
+def _names(events):
+    return [e["event"].removeprefix("nc_elastic_") for e in events.events]
+
+
+def test_a_finished_pool_stops_its_modal_app(tmp_path):
+    """Every sampler exited 0: the pool drains its islands and stops the deployed app, so
+    no idle container is left billing until Modal's scale-down."""
+    client = AppClient()
+    pool, ops, events, ticks = _app_pool(tmp_path, client, target=2)
+    ticks(4)
+    ready = [m for m in pool.members if m.state == READY]
+    assert len(ready) == 2 and client.stops == []
+    record = json.loads(ops.provider.app_record.read_text())
+    assert record["app_id"] == "ap-1" and record["app_name"] == "yeto-rollout-run-m"
+    for m in ready:
+        client.states[ops.provider.call_id(m.ticket)] = SUCCEEDED
+    ticks(3)
+    names = _names(events)
+    assert pool.stopped and not pool.live() and "sampler_finished" in names
+    assert client.stops == ["ap-1"]  # once, checked against the recorded id
+    assert names.index("pool_stopped") < names.index("pool_ended")
+    [ended] = [e for e in events.events if e["event"].endswith("pool_ended")]
+    assert ended["result"] == "stopped" and ended["app_id"] == "ap-1"
+    assert json.loads(ops.provider.app_record.read_text())["stop_result"] == "stopped"
+    pool.drain_all("pool-stop", sleep=lambda s: None)  # a later pool-stop: nothing stopped twice
+    assert client.stops == ["ap-1"]
+
+
+def test_a_finished_pool_without_stop_on_finish_stops_the_app_after_its_last_island(tmp_path):
+    """``stop_on_finish`` off: the other islands finish on their own; the app stays up
+    until the last one ended, then the pool stops it."""
+    client = AppClient()
+    pool, ops, events, ticks = _app_pool(tmp_path, client, target=2)
+    pool.ecfg.stop_on_finish = False
+    ticks(4)
+    first, second = [m for m in pool.members if m.state == READY]
+    client.states[ops.provider.call_id(first.ticket)] = SUCCEEDED
+    ticks(2)
+    assert pool.finished and not pool.stopped and second.state == READY and client.stops == []
+    client.states[ops.provider.call_id(second.ticket)] = SUCCEEDED
+    ticks(3)
+    assert pool.stopped and not pool.live() and client.stops == ["ap-1"]
+
+
+def test_replacing_a_lost_island_keeps_the_app(tmp_path):
+    """A lost island (its container died) is fenced and refilled into the same app: the
+    pool runs on, nothing stops the app."""
+    client = AppClient()
+    pool, ops, events, ticks = _app_pool(tmp_path, client, target=2)
+    ticks(4)
+    lost = [m for m in pool.members if m.state == READY][0]
+    client.states[ops.provider.call_id(lost.ticket)] = FAILED
+    ticks(6)
+    names = _names(events)
+    assert lost.state == GONE and "shard_fenced" in names
+    assert len([m for m in pool.members if m.state == READY]) == 2  # refilled
+    assert not pool.stopped and client.stops == [] and "pool_ended" not in names
+    assert len([x for x in client.log if x[0] == "spawn"]) == 3
+
+
+def test_a_sigterm_drain_stops_the_app(tmp_path):
+    """SIGTERM / Ctrl-C: the loop's drain_all releases every island and stops the app."""
+    client = AppClient()
+    pool, ops, events, ticks = _app_pool(tmp_path, client, target=2)
+    ticks(4)
+    assert len([m for m in pool.members if m.state == READY]) == 2
+    left = pool_run._drain_all(pool, "signal SIGTERM", sleep=lambda s: None)
+    assert left == [] and client.stops == ["ap-1"] and "pool_ended" in _names(events)
+
+
+def test_a_failed_app_stop_is_an_event_and_retried_by_the_next_drain(tmp_path):
+    client = AppClient(stop_error=ConnectionError("modal control plane"))
+    pool, ops, events, ticks = _app_pool(tmp_path, client)
+    ticks(3)
+    pool.stop("signal SIGTERM")
+    assert not pool.live() and client.stops == ["ap-1"] and "pool_end_failed" in _names(events)
+    assert "stopped_at" not in json.loads(ops.provider.app_record.read_text())
+    pool.drain_all("pool-stop", sleep=lambda s: None)
+    assert client.stops == ["ap-1", "ap-1"] and "pool_ended" in _names(events)
+
+
+def test_pool_stop_after_the_pool_process_died_stops_the_recorded_app(tmp_path):
+    """The pool loop was killed (SIGKILL) with an island up: the app stays deployed. A
+    pool-stop from another process reads the state file and the app record, releases
+    the island and stops the app by name, checked against the recorded id."""
+    cfg = _cfg(tmp_path)
+    client = AppClient()
+    pool, ops, events, ticks = _app_pool(tmp_path, client)
+    ticks(3)
+    [m] = [m for m in pool.members if m.state == READY]
+    state = cli.pool_state_path(cfg)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    pool.save(state)  # the process dies here: no stop, no app stop
+    later = AppClient()  # a new process: no app handle, nothing deployed by it
+    later.states = client.states
+    provider = from_config(cfg, "run-m", client=later)
+    ops2 = ModalPoolOps(cfg, provider=provider, fence_store=SimpleNamespace(objects=Objects()))
+    path = tmp_path / "pool.json"
+    path.write_text(json.dumps(cfg))
+    assert pool_run.stop_pool(cfg, str(path), ops=ops2, sleep=lambda s: None) == 0
+    assert later.stops == ["ap-1"] and ("cancel", ops.provider.call_id(m.ticket)) in later.log
+    assert json.loads(provider.app_record.read_text())["stopped_why"] == "pool-stop"
+
+
+def test_no_app_stop_for_a_pool_that_never_deployed(tmp_path):
+    """A pool stopped before any spawn: an app of that name is not this pool's."""
+    client = AppClient()
+    pool, ops, events, ticks = _app_pool(tmp_path, client)
+    pool.stop("pool-stop")
+    assert client.stops == []
+    [ended] = [e for e in events.events if e["event"].endswith("pool_ended")]
+    assert ended["result"] == "not deployed"
+
+
+def test_a_released_island_spawns_no_call(tmp_path):
+    """A background start that ran after the pool released its island would spawn a call
+    no member drains (and, after the app stop, deploy the app again)."""
+    ops, client, _ = _ops(tmp_path)
+    ticket = ops.provider.order(1)
+    ops.provider.release(1, ticket)
+    with pytest.raises(RuntimeError, match="released"):
+        ops.provider.spawn(ticket, {"shard": "m-0"})
+    assert client.n == 0
+
+
+def test_the_sdk_client_stops_its_own_app_by_handle_and_a_recorded_one_by_name():
+    stopped = []
+
+    class App:
+        def __init__(self, app_id):
+            self.app_id = app_id
+
+        def deploy(self, name):
+            pass
+
+        def stop(self):
+            stopped.append(self.app_id)
+
+    class NotFoundError(Exception):
+        pass
+
+    apps = {"yeto-rollout-run-m": App("ap-7")}
+
+    def lookup(name):
+        if name not in apps:
+            raise NotFoundError(f"App '{name}' not found")
+        return apps[name]
+
+    modal = SimpleNamespace(App=SimpleNamespace(lookup=lookup))
+    own = ModalSdkClient({"image": "i", "secret": "s"}, run_id="run-m", modal=modal)
+    own.build_app = lambda: App("ap-3")
+    own.deploy()
+    assert own.app_id == "ap-3"
+    assert own.stop_app(expect_id="ap-3") == "stopped" and stopped == ["ap-3"]  # its handle, no lookup
+    assert own.app_id is None and not own._deployed  # a later spawn deploys again
+    # another process (pool-stop after a crash): by name, only the recorded deployment
+    later = ModalSdkClient({"image": "i", "secret": "s"}, run_id="run-m", modal=modal)
+    assert later.stop_app(expect_id="ap-other") == "other deployment" and stopped == ["ap-3"]
+    assert later.stop_app(expect_id="ap-7") == "stopped" and stopped == ["ap-3", "ap-7"]
+    del apps["yeto-rollout-run-m"]
+    assert later.stop_app(expect_id="ap-7") == "absent"
+
+
+def test_the_idle_window_of_a_pool_container_is_short_by_default_and_a_knob():
+    seen = {}
+
+    class App:
+        def __init__(self, name):
+            pass
+
+        def function(self, **kw):
+            seen.update(kw)
+            return lambda body: body
+
+    image = SimpleNamespace()
+    image.dockerfile_commands = lambda cmds: image
+    image.entrypoint = lambda a: image
+    image.env = lambda e: image
+    image.add_local_python_source = lambda *a, **k: image
+    modal = SimpleNamespace(App=App, Image=SimpleNamespace(from_registry=lambda ref: image),
+                            Secret=SimpleNamespace(from_name=lambda n: n))
+    ModalSdkClient({"image": "i", "secret": "s"}, run_id="run-m", modal=modal).build_app()
+    assert seen["scaledown_window"] == 2
+    ModalSdkClient({"image": "i", "secret": "s", "scaledown_window_s": 120}, run_id="run-m",
+                   modal=modal).build_app()
+    assert seen["scaledown_window"] == 120
+
+
+@pytest.mark.parametrize("value", [1, 3601, 2.5, "60", True])
+def test_a_bad_idle_window_is_a_config_error(tmp_path, value):
+    cfg = _cfg(tmp_path)
+    cfg["provider"]["scaledown_window_s"] = value
+    with pytest.raises(ValueError, match="scaledown_window_s"):
+        from_config(cfg, "run-m", client=FakeClient())
+    assert any("scaledown_window_s" in p for p in offline_problems(cfg))

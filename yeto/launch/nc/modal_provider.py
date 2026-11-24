@@ -27,7 +27,18 @@ call itself. So the provider splits like this:
   model and claimed its lease), and the probe reads joined from it. A call that
   never reports ready is a start failure by the pool's ``start_timeout_s``;
   ``fence`` / ``fence_incarnation`` go to the run store like the
-  SSH route; ``drain`` is the provider's release.
+  SSH route; ``drain`` is the provider's release; ``pool_ended`` (the pool is
+  stopped: no member is started, restarted or replaced any more) stops the pool's
+  deployed app, which terminates every container left.
+
+App lifecycle: the app is deployed by the first spawn of a pool process and stays
+deployed while the pool runs (a restarted or replacement island spawns into it). A
+call that returned leaves its container idle for ``scaledown_window_s`` (default
+``DEFAULT_SCALEDOWN_S``; Modal's own default is 60 s of a GPU container billed for
+nothing). The pool's stop (sampler finished, ``pool-stop``, SIGTERM, ``yeto run
+down``) stops the app. A pool process that died without its stop leaves the app
+deployed: ``pool-stop`` (no live loop: release from the state file) stops it then,
+by name, checked against the app id recorded next to the call record.
 
 The real client (:class:`ModalSdkClient`) deploys one app per pool with a
 ``rollout_sampler`` GPU function (image, GPU, model volume, store Secret of the
@@ -42,7 +53,7 @@ Pool config::
     "provider": {"kind": "modal", "app_name": "yeto-rollout-<run>", "image": "<registry>/<image>@sha256:<d>",
                  "gpu": "B300", "gpus": 8, "secret": "<modal secret with the store credentials>",
                  "bucket": "<bucket>", "model_volume": "<volume>", "model_mount": "/mnt/yeto-models",
-                 "timeout_h": 24, "name_prefix": "yeto-smp"}
+                 "timeout_h": 24, "name_prefix": "yeto-smp", "scaledown_window_s": 2}
 """
 
 from __future__ import annotations
@@ -77,7 +88,22 @@ def ready_key(shard: str, ticket: str, n: int) -> str:
     return f"{READY_PREFIX}/{shard}/{ticket}.{int(n)}.json"
 CONFIG_KEYS = frozenset({"kind", "factory", "app_name", "image", "gpu", "gpus", "cpu", "memory_gib", "secret",
                          "bucket", "model_volume", "model_mount", "log_volume", "timeout_h", "python",
-                         "name_prefix", "env", "price_usd_h"})
+                         "name_prefix", "env", "price_usd_h", "scaledown_window_s"})
+# seconds a container whose call returned stays up for the next call (billed idle).
+# A restart or replacement spawns on the pool's next tick (60 s by default), after a
+# longer window would mostly have run out anyway; 2 s is the least Modal takes.
+DEFAULT_SCALEDOWN_S = 2
+SCALEDOWN_RANGE_S = (2, 3600)
+
+
+def scaledown_window_s(section: dict[str, Any]) -> int:
+    """The provider's ``scaledown_window_s`` (whole seconds in Modal's 2..3600)."""
+    value = section.get("scaledown_window_s", DEFAULT_SCALEDOWN_S)
+    lo, hi = SCALEDOWN_RANGE_S
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) \
+            or not lo <= int(value) <= hi:
+        raise ValueError(f"modal provider: scaledown_window_s must be whole seconds in {lo}..{hi} (got {value!r})")
+    return int(value)
 
 
 def _record_ledger(fn: str, *args: Any, **kw: Any) -> None:
@@ -105,6 +131,10 @@ class ModalProvider:
         # a cancel is asynchronous: the call reads RUNNING for some seconds after it
         self.sleep, self.cancel_wait_s = sleep, float(cancel_wait_s)
         self.record = record or state_dir() / f"modal-calls-{self.prefix}.json"
+        # the deployed app of this pool (name, id): a later pool-stop checks the app it
+        # stops by name against it
+        self.app_record = self.record.with_name(f"modal-app-{self.prefix}.json")
+        self._app_stopped = False  # this process stopped the app since its last spawn
         # the record is rewritten from several threads (the pool starts islands in the
         # background) and processes (a manual release while the pool runs): every
         # read-modify-write holds the record's state_file_lock, or one drops another's call
@@ -154,6 +184,10 @@ class ModalProvider:
         """Start (or restart) the island's call; a running earlier call is cancelled first."""
         if not self._ours(ticket):
             raise PermissionError(f"ticket {ticket} is not a Modal island of run {self.run_id}")
+        if not self._rows()[ticket].get("open"):
+            # a background start that ran after the island's release (the pool stopped):
+            # a call spawned now would have no member to drain it
+            raise RuntimeError(f"Modal island {ticket} is released; no call is spawned for it")
         old = self.call_id(ticket)
         if old and self.client.status(old) == RUNNING:
             self.client.cancel(old)
@@ -161,7 +195,9 @@ class ModalProvider:
         n = len(rows[ticket].get("calls") or []) + 1
         if payload.get("shard") is not None:
             payload = {**payload, "ready_key": ready_key(str(payload["shard"]), ticket, n)}
+        self._app_stopped = False
         call = str(self.client.spawn(payload))
+        self._note_app()
         with self._locked():
             rows = self._rows()
             rows[ticket].update(call=call, spawned_at=self.clock(), cancelled=None,
@@ -171,6 +207,47 @@ class ModalProvider:
         _record_ledger("created", LEDGER_KIND, call, FUNCTION, ticket=ticket, run=self.run_id, pool=True,
                        usd_per_hour=self.price_usd_h)
         return call
+
+    def _app_doc(self) -> dict[str, Any]:
+        try:
+            doc = json.loads(self.app_record.read_text())
+        except (OSError, ValueError):
+            return {}
+        return doc if isinstance(doc, dict) else {}
+
+    def _note_app(self) -> None:
+        """Record the deployed app's id (once per deploy) next to the call record."""
+        app_id = getattr(self.client, "app_id", None)
+        if not app_id:
+            return
+        with state_file_lock(self.app_record):
+            doc = self._app_doc()
+            if doc.get("app_id") == app_id and not doc.get("stopped_at"):
+                return
+            write_json_atomic(self.app_record, {"app_name": getattr(self.client, "app_name", None),
+                                                "app_id": app_id, "deployed_at": self.clock()})
+
+    def stop_app(self, why: str) -> dict[str, Any] | None:
+        """Stop the pool's deployed app (its containers end; nothing bills). Only once the
+        pool is stopped: a stopped app takes no spawn until the next deploy. None: the
+        client has no app to stop (a test double)."""
+        stop = getattr(self.client, "stop_app", None)
+        if stop is None:
+            return None
+        doc = self._app_doc()
+        out = {"app": getattr(self.client, "app_name", None), "app_id": doc.get("app_id")}
+        if self._app_stopped or (doc.get("stopped_at") and not getattr(self.client, "app_id", None)):
+            return {**out, "result": "already stopped"}
+        if not doc.get("app_id") and not getattr(self.client, "app_id", None):
+            # no spawn of this pool recorded a deploy: an app of that name is not ours to stop
+            return {**out, "result": "not deployed"}
+        result = str(stop(expect_id=doc.get("app_id")))
+        self._app_stopped = True
+        if doc:
+            with state_file_lock(self.app_record):
+                write_json_atomic(self.app_record, {**self._app_doc(), "stopped_at": self.clock(),
+                                                    "stopped_why": why, "stop_result": result})
+        return {**out, "result": result}
 
     def call_state(self, ticket: str) -> str | None:
         """RUNNING / SUCCEEDED / FAILED of the island's call (None: not spawned)."""
@@ -380,12 +457,17 @@ class ModalPoolOps:
     def drain(self, m) -> None:
         self.provider.release(m.account, m.ticket)
 
+    def pool_ended(self, why: str) -> dict[str, Any] | None:
+        """The pool is stopped (no member is started or replaced any more): stop its app."""
+        return self.provider.stop_app(why)
+
 
 # -- the real client -------------------------------------------------------------------
 
 class ModalSdkClient:
-    """``spawn`` / ``status`` / ``cancel`` over the ``modal`` SDK (imported lazily). The
-    app is deployed on the first spawn of this process (a deployed app outlives it)."""
+    """``spawn`` / ``status`` / ``cancel`` / ``stop_app`` over the ``modal`` SDK (imported
+    lazily). The app is deployed on the first spawn of this process (a deployed app
+    outlives it: the pool's stop stops it, :meth:`stop_app`)."""
 
     def __init__(self, cfg: dict[str, Any], *, run_id: str, modal: Any = None):
         self.cfg, self.run_id = dict(cfg), run_id
@@ -393,6 +475,8 @@ class ModalSdkClient:
         self._modal = modal
         self._deployed = False
         self._deploy_lock = threading.Lock()
+        self._app: Any = None
+        self.app_id: str | None = None
 
     @property
     def modal(self):
@@ -416,6 +500,7 @@ class ModalSdkClient:
         app.function(image=image, gpu=f"{c.get('gpu', 'B300')}:{int(c.get('gpus', 8))}",
                      cpu=int(c.get("cpu", 64)), memory=int(c.get("memory_gib", 1024)) * 1024,
                      timeout=int(float(c.get("timeout_h", 24)) * 3600), volumes=volumes,
+                     scaledown_window=scaledown_window_s(c),
                      secrets=[modal.Secret.from_name(c["secret"])], name=FUNCTION)(rollout_sampler_body)
         return app
 
@@ -431,6 +516,7 @@ class ModalSdkClient:
             app.deploy(name=self.app_name)
             if getattr(app, "app_id", None):
                 _record_ledger("created", "modal_app", app.app_id, self.app_name, role="rollout", run=self.run_id)
+            self._app, self.app_id = app, getattr(app, "app_id", None)
             self._deployed = True
 
     def spawn(self, payload: dict[str, Any]) -> str:
@@ -467,6 +553,32 @@ class ModalSdkClient:
 
     def cancel(self, call_id: str) -> None:
         self.modal.FunctionCall.from_id(call_id).cancel(terminate_containers=True)
+
+    def stop_app(self, *, expect_id: str | None = None) -> str:
+        """Stop the deployed app (every container ends). The app this process deployed is
+        stopped by its handle; otherwise (a pool-stop after the pool process died) it is
+        looked up by name and stopped only when its id is ``expect_id`` (None: not
+        checked). Returns ``stopped``, ``absent`` (no deployed app of that name) or
+        ``other deployment`` (the name now belongs to an app this pool did not deploy)."""
+        with self._deploy_lock:
+            app = self._app
+            if app is None or not getattr(app, "app_id", None):
+                try:
+                    app = self.modal.App.lookup(self.app_name)
+                except Exception as exc:  # noqa: BLE001 - NotFoundError: nothing deployed under the name
+                    if type(exc).__name__ == "NotFoundError" or "not found" in str(exc).lower():
+                        self._deployed, self._app, self.app_id = False, None, None
+                        return "absent"
+                    raise
+                found = getattr(app, "app_id", None)
+                if expect_id and found and found != expect_id:
+                    return "other deployment"
+            app.stop()
+            app_id = getattr(app, "app_id", None) or expect_id
+            self._deployed, self._app, self.app_id = False, None, None  # a later spawn deploys again
+        if app_id:
+            _record_ledger("released", "modal_app", app_id, self.app_name)
+        return "stopped"
 
 
 STDERR_TAIL_LINES = 20  # the sampler's last stderr lines in the call result (a traceback's end)
@@ -615,6 +727,7 @@ def from_config(cfg: dict[str, Any], run_id: str, *, client: Any = None) -> Moda
     unknown = set(section) - CONFIG_KEYS
     if unknown:
         raise ValueError(f"modal provider: unknown keys {sorted(unknown)}")
+    scaledown_window_s(section)
     from . import cli  # noqa: PLC0415
 
     return ModalProvider(run_id, slots=cli.slot_list(cfg), client=client,
