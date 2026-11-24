@@ -172,6 +172,7 @@ def check(resolved: ResolvedBreakers, *, run_config: Mapping[str, Any] | None = 
     elastic config); ``pools``: ``(name, pool config, data path)`` of each pool when
     the caller already loaded them (``yeto run up``), else they are read from
     ``run_config``. Per-pool rules run once per pool on that pool's own resolve.
+    A fleet run config (``islands``) is checked once per island (:func:`evaluate`).
     ``resolved.deps.overrides`` is applied. Never raises on a missing input."""
     from yeto.breakers import rules_facts  # noqa: PLC0415
 
@@ -181,18 +182,38 @@ def check(resolved: ResolvedBreakers, *, run_config: Mapping[str, Any] | None = 
 
 def evaluate(resolved: ResolvedBreakers, facts: Facts, *, only: Iterable[str] | None = None) -> list[Finding]:
     """The findings of the rules (``only``: these ids) over collected ``facts``, with
-    ``resolved.deps.overrides`` applied."""
+    ``resolved.deps.overrides`` applied.
+
+    A fleet (``facts.islands``): the one-budget rules (:data:`yeto.breakers.fleet.FLEET_RULES`)
+    run once over the fleet's facts with ``resolved``; every other rule runs once per island,
+    over that island's facts and resolve, and its findings carry the island
+    (``scope``, and ``island <k> (<name>):`` ahead of the message)."""
     wanted = None if only is None else set(only)
+    if not facts.islands:
+        found = _found(resolved, facts, wanted)
+    else:
+        from yeto.breakers.fleet import FLEET_RULES  # noqa: PLC0415
+
+        found = _found(resolved, facts, wanted, keep=lambda r: r.id in FLEET_RULES)
+        for island in facts.islands:
+            tag = island.island
+            found += [dataclasses.replace(f, message=f"{tag.label}: {f.message}", scope=tag.scope())
+                      for f in _found(island.resolved, island.facts, wanted, keep=lambda r: r.id not in FLEET_RULES)]
+    overrides = getattr(getattr(resolved, "deps", None), "overrides", None) or {}
+    return apply_overrides(found, overrides)
+
+
+def _found(resolved: ResolvedBreakers, facts: Facts, wanted: set[str] | None,
+           keep: Callable[[Rule], bool] | None = None) -> list[Finding]:
     found: list[Finding] = []
     for r in rules():
-        if wanted is not None and r.id not in wanted:
+        if (wanted is not None and r.id not in wanted) or (keep is not None and not keep(r)):
             continue
         targets: tuple[PoolFacts | None, ...] = facts.pools if r.scope == "pool" else (None,)
         for pool in targets:
             ctx = Ctx(resolved if pool is None else pool.resolved, facts, pool)
             found += [_capped(r, f) for f in r.check(ctx)]
-    overrides = getattr(getattr(resolved, "deps", None), "overrides", None) or {}
-    return apply_overrides(found, overrides)
+    return found
 
 
 def _capped(r: Rule, f: Finding) -> Finding:

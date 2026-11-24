@@ -29,6 +29,28 @@ The customer guide explains how to use it:
 | `pool` | the rollout pool controller |
 | `monitor` | read-only checks (`yeto breaker check`, dashboard alerts) |
 
+### Scope in an island fleet
+
+A run config with `islands` (one trainer and its own pools per island) adds
+scope, not semantics. Each island gets its own copy of the `run` and `trainer`
+entries. They resolve from that island's trainer argv (`fleet.trainer_argv`
+plus the island's `trainer.argv`) and the shared `breakers:` section. The
+dependency rules run once per island, on that island's trainer and pools. A
+trip stops that island only, and its findings start with
+`island <k> (<name>):` and carry `scope: {"island": "<k>", "island_name": ...}`.
+Two entries span the whole fleet:
+
+- `run.budget`: one cap over every pool's node hours, each island's trainer
+  `usd_per_h` times its hours, and `syncer.usd_per_h` times the syncer's hours;
+- `run.wall_clock`: one clock.
+
+Either one stops every island with `stop_reason=breaker:run.budget` (or
+`breaker:run.wall_clock`). The `launch` layer is the fleet's single
+`yeto launch`. `pool`, `sampler` and `harness` entries stay per pool, and a
+pool is named `i<k>-<name>` (the key for `breakers.pools`). The one-budget
+rules (D11, D12) run once for the whole fleet. `yeto breaker show --config`
+prints the fleet's rows first, then one table per island.
+
 ## Where a value comes from
 
 For each parameter, in order:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +110,10 @@ def _sources(args: argparse.Namespace, *, view: bool = False) -> tuple[Any, Mapp
         cfg = _read_json(args.config, "run config")
         if not isinstance(cfg, dict):
             raise ValueError(f"run config {args.config}: must be a JSON object")
+        from yeto.breakers import fleet  # noqa: PLC0415
+
+        if fleet.is_fleet(cfg) and not view:  # fleet.trainer_argv's knobs; the rules read each island
+            return Sources.from_run_config(fleet.fleet_run_config(cfg), spec=spec), cfg
         if view:  # the pool, sampler and harness rows: the run's pool, its samplers' spec (or --spec) and env
             from yeto.breakers.rules_facts import run_view_sources  # noqa: PLC0415
 
@@ -175,6 +179,16 @@ def cmd_show(args: argparse.Namespace) -> int:
     from yeto.breakers.spec import BreakerConfigError, RegistryError  # noqa: PLC0415
 
     args.view_notes = []
+    if args.config:
+        try:
+            raw = _read_json(args.config, "run config")
+        except ValueError as error:
+            print(f"[breaker] {error}", file=sys.stderr)
+            return 2
+        from yeto.breakers import fleet  # noqa: PLC0415
+
+        if fleet.is_fleet(raw):
+            return cmd_show_fleet(args, raw)
     try:
         sources, cfg = _sources(args, view=True)
         rb = resolve(sources, pool=args.pool, strict=False)
@@ -199,6 +213,84 @@ def cmd_show(args: argparse.Namespace) -> int:
                   "pass --pool NAME")
     errors = [f for f in findings if f.level == "error"]
     return 1 if rb.conflicts or errors else 0
+
+
+def cmd_show_fleet(args: argparse.Namespace, cfg: Mapping[str, Any]) -> int:
+    """``show --config`` of a fleet run config: the fleet's own rows (run.budget, run.wall_clock,
+    the launch layer; pool / sampler / harness / monitor rows as for one trainer, ``--pool``
+    naming a pool ``i<k>-<name>``), then each island's run and trainer rows and its findings."""
+    from yeto.breakers import fleet, rules  # noqa: PLC0415
+    from yeto.breakers.resolve import resolve  # noqa: PLC0415
+    from yeto.breakers.rules_facts import collect, run_view_sources  # noqa: PLC0415
+    from yeto.breakers.spec import BreakerConfigError, RegistryError  # noqa: PLC0415
+
+    view = fleet.fleet_run_config(cfg)
+    try:
+        spec = _read_json(args.spec, "sampler spec") if args.spec else None
+        seen = run_view_sources(view, pool=args.pool, spec=spec)
+        args.pool = seen.pool
+        notes = _env_notes(view, [seen.pool] if seen.pool is not None else [])
+        rb = resolve(seen.sources, pool=args.pool, strict=False)
+        facts = collect(rb, run_config=cfg)
+        findings = rules.evaluate(rb, facts)
+    except (BreakerConfigError, RegistryError, ValueError) as error:
+        print(f"[breaker] {error}", file=sys.stderr)
+        return 2
+    data = fleet_show_data(rb, facts.islands, findings, layer=args.layer)
+    for note in notes:  # ahead of the rows they are about (stderr: --json stays one object)
+        print(note, file=sys.stderr if args.json else sys.stdout)
+    if args.json:
+        print(json.dumps(data, sort_keys=True, default=str))
+    else:
+        print(render_fleet_show(data, show_all=args.all))
+        if args.pool is None and len(seen.pools) > 1:
+            print(f"pool / sampler / harness rows show defaults: {len(seen.pools)} pools ({', '.join(seen.pools)}), "
+                  "pass --pool NAME")
+    groups = [data, *data["islands"]]
+    return 1 if any(g["conflicts"] or any(f["level"] == "error" for f in g["findings"]) for g in groups) else 0
+
+
+def _group(data: dict[str, Any], keep: Callable[[str], bool], layer: str | None) -> dict[str, Any]:
+    """``data`` (a ``ResolvedBreakers.to_json``) cut to the entries ``keep`` takes (and
+    ``layer``), with their conflicts and deprecations only."""
+    data["entries"] = [e for e in data["entries"] if keep(e["name"]) and (layer is None or e["layer"] == layer)]
+    names = {e["name"] for e in data["entries"]}
+    data["conflicts"] = [c for c in data["conflicts"] if c["name"] in names]
+    data["deprecations"] = [d for e in data["entries"] for d in e.get("deprecations", ())]
+    return data
+
+
+def fleet_show_data(rb: Any, islands: Iterable[Any], findings: Iterable[Any], *,
+                    layer: str | None = None) -> dict[str, Any]:
+    """The ``show --json`` object of a fleet: the fleet's ``breakers.resolved.json`` cut to its
+    own rows (:func:`yeto.breakers.fleet.breaker_scope` other than ``island``) with the
+    fleet-wide findings, plus ``islands``: per island (``rules_facts.IslandFacts``) its index,
+    name, pools, run / trainer rows, findings, conflicts and deprecations."""
+    from yeto.breakers import fleet  # noqa: PLC0415
+
+    findings = list(findings)
+    data = _group(rb.to_json([f for f in findings if not f.scope]),
+                  lambda name: fleet.breaker_scope(name) != "island", layer)
+    data["islands"] = []
+    for isl in islands:
+        mine = [f for f in findings if f.scope.get("island") == str(isl.island.index)]
+        group = _group(isl.resolved.to_json(mine), lambda name: fleet.breaker_scope(name) == "island", layer)
+        data["islands"].append({"index": isl.island.index, "name": isl.island.name,
+                                "pools": [p.name for p in isl.facts.pools],
+                                **{k: group[k] for k in ("entries", "findings", "conflicts", "deprecations")}})
+    return data
+
+
+def render_fleet_show(data: Mapping[str, Any], *, show_all: bool = False) -> str:
+    """The ``show`` text of a fleet: the fleet's table, then one table per island."""
+    from yeto.breakers.fleet import FLEET_ENTRIES  # noqa: PLC0415
+
+    lines = [f"FLEET  {' and '.join(FLEET_ENTRIES)} span every island; launch, pool, sampler, harness and "
+             "monitor rows as for one trainer", render_show(data, show_all=show_all)]
+    for isl in data["islands"]:
+        lines += ["", f"ISLAND {isl['index']}  {isl['name']}  pools: {', '.join(isl['pools']) or '-'}"]
+        lines.append(render_show(isl, show_all=show_all) if isl["entries"] or isl["findings"] else "  (no rows)")
+    return "\n".join(lines)
 
 
 def _fmt(value: Any) -> str:
