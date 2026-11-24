@@ -35,7 +35,9 @@ def test_legacy_pins_and_bundle_are_gone():
 
 def _assert_ports_checkout(script: str, path: str) -> None:
     lowered = script.lower()
-    assert "bundle" not in lowered and "agentenv" not in lowered
+    # no legacy agentenv fork bundle; agentenv/miles is now the Miles repository itself
+    assert "bundle" not in lowered
+    assert "agentenv" not in lowered.replace(rl.MILES_NEXT_REPOSITORY.lower(), "")
     for repository, commit, name in (
         (rl.MILES_NEXT_REPOSITORY, rl.MILES_NEXT_COMMIT, "miles"),
         (rl.SGLANG_NEXT_REPOSITORY, rl.SGLANG_NEXT_COMMIT, "sglang"),
@@ -141,11 +143,50 @@ def test_verify_miles_revision_ports_rejects_commit_mismatch(tmp_path, monkeypat
         verify(tmp_path, expected=rl.MILES_NEXT_PINS)
 
 
-def test_verify_miles_revision_ports_rejects_origin_mismatch(tmp_path, monkeypatch):
-    verify, _ = _fake_git(
-        monkeypatch, tmp_path, commit=rl.MILES_NEXT_COMMIT,
-        origin="https://github.com/agentenv/miles"
-    )
+_PINNED_ORIGINS = [
+    # the fork's home since the move
+    "https://github.com/agentenv/miles",
+    "https://github.com/agentenv/miles.git",
+    "https://github.com/agentenv/miles/",
+    "https://github.com/agentenv/miles.git/",
+    # its former home: /root/miles of every image built before the move
+    "https://github.com/michaellchung/miles",
+    "https://github.com/michaellchung/miles.git",
+    "https://github.com/michaellchung/miles/",
+    "https://github.com/michaellchung/miles.git/",
+]
+
+
+def test_miles_pins_name_the_agentenv_fork_and_its_former_home():
+    from yeto.rl.adapters.miles.pins import MILES_NEXT_FORMER_REPOSITORIES
+
+    assert rl.MILES_NEXT_REPOSITORY == "https://github.com/agentenv/miles"
+    assert MILES_NEXT_FORMER_REPOSITORIES == ("https://github.com/michaellchung/miles",)
+    for pins in (rl.MILES_NEXT_PINS, rl.MILES_PORTS_V1_PINS):
+        assert pins.repository == rl.MILES_NEXT_REPOSITORY
+        assert pins.former_repositories == MILES_NEXT_FORMER_REPOSITORIES
+
+
+@pytest.mark.parametrize("origin", _PINNED_ORIGINS)
+@pytest.mark.parametrize("pins_name", ["MILES_NEXT_PINS", "MILES_PORTS_V1_PINS"])
+def test_verify_miles_revision_accepts_agentenv_and_michaellchung_origins(
+    tmp_path, monkeypatch, origin, pins_name
+):
+    pins = getattr(rl, pins_name)
+    verify, _ = _fake_git(monkeypatch, tmp_path, commit=pins.commit, origin=origin)
+    assert verify(tmp_path, expected=pins) == tmp_path.resolve()
+
+
+@pytest.mark.parametrize("origin", [
+    "https://github.com/radixark/miles",
+    "https://github.com/radixark/miles.git",
+    "https://github.com/agentenv/miles-k31",
+    "https://github.com/michaellchung/sglang",
+    "git@github.com:agentenv/miles.git",
+    "https://gitlab.com/agentenv/miles",
+])
+def test_verify_miles_revision_ports_rejects_origin_mismatch(tmp_path, monkeypatch, origin):
+    verify, _ = _fake_git(monkeypatch, tmp_path, commit=rl.MILES_NEXT_COMMIT, origin=origin)
     with pytest.raises(RuntimeError, match="origin mismatch"):
         verify(tmp_path, expected=rl.MILES_NEXT_PINS)
 

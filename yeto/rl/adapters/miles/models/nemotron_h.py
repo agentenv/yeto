@@ -117,7 +117,7 @@ def register_miles_bridges(model_path: str | Path) -> bool:
 
             raise NemotronHRecipeError(
                 f"a {VL_ARCHITECTURE} checkpoint needs Miles' language-only VL bridge "
-                f"(michaellchung/miles ports-v1 {MILES_VL_BRIDGE_COMMIT} or k31/b3-b7 "
+                f"(agentenv/miles ports-v1 {MILES_VL_BRIDGE_COMMIT} or k31/b3-b7 "
                 f"{pins.MILES_K31_B3B7_COMMIT[:9]} or later); this image's Miles has none")
     return True
 

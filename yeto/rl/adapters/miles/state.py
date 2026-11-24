@@ -53,7 +53,7 @@ def require_run_plugin(controller_cls: Any = None) -> None:
         raise PolicyStateError(
             "the pinned Miles (MILES_NEXT_COMMIT "
             f"{MILES_NEXT_COMMIT[:12]}) has no TrainerController.run_plugin; "
-            "the ports engine needs the michaellchung/miles yeto/ports patch "
+            "the ports engine needs the agentenv/miles yeto fork patch "
             "(rl-engine-ports task 1.4)."
         )
 
