@@ -48,16 +48,30 @@ def node_dirs(profile: NodeProfile) -> dict[str, str]:
     return {"work": work, "models": models, "cache": cache}
 
 
-def container_mounts(profile: NodeProfile) -> dict[str, str]:
-    """Host directory -> container path of a container launch: the node's three directories
-    at ``/work``, ``/models``, ``/root/.cache``, with the profile's own ``mounts`` on top (an
-    inventory's shared mounts, a route's per-model mounts); a profile mount at one of the
-    three container paths replaces that one."""
+def container_mount_list(profile: NodeProfile) -> list[tuple[str, str]]:
+    """``(host directory, container path)`` of a container launch, one per container path:
+    the node's three directories at ``/work``, ``/models``, ``/root/.cache``, with the
+    profile's own ``mounts`` on top (an inventory's shared mounts, a route's per-model
+    mounts); a profile mount at one of the three container paths replaces that one. One
+    host directory may appear at several container paths."""
     dirs = node_dirs(profile)
     inside_to_host = {CONTAINER_WORK: dirs["work"], CONTAINER_MODELS: dirs["models"], CONTAINER_CACHE: dirs["cache"]}
     for host, inside in (profile.mounts or {}).items():
         inside_to_host[str(inside)] = str(host)
-    return {host: inside for inside, host in inside_to_host.items()}
+    return sorted(((host, inside) for inside, host in inside_to_host.items()), key=lambda m: m[1])
+
+
+def container_mounts(profile: NodeProfile) -> dict[str, str]:
+    """:func:`container_mount_list` as host directory -> container path, for a launcher
+    that takes a map; :class:`ProfileError` when one host directory sits at two container
+    paths (a map would drop one of them)."""
+    out: dict[str, str] = {}
+    for host, inside in container_mount_list(profile):
+        if host in out:
+            raise ProfileError(f"node {profile.name}: {host} is mounted at both {out[host]} and {inside}: give "
+                               "each container path its own host directory")
+        out[host] = inside
+    return out
 
 
 def profile_doc(profile: NodeProfile) -> dict[str, Any]:

@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from yeto.launch.node_inventory import NodeProfile
 
 from .paths import sampler_dirs
-from .profile import CONTAINER_MODELS, container_mounts
+from .profile import CONTAINER_MODELS, container_mount_list
 from .records import Assignment
 from .store import reclaim_marker_env, sampler_route_env
 
@@ -111,7 +111,7 @@ def container_argv(profile: NodeProfile, *, name: str, image: str, env: Mapping[
     (``-e PYTHONPATH=`` would drop it: the CANN ``acl`` module of an Ascend image)."""
     argv = [*engine_prefix(profile, sudo), "run", "--rm", "--name", name, "--network", "host", "--ipc", "host",
             *profile.devices(cards, host_paths=host_paths).args]
-    for host, inside in sorted(container_mounts(profile).items()):
+    for host, inside in container_mount_list(profile):
         ro = inside == CONTAINER_MODELS or inside.startswith(CONTAINER_MODELS + "/")
         argv += ["-v", f"{host}:{inside}{':ro' if ro else ''}"]
     for path in env_files:

@@ -140,6 +140,15 @@ def image_for(cfg: Mapping[str, Any], profile: NodeProfile, spec: Mapping[str, A
     return chosen.ref.removeprefix("docker:"), chosen.python or "python3"
 
 
+def _mounts(profile: NodeProfile) -> dict[str, str]:
+    from .profile import ProfileError  # noqa: PLC0415
+
+    try:
+        return container_mounts(profile)
+    except ProfileError as error:
+        raise SshDockerError(f"pool config node_profile: {error}") from None
+
+
 def start(ops: Any, lease: Any, m: Any, shards: list[str], *, run: Callable[..., Any] = subprocess.run,
           prompts_file: str | None = None) -> str:
     """Start ``m``'s sampler on the lease's node through the node runtime; the container name."""
@@ -217,6 +226,6 @@ def start(ops: Any, lease: Any, m: Any, shards: list[str], *, run: Callable[...,
     argv = ssh_sampler.docker_run_argv(
         node, name=name, command=["bash", "-c", command], yeto_dir=None, env_file=env_file, detach=True,
         env={**env, "PYTHONUNBUFFERED": "1", **profile.family_env()}, extra_env_files=extra_env_files,
-        mounts=container_mounts(profile), ro_models=False)
+        mounts=_mounts(profile), ro_models=False)
     ssh(f"sudo docker rm -f {name} >/dev/null 2>&1; {shlex.join(argv)}", timeout=1800)
     return name
