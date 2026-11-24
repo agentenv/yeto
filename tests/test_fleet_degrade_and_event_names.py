@@ -62,6 +62,15 @@ def test_a_required_pool_refuses_the_run_as_before(tmp_path):
     assert _run(tmp_path, required_modal=True, failing={"modal"}).preflight() is False
 
 
+def test_a_config_error_refuses_the_run_even_for_a_pool_that_is_not_required(tmp_path, monkeypatch):
+    """REV #757: only what the environment decides (the pool dry-run) degrades a pool; a shard,
+    field or consistency problem is the run config's and still refuses the start."""
+    run = _run(tmp_path, required_modal=False, failing=set())
+    monkeypatch.setattr(up.Run, "consistency_problem",
+                        lambda self, i: "inconsistent" if self.pools[i].name == "modal" else None)
+    assert run.preflight() is False and not run.state.get("degraded_pools")
+
+
 def test_every_pool_degraded_refuses_the_run(tmp_path, monkeypatch):
     run = _run(tmp_path, required_modal=False, failing={"modal", "nc"})
     run.pools = [run.pools[0].__class__(**{**run.pools[0].__dict__, "required": False}), run.pools[1]]
@@ -114,6 +123,27 @@ def test_the_dashboard_folds_either_name_alike():
         r.feed({"event": name, "t": 10.0, "ticket": "t1", "shard": "s-0", "account": 1})
         folded.append([e["type"] for e in r.events])
     assert folded[0] == folded[1] == ["nc_elastic_ordered"]
+
+
+def test_a_dual_named_tape_reads_like_a_legacy_one_and_a_neutral_only_one(tmp_path):
+    """The compatibility window end to end: an EventLog with dual_names writes records the
+    dashboard folds exactly like the legacy records, and like records that carry only the
+    neutral name (after the window)."""
+    tapes = {}
+    for mode in ("legacy", "dual", "neutral"):
+        log = EventLog(path=tmp_path / f"{mode}.jsonl", log=lambda _m: None, clock=lambda: 10.0)
+        log.dual_names = mode == "dual"
+        log("ordered", ticket="t1", shard="s-0", account=1)
+        log("member_ready", ticket="t1", shard="s-0", account=1)
+        log("released", ticket="t1", shard="s-0", account=1)
+        records = [json.loads(line) for line in (tmp_path / f"{mode}.jsonl").read_text().splitlines()]
+        if mode == "neutral":
+            records = [{**r, "event": neutral_name(r["event"])} for r in records]
+        r = Reducer()
+        for record in records:
+            r.feed(record)
+        tapes[mode] = [(e["type"], e.get("shard")) for e in r.events]
+    assert tapes["legacy"] == tapes["dual"] == tapes["neutral"] and len(tapes["legacy"]) == 3
 
 
 def test_breakers_know_both_names_of_every_legacy_pool_event():
