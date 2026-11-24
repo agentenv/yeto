@@ -8,7 +8,7 @@ from ..gpu_spec import ClusterSpec, parse_gpu_spec
 from . import REPO_ROOT
 from .rl_backend import resolve_default_rl_image
 from .loss import pickled_loss_path, resolve_loss_function
-from .storage import apply_object_store_endpoint, modal_checkpoint_store, modal_store_secret_name
+from .storage import apply_object_store_endpoint, check_store_secret_islands, modal_checkpoint_store
 from .rl_args import _prepare_rl_args
 from .harness_env import modal_sandbox_secret_name
 
@@ -151,8 +151,7 @@ def check_cloud_prerequisites(
         for s in specs:
             modal_sandbox_secret_name(args, s)  # non-Modal islands: refused
     if args is not None and getattr(args, "modal_store_secret", None):
-        for s in specs:
-            modal_store_secret_name(args, s)  # non-Modal islands: refused
+        check_store_secret_islands(args, specs)  # Modal islands attach it, the others get the launcher's key
     nebius_regions = sorted({s.region for s in specs if s.cloud == "nebius" and s.region})
     if nebius_regions:
         from ..shape.providers import SKY_CONFIG_PATH, nebius_project_ids

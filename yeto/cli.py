@@ -667,7 +667,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="Modal islands with an s3:// --rl-checkpoint-store: attach the named Modal Secret "
         "(AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_ENDPOINT_URL / AWS_REGION for an "
         "S3-compatible store such as R2) to the island function instead of shipping the store "
-        "credentials from the launching environment. Refused for non-Modal islands",
+        "credentials from the launching environment. In a launch that mixes clouds the other "
+        "islands get the launcher's store credential; refused when no island is on Modal",
     )
     infra.add_argument(
         "--rl-object-store-endpoint",
@@ -682,7 +683,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default=None,
         metavar="NAME",
         help="AWS profile (~/.aws) of an s3:// --rl-checkpoint-store: the head reads with it, and its "
-        "key, endpoint_url and region go to every island (unless --modal-store-secret); "
+        "key, endpoint_url and region go to every island (a Modal island with --modal-store-secret reads the Secret instead); "
         "default: YETO_RL_STORE_S3_PROFILE",
     )
     infra.add_argument(

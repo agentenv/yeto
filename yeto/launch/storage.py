@@ -52,17 +52,30 @@ def modal_store_secret_name(args, spec=None) -> str | None:
     credentials (``AWS_ACCESS_KEY_ID``, ``AWS_SECRET_ACCESS_KEY``, and for an
     S3-compatible store ``AWS_ENDPOINT_URL`` / ``AWS_REGION``), attached to the
     island function so the values never pass through the launcher. None when
-    unset. Refused for a non-Modal island when ``spec`` is given (a sky island
-    cannot read a Modal Secret)."""
+    unset, and for a non-Modal island when ``spec`` is given: the store credential
+    goes per island, so in a launch that mixes clouds a sky or SSH island cannot
+    read a Modal Secret and gets the launcher's store credential instead
+    (:func:`store_object_envs`). A launch without any Modal island is refused by
+    :func:`check_store_secret_islands`."""
     name = getattr(args, "modal_store_secret", None)
     if not name:
         return None
-    if spec is not None and getattr(spec, "cloud", None) != "modal":
-        raise ValueError(f"--modal-store-secret attaches a Modal Secret to a Modal island; "
-                         f"island cloud {getattr(spec, 'cloud', None)!r} cannot use it")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(name)):
         raise ValueError(f"--modal-store-secret {name!r} is not a Modal Secret name")
+    if spec is not None and getattr(spec, "cloud", None) != "modal":
+        return None
     return str(name)
+
+
+def check_store_secret_islands(args, specs) -> None:
+    """``--modal-store-secret`` needs a Modal island to attach to: a launch whose
+    islands are all off Modal is refused (the flag would be silently unused).
+    In a launch that mixes clouds only the Modal islands attach the Secret."""
+    name = modal_store_secret_name(args)
+    if name and not any(getattr(s, "cloud", None) == "modal" for s in specs):
+        clouds = sorted({str(getattr(s, "cloud", None)) for s in specs})
+        raise ValueError(f"--modal-store-secret attaches a Modal Secret to the Modal islands of a launch; "
+                         f"this launch has none (island cloud(s) {', '.join(clouds)}), so nothing can use it")
 
 
 # --rl-checkpoint-store schemes a Modal island reaches without a mount: the whole store
@@ -214,9 +227,17 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
     # An SSH node has no bucket mount (no sky Storage): like on Modal, every node
     # stages the store on its own disk and moves it by object API. SSH trainer nodes
     # with an inventory store_env_file hold the credential themselves (no launcher key).
-    envs = island_envs(store, store_client_environ(args),
-                       stage=int(num_nodes) == 1 or cloud in NO_BUCKET_MOUNT_CLOUDS,
-                       credentials=not (cloud == "ssh" and ssh_nodes_hold_store_credentials(args)))
+    # --modal-store-secret reaches only the Modal islands: a sky or SSH island of the
+    # same launch gets the launcher's store credential (shipped as a sky secret).
+    try:
+        envs = island_envs(store, store_client_environ(args),
+                           stage=int(num_nodes) == 1 or cloud in NO_BUCKET_MOUNT_CLOUDS,
+                           credentials=not (cloud == "ssh" and ssh_nodes_hold_store_credentials(args)))
+    except ValueError as exc:
+        if modal_store_secret_name(args):
+            raise ValueError(f"{exc} (--modal-store-secret covers the Modal islands only; the {cloud} "
+                             "island takes the launcher's store credential)") from exc
+        raise
     return _lazy_cut_shards(envs, num_nodes)
 
 
