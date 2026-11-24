@@ -388,6 +388,10 @@ class _BufferRound:
             **report.metrics(), "sample_buffer/unconvertible_groups": float(len(unconvertible)),
             **({"sample_buffer/no_version_fields_groups": float(stats["no_version_fields_groups"])}
                if stats.get("no_version_fields_groups") else {}),
+            # cross-version samples (named by their oldest version) and the groups left out for
+            # tokens of unknown version: only once there are some (the metric set stays otherwise)
+            **{f"sample_buffer/{key}": float(stats[key]) for key in ("cross_version_samples", "unknown_version_groups")
+               if stats.get(key)},
             **flat_metrics(source)})
 
     @staticmethod

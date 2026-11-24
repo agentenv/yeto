@@ -355,8 +355,9 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
     names the behavior policy of every trained token): a group with a response token
     of unknown policy version is left out the same way, before it is trained, and
     counted in ``stats["unknown_version_groups"]``; the evidence would otherwise stop
-    the island after the take."""
-    from yeto.rl.engine.buffer_payload import miles_sample_dict, unknown_version_tokens  # noqa: PLC0415
+    the island after the take. Samples served by two versions (named by the oldest,
+    ``buffer_payload.miles_sample_dict``) are counted in ``stats["cross_version_samples"]``."""
+    from yeto.rl.engine.buffer_payload import cross_version, miles_sample_dict, unknown_version_tokens  # noqa: PLC0415
 
     kept, problems = [], []
     unstamped = 0
@@ -365,6 +366,9 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
             stamped = sampling is None or check_version_fields(group, sampling)
             converted = [miles_sample_dict(d, r3_layers=r3_layers, r3_num_experts=r3_num_experts)
                          for d in renumber_group(group, position=position, samples_per_group=samples_per_group)]
+            crossed = sum(cross_version(d) for d in converted)
+            if crossed and stats is not None:
+                stats["cross_version_samples"] = stats.get("cross_version_samples", 0) + crossed
             if require_known_versions:
                 unknown = sum(unknown_version_tokens(d) for d in converted)
                 if unknown:

@@ -74,6 +74,7 @@ def test_a_full_parameter_island_leaves_out_a_group_of_unknown_version_tokens(mo
     assert [position for position, _ in kept] == [10]
     assert len(problems) == 1 and "unknown policy version" in problems[0] and "buffer position 11" in problems[0]
     assert stats["unknown_version_groups"] == 1
+    assert stats["cross_version_samples"] == 1  # the good group's v4 -> v6 trial (the bad one has no number)
     assert trips and trips[0][0] == br.trainer_breakers.SAMPLE_ALIGNMENT
 
 
@@ -82,3 +83,20 @@ def test_other_trainers_keep_such_a_group_as_before(monkeypatch):
     bad = [_sample(2), _sample(3, version="4", final="yeto:x")]
     kept, problems = br.miles_groups([(11, bad)], samples_per_group=2)
     assert [position for position, _ in kept] == [11] and problems == []
+
+
+def test_cross_version_tells_a_sample_served_by_two_versions():
+    from yeto.rl.engine.buffer_payload import cross_version
+
+    assert cross_version(_sample(0, version="4", final="6"))
+    assert not cross_version(_sample(0, version="4", final="4"))
+    assert not cross_version(_sample(0, version="4"))
+    assert not cross_version(_sample(0, version="4", final="yeto:x"))
+
+
+def test_the_reader_exports_the_new_counts_only_when_there_are_some():
+    from pathlib import Path
+
+    import yeto.rl.adapters.miles as miles_adapter
+    source = (Path(miles_adapter.__file__).parent / "buffer_rollout_miles.py").read_text()  # imports Miles
+    assert '("cross_version_samples", "unknown_version_groups")' in source and "if stats.get(key)" in source

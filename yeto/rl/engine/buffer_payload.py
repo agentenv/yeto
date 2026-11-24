@@ -634,6 +634,18 @@ def payload_is_missing(buffer: Any, ref: str, error: BaseException) -> bool:
     return not has_payload(ref)
 
 
+def cross_version(sample: Mapping[str, Any]) -> bool:
+    """``sample`` was served by two policy versions (``metadata.weight_version`` and
+    ``final_weight_version`` both numeric and different): :func:`miles_sample_dict`
+    names its tokens by the oldest."""
+    metadata = sample.get("metadata") or {}
+    first, final = metadata.get("weight_version"), metadata.get("final_weight_version")
+    if first is None or final is None:
+        return False
+    first, final = engine_version_number(first), engine_version_number(final)
+    return first is not None and final is not None and first != final
+
+
 def unknown_version_tokens(sample: Mapping[str, Any]) -> int:
     """Response tokens of ``sample`` (a :func:`miles_sample_dict`) that no
     ``weight_versions`` span names a numeric version for: the tokens the
