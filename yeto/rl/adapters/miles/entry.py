@@ -134,12 +134,14 @@ MILES_DECLARED: dict[str, str] = {
     "features:kl_unbiased": "GPU run: kl_loss differs from k3",
     "corrections:opsm_rollout": "GPU run: opsm_clipfrac > 0 with opsm_old_logprob_source=rollout",
     "features:rollout_logprobs_as_old": "GPU run: use_rollout_logprobs=true in the event spec",
-    # k31 only (the loss exists on the k31 lineage alone; K31_SCORE_CENTERING_EVIDENCE)
+    # k31 only (the loss exists on the k31 lineage alone; K31_SCORE_CENTERING_EVIDENCE).
+    # Scope: the evidence is K3.1 full-parameter (Megatron) training; the declaration is
+    # per pin, so it also admits other models and LoRA, which no GPU run has covered.
     "losses:score_centering": (
-        "GPU run (k31): K3.1-Pro 3x8 B300 with an MI355X vLLM sampler, TIS clip 2.0: step 0 "
-        "train/sc_correction 0.00229, sc_importance_weight 0.9979, sc_is_clipped 0.40% (0.47% at step 1), "
-        "no pg_clipfrac (the policy loss is not run); the 16-layer K3.1 run on the customer pin at CP 2 "
-        "reports sc_is_clipped 0.0175%"
+        "GPU run (k31, K3.1 full-parameter only): K3.1-Pro 3x8 B300 with an MI355X vLLM sampler, "
+        "TIS clip 2.0: step 0 train/sc_correction 0.00229, sc_importance_weight 0.9979, sc_is_clipped "
+        "0.40% (0.47% at step 1), no pg_clipfrac (score centering replaces the PPO clip objective); "
+        "the 16-layer K3.1 run on the customer pin at CP 2 reports sc_is_clipped 0.0175%"
     ),
 }
 
@@ -188,7 +190,7 @@ _PORTS_V1_64B591A4B = EvidenceRef(
 # source tree of FULL_D (9fa600b9; the fork's history was rewritten after the run).
 _K31_FULL_D_RL5 = EvidenceRef(
     "k31", "9fa600b9ae9d8c4024f3c2e4cd23a8ed433b2b54",
-    "k31-rl-5 (2026-11-10, K3.1-Pro 3x8 B300, MI355X vLLM sampler, Miles c351a33c = FULL_D tree, 2 steps)",
+    "k31-rl-5 (2026-11-10, K3.1-Pro 3x8 B300, MI355X vLLM sampler, Miles c351a33c = FULL_D tree, 4 trained rounds)",
     "kimi-k31-rl-handoff ops/full/runs/k31-rl-5.log (archived outside the repo)",
 )
 _K31_NEXT9_X9 = EvidenceRef(
@@ -258,7 +260,11 @@ def undeclared_allowance(names: Any, miles_commit: str | None = None) -> tuple[s
     """The ``--rl-allow-unverified-mechanism`` names still undeclared on ``miles_commit``
     (default :func:`pins.current_miles_commit`), sorted. An allowance for a mechanism the
     pin declares is a no-op: it neither widens the capabilities nor marks the run's
-    artifacts as holding an unverified mechanism."""
+    artifacts as holding an unverified mechanism.
+
+    Not filtered here: ``check_unverified_allowance`` still refuses any allowance, a
+    declared one included, on a multi-island or outer-synced run, and the plan echoes the
+    flags as given (the customer K3.1 run is one island without outer sync)."""
     declared = {f"{dimension}:{name}" for dimension, found in declared_by_dimension(miles_commit).items()
                 for name in found}
     return tuple(sorted({str(name) for name in names or ()} - declared))

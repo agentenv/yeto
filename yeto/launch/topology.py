@@ -22,17 +22,34 @@ MULTINODE_SOCKET_IFNAME = {"nebius": "auto", "aws": "", "gcp": "", "ssh": ""}
 # source) instead of the cloud name alone (multinode_fabric):
 #  - "rdma": Modal clustered islands request RDMA (ModalIslandConfig.rdma);
 #  - "ib": a Nebius node ordered with sky's network_tier="best" (InfiniBand,
-#    multinode_network_tier: 8x H100 / H200 only);
-#  - "efa": an AWS node ordered with network_tier="best" (EFA; NCCL reaches it
-#    through the aws-ofi-nccl plugin, which NCCL_IB_DISABLE does not turn off);
+#    NETWORK_TIER_BEST_SHAPES: 8x H100 / H200 only);
+#  - "efa": an AWS EFA instance (AWS_EFA_SHAPES) ordered with network_tier="best"
+#    (NCCL reaches it through the aws-ofi-nccl plugin, which NCCL_IB_DISABLE does not
+#    turn off);
 #  - "tcp": anything else (NCCL over sockets).
-# NCCL's IB transport stays on for "rdma" and "ib" and is off otherwise.
-FABRIC_RDMA, FABRIC_IB, FABRIC_EFA, FABRIC_TCP = "rdma", "ib", "efa", "tcp"
-MULTINODE_FABRICS = (FABRIC_RDMA, FABRIC_IB, FABRIC_EFA, FABRIC_TCP)
-IB_FABRICS = frozenset({FABRIC_RDMA, FABRIC_IB})
-# the fabric a cloud's network_tier="best" order gives a cuda node
-TIER_BEST_FABRIC = {"nebius": FABRIC_IB, "aws": FABRIC_EFA}
+# One vocabulary with the SSH-pool inventory (node_inventory.FABRICS): its "ib" and
+# "roce" (RDMA_FABRICS) keep NCCL's IB transport on, as "rdma" does here.
+FABRIC_RDMA, FABRIC_IB, FABRIC_ROCE, FABRIC_EFA, FABRIC_TCP = "rdma", "ib", "roce", "efa", "tcp"
+RDMA_FABRICS = frozenset({FABRIC_ROCE, FABRIC_IB})
+MULTINODE_FABRICS = (FABRIC_RDMA, FABRIC_IB, FABRIC_ROCE, FABRIC_EFA, FABRIC_TCP)
+IB_FABRICS = RDMA_FABRICS | {FABRIC_RDMA}
+# AWS instances with EFA, by (gpu, gpus per node): p4d/p4de (A100), p5 (H100),
+# p5e/p5en (H200), p6 (B200). Any other AWS shape has no EFA and runs over TCP.
+AWS_EFA_SHAPES = frozenset({("A100", 8), ("A100-80GB", 8), ("H100", 8), ("H200", 8), ("B200", 8)})
 MULTINODE_IB_CLOUDS = frozenset({"modal"})  # always ordered with RDMA, whatever the shape
+# A node ordered with IB may still not reach it from the container (no /dev/infiniband,
+# or a limited memlock, where NCCL fails hard instead of falling back): turn IB off there
+# and say why.
+_IB_GUARD = (
+    'if [ ! -d /dev/infiniband ] || [ "$(ulimit -l)" != unlimited ]; then export NCCL_IB_DISABLE=1; '
+    'echo "[yeto-island] NCCL IB off: /dev/infiniband $([ -d /dev/infiniband ] && echo present || echo missing),'
+    ' memlock $(ulimit -l)"; fi'
+)
+# EFA shows as uverbs devices; without one, libfabric is not pointed at EFA.
+_EFA_GUARD = (
+    'if ls /dev/infiniband/uverbs* >/dev/null 2>&1; then export FI_PROVIDER=${FI_PROVIDER:-efa}; '
+    'else echo "[yeto-island] no EFA device: NCCL runs over TCP sockets"; fi'
+)
 _DETECT_IFACE = (
     "YETO_IFACE=${NCCL_SOCKET_IFNAME:-}; [ -n \"$YETO_IFACE\" ] || "
     "YETO_IFACE=$(for d in /sys/class/net/*; do n=$(basename \"$d\"); "
@@ -57,7 +74,6 @@ _DETECT_IFACE = (
 #  - ppu: ACCL-P keeps the NCCL names (T-PPU-gaps.md 2.3), so a PPU island
 #    exports NCCL/GLOO variables; a 16-card node uses interface hpn0.
 HCCL_CONNECT_TIMEOUT_S = 1800
-RDMA_FABRICS = frozenset({"roce", "ib"})
 
 
 def island_comm_env(device_family: str, fabric: str = "tcp", interface: str | None = None,
@@ -111,12 +127,14 @@ def multinode_fabric(cloud: str, gpu: str | None = None, gpus_per_node: int | No
     RDMA is assumed (the cloud-name rule of before)."""
     if cloud in MULTINODE_IB_CLOUDS:
         return FABRIC_RDMA
-    best = TIER_BEST_FABRIC.get(cloud)
+    best, shapes = _TIER_BEST_FABRIC.get(cloud, (None, frozenset()))
     if best is None or gpu is None or gpus_per_node is None or int(num_nodes) <= 1:
         return FABRIC_TCP
     from ..gpu_spec import device_family_of
 
     if device_family_of(gpu) != "cuda" or network_tier == "none":
+        return FABRIC_TCP
+    if (gpu.upper(), int(gpus_per_node)) not in shapes:
         return FABRIC_TCP
     return best if multinode_network_tier(cloud, gpu, gpus_per_node) == "best" else FABRIC_TCP
 
@@ -131,8 +149,10 @@ def island_fabric(args, spec) -> str:
 def multinode_env_prelude(cloud: str, num_nodes: int, *, fabric: str | None = None) -> str:
     """Shell exports every island node runs before Ray starts; "" on one node.
 
-    ``fabric`` (:func:`island_fabric`): NCCL's IB transport stays on over RDMA or IB
-    and is off otherwise; over EFA libfabric is pointed at it (``FI_PROVIDER``). None:
+    ``fabric`` (:func:`island_fabric`): NCCL's IB transport stays on over RDMA, IB or
+    RoCE and is off otherwise (an IB / RoCE node without ``/dev/infiniband`` or with a
+    limited memlock turns it off and says so); over EFA libfabric is pointed at it
+    (``FI_PROVIDER``) when an EFA device is present. None:
     :func:`multinode_fabric` of the cloud alone (Modal RDMA, TCP elsewhere)."""
     if num_nodes <= 1:
         return ""
@@ -142,8 +162,10 @@ def multinode_env_prelude(cloud: str, num_nodes: int, *, fabric: str | None = No
     ib_default = 0 if fabric in IB_FABRICS else 1
     lines = [f"export NCCL_IB_DISABLE=${{NCCL_IB_DISABLE:-{ib_default}}}",
              "export NCCL_DEBUG=${NCCL_DEBUG:-WARN}"]
+    if fabric in RDMA_FABRICS:  # ordered, not proven reachable (Modal's RDMA is)
+        lines.append(_IB_GUARD)
     if fabric == FABRIC_EFA:
-        lines.append("export FI_PROVIDER=${FI_PROVIDER:-efa}")
+        lines.append(_EFA_GUARD)
     iface = MULTINODE_SOCKET_IFNAME.get(cloud, "")
     if iface == "auto":
         lines += [_DETECT_IFACE,
@@ -161,6 +183,9 @@ def multinode_env_prelude(cloud: str, num_nodes: int, *, fabric: str | None = No
 # prelude then runs NCCL over TCP with NCCL_IB_DISABLE=1 there; an 8x H100 / H200
 # island that orders the tier keeps NCCL's IB transport on, multinode_fabric).
 NETWORK_TIER_BEST_SHAPES = {"nebius": {("H100", 8), ("H200", 8)}}
+# the fabric a cloud's network_tier="best" order gives a cuda node, and its shapes
+_TIER_BEST_FABRIC = {"nebius": (FABRIC_IB, frozenset(NETWORK_TIER_BEST_SHAPES["nebius"])),
+                     "aws": (FABRIC_EFA, AWS_EFA_SHAPES)}
 
 
 def multinode_network_tier(cloud: str, gpu: str, gpus_per_node: int) -> str | None:

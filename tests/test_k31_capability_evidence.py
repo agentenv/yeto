@@ -16,6 +16,8 @@ artifact as unverified.
 from __future__ import annotations
 
 import json
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -65,3 +67,14 @@ def test_the_capabilities_widen_only_by_the_undeclared_allowances(monkeypatch):
     caps = entry.miles_capabilities("sha256:" + "0" * 64, unverified_mechanisms=CUSTOMER)
     assert caps.unverified_mechanisms == frozenset(STILL_UNVERIFIED)
     assert "score_centering" in caps.losses
+
+
+def test_a_misspelled_allowance_is_still_refused(monkeypatch):
+    from yeto.rl.engine.capabilities import CapabilityMismatch
+
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", pins.MILES_K31_NEXT9_COMMIT)
+    with pytest.raises((CapabilityMismatch, ValueError)):
+        entry.miles_capabilities("sha256:" + "0" * 64, unverified_mechanisms=("losses:score_centring",))
+    with pytest.raises((CapabilityMismatch, ValueError)):
+        entry.miles_capabilities("sha256:" + "0" * 64,
+                                 unverified_mechanisms=(*CUSTOMER, "losses:score_centring"))
