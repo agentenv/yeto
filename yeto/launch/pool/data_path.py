@@ -137,6 +137,26 @@ class R2DataPath:
         why = end.get("why") if isinstance(end.get("why"), dict) else {}
         return {"ended_by": end.get("incarnation"), "end_why": why.get("reason"), "successor": why.get("successor")}
 
+    def shard_written(self, shard: str) -> bool:
+        """Read only: whether the shard holds any record in the run's store."""
+        from yeto.rl.engine.sample_buffer import shard_prefix  # noqa: PLC0415
+
+        store = getattr(self.records, "objects", None)
+        if store is not None and callable(getattr(store, "list", None)):
+            return bool(store.list(shard_prefix(str(shard))))
+        return self.shard_ended(shard) is not None
+
+    def end_unused_shard(self, shard: str, *, why: str) -> None:
+        """A data end record in a shard no sampler ever wrote (its number was issued, no order
+        went through): the trainer's merge counts it ended. Refused for a shard with records."""
+        from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index  # noqa: PLC0415
+
+        if self.shard_written(shard):
+            raise RuntimeError(f"shard {shard} holds records: not ended as unused")
+        store = getattr(self.records, "objects", None) or self.records
+        FileSampleBuffer(store, batch_size=1, index=shard_index(str(shard))).mark_data_end(
+            why={"reason": "shard_never_ordered", "detail": why})
+
     def request_drain(self, shard: str, seq: str) -> str:
         from yeto.rl.engine import store_dispense  # noqa: PLC0415
 

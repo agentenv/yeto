@@ -103,6 +103,10 @@ class ShardAllocator:
     def ended(self, shard: str) -> dict[str, Any] | None:
         return self._doc(self.ended_key(shard))
 
+    def ended_shards(self) -> list[str]:
+        base = f"{self.prefix}ended/"
+        return [key[len(base):-len(".json")] for key in self.objects.list(base) if key.endswith(".json")]
+
     def _doc(self, key: str) -> dict[str, Any] | None:
         data = self.objects.read(key)
         if data is None:

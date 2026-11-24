@@ -413,6 +413,10 @@ def _store_pool(cfg: dict[str, Any], pc: Any, ops: Any, objects: Any, name: str,
             held.close()
         raise
     pool.state_path = state  # the local mirror (status, run up's readers)
+    try:
+        pool.end_unused_shards()  # numbers issued before a crash / detach that no order took
+    except BaseException as error:  # noqa: BLE001 - a lost lock detaches the pool at its first tick anyway
+        pool.log(f"pool {name}: unused shards not checked ({error!r})")
     if control.state.imported_from:
         pool.log(f"pool {name}: imported the local state {control.state.imported_from} into the store once "
                  f"({control.state.key}); the store holds it from now on")

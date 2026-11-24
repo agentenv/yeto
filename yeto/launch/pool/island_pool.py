@@ -69,6 +69,32 @@ HALTED_ERRORS = ("NcHalted",)
 DEFERRED_ERRORS = ("NcReleaseDeferred",)  # the ticket ends on its own shortly: no delete now
 OWNERSHIP_ERRORS = ("NcForeignTicketReleased", "NcDeleteUnconfirmed")  # a delete hit, or may have hit, a foreign ticket
 SLOT_RETRY_S = 600.0  # a slot whose guard refused is tried again after this long
+# the ops calls that change something (a machine, a sampler, the work contract): on the store
+# control plane each runs only after the pool's store lock was confirmed (``GuardedOps``)
+MUTATING_OPS = frozenset({"order", "start", "restart", "drain", "fence", "fence_incarnation", "request_drain",
+                          "cancel_drain", "reassert_drain", "clear_stale_handoff", "pool_ended", "stop"})
+
+
+class GuardedOps:
+    """The pool's ops on the store control plane: every call in :data:`MUTATING_OPS` first
+    runs ``guard()`` (``StoreLock.guard``: raises ``LockLost`` / ``LockUnconfirmed``, both
+    ``BaseException``, so no provider error handler counts them as a failed call). Reads
+    (status, probe, balance, ...) pass through; a missing attribute stays missing."""
+
+    def __init__(self, ops: Any, guard: Callable[[], None]) -> None:
+        self.__dict__["_ops"], self.__dict__["_guard"] = ops, guard
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self.__dict__["_ops"], name)
+        if name in MUTATING_OPS and callable(value):
+            guard = self.__dict__["_guard"]
+
+            def guarded(*args: Any, **kw: Any) -> Any:
+                guard()
+                return value(*args, **kw)
+
+            return guarded
+        return value
 
 
 def error_is(error: BaseException, names: tuple[str, ...]) -> bool:
@@ -348,6 +374,8 @@ class IslandPool:
     def __post_init__(self) -> None:
         if self.events is None:
             self.events = el.EventLog(log=self.log, clock=self.clock)
+        if self.control is not None and not isinstance(self.ops, GuardedOps):
+            self.ops = GuardedOps(self.ops, self.control.lock.guard)
 
     @property
     def ecfg(self) -> el.ElasticConfig:
@@ -609,6 +637,7 @@ class IslandPool:
             number = self._reserved_shard
             limit = getattr(self.config, "index_limit", None)
             if limit is not None and number >= limit:
+                self._shard_budget_exhausted(number, limit)
                 return (f"shard {self.config.shard_base}-{number} is past the pool's index limit {limit} "
                         "(one tunnel port per shard index)")
             shard = f"{self.config.shard_base}-{number}"
@@ -623,6 +652,66 @@ class IslandPool:
             self._reserved_shard = None
             self.next_shard = number + 1
         return "64 shard numbers in a row had ended data"
+
+    def _shard_budget_exhausted(self, number: int, limit: int) -> None:
+        """Every shard index below ``limit`` was issued: ``pool_shard_budget_exhausted`` once
+        (ended, used and the limit), never a silent stall."""
+        if "shard_budget" in self._warned:
+            return
+        self._warned.add("shard_budget")
+        try:
+            ended = len(self.control.allocator.ended_shards())
+        except Exception:  # noqa: BLE001 - the counts are information
+            ended = None
+        used = len({m.shard for m in self.members if m.shard})
+        self.log(f"pool: CRITICAL: no shard index left below the index limit {limit} ({used} used by members, "
+                 f"{ended} ended unused): nothing more is ordered; widen the tunnel port range or start a new run")
+        self._event("pool_shard_budget_exhausted", level="critical", ended=ended, used=used, limit=limit,
+                    next=number)
+
+    def end_unused_shards(self) -> list[str]:
+        """On a takeover (store control plane): the shard numbers the allocator issued to this
+        pool that no member holds (an order that never went through: a controller that died or
+        detached between the number and the order) are ended for good. Each gets the
+        allocator's end record and, when its store shard holds no record, a data end record
+        in the shard (the trainer's fixed shard list then never waits for it). A number whose
+        shard holds records is left alone (``shard_orphaned``: a sampler wrote there). They are
+        never issued again; the index they took is not given back (one tunnel port per index).
+        Returns the shards ended."""
+        if self.control is None:
+            return []
+        used = {m.shard for m in self.members if m.shard}
+        if self._reserved_shard is not None:
+            used.add(f"{self.config.shard_base}-{self._reserved_shard}")
+        out = []
+        allocator = self.control.allocator
+        for doc in allocator.issued():
+            shard = str(doc.get("shard") or f"{self.config.shard_base}-{doc.get('n')}")
+            if shard in used or allocator.ended(shard) is not None:
+                continue
+            written = self._shard_has_records(shard)
+            if written:
+                self._event("shard_orphaned", shard=shard, why="issued without a member, but its shard holds records")
+                continue
+            try:
+                end = getattr(getattr(self.ops, "data_path", lambda: None)(), "end_unused_shard", None)
+                if end is not None:
+                    end(shard, why="shard number issued, never ordered")
+                allocator.mark_ended(shard, why="never ordered", token=self.control.lock.token)
+            except Exception as error:  # noqa: BLE001 - tried again at the next takeover
+                self.log(f"pool: unused shard {shard} not ended ({error!r})")
+                continue
+            out.append(shard)
+        if out:
+            self._event("unused_shards_ended", shards=out)
+        return out
+
+    def _shard_has_records(self, shard: str) -> bool:
+        check = getattr(getattr(self.ops, "data_path", lambda: None)(), "shard_written", None)
+        try:
+            return bool(check(shard)) if check is not None else False
+        except Exception:  # noqa: BLE001 - unknown: treated as written (never ended blindly)
+            return True
 
     def _skip_ended_shards(self) -> None:
         """Move ``next_shard`` past every shard whose data already ended in the run's
@@ -1314,9 +1403,16 @@ class IslandPool:
 
     # -- one control step ----------------------------------------------------
     def tick(self) -> None:
+        from .store_lock import LockLost, LockUnconfirmed  # noqa: PLC0415
+
         began = time.monotonic()
         try:
             self._tick()
+        except LockLost as error:  # another controller took the pool: stop acting at once, no drain
+            self.detach(f"store lock lost mid-tick: {error}")
+        except LockUnconfirmed as error:  # the store did not confirm the lock: this tick acts no further
+            self.log(f"pool: {error}: this tick stops here")
+            self._event("lock_unconfirmed", error=str(error)[:300])
         finally:
             self._polled.clear()
             self._probed.clear()
@@ -1602,6 +1698,9 @@ class IslandPool:
         status = None
         if future is not None and future.done():  # a background start finished
             self._starts.pop(m.ticket)
+            error = future.exception()
+            if error is not None and not isinstance(error, Exception):
+                raise error  # the store lock lost / not confirmed before the start: not a start failure
             if future.exception() is not None:
                 status = self._status(m, now)
                 if status.state != "ended":
@@ -2286,6 +2385,14 @@ class IslandPool:
         return member
 
     def stop(self, why: str) -> None:
+        from .store_lock import LockLost, LockUnconfirmed  # noqa: PLC0415
+
+        try:
+            self._stop(why)
+        except (LockLost, LockUnconfirmed) as error:  # another controller drives the machines now
+            self.detach(f"store lock lost during the stop: {error}")
+
+    def _stop(self, why: str) -> None:
         self.stopped = why
         self.log(f"pool: stopping: {why}")
         self._event("pool_stopped", why=why)
@@ -2322,6 +2429,8 @@ class IslandPool:
         Returns the members left (still billed: the caller prints the banner)."""
         sleep = sleep or time.sleep
         self.stop(why)
+        if self.detached:
+            return self.live()
         for _ in range(attempts - 1):
             left = self.live()
             owed = [m for m in self.members if m.fence_pending is not None]

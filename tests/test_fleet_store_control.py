@@ -231,3 +231,126 @@ def test_run_up_store_control_plane_is_opt_in(tmp_path, monkeypatch):
         assert all(pool.control is None for pool in plain.pools.values())
     finally:
         plain.stop("test end")
+
+
+# -- review: every action under a confirmed lock; numbers issued but never ordered -------
+
+class _TimeJump(FakeProvider):
+    """A status read during which the clock passes the lock's lease and another controller
+    takes the pool (a tick that ran longer than lock_ttl_s)."""
+
+    def __init__(self, *a, takeover=None, **kw):
+        super().__init__(*a, **kw)
+        self.takeover = takeover
+
+    def status(self, slot, ticket):
+        if self.takeover is not None:
+            go, self.takeover = self.takeover, None
+            go()
+        return super().status(slot, ticket)
+
+
+def test_a_tick_longer_than_the_lock_ttl_acts_no_further_once_the_lock_moved():
+    client, clock = FakeS3(), Clock()
+    provider = _TimeJump("p", clock)
+    a_ctl = store_state.open_pool_control(_objects(client), "nc", "smp", ttl_s=600, clock=clock)
+    a = _pool(provider, clock, control=a_ctl)
+    a.tick()
+    first = sorted(m.ticket for m in a.live())
+    taken = {}
+
+    def takeover():
+        clock.t += 601  # this tick has run past the lease
+        taken["b"] = store_state.open_pool_control(_objects(client), "nc", "smp", ttl_s=600, clock=clock)
+
+    provider.evict(first[0])  # the tick would fence, release and order a replacement
+    provider.takeover = takeover
+    clock.t += 30
+    a.tick()
+    assert taken["b"].lock.token == 2
+    assert a.detached and "mid-tick" in a.detached  # the guard before the first action stopped it
+    assert len(provider.orders) == 2 and provider.released == []  # nothing ordered, released or fenced
+    names = [e["event"] for e in a.events.events]
+    assert not any(n.endswith(("order_failed", "drain_failed", "fence_failed", "tick_failed")) for n in names)
+
+
+def test_an_unconfirmed_lock_ends_the_tick_without_an_action():
+    client, clock = FakeS3(), Clock()
+    provider = FakeProvider("p", clock)
+    ctl = store_state.open_pool_control(_objects(client), "nc", "smp", clock=clock)
+    pool = _pool(provider, clock, control=ctl)
+    real = ctl.lock.objects.list
+
+    def down(prefix, **kw):
+        if prefix.startswith("fleet/pools/nc/lock"):
+            raise ConnectionError("store down")
+        return real(prefix, **kw)
+
+    ctl.lock.renewed_at = clock()  # renewed: the tick's first action asks the store
+    pool._renew_lock = lambda: True  # noqa: SLF001 - the renew at the tick start passed just before the outage
+    ctl.lock.objects.list = down
+    pool.tick()
+    assert provider.orders == [] and not pool.detached
+    assert any(e["event"].endswith("lock_unconfirmed") for e in pool.events.events)
+
+
+def test_numbers_issued_but_never_ordered_are_ended_at_the_takeover(tmp_path):
+    """A controller issued shard numbers and died (or detached) before any order took them:
+    the next controller ends them (allocator record + a data end in the shard), never issues
+    them again, and the trainer's fixed shard list no longer waits for them."""
+    from yeto.launch.pool.data_path import R2DataPath  # noqa: PLC0415
+    from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
+    from yeto.rl.engine.object_store import DirectoryObjectStore  # noqa: PLC0415
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index  # noqa: PLC0415
+
+    objects, clock = DirectoryObjectStore(tmp_path), Clock()
+    provider = FakeProvider("p", clock)
+    data_path = R2DataPath(ObjectRecords(objects))
+    ops = ProviderPoolOps(provider, FakeRoute(), FakeFencer())
+    ops.data_path = lambda: data_path
+    ctl = store_state.open_pool_control(objects, "nc", "smp", clock=clock)
+    config = PoolConfig(target=1, accounts=[0, 1], shard_base="smp", elastic=quiet_elastic())
+    pool = IslandPool.from_doc(None, config, ops, control=ctl, clock=clock, log=lambda _m: None,
+                               events=EventLog(log=lambda _m: None, clock=clock))
+    pool.tick()
+    assert [m.shard for m in pool.live()] == ["smp-0"]
+    ctl.allocator.allocate(token=ctl.lock.token, base="smp")  # smp-1: issued, then the controller died
+    ctl.allocator.allocate(token=ctl.lock.token, base="smp")  # smp-2
+    pool._save_now()  # noqa: SLF001
+    ctl.lock.release()  # (a detach; a death lets the lease run out)
+    again = store_state.open_pool_control(objects, "nc", "smp", clock=clock)
+    pool2 = IslandPool.from_doc(again.state.load(), config, ops, control=again, clock=clock,
+                                log=lambda _m: None, events=EventLog(log=lambda _m: None, clock=clock))
+    assert pool2.end_unused_shards() == ["smp-1", "smp-2"]
+    assert pool2.end_unused_shards() == []  # once
+    assert again.allocator.ended("smp-1")["why"] == "never ordered"
+    assert again.allocator.allocate() == 3  # never issued again
+    # the trainer launched with smp-0..smp-2 ends once smp-0 ends: it does not wait for the unused two
+    writer = FileSampleBuffer(objects, batch_size=1, index=shard_index("smp-0"))
+    writer.mark_data_end()
+    trainer = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=["smp-0", "smp-1", "smp-2"])
+    assert trainer.data_ended
+
+
+def test_a_reserved_number_of_a_failed_order_is_reused_in_process():
+    objects, clock = _objects(), Clock()
+    ctl = store_state.open_pool_control(objects, "nc", "smp", clock=clock)
+    provider = FakeProvider("p", clock)
+    provider.fail_orders = 1
+    pool = _pool(provider, clock, control=ctl, target=1)
+    pool.tick()  # the order fails: its number stays reserved
+    clock.t += 60
+    pool.tick()
+    assert [m.shard for m in pool.live()] == ["smp-0"] and [d["n"] for d in ctl.allocator.issued()] == [0]
+
+
+def test_an_exhausted_index_budget_says_so_once_with_the_counts():
+    objects, clock = _objects(), Clock()
+    ctl = store_state.open_pool_control(objects, "nc", "smp", clock=clock)
+    provider = FakeProvider("p", clock)
+    pool = _pool(provider, clock, control=ctl, target=2, index_limit=1)
+    for _ in range(3):
+        pool.tick()
+        clock.t += 60
+    found = [e for e in pool.events.events if e["event"].endswith("pool_shard_budget_exhausted")]
+    assert len(found) == 1 and (found[0]["used"], found[0]["limit"]) == (1, 1) and found[0]["ended"] == 0

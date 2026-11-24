@@ -54,12 +54,22 @@ class StoreLockError(RuntimeError):
     """The lock cannot be used on this store (no atomic create, an unreadable record)."""
 
 
-class LockLost(RuntimeError):
-    """A higher token exists: this holder no longer owns what the lock guards."""
+class LockLost(BaseException):
+    """A higher token exists: this holder no longer owns what the lock guards.
+
+    A ``BaseException``: the pool wraps every call that changes something (order, start,
+    fence, drain, release) in a lock check (``IslandPool``'s guarded ops), and no
+    ``except Exception`` around a provider call may count it as that call's failure; the
+    pool's tick catches it and detaches."""
 
     def __init__(self, what: str, token: int, by: int) -> None:
         super().__init__(f"{what}: lock token {token} is fenced by token {by} (another controller took over)")
         self.token, self.by = int(token), int(by)
+
+
+class LockUnconfirmed(BaseException):
+    """The store did not answer the lock check: nothing that changes the pool may run now
+    (the tick ends; the next one checks again). A ``BaseException`` like :class:`LockLost`."""
 
 
 def holder_id() -> str:
@@ -85,6 +95,7 @@ class StoreLock:
         self.lost: LockLost | None = None
         self.released = False
         self._checked_at: float | None = None
+        self.renewed_at: float | None = None
 
     # -- keys
     @staticmethod
@@ -179,9 +190,25 @@ class StoreLock:
     def renew(self) -> None:
         """Move the lease end ``ttl_s`` past now (the holder's heartbeat). Raises :class:`LockLost`."""
         self.check(force=True)
+        now = self.clock()
         self.objects.write(self.lease_key(self.prefix, self.token), json.dumps(
-            {"token": self.token, "holder": self.holder, "until": self.clock() + self.ttl_s,
+            {"token": self.token, "holder": self.holder, "until": now + self.ttl_s,
              "released": False}).encode())
+        self.renewed_at = now
+
+    def guard(self) -> None:
+        """Before an action that changes what the lock guards: the token is still the highest
+        (one LIST; :class:`LockLost` otherwise), and the lease is renewed once half of it is
+        gone (a long tick never acts on a lease that ran out). A store that does not answer
+        raises :class:`LockUnconfirmed`."""
+        try:
+            self.check(force=True)
+            if self.renewed_at is None or self.clock() - self.renewed_at > self.ttl_s / 2:
+                self.renew()
+        except LockLost:
+            raise
+        except Exception as error:  # noqa: BLE001 - not confirmed: no action
+            raise LockUnconfirmed(f"{self.prefix}: lock not confirmed ({error!r})"[:300]) from error
 
     def release(self) -> None:
         """Give the lock up now (the next claimer does not wait for the lease). Never raises."""
