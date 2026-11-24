@@ -2585,6 +2585,11 @@ Where each layer applies:
   into the copy's `sampler.breakers` knob. Every sampler spec it renders
   carries them. The spec file itself is not changed. Preflight prints them:
   `breakers: pool <name>: applied in the sampler spec (...)`.
+  The `trainer` and `launch` values become trainer flags or `--island-env`
+  pairs. A flag in `trainer.argv` that disagrees with the section is refused.
+  `launch.budget.usd` reaches the launch only when you write it in
+  `breakers.launch.budget`. A value inherited from `run.budget.usd` is enforced
+  by run up's `run.budget` (`show` marks it `!enforced_by_run`).
 - `yeto launch --breakers FILE` applies the `launch` and `trainer` layers. The
   file holds a bare `breakers:` object or a whole run config.
 - A sampler spec may carry its own `breakers` key. The sampler applies its

@@ -32,6 +32,9 @@ FLEET_RULES = frozenset({"D11", "D12"})
 ISLAND_TRAINER_FLAGS = ("--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer")
 # a trainer flag an island may set for itself over the fleet's (the compile's --rl-island-sample-wait-s)
 SAMPLE_WAIT_FLAG = "--rl-sample-wait-s"
+# the island flags that override a breakers.trainer param of the run config: (entry, param)
+ISLAND_SECTION_FLAGS = {SAMPLE_WAIT_FLAG: ("sample_wait", "timeout_s"),
+                        "--rl-max-policy-age": ("policy_age", "max_versions")}
 
 Scope = Literal["fleet", "island", "component"]
 
@@ -203,20 +206,22 @@ def island_run_config(run_config: Mapping[str, Any], index: int) -> dict[str, An
     if raw.get("usd_per_h") is not None:
         trainer["usd_per_h"] = raw["usd_per_h"]
     base = _base(run_config)
-    if _sets(_island_own_argv(run_config, index), SAMPLE_WAIT_FLAG):
-        base = _without_section_sample_wait(base)  # the island's own sample wait wins over the run's
+    own = _island_own_argv(run_config, index)
+    for flag, (name, param) in ISLAND_SECTION_FLAGS.items():
+        if _sets(own, flag):  # the island's own sample wait / policy age wins over the run's
+            base = _without_section_param(base, name, param)
     return {**base, "trainer": trainer, "samplers": _island_samplers(run_config, index)}
 
 
-def _without_section_sample_wait(base: dict[str, Any]) -> dict[str, Any]:
-    """``base`` without ``breakers.trainer.sample_wait.timeout_s`` (copied where changed)."""
+def _without_section_param(base: dict[str, Any], name: str, param: str) -> dict[str, Any]:
+    """``base`` without ``breakers.trainer.<name>.<param>`` (copied where changed)."""
     section = base.get("breakers")
     trainer = section.get("trainer") if isinstance(section, Mapping) else None
-    wait = trainer.get("sample_wait") if isinstance(trainer, Mapping) else None
-    if not isinstance(wait, Mapping) or "timeout_s" not in wait:
+    entry = trainer.get(name) if isinstance(trainer, Mapping) else None
+    if not isinstance(entry, Mapping) or param not in entry:
         return base
-    wait = {k: v for k, v in wait.items() if k != "timeout_s"}
-    trainer = {**trainer, "sample_wait": wait} if wait else {k: v for k, v in trainer.items() if k != "sample_wait"}
+    entry = {k: v for k, v in entry.items() if k != param}
+    trainer = {**trainer, name: entry} if entry else {k: v for k, v in trainer.items() if k != name}
     return {**base, "breakers": {**section, "trainer": trainer}}
 
 

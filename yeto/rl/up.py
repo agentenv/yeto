@@ -199,7 +199,16 @@ class PoolConfigError(RunConfigError):
     """The rollout layer refused the samplers / pool section (``resolve``); ``open_run`` names the config."""
 
 
-def load_config(path: str) -> dict[str, Any]:
+# the commands that order or change a run refuse a breakers section the argv disagrees with;
+# every other command (down, status, pause, resume) only warns: it must never be blocked
+BREAKERS_STRICT_COMMANDS = frozenset({"up", "scale"})
+
+
+def load_config(path: str, *, strict_breakers: bool = True) -> dict[str, Any]:
+    """The run config at ``path``, checked and compiled. ``strict_breakers``: a ``breakers:``
+    value that disagrees with ``trainer.argv`` (or that no knob carries) raises; without it
+    the value is only warned about and the argv is kept as written (``run down`` / ``status``
+    must open any config ``run up`` once accepted, :data:`BREAKERS_STRICT_COMMANDS`)."""
     file = Path(path).expanduser()
     try:
         text = file.read_text()
@@ -231,7 +240,7 @@ def load_config(path: str) -> dict[str, Any]:
         raise ValueError(f"run config: unknown keys {sorted(unknown)} (known: {sorted(known)})")
     if fleet:
         # one synced-group trainer launch and every island's pools, from here on a run like any other
-        cfg, _plan = fleet_mod.compile_fleet(cfg)
+        cfg, _plan = fleet_mod.compile_fleet(cfg, strict_breakers=strict_breakers)
     rollout_section(cfg)
     check_sections(cfg)
     if cfg.get("breakers") is not None:
@@ -241,7 +250,71 @@ def load_config(path: str) -> dict[str, Any]:
             parse_section(cfg["breakers"])
         except BreakerConfigError as error:
             raise ValueError(f"run config: {error}") from None
+        # a fleet's compile passes each island's trainer values itself (yeto.rl.fleet)
+        cfg = apply_argv_breakers(cfg, layers=("launch",) if fleet else ARGV_LAYERS, strict=strict_breakers)
     return cfg
+
+
+ARGV_LAYERS = ("trainer", "launch")  # the layers whose knobs are yeto launch flags and island env
+ARGV_SURFACES = ("trainer_flag", "trainer_env", "launch_flag")
+
+
+def apply_argv_breakers(cfg: dict[str, Any], *, layers: tuple[str, ...] = ARGV_LAYERS,
+                        strict: bool = True) -> dict[str, Any]:
+    """``breakers.trainer.*`` and ``breakers.launch.*`` (and ``breakers.switches.cost_guard``)
+    written into ``trainer.argv``. The trainer reads its flags (``--rl-sample-wait-s``,
+    ``--rl-max-policy-age``) and its island env, the launcher its own flags
+    (``--rl-stall-timeout``, ``--budget-usd``, ``--idle-warn-minutes``, ...), never the
+    section: without this the preflight showed the section's value while the trainer and
+    the launcher ran their defaults. The write-back is the one ``yeto launch --breakers``
+    does (:func:`yeto.breakers.materialize`): a flag becomes its flag, an island env knob
+    ``--island-env K=V``. A value the argv (or the run env) already sets is left as written;
+    one that disagrees with the section is refused, as is a section value no knob carries.
+
+    ``launch.budget.usd`` is written only when ``breakers.launch.budget.usd`` is (a number or
+    ``"inherit"``): the value it inherits from ``run.budget.usd`` alone stays with run up's
+    ``run.budget`` (:func:`yeto.breakers.rules_facts.launch_budget_inherited_only`). A config
+    whose section sets none of these (or only values the argv already holds) is returned as
+    it is, its argv unchanged byte for byte. Without ``strict`` a refusal is a warning and the
+    config is returned as it is."""
+    try:
+        return _apply_argv_breakers(cfg, layers)
+    except ValueError as error:
+        if strict:
+            raise
+        _log(f"WARNING: {error}: not written into trainer.argv (the argv is read as written; "
+             "`yeto run up` refuses this config)")
+        return cfg
+
+
+def _apply_argv_breakers(cfg: dict[str, Any], layers: tuple[str, ...]) -> dict[str, Any]:
+    section = cfg.get("breakers")
+    if not isinstance(section, dict) or not any(section.get(key) for key in (*layers, "switches")):
+        return cfg
+    from yeto import breakers  # noqa: PLC0415
+    from yeto.breakers.rules_facts import launch_budget_inherited_only  # noqa: PLC0415
+
+    if launch_budget_inherited_only(section):  # no implicit inheritance: run.budget is run up's
+        budget = (section.get("launch") or {}).get("budget") or {}
+        extra = sorted(set(budget) - {"enabled", "action"})
+        if extra:  # a launch budget without its own usd is off: these would be dropped unseen
+            raise ValueError(f"run config: breakers.launch.budget {', '.join(extra)} needs breakers.launch.budget.usd "
+                             "(a number, or \"inherit\" for run.budget.usd): without it the launch has no budget "
+                             "of its own (run.budget stops the run)")
+        section = {key: value for key, value in section.items() if key != "run"}
+    trainer = cfg["trainer"]
+    sources = breakers.Sources.from_run_config(cfg, argv=list(trainer["argv"]), env=dict(cfg.get("env") or {}),
+                                               section=section)
+    try:
+        resolved = breakers.resolve(sources, layers=layers)
+        out = breakers.materialize(resolved, sources, surfaces=ARGV_SURFACES)
+    except breakers.BreakerConfigError as error:
+        raise ValueError(f"run config: {error}") from None
+    if not out.changes:
+        return cfg
+    for change in out.changes:
+        _log(f"run config: breakers: {change}")
+    return {**cfg, "trainer": {**trainer, "argv": out.argv}}
 
 
 # Keys an earlier ``run up`` read and run configs still carry: ignored (with a log line), not
@@ -1036,7 +1109,7 @@ class Run:
         --json`` object; the dashboard's Breakers panel and ``run status`` read it). Never
         raises: a view only."""
         from yeto import breakers  # noqa: PLC0415
-        from yeto.breakers.rules_facts import run_view_sources  # noqa: PLC0415
+        from yeto.breakers.rules_facts import mark_run_enforced, run_view_sources  # noqa: PLC0415
 
         try:
             # the run's only pool fills the pool / sampler / harness rows (a view; Run.breakers,
@@ -1048,7 +1121,8 @@ class Run:
                 _log(f"preflight: breakers.resolved.json shows the run config alone ({error})")
                 sources, pool = breakers.Sources.from_run_config(self.cfg), None
             resolved = breakers.resolve(sources, pool=pool, strict=False)
-            doc = resolved.to_json(breakers.preflight(resolved, run_config=self.cfg, sources=sources))
+            doc = mark_run_enforced(resolved.to_json(breakers.preflight(resolved, run_config=self.cfg, sources=sources)),
+                                    self.cfg)
             tmp = self.dir / "breakers.resolved.json.tmp"
             tmp.write_text(json.dumps(doc, indent=1, default=str))
             os.replace(tmp, self.dir / "breakers.resolved.json")
@@ -3439,7 +3513,8 @@ def ack_forced_stop(run: Run) -> None:
         run.mark("nc_forced_stop_ack", of=forced.get("at"))
 
 
-def open_run(config: str, create: bool = True, missing: str | None = None) -> Run:
+def open_run(config: str, create: bool = True, missing: str | None = None, *,
+             strict_breakers: bool = True) -> Run:
     """``Run(load_config(config))``; a config or state directory that cannot be used raises
     :class:`RunConfigError` naming the file (the CLI prints it, without a traceback).
     ``create=False`` (read-only commands) refuses a run whose state directory does not exist
@@ -3448,7 +3523,7 @@ def open_run(config: str, create: bool = True, missing: str | None = None) -> Ru
     state directory, so the stop steps the config drives (trainer down, pool-stop, sandbox
     teardown) still run on a control host that lost (or never had) the run's state."""
     try:
-        cfg = load_config(config)
+        cfg = load_config(config) if strict_breakers else load_config(config, strict_breakers=False)
     except RunConfigError:
         raise
     except ValueError as error:  # a check of the config's content
@@ -3479,7 +3554,8 @@ def open_run(config: str, create: bool = True, missing: str | None = None) -> Ru
 def main(args: Any) -> int:
     try:
         run = open_run(args.config, create=args.rl_command != "status",
-                       missing="temp" if args.rl_command == "down" else None)
+                       missing="temp" if args.rl_command == "down" else None,
+                       strict_breakers=args.rl_command in BREAKERS_STRICT_COMMANDS)
     except RunConfigError as error:
         print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
         return 2

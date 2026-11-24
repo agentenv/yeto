@@ -70,6 +70,23 @@ one as redundant.
 `breakers.resolved.json` format, which `yeto run up` also saves in its state
 directory.
 
+`yeto run up` writes the `trainer` and `launch` values of the section into the
+trainer argv when it loads the run config: a flag becomes that flag
+(`--rl-sample-wait-s`, `--rl-max-policy-age`, `--rl-stall-timeout`,
+`--budget-usd`, ...). An island environment knob becomes `--island-env K=V`. A
+value the argv already sets stays as written. A value that disagrees with it is
+refused. A config that sets none of these keeps its argv unchanged. A fleet
+gives the `trainer` values to every trainer island, unless an island sets its
+own `--rl-sample-wait-s` or `--rl-max-policy-age`.
+
+One exception: `launch.budget.usd` reaches the launch only when you write
+`breakers.launch.budget.usd`, as a number or as `"inherit"`. When you set only
+`run.budget.usd`, `launch.budget.usd` still shows that value (inherited), but
+run up's `run.budget` enforces it. The launcher's cost guard prices the run's
+shared resource ledger, pool leases included, in its own way. With the same
+limit it could stop the run first. `show` marks that row `!enforced_by_run`, and
+`breakers.resolved.json` gives it `"enforced_by": "run"`.
+
 ## Events
 
 Every trip writes one `rl_breaker` line to the component's existing event tape

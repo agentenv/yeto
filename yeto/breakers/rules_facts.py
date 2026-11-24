@@ -321,6 +321,33 @@ def pool_sources(cfg: Mapping[str, Any], *, run_config: Mapping[str, Any] | None
                    pool_dispense=dict((cfg.get("sampler") or {}).get("dispense") or {}), env=env)
 
 
+def launch_budget_inherited_only(section: Any) -> bool:
+    """``breakers.launch.budget.usd`` is not written, so ``launch.budget.usd`` takes
+    ``run.budget.usd`` by inheritance alone. ``yeto run up`` does not pass that value to its
+    ``yeto launch``: the launcher's cost guard prices the run's shared resource ledger (the
+    pools' leases included) its own way, so the same limit there could stop the run before
+    run up's ``run.budget`` does. ``run.budget`` enforces it."""
+    if not isinstance(section, Mapping):
+        return False
+    budget = (section.get("launch") or {}).get("budget") if isinstance(section.get("launch"), Mapping) else None
+    return not (isinstance(budget, Mapping) and "usd" in budget)
+
+
+def mark_run_enforced(data: dict[str, Any], run_config: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A run config's view (``show --config``, run up's ``breakers.resolved.json``):
+    ``launch.budget`` on with its ``usd`` inherited from ``run.budget.usd`` alone gets
+    ``enforced_by: "run"`` (run up's ``run.budget`` stops the run at it; the launch is not
+    given it, :func:`launch_budget_inherited_only`)."""
+    section = (run_config or {}).get("breakers")
+    if not launch_budget_inherited_only(section):
+        return data
+    for entry in data.get("entries") or ():
+        if (entry.get("name") == "launch.budget" and entry.get("enabled")  # off (cost_guard off): no claim to mark
+                and (entry.get("sources") or {}).get("usd", {}).get("kind") == "inherit"):
+            entry["enforced_by"] = "run"
+    return data
+
+
 @dataclass(frozen=True)
 class RunView:
     """The sources of a run config's one-page breaker view and the pool whose knobs it reads."""

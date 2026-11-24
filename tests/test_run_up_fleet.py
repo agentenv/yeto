@@ -252,6 +252,61 @@ def test_a_conflicting_or_bad_sample_wait_is_refused(files, edit, match):
         up.load_config(_write(files, cfg))
 
 
+def _island_values(cfg, param):
+    """{island: param} as the run's preflight resolves each island."""
+    from yeto.breakers.fleet import resolve_islands
+
+    return {i.index: r.get(param) for i, r in resolve_islands(cfg)}
+
+
+def test_every_trainer_value_of_the_run_config_reaches_every_trainer_island(files):
+    """breakers.trainer.* beyond the sample wait: the policy age becomes the fleet's
+    --rl-max-policy-age (an island's own --rl-max-policy-age wins for it, as
+    --rl-island-max-policy-age), an island env knob one --island-env pair of the launch."""
+    from yeto.launch.modal_islands import parse_island_env
+    from yeto.rl.engine import sample_roles, trainer_breakers
+
+    from yeto import cli
+
+    raw = _cfg(files, breakers={"trainer": {"policy_age": {"max_versions": 4}, "release_drain": {"timeout_s": 600}}})
+    argv = up.load_config(_write(files, raw))["trainer"]["argv"]
+    follow = argv.index("--rl-sampler-follow")
+    assert argv[follow + 2:follow + 6] == ["--rl-max-policy-age", "4", "--island-env", "YETO_TRAINER_RELEASE_DRAIN_S=600"]
+    assert argv[-2:] == ["--rl-island-max-policy-age", "1:3"]  # west's own --rl-max-policy-age=3
+    args = cli.build_parser().parse_args(["launch", *argv])
+    overrides = sample_roles.island_trainer_overrides(args, 2)
+    launched = {k: overrides.get(k, {}).get("rl_max_policy_age", args.rl_max_policy_age) for k in range(2)}
+    assert _island_values(raw, "trainer.policy_age.max_versions") == {0: 4, 1: 3} and launched == {0: 4, 1: 3}
+    env = parse_island_env(args)
+    assert _island_values(raw, "trainer.release_drain.timeout_s") == {0: 600, 1: 600}
+    assert trainer_breakers.release_drain_s(trainer_breakers.resolved(env)) == 600.0
+
+
+def test_a_fleet_policy_age_disagreeing_with_the_run_config_is_refused(files):
+    raw = _cfg(files, breakers={"trainer": {"policy_age": {"max_versions": 4}}})
+    raw["fleet"]["trainer_argv"] += ["--rl-max-policy-age", "2"]
+    with pytest.raises(ValueError, match=r"policy_age.max_versions = 4 but fleet.trainer_argv --rl-max-policy-age = 2"):
+        up.load_config(_write(files, raw))
+
+
+def test_run_down_opens_a_fleet_whose_trainer_values_conflict(files, monkeypatch, capsys):
+    raw = _cfg(files, breakers={"trainer": {"policy_age": {"max_versions": 4}}})
+    raw["fleet"]["trainer_argv"] += ["--rl-max-policy-age", "2"]
+    path = _write(files, raw)
+    monkeypatch.setattr(up.Run, "down", lambda self: True)
+    assert up.main(types.SimpleNamespace(config=path, rl_command="down")) == 0
+    assert "WARNING" in capsys.readouterr().err
+    assert up.main(_main_args(path)) == 2
+    assert "policy_age.max_versions = 4 but fleet.trainer_argv --rl-max-policy-age = 2" in capsys.readouterr().err
+
+
+def test_the_run_configs_launch_values_reach_the_fleets_launch(files):
+    raw = _cfg(files, breakers={"launch": {"stall": {"timeout_s": 1800}}})
+    argv = up.load_config(_write(files, raw))["trainer"]["argv"]
+    assert argv.count("--rl-stall-timeout") == 1 and argv[argv.index("--rl-stall-timeout") + 1] == "1800"
+    assert "--rl-stall-timeout" not in up.load_config(_write(files, _cfg(files)))["trainer"]["argv"]
+
+
 def test_the_compiled_pools(files):
     cfg = up.load_config(_write(files, _cfg(files)))
     run = up.Run(cfg)
