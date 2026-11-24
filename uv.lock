@@ -8135,7 +8135,7 @@ requires-dist = [
     { name = "requests", marker = "extra == 'local-rl'", specifier = ">=2.31.0" },
     { name = "safetensors", specifier = ">=0.4" },
     { name = "sentencepiece" },
-    { name = "skypilot", extras = ["aws", "runpod", "nebius", "verda"], marker = "extra == 'launcher'", specifier = ">=0.14.3" },
+    { name = "skypilot", extras = ["aws", "runpod", "nebius", "verda"], marker = "extra == 'launcher'", specifier = ">=0.14.3,<0.15" },
     { name = "skypilot", extras = ["aws", "runpod", "nebius", "verda"], marker = "extra == 'test'", specifier = "==0.14.3" },
     { name = "torch", specifier = ">=2.4,<2.9" },
     { name = "transformers", specifier = "==5.13.0" },

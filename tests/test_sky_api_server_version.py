@@ -31,8 +31,8 @@ def test_a_local_sky_api_server_of_another_version_is_refused_with_the_way_out()
     import sky
 
     mine = sky.__version__
-    other = "0.13.0"  # an older server: any version but this Python's
-    assert other != mine
+    major, minor, *_ = mine.split(".")
+    other = f"{major}.{int(minor) + 1}.0"  # any version but this Python's own
     assert sky_patches.api_server_version_problem(_ServerCommon(mine), environ={}) is None
     assert sky_patches.api_server_version_problem(_ServerCommon(None, status="unhealthy"), environ={}) is None
     msg, refuse = sky_patches.api_server_version_problem(_ServerCommon(other), environ={})
