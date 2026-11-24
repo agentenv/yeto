@@ -20,7 +20,7 @@
   "/work/sampler/store.env.up": 39,
   "/work/yeto/abcdef123456.tar": 3
  },
- "nc_agentic_setup_env": "DOCKER_HOST=ssh://yeto-sandbox\nHARBOR_ENV_TYPE=remote-docker\nHARBOR_TASKS_DIR=/work/harbor/tasks\nHARBOR_TRIALS_DIR=/work/harbor/trials\nHOME=/work/harbor/home\nPATH=/work/harbor/bin:/opt/runtime-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nYETO_RECORDS_PROXY_PUBLIC_BASE=http://192.0.2.1:19001\nYETO_RECORDS_PROXY_SECRET_FILE=/work/harbor/home/records-proxy.secret\n",
+ "nc_agentic_setup_env": "DOCKER_HOST=ssh://yeto-sandbox\nHARBOR_ENV_TYPE=remote-docker\nHARBOR_TASKS_DIR=/work/harbor/tasks\nHARBOR_TRIALS_DIR=/work/harbor/trials\nHOME=/work/harbor/home\nPATH=/work/harbor/bin:/opt/runtime-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nYETO_RECORDS_PROXY_PUBLIC_BASE=http://192.0.2.1:19001\nYETO_RECORDS_PROXY_SECRET_FILE=/work/harbor/<HOME>/records-proxy.secret\n",
  "nc_agentic_spec_file": "{\n \"start_on_latest\": true,\n \"sampler_id\": \"nc-1\",\n \"agentic\": {\n  \"proxy\": {\n   \"host\": \"127.0.0.1\",\n   \"port\": 18080\n  },\n  \"task_defaults\": {\n   \"provider\": \"remote-docker\"\n  }\n },\n \"prompts\": {\n  \"path\": \"/work/prompts/p.jsonl\"\n },\n \"engine\": {\n  \"adapter\": \"vllm-server\"\n }\n}",
  "nc_agentic_start": [
   {

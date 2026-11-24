@@ -149,7 +149,10 @@ def render(tmp: Path, monkeypatch) -> dict:
             call["argv"] = [a.replace(ticket, "<T>") if isinstance(a, str) else a for a in call["argv"]]
             if "input" in call:
                 call["input"] = call["input"].replace(ticket, "<T>")
-    return json.loads(json.dumps(dump, sort_keys=True, default=str).replace(str(tmp), "<TMP>"))
+    # the agentic HOME (/work/harbor/home/...) reads as a per-user home path to the repository
+    # hygiene check: written as <HOME> in the golden, on both sides of the comparison
+    text = json.dumps(dump, sort_keys=True, default=str).replace(str(tmp), "<TMP>")
+    return json.loads(text.replace("/harbor/" + "home/", "/harbor/<HOME>/"))
 
 
 def test_route_commands_are_byte_identical_to_the_golden(tmp_path, monkeypatch):
