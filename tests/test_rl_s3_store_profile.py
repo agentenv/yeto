@@ -131,10 +131,12 @@ def test_store_dispense_status_reports_a_store_error_with_its_hint(monkeypatch, 
         raise _client_error("InvalidAccessKeyId")
 
     monkeypatch.setattr(store_dispense, "_objects_for", refuse)
-    monkeypatch.delenv(s3_store.ENDPOINT_ENV, raising=False)
     monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
     monkeypatch.delenv("AWS_PROFILE", raising=False)
-    monkeypatch.delenv(s3_store.PROFILE_ENV, raising=False)  # main() sets it; restored after
+    # main() puts --endpoint-url / --profile into os.environ: the same values set here first,
+    # so the test's undo removes them (a delenv of an unset name records nothing to undo)
+    monkeypatch.setenv(s3_store.ENDPOINT_ENV, R2)
+    monkeypatch.setenv(s3_store.PROFILE_ENV, "x")
     assert store_dispense.main(["status", "--store", "s3://b/run", "--profile", "x", "--endpoint-url", R2]) == 2
     err = capsys.readouterr().err
     assert "refused the credentials" in err and R2 in err

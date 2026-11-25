@@ -24,6 +24,8 @@ def pytest_configure(config):
     from hard_exit import note_configure  # the outermost config is the one hard_exit may end
 
     note_configure(config)
+    if not config.pluginmanager.has_plugin("yeto-store-env-guard"):
+        config.pluginmanager.register(_StoreEnvGuard(), "yeto-store-env-guard")
     config.addinivalue_line(
         "markers",
         "real_nebius_sg_cleanup: keep cli._nebius_sg_cleanup unpatched (the test fakes the cloud itself)",
@@ -95,6 +97,39 @@ def _reset_island_hmac_key():
         _os.environ.pop("YETO_ISLAND_HMAC_KEY", None)
     else:
         _os.environ["YETO_ISLAND_HMAC_KEY"] = _ORIGINAL_ISLAND_HMAC_KEY
+
+
+# The s3 store client's variables (yeto.cloud.s3_store: endpoint, region, profile, key):
+# the launch exports the endpoint into the launcher's own environment
+# (launch.storage.apply_object_store_endpoint) and a store CLI puts --endpoint-url /
+# --profile there (s3_store.apply_store_client_arguments), both into os.environ directly.
+# Restored around every test, so no test sees another's store (a sky island then takes a
+# leaked R2 endpoint for its own store). Names only; no value is printed.
+_STORE_ENV_NAMES = ("YETO_RL_STORE_S3_ENDPOINT_URL", "YETO_RL_STORE_S3_REGION", "YETO_RL_STORE_S3_PROFILE",
+                    "YETO_RL_STORE_S3_ACCESS_KEY_ID", "YETO_RL_STORE_S3_SECRET_ACCESS_KEY",
+                    "YETO_RL_STORE_S3_SESSION_TOKEN", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3")
+
+
+class _StoreEnvGuard:
+    """Hooks, not a fixture: autouse fixtures of one scope set up in name order, so a test's
+    monkeypatch may be torn down after any fixture of ours and put a deleted value back.
+    Saved before any fixture of a test is set up; restored after every one is torn down. A
+    plugin of its own (registered in pytest_configure): this module's pytest_runtest_teardown
+    is the syncer reaper's."""
+
+    @_pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_setup(self, item):
+        item._yeto_store_env = {name: _os.environ.get(name) for name in _STORE_ENV_NAMES}
+        yield
+
+    @_pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_teardown(self, item, nextitem):
+        yield
+        for name, value in getattr(item, "_yeto_store_env", {}).items():
+            if value is None:
+                _os.environ.pop(name, None)
+            else:
+                _os.environ[name] = value
 
 
 @_pytest.fixture(autouse=True)
