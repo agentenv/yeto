@@ -54,6 +54,10 @@ FLEET_PARTIAL_EXPERTS = "fleet_partial_experts"  # partial-experts training on a
 RELEASE_CADENCE = "release_cadence"
 # trains the per-segment samples of a compacted trial as one trial (agentic.compaction, CompactionRL)
 COMPACTION_SEGMENTS = "compaction_segments"
+# its in-process sampler islands (--rl-island-sample-role M:sampler) follow their own trainer
+# and stop when it ends (--rl-sampler-until-trainers-end / --rl-sampler-feeds-learner); a
+# backend with PER_LEARNER_RELEASE alone is followed by external sampler pools only
+SAMPLER_ISLANDS_FOLLOW = "sampler_islands_follow"
 _log = logging.getLogger(__name__)
 
 

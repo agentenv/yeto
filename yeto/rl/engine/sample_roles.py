@@ -43,7 +43,9 @@ version of the fragments (``full_parameter_sync.merged_version``), and the
 samplers run ``--tuning full``.
 
 Samplers that follow their own trainer (``--rl-sampler-follow trainer``, on a backend
-that releases per learner: ``per_learner_release``, :func:`releases_per_learner`):
+that releases per learner: ``per_learner_release``, :func:`releases_per_learner`; sampler
+islands also need ``sampler_islands_follow``, :func:`sampler_islands_follow`, else only
+external sampler pools follow the trainers, as in a verl island fleet):
 in a synced group, sampler j (in island order) feeds trainer j % K only. Each
 trainer and its samplers form one pair inside the group: they share the store
 sub-directory ``trainer<k>`` (:func:`trainer_substore`; the buffer and the
@@ -86,13 +88,13 @@ claim from (an island fleet's ``<store>/fleet/dispense``), under its shard name
 ``island<M>``, so no prompt goes to a pool and a sampler island in the same pass
 (:func:`check_store_dispense`; ``adapters.miles.task_dispense``).
 
-Decoupled groups (``--rl-sync-preset decoupled``, ``per_learner_release``): a decoupled trainer
+Decoupled groups (``--rl-sync-preset decoupled``, ``sampler_islands_follow``): a decoupled trainer
 has one version per fragment, merged at different times, so its group needs
 ``--rl-sampler-follow trainer`` (:func:`check_decoupled_group`); its samplers
 run as LoRA no-sync samplers (:func:`_as_lora_sampler`) and, like those of a
 full-parameter group, generate until their trainer ended.
 
-How long a full-parameter synced group's samplers run (``per_learner_release``): its trainers
+How long a full-parameter synced group's samplers run (``sampler_islands_follow``): its trainers
 run asynchronous rounds until the syncer stops them, so their round count is
 not known before the launch (``run_config.resolve_lr_schedule``). Its samplers
 therefore have no fixed round count: each generates until every trainer that
@@ -285,8 +287,8 @@ def check_decoupled_group(args: Any) -> None:
                          "M:sampler) needs --rl-sampler-follow trainer: a decoupled trainer has "
                          "no single merged version to release (each fragment has its own), so "
                          "each sampler serves its own trainer's local versions")
-    if not releases_per_learner(args):
-        raise ValueError(f"a decoupled synced group needs {per_learner_requirement(args)}")
+    if not sampler_islands_follow(args):
+        raise ValueError(f"a decoupled synced group's sampler islands need {sampler_islands_requirement(args)}")
     if getattr(args, "rl_initial_adapter", None) is not None:
         raise ValueError("a decoupled synced group does not take --rl-initial-adapter: its "
                          "samplers serve the base checkpoint until the first release, so the "
@@ -756,6 +758,30 @@ def _able(capability: str) -> str:
     return " / ".join(able) or "none"
 
 
+def sampler_islands_follow(args: Any) -> bool:
+    """Whether the backend's in-process sampler islands (``--rl-island-sample-role
+    M:sampler``) follow their own trainer and stop when it ends
+    (``sampler_islands_follow``); a backend that only releases per learner
+    (:func:`releases_per_learner`) is followed by external sampler pools only."""
+    from .backend_identity import SAMPLER_ISLANDS_FOLLOW  # noqa: PLC0415
+
+    return SAMPLER_ISLANDS_FOLLOW in _capabilities(args)
+
+
+def sampler_islands_requirement(args: Any, *, short: bool = False) -> str:
+    """What :func:`sampler_islands_follow` asks, for a refusal."""
+    from .backend_identity import SAMPLER_ISLANDS_FOLLOW  # noqa: PLC0415
+
+    able = f"--rl-backend {_able(SAMPLER_ISLANDS_FOLLOW)}"
+    if short:
+        return able
+    backend = getattr(args, "rl_backend", None) or "miles"
+    tail = (f"; --rl-backend {backend} follows its trainers with external sampler pools only (an island "
+            "fleet's pools, --rl-island-buffer-shards), not with sampler islands"
+            if releases_per_learner(args) else f"; --rl-backend {backend} does not")
+    return f"a backend whose sampler islands follow their own trainer ({SAMPLER_ISLANDS_FOLLOW}: {able} only){tail}"
+
+
 def per_learner_requirement(args: Any, *, short: bool = False) -> str:
     """What :func:`releases_per_learner` asks, for a refusal."""
     from .backend_identity import PER_LEARNER_RELEASE  # noqa: PLC0415
@@ -796,13 +822,13 @@ def substore_uri(store: str, name: str) -> str:
 
 def sampler_stop_trainers(args: Any, num_islands: int) -> dict[int, int]:
     """Sampler island -> how many trainers' ends stop it, for the samplers of a
-    full-parameter or decoupled synced group on a backend that releases per learner
-    (module doc); empty for every
+    full-parameter or decoupled synced group on a backend whose sampler islands stop
+    with their trainers (:func:`sampler_islands_follow`, module doc); empty for every
     other launch."""
     if (not is_synced_group(args)
             or getattr(args, "rl_sync_preset", None) not in (FULL_PARAMETER_SYNC_PRESET,
                                                              DECOUPLED_SYNC_PRESET)
-            or not releases_per_learner(args)):
+            or not sampler_islands_follow(args)):
         return {}
     trainers = 1 if sampler_bindings(args, num_islands) else len(synced_group_learners(args, num_islands))
     return {island: trainers for island in sampler_islands(args, num_islands)}
@@ -835,6 +861,9 @@ def check_sampler_follow(args: Any, num_islands: int) -> None:
                          "syncer, --rl-island-buffer-shards K:SHARDS for every trainer island)")
     if not releases_per_learner(args):
         raise ValueError(f"--rl-sampler-follow trainer needs {per_learner_requirement(args)}")
+    if is_synced_group(args) and not sampler_islands_follow(args):  # sampler islands, with or without pools
+        raise ValueError(f"--rl-sampler-follow trainer with sampler islands (--rl-island-sample-role M:sampler) "
+                         f"needs {sampler_islands_requirement(args)}")
     if is_external_pool_group(args):
         check_external_pools(args, num_islands)
         return
@@ -903,7 +932,7 @@ def check_mixed_group(args: Any, num_islands: int) -> None:
     if not sampler_stop_trainers(args, num_islands):
         raise ValueError("a synced group with sampler islands and external sampler pools needs "
                          f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} or {DECOUPLED_SYNC_PRESET} on "
-                         f"{per_learner_requirement(args, short=True)}: its sampler islands generate until "
+                         f"{sampler_islands_requirement(args, short=True)}: its sampler islands generate until "
                          "their own trainer ended, as the pools do")
 
 

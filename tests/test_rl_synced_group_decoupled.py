@@ -72,17 +72,12 @@ def test_decoupled_synced_group_needs_the_samplers_to_follow_their_trainer():
         _prepared(*DECOUPLED)
 
 
-def test_decoupled_synced_group_refuses_an_initial_adapter_and_other_backends(monkeypatch):
+def test_decoupled_synced_group_refuses_an_initial_adapter_and_other_backends():
     base = dict(rl_sampler_follow="trainer", rl_backend="miles", rl_initial_adapter=None)
     sample_roles.check_decoupled_group(SimpleNamespace(**base))
     with pytest.raises(ValueError, match="does not take --rl-initial-adapter"):
         sample_roles.check_decoupled_group(SimpleNamespace(**{**base, "rl_initial_adapter": "/a"}))
-    # a backend whose trainers do not release their own versions (per_learner_release)
-    from yeto.rl.engine import backends
-
-    real = backends.capabilities
-    monkeypatch.setattr(backends, "capabilities", lambda name=None: frozenset() if name == "verl" else real(name))
-    with pytest.raises(ValueError, match=r"per_learner_release: --rl-backend miles only\); --rl-backend verl does not"):
+    with pytest.raises(ValueError, match="--rl-backend miles only"):
         sample_roles.check_decoupled_group(SimpleNamespace(**{**base, "rl_backend": "verl"}))
 
 

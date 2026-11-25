@@ -1,8 +1,10 @@
-"""Samplers that follow their own trainer on any backend that releases per learner
-(rl-fleet-verl-islands 2.2): ``--rl-sampler-follow trainer``, decoupled groups, the
-sampler stop count and ``--rl-release-every N`` ask the backend's
-``per_learner_release`` capability, not its name. The same scenarios run on Miles and
-on verl and must decide the same, item by item; a verl trainer whose samplers follow it
+"""Samplers that follow their own trainer by backend capability (rl-fleet-verl-islands
+2.2): ``--rl-sampler-follow trainer`` with external sampler pools and ``--rl-release-every
+N`` ask the backend's ``per_learner_release`` capability, not its name; sampler islands
+(decoupled groups, the sampler stop count, follow-trainer sampler islands) ask
+``sampler_islands_follow``, which only Miles declares: a verl fleet's trainers are
+followed by external sampler pools only. The same external-pool scenarios run on Miles
+and on verl and must decide the same, item by item; a verl trainer whose pools follow it
 is told to release its own versions (``--rl-release-mode per_learner``). No cloud, no GPU."""
 
 from __future__ import annotations
@@ -44,10 +46,16 @@ def _decide(call):
 def _events(backend: str) -> list[tuple[str, object]]:
     """Every decision of the four follow-trainer sites for one backend."""
     out = []
-    # decoupled synced group
-    out.append(("decoupled group", _decide(lambda: sample_roles.check_decoupled_group(_ns(rl_backend=backend)))))
+    # decoupled synced group without following samplers: refused on both, before the backend
     out.append(("decoupled, merged samplers", _decide(lambda: sample_roles.check_decoupled_group(
         _ns(rl_backend=backend, rl_sampler_follow="merged")))))
+    # the follow check of synced trainers fed by external pools
+    def pools():
+        args = _follow(_ns(rl_backend=backend))
+        args.rl_island_buffer_shards = ["0:a", "1:b"]
+        return sample_roles.check_sampler_follow(args, 2)
+
+    out.append(("external pools follow", _decide(pools)))
     # release cadence of a trainer whose pools follow it
     follow = SimpleNamespace(**vars(_ns(rl_backend=backend)))
     for every, age in ((1, 2), (2, 2), (2, 3), (3, 2), (4, 4)):
@@ -89,10 +97,10 @@ def test_a_backend_that_does_not_release_per_learner_is_refused_at_every_site(mo
     real = backends.capabilities
     monkeypatch.setattr(backends, "capabilities",
                         lambda name=None: real(name) - {bi.PER_LEARNER_RELEASE} if name == "verl" else real(name))
-    with pytest.raises(ValueError, match="decoupled synced group needs a backend whose trainers release their own "
-                                         r"local versions \(per_learner_release: --rl-backend miles only\)"):
-        sample_roles.check_decoupled_group(_ns(rl_backend="verl"))
-    assert sample_roles.sampler_stop_trainers(_ns(rl_backend="verl"), 2) == {}
+    with pytest.raises(ValueError, match=r"--rl-sampler-follow trainer needs a backend whose trainers release their "
+                                         r"own local versions \(per_learner_release: --rl-backend miles only\); "
+                                         r"--rl-backend verl does not"):
+        sample_roles.check_sampler_follow(_follow(_ns(rl_backend="verl")), 2)
     with pytest.raises(ValueError, match="--rl-backend miles \\(release_cadence\\)"):
         _cadence(_follow(_ns(rl_backend="verl", rl_release_every=2)))
 
@@ -148,32 +156,59 @@ def test_verl_without_per_learner_releases_cannot_follow_its_trainer(monkeypatch
         _island_flags("verl")
 
 
-def test_sampler_islands_stop_with_their_own_trainer_on_miles_and_verl(capsys):
-    from yeto.launcher import _prepare_rl_args, dry_run_plan
+def _group(backend: str, *extra: str):
+    from yeto.launcher import _prepare_rl_args
 
     four = ",".join(["modal:1xh100"] * 4)
-    seen = {}
-    for backend in ("miles", "verl"):
-        extra = (("--rl-backend", "verl") if backend == "verl" else ()) + ("--inner-lr", "1e-6")
-        args = _launcher_args("ports", (*TRAINERS, *extra, "--rl-island-sample-role", "2:sampler",
-                                        "--rl-island-sample-role", "3:sampler"), gpu=four)
-        args.controller = "local"
-        _prepare_rl_args(args)
-        stops = sample_roles.sampler_stop_trainers(args, 4)
-        line = sample_roles.describe_sampler_stop(args, 4)
-        until = []
-        for island in dry_run_plan(args)["island_requests"]:
-            tokens = shlex.split(island["learner_command"].split("island_entry", 1)[1])
-            flag = "--rl-sampler-until-trainers-end"
-            until.append((island.get("sample_role"), tokens[tokens.index(flag) + 1] if flag in tokens else None,
-                          "--rl-release-mode" in tokens))
-        seen[backend] = (stops, line, until)
-    (m_stops, m_line, m_until), (v_stops, v_line, v_until) = seen["miles"], seen["verl"]
-    assert m_stops == v_stops == {2: 1, 3: 1} and m_line == v_line
-    assert [u[:2] for u in m_until] == [u[:2] for u in v_until] == [
-        ("trainer", None), ("trainer", None), ("sampler", "1"), ("sampler", "1")]
-    # only verl's trainers are told to release per learner; no sampler island is
-    assert [u[2] for u in m_until] == [False] * 4 and [u[2] for u in v_until] == [True, True, False, False]
+    flags = (("--rl-backend", "verl") if backend == "verl" else ()) + ("--inner-lr", "1e-6")
+    args = _launcher_args("ports", (*TRAINERS, *flags, "--rl-island-sample-role", "2:sampler",
+                                    "--rl-island-sample-role", "3:sampler", *extra), gpu=four)
+    args.controller = "local"
+    _prepare_rl_args(args)
+    return args
+
+
+def test_miles_sampler_islands_stop_with_their_own_trainer(capsys):
+    from yeto.launcher import dry_run_plan
+
+    args = _group("miles")
+    assert sample_roles.sampler_stop_trainers(args, 4) == {2: 1, 3: 1}
+    until = []
+    for island in dry_run_plan(args)["island_requests"]:
+        tokens = shlex.split(island["learner_command"].split("island_entry", 1)[1])
+        flag = "--rl-sampler-until-trainers-end"
+        until.append((island.get("sample_role"), tokens[tokens.index(flag) + 1] if flag in tokens else None,
+                      "--rl-release-mode" in tokens))
+    assert until == [("trainer", None, False), ("trainer", None, False), ("sampler", "1", False),
+                     ("sampler", "1", False)]
+
+
+def test_verl_sampler_islands_are_refused_its_fleet_takes_external_pools_only():
+    """A verl sampler island runs a fixed round count and names no trainer (its engine
+    spec reads neither the stop count nor the trainer it feeds), so a synced group whose
+    samplers are verl sampler islands is refused, follow-trainer or decoupled; external
+    sampler pools (the island fleet) follow verl trainers."""
+    external = "follows its trainers with external sampler pools only"
+    with pytest.raises(ValueError, match=r"--rl-sampler-follow trainer with sampler islands .* "
+                                         r"\(sampler_islands_follow: --rl-backend miles only\); "
+                                         rf"--rl-backend verl {external}"):
+        _group("verl")
+    with pytest.raises(ValueError, match=rf"a decoupled synced group's sampler islands need .*--rl-backend verl "
+                                         rf"{external}"):
+        sample_roles.check_decoupled_group(_ns(rl_backend="verl"))
+    sample_roles.check_decoupled_group(_ns(rl_backend="miles"))
+
+
+def test_the_sampler_stop_count_asks_the_sampler_islands_capability(monkeypatch):
+    args = _group("miles")
+    assert sample_roles.sampler_stop_trainers(args, 4) == {2: 1, 3: 1}
+    # the same group as verl would see it: no stop count (its sampler islands do not stop with it)
+    assert sample_roles.sampler_stop_trainers(SimpleNamespace(**{**vars(args), "rl_backend": "verl"}), 4) == {}
+    real = backends.capabilities
+    monkeypatch.setattr(backends, "capabilities",
+                        lambda name=None: real(name) - {bi.SAMPLER_ISLANDS_FOLLOW} if name == "miles" else real(name))
+    assert sample_roles.sampler_stop_trainers(args, 4) == {}
+    assert sample_roles.describe_sampler_stop(args, 4) is None
 
 
 def test_verl_declares_both_its_fleet_capabilities():
@@ -182,4 +217,6 @@ def test_verl_declares_both_its_fleet_capabilities():
     fleet, or every verl follow-trainer launch."""
     verl = backends.capabilities("verl")
     assert {bi.FLEET_FULL_PARAMETER, bi.PER_LEARNER_RELEASE} <= verl
-    assert not verl & {bi.FLEET_PARTIAL_EXPERTS, bi.RELEASE_CADENCE, bi.COMPACTION_SEGMENTS}
+    assert not verl & {bi.FLEET_PARTIAL_EXPERTS, bi.RELEASE_CADENCE, bi.COMPACTION_SEGMENTS,
+                       bi.SAMPLER_ISLANDS_FOLLOW}
+    assert bi.SAMPLER_ISLANDS_FOLLOW in backends.capabilities("miles")
