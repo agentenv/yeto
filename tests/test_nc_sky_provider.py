@@ -3,6 +3,7 @@ module: the same pool policy (events, budget, breaker, fencing) as National Comp
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -947,6 +948,11 @@ def test_an_in_process_controller_refuses_a_sky_pool_at_its_start(monkeypatch):
            "provider": {"kind": "sky", "resources": {"infra": "aws", "accelerators": "L4:1"}}}
     with pytest.raises(SystemExit, match="AWS_PROFILE"):
         controller.nc_pool(cfg, "pool.json")
+    # the run's env overlay (run.json env of an in-process pool) is what the start checks
+    monkeypatch.delenv("AWS_PROFILE")
+    with pytest.raises(SystemExit, match="AWS_PROFILE"):
+        controller.nc_pool(cfg, "pool.json", environ={"AWS_PROFILE": "store-r2"})
+    assert "AWS_PROFILE" not in os.environ
 
 
 def test_the_dry_run_reports_a_sky_whose_request_env_cannot_be_scoped(monkeypatch):
