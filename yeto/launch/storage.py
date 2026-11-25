@@ -86,10 +86,61 @@ MODAL_OBJECT_STORE_SCHEMES = ("s3",)
 # Sky islands without a bucket mount of an s3:// store (the SSH trainer island
 # starts the run script over SSH, not through sky Storage).
 NO_BUCKET_MOUNT_CLOUDS = frozenset({"ssh"})
+# Hosts of an S3 endpoint sky Storage mounts (an explicit AWS S3 endpoint); any other
+# endpoint (Cloudflare R2, MinIO) is an S3-compatible store sky Storage cannot mount.
+AWS_S3_ENDPOINT_HOST_SUFFIX = ".amazonaws.com"
 
 
 def is_object_store_uri(value) -> bool:
     return str(value).partition("://")[0] in MODAL_OBJECT_STORE_SCHEMES and "://" in str(value)
+
+
+def store_endpoint_of(args) -> str | None:
+    """The S3-compatible endpoint the run's ``s3://`` store is reached at
+    (``--rl-object-store-endpoint``, ``YETO_RL_STORE_S3_ENDPOINT_URL``, ``AWS_ENDPOINT_URL``
+    or the store profile's ``endpoint_url``); None for AWS S3."""
+    from ..cloud.s3_store import store_endpoint
+
+    return store_endpoint(store_client_environ(args))
+
+
+def bucket_unmountable_reason(args, cloud: str) -> str | None:
+    """Why sky Storage cannot mount the run's ``s3://`` ``--rl-checkpoint-store`` on a sky
+    island on ``cloud``; None when it can, or when the island mounts no bucket (Modal,
+    ``ssh:``, no ``s3://`` store). sky Storage takes an ``s3://`` source for an AWS S3
+    bucket: a store on a custom endpoint (R2, MinIO) is looked up at AWS and refused as
+    a non-existent bucket. Such an island reaches the store by its object API instead
+    (:func:`store_object_envs`), like a Modal or ``ssh:`` island. The endpoint itself is
+    not named (an R2 endpoint carries the account id)."""
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    if cloud == "modal" or cloud in NO_BUCKET_MOUNT_CLOUDS or not store.startswith("s3://"):
+        return None
+    from urllib.parse import urlparse
+
+    endpoint = store_endpoint_of(args)
+    if not endpoint or (urlparse(endpoint).hostname or "").endswith(AWS_S3_ENDPOINT_HOST_SUFFIX):
+        return None
+    return "its S3 endpoint is not AWS S3 (R2 / MinIO): sky Storage cannot mount it"
+
+
+def mounts_store_bucket(args, cloud: str) -> bool:
+    """True when a sky island on ``cloud`` mounts the run's bucket store with sky Storage."""
+    return cloud != "modal" and cloud not in NO_BUCKET_MOUNT_CLOUDS and bucket_unmountable_reason(args, cloud) is None
+
+
+def store_access_notes(args, specs) -> list[str]:
+    """One line per sky island that reaches the run's store by object API because sky
+    Storage cannot mount it (:func:`bucket_unmountable_reason`); printed by the dry run
+    and the launch, so the access route is visible before any order."""
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    notes = []
+    for m, spec in enumerate(specs):
+        reason = bucket_unmountable_reason(args, spec.cloud)
+        if reason is not None:
+            notes.append(f"[launcher] island {m} ({spec.cloud}): --rl-checkpoint-store {store}: {reason}; "
+                         "the island reads and writes it by its object API (URL, endpoint and credentials "
+                         "in its environment), no sky Storage mount")
+    return notes
 
 
 def resumes_in_new_container(args) -> bool:
@@ -220,18 +271,22 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
         return _lazy_cut_shards(oss_island_envs(store), num_nodes)  # an oss store always stages
     if not store.startswith("s3://"):
         return {}
-    if not (sample_roles.is_pair(args) or sample_roles.sample_role(args) != sample_roles.BOTH):
+    # a store sky Storage cannot mount (custom endpoint): the whole store by object API,
+    # whatever the island's role (there is no mount to fall back on)
+    unmountable = bucket_unmountable_reason(args, cloud) is not None
+    if not unmountable and not (sample_roles.is_pair(args) or sample_roles.sample_role(args) != sample_roles.BOTH):
         return {}
     from ..cloud.s3_store import island_envs
 
     # An SSH node has no bucket mount (no sky Storage): like on Modal, every node
     # stages the store on its own disk and moves it by object API. SSH trainer nodes
     # with an inventory store_env_file hold the credential themselves (no launcher key).
+    # A sky island whose store sky Storage cannot mount does the same.
     # --modal-store-secret reaches only the Modal islands: a sky or SSH island of the
     # same launch gets the launcher's store credential (shipped as a sky secret).
     try:
         envs = island_envs(store, store_client_environ(args),
-                           stage=int(num_nodes) == 1 or cloud in NO_BUCKET_MOUNT_CLOUDS,
+                           stage=int(num_nodes) == 1 or cloud in NO_BUCKET_MOUNT_CLOUDS or unmountable,
                            credentials=not (cloud == "ssh" and ssh_nodes_hold_store_credentials(args)))
     except ValueError as exc:
         if modal_store_secret_name(args):

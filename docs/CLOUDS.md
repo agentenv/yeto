@@ -156,6 +156,14 @@ the whole store by object (`yeto.cloud.s3_store`, `STAGE_ENV`): round cuts,
 `LATEST`, the sample buffer, policy releases and trainer commands. The head
 (trainer scheduler, convertible pool) reads the same store by object key.
 
+A sky island (AWS, Nebius, ...) with the same store does the same: sky Storage
+mounts an `s3://` source only from AWS S3, so a store on a custom endpoint (R2,
+MinIO) gets no sky Storage mount. The island stages it on each node and moves
+it by object, with the URL, endpoint and key in its environment and the secret
+as a sky task secret. The dry run and the launch print one line per such island
+(`... no sky Storage mount`), and the dry run's island request carries
+`checkpoint_store_access`. An `s3://` store on AWS S3 is still mounted.
+
 - Endpoint: `--rl-object-store-endpoint https://<account>.r2.cloudflarestorage.com`
   (or `AWS_ENDPOINT_URL` in the launcher environment). The region becomes
   `auto` unless one is configured; the launcher exports the endpoint to its

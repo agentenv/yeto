@@ -166,14 +166,14 @@ def test_object_store_endpoint_reaches_the_head_and_the_islands(monkeypatch):
     assert env[s3_store.ENDPOINT_ENV] == "http://minio:9000" and s3_store.REGION_ENV not in env
     # no endpoint: nothing added (AWS S3)
     assert storage.store_client_environ(SimpleNamespace(), {"X": "1"}) == {"X": "1"}
-    # the launcher's own boto3 clients (head object API, code pack) see the endpoint too
-    storage.apply_object_store_endpoint(args)
+    # the launcher's own boto3 clients (head object API, code pack) see the endpoint too;
+    # it writes os.environ directly: a copy here, so the process environment is untouched
     import os
 
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    storage.apply_object_store_endpoint(args)
     assert os.environ[s3_store.ENDPOINT_ENV] == R2 and os.environ["AWS_ENDPOINT_URL"] == R2
     assert os.environ[s3_store.REGION_ENV] == "auto"
-    for name in (s3_store.ENDPOINT_ENV, s3_store.REGION_ENV, "AWS_ENDPOINT_URL"):
-        monkeypatch.delenv(name)
 
 
 def test_s3_store_on_modal_is_head_readable_and_reachable():
