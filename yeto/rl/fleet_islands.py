@@ -60,10 +60,39 @@ def trainer_by_name(doc: dict[str, Any], name: str) -> dict[str, Any]:
     return member
 
 
-def next_learner_id(objects: Any, plan: Any, doc: dict[str, Any]) -> int:
-    """The id :func:`allocate_learner_id` would claim now (a dry run claims nothing)."""
+def unused_claim(objects: Any, doc: dict[str, Any], name: str) -> int | None:
+    """A learner id claimed for island ``name`` by an earlier ``add`` whose desired state
+    write then failed: no trainer member has it, no island record exists under it (it
+    never launched). That add's retry takes it again, so a failed write burns no id."""
+    from yeto.launch.island_lifecycle import STATE_DIR  # noqa: PLC0415
+    from yeto.launch.learner_ids import CLAIM_NAME  # noqa: PLC0415
+    from yeto.rl.trainer_worker import LAUNCH_RECORD  # noqa: PLC0415
+
+    in_doc = {int(m["learner_id"]) for m in dz.trainers(doc).values()}
+    files: dict[int, set[str]] = {}
+    for key in objects.list(f"{STATE_DIR}/"):
+        parts = str(key).split("/")
+        if len(parts) >= 4 and parts[-2].isdigit():
+            files.setdefault(int(parts[-2]), set()).add(parts[-1])
+    for k in sorted(files):
+        if k in in_doc or CLAIM_NAME not in files[k] or files[k] & {"state.json", LAUNCH_RECORD}:
+            continue
+        try:
+            claim = json.loads(objects.read(f"{STATE_DIR}/{k}/{CLAIM_NAME}") or b"{}")
+        except ValueError:
+            continue
+        if isinstance(claim, dict) and claim.get("island") == str(name):
+            return k
+    return None
+
+
+def next_learner_id(objects: Any, plan: Any, doc: dict[str, Any], name: str | None = None) -> int:
+    """The id :func:`allocate_learner_id` would claim now (a dry run claims nothing), or
+    the id an earlier failed ``add`` of ``name`` claimed (:func:`unused_claim`)."""
     from yeto.launch.learner_ids import taken_ids  # noqa: PLC0415
 
+    if name is not None and (k := unused_claim(objects, doc, name)) is not None:
+        return k
     taken = taken_ids(objects) | {int(m["learner_id"]) for m in dz.trainers(doc).values()}
     for k in range(len(plan.islands), int(plan.max_islands)):
         if k not in taken:
@@ -212,7 +241,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
             with open(args.samplers) as fh:
                 samplers = json.load(fh)
             objects = run._objects()  # noqa: SLF001
-            k = next_learner_id(objects, plan, doc)
+            k = next_learner_id(objects, plan, doc, args.name)
             member, pools = compile_island(run.cfg, plan, k=k, name=args.name, gpu=args.gpu,
                                            usd_per_h=args.usd_per_h, samplers=samplers,
                                            island_argv=args.trainer_arg)
@@ -238,8 +267,10 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
     if args.island_command == "add":
         from yeto.launch.learner_ids import allocate_learner_id  # noqa: PLC0415
 
-        claimed = allocate_learner_id(objects, launched=len(plan.islands), max_learners=int(plan.max_islands),
-                                      island=args.name)
+        claimed = unused_claim(objects, current, args.name)
+        if claimed is None:
+            claimed = allocate_learner_id(objects, launched=len(plan.islands), max_learners=int(plan.max_islands),
+                                          island=args.name)
         if claimed != int(launch_member["learner_id"]):  # another add claimed it meanwhile: compile again
             launch_member, pools = compile_island(run.cfg, plan, k=claimed, name=args.name, gpu=args.gpu,
                                                   usd_per_h=args.usd_per_h, samplers=samplers,

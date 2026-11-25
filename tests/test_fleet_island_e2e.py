@@ -6,14 +6,19 @@ A two-island fleet trains. ``yeto fleet island add`` (its functions) writes a th
 island and its pool into the desired state: the worker starts its launch under learner
 id 2 (claimed in the store), the island catches up to the newest outer weights and
 merges. ``remove`` then takes island 1 and its pool out: the worker writes island 1's
-STOP, its launch leaves the syncer (LEAVE stopped) and ends, and the rounds merge over
-islands 0 and 2 with renormalized weights. Island 0 runs one launch from start to end.
-The final cut equals the f32 Nesterov recomputation of every merged round (1e-6).
+STOP and its launch ends, and the rounds merge over islands 0 and 2 with renormalized
+weights. Island 0 runs one launch from start to end. The final cut equals the f32
+Nesterov recomputation of every merged round (1e-6).
+
+Two ways island 1 ends: it answers its round and leaves (LEAVE stopped), or, as the
+island STOP does today (the launch tears its machines down), it is gone without a
+LEAVE: the rounds in flight wait for its lease (5 s here) and the syncer drops it.
 """
 
 from __future__ import annotations
 
 import json
+import time
 
 import numpy as np
 import pytest
@@ -41,13 +46,23 @@ from yeto.rl import fleet, fleet_islands, island_launches, trainer_worker
 from yeto.rl.engine.object_store import DirectoryObjectStore
 
 
+# Without a LEAVE: leases long enough that the fake trainers (they send nothing while a
+# round waits) stay in the pool, and a short soft deadline that bounds the round the
+# torn-down island never answers.
+NO_LEAVE_SOFT_DEADLINE_S = 8
+NO_LEAVE_POOL = tuple({"5": "60", "30": str(NO_LEAVE_SOFT_DEADLINE_S)}.get(a, a) for a in POOL)
+
+
 class SyncerTrainers(FakeLaunches):
     """Each island launch is a syncer client of its learner id; a launch ends when its
     island STOP is seen (LEAVE stopped), as the launch's fleet controller ends it."""
 
-    def __init__(self, port: int, profile_hash: str, states: lifecycle.IslandStateStore) -> None:
+    def __init__(self, port: int, profile_hash: str, states: lifecycle.IslandStateStore, *,
+                 leave: bool = True) -> None:
         super().__init__()
-        self.port, self.profile_hash, self.states = port, profile_hash, states
+        self.port, self.profile_hash, self.states, self.leave = port, profile_hash, states, leave
+        self.stopped_at: float | None = None
+        self.unanswered: list = []
         self.clients: dict[int, object] = {}
         self.prefix_of: dict[int, str] = {}
         self.catching: dict[int, dict] = {}
@@ -67,17 +82,26 @@ class SyncerTrainers(FakeLaunches):
     def stop_requested(self, finish) -> None:
         for k in list(self.clients):
             if self.states.stop_requested(k) is not None:
-                finish(k)  # it answers the round it holds a PULL of, then leaves
+                if self.leave:
+                    finish(k)  # it answers the round it holds a PULL of, then leaves
+                else:  # torn down while a round waits for it: it holds a PULL it never answers
+                    held = self.clients[k].drain_pulls()
+                    if not held:
+                        continue
+                    self.unanswered = held
                 client = self.clients.pop(k)
-                client.send_leave(2)  # stopped: the island leaves the pool on purpose
-                client.close()
+                if self.leave:
+                    client.send_leave(2)  # stopped: the island leaves the pool on purpose
+                client.close()  # without LEAVE: its machines torn down, the connection just drops
+                self.stopped_at = time.monotonic()
                 self.left.append(k)
                 self.end(self.prefix_of[k], 0)
 
 
 @needs_cargo
+@pytest.mark.parametrize("leave", [True, False], ids=["leave", "torn-down-without-leave"])
 def test_islands_join_and_leave_a_training_fleet_through_the_desired_state(syncer_binary, tmp_path,  # noqa: F811
-                                                                           monkeypatch):
+                                                                           monkeypatch, leave):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "async-rounds-test-key")
     cfg = example(tmp_path, max_islands=MAX_LEARNERS)
     plan = fleet.plan_of(cfg)
@@ -90,12 +114,13 @@ def test_islands_join_and_leave_a_training_fleet_through_the_desired_state(synce
 
     total_steps, join_at = 10, 3
     log_file = tmp_path / "syncer.log"
-    process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *POOL, total_steps=total_steps,
+    pool = POOL if leave else NO_LEAVE_POOL
+    process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *pool, total_steps=total_steps,
                                                       log_file=log_file)
     island_launches.write_syncer_record(objects, addr=f"127.0.0.1:{port}", syncer_epoch=0, learners=LAUNCHED,
                                         max_learners=MAX_LEARNERS, run="r")
     states = lifecycle.IslandStateStore(objects, log=lambda m: None)
-    launches = SyncerTrainers(port, profile_hash, states)
+    launches = SyncerTrainers(port, profile_hash, states, leave=leave)
     worker = trainer_worker.TrainerWorker(store, objects, launches, states, log=lambda m: None)
     versions = {k: [0] * P for k in range(MAX_LEARNERS)}
     seen: dict[int, set] = {k: set() for k in range(MAX_LEARNERS)}
@@ -146,6 +171,8 @@ def test_islands_join_and_leave_a_training_fleet_through_the_desired_state(synce
         # a joiner catches up before the fleet moves on (as the dynamic-member test does): the
         # recomputation below has no carry-over of a PULL the joiner answered late
         for k in list(launches.catching) or list(launches.clients):
+            if not leave and states.stop_requested(k) is not None:
+                continue  # its machines are being torn down: it answers nothing more
             drain(k)
         if launches.catching:
             return False
@@ -200,8 +227,22 @@ def test_islands_join_and_leave_a_training_fleet_through_the_desired_state(synce
     at_leave = next(i for i, line in enumerate(tape) if '"pool_leave"' in line and '"island_id":1' in line)
     after = [json.loads(line) for line in tape[at_leave:] if '"kind":"outer_step"' in line][2 * P:]
     assert after and all(int(e[0]) in (0, 2) for r in after for e in r["raw_weights"])
+    events = [json.loads(line) for line in tape]
+    (gone,) = [e for e in events if e.get("kind") == "pool_leave" and int(e.get("island_id", -1)) == 1]
+    stalled = [r for r in steps if r["timed_out"]]
     for record in steps:
-        assert abs(sum(float(e[2]) for e in record["weights"]) - 1.0) < 1e-9 and not record["timed_out"]
+        assert abs(sum(float(e[2]) for e in record["weights"]) - 1.0) < 1e-9
+    if leave:
+        assert gone["reason"] == "stopped" and stalled == []
+    else:
+        # torn down holding a PULL (no LEAVE): the syncer sees the connection drop, but the
+        # round it asked island 1 for waits for its soft deadline and merges without it: the
+        # merge stall a remove or move costs today (unset deadline: the quorum timeout)
+        assert gone["reason"] == "disconnected" and launches.unanswered
+        assert stalled and all(r.get("absent") == [1] for r in stalled)
+        opened = {(e["global_step"], e["fragment"]): e["time_unix"] for e in events if e.get("kind") == "round_open"}
+        for r in stalled:
+            assert r["time_unix"] - opened[(r["step"], r["fragment"])] >= NO_LEAVE_SOFT_DEADLINE_S - 1
     expected = _nesterov(steps)
     assert finals.keys() == {0, 2}
     for fid in range(P):

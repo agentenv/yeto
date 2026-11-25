@@ -181,3 +181,26 @@ def test_the_worker_moves_an_island_from_modal_to_aws_under_its_learner_id(fleet
     assert launches.started("r-i0") == 1 and launches.alive("r-i0") and launches.stops == []
     worker.step()
     assert worker.load(1)["state"] == trainer_worker.RUNNING and len(launches.starts) == 3
+
+
+def test_an_add_whose_write_failed_takes_its_claimed_id_again(fleet_store, monkeypatch, capsys):
+    cfg, objects, store, run_cli, samplers = fleet_store
+    real = store.update
+
+    def conflict(*a, **k):
+        raise dz.DesiredConflict(1, 2)
+
+    monkeypatch.setattr(store, "update", conflict)
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers)) == 3
+    assert objects.read(claim_key(2)) is not None and "north" not in dz.trainers(store.read())
+    monkeypatch.setattr(store, "update", real)
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers),
+                   "--dry-run") == 0
+    assert "launch of north (learner 2," in capsys.readouterr().out
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers)) == 0
+    assert dz.trainers(store.read())["north"]["learner_id"] == 2 and objects.read(claim_key(3)) is None
+    # another island's add never takes that claim: id 3
+    other = samplers.parent / "south.samplers.json"
+    other.write_text(json.dumps([dict(cfg["islands"][1]["samplers"][0], name="sglang-south")]))
+    assert run_cli("add", "--name", "south", "--gpu", "modal:1x2xh100", "--samplers", str(other)) == 0
+    assert dz.trainers(store.read())["south"]["learner_id"] == 3
