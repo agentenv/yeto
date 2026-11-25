@@ -15,6 +15,9 @@ share one syncer. While the fleet trains you can:
 The other islands keep training through each of these changes. A single trainer run (no
 `islands`) is not affected by anything in this page.
 
+A fleet whose islands train with verl (`--rl-backend verl`) works the same way. Its
+admission rules, images and trainer cards are in [VERL_FLEET.md](VERL_FLEET.md).
+
 ## Turning it on
 
 ```json
