@@ -386,10 +386,13 @@ class _Fsdp2Harness:
 
 
 def _train_rounds(learner_id, plan, results, *, stop_after=None, pace_s=0.05, max_rounds=4000,
-                  harness=_Fsdp2Harness):
+                  harness=_Fsdp2Harness, in_pool=None, hold=None):
     """One verl island process: train and sync until the final cut, or die
     (close its links, no LEAVE) after ``stop_after`` rounds. ``pace_s`` per
-    local round: quorum 1 lets an island run far ahead of the syncer's steps."""
+    local round: quorum 1 lets an island run far ahead of the syncer's steps.
+    ``in_pool`` (an Event) is set once this process joined and cleared when it
+    dies; ``hold()``, before each local round, may block until another island's
+    process is in the pool (events, never a wall-clock guess)."""
     trainer = harness()
     island = trainer.island
     sync, _policy_state, stream = vfs.build_full_parameter_sync(island, plan, backend_identity_sha256="c" * 64)
@@ -398,6 +401,8 @@ def _train_rounds(learner_id, plan, results, *, stop_after=None, pace_s=0.05, ma
     try:
         state = sync.start(driver).state
         record["joined"] = sync.joined_running_pool
+        if in_pool is not None:
+            in_pool.set()
         record["versions_at_start"] = list(stream.fragment_versions)
         now = trainer.values()
         record["anchors_equal_checkpoint"] = all(
@@ -405,7 +410,11 @@ def _train_rounds(learner_id, plan, results, *, stop_after=None, pace_s=0.05, ma
         for round_id in range(max_rounds):
             if stop_after is not None and round_id == stop_after:
                 record["died"] = True
+                if in_pool is not None:
+                    in_pool.clear()
                 return
+            if hold is not None:
+                hold()
             trainer.train(learner_id, round_id)
             ids = (f"l{learner_id}-p{id(record)}-r{round_id}",)
             batch_hash = hashlib.sha256(ids[0].encode()).hexdigest()
@@ -464,6 +473,16 @@ def run_catch_up_case(syncer_binary, tmp_path, monkeypatch, *, harness=_Fsdp2Har
     real_client = engine_stream.SyncerClient
     lock = threading.Lock()
     leave = {"from": None, "left": [], "clients": {}}
+    # Island 0 alone could also run all 12 rounds before island 1's first process
+    # did its 3 rounds (quorum 1; island 1 joined late on a loaded host and saw the
+    # end instead of dying), or before the new process joined. So island 0 trains
+    # only while a process of island 1 is in the pool: from its first join to its
+    # death, and again from the new process's join.
+    island_1_in_pool = threading.Event()
+
+    def hold_for_island_1():
+        if not island_1_in_pool.wait(timeout=180):
+            raise TimeoutError("no process of island 1 joined the pool")
 
     def client_factory(*args, **kwargs):
         client = real_client(*args, **kwargs)
@@ -498,14 +517,16 @@ def run_catch_up_case(syncer_binary, tmp_path, monkeypatch, *, harness=_Fsdp2Har
     results: dict = {}
     try:
         plans = [plan_fn(i, port, profile, rounds=rounds, fragments=fragments) for i in range(2)]
-        steady = threading.Thread(target=_train_rounds, args=(0, plans[0], results), kwargs={"harness": harness})
+        steady = threading.Thread(target=_train_rounds, args=(0, plans[0], results),
+                                  kwargs={"harness": harness, "hold": hold_for_island_1})
         steady.start()
         first = threading.Thread(target=_train_rounds, args=(1, plans[1], results),
-                                 kwargs={"stop_after": 3, "harness": harness})
+                                 kwargs={"stop_after": 3, "harness": harness, "in_pool": island_1_in_pool})
         first.start()
         first.join(timeout=60)
         assert results[1][0].get("died") and "error" not in results[1][0], results[1][0].get("error")
-        again = threading.Thread(target=_train_rounds, args=(1, plans[1], results), kwargs={"harness": harness})
+        again = threading.Thread(target=_train_rounds, args=(1, plans[1], results),
+                                 kwargs={"harness": harness, "in_pool": island_1_in_pool})
         again.start()
         for thread in (steady, again):
             thread.join(timeout=120)
