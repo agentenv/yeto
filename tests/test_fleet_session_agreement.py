@@ -43,21 +43,26 @@ def _islands(cfg) -> dict[str, list[str]]:
     plan = fleet.plan_of(cfg)
     out = {m["name"]: island_launches.launch_argv(m, syncer=RECORD)
            for m in island_launches.trainer_members(cfg, plan)}
-    entry = dict(cfg["islands"][-1]["samplers"][0], name="sglang-north")
-    added, _ = fleet_islands.compile_island(cfg, plan, k=2, name="north", gpu="modal:1x2xh100", usd_per_h=8.0,
-                                            samplers=[entry])
-    out["north (added)"] = island_launches.launch_argv(added, syncer=RECORD)
+    if int(plan.max_islands) > len(plan.islands):  # room for an island added while it trains
+        entry = dict(cfg["islands"][-1]["samplers"][0], name="sglang-north")
+        added, _ = fleet_islands.compile_island(cfg, plan, k=len(plan.islands), name="north", gpu="modal:1x2xh100",
+                                                usd_per_h=8.0, samplers=[entry])
+        out["north (added)"] = island_launches.launch_argv(added, syncer=RECORD)
     moved = island_launches.trainer_members(cfg, plan)[-1]
     out[f"{moved['name']} (moved)"] = island_launches.launch_argv(
         {**moved, "gpu": "aws:2xh100@us-east-2"}, incarnation=1, syncer=RECORD)
     return out
 
 
-@pytest.mark.parametrize("islands", [2, 1])
-def test_every_island_launch_compiles_the_syncer_launch_s_profile_and_session(tmp_path, islands):
-    """Two islands: the outer Nesterov (lr 0.7, momentum 0.9) on every launch; one: the
-    identity merge (1.0, 0.0) on every launch, an island added later too."""
-    doc = example_doc(tmp_path)
+@pytest.mark.parametrize("islands, max_islands, nesterov", [(2, 4, True), (1, 3, True), (1, None, False)])
+def test_every_island_launch_compiles_the_syncer_launch_s_profile_and_session(tmp_path, islands, max_islands,
+                                                                              nesterov):
+    """The outer optimizer follows the fleet plan's static size (fleet.max_islands, else
+    the declared islands), never the islands running now: two islands, or one planned to
+    grow to three, run the outer Nesterov (lr 0.7, momentum 0.9) on every launch, an
+    island added later too; one island with no room for more runs the identity merge
+    (1.0, 0.0)."""
+    doc = example_doc(tmp_path, max_islands=max_islands)
     doc["islands"] = doc["islands"][:islands]
     path = tmp_path / "run.json"
     path.write_text(json.dumps(doc))
@@ -65,7 +70,9 @@ def test_every_island_launch_compiles_the_syncer_launch_s_profile_and_session(tm
     syncer_args = _prepared([*cfg["trainer"]["argv"], "--controller", "local"])
     syncer_profile, syncer_flags = _session(syncer_args)
     assert syncer_profile["learners"] == islands
-    assert syncer_profile["outer_momentum"] == (pytest.approx(0.9) if islands == 2 else 0.0)
+    assert ("north (added)" in _islands(cfg)) == (max_islands is not None)
+    assert syncer_profile["outer_momentum"] == (pytest.approx(0.9) if nesterov else 0.0)
+    assert syncer_profile["outer_lr"] == (pytest.approx(0.7) if nesterov else 1.0)
     for name, argv in _islands(cfg).items():
         island_profile, island_flags = _session(_prepared(argv))
         diff = {k: (v, island_profile.get(k)) for k, v in syncer_profile.items() if island_profile.get(k) != v}

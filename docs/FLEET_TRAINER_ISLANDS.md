@@ -97,7 +97,11 @@ compiles the syncer launch and each trainer island of the desired state (else of
 config) and compares the syncer semantic profile (naming the fields that differ), the
 HELLO-bound flags, the learners the syncer waits for, the syncer_epoch, and the learner
 ids (unique, and below `--rl-sync-max-learners`). `add` and `move` check the island they
-write the same way. An island launch off Modal (added there, or moved there) launches
+write the same way. Defaults that depend on the fleet's size follow its plan, not the
+islands running now. The async mode's outer Nesterov (lr 0.7, momentum 0.9) is on when
+`fleet.max_islands` (by default the declared islands) is 2 or more. A fleet planned for
+three islands that starts with one runs it from the start, and the islands added later run
+it too. An island launch off Modal (added there, or moved there) launches
 without the fleet's Modal-only flags (`--modal-store-secret`). It reads the run store with
 the launcher's store credential.
 
