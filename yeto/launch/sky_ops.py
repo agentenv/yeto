@@ -208,6 +208,11 @@ class SkySDKOps:
             return job_id
         except Exception as e:
             print(f"[launcher] relaunch of {cluster} failed: {e}", file=sys.stderr)
+            from .image_pull import ImagePullRefused, deterministic_pull_error, image_error_message
+
+            line = deterministic_pull_error(e)
+            if line is not None:  # the image cannot be pulled anywhere: not retried
+                raise ImagePullRefused(image_error_message(cluster, line)) from e
             return None
 
     def __init__(self, nodes_by_cluster=None):
