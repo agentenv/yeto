@@ -30,6 +30,9 @@ SAMPLER_FLOOR_S = 300.0  # the shortest quiet time a sampler is allowed (3 x p50
 SAMPLER_WAIT_EVENTS = {"rl_sampler_backlog_full": "backlog full (trainers behind)",
                        "rl_sampler_waiting_policy": "waiting for a policy release"}
 SAMPLER_END_EVENTS = frozenset({"rl_sampler_stopped", "rl_sampler_data_end"})
+SAMPLER_LEAVE_EVENT = "rl_sampler_leave"  # yeto.rl.engine.sampler_resume.LEAVE_EVENT
+# a sampler leave with one of these reasons finished its work; any other reason left the run early
+SAMPLER_DONE_REASONS = frozenset({"FINISHED", "DATA_END"})
 TRAINER_EVENTS = frozenset({"rl_round_trained", "rl_driver_start", "rl_group_policies",
                             "rl_buffer_stale_skipped", "rl_policy_released", "rl_policy_release_skipped",
                             "rl_buffer_unidentified_policy_skipped"})
@@ -77,11 +80,13 @@ POOL_TARGET = "nc_elastic_target_changed"
 # a scale-down victim finishing its trials in flight: still sampling, not left
 POOL_DRAINING = "nc_elastic_scale_draining"
 POOL_STOPPED = "nc_elastic_pool_stopped"
+POOL_SHARDS_RETIRED = "nc_elastic_shards_retired"  # a removed pool's member table retires its shards
 POOL_BLOCKED, POOL_UNBLOCKED = "nc_elastic_pool_blocked", "nc_elastic_pool_unblocked"  # the alert's blocked view
 POOL_KEYS = ("ticket", "account", "slot", "slot_name", "shard", "why", "reason", "detail", "error", "state", "after_s",
              "waited_s", "restarts", "attempt", "data_slot", "old", "new", "target", "outcome", "source",
              "by", "usd_per_h", "end_reason", "replaces", "continues_shard", "max_frac", "alerts",
-             "retry_in_s", "successor", "level", "action", "expected_ticket", "usable", "halted", "pool", "tick_s")
+             "retry_in_s", "successor", "level", "action", "expected_ticket", "usable", "halted", "pool", "tick_s",
+             "shards")
 # a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
 POOL_MANUAL_PREFIX = "nc_elastic_manual_"
 
@@ -234,7 +239,7 @@ def pool_state_event(p: dict) -> bool:
     stop, a person's operation, an order (``replaced_by``) or any event tying a ticket to
     a shard. The rest (retries, refusals, warnings) only fill the event table."""
     ev = str(p.get("event"))
-    return (ev in POOL_LEFT or ev in POOL_UP or ev in (POOL_TARGET, POOL_DRAINING, POOL_STOPPED,
+    return (ev in POOL_LEFT or ev in POOL_UP or ev in (POOL_TARGET, POOL_DRAINING, POOL_STOPPED, POOL_SHARDS_RETIRED,
                                                        "nc_elastic_ordered", POOL_BLOCKED, POOL_UNBLOCKED)
             or ev.startswith(POOL_MANUAL_PREFIX) or (p.get("shard") is not None and bool(p.get("ticket"))))
 
@@ -404,6 +409,7 @@ class AsyncState:
             latest = _latest_incarnation(s["incarnations"])
             if latest != s.get("incarnation"):
                 s["ended"] = False  # a restart: the earlier incarnation's stop is not this one's
+                s["left"] = None
             s["incarnation"] = latest  # the newest by start time, whatever order the tapes arrive in
         # the incarnation this record belongs to: its own, else the one its tape announced last,
         # else (an old tape without the announcement in the same source) the newest one
@@ -510,6 +516,9 @@ class AsyncState:
                 s["cap_ts"] = ts
         if ev in SAMPLER_END_EVENTS and rinc == s.get("incarnation"):
             s["ended"] = True  # an older incarnation's stop read late does not end the newest one
+        if ev == SAMPLER_LEAVE_EVENT and rinc == s.get("incarnation"):
+            # the sampler's own leave (FINISHED, FENCED by a pool removal or a roll, PREEMPTED, ...)
+            s["left"] = {"ts": ts, "reason": str(r.get("reason") or "") or None, "source": "sampler"}
         if ev == "rl_sampler_waiting":
             reason = str(r.get("reason") or "")
             s["last_wait"] = SAMPLER_WAIT_EVENTS.get(f"rl_sampler_{reason}", f"waiting ({reason or 'no reason'})")
@@ -627,7 +636,7 @@ class AsyncState:
     def sampler_state(self, iid: str) -> dict:
         s = self.sampler.get(iid) or {}
         return {"started_rounds": s.get("first_round_ts") is not None,
-                "waiting": s.get("last_wait"), "ended": bool(s.get("ended"))}
+                "waiting": s.get("last_wait"), "ended": bool(s.get("ended")), "left": s.get("left")}
 
     def pool_exit(self, iid: str, after: float | None = None) -> dict | None:
         """The NC pool's word on sampler ``iid`` (its shard): the last exit event of
@@ -652,6 +661,11 @@ class AsyncState:
                          "reason": cause["reason"] if cause else exit_reason(p),
                          "cause": cause["cause"] if cause else ev,
                          "cause_ts": cause["cause_ts"] if cause else p.get("ts")}
+            elif ev == POOL_SHARDS_RETIRED and str(iid) in {str(x) for x in p.get("shards") or ()}:
+                state = {"status": "left", "event": ev, "ts": p.get("ts"), "why": "retired", "ticket": None,
+                         "reason": state["reason"] if state else "retired (its pool was removed)",
+                         "cause": state["cause"] if state else ev,
+                         "cause_ts": state.get("cause_ts") if state else p.get("ts")}
             elif mine and ev in POOL_LEFT:
                 keep = (state is not None and ev in POOL_FOLLOW_UP and state["ticket"] == p.get("ticket")
                         and state["cause"] not in POOL_FOLLOW_UP)

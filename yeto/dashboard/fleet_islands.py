@@ -9,7 +9,15 @@ Read-only, like the rest of the dashboard. Two sources, both optional:
   copy next to a tape or under a local store directory, else the run store's object at most
   every ``PLAN_POLL_S``;
 * ``rl_sampler_start.island`` / ``.store``: the island (learner id) and the store each
-  external sampler runs on.
+  external sampler runs on;
+* the fleet's live membership (:func:`read_fleet_state`, read with the plan): the pools
+  ``yeto fleet apply`` added or removed after the plan (``fleet/applied/<seq>.json``: name,
+  provider, shard base, island, price), each pool's own state (``fleet/pools/<name>/state.json``:
+  stopped, retired shards), its member table (``trainer<k>/fleet/members/<name>.json``:
+  retired shards) and, for a retired shard, its sampler's member record
+  (``trainer<k>/sample-buffer/members/<shard>/<incarnation>.json``: the leave the sampler or
+  its pool wrote). A pool's sampler is named by its pool and provider, and a retired one is
+  shown as left (no heartbeat alert).
 
 Which island a sampler belongs to, strongest evidence first: its own ``island`` field; the
 plan pool whose shard base names its shard; the ``trainer<k>`` its store ends in. ``k`` is
@@ -137,6 +145,114 @@ def plan_candidates(paths: list[str], max_up: int = 3) -> list[str]:
     return out
 
 
+def _json(objects: Any, key: str) -> Any:
+    try:
+        data = objects.read(key)
+    except Exception:  # noqa: BLE001 - the store's own status reports read failures
+        return None
+    if not data:
+        return None
+    try:
+        return json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _keys(objects: Any, prefix: str) -> list[str]:
+    try:
+        return sorted(k for k in objects.list(prefix) if k.endswith(".json"))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _lane(row: dict) -> str:
+    """The store lane (``trainer<k>``) of an applied pool: its ``run_prefix`` names it
+    (``<run>/trainer<k>``), else its island."""
+    prefix = str(row.get("run_prefix") or "")
+    if "/" in prefix:
+        return prefix.split("/", 1)[1].strip("/")
+    return f"trainer{row.get('learner') if row.get('learner') is not None else 0}"
+
+
+def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
+    """The fleet's live membership from the run store (module doc): ``{"pools": {name: {name,
+    provider, shard_base, usd_per_h, learner, first_at, removed_at, removing, stopped,
+    retired}}, "shards": {shard: {pool, retired, left_at, leave_reason, incarnation,
+    left_by}}}``; None when the store has no applied membership. ``cache`` keeps the applied
+    generations (written once each) between reads."""
+    cache = {} if cache is None else cache
+    gens = []
+    for key in _keys(objects, "fleet/applied/"):
+        if key not in cache:
+            doc = _json(objects, key)
+            if not isinstance(doc, dict):
+                continue
+            cache[key] = doc
+        gens.append(cache[key])
+    if not gens:
+        doc = _json(objects, "fleet/applied.json")
+        gens = [doc] if isinstance(doc, dict) else []
+    if not gens:
+        return None
+    gens.sort(key=lambda g: (_int(g.get("seq")) or 0, _f(g.get("at")) or 0.0))
+    pools: dict[str, dict] = {}
+    for g in gens:
+        at = _f(g.get("at"))
+        here = set()
+        for m in g.get("members") or ():
+            if not isinstance(m, dict) or m.get("kind") != "sampler_pool" or not _str(m.get("name")):
+                continue
+            pool = m.get("pool") if isinstance(m.get("pool"), dict) else {}
+            row = pools.setdefault(m["name"], {"name": m["name"], "first_at": at})
+            row.update(provider=_str(pool.get("provider")), shard_base=_str(pool.get("shard_base")),
+                       usd_per_h=_f(pool.get("usd_per_h")), run_prefix=_str(pool.get("run_prefix")),
+                       learner=_int((pool.get("sampler") or {}).get("island")
+                                    if isinstance(pool.get("sampler"), dict) else None),
+                       removed_at=None)
+            here.add(m["name"])
+        for name, row in pools.items():
+            if name not in here and row.get("removed_at") is None:
+                row["removed_at"] = at  # dropped from the fleet's applied membership
+        removing = {str(x.get("name") if isinstance(x, dict) else x) for x in g.get("removing") or ()}
+        for name, row in pools.items():
+            row["removing"] = name in removing
+    shards: dict[str, dict] = {}
+    for name, row in pools.items():
+        st = _json(objects, f"fleet/pools/{name}/state.json")
+        st = st if isinstance(st, dict) else {}
+        table = _json(objects, f"{_lane(row)}/fleet/members/{name}.json")
+        table = table if isinstance(table, dict) else {}
+        retired = sorted({str(x) for x in (st.get("retired_shards") or []) + (table.get("retired") or [])})
+        row.update(stopped=_str(st.get("stopped")), retired=retired, lane=_lane(row))
+        row.pop("run_prefix", None)
+        for shard in retired:
+            rec = {"pool": name, "retired": True, "retired_at": _f(table.get("updated_at")), "left_at": None,
+                   "leave_reason": None, "incarnation": None, "left_by": None}
+            newest = None
+            for key in _keys(objects, f"{row['lane']}/sample-buffer/members/{shard}/"):
+                m = _json(objects, key)
+                if isinstance(m, dict) and (newest is None or (_f(m.get("joined_at")) or 0) >= (_f(newest.get("joined_at")) or 0)):
+                    newest = m
+            if newest is not None:
+                rec.update(left_at=_f(newest.get("left_at")), leave_reason=_str(newest.get("leave_reason")),
+                           incarnation=_str(newest.get("incarnation")),
+                           left_by=_str((newest.get("detail") or {}).get("left_by"))
+                           if isinstance(newest.get("detail"), dict) else None)
+            shards[shard] = rec
+    return {"pools": pools, "shards": shards}
+
+
+def state_pool(state: dict | None, sid: str) -> dict | None:
+    """The applied pool whose shard base names sampler ``sid`` (longest base), else None."""
+    best = None
+    for row in ((state or {}).get("pools") or {}).values():
+        base = row.get("shard_base")
+        if base and (sid == base or (sid.startswith(base + "-") and sid[len(base) + 1:].isdigit())):
+            if best is None or len(base) > len(best["shard_base"]):
+                best = row
+    return best
+
+
 class PlanFile:
     """Feeds ``fleet/plan.json`` to a reducer (``Reducer.load_fleet_plan``): the first local
     candidate that exists (read again when its mtime changes), else the run store's copy
@@ -159,8 +275,25 @@ class PlanFile:
         self._store_bytes: bytes | None = None
         self._tapes: dict[str, Any] = {}
         self.substores: list[str] = []
+        self._next_state: float | None = None
+        self._state_cache: dict = {}
+
+    def pump_state(self, reducer) -> bool:
+        """The fleet's live membership (:func:`read_fleet_state`) at most every ``interval_s``."""
+        if self.objects is None or not callable(getattr(reducer, "load_fleet_state", None)):
+            return False
+        now = self.clock()
+        if self._next_state is not None and now < self._next_state:
+            return False
+        self._next_state = now + self.interval_s
+        state = read_fleet_state(self.objects, self._state_cache)
+        return False if state is None else reducer.load_fleet_state(state)
 
     def pump(self, reducer) -> bool:
+        changed = self._pump_plan(reducer)
+        return self.pump_state(reducer) or changed
+
+    def _pump_plan(self, reducer) -> bool:
         for p in self.candidates:
             try:
                 st = p.stat()
@@ -350,6 +483,7 @@ def resolve(reducer, tids: list[str] | None = None) -> dict | None:
 
 def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
     starts = sampler_starts(reducer)
+    state = getattr(reducer, "fleet_state", None)
     if not plan and not any(_int(r.get("island")) is not None for r in starts.values()):
         return None
     asy = reducer.async_
@@ -390,15 +524,24 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
             pool_of[sid] = name
             continue
         hit = _plan_pool(plan, sid)
-        name = hit[1]["name"] if hit is not None and hit[0] == k else SHARD_N.sub("", sid)
+        applied = state_pool(state, sid) if hit is None or hit[0] != k else None
+        name = (hit[1]["name"] if hit is not None and hit[0] == k else applied["name"] if applied is not None
+                else SHARD_N.sub("", sid))
         pool = next((p for p in isl["pools"] if p["name"] == name), None)
-        if pool is None:  # no plan pool names it: the samplers sharing a shard base are one pool
+        if pool is None:  # no plan pool names it: an applied pool (fleet apply), else its shard base
             prov = (asy.sampler.get(sid) or {}).get("provenance") or {}
-            pool = {"name": name, "source_name": None, "provider": None, "shard_base": name,
-                    "engine": _str(prov.get("engine")), "rollout_quant": None, "usd_per_h": None, "samplers": []}
+            pool = {"name": name, "source_name": None, "provider": (applied or {}).get("provider"),
+                    "shard_base": (applied or {}).get("shard_base") or name,
+                    "engine": _str(prov.get("engine")), "rollout_quant": None,
+                    "usd_per_h": (applied or {}).get("usd_per_h"), "samplers": []}
             isl["pools"].append(pool)
         pool["samplers"].append(sid)
         pool_of[sid] = name
+    for isl in islands.values():  # a pool fleet apply removed: drawn as ended, not as running
+        for p in isl["pools"]:
+            row = ((state or {}).get("pools") or {}).get(p["name"])
+            if row is not None and row.get("removed_at") is not None:
+                p["removed"] = {"at": row["removed_at"], "why": row.get("stopped") or "removed from the fleet"}
     if any(p.get("source") == "miles" for isl in islands.values() for p in isl["pools"]):
         # both kinds in the fleet: every row names its source (a fleet of pools alone keeps its rows)
         for isl in islands.values():

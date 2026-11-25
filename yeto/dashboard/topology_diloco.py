@@ -558,6 +558,8 @@ def _fleet_part(fleet: dict, asy) -> dict:
                    "card": card, "arch": arch_of(card),
                    "topology": prov.get("topology"),
                    "samplers": list(p["samplers"])}
+            if p.get("removed"):  # fleet apply removed the pool: drawn as ended
+                row["removed"] = p["removed"]
             if "source" in p:  # a fleet with Miles sampler islands: where each sampler row runs
                 row["source"] = p["source"]
             if p.get("source") == "miles":

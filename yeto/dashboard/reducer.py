@@ -354,6 +354,9 @@ class Reducer:
         self.fleet_plan: dict | None = None
         self.fleet_plan_source: str | None = None
         self.fleet_plan_seq = 0  # bumped by every plan change (the cached views key on it)
+        # the fleet's live membership: pools fleet apply added / removed, retired shards and their
+        # samplers' leaves (fleet_islands.read_fleet_state); None until the store has one
+        self.fleet_state: dict | None = None
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
@@ -616,6 +619,41 @@ class Reducer:
         self.fleet_plan, self.fleet_plan_source = plan, source
         self.fleet_plan_seq += 1
         return True
+
+    def load_fleet_state(self, state: Any) -> bool:
+        """Take the fleet's live membership (``fleet_islands.read_fleet_state``); False when it
+        did not change."""
+        if not isinstance(state, dict) or state == self.fleet_state:
+            return False
+        self.fleet_state = state
+        self.fleet_plan_seq += 1
+        return True
+
+    def _membership_left(self, isl: dict) -> dict | None:
+        """Sampler ``isl`` ended by the fleet's membership (``fleet_state``): the leave its member
+        record names (written by the sampler, or by its pool for a removed pool's sampler that
+        wrote none), else its shard retired by its pool's member table (the pool was removed or
+        scaled it down). None when the membership does not end it."""
+        rec = ((self.fleet_state or {}).get("shards") or {}).get(isl["id"])
+        if not rec:
+            return None
+        cur = (self.async_.sampler.get(isl["id"]) or {}).get("incarnation")
+        if rec.get("left_at") is not None and (rec.get("incarnation") is None or cur is None
+                                               or rec["incarnation"] == cur):
+            reason = rec.get("leave_reason") or "left"
+            by = "its pool" if rec.get("left_by") == "pool" else "the sampler"
+            return {"ts": rec["left_at"], "reason": reason, "source": "member record",
+                    "detail": f"leave {reason} written by {by} in its member record (pool {rec.get('pool')})",
+                    "done": reason in async_rl.SAMPLER_DONE_REASONS, "pool": rec.get("pool")}
+        if rec.get("retired"):
+            pool = rec.get("pool")
+            row = ((self.fleet_state or {}).get("pools") or {}).get(pool) or {}
+            removed = row.get("removed_at") is not None
+            return {"ts": rec.get("retired_at"), "reason": "pool removed" if removed else "retired",
+                    "source": "pool member table", "done": False, "pool": pool,
+                    "detail": f"shard retired by pool {pool}'s member table"
+                              + (" (fleet apply removed the pool)" if removed else " (scaled down)")}
+        return None
 
     def guard_drop_rates(self) -> dict[str, dict]:
         """Data-dropping guards' share of the data dropped over their recent rounds
@@ -1475,6 +1513,17 @@ class Reducer:
             left = {"ts": pool.get("cause_ts") or pool["ts"], "reason": pool["reason"], "event": pool["event"],
                     "ticket": pool.get("ticket"), "replaced_by": pool.get("replaced_by"),
                     "source": "nc pool", "lost": pool["status"] == "lost"}
+        if role == "sampler" and left is None:
+            # the sampler's own leave on its tape, else the fleet's membership (its member record,
+            # its shard retired): a removed pool's sampler is gone, not stale
+            own = (samp or {}).get("left")
+            gone = ({"ts": own["ts"], "reason": own.get("reason") or "left", "source": "sampler leave",
+                     "done": (own.get("reason") or "") in async_rl.SAMPLER_DONE_REASONS}
+                    if own else self._membership_left(isl))
+            if gone is not None and gone.pop("done"):
+                samp = {**(samp or {}), "ended": True}  # left after finishing its work: done
+            elif gone is not None:
+                left = {**gone, "lost": False}
         sl = isl["source_lost"]
         if left is None and sl and not sl.get("recovered") and sl.get("ts") is not None \
                 and (isl["last_event_ts"] or 0) <= sl["ts"] + STOP_SLACK_S and not isl["finalized"]:

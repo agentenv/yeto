@@ -106,7 +106,7 @@ function poolCard(p){var ss=(T.samplers||[]).filter(function(s){return p.sampler
   var vs=lv.map(function(s){return s.policy_version}).filter(fin),lg=lv.map(function(s){return s.lag}).filter(fin);
   var st=lv.some(function(s){return s.state==="sampling"})?"sampling":lv.length?(lv[0].state||"starting"):null;
   return{id:p.name,pool:p,ids:p.samplers,source:p.source||null,card:p.card||f0.card||null,precision:p.precision||f0.precision||null,engine:p.engine||f0.engine||null,arch:p.arch||f0.arch||null,
-    gpus:f0.gpus||p.gpus||null,live:lv.length>0,state:st,status:ss.length?(f0.status||"ended"):"not started",policy_version:vs.length?Math.max.apply(null,vs):null,
+    gpus:f0.gpus||p.gpus||null,live:lv.length>0,state:st,status:p.removed?"removed":ss.length?(f0.status||"ended"):"not started",policy_version:vs.length?Math.max.apply(null,vs):null,
     lag:lg.length?Math.max.apply(null,lg):null,rate_gpm:ss.reduce(function(a,x){return a+(x.rate_gpm||0)},0),n:p.samplers.length,nlive:lv.length}}
 // the sampler (or pool) a card shows, from the newest view (a card is built once per layout)
 function fresh(s){if(s.pool){var p=fpool(s.id);return p?poolCard(p):s}return (T.samplers||[]).filter(function(x){return x.id===s.id})[0]||s}
@@ -328,7 +328,7 @@ function samplerCard(nd,B,s,sn){
   el("text",{x:x2,y:33,"class":"tpm"},g,clip(src?s.id+prov:s.pool?s.id+prov+" · "+s.n+" sampler"+(s.n===1?"":"s"):
     ["sampler "+s.id,s.gpus?s.gpus+" GPU":null,sn.cloud].filter(Boolean).join(" · "),Math.floor((B.w-x2-7)/6.3)));
   return{ver:el("text",{x:B.w-10,y:18,"text-anchor":"end","class":"tpv"},g,""),dot:el("circle",{cx:16.5,cy:B.h-12.5,r:3.5},g),
-    st:el("text",{x:25,y:B.h-9,"class":"tps2"},g,""),rate:el("text",{x:B.w-10,y:B.h-9,"text-anchor":"end","class":"tpm"},g,""),s:s}}
+    st:el("text",{x:25,y:B.h-9,"class":"tps2"},g,""),rate:el("text",{x:B.w-10,y:B.h-9,"text-anchor":"end","class":"tpm"},g,""),g:g,s:s}}
 function store(nd,R){var g=el("g",{"data-td":"store"},nd);
   el("circle",{cx:R.cx,cy:R.cy,r:R.r,"class":"tpbox"},g);el("text",{x:R.cx,y:R.cy-4,"text-anchor":"middle","class":"tpt tpbig"},g,"Store");
   // the buffer and publisher lines sit under the circle: labels of the graph, not of the circle
@@ -415,7 +415,8 @@ function paintLearner(tr,l,lab,tn,lw){var ln=tr.learner||{},lp=tr.last_push,la=t
   fitText(lab[3],la?"  "+dur(tn-la.ts)+" ago":"",lab.w)}
 function paintSampler(o){var s=o.s;o.ver.textContent=fin(s.policy_version)?"v"+s.policy_version+(s.lag>0?" −"+s.lag:""):s.pool&&!s.live?"":"v?";
   o.ver.style.fill=s.lag>=2?C.bad:s.lag===1?C.warn:C.ink;var c=s.live?(s.state==="sampling"?C.good:s.state==="waiting"?C.warn:C.wt):C.ink2;
-  o.dot.setAttribute("fill",c);o.st.textContent=(s.live?s.state:(s.status||"ended"))+(s.pool&&s.n?" · "+s.nlive+"/"+s.n+" up":"");o.rate.textContent=(s.rate_gpm||0).toFixed(1)+" g/min"}
+  o.dot.setAttribute("fill",c);o.st.textContent=(s.live?s.state:(s.status||"ended"))+(s.pool&&s.n&&!(s.pool.removed&&!s.live)?" · "+s.nlive+"/"+s.n+" up":"");o.rate.textContent=(s.rate_gpm||0).toFixed(1)+" g/min";
+  if(o.g)o.g.setAttribute("opacity",s.pool&&s.pool.removed&&!s.live?0.55:1)}  // a pool fleet apply removed: dimmed
 function paintRollout(tr,o,tn,td){var r=tr.island,ro=o.ro,st=rolloutState(tr,tn),c=col(st[1]);
   ro.big.textContent=fin(r.round)?"round "+r.round:"round n/a";fitText(ro.st,st[0],ro.lw-14);ro.st.style.fill=st[1]==="good"?C.ink:c;ro.dot.setAttribute("fill",c);
   ro.barf.setAttribute("width",st[2]!=null?(ro.barW*st[2]/100).toFixed(1):0);
@@ -520,7 +521,8 @@ function tipHtml(key){var a=key.split(":"),tn=now(),tr=null;D.trainers.forEach(f
       row("status",mc.n?(mc.live?mc.state:mc.status):"not started")+row("serving",fin(mc.policy_version)?"v"+mc.policy_version:"no release loaded")+row("feeds","trainer "+tr.id+" (R2 lane "+laneName(tr)+")")+
       row("source of the row",(D.fleet.source==="plan"?"fleet/plan.json miles_samplers · ":"")+"launch tape rl_sampler_start.store")}
   if(a[0]==="node"&&tr&&a[2].charAt(0)==="s"&&fleet()){var pc=mine(tr)[+a[2].slice(1)]||{},pp=pc.pool||{};return '<div class="h">'+(pp.source?"External pool ":"Pool ")+esc(pc.id||"")+"</div>"+
-    row("pool in run.json",pp.source_name)+row("provider",pp.provider)+row("engine",pc.engine)+row("rollout precision",pc.precision)+row("cards",(pc.card||"GPU")+(fin(pc.gpus)?" × "+pc.gpus:""))+
+    row("pool in run.json",pp.source_name||(D.fleet.source==="plan"?"added by fleet apply":null))+row("provider",pp.provider)+
+    (pp.removed?row("removed",(pp.removed.why||"removed from the fleet")+(fin(pp.removed.at)?" · "+dur(now()-pp.removed.at)+" ago":"")):"")+row("engine",pc.engine)+row("rollout precision",pc.precision)+row("cards",(pc.card||"GPU")+(fin(pc.gpus)?" × "+pc.gpus:""))+
     row("samplers (up / all)",pc.nlive+" / "+pc.n+(pp.samplers&&pp.samplers.length?" · "+pp.samplers.join(", "):""))+row("serving",fin(pc.policy_version)?"v"+pc.policy_version:"no release loaded")+
     row("feeds","trainer "+tr.id+" (R2 lane "+laneName(tr)+")")+row("source",(D.fleet.source==="plan"?"fleet/plan.json · ":"")+"rl_sampler_start.island / .store / .provenance")}
   if(a[0]==="node"&&tr&&a[2].charAt(0)==="s"){var sp=mine(tr)[+a[2].slice(1)]||{},sn=snode(sp.id);return '<div class="h">'+esc(a[2]+" · "+(sn.machine_full||"machine not on the tape"))+"</div>"+

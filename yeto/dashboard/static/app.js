@@ -72,7 +72,7 @@ function leftText(s,l){return (s==="lost"?"lost":"left")+": "+(l.reason||"?")+(f
 function stBadge(s,c){var m={ok:["ok","healthy"],starting:["wn","starting"],stopped:["mu","stopped"],stale:["bd","stale"],waiting:["wn","waiting"],lost:["bd","lost"],
   left:["mu","left the run"],recovery:["bd","needs recovery"],done:["mu","finished"],unknown:["mu","no data"]}[s]||["mu",s];var t=m[1];
   if(c){if(s==="starting"&&c.startup_slow)t="starting (slow)";if(s==="waiting"&&c.waiting_reason)t="waiting: "+c.waiting_reason;if((s==="left"||s==="lost")&&c.left)t=leftText(s,c.left)}
-  return '<span class="st '+m[0]+'" title="'+esc(c&&c.role?c.role:"")+'"><i></i>'+esc(t)+'</span>'}
+  return '<span class="st '+m[0]+'" title="'+esc(c&&c.left&&c.left.detail&&(s==="left"||s==="lost")?c.left.detail:c&&c.role?c.role:"")+'"><i></i>'+esc(t)+'</span>'}
 
 /* theme + layout */
 var THEMES=["auto","light","dark"];
@@ -561,7 +561,7 @@ function relTable(rows,sids,tags,key,total){
     // a sampler starting on the base weights makes a v0 row with no trainer release: "base weights"
     c.rows.map(function(r){var base=r.trainer==null&&!fin(r.released_at);
       return '<tr><td class="l num">v'+esc(r.policy_version)+'</td><td class="num">'+(base?'<span class="note">base weights</span>':clock(r.released_at))+'</td><td class="num">'+(base||!fin(r.upload_s)?"—":f(r.upload_s,1)+" s")+'</td><td class="l">'+
-        (sids.length?sids.map(function(id){return loadTag((r.loads||{})[id],tags[id],id,r.policy_version)}).join(""):'<span class="note">no sampler</span>')+'</td></tr>'}).join(""))}
+        (sids.length?'<div class="lts">'+sids.map(function(id){return loadTag((r.loads||{})[id],tags[id],id,r.policy_version)}).join("")+'</div>':'<span class="note">no sampler</span>')+'</td></tr>'}).join(""))}
 function mmCell(m){return m?f(m.value,4)+' <span class="note" title="'+esc(m.method)+'">'+m.rounds+" round"+(m.rounds===1?"":"s")+"</span>":'<span class="note">not reported</span>'}
 var SRC_TAG={miles:["Miles native","var(--delta)"],external:["external pool","var(--traj)"]};
 function srcTag(s){var t=SRC_TAG[s];return t?' <span class="tag" style="border-color:'+t[1]+';color:'+t[1]+';font-weight:600;white-space:nowrap">'+t[0]+'</span>':""}
