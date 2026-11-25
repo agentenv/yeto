@@ -669,6 +669,11 @@ pools with different `prompts.dispense` settings, and a `holdout` file (give
 draws from its own slot of `--data` among the launch's sampler islands. A
 complete example: `examples/fleet/run.mixed-miles.json`.
 
+By default the fleet is one launch (`fleet.launch: synced_group`). With
+`fleet.launch: per_island` every trainer island is a launch of its own behind
+one syncer, and islands can be added, removed or moved while the fleet trains
+(`yeto fleet island add/remove/move`): [FLEET_TRAINER_ISLANDS.md](FLEET_TRAINER_ISLANDS.md).
+
 ## Launching
 
 A strict two-island run uses the default preset:
