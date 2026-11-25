@@ -313,7 +313,8 @@ def test_a_manual_hold_on_the_spot_pool_buys_no_on_demand(tmp_path):
     fleet, loop, spot_cloud, od_cloud = _held_spot_fleet(tmp_path)
     assert pool_run.scale_pool(*fleet.cfgs["spot"], 2) == 0  # a person holds the spot pool at 2
     _no_on_demand_for(fleet, loop, od_cloud, "manual hold")
-    assert "manual change" in loop.refused["spot"] and fleet.pools["spot"].config.target == 2
+    assert loop.refused["spot"].startswith("its scale write was refused: a manual change ")
+    assert "takes priority over automatic scaling" in loop.refused["spot"] and fleet.pools["spot"].config.target == 2
 
 
 @pytest.mark.parametrize("why", ["run budget breaker open: spend $50.00 of $50.00",
@@ -465,5 +466,16 @@ def test_a_broker_count_above_the_pools_slots_buys_no_on_demand(tmp_path):
     want["n"] = 4  # pool-scale refuses 4 on two slots: the pool keeps 2
     fleet.run(5400, loop)
     assert fleet.offer_counts("spot") == {"a": 2} and od_cloud.kinds("order") == []
-    assert "spot" in loop.refused and loop.state.spot_gap_since == {}
+    assert loop.refused["spot"].startswith("its scale write was refused: target 4 > 2 usable accounts")
+    assert loop.state.spot_gap_since == {}
     assert loop.last.targets == {"spot/a": 4, "od/x": 0}
+
+
+def test_a_stopped_pool_refuses_the_broker_with_its_stop_reason(tmp_path):
+    fleet = Fleet(tmp_path)
+    pool = fleet.add("spot", OfferCloud(fleet.clock, ["a"]))
+    pool.stopped = "stopped for the test"
+    pool.save(pool.state_path)
+    sink = b.ScaleFileSink(fleet.cfgs)
+    assert not sink.set_target("spot", 2, offers={"spot/a": 2}, refill="spot/a", running={})
+    assert sink.refusal("spot") == "the pool is stopped (stopped for the test)"

@@ -1135,7 +1135,8 @@ def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire:
 def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None, *,
                retire: list[str] | None = None, add: int = 0, remove: list[str] | None = None,
                mode: str | None = None, force_static: bool = False, dry_run: bool = False,
-               source: str = "manual", extra: dict[str, Any] | None = None) -> int:
+               source: str = "manual", extra: dict[str, Any] | None = None,
+               refusal: list[str] | None = None) -> int:
     """``pool-scale --config F (--target N | --add K | --remove T) [--retire T] [--drain|--fence]``:
     record the wanted target in the state dir. ``--add`` / ``--remove`` are relative to the
     target recorded when this command holds the scale lock (two concurrent ``--add 1``
@@ -1147,12 +1148,19 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None,
     default) or "auto" (an automatic scaler); an automatic request is refused for
     ``elastic.manual_hold_s`` after a manual one (manual operations take priority).
     The control file keeps the manual entries (paused tickets, released tickets) and
-    the tickets of an earlier request the loop has not applied yet."""
+    the tickets of an earlier request the loop has not applied yet. ``refusal``: a refused
+    request appends why to it (an automatic scaler reports the pool's own reason)."""
+
+    def refused(why: str, *, unchanged: bool = False) -> int:
+        print(f"pool-scale: refused{', nothing changed' if unchanged else ''}: {why}")
+        if refusal is not None:
+            refusal.append(why)
+        return 2
+
     check_state_file(cfg)
     retire = list(retire or []) + list(remove or [])
     if mode is not None and mode not in island_status.SCALE_DOWN_MODES:
-        print(f"pool-scale: refused: mode {mode!r} is not one of {list(island_status.SCALE_DOWN_MODES)}")
-        return 2
+        return refused(f"mode {mode!r} is not one of {list(island_status.SCALE_DOWN_MODES)}")
     state = cli.pool_state_path(cfg)
     path = scale_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1164,24 +1172,21 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None,
         except ValueError:
             doc = {}
         if doc.get("stopped"):
-            print(f"pool-scale: refused: the pool is stopped ({doc['stopped']})")
-            return 2
+            return refused(f"the pool is stopped ({doc['stopped']})")
         old = read_scale(cfg) or {}
         before = current_target(cfg, doc)
         wanted = target if target is not None else before + int(add) - len(remove or [])
         hold = cli.pool_config(cfg, allowed=None).elastic.manual_hold_s
         last_manual = old.get("manual_at")
         if source != "manual" and last_manual is not None and time.time() - float(last_manual) < hold:
-            print(f"pool-scale: refused, nothing changed: a manual change {time.time() - float(last_manual):.0f} s "
-                  f"ago takes priority over automatic scaling for elastic.manual_hold_s {hold:.0f} s")
-            return 2
+            return refused(f"a manual change {time.time() - float(last_manual):.0f} s ago takes priority over "
+                           f"automatic scaling for elastic.manual_hold_s {hold:.0f} s", unchanged=True)
         if int(old.get("seq", 0)) > int(doc.get("scale_seq", 0)):  # not applied yet: keep its tickets
             live = {m.get("ticket") for m in _counted(doc)}
             retire += [t for t in old.get("retire") or () if t not in retire and t in live]
         why = scale_refusal(cfg, doc, wanted, retire, force_static=force_static)
         if why is not None:
-            print(f"pool-scale: refused, nothing changed: {why}")
-            return 2
+            return refused(why, unchanged=True)
         change = "scale up" if wanted > before else "scale down" if wanted < before else "no change"
         if dry_run:
             print(f"pool-scale: dry run: target {before} -> {wanted} ({change}) would be accepted; nothing changed")
