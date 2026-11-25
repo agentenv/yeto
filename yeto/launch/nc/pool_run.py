@@ -745,12 +745,27 @@ def stopped_state_hint(state: Any, pool: IslandPool, cfg: dict[str, Any]) -> str
               "automatically; for a clean slate use a new run_prefix.")
 
 
+def _refused_banner(cfg: dict[str, Any], config_path: str) -> None:
+    """A refused (re)start still names the members an earlier loop of this pool left
+    billing: the refusal exits before the state is restored."""
+    try:
+        state = cli.pool_state_path(cfg)
+        doc = json.loads(state.read_text()) if state.exists() else {}
+    except (OSError, ValueError):
+        return
+    left = billed_members(doc)
+    if left:
+        _print_banner(billing_banner(config_path, left, why="refused restart, state not restored",
+                                     national=is_national_compute(cfg), kind=provider_kind(cfg)))
+
+
 def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: float, pool: IslandPool | None,
                      signals: _Signals | None) -> int:
     if cfg.get("route", "ssh") == "ssh":
         try:
             check_sampler_spec(cfg, pc)
         except ValueError as error:
+            _refused_banner(cfg, config_path)
             raise SystemExit(f"pool: CONFIGURATION ERROR, nothing ordered: {error}") from None
     state = cli.pool_state_path(cfg)
     try:

@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -391,6 +392,29 @@ def test_a_probe_that_does_not_fit_the_engine_context_is_refused_before_any_orde
     doc["checks"] = {**doc.get("checks", {}), "fixed_max_tokens": 1024}  # what the message asks for
     cfg, path = _cfg(tmp_path, spec_doc=doc)
     pool_run.check_sampler_spec(cfg)
+
+
+def test_a_refused_restart_names_the_members_an_earlier_loop_left_billing(tmp_path, capsys):
+    """The spec refusal exits before the pool state is restored: a restart of a pool
+    with live members still prints the billing banner for them."""
+    doc = json.loads(EXAMPLE_SPEC.read_text())
+    doc["reward"], doc["reward_kind"] = "yeto.rl.numeric_answer_reward:score", "miles"
+    doc["engine"]["server"]["max_model_len"] = 2048
+    doc["sampling"]["max_tokens"], doc["max_prompt_tokens"] = 1024, 512
+    cfg, path = _cfg(tmp_path, spec_doc=doc)
+    state = cli.pool_state_path(cfg)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"members": [
+        {"account": 1, "ticket": "t1", "shard": "nc-0", "state": "ready", "lease_until": time.time() + 3600},
+        {"account": 4, "ticket": "t2", "shard": "nc-1", "state": "gone"}]}))
+    clock = Clock()
+    cloud = Cloud(clock)
+    with pytest.raises(SystemExit, match="CONFIGURATION ERROR.*fixed_max_tokens"):
+        pool_run.run_pool(cfg, path, interval=60, pool=_pool(clock, cloud), signals=Signals("SIGTERM"))
+    out = capsys.readouterr().out
+    assert "STILL BILLING: 1 " in out and "ticket t1" in out and "ticket t2" not in out
+    assert "refused restart" in out and "pool-stop --config" in out
+    assert not cloud.kinds("order")
 
 
 def test_the_probe_window_check_counts_the_prompt_and_spares_real_contexts():

@@ -182,14 +182,17 @@ def _contains_answer(text: str, answer: str) -> bool:
     return answer in text
 
 
-# A token is at most this many UTF-8 bytes of an English prompt for the tokenizers the
-# samplers serve: the probe's prompt-length estimate without a tokenizer is a lower bound,
-# so the static window check never refuses a probe that fits.
+# Average UTF-8 bytes per token, an upper estimate for the built-in GSM8K fixed prompts
+# with the tokenizers the samplers serve. It is not a per-token maximum: long whitespace
+# runs, long words and multi-character CJK tokens exceed it. For those prompts the
+# estimate below is a lower bound, so the static window check does not refuse a probe
+# that fits; a context just above the bound can still fail on the machine.
 PROBE_PROMPT_BYTES_PER_TOKEN = 8
 
 
 def prompt_tokens_lower_bound(text: str) -> int:
-    """A lower bound of ``text``'s prompt tokens, without a tokenizer."""
+    """An estimate of ``text``'s prompt tokens without a tokenizer (a lower bound for the
+    built-in GSM8K prompts, see ``PROBE_PROMPT_BYTES_PER_TOKEN``)."""
     return max(1, -(-len(str(text).encode()) // PROBE_PROMPT_BYTES_PER_TOKEN))
 
 
