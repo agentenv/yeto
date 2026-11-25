@@ -17,6 +17,12 @@ afterwards (``modal app deploy``); a crash between the two leaves an intent
 that cleanup resolves by exact name AND creation time after the intent, or
 reports as unresolved.
 
+The same id may be recorded ``create`` more than once (a pool adopted by a restarted
+controller deploys its Modal app again and gets the same app id). The ledger is
+append only and does not dedupe on write: a reader decides only on the folded state
+(:meth:`ResourceLedger.resources`, which keeps the first creation time of an id and
+closes it at its release), never by counting raw ``create`` / ``release`` lines.
+
 Kinds and the attrs each writer fills in:
 
 * ``modal_app``  id = app id (``ap-...``), name = app name; attrs: gpu, gpus,
@@ -100,6 +106,10 @@ def _key(kind: str, rid: str | None, name: str | None) -> str:
 
 
 class ResourceLedger:
+    """One run's ledger file. Readers use :meth:`resources` / :meth:`open_resources`: the same
+    id may be recorded ``create`` more than once (e.g. after an adopt), and only the folded
+    state says what was created when and what is still open."""
+
     def __init__(self, path: str | os.PathLike, *, clock=time.time) -> None:
         self.path = Path(path)
         self.clock = clock
