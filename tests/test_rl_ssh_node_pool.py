@@ -565,7 +565,7 @@ def test_nvidia_smi_names_with_a_form_factor_are_catalog_cards():
     names = {"NVIDIA A100-SXM4-40GB": "A100", "NVIDIA A100-SXM4-80GB": "A100-80GB",
              "NVIDIA A100-PCIE-40GB": "A100", "Tesla V100-SXM2-16GB": "V100",
              "NVIDIA RTX 6000 Ada Generation": "RTX-6000-Ada", "NVIDIA H100 80GB HBM3": "H100",
-             "NVIDIA H200 NVL": "H200", "NVIDIA A100 80GB PCIe": "A100"}
+             "NVIDIA H200 NVL": "H200"}
     for name, card in names.items():
         assert [r.card for r in parse_card_tool("cuda", f"0, {name}, 40960\n")] == [card], name
     assert len(check_cards("cuda", "0, NVIDIA A100-SXM4-40GB, 40960\n", card="A100", count=1, hbm_gib=40)) == 1

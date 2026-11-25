@@ -36,9 +36,12 @@ timeout, the own-name guard and the per-offer price.
   autostop (a WARNING at each order), and its active status carries
   ``lease_until`` = order + ``hard_cap_minutes``, so the pool's lease-end rules
   (a replacement before the end, the drain and release at it) stand in for sky's
-  hard cap. If the pool process is gone, nothing downs it at the cap: ``yeto
-  cleanup --run <run> --include-pools`` (or ``yeto down``) releases it by exact
-  name from the run's resource ledger;
+  hard cap; ``HARD_CAP_GRACE_S`` past the cap it reads ended (``expired``), so
+  the pool releases it even when it acts on no lease end (a paused member). If
+  the pool process is gone, nothing downs it at the cap: ``yeto cleanup --run
+  <run> --include-pools`` releases it by exact name from the run's resource
+  ledger (refused while a pool loop of the run still holds its lock: stop that
+  loop with ``pool-stop`` first). ``yeto down`` leaves pool machines to the pool;
 * ``status``: ``sky.status`` of that cluster (``refresh=AUTO``, so a reclaimed
   spot VM is seen): ``UP`` -> active, ``INIT`` (or the launch still running) ->
   waiting (ended ``lost`` past ``start_timeout_s`` from the order: the watchdog's
@@ -138,15 +141,29 @@ def _field(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
-_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# terminal escapes: CSI sequences (colours, erase line, cursor moves) and two-byte ESC codes
+_ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+# credentials that need no key name to be recognized (AWS key ids, GitHub / Hugging Face /
+# OpenAI-style / Slack tokens); key=value secrets, bearer tokens, URL signatures and the
+# process's secret variables are redact_text's
+_BARE_TOKENS = re.compile(r"\b(?:A(?:KIA|SIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+                          r"|hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[abpr]-[A-Za-z0-9-]{10,})\b")
 ERROR_TEXT_LIMIT = 600
 
 
+def redact_error(text: str) -> str:
+    """``text`` without credentials or terminal escapes, as one line."""
+    from yeto.rl.engine.init_from_release import redact_text  # noqa: PLC0415 - numpy behind it
+
+    text = _BARE_TOKENS.sub("<redacted>", redact_text(_ESCAPES.sub("", text)))
+    return " ".join(text.split())
+
+
 def _error_text(error: BaseException, limit: int = ERROR_TEXT_LIMIT) -> str:
-    """One line of ``error`` (no terminal colours). A longer one keeps its head and its tail:
-    sky puts the per-zone reasons of a failed launch (a cloud's refusal, an unsupported
-    feature) at the end of its message."""
-    text = f"{type(error).__name__}: {' '.join(_ANSI.sub('', str(error)).split())}"
+    """One line of ``error``, redacted (it reaches the ticket's record and the pool's events).
+    A longer one keeps its head and its tail: sky puts the per-zone reasons of a failed
+    launch (a cloud's refusal, an unsupported feature) at the end of its message."""
+    text = f"{type(error).__name__}: {redact_error(str(error))}"
     if len(text) <= limit:
         return text
     head = limit // 3
@@ -379,7 +396,7 @@ class SkyProvider:
                 f"({sorted({offer_cloud(o) for o in refused})}): such a cluster has no cloud-side hard cap. "
                 "Set provider.allow_no_autodown true to launch it anyway: the pool releases it at its lease end "
                 "(order + hard_cap_minutes); if the pool process is gone, `yeto cleanup --run <run> "
-                "--include-pools` releases it from the run's resource ledger")
+                "--include-pools` releases it from the run's resource ledger (`yeto down` does not)")
         self._patched = False
         self.aws_profile = aws_profile or None
         self.request_env = aws_request_env(self.aws_profile)
@@ -615,8 +632,10 @@ class SkyProvider:
         self._save_doc(doc)  # recorded before the launch: a crash mid-launch still leaves it ours to down
         if not autodown:
             print(f"[sky-provider] WARNING: {offer_cloud(offer)} cannot autodown: cluster {name} has no cloud-side "
-                  f"hard cap; the pool releases it at its lease end (in {self.hard_cap_minutes} min); if this "
-                  f"process is gone, `yeto cleanup --run {self.run_id} --include-pools` releases it", flush=True)
+                  f"hard cap; the pool releases it at its lease end (in {self.hard_cap_minutes} min); if the pool "
+                  f"process is gone, `yeto cleanup --run {self.run_id} --include-pools` releases it (refused while "
+                  "a pool loop of the run still runs: pool-stop it first; `yeto down` leaves pool machines alone)",
+                  flush=True)
         # pool / aws_profile: a crash before "created" leaves a row the cleanup still downs as this pool's
         _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id,
                        pool=True, **({"aws_profile": self.aws_profile} if self.aws_profile else {}))
@@ -810,7 +829,12 @@ class SkyProvider:
         if state == UP:
             if state_of_launch == LOST:  # it came up before the API server restart: kept
                 self._mark(ticket, launch_state=LAUNCHED, reconciled=True)
-            return LeaseStatus("active", lease_until=self._hard_cap_end(row))
+            end = self._hard_cap_end(row)
+            if end is not None and self.clock() >= end + self.HARD_CAP_GRACE_S:
+                return LeaseStatus("ended", end_reason="expired", lease_until=end,
+                                   detail=f"{int(self.clock() - end)} s past its hard cap (hard_cap_minutes "
+                                          f"{self.hard_cap_minutes}; sky cannot autodown it): released")
+            return LeaseStatus("active", lease_until=end)
         if state == INIT:
             if state_of_launch == LOST:  # sky never resumes an interrupted launch
                 return LeaseStatus("ended", end_reason="lost",
@@ -819,6 +843,10 @@ class SkyProvider:
                 return LeaseStatus("ended", end_reason="lost")  # stuck starting: released, next offer
             return LeaseStatus("waiting")
         return LeaseStatus("ended", end_reason="preempted" if state == STOPPED else state.lower())
+
+    # past its hard cap by this much, a cluster sky does not autodown reads ended (expired):
+    # the pool releases it even when it does not act on its lease end (a paused member)
+    HARD_CAP_GRACE_S = 900.0
 
     def _hard_cap_end(self, row: dict[str, Any]) -> float | None:
         """The hard cap of a cluster sky does not autodown (its order + ``hard_cap_minutes``),
@@ -905,7 +933,11 @@ class SkyProvider:
             slot = next((s for s in self.slots if s not in busy), self.slots[0])
             rows[name] = {"slot": slot, "n": int(match.group(1)), "open": True,
                           "ordered_at": self.clock(), "adopted": True}
-            if _listed_cloud(rec) in NO_AUTODOWN_CLOUDS:  # its hard cap counts from its launch
+            cloud = _listed_cloud(rec)
+            if cloud in NO_AUTODOWN_CLOUDS or (not cloud and self.allow_no_autodown):
+                # its hard cap counts from its launch (an unknown cloud of a provider that may
+                # launch without autodown: the cap applies, the safe side); without sky's launch
+                # time, from the adoption
                 launched = _field(rec, "launched_at")
                 rows[name].update(autodown=False, **({"ordered_at": float(launched)} if launched else {}))
             changed = True

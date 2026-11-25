@@ -3,6 +3,7 @@ module: the same pool policy (events, budget, breaker, fencing) as National Comp
 
 from __future__ import annotations
 
+import json
 import os
 from types import SimpleNamespace
 
@@ -1217,3 +1218,132 @@ def test_an_adopted_cluster_of_a_cloud_without_autodown_keeps_its_hard_cap():
     assert [n for _, n in later.run_tickets()] == [name]
     assert later._rows()[name]["autodown"] is False
     assert later.status(1, name).lease_until == 1_000_030.0 + 3600
+
+
+
+def test_past_its_hard_cap_a_cluster_without_autodown_reads_expired():
+    """Nothing in the cloud downs it: HARD_CAP_GRACE_S past lease_until the ticket reads
+    ended (expired, with its lease end), so the pool releases it whatever it does with
+    lease ends (a paused member acts on none)."""
+    t = [1_000_000.0]
+    sky = FakeSky()
+    p = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60)
+    name = p.order(1)
+    sky.up(name)
+    end = 1_000_000.0 + 3600
+    t[0] = end + p.HARD_CAP_GRACE_S - 1
+    assert p.status(1, name).state == "active"
+    t[0] = end + p.HARD_CAP_GRACE_S
+    s = p.status(1, name)
+    assert (s.state, s.end_reason, s.lease_until) == ("ended", "expired", end) and "hard cap" in s.detail
+    assert el.classify(s, None, now=t[0], unreachable_since=None, cfg=el.ElasticConfig(), joined=True).kind \
+        == el.EXPIRED
+
+
+def test_a_paused_member_on_a_cloud_without_autodown_is_released_after_its_hard_cap():
+    """REV on #798: a paused member gets no lease-end drain, and the cloud has no autodown:
+    without the expired reading it stayed up past its hard cap for good."""
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    sky = FakeSky()
+    ops = SkyOps(_verda_provider(sky, clock=clock, hard_cap_minutes=60), sky, clock)
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-v")
+    pool = IslandPool(PoolConfig(target=1, accounts=[1], shard_base="s", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=1)),
+                      ops, clock=clock, log=lambda m: None, events=events)
+    for _ in range(10):
+        pool.tick()
+        t[0] += 60
+    first = pool.members[0]
+    assert first.state == READY and first.lease_until == 3600
+    pool._apply_pause({first.ticket}, set())
+    while t[0] < 3600 + ops.p.HARD_CAP_GRACE_S:
+        t[0] += 60
+        pool.tick()
+        assert first.ticket in sky.clusters or t[0] >= 3600 + ops.p.HARD_CAP_GRACE_S
+    pool.tick()
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert "paused_lease_end" in names or "manual_paused_past_lease_end" in names
+    assert first.state == GONE and first.ticket not in sky.clusters and "expired" in names
+
+
+def test_a_failed_launch_records_no_credentials_and_no_terminal_escapes(monkeypatch):
+    """REV on #798: the kept tail of a launch error reached the record and the pool's events
+    unredacted."""
+    from yeto.launch.nc.sky_provider import _error_text
+
+    monkeypatch.setenv("SOME_API_TOKEN", "envvalue-0123456789")
+    key_id = "AKIA" + "ABCDEFGHIJKLMNOP"  # built here: no credential-shaped literal in the source
+    raw = ("\x1b[31mFailed\x1b[0m\x1b[K to launch: AWS_SECRET_ACCESS_KEY=abcdEFGH1234/xyz key " + key_id + " "
+           "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig token ghp_" + "a" * 36 + " hf_" + "b" * 34
+           + " sk-" + "c" * 40 + " url https://user:pw@host/x?X-Amz-Signature=deadbeef env envvalue-0123456789")
+    text = _error_text(RuntimeError(raw))
+    for secret in ("abcdEFGH1234", key_id, "eyJhbGciOiJIUzI1NiJ9", "ghp_", "hf_bbbb", "sk-cccc",
+                   "user:pw", "deadbeef", "envvalue-0123456789", "\x1b"):
+        assert secret not in text, secret
+    assert text.startswith("RuntimeError: Failed to launch:") and "<redacted>" in text
+    # the record and the ended status carry the redacted text only
+    sky = FakeSky()
+    sky.fail_launch.add("verda/FIN-03")
+    original = sky.launch
+
+    def launch(task, cluster_name, **kw):
+        rid = original(task, cluster_name, **kw)
+        sky.requests[rid]["error"] = ResourcesUnavailableError(raw)
+        return rid
+
+    sky.launch = launch
+    p = _verda_provider(sky)
+    name = p.order(1)
+    detail = p.status(1, name).detail
+    assert key_id not in detail and "abcdEFGH1234" not in detail
+    assert key_id not in json.dumps(p._doc())
+
+
+def test_an_adopted_cluster_of_an_unknown_cloud_keeps_a_hard_cap_when_the_provider_allows_no_autodown():
+    t = [1_000_000.0]
+    sky = FakeSky()
+    first = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60)
+    name = first.order(1)
+    sky.up(name)  # the listing names no cloud and no launch time
+    t[0] += 600
+    later = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60, record=first.record.with_name("c.json"))
+    assert [n for _, n in later.run_tickets()] == [name]
+    assert later._rows()[name]["autodown"] is False
+    assert later.status(1, name).lease_until == t[0] + 3600  # from the adoption: sky gave no launch time
+
+
+def test_the_include_replaces_the_users_ssh_config_atomically_through_its_symlink(tmp_path):
+    """REV on #798: the user's ~/.ssh/config is rewritten whole (atomically), a symlinked one
+    (a dotfiles checkout) through its target, with its mode kept."""
+    import os
+
+    from yeto.launch.nc import node_pool
+
+    real = tmp_path / "dotfiles" / "ssh_config"
+    real.parent.mkdir()
+    real.write_text("Host other\n  HostName 192.0.2.1\n")
+    os.chmod(real, 0o640)
+    link = tmp_path / "home" / ".ssh" / "config"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+    ours = tmp_path / "state" / "ssh_config"
+    node_pool.include_ours(ours, ssh_config=link)
+    assert link.is_symlink() and real.read_text() == f"Include {ours}\nHost other\n  HostName 192.0.2.1\n"
+    assert os.stat(real).st_mode & 0o777 == 0o640
+    assert not [p for p in real.parent.iterdir() if p.name.endswith(".tmp")]
+    node_pool.include_ours(ours, ssh_config=link)  # already there: untouched
+    assert real.read_text().count("Include") == 1
+
+
+def test_write_ssh_alias_reads_the_ssh_config_path_when_called(tmp_path, monkeypatch):
+    """Its default was bound when the module loaded, so a test's SSH_CONFIG redirect (conftest)
+    did not reach the NC route's call."""
+    from yeto.launch.nc import node_pool
+
+    target = tmp_path / "home-ssh" / "config"
+    monkeypatch.setattr(node_pool, "SSH_CONFIG", target)
+    lease = SimpleNamespace(ticket="t-1", ip="198.51.100.9", user="ubuntu", account=1, host_key=None)
+    monkeypatch.setattr(node_pool, "ssh_host_block", lambda lease, relay_port: "Host yeto-nc-t-1\n")
+    node_pool.write_ssh_alias(lease)
+    assert target.read_text().startswith("Include ")
