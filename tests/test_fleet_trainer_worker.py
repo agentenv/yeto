@@ -51,6 +51,9 @@ class FakeLaunches:
     def request_stop(self, prefix: str, why: str) -> None:
         self.stops.append(prefix)
 
+    def tear_down(self, prefix: str, why: str) -> None:
+        self.torn_down = [*getattr(self, "torn_down", []), prefix]
+
     # test controls
     def end(self, prefix: str, code: int, log: str = "") -> None:
         with self.lock:
@@ -747,3 +750,100 @@ def test_a_launch_whose_worker_was_killed_after_it_registered_is_relaunched_not_
     assert killed["exit_code"] is None and killed["detail"] == "worker exited without a result"
     decision = lifecycle.classify(exit_code=killed["exit_code"], log_text=killed["log"], detail=killed["detail"])
     assert decision.cause == lifecycle.INFRA and decision.relaunch
+
+
+def _stuck_fleet(tmp_path, clock):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    logs: list[str] = []
+    w = worker(objects, store, launches, clock=lambda: clock[0])
+    w.log = logs.append
+    w.step()
+    return objects, store, launches, w, logs
+
+
+def test_a_move_tears_down_a_launch_stuck_ordering_its_machines(tmp_path):
+    """Bug 23: island 0's launch is still ordering its machines (a sky launch waiting for SSH
+    reads no STOP) when it is moved: STOP_UNREAD_S after its STOP it is torn down (once), and
+    once it ended the island starts on the new machines; the other island is untouched."""
+    clock = [1000.0]
+    objects, store, launches, w, logs = _stuck_fleet(tmp_path, clock)
+    w.states.write(0, lifecycle.ORDERING, name="run-i0", source="sky")
+    store.update(lambda doc: next(m for m in doc["members"] if m["name"] == "isl0").update(gpu="aws:1xh100"))
+    w.step()
+    assert w.load(0)["state"] == tw.MOVING and not getattr(launches, "torn_down", [])
+    clock[0] += tw.STOP_UNREAD_S - 1
+    w.step()
+    assert not getattr(launches, "torn_down", [])  # not yet
+    clock[0] += 2
+    w.step()
+    w.step()
+    assert launches.torn_down == ["run-i0"]  # once
+    assert any("torn down now" in line and "ordering its machines" in line for line in logs)
+    launches.end("run-i0", 143)  # its worker's teardown ended it
+    w.step()
+    assert "run-i0-m1" in launches.live and launches.alive("run-i1")
+    assert "run-i1" not in launches.torn_down
+
+
+def test_a_moved_launch_that_is_running_gets_time_to_stop_on_its_own(tmp_path):
+    """A launch that is up (it reads its STOP: it finishes its segment) is not torn down after
+    STOP_UNREAD_S; only STOP_IGNORED_S after its STOP, if it still runs."""
+    clock = [1000.0]
+    objects, store, launches, w, logs = _stuck_fleet(tmp_path, clock)
+    w.states.write(0, lifecycle.RUNNING, name="run-i0", source="modal")
+    store.update(lambda doc: next(m for m in doc["members"] if m["name"] == "isl0").update(gpu="aws:1xh100"))
+    w.step()
+    clock[0] += tw.STOP_UNREAD_S * 5
+    w.step()
+    assert not getattr(launches, "torn_down", [])
+    clock[0] = 1000.0 + tw.STOP_IGNORED_S + 1
+    w.step()
+    assert launches.torn_down == ["run-i0"]
+
+
+def test_a_removed_island_stuck_ordering_is_torn_down_too(tmp_path):
+    clock = [1000.0]
+    objects, store, launches, w, logs = _stuck_fleet(tmp_path, clock)
+    w.states.write(1, lifecycle.ORDERING, name="run-i1", source="sky")
+    store.update(lambda doc: doc.__setitem__("members", [m for m in doc["members"] if m["learner_id"] != 1]))
+    w.step()
+    assert w.load(1)["state"] == tw.STOPPING
+    clock[0] += tw.STOP_UNREAD_S + 1
+    w.step()
+    assert launches.torn_down == ["run-i1"]
+    launches.end("run-i1", 143)
+    w.step()
+    assert w.load(1)["state"] == tw.REMOVED
+
+
+def test_the_local_launch_ops_tear_down_through_yeto_down(tmp_path, monkeypatch):
+    """LocalLaunchOps.tear_down: a registered launch gets `yeto down --missing-ok <prefix>` in
+    the background (its worker's teardown, then its clusters confirmed down); one that has not
+    registered its run (it ordered nothing) has its process terminated."""
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    spawned = []
+
+    class Proc:
+        def __init__(self, argv, **kw):
+            spawned.append(argv)
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    monkeypatch.setattr(tw.subprocess, "Popen", Proc)
+    ops = tw.LocalLaunchOps(python="py", log_dir=tmp_path / "logs")
+    early = Proc(["launch"])
+    ops.procs["run-i0"] = early
+    ops.tear_down("run-i0", "moving")
+    assert early.terminated and spawned == [["launch"]]
+    runs.create_run("run-i1", {})
+    ops.tear_down("run-i1", "moving")
+    assert spawned[-1] == ["py", "-m", "yeto.cli", "down", "--missing-ok", "run-i1"]
+    assert "yeto down run-i1 (moving)" in (tmp_path / "logs" / "launch-run-i1.log").read_text()
