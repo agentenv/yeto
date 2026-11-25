@@ -117,13 +117,31 @@ class _ManualThread:
         pass
 
 
+class LeaveFencer(FakeFencer):
+    """The work contract over the samplers' member records in the run store (R2DataPath)."""
+
+    def __init__(self, objects):
+        super().__init__()
+        from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
+        from yeto.launch.pool.data_path import R2DataPath  # noqa: PLC0415
+
+        self.path = R2DataPath(ObjectRecords(objects))
+
+    def exit_evidence(self, shard):
+        return self.path.exit_evidence(shard)
+
+    def write_leave(self, shard, reason, **detail):
+        return self.path.write_leave(shard, reason, **detail)
+
+
 class Fleet:
     """A controller with a reconciler over pools on fake providers and one local store
     (the run store and the trainer's buffer store alike)."""
 
-    def __init__(self, tmp_path, members, *, slots=3, data_path=False):
+    def __init__(self, tmp_path, members, *, slots=3, data_path=False, leave_records=False):
         self.objects = DirectoryObjectStore(tmp_path / "store")
         self.data_path = data_path  # the pools' data path writes the store (in-shard end records)
+        self.leave_records = leave_records  # the fencer reads and writes the samplers' member records
         self.clock = Clock()
         self.store = dz.DesiredStore(self.objects)
         self.slots_n = slots
@@ -144,7 +162,7 @@ class Fleet:
         control.members = mt.MemberTableWriter(self.objects, name, name)
         self.providers[name] = FakeProvider(name, self.clock)
         self.routes[name] = [FakeRoute()]
-        self.fencers[name] = FakeFencer()
+        self.fencers[name] = LeaveFencer(self.objects) if self.leave_records else FakeFencer()
         ops = ProviderPoolOps(self.providers[name], self.routes[name][-1], self.fencers[name])
         if self.data_path:
             from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
@@ -587,6 +605,87 @@ def test_a_roll_never_replaces_a_member_that_is_already_going(tmp_path):
     pool._roll()  # noqa: SLF001
     steps = [e for e in pool.events.events if e["event"].endswith("roll_step")]
     assert steps and steps[-1]["ticket"] == other.ticket
+
+
+def _joined(f, pool_name, **fields):
+    """The sampler of the pool's one member joined (its member record in the run store)."""
+    from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
+    from yeto.rl.engine import sampler_resume as sr  # noqa: PLC0415
+
+    (m,) = f.c.slots[pool_name].pool.live()
+    member = sr.Member(sampler=m.shard, incarnation=f"inc-{m.ticket}", joined_at=1.0, resume={}, **fields)
+    sr.write_member(ObjectRecords(f.objects), member)
+    return m, member
+
+
+def _record(f, member):
+    from yeto.rl.engine import sampler_resume as sr  # noqa: PLC0415
+
+    return json.loads(f.objects.read(sr.member_key(member)))
+
+
+def _until_waiting(f, pool, ticket, n=10):
+    for _ in range(n):
+        if ticket in pool._leave_wait:  # noqa: SLF001
+            return f.clock()
+        f.ticks(1)
+    raise AssertionError("the member was never fenced into its leave wait")
+
+
+def test_a_removed_pools_sampler_that_writes_no_leave_gets_one_from_the_pool(tmp_path):
+    """INT2 r1: a removed pool released its machine in the tick it fenced it, before the
+    sampler saw the fence: no leave in its member record (the dashboard showed it stale).
+    The pool now waits for the leave, then writes it (POOL_REMOVED) and releases."""
+    from yeto.launch.pool.island_pool import POOL_REMOVED_LEAVE  # noqa: PLC0415
+
+    f = Fleet(tmp_path, [_member("nc", 1), _member("modal", 1)], leave_records=True)
+    f.ticks()
+    m, member = _joined(f, "modal")
+    pool = f.c.slots["modal"].pool
+    f.change(lambda d: d["members"].pop())  # remove "modal"
+    began = _until_waiting(f, pool, m.ticket)
+    assert m.shard in [s for s, _ in f.fencers["modal"].fenced]  # fenced first
+    while f.clock() < began + pool.removal_leave_wait_s:
+        assert f.providers["modal"].released == [] and _record(f, member)["leave_reason"] is None
+        f.ticks(1)
+    f.ticks(6)
+    assert set(f.c.slots) == {"nc"} and f.providers["modal"].released == [m.ticket]
+    rec = _record(f, member)
+    assert rec["leave_reason"] == POOL_REMOVED_LEAVE and rec["left_at"] and rec["detail"]["left_by"] == "pool"
+    assert any(e["event"].endswith("leave_written") for e in pool.events.events)
+
+
+def test_a_removed_pools_sampler_that_leaves_on_its_fence_is_released_at_once(tmp_path):
+    f = Fleet(tmp_path, [_member("nc", 1), _member("modal", 1)], leave_records=True)
+    f.ticks()
+    m, member = _joined(f, "modal")
+    pool = f.c.slots["modal"].pool
+    f.change(lambda d: d["members"].pop())
+    _until_waiting(f, pool, m.ticket)
+    f.ticks(2)  # no leave yet: still not released
+    assert f.providers["modal"].released == []
+    from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
+    from yeto.rl.engine import sampler_resume as sr  # noqa: PLC0415
+
+    member.left_at, member.leave_reason = 2.0, "FENCED"  # the sampler saw its fence
+    sr.write_member(ObjectRecords(f.objects), member)
+    f.ticks(2)  # the leave seen: released (in the background: started, then confirmed)
+    assert f.providers["modal"].released == [m.ticket]
+    assert _record(f, member)["leave_reason"] == "FENCED"
+    assert not any(e["event"].endswith("leave_written") for e in pool.events.events)
+
+
+def test_a_scale_down_outside_a_removal_releases_without_a_leave_wait(tmp_path):
+    """Only a removed pool waits: a target change to 0 releases as before (the customer path)."""
+    f = Fleet(tmp_path, [_member("nc", 1), _member("modal", 1)], leave_records=True)
+    f.ticks()
+    m, member = _joined(f, "modal")
+    pool = f.c.slots["modal"].pool
+    f.change(lambda d: dz.sampler_pools(d)["modal"]["pool"].update(target=0))
+    for _ in range(4):
+        f.ticks(1)
+        assert m.ticket not in pool._leave_wait  # noqa: SLF001
+    assert f.providers["modal"].released == [m.ticket] and _record(f, member)["leave_reason"] is None
 
 
 def test_run_down_stops_every_pool_the_fleet_drives(tmp_path, monkeypatch, capsys):

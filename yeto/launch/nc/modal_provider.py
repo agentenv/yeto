@@ -763,6 +763,10 @@ class ModalPoolOps:
         read = getattr(self.data_path(), "exit_evidence", None)
         return None if read is None else read(m.shard)
 
+    def write_leave(self, m, reason: str, **detail: Any) -> Any:
+        write = getattr(self.data_path(), "write_leave", None)
+        return None if write is None else write(m.shard, reason, **detail)
+
     def shard_ended(self, shard: str) -> Any:
         read = getattr(self.data_path(), "shard_ended", None)
         return None if read is None else read(shard)

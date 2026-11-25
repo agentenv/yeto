@@ -283,6 +283,8 @@ class ProviderPoolOps:
                 self.clear_stale_handoff = self._clear_stale_handoff
             if getattr(fencer, "exit_evidence", None) is not None:
                 self.exit_evidence = self._exit_evidence
+            if getattr(fencer, "write_leave", None) is not None:
+                self.write_leave = self._write_leave
             if getattr(fencer, "shard_ended", None) is not None:
                 self.shard_ended = fencer.shard_ended
 
@@ -371,6 +373,9 @@ class ProviderPoolOps:
 
     def _exit_evidence(self, member: Any) -> Any:
         return self.fencer.exit_evidence(member.shard)
+
+    def _write_leave(self, member: Any, reason: str, **detail: Any) -> Any:
+        return self.fencer.write_leave(member.shard, reason, **detail)
 
     def released_by_us(self, ticket: str) -> bool:
         """An ended-``released`` machine these ops (or the provider's own record) released:

@@ -111,6 +111,8 @@ class FleetReconciler:
         if self.fenced is not None:
             return
         for name in self._resume:  # a removal another controller began: drained to 0 again
+            if name in controller.slots:
+                controller.slots[name].pool.removing = True
             self._set_target(controller, name, 0, (), None, self.removing[name].generation if name in self.removing
                              else self.applied)
         self._resume = []
@@ -249,6 +251,7 @@ class FleetReconciler:
         if slot is None:
             return
         self.removing[name] = _Removal(since=self.clock(), member=member, generation=gen)
+        slot.pool.removing = True  # its members are released once their samplers wrote their leave
         self.log(f"fleet: pool {name} removed in generation {gen}: target 0, draining")
         slot.pool._event("pool_removing", generation=gen)  # noqa: SLF001
         self._set_target(controller, name, 0, (), None, gen)

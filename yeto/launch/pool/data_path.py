@@ -115,6 +115,28 @@ class R2DataPath:
                        not_run_ended_by=detail.get("ended_by"))
         return out
 
+    def write_leave(self, shard: str, reason: str, **detail: Any) -> dict[str, Any] | None:
+        """The leave of ``shard``'s newest sampler incarnation, written by the pool for a
+        sampler that wrote none (its machine was released before it could): ``left_at`` and
+        ``leave_reason`` in its member record, ``left_by: "pool"`` and ``detail`` in its
+        detail. None: no member record, or its leave is written already (kept as it is).
+        A store error raises."""
+        import time  # noqa: PLC0415
+
+        from yeto.rl.engine import sampler_resume  # noqa: PLC0415
+
+        records, read = self.records, sampler_resume._read_record  # noqa: SLF001
+        keys = sampler_resume._list_records(records, f"{sampler_resume.MEMBERS_DIR}/{shard}")  # noqa: SLF001
+        found = [(key, read(records, key)) for key in keys]
+        key, newest = max(((k, m) for k, m in found if m), key=lambda km: float(km[1].get("joined_at") or 0.0),
+                          default=(None, None))
+        if newest is None or newest.get("leave_reason") is not None:
+            return None
+        own = newest.get("detail") if isinstance(newest.get("detail"), dict) else {}
+        newest.update(left_at=time.time(), leave_reason=str(reason), detail={**own, "left_by": "pool", **detail})
+        sampler_resume._put_record(records, key, newest)  # noqa: SLF001
+        return newest
+
     def shard_ended(self, shard: str) -> dict[str, Any] | None:
         """Read only: whether ``shard``'s data already ended in the run's store (an end
         record its owner wrote; final for the trainer). None: it did not (or the shard
