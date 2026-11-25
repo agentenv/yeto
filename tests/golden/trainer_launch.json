@@ -1,0 +1,518 @@
+{
+ "k31-baremetal-trainer": [
+  {
+   "incarnation": 0,
+   "script": "set -eu\nexport __yeto_state_home=\"$HOME\"\nexport CUDA_DEVICE_MAX_CONNECTIONS=1\nexport CYBERGYM_AGENT_ID=yeto_agent\nexport CYBERGYM_TIMEOUT=60.0\nexport CYBERGYM_URL=http://127.0.0.1:8666\nexport GLOO_SOC...<1166414 bytes, sha256 ea821e9c570a3d964b64a0238908d90e9987bb5dbc1ab21d6164dac78c49abcc>",
+   "ssh_start": "b300-0"
+  },
+  {
+   "incarnation": 0,
+   "script": "set -eu\nexport __yeto_state_home=\"$HOME\"\nexport CUDA_DEVICE_MAX_CONNECTIONS=1\nexport CYBERGYM_AGENT_ID=yeto_agent\nexport CYBERGYM_TIMEOUT=60.0\nexport CYBERGYM_URL=http://127.0.0.1:8666\nexport GLOO_SOC...<1166414 bytes, sha256 e6da94145d6dadff835937b17d949e8bc7add72feb93cd3ff65ada0bbcc4a9a8>",
+   "ssh_start": "b300-1"
+  },
+  {
+   "incarnation": 0,
+   "script": "set -eu\nexport __yeto_state_home=\"$HOME\"\nexport CUDA_DEVICE_MAX_CONNECTIONS=1\nexport CYBERGYM_AGENT_ID=yeto_agent\nexport CYBERGYM_TIMEOUT=60.0\nexport CYBERGYM_URL=http://127.0.0.1:8666\nexport GLOO_SOC...<1166414 bytes, sha256 6b5d71e2f5c81a2d03b11c2c4e1578426c550c78568f8e83b4e3c786ad9a9188>",
+   "ssh_start": "b300-2"
+  },
+  {
+   "incarnation": 0,
+   "script": "set -eu\nexport __yeto_state_home=\"$HOME\"\nexport CUDA_DEVICE_MAX_CONNECTIONS=1\nexport CYBERGYM_AGENT_ID=yeto_agent\nexport CYBERGYM_TIMEOUT=60.0\nexport CYBERGYM_URL=http://127.0.0.1:8666\nexport GLOO_SOC...<1166414 bytes, sha256 46180db12993fd162a7d2af64335891778b27880a0422da913eae63f061b820f>",
+   "ssh_start": "b300-3"
+  },
+  {
+   "incarnation": 0,
+   "script": "set -eu\nexport __yeto_state_home=\"$HOME\"\nexport CUDA_DEVICE_MAX_CONNECTIONS=1\nexport CYBERGYM_AGENT_ID=yeto_agent\nexport CYBERGYM_TIMEOUT=60.0\nexport CYBERGYM_URL=http://127.0.0.1:8666\nexport GLOO_SOC...<1166414 bytes, sha256 feca7665b644f7f10aab1db179e671a2479c6cab46e89dbc9751e299ec8481a7>",
+   "ssh_start": "b300-4"
+  },
+  {
+   "incarnation": 0,
+   "script": "set -eu\nexport __yeto_state_home=\"$HOME\"\nexport CUDA_DEVICE_MAX_CONNECTIONS=1\nexport CYBERGYM_AGENT_ID=yeto_agent\nexport CYBERGYM_TIMEOUT=60.0\nexport CYBERGYM_URL=http://127.0.0.1:8666\nexport GLOO_SOC...<1166414 bytes, sha256 060719f602114278252881735585e06a8e7b2d04104d6f3436a80fee135be37b>",
+   "ssh_start": "b300-5"
+  }
+ ],
+ "k31-modal-trainer": [
+  {
+   "modal_app": "yeto-bmkit"
+  },
+  {
+   "modal_define": {
+    "app_name": "yeto-bmkit",
+    "checkpoint_store_mount": null,
+    "checkpoint_store_volume_name": null,
+    "cpu_override": 64,
+    "envs": {
+     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+     "CYBERGYM_AGENT_ID": "yeto_agent",
+     "CYBERGYM_TIMEOUT": "60.0",
+     "CYBERGYM_URL": "http://127.0.0.1:8666",
+     "HF_HUB_ENABLE_HF_TRANSFER": "1",
+     "HF_TOKEN": "hf_placeholder_token_for_the_plan_golden",
+     "LEARNER_ID": "0",
+     "MILES_K31_INDEXER_QUERY_CHUNK": "1024",
+     "MILES_K3_ATTN_RES_TOKEN_CHUNK": "2048",
+     "MILES_MXFP4_QAT_TRITON": "1",
+     "NCCL_RAS_ENABLE": "0",
+     "OMP_NUM_THREADS": "8",
+     "SYNCER_ADDR": "none",
+     "YETO_ISLAND_HMAC_KEY": "<HMAC>",
+     "YETO_MILES_TRAIN_EXTRA_ARGV": "--log-probs-chunk-size 16384 --no-check-for-nan-in-loss-and-grad --custom-megatron-before-train-step-hook-path yeto.rl.adapters.miles.models.kimi_k31.first_stage_grad.before_train_step",
+     "YETO_RL_COMPAT_GROUP": "nvidia-b300",
+     "YETO_RL_NAN_SKIP": "max_consecutive=2,max_fraction=0.05,min_rounds=20",
+     "YETO_RL_STORE_IMPL": "yeto.cloud.s3_store:store_from_env",
+     "YETO_RL_STORE_LAZY_CUT_SHARDS": "1",
+     "YETO_RL_STORE_S3_CREDENTIALS": "aws-env",
+     "YETO_RL_STORE_S3_ENDPOINT_URL": "https://store.example",
+     "YETO_RL_STORE_S3_REGION": "auto",
+     "YETO_RL_STORE_S3_STAGE": "~/.cache/yeto/store-stage",
+     "YETO_RL_STORE_S3_URI": "s3://bmbucket/runs/bmkit",
+     "YETO_SAMPLE_BUFFER_HEARTBEAT_S": "1800",
+     "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES": "64GiB",
+     "YETO_SPOT_RECLAIM_MARKER": "/tmp/yeto-reclaim-requested",
+     "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
+    },
+    "ephemeral_disk_gib": null,
+    "extra_mounts": {
+     "/root/.cache/huggingface/token": "<HOME>/.cache/huggingface/token",
+     "/root/yeto-rl-expert-selection.json": "<TMP>/expert_selection.ep16.json"
+    },
+    "gpu": "B300",
+    "gpu_exact": false,
+    "gpu_name": null,
+    "gpus_per_node": 8,
+    "harbor_base_env": null,
+    "harbor_layer": false,
+    "harbor_port_env": null,
+    "harbor_relay_port": null,
+    "harbor_secret_env": null,
+    "image_ref": "ghcr.io/agentenv/yeto-miles-k31@sha256:3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225",
+    "learner_id": 0,
+    "memory_gib_override": 2400,
+    "model_volume_mount": "/mnt/yeto-models",
+    "model_volume_name": "k31-weights",
+    "named_secrets": [
+     "k31-store"
+    ],
+    "num_nodes": 6,
+    "pip_requirements": [],
+    "python_version": "3.12",
+    "rdma": true,
+    "region": null,
+    "registry_login": false,
+    "retries": 10,
+    "run_script": "[ -f ~/.cache/huggingface/token ] && [ -n \"$HF_HOME\" ] && mkdir -p $HF_HOME && cp -n ~/.cache/huggingface/token $HF_HOME/token || true\nif [ -f /mnt/yeto-models/hf/Kimi-K3.1-Pro/aaaaaaaa/MANIFEST.json ...<7553 bytes, sha256 b94952aed8fe1adae8060692af87b298198ef0d5e737a7d9c1719d7f76e47190>",
+    "setup_script": "rm -rf \"$HOME/.yeto-start-phases\" >/dev/null 2>&1 || true\n{ mkdir -p \"$HOME/.yeto-start-phases\" && date +%s.%N > \"$HOME/.yeto-start-phases/container_ready\"; } >/dev/null 2>&1 || true\nsudo modprobe tcp...<8601 bytes, sha256 50adca81b42adeefad332e88a22d644917cf168c477c0f534104133fce429a08>",
+    "tape_subdir": null,
+    "tape_volume_name": null,
+    "timeout_s": 86400,
+    "training_mode": "rl",
+    "volume_mount": "/root/yeto-rl",
+    "volume_name": "bmkit-8d2db6d7-rl-0",
+    "workdir": "<REPO>"
+   }
+  },
+  {
+   "modal_deploy": "yeto-bmkit"
+  },
+  {
+   "modal_spawn": "island-0"
+  }
+ ],
+ "mixed-fleet": [
+  {
+   "options": {},
+   "sky_launch": "yeto-syncer",
+   "task": {
+    "name": "syncer",
+    "type": "SimpleNamespace"
+   }
+  },
+  {
+   "options": {
+    "retry_until_up": false
+   },
+   "sky_launch": "yeto-l1-us-east-1",
+   "task": {
+    "calls": [
+     "resources",
+     "storage"
+    ],
+    "envs": {
+     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+     "CYBERGYM_AGENT_ID": "yeto_agent",
+     "CYBERGYM_TIMEOUT": "60.0",
+     "CYBERGYM_URL": "http://127.0.0.1:8666",
+     "HF_HUB_ENABLE_HF_TRANSFER": "1",
+     "LEARNER_ID": "1",
+     "SYNCER_ADDR": "10.0.0.1:29400",
+     "YETO_RL_COMPAT_GROUP": "nvidia-a100",
+     "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
+    },
+    "file_mounts": {
+     "~/.cache/huggingface/token": "<HOME>/.cache/huggingface/token"
+    },
+    "name": "yeto-rl-island-1",
+    "num_nodes": 1,
+    "resources": {
+     "accelerators": "A100:1",
+     "cpus": "8+",
+     "disk_size": 512,
+     "image_id": "docker:ghcr.io/x/y@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "infra": "aws/us-east-1",
+     "instance_type": null,
+     "type": "_Resources",
+     "use_spot": true
+    },
+    "run": "[ -f ~/.cache/huggingface/token ] && [ -n \"$HF_HOME\" ] && mkdir -p $HF_HOME && cp -n ~/.cache/huggingface/token $HF_HOME/token || true\nset -e\ncd ~/sky_workdir\nMASTER_ADDR=$(echo \"$SKYPILOT_NODE_IPS\" |...<2959 bytes, sha256 5b8077ff3984e2dfb83bb7280bc526df1e3c13e42f4418bc4b907b098d0914c6>",
+    "secrets": {
+     "YETO_ISLAND_HMAC_KEY": "<HMAC>"
+    },
+    "setup": "rm -rf \"$HOME/.yeto-start-phases\" >/dev/null 2>&1 || true\n{ mkdir -p \"$HOME/.yeto-start-phases\" && date +%s.%N > \"$HOME/.yeto-start-phases/container_ready\"; } >/dev/null 2>&1 || true\nsudo modprobe tcp...<7248 bytes, sha256 3d0c2bdc2e0e368ee52b5675ca97d641b29642ec0a101973c2ca71f73634fa0d>",
+    "storage_mounts": {
+     "~/yeto-rl": {
+      "mode": "mount",
+      "name": "yeto-22659b0d-rl-1",
+      "persistent": false,
+      "sync_on_reconstruction": true,
+      "type": "_Storage"
+     }
+    },
+    "type": "_Task",
+    "workdir": "<REPO>"
+   }
+  },
+  {
+   "modal_app": "yeto-yeto"
+  },
+  {
+   "modal_define": {
+    "app_name": "yeto-yeto",
+    "checkpoint_store_mount": null,
+    "checkpoint_store_volume_name": null,
+    "cpu_override": null,
+    "envs": {
+     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+     "CYBERGYM_AGENT_ID": "yeto_agent",
+     "CYBERGYM_TIMEOUT": "60.0",
+     "CYBERGYM_URL": "http://127.0.0.1:8666",
+     "HF_HUB_ENABLE_HF_TRANSFER": "1",
+     "HF_TOKEN": "hf_placeholder_token_for_the_plan_golden",
+     "LEARNER_ID": "0",
+     "NCCL_RAS_ENABLE": "0",
+     "SYNCER_ADDR": "10.0.0.1:29400",
+     "YETO_ISLAND_HMAC_KEY": "<HMAC>",
+     "YETO_RL_COMPAT_GROUP": "nvidia-a100",
+     "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
+    },
+    "ephemeral_disk_gib": null,
+    "extra_mounts": {
+     "/root/.cache/huggingface/token": "<HOME>/.cache/huggingface/token"
+    },
+    "gpu": "A100",
+    "gpu_exact": false,
+    "gpu_name": null,
+    "gpus_per_node": 1,
+    "harbor_base_env": null,
+    "harbor_layer": false,
+    "harbor_port_env": null,
+    "harbor_relay_port": null,
+    "harbor_secret_env": null,
+    "image_ref": "ghcr.io/x/y@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "learner_id": 0,
+    "memory_gib_override": null,
+    "model_volume_mount": null,
+    "model_volume_name": null,
+    "named_secrets": [],
+    "num_nodes": 1,
+    "pip_requirements": [],
+    "python_version": "3.12",
+    "rdma": true,
+    "region": null,
+    "registry_login": false,
+    "retries": 10,
+    "run_script": "[ -f ~/.cache/huggingface/token ] && [ -n \"$HF_HOME\" ] && mkdir -p $HF_HOME && cp -n ~/.cache/huggingface/token $HF_HOME/token || true\nset -e\ncd ~/sky_workdir\nMASTER_ADDR=$(echo \"$SKYPILOT_NODE_IPS\" |...<3048 bytes, sha256 33a7b5126552ee2324a43204a918f5d5adc535293f2627cdebcc219e7c9d4c49>",
+    "setup_script": "rm -rf \"$HOME/.yeto-start-phases\" >/dev/null 2>&1 || true\n{ mkdir -p \"$HOME/.yeto-start-phases\" && date +%s.%N > \"$HOME/.yeto-start-phases/container_ready\"; } >/dev/null 2>&1 || true\nsudo modprobe tcp...<7248 bytes, sha256 3d0c2bdc2e0e368ee52b5675ca97d641b29642ec0a101973c2ca71f73634fa0d>",
+    "tape_subdir": null,
+    "tape_volume_name": null,
+    "timeout_s": 86400,
+    "training_mode": "rl",
+    "volume_mount": "/root/yeto-rl",
+    "volume_name": "yeto-22659b0d-rl-0",
+    "workdir": "<REPO>"
+   }
+  },
+  {
+   "modal_deploy": "yeto-yeto"
+  },
+  {
+   "modal_spawn": "island-0"
+  }
+ ],
+ "modal-fleet": [
+  {
+   "options": {},
+   "sky_launch": "yeto-syncer",
+   "task": {
+    "name": "syncer",
+    "type": "SimpleNamespace"
+   }
+  },
+  {
+   "modal_app": "yeto-yeto"
+  },
+  {
+   "modal_define": {
+    "app_name": "yeto-yeto",
+    "checkpoint_store_mount": null,
+    "checkpoint_store_volume_name": null,
+    "cpu_override": null,
+    "envs": {
+     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+     "CYBERGYM_AGENT_ID": "yeto_agent",
+     "CYBERGYM_TIMEOUT": "60.0",
+     "CYBERGYM_URL": "http://127.0.0.1:8666",
+     "HF_HUB_ENABLE_HF_TRANSFER": "1",
+     "HF_TOKEN": "hf_placeholder_token_for_the_plan_golden",
+     "LEARNER_ID": "0",
+     "NCCL_RAS_ENABLE": "0",
+     "SYNCER_ADDR": "10.0.0.1:29400",
+     "YETO_ISLAND_HMAC_KEY": "<HMAC>",
+     "YETO_RL_COMPAT_GROUP": "nvidia-h100",
+     "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
+    },
+    "ephemeral_disk_gib": null,
+    "extra_mounts": {
+     "/root/.cache/huggingface/token": "<HOME>/.cache/huggingface/token"
+    },
+    "gpu": "H100",
+    "gpu_exact": false,
+    "gpu_name": null,
+    "gpus_per_node": 1,
+    "harbor_base_env": null,
+    "harbor_layer": false,
+    "harbor_port_env": null,
+    "harbor_relay_port": null,
+    "harbor_secret_env": null,
+    "image_ref": "ghcr.io/x/y@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "learner_id": 0,
+    "memory_gib_override": null,
+    "model_volume_mount": null,
+    "model_volume_name": null,
+    "named_secrets": [],
+    "num_nodes": 1,
+    "pip_requirements": [],
+    "python_version": "3.12",
+    "rdma": true,
+    "region": null,
+    "registry_login": false,
+    "retries": 10,
+    "run_script": "[ -f ~/.cache/huggingface/token ] && [ -n \"$HF_HOME\" ] && mkdir -p $HF_HOME && cp -n ~/.cache/huggingface/token $HF_HOME/token || true\nset -e\ncd ~/sky_workdir\nMASTER_ADDR=$(echo \"$SKYPILOT_NODE_IPS\" |...<3048 bytes, sha256 33a7b5126552ee2324a43204a918f5d5adc535293f2627cdebcc219e7c9d4c49>",
+    "setup_script": "rm -rf \"$HOME/.yeto-start-phases\" >/dev/null 2>&1 || true\n{ mkdir -p \"$HOME/.yeto-start-phases\" && date +%s.%N > \"$HOME/.yeto-start-phases/container_ready\"; } >/dev/null 2>&1 || true\nsudo modprobe tcp...<7248 bytes, sha256 3d0c2bdc2e0e368ee52b5675ca97d641b29642ec0a101973c2ca71f73634fa0d>",
+    "tape_subdir": null,
+    "tape_volume_name": null,
+    "timeout_s": 86400,
+    "training_mode": "rl",
+    "volume_mount": "/root/yeto-rl",
+    "volume_name": "yeto-22659b0d-rl-0",
+    "workdir": "<REPO>"
+   }
+  },
+  {
+   "modal_define": {
+    "app_name": "yeto-yeto",
+    "checkpoint_store_mount": null,
+    "checkpoint_store_volume_name": null,
+    "cpu_override": null,
+    "envs": {
+     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+     "CYBERGYM_AGENT_ID": "yeto_agent",
+     "CYBERGYM_TIMEOUT": "60.0",
+     "CYBERGYM_URL": "http://127.0.0.1:8666",
+     "HF_HUB_ENABLE_HF_TRANSFER": "1",
+     "HF_TOKEN": "hf_placeholder_token_for_the_plan_golden",
+     "LEARNER_ID": "1",
+     "NCCL_RAS_ENABLE": "0",
+     "SYNCER_ADDR": "10.0.0.1:29400",
+     "YETO_ISLAND_HMAC_KEY": "<HMAC>",
+     "YETO_RL_COMPAT_GROUP": "nvidia-h100",
+     "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
+    },
+    "ephemeral_disk_gib": null,
+    "extra_mounts": {
+     "/root/.cache/huggingface/token": "<HOME>/.cache/huggingface/token"
+    },
+    "gpu": "H100",
+    "gpu_exact": false,
+    "gpu_name": null,
+    "gpus_per_node": 2,
+    "harbor_base_env": null,
+    "harbor_layer": false,
+    "harbor_port_env": null,
+    "harbor_relay_port": null,
+    "harbor_secret_env": null,
+    "image_ref": "ghcr.io/x/y@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "learner_id": 1,
+    "memory_gib_override": null,
+    "model_volume_mount": null,
+    "model_volume_name": null,
+    "named_secrets": [],
+    "num_nodes": 2,
+    "pip_requirements": [],
+    "python_version": "3.12",
+    "rdma": true,
+    "region": null,
+    "registry_login": false,
+    "retries": 10,
+    "run_script": "[ -f ~/.cache/huggingface/token ] && [ -n \"$HF_HOME\" ] && mkdir -p $HF_HOME && cp -n ~/.cache/huggingface/token $HF_HOME/token || true\nset -e\ncd ~/sky_workdir\nexport NCCL_IB_DISABLE=${NCCL_IB_DISABLE:...<3585 bytes, sha256 18467f61284ba55a1b057f6887116bf983c0dcebac809fd2f47507be7263de49>",
+    "setup_script": "rm -rf \"$HOME/.yeto-start-phases\" >/dev/null 2>&1 || true\n{ mkdir -p \"$HOME/.yeto-start-phases\" && date +%s.%N > \"$HOME/.yeto-start-phases/container_ready\"; } >/dev/null 2>&1 || true\nsudo modprobe tcp...<7248 bytes, sha256 3d0c2bdc2e0e368ee52b5675ca97d641b29642ec0a101973c2ca71f73634fa0d>",
+    "tape_subdir": null,
+    "tape_volume_name": null,
+    "timeout_s": 86400,
+    "training_mode": "rl",
+    "volume_mount": "/root/yeto-rl",
+    "volume_name": "yeto-22659b0d-rl-1",
+    "workdir": "<REPO>"
+   }
+  },
+  {
+   "modal_deploy": "yeto-yeto"
+  },
+  {
+   "modal_spawn": "island-0"
+  },
+  {
+   "modal_spawn": "island-1"
+  }
+ ],
+ "sky-fleet": [
+  {
+   "options": {},
+   "sky_launch": "yeto-syncer",
+   "task": {
+    "name": "syncer",
+    "type": "SimpleNamespace"
+   }
+  },
+  {
+   "options": {
+    "retry_until_up": false
+   },
+   "sky_launch": "yeto-l0-us-east-1",
+   "task": {
+    "calls": [
+     "resources",
+     "storage"
+    ],
+    "envs": {
+     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+     "CYBERGYM_AGENT_ID": "yeto_agent",
+     "CYBERGYM_TIMEOUT": "60.0",
+     "CYBERGYM_URL": "http://127.0.0.1:8666",
+     "HF_HUB_ENABLE_HF_TRANSFER": "1",
+     "LEARNER_ID": "0",
+     "SYNCER_ADDR": "10.0.0.1:29400",
+     "YETO_RL_COMPAT_GROUP": "nvidia-l40s",
+     "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
+    },
+    "file_mounts": {
+     "~/.cache/huggingface/token": "<HOME>/.cache/huggingface/token"
+    },
+    "name": "yeto-rl-island-0",
+    "num_nodes": 1,
+    "resources": {
+     "accelerators": "L40S:1",
+     "cpus": "8+",
+     "disk_size": 512,
+     "image_id": "docker:ghcr.io/x/y@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "infra": "aws/us-east-1",
+     "instance_type": null,
+     "type": "_Resources",
+     "use_spot": true
+    },
+    "run": "[ -f ~/.cache/huggingface/token ] && [ -n \"$HF_HOME\" ] && mkdir -p $HF_HOME && cp -n ~/.cache/huggingface/token $HF_HOME/token || true\nset -e\ncd ~/sky_workdir\nMASTER_ADDR=$(echo \"$SKYPILOT_NODE_IPS\" |...<2959 bytes, sha256 2d96909648bda8e1b86ca762cd9342485085254bd7cdc0a8b61ce107e60673f8>",
+    "secrets": {
+     "YETO_ISLAND_HMAC_KEY": "<HMAC>"
+    },
+    "setup": "rm -rf \"$HOME/.yeto-start-phases\" >/dev/null 2>&1 || true\n{ mkdir -p \"$HOME/.yeto-start-phases\" && date +%s.%N > \"$HOME/.yeto-start-phases/container_ready\"; } >/dev/null 2>&1 || true\nsudo modprobe tcp...<7248 bytes, sha256 3d0c2bdc2e0e368ee52b5675ca97d641b29642ec0a101973c2ca71f73634fa0d>",
+    "storage_mounts": {
+     "~/yeto-rl": {
+      "mode": "mount",
+      "name": "yeto-22659b0d-rl-0",
+      "persistent": false,
+      "sync_on_reconstruction": true,
+      "type": "_Storage"
+     }
+    },
+    "type": "_Task",
+    "workdir": "<REPO>"
+   }
+  },
+  {
+   "options": {
+    "retry_until_up": false
+   },
+   "sky_launch": "yeto-l1-us-east-1",
+   "task": {
+    "calls": [
+     "resources",
+     "storage"
+    ],
+    "envs": {
+     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+     "CYBERGYM_AGENT_ID": "yeto_agent",
+     "CYBERGYM_TIMEOUT": "60.0",
+     "CYBERGYM_URL": "http://127.0.0.1:8666",
+     "HF_HUB_ENABLE_HF_TRANSFER": "1",
+     "LEARNER_ID": "1",
+     "SYNCER_ADDR": "10.0.0.1:29400",
+     "YETO_RL_COMPAT_GROUP": "nvidia-l40s",
+     "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
+    },
+    "file_mounts": {
+     "~/.cache/huggingface/token": "<HOME>/.cache/huggingface/token"
+    },
+    "name": "yeto-rl-island-1",
+    "num_nodes": 2,
+    "resources": {
+     "accelerators": "L40S:1",
+     "cpus": "8+",
+     "disk_size": 512,
+     "image_id": "docker:ghcr.io/x/y@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "infra": "aws/us-east-1",
+     "instance_type": null,
+     "network_tier": "best",
+     "type": "_Resources",
+     "use_spot": true
+    },
+    "run": "[ -f ~/.cache/huggingface/token ] && [ -n \"$HF_HOME\" ] && mkdir -p $HF_HOME && cp -n ~/.cache/huggingface/token $HF_HOME/token || true\nset -e\ncd ~/sky_workdir\nexport NCCL_IB_DISABLE=${NCCL_IB_DISABLE:...<3496 bytes, sha256 6e96811d46a1007d6382c5e91a262263e8dc95eab390436092d7a497d362035f>",
+    "secrets": {
+     "YETO_ISLAND_HMAC_KEY": "<HMAC>"
+    },
+    "setup": "rm -rf \"$HOME/.yeto-start-phases\" >/dev/null 2>&1 || true\n{ mkdir -p \"$HOME/.yeto-start-phases\" && date +%s.%N > \"$HOME/.yeto-start-phases/container_ready\"; } >/dev/null 2>&1 || true\nsudo modprobe tcp...<7248 bytes, sha256 3d0c2bdc2e0e368ee52b5675ca97d641b29642ec0a101973c2ca71f73634fa0d>",
+    "storage_mounts": {
+     "~/yeto-rl": {
+      "mode": "mount",
+      "name": "yeto-22659b0d-rl-1",
+      "persistent": false,
+      "sync_on_reconstruction": true,
+      "type": "_Storage"
+     }
+    },
+    "type": "_Task",
+    "workdir": "<REPO>"
+   }
+  }
+ ],
+ "ssh-resident": [
+  {
+   "incarnation": 0,
+   "script": "set -eu\nexport __yeto_state_home=\"$HOME\"\nexport CUDA_DEVICE_MAX_CONNECTIONS=1\nexport CYBERGYM_AGENT_ID=yeto_agent\nexport CYBERGYM_TIMEOUT=60.0\nexport CYBERGYM_URL=http://127.0.0.1:8666\nexport GLOO_SOC...<19414 bytes, sha256 40ca4b0a3410362b44ec48046b36856dc3171d511057e49f83fefce8f5f63910>",
+   "ssh_start": "h100-0"
+  },
+  {
+   "incarnation": 0,
+   "script": "set -eu\nexport __yeto_state_home=\"$HOME\"\nexport CUDA_DEVICE_MAX_CONNECTIONS=1\nexport CYBERGYM_AGENT_ID=yeto_agent\nexport CYBERGYM_TIMEOUT=60.0\nexport CYBERGYM_URL=http://127.0.0.1:8666\nexport GLOO_SOC...<19414 bytes, sha256 f514f2717a45673eb196ae9379828ee46c67024f5194a4cc0da77a11107f11f3>",
+   "ssh_start": "h100-1"
+  }
+ ]
+}

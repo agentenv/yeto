@@ -843,6 +843,41 @@ class SshNodeProvider:
     def hourly_cost(self, ticket: str | None = None) -> float | None:  # noqa: ARG002
         return self.conf.price_usd_h
 
+    # -- group order (yeto.launch.pool.group): n free inventory nodes of one card and one fabric
+    @property
+    def fabrics(self) -> tuple[str, ...]:
+        have = {self.node_of_slot(s).fabric for s in self.slots}
+        return tuple(sorted(have | ({"rdma"} if have & {"ib", "roce"} else set())))
+
+    def order_group(self, n: int, shape: Any, fabric: str = "tcp") -> list[tuple[int, str]]:
+        """Pick ``n`` free nodes with the shape's card and card count that share one fabric
+        (``fabric`` itself; ``rdma``: one of ib / roce; ``tcp``: any one fabric), in slot
+        order, and order each. A failure releases the nodes ordered so far."""
+        def fits(node: Node) -> bool:
+            return (str(node.card).lower() == str(getattr(shape, "gpu", node.card)).lower()
+                    and int(node.cards_per_node) == int(getattr(shape, "gpus_per_node", node.cards_per_node)))
+
+        by_fabric: dict[str, list[int]] = {}
+        for slot in self.slots:
+            node = self.node_of_slot(slot)
+            if fits(node) and self.account_free(slot) and (
+                    fabric in ("tcp", node.fabric) or (fabric == "rdma" and node.fabric in ("ib", "roce"))):
+                by_fabric.setdefault(node.fabric, []).append(slot)
+        pick = next((slots for slots in by_fabric.values() if len(slots) >= int(n)), None)
+        if pick is None:
+            raise RuntimeError(f"ssh inventory: no {n} free {getattr(shape, 'gpus_per_node', '?')} x "
+                               f"{getattr(shape, 'gpu', '?')} nodes on one {fabric} fabric "
+                               f"(free by fabric: {by_fabric})")
+        from .pool.group import release_placed
+
+        placed: list[tuple[int, str]] = []
+        try:
+            for slot in pick[:int(n)]:
+                placed.append((slot, self.order(slot)))
+        except Exception as error:
+            raise release_placed(self, placed, error) from error
+        return placed
+
 
 # -- the pool ops ---------------------------------------------------------------
 
