@@ -161,6 +161,21 @@ def usd_or_off(text: str) -> float | None:
     return float(text)
 
 
+def usd_rate(text: str) -> float:
+    """A price in USD per hour: a finite number >= 0 (a negative or NaN rate would make the
+    run's spend never reach --budget-usd)."""
+    import argparse
+    import math
+
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of USD per hour") from None
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError(f"{text!r}: a price is a finite number >= 0")
+    return value
+
+
 def add_launch_arguments(p) -> None:
     # registry entries launch.budget / launch.idle (yeto.breakers.layers.launch); these flags
     # are their aliases and --no-cost-guard is the cost_guard switch group
@@ -168,9 +183,10 @@ def add_launch_arguments(p) -> None:
     g.add_argument("--budget-usd", type=usd_or_off, default=None,
                    help="stop the run gracefully (cut, then teardown) when its cost reaches this "
                    "(default: no budget stop; 'off': none)")
-    g.add_argument("--trainer-usd-per-hour", type=float, default=None, metavar="USD",
-                   help="USD per node-hour of the sky trainer islands' clusters, recorded on their ledger "
-                   "rows (usd_per_hour; wins over the unified price table). With --budget-usd a sky island "
+    g.add_argument("--trainer-usd-per-hour", type=usd_rate, default=None, metavar="USD",
+                   help="USD per node-hour of every sky island this launch orders (one price for all of "
+                   "them, whatever their card), recorded on their clusters' ledger rows (usd_per_hour = "
+                   "this x nodes; it wins over the unified price table). With --budget-usd a sky island "
                    "the table has no price for is refused unless this is set")
     g.add_argument("--budget-warn-usd", type=float, default=None,
                    help="emit cost_budget_warn at this cost (default: 80%% of --budget-usd)")

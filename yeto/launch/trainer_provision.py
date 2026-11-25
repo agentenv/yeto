@@ -205,9 +205,11 @@ class SkySource(Source):
         its cloud, card, region and spotness (:func:`yeto.cost.prices.node_usd_h`), as for
         a sky sampler."""
         spec = island.spec
-        attrs: dict[str, Any] = {"role": island.role or "trainer", "cloud": spec.cloud, "gpu": spec.gpu,
+        attrs: dict[str, Any] = {"role": "trainer", "cloud": spec.cloud, "gpu": spec.gpu,
                                  "gpus": int(spec.gpus_per_node) * int(spec.num_nodes),
                                  "num_nodes": int(spec.num_nodes)}
+        if island.role:
+            attrs["island_role"] = island.role  # anchor / droppable / sampler (an island of the trainer fleet)
         if getattr(spec, "region", None):
             attrs["region"] = spec.region
         spot = _task_spot(island.task)

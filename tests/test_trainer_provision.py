@@ -219,3 +219,15 @@ def test_the_record_and_lock_hooks_run_before_each_order(monkeypatch):
                    ("guard", "r-l4"), ("ssh start", ("r-l4",))]
     assert island_ops.on_call is on_call and island_ops.calls == {"r-l3": "call-kept"}
     assert prov.results["r-l2"] == ("call-2", None) and prov.results["r-l3"] == ("call-kept", None)
+
+
+@pytest.mark.parametrize("bad", ["-5", "nan", "inf", "-inf", "four"])
+def test_a_stated_trainer_price_is_a_finite_number_not_below_zero(bad, capsys):
+    """A negative or NaN rate would keep the run's spend below --budget-usd forever."""
+    from test_rl_algorithm_provenance import _launcher_args
+
+    with pytest.raises(SystemExit):
+        _launcher_args("ports", ("--trainer-usd-per-hour", bad), gpu=UNPRICED)
+    assert "--trainer-usd-per-hour" in capsys.readouterr().err
+    for ok in ("0", "4.5"):
+        assert _launcher_args("ports", ("--trainer-usd-per-hour", ok), gpu=UNPRICED).trainer_usd_per_hour == float(ok)
