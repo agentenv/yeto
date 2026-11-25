@@ -37,10 +37,15 @@ The other islands keep training through each of these changes. A single trainer 
 island with Miles samplers (`kind: miles`) is refused too: it is one launch with its
 trainer, so it stays on `synced_group`.
 
-The flags in `fleet.trainer_argv` are the same as for `synced_group`. A count quorum
-(`--rl-sync-quorum`) is refused for a full-parameter fleet whose `max_islands` is above
-the declared islands, because a count does not follow islands that join and leave. Leave
-both quorum flags out to get `--rl-sync-quorum-theta 1.0`, or give a theta.
+The flags in `fleet.trainer_argv` are the same as for `synced_group`. The islands always
+share the syncer's island pool. The membership options a `synced_group` compile adds to its
+launch are not added to the per-island launches: each launch works out its own. Without
+quorum flags, a fleet whose `max_islands` is above the declared islands gets
+`--rl-sync-quorum-theta 1.0`, so every island in the pool answers each round. A count quorum
+(`--rl-sync-quorum`) is refused there, because a count does not follow islands that join
+and leave. Give a theta instead. `fleet.island_lease_s`, when set, goes to the syncer launch
+and to every island launch. `fleet.fixed_roster: true` is refused: no single launch holds
+every island.
 
 A round that was open when an island was removed or moved can stall the merge, see
 [Limits today](#limits-today).
@@ -68,7 +73,8 @@ A round that was open when an island was removed or moved can stall the merge, s
   that are still running. It never starts a second launch of an island. Before each step
   it checks that `fleet/applied.json` still names its controller. Once another controller
   has taken the fleet over, the worker starts, stops and relaunches no island any more.
-  When that file cannot be read, the worker skips the step.
+  When that file cannot be read, the worker skips the step. It logs a warning the first
+  time and an error every 20 steps in a row.
 
 Each island launch is supervised on its own. An infrastructure failure relaunches that
 island only, at most 3 times. The other launches never notice. A configuration error or
@@ -80,9 +86,7 @@ The island launches are processes of the host that runs `yeto run up`. Each reco
 that host. **Restart `yeto run up` on the same host.** A worker on another host cannot see
 those processes, so it leaves every island recorded by another host alone and logs an
 error naming that host. It does not adopt, relaunch or start those islands a second time.
-
-If that host is lost or renamed, an operator can hand its islands to another host, see
-[Operations](#operations-lost-control-host).
+To move the control host, see [Moving the control host](#moving-the-control-host).
 
 The syncer launch is not adopted by a later one either. A new syncer launch starts the
 syncer again, from its checkpoint. On a new cluster that syncer has a new address. The
@@ -91,10 +95,18 @@ one like any infrastructure failure, which uses up their relaunch budget.
 
 The run's spend (`run.budget`) bills each island launch from its record, each incarnation
 at the price it ran at. An island added while the fleet trains counts from its start, and
-a removed island counts up to its end. With `budget.usd` set, `add` needs `--usd-per-h`.
+a removed island counts up to its end. The hours an island ran without a price are billed
+at its declared island's price (or nothing, for an added island), and its priced hours keep
+their own dollars. With a run budget (`budget.usd`, or `run.budget` in the `breakers`
+section), `add` needs `--usd-per-h`.
 
-`yeto run stop` stops every island launch. `yeto run down` downs the syncer launch and
-every island launch.
+`yeto run stop` stops every island launch. The worker reads the run's STOP before anything
+in the run store. It stops this host's island launches directly, so that works even when
+the store does not answer. It also writes each island's STOP in the store, and keeps trying
+at every step until that write goes through. `yeto run down` downs the syncer launch and
+every island launch. Each island launch that `run down` confirms down is recorded `down`.
+The next `yeto run up` starts it again as its next incarnation (`<run>-i<k>-m<n>`, same
+learner id, from its last release).
 
 ## Commands
 
@@ -195,45 +207,33 @@ in a TP 1 fleet) is refused with exit 2 before anything is written or ordered.
 - **A move loses progress.** It loses the island's training since its last release (see
   [Moving an island](#moving-an-island)).
 - **Same host.** `yeto run up` must be restarted on the host that started the island
-  launches (see [What runs](#what-runs)).
+  launches (see [What runs](#what-runs)). Taking over the islands of a lost host is not
+  supported yet (see [Moving the control host](#moving-the-control-host)).
 - **The syncer is not adopted.** A new syncer launch restarts the syncer, and the island
   launches relaunch for it (see [What runs](#what-runs)).
 
-## Operations: lost control host
+## Moving the control host
 
-This section is for operators of the fleet. Use it only when the host that ran
-`yeto run up` is lost or was renamed. On the new host:
+Taking over the islands of a lost control host is not supported yet. A host that ran
+`yeto run up` owns the island launches it started. A run up on another host leaves those
+islands alone.
 
-```bash
-yeto run up --config run.json --take-over-islands-from <old-host>
-```
+To move the control host while the old one still works:
 
-The take-over has two guards:
+1. On the old host, run `yeto run down --config run.json`. It stops every island launch and
+   records each one it confirmed down.
+2. Check that none of the run's launches still runs. `yeto status` on the old host should
+   list no run of the fleet (`<run>`, `<run>-i<k>`, `<run>-i<k>-m<n>`) as running, and the
+   islands' clouds should show no cluster or Modal app of the run.
+3. On the new host, run `yeto run up --config run.json`. Each island that was recorded down
+   starts again as its next incarnation, from its last release.
 
-1. **It waits until this run up holds the fleet.** This run up's controller first claims
-   `fleet/applied.json`. That fences the old host's controller, and the old host's trainer
-   worker stops at its next step if it still runs.
-2. **It asks each island's source first.** For each island the old host started, the
-   island's record (`fleet/trainers/<k>/state.json`) is checked against its source (sky
-   or Modal):
-   - **Still running**: a launch is started under the same prefix and incarnation, and it
-     adopts the running machine. Nothing new is ordered.
-   - **Gone** (or its record has ended): the island starts again as its next incarnation
-     (`<run>-i<k>-m<n>`, same learner id, from its last release). An island removed
-     meanwhile is recorded removed.
-   - **Unknown** (the source does not answer, or cannot be asked from this host): nothing
-     is ordered for that island. An error is logged and the island is asked again at the
-     next step.
+An island launch that `run down` could not confirm down keeps its old host. The new host
+leaves it alone and logs an error naming that host.
 
-Every island launch first takes its island's records lock (`fleet/trainers/<k>/lock`). If
-the old host was not lost after all (a network partition) and its launcher still holds
-that lock, the new launch hands off with exit 12. The island then goes back to the old
-host, and this run up does not take it over again. Two incarnations of one island never
-run at once.
-
-The new host does not stop launches the old host started. When the old host's launcher
-processes are really gone, `yeto down` their clusters if any remain (the names are in
-`fleet/trainers/<k>/launch.json`, `prefix_now`).
+If the old host is lost, its launches cannot be stopped or confirmed down from another
+host. Release their machines in each island's cloud. The islands that host started cannot
+be started again on another host under this run yet.
 
 ## Code
 
