@@ -17,11 +17,17 @@ without it. In that case island 0 does not run ahead while island 1 is away: it 
 the rounds open at the teardown and holds later PULLs until island 1 is back, so the
 test bounds the wait of exactly the rounds island 1 never answered. The final weights
 equal the f32 Nesterov recomputation of every merged round (1e-6).
+
+Run up's fleet runtime judges the islands on the same store throughout (bug 22): the old
+launch ends done + stopped on the island STOP the trainer worker wrote for the move, and
+that is no operator stop: no pool of the moved island is stopped, it is not counted as a
+stopped island, and the fleet is never stopped.
 """
 
 from __future__ import annotations
 
 import json
+import secrets
 import subprocess
 import time
 
@@ -29,6 +35,7 @@ import numpy as np
 import pytest
 
 from test_fleet_island_e2e import SyncerTrainers
+from test_fleet_island_runup import build
 from test_fleet_island_launches import example
 from test_rl_full_parameter_async import _f32, _initial, _start_async_syncer, _wait, needs_cargo
 from test_rl_full_parameter_async import syncer_binary  # noqa: F401 - fixture
@@ -63,16 +70,34 @@ class MovingTrainers(SyncerTrainers):
         k = int(argv[argv.index("--rl-fleet-learner-id") + 1])
         if "-m" in prefix:  # island_launches.island_prefix of incarnation >= 1
             self.catching[k] = {}
+        self.states.write(k, "running", name=prefix, source="modal")
         return pid
+
+    def end(self, prefix: str, code: int) -> None:
+        """A launch that ends on its island STOP records it as the launch does (done + stopped,
+        the STOP it ended on): what run up's fleet runtime judges."""
+        (k,) = [k for k, p in self.prefix_of.items() if p == prefix]
+        stop = self.states.stop_requested(k)
+        if stop is not None:
+            self.states.write(k, "done", name=prefix, source="modal", stop=stop,
+                              exit=f"STOPPED (island STOP: {stop['reason']})",
+                              decision={"cause": "stopped", "action": "stop", "state": "done",
+                                        "detail": stop["reason"]})
+        super().end(prefix, code)
 
 
 @needs_cargo
 @pytest.mark.parametrize("leave", [True, False], ids=["leave", "torn-down-without-leave"])
 def test_a_moved_island_comes_back_under_its_learner_id(syncer_binary, tmp_path, monkeypatch, leave):  # noqa: F811
-    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "async-rounds-test-key")
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", f"move-test-key-{secrets.token_hex(6)}")
     cfg = example(tmp_path, max_islands=MAX_LEARNERS)
     plan = fleet.plan_of(cfg)
     objects = DirectoryObjectStore(tmp_path / "store")
+    # run up on the same store: its fleet runtime judges each island's record (bug 22)
+    (tmp_path / "up").mkdir()
+    run, _ = build(tmp_path / "up", monkeypatch)
+    monkeypatch.setattr(type(run), "_objects", lambda self: objects)
+    judged = {"stopped": False}
     store = dz.DesiredStore(objects)
     members = island_launches.trainer_members(cfg, plan)
     seed = [*members, *({"kind": "sampler_pool", "name": p.name, "island": i.index, "pool": {"provider": "modal"}}
@@ -160,6 +185,13 @@ def test_a_moved_island_comes_back_under_its_learner_id(syncer_binary, tmp_path,
             beat[0] = time.monotonic()
             for client in launches.clients.values():
                 client.heartbeat(0)
+        # run up judges first: the record the old launch left at the end of the last poll is
+        # judged before the worker may start the next incarnation (which writes its own)
+        rt = run.fleet_rt()
+        rt._records_read = None  # noqa: SLF001 - judge the records as written now
+        rt.trainer_check(time.time())
+        if (states.read(1) or {}).get("state") == "done":
+            judged["stopped"] = True  # the old launch's done + stopped record was judged
         if returning():
             worker.step()
         for k in list(launches.catching) or list(launches.clients):
@@ -197,6 +229,14 @@ def test_a_moved_island_comes_back_under_its_learner_id(syncer_binary, tmp_path,
             process.kill()
             process.wait(timeout=10)
             raise
+
+    # bug 22: the old launch ended done + stopped on the worker's STOP; run up judged that record
+    # and took it for no operator stop: no pool stopped, no island stopped, the fleet goes on
+    assert judged["stopped"]
+    assert states.read(1)["state"] == "running"  # the moved incarnation runs
+    assert not [c for c in run.calls if "pool-stop" in c]
+    assert run.fleet_rt().island_stopped(0) is None and run.fleet_rt().island_stopped(1) is None
+    assert run.fleet_all_stopped() is None
 
     # the move kept the learner id, its sub-store and its sampler pool; only the machines changed
     moved_at, after = state["moved"]
