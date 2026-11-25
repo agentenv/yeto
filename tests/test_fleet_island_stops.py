@@ -569,3 +569,70 @@ def test_a_fenced_controller_tears_nothing_down_on_an_island_stop():
         ctl._island_stop(ctl.learners["r-l1"])
     assert ops.down_calls == [] and store.read(1) is None  # no record, no teardown
     assert ctl.learners["r-l1"]["state"] == lf.RUNNING
+
+
+# -- a relaunch still in flight when its island is stopped or given up ------------------------------
+
+class _DeferredThread:
+    """A relaunch thread that runs only when joined: ``start()`` runs nothing, ``join()``
+    runs the relaunch to its end. A caller that does not wait for an in-flight relaunch
+    returns before it ran (no wall clock involved)."""
+
+    def __init__(self, target=None, daemon=None):
+        self._target, self.ran = target, False
+
+    def start(self):
+        pass
+
+    def join(self, timeout=None):
+        if not self.ran:
+            self.ran = True
+            self._target()
+
+
+class _GoneGuard:
+    """The old node is gone: the relaunch runs under a fresh name."""
+
+    def check(self, name):
+        return ("gone", f"{name}-b")
+
+
+def test_an_island_stop_waits_for_its_in_flight_relaunch_and_downs_the_new_cluster():
+    """An island STOP during a relaunch waits for it (bounded) and tears down what it
+    re-provisioned under a new name before the STOP goes on; not waiting left that cluster
+    running with no record pointing at it."""
+    from tests.test_rl_object_store import FakeS3
+
+    ops, client = FakeOps(), FakeS3()
+    ops.status_seq["r-l1"] = [RUNNING]
+    ops.relaunch_results["r-l1-b"] = ["job-2"]
+    ctl, store = _recorded_ctl(ops, client, instance_guard=_GoneGuard())
+    ctl.thread_cls = _DeferredThread
+    rec = ctl.learners["r-l1"]
+    rec["attempt"] = attempt = ctl._start_relaunch(rec)
+    assert not attempt.finished and ops.relaunch_calls == []  # in flight
+    assert ctl._island_stop(rec)
+    assert attempt.finished and ops.relaunch_calls == ["r-l1-b"]
+    assert "r-l1-b" in ops.down_calls and rec["attempt"] is None and rec["draining"]
+
+
+def test_an_abandoned_island_waits_for_its_in_flight_relaunch_to_tear_it_down():
+    """Giving an island up during a relaunch waits for it (bounded): the relaunch sees the
+    island abandoned and tears down the cluster it re-provisioned before the controller
+    goes on; not waiting left it to come up after the launcher had moved on."""
+    ops = FakeOps()
+    ops.status_seq["l1"] = [RUNNING]
+    ops.relaunch_results["l1"] = ["job-2"]
+    ctl = _ctl(ops, fixed_roster=False, elastic=True)
+    ctl.thread_cls = _DeferredThread
+    rec = ctl.learners["l1"]
+    rec["attempt"] = attempt = ctl._start_relaunch(rec)
+    assert not attempt.finished and ops.relaunch_calls == []  # in flight
+    order = []
+    relaunch, down = ops.relaunch, ops.down
+    ops.relaunch = lambda task, cluster: order.append(("relaunch", cluster)) or relaunch(task, cluster)
+    ops.down = lambda cluster: order.append(("down", cluster)) or down(cluster)
+    ctl._abandon(rec, 600.0, "test")
+    assert attempt.finished
+    # the re-provisioned cluster is torn down after the relaunch, before _abandon returns
+    assert order == [("relaunch", "l1"), ("down", "l1")]

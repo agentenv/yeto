@@ -291,6 +291,8 @@ def test_decoupled_group_trainers_feed_their_own_samplers_to_the_final_cut(synce
         # releases, not all of them (the final one may land after the sampler stopped).
         order = [e["policy_version"] for e in released]
         assert len(set(versions)) == len(versions) and set(versions) <= set(order)
+        # and it kept up: its newest load is within the age window of the newest release
+        assert max(versions) >= max(order) - MAX_POLICY_AGE
         assert all(e["policy_version"] == e["local_version"] for e in released)
         assert all(h == published[v] for v, h, *_ in loads[k])
         assert released[-1]["policy_hash"] == published[max(published)]

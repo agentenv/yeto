@@ -27,6 +27,7 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -38,6 +39,26 @@ ROOT = Path(__file__).resolve().parent.parent
 BINARY = ROOT / "syncer/target/debug/yeto-syncer"
 # Per-process copies, under the checkout so the orphan sweep (syncer_reaper) still sees them.
 COPIES = ROOT / "syncer/target/test-bin"
+# A copy directory is <host>-<pid>: a pid is only checked on its own host (a container sharing
+# the checkout has its own pid namespace); another host's directory is swept once it is old.
+OTHER_HOST_STALE_S = 24 * 3600
+
+
+def _own_dir() -> Path:
+    host = "".join(c if c.isalnum() or c in "-." else "_" for c in socket.gethostname()) or "host"
+    return COPIES / f"{host}-{os.getpid()}"
+
+
+def _stale(directory: Path, now: float) -> bool:
+    """Whether a copy directory belongs to no live process: one of this host whose pid is
+    gone, or one of another host (or of the old ``<pid>`` layout) not touched for a day."""
+    host, _, pid = directory.name.rpartition("-")
+    if pid.isdigit() and host and host == _own_dir().name.rpartition("-")[0]:
+        return not _alive(int(pid))
+    try:
+        return now - directory.stat().st_mtime > OTHER_HOST_STALE_S
+    except OSError:
+        return False
 # Bounds the build on its own (it runs outside every test's timeout).
 BUILD_TIMEOUT_S = 900
 
@@ -88,18 +109,19 @@ def _alive(pid: int) -> bool:
 def remove_copies() -> None:
     """Remove this process's copies (conftest calls it at session end: the session leaves
     through ``os._exit``, which skips atexit, tests/hard_exit.py)."""
-    shutil.rmtree(COPIES / str(os.getpid()), ignore_errors=True)
+    shutil.rmtree(_own_dir(), ignore_errors=True)
 
 
 def private_copy(binary: Path = BINARY, timeout: float = 60.0) -> Path:
-    """``binary`` copied to a path of this process only (``COPIES/<pid>/<n>/``), written
+    """``binary`` copied to a path of this process only (``COPIES/<host>-<pid>/<n>/``), written
     under a temporary name and renamed into place, so no other process's ``cargo build``
     ever rewrites the file a test executes. Removed by :func:`remove_copies` or at exit; a
     dead process's copies are removed by the next process that makes one."""
-    own = COPIES / str(os.getpid())
+    own = _own_dir()
     if not own.exists():
+        now = time.time()
         for stale in COPIES.glob("*") if COPIES.exists() else ():
-            if stale.name.isdigit() and not _alive(int(stale.name)):
+            if stale.is_dir() and stale != own and _stale(stale, now):
                 shutil.rmtree(stale, ignore_errors=True)
         atexit.register(remove_copies)
     target = own / str(len(list(own.glob("*"))) if own.exists() else 0) / binary.name
