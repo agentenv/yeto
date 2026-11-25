@@ -1191,7 +1191,14 @@ measured p90 if it is longer.
    `loss.variant: score_centering` itself with `std_normalization: true` is
    refused. With `--rl-round-cuts off` the argv carries no
    cut-only flag (`--rl-stop-after-rounds`, `--rl-cut-every`); `--total-steps`
-   ends the run.
+   ends the run. Keep the four `--rl-allow-unverified-mechanism` entries of the
+   trainer argv as shipped. On the pinned Miles commit,
+   `losses:score_centering` and `features:no_grpo_std_normalization` are
+   declared with GPU evidence, so their entries change nothing.
+   `features:rollout_logprobs_as_old` and `loss_aggregations:token` are not yet
+   re-verified on this Miles lineage. The run's `rl_engine_selected` record
+   lists these two under `rl/unverified_mechanisms`. Without their entries the
+   launch is refused.
 7. `budget.wall_h`, `budget.usd` and `elastic.max_run_spend_ucr` are set, and
    the prices (`trainer.usd_per_h` 408 for 6 x 8 B300, `budget.nc_usd_per_h`
    24 in the template) are your contracted rates: `budget.usd` is checked

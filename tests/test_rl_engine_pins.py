@@ -300,15 +300,21 @@ def test_declared_evidence_is_lineage_bound():
             assert ref.from_commit in lineage.commits and ref.run_id and ref.judgment_path
             assert entry.evidence_covers(ref, lineage.commits[-1])
             assert not entry.evidence_covers(ref, pins.MILES_K31_F1_COMMIT)
-    # the 11 pin-bound mechanisms: declared on the ports-v1 head, not on the k31 pin
+    # each mechanism: declared on the pins its evidence covers only (the ports-v1 head for
+    # the 11 pin-bound mechanisms, FULL_D on for the k31-only score_centering), never on
+    # the first k31 pin
     v1 = entry.declared_by_dimension(pins.MILES_PORTS_V1_COMMIT)
     k31 = entry.declared_by_dimension(pins.MILES_K31_F1_COMMIT)
-    for mechanism in entry.MILES_DECLARED_EVIDENCE:
+    head = entry.declared_by_dimension(pins.MILES_K31_NEXT9_COMMIT)
+    for mechanism, refs in entry.MILES_DECLARED_EVIDENCE.items():
         dimension, name = mechanism.split(":", 1)
-        assert name in v1[dimension] and name not in k31.get(dimension, set())
+        assert name not in k31.get(dimension, set())
+        assert (name in v1.get(dimension, set())) == any(r.lineage == "ports-v1" for r in refs), mechanism
+        assert (name in head.get(dimension, set())) == any(r.lineage == "k31" for r in refs), mechanism
+    assert "score_centering" in head["losses"] and "score_centering" not in v1["losses"]
     # the mechanisms without pin-bound evidence stay declared on both
     assert "tis" in v1["corrections"] and "tis" in k31["corrections"]
-    assert entry.declared_by_dimension() == k31  # the default is the current pin
+    assert entry.declared_by_dimension() == entry.declared_by_dimension(pins.current_miles_commit())
 
 
 def test_ssh_harness_takes_no_tms_preload_patch():

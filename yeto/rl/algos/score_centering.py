@@ -10,9 +10,9 @@ a ``loss.variant`` (``--loss-type``), not a ``loss.policy_loss_variant``.
 The module adds, through the registry only:
 
 * the loss variant ``score_centering`` (appended to ``LOSS_VARIANTS``) and its
-  mechanism ``losses:score_centering`` -- not declared by the Miles adapter
-  until a GPU run shows it takes effect (``--rl-allow-unverified-mechanism``
-  admits it on one island);
+  mechanism ``losses:score_centering`` -- declared by the Miles adapter on the
+  k31 lineage from FULL_D on (K3.1 GPU runs, ``entry.K31_SCORE_CENTERING_EVIDENCE``);
+  on an older pin ``--rl-allow-unverified-mechanism`` admits it on one island;
 * spec fields in the ``loss`` group, in the hash exactly when the variant is
   selected: ``score_centering_is`` (``none`` | ``tis`` | ``mis``),
   ``score_centering_tis_clip`` (2.0), ``score_centering_mis_low`` (0.5),

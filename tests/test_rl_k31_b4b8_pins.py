@@ -305,8 +305,12 @@ PIN_BOUND = {
 }
 
 
+K31_ONLY = {"losses:score_centering"}
+
+
 def test_pin_bound_mechanisms_are_marked_for_k31_reverification():
-    assert set(entry.K31_REVERIFY) == set(entry.MILES_DECLARED_EVIDENCE) == PIN_BOUND
+    # the ports-v1-evidenced mechanisms; a k31-only one (score_centering) has k31 evidence only
+    assert set(entry.K31_REVERIFY) == set(entry.MILES_DECLARED_EVIDENCE) - K31_ONLY == PIN_BOUND
     assert set(entry.needs_k31_reverification()) == PIN_BOUND  # the k31 head: none re-run yet
     assert entry.needs_k31_reverification(pins.MILES_PORTS_V1_COMMIT) == {}
     assert entry.needs_k31_reverification("f" * 40) == {}

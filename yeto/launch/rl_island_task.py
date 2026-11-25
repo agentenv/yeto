@@ -19,7 +19,8 @@ from .remote_setup import (
     model_prefetch,
 )
 from .topology import (
-    multinode_env_prelude, multinode_network_tier, rl_cross_node_flags, rl_island_bundle_map_flag,
+    island_fabric, multinode_env_prelude, multinode_network_tier, rl_cross_node_flags,
+    rl_island_bundle_map_flag,
     rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_ray_head_env,
     rl_island_ray_spill_dir_prelude,
     rl_island_ray_storage, rl_island_spec, rl_trainer_shape,
@@ -689,7 +690,7 @@ def make_miles_island_task(
             "cd ~/sky_workdir\n"
             f"{island_pre_run_block(getattr(args, 'rl_island_pre_run_script', None))}"
             f"{init_release_block(args, model)}"
-            f"{multinode_env_prelude(spec.cloud, spec.num_nodes)}"
+            f"{multinode_env_prelude(spec.cloud, spec.num_nodes, fabric=island_fabric(args, spec))}"
             'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
             # The island's Ray lives in its own temp dir so that cleanup can
             # target it by path.  A whole-machine `ray stop` would also kill
