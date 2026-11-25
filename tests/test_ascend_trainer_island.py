@@ -109,6 +109,13 @@ def test_the_node_environment_and_start_script_of_an_ascend_island(tmp_path):
         assert body.index("set_env.sh") < body.index("python3 -m x")
 
 
+@pytest.mark.parametrize("script", ["~/x'>/tmp/y", "/opt/a b/activate", "~/$(id)", "/opt/../etc/profile",
+                                    "relative/activate", '/opt/"q"/activate'])
+def test_an_activation_script_path_is_shell_inert(tmp_path, script):
+    with pytest.raises(sti.SshIslandError, match="activation script"):
+        _spec(tmp_path, activate=(script,))
+
+
 def test_a_venv_activation_replaces_the_defaults_and_must_exist(tmp_path):
     spec = _spec(tmp_path, activate=("/usr/local/Ascend/ascend-toolkit/set_env.sh", "~/verl-npu/bin/activate"))
     body = sti._trainer_body(spec, 0, "log")
@@ -169,8 +176,11 @@ def test_the_miles_k31_images_need_sm90_cards():
         for gpu in ("A100", "A100-80GB", "L40S", "L4", "A10G"):
             message, refused = image_problem(image, gpu)
             assert refused and "No dot product attention backend" in message and "sm90" in message
-        for gpu in ("H100", "H200", "B200", "B300"):
+        for gpu in ("H100", "H200", "B300"):  # the cards it was run on
             assert image_problem(image, gpu) is None
+        for gpu in ("B200", "RTX-PRO-6000"):  # above the floor, never run: a warning only
+            message, refused = image_problem(image, gpu)
+            assert not refused and "above its sm90 floor but was never run" in message
     message, refused = image_problem(MILES_K31_IMAGE, "A100", attention_backend="unfused")
     assert not refused and "make sure it was run on this card" in message
     assert image_problem(MILES_K31_IMAGE, "A100", attention_backend="fused")[1]

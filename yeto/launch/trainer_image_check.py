@@ -74,8 +74,15 @@ def image_problem(image: str, gpu: str, *, attention_backend: str | None = "auto
     except ValueError:  # a card outside the catalog: the card checks report it, not this one
         return None
     have, need = _sm(arch), _sm(floor.min_arch)
-    if have is None or need is None or have >= need:
+    if have is None or need is None:
         return None
+    if have >= need:
+        verified = {card_arch_of(card) for card in floor.verified_on}
+        if arch in verified:
+            return None
+        return (f"trainer image {image} ({floor.repository}) was verified on {'/'.join(floor.verified_on)} "
+                f"only; {gpu} ({arch}) is above its {floor.min_arch} floor but was never run: make sure the "
+                "trainer runs on this card", False)
     lifted = (attention_backend or "auto") in floor.lifted_by
     message = (f"trainer image {image} ({floor.repository}) was verified on {'/'.join(floor.verified_on)} "
                f"({floor.min_arch}+) only; on {gpu} ({arch}) {floor.failure}")
@@ -139,6 +146,10 @@ def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]
             continue
         message, refused = found
         message += f" (training attention: {backend}, from {why})"
+        if refused and why == "the generic recipe":
+            message += ("; a recipe only the model's config selects (a renamed gated-delta-net or Nemotron-H "
+                        "checkpoint) reads as the generic one here: set --rl-training-attention-backend to the "
+                        "backend it runs")
         if refused:
             raise ValueError(f"--gpu island {m} ({spec}): {message}")
         warnings.append(f"--gpu island {m} ({spec}): {message}")

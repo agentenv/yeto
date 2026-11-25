@@ -245,8 +245,9 @@ class SshTrainerSpec:
             raise SshIslandError("activation scripts (--rl-ssh-trainer-activate) are for runtime: rootfs nodes; "
                                  "a docker node's image carries its own environment")
         for script in self.activate:
-            if not str(script).startswith(("/", "~/")) or any(c in str(script) for c in "\n;&|`$"):
-                raise SshIslandError(f"activation script {script!r}: an absolute path or one under ~/")
+            if not ACTIVATE_PATH.fullmatch(str(script)) or ".." in Path(str(script)).parts:
+                raise SshIslandError(f"activation script {script!r}: an absolute path or one under ~/ "
+                                     "(letters, digits and . _ - + @ = , : / only)")
         if self.env.get(DEVICE_FAMILY_ENV, self.device_family) != self.device_family:
             raise SshIslandError(f"env sets {DEVICE_FAMILY_ENV}={self.env[DEVICE_FAMILY_ENV]}, but the "
                                  f"inventory nodes are {self.device_family}; the inventory decides")
@@ -427,6 +428,9 @@ def _code_link(spec: SshTrainerSpec) -> str:
 # activation script: an Ascend host keeps CANN's toolkit (and the ATB library) outside the
 # Python environment, and torch_npu does not load without their set_env.sh. Only the
 # scripts the node has are sourced. Other families source nothing by default.
+# an activation script path: absolute or under ~/, shell-inert characters only (it is
+# sourced unquoted so that $HOME expands)
+ACTIVATE_PATH = re.compile(r"(/|~/)[A-Za-z0-9._+@=,:/-]+")
 DEFAULT_ACTIVATE: dict[str, tuple[str, ...]] = {
     "npu": ("/usr/local/Ascend/ascend-toolkit/set_env.sh", "/usr/local/Ascend/nnal/atb/set_env.sh"),
 }
@@ -449,7 +453,8 @@ def _activate_lines(spec: SshTrainerSpec) -> str:
     for script in scripts:
         path = _home_path(script, "$HOME", quote=False)
         if required:
-            lines.append(f"source {path} || {{ echo '[yeto-island] could not source {script}' >&2; exit 1; }}\n")
+            why = shlex.quote(f"[yeto-island] could not source {script}")
+            lines.append(f"source {path} || {{ echo {why} >&2; exit 1; }}\n")
         else:
             lines.append(f"[ ! -f {path} ] || source {path}\n")
     return "".join(lines)
