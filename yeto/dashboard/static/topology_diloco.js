@@ -349,13 +349,13 @@ function active(kk,iid,sh,td){return T.live&&D.flows.some(function(f){return f.k
 function paint(){
   var tn=now(),td=tn-DELAY_S,red=U.reduced();
   D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.status==="stopped"||tr.finalized||D.done)&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state));  // a finished run: no trainer is lost
-    tc.step.textContent=(fin(tr.step)?"step "+tr.step:"step n/a")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?"outer v"+tr.outer:"";
+    tc.step.textContent=(fin(tr.step)?"step "+tr.step:"step —")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?"outer v"+tr.outer:"";
     fitText(tc.ph,st[0],tc.phw);tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
     tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
     [tc.co?o.merged:tc.box].forEach(function(b){if(b){b.style.stroke=dead||tr.failure?C.bad:"";b.style.strokeDasharray=dead?"5 4":""}});
     o.tc.g.setAttribute("opacity",dead?0.6:1);
     var L0=tc.l,lw=tc.lw;
-    fitText(L0[0],"snapshot "+(tr.hash||"n/a")+(lr(tr.lr)!=null?" · lr "+lr(tr.lr):""),lw);
+    fitText(L0[0],(tr.hash?"snapshot "+tr.hash:"no snapshot yet")+(lr(tr.lr)!=null?" · lr "+lr(tr.lr):""),lw);
     if(tr.versions){var parts=[["frag [",""]];tr.versions.forEach(function(v,f){var b=behind(tr,f);parts.push([String(v),b?"fill:"+C.warn+";font-weight:700":""]);if(f<tr.versions.length-1)parts.push([" ",""])});parts.push(["]",""]);rich(L0[1],parts)}
     else L0[1].textContent="fragment versions not on the tape";
     var old=fin(tr.pending_oldest_ts)?tn-tr.pending_oldest_ts:0;
@@ -435,7 +435,7 @@ function paintSampler(o){var s=o.s;o.ver.textContent=fin(s.policy_version)?"v"+s
   o.dot.setAttribute("fill",c);o.st.textContent=(s.live?(gone?"draining (removed)":s.state):(s.status||"ended"))+(s.pool&&s.n&&!(gone&&!s.live)?" · "+s.nlive+"/"+s.n+" up":"");o.rate.textContent=(s.rate_gpm||0).toFixed(1)+" g/min";
   if(o.g)o.g.setAttribute("opacity",s.pool&&(s.pool.removed||s.pool.stopped)&&!s.live?0.55:1)}  // a pool fleet apply removed: dimmed
 function paintRollout(tr,o,tn,td){var r=tr.island,ro=o.ro,st=rolloutState(tr,tn),c=col(st[1]);
-  ro.big.textContent=fin(r.round)?"round "+r.round:"round n/a";fitText(ro.st,st[0],ro.lw-14);ro.st.style.fill=st[1]==="good"?C.ink:c;ro.dot.setAttribute("fill",c);
+  ro.big.textContent=fin(r.round)?"round "+r.round:"round —";fitText(ro.st,st[0],ro.lw-14);ro.st.style.fill=st[1]==="good"?C.ink:c;ro.dot.setAttribute("fill",c);
   ro.barf.setAttribute("width",st[2]!=null?(ro.barW*st[2]/100).toFixed(1):0);
   if(ro.co){var on=tr.phase_raw==="generate"||tr.phase_raw==="publish",live=tr.live;
     rich(ro.sub,[["GPU phase: ",""],["rollout",on&&live?"fill:"+C.traj+";font-weight:700":""],[" ⇄ ",""],["train",!on&&live&&tr.phase_raw==="train"?"fill:"+C.delta+";font-weight:700":""]])}
@@ -464,7 +464,7 @@ function matrix(tn){
   h+="</tr>";
   var finalOnSyncer=false;
   if(sft())h+=learnerRows(tn);else D.trainers.forEach(function(tr){var off=!tr.live&&!(tr.status==="done"||tr.finalized);
-    h+='<tr><th class="rh">Trainer '+esc(tr.id)+'<span class="ns">'+esc((tr.gpu||"")+" · step "+(fin(tr.step)?tr.step:"n/a")+(tr.island_now?" · "+tr.island_now.state:off?" · "+(tr.status||"lost"):tr.failure?" · failed":""))+"</span></th>";
+    h+='<tr><th class="rh">Trainer '+esc(tr.id)+'<span class="ns">'+esc((tr.gpu||"")+" · step "+(fin(tr.step)?tr.step:"—")+(tr.island_now?" · "+tr.island_now.state:off?" · "+(tr.status||"lost"):tr.failure?" · failed":""))+"</span></th>";
     for(var f=0;f<P;f++){var v=tr.versions?tr.versions[f]:null,lg=D.done?0:lag(tr,f),s=tr.since?tr.since[f]:null,pushed=(tr.pushed||{})[String(f)]!=null;
       var cls=off||tr.failure?"off":lg>=2?"lag2":lg===1?"lag1":"",ready=fin(s)&&H&&s>=H;
       var mk=pushed?'<span class="mk dl">↑</span>':lg&&tr.live?'<span class="mk wt">↓'+lg+"</span>":"";
@@ -620,7 +620,7 @@ function kpis(view,kp){
       out.push(["Groups trained / rolled out",gt+" / "+(nr?"—":gr),nr?"in-island rollout does not report its groups (full parameter): every trained group came from it · "+trs.map(function(x){return "island "+x.id+" trained "+(x.trained_groups||0)}).join(" · "):
         trs.map(function(x){return "island "+x.id+" "+(x.trained_groups||0)+"/"+(x.island?x.island.groups_total:0)}).join(" · ")+" · in-island rollout, whole run"])}else out.push(c)}
     else if(k==="Policy version / releases"){var steps=trs.map(function(x){return fin(x.step)?x.step:"—"}).join(" · "),outs={};trs.forEach(function(x){if(fin(x.outer))outs[x.outer]=1});
-      out.push(["Syncer step / local steps",d.shards.map(function(s){return s.step}).join("+")+" / "+steps,"outer "+(Object.keys(outs).length?"v"+Object.keys(outs).join(", v"):"n/a")+" · "+trs.map(function(x){return "trainer "+x.id+" local "+(fin(x.step)?x.step:"—")}).join(" · ")+" (local steps are per island, not comparable)"])}
+      out.push(["Syncer step / local steps",d.shards.map(function(s){return s.step}).join("+")+" / "+steps,"outer "+(Object.keys(outs).length?"v"+Object.keys(outs).join(", v"):"—")+" · "+trs.map(function(x){return "trainer "+x.id+" local "+(fin(x.step)?x.step:"—")}).join(" · ")+" (local steps are per island, not comparable)"])}
     else if(k.indexOf("Rejected")===0){if(isl){var zv=rolls.map(function(x){return x.island.zero_var_recent}).filter(fin),tr=trs.map(function(x){return x.truncated}).filter(fin);
       out.push(["In-island rollout: zero-var / truncated",pct(zv.length?zv.reduce(function(a,b){return a+b},0)/zv.length:null)+" / "+(tr.length?pct(Math.max.apply(null,tr)):"—"),
         rolls.map(function(x){return "island "+x.id+" zero-var "+pct(x.island.zero_var_recent)}).join(" · ")+" (median of the last rounds)"+(tr.length?"":" · truncation not reported by the trainers")])}else out.push(c)}

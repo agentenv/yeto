@@ -510,6 +510,15 @@ function fleetKpis(A,S,sps,kp,ssum,zvTot,caps){
     // a count the tapes lack is a dash, and the card says so
     return [c[0],dash(v),dash(sub)+(miss&&sub.indexOf(why)<0?why:"")]});
 }
+/* a fleet or a run with a syncer (trainer islands, app.js multiOn): a KPI without data reads as a sentence and an
+   island value its tapes do not carry as a dash with the reason; a run with one trainer keeps "n/a" */
+function rlMulti(V){var d=V.topology&&V.topology.diloco;return !!((V.async||{}).islands||[]).length||!!(d&&(d.kind==="island"||d.kind==="synced_group"))}
+var NA_KPI={"MFU":"not on the tapes","Projected finish":"no total round count","Buffer backlog":"no sampler rounds",
+  "Syncer RSS":"not collected","Tokens / card·s":"no trained tokens yet","Latest reward":"not trained yet"};
+// a KPI card [title, value, sub, ...]: a value of "n/a" becomes a sentence, an "n/a" inside a value or a sub a dash
+function naKpi(x){var t=String(x[0]),v=String(x[1]),y=x.slice();
+  y[1]=v==="n/a"?(NA_KPI[t]||(/step p50$/.test(t)?"no steps yet":"not on the tapes yet")):v.replace(/\bn\/a\b/g,"—");
+  y[2]=String(x[2]==null?"":x[2]).replace(/\bn\/a\b/g,"—");return y}
 function rlm(V){
   var O=V.overview||{},A=V.async||{},S=A.samplers||{},TR=A.trainers||{},X=V.islands||{},cs=rlCards(V);
   var t1=END,t0=END-RANGE_H*3600,tp=t0-RANGE_H*3600;
@@ -551,6 +560,7 @@ function rlm(V){
   if(typeof YetoTopoD!=="undefined")kp=YetoTopoD.kpis(V,kp);
   if(A.islands&&A.islands.length)kp=fleetKpis(A,S,sps,kp,ssum,zvTot,caps);
   // a long value (the four rejected counts) wraps in a smaller font instead of being cut off
+  if(rlMulti(V))kp=kp.map(naKpi);
   $("rKpis").innerHTML=kp.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv'+(String(x[1]).length>12?" long":"")+'" title="'+esc(x[1])+'">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
   evenGrid($("rKpis"),kp.length);
   // islands now
@@ -562,7 +572,7 @@ function rlm(V){
   // a run with a syncer: local step / outer version, last PUSH / BCAST; no HBM column when nothing sampled it
   var dl=typeof YetoTopoD!=="undefined"?YetoTopoD.table(V):null,noHbm=!!dl&&!cs.some(function(c){return fin(hbm(c))});
   var head='<tr><th>Island</th><th>'+(dl?"Local step / outer v":"Round / policy")+'</th><th>Reward</th><th>train-rollout KL</th><th>logprob |diff|</th><th>grad_norm</th><th>Step / round time</th><th>Tokens/s</th>'+(noHbm?"":'<th class="bar">HBM peak</th>')+'<th>'+(dl?"Last PUSH / BCAST applied":"Last release / load")+'</th><th>Shard · incarnation</th></tr>';
-  var flNa=!!(A.islands&&A.islands.length);
+  var flNa=rlMulti(V);
   var rowOf=function(c){var ex=X[c.id]||{},s=S[c.id],rr=RR(c),r=rr[rr.length-1]||{},liv=rlLive(c.status),h=hbm(c),lim=ex.hbm_total_gib,mx=Math.max(64,fin(lim)?lim*1.15:0),pc=fin(h)?Math.min(100,100*h/mx):0;
       var row='<tr'+(liv?'':' class="off"')+'><td><div class="nn">'+rlDot(c.status)+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null].filter(Boolean).join(" · ")||"n/a")+' · '+esc(c.status+(c.waiting_reason?": "+c.waiting_reason:"")+(c.left?" ("+(c.left.reason||"")+")":"")+(c.starting&&c.startup_stage?": "+c.startup_stage.label+(fin(c.startup_stage.age_s)?" "+dur(c.startup_stage.age_s):"")+(fin(c.startup_s)?" · start "+dur(c.startup_s):""):"")+((c.launches||[]).length>1?" · launch "+(c.launches.length)+" ("+(c.launches.length-1)+" superseded)":""))+'</div></td>';
       var hb='<td class="bar"><div class="bl">'+(fin(h)?h.toFixed(1)+" GiB"+(fin(lim)?" of "+lim+" GiB":""):"not sampled")+'</div><div class="bt"><div class="bf'+(liv?"":" idle")+'" style="width:'+pc.toFixed(1)+'%"></div>'+(fin(lim)?'<div class="bm" style="left:'+(100*lim/mx).toFixed(1)+'%"></div>':"")+'</div>'+(fin(h)?"":'<div class="ns" title="'+esc(ex.gpu_mem_note||"")+'">'+(/unavailable/.test(ex.gpu_mem_note||"")?"telemetry library missing":"enable --rl-resource-sample-interval")+'</div>')+'</td>';
@@ -579,7 +589,12 @@ function rlm(V){
     esc(c.source_lost?"tape source lost: "+String(c.source_lost.error||"").slice(0,120):"")+'</td></tr>'};
   var liveC=act.filter(function(c){return rlLive(c.status)||c.status==="stale"}),endC=act.filter(function(c){return liveC.indexOf(c)<0});
   // a fleet: a value its tapes do not carry is a dash that says so, never a bare n/a (tags and attributes kept)
-  var rowNa=function(c){var h=rowOf(c);return flNa?h.replace(/(<[^>]*>)|\bn\/a\b/g,function(m,tag){return tag||'<span class="note" title="not on this island\'s tapes">—</span>'}):h};
+  // a fleet / syncer run: an island that ended before its first round is one line saying how it ended
+  var never=function(c){return flNa&&!rlLive(c.status)&&c.status!=="stale"&&!RR(c).length&&!SR(c).length};
+  var neverRow=function(c){var why=c.left&&(c.left.reason||c.left.detail),st=c.status==="left"?"left":c.status;
+    return '<tr class="off"><td><div class="nn">'+rlDot(c.status)+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null].filter(Boolean).join(" · "))+'</div></td>'+
+      '<td colspan="'+(noHbm?9:10)+'" class="ns" title="'+esc((c.left&&c.left.detail)||"")+'">'+esc(st+(why?": "+why:"")+" · ended before its first round")+'</td></tr>'};
+  var rowNa=function(c){if(never(c))return neverRow(c);var h=rowOf(c);return flNa?h.replace(/(<[^>]*>)|\bn\/a\b/g,function(m,tag){return tag||'<span class="note" title="not on this island\'s tapes">—</span>'}):h};
   $("rNodes").innerHTML=(liveC.length?'<table class="nt">'+head+liveC.map(rowNa).join("")+'</table>':'<div class="empty">no active island</div>')+
     (endC.length?'<details class="ended"'+(liveC.length?"":" open")+'><summary class="ns">'+endC.length+' island(s) that ended (left / lost / finished / stopped): '+esc(endC.map(function(c){return c.label+" "+c.status}).join(", "))+'</summary><table class="nt">'+head+endC.map(rowNa).join("")+'</table></details>':"")+
     (unk.length?'<details class="ended"><summary class="ns">'+unk.length+' unrecognized tape(s)</summary><table class="nt">'+unk.map(unkRow).join("")+'</table></details>':"");
@@ -725,6 +740,7 @@ function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
       (Object.keys(CW).length?" · now: "+Object.keys(CW).map(function(i){return "trainer "+i+" waiting "+dur(CW[i].s)}).join(", ")+" · completed rounds only "+pc(A.wsDone):""),delta(A.ws,B.ws,function(v){return (100*v).toFixed(1)+" pt"})],
     ["Projected finish","n/a","the tapes carry no total round count",""]];
   if(((V.async||{}).islands||[]).length)ck=fleetCost(V,ck);
+  if(rlMulti(V))ck=ck.map(naKpi);
   $("rCostK").innerHTML=ck.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div>'+x[3]+'</div>'}).join("");
   $("rCost").innerHTML=card("rcG","Groups per hour","stacked by sampler")+card("rcCh","Card-hours per hour","billed card time vs effective (train step / generate)")+
     card("rcW","Trainer waiting per hour","rollout-phase seconds (waiting on the buffer) per trainer; yellow: the round still waiting now")+card("rcPv","Groups by policy version","per hour, stacked by the version the sampler generated with (no task labels on the tapes)");
