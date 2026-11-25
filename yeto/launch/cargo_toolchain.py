@@ -10,6 +10,12 @@ default toolchain and every build fails.
 ``RUSTUP_HOME`` when set, else HOME's own, or any cargo on PATH); then the
 caller's own home from the password database. The second sets only the
 variables the environment leaves unset. With neither running cargo it says why.
+
+Taking the owner's toolchain means a run under an isolated HOME builds with the
+owner's ``CARGO_HOME``: cargo may add to its registry and git caches there (a
+cache, nothing a run reads back as state). A cargo found off PATH is appended to
+PATH, so no other binary of the owner's cargo bin shadows one already on it.
+Each resolve runs ``cargo --version`` once.
 """
 
 from __future__ import annotations
@@ -68,7 +74,7 @@ def resolve(environ: Mapping[str, str] | None = None, *, owner_home: str | None 
             extra["CARGO_HOME"] = str(Path(home) / ".cargo")
         cargo_home = extra.get("CARGO_HOME") or env.get("CARGO_HOME")
         if first is None and cargo_home and (Path(cargo_home) / "bin" / "cargo").exists():
-            extra["PATH"] = f"{Path(cargo_home) / 'bin'}{os.pathsep}{path}" if path else str(Path(cargo_home) / "bin")
+            extra["PATH"] = f"{path}{os.pathsep}{Path(cargo_home) / 'bin'}" if path else str(Path(cargo_home) / "bin")
         cargo = shutil.which("cargo", path=extra.get("PATH", path))
         if extra and _runs(cargo, {**env, **extra}, run):
             return Toolchain(env=extra, cargo=cargo)
