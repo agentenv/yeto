@@ -270,6 +270,36 @@ def test_the_sky_island_task_runs_in_the_registry_image(_sky_launch):
     assert args.rl_image == pins.VERL_IMAGE  # the run's own args are untouched
 
 
+def test_the_island_task_itself_refuses_a_pulling_verl_island_without_a_registry(_sky_launch, monkeypatch):
+    # the launcher's own guard (launcher._pulled_image_args), behind the preflight: a path that builds an
+    # island task without check_trainer_images (fleet island add / move, a relaunch) still cannot order
+    # a sky verl island whose image has no registry
+    import yeto.launcher as launcher
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.launch.rl_island_task import make_miles_island_task
+
+    args = _sky_launch("aws:1xa100@us-west-2")
+    launcher._prepare_rl_args(args)
+    (spec,) = parse_gpu_spec(args.gpu)
+    monkeypatch.delenv(pins.VERL_REGISTRY_ENV)
+    built = []
+    factory = lambda *a, **kw: built.append(a) or make_miles_island_task(*a, **kw)  # noqa: E731
+    with pytest.raises(ValueError, match=r"^aws trainer island: .*YETO_VERL_IMAGE_REGISTRY"):
+        launcher._island_task(factory, args, spec, 0, 1, "$SYNCER_ADDR", {})
+    assert built == []  # refused before the task factory runs
+    with pytest.raises(ValueError, match="aws trainer island: .*dkr.ecr.*ghcr.io/<owner>"):
+        launcher._pulled_image_args(_rl(), SimpleNamespace(cloud="aws"))
+    for cloud in ("modal", "ssh", None):  # no pull: the args come back as they are
+        iargs = _rl()
+        assert launcher._pulled_image_args(iargs, SimpleNamespace(cloud=cloud)) is iargs
+    miles = _rl("miles", "docker:x/miles@sha256:" + "0" * 64)
+    assert launcher._pulled_image_args(miles, SimpleNamespace(cloud="aws")) is miles
+    monkeypatch.setenv(pins.VERL_REGISTRY_ENV, REGISTRY)
+    iargs = _rl()
+    swapped = launcher._pulled_image_args(iargs, SimpleNamespace(cloud="aws"))
+    assert swapped.rl_image == IMG and iargs.rl_image == pins.VERL_IMAGE  # a copy; the caller's args untouched
+
+
 def test_a_private_registry_image_logs_in_through_the_sky_task_secrets_only(_sky_launch, monkeypatch):
     # the Miles route for a private --rl-image (credentials.registry_login_for): SKYPILOT_DOCKER_* in the
     # launching environment become sky task SECRETS for the island whose image is on that registry; the
@@ -442,6 +472,102 @@ def test_an_unreachable_registry_is_unknown_and_refs_are_split():
         im.split_ref("verl-build:" + "c" * 40)
 
 
+def _redirecting(hops: dict[str, str], final: int = 200):
+    """A fake opener: ``hops`` maps a URL to the Location it redirects to (HTTP 307);
+    any other URL answers ``final``. Records (method, url, Authorization) per request."""
+    import urllib.error
+
+    seen = []
+
+    def urlopen(req, timeout=None):
+        seen.append((req.get_method(), req.full_url, req.headers.get("Authorization")))
+        if req.full_url in hops:
+            raise urllib.error.HTTPError(req.full_url, 307, "redirect", {"Location": hops[req.full_url]}, None)
+        if final == 200:
+            return _Resp(200)
+        raise urllib.error.HTTPError(req.full_url, final, "x", {}, None)
+
+    return urlopen, seen
+
+
+MANIFEST_URL = "https://reg.example/v2/o/r/manifests/sha256:" + "a" * 64
+
+
+def test_a_redirect_to_another_host_does_not_carry_the_registry_login():
+    # ECR / Docker Hub answer a manifest or blob request with a redirect to a presigned storage URL on
+    # another host: the Authorization header (a registry token or the Basic login) must stay behind
+    from yeto.launch import image_manifest as im
+
+    login = {"SKYPILOT_DOCKER_USERNAME": "puller", "SKYPILOT_DOCKER_PASSWORD": "pw-SENTINEL",
+             "SKYPILOT_DOCKER_SERVER": "reg.example"}
+    basic = "Basic " + __import__("base64").b64encode(b"puller:pw-SENTINEL").decode()
+    hops = {MANIFEST_URL: "https://storage.example/presigned?sig=1"}
+    plain, seen = _redirecting(hops)
+    ecr, ecr_seen = _registry({"basic": 200}, scheme="Basic")
+
+    def opener(req, timeout=None):  # anonymous HEAD -> Basic challenge; the Basic HEAD -> redirect
+        if req.headers.get("Authorization") or "storage.example" in req.full_url:
+            return plain(req, timeout)
+        return ecr(req, timeout)
+
+    assert im.manifest_status(REF, login, urlopen=opener)[0] == im.PRESENT
+    assert seen[0] == ("HEAD", MANIFEST_URL, basic)
+    assert seen[1] == ("HEAD", "https://storage.example/presigned?sig=1", None)  # login dropped
+
+    # same host, https: the header follows (a registry moving a path under itself); a relative Location too
+    same, seen = _redirecting({MANIFEST_URL: "/v2/o/r/moved"})
+    with im._open(MANIFEST_URL, method="HEAD", headers={"Authorization": "Bearer t"}, timeout=1, urlopen=same):
+        pass
+    assert seen[1] == ("HEAD", "https://reg.example/v2/o/r/moved", "Bearer t")
+    # a hop back to the registry after leaving it does not get the header back, nor does http on the same host
+    away, seen = _redirecting({MANIFEST_URL: "https://cdn.example/x", "https://cdn.example/x": MANIFEST_URL + "?b"})
+    with im._open(MANIFEST_URL, method="HEAD", headers={"Authorization": "Bearer t"}, timeout=1, urlopen=away):
+        pass
+    assert [a for _, _, a in seen] == ["Bearer t", None, None]
+    down, seen = _redirecting({MANIFEST_URL: "http://reg.example/v2/o/r/plain"})
+    with im._open(MANIFEST_URL, method="HEAD", headers={"Authorization": "Bearer t"}, timeout=1, urlopen=down):
+        pass
+    assert seen[1][2] is None
+    # a redirect loop ends as "registry not reached", not a hang
+    loop, _ = _redirecting({MANIFEST_URL: MANIFEST_URL})
+    assert im.manifest_status(REF, urlopen=loop)[0] == im.UNKNOWN
+
+
+def test_the_default_opener_does_not_follow_redirects_itself():
+    # urllib's own redirect handler would copy the Authorization header to the new host: the module's
+    # opener turns a redirect into an HTTPError for image_manifest._open to decide
+    import http.server
+    import threading
+    import urllib.error
+
+    from yeto.launch import image_manifest as im
+
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            hits.append((self.path, self.headers.get("Authorization")))
+            self.send_response(307 if self.path == "/a" else 200)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/b")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        req = __import__("urllib.request").request.Request(
+            f"http://127.0.0.1:{server.server_port}/a", method="HEAD", headers={"Authorization": "Bearer t"})
+        with pytest.raises(urllib.error.HTTPError) as err:
+            im._OPENER.open(req, timeout=5)
+        assert err.value.code == 307
+        assert hits == [("/a", "Bearer t")]  # /b was never asked
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def _sky_specs(*gpus):
     from yeto.gpu_spec import parse_gpu_spec
 
@@ -461,7 +587,7 @@ def test_a_sky_verl_island_refuses_an_image_its_registry_does_not_have(monkeypat
 
     monkeypatch.setattr(im, "manifest_status", status)
     answers = {IMG: (im.MISSING, "reg has no manifest")}
-    with pytest.raises(ValueError, match=r"--gpu island 0 .*trainer image .*no manifest.*YETO_IMAGE_REGISTRY"):
+    with pytest.raises(ValueError, match=r"--gpu island 0 .*trainer image .*no manifest.*YETO_VERL_IMAGE_REGISTRY"):
         check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO())
     answers[IMG] = (im.DENIED, "private")
     with pytest.raises(ValueError, match="SKYPILOT_DOCKER_USERNAME"):

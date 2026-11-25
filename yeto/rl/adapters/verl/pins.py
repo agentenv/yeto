@@ -165,6 +165,9 @@ VERL_FSDP_CARD_ARCHES = ("sm80", "sm89", "sm90")
 # allowed architecture that is not here gets an "unverified" warning, not a refusal.
 VERL_FSDP_VERIFIED_CARDS: dict[str, str] = {
     "H100": "Modal 1xH100, rl-verl-backend acceptance (fork acad9875)",
+    "L40S": ("Modal 1xL40S, fleet-verl-trainer-islands 5.3 (fork acad9875): Qwen3-0.6B full-parameter "
+             "async GRPO buffer trainer, 20 steps with a 1xL4 SGLang pool following every release; peak "
+             "GPU memory 13.4 GB of 46 GB (torch max allocated 11.1 GB), step ~38 s, release ~1.2 GB in ~21 s"),
 }
 
 # On npu1: where the verl checkout lives inside the island's image.

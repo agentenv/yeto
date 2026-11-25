@@ -8,6 +8,12 @@ ECR), anonymous unless a registry login is given (the ``SKYPILOT_DOCKER_*`` trip
 island would pull with). The login is sent to the registry's own token endpoint only
 and never printed.
 
+Redirects are not followed by urllib (its redirect handler copies the
+``Authorization`` header to whatever host the registry points at: an ECR or Docker
+Hub registry redirects to a presigned storage URL). They are followed here, at most
+:data:`MAX_REDIRECTS` hops, and the ``Authorization`` header goes only to the host it
+was meant for, over https.
+
 ``YETO_IMAGE_MANIFEST_CHECK=off`` turns the check off (unit tests; a host that cannot
 reach the registry while the nodes can).
 """
@@ -30,6 +36,36 @@ ACCEPT = ", ".join((
     "application/vnd.docker.distribution.manifest.v2+json",
 ))
 PRESENT, MISSING, DENIED, UNKNOWN = "present", "missing", "denied", "unknown"
+MAX_REDIRECTS = 5
+_REDIRECTS = (301, 302, 303, 307, 308)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect comes back as an HTTPError (3xx) instead of being followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _open(url: str, *, method: str, headers: dict[str, str], timeout: float, urlopen):
+    """``urlopen`` of ``url``, following redirects with the ``Authorization`` header
+    dropped as soon as a hop leaves the original host or https."""
+    origin = urllib.parse.urlsplit(url)
+    for _ in range(MAX_REDIRECTS + 1):
+        try:
+            return urlopen(urllib.request.Request(url, method=method, headers=headers), timeout=timeout)
+        except urllib.error.HTTPError as error:
+            location = (error.headers or {}).get("Location") if error.code in _REDIRECTS else None
+            if not location:
+                raise
+            url = urllib.parse.urljoin(url, location)
+            hop = urllib.parse.urlsplit(url)
+            if hop.scheme != "https" or hop.netloc.lower() != origin.netloc.lower():
+                headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+    raise urllib.error.URLError(f"more than {MAX_REDIRECTS} redirects from {origin.netloc}")
 
 
 def enabled() -> bool:
@@ -60,18 +96,19 @@ def _basic(login: dict[str, str] | None) -> str | None:
 
 
 def manifest_status(ref: str, login: dict[str, str] | None = None, *, timeout: float = 10.0,
-                    urlopen=urllib.request.urlopen) -> tuple[str, str]:
+                    urlopen=None) -> tuple[str, str]:
     """``(status, detail)``: ``present`` (HTTP 200), ``missing`` (404), ``denied`` (401/403:
     absent, or private and no / a wrong login: a registry does not tell which) or
     ``unknown`` (the registry was not reached, or answered something else)."""
     host, repo, digest = split_ref(ref)
     url = f"https://{host}/v2/{repo}/manifests/{digest}"
     basic = _basic(login)
+    urlopen = urlopen or _OPENER.open
 
     def head(auth: str | None) -> tuple[int, dict]:
         headers = {"Accept": ACCEPT, **({"Authorization": auth} if auth else {})}
         try:
-            with urlopen(urllib.request.Request(url, method="HEAD", headers=headers), timeout=timeout) as r:
+            with _open(url, method="HEAD", headers=headers, timeout=timeout, urlopen=urlopen) as r:
                 return int(r.status), dict(r.headers)
         except urllib.error.HTTPError as error:
             return int(error.code), dict(error.headers or {})
@@ -85,10 +122,10 @@ def manifest_status(ref: str, login: dict[str, str] | None = None, *, timeout: f
                 if "realm" not in params:
                     return UNKNOWN, f"{host}: a Bearer challenge without a realm"
                 query = urllib.parse.urlencode({k: params[k] for k in ("service", "scope") if k in params})
-                req = urllib.request.Request(f"{params['realm']}?{query}",
-                                             headers={"Authorization": f"Basic {basic}"} if basic else {})
                 try:
-                    with urlopen(req, timeout=timeout) as r:
+                    with _open(f"{params['realm']}?{query}", method="GET", timeout=timeout, urlopen=urlopen,
+                               headers={"Authorization": f"Basic {basic}"}
+                               if basic and params["realm"].startswith("https://") else {}) as r:
                         body = json.loads(r.read() or b"{}")
                 except urllib.error.HTTPError as error:
                     code = int(error.code)
