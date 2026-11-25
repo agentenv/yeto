@@ -1692,7 +1692,7 @@ class Run:
                                  "members would be released through the new provider; remove the pool and add a "
                                  "new one")
             pc = nc_cli.pool_config(cfg, allowed=None if not pool_run.is_national_compute(cfg)
-                                    else nc_cli.allowed_accounts())
+                                    else nc_cli.allowed_accounts(), min_target=0)
             if list(pc.accounts) != list(pool.config.accounts):
                 raise ValueError(f"the {pool.config.slot_name}s cannot change in place ({pool.config.accounts} -> "
                                  f"{pc.accounts}); remove the pool and add a new one")
@@ -1965,7 +1965,7 @@ class Run:
                         continue
                 except pool_run.PoolStateOwnerError as error:
                     raise RunUpRefused(f"pool {ref.name}: {error}") from None
-                pool = IslandPool.restore(state, cli.pool_config(cfg, allowed=None), None,  # type: ignore[arg-type]
+                pool = IslandPool.restore(state, cli.pool_config(cfg, allowed=None, min_target=0), None,  # type: ignore[arg-type]
                                           log=cli._log, events=pool_run.event_log(cfg))  # noqa: SLF001
                 if not pool.stopped or getattr(pool, "finished", None):
                     continue

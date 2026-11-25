@@ -1060,7 +1060,7 @@ def test_a_sky_pool_loop_with_run_aws_settings_is_refused_at_its_start(tmp_path,
     assert sp.start_problems(cfg) == []
     monkeypatch.setenv("AWS_PROFILE", "store-r2")
     assert sp.start_problems(cfg) and "AWS_PROFILE" in sp.start_problems(cfg)[0]
-    monkeypatch.setattr(pool_run.cli, "pool_config", lambda cfg, allowed=None: None)
+    monkeypatch.setattr(pool_run.cli, "pool_config", lambda cfg, allowed=None, min_target=1: None)
     monkeypatch.setattr(pool_run.cli, "pool_config_warnings", lambda cfg: [])
     monkeypatch.setattr(pool_run, "breaker_findings", lambda cfg: [])
     monkeypatch.setattr(pool_run, "lock_holder", lambda path: pytest.fail("got past the start check"))
@@ -1151,7 +1151,7 @@ def test_an_in_process_controller_refuses_a_sky_pool_at_its_start(monkeypatch):
     for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AWS_PROFILE", "store-r2")
-    monkeypatch.setattr(pool_run.cli, "pool_config", lambda cfg, allowed=None: None)
+    monkeypatch.setattr(pool_run.cli, "pool_config", lambda cfg, allowed=None, min_target=1: None)
     monkeypatch.setattr(pool_run, "check_sampler_spec", lambda cfg, pc: None)
     monkeypatch.setattr(pool_run, "acquire_lock", lambda *a, **k: pytest.fail("got past the start check"))
     cfg = {"target": 1, "accounts": [1], "shard_base": "s", "run": "run-k",

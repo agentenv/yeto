@@ -152,7 +152,7 @@ def view(refs: list[rollout_pools.PoolRef]) -> Any:
     for ref in refs:
         try:
             cfg = ref.load()
-            pc = cli.pool_config(cfg, allowed=None)
+            pc = cli.pool_config(cfg, allowed=None, min_target=0)  # a pool scaled to 0 shows too
             pools[ref.name] = IslandPool.restore(cli.pool_state_path(cfg), pc, _NoOps(), log=lambda _m: None)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:  # incl. a newer state format
             cli._log(f"rollout status: pool {ref.name}: {error}")  # noqa: SLF001
