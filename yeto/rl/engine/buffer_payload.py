@@ -650,17 +650,35 @@ def unknown_version_tokens(sample: Mapping[str, Any]) -> int:
     """Response tokens of ``sample`` (a :func:`miles_sample_dict`) that no
     ``weight_versions`` span names a numeric version for: the tokens the
     full-parameter trajectory evidence would find of unknown policy version."""
+    versions = _response_token_versions(sample)
+    return sum(1 for version in versions if version is None)
+
+
+def oldest_response_version(sample: Mapping[str, Any]) -> int | None:
+    """The oldest policy version a ``weight_versions`` span names for a response
+    token of ``sample`` (a :func:`miles_sample_dict`): the version the
+    full-parameter trajectory evidence names the trajectory (segment) by. None:
+    no response token has a numeric version."""
+    known = [version for version in _response_token_versions(sample) if version is not None]
+    return min(known) if known else None
+
+
+def _response_token_versions(sample: Mapping[str, Any]) -> list[int | None]:
+    """Per response token of ``sample``: the numeric version of the last
+    ``weight_versions`` span with a numeric version over it (None: no span names
+    one)."""
     response = int(sample.get("response_length") or 0)
     start = len(sample.get("tokens") or ()) - response
-    known = [False] * max(0, response)
+    out: list[int | None] = [None] * max(0, response)
     for call in sample.get("weight_versions") or ():
         spans = call.get("spans") if isinstance(call, Mapping) else call
         for span in spans or ():
-            if engine_version_number(span.get("version")) is None:
+            version = engine_version_number(span.get("version"))
+            if version is None:
                 continue
             for pos in range(max(int(span["abs_start"]), start), min(int(span["abs_end"]), start + response)):
-                known[pos - start] = True
-    return len(known) - sum(known)
+                out[pos - start] = int(version)
+    return out
 
 
 def _sample_versions(sample: Mapping[str, Any]) -> list[int]:
