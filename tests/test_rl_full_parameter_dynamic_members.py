@@ -451,3 +451,12 @@ def test_learner_ids_refuse_a_store_without_an_exclusive_create(tmp_path):
         allocate_learner_id(objects, launched=2, max_learners=4, island="a")
     with pytest.raises(ValueError, match="launched"):
         allocate_learner_id(DirectoryObjectStore(tmp_path / "s2"), launched=5, max_learners=4, island="a")
+
+
+def test_the_verl_island_reads_the_pool_roster_flag():
+    from test_verl_island_flags import REQUIRED
+
+    from yeto.rl.adapters.verl import island_entry
+
+    args, unread = island_entry.parse_args([*REQUIRED, "--sync-max-learners", "3"])
+    assert args.sync_max_learners == 3 and "--sync-max-learners" not in unread
