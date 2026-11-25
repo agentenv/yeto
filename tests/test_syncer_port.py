@@ -9,12 +9,16 @@ retired). Now a syncer that cannot bind is an error at its start, and a syncer o
 
 from __future__ import annotations
 
+import shutil
 import socket
+from pathlib import Path
 
 import pytest
 
 from syncer_port import LISTENING, on_port_zero
 from test_dispense_syncer import Syncer, syncer_binary  # noqa: F401 - the fixture
+
+pytest_plugins = ["pytester"]
 
 
 def test_a_syncer_on_port_zero_is_reached_on_the_port_it_bound(syncer_binary, tmp_path):  # noqa: F811
@@ -59,3 +63,13 @@ def test_a_test_syncer_runs_from_a_copy_no_cargo_build_rewrites(tmp_path, monkey
     assert first.is_relative_to(tmp_path / "copies")
     second = syncer_build.private_copy(built)
     assert second != first and second.read_bytes() == b"v2" and first.read_bytes() == b"v1"
+
+
+def test_a_nested_in_process_session_leaves_this_processs_binary_copy(syncer_binary, pytester):  # noqa: F811
+    """A test running pytest in process with this conftest (tests/test_conftest_ray_guard.py)
+    ends a session in the same process: removing "this process's" copies there removed the
+    copy every later syncer test of the outer session executes (FileNotFoundError, exit 127)."""
+    shutil.copy(Path(__file__).with_name("conftest.py"), pytester.path / "conftest.py")
+    pytester.makepyfile(test_nested="def test_nothing():\n    pass\n")
+    pytester.runpytest("-p", "no:cacheprovider").assert_outcomes(passed=1)
+    assert Path(syncer_binary).is_file()

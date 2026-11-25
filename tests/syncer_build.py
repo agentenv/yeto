@@ -123,6 +123,8 @@ def build_syncer() -> Path:
     on the first call."""
     global _built
     with _lock:
+        if _built is not None and not _built.is_file():
+            _built = None  # this process's copy was removed: copy (and build) again
         if _built is None and not TOOLCHAIN.ok:
             if not binary_is_current():
                 raise RuntimeError(f"no syncer binary: {TOOLCHAIN.reason}, and {BINARY} is missing or older "
