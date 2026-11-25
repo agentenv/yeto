@@ -21,7 +21,7 @@ from . import desired as dz
 
 def add_parser(sub: Any) -> None:
     p = sub.add_parser("fleet", help="the fleet's desired state (rollout.control_plane store): show, apply")
-    fsub = p.add_subparsers(dest="fleet_command", metavar="{show,apply}")
+    fsub = p.add_subparsers(dest="fleet_command", metavar="{show,apply,island}")
     fsub.required = True
     show = fsub.add_parser("show", help="print the newest generation of fleet/desired.json")
     show.add_argument("--config", required=True, help="the run config")
@@ -33,6 +33,9 @@ def add_parser(sub: Any) -> None:
                        help="the generation the file was edited from: refused when the store moved on")
     apply.add_argument("--note", default=None, help="why (kept in the generation)")
     apply.add_argument("--dry-run", action="store_true", help="check and show the change; nothing is written")
+    from yeto.rl import fleet_islands  # noqa: PLC0415 - trainer islands of a per-island fleet
+
+    fleet_islands.add_parser(fsub)
 
 
 def _store(config: str) -> Any:
@@ -93,6 +96,10 @@ def scale_refusals(run: Any, old: dict[str, Any] | None, new: dict[str, Any]) ->
 
 
 def main(args: Any) -> int:
+    if args.fleet_command == "island":
+        from yeto.rl import fleet_islands  # noqa: PLC0415
+
+        return fleet_islands.main(args)
     run, store = _store(args.config)
     if args.fleet_command == "show":
         doc = store.read(args.generation)

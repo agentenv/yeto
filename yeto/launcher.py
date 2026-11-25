@@ -328,12 +328,14 @@ def island_lifecycle_enabled(args, specs) -> bool:
     mode = getattr(args, "island_lifecycle", None) or "auto"
     if mode == "off" or getattr(args, "dry_run", False):
         return False
+    from .rl.engine import sample_roles
+
+    if sample_roles.fleet_role(args) == sample_roles.FLEET_ROLE_SYNCER:
+        return False  # the syncer launch of a fleet launched island by island runs no island
     if mode == "on":
         return True
     if getattr(args, "training_mode", "sft") != "rl":
         return False
-    from .rl.engine import sample_roles
-
     samplers = set(sample_roles.sampler_islands(args, len(specs)))
     return sum(1 for m in range(len(specs)) if m not in samplers) >= 2
 
@@ -364,9 +366,20 @@ def island_outcome(exit_codes) -> tuple[list[str], list[str], list[str]]:
     return done, stopped, failed
 
 
+def _record_id(args, m: int) -> int:
+    """The record id (``fleet/trainers/<k>/``) of launch island ``m``: its position in
+    ``--gpu``; a fleet island launch (``--rl-fleet-role island``) records its fleet
+    learner id."""
+    from .rl.engine import sample_roles
+
+    member = sample_roles.fleet_learner(args)
+    return int(m) if member is None else member[0]
+
+
 def _island_refs(args, specs, names, *, modal_names=(), ssh_names=(), events_dir=None, echo_names=()) -> dict:
     """Launch island name -> :class:`~yeto.launch.island_lifecycle.IslandRef` (learner id =
-    the island's position in ``--gpu``; ``tape``: its echoed event tape, when it has one)."""
+    the island's position in ``--gpu``, :func:`_record_id`; ``tape``: its echoed event
+    tape, when it has one)."""
     from .launch.island_lifecycle import IslandRef
     from .rl.engine import sample_roles
 
@@ -376,7 +389,7 @@ def _island_refs(args, specs, names, *, modal_names=(), ssh_names=(), events_dir
         source = ("modal" if name in modal_names else "ssh" if name in ssh_names
                   else "verda" if spec.cloud == "verda" else "sky")
         tape = str(Path(events_dir) / f"{name}.jsonl") if events_dir is not None and name in echo_names else None
-        out[name] = IslandRef(m, source, "sampler" if m in samplers else "trainer", tape)
+        out[name] = IslandRef(_record_id(args, m), source, "sampler" if m in samplers else "trainer", tape)
     return out
 
 
@@ -456,12 +469,13 @@ def _plan_island_records(args, specs, names, island_states, island_lock, *, rela
 
     # Adoption goes by the run store's records (the local run manifest is only a cache: a
     # launcher restarted on another machine finds the islands there too).
-    records = island_states.read_all(range(len(specs)), strict=True)  # also what the writes merge into
+    ids = [_record_id(args, m) for m in range(len(specs))]  # a fleet island launch: its learner id
+    records = island_states.read_all(ids, strict=True)  # also what the writes merge into
     restart = relaunch or any(r.get("state") in island_adopt.ADOPTABLE for r in records.values())
     if not restart:
-        for m in range(len(specs)):  # a new run: an island STOP / START an earlier run of this name left is void
-            island_states.clear_stop(m)
-            island_states.clear_start(m)
+        for k in ids:  # a new run: an island STOP / START an earlier run of this name left is void
+            island_states.clear_stop(k)
+            island_states.clear_start(k)
     refs = _island_refs(args, specs, names,
                         modal_names={n for n, sp in zip(names, specs) if sp.cloud == "modal"},
                         ssh_names=ssh_names, events_dir=events_dir, echo_names=echo_names)
@@ -654,7 +668,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     }
     events_dir = _no_sync_events_dir(args) if echo_names else None
     prefix = args.cluster_prefix
-    syncer_cluster = None if head_mode or no_sync else sky_cluster_name(f"{prefix}-syncer")
+    from .rl.engine.sample_roles import FLEET_ROLE_ISLAND, FLEET_ROLE_SYNCER, fleet_role
+
+    # a fleet launched island by island (yeto.rl.island_launches): an island launch dials
+    # the fleet's syncer; the syncer launch starts the syncer only. None: as before
+    member_role = fleet_role(args)
+    syncer_cluster = (None if head_mode or no_sync or member_role == FLEET_ROLE_ISLAND
+                      else sky_cluster_name(f"{prefix}-syncer"))
     learner_names = learner_cluster_names(prefix, specs)
     ssh_names = _resident_ssh_names(args, learner_names, specs)
     # yeto.launch.island_lifecycle: each trainer island's record and STOP in the run store
@@ -767,6 +787,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             syncer_task = syncer_job = None
             syncer_addr = "none"  # the island command carries no --syncer
             print("[launcher] --rl-single-island-no-sync: no syncer, no outer sync")
+        elif member_role == FLEET_ROLE_ISLAND:
+            syncer_task = syncer_job = None
+            syncer_addr = str(args.rl_fleet_syncer)
+            print(f"[launcher] fleet island (learner {args.rl_fleet_learner_id}): dials the fleet's syncer at "
+                  f"{syncer_addr}")
         elif head_mode:
             syncer_task = syncer_job = None
             syncer_addr = syncer_shard_addrs(os.environ['SYNCER_PUBLIC_IP'], args)
@@ -800,6 +825,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             resolve_island_syncer_epoch(args, syncer_status_reader(
                 local_tape=syncer_event_tape(args) if head_mode else None,
                 ssh_host=None if head_mode else syncer_cluster))
+        if member_role == FLEET_ROLE_SYNCER:
+            # the fleet's syncer alone: recorded for the island launches, then supervised
+            from .launch import fleet_syncer
+
+            return fleet_syncer.serve(
+                args, syncer_addr, num_learners, clusters=clusters, head_mode=head_mode,
+                local_syncer=local_syncer, syncer_cluster=syncer_cluster, syncer_job=syncer_job)
 
         if external:
             for x in range(external):
