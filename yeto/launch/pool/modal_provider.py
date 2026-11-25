@@ -139,6 +139,7 @@ CONFIG_KEYS = frozenset({"kind", "factory", "app_name", "image", "gpu", "gpus", 
                          "secrets", "bucket", "model_volume", "model_mount", "log_volume", "timeout_h",
                          "python", "name_prefix", "env", "price_usd_h", "scaledown_window_s", "tasks_dir"})
 DEFAULT_GPU, DEFAULT_GPUS = "B300", 8  # a pool config without gpu / gpus
+DEFAULT_CPU, DEFAULT_MEMORY_GIB = 64, 1024  # a pool config without cpu / memory_gib (the sampler function's request)
 STATS_CACHE_S = 5.0  # the function's live stats, read once for all queued calls of a pool tick
 DEFAULT_TIMEOUT_H = 24  # the sampler function's timeout without timeout_h: each call's hard end
 # a call's timeout counts as its hard end only from twice (replace_lead_s + end_margin_s) on (pool defaults)
@@ -857,7 +858,7 @@ class ModalSdkClient:
             volumes[c.get("model_mount", DEFAULT_MODEL_MOUNT)] = modal.Volume.from_name(c["model_volume"]).read_only()
         secrets = [modal.Secret.from_name(name) for name in [c["secret"], *(c.get("secrets") or ())]]
         app.function(image=image, gpu=f"{c.get('gpu', DEFAULT_GPU)}:{int(c.get('gpus', DEFAULT_GPUS))}",
-                     cpu=int(c.get("cpu", 64)), memory=int(c.get("memory_gib", 1024)) * 1024,
+                     cpu=int(c.get("cpu", DEFAULT_CPU)), memory=int(c.get("memory_gib", DEFAULT_MEMORY_GIB)) * 1024,
                      timeout=int(float(c.get("timeout_h", DEFAULT_TIMEOUT_H)) * 3600), volumes=volumes,
                      scaledown_window=scaledown_window_s(c),
                      secrets=secrets, name=FUNCTION)(rollout_sampler_body)
@@ -1329,11 +1330,19 @@ def from_config(cfg: dict[str, Any], run_id: str, *, client: Any = None) -> Moda
 
 
 def table_price(section: dict[str, Any]) -> float | None:
-    """One sampler container hour (its GPUs) at the unified price table's Modal rate: the
-    price a Modal trainer of the same GPUs is billed at (None: the GPU is not in the table)."""
+    """One sampler container hour at the unified price table's Modal list prices: its GPUs
+    plus the CPU cores and memory its function requests (``cpu`` / ``memory_gib``, else
+    :data:`DEFAULT_CPU` / :data:`DEFAULT_MEMORY_GIB`), which Modal bills next to the GPUs;
+    the price a Modal trainer of the same request is billed at (None: the GPU is not in the
+    table)."""
     from yeto.cost import prices  # noqa: PLC0415
 
-    return prices.node_usd_h("modal", section.get("gpu", DEFAULT_GPU), section.get("gpus", DEFAULT_GPUS))
+    try:
+        cpu, mem = float(section.get("cpu", DEFAULT_CPU)), float(section.get("memory_gib", DEFAULT_MEMORY_GIB))
+    except (TypeError, ValueError):
+        return None  # unpriced (never the GPU line alone): the app's own start refuses the request anyway
+    return prices.modal_container_usd_h(section.get("gpu", DEFAULT_GPU), section.get("gpus", DEFAULT_GPUS),
+                                        cpu=cpu, memory_gib=mem)
 
 
 def pool_spec(cfg: dict[str, Any]) -> dict[str, Any] | None:

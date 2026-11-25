@@ -125,9 +125,27 @@ def save_record(objects: Any, learner_id: int, record: dict[str, Any], now: floa
     return record
 
 
-def table_usd_per_h(gpu: Any) -> float | None:
+def _last_flag(argv: Any, flag: str) -> float | None:
+    """The number after the last ``flag`` (``flag N`` or ``flag=N``) of ``argv`` (None: absent or not a number)."""
+    value = None
+    items = [str(a) for a in (argv or ())]
+    for i, a in enumerate(items):
+        if a == flag and i + 1 < len(items):
+            value = items[i + 1]
+        elif a.startswith(flag + "="):
+            value = a.split("=", 1)[1]
+    try:
+        return None if value is None else float(value)
+    except ValueError:
+        return None
+
+
+def table_usd_per_h(gpu: Any, argv: Any = None) -> float | None:
     """The unified price table's USD/h of an island launch's ``--gpu`` (every node, from a
-    billing row of :mod:`yeto.cost.prices`); None when the table has no billing row for it."""
+    billing row of :mod:`yeto.cost.prices`); None when the table has no billing row for it.
+    A Modal node also bills the CPU and memory it requests: ``--modal-cpu`` /
+    ``--modal-memory-gib`` / ``--modal-ephemeral-disk-gib`` of the launch's ``argv``, else
+    the per-GPU default request (:func:`yeto.cost.billing.default_modal_host`)."""
     from yeto.cost import prices  # noqa: PLC0415
     from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
 
@@ -140,6 +158,16 @@ def table_usd_per_h(gpu: Any) -> float | None:
         node = prices.node_usd_h(str(spec.cloud), spec.gpu, spec.gpus_per_node, region=spec.region)
         if node is None:
             return None
+        if str(spec.cloud).lower() == "modal":
+            from yeto.cost.billing import default_modal_host  # noqa: PLC0415
+
+            dcpu, dmem = default_modal_host(spec.gpus_per_node)
+            cpu, mem = _last_flag(argv, "--modal-cpu"), _last_flag(argv, "--modal-memory-gib")
+            hostpart = prices.modal_host_usd_h(dcpu if cpu is None else cpu, dmem if mem is None else mem,
+                                               _last_flag(argv, "--modal-ephemeral-disk-gib"))
+            if hostpart is None:
+                return None  # no host.modal row: the GPU line alone would undercount
+            node += hostpart
         total += node * int(spec.num_nodes)
     return total
 
@@ -149,7 +177,7 @@ def incarnation_price(record: dict[str, Any]) -> float | None:
     else the unified price table's for its ``--gpu`` (:func:`table_usd_per_h`); None when
     neither prices it."""
     price = record.get("usd_per_h")
-    return float(price) if price is not None else table_usd_per_h(record.get("gpu"))
+    return float(price) if price is not None else table_usd_per_h(record.get("gpu"), record.get("argv"))
 
 
 def closed(record: dict[str, Any] | None, now: float) -> dict[str, Any]:

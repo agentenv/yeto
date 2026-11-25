@@ -324,12 +324,13 @@ def launch(c: SamplerConfig, *, wait: bool = True, log=print) -> dict[str, Any] 
     from ..cost.ledger import record_safely
 
     app, fn = build_app(c)
-    record_safely("intent", "modal_app", c.app_name, gpu=c.gpu, gpus=c.tp)
+    record_safely("intent", "modal_app", c.app_name, gpu=c.gpu, gpus=c.tp, cpu=c.cpu, memory_gib=c.memory_gib)
     with app.run(detach=True):
         # a detached ephemeral app per launch: its own app id ($YETO_RESOURCE_LEDGER records it,
         # so `yeto cleanup --run` stops exactly this app; the sampler outlives this process)
         if getattr(app, "app_id", None):
             record_safely("created", "modal_app", app.app_id, c.app_name, gpu=c.gpu, gpus=c.tp,
+                          cpu=c.cpu, memory_gib=c.memory_gib,
                           role="sampler", shard=c.shard)
         call = fn.spawn(c.record())
         record_safely("created", "modal_call", str(call.object_id), "sampler",

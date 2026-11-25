@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -47,18 +47,70 @@ MODAL_PRICES_SOURCE = prices.sources("modal")
 DEFAULT_MODAL_USD_PER_GPU_HOUR = prices.per_gpu_usd_h("modal")
 
 
-def default_modal_rate(gpu: Any, gpus: Any) -> float | None:
+def default_modal_host(gpus: Any) -> tuple[float, float]:
+    """``(cores, memory GiB)`` a Modal island of ``gpus`` GPUs requests by default
+    (:data:`yeto.modal_runner.MODAL_CPU_CORES_PER_GPU` / ``MODAL_MEMORY_GIB_PER_GPU`` each):
+    what a ledger entry without its host shape is priced at."""
+    from yeto.modal_runner import MODAL_CPU_CORES_PER_GPU, MODAL_MEMORY_GIB_PER_GPU  # noqa: PLC0415
+
+    n = float(gpus or 0)
+    return MODAL_CPU_CORES_PER_GPU * n, MODAL_MEMORY_GIB_PER_GPU * n
+
+
+def default_modal_rate(gpu: Any, gpus: Any, cpu: Any = None, memory_gib: Any = None,
+                       disk_gib: Any = None) -> float | None:
+    """USD/h of Modal containers of ``gpus`` x ``gpu`` that request ``cpu`` cores and
+    ``memory_gib`` GiB in all (an ``ephemeral disk`` of ``disk_gib`` bills as memory at
+    20:1): the GPU list price plus the CPU and memory list prices (``host.modal``), which
+    Modal bills next to the GPU. A missing host shape is the per-GPU default request."""
     unit = DEFAULT_MODAL_USD_PER_GPU_HOUR.get(str(gpu or "").lower().split(":")[0].rstrip("!"))
-    return None if unit is None or not gpus else unit * float(gpus)
+    if unit is None or not gpus:
+        return None
+    dcpu, dmem = default_modal_host(gpus)
+    hostpart = prices.modal_host_usd_h(dcpu if cpu is None else float(cpu),
+                                       dmem if memory_gib is None else float(memory_gib),
+                                       None if disk_gib is None else float(disk_gib))
+    return unit * float(gpus) + (hostpart or 0.0)
 
 
-def modal_shapes_rate(shapes: Iterable[tuple[Any, Any]]) -> float | None:
-    """USD/h of an app whose functions hold ``(gpu, gpus)`` each; None when any GPU type
-    is missing from :data:`DEFAULT_MODAL_USD_PER_GPU_HOUR` (or there is no GPU at all)."""
-    rates = [default_modal_rate(gpu, gpus) for gpu, gpus in shapes]
+def modal_shapes_rate(shapes: Iterable[tuple[Any, ...]]) -> float | None:
+    """USD/h of an app whose functions hold ``(gpu, gpus[, cpu, memory_gib[, disk_gib]])``
+    each (:func:`default_modal_rate`); None when any GPU type is missing from
+    :data:`DEFAULT_MODAL_USD_PER_GPU_HOUR` (or there is no GPU at all)."""
+    rates = [default_modal_rate(*shape) for shape in shapes]
     if not rates or any(r is None for r in rates):
         return None
     return sum(rates)
+
+
+def _attrs_rate(attrs: Mapping[str, Any]) -> float | None:
+    """:func:`default_modal_rate` of a ledger entry's ``gpu`` / ``gpus`` / ``cpu`` / ``memory_gib`` / ``disk_gib``."""
+    return default_modal_rate(attrs.get("gpu"), attrs.get("gpus"), attrs.get("cpu"), attrs.get("memory_gib"),
+                              attrs.get("disk_gib"))
+
+
+# The unbilled tail of a Modal app is estimated at the higher of its list rate and the
+# rate of its dearest billed hour (that hour's cost over the time the app ran in it, when
+# it ran >= this long in it): network egress (a trainer publishing its weights) and use
+# above the request bill on top of the list rate, and no list price foresees them.
+OBSERVED_RATE_MIN_OVERLAP_S = 900.0
+
+
+def observed_hour_rate(r: Resource, mine: list[BillingRow], end: float, *,
+                       without_egress: bool = False) -> tuple[float, str] | None:
+    """``(USD/h, hour label)`` of app ``r``'s dearest billed hour among those it ran in for
+    at least :data:`OBSERVED_RATE_MIN_OVERLAP_S` (its cost over that overlap); None: none.
+    ``without_egress``: the hour's cost less its billed egress (the tail counts the app's
+    egress from its tape instead; a row without the breakdown keeps its whole cost)."""
+    best: tuple[float, str] | None = None
+    for b in mine:
+        overlap = min(end, b.interval_start + HOUR) - max(r.created_at, b.interval_start)
+        if overlap >= OBSERVED_RATE_MIN_OVERLAP_S:
+            cost = b.cost - (b.egress or 0.0) if without_egress else b.cost
+            rate = cost / (overlap / HOUR)
+            if best is None or rate > best[0]:
+                best = (rate, hour_label(b.interval_start))
+    return best
 
 
 def _ts(value: Any) -> float | None:
@@ -111,17 +163,40 @@ class BillingRow:
     description: str
     interval_start: float
     cost: float
+    egress: float | None = None  # the row's "Network Egress" part (None: the report gave no breakdown)
+
+
+EGRESS_RESOURCE = "Network Egress"  # the billing report's cost_by_resource key of egress
+
+
+def _row_field(row: Any, name: str) -> Any:
+    return row.get(name) if isinstance(row, dict) else getattr(row, name, None)
 
 
 def modal_billing_fetch(start: float, end: float) -> list[BillingRow]:
-    """Production fetch: ``modal.billing.workspace_billing_report`` at hourly resolution."""
+    """Production fetch: the workspace billing report at hourly resolution
+    (``modal.Workspace.billing.report``, which breaks each row down by resource; older
+    clients: ``modal.billing.workspace_billing_report``, whole rows only)."""
     import modal
 
-    rows = modal.billing.workspace_billing_report(
-        start=datetime.fromtimestamp(floor_hour(start), UTC),
-        end=datetime.fromtimestamp(end, UTC), resolution="h")
-    return [BillingRow(str(r["object_id"]), str(r.get("description") or ""),
-                       _ts(r["interval_start"]), float(r["cost"])) for r in rows]
+    window = dict(start=datetime.fromtimestamp(floor_hour(start), UTC), end=datetime.fromtimestamp(end, UTC),
+                  resolution="h")
+    workspace = getattr(modal, "Workspace", None)
+    rows = None
+    if workspace is not None and hasattr(workspace, "from_context"):
+        try:
+            rows = workspace.from_context().billing.report(**window)
+        except Exception:  # noqa: BLE001 - the older report still prices every row
+            rows = None
+    if rows is None:
+        rows = modal.billing.workspace_billing_report(**window)
+    out = []
+    for r in rows:
+        by = _row_field(r, "cost_by_resource")
+        egress = None if not isinstance(by, Mapping) else float(by.get(EGRESS_RESOURCE) or 0.0)
+        out.append(BillingRow(str(_row_field(r, "object_id")), str(_row_field(r, "description") or ""),
+                              _ts(_row_field(r, "interval_start")), float(_row_field(r, "cost")), egress))
+    return out
 
 
 class ModalBilling:
@@ -230,10 +305,21 @@ class Rates:
     def table_rate(self, cloud: str, attrs: Mapping[str, Any]) -> float | None:
         if self.prices is None or not attrs.get("gpu") or not attrs.get("gpus"):
             return None
-        from ..dashboard.cost import price_per_gpu_h
+        from ..dashboard.cost import host_unit_prices, price_per_gpu_h
 
-        unit = price_per_gpu_h(dict(self.prices), cloud, attrs.get("gpu"), attrs.get("price_key"))
-        return None if unit is None else unit * float(attrs["gpus"])
+        table = dict(self.prices)
+        unit = price_per_gpu_h(table, cloud, attrs.get("gpu"), attrs.get("price_key"))
+        if unit is None:
+            return None
+        rate = unit * float(attrs["gpus"])
+        hp = host_unit_prices(table, cloud) if cloud == "modal" else None
+        if hp is not None:  # Modal bills the requested CPU and memory next to the GPU
+            dcpu, dmem = default_modal_host(attrs["gpus"])
+            cpu = dcpu if attrs.get("cpu") is None else float(attrs["cpu"])
+            mem = prices.modal_billed_memory_gib(dmem if attrs.get("memory_gib") is None else float(attrs["memory_gib"]),
+                                                 attrs.get("disk_gib"))
+            rate += hp["cpu_core_h"] * cpu + hp["mem_gib_h"] * mem
+        return rate
 
 
 def _app_rows(r: Resource, rows: Iterable[BillingRow], end: float) -> list[BillingRow]:
@@ -257,7 +343,8 @@ def _pool_call_rate(r: Resource) -> float | None:
 
 
 def _modal_app_cost(r: Resource, rows: Iterable[BillingRow], now: float, rates: Rates, *,
-                    tail_by_calls: bool = False) -> ItemCost:
+                    tail_by_calls: bool = False, egress: Sequence[Any] | None = None,
+                    egress_taken: set[float] | None = None) -> ItemCost:
     end = r.released_at if r.released_at is not None else now
     item = ItemCost(r.key, r.kind, r.name, r.created_at, end, r.open)
     lo, hi = floor_hour(r.created_at), end
@@ -271,14 +358,22 @@ def _modal_app_cost(r: Resource, rows: Iterable[BillingRow], now: float, rates: 
     rate = r.attrs.get("usd_per_hour")
     rate = float(rate) if rate is not None else rates.table_rate("modal", r.attrs)
     if rate is None:
-        rate = default_modal_rate(r.attrs.get("gpu"), r.attrs.get("gpus"))
+        rate = _attrs_rate(r.attrs)
         if rate is not None:
-            item.note = "default Modal list price"
+            item.note = "default Modal list price (GPU + CPU + memory)"
     if rate is None:
         full = [b for b in mine if b.interval_start >= r.created_at and b.interval_start + HOUR <= end]
         if full:
             rate = full[-1].cost
             item.note = "rate from the newest complete billed hour"
+    egress_events = [str(e) for e in r.attrs.get("egress_events") or ()]
+    if not tail_by_calls and billed_until < end:
+        observed = observed_hour_rate(r, mine, end, without_egress=bool(egress_events) and egress is not None)
+        if observed is not None and (rate is None or observed[0] > rate):
+            listed = "" if rate is None else f" (above the list rate {rate:.2f} USD/h: egress or use over request)"
+            rate = observed[0]
+            item.note = (item.note + "; " if item.note else "") + \
+                f"unbilled tail at the rate of billed hour {observed[1]}{listed}"
     item.rate_usd_per_hour = rate
     gap_start = max(r.created_at, billed_until)
     if tail_by_calls:  # a sampler pool's app: its priced calls estimate the unbilled tail
@@ -291,10 +386,44 @@ def _modal_app_cost(r: Resource, rows: Iterable[BillingRow], now: float, rates: 
             for lbl, usd in split_by_hour(gap_start, end, rate).items():
                 item.estimated_usd += usd
                 item.hours[lbl] = item.hours.get(lbl, 0.0) + usd
+    if egress_events and egress is not None and gap_start < end:
+        _add_egress(item, r, egress, egress_events, gap_start, end, egress_taken)
     if r.attrs.get("shared"):
         item.note = (item.note + "; " if item.note else "") + \
             "app shared with other runs: billed hours overlapping this run are counted in full"
     return item
+
+
+def _add_egress(item: ItemCost, r: Resource, samples: Sequence[Any], events: list[str], start: float,
+                end: float, taken: set[float] | None) -> None:
+    """The bytes app ``r``'s tape says it sent out of Modal in its unbilled tail
+    ``[start, end)`` (:mod:`.egress`) at the price table's ``host.modal.egress_gib``. A
+    sample counts in one app only (``taken``: the times already counted)."""
+    from . import egress as eg  # noqa: PLC0415
+
+    host = prices.host("modal")
+    price = None if host is None else host.egress_gib
+    fallback = r.attrs.get("egress_fallback_bytes")
+    sized, unsized = eg.bytes_in(samples, events, start, end, None if fallback is None else float(fallback))
+    if taken is not None:
+        sized = {t: b for t, b in sized.items() if t not in taken}
+        taken.update(sized)
+    if price is None:
+        if sized or unsized:
+            item.note = (item.note + "; " if item.note else "") + "egress not priced (no host.modal.egress_gib)"
+        return
+    usd_total = 0.0
+    for t, size in sized.items():
+        usd = size / eg.GIB * price
+        usd_total += usd
+        lbl = hour_label(t)
+        item.hours[lbl] = item.hours.get(lbl, 0.0) + usd
+    item.estimated_usd += usd_total
+    gib = sum(sized.values()) / eg.GIB
+    note = f"egress {gib:.1f} GiB out of Modal after the newest billed hour (tape) at {price:g} USD/GiB"
+    if unsized:
+        note += f"; {unsized} record(s) without a size and no fallback: not counted"
+    item.note = (item.note + "; " if item.note else "") + note
 
 
 def _intent_app_rate(r: Resource, rates: Rates) -> float | None:
@@ -302,7 +431,7 @@ def _intent_app_rate(r: Resource, rates: Rates) -> float | None:
     if rate is not None:
         return float(rate)
     rate = rates.table_rate("modal", r.attrs)
-    return rate if rate is not None else default_modal_rate(r.attrs.get("gpu"), r.attrs.get("gpus"))
+    return rate if rate is not None else _attrs_rate(r.attrs)
 
 
 def _nc_rate(r: Resource, rates: Rates) -> float | None:
@@ -348,8 +477,12 @@ def _provider_cost(kind: str):
 
 
 def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | None = None,
-                   billing: ModalBilling | None = None) -> CostSummary:
+                   billing: ModalBilling | None = None, egress: Sequence[Any] | None = None) -> CostSummary:
+    """The cost of every resource. ``egress``: the run's egress samples
+    (:class:`yeto.cost.egress.EgressMeter`), counted on the Modal apps whose ledger entry
+    names them (``egress_events``) after their newest billed hour; None: not counted."""
     rates = rates or Rates()
+    egress_taken: set[float] = set()
     resources = [r for r in resources if not r.intent_only or r.open]
     apps = [r for r in resources if r.kind == "modal_app" and r.id]
     rows: list[BillingRow] = []
@@ -394,7 +527,8 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
                     "app id unknown (deploying): priced at its GPU rate" if rate is not None
                     else "app id unknown (intent only) and no GPU shape / rate recorded"))
             else:
-                items.append(_modal_app_cost(r, rows, now, rates, tail_by_calls=r.key in rollout_keys))
+                items.append(_modal_app_cost(r, rows, now, rates, tail_by_calls=r.key in rollout_keys,
+                                             egress=egress, egress_taken=egress_taken))
         elif _pool_call_rate(r) is not None:
             start = max(r.created_at, covered_until(r))
             if r.key in next_start and (r.released_at is None or r.released_at > next_start[r.key]):

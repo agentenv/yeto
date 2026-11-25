@@ -373,13 +373,14 @@ def test_unpriced_warning_names_the_budget_and_is_a_warning(tmp_path):
 
 def test_a_deploying_modal_app_counts_against_the_budget_at_its_gpu_rate(tmp_path):
     # the trainer's app is an intent (image build, no app id yet): its recorded GPU
-    # shape prices the span, so the guard neither skips it nor warns it is unpriced
+    # shape prices the span (with the default host request of 4 cores / 32 GiB per GPU,
+    # which Modal bills next to the GPU), so the guard neither skips it nor warns
     clock = Clock(T0 + H)
     g, led, _ = make_guard(tmp_path, clock, budget=35.0)
     ledger_at(led.path, T0).intent("modal_app", "yeto-r1", gpu="H100", gpus=1)
     s = g.tick()
     assert not s.unpriced
-    assert s.total_usd == pytest.approx(3.95)
+    assert s.total_usd == pytest.approx(3.95 + 4 * 0.04716 + 32 * 0.007992)
     assert "cost_unpriced" not in events(tmp_path)
 
 
@@ -395,9 +396,13 @@ def test_an_intent_without_a_gpu_shape_stays_unpriced(tmp_path):
 def test_modal_price_table_covers_mixed_shapes():
     from yeto.cost.billing import DEFAULT_MODAL_USD_PER_GPU_HOUR, default_modal_rate, modal_shapes_rate
 
-    assert default_modal_rate("H100!", 8) == pytest.approx(8 * 3.95)
-    assert default_modal_rate("A100-80GB:2", 2) == pytest.approx(5.0)
-    assert modal_shapes_rate([("H100", 1), ("L40S", 2)]) == pytest.approx(3.95 + 2 * 1.95)
+    host = 4 * 0.04716 + 32 * 0.007992  # the default request per GPU, billed next to it
+    assert default_modal_rate("H100!", 8) == pytest.approx(8 * (3.95 + host))
+    assert default_modal_rate("A100-80GB:2", 2) == pytest.approx(5.0 + 2 * host)
+    assert default_modal_rate("L40S", 1, 8, 64) == pytest.approx(1.95 + 8 * 0.04716 + 64 * 0.007992)
+    assert modal_shapes_rate([("H100", 1), ("L40S", 2)]) == pytest.approx(3.95 + 2 * 1.95 + 3 * host)
+    assert modal_shapes_rate([("H100", 1, 8, 64, None), ("L40S", 2, 16, 128, None)]) == pytest.approx(
+        3.95 + 2 * 1.95 + 24 * 0.04716 + 192 * 0.007992)
     assert modal_shapes_rate([("H100", 1), ("MI999", 1)]) is None
     assert modal_shapes_rate([]) is None
     assert all(v > 0 for v in DEFAULT_MODAL_USD_PER_GPU_HOUR.values())
@@ -847,13 +852,18 @@ def test_modal_deploy_intent_carries_the_gpu_shape_and_rate(tmp_path, monkeypatc
     ops.ledger = led
     ops._app = App()
     ops._functions = {"island-0": object(), "island-1": object()}
-    ops._ledger_gpus = {"island-0": ("H100", 1), "island-1": ("L40S", 2)}
+    ops._ledger_gpus = {"island-0": ("H100", 1, 4, 32.0, None), "island-1": ("L40S", 2, 16, 128.0, 3000)}
+    ops.ledger_egress = {"egress_events": ["rl_publication"], "egress_fallback_bytes": 2.4e9}
     monkeypatch.setattr(ops, "_modal", lambda: FakeModal)
     ops.deploy()
     (intent,) = seen[0]
-    assert intent["intent_only"] and intent["attrs"]["usd_per_hour"] == pytest.approx(3.95 + 2 * 1.95)
+    # GPUs + 20 cores; memory 32 GiB + island-1's 3000 GiB disk billed as 150 GiB (> its 128 GiB request)
+    want = 3.95 + 2 * 1.95 + 20 * 0.04716 + (32 + 150) * 0.007992
+    assert intent["intent_only"] and intent["attrs"]["usd_per_hour"] == pytest.approx(want)
     (app,) = led.resources()
-    assert app.key == "modal_app:ap-8" and app.attrs["usd_per_hour"] == pytest.approx(7.85)
+    assert app.key == "modal_app:ap-8" and app.attrs["usd_per_hour"] == pytest.approx(want)
+    assert (app.attrs["cpu"], app.attrs["memory_gib"], app.attrs["disk_gib"]) == (20, 160.0, 3000)
+    assert app.attrs["egress_events"] == ["rl_publication"] and app.attrs["egress_fallback_bytes"] == 2.4e9
 
 
 def test_engine_sampler_launch_records_its_ephemeral_app_and_call(tmp_path, monkeypatch):
@@ -882,6 +892,7 @@ def test_engine_sampler_launch_records_its_ephemeral_app_and_call(tmp_path, monk
 
     class C:
         app_name, gpu, tp, shard, trainer_buffer_shards = "yeto-k31-sampler-b300", "B300", 8, "s0", "x"
+        cpu, memory_gib = 64, 1024
 
         def record(self):
             return {}
@@ -890,6 +901,7 @@ def test_engine_sampler_launch_records_its_ephemeral_app_and_call(tmp_path, monk
     res = {r.key: r for r in ResourceLedger(led_path).open_resources()}
     assert set(res) == {"modal_app:ap-s", "modal_call:fc-s"}
     assert res["modal_app:ap-s"].attrs["gpus"] == 8
+    assert (res["modal_app:ap-s"].attrs["cpu"], res["modal_app:ap-s"].attrs["memory_gib"]) == (64, 1024)
 
 
 def test_automatic_cleanup_keeps_the_nc_pool_lease(tmp_path, monkeypatch):

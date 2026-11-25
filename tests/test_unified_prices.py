@@ -147,16 +147,31 @@ def test_a_stale_price_is_named_with_its_source_and_date():
 # -- trainer and sampler: one price per card --------------------------------------------
 
 
-@pytest.mark.parametrize("gpu, n", [("L40S", 1), ("H100", 8), ("B300", 8), ("A100-80GB", 2)])
-def test_a_modal_trainer_and_a_modal_sampler_pool_of_the_same_gpus_cost_the_same(gpu, n):
+@pytest.mark.parametrize("gpu, n, cpu, mem", [("L40S", 1, 8, 64), ("H100", 8, 64, 1024), ("B300", 8, 64, 1024),
+                                               ("A100-80GB", 2, 8, 64)])
+def test_a_modal_trainer_and_a_modal_sampler_pool_of_the_same_request_cost_the_same(gpu, n, cpu, mem):
     from yeto.launch.nc import cli
     from yeto.launch.pool import modal_provider
 
-    trainer = billing.default_modal_rate(gpu, n)  # the launcher's Modal trainer (modal_runner)
-    assert billing.modal_shapes_rate([(gpu, n)]) == pytest.approx(trainer)
-    section = {"kind": "modal", "gpu": gpu, "gpus": n}
+    # the launcher's Modal trainer (modal_runner): GPUs + the CPU and memory it requests
+    trainer = billing.default_modal_rate(gpu, n, cpu, mem)
+    assert trainer == pytest.approx(prices.lookup("modal", gpu).usd_per_gpu_h * n + cpu * 0.04716 + mem * 0.007992)
+    assert billing.modal_shapes_rate([(gpu, n, cpu, mem, None)]) == pytest.approx(trainer)
+    assert prices.modal_container_usd_h(gpu, n, cpu=cpu, memory_gib=mem) == pytest.approx(trainer)
+    section = {"kind": "modal", "gpu": gpu, "gpus": n, "cpu": cpu, "memory_gib": mem}
     assert modal_provider.table_price(section) == pytest.approx(trainer)
     assert cli.pool_price({"shard_base": "s", "provider": section}) == (pytest.approx(trainer), "usd")
+
+
+def test_a_modal_sampler_pool_without_a_host_request_is_priced_at_the_function_s_default():
+    from yeto.launch.pool import modal_provider
+
+    # the sampler function requests 64 cores / 1024 GiB unless the config says otherwise
+    section = {"kind": "modal", "gpu": "L4", "gpus": 1}
+    assert modal_provider.table_price(section) == pytest.approx(0.8 + 64 * 0.04716 + 1024 * 0.007992)
+    assert modal_provider.table_price({**section, "cpu": 4, "memory_gib": 16}) == pytest.approx(
+        0.8 + 4 * 0.04716 + 16 * 0.007992)
+    assert modal_provider.table_price({**section, "cpu": "many"}) is None  # unpriced, never the GPU line alone
 
 
 def test_the_shape_planner_prices_modal_gpus_from_the_same_rows():

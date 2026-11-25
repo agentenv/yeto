@@ -90,6 +90,7 @@ class HostPrice:
     mem_gib_h: float
     source: str
     as_of: str
+    egress_gib: float | None = None  # USD per GiB sent out of the provider (None: not billed / unknown)
 
 
 @dataclass(frozen=True)
@@ -158,8 +159,12 @@ def parse(doc: Mapping[str, Any]) -> Table:
         for key in ("cpu_core_h", "mem_gib_h", "source", "as_of"):
             if h.get(key) in (None, ""):
                 raise PriceTableError(f"{TABLE_NAME} host.{name}: {key} is required")
+        egress = h.get("egress_gib")
+        if egress is not None and (isinstance(egress, bool) or not isinstance(egress, (int, float)) or egress < 0):
+            raise PriceTableError(f"{TABLE_NAME} host.{name}: egress_gib must be a number >= 0")
         host[name.lower()] = HostPrice(name.lower(), float(h["cpu_core_h"]), float(h["mem_gib_h"]),
-                                       str(h["source"]), str(h["as_of"]))
+                                       str(h["source"]), str(h["as_of"]),
+                                       None if egress is None else float(egress))
     services: dict[tuple[str, str], ServicePrice] = {}
     for name, entries in (doc.get("services") or {}).items():
         if name.startswith("_"):
@@ -238,6 +243,40 @@ def node_usd_h(provider: str, gpu: Any, gpus: Any, *, spot: bool | None = None, 
 
 def host(provider: str, *, path: str | None = None) -> HostPrice | None:
     return table(path).host.get(provider.lower())
+
+
+# Modal bills an ephemeral disk request as memory at 20:1 (500 GiB of disk raises the
+# memory request to 25 GiB unless it is higher already: modal.com/docs/guide/resources).
+MODAL_DISK_GIB_PER_BILLED_MEMORY_GIB = 20
+
+
+def modal_billed_memory_gib(memory_gib: float, disk_gib: float | None = None) -> float:
+    """The memory GiB Modal bills a container for: its request, raised to its disk / 20."""
+    mem = float(memory_gib)
+    return mem if not disk_gib else max(mem, float(disk_gib) / MODAL_DISK_GIB_PER_BILLED_MEMORY_GIB)
+
+
+def modal_host_usd_h(cpu: float, memory_gib: float, disk_gib: float | None = None, *,
+                     path: str | None = None) -> float | None:
+    """USD per hour of the CPU cores and memory a Modal container requests (``host.modal``
+    list prices; Modal bills max(request, usage), so the request is the floor). None: the
+    table has no ``host.modal`` row."""
+    h = host("modal", path=path)
+    if h is None:
+        return None
+    return float(cpu) * h.cpu_core_h + modal_billed_memory_gib(memory_gib, disk_gib) * h.mem_gib_h
+
+
+def modal_container_usd_h(gpu: Any, gpus: Any, *, cpu: float, memory_gib: float, disk_gib: float | None = None,
+                          path: str | None = None) -> float | None:
+    """USD per hour of Modal containers holding ``gpus`` x ``gpu`` with ``cpu`` cores and
+    ``memory_gib`` GiB in all: the GPUs' billing row plus the requested CPU and memory at the
+    ``host.modal`` list prices (Modal bills the three apart). None: the GPU has no billing
+    row, or the table has no ``host.modal`` row (an estimate without the host part would be
+    low: a Modal L40S trainer of 8 cores / 64 GiB bills ~1.46x its GPU line)."""
+    node = node_usd_h("modal", gpu, gpus, path=path)
+    hostpart = modal_host_usd_h(cpu, memory_gib, disk_gib, path=path)
+    return None if node is None or hostpart is None else node + hostpart
 
 
 SYNCER = "syncer"
