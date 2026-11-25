@@ -81,13 +81,8 @@ that host. **Restart `yeto run up` on the same host.** A worker on another host 
 those processes, so it leaves every island recorded by another host alone and logs an
 error naming that host. It does not adopt, relaunch or start those islands a second time.
 
-If that host is lost or renamed, run `yeto run up --config run.json --take-over-islands-from <host>`
-on the new host. Each island the lost host started, and that has not ended, starts again
-here as its next incarnation (`<run>-i<k>-m<n>`, same learner id, from its last release).
-An island removed meanwhile is recorded removed. The new host does not stop the launches
-the lost host started: `yeto down <prefix>` each of them (the names are in
-`fleet/trainers/<k>/launch.json`, `prefix_now`). Use this only when the old host is really
-gone, or the same learner id runs twice.
+If that host is lost or renamed, an operator can hand its islands to another host, see
+[Operations](#operations-lost-control-host).
 
 The syncer launch is not adopted by a later one either. A new syncer launch starts the
 syncer again, from its checkpoint. On a new cluster that syncer has a new address. The
@@ -200,9 +195,45 @@ in a TP 1 fleet) is refused with exit 2 before anything is written or ordered.
 - **A move loses progress.** It loses the island's training since its last release (see
   [Moving an island](#moving-an-island)).
 - **Same host.** `yeto run up` must be restarted on the host that started the island
-  launches, or take them over from a lost host (see [What runs](#what-runs)).
+  launches (see [What runs](#what-runs)).
 - **The syncer is not adopted.** A new syncer launch restarts the syncer, and the island
   launches relaunch for it (see [What runs](#what-runs)).
+
+## Operations: lost control host
+
+This section is for operators of the fleet. Use it only when the host that ran
+`yeto run up` is lost or was renamed. On the new host:
+
+```bash
+yeto run up --config run.json --take-over-islands-from <old-host>
+```
+
+The take-over has two guards:
+
+1. **It waits until this run up holds the fleet.** This run up's controller first claims
+   `fleet/applied.json`. That fences the old host's controller, and the old host's trainer
+   worker stops at its next step if it still runs.
+2. **It asks each island's source first.** For each island the old host started, the
+   island's record (`fleet/trainers/<k>/state.json`) is checked against its source (sky
+   or Modal):
+   - **Still running**: a launch is started under the same prefix and incarnation, and it
+     adopts the running machine. Nothing new is ordered.
+   - **Gone** (or its record has ended): the island starts again as its next incarnation
+     (`<run>-i<k>-m<n>`, same learner id, from its last release). An island removed
+     meanwhile is recorded removed.
+   - **Unknown** (the source does not answer, or cannot be asked from this host): nothing
+     is ordered for that island. An error is logged and the island is asked again at the
+     next step.
+
+Every island launch first takes its island's records lock (`fleet/trainers/<k>/lock`). If
+the old host was not lost after all (a network partition) and its launcher still holds
+that lock, the new launch hands off with exit 12. The island then goes back to the old
+host, and this run up does not take it over again. Two incarnations of one island never
+run at once.
+
+The new host does not stop launches the old host started. When the old host's launcher
+processes are really gone, `yeto down` their clusters if any remain (the names are in
+`fleet/trainers/<k>/launch.json`, `prefix_now`).
 
 ## Code
 
