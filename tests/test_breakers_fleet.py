@@ -206,9 +206,8 @@ def test_fleet_spend_counts_pools_every_island_and_the_syncer(tmp_path):
     assert fleet.fleet_spend(pool_node_hours=[(-1, 24), (5, None)], island_hours=[2.0],
                              island_usd_per_h=[float("nan")]).total_usd == 0.0
     assert fleet.island_prices({"islands": [{}]}) == (0.0,)
-    # an unset syncer price is the unified price table's syncer row; 0 set explicitly bills nothing
-    assert fleet.syncer_price({"syncer": {}}) == fleet.syncer_price({}) == 2.4
-    assert fleet.syncer_price({"syncer": {"usd_per_h": 0}}) == 0.0
+    # unset: by where the syncer runs (the launch default --controller head: on the head node, $0)
+    assert fleet.syncer_price({"syncer": {}}) == fleet.syncer_price({}) == 0.0
     with pytest.raises(ValueError, match="2 island hours for 1 island prices"):
         fleet.fleet_spend(pool_node_hours=[], island_hours=[1.0, 2.0], island_usd_per_h=[1.0])
 
@@ -342,3 +341,55 @@ def test_one_trainer_reads_as_before(tmp_path, capsys):
     assert _run(["breaker", "show", "--config", path]) == 0
     out = capsys.readouterr().out
     assert out.startswith("NAME ") and "FLEET" not in out and "ISLAND" not in out
+
+
+def _syncer_cfg(*argv: str, usd: object = None) -> dict:
+    cfg = {"fleet": {"trainer_argv": ["--training-mode", "rl", *argv]}}
+    return cfg if usd is None else {**cfg, "syncer": {"usd_per_h": usd}}
+
+
+def test_a_syncer_on_the_head_node_bills_nothing_of_its_own():
+    """--controller head (the launch default) runs the syncer as a process on the head node."""
+    for argv in ((), ("--controller", "head"), ("--controller=head",)):
+        cfg = _syncer_cfg(*argv)
+        assert fleet.run_syncer_placement(cfg) == fleet.SyncerPlacement("head")
+        rate, source = fleet.syncer_rate(None, fleet.run_syncer_placement(cfg))
+        assert rate == 0.0 and fleet.ON_HEAD in source and fleet.syncer_price(cfg) == 0.0
+    # the compiled trainer.argv wins over fleet.trainer_argv
+    compiled = {**_syncer_cfg("--controller", "head"), "trainer": {"argv": ["--controller", "local"]}}
+    assert fleet.run_syncer_placement(compiled) == fleet.SyncerPlacement("vm", "aws")
+
+
+@pytest.mark.parametrize("argv, provider, usd", [
+    (("--controller", "local"), "aws", 0.384),  # the default --syncer-region: an AWS region
+    (("--controller", "local", "--syncer-region", "us-east-1"), "aws", 0.384),
+    (("--controller", "local", "--syncer-region", "modal/us-east"), "modal", 2.4),  # a Modal CPU syncer
+    (("--controller", "local", "--syncer-region=Modal/us-east"), "modal", 2.4),
+])
+def test_a_syncer_on_its_own_vm_reads_the_price_row_of_that_provider(argv, provider, usd):
+    cfg = _syncer_cfg(*argv)
+    placement = fleet.run_syncer_placement(cfg)
+    assert placement == fleet.SyncerPlacement("vm", provider)
+    rate, source = fleet.syncer_rate(None, placement)
+    assert rate == fleet.syncer_price(cfg) == usd and source.startswith(f"its own {provider} VM: price table syncer@{provider}")
+
+
+def test_a_syncer_vm_without_a_price_row_or_with_a_set_price():
+    cfg = _syncer_cfg("--controller", "local", "--syncer-region", "nebius/eu-north1")
+    rate, source = fleet.syncer_rate(None, fleet.run_syncer_placement(cfg))
+    assert rate is None and "no price table row for a syncer VM on nebius" in source
+    assert fleet.syncer_price(cfg) == 0.0  # unpriced counts $0 (the dry-run says so)
+    # syncer.usd_per_h set wins wherever it runs; 0 bills nothing
+    assert fleet.syncer_price(_syncer_cfg("--controller", "local", usd=1.5)) == 1.5
+    assert fleet.syncer_price(_syncer_cfg("--controller", "local", usd=0)) == 0.0
+    assert fleet.syncer_rate(None, None) == (None, "the syncer's placement is unknown")
+    assert fleet.syncer_placement(["--rl-single-island-no-sync"]) == fleet.SyncerPlacement("none")
+
+
+def test_the_syncer_placement_defaults_are_the_launch_parser_defaults():
+    from yeto.cli import build_parser
+    from yeto.launch import syncer
+
+    args = build_parser().parse_args(["launch", "--training-mode", "rl", "--model", "m", "--data", "d.jsonl"])
+    assert args.controller == fleet.DEFAULT_CONTROLLER
+    assert syncer.syncer_cloud(args) == fleet.DEFAULT_SYNCER_CLOUD

@@ -299,19 +299,11 @@ def test_release_cadence_takes_the_newest_record_whatever_the_read_order():
     assert r.async_.trainer["1"]["release_every"] == 4
 
 
-def test_fleet_cost_rows_without_a_price_say_unpriced(tmp_path, monkeypatch):
-    from yeto.cost import prices
-
-    def syncer_row(page: dict) -> str:
-        return page["costBox"].split(">Syncer<", 1)[1].split("</tr>", 1)[0]
-
-    # the fixture plan has no syncer price: the unified price table's syncer row
-    priced = syncer_row(_page(tmp_path, _fleet()))
-    assert "$2.40" in priced and "unpriced" not in priced and "n/a" not in priced
-    # a table without a syncer row: unpriced, never a bare n/a
-    monkeypatch.setattr(prices, "service", lambda *a, **k: None)
-    unpriced = syncer_row(_page(tmp_path, _fleet()))
-    assert "unpriced" in unpriced and "n/a" not in unpriced
+def test_fleet_cost_rows_without_a_price_say_unpriced(tmp_path):
+    out = _page(tmp_path, _fleet())  # the fixture plan has no syncer price
+    cost = out["costBox"]
+    syncer = cost.split(">Syncer<", 1)[1].split("</tr>", 1)[0]
+    assert "unpriced" in syncer and "n/a" not in syncer
 
 
 def _stream(tmp_path: Path, times: list) -> list[int]:

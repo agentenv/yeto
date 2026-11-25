@@ -155,7 +155,7 @@ def _rows(r):
     return cost, {row["id"]: row for row in cost["islands"]}
 
 
-def test_fleet_spend_without_a_plan_counts_pools_trainers_and_the_table_syncer(no_plan):
+def test_fleet_spend_without_a_plan_counts_pools_trainers_and_an_unpriced_syncer(no_plan):
     cost, rows = _rows(no_plan)
     assert [rows[i]["kind"] for i in ("0", "1", "fpv-i0-0", "fps-i1-0", "fps-i1-1", "syncer")] == [
         "trainer", "trainer", "pool sampler", "pool sampler", "pool sampler", "syncer"]
@@ -165,15 +165,12 @@ def test_fleet_spend_without_a_plan_counts_pools_trainers_and_the_table_syncer(n
         # the pool's provider is not on the tapes without a plan: the trainers' cloud (modal)
         assert row["rate_usd_h"] == l40s and "the trainers' cloud" in row["rate_source"]
         assert row["hours"] == pytest.approx((150 + 30 * rounds) / 3600)  # its first to last event
-    # no plan: the unified price table's syncer row, as run up bills an unset syncer price
-    syn = rows["syncer"]
-    assert syn["priced"] is True and syn["rate_usd_h"] == 2.4 and syn["rate_source"].startswith("no fleet plan: price table syncer 2.4 USD/h")
+    assert rows["syncer"]["priced"] is False and rows["syncer"]["cost_usd"] is None
     f = cost["fleet"]
     assert f["pools_usd"] == pytest.approx(sum(rows[s]["cost_usd"] for s in SHARDS))
     assert f["trainers_usd"] == pytest.approx(rows["0"]["cost_usd"] + rows["1"]["cost_usd"])
-    assert f["syncer_usd"] == pytest.approx(2.4 * syn["hours"])
-    assert cost["total_usd"] == pytest.approx(f["pools_usd"] + f["trainers_usd"] + f["syncer_usd"])
-    assert "syncer" not in cost["unpriced"]
+    assert cost["total_usd"] == pytest.approx(f["pools_usd"] + f["trainers_usd"])
+    assert "syncer" in cost["unpriced"]
 
 
 def test_fleet_spend_with_a_plan_bills_its_prices(tmp_path):
@@ -188,19 +185,30 @@ def test_fleet_spend_with_a_plan_bills_its_prices(tmp_path):
     assert f["syncer_usd"] == pytest.approx(0.26 * syn["hours"]) and cost["unpriced"] == []
 
 
-def test_a_plan_without_a_syncer_price_bills_the_table_syncer(tmp_path):
+def test_a_plan_written_before_the_prices_keeps_the_syncer_unpriced(tmp_path):
     cost, rows = _rows(reduce(write_store(tmp_path / "s", plan_doc(prices=False))))
     assert rows["0"]["rate_usd_h"] == 5.06 and rows["fpv-i0-0"]["rate_source"].startswith("price table modal:L40S")
-    syn = rows["syncer"]
-    assert syn["rate_usd_h"] == 2.4 and syn["cost_usd"] == pytest.approx(2.4 * syn["hours"])
-    assert syn["rate_source"].startswith("the fleet plan has no syncer price (written before it): price table syncer")
-    unset = plan_doc(prices=False) | {"syncer": {"usd_per_h": None}}  # run config without syncer.usd_per_h
+    assert rows["syncer"]["cost_usd"] is None and "written before it" in rows["syncer"]["rate_source"]
+    unset = plan_doc(prices=False) | {"syncer": {"usd_per_h": None}}  # unset, and no placement on the plan
     _cost, rows = _rows(reduce(write_store(tmp_path / "u", unset)))
+    assert rows["syncer"]["cost_usd"] is None and "does not say where the syncer runs" in rows["syncer"]["rate_source"]
+
+
+@pytest.mark.parametrize("placement, rate, says", [
+    ({"where": "head", "provider": None}, 0.0, "on the head node (--controller head"),  # --controller head: no machine of its own
+    ({"where": "vm", "provider": "aws"}, 0.384, "its own aws VM: price table syncer@aws 0.384 USD/h"),
+    ({"where": "vm", "provider": "modal"}, 2.4, "its own modal VM: price table syncer@modal 2.4 USD/h"),
+])
+def test_an_unset_syncer_price_follows_where_the_plan_says_the_syncer_runs(tmp_path, placement, rate, says):
+    doc = plan_doc(prices=False) | {"syncer": {"usd_per_h": None, "placement": placement}}
+    cost, rows = _rows(reduce(write_store(tmp_path / "s", doc)))
     syn = rows["syncer"]
-    assert syn["rate_usd_h"] == 2.4 and syn["rate_source"].startswith("syncer.usd_per_h unset: price table syncer")
-    zero = plan_doc(prices=False) | {"syncer": {"usd_per_h": 0.0}}  # set to 0: a syncer that bills nothing
-    _cost, rows = _rows(reduce(write_store(tmp_path / "z", zero)))
-    assert rows["syncer"]["cost_usd"] == 0.0 and rows["syncer"]["rate_source"] == "fleet plan syncer.usd_per_h"
+    assert syn["rate_usd_h"] == rate and syn["cost_usd"] == pytest.approx(rate * syn["hours"])
+    assert syn["rate_source"].startswith("syncer.usd_per_h unset: " + says) and "syncer" not in cost["unpriced"]
+    # syncer.usd_per_h set wins wherever it runs
+    doc["syncer"]["usd_per_h"] = 0.26
+    _cost, rows = _rows(reduce(write_store(tmp_path / "p", doc)))
+    assert rows["syncer"]["rate_usd_h"] == 0.26 and rows["syncer"]["rate_source"] == "fleet plan syncer.usd_per_h"
 
 
 def test_compile_writes_the_pool_and_syncer_prices_into_the_plan():
@@ -210,11 +218,14 @@ def test_compile_writes_the_pool_and_syncer_prices_into_the_plan():
     cfg["syncer"] = {"usd_per_h": 0.26}
     _out, plan = compile_fleet(cfg)
     doc = plan.to_json()
-    assert doc["syncer"] == {"usd_per_h": 0.26}
+    # the example launches with the default --controller head: the syncer runs on the head node
+    assert doc["syncer"] == {"usd_per_h": 0.26, "placement": {"where": "head", "provider": None}}
     assert [[p["usd_per_h"] for p in i["pools"]] for i in doc["islands"]] == [[4.0, 2.0], [2.0]]
     assert FleetPlan.from_json(doc).to_json() == doc
     loaded = fleet_islands.load_plan(doc)
-    assert loaded["syncer"] == {"usd_per_h": 0.26} and loaded["islands"][0]["pools"][0]["usd_per_h"] == 4.0
+    assert loaded["syncer"] == doc["syncer"] and loaded["islands"][0]["pools"][0]["usd_per_h"] == 4.0
+    cfg["fleet"]["trainer_argv"] += ["--controller", "local", "--syncer-region", "modal/us-east"]
+    assert compile_fleet(cfg)[1].to_json()["syncer"]["placement"] == {"where": "vm", "provider": "modal"}
 
 
 def test_a_run_that_is_no_fleet_keeps_its_cost_view():
