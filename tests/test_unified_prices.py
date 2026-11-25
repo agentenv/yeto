@@ -50,6 +50,39 @@ def test_two_rows_for_the_same_node_are_refused():
         prices.parse({"rows": [row, dict(row, gpu="h100")]})
 
 
+def test_the_syncer_is_priced_per_provider_by_billing_services_rows_with_their_source():
+    aws, modal = prices.service(prices.SYNCER, "aws"), prices.service(prices.SYNCER, "modal")
+    assert aws.usd_h == prices.syncer_usd_h("aws") == 0.384 and "AWS" in aws.source
+    assert modal.usd_h == prices.syncer_usd_h("Modal") == 2.4 and "Modal" in modal.source
+    for row in (aws, modal):
+        assert row.grade == prices.BILLING and dt.date.fromisoformat(row.as_of)
+    assert modal.cited().startswith("syncer@modal 2.4 USD/h (source: ")
+    assert prices.service(prices.SYNCER, "nebius") is None and prices.syncer_usd_h("") is None
+    # an illustrative row is no price to what bills
+    doc = {"services": {"syncer": [{"provider": "x", "usd_h": 1.0, "source": "s", "as_of": "2026-01-01",
+                                    "grade": "illustrative"}]}}
+    assert prices.parse(doc).services[("syncer", "x")].grade == prices.ILLUSTRATIVE
+    assert prices.parse({"services": {"_doc": "x"}}).services == {}
+
+
+S = {"provider": "aws", **G}
+
+
+@pytest.mark.parametrize("bad, why", [
+    ([{"usd_h": 1.0, "source": "s", **S}], "as_of is required"),
+    ([{"usd_h": 1.0, "source": "s", "as_of": "2026-01-01", **G}], "provider is required"),
+    ([{"usd_h": -1, "source": "s", "as_of": "2026-01-01", **S}], "usd_h"),
+    ([{"usd_h": 1.0, "source": "s", "as_of": "soon", **S}], "ISO date"),
+    ([{"usd_h": 1.0, "source": "s", "as_of": "2026-01-01", "provider": "aws", "grade": "guess"}], "grade must be"),
+    ([{"usd_h": 1.0, "source": "s", "as_of": "2026-01-01", "cpus": 8, **S}], "unknown keys"),
+    ([{"usd_h": 1.0, "source": "s", "as_of": "2026-01-01", **S}] * 2, "two rows for aws"),
+    ({"usd_h": 1.0, "source": "s", "as_of": "2026-01-01", **S}, "a list of rows"),
+])
+def test_a_services_row_without_its_provider_source_date_or_a_sane_price_is_refused(bad, why):
+    with pytest.raises(prices.PriceTableError, match=why):
+        prices.parse({"services": {"syncer": bad}})
+
+
 def test_lookup_prefers_the_region_and_spotness_asked_and_never_quotes_spot_for_unknown():
     assert prices.node_usd_h("nebius", "H100", 8, spot=True, region="eu-north1") == pytest.approx(6.32)
     assert prices.node_usd_h("nebius", "H100", 8, spot=False, region="eu-north1") == pytest.approx(36.0)

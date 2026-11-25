@@ -93,9 +93,26 @@ class HostPrice:
 
 
 @dataclass(frozen=True)
+class ServicePrice:
+    """A machine priced by the service it runs (a fleet's syncer) on ``provider``, not by its GPUs."""
+
+    name: str
+    provider: str
+    usd_h: float
+    source: str
+    as_of: str
+    grade: str = BILLING
+    note: str | None = None
+
+    def cited(self) -> str:
+        return f"{self.name}@{self.provider} {self.usd_h:g} USD/h (source: {self.source}, as of {self.as_of})"
+
+
+@dataclass(frozen=True)
 class Table:
     rows: tuple[Price, ...]
     host: Mapping[str, HostPrice]
+    services: Mapping[tuple[str, str], ServicePrice] = field(default_factory=dict)
 
 
 def gpu_name(gpu: Any) -> str:
@@ -143,7 +160,35 @@ def parse(doc: Mapping[str, Any]) -> Table:
                 raise PriceTableError(f"{TABLE_NAME} host.{name}: {key} is required")
         host[name.lower()] = HostPrice(name.lower(), float(h["cpu_core_h"]), float(h["mem_gib_h"]),
                                        str(h["source"]), str(h["as_of"]))
-    return Table(rows, host)
+    services: dict[tuple[str, str], ServicePrice] = {}
+    for name, entries in (doc.get("services") or {}).items():
+        if name.startswith("_"):
+            continue
+        if not isinstance(entries, list):
+            raise PriceTableError(f"{TABLE_NAME} services.{name}: a list of rows, one per provider")
+        for i, sv in enumerate(entries):
+            where = f"{TABLE_NAME} services.{name}[{i}]"
+            for key in ("provider", "usd_h", "source", "as_of", "grade"):
+                if sv.get(key) in (None, ""):
+                    raise PriceTableError(f"{where}: {key} is required")
+            if sv["grade"] not in GRADES:
+                raise PriceTableError(f"{where}: grade must be one of {list(GRADES)}, not {sv['grade']!r}")
+            usd = sv["usd_h"]
+            if isinstance(usd, bool) or not isinstance(usd, (int, float)) or not usd >= 0:
+                raise PriceTableError(f"{where}: usd_h must be a number >= 0")
+            try:
+                dt.date.fromisoformat(str(sv["as_of"]))
+            except ValueError:
+                raise PriceTableError(f"{where}: as_of {sv['as_of']!r} is not an ISO date") from None
+            unknown = set(sv) - {"provider", "usd_h", "source", "as_of", "grade", "note"}
+            if unknown:
+                raise PriceTableError(f"{where}: unknown keys {sorted(unknown)}")
+            key = (name.lower(), str(sv["provider"]).lower())
+            if key in services:
+                raise PriceTableError(f"{TABLE_NAME} services.{name}: two rows for {key[1]}")
+            services[key] = ServicePrice(key[0], key[1], float(usd), str(sv["source"]), str(sv["as_of"]),
+                                         str(sv["grade"]), sv.get("note"))
+    return Table(rows, host, services)
 
 
 @lru_cache(maxsize=4)
@@ -193,6 +238,21 @@ def node_usd_h(provider: str, gpu: Any, gpus: Any, *, spot: bool | None = None, 
 
 def host(provider: str, *, path: str | None = None) -> HostPrice | None:
     return table(path).host.get(provider.lower())
+
+
+SYNCER = "syncer"
+
+
+def service(name: str, provider: str, *, grade: str | None = BILLING, path: str | None = None) -> ServicePrice | None:
+    """The ``services`` row of ``name`` on ``provider``, of ``grade`` (default: billing; None: any). None: none."""
+    row = table(path).services.get((name.lower(), str(provider or "").lower()))
+    return None if row is None or (grade is not None and row.grade != grade) else row
+
+
+def syncer_usd_h(provider: str, *, path: str | None = None) -> float | None:
+    """USD per hour of a fleet's syncer machine on ``provider`` from a billing ``services.syncer`` row (None: none)."""
+    row = service(SYNCER, provider, path=path)
+    return None if row is None else row.usd_h
 
 
 # -- views the older tables had (kept in their shape for their readers) -------------

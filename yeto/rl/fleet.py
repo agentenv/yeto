@@ -248,11 +248,14 @@ class FleetPlan:
     sync: dict[str, Any] = field(default_factory=dict)  # the trainers' sync route (training_form)
     version: int = PLAN_VERSION
     syncer_usd_per_h: float | None = None  # the run config's syncer.usd_per_h (None: unset)
+    # where the launch runs the syncer (breakers.fleet.SyncerPlacement.to_json; None: a plan written before it)
+    syncer_placement: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {"version": self.version, "run": self.run, "store": self.store, "dispense": self.dispense,
                 "dispense_store": self.dispense_store, "sync": dict(self.sync),
-                "syncer": {"usd_per_h": self.syncer_usd_per_h},
+                "syncer": {"usd_per_h": self.syncer_usd_per_h,
+                           **({"placement": dict(self.syncer_placement)} if self.syncer_placement else {})},
                 "islands": [i.to_json() for i in self.islands]}
 
     def dumps(self) -> str:
@@ -320,7 +323,8 @@ class FleetPlan:
         syncer = doc.get("syncer") if isinstance(doc.get("syncer"), dict) else {}
         return cls(run=str(doc["run"]), store=str(doc["store"]), dispense=str(doc["dispense"]), islands=islands,
                    dispense_store=doc.get("dispense_store"), sync=dict(doc.get("sync") or {}),
-                   version=int(doc.get("version", PLAN_VERSION)), syncer_usd_per_h=syncer.get("usd_per_h"))
+                   version=int(doc.get("version", PLAN_VERSION)), syncer_usd_per_h=syncer.get("usd_per_h"),
+                   syncer_placement=syncer.get("placement") if isinstance(syncer.get("placement"), dict) else None)
 
 
 def plan_of(cfg: dict[str, Any]) -> FleetPlan | None:
@@ -897,11 +901,14 @@ def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple
             argv += ["--rl-island-max-policy-age", f"{i.index}:{i.max_policy_age}"]
         if i.sample_wait_s is not None:
             argv += ["--rl-island-sample-wait-s", f"{i.index}:{i.sample_wait_s:g}"]
+    from yeto.breakers.fleet import syncer_placement  # noqa: PLC0415
+
     prices = [i.usd_per_h for i in rows]
     syncer = cfg.get("syncer") if isinstance(cfg.get("syncer"), dict) else {}
     plan = FleetPlan(run=str(cfg["run"]), store=store, dispense=dispense, islands=tuple(rows),
                      dispense_store=dispense_store, sync=training_form(trainer_argv),
-                     syncer_usd_per_h=_price(syncer.get("usd_per_h"), "syncer.usd_per_h"))
+                     syncer_usd_per_h=_price(syncer.get("usd_per_h"), "syncer.usd_per_h"),
+                     syncer_placement=syncer_placement(argv).to_json())
     out = copy.deepcopy({k: v for k, v in cfg.items() if k != PLAN_KEY})
     out["trainer"] = {"argv": argv, "usd_per_h": None if all(p is None for p in prices)
                       else float(sum(p or 0.0 for p in prices))}

@@ -189,9 +189,28 @@ def test_a_plan_written_before_the_prices_keeps_the_syncer_unpriced(tmp_path):
     cost, rows = _rows(reduce(write_store(tmp_path / "s", plan_doc(prices=False))))
     assert rows["0"]["rate_usd_h"] == 5.06 and rows["fpv-i0-0"]["rate_source"].startswith("price table modal:L40S")
     assert rows["syncer"]["cost_usd"] is None and "written before it" in rows["syncer"]["rate_source"]
-    unset = plan_doc(prices=False) | {"syncer": {"usd_per_h": None}}  # run config without syncer.usd_per_h
+    unset = plan_doc(prices=False) | {"syncer": {"usd_per_h": None}}  # unset, and no placement on the plan
     _cost, rows = _rows(reduce(write_store(tmp_path / "u", unset)))
-    assert rows["syncer"]["cost_usd"] == 0.0 and "as run up bills it" in rows["syncer"]["rate_source"]
+    assert rows["syncer"]["cost_usd"] is None and "does not say where the syncer runs" in rows["syncer"]["rate_source"]
+
+
+@pytest.mark.parametrize("placement, rate, says", [
+    # --controller head: the controller head VM it shares with the fleet controller, billed by its row
+    ({"where": "head", "provider": "aws"}, 0.384, "the controller head VM on aws (it hosts the syncer and the fleet "
+                                                  "controller): price table syncer@aws 0.384 USD/h"),
+    ({"where": "vm", "provider": "aws"}, 0.384, "its own syncer VM on aws: price table syncer@aws 0.384 USD/h"),
+    ({"where": "vm", "provider": "modal"}, 2.4, "its own syncer VM on modal: price table syncer@modal 2.4 USD/h"),
+])
+def test_an_unset_syncer_price_follows_where_the_plan_says_the_syncer_runs(tmp_path, placement, rate, says):
+    doc = plan_doc(prices=False) | {"syncer": {"usd_per_h": None, "placement": placement}}
+    cost, rows = _rows(reduce(write_store(tmp_path / "s", doc)))
+    syn = rows["syncer"]
+    assert syn["rate_usd_h"] == rate and syn["cost_usd"] == pytest.approx(rate * syn["hours"])
+    assert syn["rate_source"].startswith("syncer.usd_per_h unset: " + says) and "syncer" not in cost["unpriced"]
+    # syncer.usd_per_h set wins wherever it runs
+    doc["syncer"]["usd_per_h"] = 0.26
+    _cost, rows = _rows(reduce(write_store(tmp_path / "p", doc)))
+    assert rows["syncer"]["rate_usd_h"] == 0.26 and rows["syncer"]["rate_source"] == "fleet plan syncer.usd_per_h"
 
 
 def test_compile_writes_the_pool_and_syncer_prices_into_the_plan():
@@ -201,11 +220,14 @@ def test_compile_writes_the_pool_and_syncer_prices_into_the_plan():
     cfg["syncer"] = {"usd_per_h": 0.26}
     _out, plan = compile_fleet(cfg)
     doc = plan.to_json()
-    assert doc["syncer"] == {"usd_per_h": 0.26}
+    # the example launches with the default --controller head: the syncer runs on the controller head VM (AWS)
+    assert doc["syncer"] == {"usd_per_h": 0.26, "placement": {"where": "head", "provider": "aws"}}
     assert [[p["usd_per_h"] for p in i["pools"]] for i in doc["islands"]] == [[4.0, 2.0], [2.0]]
     assert FleetPlan.from_json(doc).to_json() == doc
     loaded = fleet_islands.load_plan(doc)
-    assert loaded["syncer"] == {"usd_per_h": 0.26} and loaded["islands"][0]["pools"][0]["usd_per_h"] == 4.0
+    assert loaded["syncer"] == doc["syncer"] and loaded["islands"][0]["pools"][0]["usd_per_h"] == 4.0
+    cfg["fleet"]["trainer_argv"] += ["--controller", "local", "--syncer-region", "modal/us-east"]
+    assert compile_fleet(cfg)[1].to_json()["syncer"]["placement"] == {"where": "vm", "provider": "modal"}
 
 
 def test_a_run_that_is_no_fleet_keeps_its_cost_view():

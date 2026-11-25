@@ -118,8 +118,10 @@ def load_plan(doc: Any) -> dict | None:
     syncer = doc.get("syncer")
     return {"version": doc["version"], "run": _str(doc.get("run")), "store": _str(doc.get("store")),
             "dispense": _str(doc.get("dispense")), "islands": islands,
-            # None: a plan older than the syncer price (unknown); {"usd_per_h": None}: unset ($0, as run up bills it)
-            "syncer": {"usd_per_h": _f(syncer.get("usd_per_h"))} if isinstance(syncer, dict) else None}
+            # None: a plan older than the syncer price (unpriced); {"usd_per_h": None}: unset (priced by its placement)
+            "syncer": ({"usd_per_h": _f(syncer.get("usd_per_h")),
+                        **({"placement": syncer["placement"]} if isinstance(syncer.get("placement"), dict) else {})}
+                       if isinstance(syncer, dict) else None)}
 
 
 def plan_candidates(paths: list[str], max_up: int = 3) -> list[str]:

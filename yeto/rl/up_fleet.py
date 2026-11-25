@@ -393,7 +393,8 @@ def breaker_pool_problems(plan: Any, section: Any) -> list[str]:
 def syncer_lines(plan: Any, trainer_argv: Sequence[str], syncer: dict[str, Any] | None) -> list[str]:
     """The syncer's region as the launch resolves it (it follows islands pinned to one
     area unless ``--syncer-region`` is set) and the launch's warnings for islands placed
-    apart from it, each island named; and its price (``syncer.usd_per_h``)."""
+    apart from it, each island named; and its price (``syncer.usd_per_h``, else by where it runs:
+    :func:`yeto.breakers.fleet.syncer_rate`)."""
     from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
     from yeto.launch import syncer_region as sr  # noqa: PLC0415
     from yeto.rl.up_consistency import trainer_args  # noqa: PLC0415
@@ -415,10 +416,23 @@ def syncer_lines(plan: Any, trainer_argv: Sequence[str], syncer: dict[str, Any] 
         names = ", ".join(f"{i.index} = {i.name}" for i in plan.islands)
         for finding in sr.region_findings(args, specs):
             out.append(f"WARNING: syncer: {finding} (launch islands: {names})")
+    from yeto.breakers import fleet as breakers_fleet  # noqa: PLC0415
+
     price = (syncer or {}).get("usd_per_h") if isinstance(syncer, dict) else None
     if price is None:
-        out.append("fleet: syncer.usd_per_h is unset: the fleet spend counts the syncer at $0/h (set it when the "
-                   "syncer runs on a billed VM)")
+        placement = breakers_fleet.syncer_placement(trainer_argv)
+        rate, source = breakers_fleet.syncer_rate(None, placement)
+        if rate is None:
+            out.append(f"fleet: syncer.usd_per_h is unset and {source}: the fleet spend counts the syncer at $0/h "
+                       "(set syncer.usd_per_h)")
+        else:
+            out.append(f"fleet: syncer.usd_per_h is unset: the fleet spend counts the syncer at ${rate:g}/h, {source}"
+                       "; set syncer.usd_per_h to price its own machine")
+            mem = placement.memory_gib
+            if mem is not None and mem > breakers_fleet.DEFAULT_SYNCER_MEMORY_GIB:
+                out.append(f"WARNING: fleet: --syncer-memory {mem:g} GiB orders a larger machine than the price table "
+                           f"row prices ({breakers_fleet.DEFAULT_SYNCER_MEMORY_GIB} GiB): set syncer.usd_per_h to its "
+                           "price")
     return out
 
 
