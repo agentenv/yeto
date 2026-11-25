@@ -69,7 +69,7 @@ and a fence there is the sampler stop.
 Spare nodes: ``slots`` may list more nodes than ``target``. When a node is lost under
 its sampler (the pool reads it unreachable for ``elastic.unreachable_grace_s``), the
 pool fences the shard and orders a replacement that continues its prompts; the lost
-node's slot is held for ``provider.lost_node_hold_s`` (default 1800 s, 0: off) while
+node's slot is held for ``provider.lost_node_hold_s`` (default 1800 s; 0: no hold) while
 any other slot's node is free, so the replacement starts on a spare, not on the lost
 node. A stop the lost node never got runs before the next start there
 (:class:`SshNodeProvider`).
@@ -182,7 +182,8 @@ class SshPoolConf:
     grace_s: int
     price_usd_h: float | None
     # a node lost under a sampler (unreachable, its stop not confirmed) is left out this long
-    # while another slot's node is free: its slot moves to a spare node (unified-sampler-pool 3.3)
+    # while another slot's node is free: its slot moves to a spare node (unified-sampler-pool 3.3);
+    # 0: no hold (the lost node's slot is offered at once)
     lost_node_hold_s: float = 1800.0
 
 
@@ -701,7 +702,19 @@ class SshNodeProvider:
     lost shard's prompts: ``IslandPool._retire``) goes to a spare node, not back to the
     lost one. Without a free spare the held node is offered as before. A stop the lost
     node never got is owed (:meth:`owed_stops`): the next start there stops that sampler
-    first, so a node back from a partition never runs two samplers."""
+    first, so a node back from a partition never runs two samplers.
+
+    ``lost_node_hold_s: 0`` turns the hold off: a lost node's slot is offered like any
+    free slot at once (the owed stop is still recorded and still runs first). A drain
+    whose stop hit one ssh failure (exit 255 after ``ssh_transport``'s own retries of a
+    dropped connection, or a timeout) counts as a loss too: that costs at most a move
+    to a spare, never a missing sampler (the hold yields when no spare is free).
+
+    Limitation: the hold and the owed stops live in this provider's state file on the
+    control host (like its tickets), not in the run store. A controller that takes the
+    pool over on another host starts without them: a lost node is then offered at once,
+    and a sampler left on it is held off only by its shard's fence (it writes nothing),
+    not stopped, until an operator stops it."""
 
     kind = KIND
     caps = ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=300)

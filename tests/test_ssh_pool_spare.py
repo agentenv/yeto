@@ -238,3 +238,15 @@ def test_hold_config():
     for bad in (-1, "1h", True):
         with pytest.raises(ValueError, match="lost_node_hold_s"):
             sp.parse_config({"provider": dict(base, lost_node_hold_s=bad)}, inventory=[_node(0)])
+
+
+def test_hold_zero_offers_the_lost_slot_at_once_and_keeps_the_owed_stop(world):
+    w = world
+    p = w.ops.provider
+    object.__setattr__(w.conf, "lost_node_hold_s", 0.0)
+    m = SimpleNamespace(account=1, ticket=p.order(1), shard="smp-0", unreachable_since=w.clock() - 400)
+    p.note_shard(m.ticket, m.shard)
+    w.nodes.down.add("ops@10.0.0.11")
+    w.ops.drain(m)
+    assert p.account_free(1)  # spares 0 and 2 are free too: no hold
+    assert p.owed_stops(1) == [(m.ticket, "smp-0")]
