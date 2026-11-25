@@ -268,9 +268,9 @@ def _conflicting(tmp_path: Path) -> Path:
 
 
 def test_run_down_and_status_open_a_conflicting_config_run_up_refuses_it(tmp_path, monkeypatch, capsys):
-    """A breakers value the argv disagrees with refuses `run up` / `scale`, never `run down`:
-    a refused down would leave the samplers billing. down / status warn and read the argv as
-    written."""
+    """A breakers value the argv disagrees with refuses `run up`, never `run down`: a refused
+    down would leave the samplers billing. down / status warn and read the argv as written
+    (scale: below, refused only when it adds nodes)."""
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
     path = str(_conflicting(tmp_path))
     downs = []
@@ -283,11 +283,10 @@ def test_run_down_and_status_open_a_conflicting_config_run_up_refuses_it(tmp_pat
     monkeypatch.setattr(up.Run, "status", lambda self: {"run": self.run})
     assert up.main(types.SimpleNamespace(config=path, rl_command="status")) == 0
     assert "WARNING" in capsys.readouterr().out
-    for command in ("up", "scale"):
-        rc = up.main(types.SimpleNamespace(config=path, rl_command=command, skip_preflight=False, dry_run=True,
-                                           no_monitor=True, allow_after_forced_stop=False))
-        assert rc == 2
-        assert "timeout_s = 1200 but trainer.argv --rl-sample-wait-s = 900" in capsys.readouterr().err
+    rc = up.main(types.SimpleNamespace(config=path, rl_command="up", skip_preflight=False, dry_run=True,
+                                       no_monitor=True, allow_after_forced_stop=False))
+    assert rc == 2
+    assert "timeout_s = 1200 but trainer.argv --rl-sample-wait-s = 900" in capsys.readouterr().err
 
 
 def test_load_config_warns_without_strict_breakers(tmp_path):
@@ -309,35 +308,66 @@ def test_rollout_status_opens_a_conflicting_config(tmp_path, monkeypatch):
     assert [r.name for r in refs] == ["pool"]
 
 
-@pytest.mark.parametrize("how, strict", [
-    ({"target": 3, "add": 0, "remove": [], "retire": []}, True),
-    ({"target": None, "add": 2, "remove": [], "retire": []}, True),
-    ({"target": None, "add": 0, "remove": ["t1"], "retire": []}, False),
-    ({"target": 1, "add": 0, "remove": [], "retire": ["t1"]}, False),
-    ({"target": 0, "add": 0, "remove": [], "retire": []}, False),
-])
-def test_a_scale_that_only_releases_nodes_is_never_blocked(tmp_path, monkeypatch, capsys, how, strict):
-    """Releasing nodes saves money: like run down it warns on a conflicting breakers value."""
+def _scale_run(tmp_path: Path, monkeypatch, live: int):
+    """A run whose pool has ``live`` members and target ``live``; pool-scale is recorded, not run."""
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
-    path = str(_conflicting(tmp_path))
-    scaled = []
-    monkeypatch.setattr(up.Run, "scale", lambda self, *a, **k: scaled.append(a) or 0)
-    args = types.SimpleNamespace(config=path, rl_command="scale", mode=None, force_static=False, dry_run=False,
-                                 source="manual", **how)
-    assert up.breakers_strict(args) is strict
-    assert up.main(args) == (2 if strict else 0)
-    assert bool(scaled) is not strict
-    out = capsys.readouterr()
-    assert ("timeout_s = 1200 but trainer.argv --rl-sample-wait-s = 900" in out.err) is strict
-    assert ("WARNING" in out.out) is not strict
+    monkeypatch.setattr(up.Run, "pool_doc", lambda self, i=0: {
+        "target": live, "members": [{"ticket": f"t{k}", "state": "ready"} for k in range(live)]})
+    monkeypatch.setattr(up.Run, "pool_target", lambda self, doc, i=0: int(doc["target"]))
+    monkeypatch.setattr(up.Run, "spend_usd", lambda self: 0.0)
+    calls = []
+    monkeypatch.setattr(up.subprocess, "run", lambda argv, **kw: calls.append(list(argv)) or types.SimpleNamespace(
+        returncode=0))
+    return calls
 
 
-def test_rollout_scale_down_opens_a_conflicting_config(tmp_path, monkeypatch):
+SCALES = [  # (how, live members, refused): only a scale that adds nodes is refused
+    ({"target": 3}, 2, True),
+    ({"add": 2}, 2, True),
+    ({"target": 1}, 2, False),  # a lower target: a scale down
+    ({"target": 2}, 2, False),  # the target already met
+    ({"target": 0}, 2, False),
+    ({"remove": ["t1"]}, 2, False),
+    ({"target": 1, "retire": ["t1"]}, 2, False),
+    ({"target": 10, "retire": ["t1"]}, 2, True),  # --retire does not make a scale up a scale down
+]
+
+
+def _how(how: dict) -> dict:
+    return {"target": None, "add": 0, "remove": [], "retire": [], **how}
+
+
+@pytest.mark.parametrize("how, live, refused", SCALES)
+def test_a_breakers_conflict_refuses_only_a_scale_that_adds_nodes(tmp_path, monkeypatch, capsys, how, live, refused):
+    """A scale down saves money: like run down it goes on (with a WARNING at load) on a
+    conflicting breakers value; a scale that adds a node is refused, before pool-scale."""
+    calls = _scale_run(tmp_path, monkeypatch, live)
+    args = types.SimpleNamespace(config=str(_conflicting(tmp_path)), rl_command="scale", mode=None,
+                                 force_static=False, dry_run=False, source="manual", pool=None, provider=None,
+                                 **_how(how))
+    assert not up.breakers_strict(args)
+    assert up.main(args) == (2 if refused else 0)
+    assert bool(calls) is not refused
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert ("scale: refused" in out and "timeout_s = 1200 but trainer.argv --rl-sample-wait-s = 900" in out) is refused
+
+
+@pytest.mark.parametrize("how, live, refused", SCALES)
+def test_rollout_scale_refuses_only_a_scale_that_adds_nodes(tmp_path, monkeypatch, capsys, how, live, refused):
     from yeto.launch.rollout import entry
 
-    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
-    monkeypatch.setattr(up.Run, "scale", lambda self, *a, **k: 0)
-    base = dict(config=str(_conflicting(tmp_path)), pool_config=None, provider=None, pool=None, add=0, mode=None,
-                force_static=False, dry_run=False, source="manual")
-    assert entry.scale(types.SimpleNamespace(**base, target=None, remove=["t1"], retire=[])) == 0
-    assert entry.scale(types.SimpleNamespace(**base, target=3, remove=[], retire=[])) == 2
+    calls = _scale_run(tmp_path, monkeypatch, live)
+    args = types.SimpleNamespace(config=str(_conflicting(tmp_path)), pool_config=None, provider=None, pool=None,
+                                 mode=None, force_static=False, dry_run=False, source="manual", **_how(how))
+    assert entry.scale(args) == (2 if refused else 0)
+    assert bool(calls) is not refused
+
+
+def test_a_scale_up_of_an_agreeing_config_is_not_refused_by_breakers(tmp_path, monkeypatch):
+    calls = _scale_run(tmp_path, monkeypatch, 2)
+    path = _write(tmp_path, breakers={"trainer": {"sample_wait": {"timeout_s": 1200}}})
+    assert up.breakers_refusal(str(path)) is None
+    args = types.SimpleNamespace(config=str(path), rl_command="scale", mode=None, force_static=False, dry_run=False,
+                                 source="manual", pool=None, provider=None, **_how({"add": 1}))
+    assert up.main(args) == 0 and calls
