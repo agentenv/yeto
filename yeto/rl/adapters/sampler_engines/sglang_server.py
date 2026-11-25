@@ -155,6 +155,11 @@ DP_FLAG_ATTN_DP_SIZE = "attn-dp-size"  # sglang-miles-kimi-k31@35708f76 and late
 DP_FLAG_LEGACY = "enable-dp-attention"  # the 0.5.x pin: --dp N --enable-dp-attention (deprecated upstream)
 DP_FLAGS = (DP_FLAG_AUTO, DP_FLAG_ATTN_DP_SIZE, DP_FLAG_LEGACY)
 HELP_PROBE_TIMEOUT_S = 600.0  # importing sglang for --help takes a while on a cold image
+METRICS_FLAG = "--enable-metrics"
+# SGLang's /metrics needs prometheus_client in the server's python: without it the server
+# fails at start, so the flag is only passed where it imports (the pool's probe then reads
+# no counters and reports engine_metrics_unreadable with this reason)
+METRICS_OFF_NO_PROMETHEUS = "metrics disabled: prometheus_client missing"
 
 
 def dp_attention_argv(flag: str, dp: int) -> list[str]:
@@ -175,6 +180,14 @@ def dp_flag_from_help(help_text: str) -> str:
     if "--enable-dp-attention" in help_text:
         return DP_FLAG_LEGACY
     raise SamplerEngineError("sglang launch_server --help names neither --attn-dp-size nor --enable-dp-attention")
+
+
+def run_import_probe(argv: Sequence[str], timeout_s: float = HELP_PROBE_TIMEOUT_S) -> bool:
+    """True when ``argv`` (``python -c "import ..."``) exits 0."""
+    import subprocess
+
+    return subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout_s,  # noqa: S603
+                          check=False).returncode == 0
 
 
 def run_help_probe(argv: Sequence[str], timeout_s: float = HELP_PROBE_TIMEOUT_S) -> str:
@@ -641,16 +654,20 @@ class SGLangServerEngine(ServerEngine):
     REFUSED_FORMATS = frozenset({"dense"})  # item 5
 
     def __init__(self, config: ServerConfig, options: SGLangOptions | None = None, *,
-                 help_probe: Any = run_help_probe, run: Any = None,
+                 help_probe: Any = run_help_probe, metrics_probe: Any = run_import_probe, run: Any = None,
                  read_tensors: k31_release.ReadTensors = k31_release.read_tensors,
                  serialize: k31_release.Serialize = k31_release.serialize_named_tensors, **kw: Any) -> None:
         """``help_probe(argv) -> str``: runs ``launch_server --help`` for the DP-flag
-        probe; ``run(argv) -> str``: runs the card tool of the platform check
+        probe; ``metrics_probe(argv) -> bool``: whether the server's python imports
+        ``prometheus_client`` (``--enable-metrics`` needs it); ``run(argv) -> str``: runs the card tool of the platform check
         (default: ``yeto.hw.card_telemetry.run_command``); ``read_tensors`` /
         ``serialize``: the expert-file update's tensor IO (:mod:`.k31_release`)."""
         super().__init__(config, **kw)
         self.options = options or SGLangOptions()
         self._help_probe = help_probe
+        self._metrics_probe = metrics_probe
+        self.metrics_off: str | None = None  # why /metrics is not served (None: served, or not probed yet)
+        self._metrics_probed = False
         self._run = run
         self._read_tensors = read_tensors
         self._serialize = serialize
@@ -766,11 +783,28 @@ class SGLangServerEngine(ServerEngine):
             argv += ["--enable-return-indexer-topk"]
         if o.fp32_lm_head:
             argv += ["--enable-fp32-lm-head"]
-        if "--enable-metrics" not in c.extra_args:
+        if not any(a == METRICS_FLAG or str(a).startswith(METRICS_FLAG + "=") for a in c.extra_args) \
+                and self._metrics_available():
             # /metrics (vLLM serves it by default): the pool's probe reads the token counter
             # there to tell a stalled engine from a working one (nc.elastic.probe_script)
-            argv += ["--enable-metrics"]
+            argv += [METRICS_FLAG]
         return argv + list(c.extra_args)
+
+    def _metrics_available(self) -> bool:
+        """Whether the server's python imports ``prometheus_client`` (probed once; a probe
+        that fails to run counts as missing: a server that cannot start is worse than one
+        without /metrics). Missing: a WARN, and :attr:`metrics_off` says why."""
+        if not self._metrics_probed:
+            self._metrics_probed = True
+            try:
+                ok = bool(self._metrics_probe([self.config.python, "-c", "import prometheus_client"]))
+            except Exception:  # noqa: BLE001 - the probe is advisory
+                ok = False
+            self.metrics_off = None if ok else METRICS_OFF_NO_PROMETHEUS
+            if not ok:
+                print(f"[sglang-server] WARN: {METRICS_OFF_NO_PROMETHEUS} in {self.config.python}: started without "
+                      f"{METRICS_FLAG}; the pool cannot read the engine's progress", flush=True)
+        return self.metrics_off is None
 
     def _resolve_dp_flag(self) -> str:
         """The DP form to launch with (module constants). ``auto``: what a
@@ -965,6 +999,8 @@ class SGLangServerEngine(ServerEngine):
         shown = ("MX_PATCH", "SGLANG_USE_AITER", CUDA_MXFP4_DECODE_MOE_ENV, sglang_mxfp4_reload.ENV, *ROCM_ENV_PRESET)
         detail: dict[str, Any] = {"env": {k: v for k, v in self.env().items() if k in shown}}
         detail["reload_policy"] = self.reload_policy()
+        if self.metrics_off is not None:  # on the tape (rl_sampler_load_checked): the pool's probe reads it
+            detail["metrics_off"] = self.metrics_off
         summary = self._read_server_info()
         build = self._build_facts()
         if summary or build:

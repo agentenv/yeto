@@ -78,7 +78,9 @@ def probe_script(container: str, tape_glob: str, join_pattern: str = "rl_sampler
                    # SGLang's names (yeto.node.report): its /metrics needs --enable-metrics (SGLangServerEngine)
                    "/^sglang:generation_tokens_total/{t+=$NF;f=1} /^sglang:num_running_reqs/{r+=$NF} "
                    "/^sglang:num_queue_reqs/{w+=$NF} END{if(f) printf \"%.0f %d %d\", t, r, w; "
-                   "else print \"- - -\"}'); t=${1:--} r=${2:--} w=${3:--}; ")
+                   "else print \"- - -\"}'); t=${1:--} r=${2:--} w=${3:--}; "
+                   # no counters and the engine said why (SGLang without prometheus_client)
+                   "[ \"$t\" = - ] && [ -n \"$n\" ] && grep -qs '\"metrics_off\"' \"$n\" && t=off; ")
     inspect = f"sudo docker inspect -f '{{{{.State.Status}}}} {{{{.State.ExitCode}}}}' {container}"
     state = state_script or (f"{inspect} 2>/dev/null || case \"$({inspect} 2>&1 >/dev/null)\" in "
                              "(*'o such object'*|*'o such container'*) echo 'absent -';; "

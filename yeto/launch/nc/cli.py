@@ -251,12 +251,13 @@ class NcSshOps:
 
     def hourly_cost(self, m: Member) -> float | None:
         """One machine hour of ``m`` in its provider's currency, for a provider that prices each
-        machine by its own offer (sky, ``hourly_cost(ticket)``): that offer's price, else (an
-        unpriced offer) the pool's node hour, the National Compute MI355X rate where the
-        config states none (as the pool budget counts it: high, never None or 0). None for
-        National Compute, whose node hour is the pool's (unchanged)."""
-        from ..pool.money import to_usd  # noqa: PLC0415
-        from ..pool.provider import MultiProvider, _takes_ticket, caps_of  # noqa: PLC0415
+        machine by its own offer (sky, ``hourly_cost(ticket)``), counted high, never None or 0:
+        the offer it was ordered with (``offer_of``); a machine whose offer is not known (an
+        adopted cluster without an offer record) the dearest of the pool's offers; an unpriced
+        offer (and a pool without offers) the pool's node hour, the MI355X fallback rate where
+        the config states none (as the pool budget counts it). None for National Compute,
+        whose node hour is the pool's (unchanged)."""
+        from ..pool.provider import MultiProvider, _takes_ticket  # noqa: PLC0415
 
         provider = self.provider
         if isinstance(provider, MultiProvider):
@@ -264,9 +265,20 @@ class NcSshOps:
         rate = getattr(provider, "hourly_cost", None)
         if isinstance(provider, NCProvider) or rate is None or not _takes_ticket(rate):
             return None
+        offer_of = getattr(provider, "offer_of", None)
+        offers = list(getattr(provider, "offers", None) or [])
+        if callable(offer_of) and offers and offer_of(m.ticket) is None:
+            fallback = self._fallback_rate(provider)
+            return max(fallback if o.price_usd_h is None else float(o.price_usd_h) for o in offers)
         value = rate(m.ticket)
-        if value is not None:
-            return float(value)
+        return self._fallback_rate(provider) if value is None else float(value)
+
+    def _fallback_rate(self, provider: Any) -> float:
+        """The pool's node hour in ``provider``'s currency: its stated or offers' price, else the
+        National Compute MI355X rate (what the pool budget counts an unpriced node at)."""
+        from ..pool.money import to_usd  # noqa: PLC0415
+        from ..pool.provider import caps_of  # noqa: PLC0415
+
         ucr = pool_hourly_ucr(self.cfg) or hourly_cost_ucr()
         return to_usd(ucr, "ucr") if caps_of(provider).currency == "usd" else float(ucr)
 
@@ -1111,10 +1123,19 @@ def spot_priced_on_demand(cfg: dict[str, Any]) -> list[str]:
             if isinstance(d, dict) and d.get("price_usd_h") is None and prices.spot_at_on_demand(o.resources)]
 
 
-def spot_on_demand_notes(cfg: dict[str, Any]) -> list[str]:
-    """The dry-run's note for each :func:`spot_priced_on_demand` offer."""
-    return [f"offer {key}: the unified price table has no spot price for it; counted at its on-demand price"
-            for key in spot_priced_on_demand(cfg)]
+def pool_price_notes(cfg: dict[str, Any]) -> list[str]:
+    """The dry-run's note for each :func:`spot_priced_on_demand` offer, and for each unpriced
+    offer of a pool that states no price (its machines count at the MI355X fallback rate)."""
+    from ..pool.money import to_usd  # noqa: PLC0415
+
+    notes = [f"offer {key}: the unified price table has no spot price for it; counted at its on-demand price"
+             for key in spot_priced_on_demand(cfg)]
+    if pool_price(cfg)[0] is None:
+        rate = to_usd(hourly_cost_ucr(), "ucr")
+        notes += [f"offer {key}: no price_usd_h and no billing row in the unified price table: priced at the "
+                  f"MI355X fallback rate {rate:g} USD/h; set usd_per_h (the offer's price_usd_h)"
+                  for key in unpriced_offers(cfg)]
+    return notes
 
 
 def unpriced_offers(cfg: dict[str, Any]) -> list[str]:

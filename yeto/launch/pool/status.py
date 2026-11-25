@@ -92,6 +92,7 @@ class Probe:
     trainer_wait: bool = False
     vram_alerts: int | None = None  # rl_sampler_vram_high lines on the newest tape (vram_guard)
     vram_max_frac: float | None = None  # the last alert's fullest card
+    metrics_off: bool = False  # no /metrics, and the engine's tape says it serves none (``tok=off``)
 
     @classmethod
     def parse(cls, text: str, returncode: int) -> Probe:
@@ -123,7 +124,8 @@ class Probe:
                    progress_age_s=float(age) if age not in (None, "", "-") else None,
                    gen_tokens=num("tok"), running=None if running is None else int(running),
                    queued=None if queued is None else int(queued), trainer_wait=doc.get("tw") == "1",
-                   vram_alerts=None if alerts is None else int(alerts), vram_max_frac=num("vm"))
+                   vram_alerts=None if alerts is None else int(alerts), vram_max_frac=num("vm"),
+                   metrics_off=doc.get("tok") == "off")
 
 
 def resolve_metrics_port(value: int | str | None, spec: Mapping[str, Any] | None) -> int | None:

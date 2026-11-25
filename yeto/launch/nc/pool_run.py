@@ -648,7 +648,7 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
         from yeto.cost import prices  # noqa: PLC0415
 
         notes += prices.stale(cli.pool_price_rows(cfg))  # a table price read too long ago: its source and date
-        notes += cli.spot_on_demand_notes(cfg)  # a spot offer the table prices at on-demand
+    notes += cli.pool_price_notes(cfg)  # sky offers priced at on-demand, or at the MI355X fallback rate
     if ecfg.max_run_spend_ucr is None and ecfg.max_run_spend_usd is None:
         notes.append("elastic.max_run_spend_ucr is unset (and max_run_spend_usd): the run's spend has no cap")
     if ecfg.max_run_spend_ucr is not None:
