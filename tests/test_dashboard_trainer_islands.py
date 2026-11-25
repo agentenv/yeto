@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from test_dashboard_diloco import D as DILOCO
-from test_dashboard_diloco import diloco, lines, load
+from test_dashboard_diloco import _smoke, diloco, lines, load
 from test_dashboard_fleet_islands import T0, fleet_reducer, plan_doc
 
 from yeto.dashboard import cost, fleet_islands
@@ -157,6 +157,57 @@ def test_a_syncer_tape_not_seen_here_reads_the_islands_versions():
         r.feed(rec, source="late/yeto-tape.jsonl", offset=off)
     d = diloco(r)
     assert d["syncer_tape"] is True and d["inferred_versions"] is None and d["versions"] == [21, 22, 23, 24]
+
+
+def _open_at_the_end(r):
+    """Island 0 pushes step 25 (fragment 0) 30 s before the trainers' last event; no merge follows."""
+    end = max(x["last_event_ts"] for x in r.islands.values() if x.get("last_event_ts") is not None)
+    r.feed({"event": "rl_fragment_push", "island_id": 0, "global_step": 25, "fragment_id": 0, "base_version": 21,
+            "round_attempt": 1, "payload_bytes": 1, "time_unix": end - 30}, source="late/push.jsonl", offset=0)
+    return end
+
+
+def test_a_round_open_when_the_run_ended_stops_its_clock(tmp_path):
+    r = load("run-b")
+    end = _open_at_the_end(r)
+    d = diloco(r, now=end + 7200)
+    assert d["done"]
+    (rd,) = [x for x in d["rounds"] if x["step"] == 25]
+    assert rd["ended"] == "run ended" and rd["age_s"] == pytest.approx(30.0, abs=1.0) and not rd["blocked"]
+    out = _smoke(tmp_path, r)
+    joined = " | ".join(out["texts"])
+    assert "1 unmerged at the end" in joined and "in flight 1" not in joined
+    assert "open 30s when the run ended" in joined and "PUSH 1/2 t25 · unmerged at the end" in out["matrix"]
+    assert "Fragment rounds in flight / BCAST pending" in out["kpis"] and "1 unmerged at the end" in out["kpis"]
+
+
+def test_a_round_open_while_no_trainer_is_up_is_stale(tmp_path):
+    """Run B as a live page saw it halfway, read two hours later: no trainer is up and none
+    finished; the open rounds are stale (their clock stopped at the last event), not waiting."""
+    from test_dashboard_diloco import _replayed
+
+    full = load("run-b")
+    ts = [x for x in full.islands.values() if x.get("first_ts") is not None]
+    mid = (min(x["first_ts"] for x in ts) + max(x["last_event_ts"] for x in ts)) / 2
+    r = _replayed("run-b", mid)
+    live = diloco(r, now=mid)
+    assert live["rounds"] and not any(x.get("ended") for x in live["rounds"]) and live["shards"][0]["state"] != "stale"
+    d = diloco(r, now=mid + 7200)
+    assert not d["done"] and d["shards"][0]["state"] == "stale"
+    for x, y in zip(d["rounds"], live["rounds"]):
+        assert x["ended"] == "no trainer up" and not x["blocked"] and x["age_s"] <= y["age_s"] + 1
+
+
+def test_without_the_syncer_tape_a_push_an_island_applied_is_not_open():
+    """No syncer record here: every PUSH looks unmerged; one whose step an island already applied
+    (its fragment's inferred version) was merged, so it is no round in flight."""
+    r = load("run-b", skip=lambda p: p.name == "yeto-tape.jsonl")
+    d = diloco(r)
+    assert d["syncer_tape"] is False and d["inferred_versions"] == [21, 22, 23, 24]
+    assert d["rounds"] == []
+    end = _open_at_the_end(r)
+    (rd,) = diloco(r, now=end)["rounds"]
+    assert rd["step"] == 25 and rd["ended"] == "run ended"
 
 
 def _cost(tmp_path: Path, *, up: dict | None = None, pools: dict | None = None, spend: dict | None = None):

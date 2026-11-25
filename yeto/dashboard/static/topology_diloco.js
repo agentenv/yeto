@@ -395,9 +395,10 @@ function paint(){
     o.barf.setAttribute("width",D.P?(o.barW*(((sh.step-1)%D.P+1)/D.P)).toFixed(1):0);
     o.roster.textContent=D.done?"run done · roster "+D.M:"roster "+D.roster+"/"+D.M;o.roster.style.fill=D.done?C.ink2:D.roster<D.M?C.bad:C.good;
     var c=st==="done"?C.ink2:st==="waiting for quorum"?(sh.attempt_max>1?C.bad:C.warn):st==="merging"?C.wt:st==="gathering"?C.good:C.ink2;
-    fitText(o.st,(st==="done"?"done (final cut)":st)+" · in flight "+mine.length+(D.behind&&D.syncer_tape!==false?" · syncer tape behind":""),o.lw-14);o.st.style.fill=c===C.good?C.ink:c;o.dot.setAttribute("fill",c);
+    var ended=mine.length&&mine.every(function(r){return r.ended});
+    fitText(o.st,(st==="done"?"done (final cut)":st==="stale"?"stale: no trainer up":st)+(ended?" · "+mine.length+" unmerged at the end":st==="done"&&!mine.length?"":" · in flight "+mine.length)+(D.behind&&D.syncer_tape!==false?" · syncer tape behind":""),o.lw-14);o.st.style.fill=c===C.good?C.ink:c;o.dot.setAttribute("fill",c);
     o.box.style.stroke=c===C.bad?C.bad:"";
-    var lines=mine.slice(0,3).map(function(r){return["t"+r.step+" f"+r.frag+": "+(r.state==="merging"?"merging":r.state==="pull"?"PULL out":"PUSH "+r.pushed.length+"/"+D.M)+" · "+dur(tn-r.since)+(r.attempt>1?" · attempt "+r.attempt:"")+(r.timeouts?" · "+r.timeouts+" timeout"+(r.timeouts>1?"s":""):"")+(r.members_left?" · all islands left, relaunched":""),r.blocked||r.timeouts?C.warn:C.ink2]});
+    var lines=mine.slice(0,3).map(function(r){return["t"+r.step+" f"+r.frag+": "+(r.state==="merging"?"merging":r.state==="pull"?"PULL out":"PUSH "+r.pushed.length+"/"+D.M)+" · "+(r.ended?"open "+dur(r.age_s)+" when the "+(r.ended==="run ended"?"run ended":"trainers stopped"):dur(tn-r.since))+(r.attempt>1?" · attempt "+r.attempt:"")+(r.timeouts?" · "+r.timeouts+" timeout"+(r.timeouts>1?"s":""):"")+(r.members_left?" · all islands left, relaunched":""),!r.ended&&(r.blocked||r.timeouts)?C.warn:C.ink2]});
     if(notape){lines.push(["syncer tape not visible on this host",C.warn]);
       lines.push([inf?"versions ≥ the islands' applied BCAST":"the syncer runs elsewhere; no merge drawn",C.ink2])}
     else lines.push([last?"last merge t"+last.step+" f"+last.frag+" · quorum "+dur(last.quorum_s)+" · merge "+(fin(last.merge_s)?last.merge_s.toFixed(2)+"s":"—"):"no merge yet",C.ink2]);
@@ -456,10 +457,10 @@ function matrix(tn){
   for(var f=0;f<P;f++){var st=D.stuck.indexOf(f)>=0,lt=D.last_merge_ts[f];h+='<th class="'+(st?"stuck":"")+'" title="'+esc("fragment "+f+(D.shards.length>1?", shard "+shardOf(f):"")+(fin(lt)?", last merged "+dur(tn-lt)+" ago":", not merged yet"))+'">f'+f+(D.shards.length>1?" · s"+shardOf(f):"")+'<span class="fa">'+(st?"stuck ":"")+(fin(lt)?"merged "+dur(tn-lt)+" ago":D.syncer_tape===false?"merges not visible":"not merged")+"</span></th>"}
   h+='</tr><tr><th class="rh">Syncer<span class="ns">committed version · round</span></th>';
   for(f=0;f<P;f++){var r=D.rounds.filter(function(x){return x.frag===f})[0],cls="",s2="idle",lt2=D.last_merge_ts[f];
-    if(r){cls=r.blocked?"sy-stuck":r.state==="merging"?"sy-merge":"sy-gather";s2=(r.state==="merging"?"merging":r.state==="pull"?"PULL out":"PUSH "+r.pushed.length+"/"+D.M)+" t"+r.step}
+    if(r){cls=r.ended?"":r.blocked?"sy-stuck":r.state==="merging"?"sy-merge":"sy-gather";s2=(r.state==="merging"?"merging":r.state==="pull"?"PULL out":"PUSH "+r.pushed.length+"/"+D.M)+" t"+r.step+(r.ended?" · unmerged at the end":"")}
     var fresh=T.live&&fin(lt2)&&tn-DELAY_S-lt2>=0&&tn-DELAY_S-lt2<4;
     if(D.syncer_tape===false&&D.inferred_versions){h+='<td title="'+esc("syncer tape not visible on this host: at least v"+D.inferred_versions[f]+", the newest version of the fragment an island applied")+'"><div class="v">≥ v'+D.inferred_versions[f]+'</div><div class="s">from the islands</div></td>';continue}
-    h+='<td class="'+cls+(fresh?" flash":"")+'" title="'+esc("committed v"+D.versions[f]+" (global step of the last merge)"+(r?"; step "+r.step+" open "+dur(r.age_s)+", pushed by "+(r.pushed.join(", ")||"none"):""))+'"><div class="v">v'+D.versions[f]+'</div><div class="s">'+s2+"</div></td>"}
+    h+='<td class="'+cls+(fresh?" flash":"")+'" title="'+esc("committed v"+D.versions[f]+" (global step of the last merge)"+(r?"; step "+r.step+" open "+dur(r.age_s)+(r.ended?" when the "+(r.ended==="run ended"?"run ended":"trainers stopped"):"")+", pushed by "+(r.pushed.join(", ")||"none"):""))+'"><div class="v">v'+D.versions[f]+'</div><div class="s">'+s2+"</div></td>"}
   h+="</tr>";
   var finalOnSyncer=false;
   if(sft())h+=learnerRows(tn);else D.trainers.forEach(function(tr){var off=!tr.live&&!(tr.status==="done"||tr.finalized);
@@ -610,7 +611,7 @@ function kpis(view,kp){
   var tn=(view.overview||{}).now||t.now,trs=d.trainers,isl=d.kind==="island",live=trs.filter(function(x){return x.live}).length,rolls=trs.filter(function(x){return x.island});
   var eng=rolls.reduce(function(a,x){return a+(x.island.engines||0)},0),pls={};rolls.forEach(function(x){if(x.island.placement)pls[x.island.placement]=1});
   var pl=Object.keys(pls),co=rolls.some(function(x){return x.island.colocated});
-  var pct=function(x){return fin(x)?Math.round(100*x)+"%":"—"},sh=d.shards[0]||{},open=d.rounds.length,pend=trs.filter(function(x){return x.live}).reduce(function(a,x){return a+x.pending_n},0);
+  var pct=function(x){return fin(x)?Math.round(100*x)+"%":"—"},sh=d.shards[0]||{},open=d.rounds.filter(function(r){return !r.ended}).length,pend=trs.filter(function(x){return x.live}).reduce(function(a,x){return a+x.pending_n},0);
   var oldest=trs.filter(function(x){return x.live&&fin(x.pending_oldest_ts)}).map(function(x){return x.pending_oldest_ts});
   var out=[];
   kp.forEach(function(c){var k=c[0];
@@ -623,7 +624,7 @@ function kpis(view,kp){
     else if(k.indexOf("Rejected")===0){if(isl){var zv=rolls.map(function(x){return x.island.zero_var_recent}).filter(fin),tr=trs.map(function(x){return x.truncated}).filter(fin);
       out.push(["In-island rollout: zero-var / truncated",pct(zv.length?zv.reduce(function(a,b){return a+b},0)/zv.length:null)+" / "+(tr.length?pct(Math.max.apply(null,tr)):"—"),
         rolls.map(function(x){return "island "+x.id+" zero-var "+pct(x.island.zero_var_recent)}).join(" · ")+" (median of the last rounds)"+(tr.length?"":" · truncation not reported by the trainers")])}else out.push(c)}
-    else if(k==="Buffer backlog"){var bb=["Fragment rounds in flight / BCAST pending",open+" / "+pend,(oldest.length?"oldest merged-not-applied "+dur(tn-Math.min.apply(null,oldest)):"every merged fragment applied")+(open?" · "+d.rounds.slice(0,3).map(function(r){return "t"+r.step+" f"+r.frag}).join(", "):"")+(d.config?"":" · PULL-only rounds not on the tapes")];
+    else if(k==="Buffer backlog"){var bb=["Fragment rounds in flight / BCAST pending",open+" / "+pend,(oldest.length?"oldest merged-not-applied "+dur(tn-Math.min.apply(null,oldest)):"every merged fragment applied")+(open?" · "+d.rounds.filter(function(r){return !r.ended}).slice(0,3).map(function(r){return "t"+r.step+" f"+r.frag}).join(", "):d.rounds.length?" · "+d.rounds.length+" unmerged at the end":"")+(d.config?"":" · PULL-only rounds not on the tapes")];
       if(isl)out.push(bb);else{out.push(c);out.push(bb)}}
     else if(k==="Syncer outer step")out.push(["Syncer",d.done?"done":"roster "+d.roster+"/"+d.M,(d.done?"every trainer finished · roster "+d.M+" · ":"")+"last merge "+ago(d.last_merge_ts_any,tn)+" · quorum wait p50 "+(fin(d.quorum_p50_s)?dur(d.quorum_p50_s):"—")+" · "+(sh.merges||0)+" merges · P "+(d.P||"—")+(d.behind?" · syncer tape behind the islands":"")]);
     else if(k==="Syncer RSS"){}  // the RL syncer's memory is not on its tape: no card rather than n/a

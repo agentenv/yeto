@@ -355,7 +355,8 @@ def shard_rows(p: int | None, n: int, merges: list[dict], rounds: list[dict], co
     for i in range(n if p else 0):
         mine = [m for m in merges if m["shard"] == i]
         own = [r for r in rounds if r["shard"] == i]
-        state = ("done" if done else "waiting for quorum" if any(r["blocked"] for r in own)
+        state = ("done" if done else "stale" if own and all(r.get("ended") for r in own)
+                 else "waiting for quorum" if any(r["blocked"] for r in own)
                  else "merging" if any(r["state"] == "merging" for r in own) else "gathering" if own else "idle")
         out.append({"index": i, "lo": i * p // n, "hi": (i + 1) * p // n, "step": committed[i], "merges": len(mine),
                     "state": state, "attempt_max": max((_int(r["attempt"]) or 1 for r in own), default=1),
@@ -463,6 +464,16 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
                                                   for i in trainer_ids)
     if done:  # PULLs nobody answered before the end are not rounds in flight
         rounds = [r for r in rounds if r["pushed"]]
+    if inferred is not None:  # no syncer tape: a PUSH of a step an island already applied was merged
+        rounds = [r for r in rounds if r["frag"] is None or r["frag"] >= len(inferred) or r["step"] > inferred[r["frag"]]]
+    if done or not live:
+        # the run ended (or no trainer is up): a round still open is not in flight; its clock stops
+        # at the trainers' last event
+        ends = [(reducer.islands.get(i) or {}).get("last_event_ts") for i in trainer_ids]
+        end = max((t for t in ends if t is not None), default=now)
+        for r in rounds:
+            r.update(ended="run ended" if done else "no trainer up", ended_at=end,
+                     age_s=max(0.0, min(end, now) - r["since"]), blocked=False)
     for t in trainers:  # the syncer's word on the island's connection (P1 tapes)
         mrec = srec["members"].get(t["id"])
         t["syncer_link"] = {"state": "disconnected" if mrec["kind"] == "member_disconnected" else "connected",
