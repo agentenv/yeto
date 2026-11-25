@@ -4743,11 +4743,8 @@ async fn scheduler(
         retry_defers.retain_inflight(&inflight);
         let now = Instant::now();
         if dynamic && !fixed_roster {
-            for r in inflight.iter_mut().filter(|r| r.deserted() && r.quorum_deadline > now) {
-                if deserted_noted.insert((r.t, r.attempt)) {
-                    info!(step = r.t, attempt = r.attempt, "every island of the round left; relaunching it now");
-                    r.quorum_deadline = now;
-                }
+            for (step, attempt) in relaunch_deserted_rounds(&mut inflight, &mut deserted_noted, now) {
+                info!(step, attempt, "every island of the round left; relaunching it now");
             }
         }
         let mut submitted_any = false;
@@ -4780,7 +4777,12 @@ async fn scheduler(
                     }
                     if stop_deadline.is_some() {
                         // Stopping: no new attempt; the round is launched again after --resume.
-                        append_round_timeout(&cfg, &inflight[i], "quorum_timeout", "abandoned");
+                        let reason = if deserted_noted.contains(&(inflight[i].t, inflight[i].attempt)) {
+                            "members_left"
+                        } else {
+                            "quorum_timeout"
+                        };
+                        append_round_timeout(&cfg, &inflight[i], reason, "abandoned");
                         let round = inflight.remove(i);
                         busy_fragments.remove(&round.p);
                         warn!(step = round.t, "stop: quorum timeout, round abandoned");
@@ -6174,6 +6176,25 @@ fn round_action(round: &Round, now: Instant) -> RoundAction {
     } else {
         RoundAction::Wait
     }
+}
+
+/// Move the quorum deadline of each deserted attempt (every expected island
+/// left, nothing pushed) to `now`, once per (step, attempt): the relaunch path
+/// then runs at once, and its own retry cadence (every second while no island
+/// is ready) is left alone afterwards. Returns the attempts it moved.
+fn relaunch_deserted_rounds(
+    inflight: &mut [Round],
+    noted: &mut HashSet<(u64, u32)>,
+    now: Instant,
+) -> Vec<(u64, u32)> {
+    let mut moved = Vec::new();
+    for r in inflight.iter_mut().filter(|r| r.deserted() && r.quorum_deadline > now) {
+        if noted.insert((r.t, r.attempt)) {
+            r.quorum_deadline = now;
+            moved.push((r.t, r.attempt));
+        }
+    }
+    moved
 }
 
 /// Return a ready round only when it is the oldest in-flight global step.
@@ -14716,6 +14737,35 @@ mod tests {
         answered.pushes.insert(gone, test_push(5));
         assert!(!answered.forget_unanswered(gone));
         assert!(!answered.deserted(), "an accepted push keeps the round");
+        // Even with its expected set empty, a round holding a push is not deserted.
+        answered.expected_members.clear();
+        assert!(!answered.deserted(), "a push is never relaunched away");
+    }
+
+    #[test]
+    fn a_deserted_attempt_is_relaunched_once_then_keeps_its_retry_cadence() {
+        let gone = member(0, 10);
+        let now = Instant::now();
+        let mut deserted = test_round(vec![gone]);
+        deserted.forget_unanswered(gone);
+        deserted.quorum_deadline = now + Duration::from_secs(900);
+        let mut alive = test_round(vec![member(1, 20)]);
+        alive.quorum_deadline = now + Duration::from_secs(900);
+        let mut rounds = vec![deserted, alive];
+        let mut noted = HashSet::new();
+        assert_eq!(relaunch_deserted_rounds(&mut rounds, &mut noted, now), vec![(7, 1)]);
+        assert_eq!(rounds[0].quorum_deadline, now, "relaunched at once");
+        assert_eq!(rounds[1].quorum_deadline, now + Duration::from_secs(900), "a round with islands waits");
+        // No island ready: the relaunch path defers by a second; later passes leave that alone.
+        let retry = now + Duration::from_secs(1);
+        rounds[0].quorum_deadline = retry;
+        let later = now + Duration::from_millis(10);
+        assert!(relaunch_deserted_rounds(&mut rounds, &mut noted, later).is_empty());
+        assert_eq!(rounds[0].quorum_deadline, retry, "the retry cadence is kept");
+        // A new attempt that loses every island again is relaunched again.
+        rounds[0].attempt = 2;
+        rounds[0].quorum_deadline = now + Duration::from_secs(900);
+        assert_eq!(relaunch_deserted_rounds(&mut rounds, &mut noted, later), vec![(7, 2)]);
     }
 
     /// The syncer-side tape records the dashboard draws from: the syncer's
