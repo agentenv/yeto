@@ -21,8 +21,14 @@ resident ``ssh:`` island) and wherever it runs (sky, Modal, an SSH inventory):
   id): state, source and its handle (cluster name and job id, Modal call id, SSH
   incarnation), incarnation, relaunch count, last exit, last resume point and the
   controller that wrote it. A launcher or a controller that dies leaves its islands
-  readable from any machine (``yeto island status``) and adoptable by the next one.
-  Writes are best effort: a store that does not answer never stops supervision;
+  readable from any machine (the record is plain JSON in the run store). Writes are
+  best effort: a store that does not answer never stops supervision. The launcher's
+  store does its I/O on one background thread (``background=True``): the fleet
+  controller's poll loop never waits on the store (a write is queued, newest wins; an
+  island's STOP is read from a cache refreshed every ``stop_poll_s``). A writer fence
+  (:class:`Fence`: the run store's single-writer lock,
+  ``yeto.launch.pool.store_lock.StoreLock``) stops a controller whose claim another
+  one took over from writing any further record;
 * **stop channel**: ``fleet/trainers/<k>/STOP`` (:meth:`IslandStateStore.request_stop`)
   stops island ``k`` only; the run's STOP flag stays for fleet-wide stops.
 
@@ -40,7 +46,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from ..config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER
 
@@ -226,16 +232,43 @@ def controller_identity() -> dict[str, Any]:
             "since": round(time.time(), 3)}
 
 
+STOP_POLL_S = 15.0  # a background store re-reads the watched islands' STOP this often
+FLUSH_S = 10.0  # a background store's queued writes get this long at the launcher's end
+RETRY_MAX_S = 120.0  # the longest back-off between two tries of a write the store did not take
+
+
+class Fence(Protocol):
+    """A single-writer claim on the island records: the interface of the run store's lock
+    (``yeto.launch.pool.store_lock.StoreLock``). ``token``: its fencing token, written into
+    each record. ``guard()``: before a write; raises an error with a ``by`` attribute (the
+    higher token, ``LockLost``) once another controller took over, and another error
+    (``LockUnconfirmed``) when the store did not answer; it renews the lease when due."""
+
+    token: int
+
+    def guard(self) -> None: ...
+
+
 class IslandStateStore:
     """Each island's state record in the run store (module doc).
 
     ``objects``: the store's object API (``read`` / ``write``; ``delete`` and ``list``
     when present). Writes keep the record's earlier fields and append a history entry
     on each state change; every failure is logged (once per kind) and swallowed: the
-    record is the view others read, never the reason supervision stops."""
+    record is the view others read, never the reason supervision stops.
+
+    ``background``: writes are queued to one worker thread (the newest body per key wins)
+    and :meth:`stop_requested` answers from a cache that thread refreshes every
+    ``stop_poll_s``: the caller never waits on the store. :meth:`flush` / :meth:`close`
+    wait (bounded) for the queue. ``fence``: a :class:`Fence`; once it is lost no record
+    is written any more (sticky); while the store cannot confirm it, a write waits for
+    the next one. The background thread also guards it every ``stop_poll_s`` (the
+    lock's lease renewal). The STOP channel is not fenced: anyone may stop an island."""
 
     def __init__(self, objects: Any, *, controller: Mapping[str, Any] | None = None,
-                 clock: Callable[[], float] = time.time, log: Callable[[str], None] | None = None) -> None:
+                 clock: Callable[[], float] = time.time, log: Callable[[str], None] | None = None,
+                 background: bool = False, stop_poll_s: float = STOP_POLL_S,
+                 fence: Fence | None = None) -> None:
         self.objects = objects
         self.controller = dict(controller or controller_identity())
         self.clock = clock
@@ -243,6 +276,19 @@ class IslandStateStore:
         self._records: dict[int, dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._warned: set[str] = set()
+        self.background = bool(background)
+        self.stop_poll_s = float(stop_poll_s)
+        self.fence = fence
+        self.fenced: BaseException | None = None
+        self._pending: dict[str, bytes] = {}
+        self._watched: set[int] = set()
+        self._stops: dict[int, dict[str, Any] | None] = {}
+        self._stops_due = True
+        self._wake = threading.Event()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._thread: threading.Thread | None = None
+        self._closed = False
 
     def _warn(self, what: str, error: BaseException) -> None:
         kind = f"{what}:{type(error).__name__}"
@@ -253,6 +299,13 @@ class IslandStateStore:
     # -- reading
     def read(self, island: int) -> dict[str, Any] | None:
         """Island ``island``'s record as stored (None: none, or the read failed)."""
+        record = self._read_unlocked(island)
+        if record is not None:
+            with self._lock:
+                self._records.setdefault(int(island), dict(record))  # what a first write merges into
+        return record
+
+    def _read_unlocked(self, island: int) -> dict[str, Any] | None:
         try:
             raw = self.objects.read(state_key(island))
         except Exception as error:  # noqa: BLE001
@@ -305,8 +358,8 @@ class IslandStateStore:
             raise ValueError(f"unknown island state {state!r} (known: {', '.join(STATES)})")
         with self._lock:
             record = self._records.get(int(island))
-            if record is None:
-                record = self.read(island) or {}
+            if record is None:  # a background store never reads here: read() / read_all() first
+                record = {} if self.background else (self._read_unlocked(island) or {})
             record = dict(record)
             now = round(self.clock(), 3)
             old = record.get("state")
@@ -322,17 +375,148 @@ class IslandStateStore:
                 if fields.get("reason"):
                     entry["reason"] = str(fields["reason"])[:300]
                 record["history"] = [*list(record.get("history") or ())[-(HISTORY - 1):], entry]
+            if self.fence is not None:
+                record["fence_token"] = int(self.fence.token)
             self._records[int(island)] = record
             data = json.dumps(record, sort_keys=True, default=str).encode()
+        self._put(state_key(island), data)
+        return record
+
+    # -- the I/O: inline, or on the background thread
+    def _put(self, key: str, data: bytes) -> None:
+        if not self.background:
+            self._store(key, data)
+            return
+        with self._lock:
+            self._pending[key] = data
+            self._idle.clear()
+            self._start()
+        self._wake.set()
+
+    def _fence_holds(self) -> bool:
+        if self.fence is None:
+            return True
+        if self.fenced is not None:
+            return False
         try:
-            self.objects.write(state_key(island), data)
+            self.fence.guard()
+        except (KeyboardInterrupt, SystemExit):
+            if threading.current_thread() is threading.main_thread():
+                raise
+            self._warn("fence check", RuntimeError("interrupted"))  # never ends the background thread
+            return False
+        except BaseException as error:  # noqa: BLE001 - the lock's errors are BaseExceptions
+            if hasattr(error, "by"):
+                self.fenced = error
+                self.log(f"[launcher] island state store: fenced ({error}); this controller writes no "
+                         "island record any more"[:400])
+            else:
+                self._warn("fence check", error)  # not confirmed: this write waits for the next one
+            return False
+        return True
+
+    def _store(self, key: str, data: bytes) -> bool:
+        """Write one body; False when it should be tried again (the fence not confirmed, the
+        store did not take it); True once written, or for good not (the fence is lost)."""
+        if not self._fence_holds():
+            return self.fenced is not None
+        try:
+            self.objects.write(key, data)
         except Exception as error:  # noqa: BLE001
             self._warn("write", error)
-        return record
+            return False
+        return True
+
+    def _start(self) -> None:  # under self._lock
+        if self._thread is None and not self._closed:
+            self._thread = threading.Thread(target=self._work, name="island-state-store", daemon=True)
+            self._thread.start()
+
+    def _work(self) -> None:
+        stops_at = float("-inf")
+        retry_at, backoff = float("-inf"), self.stop_poll_s
+        while True:
+            self._wake.wait(self.stop_poll_s)
+            self._wake.clear()
+            with self._lock:
+                pending, self._pending = self._pending, {}
+                watched = sorted(self._watched)
+                due, self._stops_due = self._stops_due, False
+                closing = self._closed
+            if pending and time.monotonic() < retry_at and not closing:
+                retry = pending  # backing off: nothing is tried before retry_at
+            else:
+                retry = {key: data for key, data in pending.items() if not self._store(key, data)}
+                if retry:  # the fence not confirmed, or the store did not take it: back off, try again
+                    retry_at, backoff = time.monotonic() + backoff, min(backoff * 2, RETRY_MAX_S)
+                else:
+                    backoff = self.stop_poll_s
+            if retry:
+                with self._lock:  # unless a newer body of the key is queued meanwhile
+                    for key, data in retry.items():
+                        self._pending.setdefault(key, data)
+            if not pending:
+                self._fence_holds()  # the lease renewal of a quiet fleet
+            if watched and (due or time.monotonic() - stops_at >= self.stop_poll_s):
+                for k in watched:
+                    self._stops[k] = self._read_stop(k)
+                stops_at = time.monotonic()
+            with self._lock:
+                if not self._pending:
+                    self._idle.set()
+                if closing and (not self._pending or retry):
+                    return  # closing: a body the store does not take now is left behind (close() says which)
+
+    def flush(self, timeout: float = FLUSH_S) -> bool:
+        """Wait up to ``timeout`` s for the queued writes (True once none is left)."""
+        if not self.background:
+            return True
+        self._wake.set()
+        return self._idle.wait(timeout)
+
+    def close(self, timeout: float = FLUSH_S) -> bool:
+        """Flush (bounded) and end the background thread; True when every write landed."""
+        if not self.background:
+            return True
+        with self._lock:
+            self._closed = True
+            thread = self._thread
+        self._wake.set()
+        if thread is not None:
+            thread.join(timeout)
+        with self._lock:
+            left = {key: data for key, data in self._pending.items()}
+        if not left and self._idle.is_set():
+            return True
+        what = []
+        for key, data in sorted(left.items()):
+            try:
+                state = json.loads(data).get("state")
+            except (ValueError, AttributeError):
+                state = None
+            what.append(f"{key}" + (f" ({state})" if state else ""))
+        self.log(f"[launcher] ERROR: island state store: {len(left) or 'a'} record write(s) did not land "
+                 f"within {timeout:.0f} s at the end ({', '.join(what) or 'in flight'}"
+                 f"{'; fenced: ' + str(self.fenced) if self.fenced is not None else ''}): the run store shows "
+                 "an older state of these islands")
+        return False
 
     # -- the stop channel
     def stop_requested(self, island: int) -> dict[str, Any] | None:
-        """Island ``island``'s STOP request (``{"reason": ..., "by": ..., "at": ...}``), else None."""
+        """Island ``island``'s STOP request (``{"reason": ..., "by": ..., "at": ...}``), else None.
+        A background store answers from its cache: None until its first read of the island."""
+        if not self.background:
+            return self._read_stop(island)
+        k = int(island)
+        with self._lock:
+            if k not in self._watched:
+                self._watched.add(k)
+                self._stops_due = True
+                self._start()
+                self._wake.set()
+        return self._stops.get(k)
+
+    def _read_stop(self, island: int) -> dict[str, Any] | None:
         try:
             raw = self.objects.read(stop_key(island))
         except Exception as error:  # noqa: BLE001
@@ -391,7 +575,8 @@ def store_objects(uri: str | None, environ: Mapping[str, str] | None = None) -> 
 
 
 def open_state_store(uri: str | None, environ: Mapping[str, str] | None = None, *,
-                     log: Callable[[str], None] | None = None) -> IslandStateStore | None:
+                     log: Callable[[str], None] | None = None, background: bool = False,
+                     fence: Fence | None = None) -> IslandStateStore | None:
     """:class:`IslandStateStore` of the run store ``uri`` (None when it has no object API)."""
     try:
         objects = store_objects(uri, environ)
@@ -399,7 +584,7 @@ def open_state_store(uri: str | None, environ: Mapping[str, str] | None = None, 
         (log or (lambda m: print(m, file=sys.stderr, flush=True)))(
             f"[launcher] island state store: {uri}: {type(error).__name__}: {error}"[:400])
         return None
-    return None if objects is None else IslandStateStore(objects, log=log)
+    return None if objects is None else IslandStateStore(objects, log=log, background=background, fence=fence)
 
 
 @dataclass(frozen=True)
