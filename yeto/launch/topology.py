@@ -146,6 +146,46 @@ def island_fabric(args, spec) -> str:
                             network_tier=getattr(args, "rl_island_network_tier", "auto") or "auto")
 
 
+def _tcp_reason(args, spec) -> str:
+    """Why :func:`island_fabric` gave a multi-node cloud island no fabric (for the note)."""
+    if spec.cloud in MULTINODE_IB_CLOUDS:
+        return ""
+    if (getattr(args, "rl_island_network_tier", "auto") or "auto") == "none":
+        return "--rl-island-network-tier none orders no fabric tier"
+    best, shapes = _TIER_BEST_FABRIC.get(spec.cloud, (None, frozenset()))
+    if best is None:
+        return f"yeto orders no IB or EFA tier on {spec.cloud}"
+    offered = ", ".join(f"{gpu}:{n}" for gpu, n in sorted(shapes))
+    return f"{spec.cloud} offers {best.upper()} for {offered} only"
+
+
+def fabric_bandwidth_notes(args, specs) -> list[str]:
+    """The dry-run notes for multi-node trainer islands whose nodes talk over TCP: NCCL runs
+    over sockets there, so cross-node bandwidth is limited (an all-reduce per step crosses
+    it). A cloud island: :func:`island_fabric` gave ``tcp``. An ``ssh:`` island: an
+    inventory trainer node declares ``fabric: tcp``. Islands on IB, RoCE, RDMA or EFA, and
+    one-node islands, get no note."""
+    notes = []
+    for learner_id, spec in enumerate(specs):
+        if spec.num_nodes <= 1:
+            continue
+        if spec.cloud == "ssh":
+            from .node_inventory import island_nodes
+
+            nodes = island_nodes(list(getattr(args, "rl_node_inventory_nodes", None) or ()), "trainer")
+            tcp = sorted(n.name for n in nodes if n.fabric == FABRIC_TCP)
+            if not tcp:
+                continue
+            why = f"inventory trainer node(s) {tcp} declare fabric: tcp"
+        else:
+            if island_fabric(args, spec) != FABRIC_TCP:
+                continue
+            why = _tcp_reason(args, spec)
+        notes.append(f"[preflight] note: island {learner_id} ({spec}) runs NCCL between its {spec.num_nodes} "
+                     f"nodes over TCP sockets (no IB or EFA: {why}); cross-node bandwidth is limited")
+    return notes
+
+
 def multinode_env_prelude(cloud: str, num_nodes: int, *, fabric: str | None = None) -> str:
     """Shell exports every island node runs before Ray starts; "" on one node.
 

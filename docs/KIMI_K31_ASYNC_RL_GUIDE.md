@@ -1199,6 +1199,44 @@ measured p90 if it is longer.
    re-verified on this Miles lineage. The run's `rl_engine_selected` record
    lists these two under `rl/unverified_mechanisms`. Without their entries the
    launch is refused.
+
+   **Why these two are still unverified, and what it means for your run.**
+   "Unverified" means that no GPU run on this Miles lineage has yet shown the
+   mechanism taking effect in the way the declaration requires. It does not
+   mean that a problem is known. The mechanisms run exactly as configured, and
+   your run's behaviour, metrics and checkpoints are the same as they would be
+   with the mechanisms declared. The only visible effect is the
+   `rl/unverified_mechanisms` field of the run record. What is missing:
+   - `features:rollout_logprobs_as_old`: the trainer takes the sampler's
+     log-probs as the old policy. Runs at context parallel 1 show them aligned
+     with the trainer's own log-probs: step-0 `train/train_rollout_logprob_abs_diff`
+     of 0.028 (SGLang sampler) and 0.077 (MI355X vLLM sampler). This lineage
+     changed how rollout log-probs are split across context-parallel ranks, and
+     the only run at context parallel 2 replayed recorded rollouts, so its
+     value (12.4) says nothing about the split.
+   - `loss_aggregations:token`: the per-token loss (`calculate_per_token_loss`)
+     is configured on every K3.1 run, but no paired run has compared its
+     `grad_norm` with a per-sample aggregation on the same batch on this
+     lineage.
+
+   **Collecting the evidence on your next run.** Nothing in the run files
+   changes:
+   - Keep the trainer log and the metrics of the first rounds. The evidence for
+     `features:rollout_logprobs_as_old` is `train/train_rollout_logprob_abs_diff`
+     at step 0, before the first update, next to the Miles commit and the
+     context-parallel size the run reports at start. A value close to the
+     context-parallel-1 runs above confirms the split. Send the value, the
+     commit and the run date to your yeto contact.
+   - `loss_aggregations:token` cannot come from the production run alone.
+     Score centering refuses any aggregation but per-token, so the pair needs
+     two short runs (2 steps each) with the default policy loss, on the same
+     nodes, data and seed. Their `--rl-algorithm-spec` files differ only in
+     `loss.aggregation` (`"token"` against `"default"`). The two step-0
+     `grad_norm` values must differ. The pair can run on the reserved trainer
+     nodes right before or after the production run.
+   Once a run of this kind has been recorded, the mechanisms are declared on
+   the pinned commit, and their entries become no-ops like the other two. Keep
+   the entries as shipped until then.
 7. `budget.wall_h`, `budget.usd` and `elastic.max_run_spend_ucr` are set, and
    the prices (`trainer.usd_per_h` 408 for 6 x 8 B300, `budget.nc_usd_per_h`
    24 in the template) are your contracted rates: `budget.usd` is checked

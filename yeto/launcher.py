@@ -1741,6 +1741,10 @@ def dry_run_plan(args) -> dict:
         from .launch.downlink_demand import downlink_preflight
 
         downlink_preflight(args)  # a WARNING only; not in the plan (byte-locked)
+        from .launch.topology import fabric_bandwidth_notes
+
+        for note in fabric_bandwidth_notes(args, specs):  # notes only; not in the plan
+            print(note, flush=True)
     from .launch.model_check import preflight_trainer_model
 
     trainer_model = preflight_trainer_model(args)  # ModelCheckError (a ValueError): rejected
