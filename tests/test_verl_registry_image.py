@@ -21,6 +21,14 @@ from yeto.rl.adapters.verl import image, launch_flags, pins
 
 ROOT = Path(__file__).resolve().parents[1]
 DIGEST_RE = re.compile(r"docker:[^\s@]+/yeto-verl-fsdp@sha256:[0-9a-f]{64}")
+REGISTRY = "registry.example/mirror"
+IMG = f"docker:{REGISTRY}/yeto-verl-fsdp@sha256:{pins.VERL_REGISTRY_DIGEST}"
+
+
+@pytest.fixture(autouse=True)
+def _verl_registry(monkeypatch):
+    """The operator's verl registry (there is no default); tests of the unset case delete it."""
+    monkeypatch.setenv(pins.VERL_REGISTRY_ENV, REGISTRY)
 
 
 class _Recorder:
@@ -79,8 +87,8 @@ def test_the_pinned_registry_image_was_built_from_this_recipe():
     assert pins.VERL_REGISTRY_TAG == f"fsdp-{pins.VERL_COMMIT[:8]}-{image.recipe_sha256()[:8]}"
     assert f"ai.yeto.verl.commit={pins.VERL_COMMIT}" in image.dockerfile()
     assert f"ai.yeto.verl.recipe_sha256={image.recipe_sha256()}" in image.dockerfile()
-    assert DIGEST_RE.fullmatch(pins.VERL_REGISTRY_IMAGE)
-    assert pins.VERL_REGISTRY_IMAGE.endswith("@sha256:" + pins.VERL_REGISTRY_DIGEST)
+    assert DIGEST_RE.fullmatch(IMG)
+    assert IMG.endswith("@sha256:" + pins.VERL_REGISTRY_DIGEST)
 
 
 def test_the_recipe_hash_follows_the_patch_file(monkeypatch, tmp_path):
@@ -133,19 +141,55 @@ def test_the_modal_call_chain_is_unchanged():
         ("run_commands", (patch + " --profile megatron",)), ("env", image.image_env())]
 
 
-def test_the_registry_image_follows_the_image_registry(monkeypatch):
-    from yeto.rl.image_registry import pinned_image
+def test_the_registry_image_is_on_the_registry_the_operator_names(monkeypatch):
+    assert pins.verl_registry_image() == IMG
+    monkeypatch.setenv(pins.VERL_REGISTRY_ENV, "111122223333.dkr.ecr.us-east-1.amazonaws.com/")
+    assert pins.verl_registry_image() == (
+        f"docker:111122223333.dkr.ecr.us-east-1.amazonaws.com/yeto-verl-fsdp@sha256:{pins.VERL_REGISTRY_DIGEST}")
+    monkeypatch.delenv(pins.VERL_REGISTRY_ENV)
+    monkeypatch.setenv("YETO_IMAGE_REGISTRY", "ghcr.io/somewhere")  # the Miles images' registry is not used
+    assert pins.verl_registry_image() is None and pins.registry_image_for(pins.VERL_IMAGE) is None
+    assert pins.is_verl_registry_image(IMG) and pins.is_verl_registry_image(IMG.removeprefix("docker:"))
+    assert not pins.is_verl_registry_image(IMG.replace(pins.VERL_REGISTRY_DIGEST, "0" * 64))
+    assert not pins.is_verl_registry_image("docker:x/other@sha256:" + pins.VERL_REGISTRY_DIGEST)
 
-    monkeypatch.setenv("YETO_IMAGE_REGISTRY", "registry.example/mirror/")
-    assert pinned_image(pins.VERL_REGISTRY_REPOSITORY, pins.VERL_REGISTRY_DIGEST) == (
-        f"docker:registry.example/mirror/yeto-verl-fsdp@sha256:{pins.VERL_REGISTRY_DIGEST}")
+
+def test_without_a_registry_a_pulling_verl_island_is_refused_before_any_order(monkeypatch):
+    from yeto.launch import ssh_trainer_island as sti
+    from yeto.launch.rl_backend import pulled_rl_image
+    from yeto.launch.trainer_image_check import check_trainer_images
+
+    monkeypatch.delenv(pins.VERL_REGISTRY_ENV)
+    pulled = pulled_rl_image(_rl(), "aws")
+    assert pulled["image"] is None and pins.VERL_REGISTRY_ENV in pulled["problem"]
+    assert "dkr.ecr" in pulled["problem"] and "ghcr.io/<owner>" in pulled["problem"]
+    for check in ("on", "off"):  # a configuration problem, not a registry question: refused either way
+        monkeypatch.setenv("YETO_IMAGE_MANIFEST_CHECK", check)
+        with pytest.raises(ValueError, match=r"--gpu island 0 .*YETO_VERL_IMAGE_REGISTRY"):
+            check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO())
+    assert check_trainer_images(_verl_args(), _sky_specs("modal:1xh100"), out=io.StringIO()) == []  # Modal builds
+    with pytest.raises(sti.SshIslandError, match="YETO_VERL_IMAGE_REGISTRY"):
+        sti.run_image(_rl(), [SimpleNamespace(runtime="docker", image=None, name="n0")])
+
+
+def test_the_dry_run_of_a_sky_verl_island_without_a_registry_fails(_sky_launch, monkeypatch):
+    import yeto.launcher as launcher
+
+    monkeypatch.delenv(pins.VERL_REGISTRY_ENV)
+    args = _sky_launch("aws:1xa100@us-west-2")
+    launcher._prepare_rl_args(args)
+    with pytest.raises(ValueError, match="YETO_VERL_IMAGE_REGISTRY"):
+        launcher.dry_run_plan(args)
+    args = _sky_launch("modal:1xa100")
+    launcher._prepare_rl_args(args)
+    assert launcher.dry_run_plan(args)["island_requests"]  # a Modal island needs no registry
 
 
 def test_the_registry_image_belongs_to_the_verl_backend():
     from yeto.rl.engine import island_engine
 
-    assert island_engine.infer_backend(pins.VERL_REGISTRY_IMAGE) == "verl"
-    assert island_engine.image_ok(SimpleNamespace(rl_image=pins.VERL_REGISTRY_IMAGE, rl_backend="verl"))
+    assert island_engine.infer_backend(IMG) == "verl"
+    assert island_engine.image_ok(SimpleNamespace(rl_image=IMG, rl_backend="verl"))
 
 
 def _rl(backend="verl", image_ref=None):
@@ -157,12 +201,12 @@ def test_a_sky_island_pulls_the_registry_image_in_place_of_verl_build():
     from yeto.launch.rl_backend import pulled_rl_image
 
     for cloud in ("aws", "nebius", "gcp"):
-        assert pulled_rl_image(_rl(), cloud) == {"image": pins.VERL_REGISTRY_IMAGE, "tag": pins.VERL_REGISTRY_TAG,
+        assert pulled_rl_image(_rl(), cloud) == {"image": IMG, "tag": pins.VERL_REGISTRY_TAG,
                                                  "replaces": pins.VERL_IMAGE}
     assert pulled_rl_image(_rl(), "modal") is None  # Modal builds verl-build itself
     assert pulled_rl_image(_rl(), "ssh") is None  # ssh_trainer_island.run_image decides (refuses)
     assert pulled_rl_image(_rl(image_ref=pins.VERL_MEGATRON_IMAGE), "aws") is None  # no registry variant
-    assert pulled_rl_image(_rl(image_ref=pins.VERL_REGISTRY_IMAGE), "aws") is None  # used as given
+    assert pulled_rl_image(_rl(image_ref=IMG), "aws") is None  # used as given
     from yeto.rl import default_rl_image
 
     assert pulled_rl_image(_rl("miles", default_rl_image()), "aws") is None  # Miles: unchanged
@@ -174,15 +218,15 @@ def test_an_ssh_island_still_refuses_verl_build_and_names_the_registry_image():
     nodes = [SimpleNamespace(runtime="docker", image=None, name="n0")]
     with pytest.raises(sti.SshIslandError, match="builds on Modal") as err:
         sti.run_image(_rl(), nodes)
-    assert pins.VERL_REGISTRY_IMAGE in str(err.value) and pins.VERL_REGISTRY_TAG in str(err.value)
-    assert sti.run_image(_rl(image_ref=pins.VERL_REGISTRY_IMAGE), nodes) == pins.VERL_REGISTRY_IMAGE.removeprefix(
+    assert IMG in str(err.value) and pins.VERL_REGISTRY_TAG in str(err.value)
+    assert sti.run_image(_rl(image_ref=IMG), nodes) == IMG.removeprefix(
         "docker:")
 
 
 def test_the_launch_flags_offer_the_registry_image_for_the_pinned_build_only():
-    assert launch_flags.pulled_image(pins.VERL_IMAGE)["image"] == pins.VERL_REGISTRY_IMAGE
+    assert launch_flags.pulled_image(pins.VERL_IMAGE)["image"] == IMG
     assert launch_flags.pulled_image("verl-build:" + "b" * 40) is None
-    assert launch_flags.pulled_image(pins.VERL_REGISTRY_IMAGE) is None
+    assert launch_flags.pulled_image(IMG) is None
 
 
 # --- 5.1: the plan of a sky island --------------------------------------------------------------
@@ -203,9 +247,9 @@ def test_the_sky_island_plan_names_the_registry_image_tag(_sky_launch, capsys):
     launcher._prepare_rl_args(args)
     assert args.rl_image == pins.VERL_IMAGE
     (entry,) = launcher.dry_run_plan(args)["island_requests"]
-    assert entry["trainer_image"] == {"image": pins.VERL_REGISTRY_IMAGE, "tag": pins.VERL_REGISTRY_TAG,
+    assert entry["trainer_image"] == {"image": IMG, "tag": pins.VERL_REGISTRY_TAG,
                                       "replaces": pins.VERL_IMAGE}
-    assert f"pulls {pins.VERL_REGISTRY_IMAGE} (tag {pins.VERL_REGISTRY_TAG})" in capsys.readouterr().err
+    assert f"pulls {IMG} (tag {pins.VERL_REGISTRY_TAG})" in capsys.readouterr().err
 
     args = _sky_launch("modal:1xa100")
     launcher._prepare_rl_args(args)
@@ -222,7 +266,7 @@ def test_the_sky_island_task_runs_in_the_registry_image(_sky_launch):
     launcher._prepare_rl_args(args)
     (spec,) = parse_gpu_spec(args.gpu)
     task = launcher._island_task(make_miles_island_task, args, spec, 0, 1, "$SYNCER_ADDR", {})
-    assert task.resources.image_id == pins.VERL_REGISTRY_IMAGE
+    assert task.resources.image_id == IMG
     assert args.rl_image == pins.VERL_IMAGE  # the run's own args are untouched
 
 
@@ -233,17 +277,15 @@ def test_a_private_registry_image_logs_in_through_the_sky_task_secrets_only(_sky
     import yeto.launcher as launcher
     from yeto.gpu_spec import parse_gpu_spec
     from yeto.launch.rl_island_task import make_miles_island_task
-    from yeto.rl.image_registry import image_registry
-
     password = "registry-password-SENTINEL-0123456789"
     monkeypatch.setenv("SKYPILOT_DOCKER_USERNAME", "puller")
     monkeypatch.setenv("SKYPILOT_DOCKER_PASSWORD", password)
-    monkeypatch.setenv("SKYPILOT_DOCKER_SERVER", image_registry().split("/", 1)[0])
+    monkeypatch.setenv("SKYPILOT_DOCKER_SERVER", REGISTRY.split("/", 1)[0])
     args = _sky_launch("aws:1xa100@us-west-2")
     launcher._prepare_rl_args(args)
     (spec,) = parse_gpu_spec(args.gpu)
     task = launcher._island_task(make_miles_island_task, args, spec, 0, 1, "$SYNCER_ADDR", {})
-    assert task.resources.image_id == pins.VERL_REGISTRY_IMAGE
+    assert task.resources.image_id == IMG
     assert task.secrets["SKYPILOT_DOCKER_PASSWORD"] == password
     assert task.secrets["SKYPILOT_DOCKER_USERNAME"] == "puller"
     texts = "\n".join(str(getattr(task, a, "") or "") for a in ("setup", "run", "envs", "file_mounts"))
@@ -418,34 +460,32 @@ def test_a_sky_verl_island_refuses_an_image_its_registry_does_not_have(monkeypat
         return answers[ref]
 
     monkeypatch.setattr(im, "manifest_status", status)
-    answers = {pins.VERL_REGISTRY_IMAGE: (im.MISSING, "reg has no manifest")}
+    answers = {IMG: (im.MISSING, "reg has no manifest")}
     with pytest.raises(ValueError, match=r"--gpu island 0 .*trainer image .*no manifest.*YETO_IMAGE_REGISTRY"):
         check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO())
-    answers[pins.VERL_REGISTRY_IMAGE] = (im.DENIED, "private")
+    answers[IMG] = (im.DENIED, "private")
     with pytest.raises(ValueError, match="SKYPILOT_DOCKER_USERNAME"):
         check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO())
-    answers[pins.VERL_REGISTRY_IMAGE] = (im.UNKNOWN, "not reached")
+    answers[IMG] = (im.UNKNOWN, "not reached")
     (warning,) = check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO())
     assert "not checked: not reached" in warning
-    answers[pins.VERL_REGISTRY_IMAGE] = (im.PRESENT, "ok")
+    answers[IMG] = (im.PRESENT, "ok")
     assert check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO()) == []
     asked.clear()
     assert check_trainer_images(_verl_args(), _sky_specs("modal:1xh100"), out=io.StringIO()) == []
     assert asked == []  # a Modal island builds verl-build: no registry asked
     monkeypatch.setenv(im.CHECK_ENV, "off")
-    answers[pins.VERL_REGISTRY_IMAGE] = (im.MISSING, "x")
+    answers[IMG] = (im.MISSING, "x")
     assert check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO()) == []
 
 
 def test_the_manifest_check_uses_the_login_the_island_pulls_with(monkeypatch):
     from yeto.launch import image_manifest as im
     from yeto.launch.trainer_image_check import check_trainer_images
-    from yeto.rl.image_registry import image_registry
-
     monkeypatch.setenv(im.CHECK_ENV, "on")
     monkeypatch.setenv("SKYPILOT_DOCKER_USERNAME", "puller")
     monkeypatch.setenv("SKYPILOT_DOCKER_PASSWORD", "pw")
-    monkeypatch.setenv("SKYPILOT_DOCKER_SERVER", image_registry().split("/", 1)[0])
+    monkeypatch.setenv("SKYPILOT_DOCKER_SERVER", REGISTRY.split("/", 1)[0])
     asked = []
     monkeypatch.setattr(im, "manifest_status", lambda ref, login=None, **kw: asked.append(login) or (im.PRESENT, ""))
     check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2", "nebius:1xh100"), out=io.StringIO())

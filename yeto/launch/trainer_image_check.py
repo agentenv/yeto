@@ -270,6 +270,8 @@ def _pulled_image(args: Any, cloud: str | None) -> str | None:
     from .rl_backend import _NO_PULL_CLOUDS, pulled_rl_image
 
     pulled = pulled_rl_image(args, cloud)
+    if pulled is not None and pulled.get("problem"):
+        raise ValueError(pulled["problem"])
     if pulled is not None:
         return pulled["image"]
     image = str(getattr(args, "rl_image", None) or "")
@@ -289,12 +291,20 @@ def check_pulled_images(args: Any, specs: Any, samplers: Any = (), *, out: Any =
     from . import image_manifest as im
     from .credentials import registry_login_for
 
+    images = {}
+    for m, spec in enumerate(specs):
+        if m in samplers:
+            continue
+        try:  # a configuration problem (no registry named) is refused with the check on or off
+            images[m] = _pulled_image(args, getattr(spec, "cloud", None))
+        except ValueError as error:
+            raise ValueError(f"--gpu island {m} ({spec}): {error}") from None
     if not im.enabled():
         return []
     found: dict[str, tuple[str, str]] = {}
     warnings = []
     for m, spec in enumerate(specs):
-        image = None if m in samplers else _pulled_image(args, getattr(spec, "cloud", None))
+        image = images.get(m)
         if image is None:
             continue
         if image not in found:

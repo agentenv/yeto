@@ -270,6 +270,8 @@ def _pulled_image_args(iargs, spec):
     pulled = pulled_rl_image(iargs, getattr(spec, "cloud", None))
     if pulled is None:
         return iargs
+    if pulled.get("problem"):
+        raise ValueError(f"{spec.cloud} trainer island: {pulled['problem']}")
     import copy
 
     print(f"[launcher] {spec.cloud} trainer island pulls {pulled['image']} (tag {pulled['tag']}): the "

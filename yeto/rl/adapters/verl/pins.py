@@ -9,8 +9,6 @@ from the fork's own ``uv.lock`` (``uv sync --frozen --all-packages --extra vllm
 import os
 from pathlib import Path
 
-from yeto.rl.image_registry import pinned_image
-
 VERL_REPOSITORY = "https://github.com/michaellchung/verl"
 VERL_COMMIT = "acad9875a8bdfc81afbcb0a50d146b2630f44093"
 VERL_BASE_IMAGE = "nvidia/cuda:13.0.2-devel-ubuntu24.04"
@@ -89,30 +87,71 @@ VERL_IMAGE = f"verl-build:{VERL_COMMIT}"
 # with docker and pushed under a fixed tag, for trainer islands that pull an image
 # instead of building on Modal: a sky island (AWS, Nebius, ...) and an ssh: island's
 # docker nodes. docker/verl-fsdp/Dockerfile is the recipe as text and
-# docker/verl-fsdp/build.sh pushes it; the repository prefix follows
-# yeto.rl.image_registry (YETO_IMAGE_REGISTRY), as for the Miles images, and the
-# digest names the bytes. VERL_REGISTRY_RECIPE_SHA256 is image.recipe_sha256() at
-# build time: a test fails when the recipe (or patch_verl.py) changes without a
-# rebuild, so the registry image and the Modal image cannot drift apart.
-# Built 2026-11-25 with docker/verl-fsdp/build.sh --push (linux/amd64, docker 28),
-# tag fsdp-acad9875-a3aa3c94, about 8.6 GB; read back from the pushed image: verl at
+# docker/verl-fsdp/build.sh pushes it. VERL_REGISTRY_RECIPE_SHA256 is
+# image.recipe_sha256() at build time: a test fails when the recipe (or
+# patch_verl.py) changes without a rebuild, so the registry image and the Modal
+# image cannot drift apart. The digest names the bytes.
+#
+# There is no default registry: no registry yeto ships with carries this digest.
+# The operator names the registry (or registry/organization) that holds it in
+# YETO_VERL_IMAGE_REGISTRY, e.g. an ECR registry
+# (<account>.dkr.ecr.<region>.amazonaws.com) or a GHCR owner (ghcr.io/<owner>);
+# without it a verl island that has to pull its image is refused before anything is
+# ordered (launch.trainer_image_check), and the launch preflight asks that registry
+# for the manifest (launch.image_manifest) with the login the island pulls with.
+# Built 2026-11-25 with docker/verl-fsdp/build.sh --push (linux/amd64, docker 28) into
+# a private ECR registry, tag fsdp-acad9875-a3aa3c94, about 8.6 GB (an earlier build of
+# the same recipe pushed elsewhere has another digest and is not this pin: a registry
+# serves this pin only with these bytes); read back from the pushed image: verl at
 # VERL_COMMIT, torch 2.13.0+cu130, vllm 0.29.0, transformers 5.12.1, peft 0.19.1 (the
 # EXPECTED_VERSIONS above), boto3 1.43.104, the patch_verl hooks in place, and the venv
-# first on PATH in a login shell too. Like the Miles images the default registry
-# (ghcr.io/agentenv) needs a mirror of this digest, and a private package needs a
-# registry login (--rl-image-private, or SKYPILOT_DOCKER_USERNAME/PASSWORD/SERVER).
+# first on PATH in a login shell too.
+VERL_REGISTRY_ENV = "YETO_VERL_IMAGE_REGISTRY"
 VERL_REGISTRY_REPOSITORY = "yeto-verl-fsdp"
 VERL_REGISTRY_RECIPE_SHA256 = "a3aa3c94ebb9301a760e5e215defbf6c52c0d2380bcc895b7d5e7c451c4a7f9b"
 VERL_REGISTRY_TAG = f"fsdp-{VERL_COMMIT[:8]}-{VERL_REGISTRY_RECIPE_SHA256[:8]}"
-VERL_REGISTRY_DIGEST = "df8a125ee9a3e5291f36a2cd06d2410af00814a757d160f6e9ff1e9cb1d25714"
-VERL_REGISTRY_IMAGE = pinned_image(VERL_REGISTRY_REPOSITORY, VERL_REGISTRY_DIGEST)
+VERL_REGISTRY_DIGEST = "5557c80fa3a5df13d5ba80b220db481bd81ccaed6444f9763f32e54b3e95f10c"
+VERL_REGISTRY_EXAMPLES = ("<account>.dkr.ecr.<region>.amazonaws.com", "ghcr.io/<owner>")
 
 
-def registry_image_for(rl_image: str | None) -> str | None:
+def verl_registry(environ=None) -> str | None:
+    """The registry (``host[/organization]``) that carries the verl registry image:
+    ``$YETO_VERL_IMAGE_REGISTRY``; None when it is not set (there is no default)."""
+    value = (os.environ if environ is None else environ).get(VERL_REGISTRY_ENV, "").strip().rstrip("/")
+    return value.removeprefix("docker:") or None
+
+
+def verl_registry_image(environ=None) -> str | None:
+    """``docker:<registry>/yeto-verl-fsdp@sha256:<digest>`` on :func:`verl_registry`;
+    None when no registry is configured."""
+    registry = verl_registry(environ)
+    return f"docker:{registry}/{VERL_REGISTRY_REPOSITORY}@sha256:{VERL_REGISTRY_DIGEST}" if registry else None
+
+
+def is_verl_registry_image(rl_image: str | None) -> bool:
+    """``rl_image`` names the pinned verl registry image, on any registry."""
+    name, sep, digest = str(rl_image or "").removeprefix("docker:").partition("@")
+    return bool(sep) and digest == f"sha256:{VERL_REGISTRY_DIGEST}" and (
+        name.rsplit("/", 1)[-1].split(":", 1)[0] == VERL_REGISTRY_REPOSITORY)
+
+
+def registry_image_for(rl_image: str | None, environ=None) -> str | None:
     """The registry image that carries the same pin and recipe as the Modal-built
-    ``rl_image`` (``verl-build:<VERL_COMMIT>`` -> VERL_REGISTRY_IMAGE); None for any
-    other image (the Megatron variant has no registry image)."""
-    return VERL_REGISTRY_IMAGE if rl_image == VERL_IMAGE else None
+    ``rl_image`` (``verl-build:<VERL_COMMIT>`` -> :func:`verl_registry_image`); None for
+    any other image (the Megatron variant has no registry image) or when no registry
+    is configured."""
+    return verl_registry_image(environ) if rl_image == VERL_IMAGE else None
+
+
+def registry_missing_problem() -> str:
+    """What to set when a verl island has to pull its image and no registry is named."""
+    examples = " or ".join(f"{VERL_REGISTRY_ENV}={e}" for e in VERL_REGISTRY_EXAMPLES)
+    return (f"this verl trainer island pulls the registry image {VERL_REGISTRY_REPOSITORY}@sha256:"
+            f"{VERL_REGISTRY_DIGEST} (tag {VERL_REGISTRY_TAG}, the recipe of {VERL_IMAGE}) and no registry that "
+            f"carries it is configured: set {examples} (docker/verl-fsdp/build.sh builds and pushes it; a "
+            "private registry also needs SKYPILOT_DOCKER_USERNAME / SKYPILOT_DOCKER_PASSWORD / "
+            "SKYPILOT_DOCKER_SERVER), or pass --rl-image docker:<registry>/"
+            f"{VERL_REGISTRY_REPOSITORY}@sha256:{VERL_REGISTRY_DIGEST}")
 
 
 # --- cards (fleet-verl-trainer-islands 5.2) ------------------------------------

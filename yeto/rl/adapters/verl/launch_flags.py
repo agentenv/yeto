@@ -28,9 +28,13 @@ _IMAGE = re.compile(r"verl(?:-megatron)?-build:(?P<commit>[0-9a-f]{40})")
 
 def rl_image_ok(rl_image: str) -> bool:
     """``verl-build:<pinned commit>`` or ``verl-megatron-build:<pinned commit>``
-    (Modal-built, see ``image``); other commits are refused."""
+    (Modal-built, see ``image``), or the pinned registry image of that recipe on any
+    registry (``<registry>/yeto-verl-fsdp@sha256:<pinned digest>``, pins); other
+    commits are refused."""
+    from .pins import is_verl_registry_image
+
     match = _IMAGE.fullmatch(rl_image or "")
-    return bool(match) and match["commit"] == VERL_COMMIT
+    return (bool(match) and match["commit"] == VERL_COMMIT) or is_verl_registry_image(rl_image)
 
 
 def image_pin_problem(rl_image: str) -> str | None:
@@ -48,13 +52,18 @@ def image_pin_problem(rl_image: str) -> str | None:
 
 def pulled_image(rl_image: str) -> dict | None:
     """The registry image an island that pulls its image (a sky island) runs in place
-    of the Modal-built ``verl-build:<pinned commit>``: the same pin and recipe
-    (pins.VERL_REGISTRY_IMAGE). None for any other image (an explicit registry
-    image is used as given; the Megatron variant has no registry image)."""
-    from .pins import VERL_REGISTRY_TAG, registry_image_for
+    of the Modal-built ``verl-build:<pinned commit>``: the same pin and recipe on the
+    registry ``$YETO_VERL_IMAGE_REGISTRY`` names. ``problem`` (and no ``image``) when no
+    registry is configured: there is no default. None for any other image (an explicit
+    registry image is used as given; the Megatron variant has no registry image)."""
+    from .pins import VERL_REGISTRY_TAG, registry_image_for, registry_missing_problem
 
+    if rl_image != VERL_IMAGE:
+        return None
     image = registry_image_for(rl_image)
-    return {"image": image, "tag": VERL_REGISTRY_TAG, "replaces": rl_image} if image else None
+    if image is None:
+        return {"image": None, "tag": VERL_REGISTRY_TAG, "replaces": rl_image, "problem": registry_missing_problem()}
+    return {"image": image, "tag": VERL_REGISTRY_TAG, "replaces": rl_image}
 
 
 def bundle_map_flag(bundle_map: Mapping[str, Sequence[int]]) -> str:
