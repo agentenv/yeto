@@ -447,7 +447,11 @@ class _Embedding(torch.nn.Module):
 
 
 def _recompute_forward(chunk, tokens, n_local):
-    """Embedding, then every layer's experts under a reentrant checkpoint (Megatron full recompute)."""
+    """Embedding, then every layer's experts under a reentrant checkpoint (Megatron full recompute).
+
+    The experts are SwiGLU (``silu(gate) * up``, as Megatron's MoE experts): every weight gets a nonzero
+    gradient. A ReLU of half of fc1 left an expert with no active unit on the 4 tokens for some random
+    weights (about 1 in 400 RNG states), so its fc1 and fc2 gradients were exactly zero."""
 
     hidden = chunk.embedding(tokens)
     for block in chunk.decoder.layers:
@@ -456,8 +460,9 @@ def _recompute_forward(chunk, tokens, n_local):
         def layer(h, experts=experts):
             out = h
             for i in range(n_local):
-                up = h @ getattr(experts.linear_fc1, f"weight{i}").t()
-                out = out + torch.relu(up[..., :FFN]) @ getattr(experts.linear_fc2, f"weight{i}").t()
+                gate_up = h @ getattr(experts.linear_fc1, f"weight{i}").t()
+                act = torch.nn.functional.silu(gate_up[..., :FFN]) * gate_up[..., FFN:]
+                out = out + act @ getattr(experts.linear_fc2, f"weight{i}").t()
             return out
 
         hidden = torch.utils.checkpoint.checkpoint(layer, hidden, use_reentrant=True)
@@ -465,6 +470,13 @@ def _recompute_forward(chunk, tokens, n_local):
 
 
 def test_selected_experts_get_gradients_under_full_recompute(monkeypatch):
+    # its own RNG stream: the weights neither depend on what earlier tests drew nor shift later tests
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        _selected_experts_get_gradients_under_full_recompute(monkeypatch)
+
+
+def _selected_experts_get_gradients_under_full_recompute(monkeypatch):
     structure = STRUCTURES["qwen3_moe"]
     selection = _selection(structure)
     n_local = selection.num_experts // structure["ep"]
