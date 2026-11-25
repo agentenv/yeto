@@ -1148,7 +1148,9 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert "--tito-model deepseekv4" in task.run
     assert "--tito-allowed-append-roles tool user" in task.run
     assert task.num_nodes == 2
-    assert task.resources.image_id == args.rl_image
+    from yeto.launch.trainer_image_check import sky_pull_image
+
+    assert task.resources.image_id == sky_pull_image(args.rl_image)  # a pin's overlay-safe repack on a sky VM
     assert task.resources.network_tier == "best"
     assert list(task.storage_mounts) == ["~/yeto-rl"]
     storage = task.storage_mounts["~/yeto-rl"]

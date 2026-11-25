@@ -54,12 +54,15 @@ def test_island_task_uses_baked_image_dict(monkeypatch):
 
     args = _cli(["--gpu", "nebius:1xl40s@eu-north1"])
     _prepare_rl_args(args)
-    digest = "sha256:" + args.rl_image.rsplit("@sha256:", 1)[1]
+    from yeto.launch.trainer_image_check import sky_pull_image
+
+    pulled = sky_pull_image(args.rl_image)  # the VM's docker pulls a pin's overlay-safe repack: bake that
+    digest = "sha256:" + pulled.rsplit("@sha256:", 1)[1]
     monkeypatch.setattr(yeto.rl, "NEBIUS_BAKED_IMAGES", {digest: {"eu-north1": "computeimage-x"}})
     task = _island_task(args, monkeypatch)
-    assert task.resources.image_id == {"eu-north1": "computeimage-x", "docker": args.rl_image}
+    assert task.resources.image_id == {"eu-north1": "computeimage-x", "docker": pulled}
     monkeypatch.setattr(yeto.rl, "NEBIUS_BAKED_IMAGES", {})
-    assert _island_task(args, monkeypatch).resources.image_id == args.rl_image
+    assert _island_task(args, monkeypatch).resources.image_id == pulled
 
 
 def test_model_store_uri_validation(capsys):

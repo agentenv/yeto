@@ -170,7 +170,12 @@ def test_rl_image_default_is_the_ports_image(monkeypatch):
     _prepare_rl_args(ports)
     assert ports.rl_image == MILES_NEXT_IMAGE
     assert "@sha256:" in ports.rl_image  # digest-pinned; the registry is YETO_IMAGE_REGISTRY (yeto.rl.image_registry)
-    assert _island_task(ports, monkeypatch).resources.image_id == MILES_NEXT_IMAGE
+    # a sky VM pulls the overlay-safe repack of the pin (bug 26: docker refuses 028e505d's layer 115)
+    from yeto.launch.trainer_image_check import sky_pull_image
+    from yeto.rl.adapters.miles.pins import MILES_K31_OVERLAYFIX_IMAGE
+
+    assert sky_pull_image(MILES_NEXT_IMAGE) == MILES_K31_OVERLAYFIX_IMAGE
+    assert _island_task(ports, monkeypatch).resources.image_id == MILES_K31_OVERLAYFIX_IMAGE
     explicit = "docker:example/miles@sha256:" + "e" * 64
     pinned = _cli(("--rl-engine", "ports", "--rl-image", explicit))
     _prepare_rl_args(pinned)

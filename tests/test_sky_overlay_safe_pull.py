@@ -87,3 +87,60 @@ def test_plan_entry_names_the_pulled_repack():
     assert _sky_overlay_swap(SimpleNamespace(rl_image=pins.MILES_K31_IMAGE), "modal") is None
     assert _sky_overlay_swap(SimpleNamespace(rl_image=pins.MILES_K31_NEXT9_IMAGE), "nebius") is None
     assert _sky_overlay_swap(SimpleNamespace(rl_image=None), "aws") is None
+
+
+# --- the launcher with fake sky / Modal backends (test_trainer_launch_render): no cloud ---
+from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: E402,F401  (fixtures)
+
+
+def _launch_args(gpu, image):
+    args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync", "--rl-image", image),
+                          gpu=gpu)
+    args.keep, args.recover_timeout, args.controller_poll = False, 0.0, 30.0
+    return args
+
+
+def test_the_dry_run_plan_names_the_repack_a_sky_vm_pulls(monkeypatch, capsys):
+    import yeto.launcher as launcher
+
+    monkeypatch.setenv("YETO_PREFLIGHT_MODEL", "off")
+    monkeypatch.setenv("YETO_SKY_SERVER_CHECK", "off")
+    args = _launch_args("aws:1xh100@us-west-2", pins.MILES_K31_IMAGE)
+    launcher._prepare_rl_args(args)
+    (entry,) = launcher.dry_run_plan(args)["island_requests"]
+    assert entry["overlay_safe_image"]["pinned"] == pins.MILES_K31_IMAGE
+    assert entry["overlay_safe_image"]["pulled"] == REPACK
+    args = _launch_args("modal:1xh100", pins.MILES_K31_IMAGE)
+    launcher._prepare_rl_args(args)
+    (entry,) = launcher.dry_run_plan(args)["island_requests"]
+    assert "overlay_safe_image" not in entry  # a Modal island's plan is unchanged
+    args = _launch_args("aws:1xh100@us-west-2", pins.MILES_K31_NEXT9_IMAGE)
+    launcher._prepare_rl_args(args)
+    (entry,) = launcher.dry_run_plan(args)["island_requests"]
+    assert "overlay_safe_image" not in entry  # an overlay-safe pin pulls as it is
+
+
+def test_the_launched_sky_task_pulls_the_repack(monkeypatch, tmp_path):
+    import sys
+
+    import yeto.launcher as launcher
+    from test_trainer_launch_render import _Provisioned, _setup
+
+    monkeypatch.setenv("YETO_PREFLIGHT_MODEL", "off")
+    monkeypatch.setenv("YETO_SKY_SERVER_CHECK", "off")
+    _setup(monkeypatch, tmp_path, [])
+    tasks = []
+
+    def launch(task, **kw):
+        tasks.append(task)
+        return f"rid-{kw.get('cluster_name')}"
+
+    sys.modules["sky"].launch = launch
+    try:
+        launcher.run(_launch_args("aws:1xh100@us-west-2", pins.MILES_K31_IMAGE))
+    except _Provisioned:
+        pass
+    (task,) = tasks
+    (res,) = list(task.resources) if isinstance(task.resources, (set, list, tuple)) else [task.resources]
+    image = getattr(res, "image_id", None) or getattr(res, "kwargs", {}).get("image_id")
+    assert REPACK.removeprefix("docker:") in str(image) and pins.MILES_K31_IMAGE.rpartition("@")[2] not in str(image)

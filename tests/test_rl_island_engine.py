@@ -215,7 +215,9 @@ def test_sky_island_task_runs_the_island_image(monkeypatch):
     images = [launcher._island_task(launcher.make_miles_island_task, args, spec, m, 2,
                                     "127.0.0.1:29400", {}).resources.image_id
               for m, spec in enumerate(specs)]
-    assert images == [args.rl_image, OTHER]
+    from yeto.launch.trainer_image_check import sky_pull_image
+
+    assert images == [sky_pull_image(args.rl_image), OTHER]  # a sky VM pulls a pin's overlay-safe repack
 
 
 def test_island_override_under_release_code_pack_is_refused():
