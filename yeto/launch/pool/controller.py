@@ -60,6 +60,7 @@ from .island_pool import READY, IslandPool, Member
 
 DEFAULT_STALL_S = 1800.0  # every ready sampler silent this long: the rollout stall alert
 DEFAULT_BLOCKED_S = 300.0  # a pool tick running this long: the pool is reported blocked
+_STATE_RANK = {"draining": 1, "gone": 2}  # member states a stale store copy may not undo
 RESTART_RESET_S = 600.0  # a worker that ran this long before it died: its restart backoff starts over
 
 _ACTIVE: list[RolloutController] = []
@@ -332,10 +333,11 @@ class RolloutController:
 
     def _restore_after_death(self, name: str, pool: IslandPool, control: Any) -> None:
         """A store pool whose worker died: the store copy replaces what a tick cut off may
-        have left in memory, and every member the memory holds that the store copy does not
-        (ordered after the last successful save: a save that failed, or the crash came
-        first) is kept, so no billed machine drops out of the pool; the result is saved at
-        once. The futures of background starts / releases are kept: they track threads
+        have left in memory, except a member the memory holds as draining or gone (released
+        after that save: never live again). Every member the memory holds that the store
+        copy does not (ordered after the last successful save: a save that failed, or the
+        crash came first) is kept, so no billed machine drops out of the pool; the result
+        is saved at once. The futures of background starts / releases are kept: they track threads
         still running (dropping them would start or release a member twice)."""
         held = {m.ticket: m for m in pool.members}
         try:
@@ -345,6 +347,10 @@ class RolloutController:
         except Exception as reload_error:  # noqa: BLE001 - the pool goes on with what it holds
             self.log(f"rollout: pool {name}: state not reloaded from the store ({reload_error!r})")
             return
+        for i, m in enumerate(pool.members):  # a member the memory saw drain or end after that save stays so
+            mine = held.get(m.ticket)
+            if mine is not None and _STATE_RANK.get(mine.state, 0) > _STATE_RANK.get(m.state, 0):
+                pool.members[i] = mine
         known = {m.ticket for m in pool.members}
         extra = [m for ticket, m in held.items() if ticket not in known]
         if extra:
@@ -517,13 +523,21 @@ class RolloutController:
         """Save a pool that is detached (its own save path skips nothing it must keep)."""
         pool = slot.pool
         control = getattr(pool, "control", None)
-        try:
-            if control is not None:
+        from .store_lock import LockLost, LockUnconfirmed  # noqa: PLC0415
+
+        if control is not None:
+            try:
                 control.state.save(pool.snapshot())
-            if slot.state_path is not None:
+            except (LockLost, LockUnconfirmed) as error:  # another controller took over: never a skipped close
+                self.log(f"rollout: detach: state of {pool.config.shard_base} not saved to the store ({error}); "
+                         "the controller that holds it now drives its members")
+            except Exception as error:  # noqa: BLE001 - the last tick's save holds
+                self.log(f"rollout: detach: state of {pool.config.shard_base} not saved: {error!r}")
+        if slot.state_path is not None:
+            try:
                 pool.save(slot.state_path)
-        except Exception as error:  # noqa: BLE001 - the last tick's save holds
-            self.log(f"rollout: detach: state of {pool.config.shard_base} not saved: {error!r}")
+            except Exception as error:  # noqa: BLE001
+                self.log(f"rollout: detach: local state of {pool.config.shard_base} not saved: {error!r}")
 
     # -- views
     def progress(self) -> int:

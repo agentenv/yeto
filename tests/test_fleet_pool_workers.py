@@ -448,3 +448,35 @@ def test_the_dashboard_warns_of_a_blocked_pool_until_its_tick_returns():
     assert [a["title"] for a in alerts.blocked_pools(reducer)] == ["pool modal blocked"]
     reducer.async_.pool.append({"event": "nc_elastic_pool_unblocked", "pool": "modal", "tick_s": 420})
     assert alerts.blocked_pools(reducer) == []
+
+
+def test_a_blocked_tick_that_returns_after_a_takeover_still_closes_the_slot():
+    """REV #755: the late save finds a higher token (LockLost, a BaseException); the slot still
+    closes and the banner names every member left, the late order included."""
+    client, clock = FakeS3(), Clock()
+    c, pool, control, provider, route, closed = _blocked_in_an_order(client, clock)
+    c.stop("test", join_s=0.2)
+    clock.t += 601
+    store_state.open_pool_control(_objects(client), "p", "p", clock=clock)  # the lease ran out: taken over
+    provider.gate.set()
+    assert _wait_for(lambda: closed)
+    assert closed[0] == sorted(provider.machines) and len(provider.machines) == 2
+
+
+def test_a_restart_never_brings_back_a_member_the_memory_saw_end():
+    client, clock = FakeS3(), Clock()
+    control = store_state.open_pool_control(_objects(client), "p", "p", clock=clock)
+    provider = FakeProvider("p", clock)
+    pool = _pool("p", provider, clock, control=control, target=1)
+    c = rc.RolloutController({"p": pool}, interval=0.02, log=lambda _m: None, pool_workers=True,
+                             restart_backoff_s=0, thread_cls=_ManualThread)
+    c.tick()
+    member = pool.live()[0]
+    member.state = GONE  # released after the last save that went through (not saved yet)
+    c.slots["p"].worker = _ManualThread(target=None, dead=True)
+    c.slots["p"].worker_error = RuntimeError("crash")
+    store_copy = store_state.read_state(_objects(client), "p")
+    assert [m["state"] for m in store_copy["members"]] != [GONE]  # the store copy still has it live
+    c.supervise()
+    assert [m.state for m in pool.members if m.ticket == member.ticket] == [GONE]
+    c.stop("test end")
