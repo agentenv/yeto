@@ -51,6 +51,7 @@ SUBCOMMANDS = (
     "cost",
     "cleanup",
     "breaker",
+    "island",
     "_reaper",
 )
 
@@ -1110,6 +1111,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .breakers.cli import add_parser as _add_breaker_parser
 
     _add_breaker_parser(sub)
+    from .island_cli import add_parser as _add_island_parser
+
+    _add_island_parser(sub)
     from .rl.model_registry.cli import add_model_parser as _add_model_parser
     from .rl.model_registry.cli import add_parser as _add_adapt_parser
 
@@ -2761,6 +2765,10 @@ def main(argv=None) -> int:
         from .rl.model_registry.cli import cmd_model
 
         return cmd_model(args)
+    if args.command == "island":
+        from .island_cli import main as island_main
+
+        return island_main(args)
     if args.command == "breaker":
         from .breakers.cli import main as breaker_main
 

@@ -228,6 +228,10 @@ def stop_key(island: int) -> str:
     return f"{STATE_DIR}/{int(island)}/STOP"
 
 
+def start_key(island: int) -> str:
+    return f"{STATE_DIR}/{int(island)}/START"
+
+
 def controller_identity() -> dict[str, Any]:
     """Who supervises: host, PID and a fencing token unique to this process."""
     return {"host": socket.gethostname(), "pid": os.getpid(), "token": uuid.uuid4().hex[:16],
@@ -306,6 +310,7 @@ class IslandStateStore:
         self._pending: dict[str, bytes] = {}
         self._watched: set[int] = set()
         self._stops: dict[int, dict[str, Any] | None] = {}
+        self._starts: dict[int, dict[str, Any] | None] = {}
         self._stops_due = True
         self._wake = threading.Event()
         self._idle = threading.Event()
@@ -350,6 +355,12 @@ class IslandStateStore:
         if strict and not isinstance(record, dict):
             raise IslandRecordsUnreadable(f"island {island}: its record is not an object")
         return record if isinstance(record, dict) else None
+
+    def cached(self, island: int) -> dict[str, Any] | None:
+        """Island ``island``'s record as this store last read or wrote it (no store call)."""
+        with self._lock:
+            record = self._records.get(int(island))
+        return None if record is None else dict(record)
 
     def read_all(self, islands: Iterable[int] | None = None, *, strict: bool = False) -> dict[int, dict[str, Any]]:
         """Every island's record: those of ``islands``, else every one the store lists.
@@ -547,6 +558,7 @@ class IslandStateStore:
             if watched and (due or time.monotonic() - stops_at >= self.stop_poll_s):
                 for k in watched:
                     self._stops[k] = self._read_stop(k)
+                    self._starts[k] = self._read_request(start_key(k))
                 stops_at = time.monotonic()
             with self._lock:
                 if not self._pending:
@@ -625,9 +637,30 @@ class IslandStateStore:
                 self._wake.set()
         return self._stops.get(k)
 
-    def _read_stop(self, island: int) -> dict[str, Any] | None:
+    def start_requested(self, island: int) -> dict[str, Any] | None:
+        """Island ``island``'s START request (``yeto island start``), else None; a background
+        store answers from the cache it keeps with the STOP's."""
+        if not self.background:
+            return self._read_request(start_key(island))
+        self.stop_requested(island)  # watches the island
+        return self._starts.get(int(island))
+
+    def request_start(self, island: int, reason: str, *, by: str = "operator") -> bool:
+        """Write island ``island``'s START request (True once written)."""
+        body = {"reason": str(reason), "by": str(by), "at": round(self.clock(), 3)}
         try:
-            raw = self.objects.read(stop_key(island))
+            self.objects.write(start_key(island), json.dumps(body, sort_keys=True).encode())
+            return True
+        except Exception as error:  # noqa: BLE001
+            self._warn("start write", error)
+            return False
+
+    def _read_stop(self, island: int) -> dict[str, Any] | None:
+        return self._read_request(stop_key(island))
+
+    def _read_request(self, key: str) -> dict[str, Any] | None:
+        try:
+            raw = self.objects.read(key)
         except Exception as error:  # noqa: BLE001
             self._warn("stop read", error)
             return None
@@ -651,17 +684,24 @@ class IslandStateStore:
 
     def clear_stop(self, island: int) -> bool:
         """Remove island ``island``'s STOP (True when none is left)."""
+        return self._delete(stop_key(island), "stop clear")
+
+    def clear_start(self, island: int) -> bool:
+        """Remove island ``island``'s START request (True when none is left)."""
+        return self._delete(start_key(island), "start clear")
+
+    def _delete(self, key: str, what: str) -> bool:
         try:
             delete = getattr(self.objects, "delete", None)
             if callable(delete):
-                delete(stop_key(island))
-            elif self.objects.read(stop_key(island)) is not None:
+                delete(key)
+            elif self.objects.read(key) is not None:
                 raise RuntimeError("this store cannot delete objects")
             return True
         except FileNotFoundError:
             return True
         except Exception as error:  # noqa: BLE001
-            self._warn("stop clear", error)
+            self._warn(what, error)
             return False
 
 
@@ -737,6 +777,12 @@ class FleetRecorder:
             return None
         return self.store.stop_requested(ref.island)
 
+    def start_requested(self, name: str) -> dict[str, Any] | None:
+        ref = self.islands.get(name)
+        if ref is None or ref.role == "sampler":
+            return None
+        return self.store.start_requested(ref.island)
+
 
 def handle_of(source: str, name: str, job_id: Any) -> dict[str, Any]:
     """The machine handle of an island in its record: the cluster (or island) name
@@ -757,3 +803,185 @@ def active_islands(records: Mapping[int, Mapping[str, Any]]) -> list[int]:
     """The islands whose record is not terminal (sampler islands excluded)."""
     return sorted(k for k, r in records.items()
                   if r.get("state") in ACTIVE and r.get("role") != "sampler")
+
+
+# -- the trainer scheduler s1 (``yeto.rl.engine.trainer_loop``) ------------------------------------
+# s1 runs one trainer island in incarnations it starts and stops itself; its journal
+# (``<run dir>/trainer-loop/journal.jsonl``, kind ``trainer_loop``) stays the source of its
+# own restart. With the island lifecycle on, each of its records also moves the island's
+# state record (:class:`LoopRecorder`), and its failures go through the decision table
+# (:func:`loop_classifier`). Names of ``yeto.rl.engine.trainer_loop``: no import (stdlib only).
+LOOP_KIND = "trainer_loop"
+
+
+def loop_classifier(reason: Any, error: BaseException | None) -> tuple[str, bool]:
+    """``TrainerLoop(classify_stop=...)``: a failed s1 incarnation's (cause, relaunch)."""
+    d = classify_error(error) if error is not None else classify(leave_reason=reason)
+    if d.cause in (FINISHED, STOPPED):  # a failure (error or INFRA_FAILED) the table read as an end
+        d = decision(INFRA, d.detail)
+    return d.cause, d.relaunch
+
+
+def loop_event(record: Mapping[str, Any]) -> tuple[str, Decision | None] | None:
+    """The island state (and decision) one s1 journal record means; None for a record
+    that moves no state (scheduler state, ``first_policy``, other kinds).
+
+    ``started`` -> ordering; ``ready`` -> running; ``stopped``: by its ``cause`` (the
+    decision table, when the loop had it), else an error or ``INFRA_FAILED`` -> an
+    infrastructure failure (recovering), ``FINISHED`` -> done, any other stop (an idle
+    stop of the scheduler, a STOP) -> done, never a relaunch by the table: s1 starts the
+    next incarnation itself (done -> ordering); ``orphaned`` (the head died with it up)
+    -> recovering (lost); ``gave_up`` -> abandoned; ``finished`` -> done."""
+    if record.get("kind", LOOP_KIND) != LOOP_KIND:
+        return None
+    event = record.get("event")
+    incarnation = record.get("incarnation")
+    if event == "started":
+        return ORDERING, None
+    if event == "ready":
+        return RUNNING, None
+    if event == "orphaned":
+        return RECOVERING, decision(LOST, f"incarnation {incarnation}: the head that ran it died")
+    if event == "gave_up":
+        return ABANDONED, decision(INFRA, f"{record.get('failures')} incarnations failed in a row "
+                                          f"(limit {record.get('limit')})")
+    if event == "finished":
+        return DONE, decision(FINISHED, "the data ended")
+    if event != "stopped":
+        return None
+    reason, error, cause = record.get("reason"), record.get("error"), record.get("cause")
+    detail = str(error or reason or "")
+    if cause in DECISIONS:
+        d = decision(str(cause), detail)
+    elif error is not None and "ConfigError(" in str(error):  # a journal of a loop without the table
+        d = decision(CONFIG_ERROR, detail)
+    elif error is not None or reason == "INFRA_FAILED":
+        d = classify(log_text=str(error or ""), detail=detail)
+        if not d.relaunch and d.action != FAIL:
+            d = decision(INFRA, detail)
+    elif reason == "FINISHED":
+        d = decision(FINISHED, detail)
+    elif reason == "PREEMPTED":
+        d = decision(PREEMPTED, detail)
+    else:
+        d = decision(STOPPED, detail or "scheduled stop")
+    return d.state, d
+
+
+class LoopRecorder:
+    """An s1 journal writer that also keeps the island's state record: wraps
+    ``journal.append`` (``TrainerLoop(record=...)``); the journal is written first and
+    stays the loop's only input. ``island``: the record's ``k``; ``source`` / ``name``:
+    the held trainer island's. ``store``: the launcher's own (fenced, under the island
+    records' lock), so a launcher that lost the lock writes nothing.
+
+    The island's record is read (strictly) before the first write, so a write merges into
+    it: until a read answers (the record, or none), nothing is written (the journal goes on;
+    the record catches up at the next journal record). An s1 idle stop is ``done`` with
+    ``idle: true`` (the scheduler starts the island again when samples wait)."""
+
+    def __init__(self, append: Callable[..., Any], store: IslandStateStore, island: int, *,
+                 source: str, name: str | None = None) -> None:
+        self._append = append
+        self.store = store
+        self.island = int(island)
+        self.source = str(source)
+        self.name = name
+        self._incarnations: set[int] = set()
+        self._last: Decision | None = None
+        self._known = False  # the island's record read once (it, or none): writes merge into it
+        self._pending: list[Mapping[str, Any]] | None = None  # an older journal to import once known
+        self.imported: dict[str, Any] | None = None
+
+    def _ready(self) -> bool:
+        """The island's record read strictly once (True: writes may go on). The first read
+        that answers imports a pending older journal when the store holds no record; one that
+        fails leaves both for the next journal record (:class:`IslandRecordsUnreadable` is
+        not "no record": an import then would write over the record)."""
+        if self._known:
+            return True
+        try:
+            existing = self.store.read_all([self.island], strict=True).get(self.island)
+        except IslandRecordsUnreadable as error:
+            self.store._warn("s1 record read", error)  # noqa: SLF001
+            return False
+        self._known = True
+        pending, self._pending = self._pending, None
+        if existing is None and pending:
+            self.imported = self._import(pending)
+        return True
+
+    def __call__(self, kind: str, **fields: Any) -> Any:
+        out = self._append(kind, **fields)
+        try:
+            self.observe({"kind": kind, **fields})
+        except Exception as error:  # noqa: BLE001 - the record is a view, never the reason the loop stops
+            self.store._warn("s1 record", error)
+        return out
+
+    def observe(self, record: Mapping[str, Any], **extra: Any) -> dict[str, Any] | None:
+        moved = loop_event(record)
+        if moved is None or not self._ready():
+            return None
+        state, d = moved
+        incarnation = record.get("incarnation")
+        if incarnation is not None:
+            self._incarnations.add(int(incarnation))
+        if record.get("event") == "gave_up" and self._last is not None and self._last.action == FAIL:
+            state, d = FAILED, self._last  # the loop ended on a failure the table never relaunches
+        if d is not None:
+            self._last = d
+        fields: dict[str, Any] = {"source": self.source, "role": "trainer", "mode": "s1",
+                                  "relaunches": max(0, len(self._incarnations) - 1), **extra}
+        if self.name:
+            fields["name"] = self.name
+        if incarnation is not None:
+            fields["incarnation"] = int(incarnation)
+            fields["handle"] = {"incarnation": int(incarnation), **({"cluster": self.name} if self.name else {})}
+        if record.get("resume_cut") is not None or record.get("resume_version") is not None:
+            fields["resume"] = {"cut": record.get("resume_cut"), "version": record.get("resume_version")}
+        if record.get("event") == "stopped":
+            fields["exit"] = str(record.get("error") or record.get("reason") or "stopped")[:500]
+        # an idle stop of the scheduler: done for now, started again when samples wait
+        fields["idle"] = bool(state == DONE and d is not None and d.cause == STOPPED)
+        fields["decision"] = None if d is None else d.to_json()
+        fields["reason"] = None if d is None else d.detail
+        return self.store.write(self.island, state, **fields)
+
+    def import_journal(self, records: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
+        """Write the island's record from an s1 journal written before the lifecycle
+        was on: once (only when the store holds no record of the island), read only
+        (the journal is not touched). Returns the record written, else None. A store read
+        that fails is not "no record": the import waits for the first read that answers
+        (:meth:`_ready`, tried again at each journal record)."""
+        if self._known:
+            return None  # the record was read already: imported then, or the store has one
+        self._pending = list(records)
+        self._ready()
+        return self.imported
+
+    def _import(self, records: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
+        last, resume = None, None
+        for record in records:
+            moved = loop_event(record)
+            if moved is None:
+                continue
+            last = record
+            if record.get("event") == "started":
+                resume = {"cut": record.get("resume_cut"), "version": record.get("resume_version")}
+            if record.get("incarnation") is not None:
+                self._incarnations.add(int(record["incarnation"]))
+            if moved[1] is not None:
+                self._last = moved[1]
+        if last is None:
+            return None
+        extra: dict[str, Any] = {"imported_from_journal": True}
+        if resume is not None and (resume["cut"] is not None or resume["version"] is not None):
+            extra["resume"] = resume
+        return self.observe(last, **extra)
+
+
+def loop_enabled(args: Any) -> bool:
+    """Whether s1 keeps the island's state record: ``--island-lifecycle on`` only (s1
+    runs a single trainer island, which takes no new path by default)."""
+    return getattr(args, "island_lifecycle", "auto") == "on" and not getattr(args, "dry_run", False)

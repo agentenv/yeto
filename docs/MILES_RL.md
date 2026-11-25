@@ -518,6 +518,9 @@ A complete example: `examples/fleet/run.two-islands.json`.
 | `fleet.trainer_argv` | The `yeto launch` arguments every trainer shares. It must name `--rl-checkpoint-store` (the run's `store`) and must not set `--gpu`, `--rl-sample-role`, `--rl-sampler-follow`, `--rl-buffer-shards`, `--rl-island-*` or `--rl-single-island-no-sync`: `run up` writes those. Required. |
 | `fleet.dispense` | `fleet` (default): one task ledger for the fleet, `<store>/fleet/dispense`, so no two islands train on the same prompt in an epoch. `island`: each island keeps its own ledger under `trainer<k>/`. |
 | `fleet.step_s` | Optional: the step time estimate (seconds) of every island without its own `trainer.step_s`. |
+| `fleet.fixed_roster` | Optional, default `false`. `false`: the islands share a syncer island pool (a lease per island), so an island that is given up or stopped leaves the merge and the other islands keep training. `true`: the fixed roster of earlier versions, kept as it was: one island given up ends the whole fleet (launch exit 4), and an island's trip stops only its pools while its trainer starves. Set `true` to roll back to the earlier behavior. |
+| `fleet.min_islands` | Optional, default `1`. The fleet stops (the run's STOP flag) once fewer islands run than this; `1` stops it once every island stopped. At most the number of islands. |
+| `fleet.island_lease_s` | Optional, default 150. The syncer lease of each island in the island pool (seconds > 0): an island whose heartbeat is silent this long leaves the merge, and rejoins with a catch-up of the full parameters. Raise it when islands may pause longer (network, syncer restart). Refused with `fleet.fixed_roster: true` and next to a `--rl-sync-island-lease-s` in `fleet.trainer_argv`. |
 
 What `run up` makes of it:
 
@@ -577,15 +580,44 @@ What `run up` makes of it:
   finished and the task ledger has nothing left for it (its shards are sealed),
   and the fleet's once every island's did. `run.budget` (pools + every island
   trainer for the launch's hours + the syncer) and `run.wall_clock` stop the
-  whole fleet. A stop trip of one island stops that island only: the fleet's one
-  `yeto launch` cannot end a single trainer island, so its pools are stopped
-  (`pool-stop`) and its trainer starves until its `trainer.sample_wait` ends it
-  and the launcher gives it up; once no island runs, the launch is stopped.
+  whole fleet. A stop trip of one island stops that island only: its pools are
+  stopped (`pool-stop`) and its island STOP is written
+  (`<store>/fleet/trainers/<k>/STOP`); the launch's fleet controller relaunches
+  it no more, gives its trainer up to 60 s to end on its own (the trainer has no
+  command channel, so it does not leave the syncer by itself), then releases it.
+  The syncer drops it when its lease runs out (`fleet.island_lease_s`); until
+  then a round that waits for it waits up to the lease, and the island's
+  training since its last release is lost. Each island's trainer is judged on
+  its own: `run.trainer_exit` when its record shows it given up or failed,
+  `run.trainer_silence` when its event tape stops growing. While any island has
+  no event tape on the launcher's machine (sky, Verda, an SSH island whose tape
+  is fetched), or its recorded tape does not read, the run's silence over the
+  launcher log stays on, and it stops the whole fleet. Once fewer islands run than `fleet.min_islands`, the launch is stopped.
+  With a fixed roster (`fleet.fixed_roster: true`, or a fleet the island pool
+  does not fit, below) none of this changes: a trip stops the island's pools,
+  its trainer starves until its `trainer.sample_wait` ends it, and the
+  launcher's fixed roster then ends the launch (exit 4), which `run up` reports
+  as `run.trainer_exit` of the fleet.
   A later `yeto run up` of the run keeps such an island stopped (its pools are
   not driven again; remove `fleet_island_stops.<k>` from the run's
-  `state.json` to run it again), while a fleet-wide stop (`run.trainer_exit`,
-  `run.budget`, ...) ended only the launch it replaces. `yeto run status` shows
-  each island under `fleet`.
+  `state.json` to run it again), while a fleet-wide stop (`run.budget`,
+  `run.wall_clock`, the launcher's own exit) ended only the launch it replaces.
+  `yeto run status` shows each island under `fleet`.
+- The roster: without `fleet.fixed_roster`, the compile adds
+  `--rl-sync-island-lease-s <fleet.island_lease_s>` to the launch (nothing else:
+  the asynchronous rounds already merge without some island). A fleet the
+  island pool does not fit keeps the fixed roster with a WARNING and the reason
+  in the plan: `--rl-sync-mode strict` or a count quorum of every island without
+  a grace window or base lag (rounds that wait for every island: the quorum is
+  not lowered), `--syncer-shards` above 1, `--rl-sync-bcast-delta-full-every`,
+  a critic. A trainer argv that sets a membership option
+  (`--rl-sync-quorum-theta`, `--rl-sync-island-lease-s`, ...) is taken as given.
+  A plan stored before `fleet.fixed_roster` existed ran a fixed roster: `run up`
+  refuses to write another roster over it while its trainer islands still run
+  by their records (set `fleet.fixed_roster: true` to re-up that fleet). The
+  same holds for an island pool re-upped with another `fleet.island_lease_s`
+  (its running trainers keep the old lease's heartbeat pace): keep the stored
+  lease, or change it once the fleet's islands are gone.
 
 #### Miles sampler islands next to external pools
 

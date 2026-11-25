@@ -387,9 +387,12 @@ def test_an_island_with_a_miles_sampler_seals_only_its_pools(fleet_run, files, c
     assert "sg-i1-0" in run.data_end_shards() and miles.shard not in run.data_end_shards()
     assert not run.seal_data_end()  # sealed once: nothing logged or written again
     assert not any(line.startswith("data end:") for line in _out(capsys))
-    # a trip of that island stops its pools; its Miles sampler keeps feeding its trainer
+    # a trip of that island writes its island STOP (the launch releases its trainer, which its
+    # Miles sampler follows) and stops its pools
     run.fleet_rt().trip_island(1, "run.starvation", value=1, limit=1, why="x")
-    assert any("Miles sampler island(s) i1-miles are part of the launch" in line for line in _out(capsys))
+    assert any("Miles sampler island(s) i1-miles follow its trainer" in line for line in _out(capsys))
+    assert run._objects().read("fleet/trainers/1/STOP") is not None
+    assert run._objects().read("fleet/trainers/0/STOP") is None
 
 
 def test_the_data_end_shards_are_every_islands(fleet_run):

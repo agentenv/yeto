@@ -445,8 +445,9 @@ def _plan_island_records(args, specs, names, island_states, island_lock, *, rela
     records = island_states.read_all(range(len(specs)), strict=True)  # also what the writes merge into
     restart = relaunch or any(r.get("state") in island_adopt.ADOPTABLE for r in records.values())
     if not restart:
-        for m in range(len(specs)):  # a new run: an island STOP an earlier run of this name left is void
+        for m in range(len(specs)):  # a new run: an island STOP / START an earlier run of this name left is void
             island_states.clear_stop(m)
+            island_states.clear_start(m)
     refs = _island_refs(args, specs, names,
                         modal_names={n for n, sp in zip(names, specs) if sp.cloud == "modal"},
                         ssh_names=ssh_names, events_dir=events_dir, echo_names=echo_names)
@@ -1172,7 +1173,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     held_name, specs[held].cloud, held_cfg, modal_ops, sky_task=held_task,
                     spec=specs[held], events_dir=events_dir,
                     ssh=_ssh_trainer_spec(args, specs[held], held_task)),
-                abort=controller.abort)
+                abort=controller.abort, states=island_states)  # s1: this launcher's fenced records
         except trainer_loop.TrainerLoopGaveUp as error:
             # the trainer scheduler released the trainer and stopped; the samplers
             # cannot finish the run usefully: tear everything down
