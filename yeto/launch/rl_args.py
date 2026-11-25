@@ -543,6 +543,8 @@ def _apply_rl_sync_mode(args) -> None:
             current = getattr(args, dest, None)
             if current is None or is_sync_mode_default(current):
                 setattr(args, dest, value)
+                if dest == "rl_sync_quorum":  # derived, not given (_pool_quorum_follows_the_pool)
+                    args.rl_sync_quorum_derived = True
         if (args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET
                 and args.rl_sync_full_parameter_rounds == "async"
                 and is_sync_mode_default(getattr(args, "rl_sync_fragment_pipeline", None))):
@@ -792,6 +794,7 @@ def _default_spot_island_pool(args) -> None:
         return
     if fixed:
         args.rl_sync_quorum = num_islands - 1
+        args.rl_sync_quorum_derived = True  # not given (_pool_quorum_follows_the_pool)
     args.rl_sync_island_lease_s = DEFAULT_ISLAND_LEASE_S
     print(f"[launcher] spot rollout: island pool on by default (--rl-sync-island-lease-s "
           f"{DEFAULT_ISLAND_LEASE_S:g}" + (f", --rl-sync-quorum {args.rl_sync_quorum}" if fixed else "")
@@ -855,6 +858,8 @@ def _pool_quorum_follows_the_pool(args, preset: str, num_islands: int, max_learn
               "islands join and leave the pool; --rl-sync-quorum-theta F follows the islands in "
               "the pool (F of the islands a round expects; 1.0: every one of them)", file=sys.stderr)
         return
+    if getattr(args, "rl_sync_quorum", None) is not None and getattr(args, "rl_sync_quorum_derived", False):
+        args.rl_sync_quorum = None  # a quorum the launcher derived (async mode, spot): θ replaces it
     if getattr(args, "rl_sync_quorum", None) is not None:
         raise ValueError(
             f"--rl-sync-max-learners {max_learners} lets full-parameter islands join past the "

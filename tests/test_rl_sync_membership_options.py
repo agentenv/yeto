@@ -243,3 +243,24 @@ def test_stale_lag_options_fail_while_the_rl_args_are_prepared():
     args.controller = "local"
     with pytest.raises(ValueError, match="go together"):
         _prepare_rl_args(args)  # before any syncer command is rendered
+
+
+def test_the_async_mode_quorum_gives_way_to_the_pool_theta():
+    """The async sync mode (the default) derives a count quorum of 1; a full-parameter
+    pool past the launch takes θ = 1.0 instead of refusing that derived quorum."""
+    from yeto.launcher import _prepare_rl_args, dry_run_plan
+
+    def plan(extra):
+        args = _provenance_launcher_args("ports", FULL_ASYNC + tuple(extra), gpu=TWO_ISLANDS)
+        args.controller = "local"
+        _prepare_rl_args(args)
+        return args, dry_run_plan(args)
+
+    args, rendered = plan(("--rl-sync-max-learners", "4"))
+    assert args.rl_sync_mode_effective == "async" and args.rl_sync_quorum_theta == 1.0
+    assert " --quorum 1 " in _syncer(rendered) and " --quorum-theta 1.0 " in _syncer(rendered)
+    assert " --max-learners 4 " in _syncer(rendered)
+    with pytest.raises(ValueError, match="counts islands and stays fixed"):
+        plan(("--rl-sync-quorum", "1", "--rl-sync-max-learners", "4"))  # given, not derived
+    args, rendered = plan(())  # no pool past the launch: the async default stays
+    assert args.rl_sync_quorum == 1 and "--quorum-theta" not in _syncer(rendered)
