@@ -248,7 +248,9 @@ class FleetRuntime:
                                     "trainer.sample_wait ends it and the launcher gives it up")
                  + f"; its pools ({', '.join(names) or 'none'}) are stopped and the other islands go on"
                  + (f"; its Miles sampler island(s) {', '.join(miles)} follow its trainer" if miles else ""))
-        rc = max((self.run._cmd(self.run.nc("pool-stop", "--config", self.run.pools[i].config),  # noqa: SLF001
+        # Run.pool_stop: on the store control plane the stop names the run store and the pool, so
+        # a pool whose controller is gone is still released from the store's state
+        rc = max((self.run._cmd(self.run.pool_stop(self.run.pools[i].config),  # noqa: SLF001
                                 log="down.log", timeout=1800) for i in pools), default=0)
         if rc:
             _log(f"CRITICAL: {self.label(k)}: pool-stop rc={rc}: its machines may still bill; release them with "

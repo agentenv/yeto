@@ -215,6 +215,45 @@ def test_min_islands_stop_has_its_own_event(fleet_run, files, monkeypatch):  # n
 
 # -- re-up: the stored plan's roster -----------------------------------------------------------------
 
+# -- an island's pool stop on the store control plane names the run store and the pool ------------
+
+def _stop_island_1(run, how):
+    if how == "trip":
+        assert run.fleet_rt().trip_island(1, "run.starvation", value=1, limit=1, why="no group")
+    else:  # stopped by hand: its record is done on an island STOP that run up did not write
+        states = _states(run)
+        states.write(0, "running", name="r-l0", source="modal")
+        states.request_stop(1, "maintenance", by="yeto island stop")
+        states.write(1, "done", name="r-l1", source="modal", stop={"reason": "maintenance", "by": "yeto island stop"},
+                     decision={"cause": "stopped", "action": "stop", "state": "done", "detail": "maintenance"})
+        run.fleet_rt().trainer_check(1000.0)
+
+
+@pytest.mark.parametrize("how,fixed", [("trip", False), ("operator", False), ("trip", True)])
+def test_an_island_pool_stop_on_the_store_control_plane_names_the_store_and_the_pool(
+        fleet_run, files, how, fixed):  # noqa: F811
+    """Run.pool_stop: a pool whose controller is gone is still released from the store's state."""
+    raw = _cfg(files)
+    raw["fleet"]["fixed_roster"] = fixed
+    raw.update(controller="in_process", rollout={"control_plane": "store"})
+    run = fleet_run(raw)
+    _stop_island_1(run, how)
+    stops = _pool_stops(run)
+    (i,) = [j for j, ref in enumerate(run.pools) if ref.name == "i1-sglang"]
+    assert stops == [run.nc("pool-stop", "--config", run.pools[i].config,
+                            "--control-store", str(run.cfg["store"]), "--pool-name", "i1-sglang")]
+
+
+@pytest.mark.parametrize("how,fixed", [("trip", False), ("operator", False), ("trip", True)])
+def test_an_island_pool_stop_on_the_local_control_plane_is_as_before(fleet_run, files, how, fixed):  # noqa: F811
+    raw = _cfg(files)
+    raw["fleet"]["fixed_roster"] = fixed
+    run = fleet_run(raw)
+    _stop_island_1(run, how)
+    (i,) = [j for j, ref in enumerate(run.pools) if ref.name == "i1-sglang"]
+    assert _pool_stops(run) == [run.nc("pool-stop", "--config", run.pools[i].config)]
+
+
 def _stored_plan(run, **roster):
     doc = run.fleet_plan().to_json()
     if roster.get("legacy"):
