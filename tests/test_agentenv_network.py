@@ -280,3 +280,112 @@ def test_probe_command_is_body_free_and_bounded():
     assert "--max-time 5" in cmd
     assert "http://10.0.0.5:8300/health" in cmd
     assert "%{http_code}" in cmd
+
+
+# --------------------------------------------------------------------------- #
+# probe fallbacks for task images without curl (run the real command in bash)
+# --------------------------------------------------------------------------- #
+
+
+def _serve(code: int):
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(code)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _run_in(tools: list[str], tmp_path, cmd: str) -> _Res:
+    """Run the probe in bash with PATH holding only ``tools`` (no curl, maybe no python)."""
+    import shutil
+    import subprocess
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    for tool in tools:
+        found = shutil.which(tool)
+        if found and not (bindir / tool).exists():
+            (bindir / tool).symlink_to(found)
+    bash = shutil.which("bash")
+    proc = subprocess.run([bash, "-c", cmd], capture_output=True, text=True, timeout=60,
+                          env={"PATH": str(bindir)})
+    return _Res(stdout=proc.stdout, stderr=proc.stderr, return_code=proc.returncode)
+
+
+def test_probe_command_tries_curl_first_then_python_then_tcp():
+    cmd = net._probe_command("http://10.0.0.5:8300/health", timeout_s=5)
+    assert cmd.index("curl -sS") < cmd.index('"$p" -c') < cmd.index("/dev/tcp/")
+
+
+def test_probe_without_curl_uses_python_and_reads_like_curl(tmp_path):
+    srv = _serve(204)
+    try:
+        ep = SidecarEndpoint("rp", f"http://127.0.0.1:{srv.server_port}", health_path="/health")
+        res = _run_in(["bash", "python3"], tmp_path, net._probe_command(ep.probe_url(), timeout_s=5))
+    finally:
+        srv.shutdown()
+    assert res.return_code == 0 and res.stdout.split()[0] == "204"
+    health = net._interpret(ep, res)
+    assert health.reachable and health.healthy and health.http_code == 204
+
+
+def test_python_probe_reports_a_refused_connection_as_unreachable(tmp_path):
+    ep = SidecarEndpoint("rp", f"http://127.0.0.1:{_free_port()}")
+    res = _run_in(["bash", "python3"], tmp_path, net._probe_command(ep.probe_url(), timeout_s=5))
+    assert res.return_code == 7
+    health = net._interpret(ep, res)
+    assert not health.reachable and "network unreachable" in health.error
+
+
+def test_probe_without_curl_or_python_connects_by_tcp(tmp_path):
+    srv = _serve(200)
+    tools = ["bash", "date", "awk", "timeout"]
+    try:
+        bare = SidecarEndpoint("rp", f"http://127.0.0.1:{srv.server_port}")
+        res = _run_in(tools, tmp_path, net._probe_command(bare.probe_url(), timeout_s=5))
+        checked = SidecarEndpoint("ts", f"http://127.0.0.1:{srv.server_port}", health_path="/health")
+        res_checked = _run_in(tools, tmp_path, net._probe_command(checked.probe_url(), timeout_s=5))
+    finally:
+        srv.shutdown()
+    assert res.return_code == 0 and res.stdout.split()[0] == net.TCP_ONLY
+    health = net._interpret(bare, res)
+    assert health.reachable and health.healthy and health.http_code is None
+    # a health path cannot be checked without an HTTP client: reached, not healthy, and said so
+    health = net._interpret(checked, res_checked)
+    assert health.reachable and not health.healthy and "TCP only" in health.error
+
+
+def test_tcp_probe_reports_a_refused_connection_as_unreachable(tmp_path):
+    ep = SidecarEndpoint("rp", f"http://127.0.0.1:{_free_port()}")
+    res = _run_in(["bash", "date", "awk", "timeout"], tmp_path, net._probe_command(ep.probe_url(), timeout_s=5))
+    assert res.return_code == 7 and "TCP connect" in res.stderr
+    health = net._interpret(ep, res)
+    assert not health.reachable and "network unreachable" in health.error
+
+
+@pytest.mark.asyncio
+async def test_curl_000_on_a_failed_connection_is_unreachable():
+    # curl -w '%{http_code}' prints 000 when no HTTP reply came: that is no reply, not a reached service
+    eps = [SidecarEndpoint("rp", "http://10.0.0.5:8400")]
+    exec_fn = FakeExec(rules=[("10.0.0.5", 7, "000 0.001589", "Failed to connect")])
+    report = await check_reachability(exec_fn, eps, tries=1, sleep=_noop_sleep)
+    health = report.by_name("rp")
+    assert not health.reachable and not health.healthy and health.http_code is None
+    assert "network unreachable" in health.error and report.ok is False

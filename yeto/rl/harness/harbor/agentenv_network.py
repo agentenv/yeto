@@ -260,18 +260,49 @@ def render_task_text(text: str, endpoints: Iterable[SidecarEndpoint]) -> str:
 # --------------------------------------------------------------------------- #
 
 
+# The python fallback prints what the curl prints (``<http_code> <time_total>``) and exits like curl
+# on a network failure (6 DNS, 7 connect, 28 timeout), so :func:`_interpret` reads both the same way.
+_PY_PROBE = (
+    "import socket,sys,time,urllib.error,urllib.request as u\n"
+    "t0=time.time()\n"
+    "try:\n"
+    "    c=u.urlopen(sys.argv[1],timeout=float(sys.argv[2])).status\n"
+    "except urllib.error.HTTPError as e:\n"
+    "    c=e.code\n"
+    "except Exception as e:\n"
+    "    r=getattr(e,'reason',e)\n"
+    "    sys.stderr.write(str(r)+'\\n')\n"
+    "    sys.exit(6 if isinstance(r,socket.gaierror) else 28 if isinstance(r,(socket.timeout,TimeoutError)) else 7)\n"
+    "print('%d %.3f'%(c,time.time()-t0))\n"
+)
+TCP_ONLY = "tcp"  # the probe's first word when only a TCP connect could be tried (no curl, no python)
+
+
 def _probe_command(url: str, *, timeout_s: float) -> str:
     """A curl that prints ``<http_code> <time_total>`` and never reads the body.
 
     ``-sS`` quiet but show errors, ``-o /dev/null`` drop the body, ``--max-time``
     bound the whole call; a non-zero exit means the network failed (DNS/connect/
     timeout), a zero exit with an HTTP code means the service was reached.
+
+    Task images without curl (several TB2 images ship only python3, or only perl) fall back
+    to python's urllib with the same output and exit codes, and an image with neither to a
+    bash ``/dev/tcp`` connect to the URL's host and port, which prints ``tcp <seconds>``:
+    the network path is proven, the HTTP reply is not (see :func:`_interpret`).
     """
-    return (
-        "curl -sS -o /dev/null "
-        f"-w '%{{http_code}} %{{time_total}}' --max-time {int(timeout_s)} "
-        f"{shlex.quote(url)}"
-    )
+    t = int(timeout_s)
+    q = shlex.quote(url)
+    curl = f"curl -sS -o /dev/null -w '%{{http_code}} %{{time_total}}' --max-time {t} {q}"
+    py = f'"$p" -c {shlex.quote(_PY_PROBE)} {q} {t}'
+    tcp = (f"u={q}; r=${{u#*://}}; hp=${{r%%/*}}; h=${{hp%%:*}}; pt=${{hp##*:}}; "
+           f"if [ \"$pt\" = \"$hp\" ]; then case $u in https:*) pt=443;; *) pt=80;; esac; fi; "
+           f"tc=; command -v timeout >/dev/null 2>&1 && tc=\"timeout {t}\"; s=$(date +%s.%N); "
+           f"if $tc bash -c \"exec 3<>/dev/tcp/$h/$pt\" 2>/dev/null; "
+           f"then awk -v a=\"$s\" -v b=\"$(date +%s.%N)\" 'BEGIN{{printf \"{TCP_ONLY} %.3f\\n\", b-a}}' 2>/dev/null || echo {TCP_ONLY}; "
+           f"else echo \"no curl or python in the image; TCP connect to $h:$pt failed\" >&2; exit 7; fi")
+    return (f"if command -v curl >/dev/null 2>&1; then {curl}; "
+            f"elif p=$(command -v python3 || command -v python) && [ -n \"$p\" ]; then {py}; "
+            f"else {tcp}; fi")
 
 
 def _interpret(ep: SidecarEndpoint, res: ExecResult) -> EndpointHealth:
@@ -280,12 +311,27 @@ def _interpret(ep: SidecarEndpoint, res: ExecResult) -> EndpointHealth:
     code: int | None = None
     latency: float | None = None
     out = (res.stdout or "").strip()
+    if res.return_code == 0 and out.split()[:1] == [TCP_ONLY]:
+        # neither curl nor python in the image: a TCP connect reached the host and port
+        parts = out.split()
+        try:
+            latency = float(parts[1]) if len(parts) > 1 else None
+        except ValueError:
+            latency = None
+        checked = ep.health_path is None
+        return EndpointHealth(
+            name=ep.name, url=url, reachable=True, healthy=checked, http_code=None, latency_s=latency,
+            error=None if checked else f"reached by TCP only (no curl or python in the image); "
+                                       f"health {ep.health_path} not checked",
+        )
     if out:
         parts = out.split()
         try:
             code = int(parts[0])
         except (ValueError, IndexError):
             code = None
+        if code == 0:
+            code = None  # curl's -w prints http_code 000 when no HTTP reply came (refused, DNS, timeout)
         if len(parts) > 1:
             try:
                 latency = float(parts[1])
@@ -327,9 +373,8 @@ async def check_reachability(
     no-op.  Never raises for an unreachable endpoint -- that is reported in the
     result; :func:`self_check` is the raising wrapper.
 
-    The probe assumes ``curl`` is on the microVM (true for the pi/codex task
-    images; if a task image lacks it, ``exec_fn`` returns a non-zero exit and the
-    endpoint reports ``curl error``, which the caller can special-case).
+    The probe uses ``curl``, else python's urllib, else a bash ``/dev/tcp``
+    connect (:func:`_probe_command`), so a task image without curl is still probed.
     """
     if tries < 1:
         raise ValueError("tries must be >= 1")
