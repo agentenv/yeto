@@ -38,7 +38,7 @@ class FakeFleet:
         return ticket
 
     # the sink: a pool reaches its target by its own rules (orders or releases)
-    def set_target(self, pool, nodes, *, offers, refill):
+    def set_target(self, pool, nodes, *, offers, refill, running=None):
         self.targets[pool] = nodes
         have = self.members.setdefault(pool, [])
         while len(have) < nodes:

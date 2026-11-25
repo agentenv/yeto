@@ -245,12 +245,78 @@ def test_on_demand_only_after_the_spot_gap_lasts():
     assert d.targets == {"s/a": 1, "od/c": 1}
 
 
+def test_a_placed_spot_node_that_never_orders_moves_to_on_demand_after_the_wait():
+    offers = [offer("s", "a", b.SPOT), offer("od", "c", b.ON_DEMAND)]
+    policy = b.Policy(on_demand_after_s=1800)
+    d = b.decide(offers, [b.Demand("0", want=2)], policy=policy, now=0.0)
+    assert d.targets == {"s/a": 2, "od/c": 0}
+    # the offer flaps (available at every tick) but its orders keep failing: nothing runs
+    d = b.decide(offers, [b.Demand("0", want=2)], policy=policy, state=d.state, now=1500.0)
+    assert d.targets == {"s/a": 2, "od/c": 0}
+    d = b.decide(offers, [b.Demand("0", want=2)], policy=policy, state=d.state, running={"s/a": 1}, now=1900.0)
+    assert d.targets == {"s/a": 1, "od/c": 1}, "the one spot node that runs stays; the unordered one moves"
+
+
+NON_MARKET = {
+    "manual hold": "its scale write was refused (a manual change holds)",
+    "budget breaker": "run budget breaker open: spend $50.00 of $50.00",
+    "balance floor": "balance below the order floor 120",
+}
+
+
+def _held_spot_ticks(blocked):
+    """The review's repro: spot $10/h always available, on-demand $30/h, want 4, the spot
+    pool holding 2 (it orders no more), ten broker ticks of 300 s."""
+    offers = [offer("spot", "a", b.SPOT, usd=10.0), offer("od", "x", b.ON_DEMAND, usd=30.0)]
+    policy, state, out = b.Policy(on_demand_after_s=1800), None, []
+    for i in range(10):
+        d = b.decide(offers, [b.Demand("0", want=4)], running={"spot/a": 2}, policy=policy, state=state,
+                     now=300.0 * i, blocked=blocked)
+        state = d.state
+        out.append(d)
+    return out
+
+
+@pytest.mark.parametrize("reason", sorted(NON_MARKET))
+def test_a_spot_pool_that_cannot_order_for_its_own_reason_buys_no_on_demand(reason):
+    for d in _held_spot_ticks({"spot": NON_MARKET[reason]}):
+        assert d.targets == {"spot/a": 4, "od/x": 0}, f"{reason}: the spot placement stays, no on-demand"
+        assert d.state.spot_gap_since == {} and d.usd_h == pytest.approx(40.0)
+        assert any("cannot order" in n and NON_MARKET[reason] in n for n in d.notes)
+
+
+def test_the_same_spot_pool_held_by_the_market_moves_to_on_demand_after_the_wait():
+    ticks = _held_spot_ticks(None)  # its orders fail (no capacity): a market gap
+    assert all(d.targets["od/x"] == 0 for d in ticks[:6]), "under on_demand_after_s"
+    assert ticks[6].targets == {"spot/a": 2, "od/x": 2}, "at 1800 s the two unordered spot nodes move"
+
+
+def test_a_sink_refusal_blocks_the_pool_at_the_next_decision_and_an_accepted_write_unblocks_it():
+    offers = [offer("spot", "a", b.SPOT, usd=10.0), offer("od", "x", b.ON_DEMAND, usd=30.0)]
+    t = [0.0]
+    sink = Sink(refuse={"spot"})
+    loop = b.Broker(b.BrokerConfig(interval_s=300, policy=b.Policy(on_demand_after_s=1800)),
+                    lambda: b.Snapshot(offers=offers, demands=[b.Demand("0", want=4)], running={"spot/a": 2}),
+                    sink, clock=lambda: t[0])
+    for _ in range(10):
+        d = loop.tick()
+        t[0] += 300
+    assert d.targets == {"spot/a": 4, "od/x": 0} and loop.refused == {"spot": NON_MARKET["manual hold"]}
+    assert d.state.spot_gap_since == {}, "a person's lower count is no spot gap"
+    sink.refuse = set()
+    loop.tick()
+    assert loop.refused == {}, "accepted: the pool orders again, and a market failure is a gap again"
+
+
 def test_a_gap_that_closes_resets_the_clock():
     offers = [offer("s", "a", b.SPOT, available=False), offer("od", "c", b.ON_DEMAND)]
     d = b.decide(offers, [b.Demand("0", want=1)], now=0.0)
     offers[0] = offer("s", "a", b.SPOT)
     d = b.decide(offers, [b.Demand("0", want=1)], state=d.state, now=100.0)
-    assert d.state.spot_gap_since == {}
+    assert d.targets == {"s/a": 1, "od/c": 0} and d.state.spot_gap_since == {"0": 0.0}, \
+        "placed on spot but not ordered yet: the gap goes on"
+    d = b.decide(offers, [b.Demand("0", want=1)], state=d.state, running={"s/a": 1}, now=200.0)
+    assert d.state.spot_gap_since == {}, "the spot node is ordered: the gap closed"
     offers[0] = offer("s", "a", b.SPOT, available=False)
     d = b.decide(offers, [b.Demand("0", want=1)], state=d.state, running={"s/a": 1}, now=5000.0)
     assert d.state.spot_gap_since == {}, "a running node meets the want: no gap"
@@ -315,10 +381,11 @@ def test_the_broker_is_off_unless_enabled():
 
 class Sink:
     def __init__(self, refuse=()):
-        self.calls, self.refuse = [], set(refuse)
+        self.calls, self.refuse, self.running = [], set(refuse), []
 
-    def set_target(self, pool, nodes, *, offers, refill):
+    def set_target(self, pool, nodes, *, offers, refill, running=None):
         self.calls.append((pool, nodes, dict(offers), refill))
+        self.running.append(dict(running or {}))
         return pool not in self.refuse
 
 
@@ -378,10 +445,11 @@ def test_scale_file_sink_writes_an_automatic_scale():
     assert not sink.set_target("other", 1, offers={}, refill=None)
 
 
-def test_through_pool_scale_only_the_total_takes_effect_today(tmp_path, monkeypatch):
-    """The pool applies the scale file's target; the offer mix and refill ride along under
-    ``broker`` and change nothing yet (TODO with the NodePool split: the pool orders at the
-    refill offer). This pins today's behaviour."""
+def test_through_pool_scale_a_new_mix_moves_no_running_node(tmp_path, monkeypatch):
+    """The pool applies the scale file's target and reads the plan under ``broker``; a
+    provider without ``prefer_offer`` (National Compute) orders as always, and a new offer
+    mix with the same total orders or moves nothing (test_pool_broker_offers_e2e covers a
+    provider that takes the plan)."""
     import json
     import subprocess
 

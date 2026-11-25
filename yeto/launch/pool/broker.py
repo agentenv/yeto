@@ -25,10 +25,12 @@ Compute), spot, then on-demand as a fallback. Within a tier, best score first.
   (lease end, a replacement ready, its island ended): a better score elsewhere
   never moves it; at a boundary its own offer wins unless another beats it by
   more than ``hysteresis`` (fraction of its score);
-* on-demand only covers a spot gap (spot wanted but not orderable: unavailable or
-  full) that has lasted ``on_demand_after_s``; a shortfall the spot caps (spread,
-  share) leave goes to on-demand at once; nodes already on on-demand stay until
-  their boundary.
+* on-demand only covers a spot gap that has lasted ``on_demand_after_s``: spot
+  nodes placed but not ordered yet (``running`` below the target: sold out, cooling,
+  failing) plus a shortfall no spot offer can take (unavailable or full); then those
+  unordered spot nodes go to on-demand too. A shortfall the spot caps (spread, share)
+  leave goes to on-demand at once; nodes already on on-demand stay until their
+  boundary.
 
 The broker is a library only: nothing in yeto calls it yet (``yeto run up`` refuses a
 ``broker`` key in a run config; :func:`config_from_run` reads the section for the caller
@@ -358,11 +360,17 @@ def _throughput_known(offer: Offer, ledger: OfferLedger | None) -> bool:
 def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mapping[str, int] | None = None,
            at_boundary: Mapping[str, int] | None = None, policy: Policy = Policy(), budget: Budget = Budget(),
            state: State | None = None, now: float = 0.0, prices: PriceTable | None = None,
-           ledger: OfferLedger | None = None, caps: CapsOf | None = None) -> Decision:
+           ledger: OfferLedger | None = None, caps: CapsOf | None = None,
+           blocked: Mapping[str, str] | None = None) -> Decision:
     """The node count of every offer. ``running``: nodes each offer holds now (ordered
     and alive); ``at_boundary``: how many of those are at a natural boundary and may be
     placed anew. ``state``: the previous tick's (spot gap clocks); the decision carries
-    the next one."""
+    the next one. ``blocked``: pool -> why it cannot order for a reason of its own, not
+    the market's (its scale write refused by a manual hold, its budget breaker, its
+    balance under the order floor, no free slot): its placed spot nodes that are not
+    ordered are no spot gap, so they never move to on-demand (only the market's sold out,
+    cooling, failing or preempted offers do)."""
+    blocked = dict(blocked or {})
     running = {k: max(0, int(v)) for k, v in (running or {}).items()}
     at_boundary = {k: max(0, min(int(v), running.get(k, 0))) for k, v in (at_boundary or {}).items()}
     state = State(dict(state.spot_gap_since)) if state is not None else State()
@@ -398,6 +406,12 @@ def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mappi
         targets[s.offer.key] += 1
         spread[s.offer.spread_key] = spread.get(s.offer.spread_key, 0) + 1
         usd_h += s.usd_h or 0.0
+
+    def unplace(s: Scored) -> None:
+        nonlocal usd_h
+        targets[s.offer.key] -= 1
+        spread[s.offer.spread_key] -= 1
+        usd_h -= s.usd_h or 0.0
 
     def island_count(island: str, tier: str | None = None) -> int:
         return sum(n for k, n in targets.items() if scored[k].offer.island == island
@@ -455,21 +469,41 @@ def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mappi
                     need -= 1
             if goal != "want":
                 continue
-            if need <= 0:
+            # 3. the spot gap: spot nodes the broker placed that are not ordered yet (sold out,
+            # cooling, failing) plus a shortfall the market (not a policy cap) leaves. It waits
+            # on_demand_after_s; then the unordered spot nodes move to on-demand too. A pool
+            # that cannot order for a reason of its own (``blocked``) is no gap: it keeps its
+            # spot placement and orders it once it can again.
+            spot_keys = [k for k, s in scored.items() if s.offer.island == island and s.offer.tier == SPOT]
+            unordered = {}
+            for k in spot_keys:
+                n = targets[k] - running.get(k, 0)
+                if n <= 0:
+                    continue
+                why = blocked.get(scored[k].offer.pool)
+                if why:
+                    notes.append(f"{k}: {n} placed spot node(s) not ordered: pool {scored[k].offer.pool} "
+                                 f"cannot order ({why}): no spot gap")
+                    continue
+                unordered[k] = n
+            waiting = sum(unordered.values()) + (0 if capped else need)
+            if not spot_keys or waiting <= 0:
                 state.spot_gap_since.pop(island, None)
-                continue
-            # 3. spot gap -> on-demand after on_demand_after_s
-            spot_wanted = any(s.offer.island == island and s.offer.tier == SPOT for s in scored.values())
-            od = [s for s in cands if s.offer.tier == ON_DEMAND]
-            if not od:
-                continue
-            if spot_wanted and not capped:
+            else:
                 since = state.spot_gap_since.setdefault(island, now)
                 if now - since < policy.on_demand_after_s:
-                    notes.append(f"island {island}: spot gap {need} node(s) for {now - since:.0f} s; on-demand "
+                    notes.append(f"island {island}: spot gap {waiting} node(s) for {now - since:.0f} s; on-demand "
                                  f"after {policy.on_demand_after_s:.0f} s")
-                    continue
-            for s in od:
+                    if not capped:
+                        continue
+                else:
+                    for k in sorted(unordered, key=lambda k: -(scored[k].score or 0.0)):
+                        for _ in range(unordered[k]):
+                            unplace(scored[k])
+                            need += 1
+            if need <= 0:
+                continue
+            for s in (s for s in cands if s.offer.tier == ON_DEMAND):
                 while need > 0 and room(s) > 0:
                     if ceiling is not None and usd_h + (s.usd_h or 0.0) > ceiling + 1e-9:
                         notes.append(f"{s.offer.key}: hourly ceiling {ceiling:.2f} USD/h reached")
@@ -589,11 +623,23 @@ class TargetSink(Protocol):
     """Where the broker's counts go: the pools' scale control (``pool-scale`` with source
     "auto", which yields to a manual change) or the fleet's desired state."""
 
-    def set_target(self, pool: str, nodes: int, *, offers: Mapping[str, int], refill: str | None) -> bool: ...
+    def set_target(self, pool: str, nodes: int, *, offers: Mapping[str, int], refill: str | None,
+                   running: Mapping[str, int] | None = None) -> bool: ...
 
 
 @dataclass
 class Snapshot:
+    """What the broker reads each tick (its builder's contract):
+
+    * ``offers``: every offer of every pool it drives, ``available`` False while the pool
+      cannot order it for the market's reason (the provider cools it down, sold out);
+    * ``running``: per offer key, the nodes its pool counts now, provisioning ones
+      included (ordered and alive: a node ordered and not ready yet is no gap);
+    * ``at_boundary``: how many of those may be placed anew (a natural boundary);
+    * ``blocked``: per pool, why it cannot order for a reason of its own
+      (``broker_plan.blocked_pools`` over the live pools);
+    * the rest: the run budget, phase 2's movable nodes and ended islands, the ledger."""
+
     offers: list[Offer]
     demands: list[Demand]
     running: dict[str, int] = field(default_factory=dict)
@@ -602,13 +648,18 @@ class Snapshot:
     nodes: list[Node] = field(default_factory=list)  # phase 2: the nodes a move may take
     ended: tuple[str, ...] = ()  # islands whose trainer ended (their nodes may move)
     ledger: OfferLedger | None = None  # the offer ledger as read now (None: the broker's own)
+    # pool -> why it cannot order for a reason of its own (``broker_plan.blocked_pools``):
+    # its placed, unordered spot nodes are no spot gap (see :func:`decide`)
+    blocked: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class Broker:
     """The slow loop: every ``config.interval_s`` read a :class:`Snapshot`, decide, and
     write a pool's count, its offers' counts and its refill offer to the sink when any of
-    them changed (a sink refusal, e.g. a manual hold, is retried at the next tick).
+    them changed (a sink refusal, e.g. a manual hold, is retried at the next tick, and
+    until a write is accepted the pool counts as blocked: its placed spot nodes that are
+    not ordered are no spot gap, so a person's lower count never buys on-demand).
 
     Phase 2 (``config.migrate`` and a ``mover``): the moves of :func:`plan_migrations`
     run before any count is sent, so neither pool orders or releases for a moved node:
@@ -627,8 +678,10 @@ class Broker:
     mover: LaneMover | None = None
     compatible: Callable[[Offer, Offer], bool] | None = None
     state: State = field(default_factory=State)
-    # pool -> (nodes, its offers' counts, refill offer) last accepted by the sink
-    sent: dict[str, tuple[int, tuple[tuple[str, int], ...], str | None]] = field(default_factory=dict)
+    # pool -> (nodes, its offers' counts, refill offer, what ran on them) last accepted by the sink
+    sent: dict[str, tuple[Any, ...]] = field(default_factory=dict)
+    # pool -> why the sink refused its last write (a manual hold): blocked at the next decision
+    refused: dict[str, str] = field(default_factory=dict)
     last: Decision | None = None
     _next_at: float = 0.0
 
@@ -642,10 +695,11 @@ class Broker:
         self._next_at = now + self.config.interval_s
         snap = self.snapshot()
         demands = [replace(d, floor=max(d.floor, int(self.config.floors.get(d.island, 0)))) for d in snap.demands]
+        blocked = {**self.refused, **dict(snap.blocked or {})}
         dec = decide(snap.offers, demands, running=snap.running, at_boundary=snap.at_boundary,
                      policy=self.config.policy, budget=snap.budget, state=self.state, now=now,
                      prices=self.prices, ledger=snap.ledger if snap.ledger is not None else self.ledger,
-                     caps=self.caps)
+                     caps=self.caps, blocked=blocked)
         self.state = dec.state
         self.last = dec
         if self.config.migrate and self.mover is not None:
@@ -656,11 +710,21 @@ class Broker:
                 run_migration(move, self.mover, self.emit)
         for pool, nodes in sorted(dec.pools.items()):
             offers = {k: n for k, n in dec.targets.items() if k.split("/", 1)[0] == pool}
-            wanted = (nodes, tuple(sorted(offers.items())), dec.refill.get(pool))
-            if self.sent.get(pool) == wanted:
-                continue  # a change of the total, of the offer mix or of the refill offer is sent
-            if self.sink.set_target(pool, nodes, offers=offers, refill=dec.refill.get(pool)):
+            running = {k: int(snap.running.get(k, 0)) for k in offers}
+            wanted = (nodes, tuple(sorted(offers.items())), dec.refill.get(pool), tuple(sorted(running.items())))
+            holds = getattr(self.sink, "holds", None)
+            if holds is not None:  # the sink can read back what the pool holds: send when it differs
+                if holds(pool, nodes, offers=offers, refill=dec.refill.get(pool), running=running):
+                    self.sent[pool] = wanted
+                    self.refused.pop(pool, None)
+                    continue
+            elif self.sent.get(pool) == wanted:
+                continue  # a change of the total, the offer mix, the refill offer or what runs is sent
+            if self.sink.set_target(pool, nodes, offers=offers, refill=dec.refill.get(pool), running=running):
                 self.sent[pool] = wanted
+                self.refused.pop(pool, None)
+            else:  # a manual hold: the pool keeps the person's count, which is no spot gap
+                self.refused[pool] = "its scale write was refused (a manual change holds)"
         self.emit(EVENT, **dec.record())
         return dec
 
@@ -670,17 +734,48 @@ class ScaleFileSink:
     (``yeto.launch.nc.pool_run.scale_pool`` with ``source="auto"``: refused for
     ``elastic.manual_hold_s`` after a manual change, so a person's scale wins).
 
-    Only the total takes effect today: the file's ``target`` is what the pool applies;
-    the offer mix and the refill offer ride along under ``broker`` for the record. TODO
-    (with the NodePool split): the pool orders its refills at ``broker.refill`` and
-    moves toward ``broker.offers`` at its natural boundaries."""
+    The pool applies ``target``; under ``broker`` it reads the offer mix, the refill offer
+    and what ran on each offer when the broker decided (``broker_plan``): a node the broker
+    added goes to its offer, a lost node's replacement to the refill offer, and a smaller
+    target retires members on an offer over its count first.
+
+    A person's ``pool-scale`` (and a pause, which rewrites the file) replaces the file
+    without the ``broker`` part: the pool then orders at its provider's cursor, as without
+    the broker, and the broker's writes are refused (the pool is ``blocked``, no spot gap)
+    until ``manual_hold_s`` passes; then :meth:`holds` sees the file no longer holds its
+    plan and the broker writes its count again, which replaces the person's."""
 
     def __init__(self, pools: Mapping[str, tuple[dict[str, Any], str]], *,
-                 scale: Callable[..., int] | None = None) -> None:
+                 scale: Callable[..., int] | None = None,
+                 read: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None) -> None:
         self.pools = dict(pools)  # pool -> (pool config, config path)
         self._scale = scale
+        self._read = read
 
-    def set_target(self, pool: str, nodes: int, *, offers: Mapping[str, int], refill: str | None) -> bool:
+    @staticmethod
+    def _plan(offers: Mapping[str, int], refill: str | None, running: Mapping[str, int] | None) -> dict[str, Any]:
+        plan: dict[str, Any] = {"offers": dict(offers), "refill": refill}
+        if running is not None:
+            plan["running"] = dict(running)
+        return plan
+
+    def holds(self, pool: str, nodes: int, *, offers: Mapping[str, int], refill: str | None,
+              running: Mapping[str, int] | None = None) -> bool:
+        """Whether the pool's scale file already says this (its target and the broker plan):
+        a file another writer replaced since (a person's pool-scale, a pool lowering its own
+        target, a move) is written again at the next tick, never assumed."""
+        if pool not in self.pools:
+            return False
+        read = self._read
+        if read is None:
+            from yeto.launch.nc.pool_run import read_scale  # noqa: PLC0415
+
+            read = read_scale
+        doc = read(self.pools[pool][0]) or {}
+        return doc.get("target") == nodes and doc.get("broker") == self._plan(offers, refill, running)
+
+    def set_target(self, pool: str, nodes: int, *, offers: Mapping[str, int], refill: str | None,
+                   running: Mapping[str, int] | None = None) -> bool:
         if pool not in self.pools:
             return False
         scale = self._scale
@@ -689,8 +784,7 @@ class ScaleFileSink:
 
             scale = scale_pool
         cfg, path = self.pools[pool]
-        return scale(cfg, path, nodes, source="auto",
-                     extra={"broker": {"offers": dict(offers), "refill": refill}}) == 0
+        return scale(cfg, path, nodes, source="auto", extra={"broker": self._plan(offers, refill, running)}) == 0
 
 
 # -- phase 2: moving a node between islands ----------------------------------------
