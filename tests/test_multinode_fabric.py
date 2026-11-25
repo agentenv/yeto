@@ -8,6 +8,7 @@ RDMA; every other source and shape runs NCCL over TCP, as before.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -15,6 +16,7 @@ import types
 
 import pytest
 
+from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from yeto import launcher
 from yeto.gpu_spec import parse_gpu_spec
 from yeto.launch import topology
@@ -136,3 +138,63 @@ def test_an_island_that_orders_no_tier_runs_over_tcp(monkeypatch):
     task = _task(monkeypatch, "nebius:2x8xh100", "--rl-island-network-tier", "none")
     assert getattr(task.resources, "network_tier", None) is None
     assert "export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}" in task.run
+
+
+# --- the dry-run note for an island on TCP ------------------------------------------------
+
+def _notes(gpu: str, tier: str = "auto", inventory=None):
+    args = types.SimpleNamespace(rl_island_network_tier=tier, rl_node_inventory_nodes=inventory)
+    return topology.fabric_bandwidth_notes(args, parse_gpu_spec(gpu))
+
+
+def test_an_island_on_tcp_gets_the_bandwidth_note():
+    [note] = _notes("nebius:2x1xl40s")
+    assert note.startswith("[preflight] note: island 0 (nebius:2x1xL40S)")
+    assert "over TCP sockets" in note and "cross-node bandwidth is limited" in note
+    assert "nebius offers IB for H100:8, H200:8 only" in note
+    [note] = _notes("nebius:2x8xh100", tier="none")
+    assert "--rl-island-network-tier none" in note
+    [note] = _notes("gcp:2x8xh100")
+    assert "yeto orders no IB or EFA tier on gcp" in note
+    [note] = _notes("aws:1x8xh100,aws:2x8xa10g")  # one note, for the multi-node TCP island
+    assert note.startswith("[preflight] note: island 1 (aws:2x8xA10G)") and "aws offers EFA for" in note
+
+
+@pytest.mark.parametrize("gpu", ["nebius:2x8xh100", "aws:2x8xh100", "modal:2x8xb300", "nebius:1x8xh100",
+                                 "nebius:1x1xl40s", "gcp:1x8xh100"])
+def test_islands_on_ib_efa_rdma_or_one_node_get_no_note(gpu):
+    assert _notes(gpu) == []
+
+
+def _inventory(fabric: str):
+    from yeto.launch.node_inventory import parse_inventory
+
+    path = topology.__file__.rsplit("/yeto/", 1)[0] + "/examples/k31/inventory.b300-6x8-baremetal.yaml"
+    import yaml
+
+    doc = yaml.safe_load(open(path))
+    for node in doc["nodes"]:
+        node["fabric"] = fabric
+    return parse_inventory(doc)
+
+
+def test_an_ssh_island_follows_its_inventory_fabric():
+    assert _notes("ssh:6x8xb300", inventory=_inventory("ib")) == []  # the customer bare-metal kit
+    assert _notes("ssh:6x8xb300", inventory=_inventory("roce")) == []
+    [note] = _notes("ssh:6x8xb300", inventory=_inventory("tcp"))
+    assert "inventory trainer node(s)" in note and "declare fabric: tcp" in note
+    assert _notes("ssh:6x8xb300", inventory=None) == []  # no inventory: the launch refuses it itself
+
+
+def test_the_dry_run_prints_the_note(monkeypatch, capsys, _fake_sky, _no_modal_listing):  # noqa: F811
+    from test_verl_full_parameter_launch import _prepared
+
+    from yeto.launcher import dry_run_plan
+
+    args = _prepared(_launcher_args("ports", ("--reward-function", "gsm8k_reward:score",
+                                                "--rollout-batch-size", "8"), gpu="nebius:2x8xh100"))
+    args.rl_island_network_tier = "none"
+    plan = dry_run_plan(args)
+    out = capsys.readouterr().out
+    assert "[preflight] note: island 0 (nebius:2x8xH100) runs NCCL between its 2 nodes over TCP sockets" in out
+    assert "cross-node bandwidth" not in json.dumps(plan)  # a note only: the plan is unchanged
