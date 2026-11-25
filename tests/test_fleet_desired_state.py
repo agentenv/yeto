@@ -631,6 +631,19 @@ def test_a_reconfigure_waits_for_the_background_calls_of_the_old_ops(tmp_path):
     f.change(lambda d: dz.sampler_pools(d)["nc"]["pool"].update(image="new"))
     f.c.reconciler.step(f.c)
     assert len(f.routes["nc"]) == 1 and not pool.roll_tickets and "nc" in f.c.reconciler.pending_rolls
+    from yeto.launch.pool import fleet_reconcile as fr  # noqa: PLC0415
+
+    t = [0.0]
+    f.c.reconciler.clock = lambda: t[0]
+    f.c.reconciler._held_since["nc"] = 0.0  # noqa: SLF001 - held since t=0
+    t[0] = fr.RECONFIGURE_WAIT_ALERT_S - 1
+    f.c.reconciler.step(f.c)
+    waiting = lambda: [e for e in pool.events.events if e["event"].endswith("reconfigure_waiting")]  # noqa: E731
+    assert not waiting()
+    for _ in range(2):  # bounded: reported once, still never swapped while the call runs
+        t[0] += 60
+        f.c.reconciler.step(f.c)
+    assert len(waiting()) == 1 and waiting()[0]["tickets"] == ["t-bg"] and len(f.routes["nc"]) == 1
     running.set_result(None)
     f.c.reconciler.step(f.c)
     assert len(f.routes["nc"]) == 2 and pool.roll_tickets and "nc" not in f.c.reconciler.pending_rolls
