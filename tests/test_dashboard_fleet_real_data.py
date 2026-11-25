@@ -367,11 +367,12 @@ def test_fleet_cost_table_names_trainers_pools_and_the_syncer(tmp_path):
     assert "Specs: ." not in cost and "undefined" not in cost and "NaN" not in cost
 
 
-def test_a_per_island_fleet_s_trainers_cost_what_run_budget_counts(tmp_path):
+def test_a_per_island_fleet_s_trainers_cost_what_run_budget_counts(tmp_path, monkeypatch):
     """fleet.launch per_island: the cost panel bills each trainer island from its launch
     records with the function run.budget counts them with (trainer_worker.island_spend of
     billed): an island moved from $8/h to $100/h, and one that ran 1 h without a price
-    (its declared $5.06/h), not the plan price times the tape hours."""
+    (its declared $5.06/h), not the plan price times the tape hours. Read by the dashboard's
+    own pump (``PlanFile.pump_tapes``, what the server and ``yeto dashboard`` call)."""
     from yeto.rl import trainer_worker as tw
 
     plan = dict(plan_doc(prices=True), launch="per_island", max_islands=2)
@@ -387,7 +388,9 @@ def test_a_per_island_fleet_s_trainers_cost_what_run_budget_counts(tmp_path):
     r = reduce(root)
     pf = fleet_islands.PlanFile([], objs)
     pf.pump(r)
-    assert pf.pump_trainer_spend(r, now=now)
+    monkeypatch.setattr("time.time", lambda: now)
+    pf.pump_tapes(r)
+    assert r.trainer_spend["at"] == now
     cost = r.cost(r.max_ts)
     rows = {row["id"]: row for row in cost["islands"]}
     expected = tw.island_spend(tw.billed(objs, now), {0: 5.06, 1: 5.06})

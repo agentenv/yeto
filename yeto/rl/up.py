@@ -638,6 +638,7 @@ class Run:
         # why run up refuses this config's breakers section (set by scale: a scale that adds nodes is refused)
         self.breakers_refusal: str | None = None
         self.applied_desired: dict[str, Any] | None = None  # store control plane: the applied state (adopt_desired)
+        self.desired_doc: dict[str, Any] | None = None  # store control plane: the desired state read (adopt_desired)
         self.auto_backlog = self._derive_auto_backlog()
 
     def _derive_auto_backlog(self) -> dict[str, Any] | None:
@@ -1794,6 +1795,7 @@ class Run:
                 doc = store.read()
         if doc is None:
             return None
+        self.desired_doc = doc
         names = list(sampler_pools(doc))
         if names != [ref.name for ref in self.pools]:
             _log(f"fleet: the desired state (generation {doc['generation']}) drives pool(s) {names}; the run config "
@@ -2744,13 +2746,16 @@ class Run:
 
     def island_price_problem(self) -> str | None:
         """A run budget and a per-island fleet whose trainer island has no price: neither
-        ``islands[k].trainer.usd_per_h`` nor a billing row of the unified price table for its
-        ``--gpu`` (``yeto.rl.trainer_worker.table_usd_per_h``). Its spend would count $0, so
-        it is refused before anything is ordered. None when every island is priced (or no
-        per-island fleet)."""
+        its ``usd_per_h`` (``islands[k].trainer.usd_per_h``, or ``--usd-per-h`` of an island
+        added or moved later) nor a billing row of the unified price table for its ``--gpu``
+        (``yeto.rl.trainer_worker.table_usd_per_h``). The run config's islands and the trainer
+        members of the fleet's desired state (read by the preflight: islands added or moved at
+        run time, the ones running) are checked. Its spend would count $0, so it is refused
+        before anything is ordered. None when every island is priced (or no per-island fleet)."""
         plan = self.fleet_plan()
         if plan is None or not plan.per_island:
             return None
+        from yeto.launch.pool.desired import trainers  # noqa: PLC0415
         from yeto.rl import trainer_worker  # noqa: PLC0415
 
         for island in plan.islands:
@@ -2760,6 +2765,14 @@ class Run:
                         f"islands[{island.index}].trainer.usd_per_h nor a billing row of the price table "
                         "(yeto/cost/prices.json) for its machines; its spend would count $0. Give its price: "
                         f"islands[{island.index}].trainer.usd_per_h (an island added later: --usd-per-h)")
+        for name, member in sorted(trainers(self.desired_doc).items()):
+            gpu = member.get("gpu")
+            if member.get("usd_per_h") is None and trainer_worker.table_usd_per_h(gpu) is None:
+                return (f"fleet.launch per_island with a run budget: trainer island {name} of the fleet's desired "
+                        f"state (learner {member.get('learner_id')}, --gpu {gpu}) has no price: neither its "
+                        "--usd-per-h nor a billing row of the price table (yeto/cost/prices.json) for its "
+                        f"machines; its spend would count $0. Give its price: `yeto fleet island move --config "
+                        f"<run config> --name {name} --gpu {gpu} --usd-per-h <price>`")
         return None
 
     def breakers_problem(self) -> str | None:

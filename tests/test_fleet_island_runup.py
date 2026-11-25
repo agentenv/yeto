@@ -444,9 +444,30 @@ def test_a_run_budget_refuses_a_per_island_trainer_without_a_price(tmp_path, mon
     path.write_text(json.dumps(doc))
     assert up.Run(up.load_config(str(path)), state_root=tmp_path / "t").island_price_problem() is None
     doc["islands"][1]["trainer"]["gpu"] = "aws:2xh100@us-east-2"
-    doc.pop("budget", None)
-    doc.get("breakers", {}).get("run", {}).pop("budget", None)
+    assert "breakers" not in doc  # the example's budget is its budget: section only
+    del doc["budget"]["usd"]  # no run budget: the unpriced island passes (the spend warns)
     path.write_text(json.dumps(doc))
     free = up.Run(up.load_config(str(path)), state_root=tmp_path / "f")
-    if free.breaker_param("run.budget", "usd") is None:
-        assert free.budget_problem() is None
+    assert free.breaker_param("run.budget", "usd") is None
+    assert free.island_price_problem() is not None and free.budget_problem() is None
+
+
+def test_a_run_budget_refuses_an_unpriced_island_of_the_desired_state(tmp_path, monkeypatch):
+    """An island added (or moved) at run time without a price while the run had no budget
+    is a trainer member of the fleet's desired state only: once the run config has a
+    budget, the preflight's read of the desired state refuses it as well."""
+    run, objects = build(tmp_path, monkeypatch)
+    run.attach_trainer_worker(FakeController(), objects, ops=FakeLaunches())  # seeds the run config's islands
+    store = dz.DesiredStore(objects)
+    late = dict(dz.trainers(store.read())["sglang"], name="late", learner_id=2,
+                gpu="aws:2xh100@us-east-2", usd_per_h=None, prefix="r-i2", pools=[])
+    store.update(lambda doc: doc["members"].append(late))
+    assert run.breaker_param("run.budget", "usd") is not None
+    assert run.island_price_problem() is None  # the run config's islands are priced; nothing read yet
+    run.adopt_desired()  # what the preflight reads first
+    problem = run.budget_problem()
+    assert problem and "trainer island late of the fleet's desired state" in problem
+    assert "--name late --gpu aws:2xh100@us-east-2 --usd-per-h" in problem
+    store.update(lambda doc: dz.trainers(doc)["late"].update(usd_per_h=6.0))
+    run.adopt_desired()
+    assert run.island_price_problem() is None
