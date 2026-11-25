@@ -35,6 +35,9 @@ Kinds and the attrs each writer fills in:
   SSH nodes; attrs: run_id, island, incarnation, nodes (name, host, proxy_jump),
   docker, kill_grace_s, gpus, usd_per_hour (declared price, optional)
   (``yeto.launch.ssh_trainer_ledger``).
+* ``sky_storage`` id = the bucket name sky creates for a sky island's storage mount (the
+  per-island checkpoint volume); attrs: cluster, cluster_prefix, cloud, region, mount,
+  persistent (``yeto.launch.sky_storage_ledger``). Not compute: billed 0.
 
 Other processes of the same run (sampler launch scripts, the NC pool) find the
 ledger through ``$YETO_RESOURCE_LEDGER`` (see :func:`current`).
@@ -68,7 +71,7 @@ def _stamp(value: Any) -> float | None:
 LEDGER_ENV = "YETO_RESOURCE_LEDGER"
 LEDGER_FILE = "resources.jsonl"
 
-KINDS = ("modal_app", "modal_call", "nc_lease", "sky_cluster", "ssh_trainer")
+KINDS = ("modal_app", "modal_call", "nc_lease", "sky_cluster", "ssh_trainer", "sky_storage")
 
 
 def kinds() -> tuple[str, ...]:

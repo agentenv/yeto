@@ -228,6 +228,26 @@ def _island_engine_rows(args, m) -> list[dict]:
     return [r for r in island_engine.records(args, rl_island_count(args)) if r["island"] == m]
 
 
+def _release_sky_storages(ledger, storages: dict[str, str], unverified) -> None:
+    """Release every bucket sky created for an island of this launch whose cluster is gone
+    (``sky_storage_ledger``: exact names, ledger release); a cluster whose teardown is not
+    confirmed keeps its bucket (it may still mount it). Never raises."""
+    from .launch import sky_storage_ledger
+
+    attrs_by_name = {}
+    try:
+        attrs_by_name = {r.id: r.attrs for r in ledger.open_resources() if r.kind == sky_storage_ledger.KIND}
+    except Exception:  # noqa: BLE001 - a NullLedger, an unreadable ledger: nothing recorded to release
+        return
+    for name, cluster in sorted(storages.items()):
+        if cluster in unverified or name not in attrs_by_name:
+            continue
+        try:
+            sky_storage_ledger.release(ledger, name, attrs_by_name[name], by="teardown")
+        except Exception as error:  # noqa: BLE001 - yeto cleanup / run down retries it
+            print(f"[launcher] sky storage {name}: release failed: {error}", file=sys.stderr)
+
+
 def _sky_overlay_swap(iargs, cloud) -> dict | None:
     """``{"pinned", "pulled", "why"}`` when the sky VM of a trainer island pulls the
     overlay-safe repack of its ``--rl-image`` (trainer_image_check.sky_pull_image),
@@ -822,6 +842,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         except Exception as e:
             print(f"[launcher] on_clusters hook failed: {e}", file=sys.stderr)
     clusters: list[str] = []
+    sky_storages: dict[str, str] = {}  # bucket sky creates -> its island cluster (sky_storage_ledger)
     controller = None
     teardown_unverified = False
     run_started_unix = time.time()  # Modal rows created after this are this run's app
@@ -988,6 +1009,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             guard_order=None if island_states is None else island_states.guard_order,
             ledger=cost_ledger, events_dir=events_dir, collectors=event_collectors)
         island_overrides = _island_overrides(args, specs)
+        from .launch import sky_storage_ledger
+
         for m, spec in enumerate(specs):
             name = learner_names[m]
             role = _island_role(args, specs, m)
@@ -1022,6 +1045,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 # its record names a cluster and a job that still run: no order, no restart
                 rids[name] = (m, ("adopted", adoption[name].job_id))
                 continue
+            # the buckets sky creates for this island's storage mounts, before the order: a
+            # launch that fails for capacity leaves them (no cluster, so no sky down)
+            sky_storages.update({s: name for s in sky_storage_ledger.record(
+                cost_ledger, name, island.task, cluster_prefix=args.cluster_prefix, cloud=spec.cloud,
+                region=spec.region)})
             rids[name] = (m, ("order", provision.order(island)))
         modal_cfgs.update({n: i.task for n, i in provision.batch("modal").items()})
 
@@ -1584,6 +1612,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     unverified.append(name)
                 else:
                     cost_ledger.released("sky_cluster", name, name)
+            # the buckets sky created for the islands' volumes: a cluster that is gone (torn
+            # down here or by the controller, or never provisioned) no longer mounts its bucket
+            _release_sky_storages(cost_ledger, sky_storages, unverified)
             # Sky islands without an echoed tape
             # (their tapes are in the pre-teardown diagnostics, also for islands
             # the controller tore down earlier) still give the manifest T_s.
