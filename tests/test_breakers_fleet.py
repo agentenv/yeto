@@ -206,8 +206,8 @@ def test_fleet_spend_counts_pools_every_island_and_the_syncer(tmp_path):
     assert fleet.fleet_spend(pool_node_hours=[(-1, 24), (5, None)], island_hours=[2.0],
                              island_usd_per_h=[float("nan")]).total_usd == 0.0
     assert fleet.island_prices({"islands": [{}]}) == (0.0,)
-    # unset: by where the syncer runs (the launch default --controller head: on the head node, $0)
-    assert fleet.syncer_price({"syncer": {}}) == fleet.syncer_price({}) == 0.0
+    # unset: the machine the syncer runs on (the launch default: the controller head VM on AWS)
+    assert fleet.syncer_price({"syncer": {}}) == fleet.syncer_price({}) == 0.384
     with pytest.raises(ValueError, match="2 island hours for 1 island prices"):
         fleet.fleet_spend(pool_node_hours=[], island_hours=[1.0, 2.0], island_usd_per_h=[1.0])
 
@@ -348,13 +348,22 @@ def _syncer_cfg(*argv: str, usd: object = None) -> dict:
     return cfg if usd is None else {**cfg, "syncer": {"usd_per_h": usd}}
 
 
-def test_a_syncer_on_the_head_node_bills_nothing_of_its_own():
-    """--controller head (the launch default) runs the syncer as a process on the head node."""
-    for argv in ((), ("--controller", "head"), ("--controller=head",)):
-        cfg = _syncer_cfg(*argv)
-        assert fleet.run_syncer_placement(cfg) == fleet.SyncerPlacement("head")
-        rate, source = fleet.syncer_rate(None, fleet.run_syncer_placement(cfg))
-        assert rate == 0.0 and fleet.ON_HEAD in source and fleet.syncer_price(cfg) == 0.0
+@pytest.mark.parametrize("argv, provider", [
+    ((), "aws"), (("--controller", "head"), "aws"), (("--controller=head",), "aws"),
+    (("--controller", "head", "--syncer-region", "modal/us-east"), "modal"),
+])
+def test_a_syncer_on_the_controller_head_vm_bills_that_vm(argv, provider):
+    """--controller head (the launch default) runs the syncer on the controller head VM: one
+    on-demand VM on the --syncer-region cloud, in no other fleet spend line, priced by its row."""
+    from yeto.cost import prices
+
+    cfg = _syncer_cfg(*argv)
+    placement = fleet.run_syncer_placement(cfg)
+    assert placement == fleet.SyncerPlacement("head", provider)
+    rate, source = fleet.syncer_rate(None, placement)
+    assert rate > 0 and rate == fleet.syncer_price(cfg) == prices.syncer_usd_h(provider)
+    assert source.startswith(f"the {fleet.HEAD_VM} on {provider} (it hosts the syncer and the fleet controller): "
+                             f"price table syncer@{provider}")
     # the compiled trainer.argv wins over fleet.trainer_argv
     compiled = {**_syncer_cfg("--controller", "head"), "trainer": {"argv": ["--controller", "local"]}}
     assert fleet.run_syncer_placement(compiled) == fleet.SyncerPlacement("vm", "aws")
@@ -371,19 +380,22 @@ def test_a_syncer_on_its_own_vm_reads_the_price_row_of_that_provider(argv, provi
     placement = fleet.run_syncer_placement(cfg)
     assert placement == fleet.SyncerPlacement("vm", provider)
     rate, source = fleet.syncer_rate(None, placement)
-    assert rate == fleet.syncer_price(cfg) == usd and source.startswith(f"its own {provider} VM: price table syncer@{provider}")
+    assert rate == fleet.syncer_price(cfg) == usd
+    assert source.startswith(f"its own syncer VM on {provider}: price table syncer@{provider}")
 
 
 def test_a_syncer_vm_without_a_price_row_or_with_a_set_price():
     cfg = _syncer_cfg("--controller", "local", "--syncer-region", "nebius/eu-north1")
     rate, source = fleet.syncer_rate(None, fleet.run_syncer_placement(cfg))
-    assert rate is None and "no price table row for a syncer VM on nebius" in source
+    assert rate is None and source == "its own syncer VM on nebius: no price table row for it"
     assert fleet.syncer_price(cfg) == 0.0  # unpriced counts $0 (the dry-run says so)
     # syncer.usd_per_h set wins wherever it runs; 0 bills nothing
     assert fleet.syncer_price(_syncer_cfg("--controller", "local", usd=1.5)) == 1.5
     assert fleet.syncer_price(_syncer_cfg("--controller", "local", usd=0)) == 0.0
     assert fleet.syncer_rate(None, None) == (None, "the syncer's placement is unknown")
     assert fleet.syncer_placement(["--rl-single-island-no-sync"]) == fleet.SyncerPlacement("none")
+    assert fleet.syncer_rate(None, fleet.SyncerPlacement("none"))[0] == 0.0
+    assert fleet.syncer_placement(["--syncer-memory", "96"]).memory_gib == 96.0
 
 
 def test_the_syncer_placement_defaults_are_the_launch_parser_defaults():
@@ -393,3 +405,22 @@ def test_the_syncer_placement_defaults_are_the_launch_parser_defaults():
     args = build_parser().parse_args(["launch", "--training-mode", "rl", "--model", "m", "--data", "d.jsonl"])
     assert args.controller == fleet.DEFAULT_CONTROLLER
     assert syncer.syncer_cloud(args) == fleet.DEFAULT_SYNCER_CLOUD
+    assert args.syncer_memory == fleet.DEFAULT_SYNCER_MEMORY_GIB
+    assert fleet.syncer_placement([]).memory_gib == fleet.DEFAULT_SYNCER_MEMORY_GIB
+
+
+def test_the_dry_run_says_when_the_syncer_memory_outgrows_the_price_row():
+    import types
+
+    from yeto.rl import up_fleet
+
+    base = ["--training-mode", "rl", "--model", "m", "--data", "d.jsonl"]
+    plan = types.SimpleNamespace(islands=())
+    lines = up_fleet.syncer_lines(plan, base, None)
+    assert any(line.startswith("fleet: syncer.usd_per_h is unset: the fleet spend counts the syncer at $0.384/h, "
+                               "the controller head VM on aws") for line in lines)
+    assert not any("--syncer-memory" in line for line in lines)
+    lines = up_fleet.syncer_lines(plan, [*base, "--syncer-memory", "96"], None)
+    assert any(line.startswith("WARNING: fleet: --syncer-memory 96 GiB orders a larger machine") for line in lines)
+    assert not any("--syncer-memory" in line for line in up_fleet.syncer_lines(plan, [*base, "--syncer-memory", "96"],
+                                                                                {"usd_per_h": 1.0}))

@@ -306,8 +306,8 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     node price, else the price table's for its provider and card; hours: the union of its
     incarnations' first to last event, a lower bound) and one for the syncer (the plan's
     ``syncer.usd_per_h``; unset: by where the plan says it runs, as ``run up`` bills it
-    (``breakers.fleet.syncer_rate``: $0 on the head node, else the price table's syncer row
-    of its VM's provider); a plan without it or no plan: unpriced;
+    (``breakers.fleet.syncer_rate``: the controller head VM or its own syncer VM at the price
+    table's syncer row of that VM's provider); a plan without it or no plan: unpriced;
     hours: the trainers' first to last event). None (``rows`` unchanged) off a fleet."""
     from . import fleet_islands  # noqa: PLC0415
 

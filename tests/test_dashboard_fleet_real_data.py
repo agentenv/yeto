@@ -195,9 +195,11 @@ def test_a_plan_written_before_the_prices_keeps_the_syncer_unpriced(tmp_path):
 
 
 @pytest.mark.parametrize("placement, rate, says", [
-    ({"where": "head", "provider": None}, 0.0, "on the head node (--controller head"),  # --controller head: no machine of its own
-    ({"where": "vm", "provider": "aws"}, 0.384, "its own aws VM: price table syncer@aws 0.384 USD/h"),
-    ({"where": "vm", "provider": "modal"}, 2.4, "its own modal VM: price table syncer@modal 2.4 USD/h"),
+    # --controller head: the controller head VM it shares with the fleet controller, billed by its row
+    ({"where": "head", "provider": "aws"}, 0.384, "the controller head VM on aws (it hosts the syncer and the fleet "
+                                                  "controller): price table syncer@aws 0.384 USD/h"),
+    ({"where": "vm", "provider": "aws"}, 0.384, "its own syncer VM on aws: price table syncer@aws 0.384 USD/h"),
+    ({"where": "vm", "provider": "modal"}, 2.4, "its own syncer VM on modal: price table syncer@modal 2.4 USD/h"),
 ])
 def test_an_unset_syncer_price_follows_where_the_plan_says_the_syncer_runs(tmp_path, placement, rate, says):
     doc = plan_doc(prices=False) | {"syncer": {"usd_per_h": None, "placement": placement}}
@@ -218,8 +220,8 @@ def test_compile_writes_the_pool_and_syncer_prices_into_the_plan():
     cfg["syncer"] = {"usd_per_h": 0.26}
     _out, plan = compile_fleet(cfg)
     doc = plan.to_json()
-    # the example launches with the default --controller head: the syncer runs on the head node
-    assert doc["syncer"] == {"usd_per_h": 0.26, "placement": {"where": "head", "provider": None}}
+    # the example launches with the default --controller head: the syncer runs on the controller head VM (AWS)
+    assert doc["syncer"] == {"usd_per_h": 0.26, "placement": {"where": "head", "provider": "aws"}}
     assert [[p["usd_per_h"] for p in i["pools"]] for i in doc["islands"]] == [[4.0, 2.0], [2.0]]
     assert FleetPlan.from_json(doc).to_json() == doc
     loaded = fleet_islands.load_plan(doc)

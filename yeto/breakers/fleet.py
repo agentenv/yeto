@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 FLEET_ENTRIES: tuple[str, ...] = ("run.budget", "run.wall_clock")  # one budget, one wall clock
@@ -182,16 +182,20 @@ def sandbox_price(run_config: Mapping[str, Any]) -> float:
 # ``yeto launch`` defaults the syncer placement reads (pinned against the parser by a test)
 DEFAULT_CONTROLLER = "head"
 DEFAULT_SYNCER_CLOUD = "aws"
-ON_HEAD = "on the head node"
+DEFAULT_SYNCER_MEMORY_GIB = 32
+HEAD_VM = "controller head VM"
 
 
 @dataclass(frozen=True)
 class SyncerPlacement:
-    """Where a fleet's syncer runs: ``head`` (a process on the head node, --controller head),
-    ``vm`` (its own sky VM on ``provider``, --controller local) or ``none`` (no syncer)."""
+    """Where a fleet's syncer runs: ``head`` (on the controller head VM it shares with the fleet
+    controller, --controller head), ``vm`` (its own syncer VM, --controller local) or ``none`` (no
+    syncer). Either machine is one on-demand sky VM on ``provider`` (the --syncer-region cloud) with
+    cpus 8+ and ``memory_gib`` (--syncer-memory)."""
 
     where: Literal["head", "vm", "none"]
     provider: str | None = None
+    memory_gib: float | None = field(default=None, compare=False)
 
     def to_json(self) -> dict[str, Any]:
         return {"where": self.where, "provider": self.provider}
@@ -213,10 +217,14 @@ def syncer_placement(argv: Sequence[str]) -> SyncerPlacement:
     argv = [str(a) for a in argv]
     if _sets(argv, "--rl-single-island-no-sync"):
         return SyncerPlacement("none")
-    if (_last_value(argv, "--controller") or DEFAULT_CONTROLLER) == "head":
-        return SyncerPlacement("head")
+    where = "head" if (_last_value(argv, "--controller") or DEFAULT_CONTROLLER) == "head" else "vm"
     region = _last_value(argv, "--syncer-region") or ""
-    return SyncerPlacement("vm", region.split("/", 1)[0].lower() if "/" in region else DEFAULT_SYNCER_CLOUD)
+    try:
+        memory = float(_last_value(argv, "--syncer-memory") or DEFAULT_SYNCER_MEMORY_GIB)
+    except ValueError:
+        memory = None
+    return SyncerPlacement(where, region.split("/", 1)[0].lower() if "/" in region else DEFAULT_SYNCER_CLOUD,
+                           memory)
 
 
 def run_syncer_placement(run_config: Mapping[str, Any]) -> SyncerPlacement:
@@ -229,23 +237,23 @@ def run_syncer_placement(run_config: Mapping[str, Any]) -> SyncerPlacement:
 
 def syncer_rate(usd_per_h: Any, placement: SyncerPlacement | None) -> tuple[float | None, str]:
     """The syncer's USD per hour and where it comes from: ``syncer.usd_per_h`` when set (0: it
-    bills nothing); else by placement: on the head node or no syncer $0 (the head runs it next
-    to the controller), its own VM the price table's ``services.syncer`` row of that provider.
-    None: unpriced (no row for the provider, or the placement is unknown)."""
+    bills nothing); else the machine it runs on (the controller head VM or its own syncer VM) at
+    the price table's ``services.syncer`` row of that VM's provider; no syncer: $0. None:
+    unpriced (no row for the provider, or the placement is unknown)."""
     if usd_per_h is not None and not isinstance(usd_per_h, bool):
         return _price(usd_per_h), "run config syncer.usd_per_h"
     if placement is None:
         return None, "the syncer's placement is unknown"
     if placement.where == "none":
         return 0.0, "no syncer (--rl-single-island-no-sync)"
-    if placement.where == "head":
-        return 0.0, f"{ON_HEAD} (--controller head runs it next to the controller, on no machine of its own)"
     from yeto.cost import prices  # noqa: PLC0415
 
+    machine = (f"the {HEAD_VM} on {placement.provider} (it hosts the syncer and the fleet controller)"
+               if placement.where == "head" else f"its own syncer VM on {placement.provider}")
     row = prices.service(prices.SYNCER, placement.provider or "")
     if row is None:
-        return None, f"no price table row for a syncer VM on {placement.provider}"
-    return row.usd_h, f"its own {placement.provider} VM: price table {row.cited()}"
+        return None, f"{machine}: no price table row for it"
+    return row.usd_h, f"{machine}: price table {row.cited()}"
 
 
 def syncer_price(run_config: Mapping[str, Any]) -> float:

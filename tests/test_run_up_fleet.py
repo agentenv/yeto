@@ -427,7 +427,7 @@ def test_run_up_writes_the_plan_the_dry_run_printed(files, no_subprocess, monkey
                                 "rollout_quant": None, "usd_per_h": 4.0}
     assert east["pools"][1]["engine"] == "sglang" and east["pools"][1]["rollout_quant"] == 1
     assert east["pools"][1]["usd_per_h"] == 2.0
-    assert doc["syncer"] == {"usd_per_h": None, "placement": {"where": "head", "provider": None}}
+    assert doc["syncer"] == {"usd_per_h": None, "placement": {"where": "head", "provider": "aws"}}
     assert (west["learner"], west["max_policy_age"], [p["name"] for p in west["pools"]]) == (1, 3, ["i1-sglang"])
     state = json.loads((up.STATE_ROOT / "r" / "state.json").read_text())
     assert state["steps"]["fleet_plan"]["object"] == "s3://b/runs/r/fleet/plan.json"

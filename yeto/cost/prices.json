@@ -44,11 +44,11 @@
      "source": "National Compute rate: 3e6 ucr per GPU-hour, 1 credit (1e6 ucr) ~ 1 USD (K3.1 run quote)", "as_of": "2026-11-11"}
   ],
   "services": {
-    "_doc": "Machines priced by what they serve, not by their GPUs: per service, one row per provider the service runs on, each a whole-machine USD per hour with its grade, source and date. `syncer`: a fleet's syncer on its own machine (--controller local: a sky VM on the --syncer-region cloud), billed when the run config sets no syncer.usd_per_h; a syncer on the head node (--controller head) bills nothing of its own.",
+    "_doc": "Machines priced by what they serve, not by their GPUs: per service, one row per provider the service runs on, each a whole-machine USD per hour with its grade, source and date. `syncer`: the machine a fleet's syncer runs on, billed when the run config sets no syncer.usd_per_h: the controller head VM it shares with the fleet controller (--controller head, the default) or its own syncer VM (--controller local); either is one on-demand sky VM on the --syncer-region cloud with cpus 8+ and --syncer-memory.",
     "syncer": [
       {"provider": "aws", "usd_h": 0.384, "grade": "billing",
        "source": "AWS EC2 on-demand Linux price list: m6i.2xlarge (8 vCPU, 32 GiB) in us-east-1 / us-west-2", "as_of": "2026-11-25",
-       "note": "the cheapest instance sky picks for the syncer VM's default resources (cpus 8+, --syncer-memory 32 GiB); a larger --syncer-memory orders a larger machine: set syncer.usd_per_h"},
+       "note": "the cheapest instance sky picks for the head / syncer VM's default resources (cpus 8+, --syncer-memory 32 GiB); a larger --syncer-memory orders a larger machine: set syncer.usd_per_h"},
       {"provider": "modal", "usd_h": 2.4, "grade": "billing",
        "source": "Modal billing report of a two-island fleet run: the syncer's Modal CPU container (8 cores, 96 GiB) ~2.4 USD/h", "as_of": "2026-11-24",
        "note": "measured on the bill; the estimate from CPU and memory list prices (1.32 USD/h) undercounted it"}

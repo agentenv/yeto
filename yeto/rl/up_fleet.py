@@ -420,13 +420,19 @@ def syncer_lines(plan: Any, trainer_argv: Sequence[str], syncer: dict[str, Any] 
 
     price = (syncer or {}).get("usd_per_h") if isinstance(syncer, dict) else None
     if price is None:
-        rate, source = breakers_fleet.syncer_rate(None, breakers_fleet.syncer_placement(trainer_argv))
+        placement = breakers_fleet.syncer_placement(trainer_argv)
+        rate, source = breakers_fleet.syncer_rate(None, placement)
         if rate is None:
             out.append(f"fleet: syncer.usd_per_h is unset and {source}: the fleet spend counts the syncer at $0/h "
                        "(set syncer.usd_per_h)")
         else:
             out.append(f"fleet: syncer.usd_per_h is unset: the fleet spend counts the syncer at ${rate:g}/h, {source}"
                        "; set syncer.usd_per_h to price its own machine")
+            mem = placement.memory_gib
+            if mem is not None and mem > breakers_fleet.DEFAULT_SYNCER_MEMORY_GIB:
+                out.append(f"WARNING: fleet: --syncer-memory {mem:g} GiB orders a larger machine than the price table "
+                           f"row prices ({breakers_fleet.DEFAULT_SYNCER_MEMORY_GIB} GiB): set syncer.usd_per_h to its "
+                           "price")
     return out
 
 

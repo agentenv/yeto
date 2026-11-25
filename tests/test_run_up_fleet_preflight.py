@@ -306,9 +306,9 @@ def test_the_syncer_follows_islands_pinned_to_one_area(files, no_subprocess, cap
     out = _lines(capsys)
     assert "preflight: fleet: syncer region us-east-1 (follows the islands' @region)" in out
     assert not any("WARNING: syncer" in line for line in out)
-    assert "preflight: fleet: syncer.usd_per_h is unset: the fleet spend counts the syncer at $0/h, on the head " \
-           "node (--controller head runs it next to the controller, on no machine of its own); set syncer.usd_per_h " \
-           "to price its own machine" in out
+    assert any(line.startswith("preflight: fleet: syncer.usd_per_h is unset: the fleet spend counts the syncer at "
+                               "$0.384/h, the controller head VM on aws (it hosts the syncer and the fleet controller): "
+                               "price table syncer@aws 0.384 USD/h") for line in out)
 
 
 def test_an_unpriced_island_trainer_is_warned():
