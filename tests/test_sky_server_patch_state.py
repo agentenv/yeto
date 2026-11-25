@@ -316,13 +316,33 @@ def test_a_verda_sky_pool_is_refused_at_its_start_and_dry_run_unless_warn(monkey
 
 def test_a_checkouts_parent_as_cwd_does_not_decide(tmp_path, monkeypatch, no_run):
     """A server started from a checkout's parent has ``<parent>/yeto`` (the checkout root,
-    no ``__init__.py``) first on its path: a namespace portion, which a regular yeto
-    later on the path beats. With no regular yeto at all it is unreadable."""
+    no ``__init__.py``) first on its path: a namespace portion. With no regular yeto
+    anywhere the hook's ImportError fallback imports its repo; a portion with its own
+    ``sky_patches`` is what the import finds; a regular yeto later on the path beats
+    every portion."""
     python, site, repo = _venv(tmp_path)
     parent = tmp_path / "work"
     (parent / "yeto" / "docs").mkdir(parents=True)  # a checkout root: no yeto/__init__.py
     _server(monkeypatch, python, cwd=str(parent))
+    assert patches.server_patch_state(TARGET, server_common=_Common())[0]  # the hook's repo
+    (parent / "yeto" / "sky_patches").mkdir()  # a portion holding an older sky_patches: imported first
+    (parent / "yeto" / "sky_patches" / "__init__.py").write_text("")
     ok, why = patches.server_patch_state(TARGET, server_common=_Common())
-    assert not ok and "namespace package" in why
+    assert not ok and "has no patch of" in why
     _yeto(site, verda=VERDA_SOURCE)  # a regular yeto in site-packages: it decides
     assert patches.server_patch_state(TARGET, server_common=_Common())[0]
+
+
+@pytest.mark.parametrize("where", ["portion", "regular package"])
+def test_a_sky_patches_directory_without_init_is_unreadable(tmp_path, monkeypatch, no_run, where):
+    """Python imports such a directory as a namespace package: the hook's install() is
+    missing there and nothing is applied, so it never reads as the repo's patch."""
+    python, _, _ = _venv(tmp_path)
+    root = tmp_path / "cwd"
+    (root / "yeto" / "sky_patches").mkdir(parents=True)
+    if where == "regular package":
+        (root / "yeto" / "__init__.py").write_text("")
+    _server(monkeypatch, python, cwd=str(root))
+    ok, why = patches.server_patch_state(TARGET, server_common=_Common())
+    assert not ok and "has no __init__.py" in why
+
