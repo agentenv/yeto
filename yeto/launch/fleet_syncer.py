@@ -27,6 +27,7 @@ The launcher's ``finally`` tears the syncer cluster down afterwards, as for any 
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from collections.abc import Callable
@@ -163,14 +164,47 @@ _LISTEN_SCRIPT = ("import socket, sys\n"
                   "    socket.create_connection(('127.0.0.1', int(port)), 3).close()\n")
 
 
-def syncer_listening(args: Any, *, head_mode: bool, syncer_cluster: str | None,
-                     run: Callable[..., Any] | None = None) -> bool:
-    """Whether every syncer port accepts a connection on the syncer's own machine: this
-    host under ``--controller head``, else ``ssh <syncer cluster>``. A probe from this
-    machine to the public address cannot tell: a local proxy accepts any connection."""
+# ssh exit codes that say nothing about the syncer: ssh itself failed (255: no host entry,
+# host key, auth), or the shell found no python3 (127).
+_CANNOT_CHECK_RC = {126, 127, 255}
+UNCHECKED_LIMIT = 3  # checks in a row that cannot be made from here: the launch fails, naming why
+# The syncer's line once its port is bound (syncer/src/server.rs, no ANSI: main.rs with_ansi(false)).
+LISTENING_LINE = re.compile(r"syncer listening port=(\d+)")
+
+
+def _ssh_config(cluster: str) -> list[str]:
+    """``-F <sky's generated ssh config of the cluster>`` when this HOME has it (ssh reads
+    the passwd home's config, which a launch under another HOME does not include)."""
+    path = os.path.expanduser(os.path.join("~", ".sky", "generated", "ssh", cluster))
+    return ["-F", path] if os.path.isfile(path) else []
+
+
+def _ssh_listening(cluster: str, ports: list[int], run: Callable[..., Any] | None) -> bool | str:
     import shlex
-    import socket
     import subprocess
+
+    command = f"python3 -c {shlex.quote(_LISTEN_SCRIPT)} " + " ".join(str(port) for port in ports)
+    try:
+        out = (run or subprocess.run)(["ssh", *_ssh_config(cluster), "-o", "BatchMode=yes",
+                                       "-o", "ConnectTimeout=10", cluster, command],
+                                      capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"ssh {cluster}: {type(error).__name__}: {error}"
+    if out.returncode in _CANNOT_CHECK_RC:
+        lines = [line for line in str(out.stderr or "").splitlines() if line.strip()]
+        return f"ssh {cluster} exited {out.returncode}" + (f": {lines[-1].strip()}" if lines else "")
+    return out.returncode == 0
+
+
+def syncer_listening(args: Any, *, head_mode: bool, syncer_cluster: str | None, syncer_job: Any = None,
+                     ops: Any = None, run: Callable[..., Any] | None = None) -> bool | str:
+    """Whether every syncer port is bound on the syncer's own machine: this host under
+    ``--controller head`` (a connect to 127.0.0.1), else the syncer job's log (its
+    ``syncer listening port=N`` lines, read through sky: no ssh), else ``ssh <syncer
+    cluster>`` and a connect to 127.0.0.1 there. A probe from this machine to the public
+    address cannot tell: a local proxy accepts any connection. A string: why it cannot be
+    checked from here (the log unreadable and ssh failed, or no python3 there)."""
+    import socket
 
     from .syncer import _head_ports
 
@@ -184,31 +218,52 @@ def syncer_listening(args: Any, *, head_mode: bool, syncer_cluster: str | None,
         return True
     if not syncer_cluster:
         return True  # nothing to check against: recorded as before
-    command = f"python3 -c {shlex.quote(_LISTEN_SCRIPT)} " + " ".join(str(port) for port in ports)
-    try:
-        out = (run or subprocess.run)(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", syncer_cluster,
-                                       command], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return out.returncode == 0
+    log_read: str | None = None
+    lines = getattr(ops, "job_log_lines", None)
+    if callable(lines) and syncer_job is not None:
+        try:
+            bound = {int(m.group(1)) for line in lines(syncer_cluster, syncer_job)
+                     if (m := LISTENING_LINE.search(str(line)))}
+        except Exception as error:  # noqa: BLE001 - ssh is asked instead
+            log_read = f"its job log: {type(error).__name__}: {error}"
+        else:
+            if set(ports) <= bound:
+                return True
+    state = _ssh_listening(syncer_cluster, ports, run)
+    if isinstance(state, str):
+        # a readable log that has no line yet: not listening (ssh is only the second witness)
+        return f"{log_read}; {state}" if log_read else (False if callable(lines) and syncer_job is not None
+                                                        else state)
+    return state
 
 
-def wait_listening(listening: Callable[[], bool], failed: Callable[[], str | None], *, where: str,
+def wait_listening(listening: Callable[[], bool | str], failed: Callable[[], str | None], *, where: str,
                    timeout_s: float = LISTEN_WAIT_S, poll_s: float = LISTEN_POLL_S,
                    sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] | None = None,
                    log: Callable[[str], None] = print) -> str | None:
     """Wait until the syncer process listens (``listening()``); None then. The reason it
     never will otherwise: its job ended in failure (``failed()`` gives a :class:`Final`),
-    or nothing listened within ``timeout_s``. Nothing is recorded meanwhile, so no
-    island dials a syncer that is not up yet (bug 25)."""
+    nothing listened within ``timeout_s``, or the check could not be made from here
+    (``listening()`` gave a reason :data:`UNCHECKED_LIMIT` times in a row: named, not
+    waited out). Nothing is recorded meanwhile, so no island dials a syncer that is not
+    up yet (bug 25)."""
     clock = clock or time.monotonic
     started = clock()
     said = False
+    unchecked = 0
     while True:
-        if listening():
+        state = listening()
+        if state is True:
             if said:
                 log(f"[launcher] fleet syncer: listening at {where} after {clock() - started:.0f}s")
             return None
+        if isinstance(state, str):
+            unchecked += 1
+            if unchecked >= UNCHECKED_LIMIT:
+                return (f"cannot check whether the syncer listens at {where}: {state} ({unchecked} checks in a "
+                        "row); no island was started")
+        else:
+            unchecked = 0
         why = failed()
         if isinstance(why, Final):
             return f"{why} before it listened at {where}"
@@ -317,7 +372,8 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
 
         def dead() -> str | None:
             return probe(ops, syncer_cluster, syncer_job)[0]
-    never = wait_listening(lambda: syncer_listening(args, head_mode=head_mode, syncer_cluster=syncer_cluster),
+    never = wait_listening(lambda: syncer_listening(args, head_mode=head_mode, syncer_cluster=syncer_cluster,
+                                                    syncer_job=syncer_job, ops=ops),
                            dead, where=syncer_addr, sleep=sleep)
     if never is not None:
         print(f"[launcher] ERROR: fleet syncer: {never}", file=sys.stderr, flush=True)

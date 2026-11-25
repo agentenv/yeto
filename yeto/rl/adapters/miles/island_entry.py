@@ -1894,15 +1894,17 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
         last = "not tried"
         started = clock()
         tries = 0
+        since_refused = 0  # the attempts of any other error count from the last refusal
         while True:
             tries += 1
+            since_refused += 1
             refused = False
             try:
                 connect((host, port), timeout=timeout).close()
                 print(f"[rl] syncer probe: {host}:{port} reachable (attempt {tries})", flush=True)
                 break
             except ConnectionRefusedError as error:
-                refused, last = True, f"{type(error).__name__}: {error}"
+                refused, last, since_refused = True, f"{type(error).__name__}: {error}", 0
             except OSError as error:
                 last = f"{type(error).__name__}: {error}"
             waited = clock() - started
@@ -1910,7 +1912,7 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
                 if tries == 1:
                     print(f"[rl] syncer probe: {host}:{port} refused (the syncer process is not listening yet); "
                           f"waiting up to {refused_wait_s:.0f}s", flush=True)
-            elif tries >= max(1, attempts):
+            elif (tries if refused else since_refused) >= max(1, attempts):
                 why = (f" (refused for {waited:.0f}s: the syncer host answers but its process does not listen)"
                        if refused else "")
                 raise ConnectionError(

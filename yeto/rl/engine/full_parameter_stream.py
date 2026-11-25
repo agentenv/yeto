@@ -1121,11 +1121,13 @@ class FullParameterRoleStream:
         syncer resends every fragment and they become this island's anchors
         in one apply (``peer_recovery`` module doc).
 
-        False when the syncer answered from initialization (no initial cut yet: it
-        holds no fragment, the earlier process of this island never got past the
-        start): ``client``, ``heartbeat`` and ``sink`` are closed, the trainer is
-        untouched (still fresh), and the caller starts the island as on a first
-        launch. A recovery that ends without every fragment resent otherwise raises
+        False when the syncer answered from initialization (no initial cut yet: the
+        earlier process of this island never got past the start, or the syncer itself
+        restarted and is resuming its checkpoint): ``client``, ``heartbeat`` and
+        ``sink`` are closed, the trainer is untouched (still fresh), and the caller
+        starts the island as on a first launch: it takes the syncer's cut (a resumed
+        one is newer than version 0) with a fresh inner optimizer state, which no
+        donor restored. A recovery that ends without every fragment resent otherwise raises
         :class:`~yeto.rl.peer_recovery.RecoveryIncomplete` (a deterministic stop)."""
         from yeto.rl.peer_recovery import RecoveryIncomplete, recover
 
@@ -1146,7 +1148,8 @@ class FullParameterRoleStream:
                 sink.release_all()
                 print(f"[yeto-peer-recovery] {self.config.role} learner {self.config.learner_id}: the syncer "
                       "is still in initialization (no initial cut, no fragment to recover); joining as on a "
-                      "first launch", file=sys.stderr, flush=True)
+                      "first launch: the inner optimizer state starts fresh (not restored from a donor)",
+                      file=sys.stderr, flush=True)
                 return False
             client.mark_initial_cut_received()
             if sorted(island.resent) != list(range(count)):
