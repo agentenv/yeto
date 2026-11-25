@@ -130,10 +130,32 @@ def breakers_only(path: Path) -> bool:
     return path.name == COST_EVENTS_FILE or (path.name == UP_EVENTS_FILE and (path.parent / "state.json").is_file())
 
 
+# The host-wide syncer tape (``~/yeto-output/yeto-tape.jsonl`` and its shard tapes) is shared
+# by every run on this host and its records carry no run id: a run's dashboard takes only its
+# records from the run's start on (:func:`run_sources` registers the start here, by path); the
+# older ones are another run's syncer and are counted, not fed (``Reducer.foreign_tapes``).
+HOST_TAPE_SINCE: dict[str, float] = {}
+HOST_TAPE_SLACK_S = 60.0  # clock skew between the syncer's host and this one
+_SHARD_TAPE = re.compile(r"^(.+)\.shard\d+(\.jsonl)$")
+
+
+def host_tape_since(path: Path) -> float | None:
+    """The run start a host-wide syncer tape (or one of its shard tapes) is read from."""
+    since = HOST_TAPE_SINCE.get(str(path))
+    if since is None:
+        m = _SHARD_TAPE.match(path.name)
+        if m:
+            since = HOST_TAPE_SINCE.get(str(path.parent / (m.group(1) + m.group(2))))
+    return since
+
+
 class TapeSource:
     def __init__(self, path: str | os.PathLike, island: str | None = None):
         self.path = Path(path)
         self.name = str(self.path)
+        self.since = host_tape_since(self.path)
+        self.foreign = 0  # records from before the run's start (another run's syncer)
+        self.foreign_last_ts: float | None = None
         self.breakers_only = breakers_only(self.path)
         cluster = cluster_tape_island(self.path) if island is None else None
         self.island_fixed = cluster is not None
@@ -176,13 +198,32 @@ class TapeSource:
     def pump(self, reducer) -> int:
         n = 0
         for off, rec in self.read_new():
+            if self.since is not None and self._foreign(rec):
+                continue
             if self.breakers_only:
                 n += reducer.feed_breaker(rec, source=self.name, offset=off)
                 continue
             if reducer.feed(rec, source=self.name, offset=off, island=self.island, node=self.node,
                             island_fixed=self.island_fixed):
                 n += 1
+        if self.since is not None:
+            _note_foreign(reducer, self)
         return n
+
+    def _foreign(self, rec: dict) -> bool:
+        """A host-wide syncer tape's record from before the run started: another run's."""
+        t = rec.get("time_unix")
+        if not isinstance(t, (int, float)) or isinstance(t, bool) or t >= self.since - HOST_TAPE_SLACK_S:
+            return False
+        self.foreign += 1
+        self.foreign_last_ts = t if self.foreign_last_ts is None else max(self.foreign_last_ts, t)
+        return True
+
+
+def _note_foreign(reducer, src: TapeSource) -> None:
+    tapes = getattr(reducer, "foreign_tapes", None)
+    if isinstance(tapes, dict):
+        tapes[src.name] = {"records": src.foreign, "last_ts": src.foreign_last_ts, "since": src.since}
 
 
 def load_all(reducer, paths: list[str]) -> list[TapeSource]:
@@ -214,13 +255,39 @@ def run_sources(run: str, up_state: str | None = None) -> list[str]:
         RL_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-tape.jsonl"
 
     d = runs_mod.run_dir(run)
+    host = str(Path(os.path.expanduser(RL_SYNCER_EVENT_TAPE)))
+    since = run_started_at(run, up_state)
+    if since is not None:
+        HOST_TAPE_SINCE[host] = since
     # the run's own paths are kept even before they exist: serve re-discovers them every
     # poll, so a dashboard started before the run follows them once they appear; the cost
     # guard's and the ``run up`` monitor's tapes feed the Breakers panel only; the host-wide
     # syncer tape too: a syncer that starts after the dashboard (or a tape the launcher copies
     # from the syncer's host later) is followed once it appears, with its shards
-    return [str(d / "events"), str(d / "fleet.jsonl"), str(d / COST_EVENTS_FILE), up_events_path(run, up_state),
-            str(Path(os.path.expanduser(RL_SYNCER_EVENT_TAPE)))]
+    return [str(d / "events"), str(d / "fleet.jsonl"), str(d / COST_EVENTS_FILE), up_events_path(run, up_state), host]
+
+
+def run_started_at(run: str, up_state: str | None = None) -> float | None:
+    """When run ``run`` started: the earliest of its ``~/.yeto/runs`` meta's ``started_at`` and
+    its ``run up`` state's ``run_t0`` (the run's first up), ``trainer_t0`` and ``t0`` (reset by
+    each up: later than the run's syncer may have started); None when none is recorded."""
+    from .. import runs as runs_mod
+
+    found = []
+    try:
+        meta = runs_mod.load_run(run) or {}
+    except Exception:  # noqa: BLE001
+        meta = {}
+    found.append(meta.get("started_at"))
+    state = Path(os.path.expanduser(str(up_state))) if up_state else (
+        Path(up_events_path(run) or "").parent / "state.json")
+    try:
+        doc = json.loads(state.read_text(encoding="utf-8")) or {}
+        found += [doc.get(k) for k in ("run_t0", "trainer_t0", "t0")]
+    except (OSError, ValueError, AttributeError):
+        pass
+    found = [float(t) for t in found if isinstance(t, (int, float)) and not isinstance(t, bool) and t > 0]
+    return min(found) if found else None
 
 
 _RUN_FROM_TAPE_DIR = re.compile(r"^yeto-(.+)$")

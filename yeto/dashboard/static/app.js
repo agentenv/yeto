@@ -73,7 +73,7 @@ function stBadge(s,c){var m={ok:["ok","healthy"],starting:["wn","starting"],stop
   left:["mu","left the run"],recovery:["bd","needs recovery"],done:["mu","finished"],unknown:["mu","no data"]}[s]||["mu",s];var t=m[1];
   if(c){if(s==="starting"&&c.startup_slow)t="starting (slow)";if(s==="waiting"&&c.waiting_reason)t="waiting: "+c.waiting_reason;if((s==="left"||s==="lost")&&c.left)t=leftText(s,c.left);
     // its pool removed / retired it but it still runs: draining, or a release that failed (still billed)
-    if(c.pool_removed&&!c.left){var pr=c.pool_removed;if(s==="ok"||s==="waiting"||s==="starting"){m=["wn"];t="draining ("+(pr.reason||"retired")+")"}else t+=" · "+(pr.reason||"retired")+", not released"}}
+    if(c.pool_removed&&!c.left){var pr=c.pool_removed;if(pr.released){m=["bd"];t="active after release"}else if(s==="ok"||s==="waiting"||s==="starting"){m=["wn"];t="draining ("+(pr.reason||"retired")+")"}else t+=" · "+(pr.reason||"retired")+", not released"}}
   return '<span class="st '+m[0]+'" title="'+esc(c&&c.left&&c.left.detail&&(s==="left"||s==="lost")?c.left.detail:c&&c.pool_removed&&!c.left?c.pool_removed.detail||"":c&&c.role?c.role:"")+'"><i></i>'+esc(t)+'</span>'}
 
 /* theme + layout */
@@ -740,8 +740,18 @@ function aPool(A,show){
   $("aPool").innerHTML=pc.bar+pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>'+(/^nc_elastic_manual_/.test(e.event||"")?"manual":"pool")+'</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
     esc(["ticket","slot","shard","why","reason","detail","error","old","new","outcome","waited_s","source","by"].filter(function(k){return k=="slot"?(e.slot!=null||e.account!=null):e[k]!=null}).map(function(k){var v=e[k],n=k;if(k=="slot"){n=e.slot_name||"account";v=e.slot!=null?e.slot:e.account}return n+"="+String(v).slice(0,80)}).join(" "))+'</span></div>'}).join("");
 }
-/* release timeline of the picked island: the trainer's releases (version labels on two rows, a label that fits on
-   neither is left out, its diamond keeps a tooltip) and each sampler's load done */
+/* release timeline of the picked island: the trainer's releases (version labels on one row, every step-th version
+   with the smallest step 1/2/5/10/... whose labels keep apart, and the latest; every diamond keeps a tooltip) and
+   each sampler's load done */
+// the release labels to draw: {v, x} of every step-th version (steps 1, 2, 5, 10, 20, ...: the smallest whose labels
+// stay 12 px apart on one row) and the latest (it replaces a label it would overlap)
+function relLabels(pts,W){var GAP=12,wd=function(v){return 7.3*("v"+v).length};
+  function fit(c){var out=[],right=-1e9;c.forEach(function(q){if(q.x-wd(q.v)/2>right+GAP&&q.x+wd(q.v)/2<=W-2){out.push(q);right=q.x+wd(q.v)/2}});return out}
+  var vs=pts.filter(function(q){return fin(q.v)});if(!vs.length)return [];var last=vs[vs.length-1];
+  for(var i=0,steps=[1,2,5];;i++){var st=steps[i%3]*Math.pow(10,Math.floor(i/3));
+    var c=vs.filter(function(q){return q.v%st===0}),got=fit(c);
+    if(got.length===c.length||st>1e6){var lw=wd(last.v)/2;got=got.filter(function(q){return q===last||q.x+wd(q.v)/2+GAP<last.x-lw});
+      if(got.indexOf(last)<0&&last.x+lw<=W-2)got.push(last);return got}}}
 function aRelChart(ctx,tags){
   var box=$("aRelChart"),rows=ctx.rel,sids=ctx.sids,A=V.async;box.innerHTML="";
   var pool=(A.pool||[]).filter(function(e){return fin(e.ts)&&(!ctx.fleet||sids.indexOf(String(e.shard))>=0)});
@@ -756,11 +766,11 @@ function aRelChart(ctx,tags){
   lanes.forEach(function(n,i){var tx=el("text",{x:m.l-10,y:ly(i)+4,"text-anchor":"end"},s);tx.textContent=n;if(i)el("title",{},tx).textContent=lbl(sids[i-1]);el("line",{x1:m.l,x2:W-m.r,y1:ly(i),y2:ly(i),stroke:"var(--line)"},s)});
   pool.forEach(function(e){var x=sx(e.ts),bad=POOL_BAD.test(e.event||"");el("line",{x1:x,x2:x,y1:m.t-6,y2:H-m.b,stroke:bad?"var(--bad)":"var(--warn)","stroke-dasharray":"3 3"},s);
     el("title",{},el("rect",{x:x-3,y:m.t,width:6,height:H-m.t-m.b,fill:"transparent"},s)).textContent=e.event+" "+clock(e.ts)});
-  var rel=rows.filter(function(r){return fin(r.released_at)}).slice().sort(function(a,b){return a.released_at-b.released_at}),right=[-1e9,-1e9];
+  var rel=rows.filter(function(r){return fin(r.released_at)}).slice().sort(function(a,b){return a.released_at-b.released_at});
+  var labs=relLabels(rel.map(function(r){return {v:r.policy_version,x:sx(r.released_at)}}),W);
+  labs.forEach(function(q){var t=el("text",{x:q.x,y:ly(0)-11,"text-anchor":"middle"},s);t.textContent="v"+q.v});
   rel.forEach(function(r){var x0=sx(r.released_at);
     el("title",{},el("rect",{x:x0-4,y:ly(0)-4,width:8,height:8,fill:"var(--P)",transform:"rotate(45 "+x0+" "+ly(0)+")"},s)).textContent="v"+r.policy_version+" released "+clock(r.released_at);
-    var lab="v"+r.policy_version,w=7.3*lab.length,lv=-1;for(var q=0;q<2;q++)if(x0-w/2>right[q]+4&&x0+w/2<=W-2){lv=q;break}
-    if(lv>=0){right[lv]=x0+w/2;el("text",{x:x0,y:ly(0)-10-lv*15,"text-anchor":"middle"},s).textContent=lab}
     sids.forEach(function(k,i){var ld=(r.loads||{})[k];if(!ld||!fin(ld.loaded_at))return;var x1=sx(ld.loaded_at);
       el("line",{x1:x0,y1:ly(0),x2:x1,y2:ly(i+1),stroke:"var(--P)","stroke-opacity":.45},s);
       el("title",{},el("circle",{cx:x1,cy:ly(i+1),r:4,fill:"var(--P)"},s)).textContent=lbl(k)+" loaded v"+r.policy_version+" at "+clock(ld.loaded_at)+(fin(ld.latency_s)?" ("+f(ld.latency_s,0)+" s)":"")})});

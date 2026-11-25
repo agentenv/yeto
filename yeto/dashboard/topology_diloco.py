@@ -470,8 +470,20 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
                     "bcast": len(bcasts5)},
         "trainers": trainers,
         "flows": _flows(isl, merges, now, {t["id"] for t in trainers if t["island"]}),
+        "foreign_tape": _foreign_tape(reducer) if not merges else None,
         **(_samplers(reducer, trainer_ids, by_id, states) if kind_ == "synced_group" else {}),
     }
+
+
+def _foreign_tape(reducer) -> dict | None:
+    """The host-wide syncer tape's records from before this run started (``sources.HOST_TAPE_SINCE``):
+    another run's syncer, not drawn. None when it had none."""
+    tapes = [t for t in (getattr(reducer, "foreign_tapes", None) or {}).values() if t.get("records")]
+    if not tapes:
+        return None
+    last = [t["last_ts"] for t in tapes if t.get("last_ts") is not None]
+    return {"records": sum(t["records"] for t in tapes), "last_ts": max(last) if last else None,
+            "since": min(t["since"] for t in tapes if t.get("since") is not None)}
 
 
 SUBSTORE = re.compile(r"/trainer(\d+)/?$")
