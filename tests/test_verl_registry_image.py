@@ -147,7 +147,7 @@ def test_the_registry_image_is_on_the_registry_the_operator_names(monkeypatch):
     assert pins.verl_registry_image() == (
         f"docker:111122223333.dkr.ecr.us-east-1.amazonaws.com/yeto-verl-fsdp@sha256:{pins.VERL_REGISTRY_DIGEST}")
     monkeypatch.delenv(pins.VERL_REGISTRY_ENV)
-    monkeypatch.setenv("YETO_IMAGE_REGISTRY", "ghcr.io/somewhere")  # the Miles images' registry is not used
+    monkeypatch.setenv("YETO_IMAGE_REGISTRY", "registry.example/miles-mirror")  # the Miles images' registry is not used
     assert pins.verl_registry_image() is None and pins.registry_image_for(pins.VERL_IMAGE) is None
     assert pins.is_verl_registry_image(IMG) and pins.is_verl_registry_image(IMG.removeprefix("docker:"))
     assert not pins.is_verl_registry_image(IMG.replace(pins.VERL_REGISTRY_DIGEST, "0" * 64))
