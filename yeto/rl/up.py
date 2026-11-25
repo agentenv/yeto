@@ -613,7 +613,7 @@ class Run:
         self.controller: Any = None  # controller: in_process -> the RolloutController of every pool
         # why run up refuses this config's breakers section (set by scale: a scale that adds nodes is refused)
         self.breakers_refusal: str | None = None
-        self.applied_desired: dict[str, Any] | None = None  # store control plane: fleet/applied.json (adopt_desired)
+        self.applied_desired: dict[str, Any] | None = None  # store control plane: the applied state (adopt_desired)
         self.auto_backlog = self._derive_auto_backlog()
 
     def _derive_auto_backlog(self) -> dict[str, Any] | None:

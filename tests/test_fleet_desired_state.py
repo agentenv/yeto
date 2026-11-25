@@ -683,3 +683,25 @@ def test_old_applied_records_are_pruned(tmp_path):
         store.write_applied(1, {}, {}, writer="a", claim=i == 0)
     seqs = store._applied_seqs()  # noqa: SLF001
     assert len(seqs) == dz.APPLIED_KEEP and seqs[-1] == dz.APPLIED_KEEP + 5
+
+
+def test_a_pruned_record_number_created_again_by_a_stale_writer_is_fenced(tmp_path):
+    """REV #783 (ABA): A read record 1 and stalled; B took over and wrote past APPLIED_KEEP, so
+    the early numbers were pruned. A's create of record 2 then succeeds: A is fenced anyway,
+    its record withdrawn, and the copy never goes back."""
+    objects = DirectoryObjectStore(tmp_path)
+    a = dz.DesiredStore(objects, log=lambda _m: None)
+    b = dz.DesiredStore(objects, log=lambda _m: None)
+    a.write_applied(1, {}, {}, writer="a", claim=True)
+    stale = a.read_applied()
+    for i in range(dz.APPLIED_KEEP + 3):
+        b.write_applied(2, {}, {}, writer="b", claim=i == 0)
+    top = b.read_applied()["seq"]
+    assert 2 not in b._applied_seqs()  # noqa: SLF001 - pruned
+    a.read_applied = lambda: stale  # A woke up with what it read before it stalled
+    with pytest.raises(dz.AppliedFenced, match="past 2"):
+        a.write_applied(1, {}, {}, writer="a")
+    assert 2 not in b._applied_seqs()  # noqa: SLF001 - withdrawn
+    copy = json.loads(objects.read(dz.APPLIED_KEY))
+    assert copy["seq"] == top and copy["writer"] == "b"
+    assert b.read_applied()["writer"] == "b"

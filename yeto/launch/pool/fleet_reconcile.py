@@ -19,7 +19,7 @@ than the one applied, compares its sampler pools with the applied ones:
   is stopped (its machines released, confirmed ended) and dropped (``hooks.removed``).
 
 What was applied (the generation, its pools, the pools still being removed) is kept in
-``fleet/applied.json`` (``DesiredStore.write_applied``). A controller that starts (after
+the records ``fleet/applied/<seq>.json`` (``DesiredStore.write_applied``). A controller that starts (after
 a detach, a crash) builds the applied pools and the removals in progress and starts from
 that generation, so every change made to the desired state meanwhile is applied: a pool
 removed is drained and retired, a target change and a new config are applied.
@@ -83,14 +83,14 @@ class FleetReconciler:
     _polled_at: float | None = None
     _resume: list[str] = field(default_factory=list)  # restored removals: target 0 asked again
     _dirty: bool = False  # the applied state changed and is not in the store yet
-    _claim: bool = True  # the first write claims fleet/applied.json for this controller
+    _claim: bool = True  # the first write claims the applied state for this controller
     _seq: int | None = None  # the applied record this controller wrote last
     writer: str = field(default_factory=lambda: f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}")
     fenced: str | None = None  # another controller took the fleet over: this one applies nothing more
     errors: int = 0
 
     def start_from(self, doc: dict[str, Any] | None, applied: dict[str, Any] | None = None) -> None:
-        """Where the controller starts: what was applied before (``fleet/applied.json``: its
+        """Where the controller starts: what was applied before (``DesiredStore.read_applied``: its
         generation, pools and removals in progress), else the generation the controller was
         built from (``doc``: its pools are that generation's)."""
         if applied is not None:
@@ -143,7 +143,7 @@ class FleetReconciler:
             self.log(f"fleet: applied state not read ({error!r}); the new generation waits")
             return False
         if current is not None and current.get("writer") not in (None, self.writer):
-            self.fenced = f"fleet/applied.json is written by {current.get('writer')} now (not {self.writer})"
+            self.fenced = f"the applied state is written by {current.get('writer')} now (not {self.writer})"
             self.log(f"fleet: CRITICAL: {self.fenced}: this controller applies the desired state no more")
             return False
         return True
@@ -169,7 +169,7 @@ class FleetReconciler:
         self._persist()
 
     def _persist(self) -> None:
-        """``fleet/applied.json`` when it changed (a store that does not answer: the next pass)."""
+        """The applied state when it changed (a store that does not answer: the next pass)."""
         if not self._dirty or self.fenced is not None:
             return
         try:

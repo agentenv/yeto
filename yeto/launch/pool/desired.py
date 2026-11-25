@@ -33,7 +33,8 @@ Member kinds:
 The control plane acts on a *change*: a new generation is compared with the one it
 applied before, pool by pool (a target change, a pool added, removed or reconfigured).
 A pool's own target changes in between (a manual release it detected) are not undone.
-What the controller applied is kept in ``fleet/applied.json`` (:meth:`DesiredStore.write_applied`):
+What the controller applied is kept in the records ``fleet/applied/<seq>.json``, each created once
+(``fleet/applied.json`` is a copy of the newest; :meth:`DesiredStore.write_applied`):
 a controller that starts later applies every generation written since.
 """
 
@@ -165,7 +166,7 @@ class AppliedUnsafe(RuntimeError):
 
 
 class AppliedFenced(RuntimeError):
-    """``fleet/applied.json`` belongs to another controller now (it took the fleet over):
+    """The applied state (``fleet/applied/<seq>.json``) belongs to another controller now (it took the fleet over):
     this one writes it no more."""
 
 
@@ -248,7 +249,9 @@ class DesiredStore:
         ``seq``; None before the first apply. The newest record is the higher of the newest
         listed one and the copy's (``fleet/applied.json``, written after each record: a listing
         that lags behind a create does not hide it). No record (a run that wrote only the copy,
-        before the records): the copy, so pools being removed are still driven."""
+        before the records): the copy, so pools being removed are still driven. Both formats
+        side by side (an upgraded run): the higher ``seq`` wins, a copy without one counts as 0,
+        so the first record written after the upgrade replaces it."""
         copy_doc = self._doc(APPLIED_KEY)
         seqs = self._applied_seqs()
         top = max([*seqs[-1:], int((copy_doc or {}).get("seq") or 0)], default=0)
@@ -272,15 +275,15 @@ class DesiredStore:
         from yeto.rl.engine.object_store import atomic_create  # noqa: PLC0415
 
         if not atomic_create(self.objects):
-            raise AppliedUnsafe("the store has no atomic exclusive create: fleet/applied.json cannot be fenced")
+            raise AppliedUnsafe("the store has no atomic exclusive create: the applied state cannot be fenced")
         current = self.read_applied()
         seq = int(current.get("seq") or 0) if current is not None else 0
         if writer is not None and current is not None and not claim:
             if current.get("writer") not in (None, writer):
-                raise AppliedFenced(f"fleet/applied.json is written by {current.get('writer')} now "
+                raise AppliedFenced(f"the applied state is written by {current.get('writer')} now "
                                     f"(record {seq}; not {writer})")
         if current is not None and int(current.get("generation") or 0) > int(generation):
-            raise AppliedFenced(f"fleet/applied.json is at generation {current.get('generation')}, past {generation}")
+            raise AppliedFenced(f"the applied state is at generation {current.get('generation')}, past {generation}")
         for _ in range(3):
             seq += 1
             doc = {"schema": APPLIED_SCHEMA, "seq": seq, "generation": int(generation),
@@ -291,19 +294,40 @@ class DesiredStore:
                 break
             taken = self._doc(self.applied_key(seq)) or {}
             if writer is None or taken.get("writer") != writer:
-                raise AppliedFenced(f"{taken.get('writer') or 'another controller'} wrote fleet/applied "
+                raise AppliedFenced(f"{taken.get('writer') or 'another controller'} wrote applied "
                                     f"record {seq} first")
             # our own record (a create whose answer was lost, or a listing that lagged): the next one
         else:
-            raise AppliedFenced(f"fleet/applied records past {seq - 3} kept being taken")
+            raise AppliedFenced(f"applied records past {seq - 3} kept being taken")
         if not atomic_create(self.objects):  # an endpoint found to refuse If-None-Match on that create
-            raise AppliedUnsafe("the store's create turned out not atomic: fleet/applied.json cannot be fenced")
-        try:
-            self.objects.write(APPLIED_KEY, body)  # the copy of the newest record
-        except Exception as error:  # noqa: BLE001 - the record is the truth; readers fall back to it
-            self.log(f"fleet: WARNING: fleet/applied.json (the copy of record {seq}) not written: {error!r}")
+            raise AppliedUnsafe("the store's create turned out not atomic: the applied state cannot be fenced")
+        newer = self._newer_than(seq, writer)
+        if newer is not None:
+            # a number pruned after another controller wrote past it was created again (ABA):
+            # this writer read a stale state; its record is withdrawn and it is fenced
+            try:
+                self.objects.delete(self.applied_key(seq))
+            except Exception:  # noqa: BLE001 - below the newest record: never read
+                pass
+            raise AppliedFenced(f"{newer.get('writer')} wrote applied record {newer.get('seq')} past {seq}")
+        copy_seq = int((self._doc(APPLIED_KEY) or {}).get("seq") or 0)
+        if copy_seq < seq:  # the copy only moves forward
+            try:
+                self.objects.write(APPLIED_KEY, body)
+            except Exception as error:  # noqa: BLE001 - the record is the truth; readers fall back to it
+                self.log(f"fleet: WARNING: fleet/applied.json (the copy of record {seq}) not written: {error!r}")
         self._prune_applied(seq)
         return seq
+
+    def _newer_than(self, seq: int, writer: str | None) -> dict[str, Any] | None:
+        """After a create: the newest record past ``seq`` that another writer holds (listed, or
+        named by the copy), None when there is none."""
+        copy_doc = self._doc(APPLIED_KEY) or {}
+        top = max([*self._applied_seqs()[-1:], int(copy_doc.get("seq") or 0)], default=0)
+        if top <= seq:
+            return None
+        doc = self._doc(self.applied_key(top)) or copy_doc
+        return doc if doc.get("writer") != writer else None
 
     def _prune_applied(self, newest: int) -> None:
         """Delete the records older than the newest :data:`APPLIED_KEEP` (best effort)."""
