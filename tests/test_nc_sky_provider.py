@@ -642,3 +642,63 @@ def test_sky_accepts_and_keeps_the_ownership_label_on_every_infra(infra, run):
     labels = {OWNER_LABEL: owner_token(run)}
     resources = sky.Resources(infra=infra, labels=labels)
     assert resources.labels == labels and resources.copy(region=None).labels == labels
+
+
+# -- the run's AWS credentials never reach sky's requests (INT: AWS_PROFILE of an R2 store)
+def test_the_providers_sky_calls_carry_no_run_aws_credentials(monkeypatch):
+    from yeto.launch.nc import sky_provider as sp
+
+    seen = []
+
+    def original():
+        return {"AWS_PROFILE": "store-r2", "AWS_ACCESS_KEY_ID": "AKIAEXAMPLE", "SKYPILOT_X": "1"}
+
+    builder = sp._scoped_request_env(original)
+
+    class Module:
+        StatusRefreshMode = SimpleNamespace(AUTO="auto")
+
+        @staticmethod
+        def status(names, **kw):
+            seen.append(builder())
+            return "rid"
+
+    plain = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=Module())
+    assert plain.sky.status(None) == "rid" and plain.sky.StatusRefreshMode.AUTO == "auto"
+    assert seen[-1] == {"SKYPILOT_X": "1"}  # the run's AWS keys dropped
+    named = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=Module(), aws_profile="sky-aws")
+    named.sky.status(None)
+    assert seen[-1] == {"SKYPILOT_X": "1", "AWS_PROFILE": "sky-aws"}
+    assert builder() == original()  # outside a provider call: as sky builds it
+
+
+def test_real_sky_request_bodies_of_the_provider_drop_the_run_aws_profile(monkeypatch):
+    pytest.importorskip("sky")
+    from sky.server import common
+    from sky.server.requests import payloads
+
+    from yeto.launch.nc import sky_provider as sp
+
+    monkeypatch.setattr(payloads, "request_body_env_vars", payloads.request_body_env_vars)  # restored after
+    monkeypatch.setattr(common, "is_api_server_local", lambda *a, **k: True)
+    monkeypatch.setenv("AWS_PROFILE", "store-r2")
+    assert sp.install_request_env_scope() and sp.install_request_env_scope()  # idempotent
+    assert payloads.RequestBody().env_vars.get("AWS_PROFILE") == "store-r2"  # sky's own forwarding
+    with sp._request_env(SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=FakeSky()).request_env):
+        assert "AWS_PROFILE" not in payloads.RequestBody().env_vars
+    with sp._request_env(SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=FakeSky(),
+                                     aws_profile="sky-aws").request_env):
+        assert payloads.RequestBody().env_vars["AWS_PROFILE"] == "sky-aws"
+
+
+def test_dry_run_refuses_run_aws_credentials_without_a_sky_profile(monkeypatch):
+    from yeto.launch.nc import sky_provider as sp
+
+    for name in sp.AWS_FORWARDED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    p = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=FakeSky())
+    assert sp.aws_env_problems(p, {}) == []
+    problems = sp.aws_env_problems(p, {"AWS_PROFILE": "store-r2"})
+    assert len(problems) == 1 and "YETO_RL_STORE_S3_PROFILE" in problems[0] and "provider.aws_profile" in problems[0]
+    named = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=FakeSky(), aws_profile="sky-aws")
+    assert sp.aws_env_problems(named, {"AWS_PROFILE": "store-r2"}) == []

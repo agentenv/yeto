@@ -428,3 +428,16 @@ def test_a_sky_order_names_the_offer_it_tried_and_never_a_stale_one():
     with pytest.raises(RuntimeError):
         p.order(1)
     assert p.last_offer_key is None  # not the previous order's offer
+
+
+def test_pool_dry_run_refuses_aws_profile_in_the_run_env_without_provider_aws_profile(monkeypatch):
+    from yeto.launch.nc.sky_provider import AWS_FORWARDED_ENVS
+
+    for name in AWS_FORWARDED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    cfg = _cfg(resources={"infra": "aws", "accelerators": "L4:1"})
+    assert not [p for p in offline_problems(cfg) if "AWS_PROFILE" in p]
+    monkeypatch.setenv("AWS_PROFILE", "store-r2")
+    assert [p for p in offline_problems(cfg) if "AWS_PROFILE" in p and "YETO_RL_STORE_S3_PROFILE" in p]
+    named = _cfg(resources={"infra": "aws", "accelerators": "L4:1"}, aws_profile="sky-aws")
+    assert not [p for p in offline_problems(named) if "AWS_PROFILE" in p]
