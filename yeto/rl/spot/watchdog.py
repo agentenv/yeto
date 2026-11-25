@@ -27,7 +27,9 @@ its cluster record and the run's resource ledger); the watchdog keeps only its l
 (candidates, budget, stop marker, orphan sweep, ready probe). Tests inject a fake ops
 object. The candidate list is the shared one of :mod:`yeto.launch.rollout.offers`.
 The former sky / nebius CLI path is gone; ``--via-provider`` is accepted and is the
-default.
+default. The provider path has been verified on real machines on AWS only; on Nebius
+it is covered by a comparison test against the removed CLI path and has not yet been
+verified on real machines.
 
 Deprecated for new runs: a sky rollout pool (``"provider": {"kind": "sky", "candidates":
 {...}}``, ``yeto rollout scale --provider sky``) runs the same candidate rotation under the
