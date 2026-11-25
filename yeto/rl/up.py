@@ -1091,12 +1091,32 @@ class Run:
         for line in up_fleet.syncer_lines(plan, argv, self.cfg.get("syncer")):
             _log(f"preflight: {line}")
         refused, notes = self.fleet_sandbox_findings()
-        problems += refused
+        problems += refused + self.agentic_row_problems(argv)
         for line in notes:
             _log(f"preflight: {line}")
         for line in self.fleet_budget_lines():
             _log(f"preflight: {line}")
         return "; ".join(problems) if problems else None
+
+    def agentic_row_problems(self, trainer_argv: list[str]) -> list[str]:
+        """Each agentic pool's data rows against its sandbox provider
+        (:func:`yeto.launch.agentic_rows.run_rows_problems`): a row's own provider overrides
+        the spec's ``task_defaults``, and the sampler image carries the pool provider's SDK
+        only. The rows are read from the pool's ``prompts_file`` or ``prompts.path`` when they
+        are on this machine, else from the trainer's local ``--data`` of the same file name."""
+        from yeto.launch.agentic_rows import run_rows_problems  # noqa: PLC0415
+
+        pools = []
+        for ref in self.pools:
+            try:
+                cfg = ref.load()
+                spec = up_consistency.effective_spec(cfg)
+            except (OSError, ValueError):
+                continue  # the pool dry-run reports an unreadable pool config
+            if isinstance((spec or {}).get("agentic"), dict):
+                pools.append((ref.name, cfg, spec))
+        data = [trainer_argv[i + 1] for i, a in enumerate(trainer_argv[:-1]) if a == "--data"]
+        return run_rows_problems(pools, data_files=data, environ=self.env)
 
     def fleet_sandbox_pools(self) -> list[Any]:
         """The fleet's agentic pools as :mod:`yeto.rl.fleet_sandbox` sees them: the rendered
