@@ -1110,6 +1110,103 @@ def test_an_order_without_autodown_warns(capsys):
     assert "WARNING: verda cannot autodown" in out and "yeto cleanup --run run-v --include-pools" in out
 
 
+def test_a_verda_offer_without_an_image_gets_verda_default_image():
+    """sky 0.14.3's own Verda default image is gone from Verda: an offer naming no image_id
+    orders the provider's default; an offer's own image_id (null too) is kept."""
+    from yeto.launch.nc.sky_provider import DEFAULT_IMAGE_ID, offer_image_lines
+
+    sky = FakeSky()
+    p = _verda_provider(sky)
+    p.order(1)
+    assert DEFAULT_IMAGE_ID["verda"] == "24.04.cuda12.9.docker"
+    assert sky.calls[0][2].resources["image_id"] == "24.04.cuda12.9.docker"
+    assert p.offers[0].resources["image_id"] == "24.04.cuda12.9.docker"
+    own = SkyProvider("run-v", resources={"infra": "verda/FIN-01", "accelerators": "A100:1", "image_id": "mine"},
+                      slots=[1], sky=FakeSky(), allow_no_autodown=True)
+    assert own.offers[0].resources["image_id"] == "mine"
+    sky_default = SkyProvider("run-v", resources={"infra": "verda/FIN-01", "accelerators": "A100:1",
+                                                  "image_id": None}, slots=[1], sky=FakeSky(), allow_no_autodown=True)
+    assert sky_default.offers[0].resources["image_id"] is None
+    # another cloud is left to sky
+    assert "image_id" not in _provider(FakeSky()).offers[0].resources
+    # pool / pool --dry-run print the image each offer orders
+    cfg = {"target": 1, "slots": [1], "shard_base": "s", "run": "run-v",
+           "provider": {"kind": "sky", "allow_no_autodown": True, "offers": [
+               {"key": "vda", "resources": {"infra": "verda/FIN-01", "accelerators": "A100:1"}},
+               {"key": "own", "resources": {"infra": "verda/FIN-01", "accelerators": "A100:1", "image_id": "mine"}},
+               {"key": "neb", "resources": {"infra": "nebius/eu-north1", "accelerators": "L40S:1"}}]}}
+    assert offer_image_lines(cfg) == [
+        "sky offer vda: VM image 24.04.cuda12.9.docker (yeto's verda default; set image_id in the offer to change it)",
+        "sky offer own: VM image mine (the offer's image_id)",
+        "sky offer neb: VM image sky's default image"]
+    assert offer_image_lines({"provider": {"kind": "nc"}}) == []
+
+
+def test_nc_pool_prints_the_sky_offer_images(tmp_path, monkeypatch, capsys):
+    """``nc pool --dry-run`` prints each sky offer's VM image before the plan."""
+    from yeto.launch.nc import cli as nc_cli
+    from yeto.launch.nc import pool_run
+
+    cfg = {"target": 1, "slots": [1], "shard_base": "s", "run": "run-v", "spec": str(tmp_path / "spec.json"),
+           "provider": {"kind": "sky", "allow_no_autodown": True,
+                        "resources": {"infra": "verda/FIN-01", "accelerators": "A100:1"}}}
+    path = tmp_path / "pool.json"
+    path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(nc_cli, "node_image_lines", lambda cfg: [])
+    monkeypatch.setattr(pool_run, "dry_run", lambda cfg, config_path: 0)
+    assert nc_cli.main(["pool", "--config", str(path), "--dry-run"]) == 0
+    assert "sky offer A100:1@verda/FIN-01/od: VM image 24.04.cuda12.9.docker (yeto's verda default" \
+        in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("cloud", "image", "user", "source"), [
+    ("nebius", None, "ubuntu", "sky's nebius default"),
+    ("verda", None, "root", "sky's verda default"),
+    ("gcp", None, "gcpuser", "sky's gcp default"),
+    ("oci", "ocid1.image.x:oraclelinux", "opc", "OCI image ocid1.image.x:oraclelinux"),
+    ("oci", None, "ubuntu", "OCI image (sky default)"),
+    ("somecloud", None, "ubuntu", "no known default for cloud somecloud, a guess"),
+])
+def test_a_cluster_without_an_ssh_user_takes_its_cloud_default_and_warns(cloud, image, user, source, capsys):
+    """sky's handle carries no ssh user on some clouds (Nebius): the node's user is the cloud's
+    (or image's) known default, never a silent 'ubuntu'; one warning per cluster names it."""
+    sky = FakeSky()
+    resources = {"infra": f"{cloud}/r1", "accelerators": "L40S:1"}
+    if image:
+        resources["image_id"] = image
+    p = SkyProvider("run-u", resources=resources, slots=[1], sky=sky, allow_no_autodown=True)
+    name = p.order(1)
+    sky.get(sky.cluster_request[name])
+    sky.clusters[name]["handle"].ssh_user = None
+    capsys.readouterr()
+    assert p.node(1, name).user == user
+    assert p.node(1, name).user == user
+    out = capsys.readouterr().out
+    assert out.count("sky reports no ssh user") == 1
+    assert f"using {user!r} ({source})" in out
+
+
+def test_a_cluster_with_an_ssh_user_keeps_it_without_a_warning(capsys):
+    sky = FakeSky()
+    p = _verda_provider(sky)
+    name = p.order(1)
+    sky.get(sky.cluster_request[name])
+    capsys.readouterr()
+    assert p.node(1, name).user == "ubuntu"  # the handle's own user wins over the cloud default
+    assert "no ssh user" not in capsys.readouterr().out
+
+
+def test_the_listed_cloud_picks_the_ssh_user_default():
+    """The cloud sky lists for the cluster comes first (the offer may name no cloud)."""
+    sky = FakeSky()
+    p = SkyProvider("run-u", resources={"accelerators": "L40S:1"}, slots=[1], sky=sky)
+    name = p.order(1)
+    sky.get(sky.cluster_request[name])
+    sky.clusters[name]["cloud"] = "Verda"
+    sky.clusters[name]["handle"].ssh_user = None
+    assert p.node(1, name).user == "root"
+
+
 def test_a_cloud_sky_cannot_autodown_is_launched_without_it_and_the_hard_cap_is_a_lease_end():
     """Found on real Verda (sky 0.14.3): sky refuses any launch that asks for autodown there
     ("autodown: Auto-down is not supported on Verda"), so every order failed. The cluster is

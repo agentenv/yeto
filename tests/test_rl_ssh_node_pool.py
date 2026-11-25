@@ -573,3 +573,31 @@ def test_nvidia_smi_names_with_a_form_factor_are_catalog_cards():
         check_cards("cuda", "0, NVIDIA A100-SXM4-80GB, 81920\n", card="A100", count=1)
     with pytest.raises(CardMismatch, match="not in the yeto card catalog"):
         check_cards("cuda", "0, NVIDIA Z900-SXM9-1TB, 81920\n", card="A100", count=1)
+
+
+def test_single_card_sky_offers_have_a_nominal_hbm_size_the_preflight_checks():
+    """An L40S / L4 / T4 offer's node profile declared 0 GiB HBM (the catalog had no size), so
+    the preflight's HBM check passed any card. Each now has its size, and a nvidia-smi total
+    of that card passes while a smaller card's does not."""
+    from yeto.hw.catalog import CARD_HBM_GIB, nominal_hbm_gib
+    from yeto.launcher import GPU_MEM_GB
+    from yeto.node.ssh_docker import offer_profile
+
+    reported_mib = {"L40S": 46068, "L4": 23034, "T4": 15360, "A10G": 23028, "RTX-6000-Ada": 49140,
+                    "RTX-PRO-6000": 97887}
+    for card, mib in reported_mib.items():
+        profile = offer_profile({}, (card, 1), name=f"{card}-offer")
+        assert profile.hbm_gib == CARD_HBM_GIB[card][0] > 0, card
+        product = {"L40S": "NVIDIA L40S", "L4": "NVIDIA L4", "T4": "Tesla T4", "A10G": "NVIDIA A10G",
+                   "RTX-6000-Ada": "NVIDIA RTX 6000 Ada Generation",
+                   "RTX-PRO-6000": "NVIDIA RTX PRO 6000 Blackwell Server Edition"}[card]
+        assert len(profile.check_cards(f"0, {product}, {mib}\n")) == 1, card
+        assert nominal_hbm_gib(card, mib / 1024) == CARD_HBM_GIB[card][0], card
+    assert offer_profile({}, ("L40S", 1), name="x").hbm_gib == 48
+    assert offer_profile({}, ("L4", 1), name="x").hbm_gib == 24
+    assert offer_profile({}, ("T4", 1), name="x").hbm_gib == 16
+    with pytest.raises(CardMismatch, match="declares 48 GiB HBM"):  # a 24 GiB card on an L40S slot
+        check_cards("cuda", "0, NVIDIA L40S, 23034\n", card="L40S", count=1, hbm_gib=48)
+    # every card the launcher sizes models by has a catalog size, and the same one
+    for card, gb in GPU_MEM_GB.items():
+        assert gb in CARD_HBM_GIB.get(card, ()), card

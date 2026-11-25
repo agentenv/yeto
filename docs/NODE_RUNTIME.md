@@ -241,6 +241,13 @@ releases it by exact name from the run's resource ledger; it refuses while a poo
 loop of the run still holds its lock (stop that loop with `pool-stop` first), and
 `yeto down` leaves pool machines to the pool.
 
+A Verda offer that sets no `image_id` orders `24.04.cuda12.9.docker` (SkyPilot 0.14.3's
+own Verda default image is no longer offered there); an offer's own `image_id` is kept,
+and `pool` / `pool --dry-run` print the VM image of every offer. When sky's cluster handle
+names no ssh user (Nebius), the node is reached as the user sky's template for that cloud
+logs in as (`ubuntu` on Nebius and AWS, `root` on Verda, ...; on OCI by the image), with
+a WARNING naming the user and where it came from.
+
 National Compute (the MI355X vLLM pool) and Daytona keep their own sampler starts.
 `yeto.node.shadow` renders the node runtime's launch on the same node and lists
 each difference from the route's own (device flags, mounts, env files,

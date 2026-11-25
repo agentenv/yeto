@@ -100,6 +100,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import dataclasses
 import functools
 import hashlib
 import json
@@ -126,6 +127,23 @@ DEFAULT_HARD_CAP_MINUTES = 24 * 60
 # Clouds whose sky provisioner has no autodown (SkyPilot 0.14.3: CloudImplementationFeatures.AUTODOWN
 # unsupported); sky refuses a launch with down=True or an autostop there.
 NO_AUTODOWN_CLOUDS = frozenset({"hyperbolic", "primeintellect", "verda", "yotta"})
+# The VM image (``image_id``) an offer of these clouds gets when it names none. Verda: SkyPilot
+# 0.14.3's default image type ``ubuntu-24.04-cuda-12.8-open-docker`` is no longer offered by Verda
+# (an order fails "Operating system or volume not found"); ``24.04.cuda12.9.docker`` is the oldest
+# CUDA image Verda lists, and a spot order on it came up on 2026-11-25. An offer that sets
+# ``image_id`` (null too: sky's own default) keeps it.
+DEFAULT_IMAGE_ID = {"verda": "24.04.cuda12.9.docker"}
+# The user sky logs in as on a cloud's VMs (SkyPilot 0.14.3: ``auth.ssh_user`` of
+# ``sky/templates/<cloud>-ray.yml.j2``, a fixed user there), for a cluster handle that carries no
+# ssh_user (Nebius answers None). OCI depends on the image (``oci_ssh_user``); a cloud missing here
+# (or a templated user: fluidstack, runpod, primeintellect) falls back to FALLBACK_SSH_USER.
+SSH_USER_BY_CLOUD = {
+    "aws": "ubuntu", "azure": "azureuser", "gcp": "gcpuser", "nebius": "ubuntu", "lambda": "ubuntu",
+    "hyperbolic": "ubuntu", "ibm": "ubuntu", "mithril": "ubuntu", "vsphere": "ubuntu",
+    "verda": "root", "vast": "root", "yotta": "root", "cudo": "root", "do": "root", "scp": "root",
+    "kubernetes": "sky", "paperspace": "paperspace", "seeweb": "ecuser", "shadeform": "shadeform",
+}
+FALLBACK_SSH_USER = "ubuntu"
 # sky request states (sky.server.requests.requests.RequestStatus) of a request still in flight
 REQUEST_LIVE = frozenset({"PENDING", "WAITING", "RUNNING"})
 # launch_state of a record row: the launch request is in flight / confirmed / failed /
@@ -186,6 +204,39 @@ def _listed_cloud(record: Any) -> str:
     cloud = _field(record, "cloud") or getattr(getattr(_field(record, "handle"), "launched_resources", None),
                                                 "cloud", None)
     return str(cloud or "").strip().lower()
+
+
+def with_default_image(offer: Offer) -> Offer:
+    """``offer`` with its cloud's :data:`DEFAULT_IMAGE_ID` when it sets no ``image_id``."""
+    image = DEFAULT_IMAGE_ID.get(offer_cloud(offer))
+    if image is None or "image_id" in offer.resources:
+        return offer
+    return dataclasses.replace(offer, resources={**offer.resources, "image_id": image})
+
+
+def image_text(offer: Offer) -> str:
+    """The VM image an order of ``offer`` asks for, and where it comes from."""
+    image = offer.resources.get("image_id")
+    if image is None:
+        return "sky's default image"
+    if DEFAULT_IMAGE_ID.get(offer_cloud(offer)) == image:
+        return f"{image} (yeto's {offer_cloud(offer)} default; set image_id in the offer to change it)"
+    return f"{image} (the offer's image_id)"
+
+
+def oci_ssh_user(image: Any) -> str:
+    """OCI's login user: ``opc`` on an Oracle Linux image (``<image>:oraclelinux`` or such a
+    tag), ``ubuntu`` otherwise (sky's OCI images are Ubuntu)."""
+    return "opc" if "oraclelinux" in str(image or "").replace(" ", "").replace("-", "").lower() else "ubuntu"
+
+
+def default_ssh_user(cloud: str, image: Any = None) -> tuple[str, str]:
+    """``(user, source)``: the user sky logs in as on ``cloud`` (with ``image``)."""
+    if cloud == "oci":
+        return oci_ssh_user(image), f"OCI image {image or '(sky default)'}"
+    if cloud in SSH_USER_BY_CLOUD:
+        return SSH_USER_BY_CLOUD[cloud], f"sky's {cloud} default"
+    return FALLBACK_SSH_USER, f"no known default for cloud {cloud or '(unknown)'}, a guess"
 
 
 def autodown_supported(offer: Offer) -> bool:
@@ -378,7 +429,8 @@ class SkyProvider:
             offers = offers_from_config({"resources": resources})
         if not offers:
             raise ValueError("sky provider: no offer")
-        self.run_id, self.slots, self.offers = run_id, list(slots), list(offers)
+        self.run_id, self.slots = run_id, list(slots)
+        self.offers = [with_default_image(o) for o in offers]
         self.resources = dict(self.offers[0].resources)
         # {offer key: its key before instance types were part of it} (offers.legacy_aliases): a
         # record written by an older yeto (a cluster's offer, a cooling breaker) is read as its offer's
@@ -406,6 +458,7 @@ class SkyProvider:
                 "(order + hard_cap_minutes); if the pool process is gone, `yeto cleanup --run <run> "
                 "--include-pools` releases it from the run's resource ledger (`yeto down` does not)")
         self._patched = False
+        self._ssh_user_warned: set[str] = set()
         self.aws_profile = aws_profile or None
         self.request_env = aws_request_env(self.aws_profile)
         self.task_yaml = os.path.expanduser(task_yaml) if task_yaml else None
@@ -927,7 +980,15 @@ class SkyProvider:
         ip = getattr(handle, "head_ip", None)
         if not ip:
             raise RuntimeError(f"cluster {ticket} has no head IP yet")
-        user = getattr(handle, "ssh_user", None) or "ubuntu"
+        user = getattr(handle, "ssh_user", None)
+        if not user:
+            resources = ((self._rows().get(ticket) or {}).get("offer") or {}).get("resources") or {}
+            cloud = _listed_cloud(record) or offer_cloud(Offer(key="", resources=dict(resources)))
+            user, source = default_ssh_user(cloud, resources.get("image_id"))
+            if ticket not in self._ssh_user_warned:
+                self._ssh_user_warned.add(ticket)
+                print(f"[sky-provider] WARNING: cluster {ticket}: sky reports no ssh user; using {user!r} "
+                      f"({source})", flush=True)
         return NodeLease(account, ticket, ip, user, "", None, None, None, None)
 
     def balance(self) -> int | None:
@@ -1049,6 +1110,19 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
     except RuntimeError as error:
         problems.append(f"sky provider: {error}")
     return problems
+
+
+def offer_image_lines(cfg: dict[str, Any]) -> list[str]:
+    """The VM image of every offer of a sky pool, one line each (``pool`` and ``pool
+    --dry-run``); nothing for another pool or a config the provider refuses (its
+    offline problems name why)."""
+    if str((cfg.get("provider") or {}).get("kind") or "") != KIND:
+        return []
+    try:
+        provider = from_config(cfg, str(cfg.get("run") or cfg.get("shard_base")), sky=object())
+    except (ValueError, TypeError, KeyError):
+        return []
+    return [f"sky offer {o.key}: VM image {image_text(o)}" for o in provider.offers]
 
 
 def _uses_aws(provider: SkyProvider) -> bool:

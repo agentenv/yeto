@@ -58,6 +58,12 @@ CARD_HBM_GIB: Mapping[str, tuple[int, ...]] = {
     "810E": (), "M890": (144,),
     "H100": (80,), "H200": (141,), "A100": (40, 80), "A100-80GB": (80,), "B200": (180,),
     "B300": (288,), "MI300X": (192,), "MI325X": (256,), "MI355X": (288,),
+    # NVIDIA product figures (the single-card sky offers; the node preflight checks each
+    # reported total against them): L40S 48 GB, L4 24 GB, T4 16 GB, A10G 24 GB, V100 16 / 32 GB,
+    # RTX 6000 Ada 48 GB, RTX PRO 6000 Blackwell 96 GB. nvidia-smi reports them a few percent
+    # lower (an L40S 46068 MiB), within card_tools.HBM_TOLERANCE.
+    "L40S": (48,), "L4": (24,), "T4": (16,), "A10G": (24,), "V100": (16, 32),
+    "RTX-6000-Ada": (48,), "RTX-PRO-6000": (96,),
 }
 
 # The tables below are derived from yeto.gpu_spec.HW_FAMILIES, the single
