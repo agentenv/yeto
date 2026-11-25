@@ -578,6 +578,8 @@ def test_a_fleet_islands_launch_ends_with_the_island_stop_exit(monkeypatch, tmp_
     (("--rl-deterministic-stop",), "modal:1xa100", True),  # switched on for a single trainer
     ((), "modal:1xa100,modal:1xa100", True),  # two trainer islands: a fleet
     (("--rl-sync-island-lease-s", "150"), "modal:1xa100", True),  # an island pool option
+    (("--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer"), "modal:1xa100", True),  # a fleet plan
+    (("--rl-sample-role", "trainer"), "modal:1xa100", False),  # the K3.1 buffer trainer: a single trainer
 ])
 def test_the_switch_is_on_for_a_fleet_and_off_for_a_single_trainer(extra, gpu, on):
     args = _launcher_args("ports", extra, gpu=gpu)

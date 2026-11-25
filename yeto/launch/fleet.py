@@ -28,8 +28,9 @@ def deterministic_stop(args, trainer_islands: int | None = None) -> tuple[bool, 
     ends for good (exit ``ISLAND_STOP_EXIT`` on the island, never retried by its provider,
     never relaunched; ``trainer.nan`` / ``trainer.policy_hash`` get one relaunch on a new
     machine), and why. On for a fleet: an island pool (any island pool option), an island
-    launch of a fleet (fleet role ``island``) and a launch of two or more trainer islands
-    (``trainer_islands``). A single trainer keeps the behavior it always had (the provider
+    launch of a fleet (fleet role ``island``), a fleet plan's launch (``--rl-sampler-follow
+    trainer``, which ``yeto.rl.fleet.compile_fleet`` writes) and a launch of two or more trainer
+    islands (``trainer_islands``). A single trainer keeps the behavior it always had (the provider
     retries the island's exit, the controller relaunches it) unless ``--rl-deterministic-stop``
     turns it on."""
     if getattr(args, "rl_deterministic_stop", False):
@@ -40,6 +41,10 @@ def deterministic_stop(args, trainer_islands: int | None = None) -> tuple[bool, 
         return True, "an island pool"
     if getattr(args, "rl_fleet_role", None) == "island":
         return True, "an island launch of a fleet"
+    if getattr(args, "rl_sampler_follow", None) == "trainer":
+        # a fleet plan's launch (yeto.rl.fleet.compile_fleet writes it, also for one trainer
+        # island) and a synced group of trainer and sampler islands
+        return True, "a fleet plan's launch (--rl-sampler-follow trainer)"
     count = _trainer_islands(args) if trainer_islands is None else int(trainer_islands)
     if count >= 2:
         return True, f"a fleet of {count} trainer islands"
