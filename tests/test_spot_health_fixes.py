@@ -314,6 +314,7 @@ def test_d4_a_fenced_sampler_leaves_fenced_on_its_tape(tmp_path, monkeypatch, ca
 def test_d7_the_local_step_line_and_the_global_rounds_help():
     from yeto.rl.engine.run_flags import GLOBAL_ROUNDS_HELP, local_training_steps_line
 
+    # H = 1 and a serial pipeline: one round per local step, the count is exact
     assert "= global_rounds x fragments = 40 x 8 = 320" in local_training_steps_line(40, 8)
     assert "sync rounds" in GLOBAL_ROUNDS_HELP
 
@@ -327,38 +328,54 @@ GPU3 = ["--gpu", "modal:1xh200,modal:1xh200,modal:1xh200"]
 def test_d7_the_launcher_prints_the_local_training_steps(monkeypatch, capsys):
     from tests.test_verl_sample_role import _launch
 
-    _launch(monkeypatch, SPOT + RELAY + GPU3)  # --total-steps 4, 4 fragments
-    assert "local training steps = global_rounds x fragments = 4 x 4 = 16" in capsys.readouterr().out
+    # --total-steps 4, 4 fragments, H = 1, the asynchronous default pipeline D = 2: a boundary
+    # may push two rounds, so 16 fragment rounds take at least 8 local steps
+    _launch(monkeypatch, SPOT + RELAY + GPU3)
+    out = capsys.readouterr().out
+    assert "local training steps >= 8 (R=4 global rounds x F=4 fragments = 16 fragment rounds; " \
+        "H=1 local steps per fragment sync, D=2 rounds per step at most" in out
 
 
-def test_p5b_the_local_step_count_adds_the_horizon_before_the_first_round():
-    # P5b g4 (fleet, decoupled, --total-steps 1, --fragments 4, --local-rl-rounds-per-sync 4):
-    # the islands pushed their fragment rounds at local steps 4, 5, 6, 7 (one island, 8 with a
-    # late permit), not by step 4 as "R x F = 4" said: each round needs H local steps first
+def test_the_local_step_bound_counts_the_horizon_the_pipeline_and_the_stagger(monkeypatch):
+    # A two-island decoupled fleet (--total-steps 1 --fragments 4 --local-rl-rounds-per-sync 4,
+    # pipeline 2) pushed its 4 fragment rounds at local steps 4, 5, 6, 7 (one island 8 after a
+    # late permit) while the line said "1 x 4 = 4", so the run looked like it trained past its
+    # budget; the syncer had finished on schedule
+    from yeto.rl.engine.full_parameter_stream import (
+        STAGGER_FIRST_PUSH_ENV,
+        first_push_phase,
+    )
     from yeto.rl.engine.run_flags import (
         GLOBAL_ROUNDS_HELP,
         local_training_steps,
         local_training_steps_line,
     )
 
-    assert local_training_steps(1, 4, 4) == 7
-    assert local_training_steps(40, 8, 1) == 320
-    assert local_training_steps(40, 8, 0) == 320  # an unset horizon counts as 1
-    assert local_training_steps(2, 4, 8) == 15
-    line = local_training_steps_line(1, 4, local_horizon=4, who="x")
-    assert "local training steps >= global_rounds x fragments + local_horizon - 1 = 1 x 4 + 4 - 1 = 7" in line
-    assert "H=4" in line
-    # H = 1 keeps the exact line (the count is exact there)
-    assert local_training_steps_line(40, 8, local_horizon=1) == local_training_steps_line(40, 8)
-    assert "R x --fragments + H - 1" in GLOBAL_ROUNDS_HELP
+    monkeypatch.delenv(STAGGER_FIRST_PUSH_ENV, raising=False)
+    assert local_training_steps(1, 4, 4, 2) == 7       # the stagger: last first push at 4 + 3
+    assert local_training_steps(1, 8, 2, 2) == 5       # H < F: the pipeline bounds it, 1 + 8 / 2
+    assert local_training_steps(2, 4, 8, 2) == 22      # H > F: every fragment syncs every H steps
+    assert local_training_steps(40, 8, 1, 1) == 320    # exact case
+    assert local_training_steps(40, 8, 0, 9) == 40     # unset H counts as 1, D clamps to F
+    assert local_training_steps(1, 4, 4, 2, stagger=False) == 5
+    monkeypatch.setenv(STAGGER_FIRST_PUSH_ENV, "0")
+    assert local_training_steps(1, 4, 4, 2) == 5
+    # the stagger term is the role stream's own phase of the last fragment
+    assert (8 - 1) * 2 // 8 == first_push_phase(7, 8, 2)
+    monkeypatch.delenv(STAGGER_FIRST_PUSH_ENV)
+    line = local_training_steps_line(1, 4, local_horizon=4, pipeline=2, who="x")
+    assert line.startswith("[x] local training steps >= 7 (R=1 global rounds x F=4 fragments")
+    assert local_training_steps_line(40, 8, local_horizon=1, pipeline=1) == local_training_steps_line(40, 8)
+    assert "max(H - 1 + ceil(R x F / D), R x H + (F - 1) x H // F)" in GLOBAL_ROUNDS_HELP
 
 
-def test_p5b_the_launcher_prints_the_horizon_aware_local_steps(monkeypatch, capsys):
+def test_the_launcher_prints_the_horizon_and_pipeline_bound(monkeypatch, capsys):
     from tests.test_verl_sample_role import _launch
 
+    monkeypatch.delenv("YETO_FULL_PARAMETER_STAGGER_FIRST_PUSH", raising=False)
     _launch(monkeypatch, SPOT + RELAY + GPU3 + ["--local-rl-rounds-per-sync", "4"])  # --total-steps 4
-    assert "local training steps >= global_rounds x fragments + local_horizon - 1 = 4 x 4 + 4 - 1 = 19" \
-        in capsys.readouterr().out
+    assert "local training steps >= 19 (R=4 global rounds x F=4 fragments = 16 fragment rounds; " \
+        "H=4 local steps per fragment sync, D=2" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------- spot pool default

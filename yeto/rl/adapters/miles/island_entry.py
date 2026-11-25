@@ -1074,6 +1074,7 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
         from yeto.rl.engine.run_flags import local_training_steps_line
 
         print(local_training_steps_line(args.global_rounds, args.fragments, local_horizon=args.local_horizon,
+                                        pipeline=args.pipeline,
                                         who=f"yeto-miles island {getattr(args, 'learner_id', '?')}"), flush=True)
     if not _is_sha256(getattr(args, "syncer_profile_sha256", None)):
         raise ValueError("dense full-parameter mode requires --syncer-profile-sha256")

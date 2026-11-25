@@ -151,6 +151,21 @@ EXPERT_FULL = (
 )
 
 
+def test_an_async_dense_island_prints_the_horizon_and_pipeline_bound(capsys):
+    from yeto.rl.adapters.miles import island_entry
+
+    _, plan = _dense_plan()
+    command = plan["island_requests"][0]["learner_command"]
+    tokens = shlex.split(command.split("-m yeto.rl.adapters.miles.island_entry", 1)[1])
+    tokens = [{"$SYNCER_ADDR": "127.0.0.1:29400", "$LEARNER_ID": "1"}.get(t, t) for t in tokens]
+    parsed = island_entry.parse_args(tokens)
+    parsed.full_parameter_rounds, parsed.local_horizon, parsed.pipeline = "async", 4, 2
+    parsed.rl_max_policy_age = 3
+    island_entry._check_dense_full_sweep(parsed, yeto_policy_sync=True)
+    out = capsys.readouterr().out
+    assert "local training steps >= " in out and "H=4 local steps per fragment sync, D=2" in out
+
+
 def test_deepseek_v4_expert_full_island_is_the_lora_hybrid_on_the_dense_sweep(monkeypatch):
     # Attention LoRA + clone experts ride the same strict sweep as dense.
     from yeto import launcher

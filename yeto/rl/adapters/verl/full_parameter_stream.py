@@ -1425,6 +1425,7 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         from yeto.rl.engine.run_flags import local_training_steps_line
 
         print(local_training_steps_line(args.global_rounds, args.fragments, local_horizon=args.local_horizon,
+                                        pipeline=args.pipeline,
                                         who=f"yeto-verl island {args.learner_id}"), flush=True)
     if not _sha256_hex(args.parameter_layout_sha256) or not _sha256_hex(args.syncer_profile_sha256):
         raise ValueError("a synced full-parameter island needs --parameter-layout-sha256 and "
