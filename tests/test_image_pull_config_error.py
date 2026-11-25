@@ -197,11 +197,50 @@ def test_a_refused_login_on_a_relaunch_is_read_again_and_tried_once_more(monkeyp
     ops = SkySDKOps.__new__(SkySDKOps)
     task = _Task(old)
     assert ops.relaunch(task, "r-i0-l0") == 7
-    assert launched[0]["SKYPILOT_DOCKER_PASSWORD"] == "fresh-token"
+    assert len(launched) == 1 and launched[0]["SKYPILOT_DOCKER_PASSWORD"] == "fresh-token"
+    assert len(task.updated) == 1
 
     _sky(monkeypatch, iter([expired, expired]))
     with pytest.raises(ImagePullRefused, match="check the registry login"):
         ops.relaunch(_Task(old), "r-i0-l0")
+
+
+def test_a_refused_login_that_has_not_changed_is_not_tried_again(monkeypatch, tmp_path):
+    """The login came from this launch's SKYPILOT_DOCKER_* variables, which do not change while
+    it runs: reading it again gives the refused one, so no second machine is ordered."""
+    from yeto.launch.sky_ops import SkySDKOps
+
+    expired = RuntimeError(_pull("Error response from daemon: denied: Your authorization token has expired."))
+    same = {"SKYPILOT_DOCKER_USERNAME": "AWS", "SKYPILOT_DOCKER_PASSWORD": "old-token",
+            "SKYPILOT_DOCKER_SERVER": "1.dkr.ecr.us-east-1.amazonaws.com"}
+    for key, value in same.items():
+        monkeypatch.setenv(key, value)
+    calls = []
+    errors = iter([expired, None])
+
+    def counted():
+        for error in errors:
+            calls.append(1)
+            yield error
+
+    _sky(monkeypatch, counted())
+    task = _Task(same)
+    with pytest.raises(ImagePullRefused, match="registry credentials refused, the login is unchanged") as raised:
+        SkySDKOps.__new__(SkySDKOps).relaunch(task, "r-i0-l0")
+    assert len(calls) == 1 and task.updated == []
+    assert "old-token" not in str(raised.value)
+
+    # no login found at all (variables gone, no ~/.docker/config.json entry): not retried either
+    for key in same:
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    calls.clear()
+    errors = iter([expired, None])
+    _sky(monkeypatch, counted())
+    task = _Task(same)
+    with pytest.raises(ImagePullRefused, match="the login is unchanged"):
+        SkySDKOps.__new__(SkySDKOps).relaunch(task, "r-i0-l0")
+    assert len(calls) == 1 and task.updated == []
 
 
 def test_sky_ops_relaunch_names_a_deterministic_pull_and_keeps_the_others(monkeypatch):

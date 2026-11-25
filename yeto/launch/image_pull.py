@@ -16,8 +16,9 @@ credential or permission problem. Every provision runs ``docker login`` on its n
 token itself. A launch's first provision has just read it: refused there, it is a
 configuration error ("check the registry login"). A relaunch inside a running launch
 reuses the login read at its start, which may have expired since (an ECR password lasts
-12 hours): it reads the login again and tries once more before it gives up
-(``sky_ops.relaunch``).
+12 hours): it reads the login again and tries once more only when that login differs
+from the refused one (by fingerprint); the same login fails the same way, so it gives up
+at once (``sky_ops.relaunch``).
 
 Only docker's own error lines count (``Error response from daemon: ...``, ``failed to
 register layer: ...``): a line of another tool in the same text (a Hugging Face 401, git's
@@ -125,18 +126,32 @@ def deterministic_pull_error(text: object) -> str | None:
     return None if found is None else found.line
 
 
-def image_error_message(cluster: str, failure: PullFailure | str) -> str:
-    """The configuration error of a deterministic pull failure on ``cluster``."""
+def image_error_message(cluster: str, failure: PullFailure | str, *, note: str = "") -> str:
+    """The configuration error of a deterministic pull failure on ``cluster`` (``note``: why a
+    credential failure was not tried again)."""
     if isinstance(failure, str):
         failure = PullFailure(IMAGE, failure)
     if failure.kind == CREDENTIAL:
         return (f"the island image cannot be pulled on {cluster}: {failure.line} (credential or image "
                 "permission problem: check the registry login (SKYPILOT_DOCKER_USERNAME / "
                 "SKYPILOT_DOCKER_PASSWORD / SKYPILOT_DOCKER_SERVER, else ~/.docker/config.json; an ECR "
-                "password lasts 12 hours) and the image's access, then launch again; not relaunched)")
+                "password lasts 12 hours) and the image's access, then launch again; not relaunched"
+                + (f"; {note}" if note else "") + ")")
     return (f"the island image cannot be pulled on {cluster}: {failure.line} (a property of the image or its "
             "reference, the same on every machine: fix or replace the image, then launch again; "
             "not relaunched)")
+
+
+def login_fingerprint(login: dict | None) -> str:
+    """A digest of a registry login triple (user, password, server), to compare two logins
+    without keeping or showing either."""
+    import hashlib
+
+    from ..modal_runner import DOCKER_LOGIN_ENV_VARS
+
+    login = login or {}
+    raw = "\0".join(str(login.get(key) or "") for key in DOCKER_LOGIN_ENV_VARS)
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def fresh_registry_login(server: str | None, environ=None) -> dict[str, str] | None:
