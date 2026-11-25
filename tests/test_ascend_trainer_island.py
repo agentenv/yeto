@@ -10,6 +10,7 @@ image is refused on cards it was never verified on."""
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -290,13 +291,31 @@ def test_the_launch_preflight_refuses_the_p5b_pairing_before_any_order(monkeypat
 
 
 def test_the_explicit_environment_wins_over_the_activation_scripts(tmp_path):
-    """CANN's set_env.sh sets LD_LIBRARY_PATH / PYTHONPATH / ASCEND_*: the job sources it
-    first and exports the inventory / --island-env / island task environment after it."""
+    """CANN's set_env.sh sets LD_LIBRARY_PATH / PYTHONPATH / ASCEND_*: the job saves the
+    island environment's variables before it and restores them after it."""
     spec = _spec(tmp_path)
-    env = {"LD_LIBRARY_PATH": "/opt/site/lib", "ASCEND_RT_VISIBLE_DEVICES": "0,1"}
-    body = sti._trainer_body(spec, 0, "/tmp/requant.log", env=env)
+    body = sti._trainer_body(spec, 0, "/tmp/requant.log", keep=["LD_LIBRARY_PATH", "ASCEND_RT_VISIBLE_DEVICES"])
+    saved = body.index("__yeto_keep=$(declare -p ASCEND_RT_VISIBLE_DEVICES LD_LIBRARY_PATH")
     sourced = body.index("ascend-toolkit/set_env.sh")
-    assert sourced < body.index("export LD_LIBRARY_PATH=/opt/site/lib")
-    assert sourced < body.index("export ASCEND_RT_VISIBLE_DEVICES=0,1")
-    plain = sti._trainer_body(spec, 0, "/tmp/requant.log")  # no env given: nothing exported again
-    assert "export LD_LIBRARY_PATH" not in plain
+    assert saved < sourced < body.index('eval "$__yeto_keep"')
+    assert "__yeto_keep" not in sti._trainer_body(spec, 0, "/tmp/requant.log")  # nothing to keep
+    with_env = tmp_path / "run.sh"
+    script = sti.start_script(spec, 0, {"LD_LIBRARY_PATH": "/opt/site/lib"}, sti.remote_paths("asc", "asc-l0-ssh", 0))
+    with_env.write_text(script)
+    proc = subprocess.run(["bash", "-n", str(with_env)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_no_secret_value_reaches_a_command_line(tmp_path):
+    """The start script goes to the node on ssh's stdin; only its outer exports carry the
+    values. The job itself is a ``setsid bash -c`` argument (readable by every user of the
+    node in the process list): with activation scripts it names the variables it keeps,
+    never their values."""
+    spec = _spec(tmp_path)
+    secret = "s3cr3t-SENTINEL-0123456789"
+    script = sti.start_script(spec, 0, {"YETO_STORE_SECRET_KEY": secret, "YETO_ISLAND_HMAC_KEY": secret + "h"},
+                              sti.remote_paths("asc", "asc-l0-ssh", 0))
+    holders = [line for line in script.splitlines() if secret in line]
+    assert holders == [f"export YETO_ISLAND_HMAC_KEY={secret}h", f"export YETO_STORE_SECRET_KEY={secret}"]
+    job = script[script.index("( setsid bash -c "):]
+    assert secret not in job and "YETO_STORE_SECRET_KEY" in job  # kept by name across the activation

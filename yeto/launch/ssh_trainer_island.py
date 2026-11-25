@@ -460,18 +460,31 @@ def _activate_lines(spec: SshTrainerSpec) -> str:
     return "".join(lines)
 
 
+def _keep_env(names: Sequence[str], activate: str) -> str:
+    """``activate`` with the variables ``names`` kept: their values (already in the job's
+    environment) are saved before the scripts and restored after them, so an activation
+    script (CANN's ``set_env.sh`` sets ``LD_LIBRARY_PATH``, ``PYTHONPATH``, ``ASCEND_*``)
+    never overrides what the inventory, ``--island-env`` or the island task set. Only the
+    names are in the script, never a value: the script is a ``bash -c`` argument, which
+    any user of the node can read from the process list."""
+    keep = sorted(n for n in names if ENV_NAME.fullmatch(n))
+    if not activate or not keep:
+        return activate
+    return (f"__yeto_keep=$(declare -p {' '.join(keep)} 2>/dev/null || true)\n"
+            + activate + 'eval "$__yeto_keep"; unset __yeto_keep\n')
+
+
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str, state_dir: str | None = None,
-                  env: Mapping[str, str] | None = None) -> str:
+                  keep: Sequence[str] = ()) -> str:
     """The node's job as bash; it exits with the trainer's exit code. ``state_dir``:
     the incarnation's state dir as the job sees it (the node-local storage prelude,
     :func:`ssh_node_storage.job_prelude`). A rootfs job first sources its activation
-    scripts (:func:`activation`), then exports ``env`` again: an activation script (CANN's
-    ``set_env.sh`` sets ``LD_LIBRARY_PATH``, ``PYTHONPATH``, ``ASCEND_*``) never overrides
-    what the inventory, ``--island-env`` or the island task set."""
+    scripts (:func:`activation`), keeping the variables ``keep`` (:func:`_keep_env`)."""
     node = spec.nodes[rank]
-    activate = _activate_lines(spec)
-    prelude = (activate + (_exports(env) if activate and env else "")
-               + ssh_node_storage.job_prelude(node, spec.run_id, state_dir))
+    prelude = _keep_env(keep, _activate_lines(spec)) + ssh_node_storage.job_prelude(node, spec.run_id, state_dir)
     if spec.run_script:
         # The island run script (rl_island_task) enters ~/sky_workdir, where sky syncs
         # the code; an SSH node has no sync: the run code pack, or the spec's workdir.
@@ -558,7 +571,7 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
         enter = place = ""
     else:
         requant_log = f"\"{paths['requant_log']}\""
-        job = f"bash -c {shlex.quote(_trainer_body(spec, rank, requant_log, env=full_env))}"
+        job = f"bash -c {shlex.quote(_trainer_body(spec, rank, requant_log, keep=sorted(full_env)))}"
         enter = f"cd {shlex.quote(spec.workdir)}\n" if spec.workdir else 'cd "$HOME"\n'
         place = "".join(
             f"__yeto_f={_home_path(target, '$HOME', quote=False)}\n"
