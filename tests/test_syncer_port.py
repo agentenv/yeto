@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import shutil
 import socket
+import time
 from pathlib import Path
 
 import pytest
@@ -73,3 +74,32 @@ def test_a_nested_in_process_session_leaves_this_processs_binary_copy(syncer_bin
     pytester.makepyfile(test_nested="def test_nothing():\n    pass\n")
     pytester.runpytest("-p", "no:cacheprovider").assert_outcomes(passed=1)
     assert Path(syncer_binary).is_file()
+
+
+def test_only_copies_no_live_process_holds_are_swept(tmp_path, monkeypatch):
+    """A pid is checked only on its own host: a container sharing the checkout has its own
+    pid namespace, so its live process is no process here. Another host's directory goes
+    once it is a day old."""
+    import os
+    import subprocess
+    import sys
+
+    import syncer_build
+
+    monkeypatch.setattr(syncer_build, "COPIES", tmp_path / "copies")
+    host = syncer_build._own_dir().name.rpartition("-")[0]
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    here_dead = tmp_path / "copies" / f"{host}-{dead.pid}"
+    here_live = tmp_path / "copies" / f"{host}-{os.getppid()}"
+    other_recent = tmp_path / "copies" / f"container-7-{dead.pid}"
+    other_old = tmp_path / "copies" / f"container-8-{dead.pid}"
+    for directory in (here_dead, here_live, other_recent, other_old):
+        directory.mkdir(parents=True)
+    old = time.time() - syncer_build.OTHER_HOST_STALE_S - 60
+    os.utime(other_old, (old, old))
+    built = tmp_path / "yeto-syncer"
+    built.write_bytes(b"v1")
+    syncer_build.private_copy(built)
+    assert sorted(p.name for p in (tmp_path / "copies").iterdir()) == sorted(
+        [here_live.name, other_recent.name, syncer_build._own_dir().name])
