@@ -1394,9 +1394,10 @@ class BatchReader:
              ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
         """``groups`` ``(buffer position, decoded group)`` pairs for ``rollout_id``.
         Waits for them while the samplers write: it raises only after ``wait_s``
-        seconds in which no new group reached the buffer (a slow round that keeps
-        arriving is waited for); after the data end returns what is left (raises
-        when nothing is). When it raises, the groups it selected are selected again
+        seconds in which no new group it can train reached the buffer (a slow round
+        that keeps arriving is waited for; groups it passes over, such as those past
+        ``max_policy_age``, do not start the wait again); after the data end returns
+        what is left (raises when nothing is). When it raises, the groups it selected are selected again
         by the next take on this reader (the class doc)."""
         if int(groups) < 1:
             raise ValueError("groups must be positive")
@@ -1503,6 +1504,19 @@ class BatchReader:
         deferred_now = 0
         lease_reads: dict[str, float] = {}  # shard -> when the recheck read its lease
         accounts = (decoded, accounted, versions, source_groups, source_tokens, position_sources)
+        passed_since = 0  # groups selected and passed over since the wait started
+
+        def raise_wait() -> None:
+            """``trainer.sample_wait``: ``wait_s`` without a new group this take can train."""
+            what = ("without a new group" if not passed_since else
+                    f"without a new group it can train ({passed_since} selected since, all passed over)")
+            error = SampleBufferRolloutError(
+                f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
+                f"{what} (buffer position {self._cursor()})")
+            trip_sample_wait(self.emit, waited_s=self.clock() - progress, limit_s=self.wait_s, error=error)
+            raise self._ended(error, stale=stale, stale_incarnation=fenced, quarantined=quarantined,
+                              dropped_small=dropped_small)
+
         while True:
             if len(chosen) >= groups:
                 # judged again right before the round is handed over: a fence that came
@@ -1519,6 +1533,7 @@ class BatchReader:
             again = [item for _, item in waiting]  # judged again first, in buffer order
             judged_before = {id(item) for item in again}
             kept_before, unidentified_before = len(chosen), self.unidentified_total
+            deferred_before = deferred_now
             selection: list[list[Any]] = [[]]
 
             def candidates() -> Any:
@@ -1601,8 +1616,18 @@ class BatchReader:
                 waited = self._read_wait_s - waited
                 read_s += waited
                 decode_s += self.clock() - begun - waited
-            if selected:
+            # The wait for a group this take can train: it starts again when the selection
+            # brought one (chosen, or waiting for its lease), not for groups it passed over
+            # (too old, fenced, a duplicate task, unidentified, too small): those are read on
+            # at once, and once the buffer holds nothing new the wait is counted from the last
+            # trainable group. Before, any selected group started it again, so a take whose
+            # samplers kept writing groups it could never train (all past max_policy_age)
+            # waited for good instead of stopping by trainer.sample_wait.
+            if selected and (len(chosen) > kept_before or deferred_now > deferred_before):
                 progress = self.clock()  # the samplers are writing: the wait starts again
+                passed_since = 0
+            elif selected:
+                passed_since += len(selected)
             if len(chosen) >= groups or selected:
                 continue
             if self._deferred:
@@ -1621,12 +1646,7 @@ class BatchReader:
                 break
             waited = self.clock() - progress
             if waited > self.wait_s:
-                error = SampleBufferRolloutError(
-                    f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
-                    f"without a new group (buffer position {self._cursor()})")
-                trip_sample_wait(self.emit, waited_s=self.clock() - progress, limit_s=self.wait_s, error=error)
-                raise self._ended(error, stale=stale, stale_incarnation=fenced, quarantined=quarantined,
-                                  dropped_small=dropped_small)
+                raise_wait()
             if self.heartbeat_s > 0 and self.clock() - max(progress, beat) >= self.heartbeat_s:
                 # a legitimate wait is not a hang: the launcher's stall clock sees this event
                 beat = self.clock()
