@@ -78,10 +78,16 @@ island lease, see [Limits today](#limits-today).
 
 Each island launch is supervised on its own. An infrastructure failure relaunches that
 island only, at most 3 times. The other launches never notice. A configuration error or
-a strict failure marks the island `failed`, and it is never ordered again: this covers a
-syncer that refuses its HELLO (profile, session or layout) and a broken invariant. The
-island launch then exits 11, even when the engine's teardown output has pushed the
-failure out of its log tail. A normal end marks it `done`. The worker keeps
+a deterministic stop marks the island `failed`, and it is never ordered again: this covers a
+syncer that refuses its HELLO (profile, session or layout), a broken invariant and a trainer
+breaker's stop (`launch.deterministic_stop`, on for every island launch of a fleet). The
+island launch then exits 11 (`ISLAND_STOP_EXIT`), even when the engine's teardown output has
+pushed the failure out of its log tail. An island given up for good (`failed`, or
+`abandoned` once out of relaunches) stops its own sampler pools at once. A launch whose
+supervisor was killed after it registered its run is an infrastructure failure: it is
+relaunched and takes the running island back. A normal end marks it `done`. The island
+STOPs the worker writes itself (to move, remove or give up an island, or to forward the
+fleet's stop) are not stops by hand: a moved island keeps its pools. The worker keeps
 its record in `fleet/trainers/<k>/launch.json`, next to the island's lifecycle record
 `state.json` and its learner id claim `learner.json`.
 

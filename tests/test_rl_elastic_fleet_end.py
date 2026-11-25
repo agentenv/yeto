@@ -285,14 +285,14 @@ def test_a_strict_failure_pushed_out_of_the_log_tail_is_still_never_relaunched(t
     tape.feed(PREFIX + json.dumps({"event": "rl_strict_failure", "island_id": 0, "error": error,
                                         "time_unix": 1.0}) + "\n")
     tape.feed("".join(f"(RayWorkerManager) teardown line {i}\n" for i in range(2000)))
-    assert tape.strict_failure == error
+    assert tape.island_stop and tape.island_stop.get("strict")
     ops = _refusing_ops(None)  # the log tail no longer holds the strict line
     ops.status_seq["l0"] = [FAILED]
     ops.status_seq.setdefault(SYNCER, [RUNNING])
     ops.relaunch_results["l0"] = [None] * 200
     ctl = FleetController(learners={"l0": ("task-l0", 1)}, syncer=None, sky_ops=ops, poll_interval=30,
                           recover_timeout=900, thread_cls=ImmediateThread, fixed_roster=False, elastic=True,
-                          strict_failure_probe=lambda name: tape.strict_failure if name == "l0" else None)
+                          deterministic_stop=True, stop_probe=lambda name: tape.island_stop if name == "l0" else None)
     with pytest.raises(IslandsFailedForGood) as raised:
         ctl.run()
     assert ops.relaunch_calls == [] and ctl.learners["l0"]["state"] == "abandoned"
@@ -300,9 +300,10 @@ def test_a_strict_failure_pushed_out_of_the_log_tail_is_still_never_relaunched(t
     assert ctl.learners["l0"]["decision"].action == lifecycle.FAIL
 
 
-def test_the_strict_failure_exit_is_never_relaunched():
+def test_the_island_stop_exit_is_never_relaunched():
+    from yeto.config_errors import ISLAND_STOP_EXIT
     from yeto.launch import island_lifecycle as lifecycle
 
-    decision = lifecycle.classify(exit_code=lifecycle.STRICT_FAILURE_EXIT, log_text="(teardown lines only)")
-    assert decision.cause == lifecycle.STRICT and not decision.relaunch
+    decision = lifecycle.classify(exit_code=ISLAND_STOP_EXIT, log_text="(teardown lines only)")
+    assert decision.action == lifecycle.FAIL and not decision.relaunch
     assert lifecycle.classify(exit_code=1, log_text="(teardown lines only)").relaunch
