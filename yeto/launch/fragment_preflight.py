@@ -1,4 +1,4 @@
-"""Preflight of ``--fragments`` for a Miles full-parameter run.
+"""Preflight of ``--fragments`` (and, for verl, the layout hash) for a full-parameter run.
 
 A Miles full-parameter island refuses a layout whose fragment count is not
 ``--fragments`` (``MilesChunkedFullParameterAdapter.initialize``), but it only
@@ -15,12 +15,21 @@ cache, a model family the offline layout does not list, shape-free layouts,
 partial experts, CP or DP above 1, another backend), the check prints nothing
 and the run goes on as before. At PP>1 the count is an estimate: a mismatch is
 a warning, not a refusal.
+
+verl (``launch_flags.OFFLINE_LAYOUT_CARD_FREE``): its layout names no card or shard,
+so the planner (``adapters.verl.full_parameter_plan``: the HF model on the meta
+device) gives one layout for every island shape, DP included; the verl island has no
+``auto`` hash, so the launch also refuses a ``--rl-parameter-layout-sha256`` that is
+not the planned hash (when the model revision is a commit and the hash can be
+computed). A fleet island added or moved at run time runs the same check in its
+launch's dry run.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -66,9 +75,12 @@ def _in_scope(args: Any, trainers: list[tuple[Any, Any]]) -> bool:
             or not trainers):
         return False
     group = int(args.tensor_parallel or 1) * int(getattr(args, "pipeline_parallel", 1) or 1)
+    card_free = _card_free(args)
     for iargs, spec in trainers:
         if getattr(iargs, "rl_backend", None) != getattr(args, "rl_backend", None):
             return False  # an island of another backend (--rl-island-engine)
+        if card_free:  # one layout on every shape
+            continue
         try:
             nodes, gpus = rl_trainer_shape(iargs, spec)
         except ValueError:
@@ -76,6 +88,13 @@ def _in_scope(args: Any, trainers: list[tuple[Any, Any]]) -> bool:
         if nodes * gpus != group:  # DP > 1 (or a shape the layout does not model)
             return False
     return True
+
+
+def _card_free(args: Any) -> bool:
+    """Whether the backend's layout names no card or shard (verl: module doc)."""
+    from .rl_backend import _rl_backend_module
+
+    return bool(getattr(_rl_backend_module(args, "launch_flags"), "OFFLINE_LAYOUT_CARD_FREE", False))
 
 
 @dataclass(frozen=True)
@@ -150,11 +169,25 @@ def check_fragment_layout(args: Any, per_island: list, specs: list) -> None:
     tp = int(args.tensor_parallel or 1)
     pp = int(getattr(args, "pipeline_parallel", 1) or 1)
     layout = offline_summary(args, tp=tp, pp=pp)
-    if layout is None or layout.fragments == int(args.fragments):
+    if layout is None:
         return
+    card_free = _card_free(args)
     max_bytes = int(getattr(args, "rl_sync_fragment_max_bytes", 2 << 30))
     merge = getattr(args, "rl_sync_matrix_merge", "avg")
-    detail = (f"the Miles full-parameter layout of {args.model} at TP{tp} x PP{pp} "
+    backend = getattr(args, "rl_backend", None) or "miles"
+    where = "on any island shape" if card_free else f"at TP{tp} x PP{pp}"
+    if layout.fragments == int(args.fragments):
+        pinned = str(getattr(args, "rl_parameter_layout_sha256", None) or "")
+        if card_free and layout.layout_hash and re.fullmatch(r"[0-9a-f]{64}", pinned) and pinned != layout.layout_hash:
+            raise ValueError(
+                f"--rl-parameter-layout-sha256 {pinned[:16]}... is not the layout the trainer islands build: the "
+                f"{backend} full-parameter layout of {args.model}@{args.model_revision} {where} (config.json from the "
+                f"local model files), {layout.fragments} FP32 fragments of at most {max_bytes} bytes and matrix "
+                f"merge {merge} has hash {layout.layout_hash}; every island would refuse it at its start "
+                "(and the syncer session binds it). Set --rl-parameter-layout-sha256 " + layout.layout_hash)
+        return
+    name = "Miles" if backend == "miles" else backend
+    detail = (f"the {name} full-parameter layout of {args.model} {where} "
               f"(config.json from the local model files), FP32 fragments of at most "
               f"{max_bytes} bytes (--rl-sync-fragment-max-bytes) and matrix merge {merge} "
               f"has {layout.fragments} fragments over {layout.ranks} trainer rank(s)")

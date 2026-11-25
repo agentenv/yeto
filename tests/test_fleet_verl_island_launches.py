@@ -37,6 +37,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def _island_env(monkeypatch, tmp_path):
+    # hermetic: the offline layout check reads no model config from this host's HF cache
+    from yeto.launch import fragment_preflight
+
+    monkeypatch.setattr(fragment_preflight, "local_hf_config", lambda model, revision: None)
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "fleet-verl-launch-test-key")
     monkeypatch.setenv("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test-key-id")
     monkeypatch.setenv("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test-secret")

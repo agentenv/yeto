@@ -962,7 +962,8 @@ class Run:
                     continue  # the pool dry-run reports an unreadable pool config
 
         return (fleet.form_problem(plan.sync, backends=fleet.fleet_backends(self.cfg))
-                or fleet.compaction_problem(self.cfg, plan, pools()))
+                or fleet.compaction_problem(self.cfg, plan, pools())
+                or fleet.prompt_width_problem(self.cfg, plan))
 
     def write_fleet_plan(self) -> bool:
         """``<store>/fleet/plan.json`` (the island table the dashboard and the monitor read),

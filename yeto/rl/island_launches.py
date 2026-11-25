@@ -121,6 +121,8 @@ def island_argv(trainer_argv: list[str], island: Any, plan: Any, *, learners: in
         argv += ["--rl-island-max-policy-age", f"0:{island.max_policy_age}"]
     if island.sample_wait_s is not None:
         argv += ["--rl-island-sample-wait-s", f"0:{island.sample_wait_s:g}"]
+    if getattr(island, "buffer_max_prompt_len", None) is not None:
+        argv += ["--rl-island-buffer-max-prompt-len", f"0:{island.buffer_max_prompt_len}"]
     argv += ["--rl-fleet-role", "island", "--rl-fleet-learner-id", str(int(island.learner)),
              "--rl-fleet-learners", str(int(learners)), *fleet_flags(plan),
              "--controller", "local", "--island-lifecycle", "on"]

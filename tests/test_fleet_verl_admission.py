@@ -15,7 +15,9 @@ from yeto.rl import fleet, up
 from yeto.rl.engine import backend_identity as bi
 from yeto.rl.engine import backends
 
-VERL_ARGV = TRAINER_ARGV + ["--rl-backend", "verl", "--rl-parameter-layout-sha256", "a" * 64]
+# a verl trainer sizes its prompt rows within --seq-len next to a full response (prompt width preflight)
+VERL_ARGV = TRAINER_ARGV + ["--rl-backend", "verl", "--rl-parameter-layout-sha256", "a" * 64,
+                            "--seq-len", "4096", "--rollout-max-response-len", "2048"]
 
 
 def _run(files, argv, **edit):

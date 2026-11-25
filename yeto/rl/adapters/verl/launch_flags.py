@@ -37,11 +37,74 @@ def rl_image_ok(rl_image: str) -> bool:
     return (bool(match) and match["commit"] == VERL_COMMIT) or is_verl_registry_image(rl_image)
 
 
+# The offline layout (yeto.launch.fragment_preflight): a verl full-parameter layout names
+# no card or shard (full_parameter module doc), so one model plans one layout on any island
+# shape; the launcher checks --fragments and --rl-parameter-layout-sha256 against it.
+OFFLINE_LAYOUT_CARD_FREE = True
+
+
+def offline_full_parameter_layout(config: Mapping, *, tp: int = 1, pp: int = 1, minimum_fragments: int,
+                                  max_fragment_bytes: int, matrix_merge: str = "avg", model_revision: str = "",
+                                  config_sha256: str = ""):
+    """The full-parameter layout a verl island of the model in ``config`` (its
+    ``config.json``) plans, computed on the control host (``full_parameter_plan``: the
+    HF model on the meta device, no weights): ``fragments``, ``layout_hash`` (None
+    without a commit ``model_revision`` and the config's SHA-256, which the hash binds),
+    ``fragment_bytes``, ``ranks`` and ``exact``. ``tp`` / ``pp`` do not change it. None
+    for a model the meta-device build does not take; ImportError without torch /
+    transformers on this host."""
+    import json as _json
+    import tempfile
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from yeto.rl.local_learner import ComponentIdentity
+
+    from . import full_parameter as fp
+    from .full_parameter_plan import model_shapes
+
+    del tp, pp  # card-free: the same layout on every shape
+    import torch  # noqa: F401 - ImportError: the check is out of scope on this host
+    import transformers  # noqa: F401
+
+    revision = str(model_revision or "").lower()
+    identified = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision)
+                      and re.fullmatch(r"[0-9a-f]{64}", str(config_sha256 or "")))
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "config.json").write_text(_json.dumps(dict(config)))
+            shapes = model_shapes(directory)
+        component = ComponentIdentity(role="actor", model_revision=revision if identified else "0" * 40,
+                                      config_hash=config_sha256 if identified else "0" * 64)
+        layout = fp.plan_layout(fp.island_specs(shapes), component=component,
+                                minimum_fragments=int(minimum_fragments),
+                                max_fragment_bytes=int(max_fragment_bytes), matrix_merge=matrix_merge)
+    except Exception:  # noqa: BLE001 - a model the meta-device build or the planner does not take
+        return None
+    return SimpleNamespace(fragments=layout.fragments.num_fragments,
+                           layout_hash=layout.layout_hash if identified else None,
+                           fragment_bytes=tuple(f.numel * 4 for f in layout.fragments.fragments),
+                           ranks=1, exact=True)
+
+
 def per_learner_release_flags() -> str:
     """The island flag of a synced trainer whose samplers follow it (the launcher gives it
     its own sub-store ``trainer<k>`` and lane): it releases its own local versions there
     (``buffer_ports`` per-learner mode) instead of learner 0's merged versions."""
     return " --rl-release-mode per_learner"
+
+
+def buffer_prompt_width(*, seq_len: int, response_len: int, pool_max_prompt_len: int | None = None) -> int:
+    """The verl buffer trainer's prompt row width (``buffer_feed.buffer_prompt_width``):
+    the launcher's check of an island fleet's trainers before anything is ordered."""
+    from .buffer_feed import buffer_prompt_width as width
+
+    return width(seq_len=seq_len, response_len=response_len, pool_max_prompt_len=pool_max_prompt_len)
+
+
+def buffer_prompt_width_flags(width: int) -> str:
+    """The island flag of a trainer's prompt row width (its pools' ``agentic.max_prompt_len``)."""
+    return f" --rl-buffer-max-prompt-len {int(width)}"
 
 
 def image_pin_problem(rl_image: str) -> str | None:
