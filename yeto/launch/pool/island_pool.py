@@ -2617,13 +2617,14 @@ class IslandPool(PoolMoves):
                   sleep: Callable[[float], None] | None = None) -> list[Member]:
         """Stop the pool (drain every member) and retry failed drains ``attempts - 1``
         more times; the patrol then releases this run's machines no member owns.
-        Returns the members left (still billed: the caller prints the banner)."""
+        Returns the members left (still billed: the caller prints the banner), with the
+        machines of moves to / from another pool that are not settled (``moves_left``)."""
         from .store_lock import LockLost, LockUnconfirmed  # noqa: PLC0415
 
         sleep = sleep or time.sleep
         self.stop(why, sleep=sleep)
         if self.detached:
-            return self.live()
+            return self.live() + (self.moves_left() if self.moves else [])
         try:
             self._drain_retries(why, attempts, wait_s, sleep)
         except LockLost as error:
@@ -2631,7 +2632,7 @@ class IslandPool(PoolMoves):
         except LockUnconfirmed as error:
             self.log(f"pool: CRITICAL: drain: {error}; members left undrained")
             self._event("lock_unconfirmed", error=str(error)[:300], during="drain")
-        return self.live()
+        return self.live() + (self.moves_left() if self.moves else [])
 
     def _drain_retries(self, why: str, attempts: int, wait_s: float, sleep: Callable[[float], None]) -> None:
         """:meth:`drain_all` after the stop: failed drains and owed fences again, then the patrol."""

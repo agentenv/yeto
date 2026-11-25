@@ -771,7 +771,8 @@ class LaneMover(Protocol):
     A mover may also have ``begin(move)``, called with the whole :class:`Migration` before
     the steps (it names both pools); :class:`yeto.launch.pool.migrate.PoolMover` reserves
     the destination and starts the source's drain there, and the pools finish the move
-    on their own ticks (its steps then confirm each half is under way)."""
+    on their own ticks (its steps then confirm each half is under way). Once moved, the
+    ticket is the destination pool's: it watches, bills and releases the machine."""
 
     def drain_lane(self, ticket: str, island: str) -> None: ...
     def load_release(self, ticket: str, island: str) -> None: ...

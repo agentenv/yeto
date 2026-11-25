@@ -30,7 +30,10 @@ The box is the run store's (``fleet/moves/<move id>/``) on the store control pla
 a ``moves/`` directory next to the local state files: it outlives any controller, and a
 pool restored without a mover finds it again. A pool with neither (no state kept) never
 moves a machine. Keys carry the move id (ticket and start time), so a machine moved back
-later starts a fresh claim.
+later starts a fresh claim. Each move records where its box is: a pool that finds a
+different box (a store-plane pool restored from its local mirror by ``pool-stop``) never
+claims or releases on it; the move is reported unresolved (a critical alert, and the
+machine is listed with the members a stop leaves billed).
 
 What can go wrong, and what then happens:
 
@@ -168,6 +171,14 @@ class PoolMoves:
             self.log(f"pool: no hand-over box: {error!r}"[:300])  # type: ignore[attr-defined]
             return None
 
+    def _rec_box(self, rec: Mapping[str, Any]) -> MoveBox | None:
+        """The box of one move: the pool's, only when it is the one the move began on (every
+        move records it; a record without it is not trusted either)."""
+        box = self._box()
+        if box is None or rec.get("box") != box.where:
+            return None
+        return box
+
     def _move_guard(self) -> None:
         """Before a box write: the pool's store lock (a fenced controller writes nothing)."""
         guard = getattr(self, "_guard_store", None)
@@ -210,7 +221,7 @@ class PoolMoves:
 
     # -- the destination: reserve, take, start ------------------------------------
     def expect_move_in(self, ticket: str, *, move: str, source: str, account: Any,
-                       timeout_s: float = MOVE_TIMEOUT_S) -> Any:
+                       timeout_s: float = MOVE_TIMEOUT_S, box: str | None = None) -> Any:
         """Reserve a slot and a placeholder for machine ``ticket`` of pool ``source`` (move
         ``move``); the target goes up by one. Returns the slot. :class:`MoveRefused` when
         the pool cannot take it (not running, its provider cannot manage a ticket it did
@@ -236,7 +247,8 @@ class PoolMoves:
             raise MoveRefused(f"no free slot for {ticket} (slot {account!r}; free {free})")
         now = self.clock()  # type: ignore[attr-defined]
         self.moves.setdefault(IN, {})[ticket] = {"move": move, "state": WAITING, "source": source, "account": slot,
-                                                 "since": now, "until": now + float(timeout_s)}
+                                                 "since": now, "until": now + float(timeout_s),
+                                                 "box": box or self._box().where}
         old_target = self.config.target  # type: ignore[attr-defined]
         self._move_set_target(old_target + 1)
         if not self._save_now():  # type: ignore[attr-defined]
@@ -268,16 +280,19 @@ class PoolMoves:
         """Each placeholder: complete a take this pool claimed (also when it no longer runs:
         the machine is then its member, released by its own rules), claim an offered
         machine (only while running), or run out."""
-        box = self._box()
         running = self._move_pool_blocker() is None and not stopping
         for ticket, rec in list(self.moves.get(IN, {}).items()):
             move = rec["move"]
+            box = self._rec_box(rec)
+            if rec["state"] == TAKING and box is None:  # it may have claimed it: neither taken nor dropped blind
+                self._unresolved(ticket, rec, now, "move_in_unresolved")
+                continue
             if rec["state"] == TAKING:
-                taker = box.claimed_by(move) if box is not None else None
+                taker = box.claimed_by(move)
                 if taker == self.move_name:
                     self._move_in(ticket, rec, now)
                     continue
-                if taker is None and box is not None and running:
+                if taker is None and running:
                     self._move_guard()
                     if box.claim(move, self.move_name):
                         self._move_in(ticket, rec, now)
@@ -357,7 +372,8 @@ class PoolMoves:
         self._save_now()  # type: ignore[attr-defined] - publishes the member table (store control plane)
 
     # -- the source: drain, fence, stop, hand over ---------------------------------
-    def move_out(self, ticket: str, *, move: str, to: str, timeout_s: float = MOVE_TIMEOUT_S) -> None:
+    def move_out(self, ticket: str, *, move: str, to: str, timeout_s: float = MOVE_TIMEOUT_S,
+                 box: str | None = None) -> None:
         """Start moving member ``ticket`` to pool ``to`` (move ``move``): the target goes down
         by one and the member drains ("drain" scale down; fenced at once without
         ``request_drain``). :class:`MoveRefused` when it cannot move. A save that fails is
@@ -374,7 +390,7 @@ class PoolMoves:
             "move": move, "to": to, "state": DRAINING_OUT, "since": now, "timeout_s": float(timeout_s),
             "account": m.account, "shard": m.shard, "lease_until": m.lease_until, "hourly_ucr": m.hourly_ucr,
             "created": m.created, "offer": known.get("offer"), "ordered_at": known.get("ordered", m.created),
-            "ready_at": known.get("ready", m.ready_since), "stop_failures": 0}
+            "ready_at": known.get("ready", m.ready_since), "stop_failures": 0, "box": box or self._box().where}
         self._move_set_target(max(0, self.config.target - 1))  # type: ignore[attr-defined]
         self._event("move_out_started", ticket=ticket, move=move, account=m.account, shard=m.shard,  # type: ignore[attr-defined]
                     to=to, target=self.config.target)  # type: ignore[attr-defined]
@@ -452,7 +468,7 @@ class PoolMoves:
     def _offer_saved(self, ticket: str, rec: dict[str, Any]) -> None:
         """Offer a handed-over machine once the pool's state holds it as gone (a restart never
         finds it serving here while another pool takes it)."""
-        box = self._box()
+        box = self._rec_box(rec)
         if box is None or not self._save_now():  # type: ignore[attr-defined]
             return
         try:
@@ -478,10 +494,10 @@ class PoolMoves:
         from .island_pool import DRAINING, FENCING, GONE, Member  # noqa: PLC0415
 
         by_ticket = {m.ticket: m for m in self.members}  # type: ignore[attr-defined]
-        box = self._box()
         for ticket, rec in list(self.moves.get(OUT, {}).items()):
             state = rec["state"]
             m = by_ticket.get(ticket)
+            box = self._rec_box(rec)
             if state == DRAINING_OUT:
                 if m is None or m.state in (GONE, DRAINING) or (m.retiring_since is None and m.state != FENCING):
                     gone = m is None or m.state in (GONE, DRAINING)
@@ -494,13 +510,13 @@ class PoolMoves:
                     self._hand_over(m, now, outcome="stopped late")
                 continue
             if state == HANDED_OVER:
+                if box is None:
+                    self._unresolved(ticket, rec, now, "move_out_unresolved")
+                    continue
                 if rec.get("unoffered"):
                     self._offer_saved(ticket, rec)
                     if rec.get("unoffered"):
                         continue
-                if box is None:
-                    self._unresolved(ticket, rec, now)
-                    continue
                 taker = box.claimed_by(rec["move"])
                 if taker == rec["to"]:
                     rec["state"] = TAKEN
@@ -528,15 +544,30 @@ class PoolMoves:
                 self._save_now()  # type: ignore[attr-defined]
         self._take_moves(now, stopping=stopping)
 
-    def _unresolved(self, ticket: str, rec: dict[str, Any], now: float) -> None:
-        """A handed-over machine whose box the pool cannot open: it is neither released (its
-        new pool may hold it) nor forgotten; a critical alert every UNRESOLVED_ALERT_S."""
+    def _unresolved(self, ticket: str, rec: dict[str, Any], now: float, event: str) -> None:
+        """A move whose box the pool cannot open (none, or not the one the move began on): the
+        machine is neither released nor forgotten (the other pool may hold it); a critical
+        alert every UNRESOLVED_ALERT_S, and :meth:`moves_left` lists it."""
         last = rec.get("alerted_at")
         if last is None or now - float(last) >= UNRESOLVED_ALERT_S:
             rec["alerted_at"] = now
-            self._event("move_out_unresolved", level="critical", ticket=ticket, move=rec["move"], to=rec["to"],  # type: ignore[attr-defined]
-                        waited_s=round(now - float(rec["at"])),
+            self._event(event, level="critical", ticket=ticket, move=rec["move"],  # type: ignore[attr-defined]
+                        other=rec.get("to") or rec.get("source"), box=rec.get("box"),
+                        waited_s=round(now - float(rec.get("at") or rec["since"])),
                         action=f"find which pool holds {ticket}; release it there or by hand")
+
+    def moves_left(self) -> list[Any]:
+        """Machines of unsettled moves this pool may still be billed for (a hand-over nobody
+        confirmed, a release that failed, a take whose box is gone), as members for the
+        billing banner of a stop."""
+        from .island_pool import DRAINING, Member  # noqa: PLC0415
+
+        out = [(t, r, f"moving to {r['to']}, not settled ({r['state']})") for t, r in self.moves.get(OUT, {}).items()
+               if r["state"] in (HANDED_OVER, RELEASING)]
+        out += [(t, r, f"moving in from {r.get('source')}, not settled") for t, r in self.moves.get(IN, {}).items()
+                if r["state"] == TAKING]
+        return [Member(r["account"], t, str(r.get("shard") or ""), state=DRAINING, end_reason=why)
+                for t, r, why in out]
 
     def _stop_moves(self) -> None:
         """The pool stops (before its members are drained): a take it claimed becomes a
@@ -570,9 +601,19 @@ class PoolMoves:
         return {"moves": json.loads(json.dumps(self.moves, default=str))} if self.moves else {}
 
     def load_moves(self, doc: Mapping[str, Any]) -> None:
+        """``moves`` of a state document; a record that does not read as a move is dropped
+        (logged), never a reason the pool cannot load."""
         moves = doc.get("moves")
-        self.moves = {k: {str(t): dict(r) for t, r in v.items()} for k, v in moves.items()} \
-            if isinstance(moves, Mapping) else {}
+        self.moves = {}
+        if not isinstance(moves, Mapping):
+            return
+        for kind in (OUT, IN):
+            for ticket, rec in (moves.get(kind) or {}).items() if isinstance(moves.get(kind), Mapping) else ():
+                if isinstance(rec, Mapping) and isinstance(rec.get("move"), str) and isinstance(rec.get("state"), str) \
+                        and "account" in rec and "since" in rec:
+                    self.moves.setdefault(kind, {})[str(ticket)] = dict(rec)
+                else:
+                    self.log(f"pool: a {kind} move record of {ticket} does not read: dropped ({rec!r})"[:300])  # type: ignore[attr-defined]
 
     def merge_moves(self, held: Mapping[str, Mapping[str, Mapping[str, Any]]]) -> None:
         """After a reload from the store (a worker restarted): ``held`` is what the memory
@@ -648,9 +689,9 @@ class PoolMover:
             raise MoveRefused(f"pools {src} and {dst} do not share a hand-over box")
         mid = move_id(move.ticket, self.clock())
         target.expect_move_in(move.ticket, move=mid, source=source.move_name, account=member.account,
-                              timeout_s=self.timeout_s)
+                              timeout_s=self.timeout_s, box=a.where)
         try:
-            source.move_out(move.ticket, move=mid, to=target.move_name, timeout_s=self.timeout_s)
+            source.move_out(move.ticket, move=mid, to=target.move_name, timeout_s=self.timeout_s, box=a.where)
         except (Exception, LockLost, LockUnconfirmed) as error:
             target.cancel_move_in(move.ticket, why=f"the source refused: {error}"[:300])
             raise

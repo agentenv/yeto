@@ -7,6 +7,7 @@ offer ledger, the real broker loop and :class:`yeto.launch.pool.migrate.PoolMove
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 
 import pytest
@@ -621,3 +622,62 @@ def test_a_handed_over_machine_whose_box_is_gone_is_alerted_and_never_released_b
     assert alerts and alerts[0]["level"] == "critical"
     pa.stop("test end")
     assert ticket not in fleet.cloud.releases, "not at the stop either"
+
+
+def test_a_store_pool_stopped_from_its_local_mirror_never_releases_a_machine_taken_on_the_store(tmp_path):
+    """pool-stop / run down after the controller died rebuild the old pool from its local
+    mirror without its store control. That pool would open the local box, which holds no
+    claim: the move records the box it began on, so it claims and releases nothing there;
+    the machine is reported with the members the stop leaves billed."""
+    from tests.test_fleet_store_control import _objects
+    from yeto.launch.pool import store_state
+
+    fleet = Fleet(tmp_path)
+    objects = _objects()
+    for name, pool in fleet.pools.items():
+        pool.control = store_state.open_pool_control(objects, name, pool.config.shard_base, clock=fleet.clock)
+        pool.__post_init__()
+        pool.move_box = None
+    fleet.mover = fleet.broker.mover = migrate.PoolMover(fleet.slots, clock=fleet.clock)
+    fleet.run(6)
+    fleet.wants = {"0": 1, "1": 2}
+    fleet.broker.tick(force=True)
+    ticket = fleet.moved()
+    pa, pb = fleet.pools["pa"], fleet.pools["pb"]
+    for _ in range(40):
+        fleet.run(1, skip=("pa",) if pa.moves.get("out", {}).get(ticket, {}).get("state") == "handed_over" else ())
+        if any(m.ticket == ticket for m in pb.live()):
+            break
+    assert any(m.ticket == ticket for m in pb.live()) and pa.moves["out"][ticket]["state"] == "handed_over"
+    mirror = json.loads(pa.state_path.read_text())  # what pool-stop reads with no controller running
+    stray = IslandPool.from_doc(mirror, pa.config, pa.ops.__dict__["_ops"], clock=fleet.clock, log=lambda _m: None,
+                                events=pa.events)
+    stray.state_path = pa.state_path  # no control: box_of opens the local box, not the store's
+    left = stray.drain_all("pool-stop", attempts=1, sleep=lambda _s: None)
+    assert ticket not in fleet.cloud.releases, "the machine its new pool holds is not released"
+    assert any(m.ticket == ticket for m in pb.live()), "its new pool still holds it"
+    assert ticket in [m.ticket for m in left], "listed with the members the stop leaves billed"
+    assert any(e["event"].endswith("move_out_unresolved") for e in pa.events.events)
+
+
+def test_a_move_record_that_does_not_read_is_dropped_not_fatal(tmp_path):
+    fleet = Fleet(tmp_path)
+    fleet.run(3)
+    pa = fleet.pools["pa"]
+    doc = pa.snapshot()
+    doc["moves"] = {"out": {"x": {"state": "handed_over"}, "y": "junk"}, "in": "junk"}
+    again = IslandPool.from_doc(doc, pa.config, pa.ops, clock=fleet.clock, log=lambda _m: None, events=pa.events)
+    assert again.moves == {}
+    again.tick()
+
+
+def test_a_take_whose_box_is_gone_is_alerted_and_listed(tmp_path):
+    fleet = Fleet(tmp_path)
+    fleet.run(6)
+    pb = fleet.pools["pb"]
+    pb.moves = {"in": {"pa-t0": {"move": "pa-t0.1", "state": "taking", "source": "pa-i0", "account": 1,
+                                 "since": fleet.clock(), "until": fleet.clock(), "box": "elsewhere"}}}
+    fleet.run(2)
+    assert any(e["event"].endswith("move_in_unresolved") and e["level"] == "critical" for e in pb.events.events)
+    assert "pa-t0" in pb.moves["in"], "kept: it may have claimed the machine"
+    assert "pa-t0" in [m.ticket for m in pb.moves_left()]
