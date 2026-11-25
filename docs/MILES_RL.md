@@ -227,6 +227,13 @@ The public parameters are:
 | `N` | `--total-steps` | complete fragment sweeps |
 | `T` | internal | outer fragment steps, exactly `N * P` |
 
+With asynchronous rounds a local step pushes at most `D = min(--pipeline, P)`
+fragment rounds, a fragment syncs every `H` local steps from its anchor, and the
+first pushes are staggered by `f * H // P` steps, so an island trains at least
+`max(H - 1 + ceil(N * P / D), N * H + (P - 1) * H // P)` local steps before the
+run ends (exactly `N * P` for `H = 1, D = 1`; waits for a permit or a late
+broadcast add to it). The launcher and each island print this count.
+
 With `--rl-sync-mode strict` the launcher fixes the rest of the algorithm:
 
 ```text

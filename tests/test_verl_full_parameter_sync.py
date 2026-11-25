@@ -291,6 +291,14 @@ def test_async_rounds_default_to_local_init_and_a_pool_carries_its_lease(model_d
     assert config.local_horizon == 2 and config.pipeline_depth == 2
 
 
+def test_an_async_verl_island_prints_the_horizon_and_pipeline_bound(model_dir, capsys):
+    vfs.plan_section(_island_args(full_parameter_rounds="async", local_horizon=2, pipeline=2),
+                     _run_dict(), model_path=str(model_dir), sync="pool", algorithm_spec_sha256="a" * 64)
+    out = capsys.readouterr().out
+    assert "yeto-verl island 1] local training steps >= " in out
+    assert "H=2 local steps per fragment sync, D=2" in out
+
+
 @pytest.mark.parametrize("overrides, sync, match", [
     (dict(total_fragment_steps=5), "strict", "fragment budget"),
     (dict(parameter_layout_sha256=None), "strict", "parameter-layout-sha256"),

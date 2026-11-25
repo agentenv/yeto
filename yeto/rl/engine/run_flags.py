@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -170,19 +171,51 @@ def shared_flag(*options: str, island: Mapping[str, Any] | None = None,
 
 GLOBAL_ROUNDS_HELP = (
     "sync rounds R (the syncer's outer budget). With full-parameter asynchronous rounds "
-    "the syncer merges one fragment per outer step and the island pushes one fragment per "
-    "local training step, so the island trains R x --fragments local steps "
-    "(--total-fragment-steps), not R")
+    "the syncer merges one fragment per outer step, so the island pushes R x --fragments "
+    "fragment rounds (--total-fragment-steps), not R; how many local training steps that "
+    "takes depends on the local horizon H (--local-rl-rounds-per-sync) and the fragment "
+    "pipeline D: at least max(H - 1 + ceil(R x F / D), R x H + (F - 1) x H // F), which "
+    "the launcher and each island print")
 
 
-def local_training_steps_line(global_rounds: int, fragments: int, *, who: str = "launcher") -> str:
-    """The line a launcher / island prints for full-parameter asynchronous
-    rounds, where ``--global-rounds`` counts sync rounds and the island trains one
-    local step per fragment round."""
+def local_training_steps(global_rounds: int, fragments: int, local_horizon: int = 1,
+                         pipeline: int = 1, *, stagger: bool | None = None) -> int:
+    """A lower bound on the local training steps of an island of full-parameter
+    asynchronous rounds (FullParameterSync / the role stream):
+
+    * a boundary pushes at most ``D = min(pipeline, fragments)`` rounds (the pipeline
+      capacity) and no round before the island trained ``H`` local steps, so the
+      ``R x F`` rounds need at least ``H - 1 + ceil(R x F / D)`` steps;
+    * each fragment syncs every ``H`` local steps from its anchor, and its first push
+      waits ``first_push_phase`` = ``f x H // F`` more steps (staggered start, on unless
+      YETO_FULL_PARAMETER_STAGGER_FIRST_PUSH=0), so the last fragment's R-th round comes
+      at least ``R x H + (F - 1) x H // F`` steps in.
+
+    Waits for a permit or a late broadcast only add to it."""
+    rounds, frags = int(global_rounds), max(int(fragments), 1)
+    horizon, depth = max(int(local_horizon), 1), max(min(int(pipeline), frags), 1)
+    if stagger is None:
+        stagger = os.environ.get("YETO_FULL_PARAMETER_STAGGER_FIRST_PUSH", "1") != "0"
+    phase = (frags - 1) * horizon // frags if stagger and horizon > 1 and frags > 1 else 0
+    return max(horizon - 1 + -(-rounds * frags // depth), rounds * horizon + phase)
+
+
+def local_training_steps_line(global_rounds: int, fragments: int, *, local_horizon: int = 1,
+                              pipeline: int = 1, who: str = "launcher") -> str:
+    """The line a launcher / island prints for full-parameter asynchronous rounds,
+    where ``--global-rounds`` counts sync rounds: exact for H = 1 and a serial pipeline
+    (one round per local step), else the lower bound of :func:`local_training_steps`."""
     rounds, frags = int(global_rounds), int(fragments)
-    return (f"[{who}] local training steps = global_rounds x fragments = {rounds} x {frags} = "
-            f"{rounds * frags} (--global-rounds {rounds} counts sync rounds; each local step "
-            "pushes one fragment)")
+    horizon, depth = max(int(local_horizon), 1), max(min(int(pipeline), max(frags, 1)), 1)
+    if horizon == 1 and depth == 1:
+        return (f"[{who}] local training steps = global_rounds x fragments = {rounds} x {frags} = "
+                f"{rounds * frags} (--global-rounds {rounds} counts sync rounds; each local step "
+                "pushes one fragment)")
+    return (f"[{who}] local training steps >= {local_training_steps(rounds, frags, horizon, depth)} "
+            f"(R={rounds} global rounds x F={frags} fragments = {rounds * frags} fragment rounds; "
+            f"H={horizon} local steps per fragment sync, D={depth} rounds per step at most: "
+            "max(H - 1 + ceil(R x F / D), R x H + (F - 1) x H // F); waits for a permit or a "
+            "late broadcast add steps)")
 
 
 def check_verify_every(args) -> None:
