@@ -183,3 +183,32 @@ def test_host_runner_takes_credentials_from_a_remote_api_server(monkeypatch, tmp
     assert asked == ["c-1"] and isinstance(runner, command_runner.SSHCommandRunner)
     assert runner.ip == "10.0.0.5" and runner.ssh_user == "ubuntu"
     assert getattr(runner, "docker_user", None) is None  # the HOST, not the container
+
+
+@pytest.mark.parametrize("model", ["sky", "attributes"])
+def test_server_credentials_read_skys_status_records_by_field(monkeypatch, model):
+    """sky >= 0.14 answers status with StatusResponse models, not dicts; the credentials are
+    read by field (not through sky's dict-compat ``get``, marked for removal)."""
+    pytest.importorskip("sky")
+    from sky.client import sdk
+    from sky.utils import cluster_utils
+
+    creds = {"ssh_user": "ubuntu", "ssh_private_key": "k"}
+
+    def record(name, credentials):
+        if model == "sky":
+            from sky.schemas.api.responses import StatusResponse
+
+            return StatusResponse.model_construct(name=name, credentials=credentials)
+        return SimpleNamespace(name=name, credentials=credentials)  # attribute access only, no get
+
+    keyed = []
+    monkeypatch.setattr(sdk, "status", lambda names, **kw: ("req", tuple(names), kw))
+    monkeypatch.setattr(sdk, "stream_and_get", lambda rid: [record("other", {"ssh_user": "x"}),
+                                                           record("c-1", creds)])
+    monkeypatch.setattr(cluster_utils.SSHConfigHelper, "generate_local_key_file",
+                        staticmethod(lambda cluster, c: keyed.append((cluster, c))))
+    assert nr._server_credentials("c-1") == creds and keyed == [("c-1", creds)]
+    monkeypatch.setattr(sdk, "stream_and_get", lambda rid: [record("other", {"ssh_user": "x"})])
+    with pytest.raises(RuntimeError, match="no SSH credentials"):
+        nr._server_credentials("c-1")

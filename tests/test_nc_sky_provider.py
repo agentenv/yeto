@@ -28,6 +28,46 @@ class RequestId(str):
     """sky.server.common.RequestId: what every sky SDK call returns."""
 
 
+try:  # sky's own response models, so the fake answers what sky answers (not dicts)
+    from sky.schemas.api.responses import StatusResponse as SkyStatusResponse
+    from sky.server.requests.payloads import RequestPayload as SkyRequestPayload
+except ImportError:  # sky not installed: stand-ins of the same shape
+    SkyStatusResponse = SkyRequestPayload = None
+
+
+class _SkyModel:
+    """A sky pydantic response's stand-in without sky: fields by attribute plus sky's
+    dict-compat ``get`` / ``[]`` / ``in``, and not a dict."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+    def __getitem__(self, key):
+        try:
+            return getattr(self, key)
+        except AttributeError as error:
+            raise KeyError(key) from error
+
+    def __contains__(self, key):
+        return hasattr(self, key)
+
+
+def sky_status_response(row):
+    """``sky.status``'s answer for one fake cluster row: a ``StatusResponse``."""
+    fields = {k: v for k, v in row.items() if k != "kw"}  # ``kw``: the fake's own launch kwargs
+    return SkyStatusResponse.model_construct(**fields) if SkyStatusResponse else _SkyModel(**fields)
+
+
+def sky_request_payload(request_id, status):
+    """``sky.api_status``'s answer for one request: a ``RequestPayload``."""
+    if SkyRequestPayload:
+        return SkyRequestPayload.model_construct(request_id=request_id, status=status)
+    return _SkyModel(request_id=request_id, status=status)
+
+
 class FakeSky:
     """The async sky SDK (>= 0.14) over an in-memory cluster table; never a cloud.
 
@@ -101,7 +141,7 @@ class FakeSky:
         return req["result"]
 
     def api_status(self, ids):
-        return [SimpleNamespace(request_id=r, status=self.requests[r]["status"]) for r in ids if r in self.requests]
+        return [sky_request_payload(r, self.requests[r]["status"]) for r in ids if r in self.requests]
 
     def api_cancel(self, ids):
         for r in ids:
@@ -139,7 +179,7 @@ class FakeSky:
         self.calls.append(("status", tuple(names) if names else None, refresh))
         rows = list(self.clusters.values()) if names is None else [self.clusters[n] for n in names
                                                                   if n in self.clusters]
-        return self._submit(lambda: rows)
+        return self._submit(lambda: [sky_status_response(row) for row in rows])
 
     def down(self, name):
         self.calls.append(("down", name))
@@ -643,6 +683,42 @@ def test_sky_accepts_and_keeps_the_ownership_label_on_every_infra(infra, run):
     labels = {OWNER_LABEL: owner_token(run)}
     resources = sky.Resources(infra=infra, labels=labels)
     assert resources.labels == labels and resources.copy(region=None).labels == labels
+
+
+def test_the_fake_answers_skys_own_response_models_not_dicts():
+    """sky >= 0.14 answers pydantic models (dict-like, never dicts); a fake answering dicts
+    hid that ``run_tickets`` filtered every real cluster out (found on real Nebius)."""
+    responses = pytest.importorskip("sky.schemas.api.responses")
+    payloads = pytest.importorskip("sky.server.requests.payloads")
+    sky = FakeSky()
+    p = _provider(sky)
+    name = p.order(1)
+    sky.up(name)
+    rows = sky.get(sky.status(None))
+    assert rows and all(isinstance(r, responses.StatusResponse) and not isinstance(r, dict) for r in rows)
+    request = sky.api_status([sky.cluster_request[name]])[0]
+    assert isinstance(request, payloads.RequestPayload) and not isinstance(request, dict)
+
+
+def test_sky_records_are_read_by_field_without_skys_dict_compat_layer(tmp_path):
+    """sky marks its dict-compat ``get`` / ``[]`` on response models for removal: records
+    answering only by attribute must still map states, nodes and adoption."""
+    class AttributeOnlySky(FakeSky):
+        def status(self, names, refresh=None):
+            rows = self.get(super().status(names, refresh))
+            return self._submit(lambda: [SimpleNamespace(**{k: getattr(r, k, None) for k in
+                                                            ("name", "status", "handle", "labels")})
+                                         for r in rows])
+
+    sky = AttributeOnlySky()
+    p = SkyProvider("abc", slots=[1, 2], resources={"infra": "aws"}, sky=sky, record=tmp_path / "a.json")
+    name = p.order(1)
+    sky.up(name)
+    assert p.status(1, name).state == "active" and p.node(1, name).ip == "198.51.100.7"
+    assert p.cluster_state(name) == "UP"
+    sky.clusters["yeto-smp-abc-3"] = marked("yeto-smp-abc-3", "abc")  # ours: a launch the record lost
+    sky.clusters["yeto-smp-abc-8"] = marked("yeto-smp-abc-8", "abc-2")  # another run's mark
+    assert sorted(t for _, t in p.run_tickets()) == sorted([name, "yeto-smp-abc-3"])
 
 
 # -- the run's AWS credentials never reach sky's requests (an R2 store's AWS_PROFILE, found on a real machine)

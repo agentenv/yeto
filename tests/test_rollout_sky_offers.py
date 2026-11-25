@@ -361,29 +361,13 @@ def test_the_watchdog_releases_only_clusters_of_its_own_run(tmp_path):
     assert not [c for c in sky.calls if c[0] == "down" and c[1] in ("spot-w-7", "spot-w-debug")]
 
 
-class _StatusResponse:
-    """sky >= 0.14's StatusResponse: a pydantic model that acts like a dict but is none."""
-
-    def __init__(self, row):
-        self._row = dict(row)
-
-    def get(self, key, default=None):
-        return self._row.get(key, default)
-
-    def __getitem__(self, key):
-        return self._row[key]
-
-    def __contains__(self, key):
-        return key in self._row
-
-
 def test_a_listing_of_sky_status_responses_is_adopted_by_its_run(tmp_path):
     """Found on real Nebius (sky 0.14.3): status answers StatusResponse records, not dicts.
     The listing must still adopt this run's labelled cluster (and only that one)."""
     t = [1_000_000.0]
     clock = lambda: t[0]  # noqa: E731
-    sky = FakeSky()
-    original_launch, original_status = sky.launch, sky.status
+    sky = FakeSky()  # its status answers sky's StatusResponse models, as real sky does
+    original_launch = sky.launch
 
     def launch_up(task, cluster_name, **kw):
         rid = original_launch(task, cluster_name, **kw)
@@ -393,13 +377,7 @@ def test_a_listing_of_sky_status_responses_is_adopted_by_its_run(tmp_path):
             labels=dict(task.resources.get("labels") or {}))
         return rid
 
-    def status_responses(names, refresh=None):
-        rid = original_status(names, refresh)
-        rows = sky.requests[rid]["result"]
-        sky.requests[rid]["result"] = [_StatusResponse(r) for r in rows]
-        return rid
-
-    sky.launch, sky.status = launch_up, status_responses
+    sky.launch = launch_up
     cands = wd.candidates(spot_only=True)[:1]
 
     def ops_for(where):
