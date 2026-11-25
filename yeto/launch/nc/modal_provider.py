@@ -269,10 +269,42 @@ class ModalProvider:
             self._save(rows)
         return name
 
+    # -- group order (yeto.launch.pool.group): one clustered call of ``size`` containers
+    # (Modal starts all of them or none), RDMA between them for an RDMA fabric
+    fabrics = ("tcp", "rdma")
+
+    def order_group(self, n: int, shape: Any, fabric: str = "tcp") -> list[tuple[int, str]]:
+        """Reserve one ticket for a ``modal.clustered(size=n, rdma=...)`` call; like
+        :meth:`order`, nothing bills until its call is spawned (by a clustered function:
+        :meth:`group_of` tells the caller the size and RDMA)."""
+        free = [s for s in self.slots if self.account_free(s)]
+        if not free:
+            raise RuntimeError(f"Modal provider: no free slot for a group of {n}")
+        have = (str(self.config.get("gpu") or "").upper(), int(self.config.get("gpus") or 0))
+        want = (str(getattr(shape, "gpu", "")).upper(), int(getattr(shape, "gpus_per_node", 0) or 0))
+        if have[0] and have != want:
+            raise ValueError(f"Modal provider: its function has {have[1]} x {have[0]} per container, the group "
+                             f"asks for {want[1]} x {want[0]}; nothing ordered")
+        name = self.order(free[0])
+        with self._locked():
+            rows = self._rows()
+            rows[name].update(size=int(n), rdma=fabric != "tcp", gpu=str(getattr(shape, "gpu", "")),
+                              gpus=int(getattr(shape, "gpus_per_node", 0) or 0))
+            self._save(rows)
+        return [(free[0], name)]
+
+    def group_of(self, ticket: str) -> dict[str, Any] | None:
+        """``{"size", "rdma"}`` of a group ticket (None: a single-container ticket)."""
+        row = self._rows().get(ticket) or {}
+        return {"size": int(row["size"]), "rdma": bool(row.get("rdma"))} if int(row.get("size", 1)) > 1 else None
+
     def spawn(self, ticket: str, payload: dict[str, Any]) -> str:
         """Start (or restart) the island's call; a running earlier call is cancelled first."""
         if not self._ours(ticket):
             raise PermissionError(f"ticket {ticket} is not a Modal island of run {self.run_id}")
+        if self.group_of(ticket) is not None and not getattr(self.client, "clustered", False):
+            raise RuntimeError(f"Modal ticket {ticket} is a group of {self.group_of(ticket)['size']} containers; "
+                               "this client spawns single-container calls only")
         if not self._rows()[ticket].get("open"):
             # a background start that ran after the island's release (the pool stopped):
             # a call spawned now would have no member to drain it
@@ -438,8 +470,12 @@ class ModalProvider:
     def run_tickets(self) -> list[tuple[int, str]]:
         return [(int(r["slot"]), name) for name, r in self._rows().items() if r.get("open")]
 
-    def hourly_cost(self, ticket: str | None = None) -> float | None:  # noqa: ARG002 - one price per pool
-        return self.price_usd_h
+    def hourly_cost(self, ticket: str | None = None) -> float | None:
+        """One call of the pool (a group ticket: its ``size`` containers)."""
+        if self.price_usd_h is None:
+            return None
+        group = self.group_of(ticket) if ticket else None
+        return self.price_usd_h * (group["size"] if group else 1)
 
 
 class ModalPoolOps:

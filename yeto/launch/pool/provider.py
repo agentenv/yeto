@@ -31,7 +31,9 @@ Optional: ``kind`` (registry name), ``caps`` (:class:`ProviderCaps`),
 ``sampler_route``, ``sweep()`` (delete every machine of this run: orphan cleanup),
 ``owned()`` (same as ``run_tickets``), ``hourly_cost(ticket=None)`` (one machine
 hour in ``caps.currency``; the pool charges a member's budget with it when the
-status carries no rate), ``released_by_us(ticket)``.
+status carries no rate), ``released_by_us(ticket)``, ``order_group(n, shape, fabric)``
+and ``fabrics`` (a group order: n nodes of one shape on one fabric, all or none;
+:mod:`.group`).
 
 The registry maps a pool config's ``provider.kind`` to a factory and, for
 providers whose machines are recorded in the run's resource ledger

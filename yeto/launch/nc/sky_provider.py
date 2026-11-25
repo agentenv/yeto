@@ -243,9 +243,11 @@ class SkyProvider:
                 print(f"[sky-provider] WARNING: sky patch hook {path} was only now installed; restart the sky API "
                       "server (sky api stop) before Nebius spot orders", flush=True)
 
-    def _task(self, name: str, offer: Offer):
+    def _task(self, name: str, offer: Offer, num_nodes: int = 1):
         sky = self.sky
         task = sky.Task.from_yaml(self.task_yaml) if self.task_yaml else sky.Task(name=name, run=None)
+        if num_nodes > 1:  # a group order (order_group): one cluster of num_nodes nodes
+            task.num_nodes = int(num_nodes)
         if self.envs:
             task.update_envs(dict(self.envs))
         if self.secrets:
@@ -298,7 +300,8 @@ class SkyProvider:
     def offer_breakers(self) -> dict[str, dict[str, Any]]:
         return dict(self._doc().get("offers") or {})
 
-    def launch_cluster(self, name: str, offer: Offer, *, slot: int, n: int = 0, wait: bool = True) -> str:
+    def launch_cluster(self, name: str, offer: Offer, *, slot: int, n: int = 0, wait: bool = True,
+                       num_nodes: int = 1) -> str:
         """Record, then launch cluster ``name`` (``<prefix>-...``) with ``offer``.
         ``wait``: block on the launch request (the spot watchdog); a failure moves
         the cursor past the offer and is raised. ``wait=False`` (the pool's ``order``):
@@ -308,11 +311,12 @@ class SkyProvider:
         self._install_patches()
         doc = self._doc()
         doc["clusters"][name] = {"slot": slot, "n": n, "open": True, "ordered_at": self.clock(),
-                                 "offer": offer.record(), "launch_state": SUBMITTED}
+                                 "offer": offer.record(), "launch_state": SUBMITTED,
+                                 **({"num_nodes": num_nodes} if num_nodes > 1 else {})}
         self._save_doc(doc)  # recorded before the launch: a crash mid-launch still leaves it ours to down
         _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h)
         try:
-            task = self._task(name, offer)
+            task = self._task(name, offer, num_nodes)
             request = self.sky.launch(task, cluster_name=name, **self.launch_kwargs(task))
         except Exception as error:  # the submit itself failed (bad resources, API server down)
             self._launch_failed(name, error)
@@ -330,6 +334,73 @@ class SkyProvider:
         self._launch_ok(name)
         return name
 
+    # -- group order (yeto.launch.pool.group): one multi-node cluster; sky's best network
+    # tier when the group asks for an RDMA fabric
+    fabrics = ("tcp", "rdma")
+
+    def order_group(self, n: int, shape: Any, fabric: str = "tcp") -> list[tuple[int, str]]:
+        """Place ``n`` nodes as one cluster ``<prefix>-<k>`` on a free slot: one ticket, from
+        the first offer (cursor order, cooling offers last) whose accelerators are the
+        shape's. An RDMA fabric takes the cloud's best network tier for that shape
+        (``topology.multinode_network_tier``; a shape the cloud has no such tier for is
+        refused). A launch that fails releases what it left (``group.release_placed``)."""
+        from ..pool.group import release_placed
+        from ..topology import multinode_network_tier
+
+        free = [s for s in self.slots if self.account_free(s)]
+        if not free:
+            raise RuntimeError(f"sky provider: no free slot for a group of {n}")
+        doc = self._doc()
+        offer = self._group_offer(doc, shape)
+        if fabric != "tcp" and int(n) > 1:
+            cloud = str(offer.resources.get("cloud") or str(offer.resources.get("infra") or "").partition("/")[0])
+            tier = multinode_network_tier(cloud.lower(), str(shape.gpu), int(shape.gpus_per_node))
+            if tier is None:
+                raise ValueError(f"sky provider: {cloud} has no RDMA network tier for "
+                                 f"{shape.gpus_per_node} x {shape.gpu} nodes; nothing ordered")
+            offer = Offer(offer.key, {**offer.resources, "network_tier": tier}, offer.price_usd_h)
+        k = 1 + max([int(r.get("n", 0)) for r in doc["clusters"].values()] or [0])
+        name = f"{self.prefix}-{k}"
+        try:
+            self.launch_cluster(name, offer, slot=free[0], n=k, wait=False, num_nodes=int(n))
+        except Exception as error:
+            left = [(free[0], name)] if (self._rows().get(name) or {}).get("open") else []
+            raise release_placed(self, left, error) from error
+        return [(free[0], name)]
+
+    def _group_offer(self, doc: dict[str, Any], shape: Any) -> Offer:
+        """The offer a group of ``shape`` nodes orders: cursor order, an offer cooling down
+        only when every matching one is."""
+        want = (str(shape.gpu).upper(), int(shape.gpus_per_node))
+
+        def accelerators(offer: Offer) -> tuple[str, int] | None:
+            acc = offer.resources.get("accelerators")
+            if not isinstance(acc, str) or not acc:
+                return None
+            gpu, _, count = acc.partition(":")
+            return gpu.upper(), int(count or 1)
+
+        start = int(doc.get("cursor", 0)) % len(self.offers)
+        ring = [o for o in self.offers[start:] + self.offers[:start] if accelerators(o) == want]
+        if not ring:
+            raise ValueError(f"sky provider: no offer of {want[1]} x {want[0]} nodes "
+                             f"(offers: {[o.resources.get('accelerators') for o in self.offers]}); nothing ordered")
+        now = self.clock()
+        open_ = [o for o in ring if not self._cooling(doc, o.key, now)]
+        return open_[0] if open_ else min(ring, key=lambda o: float(doc["offers"][o.key]["open_until"]))
+
+    def group_failed(self, ticket: str) -> None:
+        """A group on cluster ``ticket`` did not come up: its offer cools down (once; a start
+        timeout already counted it), so the next group order takes the next offer."""
+        doc = self._doc()
+        row = doc["clusters"].get(ticket) or {}
+        key = (row.get("offer") or {}).get("key")
+        if key and not row.get("start_timed_out") and not row.get("launch_failed") and not row.get("group_failed"):
+            row["group_failed"] = True
+            self._offer_failed(doc, key)
+            doc["cursor"] = (next((i for i, o in enumerate(self.offers) if o.key == key), 0) + 1) % len(self.offers)
+            self._save_doc(doc)
+
     def _launch_ok(self, name: str) -> None:
         doc = self._doc()
         row = doc["clusters"][name]
@@ -342,7 +413,8 @@ class SkyProvider:
         self._save_doc(doc)
         offer = row.get("offer") or {}
         _record_ledger("created", LEDGER_KIND, name, name, offer=key, price_usd_h=offer.get("price_usd_h"),
-                       run=self.run_id, slot=row.get("slot"), pool=True)
+                       run=self.run_id, slot=row.get("slot"), pool=True,
+                       **({"num_nodes": row["num_nodes"]} if row.get("num_nodes") else {}))
 
     def _launch_failed(self, name: str, error: BaseException) -> None:
         """The launch failed: the next order tries the next offer; a cluster it left
@@ -511,9 +583,9 @@ class SkyProvider:
 
     # -- pricing (the pool's spend in USD; see the rollout controller notes)
     def hourly_cost(self, ticket: str | None = None) -> float | None:
-        offer = (self._rows().get(ticket) or {}).get("offer") if ticket else None
-        price = (offer or {}).get("price_usd_h", self.offers[self.cursor].price_usd_h)
-        return None if price is None else float(price)
+        row = (self._rows().get(ticket) or {}) if ticket else {}
+        price = (row.get("offer") or {}).get("price_usd_h", self.offers[self.cursor].price_usd_h)
+        return None if price is None else float(price) * int(row.get("num_nodes", 1))
 
     # -- node route hook
     def attach(self, lease: NodeLease, *, ssh_run) -> str:
