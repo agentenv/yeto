@@ -44,6 +44,10 @@ class LeaseStatus:
     # call: its sampler's exit code and the tail of its stderr); the pool's ended event
     # carries it. Not part of the status's identity.
     detail: str | None = field(default=None, compare=False)
+    # an active ticket that bills: False while nothing runs on the provider yet (a Modal
+    # island reserved but not spawned, or a call still waiting for a GPU worker). The pool
+    # grants (and bills) a member from its first billing tick. Not part of the identity.
+    billing: bool = field(default=True, compare=False)
 
     @classmethod
     def of(cls, value: Any) -> LeaseStatus:

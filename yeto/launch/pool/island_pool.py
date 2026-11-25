@@ -1672,7 +1672,7 @@ class IslandPool:
         watched as usual (an eviction is replaced, a release by a person is respected)."""
         status = self._status(m, now)
         if status.state == "active":
-            if m.granted is None:
+            if m.granted is None and status.billing:  # nothing runs (or bills) before the provider schedules it
                 m.granted = now
             self._charge(m, now)
             end = el.effective_end(status)
@@ -1813,8 +1813,16 @@ class IslandPool:
         if status is None:
             status = self._status(m, now)
         if status.state == "active":
-            if m.granted is None:
+            if m.granted is None and not status.billing and status.detail:
+                # started, but the provider has not placed it yet (no Modal GPU worker free):
+                # not granted, not billed; said once, the start timeout bounds the wait
+                self._once(m, "unscheduled", "member_unscheduled", detail=status.detail,
+                           waited_s=round(now - m.created))
+            if m.granted is None and status.billing:  # nothing runs (or bills) before the provider schedules it
                 m.granted = now
+                if "unscheduled" in m.alerted:
+                    self._event("member_scheduled", ticket=m.ticket, account=m.account, shard=m.shard,
+                                unscheduled_s=round(now - m.created))
                 if status.gpus and status.rate_ucr_per_gpu_hour:
                     m.hourly_ucr = int(status.gpus) * int(status.rate_ucr_per_gpu_hour)
             self._charge(m, now)

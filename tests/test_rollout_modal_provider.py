@@ -965,3 +965,173 @@ def test_a_bad_idle_window_is_a_config_error(tmp_path, value):
     with pytest.raises(ValueError, match="scaledown_window_s"):
         from_config(cfg, "run-m", client=FakeClient())
     assert any("scaledown_window_s" in p for p in offline_problems(cfg))
+
+
+# -- a call Modal has not scheduled yet (no GPU worker of its shape free) ----------------------
+class QueuedClient(FakeClient):
+    """Calls wait for a worker until ``placed``: Modal reads them RUNNING and a cancel of an
+    unscheduled one is taken but the call keeps reading RUNNING (as INT saw on an L4 pool)."""
+
+    def __init__(self):
+        super().__init__()
+        self.placed: set[str] = set()
+
+    def spawn(self, payload, *, wanted=None):
+        report, self.report_ready = self.report_ready, None  # an unscheduled call reports nothing
+        try:
+            return super().spawn(payload, wanted=wanted)
+        finally:
+            self.report_ready = report
+
+    def place(self, call):
+        """A worker takes the call: it runs, and its sampler joins."""
+        self.placed.add(call)
+        key = self.calls[call].get("ready_key")
+        if key and self.report_ready is not None:
+            self.report_ready().write(key, b"{}")
+
+    def scheduled(self, call):
+        return call in self.placed
+
+    def cancel(self, call):
+        self.log.append(("cancel", call))
+        if call in self.placed:
+            self.states[call] = FAILED
+
+
+def _ledger(tmp_path, monkeypatch):
+    from yeto.cost.ledger import ResourceLedger
+
+    path = tmp_path / "resources.jsonl"
+    monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(path))
+    return ResourceLedger(path)
+
+
+def test_an_unscheduled_call_reads_active_but_not_billing_until_modal_places_it(tmp_path, monkeypatch):
+    ledger = _ledger(tmp_path, monkeypatch)
+    now = [100.0]
+    client = QueuedClient()
+    p = ModalProvider("run-m", slots=[1], client=client, clock=lambda: now[0], price_usd_h=1.12,
+                      config={"gpu": "L4"})
+    ticket = p.order(1)
+    assert p.status(1, ticket).billing is False  # reserved, nothing spawned
+    call = p.spawn(ticket, {"shard": "m-0"})
+    waiting = p.status(1, ticket)
+    assert waiting.state == "active" and waiting.billing is False
+    assert "waits to be scheduled on a L4 worker" in waiting.detail
+    (row,) = [r for r in ledger.resources() if r.kind == "modal_call"]
+    assert row.attrs["pending"] is True and row.attrs.get("scheduled_at") is None
+    now[0] = 500.0
+    client.placed.add(call)
+    assert p.status(1, ticket).billing is True
+    (row,) = [r for r in ledger.resources() if r.kind == "modal_call"]
+    assert row.attrs["scheduled_at"] == 500.0 and p._rows()[ticket]["scheduled_at"] == 500.0
+    assert p.status(1, ticket).billing is True  # recorded once: no second lookup needed
+    second = p.spawn(ticket, {"shard": "m-0"})  # a restart: its new call waits again
+    assert p.status(1, ticket).billing is False and p.call_id(ticket) == second
+
+
+def test_releasing_an_unscheduled_call_ends_it_with_the_cancel(tmp_path, monkeypatch):
+    """INT: a call that never left "waiting to be scheduled" read RUNNING after its cancel
+    and the drain failed with "cancel sent but it still runs after 60 s"."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    now = [0.0]
+    client = QueuedClient()
+    p = ModalProvider("run-m", slots=[1], client=client, clock=lambda: now[0],
+                      sleep=lambda s: now.__setitem__(0, now[0] + s), cancel_wait_s=60.0, price_usd_h=1.12)
+    ticket = p.order(1)
+    call = p.spawn(ticket, {"shard": "m-0"})
+    assert p.release(1, ticket)["state"] == "ended" and ("cancel", call) in client.log
+    assert now[0] == 0.0 and client.states[call] == RUNNING  # no wait: it never ran
+    (row,) = [r for r in ledger.resources() if r.kind == "modal_call"]
+    assert row.released_at is not None
+    # a scheduled call that keeps running after its cancel is still a drain failure
+    t2 = p.order(1)
+    c2 = p.spawn(t2, {"shard": "m-1"})
+    client.placed.add(c2)
+    client.cancel = lambda c: None
+    with pytest.raises(RuntimeError, match="still runs after 60 s"):
+        p.release(1, t2)
+
+
+def test_a_pool_does_not_bill_a_call_waiting_for_a_worker_and_times_its_start_out(tmp_path):
+    """No capacity: the member is started, not granted and not billed; the pool says so once
+    (member_unscheduled), ends the start at start_timeout_s, releases the call without a
+    drain failure and orders a replacement. A call placed later bills from then."""
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    client = QueuedClient()
+    ops, client, _store = _ops(tmp_path, client=client)
+    ops.provider.clock = clock
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 2, 3], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0,
+                                 elastic=el.ElasticConfig(max_orders=5, start_timeout_s=600)),
+                      ops, clock=clock, log=lambda m: None, events=events)
+    ops.start_in_background = False
+    for _ in range(8):  # 8 min: started, waiting for a worker
+        pool.tick()
+        t[0] += 60
+    first = pool.members[0]
+    assert first.started is not None and first.granted is None and pool.budget.spent_ucr == 0
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert names.count("member_unscheduled") == 1
+    for _ in range(4):  # past start_timeout_s: the start ends, the call is cancelled, a new one is ordered
+        pool.tick()
+        t[0] += 60
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert "start_timeout" in names and "drain_failed" not in names
+    assert first.state == GONE and pool.budget.spent_ucr == 0
+    replacement = [m for m in pool.members if m.state != GONE][-1]
+    while ops.provider.call_id(replacement.ticket) is None:  # its start spawns the call
+        pool.tick()
+        t[0] += 60
+    pool.tick()  # it waits for a worker, too
+    t[0] += 60
+    assert replacement.granted is None and pool.budget.spent_ucr == 0
+    client.place(ops.provider.call_id(replacement.ticket))  # a worker frees up
+    for _ in range(3):
+        pool.tick()
+        t[0] += 60
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert replacement.granted is not None and "member_scheduled" in names and pool.budget.spent_ucr > 0
+
+
+def test_the_ledger_bills_a_pool_call_from_its_scheduled_at():
+    from yeto.cost.billing import resource_costs
+    from yeto.cost.ledger import Resource
+
+    attrs = {"pool": True, "usd_per_hour": 1.12, "run": "r", "ticket": "t"}
+    never = Resource("modal_call", "fc-1", "rollout_sampler", 0.0, {**attrs, "pending": True})
+    placed = Resource("modal_call", "fc-2", "rollout_sampler", 0.0, {**attrs, "ticket": "u", "pending": True,
+                                                                         "scheduled_at": 3600.0})
+    legacy = Resource("modal_call", "fc-3", "rollout_sampler", 0.0, {**attrs, "ticket": "v"})
+    cost = {i.key.split(":")[-1] if ":" in i.key else i.key: i for i in resource_costs([never, placed, legacy],
+                                                                                        7200.0).items}
+    by_id = {k: v for k, v in cost.items()}
+    usd = {r.id: next(v for k, v in by_id.items() if r.id in k).estimated_usd for r in (never, placed, legacy)}
+    assert usd["fc-1"] == 0.0  # 400 s or 2 h waiting for a worker: nothing ran, nothing billed
+    assert usd["fc-2"] == pytest.approx(1.12) and usd["fc-3"] == pytest.approx(2.24)
+
+
+def test_the_sdk_client_reads_scheduled_from_the_call_graph():
+    # modal.call_graph.InputInfo / InputStatus (PENDING 0, SUCCESS 1) without the SDK (not in CI)
+    pending, success = 0, 1
+    graphs = {}
+
+    class FunctionCall:
+        @staticmethod
+        def from_id(call_id):
+            return SimpleNamespace(get_call_graph=lambda: graphs[call_id])
+
+    client = ModalSdkClient({"image": "i", "secret": "s"}, run_id="r", modal=SimpleNamespace(FunctionCall=FunctionCall))
+
+    def info(call, task, status):
+        return SimpleNamespace(input_id="in-1", function_call_id=call, task_id=task, status=status,
+                               function_name="rollout_sampler", module_name="m", children=[])
+
+    graphs.update({"fc-1": [info("fc-1", "", pending)], "fc-2": [info("fc-2", "ta-1", pending)],
+                   "fc-3": [info("fc-3", "", success)], "fc-4": []})
+    assert client.scheduled("fc-1") is False
+    assert client.scheduled("fc-2") is True and client.scheduled("fc-3") is True
+    assert client.scheduled("fc-4") is True  # no input info: billed, never free
