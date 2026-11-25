@@ -295,10 +295,11 @@ def _priced_cfg(tmp_path, provider):
 
 
 def test_a_modal_pool_without_a_price_takes_the_unified_price_table(tmp_path, monkeypatch, capsys):
-    """A Modal pool's B300 x 8 (its default GPUs) at the Modal list price the trainer is billed at."""
+    """A Modal pool's B300 x 8 (its default GPUs) with its function's default 64 cores / 1024 GiB
+    at the Modal list prices the trainer is billed at (GPU 68.00 + CPU 3.02 + memory 8.18 USD/h)."""
     cfg = _priced_cfg(tmp_path, {"kind": "modal", "image": "i", "secret": "s", "bucket": "b"})
     assert _dry_run_spend(cfg, tmp_path, monkeypatch, capsys) == [
-        "estimated spend: $68.00 per node hour; steady $136.00/h; up to $136.00/h while replacements overlap"]
+        "estimated spend: $79.20 per node hour; steady $158.40/h; up to $158.40/h while replacements overlap"]
 
 
 @pytest.mark.parametrize("provider", [{"kind": "daytona"}])

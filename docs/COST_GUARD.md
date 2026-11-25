@@ -36,7 +36,14 @@ before is not counted (`yeto cost --run` still reports the whole ledger). A new 
 How cost is computed:
 - **Modal**: hourly rows from the Modal billing API, matched by exact app id, plus an estimate for the
   time after the newest billed hour (billing data lags behind). The estimate uses the rate recorded in
-  the ledger, then the price table, then the app's newest complete billed hour.
+  the ledger, then the price table, then the app's newest complete billed hour. Modal bills a container's
+  GPU, the CPU cores and memory it requests, and its network egress separately, so a rate is the GPU
+  row plus the requested cores and memory at the `host.modal` list prices of `yeto/cost/prices.json`.
+  The rate never falls below the app's most expensive billed hour (cost divided by the time the app ran
+  in that hour, when it ran at least 15 minutes in it). A trainer that publishes releases to a store
+  outside Modal, or pushes fragments to a syncer, also adds the bytes its tape reports
+  (`rl_publication`, `rl_member_publication`, `rl_fragment_push`) at `host.modal.egress_gib` plus 5 %
+  wire overhead. The ledger entry's `egress_events` lists which of these events count.
 - **National Compute**: lease duration × rate. A lease past its `lease_until` keeps billing until it is
   deleted, and it is counted that way. Set `YETO_NC_USD_PER_GPU_HOUR` (or `YETO_NC_USD_PER_UCR`) to price it.
 - A resource without a known rate is reported as **unpriced** (`cost_unpriced` event), never as $0, and

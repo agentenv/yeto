@@ -44,13 +44,15 @@ def _daytona(price=None):
 
 
 def test_a_modal_pool_without_a_price_is_budgeted_at_the_unified_price_table(run_with):
-    """No price_usd_h: the pool's B300 x 8 at the Modal list price of the unified price table
-    (yeto.cost.prices: the price a Modal trainer of the same GPUs is billed at), not $0."""
+    """No price_usd_h: the pool's B300 x 8 and its function's default 64 cores / 1024 GiB at the
+    Modal list prices of the unified price table (yeto.cost.prices: what a Modal trainer of the
+    same request is billed at), not $0 and not the GPU line alone."""
     from yeto.cost import prices
 
     run = run_with([run_with.nc, _modal(None)], {"usd": 450})
     assert run.budget_problem() is None
-    assert run.node_usd_per_h(1) == pytest.approx(prices.node_usd_h("modal", "B300", 8)) == pytest.approx(68.0)
+    assert run.node_usd_per_h(1) == pytest.approx(
+        prices.modal_container_usd_h("B300", 8, cpu=64, memory_gib=1024)) == pytest.approx(68.0 + 3.01824 + 8.183808)
 
 
 @pytest.mark.parametrize("price", [0, -1, "<USD per island hour: required>"])
