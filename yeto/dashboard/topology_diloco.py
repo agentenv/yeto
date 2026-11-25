@@ -48,6 +48,7 @@ from .topology import DRIVER_PHASES, RATE_S, WINDOW_S, _engine, arch_of
 # tapes/syncer-shard<i>/<incarnation>/ (source "store:syncer-shard<i>/<incarnation>")
 SHARD_TAPE = re.compile(r"\.shard(\d+)\.jsonl$|(?:^|[:/])syncer-shard(\d+)/")
 VECTOR_KEYS = ("rl/fragment_versions", "sync/fragment_versions")
+ROUNDS_STALE_S = 1800.0  # no trainer up and none wrote for this long: its open rounds are stale
 ROUND_OPEN_WARN_S = 120.0  # a round open longer than max(this, 3 x median round wall time): waiting for quorum
 STUCK_MIN_S = 240.0  # a fragment not merged for max(this, 3 x the fragment period): not advancing
 IDLE_MIN_S = 180.0  # no merge for max(this, 4 x the recent merge interval): syncer idle
@@ -355,7 +356,8 @@ def shard_rows(p: int | None, n: int, merges: list[dict], rounds: list[dict], co
     for i in range(n if p else 0):
         mine = [m for m in merges if m["shard"] == i]
         own = [r for r in rounds if r["shard"] == i]
-        state = ("done" if done else "waiting for quorum" if any(r["blocked"] for r in own)
+        state = ("done" if done else "stale" if own and all(r.get("ended") for r in own)
+                 else "waiting for quorum" if any(r["blocked"] for r in own)
                  else "merging" if any(r["state"] == "merging" for r in own) else "gathering" if own else "idle")
         out.append({"index": i, "lo": i * p // n, "hi": (i + 1) * p // n, "step": committed[i], "merges": len(mine),
                     "state": state, "attempt_max": max((_int(r["attempt"]) or 1 for r in own), default=1),
@@ -446,7 +448,21 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
     # a trainer anchored past the syncer's committed version: the syncer tape lags (it is copied
     # from the syncer's host); no negative lag, and no "not advancing" from a stale copy
     behind = any(t["versions"] and any(a > b for a, b in zip(t["versions"], versions)) for t in trainers)
+    # no syncer record here at all (a per-island fleet's syncer on its own VM, its tape not uploaded):
+    # each fragment's version is at least what the islands applied (their BCASTs), drawn as such
+    tape_seen = bool(merges) or bool(srec["configs"])
+    inferred = None
+    if not tape_seen and p:
+        vs = [t["versions"] for t in trainers if t.get("versions")]
+        if vs:
+            inferred = [max((v[f] for v in vs if f < len(v) and v[f] is not None), default=0) for f in range(p)]
     stuck = stuck_fragments(sy, running=running, behind=behind, any_merge=bool(merges), now=now)
+    if any((t.get("island_now") or {}).get("state") in ("moving", "starting") for t in trainers):
+        # an island moving or relaunching: no merge is expected until its new launch joins, so no
+        # fragment is stuck and no round is blocked yet
+        stuck = []
+        for r in rounds:
+            r["blocked"] = False
     for t in trainers:
         t["outer"] = t["outer"] if t["outer"] is not None else _outer(t["versions"], p)
 
@@ -455,6 +471,17 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
                                                   for i in trainer_ids)
     if done:  # PULLs nobody answered before the end are not rounds in flight
         rounds = [r for r in rounds if r["pushed"]]
+    if inferred is not None:  # no syncer tape: a PUSH of a step an island already applied was merged
+        rounds = [r for r in rounds if r["frag"] is None or r["frag"] >= len(inferred) or r["step"] > inferred[r["frag"]]]
+    ends = [(reducer.islands.get(i) or {}).get("last_event_ts") for i in trainer_ids]
+    end = max((t for t in ends if t is not None), default=now)
+    # the run ended, or no trainer has written for ROUNDS_STALE_S (a restart of every island
+    # shorter than that keeps its rounds in flight and their quorum warning): a round still
+    # open is not in flight; its clock stops at the trainers' last event
+    if done or (not live and now - end > max(ROUNDS_STALE_S, sy["open_limit_s"])):
+        for r in rounds:
+            r.update(ended="run ended" if done else "no trainer up", ended_at=end,
+                     age_s=max(0.0, min(end, now) - r["since"]), blocked=False)
     for t in trainers:  # the syncer's word on the island's connection (P1 tapes)
         mrec = srec["members"].get(t["id"])
         t["syncer_link"] = {"state": "disconnected" if mrec["kind"] == "member_disconnected" else "connected",
@@ -467,6 +494,7 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         "kind": kind_, "P": p, "M": m_size, "N": n, "H": min(hs) if hs else (config or {}).get("H"),
         "config": config,
         "quorum": sy["quorum"], "versions": versions, "last_merge_ts": sy["last_merge_ts"], "behind": behind,
+        "syncer_tape": tape_seen, "inferred_versions": inferred,
         "stuck": stuck, "period_s": sy["period_s"], "merge_gap_s": sy["merge_gap_s"], "quorum_p50_s": sy["quorum_p50_s"],
         "roster": len(live), "expected": expected, "shards": shard_rows(p, n, merges, rounds, committed, done),
         "rounds": rounds, "last_merge_ts_any": sy["last_merge_ts_any"], "running": running, "done": done,
@@ -576,6 +604,8 @@ def _fleet_part(fleet: dict, asy) -> dict:
                    "samplers": list(p["samplers"])}
             if p.get("removed"):  # fleet apply removed the pool: drawn as ended
                 row["removed"] = p["removed"]
+            if p.get("stopped"):  # stopped (pool-stop, its island given up): drawn as ended
+                row["stopped"] = p["stopped"]
             if "source" in p:  # a fleet with Miles sampler islands: where each sampler row runs
                 row["source"] = p["source"]
             if p.get("source") == "miles":
@@ -584,7 +614,12 @@ def _fleet_part(fleet: dict, asy) -> dict:
         # index: the island's place in the fleet (the plan's; bound from the events, its learner id)
         index = isl.get("index") if isl.get("index") is not None else isl["learner"]
         islands.append({"island": isl["learner"], "index": index, "trainer": isl.get("trainer"), "name": isl.get("name"),
-                        "gpu": isl.get("gpu"), "substore": isl.get("substore"), "pools": pools})
+                        "gpu": isl.get("gpu"), "substore": isl.get("substore"), "pools": pools,
+                        # a fleet launched island by island: its desired-state row (gpu, moves, removal) and its
+                        # record's state (fleet_islands.island_state)
+                        **({"desired": isl["desired"]} if isl.get("desired") else {}),
+                        **({"now": isl["now"]} if isl.get("now") else {}),
+                        **({"added": True} if isl.get("added") else {})})
     return {"source": fleet["source"], "islands": islands, "unbound": list(fleet["unbound"])}
 
 
@@ -652,6 +687,7 @@ def _trainer(iid: str, x: _Island, card: dict, st: dict, merges: list[dict], ver
         "id": iid, "name": card.get("name"), "gpu": card.get("gpu"), "gpus": card.get("gpus"),
         "arch": arch_of(card.get("gpu")), "status": st.get("status"), "live": bool(st.get("alive")),
         "reason": (card.get("left") or {}).get("reason"), "finalized": bool(card.get("finalized")),
+        "island_now": card.get("island_now"),  # its trainer island record (a fleet launched island by island)
         "last_event_ts": st.get("last_event_ts"), "step": step,
         "outer": _int(full.get("sync/outer_version")) if full else None,
         "versions": vec, "since": since, "pushed": {str(k): v for k, v in pushed.items()},

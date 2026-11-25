@@ -633,6 +633,20 @@ class Reducer:
         self.fleet_plan_seq += 1
         return True
 
+    def _trainer_island_now(self, isl: dict) -> dict | None:
+        """The record of trainer island ``isl`` (``fleet_islands.island_state`` of its records under
+        ``fleet/trainers/<k>/``: learner k is the card's id), with its gpu, price and moves."""
+        trainers = (self.fleet_state or {}).get("trainers") or {}
+        k = int(isl["id"]) if str(isl["id"]).isdigit() else None
+        row = trainers.get(k) if k is not None else None
+        if not row or not row.get("now"):
+            return None
+        rec = row.get("record") or {}
+        return {**row["now"], "since": rec.get("since"), "gpu": rec.get("gpu") or row.get("gpu"),
+                "usd_per_h": rec.get("usd_per_h") or row.get("usd_per_h"), "incarnation": rec.get("incarnation"),
+                "relaunches": rec.get("relaunches"), "moves": row.get("moves") or [], "name": row.get("name"),
+                "prefix": rec.get("prefix") or row.get("prefix")}
+
     def _membership_left(self, isl: dict, now: float | None = None) -> dict | None:
         """Sampler ``isl`` ended by the fleet's membership (``fleet_state``): the leave its member
         record names (written by the sampler, or by its pool for a removed pool's sampler that
@@ -656,6 +670,10 @@ class Reducer:
             out = {"ts": rec["left_at"], "reason": reason, "source": "member record",
                    "detail": f"leave {reason} written by {by} in its member record (pool {rec.get('pool')})",
                    "done": reason in async_rl.SAMPLER_DONE_REASONS, "pool": rec.get("pool")}
+        elif rec.get("stopped") and rec.get("member_state") == fleet_islands.GONE:
+            pool = rec.get("pool")
+            out = {"ts": rec.get("released_at"), "reason": "pool stopped", "source": "pool state", "done": False,
+                   "pool": pool, "detail": f"pool {pool} stopped ({rec['stopped']})"}
         elif rec.get("retired"):
             pool = rec.get("pool")
             row = ((self.fleet_state or {}).get("pools") or {}).get(pool) or {}
@@ -1569,6 +1587,17 @@ class Reducer:
                 samp = {**(samp or {}), "ended": True}  # left after finishing its work: done
             elif gone is not None:
                 left = {**gone, "lost": False}
+        # a trainer island of a fleet launched island by island: its records in the run store say
+        # what it is (yeto.rl.trainer_worker), over what its tape last said
+        inow = self._trainer_island_now(isl) if role != "sampler" else None
+        rec_stopped = bool(inow) and inow["state"] in ("stopped", "done", "down")
+        if inow and inow["state"] in ("moving", "starting"):
+            left = None  # the leave on its tape is the superseded launch's: its next launch is starting
+        if left is None and inow and inow["state"] in ("removed", "failed", "abandoned"):
+            left = {"ts": inow.get("since"), "reason": inow["state"] + (f": {inow['reason']}" if inow.get("reason")
+                                                                        and inow["state"] != "removed" else ""),
+                    "detail": inow.get("detail"), "source": "trainer island record",
+                    "lost": inow["state"] in ("failed", "abandoned")}
         sl = isl["source_lost"]
         if left is None and sl and not sl.get("recovered") and sl.get("ts") is not None \
                 and (isl["last_event_ts"] or 0) <= sl["ts"] + STOP_SLACK_S and not isl["finalized"]:
@@ -1596,7 +1625,10 @@ class Reducer:
         trainers_done = role == "sampler" and self._trainers_done() and (
             (self.async_.last_write_ts(isl["id"]) or 0) <= (self._trainers_end_ts() or float("inf"))
             + SAMPLER_AFTER_TRAINERS_S)
-        if stopped and not isl["finalized"]:
+        # an island we stopped stays "stopped" whatever it wrote on its way out (island_leave
+        # STOPPED, RECOVERY_REQUIRED); only its fleet record (removed / failed / abandoned) is above it
+        rec_left = left is not None and left.get("source") == "trainer island record"
+        if (stopped or rec_stopped) and not isl["finalized"] and not rec_left:
             status = "stopped"
             starting = False
         elif isl["recovery_required"] and not _recovered_after(isl):
@@ -1634,13 +1666,17 @@ class Reducer:
             status = "unknown"
         else:
             status = "ok"
+        if inow and inow["state"] in ("starting", "moving") and status in ("stale", "lost", "left", "waiting",
+                                                                          "unknown", "ok", "recovery"):
+            status, starting = "starting", True  # relaunching / moving: its new incarnation is starting
+            waiting_why = inow.get("reason")
         return {
             "id": isl["id"], "name": isl["name"], "cloud": isl["cloud"], "region": isl["region"],
             "gpu": isl["gpu"], "gpus": isl["gpus"], "status": status, "finalized": bool(isl["finalized"]),
             "stopped_by_us": stopped, "starting": starting, "startup_s": _r(startup_s), "driver_started": isl["driver_started"],
             # a sampler waiting at its backlog cap writes nothing until the trainers read
             "waiting_backlog": waiting, "waiting_reason": waiting_why or ("backlog full" if waiting else None),
-            "role": role, "left": left, "stale_after_s": _r(warn_s),
+            "role": role, "left": left, "stale_after_s": _r(warn_s), "island_now": inow,
             # a sampler whose pool removed or retired it but that still runs (draining, or its
             # machine not released): shown running, alerted past alerts.POOL_REMOVED_GRACE_S
             "pool_removed": ({**pool_removed, "since_s": _r(now - pool_removed["ts"])
