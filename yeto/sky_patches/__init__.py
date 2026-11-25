@@ -417,8 +417,9 @@ def _patch_source(site: str, repo: str, front: tuple[str, ...] = ()) -> str:
     regular ``yeto`` package found decides: with ``sky_patches`` it is the source, without,
     the hook falls back to its repo. A ``yeto`` directory without ``__init__.py`` (a
     checkout's root, seen from its parent) does not decide: Python prefers a regular
-    package anywhere on the path. Only such directories and no regular package:
-    unreadable. No yeto anywhere: the hook's repo."""
+    package anywhere on the path. Only such directories: the first of them with a
+    ``sky_patches`` package, else (the hook's ImportError fallback) its repo. No yeto
+    anywhere: the hook's repo."""
     import os
 
     portions: list[str] = []
@@ -454,9 +455,12 @@ def _patch_source(site: str, repo: str, front: tuple[str, ...] = ()) -> str:
         if found == "":  # a yeto without sky_patches comes first: the hook falls back to its repo
             break
     else:
-        if portions:
-            raise ServerUnreadable(f"{portions[0]} makes yeto a namespace package on the server's path: which "
-                                   "yeto applies the patch cannot be read")
+        # only namespace portions: ``import yeto.sky_patches`` finds it in the first portion
+        # that has it; else the ImportError sends the hook to its repo (appended to yeto's path)
+        for pkg in portions:
+            patches = os.path.join(pkg, "sky_patches")
+            if os.path.isfile(os.path.join(patches, "__init__.py")):
+                return patches
     found = os.path.join(repo, "yeto", "sky_patches")
     if not os.path.isfile(os.path.join(found, "__init__.py")):
         raise ServerUnreadable(f"the patch hook points at {repo}, which has no yeto/sky_patches")
