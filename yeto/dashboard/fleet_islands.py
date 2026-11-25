@@ -180,6 +180,16 @@ def _lane(row: dict) -> str:
 GONE = "gone"  # a pool member released (``yeto.launch.pool.island_pool.GONE``)
 
 
+def _released_at(st: dict, shard: str) -> float | None:
+    """When the pool released the last machine of ``shard`` (its members' ``charged_to``: the pool
+    charges a member up to its release); None while one is held or not recorded."""
+    rows = [m for m in st.get("members") or () if isinstance(m, dict) and str(m.get("shard")) == shard]
+    if not rows or any(str(m.get("state") or "") != GONE for m in rows):
+        return None
+    ts = [t for t in (_f(m.get("charged_to")) for m in rows) if t is not None]
+    return max(ts) if ts else None
+
+
 def _member_state(st: dict, shard: str) -> str | None:
     """The pool's word on the machine serving ``shard`` (its state.json members): a member not
     released (``draining``, ``ready``, ...) wins, else ``gone`` (released); None: not listed."""
@@ -250,7 +260,7 @@ def _shard_record(objects: Any, lane: str, shard: str) -> dict | None:
 def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
     """The fleet's live membership from the run store (module doc): ``{"pools": {name: {name,
     provider, shard_base, usd_per_h, learner, first_at, removed_at, removing, stopped,
-    retired}}, "shards": {shard: {pool, retired, retired_at, member_state, left_at,
+    retired}}, "shards": {shard: {pool, retired, retired_at, member_state, released_at, left_at,
     leave_reason, incarnation, left_by}}}``; None when the store has no applied membership.
 
     ``cache`` bounds the reads across calls: the applied generations are folded once each, a
@@ -286,7 +296,8 @@ def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
                 mine[shard] = settled_shards[key]
                 continue
             rec = {"pool": name, "retired": True, "retired_at": _f(table.get("updated_at")),
-                   "member_state": _member_state(st, shard), "left_at": None, "leave_reason": None,
+                   "member_state": _member_state(st, shard), "released_at": _released_at(st, shard),
+                   "left_at": None, "leave_reason": None,
                    "incarnation": None, "left_by": None}
             newest = _shard_record(objects, lane, shard)
             if newest is not None:

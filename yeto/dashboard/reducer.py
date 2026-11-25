@@ -357,6 +357,8 @@ class Reducer:
         # the fleet's live membership: pools fleet apply added / removed, retired shards and their
         # samplers' leaves (fleet_islands.read_fleet_state); None until the store has one
         self.fleet_state: dict | None = None
+        # the host-wide syncer tape's records of another run, counted by sources.TapeSource: {path: ...}
+        self.foreign_tapes: dict[str, dict] = {}
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
@@ -629,7 +631,7 @@ class Reducer:
         self.fleet_plan_seq += 1
         return True
 
-    def _membership_left(self, isl: dict) -> dict | None:
+    def _membership_left(self, isl: dict, now: float | None = None) -> dict | None:
         """Sampler ``isl`` ended by the fleet's membership (``fleet_state``): the leave its member
         record names (written by the sampler, or by its pool for a removed pool's sampler that
         wrote none), else its shard retired by its pool's member table (the pool was removed or
@@ -666,15 +668,27 @@ class Reducer:
         last = isl["last_event_ts"]
         wrote_after = last is not None and out["ts"] is not None and last > out["ts"] + STOP_SLACK_S
         held = member is not None and member != fleet_islands.GONE  # the pool still holds (bills) its machine
-        if member == fleet_islands.GONE or not (wrote_after or held):
-            if member == fleet_islands.GONE:
+        released = member == fleet_islands.GONE
+        # released, yet the sampler writes after the release (or, release time not recorded, still
+        # writes now): a copy runs on, or the release did not take; it may be billed
+        rel = rec.get("released_at")
+        active = released and wrote_after and (
+            last > rel + STOP_SLACK_S if rel is not None
+            else now is not None and now - last <= self.thresholds["heartbeat_warn_s"])
+        if not (wrote_after or held) or (released and not active):
+            if released:
                 out["detail"] += "; its pool released the machine"
             return out
         out["draining"] = True
         out["member_state"] = member
         out["wrote_after"] = wrote_after
-        out["detail"] += ("; the sampler still writes after it" if wrote_after else "") + (
-            f"; its pool still holds the machine ({member}, billed)" if held else "")
+        out["released"] = bool(active)
+        if active and rel is not None:
+            out["ts"] = rel  # alerted from the release on
+        out["detail"] += ("; its pool released the machine, but the sampler still writes (pool gone but "
+                          "sampler still active)" if active else ("; the sampler still writes after it"
+                                                                 if wrote_after else "")
+                          + (f"; its pool still holds the machine ({member}, billed)" if held else ""))
         return out
 
     def guard_drop_rates(self) -> dict[str, dict]:
@@ -1544,10 +1558,10 @@ class Reducer:
                 own = None  # it wrote after its leave: not ended by it
             gone = ({"ts": own["ts"], "reason": own.get("reason") or "left", "source": "sampler leave",
                      "done": (own.get("reason") or "") in async_rl.SAMPLER_DONE_REASONS}
-                    if own else self._membership_left(isl))
+                    if own else self._membership_left(isl, now))
             if gone is not None and gone.get("draining"):
                 pool_removed = {k: gone.get(k) for k in ("ts", "reason", "pool", "member_state", "wrote_after",
-                                                         "detail")}  # still runs: draining, or not released
+                                                         "released", "detail")}  # still runs: draining, or not released
             elif gone is not None and gone.pop("done"):
                 samp = {**(samp or {}), "ended": True}  # left after finishing its work: done
             elif gone is not None:

@@ -110,6 +110,15 @@ def pool_removed(cards: list[dict]) -> list[dict]:
     for c in cards:
         pr = c.get("pool_removed")
         since = (pr or {}).get("since_s")
+        if pr and pr.get("released") and c["status"] not in QUIET_OK:
+            # the pool released its machine, yet it still writes: alerted at once
+            out.append(_alert(0 if (since or 0) > POOL_REMOVED_GRACE_S else 1, "pool_removed_running",
+                              f"pool gone but sampler {c['id']} still active",
+                              f"pool {pr.get('pool')} released its machine"
+                              + (f" {since / 60:.0f} min ago" if since is not None else "")
+                              + ", but the sampler still writes: a copy still runs or the release did not take "
+                              "(it may still be billed); check the provider and release it", island=c["id"]))
+            continue
         if not pr or c["status"] in QUIET_OK or since is None or since <= POOL_REMOVED_GRACE_S:
             continue
         held = pr.get("member_state")

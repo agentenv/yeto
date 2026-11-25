@@ -304,7 +304,7 @@ function syncerCard(nd,B,sh){
   var g=el("g",{transform:"translate("+B.x+","+B.y+")","data-td":"syn:"+sh.index},nd),w=B.w,h=B.h,N=D.shards.length;
   var box=el("rect",{width:w,height:h,rx:10,"class":"tpbox"},g);accent(g,h,"var(--ink2)");
   el("text",{x:14,y:20,"class":"tpt"},g,N>1?"Syncer shard "+sh.index+" · fragments "+sh.lo+"–"+(sh.hi-1):"Syncer");
-  fitText(el("text",{x:14,y:36,"class":"tpm"},g,""),(N>1?"steps t ≡ "+(sh.index+1)+" (mod "+N+") · ":"")+["P "+D.P,D.quorum!=null?"quorum "+D.quorum+"/"+D.M:"M "+D.M,D.H?(D.H_exact?"H ":"H ≤ ")+D.H:null].concat(cfgBits(D.config)).filter(Boolean).join(" · "),w-26);
+  fitText(el("text",{x:14,y:36,"class":"tpm"},g,""),(N>1?"steps t ≡ "+(sh.index+1)+" (mod "+N+") · ":"")+["P "+(fin(D.P)?D.P:"—"),D.quorum!=null?"quorum "+D.quorum+"/"+D.M:"M "+D.M,D.H?(D.H_exact?"H ":"H ≤ ")+D.H:null].concat(cfgBits(D.config)).filter(Boolean).join(" · "),w-26);
   var o={g:g,box:box,sh:sh,lw:w-26};
   o.roster=el("text",{x:w-12,y:20,"text-anchor":"end","class":"tpv"},g,"");
   o.step=el("text",{x:14,y:66,"class":"tpbig2"},g,"");o.of=el("text",{x:w-12,y:66,"text-anchor":"end","class":"tpm"},g,"");
@@ -381,14 +381,17 @@ function paint(){
     fitText(pr.lab[3],lb?"  queue "+dur(lb.queue_s)+(fin(tr.apply_s)?" · apply "+tr.apply_s.toFixed(2)+"s":""):"",lw2);
     if(sft())paintLearner(tr,tc.l,pr.lab,tn,tc.lw)});
   L.syn.forEach(function(o,s){var sh=D.shards[s],mine=D.rounds.filter(function(r){return r.shard===s}),st=sh.state,last=sh.last;
-    o.step.textContent="step "+sh.step;o.of.textContent=(fin(D.total_steps)?"of "+D.total_steps+" · ":"")+sh.merges+" merges · sweep "+(D.P?Math.floor(Math.max(0,sh.step-1)/D.P)+1:"n/a");
+    o.step.textContent="step "+sh.step;o.of.textContent=(fin(D.total_steps)?"of "+D.total_steps+" · ":"")+sh.merges+" merges"+(D.P?" · sweep "+(Math.floor(Math.max(0,sh.step-1)/D.P)+1):"");
     o.barf.setAttribute("width",D.P?(o.barW*(((sh.step-1)%D.P+1)/D.P)).toFixed(1):0);
     o.roster.textContent=D.done?"run done · roster "+D.M:"roster "+D.roster+"/"+D.M;o.roster.style.fill=D.done?C.ink2:D.roster<D.M?C.bad:C.good;
     var c=st==="done"?C.ink2:st==="waiting for quorum"?(sh.attempt_max>1?C.bad:C.warn):st==="merging"?C.wt:st==="gathering"?C.good:C.ink2;
     fitText(o.st,(st==="done"?"done (final cut)":st)+" · in flight "+mine.length+(D.behind?" · syncer tape behind":""),o.lw-14);o.st.style.fill=c===C.good?C.ink:c;o.dot.setAttribute("fill",c);
     o.box.style.stroke=c===C.bad?C.bad:"";
     var lines=mine.slice(0,3).map(function(r){return["t"+r.step+" f"+r.frag+": "+(r.state==="merging"?"merging":r.state==="pull"?"PULL out":"PUSH "+r.pushed.length+"/"+D.M)+" · "+dur(tn-r.since)+(r.attempt>1?" · attempt "+r.attempt:"")+(r.timeouts?" · "+r.timeouts+" timeout"+(r.timeouts>1?"s":""):""),r.blocked||r.timeouts?C.warn:C.ink2]});
-    lines.push([last?"last merge t"+last.step+" f"+last.frag+" · quorum "+dur(last.quorum_s)+" · merge "+(fin(last.merge_s)?last.merge_s.toFixed(2)+"s":"n/a"):"no merge yet",C.ink2]);
+    lines.push([last?"last merge t"+last.step+" f"+last.frag+" · quorum "+dur(last.quorum_s)+" · merge "+(fin(last.merge_s)?last.merge_s.toFixed(2)+"s":"—"):"no merge yet",C.ink2]);
+    // the host-wide syncer tape held only an earlier run's syncer: not this run's, not drawn
+    if(!last&&D.foreign_tape){lines.push(["no syncer tape for this run",C.warn]);
+      lines.push(["host tape: an earlier run's syncer"+(fin(D.foreign_tape.last_ts)?" · last "+dur(tn-D.foreign_tape.last_ts)+" ago":""),C.ink2])}
     if(last)lines.push(["checkpoint step "+last.step+(fin(last.checkpoint_s)?" · "+last.checkpoint_s.toFixed(2)+"s":"")+" · "+dur(tn-last.ts)+" ago (before BCAST)",C.ink2]);
     if(last&&last.missed.length)lines.push(["last merge without "+(sft()?"island ":"trainer ")+last.missed.join(", ")+" (quorum "+last.quorum+")",C.ink2]);
     if(D.shards.length===1)lines.push(["5 min: ↑ "+D.traffic.push+" PUSH"+(fin(D.traffic.push_bytes)?" "+mb(D.traffic.push_bytes):"")+" · ↓ "+D.traffic.bcast+" applied",C.ink2]);
@@ -458,7 +461,10 @@ function matrix(tn){
     h+="</tr>"});
   h+='</table><div class="fmlg">'+(sft()?'<span><b>v41</b> committed version (syncer) = global step of the fragment\'s last merge</span><span><b>t203</b> the island\'s last contribution: the merge its delta went into, base v = the version it was computed on</span><span class="dl">↑ PUSH accepted, waiting for the merge</span><span class="wt">↓n merged after the island\'s last applying step</span>':
     '<span><b>v41</b> committed (syncer) / anchor (trainer) version = global step of the fragment\'s last merge</span>'+(D.trainers.some(function(t){return t.since})?'<span>bar = local steps since anchor / H (green: ≥ H)</span>':"")+'<span class="dl">↑ pushed, waiting for the merge</span><span class="wt">↓n merged, not applied yet (on the wire or queued for the safe boundary)</span><span>tint: 1 / ≥ 2 merges behind</span>'+(finalOnSyncer?'<span><b>last applied</b> the island\'s last applied version; the final version is on the syncer (final cut)</span>':""))+'</div>';
-  if(h!==fmKey){L.fm.innerHTML=h;fmKey=h}}
+  if(h!==fmKey){L.fm.innerHTML=h;fmKey=h}
+  // wider than its box (narrow screens, many fragments): it scrolls in its own box, said in its header
+  var fm=L.fm,more=fm.scrollWidth>fm.clientWidth+1,hs=more&&fm.querySelector?fm.querySelector(".fmh span"):null;
+  if(hs&&!hs.querySelector(".fmmore")){var m=document.createElement("b");m.className="fmmore";m.textContent=" · scroll ⟶";hs.appendChild(m)}}
 
 // an SFT learner has no anchor vector: its last contribution per fragment (responders[] of the merges)
 function learnerRows(tn){var P=D.P||0,h="";

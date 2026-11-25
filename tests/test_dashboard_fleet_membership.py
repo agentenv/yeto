@@ -37,7 +37,8 @@ def _applied(seq: int, at: float, *, with_add: bool) -> dict:
             "removing": []}
 
 
-def _store(tmp_path: Path, *, leave: dict | None = None, member: str | None = "gone") -> Path:
+def _store(tmp_path: Path, *, leave: dict | None = None, member: str | None = "gone",
+           charged_to: float | None = None) -> Path:
     """The run store after fleet apply added i0-add-l4 (generation 2) and removed it (3): its pool
     state and member table retire its shard; its sampler's member record has ``leave`` (none: the
     sampler was released before it wrote one); ``member``: the pool's state of the machine serving the
@@ -51,7 +52,8 @@ def _store(tmp_path: Path, *, leave: dict | None = None, member: str | None = "g
     w("fleet/applied/00000003.json", _applied(3, REMOVED_AT, with_add=False))
     w("fleet/pools/i0-add-l4/state.json", {"format": 2, "stopped": "removed from the fleet's desired state",
                                            "retired_shards": [ADD],
-                                           "members": [{"shard": ADD, "state": member}] if member else []})
+                                           "members": [{"shard": ADD, "state": member, "charged_to": charged_to}]
+                                           if member else []})
     w("trainer0/fleet/members/i0-add-l4.json", {"schema": "yeto.fleet.member-table/v1", "pool": "i0-add-l4",
                                                 "shard_base": "qa-add-i0", "epoch": 2, "shards": [ADD],
                                                 "retired": [ADD], "updated_at": RETIRED_AT})
@@ -186,12 +188,37 @@ def test_a_quiet_retired_sampler_whose_machine_the_pool_still_holds_runs_and_ale
     assert [a["sev"] for a in r.overview(now=later)["alerts"] if a["rule"] == "pool_removed_running"] == [0]
 
 
-def test_a_released_sampler_is_left_even_with_a_round_after_its_retirement(tmp_path):
-    """The pool released its machine (member gone): nothing of it runs, whatever its clock wrote."""
-    r = _reducer(rounds_after=1)
-    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(_store(tmp_path, member="gone")))))
+def test_a_sampler_that_drained_and_was_released_is_left(tmp_path):
+    """Rounds while it drained (after the retirement, before the release), then released: left."""
+    r = _reducer(rounds_after=2)
+    st = _store(tmp_path, member="gone", charged_to=RETIRED_AT + 150)
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(st))))
     card = _card(r, ADD, LATE)
     assert card["status"] == "left" and "released the machine" in card["left"]["detail"]
+    assert not [a for a in r.overview(now=LATE)["alerts"] if a["rule"] == "pool_removed_running"]
+
+
+def test_pool_gone_but_the_sampler_still_writing_is_active_and_alerted_at_once(tmp_path):
+    """The pool released its machine, yet the sampler writes after the release: a copy runs on or
+    the release did not take (maybe billed). Shown running, alerted at once, never left."""
+    r = _reducer(rounds_after=12)
+    st = _store(tmp_path, member="gone", charged_to=RETIRED_AT + 30)
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(st))))
+    now = RETIRED_AT + 60 * 3 + 10
+    card = _card(r, ADD, now)
+    assert card["status"] not in ("left", "done") and card["left"] is None and card["pool_removed"]["released"]
+    alerts = [a for a in r.overview(now=now)["alerts"] if a["rule"] == "pool_removed_running"]
+    assert alerts and alerts[0]["title"] == f"pool gone but sampler {ADD} still active" and alerts[0]["sev"] == 1
+    later = RETIRED_AT + 60 * 12 + 10
+    assert [a["sev"] for a in r.overview(now=later)["alerts"] if a["rule"] == "pool_removed_running"] == [0]
+
+
+def test_pool_gone_without_a_release_time_judges_by_whether_it_still_writes_now(tmp_path):
+    r = _reducer(rounds_after=12)
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(_store(tmp_path, member="gone")))))
+    assert _card(r, ADD, RETIRED_AT + 60 * 12 + 20)["pool_removed"]["released"]  # writing now
+    quiet = RETIRED_AT + 60 * 12 + 5000
+    assert _card(r, ADD, quiet)["status"] == "left"  # it stopped since: the release took
 
 
 def test_a_member_record_leave_with_rounds_after_it_is_not_believed(tmp_path):
@@ -328,3 +355,130 @@ def test_the_releases_loaded_by_tags_wrap_inside_their_cell():
     js = (Path(fleet_islands.__file__).parent / "static" / "app.js").read_text()
     assert re.search(r"\.lts\{display:flex;flex-wrap:wrap", css)
     assert "'<div class=\"lts\">'+sids.map(function(id){return loadTag(" in js
+
+
+# -- the host-wide syncer tape ----------------------------------------------------------------
+def _syncer_line(t: float, **kw) -> str:
+    return json.dumps({"kind": "syncer_config", "learners": 1, "outer_lr": 1.0, "time_unix": t, **kw}) + "\n"
+
+
+def _merge_line(t: float, step: int) -> str:
+    return json.dumps({"step": step, "fragment": 0, "quorum": 1, "expected": [0], "responders": [{"id": 0}],
+                       "time_unix": t, "sync/base_version": step - 1}) + "\n"
+
+
+@pytest.fixture
+def host_home(tmp_path, monkeypatch):
+    from yeto import runs
+    from yeto.dashboard import sources
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "home" / ".yeto" / "runs")
+    monkeypatch.setenv("YETO_STATE_DIR", str(tmp_path / "home" / ".yeto" / "rl-up"))
+    monkeypatch.setattr(sources, "HOST_TAPE_SINCE", {})
+    (tmp_path / "home" / "yeto-output").mkdir(parents=True)
+    return tmp_path / "home"
+
+
+def _run(home: Path, run: str, started_at: float) -> None:
+    d = home / ".yeto" / "runs" / run
+    d.mkdir(parents=True)
+    (d / "meta.json").write_text(json.dumps({"name": run, "started_at": started_at}))
+
+
+def test_the_host_syncer_tape_of_an_earlier_run_is_not_this_runs(host_home):
+    from yeto.dashboard import sources
+
+    tape = host_home / "yeto-output" / "yeto-tape.jsonl"
+    tape.write_text(_syncer_line(1000.0) + _merge_line(1010.0, 19))  # the earlier run's syncer
+    _run(host_home, "r2", 5000.0)
+    paths = sources.run_sources("r2")
+    assert str(tape) in paths
+    r = Reducer(run="r2")
+    srcs = sources.load_all(r, paths)
+    assert not r.syncer_records and not r.merges
+    assert r.foreign_tapes[str(tape)] == {"records": 2, "last_ts": 1010.0, "since": 5000.0}
+    # this run's syncer appends to the same file later: its records are read
+    with tape.open("a") as fh:
+        fh.write(_syncer_line(5100.0, learners=2) + _merge_line(5200.0, 1))
+    for s in srcs:
+        s.pump(r)
+    cfgs = [x for x in r.syncer_records if x.get("kind") == "syncer_config"]
+    assert [c["learners"] for c in cfgs] == [2]
+
+
+def test_a_shard_tape_follows_its_host_tape(host_home):
+    from yeto.dashboard import sources
+
+    (host_home / "yeto-output" / "yeto-tape.jsonl").write_text(_syncer_line(1000.0))
+    shard = host_home / "yeto-output" / "yeto-tape.shard1.jsonl"
+    shard.write_text(_syncer_line(1001.0, shard_index=1))
+    _run(host_home, "r2", 5000.0)
+    sources.run_sources("r2")
+    assert sources.host_tape_since(shard) == 5000.0
+
+
+def test_a_run_without_a_recorded_start_reads_the_host_tape_as_before(host_home):
+    from yeto.dashboard import sources
+
+    tape = host_home / "yeto-output" / "yeto-tape.jsonl"
+    tape.write_text(_syncer_line(1000.0))
+    r = Reducer(run="r9")
+    sources.load_all(r, sources.run_sources("r9"))
+    assert [x.get("kind") for x in r.syncer_records] == ["syncer_config"] and not r.foreign_tapes
+
+
+def test_the_run_up_state_start_counts(host_home, tmp_path):
+    from yeto.dashboard import sources
+
+    st = tmp_path / "up" / "state.json"
+    st.parent.mkdir()
+    st.write_text(json.dumps({"t0": 4000.0}))
+    _run(host_home, "r3", 5000.0)
+    assert sources.run_started_at("r3", up_state=str(st)) == 4000.0
+    # each up resets t0; the run's first up (run_t0) is when its syncer may have started
+    st.write_text(json.dumps({"t0": 4000.0, "run_t0": 2000.0, "trainer_t0": 3000.0}))
+    assert sources.run_started_at("r3", up_state=str(st)) == 2000.0
+
+
+def test_the_syncer_view_names_a_foreign_host_tape():
+    from yeto.dashboard import topology_diloco
+
+    r = Reducer(run="r2")
+    assert topology_diloco._foreign_tape(r) is None  # noqa: SLF001
+    r.foreign_tapes["a"] = {"records": 2, "last_ts": 10.0, "since": 50.0}
+    r.foreign_tapes["b"] = {"records": 0, "last_ts": None, "since": 50.0}
+    assert topology_diloco._foreign_tape(r) == {"records": 2, "last_ts": 10.0, "since": 50.0}  # noqa: SLF001
+
+
+# -- the page's release labels and fragments table -------------------------------------------------
+def _rel_labels(points: list[tuple[int, float]], width: float) -> list[dict]:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    js = (Path(fleet_islands.__file__).parent / "static" / "app.js").read_text()
+    m = re.search(r"function relLabels\(pts,W\)\{.*?\n(?=function aRelChart)", js, re.S)
+    assert m, "relLabels not found"
+    script = ("function fin(v){return typeof v===\"number\"&&isFinite(v)}\n" + m.group(0)
+              + f"\nconsole.log(JSON.stringify(relLabels({json.dumps([{'v': v, 'x': x} for v, x in points])},{width})))")
+    res = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30, check=False)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def test_release_labels_keep_apart_on_one_row_and_keep_the_latest():
+    pts = [(v, 200 + 13.0 * v) for v in range(57)]  # 57 releases 13 px apart: two-digit labels need more
+    labs = _rel_labels(pts, 1000)
+    vs = [q["v"] for q in labs]
+    assert vs[-1] == 56 and vs[0] == 0
+    assert all(v % 5 == 0 for v in vs[:-1])  # every 5th version (1 and 2 do not fit)
+    xs = [(q["x"] - 7.3 * len(f"v{q['v']}") / 2, q["x"] + 7.3 * len(f"v{q['v']}") / 2) for q in labs]
+    assert all(b[0] - a[1] > 12 for a, b in zip(xs, xs[1:]))
+    sparse = _rel_labels([(v, 100 + 60.0 * v) for v in range(8)], 1000)
+    assert [q["v"] for q in sparse] == list(range(8))  # room for all: every version
+
+
+def test_the_fragments_row_header_wraps_on_a_narrow_screen():
+    css = (Path(fleet_islands.__file__).parent / "static" / "index.html").read_text()
+    assert re.search(r"@media \(max-width:640px\)\{#topo table\.fm th\.rh\{min-width:0;max-width:112px;white-space:normal\}",
+                     css)

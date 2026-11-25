@@ -203,7 +203,9 @@ table.qt td:first-child,table.qt th:first-child{text-align:left;color:var(--ink2
 #topo table.fm{border-collapse:separate;border-spacing:3px;font-size:11px;min-width:100%}
 #topo table.fm th{font-weight:500;color:var(--ink2);text-align:center;padding:2px;white-space:nowrap}#topo table.fm th .fa{display:block;font:10px var(--mono)}
 #topo table.fm th.rh{text-align:left;color:var(--ink);font-weight:600;padding-right:8px;min-width:130px;position:sticky;left:0;background:var(--panel);z-index:1}
-#topo table.fm th.rh .ns{display:block;font:10.5px var(--mono);font-weight:400;color:var(--ink2)}#topo table.fm th.stuck{color:var(--bad);font-weight:700}
+#topo table.fm th.rh .ns{display:block;font:10.5px var(--mono);font-weight:400;color:var(--ink2)}
+#topo .fmmore{font-weight:600;color:var(--ink)}
+@media (max-width:640px){#topo table.fm th.rh{min-width:0;max-width:112px;white-space:normal}#topo table.fm th.rh .ns{white-space:normal;overflow-wrap:anywhere}}#topo table.fm th.stuck{color:var(--bad);font-weight:700}
 #topo table.fm td{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 5px 5px;min-width:74px;vertical-align:top;position:relative}
 #topo table.fm td .v{font:600 12px var(--mono)}#topo table.fm td .s{font:10px var(--mono);color:var(--ink2);margin-top:1px;white-space:nowrap}
 #topo table.fm td .b{height:4px;background:var(--line);border-radius:2px;margin-top:4px;overflow:hidden}#topo table.fm td .b i{display:block;height:4px;background:var(--ink2);border-radius:2px}
