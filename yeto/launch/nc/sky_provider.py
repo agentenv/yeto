@@ -313,8 +313,15 @@ class SkyProvider:
 
             self._sky = sky
         if self._real_sky and not getattr(self, "_env_scoped", False):
-            install_request_env_scope()  # raises: no sky request without the scope
             self._env_scoped = True
+            try:
+                install_request_env_scope()
+            except RuntimeError as error:
+                # launches are refused (_install_patches); status / down / cancel still run, without
+                # the scope, so a pool can always release what it has
+                self._scope_error = str(error)
+                print(f"[sky-provider] WARNING: {error}; new launches are refused, status and down run "
+                      "without the request env scope", flush=True)
         return _ScopedSky(self._sky, self.request_env)
 
     def _doc(self) -> dict[str, Any]:
@@ -408,7 +415,10 @@ class SkyProvider:
 
         if self._real_sky:  # its API server must run this Python's sky version
             sky_patches.require_matching_api_server()
-            problems = aws_env_problems(self, dict(os.environ))  # the pool's start, not only its dry run
+            problems = aws_env_problems(self, dict(os.environ))  # any orderer, not only a checked pool start
+            self.sky  # noqa: B018 - installs the request env scope (or records why it could not)
+            if getattr(self, "_scope_error", None):
+                problems.append(f"sky provider: refusing to launch: {self._scope_error}")
             if problems:
                 raise ValueError(problems[0])
         sky_patches.install()
@@ -507,7 +517,9 @@ class SkyProvider:
                                  "offer": offer.record(), "launch_state": SUBMITTED,
                                  **({"num_nodes": num_nodes} if num_nodes > 1 else {})}
         self._save_doc(doc)  # recorded before the launch: a crash mid-launch still leaves it ours to down
-        _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id)
+        # pool / aws_profile: a crash before "created" leaves a row the cleanup still downs as this pool's
+        _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id,
+                       pool=True, **({"aws_profile": self.aws_profile} if self.aws_profile else {}))
         self.last_offer_key = offer.key  # the pool's order_failed event names it (offer ledger)
         try:
             task = self._task(name, offer, num_nodes)
@@ -859,12 +871,28 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
 
 
 def _uses_aws(provider: SkyProvider) -> bool:
-    """Some offer may land on AWS: its infra / cloud is AWS, or not pinned at all."""
+    """Some offer may land on AWS: its infra / cloud is AWS, a wildcard (``*/<region>``),
+    or not pinned at all."""
     for offer in provider.offers:
         where = str(offer.resources.get("infra") or offer.resources.get("cloud") or "").lower()
-        if not where or where.split("/", 1)[0] == "aws":
+        if where.split("/", 1)[0] in ("", "*", "aws"):
             return True
     return False
+
+
+def start_problems(cfg: dict[str, Any]) -> list[str]:
+    """What refuses a sky pool's loop at its start (``pool --config``), before any order:
+    a refusal at the first order would only cool that offer down and retry every tick."""
+    try:
+        provider = from_config(cfg, str(cfg.get("run") or cfg.get("shard_base")), sky=object())
+    except (ValueError, TypeError, KeyError) as error:
+        return [str(error)]
+    problems = aws_env_problems(provider, dict(os.environ))
+    try:
+        install_request_env_scope()
+    except RuntimeError as error:
+        problems.append(f"sky provider: {error}")
+    return problems
 
 
 def aws_env_problems(provider: SkyProvider, env: dict[str, str]) -> list[str]:

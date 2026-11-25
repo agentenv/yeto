@@ -709,6 +709,12 @@ def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: Is
 
     for note in [*cli.pool_config_warnings(cfg), *map(format_finding, breaker_findings(cfg))]:
         _say(f"WARNING: {note}")
+    if provider_kind(cfg) == "sky":  # refused here, not order by order (an order refusal only cools an offer)
+        from .sky_provider import start_problems  # noqa: PLC0415
+
+        refused = start_problems(cfg)
+        if refused:
+            raise SystemExit(f"pool {cfg['shard_base']}: " + "; ".join(refused))
     holder = lock_holder(lock_path(cfg))
     if holder is not None:
         raise SystemExit(f"pool {cfg['shard_base']}: another instance holds {lock_path(cfg)} "

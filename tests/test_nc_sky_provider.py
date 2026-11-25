@@ -813,3 +813,65 @@ def test_the_cleanups_sky_down_of_a_pool_cluster_uses_the_providers_request_env(
     assert cleanup._release_one(row(pool=True), Ops(), Ledger(), False, {}).ok
     assert cleanup._release_one(row(), Ops(), Ledger(), False, {}).ok  # a launcher cluster: sky's own forwarding
     assert seen == [sp.aws_request_env("sky-aws"), sp.aws_request_env(None), None]
+
+
+def test_a_failed_scope_self_check_refuses_launches_but_status_and_down_still_run(monkeypatch, capsys):
+    from yeto import sky_patches
+    from yeto.launch.nc import sky_provider as sp
+
+    for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sky_patches, "require_matching_api_server", lambda out=None: None)
+    sky = FakeSky()
+    up = _provider(sky)
+    name = up.order(1)  # launched while the scope still worked (a fake sky: no scope needed)
+    sky.up(name)
+
+    def broken():
+        raise RuntimeError("sky builds its request env without payloads.request_body_env_vars")
+
+    monkeypatch.setattr(sp, "install_request_env_scope", broken)
+    p = _provider(sky)
+    p.record = up.record
+    p._real_sky = True
+    assert p.status(1, name).state == "active"  # still read
+    assert "new launches are refused" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="refusing to launch"):
+        p.order(2)
+    assert p.release(1, name)["state"] == "ended" and name not in sky.clusters  # still released
+
+
+def test_a_sky_pool_loop_with_run_aws_settings_is_refused_at_its_start(tmp_path, monkeypatch):
+    from yeto.launch.nc import pool_run
+    from yeto.launch.nc import sky_provider as sp
+
+    for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    cfg = {"target": 1, "accounts": [1], "shard_base": "s", "run": "run-k",
+           "provider": {"kind": "sky", "resources": {"infra": "aws", "accelerators": "L4:1"}}}
+    assert sp.start_problems(cfg) == []
+    monkeypatch.setenv("AWS_PROFILE", "store-r2")
+    assert sp.start_problems(cfg) and "AWS_PROFILE" in sp.start_problems(cfg)[0]
+    monkeypatch.setattr(pool_run.cli, "pool_config", lambda cfg, allowed=None: None)
+    monkeypatch.setattr(pool_run.cli, "pool_config_warnings", lambda cfg: [])
+    monkeypatch.setattr(pool_run, "breaker_findings", lambda cfg: [])
+    monkeypatch.setattr(pool_run, "lock_holder", lambda path: pytest.fail("got past the start check"))
+    with pytest.raises(SystemExit, match="AWS_PROFILE"):
+        pool_run.run_pool(cfg, str(tmp_path / "pool.json"), interval=1.0)
+
+
+def test_a_wildcard_infra_may_land_on_aws():
+    from yeto.launch.nc import sky_provider as sp
+
+    p = SkyProvider("run-s", slots=[1], resources={"infra": "*/us-east-1", "accelerators": "L4:1"}, sky=FakeSky())
+    assert sp.aws_env_problems(p, {"AWS_PROFILE": "store-r2"})
+
+
+def test_the_intent_row_marks_the_pool_and_its_aws_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(tmp_path / "ledger.jsonl"))
+    p = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=FakeSky(), aws_profile="sky-aws")
+    p.order(1)
+    from yeto.cost.ledger import current
+
+    intent = next(r for r in current().records() if r["op"] == "intent")
+    assert intent["attrs"]["pool"] is True and intent["attrs"]["aws_profile"] == "sky-aws"
