@@ -154,11 +154,21 @@ def test_a_table_outside_the_trainers_lanes_is_ignored_and_reported_once(tmp_pat
         ("rl_member_table_ignored", {"pool": "theirs", "shard_base": "i2-nc"})]
     buffer.refresh_members()
     assert len([e for e in events if e[0] == "rl_member_table_ignored"]) == 1  # reported once
-    monkeypatch.setenv(mt.MEMBER_LANES_ENV, "i1")  # a lane prefix: a pool added to island 1 later
-    assert mt.lanes_from(__import__("os").environ, ["i1-nc-0"]) == frozenset({"i1"})
-    assert mt.in_lanes("i1-modal", frozenset({"i1"})) and not mt.in_lanes("i10-nc", frozenset({"i1"}))
+    monkeypatch.setenv(mt.MEMBER_LANES_ENV, "i1")  # island 1's lane: a pool added to island 1 later
+    assert mt.lanes_from(__import__("os").environ, ["r-nc-i1-0"]) == frozenset({"i1"})
     monkeypatch.setenv(mt.MEMBER_LANES_ENV, "*")
     assert mt.lanes_from(__import__("os").environ, ["i1-nc-0"]) is None
+
+
+def test_an_island_lane_matches_by_suffix_any_other_lane_by_prefix():
+    """A fleet compiles island k's pools to <base>-i<k>: lane i<k> (or -i<k>) is a suffix."""
+    one = frozenset({"i1"})
+    assert mt.in_lanes("r-sglang-i1", one) and mt.in_lanes("r-sglang-i1", frozenset({"-i1"}))
+    assert not mt.in_lanes("r-sglang-i10", one) and not mt.in_lanes("r-sglang-i2", one)
+    assert not mt.in_lanes("i1-modal", one)  # the pool's name form is not its shard_base
+    assert mt.in_lanes("team-nc", frozenset({"team"})) and mt.in_lanes("team", frozenset({"team"}))
+    assert not mt.in_lanes("teams-nc", frozenset({"team"}))
+    assert mt.lane_matches("anything", "*") and mt.in_lanes("anything", None)
 
 
 def test_a_table_under_another_pools_key_is_not_followed(tmp_path):

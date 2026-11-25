@@ -20,18 +20,21 @@ The trainer (:class:`MemberTableReader`, used by ``sample_buffer.FileSampleBuffe
 when :data:`MEMBER_TABLE_ENV` is set) reads the tables before each round and adds
 every new shard to the shards it merges; it never drops a shard (its unmerged groups
 stay trainable). Lanes: a table is followed only when its ``shard_base`` is in one of the
-trainer's lanes (:data:`MEMBER_LANES_ENV`: comma-separated lane prefixes, ``*`` every
-table of the store; unset: the bases of the trainer's initial ``--rl-buffer-shards``), its
+trainer's lanes (:data:`MEMBER_LANES_ENV`: comma-separated lanes, ``*`` every table of
+the store; an island lane ``i<k>`` matches a ``shard_base`` ending in ``-i<k>``, any other
+lane ``L`` matches ``L`` and ``L-...`` (:func:`lane_matches`); unset: the bases of the
+trainer's initial ``--rl-buffer-shards``), its
 ``pool`` names its own key, and a shard is taken only when it starts with the table's
 ``shard_base`` followed by ``-``: a table of another lane is ignored (reported once), so
 it cannot route that lane's shards into this trainer. ``yeto run up`` sets ``*`` for a
 single trainer (its store prefix is its one lane, and a pool added while it trains has a
-new ``shard_base``); a fleet's island trainers keep their own bases (or a lane prefix).
+new ``shard_base``); a fleet's island k trainer gets ``i<k>``.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -69,8 +72,24 @@ def lanes_from(environ: Any, initial_shards: Iterable[str]) -> frozenset[str] | 
     return frozenset(shard_base(s) for s in initial_shards)
 
 
+_ISLAND_LANE = re.compile(r"-?i\d+")
+
+
+def lane_matches(shard_base: str, lane: str) -> bool:
+    """Is a table's ``shard_base`` in ``lane``? ``*``: every one. An island lane (``i<k>``
+    or ``-i<k>``) matches by suffix: a fleet compiles island k's pools to
+    ``<base>-i<k>`` (``r-sglang-i2``). Any other lane matches by prefix: ``L`` itself or
+    ``L-...``."""
+    if lane == "*":
+        return True
+    if lane.startswith("-") or _ISLAND_LANE.fullmatch(lane):
+        suffix = lane if lane.startswith("-") else f"-{lane}"
+        return shard_base == suffix.lstrip("-") or shard_base.endswith(suffix)
+    return shard_base == lane or shard_base.startswith(f"{lane}-")
+
+
 def in_lanes(base: str, lanes: frozenset[str] | None) -> bool:
-    return lanes is None or any(base == lane or base.startswith(f"{lane}-") for lane in lanes)
+    return lanes is None or any(lane_matches(base, lane) for lane in lanes)
 
 
 class MemberTableWriter:
