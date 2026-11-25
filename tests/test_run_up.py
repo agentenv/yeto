@@ -201,6 +201,22 @@ def test_an_exited_launcher_without_success_is_a_breach(make_run, tmp_path, tail
     assert run.breach().startswith("trainer: launcher")
 
 
+@pytest.mark.parametrize("code", ["12", "13"])
+def test_a_refused_launcher_is_a_breach_whose_down_tears_nothing_down(make_run, tmp_path, monkeypatch, code):
+    """Exit 12 / 13: another launcher holds this run's island records (or they did not read).
+    The breach stops this run up's trainer side, but ``yeto down <launch>`` is not run: it
+    would stop the islands the holding launcher supervises."""
+    run = make_run()
+    monkeypatch.setattr(up, "_worker_alive", lambda name: False)
+    _trainer(run, tmp_path, f"[yeto] run 'r1' finished: FAILED (exit code {code})\n")
+    why = run.breach()
+    assert why.startswith("trainer: launcher refused") and "nothing of the trainer is torn down" in why
+    calls = []
+    monkeypatch.setattr(run, "_cmd", lambda *a, **k: calls.append(a) or 0)
+    run.trainer_down(why)
+    assert calls == [] and run.state["steps"]["trainer_down"]["hands_off"] is True
+
+
 def test_a_killed_log_streamer_of_a_running_worker_is_no_breach(make_run, tmp_path, monkeypatch):
     run = make_run()
     _trainer(run, tmp_path, "streaming\n")

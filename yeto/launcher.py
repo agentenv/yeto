@@ -424,15 +424,16 @@ def _adopt_syncer(states, cluster: str, adoption: dict):
     the cluster UP, its job alive); else None (the syncer is launched as usual)."""
     if states is None or not any(a.adopt for a in adoption.values()):
         return None
-    record = states.read_syncer() or {}
+    record = states.read_syncer(strict=True) or {}
     if record.get("cluster") != cluster or record.get("job_id") is None or not record.get("head_ip"):
         return None
-    from .launch.island_adopt import SkyProbe
+    from .launch.island_adopt import AdoptionUnknown, SkyProbe
 
     try:
         running, why = SkyProbe(cluster)({"cluster": cluster, "job_id": record["job_id"]})
-    except Exception as e:  # noqa: BLE001 - launched as usual
-        running, why = False, f"probe failed: {e}"
+    except Exception as e:  # noqa: BLE001 - unknown is not "gone": a second syncer would split the fleet
+        raise AdoptionUnknown(f"syncer {cluster}: whether its job {record['job_id']} still runs is "
+                              f"unknown ({type(e).__name__}: {e})"[:400]) from e
     if not running:
         print(f"[launcher] syncer {cluster}: not adopted ({why}); launching it", file=sys.stderr)
         return None
@@ -445,6 +446,7 @@ def _record_ordering(recorder, name: str, adoption: dict) -> None:
     so a launcher that dies mid-order leaves the machine findable."""
     if recorder is None:
         return
+    recorder.store.guard_order(name)  # the lock still ours, checked now (raises: nothing ordered)
     a = adoption.get(name)
     try:
         recorder.record(name, "ordering", handle={"cluster": name},
@@ -466,6 +468,55 @@ def _record_call(recorder, name: str, call_id: str, adoption: dict) -> None:
 ISLAND_RECORDS_LOCK = "fleet/trainers/lock"  # the island records' single-writer lock (StoreLock)
 ISLAND_RECORDS_LOCK_TTL_S = 120.0  # a dead launcher's lease runs out this long after its last renewal
 ISLAND_RECORDS_LOCKED_EXIT = 12  # another live launcher holds the island records of this run
+ISLAND_RECORDS_UNKNOWN_EXIT = 13  # an island record, or whether its machine runs, did not read
+# exits after which nothing of the run may be torn down: another launcher (may) supervise it
+HANDS_OFF_EXITS = frozenset({ISLAND_RECORDS_LOCKED_EXIT, ISLAND_RECORDS_UNKNOWN_EXIT})
+
+
+def _plan_island_records(args, specs, names, island_states, island_lock, *, relaunch, ssh_names, events_dir,
+                         echo_names, held_name, syncer_cluster):
+    """Under the island records' lock: the records (read strictly), the fleet recorder and
+    the adoption plan of a restart, and the syncer to keep. Returns ``(recorder, adoption,
+    kept_syncer)``. Raises ``IslandRecordsUnreadable`` / ``island_adopt.AdoptionUnknown``
+    when a record or a machine's state does not read: nothing may be ordered then."""
+    from .launch import island_adopt
+    from .launch.island_lifecycle import FleetRecorder
+
+    # Adoption goes by the run store's records (the local run manifest is only a cache: a
+    # launcher restarted on another machine finds the islands there too).
+    records = island_states.read_all(range(len(specs)), strict=True)  # also what the writes merge into
+    restart = relaunch or any(r.get("state") in island_adopt.ADOPTABLE for r in records.values())
+    if not restart:
+        for m in range(len(specs)):  # a new run: an island STOP an earlier run of this name left is void
+            island_states.clear_stop(m)
+    refs = _island_refs(args, specs, names,
+                        modal_names={n for n, sp in zip(names, specs) if sp.cloud == "modal"},
+                        ssh_names=ssh_names, events_dir=events_dir, echo_names=echo_names)
+    refs.pop(held_name, None)  # the trainer scheduler's island has its own journal
+    recorder = FleetRecorder(island_states, refs)
+    adoption: dict = {}
+    if restart and island_lock is not None:  # adopt only under the lock
+        adoption = island_adopt.plan(records, refs, probes=_adopt_probes(args))
+    kept = None
+    if syncer_cluster is not None:
+        kept = _adopt_syncer(island_states, syncer_cluster, adoption)
+    return recorder, adoption, kept
+
+
+def _lost_island_records(island_states) -> bool:
+    """This launcher no longer holds the island records (checked now): another launcher
+    supervises the fleet, so this one tears nothing of it down."""
+    from .launch.island_lifecycle import IslandRecordsFenced, IslandRecordsUnconfirmed
+
+    if island_states is None or island_states.fence is None:
+        return False
+    try:
+        island_states.guard_order("teardown")
+    except IslandRecordsFenced:
+        return True
+    except IslandRecordsUnconfirmed:
+        return False  # not confirmed is not lost: the last known holder tears down
+    return False
 
 
 def _claim_island_records(states, *, wait_s: float | None = None, sleep=None, clock=None):
@@ -544,6 +595,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     relaunch = _relaunch_of_same_run(args)  # before this launch writes its own manifest
     import sky
 
+    from .launch.island_lifecycle import IslandRecordsFenced
+
     if getattr(args, "rl_single_island_no_sync", False) and (
         getattr(args, "training_mode", "sft") != "rl"
     ):
@@ -595,9 +648,49 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         if _echoes_events(args, spec) and name != held_name
     }
     events_dir = _no_sync_events_dir(args) if echo_names else None
+    prefix = args.cluster_prefix
+    syncer_cluster = None if head_mode or no_sync else sky_cluster_name(f"{prefix}-syncer")
+    learner_names = learner_cluster_names(prefix, specs)
+    ssh_names = _resident_ssh_names(args, learner_names, specs)
+    # yeto.launch.island_lifecycle: each trainer island's record and STOP in the run store
+    # (an island fleet by default; None for a single trainer island: nothing changes). One
+    # launcher writes them: the run store's single-writer lock is claimed first (a dead
+    # launcher's lease is waited out), before anything of the run is registered, moved or
+    # ordered; held by a live launcher, nothing is launched. The lease is renewed from here on.
+    island_states = _island_state_store(args) if island_lifecycle_enabled(args, specs) else None
+    island_lock = None
+    recorder = None
+    adoption: dict = {}  # name -> island_adopt.Adoption (a relaunch of the same run)
+    kept_syncer = None  # (job id, head ip) of an adopted syncer
+    if island_states is not None:
+        from .launch.island_adopt import AdoptionUnknown
+        from .launch.island_lifecycle import IslandRecordsUnreadable
+
+        island_lock, refusal = _claim_island_records(island_states)
+        if refusal is not None:
+            island_states.close()
+            print(f"[launcher] ERROR: {refusal}; nothing is launched and nothing of the run is torn down "
+                  f"(exit {ISLAND_RECORDS_LOCKED_EXIT})", file=sys.stderr)
+            return ISLAND_RECORDS_LOCKED_EXIT
+        island_states.keep_lease()
+        try:
+            recorder, adoption, kept_syncer = _plan_island_records(
+                args, specs, learner_names, island_states, island_lock, relaunch=relaunch, ssh_names=ssh_names,
+                events_dir=events_dir, echo_names=echo_names, held_name=held_name, syncer_cluster=syncer_cluster)
+        except (IslandRecordsUnreadable, AdoptionUnknown) as error:
+            island_states.close()
+            if island_lock is not None:
+                island_lock.release()
+            print(f"[launcher] ERROR: {error}; nothing is launched and nothing of the run is torn down "
+                  f"(exit {ISLAND_RECORDS_UNKNOWN_EXIT}): launch again once the store and the cloud answer",
+                  file=sys.stderr)
+            return ISLAND_RECORDS_UNKNOWN_EXIT
+    adopted_names = {name for name, a in adoption.items() if a.adopt}
     if echo_names:
-        # Refuse to mix runs in one tape, before anything is provisioned.
-        existing = sorted(str(p) for p in events_dir.glob("*.jsonl*")) if events_dir.exists() else []
+        # Refuse to mix runs in one tape, before anything is provisioned. An adopted island's
+        # tape is continued (its trainer keeps running): it stays in place.
+        existing = sorted(str(p) for p in events_dir.glob("*.jsonl*")
+                          if p.name.split(".jsonl")[0] not in adopted_names) if events_dir.exists() else []
         if existing and relaunch:
             # a relaunch of this run (resume, or a restart after a failed start): the
             # earlier attempt's tapes move aside, so the new incarnation's tape is clean
@@ -624,9 +717,6 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     num_learners = sample_roles.syncer_learner_count(args, len(specs)) + external
     require_modal_for_gpu_exact(args, specs)
     warn_if_model_wont_fit(args, specs)
-    prefix = args.cluster_prefix
-    syncer_cluster = None if head_mode or no_sync else sky_cluster_name(f"{prefix}-syncer")
-    learner_names = learner_cluster_names(prefix, specs)
     if on_clusters is not None:
         try:
             on_clusters(([] if syncer_cluster is None else [syncer_cluster]) + learner_names
@@ -639,18 +729,6 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     run_started_unix = time.time()  # Modal rows created after this are this run's app
     # Every billed resource of this run goes into its crash-safe ledger; the cost guard
     # (budget breaker, idle shutdown, NC lease expiry) runs until the teardown below.
-    # yeto.launch.island_lifecycle: each trainer island's record and STOP in the run store
-    # (an island fleet by default; None for a single trainer island: nothing changes). One
-    # launcher writes them: the run store's single-writer lock is claimed first (a dead
-    # launcher's lease is waited out); held by a live launcher, nothing is launched.
-    island_states = _island_state_store(args) if island_lifecycle_enabled(args, specs) else None
-    island_lock = None
-    if island_states is not None:
-        island_lock, refusal = _claim_island_records(island_states)
-        if refusal is not None:
-            print(f"[launcher] ERROR: {refusal}; nothing is launched (exit {ISLAND_RECORDS_LOCKED_EXIT})",
-                  file=sys.stderr)
-            return ISLAND_RECORDS_LOCKED_EXIT
     cost_ledger, cost_guard = _start_cost_guard(args, events_dir)
     verda_names = [n for n, sp in zip(learner_names, specs) if sp.cloud == "verda"]
     verda = prepare_verda_islands(verda_names, on_instance_ids) if verda_names else None
@@ -660,31 +738,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     # Resident ssh: trainer islands (yeto.launch.ssh_resident): the fleet supervises them
     # over SSH; the finally block releases them and verifies every node.
     ssh_islands = None
-    ssh_names = _resident_ssh_names(args, learner_names, specs)
     # The log streams and their echo-tape collectors (an ssh: island streams from its start).
     tail_threads: list[threading.Thread] = []
     event_collectors: dict[str, EventCollector] = {}
-    recorder = None
-    adoption: dict = {}  # name -> island_adopt.Adoption (a relaunch of the same run)
-    if island_states is not None:
-        from .launch import island_adopt
-        from .launch.island_lifecycle import FleetRecorder
-
-        # Adoption goes by the run store's records (the local run manifest is only a cache: a
-        # launcher restarted on another machine finds the islands there too).
-        records = island_states.read_all(range(len(specs)))  # also what the writes merge into
-        restart = relaunch or any(r.get("state") in island_adopt.ADOPTABLE for r in records.values())
-        if not restart:
-            for m in range(len(specs)):  # a new run: an island STOP an earlier run of this name left is void
-                island_states.clear_stop(m)
-        refs = _island_refs(args, specs, learner_cluster_names(args.cluster_prefix, specs),
-                            modal_names={n for n, sp in zip(learner_cluster_names(args.cluster_prefix, specs), specs)
-                                         if sp.cloud == "modal"},
-                            ssh_names=ssh_names, events_dir=events_dir, echo_names=echo_names)
-        refs.pop(held_name, None)  # the trainer scheduler's island has its own journal
-        recorder = FleetRecorder(island_states, refs)
-        if restart and island_lock is not None:  # adopt only under the lock
-            adoption = island_adopt.plan(records, refs, probes=_adopt_probes(args))
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -703,10 +759,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     "event-tape forwarder (log: /tmp/yeto-tape-wandb.log)"
                 )
             syncer_task = make_syncer_task(args, num_learners)
-            kept = _adopt_syncer(island_states, syncer_cluster, adoption)
-            if kept is not None:  # the adopted islands keep talking to the syncer that still runs
-                syncer_job, head_ip = kept
+            if kept_syncer is not None:  # the adopted islands keep talking to the syncer that still runs
+                syncer_job, head_ip = kept_syncer
             else:
+                if island_states is not None:
+                    island_states.guard_order(syncer_cluster)  # the lock still ours (raises: nothing ordered)
                 print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
                 cost_ledger.created("sky_cluster", syncer_cluster, syncer_cluster, role="syncer")
                 rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
@@ -901,6 +958,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 modal_ops.define(cfg)
             print(f"[launcher] deploying Modal app {modal_ops.app_name} "
                   f"({len(modal_cfgs) + (held_cfg is not None)} island(s))")
+            if island_states is not None:
+                island_states.guard_order(modal_ops.app_name)  # the lock still ours (raises: nothing deployed)
             modal_ops.deploy()
             modal_island_ops = ModalIslandOps(modal_ops)
             if recorder is not None:  # the call id is in the island's record from its spawn on
@@ -1338,9 +1397,16 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         # A synced run still fetches/delivers its checkpoint first, then
         # fails closed on an incomplete island tape.
         return NO_SYNC_INCOMPLETE_EXIT if no_sync_incomplete else 0
+    except IslandRecordsFenced as error:
+        # another launcher took the island records over: it supervises (and tears down) the fleet
+        print(f"[launcher] ERROR: {error}; nothing of the run is torn down here "
+              f"(exit {ISLAND_RECORDS_LOCKED_EXIT})", file=sys.stderr)
+        return ISLAND_RECORDS_LOCKED_EXIT
     finally:
         if cost_guard is not None:
             cost_guard.stop()  # the teardown below releases everything; no forced stop mid-way
+        # a launcher that lost the island records' lock tears nothing down: the holder owns the fleet
+        hands_off = _lost_island_records(island_states)
         if verda is not None and verda.get("pth_written"):
             from .sky_patches import remove_local_pth
 
@@ -1356,7 +1422,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             # Containers commit their tape every 30 s and at exit; pulled
             # here (before the app stop) and again after it below.
             pull_modal_tapes(modal_ops, modal_cfgs, _modal_tape_run_dir(args))
-        if args.keep:
+        if hands_off:
+            print(f"[launcher] not tearing down {remaining} or the Modal app: another launcher holds this "
+                  "run's island records and supervises them", file=sys.stderr)
+        elif args.keep:
             print(f"[launcher] keeping clusters: {remaining}")
         else:
             unverified = []

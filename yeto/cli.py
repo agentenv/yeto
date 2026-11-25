@@ -2001,6 +2001,14 @@ def cmd_worker(name: str) -> int:
         _backstop_cleanup(name, args)
         return 1
     code = int(code or 0)
+    from .launcher import HANDS_OFF_EXITS
+
+    if code in HANDS_OFF_EXITS:
+        # nothing was launched: the run's resources belong to the launcher that holds its
+        # island records (or may); no backstop cleanup of them
+        runs.update_run(name, state=runs.FAILED, exit_code=code, finished_at=time.time(), refused_launch=True)
+        print(f"[yeto] launch of {name} refused (exit {code}); nothing of the run was torn down", file=sys.stderr)
+        return code
     _backstop_cleanup(name, args)
     runs.update_run(
         name,

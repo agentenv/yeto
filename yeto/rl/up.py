@@ -122,6 +122,8 @@ SILENCE_STALL_FACTOR = 4
 LAUNCH_DEFAULT_NAME = "yeto"
 SEAL_OWNER = "run-up-data-end"  # the incarnation the data-end seal claims an owned shard as
 FINISHED = re.compile(r"finished: (\S+).*?\(exit code (-?\d+)\)")
+# yeto.launcher HANDS_OFF_EXITS: the island records are another launcher's (12) or did not read (13)
+HANDS_OFF_CODES = ("12", "13")
 
 
 def _log_tail(path: str | os.PathLike, offset: int = 0, size: int = 200_000) -> str:
@@ -1565,7 +1567,7 @@ class Run:
 
     def trainer(self) -> None:
         self._spawn("trainer", self.yeto("launch", *self.trainer_argv()))
-        for key in ("trainer_exit_seen", "trainer_finished"):  # of an earlier launcher of this run
+        for key in ("trainer_exit_seen", "trainer_finished", "trainer_hands_off"):  # of an earlier launcher
             self.state.pop(key, None)
         if self.fleet_plan() is not None:  # a fleet-wide stop of the launch this one replaces no longer holds
             self.fleet_rt().on_trainer_start()
@@ -1973,6 +1975,13 @@ class Run:
                 self.state["trainer_finished"] = self.state.get("trainer_finished") or _now()
             if not done and not _worker_alive(self.trainer_launch_name()):  # a killed log streamer: the worker may still run
                 why, tripped = "trainer: launcher exited without a result", ("run.trainer_exit", None, None)
+            elif done and done[-1][1] in HANDS_OFF_CODES:
+                # the launcher was refused: another launcher holds (or may hold) this run's island
+                # records and supervises its trainer islands; trainer_down leaves them alone
+                self.state["trainer_hands_off"] = int(done[-1][1])
+                why = (f"trainer: launcher refused (exit code {done[-1][1]}): another launcher holds this "
+                       "run's island records, or they did not read; nothing of the trainer is torn down")
+                tripped = ("run.trainer_exit", float(done[-1][1]), 0.0)
             elif done and (done[-1][0] == "FAILED" or done[-1][1] != "0"):
                 why = f"trainer: launcher finished {done[-1][0]} (exit code {done[-1][1]})"
                 tripped = ("run.trainer_exit", float(done[-1][1]), 0.0)
@@ -2313,6 +2322,13 @@ class Run:
         tr = (self.state.get("procs") or {}).get("trainer")
         if tr and _alive(tr["pid"]) and _signal(tr["pid"], signal.SIGINT):
             time.sleep(10)
+        if self.state.get("trainer_hands_off"):
+            # a refused launcher (exit 12 / 13): the trainer islands are another launcher's
+            _log(f"trainer down: the launcher was refused (exit {self.state['trainer_hands_off']}); "
+                 f"`yeto down {self.trainer_launch_name()}` is NOT run (it would stop the islands the "
+                 "launcher holding the island records supervises)")
+            self.mark("trainer_down", why=why, hands_off=True)
+            return
         self._cmd(self.yeto("down", "--missing-ok", self.trainer_launch_name()), log="down.log", timeout=900)
         self.mark("trainer_down", why=why)
         stops = " / ".join(f"python -m yeto.launch.nc pool-stop --config {path}" for path in self.pool_configs)

@@ -15,8 +15,12 @@ source whether the incarnation the record names still runs:
 An adopted island keeps its machine, its job and its incarnation: nothing is ordered
 for it and the trainer is not restarted. An island whose recorded machine is gone (or
 whose record is terminal, or that has none) is launched as usual: one order, with the
-next incarnation number. Every probe failure counts as "not running" for that island
-only; it never raises.
+next incarnation number. A record in ``ordering`` or ``recovering`` is probed too: the
+machine it names may have started before the launcher died.
+
+A probe that cannot tell (the cloud listing or the job table does not answer) raises
+:class:`AdoptionUnknown`: an order then could start the island twice, so the launcher
+orders nothing and says to try again.
 
 Standard library only; the cloud calls are injected (:class:`SkyProbe`, :class:`ModalProbe`).
 """
@@ -31,7 +35,11 @@ from typing import Any
 from . import island_lifecycle as lc
 
 # records in these states may name a machine that still runs
-ADOPTABLE = frozenset({lc.STARTING, lc.RUNNING, lc.DRAINING})
+ADOPTABLE = frozenset({lc.ORDERING, lc.STARTING, lc.RUNNING, lc.RECOVERING, lc.DRAINING})
+
+
+class AdoptionUnknown(RuntimeError):
+    """Whether a recorded island machine still runs is unknown (its source did not answer)."""
 
 
 @dataclass(frozen=True)
@@ -69,9 +77,17 @@ class SkyProbe:
 
     @staticmethod
     def _sky_job_alive(cluster: str, job_id: Any) -> bool:
-        from .sky_ops import SkySDKOps
+        """The recorded job is queued, setting up or running (a job table that does not read
+        raises: unknown is not "gone")."""
+        import sky
 
-        return SkySDKOps().job_alive(cluster, int(job_id))
+        records = sky.get(sky.queue(cluster))
+        for record in records:
+            rid = record.get("job_id") if isinstance(record, dict) else getattr(record, "job_id", None)
+            status = record.get("status") if isinstance(record, dict) else getattr(record, "status", None)
+            if rid == int(job_id):
+                return status is not None and not status.is_terminal()
+        return False
 
     def clusters(self) -> dict[str, str]:
         """The run's clusters (name -> status), read once."""
@@ -145,8 +161,10 @@ def plan(records: Mapping[int, Mapping[str, Any]], islands: Mapping[str, lc.Isla
         else:
             try:
                 running, why = probe(handle)
-            except Exception as error:  # noqa: BLE001 - not adopted, launched as usual
-                running, why = False, f"probe failed: {type(error).__name__}: {error}"
+            except Exception as error:  # noqa: BLE001 - unknown is not "gone": nothing is ordered
+                raise AdoptionUnknown(f"{name}: island {ref.island} ({ref.source}): whether its "
+                                      f"incarnation {incarnation} still runs is unknown "
+                                      f"({type(error).__name__}: {error})"[:400]) from error
             if running:
                 job_id = handle.get("call_id") if ref.source == "modal" else handle.get("job_id")
                 out[name] = Adoption(name, ref.island, True, incarnation, relaunches, job_id=job_id,

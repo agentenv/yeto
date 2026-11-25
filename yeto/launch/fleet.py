@@ -425,6 +425,7 @@ class FleetController:
         while True:
             if self._abort_error is not None:
                 raise self._abort_error
+            self._raise_if_fenced()
             self._fleet("cost_tick")
             self._poll_rollout()
             if self.syncer is not None:
@@ -464,6 +465,19 @@ class FleetController:
         return exit_codes
 
     # -- the island records (yeto.launch.island_lifecycle) -------------------------------
+    def _records_fenced(self):
+        """The island records' lock error once another launcher took them over, else None."""
+        return None if self.recorder is None else getattr(self.recorder.store, "fenced", None)
+
+    def _raise_if_fenced(self) -> None:
+        """A controller that lost the island records' lock stops supervising at once: the
+        launcher that holds it orders, relaunches and tears down (this one touches nothing)."""
+        fenced = self._records_fenced()
+        if fenced is not None:
+            from .island_lifecycle import IslandRecordsFenced
+
+            raise IslandRecordsFenced(f"the fleet controller lost the island records' lock ({fenced})")
+
     @staticmethod
     def _unified_state(rec) -> str:
         """The lifecycle state of a controller record (an island dropped for a
@@ -1000,13 +1014,14 @@ class FleetController:
                 if not is_syncer:  # the syncer is never abandoned; it just is not relaunched
                     self._abandon(rec, elapsed, reason="STOP flag")
                 return
-            fenced = None if self.recorder is None else getattr(self.recorder.store, "fenced", None)
-            if fenced is not None:  # another launcher took the island records over: it orders, not this one
-                if not rec.get("fenced_logged"):
-                    rec["fenced_logged"] = True
-                    print(f"[launcher] {rec['name']}: NOT relaunching: this launcher lost the island records' "
-                          f"lock ({fenced}); the launcher that holds it supervises this island", file=sys.stderr)
-                return
+            if self.recorder is not None:  # an island's or the syncer's relaunch is an order
+                from .island_lifecycle import IslandRecordsUnconfirmed
+
+                try:  # the lock still ours, checked now; lost raises IslandRecordsFenced (supervision ends)
+                    self.recorder.store.guard_order(rec["name"])
+                except IslandRecordsUnconfirmed as error:
+                    print(f"[launcher] {rec['name']}: relaunch deferred: {error}", file=sys.stderr)
+                    return
             if not is_syncer and self.replacement_planner is not None and not rec.get("replace_planned"):
                 rec["replace_planned"] = True
                 planned = self._plan_replacement(rec)
@@ -1145,6 +1160,11 @@ class FleetController:
         )
 
     def _down(self, name: str, force: bool = False) -> None:
+        fenced = self._records_fenced()
+        if fenced is not None:  # the launcher that holds the island records owns this machine now
+            print(f"[launcher] NOT tearing down {name}: this launcher lost the island records' lock "
+                  f"({fenced})", file=sys.stderr)
+            return
         if name in self.downed_clusters and not force:
             return
         self.downed_clusters.add(name)

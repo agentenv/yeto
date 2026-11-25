@@ -251,6 +251,21 @@ class Fence(Protocol):
     def guard(self) -> None: ...
 
 
+class IslandRecordsFenced(RuntimeError):
+    """This controller lost the island records' single-writer lock (another launcher took
+    them over): it orders, relaunches and tears down nothing of the fleet any more."""
+
+
+class IslandRecordsUnconfirmed(RuntimeError):
+    """The store did not confirm the island records' lock before an order (and the lease is
+    nearly over): nothing is ordered now."""
+
+
+class IslandRecordsUnreadable(RuntimeError):
+    """An island record (or the syncer's) could not be read: whether its machine still runs
+    is unknown, so nothing is ordered for it (an order could start it twice)."""
+
+
 class IslandStateStore:
     """Each island's state record in the run store (module doc).
 
@@ -291,6 +306,7 @@ class IslandStateStore:
         self._idle.set()
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._ended = False  # closed: nothing more is written or guarded (the lock may be released)
 
     def _warn(self, what: str, error: BaseException) -> None:
         kind = f"{what}:{type(error).__name__}"
@@ -307,10 +323,13 @@ class IslandStateStore:
                 self._records.setdefault(int(island), dict(record))  # what a first write merges into
         return record
 
-    def _read_unlocked(self, island: int) -> dict[str, Any] | None:
+    def _read_unlocked(self, island: int, *, strict: bool = False) -> dict[str, Any] | None:
         try:
             raw = self.objects.read(state_key(island))
         except Exception as error:  # noqa: BLE001
+            if strict:
+                raise IslandRecordsUnreadable(f"island {island}: its record did not read "
+                                              f"({type(error).__name__}: {error})"[:400]) from error
             self._warn("read", error)
             return None
         if raw is None:
@@ -318,18 +337,26 @@ class IslandStateStore:
         try:
             record = json.loads(raw)
         except ValueError as error:
+            if strict:
+                raise IslandRecordsUnreadable(f"island {island}: its record is not JSON ({error})"[:400]) from error
             self._warn("parse", error)
             return None
+        if strict and not isinstance(record, dict):
+            raise IslandRecordsUnreadable(f"island {island}: its record is not an object")
         return record if isinstance(record, dict) else None
 
-    def read_all(self, islands: Iterable[int] | None = None) -> dict[int, dict[str, Any]]:
-        """Every island's record: those of ``islands``, else every one the store lists."""
+    def read_all(self, islands: Iterable[int] | None = None, *, strict: bool = False) -> dict[int, dict[str, Any]]:
+        """Every island's record: those of ``islands``, else every one the store lists.
+        ``strict``: a record that does not read raises :class:`IslandRecordsUnreadable`
+        (a missing one is no record)."""
         if islands is None:
             islands = self.listed()
         out = {}
         for k in islands:
-            record = self.read(int(k))
+            record = self._read_unlocked(int(k), strict=strict)
             if record is not None:
+                with self._lock:
+                    self._records.setdefault(int(k), dict(record))  # what a first write merges into
                 out[int(k)] = record
         return out
 
@@ -396,6 +423,8 @@ class IslandStateStore:
         self._wake.set()
 
     def _fence_holds(self) -> bool:
+        if self._ended:
+            return False
         if self.fence is None:
             return True
         if self.fenced is not None:
@@ -421,13 +450,45 @@ class IslandStateStore:
         """Write one body; False when it should be tried again (the fence not confirmed, the
         store did not take it); True once written, or for good not (the fence is lost)."""
         if not self._fence_holds():
-            return self.fenced is not None
+            return self.fenced is not None or self._ended
         try:
             self.objects.write(key, data)
         except Exception as error:  # noqa: BLE001
             self._warn("write", error)
             return False
         return True
+
+    def keep_lease(self) -> None:
+        """Start the background thread now (not at the first write): it guards the fence every
+        ``stop_poll_s``, which renews the lock's lease while nothing is written yet (a syncer
+        launch, a Modal deploy)."""
+        if self.background:
+            with self._lock:
+                self._start()
+
+    def guard_order(self, what: str) -> None:
+        """Right before an order of the fleet (an island, its relaunch, the syncer): the fence
+        still holds, checked now. :class:`IslandRecordsFenced` once another launcher holds the
+        records (sticky), :class:`IslandRecordsUnconfirmed` when the store does not confirm it
+        and the lease is nearly over. Nothing to check without a fence."""
+        if self.fence is None:
+            return
+        if self.fenced is None and not self._ended:
+            try:
+                self.fence.guard()
+                return
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as error:  # noqa: BLE001 - the lock's errors are BaseExceptions
+                if not hasattr(error, "by"):
+                    raise IslandRecordsUnconfirmed(f"{what}: the island records' lock is not confirmed "
+                                                   f"({error}); nothing ordered now"[:400]) from None
+                self.fenced = error
+                self.log(f"[launcher] island state store: fenced ({error}); this controller writes no "
+                         "island record any more"[:400])
+        raise IslandRecordsFenced(f"{what}: this launcher no longer holds the island records "
+                                  f"({self.fenced or 'store closed'}); the launcher that holds them "
+                                  "orders and tears down"[:400])
 
     def _start(self) -> None:  # under self._lock
         if self._thread is None and not self._closed:
@@ -488,6 +549,7 @@ class IslandStateStore:
             thread.join(timeout)
         with self._lock:
             left = {key: data for key, data in self._pending.items()}
+            self._ended = True  # a write still in flight lands or not; nothing after it
         if not left and self._idle.is_set():
             return True
         what = []
@@ -510,11 +572,16 @@ class IslandStateStore:
             body["fence_token"] = int(self.fence.token)
         self._put(SYNCER_KEY, json.dumps(body, sort_keys=True, default=str).encode())
 
-    def read_syncer(self) -> dict[str, Any] | None:
+    def read_syncer(self, *, strict: bool = False) -> dict[str, Any] | None:
+        """The syncer's record; ``strict``: one that does not read raises
+        :class:`IslandRecordsUnreadable` (a missing one is None)."""
         try:
             raw = self.objects.read(SYNCER_KEY)
             record = None if raw is None else json.loads(raw)
         except Exception as error:  # noqa: BLE001
+            if strict:
+                raise IslandRecordsUnreadable(f"the syncer's record did not read "
+                                              f"({type(error).__name__}: {error})"[:400]) from error
             self._warn("syncer read", error)
             return None
         return record if isinstance(record, dict) else None

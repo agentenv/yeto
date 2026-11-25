@@ -75,17 +75,39 @@ def test_a_dead_job_or_call_is_not_adopted():
     assert not plan["r-l1-modal"].adopt and plan["r-l1-modal"].incarnation == 1
 
 
-def test_terminal_records_and_probe_errors_are_not_adopted():
+def test_terminal_records_are_not_adopted():
     records = _records()
     records[1]["state"] = "done"
+    plan = island_adopt.plan(records, REFS, probes={"sky": lambda h: (True, "up"), "modal": lambda h: (True, "")})
+    assert not plan["r-l1-modal"].adopt and "done" in plan["r-l1-modal"].why
+    assert plan["r-l0-aws"].adopt
+    assert island_adopt.plan({}, REFS, probes={})["r-l0-aws"].incarnation == 0
 
+
+def test_a_probe_that_cannot_tell_orders_nothing():
+    """Unknown is not gone: an order then could start the island twice."""
     def boom(handle):
         raise RuntimeError("sky api down")
 
-    plan = island_adopt.plan(records, REFS, probes={"sky": boom, "modal": lambda h: (True, "")})
-    assert not plan["r-l1-modal"].adopt and "done" in plan["r-l1-modal"].why
-    assert not plan["r-l0-aws"].adopt and "probe failed" in plan["r-l0-aws"].why
-    assert island_adopt.plan({}, REFS, probes={})["r-l0-aws"].incarnation == 0
+    with pytest.raises(island_adopt.AdoptionUnknown, match="r-l0-aws.*unknown.*sky api down"):
+        island_adopt.plan(_records(), REFS, probes={"sky": boom, "modal": lambda h: (True, "")})
+    probe = island_adopt.SkyProbe("r-", status=lambda: (_ for _ in ()).throw(RuntimeError("no listing")),
+                                  job_alive=lambda c, j: True)
+    with pytest.raises(island_adopt.AdoptionUnknown, match="no listing"):
+        island_adopt.plan(_records(), REFS, probes={"sky": probe, "modal": lambda h: (True, "")})
+
+
+@pytest.mark.parametrize("state", ["ordering", "recovering"])
+def test_an_ordering_or_recovering_record_is_probed_and_adopted(state):
+    """A launcher that died mid-order or mid-relaunch: the machine its record names may run."""
+    records = _records()
+    records[1]["state"] = state
+    plan = island_adopt.plan(records, REFS, probes={"sky": lambda h: (True, ""), "modal": lambda h: (True, "up")})
+    assert plan["r-l1-modal"].adopt and plan["r-l1-modal"].incarnation == 0
+    records[1]["handle"] = {"cluster": "r-l1-modal"}  # ordered, its call not recorded yet
+    plan = island_adopt.plan(records, REFS, probes={"sky": lambda h: (True, ""),
+                                                    "modal": island_adopt.ModalProbe(lambda c: "RUNNING")})
+    assert not plan["r-l1-modal"].adopt and plan["r-l1-modal"].incarnation == 1
 
 
 def test_a_record_of_another_island_shape_is_not_adopted():
@@ -111,7 +133,7 @@ def _store(monkeypatch, tmp_path):
                         lambda args: lc.IslandStateStore(DirectoryObjectStore(tmp_path / "store")))
 
 
-def _run(monkeypatch, tmp_path, *, seeded, alive_calls):
+def _run(monkeypatch, tmp_path, *, seeded, alive_calls, before=None):
     record, clock = [], Clock()
     _setup(monkeypatch, tmp_path, failing=set(), succeeding={0, 1}, clock=clock, record=record)
     fake = modal_runner.ModalOps
@@ -139,6 +161,8 @@ def _run(monkeypatch, tmp_path, *, seeded, alive_calls):
     for k, (call, island) in enumerate(seeded.items()):
         states.write(island, "running", name=names[island], source="modal", incarnation=4, relaunches=1,
                      handle={"cluster": names[island], "call_id": call})
+    if before is not None:
+        before(args, names)
     code = launcher.run(args)
     return code, record, states, names
 
@@ -396,8 +420,36 @@ def test_a_fenced_controller_orders_nothing():
     ctl = FleetController(learners={"r-l0-modal": ("t", 1), "r-l1-modal": ("t", 2)}, syncer=(SYNCER, "t", 1),
                           sky_ops=ops, poll_interval=30, recover_timeout=600, thread_cls=ImmediateThread,
                           elastic=True, recorder=lc.FleetRecorder(store, refs))
-    ctl.run()
+    with pytest.raises(lc.IslandRecordsFenced):  # supervision ends at once
+        ctl.run()
     assert ops.relaunch_calls == []  # the launcher that took the records over relaunches, not this one
+    assert ops.down_calls == []  # ... and tears down, not this one
+
+
+def test_a_controller_fenced_while_supervising_tears_nothing_down():
+    """The fence is lost mid-run (a recovering island past its timeout would be abandoned and
+    torn down): this controller tears nothing down and stops."""
+    from test_controller import FAILED, RUNNING, SYNCER, FakeOps, ImmediateThread
+
+    from yeto.launch.fleet import FleetController
+
+    ops = FakeOps()
+    ops.status_seq["r-l0-modal"] = [FAILED]
+    ops.status_seq["r-l1-modal"] = [RUNNING] * 50
+    ops.status_seq[SYNCER] = [RUNNING] * 50
+    store = lc.IslandStateStore(DirectoryObjectStore("/nonexistent-t1"), log=lambda m: None)
+    refs = {"r-l0-modal": lc.IslandRef(0, "modal"), "r-l1-modal": lc.IslandRef(1, "modal")}
+    ctl = FleetController(learners={"r-l0-modal": ("t", 1), "r-l1-modal": ("t", 2)}, syncer=(SYNCER, "t", 1),
+                          sky_ops=ops, poll_interval=30, recover_timeout=0, thread_cls=ImmediateThread,
+                          elastic=True, recorder=lc.FleetRecorder(store, refs))
+    rec = ctl.learners["r-l0-modal"]
+    rec.update(state="recovering", failed_at=ops.now() - 10, attempt=None)
+    store.fenced = RuntimeError("lock token 1 is fenced by token 2")
+    ctl._drive_recovery(rec, is_syncer=False)  # past its timeout: abandoned ...
+    from yeto.launch.fleet import ABANDONED
+
+    assert rec["state"] == ABANDONED
+    assert ops.down_calls == [] and ops.relaunch_calls == []  # ... but not torn down by this controller
 
 
 
@@ -418,3 +470,106 @@ def test_an_adopted_islands_tape_continues_without_duplicates(tmp_path):
     again.feed(format_record({"event": "rl_round_trained", "island_id": 1, "round": 3, "time_unix": 4.0}) + "\n")
     rows = tape.read_text().splitlines()
     assert len(rows) == 4 and again.count == 1
+
+
+# -- REV #750: the lease from the claim on, unknown is not gone, hands off once fenced --------
+
+def test_a_record_that_does_not_read_orders_nothing(monkeypatch, tmp_path):
+    """A store read error is not "no record": the launcher orders nothing, keeps every island
+    STOP and exits 13 (an order then could start a running island twice)."""
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), succeeding={0, 1}, clock=clock, record=record)
+
+    class Flaky(DirectoryObjectStore):
+        def read(self, key):
+            if key.endswith("state.json"):
+                raise OSError("store timeout")
+            return super().read(key)
+
+    objects = Flaky(tmp_path / "store")
+    objects.write(lc.stop_key(1), b'{"reason": "by hand"}')
+    monkeypatch.setattr(launcher, "_island_state_store", lambda args: lc.IslandStateStore(objects))
+    code = launcher.run(_fleet_args(tmp_path))
+    assert code == launcher.ISLAND_RECORDS_UNKNOWN_EXIT
+    assert [r for r in record if r[0] in ("spawn", "stop_app", "down", "terminate")] == []
+    assert DirectoryObjectStore(tmp_path / "store").read(lc.stop_key(1)) is not None  # not cleared
+    from yeto.launch.pool.store_lock import StoreLock
+
+    assert StoreLock.acquire(objects, launcher.ISLAND_RECORDS_LOCK, ttl_s=10) is not None  # released
+
+
+def test_the_lease_is_renewed_from_the_claim_on_while_nothing_is_written(tmp_path):
+    """A syncer launch or a Modal deploy writes no record for minutes: the lease must not run
+    out meanwhile (a second launcher would then order the same islands)."""
+    import threading
+    import time as _time
+
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    t = [1000.0]
+    states = lc.IslandStateStore(objects, background=True, stop_poll_s=0.02, log=lambda m: None)
+    lock, why = launcher._claim_island_records(states, wait_s=0, clock=lambda: t[0])
+    assert lock is not None
+    states.keep_lease()
+    for _ in range(4):  # 4 x 70 s idle (renewed once half the lease is gone): over twice the 120 s lease
+        t[0] += 70.0
+        deadline = _time.monotonic() + 5
+        while lock.renewed_at != t[0] and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        assert lock.renewed_at == t[0]
+    rival = lc.IslandStateStore(objects, log=lambda m: None)
+    other, refusal = launcher._claim_island_records(rival, wait_s=0, clock=lambda: t[0])
+    assert other is None and "another launcher holds" in refusal
+    states.close(2)
+    lock.release()
+    t[0] += 70.0
+    assert states._fence_holds() is False and lock.renewed_at == t[0] - 70.0  # closed: no renewal after the release
+    with pytest.raises(lc.IslandRecordsFenced):
+        states.guard_order("late")
+    assert threading.active_count() >= 1
+    assert StoreLock.acquire(objects, launcher.ISLAND_RECORDS_LOCK, ttl_s=10, clock=lambda: t[0]) is not None
+
+
+def test_a_launcher_that_lost_the_lock_orders_nothing_and_tears_nothing_down(monkeypatch, tmp_path):
+    """The lock is lost between the claim and the orders: no order, no cancel, no app stop,
+    exit 12 (the launcher holding the records supervises the fleet)."""
+    from yeto.launch.pool.store_lock import LockLost
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), succeeding={0, 1}, clock=clock, record=record)
+    _store(monkeypatch, tmp_path)
+    real = launcher._claim_island_records
+
+    def claim_then_lose(states):
+        lock, why = real(states)
+        lock.lost = LockLost(launcher.ISLAND_RECORDS_LOCK, lock.token, lock.token + 1)
+        return lock, why
+
+    monkeypatch.setattr(launcher, "_claim_island_records", claim_then_lose)
+    code = launcher.run(_fleet_args(tmp_path))
+    assert code == launcher.ISLAND_RECORDS_LOCKED_EXIT
+    assert [r for r in record if r[0] in ("spawn", "cancel", "stop_app", "down", "terminate")] == []
+
+
+def test_a_restart_on_the_same_machine_keeps_the_adopted_islands_tapes(monkeypatch, tmp_path):
+    """Only the tapes of islands launched again move to previous/: an adopted island's tape is
+    continued where it is."""
+    from yeto.launch.manifest import _no_sync_events_dir
+
+    seen = {}
+
+    def tapes(args, names):
+        events = seen["events"] = _no_sync_events_dir(args)
+        events.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (events / f"{name}.jsonl").write_text('{"event": "rl_round_trained", "round": 0}\n')
+
+    seeded = {"fc-old-0": 0, "fc-old-1": 1}
+    code, record, states, names = _run(monkeypatch, tmp_path, seeded=seeded, alive_calls={"fc-old-0"}, before=tapes)
+    events = seen["events"]
+    kept = events / f"{names[0]}.jsonl"
+    assert kept.exists() and '"round": 0' in kept.read_text().splitlines()[0]  # adopted: in place
+    moved = list((events / "previous").glob(f"*/{names[1]}.jsonl"))
+    assert len(moved) == 1  # launched again: its earlier tape moved aside
+    assert not list((events / "previous").glob(f"*/{names[0]}.jsonl"))
