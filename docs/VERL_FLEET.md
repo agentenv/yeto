@@ -28,7 +28,8 @@ hash binds the matrix merge, so plan with the one the run actually uses. A fleet
 (`--rl-sync-preset decoupled` or `full-parameter`) merges with `rda` in the default async
 mode, and with `avg` under `--rl-sync-mode strict` or `--rl-sync-full-parameter-rounds sweep`;
 `--rl-sync-matrix-merge` overrides both. The dry run prints the value it uses in each
-island's command (`--rl-sync-matrix-merge rda`, in the launch log of `run up --dry-run`).
+island's command (`--rl-sync-matrix-merge rda`, in the launch log of `run up --dry-run`);
+an island command without that flag merges with `avg`.
 
 ```bash
 python -m yeto.rl.adapters.verl.full_parameter_plan --model Qwen/Qwen3-0.6B \
