@@ -793,6 +793,16 @@ class Run:
     def nc(self, *args: str) -> list[str]:
         return [self.py, "-m", "yeto.launch.nc", *args]
 
+    def pool_stop(self, path: str) -> list[str]:
+        """``nc pool-stop`` of the pool config ``path``; on the store control plane with the
+        run store and the pool's name, so a pool whose controller is gone is released from
+        the store's state (and the store says so), not from this host's mirror."""
+        argv = self.nc("pool-stop", "--config", path)
+        if rollout_section(self.cfg).get("control_plane") == "store":
+            name = next((ref.name for ref in self.pools if ref.config == path), None)
+            argv += ["--control-store", str(self.cfg["store"])] + (["--pool-name", name] if name else [])
+        return argv
+
     @property
     def pool_config(self) -> str:
         """The first pool's config file (the only one of a run config with ``pool``)."""
@@ -3189,7 +3199,7 @@ class Run:
                                        value=spend if spend > usd_cap else elapsed / 3600,
                                        limit=usd_cap if spend > usd_cap else wall_cap / 3600,
                                        detail=f"{cap}: forced pool-stop of {self.pools_phrase()}")
-                rc = max(self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800)
+                rc = max(self._cmd(self.pool_stop(path), log="down.log", timeout=1800)
                          for path in self.pool_configs)
                 if "nc_forced_stop" not in forced:
                     self.mark("nc_forced_stop", why=cap, rc=rc)
@@ -3267,7 +3277,7 @@ class Run:
         if rollout_section(self.cfg).get("control_plane") == "store":
             failed += self._store_pools_for_down()
         for path in self.pool_configs:
-            if self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) != 0:
+            if self._cmd(self.pool_stop(path), log="down.log", timeout=1800) != 0:
                 failed.append(f"pool-stop {path}")
         if self.envs:
             if self._cmd(self.yeto("sandbox", "teardown", "--envs", self.envs, "--store", self.cfg["store"]),

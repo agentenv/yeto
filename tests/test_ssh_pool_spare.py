@@ -566,3 +566,56 @@ def test_the_merge_takes_the_later_hold_and_keeps_this_holders_own_fields(world,
     assert rows["r1-n0-1"]["state"] == "active"  # record 2's own state
     assert "r1-n2-1" not in rows  # record 1 is not the predecessor's newest: pruned, never merged
     control.close()
+
+
+def test_pool_stop_after_the_controller_died_releases_from_the_store(world, tmp_path, monkeypatch):
+    """rollout.control_plane store: the controller died with two samplers running (its lease
+    still runs). `pool-stop` on another host (no pool process, no local state) waits for the
+    lease, claims the pool's store lock, releases every member from the store's state and
+    saves it there: the store's state and the provider's record say released."""
+    from yeto.launch.nc import pool_run  # noqa: PLC0415
+
+    w = world
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "pool-stop-host"))
+    real_open = store_state.open_pool_control
+    monkeypatch.setattr(store_state, "open_pool_control", lambda *a, **k: real_open(*a, clock=w.clock, **k))
+    objects = _store()
+    control = real_open(objects, "ssh", "smp", clock=w.clock)
+    w.ops.attach_control(control)
+    pool = _pool(w, control=control)
+    _run(pool, w, 3)
+    live = [m for m in pool.live() if m.state == READY]
+    assert len(live) == 2
+    doc = store_state.read_state(objects, "ssh")
+    assert sorted(m["ticket"] for m in doc["members"] if m["state"] != GONE) == sorted(m.ticket for m in live)
+    # the controller dies here: no drain, no release of its lock
+
+    b_ops = _other_host(w, tmp_path, "host-b")
+    w.nodes.calls.clear()
+    rc = pool_run.stop_pool(w.cfg, str(tmp_path / "pool.json"), ops=b_ops, objects=objects, pool_name="ssh",
+                            sleep=lambda s: setattr(w.clock, "t", w.clock.t + s), poll_s=30.0)
+    assert rc == 0
+    doc = store_state.read_state(objects, "ssh")
+    assert all(m["state"] == GONE for m in doc["members"]) and doc["control"]["token"] > control.lock.token
+    tickets = _record(objects)[1]["tickets"]
+    assert all(tickets[m.ticket]["state"] == "released" for m in live)
+    for m in live:  # each sampler was stopped on its node
+        host = {"n0": "ops@10.0.0.10", "n1": "ops@10.0.0.11", "n2": "ops@10.0.0.12"}[
+            b_ops.provider.node_of_ticket(m.ticket).name]
+        assert any(f"yeto-sampler-{m.shard}" in c for h, c in w.nodes.calls if h == host)
+    assert store_state.StoreLock.holder_of(objects, store_state.lock_prefix("ssh"), now=w.clock()) is None
+
+
+def test_run_down_passes_the_store_to_pool_stop_on_the_store_control_plane(tmp_path, monkeypatch):
+    from tests.test_rollout_entry import _two_pools  # noqa: PLC0415
+    from yeto.rl import up  # noqa: PLC0415
+
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
+    run_cfg, _, _ = _two_pools(tmp_path)
+    local = up.Run(run_cfg)
+    assert local.pool_stop(local.pool_configs[0])[-2:] == ["--config", local.pool_configs[0]]  # as before
+    store = up.Run(dict(run_cfg, controller="in_process", rollout={"control_plane": "store"}))
+    argv = store.pool_stop(store.pool_configs[1])
+    assert argv[argv.index("--control-store") + 1] == str(run_cfg["store"])
+    assert argv[argv.index("--pool-name") + 1] == store.pools[1].name

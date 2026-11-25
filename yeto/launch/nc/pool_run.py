@@ -1355,8 +1355,12 @@ def down_member(ticket: str, *, mode: str | None = "fence") -> int | None:
 # -- stop ----------------------------------------------------------------------
 
 def stop_pool(cfg: dict[str, Any], config_path: str, *, wait_s: float = 900.0, poll_s: float = 5.0,
-              sleep=None, ops=None) -> int:
-    """Release every node the pool created (``pool-stop --config F``)."""
+              sleep=None, ops=None, control_store: str | None = None, pool_name: str | None = None,
+              objects: Any = None) -> int:
+    """Release every node the pool created (``pool-stop --config F``). A pool on the store
+    control plane (``control_store``: the run store's URI, ``pool_name``: the pool's name
+    there; ``objects``: its object API, for tests) is released from the store's state,
+    under the pool's store lock (:func:`_release_from_store`), not from the local mirror."""
     check_state_file(cfg)
     sleep = sleep or time.sleep
     cli.pool_config(cfg, allowed=None)  # releasing needs no ordering rights
@@ -1393,9 +1397,70 @@ def stop_pool(cfg: dict[str, Any], config_path: str, *, wait_s: float = 900.0, p
         _say(f"pool-stop: a pool loop holds {lock_path(cfg)} again; rerun pool-stop to ask it to drain")
         return 1
     try:
+        if control_store is not None or objects is not None:
+            if objects is None:
+                from yeto.cloud.s3_store import head_objects  # noqa: PLC0415
+
+                objects = head_objects(control_store, environ=dict(os.environ))
+            return _release_from_store(cfg, config_path, proc, state, sleep=sleep, ops=ops, objects=objects,
+                                       name=pool_name or str(cfg["shard_base"]), wait_s=wait_s, poll_s=poll_s)
         return _release_from_state(cfg, config_path, proc, state, sleep=sleep, ops=ops)
     finally:
         lock.close()
+
+
+def _release_from_store(cfg, config_path, proc, state, *, sleep, ops, objects, name, wait_s, poll_s) -> int:
+    """The store control plane: claim the pool's store lock (a controller's lease still
+    running, e.g. one that died moments ago: waited for up to ``wait_s``), load the
+    store's state (the local file imported once when the store has none), hand the ops
+    the control (an ssh pool's provider record), drain every member and save the result
+    to the store (and the local mirror). The store then says what was released, for the
+    next run up and for status readers on any host."""
+    from ..pool import store_state  # noqa: PLC0415
+
+    deadline = time.monotonic() + wait_s
+    said = False
+    while True:
+        try:
+            control = store_state.open_pool_control(objects, name, str(cfg["shard_base"]),
+                                                    holder=f"pool-stop:{socket.gethostname()}:{os.getpid()}")
+            break
+        except store_state.PoolLocked as error:
+            if time.monotonic() >= deadline:
+                _say(f"pool-stop: refused: {error}; nothing released here (stop the controller that holds "
+                     "it, or rerun pool-stop once its lease ran out)")
+                doc = store_state.read_state(objects, name) or {}
+                _print_banner(billing_banner(config_path, billed_members(doc), why="another controller holds the pool",
+                                             national=is_national_compute(cfg), kind=provider_kind(cfg)))
+                return 1
+            if not said:
+                _say(f"pool-stop: {error}; waiting up to {wait_s:.0f} s for its lease to run out")
+                said = True
+            sleep(poll_s)
+    try:
+        pool_ops = ops if ops is not None else cli.pool_ops(cfg)
+        attach = getattr(pool_ops, "attach_control", None)
+        if callable(attach):  # the provider's own record (an ssh pool's holds and owed stops)
+            attach(control)
+        doc = control.state.load(legacy=state)
+        events = island_status.EventLog(path=cli.pool_events_path(cfg), run=cli.run_id(cfg), log=cli._log)
+        pool = IslandPool.from_doc(doc, cli.pool_config(cfg, allowed=None), pool_ops, control=control,
+                                   where=control.state.key, log=cli._log, events=events)
+        pool.state_path = state  # the local mirror
+        _say(f"pool-stop: no pool process alive; releasing from the store's state ({control.state.key})")
+        left = _drain_all(pool, "pool-stop", sleep=sleep)
+        pool._save_now()  # noqa: SLF001 - the store's state (fenced) and the local mirror
+    finally:
+        control.close()
+    _remove(pid_path(cfg))
+    _remove(stop_path(cfg))
+    if left:
+        _print_banner(billing_banner(config_path, [m.__dict__ for m in left], why="a release failed",
+                                     national=is_national_compute(cfg), kind=provider_kind(cfg)))
+        return 1
+    _remove(scale_path(cfg))
+    _say("pool-stop: every node of the pool is released")
+    return 0
 
 
 def _release_from_state(cfg, config_path, proc, state, *, sleep, ops) -> int:
