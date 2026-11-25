@@ -144,6 +144,71 @@ def test_streaming_round_drops_a_settled_group_once_fenced(tmp_path):
     assert len(entries) == 1
 
 
+FIRST_HARBOR_IMPORT = """
+import sys
+from pathlib import Path
+
+from tests.test_agentic_round_streaming import Harness, Prompts, _round
+
+assert not [m for m in sys.modules if m.startswith("yeto.rl.harness.harbor")], "harbor imported already"
+rnd, engine, events = _round(Path(sys.argv[1]), Harness({"a": 0.0}), Prompts({0: ["a"]}))
+try:
+    rnd(0)
+    rnd.flush()
+finally:
+    rnd.close()
+print("round done")
+"""
+
+
+def test_a_round_whose_harness_is_not_harbor_imports_harbor_once_not_on_two_threads(tmp_path):
+    """The round imports harbor lazily on the caller's thread and on the loop's. In a process
+    that had not imported it (a stub harness, this file run alone), the two first imports at
+    once failed: ImportError from a partially initialized ``harbor.trial``, or _DeadlockError."""
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    proc = subprocess.run([sys.executable, "-c", FIRST_HARBOR_IMPORT, str(tmp_path)], cwd=root,
+                          env={**os.environ, "PYTHONPATH": str(root)}, capture_output=True, text=True,
+                          timeout=120)
+    assert proc.returncode == 0 and "round done" in proc.stdout, proc.stderr[-3000:]
+    assert "partially initialized" not in proc.stderr and "DeadlockError" not in proc.stderr, proc.stderr[-3000:]
+
+
+HARBOR_UNIMPORTABLE = """
+import sys
+from pathlib import Path
+
+
+class Refuse:
+    def find_spec(self, name, path=None, target=None):
+        if name.startswith("yeto.rl.harness.harbor"):
+            raise ImportError(f"{name} refused by the test")
+        return None
+
+
+sys.meta_path.insert(0, Refuse())
+from tests.test_agentic_round_streaming import Harness, Prompts, _round
+
+rnd, engine, events = _round(Path(sys.argv[1]), Harness({"a": 0.0}), Prompts({0: ["a"]}))
+print("built", flush=True)  # (its close imports harbor lazily too, as before: not called here)
+"""
+
+
+def test_a_round_is_built_when_harbor_cannot_be_imported(tmp_path):
+    """The early harbor import is a convenience: a round of another harness is still built
+    where harbor does not import (its lazy imports then fail where they always did)."""
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    proc = subprocess.run([sys.executable, "-c", HARBOR_UNIMPORTABLE, str(tmp_path)], cwd=root,
+                          env={**os.environ, "PYTHONPATH": str(root)}, capture_output=True, text=True,
+                          timeout=120)
+    assert proc.returncode == 0 and "built" in proc.stdout, proc.stderr[-3000:]
+
+
 # --------------------------------------------------------------------------- c1: buffer side
 
 def test_gate_refuses_late_groups_of_a_superseded_incarnation(tmp_path):
