@@ -42,6 +42,12 @@ first at every step, before anything that reads the run store, and forwarded:
 When in doubt the islands stop rather than keep spending. While an island is moving
 or being removed and its launch still runs, its island STOP is written again whenever
 it is missing (a launch that was just starting clears its STOP once when it comes up).
+A launch that reads no STOP yet (still ordering its machines, e.g. a sky launch waiting
+for SSH) is torn down :data:`STOP_UNREAD_S` after its STOP, any other one that still runs
+:data:`STOP_IGNORED_S` after it (``ops.tear_down``: ``yeto down``), so a move or a removal
+never waits for a provisioning timeout. A launch being relaunched on its old machines
+(after an infrastructure failure) orders them again: it is torn down the same way, which
+is what a move or a removal wants.
 
 Only one worker drives the islands: before each step it checks that its controller
 still holds the fleet (``fleet/applied.json`` still names its writer; the
@@ -99,6 +105,11 @@ TERMINAL = frozenset({DONE, FAILED, ABANDONED, REMOVED})
 DEFAULT_RELAUNCH_BUDGET = 3
 HANDOFF_LIMIT = 3  # launches in a row that hand off (exit 12/13) before the island is given up
 START_GRACE_S = 600.0  # a launch just started may take this long to register its run
+# A launch that still orders its machines this long after its island STOP was written (it
+# reads no STOP before they are up: a sky launch waiting for SSH) is torn down
+STOP_UNREAD_S = 90.0
+# Any launch still running this long after its island STOP was written is torn down
+STOP_IGNORED_S = 1800.0
 # yeto.launcher HANDS_OFF_EXITS: another live launcher holds the island's records lock (12),
 # or whether its machine runs did not read (13); the launch ordered nothing and tore nothing down
 HANDS_OFF_EXITS = frozenset({12, 13})
@@ -168,6 +179,7 @@ class LaunchOps(Protocol):
     def start(self, prefix: str, argv: list[str]) -> int | None: ...
     def ended(self, prefix: str) -> dict[str, Any] | None: ...
     def request_stop(self, prefix: str, why: str) -> None: ...
+    def tear_down(self, prefix: str, why: str) -> None: ...
 
 
 @dataclass
@@ -394,6 +406,7 @@ class TrainerWorker:
         if state == MOVING:
             if alive:  # its STOP is ending the launch on the old machines
                 self._assert_stop(k, f"moving to {member.get('gpu')}")
+                self._stuck(k, record, prefix, f"moving to {member.get('gpu')}")
                 return
             if syncer is None:
                 return
@@ -404,7 +417,8 @@ class TrainerWorker:
             if record.get("spec") != spec:
                 if not self._write_stop(k, f"moving to {member.get('gpu')}"):
                     return  # not moving until its STOP is written: asked again at the next step
-                self.save(k, {**record, "state": MOVING, "moving_to": member.get("gpu"), "generation": generation})
+                self.save(k, {**record, "state": MOVING, "moving_to": member.get("gpu"), "generation": generation,
+                              "stop_at": round(self.clock(), 3), "torn_down_at": None})
                 self._event(k, "moving: its launch stops on the old machines first", to=member.get("gpu"))
                 return
             if state != RUNNING:  # up
@@ -495,6 +509,35 @@ class TrainerWorker:
                      "none of the run's launches runs, `yeto run up` here starts them again")
         return True
 
+    def _stuck(self, k: int, record: dict[str, Any], prefix: str, why: str) -> None:
+        """Island ``k``'s launch still runs after its STOP (moving or removed): torn down
+        (``ops.tear_down``: ``yeto down``, the launcher's own teardown) once it still orders
+        its machines :data:`STOP_UNREAD_S` after the STOP was written (it reads no STOP before
+        they are up: a sky launch waiting for SSH would hold the move for its whole timeout,
+        then fail and be relaunched on the same target), or :data:`STOP_IGNORED_S` after it
+        whatever it does. Once per STOP; the move or removal goes on when it ended."""
+        since = record.get("stop_at")
+        if since is None:  # a record from before this field: its wait starts now
+            self.save(k, {**record, "stop_at": round(self.clock(), 3)})
+            return
+        if record.get("torn_down_at") is not None:
+            return
+        waited = self.clock() - float(since)
+        life = self.states.read(k) or {}
+        ordering = life.get("state") == lifecycle.ORDERING
+        if not ((ordering and waited >= STOP_UNREAD_S) or waited >= STOP_IGNORED_S):
+            return
+        what = (f"still ordering its machines {waited:.0f}s after its STOP (it reads none before they are up)"
+                if ordering and waited < STOP_IGNORED_S else f"still running {waited:.0f}s after its STOP")
+        self.save(k, {**record, "torn_down_at": round(self.clock(), 3)})
+        self.log(f"fleet: WARNING: trainer island {k}: its launch {prefix} is {what}: torn down now "
+                 f"(`yeto down {prefix}`; the island is {why})")
+        try:
+            self.ops.tear_down(prefix, f"{why}: {what}")
+        except Exception as error:  # noqa: BLE001 - its STOP still stands; reported
+            self.log(f"fleet: ERROR: trainer island {k}: tearing its launch {prefix} down failed ({error!r}); "
+                     f"run `yeto down {prefix}` on this host")
+
     def _assert_stop(self, k: int, why: str) -> None:
         """Island ``k``'s STOP, written again when it is missing (module doc)."""
         if self.states.stop_requested(k) is None and self._write_stop(k, why):
@@ -515,10 +558,11 @@ class TrainerWorker:
             if record.get("state") != STOPPING:
                 if not self._write_stop(k, "removed from the fleet's desired state"):
                     return  # not stopping until its STOP is written: asked again at the next step
-                self.save(k, {**record, "state": STOPPING})
+                self.save(k, {**record, "state": STOPPING, "stop_at": round(self.clock(), 3), "torn_down_at": None})
                 self._event(k, "removed: its launch stops", prefix=prefix)
             else:
                 self._assert_stop(k, "removed from the fleet's desired state")
+                self._stuck(k, record, prefix, "removed from the fleet's desired state")
             return
         if not record.get("billing_open"):  # a launcher that still holds a given-up island keeps its STOP
             self.states.clear_stop(k)
@@ -682,6 +726,25 @@ class LocalLaunchOps:
         from yeto import runs  # noqa: PLC0415
 
         runs.request_stop(prefix)
+
+    def tear_down(self, prefix: str, why: str) -> None:
+        """The launch torn down now, without waiting for it to read a STOP: ``yeto down
+        <prefix>`` in the background (it signals the launch's worker, whose teardown releases
+        what it ordered, then confirms its clusters down). A launch that has not registered its
+        run yet ordered nothing: its process is terminated."""
+        from yeto import runs  # noqa: PLC0415
+
+        proc = self.procs.get(prefix)
+        if runs.load_run(prefix) is None:
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+            return
+        path = self._log_path(prefix)
+        with open(path, "a") as fh:
+            fh.write(f"\n### {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} yeto down {prefix} ({why})\n")
+            fh.flush()
+            subprocess.Popen([self.python, "-m", "yeto.cli", "down", "--missing-ok", prefix], env=self.env,
+                             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
 
 
 def _tail(path: os.PathLike[str] | str, size: int = 20_000) -> str:
