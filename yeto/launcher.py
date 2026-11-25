@@ -1274,7 +1274,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     held_name, specs[held].cloud, held_cfg, modal_ops, sky_task=held_task,
                     spec=specs[held], events_dir=events_dir,
                     ssh=_ssh_trainer_spec(args, specs[held], held_task)),
-                abort=controller.abort)
+                abort=controller.abort, states=island_states)  # s1: this launcher's fenced records
         except trainer_loop.TrainerLoopGaveUp as error:
             # the trainer scheduler released the trainer and stopped; the samplers
             # cannot finish the run usefully: tear everything down

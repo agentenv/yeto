@@ -313,17 +313,15 @@ def build(args, binding: CloudTrainerBinding, journal: Journal, *,
 
 
 def island_recorder(args, journal: Journal, island: TrainerIsland | None, *,
-                    store_factory: Callable[[Any], Any] | None = None) -> Any:
+                    states: Any = None) -> Any:
     """With the island lifecycle on (``--island-lifecycle on``: s1 runs one trainer island,
     which takes no new path by default), the journal writer that also keeps the held
     island's record (``fleet/trainers/<k>/state.json``), after a one-time read-only import
-    of a journal written before; None otherwise (nothing changes)."""
-    if not island_lifecycle.loop_enabled(args):
-        return None
-    if store_factory is None:
-        from ..launcher import _island_state_store as store_factory  # noqa: PLC0415
-    states = store_factory(args)
-    if states is None:
+    of a journal written before; None otherwise (nothing changes). ``states``: the
+    launcher's island records (:class:`~yeto.launch.island_lifecycle.IslandStateStore`,
+    fenced by the run store's single-writer lock it claimed); s1 opens no store of its own,
+    so a launcher that lost the lock writes nothing. None: no records."""
+    if not island_lifecycle.loop_enabled(args) or states is None:
         return None
     k = held_island(args)
     k = 0 if k is None else int(k)
@@ -336,16 +334,21 @@ def island_recorder(args, journal: Journal, island: TrainerIsland | None, *,
     if recorder.import_journal(journal.records) is not None:
         print(f"[launcher] trainer scheduler: island {k}'s record imported from {journal.dir} (read only, once)",
               flush=True)
+    elif not recorder._known:  # noqa: SLF001
+        print(f"[launcher] trainer scheduler: island {k}'s record did not read; its journal is imported once it "
+              "does (no record is written before)", file=sys.stderr, flush=True)
     return recorder
 
 
 def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland | None = None,
                           factory: Callable[[Any, TrainerIsland | None], CloudTrainerBinding]
                           | None = None,
-                          abort: Callable[[BaseException], None] | None = None) -> T:
+                          abort: Callable[[BaseException], None] | None = None,
+                          states: Any = None) -> T:
     """``run()`` (the fleet controller); with the switch on, the trainer loop ticks
     on its own thread meanwhile. ``island``: the held-back trainer island
-    (:func:`held_island`).
+    (:func:`held_island`). ``states``: the launcher's island records (fenced; the
+    launcher closes them), for :func:`island_recorder`.
 
     When ``run`` returns, the fleet (the samplers) has ended: the data ended. The
     loop keeps ticking up to ``--rl-trainer-drain-seconds`` so the trainer consumes
@@ -376,7 +379,7 @@ def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland |
             if abort is not None and isinstance(error, TrainerLoopGaveUp):
                 abort(error)
 
-        recorder = island_recorder(args, journal, island)
+        recorder = island_recorder(args, journal, island, states=states)
         loop = build(args, binding, journal) if recorder is None else build(args, binding, journal, record=recorder)
         runner = TrainerLoopThread(loop,
                                    args.rl_trainer_scheduler_interval, on_error=on_error,
@@ -398,5 +401,3 @@ def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland |
             if runner.error is not None:
                 print(f"[launcher] trainer scheduler stopped on error: {runner.error!r}",
                       file=sys.stderr, flush=True)
-            if recorder is not None and hasattr(recorder.store, "close"):
-                recorder.store.close()  # its queued records, bounded

@@ -826,7 +826,13 @@ class LoopRecorder:
     """An s1 journal writer that also keeps the island's state record: wraps
     ``journal.append`` (``TrainerLoop(record=...)``); the journal is written first and
     stays the loop's only input. ``island``: the record's ``k``; ``source`` / ``name``:
-    the held trainer island's."""
+    the held trainer island's. ``store``: the launcher's own (fenced, under the island
+    records' lock), so a launcher that lost the lock writes nothing.
+
+    The island's record is read (strictly) before the first write, so a write merges into
+    it: until a read answers (the record, or none), nothing is written (the journal goes on;
+    the record catches up at the next journal record). An s1 idle stop is ``done`` with
+    ``idle: true`` (the scheduler starts the island again when samples wait)."""
 
     def __init__(self, append: Callable[..., Any], store: IslandStateStore, island: int, *,
                  source: str, name: str | None = None) -> None:
@@ -837,6 +843,27 @@ class LoopRecorder:
         self.name = name
         self._incarnations: set[int] = set()
         self._last: Decision | None = None
+        self._known = False  # the island's record read once (it, or none): writes merge into it
+        self._pending: list[Mapping[str, Any]] | None = None  # an older journal to import once known
+        self.imported: dict[str, Any] | None = None
+
+    def _ready(self) -> bool:
+        """The island's record read strictly once (True: writes may go on). The first read
+        that answers imports a pending older journal when the store holds no record; one that
+        fails leaves both for the next journal record (:class:`IslandRecordsUnreadable` is
+        not "no record": an import then would write over the record)."""
+        if self._known:
+            return True
+        try:
+            existing = self.store.read_all([self.island], strict=True).get(self.island)
+        except IslandRecordsUnreadable as error:
+            self.store._warn("s1 record read", error)  # noqa: SLF001
+            return False
+        self._known = True
+        pending, self._pending = self._pending, None
+        if existing is None and pending:
+            self.imported = self._import(pending)
+        return True
 
     def __call__(self, kind: str, **fields: Any) -> Any:
         out = self._append(kind, **fields)
@@ -848,7 +875,7 @@ class LoopRecorder:
 
     def observe(self, record: Mapping[str, Any], **extra: Any) -> dict[str, Any] | None:
         moved = loop_event(record)
-        if moved is None:
+        if moved is None or not self._ready():
             return None
         state, d = moved
         incarnation = record.get("incarnation")
@@ -869,6 +896,8 @@ class LoopRecorder:
             fields["resume"] = {"cut": record.get("resume_cut"), "version": record.get("resume_version")}
         if record.get("event") == "stopped":
             fields["exit"] = str(record.get("error") or record.get("reason") or "stopped")[:500]
+        # an idle stop of the scheduler: done for now, started again when samples wait
+        fields["idle"] = bool(state == DONE and d is not None and d.cause == STOPPED)
         fields["decision"] = None if d is None else d.to_json()
         fields["reason"] = None if d is None else d.detail
         return self.store.write(self.island, state, **fields)
@@ -876,9 +905,16 @@ class LoopRecorder:
     def import_journal(self, records: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
         """Write the island's record from an s1 journal written before the lifecycle
         was on: once (only when the store holds no record of the island), read only
-        (the journal is not touched). Returns the record written, else None."""
-        if self.store.read(self.island) is not None:
-            return None
+        (the journal is not touched). Returns the record written, else None. A store read
+        that fails is not "no record": the import waits for the first read that answers
+        (:meth:`_ready`, tried again at each journal record)."""
+        if self._known:
+            return None  # the record was read already: imported then, or the store has one
+        self._pending = list(records)
+        self._ready()
+        return self.imported
+
+    def _import(self, records: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
         last, resume = None, None
         for record in records:
             moved = loop_event(record)
