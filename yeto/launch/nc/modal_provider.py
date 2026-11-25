@@ -632,7 +632,8 @@ class ModalPoolOps:
         if self.provider.note_running(m.ticket, source=source, at=at):
             from . import cli  # noqa: PLC0415
 
-            cli._log(f"pool: {m.ticket}: Modal reads its call unscheduled, but {source}: billed from now")  # noqa: SLF001
+            when = "" if at is None else f" ({max(0.0, self.provider.clock() - float(at)):.0f} s ago)"
+            cli._log(f"pool: {m.ticket}: Modal reads its call unscheduled, but {source}: billed from then{when}")  # noqa: SLF001
         return self.provider.status(m.account, m.ticket)
 
     def note_running(self, m, *, source: str) -> bool:
