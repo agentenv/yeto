@@ -766,7 +766,13 @@ def plan_migrations(nodes: Iterable[Node], offers: Iterable[Offer], decision: De
 class LaneMover(Protocol):
     """What a move asks of the pools (the NodePool / Lane split): stop the node's lane on
     its island (fence, return claims, drain), load the new island's release on the
-    running engine, then start a lane of the new island on the same machine."""
+    running engine, then start a lane of the new island on the same machine.
+
+    A mover may also have ``begin(move)``, called with the whole :class:`Migration` before
+    the steps (it names both pools); :class:`yeto.launch.pool.migrate.PoolMover` reserves
+    the destination and starts the source's drain there, and the pools finish the move
+    on their own ticks (its steps then confirm each half is under way). Once moved, the
+    ticket is the destination pool's: it watches, bills and releases the machine."""
 
     def drain_lane(self, ticket: str, island: str) -> None: ...
     def load_release(self, ticket: str, island: str) -> None: ...
@@ -781,6 +787,13 @@ def run_migration(move: Migration, mover: LaneMover, emit: Callable[..., Any] = 
     detail = {"ticket": move.ticket, "from_island": move.from_island, "to_island": move.to_island,
               "from_offer": move.from_offer, "to_offer": move.to_offer, "reason": move.reason}
     emit("broker_migrate", **detail)
+    begin = getattr(mover, "begin", None)
+    if begin is not None:
+        try:
+            begin(move)
+        except Exception as error:  # noqa: BLE001 - reported; nothing changed (or undone by the mover)
+            emit("broker_migrate_failed", step="begin", error=repr(error)[:300], **detail)
+            return False
     for step, call, island in (("drain_lane", mover.drain_lane, move.from_island),
                                ("load_release", mover.load_release, move.to_island),
                                ("start_lane", mover.start_lane, move.to_island)):

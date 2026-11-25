@@ -107,7 +107,8 @@ def pool_summary(ref: rollout_pools.PoolRef) -> dict[str, Any]:
         return dict(out, error=str(error))
     scale_doc = pool_run.read_scale(cfg)
     target = int(scale_doc["target"]) if scale_doc else int(doc.get("target", cfg.get("target", 0)))
-    billed = pool_run.billed_members(doc)
+    billed = pool_run._live_members(doc)  # noqa: SLF001 - the islands themselves
+    moving = [m for m in pool_run.billed_members(doc) if m.get("moving")]  # machines of unsettled moves
     proc = pool_run.pool_process(cfg)
     alive = bool(proc and proc.get("alive"))
     out.update(target=target, islands=len(billed), ready=sum(1 for m in billed if m.get("state") == "ready"),
@@ -118,6 +119,11 @@ def pool_summary(ref: rollout_pools.PoolRef) -> dict[str, Any]:
     if billed and not alive:
         out["warning"] = (f"{len(billed)} island(s) bill with no pool loop alive: "
                           f"python -m yeto.launch.nc pool-stop --config {ref.config}")
+    if moving:  # capacity broker phase 2: pool-stop does not release these
+        out["moving"] = [{cli.slot_name(cfg): m.get("account"), "ticket": m.get("ticket"), "why": m.get("moving")}
+                         for m in moving]
+        note = f"{len(moving)} machine(s) of an unsettled move to / from another pool: see moving"
+        out["warning"] = f"{out['warning']}; {note}" if out.get("warning") else note
     attention = pool_run.account_attention(cfg)
     if attention:  # halted accounts, unconfirmed deletes, orders without an outcome (the NC ledger)
         out["accounts_attention"] = attention

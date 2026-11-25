@@ -248,7 +248,8 @@ def claim_state(cfg: dict[str, Any], *, now: float | None = None) -> Path | None
             + ("not stopped" if not doc.get("stopped") else f"stopped ({doc.get('stopped')})")
             + (f" with billed member(s) {tickets}" if tickets else "")
             + ": its nodes, leases and spend are not taken over. Stop it with its own pool config (pool-stop), "
-              "or give this pool another shard_base or state dir (YETO_NC_STATE_DIR); nothing changed")
+              "or give this pool another shard_base or state dir (YETO_NC_STATE_DIR); nothing changed"
+            + "".join(f". {m['ticket']}: {m['moving']}" for m in left if m.get("moving")))
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
     run = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(owner.get("run")))
     dest = state.parent / "archive" / f"{state.stem}.{run}.{stamp}.json"
@@ -368,9 +369,21 @@ def _remove(path: Path) -> None:
 
 # -- billing -------------------------------------------------------------------
 
-def billed_members(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    """Members of a pool state document that may still hold a ticket."""
+def _live_members(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Members of a pool state document that are not gone."""
     return [m for m in doc.get("members", []) if m.get("state") != GONE]
+
+
+def billed_members(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Members of a pool state document that may still hold a ticket, and the machines of
+    its unsettled moves to / from another pool (``migrate.unsettled_moves``: no member shows
+    them; absent when the document has no ``moves``)."""
+    live = _live_members(doc)
+    if not doc.get("moves"):
+        return live
+    from yeto.launch.pool.migrate import unsettled_moves  # noqa: PLC0415
+
+    return live + unsettled_moves(doc)
 
 
 def _until(value: float | None) -> str:
@@ -416,6 +429,11 @@ def billing_banner(config_path: str, members: list[dict[str, Any]], *, why: str 
                      f"shard {m.get('shard')} state {m.get('state')}"
                      + (f" lease_until {_until(until)}" if national or until is not None else "")
                      + ("  PAST lease_until, STILL BILLED" if late else ""))
+        # a machine of a move to / from another pool (capacity broker phase 2): why, and what to do
+        moving = m.get("moving") or (m.get("end_reason") if str(m.get("end_reason") or "").startswith(
+            ("moving to pool", "moving in from pool")) else None)
+        if moving:
+            lines.append(f"    {moving}")
     lines += ["Release them with:", f"  {stop_command(config_path)}"]
     if national:  # ``down`` is the National Compute ticket call
         lines.append("or one by one: python -m yeto.launch.nc down --account <account> --ticket <ticket>")
@@ -1156,7 +1174,7 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None,
         tmp.replace(path)
     finally:
         lock.close()
-    actual = len(billed_members(doc))
+    actual = len(_live_members(doc))
     proc = pool_process(cfg)
     alive = proc is not None and proc.get("alive")
     pc = cli.pool_config(cfg, allowed=None)
@@ -1202,7 +1220,7 @@ def pause_pool(cfg: dict[str, Any], config_path: str, tickets: list[str], *, res
             doc = json.loads(state.read_text()) if state.exists() else {}
         except ValueError:
             doc = {}
-        live = {m.get("ticket") for m in billed_members(doc)}
+        live = {m.get("ticket") for m in _live_members(doc)}
         unknown = [t for t in tickets if t not in live]
         if unknown and not resume:
             print(f"{name}: refused, nothing changed: {unknown} not a live member of this pool "
@@ -1262,7 +1280,7 @@ def pool_of_ticket(ticket: str) -> tuple[dict[str, Any], str, dict[str, Any]] | 
         except (OSError, ValueError, KeyError, TypeError):
             continue
         check_state_file(cfg)  # a newer format: whether the ticket is a member cannot be told
-        for m in billed_members(doc):
+        for m in _live_members(doc):
             if m.get("ticket") == ticket:
                 return cfg, config_path, m
     return None
@@ -1456,7 +1474,8 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
     path = cli.pool_events_path(cfg)
     lines = path.read_text().splitlines() if path.exists() else []
     proc = pool_process(cfg)
-    left = billed_members(doc)
+    left = _live_members(doc)
+    moving = [m for m in billed_members(doc) if m.get("moving")]  # machines of unsettled moves (none: absent)
     now = time.time()
     label = cli.slot_name(cfg)  # "account" on National Compute, else "slot"
     billed = [{label: m.get("account"), "ticket": m.get("ticket"), "shard": m.get("shard"),
@@ -1478,6 +1497,7 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
     print(json.dumps({"process": proc, "target": target, "nodes": len(left),
                       "samplers": f"{len(left)}/{target}", "accounts_attention": attention,
                       "manual": manual, "scale": scale, "billed": billed,
+                      **({"moving": moving} if moving else {}),
                       "state": doc,
                       "events": [json.loads(x) for x in lines[-events:]]}, indent=1))
     print_attention(attention)

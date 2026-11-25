@@ -36,7 +36,11 @@ ORDERED, READY = "ordered", "member_ready"
 START_FAILED = frozenset({"order_failed", "grant_timeout", "start_timeout"})
 RECLAIMED = frozenset({"evicted", "node_lost"})
 ENDED = frozenset({"released", "expired", "released_externally", "released_by_earlier_pool", "ended_for_balance"})
-KNOWN = frozenset({ORDERED, READY, "offer_failed", *START_FAILED, *RECLAIMED, *ENDED})
+# a machine moving to another pool (capacity broker phase 2): the source's shard forgets it
+# without an end, the destination's takes it over with its offer and order / ready times
+# without an order or a start, so a moved machine is one machine in the merged ledger
+MOVED_OUT, MOVED_IN = "member_moved_out", "member_moved_in"
+KNOWN = frozenset({ORDERED, READY, "offer_failed", *START_FAILED, *RECLAIMED, *ENDED, MOVED_OUT, MOVED_IN})
 
 
 def percentile(values: list[float], q: float) -> float | None:
@@ -172,6 +176,18 @@ class OfferLedger:
         if offer is None:
             return None
         t = float(event.get("t") or 0.0)
+        if name == MOVED_OUT:
+            if ticket is not None:
+                self.tickets.pop(ticket, None)
+            return name
+        if name == MOVED_IN:
+            if ticket is not None:
+                moved = {"offer": str(offer)}
+                for key, field_name in (("ordered", "ordered_at"), ("ready", "ready_at")):
+                    if event.get(field_name) is not None:
+                        moved[key] = float(event[field_name])
+                self.tickets[ticket] = moved
+            return name
         row = self.stats(str(offer))
         if name == ORDERED:
             row.orders += 1

@@ -48,6 +48,7 @@ pool``, so the two modes never drive one pool at once.
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import threading
 import time
@@ -403,6 +404,7 @@ class RolloutController:
         is saved at once. The futures of background starts / releases are kept: they track threads
         still running (dropping them would start or release a member twice)."""
         held = {m.ticket: m for m in pool.members}
+        held_moves = json.loads(json.dumps(pool.moves, default=str)) if pool.moves else {}
         try:
             doc = control.state.load()
             if doc is not None:
@@ -420,6 +422,8 @@ class RolloutController:
             pool.members.extend(extra)
             self.log(f"rollout: pool {name}: kept {len(extra)} member(s) the store copy did not hold yet")
             pool._event("worker_state_merged", tickets=[m.ticket for m in extra])  # noqa: SLF001
+        if held_moves or pool.moves:  # a move the memory saw further along stays so (after the members)
+            pool.merge_moves(held_moves)
         pool._save_now()  # noqa: SLF001
 
     def _work(self, name: str, slot: PoolSlot) -> None:
