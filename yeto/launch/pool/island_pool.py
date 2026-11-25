@@ -306,6 +306,7 @@ class IslandPool(PoolMoves):
     breaker: el.Breaker = field(default_factory=el.Breaker)
     budget: el.Budget = field(default_factory=el.Budget)
     _refused: str | None = None
+    _refused_by_breaker: bool = False  # the last refusal was the order breaker's (failed orders: the market)
     _capped: el.Refusal | None = None  # the cap behind the last gate refusal (node / order / spend)
     _slot_hold: dict[Any, float] = field(default_factory=dict)  # slot -> its guard refused: not before
     # slot -> when an order on it last failed: tried after the slots that did not fail, so one
@@ -574,10 +575,9 @@ class IslandPool(PoolMoves):
         slot, a shard or handoff wait (the capacity broker counts no spot gap for such a pool,
         ``broker_plan.blocked_pools``). None: the last attempt ordered, or only the order
         breaker (failed orders: the market) held it back."""
-        why = self._refused or self._no_account
-        if not why or why.startswith("breaker"):
-            return None
-        return why
+        if self._refused is not None:
+            return None if self._refused_by_breaker else self._refused
+        return self._no_account
 
     def _order(self, replaces: Member | None = None) -> Member | None:
         now = self.clock()
@@ -588,9 +588,11 @@ class IslandPool(PoolMoves):
                 self.log(f"pool: balance {balance} < order floor {self.config.order_floor()}: not ordering")
                 self._event("order_refused", why=refused, balance=balance,
                             replaces=replaces.ticket if replaces else None)
-            self._refused = refused
+            self._refused, self._refused_by_breaker = refused, False
             return None
         refused = self._gate(now)
+        # by what refused, not by its text: a budget gate's reason may say "breaker" too
+        self._refused_by_breaker = bool(refused) and (self.breaker.tripped or not self.breaker.allows(now))
         if refused:
             if refused != self._refused and not refused.startswith("breaker open"):
                 self.log(f"pool: {refused}: not ordering")

@@ -316,9 +316,11 @@ def test_a_manual_hold_on_the_spot_pool_buys_no_on_demand(tmp_path):
     assert "manual change" in loop.refused["spot"] and fleet.pools["spot"].config.target == 2
 
 
-def test_an_open_budget_breaker_on_the_spot_pool_buys_no_on_demand(tmp_path):
+@pytest.mark.parametrize("why", ["run budget breaker open: spend $50.00 of $50.00",
+                                 "breaker run.budget open: spend $50.00 of $50.00"])  # its text is no market sign
+def test_an_open_budget_breaker_on_the_spot_pool_buys_no_on_demand(tmp_path, why):
     fleet, loop, spot_cloud, od_cloud = _held_spot_fleet(tmp_path)
-    breaker = {"open": "run budget breaker open: spend $50.00 of $50.00"}
+    breaker = {"open": why}
     fleet.pools["spot"].gate = lambda: breaker["open"]  # the controller's run budget gate
     _no_on_demand_for(fleet, loop, od_cloud, "budget breaker")
     assert fleet.pools["spot"].order_block() == breaker["open"]
@@ -340,7 +342,9 @@ def test_a_spot_pool_whose_orders_fail_on_the_market_still_moves_to_on_demand(tm
     fleet, loop, spot_cloud, od_cloud = _held_spot_fleet(tmp_path)
     spot_cloud.sold_out = {"a"}  # no capacity: a market gap
     fleet.run(3600, loop)
-    assert len(od_cloud.kinds("order")) == 2 and fleet.pools["spot"].order_block() is None
+    pool = fleet.pools["spot"]
+    assert len(od_cloud.kinds("order")) == 2 and pool.order_block() is None
+    assert pool._refused and pool._refused.startswith("breaker"), "the order breaker (failed orders) held it back"
 
 
 def test_the_pool_counts_its_orders_against_the_plan_and_a_new_plan_starts_the_count_again(tmp_path):
