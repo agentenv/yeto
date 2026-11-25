@@ -1599,6 +1599,11 @@ def _serializable_args(args) -> dict:
     return out
 
 
+# A submitter-local --rl-algorithm-spec, as the head job sees it: relative to the
+# head's workdir (~/sky_workdir), where every head job runs.
+HEAD_ALGORITHM_SPEC_NAME = "yeto-head-algorithm-spec.json"
+
+
 def _make_head_task(args, extra_mounts: dict | None = None):
     """The head VM's provisioning task: repo workdir, cloud
     credentials, staged local --data, and the pickled loss (when used) — no
@@ -1814,6 +1819,13 @@ def cmd_launch_head(args) -> int:
             args.rl_initial_adapter
         )
         args.rl_initial_adapter = launcher.RL_HEAD_INITIAL_ADAPTER_PATH
+    spec = getattr(args, "rl_algorithm_spec", None)
+    if spec and os.path.isfile(os.path.expanduser(spec)):
+        # A local --rl-algorithm-spec file: the head re-reads it when its launcher
+        # prepares the args, so mount it into the head's workdir (where the head
+        # job runs) under a fixed name, like the pickled loss.
+        data_mounts[f"~/sky_workdir/{HEAD_ALGORITHM_SPEC_NAME}"] = os.path.abspath(os.path.expanduser(spec))
+        args.rl_algorithm_spec = HEAD_ALGORITHM_SPEC_NAME
     args_dict = _serializable_args(args)
     runs.create_run(name, args_dict)
     learner_names = launcher.learner_cluster_names(name, specs)

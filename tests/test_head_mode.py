@@ -309,6 +309,41 @@ def test_rl_head_stages_the_initial_adapter_for_learner_mounts(
     assert '"rl_initial_adapter_sha256": "' + "a" * 64 + '"' in job_task.run
 
 
+def test_rl_head_mounts_a_local_algorithm_spec_into_its_workdir(fake_sky, fake_aws_env, monkeypatch, tmp_path):
+    # the head's launcher prepares the args again on the head: a submitter-local --rl-algorithm-spec must be
+    # there, under the name the head job reads (relative to ~/sky_workdir, where head jobs run)
+    spec = tmp_path / "spec.json"
+    spec.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
+    args = cli.parse_args(
+        LAUNCH_ARGS
+        + ["--cluster-prefix", "rl-spec", "--training-mode", "rl", "--reward-function",
+           "yeto_miles_cybergym.reward:score", "--rl-sync-preset", "decoupled", "--rl-algorithm-spec", str(spec)]
+    )
+
+    assert cli.cmd_launch_head(args) == 0
+
+    (_, head_task), = fake_sky["launches"]
+    (_, job_task), = fake_sky["execs"]
+    assert head_task.file_mounts[f"~/sky_workdir/{cli.HEAD_ALGORITHM_SPEC_NAME}"] == str(spec)
+    assert f'"rl_algorithm_spec": "{cli.HEAD_ALGORITHM_SPEC_NAME}"' in job_task.run
+    assert str(tmp_path) not in job_task.run  # no submitter path reaches the head job
+
+
+def test_rl_head_leaves_a_missing_algorithm_spec_path_to_the_launcher(fake_sky, fake_aws_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
+    args = cli.parse_args(
+        LAUNCH_ARGS
+        + ["--cluster-prefix", "rl-nospec", "--training-mode", "rl", "--reward-function",
+           "yeto_miles_cybergym.reward:score", "--rl-sync-preset", "decoupled"]
+    )
+
+    assert cli.cmd_launch_head(args) == 0
+
+    (_, head_task), = fake_sky["launches"]
+    assert not any(cli.HEAD_ALGORITHM_SPEC_NAME in str(k) for k in head_task.file_mounts)
+
+
 def test_launch_head_mounts_aws_credentials_when_present(
     fake_sky, monkeypatch, tmp_path
 ):
