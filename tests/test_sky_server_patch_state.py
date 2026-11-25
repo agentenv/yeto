@@ -312,3 +312,17 @@ def test_a_verda_sky_pool_is_refused_at_its_start_and_dry_run_unless_warn(monkey
     aws = {**cfg, "provider": {"kind": "sky", "resources": {"infra": "aws", "accelerators": "L4:1"}}}
     monkeypatch.delenv(patches.SERVER_PATCH_ENV)
     assert not [p for p in sp.start_problems(aws) if "Verda" in p]
+
+
+def test_a_checkouts_parent_as_cwd_does_not_decide(tmp_path, monkeypatch, no_run):
+    """A server started from a checkout's parent has ``<parent>/yeto`` (the checkout root,
+    no ``__init__.py``) first on its path: a namespace portion, which a regular yeto
+    later on the path beats. With no regular yeto at all it is unreadable."""
+    python, site, repo = _venv(tmp_path)
+    parent = tmp_path / "work"
+    (parent / "yeto" / "docs").mkdir(parents=True)  # a checkout root: no yeto/__init__.py
+    _server(monkeypatch, python, cwd=str(parent))
+    ok, why = patches.server_patch_state(TARGET, server_common=_Common())
+    assert not ok and "namespace package" in why
+    _yeto(site, verda=VERDA_SOURCE)  # a regular yeto in site-packages: it decides
+    assert patches.server_patch_state(TARGET, server_common=_Common())[0]

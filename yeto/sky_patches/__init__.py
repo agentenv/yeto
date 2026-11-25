@@ -414,18 +414,24 @@ def _patch_source(site: str, repo: str, front: tuple[str, ...] = ()) -> str:
     """The ``yeto/sky_patches`` directory the hook in ``site`` imports. The hook imports
     ``yeto.sky_patches`` as the server's ``sys.path`` finds it first (``front``: its cwd,
     then PYTHONPATH; then site-packages and the paths its ``.pth`` files add); the first
-    ``yeto`` package found decides: with ``sky_patches`` it is the source, without, the
-    hook falls back to its repo. No yeto anywhere: the hook's repo."""
+    regular ``yeto`` package found decides: with ``sky_patches`` it is the source, without,
+    the hook falls back to its repo. A ``yeto`` directory without ``__init__.py`` (a
+    checkout's root, seen from its parent) does not decide: Python prefers a regular
+    package anywhere on the path. Only such directories and no regular package:
+    unreadable. No yeto anywhere: the hook's repo."""
     import os
 
+    portions: list[str] = []
+
     def yeto_in(root: str) -> str | None:
-        """The patch source of a yeto package at ``root``, the repo's when it has none,
-        None when there is no yeto package."""
+        """The patch source of a regular yeto package at ``root``, "" when it has none,
+        None when there is no regular yeto package there."""
         pkg = os.path.join(root, "yeto")
         if not os.path.isdir(pkg):
             return None
         if not os.path.isfile(os.path.join(pkg, "__init__.py")):
-            raise ServerUnreadable(f"{pkg} is a namespace package: which yeto applies the patch cannot be read")
+            portions.append(pkg)  # a namespace portion: a regular package later on the path wins
+            return None
         patches = os.path.join(pkg, "sky_patches")
         return patches if os.path.isfile(os.path.join(patches, "__init__.py")) else ""
 
@@ -447,6 +453,10 @@ def _patch_source(site: str, repo: str, front: tuple[str, ...] = ()) -> str:
             return found
         if found == "":  # a yeto without sky_patches comes first: the hook falls back to its repo
             break
+    else:
+        if portions:
+            raise ServerUnreadable(f"{portions[0]} makes yeto a namespace package on the server's path: which "
+                                   "yeto applies the patch cannot be read")
     found = os.path.join(repo, "yeto", "sky_patches")
     if not os.path.isfile(os.path.join(found, "__init__.py")):
         raise ServerUnreadable(f"the patch hook points at {repo}, which has no yeto/sky_patches")
