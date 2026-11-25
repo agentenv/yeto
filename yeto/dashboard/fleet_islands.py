@@ -250,6 +250,111 @@ def _fold_gens(objects: Any, cache: dict) -> dict[str, dict] | None:
     return pools if pools or fold["any"] or gens else None
 
 
+def _fold_desired(objects: Any, cache: dict) -> dict[int, dict]:
+    """The trainer members of the desired state's generations (``fleet/desired/<gen>.json``,
+    ``yeto fleet island add / move / remove``) folded once each: ``{learner: {name, learner,
+    gpu, usd_per_h, prefix, pools, first_at, removed_at, moves: [{at, gpu}]}}``."""
+    fold = cache.setdefault("desired", {"last": "", "trainers": {}})
+    for key in _keys(objects, "fleet/desired/"):
+        if key <= fold["last"]:
+            continue
+        doc = _json(objects, key)
+        if not isinstance(doc, dict):
+            break  # not readable yet: folded on a later read, in order
+        fold["last"] = key
+        at = _f(doc.get("updated_at"))
+        here = set()
+        for m in doc.get("members") or ():
+            k = _int(m.get("learner_id")) if isinstance(m, dict) and m.get("kind") == "trainer" else None
+            if k is None:
+                continue
+            row = fold["trainers"].setdefault(k, {"learner": k, "first_at": at, "moves": []})
+            gpu = _str(m.get("gpu"))
+            if row.get("gpu") is not None and gpu != row["gpu"]:
+                row["moves"].append({"at": at, "gpu": gpu, "from": row["gpu"]})
+            row.update(name=_str(m.get("name")), gpu=gpu, usd_per_h=_f(m.get("usd_per_h")), prefix=_str(m.get("prefix")),
+                       pools=[str(x) for x in m.get("pools") or () if isinstance(x, str)], removed_at=None)
+            here.add(k)
+        for k, row in fold["trainers"].items():
+            if k not in here and row.get("removed_at") is None:
+                row["removed_at"] = at  # dropped from the desired state: `fleet island remove`
+    return fold["trainers"]
+
+
+def _trainer_records(objects: Any, learners: Any = None) -> dict[int, dict]:
+    """Each trainer island's records under ``fleet/trainers/<k>/`` (``yeto.rl.trainer_worker``):
+    its launch record (``launch.json``: incarnation, machines, price, billing), its lifecycle
+    (``state.json``: ordering / starting / running / recovering / draining / done / abandoned /
+    failed, the decision and the exit) and its STOP. A handful of small files per island, read
+    each poll (the islands are at most ``fleet.max_islands``)."""
+    out: dict[int, dict] = {}
+    if learners:  # every island the desired state ever named (no listing of the islands' lock records)
+        ks = sorted(learners)
+    else:
+        ks = sorted({int(k.split("/")[2]) for k in _keys(objects, "fleet/trainers/")
+                     if len(k.split("/")) > 3 and k.split("/")[2].isdigit()})
+    for k in ks:
+        launch = _json(objects, f"fleet/trainers/{k}/launch.json")
+        life = _json(objects, f"fleet/trainers/{k}/state.json")
+        stop = _json(objects, f"fleet/trainers/{k}/STOP")
+        launch = launch if isinstance(launch, dict) else {}
+        life = life if isinstance(life, dict) else {}
+        if not launch and not life:
+            continue
+        dec = life.get("decision") if isinstance(life.get("decision"), dict) else (
+            launch.get("decision") if isinstance(launch.get("decision"), dict) else None)
+        ended = launch.get("ended") if isinstance(launch.get("ended"), dict) else {}
+        out[k] = {"launch_state": _str(launch.get("state")), "life_state": _str(life.get("state")),
+                  "reason": _str(life.get("reason")), "since": _f(life.get("since")), "exit": _str(life.get("exit")),
+                  "decision": {x: _str(dec.get(x)) for x in ("action", "cause", "detail", "state")} if dec else None,
+                  "stop": {"at": _f(stop.get("at")), "by": _str(stop.get("by")), "reason": _str(stop.get("reason"))}
+                  if isinstance(stop, dict) else None,
+                  "cluster": _str((life.get("handle") or {}).get("cluster")) if isinstance(life.get("handle"), dict) else None,
+                  "incarnation": _int(launch.get("incarnation") if launch.get("incarnation") is not None
+                                      else life.get("incarnation")),
+                  "relaunches": _int(launch.get("relaunches") if launch.get("relaunches") is not None
+                                     else life.get("relaunches")),
+                  "gpu": _str(launch.get("gpu")), "usd_per_h": _f(launch.get("usd_per_h")),
+                  "prefix": _str(launch.get("prefix_now") or launch.get("prefix")), "why": _str(launch.get("why")),
+                  "started_at": _f(launch.get("started_at")), "closed_at": _f(launch.get("closed_at")),
+                  "down_at": _f(launch.get("down_at")), "name": _str(launch.get("name")),
+                  "last_exit": {"code": _int(ended.get("exit_code")), "detail": _str(ended.get("detail"))} if ended else None}
+    return out
+
+
+def island_state(rec: dict | None, desired: dict | None = None) -> dict | None:
+    """What a trainer island's records say it is now: ``{"state": running / starting / moving /
+    stopped / removed / failed / abandoned / down / done, "reason", "detail"}``; None without a
+    record (its tape decides). ``desired``: its desired-state row (removed: dropped from it)."""
+    if not rec:
+        return None
+    ls, life, dec = rec.get("launch_state"), rec.get("life_state"), rec.get("decision") or {}
+    why = dec.get("detail") or (rec.get("stop") or {}).get("reason") or rec.get("reason")
+    removed = ls == "removed" or (desired or {}).get("removed_at") is not None \
+        or "removed from the fleet" in str((rec.get("stop") or {}).get("reason") or "")
+    if life == "failed" or ls == "failed":
+        return {"state": "failed", "reason": dec.get("cause") or "failed", "detail": rec.get("exit") or why}
+    if life == "abandoned" or ls == "abandoned":
+        ex = rec.get("last_exit") or {}
+        return {"state": "abandoned", "reason": f"given up after {rec.get('relaunches') or 0} relaunch(es)",
+                "detail": " · ".join(x for x in (f"on {rec['gpu']}" if rec.get("gpu") else None,
+                                                  f"last exit {ex.get('code')}: {ex.get('detail')}" if ex else None,
+                                                  "still billed until removed or confirmed down") if x)}
+    if removed and life in ("done", "draining", None) or ls == "removed":
+        return {"state": "removed", "reason": "removed from the fleet", "detail": rec.get("exit") or why}
+    if life == "done" or ls in ("done", "down"):
+        stopped = dec.get("cause") == "stopped" or rec.get("stop") is not None
+        return {"state": "stopped" if stopped else ("down" if ls == "down" else "done"),
+                "reason": (rec.get("stop") or {}).get("reason") or dec.get("detail") or ls, "detail": rec.get("exit")}
+    if ls == "moving" or (life in ("ordering", "starting") and (desired or {}).get("moves")):
+        return {"state": "moving", "reason": f"moving to {rec.get('gpu') or (desired or {}).get('gpu')}",
+                "detail": f"incarnation {rec.get('incarnation')} · relaunch {rec.get('relaunches')}"}
+    if life in ("ordering", "starting", "recovering"):
+        return {"state": "starting", "reason": "relaunching" if (rec.get("relaunches") or 0) > 0 else life,
+                "detail": f"incarnation {rec.get('incarnation')} · relaunch {rec.get('relaunches')}"}
+    return {"state": "running", "reason": None, "detail": None}
+
+
 def _shard_record(objects: Any, lane: str, shard: str) -> dict | None:
     """The newest incarnation's member record of ``shard`` (by ``joined_at``)."""
     newest = None
@@ -271,8 +376,14 @@ def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
     and a removed pool whose every retired shard settled is not read again at all."""
     cache = {} if cache is None else cache
     pools = _fold_gens(objects, cache)
+    desired = _fold_desired(objects, cache)
+    records = _trainer_records(objects, set(desired))
+    trainers = {k: {**(desired.get(k) or {"learner": k}), "record": records.get(k)}
+                for k in sorted(set(desired) | set(records))}
+    for k, row in trainers.items():
+        row["now"] = island_state(row["record"], desired.get(k))
     if pools is None:
-        return None
+        return {"pools": {}, "shards": {}, "trainers": trainers} if trainers else None
     settled_pools = cache.setdefault("settled_pools", {})
     settled_shards = cache.setdefault("settled_shards", {})
     out_pools: dict[str, dict] = {}
@@ -311,12 +422,19 @@ def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
             if rec["member_state"] == GONE:
                 settled_shards[key] = rec  # released: a retired shard does not come back
             mine[shard] = rec
+        if row.get("stopped"):  # a stopped pool (pool-stop, its island given up): its released machines' shards
+            for m in st.get("members") or ():
+                sh = str(m.get("shard")) if isinstance(m, dict) and m.get("shard") is not None else None
+                if sh and sh not in mine and _member_state(st, sh) == GONE:
+                    mine[sh] = {"pool": name, "retired": False, "stopped": row["stopped"], "retired_at": None,
+                                "member_state": GONE, "released_at": _released_at(st, sh), "left_at": None,
+                                "leave_reason": None, "incarnation": None, "left_by": None}
         shards.update(mine)
         out_pools[name] = row
         if base.get("removed_at") is not None and st and all(r["member_state"] == GONE for r in mine.values()) \
                 and _member_state_all_gone(st):
             settled_pools[name] = {"row": {k: row[k] for k in ("stopped", "retired", "lane")}, "shards": mine}
-    return {"pools": out_pools, "shards": shards}
+    return {"pools": out_pools, "shards": shards, "trainers": trainers}
 
 
 def _member_state_all_gone(st: dict) -> bool:
@@ -645,11 +763,29 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
             isl["pools"].append(pool)
         pool["samplers"].append(sid)
         pool_of[sid] = name
+    # the desired state's trainer islands (`yeto fleet island add / move / remove`): an island added
+    # while the fleet trains, its pools (also before their samplers wrote), a move, a removal
+    for k, row in sorted(((state or {}).get("trainers") or {}).items()):
+        isl = islands.setdefault(k, {"index": k, "learner": k, "name": row.get("name"), "substore": f"trainer{k}",
+                                     "gpu": None, "usd_per_h": None, "trainer_usd_per_h": row.get("usd_per_h"),
+                                     "release_every": None, "max_policy_age": None, "pools": [], "added": True})
+        if isl.get("name") is None:
+            isl["name"] = row.get("name")
+        isl["desired"] = {x: row.get(x) for x in ("gpu", "usd_per_h", "moves", "removed_at", "first_at")}
+        isl["now"] = row.get("now")
+    for name, prow in sorted(((state or {}).get("pools") or {}).items()):
+        k = prow.get("learner")
+        if k in islands and not any(p["name"] == name for p in islands[k]["pools"]):
+            islands[k]["pools"].append({"name": name, "source_name": None, "provider": prow.get("provider"),
+                                        "shard_base": prow.get("shard_base") or name, "engine": None,
+                                        "rollout_quant": None, "usd_per_h": prow.get("usd_per_h"), "samplers": []})
     for isl in islands.values():  # a pool fleet apply removed: drawn as ended, not as running
         for p in isl["pools"]:
             row = ((state or {}).get("pools") or {}).get(p["name"])
             if row is not None and row.get("removed_at") is not None:
                 p["removed"] = {"at": row["removed_at"], "why": row.get("stopped") or "removed from the fleet"}
+            elif row is not None and row.get("stopped"):
+                p["stopped"] = row["stopped"]  # stopped (pool-stop, its island given up): ended, not running
     if any(p.get("source") == "miles" for isl in islands.values() for p in isl["pools"]):
         # both kinds in the fleet: every row names its source (a fleet of pools alone keeps its rows)
         for isl in islands.values():

@@ -446,6 +446,14 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
     # a trainer anchored past the syncer's committed version: the syncer tape lags (it is copied
     # from the syncer's host); no negative lag, and no "not advancing" from a stale copy
     behind = any(t["versions"] and any(a > b for a, b in zip(t["versions"], versions)) for t in trainers)
+    # no syncer record here at all (a per-island fleet's syncer on its own VM, its tape not uploaded):
+    # each fragment's version is at least what the islands applied (their BCASTs), drawn as such
+    tape_seen = bool(merges) or bool(srec["configs"])
+    inferred = None
+    if not tape_seen and p:
+        vs = [t["versions"] for t in trainers if t.get("versions")]
+        if vs:
+            inferred = [max((v[f] for v in vs if f < len(v) and v[f] is not None), default=0) for f in range(p)]
     stuck = stuck_fragments(sy, running=running, behind=behind, any_merge=bool(merges), now=now)
     for t in trainers:
         t["outer"] = t["outer"] if t["outer"] is not None else _outer(t["versions"], p)
@@ -467,6 +475,7 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         "kind": kind_, "P": p, "M": m_size, "N": n, "H": min(hs) if hs else (config or {}).get("H"),
         "config": config,
         "quorum": sy["quorum"], "versions": versions, "last_merge_ts": sy["last_merge_ts"], "behind": behind,
+        "syncer_tape": tape_seen, "inferred_versions": inferred,
         "stuck": stuck, "period_s": sy["period_s"], "merge_gap_s": sy["merge_gap_s"], "quorum_p50_s": sy["quorum_p50_s"],
         "roster": len(live), "expected": expected, "shards": shard_rows(p, n, merges, rounds, committed, done),
         "rounds": rounds, "last_merge_ts_any": sy["last_merge_ts_any"], "running": running, "done": done,
@@ -576,6 +585,8 @@ def _fleet_part(fleet: dict, asy) -> dict:
                    "samplers": list(p["samplers"])}
             if p.get("removed"):  # fleet apply removed the pool: drawn as ended
                 row["removed"] = p["removed"]
+            if p.get("stopped"):  # stopped (pool-stop, its island given up): drawn as ended
+                row["stopped"] = p["stopped"]
             if "source" in p:  # a fleet with Miles sampler islands: where each sampler row runs
                 row["source"] = p["source"]
             if p.get("source") == "miles":
@@ -584,7 +595,12 @@ def _fleet_part(fleet: dict, asy) -> dict:
         # index: the island's place in the fleet (the plan's; bound from the events, its learner id)
         index = isl.get("index") if isl.get("index") is not None else isl["learner"]
         islands.append({"island": isl["learner"], "index": index, "trainer": isl.get("trainer"), "name": isl.get("name"),
-                        "gpu": isl.get("gpu"), "substore": isl.get("substore"), "pools": pools})
+                        "gpu": isl.get("gpu"), "substore": isl.get("substore"), "pools": pools,
+                        # a fleet launched island by island: its desired-state row (gpu, moves, removal) and its
+                        # record's state (fleet_islands.island_state)
+                        **({"desired": isl["desired"]} if isl.get("desired") else {}),
+                        **({"now": isl["now"]} if isl.get("now") else {}),
+                        **({"added": True} if isl.get("added") else {})})
     return {"source": fleet["source"], "islands": islands, "unbound": list(fleet["unbound"])}
 
 
@@ -652,6 +668,7 @@ def _trainer(iid: str, x: _Island, card: dict, st: dict, merges: list[dict], ver
         "id": iid, "name": card.get("name"), "gpu": card.get("gpu"), "gpus": card.get("gpus"),
         "arch": arch_of(card.get("gpu")), "status": st.get("status"), "live": bool(st.get("alive")),
         "reason": (card.get("left") or {}).get("reason"), "finalized": bool(card.get("finalized")),
+        "island_now": card.get("island_now"),  # its trainer island record (a fleet launched island by island)
         "last_event_ts": st.get("last_event_ts"), "step": step,
         "outer": _int(full.get("sync/outer_version")) if full else None,
         "versions": vec, "since": since, "pushed": {str(k): v for k, v in pushed.items()},
