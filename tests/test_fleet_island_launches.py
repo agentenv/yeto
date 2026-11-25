@@ -208,3 +208,44 @@ def test_island_k_s_launch_reads_and_clears_only_its_own_record_and_stop(tmp_pat
     assert states.stop_requested(0) is not None  # island 0's STOP untouched
     recorder.record("r-i2-l0", "starting", reason="test")
     assert states.read(2)["state"] == "starting" and states.read(0)["state"] == "done"
+
+
+def test_per_island_launches_take_no_roster_option_of_a_synced_group(tmp_path, monkeypatch):
+    """The synced-group compile adds its roster's membership options to the group argv
+    (a lease; a count quorum like --rl-sync-quorum 1 would merge a round on the first
+    island). A per-island fleet's syncer and island launches take none of them: they
+    resolve their own membership, the capacity quorum theta 1.0 (every island of the pool
+    answers each round), so the fleet is neither refused nor merged on one island."""
+    from yeto.launcher import dry_run_plan
+
+    injected = ["--rl-sync-island-lease-s", "150", "--rl-sync-quorum", "1"]
+    monkeypatch.setattr(fleet, "roster_of", lambda *a, **k: fleet.Roster(False, 1, 150.0, None, tuple(injected)))
+    group = example(tmp_path, per_island=False)["trainer"]["argv"]
+    assert " ".join(injected) in " ".join(group)  # the synced group takes them
+    (tmp_path / "pi").mkdir()
+    cfg = example(tmp_path / "pi")
+    plan = fleet.plan_of(cfg)
+    members = island_launches.trainer_members(cfg, plan)
+    for argv in [cfg["trainer"]["argv"], *(m["argv"] for m in members)]:
+        assert "--rl-sync-quorum" not in argv and "--rl-sync-island-lease-s" not in argv
+    syncer = _prepared([*cfg["trainer"]["argv"], "--controller", "local"])
+    assert syncer.rl_sync_quorum is None and syncer.rl_sync_quorum_theta == 1.0
+    command = dry_run_plan(syncer)["role_syncers"][0]["command"]
+    assert "--quorum-theta 1.0" in command and "--quorum 1 " in command  # theta, not a count of one
+    island = _prepared(island_launches.launch_argv(members[0], syncer={"addr": "10.0.0.1:29400"}))
+    assert island.rl_sync_quorum is None
+    # fleet.island_lease_s still reaches the syncer and every island; a fixed roster is refused
+    for name, value, check in (("island_lease_s", 300, None), ("fixed_roster", True, "fixed_roster")):
+        (tmp_path / name).mkdir()
+        doc = example_doc(tmp_path / name)
+        doc["fleet"][name] = value
+        path = tmp_path / name / "run.json"
+        path.write_text(json.dumps(doc))
+        if check:
+            with pytest.raises(ValueError, match=check):
+                up.load_config(str(path))
+            continue
+        cfg = up.load_config(str(path))
+        plan = fleet.plan_of(cfg)
+        for argv in [cfg["trainer"]["argv"], *(m["argv"] for m in island_launches.trainer_members(cfg, plan))]:
+            assert argv[argv.index("--rl-sync-island-lease-s") + 1] == "300"
