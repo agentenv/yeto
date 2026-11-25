@@ -287,7 +287,7 @@ function trainerCard(nd,x,y,w,h,tr,co){
   var g=el("g",{transform:"translate("+x+","+y+")","data-td":"trn:"+tr.id},nd);
   var box=el("rect",{width:w,height:h,rx:10,"class":"tpbox",visibility:co?"hidden":"visible"},g);if(!co)accent(g,h,arch(tr.arch));
   el("text",{x:14,y:20,"class":"tpt"},g,clip((sft()?"Learner ":"Trainer ")+tr.id+(tr.name?" · "+(fleet()?shortName(tr.name):tr.name):""),Math.floor((w-70)/7)));
-  el("text",{x:14,y:36,"class":"tpm"},g,sft()?["ms-swift Megatron",(tr.learner||{}).layout].filter(Boolean).join(" · "):co?"Megatron · same GPU as the rollout":D.kind==="island"?"Megatron · "+(tr.gpu||"GPU"):[tr.gpus?tr.gpus+" × "+tr.gpu:tr.gpu,tr.arch].filter(Boolean).join(" · "));
+  el("text",{x:14,y:36,"class":"tpm"},g,sft()?["ms-swift Megatron",(tr.learner||{}).layout].filter(Boolean).join(" · "):co?(tr.backend||"Megatron")+" · same GPU as the rollout":D.kind==="island"?(tr.backend||"Megatron")+" · "+(tr.gpu||"GPU"):[tr.gpus?tr.gpus+" × "+tr.gpu:tr.gpu,tr.arch,tr.backend].filter(Boolean).join(" · "));
   var o={g:g,box:box,co:co};
   o.badge=el("text",{x:w-12,y:20,"text-anchor":"end","class":"tpv"},g,"");
   o.step=el("text",{x:14,y:66,"class":"tpbig2"},g,"");o.outer=el("text",{x:w-12,y:66,"text-anchor":"end","class":"tpm"},g,"");

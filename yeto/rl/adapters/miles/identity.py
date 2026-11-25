@@ -11,7 +11,7 @@ still hashed so a future non-identity map changes the identity.  Under
 from __future__ import annotations
 
 from yeto.rl.engine.backend_identity import (COMPACTION_SEGMENTS, FLEET_FULL_PARAMETER, FLEET_PARTIAL_EXPERTS,
-                                             PER_LEARNER_RELEASE, RELEASE_CADENCE, SAMPLER_ISLANDS_FOLLOW,
+                                             PER_LEARNER_RELEASE, RELEASE_CADENCE, ROUND_METRICS, SAMPLER_ISLANDS_FOLLOW,
                                              BackendIdentity, param_map_sha256)
 
 from .pins import MILES_NEXT_COMMIT
@@ -24,6 +24,8 @@ PARAM_MAP_SHA256 = param_map_sha256(PARAM_MAP)
 # yeto.rl.engine.backends.capabilities
 CAPABILITIES: frozenset[str] = frozenset({FLEET_FULL_PARAMETER, FLEET_PARTIAL_EXPERTS, PER_LEARNER_RELEASE,
                                           RELEASE_CADENCE, COMPACTION_SEGMENTS, SAMPLER_ISLANDS_FOLLOW})
+# The round metrics a Miles trainer reports (``backend_identity.reported_metrics``): all of them.
+REPORTED_METRICS: frozenset[str] = ROUND_METRICS
 
 
 def backend_identity(*, device_family: str = DEVICE_FAMILY,
@@ -34,3 +36,4 @@ def backend_identity(*, device_family: str = DEVICE_FAMILY,
 
     return BackendIdentity(ENGINE, MILES_NEXT_COMMIT, device_family, PARAM_MAP_SHA256,
                            island_compat_group(compat_group))
+

@@ -717,6 +717,7 @@ def _trainer(iid: str, x: _Island, card: dict, st: dict, merges: list[dict], ver
     oldest = min((t for ts in pending.values() for t in ts), default=None)
     return {
         "id": iid, "name": card.get("name"), "gpu": card.get("gpu"), "gpus": card.get("gpus"),
+        "backend": card.get("backend_label"), "unreported": card.get("unreported") or {},
         "arch": arch_of(card.get("gpu")), "status": st.get("status"), "live": bool(st.get("alive")),
         "reason": (card.get("left") or {}).get("reason"), "finalized": bool(card.get("finalized")),
         "island_now": card.get("island_now"),  # its trainer island record (a fleet launched island by island)

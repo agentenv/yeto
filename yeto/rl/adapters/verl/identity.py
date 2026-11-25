@@ -11,7 +11,8 @@ Miles islands on any device family can share a session.
 
 from __future__ import annotations
 
-from yeto.rl.engine.backend_identity import FLEET_FULL_PARAMETER, PER_LEARNER_RELEASE, BackendIdentity, param_map_sha256
+from yeto.rl.engine.backend_identity import (FLEET_FULL_PARAMETER, METRIC_PPO_KL, METRIC_TRAIN_ROLLOUT_KL,
+                                             PER_LEARNER_RELEASE, ROUND_METRICS, BackendIdentity, param_map_sha256)
 
 from .param_names import PARAM_MAP
 from .pins import VERL_COMMIT
@@ -35,6 +36,9 @@ PARAM_MAP_SHA256_BY_BACKEND = {"fsdp2": PARAM_MAP_SHA256, "megatron": param_map_
 # Not declared: partial experts, per-segment training of compacted trials (one sample is
 # one token stream), a release cadence outside per-learner releases.
 CAPABILITIES: frozenset[str] = frozenset({FLEET_FULL_PARAMETER, PER_LEARNER_RELEASE})
+# The round metrics a verl trainer reports (``backend_identity.reported_metrics``): its
+# rounds carry no train-rollout KL and no PPO KL; the dashboard says "not reported by verl".
+REPORTED_METRICS: frozenset[str] = ROUND_METRICS - {METRIC_TRAIN_ROLLOUT_KL, METRIC_PPO_KL}
 
 
 def backend_identity(*, device_family: str | None = None,
@@ -55,3 +59,4 @@ def backend_identity(*, device_family: str | None = None,
     family = device_family if device_family is not None else detect_device_family()
     return BackendIdentity(ENGINE, VERL_COMMIT, family, PARAM_MAP_SHA256_BY_BACKEND[train_backend],
                            island_compat_group(compat_group))
+

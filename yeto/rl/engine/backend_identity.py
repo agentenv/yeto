@@ -261,3 +261,27 @@ def check_identity_match(local: BackendIdentity, peer: BackendIdentity, *,
             f"local {local.to_dict()} ({local.sha256()[:12]}) vs "
             f"peer {peer.to_dict()} ({peer.sha256()[:12]})")
     return {}
+
+
+# Metrics a backend's trainer rounds report (``REPORTED_METRICS`` in
+# ``adapters/<backend>/identity.py``): the dashboard renders one a backend does not
+# report as "not reported by <backend>", never as a bare "n/a", and asks for the
+# metric, never for a backend name.
+METRIC_TRAIN_ROLLOUT_KL = "train_rollout_kl"  # trainer vs sampler logprobs (train_metrics.train_rollout_kl)
+METRIC_PPO_KL = "ppo_kl"  # trainer policy vs the batch's old logprobs (train_metrics.ppo_kl)
+ROUND_METRICS: frozenset[str] = frozenset({METRIC_TRAIN_ROLLOUT_KL, METRIC_PPO_KL})
+
+
+def reported_metrics(backend: str | None) -> frozenset[str]:
+    """The round metrics backend ``backend`` reports (its identity module's
+    ``REPORTED_METRICS``); every metric for a backend that declares none, is not
+    registered, or is not known (None): a missing value there is "not on the tape"."""
+    if not backend:
+        return ROUND_METRICS
+    from yeto.rl.engine import backends  # noqa: PLC0415
+
+    try:
+        declared = getattr(backends.module("identity", backend), "REPORTED_METRICS", None)
+    except (backends.UnknownBackend, ImportError):
+        return ROUND_METRICS
+    return ROUND_METRICS if declared is None else frozenset(declared) & ROUND_METRICS

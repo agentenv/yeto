@@ -139,6 +139,25 @@ def first_finite(record: dict, paths: Iterable[str]) -> float | None:
     return None
 
 
+def unreported_metrics(backend: str | None) -> dict[str, str]:
+    """``{metric: "not reported by <backend>"}`` for each round metric the island's backend
+    does not report (``yeto.rl.engine.backend_identity.reported_metrics``); empty for a
+    backend that reports them all or is not known."""
+    if not backend:
+        return {}
+    from yeto.rl.engine.backend_identity import ROUND_METRICS, reported_metrics  # noqa: PLC0415
+
+    return {m: f"not reported by {backend}" for m in sorted(ROUND_METRICS - reported_metrics(backend))}
+
+
+def backend_label(backend: str | None) -> str | None:
+    """The backend named on the island's card: one other than the default training
+    backend (``yeto.rl.engine.backends.DEFAULT_BACKEND``); None for the default or unknown."""
+    from yeto.rl.engine.backends import DEFAULT_BACKEND  # noqa: PLC0415
+
+    return backend if backend and backend != DEFAULT_BACKEND else None
+
+
 def ppo_kl(record: dict) -> float | None:
     """PPO KL of a trainer round record. ``mean_kl`` counts only when the record has no
     explicit KL key and it is not the record's train-rollout KL (the async driver writes
@@ -953,8 +972,13 @@ class Reducer:
                 isl["finalized_ts"] = ts
         elif event == "rl_island_override":
             isl["negative_test"] = negative_test_label(r.get("overrides"))
-        elif event == "rl_verl_island_start" or (event == "rl_engine_selected" and r.get("rl_backend") == "verl"):
-            isl["backend"] = "verl"  # verl reports no train-rollout / PPO KL on its rounds
+        elif event == "rl_verl_island_start":
+            isl["backend"] = "verl"
+        elif event == "rl_engine_selected" and (r.get("rl_backend") or (r.get("miles_commit") and not isl.get("backend"))):
+            # the island's training backend (its rl_backend; a Miles island writes only its miles_commit,
+            # which never overrides a backend the island named): what its rounds report is the
+            # backend's declaration (backend_identity.reported_metrics)
+            isl["backend"] = str(r.get("rl_backend") or "miles")
         elif event == "rl_reconfiguration":
             isl["reconfig"].append({"ts": ts, "result": r.get("result"), "rollout_id": r.get("rollout_id"),
                                     "cause": r.get("cause"), "error": r.get("error")})
@@ -1714,6 +1738,9 @@ class Reducer:
             "segments": self.resume_segments(isl),
             "negative_test": isl["negative_test"],
             "backend": isl.get("backend"),
+            # round metrics the island's backend does not report: shown as "not reported by <backend>"
+            "unreported": unreported_metrics(isl.get("backend")),
+            "backend_label": backend_label(isl.get("backend")),
         }
 
     def infer_hardware(self) -> None:
