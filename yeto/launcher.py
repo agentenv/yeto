@@ -524,30 +524,49 @@ def _lost_island_records(island_states) -> bool:
     return False
 
 
-def _claim_island_records(states, *, wait_s: float | None = None, sleep=None, clock=None):
+def _island_records_lock(args) -> str:
+    """The single-writer lock of this launch's island records: the run's
+    (:data:`ISLAND_RECORDS_LOCK`), or, for an island launch of a fleet launched island by
+    island (fleet role ``island``, learner id K: ``args.rl_fleet_role``, ``args.rl_fleet_learner_id``), its own island's
+    (``fleet/trainers/<k>/lock``): each island launch writes only its own record, next to
+    the other islands' launches, and none waits for or fences another."""
+    if getattr(args, "rl_fleet_role", None) == "island" and getattr(args, "rl_fleet_learner_id", None) is not None:
+        return f"fleet/trainers/{int(args.rl_fleet_learner_id)}/lock"
+    return ISLAND_RECORDS_LOCK
+
+
+def _claim_island_records(states, *, prefix: str = ISLAND_RECORDS_LOCK, wait_s: float | None = None,
+                          sleep=None, clock=None, others=()):
     """Claim the run store's single-writer lock on the island records
-    (``yeto.launch.pool.store_lock.StoreLock``, prefix :data:`ISLAND_RECORDS_LOCK`) and make
-    it the store's fence; a lease that runs (a launcher that just died, or a live one) is
-    waited on up to ``wait_s``. Returns ``(lock, None)``; ``(None, why)`` when a live
-    launcher keeps it; ``(None, None)`` on a store without an atomic create (records are
-    kept, nothing is adopted)."""
+    (``yeto.launch.pool.store_lock.StoreLock`` under ``prefix``: :func:`_island_records_lock`)
+    and make it the store's fence; a lease that runs (a launcher that just died, or a live
+    one) is waited on up to ``wait_s``. ``others``: lock prefixes that exclude this one (a
+    whole-fleet launch and the island-by-island launches of one run): one held live refuses
+    the claim. Returns ``(lock, None)``; ``(None, why)`` when a live launcher keeps it;
+    ``(None, None)`` on a store without an atomic create (records are kept, nothing is
+    adopted)."""
     from .launch.pool.store_lock import StoreLock, StoreLockError
 
     sleep, clock = sleep or time.sleep, clock or time.time
     deadline = clock() + (ISLAND_RECORDS_LOCK_TTL_S + 30.0 if wait_s is None else float(wait_s))
     while True:
         try:
-            lock = StoreLock.acquire(states.objects, ISLAND_RECORDS_LOCK, ttl_s=ISLAND_RECORDS_LOCK_TTL_S,
-                                     clock=clock)
+            lock = StoreLock.acquire(states.objects, prefix, ttl_s=ISLAND_RECORDS_LOCK_TTL_S, clock=clock)
         except StoreLockError as error:
             print(f"[launcher] island records: no single-writer lock on this store ({error}); records are "
                   "kept, no island is adopted", file=sys.stderr)
             return None, None
         if lock is not None:
+            busy = [o for o in others if StoreLock.holder_of(states.objects, o, now=clock()) is not None]
+            if busy:
+                lock.release()
+                return None, (f"another launcher of this run holds its island records under {busy[0]} (a "
+                              "whole-fleet launch and island-by-island launches of one run exclude each other)")
             states.fence = lock
-            print(f"[launcher] island records: lock token {lock.token} held by this launcher", flush=True)
+            print(f"[launcher] island records: lock {prefix} token {lock.token} held by this launcher",
+                  flush=True)
             return lock, None
-        holder = StoreLock.holder_of(states.objects, ISLAND_RECORDS_LOCK, now=clock()) or {}
+        holder = StoreLock.holder_of(states.objects, prefix, now=clock()) or {}
         now = clock()
         if now >= deadline:
             return None, (f"another launcher holds the island records of this run (lock token "
@@ -673,8 +692,17 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         from .launch.island_adopt import AdoptionUnknown
         from .launch.island_lifecycle import IslandRecordsUnreadable
 
-        island_lock, refusal = _claim_island_records(island_states)
+        # From the claim until this launcher supervises the fleet (the try below), any way out
+        # is hands off: another launcher may hold the records, or this one is about to adopt
+        # the islands its ledger still lists (a backstop cleanup would tear them down).
+        args._hands_off_exit = ISLAND_RECORDS_UNKNOWN_EXIT
+        lock_prefix = _island_records_lock(args)
+        island_lock, refusal = _claim_island_records(
+            island_states, prefix=lock_prefix,
+            others=[ISLAND_RECORDS_LOCK] if lock_prefix != ISLAND_RECORDS_LOCK else
+            [f"fleet/trainers/{k}/lock" for k in range(len(specs))])
         if refusal is not None:
+            args._hands_off_exit = ISLAND_RECORDS_LOCKED_EXIT
             island_states.close()
             print(f"[launcher] ERROR: {refusal}; nothing is launched and nothing of the run is torn down "
                   f"(exit {ISLAND_RECORDS_LOCKED_EXIT})", file=sys.stderr)
@@ -742,6 +770,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     verda = prepare_verda_islands(verda_names, on_instance_ids) if verda_names else None
     # Read by the finally block (Modal stop / tape pull) even on an early failure.
     modal_ops = None
+    modal_island_ops = None
     modal_cfgs: dict[str, object] = {}
     # Resident ssh: trainer islands (yeto.launch.ssh_resident): the fleet supervises them
     # over SSH; the finally block releases them and verifies every node.
@@ -751,6 +780,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     event_collectors: dict[str, EventCollector] = {}
 
     try:
+        if island_states is not None:  # supervising from here on: the finally decides hands off
+            args._hands_off_exit = None
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
         if no_sync:
             syncer_task = syncer_job = None
@@ -1420,8 +1451,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     except IslandRecordsUnconfirmed as error:
         # the store did not confirm the lock at an order: another launcher may hold it now
         hands_off_exit = ISLAND_RECORDS_UNKNOWN_EXIT
+        up = sorted(set(clusters) | set((modal_island_ops.calls if modal_island_ops is not None else None) or {}))
         print(f"[launcher] ERROR: {error}; nothing of the run is torn down here "
-              f"(exit {ISLAND_RECORDS_UNKNOWN_EXIT}): launch again once the store answers", file=sys.stderr)
+              f"(exit {ISLAND_RECORDS_UNKNOWN_EXIT}): launch again once the store answers (the next launcher "
+              f"adopts or takes down what is up: {up or 'nothing ordered yet'})", file=sys.stderr)
         return ISLAND_RECORDS_UNKNOWN_EXIT
     finally:
         if cost_guard is not None:

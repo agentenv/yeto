@@ -317,7 +317,7 @@ def test_a_second_launcher_while_one_holds_the_records_launches_nothing(monkeypa
     held = StoreLock.acquire(objects, launcher.ISLAND_RECORDS_LOCK, ttl_s=3600)  # a live first launcher
     assert held is not None
     real = launcher._claim_island_records
-    monkeypatch.setattr(launcher, "_claim_island_records", lambda states: real(states, wait_s=0))
+    monkeypatch.setattr(launcher, "_claim_island_records", lambda states, **kw: real(states, **kw, wait_s=0))
     code = launcher.run(_fleet_args(tmp_path))
     assert code == launcher.ISLAND_RECORDS_LOCKED_EXIT
     assert [r for r in record if r[0] in ("spawn", "stop_app")] == []  # nothing ordered, nothing touched
@@ -541,8 +541,8 @@ def test_a_launcher_that_lost_the_lock_orders_nothing_and_tears_nothing_down(mon
     _store(monkeypatch, tmp_path)
     real = launcher._claim_island_records
 
-    def claim_then_lose(states):
-        lock, why = real(states)
+    def claim_then_lose(states, **kw):
+        lock, why = real(states, **kw)
         lock.lost = LockLost(launcher.ISLAND_RECORDS_LOCK, lock.token, lock.token + 1)
         return lock, why
 
@@ -630,7 +630,7 @@ def test_the_worker_runs_no_backstop_cleanup_after_a_fenced_launcher(monkeypatch
     seen = []
     monkeypatch.setattr(cleanup_mod, "cleanup_run", lambda run, *a, **k: seen.append(run) or True)
     monkeypatch.setattr(cli, "_backstop_cleanup", lambda name, args: seen.append(name))
-    assert cli.cmd_worker("w") == 1
+    assert cli.cmd_worker("w") == launcher.ISLAND_RECORDS_LOCKED_EXIT
     assert seen == []
 
 
@@ -642,8 +642,8 @@ def test_an_unconfirmed_lock_at_an_order_orders_and_tears_down_nothing(monkeypat
     _store(monkeypatch, tmp_path)
     real = launcher._claim_island_records
 
-    def claim_then_unconfirmed(states):
-        lock, why = real(states)
+    def claim_then_unconfirmed(states, **kw):
+        lock, why = real(states, **kw)
 
         def guard():
             raise LockUnconfirmed("store does not answer")
@@ -806,3 +806,104 @@ def test_a_running_two_cluster_island_is_not_adopted(monkeypatch, tmp_path):
                                       states, object(),
                                       relaunch=True, ssh_names=set(), events_dir=None, echo_names=set(),
                                       held_name=None, syncer_cluster=None, two_cluster_names={"r-l0-aws"})
+
+
+# -- REV #750 round 4: hands off before supervision; per-island records locks --------------------
+
+def test_each_island_launch_holds_its_own_records_lock(tmp_path):
+    """Island launches of one fleet (``--rl-fleet-role island``) share the run store: each claims
+    the lock of its own record, so none waits for or fences another; a launch without a fleet
+    role keeps the run's lock, and the two kinds exclude each other."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    island = [types.SimpleNamespace(rl_fleet_role="island", rl_fleet_learner_id=k, rl_fleet_learners=2)
+              for k in (0, 1)]
+    prefixes = [launcher._island_records_lock(a) for a in island]
+    assert prefixes == ["fleet/trainers/0/lock", "fleet/trainers/1/lock"]
+    assert launcher._island_records_lock(types.SimpleNamespace()) == launcher.ISLAND_RECORDS_LOCK
+    assert launcher._island_records_lock(types.SimpleNamespace(rl_fleet_role="syncer",
+                                                               rl_fleet_learner_id=0)) == launcher.ISLAND_RECORDS_LOCK
+    store = lambda: lc.IslandStateStore(objects, log=lambda m: None)  # noqa: E731
+    locks = []
+    for prefix in prefixes:
+        lock, why = launcher._claim_island_records(store(), prefix=prefix, wait_s=0,
+                                                   others=[launcher.ISLAND_RECORDS_LOCK])
+        assert lock is not None and why is None
+        locks.append(lock)
+    again, why = launcher._claim_island_records(store(), prefix=prefixes[1], wait_s=0)
+    assert again is None and "another launcher" in why  # a second launcher of island 1
+    whole, why = launcher._claim_island_records(store(), wait_s=0, others=prefixes)
+    assert whole is None and "exclude each other" in why  # a whole-fleet launch of the same run
+    from yeto.launch.pool.store_lock import StoreLock
+
+    assert StoreLock.holder_of(objects, launcher.ISLAND_RECORDS_LOCK) is None  # it gave its claim back
+
+
+def test_a_store_error_while_claiming_is_hands_off_in_the_worker(monkeypatch, tmp_path):
+    """Before the launcher supervises the fleet (the claim, the plan, the cost guard), any way
+    out is hands off: the worker returns 13 and runs no backstop cleanup (the ledger may list
+    the islands this launcher was about to adopt). A SIGTERM while waiting for the lock too."""
+    import yeto.cli as cli
+    import yeto.cost.cleanup as cleanup_mod
+    from yeto import runs
+
+    for raised, name in ((OSError("store list timed out"), "w1"), (SystemExit(143), "w2")):
+        record, clock = [], Clock()
+        _setup(monkeypatch, tmp_path, failing=set(), succeeding={0, 1}, clock=clock, record=record)
+        _store(monkeypatch, tmp_path)
+
+        def claim(states, raised=raised, **kw):
+            raise raised
+
+        monkeypatch.setattr(launcher, "_claim_island_records", claim)
+        runs.create_run(name, vars(_fleet_args(tmp_path)))
+        seen = []
+        monkeypatch.setattr(cleanup_mod, "cleanup_run", lambda run, *a, **k: seen.append(run) or True)
+        monkeypatch.setattr(cli, "_backstop_cleanup", lambda n, args: seen.append(n))
+        assert cli.cmd_worker(name) == launcher.ISLAND_RECORDS_UNKNOWN_EXIT
+        assert seen == [] and runs.load_run(name)["exit_code"] == launcher.ISLAND_RECORDS_UNKNOWN_EXIT
+        assert [r for r in record if r[0] in ("spawn", "cancel", "stop_app", "down", "terminate")] == []
+
+
+def test_the_worker_returns_the_hands_off_exit_after_a_fenced_launcher_raised(monkeypatch, tmp_path):
+    """run up reads the worker's exit: 12, not 1, so its trainer down runs no `yeto down`."""
+    import yeto.cli as cli
+    from yeto import runs
+
+    monkeypatch.setenv("YETO_RUNS_DIR", str(tmp_path / "runs"))
+    runs.create_run("w", {"cluster_prefix": "w"})
+
+    def fenced_then_raise(args, **kw):
+        args._hands_off_exit = launcher.ISLAND_RECORDS_LOCKED_EXIT
+        raise RuntimeError("after the fence")
+
+    monkeypatch.setattr(launcher, "run", fenced_then_raise)
+    monkeypatch.setattr(cli, "_backstop_cleanup", lambda n, args: pytest.fail("backstop cleanup ran"))
+    assert cli.cmd_worker("w") == launcher.ISLAND_RECORDS_LOCKED_EXIT
+    meta = runs.load_run("w")
+    assert meta["exit_code"] == launcher.ISLAND_RECORDS_LOCKED_EXIT and meta["refused_launch"] is True
+
+
+def test_an_unconfirmed_lock_whose_lease_ran_out_is_lost(tmp_path):
+    """Not confirmed with this holder's own lease over: another machine may hold the records
+    now. Treated as lost (sticky): nothing ordered, nothing torn down."""
+    class Unconfirmed(BaseException):
+        pass
+
+    class Fence:
+        token, left = 1, 30.0
+
+        def guard(self):
+            raise Unconfirmed("store does not answer")
+
+        def lease_left(self):
+            return self.left
+
+    fence = Fence()
+    states = lc.IslandStateStore(DirectoryObjectStore(tmp_path / "s"), log=lambda m: None, fence=fence)
+    with pytest.raises(lc.IslandRecordsUnconfirmed):
+        states.guard_order("island 0")
+    assert states.fenced is None and launcher._lost_island_records(states) is False
+    fence.left = 0.0
+    with pytest.raises(lc.IslandRecordsFenced, match="lease ran out unconfirmed"):
+        states.guard_order("island 0")
+    assert states.fenced is not None and launcher._lost_island_records(states) is True

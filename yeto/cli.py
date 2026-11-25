@@ -1996,12 +1996,17 @@ def cmd_worker(name: str) -> int:
         import traceback
 
         traceback.print_exc()
+        hands_off = getattr(args, "_hands_off_exit", None)
+        if hands_off is not None:
+            # the run's islands are (or may be) another launcher's, or this one was about to adopt
+            # them: the exit says hands off (run up then runs no `yeto down`), no backstop cleanup
+            runs.update_run(name, state=runs.FAILED, exit_code=int(hands_off), finished_at=time.time(),
+                            refused_launch=True, **_stop_reason_field())
+            print(f"[yeto] {name}: launcher ended before it supervised the run, or after it lost the run's "
+                  f"island records (exit {hands_off}); nothing of the run was torn down", file=sys.stderr)
+            return int(hands_off)
         runs.update_run(name, state=runs.FAILED, exit_code=1, finished_at=time.time(),
                         **_stop_reason_field())
-        if getattr(args, "_hands_off_exit", None) is not None:  # fenced: the fleet is another launcher's
-            print(f"[yeto] {name}: this launcher lost the run's island records; no backstop cleanup",
-                  file=sys.stderr)
-            return 1
         _backstop_cleanup(name, args)
         return 1
     code = int(code or 0)

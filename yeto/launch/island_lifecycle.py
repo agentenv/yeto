@@ -483,8 +483,13 @@ class IslandStateStore:
                 raise
             except BaseException as error:  # noqa: BLE001 - the lock's errors are BaseExceptions
                 if not hasattr(error, "by"):
-                    raise IslandRecordsUnconfirmed(f"{what}: the island records' lock is not confirmed "
-                                                   f"({error}); nothing ordered now"[:400]) from None
+                    left = getattr(self.fence, "lease_left", None)
+                    if not (callable(left) and left() <= 0):
+                        raise IslandRecordsUnconfirmed(f"{what}: the island records' lock is not confirmed "
+                                                       f"({error}); nothing ordered now"[:400]) from None
+                    # not confirmed AND this holder's own lease ran out: another launcher may have
+                    # claimed the records meanwhile; treated as lost (nothing ordered or torn down)
+                    error = RuntimeError(f"lease ran out unconfirmed ({error})")
                 self.fenced = error
                 self.log(f"[launcher] island state store: fenced ({error}); this controller writes no "
                          "island record any more"[:400])
