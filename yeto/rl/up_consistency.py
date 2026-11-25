@@ -579,7 +579,9 @@ def pool_backlog(pool_cfg: dict[str, Any], *, auto: int | None = None) -> dict[s
     per_round = _positive_int(prompts.get("groups_per_round")) or 1
     cap = _positive_int(spec.get("max_backlog_groups"))
     if is_auto_backlog(spec):
-        cap = auto or sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS
+        own = pool_cfg.get("auto_backlog") if isinstance(pool_cfg.get("auto_backlog"), dict) else {}
+        # as the pool renders it: its own (an island fleet's pool), the run's, the fallback
+        cap = _positive_int(own.get("groups")) or auto or sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS
     backlog = pool_cfg.get("backlog")
     if backlog:
         from yeto.launch.nc import tasks  # noqa: PLC0415
@@ -615,14 +617,20 @@ def release_cadence(trainer_argv: list[str]) -> dict[str, Any] | None:
     (:func:`yeto.rl.engine.sample_roles.release_record_rounds`) and ``need``
     (:func:`yeto.rl.engine.sample_roles.release_backlog_need`, all samplers
     together). None for any other trainer."""
-    from yeto.rl.engine import sample_roles  # noqa: PLC0415
-
     args = trainer_args(trainer_argv)
     if args is None or getattr(args, "rl_sample_role", None) != "trainer" \
             or not getattr(args, "rl_single_island_no_sync", False):
         return None
+    return _cadence(args)
+
+
+def _cadence(args: Any, *, release_every: int | None = None) -> dict[str, Any] | None:
+    """:func:`release_cadence` of parsed trainer args; ``release_every`` (an island's own,
+    ``--rl-island-release-every``) replaces ``--rl-release-every``."""
+    from yeto.rl.engine import sample_roles  # noqa: PLC0415
+
     groups = _positive_int(getattr(args, "rollout_batch_size", None))
-    every = _positive_int(getattr(args, "rl_release_every", None)) or 1
+    every = _positive_int(release_every) or _positive_int(getattr(args, "rl_release_every", None)) or 1
     if groups is None:
         return None
     staged = getattr(args, "tuning", None) != "lora" and not getattr(args, "rl_release_inline", False)
@@ -648,12 +656,37 @@ def auto_backlog(trainer_argv: list[str], pools: list[tuple[dict[str, Any], str]
     samplers = sum(_positive_int(cfg.get("target")) or 0 for cfg, spec in specs if spec is not None)
     if cadence is None or samplers < 1:
         return None
+    return _auto_of(cadence, samplers)
+
+
+def _auto_of(cadence: dict[str, Any], samplers: int) -> dict[str, Any]:
+    from yeto.rl.engine import sample_roles  # noqa: PLC0415
+
     groups = sample_roles.auto_backlog_groups(groups_per_round=cadence["groups_per_round"],
                                               release_every=cadence["release_every"],
                                               record_rounds=cadence["m"], samplers=samplers)
     why = (f"ceil(((release_every {cadence['release_every']} + m {cadence['m']} + 1) x {cadence['groups_per_round']} + "
            f"{sample_roles.RELEASE_BACKLOG_MARGIN_GROUPS}) / samplers {samplers}) = {groups}")
     return {**cadence, "groups": groups, "why": why, "samplers": samplers}
+
+
+def island_auto_backlog(trainer_argv: list[str], pool_docs: list[dict[str, Any]], *,
+                        release_every: int | None = None) -> dict[str, Any] | None:
+    """:func:`auto_backlog` of one island of a fleet: each island's trainer is the buffer
+    trainer of its own pools (it reads only their shards, its samplers follow only its
+    releases), so the formula is the single trainer's with the island's trainer
+    (``trainer_argv``, the island's ``release_every``) and the target samplers of the
+    island's pools (``pool_docs``, compiled). None when none of them says ``"auto"``, the
+    argv does not parse or names no ``--rollout-batch-size``, or no pool has a target."""
+    specs = [(cfg, effective_spec(cfg)) for cfg in pool_docs]
+    if not any(is_auto_backlog(spec) for _cfg, spec in specs):
+        return None
+    args = trainer_args(trainer_argv)
+    cadence = None if args is None else _cadence(args, release_every=release_every)
+    samplers = sum(_positive_int(cfg.get("target")) or 0 for cfg, spec in specs if spec is not None)
+    if cadence is None or samplers < 1:
+        return None
+    return _auto_of(cadence, samplers)
 
 
 def store_problems(run_store: str, args: Any, pool_cfg: dict[str, Any], *, data_path: str = "r2") -> list[str]:

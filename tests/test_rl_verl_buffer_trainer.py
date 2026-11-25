@@ -266,7 +266,7 @@ class FakeBufferActor:
 
 
 def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None, limit=1,
-             releases=None, resume_versions=False, no_release=False, release_only=None, **ports):
+             releases=None, resume_versions=False, no_release=False, release_only=None, wait_s=30, **ports):
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland, FullyAsyncTrainerGroup
     from yeto.rl.adapters.verl.ports_impl import VerlPolicyState
@@ -288,7 +288,7 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None,
     rollout, publisher, placement = install_buffer_ports(
         island, buffer=buffer,
         releases=releases or PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
-        tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30, resume_versions=resume_versions,
+        tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=wait_s, resume_versions=resume_versions,
         no_release=no_release, release_only=release_only, **ports)
     profile = far.execution_profile_for(TOLERANT, 1, groups_per_round=required, samples_per_group=2, sync="none")
     driver = IslandDriver(
@@ -414,6 +414,57 @@ def test_a_relaunched_buffer_trainer_trains_the_groups_of_the_releases_it_finds(
     assert releases.latest().version == 4
     assert island.vmap.to_dict() == {"0": 3, "1": 4}  # verl's param versions still start at 0
     assert island.consume_map.to_dict() == {"1": 1, "2": 2, "3": 3, "4": 4}
+
+
+def _stale_backlog(tmp_path, *, stale, fresh):
+    """A relaunched buffer trainer (releases v1..v3 in the store) whose buffer holds
+    ``stale`` groups of v1 (age 2 > max_policy_age 1) and then ``fresh`` groups of v3."""
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    releases = PolicyReleaseStore(store, keep=4)
+    for version in (1, 2, 3):
+        _released(releases, version)
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for i in range(stale + fresh):
+        version = 1 if i < stale else 3
+        writer.write([_sample(version, index=0), _sample(version, index=1)], group_key=f"g{i}")
+    return store_dir, store, releases
+
+
+def test_a_round_drops_every_over_age_group_and_waits_for_newer_ones(tmp_path):
+    """More over-age groups than verl's old 8 x required pull cap (16 here): they are
+    dropped and counted (the round's trainer.policy_age record, as on a Miles trainer)
+    and the round fills from the newer groups behind them, instead of raising
+    ("only 0/2 within the policy-age limit", exit 1, taken for an infrastructure fault)."""
+    store_dir, store, releases = _stale_backlog(tmp_path, stale=40, fresh=2)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    driver, _island, _publisher = _trainer(tmp_path, store_dir, FakeBufferActor(), rounds=1, required=2,
+                                           base=base, releases=releases, resume_versions=True,
+                                           buffer=FileSampleBuffer(store, batch_size=1, create_index=False))
+    driver.run()
+    assert driver.rounds_completed == 1
+    tape = _lines(tmp_path / "tape.jsonl")
+    [round_event] = [e for e in tape if e["event"] == "rl_verl_fa_round"]
+    assert (round_event["pulled"], round_event["kept"], round_event["discarded"]) == (42, 2, 40)
+    [age] = [e for e in tape if e.get("breaker") == "trainer.policy_age" or e.get("name") == "trainer.policy_age"]
+    assert age["count"] == 40
+
+
+def test_only_a_wait_with_no_group_stops_the_island_as_trainer_sample_wait(tmp_path):
+    """Over-age groups only, then nothing: the island stops by trainer.sample_wait (the
+    deterministic stop, exit 11 in a fleet), not by a RuntimeError of the pull cap."""
+    from yeto.launch.island_lifecycle import island_stop_line
+    from yeto.rl.adapters.verl.buffer_feed import BufferFeedError
+
+    store_dir, store, releases = _stale_backlog(tmp_path, stale=40, fresh=0)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    driver, _island, _publisher = _trainer(tmp_path, store_dir, FakeBufferActor(), rounds=1, required=2,
+                                           base=base, releases=releases, resume_versions=True, wait_s=0.3,
+                                           buffer=FileSampleBuffer(store, batch_size=1, create_index=False))
+    with pytest.raises(BufferFeedError) as raised:
+        driver.run()
+    assert getattr(raised.value, "yeto_breaker", None) == "trainer.sample_wait"
+    assert island_stop_line(raised.value) is not None  # the whitelist: a deterministic stop
 
 
 def test_a_buffer_trainer_whose_store_holds_no_release_counts_from_zero(tmp_path):

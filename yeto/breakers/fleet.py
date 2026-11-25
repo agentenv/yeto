@@ -156,7 +156,28 @@ def _island_samplers(run_config: Mapping[str, Any], index: int) -> list[dict[str
     for i, pool in enumerate(entry.get("samplers") or ()):
         if isinstance(pool, Mapping) and not is_miles_sampler(pool):
             out.append({**pool, "name": pool_name(index, pool, i)})
-    return out
+    return _with_auto_backlog(run_config, index, out)
+
+
+def _with_auto_backlog(run_config: Mapping[str, Any], index: int, pools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``pools`` of island ``index`` with the ``"auto"`` backlog cap the fleet compile gives
+    them (``auto_backlog``, :func:`yeto.rl.fleet.island_auto_backlog`), so a view of the raw
+    run config reads the cap the samplers run with; unchanged when it cannot be derived."""
+    try:
+        from yeto.launch.rollout.pools import entry_doc  # noqa: PLC0415
+        from yeto.rl import up_consistency  # noqa: PLC0415
+
+        docs = [entry_doc(p, p["name"])[0] for p in pools]
+        auto = up_consistency.island_auto_backlog(island_trainer_argv(run_config, index), docs)
+        if auto is None:
+            return pools
+        name = _entries(run_config)[index].get("name")
+        cap = {"groups": int(auto["groups"]), "why": f"island {index} ({name}): {auto['why']}"}
+        return [{**p, "auto_backlog": cap}
+                if "auto_backlog" not in p and up_consistency.is_auto_backlog(up_consistency.effective_spec(d)) else p
+                for p, d in zip(pools, docs)]
+    except (OSError, ValueError, TypeError, KeyError):
+        return pools  # a pool that does not load: the pool dry-run reports it
 
 
 def island_price(run_config: Mapping[str, Any], index: int) -> float:

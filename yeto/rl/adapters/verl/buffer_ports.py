@@ -762,4 +762,11 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                                        delta=delta, resumed=resumed, no_release=no_release,
                                        release_only=release_only, background=release_background,
                                        release_mode=release_mode, release_every=release_every)
-    return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()
+    # No cap on discarded pulls, as on a Miles buffer trainer (batch_reader.BatchReader.take)
+    # and the relay pool: a group past the policy-age limit is dropped and counted (the
+    # round's trainer.policy_age record), and the round waits for newer ones. Only a wait
+    # with no group at all stops the island (trainer.sample_wait, the feed). With verl's
+    # 8 x required cap, samplers that wrote base-version groups before the trainer started
+    # made the island exit 1 (infrastructure) on its first rounds.
+    return (FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True, max_pulls_factor=0), publisher,
+            BufferPlacement())
