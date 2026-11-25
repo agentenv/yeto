@@ -154,6 +154,12 @@ def offer_cloud(offer: Offer) -> str:
     return str(res.get("cloud") or str(res.get("infra") or "").partition("/")[0]).strip().lower()
 
 
+def _listed_cloud(record: Any) -> str:
+    """The cloud of a cluster sky lists (its ``cloud`` field, or the handle's launched resources)."""
+    cloud = record.get("cloud") or getattr(getattr(record.get("handle"), "launched_resources", None), "cloud", None)
+    return str(cloud or "").strip().lower()
+
+
 def autodown_supported(offer: Offer) -> bool:
     """False when sky cannot autodown a cluster of this offer's cloud. An offer without a
     cloud keeps autodown: sky's optimizer then only picks clouds that have it."""
@@ -876,6 +882,9 @@ class SkyProvider:
             slot = next((s for s in self.slots if s not in busy), self.slots[0])
             rows[name] = {"slot": slot, "n": int(match.group(1)), "open": True,
                           "ordered_at": self.clock(), "adopted": True}
+            if _listed_cloud(rec) in NO_AUTODOWN_CLOUDS:  # its hard cap counts from its launch
+                launched = rec.get("launched_at")
+                rows[name].update(autodown=False, **({"ordered_at": float(launched)} if launched else {}))
             changed = True
         if changed:
             self._save_doc(doc)

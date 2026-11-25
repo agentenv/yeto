@@ -89,6 +89,9 @@ def preflight_commands(family: str) -> tuple[tuple[str, ...], ...]:
 
 # --- nvidia-smi / ppu-smi (NVML CSV) ----------------------------------------
 
+_FORM_FACTOR = re.compile(r"(?i)sxm\d*|pcie|nvl|hbm\d*e?")
+
+
 def _card_from_product_name(text: str) -> str:
     """Catalog card name inside a product name such as ``NVIDIA H200 NVL``.
 
@@ -96,13 +99,24 @@ def _card_from_product_name(text: str) -> str:
     known card wins. Nothing known -> :class:`UnknownCard` with the whole
     product name, so the launch refusal shows what the tool reported.
     """
-    for word in re.split(r"[\s/,]+", text.strip()):
-        if not word:
-            continue
+    words = [word for word in re.split(r"[\s/,]+", text.strip()) if word]
+    for word in words:
         try:
             return canonical_card(word)
         except UnknownCard:
             continue
+    # NVML joins the model and its form factor with '-' (``NVIDIA A100-SXM4-40GB``) or names
+    # it in several words (``NVIDIA RTX 6000 Ada Generation``): the longest run of parts,
+    # without the form factor, that the catalog knows (``A100-80GB``, ``RTX-6000-Ada``, ``A100``)
+    parts = [part for word in words for part in word.split("-") if part and not _FORM_FACTOR.fullmatch(part)]
+    for start in range(len(parts)):
+        for width in (3, 2, 1):
+            if start + width > len(parts):
+                continue
+            try:
+                return canonical_card("-".join(parts[start:start + width]))
+            except UnknownCard:
+                continue
     raise UnknownCard(f"card tool reports {text.strip()!r}, which is not in the "
                       "yeto card catalog; refusing the launch (an unknown card "
                       "is never treated as cuda)")

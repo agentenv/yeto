@@ -557,3 +557,19 @@ def test_the_launch_flag_validates_the_inventory_file(tmp_path):
     unset = SimpleNamespace(rl_node_inventory=None)
     _prepare_node_inventory(unset)
     assert unset.rl_node_inventory_nodes is None
+
+
+def test_nvidia_smi_names_with_a_form_factor_are_catalog_cards():
+    """Found on a real Verda A100 node: nvidia-smi says ``NVIDIA A100-SXM4-40GB`` (model and
+    form factor joined by '-'), and the preflight refused it as an unknown card."""
+    names = {"NVIDIA A100-SXM4-40GB": "A100", "NVIDIA A100-SXM4-80GB": "A100-80GB",
+             "NVIDIA A100-PCIE-40GB": "A100", "Tesla V100-SXM2-16GB": "V100",
+             "NVIDIA RTX 6000 Ada Generation": "RTX-6000-Ada", "NVIDIA H100 80GB HBM3": "H100",
+             "NVIDIA H200 NVL": "H200", "NVIDIA A100 80GB PCIe": "A100"}
+    for name, card in names.items():
+        assert [r.card for r in parse_card_tool("cuda", f"0, {name}, 40960\n")] == [card], name
+    assert len(check_cards("cuda", "0, NVIDIA A100-SXM4-40GB, 40960\n", card="A100", count=1, hbm_gib=40)) == 1
+    with pytest.raises(CardMismatch, match="A100-80GB"):
+        check_cards("cuda", "0, NVIDIA A100-SXM4-80GB, 81920\n", card="A100", count=1)
+    with pytest.raises(CardMismatch, match="not in the yeto card catalog"):
+        check_cards("cuda", "0, NVIDIA Z900-SXM9-1TB, 81920\n", card="A100", count=1)

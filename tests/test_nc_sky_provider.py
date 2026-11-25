@@ -1172,3 +1172,20 @@ def test_sky_attach_includes_its_alias_file_in_the_users_ssh_config(tmp_path, mo
     lines = user_config.read_text().splitlines()
     include = f"Include {cli.tunnel.state_dir() / 'ssh_config'}"
     assert lines[0] == include and lines.count(include) == 1 and "Host other" in lines
+
+
+def test_an_adopted_cluster_of_a_cloud_without_autodown_keeps_its_hard_cap():
+    """Found on real Verda: a later process adopted the cluster without the record's
+    autodown mark, so its lease end (the hard cap) was lost. The listing's cloud brings it
+    back, counted from sky's launch time."""
+    t = [1_000_000.0]
+    sky = FakeSky()
+    first = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60)
+    name = first.order(1)
+    sky.up(name)
+    sky.clusters[name].update(cloud="Verda", launched_at=1_000_030.0)
+    t[0] += 600
+    later = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60, record=first.record.with_name("b.json"))
+    assert [n for _, n in later.run_tickets()] == [name]
+    assert later._rows()[name]["autodown"] is False
+    assert later.status(1, name).lease_until == 1_000_030.0 + 3600
