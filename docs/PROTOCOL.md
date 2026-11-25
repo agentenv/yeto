@@ -837,6 +837,12 @@ stay until a newer generation rebinds them or, with a lease, the island has had
 no generation connected for one lease after the disconnect; then the syncer
 drops them the same way. Accepted pushes always keep their slot. Each release
 that took a slot from an open round writes a `pool_slots_released` record.
+When this leaves a round with no expected island and no push (every island it
+expected left), the round is relaunched at once with the islands connected and
+caught up then (the `round_attempt_timeout` record has `reason` `members_left`;
+with none connected it retries every second), instead of waiting for the
+quorum timeout. A fixed roster never releases a slot, so this never applies to
+it.
 
 At the end of the run the launcher waives the missing `rl_learner_finalized`
 record only for islands whose last syncer `pool_leave` reason is `finished`,

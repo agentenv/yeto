@@ -4367,6 +4367,10 @@ async fn scheduler(
     let mut step_rates = StepRates::default();
     // (step, attempt) whose quorum timeout is on the tape already.
     let mut timeouts_noted: HashSet<(u64, u32)> = HashSet::new();
+    // Attempts whose expected islands all left (LEAVE, lease, absence) with
+    // nothing pushed: relaunched at once with the members connected now,
+    // not at the quorum timeout (dynamic membership only).
+    let mut deserted_noted: HashSet<(u64, u32)> = HashSet::new();
     let mut arrival_gaps = ArrivalGaps::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
 
@@ -4738,6 +4742,11 @@ async fn scheduler(
         // immediately continues serving learner traffic while they run.
         retry_defers.retain_inflight(&inflight);
         let now = Instant::now();
+        if dynamic && !fixed_roster {
+            for (step, attempt) in relaunch_deserted_rounds(&mut inflight, &mut deserted_noted, now) {
+                info!(step, attempt, "every island of the round left; relaunching it now");
+            }
+        }
         let mut submitted_any = false;
         let mut i = 0;
         while i < inflight.len() {
@@ -4768,7 +4777,12 @@ async fn scheduler(
                     }
                     if stop_deadline.is_some() {
                         // Stopping: no new attempt; the round is launched again after --resume.
-                        append_round_timeout(&cfg, &inflight[i], "quorum_timeout", "abandoned");
+                        let reason = if deserted_noted.contains(&(inflight[i].t, inflight[i].attempt)) {
+                            "members_left"
+                        } else {
+                            "quorum_timeout"
+                        };
+                        append_round_timeout(&cfg, &inflight[i], reason, "abandoned");
                         let round = inflight.remove(i);
                         busy_fragments.remove(&round.p);
                         warn!(step = round.t, "stop: quorum timeout, round abandoned");
@@ -4813,7 +4827,13 @@ async fn scheduler(
                         catch_ups.holds(member) || resends.holds(member)
                     });
                     let required = cfg.membership.min_launch_members(cfg.quorum);
-                    let reason = if Instant::now() < r.quorum_deadline { "refused_ahead" } else { "quorum_timeout" };
+                    let reason = if Instant::now() < r.quorum_deadline {
+                        "refused_ahead"
+                    } else if deserted_noted.contains(&(r.t, r.attempt)) {
+                        "members_left"
+                    } else {
+                        "quorum_timeout"
+                    };
                     if groups.len() < required {
                         // Retried every second: one record per timed-out attempt.
                         if timeouts_noted.insert((r.t, r.attempt)) {
@@ -4845,6 +4865,14 @@ async fn scheduler(
                             refused = r.refused_ahead.len(),
                             "every expected island pushed from a base ahead of the resumed state; \
                              launching a new frozen-membership attempt"
+                        );
+                    } else if reason == "members_left" {
+                        info!(
+                            step = r.t,
+                            attempt = r.attempt,
+                            deferrals,
+                            members = groups.len(),
+                            "launching a new attempt with the islands connected now"
                         );
                     } else {
                         warn!(
@@ -6021,6 +6049,12 @@ impl Round {
         }
     }
 
+    /// Every island this attempt expected is gone (its slots released) and
+    /// none pushed: nobody can answer it any more.
+    fn deserted(&self) -> bool {
+        self.expected_members.is_empty() && self.pushes.is_empty()
+    }
+
     /// Drop an expired member from the islands this round still waits for.
     /// An accepted push is permanent and keeps its slot.
     fn forget_unanswered(&mut self, member: Member) -> bool {
@@ -6142,6 +6176,25 @@ fn round_action(round: &Round, now: Instant) -> RoundAction {
     } else {
         RoundAction::Wait
     }
+}
+
+/// Move the quorum deadline of each deserted attempt (every expected island
+/// left, nothing pushed) to `now`, once per (step, attempt): the relaunch path
+/// then runs at once, and its own retry cadence (every second while no island
+/// is ready) is left alone afterwards. Returns the attempts it moved.
+fn relaunch_deserted_rounds(
+    inflight: &mut [Round],
+    noted: &mut HashSet<(u64, u32)>,
+    now: Instant,
+) -> Vec<(u64, u32)> {
+    let mut moved = Vec::new();
+    for r in inflight.iter_mut().filter(|r| r.deserted() && r.quorum_deadline > now) {
+        if noted.insert((r.t, r.attempt)) {
+            r.quorum_deadline = now;
+            moved.push((r.t, r.attempt));
+        }
+    }
+    moved
 }
 
 /// Return a ready round only when it is the oldest in-flight global step.
@@ -14570,6 +14623,149 @@ mod tests {
         let released = text.lines().find(|line| line.contains("\"kind\":\"pool_slots_released\"")).expect("no release record");
         assert!(released.contains("\"island_id\":1,\"reason\":\"left\",\"steps\":[1]"), "{released}");
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// Every island of an open round leaves (LEAVE) before answering it, under
+    /// θ = 1.0 with a 3600 s quorum timeout. A new island joins afterwards: the
+    /// round is relaunched for it as soon as it is ready (its catch-up done),
+    /// not at the quorum timeout, and commits on its push.
+    #[tokio::test]
+    async fn a_round_whose_islands_all_left_is_relaunched_for_the_next_joiner() {
+        let layout = Layout {
+            fragments: (0..2)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![4],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let directory = unique_test_directory("deserted-round-relaunch");
+        let tape = directory.join("tape.jsonl");
+        let mut cfg = round_test_config(4);
+        cfg.learners = 2;
+        cfg.quorum = 1;
+        cfg.max_base_lag = Some(64);
+        cfg.quorum_timeout_s = 3600;
+        cfg.event_tape = Some(tape.clone());
+        cfg.membership.quorum_rule = crate::membership::QuorumRule::Capacity { theta: 1.0, q_min: 1 };
+        cfg.membership.lease = Some(Duration::from_secs(30));
+        cfg.membership.max_learners = Some(3);
+        let registry: Registry =
+            Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg.membership.clone(), 3))));
+        let budget_cutoff = Arc::new(BudgetCutoff::new(false, Duration::from_secs(cfg.quorum_timeout_s)));
+        let (events, events_rx) = mpsc::channel(64);
+        let (a, b, joiner) = (member(0, 1), member(1, 1), member(2, 1));
+        let (a_control, mut a_frames) = mpsc::channel(1024);
+        let (b_control, mut b_frames) = mpsc::channel(1024);
+        let (joiner_control, mut joiner_frames) = mpsc::channel(1024);
+        let a_group = scheduler_test_group(a, &layout, a_control);
+        let b_group = scheduler_test_group(b, &layout, b_control);
+        let joiner_group = scheduler_test_group(joiner, &layout, joiner_control);
+        for group in [a_group, b_group] {
+            registry.lock().unwrap().register_group(group.clone(), Instant::now()).unwrap();
+            events.send(Event::Hello { group }).await.unwrap();
+        }
+        for fragment_id in 0..2 {
+            let init = Event::Init { member: a, fragment_id, values: vec![0.0; 4], sha256: [0; 32] };
+            events.send(init).await.unwrap();
+        }
+        let wait_for = |needle: &'static str| {
+            let tape = tape.clone();
+            async move {
+                loop {
+                    let text = std::fs::read_to_string(&tape).unwrap_or_default();
+                    if text.contains(needle) {
+                        return text;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        let driver = async {
+            let pull = next_pull(&mut a_frames).await;
+            assert_eq!((pull.1, pull.2), (1, 1));
+            assert_eq!(next_pull(&mut b_frames).await, pull);
+            for gone in [a, b] {
+                events.send(Event::Leave { member: gone, reason: 2 }).await.unwrap();
+                registry.lock().unwrap().unregister(gone);
+                events.send(Event::Disconnected { member: gone }).await.unwrap();
+            }
+            registry.lock().unwrap().register_group(joiner_group.clone(), Instant::now()).unwrap();
+            events.send(Event::Hello { group: joiner_group }).await.unwrap();
+            let relaunched = tokio::time::timeout(Duration::from_secs(10), next_pull(&mut joiner_frames))
+                .await
+                .expect("the deserted round waits for its quorum timeout");
+            assert_eq!((relaunched.0, relaunched.1), (pull.0, 1));
+            assert!(relaunched.2 > 1, "a new attempt: {relaunched:?}");
+            let mut push = test_push_for(2, 0);
+            push.fragment_id = relaunched.0;
+            push.global_step = 1;
+            push.round_attempt = relaunched.2;
+            push.outer_gradient = vec![0.5; 4];
+            events.send(Event::Push { member: joiner, push }).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), wait_for("\"sync/responders\""))
+                .await
+                .expect("step 1 did not commit on the joiner's push")
+        };
+        let text = tokio::select! {
+            result = scheduler(cfg, events_rx, registry.clone(), budget_cutoff) => panic!("scheduler ended: {result:?}"),
+            text = driver => text,
+        };
+        let record = text.lines().find(|line| line.contains("\"sync/responders\"")).unwrap();
+        assert!(record.contains("\"step\":1,") && record.contains("\"responded\":[2],"), "{record}");
+        let relaunch = text
+            .lines()
+            .find(|line| line.contains("\"kind\":\"round_attempt_timeout\"") && line.contains("\"next\":\"new_attempt\""))
+            .expect("no relaunch record");
+        assert!(relaunch.contains("\"reason\":\"members_left\""), "{relaunch}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A fixed roster never releases a slot, so it never sees a deserted
+    /// round; a round whose expected set is empty (dynamic membership) still
+    /// never completes on nothing.
+    #[test]
+    fn a_deserted_round_has_no_island_and_no_push() {
+        let gone = member(0, 10);
+        let mut round = test_round(vec![gone]);
+        assert!(!round.deserted());
+        assert!(round.forget_unanswered(gone));
+        assert!(round.deserted());
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait, "never merges nothing");
+        let mut answered = test_round(vec![gone]);
+        answered.pushes.insert(gone, test_push(5));
+        assert!(!answered.forget_unanswered(gone));
+        assert!(!answered.deserted(), "an accepted push keeps the round");
+        // Even with its expected set empty, a round holding a push is not deserted.
+        answered.expected_members.clear();
+        assert!(!answered.deserted(), "a push is never relaunched away");
+    }
+
+    #[test]
+    fn a_deserted_attempt_is_relaunched_once_then_keeps_its_retry_cadence() {
+        let gone = member(0, 10);
+        let now = Instant::now();
+        let mut deserted = test_round(vec![gone]);
+        deserted.forget_unanswered(gone);
+        deserted.quorum_deadline = now + Duration::from_secs(900);
+        let mut alive = test_round(vec![member(1, 20)]);
+        alive.quorum_deadline = now + Duration::from_secs(900);
+        let mut rounds = vec![deserted, alive];
+        let mut noted = HashSet::new();
+        assert_eq!(relaunch_deserted_rounds(&mut rounds, &mut noted, now), vec![(7, 1)]);
+        assert_eq!(rounds[0].quorum_deadline, now, "relaunched at once");
+        assert_eq!(rounds[1].quorum_deadline, now + Duration::from_secs(900), "a round with islands waits");
+        // No island ready: the relaunch path defers by a second; later passes leave that alone.
+        let retry = now + Duration::from_secs(1);
+        rounds[0].quorum_deadline = retry;
+        let later = now + Duration::from_millis(10);
+        assert!(relaunch_deserted_rounds(&mut rounds, &mut noted, later).is_empty());
+        assert_eq!(rounds[0].quorum_deadline, retry, "the retry cadence is kept");
+        // A new attempt that loses every island again is relaunched again.
+        rounds[0].attempt = 2;
+        rounds[0].quorum_deadline = now + Duration::from_secs(900);
+        assert_eq!(relaunch_deserted_rounds(&mut rounds, &mut noted, later), vec![(7, 2)]);
     }
 
     /// The syncer-side tape records the dashboard draws from: the syncer's

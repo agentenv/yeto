@@ -798,6 +798,17 @@ def test_round_open_shows_a_pull_without_push_and_its_timeouts():
     assert links["0"] is None and links["1"]["state"] == "disconnected" and links["1"]["since"] == mid - 5
 
 
+def test_a_round_relaunched_because_its_islands_left_is_not_a_timeout():
+    """A ``members_left`` attempt record (every island of the round left, the syncer relaunched
+    it at once) is shown as such and never counted as a quorum timeout."""
+    reducer, mid, ahead = _run_b_with_p1_records()
+    left = {"kind": "round_attempt_timeout", "global_step": ahead, "fragment": (ahead - 1) % 4, "attempt": 2,
+            "reason": "members_left", "next": "new_attempt", "time_unix": mid - 10}
+    reducer.feed(left, source="yeto-tape.jsonl#p1", offset=99)
+    r = next(x for x in diloco(reducer, now=mid)["rounds"] if x["step"] == ahead)
+    assert (r["timeouts"], r["members_left"]) == (1, True)  # only the attempt-1 quorum timeout counts
+
+
 def test_bcast_flows_use_the_syncer_and_island_stamps(tmp_path):
     """Merge bcast_unix starts a BCAST window and the island's received_unix ends it (older tapes:
     the merge time and the apply record minus its queue time)."""

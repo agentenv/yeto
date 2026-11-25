@@ -387,7 +387,7 @@ function paint(){
     var c=st==="done"?C.ink2:st==="waiting for quorum"?(sh.attempt_max>1?C.bad:C.warn):st==="merging"?C.wt:st==="gathering"?C.good:C.ink2;
     fitText(o.st,(st==="done"?"done (final cut)":st)+" · in flight "+mine.length+(D.behind?" · syncer tape behind":""),o.lw-14);o.st.style.fill=c===C.good?C.ink:c;o.dot.setAttribute("fill",c);
     o.box.style.stroke=c===C.bad?C.bad:"";
-    var lines=mine.slice(0,3).map(function(r){return["t"+r.step+" f"+r.frag+": "+(r.state==="merging"?"merging":r.state==="pull"?"PULL out":"PUSH "+r.pushed.length+"/"+D.M)+" · "+dur(tn-r.since)+(r.attempt>1?" · attempt "+r.attempt:"")+(r.timeouts?" · "+r.timeouts+" timeout"+(r.timeouts>1?"s":""):""),r.blocked||r.timeouts?C.warn:C.ink2]});
+    var lines=mine.slice(0,3).map(function(r){return["t"+r.step+" f"+r.frag+": "+(r.state==="merging"?"merging":r.state==="pull"?"PULL out":"PUSH "+r.pushed.length+"/"+D.M)+" · "+dur(tn-r.since)+(r.attempt>1?" · attempt "+r.attempt:"")+(r.timeouts?" · "+r.timeouts+" timeout"+(r.timeouts>1?"s":""):"")+(r.members_left?" · all islands left, relaunched":""),r.blocked||r.timeouts?C.warn:C.ink2]});
     lines.push([last?"last merge t"+last.step+" f"+last.frag+" · quorum "+dur(last.quorum_s)+" · merge "+(fin(last.merge_s)?last.merge_s.toFixed(2)+"s":"—"):"no merge yet",C.ink2]);
     // the host-wide syncer tape held only an earlier run's syncer: not this run's, not drawn
     if(!last&&D.foreign_tape){lines.push(["no syncer tape for this run",C.warn]);

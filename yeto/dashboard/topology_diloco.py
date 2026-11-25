@@ -304,11 +304,13 @@ def syncer_state(merges: list[dict], p: int | None, n: int) -> dict:
 
 def syncer_records(reducer) -> dict:
     """The syncer's own records (P1 tapes; empty on older tapes): its config per shard, the
-    attempts it opened (PULL sent) per global step, its quorum timeouts per step and each
-    island's last connection record (by learner id)."""
+    attempts it opened (PULL sent) per global step, its quorum timeouts per step, the attempts
+    it relaunched at once because every island of the round left (``members_left``, not a
+    timeout) and each island's last connection record (by learner id)."""
     configs: dict[int, dict] = {}
     opens: dict[int, dict] = {}
     timeouts: dict[int, list[dict]] = {}
+    relaunched: dict[int, list[dict]] = {}
     members: dict[str, dict] = {}
     for r in getattr(reducer, "syncer_records", ()):
         k = r.get("kind")
@@ -319,10 +321,11 @@ def syncer_records(reducer) -> dict:
             if (_int(r.get("attempt")) or 1) >= (_int((opens.get(step) or {}).get("attempt")) or 0):
                 opens[step] = r
         elif k == "round_attempt_timeout" and _int(r.get("global_step")) is not None:
-            timeouts.setdefault(_int(r["global_step"]), []).append(r)
+            into = relaunched if r.get("reason") == "members_left" else timeouts
+            into.setdefault(_int(r["global_step"]), []).append(r)
         elif k in ("member_connected", "member_disconnected") and r.get("learner_id") is not None:
             members[str(r["learner_id"])] = r
-    return {"configs": configs, "opens": opens, "timeouts": timeouts, "members": members}
+    return {"configs": configs, "opens": opens, "timeouts": timeouts, "relaunched": relaunched, "members": members}
 
 
 def config_summary(configs: dict[int, dict]) -> dict | None:
@@ -429,6 +432,7 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         r["age_s"] = now - r["since"]
         r["state"] = "merging" if len(r["pushed"]) >= m_size else "gathering" if r["pushed"] else "pull"
         r["timeouts"] = len(srec["timeouts"].get(r["step"], ()))
+        r["members_left"] = bool(srec["relaunched"].get(r["step"]))
         r["blocked"] = r["state"] != "merging" and r["age_s"] > sy["open_limit_s"]
         r["missing"] = [i for i in (expected or trainer_ids) if i not in r["pushed"]]
         rounds.append(r)
