@@ -11,7 +11,7 @@ Miles islands on any device family can share a session.
 
 from __future__ import annotations
 
-from yeto.rl.engine.backend_identity import BackendIdentity, param_map_sha256
+from yeto.rl.engine.backend_identity import PER_LEARNER_RELEASE, BackendIdentity, param_map_sha256
 
 from .param_names import PARAM_MAP
 from .pins import VERL_COMMIT
@@ -28,6 +28,10 @@ PARAM_MAP_SHA256 = param_map_sha256(PARAM_MAP)
 # island do not share a session contract; --rl-identity relaxed: provenance.
 MEGATRON_PARAM_MAP = {"names": "megatron-core module paths", "export": "megatron-bridge export_hf_weights"}
 PARAM_MAP_SHA256_BY_BACKEND = {"fsdp2": PARAM_MAP_SHA256, "megatron": param_map_sha256(MEGATRON_PARAM_MAP)}
+# What the verl adapter implements (``yeto.rl.engine.backend_identity``): a buffer trainer
+# releases its own local versions into its sub-store trainer<k> (``--rl-release-mode
+# per_learner``, ``buffer_ports`` module doc).
+CAPABILITIES: frozenset[str] = frozenset({PER_LEARNER_RELEASE})
 
 
 def backend_identity(*, device_family: str | None = None,

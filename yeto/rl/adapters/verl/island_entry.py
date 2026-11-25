@@ -333,6 +333,38 @@ def wide_prompt_rows(args: Any) -> bool:
             and sample_roles.sample_role(args) == sample_roles.TRAINER)
 
 
+def island_prompt_width(args: Any, buffer_section: dict | None) -> int:
+    """The prompt row width of this island (``data.max_prompt_length``):
+
+    * :func:`wide_prompt_rows` (an agentic island, a relay buffer trainer): the
+      sequence budget, at least 512, as before;
+    * a store buffer trainer (``--rl-sample-role trainer``, not the relay) with
+      ``--rl-buffer-max-prompt-len N`` (its pools' ``agentic.max_prompt_len``), or
+      with per-learner releases (an island fleet's trainer, whose pools may write
+      prompts of any length up to the engine context): the pools' bound, else the
+      sequence budget ``--seq-len - --rollout-max-response-len``
+      (``buffer_feed.buffer_prompt_width``). Rows wider than ``--seq-len`` refuse
+      the start: a group the rows cannot hold would be dropped whole;
+    * every other island: 512 (``buffer_feed.LEGACY_PROMPT_WIDTH``), unchanged.
+    """
+    from .buffer_feed import LEGACY_PROMPT_WIDTH, PromptWidthError, buffer_prompt_width
+    from .run_flags import PER_LEARNER_RELEASE
+
+    seq, response = int(args.seq_len), int(args.rollout_max_response_len)
+    explicit = getattr(args, "rl_buffer_max_prompt_len", None)
+    if explicit is not None and (buffer_section is None or wide_prompt_rows(args)):
+        raise SystemExit("--rl-buffer-max-prompt-len is for a verl buffer trainer reading the store "
+                         "(--rl-sample-role trainer, no --rl-sample-relay)")
+    if wide_prompt_rows(args):
+        return max(LEGACY_PROMPT_WIDTH, seq - response)
+    if buffer_section is None or (explicit is None and buffer_section.get("release_mode") != PER_LEARNER_RELEASE):
+        return LEGACY_PROMPT_WIDTH
+    try:
+        return buffer_prompt_width(seq_len=seq, response_len=response, pool_max_prompt_len=explicit)
+    except PromptWidthError as error:
+        raise SystemExit(str(error)) from None
+
+
 def agentic_island(args: Any) -> bool:
     """``--rl-agentic-harbor``: the rollout runs Harbor trials (``harness_env.is_harbor_agent``)."""
     return bool(getattr(args, "rl_agentic_harbor", False))
@@ -746,9 +778,9 @@ def main(argv=None) -> int:
     # A spot relay trainer holds the same agentic rows: the spot
     # islands that wrote them are agentic, the trainer has no --rl-agentic-harbor of
     # its own, and a 512 cap refused the first group (prompt 7940 tokens,
-    # BufferFeedError). Other buffer trainers keep the 512 default.
-    max_prompt = (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
-                  if wide_prompt_rows(args) else 512)
+    # BufferFeedError). A store buffer trainer takes its pools' prompt bound or
+    # its sequence budget when the launch names them (island_prompt_width).
+    max_prompt = island_prompt_width(args, buffer_section)
     ahead, limit = rollout_ahead_of(args)  # limit: the fully_async path's (0 with rollout ahead)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
     pools = None
@@ -1469,6 +1501,7 @@ def sample_buffer_section(args) -> dict | None:
     except ValueError as error:
         raise SystemExit(str(error)) from None
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
+    release = release_mode_fields(args, lane, release_every=config.release_every)
     return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env(),
             # staged bf16 delta releases (0: the release goes into the store whole)
             "release_delta_full_every": int(config.release_delta_full_every or 0),
@@ -1476,7 +1509,34 @@ def sample_buffer_section(args) -> dict | None:
             **({"release_background": True} if getattr(args, "rl_release_background", False) else {}),
             **({"release_only": list(args.rl_release_only_versions)}
                if getattr(args, "rl_release_only_versions", None) is not None else {}),
-            **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
+            **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {}),
+            **release}
+
+
+def release_mode_fields(args, lane, *, release_every: int) -> dict:
+    """The plan fields of ``--rl-release-mode`` / ``--rl-release-every`` on a buffer
+    trainer ({} for the default: a merged release mode, every version released, so
+    the plan is unchanged). ``per_learner`` (an island fleet,
+    ``buffer_ports`` module doc) needs a synced trainer reading its own lane
+    (``--rl-sample-lanes 1`` over its sub-store ``trainer<k>``) through the store,
+    not the relay; ``--rl-release-every N > 1`` counts its local versions and is
+    refused in the merged mode (a synced group releases every merge)."""
+    from yeto.rl.engine.merged_release import OWN_LANE
+
+    from .run_flags import MERGED_RELEASE, PER_LEARNER_RELEASE
+
+    mode = getattr(args, "rl_release_mode", None) or MERGED_RELEASE
+    per_learner = mode == PER_LEARNER_RELEASE
+    if per_learner and (lane != OWN_LANE or getattr(args, "rl_sample_relay", False)):
+        raise SystemExit("--rl-release-mode per_learner needs a synced verl buffer trainer reading its own "
+                         "sub-store (--rl-sample-role trainer, a syncer, --rl-sample-store <store>/trainer<k> "
+                         "--rl-sample-lanes 1, no --rl-sample-relay)")
+    if int(release_every) > 1 and not per_learner:
+        raise SystemExit(f"--rl-release-every {int(release_every)} on a verl buffer trainer needs "
+                         "--rl-release-mode per_learner (an island fleet's trainer); otherwise it "
+                         "releases every version, or every merge")
+    return {**({"release_mode": PER_LEARNER_RELEASE} if per_learner else {}),
+            **({"release_every": int(release_every)} if int(release_every) != 1 else {})}
 
 
 def spot_rollout_env(args, buffer_section: dict | None) -> dict[str, str]:
@@ -1625,4 +1685,15 @@ if __name__ == "__main__":
     from yeto.island_credential_guard import check_island_credentials
 
     check_island_credentials()
-    sys.exit(main())
+    try:
+        # the training process (verl_main) ends a deterministic stop with ISLAND_STOP_EXIT,
+        # and main() returns its code; a stop raised in this process ends the same way
+        code = main()
+    except Exception as error:  # noqa: BLE001 - re-raised unless a deterministic stop
+        from yeto.config_errors import island_stop_exit
+
+        stop = island_stop_exit(error)
+        if stop is None:
+            raise
+        raise SystemExit(stop) from error
+    sys.exit(code)

@@ -143,7 +143,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         from yeto.rl.engine.sample_buffer import open_trainer_buffer
 
         from .buffer_feed import RowShape, xhw_guard_enabled
-        from .buffer_ports import install_buffer_ports, release_weights_for
+        from .buffer_ports import MERGED_RELEASE, install_buffer_ports, release_weights_for
         from .island_entry import TRAINER_FP8_KEY, start_trainer_releaser
         from .relay_trainer import RELAY_SECTION_KEY, install_relay_ports, relay_buffer
         from .trainer import run_fully_async_island
@@ -216,6 +216,10 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         # encode and upload each staged release on a worker
                                         # thread while the next rounds train
                                         release_background=bool(section.get("release_background")),
+                                        # an island fleet's trainer releases its local
+                                        # versions into its own sub-store, every N-th one
+                                        release_mode=str(section.get("release_mode") or MERGED_RELEASE),
+                                        release_every=int(section.get("release_every") or 1),
                                         # This island counts its own
                                         # versions, so a new process of it continues the
                                         # account above the store's newest release
