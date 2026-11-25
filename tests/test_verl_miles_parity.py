@@ -549,10 +549,22 @@ def run_catch_up_case(syncer_binary, tmp_path, monkeypatch, *, harness=_Fsdp2Har
     island_1 = [r for r in records if r.get("island_id") == 1]
     rejoin = next(i for i, r in enumerate(island_1) if r.get("kind") == "pool_join" and r.get("catch_up"))
     assert any(r["kind"] == "delta_accepted" for r in island_1[rejoin + 1:]), "the restarted island never contributed"
-    # The round island 0 left closed with the restarted island's delta alone.
+    # The round island 0 left closed with the restarted island's push alone. Its raw weights
+    # may also hold a delta of island 0 carried in from an earlier round of the same fragment:
+    # a push that missed its round (quorum 1 closes a round with its first push) is carried into
+    # the next round of its fragment by design (docs/PROTOCOL.md, "A late push is carried into
+    # the next round of its fragment"), merged against its own older base and taped as
+    # delta_carried_over. That is not a push for this round: island 0 stays absent from it.
     assert len(leave["left"]) == 1, "the restarted island never got a PULL that island 0 could leave to it"
-    closed_by = {r["step"]: r["raw_weights"] for r in records if r.get("kind") == "outer_step"}
-    assert [weight[0] for weight in closed_by[leave["left"][0]]] == [1], (leave["left"], closed_by.get(leave["left"][0]))
+    step = leave["left"][0]
+    closed = next(r for r in records if r.get("kind") == "outer_step" and r["step"] == step)
+    carried = {(r["island_id"], r["step"]): r["missed_step"] for r in records if r.get("kind") == "delta_carried_over"}
+    pushed = [int(learner) for learner, base, _ in closed["raw_weights"] if int(base) == closed["base_version"]]
+    older = [(int(learner), int(base)) for learner, base, _ in closed["raw_weights"]
+             if int(base) != closed["base_version"]]
+    assert pushed == [1] and closed["arrived"] == 1 and 0 in closed["absent"], (step, closed)
+    assert all(base < closed["base_version"] and carried.get((learner, step), step) < step
+               for learner, base in older), (step, closed, carried)
 
 
 @needs_cargo
