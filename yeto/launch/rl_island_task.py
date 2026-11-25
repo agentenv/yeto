@@ -49,6 +49,7 @@ from .in_vm_docker import (
     DOCKER_LOGIN_UNSET, IN_VM_DOCKER_CLOUDS, in_vm_docker_run, in_vm_docker_setup,
 )
 from .harness_env import check_compaction_launch, harbor_example_pythonpath
+from .trainer_image_check import NO_SKY_DOCKER_CLOUDS, sky_pull_image
 
 
 
@@ -771,9 +772,10 @@ def make_miles_island_task(
     if in_vm_docker:
         # C block: sky's docker runtime is unavailable here; the same setup
         # and run execute inside `docker run` of the same pinned image.
+        pulled = sky_pull_image(args.rl_image)  # the overlay-safe repack of a pin that has one
         setup_script, run_script = (
-            in_vm_docker_setup(args.rl_image, login=bool(registry_login)),
-            in_vm_docker_run(args.rl_image, setup_script, run_script,
+            in_vm_docker_setup(pulled, login=bool(registry_login)),
+            in_vm_docker_run(pulled, setup_script, run_script,
                              [*envs.keys(), *env_secrets.keys(), *island_hmac_secret(args).keys()],
                              learner_id),
         )
@@ -839,7 +841,10 @@ def island_sky_resources(args, spec, *, in_vm_docker: bool) -> dict:
         "disk_size": args.disk_size,
     }
     if not in_vm_docker:  # Verda: the VM image stays the cloud default; the container is ours
-        resources["image_id"] = nebius_baked_image_id(args.rl_image, spec.cloud, spec.region)
+        # sky's `docker pull` on the VM: the overlay-safe repack of a pin that has one
+        # (trainer_image_check.sky_pull_image; a Modal island never reads image_id)
+        image = args.rl_image if spec.cloud in NO_SKY_DOCKER_CLOUDS else sky_pull_image(args.rl_image)
+        resources["image_id"] = nebius_baked_image_id(image, spec.cloud, spec.region)
     if spec.num_nodes > 1 and getattr(args, "rl_island_network_tier", "auto") != "none":
         tier = multinode_network_tier(spec.cloud, spec.gpu, spec.gpus_per_node)
         if tier:

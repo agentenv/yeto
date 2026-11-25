@@ -228,6 +228,22 @@ def _island_engine_rows(args, m) -> list[dict]:
     return [r for r in island_engine.records(args, rl_island_count(args)) if r["island"] == m]
 
 
+def _sky_overlay_swap(iargs, cloud) -> dict | None:
+    """``{"pinned", "pulled", "why"}`` when the sky VM of a trainer island pulls the
+    overlay-safe repack of its ``--rl-image`` (trainer_image_check.sky_pull_image),
+    else None (a Modal or ssh island, or an image that pulls as it is)."""
+    from .launch.trainer_image_check import NO_SKY_DOCKER_CLOUDS, sky_pull_image
+
+    image = getattr(iargs, "rl_image", None)
+    if str(cloud or "").lower() in NO_SKY_DOCKER_CLOUDS or not isinstance(image, str):
+        return None
+    pulled = sky_pull_image(image)
+    if pulled == image:
+        return None
+    return {"pinned": image, "pulled": pulled,
+            "why": "a layer of the pin whites out a path and writes it again: docker on a VM refuses it"}
+
+
 def _island_role(args, specs, m) -> str | None:
     """rl-spot-cost-saving phase 2: island m's role (anchor | droppable), None without
     --rl-island-role. Admission already ran in pre_cloud_checks; it is re-run here
@@ -1816,6 +1832,8 @@ def dry_run_plan(args) -> dict:
             entry["placement"] = placements[learner_id]
         if rl and (pulled := _pulled_rl_image(rl_island_args(args, learner_id), spec.cloud)) is not None:
             entry["trainer_image"] = pulled  # only such an island gets the key: every other plan is unchanged
+        if rl and (swap := _sky_overlay_swap(rl_island_args(args, learner_id), spec.cloud)) is not None:
+            entry["overlay_safe_image"] = swap  # only such an island gets the key: every other plan is unchanged
         if rl and rl_island_spec(rl_island_args(args, learner_id), spec) is not spec:
             entry["allocated_gpus_per_node"] = rl_island_spec(
                 rl_island_args(args, learner_id), spec).gpus_per_node

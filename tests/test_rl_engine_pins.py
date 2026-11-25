@@ -345,17 +345,33 @@ def test_overlay_safe_digests_map_a_rejected_image_to_its_repack_of_the_same_com
 
     for broken, fixed in pins.OVERLAY_SAFE_DIGESTS.items():
         assert len(broken) == len(fixed) == 64 and broken != fixed
-        assert pins.IMAGE_MILES_COMMITS[fixed] == pins.IMAGE_MILES_COMMITS[broken]
-    # the mapping holds the legacy pair (the former full image and its repack); the
-    # full-image default (next9) is overlay-safe as built
+        # the same Miles commit (None: the default MILES_NEXT_COMMIT on both sides)
+        assert pins.IMAGE_MILES_COMMITS.get(fixed) == pins.IMAGE_MILES_COMMITS.get(broken)
+        assert pins.overlay_unsafe_image("r/o/yeto-miles-k31@sha256:" + broken)
+        assert not pins.overlay_unsafe_image("r/o/yeto-miles-k31@sha256:" + fixed)
+    # the mapping holds the legacy pair (the former full image and its repack) and the
+    # LoRA / generic default MILES_K31_IMAGE with its repack; the full-image default
+    # (next9) is overlay-safe as built
     legacy, safe = "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b", \
         pins.MILES_K31_FULL_OVERLAYFIX_IMAGE
-    assert pins.OVERLAY_SAFE_DIGESTS == {legacy: safe.rpartition("@sha256:")[2]}
+    lora, lora_safe = (i.rpartition("@sha256:")[2] for i in (pins.MILES_K31_IMAGE, pins.MILES_K31_OVERLAYFIX_IMAGE))
+    assert pins.OVERLAY_SAFE_DIGESTS == {legacy: safe.rpartition("@sha256:")[2], lora: lora_safe}
+    assert pins.overlay_safe_image(pins.MILES_K31_IMAGE) == pins.MILES_K31_OVERLAYFIX_IMAGE
+    assert pins.image_miles_commit(pins.MILES_K31_OVERLAYFIX_IMAGE) is None  # MILES_NEXT_COMMIT (FULL_D)
+    assert pins.MILES_NEXT_COMMIT == pins.MILES_K31_FULL_D_COMMIT
     assert pins.overlay_safe_image(pins.MILES_K31_FULL_IMAGE) is None  # no repack
     assert pins.overlay_safe_image(pins.MILES_K31_NEXT9_IMAGE) is None  # nothing to repack
+    assert not pins.overlay_unsafe_image(pins.MILES_K31_NEXT9_IMAGE)
+    # FULL_D 63ad0d2a: refused by overlay appliers, no repack
+    full_d = "r/o/yeto-miles-k31@sha256:" + pins.OVERLAY_UNSAFE_UNREPACKED[0]
+    assert pins.overlay_unsafe_image(full_d) and pins.overlay_safe_image(full_d) is None
+    # the cluster preflight's list is the same set
+    from yeto.launch.preflight import cluster as cp
+
+    assert set(cp.OVERLAY_UNSAFE_DIGESTS) == set(pins.OVERLAY_SAFE_DIGESTS) | set(pins.OVERLAY_UNSAFE_UNREPACKED)
     # the registry part of the reference is kept; a docker: prefix too
     mirror = "registry.example/org/yeto-miles-k31@sha256:" + legacy
     assert pins.overlay_safe_image(mirror) == "registry.example/org/yeto-miles-k31@sha256:" \
         + safe.rpartition("@sha256:")[2]
-    for ref in (safe, pins.MILES_K31_IMAGE, "ghcr.io/o/x:tag", "", None):
+    for ref in (safe, pins.MILES_K31_OVERLAYFIX_IMAGE, "ghcr.io/o/x:tag", "", None):
         assert pins.overlay_safe_image(ref) is None

@@ -40,7 +40,12 @@ Helper modes for the build scripts (crane does the registry reads):
   mentions the SGLang checkout and an editable install come first, then the
   rest from the last layer down);
 * ``make_layer.py check-listing < names.txt``: exit 0 when a ``tar -t`` listing
-  of a layer holds the SGLang editable-install metadata, 1 otherwise.
+  of a layer holds the SGLang editable-install metadata, 1 otherwise;
+* ``make_layer.py repack-whiteouts --in BLOB --out layer.tar``: an already
+  pushed layer rewritten for overlay appliers (``resolve_same_layer_whiteouts``,
+  every other entry as it was); prints the changes and the new diff_id, exit 1
+  when the layer needs no repack. The image is then the same manifest with that
+  one layer (digest, size) and its diff_id swapped.
 
 Approximate docker equivalent (unverified): docker/miles-ports/Dockerfile.
 Rebuilds are file-content equivalent, not byte-identical: entries are
@@ -175,6 +180,56 @@ def resolve_same_layer_whiteouts(entries: dict) -> dict:
     return out
 
 
+def _layer_key(member: tarfile.TarInfo) -> str:
+    name = member.name[2:] if member.name.startswith("./") else member.name
+    name = name.rstrip("/")
+    return name + "/" if member.isdir() else name
+
+
+def repack_same_layer_whiteouts(src: Path, dst: Path) -> dict:
+    """Rewrite the layer tar ``src`` (plain or compressed) as the plain tar ``dst``
+    with :func:`resolve_same_layer_whiteouts` applied: a whiteout of a path the
+    layer writes again is dropped, and a re-written directory gets an entry and
+    an opaque whiteout right before its first entry. Every other entry keeps its
+    header and data, in the same order, so the image keeps the same files.
+    Returns what changed (``dropped``, ``opaque``), empty when nothing did."""
+    with tarfile.open(src, "r:*") as tar:
+        members = tar.getmembers()
+    entries = {_layer_key(m): ("dir" if m.isdir() else "file", None, m.mode, None) for m in members}
+    resolved = resolve_same_layer_whiteouts(entries)
+    dropped = {k for k in entries if k not in resolved}
+    opaque = sorted(k[: -len(OPAQUE) - 1] for k in resolved if k not in entries and k.endswith("/" + OPAQUE))
+    stamp = {_layer_key(m): m for m in members if _layer_key(m) in dropped}
+    before: dict[int, list[tarfile.TarInfo]] = {}
+    for target in opaque:
+        whiteout = stamp.get(f"{target.rpartition('/')[0]}/.wh.{target.rpartition('/')[2]}".lstrip("/"))
+        index = next(i for i, m in enumerate(members)
+                     if _layer_key(m).rstrip("/") == target or _layer_key(m).startswith(target + "/"))
+        added = []
+        for name, kind in ((target, tarfile.DIRTYPE), (f"{target}/{OPAQUE}", tarfile.REGTYPE)):
+            if kind == tarfile.DIRTYPE and _layer_key(members[index]) == target + "/":
+                continue  # the layer has the directory entry: only the marker is new
+            info = tarfile.TarInfo(name)
+            info.type, info.mode = kind, 0o755 if kind == tarfile.DIRTYPE else 0o644
+            if whiteout is not None:
+                info.mtime, info.uid, info.gid = whiteout.mtime, whiteout.uid, whiteout.gid
+                info.uname, info.gname = whiteout.uname, whiteout.gname
+            added.append(info)
+        if _layer_key(members[index]) == target + "/":
+            index += 1  # after the existing directory entry
+        before.setdefault(index, []).extend(added)
+    with tarfile.open(src, "r:*") as tar, tarfile.open(dst, "w", format=tarfile.PAX_FORMAT) as out:
+        for index, member in enumerate(tar):
+            for info in before.get(index, ()):
+                out.addfile(info)
+            if _layer_key(member) in dropped:
+                continue
+            out.addfile(member, tar.extractfile(member) if member.isreg() else None)
+        for info in before.get(len(members), ()):
+            out.addfile(info)
+    return {"dropped": sorted(dropped), "opaque": opaque}
+
+
 _SGLANG_STEP_HINTS = ("/sgl-workspace/sglang", "sglang_deps", "pip install -e")
 
 
@@ -203,10 +258,22 @@ def candidate_metadata_layers(manifest: dict, config: dict) -> list[int]:
 
 
 def _helper_mode(argv: list[str]) -> int | None:
-    if not argv or argv[0] not in ("find-layer", "check-listing"):
+    if not argv or argv[0] not in ("find-layer", "check-listing", "repack-whiteouts"):
         return None
     if argv[0] == "check-listing":
         return 0 if layer_holds_sglang_metadata(sys.stdin.read().splitlines()) else 1
+    if argv[0] == "repack-whiteouts":
+        p = argparse.ArgumentParser(prog="make_layer.py repack-whiteouts")
+        p.add_argument("--in", dest="src", type=Path, required=True, help="a layer blob (tar or tar.gz)")
+        p.add_argument("--out", type=Path, required=True, help="the repacked layer (plain tar)")
+        a = p.parse_args(argv[1:])
+        changes = repack_same_layer_whiteouts(a.src, a.out)
+        digest = hashlib.sha256()
+        with open(a.out, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        print(json.dumps({**changes, "diff_id": "sha256:" + digest.hexdigest()}))
+        return 0 if changes["dropped"] else 1
     p = argparse.ArgumentParser(prog="make_layer.py find-layer")
     p.add_argument("--manifest", type=Path, required=True, help="crane manifest of the base (amd64)")
     p.add_argument("--config", type=Path, required=True, help="crane config of the base (amd64)")

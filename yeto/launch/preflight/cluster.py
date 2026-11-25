@@ -76,9 +76,11 @@ _DELIM = "__YETO_PREFLIGHT_EOF__"
 # yeto-miles-k31 images whose layer 115 whites out a directory and writes it again in the
 # same layer: overlay appliers (moby overlay2, the containerd overlayfs snapshotter) refuse
 # to unpack it ("not a directory"); docker/miles-ports/make_layer.py builds a fixed layer.
+# The same set as the miles pins' OVERLAY_SAFE_DIGESTS keys plus OVERLAY_UNSAFE_UNREPACKED.
 OVERLAY_UNSAFE_DIGESTS = (
     "63ad0d2a9e70a139221050f51214f073a5bc53f66c0c57090ae926012e439c04",
     "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b",
+    "028e505de58552e6ede8926c8bf8ab8451e8e749cfc35afc1eb70e8d362c65b3",
 )
 OVERLAY_DRIVERS = ("overlay2", "overlayfs", "overlay")
 TOPO_RANK = {"PIX": 0, "PXB": 1, "PHB": 2, "NODE": 3, "SYS": 4}
