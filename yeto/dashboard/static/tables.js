@@ -42,5 +42,16 @@ function spark(items){
       '<svg class="sp" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" aria-hidden="true"><path d="'+d+'" fill="none" stroke="var(--accent)" stroke-width="1.3" vector-effect="non-scaling-stroke"/>'+
       '<circle cx="'+X(last[0])+'" cy="'+Y(last[1])+'" r="1.8" fill="var(--accent)"/></svg><b class="num">'+esc(fmt(last[1]))+'</b></span>'}).filter(Boolean);
   return out.length?'<div class="spk">'+out.join("")+'</div>':""}
-return {cap:cap,click:click,table:table,spark:spark,want:want,setRender:function(fn){onChange=fn},_state:function(){return ST}};
+/* a table wider than its box scrolls inside it (.tw); while more columns sit to the right, the box's right
+   edge fades (class "more") so a narrow screen shows the table goes on. A box that fits is left untouched */
+function edge(w){var more=w.scrollWidth>w.clientWidth+1&&w.scrollLeft+w.clientWidth<w.scrollWidth-1;
+  // the horizontal scrollbar's own height stays unmasked (0 for an overlay scrollbar: no unfaded strip)
+  if(more&&w.style&&w.style.setProperty&&fin(w.offsetHeight))w.style.setProperty("--sb",Math.max(0,w.offsetHeight-w.clientHeight)+"px");
+  if(w.classList&&w.classList.contains("more")!==more)w.classList.toggle("more",more)}
+var hooked=false;
+function hint(root){root=root||(typeof document!=="undefined"?document:null);if(!root||typeof root.querySelectorAll!=="function")return;
+  Array.prototype.forEach.call(root.querySelectorAll(".tw"),edge);
+  if(!hooked&&typeof document!=="undefined"&&document.addEventListener){hooked=true;
+    document.addEventListener("scroll",function(e){var t=e.target;if(t&&t.classList&&t.classList.contains("tw"))edge(t)},true)}}
+return {cap:cap,click:click,table:table,spark:spark,hint:hint,want:want,setRender:function(fn){onChange=fn},_state:function(){return ST}};
 })();

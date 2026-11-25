@@ -537,6 +537,9 @@ class AsyncState:
                                          "groups": r.get("unidentified_policy_groups_total")}
             return
         if ev == "rl_policy_release_skipped":
+            # the trainer's own --rl-release-every; the newest record wins, whatever order the tapes are read in
+            if _int(r.get("release_every")) is not None and (ts or 0.0) >= t.get("release_every_ts", float("-inf")):
+                t["release_every"], t["release_every_ts"] = _int(r["release_every"]), ts or 0.0
             # a release skipped because the previous one is still uploading (--rl-release-skip-busy)
             if r.get("reason") == "upload_in_flight" and ts is not None:
                 t.setdefault("upload_skips", []).append({"ts": ts, "policy_version": r.get("policy_version")})
@@ -823,7 +826,11 @@ class AsyncState:
             mine = [r for r in releases if r.get("island") == k]
             index = isl.get("index") if isl.get("index") is not None else k
             out.append({"island": k, "index": index, "name": isl.get("name"), "trainer": tid, "gpu": isl.get("gpu"),
-                        "substore": isl.get("substore"), "release_every": isl.get("release_every"),
+                        "plan": fleet.get("source") == "plan",  # the island's settings come from a fleet plan
+                        "substore": isl.get("substore"),
+                        # the plan's per-island value, else the one the trainer's skipped releases name
+                        "release_every": isl.get("release_every") if isl.get("release_every") is not None
+                        else (self.trainer.get(tid) or {}).get("release_every"),
                         "max_policy_age": isl.get("max_policy_age") if isl.get("max_policy_age") is not None else cap,
                         "pools": pools,
                         "backlog": self.backlog_series(samplers=set(sids), trainers={tid} if tid else set()),

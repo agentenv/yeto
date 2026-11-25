@@ -467,6 +467,32 @@ function evenGrid(box,n){if(!box||!n)return;var w=box.clientWidth||box.getBoundi
 function loadParts(l){var p=[["resolve",l.resolve_s],["drain",l.drain_s],["load",l.load_s],["pause",l.pause_s]].filter(function(x){return fin(x[1])});
   return p.length?'<div class="ns" title="sampler follower timings (rl_sampler_policy_loaded) and the drain before the switch (rl_agentic_drain)'+(fin(l.drain_in_flight)?": "+l.drain_in_flight+" trials in flight":"")+(l.drain_cut?", "+l.drain_cut+" cut":"")+'">'+
     p.map(function(x){return x[0]+" "+dur(x[1])}).join(" · ")+(l.drain_cut?' · <b>'+l.drain_cut+' cut</b>':"")+'</div>':""}
+/* a fleet of async islands (async.islands): one buffer per island lane (the run-wide async.backlog is null
+   there), and pools that keep zero-variance groups report them as seen, not dropped */
+function fleetKpis(A,S,sps,kp,ssum,zvTot,caps){
+  var I=A.islands,last=function(x){var p=((x.backlog||{}).points||[]);return p.length?p[p.length-1]:null};
+  var ib=I.map(function(x){var p=last(x);return {x:x,b:x.backlog,v:p&&fin(p[3])?p[3]:null}}),have=ib.filter(function(o){return fin(o.v)}),any=ib.some(function(o){return o.b});
+  var one=function(o){return fin(o.v)?k(o.v,0):o.b?(fin(o.b.written)?k(o.b.written,0)+" written, ":"")+"not read yet":"no rounds"};
+  var bl=["Buffer backlog",have.length?k(sum(have.map(function(o){return o.v})),0):any?"not read yet":"no rounds",
+    any?ib.map(function(o){return "island "+o.x.island+": "+one(o)}).join(" · ")+
+      " · written "+k(sum(ib.map(function(o){return (o.b||{}).written})),0)+" · read "+k(sum(ib.map(function(o){return (o.b||{}).read})),0)+(caps.length?" · cap "+caps.join("+"):""):"no island has a sampler round yet"];
+  // zero-variance: a pool with drop_zero_variance_groups off reports the groups as seen and writes no dropped count
+  var keeps=sps.filter(function(c){var x=S[c.id]||{};return fin(x.zero_variance_seen)&&!fin(x.zero_variance_dropped)});
+  var kept=!fin(ssum("zero_variance_dropped"))&&!fin(zvTot)&&keeps.length>0;
+  var quiet=sps.filter(function(c){return !fin((S[c.id]||{}).zero_variance_seen)&&!fin((S[c.id]||{}).zero_variance_dropped)});
+  var kz=function(){return k(sum(keeps.map(function(x){return S[x.id].zero_variance_seen})),0)+" of "+k(sum(keeps.map(function(x){return S[x.id].groups})),0)};
+  var NA=/\bn\/a\b/g,dash=function(v){return String(v).replace(NA,"—")},why=" · —: not on the tapes";
+  return kp.map(function(c){
+    if(c[0]==="Buffer backlog")return bl;
+    var rej=c[0].indexOf("Rejected")===0,v=String(c[1]),sub=String(c[2]);
+    if(rej){var p=v.split(" / ");if(kept)p[1]="0";v=p.join(" / ");
+      if(kept)sub+=" · zero-var: "+kz()+" groups all-equal, kept by the pools (drop_zero_variance_groups off)";
+      else if(fin(ssum("zero_variance_dropped"))&&keeps.length)sub+=" · zero-var kept (not dropped) by "+keeps.map(function(x){return x.label}).join(", ")+": "+kz()+" groups";
+      if(quiet.length)sub+=" · "+quiet.map(function(x){return x.label}).join(", ")+": no zero-variance count"}
+    var miss=/\bn\/a\b/.test(v+" "+sub);
+    // a count the tapes lack is a dash, and the card says so
+    return [c[0],dash(v),dash(sub)+(miss&&sub.indexOf(why)<0?why:"")]});
+}
 function rlm(V){
   var O=V.overview||{},A=V.async||{},S=A.samplers||{},TR=A.trainers||{},X=V.islands||{},cs=rlCards(V);
   var t1=NOW,t0=NOW-RANGE_H*3600,tp=t0-RANGE_H*3600;
@@ -506,6 +532,7 @@ function rlm(V){
   if((V.usage||{}).syncer){var rs=V.rounds_syncer||[];kp.push(["Syncer outer step",rs.length?String(rs[rs.length-1].round):"0","merges on the syncer tape"],["Syncer RSS","n/a","syncer.log not collected for RL runs"])}
   // a run with a syncer: its own cards instead of the sample-buffer ones (topology_diloco.js)
   if(typeof YetoTopoD!=="undefined")kp=YetoTopoD.kpis(V,kp);
+  if(A.islands&&A.islands.length)kp=fleetKpis(A,S,sps,kp,ssum,zvTot,caps);
   // a long value (the four rejected counts) wraps in a smaller font instead of being cut off
   $("rKpis").innerHTML=kp.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv'+(String(x[1]).length>12?" long":"")+'" title="'+esc(x[1])+'">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
   evenGrid($("rKpis"),kp.length);
@@ -564,7 +591,7 @@ function rlm(V){
     ["rfHbm","HBM","mean used GiB over each island's GPUs (NVML / host probe)"+(MANY?"; samplers: p50 and p10–p90 band":"")],["rfHost","Host memory","per node, from the Modal host probe (YETO_MODAL_HOSTMEM_SAMPLE_S)"],
     ["rfRound","Sampler round time","generate seconds per sampler round"+(MANY?"; p50 and p10–p90 band over samplers":"")],["rfAge","Group policy age","trained groups' mean policy age per trainer round (rl_round_trained.policy_age_groups); sampler version lag per round"],
     ["rfResp","Response length","mean tokens per sample. Trainer (solid): model-generated tokens only (loss mask); trainer full (dotted, newer tapes) and sampler (dashed): whole response incl. tool / env tokens"],["rfBl","Buffer backlog","groups written − trainers' read position (solid); sampler-reported (dots)"],
-    ["rfRel","Release → load latency","per sampler: load done − trainer release, one point per policy version"],["rfDrop","Rejected groups / samples","counts per time bucket: groups (stale, zero-variance, infra drops) and samples (truncated); hover for each count. Zero-variance from the trainer (rl_local_round ratio × trained groups) is trained with zero advantage, from samplers it is dropped"]]);
+    ["rfRel","Release → load latency","per sampler: load done − trainer release, one point per policy version"],["rfDrop","Rejected groups / samples","counts per time bucket: groups (stale, zero-variance, infra drops) and samples (truncated); hover for each count. Zero-variance from the trainer (rl_local_round ratio × trained groups) is trained with zero advantage, from samplers it is dropped"+(A.islands&&A.islands.length?" when the pool drops it (drop_zero_variance_groups), else kept":"")]]);
   $("rFleet").innerHTML=g.map(function(x){return card(x[0],x[1],x[2])}).join("");
   var axs=function(o){o.yaxis=true;return o},mag=function(o){o.yaxis=true;o.y0=true;return o}; // magnitudes / fractions: the axis starts at 0
   var f3=function(v){return k(v,3)},f4=function(v){return v.toPrecision(3)};
@@ -605,8 +632,14 @@ function rlm(V){
     .concat(trs.map(function(c){return {name:c.label+" full",color:c.color,dash:"1 3",pts:RR(c).map(function(r){return [r.ts,r.resp_full_mean,lOf(c,r.ts)]})}}).filter(function(x){return x.pts.some(function(p){return fin(p[1])})}))
     .concat(rsp.series),extra:rsp.extra,extraLabel:XL,yfmt:k}));
   var bls=sps.map(function(c){return {name:c.label+" reported",color:c.color,pts:((S[c.id]||{}).backlog||[]).map(function(p){return [p[0],p[1]]}),empty:"never full in range"}}); // it reports only when its backlog is full
-  fc("rfBl",{series:[{name:"backlog",color:PAL[3],pts:bl?bl.points.map(function(p){return [p[0],p[3]]}):[]}].concat(MANY?[]:bls),extra:MANY?bls:[],extraLabel:"each sampler's own count",yfmt:k,
-    refs:caps.length?[{y:sum(caps),label:"caps "+sum(caps),legend:"sum of backlog caps",color:"#eab308"}]:[]});
+  // a fleet: one backlog line per island lane (async.backlog is null there), in its trainer's colour, without
+  // the sum of every lane's cap (no lane can reach it)
+  var FLT=!!(A.islands&&A.islands.length);
+  var blMain=FLT?A.islands.map(function(x,i){var tc=cs.filter(function(c){return x.trainer!=null&&String(c.id)===String(x.trainer)})[0];
+      return {name:"island "+x.island+" backlog",color:tc?tc.color:PAL[(3+i)%PAL.length],pts:((x.backlog||{}).points||[]).map(function(p){return [p[0],p[3]]})}}):
+    [{name:"backlog",color:PAL[3],pts:bl?bl.points.map(function(p){return [p[0],p[3]]}):[]}];
+  fc("rfBl",{series:blMain.concat(MANY?[]:bls),extra:MANY?bls:[],extraLabel:"each sampler's own count",yfmt:k,
+    refs:caps.length&&!FLT?[{y:sum(caps),label:"caps "+sum(caps),legend:"sum of backlog caps",color:"#eab308"}]:[]});
   var rel=sps.map(function(c){return {name:c.label,color:c.color,pts:(A.releases||[]).map(function(x){var l=(x.loads||{})[c.id];return l&&!l.at_start?[l.loaded_at,l.latency_s]:null}).filter(Boolean)}});
   fc("rfRel",{dots:true,series:MANY?[{name:"all samplers",color:SC,pts:[].concat.apply([],rel.map(function(x){return x.pts}))}]:rel,extra:MANY?rel:[],extraLabel:XL,yfmt:dur});
   var tb=function(key){var o=[];trs.forEach(function(c){((TR[c.id]||{}).rounds||[]).forEach(function(r){if(fin(r.ts)&&r[key]>0)o.push([r.ts,r[key]])})});return o};
@@ -616,11 +649,36 @@ function rlm(V){
   var sz=function(key){return sps.some(function(c){return SR(c).some(function(r){return fin(r[key])&&inR(r.ts,t0,t1)})})?"0 so far":null};
   var zvs=sb("zero_variance_dropped").length?sb("zero_variance_dropped"):sb("zero_variance_seen"),zvt=[].concat.apply([],trs.map(zvT)).filter(function(p){return p[1]>0});
   fc("rfDrop",{kind:"bars",series:[{name:"stale groups",color:PAL[3],pts:tb("stale_groups"),empty:tz("stale_groups")},
-    {name:zvs.length?"zero-variance groups (samplers, dropped)":"zero-variance groups (trainer, zero advantage)",color:PAL[5],pts:zvs.length?zvs:zvt},
+    {name:zvs.length?(FLT&&!sb("zero_variance_dropped").length?"zero-variance groups (samplers, kept: zero advantage)":"zero-variance groups (samplers, dropped)"):"zero-variance groups (trainer, zero advantage)",color:PAL[5],pts:zvs.length?zvs:zvt},
     {name:"truncated samples",color:PAL[1],pts:sb("truncated"),empty:sz("truncated")},{name:"infra-dropped groups",color:PAL[8],pts:sb("dropped_groups"),empty:sz("dropped_groups")}],yfmt:function(v){return +v.toFixed(1)+""},yaxis:true,yint:true});
   foldEmpty(g,"rFleetNone");balanceGrid("rFleet",340,4);
   rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp);
 }
+/* a fleet of async islands: the syncer's total steps (syncer_config.total_steps on its tape) give the finish;
+   the tapes carry no FLOP or parameter counts, so there is no MFU card rather than an "n/a" one */
+/* a fleet of async islands: the syncer's total steps (syncer_config.total_steps on its tape) give the finish,
+   paced from the step the syncer (re)started at (syncer_config.global_step: a resumed syncer starts past 0) */
+function fleetCost(V,ck){
+  var d=(V.topology||{}).diloco||null,cf=d&&d.config||{},T=cf.T,steps=d?(d.shards||[]).map(function(s){return s.step}).filter(fin):[],st=steps.length?Math.min.apply(null,steps):null;
+  var s0=fin(cf.step0)?cf.step0:cf.resumed?null:0,lm=d&&fin(d.last_merge_ts_any)?d.last_merge_ts_any:null,t0=fin(cf.ts)?cf.ts:null;
+  var fin2=function(){
+    if(!fin(T))return ["Projected finish","—","the syncer tape has no total step count yet (syncer_config)",""];
+    if(d.done||(fin(st)&&st>=T))return ["Finished",lm?day(lm):"step "+T,"syncer reached step "+(fin(st)?st:T)+" of "+T+" (final cut)"+(lm&&t0?" · "+dur(lm-t0)+" after its "+(cf.resumed?"resume":"config"):""),""];
+    if(!fin(s0))return ["Projected finish","—","syncer step "+(fin(st)?st:0)+" of "+T+"; resumed at a step not on its tape, so no pace",""];
+    // a sharded syncer resumes each shard at its own step: shard 0's start against the slowest shard is no pace
+    if(cf.resumed&&cf.shards>1)return ["Projected finish","—","syncer step "+(fin(st)?st:0)+" of "+T+"; a sharded syncer resumed per shard, so no pace",""];
+    var n=fin(st)?st-s0:0;
+    if(n<=0||!lm||!t0||lm<=t0)return ["Projected finish","—","syncer step "+(fin(st)?st:0)+" of "+T+"; needs a merge"+(cf.resumed?" after its resume":"")+" to pace the rest",""];
+    var pace=(lm-t0)/n,eta=lm+(T-st)*pace;
+    return ["Projected finish",day(eta),"syncer step "+st+" of "+T+" at its mean merge pace "+dur(pace)+(cf.resumed?" since its resume at step "+s0:"")+
+      (eta>=NOW?" · in "+dur(eta-NOW):" · overdue by "+dur(NOW-eta)+", last merge "+ago(lm)),""]};
+  var NA=/\bn\/a\b/g;
+  return ck.map(function(x){
+    if(x[0]==="Projected finish")return fin2();
+    if(x[0]==="MFU")return ["MFU","—","not on the tapes (no FLOP counts)",""];
+    var sub=String(x[2]).replace(/ · completed rounds only n\/a/,""),miss=/\bn\/a\b/.test(String(x[1])+" "+sub);
+    // any other count the tapes lack is a dash, and the card says so
+    return [x[0],String(x[1]).replace(NA,"—"),sub.replace(NA,"—")+(miss?" · —: not on the tapes":""),x[3]]})}
 function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
   $("rCostH").textContent="Cost / efficiency over the last "+rangeLabel();
   var X=V.islands||{};
@@ -646,6 +704,7 @@ function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
     ["Trainer waiting for data",pc(A.ws),"rollout phase (waiting on the buffer) ÷ round wall time, including the round in progress"+
       (Object.keys(CW).length?" · now: "+Object.keys(CW).map(function(i){return "trainer "+i+" waiting "+dur(CW[i].s)}).join(", ")+" · completed rounds only "+pc(A.wsDone):""),delta(A.ws,B.ws,function(v){return (100*v).toFixed(1)+" pt"})],
     ["Projected finish","n/a","the tapes carry no total round count",""]];
+  if(((V.async||{}).islands||[]).length)ck=fleetCost(V,ck);
   $("rCostK").innerHTML=ck.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div>'+x[3]+'</div>'}).join("");
   $("rCost").innerHTML=card("rcG","Groups per hour","stacked by sampler")+card("rcCh","Card-hours per hour","billed card time vs effective (train step / generate)")+
     card("rcW","Trainer waiting per hour","rollout-phase seconds (waiting on the buffer) per trainer; yellow: the round still waiting now")+card("rcPv","Groups by policy version","per hour, stacked by the version the sampler generated with (no task labels on the tapes)");
