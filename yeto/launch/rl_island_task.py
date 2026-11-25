@@ -36,7 +36,8 @@ from .storage import (
     RL_INIT_RELEASE_DIR,
     RL_INITIAL_ADAPTER_PATH,
     _rl_checkpoint_mount, _rl_checkpoint_storage_name, modal_volume_store_env, model_store_env,
-    model_store_filesystem, model_store_local_path, nebius_baked_image_id, rl_checkpoint_store_plan,
+    model_store_filesystem, model_store_local_path, mounts_store_bucket, nebius_baked_image_id,
+    rl_checkpoint_store_plan,
     store_object_envs,
 )
 from .island_tasks import island_task_data
@@ -796,9 +797,12 @@ def make_miles_island_task(
             mode=sky.StorageMode.MOUNT,
             sync_on_reconstruction=True,
         )
+    # A store sky Storage cannot mount (an s3:// store on R2 / MinIO): no mount; the island
+    # reaches it by its object API from a local stage (store_object_envs above).
+    bucket_mount = mounts_store_bucket(args, spec.cloud)
     if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False):
         store = rl_checkpoint_store_plan(args)  # resume store: same bucket mount on sky
-        if store is not None and store[1] is not None:
+        if store is not None and store[1] is not None and bucket_mount:
             storage_mounts[ELASTIC_CHECKPOINT_STORE_MOUNT] = sky.Storage(
                 source=store[1], mode=sky.StorageMode.MOUNT, persistent=True)
     if getattr(args, "rl_elastic", False):
@@ -808,8 +812,9 @@ def make_miles_island_task(
         # a warning: single-node and node0-local behavior is unchanged).
         store = rl_checkpoint_store_plan(args)
         if store is not None and store[1] is not None:
-            storage_mounts[ELASTIC_CHECKPOINT_STORE_MOUNT] = sky.Storage(
-                source=store[1], mode=sky.StorageMode.MOUNT, persistent=True)
+            if bucket_mount:
+                storage_mounts[ELASTIC_CHECKPOINT_STORE_MOUNT] = sky.Storage(
+                    source=store[1], mode=sky.StorageMode.MOUNT, persistent=True)
         elif store is None and spec.num_nodes > 1:
             print(NODE0_LOCAL_CHECKPOINT_WARNING, file=sys.stderr)
     if storage_mounts:

@@ -1661,6 +1661,10 @@ def dry_run_plan(args) -> dict:
     from .launch.trainer_provision import check_sky_prices
 
     check_sky_prices(args, specs)  # the launch preflight's budget / price refusal, found early
+    from .launch.storage import bucket_unmountable_reason, store_access_notes
+
+    for note in store_access_notes(args, specs):  # the launch preflight's note, found early
+        print(note, file=sys.stderr, flush=True)
     task_plan = island_task_plan(args) if rl else None
     split_plan = data_split_plan(args) if rl else None
     placements = rl_island_placement_records(args) if rl else []
@@ -1678,6 +1682,10 @@ def dry_run_plan(args) -> dict:
             "gpus_per_node": spec.gpus_per_node,
             "total_gpus": spec.total_gpus,
         }
+        unmountable = bucket_unmountable_reason(args, spec.cloud)
+        if unmountable is not None:  # only such an island gets the key: every other plan is unchanged
+            entry["checkpoint_store_access"] = {"route": "object API", "sky_storage_mount": False,
+                                                "why": unmountable}
         if rl:
             entry["placement"] = placements[learner_id]
         if rl and rl_island_spec(rl_island_args(args, learner_id), spec) is not spec:
