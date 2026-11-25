@@ -1855,6 +1855,9 @@ def write_read_position(buffer_root: str | Path, *, buffer_selected: int,
     ignore a heartbeat left by another run or written before a newer release
     (``SamplerLoop.backlog``): sparse or slow releases no longer hold the cap shut."""
     root = Path(buffer_root)
+    # the directory may not exist yet: a trainer opens the buffer without creating its index
+    # (create_index=False), and a staged object store's local root holds nothing of the buffer
+    root.mkdir(parents=True, exist_ok=True)
     path = root / READ_POSITION
     payload = {"buffer_selected": int(buffer_selected),
                "buffer_shards": {str(k): int(v) for k, v in (buffer_shards or {}).items()},

@@ -481,7 +481,43 @@ def test_run_up_preflight_refuses_a_pool_shard_the_trainer_does_not_read(tmp_pat
     run.cfg["trainer"]["argv"] = ["--rl-buffer-shards=nc-0,nc-1,nc-2"]
     assert run.shard_problem() is None
     run.cfg["trainer"]["argv"] = []
+    assert run.shard_problem() is None  # no buffer trainer: nothing reads the pool's shards
+
+
+def test_run_up_preflight_refuses_a_buffer_trainer_that_names_no_shard_on_an_s3_store(tmp_path, monkeypatch):
+    """Every pool member writes its own shard (<shard_base>-<i>); a trainer on an S3 / R2
+    store merges only the shards of its --rl-buffer-shards. Without the flag it read an
+    index nobody wrote and waited until trainer.sample_wait (a verl L40S run billed for
+    nothing). Any backend: the check reads only the trainer argv and the store."""
+    run = _run_cfg(tmp_path, monkeypatch)
+    (tmp_path / "pool.json").write_text(json.dumps({"target": 1, "accounts": [1], "shard_base": "nc",
+                                                    "run": "run-a", "shard_limit": 2}))
+    for backend in ((), ("--rl-backend", "verl"), ("--rl-backend", "miles")):
+        run.cfg["trainer"]["argv"] = [*backend, "--rl-sample-role", "trainer", "--rl-max-policy-age", "2"]
+        problem = run.shard_problem()
+        assert problem and "has no --rl-buffer-shards" in problem and "--rl-buffer-shards nc-0,nc-1" in problem
+    run.cfg["trainer"]["argv"] = ["--rl-sample-role=trainer"]
+    assert "has no --rl-buffer-shards" in run.shard_problem()
+    # the shards named: the coverage check as before
+    run.cfg["trainer"]["argv"] = ["--rl-sample-role", "trainer", "--rl-buffer-shards", "nc-0,nc-1"]
     assert run.shard_problem() is None
+    # a relay trainer reads the relay, and an oss:// store's trainer merges every shard it finds
+    run.cfg["trainer"]["argv"] = ["--rl-sample-role", "trainer", "--rl-sample-relay"]
+    assert run.shard_problem() is None
+    run.cfg["trainer"]["argv"] = ["--rl-sample-role", "trainer"]
+    run.cfg["store"] = "oss://b/runs/r"
+    assert run.shard_problem() is None
+
+
+def test_run_up_dry_run_fails_before_ordering_when_the_trainer_names_no_shard(tmp_path, monkeypatch, capsys):
+    run = _run_cfg(tmp_path, monkeypatch)
+    run.cfg["trainer"]["argv"] = ["--rl-backend", "verl", "--rl-sample-role", "trainer"]
+    for name in ("env_file_problem", "rules_problem"):  # the checks before the pools' own
+        monkeypatch.setattr(run, name, lambda: None)
+    assert run.preflight() is False
+    out = capsys.readouterr().out
+    assert "preflight: the trainer argv has no --rl-buffer-shards" in out
+    assert "trainer launch" not in out  # stopped before the trainer and pool dry-runs
 
 
 def test_yeto_run_scale_parser():

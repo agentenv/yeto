@@ -2584,9 +2584,15 @@ class Run:
         it is never trained on), so the pool may only order shards the trainer names: with
         that flag set, the pool needs a ``shard_limit`` and every ``<shard_base>-<i>`` below
         it in the trainer's list (each node and each lease-end replacement takes a new
-        shard; plan the list for the largest scale plus the replacements). In a fleet the
+        shard; plan the list for the largest scale plus the replacements). Without the
+        flag a buffer trainer (``--rl-sample-role trainer``, not the relay) on a store
+        that does not merge the samplers' shards by itself (S3 / R2: every store but
+        ``oss://``, ``sample_buffer.needs_shards``) reads an index no pool member writes
+        (each writes its own shard ``<shard_base>-<i>``, ``launch.nc.tasks.sampler_spec``)
+        and waits for groups until ``trainer.sample_wait`` stops it, with its machines
+        billed (:meth:`_unmerged_shards_problem`; any backend). In a fleet the
         pool's island trainer reads its ``--rl-island-buffer-shards k:...``
-        (:func:`yeto.rl.up_fleet.shard_problem`)."""
+        (:func:`yeto.rl.up_fleet.shard_problem`), which refuses an island without it."""
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
         plan = self.fleet_plan()
         if plan is not None:
@@ -2600,7 +2606,7 @@ class Run:
             elif a.startswith("--rl-buffer-shards="):
                 named = a.split("=", 1)[1]
         if named is None:
-            return None
+            return self._unmerged_shards_problem(argv, pool)
         shards = {x for x in named.split(",") if x}
         from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
 
@@ -2615,6 +2621,29 @@ class Run:
             return (f"pool shard_limit {limit} but the trainer's --rl-buffer-shards lacks {missing[:5]}"
                     f"{' ...' if len(missing) > 5 else ''}: those nodes' groups would never be trained on")
         return None
+
+    def _unmerged_shards_problem(self, argv: list[str], pool: int) -> str | None:
+        """A buffer trainer without ``--rl-buffer-shards`` whose store does not merge the
+        pool's shards by itself (:meth:`shard_problem`); None for a relay trainer, a
+        trainer that is no buffer reader, and an ``oss://`` store (its trainer merges
+        every shard it finds)."""
+        role = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--rl-sample-role"),
+                    next((a.split("=", 1)[1] for a in argv if a.startswith("--rl-sample-role=")), None))
+        if role != "trainer" or "--rl-sample-relay" in argv:
+            return None
+        if str(self.cfg.get("store") or "").strip().startswith("oss://"):
+            return None
+        pool_cfg = self.pools[pool].load()
+        base = pool_cfg.get("shard_base") or "<shard_base>"
+        from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
+
+        limit = nc_cli.pool_shard_limit(pool_cfg)
+        names = (",".join(f"{base}-{i}" for i in range(min(int(limit), 3))) + ("" if int(limit) <= 3 else ",...")
+                 if limit is not None else f"{base}-0,{base}-1,...")
+        return (f"the trainer argv has no --rl-buffer-shards: every member of this pool writes its own shard "
+                f"({base}-<i>) and a trainer on {self.cfg.get('store') or 'this store'} merges only the shards it "
+                f"names, so it would read none and wait for groups until trainer.sample_wait stops it; add "
+                f"--rl-buffer-shards {names} (one per shard index up to the pool's shard_limit)")
 
     def _trainer_flag(self, name: str) -> str | None:
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]

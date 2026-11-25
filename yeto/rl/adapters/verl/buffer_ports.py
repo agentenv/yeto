@@ -94,7 +94,7 @@ from yeto.rl.contracts import InferencePublicationManifest
 from yeto.rl.engine.merged_release import (BufferLane, MergedReleaseGuard, ResumedReleases, is_publisher,
                                            merged_version, resumed_releases)
 from yeto.rl.engine.policy_release import FULL, BackgroundReleaser, PolicyReleaseStore
-from yeto.rl.engine.sample_buffer import buffer_dir, write_read_position
+from yeto.rl.engine.sample_buffer import buffer_dir, buffer_objects, write_buffer_read_position
 from yeto.rl.engine.ports import PlacementDescription, PublicationResult
 
 from .buffer_feed import BufferCall, BufferFeed, MergedVersions, RowShape
@@ -699,11 +699,16 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     actor_call = island.call
     log = CONSUMED_LOG.format(learner=island.learner_id)
 
-    heartbeat_root = buffer_dir(buffer)
+    # The read heartbeat goes where the samplers read it (as on the Miles trainer,
+    # buffer_rollout.trainer_read_heartbeat): the object sample-buffer/read-position.json on
+    # an object store, else the file in the store's sample-buffer/. Before, it was always the
+    # local file, under the stage root of a staged S3 store: a directory nobody had created
+    # (rl_buffer_read_position_failed every group), which no sampler on another host reads.
+    heartbeat = buffer_objects(buffer) is not None or buffer_dir(buffer) is not None
     # the newest release this trainer knows: the store's at start, then each one it
     # publishes (BufferReleasePublisher.publish); it ties the heartbeat to this run
     island.heartbeat_release = None
-    if heartbeat_root is not None:
+    if heartbeat:
         try:
             newest = releases.latest()
         except Exception:  # noqa: BLE001 - a heartbeat without a release is still valid
@@ -713,12 +718,12 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
 
     def record(fields: dict[str, Any]) -> None:
         island.append_jsonl(log, fields)
-        if heartbeat_root is not None:  # the read position, released or not
+        if heartbeat:  # the read position, released or not
             try:
-                write_read_position(heartbeat_root, buffer_selected=feed.read_cursor(),
-                                    buffer_shards=feed.read_shards(),
-                                    train_step=int(island.published[0]) if island.published else None,
-                                    release=getattr(island, "heartbeat_release", None))
+                write_buffer_read_position(buffer, buffer_selected=feed.read_cursor(),
+                                           buffer_shards=feed.read_shards(),
+                                           train_step=int(island.published[0]) if island.published else None,
+                                           release=getattr(island, "heartbeat_release", None))
             except Exception as error:  # noqa: BLE001 - a heartbeat never stops training
                 island.emit("rl_buffer_read_position_failed", error=str(error)[:300])
 
