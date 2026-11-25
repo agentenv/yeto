@@ -263,3 +263,85 @@ def test_the_fleet_shape_needs_the_full_parameter_preset_and_a_valid_shape(monke
     args.controller = "local"
     with pytest.raises(ValueError, match="--rl-fleet-trainer-shape only applies to --rl-sync-preset full-parameter"):
         _prepare_rl_args(args)
+
+
+# -- Miles (the customer path) never fetches a config ------------------------------------------
+
+def _no_fetch(monkeypatch):
+    """A remote_hf_config that fails the test if it is ever called, and the calls seen."""
+    from yeto.launch import fragment_preflight
+
+    calls = []
+
+    def fetch(args):
+        calls.append(args.model)
+        raise AssertionError(f"a Miles launch fetched the config of {args.model}")
+
+    monkeypatch.setattr(fragment_preflight, "remote_hf_config", fetch)
+    return calls
+
+
+def test_a_miles_launch_without_a_local_config_fetches_nothing_and_launches_as_before(monkeypatch, capsys):
+    """No config.json here: a Miles launch is not checked, fetches nothing and is refused
+    nothing, inside the refusal context of ``yeto run up`` too (that is verl's only), with
+    the same plan and output as outside it."""
+    from yeto.launch.fragment_preflight import refuse_unverified_layout
+    from yeto.launcher import dry_run_plan
+
+    calls = _no_fetch(monkeypatch)
+
+    def launch(*extra):
+        args, seen = _prepare(4, monkeypatch, config=None, extra=extra)
+        return seen, json.dumps(dry_run_plan(args), sort_keys=True, default=str), capsys.readouterr()
+
+    outside = launch()
+    with refuse_unverified_layout():
+        inside = launch()
+    assert outside[0] == [("org/model", "a" * 40)]  # the local files were read, nothing else
+    assert inside == outside and calls == []
+    assert "not verified offline" not in outside[2].err
+
+
+def test_a_miles_fleet_run_up_fetches_nothing(tmp_path, monkeypatch, capsys):
+    """``yeto run up`` of a Miles fleet launched island by island (not a dry run: the
+    refusal context is on) prepares every launch without fetching any config: the
+    example's islands (TP1 on 2 cards, DP2) are out of the check's scope, and a fleet in
+    its scope (forced here) reads the local files only."""
+    from test_fleet_island_runup import build
+    from yeto.launch import fragment_preflight
+
+    calls = _no_fetch(monkeypatch)
+    scoped = []
+    real_scope = fragment_preflight._in_scope
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "miles-fleet-no-fetch-test-key")
+    monkeypatch.setenv("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test-key-id")
+    monkeypatch.setenv("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test-secret")
+    monkeypatch.setattr("yeto.launch.fragment_preflight.local_hf_config", lambda model, revision: None)
+    run, _ = build(tmp_path, monkeypatch)
+    assert run.fleet_session_problem(dry_run=False) is None
+    assert run.fleet_session_problem(dry_run=True) is None
+    monkeypatch.setattr(fragment_preflight, "_in_scope",
+                        lambda args, trainers: scoped.append(real_scope(args, trainers)) or True)
+    assert run.fleet_session_problem(dry_run=False) is None
+    assert scoped and not any(scoped)  # the example is out of scope; forced in, the check ran
+    assert calls == [] and "not verified offline" not in capsys.readouterr().err
+
+
+def _k31_cases():
+    import test_k31_customer_plan_golden as golden
+
+    return sorted(golden.CASES)
+
+
+@pytest.mark.parametrize("case", _k31_cases())
+def test_the_k31_customer_launch_fetches_nothing_and_its_plan_is_unchanged(case, tmp_path, monkeypatch, capsys):
+    """The customer's K3.1 single-trainer launch, inside the refusal context, with no
+    config.json anywhere: no fetch, and the plan is byte for byte its golden."""
+    import test_k31_customer_plan_golden as golden
+    from yeto.launch.fragment_preflight import refuse_unverified_layout
+
+    calls = _no_fetch(monkeypatch)
+    with refuse_unverified_layout():
+        got = golden._plan(golden.CASES[case], tmp_path, monkeypatch, capsys)
+    assert calls == []
+    assert got == json.loads(golden.GOLDEN.read_text())[case]

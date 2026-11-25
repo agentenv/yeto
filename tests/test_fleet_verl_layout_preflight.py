@@ -19,6 +19,7 @@ import pytest
 from test_fleet_verl_island_launches import _run, verl_doc
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from yeto.launch import fragment_preflight
+from yeto.launch.fragment_preflight import remote_hf_config as REAL_REMOTE_HF_CONFIG  # conftest patches the name
 from yeto.rl import island_launches as il
 from yeto.rl import up
 
@@ -34,7 +35,9 @@ GPU = "modal:1x2xh100,modal:1x2xh100"
 @pytest.fixture(autouse=True)
 def _tiny_model(monkeypatch):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "verl-layout-preflight-test-key")
+    monkeypatch.delenv(fragment_preflight.LAYOUT_MODE_ENV, raising=False)
     monkeypatch.setattr(fragment_preflight, "local_hf_config", lambda model, revision: RAW)
+    monkeypatch.setattr(fragment_preflight, "_WARNED", set())  # each test sees its own WARN lines
 
 
 def _planned(fragments: int, merge: str = "rda", revision: str = REVISION, max_bytes: int = 2 << 30):
@@ -154,27 +157,33 @@ def test_a_fleet_island_added_with_the_fleets_layout_passes_and_a_wrong_pin_is_r
         fleet_islands.launch_dry_run(member("e" * 64), prepare=prepare)
 
 
-def test_run_up_dry_run_checks_every_verl_island_launchs_layout(tmp_path, monkeypatch):
-    """``yeto run up`` (dry run too) prepares every launch of a per-island fleet at its
-    preflight (``Run.fleet_session_problem``): the same offline layout check passes the
-    model's layout and refuses a fleet whose pinned hash is not the layout of its model and
-    ``--fragments``."""
+def _run_up_problem(tmp_path, monkeypatch, pin: str, fragments: int, *, dry_run: bool = False):
+    """``Run.fleet_session_problem`` of a two-island verl fleet pinning ``pin`` at
+    ``--fragments fragments`` (``dry_run``: ``yeto run up --dry-run``'s preflight)."""
     monkeypatch.setenv("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test-key-id")
     monkeypatch.setenv("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test-secret")
     from yeto import runs
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    doc = verl_doc(tmp_path)
+    argv = doc["fleet"]["trainer_argv"]
+    argv[argv.index("--rl-parameter-layout-sha256") + 1] = pin
+    argv[argv.index("--fragments") + 1] = str(fragments)
+    argv += ["--model-revision", REVISION]
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps(doc))
+    return up.Run(up.load_config(str(path)), state_root=tmp_path / "state").fleet_session_problem(dry_run=dry_run)
+
+
+def test_run_up_dry_run_checks_every_verl_island_launchs_layout(tmp_path, monkeypatch):
+    """``yeto run up`` (dry run too) prepares every launch of a per-island fleet at its
+    preflight (``Run.fleet_session_problem``): the same offline layout check passes the
+    model's layout and refuses a fleet whose pinned hash is not the layout of its model and
+    ``--fragments``."""
     layout = _planned(4)
 
     def problem(pin: str, fragments: int):
-        doc = verl_doc(tmp_path)
-        argv = doc["fleet"]["trainer_argv"]
-        argv[argv.index("--rl-parameter-layout-sha256") + 1] = pin
-        argv[argv.index("--fragments") + 1] = str(fragments)
-        argv += ["--model-revision", REVISION]
-        path = tmp_path / "run.json"
-        path.write_text(json.dumps(doc))
-        return up.Run(up.load_config(str(path)), state_root=tmp_path / "state").fleet_session_problem()
+        return _run_up_problem(tmp_path, monkeypatch, pin, fragments)
 
     assert problem(layout.layout_hash, layout.fragments.num_fragments) is None
     wrong_pin = problem("e" * 64, layout.fragments.num_fragments)
@@ -184,3 +193,237 @@ def test_run_up_dry_run_checks_every_verl_island_launchs_layout(tmp_path, monkey
     other = _planned(layout.fragments.num_fragments + 1)
     wrong_count = problem(layout.layout_hash, layout.fragments.num_fragments + 1)
     assert wrong_count and f"Set --rl-parameter-layout-sha256 {other.layout_hash}" in wrong_count
+
+
+# -- the model's config.json not on this host -------------------------------------------------
+
+UNVERIFIED = "verl layout hash not verified offline"
+
+
+def test_without_the_models_config_run_up_refuses_a_pinned_verl_fleet_and_its_dry_run_warns(
+        tmp_path, monkeypatch, capsys):
+    """No config.json here and none fetched (unit tests fetch nothing): ``yeto run up``
+    refuses the fleet (each island would check its pin only after its paid boot), naming
+    why, the matrix merge the check plans with and how to verify or go on; its dry run
+    passes with one WARN line; ``YETO_PREFLIGHT_LAYOUT=warn`` lets ``run up`` go on."""
+    monkeypatch.setattr(fragment_preflight, "local_hf_config", lambda model, revision: None)
+    layout = _planned(4)
+    count = layout.fragments.num_fragments
+
+    refused = _run_up_problem(tmp_path, monkeypatch, layout.layout_hash, count)
+    assert refused and f"ValueError: {UNVERIFIED}: config.json of Qwen/Qwen3-4B@{REVISION} is not in this host's " \
+                      "model files or Hugging Face cache, and fetching it failed: unit tests fetch nothing" in refused
+    assert "The check plans with matrix merge rda (--rl-sync-matrix-merge)" in refused
+    assert f"the launch pins --rl-parameter-layout-sha256 {layout.layout_hash[:16]}..." in refused
+    assert f"hf download Qwen/Qwen3-4B config.json --revision {REVISION}" in refused
+    assert "to launch unverified, set YETO_PREFLIGHT_LAYOUT=warn" in refused
+
+    capsys.readouterr()
+    assert _run_up_problem(tmp_path, monkeypatch, layout.layout_hash, count, dry_run=True) is None
+    warned = [line for line in capsys.readouterr().err.splitlines() if UNVERIFIED in line]
+    assert len(warned) == 1  # once, though every launch of the fleet is prepared
+    assert warned[0].startswith(f"[launcher] WARN: {UNVERIFIED}: ") and "matrix merge rda" in warned[0]
+
+    monkeypatch.setenv(fragment_preflight.LAYOUT_MODE_ENV, "warn")
+    assert _run_up_problem(tmp_path, monkeypatch, layout.layout_hash, count) is None
+    monkeypatch.setenv(fragment_preflight.LAYOUT_MODE_ENV, "maybe")
+    assert "YETO_PREFLIGHT_LAYOUT='maybe': expected one of check, warn" in _run_up_problem(
+        tmp_path, monkeypatch, layout.layout_hash, count)
+
+
+def test_a_fetched_config_verifies_the_layout(tmp_path, monkeypatch):
+    """Without a local config.json the launcher fetches that one file: the layout of the
+    fetched config is checked like a local one, and the refusal names where it came from."""
+    monkeypatch.setattr(fragment_preflight, "local_hf_config", lambda model, revision: None)
+    fetched = []
+
+    def remote(args):
+        fetched.append((args.model, args.model_revision))
+        return RAW, f"hf://{args.model}@{args.model_revision}/config.json"
+
+    monkeypatch.setattr(fragment_preflight, "remote_hf_config", remote)
+    layout = _planned(4)
+    count = layout.fragments.num_fragments
+    assert _run_up_problem(tmp_path, monkeypatch, layout.layout_hash, count) is None
+    assert fetched and set(fetched) == {("Qwen/Qwen3-4B", REVISION)}
+    wrong = _run_up_problem(tmp_path, monkeypatch, "e" * 64, count)
+    assert wrong and f"(config.json from hf://Qwen/Qwen3-4B@{REVISION}/config.json)" in wrong
+    assert f"Set --rl-parameter-layout-sha256 {layout.layout_hash}" in wrong
+
+
+def test_a_hash_planned_with_the_wrong_matrix_merge_is_named(tmp_path, monkeypatch):
+    """The fleet's islands merge with rda (the async full-parameter default): a pin planned
+    with avg is refused, and the refusal says it is the avg layout."""
+    rda, avg = _planned(4), _planned(4, merge="avg")
+    assert rda.layout_hash != avg.layout_hash
+    wrong = _run_up_problem(tmp_path, monkeypatch, avg.layout_hash, rda.fragments.num_fragments)
+    assert wrong and "matrix merge rda (--rl-sync-matrix-merge) has hash " + rda.layout_hash in wrong
+    assert ("the pinned hash is that layout under matrix merge avg, so it was planned with the wrong matrix merge "
+            "(the islands merge with rda)") in wrong
+    other = _run_up_problem(tmp_path, monkeypatch, "e" * 64, rda.fragments.num_fragments)
+    assert other and "planned with the wrong matrix merge" not in other
+
+
+def test_fleet_island_add_refuses_an_unverified_pin_and_its_dry_run_warns(tmp_path, monkeypatch, capsys):
+    """``yeto fleet island add`` (written) refuses a verl island whose pinned layout cannot
+    be planned here; ``--dry-run`` passes with the WARN."""
+    import types
+
+    from test_fleet_island_changes import prepare
+    from yeto.launch.pool import desired as dz
+    from yeto.rl import fleet
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    monkeypatch.setattr(fragment_preflight, "local_hf_config", lambda model, revision: None)
+    monkeypatch.setenv("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test-key-id")
+    monkeypatch.setenv("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test-secret")
+    cfg = up.load_config(str(_write(tmp_path, verl_doc(tmp_path))))
+    plan = fleet.plan_of(cfg)
+    objects = DirectoryObjectStore(tmp_path / "store")
+    store = dz.DesiredStore(objects)
+    pools = [{"kind": "sampler_pool", "name": p.name, "island": i.index, "pool": {"provider": "modal", "target": 1}}
+             for i in plan.islands for p in i.pools]
+    store.apply({"members": [*il.trainer_members(cfg, plan), *pools]}, expect=0)
+    monkeypatch.setattr("yeto.launch.pool.fleet_cli._store",
+                        lambda config: (types.SimpleNamespace(cfg=cfg, _objects=lambda: objects), store))
+    samplers = tmp_path / "north.samplers.json"
+    samplers.write_text(json.dumps([dict(cfg["islands"][1]["samplers"][0], name="sglang-north")]))
+
+    def add(*extra: str) -> int:
+        from yeto.cli import build_parser
+        from yeto.rl import fleet_islands
+
+        args = build_parser().parse_args(["fleet", "island", "add", "--name", "north", "--gpu", "modal:1x2xh100",
+                                          "--usd-per-h", "8", "--samplers", str(samplers), "--config", "run.json",
+                                          *extra])
+        return fleet_islands.main(args, prepare=prepare)
+
+    capsys.readouterr()
+    assert add("--dry-run") == 0
+    err = capsys.readouterr().err
+    assert f"[launcher] WARN: {UNVERIFIED}: " in err and "matrix merge rda" in err
+    assert add() == 2
+    err = capsys.readouterr().err
+    assert f"fleet island: refused: {UNVERIFIED}: " in err and "YETO_PREFLIGHT_LAYOUT=warn" in err
+    assert store.read()["generation"] == 1  # nothing written
+
+
+def _write(tmp_path, doc):
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps(doc))
+    return path
+
+
+# -- fetching config.json by itself (fragment_preflight._fetch_config) ----------------------
+
+def _args(model: str, *, revision: str | None = REVISION, source: str | None = None, volume: str | None = None):
+    import types
+
+    return types.SimpleNamespace(model=model, model_revision=revision, model_store_source=source,
+                                 modal_model_volume=volume)
+
+
+def _store(files: dict):
+    def store(uri):
+        return list(files), files.get
+    return store
+
+
+def test_the_config_is_fetched_from_the_hub_at_the_pinned_revision():
+    asked = []
+
+    def hub(repo, name, revision):
+        asked.append((repo, name, revision))
+        return RAW
+
+    assert fragment_preflight._fetch_config(_args("Qwen/Qwen3-4B"), hub=hub) == (
+        RAW, f"hf://Qwen/Qwen3-4B@{REVISION}/config.json")
+    assert asked == [("Qwen/Qwen3-4B", "config.json", REVISION)]  # that one file, at the pinned commit
+
+
+def test_a_store_model_and_a_model_store_source_give_their_config():
+    store = _store({"config.json": RAW, "model.safetensors": b""})
+    assert fragment_preflight._fetch_config(_args("s3://bkt/models/q"), store=store) == (
+        RAW, "s3://bkt/models/q/config.json")
+    no_hub = lambda *a: (_ for _ in ()).throw(AssertionError("the store source comes first"))  # noqa: E731
+    assert fragment_preflight._fetch_config(_args("Qwen/Qwen3-4B", source="s3://bkt/q/"), hub=no_hub,
+                                            store=store) == (RAW, "s3://bkt/q/config.json")
+    raw, why = fragment_preflight._fetch_config(_args("s3://bkt/models/q"), store=_store({}))
+    assert raw is None and why == "s3://bkt/models/q has no config.json"
+
+
+def test_the_model_volume_snapshot_is_the_fallback_and_every_failure_is_named():
+    def offline(repo, name, revision):
+        raise OSError("no network")
+
+    snaps = []
+
+    def volume(vol, snap):
+        snaps.append((vol, snap))
+        return ["config.json", "MANIFEST.json"], {"config.json": RAW}.get
+
+    assert fragment_preflight._fetch_config(_args("Qwen/Qwen3-4B", volume="models"), hub=offline, volume=volume) == (
+        RAW, f"modal volume models:/hf/Qwen3-4B/{REVISION[:8]}/config.json")
+    assert snaps == [("models", f"hf/Qwen3-4B/{REVISION[:8]}")]
+    raw, why = fragment_preflight._fetch_config(_args("Qwen/Qwen3-4B", volume="models"), hub=offline,
+                                                volume=lambda vol, snap: None)
+    assert raw is None
+    assert why == (f"the Hub did not give hf://Qwen/Qwen3-4B@{REVISION}/config.json (OSError: no network); "
+                   f"modal volume models has no hf/Qwen3-4B/{REVISION[:8]}/config.json")
+    raw, why = fragment_preflight._fetch_config(_args("/data/models/q"))
+    assert raw is None and why == "--model /data/models/q is not a local directory with config.json on this host"
+
+
+def test_a_fetched_config_is_kept_and_a_failed_fetch_is_tried_again_after_its_ttl(monkeypatch):
+    """Every launch of a fleet is prepared (the syncer's and each island's): one fetch. A
+    failure is shared for FAILED_FETCH_TTL_S only, so a long-lived controller tries again."""
+    calls, answers = [], {}
+    clock = [1000.0]
+
+    def fetch(args, **probes):
+        calls.append(args.model_revision)
+        return answers.get(args.model_revision, (None, "the Hub is down"))
+
+    monkeypatch.setattr(fragment_preflight, "_FETCHED", {})
+    monkeypatch.setattr(fragment_preflight, "_FAILED", {})
+    monkeypatch.setattr(fragment_preflight, "_fetch_config", fetch)
+    monkeypatch.setattr(fragment_preflight.time, "monotonic", lambda: clock[0])
+    answers[REVISION] = (RAW, "hf://x")
+    for _ in range(3):
+        assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B")) == (RAW, "hf://x")
+    assert calls == [REVISION]
+    down = "b" * 40
+    assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B", revision=down)) == (None, "the Hub is down")
+    clock[0] += fragment_preflight.FAILED_FETCH_TTL_S - 1
+    assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B", revision=down)) == (None, "the Hub is down")
+    assert calls == [REVISION, down]  # within the TTL: the failure is shared
+    answers[down] = (RAW, "hf://y")
+    clock[0] += 2
+    assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B", revision=down)) == (RAW, "hf://y")  # tried again
+    assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B", revision=down)) == (RAW, "hf://y")
+    assert calls == [REVISION, down, down]
+
+
+def test_only_a_launch_that_pins_a_hash_is_refused_unverified(capsys):
+    """Inside the refusal context (``yeto run up``), a layout the launcher cannot plan
+    refuses a launch that pins a 64-hex hash; one without a pin (none, or ``auto``) only
+    gets the WARN."""
+    import types
+
+    def args(pin):
+        return types.SimpleNamespace(model="Qwen/Qwen3-4B", model_revision=REVISION, fragments=4,
+                                     rl_parameter_layout_sha256=pin)
+
+    with fragment_preflight.refuse_unverified_layout():
+        for pin in (None, "", "auto", "e" * 63):
+            fragment_preflight._unverified(args(pin), f"no config ({pin})", backend="verl", merge="rda",
+                                           max_bytes=2 << 30)
+            err = capsys.readouterr().err
+            assert f"[launcher] WARN: {UNVERIFIED}: no config ({pin}). The check plans with matrix merge rda" in err
+            assert "the launch pins" not in err
+        with pytest.raises(ValueError, match=rf"^{UNVERIFIED}: no config\. .* the launch pins "
+                                             rf"--rl-parameter-layout-sha256 eeeeeeeeeeeeeeee\.\.\."):
+            fragment_preflight._unverified(args("e" * 64), "no config", backend="verl", merge="rda", max_bytes=2 << 30)
+    # outside it (a dry run, the launch itself): the pinned launch only warns
+    fragment_preflight._unverified(args("e" * 64), "no config", backend="verl", merge="rda", max_bytes=2 << 30)
+    assert "the launch pins --rl-parameter-layout-sha256 eeeeeeeeeeeeeeee..." in capsys.readouterr().err

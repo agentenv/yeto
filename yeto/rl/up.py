@@ -1228,7 +1228,9 @@ class Run:
                                      sandbox_usd_per_h=breakers_fleet.sandbox_price(self.cfg))
 
     # -- steps
-    def preflight(self) -> bool:
+    def preflight(self, *, dry_run: bool = False) -> bool:
+        """``dry_run``: ``yeto run up --dry-run`` (a verl island launch whose pinned layout hash
+        cannot be planned offline is warned about, not refused: :meth:`fleet_session_problem`)."""
         from yeto.launch_preflight import modal_sdk_problem  # noqa: PLC0415
 
         if rollout_section(self.cfg).get("control_plane") == "store":
@@ -1246,7 +1248,7 @@ class Run:
                 _log(f"preflight: WARNING: the fleet's desired state was not read ({type(error).__name__}: {error}); "
                      "checking the run config's pools and trainer islands only (islands added at run time are "
                      "not checked for a price)")
-        problem = self.fleet_problem() or self.fleet_session_problem()
+        problem = self.fleet_problem() or self.fleet_session_problem(dry_run=dry_run)
         if problem is not None:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
@@ -2867,14 +2869,17 @@ class Run:
                 return problem
         return None
 
-    def fleet_session_problem(self) -> str | None:
+    def fleet_session_problem(self, *, dry_run: bool = False) -> str | None:
         """A fleet launched island by island: its syncer launch and every island launch (the
         trainer islands of the desired state the preflight read, else the run config's)
         compiled and compared (``yeto.rl.fleet_session``: syncer profile, HELLO flags,
-        learners, syncer_epoch, learner ids). None when they agree (or no per-island fleet)."""
+        learners, syncer_epoch, learner ids). None when they agree (or no per-island fleet).
+        Not ``dry_run``: a verl launch pinning a layout hash the launcher cannot plan offline
+        is refused (``fragment_preflight.refuse_unverified_layout``); a dry run warns."""
         plan = self.fleet_plan()
         if plan is None or not plan.per_island:
             return None
+        from yeto.launch.fragment_preflight import refuse_unverified_layout  # noqa: PLC0415
         from yeto.launch.pool.desired import trainers  # noqa: PLC0415
         from yeto.rl import fleet_session, island_launches  # noqa: PLC0415
 
@@ -2883,7 +2888,8 @@ class Run:
             members = [{**m, "argv": [*m["argv"], *island_launches.member_table_flags(m["learner_id"])]}
                        for m in island_launches.trainer_members(self.cfg, plan)]
         try:
-            fleet_session.check(self.trainer_argv(), members)
+            with refuse_unverified_layout(not dry_run):
+                fleet_session.check(self.trainer_argv(), members)
         except ValueError as error:
             return f"fleet.launch per_island: {error}"
         _log(f"preflight: fleet.launch per_island: the syncer launch and {len(members)} island launch(es) agree "
@@ -4488,7 +4494,7 @@ def main(args: Any) -> int:
         _log(refused)
         return 2
     run.log_fleet_plan()
-    if not args.skip_preflight and not run.preflight():
+    if not args.skip_preflight and not run.preflight(dry_run=args.dry_run):
         log = run.dir / "preflight.log"
         _log("preflight failed: nothing ordered" + (f" (see {log})" if log.exists() else
                                                      " (the reason is the preflight line above)"))

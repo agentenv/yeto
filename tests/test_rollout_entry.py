@@ -773,7 +773,7 @@ def test_an_allowed_run_up_that_orders_nothing_does_not_acknowledge_the_forced_s
     run.mark("nc_forced_stop", why="spend $600 > $540", rc=0)
     args.allow_after_forced_stop = True
     args.skip_preflight = False
-    monkeypatch.setattr(run, "preflight", lambda: how != "failed_preflight")
+    monkeypatch.setattr(run, "preflight", lambda *, dry_run=False: how != "failed_preflight")
     args.dry_run = how == "dry_run"
     assert up.main(args) == (0 if how == "dry_run" else 2)
     assert not any(p.orders for p in providers.values())

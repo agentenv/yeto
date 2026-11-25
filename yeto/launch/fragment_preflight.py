@@ -10,7 +10,7 @@ the launcher computes it here with the backend's offline planner (Miles:
 ``models.dense_gpt_layout``) and refuses a mismatch before anything is ordered.
 
 Only the model's ``config.json`` is read, from a local model directory or the
-local Hugging Face cache; nothing is downloaded. Out of scope (no config in the
+local Hugging Face cache; for Miles nothing is downloaded. Out of scope (no config in the
 cache, a model family the offline layout does not list, shape-free layouts,
 partial experts, CP or DP above 1, another backend), the check prints nothing
 and the run goes on as before. At PP>1 the count is an estimate: a mismatch is
@@ -22,19 +22,53 @@ device) gives one layout for every island shape, DP included; the verl island ha
 ``auto`` hash, so the launch also refuses a ``--rl-parameter-layout-sha256`` that is
 not the planned hash (when the model revision is a commit and the hash can be
 computed). A fleet island added or moved at run time runs the same check in its
-launch's dry run.
+launch's dry run. Without ``config.json`` in the local files the launcher fetches that
+one file (:func:`remote_hf_config`: the model's store URI or ``--model-store-source``,
+the Hub at the pinned revision, the ``--modal-model-volume`` snapshot). When the layout
+still cannot be planned it prints ``WARN: verl layout hash not verified offline: <why>``
+with the matrix merge it would have planned with; inside :func:`refuse_unverified_layout`
+(``yeto run up`` and ``yeto fleet island add/move``, not their dry runs) an island launch
+that pins ``--rl-parameter-layout-sha256`` is refused instead, unless
+``YETO_PREFLIGHT_LAYOUT=warn``.
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
+import os
 import re
 import sys
-from collections.abc import Mapping
+import time
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# check (default): ``yeto run up`` / ``yeto fleet island add|move`` refuse an island launch
+# that pins a layout hash the launcher could not plan; warn: they print the WARN and go on
+LAYOUT_MODE_ENV = "YETO_PREFLIGHT_LAYOUT"
+LAYOUT_MODES = ("check", "warn")
+_REFUSE_UNVERIFIED: contextvars.ContextVar[bool] = contextvars.ContextVar("refuse_unverified_layout", default=False)
+_FETCHED: dict[tuple, tuple[bytes, str]] = {}  # remote_hf_config: a config fetched once per process
+_FAILED: dict[tuple, tuple[float, str]] = {}  # remote_hf_config: a failed fetch (monotonic time, why)
+FAILED_FETCH_TTL_S = 60.0  # one preflight's launches share a failure; later launches try again
+_WARNED: set[str] = set()
+
+
+@contextlib.contextmanager
+def refuse_unverified_layout(refuse: bool = True) -> Iterator[None]:
+    """Inside: a card-free (verl) island launch that pins ``--rl-parameter-layout-sha256``
+    whose layout the launcher cannot plan is refused rather than warned about
+    (``YETO_PREFLIGHT_LAYOUT=warn`` keeps the warning). ``yeto run up`` and ``yeto fleet
+    island add|move`` enter it; their dry runs, and the launch itself, only warn."""
+    token = _REFUSE_UNVERIFIED.set(bool(refuse))
+    try:
+        yield
+    finally:
+        _REFUSE_UNVERIFIED.reset(token)
 
 
 def local_hf_config(model: str, revision: str | None) -> bytes | None:
@@ -51,6 +85,87 @@ def local_hf_config(model: str, revision: str | None) -> bytes | None:
         return Path(found).read_bytes() if isinstance(found, str) else None
     except Exception:  # noqa: BLE001 - not a repo id, no huggingface_hub, unreadable
         return None
+
+
+def remote_hf_config(args: Any, **probes: Any) -> tuple[bytes | None, str]:
+    """``config.json`` of the model of ``args`` fetched by itself (a few KB) when the local
+    files lack it: ``(bytes, where)``, else ``(None, why not)``. A fetched config is kept
+    for the process (per model, revision and source); a failure only for
+    ``FAILED_FETCH_TTL_S`` (the launches of one preflight share it, so an offline host
+    waits on the Hub once), after which a launch (a long-lived controller's too) tries again."""
+    if probes:
+        return _fetch_config(args, **probes)
+    key = (str(getattr(args, "model", "")), str(getattr(args, "model_revision", None) or ""),
+           str(getattr(args, "model_store_source", None) or ""), str(getattr(args, "modal_model_volume", None) or ""))
+    if key in _FETCHED:
+        return _FETCHED[key]
+    failed = _FAILED.get(key)
+    if failed is not None and time.monotonic() - failed[0] < FAILED_FETCH_TTL_S:
+        return None, failed[1]
+    raw, where = _fetch_config(args)
+    if raw is None:
+        _FAILED[key] = (time.monotonic(), where)
+        return None, where
+    _FAILED.pop(key, None)
+    _FETCHED[key] = (raw, where)
+    return raw, where
+
+
+def _fetch_config(args: Any, *, hub: Any = None, volume: Any = None, store: Any = None) -> tuple[bytes | None, str]:
+    from yeto.provenance import is_local_reference  # noqa: PLC0415
+
+    from . import model_check  # noqa: PLC0415
+
+    model = str(getattr(args, "model", "") or "")
+    revision = str(getattr(args, "model_revision", None) or "") or None
+    tried: list[str] = []
+
+    def from_store(uri: str) -> tuple[bytes | None, str]:
+        try:
+            names, read = (store or model_check.model_store_source_files)(uri)
+            if model_check.CONFIG in names:
+                raw = read(model_check.CONFIG)
+                if raw:
+                    return raw, f"{uri.rstrip('/')}/{model_check.CONFIG}"
+            tried.append(f"{uri} has no {model_check.CONFIG}")
+        except Exception as error:  # noqa: BLE001 - reported in the reason
+            tried.append(f"{uri} is not readable from this host ({type(error).__name__}: {error})"[:300])
+        return None, ""
+
+    if "://" in model:
+        raw, where = from_store(model)
+        return (raw, where) if raw else (None, "; ".join(tried))
+    if is_local_reference(model):
+        return None, f"--model {model} is not a local directory with {model_check.CONFIG} on this host"
+    source = getattr(args, "model_store_source", None)
+    if source:
+        raw, where = from_store(str(source))
+        if raw:
+            return raw, where
+    try:
+        if hub is None:
+            from huggingface_hub import hf_hub_download  # noqa: PLC0415
+
+            def hub(repo: str, name: str, rev: str | None) -> bytes:
+                return Path(hf_hub_download(repo, name, revision=rev)).read_bytes()
+
+        return hub(model, model_check.CONFIG, revision), f"hf://{model}@{revision or 'main'}/{model_check.CONFIG}"
+    except Exception as error:  # noqa: BLE001 - offline host, gated repo, no huggingface_hub
+        tried.append(f"the Hub did not give hf://{model}@{revision or 'main'}/{model_check.CONFIG} "
+                     f"({type(error).__name__}: {str(error).splitlines()[0] if str(error) else ''})"[:300])
+    vol = getattr(args, "modal_model_volume", None)
+    if vol and revision and len(revision) == 40:
+        snap = f"{model_check.MODEL_VOLUME_MOUNT_DIR}/{model.split('/')[-1]}/{revision[:8]}"
+        try:
+            listing = (volume or model_check.modal_volume_files)(str(vol), snap)
+            if listing is not None and model_check.CONFIG in listing[0]:
+                raw = listing[1](model_check.CONFIG)
+                if raw:
+                    return raw, f"modal volume {vol}:/{snap}/{model_check.CONFIG}"
+            tried.append(f"modal volume {vol} has no {snap}/{model_check.CONFIG}")
+        except Exception as error:  # noqa: BLE001 - reported in the reason
+            tried.append(f"modal volume {vol} is not readable ({type(error).__name__}: {error})"[:300])
+    return None, "; ".join(tried)
 
 
 def _trainer_islands(args: Any, per_island: list, specs: list) -> list[tuple[Any, Any]]:
@@ -108,6 +223,7 @@ class LayoutSummary:
     fragment_bytes: tuple[int, ...]
     layout_hash: str | None  # None without a commit revision (dense_gpt_layout.offline_layout)
     exact: bool
+    config_source: str = "the local model files"  # where config.json came from
 
     @property
     def shape(self) -> str:
@@ -124,41 +240,99 @@ class LayoutSummary:
                 f"layout {self.digest()}" + ("" if self.exact else " (PP>1 estimate)"))
 
 
+MATRIX_MERGES = ("avg", "rda")
+
+
 def offline_summary(args: Any, *, tp: int, pp: int) -> LayoutSummary | None:
     """The layout of a trainer of shape TP x PP from the backend's offline planner and the
     model's local ``config.json``; None when the planner or the config is not there."""
+    return plan_offline(args, tp=tp, pp=pp)[0]
+
+
+def plan_offline(args: Any, *, tp: int, pp: int, matrix_merge: str | None = None,
+                 fetch: bool = False) -> tuple[LayoutSummary | None, str]:
+    """``(layout, "")`` of a trainer of shape TP x PP (``matrix_merge``: the run's
+    ``--rl-sync-matrix-merge`` unless given), else ``(None, why it was not planned)``.
+    ``fetch``: without a local ``config.json`` fetch that one file (:func:`remote_hf_config`)."""
     from .rl_backend import _rl_backend_module
 
     plan = getattr(_rl_backend_module(args, "launch_flags"), "offline_full_parameter_layout", None)
     if plan is None:
-        return None
-    raw = local_hf_config(args.model, getattr(args, "model_revision", None))
+        return None, f"--rl-backend {getattr(args, 'rl_backend', None) or 'miles'} has no offline layout planner"
+    revision = getattr(args, "model_revision", None)
+    raw, source = local_hf_config(args.model, revision), "the local model files"
+    if raw is None and fetch:
+        raw, source = remote_hf_config(args)
+        if raw is None:
+            return None, (f"config.json of {args.model}@{revision or 'main'} is not in this host's model files "
+                          f"or Hugging Face cache, and fetching it failed: {source or 'no source to fetch from'}")
     if raw is None:
-        return None
+        return None, f"config.json of {args.model}@{revision or 'main'} is not in this host's model files"
     try:
         config = json.loads(raw)
     except ValueError:
-        return None
+        return None, f"config.json of {args.model} from {source} is not JSON"
     try:
         layout = plan(
             config, tp=tp, pp=pp, minimum_fragments=int(args.fragments),
             max_fragment_bytes=int(getattr(args, "rl_sync_fragment_max_bytes", 2 << 30)),
-            matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
-            model_revision=str(getattr(args, "model_revision", None) or ""),
+            matrix_merge=matrix_merge or getattr(args, "rl_sync_matrix_merge", "avg"),
+            model_revision=str(revision or ""),
             config_sha256=hashlib.sha256(raw).hexdigest())
-    except ImportError:  # the backend's planner needs a package the control host lacks
-        return None
+    except ImportError as error:  # the backend's planner needs a package the control host lacks
+        return None, f"the offline planner needs a package this host lacks ({error})"
     if layout is None:
-        return None
+        return None, f"the offline planner does not take the model in config.json of {args.model} ({source})"
     return LayoutSummary(tp=tp, pp=pp, fragments=layout.fragments, ranks=layout.ranks,
                          fragment_bytes=tuple(layout.fragment_bytes), layout_hash=layout.layout_hash,
-                         exact=layout.exact)
+                         exact=layout.exact, config_source=source), ""
+
+
+def _layout_mode() -> str:
+    mode = (os.environ.get(LAYOUT_MODE_ENV) or "check").strip().lower()
+    if mode not in LAYOUT_MODES:
+        raise ValueError(f"{LAYOUT_MODE_ENV}={mode!r}: expected one of {', '.join(LAYOUT_MODES)}")
+    return mode
+
+
+def _unverified(args: Any, why: str, *, backend: str, merge: str, max_bytes: int) -> None:
+    """A card-free layout the launcher could not plan: refused inside
+    :func:`refuse_unverified_layout` when the launch pins a hash, else one WARN line."""
+    pinned = str(getattr(args, "rl_parameter_layout_sha256", None) or "")
+    pins = bool(re.fullmatch(r"[0-9a-f]{64}", pinned))
+    revision = getattr(args, "model_revision", None) or "main"
+    what = (f"{backend} layout hash not verified offline: {why}. The check plans with matrix merge {merge} "
+            f"(--rl-sync-matrix-merge), --fragments {args.fragments} and FP32 fragments of at most {max_bytes} bytes"
+            + (f"; the launch pins --rl-parameter-layout-sha256 {pinned[:16]}..." if pins else ""))
+    hint = (f"put the model's config.json in this host's Hugging Face cache (hf download {args.model} config.json "
+            f"--revision {revision}) and run again")
+    mode = _layout_mode()
+    if pins and _REFUSE_UNVERIFIED.get() and mode != "warn":
+        raise ValueError(f"{what}; every island would check the pin only after its paid boot. To verify, {hint}; "
+                         f"to launch unverified, set {LAYOUT_MODE_ENV}=warn")
+    line = (f"[launcher] WARN: {what}; each island checks the pin itself after its boot and refuses a hash "
+            f"that is not its layout. To verify, {hint}")
+    if line not in _WARNED:
+        _WARNED.add(line)
+        print(line, file=sys.stderr, flush=True)
+
+
+def _pinned_under_other_merge(args: Any, pinned: str, *, tp: int, pp: int, merge: str) -> str | None:
+    """The other matrix merge whose layout has hash ``pinned`` (None: neither)."""
+    for other in MATRIX_MERGES:
+        if other == merge:
+            continue
+        layout, _ = plan_offline(args, tp=tp, pp=pp, matrix_merge=other, fetch=True)
+        if layout is not None and layout.layout_hash == pinned:
+            return other
+    return None
 
 
 def check_fragment_layout(args: Any, per_island: list, specs: list) -> None:
     """Refuse (ValueError) a ``--fragments`` the islands' full-parameter layout
     cannot have; warn on stderr when the count is an estimate (PP>1). Silent when
-    the count matches or the check is out of scope (module doc)."""
+    the count matches or the check is out of scope (module doc); a card-free (verl)
+    layout that cannot be planned warns, or refuses (:func:`refuse_unverified_layout`)."""
     from .rl_backend import _rl_backend_module
 
     # the backend's offline planner (Miles: launch_flags.offline_full_parameter_layout)
@@ -168,27 +342,37 @@ def check_fragment_layout(args: Any, per_island: list, specs: list) -> None:
         return
     tp = int(args.tensor_parallel or 1)
     pp = int(getattr(args, "pipeline_parallel", 1) or 1)
-    layout = offline_summary(args, tp=tp, pp=pp)
-    if layout is None:
-        return
     card_free = _card_free(args)
     max_bytes = int(getattr(args, "rl_sync_fragment_max_bytes", 2 << 30))
     merge = getattr(args, "rl_sync_matrix_merge", "avg")
     backend = getattr(args, "rl_backend", None) or "miles"
+    layout, why = plan_offline(args, tp=tp, pp=pp, fetch=card_free)
+    if layout is None:
+        if card_free:
+            _unverified(args, why, backend=backend, merge=merge, max_bytes=max_bytes)
+        return
     where = "on any island shape" if card_free else f"at TP{tp} x PP{pp}"
     if layout.fragments == int(args.fragments):
         pinned = str(getattr(args, "rl_parameter_layout_sha256", None) or "")
-        if card_free and layout.layout_hash and re.fullmatch(r"[0-9a-f]{64}", pinned) and pinned != layout.layout_hash:
+        if card_free and not layout.layout_hash:
+            _unverified(args, f"--model-revision {getattr(args, 'model_revision', None) or '(none)'} is not a "
+                        "commit, and the layout hash binds the commit", backend=backend, merge=merge,
+                        max_bytes=max_bytes)
+        elif card_free and re.fullmatch(r"[0-9a-f]{64}", pinned) and pinned != layout.layout_hash:
+            other = _pinned_under_other_merge(args, pinned, tp=tp, pp=pp, merge=merge)
             raise ValueError(
                 f"--rl-parameter-layout-sha256 {pinned[:16]}... is not the layout the trainer islands build: the "
-                f"{backend} full-parameter layout of {args.model}@{args.model_revision} {where} (config.json from the "
-                f"local model files), {layout.fragments} FP32 fragments of at most {max_bytes} bytes and matrix "
-                f"merge {merge} has hash {layout.layout_hash}; every island would refuse it at its start "
-                "(and the syncer session binds it). Set --rl-parameter-layout-sha256 " + layout.layout_hash)
+                f"{backend} full-parameter layout of {args.model}@{args.model_revision} {where} (config.json from "
+                f"{layout.config_source}), {layout.fragments} FP32 fragments of at most {max_bytes} bytes and matrix "
+                f"merge {merge} (--rl-sync-matrix-merge) has hash {layout.layout_hash}; "
+                + (f"the pinned hash is that layout under matrix merge {other}, so it was planned with the wrong "
+                   f"matrix merge (the islands merge with {merge}); " if other else "")
+                + "every island would refuse it at its start (and the syncer session binds it). "
+                "Set --rl-parameter-layout-sha256 " + layout.layout_hash)
         return
     name = "Miles" if backend == "miles" else backend
     detail = (f"the {name} full-parameter layout of {args.model} {where} "
-              f"(config.json from the local model files), FP32 fragments of at most "
+              f"(config.json from {layout.config_source}), FP32 fragments of at most "
               f"{max_bytes} bytes (--rl-sync-fragment-max-bytes) and matrix merge {merge} "
               f"has {layout.fragments} fragments over {layout.ranks} trainer rank(s)")
     if not layout.exact:

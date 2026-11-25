@@ -201,7 +201,7 @@ def test_run_up_main_refuses_before_ordering_and_skip_reaches_the_trainer(make_u
     order = []
     monkeypatch.setattr(up, "Run", lambda cfg: run)
     monkeypatch.setattr(up, "load_config", lambda path: {})
-    monkeypatch.setattr(run, "preflight", lambda: True)
+    monkeypatch.setattr(run, "preflight", lambda *, dry_run=False: True)
     monkeypatch.setattr(run, "sandbox_prepare", lambda: order.append("sandbox") or True)
     monkeypatch.setattr(run, "pool", lambda: order.append("pool"))
     monkeypatch.setattr(run, "wait_first_group", lambda: None)

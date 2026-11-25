@@ -37,11 +37,20 @@ python -m yeto.rl.adapters.verl.full_parameter_plan --model Qwen/Qwen3-0.6B \
 # -> "launcher_flags": "--rl-parameter-layout-sha256 <sha256> --fragments 2"
 ```
 
-Put those two flags in `fleet.trainer_argv` together with `--rl-backend verl`. When the
-model's `config.json` is in the local Hugging Face cache, `yeto run up --dry-run` computes
-the same layout and refuses a hash of another matrix merge or fragment count before
-anything is ordered. Without a local config that check is skipped, and each island refuses
-a wrong hash at its start.
+Put those two flags in `fleet.trainer_argv` together with `--rl-backend verl`. `yeto run up`
+(and its dry run) computes the same layout and refuses a hash of another matrix merge or
+fragment count before anything is ordered. The refusal names the matrix merge it planned
+with, and says so when the pinned hash is the layout under the other merge.
+
+The check needs the model's `config.json`. Without it in the local files or Hugging Face
+cache, the launcher fetches that one file: from the model's store URI or
+`--model-store-source`, then from the Hub at `--model-revision`, then from the
+`--modal-model-volume` snapshot. When none of them gives it, `yeto run up` and
+`yeto fleet island add/move` refuse a fleet that pins a layout hash, because each island
+would check the pin only after its paid boot. Their dry runs print
+`WARN: verl layout hash not verified offline: <why>` instead. To verify, put the config in
+the cache (`hf download <model> config.json --revision <revision>`) and run again; to go
+on unverified, set `YETO_PREFLIGHT_LAYOUT=warn`.
 
 ## How a verl fleet differs from a Miles fleet
 

@@ -316,8 +316,12 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
         for line in changes(current, doc):
             print(f"fleet island: {line}")
         if launch_member is not None:
-            launch_dry_run(launch_member, prepare=prepare)
-            session_check(run, doc, launch_member)
+            from yeto.launch.fragment_preflight import refuse_unverified_layout  # noqa: PLC0415
+
+            # a change that is written (not --dry-run) refuses a pinned verl layout hash it cannot plan
+            with refuse_unverified_layout(not args.dry_run):
+                launch_dry_run(launch_member, prepare=prepare)
+                session_check(run, doc, launch_member)
             print(f"fleet island: launch of {launch_member['name']} (learner {launch_member['learner_id']}, "
                   f"--gpu {launch_member['gpu']}) passes its dry run")
     except (IslandChangeError, ValueError, OSError) as error:
