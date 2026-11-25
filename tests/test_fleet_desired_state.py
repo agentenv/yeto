@@ -605,3 +605,81 @@ def test_two_controllers_claiming_the_applied_state_at_once_one_wins(tmp_path):
     winners = [r for r in claimers if not r.fenced]
     assert len(winners) == 1 and len(fenced) == 1
     assert real(f.store)["writer"] == winners[0].writer
+
+
+def test_a_store_without_atomic_create_refuses_to_fence_the_applied_state(tmp_path):
+    """REV #783: a check-then-write create (the OSS relay, an endpoint refusing If-None-Match)
+    cannot tell two claimers apart: refused, and the reconciler applies nothing more."""
+    objects = DirectoryObjectStore(tmp_path)
+    objects.atomic_create = False
+    store = dz.DesiredStore(objects, log=lambda _m: None)
+    with pytest.raises(dz.AppliedUnsafe):
+        store.write_applied(1, {}, {}, writer="a", claim=True)
+    r = FleetReconciler(store, ReconcileHooks(), poll_s=0, log=lambda _m: None)
+    r.start_from({"generation": 1, "members": []})
+    r._persist()  # noqa: SLF001
+    assert r.fenced and "atomic" in r.fenced
+
+
+def test_the_applied_copy_of_the_older_format_is_still_read(tmp_path):
+    """REV #783: a run that wrote only fleet/applied.json (before the records): its pools being
+    removed are still read, so they are still driven after the upgrade."""
+    objects = DirectoryObjectStore(tmp_path)
+    old = {"schema": dz.APPLIED_SCHEMA, "generation": 3, "writer": "old",
+           "members": [_member("nc", 1)], "removing": [_member("gone", 2)]}
+    objects.write(dz.APPLIED_KEY, json.dumps(old).encode())
+    store = dz.DesiredStore(objects, log=lambda _m: None)
+    assert [m["name"] for m in store.read_applied()["removing"]] == ["gone"]
+    assert store.write_applied(4, {}, {}, writer="new", claim=True) == 1
+    assert store.read_applied()["writer"] == "new"
+
+
+def test_a_failed_copy_write_is_logged_and_the_record_still_holds(tmp_path):
+    objects = DirectoryObjectStore(tmp_path)
+    real = objects.write
+
+    def write(key, data):
+        if key == dz.APPLIED_KEY:
+            raise ConnectionError("copy write failed")
+        return real(key, data)
+
+    objects.write = write
+    logged = []
+    store = dz.DesiredStore(objects, log=logged.append)
+    assert store.write_applied(1, {}, {}, writer="a", claim=True) == 1
+    assert logged and "WARNING" in logged[0] and "copy" in logged[0]
+    assert store.read_applied()["seq"] == 1 and store.read_applied()["writer"] == "a"
+
+
+def test_a_lagging_listing_never_fences_the_only_controller(tmp_path):
+    objects = DirectoryObjectStore(tmp_path)
+    store = dz.DesiredStore(objects, log=lambda _m: None)
+    store.write_applied(1, {}, {}, writer="a", claim=True)
+    store.write_applied(1, {}, {}, writer="a")
+    real = objects.list
+    objects.list = lambda prefix, **kw: [k for k in real(prefix, **kw) if not k.endswith("00000002.json")]
+    assert store.read_applied()["seq"] == 2  # the copy says 2 although the listing lags
+    assert store.write_applied(2, {}, {}, writer="a") == 3
+
+
+def test_a_store_that_does_not_list_retries_the_applied_write(tmp_path):
+    objects = DirectoryObjectStore(tmp_path)
+    store = dz.DesiredStore(objects, log=lambda _m: None)
+    r = FleetReconciler(store, ReconcileHooks(), poll_s=0, log=lambda _m: None)
+    r.start_from({"generation": 1, "members": []})
+    real = objects.list
+    objects.list = lambda prefix, **kw: (_ for _ in ()).throw(ConnectionError("list failed"))
+    r._persist()  # noqa: SLF001
+    assert not r.fenced and r._dirty  # noqa: SLF001 - not written, tried again
+    objects.list = real
+    r._persist()  # noqa: SLF001
+    assert not r._dirty and store.read_applied()["writer"] == r.writer  # noqa: SLF001
+
+
+def test_old_applied_records_are_pruned(tmp_path):
+    objects = DirectoryObjectStore(tmp_path)
+    store = dz.DesiredStore(objects, log=lambda _m: None)
+    for i in range(dz.APPLIED_KEEP + 5):
+        store.write_applied(1, {}, {}, writer="a", claim=i == 0)
+    seqs = store._applied_seqs()  # noqa: SLF001
+    assert len(seqs) == dz.APPLIED_KEEP and seqs[-1] == dz.APPLIED_KEEP + 5

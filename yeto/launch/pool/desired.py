@@ -44,6 +44,7 @@ import json
 import os
 import re
 import socket
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -52,6 +53,7 @@ SCHEMA = "yeto.fleet.desired/v1"
 DESIRED_KEY = "fleet/desired.json"
 APPLIED_KEY = "fleet/applied.json"  # what the controller applied (FleetReconciler): generation, pools, removals
 APPLIED_DIR = "fleet/applied"  # its records, fleet/applied/<seq>.json, each created once (the writer fence)
+APPLIED_KEEP = 20  # the newest records kept (older ones are deleted after a write)
 APPLIED_SCHEMA = "yeto.fleet.applied/v1"
 GENERATIONS_DIR = "fleet/desired"
 KINDS = ("sampler_pool", "trainer")
@@ -157,6 +159,11 @@ def _kind(entry: dict[str, Any]) -> str:
     return str(provider or "nc")
 
 
+class AppliedUnsafe(RuntimeError):
+    """The store cannot fence the applied state: its create is not atomic (a check-then-write
+    store such as the OSS relay, or an endpoint that refuses ``If-None-Match``)."""
+
+
 class AppliedFenced(RuntimeError):
     """``fleet/applied.json`` belongs to another controller now (it took the fleet over):
     this one writes it no more."""
@@ -165,8 +172,10 @@ class AppliedFenced(RuntimeError):
 class DesiredStore:
     """Reads and writes the desired state on an object API (module doc)."""
 
-    def __init__(self, objects: Any, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, objects: Any, *, clock: Callable[[], float] = time.time,
+                 log: Callable[[str], None] | None = None) -> None:
         self.objects, self.clock = objects, clock
+        self.log = log or (lambda msg: print(msg, file=sys.stderr, flush=True))
 
     @staticmethod
     def key(generation: int) -> str:
@@ -226,20 +235,27 @@ class DesiredStore:
         return sorted(int(m.group(1)) for key in self.objects.list(base)
                       if (m := _GEN.fullmatch(key[len(base):])) is not None)
 
-    def read_applied(self) -> dict[str, Any] | None:
-        """The generation the controller last applied, with its sampler pools (``members``),
-        the pools it was still removing (``removing``), its ``writer`` and the record's
-        ``seq``; None before the first apply."""
-        seqs = self._applied_seqs()
-        if not seqs:
-            return None
-        data = self.objects.read(self.applied_key(seqs[-1]))
+    def _doc(self, key: str) -> dict[str, Any] | None:
+        data = self.objects.read(key)
         if data is None:
             return None
         doc = json.loads(data)
-        if not isinstance(doc, dict) or doc.get("schema") != APPLIED_SCHEMA:
-            return None
-        return doc
+        return doc if isinstance(doc, dict) and doc.get("schema") == APPLIED_SCHEMA else None
+
+    def read_applied(self) -> dict[str, Any] | None:
+        """The generation the controller last applied, with its sampler pools (``members``),
+        the pools it was still removing (``removing``), its ``writer`` and the record's
+        ``seq``; None before the first apply. The newest record is the higher of the newest
+        listed one and the copy's (``fleet/applied.json``, written after each record: a listing
+        that lags behind a create does not hide it). No record (a run that wrote only the copy,
+        before the records): the copy, so pools being removed are still driven."""
+        copy_doc = self._doc(APPLIED_KEY)
+        seqs = self._applied_seqs()
+        top = max([*seqs[-1:], int((copy_doc or {}).get("seq") or 0)], default=0)
+        if top <= 0:
+            return copy_doc  # the copy only (no seq): the older format
+        doc = self._doc(self.applied_key(top))
+        return doc if doc is not None else copy_doc
 
     def write_applied(self, generation: int, pools: dict[str, dict[str, Any]],
                       removing: dict[str, dict[str, Any]], *, writer: str | None = None,
@@ -249,9 +265,14 @@ class DesiredStore:
         record, one wins and the other gets :class:`AppliedFenced`. A controller claims it
         once when it starts (``claim``); from then on a write needs the newest record to be
         its own (``writer``: unique per controller, so a create whose answer was lost and is
-        sent again still finds its own record), and a generation
-        older than the stored one is never written back. Returns the new record's ``seq``;
+        sent again still finds its own record), and a generation older than the stored one
+        is never written back. A store whose create is not atomic raises :class:`AppliedUnsafe`
+        (it cannot tell two writers apart). Returns the new record's ``seq``;
         ``fleet/applied.json`` is a copy of the newest record."""
+        from yeto.rl.engine.object_store import atomic_create  # noqa: PLC0415
+
+        if not atomic_create(self.objects):
+            raise AppliedUnsafe("the store has no atomic exclusive create: fleet/applied.json cannot be fenced")
         current = self.read_applied()
         seq = int(current.get("seq") or 0) if current is not None else 0
         if writer is not None and current is not None and not claim:
@@ -260,17 +281,40 @@ class DesiredStore:
                                     f"(record {seq}; not {writer})")
         if current is not None and int(current.get("generation") or 0) > int(generation):
             raise AppliedFenced(f"fleet/applied.json is at generation {current.get('generation')}, past {generation}")
-        doc = {"schema": APPLIED_SCHEMA, "seq": seq + 1, "generation": int(generation),
-               "members": list(pools.values()), "removing": list(removing.values()), "at": self.clock(),
-               "writer": writer}
-        body = json.dumps(doc, indent=1, sort_keys=True, default=str).encode()
-        if not self.objects.create(self.applied_key(seq + 1), body):
-            raise AppliedFenced(f"another controller wrote fleet/applied record {seq + 1} first")
+        for _ in range(3):
+            seq += 1
+            doc = {"schema": APPLIED_SCHEMA, "seq": seq, "generation": int(generation),
+                   "members": list(pools.values()), "removing": list(removing.values()), "at": self.clock(),
+                   "writer": writer}
+            body = json.dumps(doc, indent=1, sort_keys=True, default=str).encode()
+            if self.objects.create(self.applied_key(seq), body):
+                break
+            taken = self._doc(self.applied_key(seq)) or {}
+            if writer is None or taken.get("writer") != writer:
+                raise AppliedFenced(f"{taken.get('writer') or 'another controller'} wrote fleet/applied "
+                                    f"record {seq} first")
+            # our own record (a create whose answer was lost, or a listing that lagged): the next one
+        else:
+            raise AppliedFenced(f"fleet/applied records past {seq - 3} kept being taken")
+        if not atomic_create(self.objects):  # an endpoint found to refuse If-None-Match on that create
+            raise AppliedUnsafe("the store's create turned out not atomic: fleet/applied.json cannot be fenced")
         try:
-            self.objects.write(APPLIED_KEY, body)  # the convenience copy of the newest record
-        except Exception:  # noqa: BLE001 - the record is the truth
-            pass
-        return seq + 1
+            self.objects.write(APPLIED_KEY, body)  # the copy of the newest record
+        except Exception as error:  # noqa: BLE001 - the record is the truth; readers fall back to it
+            self.log(f"fleet: WARNING: fleet/applied.json (the copy of record {seq}) not written: {error!r}")
+        self._prune_applied(seq)
+        return seq
+
+    def _prune_applied(self, newest: int) -> None:
+        """Delete the records older than the newest :data:`APPLIED_KEEP` (best effort)."""
+        if newest <= APPLIED_KEEP:
+            return
+        try:
+            for old in self._applied_seqs():
+                if old <= newest - APPLIED_KEEP:
+                    self.objects.delete(self.applied_key(old))
+        except Exception as error:  # noqa: BLE001 - tried again after the next write
+            self.log(f"fleet: old fleet/applied records not deleted: {error!r}")
 
     def update(self, change: Callable[[dict[str, Any]], None], *, seed: dict[str, Any] | None = None,
                note: str | None = None, attempts: int = 1) -> dict[str, Any]:

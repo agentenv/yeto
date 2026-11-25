@@ -177,7 +177,7 @@ class FleetReconciler:
                 self.applied, self.applied_pools, {name: r.member for name, r in self.removing.items() if r.member},
                 writer=self.writer, claim=self._claim)
             self._dirty, self._claim = False, False
-        except dz.AppliedFenced as error:
+        except (dz.AppliedFenced, dz.AppliedUnsafe) as error:
             self.fenced = str(error)
             self.log(f"fleet: CRITICAL: {error}: this controller applies the desired state no more")
         except Exception as error:  # noqa: BLE001
