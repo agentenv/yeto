@@ -170,11 +170,12 @@ def trainer_members(cfg: dict[str, Any], plan: Any) -> list[dict[str, Any]]:
             for i in plan.islands]
 
 
-# Launch options that only a Modal island takes (a launch without one refuses them):
-# the fleet's trainer argv may carry them for its Modal islands; an island launch whose
-# --gpu is elsewhere (added there, or moved there) launches without them (its store
-# credential is the launcher's, yeto.launch.storage).
-MODAL_ONLY_FLAGS = ("--modal-store-secret",)
+# Launch options that only a Modal island takes (a launch without one refuses them), by
+# the number of values each takes: the fleet's trainer argv may carry them for its Modal
+# islands; an island launch whose --gpu is elsewhere (added there, or moved there)
+# launches without them (its store credential is the launcher's, yeto.launch.storage;
+# its GPU is its --gpu, not a pinned Modal GPU).
+MODAL_ONLY_FLAGS = {"--modal-store-secret": 1, "--modal-gpu-name": 1, "--modal-gpu-exact": 0}
 
 
 def own_cloud_argv(argv: list[str], gpu: str) -> list[str]:
@@ -184,13 +185,13 @@ def own_cloud_argv(argv: list[str], gpu: str) -> list[str]:
 
     if all(getattr(spec, "cloud", None) == "modal" for spec in parse_gpu_spec(gpu)):
         return list(argv)
-    out, skip = [], False
+    out, skip = [], 0
     for arg in argv:
         if skip:
-            skip = False
+            skip -= 1
             continue
         if arg in MODAL_ONLY_FLAGS:
-            skip = True
+            skip = MODAL_ONLY_FLAGS[arg]
             continue
         if any(arg.startswith(flag + "=") for flag in MODAL_ONLY_FLAGS):
             continue

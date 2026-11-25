@@ -808,6 +808,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     try:
         if island_states is not None:  # supervising from here on: the finally decides hands off
             args._hands_off_exit = None
+        if member_role == FLEET_ROLE_SYNCER and not no_sync:
+            # the fleet's syncer record is read before the syncer is ordered: one that does
+            # not read (or parse) fails the launch here, not after a syncer VM was paid for
+            from .launch import fleet_syncer
+
+            fleet_syncer._recorded_epoch(args, None, print)
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
         if no_sync:
             syncer_task = syncer_job = None

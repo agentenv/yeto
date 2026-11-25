@@ -108,16 +108,19 @@ def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_e
     compiled with the syncer record's term (``syncer_epoch``; None: the syncer launch's)."""
     from yeto.rl import island_launches as il  # noqa: PLC0415
 
-    syncer = launch_session(syncer_argv, "syncer launch", prepare=prepare)
+    try:
+        syncer = launch_session(syncer_argv, "syncer launch", prepare=prepare)
+    except (OSError, ValueError) as error:  # a missing or broken file it reads (algorithm spec, inventory)
+        raise ValueError(f"the syncer launch refuses its options: {type(error).__name__}: {error}") from None
     record = {"addr": PLACEHOLDER_ADDR, "syncer_epoch": syncer.syncer_epoch if syncer_epoch is None else syncer_epoch}
     islands = []
     for member in members:
         try:
             islands.append(launch_session(il.launch_argv(member, syncer=record), str(member.get("name")),
                                           prepare=prepare))
-        except ValueError as error:
+        except (OSError, ValueError) as error:  # json.JSONDecodeError is a ValueError
             raise ValueError(f"island {member.get('name')} (learner {member.get('learner_id')}): its launch "
-                             f"refuses its options: {error}") from None
+                             f"refuses its options: {type(error).__name__}: {error}") from None
     found = problems(syncer, islands)
     if found:
         raise ValueError("the fleet's launches do not agree on the syncer session (the syncer would refuse "

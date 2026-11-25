@@ -150,3 +150,42 @@ def test_a_move_of_an_island_whose_launch_disagrees_is_refused(fleet_store, caps
     assert run_cli("move", "--name", "sglang", "--gpu", "modal:1x2xh100", "--usd-per-h", "6", "--dry-run") == 2
     err = capsys.readouterr().err
     assert "do not agree on the syncer session" in err and "'outer_lr'" in err
+
+
+def test_an_island_off_modal_launches_without_any_modal_only_flag(tmp_path):
+    """--modal-store-secret NAME, --modal-gpu-name NAME and --modal-gpu-exact (no value)
+    are dropped from an island launch moved or added off Modal, each with its own values
+    only; a Modal island keeps them."""
+    argv = ["--modal-gpu-exact", "--rl-release-every", "0:2", "--modal-gpu-name", "H100",
+            "--modal-store-secret", "store-secret", "--modal-gpu-name=H100"]
+    assert island_launches.own_cloud_argv(argv, "aws:1xh100@us-west-2") == ["--rl-release-every", "0:2"]
+    assert island_launches.own_cloud_argv(argv, "modal:1x2xh100") == argv
+    cfg = _secret_cfg(tmp_path)
+    member = island_launches.trainer_members(cfg, fleet.plan_of(cfg))[0]
+    member = {**member, "argv": [*member["argv"], "--modal-gpu-exact", "--modal-gpu-name", "H100"]}
+    on_modal = island_launches.launch_argv(member, syncer=RECORD)
+    assert "--modal-gpu-exact" in on_modal and "--modal-gpu-name" in on_modal
+    aws = island_launches.launch_argv({**member, "gpu": "aws:1xh100@us-west-2"}, incarnation=1, syncer=RECORD)
+    assert not {"--modal-gpu-exact", "--modal-gpu-name", "--modal-store-secret"} & set(aws)
+    _prepared(aws)  # the moved island's launch takes its options
+
+
+@pytest.mark.parametrize("broken", ["missing", "not json"])
+def test_an_algorithm_spec_the_launches_cannot_read_is_a_preflight_refusal(tmp_path, monkeypatch, broken):
+    from test_fleet_island_runup import build
+
+    run, _ = build(tmp_path, monkeypatch)
+    spec = tmp_path / "spec.algorithm.json"
+    if broken == "not json":
+        spec.write_text("{not json")
+    argv = run.cfg["trainer"]["argv"]
+    argv[argv.index("--rl-algorithm-spec") + 1] = str(spec)
+    for m in run.cfg["fleet"]["trainer_argv"], *(i["trainer"].get("argv") or [] for i in run.cfg["islands"]):
+        if "--rl-algorithm-spec" in m:
+            m[m.index("--rl-algorithm-spec") + 1] = str(spec)
+    problem = run.fleet_session_problem()  # a refusal, not an exception out of the preflight
+    assert problem and "the syncer launch refuses its options" in problem
+    logs = []
+    monkeypatch.setattr(up, "_log", logs.append)
+    assert run.preflight() is False
+    assert any("refuses its options" in m for m in logs)

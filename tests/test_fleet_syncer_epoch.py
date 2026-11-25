@@ -235,6 +235,31 @@ def test_an_explicit_or_adopted_term_below_the_record_is_raised_to_it(fleet_run,
     assert _syncer_launch(args, objects, adopted=True)["syncer_epoch"] == term + 4
 
 
+def test_a_syncer_record_that_does_not_read_fails_the_syncer_launch_before_its_syncer_is_ordered(
+        tmp_path, monkeypatch, no_retry_wait):
+    import sys
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
+    monkeypatch.setattr(launcher, "prepare_run_code_pack", lambda args: None)
+    broken = DirectoryObjectStore(tmp_path / "store")
+    broken.write(island_launches.SYNCER_RECORD, b"{truncated")
+    monkeypatch.setattr(fleet_syncer, "_store_objects", lambda args: broken)
+    ordered = []
+    sky = sys.modules["sky"]
+    real = sky.launch
+    monkeypatch.setattr(sky, "launch", lambda task, **kw: ordered.append(kw.get("cluster_name")) or real(task, **kw))
+    from yeto.cli import parse_args
+
+    args = parse_args([*example(tmp_path)["trainer"]["argv"], "--controller", "local"])
+    args.model_revision, args.data_revision = "a" * 40, "b" * 40
+    args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
+    args.keep, args.recover_timeout, args.controller_poll = False, 0.0, 30.0
+    with pytest.raises(fleet_syncer.SyncerRecordUnreadable, match="does not parse"):
+        launcher.run(args)
+    assert ordered == []  # no syncer VM ordered
+
+
 def test_a_status_reader_without_a_syncer_says_why():
     with pytest.raises(ValueError, match="no syncer to read status.json from"):
         syncer_mod.syncer_status_reader(ssh_host=None)
