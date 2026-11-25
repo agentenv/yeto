@@ -1597,6 +1597,10 @@ def _pool_command(args: Any) -> int:
             return pool_run.stop_pool(cfg, args.config, wait_s=args.wait, control_store=args.control_store,
                                       pool_name=args.pool_name)
         _print_breaker_deprecations(cfg)
+        from .sky_provider import offer_image_lines  # noqa: PLC0415
+
+        for line in offer_image_lines(cfg):  # a sky pool's VM images (and in the dry run)
+            print(line)
         try:  # the sky route's images, before the pool orders anything (and in the dry run)
             for line in node_image_lines(cfg):
                 print(line)

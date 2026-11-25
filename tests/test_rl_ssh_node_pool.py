@@ -573,3 +573,69 @@ def test_nvidia_smi_names_with_a_form_factor_are_catalog_cards():
         check_cards("cuda", "0, NVIDIA A100-SXM4-80GB, 81920\n", card="A100", count=1)
     with pytest.raises(CardMismatch, match="not in the yeto card catalog"):
         check_cards("cuda", "0, NVIDIA Z900-SXM9-1TB, 81920\n", card="A100", count=1)
+
+
+def test_single_card_sky_offers_have_a_nominal_hbm_size_the_preflight_checks():
+    """An L40S / L4 / T4 offer's node profile declared 0 GiB HBM (the catalog had no size), so
+    the preflight's HBM check passed any card. Each now has its size, and a nvidia-smi total
+    of that card passes while a smaller card's does not."""
+    from yeto.hw.catalog import CARD_HBM_GIB, nominal_hbm_gib
+    from yeto.launcher import GPU_MEM_GB
+    from yeto.node.ssh_docker import offer_profile
+
+    reported_mib = {"L40S": 46068, "L4": 23034, "T4": 15360, "A10G": 23028, "RTX-6000-Ada": 49140,
+                    "RTX-PRO-6000": 97887}
+    for card, mib in reported_mib.items():
+        profile = offer_profile({}, (card, 1), name=f"{card}-offer")
+        assert profile.hbm_gib == CARD_HBM_GIB[card][0] > 0, card
+        product = {"L40S": "NVIDIA L40S", "L4": "NVIDIA L4", "T4": "Tesla T4", "A10G": "NVIDIA A10G",
+                   "RTX-6000-Ada": "NVIDIA RTX 6000 Ada Generation",
+                   "RTX-PRO-6000": "NVIDIA RTX PRO 6000 Blackwell Server Edition"}[card]
+        assert len(profile.check_cards(f"0, {product}, {mib}\n")) == 1, card
+        assert nominal_hbm_gib(card, mib / 1024) == CARD_HBM_GIB[card][0], card
+    assert offer_profile({}, ("L40S", 1), name="x").hbm_gib == 48
+    assert offer_profile({}, ("L4", 1), name="x").hbm_gib == 24
+    assert offer_profile({}, ("T4", 1), name="x").hbm_gib == 16
+    with pytest.raises(CardMismatch, match="declares 48 GiB HBM"):  # a 24 GiB card on an L40S slot
+        check_cards("cuda", "0, NVIDIA L40S, 23034\n", card="L40S", count=1, hbm_gib=48)
+    # every card the launcher sizes models by has a catalog size, and the same one
+    for card, gb in GPU_MEM_GB.items():
+        assert gb in CARD_HBM_GIB.get(card, ()), card
+
+
+def test_new_hbm_sizes_change_no_identity_group_and_keep_old_records_and_inventories():
+    """The sizes added for L40S / L4 / T4 / ... must not turn a running run's members into
+    'incompatible' ones: the identity group islands compare carries no HBM, an assignment an
+    older yeto wrote (hbm_gib 0) still starts, and an inventory that loaded before still loads
+    (a size fitting no nominal one keeps its old rounded label)."""
+    from yeto.hw.catalog import ROUNDED_HBM_CARDS, UnknownCardType, compat_group, launch_compat_group
+    from yeto.launch.node_inventory import InventoryError, NodeProfile, parse_inventory
+    from yeto.node.profile import profile_doc, profile_from_doc
+    from yeto.node.ssh_docker import offer_profile
+
+    # the group in the backend identity / at the syncer's HELLO: the card alone, as before
+    assert compat_group("L40S") == launch_compat_group("L40S") == "nvidia-l40s"
+    assert compat_group("RTX-6000-Ada") == "nvidia-rtx-6000-ada"
+    # an assignment written before (the offer profile declared 0 GiB): it loads, its card
+    # check passes as it did (no size to check), and a new assignment declares the size
+    old = profile_doc(offer_profile({}, ("L40S", 1), name="smp-0"))
+    old["hbm_gib"] = 0.0
+    profile = profile_from_doc(old)
+    assert len(profile.check_cards("0, NVIDIA L40S, 46068\n")) == 1
+    assert profile.summary()["hbm_gib"] == 0.0
+    assert offer_profile({}, ("L40S", 1), name="smp-1").hbm_gib == 48
+    # inventories: a declared usable size labels as the nominal one; one fitting no nominal
+    # size of a newly sized card keeps the rounded label it had (not refused at load)
+    def node(card, hbm):
+        return {"name": "n", "host": "u@n", "device_family": "cuda", "cpu_arch": "x86_64", "card": card,
+                "cards_per_node": 1, "hbm_gib": hbm, "host_memory_gib": 64, "runtime": "docker"}
+
+    assert parse_inventory({"nodes": [node("L40S", 46)]})[0].compat_group == "nvidia-l40s-48g"
+    assert parse_inventory({"nodes": [node("RTX-6000-Ada", 50)]})[0].compat_group == "nvidia-rtx-6000-ada-50g"
+    assert "RTX-6000-Ada" in ROUNDED_HBM_CARDS and "A100" not in ROUNDED_HBM_CARDS
+    # a card sized before keeps refusing an unknown variant
+    with pytest.raises(InventoryError, match="not a known variant"):
+        parse_inventory({"nodes": [node("A100", 60)]})
+    with pytest.raises(UnknownCardType):
+        compat_group("L40S", hbm_gib=0)
+    assert NodeProfile.for_card("x", "L4", 1, hbm_gib=24.0).compat_group == "nvidia-l4-24g"
