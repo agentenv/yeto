@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -270,3 +271,120 @@ def test_refused_snapshot_drops_the_request_and_leaves_nothing(tmp_path):
     assert donor.poll() == 0 and client.sent == []
     assert [reason for _, reason in donor.refused] == ["rank 1 refused"]
     assert store.locators() == [] and donor.poll() == 0, "the request is not retried"
+
+
+class _ConcurrentS3Objects:
+    """An ``S3ObjectStore`` over the in-memory fake S3 whose single-file transfers
+    must overlap: every ``write_file`` / ``read_file`` waits at a barrier of
+    ``parties`` callers, so moving the files one after the other times out."""
+
+    def __init__(self, parties):
+        from tests.test_rl_object_store import URI, FakeS3
+        from yeto.cloud import s3_store
+
+        self.objects = s3_store.S3ObjectStore(URI, client=FakeS3())
+        self.barrier = threading.Barrier(parties, timeout=5)
+        self.single_writes = 0
+        self.single_reads = 0
+        write_file, read_file = self.objects.write_file, self.objects.read_file
+
+        def concurrent_write(key, source):
+            self.single_writes += 1
+            self.barrier.wait()
+            return write_file(key, source)
+
+        def concurrent_read(key, target):
+            self.single_reads += 1
+            self.barrier.wait()
+            return read_file(key, target)
+
+        self.objects.write_file = concurrent_write
+        self.objects.read_file = concurrent_read
+
+
+def test_rank_files_of_a_snapshot_move_in_parallel_through_the_store(tmp_path):
+    ranks = 4
+    bulk = _ConcurrentS3Objects(ranks)
+    donor_store = SnapshotStore(bulk.objects, staging=tmp_path / "donor-stage")
+    recovering_store = SnapshotStore(bulk.objects, staging=tmp_path / "recovering-stage")
+    source = _serve(donor_store, FileIsland([3, 3], ranks=ranks), rp.SnapshotRequest(1, 4, 2, (3, 3)))
+    assert bulk.single_writes == ranks, "every rank file went up, all at once"
+    assert not bulk.barrier.broken
+
+    client = _ScriptedClient(events=[source, rp.RecoveryDone(2, 3, 2, (4, 4))])
+    client.updates = [BcastFragment(0, 4, b""), BcastFragment(1, 4, b"")]
+    me = FileIsland([0, 0], ranks=ranks)
+    recover(client, me, recovering_store, timeout=10)
+    assert bulk.single_reads == ranks and not bulk.barrier.broken
+    assert sorted(me.restored) == [f"rank{r}/shard.pt" for r in range(ranks)]
+    assert all(me.restored[f"rank{r}/shard.pt"] == bytes([r]) * (1000 + r) for r in range(ranks))
+    assert client.sent == [("restored", None)]
+
+
+class _BulkObjects(FakeObjectStore):
+    """The many-file surface of ``S3ObjectStore`` (``write_files`` / ``read_files``)."""
+
+    def __init__(self, *, failed_uploads=(), missing_downloads=()):
+        super().__init__()
+        self.failed_uploads = set(failed_uploads)
+        self.missing_downloads = set(missing_downloads)
+        self.batches: list[tuple[str, int]] = []
+
+    def write_files(self, items):
+        self.batches.append(("write", len(items)))
+        written, errors = [], {}
+        for key, source in items:
+            if any(key.endswith(rel) for rel in self.failed_uploads):
+                errors[key] = "ConnectionError: reset"
+                continue
+            self.data[key] = Path(source).read_bytes()
+            written.append(key)
+        return written, errors
+
+    def read_file(self, key, target):
+        data = self.data.get(key)
+        if data is None:
+            return False
+        Path(target).write_bytes(data)
+        return True
+
+    def read_files(self, items):
+        self.batches.append(("read", len(items)))
+        missing = []
+        for key, target in items:
+            if any(key.endswith(rel) for rel in self.missing_downloads) or not self.read_file(key, target):
+                missing.append(key)
+        return missing
+
+
+def test_a_failed_rank_upload_refuses_the_snapshot_and_leaves_nothing(tmp_path):
+    objects = _BulkObjects(failed_uploads={"rank1/shard.pt"})
+    store = SnapshotStore(objects, staging=tmp_path / "stage")
+    client = _ScriptedClient(requests=[rp.SnapshotRequest(1, 4, 2, (3, 3))])
+    donor = DonorService(client, FileIsland([3, 3]), store)
+    donor.poll()
+    assert donor.wait(5)
+    assert donor.poll() == 0 and client.sent == []
+    (_, reason), = donor.refused
+    assert "1 of 2 snapshot file(s) failed to upload" in reason and "rank1/shard.pt" in reason
+    assert objects.batches == [("write", 2)] and objects.uploads == 0, "one many-file upload"
+    assert store.locators() == [] and not any((tmp_path / "stage").iterdir())
+
+
+def test_a_rank_file_missing_from_the_download_fails_the_restore(tmp_path):
+    objects = _BulkObjects()
+    store = SnapshotStore(objects, staging=tmp_path / "stage")
+    source = _serve(store, FileIsland([3, 3]), rp.SnapshotRequest(1, 4, 2, (3, 3)))
+    objects.missing_downloads = {"rank0/shard.pt"}
+    with pytest.raises(SnapshotIntegrityError, match="misses 'rank0/shard.pt'"):
+        store.fetch(source.text, source.sha256, tmp_path / "into")
+    assert ("read", 2) in objects.batches
+
+
+def test_a_one_file_snapshot_keeps_the_single_file_transfer(tmp_path):
+    objects = _BulkObjects()
+    store = SnapshotStore(objects, staging=tmp_path / "stage")
+    locator, sha256 = store.put(Snapshot((0,), "t", {"w": np.zeros(2, np.float32)}))
+    assert objects.uploads == 1 and objects.batches == []
+    assert store.get(locator, sha256).state["w"].tolist() == [0.0, 0.0]
+    assert objects.batches == []

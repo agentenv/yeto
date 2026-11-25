@@ -243,6 +243,34 @@ def _sha256_files(paths: Sequence[Path], workers: int) -> list[str]:
         return list(pool.map(_sha256_file, paths))
 
 
+def _upload_files(objects: ObjectStore, items: Sequence[tuple[str, Path]]) -> None:
+    """Upload every ``(key, path)``: through the store's many-file upload when it
+    has one (``S3ObjectStore.write_files``: ``file_concurrency`` files at once),
+    else one file after the other. A multi-rank snapshot used to go up one rank
+    file at a time, each capped near the single-object rate of the store (about
+    140 MB/s on R2: 56 GB of a TP2 4B trainer took 6.5 min)."""
+    write_files = getattr(objects, "write_files", None)
+    if write_files is None or len(items) <= 1:
+        for key, path in items:
+            upload_file(objects, key, path)
+        return
+    _, errors = write_files([(key, str(path)) for key, path in items])
+    if errors:
+        key, error = sorted(errors.items())[0]
+        raise SnapshotIntegrityError(f"{len(errors)} of {len(items)} snapshot file(s) failed to upload "
+                                     f"(first {key!r}: {error})")
+
+
+def _download_files(objects: ObjectStore, items: Sequence[tuple[str, Path]]) -> list[str]:
+    """Download every ``(key, path)``; returns the keys that are missing. Through
+    the store's many-file download when it has one (``S3ObjectStore.read_files``:
+    files over ``download_processes`` processes), else one file after the other."""
+    read_files = getattr(objects, "read_files", None)
+    if read_files is None or len(items) <= 1:
+        return [key for key, path in items if not download_file(objects, key, path)]
+    return list(read_files([(key, str(path)) for key, path in items]))
+
+
 def _tree(directory: Path) -> list[str]:
     return sorted(p.relative_to(directory).as_posix() for p in directory.rglob("*") if p.is_file())
 
@@ -279,8 +307,8 @@ class SnapshotWriter:
         files = {rel: {"sha256": digest, "bytes": path.stat().st_size}
                  for rel, path, digest in zip(rels, paths, digests)}
         if self._staged:
-            for rel, path in zip(rels, paths):
-                upload_file(store.objects, store.file_key(self.locator, rel), path)
+            _upload_files(store.objects, [(store.file_key(self.locator, rel), path)
+                                          for rel, path in zip(rels, paths)])
         self.bytes = sum(meta["bytes"] for meta in files.values())
         manifest = SnapshotManifest(tuple(int(v) for v in versions), str(layout_tag),
                                     locator_created_unix(self.locator), files)
@@ -463,14 +491,19 @@ class SnapshotStore:
         manifest = self.manifest(locator, sha256)
         in_place = self._local_files(locator)
         directory = in_place if in_place is not None else Path(into)
-        for rel, meta in manifest.files.items():
-            path = directory / rel
-            if in_place is None:
+        if in_place is None:
+            pending = []  # (key, partial path, final path, rel)
+            for rel in manifest.files:
+                path = directory / rel
                 path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_name(path.name + ".part")
-                if not download_file(self.objects, self.file_key(locator, rel), tmp):
+                pending.append((self.file_key(locator, rel), path.with_name(path.name + ".part"), path, rel))
+            missing = set(_download_files(self.objects, [(key, tmp) for key, tmp, _, _ in pending]))
+            for key, tmp, path, rel in pending:
+                if key in missing:
                     raise SnapshotIntegrityError(f"snapshot {locator!r} misses {rel!r}")
                 os.replace(tmp, path)
+        for rel, meta in manifest.files.items():
+            path = directory / rel
             if not path.is_file() or path.stat().st_size != meta["bytes"]:
                 raise SnapshotIntegrityError(f"snapshot {locator!r}: {rel!r} is missing or has the wrong size")
         rels = list(manifest.files)
