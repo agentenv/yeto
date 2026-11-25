@@ -774,8 +774,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     infra.add_argument(
         "--island-lifecycle", choices=["auto", "on", "off"], default="auto",
-        help="keep each trainer island's state in the run store (fleet/trainers/<k>/state.json) and stop "
-        "one island on its own fleet/trainers/<k>/STOP: "
+        help="keep each trainer island's state in the run store (fleet/trainers/<k>/state.json), adopt the "
+        "islands that still run after a launcher restart (no new order, same incarnation) and stop one "
+        "island on its own fleet/trainers/<k>/STOP: "
         "'auto' (default) for an RL launch of two or more trainer islands, 'on' for any launch with a run "
         "store, 'off' never",
     )
@@ -1995,11 +1996,28 @@ def cmd_worker(name: str) -> int:
         import traceback
 
         traceback.print_exc()
+        hands_off = getattr(args, "_hands_off_exit", None)
+        if hands_off is not None:
+            # the run's islands are (or may be) another launcher's, or this one was about to adopt
+            # them: the exit says hands off (run up then runs no `yeto down`), no backstop cleanup
+            runs.update_run(name, state=runs.FAILED, exit_code=int(hands_off), finished_at=time.time(),
+                            refused_launch=True, **_stop_reason_field())
+            print(f"[yeto] {name}: launcher ended before it supervised the run, or after it lost the run's "
+                  f"island records (exit {hands_off}); nothing of the run was torn down", file=sys.stderr)
+            return int(hands_off)
         runs.update_run(name, state=runs.FAILED, exit_code=1, finished_at=time.time(),
                         **_stop_reason_field())
         _backstop_cleanup(name, args)
         return 1
     code = int(code or 0)
+    from .launcher import HANDS_OFF_EXITS
+
+    if code in HANDS_OFF_EXITS or getattr(args, "_hands_off_exit", None) is not None:
+        # nothing was launched: the run's resources belong to the launcher that holds its
+        # island records (or may); no backstop cleanup of them
+        runs.update_run(name, state=runs.FAILED, exit_code=code, finished_at=time.time(), refused_launch=True)
+        print(f"[yeto] launch of {name} refused (exit {code}); nothing of the run was torn down", file=sys.stderr)
+        return code
     _backstop_cleanup(name, args)
     runs.update_run(
         name,

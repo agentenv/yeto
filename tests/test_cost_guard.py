@@ -923,3 +923,20 @@ def test_kimi_k31_full_launch_gets_a_longer_load_grace():
     assert guard_config_from_args(a).idle.load_grace_s == 30 * MIN  # an explicit value wins
     lora = SimpleNamespace(rl_model_recipe="kimi_k31", tuning="lora", load_grace_minutes=None)
     assert guard_config_from_args(lora).idle.load_grace_s == 45 * MIN
+
+
+@pytest.mark.parametrize("code", [12, 13])
+def test_a_refused_launch_cleans_nothing_up(runs_dir, monkeypatch, code):
+    """Exit 12 / 13: another launcher holds (or may hold) the run's island records; the run's
+    open resources are that launcher's, so no backstop cleanup runs."""
+    runs.create_run("w", {"cluster_prefix": "w"})
+    ResourceLedger.for_run("w").created("modal_app", "ap-1", "yeto-w")
+    import yeto.launcher as launcher
+
+    monkeypatch.setattr(launcher, "run", lambda args, **kw: code)
+    seen = []
+    monkeypatch.setattr(cleanup_mod, "cleanup_run", lambda run, *a, **k: seen.append(run) or True)
+    assert cli.cmd_worker("w") == code
+    assert seen == []
+    meta = runs.load_run("w")
+    assert meta["exit_code"] == code and meta["refused_launch"] is True

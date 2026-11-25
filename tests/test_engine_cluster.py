@@ -536,3 +536,23 @@ def test_on_demand_trainer_with_preemptible_engines(monkeypatch):
     assert tasks.trainer.resources.use_spot is False
     assert tasks.engine_setup.resources.use_spot is True and tasks.engine_run.resources.use_spot is True
     assert args.spot is False  # the launch args are not changed
+
+
+def test_a_refused_order_hook_relaunches_nothing(monkeypatch):
+    """The launcher's island records lock guards each relaunch: refused, nothing is submitted."""
+    sky, links = _LaunchSky(), []
+    island, submits = _island(monkeypatch, sky, links)
+    island.finish(sky, island.submit())
+    before = list(submits)
+    asked = []
+
+    def refuse(name):
+        asked.append(name)
+        raise RuntimeError("lock lost")
+
+    island.before_order = refuse
+    with pytest.raises(RuntimeError, match="lock lost"):
+        island.relaunch_engine(sky)
+    with pytest.raises(RuntimeError, match="lock lost"):
+        island.relaunch(sky)
+    assert submits == before and asked == ["run1-l0-eu-north1-eng", "run1-l0-eu-north1"]

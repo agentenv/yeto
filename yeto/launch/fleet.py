@@ -205,7 +205,7 @@ class FleetController:
         follower_grace_s: float = 120.0,
         rollout=None,
         recorder=None,
-        adopted=None,
+        incarnations=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -313,12 +313,14 @@ class FleetController:
         # STOP there ends that island only. None (a single-trainer launch by default):
         # nothing is written or read.
         self.recorder = recorder
-        # name -> the incarnation of an island this controller adopted from a dead
-        # launcher (its record in the store): it keeps that incarnation.
-        for name, incarnation in dict(adopted or {}).items():
+        # name -> {"incarnation", "relaunches", "adopted"} from the island's record of an
+        # earlier launcher of this run (yeto.launch.island_adopt): an adopted island keeps
+        # its incarnation; a relaunched one continues the count.
+        for name, known in dict(incarnations or {}).items():
             if name in self.learners:
-                self.learners[name]["incarnation"] = int(incarnation)
-                self.learners[name]["adopted"] = True
+                self.learners[name]["incarnation"] = int(known.get("incarnation") or 0)
+                self.learners[name]["relaunches"] = int(known.get("relaunches") or 0)
+                self.learners[name]["adopted"] = bool(known.get("adopted"))
 
     def _fleet(self, kind: str, name: str | None = None, *, force: bool = False, **fields) -> None:
         if self.fleet_log is None:
@@ -416,10 +418,14 @@ class FleetController:
         """
         for name, rec in self.learners.items():
             self._fleet("island_ready", name, initial=True)
-            self._record(rec, reason="adopted from an earlier launcher" if rec.get("adopted") else "launched")
+            if rec.get("adopted"):
+                self._record(rec, reason="adopted from an earlier launcher", adopted=True)
+            else:
+                self._record(rec, reason="launched", adopted=False)
         while True:
             if self._abort_error is not None:
                 raise self._abort_error
+            self._raise_if_fenced()
             self._fleet("cost_tick")
             self._poll_rollout()
             if self.syncer is not None:
@@ -459,6 +465,17 @@ class FleetController:
         return exit_codes
 
     # -- the island records (yeto.launch.island_lifecycle) -------------------------------
+    def _records_fenced(self):
+        """The island records' lock error once another launcher took them over, else None."""
+        return None if self.recorder is None else getattr(self.recorder.store, "fenced", None)
+
+    def _raise_if_fenced(self) -> None:
+        """A controller that lost the island records' lock stops supervising at once: the
+        launcher that holds it orders, relaunches and tears down (this one touches nothing)."""
+        fenced = self._records_fenced()
+        if fenced is not None:
+            raise lifecycle.IslandRecordsFenced(f"the fleet controller lost the island records' lock ({fenced})")
+
     @staticmethod
     def _unified_state(rec) -> str:
         """The lifecycle state of a controller record (an island dropped for a
@@ -995,6 +1012,12 @@ class FleetController:
                 if not is_syncer:  # the syncer is never abandoned; it just is not relaunched
                     self._abandon(rec, elapsed, reason="STOP flag")
                 return
+            if self.recorder is not None:  # an island's or the syncer's relaunch is an order
+                try:  # the lock still ours, checked now; lost raises IslandRecordsFenced (supervision ends)
+                    self.recorder.store.guard_order(rec["name"])
+                except lifecycle.IslandRecordsUnconfirmed as error:
+                    print(f"[launcher] {rec['name']}: relaunch deferred: {error}", file=sys.stderr)
+                    return
             if not is_syncer and self.replacement_planner is not None and not rec.get("replace_planned"):
                 rec["replace_planned"] = True
                 planned = self._plan_replacement(rec)
@@ -1133,6 +1156,22 @@ class FleetController:
         )
 
     def _down(self, name: str, force: bool = False) -> None:
+        if self.recorder is not None:  # the lock checked now, not only the cached view
+            try:
+                self.recorder.store.guard_order(f"teardown of {name}")
+            except lifecycle.IslandRecordsFenced:
+                pass  # the cached view below says so too
+            except lifecycle.IslandRecordsUnconfirmed as error:
+                if error.lease_over:  # another launcher may hold the records: no teardown now
+                    print(f"[launcher] NOT tearing down {name} now: {error}", file=sys.stderr)
+                    return
+                # within this holder's lease: still ours (nobody claims the records without the store)
+                print(f"[launcher] {name}: tearing down unconfirmed ({error})", file=sys.stderr)
+        fenced = self._records_fenced()
+        if fenced is not None:  # the launcher that holds the island records owns this machine now
+            print(f"[launcher] NOT tearing down {name}: this launcher lost the island records' lock "
+                  f"({fenced})", file=sys.stderr)
+            return
         if name in self.downed_clusters and not force:
             return
         self.downed_clusters.add(name)

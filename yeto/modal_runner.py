@@ -2308,6 +2308,9 @@ class ModalIslandOps:
     def __init__(self, ops: ModalOps) -> None:
         self.ops = ops
         self.calls: dict[str, str] = {}  # island name -> latest call id
+        # (name, call id) -> None, told each spawn: persists the call id (the island's record
+        # in the run store, yeto.launch.island_lifecycle) so a restarted launcher adopts it
+        self.on_call = None
 
     def job_status(self, name: str, job_id: str):
         return _JobStatus(self.ops.status(job_id))
@@ -2336,6 +2339,11 @@ class ModalIslandOps:
         # The call id is the handle for `modal.FunctionCall.from_id(..).cancel()`
         # (kill/resume tests) and for reading one island's logs.
         print(f"[modal] {name}: function call {call_id}", flush=True)
+        if self.on_call is not None:
+            try:
+                self.on_call(name, call_id)
+            except Exception as exc:  # noqa: BLE001 - bookkeeping never fails a spawn
+                print(f"[modal] {name}: recording call {call_id} failed: {exc}", file=sys.stderr)
         return call_id
 
     def _app_stopped(self) -> str | None:
