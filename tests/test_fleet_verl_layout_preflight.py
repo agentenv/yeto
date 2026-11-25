@@ -16,10 +16,11 @@ import json
 
 import pytest
 
-from test_fleet_verl_island_launches import _run
+from test_fleet_verl_island_launches import _run, verl_doc
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from yeto.launch import fragment_preflight
 from yeto.rl import island_launches as il
+from yeto.rl import up
 
 TINY = {"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3", "hidden_size": 64,
         "intermediate_size": 128, "num_hidden_layers": 2, "num_attention_heads": 4, "num_key_value_heads": 2,
@@ -151,3 +152,35 @@ def test_a_fleet_island_added_with_the_fleets_layout_passes_and_a_wrong_pin_is_r
     fleet_islands.launch_dry_run(member(layout.layout_hash), prepare=prepare)
     with pytest.raises(ValueError, match=r"--rl-parameter-layout-sha256 eeeeeeeeeeeeeeee\.\.\. is not the layout"):
         fleet_islands.launch_dry_run(member("e" * 64), prepare=prepare)
+
+
+def test_run_up_dry_run_checks_every_verl_island_launchs_layout(tmp_path, monkeypatch):
+    """``yeto run up`` (dry run too) prepares every launch of a per-island fleet at its
+    preflight (``Run.fleet_session_problem``): the same offline layout check passes the
+    model's layout and refuses a fleet whose pinned hash is not the layout of its model and
+    ``--fragments``."""
+    monkeypatch.setenv("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test-key-id")
+    monkeypatch.setenv("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test-secret")
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    layout = _planned(4)
+
+    def problem(pin: str, fragments: int):
+        doc = verl_doc(tmp_path)
+        argv = doc["fleet"]["trainer_argv"]
+        argv[argv.index("--rl-parameter-layout-sha256") + 1] = pin
+        argv[argv.index("--fragments") + 1] = str(fragments)
+        argv += ["--model-revision", REVISION]
+        path = tmp_path / "run.json"
+        path.write_text(json.dumps(doc))
+        return up.Run(up.load_config(str(path)), state_root=tmp_path / "state").fleet_session_problem()
+
+    assert problem(layout.layout_hash, layout.fragments.num_fragments) is None
+    wrong_pin = problem("e" * 64, layout.fragments.num_fragments)
+    assert wrong_pin and "--rl-parameter-layout-sha256 eeeeeeeeeeeeeeee... is not the layout" in wrong_pin
+    assert layout.layout_hash in wrong_pin
+    # another --fragments is another layout: the pin of 4 fragments is refused, naming the hash of 5
+    other = _planned(layout.fragments.num_fragments + 1)
+    wrong_count = problem(layout.layout_hash, layout.fragments.num_fragments + 1)
+    assert wrong_count and f"Set --rl-parameter-layout-sha256 {other.layout_hash}" in wrong_count
