@@ -1172,7 +1172,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 island=None if held_name is None else trainer_loop.TrainerIsland(
                     held_name, specs[held].cloud, held_cfg, modal_ops, sky_task=held_task,
                     spec=specs[held], events_dir=events_dir,
-                    ssh=_ssh_trainer_spec(args, specs[held], held_task)),
+                    ssh=_ssh_trainer_spec(args, specs[held], held_task),
+                    # a sky incarnation's cluster is priced like an ordered one (SkySource.ledger_attrs)
+                    ledger=cost_ledger, ledger_attrs=provision.ledger_attrs(provision.held)),
                 abort=controller.abort, states=island_states)  # s1: this launcher's fenced records
         except trainer_loop.TrainerLoopGaveUp as error:
             # the trainer scheduler released the trainer and stopped; the samplers
