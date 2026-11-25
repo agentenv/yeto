@@ -520,12 +520,21 @@ class BufferFeed:
         other, so it waits and asks again."""
         if self.gate is None:
             return None
-        while True:
-            try:
-                return self.gate.verdict(item.entry, int(item.position))
-            except LeaseUnknown:
-                self.lease_waits += 1
-                self.sleep(self.poll_s)
+        paused = None
+        try:
+            while True:
+                try:
+                    return self.gate.verdict(item.entry, int(item.position))
+                except LeaseUnknown:
+                    if paused is None:
+                        paused = self.clock()
+                    self.lease_waits += 1
+                    self.sleep(self.poll_s)
+        finally:
+            if paused is not None and self._wait_since is not None:
+                # a pause for an unreadable lease is not a wait for groups (as on the core
+                # reader, whose deferred groups the no-new-group timeout does not apply to)
+                self._wait_since += self.clock() - paused
 
     def _local(self, version: int) -> int | None:
         if self.merged is not None:

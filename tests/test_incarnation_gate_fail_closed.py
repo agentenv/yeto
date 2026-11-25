@@ -355,7 +355,7 @@ def test_buffer_feed_waits_for_an_unreadable_lease(tmp_path):
 
     records = []
     feed = BufferFeed(reader, vmap=lambda: None, shape=RowShape(16, 16, 0), add_group=lambda rows: None,
-                      record=records.append, emit=lambda name, **f: None, wait_s=0.0, poll_s=0.25, sleep=sleep,
+                      record=records.append, emit=lambda name, **f: None, wait_s=60.0, poll_s=0.25, sleep=sleep,
                       incarnation_gate=IncarnationGate(flaky, reader.entries, retry_s=0.0))
     feed._local = lambda version: 0  # noqa: SLF001 - versions are not under test
     pulled = feed.pull()

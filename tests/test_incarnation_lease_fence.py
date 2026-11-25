@@ -276,7 +276,7 @@ def test_buffer_feed_drops_stale_incarnation_groups(tmp_path):
     reader = FileSampleBuffer(store, batch_size=1)
     records, emitted = [], []
     feed = BufferFeed(reader, vmap=lambda: None, shape=RowShape(16, 16, 0), add_group=lambda rows: None,
-                      record=records.append, emit=lambda name, **f: emitted.append((name, f)), wait_s=0.0)
+                      record=records.append, emit=lambda name, **f: emitted.append((name, f)), wait_s=60.0)
     feed._local = lambda version: 0  # noqa: SLF001 - versions are not under test
     first = feed.pull()
     feed.drop()

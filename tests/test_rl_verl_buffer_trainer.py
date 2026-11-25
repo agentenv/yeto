@@ -541,6 +541,35 @@ def test_the_wait_for_a_trainable_group_starts_at_the_first_pull_after_a_kept_on
     assert raised.value.yeto_breaker == "trainer.sample_wait"
 
 
+def test_a_pause_for_an_unreadable_lease_is_not_a_wait_for_groups(tmp_path):
+    """As on the core reader: while the incarnation gate cannot read a lease the group is
+    neither trained nor dropped, and that pause does not count toward trainer.sample_wait."""
+    from yeto.rl.engine.incarnation_lease import LeaseUnknown
+
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="fenced")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="trainable")
+    now, unread = [0.0], [3]
+
+    class Gate:
+        def verdict(self, entry, position):
+            if unread[0]:
+                unread[0] -= 1
+                raise LeaseUnknown("lease unreadable")
+            return "superseded incarnation" if position == 0 else None
+
+    def sleep(seconds):
+        now[0] += 100  # 300 s of lease outage, past wait_s
+
+    vmap = VersionMap()
+    vmap.record(0, 0)
+    feed = bf.BufferFeed(_buffer(tmp_path), vmap=lambda: vmap, shape=SHAPE, add_group=print, record=print,
+                         wait_s=60, clock=lambda: now[0], sleep=sleep, emit=lambda *a, **f: None,
+                         incarnation_gate=Gate())
+    assert feed.pull()["uid"] == "buf1" and feed.lease_waits == 3
+    assert feed.dropped == {bf.STALE_REASON: 1}
+
+
 def test_a_buffer_trainer_whose_store_holds_no_release_counts_from_zero(tmp_path):
     """A run that starts here is unchanged (the account begins at v0)."""
     from yeto.rl.engine.merged_release import resumed_releases
