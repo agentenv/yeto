@@ -166,6 +166,8 @@ def test_a_two_island_verl_fleet_releases_per_island_pools_follow_and_the_ledger
             thread.start()
         for thread in threads:
             thread.join(timeout=150)
+        failed = {k: r for k, r in results.items() if isinstance(r, BaseException)}
+        assert not failed, failed  # an island's own error, not the syncer's wait for it
         assert process.wait(timeout=30) == 0
     finally:
         kill_group(process)

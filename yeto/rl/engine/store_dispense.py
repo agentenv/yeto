@@ -347,14 +347,19 @@ class DirObjects:
         os.replace(tmp, path)
 
     def create(self, key: str, data: bytes) -> bool:
+        """Exclusive create that a concurrent reader never sees half written: the body
+        is staged, then hard-linked into place (the link fails if the key exists), as
+        an object store's If-None-Match put is atomic."""
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_bytes(data)
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            os.link(tmp, path)
         except FileExistsError:
             return False
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
+        finally:
+            tmp.unlink()
         return True
 
     def exists(self, key: str) -> bool:
