@@ -40,6 +40,10 @@ function nameCell(id){var c=cardOf(id)||{};return '<span class="nn nc"><i class=
 var FLEET="fleet",PICK=null,FOLDS=[];
 function fleetOn(){return !!(V.async&&V.async.islands&&V.async.islands.length)}
 function fleetView(){return fleetOn()&&PICK===FLEET}
+/* a fleet or a run with a syncer (trainer islands): a value its tapes do not carry reads as a dash with the reason
+   in its title, a KPI without data as a sentence; a run with one trainer (no syncer, no fleet) keeps "n/a" */
+function multiOn(){var d=V&&V.topology&&V.topology.diloco;return fleetOn()||!!(d&&(d.kind==="island"||d.kind==="synced_group"))}
+function naDash(h,why){return multiOn()?String(h).replace(/(<[^>]*>)|\bn\/a\b/g,function(m,tag){return tag||'<span class="note" title="'+esc(why)+'">—</span>'}):h}
 function pickItems(){var A=V.async,cards=O.islands||[],one=function(c){return {key:String(c.id),label:lbl(c.id),title:c.name||"",color:islColor(c.id),tid:String(c.id)}};
   if(fleetOn())return A.islands.map(function(x){var t=x.trainer!=null?String(x.trainer):null;
     return {key:"i"+x.island,label:"Island "+x.island,title:[x.name,t!=null?"trainer "+t:"trainer not on the tapes yet"].filter(Boolean).join(" · "),color:t!=null&&cardOf(t)?islColor(t):"var(--ink2)",tid:t}}).concat(
@@ -411,9 +415,9 @@ function islands(){
   $("nodes").hidden=!!V.async;if(V.async)return;
   $("islands").innerHTML=(O.islands||[]).map(function(c){var ex=V.islands[c.id]||{},re=ex.ray_embed||{};
     return '<details class="isl"'+(String(c.id)===String(SEL)?" open":"")+'><summary><span><b>'+nameCell(c.id)+'</b> <span class="note">'+esc(c.name||"")+'</span></span>'+negBadge(c)+stBadge(c.status,c)+'</summary>'+
-    '<div class="kv"><span>cloud / GPU</span><span class="num">'+esc(platform(c))+' · '+esc(c.gpu||"n/a")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</span>'+
+    naDash('<div class="kv"><span>cloud / GPU</span><span class="num">'+esc(platform(c))+' · '+esc(c.gpu||"n/a")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</span>'+
     '<span>phase / policy</span><span class="num">'+esc(islPhase(c)||"n/a")+' · '+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span>'+
-    '<span>last event</span><span class="num">'+(fin(c.last_event_age_s)?f(c.last_event_age_s,0)+" s ago":"n/a")+'</span>'+
+    '<span>last event</span><span class="num">'+(fin(c.last_event_age_s)?f(c.last_event_age_s,0)+" s ago":"n/a")+'</span>',"not reported by this island yet")+
     (c.starting?'<span>startup elapsed</span><span class="num">'+hm(c.startup_s)+'</span>':"")+
     (Object.keys(c.startup_steps||{}).length?'<span>startup steps</span><span class="num">'+
       Object.keys(c.startup_steps).map(function(k){var v=c.startup_steps[k];
