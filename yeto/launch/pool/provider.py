@@ -267,8 +267,9 @@ class ProviderPoolOps:
             self.stop_sampler = self._stop_sampler
             if not isinstance(route, Mapping) and getattr(route, "load_release", None) is not None:
                 self.load_release = self._load_release
-        if getattr(provider, "move_slot", None) is not None:  # a slot that is only a counter (sky)
-            self.move_slot = provider.move_slot
+        # a provider that can read and release a ticket it did not order takes a machine moving in
+        if getattr(provider, "take_foreign", None) is not None:
+            self.take_foreign = provider.take_foreign
         if fencer is not None:
             self.fence = self._fence
             self.fence_incarnation = self._fence_incarnation

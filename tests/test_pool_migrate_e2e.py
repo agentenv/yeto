@@ -14,6 +14,7 @@ import pytest
 from tests.test_rollout_island_pool import Clock, quiet_elastic
 from tests.test_store_dispense_fleet import NS, ROWS, _prompts, _sampler, _spec
 from yeto.launch.pool import broker as b
+from yeto.launch.pool import controller as rc
 from yeto.launch.pool import migrate
 from yeto.launch.pool.island_pool import GONE, READY, IslandPool, PoolConfig
 from yeto.launch.pool.offer_ledger import OfferLedger, PoolLedger
@@ -37,8 +38,8 @@ class Cloud:
 
 class PrefixProvider:
     """A pool's view of the cloud: it orders ``<prefix>-t<n>`` and lists its own prefix
-    (sky's cluster names); status / release / node work on any ticket of the account. Its
-    slot is a counter, so a machine moving in takes any free slot (``move_slot``)."""
+    (sky's cluster names); status / release / node work on any ticket of the account, so
+    it can take a machine another pool ordered (``take_foreign``: any free slot)."""
 
     def __init__(self, cloud: Cloud, prefix: str) -> None:
         self.cloud, self.prefix = cloud, prefix
@@ -70,7 +71,7 @@ class PrefixProvider:
         return [(m["slot"], t) for t, m in self.cloud.machines.items()
                 if t.startswith(self.prefix + "-") and m["state"] != "ended"]
 
-    def move_slot(self, account, ticket, free):
+    def take_foreign(self, account, ticket, free):
         return free[0] if free else None
 
 
@@ -141,12 +142,14 @@ class Island:
                 self.held[shard] = got
 
 
-def _pool(name: str, island: Island, cloud: Cloud, clock: Clock, *, target: int) -> IslandPool:
+def _pool(name: str, island: Island, cloud: Cloud, clock: Clock, *, target: int, state_dir) -> IslandPool:
     ops = ProviderPoolOps(cloud.provider(name), island, island)
     config = PoolConfig(target=target, accounts=[0, 1, 2], shard_base=f"{name}-i{island.k}",
                         hourly_cost=RATE, elastic=quiet_elastic(scale_drain_timeout_s=600.0))
     events = EventLog(log=lambda _m: None, clock=clock)
     pool = IslandPool(config, ops, clock=clock, log=lambda _m: None, events=events)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    pool.state_path = state_dir / f"pool-{name}.json"  # the local state; the hand-over box sits next to it
     pool.offer_ledger = PoolLedger(own=OfferLedger(), writer=name, default_offer=OFFER, background=False)
     events.sinks.append(pool.offer_ledger)
     return pool
@@ -177,11 +180,13 @@ class Fleet:
         self.clock = Clock()
         self.cloud = Cloud(self.clock)
         self.islands = {"0": Island(tmp_path, 0), "1": Island(tmp_path, 1)}
-        self.pools = {"pa": _pool("pa", self.islands["0"], self.cloud, self.clock, target=2),
-                      "pb": _pool("pb", self.islands["1"], self.cloud, self.clock, target=1)}
+        self.state_dir = tmp_path / "state"
+        self.pools = {"pa": _pool("pa", self.islands["0"], self.cloud, self.clock, target=2, state_dir=self.state_dir),
+                      "pb": _pool("pb", self.islands["1"], self.cloud, self.clock, target=1, state_dir=self.state_dir)}
         self.island_of = {"pa": "0", "pb": "1"}
         self.events: list[tuple[str, dict]] = []
-        self.mover = migrate.PoolMover(self.pools, timeout_s=timeout_s)
+        self.slots = {n: rc.PoolSlot(p) for n, p in self.pools.items()}  # the controller's: pool + tick lock
+        self.mover = migrate.PoolMover(self.slots, timeout_s=timeout_s, clock=self.clock)
         self.wants = {"0": 2, "1": 1}
         self.broker = b.Broker(b.BrokerConfig(migrate=migrate_on), self.snapshot, Sink(self.pools),
                                emit=lambda name, **kw: self.events.append((name, kw)), mover=self.mover,
@@ -195,13 +200,22 @@ class Fleet:
         return b.Snapshot(offers=offers, demands=[b.Demand(k, want=w) for k, w in self.wants.items()],
                           running=running, nodes=nodes)
 
-    def run(self, steps: int, *, dt: float = 30.0) -> None:
+    def run(self, steps: int, *, dt: float = 30.0, skip: tuple[str, ...] = ()) -> None:
+        """``skip``: pools whose controller is down meanwhile (they do not tick)."""
         for _ in range(steps):
             for island in self.islands.values():
                 island.step()
-            for pool in self.pools.values():
-                pool.tick()
+            for name, pool in self.pools.items():
+                if name not in skip:
+                    pool.tick()
             self.clock.t += dt
+
+    def replace(self, name: str, pool: IslandPool) -> None:
+        self.pools[name] = pool
+        self.slots[name] = rc.PoolSlot(pool)
+
+    def moved(self) -> str:
+        return next(kw["ticket"] for name, kw in self.events if name == "broker_migrated")
 
     def ready(self, name: str) -> list:
         return [m for m in self.pools[name].live() if m.state == READY]
@@ -304,32 +318,37 @@ def test_a_machine_nobody_takes_is_released_by_its_old_pool_after_the_timeout(tm
     fleet.run(6)
     fleet.wants = {"0": 1, "1": 2}
     fleet.broker.tick(force=True)
-    ticket = next(kw["ticket"] for name, kw in fleet.events if name == "broker_migrated")
+    ticket = fleet.moved()
     pb = fleet.pools["pb"]
-    pb.move_box = None  # the new pool never sees the hand-over (its controller died, say)
-    fleet.run(30)
+    fleet.run(30, skip=("pb",))  # the new pool's controller is down meanwhile
     assert ticket in fleet.cloud.releases, "the old pool released the machine nobody took"
     names = [e["event"].removeprefix("nc_elastic_") for e in fleet.pools["pa"].events.events]
     assert names.index("member_moved_out") < names.index("move_out_abandoned") < names.index("released")
     assert not fleet.pools["pa"].moves, "the released machine's move is forgotten once the cloud no longer lists it"
-    assert not pb.moves, "the placeholder ran out"
-    assert len(fleet.cloud.orders) == 4, "the short island ordered once its placeholder ran out"
+    fleet.run(2)  # its controller is back: the machine is gone, so is the placeholder
+    assert not pb.moves, "the placeholder is dropped: its machine went to the old pool's release"
+    assert any(e["event"].endswith("move_in_lost") for e in pb.events.events)
+    fleet.run(4)
+    assert len(fleet.cloud.orders) == 4, "the short island ordered for the place"
 
 
-def test_the_box_lets_exactly_one_of_take_and_release_win():
-    box = migrate.MoveBox()
-    assert box.claim("t", "pb-i1") and box.claim("t", "pb-i1")
-    assert not box.claim("t", "pa-i0") and box.claimed_by("t") == "pb-i1"
-
-
-def test_the_store_box_survives_the_controller(tmp_path):
+def test_the_box_lets_exactly_one_of_take_and_release_win_and_outlives_its_controller(tmp_path):
     objects = sd.DirObjects(tmp_path / "store")
-    first = migrate.MoveBox(objects)
-    first.offer("t", {"to": "pb-i1", "at": 5.0})
-    assert first.claim("t", "pb-i1")
-    again = migrate.MoveBox(objects)
-    assert again.get("t")["to"] == "pb-i1" and again.claimed_by("t") == "pb-i1"
-    assert not again.claim("t", "pa-i0")
+    box = migrate.MoveBox(objects)
+    box.offer("t.1", {"to": "pb-i1", "at": 5.0})
+    assert box.claim("t.1", "pb-i1") and box.claim("t.1", "pb-i1")
+    assert not box.claim("t.1", "pa-i0") and box.claimed_by("t.1") == "pb-i1"
+    again = migrate.MoveBox(objects)  # the next controller
+    assert again.get("t.1")["to"] == "pb-i1" and again.claimed_by("t.1") == "pb-i1"
+    assert not again.claim("t.1", "pa-i0")
+    assert again.claim("t.2", "pa-i0"), "a later move of the same machine has its own claim"
+
+
+def test_a_store_without_an_atomic_create_holds_no_box(tmp_path):
+    objects = sd.DirObjects(tmp_path / "store")
+    objects.atomic_create = False  # a check-then-write store (the OSS relay)
+    with pytest.raises(Exception, match="atomic"):
+        migrate.MoveBox(objects)
 
 
 def test_moves_outlive_a_pool_restart(tmp_path):
@@ -364,7 +383,7 @@ def test_a_pool_that_cannot_stop_a_sampler_alone_never_moves(tmp_path):
     fleet.run(6)
     pa = fleet.pools["pa"]
     del pa.ops.stop_sampler
-    assert all(not n.movable for n in migrate.nodes_from_pools(fleet.pools, island_of=fleet.island_of)
+    assert all(not n.movable for n in migrate.nodes_from_pools(fleet.slots, island_of=fleet.island_of)
                if n.offer.startswith("pa/"))
     fleet.wants = {"0": 1, "1": 2}
     fleet.broker.tick(force=True)
@@ -384,16 +403,16 @@ def test_on_the_store_control_plane_a_restarted_new_pool_takes_the_machine(tmp_p
     for name, pool in fleet.pools.items():
         pool.control = store_state.open_pool_control(objects, name, pool.config.shard_base, clock=fleet.clock)
         pool.__post_init__()  # its ops are guarded by the store lock now
-    fleet.mover = migrate.PoolMover(fleet.pools, box=migrate.MoveBox(objects), timeout_s=3600.0)
+        pool.move_box = None  # the run store's box now
+    fleet.mover = migrate.PoolMover(fleet.slots, timeout_s=3600.0, clock=fleet.clock)
     fleet.broker.mover = fleet.mover
     fleet.run(6)
     orders = list(fleet.cloud.orders)
     fleet.wants = {"0": 1, "1": 2}
     fleet.broker.tick(force=True)
-    ticket = next(kw["ticket"] for name, kw in fleet.events if name == "broker_migrated")
+    ticket = fleet.moved()
     pb = fleet.pools["pb"]
-    pb.move_box = None  # its controller is gone before the machine arrives
-    fleet.run(8)
+    fleet.run(8, skip=("pb",))  # its controller is gone before the machine arrives
     assert fleet.pools["pa"].moves["out"][ticket]["state"] == "handed_over"
     doc = store_state.read_state(objects, "pb")
     assert ticket in doc["moves"]["in"], "the placeholder is in the store state"
@@ -402,8 +421,7 @@ def test_on_the_store_control_plane_a_restarted_new_pool_takes_the_machine(tmp_p
     again = IslandPool.from_doc(doc, pb.config, pb.ops.__dict__["_ops"], control=control,
                                 clock=fleet.clock, log=lambda _m: None, events=pb.events)
     again.offer_ledger = pb.offer_ledger
-    fleet.pools["pb"] = again
-    again.move_box = migrate.MoveBox(objects)  # the next controller's mover
+    fleet.replace("pb", again)  # the next controller: the box is the run store's again
     fleet.run(10)
     moved = next(m for m in again.live() if m.ticket == ticket)
     assert moved.state == READY and fleet.cloud.orders == orders and fleet.cloud.releases == []
@@ -415,53 +433,191 @@ def test_a_slot_held_for_a_machine_moving_in_is_not_ordered_on(tmp_path):
     fleet = Fleet(tmp_path)
     fleet.run(6)
     pb = fleet.pools["pb"]
-    slot = pb.expect_move_in("pa-t0", source="pa-i0", account=pb.live()[0].account)
+    slot = pb.expect_move_in("pa-t0", move="pa-t0.1", source="pa-i0", account=pb.live()[0].account)
     assert slot != pb.live()[0].account, "the machine keeps no slot the pool's own member holds"
     assert pb._free_account() not in (slot, pb.live()[0].account)
     pb.cancel_move_in("pa-t0", why="test")
     assert pb.config.target == 1 and not pb.moves
 
 
-def test_a_new_controller_never_releases_a_machine_the_new_pool_took_before_it(tmp_path):
-    """The local control plane (the box in memory): the new pool took the machine, the
-    controller died before the old pool saw it. The next controller's mover seeds its box
-    from the pools' states: the machine is the new pool's, the old pool never releases it."""
+def test_an_old_pool_restored_after_the_take_never_releases_the_machine(tmp_path):
+    """The new pool took the machine; the old pool's controller died before it saw that.
+    Restored from its saved state, it reads the claim in the box (next to the state files)
+    and never releases the machine."""
     fleet = Fleet(tmp_path, timeout_s=300.0)
     fleet.run(6)
     fleet.wants = {"0": 1, "1": 2}
     fleet.broker.tick(force=True)
-    ticket = next(kw["ticket"] for name, kw in fleet.events if name == "broker_migrated")
+    ticket = fleet.moved()
     pa, pb = fleet.pools["pa"], fleet.pools["pb"]
-    for _ in range(40):  # tick until the new pool took it, the old pool not again after that
-        fleet.islands["0"].step()
-        fleet.islands["1"].step()
-        if pa.moves["out"][ticket]["state"] != "handed_over":
-            pa.tick()
-        pb.tick()
-        fleet.clock.t += 30.0
-        if any(m.ticket == ticket for m in pb.live()):
+    for _ in range(40):  # until the old pool handed it over
+        fleet.run(1)
+        if pa.moves["out"][ticket]["state"] == "handed_over":
             break
-    assert pa.moves["out"][ticket]["state"] == "handed_over" and any(m.ticket == ticket for m in pb.live())
-    restored = {n: IslandPool.from_doc(p.snapshot(), p.config, p.ops, clock=fleet.clock, log=lambda _m: None,
-                                       events=p.events) for n, p in fleet.pools.items()}
-    migrate.PoolMover(restored)  # the next controller (a new, empty box)
-    fleet.pools.update(restored)
+    doc = pa.snapshot()  # what the old pool saved before its controller died
+    fleet.run(3, skip=("pa",))
+    assert any(m.ticket == ticket for m in pb.live()), "the new pool took it"
+    restored = IslandPool.from_doc(doc, pa.config, pa.ops, clock=fleet.clock, log=lambda _m: None, events=pa.events)
+    restored.state_path, restored.offer_ledger = pa.state_path, pa.offer_ledger
+    fleet.replace("pa", restored)
     fleet.clock.t += 3600.0
     fleet.run(4)
     assert ticket not in fleet.cloud.releases
-    assert restored["pa"].moves["out"][ticket]["state"] == "taken"
+    assert restored.moves.get("out", {}).get(ticket, {}).get("state") in ("taken", None)
 
 
-def test_without_a_box_a_handed_over_machine_is_kept_until_the_pool_stops(tmp_path):
+def test_the_same_machine_moves_there_and_back(tmp_path):
+    fleet = Fleet(tmp_path)
+    fleet.run(6)
+    fleet.wants = {"0": 1, "1": 2}
+    fleet.broker.tick(force=True)
+    ticket = fleet.moved()
+    fleet.run(20)
+    assert any(m.ticket == ticket and m.state == READY for m in fleet.pools["pb"].live())
+    fleet.events.clear()
+    fleet.wants = {"0": 2, "1": 1}
+    fleet.clock.t += 600.0
+    fleet.broker.tick(force=True)
+    back = [kw["ticket"] for name, kw in fleet.events if name == "broker_migrated"]
+    assert len(back) == 1
+    fleet.run(20)
+    assert fleet.cloud.releases == [] and len(fleet.cloud.orders) == 3
+    assert len(fleet.ready("pa")) == 2 and len(fleet.ready("pb")) == 1
+    assert any(m.ticket == back[0] for m in fleet.ready("pa"))
+
+
+def test_a_move_waits_while_a_pool_ticks_and_never_runs_without_its_lock(tmp_path):
+    fleet = Fleet(tmp_path)
+    fleet.run(6)
+    fleet.wants = {"0": 1, "1": 2}
+    lock = fleet.slots["pb"].tick_lock
+    lock.acquire()  # the new pool's worker is in a tick
+    try:
+        fleet.broker.tick(force=True)
+    finally:
+        lock.release()
+    failed = [kw for name, kw in fleet.events if name == "broker_migrate_failed"]
+    assert failed and failed[0]["step"] == "begin" and "MoveBusy" in failed[0]["error"]
+    assert not fleet.pools["pa"].moves and not fleet.pools["pb"].moves
+    bare = migrate.PoolMover(fleet.pools)  # pools without their tick locks: refused
+    move = b.Migration(fleet.pools["pa"].live()[0].ticket, "0", "1", "pa/h100", "pb/h100", "test")
+    with pytest.raises(migrate.MoveBusy):
+        bare.begin(move)
+
+
+def test_a_sampler_that_does_not_stop_cancels_the_move_and_its_machine_goes(tmp_path):
+    fleet = Fleet(tmp_path)
+    fleet.run(6)
+    island = fleet.islands["0"]
+
+    def stuck(member):
+        raise RuntimeError("docker stop timed out")
+
+    island.stop = stuck
+    fleet.wants = {"0": 1, "1": 2}
+    fleet.broker.tick(force=True)
+    ticket = fleet.moved()
+    fleet.run(30)
+    pa = fleet.pools["pa"]
+    names = [e["event"].removeprefix("nc_elastic_") for e in pa.events.events]
+    assert names.count("move_stop_failed") == migrate.MOVE_STOP_TRIES and "member_moved_out" not in names
+    assert ticket in fleet.cloud.releases, "the machine whose sampler would not stop is released"
+    assert not any(m.ticket == ticket for m in fleet.pools["pb"].members)
+
+
+def test_a_new_pool_that_dies_right_after_its_claim_completes_the_take(tmp_path):
+    """The claim is won only after "taking" is saved: a restart from that state finds its
+    own claim in the box and makes the member (no machine left without a pool)."""
+    fleet = Fleet(tmp_path)
+    fleet.run(6)
+    fleet.wants = {"0": 1, "1": 2}
+    fleet.broker.tick(force=True)
+    ticket = fleet.moved()
+    pb = fleet.pools["pb"]
+    saved = {}
+    real = pb._move_in
+
+    def die_after_claim(t, rec, now):
+        saved["doc"] = pb.snapshot()
+        raise SystemExit("controller died")
+
+    pb._move_in = die_after_claim
+    with pytest.raises(SystemExit):
+        for _ in range(40):
+            fleet.run(1)
+    pb._move_in = real
+    assert saved["doc"]["moves"]["in"][ticket]["state"] == "taking"
+    again = IslandPool.from_doc(saved["doc"], pb.config, pb.ops, clock=fleet.clock, log=lambda _m: None,
+                                events=pb.events)
+    again.state_path, again.offer_ledger = pb.state_path, pb.offer_ledger
+    fleet.replace("pb", again)
+    fleet.run(6)
+    assert any(m.ticket == ticket and m.state == READY for m in again.live())
+    assert fleet.cloud.releases == [] and len(fleet.cloud.orders) == 3
+
+
+def test_a_destination_whose_provider_cannot_manage_a_foreign_machine_is_refused(tmp_path):
+    fleet = Fleet(tmp_path)
+    fleet.run(6)
+    del fleet.pools["pb"].ops.take_foreign
+    fleet.wants = {"0": 1, "1": 2}
+    fleet.broker.tick(force=True)
+    failed = [kw for name, kw in fleet.events if name == "broker_migrate_failed"]
+    assert failed and "did not order" in failed[0]["error"]
+    assert not fleet.pools["pa"].moves and not fleet.pools["pb"].moves
+    assert fleet.pools["pa"].config.target == 2 or fleet.pools["pa"].shrink > 0
+
+
+def test_a_restarted_worker_keeps_the_newer_moves_it_held(tmp_path):
+    """The store control plane: a worker died after its pool took the machine, before the
+    store copy said so. The restore keeps the member the memory holds and drops the
+    placeholder, so the machine is never taken twice."""
+    from tests.test_fleet_store_control import _objects
+    from yeto.launch.pool import store_state
+
+    fleet = Fleet(tmp_path)
+    objects = _objects()
+    for name, pool in fleet.pools.items():
+        pool.control = store_state.open_pool_control(objects, name, pool.config.shard_base, clock=fleet.clock)
+        pool.__post_init__()
+        pool.move_box = None
+    fleet.mover = fleet.broker.mover = migrate.PoolMover(fleet.slots, clock=fleet.clock)
+    fleet.run(6)
+    fleet.wants = {"0": 1, "1": 2}
+    fleet.broker.tick(force=True)
+    ticket = fleet.moved()
+    pb = fleet.pools["pb"]
+    before = pb.snapshot()  # the store copy with the placeholder still waiting
+    for _ in range(40):
+        fleet.run(1)
+        if any(m.ticket == ticket for m in pb.members):
+            break
+    pb.control.state.save(before)  # the store copy is older than the memory
+    controller = rc.RolloutController({"pb": fleet.slots["pb"]}, interval=0.02, log=lambda _m: None)
+    controller._restore_after_death("pb", pb, pb.control)
+    assert [m.ticket for m in pb.members].count(ticket) == 1
+    assert ticket not in pb.moves.get("in", {})
+    fleet.run(6)
+    assert [m.ticket for m in pb.members].count(ticket) == 1 and fleet.cloud.orders[:3] == fleet.cloud.orders
+
+
+def test_a_handed_over_machine_whose_box_is_gone_is_alerted_and_never_released_blind(tmp_path):
     fleet = Fleet(tmp_path, timeout_s=300.0)
     fleet.run(6)
     fleet.wants = {"0": 1, "1": 2}
     fleet.broker.tick(force=True)
     ticket = next(kw["ticket"] for name, kw in fleet.events if name == "broker_migrated")
     pa = fleet.pools["pa"]
-    pa.move_box = fleet.pools["pb"].move_box = None  # restored without a mover
-    fleet.run(30)
-    assert ticket not in fleet.cloud.releases, "its new pool may hold it: not released on a timeout"
-    assert [e["event"] for e in pa.events.events].count("nc_elastic_move_out_stranded") == 1
+    for _ in range(40):
+        fleet.run(1, skip=("pb",))
+        if pa.moves["out"][ticket]["state"] == "handed_over":
+            break
+    pa.state_path = None  # its box cannot be opened any more (no state kept, no store)
+    pa.move_box = None
+    fleet.clock.t += 4 * 3600.0
+    fleet.run(30, skip=("pb",))
+    assert ticket not in fleet.cloud.releases, "its new pool may hold it: never released blind"
+    alerts = [e for e in pa.events.events if e["event"].endswith("move_out_unresolved")]
+    assert alerts and alerts[0]["level"] == "critical"
     pa.stop("test end")
-    assert ticket in fleet.cloud.releases
+    assert ticket not in fleet.cloud.releases, "not at the stop either"

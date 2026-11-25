@@ -74,7 +74,7 @@ SLOT_RETRY_S = 600.0  # a slot whose guard refused is tried again after this lon
 # control plane each runs only after the pool's store lock was confirmed (``GuardedOps``)
 MUTATING_OPS = frozenset({"order", "start", "restart", "drain", "fence", "fence_incarnation", "request_drain",
                           "cancel_drain", "reassert_drain", "clear_stale_handoff", "pool_ended", "stop",
-                          "stop_sampler", "load_release"})
+                          "stop_sampler", "load_release", "take_foreign"})
 
 
 class GuardedOps:
@@ -353,7 +353,7 @@ class IslandPool(PoolMoves):
     # the offer ledger as this pool feeds and reads it (offer_ledger.PoolLedger; None: not kept)
     offer_ledger: Any = None
     # machines moving to / from another pool (capacity broker phase 2, ``migrate``): saved under
-    # ``moves`` only while there is one; ``move_box`` is the hand-over box a PoolMover sets
+    # ``moves`` only while there is one; ``move_box``: the hand-over box (None: ``migrate.box_of``)
     moves: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     move_box: Any = None
 
@@ -2582,6 +2582,8 @@ class IslandPool(PoolMoves):
         self.stopped = why
         self.log(f"pool: stopping: {why}")
         self._event("pool_stopped", why=why)
+        if self.moves:  # a take it claimed becomes a member first; a hand-over nobody took is released
+            self._stop_moves()
         for m in self.live():
             # Retire the member in the work contract first (syncer member
             # table / store dispenser): its open claims go back at once
@@ -2592,8 +2594,6 @@ class IslandPool(PoolMoves):
         if self._release_pool is not None:  # a stopping pool releases in line from here on
             self._release_pool.shutdown(wait=False)
             self._release_pool = None
-        if self.moves:
-            self._stop_moves()
         self._pool_ended(why)
 
     def _pool_ended(self, why: str) -> None:
