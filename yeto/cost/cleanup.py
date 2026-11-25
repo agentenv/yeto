@@ -150,7 +150,11 @@ def _release_one(r: Resource, ops: CleanupOps, ledger: ResourceLedger, dry_run: 
     if r.kind == "sky_cluster":
         if dry_run:
             return Action(r.key, f"would sky down {r.id}", True)
-        with _pool_sky_scope(r):
+        try:
+            scope = _pool_sky_scope(r)
+        except RuntimeError as refused:  # no scope, and an unscoped down would use another account
+            return Action(r.key, f"sky down {r.id}", False, str(refused)[:300])
+        with scope:
             ok = ops.sky_down(r.id)
         if ok:
             ledger.released("sky_cluster", r.id, r.name, by="cleanup")
@@ -194,12 +198,16 @@ def _pool_sky_scope(r: Any):
         return contextlib.nullcontext()
     from yeto.launch.nc import sky_provider  # noqa: PLC0415
 
+    aws_profile = (r.attrs or {}).get("aws_profile")
     try:
         sky_provider.install_request_env_scope()
     except RuntimeError as error:
+        refused = sky_provider.unscoped_refusal(aws_profile, what=f"sky down {r.id}", cluster=r.id)
+        if refused:
+            raise RuntimeError(f"{refused} ({error})") from error
         print(f"[cleanup] WARNING: sky down {r.id} without the request env scope: {error}", flush=True)
         return contextlib.nullcontext()
-    return sky_provider.request_env_scope(sky_provider.aws_request_env((r.attrs or {}).get("aws_profile")))
+    return sky_provider.request_env_scope(sky_provider.aws_request_env(aws_profile))
 
 
 def pool_owned(r: Any) -> bool:

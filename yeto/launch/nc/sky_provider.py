@@ -185,18 +185,24 @@ def _scoped_request_env(original):
     return request_body_env_vars
 
 
+class ScopeUnavailable(RuntimeError):
+    """This sky cannot have its request env scoped (a deterministic failure: no retry)."""
+
+
 def install_request_env_scope() -> None:
     """Wrap sky's request env builder once (idempotent), then prove it is in effect: a
     request body built in a scope carries the scope's sentinel. Raises RuntimeError when
-    sky has no such builder or does not use it (a sky version that moved it): the
-    provider then refuses to order rather than forward the run's AWS credentials."""
+    sky has no such builder or does not use it (a sky version that moved it:
+    :class:`ScopeUnavailable`, final) or the self-check itself raised (a plain
+    RuntimeError, tried again later): the provider then refuses to order rather than
+    forward the run's AWS credentials."""
     try:
         from sky.server.requests import payloads  # noqa: PLC0415
     except ImportError as error:
-        raise RuntimeError(f"sky has no request payloads module ({error})") from error
+        raise ScopeUnavailable(f"sky has no request payloads module ({error})") from error
     current = getattr(payloads, "request_body_env_vars", None)
     if current is None:
-        raise RuntimeError("sky has no payloads.request_body_env_vars to scope the request env")
+        raise ScopeUnavailable("sky has no payloads.request_body_env_vars to scope the request env")
     if not getattr(current, "yeto_scoped", False):
         payloads.request_body_env_vars = _scoped_request_env(current)
     token = _REQUEST_ENV.set({"AWS_PROFILE": _SENTINEL})
@@ -207,8 +213,8 @@ def install_request_env_scope() -> None:
     finally:
         _REQUEST_ENV.reset(token)
     if seen != _SENTINEL:
-        raise RuntimeError("sky builds its request env without payloads.request_body_env_vars: the run's "
-                           "AWS credentials cannot be kept out of sky's requests on this sky version")
+        raise ScopeUnavailable("sky builds its request env without payloads.request_body_env_vars: the run's "
+                               "AWS credentials cannot be kept out of sky's requests on this sky version")
 
 
 @contextlib.contextmanager
@@ -223,10 +229,12 @@ def request_env_scope(overrides: dict[str, str | None]):
 
 
 class _ScopedSky:
-    """The sky module, every SDK call made inside the provider's request env scope."""
+    """The sky module, every SDK call made inside the provider's request env scope.
+    ``refuse``: every SDK call raises it instead (no scope, and an unscoped request
+    would carry the wrong AWS credentials)."""
 
-    def __init__(self, module: Any, overrides: dict[str, str | None]):
-        self._module, self._overrides = module, overrides
+    def __init__(self, module: Any, overrides: dict[str, str | None], refuse: str | None = None):
+        self._module, self._overrides, self._refuse = module, overrides, refuse
 
     def __getattr__(self, name: str) -> Any:
         value = getattr(self._module, name)
@@ -235,10 +243,29 @@ class _ScopedSky:
 
         @functools.wraps(value)
         def call(*args: Any, **kw: Any) -> Any:
+            if self._refuse:
+                raise RuntimeError(self._refuse)
             with request_env_scope(self._overrides):
                 return value(*args, **kw)
 
         return call
+
+
+def unscoped_refusal(aws_profile: str | None, environ=None, what: str = "sky requests",
+                     cluster: str | None = None) -> str | None:
+    """Without the request env scope, a sky request would carry this process's AWS
+    variables. Refused when they or ``aws_profile`` say another account than the
+    server's own: the message gives the manual command."""
+    environ = os.environ if environ is None else environ
+    forwarded = [n for n in AWS_FORWARDED_ENVS if environ.get(n)]
+    if not aws_profile and not forwarded:
+        return None
+    target = cluster or "<cluster>"
+    manual = (f"AWS_PROFILE={aws_profile} sky down {target}" if aws_profile else
+              f"env -u {' -u '.join(forwarded)} sky down {target}")
+    return (f"sky provider: {what} refused without the request env scope (they would carry "
+            f"{', '.join(forwarded) or 'no AWS_PROFILE'} instead of "
+            f"{'aws_profile ' + aws_profile if aws_profile else 'the server credentials'}); by hand: {manual}")
 
 
 def owner_token(run_id: str) -> str:
@@ -312,17 +339,23 @@ class SkyProvider:
             import sky  # noqa: PLC0415
 
             self._sky = sky
+        refuse = None
         if self._real_sky and not getattr(self, "_env_scoped", False):
-            self._env_scoped = True
             try:
                 install_request_env_scope()
+                self._env_scoped, self._scope_error = True, None
             except RuntimeError as error:
-                # launches are refused (_install_patches); status / down / cancel still run, without
-                # the scope, so a pool can always release what it has
+                # launches are refused (_install_patches). A version that cannot be scoped is final;
+                # a self-check that raised is tried again on the next call
+                self._env_scoped = isinstance(error, ScopeUnavailable)
+                if getattr(self, "_scope_error", None) != str(error):
+                    print(f"[sky-provider] WARNING: {error}; new launches are refused", flush=True)
                 self._scope_error = str(error)
-                print(f"[sky-provider] WARNING: {error}; new launches are refused, status and down run "
-                      "without the request env scope", flush=True)
-        return _ScopedSky(self._sky, self.request_env)
+        if self._real_sky and getattr(self, "_scope_error", None):
+            # status / down / cancel run unscoped only when that sends no other account's AWS
+            # credentials; else they raise (a status error is never read as the cluster ended)
+            refuse = unscoped_refusal(self.aws_profile, what="sky status / down / cancel")
+        return _ScopedSky(self._sky, self.request_env, refuse)
 
     def _doc(self) -> dict[str, Any]:
         try:
@@ -867,6 +900,10 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
         if not os.environ.get(env_name):
             problems.append(f"sky provider: secret variable {env_name} is not set")
     problems += aws_env_problems(provider, dict(os.environ))
+    try:
+        install_request_env_scope()  # local only: builds a request body, sends nothing
+    except RuntimeError as error:
+        problems.append(f"sky provider: {error}")
     return problems
 
 
@@ -893,6 +930,12 @@ def start_problems(cfg: dict[str, Any]) -> list[str]:
     except RuntimeError as error:
         problems.append(f"sky provider: {error}")
     return problems
+
+
+def start_refusal(cfg: dict[str, Any]) -> str | None:
+    """The message a sky pool's start (``pool --config`` or an in-process controller) exits with."""
+    refused = start_problems(cfg)
+    return f"pool {cfg.get('shard_base')}: " + "; ".join(refused) if refused else None
 
 
 def aws_env_problems(provider: SkyProvider, env: dict[str, str]) -> list[str]:

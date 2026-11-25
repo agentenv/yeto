@@ -733,6 +733,7 @@ def _nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any, lock: bool, con
     pc = cli.pool_config(cfg, allowed=None if external else cli.allowed_accounts())
     if cfg.get("route", "ssh") == "ssh":
         pool_run.check_sampler_spec(cfg, pc)
+    pool_run.refuse_provider_start(cfg)  # a sky pool's start checks, as `pool --config` runs them
     held = None
     if lock:
         held = pool_run.acquire_lock(pool_run.lock_path(cfg), run=cli.run_id(cfg), role="controller")

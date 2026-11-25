@@ -875,3 +875,120 @@ def test_the_intent_row_marks_the_pool_and_its_aws_profile(tmp_path, monkeypatch
 
     intent = next(r for r in current().records() if r["op"] == "intent")
     assert intent["attrs"]["pool"] is True and intent["attrs"]["aws_profile"] == "sky-aws"
+
+
+def test_without_the_scope_status_and_down_are_refused_when_they_would_carry_another_account(monkeypatch):
+    from yeto import sky_patches
+    from yeto.launch.nc import sky_provider as sp
+
+    for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sky_patches, "require_matching_api_server", lambda out=None: None)
+    sky = FakeSky()
+    up = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=sky, aws_profile="sky-aws")
+    name = up.order(1)
+    sky.up(name)
+
+    def broken():
+        raise sp.ScopeUnavailable("sky builds its request env without payloads.request_body_env_vars")
+
+    monkeypatch.setattr(sp, "install_request_env_scope", broken)
+    p = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=sky, aws_profile="sky-aws", record=up.record)
+    p._real_sky = True
+    with pytest.raises(RuntimeError, match=f"AWS_PROFILE=sky-aws sky down {name}|by hand"):
+        p.status(1, name)  # an error, never "ended": the pool keeps the member
+    with pytest.raises(RuntimeError, match="by hand"):
+        p.release(1, name)
+    assert name in sky.clusters
+    # no aws_profile, but the store's AWS_PROFILE in the env: refused the same way
+    monkeypatch.setenv("AWS_PROFILE", "store-r2")
+    q = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=sky, record=up.record)
+    q._real_sky = True
+    with pytest.raises(RuntimeError, match="env -u AWS_PROFILE sky down"):
+        q.status(1, name)
+
+
+def test_a_transient_self_check_failure_is_tried_again(monkeypatch):
+    from yeto import sky_patches
+    from yeto.launch.nc import sky_provider as sp
+
+    for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sky_patches, "require_matching_api_server", lambda out=None: None)
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("sky request env self-check failed (OSError())")
+
+    monkeypatch.setattr(sp, "install_request_env_scope", flaky)
+    sky = FakeSky()
+    p = _provider(sky)
+    p._real_sky = True
+    with pytest.raises(ValueError, match="refusing to launch"):
+        p.order(1)
+    assert p.order(1)  # the next try installs the scope: launches again
+    assert len(calls) == 2
+
+
+def test_an_in_process_controller_refuses_a_sky_pool_at_its_start(monkeypatch):
+    from yeto.launch.nc import pool_run
+    from yeto.launch.pool import controller
+    from yeto.launch.nc import sky_provider as sp
+
+    for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_PROFILE", "store-r2")
+    monkeypatch.setattr(pool_run.cli, "pool_config", lambda cfg, allowed=None: None)
+    monkeypatch.setattr(pool_run, "check_sampler_spec", lambda cfg, pc: None)
+    monkeypatch.setattr(pool_run, "acquire_lock", lambda *a, **k: pytest.fail("got past the start check"))
+    cfg = {"target": 1, "accounts": [1], "shard_base": "s", "run": "run-k",
+           "provider": {"kind": "sky", "resources": {"infra": "aws", "accelerators": "L4:1"}}}
+    with pytest.raises(SystemExit, match="AWS_PROFILE"):
+        controller.nc_pool(cfg, "pool.json")
+
+
+def test_the_dry_run_reports_a_sky_whose_request_env_cannot_be_scoped(monkeypatch):
+    from yeto.launch.nc import sky_provider as sp
+
+    for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+
+    def broken():
+        raise sp.ScopeUnavailable("sky has no payloads.request_body_env_vars to scope the request env")
+
+    monkeypatch.setattr(sp, "install_request_env_scope", broken)
+    cfg = {"target": 1, "accounts": [1], "shard_base": "s", "run": "run-k",
+           "provider": {"kind": "sky", "resources": {"infra": "aws", "accelerators": "L4:1"}}}
+    assert [p for p in sp.offline_problems(cfg) if "request_body_env_vars" in p]
+    assert sp.start_refusal(cfg) and "request_body_env_vars" in sp.start_refusal(cfg)
+
+
+def test_the_cleanup_refuses_an_unscoped_down_with_another_account(monkeypatch):
+    from yeto.cost import cleanup
+    from yeto.launch.nc import sky_provider as sp
+
+    for name in sp.AWS_FORWARDED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+
+    def broken():
+        raise sp.ScopeUnavailable("no builder")
+
+    monkeypatch.setattr(sp, "install_request_env_scope", broken)
+    downs = []
+
+    class Ops:
+        def sky_down(self, cluster):
+            downs.append(cluster)
+            return True
+
+    class Ledger:
+        def released(self, *a, **k):
+            pass
+
+    row = SimpleNamespace(kind="sky_cluster", id="c-1", name="c-1", key="k", attrs={"pool": True, "aws_profile": "a"})
+    action = cleanup._release_one(row, Ops(), Ledger(), False, {})
+    assert not action.ok and "AWS_PROFILE=a sky down c-1" in action.detail and downs == []
+    plain = SimpleNamespace(kind="sky_cluster", id="c-2", name="c-2", key="k", attrs={"pool": True})
+    assert cleanup._release_one(plain, Ops(), Ledger(), False, {}).ok and downs == ["c-2"]  # nothing to carry

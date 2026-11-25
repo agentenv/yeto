@@ -700,6 +700,19 @@ def event_log(cfg: dict[str, Any]) -> island_status.EventLog:
     return island_status.EventLog(path=cli.pool_events_path(cfg), run=cli.run_id(cfg), log=cli._log, hook=hook)
 
 
+def refuse_provider_start(cfg: dict[str, Any]) -> None:
+    """A sky pool that must not start (run AWS settings sky would use, no request env
+    scope): SystemExit before the lock, nothing ordered; the foreground loop and an
+    in-process controller alike. Refused order by order instead, an offer would only
+    cool down and the pool retry every tick."""
+    if provider_kind(cfg) == "sky":
+        from .sky_provider import start_refusal  # noqa: PLC0415
+
+        message = start_refusal(cfg)
+        if message:
+            raise SystemExit(message)
+
+
 def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: IslandPool | None = None,
              signals: _Signals | None = None) -> int:
     """The foreground control loop of a pool (``pool --config F``)."""
@@ -709,12 +722,7 @@ def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: Is
 
     for note in [*cli.pool_config_warnings(cfg), *map(format_finding, breaker_findings(cfg))]:
         _say(f"WARNING: {note}")
-    if provider_kind(cfg) == "sky":  # refused here, not order by order (an order refusal only cools an offer)
-        from .sky_provider import start_problems  # noqa: PLC0415
-
-        refused = start_problems(cfg)
-        if refused:
-            raise SystemExit(f"pool {cfg['shard_base']}: " + "; ".join(refused))
+    refuse_provider_start(cfg)
     holder = lock_holder(lock_path(cfg))
     if holder is not None:
         raise SystemExit(f"pool {cfg['shard_base']}: another instance holds {lock_path(cfg)} "
