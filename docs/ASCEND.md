@@ -222,7 +222,10 @@ yeto launch --training-mode rl --rl-backend verl --gpu ssh:2x8x910b4 \
   the trainer in the node's own Python environment. Before the trainer, the job sources
   each `--rl-ssh-trainer-activate` script in order (a missing one fails the job). Without
   the flag, an `npu` node sources `/usr/local/Ascend/ascend-toolkit/set_env.sh` and
-  `/usr/local/Ascend/nnal/atb/set_env.sh` when they exist. A `runtime: docker` node needs
+  `/usr/local/Ascend/nnal/atb/set_env.sh` when they exist. The island's environment (the
+  node's `env`, `--island-env`, the island task's) is exported again after the scripts,
+  so a script's `LD_LIBRARY_PATH` / `PYTHONPATH` / `ASCEND_*` never overrides what you
+  set. A `runtime: docker` node needs
   a registry image (`--rl-image docker:<registry>/<image>@sha256:<digest>`): the verl
   default `verl-build:<commit>` is built on Modal and is refused there.
 - **HCCL.** A multi-node island exports `HCCL_CONNECT_TIMEOUT=1800` and, from the

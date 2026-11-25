@@ -259,3 +259,44 @@ def test_the_dry_run_refuses_the_p5b_pairing(tmp_path, monkeypatch, capsys):
     assert "(sm90+) only" in err and "Use sm90+ cards (H100, H200, B300) for the trainer" in err
     h100 = [a if a != "modal:1xa100-80gb" else "modal:1xh100" for a in argv]
     assert cli.cmd_launch(cli.parse_args([*h100, "--dry-run"])) == 0
+
+
+def test_the_launch_preflight_refuses_the_p5b_pairing_before_any_order(monkeypatch, tmp_path):
+    """The real launch goes through launch_preflight.pre_cloud_checks (the CLI before its
+    worker, and launcher.run): a Miles trainer on A100 is refused there, before any cloud
+    work; on H100 it passes."""
+    import yeto.launch_preflight as lp
+    import yeto.launcher as launcher
+    import yeto.modal_runner as modal_runner
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("YETO_PREFLIGHT_MODEL", "off")
+    no_sync = ("--rl-single-island-no-sync", "--controller", "local")
+    a100 = _miles_args("modal:1xa100", *no_sync)
+    launcher._prepare_rl_args(a100)
+    with pytest.raises(ValueError, match="sm90\\+.*training attention: fused"):
+        lp.pre_cloud_checks(a100, threads=False)
+    h100 = _miles_args("modal:1xh100", *no_sync)
+    launcher._prepare_rl_args(h100)
+    lp.pre_cloud_checks(h100, threads=False)
+
+    ordered = []
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    monkeypatch.setattr(modal_runner, "ModalOps", lambda *a, **k: ordered.append(("modal", a)))
+    with pytest.raises(ValueError, match="sm90\\+"):
+        launcher.run(_miles_args("modal:1xa100", *no_sync))
+    assert ordered == []  # refused in the launcher's preflight: no Modal app, no cluster
+
+
+def test_the_explicit_environment_wins_over_the_activation_scripts(tmp_path):
+    """CANN's set_env.sh sets LD_LIBRARY_PATH / PYTHONPATH / ASCEND_*: the job sources it
+    first and exports the inventory / --island-env / island task environment after it."""
+    spec = _spec(tmp_path)
+    env = {"LD_LIBRARY_PATH": "/opt/site/lib", "ASCEND_RT_VISIBLE_DEVICES": "0,1"}
+    body = sti._trainer_body(spec, 0, "/tmp/requant.log", env=env)
+    sourced = body.index("ascend-toolkit/set_env.sh")
+    assert sourced < body.index("export LD_LIBRARY_PATH=/opt/site/lib")
+    assert sourced < body.index("export ASCEND_RT_VISIBLE_DEVICES=0,1")
+    plain = sti._trainer_body(spec, 0, "/tmp/requant.log")  # no env given: nothing exported again
+    assert "export LD_LIBRARY_PATH" not in plain

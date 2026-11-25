@@ -569,7 +569,9 @@ def dry_run_record(args: Any, spec: SshTrainerSpec, name: str, *, mode: str = "r
         "warnings": warnings,
         "code": code,
         "journal": str(runs.run_dir(spec.run_id) / RESIDENT_DIR / f"{name}-jobs.json") if mode == "resident" else None,
-        "env_order": "fabric defaults < inventory node env < --island-env and the island task env",
+        "env_order": "fabric defaults < inventory node env < --island-env and the island task env"
+                     + ("; the activation scripts are sourced first, then that environment is exported "
+                        "again (a script never overrides it)" if scripts else ""),
         "image": spec.image or spec.nodes[0].image,
         **({"activate": {"scripts": list(scripts), "required": required}} if scripts else {}),
         "files": sorted(spec.files),
