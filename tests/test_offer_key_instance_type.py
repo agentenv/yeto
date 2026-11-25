@@ -137,3 +137,19 @@ def test_two_instance_types_keep_their_own_breakers():
     p._save_doc(doc)  # noqa: SLF001
     assert p._cooling(p._doc(), a.key, t[0]) and not p._cooling(p._doc(), b.key, t[0])  # noqa: SLF001
     assert p.has_fallback_offer()
+
+
+def test_breakers_and_a_tickets_offer_read_by_the_current_key():
+    t = [1000.0]
+    [a] = _offers(TYPE_A)
+    p = SkyProvider("run-k", slots=[1], offers=[a], sky=FakeSky(), clock=lambda: t[0])
+    doc = p._doc()  # noqa: SLF001
+    doc["offers"] = {OLD: {"fails": 2, "open_until": t[0] + 900}, a.key: {"fails": 1, "open_until": t[0] + 60}}
+    p._save_doc(doc)  # noqa: SLF001
+    assert p.offer_breakers() == {a.key: {"fails": 2, "open_until": t[0] + 900}}  # the later one, by its key
+    # a ticket the ledger knows by the older key (ordered by an older yeto) leads from the merged history
+    led = ol.PoolLedger(ol.OfferLedger(), writer="w", aliases=offers.legacy_aliases([a]))
+    led.own.tickets["old-t"] = {"offer": OLD}
+    assert led.offer("old-t") == a.key
+    led.others = _stats(OLD, 3, [1200.0, 1300.0, 1400.0])
+    assert led.stats(led.offer("old-t")).ready == 3

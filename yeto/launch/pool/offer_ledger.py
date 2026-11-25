@@ -343,8 +343,11 @@ class PoolLedger:
     background: bool = True
     prefix: str = PREFIX
     # {offer key: the key its history was counted under before} (``offers.legacy_aliases``:
-    # the generated key without the instance type, where it names this offer alone): read
-    # with the offer's own; written never (new counts go under the offer's key)
+    # the generated key without the instance type, where it names this offer alone among the
+    # pool's offers): read with the offer's own; written never (new counts go under the
+    # offer's key). The alias is judged by this pool's offers: an older run that ordered
+    # another instance type of the same GPU and region (a removed offer, another pool) counted
+    # under the same older key, and that history is read as this offer's too
     aliases: dict[str, str] = field(default_factory=dict)
     others: OfferLedger = field(default_factory=OfferLedger)
     loaded: bool = False
@@ -482,9 +485,12 @@ class PoolLedger:
             return None
 
     def offer(self, ticket: str) -> str | None:
+        """The offer ``ticket`` was ordered with, by its current key (an older key: its offer's)."""
         with self._lock:
             known = self.own.tickets.get(ticket) or {}
-        return known.get("offer") or self._offer_of(ticket) or self.default_offer
+        offer = known.get("offer") or self._offer_of(ticket) or self.default_offer
+        current = {old: key for key, old in self.aliases.items()}
+        return current.get(offer, offer) if offer is not None else None
 
     def stats(self, offer: str) -> OfferStats | None:
         """Every writer's measurements of ``offer`` (the others' as read, this writer's live),

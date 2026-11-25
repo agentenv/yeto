@@ -638,7 +638,14 @@ class SkyProvider:
         return self._canonical(((self._rows().get(ticket) or {}).get("offer") or {}).get("key"))
 
     def offer_breakers(self) -> dict[str, dict[str, Any]]:
-        return dict(self._doc().get("offers") or {})
+        """The cooling breakers by the offers' current keys (a row an older yeto kept under an
+        offer's older key reads as that offer's; with both, the one that reopens later)."""
+        out: dict[str, dict[str, Any]] = {}
+        for key, row in (self._doc().get("offers") or {}).items():
+            key = self._canonical(key)
+            if key not in out or float(row.get("open_until", 0)) > float(out[key].get("open_until", 0)):
+                out[key] = row
+        return out
 
     def launch_cluster(self, name: str, offer: Offer, *, slot: int, n: int = 0, wait: bool = True,
                        num_nodes: int = 1) -> str:
