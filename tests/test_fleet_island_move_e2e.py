@@ -8,11 +8,14 @@ launch with its island STOP and starts the next incarnation (``<prefix>-m1``) on
 machines under the **same learner id**. To the syncer this is a short absence, not a
 removal: the moved island comes back as learner 1, catches up to the newest outer
 weights and merges again. Island 0 runs one launch from start to end and no round times
-out. With a LEAVE the rounds never wait for the absent island (the moved incarnation starts
-once the syncer has handled that LEAVE, as on real machines that take minutes to come up). Without one (the move tears
-the old machines down while island 1 holds a PULL) the moved incarnation starts only after
-island 1's lease: the round it held waits that one lease (the syncer releases the slot of
-an island gone a lease, #788), merges without it, and island 0 goes on. The final weights
+out. With a LEAVE the rounds never wait for the absent island (the moved incarnation
+starts once the syncer has handled that LEAVE, as on real machines that take minutes to
+come up). Without one (the move tears the old machines down while island 1 holds a PULL)
+the moved incarnation starts only after island 1's lease: the round it held waits that
+one lease (the syncer releases the slot of an island gone a lease, #788) and merges
+without it. In that case island 0 does not run ahead while island 1 is away: it answers
+the rounds open at the teardown and holds later PULLs until island 1 is back, so the
+test bounds the wait of exactly the rounds island 1 never answered. The final weights
 equal the f32 Nesterov recomputation of every merged round (1e-6).
 """
 
@@ -106,7 +109,14 @@ def test_a_moved_island_comes_back_under_its_learner_id(syncer_binary, tmp_path,
     def returning() -> bool:  # may the worker start the moved incarnation yet?
         if launches.stopped_at is None or launches.started("r-i1-m1"):
             return True
-        if leave:  # new machines take minutes: the old connection's LEAVE is handled first
+        if leave:
+            # New machines take minutes, so the old connection's LEAVE and disconnect are
+            # handled first and the tape has its pool_leave. This test pins that order. In
+            # the other order (the new HELLO handled while the old generation is still
+            # connected) the old one counts as replaced: no pool_leave is written, and the
+            # disconnect rebinds its unanswered slots to the new generation, which gets the
+            # re-PULL after its catch-up. That is not a stall: server.rs pins it through
+            # the scheduler (a_leave_after_the_next_generation_said_hello_rebinds_its_slot).
             return left()
         return time.monotonic() - launches.stopped_at >= RETURN_AFTER_S  # back after its lease
 
