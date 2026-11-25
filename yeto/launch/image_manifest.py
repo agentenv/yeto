@@ -98,7 +98,8 @@ def _basic(login: dict[str, str] | None) -> str | None:
 def manifest_status(ref: str, login: dict[str, str] | None = None, *, timeout: float = 10.0,
                     urlopen=None) -> tuple[str, str]:
     """``(status, detail)``: ``present`` (HTTP 200), ``missing`` (404), ``denied`` (401/403:
-    absent, or private and no / a wrong login: a registry does not tell which) or
+    absent, or private and no / a wrong login: a registry does not tell which; and a 400 to
+    a request that carried the login: ECR answers a malformed or wrong login so) or
     ``unknown`` (the registry was not reached, or answered something else)."""
     host, repo, digest = split_ref(ref)
     url = f"https://{host}/v2/{repo}/manifests/{digest}"
@@ -113,6 +114,7 @@ def manifest_status(ref: str, login: dict[str, str] | None = None, *, timeout: f
         except urllib.error.HTTPError as error:
             return int(error.code), dict(error.headers or {})
 
+    sent_login = False  # the code below answers a request (or token request) that carried the login
     try:
         code, headers = head(None)
         if code == 401:
@@ -128,18 +130,22 @@ def manifest_status(ref: str, login: dict[str, str] | None = None, *, timeout: f
                                if basic and params["realm"].startswith("https://") else {}) as r:
                         body = json.loads(r.read() or b"{}")
                 except urllib.error.HTTPError as error:
-                    code = int(error.code)
+                    code, sent_login = int(error.code), bool(basic and params["realm"].startswith("https://"))
                 else:
                     token = body.get("token") or body.get("access_token")
                     code = head(f"Bearer {token}")[0] if token else 401
             elif basic:
-                code = head(f"Basic {basic}")[0]
+                code, sent_login = head(f"Basic {basic}")[0], True
     except (urllib.error.URLError, OSError, ValueError) as error:
         return UNKNOWN, f"{host} not reached ({type(error).__name__}: {error})"[:300]
     if code == 200:
         return PRESENT, f"{host}/{repo}@{digest}"
     if code == 404:
         return MISSING, f"{host}/{repo} has no manifest {digest}"
+    if code == 400 and sent_login:
+        return DENIED, (f"{host} rejected the registry login given for {repo}@{digest} (HTTP 400): a malformed "
+                        "or wrong password (an ECR password is `aws ecr get-login-password`, valid 12 hours); a registry "
+                        f"that answers 400 for another reason: {CHECK_ENV}=off skips this check")
     if code in (401, 403):
         how = "with the registry login given" if login else "anonymously"
         return DENIED, (f"{host}/{repo}@{digest} is not readable {how} (HTTP {code}): it is not in that "

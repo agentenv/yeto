@@ -533,6 +533,73 @@ def test_a_redirect_to_another_host_does_not_carry_the_registry_login():
     assert im.manifest_status(REF, urlopen=loop)[0] == im.UNKNOWN
 
 
+def test_a_login_the_registry_rejects_with_400_is_denied_not_unknown():
+    # ECR answers a malformed or wrong Basic login with HTTP 400 (seen live): with a login sent that is a refusal,
+    # without one a 400 stays "unknown" (the registry said something else)
+    import urllib.error
+
+    from yeto.launch import image_manifest as im
+
+    def ecr(req, timeout=None):
+        if req.headers.get("Authorization"):
+            raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, None)
+        raise urllib.error.HTTPError(req.full_url, 401, "x", {"WWW-Authenticate": 'Basic realm="https://reg.example/"'},
+                                     None)
+
+    login = {"SKYPILOT_DOCKER_USERNAME": "AWS", "SKYPILOT_DOCKER_PASSWORD": "pw-BAD-SENTINEL", "SKYPILOT_DOCKER_SERVER": "reg.example"}
+    status, detail = im.manifest_status(REF, login, urlopen=ecr)
+    assert status == im.DENIED and "rejected the registry login" in detail and "SENTINEL" not in detail
+    assert f"{im.CHECK_ENV}=off" in detail  # the operator's way out when a registry answers 400 for another reason
+    assert im.manifest_status(REF, urlopen=ecr)[0] == im.DENIED  # anonymous: the 401
+    plain400 = lambda req, timeout=None: (_ for _ in ()).throw(  # noqa: E731
+        urllib.error.HTTPError(req.full_url, 400, "x", {}, None))
+    assert im.manifest_status(REF, login, urlopen=plain400)[0] == im.UNKNOWN  # no login was sent: not a refusal
+
+
+def test_a_bearer_realm_that_is_not_https_gets_no_login():
+    import base64
+
+    from yeto.launch import image_manifest as im
+
+    seen = []
+    opener, _ = _registry({"token": 200})
+
+    def plain_realm(req, timeout=None):
+        seen.append((req.full_url, req.headers.get("Authorization")))
+        if "/token?" in req.full_url:
+            return _Resp(200, b'{"token": "t0k"}')
+        if req.headers.get("Authorization") == "Bearer t0k":
+            return _Resp(200)
+        import urllib.error
+
+        raise urllib.error.HTTPError(req.full_url, 401, "x", {"WWW-Authenticate": (
+            'Bearer realm="http://reg.example/token",service="reg.example",scope="repository:o/r:pull"')}, None)
+
+    login = {"SKYPILOT_DOCKER_USERNAME": "puller", "SKYPILOT_DOCKER_PASSWORD": "pw-SENTINEL",
+             "SKYPILOT_DOCKER_SERVER": "reg.example"}
+    assert im.manifest_status(REF, login, urlopen=plain_realm)[0] == im.PRESENT
+    token_requests = [auth for url, auth in seen if "/token?" in url]
+    assert token_requests == [None]  # asked anonymously: the login never goes over http
+    assert base64.b64encode(b"puller:pw-SENTINEL").decode() not in repr(seen)
+
+
+def test_redirects_stop_at_the_hop_limit():
+    from yeto.launch import image_manifest as im
+
+    assert im.MAX_REDIRECTS == 5
+    chain = {MANIFEST_URL: "https://reg.example/h1"}
+    chain.update({f"https://reg.example/h{i}": f"https://reg.example/h{i + 1}" for i in range(1, 5)})
+    five, seen = _redirecting(chain)  # 5 redirects, the 6th request answers 200
+    with im._open(MANIFEST_URL, method="HEAD", headers={}, timeout=1, urlopen=five):
+        pass
+    assert len(seen) == 6
+    chain["https://reg.example/h5"] = "https://reg.example/h6"
+    six, seen = _redirecting(chain)  # one more: given up after the limit, not followed on
+    with pytest.raises(__import__("urllib.error").error.URLError, match="more than 5 redirects"):
+        im._open(MANIFEST_URL, method="HEAD", headers={}, timeout=1, urlopen=six)
+    assert len(seen) == 6
+
+
 def test_the_default_opener_does_not_follow_redirects_itself():
     # urllib's own redirect handler would copy the Authorization header to the new host: the module's
     # opener turns a redirect into an HTTPError for image_manifest._open to decide
