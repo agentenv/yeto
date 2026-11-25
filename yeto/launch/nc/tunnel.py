@@ -181,9 +181,8 @@ def handshake_request(endpoint: Endpoint, target: str, key: str) -> tuple[str, i
     host = url.hostname or ""
     port = url.port or (443 if url.scheme == "https" else 80)
     extra = "" if not endpoint.authorization else f"Authorization: Bearer {endpoint.authorization}\r\n"
-    cookie = f"Cookie: {endpoint.cookie}\r\n" if endpoint.cookie else ""
     req = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-           f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n{cookie}{extra}\r\n")
+           f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nCookie: {endpoint.cookie}\r\n{extra}\r\n")
     return host, port, req.encode()
 
 

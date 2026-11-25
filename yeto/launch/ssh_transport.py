@@ -93,6 +93,11 @@ def mux_options(target: Sequence[str]) -> list[str]:
     """``-o`` options that make ``ssh ... <target>`` reuse one master connection
     (module doc); ``target``: the options and host the call dials (``ProxyJump`` and
     the host), so the user's configuration is read for exactly that route."""
+    if any(str(o).startswith("ProxyCommand=") for o in target):
+        # ControlPath's %C does not hash the ProxyCommand: two relay nodes with one inner
+        # address (two sites' 10.0.0.7) would share a master, and the second would skip its
+        # host key check. A relayed route never shares a connection, the user's config included.
+        return ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
     if os.environ.get(MUX_ENV, "").strip().lower() in ("off", "0", "false", "no"):
         return []
     if user_controls(target):

@@ -87,14 +87,23 @@ def token(env: Mapping[str, str] | None = None) -> str:
             raise tunnel.TunnelError(f"{TOKEN_FILE_ENV}: the relay token file must be owner-only (chmod 600)")
         if not value:
             raise tunnel.TunnelError(f"{TOKEN_FILE_ENV}: the relay token file is empty")
-        return value
+        return _header_safe(value, TOKEN_FILE_ENV)
     value = (env.get(TOKEN_ENV) or "").strip()
     if value:
-        return value
+        return _header_safe(value, TOKEN_ENV)
     if env.get(NO_TOKEN_ENV) == "1":
         return ""
     raise tunnel.TunnelError(f"a site relay needs a bearer token: set {TOKEN_FILE_ENV} (a 0600 file) or {TOKEN_ENV}, "
                              f"or {NO_TOKEN_ENV}=1 when the relay's gateway authenticates otherwise (VPN, mutual TLS)")
+
+
+def _header_safe(value: str, where: str) -> str:
+    """A token that fits one HTTP header line: printable ASCII, no blanks (a CR / LF would
+    end the header and inject others)."""
+    if not all(33 <= ord(c) <= 126 for c in value):
+        raise tunnel.TunnelError(f"{where}: the relay token must be one word of printable ASCII "
+                                 "(no blanks, CR, LF or other control characters)")
+    return value
 
 
 def endpoint(url: str, env: Mapping[str, str] | None = None) -> tunnel.Endpoint:

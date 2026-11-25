@@ -8,7 +8,7 @@
   "-o",
   "ConnectTimeout=20",
   "ops@192.0.2.1",
-  "set -u; mkdir -p /srv/yeto/run0/sampler /srv/yeto/run0/logs || exit 3; echo YETO_SSH_ARCH $(uname -m); for f in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc /usr/local/Ascend/driver /usr/local/dcmi /usr/local/bin/npu-smi /usr/local/sbin/npu-smi /etc/ascend_install.info /etc/vnpu.cfg; do [ -e $f ] && echo YETO_SSH_HOSTPATH $f; done; echo YETO_SSH_FREE_GIB $(df -Pk /srv/yeto/run0 | awk 'NR==2{printf \"%d\", $4/1048576}'); echo YETO_SSH_CARDS_BEGIN; npu-smi info 2>&1; echo YETO_SSH_CARDS_END rc=$?"
+  "mkdir -p /srv/yeto/run0/logs; if podman inspect --type container yeto-sampler-f09-0 >/dev/null 2>&1; then if [ \"$(podman inspect -f '{{.State.Status}}' yeto-sampler-f09-0 2>/dev/null)\" = running ]; then n0=$(podman logs yeto-sampler-f09-0 2>&1 | grep -c 'reclaimed: waiting up to'); n0=${n0:-0}; echo YETO_SSH_TERM container=yeto-sampler-f09-0; podman kill --signal TERM yeto-sampler-f09-0 >/dev/null 2>&1; for i in $(seq 120); do [ \"$(podman inspect -f '{{.State.Status}}' yeto-sampler-f09-0 2>/dev/null)\" = running ] || break; n=$(podman logs yeto-sampler-f09-0 2>&1 | grep -c 'reclaimed: waiting up to'); [ \"${n:-0}\" -gt \"$n0\" ] && { echo YETO_SSH_LEFT after=$i; break; }; sleep 1; done; fi; podman stop -t 10 yeto-sampler-f09-0 >/dev/null 2>&1; echo YETO_SSH_EXIT $(podman inspect -f '{{.State.ExitCode}}' yeto-sampler-f09-0 2>/dev/null); podman logs yeto-sampler-f09-0 > /srv/yeto/run0/logs/yeto-sampler-f09-0.last.log 2>&1; podman rm -f yeto-sampler-f09-0 >/dev/null 2>&1; fi; echo stopped"
  ],
  [
   "ssh",
@@ -19,7 +19,7 @@
   "-o",
   "ConnectTimeout=20",
   "ops@192.0.2.1",
-  "mkdir -p /srv/yeto/run0/logs; if podman inspect --type container yeto-sampler-f09-0 >/dev/null 2>&1; then if [ \"$(podman inspect -f '{{.State.Status}}' yeto-sampler-f09-0 2>/dev/null)\" = running ]; then n0=$(podman logs yeto-sampler-f09-0 2>&1 | grep -c 'reclaimed: waiting up to'); n0=${n0:-0}; echo YETO_SSH_TERM container=yeto-sampler-f09-0; podman kill --signal TERM yeto-sampler-f09-0 >/dev/null 2>&1; for i in $(seq 120); do [ \"$(podman inspect -f '{{.State.Status}}' yeto-sampler-f09-0 2>/dev/null)\" = running ] || break; n=$(podman logs yeto-sampler-f09-0 2>&1 | grep -c 'reclaimed: waiting up to'); [ \"${n:-0}\" -gt \"$n0\" ] && { echo YETO_SSH_LEFT after=$i; break; }; sleep 1; done; fi; podman stop -t 10 yeto-sampler-f09-0 >/dev/null 2>&1; echo YETO_SSH_EXIT $(podman inspect -f '{{.State.ExitCode}}' yeto-sampler-f09-0 2>/dev/null); podman logs yeto-sampler-f09-0 > /srv/yeto/run0/logs/yeto-sampler-f09-0.last.log 2>&1; podman rm -f yeto-sampler-f09-0 >/dev/null 2>&1; fi; echo stopped"
+  "set -u; mkdir -p /srv/yeto/run0/sampler /srv/yeto/run0/logs || exit 3; echo YETO_SSH_ARCH $(uname -m); for f in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc /usr/local/Ascend/driver /usr/local/dcmi /usr/local/bin/npu-smi /usr/local/sbin/npu-smi /etc/ascend_install.info /etc/vnpu.cfg; do [ -e $f ] && echo YETO_SSH_HOSTPATH $f; done; echo YETO_SSH_FREE_GIB $(df -Pk /srv/yeto/run0 | awk 'NR==2{printf \"%d\", $4/1048576}'); echo YETO_SSH_CARDS_BEGIN; npu-smi info 2>&1; echo YETO_SSH_CARDS_END rc=$?"
  ],
  [
   "ssh",

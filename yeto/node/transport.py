@@ -251,6 +251,17 @@ class ReachError(ValueError):
     ``nc:<account>`` nor a relay URL, an ``outbound`` / ``function`` node)."""
 
 
+def nc_relay_identity_options() -> list[str]:
+    """What a node behind an NC workspace relay is dialled with besides the relay: the host
+    keys yeto pinned for NC nodes (``<nc state>/known_hosts``, after the user's own file) and
+    yeto's NC key as one more identity, as an NC lease's alias is (``node_pool.ssh_host_block``)."""
+    from yeto.launch.nc.node_pool import key_path  # noqa: PLC0415
+    from yeto.launch.nc.tunnel import state_dir  # noqa: PLC0415
+
+    return ["-o", f"UserKnownHostsFile=~/.ssh/known_hosts {state_dir() / 'known_hosts'}",
+            "-o", f"IdentityFile={key_path()}"]
+
+
 def relay_proxy_command(via: str) -> str:
     """The ``ProxyCommand`` that dials ``%h:%p`` through the relay ``via``.
 
@@ -304,7 +315,8 @@ def reach_options(reach: Any) -> list[str]:
         return ["-o", f"ProxyJump={via}"]
     if mode == "relay":
         # the relay host must not stand in for the node: its key is pinned (known_hosts), never learned here
-        return ["-o", "StrictHostKeyChecking=yes", "-o", f"ProxyCommand={relay_proxy_command(via)}"]
+        extra = nc_relay_identity_options() if str(via or "").strip().startswith("nc:") else []
+        return ["-o", "StrictHostKeyChecking=yes", *extra, "-o", f"ProxyCommand={relay_proxy_command(via)}"]
     raise ReachError(f"reach {mode!r}: the control host cannot open an ssh connection to such a node "
                      "(outbound: it only dials the store; function: the platform's calls)")
 

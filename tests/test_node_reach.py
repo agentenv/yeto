@@ -69,14 +69,21 @@ def test_a_national_compute_relay_is_the_lease_alias_proxy_command(tmp_path, mon
     ``ProxyCommand`` line of ``node_pool.ssh_host_block`` (that block is unchanged)."""
     monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path))
     opts = transport.reach_options(Reach("relay", "nc:4"))
-    assert opts == [*STRICT, "-o", f"ProxyCommand={node_pool.proxy_command(4)}"]
+    # the lease alias' pinned host keys (after the user's own) and yeto's NC key, as the alias has them
+    assert opts == [*STRICT, "-o", f"UserKnownHostsFile=~/.ssh/known_hosts {tmp_path / 'known_hosts'}",
+                    "-o", f"IdentityFile={node_pool.key_path()}",
+                    "-o", f"ProxyCommand={node_pool.proxy_command(4)}"]
+    alias = node_pool.ssh_host_block(NodeLease(account=4, ticket="t0", ip="10.1.2.3", user="u", host_key="",
+                                               granted_at=None, lease_until=None, gpus=None,
+                                               rate_ucr_per_gpu_hour=None)).splitlines()
+    assert f"  UserKnownHostsFile {tmp_path / 'known_hosts'}" in alias and f"  IdentityFile {node_pool.key_path()}" in alias
     lease = NodeLease(account=4, ticket="t1", ip="10.1.2.3", user="ubuntu", host_key="", granted_at=None,
                       lease_until=None, gpus=None, rate_ucr_per_gpu_hour=None)
     block = node_pool.ssh_host_block(lease)
     assert f"  ProxyCommand {node_pool.proxy_command(4)}" in block.splitlines()
     assert _option(opts, "ProxyCommand").endswith(f"-m yeto.launch.nc proxy --account 4 --relay-port "
                                                   f"{tunnel.RELAY_PORT} %h %p")
-    port = transport.reach_options(Reach("relay", "nc:4:8799"))[3]
+    port = transport.reach_options(Reach("relay", "nc:4:8799"))[-1]
     assert port == f"ProxyCommand={node_pool.proxy_command(4, 8799)}"
 
 
@@ -262,7 +269,7 @@ def test_inventory_reach_is_read_and_a_node_ssh_cannot_reach_is_refused(tmp_path
     assert profiles["old-jump"].reach == Reach("jump", "ops@bastion")
     for bad in ({"reach": {"mode": "outbound"}}, {"reach": {"mode": "relay", "via": "nowhere"}}):
         path = _inventory(tmp_path, edge=bad)
-        with pytest.raises(ValueError, match="node edge"):
+        with pytest.raises(ValueError, match="edge"):
             sp.parse_config({"provider": {"kind": "ssh", "inventory": str(path), "nodes": ["edge"],
                                           "workdir": "/srv/yeto/r", "runtime": "venv",
                                           "venv": {"python": "/v/bin/python"}}})
@@ -295,7 +302,37 @@ def test_the_handshake_carries_the_token_and_the_nc_one_is_unchanged():
                   b"Connection: Upgrade\r\nSec-WebSocket-Key: KEY\r\nSec-WebSocket-Version: 13\r\n"
                   b"Cookie: gardengate_port=c\r\n\r\n")
     _h, _p, site = tunnel.handshake_request(relay_proxy.endpoint("wss://r.example/y"), "10.0.0.7:22", "KEY")
-    assert b"\r\nAuthorization: Bearer t0ken\r\n\r\n" in site and b"Cookie" not in site
+    assert site.endswith(b"\r\nCookie: \r\nAuthorization: Bearer t0ken\r\n\r\n")
+
+
+@pytest.mark.parametrize("bad", ["a\r\nX-Injected: 1", "a b", "a\tb", "tok\u00e9n"])
+def test_a_token_that_does_not_fit_one_header_line_is_refused(tmp_path, monkeypatch, bad):
+    monkeypatch.setenv(relay_proxy.TOKEN_ENV, bad)
+    with pytest.raises(tunnel.TunnelError, match="printable ASCII"):
+        relay_proxy.token()
+    monkeypatch.delenv(relay_proxy.TOKEN_ENV)
+    file = tmp_path / "t"
+    file.write_text(bad)
+    file.chmod(0o600)
+    monkeypatch.setenv(relay_proxy.TOKEN_FILE_ENV, str(file))
+    with pytest.raises(tunnel.TunnelError, match="printable ASCII"):
+        relay_proxy.token()
+
+
+def test_a_relayed_route_never_shares_a_master_connection(monkeypatch):
+    """ControlPath's %C does not hash the ProxyCommand: two relay nodes of one inner address
+    would share a master and skip the second host key check. A relayed route opens its own
+    connection, whatever the user's ssh config says; other routes keep their reuse."""
+    monkeypatch.delenv(sp.ssh_transport.MUX_ENV, raising=False)
+    monkeypatch.setattr(sp.ssh_transport, "user_controls", lambda target: False)
+    a = [*transport.reach_options(Reach("relay", "wss://a.example")), "ops@10.0.0.7"]
+    b = [*transport.reach_options(Reach("relay", "wss://b.example")), "ops@10.0.0.7"]
+    for route in (a, b):
+        assert sp.ssh_transport.mux_options(route) == ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
+    jump = sp.ssh_transport.mux_options(["-o", "ProxyJump=ops@bastion", "ops@10.0.0.7"])
+    assert "ControlMaster=auto" in jump and any(o.startswith("ControlPath=") and o != "ControlPath=none" for o in jump)
+    monkeypatch.setattr(sp.ssh_transport, "user_controls", lambda target: True)  # the user's own ControlMaster
+    assert sp.ssh_transport.mux_options(a) == ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
 
 
 def test_relay_proxy_pipes_ssh_bytes_through_a_relay(monkeypatch):
