@@ -1077,8 +1077,22 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 if name not in clusters:
                     clusters.append(name)
         if errors:
+            from .launch.image_pull import image_error_message, pull_failure
+
+            refused = None
             for name, e in errors.items():
                 print(f"[launcher] ERROR launching {name}: {e}", file=sys.stderr)
+                found = pull_failure(e)
+                if found is not None and refused is None:
+                    refused = image_error_message(name, found)
+            if refused is not None:
+                # the image cannot be pulled (the image, or the login this launch just read):
+                # every relaunch would order a machine and fail the same way
+                # (yeto.launch.image_pull); the finally block tears down
+                from .config_errors import ConfigError, config_error_line
+
+                print(config_error_line(ConfigError(refused)), file=sys.stderr, flush=True)
+                return CONFIG_ERROR_EXIT
             raise RuntimeError(f"{len(errors)} learner cluster(s) failed to provision")
 
         # 3. Stream logs while the fleet controller polls health, recovers

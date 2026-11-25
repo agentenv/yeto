@@ -113,6 +113,26 @@ SYNCER_REFUSAL_MARKERS = ("backend identity mismatch, JOIN refused",
                           "session mismatch (HELLO refused")
 
 
+def _refresh_registry_login(task) -> bool:
+    """Put the registry login read now (``image_pull.fresh_registry_login``) into ``task``'s
+    secrets when it differs from the one the task carries (compared by fingerprint, never
+    shown); True then (the next provision's ``docker login`` uses it), False when none was
+    found or it is the same login."""
+    from .image_pull import fresh_registry_login, login_fingerprint
+
+    secrets = getattr(task, "secrets", None) or {}
+    if not isinstance(secrets, dict):
+        return False
+    current = {k: getattr(v, "get_secret_value", lambda v=v: v)() for k, v in secrets.items()}
+    login = fresh_registry_login(current.get("SKYPILOT_DOCKER_SERVER"))
+    if login is None or not callable(getattr(task, "update_secrets", None)):
+        return False
+    if login_fingerprint(login) == login_fingerprint(current):
+        return False
+    task.update_secrets(login)
+    return True
+
+
 class SkySDKOps:
     """Thin adapter over the sky SDK: the only surface FleetController needs.
 
@@ -202,13 +222,33 @@ class SkySDKOps:
         """
         import sky
 
-        try:
-            job_id, _handle = sky.get(sky.launch(task, cluster_name=cluster))
-            maybe_install_nebius_reclaim_hook(task, (job_id, _handle), cluster)
-            return job_id
-        except Exception as e:
-            print(f"[launcher] relaunch of {cluster} failed: {e}", file=sys.stderr)
-            return None
+        from .image_pull import CREDENTIAL, ImagePullRefused, image_error_message, pull_failure
+
+        for attempt in (1, 2):
+            try:
+                job_id, _handle = sky.get(sky.launch(task, cluster_name=cluster))
+                maybe_install_nebius_reclaim_hook(task, (job_id, _handle), cluster)
+                return job_id
+            except Exception as e:
+                print(f"[launcher] relaunch of {cluster} failed: {e}", file=sys.stderr)
+                found = pull_failure(e)
+                if found is None:
+                    return None
+                note = ""
+                if found.kind == CREDENTIAL and attempt == 1:
+                    # the login this launch read at its start may have expired since (an ECR
+                    # password lasts 12 hours): read it again; tried once more only with a
+                    # login that differs from the refused one (the same one fails the same way)
+                    if _refresh_registry_login(task):
+                        print(f"[launcher] relaunch of {cluster}: the registry refused the login ({found.line}); "
+                              "a different login was read now, trying once more", file=sys.stderr)
+                        continue
+                    note = ("registry credentials refused, the login is unchanged (or none was found: "
+                            "the SKYPILOT_DOCKER_* variables of this launch, else ~/.docker/config.json), "
+                            "not retried")
+                # the image (or the login) cannot be pulled anywhere: not retried
+                raise ImagePullRefused(image_error_message(cluster, found, note=note)) from e
+        return None
 
     def __init__(self, nodes_by_cluster=None):
         # The controller's failure-path teardown (job FAILED ->

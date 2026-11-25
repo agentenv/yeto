@@ -12,6 +12,7 @@ from ..config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER  # noqa: F401
 from ..config_errors import DETERMINISTIC_STOP_ENV
 from . import island_lifecycle as lifecycle
 from .syncer import island_pool
+from .image_pull import ImagePullRefused
 from .sky_ops import SYNCER_REFUSAL_MARKERS
 
 
@@ -98,6 +99,7 @@ class _RelaunchAttempt:
         self.thread = None
         self.blocked = None  # reason the relaunch was refused (instance alive)
         self.name = None  # cluster name the relaunch used (may be a new one)
+        self.config_error = None  # the relaunch's image cannot be pulled (image_pull.ImagePullRefused)
 
 
 # Fixed-roster RL islands: consecutive relaunches allowed within one recovery
@@ -849,16 +851,8 @@ class FleetController:
             else:
                 config_error = None if is_syncer else self._config_error(rec)
                 if config_error is not None:
-                    rec["decision"] = lifecycle.decision(lifecycle.CONFIG_ERROR, config_error.strip())
-                    # the island refused its launch options: a relaunch fails the same way
-                    self._fleet("island_lost", rec["name"], reason=f"configuration error: {config_error}"[:500])
-                    if self.elastic:
-                        print(f"[launcher] {rec['name']}: configuration error, not relaunched; the "
-                              f"elastic pool goes on without it: {config_error}", file=sys.stderr)
-                        self._abandon(rec, 0.0, reason="configuration error (elastic: island dropped)")
-                        return
-                    raise IslandConfigError(f"island {rec['name']} refused its configuration "
-                                            f"(not relaunched): {config_error}")
+                    self._refused_configuration(rec, config_error)
+                    return
                 retry = None if is_syncer or not self.deterministic_stop else self._new_machine_retry(rec)
                 if retry is not None:
                     # a stop a faulty card may cause (trainer.nan): one relaunch, on a new machine
@@ -1072,6 +1066,20 @@ class FleetController:
             return bool(probe(name, job_id))
         except Exception:
             return False
+
+    def _refused_configuration(self, rec, config_error: str) -> None:
+        """Island ``rec`` failed on its configuration (its own refusal of the launch options,
+        or an image no machine can pull): a relaunch fails the same way. An elastic pool
+        goes on without it; otherwise the run ends (:class:`IslandConfigError`)."""
+        rec["decision"] = lifecycle.decision(lifecycle.CONFIG_ERROR, config_error.strip())
+        self._fleet("island_lost", rec["name"], reason=f"configuration error: {config_error}"[:500])
+        if self.elastic:
+            print(f"[launcher] {rec['name']}: configuration error, not relaunched; the "
+                  f"elastic pool goes on without it: {config_error}", file=sys.stderr)
+            self._abandon(rec, 0.0, reason="configuration error (elastic: island dropped)")
+            return
+        raise IslandConfigError(f"island {rec['name']} refused its configuration "
+                                f"(not relaunched): {config_error}")
 
     def _config_error(self, rec) -> str | None:
         """The island's ``[yeto-config-error]`` log line (its own refusal of the launch
@@ -1292,6 +1300,9 @@ class FleetController:
         attempt = rec["attempt"]
         if attempt is not None and attempt.finished:
             rec["attempt"] = None
+            if attempt.config_error is not None and not is_syncer:
+                self._refused_configuration(rec, attempt.config_error)
+                return
             if attempt.blocked is not None and not is_syncer:
                 print(
                     f"[launcher] {rec['name']}: NOT relaunching — {attempt.blocked}",
@@ -1454,6 +1465,9 @@ class FleetController:
                     attempt.result = self.ops.relaunch(task, target)
                 except RelaunchBlocked as blocked:
                     attempt.blocked, attempt.result = str(blocked), None
+                    return
+                except ImagePullRefused as refused:
+                    attempt.config_error, attempt.result = str(refused), None
                     return
                 if attempt.result is not None and self.instance_guard is not None:
                     after = getattr(self.instance_guard, "after_relaunch", None)
