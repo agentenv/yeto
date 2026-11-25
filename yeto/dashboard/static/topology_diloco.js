@@ -112,7 +112,7 @@ function poolCard(p){var ss=(T.samplers||[]).filter(function(s){return p.sampler
   var vs=lv.map(function(s){return s.policy_version}).filter(fin),lg=lv.map(function(s){return s.lag}).filter(fin);
   var st=lv.some(function(s){return s.state==="sampling"})?"sampling":lv.length?(lv[0].state||"starting"):null;
   return{id:p.name,pool:p,ids:p.samplers,source:p.source||null,card:p.card||f0.card||null,precision:p.precision||f0.precision||null,engine:p.engine||f0.engine||null,arch:p.arch||f0.arch||null,
-    gpus:f0.gpus||p.gpus||null,live:lv.length>0,state:st,status:p.removed?"removed":p.stopped&&!lv.length?"stopped":ss.length?(f0.status||"ended"):"not started",policy_version:vs.length?Math.max.apply(null,vs):null,
+    gpus:f0.gpus||p.gpus||null,live:lv.length>0,state:st,status:p.removed?"removed":!lv.length&&p.released?"released":p.stopped&&!lv.length?"stopped":!lv.length&&p.machines?p.machines:ss.length?(f0.status||"ended"):"not started",policy_version:vs.length?Math.max.apply(null,vs):null,
     lag:lg.length?Math.max.apply(null,lg):null,rate_gpm:ss.reduce(function(a,x){return a+(x.rate_gpm||0)},0),n:p.samplers.length,nlive:lv.length}}
 // the sampler (or pool) a card shows, from the newest view (a card is built once per layout)
 function fresh(s){if(s.pool){var p=fpool(s.id);return p?poolCard(p):s}return (T.samplers||[]).filter(function(x){return x.id===s.id})[0]||s}
@@ -349,7 +349,7 @@ function active(kk,iid,sh,td){return T.live&&D.flows.some(function(f){return f.k
 function paint(){
   var tn=now(),td=tn-DELAY_S,red=U.reduced();
   D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.status==="stopped"||tr.finalized||D.done)&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state));  // a finished run: no trainer is lost
-    tc.step.textContent=(fin(tr.step)?"step "+tr.step:"step —")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?"outer v"+tr.outer:"";
+    tc.step.textContent=(fin(tr.step)?"step "+tr.step:fleet()?"not trained yet":"step —")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?"outer v"+tr.outer:"";
     fitText(tc.ph,st[0],tc.phw);tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
     tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
     [tc.co?o.merged:tc.box].forEach(function(b){if(b){b.style.stroke=dead||tr.failure?C.bad:"";b.style.strokeDasharray=dead?"5 4":""}});
@@ -464,7 +464,7 @@ function matrix(tn){
   h+="</tr>";
   var finalOnSyncer=false;
   if(sft())h+=learnerRows(tn);else D.trainers.forEach(function(tr){var off=!tr.live&&!(tr.status==="done"||tr.finalized);
-    h+='<tr><th class="rh">Trainer '+esc(tr.id)+'<span class="ns">'+esc((tr.gpu||"")+" · step "+(fin(tr.step)?tr.step:"—")+(tr.island_now?" · "+tr.island_now.state:off?" · "+(tr.status||"lost"):tr.failure?" · failed":""))+"</span></th>";
+    h+='<tr><th class="rh">Trainer '+esc(tr.id)+'<span class="ns">'+esc((tr.gpu||"")+(fin(tr.step)?" · step "+tr.step:fleet()?" · not trained yet":" · step —")+(tr.island_now?" · "+tr.island_now.state:off?" · "+(tr.status||"lost"):tr.failure?" · failed":""))+"</span></th>";
     for(var f=0;f<P;f++){var v=tr.versions?tr.versions[f]:null,lg=D.done?0:lag(tr,f),s=tr.since?tr.since[f]:null,pushed=(tr.pushed||{})[String(f)]!=null;
       var cls=off||tr.failure?"off":lg>=2?"lag2":lg===1?"lag1":"",ready=fin(s)&&H&&s>=H;
       var mk=pushed?'<span class="mk dl">↑</span>':lg&&tr.live?'<span class="mk wt">↓'+lg+"</span>":"";
@@ -620,7 +620,7 @@ function kpis(view,kp){
       out.push(["Groups trained / rolled out",gt+" / "+(nr?"—":gr),nr?"in-island rollout does not report its groups (full parameter): every trained group came from it · "+trs.map(function(x){return "island "+x.id+" trained "+(x.trained_groups||0)}).join(" · "):
         trs.map(function(x){return "island "+x.id+" "+(x.trained_groups||0)+"/"+(x.island?x.island.groups_total:0)}).join(" · ")+" · in-island rollout, whole run"])}else out.push(c)}
     else if(k==="Policy version / releases"){var steps=trs.map(function(x){return fin(x.step)?x.step:"—"}).join(" · "),outs={};trs.forEach(function(x){if(fin(x.outer))outs[x.outer]=1});
-      out.push(["Syncer step / local steps",d.shards.map(function(s){return s.step}).join("+")+" / "+steps,"outer "+(Object.keys(outs).length?"v"+Object.keys(outs).join(", v"):"—")+" · "+trs.map(function(x){return "trainer "+x.id+" local "+(fin(x.step)?x.step:"—")}).join(" · ")+" (local steps are per island, not comparable)"])}
+      out.push(["Syncer step / local steps",d.shards.map(function(s){return s.step}).join("+")+" / "+steps,"outer "+(Object.keys(outs).length?"v"+Object.keys(outs).join(", v"):"—")+" · "+trs.map(function(x){return "trainer "+x.id+(fin(x.step)?" local "+x.step:d.kind==="synced_group"&&d.follow&&d.fleet?" not trained yet":" local —")}).join(" · ")+" (local steps are per island, not comparable)"])}
     else if(k.indexOf("Rejected")===0){if(isl){var zv=rolls.map(function(x){return x.island.zero_var_recent}).filter(fin),tr=trs.map(function(x){return x.truncated}).filter(fin);
       out.push(["In-island rollout: zero-var / truncated",pct(zv.length?zv.reduce(function(a,b){return a+b},0)/zv.length:null)+" / "+(tr.length?pct(Math.max.apply(null,tr)):"—"),
         rolls.map(function(x){return "island "+x.id+" zero-var "+pct(x.island.zero_var_recent)}).join(" · ")+" (median of the last rounds)"+(tr.length?"":" · truncation not reported by the trainers")])}else out.push(c)}
