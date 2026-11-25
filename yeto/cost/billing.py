@@ -24,6 +24,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from . import prices
 from .ledger import Resource
 
 log = logging.getLogger(__name__)
@@ -34,20 +35,16 @@ NC_USD_PER_UCR_ENV = "YETO_NC_USD_PER_UCR"
 NC_USD_PER_GPU_HOUR_ENV = "YETO_NC_USD_PER_GPU_HOUR"
 NC_UCR_PER_GPU_HOUR_ENV = "YETO_NC_UCR_PER_GPU_HOUR"
 # National Compute defaults: 1 credit (1e6 ucr) ~ 1 USD, and the 8-GPU MI355X node at
-# 3e6 ucr per GPU-hour (24e6 ucr/h, ~24 USD/h); the env above overrides either
-DEFAULT_NC_USD_PER_UCR = 1e-6
-DEFAULT_NC_UCR_PER_GPU_HOUR = 3_000_000
+# 3e6 ucr per GPU-hour (24e6 ucr/h, ~24 USD/h); the env above overrides either. Both
+# come from the unified price table (yeto.cost.prices, row nc:MI355X).
+DEFAULT_NC_USD_PER_UCR = prices.nc_usd_per_ucr()
+DEFAULT_NC_UCR_PER_GPU_HOUR = prices.nc_ucr_per_gpu_h()
 # Modal price per GPU-hour, used when neither the ledger nor a price table gives a
-# rate. Keys are lower-case Modal gpu names. Source: https://modal.com/pricing,
-# per-second list prices x 3600, checked 2026-11-23 (base region-agnostic rate;
-# Modal bills 1.15-1.75x when a region is pinned). B300 lists at 0.001972 USD/s
-# (7.10 USD/h); it stays at the earlier 8.5 so a region-pinned 2x8 B300 trainer
-# (~136 USD/h) does not overrun its budget before the billing report catches up.
-MODAL_PRICES_SOURCE = "https://modal.com/pricing (checked 2026-11-23)"
-DEFAULT_MODAL_USD_PER_GPU_HOUR = {"b300": 8.5, "b200": 6.25, "h200": 4.54, "h100": 3.95,
-                                  "rtx-pro-6000": 3.03, "a100-80gb": 2.5, "a100": 2.1,
-                                  "a100-40gb": 2.1, "l40s": 1.95, "a10": 1.10, "a10g": 1.10,
-                                  "l4": 0.80, "t4": 0.59}
+# rate. Keys are lower-case Modal gpu names. From the unified price table (its Modal
+# rows: modal.com/pricing per-second list prices x 3600, each row with its date; base
+# region-agnostic rate; Modal bills 1.15-1.75x when a region is pinned).
+MODAL_PRICES_SOURCE = prices.sources("modal")
+DEFAULT_MODAL_USD_PER_GPU_HOUR = prices.per_gpu_usd_h("modal")
 
 
 def default_modal_rate(gpu: Any, gpus: Any) -> float | None:
@@ -420,7 +417,12 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
         elif r.kind == "sky_cluster":
             rate = r.attrs.get("usd_per_hour")
             rate = float(rate) if rate is not None else rates.table_rate(r.attrs.get("cloud") or "", r.attrs)
-            items.append(_span_cost(r, r.created_at, now, rate))
+            note = ""
+            if rate is None and r.attrs.get("cloud") and r.attrs.get("gpu"):
+                rate = prices.node_usd_h(str(r.attrs["cloud"]), r.attrs["gpu"], r.attrs.get("gpus"),
+                                         spot=r.attrs.get("use_spot"), region=r.attrs.get("region"))
+                note = "" if rate is None else "unified price table (list price)"
+            items.append(_span_cost(r, r.created_at, now, rate, note))
         else:  # modal_call: its cost is in its app; listed for liveness / utilization
             end = r.released_at if r.released_at is not None else now
             items.append(ItemCost(r.key, r.kind, r.name, r.created_at, end, r.open, billed_usd=0.0,

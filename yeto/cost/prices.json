@@ -1,0 +1,51 @@
+{
+  "_doc": "The one machine price table of yeto (yeto.cost.prices). Every row has a grade: billing (a price list a bill follows: billing, budget gates, breakers and offer pricing use it) or illustrative (an example value for estimates only: the dashboard shows it marked as an estimate; to everything that gates money it is no price). Every row: one node of `gpus` GPUs of `gpu` at `provider`, its whole-node price `usd_h` (USD per hour), where it came from (`source`) and when it was read (`as_of`). `spot` (true / false) and `region` narrow a row; a row without them matches any. A node of n GPUs is priced n / gpus x usd_h. `native` keeps a provider's own unit next to the USD price (National Compute bills in ucr). Billing, the run and pool budgets, the dashboard and the dry-runs read this table; a run config or a price file still overrides it.",
+  "rows": [
+    {"provider": "modal", "gpu": "B300", "gpus": 1, "grade": "billing", "usd_h": 8.5, "source": "https://modal.com/pricing", "as_of": "2026-11-23",
+     "note": "lists at 0.001972 USD/s (7.10 USD/h); kept at 8.5 so a region-pinned 2x8 B300 trainer (~136 USD/h) does not overrun its budget before the billing report catches up"},
+    {"provider": "modal", "gpu": "B200", "gpus": 1, "grade": "billing", "usd_h": 6.25, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "H200", "gpus": 1, "grade": "billing", "usd_h": 4.54, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "H100", "gpus": 1, "grade": "billing", "usd_h": 3.95, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "RTX-PRO-6000", "gpus": 1, "grade": "billing", "usd_h": 3.03, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "A100-80GB", "gpus": 1, "grade": "billing", "usd_h": 2.5, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "A100", "gpus": 1, "grade": "billing", "usd_h": 2.1, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "A100-40GB", "gpus": 1, "grade": "billing", "usd_h": 2.1, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "L40S", "gpus": 1, "grade": "billing", "usd_h": 1.95, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "A10", "gpus": 1, "grade": "billing", "usd_h": 1.1, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "A10G", "gpus": 1, "grade": "billing", "usd_h": 1.1, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "L4", "gpus": 1, "grade": "billing", "usd_h": 0.8, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+    {"provider": "modal", "gpu": "T4", "gpus": 1, "grade": "billing", "usd_h": 0.59, "source": "https://modal.com/pricing", "as_of": "2026-11-23"},
+
+    {"provider": "nebius", "gpu": "H100", "gpus": 8, "region": "eu-north1", "spot": false, "grade": "billing", "usd_h": 36.0,
+     "source": "sky gpus list H100:8 --infra nebius --all-regions", "as_of": "2026-11-02"},
+    {"provider": "nebius", "gpu": "H100", "gpus": 8, "region": "eu-north1", "spot": true, "grade": "billing", "usd_h": 6.32,
+     "source": "sky gpus list H100:8 --infra nebius --all-regions", "as_of": "2026-11-02"},
+    {"provider": "nebius", "gpu": "H200", "gpus": 8, "region": "eu-west1", "spot": false, "grade": "billing", "usd_h": 43.2,
+     "source": "sky gpus list H200:8 --infra nebius --all-regions", "as_of": "2026-11-02"},
+    {"provider": "nebius", "gpu": "H200", "gpus": 8, "region": "eu-west1", "spot": true, "grade": "billing", "usd_h": 11.2,
+     "source": "sky gpus list H200:8 --infra nebius --all-regions", "as_of": "2026-11-02"},
+    {"provider": "nebius", "gpu": "H200", "gpus": 8, "region": "eu-north1", "spot": false, "grade": "billing", "usd_h": 43.2,
+     "source": "sky gpus list H200:8 --infra nebius --all-regions", "as_of": "2026-11-02"},
+    {"provider": "nebius", "gpu": "H200", "gpus": 8, "region": "eu-north1", "spot": true, "grade": "billing", "usd_h": 16.0,
+     "source": "sky gpus list H200:8 --infra nebius --all-regions", "as_of": "2026-11-02"},
+    {"provider": "nebius", "gpu": "H200", "gpus": 8, "region": "us-central1", "spot": false, "grade": "billing", "usd_h": 43.2,
+     "source": "sky gpus list H200:8 --infra nebius --all-regions", "as_of": "2026-11-02"},
+    {"provider": "nebius", "gpu": "H200", "gpus": 8, "region": "us-central1", "spot": true, "grade": "billing", "usd_h": 39.92,
+     "source": "sky gpus list H200:8 --infra nebius --all-regions", "as_of": "2026-11-02"},
+    {"provider": "nebius", "gpu": "H100", "gpus": 1, "grade": "illustrative", "usd_h": 2.95, "source": "dashboard example price table (illustrative, not billing data)", "as_of": "2026-10-06"},
+    {"provider": "nebius", "gpu": "H200", "gpus": 1, "grade": "illustrative", "usd_h": 3.5, "source": "dashboard example price table (illustrative, not billing data)", "as_of": "2026-10-06"},
+    {"provider": "aws", "gpu": "H100", "gpus": 1, "grade": "illustrative", "usd_h": 6.88, "source": "dashboard example price table (illustrative, not billing data)", "as_of": "2026-10-06"},
+    {"provider": "verda", "gpu": "H100", "gpus": 1, "grade": "illustrative", "usd_h": 2.29, "source": "dashboard example price table (illustrative, not billing data)", "as_of": "2026-10-06"},
+    {"provider": "verda", "gpu": "H200", "gpus": 1, "grade": "illustrative", "usd_h": 2.99, "source": "dashboard example price table (illustrative, not billing data)", "as_of": "2026-10-06"},
+    {"provider": "*", "gpu": "A100", "gpus": 1, "grade": "illustrative", "usd_h": 1.79, "source": "dashboard example price table (illustrative, not billing data)", "as_of": "2026-10-06"},
+
+    {"provider": "nc", "gpu": "MI355X", "gpus": 8, "grade": "billing", "usd_h": 24.0,
+     "native": {"unit": "ucr", "per_gpu_h": 3000000, "usd_per_unit": 1e-6},
+     "source": "National Compute rate: 3e6 ucr per GPU-hour, 1 credit (1e6 ucr) ~ 1 USD (K3.1 run quote)", "as_of": "2026-11-11"}
+  ],
+  "host": {
+    "modal": {"cpu_core_h": 0.04716, "mem_gib_h": 0.007992,
+              "source": "https://modal.com/pricing (0.0000131 USD per core-second, 0.00000222 USD per GiB-second)",
+              "as_of": "2026-09-23"}
+  }
+}

@@ -415,3 +415,16 @@ def test_a_listing_of_sky_status_responses_is_adopted_by_its_run(tmp_path):
     later = ops_for("later")  # its record is empty: the listing is the only way to find the cluster
     assert [name for _, name in later.provider.run_tickets()] == ["spot-r-1"]
     assert later.down("spot-r-1") is True and "spot-r-1" not in sky.clusters
+
+
+def test_a_sky_order_names_the_offer_it_tried_and_never_a_stale_one():
+    sky = FakeSky()
+    two = [{"resources": {"infra": "nebius/eu-north1"}, "price_usd_h": 6.32},
+           {"resources": {"infra": "nebius/eu-west1"}, "price_usd_h": 11.2}]
+    p = SkyProvider("run-k", slots=[1, 2], offers=offers.offers_from_config({"offers": two}), sky=sky)
+    p.order(1)  # submitted: the pool confirms the launch later (status)
+    assert p.last_offer_key == p.offers[0].key
+    p._pick = lambda doc: (_ for _ in ()).throw(RuntimeError("no offer picked"))  # fails before a launch
+    with pytest.raises(RuntimeError):
+        p.order(1)
+    assert p.last_offer_key is None  # not the previous order's offer

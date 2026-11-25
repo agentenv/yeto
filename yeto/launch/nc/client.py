@@ -37,11 +37,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from yeto.cost import prices as _prices
+
 if TYPE_CHECKING:
     from ..pool.status import LeaseStatus
 
 OPEN_STATES = frozenset({"queued", "held", "provisioning", "active", "releasing"})
-MI355X_RATE_UCR_PER_GPU_HOUR = 3_000_000
+# the 8-GPU MI355X rate in ucr per GPU-hour: the unified price table's nc:MI355X row (yeto.cost.prices)
+MI355X_RATE_UCR_PER_GPU_HOUR = _prices.nc_ucr_per_gpu_h()
 LEASE_HOURS = 4.0
 ORDER_IN_FLIGHT_S = 360.0  # an order call (300 s timeout) may still run this long after it was written down
 ORDER_LOOK_TIMEOUT_S = 30.0  # the one status read after an order call that failed (it only reports)
@@ -1042,5 +1045,5 @@ class NcClient:
                           f"halted for this tool until clear-halt --account {self.account} --yes")
         raise NcDeleteUnconfirmed(f"account {self.account}: {reason} ({why}); the account is halted")
 
-def hourly_cost_ucr(gpus: int = 8, rate: int = MI355X_RATE_UCR_PER_GPU_HOUR) -> int:
+def hourly_cost_ucr(gpus: int = _prices.nc_node_gpus(), rate: int = MI355X_RATE_UCR_PER_GPU_HOUR) -> int:
     return gpus * rate

@@ -15,15 +15,23 @@ import json
 import re
 from pathlib import Path
 
-EXAMPLE_PRICES = Path(__file__).with_name("prices.example.json")
 INFERRED_RUNNING_S = 900.0  # an inferred island with an event this recent is still billed
 LOCAL_CLOUDS = ("local", "\u672c\u5730")  # "local" in Chinese, as older tapes wrote it
 
 
 def load_prices(path: str | None) -> dict:
-    p = Path(path) if path else EXAMPLE_PRICES
+    """A price file (``--prices``), else the unified price table (:mod:`yeto.cost.prices`)."""
+    if not path:
+        from yeto.cost import prices  # noqa: PLC0415
+
+        data = prices.dashboard_table()
+        marked = ", ".join(data["estimate_keys"])
+        data["_source"] = (f"unified price table ({prices.TABLE_NAME}, built in: list prices, not billing data; "
+                           f"estimate (illustrative rows): {marked})")
+        return data
+    p = Path(path)
     data = json.loads(p.read_text(encoding="utf-8"))
-    data["_source"] = str(p) if path else "example price table (built in, not billing data)"
+    data["_source"] = str(p)
     return data
 
 
@@ -41,6 +49,19 @@ def price_per_gpu_h(prices: dict, cloud: str | None, gpu: str | None,
         if k in table and table[k] is not None:
             return float(table[k])
     return None
+
+
+def is_estimate(prices: dict, cloud: str | None, gpu: str | None, price_key: str | None = None) -> bool:
+    """The price :func:`price_per_gpu_h` finds is an illustrative row of the unified price
+    table (``estimate_keys``): shown marked as an estimate."""
+    marked = {k.lower() for k in prices.get("estimate_keys") or ()}
+    if not marked or (cloud and cloud.lower() in LOCAL_CLOUDS):
+        return False
+    table = {k.lower(): v for k, v in (prices.get("prices") or {}).items()}
+    keys = ([price_key.lower()] if price_key else []) + ([f"{cloud}:{gpu}".lower(), f"*:{gpu}".lower()]
+                                                         if cloud and gpu else [])
+    hit = next((k for k in keys if table.get(k) is not None), None)
+    return hit in marked
 
 
 def host_unit_prices(prices: dict, cloud: str | None) -> dict | None:
@@ -96,7 +117,8 @@ def island_cost(isl: dict, prices: dict, now: float) -> dict:
             "gpu_only": rt["gpu_only"], "cpus": isl.get("cpus"), "memory_gib": isl.get("memory_gib"),
             "cost_usd": rate * hours if rate is not None and hours is not None else None,
             "running": running, "local": (isl.get("cloud") or "").lower() in LOCAL_CLOUDS,
-            "priced": unit is not None}
+            "priced": unit is not None,
+            "estimate": is_estimate(prices, isl.get("cloud"), isl.get("gpu"), isl.get("price_key"))}
 
 
 def nc_node_rates(pool_events) -> dict[str, float]:
@@ -327,6 +349,8 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
                     unit = price_per_gpu_h(reducer.prices, cloud, card)
                     rate = None if unit is None else unit * gpus
                     source = f"price table {cloud}:{card} x {gpus}{why}"
+                    if is_estimate(reducer.prices, cloud, card):
+                        source += " (estimate: illustrative price, not a price list)"
                 incs = s.get("incarnations") or []
                 hours = _spans_hours((x.get("first_ts"), x.get("last_ts")) for x in incs)
                 isl_rec = reducer.islands.get(sid) or {}

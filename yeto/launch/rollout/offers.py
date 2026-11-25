@@ -21,17 +21,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# Default 8-GPU hourly prices (USD) from `sky gpus list H100:8|H200:8 --infra nebius --all-regions`
-# on 2026-11-02; a ``prices`` file replaces the table. H200 is NOT the same price as H100 (spot H100
-# eu-north1 $6.32, cheapest spot H200 $11.20). A region missing here has no such preset in the sky
-# catalog; Nebius quotas: compute.instance.gpu.h100 only in eu-north1, gpu.h200 in
+from yeto.cost import prices as _prices
+
+# Default 8-GPU hourly prices (USD), (gpu, region) -> (on-demand, spot): the Nebius rows of the
+# unified price table (yeto.cost.prices; read with `sky gpus list H100:8|H200:8 --infra nebius
+# --all-regions`, each row dated); a ``prices`` file replaces the table. H200 is NOT the same price
+# as H100 (spot H100 eu-north1 $6.32, cheapest spot H200 $11.20). A region missing here has no such
+# preset in the sky catalog; Nebius quotas: compute.instance.gpu.h100 only in eu-north1, gpu.h200 in
 # eu-north1/eu-west1/us-central1.
-PRICES_8GPU: dict[tuple[str, str], tuple[float, float]] = {  # (gpu, region) -> (on-demand, spot)
-    ("H100", "eu-north1"): (36.00, 6.32),
-    ("H200", "eu-west1"): (43.20, 11.20),
-    ("H200", "eu-north1"): (43.20, 16.00),
-    ("H200", "us-central1"): (43.20, 39.92),
-}
+PRICES_8GPU: dict[tuple[str, str], tuple[float, float]] = _prices.regional_8gpu("nebius")
 
 
 @dataclass(frozen=True)
@@ -95,10 +93,21 @@ OFFER_KEYS = frozenset({"key", "resources", "price_usd_h"})
 CANDIDATE_KEYS = frozenset({"gpus", "regions", "count", "prices", "allow_ondemand_h200", "spot_only", "infra"})
 
 
+def max_price(offers: list[Offer]) -> float | None:
+    """The dearest node hour a pool of ``offers`` may order (the price a budget must assume
+    before it knows which offer an order lands on: a spot pool whose spot offers fail falls
+    back to its on-demand one). None when any offer is unpriced: such a node would be
+    counted at $0."""
+    if not offers or any(o.price_usd_h is None for o in offers):
+        return None
+    return max(float(o.price_usd_h) for o in offers)  # type: ignore[arg-type]
+
+
 def offers_from_config(section: dict[str, Any]) -> list[Offer]:
     """The offers of a provider config: ``offers`` (``[{resources, price_usd_h, key}]``),
     else ``candidates`` (the watchdog's Nebius list), else one offer of ``resources``
-    (with ``price_usd_h``)."""
+    (with ``price_usd_h``). An offer without ``price_usd_h`` takes the unified price
+    table's price of its node (:func:`yeto.cost.prices.offer_usd_h`) when the table has one."""
     if section.get("offers") is not None and section.get("candidates") is not None:
         raise ValueError("sky provider: set 'offers' or 'candidates', not both")
     if section.get("offers") is not None:
@@ -111,7 +120,7 @@ def offers_from_config(section: dict[str, Any]) -> list[Offer]:
                 raise ValueError(f"sky provider: offers[{i}]: unknown keys {sorted(unknown)}")
             res = dict(doc["resources"])
             out.append(Offer(key=str(doc.get("key") or _key(res)), resources=res,
-                             price_usd_h=_price(doc.get("price_usd_h"), f"offers[{i}]")))
+                             price_usd_h=_stated_or_table(doc.get("price_usd_h"), res, f"offers[{i}]")))
         if not out:
             raise ValueError("sky provider: offers is empty")
         return out
@@ -129,7 +138,15 @@ def offers_from_config(section: dict[str, Any]) -> list[Offer]:
     if not isinstance(section.get("resources"), dict):
         raise ValueError("sky provider: resources (or offers / candidates) is required")
     res = dict(section["resources"])
-    return [Offer(key=_key(res), resources=res, price_usd_h=_price(section.get("price_usd_h"), "resources"))]
+    price = _stated_or_table(section.get("price_usd_h"), res, "resources")
+    return [Offer(key=_key(res), resources=res, price_usd_h=price)]
+
+
+def _stated_or_table(value: Any, resources: dict[str, Any], where: str) -> float | None:
+    """The offer's stated ``price_usd_h``, else the unified price table's price of the node its
+    resources order (None: neither: the offer is unpriced)."""
+    stated = _price(value, where)
+    return _prices.offer_usd_h(resources) if stated is None else stated
 
 
 def _price(value: Any, where: str) -> float | None:

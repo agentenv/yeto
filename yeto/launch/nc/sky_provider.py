@@ -81,7 +81,7 @@ from typing import Any
 
 from yeto.launch.rollout.offers import Offer, offers_from_config
 
-from ..pool.provider import ProviderCaps
+from ..pool.provider import provider_caps
 from ..pool.status import LeaseStatus
 from .client import NodeLease
 from .tunnel import state_dir
@@ -153,7 +153,7 @@ def _record_ledger(fn: str, *args: Any, **kw: Any) -> None:
 class SkyProvider:
     kind = KIND
     ledger_kind = LEDGER_KIND
-    caps = ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=1800)
+    caps = provider_caps(KIND)  # yeto/cloud/capabilities.json
 
     def __init__(self, run_id: str, *, slots: list[int], resources: dict[str, Any] | None = None,
                  offers: list[Offer] | None = None, cluster_prefix: str = "yeto-smp", ssh_key: str | None = None,
@@ -329,6 +329,7 @@ class SkyProvider:
 
     # -- IslandProvider
     def order(self, account: int) -> str:
+        self.last_offer_key = None  # set again once this order picked its offer
         doc = self._doc()
         n = 1 + max([int(r.get("n", 0)) for r in doc["clusters"].values()] or [0])
         offer = self._pick(doc)
@@ -383,6 +384,7 @@ class SkyProvider:
                                  **({"num_nodes": num_nodes} if num_nodes > 1 else {})}
         self._save_doc(doc)  # recorded before the launch: a crash mid-launch still leaves it ours to down
         _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id)
+        self.last_offer_key = offer.key  # the pool's order_failed event names it (offer ledger)
         try:
             task = self._task(name, offer, num_nodes)
             request = self.sky.launch(task, cluster_name=name, **self.launch_kwargs(task))
@@ -415,6 +417,7 @@ class SkyProvider:
         from ..pool.group import release_placed
         from ..topology import multinode_network_tier
 
+        self.last_offer_key = None  # set again once this order picked its offer
         free = [s for s in self.slots if self.account_free(s)]
         if not free:
             raise RuntimeError(f"sky provider: no free slot for a group of {n}")

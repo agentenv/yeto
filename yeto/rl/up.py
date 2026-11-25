@@ -101,6 +101,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +125,14 @@ SEAL_OWNER = "run-up-data-end"  # the incarnation the data-end seal claims an ow
 FINISHED = re.compile(r"finished: (\S+).*?\(exit code (-?\d+)\)")
 # yeto.launcher HANDS_OFF_EXITS: the island records are another launcher's (12) or did not read (13)
 HANDS_OFF_CODES = ("12", "13")
+
+
+def _nc_node_usd_h() -> float:
+    """One National Compute node hour in USD when ``budget.nc_usd_per_h`` is unset: the unified
+    price table's nc:MI355X row (yeto.cost.prices)."""
+    from yeto.cost import prices  # noqa: PLC0415
+
+    return prices.nc_node_usd_h()
 
 
 def _log_tail(path: str | os.PathLike, offset: int = 0, size: int = 200_000) -> str:
@@ -1725,7 +1734,7 @@ class Run:
         if self.fleet_plan() is not None:  # pools + each island's trainer + the syncer
             return self.fleet_rt().spend().total_usd
         now = time.time()
-        nc = sum(self.node_hours(i, now) * self.node_usd_per_h(i) for i in range(len(self.pools)))
+        nc = sum(self.node_spend_usd(i, now) for i in range(len(self.pools)))
         rate = up_consistency.number_or_default(self.cfg.get("trainer"), "usd_per_h", 0)
         return nc + self.trainer_hours(now) * rate
 
@@ -1776,19 +1785,55 @@ class Run:
                     price = None
             except Exception:  # noqa: BLE001 - an unreadable pool config: the NC rate
                 price = None
-        return up_consistency.number_or_default(self.cfg.get("budget"), "nc_usd_per_h", 24) if price is None else price
+        if price is None:
+            return up_consistency.number_or_default(self.cfg.get("budget"), "nc_usd_per_h", _nc_node_usd_h())
+        return price
+
+    def node_spend_usd(self, i: int = 0, now: float | None = None) -> float:
+        """Spend of pool ``i``: each member's billed hours (:meth:`node_hours`) at the rate of the
+        offer it was ordered with (the ``hourly_ucr`` its pool charged it, in USD) for a pool of
+        a USD provider without a ``usd_per_h`` override; :meth:`node_usd_per_h` otherwise (a
+        member the pool did not price yet, National Compute, a pool without a readable state)."""
+        from yeto.launch.pool.money import to_usd  # noqa: PLC0415
+
+        base = self.node_usd_per_h(i)
+        per_member = False
+        if self.pools[i].usd_per_h is None:
+            try:
+                from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
+
+                per_member = pool_price(self.pools[i].load())[1] == "usd"
+            except Exception:  # noqa: BLE001 - an unreadable pool config: node_usd_per_h
+                per_member = False
+        if not per_member:
+            return self.node_hours(i, now) * base
+
+        def rate(m: dict[str, Any] | None) -> float:
+            own = None if m is None else m.get("hourly_ucr")
+            return base if own is None else to_usd(float(own), "ucr")
+
+        return self.node_hours(i, now, rate=rate)
+
+    def pool_spend_rate(self, i: int = 0, now: float | None = None) -> tuple[float, float]:
+        """``(billed node hours, their mean USD per node hour)`` of pool ``i`` (each member at
+        its own offer's rate: :meth:`node_spend_usd`)."""
+        hours = self.node_hours(i, now)
+        return hours, (self.node_spend_usd(i, now) / hours if hours > 0 else self.node_usd_per_h(i))
 
     def nc_node_hours(self, now: float | None = None) -> float:
         """Billed rollout node hours of this run, every pool (see :meth:`node_hours`)."""
         return sum(self.node_hours(i, now) for i in range(len(self.pools)))
 
-    def node_hours(self, i: int = 0, now: float | None = None) -> float:
+    def node_hours(self, i: int = 0, now: float | None = None, *,
+                   rate: Callable[[dict[str, Any] | None], float] | None = None) -> float:
         """Billed node hours of pool ``i``: each pool state member from its grant (a ticket
         never granted bills nothing) to its release (``charged_to`` of a gone member) or now,
         counted from the run's first start (``run_t0``: the spend spans every ``run up``).
         Without a readable pool state: the run's cumulative up time (every up period; the
         whole time since ``run_t0`` before periods were recorded) times the pool target
-        (the scaled one; every node assumed billed)."""
+        (the scaled one; every node assumed billed). ``rate``: each member's hours times
+        ``rate(member)`` instead (``rate(None)`` for the estimate without a state): the spend."""
+        weight = rate or (lambda _m: 1.0)
         now = time.time() if now is None else now
         t0 = float(self.state.get("run_t0", self.state.get("t0", now)))
         members = self._members(i)
@@ -1798,8 +1843,8 @@ class Run:
             except Exception:  # noqa: BLE001
                 nodes = 1
             if self.state.get("ups"):
-                return up_segments.uptime_summary(self.state, now)["cumulative_runtime_h"] * nodes
-            return max(0.0, now - t0) / 3600 * nodes
+                return up_segments.uptime_summary(self.state, now)["cumulative_runtime_h"] * nodes * weight(None)
+            return max(0.0, now - t0) / 3600 * nodes * weight(None)
         hours = 0.0
         for m in members:
             if m.get("granted") is None:
@@ -1811,7 +1856,7 @@ class Run:
             start = t0 if granted is None else max(granted, t0)
             charged = _epoch(m.get("charged_to")) if m.get("charged_to") else now
             end = (now if charged is None else charged) if m.get("state") == "gone" else now
-            hours += max(0.0, end - start) / 3600
+            hours += max(0.0, end - start) / 3600 * weight(m)
         return hours
 
     def _nc_dir(self) -> Path:
@@ -2229,7 +2274,7 @@ class Run:
             off = "budget.wall_h is null" if "wall_h" in b else "breakers.run.wall_clock is off"
             _log(f"preflight: {off}: no wall-clock cap; only budget.usd (if set) stops the run")
         priced = (up_consistency.number_or_default(self.cfg["trainer"], "usd_per_h", 0) > 0
-                  or up_consistency.number_or_default(b, "nc_usd_per_h", 24) > 0)
+                  or up_consistency.number_or_default(b, "nc_usd_per_h", _nc_node_usd_h()) > 0)
         if usd is not None and usd <= 0 and priced:
             shown = f"budget.usd is {b['usd']}" if b.get("usd") is not None else f"breakers.run.budget.usd is {usd:g}"
             return (f"{shown} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "

@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..pool import provider as registry
-from ..pool.provider import IslandProvider, ProviderCaps
+from ..pool.provider import IslandProvider, provider_caps
 from ..pool.status import LeaseStatus
 from .client import Ledger, NcClient, NodeLease, configure_tools, hourly_cost_ucr
 
@@ -30,7 +30,7 @@ class NCProvider:
     """National Compute through its order tools (guarded :class:`NcClient`)."""
 
     kind = "nc"
-    caps = ProviderCaps(lease_bounded=True, renewable=False, currency="ucr", balance=True, cold_start_s=3600)
+    caps = provider_caps("nc")  # yeto/cloud/capabilities.json
 
     def __init__(self, accounts: list[int], run_id: str, *, ledger: Ledger, allowed: set[int],
                  model: str = "mi355x", pubkey=None, before_order=None, run=None, event=None):

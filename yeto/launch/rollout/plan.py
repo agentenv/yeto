@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
+
+from yeto.cost import prices as _prices
 
 GB = 1e9
 
@@ -64,7 +66,7 @@ class PlanInputs:
     max_policy_age: int = 4
     trials_per_island: int = 20
     host_max_sandboxes: int = 160
-    island_usd_h: float = 24.0
+    island_usd_h: float = field(default_factory=lambda: _prices.nc_node_usd_h())
     trainer_usd_h: float = 408.0
     host_usd_h: float = 0.0
 

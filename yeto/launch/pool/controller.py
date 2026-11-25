@@ -662,6 +662,7 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
     pool.owner = pool_run.state_owner(cfg)  # this run's from now on (a file with no owner is stamped)
     pool.scale_path, pool.scale_run = pool_run.scale_path(cfg), cli.run_id(cfg)
     pool.apply_scale()
+    pool_run.attach_offer_ledger(cfg, pool)  # every pool feeds the offer ledger (leads from it: replace_lead_auto)
     pool_run._write_pid(cfg, config_path)  # noqa: SLF001 - pool-status / pool-scale see a live loop
     pool_run._remove(pool_run.stop_path(cfg))  # noqa: SLF001
 
@@ -671,6 +672,11 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
         return "pool-stop requested" if pool_run.stop_path(cfg).exists() else None
 
     def close(left: list[Member]) -> None:
+        if pool.offer_ledger is not None:
+            try:
+                pool.offer_ledger.close()  # what the last events counted
+            except Exception as error:  # noqa: BLE001
+                cli._log(f"pool: offer ledger not closed: {error!r}"[:300])  # noqa: SLF001
         if pool.control is not None:
             pool.control.close()  # the store lock: released (a detach or a drain alike)
         pool_run._remove(pool_run.pid_path(cfg))  # noqa: SLF001

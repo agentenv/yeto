@@ -188,9 +188,11 @@ raises a "tape source lost" alert for that island. Modal islands keep using the
 
 Cost = price-table rate ($/GPU-hour) x GPU count x wall clock (from
 `island_ready` to `island_lost` / `island_stop` / now; restarts accumulate
-again). The default price table `yeto/dashboard/prices.example.json` holds
-**example values, not billing data**; replace it with `--prices my.json` (same
-format as the example, keys are `cloud:GPU`, `*:GPU` is a wildcard). An island
+again). The default price table is yeto's unified price table
+(`yeto/cost/prices.json`: list prices, each row with its source and date,
+**not billing data**); replace it with `--prices my.json` (a JSON object with
+`prices` of `cloud:GPU` -> $/GPU-hour, `*:GPU` is a wildcard, and optional
+`host_prices`). An island
 missing from the table shows "unpriced" rather than $0; local islands count as
 $0 and are left out of the efficiency ranking. With `--budget`, reaching 60% /
 80% of the budget raises a warning / critical alert, and the projected time to

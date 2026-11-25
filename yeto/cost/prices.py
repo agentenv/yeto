@@ -1,0 +1,309 @@
+"""The one machine price table of yeto.
+
+Every price yeto uses for a machine it does not get a bill for yet comes from
+``prices.json`` next to this module: one row per (provider, GPU type, GPU count
+of the node, spot / on-demand, region), each a whole-node price in USD per
+hour with its ``source`` and its ``as_of`` date. Billing (``yeto.cost.billing``),
+the pool and run budgets, the dashboard's default table, the sky offers of a
+sampler pool, the shape planner and the dry-runs read it through the functions
+below; a run config (``usd_per_h``, ``price_usd_h``) or a price file
+(``--prices``) still overrides a row.
+
+A node of ``n`` GPUs matched by a row of ``gpus`` GPUs costs ``n / gpus x usd_h``.
+
+Every row has a ``grade``: ``billing`` (a price list the bill follows) or
+``illustrative`` (an example value). Everything that gates or counts money (billing,
+the pool and run budgets, the breakers, offer pricing, the broker) reads billing rows
+only: to them an illustrative row is no price, so an offer priced by nothing else stays
+unpriced and a capped run refuses it. Only the dashboard's estimate shows illustrative
+rows, marked as estimates.
+GPU names compare case-insensitively without a ``!`` suffix or a ``:count``
+(``"h100!"``, ``"H100:8"`` and ``"H100"`` are one GPU).
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+TABLE_PATH = Path(__file__).with_name("prices.json")
+TABLE_NAME = "yeto/cost/prices.json"
+# a dry-run says so when a price it uses was read longer ago than this
+DEFAULT_MAX_AGE_DAYS = 90
+ANY = "*"
+BILLING, ILLUSTRATIVE = "billing", "illustrative"
+GRADES = (BILLING, ILLUSTRATIVE)
+
+
+class PriceTableError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Price:
+    """One row: a node of ``gpus`` x ``gpu`` at ``provider`` for ``usd_h`` USD per hour."""
+
+    provider: str
+    gpu: str
+    gpus: int
+    usd_h: float
+    source: str
+    as_of: str
+    grade: str = BILLING
+    spot: bool | None = None  # None: either
+    region: str | None = None  # None: any region
+    note: str | None = None
+    native: Mapping[str, Any] | None = field(default=None, compare=False)
+
+    @property
+    def usd_per_gpu_h(self) -> float:
+        return self.usd_h / self.gpus
+
+    def node_usd_h(self, gpus: float) -> float:
+        """A node of ``gpus`` GPUs of this row's type."""
+        return self.usd_per_gpu_h * float(gpus)
+
+    @property
+    def key(self) -> str:
+        where = f"@{self.region}" if self.region else ""
+        kind = "" if self.spot is None else ("/spot" if self.spot else "/od")
+        return f"{self.provider}:{self.gpu}x{self.gpus}{where}{kind}"
+
+    def age_days(self, today: dt.date | None = None) -> int:
+        return ((today or dt.date.today()) - dt.date.fromisoformat(self.as_of)).days
+
+    def cited(self) -> str:
+        return f"{self.key} {self.usd_h:g} USD/h (source: {self.source}, as of {self.as_of})"
+
+
+@dataclass(frozen=True)
+class HostPrice:
+    """CPU and memory a provider bills next to the GPUs (Modal)."""
+
+    provider: str
+    cpu_core_h: float
+    mem_gib_h: float
+    source: str
+    as_of: str
+
+
+@dataclass(frozen=True)
+class Table:
+    rows: tuple[Price, ...]
+    host: Mapping[str, HostPrice]
+
+
+def gpu_name(gpu: Any) -> str:
+    """The comparable form of a GPU name (``"H100!"``, ``"h100:8"`` -> ``"h100"``)."""
+    return str(gpu or "").strip().lower().split(":")[0].rstrip("!")
+
+
+def _row(doc: Mapping[str, Any], i: int) -> Price:
+    where = f"{TABLE_NAME} rows[{i}]"
+    for key in ("provider", "gpu", "gpus", "usd_h", "source", "as_of", "grade"):
+        if doc.get(key) in (None, ""):
+            raise PriceTableError(f"{where}: {key} is required")
+    if doc["grade"] not in GRADES:
+        raise PriceTableError(f"{where}: grade must be one of {list(GRADES)}, not {doc['grade']!r}")
+    try:
+        dt.date.fromisoformat(str(doc["as_of"]))
+    except ValueError:
+        raise PriceTableError(f"{where}: as_of {doc['as_of']!r} is not an ISO date") from None
+    gpus, usd = doc["gpus"], doc["usd_h"]
+    if isinstance(gpus, bool) or not isinstance(gpus, int) or gpus < 1:
+        raise PriceTableError(f"{where}: gpus must be a whole number >= 1")
+    if isinstance(usd, bool) or not isinstance(usd, (int, float)) or not usd >= 0:
+        raise PriceTableError(f"{where}: usd_h must be a number >= 0")
+    unknown = set(doc) - {"provider", "gpu", "gpus", "usd_h", "source", "as_of", "grade", "spot", "region", "note",
+                          "native"}
+    if unknown:
+        raise PriceTableError(f"{where}: unknown keys {sorted(unknown)}")
+    return Price(provider=str(doc["provider"]).lower(), gpu=str(doc["gpu"]), gpus=int(gpus), usd_h=float(usd),
+                 source=str(doc["source"]), as_of=str(doc["as_of"]), grade=str(doc["grade"]), spot=doc.get("spot"),
+                 region=doc.get("region"), note=doc.get("note"), native=doc.get("native"))
+
+
+def parse(doc: Mapping[str, Any]) -> Table:
+    rows = tuple(_row(r, i) for i, r in enumerate(doc.get("rows") or ()))
+    seen: set[tuple[Any, ...]] = set()
+    for r in rows:
+        ident = (r.provider, gpu_name(r.gpu), r.gpus, r.spot, r.region)
+        if ident in seen:
+            raise PriceTableError(f"{TABLE_NAME}: two rows for {r.key}")
+        seen.add(ident)
+    host = {}
+    for name, h in (doc.get("host") or {}).items():
+        for key in ("cpu_core_h", "mem_gib_h", "source", "as_of"):
+            if h.get(key) in (None, ""):
+                raise PriceTableError(f"{TABLE_NAME} host.{name}: {key} is required")
+        host[name.lower()] = HostPrice(name.lower(), float(h["cpu_core_h"]), float(h["mem_gib_h"]),
+                                       str(h["source"]), str(h["as_of"]))
+    return Table(rows, host)
+
+
+@lru_cache(maxsize=4)
+def table(path: str | None = None) -> Table:
+    return parse(json.loads(Path(path or TABLE_PATH).read_text(encoding="utf-8")))
+
+
+def rows(provider: str | None = None, *, path: str | None = None) -> list[Price]:
+    out = list(table(path).rows)
+    return out if provider is None else [r for r in out if r.provider == provider.lower()]
+
+
+def lookup(provider: str, gpu: Any, *, spot: bool | None = None, region: str | None = None,
+           grade: str | None = BILLING, path: str | None = None) -> Price | None:
+    """The row that prices ``gpu`` at ``provider`` (``spot`` / ``region`` when known): the
+    provider's own rows before the ``*`` rows; among them an exact region before a
+    region-less row, and a row of the asked spot-ness before one that matches either.
+    A row of a stated region or spot-ness never matches a different one. Only rows of
+    ``grade`` (default: billing; None: any grade). None: no row."""
+    want = gpu_name(gpu)
+    best: tuple[tuple[int, int, int], Price] | None = None
+    for r in table(path).rows:
+        if gpu_name(r.gpu) != want or r.provider not in (provider.lower(), ANY):
+            continue
+        if grade is not None and r.grade != grade:
+            continue
+        if r.region is not None and r.region != region:
+            continue
+        if r.spot is not None and spot is not None and r.spot != spot:
+            continue
+        if r.spot is not None and spot is None and r.spot:  # spot unknown: never the spot price
+            continue
+        rank = (r.provider == ANY, r.region is None, r.spot is None)
+        if best is None or rank < best[0]:
+            best = (rank, r)
+    return None if best is None else best[1]
+
+
+def node_usd_h(provider: str, gpu: Any, gpus: Any, *, spot: bool | None = None, region: str | None = None,
+               path: str | None = None) -> float | None:
+    """USD per hour of a node of ``gpus`` x ``gpu`` at ``provider`` from a billing row (None: none)."""
+    if not gpus:
+        return None
+    row = lookup(provider, gpu, spot=spot, region=region, path=path)
+    return None if row is None else row.node_usd_h(float(gpus))
+
+
+def host(provider: str, *, path: str | None = None) -> HostPrice | None:
+    return table(path).host.get(provider.lower())
+
+
+# -- views the older tables had (kept in their shape for their readers) -------------
+
+def per_gpu_usd_h(provider: str, *, path: str | None = None) -> dict[str, float]:
+    """``{gpu name lower-case: USD per GPU-hour}`` of a provider's region-less, spot-less rows
+    (Modal: the per-GPU list prices billing falls back to)."""
+    return {gpu_name(r.gpu): r.usd_per_gpu_h for r in rows(provider, path=path)
+            if r.region is None and r.spot is None and r.grade == BILLING}
+
+
+def sources(provider: str, *, path: str | None = None) -> str:
+    """Where a provider's prices come from, for a message: ``source (as of date)`` per distinct pair."""
+    pairs = sorted({(r.source, r.as_of) for r in rows(provider, path=path) if r.grade == BILLING})
+    return "; ".join(f"{s} (checked {d})" for s, d in pairs)
+
+
+def regional_8gpu(provider: str, *, path: str | None = None) -> dict[tuple[str, str], tuple[float, float]]:
+    """``{(GPU, region): (on-demand, spot)}`` of a provider's 8-GPU regional rows (the sky
+    spot watchdog's Nebius candidate table). Only regions with both prices."""
+    od: dict[tuple[str, str], float] = {}
+    sp: dict[tuple[str, str], float] = {}
+    for r in rows(provider, path=path):
+        if r.gpus != 8 or r.region is None or r.spot is None or r.grade != BILLING:
+            continue
+        (sp if r.spot else od)[(r.gpu.upper(), r.region)] = r.usd_h
+    return {k: (od[k], sp[k]) for k in od if k in sp}
+
+
+def dashboard_table(*, path: str | None = None) -> dict[str, Any]:
+    """The dashboard's price table form: ``{"prices": {"provider:GPU": USD per GPU-hour},
+    "host_prices": {provider: {cpu_core_h, mem_gib_h}}, "estimate_keys": [...]}`` from the
+    region-less, spot-less rows of either grade; ``estimate_keys`` are the illustrative ones
+    (the dashboard marks a price from them as an estimate)."""
+    t = table(path)
+    picked = [r for r in t.rows if r.region is None and r.spot is None]
+    out = {f"{r.provider}:{r.gpu}": r.usd_per_gpu_h for r in picked}
+    return {"_note": f"built from the unified price table {TABLE_NAME} (each row carries its source and date)",
+            "prices": out,
+            "estimate_keys": sorted(f"{r.provider}:{r.gpu}" for r in picked if r.grade == ILLUSTRATIVE),
+            "host_prices": {name: {"cpu_core_h": h.cpu_core_h, "mem_gib_h": h.mem_gib_h} for name, h in t.host.items()}}
+
+
+# -- National Compute ---------------------------------------------------------------
+
+NC_PROVIDER, NC_GPU = "nc", "MI355X"
+
+
+def _nc_row(path: str | None = None) -> Price:
+    row = lookup(NC_PROVIDER, NC_GPU, path=path)
+    if row is None or not row.native:
+        raise PriceTableError(f"{TABLE_NAME}: no {NC_PROVIDER}:{NC_GPU} row with its native ucr rate")
+    return row
+
+
+def nc_ucr_per_gpu_h(*, path: str | None = None) -> int:
+    """The National Compute MI355X rate in ucr per GPU-hour."""
+    return int(_nc_row(path).native["per_gpu_h"])
+
+
+def nc_usd_per_ucr(*, path: str | None = None) -> float:
+    return float(_nc_row(path).native["usd_per_unit"])
+
+
+def nc_node_gpus(*, path: str | None = None) -> int:
+    return _nc_row(path).gpus
+
+
+def nc_node_usd_h(*, path: str | None = None) -> float:
+    """One 8-GPU National Compute MI355X node hour in USD."""
+    return _nc_row(path).usd_h
+
+
+# -- sky offers ---------------------------------------------------------------------
+
+def offer_row(resources: Mapping[str, Any], *, path: str | None = None) -> Price | None:
+    """The row that prices a sky offer's ``resources`` (``infra`` ``"<cloud>/<region>"`` or
+    ``cloud`` + ``region``, ``accelerators`` ``"GPU:count"``, ``use_spot``); None: not in the table."""
+    infra = str(resources.get("infra") or "")
+    cloud, _, region = infra.partition("/")
+    cloud = (cloud or str(resources.get("cloud") or "")).lower()
+    region = region.split("/")[0] or (str(resources["region"]) if resources.get("region") else "")
+    acc = resources.get("accelerators")
+    if not cloud or not acc or not isinstance(acc, str):
+        return None
+    return lookup(cloud, acc, spot=bool(resources.get("use_spot")), region=region or None, path=path)
+
+
+def offer_usd_h(resources: Mapping[str, Any], *, path: str | None = None) -> float | None:
+    """USD per hour of the node a sky offer orders (None: its cloud / GPU / region is not in the table)."""
+    row = offer_row(resources, path=path)
+    if row is None:
+        return None
+    acc = str(resources["accelerators"])
+    count = acc.partition(":")[2]
+    try:
+        gpus = float(count) if count else 1.0
+    except ValueError:
+        return None
+    return row.node_usd_h(gpus)
+
+
+# -- age ----------------------------------------------------------------------------
+
+def stale(used: Iterable[Price], *, max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+          today: dt.date | None = None) -> list[str]:
+    """One line per price in ``used`` read more than ``max_age_days`` ago (its source and date)."""
+    out = []
+    for r in sorted(set(used), key=lambda r: r.key):
+        age = r.age_days(today)
+        if age > max_age_days:
+            out.append(f"price {r.key} {r.usd_h:g} USD/h is {age} days old (source: {r.source}, as of {r.as_of}); "
+                       f"check it before trusting the spend estimate")
+    return out

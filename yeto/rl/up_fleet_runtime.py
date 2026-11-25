@@ -551,7 +551,7 @@ class FleetRuntime:
         now = _up().time.time() if now is None else now
         hours = run.trainer_hours(now)
         return breakers_fleet.fleet_spend(
-            pool_node_hours=[(run.node_hours(i, now), run.node_usd_per_h(i)) for i in range(len(run.pools))],
+            pool_node_hours=[run.pool_spend_rate(i, now) for i in range(len(run.pools))],
             island_hours=[hours] * len(self.plan.islands), island_usd_per_h=breakers_fleet.island_prices(run.cfg),
             syncer_hours=hours, syncer_usd_per_h=breakers_fleet.syncer_price(run.cfg))
 
