@@ -49,6 +49,11 @@ IDENTITY_MODES = ("strict", "relaxed")
 FLEET_FULL_PARAMETER = "fleet_full_parameter"  # a full-parameter trainer island of a fleet
 PER_LEARNER_RELEASE = "per_learner_release"  # each trainer releases its local versions into trainer<k>/
 FLEET_PARTIAL_EXPERTS = "fleet_partial_experts"  # partial-experts training on a fleet island
+# --rl-release-every N / --rl-release-skip-busy in every trainer role (a backend with
+# PER_LEARNER_RELEASE alone honours N only where it releases per learner)
+RELEASE_CADENCE = "release_cadence"
+# trains the per-segment samples of a compacted trial as one trial (agentic.compaction, CompactionRL)
+COMPACTION_SEGMENTS = "compaction_segments"
 _log = logging.getLogger(__name__)
 
 

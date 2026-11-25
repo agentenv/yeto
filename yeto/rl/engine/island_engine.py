@@ -244,9 +244,14 @@ def check(args: Any, num_islands: int) -> None:
     for m, own in sorted(overrides.items()):
         iargs = island_args(args, m, num_islands)
         if not image_ok(iargs):
+            from . import backends
+
+            pin = getattr(backends.module("launch_flags", iargs.rl_backend or "miles"), "image_pin_problem", None)
+            why = pin(str(iargs.rl_image or "")) if pin else None
             raise ValueError(f"{FLAG}: island {m} image {iargs.rl_image!r} is not a "
                              "docker:<repository>@sha256:<64 hex> reference (nor the "
-                             f"{iargs.rl_backend or 'miles'} backend's own image form)")
+                             f"{iargs.rl_backend or 'miles'} backend's own image form)"
+                             + (f": {why}" if why else ""))
         backend = own.get("rl_backend")
         if "rl_image" in own:
             # an image of another backend than the island trains with

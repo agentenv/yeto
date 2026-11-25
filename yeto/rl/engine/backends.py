@@ -142,6 +142,16 @@ def module(role: str, name: str | None = None) -> ModuleType:
     return importlib.import_module(path)
 
 
+def capabilities(name: str | None = None) -> frozenset[str]:
+    """The capabilities backend ``name`` declares (its ``identity`` module's
+    ``CAPABILITIES``; constants in :mod:`yeto.rl.engine.backend_identity`); empty
+    for a backend that declares none."""
+
+    if "identity" not in get(name).roles:  # raises UnknownBackend for a name not registered
+        return frozenset()
+    return frozenset(getattr(module("identity", name), "CAPABILITIES", ()))
+
+
 def register(entry: BackendEntry) -> None:
     """Add a backend (tests; a new adapter adds its row to ``_REGISTRY``)."""
 

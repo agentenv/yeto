@@ -82,9 +82,14 @@ to each pool's ``prompts_file`` where one is set) and the pools must share one s
 the compile refuses anything else (a Miles sampler on its own slot would give out the
 pools' prompts a second time).
 
-Supported training forms: full parameters or partial experts on Miles, synchronized
-by asynchronous full-parameter rounds (``--rl-sync-preset decoupled`` routes there);
-:func:`form_problem` refuses the rest (LoRA, verl) in the preflight.
+Supported training forms: full parameters on a backend that declares
+``fleet_full_parameter`` (Miles, verl), partial experts on one that also declares
+``fleet_partial_experts`` (Miles), synchronized by asynchronous full-parameter rounds
+(``--rl-sync-preset decoupled`` routes there), every island of the fleet on the same
+backend (:func:`fleet_backends`); :func:`form_problem` refuses the rest (LoRA, Miles and
+verl islands in one fleet) in the preflight, and :func:`compaction_problem` a fleet of a
+backend that cannot train compacted trials whose pools compact or whose trainer runs
+CompactionRL.
 
 The roster (:func:`roster_of`). Without ``fleet.fixed_roster`` the islands share a syncer
 island pool: the compile adds ``--rl-sync-island-lease-s <fleet.island_lease_s>`` (default
@@ -113,6 +118,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass, field
+from collections.abc import Iterable
 from typing import Any
 
 PLAN_VERSION = 1
@@ -314,6 +320,8 @@ class FleetPlan:
                 f"fleet: no fixed roster (syncer island pool, lease {self.island_lease_s or 0:g} s): an island "
                 f"given up or stopped leaves the merge and the others go on; the fleet stops once fewer than "
                 f"{self.min_islands} island(s) run (fleet.min_islands)")]
+        # a fleet's islands share one backend (form_problem); a Miles fleet's lines stay as they were
+        backend = f" on {sync['backend']}" if sync.get("backend") not in (None, MILES_KIND) else ""
         for i in self.islands:
             trainer_price = i.trainer_usd_per_h if i.miles_samplers else i.usd_per_h  # the trainer alone
             price = "?" if trainer_price is None else f"${trainer_price:g}/h"
@@ -323,7 +331,7 @@ class FleetPlan:
                             if value is not None)
             miles = (f", Miles samplers {', '.join(m.name for m in i.miles_samplers)}" if i.miles_samplers else "")
             out.append(f"fleet: island {i.index} {i.name}: learner {i.learner}, store {i.substore}/ ({i.store}), "
-                       f"trainer {i.gpu} at {price}{extra}, {len(i.buffer_shards())} buffer shard(s), "
+                       f"trainer {i.gpu}{backend} at {price}{extra}, {len(i.buffer_shards())} buffer shard(s), "
                        f"pools {', '.join(p.name for p in i.pools) or '-'}{miles}")
             for m in i.miles_samplers:
                 cost = "?" if m.usd_per_h is None else f"${m.usd_per_h:g}/h"
@@ -968,21 +976,67 @@ def training_form(trainer_argv: list[str]) -> dict[str, Any]:
     return out
 
 
-def form_problem(form: dict[str, Any]) -> str | None:
+def fleet_backends(cfg: dict[str, Any]) -> dict[str, str]:
+    """The training backend of every island of the fleet, by a label naming it: each
+    trainer island (``fleet.trainer_argv`` ``--rl-backend``; an island sets no backend of
+    its own) and each Miles sampler island (Miles). Empty when the trainer argv does not
+    parse (:func:`form_problem` names that)."""
+    from yeto.rl.up_consistency import trainer_args  # noqa: PLC0415
+
+    section = cfg.get("fleet") if isinstance(cfg.get("fleet"), dict) else {}
+    args = trainer_args([str(a) for a in section.get("trainer_argv") or ()])
+    islands = cfg.get("islands") if isinstance(cfg.get("islands"), list) else []
+    if args is None or not islands:
+        return {}
+    run_backend = str(getattr(args, "rl_backend", None) or "miles")
+    out: dict[str, str] = {}
+    for k, island in enumerate(islands):
+        name = island.get("name") if isinstance(island, dict) else None
+        out[f"island {k} ({name})"] = run_backend
+        for entry in (island.get("samplers") if isinstance(island, dict) else None) or ():
+            if is_miles_entry(entry):
+                out[f"Miles sampler {entry.get('name')} of island {k} ({name})"] = MILES_KIND
+    return out
+
+
+def form_problem(form: dict[str, Any], *, backends: dict[str, str] | None = None) -> str | None:
     """Why a fleet with this :func:`training_form` cannot run (None: it can).
 
     A fleet's samplers are external engine pools that load each release whole and
     in place (vLLM ``reload_weights`` / SGLang ``update_weights_from_disk``); LoRA
-    releases to external engines are out of scope, and the synced-group launch of
-    external pools is Miles only."""
+    releases to external engines are out of scope. Every island runs one backend
+    (``backends``: :func:`fleet_backends`; None: only the trainer argv's), and that
+    backend declares the fleet's form as a capability (``fleet_full_parameter``,
+    ``fleet_partial_experts``: ``yeto.rl.engine.backends.capabilities``)."""
     if not form:
         return ("fleet.trainer_argv does not parse as an RL yeto launch argv (--training-mode rl ...); "
                 "`yeto launch --dry-run` names the argument")
     if form.get("error"):
         return f"fleet.trainer_argv: {form['error']}"
-    if form["backend"] != "miles":
-        return (f"a fleet trainer runs on Miles (got --rl-backend {form['backend']}): the synced-group launch "
-                "of external sampler pools is not built for other backends")
+    if backends and len(set(backends.values())) > 1:
+        by = ", ".join(f"{where}: {backend}" for where, backend in backends.items())
+        return (f"the islands of a fleet run one training backend, these run {len(set(backends.values()))} "
+                f"({by}): Miles and verl islands do not share a syncer session (a verl layout carries no shard "
+                "identity, a Miles layout names every rank's shard; mixing them needs a shape-free layout, which "
+                "a fleet does not support). Run every island on one backend")
+    from yeto.rl.engine import backend_identity as bi  # noqa: PLC0415
+    from yeto.rl.engine import backends as registry  # noqa: PLC0415
+
+    backend = form["backend"]
+    try:
+        declared = registry.capabilities(backend)
+    except registry.UnknownBackend as error:
+        return f"fleet.trainer_argv: {error}"
+    if bi.FLEET_FULL_PARAMETER not in declared:
+        able = [name for name in registry.registered() if bi.FLEET_FULL_PARAMETER in registry.capabilities(name)]
+        return (f"a fleet trainer runs on a backend that declares {bi.FLEET_FULL_PARAMETER} ({', '.join(able)}); "
+                f"--rl-backend {backend} does not: its synced trainers cannot release to external sampler pools")
+    if form["tuning"] == "full" and form.get("expert_selection") and bi.FLEET_PARTIAL_EXPERTS not in declared:
+        able = [name for name in registry.registered() if bi.FLEET_PARTIAL_EXPERTS in registry.capabilities(name)]
+        return (f"a partial-experts fleet (--rl-expert-selection) needs a backend that declares "
+                f"{bi.FLEET_PARTIAL_EXPERTS} ({', '.join(able)}): --rl-backend {backend} does not train partial "
+                "experts; train full parameters (drop --rl-expert-selection) or use "
+                + " / ".join(f"--rl-backend {name}" for name in able))
     if form["tuning"] == "lora" or form.get("expert_full_count"):
         return ("a LoRA fleet (--tuning lora or --expert-full-count) is not supported: the islands' samplers are "
                 "external vLLM / SGLang pools, which load full-parameter releases in place; LoRA releases to "
@@ -993,6 +1047,55 @@ def form_problem(form: dict[str, Any]) -> str | None:
                 f"{form.get('requested')} runs {form.get('preset')}"
                 + (f" with {form.get('rounds')} rounds" if form.get("rounds") else "")
                 + "; use --rl-sync-preset decoupled (routed to full-parameter async rounds)")
+    return None
+
+
+def compaction_problem(cfg: dict[str, Any], plan: FleetPlan,
+                       pools: Iterable[tuple[str, dict[str, Any]]] = ()) -> str | None:
+    """Why a fleet whose backend cannot train compacted trials cannot run (None: it can):
+    a pool's sampler spec with ``agentic.compaction`` (each segment of a trial is its own
+    sample) or a trainer running CompactionRL (``advantage.gae_variant
+    cross_segment_per_sample``) on a backend that does not declare ``compaction_segments``
+    (verl: one sample is one token stream). ``pools``: ``(compiled pool name, its loaded
+    pool config)``. The trainers' run-time stop on a compacted group
+    (``trainer.compaction_round``) stays as the backstop."""
+    form = plan.sync or {}
+    backend = form.get("backend")
+    if not backend:
+        return None
+    from yeto.rl.engine import backend_identity as bi  # noqa: PLC0415
+    from yeto.rl.engine import backends as registry  # noqa: PLC0415
+
+    try:
+        if bi.COMPACTION_SEGMENTS in registry.capabilities(backend):
+            return None
+    except registry.UnknownBackend:
+        return None  # form_problem names it
+    able = " / ".join(f"--rl-backend {name}" for name in registry.registered()
+                      if bi.COMPACTION_SEGMENTS in registry.capabilities(name))
+    why = (f"a {backend} trainer cannot train the per-segment samples of a compacted trial as one trial (each "
+           f"sample is its own token stream); use {able} for CompactionRL, or turn compaction off")
+    section = cfg.get("fleet") if isinstance(cfg.get("fleet"), dict) else {}
+    from yeto.rl.up_consistency import trainer_args  # noqa: PLC0415
+
+    args = trainer_args([str(a) for a in section.get("trainer_argv") or ()])
+    if args is not None:
+        from yeto.launch.harness_env import _launch_algorithm  # noqa: PLC0415
+
+        advantage = (_launch_algorithm(args) or {}).get("advantage") or {}
+        if advantage.get("gae_variant") == "cross_segment_per_sample":
+            return (f"fleet.trainer_argv runs CompactionRL (advantage.gae_variant cross_segment_per_sample) on "
+                    f"--rl-backend {backend}: {why}")
+    from yeto.rl.up_consistency import effective_spec  # noqa: PLC0415
+
+    for name, pool_cfg in pools:
+        spec = effective_spec(pool_cfg) or {}
+        agentic = spec.get("agentic") if isinstance(spec.get("agentic"), dict) else {}
+        if agentic.get("compaction") is not None:
+            island = plan.island_of_pool(str(name))
+            where = f"island {island.index} ({island.name}) " if island is not None else ""
+            return (f"{where}pool {name}: its sampler spec sets agentic.compaction, and the fleet trains on "
+                    f"--rl-backend {backend}: {why}")
     return None
 
 

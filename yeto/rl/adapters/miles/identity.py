@@ -10,7 +10,9 @@ still hashed so a future non-identity map changes the identity.  Under
 
 from __future__ import annotations
 
-from yeto.rl.engine.backend_identity import BackendIdentity, param_map_sha256
+from yeto.rl.engine.backend_identity import (COMPACTION_SEGMENTS, FLEET_FULL_PARAMETER, FLEET_PARTIAL_EXPERTS,
+                                             PER_LEARNER_RELEASE, RELEASE_CADENCE, BackendIdentity,
+                                             param_map_sha256)
 
 from .pins import MILES_NEXT_COMMIT
 
@@ -19,6 +21,9 @@ DEVICE_FAMILY = "nvidia"
 PARAM_MAP = {"schema": "yeto-param-map-v1", "backend": ENGINE, "kind": "identity",
              "note": "Miles/Megatron LoRA tensor names are yeto canonical names"}
 PARAM_MAP_SHA256 = param_map_sha256(PARAM_MAP)
+# yeto.rl.engine.backends.capabilities
+CAPABILITIES: frozenset[str] = frozenset({FLEET_FULL_PARAMETER, FLEET_PARTIAL_EXPERTS, PER_LEARNER_RELEASE,
+                                          RELEASE_CADENCE, COMPACTION_SEGMENTS})
 
 
 def backend_identity(*, device_family: str = DEVICE_FAMILY,

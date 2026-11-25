@@ -1520,8 +1520,11 @@ def _prepare_rl_args(
     if not re.fullmatch(
         r"docker:[^\s@]+@sha256:[0-9a-fA-F]{64}", args.rl_image or ""
     ) and not _rl_backend_image_ok(args):
+        from .trainer_image_check import image_pin_problems
+
+        pins = image_pin_problems(args)  # a backend-built image of another engine commit: say which
         raise ValueError(
-            "--rl-image must be docker:<repository>@sha256:<64 hex digest>"
+            "; ".join(pins) if pins else "--rl-image must be docker:<repository>@sha256:<64 hex digest>"
         )
     if getattr(args, "learner_image", None) is not None:
         raise ValueError("RL uses digest-pinned --rl-image, not --learner-image")

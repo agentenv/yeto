@@ -18,6 +18,11 @@ refused below the floor; ``flash`` and ``unfused`` (the generic recipe under
 are only warned about, since they still have to be verified on that card. Other
 training backends (verl, ...) run their own images and are not checked, nor is an image
 outside this table (a site image, a registry image yeto does not know).
+
+A backend that builds its own trainer image from a pinned engine commit (verl:
+``verl-build:<commit>``) checks the image's commit against its pin
+(:func:`image_pin_problems`, the backend's ``launch_flags.image_pin_problem``): a trainer
+island on another commit is refused and named.
 """
 
 from __future__ import annotations
@@ -122,12 +127,48 @@ def training_attention(args: Any) -> tuple[str, str]:
                      else "the generic recipe")
 
 
-def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]:
-    """Refuse (ValueError) a trainer island whose image cannot run on its cards; returns
-    the warnings it printed. Only the Miles backend's trainer islands are checked (the
-    sampler islands of a group run their own engine image)."""
+def image_pin_problems(args: Any, num_islands: int | None = None) -> list[str]:
+    """Each trainer island whose image (``--rl-image``, or its own ``--rl-island-engine``
+    image) is not built from its backend's pinned engine commit, named by its ``--gpu``
+    island (the backend's ``launch_flags.image_pin_problem``; a backend without one is not
+    checked). Empty for an SFT launch."""
     if getattr(args, "training_mode", "sft") != "rl":
         return []
+    from ..gpu_spec import parse_gpu_spec
+    from ..rl.engine import backends, island_engine, sample_roles
+
+    try:
+        specs = parse_gpu_spec(args.gpu)
+        count = len(specs) if num_islands is None else int(num_islands)
+        samplers = set(sample_roles.sampler_islands(args, count))
+    except (TypeError, ValueError, AttributeError):  # the launch's own checks name a bad --gpu
+        return []
+    found = []
+    for m in range(count):
+        if m in samplers:
+            continue
+        try:
+            iargs = island_engine.island_args(args, m, count)
+            check = getattr(backends.module("launch_flags", getattr(iargs, "rl_backend", None) or "miles"),
+                            "image_pin_problem", None)
+        except (ValueError, backends.UnknownBackend):  # island_engine.check / the backend check name it
+            continue
+        problem = check(str(getattr(iargs, "rl_image", None) or "")) if check else None
+        if problem:
+            found.append(f"--gpu island {m} ({specs[m] if m < len(specs) else '?'}): {problem}")
+    return found
+
+
+def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]:
+    """Refuse (ValueError) a trainer island whose image cannot run on its cards; returns
+    the warnings it printed. Only the Miles backend's trainer islands are checked against
+    the card floors (the sampler islands of a group run their own engine image); every
+    backend's against its engine pin (:func:`image_pin_problems`)."""
+    if getattr(args, "training_mode", "sft") != "rl":
+        return []
+    pins = image_pin_problems(args, len(specs))
+    if pins:
+        raise ValueError("; ".join(pins))
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
         return []
     image = str(getattr(args, "rl_image", None) or "")
