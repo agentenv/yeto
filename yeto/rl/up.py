@@ -2737,6 +2737,29 @@ class Run:
                 problem = up_consistency.price_problem(ref.name, ref.usd_per_h, pool_cfg)
                 if problem is not None:
                     return problem
+            problem = self.island_price_problem()
+            if problem is not None:
+                return problem
+        return None
+
+    def island_price_problem(self) -> str | None:
+        """A run budget and a per-island fleet whose trainer island has no price: neither
+        ``islands[k].trainer.usd_per_h`` nor a billing row of the unified price table for its
+        ``--gpu`` (``yeto.rl.trainer_worker.table_usd_per_h``). Its spend would count $0, so
+        it is refused before anything is ordered. None when every island is priced (or no
+        per-island fleet)."""
+        plan = self.fleet_plan()
+        if plan is None or not plan.per_island:
+            return None
+        from yeto.rl import trainer_worker  # noqa: PLC0415
+
+        for island in plan.islands:
+            if island.trainer_usd_per_h is None and trainer_worker.table_usd_per_h(island.gpu) is None:
+                return (f"fleet.launch per_island with a run budget: trainer island {island.name} "
+                        f"(learner {island.learner}, --gpu {island.gpu}) has no price: neither "
+                        f"islands[{island.index}].trainer.usd_per_h nor a billing row of the price table "
+                        "(yeto/cost/prices.json) for its machines; its spend would count $0. Give its price: "
+                        f"islands[{island.index}].trainer.usd_per_h (an island added later: --usd-per-h)")
         return None
 
     def breakers_problem(self) -> str | None:

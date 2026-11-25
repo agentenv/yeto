@@ -319,10 +319,22 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     by_id = {r["id"]: r for r in rows}
     asy = reducer.async_
     trainer_rows, pool_rows = [], []
+    launched = (getattr(reducer, "trainer_spend", None) or {}).get("islands") \
+        if (getattr(reducer, "fleet_plan", None) or {}).get("launch") == "per_island" else None
     for isl in fleet["islands"]:
         tid, price = isl.get("trainer"), isl.get("trainer_usd_per_h")
         row = by_id.get(tid) if tid is not None else None
-        if row is not None:
+        if row is not None and launched is not None and isl["learner"] in launched:
+            # a fleet launched island by island: its launch records, as run.budget bills them
+            hours, usd, fallback = launched[isl["learner"]]
+            row.update(kind="trainer", island=isl["learner"], hours=hours, cost_usd=usd, priced=True,
+                       rate_usd_h=usd / hours if hours > 0 else 0.0, gpu_only=False, host_rate_usd_h=None,
+                       rate_source="trainer launch records: each incarnation at its price, as run.budget bills it"
+                       + ("; hours without a price at the island's declared price" if fallback else ""),
+                       billed_from="the island's launch records in the run store")
+            row["gpu_rate_usd_h"] = row["rate_usd_h"]
+            trainer_rows.append(row)
+        elif row is not None:
             row.update(kind="trainer", island=isl["learner"])
             if price is not None:
                 row.update(rate_usd_h=price, gpu_rate_usd_h=price, host_rate_usd_h=None, priced=True, gpu_only=False,

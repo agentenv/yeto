@@ -290,6 +290,8 @@ def test_the_spend_bills_the_island_launches_added_and_removed(tmp_path, monkeyp
     monkeypatch.setattr(up.Run, "node_hours", lambda self, i=0, now=None: 0.0)
     spend = run.fleet_rt().spend(now=1000.0 + 4 * 3600)
     assert [round(u, 2) for u in spend.islands_usd] == [32.0, 16.0, 15.0]
+    shared = trainer_worker.island_spend(trainer_worker.billed(objects, now=1000.0 + 4 * 3600), {})
+    assert [round(shared[k][1], 2) for k in sorted(shared)] == [32.0, 16.0, 15.0]  # the dashboard's function
     # island 0 moves to machines without a price for 1 h: its known $32 stays, only that hour
     # bills at its declared price ($8/h)
     clock[0] = 1000.0 + 4 * 3600
@@ -424,3 +426,27 @@ def test_the_syncer_grace_is_the_syncer_launch_s_own_setting(tmp_path, monkeypat
         sample_roles.check_fleet_member(types.SimpleNamespace(rl_fleet_syncer_grace_s=60.0))
     with pytest.raises(ValueError, match="> 0"):
         sample_roles.check_fleet_member(types.SimpleNamespace(rl_fleet_role="syncer", rl_fleet_syncer_grace_s=0))
+
+
+def test_a_run_budget_refuses_a_per_island_trainer_without_a_price(tmp_path, monkeypatch):
+    """With a run budget, a trainer island priced neither by islands[k].trainer.usd_per_h
+    nor by the price table is refused at the preflight (dry run too); without a budget it
+    passes (the spend warns)."""
+    doc = example_doc(tmp_path)
+    doc["islands"][1]["trainer"].update(gpu="aws:2xh100@us-east-2", usd_per_h=None)
+    path = tmp_path / "unpriced.json"
+    path.write_text(json.dumps(doc))
+    run = up.Run(up.load_config(str(path)), state_root=tmp_path / "u")
+    assert run.breaker_param("run.budget", "usd") is not None
+    problem = run.budget_problem()
+    assert problem and "has no price" in problem and "islands[1].trainer.usd_per_h" in problem
+    doc["islands"][1]["trainer"]["gpu"] = "modal:1x2xh100"  # the table prices it
+    path.write_text(json.dumps(doc))
+    assert up.Run(up.load_config(str(path)), state_root=tmp_path / "t").island_price_problem() is None
+    doc["islands"][1]["trainer"]["gpu"] = "aws:2xh100@us-east-2"
+    doc.pop("budget", None)
+    doc.get("breakers", {}).get("run", {}).pop("budget", None)
+    path.write_text(json.dumps(doc))
+    free = up.Run(up.load_config(str(path)), state_root=tmp_path / "f")
+    if free.breaker_param("run.budget", "usd") is None:
+        assert free.budget_problem() is None

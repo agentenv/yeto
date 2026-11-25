@@ -148,7 +148,7 @@ def test_an_island_of_another_trainer_shape_is_refused_at_dry_run(fleet_store, c
     # an operator's edit to TP2 (yeto fleet apply), then a move: refused, nothing written
     store.update(lambda doc: dz.trainers(doc)["sglang"].update(argv=wide["argv"]))
     generation = store.read()["generation"]
-    assert run_cli("move", "--name", "sglang", "--gpu", "aws:2xh100@us-east-2") == 2
+    assert run_cli("move", "--name", "sglang", "--gpu", "aws:2xh100@us-east-2", "--usd-per-h", "6") == 2
     assert "differs from the fleet" in capsys.readouterr().err
     assert store.read()["generation"] == generation
     assert plan.islands[1].learner == 1
@@ -163,7 +163,7 @@ def test_the_worker_moves_an_island_from_modal_to_aws_under_its_learner_id(fleet
     worker = trainer_worker.TrainerWorker(store, objects, launches, states, log=lambda m: None)
     worker.step()
     assert sorted(launches.live) == ["r-i0", "r-i1"]
-    assert run_cli("move", "--name", "sglang", "--gpu", "aws:2xh100@us-east-2") == 0
+    assert run_cli("move", "--name", "sglang", "--gpu", "aws:2xh100@us-east-2", "--usd-per-h", "6") == 0
     worker.step()
     assert states.stop_requested(1)["reason"].startswith("moving to aws:2xh100") and states.stop_requested(0) is None
     assert worker.load(1)["state"] == trainer_worker.MOVING
@@ -207,10 +207,31 @@ def test_an_add_whose_write_failed_takes_its_claimed_id_again(fleet_store, monke
 
 
 def test_an_add_without_a_price_is_refused_when_the_run_has_a_budget(fleet_store, capsys):
+    """Under a run budget an island needs a price: --usd-per-h, or a billing row of the
+    unified price table for its --gpu (a Modal H100 has one; an AWS H100 here has none)."""
     cfg, objects, store, run_cli, samplers = fleet_store
     assert cfg["budget"]["usd"] is not None
-    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers)) == 2
+    assert run_cli("add", "--name", "north", "--gpu", "aws:2xh100@us-east-2", "--samplers", str(samplers)) == 2
     assert "--usd-per-h" in capsys.readouterr().err and objects.read(claim_key(2)) is None
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers)) == 0
+    assert dz.trainers(store.read())["north"]["usd_per_h"] is None  # billed at the table's price
+
+
+def test_a_move_without_a_price_takes_the_table_s_never_the_old_one(fleet_store, capsys):
+    cfg, objects, store, run_cli, samplers = fleet_store
+    from yeto.rl import trainer_worker
+
+    before = dz.trainers(store.read())["sglang"]["usd_per_h"]
+    assert before is not None
+    assert run_cli("move", "--name", "sglang", "--gpu", "modal:2x8xb200") == 0
+    member = dz.trainers(store.read())["sglang"]
+    assert member["usd_per_h"] is None
+    record = {"usd_per_h": member["usd_per_h"], "gpu": member["gpu"]}
+    assert trainer_worker.incarnation_price(record) == trainer_worker.table_usd_per_h("modal:2x8xb200") != before
+    # machines the table does not price: refused under the budget, nothing written
+    generation = store.read()["generation"]
+    assert run_cli("move", "--name", "sglang", "--gpu", "aws:2xh100@us-east-2") == 2
+    assert "--usd-per-h" in capsys.readouterr().err and store.read()["generation"] == generation
 
 
 

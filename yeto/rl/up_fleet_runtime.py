@@ -764,13 +764,13 @@ class FleetRuntime:
             return [hours] * len(declared), declared
         by_id = {i.learner: p for i, p in zip(self.plan.islands, declared)}
         hours, prices = [], []
-        for k, h, usd, unpriced in rows:
-            if unpriced > 0:  # only the hours of incarnations without a price: at the declared price
-                usd += unpriced * float(by_id.get(k, 0.0))
+        for k, (h, usd, fallback) in sorted(trainer_worker.island_spend(rows, by_id).items()):
+            if fallback:
                 warned = getattr(self, "_unpriced_warned", set())
                 if k not in warned:
                     self._unpriced_warned = warned | {k}
-                    _log(f"WARNING: fleet: spend: trainer island {k} ran without a price (--usd-per-h); billed "
+                    _log(f"WARNING: fleet: spend: trainer island {k} ran without a price (--usd-per-h, nor a billing "
+                         "row of the price table for its --gpu); billed "
                          + (f"at its declared ${by_id[k]:g}/h" if k in by_id else "nothing") + " for that time")
             hours.append(h)
             prices.append(usd / h if h > 0 else 0.0)

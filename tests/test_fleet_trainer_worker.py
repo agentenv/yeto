@@ -565,10 +565,14 @@ def test_a_launch_that_keeps_handing_off_is_given_up_stopped_and_still_billed(tm
     w.fleet_stop = lambda: "STOP flag"
     w.step()
     assert states.stop_requested(0) is not None
-    # run down confirms it down: the bill closes
-    assert tw.mark_down(objects, ["run-i0"], log=lambda m: None, clock=lambda: 9000.0) == [0]
+    # run down confirms it down: the bill closes, and it stays given up (never restarted)
+    assert tw.mark_down(objects, ["run-i0"], log=lambda m: None, clock=lambda: 9000.0) == []
     ((_, hours, usd, _),) = tw.billed(objects, now=99999.0)
     assert round(hours, 6) == 2.5 and round(usd, 6) == 20.0
+    assert w.load(0)["state"] == tw.ABANDONED and not w.load(0).get("billing_open")
+    again = FakeLaunches()
+    worker(objects, store, again, clock=lambda: 10 ** 10).step()
+    assert again.starts == []
 
 
 def test_a_launch_that_comes_up_resets_its_hand_offs(tmp_path):
@@ -625,3 +629,71 @@ def test_one_island_s_stop_write_failing_never_keeps_the_next_from_its_stop(tmp_
     assert states.stop_requested(0) is None
     assert states.stop_requested(1) is not None and states.stop_requested(2) is not None
     assert any("island 0" in m and "not written to every island's STOP" in m for m in logs)
+
+
+def _abandon(objects, store, launches, w):
+    for _ in range(tw.HANDOFF_LIMIT + 1):
+        launches.live.pop("run-i0", None)
+        launches.exits["run-i0"] = {"exit_code": 12, "log": "", "detail": "held"}
+        w.step()
+    assert w.load(0)["state"] == tw.ABANDONED and w.load(0)["billing_open"]
+
+
+def test_a_hand_off_keeps_the_time_billed_so_far(tmp_path):
+    """A launcher that lost the island's lock while it ran exits 13 and tears nothing down:
+    the hour billed so far stays billed ($8), the relaunch's time adds to it."""
+    objects, store = fleet(tmp_path, [member(0)])
+    launches, clock = FakeLaunches(), [0.0]
+    w = worker(objects, store, launches, clock=lambda: clock[0])
+    w.step()
+    clock[0] = 3600.0
+    launches.live.pop("run-i0")
+    launches.exits["run-i0"] = {"exit_code": 13, "log": "", "detail": "lock lost"}
+    w.step()
+    ((_, hours, usd, _),) = tw.billed(objects, now=3600.0)
+    assert (round(hours, 6), round(usd, 6)) == (1.0, 8.0)
+    ((_, hours, usd, _),) = tw.billed(objects, now=5400.0)
+    assert (round(hours, 6), round(usd, 6)) == (1.5, 12.0)
+
+
+def test_a_given_up_island_moved_again_carries_no_billing_open_and_run_down_never_restarts_it(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    _abandon(objects, store, launches, w)
+    store.update(lambda doc: dz.trainers(doc)["isl0"].update(gpu="aws:2xh100@us-east-2"))
+    w.step()  # changed after it ended: its next incarnation
+    record = w.load(0)
+    assert record["prefix_now"] == "run-i0-m1" and record.get("billing_open") is None
+    launches.end("run-i0-m1", 0)
+    w.step()
+    assert w.load(0)["state"] == tw.DONE and w.load(0).get("billing_open") is None
+    assert tw.mark_down(objects, ["run-i0-m1"], log=lambda m: None) == []  # done: never recorded down
+    again = FakeLaunches()
+    worker(objects, store, again, clock=lambda: 10 ** 10).step()
+    assert again.starts == [] and w.load(0)["state"] == tw.DONE
+
+
+def test_an_adopted_launch_carries_no_billing_open(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    w.save(0, {**w.load(0), "billing_open": "stale"})
+    w.step()  # alive: adopted as running
+    assert w.load(0)["state"] == tw.RUNNING and w.load(0).get("billing_open") is None
+
+
+def test_removing_a_given_up_island_keeps_its_stop_and_closes_its_bill(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    states = lifecycle.IslandStateStore(objects, log=lambda m: None)
+    w = tw.TrainerWorker(store, objects, launches, states, log=lambda m: None)
+    w.step()
+    _abandon(objects, store, launches, w)
+    store.update(lambda doc: doc["members"].remove(next(m for m in doc["members"] if m["name"] == "isl0")))
+    w.step()
+    record = w.load(0)
+    assert record["state"] == tw.REMOVED and record.get("billing_open") is None and record["closed_at"] is not None
+    assert states.stop_requested(0) is not None  # the launcher that may still hold it keeps its STOP

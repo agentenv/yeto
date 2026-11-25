@@ -99,8 +99,17 @@ a removed island counts up to its end. An incarnation without `--usd-per-h` is b
 the unified price table's price for its `--gpu` (`yeto/cost/prices.json`, billing rows
 only), the same table the pools are billed from. The hours of an incarnation the table has
 no billing row for are billed at its declared island's price (or nothing, for an added
-island), and its priced hours keep their own dollars. With a run budget (`budget.usd`, or `run.budget` in the `breakers`
-section), `add` needs `--usd-per-h`.
+island), and its priced hours keep their own dollars.
+
+With a run budget (`budget.usd`, or `run.budget` in the `breakers` section), every trainer
+island needs a price: `islands[k].trainer.usd_per_h` (or `--usd-per-h` on `add` and
+`move`), or a billing row of the price table for its `--gpu`. An island with neither is
+refused before anything is ordered (`yeto run up` and its dry run, `add`, `move`). A
+`move` without `--usd-per-h` bills the new machines at the table's price for them, never
+at the old machines' price. An island given up because another launcher holds it stays
+billed (it counts toward `run.budget`) until it is removed or `yeto run down` confirms it
+down. The cost panel of `yeto dashboard` bills each trainer island from the same launch
+records, with the same function as `run.budget`.
 
 `yeto run stop` stops every island launch. The worker reads the run's STOP before anything
 in the run store. It stops this host's island launches directly, so that works even when

@@ -156,6 +156,17 @@ def run_budget_usd(cfg: dict[str, Any]) -> float | None:
     return None if usd is None else float(usd)
 
 
+def unpriced_under_budget(cfg: dict[str, Any], gpu: str, usd_per_h: float | None) -> None:
+    """Refuse an island (added, or moved to ``gpu``) without a price while the run has a
+    budget: no ``--usd-per-h`` and no billing row of the unified price table for ``gpu``;
+    its spend would count $0. Without a budget it passes (the spend warns)."""
+    from yeto.rl import trainer_worker  # noqa: PLC0415
+
+    if usd_per_h is None and run_budget_usd(cfg) is not None and trainer_worker.table_usd_per_h(gpu) is None:
+        raise IslandChangeError(f"give the island's trainer price (--usd-per-h): the run has a budget (run.budget) "
+                                f"and the price table has no billing row for {gpu}, so the island would bill nothing")
+
+
 def add(doc: dict[str, Any], member: dict[str, Any], pools: list[dict[str, Any]]) -> None:
     """Add an island's trainer member and its pools to ``doc`` (in place)."""
     if member["name"] in dz.trainers(doc):
@@ -181,11 +192,14 @@ def remove(doc: dict[str, Any], name: str) -> list[str]:
 
 
 def move(doc: dict[str, Any], cfg: dict[str, Any], name: str, *, gpu: str, usd_per_h: float | None = None) -> dict:
-    """Move island ``name`` to other machines (in place); returns its member."""
+    """Move island ``name`` to other machines (in place); returns its member. Its price is
+    ``usd_per_h`` when given, else none of its own: the new machines are billed at the
+    unified price table's price for their ``--gpu`` (``trainer_worker.table_usd_per_h``),
+    never at the old machines' price."""
     member = trainer_by_name(doc, name)
     member["gpu"] = fleet_mod._gpu(gpu, f"island {name} --gpu")  # noqa: SLF001
-    if usd_per_h is not None:
-        member["usd_per_h"] = fleet_mod._price(usd_per_h, f"island {name} --usd-per-h")  # noqa: SLF001
+    member["usd_per_h"] = (None if usd_per_h is None
+                           else fleet_mod._price(usd_per_h, f"island {name} --usd-per-h"))  # noqa: SLF001
     shape = il.fleet_shape([str(a) for a in cfg["fleet"]["trainer_argv"]])
     if shape:
         member["fleet_shape"] = shape  # the moved island's layout is checked against the fleet's
@@ -255,9 +269,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
                 m.pop(key, None)
         launch_member = None
         if args.island_command == "add":
-            if args.usd_per_h is None and run_budget_usd(run.cfg) is not None:
-                raise IslandChangeError("give the island's trainer price (--usd-per-h): the run has a budget "
-                                        "(run.budget), and an island without a price would bill nothing")
+            unpriced_under_budget(run.cfg, args.gpu, args.usd_per_h)
             with open(args.samplers) as fh:
                 samplers = json.load(fh)
             objects = run._objects()  # noqa: SLF001
@@ -270,6 +282,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
         elif args.island_command == "remove":
             remove(doc, args.name)
         else:
+            unpriced_under_budget(run.cfg, args.gpu, args.usd_per_h)
             launch_member = move(doc, run.cfg, args.name, gpu=args.gpu, usd_per_h=args.usd_per_h)
         doc = dz.validate(doc)
         for line in changes(current, doc):

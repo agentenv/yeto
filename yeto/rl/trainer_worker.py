@@ -366,7 +366,7 @@ class TrainerWorker:
                              "gpu": member.get("gpu"), "state": STARTING, "relaunches": relaunches,
                              "host": self.host, "usd_per_h": member.get("usd_per_h"), "closed_at": None, "argv": argv,
                              "generation": generation, "pid": pid, "started_at": round(self.clock(), 3),
-                             "why": why, "ended": None, "handoffs": 0,
+                             "why": why, "ended": None, "handoffs": 0, "billing_open": None,
                              "last_end": (record or {}).get("ended") or (record or {}).get("last_end")})
 
     def _reconcile(self, k: int, member: dict[str, Any], syncer: dict[str, Any] | None,
@@ -405,7 +405,7 @@ class TrainerWorker:
                 self._event(k, "moving: its launch stops on the old machines first", to=member.get("gpu"))
                 return
             if state != RUNNING:  # up
-                self.save(k, {**record, "state": RUNNING, "handoffs": 0})
+                self.save(k, {**record, "state": RUNNING, "handoffs": 0, "billing_open": None})
                 if state != STARTING:
                     self._event(k, "launch adopted (already running)", prefix=prefix)
             return
@@ -451,12 +451,15 @@ class TrainerWorker:
                           "billing_open": "another launcher holds the island: billed until removed or run down"})
             self.log(f"fleet: ERROR: trainer island {k}: its launch {record.get('prefix_now')} handed off "
                      f"{handoffs - 1} times in a row ({ended.get('detail')}): another launcher holds the island's "
-                     "records lock; it is not started again, its island STOP is written and it is still billed. "
+                     "records lock; it is not started again, its island STOP is written and it is still billed (it counts "
+                     "toward run.budget until it is removed or `yeto run down` confirms it down). "
                      f"Stop that launcher (`yeto down {record.get('prefix_now')}` on its host), then move or add the "
                      "island again")
             return
-        self.save(k, {**record, "state": STARTING, "started_at": round(self.clock(), 3), "ended": ended,
-                      "handoffs": handoffs})
+        # its machine may still run (a launcher that lost the lock exits 12/13 and tears nothing
+        # down): the time billed so far is closed first, the next launch's time opens after it
+        self.save(k, {**self._closed(record), "state": STARTING, "started_at": round(self.clock(), 3),
+                      "closed_at": None, "ended": ended, "handoffs": handoffs})
         self.log(f"fleet: WARNING: trainer island {k}: its launch handed off ({ended.get('detail')}); started "
                  f"again now ({handoffs}/{HANDOFF_LIMIT})")
         self.ops.start(str(record["prefix_now"]), list(record.get("argv") or ()))
@@ -540,12 +543,28 @@ def billed(objects: Any, now: float | None = None) -> list[tuple[int, float, flo
     return out
 
 
+def island_spend(rows: Any, declared: Any) -> dict[int, tuple[float, float, bool]]:
+    """``{learner id: (billed hours, usd, fallback)}`` from :func:`billed` rows: the dollars
+    each incarnation was billed at its price, plus the hours no price covered at the
+    island's declared price (``declared``: learner id -> USD/h; 0 when absent); ``fallback``
+    when some hours were. What ``run.budget`` (``FleetRuntime.spend``) and the dashboard's
+    cost panel both count."""
+    out = {}
+    for k, hours, usd, unpriced in rows:
+        fallback = unpriced > 0
+        if fallback:
+            usd += unpriced * float(declared.get(k, 0.0) or 0.0)
+        out[int(k)] = (float(hours), float(usd), fallback)
+    return out
+
+
 def mark_down(objects: Any, prefixes: Any, *, log: Callable[[str], None] = print,
               clock: Callable[[], float] = time.time) -> list[int]:
     """``yeto run down`` confirmed the island launches ``prefixes`` torn down: each
     island whose launch runs under one of them (not ended) is recorded ``down`` and its
     incarnation closed for the spend; the next ``yeto run up``, on any host, starts its
-    next incarnation. Returns the learner ids recorded down."""
+    next incarnation. An island given up and still billed (``billing_open``) gets its bill
+    closed and stays given up: it is never restarted. Returns the learner ids recorded down."""
     gone, out = {str(p) for p in prefixes}, []
     for key in sorted(objects.list(f"{lifecycle.STATE_DIR}/")):
         parts = str(key).split("/")
@@ -560,6 +579,11 @@ def mark_down(objects: Any, prefixes: Any, *, log: Callable[[str], None] = print
                 or str(record.get("prefix_now")) not in gone):
             continue
         k, now = int(parts[-2]), clock()
+        if record.get("state") in TERMINAL:  # given up and still billed: its bill closes, it is never restarted
+            save_record(objects, k, {**closed(record, now), "billing_open": None, "down_at": round(now, 3)}, now)
+            log(f"fleet: trainer island {k}: its launch {record.get('prefix_now')} is down; it stays "
+                f"{record.get('state')}")
+            continue
         save_record(objects, k, {**closed(record, now), "state": DOWN, "down_at": round(now, 3), "billing_open": None}, now)
         log(f"fleet: trainer island {k}: its launch {record.get('prefix_now')} is down; the next `yeto run up` "
             "starts it again")

@@ -124,12 +124,15 @@ def load_plan(doc: Any) -> dict | None:
                         "miles_samplers": miles})
     islands.sort(key=lambda x: x["learner"])
     syncer = doc.get("syncer")
-    return {"version": doc["version"], "run": _str(doc.get("run")), "store": _str(doc.get("store")),
-            "dispense": _str(doc.get("dispense")), "islands": islands,
-            # None: a plan older than the syncer price (unpriced); {"usd_per_h": None}: unset (priced by its placement)
-            "syncer": ({"usd_per_h": _f(syncer.get("usd_per_h")),
-                        **({"placement": syncer["placement"]} if isinstance(syncer.get("placement"), dict) else {})}
-                       if isinstance(syncer, dict) else None)}
+    out = {"version": doc["version"], "run": _str(doc.get("run")), "store": _str(doc.get("store")),
+           "dispense": _str(doc.get("dispense")), "islands": islands,
+           # None: a plan older than the syncer price (unpriced); {"usd_per_h": None}: unset (priced by its placement)
+           "syncer": ({"usd_per_h": _f(syncer.get("usd_per_h")),
+                       **({"placement": syncer["placement"]} if isinstance(syncer.get("placement"), dict) else {})}
+                      if isinstance(syncer, dict) else None)}
+    if doc.get("launch") == "per_island":  # its trainers are billed from their launch records (PlanFile)
+        out["launch"] = "per_island"
+    return out
 
 
 def plan_candidates(paths: list[str], max_up: int = 3) -> list[str]:
@@ -424,7 +427,34 @@ class PlanFile:
         return [self._tapes[s] for s in self.substores]
 
     def pump_tapes(self, reducer) -> int:
+        self.pump_trainer_spend(reducer)
         return sum(t.pump(reducer) for t in self.tapes())
+
+    def pump_trainer_spend(self, reducer, now: float | None = None) -> bool:
+        """A fleet launched island by island: each trainer island's spend from its launch
+        records in the run store, by the function ``run.budget`` counts it with
+        (``yeto.rl.trainer_worker.island_spend`` of ``billed``), into
+        ``reducer.trainer_spend`` (``{"at": unix time, "islands": {learner: (hours, usd,
+        fallback)}}``); read at most every ``PLAN_POLL_S``. False when not read."""
+        import time  # noqa: PLC0415
+
+        plan = getattr(reducer, "fleet_plan", None)
+        if self.objects is None or not plan or plan.get("launch") != "per_island":
+            return False
+        tick = self.clock()
+        if getattr(self, "_next_spend", None) is not None and tick < self._next_spend:
+            return False
+        self._next_spend = tick + self.interval_s
+        from yeto.rl import trainer_worker  # noqa: PLC0415
+
+        now = time.time() if now is None else now
+        declared = {isl["learner"]: isl.get("trainer_usd_per_h") or 0.0 for isl in plan["islands"]}
+        try:
+            rows = trainer_worker.billed(self.objects, now)
+        except Exception:  # noqa: BLE001 - the store's own status reports read failures
+            return False
+        reducer.trainer_spend = {"at": now, "islands": trainer_worker.island_spend(rows, declared)}
+        return True
 
 
 # -- which island, which pool -------------------------------------------------------------
