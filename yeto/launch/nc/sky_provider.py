@@ -67,10 +67,26 @@ Requires SkyPilot >= 0.14.3 (``sky.api_status`` / ``sky.api_cancel``). Pool conf
                  "start_timeout_s": 1800, "hard_cap_minutes": 1440, "host_setup": ["sudo docker info"]}
 
 (``"factory": "yeto.launch.nc.sky_provider:from_config"`` is the same provider.)
+
+AWS credentials: the provider's sky requests never carry the run env's ``AWS_PROFILE`` /
+``AWS_*`` keys (sky forwards them to a local API server, where they would override the
+server's own; a run sets them for its object store). ``"aws_profile"`` names the AWS
+profile sky's requests use. A pool whose offers may land on AWS (AWS or unpinned infra)
+is refused, at ``pool --dry-run`` and again before its first order, while the run env
+holds AWS settings a sky API server would apply: a profile without ``aws_profile``, key
+variables (botocore prefers them to any profile), or endpoint / config file variables (a
+server sky starts inherits them). Give the store ``YETO_RL_STORE_S3_PROFILE`` instead.
+``aws_profile`` only reaches a local API server: a remote one (or one enforcing mount
+containment) drops forwarded credentials and uses its own; there, sky's own
+``workspaces.<ws>.aws.profile`` server config is the knob. The spot watchdog's provider
+route has no ``aws_profile`` (its Nebius offers make no AWS call).
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
 import hashlib
 import json
 import os
@@ -90,7 +106,7 @@ UP, INIT, STOPPED = "UP", "INIT", "STOPPED"
 KIND, LEDGER_KIND = "sky", "sky_cluster"
 CONFIG_KEYS = frozenset({"kind", "factory", "resources", "price_usd_h", "offers", "candidates", "cluster_prefix",
                          "ssh_key", "host_setup", "start_timeout_s", "task_yaml", "envs", "secrets",
-                         "hard_cap_minutes"})
+                         "hard_cap_minutes", "aws_profile"})
 # A cluster with no sky job is autodowned this long after its launch (wait_for=none).
 DEFAULT_HARD_CAP_MINUTES = 24 * 60
 # sky request states (sky.server.requests.requests.RequestStatus) of a request still in flight
@@ -124,6 +140,132 @@ def _status_name(value: Any) -> str:
 
 
 OWNER_LABEL = "yeto-run"
+
+# The AWS credential variables sky's client forwards to a local API server with every
+# request (sky.server.requests.payloads.EXTERNAL_LOCAL_ENV_VARS), where they override
+# the server's own. A run's env sets AWS_PROFILE for its object store (an R2 profile,
+# say): forwarded, sky would call AWS with it. SkyProvider's requests carry none of
+# them; ``aws_profile`` (provider config) is the profile its requests use instead.
+AWS_FORWARDED_ENVS = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                      "AWS_SESSION_TOKEN")
+AWS_PROFILE_ENVS = ("AWS_PROFILE", "AWS_DEFAULT_PROFILE")  # replaced by ``aws_profile``
+AWS_KEY_ENVS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")  # beat any profile in botocore
+# Not forwarded per request, but inherited by a local API server sky starts from this
+# process (os.environ), where botocore applies them to sky's AWS calls
+AWS_INHERITED_ENVS = ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_STS", "AWS_ENDPOINT_URL_EC2",
+                      "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE")
+_REQUEST_ENV: contextvars.ContextVar[dict[str, str | None] | None] = contextvars.ContextVar(
+    "yeto_sky_request_env", default=None)  # copied into sky's own worker threads (run_in_parallel)
+_SENTINEL = "yeto-sky-request-env-self-check"
+
+
+def aws_request_env(aws_profile: str | None) -> dict[str, str | None]:
+    """The request env overrides of a provider: every forwarded AWS variable dropped,
+    ``AWS_PROFILE`` set to ``aws_profile`` when given."""
+    env: dict[str, str | None] = {name: None for name in AWS_FORWARDED_ENVS}
+    if aws_profile:
+        env["AWS_PROFILE"] = aws_profile
+    return env
+
+
+def _scoped_request_env(original):
+    """sky's ``request_body_env_vars`` with the calling SkyProvider's overrides applied
+    (None drops the variable); other callers' requests are left as sky builds them."""
+    @functools.wraps(original)
+    def request_body_env_vars(*args: Any, **kw: Any) -> dict:
+        env = dict(original(*args, **kw))
+        for name, value in (_REQUEST_ENV.get() or {}).items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+        return env
+
+    request_body_env_vars.yeto_scoped = True  # type: ignore[attr-defined]
+    return request_body_env_vars
+
+
+class ScopeUnavailable(RuntimeError):
+    """This sky cannot have its request env scoped (a deterministic failure: no retry)."""
+
+
+def install_request_env_scope() -> None:
+    """Wrap sky's request env builder once (idempotent), then prove it is in effect: a
+    request body built in a scope carries the scope's sentinel. Raises RuntimeError when
+    sky has no such builder or does not use it (a sky version that moved it:
+    :class:`ScopeUnavailable`, final) or the self-check itself raised (a plain
+    RuntimeError, tried again later): the provider then refuses to order rather than
+    forward the run's AWS credentials."""
+    try:
+        from sky.server.requests import payloads  # noqa: PLC0415
+    except ImportError as error:
+        raise ScopeUnavailable(f"sky has no request payloads module ({error})") from error
+    current = getattr(payloads, "request_body_env_vars", None)
+    if current is None:
+        raise ScopeUnavailable("sky has no payloads.request_body_env_vars to scope the request env")
+    if not getattr(current, "yeto_scoped", False):
+        payloads.request_body_env_vars = _scoped_request_env(current)
+    token = _REQUEST_ENV.set({"AWS_PROFILE": _SENTINEL})
+    try:
+        seen = payloads.RequestBody().env_vars.get("AWS_PROFILE")
+    except Exception as error:  # noqa: BLE001
+        raise RuntimeError(f"sky request env self-check failed ({error!r:.160})") from error
+    finally:
+        _REQUEST_ENV.reset(token)
+    if seen != _SENTINEL:
+        raise ScopeUnavailable("sky builds its request env without payloads.request_body_env_vars: the run's "
+                               "AWS credentials cannot be kept out of sky's requests on this sky version")
+
+
+@contextlib.contextmanager
+def request_env_scope(overrides: dict[str, str | None]):
+    """Sky requests built inside (this thread, and work sky hands to threads with a
+    copied context) carry ``overrides``."""
+    token = _REQUEST_ENV.set(overrides)
+    try:
+        yield
+    finally:
+        _REQUEST_ENV.reset(token)
+
+
+class _ScopedSky:
+    """The sky module, every SDK call made inside the provider's request env scope.
+    ``refuse``: every SDK call raises it instead (no scope, and an unscoped request
+    would carry the wrong AWS credentials)."""
+
+    def __init__(self, module: Any, overrides: dict[str, str | None], refuse: str | None = None):
+        self._module, self._overrides, self._refuse = module, overrides, refuse
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._module, name)
+        if not callable(value) or isinstance(value, type):
+            return value
+
+        @functools.wraps(value)
+        def call(*args: Any, **kw: Any) -> Any:
+            if self._refuse:
+                raise RuntimeError(self._refuse)
+            with request_env_scope(self._overrides):
+                return value(*args, **kw)
+
+        return call
+
+
+def unscoped_refusal(aws_profile: str | None, environ=None, what: str = "sky requests",
+                     cluster: str | None = None) -> str | None:
+    """Without the request env scope, a sky request would carry this process's AWS
+    variables. Refused when they or ``aws_profile`` say another account than the
+    server's own: the message gives the manual command."""
+    environ = os.environ if environ is None else environ
+    forwarded = [n for n in AWS_FORWARDED_ENVS if environ.get(n)]
+    if not aws_profile and not forwarded:
+        return None
+    target = cluster or "<cluster>"
+    manual = (f"AWS_PROFILE={aws_profile} sky down {target}" if aws_profile else
+              f"env -u {' -u '.join(forwarded)} sky down {target}")
+    return (f"sky provider: {what} refused without the request env scope (they would carry "
+            f"{', '.join(forwarded) or 'no AWS_PROFILE'} instead of "
+            f"{'aws_profile ' + aws_profile if aws_profile else 'the server credentials'}); by hand: {manual}")
 
 
 def owner_token(run_id: str) -> str:
@@ -161,7 +303,7 @@ class SkyProvider:
                  task_yaml: str | None = None, envs: dict[str, str] | None = None,
                  secrets: dict[str, str] | None = None, sky: Any = None, record: Path | None = None,
                  clock=time.time, exact_prefix: str | None = None,
-                 hard_cap_minutes: float = DEFAULT_HARD_CAP_MINUTES):
+                 hard_cap_minutes: float = DEFAULT_HARD_CAP_MINUTES, aws_profile: str | None = None):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", cluster_prefix):
             raise ValueError("cluster_prefix: lower-case letters, digits and '-'")
         if offers is None:
@@ -181,6 +323,8 @@ class SkyProvider:
             raise ValueError("sky provider: hard_cap_minutes must be >= 1")
         self.hard_cap_minutes = int(hard_cap_minutes)
         self._patched = False
+        self.aws_profile = aws_profile or None
+        self.request_env = aws_request_env(self.aws_profile)
         self.task_yaml = os.path.expanduser(task_yaml) if task_yaml else None
         self.envs, self.secrets = dict(envs or {}), dict(secrets or {})
         self._sky, self.clock = sky, clock
@@ -190,11 +334,28 @@ class SkyProvider:
     # -- sky
     @property
     def sky(self):
+        """The sky SDK; every call sends :attr:`request_env` (no run AWS credentials)."""
         if self._sky is None:
             import sky  # noqa: PLC0415
 
             self._sky = sky
-        return self._sky
+        refuse = None
+        if self._real_sky and not getattr(self, "_env_scoped", False):
+            try:
+                install_request_env_scope()
+                self._env_scoped, self._scope_error = True, None
+            except RuntimeError as error:
+                # launches are refused (_install_patches). A version that cannot be scoped is final;
+                # a self-check that raised is tried again on the next call
+                self._env_scoped = isinstance(error, ScopeUnavailable)
+                if getattr(self, "_scope_error", None) != str(error):
+                    print(f"[sky-provider] WARNING: {error}; new launches are refused", flush=True)
+                self._scope_error = str(error)
+        if self._real_sky and getattr(self, "_scope_error", None):
+            # status / down / cancel run unscoped only when that sends no other account's AWS
+            # credentials; else they raise (a status error is never read as the cluster ended)
+            refuse = unscoped_refusal(self.aws_profile, what="sky status / down / cancel")
+        return _ScopedSky(self._sky, self.request_env, refuse)
 
     def _doc(self) -> dict[str, Any]:
         try:
@@ -287,6 +448,12 @@ class SkyProvider:
 
         if self._real_sky:  # its API server must run this Python's sky version
             sky_patches.require_matching_api_server()
+            problems = aws_env_problems(self, dict(os.environ))  # any orderer, not only a checked pool start
+            self.sky  # noqa: B018 - installs the request env scope (or records why it could not)
+            if getattr(self, "_scope_error", None):
+                problems.append(f"sky provider: refusing to launch: {self._scope_error}")
+            if problems:
+                raise ValueError(problems[0])
         sky_patches.install()
         self._patched = True
         version = getattr(self.sky, "__version__", None)
@@ -383,7 +550,9 @@ class SkyProvider:
                                  "offer": offer.record(), "launch_state": SUBMITTED,
                                  **({"num_nodes": num_nodes} if num_nodes > 1 else {})}
         self._save_doc(doc)  # recorded before the launch: a crash mid-launch still leaves it ours to down
-        _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id)
+        # pool / aws_profile: a crash before "created" leaves a row the cleanup still downs as this pool's
+        _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id,
+                       pool=True, **({"aws_profile": self.aws_profile} if self.aws_profile else {}))
         self.last_offer_key = offer.key  # the pool's order_failed event names it (offer ledger)
         try:
             task = self._task(name, offer, num_nodes)
@@ -483,9 +652,10 @@ class SkyProvider:
         (doc.get("offers") or {}).pop(key, None)
         self._save_doc(doc)
         offer = row.get("offer") or {}
+        extra = {"aws_profile": self.aws_profile} if self.aws_profile else {}  # the cleanup's sky down uses it
         _record_ledger("created", LEDGER_KIND, name, name, offer=key, price_usd_h=offer.get("price_usd_h"),
                        run=self.run_id, slot=row.get("slot"), pool=True,
-                       **({"num_nodes": row["num_nodes"]} if row.get("num_nodes") else {}))
+                       **({"num_nodes": row["num_nodes"]} if row.get("num_nodes") else {}), **extra)
 
     def _launch_failed(self, name: str, error: BaseException) -> None:
         """The launch failed: the next order tries the next offer; a cluster it left
@@ -729,4 +899,64 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
     for env_name in provider.secrets.values():
         if not os.environ.get(env_name):
             problems.append(f"sky provider: secret variable {env_name} is not set")
+    problems += aws_env_problems(provider, dict(os.environ))
+    try:
+        install_request_env_scope()  # local only: builds a request body, sends nothing
+    except RuntimeError as error:
+        problems.append(f"sky provider: {error}")
     return problems
+
+
+def _uses_aws(provider: SkyProvider) -> bool:
+    """Some offer may land on AWS: its infra / cloud is AWS, a wildcard (``*/<region>``),
+    or not pinned at all."""
+    for offer in provider.offers:
+        where = str(offer.resources.get("infra") or offer.resources.get("cloud") or "").lower()
+        if where.split("/", 1)[0] in ("", "*", "aws"):
+            return True
+    return False
+
+
+def start_problems(cfg: dict[str, Any]) -> list[str]:
+    """What refuses a sky pool's loop at its start (``pool --config``), before any order:
+    a refusal at the first order would only cool that offer down and retry every tick."""
+    try:
+        provider = from_config(cfg, str(cfg.get("run") or cfg.get("shard_base")), sky=object())
+    except (ValueError, TypeError, KeyError) as error:
+        return [str(error)]
+    problems = aws_env_problems(provider, dict(os.environ))
+    try:
+        install_request_env_scope()
+    except RuntimeError as error:
+        problems.append(f"sky provider: {error}")
+    return problems
+
+
+def start_refusal(cfg: dict[str, Any]) -> str | None:
+    """The message a sky pool's start (``pool --config`` or an in-process controller) exits with."""
+    refused = start_problems(cfg)
+    return f"pool {cfg.get('shard_base')}: " + "; ".join(refused) if refused else None
+
+
+def aws_env_problems(provider: SkyProvider, env: dict[str, str]) -> list[str]:
+    """The run env's AWS settings that would reach sky's AWS calls, for a provider whose
+    offers may land on AWS (Nebius / Kubernetes pools make no AWS call):
+
+    * ``AWS_PROFILE`` / ``AWS_DEFAULT_PROFILE`` without ``provider.aws_profile``: the
+      provider's requests drop them, but a local API server sky starts inherits them;
+    * ``AWS_ACCESS_KEY_ID`` / ``_SECRET_ACCESS_KEY`` / ``_SESSION_TOKEN``, ``aws_profile``
+      or not: in an inherited environment botocore prefers them to any profile;
+    * ``AWS_ENDPOINT_URL[_STS|_EC2]``, ``AWS_SHARED_CREDENTIALS_FILE``, ``AWS_CONFIG_FILE``:
+      never forwarded per request, but inherited the same way (an R2 endpoint would
+      take sky's STS and EC2 calls)."""
+    if not _uses_aws(provider):
+        return []
+    found = [n for n in AWS_KEY_ENVS + AWS_INHERITED_ENVS if env.get(n)]
+    if not provider.aws_profile:
+        found = [n for n in AWS_PROFILE_ENVS if env.get(n)] + found
+    if not found:
+        return []
+    return [f"sky provider: the run env sets {', '.join(found)}, which sky would use for its own AWS calls "
+            "(forwarded to a local sky API server, or inherited by one sky starts). Give the object store its "
+            "credentials with YETO_RL_STORE_S3_PROFILE (and YETO_RL_STORE_S3_ENDPOINT_URL) instead of AWS_*, "
+            "and name sky's AWS profile with provider.aws_profile"]
