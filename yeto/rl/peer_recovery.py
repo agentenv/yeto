@@ -77,6 +77,7 @@ from yeto.protocol import BcastFragment, SyncerClient
 from yeto.rl.engine.object_store import (
     DirectoryObjectStore,
     ObjectStore,
+    ObjectStoreError,
     download_file,
     upload_file,
 )
@@ -264,11 +265,17 @@ def _upload_files(objects: ObjectStore, items: Sequence[tuple[str, Path]]) -> No
 def _download_files(objects: ObjectStore, items: Sequence[tuple[str, Path]]) -> list[str]:
     """Download every ``(key, path)``; returns the keys that are missing. Through
     the store's many-file download when it has one (``S3ObjectStore.read_files``:
-    files over ``download_processes`` processes), else one file after the other."""
+    files over ``download_processes`` processes), else one file after the other. A
+    download process that fails (killed for memory, a broken import) is a refused
+    snapshot like a missing file: :func:`recover` then tells the syncer, which asks
+    the next donor or takes the degraded path, instead of the island failing."""
     read_files = getattr(objects, "read_files", None)
     if read_files is None or len(items) <= 1:
         return [key for key, path in items if not download_file(objects, key, path)]
-    return list(read_files([(key, str(path)) for key, path in items]))
+    try:
+        return list(read_files([(key, str(path)) for key, path in items]))
+    except ObjectStoreError as exc:
+        raise SnapshotIntegrityError(f"snapshot download of {len(items)} file(s) failed: {exc}") from exc
 
 
 def _tree(directory: Path) -> list[str]:

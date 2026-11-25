@@ -388,3 +388,29 @@ def test_a_one_file_snapshot_keeps_the_single_file_transfer(tmp_path):
     assert objects.uploads == 1 and objects.batches == []
     assert store.get(locator, sha256).state["w"].tolist() == [0.0, 0.0]
     assert objects.batches == []
+
+
+class _FailingDownloadObjects(_BulkObjects):
+    """``read_files`` whose download process died (``S3ObjectStore`` raises ``ObjectStoreError``)."""
+
+    def read_files(self, items):
+        from yeto.rl.engine.object_store import ObjectStoreError
+
+        self.batches.append(("read", len(items)))
+        raise ObjectStoreError("s3://bkt/runs/a: 1 of 2 download processes failed (exit [-9]); their stderr is above")
+
+
+def test_a_failed_download_process_is_a_refused_snapshot_not_a_failed_island(tmp_path):
+    objects = _FailingDownloadObjects()
+    store = SnapshotStore(objects, staging=tmp_path / "stage")
+    source = _serve(store, FileIsland([3, 3]), rp.SnapshotRequest(1, 4, 2, (3, 3)))
+    with pytest.raises(SnapshotIntegrityError, match="download processes failed"):
+        store.fetch(source.text, source.sha256, tmp_path / "into")
+
+    client = _ScriptedClient(events=[source])
+    me = FileIsland([0, 0])
+    with pytest.raises(TimeoutError):
+        recover(client, me, store, timeout=0.3)
+    assert client.sent[0][0] == "failed" and "download processes failed" in client.sent[0][1], \
+        "the syncer is told (next donor or degraded) instead of the island failing"
+    assert me.restored is None
