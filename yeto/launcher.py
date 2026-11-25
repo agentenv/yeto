@@ -838,10 +838,20 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             if kept_syncer is not None:  # the adopted islands keep talking to the syncer that still runs
                 syncer_job, head_ip = kept_syncer
             else:
+                from .cost.prices import syncer_vm_usd_h
+                from .launch.syncer import syncer_cloud
+
+                # billed from its order to its confirmed release (run.budget, yeto cost): at the
+                # price table's syncer row of its cloud, else conservatively, never at 0
+                syncer_rate, syncer_price_note, conservative = syncer_vm_usd_h(syncer_cloud(args))
+                if conservative:
+                    print(f"[launcher] WARNING: syncer cluster {syncer_cluster}: {syncer_price_note}", flush=True)
+                syncer_vm = {"role": "syncer", "cloud": syncer_cloud(args), "usd_per_hour": syncer_rate,
+                             "price_note": syncer_price_note}
                 if island_states is not None:
                     island_states.guard_order(syncer_cluster)  # the lock still ours (raises: nothing ordered)
                 print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
-                cost_ledger.created("sky_cluster", syncer_cluster, syncer_cluster, role="syncer")
+                cost_ledger.created("sky_cluster", syncer_cluster, syncer_cluster, **syncer_vm)
                 rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
                 syncer_job, syncer_handle = sky.stream_and_get(rid)
                 head_ip = str(syncer_handle.head_ip)

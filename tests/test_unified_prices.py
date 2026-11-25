@@ -322,3 +322,39 @@ def test_a_sampler_pool_sky_cluster_is_billed_at_its_offer_price_times_its_nodes
     assert items["yeto-smp-r-2"].rate_usd_per_hour == pytest.approx(12.64)
     assert items["yeto-smp-r-2"].estimated_usd == pytest.approx(6.32)
     assert items["yeto-smp-r-3"].rate_usd_per_hour == pytest.approx(9.0)  # a stated rate wins
+
+
+def test_a_syncer_vm_is_billed_from_its_order_to_its_release_at_its_syncer_row():
+    """A per-island fleet's syncer launch orders a sky VM of its own: billed at the price table's
+    syncer row of its cloud, from its order to its confirmed release, never unpriced (0 in the
+    run's spend). A ledger written before it carried a price is billed the same way; a cloud
+    without a syncer row is billed at the dearest syncer row (conservative, said so)."""
+    from yeto.cost.billing import Rates, resource_costs
+    from yeto.cost.ledger import Resource
+
+    aws = prices.syncer_usd_h("aws")
+    assert aws and aws > 0
+    recorded = Resource("sky_cluster", "r-syncer", "r-syncer", 0.0,
+                        {"role": "syncer", "cloud": "aws", "usd_per_hour": aws, "price_note": "price table syncer@aws"},
+                        released_at=7200.0)
+    old = Resource("sky_cluster", "o-syncer", "o-syncer", 0.0, {"role": "syncer"})  # still open
+    elsewhere = Resource("sky_cluster", "n-syncer", "n-syncer", 0.0, {"role": "syncer", "cloud": "nebius"},
+                         released_at=3600.0)
+    summary = resource_costs([recorded, old, elsewhere], 10800.0, rates=Rates())
+    items = {i.name: i for i in summary.items}
+    assert not summary.unpriced
+    assert items["r-syncer"].rate_usd_per_hour == pytest.approx(aws)
+    assert items["r-syncer"].estimated_usd == pytest.approx(2 * aws)  # order to release, not to now
+    dearest = max(r.usd_h for (name, _p), r in prices.table().services.items() if name == prices.SYNCER)
+    # no cloud recorded (an older ledger): not known, so counted at the dearest syncer row
+    assert items["o-syncer"].rate_usd_per_hour == pytest.approx(dearest)
+    assert items["o-syncer"].estimated_usd == pytest.approx(3 * dearest)  # open: to now
+    assert items["n-syncer"].rate_usd_per_hour == pytest.approx(dearest) and dearest >= aws
+    assert "dearest syncer row" in items["n-syncer"].note
+
+
+def test_the_syncer_vm_price_is_never_zero_and_says_when_it_is_conservative():
+    rate, note, conservative = prices.syncer_vm_usd_h("aws")
+    assert rate == prices.syncer_usd_h("aws") and not conservative and "syncer@aws" in note
+    rate, note, conservative = prices.syncer_vm_usd_h("verda")
+    assert rate and rate > 0 and conservative and "verda" in note

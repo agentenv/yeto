@@ -255,6 +255,23 @@ def syncer_usd_h(provider: str, *, path: str | None = None) -> float | None:
     return None if row is None else row.usd_h
 
 
+def syncer_vm_usd_h(provider: str, *, path: str | None = None) -> tuple[float | None, str, bool]:
+    """``(USD per hour, where it comes from, conservative)`` of a syncer VM of its own on
+    ``provider`` (a per-island fleet's syncer launch, a fleet launch's syncer cluster): the
+    billing ``services.syncer`` row of that provider; without one, the dearest billing syncer
+    row of any provider (``conservative`` True: never counted as 0, a spend may be over, not
+    under). None only when the table has no syncer row at all (unpriced)."""
+    row = service(SYNCER, provider, path=path)
+    if row is not None:
+        return row.usd_h, f"price table {row.cited()}", False
+    rows_ = [r for (name, _p), r in table(path).services.items() if name == SYNCER and r.grade == BILLING]
+    if not rows_:
+        return None, f"no price table syncer row (for {provider or 'an unknown provider'} or any other)", True
+    dearest = max(rows_, key=lambda r: r.usd_h)
+    return dearest.usd_h, (f"no price table syncer row for {provider or 'an unknown provider'}: counted at the "
+                           f"dearest syncer row, {dearest.cited()}"), True
+
+
 # -- views the older tables had (kept in their shape for their readers) -------------
 
 def per_gpu_usd_h(provider: str, *, path: str | None = None) -> dict[str, float]:
