@@ -1469,7 +1469,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             cost_guard.stop()  # the teardown below releases everything; no forced stop mid-way
         # a launcher that lost the island records' lock tears nothing down: the holder owns the fleet
         if hands_off_exit is None and _lost_island_records(island_states):
-            hands_off_exit = ISLAND_RECORDS_LOCKED_EXIT
+            # 12: another launcher holds the records; 13: not confirmed past this holder's lease
+            hands_off_exit = (ISLAND_RECORDS_LOCKED_EXIT if island_states.fenced is not None
+                              else ISLAND_RECORDS_UNKNOWN_EXIT)
         hands_off = hands_off_exit is not None
         if hands_off:
             args._hands_off_exit = hands_off_exit  # the worker runs no backstop cleanup either

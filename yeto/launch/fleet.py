@@ -291,6 +291,9 @@ class FleetController:
             self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
             self.syncer_probe = self.syncer_restart = None
         self.downed_clusters: set = set()
+        # teardowns skipped while the records lock could not be confirmed past its lease: tried
+        # again each poll once it is confirmed (the island would bill until the launcher ends)
+        self.pending_downs: set = set()
         # Learners whose recovery is disabled regardless of recover_timeout
         # (Verda without the verified sky patch: a same-name relaunch there
         # can delete the running node).
@@ -426,6 +429,7 @@ class FleetController:
             if self._abort_error is not None:
                 raise self._abort_error
             self._raise_if_fenced()
+            self._retry_pending_downs()
             self._fleet("cost_tick")
             self._poll_rollout()
             if self.syncer is not None:
@@ -1174,6 +1178,11 @@ class FleetController:
             file=sys.stderr,
         )
 
+    def _retry_pending_downs(self) -> None:
+        for name in sorted(self.pending_downs):
+            self.pending_downs.discard(name)
+            self._down(name)  # skipped again (and kept pending) while the lock is still not confirmed
+
     def _down(self, name: str, force: bool = False) -> None:
         if self.recorder is not None:  # the lock checked now, not only the cached view
             try:
@@ -1182,7 +1191,10 @@ class FleetController:
                 pass  # the cached view below says so too
             except lifecycle.IslandRecordsUnconfirmed as error:
                 if error.lease_over:  # another launcher may hold the records: no teardown now
-                    print(f"[launcher] NOT tearing down {name} now: {error}", file=sys.stderr)
+                    if name not in self.pending_downs:
+                        print(f"[launcher] NOT tearing down {name} now: {error}; tried again once the "
+                              "lock is confirmed", file=sys.stderr)
+                    self.pending_downs.add(name)
                     return
                 # within this holder's lease: still ours (nobody claims the records without the store)
                 print(f"[launcher] {name}: tearing down unconfirmed ({error})", file=sys.stderr)
