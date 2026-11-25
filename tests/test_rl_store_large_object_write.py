@@ -130,11 +130,14 @@ def test_a_write_above_the_threshold_goes_in_parts_and_reads_back_whole():
 def test_parts_are_equal_but_the_last_and_stay_under_the_part_limit():
     fake = LimitedS3()
     store = _store(fake, part_checksum=False)
-    sizes = []
+    sizes = {}  # by part number: the parts go up concurrently, in no fixed order
     real = fake.upload_part
-    fake.upload_part = lambda **kw: (sizes.append(len(kw["Body"])), real(**kw))[1]
-    store.write("g", _data(3 * MIN_PART_BYTES + 1))
-    assert sizes[:-1] == [MIN_PART_BYTES] * 3 and sizes[-1] == 1  # R2: all parts but the last the same size
+    fake.upload_part = lambda **kw: (sizes.__setitem__(kw["PartNumber"], len(kw["Body"])), real(**kw))[1]
+    data = _data(3 * MIN_PART_BYTES + 1)
+    store.write("g", data)
+    # R2: all parts but the last the same size
+    assert sizes == {1: MIN_PART_BYTES, 2: MIN_PART_BYTES, 3: MIN_PART_BYTES, 4: 1}
+    assert store.read("g") == data  # completed in part-number order
 
 
 def test_a_reader_never_sees_a_large_object_before_its_upload_completes():
