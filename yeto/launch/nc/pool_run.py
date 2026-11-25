@@ -842,8 +842,13 @@ def attach_offer_ledger(cfg: dict[str, Any], pool: IslandPool, store: Any = None
         except Exception as error:  # noqa: BLE001 - no store: the ledger is kept for this run only
             _say(f"pool: offer ledger kept in memory only (no store: {error!r})"[:300])
             store = None
+    from ..rollout.offers import Offer, legacy_aliases  # noqa: PLC0415
+
     provider = getattr(pool.ops, "provider", None)
+    offers = getattr(provider, "offers", None)
+    offers = [o for o in offers if isinstance(o, Offer)] if isinstance(offers, (list, tuple)) else []
     sink = ol.PoolLedger(ol.OfferLedger(), writer=f"{cli.run_id(cfg)}-{cfg['shard_base']}",
+                         aliases=legacy_aliases(offers),
                          default_offer=offer_key(cfg), offer_of=getattr(provider, "offer_of", None), store=store,
                          log=_say, event=pool.events, background=background,
                          may_write=lambda: pool.detached is None)  # a pool that lost its store lock writes nothing
