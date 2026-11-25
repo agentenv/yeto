@@ -8,7 +8,8 @@ launch with its island STOP and starts the next incarnation (``<prefix>-m1``) on
 machines under the **same learner id**. To the syncer this is a short absence, not a
 removal: the moved island comes back as learner 1, catches up to the newest outer
 weights and merges again. Island 0 runs one launch from start to end and no round times
-out. With a LEAVE the rounds never wait for the absent island. Without one (the move tears
+out. With a LEAVE the rounds never wait for the absent island (the moved incarnation starts
+once the syncer has handled that LEAVE, as on real machines that take minutes to come up). Without one (the move tears
 the old machines down while island 1 holds a PULL) the moved incarnation starts only after
 island 1's lease: the round it held waits that one lease (the syncer releases the slot of
 an island gone a lease, #788), merges without it, and island 0 goes on. The final weights
@@ -97,6 +98,18 @@ def test_a_moved_island_comes_back_under_its_learner_id(syncer_binary, tmp_path,
     def away() -> bool:  # torn down without LEAVE, not back yet
         return not leave and launches.stopped_at is not None and not back()
 
+    def left() -> bool:  # the syncer handled the departure of island 1's first launch
+        tape = tmp_path / "tape.jsonl"
+        return tape.exists() and any('"pool_leave"' in line and '"island_id":1,' in line
+                                     for line in tape.read_text().splitlines())
+
+    def returning() -> bool:  # may the worker start the moved incarnation yet?
+        if launches.stopped_at is None or launches.started("r-i1-m1"):
+            return True
+        if leave:  # new machines take minutes: the old connection's LEAVE is handled first
+            return left()
+        return time.monotonic() - launches.stopped_at >= RETURN_AFTER_S  # back after its lease
+
     def drain(k):
         client = launches.clients[k]
         client.check_health()
@@ -137,9 +150,8 @@ def test_a_moved_island_comes_back_under_its_learner_id(syncer_binary, tmp_path,
             beat[0] = time.monotonic()
             for client in launches.clients.values():
                 client.heartbeat(0)
-        if not (away() and launches.started("r-i1-m1") == 0
-                and time.monotonic() - launches.stopped_at < RETURN_AFTER_S):
-            worker.step()  # without LEAVE the moved incarnation starts only after island 1's lease
+        if returning():
+            worker.step()
         for k in list(launches.catching) or list(launches.clients):
             if not leave and states.stop_requested(k) is not None:
                 continue  # its old machines are being torn down: it answers nothing more
