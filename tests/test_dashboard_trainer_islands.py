@@ -447,6 +447,44 @@ def test_a_moving_or_relaunching_island_reads_so(rec, state, reason):
         assert "ordering machines" in got["detail"]
 
 
+def _moving_state(tmp_path: Path, *, since: float | None) -> dict:
+    """The fixture store's fleet state with island 0's next launch, after a move, ordering its
+    machines since ``since`` (None: no time on its record)."""
+    st = _state(tmp_path)
+    st["trainers"][0]["record"] = {**st["trainers"][0]["record"], "launch_state": "starting", "life_state": "ordering",
+                                   "why": f"moved to {AWS}", "relaunches": 0, "incarnation": 1, "since": since,
+                                   "started_at": None, "stop": None}
+    st["trainers"][0]["now"] = fleet_islands.island_state(st["trainers"][0]["record"], st["trainers"][0])
+    return st
+
+
+def _blocked_fleet():
+    """The fleet fixture where island 1 pushed the next step and island 0 (moving) never will."""
+    r = fleet_reducer()
+    r.feed({"event": "island_leave", "island_id": 0, "time_unix": r.max_ts + 5, "reason_name": "STOPPED"})
+    r.feed({"event": "rl_fragment_push", "island_id": 1, "time_unix": r.max_ts + 6, "global_step": 11,
+            "fragment_id": 0, "base_version": 10, "payload_bytes": 1, "round_attempt": 1})
+    return r
+
+
+@pytest.mark.parametrize("ago", [None, 1800 + 600])
+def test_an_island_moving_too_long_raises_the_stuck_and_blocked_alerts_again(tmp_path, ago):
+    """Moving or relaunching for longer than MOVE_QUIET_S (or with no time on its record): its
+    card still reads starting, but the rounds it holds up are blocked and alerted again."""
+    from yeto.dashboard.topology_diloco import MOVE_QUIET_S
+
+    assert MOVE_QUIET_S == 1800
+    r = _blocked_fleet()
+    now = r.max_ts + 900
+    r.load_fleet_state(_moving_state(tmp_path, since=None if ago is None else now - ago))
+    view = r.page_view(now=now)
+    card = next(c for c in view["overview"]["islands"] if c["id"] == "0")
+    assert card["status"] == "starting"
+    d = view["topology"]["diloco"]
+    assert any(x["blocked"] for x in d["rounds"])
+    assert [a for a in view["overview"]["alerts"] if a["rule"] == "diloco_round_open"]
+
+
 def test_a_moving_islands_old_leave_does_not_make_it_lost(tmp_path):
     """The old launch wrote island_leave STOPPED (its STOP: moving); the new launch orders its
     machines on the target cloud: the card reads starting (moving to <target>), not left / lost."""
@@ -459,14 +497,21 @@ def test_a_moving_islands_old_leave_does_not_make_it_lost(tmp_path):
     assert any(x["blocked"] for x in diloco(r, now=now)["rounds"])
     before = {c["id"]: c for c in r.overview(now=now)["islands"]}
     assert before["0"]["status"] in ("left", "lost")
-    st = _state(tmp_path)
-    st["trainers"][0]["record"] = {**st["trainers"][0]["record"], "launch_state": "starting", "life_state": "ordering",
-                                   "why": f"moved to {AWS}", "relaunches": 0, "incarnation": 1}
-    st["trainers"][0]["now"] = fleet_islands.island_state(st["trainers"][0]["record"], st["trainers"][0])
-    r.load_fleet_state(st)
+    r.load_fleet_state(_moving_state(tmp_path, since=now - 600))
     view = r.page_view(now=now)
     card = next(c for c in view["overview"]["islands"] if c["id"] == "0")
     assert card["status"] == "starting" and card["left"] is None and card["waiting_reason"] == f"moving to {AWS}"
     assert not [a for a in view["overview"]["alerts"] if a.get("island") == "0" and a["rule"] in ("island_lost", "heartbeat")]
     d = view["topology"]["diloco"]
     assert d["stuck"] == [] and d["rounds"] and not any(x["blocked"] for x in d["rounds"])
+
+
+def test_a_moving_islands_quiet_time_starts_at_the_newest_of_its_marks(tmp_path):
+    """The STOP that began a move (or the new launch's start) is newer than the old launch's
+    lifecycle state: the quiet time counts from it."""
+    r = fleet_reducer()
+    st = _moving_state(tmp_path, since=T0)
+    st["trainers"][0]["record"].update(started_at=T0 + 50, stop={"at": T0 + 90, "by": "trainer worker",
+                                                                 "reason": f"moving to {AWS}"})
+    r.load_fleet_state(st)
+    assert r._trainer_island_now(r.islands["0"])["state_since"] == T0 + 90
