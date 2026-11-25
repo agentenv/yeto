@@ -2935,10 +2935,14 @@ def island_stop_exit(error: BaseException, stream=None) -> int | None:
     syncer's refusal: ``yeto.launch.island_lifecycle.island_stop_line``), after its traceback and
     the ``[yeto-island-stop]`` line the launcher's log probes read. A relaunch would stop the
     same way and bill a machine meanwhile, so the exit is not retried (Modal's function retries
-    and the fleet controller both see it). None for any other error (raised as before)."""
-    from yeto.config_errors import ISLAND_STOP_EXIT
+    and the fleet controller both see it). None for any other error, and for every error while
+    the launch's ``launch.deterministic_stop`` is off (``YETO_RL_DETERMINISTIC_STOP`` unset: a
+    single trainer by default): raised as before."""
+    from yeto.config_errors import ISLAND_STOP_EXIT, deterministic_stop_on
     from yeto.launch.island_lifecycle import island_stop_line
 
+    if not deterministic_stop_on():  # launch.deterministic_stop off: raised as before (exit 1)
+        return None
     line = island_stop_line(error)
     if line is None:
         return None

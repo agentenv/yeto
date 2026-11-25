@@ -143,6 +143,12 @@ def parse_line(line):
     return raw
 
 
+def _breaker_stop(record: dict) -> bool:
+    """Whether ``record`` is a trainer breaker's stop (``rl_breaker`` of layer trainer, action stop)."""
+    return (record.get("event") == "rl_breaker" and record.get("layer") == "trainer"
+            and record.get("action") == "stop" and record.get("state", "trip") == "trip")
+
+
 class TapeCollector:
     """Appends each new echoed record of a log stream to ``path``."""
 
@@ -173,16 +179,30 @@ class TapeCollector:
         # action stop), ``rl_strict_failure`` and ``island_leave`` (``island_stop``). The fleet
         # controller never relaunches an island a breaker, a strict check or a refusal stopped.
         self._stop_records: dict[str, dict] = {}
+        # trainer breaker -> the incarnations of the island its stop ended, over the whole tape
+        # (an earlier launcher's records too): the fleet controller's one relaunch on a new
+        # machine (``island_lifecycle.NEW_MACHINE_BREAKERS``) is not given twice.
+        self._stop_counts: dict[str, int] = {}
+        self._counted: set[str] = set()  # the breakers counted for the current incarnation
         self.closed = False
         if not fresh and self.path.exists():
             # A tape this run already wrote (a restarted launcher that adopted the island,
             # whose log stream replays): its records are seen, the tape continues without
-            # writing one twice.
+            # writing one twice; its breaker stops are counted.
             try:
                 with self.path.open(encoding="utf-8") as handle:
-                    self._seen.update(line.rstrip("\n") for line in handle if line.strip())
+                    lines = [line.rstrip("\n") for line in handle if line.strip()]
             except OSError:
-                pass
+                lines = []
+            self._seen.update(lines)
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(record, dict):
+                    self._count_stop(record)
+            self._counted = set()  # a new launcher's first record of the island is a new incarnation
 
     @property
     def incomplete_marker(self) -> Path:
@@ -241,20 +261,33 @@ class TapeCollector:
             self._stop_records = {}  # a new incarnation: the last one's stop is history
         elif event in JOINED_EVENTS:
             self.awaiting_syncer = False
-        if (event == "rl_breaker" and record.get("layer") == "trainer" and record.get("action") == "stop"
-                and record.get("state", "trip") == "trip"):
+        self._count_stop(record)
+        if _breaker_stop(record):
             self._stop_records["breaker"] = record
         elif event == "rl_strict_failure":
             self._stop_records["strict"] = record
         elif event == "island_leave":
             self._stop_records["leave"] = record
 
+    def _count_stop(self, record: dict) -> None:
+        if record.get("event") == "rl_driver_start":
+            self._counted = set()
+        elif _breaker_stop(record):
+            name = str(record.get("name") or "")
+            if name and name not in self._counted:
+                self._counted.add(name)
+                self._stop_counts[name] = self._stop_counts.get(name, 0) + 1
+
     @property
     def island_stop(self) -> dict[str, dict] | None:
         """The current incarnation's stop records (``breaker``, ``strict``, ``leave``; see
-        ``yeto.launch.island_lifecycle.classify_records``); None before any."""
+        ``yeto.launch.island_lifecycle.classify_records``) and, with them, ``stops``: trainer
+        breaker -> the incarnations of the whole tape its stop ended (this one included);
+        None before any stop record."""
         with self._lock:
-            return dict(self._stop_records) or None
+            if not self._stop_records:
+                return None
+            return {**self._stop_records, "stops": dict(self._stop_counts)}
 
     def recover_from_file(self, tape_file) -> bool:
         """Complete the tape from the island's own tape file (raw tape lines, the

@@ -288,6 +288,16 @@ def max_failures(args) -> int:
     return int(getattr(args, "rl_trainer_max_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES))
 
 
+def _loop_classifier(args):
+    """The decision table's classifier of the loop's failed incarnations, with
+    ``launch.deterministic_stop`` as the launch has it (``yeto.launch.fleet.deterministic_stop``)."""
+    import functools  # noqa: PLC0415
+
+    from .fleet import deterministic_stop  # noqa: PLC0415
+
+    return functools.partial(island_lifecycle.loop_classifier, deterministic=deterministic_stop(args)[0])
+
+
 def build(args, binding: CloudTrainerBinding, journal: Journal, *,
           record: Callable[..., Any] | None = None) -> TrainerLoop:
     """Backlog scheduler + lifecycle + loop over ``journal``; restored from its records.
@@ -305,7 +315,7 @@ def build(args, binding: CloudTrainerBinding, journal: Journal, *,
         scheduler = binding.wrap_scheduler(scheduler, append)
     loop = TrainerLoop(scheduler=scheduler, lifecycle=binding.lifecycle(next_incarnation(records)),
                        buffer=binding.buffer, cuts=binding.cuts, record=append,
-                       classify_stop=None if record is None else island_lifecycle.loop_classifier,
+                       classify_stop=None if record is None else _loop_classifier(args),
                        data_ended=binding.data_ended, release_orphan=binding.release_orphan,
                        spec=binding.spec, needs_first_policy=binding.needs_first_policy,
                        ready_timeout_s=float(getattr(

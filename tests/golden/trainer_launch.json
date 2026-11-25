@@ -146,6 +146,7 @@
      "LEARNER_ID": "1",
      "SYNCER_ADDR": "10.0.0.1:29400",
      "YETO_RL_COMPAT_GROUP": "nvidia-a100",
+     "YETO_RL_DETERMINISTIC_STOP": "1",
      "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
     },
     "file_mounts": {
@@ -202,6 +203,7 @@
      "SYNCER_ADDR": "10.0.0.1:29400",
      "YETO_ISLAND_HMAC_KEY": "<HMAC>",
      "YETO_RL_COMPAT_GROUP": "nvidia-a100",
+     "YETO_RL_DETERMINISTIC_STOP": "1",
      "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
     },
     "ephemeral_disk_gib": null,
@@ -278,6 +280,7 @@
      "SYNCER_ADDR": "10.0.0.1:29400",
      "YETO_ISLAND_HMAC_KEY": "<HMAC>",
      "YETO_RL_COMPAT_GROUP": "nvidia-h100",
+     "YETO_RL_DETERMINISTIC_STOP": "1",
      "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
     },
     "ephemeral_disk_gib": null,
@@ -335,6 +338,7 @@
      "SYNCER_ADDR": "10.0.0.1:29400",
      "YETO_ISLAND_HMAC_KEY": "<HMAC>",
      "YETO_RL_COMPAT_GROUP": "nvidia-h100",
+     "YETO_RL_DETERMINISTIC_STOP": "1",
      "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
     },
     "ephemeral_disk_gib": null,
@@ -412,6 +416,7 @@
      "LEARNER_ID": "0",
      "SYNCER_ADDR": "10.0.0.1:29400",
      "YETO_RL_COMPAT_GROUP": "nvidia-l40s",
+     "YETO_RL_DETERMINISTIC_STOP": "1",
      "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
     },
     "file_mounts": {
@@ -466,6 +471,7 @@
      "LEARNER_ID": "1",
      "SYNCER_ADDR": "10.0.0.1:29400",
      "YETO_RL_COMPAT_GROUP": "nvidia-l40s",
+     "YETO_RL_DETERMINISTIC_STOP": "1",
      "YETO_START_SUBMITTED_UNIX": "<EPOCH>"
     },
     "file_mounts": {

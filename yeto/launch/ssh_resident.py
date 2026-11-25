@@ -355,6 +355,10 @@ class SshIslandOps:
             log_text="\n".join(str(line) for line in rec.lines), succeeded=rec.verdict == "SUCCEEDED",
             lost="does not answer over SSH" in rec.reason, detail=rec.reason)
 
+    def replaces_machine(self, name: str) -> bool:
+        """A relaunch runs on the inventory's same nodes (no other machine to order)."""
+        return False
+
     def rl_strict_failure(self, name: str, job_id: Any) -> str | None:
         for line in reversed(list(self.islands[name].lines)):
             text = str(line).strip()

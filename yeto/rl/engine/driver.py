@@ -3185,6 +3185,8 @@ class IslandDriver:
             from . import trainer_breakers  # noqa: PLC0415 - import-light, read on the way out
 
             breaker = trainer_breakers.breaker_of(failure)
+            if breaker is None and isinstance(failure, StrictRlInvariantError):
+                breaker = trainer_breakers.strict_breaker(failure.metric)
             self.emit("island_leave", reason=int(reason), reason_name=reason.name,
                       error_type=type(failure).__name__, error=str(failure),
                       **({"breaker": breaker} if breaker else {}))

@@ -29,8 +29,8 @@ MIN = 60.0
 T0 = 1_800_000_000.0 - (1_800_000_000.0 % H)
 BASE = ["--model", "m", "--data", "d", "--gpu", "H100:8"]
 LAUNCH_ENTRIES = ("launch.budget", "launch.idle", "launch.nc_lease_overdue", "launch.stall",
-                  "launch.trainer_failures", "launch.island_relaunches", "launch.provider_timeout",
-                  "launch.teardown_verify")
+                  "launch.trainer_failures", "launch.deterministic_stop", "launch.island_relaunches",
+                  "launch.provider_timeout", "launch.teardown_verify")
 
 
 @pytest.fixture

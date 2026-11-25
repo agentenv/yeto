@@ -2429,6 +2429,12 @@ class RoutingOps:
         probe = getattr(self._for(name), "rl_strict_failure", None)
         return probe(name, job_id) if probe else None
 
+    def replaces_machine(self, name):
+        """Whether a relaunch of ``name`` runs on another machine: a resident ``ssh:`` island
+        runs on its inventory's nodes again; a Modal container and a sky cluster are new."""
+        probe = getattr(self._for(name), "replaces_machine", None)
+        return True if probe is None else bool(probe(name))
+
     def island_decision(self, name, job_id):
         """The source's own reading of why the island ended (``island_lifecycle.Decision``),
         when it has one (resident ``ssh:`` islands); None otherwise."""

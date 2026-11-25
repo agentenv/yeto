@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
 from dataclasses import dataclass
 
 from ..config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER  # noqa: F401 - registered exit code
+from ..config_errors import DETERMINISTIC_STOP_ENV
 from . import island_lifecycle as lifecycle
 from .syncer import island_pool
 from .sky_ops import SYNCER_REFUSAL_MARKERS
@@ -18,6 +20,49 @@ def controller_fixed_roster(args) -> bool:
     A pool's membership is dynamic: an island that fails for good is dropped
     and the pool goes on (10-09 ruling of the main agent for the user)."""
     return getattr(args, "training_mode", "sft") == "rl" and not island_pool(args)
+
+
+def deterministic_stop(args, trainer_islands: int | None = None) -> tuple[bool, str]:
+    """``launch.deterministic_stop``: whether an island a trainer breaker (e.g. no new group
+    within ``trainer.sample_wait``), a whitelisted strict check or the syncer's refusal stopped
+    ends for good (exit ``ISLAND_STOP_EXIT`` on the island, never retried by its provider,
+    never relaunched; ``trainer.nan`` / ``trainer.policy_hash`` get one relaunch on a new
+    machine), and why. On for a fleet: an island pool (any island pool option), an island
+    launch of a fleet (fleet role ``island``) and a launch of two or more trainer islands
+    (``trainer_islands``). A single trainer keeps the behavior it always had (the provider
+    retries the island's exit, the controller relaunches it) unless ``--rl-deterministic-stop``
+    turns it on."""
+    if getattr(args, "rl_deterministic_stop", False):
+        return True, "--rl-deterministic-stop"
+    if getattr(args, "training_mode", "sft") != "rl":
+        return False, "not an RL launch"
+    if island_pool(args):
+        return True, "an island pool"
+    if getattr(args, "rl_fleet_role", None) == "island":
+        return True, "an island launch of a fleet"
+    count = _trainer_islands(args) if trainer_islands is None else int(trainer_islands)
+    if count >= 2:
+        return True, f"a fleet of {count} trainer islands"
+    return False, "a single trainer (--rl-deterministic-stop turns it on)"
+
+
+def _trainer_islands(args) -> int:
+    """The launch's trainer islands (its ``--gpu`` islands that are not sampler islands)."""
+    from ..gpu_spec import parse_gpu_spec  # noqa: PLC0415
+    from ..rl.engine import sample_roles  # noqa: PLC0415
+
+    try:
+        count = len(parse_gpu_spec(args.gpu))
+    except Exception:  # noqa: BLE001 - the launch refuses a malformed --gpu itself
+        return 0
+    samplers = set(sample_roles.sampler_islands(args, count))
+    return sum(1 for m in range(count) if m not in samplers)
+
+
+def deterministic_stop_env(args) -> dict[str, str]:
+    """``{DETERMINISTIC_STOP_ENV: "1"}`` for an island of a launch with
+    ``launch.deterministic_stop`` on (:func:`deterministic_stop`), else {} (nothing changes)."""
+    return {DETERMINISTIC_STOP_ENV: "1"} if deterministic_stop(args)[0] else {}
 
 
 # FleetController states.
@@ -104,6 +149,14 @@ def effective_stall_timeout(args) -> float:
     if value == 0:
         return 0.0
     return float(value or DEFAULT_RL_STALL_TIMEOUT_S)
+
+
+_UNREAD = object()  # _deterministic_stop: the stop records are read by it
+
+
+def _stop_key(records) -> str:
+    """One incarnation's stop records as a comparable key (its history ``stops`` left out)."""
+    return json.dumps({k: v for k, v in dict(records).items() if k != "stops"}, sort_keys=True, default=str)
 
 
 class FixedRosterIslandAbandoned(RuntimeError):
@@ -226,6 +279,7 @@ class FleetController:
         recorder=None,
         incarnations=None,
         stop_probe=None,
+        deterministic_stop: bool = False,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -289,6 +343,11 @@ class FleetController:
         # breaker stop, strict failure and LEAVE; ``yeto.rl.event_echo.TapeCollector.island_stop``),
         # or None: the island process's reason, read from its tape, not from its exit status.
         self.stop_probe = stop_probe
+        # launch.deterministic_stop (:func:`deterministic_stop`): an island a trainer breaker, a
+        # whitelisted strict check or a refusal stopped is given up instead of relaunched (and
+        # trainer.nan / trainer.policy_hash get one relaunch on a new machine). Off (a single
+        # trainer by default): the controller relaunches as before.
+        self.deterministic_stop = bool(deterministic_stop)
         # () -> int: events received from the islands so far (log echo). With
         # stall_timeout > 0 a run with no new event for that long, and not every
         # learner finalized, is stalled (e.g. a dead syncer connection).
@@ -348,6 +407,10 @@ class FleetController:
                 self.learners[name]["incarnation"] = int(known.get("incarnation") or 0)
                 self.learners[name]["relaunches"] = int(known.get("relaunches") or 0)
                 self.learners[name]["adopted"] = bool(known.get("adopted"))
+                # the relaunches on a new machine its record counts (_new_machine_retry)
+                retries = known.get("new_machine_retries")
+                if isinstance(retries, dict) and retries:
+                    self.learners[name]["new_machine_retries"] = {str(k): int(v) for k, v in retries.items()}
 
     def _fleet(self, kind: str, name: str | None = None, *, force: bool = False, **fields) -> None:
         if self.fleet_log is None:
@@ -490,7 +553,7 @@ class FleetController:
                     file=sys.stderr,
                 )
             decisions = {name: rec.get("decision") for name, rec in self.learners.items()}
-            if decisions and all(d is not None and d.action == lifecycle.FAIL for d in decisions.values()):
+            if self.deterministic_stop and decisions and all(d is not None and d.action == lifecycle.FAIL for d in decisions.values()):
                 raise IslandsFailedForGood("all learners abandoned; nothing left to train",
                                            {name: d.detail for name, d in decisions.items()})
             raise RuntimeError("all learners abandoned; nothing left to train")
@@ -540,7 +603,8 @@ class FleetController:
                 incarnation=int(rec.get("incarnation") or 0), relaunches=int(rec.get("relaunches") or 0),
                 exit=None if rec.get("exit") is None else str(rec["exit"])[:500],
                 decision=None if decision is None else decision.to_json(),
-                fixed_roster=bool(self.fixed_roster), **fields)
+                fixed_roster=bool(self.fixed_roster),
+                new_machine_retries=dict(rec.get("new_machine_retries") or {}), **fields)
         except Exception as e:  # noqa: BLE001 - the record is a view; supervision goes on
             print(f"[launcher] island record of {rec.get('name')}: {e}", file=sys.stderr)
 
@@ -790,6 +854,11 @@ class FleetController:
                         return
                     raise IslandConfigError(f"island {rec['name']} refused its configuration "
                                             f"(not relaunched): {config_error}")
+                retry = None if is_syncer or not self.deterministic_stop else self._new_machine_retry(rec)
+                if retry is not None:
+                    # a stop a faulty card may cause (trainer.nan): one relaunch, on a new machine
+                    self._enter_recovering(rec, retry, is_syncer)
+                    return
                 strict_failure = self._strict_failure(rec)
                 if strict_failure is not None and not is_syncer:
                     rec["decision"] = lifecycle.classify(log_text=strict_failure, detail=strict_failure)
@@ -809,7 +878,7 @@ class FleetController:
                     raise RuntimeError(
                         f"strict RL job {rec['name']} failed: {strict_failure}"
                     )
-                stop = None if is_syncer else self._deterministic_stop(rec)
+                stop = None if is_syncer or not self.deterministic_stop else self._deterministic_stop(rec)
                 if stop is not None:
                     self._stop_for_good(rec, stop)
                     return
@@ -1032,12 +1101,77 @@ class FleetController:
             # a fixed roster's refused island is not a strict failure that ends the launch here:
             # _deterministic_stop gives it up from its records (exit 4); a relaunch is refused the same way
             return None
-        line = lifecycle.island_stop_text(text)
+        line = lifecycle.island_stop_text(text) if self.deterministic_stop else None
         if line is not None and lifecycle.classify(log_text=line).cause == lifecycle.BREAKER:
             return None  # a breaker's stop: given up, not a strict failure (_deterministic_stop)
         return text
 
-    def _deterministic_stop(self, rec):
+    def _stop_records(self, rec):
+        """The island's stop records of its current incarnation (:attr:`stop_probe`), None
+        without any, and None for those whose stop this controller already relaunched on a new
+        machine (:meth:`_new_machine_retry`: the next incarnation's records are not in yet)."""
+        if self.stop_probe is None:
+            return None
+        try:
+            records = self.stop_probe(rec["name"])
+        except Exception:  # noqa: BLE001 - a probe that fails reads as no record
+            return None
+        if records and rec.get("handled_stop") is not None and _stop_key(records) == rec["handled_stop"]:
+            return None
+        return records
+
+    def _new_machine_retry(self, rec) -> str | None:
+        """The reason island ``rec`` is relaunched once more on a new machine, else None: it
+        ended on a deterministic stop a faulty card may cause (``island_lifecycle
+        .NEW_MACHINE_BREAKERS``: ``trainer.nan``, ``trainer.policy_hash``) and that breaker has
+        not had its relaunch yet (``NEW_MACHINE_RETRIES`` per island and breaker). The count is
+        the island's: its record in the run store (``new_machine_retries``, written before the
+        order, read back by a restarted launcher) and its tape (the incarnations the breaker
+        ended, counted again from the tape file by a restarted launcher). The relaunch takes the
+        old machine down first (:meth:`_start_relaunch`); Modal never retries the island's
+        exit (``ISLAND_STOP_EXIT``) itself. A source that cannot order another machine
+        (a resident ``ssh:`` island) gets no relaunch."""
+        records = self._stop_records(rec)
+        stop = self._deterministic_stop(rec, records=records)
+        breaker = lifecycle.new_machine_breaker(stop)
+        if breaker is None:
+            return None
+        retries = rec.setdefault("new_machine_retries", {})
+        earlier = int(((records or {}).get("stops") or {}).get(breaker) or 0) - 1  # the tape's earlier stops
+        given = max(int(retries.get(breaker) or 0), earlier)
+        limit = lifecycle.NEW_MACHINE_RETRIES
+        if given >= limit:
+            print(f"[launcher] {rec['name']}: {breaker} stopped it again after its relaunch on a new machine "
+                  f"({given}/{limit}); not relaunched", file=sys.stderr)
+            return None
+        if not self._replaces_machine(rec["name"]):
+            print(f"[launcher] {rec['name']}: {breaker} stop; its source cannot order another machine "
+                  "(a resident ssh: island); not relaunched", file=sys.stderr)
+            return None
+        retries[breaker] = given + 1
+        rec["new_machine"] = True
+        rec["handled_stop"] = None if not records else _stop_key(records)
+        self._record(rec)  # the count is in the island's record before the order
+        why = (f"{stop.detail}"[:300] + f"; a faulty card may cause it: relaunch {given + 1}/{limit} "
+               "on a new machine")
+        self._fleet("island_new_machine_retry", rec["name"], reason=f"{breaker}: {why}"[:500],
+                    breaker=breaker, retry=given + 1, limit=limit)
+        print(f"[launcher] WARNING: {rec['name']}: {why} (the old machine is taken down first; the "
+              f"next {breaker} stop ends the island)", file=sys.stderr)
+        return why
+
+    def _replaces_machine(self, name: str) -> bool:
+        """Whether a relaunch of ``name`` runs on another machine (``ops.replaces_machine``;
+        a source without it: yes)."""
+        probe = getattr(self.ops, "replaces_machine", None)
+        if probe is None:
+            return True
+        try:
+            return bool(probe(name))
+        except Exception:  # noqa: BLE001 - unknown: no relaunch on the same machine
+            return False
+
+    def _deterministic_stop(self, rec, *, records=_UNREAD):
         """Why island ``rec`` stopped when no relaunch can help (``island_lifecycle.Decision``
         of cause breaker, strict or config error), else None: its own tape records of the
         incarnation (a trainer breaker's stop such as ``trainer.sample_wait``, a strict
@@ -1045,12 +1179,7 @@ class FleetController:
         ``[yeto-island-stop]`` log line, or its source's exit code
         (``config_errors.ISLAND_STOP_EXIT``). Any roster: the island's exit status alone (a
         rank that exited 1) says nothing of why."""
-        records = None
-        if self.stop_probe is not None:
-            try:
-                records = self.stop_probe(rec["name"])
-            except Exception:  # noqa: BLE001 - a probe that fails reads as no record
-                records = None
+        records = self._stop_records(rec) if records is _UNREAD else records
         found = lifecycle.classify_records(records)
         if found is not None:
             return found
@@ -1280,8 +1409,19 @@ class FleetController:
         attempt = _RelaunchAttempt()
         name, task = rec["name"], rec["task"]
 
+        new_machine = bool(rec.pop("new_machine", False))
+
         def _run():
             target = name
+            if new_machine:
+                # a relaunch on a new machine (_new_machine_retry): the old one goes first, so the
+                # order cannot land on the card that stopped the island (and an instance check
+                # does not find it alive)
+                try:
+                    self.ops.down(name)
+                except Exception as e:  # noqa: BLE001 - the relaunch still orders
+                    print(f"[launcher] {name}: taking the old machine down before its relaunch "
+                          f"failed: {e}", file=sys.stderr)
             if self.instance_guard is not None:
                 try:
                     verdict = self.instance_guard.check(name)
