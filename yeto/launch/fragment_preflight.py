@@ -41,6 +41,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,7 +52,9 @@ from typing import Any
 LAYOUT_MODE_ENV = "YETO_PREFLIGHT_LAYOUT"
 LAYOUT_MODES = ("check", "warn")
 _REFUSE_UNVERIFIED: contextvars.ContextVar[bool] = contextvars.ContextVar("refuse_unverified_layout", default=False)
-_FETCHED: dict[tuple, tuple[bytes | None, str]] = {}  # remote_hf_config, once per process
+_FETCHED: dict[tuple, tuple[bytes, str]] = {}  # remote_hf_config: a config fetched once per process
+_FAILED: dict[tuple, tuple[float, str]] = {}  # remote_hf_config: a failed fetch (monotonic time, why)
+FAILED_FETCH_TTL_S = 60.0  # one preflight's launches share a failure; later launches try again
 _WARNED: set[str] = set()
 
 
@@ -86,16 +89,26 @@ def local_hf_config(model: str, revision: str | None) -> bytes | None:
 
 def remote_hf_config(args: Any, **probes: Any) -> tuple[bytes | None, str]:
     """``config.json`` of the model of ``args`` fetched by itself (a few KB) when the local
-    files lack it: ``(bytes, where)``, else ``(None, why not)``. Once per process for a
-    model, revision and source."""
+    files lack it: ``(bytes, where)``, else ``(None, why not)``. A fetched config is kept
+    for the process (per model, revision and source); a failure only for
+    ``FAILED_FETCH_TTL_S`` (the launches of one preflight share it, so an offline host
+    waits on the Hub once), after which a launch (a long-lived controller's too) tries again."""
+    if probes:
+        return _fetch_config(args, **probes)
     key = (str(getattr(args, "model", "")), str(getattr(args, "model_revision", None) or ""),
            str(getattr(args, "model_store_source", None) or ""), str(getattr(args, "modal_model_volume", None) or ""))
-    if probes or key not in _FETCHED:
-        found = _fetch_config(args, **probes)
-        if probes:
-            return found
-        _FETCHED[key] = found
-    return _FETCHED[key]
+    if key in _FETCHED:
+        return _FETCHED[key]
+    failed = _FAILED.get(key)
+    if failed is not None and time.monotonic() - failed[0] < FAILED_FETCH_TTL_S:
+        return None, failed[1]
+    raw, where = _fetch_config(args)
+    if raw is None:
+        _FAILED[key] = (time.monotonic(), where)
+        return None, where
+    _FAILED.pop(key, None)
+    _FETCHED[key] = (raw, where)
+    return raw, where
 
 
 def _fetch_config(args: Any, *, hub: Any = None, volume: Any = None, store: Any = None) -> tuple[bytes | None, str]:

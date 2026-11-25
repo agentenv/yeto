@@ -103,6 +103,21 @@ def test_trainer_now_skips_the_first_group_wait(make_run, monkeypatch):
     assert order == ["pool", "wait", "trainer", "dashboard"]
 
 
+def test_run_up_tells_its_preflight_and_the_fleet_session_check_whether_it_is_a_dry_run(make_run, monkeypatch):
+    """``yeto run up --dry-run`` warns about a verl layout hash it cannot verify offline;
+    ``yeto run up`` refuses it (fragment_preflight.refuse_unverified_layout): the dry-run
+    bit reaches the fleet session check."""
+    run = make_run()
+    monkeypatch.setattr(up, "Run", lambda cfg: run)
+    monkeypatch.setattr(up, "load_config", lambda path: {})
+    seen = []
+    monkeypatch.setattr(run, "fleet_problem", lambda: None)
+    monkeypatch.setattr(run, "fleet_session_problem", lambda *, dry_run=False: seen.append(dry_run) or "refused")
+    assert up.main(_args(skip_preflight=False, dry_run=True)) == 2
+    assert up.main(_args(skip_preflight=False)) == 2
+    assert seen == [True, False]
+
+
 def test_first_group_failure_in_main_does_not_stop_the_pool(make_run, monkeypatch):
     run = make_run()
     monkeypatch.setattr(up, "Run", lambda cfg: run)

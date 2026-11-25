@@ -374,17 +374,56 @@ def test_the_model_volume_snapshot_is_the_fallback_and_every_failure_is_named():
     assert raw is None and why == "--model /data/models/q is not a local directory with config.json on this host"
 
 
-def test_the_config_is_fetched_once_per_model_and_revision(monkeypatch):
-    """Every launch of a fleet is prepared (the syncer's and each island's): one fetch."""
-    calls = []
+def test_a_fetched_config_is_kept_and_a_failed_fetch_is_tried_again_after_its_ttl(monkeypatch):
+    """Every launch of a fleet is prepared (the syncer's and each island's): one fetch. A
+    failure is shared for FAILED_FETCH_TTL_S only, so a long-lived controller tries again."""
+    calls, answers = [], {}
+    clock = [1000.0]
 
     def fetch(args, **probes):
         calls.append(args.model_revision)
-        return RAW, "hf://x"
+        return answers.get(args.model_revision, (None, "the Hub is down"))
 
     monkeypatch.setattr(fragment_preflight, "_FETCHED", {})
+    monkeypatch.setattr(fragment_preflight, "_FAILED", {})
     monkeypatch.setattr(fragment_preflight, "_fetch_config", fetch)
+    monkeypatch.setattr(fragment_preflight.time, "monotonic", lambda: clock[0])
+    answers[REVISION] = (RAW, "hf://x")
     for _ in range(3):
         assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B")) == (RAW, "hf://x")
-    REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B", revision="b" * 40))
-    assert calls == [REVISION, "b" * 40]
+    assert calls == [REVISION]
+    down = "b" * 40
+    assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B", revision=down)) == (None, "the Hub is down")
+    clock[0] += fragment_preflight.FAILED_FETCH_TTL_S - 1
+    assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B", revision=down)) == (None, "the Hub is down")
+    assert calls == [REVISION, down]  # within the TTL: the failure is shared
+    answers[down] = (RAW, "hf://y")
+    clock[0] += 2
+    assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B", revision=down)) == (RAW, "hf://y")  # tried again
+    assert REAL_REMOTE_HF_CONFIG(_args("Qwen/Qwen3-4B", revision=down)) == (RAW, "hf://y")
+    assert calls == [REVISION, down, down]
+
+
+def test_only_a_launch_that_pins_a_hash_is_refused_unverified(capsys):
+    """Inside the refusal context (``yeto run up``), a layout the launcher cannot plan
+    refuses a launch that pins a 64-hex hash; one without a pin (none, or ``auto``) only
+    gets the WARN."""
+    import types
+
+    def args(pin):
+        return types.SimpleNamespace(model="Qwen/Qwen3-4B", model_revision=REVISION, fragments=4,
+                                     rl_parameter_layout_sha256=pin)
+
+    with fragment_preflight.refuse_unverified_layout():
+        for pin in (None, "", "auto", "e" * 63):
+            fragment_preflight._unverified(args(pin), f"no config ({pin})", backend="verl", merge="rda",
+                                           max_bytes=2 << 30)
+            err = capsys.readouterr().err
+            assert f"[launcher] WARN: {UNVERIFIED}: no config ({pin}). The check plans with matrix merge rda" in err
+            assert "the launch pins" not in err
+        with pytest.raises(ValueError, match=rf"^{UNVERIFIED}: no config\. .* the launch pins "
+                                             rf"--rl-parameter-layout-sha256 eeeeeeeeeeeeeeee\.\.\."):
+            fragment_preflight._unverified(args("e" * 64), "no config", backend="verl", merge="rda", max_bytes=2 << 30)
+    # outside it (a dry run, the launch itself): the pinned launch only warns
+    fragment_preflight._unverified(args("e" * 64), "no config", backend="verl", merge="rda", max_bytes=2 << 30)
+    assert "the launch pins --rl-parameter-layout-sha256 eeeeeeeeeeeeeeee..." in capsys.readouterr().err
