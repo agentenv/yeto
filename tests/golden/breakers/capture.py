@@ -183,6 +183,21 @@ def launch_values(argv: list[str]) -> dict[str, Any]:
                                                      else DEFAULT_TIMEOUT_S)
     out["launch.provider_timeout.retries_n"] = int(args.modal_retries if args.modal_retries is not None
                                                    else DEFAULT_RETRIES)
+    # yeto.launch.fleet: a deterministic stop is final (a fleet; a single trainer with
+    # --rl-deterministic-stop) and an island pool island's relaunch budget (an island pool only)
+    from yeto.launch.fleet import ISLAND_MAX_RELAUNCHES, ISLAND_RELAUNCH_WINDOW_S, deterministic_stop
+    from yeto.launch.island_lifecycle import NEW_MACHINE_RETRIES
+    from yeto.launch.syncer import island_pool
+
+    on = deterministic_stop(args)[0]
+    out["launch.deterministic_stop.enabled"] = on
+    if on:
+        out["launch.deterministic_stop.new_machine_retries_n"] = NEW_MACHINE_RETRIES
+    on = island_pool(args)
+    out["launch.island_relaunches.enabled"] = on
+    if on:
+        out["launch.island_relaunches.max_n"] = ISLAND_MAX_RELAUNCHES
+        out["launch.island_relaunches.window_s"] = ISLAND_RELAUNCH_WINDOW_S
     out["switch.cost_guard"] = guard
     return out
 

@@ -10,8 +10,11 @@ resident ``ssh:`` island) and wherever it runs (sky, Modal, an SSH inventory):
 * **decision table** (:func:`classify`, :data:`DECISIONS`): why an island ended ->
   what happens next. A configuration error (exit :data:`CONFIG_ERROR_EXIT`, its
   ``[yeto-config-error]`` line, LEAVE ``CONFIG_MISMATCH``, e.g.
-  ``FullParameterLayoutMismatch``) and a strict failure are never relaunched (the
-  island is ``failed``); an infrastructure failure, a lost node or cluster and a
+  ``FullParameterLayoutMismatch``), a strict failure and a trainer breaker's stop
+  (:data:`BREAKER`: e.g. no new group within ``trainer.sample_wait``; exit
+  :data:`ISLAND_STOP_EXIT`, its ``[yeto-island-stop]`` line, or the island's own
+  ``rl_breaker`` stop record) are never relaunched (the island is ``failed``: a
+  relaunch stops the same way and bills a machine meanwhile); an infrastructure failure, a lost node or cluster and a
   preemption are relaunched within the caller's relaunch budget (``recovering``); a
   normal end is ``done``, and so is a stop (STOP flag, LEAVE ``STOPPED``), which is
   never relaunched. A source only reports what it observed (exit code, LEAVE code,
@@ -49,7 +52,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ..config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER
+from ..config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER, ISLAND_STOP_EXIT, ISLAND_STOP_MARKER
 
 SCHEMA = 1
 
@@ -97,6 +100,7 @@ LOST = "lost"
 PREEMPTED = "preempted"
 FINISHED = "finished"
 STOPPED = "stopped"
+BREAKER = "breaker"  # a trainer breaker stopped the island (rl_breaker action stop)
 
 FAIL = "fail"  # never relaunched
 RELAUNCH = "relaunch"  # relaunched within the relaunch budget
@@ -107,6 +111,7 @@ STOP = "stop"  # ended on request: never relaunched
 DECISIONS: dict[str, tuple[str, str]] = {
     CONFIG_ERROR: (FAIL, FAILED),
     STRICT: (FAIL, FAILED),
+    BREAKER: (FAIL, FAILED),
     INFRA: (RELAUNCH, RECOVERING),
     LOST: (RELAUNCH, RECOVERING),
     PREEMPTED: (RELAUNCH, RECOVERING),
@@ -119,6 +124,44 @@ STRICT_MARKERS: tuple[str, ...] = (
     "[yeto-rl-strict-failure]", "StrictRlInvariantError:",
     "backend identity mismatch, JOIN refused", "session mismatch (HELLO refused",
 )
+# A trainer breaker's stop marks the error it raises with the breaker's name (this attribute,
+# ``yeto.rl.engine.trainer_breakers.stop_error``): the reader's stops (trainer.sample_wait,
+# trainer.buffer_damaged, trainer.sample_alignment, trainer.compaction_round). The mark survives
+# pickling, so an error a Ray actor raised still carries it (``RayTaskError.cause``).
+BREAKER_ATTR = "yeto_breaker"
+# The trainer breakers whose stop record (``rl_breaker`` action stop) alone makes the island's
+# stop deterministic (:func:`classify_records`): the ones that mark their error (above). Any
+# other trainer breaker's stop goes by its strict record or its LEAVE; a new transient breaker
+# is not read as final unless listed here (tests/test_island_deterministic_stop.py checks the list).
+BREAKER_STOPS = frozenset({"trainer.sample_wait", "trainer.buffer_damaged", "trainer.sample_alignment",
+                           "trainer.compaction_round", "trainer.release_drain"})
+# The strict failures that end an island the same way on every attempt (module, class): a
+# strict trainer check (``trainer.strict_invariant`` -- including a learning rate 0 before the
+# final round --, ``trainer.nan``, ``trainer.gradient_flow``, ``trainer.policy_hash``; the
+# syncer's session refusals: HELLO profile / session / identity mismatch, island auth, epoch
+# fenced, init digest), groups older than ``max_policy_age`` that the rollout cannot drop, a
+# malformed policy-age limit, an optimizer without a readable or finite learning rate. A whitelist: the other LEAVE ``TRAINING_FAILED`` errors (a
+# failed optimizer step, a publication whose engine update raised, a cross-channel commit, a
+# plain ``DriverError``) may be an NCCL, CUDA, OOM, storage or network fault underneath, and
+# keep their retries and relaunches.
+DETERMINISTIC_ERRORS: tuple[tuple[str, str], ...] = (
+    ("yeto.rl.core", "StrictRlInvariantError"),
+    ("yeto.rl.engine.driver", "PolicyAgeExceeded"),
+    ("yeto.rl.engine.policy_age", "PolicyAgeError"),
+    ("yeto.rl.applied_lr", "AppliedLrError"),
+)
+DETERMINISTIC_ERROR_NAMES = frozenset(name for _module, name in DETERMINISTIC_ERRORS)
+# The deterministic stops a faulty card may cause (a silent data error on one of the island's
+# GPUs): a non-finite gradient norm or the NaN-skip limit (``trainer.nan``), a policy that does
+# not hash the same after an in-memory apply or rebuild (``trainer.policy_hash``). The island
+# gets one relaunch on a newly ordered machine for each (:data:`NEW_MACHINE_RETRIES`, counted in
+# its record and its tape); the next stop of the same breaker ends it as any deterministic stop.
+# A data or algorithm cause stops again soon after the relaunch's resume: the waste is bounded.
+# Not here: ``trainer.nonfinite_reward`` (the reward), ``trainer.xhw_guard`` (the samplers'
+# numerics), ``trainer.gradient_flow`` (a zero gradient: frozen or detached parameters),
+# ``trainer.strict_invariant`` and every breaker of the reader (sample_wait, ...).
+NEW_MACHINE_BREAKERS = frozenset({"trainer.nan", "trainer.policy_hash"})
+NEW_MACHINE_RETRIES = 1
 # LEAVE codes (``yeto.rl.leave_code.LeaveReason``) by name: no import of the RL package.
 _LEAVE_CAUSE = {"CONFIG_MISMATCH": CONFIG_ERROR, "TRAINING_FAILED": STRICT, "STOPPED": STOPPED,
                 "FINISHED": FINISHED, "PREEMPTED": PREEMPTED, "INFRA_FAILED": INFRA,
@@ -164,6 +207,23 @@ def config_error_text(text: str | None) -> str | None:
     return None
 
 
+def island_stop_text(text: str | None) -> str | None:
+    """The ``[yeto-island-stop]`` line in ``text`` (None without one)."""
+    if not text:
+        return None
+    for line in reversed(str(text).splitlines()):
+        if ISLAND_STOP_MARKER in line:
+            return line.strip()
+    return None
+
+
+def _stop_line_cause(line: str) -> str:
+    """The cause a ``[yeto-island-stop] <cause> ...`` line names (:data:`BREAKER` when it names
+    none: the exit code alone says only that a relaunch cannot help)."""
+    word = line.split(ISLAND_STOP_MARKER, 1)[1].split(None, 1)[:1]
+    return word[0] if word and word[0] in (BREAKER, STRICT, CONFIG_ERROR) else BREAKER
+
+
 def strict_text(text: str | None) -> str | None:
     """The strict-failure line in ``text`` (None without one)."""
     if not text:
@@ -185,6 +245,9 @@ def classify(*, exit_code: int | None = None, leave_reason: Any = None, log_text
     line = config_error_text(log_text)
     if line or leave == "CONFIG_MISMATCH" or (exit_code == CONFIG_ERROR_EXIT and not isinstance(exit_code, bool)):
         return decision(CONFIG_ERROR, line or detail or (f"exit {exit_code}" if exit_code is not None else leave or ""))
+    line = island_stop_text(log_text)
+    if line or (exit_code == ISLAND_STOP_EXIT and not isinstance(exit_code, bool)):
+        return decision(_stop_line_cause(line) if line else BREAKER, line or detail or f"exit {exit_code}")
     line = strict_text(log_text)
     if line or leave == "TRAINING_FAILED":
         return decision(STRICT, line or detail or str(leave))
@@ -199,19 +262,177 @@ def classify(*, exit_code: int | None = None, leave_reason: Any = None, log_text
     return decision(INFRA, detail or (f"exit {exit_code}" if exit_code is not None else leave or "failed"))
 
 
-def classify_error(error: BaseException | None, *, detail: str = "") -> Decision:
+def breaker_error_in(error: BaseException | None) -> tuple[str, BaseException] | None:
+    """The trainer breaker stop in ``error``'s chain (cause, context and a Ray task error's
+    ``cause``): its breaker's name and the error that carries the mark (:data:`BREAKER_ATTR`);
+    None without one."""
+    seen, todo = set(), [error]
+    while todo:
+        error = todo.pop()
+        if error is None or id(error) in seen:
+            continue
+        seen.add(id(error))
+        name = getattr(error, BREAKER_ATTR, None)
+        if isinstance(name, str) and name:
+            return name, error
+        inner = getattr(error, "cause", None)
+        todo += [e for e in (error.__cause__, error.__context__, inner) if isinstance(e, BaseException)]
+    return None
+
+
+def classify_error(error: BaseException | None, *, detail: str = "", deterministic: bool = True) -> Decision:
     """The decision for an island process that stopped with ``error`` (None: finished):
-    a :class:`~yeto.config_errors.ConfigError` in its chain is a configuration error,
-    else its LEAVE code (``yeto.rl.engine.leave_reason.leave_reason_for``) decides."""
+    a :class:`~yeto.config_errors.ConfigError` in its chain is a configuration error, a
+    deterministic stop (:func:`island_stop_decision`: a trainer breaker, a LEAVE
+    ``CONFIG_MISMATCH``, a whitelisted strict failure) is never relaunched, any other LEAVE
+    ``TRAINING_FAILED`` is an infrastructure failure, else its LEAVE code
+    (``yeto.rl.engine.leave_reason.leave_reason_for``) decides."""
     from ..config_errors import config_error_in  # noqa: PLC0415
 
     if error is not None and config_error_in(error) is not None:
         return decision(CONFIG_ERROR, detail or f"{type(error).__name__}: {error}")
+    if not deterministic:  # launch.deterministic_stop off: the LEAVE code decides, as before
+        from yeto.rl.engine.leave_reason import leave_reason_for  # noqa: PLC0415 - no torch
+
+        return classify(leave_reason=leave_reason_for(error),
+                        detail=detail or ("" if error is None else f"{type(error).__name__}: {error}"))
+    stop = island_stop_decision(error)
+    if stop is not None:
+        return decision(stop.cause, detail or stop.detail)
     from yeto.rl.engine.leave_reason import leave_reason_for  # noqa: PLC0415 - no torch
 
     reason = leave_reason_for(error)
-    return classify(leave_reason=reason,
-                    detail=detail or ("" if error is None else f"{type(error).__name__}: {error}"))
+    text = detail or ("" if error is None else f"{type(error).__name__}: {error}")
+    if _leave_name(reason) == "TRAINING_FAILED":
+        # not a whitelisted strict failure (DETERMINISTIC_ERRORS): it may be an NCCL, CUDA,
+        # storage or network fault underneath, so it keeps its relaunches
+        return decision(INFRA, text)
+    return classify(leave_reason=reason, detail=text)
+
+
+def _chain(error: BaseException | None) -> list[BaseException]:
+    """``error`` and its cause / context chain, and a Ray task error's ``cause``."""
+    seen, todo, out = set(), [error], []
+    while todo:
+        error = todo.pop()
+        if error is None or id(error) in seen:
+            continue
+        seen.add(id(error))
+        out.append(error)
+        inner = getattr(error, "cause", None)
+        todo += [e for e in (error.__cause__, error.__context__, inner) if isinstance(e, BaseException)]
+    return out
+
+
+def deterministic_error_in(error: BaseException | None) -> BaseException | None:
+    """The whitelisted deterministic strict failure (:data:`DETERMINISTIC_ERRORS`) in
+    ``error``'s chain; None without one. Classes are looked up in ``sys.modules`` only."""
+    classes = tuple(c for c in (getattr(sys.modules.get(m), n, None) for m, n in DETERMINISTIC_ERRORS)
+                    if isinstance(c, type))
+    return next((e for e in _chain(error) if classes and isinstance(e, classes)), None)
+
+
+def island_stop_decision(error: BaseException | None) -> Decision | None:
+    """The deterministic stop ``error`` is, else None (the error keeps its retries and
+    relaunches): a trainer breaker's stop (:func:`breaker_error_in`), a LEAVE
+    ``CONFIG_MISMATCH`` (an identity, profile or layout the run does not accept), or a
+    whitelisted strict failure (:data:`DETERMINISTIC_ERRORS`). A
+    :class:`~yeto.config_errors.ConfigError` is None here: it has its own exit."""
+    from ..config_errors import config_error_in  # noqa: PLC0415
+
+    if error is None or config_error_in(error) is not None:
+        return None
+    stop = breaker_error_in(error)
+    if stop is not None:
+        name, marked = stop
+        return decision(BREAKER, f"{name}: {type(marked).__name__}: {marked}")
+    from yeto.rl.engine.leave_reason import leave_reason_for  # noqa: PLC0415 - no torch
+
+    if _leave_name(leave_reason_for(error)) == "CONFIG_MISMATCH":
+        return decision(CONFIG_ERROR, f"{type(error).__name__}: {error}")
+    strict = deterministic_error_in(error)
+    if strict is not None:
+        name = _strict_breaker(getattr(strict, "metric", None))
+        return decision(STRICT, f"{name + ': ' if name else ''}{type(strict).__name__}: {strict}")
+    return None
+
+
+def _strict_breaker(metric: Any) -> str | None:
+    """The trainer breaker a ``StrictRlInvariantError`` of ``metric`` trips
+    (``yeto.rl.engine.trainer_breakers.strict_breaker``); None without a metric."""
+    if not metric:
+        return None
+    try:
+        from yeto.rl.engine.trainer_breakers import strict_breaker  # noqa: PLC0415 - import-light
+    except Exception:  # noqa: BLE001 - the stop is read without its breaker's name
+        return None
+    return strict_breaker(str(metric))
+
+
+def new_machine_breaker(stop: Decision | None) -> str | None:
+    """The breaker of deterministic stop ``stop`` when a new machine may cure it
+    (:data:`NEW_MACHINE_BREAKERS`), else None. ``stop.detail`` names the breaker first
+    (``trainer.nan: ...``), as :func:`island_stop_decision`, :func:`classify_records` and an
+    ``[yeto-island-stop]`` line (``<marker> strict trainer.nan: ...``) write it."""
+    if stop is None or stop.cause not in (BREAKER, STRICT):
+        return None
+    text = str(stop.detail or "")
+    if ISLAND_STOP_MARKER in text:
+        words = text.split(ISLAND_STOP_MARKER, 1)[1].split(None, 1)
+        text = words[1] if len(words) > 1 and words[0] in (BREAKER, STRICT, CONFIG_ERROR) else " ".join(words)
+    head = text.split(":", 1)[0].strip()
+    return head if head in NEW_MACHINE_BREAKERS else None
+
+
+def island_stop_line(error: BaseException) -> str | None:
+    """The ``[yeto-island-stop]`` line of an island process that ends with ``error`` when the
+    error is a deterministic stop (:func:`island_stop_decision`); None for any other error."""
+    found = island_stop_decision(error)
+    if found is None:
+        return None
+    return f"{ISLAND_STOP_MARKER} {found.cause} {found.detail} (exit {ISLAND_STOP_EXIT}, not retried)"
+
+
+def _error_type_name(text: Any) -> str:
+    """The class name an ``island_leave`` record's ``error_type`` names (a Ray task error is
+    written ``RayTaskError(Name)``)."""
+    name = str(text or "")
+    if name.endswith(")") and "(" in name:
+        name = name[name.rindex("(") + 1:-1]
+    return name.rsplit(".", 1)[-1]
+
+
+def classify_records(records: Mapping[str, Any] | None) -> Decision | None:
+    """The decision the island's own tape records give for its ended incarnation (None: they
+    give none, the caller's reading stands). ``records``: the last trainer ``rl_breaker`` stop
+    (``breaker``), ``rl_strict_failure`` (``strict``) and ``island_leave`` (``leave``) records
+    of the incarnation (``yeto.rl.event_echo.TapeCollector.island_stop``). The stop of a breaker
+    of :data:`BREAKER_STOPS` is :data:`BREAKER`; a strict failure (``rl_strict_failure``) or a LEAVE
+    ``TRAINING_FAILED`` of a whitelisted error (:data:`DETERMINISTIC_ERRORS`) is :data:`STRICT`;
+    a LEAVE ``CONFIG_MISMATCH`` is a configuration error. Any other LEAVE (an infrastructure
+    failure, a ``TRAINING_FAILED`` that may be an NCCL / CUDA / storage fault) gives none."""
+    if not records:
+        return None
+    breaker = records.get("breaker")
+    if isinstance(breaker, Mapping) and str(breaker.get("name") or "") in BREAKER_STOPS:
+        name = str(breaker.get("name"))
+        text = f"{name}: {breaker.get('detail') or breaker.get('stop_reason') or 'stop'}"
+        return decision(BREAKER, text)
+    leave = records.get("leave") if isinstance(records.get("leave"), Mapping) else {}
+    error = f"{leave.get('error_type') or 'error'}: {leave.get('error') or ''}".strip()
+    strict = records.get("strict")
+    if isinstance(strict, Mapping):
+        named = _strict_breaker(strict.get("metric")) or leave.get("breaker")
+        text = str(strict.get("error") or strict.get("detail") or error)
+        return decision(STRICT, f"{named}: {text}" if named else text)
+    name = str(leave.get("reason_name") or "").upper()
+    if name == "TRAINING_FAILED" and _error_type_name(leave.get("error_type")) in DETERMINISTIC_ERROR_NAMES:
+        return decision(STRICT, f"{leave['breaker']}: {error}" if leave.get("breaker") else error)
+    if name == "CONFIG_MISMATCH":
+        return decision(CONFIG_ERROR, error)
+    if leave.get("breaker") in BREAKER_STOPS:  # the driver's LEAVE record names the breaker whose stop ended it
+        return decision(BREAKER, f"{leave['breaker']}: {error}")
+    return None
 
 
 # -- the state record in the store ---------------------------------------------------------------
@@ -814,9 +1035,11 @@ def active_islands(records: Mapping[int, Mapping[str, Any]]) -> list[int]:
 LOOP_KIND = "trainer_loop"
 
 
-def loop_classifier(reason: Any, error: BaseException | None) -> tuple[str, bool]:
-    """``TrainerLoop(classify_stop=...)``: a failed s1 incarnation's (cause, relaunch)."""
-    d = classify_error(error) if error is not None else classify(leave_reason=reason)
+def loop_classifier(reason: Any, error: BaseException | None, *,
+                    deterministic: bool = False) -> tuple[str, bool]:
+    """``TrainerLoop(classify_stop=...)``: a failed s1 incarnation's (cause, relaunch).
+    ``deterministic``: ``launch.deterministic_stop`` is on (:func:`classify_error`)."""
+    d = classify_error(error, deterministic=deterministic) if error is not None else classify(leave_reason=reason)
     if d.cause in (FINISHED, STOPPED):  # a failure (error or INFRA_FAILED) the table read as an end
         d = decision(INFRA, d.detail)
     return d.cause, d.relaunch

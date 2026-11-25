@@ -229,7 +229,7 @@ def refuse_compaction_round(message: str, *, emit: Callable[..., Any] | None = N
     error = SampleBufferRolloutError(message)
     trainer_breakers.trip(trainer_breakers.COMPACTION_ROUND, _echo_event if emit is None else emit, detail=message,
                           legacy_event="SampleBufferRolloutError")
-    return error
+    return trainer_breakers.stop_error(error, trainer_breakers.COMPACTION_ROUND)
 
 
 def stale_segment_buckets(report: Any, pruned: Sequence[Sequence[dict[str, Any]]] = (), *,
@@ -283,15 +283,16 @@ def unconvertible_round(rollout_id: int, takes: int, problem: str, *, form: str 
                                      f"converts to {form}: {problem}")
     trainer_breakers.trip(trainer_breakers.SAMPLE_ALIGNMENT, _echo_event if emit is None else emit, action="stop",
                           value=takes, limit=takes, detail=str(error), legacy_event="SampleBufferRolloutError")
-    return error
+    return trainer_breakers.stop_error(error, trainer_breakers.SAMPLE_ALIGNMENT)
 
 
 def trip_sample_wait(emit: Callable[..., Any] | None, *, waited_s: float, limit_s: float,
                      error: BaseException) -> None:
     """``trainer.sample_wait``: no new group reached the buffer for ``limit_s`` seconds while
-    a round filled; the caller raises ``error``."""
+    a round filled; the caller raises ``error`` (marked as the breaker's stop)."""
     trainer_breakers.trip(trainer_breakers.SAMPLE_WAIT, emit, value=round(float(waited_s), 3), limit=limit_s,
                           detail=str(error), legacy_event="SampleBufferRolloutError")
+    trainer_breakers.stop_error(error, trainer_breakers.SAMPLE_WAIT)
 
 
 def check_damaged_run(*, run: int, damaged: int, decoded: int, limit: int, position: int, sample_id: Any,
@@ -308,7 +309,7 @@ def check_damaged_run(*, run: int, damaged: int, decoded: int, limit: int, posit
             f"{MAX_DAMAGED_RUN_ENV} (now {limit}, 0: no limit) sets the bound")
         trainer_breakers.trip(trainer_breakers.BUFFER_DAMAGED, emit, value=run,
                               limit=limit, detail=str(error), legacy_event="DamagedPayloadLimit")
-        raise error
+        raise trainer_breakers.stop_error(error, trainer_breakers.BUFFER_DAMAGED)
 
 
 def max_damaged_run_limit(environ: Mapping[str, str] | None = None) -> int:
@@ -1216,6 +1217,9 @@ class BatchReader:
                   "damaged_payload": len(self._damaged), "duplicate_task": len(self._duplicates)}
         counts = {key: int(value) for key, value in counts.items() if value}
         out = type(error)(f"{error}{passed_over_text(counts)}")
+        breaker = trainer_breakers.breaker_of(error)
+        if breaker is not None:  # the stop's mark goes with the text
+            trainer_breakers.stop_error(out, breaker)
         out.passed_over = {**counts, "damaged_payloads": list(self._damaged),
                            "duplicate_tasks": list(self._duplicates)}
         if counts:

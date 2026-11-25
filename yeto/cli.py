@@ -794,6 +794,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--modal-retries 0. The syncer is still recovered",
     )
     infra.add_argument(
+        "--rl-deterministic-stop",
+        action="store_true",
+        help="launch.deterministic_stop for a single trainer island (a fleet has it on): an island a "
+        "trainer breaker (e.g. no new group within trainer.sample_wait), a strict check or the syncer's "
+        "refusal stopped exits 11 and is neither retried by its provider (Modal) nor relaunched; "
+        "trainer.nan / trainer.policy_hash get one relaunch on a new machine. Off (the single-trainer "
+        "default): such an exit is retried and relaunched like any failure",
+    )
+    infra.add_argument(
         "--recover-timeout",
         type=int,
         default=1200,

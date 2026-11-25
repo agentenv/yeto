@@ -353,6 +353,7 @@ class IslandTrainerAgent:
             trainer_breakers.trip(trainer_breakers.RELEASE_DRAIN, self.emit, value=self.release_drain_s,
                                   limit=self.release_drain_s, detail=str(handle.error),
                                   legacy_event="RemoteTrainerError")
+            trainer_breakers.stop_error(handle.error, trainer_breakers.RELEASE_DRAIN)
         elif failed:
             handle.error = failed[0]
 

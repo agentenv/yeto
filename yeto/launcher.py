@@ -71,7 +71,8 @@ from .launch.fleet import (
     CONFIG_ERROR_EXIT, CONTAINER_CHANGED_EXIT, FAILED_RUN_DRAIN_S,
     ISLAND_FAILED_EXIT, RUN_STALLED_EXIT, RUN_STOPPED_EXIT, TEARDOWN_UNVERIFIED_EXIT,
     TRAINER_GAVE_UP_EXIT, FixedRosterIslandAbandoned, FleetController, IslandConfigError,
-    RunStalled, RunStopRequested, controller_fixed_roster, effective_stall_timeout,
+    IslandsFailedForGood, RunStalled, RunStopRequested, controller_fixed_roster, deterministic_stop,
+    effective_stall_timeout,
 )
 from .launch import trips
 from .launch.teardown import collect_diagnostics_parallel, teardown_island
@@ -335,6 +336,19 @@ def island_lifecycle_enabled(args, specs) -> bool:
 
     samplers = set(sample_roles.sampler_islands(args, len(specs)))
     return sum(1 for m in range(len(specs)) if m not in samplers) >= 2
+
+
+def _recorded_new_machine_retries(recorder, name: str) -> dict | None:
+    """Island ``name``'s ``new_machine_retries`` as its run store record holds them (None: none)."""
+    if recorder is None:
+        return None
+    try:
+        ref = recorder.ref(name)
+        record = None if ref is None else recorder.store.cached(ref.island)
+    except Exception:  # noqa: BLE001 - the tape still counts them
+        return None
+    retries = (record or {}).get("new_machine_retries")
+    return dict(retries) if isinstance(retries, dict) and retries else None
 
 
 def island_outcome(exit_codes) -> tuple[list[str], list[str], list[str]]:
@@ -1134,8 +1148,17 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             followers=_follower_islands(args, specs, learner_names),
             rollout=_rollout_controller(args),
             recorder=recorder,
-            incarnations={name: {"incarnation": a.incarnation, "relaunches": a.relaunches, "adopted": a.adopt}
+            incarnations={name: {"incarnation": a.incarnation, "relaunches": a.relaunches, "adopted": a.adopt,
+                                 # the relaunches on a new machine its record counts (trainer.nan)
+                                 "new_machine_retries": _recorded_new_machine_retries(recorder, name)}
                           for name, a in adoption.items()},
+            deterministic_stop=deterministic_stop(args)[0],
+            # why an island stopped, from its own tape records (a breaker, a strict check, a
+            # refusal: never relaunched), not from its rank's exit status
+            stop_probe=(
+                (lambda name: event_collectors[name].island_stop if name in event_collectors else None)
+                if echo_names else None
+            ),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -1220,6 +1243,18 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 print(f"[launcher] event tape incomplete for {no_sync_incomplete} "
                       "(expected after an island failure)", file=sys.stderr)
             return CONTAINER_CHANGED_EXIT if container_changed() else ISLAND_FAILED_EXIT
+        except IslandsFailedForGood as error:
+            # Every island ended on a deterministic stop (a trainer breaker, a strict check, a
+            # refusal). A fleet island's launch says so with ISLAND_STOP_EXIT, so the run's
+            # trainer worker does not start it again; any other launch raises as before.
+            if getattr(args, "rl_fleet_role", None) != "island" or container_changed():
+                raise
+            from .config_errors import ISLAND_STOP_EXIT
+
+            print(f"[launcher] ERROR: {error}: {error.reasons}; not relaunched (exit {ISLAND_STOP_EXIT})",
+                  file=sys.stderr)
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return ISLAND_STOP_EXIT
         except Exception as error:
             if not container_changed():
                 raise
@@ -1752,6 +1787,10 @@ def dry_run_plan(args) -> dict:
         # the trainer's model: source, problems, warnings (absent: --preflight-model off)
         **({"trainer_model": trainer_model} if trainer_model is not None else {}),
         "external_learners": external,
+        # launch.deterministic_stop when on (a fleet, or --rl-deterministic-stop): an island a
+        # trainer breaker or a strict check stopped exits 11, not retried; absent: off, as before
+        **({"deterministic_stop": {"on": True, "why": _ds[1]}}
+           if rl and (_ds := deterministic_stop(args))[0] else {}),
         "total_gpus": sum(s.total_gpus for s in specs),
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
         # one syncer per trainable role (actor first); none without outer sync

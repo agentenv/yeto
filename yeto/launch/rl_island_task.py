@@ -580,6 +580,11 @@ def make_miles_island_task(
         "CYBERGYM_AGENT_ID": args.cybergym_agent_id,
         "CYBERGYM_TIMEOUT": str(args.cybergym_timeout),
     }
+    from .fleet import deterministic_stop_env  # noqa: PLC0415
+
+    # launch.deterministic_stop on (a fleet; a single trainer only with --rl-deterministic-stop): the
+    # island ends a breaker's or a strict check's stop with exit 11, never retried. Off: nothing added.
+    envs.update(deterministic_stop_env(args))
     from yeto.rl.profiles import qwen3_8_next as _fn
     if str(args.model or "").rstrip("/").rsplit("/", 1)[-1] in _fn.MODEL_NAMES.values():
         # run_qwen3_8_next.py extra_env_vars, exported before `ray start`

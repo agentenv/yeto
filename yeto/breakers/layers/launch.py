@@ -97,6 +97,35 @@ BREAKERS: tuple[Breaker, ...] = (
         legacy_events=("TrainerLoopGaveUp",), gauge="count", owner="yeto.launch.trainer_loop",
         doc="the trainer scheduler releases the trainer and stops the run (exit 8)"),
     Breaker(
+        name="launch.deterministic_stop", layer="launch", kind="breaker",
+        params=(Param("new_machine_retries_n", int, 1, unit="n", lo=0,
+                      doc="relaunches on a newly ordered machine of an island trainer.nan or "
+                      "trainer.policy_hash stopped (a faulty card may cause either); the next stop of the "
+                      "same breaker ends the island"),),
+        actions=("stop",), default_action="stop", default_enabled=False,
+        aliases=(Alias("launch_flag", "--rl-deterministic-stop", None, nargs=0, on_values=(True,)),),
+        native="yeto.launch.fleet deterministic_stop / island_lifecycle.NEW_MACHINE_RETRIES",
+        legacy_events=("island_lost", "island_new_machine_retry"), gauge="count", owner="yeto.launch.fleet",
+        doc="an island a trainer breaker (e.g. no new group within trainer.sample_wait), a whitelisted strict "
+            "check or the syncer's refusal stopped exits 11: its provider (Modal) does not retry it and the "
+            "controller does not relaunch it (each would stop the same way and bill a machine meanwhile). On "
+            "for a fleet (an island pool, an island launch of a fleet, two or more trainer islands); off for a "
+            "single trainer, which keeps its retries and relaunches unless --rl-deterministic-stop"),
+    Breaker(
+        name="launch.island_relaunches", layer="launch", kind="retry_budget",
+        params=(Param("max_n", int, 3, unit="n", lo=1,
+                      doc="relaunches of one island pool island within window_s; one more failure gives "
+                      "the island up"),
+                Param("window_s", float, 3600.0, unit="s", lo=0,
+                      doc="the sliding window the relaunches are counted in")),
+        actions=("stop",), default_action="stop", default_enabled=False, can_disable=False,
+        native="yeto.launch.fleet ISLAND_MAX_RELAUNCHES / ISLAND_RELAUNCH_WINDOW_S",
+        legacy_events=("island_relaunch_limit",), gauge="count", owner="yeto.launch.fleet",
+        doc="an island pool (elastic) island that keeps failing is abandoned (a CRITICAL line and an "
+            "island_relaunch_limit fleet event) instead of being ordered again; the pool goes on. On for an "
+            "island pool only (any island pool option); a fixed roster and a single trainer keep their "
+            "recovery budget (--recover-timeout, two relaunches per window of a fixed roster)"),
+    Breaker(
         name="launch.provider_timeout", layer="launch", kind="breaker",
         params=(
             Param("timeout_s", int, 24 * 3600, unit="s", lo=1,
