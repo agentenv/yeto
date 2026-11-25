@@ -14540,6 +14540,94 @@ mod tests {
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
+    /// A moved island whose new machines come up at once: generation B of
+    /// island 1 says HELLO while A, which holds the PULL of step 1, is still
+    /// connected; then A sends LEAVE and drops. A counts as replaced (no
+    /// `pool_leave`), and its slot is not stranded until a lease (30 s here)
+    /// or the soft deadline: the disconnect rebinds it to B, which gets the
+    /// re-PULL after its catch-up, and step 1 commits on both islands.
+    #[tokio::test]
+    async fn a_leave_after_the_next_generation_said_hello_rebinds_its_slot() {
+        let layout = Layout {
+            fragments: (0..2)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![4],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let directory = unique_test_directory("leave-after-next-generation-hello");
+        let tape = directory.join("tape.jsonl");
+        let mut cfg = round_test_config(4);
+        cfg.learners = 2;
+        cfg.quorum = 1;
+        cfg.max_base_lag = Some(64);
+        cfg.quorum_timeout_s = 3600;
+        cfg.event_tape = Some(tape.clone());
+        cfg.membership.quorum_rule = crate::membership::QuorumRule::Capacity { theta: 1.0, q_min: 1 };
+        cfg.membership.lease = Some(Duration::from_secs(30));
+        let registry: Registry =
+            Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg.membership.clone(), 2))));
+        let budget_cutoff = Arc::new(BudgetCutoff::new(false, Duration::from_secs(cfg.quorum_timeout_s)));
+        let (events, events_rx) = mpsc::channel(64);
+        let (zero, a, b) = (member(0, 1), member(1, 1), member(1, 2));
+        let (zero_control, mut zero_frames) = mpsc::channel(1024);
+        let (a_control, mut a_frames) = mpsc::channel(1024);
+        let (b_control, mut b_frames) = mpsc::channel(1024);
+        let zero_group = scheduler_test_group(zero, &layout, zero_control);
+        let a_group = scheduler_test_group(a, &layout, a_control);
+        let b_group = scheduler_test_group(b, &layout, b_control);
+        for group in [zero_group, a_group] {
+            registry.lock().unwrap().register_group(group.clone(), Instant::now()).unwrap();
+            events.send(Event::Hello { group }).await.unwrap();
+        }
+        for fragment_id in 0..2 {
+            let init = Event::Init { member: zero, fragment_id, values: vec![0.0; 4], sha256: [0; 32] };
+            events.send(init).await.unwrap();
+        }
+        let push_of = |learner: u32, pull: (u32, u64, u32)| {
+            let mut push = test_push_for(learner, 0);
+            push.fragment_id = pull.0;
+            push.global_step = pull.1;
+            push.round_attempt = pull.2;
+            push.outer_gradient = vec![0.5; 4];
+            push
+        };
+        let driver = async {
+            let pull = next_pull(&mut zero_frames).await;
+            assert_eq!((pull.1, pull.2), (1, 1));
+            assert_eq!(next_pull(&mut a_frames).await, pull);
+            events.send(Event::Push { member: zero, push: push_of(0, pull) }).await.unwrap();
+            registry.lock().unwrap().register_group(b_group.clone(), Instant::now()).unwrap();
+            events.send(Event::Hello { group: b_group }).await.unwrap();
+            events.send(Event::Leave { member: a, reason: 2 }).await.unwrap();
+            registry.lock().unwrap().unregister(a);
+            events.send(Event::Disconnected { member: a }).await.unwrap();
+            let repull = tokio::time::timeout(Duration::from_secs(10), next_pull(&mut b_frames))
+                .await
+                .expect("the slot of the generation that left was never rebound");
+            assert_eq!(repull, pull);
+            events.send(Event::Push { member: b, push: push_of(1, repull) }).await.unwrap();
+            loop {
+                let text = std::fs::read_to_string(&tape).unwrap_or_default();
+                if text.contains("\"sync/responders\"") {
+                    return text;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        let text = tokio::select! {
+            result = scheduler(cfg, events_rx, registry.clone(), budget_cutoff) => panic!("scheduler ended: {result:?}"),
+            text = tokio::time::timeout(Duration::from_secs(10), driver) => text.expect("step 1 did not commit"),
+        };
+        let record = text.lines().find(|line| line.contains("\"sync/responders\"")).unwrap();
+        assert!(record.contains("\"step\":1,") && record.contains("\"responded\":[0,1],"), "{record}");
+        assert!(!text.contains("\"kind\":\"pool_leave\""), "a replaced generation is no departure: {text}");
+        assert!(!text.contains("\"kind\":\"pool_slots_released\""), "{text}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
     /// Generation A of island 1 holds the PULL of step 1 and drops without
     /// LEAVE; generation B registers, sends LEAVE and closes before its HELLO
     /// is handled (no catch-up, no rebind). B's departure releases A's slot:
