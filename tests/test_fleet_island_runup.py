@@ -119,7 +119,10 @@ def test_the_local_island_launches_are_this_fleet_s_from_the_run_registry(tmp_pa
 
     run, _ = build(tmp_path, monkeypatch)
     for name in ("r-i0", "r-i1-m2", "r-i7", "r", "r-island", "other-i0", "r-i0-m1x"):
-        runs.create_run(name, {})
+        k = name.split("-i", 1)[-1].split("-")[0]
+        runs.create_run(name, {"rl_fleet_role": "island", "rl_fleet_learner_id": int(k) if k.isdigit() else 0})
+    runs.create_run("r-i3", {"training_mode": "rl"})  # another run that only shares the name pattern
+    runs.create_run("r-i4", {"rl_fleet_role": "island", "rl_fleet_learner_id": 5})  # not island 4
     assert run.local_island_launches() == ["r-i0", "r-i1-m2", "r-i7"]
 
 
@@ -133,7 +136,7 @@ def test_run_down_records_the_island_launches_it_confirmed_down(tmp_path, monkey
     worker.host = "host-a"
     il.write_syncer_record(objects, addr="h:1", syncer_epoch=0, learners=2, max_learners=4, run="r")
     worker.step()
-    runs.create_run("r-i0", {})  # island 1's launch is not registered here: not confirmed
+    runs.create_run("r-i0", {"rl_fleet_role": "island", "rl_fleet_learner_id": 0})  # island 1's: not registered here
     monkeypatch.setattr(up.Run, "lock_for_down", lambda self: None)
     run.down()
     assert worker.load(0)["state"] == trainer_worker.DOWN and worker.load(1)["state"] == trainer_worker.STARTING

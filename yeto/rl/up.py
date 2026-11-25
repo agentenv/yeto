@@ -1607,18 +1607,26 @@ class Run:
         self.env[ISLAND_HMAC_KEY_ENV] = path.read_text().strip()
 
     def local_island_launches(self) -> list[str]:
-        """The island launches of this fleet in this host's run registry (``yeto.runs``),
-        by run name: the plan's island prefixes and their incarnations (``-m<n>``), the
-        islands added at run time (``-i<k>``) too. No store read: the trainer worker
-        forwards a fleet STOP to them when the store does not answer."""
+        """The island launches of this fleet in this host's run registry (``yeto.runs``):
+        a run named ``<fleet>-i<k>`` or ``<fleet>-i<k>-m<n>`` (the islands added at run time
+        too) launched as island ``k`` (``--rl-fleet-role island --rl-fleet-learner-id k``);
+        another run that only shares the name pattern is not one. No store read: the
+        trainer worker forwards a fleet STOP to them when the store does not answer."""
         if not self.per_island_fleet():
             return []
         from yeto import runs  # noqa: PLC0415
         from yeto.rl.island_launches import fleet_prefix  # noqa: PLC0415
 
         base = fleet_prefix(self.cfg["fleet"]["trainer_argv"])
-        own = re.compile(re.escape(base) + r"-i\d+(-m\d+)?")
-        return sorted(str(m.get("name")) for m in runs.list_runs() if own.fullmatch(str(m.get("name") or "")))
+        own = re.compile(re.escape(base) + r"-i(\d+)(-m\d+)?")
+        out = []
+        for meta in runs.list_runs():  # by name, and launched as that island of a fleet (not another run's name)
+            match = own.fullmatch(str(meta.get("name") or ""))
+            args = meta.get("args") if isinstance(meta.get("args"), dict) else {}
+            if (match and args.get("rl_fleet_role") == "island"
+                    and str(args.get("rl_fleet_learner_id")) == match.group(1)):
+                out.append(str(meta["name"]))
+        return sorted(out)
 
     def mark_islands_down(self, names: list[str]) -> None:
         """The island launches ``names`` were torn down by ``yeto down`` on this host (their
