@@ -37,7 +37,7 @@ def _pull(line: str) -> str:
 @pytest.mark.parametrize("line, kind", [
     (f"Error response from daemon: manifest for {DIGEST} not found: manifest unknown: manifest unknown", IMAGE),
     ("Error response from daemon: no matching manifest for linux/arm64/v8 in the manifest list entries", IMAGE),
-    ("Error response from daemon: Head \"https://ghcr.io/v2/x/manifests/sha256:0\": unauthorized", CREDENTIAL),
+    ("Error response from daemon: Head \"https://registry.example.com/v2/x/manifests/sha256:0\": unauthorized", CREDENTIAL),
     ("Error response from daemon: pull access denied for x/yeto-miles, repository does not exist or may require "
      "'docker login': denied: requested access to the resource is denied", CREDENTIAL),
     ("Error response from daemon: Head \"https://1.dkr.ecr.us-east-1.amazonaws.com/v2/x/manifests/0\": "
@@ -51,7 +51,7 @@ def test_an_image_or_credential_failure_on_dockers_own_line_is_deterministic(lin
 
 
 @pytest.mark.parametrize("line", [
-    "Error response from daemon: Get \"https://ghcr.io/v2/\": net/http: TLS handshake timeout",
+    "Error response from daemon: Get \"https://registry.example.com/v2/\": net/http: TLS handshake timeout",
     "Error response from daemon: toomanyrequests: retry-after: 39.1us, allowed: 44000/minute",
     "Error response from daemon: received unexpected HTTP status: 503 Service Unavailable",
     "error pulling image configuration: download failed after attempts=6: unexpected EOF",
@@ -72,7 +72,7 @@ def test_a_network_registry_or_host_failure_keeps_its_relaunches(line):
 def test_another_tools_line_after_a_pull_failure_keeps_its_relaunches(other):
     """Only docker's own error lines count: a failed pull (its own error a timeout here, or
     none) followed by a Hugging Face 401 or a git refusal is not an image problem."""
-    assert pull_failure(_pull("Error response from daemon: Get \"https://ghcr.io/v2/\": i/o timeout") + other) is None
+    assert pull_failure(_pull("Error response from daemon: Get \"https://registry.example.com/v2/\": i/o timeout") + other) is None
     assert pull_failure(_pull("2e676d178d2f: Pull complete") + other) is None
 
 
