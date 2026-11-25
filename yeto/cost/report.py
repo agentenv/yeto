@@ -168,6 +168,10 @@ def add_launch_arguments(p) -> None:
     g.add_argument("--budget-usd", type=usd_or_off, default=None,
                    help="stop the run gracefully (cut, then teardown) when its cost reaches this "
                    "(default: no budget stop; 'off': none)")
+    g.add_argument("--trainer-usd-per-hour", type=float, default=None, metavar="USD",
+                   help="USD per node-hour of the sky trainer islands' clusters, recorded on their ledger "
+                   "rows (usd_per_hour; wins over the unified price table). With --budget-usd a sky island "
+                   "the table has no price for is refused unless this is set")
     g.add_argument("--budget-warn-usd", type=float, default=None,
                    help="emit cost_budget_warn at this cost (default: 80%% of --budget-usd)")
     g.add_argument("--budget-stop-grace-minutes", type=float, default=20.0,

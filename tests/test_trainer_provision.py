@@ -12,7 +12,7 @@ import pytest
 
 from yeto.cost import billing, prices
 from yeto.cost.ledger import Resource
-from yeto.gpu_spec import ClusterSpec
+from yeto.gpu_spec import ClusterSpec, parse_gpu_spec
 from yeto.launch import trainer_provision as tp
 from yeto.launch.nc.sky_provider import SkyProvider
 from yeto.launch.rollout.offers import offers_from_config
@@ -100,3 +100,64 @@ def test_a_trainer_island_override_of_spot_is_what_its_cluster_is_priced_at():
     assert prov.ledger_attrs(prov.island("run-t-l0", 0, spec, None, task))["use_spot"] is True
     unreadable = types.SimpleNamespace(envs={})
     assert prov.ledger_attrs(prov.island("run-t-l0", 0, spec, None, unreadable))["use_spot"] is False
+
+
+# -- a budget needs a price (as a capped run refuses an unpriced sampler offer) ----------
+
+
+def _launch_args(gpu, *extra):
+    from test_rl_algorithm_provenance import _launcher_args
+
+    from yeto.launcher import _prepare_rl_args
+
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local", *extra), gpu=gpu)
+    _prepare_rl_args(args)
+    return args
+
+
+UNPRICED = "aws:1xh100@us-east-1"  # no billing row in the unified price table
+PRICED = "nebius:1x8xh100@eu-north1"  # the table's nebius H100:8 eu-north1 rows
+
+
+@pytest.fixture
+def _offline(monkeypatch, tmp_path):
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("YETO_PREFLIGHT_MODEL", "off")
+
+
+@pytest.mark.usefixtures("_offline")
+def test_a_budget_refuses_a_sky_trainer_no_price_covers_before_any_order():
+    import yeto.launch_preflight as lp
+    import yeto.launcher as launcher
+    from yeto.config_errors import ConfigError
+
+    capped = _launch_args(UNPRICED, "--budget-usd", "50")
+    with pytest.raises(ConfigError, match="--budget-usd 50 cannot see .*aws.*--trainer-usd-per-hour"):
+        lp.pre_cloud_checks(capped, threads=False)  # the launch path, before any order
+    with pytest.raises(ConfigError, match="--trainer-usd-per-hour"):
+        launcher.dry_run_plan(capped)
+    lp.pre_cloud_checks(_launch_args(UNPRICED), threads=False)  # no budget: unchanged
+    lp.pre_cloud_checks(_launch_args(PRICED, "--budget-usd", "50"), threads=False)  # the table prices it
+
+
+@pytest.mark.usefixtures("_offline")
+def test_a_stated_trainer_price_lifts_the_refusal_and_prices_the_cluster():
+    import yeto.launch_preflight as lp
+
+    stated = _launch_args("aws:2x1xh100@us-east-1", "--budget-usd", "50", "--trainer-usd-per-hour", "4.5")
+    lp.pre_cloud_checks(stated, threads=False)
+    spec = parse_gpu_spec(stated.gpu)[0]
+    prov = tp.TrainerProvision(stated, sky=None, specs=[spec], names=["run-t-l0"], no_sync=True)
+    attrs = prov.ledger_attrs(prov.island("run-t-l0", 0, spec, None, types.SimpleNamespace(envs={})))
+    assert attrs["usd_per_hour"] == pytest.approx(9.0)  # 4.5 per node-hour x 2 nodes
+    (item,) = billing.resource_costs([Resource("sky_cluster", "run-t-l0", "run-t-l0", 0.0, attrs)], 3600.0).items
+    assert item.priced and item.rate_usd_per_hour == pytest.approx(9.0)
+
+
+def test_only_the_sky_islands_the_launcher_orders_are_checked():
+    args = types.SimpleNamespace(training_mode="sft", spot=False, budget_usd=10.0)
+    specs = parse_gpu_spec("modal:1xh100,verda:1xb300,ssh:1xh100,kubernetes:1xh100,aws:1xh100@us-east-1")
+    (problem,) = tp.sky_price_problems(args, specs)
+    assert problem.startswith("--gpu island 4 (aws")

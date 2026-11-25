@@ -1655,6 +1655,9 @@ def dry_run_plan(args) -> dict:
     from .launch.trainer_image_check import check_trainer_images
 
     check_trainer_images(args, specs)  # the launch preflight's image / card refusal, found early
+    from .launch.trainer_provision import check_sky_prices
+
+    check_sky_prices(args, specs)  # the launch preflight's budget / price refusal, found early
     task_plan = island_task_plan(args) if rl else None
     split_plan = data_split_plan(args) if rl else None
     placements = rl_island_placement_records(args) if rl else []

@@ -200,10 +200,12 @@ class SkySource(Source):
         return result
 
     def ledger_attrs(self, prov, island):
-        """What prices the cluster: the unified price table's row of its cloud, card,
-        region and spotness (:func:`yeto.cost.prices.node_usd_h`), as for a sky sampler."""
+        """What prices the cluster: ``--trainer-usd-per-hour`` x its nodes when stated
+        (``usd_per_hour``, billing's first choice), else the unified price table's row of
+        its cloud, card, region and spotness (:func:`yeto.cost.prices.node_usd_h`), as for
+        a sky sampler."""
         spec = island.spec
-        attrs: dict[str, Any] = {"role": "trainer", "cloud": spec.cloud, "gpu": spec.gpu,
+        attrs: dict[str, Any] = {"role": island.role or "trainer", "cloud": spec.cloud, "gpu": spec.gpu,
                                  "gpus": int(spec.gpus_per_node) * int(spec.num_nodes),
                                  "num_nodes": int(spec.num_nodes)}
         if getattr(spec, "region", None):
@@ -213,6 +215,9 @@ class SkySource(Source):
             spot = getattr(prov.args, "spot", None)
         if spot is not None:
             attrs["use_spot"] = bool(spot)
+        stated = getattr(prov.args, "trainer_usd_per_hour", None)
+        if stated is not None:
+            attrs["usd_per_hour"] = float(stated) * int(spec.num_nodes)
         return attrs
 
 
@@ -411,3 +416,61 @@ def ssh_trainer_spec(args, spec: ClusterSpec, task):
     from .ssh_trainer_island import island_spec_from_inventory
 
     return island_spec_from_inventory(args, spec, task)
+
+
+# -- a budget needs a price ---------------------------------------------------------
+
+# sky clouds of the operator's own machines: no cloud bill to price
+OWN_MACHINE_CLOUDS = frozenset({"ssh", "kubernetes"})
+
+
+def sky_price_problems(args, specs: list[ClusterSpec], names: list[str] | None = None) -> list[str]:
+    """The sky islands this launch orders that no price covers: neither
+    ``--trainer-usd-per-hour`` nor a unified price table row of their cloud, card, region
+    and spotness (the row a sky sampler's offer is priced from). Their spend is invisible to
+    ``--budget-usd``. Modal (its own app billing), Verda (its instance guard), resident
+    ``ssh:`` islands, the trainer scheduler's held island and the operator's own machines
+    (``ssh`` / ``kubernetes`` sky clouds) are not this check's."""
+    if getattr(args, "trainer_usd_per_hour", None) is not None:
+        return []
+    from ..cost import prices
+    from . import trainer_loop
+    from .topology import rl_island_args
+
+    rl = getattr(args, "training_mode", "sft") == "rl"
+    names = names or [f"island {m}" for m in range(len(specs))]
+    ssh = resident_ssh_names(args, names, specs) if rl else set()
+    held = trainer_loop.held_island(args) if rl else None
+    out = []
+    for m, spec in enumerate(specs):
+        if m == held or names[m] in ssh or spec.cloud in OWN_MACHINE_CLOUDS:
+            continue
+        if next(a for a in _SOURCES if a.claims(_Probe(ssh), names[m], spec)).kind != SkySource.kind:
+            continue
+        spot = bool(getattr(rl_island_args(args, m) if rl else args, "spot", False))
+        if prices.node_usd_h(spec.cloud, spec.gpu, spec.gpus_per_node, spot=spot, region=spec.region) is None:
+            out.append(f"--gpu island {m} ({spec}, {'spot' if spot else 'on-demand'}): no unified price table row "
+                       f"for {spec.cloud} {spec.gpu}" + (f" in {spec.region}" if spec.region else ""))
+    return out
+
+
+@dataclass
+class _Probe:
+    """What an adapter's ``claims`` reads before a provision exists."""
+
+    ssh_names: set[str]
+
+
+def check_sky_prices(args, specs: list[ClusterSpec], names: list[str] | None = None) -> None:
+    """With ``--budget-usd``, refuse (ConfigError) a sky island no price covers, as a capped
+    run refuses an unpriced sampler offer; without a budget, nothing changes."""
+    if getattr(args, "budget_usd", None) is None:
+        return
+    problems = sky_price_problems(args, specs, names)
+    if problems:
+        from ..config_errors import ConfigError
+
+        raise ConfigError(
+            f"--budget-usd {args.budget_usd:g} cannot see the spend of {len(problems)} sky island(s): "
+            + "; ".join(problems) + ". State the price with --trainer-usd-per-hour USD (per node-hour; its "
+            "clusters' ledger rows then carry usd_per_hour), use a priced region / card, or drop --budget-usd")
