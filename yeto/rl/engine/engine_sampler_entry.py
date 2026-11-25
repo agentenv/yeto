@@ -1287,6 +1287,8 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         from yeto.node import report as node_report  # noqa: PLC0415
 
         node = node_report.from_env(env, member_store, spec)
+        if node is not None:  # every tape event is progress to the pool, as on the SSH probe
+            emit = node.watching(emit)
     node_exit: list[Any] = [None, None]  # exit code, reason of an unsupervised start
     from .sampler_breakers import spec_breakers  # noqa: PLC0415
 

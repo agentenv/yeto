@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from yeto.launch.node_inventory import NodeProfile
 
 from .paths import sampler_dirs
-from .profile import CONTAINER_MODELS, container_mounts
+from .profile import CONTAINER_MODELS, container_mount_list
 from .records import Assignment
 from .store import reclaim_marker_env, sampler_route_env
 
@@ -57,18 +57,30 @@ def store_env(store_uri: str | None, *, stage: str, environ: Mapping[str, str]) 
     return out
 
 
+def prepend_path(first: str, rest: str | None) -> str:
+    """``first`` in front of a ``PYTHONPATH`` (``rest``), without repeating it."""
+    parts = [p for p in str(rest or "").split(":") if p and p != first]
+    return ":".join([first, *parts])
+
+
 def sampler_env(assignment: Assignment, profile: NodeProfile, *, yeto_dir: str, store_uri: str | None,
                 environ: Mapping[str, str], heartbeat_s: float | None = None,
                 host_paths: Sequence[str] | None = None) -> dict[str, str]:
-    """The sampler's non-secret environment: the yeto tree, the reclaim marker (SIGTERM
-    is its orderly leave), the release download's spread key, the family's visible
-    cards and ``YETO_DEVICE_FAMILY``, the store settings, the node record identity,
-    then the profile's and the assignment's own variables (the assignment's win)."""
+    """The sampler's non-secret environment: the yeto tree in front of the inherited
+    ``PYTHONPATH`` (a venv's or an image's own entries, e.g. CANN's ``acl``, stay), the
+    reclaim marker (SIGTERM is its orderly leave), the release download's spread key, the
+    family's visible cards and ``YETO_DEVICE_FAMILY``, the store settings, the node record
+    identity, then the profile's and the assignment's own variables (the assignment's win).
+    A container launch takes ``PYTHONPATH`` out and prepends the tree inside the container
+    (:func:`container_argv`): the image's value is only known there."""
     p = sampler_paths(profile, assignment.shard)
     devices = profile.devices(assignment.cards, host_paths=host_paths)
     sampler_dir = p["reclaim"].rsplit("/", 1)[0]
-    env = {"PYTHONUNBUFFERED": "1", "PYTHONPATH": yeto_dir, **reclaim_marker_env(assignment.shard, sampler_dir),
-           **devices.env, **profile.family_env()}
+    # a process on every card (no cards assigned) sees the host's cards as the route left them:
+    # no visible-cards variable is set for it (a container's numbering always is)
+    visible = devices.env if assignment.cards is not None or profile.container in ("docker", "podman") else {}
+    env = {"PYTHONUNBUFFERED": "1", "PYTHONPATH": prepend_path(yeto_dir, environ.get("PYTHONPATH")),
+           **reclaim_marker_env(assignment.shard, sampler_dir), **visible, **profile.family_env()}
     if assignment.run:
         env.update(sampler_route_env(assignment.run, assignment.shard, sampler_dir))
     env.update(store_env(store_uri, stage=p["stage"], environ=environ))
@@ -78,8 +90,8 @@ def sampler_env(assignment: Assignment, profile: NodeProfile, *, yeto_dir: str, 
                 SUPERVISED_ENV: "1"})
     if heartbeat_s is not None:
         env[HEARTBEAT_ENV] = f"{float(heartbeat_s):g}"
-    env.update(profile.env)
-    env.update({str(k): str(v) for k, v in dict(assignment.env).items()})
+    env.update({k: v for k, v in profile.env.items() if k != "PYTHONPATH"})
+    env.update({str(k): str(v) for k, v in dict(assignment.env).items() if k != "PYTHONPATH"})
     return env
 
 
@@ -94,17 +106,23 @@ def engine_prefix(profile: NodeProfile, sudo: bool) -> list[str]:
 def container_argv(profile: NodeProfile, *, name: str, image: str, env: Mapping[str, str], python: str,
                    spec_path: str, env_files: Sequence[str] = (), cards: Sequence[int] | None = None,
                    host_paths: Sequence[str] | None = None, sudo: bool = False) -> list[str]:
-    """``<engine> run --rm`` of the sampler in the foreground (the runtime is its parent)."""
+    """``<engine> run --rm`` of the sampler in the foreground (the runtime is its parent).
+    The yeto tree goes in front of the image's own ``PYTHONPATH`` inside the container
+    (``-e PYTHONPATH=`` would drop it: the CANN ``acl`` module of an Ascend image)."""
     argv = [*engine_prefix(profile, sudo), "run", "--rm", "--name", name, "--network", "host", "--ipc", "host",
             *profile.devices(cards, host_paths=host_paths).args]
-    for host, inside in sorted(container_mounts(profile).items()):
-        argv += ["-v", f"{host}:{inside}{':ro' if inside == CONTAINER_MODELS else ''}"]
+    for host, inside in container_mount_list(profile):
+        ro = inside == CONTAINER_MODELS or inside.startswith(CONTAINER_MODELS + "/")
+        argv += ["-v", f"{host}:{inside}{':ro' if ro else ''}"]
     for path in env_files:
         argv += ["--env-file", path]
+    tree = str(env.get("PYTHONPATH") or "").split(":")[0]
     for key, value in sorted(env.items()):
-        argv += ["-e", f"{key}={value}"]
+        if key != "PYTHONPATH":
+            argv += ["-e", f"{key}={value}"]
+    prelude = f'export PYTHONPATH={shlex.quote(tree)}"${{PYTHONPATH:+:$PYTHONPATH}}"; ' if tree else ""
     return [*argv, "--entrypoint", "bash", image, "-c",
-            f"exec {shlex.quote(python)} -m {SAMPLER_MODULE} --spec {shlex.quote(spec_path)}"]
+            f"{prelude}exec {shlex.quote(python)} -m {SAMPLER_MODULE} --spec {shlex.quote(spec_path)}"]
 
 
 def stop_argv(profile: NodeProfile, name: str, *, sudo: bool = False) -> list[str]:

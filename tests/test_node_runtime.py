@@ -242,3 +242,30 @@ def test_a_stop_during_the_boot_writes_the_exit_record(tmp_path, code_tar):
     status = records.node_status(objects, "t-stop")
     assert status.state == "exited" and status.reason == "stopped"
     assert signal.getsignal(signal.SIGTERM) is not None  # the handler before main is back
+
+
+def test_container_mounts_add_the_profiles_mounts_to_the_nodes_directories(tmp_path):
+    from yeto.node.profile import container_mounts
+
+    profile = _profile(tmp_path, container="docker", mounts={"/shared/datasets": "/datasets",
+                                                             "/nvme/models/K": "/models/k"})
+    mounts = container_mounts(profile)
+    assert mounts[f"{tmp_path}/work"] == "/work" and mounts[f"{tmp_path}/models"] == "/models"
+    assert mounts[f"{tmp_path}/work/cache"] == "/root/.cache"
+    assert mounts["/shared/datasets"] == "/datasets" and mounts["/nvme/models/K"] == "/models/k"
+    replaced = container_mounts(_profile(tmp_path, container="docker", mounts={"/big/cache": "/root/.cache"}))
+    assert replaced["/big/cache"] == "/root/.cache" and f"{tmp_path}/work/cache" not in replaced
+
+
+def test_one_host_directory_at_two_container_paths(tmp_path):
+    from yeto.node import launch as node_launch
+    from yeto.node.profile import ProfileError, container_mount_list, container_mounts
+
+    shared = str(tmp_path / "work")  # the node's models in its work directory
+    profile = _profile(tmp_path, container="docker",
+                       paths=NodePaths(work=shared, models=shared, cache=str(tmp_path / "cache")))
+    assert [m for m in container_mount_list(profile) if m[0] == shared] == [(shared, "/models"), (shared, "/work")]
+    argv = node_launch.container_argv(profile, name="n", image="img", env={}, python="python3", spec_path="/work/s.json")
+    assert f"{shared}:/work" in argv and f"{shared}:/models:ro" in argv  # both mounts, none dropped
+    with pytest.raises(ProfileError, match="mounted at both"):
+        container_mounts(profile)  # a map cannot hold both: refused, not merged

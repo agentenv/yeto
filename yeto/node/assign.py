@@ -34,7 +34,7 @@ def model_plan(cfg: Mapping[str, Any], profile: NodeProfile) -> ModelPlan:
     as a plan, by the profile's model source (no ``model_pull``: nothing to do)."""
     pull = cfg.get("model_pull") or {}
     source = profile.model_source or ("store" if pull else "none")
-    if source == "store" and not pull:
+    if not pull and source in ("store", "volume", "preset"):  # nothing named to fetch or to check
         return ModelPlan(source="none")
     return ModelPlan(source=source, key=pull.get("src_key"), dest=pull.get("dest"), include=pull.get("include"),
                      max_mb_s=int(pull.get("max_mb_s", 2500)), timeout_s=float(pull.get("timeout_s", 3600)),

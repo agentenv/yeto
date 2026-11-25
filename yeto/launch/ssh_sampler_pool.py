@@ -124,7 +124,7 @@ ENGINES = ("podman", "docker")
 PULL_POLICIES = ("missing", "always", "never")
 CONFIG_KEYS = frozenset({"kind", "inventory", "nodes", "workdir", "runtime", "container", "venv", "env",
                          "devices", "store", "preflight", "grace_s", "price_usd_h", "start_timeout_s",
-                         "lost_node_hold_s"})
+                         "lost_node_hold_s", "node_runtime"})
 CONTAINER_KEYS = frozenset({"engine", "image", "pull_ref", "pull", "security_opt", "sudo", "args", "python",
                             "shm_size", "mounts"})
 VENV_KEYS = frozenset({"python", "source", "ld_preload", "pythonpath"})
@@ -186,6 +186,9 @@ class SshPoolConf:
     # while another slot's node is free: its slot moves to a spare node (unified-sampler-pool 3.3);
     # 0: no hold (the lost node's slot is offered at once)
     lost_node_hold_s: float = 1800.0
+    # the node starts ``python -m yeto.node run`` (yeto.node.route), which starts the sampler;
+    # false: the sampler directly, as before (kept for one release)
+    node_runtime: bool = False  # opt-in: python -m yeto.node run starts the sampler
 
 
 def _strs(value: Any, key: str) -> tuple[str, ...]:
@@ -283,13 +286,20 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
     hold = section.get("lost_node_hold_s", 1800)
     if isinstance(hold, bool) or not isinstance(hold, (int, float)) or hold < 0:
         raise ValueError(f"ssh provider: lost_node_hold_s must be a number of seconds >= 0, not {hold!r}")
+    from yeto.node.route import enabled as node_runtime_enabled  # noqa: PLC0415
+
+    try:  # provider.node_runtime, else the pool config's: opt-in (default false)
+        node_runtime = node_runtime_enabled(cfg, default=False, section=section)
+    except ValueError as error:
+        raise ValueError(f"ssh provider: {error}") from None
     return SshPoolConf(nodes=tuple(nodes), workdir=workdir.rstrip("/"), runtime=runtime, container=container,
                        venv=venv, env={str(k): str(v) for k, v in env.items()}, devices=devices,
                        store=str(store) if store else None, min_free_gib=float(pre.get("min_free_gib", 20)),
                        require_idle=(bool(pre["require_idle"]) if pre.get("require_idle") is not None else None),
                        min_cards=int(pre["min_cards"]) if pre.get("min_cards") is not None else None,
                        grace_s=int(section.get("grace_s", 120)),
-                       price_usd_h=float(price) if price is not None else None, lost_node_hold_s=float(hold))
+                       price_usd_h=float(price) if price is not None else None, lost_node_hold_s=float(hold),
+                       node_runtime=node_runtime)
 
 
 # -- node shell -----------------------------------------------------------------
@@ -508,8 +518,9 @@ def _group_ok(p: Mapping[str, str]) -> str:
 
 
 def start_script(conf: SshPoolConf, *, yeto_dir: str, spec_path: str, pid_path: str,
-                 env: Mapping[str, str], env_file: str | None) -> str:
-    """The venv start script: env scripts, environment, PID record, ``exec`` python."""
+                 env: Mapping[str, str], env_file: str | None, exec_line: str | None = None) -> str:
+    """The venv start script: env scripts, environment, PID record, ``exec`` python.
+    ``exec_line``: the node runtime's start line instead (it records the sampler's PID itself)."""
     assert conf.venv is not None
     v = conf.venv
     lines = ["#!/bin/bash", "set -e"]
@@ -524,15 +535,18 @@ def start_script(conf: SshPoolConf, *, yeto_dir: str, spec_path: str, pid_path: 
         lines.append(f"export LD_PRELOAD={shlex.quote(v.ld_preload)}")
     if env_file:
         lines.append(_STORE_URI)
-    lines += [f"cd {shlex.quote(conf.workdir)}", f"echo $$ > {shlex.quote(pid_path)}",
-              f"exec {shlex.quote(v.python)} -m yeto.rl.engine.engine_sampler --spec {shlex.quote(spec_path)}"]
+    if exec_line is not None:
+        lines += [f"cd {shlex.quote(conf.workdir)}", exec_line]
+    else:
+        lines += [f"cd {shlex.quote(conf.workdir)}", f"echo $$ > {shlex.quote(pid_path)}",
+                  f"exec {shlex.quote(v.python)} -m yeto.rl.engine.engine_sampler --spec {shlex.quote(spec_path)}"]
     return "\n".join(lines) + "\n"
 
 
 _STORE_URI = STORE_URI_SHELL  # the bucket and endpoint are only known on the node (its env file)
 
 
-def venv_launch_command(p: Mapping[str, str], marker: str) -> str:
+def venv_launch_command(p: Mapping[str, str], marker: str, wait_s: int = 10) -> str:
     """Detach the start script in its own session (``$0``: the start's marker); the
     session's PGID and the marker are recorded, the script records the sampler's own
     PID. The log starts empty: a line of an earlier run is never read as this one's."""
@@ -541,7 +555,7 @@ def venv_launch_command(p: Mapping[str, str], marker: str) -> str:
             f"printf '%s\\n' {shlex.quote(marker)} > {p['marker']}; "
             f"{{ setsid bash -c {shlex.quote(inner)} {shlex.quote(marker)} </dev/null >/dev/null 2>&1 & "
             f"echo $! > {p['pgid']}; }}; "
-            f"for i in 1 2 3 4 5 6 7 8 9 10; do {_alive(p)} && break; sleep 1; done; "
+            f"for i in {' '.join(str(i) for i in range(1, int(wait_s) + 1))}; do {_alive(p)} && break; sleep 1; done; "
             f"if {_alive(p)}; then echo YETO_SSH_STARTED pid=$(cat {p['pid']}) pgid=$(cat {p['pgid']}); "
             f"else echo YETO_SSH_START_FAILED; tail -n 40 {p['log']} 2>/dev/null; exit 1; fi")
 
@@ -619,7 +633,7 @@ def container_pull_command(conf: SshPoolConf, image: str) -> str:
 
 def container_run_argv(conf: SshPoolConf, node: Node, *, name: str, image: str, yeto_dir: str, spec_path: str,
                        env: Mapping[str, str], env_file: str | None, cards: Sequence[int],
-                       host_paths: Sequence[str] | None = None) -> list[str]:
+                       host_paths: Sequence[str] | None = None, command: str | None = None) -> list[str]:
     """``<engine> run -d``: the node's device flags (the inventory's ``docker_args``,
     else the defaults of its family for ``cards``: :meth:`NodeProfile.devices`),
     ``security_opt``, the workdir and mounts at the same paths as on the host, then
@@ -648,9 +662,9 @@ def container_run_argv(conf: SshPoolConf, node: Node, *, name: str, image: str, 
     argv += list(c.args)
     # the yeto tree goes in front of the image's own PYTHONPATH (the CANN ``acl`` module of an
     # Ascend image is found through it; ``-e PYTHONPATH=`` would drop it, A07 pit 3)
+    exec_line = command or f"exec {shlex.quote(c.python)} -m yeto.rl.engine.engine_sampler --spec {shlex.quote(spec_path)}"
     body = f'export PYTHONPATH={shlex.quote(yeto_dir)}"${{PYTHONPATH:+:$PYTHONPATH}}"; ' + \
-        ((_STORE_URI + "; ") if env_file else "") + \
-        f"exec {shlex.quote(c.python)} -m yeto.rl.engine.engine_sampler --spec {shlex.quote(spec_path)}"
+        ((_STORE_URI + "; ") if env_file else "") + exec_line
     return [*argv, "--entrypoint", "bash", image, "-c", body]
 
 
@@ -905,6 +919,41 @@ class SshSamplerPoolOps:
         self.provider = SshNodeProvider(self.run_id, self.conf, slots=cli.slot_list(cfg),
                                         state_path=self.state_dir / f"ssh-pool-{self.run_id}.json", clock=clock)
         self._shard_of: dict[str, str] = {}
+        self._node_route: Any = None
+
+    def node_route_for(self, node: Node) -> Any:
+        """The node runtime's assignments (``yeto.node.route``): in the run's object store, or
+        in the node-local store (``provider.store``, written through the node's shell). None:
+        ``node_runtime: false``, or the syncer data path (no store): the node then starts the
+        sampler itself, as before."""
+        if not self.conf.node_runtime:
+            return None
+        if self.conf.store:
+            from yeto.node.route import NodeRoute, ShellObjects  # noqa: PLC0415
+
+            objects = ShellObjects(lambda cmd, text: self.ssh(node, cmd, input=text, timeout=120), self.conf.store)
+            return NodeRoute(self.cfg, kind=KIND, objects=lambda: objects, store=lambda: str(self.conf.store),
+                             code_ref=self.code_ref, run=self._run, publish_code=False)
+        if not self._uses_r2():
+            return None
+        if self._node_route is None:
+            from yeto.node.route import NodeRoute  # noqa: PLC0415
+            from yeto.node.store import run_store_uri  # noqa: PLC0415
+
+            self._node_route = NodeRoute(
+                self.cfg, kind=KIND, objects=lambda: self._fence_store().objects, code_ref=self.code_ref,
+                store=lambda: run_store_uri(self.cfg["r2_env_file"], self.cfg["run_prefix"],
+                                            bucket_env=self.cfg.get("bucket_env", "R2_BUCKET")), run=self._run)
+        return self._node_route
+
+    def node_profile(self, node: Node) -> Any:
+        """The node's profile for the runtime it starts (a process there: inside the container
+        of a container pool, on the host of a venv pool; the workdir on the same path in both)."""
+        from yeto.launch.node_inventory import NodePaths, NodeProfile  # noqa: PLC0415
+
+        return NodeProfile.from_node(node, container="process",
+                                     paths=NodePaths(work=self.conf.workdir, models=self.conf.workdir,
+                                                     cache=f"{self.conf.workdir}/cache"))
 
     # -- shell on a node
     def ssh(self, node: Node, command: str, *, timeout: float = 600, input: str | bytes | None = None,
@@ -1021,24 +1070,32 @@ class SshSamplerPoolOps:
         if facts.get("idle"):
             self.event("ssh_pool_idle_unchecked", node=node.name, shard=m.shard, detail=facts["idle"])
         yeto_dir = self.upload_code(node)
-        self.put(node, json.dumps(self.spec_for(m, shards), indent=1), p["spec"])
+        spec = self.spec_for(m, shards)
+        route = self.node_route_for(node)
+        if route is None:
+            self.put(node, json.dumps(spec, indent=1), p["spec"])
         env_file = None
         if self._uses_r2():
             env_file = f"{self.conf.workdir}/sampler/.store.env"
             self.put(node, Path(os.path.expanduser(str(self.cfg["r2_env_file"]))).read_text(), env_file, mode="600")
         env = self.sampler_env(node, m)
+        exec_line = None
+        if route is not None:  # the node runtime starts the sampler (its records go to the store)
+            python = self.conf.venv.python if self.conf.venv else self.conf.container.python  # type: ignore[union-attr]
+            exec_line = self.start_node_runtime(route, node, m, shards, spec, python=python, env_file=env_file)
         if self.conf.runtime == "venv":
             marker = start_marker(self.run_id, m.shard, m.ticket)
             env[MARK_ENV] = marker
             self.put(node, start_script(self.conf, yeto_dir=yeto_dir, spec_path=p["spec"], pid_path=p["pid"],
-                                        env=env, env_file=env_file), p["script"], mode="700")
-            out = self.ssh(node, venv_launch_command(p, marker), timeout=120)
+                                        env=env, env_file=env_file, exec_line=exec_line), p["script"], mode="700")
+            out = self.ssh(node, venv_launch_command(p, marker, wait_s=10 if exec_line is None else 120),
+                           timeout=120 if exec_line is None else 240)
         else:
             image = self.image_for(node)
             name = container_name(m.shard)
             argv = container_run_argv(self.conf, node, name=name, image=str(image), yeto_dir=yeto_dir,
                                       spec_path=p["spec"], env=env, env_file=env_file, cards=self.cards(node),
-                                      host_paths=facts.get("host_paths"))
+                                      host_paths=facts.get("host_paths"), command=exec_line)
             out = self.ssh(node, f"{container_pull_command(self.conf, str(image))} && "
                                  f"{{ {_ce(self.conf)} rm -f {name} >/dev/null 2>&1; true; }} && "
                                  f"{shlex.join(argv)} && echo YETO_SSH_STARTED container={name}", timeout=3600)
@@ -1063,6 +1120,29 @@ class SshSamplerPoolOps:
         """The image a node runs: ``container.image`` (``auto``: the node's inventory
         image, else the catalog's for what the spec asks), else the node's image."""
         return node_image(self.conf, node, spec_of(self.cfg))
+
+    def start_node_runtime(self, route: Any, node: Node, m, shards: list[str], spec: Mapping[str, Any], *,
+                           python: str, env_file: str | None) -> str:
+        """Write ``m``'s assignment, put its token and the node's profile next to the spec,
+        and return the node runtime's start line."""
+        from yeto.node.route import runtime_command  # noqa: PLC0415
+
+        p = node_paths(self.conf.workdir, m.shard)
+        profile = self.node_profile(node)
+        # provider.env goes in the assignment's environment (applied last by the runtime, as the
+        # route applies it last); PYTHONPATH stays the route's (its start line prepends the tree)
+        env = {k: v for k, v in self.conf.env.items() if k != "PYTHONPATH"}
+        # no cards in the assignment: the route's own card variables (device_env: numbered as the
+        # container or the venv sees them) reach the sampler through the runtime's environment
+        assignment, token = route.assign(m, shards, profile, spec, spec_paths="host", python=python, env=env)
+        token_file, profile_file = f"{p['dir']}/{m.shard}.token", f"{p['dir']}/{m.shard}.profile.json"
+        self.put(node, token, token_file, mode="600")
+        self.put(node, route.profile_file_text(profile), profile_file, mode="644")
+        _log(f"ssh pool: {m.shard} on {node.name}: node runtime, assignment {assignment.ticket} "
+             f"generation {assignment.generation}")
+        return runtime_command(python, assignment.ticket, route.store, env_file=env_file, token_file=token_file,
+                               profile_file=profile_file, log="-",
+                               child_pid_file=p["pid"] if self.conf.runtime == "venv" else None)
 
     def restart(self, m, shards: list[str]) -> None:
         self.start(m, shards)

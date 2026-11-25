@@ -60,6 +60,48 @@ def pull_body(src_key: str, dest: str, *, max_mb_s: int = 2500, include: str | N
             '&& echo "YETO_NC_PULL done $(date -u +%FT%TZ)"')
 
 
+def boto3_pull(plan: ModelPlan, dest: str, *, environ: Mapping[str, str] | None = None,
+               log: Callable[[str], None] = print, client: Any = None) -> dict[str, Any]:
+    """``s3://$R2_BUCKET/<key>`` into ``dest`` with boto3 (``max_mb_s`` as the transfer cap,
+    an object already there with its size skipped); the env names the bucket and endpoint
+    as the aws-cli body reads them."""
+    import fnmatch  # noqa: PLC0415
+
+    env = dict(os.environ if environ is None else environ)
+    bucket = env.get("R2_BUCKET")
+    if not bucket:
+        raise ModelError("model pull: R2_BUCKET is not set (the store env file names the bucket)")
+    if client is None:
+        import boto3  # noqa: PLC0415
+
+        client = boto3.client("s3", endpoint_url=env.get("AWS_ENDPOINT_URL"),
+                              aws_access_key_id=env.get("AWS_ACCESS_KEY_ID"),
+                              aws_secret_access_key=env.get("AWS_SECRET_ACCESS_KEY"),
+                              region_name=env.get("AWS_REGION") or "auto")
+    from boto3.s3.transfer import TransferConfig  # noqa: PLC0415
+
+    config = TransferConfig(max_concurrency=max(1, int(plan.jobs)),
+                            max_bandwidth=max(1, int(plan.max_mb_s)) * 1_000_000)
+    src = str(plan.key).strip("/") + "/"
+    copied = skipped = 0
+    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=src):
+        for obj in page.get("Contents") or ():
+            rel = obj["Key"][len(src):]
+            if not rel or (plan.include and not fnmatch.fnmatch(rel, plan.include)):
+                continue
+            target = Path(dest) / rel
+            if target.is_file() and target.stat().st_size == int(obj["Size"]):
+                skipped += 1
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            client.download_file(bucket, obj["Key"], str(target), Config=config)
+            copied += 1
+    if copied + skipped == 0:
+        raise ModelError(f"model pull: empty listing s3://{bucket}/{src}")
+    log(f"model pull: {copied} copied, {skipped} already there")
+    return {"copied": copied, "skipped": skipped}
+
+
 def model_dest(plan: ModelPlan, models_dir: str) -> str:
     """The node path of the model: ``dest`` (``/models/...`` read as ``models_dir``),
     else ``<models_dir>/<last part of key or repo>``."""
@@ -110,6 +152,9 @@ def prepare_model(plan: ModelPlan, *, models_dir: str, objects: Any = None,
                 copied += 1
             return {"source": "store", "dest": dest, "copied": copied}
         Path(dest).mkdir(parents=True, exist_ok=True)
+        if shutil.which("aws", path=(environ or os.environ).get("PATH")) is None:
+            # an engine image without awscli: boto3 (every sampler image has it), same skip-by-size resume
+            return {"source": "store", "dest": dest, **boto3_pull(plan, dest, environ=environ, log=log)}
         body = pull_body(plan.key, dest, max_mb_s=int(plan.max_mb_s), include=plan.include, jobs=int(plan.jobs))
         out = run(["bash", "-c", body], capture_output=True, text=True, timeout=float(plan.timeout_s), check=False,
                   env=dict(os.environ if environ is None else environ))

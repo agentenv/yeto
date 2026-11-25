@@ -278,7 +278,7 @@ class NcSshOps:
         else:
             attach_ssh(lease)
         pull = self.cfg.get("model_pull")
-        if pull:
+        if pull and self.node_route is None:  # on the node runtime the node pulls it (its model plan)
             self._pull(lease, pull)
         self._hooks(lease, m)
         self._start_sampler(lease, m, shards)
@@ -326,7 +326,31 @@ class NcSshOps:
             self._route = route
         return self._route
 
+    @property
+    def node_route(self) -> Any:
+        """The node runtime (``yeto.node.route``) on the sky route: the node runs ``python -m
+        yeto.node run`` in the sampler image, with the node's own family flags (a CUDA VM gets
+        CUDA flags, not the MI355X ones). Default on for ``provider.kind: sky`` on the r2 data
+        path; ``node_runtime: false`` keeps the docker route of :mod:`.ssh_sampler`. National
+        Compute and Daytona stay on their routes (``yeto.node.shadow`` compares them)."""
+        if not hasattr(self, "_node_route"):
+            from yeto.node import route as node_route  # noqa: PLC0415
+
+            on = (getattr(self.provider, "kind", None) == "sky" and self.sampler_route is None
+                  and self.cfg.get("data_path", "r2") == "r2" and node_runtime_on(self.cfg))
+            self._node_route = None
+            if on:
+                from yeto.node.store import pool_fence_store, run_store_uri  # noqa: PLC0415
+
+                self._node_route = node_route.NodeRoute(
+                    self.cfg, kind="sky", objects=lambda: pool_fence_store(self.cfg, error=NcError).objects,
+                    store=lambda: run_store_uri(self.cfg["r2_env_file"], self.cfg["run_prefix"],
+                                                bucket_env=self.cfg.get("bucket_env", "R2_BUCKET")), run=self._run)
+        return self._node_route
+
     def probe(self, m: Member) -> island_status.Probe:
+        if self.node_route is not None:  # the node's records in the store: no ssh round trip
+            return self.node_route.probe(m)
         alias = node_pool.host_alias(m.ticket)
         if self.sampler_route is not None:
             script = self.sampler_route.probe_script(m.shard, self._tape_glob(m.shard), self.metrics_port)
@@ -416,6 +440,9 @@ class NcSshOps:
         if m.shard and leases_path().exists() and m.ticket in json.loads(leases_path().read_text()):
             name = ssh_sampler.container_name(m.shard)
             stop = (self.sampler_route.stop_command(m.shard, grace_s=30) if self.sampler_route is not None else
+                    f"sudo docker stop -t 30 {name} >/dev/null 2>&1; mkdir -p ~/yeto/logs; sudo docker logs "
+                    f"--tail 500 {name} > ~/yeto/logs/{name}.last.log 2>&1; sudo docker rm -f {name} >/dev/null 2>&1; "
+                    "echo stopped" if self.node_route is not None else
                     f"sudo docker stop -t 30 {name} >/dev/null 2>&1; sudo docker logs --tail 500 {name} "
                     f"> {ssh_sampler.NVME}/logs/{name}.last.log 2>&1; sudo docker rm -f {name} "
                     ">/dev/null 2>&1; echo stopped")
@@ -480,6 +507,11 @@ class NcSshOps:
         # the prompts file goes to every node at every start (checked by size and sha256 there)
         prompts = {"prompts_file": str(Path(str(self.cfg["prompts_file"])).expanduser())} \
             if self.cfg.get("prompts_file") else {}
+        if self.node_route is not None:
+            from yeto.node import ssh_docker  # noqa: PLC0415
+
+            ssh_docker.start(self, lease, m, shards, run=self._run, **prompts)
+            return
         if self.sampler_route is not None:
             self.sampler_route.start(node_pool.host_alias(lease.ticket), spec=self._spec(m, shards), shard=m.shard,
                                      run_prefix=self.cfg["run_prefix"], r2_env_file=self.cfg["r2_env_file"],
@@ -609,7 +641,7 @@ POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base
                        "engine", "platform",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "comment", "sampler_route", "data_path", "syncer", "protected_accounts",
-                       "prompts_file"})
+                       "prompts_file", "node_runtime", "node_profile"})
 DATA_PATHS = ("r2", "syncer")  # buffer shards + releases in the run store | syncer broadcast + sample relay
 REQUIRED_KEYS = ("target", "shard_base")  # and "accounts" (or "slots" off National Compute)
 # the keys of the removed sky route (a SkyPilot SSH node pool with k3s on the node): refused by name
@@ -949,6 +981,20 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         _unknown("syncer", cfg["syncer"], SYNCER_KEYS)
     if cfg.get("data_path", "r2") == "syncer":
         syncer_address((cfg.get("syncer") or {}).get("address"))
+    if cfg.get("node_runtime") is not None and not isinstance(cfg["node_runtime"], bool):
+        raise ValueError(f"pool config: node_runtime must be true or false, not {cfg['node_runtime']!r}")
+    section = cfg.get("provider") or {}
+    kind = str(section.get("kind") or "nc")
+    if kind == "sky" and section.get("node_runtime") is not None:  # the sky provider section has no such key
+        raise ValueError("pool config: provider.node_runtime: the sky route's switch is the pool config's own "
+                         "node_runtime (top level)")
+    if kind not in ("ssh", "sky") and section.get("node_runtime") is not None:
+        raise ValueError(f"pool config: provider.node_runtime: provider kind {kind!r} keeps its own sampler start")
+    if cfg.get("node_runtime") is True and kind not in ("sky", "ssh"):
+        raise ValueError(f"pool config: node_runtime true: provider kind {kind!r} keeps its own sampler start "
+                         "(the node runtime runs on the sky and ssh routes)")
+    if cfg.get("node_profile") is not None and not isinstance(cfg["node_profile"], dict):
+        raise ValueError("pool config: node_profile must be a map of node profile fields")
     run_id(cfg)
     lead, margin = (_seconds(cfg, "replace_lead_s", 3600), _seconds(cfg, "end_margin_s", 600))
     price = pool_price(cfg)[0]
@@ -1045,6 +1091,37 @@ def pool_state_path(cfg: dict[str, Any]) -> Path:
 
 def pool_events_path(cfg: dict[str, Any]) -> Path:
     return tunnel.state_dir() / f"events-{run_id(cfg)}.jsonl"
+
+
+def node_runtime_on(cfg: dict[str, Any]) -> bool:
+    """The sky route's switch: the pool config's ``node_runtime`` (default on);
+    ``provider.node_runtime`` is refused on sky by :func:`pool_config`."""
+    from yeto.node.route import enabled  # noqa: PLC0415
+
+    return enabled(cfg, default=True, section=cfg.get("provider") or {})
+
+
+def node_image_lines(cfg: dict[str, Any]) -> list[str]:
+    """The sky route on the node runtime: the image of every offer's machine for the pool's
+    spec, one line each; :class:`NcError` when an offer has none (refused before the pool
+    starts, and in ``pool --dry-run``). Nothing for any other pool."""
+    section = cfg.get("provider") or {}
+    if (str(section.get("kind") or "") != "sky" or cfg.get("sampler_route") not in (None, "docker")
+            or cfg.get("data_path", "r2") != "r2" or not node_runtime_on(cfg)):
+        return []
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from yeto.launch.rollout.offers import offers_from_config  # noqa: PLC0415
+    from yeto.node import ssh_docker  # noqa: PLC0415
+
+    probe = SimpleNamespace(account=slot_list(cfg)[0], ticket="check", shard=f"{cfg['shard_base']}-0", data_slot=None,
+                            replaces_shard=None, predecessor_lost=False)
+    try:
+        spec = render_spec(cfg, probe, [probe.shard])
+        chosen = ssh_docker.check_offers(cfg, SimpleNamespace(offers=offers_from_config(section)), spec)
+    except (OSError, ValueError, KeyError, ssh_docker.SshDockerError) as error:
+        raise NcError(f"pool: node runtime images: {error}") from None
+    return [f"node runtime image: offer {key}: {image}" for key, image in chosen]
 
 
 def pool_ops(cfg: dict[str, Any]):
@@ -1454,6 +1531,12 @@ def _pool_command(args: Any) -> int:
         if args.cmd == "pool-stop":
             return pool_run.stop_pool(cfg, args.config, wait_s=args.wait)
         _print_breaker_deprecations(cfg)
+        try:  # the sky route's images, before the pool orders anything (and in the dry run)
+            for line in node_image_lines(cfg):
+                print(line)
+        except NcError as error:
+            print(f"pool: {error}", file=sys.stderr)
+            return 2
         if args.dry_run:
             return pool_run.dry_run(cfg, args.config)
         return pool_run.run_pool(cfg, args.config, interval=args.interval)

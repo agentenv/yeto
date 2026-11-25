@@ -54,22 +54,24 @@ def host_path(path: str, profile: NodeProfile) -> str:
                         (CONTAINER_CACHE, dirs["cache"])))
 
 
-def fill_value(value: str, profile: NodeProfile, *, run_prefix: str | None = None) -> str:
+def fill_value(value: str, profile: NodeProfile, *, run_prefix: str | None = None, move: bool = True) -> str:
     dirs = sampler_dirs(profile)
     text = value.replace("__YETO_WORK__", dirs["work"]).replace("__YETO_MODELS__", dirs["models"]) \
         .replace("__YETO_CACHE__", dirs["cache"])
     if run_prefix is not None:
         text = text.replace("__RUN_PREFIX__", run_prefix.strip("/"))
-    return sampler_path(text, profile) if text.startswith("/") else text
+    return sampler_path(text, profile) if move and text.startswith("/") else text
 
 
-def fill_spec(spec: Mapping[str, Any], profile: NodeProfile, *, run_prefix: str | None = None) -> dict[str, Any]:
+def fill_spec(spec: Mapping[str, Any], profile: NodeProfile, *, run_prefix: str | None = None,
+              move: bool = True) -> dict[str, Any]:
     """A copy of ``spec`` with every machine path filled for ``profile`` (strings in
-    nested maps and lists; keys untouched)."""
+    nested maps and lists; keys untouched). ``move``: container paths move for a process
+    launch (False: a spec already in the node's own paths keeps them)."""
 
     def walk(value: Any) -> Any:
         if isinstance(value, str):
-            return fill_value(value, profile, run_prefix=run_prefix)
+            return fill_value(value, profile, run_prefix=run_prefix, move=move)
         if isinstance(value, Mapping):
             return {k: walk(v) for k, v in value.items()}
         if isinstance(value, list):

@@ -29,6 +29,7 @@ from typing import Any
 from .launch import GENERATION_ENV, HEARTBEAT_ENV, PROFILE_ENV, SUPERVISED_ENV, TICKET_ENV
 from .records import NodeReporter
 
+WAIT_EVENT = "rl_sampler_waiting"  # yeto.rl.engine.sampler_loop: the sampler waits for the trainer
 DEFAULT_HEARTBEAT_S = 30.0
 METRICS_TIMEOUT_S = 3.0
 
@@ -91,6 +92,11 @@ class SamplerNodeReport:
         self.metrics, self.clock = metrics, clock
         self.stage = "engine"
         self.progress: Callable[[], Mapping[str, Any]] | None = None
+        # when the sampler last made progress (joined, then each new round): the pool's
+        # progress age, the same reading as an event tape that last grew then
+        self.progress_at: float | None = None
+        self._rounds: Any = None
+        self.trainer_wait = False  # the newest tape event is rl_sampler_waiting (the trainer is away)
         self.leave_reason: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -133,6 +139,11 @@ class SamplerNodeReport:
                 fields.update(dict(self.progress()))
             except Exception:  # noqa: BLE001 - observation only
                 pass
+        if "rounds" in fields and fields["rounds"] != self._rounds:
+            self._rounds, self.progress_at = fields["rounds"], float(self.clock())
+        if self.progress_at is not None:
+            fields["progress_at"] = self.progress_at
+        fields["trainer_wait"] = self.trainer_wait
         engine = dict(self.metrics(self.metrics_port)) if self.stage in ("engine", "running") else {}
         if engine:
             fields["engine"] = engine
@@ -151,9 +162,22 @@ class SamplerNodeReport:
         self._thread.start()
         return self
 
+    def saw(self, event: str) -> None:
+        """A tape event: progress, as an event tape that grew is to the SSH probe (a sampler
+        that waits for the trainer writes ``rl_sampler_waiting`` every heartbeat)."""
+        self.progress_at = float(self.clock())
+        self.trainer_wait = event == WAIT_EVENT
+
+    def watching(self, emit: Callable[..., None]) -> Callable[..., None]:
+        """``emit`` that also tells this report of each event (:meth:`saw`)."""
+        def watched(event: str, **fields: Any) -> None:
+            emit(event, **fields)
+            self.saw(event)
+        return watched
+
     def ready(self, **fields: Any) -> None:
         self.reporter.ready(profile=self.profile, **fields)
-        self.stage = "running"
+        self.stage, self.progress_at = "running", float(self.clock())
         self._beat()
 
     def left(self, reason: str, **fields: Any) -> None:
