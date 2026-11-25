@@ -307,7 +307,11 @@ class SkyProvider:
         if self.secrets:
             task.update_secrets({k: os.environ.get(v, "") for k, v in self.secrets.items()})
         resources = dict(offer.resources)
-        resources["labels"] = {**dict(resources.get("labels") or {}), OWNER_LABEL: self.owner}
+        if resources.get("infra") or resources.get("cloud"):
+            # sky keeps the labels in the cluster handle on every cloud (AWS / GCP / Kubernetes
+            # also tag the instances). Without a cloud, sky validates labels against every
+            # enabled cloud (a client-side cloud check): the ledger intent is the mark then.
+            resources["labels"] = {**dict(resources.get("labels") or {}), OWNER_LABEL: self.owner}
         task.set_resources(sky.Resources(**resources))
         return task
 

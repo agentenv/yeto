@@ -615,3 +615,30 @@ def test_the_watchdogs_exact_prefix_adopts_only_its_own_runs_clusters(tmp_path):
             mine.release(1, foreign)
         assert foreign in sky.clusters
     assert not [c for c in sky.calls if c[0] == "down" and c[1] != "spot-w-1"]
+
+
+def test_no_ownership_label_without_a_cloud_the_ledger_intent_is_the_mark(tmp_path, monkeypatch):
+    """sky validates labels of cloud-less resources against every enabled cloud (a client-side
+    cloud check), so a cloud-less offer gets no label; its ledger intent still marks it."""
+    monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(tmp_path / "ledger.jsonl"))
+    sky = FakeSky()
+    p = SkyProvider("run-s", slots=[1], resources={"accelerators": "L4:1"}, sky=sky, record=tmp_path / "a.json")
+    name = p.order(1)
+    task = next(c[2] for c in sky.calls if c[0] == "launch")
+    assert "labels" not in task.resources
+    sky.up(name)
+    again = SkyProvider("run-s", slots=[1], resources={"accelerators": "L4:1"}, sky=sky, record=tmp_path / "b.json")
+    assert again.run_tickets() == [(1, name)]
+
+
+@pytest.mark.parametrize("infra", ["aws", "gcp", "nebius", "kubernetes", "runpod", "verda"])
+@pytest.mark.parametrize("run", ["run-s", "ABC_2"])
+def test_sky_accepts_and_keeps_the_ownership_label_on_every_infra(infra, run):
+    """Real sky: the label passes the cloud's label rules and survives the copies the
+    optimizer makes (launched_resources is a copy of the requested resources)."""
+    sky = pytest.importorskip("sky")
+    from yeto.launch.nc.sky_provider import OWNER_LABEL, owner_token
+
+    labels = {OWNER_LABEL: owner_token(run)}
+    resources = sky.Resources(infra=infra, labels=labels)
+    assert resources.labels == labels and resources.copy(region=None).labels == labels
