@@ -355,10 +355,12 @@ def _port_in_use(host: str, port: int) -> bool:
 
 
 def local_server_process(port: int, host: str = "127.0.0.1"):
-    """(python, start time) of this user's sky API server process listening on ``port``,
-    or None (nothing listens there). Only a process of this user (real uid) that is seen
-    listening on the port counts. Two such processes, or a port in use by none of them
-    (another user's server, a command line that cannot be read): ServerUnreadable."""
+    """(python, start time, cwd, PYTHONPATH) of this user's sky API server process
+    listening on ``port``, or None (nothing listens there). Only a process of this user
+    (real uid) that is seen listening on the port counts. Two such processes, a port in
+    use by none of them (another user's server, a command line that cannot be read), or a
+    cwd / environment that cannot be read: ServerUnreadable. Of its environment only
+    ``PYTHONPATH`` is read (it decides which yeto its patch hook imports)."""
     import os
 
     import psutil
@@ -373,11 +375,18 @@ def local_server_process(port: int, host: str = "127.0.0.1"):
         if uids is None or uids.real != uid:  # another user's process: never read, never run
             continue
         if _listens(proc, port):
-            found.append((argv[0], float(proc.info["create_time"])))
+            found.append((proc, argv[0], float(proc.info["create_time"])))
     if len(found) > 1:
         raise ServerUnreadable(f"{len(found)} sky API server processes of this user listen on port {port}")
     if found:
-        return found[0]
+        proc, python, started = found[0]
+        try:  # python -m puts its cwd first on sys.path, then PYTHONPATH: both decide which yeto it imports
+            cwd = proc.cwd()
+            pythonpath = proc.environ().get("PYTHONPATH", "")
+        except Exception as exc:  # noqa: BLE001
+            raise ServerUnreadable(f"the cwd / PYTHONPATH of the sky API server process cannot be read "
+                                   f"({type(exc).__name__})") from None
+        return python, started, cwd, pythonpath
     if _port_in_use(host, port):
         raise ServerUnreadable(f"port {port} is in use, but not by a sky API server process of this user "
                                "whose command line can be read")
@@ -401,18 +410,26 @@ def python_site_packages(python: str) -> str | None:
     return None
 
 
-def _patch_source(site: str, repo: str) -> str:
-    """The ``yeto/sky_patches`` directory the hook in ``site`` imports: an installed
-    yeto first (as the hook does), else the hook's repo."""
+def _patch_source(site: str, repo: str, front: tuple[str, ...] = ()) -> str:
+    """The ``yeto/sky_patches`` directory the hook in ``site`` imports. The hook imports
+    ``yeto.sky_patches`` as the server's ``sys.path`` finds it first (``front``: its cwd,
+    then PYTHONPATH; then site-packages and the paths its ``.pth`` files add); the first
+    ``yeto`` package found decides: with ``sky_patches`` it is the source, without, the
+    hook falls back to its repo. No yeto anywhere: the hook's repo."""
     import os
 
-    def patches_in(root: str) -> str | None:
-        d = os.path.join(root, "yeto", "sky_patches")
-        return d if os.path.isfile(os.path.join(d, "__init__.py")) else None
+    def yeto_in(root: str) -> str | None:
+        """The patch source of a yeto package at ``root``, the repo's when it has none,
+        None when there is no yeto package."""
+        pkg = os.path.join(root, "yeto")
+        if not os.path.isdir(pkg):
+            return None
+        if not os.path.isfile(os.path.join(pkg, "__init__.py")):
+            raise ServerUnreadable(f"{pkg} is a namespace package: which yeto applies the patch cannot be read")
+        patches = os.path.join(pkg, "sky_patches")
+        return patches if os.path.isfile(os.path.join(patches, "__init__.py")) else ""
 
-    found = patches_in(site)
-    if found:
-        return found
+    roots = [*front, site]
     for name in sorted(os.listdir(site)):
         if not name.endswith(".pth") or name == PTH_NAME:
             continue
@@ -423,12 +440,15 @@ def _patch_source(site: str, repo: str) -> str:
                     raise ServerUnreadable(f"{name} in the server's site-packages imports yeto: which yeto "
                                            "applies the patch cannot be read without running it")
                 if line and not line.startswith(("#", "import")):
-                    path = line if os.path.isabs(line) else os.path.join(site, line)
-                    found = patches_in(path)
-                    if found:
-                        return found
-    found = patches_in(repo)
-    if found is None:
+                    roots.append(line if os.path.isabs(line) else os.path.join(site, line))
+    for root in roots:
+        found = yeto_in(root)
+        if found:
+            return found
+        if found == "":  # a yeto without sky_patches comes first: the hook falls back to its repo
+            break
+    found = os.path.join(repo, "yeto", "sky_patches")
+    if not os.path.isfile(os.path.join(found, "__init__.py")):
         raise ServerUnreadable(f"the patch hook points at {repo}, which has no yeto/sky_patches")
     return found
 
@@ -478,9 +498,11 @@ def _dist_version(site: str) -> str | None:
             with open(os.path.join(d, "METADATA"), encoding="utf-8", errors="replace") as f:
                 for line in f:
                     if line.startswith("Version:"):
-                        found.append(line.split(":", 1)[1].strip())
+                        found.append((os.path.basename(d), line.split(":", 1)[1].strip()))
                         break
-    return found[0] if len(found) == 1 else None
+    if len(found) > 1:
+        raise ServerUnreadable(f"several sky installs in the server's site-packages: {[d for d, _ in found]}")
+    return found[0][1] if found else None
 
 
 def _top_level_names(path: str) -> set[str]:
@@ -501,9 +523,18 @@ def _top_level_names(path: str) -> set[str]:
     return names
 
 
-def _patch_state_in(python: str, target: str, started: float | None) -> tuple[bool, str]:
+def _front_paths(cwd: str, pythonpath: str) -> tuple[str, ...]:
+    """What ``python -m`` puts before site-packages on ``sys.path``: its cwd, then PYTHONPATH."""
+    import os
+
+    return (cwd, *(os.path.join(cwd, p) for p in pythonpath.split(os.pathsep) if p))
+
+
+def _patch_state_in(python: str, target: str, started: float | None,
+                    front: tuple[str, ...] = ()) -> tuple[bool, str]:
     """Would the patch of ``target`` be in effect in a process of ``python`` started at
-    ``started``? Read from that environment's files only: nothing of it is run."""
+    ``started`` (``front``: its sys.path before site-packages)? Read from that
+    environment's files only: nothing of it is run."""
     import glob
     import os
 
@@ -520,7 +551,7 @@ def _patch_state_in(python: str, target: str, started: float | None) -> tuple[bo
     with open(hook, encoding="utf-8") as f:
         if repr(target) not in f.read():
             return False, f"the patch hook {hook} predates the patch of {target} (install it again)"
-    src = _patch_source(site, repo)
+    src = _patch_source(site, repo, front)
     spec = _patch_spec(src, target)
     if spec is None:
         return False, f"the yeto at {src} has no patch of {target}"
@@ -545,7 +576,9 @@ def server_patch_state(target: str, *, server_common=None) -> tuple[bool, str]:
     files: the hook in its site-packages, the yeto that hook imports, its sky version and
     module (nothing of it is run). A hook or patch source changed after the server
     started is not in effect. No server running: the one sky would start, from this
-    Python. Anything unreadable: not applied."""
+    Python, cwd and PYTHONPATH. Anything unreadable: not applied. It is an approximation
+    of the import-time checks (the target module's top-level names, not its objects),
+    not a proof."""
     try:
         if server_common is None:
             from sky.server import common as server_common
@@ -558,9 +591,12 @@ def server_patch_state(target: str, *, server_common=None) -> tuple[bool, str]:
         found = local_server_process(addr[1], addr[0])
     except Exception as exc:  # noqa: BLE001
         return False, f"the sky API server could not be inspected ({exc})"[:300]
-    python, started = found if found else (sys.executable, None)
+    import os
+
+    # no server: sky starts one from this Python, inheriting this cwd and environment
+    python, started, cwd, pythonpath = found or (sys.executable, None, os.getcwd(), os.environ.get("PYTHONPATH", ""))
     try:
-        return _patch_state_in(python, target, started)
+        return _patch_state_in(python, target, started, _front_paths(cwd, pythonpath))
     except Exception as exc:  # noqa: BLE001
         return False, f"the sky API server's environment could not be read: {exc} ({python})"[:600]
 

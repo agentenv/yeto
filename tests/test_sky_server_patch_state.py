@@ -68,8 +68,23 @@ def no_run(monkeypatch):
     monkeypatch.setattr(os, "system", refuse)
 
 
-def _server(monkeypatch, python, started=2_000.0):
-    monkeypatch.setattr(patches, "local_server_process", lambda port, host="127.0.0.1": (python, started))
+def _server(monkeypatch, python, started=2_000.0, cwd="/nonexistent-cwd", pythonpath=""):
+    monkeypatch.setattr(patches, "local_server_process",
+                        lambda port, host="127.0.0.1": (python, started, cwd, pythonpath))
+
+
+def _yeto(root, *, verda=VERDA_SOURCE, sky_patches=True, mtime=1_000.0):
+    """A yeto package at ``root`` (``verda``: its patch source, None: none)."""
+    (root / "yeto").mkdir(parents=True)
+    (root / "yeto" / "__init__.py").write_text("")
+    if sky_patches:
+        (root / "yeto" / "sky_patches").mkdir()
+        (root / "yeto" / "sky_patches" / "__init__.py").write_text("")
+        if verda is not None:
+            (root / "yeto" / "sky_patches" / "verda.py").write_text(verda)
+        for f in (root / "yeto" / "sky_patches").glob("*.py"):
+            os.utime(f, (mtime, mtime))
+    return root
 
 
 def test_a_remote_server_is_not_applied():
@@ -114,12 +129,8 @@ def test_every_unproven_state_is_not_applied(tmp_path, monkeypatch, no_run, case
 
 def test_an_installed_yeto_in_the_server_env_is_the_patch_that_counts(tmp_path, monkeypatch, no_run):
     python, site, _ = _venv(tmp_path)
-    (site / "yeto" / "sky_patches").mkdir(parents=True)
-    (site / "yeto" / "sky_patches" / "__init__.py").write_text("")
-    (site / "yeto" / "sky_patches" / "verda.py").write_text(  # an older yeto: verified for 0.13.0 only
-        VERDA_SOURCE.replace('frozenset({"0.13.0", "0.14.3"})', 'frozenset({"0.13.0"})'))
-    for f in (site / "yeto" / "sky_patches").glob("*.py"):
-        os.utime(f, (1_000.0, 1_000.0))
+    _yeto(site, verda=VERDA_SOURCE.replace('frozenset({"0.13.0", "0.14.3"})',  # an older yeto: 0.13.0 only
+                                           'frozenset({"0.13.0"})'))
     _server(monkeypatch, python)
     ok, why = patches.server_patch_state(TARGET, server_common=_Common())
     assert not ok and "not in verified ['0.13.0']" in why
@@ -137,7 +148,45 @@ def test_no_server_running_reads_the_one_sky_would_start_from_this_python(tmp_pa
     python, site, _ = _venv(tmp_path, mtime=9_999_999_999.0)  # no start time to compare: not running yet
     monkeypatch.setattr(patches, "local_server_process", lambda port, host="127.0.0.1": None)
     monkeypatch.setattr(sys, "executable", python)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.chdir(tmp_path)
     assert patches.server_patch_state(TARGET, server_common=_Common())[0]
+    # the server sky starts inherits this cwd: an older yeto checkout here is what its hook imports
+    _yeto(tmp_path / "old", verda=None)
+    monkeypatch.chdir(tmp_path / "old")
+    ok, why = patches.server_patch_state(TARGET, server_common=_Common())
+    assert not ok and "has no patch of" in why
+
+
+@pytest.mark.parametrize("where", ["cwd", "PYTHONPATH"])
+def test_the_yeto_on_the_servers_cwd_or_pythonpath_comes_before_the_hooks_repo(tmp_path, monkeypatch, no_run, where):
+    """python -m puts the server's cwd first on sys.path, then PYTHONPATH: the hook's
+    ``import yeto.sky_patches`` finds a yeto there before its own repo."""
+    python, _, _ = _venv(tmp_path)
+    old = _yeto(tmp_path / "old-checkout", verda=None)  # a branch without the Verda patch
+    if where == "cwd":
+        _server(monkeypatch, python, cwd=str(old))
+    else:
+        _server(monkeypatch, python, cwd=str(tmp_path), pythonpath=f"/nowhere{os.pathsep}{old}")
+    ok, why = patches.server_patch_state(TARGET, server_common=_Common())
+    assert not ok and f"the yeto at {old}" in why and "has no patch of" in why
+
+
+def test_a_yeto_without_sky_patches_first_falls_back_to_the_hooks_repo(tmp_path, monkeypatch, no_run):
+    python, _, _ = _venv(tmp_path)
+    old = _yeto(tmp_path / "very-old", sky_patches=False)  # the hook then imports its repo's
+    _yeto(tmp_path / "later", verda=None)  # after the first yeto: never searched
+    _server(monkeypatch, python, cwd=str(old), pythonpath=str(tmp_path / "later"))
+    assert patches.server_patch_state(TARGET, server_common=_Common())[0]
+
+
+def test_two_sky_installs_are_named(tmp_path, monkeypatch, no_run):
+    python, site, _ = _venv(tmp_path)
+    (site / "skypilot_nightly-1.0.0.dev1.dist-info").mkdir()
+    (site / "skypilot_nightly-1.0.0.dev1.dist-info" / "METADATA").write_text("Version: 1.0.0.dev1\n")
+    _server(monkeypatch, python)
+    ok, why = patches.server_patch_state(TARGET, server_common=_Common())
+    assert not ok and "several sky installs" in why
 
 
 def test_the_server_address_comes_from_the_endpoint():
@@ -147,12 +196,18 @@ def test_the_server_address_comes_from_the_endpoint():
     assert patches._cmdline_port(["/p/python", "-m", "sky.server.server"]) == 46580
 
 
-def _proc(pid, cmdline, *, uid=None, listens=(), create_time=1.0):
+def _proc(pid, cmdline, *, uid=None, listens=(), create_time=1.0, cwd="/srv", environ=None):
     uid = os.getuid() if uid is None else uid
     conns = [SimpleNamespace(status=psutil.CONN_LISTEN, laddr=SimpleNamespace(port=p)) for p in listens]
+
+    def env():
+        if environ is None:
+            raise psutil.AccessDenied(pid)
+        return environ
+
     return SimpleNamespace(info={"pid": pid, "cmdline": cmdline, "create_time": create_time,
                                  "uids": SimpleNamespace(real=uid)},
-                           net_connections=lambda kind="inet": conns)
+                           net_connections=lambda kind="inet": conns, cwd=lambda: cwd, environ=env)
 
 
 def _procs(monkeypatch, procs, *, in_use=()):
@@ -163,13 +218,20 @@ def _procs(monkeypatch, procs, *, in_use=()):
 def test_the_server_is_this_users_process_listening_on_the_port(monkeypatch):
     _procs(monkeypatch, [
         _proc(3, ["/bin/zsh", "-c", "python -m sky.server.server --port 46580"]),
-        _proc(1, ["/int/venv/bin/python -m sky.server.server --host 127.0.0.1 --port 46591"], listens=[46591]),
+        _proc(1, ["/int/venv/bin/python -m sky.server.server --host 127.0.0.1 --port 46591"], listens=[46591],
+              environ={"PYTHONPATH": "/int/src", "AWS_SECRET_ACCESS_KEY": "never-read"}),
         _proc(2, ["/venvs/sky-api/bin/python", "-u", "-X", "dev", "-m", "sky.server.server", "--host=127.0.0.1",
-                  "--port=46580"], listens=[46580], create_time=2.0),
+                  "--port=46580"], listens=[46580], create_time=2.0, cwd="/work/yeto", environ={}),
     ])
-    assert patches.local_server_process(46580) == ("/venvs/sky-api/bin/python", 2.0)
-    assert patches.local_server_process(46591) == ("/int/venv/bin/python", 1.0)
+    assert patches.local_server_process(46580) == ("/venvs/sky-api/bin/python", 2.0, "/work/yeto", "")
+    assert patches.local_server_process(46591) == ("/int/venv/bin/python", 1.0, "/srv", "/int/src")
     assert patches.local_server_process(8892) is None
+
+
+def test_a_server_whose_environment_cannot_be_read_is_unreadable(monkeypatch):
+    _procs(monkeypatch, [_proc(9, ["/a/bin/python", "-m", "sky.server.server"], listens=[46580])])
+    with pytest.raises(patches.ServerUnreadable, match="cwd / PYTHONPATH .* cannot be read"):
+        patches.local_server_process(46580)
 
 
 def test_another_users_server_is_ignored_and_its_port_is_unreadable(monkeypatch):
