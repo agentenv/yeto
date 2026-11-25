@@ -481,6 +481,17 @@ class AgenticRound(EngineRound):
         self.task_defaults = dict(task_defaults or {})
         self.sampling_params = dict(sampling_params or {"temperature": self.sampling.temperature,
                                                         "top_p": self.sampling.top_p})
+        # The round imports harbor lazily on two threads: the caller's (the round's breaker
+        # events) and the loop's (a finished trial's infra-failure check). harbor/__init__
+        # imports .trial, which imports the package back, so a first import of both at once
+        # fails (ImportError on a partially initialized module, or _DeadlockError). Imported
+        # here, before the loop runs anything, it is already loaded on both. A HarborHarness
+        # has loaded it before; another harness (a test stub) had not. The package imports
+        # no optional dependency at its top; if it ever fails, the lazy imports stay as before.
+        try:
+            import yeto.rl.harness.harbor  # noqa: F401
+        except ImportError:
+            pass
         self.loop = loop or LoopThread(workers=self.max_in_flight + 8)
         self.lost: Counter[str] = Counter()  # over the island's life
         self.trials = 0
