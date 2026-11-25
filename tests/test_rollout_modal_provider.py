@@ -1115,8 +1115,8 @@ def test_the_ledger_bills_a_pool_call_from_its_scheduled_at():
 
 
 def test_the_sdk_client_reads_scheduled_from_the_call_graph():
-    from modal.call_graph import InputInfo, InputStatus
-
+    # modal.call_graph.InputInfo / InputStatus (PENDING 0, SUCCESS 1) without the SDK (not in CI)
+    pending, success = 0, 1
     graphs = {}
 
     class FunctionCall:
@@ -1127,10 +1127,11 @@ def test_the_sdk_client_reads_scheduled_from_the_call_graph():
     client = ModalSdkClient({"image": "i", "secret": "s"}, run_id="r", modal=SimpleNamespace(FunctionCall=FunctionCall))
 
     def info(call, task, status):
-        return InputInfo("in-1", call, task, status, "rollout_sampler", "m", [])
+        return SimpleNamespace(input_id="in-1", function_call_id=call, task_id=task, status=status,
+                               function_name="rollout_sampler", module_name="m", children=[])
 
-    graphs.update({"fc-1": [info("fc-1", "", InputStatus.PENDING)], "fc-2": [info("fc-2", "ta-1", InputStatus.PENDING)],
-                   "fc-3": [info("fc-3", "", InputStatus.SUCCESS)], "fc-4": []})
+    graphs.update({"fc-1": [info("fc-1", "", pending)], "fc-2": [info("fc-2", "ta-1", pending)],
+                   "fc-3": [info("fc-3", "", success)], "fc-4": []})
     assert client.scheduled("fc-1") is False
     assert client.scheduled("fc-2") is True and client.scheduled("fc-3") is True
     assert client.scheduled("fc-4") is True  # no input info: billed, never free
