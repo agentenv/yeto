@@ -163,9 +163,9 @@ _NOT_INFRA = frozenset({"wall_clock_cap", "admission_draining", "token_alignment
                         "prompt_exceeds_prompt_length", "policy_output_error"})
 DRAIN_EVENT = "rl_agentic_drain"
 # A trial whose sandbox provider or harness could not import a module (the image lacks
-# that provider's dependency) is a configuration error, never retried; this many in a
-# row (no trial that got further in between) stop the sampler (SandboxDependencyError)
-DEPENDENCY_EXCEPTIONS = frozenset({"ImportError", "ModuleNotFoundError"})
+# that provider's dependency; harbor.trial.missing_module, not a racing first import of
+# a package with an import cycle) is a configuration error, never retried; this many in
+# a row (no trial that got further in between) stop the sampler (SandboxDependencyError)
 DEPENDENCY_STREAK_N = 3
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -340,27 +340,33 @@ def infra_failure(result: Any) -> str | None:
     verdict = trajectory.verdict
     exc = None if verdict is None else verdict.exception_type
     if name in _NOT_INFRA or name in NOT_RETRIED_EXCEPTIONS or name in POLICY_LIMIT_EXCEPTIONS \
-            or exc in NOT_RETRIED_EXCEPTIONS or exc in POLICY_LIMIT_EXCEPTIONS:
+            or exc in NOT_RETRIED_EXCEPTIONS or exc in POLICY_LIMIT_EXCEPTIONS or missing_dependency(result):
         return None
     return name
 
 
 def missing_dependency(result: Any) -> str | None:
     """The import error of ``result`` (a finished trial) when it is ABORTED before any
-    model call on an ``ImportError`` / ``ModuleNotFoundError`` (its sandbox provider or
-    harness module is not in the image), else None."""
+    model call on an ``ImportError`` / ``ModuleNotFoundError`` that names a module the
+    image does not have (its sandbox provider or harness module), else None. An import
+    that raced another trial's first import of a package with an import cycle
+    ("partially initialized module", :func:`~yeto.rl.harness.harbor.trial.missing_module`)
+    is not one: it stays an infrastructure failure, retried."""
     from yeto.rl.agentic import Outcome
+    from yeto.rl.harness.harbor.trial import missing_module
 
     trajectory = getattr(result, "trajectory", None)
     if trajectory is None or trajectory.outcome is not Outcome.ABORTED or getattr(result, "turns", ()):
         return None
     verdict = trajectory.verdict
-    exc = None if verdict is None else verdict.exception_type
     reason = str(trajectory.reason or "")
-    if exc not in DEPENDENCY_EXCEPTIONS and reason.split(":", 1)[0].strip() not in DEPENDENCY_EXCEPTIONS:
+    head, _, tail = reason.partition(":")
+    exc = (None if verdict is None else verdict.exception_type) or head.strip()
+    message = (str(getattr(verdict, "exception_message", "") or "").strip() if verdict is not None else "") \
+        or tail.strip()
+    if not missing_module(exc, message):
         return None
-    message = str(getattr(verdict, "exception_message", "") or "").strip() if verdict is not None else ""
-    return f"{exc or reason.split(':', 1)[0].strip()}: {message}" if message else (reason or str(exc))
+    return f"{exc}: {message}" if message else exc
 
 
 class _Lost:
