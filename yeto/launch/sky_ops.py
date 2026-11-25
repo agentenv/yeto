@@ -165,6 +165,12 @@ class SkySDKOps:
         )
         return status == sky.ClusterStatus.UP
 
+    def job_log_lines(self, cluster: str, job_id: int) -> list[str]:
+        """The job's log so far (no follow); raises when it cannot be read."""
+        import sky
+
+        return [str(line) for line in sky.tail_logs(cluster, job_id, follow=False, preload_content=False)]
+
     def rl_strict_failure(self, cluster: str, job_id: int) -> str | None:
         """Return a strict RL event from a failed job's existing log."""
 

@@ -153,6 +153,9 @@ DETERMINISTIC_ERRORS: tuple[tuple[str, str], ...] = (
     ("yeto.rl.engine.driver", "PolicyAgeExceeded"),
     ("yeto.rl.engine.policy_age", "PolicyAgeError"),
     ("yeto.rl.applied_lr", "AppliedLrError"),
+    # a peer recovery that ended without every fragment: the syncer is not training
+    # (finalization, the budget cutoff); a relaunch meets the same syncer
+    ("yeto.rl.peer_recovery", "RecoveryIncomplete"),
 )
 DETERMINISTIC_ERROR_NAMES = frozenset(name for _module, name in DETERMINISTIC_ERRORS)
 # The deterministic stops a faulty card may cause (a silent data error on one of the island's

@@ -138,6 +138,7 @@ def _training_failed_members():
     from yeto.rl.grad_audit import GradAuditError
     from yeto.rl.tbench_outcome import UntrustedTBenchOutcome
     from yeto.rl.engine.ports import PublicationCause
+    from yeto.rl.peer_recovery import RecoveryIncomplete
 
     return {
         # deterministic: the same check fails the same way on every attempt
@@ -148,6 +149,7 @@ def _training_failed_members():
         "PolicyAgeExceeded": (PolicyAgeExceeded("groups older than max_policy_age"), True),
         "PolicyAgeError": (PolicyAgeError("max_policy_age must be an int"), True),
         "AppliedLrError": (AppliedLrError("LR 0 before the final round"), True),
+        "RecoveryIncomplete": (RecoveryIncomplete("actor recovery did not receive every fragment"), True),
         # may be an NCCL / CUDA / OOM / storage / network fault underneath: retried as before
         "RoundFailedError": (RoundFailedError("rollout 7: optimizer step failed"), False),
         "PublicationError (update failed)": (PublicationError(

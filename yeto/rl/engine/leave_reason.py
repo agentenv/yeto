@@ -67,6 +67,7 @@ _TABLE: tuple[tuple[LeaveReason, tuple[tuple[str, str], ...]], ...] = (
         ("yeto.rl.applied_lr", "AppliedLrError"),
         ("yeto.rl.critic_state", "CriticStateError"),
         ("yeto.rl.tbench_outcome", "UntrustedTBenchOutcome"),
+        ("yeto.rl.peer_recovery", "RecoveryIncomplete"),  # the syncer was not training
     )),
 )
 

@@ -5,7 +5,9 @@ one launch per trainer island. The syncer launch runs :func:`yeto.launcher.run` 
 its syncer (a VM of its own, or the head's subprocess under ``--controller head``) and
 then calls :func:`serve`:
 
-1. it records the syncer's address and term in the run store
+1. once the syncer process accepts connections on every port (:func:`wait_listening`:
+   checked on the syncer's machine itself, up to ``LISTEN_WAIT_S``; a syncer built on its
+   VM takes minutes after the VM is up), it records the syncer's address and term in the run store
    (``fleet/island_syncer.json``, :func:`yeto.rl.island_launches.write_syncer_record`): the
    trainer worker of ``yeto run up`` gives them to every island launch
    (``--rl-fleet-syncer``, ``--rl-syncer-epoch``);
@@ -25,6 +27,7 @@ The launcher's ``finally`` tears the syncer cluster down afterwards, as for any 
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from collections.abc import Callable
@@ -45,6 +48,11 @@ def _store_objects(args: Any) -> Any:
     return store_objects(getattr(args, "rl_checkpoint_store", None), store_client_environ(args))
 
 
+# How long the syncer launch waits for the syncer process to listen before it records the
+# syncer for the islands: the VM is up (its address known) minutes before a syncer built on
+# it (a non-x86 submitter) listens, and an island started then fails its ~30 s probe.
+LISTEN_WAIT_S = 1200.0
+LISTEN_POLL_S = 5.0
 EPOCH_READ_S = 120.0  # an adopted syncer: how long its status.json is read for its term
 RECORD_READ_ATTEMPTS = 3
 RECORD_READ_RETRY_S = 5.0
@@ -151,6 +159,125 @@ def record(args: Any, syncer_addr: str, num_learners: int, *, objects: Any = Non
     return out
 
 
+_LISTEN_SCRIPT = ("import socket, sys\n"
+                  "for port in sys.argv[1:]:\n"
+                  "    socket.create_connection(('127.0.0.1', int(port)), 3).close()\n")
+
+
+# ssh exit codes that say nothing about the syncer: ssh itself failed (255: no host entry,
+# host key, auth), or the shell found no python3 (127).
+_CANNOT_CHECK_RC = {126, 127, 255}
+UNCHECKED_LIMIT = 3  # checks in a row that cannot be made from here: the launch fails, naming why
+# The syncer's line once its port is bound (syncer/src/server.rs, no ANSI: main.rs with_ansi(false)).
+LISTENING_LINE = re.compile(r"syncer listening port=(\d+)")
+
+
+def _ssh_config(cluster: str) -> list[str]:
+    """``-F <sky's generated ssh config of the cluster>`` when this HOME has it (ssh reads
+    the passwd home's config, which a launch under another HOME does not include)."""
+    path = os.path.expanduser(os.path.join("~", ".sky", "generated", "ssh", cluster))
+    return ["-F", path] if os.path.isfile(path) else []
+
+
+def _ssh_listening(cluster: str, ports: list[int], run: Callable[..., Any] | None) -> bool | str:
+    import shlex
+    import subprocess
+
+    command = f"python3 -c {shlex.quote(_LISTEN_SCRIPT)} " + " ".join(str(port) for port in ports)
+    try:
+        out = (run or subprocess.run)(["ssh", *_ssh_config(cluster), "-o", "BatchMode=yes",
+                                       "-o", "ConnectTimeout=10", cluster, command],
+                                      capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"ssh {cluster}: {type(error).__name__}: {error}"
+    if out.returncode in _CANNOT_CHECK_RC:
+        lines = [line for line in str(out.stderr or "").splitlines() if line.strip()]
+        return f"ssh {cluster} exited {out.returncode}" + (f": {lines[-1].strip()}" if lines else "")
+    return out.returncode == 0
+
+
+def syncer_listening(args: Any, *, head_mode: bool, syncer_cluster: str | None, syncer_job: Any = None,
+                     ops: Any = None, run: Callable[..., Any] | None = None) -> bool | str:
+    """Whether every syncer port is bound on the syncer's own machine: this host under
+    ``--controller head`` (a connect to 127.0.0.1), else the syncer job's log (its
+    ``syncer listening port=N`` lines, read through sky: no ssh), else ``ssh <syncer
+    cluster>`` and a connect to 127.0.0.1 there. A probe from this machine to the public
+    address cannot tell: a local proxy accepts any connection. A string: why it cannot be
+    checked from here (the log unreadable and ssh failed, or no python3 there)."""
+    import socket
+
+    from .syncer import _head_ports
+
+    ports = [int(port) for port in _head_ports(args)]
+    if head_mode:
+        try:
+            for port in ports:
+                socket.create_connection(("127.0.0.1", port), 3).close()
+        except OSError:
+            return False
+        return True
+    if not syncer_cluster:
+        return True  # nothing to check against: recorded as before
+    log_read: str | None = None
+    lines = getattr(ops, "job_log_lines", None)
+    if callable(lines) and syncer_job is not None:
+        try:
+            bound = {int(m.group(1)) for line in lines(syncer_cluster, syncer_job)
+                     if (m := LISTENING_LINE.search(str(line)))}
+        except Exception as error:  # noqa: BLE001 - ssh is asked instead
+            log_read = f"its job log: {type(error).__name__}: {error}"
+        else:
+            if set(ports) <= bound:
+                return True
+    state = _ssh_listening(syncer_cluster, ports, run)
+    if isinstance(state, str):
+        # a readable log that has no line yet: not listening (ssh is only the second witness)
+        return f"{log_read}; {state}" if log_read else (False if callable(lines) and syncer_job is not None
+                                                        else state)
+    return state
+
+
+def wait_listening(listening: Callable[[], bool | str], failed: Callable[[], str | None], *, where: str,
+                   timeout_s: float = LISTEN_WAIT_S, poll_s: float = LISTEN_POLL_S,
+                   sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] | None = None,
+                   log: Callable[[str], None] = print) -> str | None:
+    """Wait until the syncer process listens (``listening()``); None then. The reason it
+    never will otherwise: its job ended in failure (``failed()`` gives a :class:`Final`),
+    nothing listened within ``timeout_s``, or the check could not be made from here
+    (``listening()`` gave a reason :data:`UNCHECKED_LIMIT` times in a row: named, not
+    waited out). Nothing is recorded meanwhile, so no island dials a syncer that is not
+    up yet (bug 25)."""
+    clock = clock or time.monotonic
+    started = clock()
+    said = False
+    unchecked = 0
+    while True:
+        state = listening()
+        if state is True:
+            if said:
+                log(f"[launcher] fleet syncer: listening at {where} after {clock() - started:.0f}s")
+            return None
+        if isinstance(state, str):
+            unchecked += 1
+            if unchecked >= UNCHECKED_LIMIT:
+                return (f"cannot check whether the syncer listens at {where}: {state} ({unchecked} checks in a "
+                        "row); no island was started")
+        else:
+            unchecked = 0
+        why = failed()
+        if isinstance(why, Final):
+            return f"{why} before it listened at {where}"
+        waited = clock() - started
+        if waited >= timeout_s:
+            return (f"nothing listens at {where} {waited:.0f}s after the syncer launch (its process did "
+                    "not start: see the syncer job's log); no island was started")
+        if not said:
+            log(f"[launcher] fleet syncer: waiting for the syncer process to listen at {where} "
+                f"(up to {timeout_s:.0f}s) before the islands are started")
+            said = True
+        sleep(poll_s)
+
+
 def supervise(*, finished: Callable[[], bool], failed: Callable[[], str | None],
               restart: Callable[[str], bool] | None = None, stop_flag: str | os.PathLike[str] | None = None,
               sleep: Callable[[float], None] = time.sleep, poll_s: float = POLL_S,
@@ -193,6 +320,12 @@ def supervise(*, finished: Callable[[], bool], failed: Callable[[], str | None],
         sleep(poll_s)
 
 
+def _sky_ops() -> Any:
+    from .sky_ops import SkySDKOps
+
+    return SkySDKOps()
+
+
 def probe(ops: Any, cluster: str | None, job: Any) -> tuple[str | None, Any]:
     """The syncer job's state, as the fleet controller's ``_probe`` reads an island:
     ``(None, status)`` up, ``("succeeded", status)``, a :class:`Final` reason for a job
@@ -227,9 +360,24 @@ def probe(ops: Any, cluster: str | None, job: Any) -> tuple[str | None, Any]:
 def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str], head_mode: bool,
           local_syncer: Any = None, syncer_cluster: str | None = None, syncer_job: Any = None,
           ops: Any = None, sleep: Callable[[float], None] = time.sleep) -> int:
-    """Record the syncer, then supervise it alone (module doc)."""
+    """Record the syncer once it listens, then supervise it alone (module doc)."""
     from .. import runs
 
+    if head_mode:
+        def dead() -> str | None:
+            reason = local_syncer.probe()
+            return None if reason is None else Final(f"the syncer process ended ({getattr(reason, 'reason', reason)})")
+    else:
+        ops = ops or _sky_ops()
+
+        def dead() -> str | None:
+            return probe(ops, syncer_cluster, syncer_job)[0]
+    never = wait_listening(lambda: syncer_listening(args, head_mode=head_mode, syncer_cluster=syncer_cluster,
+                                                    syncer_job=syncer_job, ops=ops),
+                           dead, where=syncer_addr, sleep=sleep)
+    if never is not None:
+        print(f"[launcher] ERROR: fleet syncer: {never}", file=sys.stderr, flush=True)
+        return 1
     record(args, syncer_addr, num_learners)
     stop_flag = runs.stop_flag_path(args.cluster_prefix)
     if head_mode:
@@ -259,9 +407,6 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
 
         return supervise(finished=local_syncer.finished, failed=failed, restart=restart, stop_flag=stop_flag,
                          sleep=sleep)
-    from .sky_ops import SkySDKOps
-
-    ops = ops or SkySDKOps()
     last: dict[str, Any] = {}
 
     def finished() -> bool:
