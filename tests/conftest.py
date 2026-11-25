@@ -376,6 +376,9 @@ from hard_exit import note_exitstatus, pytest_unconfigure  # noqa: E402,F401
 def pytest_sessionfinish(session, exitstatus):
     note_exitstatus(session, exitstatus)
     _reaper_sessionfinish(session, exitstatus)
+    from syncer_build import remove_copies
+
+    remove_copies()  # after the reaper: no syncer of this session runs the copy any more
 
 
 # Most launch tests build RL argv without --inner-lr; yeto refuses that

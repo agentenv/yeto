@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
-from test_dispense_syncer import FP, ROOT, Syncer, crash, source, syncer_binary  # noqa: F401
+from test_dispense_syncer import FP, KEY, ROOT, Syncer, crash, source, syncer_binary  # noqa: F401
 from yeto.launch.checks.dispense_check import check
 from yeto.rl.engine import task_dispense as td
 from yeto.rl.engine.data_split import DATA_ROW_KEY, DISPENSE, STRIDE, plan_data_split
@@ -198,7 +198,7 @@ def test_miles_hook_draws_rows_by_position_and_reports_the_kept_groups(syncer_bi
         executor = SimpleNamespace(data_source=fake)
         config = {"address": f"127.0.0.1:{syncer.port}", "learner_id": 0, "rows": rows,
                   "fingerprint": FP.hex(), "seed": 5, "block": 3, "prefetch_blocks": 1}
-        out = hook.install(executor, config, b"dispense-test-key")
+        out = hook.install(executor, config, KEY)
         assert out["installed"] and out["filtered_rows"] == 1
         assert hook.install(executor, config, None)["installed"] is False, "idempotent"
         groups = fake.get_samples(3)
@@ -246,7 +246,7 @@ def test_two_miles_islands_and_a_relaunch_share_the_rows(syncer_binary, tmp_path
             config = {"address": f"127.0.0.1:{syncer.port}", "learner_id": learner_id, "rows": rows,
                       "fingerprint": FP.hex(), "seed": 1, "block": 4, "prefetch_blocks": 1}
             hook._CURRENT = None
-            hook.install(SimpleNamespace(data_source=fake), config, b"dispense-test-key")
+            hook.install(SimpleNamespace(data_source=fake), config, KEY)
             return fake, hook.current()
 
         a_src, a = island(0)

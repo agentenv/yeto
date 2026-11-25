@@ -164,3 +164,20 @@ def test_no_orphaned_checkout_syncer_after_reap_orphans(tmp_path):
     killed = syncer_reaper.reap_orphans(tmp_path)
     assert killed and all(_wait_dead(pid) for pid in killed)
     assert syncer_reaper.checkout_syncers(tmp_path) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+def test_a_sibling_checkout_whose_name_extends_this_one_is_not_this_checkout(tmp_path):
+    root, sibling = tmp_path / "wt", tmp_path / "wt-other"
+    sibling.mkdir()
+    binary = _fake_syncer(sibling)
+    process = subprocess.Popen([str(binary), "300"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while not [row for row in syncer_reaper.checkout_syncers(sibling) if row[0] == process.pid]:
+            assert time.monotonic() < deadline, "the fake syncer did not show up"
+            time.sleep(0.05)
+        assert [row for row in syncer_reaper.checkout_syncers(root) if row[0] == process.pid] == []
+    finally:
+        process.kill()
+        process.wait(timeout=10)

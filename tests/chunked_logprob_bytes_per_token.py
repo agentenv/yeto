@@ -96,9 +96,8 @@ def _setup() -> None:
     if dist.is_initialized():
         return
     torch.cuda.current_device = lambda: None
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29571")
-    dist.init_process_group("gloo", rank=0, world_size=1)
+    # one rank: an in-process store, no rendezvous port another test process could hold
+    dist.init_process_group("gloo", store=dist.HashStore(), rank=0, world_size=1)
     mpu.initialize_model_parallel(tensor_model_parallel_size=1)
 
 

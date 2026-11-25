@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import random
+import secrets
 import socket
 import subprocess
 import threading
@@ -19,11 +20,14 @@ import pytest
 
 from yeto.launch.checks.dispense_check import check, check_tapes, read_records
 from free_ports import free_port
+from syncer_build import build_syncer
+from syncer_port import bound_port
 from yeto.rl.engine import task_dispense as td
 from yeto.rl.engine.data_split import pass_order
 
 ROOT = Path(__file__).resolve().parent.parent
-KEY = b"dispense-test-key"
+# per test process: a syncer of another test process (its own key) refuses this one's HELLO
+KEY = f"dispense-test-key-{secrets.token_hex(6)}".encode()
 FP = hashlib.sha256(b"rows").digest()
 
 
@@ -36,10 +40,7 @@ def _cargo_env() -> dict[str, str]:
 
 @pytest.fixture(scope="module")
 def syncer_binary() -> Path:
-    binary = ROOT / "syncer/target/debug/yeto-syncer"
-    subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True, env=_cargo_env())
-    assert binary.exists()
-    return binary
+    return build_syncer()  # this process's copy: another process's cargo build never rewrites it
 
 
 class Syncer:
@@ -48,25 +49,21 @@ class Syncer:
 
     def __init__(self, binary: Path, tmp: Path, *extra: str, lease_s: float = 2.0, port: int | None = None,
                  key: bytes | None = KEY, learners: int = 4, name: str = "syncer") -> None:
-        self.port = port or free_port()
+        """``port``: a restart on the port of an earlier syncer; None: the syncer binds a
+        free one itself (``--port 0``) and the port is read from its log (another test's
+        syncer is never reached)."""
         self.log = tmp / "task-dispense.jsonl"
-        args = [str(binary), "--port", str(self.port), "--learners", str(learners), "--quorum", "1",
+        args = [str(binary), "--port", str(port or 0), "--learners", str(learners), "--quorum", "1",
                 "--total-steps", "1000", "--dispense", "--dispense-lease-s", str(lease_s),
                 "--dispense-log", str(self.log), *extra]
         if key:
             args += ["--island-hmac-key", key.decode()]
-        self.out = open(tmp / f"{name}.out", "w")
+        out = tmp / f"{name}.out"
+        self.out = open(out, "w")
         self.proc = subprocess.Popen(args, stdout=self.out, stderr=subprocess.STDOUT, env=_cargo_env())
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if self.proc.poll() is not None:
-                raise RuntimeError(f"syncer exited {self.proc.returncode}: {(tmp / f'{name}.out').read_text()[-2000:]}")
-            try:
-                socket.create_connection(("127.0.0.1", self.port), timeout=0.2).close()
-                return
-            except OSError:
-                time.sleep(0.05)
-        raise RuntimeError("syncer did not listen")
+        self.port = bound_port(self.proc, log_file=out)
+        if port and self.port != port:
+            raise RuntimeError(f"syncer listens on {self.port}, not {port}")
 
     def stop(self) -> None:
         if self.proc.poll() is None:

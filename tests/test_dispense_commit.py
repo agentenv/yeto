@@ -14,13 +14,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_dispense_syncer import FP, Syncer, crash, syncer_binary  # noqa: F401
+from test_dispense_syncer import FP, KEY, Syncer, crash, syncer_binary  # noqa: F401
 from test_dispense_wiring import FakeMilesSource
 from yeto.launch.checks.dispense_check import check, check_tapes, tape_rows
 from yeto.rl.engine import task_dispense as td
 from yeto.rl.engine.buffer_payload import SampleBufferExhausted, data_end_kind, is_buffer_exhausted
 
-KEY = b"dispense-test-key"
 
 
 def _island(port: int, learner_id: int, rows: int, *, block: int, prefetch: int = 1,

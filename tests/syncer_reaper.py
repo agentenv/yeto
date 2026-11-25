@@ -129,8 +129,12 @@ def _ps() -> list[tuple[int, int, str]]:
 
 
 def checkout_syncers(root: Path = REPO_ROOT) -> list[tuple[int, int, str]]:
-    """``yeto-syncer`` processes whose binary is under ``root``: (pid, ppid, args)."""
-    prefix = str(root)
+    """``yeto-syncer`` processes whose binary is under ``root``: (pid, ppid, args).
+
+    Under ``root`` means below ``root/``: a sibling checkout whose name extends this one
+    (``.../t5b-fu`` next to ``.../t5b``) is another checkout, and its syncers are not
+    this session's to kill."""
+    prefix = os.path.join(str(root), "")
     return [(pid, ppid, args) for pid, ppid, args in _ps()
             if args.split(" ", 1)[0].startswith(prefix)
             and os.path.basename(args.split(" ", 1)[0]) == SYNCER_NAME]

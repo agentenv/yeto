@@ -23,7 +23,6 @@ Prints nothing; writes ``{"ok": ..., "max_abs": {...}}`` from rank 0.
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -58,7 +57,7 @@ def _reference(hidden, weight, labels, d_lp, d_ent):
     return lp.detach(), ent.detach(), h.grad, w.grad
 
 
-def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str,
+def _rank_main(rank: int, tp: int, dtype_name: str, out_path: str,
                impl: str = "torch") -> None:
     import torch
     import torch.distributed as dist
@@ -69,8 +68,9 @@ def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str,
     want_entropy = impl != "npu_noent"
 
     torch.set_num_threads(1)
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
-    dist.init_process_group("gloo", rank=rank, world_size=tp)
+    # a file store next to the output: no rendezvous port another test process could take
+    store = dist.FileStore(f"{out_path}.store", tp)
+    dist.init_process_group("gloo", store=store, rank=rank, world_size=tp)
     group = dist.new_group(list(range(tp)))
     dtype = getattr(torch, dtype_name)
     hidden, weight, labels, d_lp, d_ent = _inputs(dtype)
@@ -118,16 +118,15 @@ def _rank_main(rank: int, tp: int, port: int, dtype_name: str, out_path: str,
 
 
 def main(argv: list[str]) -> int:
-    import socket
-
     import torch.multiprocessing as mp
 
     tp, dtype_name, out_path = int(argv[0]), argv[1], argv[2]
     impl = argv[3] if len(argv) > 3 else "torch"
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    mp.spawn(_rank_main, args=(tp, port, dtype_name, out_path, impl), nprocs=tp)
+    # The ranks meet in a file store, not on a TCP port: a port probed and closed here was
+    # taken by another test process before rank 0 bound it (EADDRINUSE), and a TCPStore on
+    # port 0 here pinged another process's store (invalid nonce) under parallel runs.
+    Path(f"{out_path}.store").unlink(missing_ok=True)
+    mp.spawn(_rank_main, args=(tp, dtype_name, out_path, impl), nprocs=tp)
     return 0
 
 

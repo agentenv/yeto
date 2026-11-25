@@ -15,6 +15,7 @@ rounds x P to the syncer's ``--max-base-lag``, which counts versions.
 
 from __future__ import annotations
 
+import secrets
 import shutil
 import subprocess
 import time
@@ -23,8 +24,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from free_ports import free_port
 from process_groups import group_popen, kill_group
+from syncer_build import build_syncer
+from syncer_port import bound_port, on_port_zero
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
 from test_rl_algorithm_provenance import _launcher_args as _provenance_launcher_args
 
@@ -34,6 +36,7 @@ def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
     defaults are covered in test_rl_sync_mode.py."""
     return _provenance_launcher_args(engine, ("--rl-sync-mode", "strict", *extra), gpu=gpu)
 from yeto.fragments import MERGE_AVG, MERGE_RDA, Fragment, FragmentLayout
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 from yeto.protocol import DTYPE_F32, SyncerClient
 from yeto.rl.core import CanonicalTensorSpec, build_rl_fragment_layout
 
@@ -47,13 +50,13 @@ DEFAULT_LR, DEFAULT_MU = 0.7, 0.9
 
 @pytest.fixture(scope="module")
 def syncer_binary() -> Path:
-    subprocess.run([CARGO, "build", "-q"], cwd=ROOT / "syncer", check=True)
-    return ROOT / "syncer/target/debug/yeto-syncer"
+    return build_syncer()  # this process's copy: another process's cargo build never rewrites it
 
 
 @pytest.fixture(autouse=True)
 def _hmac_key(monkeypatch):
-    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "outer-merge-test-key")
+    # its own key: a syncer of another test refuses this test's HELLO, never takes it
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", f"outer-merge-test-key-{secrets.token_hex(6)}")
 
 
 def default_layout(merge: int = MERGE_AVG) -> FragmentLayout:
@@ -128,13 +131,14 @@ class Rig:
         args.controller = "local"
         _prepare_rl_args(args)
         command = launcher.role_syncer_commands(args, islands, binary=str(binary))["actor"]
-        port = free_port()
-        self.command = (command
-                        .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
+        # its own port (bound by the syncer, read from its log) and its own files
+        self.command = (on_port_zero(command)
                         .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
-                        .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+                        .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl"))
+                        .replace(DISPENSE_LOG, str(tmp_path / "task-dispense.jsonl")))
         self.process = group_popen(["bash", "-c", self.command], stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True)
+        port = bound_port(self.process)
         self.clients = [SyncerClient(("127.0.0.1", port), i, self.layout, dtype=DTYPE_F32,
                                      num_streams=1, connect_timeout=10, max_reconnects=0,
                                      finalization_timeout=30) for i in range(islands)]
