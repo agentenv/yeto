@@ -156,6 +156,11 @@ def _kind(entry: dict[str, Any]) -> str:
     return str(provider or "nc")
 
 
+class AppliedFenced(RuntimeError):
+    """``fleet/applied.json`` belongs to another controller now (it took the fleet over):
+    this one writes it no more."""
+
+
 class DesiredStore:
     """Reads and writes the desired state on an object API (module doc)."""
 
@@ -223,9 +228,21 @@ class DesiredStore:
         return doc
 
     def write_applied(self, generation: int, pools: dict[str, dict[str, Any]],
-                      removing: dict[str, dict[str, Any]]) -> None:
+                      removing: dict[str, dict[str, Any]], *, writer: str | None = None,
+                      claim: bool = False) -> None:
+        """One controller writes it at a time: ``writer`` names it. A controller claims it once
+        when it starts (``claim``); from then on a write finds the stored ``writer`` still its
+        own, or raises :class:`AppliedFenced` (another controller started and took over), and
+        a generation older than the stored one is never written back."""
+        if writer is not None:
+            current = self.read_applied()
+            if current is not None and not claim and current.get("writer") not in (None, writer):
+                raise AppliedFenced(f"fleet/applied.json is written by {current.get('writer')} now (not {writer})")
+            if current is not None and int(current.get("generation") or 0) > int(generation):
+                raise AppliedFenced(f"fleet/applied.json is at generation {current.get('generation')}, "
+                                    f"past {generation}")
         doc = {"schema": APPLIED_SCHEMA, "generation": int(generation), "members": list(pools.values()),
-               "removing": list(removing.values()), "at": self.clock()}
+               "removing": list(removing.values()), "at": self.clock(), "writer": writer}
         self.objects.write(APPLIED_KEY, json.dumps(doc, indent=1, sort_keys=True, default=str).encode())
 
     def update(self, change: Callable[[dict[str, Any]], None], *, seed: dict[str, Any] | None = None,

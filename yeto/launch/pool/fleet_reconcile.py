@@ -37,7 +37,10 @@ change of the desired state is acted on.
 
 from __future__ import annotations
 
+import os
+import socket
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -80,6 +83,9 @@ class FleetReconciler:
     _polled_at: float | None = None
     _resume: list[str] = field(default_factory=list)  # restored removals: target 0 asked again
     _dirty: bool = False  # the applied state changed and is not in the store yet
+    _claim: bool = True  # the first write claims fleet/applied.json for this controller
+    writer: str = field(default_factory=lambda: f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}")
+    fenced: str | None = None  # another controller took the fleet over: this one applies nothing more
     errors: int = 0
 
     def start_from(self, doc: dict[str, Any] | None, applied: dict[str, Any] | None = None) -> None:
@@ -92,6 +98,7 @@ class FleetReconciler:
             self.removing = {m["name"]: _Removal(since=self.clock(), member=m, generation=self.applied)
                              for m in applied.get("removing") or () if m.get("kind") == "sampler_pool"}
             self._resume = sorted(self.removing)
+            self._dirty = True  # claimed at the first pass
         elif doc is not None:
             self.applied = int(doc.get("generation") or 0)
             self.applied_pools = dz.sampler_pools(doc)
@@ -100,6 +107,8 @@ class FleetReconciler:
     def step(self, controller: Any, *, force: bool = False) -> None:
         """One reconcile pass: a newer generation is applied; removals in progress advance."""
         self._persist()
+        if self.fenced is not None:
+            return
         for name in self._resume:  # a removal another controller began: drained to 0 again
             self._set_target(controller, name, 0, (), None, self.removing[name].generation if name in self.removing
                              else self.applied)
@@ -119,7 +128,24 @@ class FleetReconciler:
             return
         if doc is None or int(doc["generation"]) <= self.applied:
             return
+        if not self._still_ours():
+            return
         self.apply(controller, doc)
+
+    def _still_ours(self) -> bool:
+        """Before acting on a new generation: no other controller claimed the fleet since."""
+        if self._claim:
+            return True
+        try:
+            current = self.store.read_applied()
+        except Exception as error:  # noqa: BLE001 - not known: the next pass checks again
+            self.log(f"fleet: applied state not read ({error!r}); the new generation waits")
+            return False
+        if current is not None and current.get("writer") not in (None, self.writer):
+            self.fenced = f"fleet/applied.json is written by {current.get('writer')} now (not {self.writer})"
+            self.log(f"fleet: CRITICAL: {self.fenced}: this controller applies the desired state no more")
+            return False
+        return True
 
     def apply(self, controller: Any, doc: dict[str, Any]) -> None:
         gen = int(doc["generation"])
@@ -143,12 +169,16 @@ class FleetReconciler:
 
     def _persist(self) -> None:
         """``fleet/applied.json`` when it changed (a store that does not answer: the next pass)."""
-        if not self._dirty:
+        if not self._dirty or self.fenced is not None:
             return
         try:
             self.store.write_applied(self.applied, self.applied_pools,
-                                     {name: r.member for name, r in self.removing.items() if r.member})
-            self._dirty = False
+                                     {name: r.member for name, r in self.removing.items() if r.member},
+                                     writer=self.writer, claim=self._claim)
+            self._dirty, self._claim = False, False
+        except dz.AppliedFenced as error:
+            self.fenced = str(error)
+            self.log(f"fleet: CRITICAL: {error}: this controller applies the desired state no more")
         except Exception as error:  # noqa: BLE001
             self.log(f"fleet: applied state not written ({error!r}); tried again at the next pass")
 
