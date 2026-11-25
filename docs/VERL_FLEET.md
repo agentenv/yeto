@@ -23,15 +23,21 @@ before anything is ordered.
 | The image is the pinned verl image: `verl-build:<VERL_COMMIT>` on Modal, the registry image of the same recipe elsewhere. | A `verl-build` image of another commit, named by its `--gpu` island. |
 | The trainer card is sm80 or newer. | A T4 or V100 island. |
 
-The planner reads the model's config on the meta device (no GPU, no weights):
+The planner reads the model's config on the meta device (no GPU, no weights). The layout
+hash binds the matrix merge, so pass the run's: a fleet (`--rl-sync-preset decoupled` or
+`full-parameter`) merges with `rda` unless `--rl-sync-matrix-merge` says otherwise.
 
 ```bash
 python -m yeto.rl.adapters.verl.full_parameter_plan --model Qwen/Qwen3-0.6B \
-  --model-revision c1899de289a04d12100db370d81485cdf75e47ca --fragments 2 --matrix-merge avg
+  --model-revision c1899de289a04d12100db370d81485cdf75e47ca --fragments 2 --matrix-merge rda
 # -> "launcher_flags": "--rl-parameter-layout-sha256 <sha256> --fragments 2"
 ```
 
-Put those two flags in `fleet.trainer_argv` together with `--rl-backend verl`.
+Put those two flags in `fleet.trainer_argv` together with `--rl-backend verl`. When the
+model's `config.json` is in the local Hugging Face cache, `yeto run up --dry-run` computes
+the same layout and refuses a hash of another matrix merge or fragment count before
+anything is ordered. Without a local config that check is skipped, and each island refuses
+a wrong hash at its start.
 
 ## How a verl fleet differs from a Miles fleet
 
