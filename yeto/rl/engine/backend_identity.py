@@ -44,6 +44,11 @@ SEMANTIC_IDENTITY_SCHEMA = "yeto-backend-semantic-identity-v1"
 CANONICAL_PARAM_NAMING = "yeto-canonical-hf-names"
 IDENTITY_MODE_ENV = "YETO_RL_IDENTITY"  # "strict" (default) | "relaxed"
 IDENTITY_MODES = ("strict", "relaxed")
+# Capabilities a backend declares (``CAPABILITIES`` in ``adapters/<backend>/identity.py``):
+# the fleet code asks for a capability, never for a backend name.
+FLEET_FULL_PARAMETER = "fleet_full_parameter"  # a full-parameter trainer island of a fleet
+PER_LEARNER_RELEASE = "per_learner_release"  # each trainer releases its local versions into trainer<k>/
+FLEET_PARTIAL_EXPERTS = "fleet_partial_experts"  # partial-experts training on a fleet island
 _log = logging.getLogger(__name__)
 
 

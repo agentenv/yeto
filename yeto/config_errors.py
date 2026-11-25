@@ -57,6 +57,33 @@ def config_error_in(error: BaseException | None) -> ConfigError | None:
     return None
 
 
+def island_stop_exit(error: BaseException, stream=None) -> int | None:
+    """:data:`ISLAND_STOP_EXIT` when ``error`` is a deterministic stop of the island (a trainer
+    breaker's stop such as ``trainer.sample_wait``, a strict failure, the syncer's refusal:
+    ``yeto.launch.island_lifecycle.island_stop_line``, whose whitelist decides), after its
+    traceback and the ``[yeto-island-stop]`` line the launcher's log probes read. A relaunch
+    would stop the same way and bill a machine meanwhile, so the exit is not retried (Modal's
+    function retries and the fleet controller both see it). None for any other error, and for
+    every error while the launch's ``launch.deterministic_stop`` is off
+    (:data:`DETERMINISTIC_STOP_ENV` unset: a single trainer by default): raised as before.
+    Every island entry ends its deterministic stops here (the Miles island entry, the verl
+    training process ``yeto.rl.adapters.verl.verl_main``)."""
+    import sys  # noqa: PLC0415
+    import traceback  # noqa: PLC0415
+
+    if not deterministic_stop_on():  # launch.deterministic_stop off: raised as before (exit 1)
+        return None
+    from yeto.launch.island_lifecycle import island_stop_line  # noqa: PLC0415 - stdlib-only module top
+
+    line = island_stop_line(error)
+    if line is None:
+        return None
+    stream = sys.stderr if stream is None else stream
+    traceback.print_exception(error, file=stream)
+    print(line, file=stream, flush=True)
+    return ISLAND_STOP_EXIT
+
+
 def config_error_line(error: BaseException) -> str:
     """The marker line an island prints before it exits :data:`CONFIG_ERROR_EXIT`."""
     return (f"{CONFIG_ERROR_MARKER} {type(error).__name__}: {error} "

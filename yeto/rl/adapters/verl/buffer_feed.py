@@ -176,6 +176,46 @@ class RowShape:
             raise ValueError(f"row widths must be positive, got {self.prompt_length}/{self.response_length}")
 
 
+# The prompt row width a buffer trainer keeps when nothing names a wider one: enough for
+# one single-turn data prompt (island_entry.island_prompt_width).
+LEGACY_PROMPT_WIDTH = 512
+
+
+class PromptWidthError(ValueError):
+    """The prompt rows a buffer trainer needs do not fit its sequence budget."""
+
+
+def buffer_prompt_width(*, seq_len: int, response_len: int, pool_max_prompt_len: int | None = None) -> int:
+    """The prompt row width (``data.max_prompt_length``) of a non-relay buffer trainer
+    whose pools name their prompt bound, or whose rows take the sequence budget.
+
+    ``pool_max_prompt_len``: the widest first prompt the trainer's sampler pools write
+    (their ``agentic.max_prompt_len``); a group with a longer prompt never reaches the
+    buffer, so the rows need exactly that width. None (the pools bound no prompt): the
+    sequence budget ``seq_len - response_len``, the widest prompt a row of the island's
+    memory plan (``--seq-len``) holds next to a full response. A width whose rows
+    (width + ``response_len``) exceed ``seq_len`` raises :class:`PromptWidthError`:
+    the island's memory plan does not hold them, and a group the rows cannot hold is
+    dropped whole (``BufferFeed``: over_length), so the run must not start that way."""
+    seq, response = int(seq_len), int(response_len)
+    if response < 1:
+        raise PromptWidthError(f"--rollout-max-response-len {response}: a buffer trainer's rows need a response")
+    if pool_max_prompt_len is None:
+        width = seq - response
+        if width < 1:
+            raise PromptWidthError(f"--seq-len {seq} leaves no prompt tokens next to --rollout-max-response-len "
+                                   f"{response}: raise --seq-len")
+        return width
+    width = int(pool_max_prompt_len)
+    if width < 1:
+        raise PromptWidthError(f"pool max_prompt_len {width}: must be positive")
+    if width + response > seq:
+        raise PromptWidthError(f"pool max_prompt_len {width} + --rollout-max-response-len {response} = "
+                               f"{width + response} tokens per row > the trainer's --seq-len {seq} (its memory "
+                               f"plan): raise --seq-len to {width + response}, or lower the pools' max_prompt_len")
+    return width
+
+
 def sample_version(sample: Mapping[str, Any]) -> int:
     """The oldest engine weight version of one sample (its behavior version)."""
     return group_entry_fields([sample])[0]

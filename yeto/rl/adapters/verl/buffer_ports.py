@@ -35,6 +35,22 @@ merge (elastic: several local rounds per merge) releases nothing: its weights
 are not a merged policy. The driver is bound after it is built
 (:meth:`BufferReleasePublisher.bind`).
 
+Per-learner releases (``--rl-release-mode per_learner``, an island fleet: every
+trainer island has its own sampler pools, ``sample_roles`` module doc "external
+sampler pools that follow their own trainer"): the trainer reads its own
+sub-store ``trainer<k>`` as its own lane (``merged_release.OWN_LANE``: lane 0 of
+1, ``--rl-sample-lanes 1``) and releases its *local* policy versions there, full
+weights in ``trainer<k>/policy-releases/`` with that sub-store's ``LATEST.json``,
+as a Miles trainer on its own lane does (``merged_release.release_version``):
+its pools serve the policy the trainer itself trains, so their groups carry
+local versions and the feed judges them without the merged -> local pairing.
+``--rl-release-every N`` counts local versions: only versions ``v % N == 0`` are
+released, the others are logged as ``rl_policy_release_skipped`` (reason
+``release_every``), and the last one skipped is released when the run drains
+(:meth:`BufferReleasePublisher.drain_releases`), so the trained policy always
+reaches the store. The release guard keeps the versions increasing. The default
+mode (``merged``) is the synced group's rule above, unchanged.
+
 Delta releases (``--rl-release-delta-full-every N`` on a
 full-parameter trainer): the release is written into a staging directory on the
 island's local disk and published with
@@ -86,6 +102,7 @@ from .fully_async_ports import MEMBER, FullyAsyncIsland, FullyAsyncRolloutPool
 from .fully_async_round import FULLY_ASYNC_PLACEMENT
 from .fully_async_translate import VersionMap
 from .merged_release import LORA_B, write_full_checkpoint, write_merged_checkpoint
+from .run_flags import MERGED_RELEASE, PER_LEARNER_RELEASE, RELEASE_MODES  # noqa: F401 - re-exported
 
 BASE_POLICY_VERSION = 0
 RELEASE_EVENT = "rl_policy_released"  # the Miles trainer island's event name
@@ -234,7 +251,8 @@ class BufferReleasePublisher:
                  weights: Callable[[Any], ReleaseWeights] | None = None,
                  staging: str | Path | None = None, delta: Any = None,
                  resumed: ResumedReleases | None = None, no_release: bool = False,
-                 release_only: Iterable[int] | None = None, background: bool = False) -> None:
+                 release_only: Iterable[int] | None = None, background: bool = False,
+                 release_mode: str = MERGED_RELEASE, release_every: int = 1) -> None:
         """``no_release`` (``--rl-measure-no-release``): a measurement run
         (memory, MFU) writes no policy release at all. One release of the 120B is about
         225 GB written and a dozen minutes per round, which answers nothing such a run
@@ -261,7 +279,27 @@ class BufferReleasePublisher:
         that releases (or :meth:`close`) waits for it first and then puts its
         record, events and heartbeat on the tape. A failed background release
         raises there. Single trainer only (a synced trainer's peers wait for
-        the release)."""
+        the release).
+
+        ``release_mode`` (``--rl-release-mode``): :data:`MERGED_RELEASE`, or
+        :data:`PER_LEARNER_RELEASE` on a trainer reading its own lane, which
+        releases its local versions every ``release_every`` of them
+        (``--rl-release-every``; module doc, per-learner releases)."""
+        if release_mode not in RELEASE_MODES:
+            raise ValueError(f"--rl-release-mode {release_mode!r}: expected one of {RELEASE_MODES}")
+        if release_mode == PER_LEARNER_RELEASE and (lane is None or not lane.is_own):
+            raise ValueError("--rl-release-mode per_learner needs a synced trainer reading its own lane "
+                             "(--rl-sample-lanes 1 over its sub-store trainer<k>)")
+        if int(release_every) < 1:
+            raise ValueError("--rl-release-every must be >= 1")
+        if int(release_every) > 1 and release_mode != PER_LEARNER_RELEASE:
+            raise ValueError("--rl-release-every > 1 on a verl buffer trainer needs --rl-release-mode "
+                             "per_learner (otherwise it releases every version, or every merge)")
+        self.release_mode = release_mode
+        self.per_learner = release_mode == PER_LEARNER_RELEASE
+        self.release_every = int(release_every)
+        # the last publication a cadence skip left unreleased (released by drain_releases)
+        self._cadence_pending: Any = None
         if delta is not None and staging is None:
             raise ValueError("delta releases need a staging directory")
         if background and (staging is None or lane is not None):
@@ -311,7 +349,8 @@ class BufferReleasePublisher:
             driver.published_policy_history = self.resumed.history
         if self.lane is not None:
             self.island.emit("rl_policy_release_role", learner_id=self.lane.index,
-                             num_learners=self.lane.count, publisher=self.releasing)
+                             num_learners=self.lane.count, publisher=self.releasing,
+                             **({"own_lane": True} if self.per_learner else {}))
 
     def _on_gap(self, previous: int, version: int) -> None:
         self.island.emit("rl_policy_release_gap", previous_version=previous, policy_version=version)
@@ -343,6 +382,8 @@ class BufferReleasePublisher:
             return local
         if self.driver is None:
             raise RuntimeError("synced buffer trainer: publish before bind(driver)")
+        if self.per_learner:
+            return self._local_release_version(state, local)
         merged = merged_version(self.driver, state)
         new = self.feed.merged.record(merged, local)
         if not (new and self.releasing):
@@ -353,6 +394,23 @@ class BufferReleasePublisher:
                              latest_version=latest.version, reason="not_newer_than_latest")
             return None
         return merged
+
+    def _local_release_version(self, state: Any, local: int) -> int | None:
+        """Per-learner releases (module doc): the local version, every
+        ``release_every``-th one, kept increasing by the guard (as the Miles
+        trainer on its own lane, ``sampler_island.ReleasingPublisher``)."""
+        if self.release_every > 1 and local % self.release_every != 0:
+            self._cadence_pending = state
+            self.island.emit("rl_policy_release_skipped", policy_version=local, local_version=local,
+                             latest_version=None, reason="release_every", release_every=self.release_every)
+            return None
+        self._cadence_pending = None
+        latest = self.releases.latest()
+        if self.guard.check(local, None if latest is None else latest.version) == "stale":
+            self.island.emit("rl_policy_release_skipped", policy_version=local, local_version=local,
+                             latest_version=latest.version, reason="not_newer_than_latest")
+            return None
+        return local
 
     def _release_from_staging(self, version: int, digest: str, write: Callable[[Path], None],
                               position: int | None, shards: dict[str, int] | None, state: Any):
@@ -396,8 +454,8 @@ class BufferReleasePublisher:
         unverified = {"policy_hash": "unverified-identity"} if not bool(getattr(state, "verified", True)) else {}
         if self.lane is None:
             return ({"kind": "single", **unverified} if unverified else None)
-        return {"kind": "merged", "learner_id": self.lane.index, "num_learners": self.lane.count,
-                "local_version": int(state.policy_version), **unverified}
+        return {"kind": "local" if self.per_learner else "merged", "learner_id": self.lane.index,
+                "num_learners": self.lane.count, "local_version": int(state.policy_version), **unverified}
 
     def publish(self, state: Any) -> PublicationResult:
         isl = self.island
@@ -440,13 +498,7 @@ class BufferReleasePublisher:
                 isl.emit("rl_policy_release_background", policy_version=int(released),
                          write_seconds=written)
                 return self._finish_publication(version, param_version, digest, None, weights)
-            elif self.staging is not None:
-                release, event = self._release_from_staging(released, digest, write, position, shards, state)
-                isl.emit("rl_policy_release_delta", **event)
-            else:
-                release = self.releases.release(released, digest, write, buffer_selected=position,
-                                                buffer_shards=shards, weights=FULL,
-                                                origin=self._origin(state))
+            release = self._write_release(released, digest, write, position, shards, state)
         record = self._record(state, version, param_version, digest, position, shards, release,
                               merge, started)
         if self._pending is not None:  # after the release in flight: the log stays in version order
@@ -455,6 +507,45 @@ class BufferReleasePublisher:
             self._commit_record(record, release, merge)
         return self._finish_publication(version, param_version, digest, record.get("path"), weights,
                                         record.get("payload_bytes"))
+
+    def _write_release(self, version: int, digest: str, write: Callable[[Path], None],
+                       position: int | None, shards: dict[str, int] | None, state: Any) -> Any:
+        """Write release ``version`` on this thread: staged (and as a delta when
+        the chain has a base) or into the store."""
+        if self.staging is not None:
+            release, event = self._release_from_staging(version, digest, write, position, shards, state)
+            self.island.emit("rl_policy_release_delta", **event)
+            return release
+        return self.releases.release(version, digest, write, buffer_selected=position,
+                                     buffer_shards=shards, weights=FULL, origin=self._origin(state))
+
+    def _release_cadence_pending(self) -> None:
+        """The end of a per-learner run: release the last version a cadence skip
+        left unreleased (module doc), so the trained policy reaches the store; its
+        publication log line says ``drained``."""
+        state, self._cadence_pending = self._cadence_pending, None
+        if state is None:
+            return
+        version = int(state.policy_version)
+        latest = self.releases.latest()
+        if self.guard.check(version, None if latest is None else latest.version) == "stale":
+            self.island.emit("rl_policy_release_skipped", policy_version=version, local_version=version,
+                             latest_version=latest.version, reason="not_newer_than_latest")
+            return
+        weights = (self.weights or lora_release_weights(self.base_dir, self.merge))(state)
+        if weights.is_base(version):
+            return
+        digest = state.policy_tensor_hash()
+        started = self.clock()
+        merge: dict[str, Any] = {}
+        position, shards = self.feed.read_cursor(), self.feed.read_shards()
+        release = self._write_release(version, digest, lambda directory: merge.update(weights.write(directory)),
+                                      position, shards, state)
+        # the verl param version this publication recorded (vmap: param -> outer version)
+        param_version = next((int(p) for p, v in self.island.vmap.to_dict().items() if int(v) == version), None)
+        record = self._record(state, version, param_version, digest, position, shards, release, merge, started)
+        record["drained"] = True
+        self._commit_record(record, release, merge)
 
     # -- background releases ------------------------------------------------
     def _write_staged(self, version: int, write: Callable[[Path], None]) -> Path:
@@ -496,7 +587,9 @@ class BufferReleasePublisher:
     def drain_releases(self) -> None:
         """The driver's and the commanded island's end-of-run drain (``IslandDriver``,
         ``trainer_remote.IslandTrainerAgent``): a commanded island reports STOPPED,
-        and the head releases it, before ``close`` runs."""
+        and the head releases it, before ``close`` runs. A per-learner trainer
+        first releases the last version its cadence skipped (module doc)."""
+        self._release_cadence_pending()
         self.flush()
 
     # -- records ------------------------------------------------------------
@@ -515,8 +608,9 @@ class BufferReleasePublisher:
                   "seconds": round(self.clock() - started, 3), "merge": merge or None,
                   "version_map": isl.vmap.to_dict()}
         if self.lane is not None:
-            record.update(merged_version=merged_version(self.driver, state),
-                          merged_versions=self.feed.merged.to_dict())
+            record.update(merged_version=merged_version(self.driver, state))
+            if self.feed.merged is not None:  # per-learner: the groups carry local versions
+                record.update(merged_versions=self.feed.merged.to_dict())
         return record
 
     def _commit_record(self, record: dict[str, Any], release: Any, merge: dict[str, Any]) -> None:
@@ -573,6 +667,7 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                          staging: str | Path | None = None, delta_full_every: int = 0,
                          resume_versions: bool = False, no_release: bool = False,
                          release_only: Iterable[int] | None = None, release_background: bool = False,
+                         release_mode: str = MERGED_RELEASE, release_every: int = 1,
                          **feed_kwargs: Any) -> tuple[FullyAsyncRolloutPool, BufferReleasePublisher,
                                                       BufferPlacement]:
     """Route the island's queue calls to a buffer feed and return the rollout
@@ -589,7 +684,13 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     releases its store already holds (``merged_release.ResumedReleases``) --
     its round counter, its version map and its published policies all start at
     the store's newest release version. A synced trainer takes its versions
-    from the syncer and refuses this."""
+    from the syncer and refuses this.
+
+    ``release_mode`` / ``release_every`` (``--rl-release-mode``,
+    ``--rl-release-every``): :data:`PER_LEARNER_RELEASE` on a synced trainer
+    reading its own lane releases its local versions into its own sub-store,
+    every ``release_every``-th one (module doc, per-learner releases); its feed
+    judges the groups' behavior versions as local versions."""
     lane = getattr(buffer, "lane", None)
     if lane is not None and cursor_log is None:
         raise ValueError("a synced buffer trainer needs both a lane reader and its cursor log")
@@ -637,7 +738,8 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                       add_group=lambda rows: actor_call("yeto_add_group", rows),
                       remove_group=lambda uid: actor_call("yeto_remove_group", uid), record=record,
                       tokenize=tokenize, wait_s=wait_s, poll_s=poll_s, cursor_log=cursor_log,
-                      merged=None if lane is None else MergedVersions(),
+                      # a per-learner trainer's pools stamp its own local versions
+                      merged=None if lane is None or release_mode == PER_LEARNER_RELEASE else MergedVersions(),
                       round_of=lambda: int(island.published[0]) if island.published else 0,
                       **feed_kwargs)
     # YETO_RL_XHW_GUARD (default off): the per-source guard on this trainer too
@@ -653,5 +755,6 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                                        weights=weights,
                                        staging=staging if int(delta_full_every) > 0 else None,
                                        delta=delta, resumed=resumed, no_release=no_release,
-                                       release_only=release_only, background=release_background)
+                                       release_only=release_only, background=release_background,
+                                       release_mode=release_mode, release_every=release_every)
     return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()

@@ -657,16 +657,14 @@ def test_agentic_island_sizes_the_prompt_from_the_sequence_budget():
     """
     from yeto.rl.adapters.verl import island_entry
 
-    source = Path(island_entry.__file__).read_text()
-    # the rule itself, read off the module: the agentic branch uses the budget
-    # (a spot relay trainer holds the same agentic rows, so it takes the budget too)
-    assert "if wide_prompt_rows(args) else 512" in source
+    # the rule itself, the function island_entry.main sizes max_prompt with: the agentic
+    # branch uses the budget (a spot relay trainer holds the same agentic rows, so it
+    # takes the budget too)
     agentic = argparse.Namespace(rl_agentic_harbor=True, seq_len=81920, rollout_max_response_len=8192)
     plain = argparse.Namespace(rl_agentic_harbor=False, seq_len=81920, rollout_max_response_len=8192)
 
-    def cap(args):  # the expression at island_entry.py's max_prompt
-        return (max(512, int(args.seq_len) - int(args.rollout_max_response_len))
-                if island_entry.wide_prompt_rows(args) else 512)
+    def cap(args):  # island_entry.py's max_prompt of an island without a buffer section
+        return island_entry.island_prompt_width(args, None)
 
     assert cap(agentic) == 81920 - 8192
     assert cap(plain) == 512  # a math run is unchanged

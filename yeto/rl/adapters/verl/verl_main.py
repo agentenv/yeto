@@ -7,6 +7,13 @@ then hands the round loop to yeto's neutral ``IslandDriver`` over the verl
 ports (``ports_impl``).  The island plan (sync mode, syncer, learner id,
 canonical layout ...) comes from the JSON file named by ``$YETO_VERL_PLAN``.
 
+A deterministic stop of the island (a trainer breaker such as ``trainer.sample_wait``, a
+whitelisted strict failure, the syncer's refusal) ends this process with
+``config_errors.ISLAND_STOP_EXIT`` when the launch's ``launch.deterministic_stop`` is on
+(:func:`run_island`; the island entry passes the code on), as the Miles island does: the
+launcher never relaunches it. Any other error (a killed Ray worker, NCCL, CUDA, storage)
+ends it as before (exit 1, an infrastructure failure, relaunched).
+
 Ray is initialised here (not by verl) so that the runtime environment of every
 Ray worker -- and of the vLLM worker processes they spawn -- carries
 ``PYTHONPATH`` (yeto importable for the read-back hook) and the yeto env vars,
@@ -218,6 +225,23 @@ def _plan_and_ray(fully_async: bool = False) -> dict:
     return plan
 
 
+def run_island(run):
+    """``run()`` (the island's ``ray.get`` of its task runner), ending a deterministic
+    stop with ``SystemExit(ISLAND_STOP_EXIT)`` (``config_errors.island_stop_exit``: its
+    traceback and the ``[yeto-island-stop]`` line first). Raised here, inside verl's hydra
+    task function: hydra turns any ``Exception`` that leaves it into exit 1, not a
+    ``SystemExit``. Every other error is raised unchanged (module doc)."""
+    from yeto.config_errors import island_stop_exit
+
+    try:
+        return run()
+    except Exception as error:  # noqa: BLE001 - re-raised unless a deterministic stop
+        code = island_stop_exit(error)
+        if code is not None:
+            raise SystemExit(code) from error
+        raise
+
+
 def main(argv: list[str] | None = None) -> None:
     import verl.trainer.main_ppo as main_ppo
 
@@ -226,7 +250,7 @@ def main(argv: list[str] | None = None) -> None:
         import yeto.rl.adapters.verl.advantage  # noqa: F401  (registers yeto_grpo)
 
     def run_ppo(config, task_runner_class=None):  # replaces verl's: our runner, our plan
-        result = ray.get(YetoTaskRunner.remote().run.remote(config, plan))
+        result = run_island(lambda: ray.get(YetoTaskRunner.remote().run.remote(config, plan)))
         print("[yeto-verl] island result " + json.dumps(result, sort_keys=True, default=str), flush=True)
 
     main_ppo.run_ppo = run_ppo
@@ -249,7 +273,7 @@ def main_fully_async(argv: list[str] | None = None) -> None:
         from yeto.rl.adapters.verl.fully_async_runner import YetoFullyAsyncTaskRunner
 
         runner = ray.remote(num_cpus=1)(YetoFullyAsyncTaskRunner)
-        result = ray.get(runner.remote().run.remote(config, plan))
+        result = run_island(lambda: ray.get(runner.remote().run.remote(config, plan)))
         print("[yeto-verl] island result " + json.dumps(result, sort_keys=True, default=str), flush=True)
 
     main_ppo.run_ppo = run_ppo  # fully_async_main.main imports it at call time
@@ -271,7 +295,7 @@ def main_buffer_trainer(argv: list[str] | None = None) -> None:
         from yeto.rl.adapters.verl.buffer_trainer_runner import YetoBufferTaskRunner
 
         runner = ray.remote(num_cpus=1)(YetoBufferTaskRunner)
-        result = ray.get(runner.remote().run.remote(config, plan))
+        result = run_island(lambda: ray.get(runner.remote().run.remote(config, plan)))
         print("[yeto-verl] island result " + json.dumps(result, sort_keys=True, default=str), flush=True)
 
     main_ppo.run_ppo = run_ppo

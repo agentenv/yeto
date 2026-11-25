@@ -28,6 +28,12 @@ from typing import Any
 
 from yeto.rl.engine.run_flags import ISLAND, add_rl_flags, island_flag
 
+# --rl-release-mode (buffer_ports module doc): a synced group's publisher releases the
+# merged version (the default); an island fleet's trainer releases its own local versions
+MERGED_RELEASE = "merged"
+PER_LEARNER_RELEASE = "per_learner"
+RELEASE_MODES = (MERGED_RELEASE, PER_LEARNER_RELEASE)
+
 ISLAND_FLAGS = (
     # FSDP2 host-memory offload (e.g. 64 GiB Ascend cards with 30B full parameters)
     island_flag("--rl-fsdp-offload", choices=("none", "param", "optimizer", "both"), default="none"),
@@ -45,6 +51,14 @@ ISLAND_FLAGS = (
     # multi-step run trains on the samples it has and releases once for the samplers
     island_flag("--rl-release-only-versions", default=None,
                 type=lambda text: [int(v) for v in text.split(",") if v.strip()]),
+    # a buffer trainer of an island fleet releases its own local versions into its
+    # sub-store trainer<k> (buffer_ports module doc, per-learner releases); merged:
+    # a synced group's learner 0 releases the merged version (the default)
+    island_flag("--rl-release-mode", choices=RELEASE_MODES, default=MERGED_RELEASE),
+    # a non-relay buffer trainer's prompt row width: the widest first prompt its
+    # sampler pools write (agentic.max_prompt_len); unset: 512, or the sequence
+    # budget on a per-learner trainer (island_entry.island_prompt_width)
+    island_flag("--rl-buffer-max-prompt-len", type=int, default=None, metavar="TOKENS"),
     # precision-aware optimizer on the card, bf16 Adam moments, FP32 master
     island_flag("--rl-megatron-bf16-moments", action="store_true"),
     # uneven pipeline stages and full-layer recompute (megatron_engine.MegatronShape)
@@ -101,7 +115,8 @@ READ = frozenset({
     "rl_optimizer_offload_fraction", "rl_peer_recover", "rl_peer_recovery_donor_write",
     "rl_peer_recovery_manifest_wait_s", "rl_peer_recovery_staging", "rl_peer_recovery_store",
     "rl_peer_recovery_ttl_s", "rl_placement", "rl_prompt_column", "rl_release_background",
-    "rl_release_delta_full_every", "rl_release_only_versions", "rl_resource_sample_interval",
+    "rl_release_delta_full_every", "rl_release_every", "rl_release_mode", "rl_release_only_versions",
+    "rl_buffer_max_prompt_len", "rl_resource_sample_interval",
     "rl_resume_allow_config_change", "rl_resume_state_dir", "rl_resume_store", "rl_rollout_ahead",
     "rl_rollout_quant_tier", "rl_round_cuts", "rl_sample_lanes", "rl_sample_relay", "rl_sample_relay_prefetch",
     "rl_sample_role", "rl_sample_store", "rl_sample_wait_s", "rl_sampler_data_slot",
