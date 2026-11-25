@@ -167,7 +167,7 @@ class Sink:
     def __init__(self, pools):
         self.pools, self.sent = pools, []
 
-    def set_target(self, pool, nodes, *, offers, refill):
+    def set_target(self, pool, nodes, *, offers, refill, running=None):
         self.sent.append((pool, nodes))
         p = self.pools[pool]
         if nodes < p.config.target:  # as apply_scale does for a lowered target
