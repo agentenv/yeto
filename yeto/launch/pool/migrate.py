@@ -389,11 +389,19 @@ class PoolMoves:
                     self._event("move_out_taken", ticket=ticket, to=rec["to"])  # type: ignore[attr-defined]
                     self._save_now()  # type: ignore[attr-defined]
                 wait = float(rec.get("timeout_s", MOVE_TIMEOUT_S)) if timeout_s is None else timeout_s
-                if taker != rec["to"] and now - float(rec["at"]) >= wait \
-                        and (box is None or box.claim(ticket, self.move_name)):
-                    rec["state"] = RELEASING
-                    self._event("move_out_abandoned", ticket=ticket, to=rec["to"],  # type: ignore[attr-defined]
-                                waited_s=round(now - float(rec["at"])))
+                stopping = timeout_s is not None
+                if taker != rec["to"] and now - float(rec["at"]) >= wait:
+                    if box is None and not stopping:
+                        # no box (restored without a mover): its new pool may hold it, so it is
+                        # not released here; the pool's stop releases it (alerted once)
+                        if not rec.get("stranded"):
+                            rec["stranded"] = True
+                            self._event("move_out_stranded", level="alert", ticket=ticket,  # type: ignore[attr-defined]
+                                        to=rec["to"], waited_s=round(now - float(rec["at"])))
+                    elif box is None or box.claim(ticket, self.move_name):
+                        rec["state"] = RELEASING
+                        self._event("move_out_abandoned", ticket=ticket, to=rec["to"],  # type: ignore[attr-defined]
+                                    waited_s=round(now - float(rec["at"])))
                 state = rec["state"]
             if state == RELEASING:
                 stray = Member(rec["account"], ticket, shard="", state=DRAINING, created=now)
@@ -466,8 +474,26 @@ class PoolMover:
     _moves: dict[str, tuple[str, str]] = field(default_factory=dict)  # ticket -> (source, destination)
 
     def __post_init__(self) -> None:
+        """Hand every pool the box. A box in memory starts empty (a new controller): it is
+        seeded from the pools' saved states, so a machine its new pool took before the
+        restart is claimed by that pool (its old pool never releases it) and one handed over
+        but not taken yet is offered again."""
         for name in self.pools:
             self.pool(name).move_box = self.box
+        outs: dict[str, tuple[Any, dict[str, Any]]] = {}
+        for name in self.pools:
+            pool = self.pool(name)
+            for ticket, rec in pool.moves.get(OUT, {}).items():
+                if rec["state"] == HANDED_OVER:
+                    outs[ticket] = (pool, rec)
+        for name in self.pools:
+            pool = self.pool(name)
+            for m in pool.live():
+                if m.ticket in outs and outs[m.ticket][0] is not pool:
+                    self.box.claim(m.ticket, pool.move_name)
+        for ticket, (pool, rec) in outs.items():
+            if self.box.claimed_by(ticket) is None and self.box.get(ticket) is None:
+                self.box.offer(ticket, {**rec, "ticket": ticket, "from": pool.move_name})
 
     def pool(self, name: str) -> Any:
         entry = self.pools[name]
