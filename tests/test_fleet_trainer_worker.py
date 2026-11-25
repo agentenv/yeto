@@ -418,7 +418,7 @@ def test_the_fleet_stop_is_forwarded_while_the_store_does_not_read(tmp_path):
     for _ in range(3):
         w.step()
     assert sorted(launches.stops) == ["run-i0", "run-i1"]  # stopped directly, without the store
-    assert [m.split(":")[1].strip() for m in logs if "not written to the islands' STOPs" in m] == ["WARNING", "ERROR"]
+    assert [m.split(":")[1].strip() for m in logs if "not written to every island's STOP" in m] == ["WARNING", "ERROR"]
     objects.broken = False
     w.step()
     states = lifecycle.IslandStateStore(objects, log=lambda m: None)
@@ -522,7 +522,7 @@ def test_a_stop_write_that_fails_alone_is_a_failure_not_written(tmp_path):
         w.step()
     assert sorted(launches.stops) == ["run-i0", "run-i1"]
     assert not any("fleet stop written" in m for m in logs)
-    alarms = [m.split(":")[1].strip() for m in logs if "not written to the islands' STOPs" in m]
+    alarms = [m.split(":")[1].strip() for m in logs if "not written to every island's STOP" in m]
     assert alarms == ["WARNING", "ERROR"]
     objects.failing = False
     w.step()
@@ -530,16 +530,98 @@ def test_a_stop_write_that_fails_alone_is_a_failure_not_written(tmp_path):
     assert any("fleet stop written" in m for m in logs)
 
 
-def test_a_launch_that_keeps_handing_off_is_given_up(tmp_path):
-    objects, store = fleet(tmp_path, [member(0)])
-    launches, logs = FakeLaunches(), []
-    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
-                         log=logs.append)
+def test_a_launch_that_keeps_handing_off_is_given_up_stopped_and_still_billed(tmp_path):
+    """After HANDOFF_LIMIT hand-offs in a row the island is abandoned, but only once its
+    island STOP is written (the launcher that holds it stops), and it stays billed until
+    it is removed or run down; a fleet stop still reaches an abandoned island."""
+    objects, store = _stop_writes_fail(tmp_path, [member(0)])
+    launches, logs, clock = FakeLaunches(), [], [0.0]
+    states = lifecycle.IslandStateStore(objects, log=lambda m: None)
+    w = tw.TrainerWorker(store, objects, launches, states, log=logs.append, clock=lambda: clock[0])
     w.step()
-    for _ in range(tw.HANDOFF_LIMIT + 2):
+
+    def hand_off():
         launches.live.pop("run-i0", None)
         launches.exits["run-i0"] = {"exit_code": 12, "log": "", "detail": "another launcher holds the records"}
         w.step()
+
+    for _ in range(tw.HANDOFF_LIMIT):
+        hand_off()
     assert launches.started("run-i0") == 1 + tw.HANDOFF_LIMIT  # started again at once, a bounded number of times
-    assert w.load(0)["state"] == tw.ABANDONED
+    objects.failing = True  # the STOP does not write: not given up yet, not started again either
+    hand_off()
+    assert w.load(0)["state"] == tw.STARTING and launches.started("run-i0") == 1 + tw.HANDOFF_LIMIT
+    objects.failing = False
+    hand_off()
+    record = w.load(0)
+    assert record["state"] == tw.ABANDONED and states.stop_requested(0) is not None
     assert sum("ERROR" in m and "handed off" in m for m in logs) == 1
+    assert launches.started("run-i0") == 1 + tw.HANDOFF_LIMIT
+    clock[0] = 7200.0  # still billed: 2 h at $8
+    ((_, hours, usd, _),) = tw.billed(objects, now=clock[0])
+    assert round(hours, 6) == 2.0 and round(usd, 6) == 16.0
+    # a fleet stop goes to the abandoned island too (its STOP cleared meanwhile)
+    states.clear_stop(0)
+    w.fleet_stop = lambda: "STOP flag"
+    w.step()
+    assert states.stop_requested(0) is not None
+    # run down confirms it down: the bill closes
+    assert tw.mark_down(objects, ["run-i0"], log=lambda m: None, clock=lambda: 9000.0) == [0]
+    ((_, hours, usd, _),) = tw.billed(objects, now=99999.0)
+    assert round(hours, 6) == 2.5 and round(usd, 6) == 20.0
+
+
+def test_a_launch_that_comes_up_resets_its_hand_offs(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    for _ in range(tw.HANDOFF_LIMIT):
+        launches.live.pop("run-i0", None)
+        launches.exits["run-i0"] = {"exit_code": 12, "log": "", "detail": "held"}
+        w.step()
+    launches.live["run-i0"] = []  # up at last
+    w.step()
+    assert w.load(0)["state"] == tw.RUNNING and w.load(0)["handoffs"] == 0
+    launches.live.pop("run-i0")
+    launches.exits["run-i0"] = {"exit_code": 12, "log": "", "detail": "held"}
+    w.step()
+    assert w.load(0)["state"] == tw.STARTING and w.load(0)["handoffs"] == 1  # a fresh count, not given up
+
+
+def test_a_move_starts_with_no_hand_offs(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.live.pop("run-i0")
+    launches.exits["run-i0"] = {"exit_code": 12, "log": "", "detail": "held"}
+    w.step()
+    assert w.load(0)["handoffs"] == 1
+    store.update(lambda doc: next(m for m in doc["members"] if m["name"] == "isl0").update(gpu="aws:2xh100@us-east-2"))
+    w.step()  # moving (the relaunched launch runs)
+    launches.end("run-i0", 0)
+    w.step()
+    assert w.load(0)["prefix_now"] == "run-i0-m1" and w.load(0)["handoffs"] == 0
+
+
+def test_one_island_s_stop_write_failing_never_keeps_the_next_from_its_stop(tmp_path):
+    class RefuseIsland0(DirectoryObjectStore):
+        def write(self, key, data):
+            if str(key) == lifecycle.stop_key(0):
+                raise OSError("refused")
+            return super().write(key, data)
+
+    objects = RefuseIsland0(tmp_path / "store")
+    store = dz.DesiredStore(objects)
+    store.apply({"members": [member(0), member(1), member(2)]}, expect=0)
+    il.write_syncer_record(objects, addr="10.0.0.9:29400", syncer_epoch=2, learners=3, max_learners=4, run="run")
+    states = lifecycle.IslandStateStore(objects, log=lambda m: None)
+    logs = []
+    w = tw.TrainerWorker(store, objects, FakeLaunches(), states, log=logs.append, fleet_stop=lambda: None)
+    w.step()
+    w.fleet_stop = lambda: "STOP flag"
+    w.step()
+    assert states.stop_requested(0) is None
+    assert states.stop_requested(1) is not None and states.stop_requested(2) is not None
+    assert any("island 0" in m and "not written to every island's STOP" in m for m in logs)
