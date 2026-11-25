@@ -162,6 +162,11 @@ DEFAULT_INFRA_RETRIES = 2  # per trial slot (spec agentic.infra_retries)
 _NOT_INFRA = frozenset({"wall_clock_cap", "admission_draining", "token_alignment",
                         "prompt_exceeds_prompt_length", "policy_output_error"})
 DRAIN_EVENT = "rl_agentic_drain"
+# A trial whose sandbox provider or harness could not import a module (the image lacks
+# that provider's dependency; harbor.trial.missing_module, not a racing first import of
+# a package with an import cycle) is a configuration error, never retried; this many in
+# a row (no trial that got further in between) stop the sampler (SandboxDependencyError)
+DEPENDENCY_STREAK_N = 3
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -335,9 +340,33 @@ def infra_failure(result: Any) -> str | None:
     verdict = trajectory.verdict
     exc = None if verdict is None else verdict.exception_type
     if name in _NOT_INFRA or name in NOT_RETRIED_EXCEPTIONS or name in POLICY_LIMIT_EXCEPTIONS \
-            or exc in NOT_RETRIED_EXCEPTIONS or exc in POLICY_LIMIT_EXCEPTIONS:
+            or exc in NOT_RETRIED_EXCEPTIONS or exc in POLICY_LIMIT_EXCEPTIONS or missing_dependency(result):
         return None
     return name
+
+
+def missing_dependency(result: Any) -> str | None:
+    """The import error of ``result`` (a finished trial) when it is ABORTED before any
+    model call on an ``ImportError`` / ``ModuleNotFoundError`` that names a module the
+    image does not have (its sandbox provider or harness module), else None. An import
+    that raced another trial's first import of a package with an import cycle
+    ("partially initialized module", :func:`~yeto.rl.harness.harbor.trial.missing_module`)
+    is not one: it stays an infrastructure failure, retried."""
+    from yeto.rl.agentic import Outcome
+    from yeto.rl.harness.harbor.trial import missing_module
+
+    trajectory = getattr(result, "trajectory", None)
+    if trajectory is None or trajectory.outcome is not Outcome.ABORTED or getattr(result, "turns", ()):
+        return None
+    verdict = trajectory.verdict
+    reason = str(trajectory.reason or "")
+    head, _, tail = reason.partition(":")
+    exc = (None if verdict is None else verdict.exception_type) or head.strip()
+    message = (str(getattr(verdict, "exception_message", "") or "").strip() if verdict is not None else "") \
+        or tail.strip()
+    if not missing_module(exc, message):
+        return None
+    return f"{exc}: {message}" if message else exc
 
 
 class _Lost:
@@ -545,6 +574,7 @@ class AgenticRound(EngineRound):
         self._rounds: dict[int, _RoundState] = {}
         self._wake = threading.Event()
         self._error: BaseException | None = None
+        self._dependency_streak = 0  # trials in a row that could not import their provider's module
         self.session_collisions = 0  # trials lost to a recorder session id already open
         self._open_started = 0  # groups with a trial started and one not ended
         self._drain_started: float | None = None  # drain state (calling thread)
@@ -719,6 +749,7 @@ class AgenticRound(EngineRound):
                 result = _Lost(type(error).__name__)
         else:
             result = task.result()
+        self._dependency(group, result)
         if self._retry(group, j, result):
             self._fill()
             self._wake.set()
@@ -727,6 +758,32 @@ class AgenticRound(EngineRound):
         self._ended(group, 1)
         self._fill()
         self._wake.set()
+
+    def _dependency(self, group: _Group, result: Any) -> None:
+        """Count the trials in a row that could not import their sandbox provider's or
+        harness's module (:func:`missing_dependency`); :data:`DEPENDENCY_STREAK_N` of them
+        stop the sampler with a :class:`~yeto.rl.agentic.SandboxDependencyError` naming
+        the provider and the module (loop thread). A trial that got further resets it."""
+        if isinstance(result, _Lost):
+            return
+        error = missing_dependency(result)
+        if error is None:
+            self._dependency_streak = 0
+            return
+        self._dependency_streak += 1
+        if self._dependency_streak < DEPENDENCY_STREAK_N or self._error is not None:
+            return
+        from yeto.rl.agentic import SandboxDependencyError
+
+        try:
+            provider = self._task(group.item, "dependency-check").provider
+        except Exception:  # noqa: BLE001 - the row's own error is not this one
+            provider = "unknown"
+        self._error = SandboxDependencyError(
+            f"sandbox provider {provider!r} (prompt {group.item.prompt_id}): {error}; "
+            f"{self._dependency_streak} trials in a row failed on it before the agent ran, and every "
+            "trial fails the same way: install that provider's dependency in the sampler image, or "
+            "fix the provider (the data row's metadata provider overrides agentic.task_defaults.provider)")
 
     def _retry(self, group: _Group, j: int, result: Any) -> bool:
         """Put slot ``j`` back in the stream when ``result`` is an infrastructure

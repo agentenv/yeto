@@ -300,6 +300,23 @@ def verdict_from_result(result: Any, *, trial_dir: str | None = None) -> TrialVe
 # the configuration is wrong, so another sandbox fails the same way.
 NOT_RETRIED_EXCEPTIONS = frozenset({"ValueError", "TypeError", "FileNotFoundError", "HarnessConfigError",
                                     "TrustViolation", "BoatQuotaError"})
+# A provider or harness module missing from the image (boat_sdk, e2b, ...) is not
+# retried either (:func:`missing_module`), except an import that raced another
+# trial's first import of a package with an import cycle: "cannot import name ...
+# from partially initialized module ... (most likely due to a circular import)" (or
+# importlib's _DeadlockError, another name) succeeds on the next attempt.
+IMPORT_EXCEPTIONS = frozenset({"ImportError", "ModuleNotFoundError"})
+TRANSIENT_IMPORT_MARKERS = ("partially initialized module", "circular import", "deadlock detected")
+
+
+def missing_module(name: Any, message: Any = "") -> bool:
+    """``name`` / ``message`` (an exception) is a module the image does not have: an
+    ``ImportError`` or ``ModuleNotFoundError`` that is not a concurrent first import of
+    a package with an import cycle (:data:`TRANSIENT_IMPORT_MARKERS`)."""
+    if name not in IMPORT_EXCEPTIONS:
+        return False
+    text = str(message or "").lower()
+    return not any(marker in text for marker in TRANSIENT_IMPORT_MARKERS)
 
 
 def retryable_setup_failure(result: Any) -> str | None:
@@ -319,7 +336,8 @@ def retryable_setup_failure(result: Any) -> str | None:
     agent_run = getattr(result, "agent_execution", None)
     if (getattr(agent_run, "started_at", None) is not None
             or getattr(result, "verifier_result", None) is not None
-            or name in POLICY_LIMIT_EXCEPTIONS or name in NOT_RETRIED_EXCEPTIONS):
+            or name in POLICY_LIMIT_EXCEPTIONS or name in NOT_RETRIED_EXCEPTIONS
+            or missing_module(name, getattr(exc, "exception_message", ""))):
         return None
     return name
 

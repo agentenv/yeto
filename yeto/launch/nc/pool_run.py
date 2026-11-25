@@ -583,6 +583,9 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
                 print(line)
             problems += prompt_problems
             notes += prompt_notes
+            from yeto.launch.agentic_rows import pool_rows_problems  # noqa: PLC0415
+
+            problems += pool_rows_problems(cfg, spec)  # each row's own provider against the pool's
         except ValueError as error:
             problems.append(str(error))
         env_file = Path(str(cfg.get("r2_env_file") or "")).expanduser()
