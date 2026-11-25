@@ -394,10 +394,11 @@ def test_scale_file_sink_writes_an_automatic_scale():
     assert not sink.set_target("other", 1, offers={}, refill=None)
 
 
-def test_through_pool_scale_only_the_total_takes_effect_today(tmp_path, monkeypatch):
-    """The pool applies the scale file's target; the offer mix and refill ride along under
-    ``broker`` and change nothing yet (TODO with the NodePool split: the pool orders at the
-    refill offer). This pins today's behaviour."""
+def test_through_pool_scale_a_new_mix_moves_no_running_node(tmp_path, monkeypatch):
+    """The pool applies the scale file's target and reads the plan under ``broker``; a
+    provider without ``prefer_offer`` (National Compute) orders as always, and a new offer
+    mix with the same total orders or moves nothing (test_pool_broker_offers_e2e covers a
+    provider that takes the plan)."""
     import json
     import subprocess
 

@@ -245,3 +245,26 @@ def test_read_plan_and_next_offer():
     assert plans.next_offer(None, []) is None
     assert plans.victim_rank(plan, "b", ["b", "b"]) == 0 and plans.victim_rank(plan, "b", ["b"]) == 1
     assert plans.victim_rank(None, "b", ["b", "b"]) == 1
+
+
+def test_a_scale_file_another_writer_replaced_is_written_again(tmp_path):
+    fleet = Fleet(tmp_path)
+    cloud = OfferCloud(fleet.clock, ["b", "a"])
+    pool = fleet.add("spot", cloud)
+
+    def offers():
+        return [spot(fleet, "a", 1.0, "r1"), spot(fleet, "b", 1.5, "r2")]
+
+    loop = b.Broker(b.BrokerConfig(interval_s=300), snapshot(fleet, offers, want=2), b.ScaleFileSink(fleet.cfgs),
+                    clock=fleet.clock)
+    fleet.run(600, loop)
+    assert pool.broker_plan is not None and fleet.offer_counts("spot") == {"a": 2}
+    seq = json.loads(pool_run.scale_path(fleet.cfgs["spot"][0]).read_text())["seq"]
+    fleet.run(600, loop)
+    assert json.loads(pool_run.scale_path(fleet.cfgs["spot"][0]).read_text())["seq"] == seq, \
+        "nothing changed: the file is not rewritten"
+    pool.record_target(2, source="broker-move")  # a writer that keeps no broker plan
+    assert "broker" not in json.loads(pool_run.scale_path(fleet.cfgs["spot"][0]).read_text())
+    fleet.run(600, loop)
+    doc = json.loads(pool_run.scale_path(fleet.cfgs["spot"][0]).read_text())
+    assert doc["broker"]["offers"] == {"spot/a": 2, "spot/b": 0} and pool.broker_plan is not None

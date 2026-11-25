@@ -675,7 +675,12 @@ class Broker:
             offers = {k: n for k, n in dec.targets.items() if k.split("/", 1)[0] == pool}
             running = {k: int(snap.running.get(k, 0)) for k in offers}
             wanted = (nodes, tuple(sorted(offers.items())), dec.refill.get(pool), tuple(sorted(running.items())))
-            if self.sent.get(pool) == wanted:
+            holds = getattr(self.sink, "holds", None)
+            if holds is not None:  # the sink can read back what the pool holds: send when it differs
+                if holds(pool, nodes, offers=offers, refill=dec.refill.get(pool), running=running):
+                    self.sent[pool] = wanted
+                    continue
+            elif self.sent.get(pool) == wanted:
                 continue  # a change of the total, the offer mix, the refill offer or what runs is sent
             if self.sink.set_target(pool, nodes, offers=offers, refill=dec.refill.get(pool), running=running):
                 self.sent[pool] = wanted
@@ -694,9 +699,33 @@ class ScaleFileSink:
     target retires members on an offer over its count first."""
 
     def __init__(self, pools: Mapping[str, tuple[dict[str, Any], str]], *,
-                 scale: Callable[..., int] | None = None) -> None:
+                 scale: Callable[..., int] | None = None,
+                 read: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None) -> None:
         self.pools = dict(pools)  # pool -> (pool config, config path)
         self._scale = scale
+        self._read = read
+
+    @staticmethod
+    def _plan(offers: Mapping[str, int], refill: str | None, running: Mapping[str, int] | None) -> dict[str, Any]:
+        plan: dict[str, Any] = {"offers": dict(offers), "refill": refill}
+        if running is not None:
+            plan["running"] = dict(running)
+        return plan
+
+    def holds(self, pool: str, nodes: int, *, offers: Mapping[str, int], refill: str | None,
+              running: Mapping[str, int] | None = None) -> bool:
+        """Whether the pool's scale file already says this (its target and the broker plan):
+        a file another writer replaced since (a person's pool-scale, a pool lowering its own
+        target, a move) is written again at the next tick, never assumed."""
+        if pool not in self.pools:
+            return False
+        read = self._read
+        if read is None:
+            from yeto.launch.nc.pool_run import read_scale  # noqa: PLC0415
+
+            read = read_scale
+        doc = read(self.pools[pool][0]) or {}
+        return doc.get("target") == nodes and doc.get("broker") == self._plan(offers, refill, running)
 
     def set_target(self, pool: str, nodes: int, *, offers: Mapping[str, int], refill: str | None,
                    running: Mapping[str, int] | None = None) -> bool:
@@ -708,10 +737,7 @@ class ScaleFileSink:
 
             scale = scale_pool
         cfg, path = self.pools[pool]
-        plan: dict[str, Any] = {"offers": dict(offers), "refill": refill}
-        if running is not None:
-            plan["running"] = dict(running)
-        return scale(cfg, path, nodes, source="auto", extra={"broker": plan}) == 0
+        return scale(cfg, path, nodes, source="auto", extra={"broker": self._plan(offers, refill, running)}) == 0
 
 
 # -- phase 2: moving a node between islands ----------------------------------------
