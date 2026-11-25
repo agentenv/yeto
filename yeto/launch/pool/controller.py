@@ -719,6 +719,9 @@ def _store_pool(cfg: dict[str, Any], pc: Any, ops: Any, objects: Any, name: str,
             held.close()
         raise SystemExit(f"pool {cfg['shard_base']}: refused: {error}") from None
     try:
+        attach = getattr(ops, "attach_control", None)
+        if callable(attach):  # the provider's own record (an ssh pool's holds) into the store, before any tick
+            attach(control)
         doc = control.state.load(legacy=state)
         control.members = _member_table(ops, name, str(cfg["shard_base"]))
         if pc.index_limit is None:

@@ -72,7 +72,10 @@ pool fences the shard and orders a replacement that continues its prompts; the l
 node's slot is held for ``provider.lost_node_hold_s`` (default 1800 s; 0: no hold) while
 any other slot's node is free, so the replacement starts on a spare, not on the lost
 node. A stop the lost node never got runs before the next start there
-(:class:`SshNodeProvider`).
+(:class:`SshNodeProvider`). On the store control plane (``rollout.control_plane: store``)
+the tickets, holds and owed stops live in the run store
+(``fleet/pools/<pool>/provider.json``), so a controller that takes the pool over on
+another host keeps them.
 
 Reach: every ``ssh`` to a node (preflight, code upload, start, probe, stop) goes
 through the node's ``reach`` in the inventory (:func:`yeto.node.transport.reach_options`):
@@ -740,11 +743,14 @@ class SshNodeProvider:
     dropped connection, or a timeout) counts as a loss too: that costs at most a move
     to a spare, never a missing sampler (the hold yields when no spare is free).
 
-    Limitation: the hold and the owed stops live in this provider's state file on the
-    control host (like its tickets), not in the run store. A controller that takes the
-    pool over on another host starts without them: a lost node is then offered at once,
-    and a sampler left on it is held off only by its shard's fence (it writes nothing),
-    not stopped, until an operator stops it."""
+    Where the record lives: on the local control plane, this provider's state file on
+    the control host (``state_path``). On the store control plane (:meth:`attach_store`,
+    from the pool's ``store_state.PoolControl``) it is ``fleet/pools/<pool>/provider.json``
+    in the run store, written only under the pool's store lock: every save checks the
+    lock's fencing token first, so a fenced controller raises ``LockLost`` instead of
+    writing. A controller that takes the pool over on another host then reads the
+    tickets, the holds and the owed stops from the store. The local file is imported
+    once (when the store has no record yet) and from then on only mirrored."""
 
     kind = KIND
     caps = provider_caps(KIND)  # yeto/cloud/capabilities.json
@@ -754,17 +760,60 @@ class SshNodeProvider:
         self.run_id, self.conf, self.slots, self.state_path = run_id, conf, list(slots), state_path
         self.clock = clock
         self._lock = threading.Lock()
+        # the store control plane (attach_store): (objects, key, lock) and the record in memory
+        self._store: tuple[Any, str, Any] | None = None
+        self._store_rows: dict[str, dict[str, Any]] = {}
+        self.imported_from: str | None = None
         bad = [s for s in self.slots if not 0 <= s < len(conf.nodes)]
         if bad:
             raise ValueError(f"ssh provider: slots {bad} have no node (nodes: {[n.name for n in conf.nodes]})")
 
-    def _rows(self) -> dict[str, dict[str, Any]]:
+    def attach_store(self, objects: Any, key: str, lock: Any) -> None:
+        """Keep the record in the run store at ``key`` under the pool's store ``lock``
+        (class doc). The store's record wins; without one the local file is imported once."""
+        raw = objects.read(key)
+        doc = json.loads(raw) if raw is not None else None  # unreadable: raises (never a fresh, empty record)
+        imported = None
+        if doc is None:
+            rows = self._local_rows()
+            imported = str(self.state_path) if self.state_path.exists() else None
+        else:
+            rows = doc.get("tickets") if isinstance(doc, dict) else None
+            if not isinstance(rows, dict):
+                raise ValueError(f"ssh provider: the store record {key} holds no tickets")
+        with self._lock:
+            self._store, self._store_rows = (objects, key, lock), {t: dict(r) for t, r in rows.items()}
+            self.imported_from = imported
+            if doc is None and imported is not None:
+                self._save(self._rows())
+
+    def _local_rows(self) -> dict[str, dict[str, Any]]:
         try:
             return json.loads(self.state_path.read_text())
         except (OSError, ValueError):
             return {}
 
+    def _rows(self) -> dict[str, dict[str, Any]]:
+        if self._store is not None:  # the lock holder's record (a copy: a save that fails changes nothing)
+            return {t: dict(r) for t, r in self._store_rows.items()}
+        return self._local_rows()
+
     def _save(self, rows: dict[str, dict[str, Any]]) -> None:
+        if self._store is not None:
+            objects, key, lock = self._store
+            lock.check(force=True)  # one LIST: no write after another controller took the pool (LockLost)
+            doc = {"tickets": rows, "control": {"token": lock.token, "holder": lock.holder, "saved_at": self.clock()},
+                   **({"imported_from": self.imported_from} if self.imported_from else {})}
+            objects.write(key, json.dumps(doc, indent=1, sort_keys=True).encode())
+            self._store_rows = {t: dict(r) for t, r in rows.items()}
+            try:  # the local mirror (status readers on this host); never read back on this plane
+                self._write_local(rows)
+            except OSError:
+                pass
+            return
+        self._write_local(rows)
+
+    def _write_local(self, rows: dict[str, dict[str, Any]]) -> None:
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(rows, indent=1, sort_keys=True))
         tmp.replace(self.state_path)
@@ -936,6 +985,13 @@ class SshSamplerPoolOps:
                                         state_path=self.state_dir / f"ssh-pool-{self.run_id}.json", clock=clock)
         self._shard_of: dict[str, str] = {}
         self._node_route: Any = None
+
+    def attach_control(self, control: Any) -> None:
+        """The store control plane (``store_state.PoolControl``): the provider's tickets, holds
+        and owed stops move into the run store next to the pool's state, under its lock."""
+        from .pool import store_state  # noqa: PLC0415
+
+        self.provider.attach_store(control.state.objects, store_state.provider_key(control.state.pool), control.lock)
 
     def node_route_for(self, node: Node) -> Any:
         """The node runtime's assignments (``yeto.node.route``): in the run's object store, or
