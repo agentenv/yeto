@@ -344,8 +344,8 @@ def test_sm80_sm89_sm90_are_allowed_for_the_fsdp2_trainer():
     assert set(pins.VERL_FSDP_CARD_ARCHES) == {"sm80", "sm89", "sm90"}
     from yeto.launch.trainer_image_check import verl_card_problem
 
-    assert verl_card_problem("H100") is None  # verified
-    for card in ("A100", "A100-80GB", "L40S", "L4"):
+    assert verl_card_problem("H100") is None and verl_card_problem("L40S") is None  # verified (5.3 for L40S)
+    for card in ("A100", "A100-80GB", "L4"):
         message, refused = verl_card_problem(card)
         assert not refused and message.startswith("UNVERIFIED") and "an allowed architecture" in message
     message, refused = verl_card_problem("B300")  # above the floor, outside the list: warned, not refused
