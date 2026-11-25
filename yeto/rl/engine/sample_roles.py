@@ -455,6 +455,8 @@ ISLAND_TRAINER_OVERRIDES = (
     ("--rl-island-release-every", "rl_island_release_every", "rl_release_every"),
     ("--rl-island-max-policy-age", "rl_island_max_policy_age", "rl_max_policy_age"),
     ("--rl-island-sample-wait-s", "rl_island_sample_wait_s", "rl_sample_wait_s"),
+    # a verl trainer's prompt row width (its pools' agentic.max_prompt_len; island fleet compile)
+    ("--rl-island-buffer-max-prompt-len", "rl_island_buffer_max_prompt_len", "rl_buffer_max_prompt_len"),
 )
 # island options whose value is seconds (a number > 0) rather than an integer >= 1
 _SECONDS_OPTIONS = frozenset({"rl_sample_wait_s"})
@@ -845,6 +847,32 @@ def describe_sampler_stop(args: Any, num_islands: int) -> str | None:
             f"{whose} ended (no fixed round count; the trainers run until the syncer stops them)")
 
 
+def check_island_prompt_width(args: Any, num_islands: int) -> None:
+    """``--rl-island-buffer-max-prompt-len K:N`` (an island fleet's verl trainers: their
+    pools' widest first prompt): the backend's ``launch_flags.buffer_prompt_width`` must
+    take N next to ``--rollout-max-response-len`` within ``--seq-len``, as the island
+    does at its start (it refuses rows its memory plan does not hold); a backend without
+    that function does not size prompt rows and refuses the flag."""
+    if not getattr(args, "rl_island_buffer_max_prompt_len", None):
+        return
+    from yeto.rl.engine import backends  # noqa: PLC0415
+
+    backend = getattr(args, "rl_backend", None) or "miles"
+    width = getattr(backends.module("launch_flags", backend), "buffer_prompt_width", None)
+    if width is None:
+        raise ValueError(f"--rl-island-buffer-max-prompt-len sizes the prompt rows of a buffer trainer that "
+                         f"takes a row width (--rl-backend verl); --rl-backend {backend} does not")
+    for island, kv in sorted(island_trainer_overrides(args, num_islands).items()):
+        if "rl_buffer_max_prompt_len" not in kv:
+            continue
+        try:
+            width(seq_len=int(args.seq_len), response_len=int(args.rollout_max_response_len),
+                  pool_max_prompt_len=kv["rl_buffer_max_prompt_len"])
+        except ValueError as error:
+            raise ValueError(f"--rl-island-buffer-max-prompt-len {island}:{kv['rl_buffer_max_prompt_len']} "
+                             f"(trainer {island}): {error}") from None
+
+
 def check_sampler_follow(args: Any, num_islands: int) -> None:
     """Launch checks of ``--rl-sampler-follow trainer``: a synced group on a backend that
     releases per learner whose samplers split evenly over its trainers, synced trainers fed
@@ -852,6 +880,7 @@ def check_sampler_follow(args: Any, num_islands: int) -> None:
     group, :func:`check_mixed_group`); the external-pool flags belong to the
     latter two (:func:`check_external_pool_flags`)."""
     check_external_pool_flags(args)
+    check_island_prompt_width(args, num_islands)
     if getattr(args, "rl_sampler_follow", FOLLOW_MERGED) != FOLLOW_TRAINER:
         return
     if not is_synced_group(args) and not is_external_pool_group(args):

@@ -117,11 +117,15 @@ def compile_island(cfg: dict[str, Any], plan: Any, *, k: int, name: str, gpu: st
     flags = fleet_mod._flag_values(list(island_argv or ()), f"{where} trainer argv")  # noqa: SLF001
     if not isinstance(samplers, list) or not samplers:
         raise IslandChangeError(f"{where}: give its sampler pools (a non-empty list of pool entries)")
-    rows, members = [], []
+    rows, members, prompt_lens = [], [], []
+    trainer_argv = [str(a) for a in cfg["fleet"]["trainer_argv"]]
+    sized = fleet_mod.sizes_prompt_rows(trainer_argv)  # its pools' widest prompt (verl's prompt rows)
     for j, entry in enumerate(samplers):
         if fleet_mod.is_miles_entry(entry):
             raise IslandChangeError(f"{where}: a fleet launched island by island takes external pools only")
-        out, row, ports, _doc = fleet_mod._pool(entry, k, j, where, plan.dispense_store, plan.store)  # noqa: SLF001
+        out, row, ports, doc = fleet_mod._pool(entry, k, j, where, plan.dispense_store, plan.store)  # noqa: SLF001
+        if sized:
+            prompt_lens.append(fleet_mod.pool_max_prompt_len(doc))
         if ports is not None:
             raise IslandChangeError(f"{where}: pool {row.name} shares a port range with other pools (records relay / "
                                     "tunnel); an island added at run time cannot take a block of it")
@@ -133,8 +137,8 @@ def compile_island(cfg: dict[str, Any], plan: Any, *, k: int, name: str, gpu: st
                                    store=fleet_mod.substore_uri(plan.store, fleet_mod.substore(k)),
                                    release_every=flags.get("release_every"),
                                    max_policy_age=flags.get("max_policy_age"), pools=tuple(rows),
-                                   trainer_usd_per_h=price, sample_wait_s=flags.get("sample_wait_s"))
-    trainer_argv = [str(a) for a in cfg["fleet"]["trainer_argv"]]
+                                   trainer_usd_per_h=price, sample_wait_s=flags.get("sample_wait_s"),
+                                   buffer_max_prompt_len=fleet_mod.island_prompt_len(prompt_lens))
     argv = il.island_argv(trainer_argv, island, plan, learners=len(plan.islands),
                           section_argv=il.island_section_argv(cfg, trainer_argv))
     argv += il.member_table_flags(k)

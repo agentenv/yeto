@@ -494,6 +494,11 @@ def add_cli_args(p) -> None:
     g.add_argument("--rl-island-sample-wait-s", action="append", default=None, metavar="K:S",
                    help="with --rl-island-buffer-shards: the trainer with learner id K's own "
                    "--rl-sample-wait-s (seconds without a new group while a round fills); repeatable")
+    g.add_argument("--rl-island-buffer-max-prompt-len", action="append", default=None, metavar="K:N",
+                   help="with --rl-island-buffer-shards, on a backend whose buffer trainer sizes its "
+                   "prompt rows (verl): the trainer with learner id K's prompt row width, the widest "
+                   "first prompt its pools write (their agentic.max_prompt_len; an island fleet's "
+                   "compile writes it); refused when the rows do not fit --seq-len; repeatable")
     g.add_argument("--rl-sampler-spot", action="store_true",
                    help="with --rl-island-sample-role: the sampler islands use spot (preemptible) "
                    "capacity, the trainer island stays on demand; a reclaimed sampler island is "

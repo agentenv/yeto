@@ -798,6 +798,9 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         if substore is not None:  # its samplers follow it: a backend that needs to be told releases per learner
             per_learner = getattr(_rl_backend_module(args, "launch_flags"), "per_learner_release_flags", None)
             flags += per_learner() if per_learner is not None else ""
+            width = getattr(args, "rl_buffer_max_prompt_len", None)  # --rl-island-buffer-max-prompt-len K:N
+            if width is not None:
+                flags += _rl_backend_module(args, "launch_flags").buffer_prompt_width_flags(int(width))
         resume_store = None
     if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):
         resume_store = None  # a synced launch: island cuts only (above)

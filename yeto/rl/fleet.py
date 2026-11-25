@@ -235,6 +235,9 @@ class FleetIsland:
     miles_samplers: tuple[FleetMilesSampler, ...] = ()
     trainer_usd_per_h: float | None = None  # its trainer alone (usd_per_h without Miles samplers)
     sample_wait_s: float | None = None  # its trainer's own --rl-sample-wait-s (None: the fleet's)
+    # the widest first prompt its pools write (their agentic.max_prompt_len), on a backend that
+    # sizes its buffer trainer's prompt rows (buffer_max_prompt_len); None: not given / not sized
+    buffer_max_prompt_len: int | None = None
 
     @property
     def learner(self) -> int:
@@ -258,7 +261,10 @@ class FleetIsland:
                 "trainer_usd_per_h": self.trainer_usd_per_h,
                 "release_every": self.release_every, "max_policy_age": self.max_policy_age,
                 "sample_wait_s": self.sample_wait_s, "buffer_shards": self.buffer_shards(), "pools": [p.to_json() for p in self.pools],
-                "miles_samplers": [m.to_json() for m in self.miles_samplers]}
+                "miles_samplers": [m.to_json() for m in self.miles_samplers],
+                # a Miles fleet's plan stays byte for byte what it was
+                **({"buffer_max_prompt_len": self.buffer_max_prompt_len}
+                   if self.buffer_max_prompt_len is not None else {})}
 
 
 @dataclass(frozen=True)
@@ -366,7 +372,8 @@ class FleetPlan:
                                                                dispense_namespace=m.get("dispense_namespace"))
                                              for m in i.get("miles_samplers") or ()),
                         # a plan written before Miles samplers: the island's price is its trainer's
-                        trainer_usd_per_h=i.get("trainer_usd_per_h", i.get("usd_per_h")))
+                        trainer_usd_per_h=i.get("trainer_usd_per_h", i.get("usd_per_h")),
+                        buffer_max_prompt_len=i.get("buffer_max_prompt_len"))
             for i in doc.get("islands") or ())
         syncer = doc.get("syncer") if isinstance(doc.get("syncer"), dict) else {}
         # a plan written before fleet.fixed_roster: its launch had the fixed roster
@@ -1050,6 +1057,65 @@ def form_problem(form: dict[str, Any], *, backends: dict[str, str] | None = None
     return None
 
 
+# a trainer island's prompt row width (its pools' widest first prompt): --rl-island-buffer-max-prompt-len
+# K:N, written by the compile for a backend whose buffer trainer sizes its prompt rows
+PROMPT_LEN_FLAG = "--rl-island-buffer-max-prompt-len"
+
+
+def sizes_prompt_rows(trainer_argv: list[str]) -> bool:
+    """Whether the trainers' backend sizes its buffer trainer's prompt rows from its pools
+    (its ``launch_flags.buffer_prompt_width``: verl); a Miles trainer packs rows by tokens."""
+    backend = _argv_value([str(a) for a in trainer_argv], "--rl-backend") or MILES_KIND
+    from yeto.rl.engine import backends  # noqa: PLC0415
+
+    try:
+        return getattr(backends.module("launch_flags", backend), "buffer_prompt_width", None) is not None
+    except backends.UnknownBackend:
+        return False
+
+
+def pool_max_prompt_len(pool_doc: dict[str, Any]) -> int | None:
+    """A compiled pool's ``agentic.max_prompt_len`` (its rendered sampler spec), None if unset."""
+    spec, _engine, _quant = _spec_facts(pool_doc)
+    agentic = (spec or {}).get("agentic")
+    value = agentic.get("max_prompt_len") if isinstance(agentic, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def island_prompt_len(lens: list[int | None]) -> int | None:
+    """An island's prompt row width from its pools: the widest bound, None when any pool
+    bounds none (the trainer then takes its sequence budget)."""
+    if not lens or any(n is None for n in lens):
+        return None
+    return max(n for n in lens if n is not None)
+
+
+def prompt_width_problem(cfg: dict[str, Any], plan: FleetPlan) -> str | None:
+    """Why an island's prompt rows do not fit its trainer (None: they do): the backend's
+    ``launch_flags.buffer_prompt_width`` over the trainer's ``--seq-len`` and
+    ``--rollout-max-response-len`` and the island's pools' bound (or the sequence
+    budget), naming the island; the island launch refuses the same before it starts."""
+    section = cfg.get("fleet") if isinstance(cfg.get("fleet"), dict) else {}
+    trainer_argv = [str(a) for a in section.get("trainer_argv") or ()]
+    if not sizes_prompt_rows(trainer_argv):
+        return None
+    from yeto.rl.engine import backends  # noqa: PLC0415
+    from yeto.rl.up_consistency import trainer_args  # noqa: PLC0415
+
+    args = trainer_args(trainer_argv)
+    if args is None:
+        return None
+    width = backends.module("launch_flags", args.rl_backend).buffer_prompt_width
+    for i in plan.islands:
+        try:
+            width(seq_len=int(args.seq_len), response_len=int(args.rollout_max_response_len),
+                  pool_max_prompt_len=i.buffer_max_prompt_len)
+        except ValueError as error:
+            pools = ", ".join(p.name for p in i.pools)
+            return f"island {i.index} ({i.name}), pools {pools}: {error}"
+    return None
+
+
 def compaction_problem(cfg: dict[str, Any], plan: FleetPlan,
                        pools: Iterable[tuple[str, dict[str, Any]]] = ()) -> str | None:
     """Why a fleet whose backend cannot train compacted trials cannot run (None: it can):
@@ -1131,7 +1197,9 @@ def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple
     names: set[str] = set()
     # Miles samplers come after every trainer in the launch: count the trainers first
     launch_island = len(islands)
+    sized = sizes_prompt_rows(trainer_argv)
     for k, island in enumerate(islands):
+        prompt_lens: list[int | None] = []
         where = f"islands[{k}]"
         if not isinstance(island, dict):
             raise _err(f"{where} must be an object (name, trainer, samplers)")
@@ -1164,6 +1232,8 @@ def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple
             pools.append(row)
             shared.append((row.name, ports, row.shard_limit))
             pool_docs.append((row.name, doc))
+            if sized:
+                prompt_lens.append(pool_max_prompt_len(doc))
         seen = [p.name for p in pools] + [m.name for m in miles]
         if len(set(seen)) != len(seen):
             raise _err(f"{where}: pool names repeat {seen} (Miles samplers included); set 'name' on each")
@@ -1173,7 +1243,8 @@ def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple
                                 release_every=flags.get("release_every"),
                                 max_policy_age=flags.get("max_policy_age"), pools=tuple(pools),
                                 miles_samplers=tuple(miles), trainer_usd_per_h=price,
-                                sample_wait_s=flags.get("sample_wait_s")))
+                                sample_wait_s=flags.get("sample_wait_s"),
+                                buffer_max_prompt_len=island_prompt_len(prompt_lens)))
     offsets = share_offsets(shared)
     for out in samplers:
         if out["name"] in offsets:  # a port range several pools share: one block of it each
@@ -1223,6 +1294,8 @@ def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple
             argv += ["--rl-island-max-policy-age", f"{i.index}:{i.max_policy_age}"]
         if i.sample_wait_s is not None:
             argv += ["--rl-island-sample-wait-s", f"{i.index}:{i.sample_wait_s:g}"]
+        if i.buffer_max_prompt_len is not None:
+            argv += [PROMPT_LEN_FLAG, f"{i.index}:{i.buffer_max_prompt_len}"]
     from yeto.breakers.fleet import syncer_placement  # noqa: PLC0415
 
     prices = [i.usd_per_h for i in rows]
