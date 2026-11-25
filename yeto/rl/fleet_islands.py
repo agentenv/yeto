@@ -249,9 +249,12 @@ def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
 
     record, unread = None, None
     try:
-        record = il.read_syncer_record(run._objects())  # noqa: SLF001
+        objects = run._objects()  # noqa: SLF001
+        record = il.read_syncer_record(objects)
+        if record is None and objects.read(il.SYNCER_RECORD) is not None:
+            raise ValueError("the record exists but does not parse or names no address")
     except Exception as error:  # noqa: BLE001 - never taken for "no syncer yet"
-        unread = f"{type(error).__name__}: {error}"
+        record, unread = None, f"{type(error).__name__}: {error}"
         if not dry_run:
             raise IslandChangeError(
                 f"the fleet's syncer record could not be read ({unread}): whether a syncer holds a running "

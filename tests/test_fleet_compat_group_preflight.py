@@ -135,6 +135,17 @@ def test_an_unreadable_syncer_record_is_never_taken_for_no_syncer(fleet_store, c
     assert "sglang (its machines before the move)" in err and "compat_group nvidia-h200" in err
 
 
+def test_a_syncer_record_that_does_not_parse_is_unreadable_not_missing(fleet_store, capsys):  # noqa: F811
+    cfg, objects, store, run_cli, _ = fleet_store
+    assert run_cli("remove", "--name", "mixed") == 0
+    objects.write(island_launches.SYNCER_RECORD, b"{not json")
+    capsys.readouterr()
+    assert run_cli("move", "--name", "sglang", "--gpu", "modal:1x2xh100", "--usd-per-h", "4") == 2
+    assert "does not parse or names no address" in capsys.readouterr().err
+    assert run_cli("move", "--name", "sglang", "--gpu", H200, "--usd-per-h", "4", "--dry-run") == 2
+    assert "sglang (its machines before the move)" in capsys.readouterr().err
+
+
 def test_a_strict_syncer_refuses_relaxed_islands_on_two_compat_groups(tmp_path):
     """The syncer compares compat groups unless it runs --rl-identity relaxed itself: two
     relaxed islands on different cards are refused by a strict syncer launch."""
