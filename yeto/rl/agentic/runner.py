@@ -59,14 +59,14 @@ async def run_agent_task(task: AgentTask, harness: AgentHarness, endpoint: str,
     wall-clock cap is extended by the time it was suspended."""
     try:
         async with gate.admit() as admission:
-            verdict, cap_reason = await _run_capped(task, harness, endpoint, ledger, admission)
+            verdict, cap_reason, detail = await _run_capped(task, harness, endpoint, ledger, admission)
     except AdmissionClosed:
         trajectory = _aborted(task, "admission_draining", policy_version=None)
         gate.metrics.record_outcome(trajectory.outcome)
         return trajectory
 
     if verdict is None:
-        trajectory = _aborted(task, cap_reason, policy_version=admission.policy_version)
+        trajectory = _aborted(task, cap_reason, policy_version=admission.policy_version, detail=detail)
     else:
         outcome, reward, reason = classify(verdict)
         trajectory = AgentTrajectory(task=task, outcome=outcome, reward=reward, reason=reason,
@@ -79,8 +79,9 @@ async def run_agent_task(task: AgentTask, harness: AgentHarness, endpoint: str,
 
 async def _run_capped(task: AgentTask, harness: AgentHarness, endpoint: str,
                       ledger: SuspendLedger | None = None,
-                      admission: Admission | None = None) -> tuple[TrialVerdict | None, str]:
-    """``(verdict, "")`` or ``(None, reason)`` for an infrastructure failure."""
+                      admission: Admission | None = None) -> tuple[TrialVerdict | None, str, str]:
+    """``(verdict, "", "")`` or ``(None, reason, message)`` for an infrastructure failure
+    (``message``: the exception's, empty for the wall-clock cap)."""
 
     def stuck(run: asyncio.Future) -> None:
         logger.warning("stuck harness: agent task %s ignored cancellation for %ss; the trajectory "
@@ -91,17 +92,17 @@ async def _run_capped(task: AgentTask, harness: AgentHarness, endpoint: str,
 
     try:
         return await _capped(harness.run(task, endpoint), task.budget.wall_clock_s, ledger,
-                             on_stuck=stuck), ""
+                             on_stuck=stuck), "", ""
     except asyncio.TimeoutError:
         # The harness's own agent timeout sits below this cap; reaching it means
         # the harness did not return (stuck teardown, lost sandbox), not a slow policy.
         logger.error("agent task %s exceeded the %ss wall-clock cap", task.task_id, task.budget.wall_clock_s)
-        return None, WALL_CLOCK_REASON
+        return None, WALL_CLOCK_REASON, ""
     except (HarnessConfigError, TrustViolation):
         raise
     except Exception as exc:  # noqa: BLE001 - every other harness failure is infrastructure
         logger.error("agent task %s: harness failed: %r", task.task_id, exc, exc_info=True)
-        return None, type(exc).__name__
+        return None, type(exc).__name__, str(exc)[:2000]
 
 
 _SUSPENDED_RECHECK_S = 1.0
@@ -158,6 +159,6 @@ async def _capped(coro, cap_s: float, ledger: SuspendLedger | None, *,
                     on_stuck(run)
 
 
-def _aborted(task: AgentTask, reason: str, *, policy_version: int | None) -> AgentTrajectory:
+def _aborted(task: AgentTask, reason: str, *, policy_version: int | None, detail: str = "") -> AgentTrajectory:
     return AgentTrajectory(task=task, outcome=Outcome.ABORTED, reward=0.0, reason=reason,
-                           verdict=None, policy_version=policy_version)
+                           verdict=None, policy_version=policy_version, error_detail=detail)

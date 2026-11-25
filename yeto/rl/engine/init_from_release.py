@@ -106,6 +106,20 @@ def redact_reason(text: str, environ: Mapping[str, str] | None = None) -> str:
     return text if len(text) <= FAILURE_REASON_MAX else text[:FAILURE_REASON_MAX - 3] + "..."
 
 
+_URL_TAIL = re.compile(r"\b([a-z][a-z0-9+.-]*://)([^/\s'\"?#]+)[^\s'\"]*", re.I)
+DETAIL_MAX = 200  # characters of an error detail an event carries
+
+
+def redact_detail(text: Any, environ: Mapping[str, str] | None = None, *, limit: int = DETAIL_MAX) -> str:
+    """An exception message short enough for an event: :func:`redact_text`, every URL cut
+    to its scheme and host (no userinfo, path or query: a path can hold a token), one
+    line, at most ``limit`` characters."""
+    text = redact_text(str(text or ""), environ)
+    text = _URL_TAIL.sub(lambda m: m.group(1) + m.group(2).rpartition("@")[2], text)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
 class InitFromReleaseError(ValueError):
     pass
 

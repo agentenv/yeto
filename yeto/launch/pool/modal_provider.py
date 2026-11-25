@@ -85,6 +85,14 @@ route's), so the function itself carries what the trials need:
   ``prompts.path`` are read from the model volume (under ``model_mount``).
 * the boat quota: the pool's samplers get their share of the account
   (``yeto.launch.rollout.pools.with_boat_shares``) in the spec's ``breakers``.
+* AgentENV microVMs: a pool whose ``provider.env`` names no run label
+  (``YETO_SANDBOX_RUN_LABEL`` / ``YETO_NC_RUN_PREFIX``) labels them with its
+  ``run_prefix``, so the owner metadata is set and a restarted shard sweeps what an
+  earlier incarnation left. A cancelled or stopped call gets no teardown from its
+  sampler, so the call itself, as it ends, deletes the microVMs of its shard made by
+  the incarnations it ran (:func:`release_call_sandboxes`); once the pool's app is
+  stopped, a controller that holds an AgentENV key deletes those of its own shards
+  too (:meth:`ModalPoolOps.pool_ended`; ``yeto.rl.harness.harbor.agentenv_labels``).
 """
 
 from __future__ import annotations
@@ -104,6 +112,8 @@ from ..nc.client import NodeLease, state_file_lock, write_json_atomic
 from ..nc.tunnel import state_dir
 
 KIND, LEDGER_KIND = "modal", "modal_call"
+RUN_LABEL_ENV = "YETO_SANDBOX_RUN_LABEL"  # yeto.rl.harness.harbor.agentenv_labels.RUN_LABEL_ENV
+RUN_PREFIX_ENV = "YETO_NC_RUN_PREFIX"     # agentenv_labels.RUN_PREFIX_ENV
 FUNCTION = "rollout_sampler"
 RUNNING, SUCCEEDED, FAILED = "RUNNING", "SUCCEEDED", "FAILED"
 # the call returned with the sampler's "did not run" exit (a stop request on its shard it
@@ -795,8 +805,13 @@ class ModalPoolOps:
         self.provider.release(m.account, m.ticket)
 
     def pool_ended(self, why: str) -> dict[str, Any] | None:
-        """The pool is stopped (no member is started or replaced any more): stop its app."""
-        return self.provider.stop_app(why)
+        """The pool is stopped (no member is started or replaced any more): stop its app,
+        then delete the AgentENV microVMs of its shards (:func:`release_pool_sandboxes`)."""
+        result = self.provider.stop_app(why)
+        released = release_pool_sandboxes(self.cfg, self.provider.config, getattr(self.provider, "harbor", None))
+        if released is None:
+            return result
+        return {**(result or {}), "sandboxes": released}
 
 
 # -- the real client -------------------------------------------------------------------
@@ -1031,6 +1046,9 @@ def agentic_payload(payload: dict[str, Any], section: dict[str, Any]) -> dict[st
     if provider and provider != "?":
         env["HARBOR_ENV_TYPE"] = provider
     env.update(payload.get("env") or {})
+    label = str(payload.get("run_prefix") or "").strip("/")
+    if env.get("HARBOR_ENV_TYPE") == "agentenv" and label and not (env.get(RUN_LABEL_ENV) or env.get(RUN_PREFIX_ENV)):
+        env[RUN_LABEL_ENV] = label  # the microVMs' yeto_run (module doc)
     return {**payload, "spec": spec, "env": env, "records_port": int(proxy.get("port") or 0),
             "harbor_site": HARBOR_SITE}
 
@@ -1120,6 +1138,16 @@ def _run_sampler(payload: dict[str, Any], env: dict[str, str], out: Path, *, t0:
                                         "--spec", str(out / "spec.json")], env=env,
                                        stderr=subprocess.PIPE, text=True, errors="replace", bufsize=1)
     tail = _StderrTail(getattr(proc, "stderr", None))
+    try:
+        reported = _watch_sampler(payload, env, proc, before, t0=t0, objects=objects, poll_s=poll_s, sleep=sleep)
+    finally:  # also on the call's cancel: the sampler's trials leave their microVMs
+        release_call_sandboxes(payload, env, proc, before)
+    return {"rc": proc.returncode, "secs": round(time.time() - t0, 1), "reported_ready": reported,
+            "stderr_tail": tail.lines()}
+
+
+def _watch_sampler(payload: dict[str, Any], env: dict[str, str], proc: Any, before: set[Path], *, t0: float,
+                   objects: Any, poll_s: float, sleep: Any) -> bool:
     key, reported = payload.get("ready_key"), False
     started = started_key(key) if key else None  # the container runs: the call bills (ModalPoolOps.poll)
     while proc.poll() is None:
@@ -1144,8 +1172,96 @@ def _run_sampler(payload: dict[str, Any], env: dict[str, str], out: Path, *, t0:
             except Exception as error:  # noqa: BLE001 - retried next poll; the pool's start timeout bounds it
                 print(f"rollout_sampler: ready marker not written yet: {error}", flush=True)
         sleep(poll_s)
-    return {"rc": proc.returncode, "secs": round(time.time() - t0, 1), "reported_ready": reported,
-            "stderr_tail": tail.lines()}
+    return reported
+
+
+SAMPLER_STOP_WAIT_S = 5.0  # a sampler still running when its call ends: TERM, then KILL after this
+RELEASE_TIMEOUT_S = 20.0   # the call's microVM release (Modal's stop grace is about 30 s)
+
+
+def call_incarnations(spec: dict[str, Any], before: set[Path] | frozenset[Path]) -> list[str]:
+    """The incarnations whose tape this call wrote (``events.<inc>.jsonl`` next to the
+    spec's ``event_tape``, not there before the call)."""
+    tape = spec.get("event_tape")
+    if not tape:
+        return []
+    path = Path(str(tape)).expanduser()
+    head, tail = f"{path.stem}.", path.suffix or ".jsonl"
+    return sorted(p.name[len(head):-len(tail)] for p in tape_files(spec) - set(before)
+                  if p.name.startswith(head) and p.name.endswith(tail) and len(p.name) > len(head) + len(tail))
+
+
+def release_call_sandboxes(payload: dict[str, Any], env: dict[str, str], proc: Any,
+                           before: set[Path] | frozenset[Path], *, run: Any = None) -> dict[str, Any] | None:
+    """An AgentENV call that ends deletes the microVMs of its shard made by the
+    incarnations it ran (module doc): its sampler is stopped first if it still runs (no
+    new trial starts behind the release), then ``python -m
+    yeto.rl.harness.harbor.agentenv_labels release`` runs in the sampler's environment
+    (the Secret's key, the gateway URLs, the Harbor site). Best effort, bounded by
+    :data:`RELEASE_TIMEOUT_S`; None when it does not apply (another provider, no run
+    label, no tape of this call)."""
+    import subprocess  # noqa: PLC0415
+
+    if env.get("HARBOR_ENV_TYPE") != "agentenv" or not (env.get(RUN_LABEL_ENV) or env.get(RUN_PREFIX_ENV)):
+        return None
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=SAMPLER_STOP_WAIT_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=SAMPLER_STOP_WAIT_S)
+    except Exception as error:  # noqa: BLE001 - the container ends it anyway
+        print(f"rollout_sampler: sampler stop before the microVM release: {type(error).__name__}", flush=True)
+    incs = call_incarnations(payload.get("spec") or {}, before)
+    if not incs:
+        return None
+    cmd = [payload.get("python", "python3"), "-m", "yeto.rl.harness.harbor.agentenv_labels", "release",
+           "--shard", str(payload["shard"]), *[a for inc in incs for a in ("--inc", inc)]]
+    try:
+        done = (run or subprocess.run)(cmd, env=env, capture_output=True, text=True, timeout=RELEASE_TIMEOUT_S)
+        line = (done.stdout or "").strip().splitlines()[-1:] or [f"rc={done.returncode}"]
+        print(f"rollout_sampler: agentenv microVM release: {line[0][:300]}", flush=True)
+        return {"rc": done.returncode, "out": line[0][:300]}
+    except Exception as error:  # noqa: BLE001 - what is left waits for its TTL
+        print(f"rollout_sampler: agentenv microVM release failed: {type(error).__name__}", flush=True)
+        return {"rc": None, "out": type(error).__name__}
+
+
+def release_pool_sandboxes(cfg: dict[str, Any], section: dict[str, Any], harbor: str | None, *, client: Any = None,
+                           environ: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """Once the pool's app is stopped: delete the AgentENV microVMs of the pool's run
+    label on its own shards (``<shard_base>-<n>``, any incarnation;
+    :func:`~yeto.rl.harness.harbor.agentenv_labels.release_pool`). Only for an agentic
+    AgentENV pool (``harbor``: :func:`agentic_provider`), and only with an AgentENV key in this process's environment (the
+    calls' key is in their Secret; a call deletes its own as it ends): otherwise
+    ``skipped``. None when the pool has no AgentENV trials."""
+    from yeto.rl.harness.harbor import agentenv_labels as al  # noqa: PLC0415
+
+    env_cfg = {str(k): str(v) for k, v in (section.get("env") or {}).items()}
+    if harbor != "agentenv":
+        return None
+    run = al.run_label(env_cfg) or str(cfg.get("run_prefix") or "").strip("/")
+    base = str(cfg.get("shard_base") or "")
+    if client is None:
+        environ = dict(os.environ if environ is None else environ)
+        from yeto.rl.harness.harbor import agentenv_client as ac  # noqa: PLC0415
+
+        if not any(environ.get(k) for k in (ac.API_KEY_ENV, ac.SDK_API_KEY_ENV, ac.API_KEY_FILE_ENV)):
+            return {"run": run, "shard_base": base, "result": "skipped", "why": "no AgentENV key here"}
+        try:
+            client = ac.SdkAgentenvClient(
+                api_url=env_cfg.get(ac.API_URL_ENV) or env_cfg.get(ac.SDK_API_URL_ENV) or None,
+                sandbox_url=env_cfg.get(ac.SANDBOX_URL_ENV) or env_cfg.get(ac.SDK_SANDBOX_URL_ENV) or None,
+                request_timeout_s=RELEASE_TIMEOUT_S)  # the stop is not held for a create-sized timeout
+        except Exception as error:  # noqa: BLE001 - no SDK / key here: each call released its own
+            return {"run": run, "shard_base": base, "result": "skipped", "why": type(error).__name__}
+    out = al.release_pool(client, run, base)
+    if out is None:
+        return {"run": run, "shard_base": base, "result": "list failed"}
+    deleted, found = out
+    return {"run": run, "shard_base": base, "result": "released", "removed": len(deleted), "found": found}
 
 
 class _StderrTail:
