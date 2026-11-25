@@ -841,3 +841,67 @@ def test_every_trainer_stop_breaker_is_judged():
     unjudged = stop - set(lc.BREAKER_STOPS) - strict - by_record_elsewhere
     assert not unjudged, f"trainer stop breakers not judged by the deterministic stop: {sorted(unjudged)}"
     assert lc.classify_records({"breaker": {**BREAKER_RECORD, "name": "trainer.some_new_transient"}}) is None
+
+
+# -- the customer's configs keep the switch off ----------------------------------------------------------------
+
+def _customer_runs():
+    from test_k31_customer_plan_golden import K31, KIT
+
+    return sorted([*K31.glob("run*.json"), KIT / "run.json"])
+
+
+@pytest.mark.parametrize("run", _customer_runs(), ids=lambda p: f"{p.parent.name}/{p.name}")
+def test_every_customer_config_keeps_the_switch_off(run, tmp_path, monkeypatch, capsys):
+    """Every examples/k31/run*.json (and the customer kit's run.json): launch.deterministic_stop is
+    off, no island gets YETO_RL_DETERMINISTIC_STOP and the dry-run plan reports no switch (it is
+    printed only when on). A customer config that comes to turn it on (an island pool option,
+    --rl-sampler-follow trainer, a second trainer island, --rl-deterministic-stop) fails here:
+    the customer's retries and relaunches would change, which needs the owner's decision."""
+    import yeto.cli as cli
+    from test_k31_customer_plan_golden import _argv, _plan
+
+    args = cli.parse_args(_argv(run, tmp_path))
+    assert fleet.deterministic_stop(args) == (False, "a single trainer (--rl-deterministic-stop turns it on)")
+    assert fleet.deterministic_stop_env(args) == {}
+    plan = _plan(run, tmp_path, monkeypatch, capsys)
+    assert "deterministic_stop" not in plan["plan"]
+    assert DETERMINISTIC_STOP_ENV not in json.dumps(plan)
+
+
+# -- REV's gaps: the stop already relaunched, the trainer scheduler's wiring ------------------------------------
+
+def test_a_relaunched_island_that_fails_before_its_driver_starts_is_an_infrastructure_relaunch(tmp_path):
+    """After the NaN stop's relaunch on a new machine, the new container fails while it boots
+    (before its rl_driver_start): the tape still holds the old incarnation's NaN records. They
+    were handled already; the failure is an infrastructure failure and is relaunched."""
+    ops = FakeOps()
+    tape = TapeCollector(tmp_path / "l1.jsonl")
+    _nan_incarnation(tape, 1)
+    ops.status_seq["l0"] = [RUNNING] * 20 + [SUCCEEDED]
+    ops.status_seq["l1"] = [RUNNING, FAILED]
+    ops.relaunch_results["l1"] = ["j2", "j3"]
+    boots = iter([[RUNNING, FAILED], [RUNNING, SUCCEEDED]])  # the first new container fails at boot
+    ops.after_relaunch["l1"] = next(boots)
+
+    def relaunched(name, job):
+        ops.after_relaunch["l1"] = next(boots, [RUNNING, SUCCEEDED])
+
+    ctl = _controller(ops, {"l0": 1, "l1": 2}, probe=lambda name: tape.island_stop if name == "l1" else None,
+                      elastic=True)
+    ctl.on_relaunch = relaunched
+    ctl.run()
+    assert ops.relaunch_calls == ["l1", "l1"]
+    assert ctl.learners["l1"]["state"] == "done" and ctl.learners["l1"]["new_machine_retries"] == {"trainer.nan": 1}
+
+
+@pytest.mark.parametrize("gpu,expected", [("modal:1xa100", (lc.INFRA, True)),  # single trainer: as on main
+                                          ("modal:1xa100,modal:1xa100", (lc.BREAKER, False))])
+def test_the_trainer_scheduler_classifies_with_the_launchs_switch(gpu, expected):
+    """``yeto.launch.trainer_loop.build`` hands the loop ``_loop_classifier(args)``: a single
+    trainer's scheduler reads a breaker's stop as main does (an infrastructure failure, started
+    again); a fleet's never starts it again."""
+    from yeto.launch import trainer_loop
+
+    classify = trainer_loop._loop_classifier(_launcher_args("ports", (), gpu=gpu))
+    assert classify(None, _sample_wait()) == expected
