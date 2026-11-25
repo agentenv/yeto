@@ -723,8 +723,10 @@ class Broker:
             if self.sink.set_target(pool, nodes, offers=offers, refill=dec.refill.get(pool), running=running):
                 self.sent[pool] = wanted
                 self.refused.pop(pool, None)
-            else:  # a manual hold: the pool keeps the person's count, which is no spot gap
-                self.refused[pool] = "its scale write was refused (a manual change holds)"
+            else:  # a manual hold, a stopped pool, too few slots: the pool keeps its count, no spot gap
+                why = getattr(self.sink, "refusal", None)
+                why = why(pool) if callable(why) else None
+                self.refused[pool] = f"its scale write was refused: {why}" if why else "its scale write was refused"
         self.emit(EVENT, **dec.record())
         return dec
 
@@ -749,6 +751,7 @@ class ScaleFileSink:
                  scale: Callable[..., int] | None = None,
                  read: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None) -> None:
         self.pools = dict(pools)  # pool -> (pool config, config path)
+        self._refusals: dict[str, str] = {}  # pool -> why pool-scale refused its last write
         self._scale = scale
         self._read = read
 
@@ -774,9 +777,15 @@ class ScaleFileSink:
         doc = read(self.pools[pool][0]) or {}
         return doc.get("target") == nodes and doc.get("broker") == self._plan(offers, refill, running)
 
+    def refusal(self, pool: str) -> str | None:
+        """Why ``pool-scale`` refused the last write to ``pool`` (None: accepted, or no reason given)."""
+        return self._refusals.get(pool)
+
     def set_target(self, pool: str, nodes: int, *, offers: Mapping[str, int], refill: str | None,
                    running: Mapping[str, int] | None = None) -> bool:
+        self._refusals.pop(pool, None)
         if pool not in self.pools:
+            self._refusals[pool] = f"pool {pool} is not one this sink writes"
             return False
         scale = self._scale
         if scale is None:
@@ -784,7 +793,12 @@ class ScaleFileSink:
 
             scale = scale_pool
         cfg, path = self.pools[pool]
-        return scale(cfg, path, nodes, source="auto", extra={"broker": self._plan(offers, refill, running)}) == 0
+        why: list[str] = []
+        ok = scale(cfg, path, nodes, source="auto", extra={"broker": self._plan(offers, refill, running)},
+                   refusal=why) == 0
+        if not ok:
+            self._refusals[pool] = why[-1] if why else "pool-scale refused it"
+        return ok
 
 
 # -- phase 2: moving a node between islands ----------------------------------------

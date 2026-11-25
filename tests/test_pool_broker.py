@@ -258,7 +258,7 @@ def test_a_placed_spot_node_that_never_orders_moves_to_on_demand_after_the_wait(
 
 
 NON_MARKET = {
-    "manual hold": "its scale write was refused (a manual change holds)",
+    "manual hold": "its scale write was refused: a manual change 40 s ago takes priority over automatic scaling",
     "budget breaker": "run budget breaker open: spend $50.00 of $50.00",
     "balance floor": "balance below the order floor 120",
 }
@@ -301,7 +301,7 @@ def test_a_sink_refusal_blocks_the_pool_at_the_next_decision_and_an_accepted_wri
     for _ in range(10):
         d = loop.tick()
         t[0] += 300
-    assert d.targets == {"spot/a": 4, "od/x": 0} and loop.refused == {"spot": NON_MARKET["manual hold"]}
+    assert d.targets == {"spot/a": 4, "od/x": 0} and loop.refused == {"spot": "its scale write was refused"}
     assert d.state.spot_gap_since == {}, "a person's lower count is no spot gap"
     sink.refuse = set()
     loop.tick()
@@ -441,8 +441,28 @@ def test_scale_file_sink_writes_an_automatic_scale():
     sink = b.ScaleFileSink({"p": ({"run": "r"}, "/x/p.json")}, scale=scale)
     assert sink.set_target("p", 3, offers={"p/a": 3}, refill="p/a")
     assert seen == [({"run": "r"}, "/x/p.json", 3,
-                     {"source": "auto", "extra": {"broker": {"offers": {"p/a": 3}, "refill": "p/a"}}})]
+                     {"source": "auto", "extra": {"broker": {"offers": {"p/a": 3}, "refill": "p/a"}}, "refusal": []})]
+    assert sink.refusal("p") is None
     assert not sink.set_target("other", 1, offers={}, refill=None)
+    assert sink.refusal("other") == "pool other is not one this sink writes"
+
+
+@pytest.mark.parametrize("why", ["a manual change 40 s ago takes priority over automatic scaling for "
+                                 "elastic.manual_hold_s 3600 s",
+                                 "the pool is stopped (balance 0 < 20000000)",
+                                 "target 4 > 2 usable accounts [1, 4]"])
+def test_a_refused_scale_write_blocks_the_pool_with_the_reason_pool_scale_gave(why):
+    def scale(cfg, path, target, *, refusal, **kw):
+        refusal.append(why)
+        return 2
+
+    sink = b.ScaleFileSink({"spot": ({"run": "r"}, "/x/spot.json")}, scale=scale, read=lambda cfg: None)
+    loop = b.Broker(b.BrokerConfig(), lambda: b.Snapshot(offers=[offer("spot", "a", b.SPOT)],
+                                                         demands=[b.Demand("0", want=2)]), sink, clock=lambda: 0.0)
+    loop.tick()
+    assert sink.refusal("spot") == why
+    assert loop.refused == {"spot": f"its scale write was refused: {why}"}
+    assert "manual change holds" not in loop.refused["spot"]
 
 
 def test_through_pool_scale_a_new_mix_moves_no_running_node(tmp_path, monkeypatch):
