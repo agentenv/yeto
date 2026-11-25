@@ -66,6 +66,14 @@ the node (spec ``store`` / ``buffer_root``). A node-local store is only read on
 that node, so the pool's fence cannot reach it: ``store`` needs ``target: 1``,
 and a fence there is the sampler stop.
 
+Spare nodes: ``slots`` may list more nodes than ``target``. When a node is lost under
+its sampler (the pool reads it unreachable for ``elastic.unreachable_grace_s``), the
+pool fences the shard and orders a replacement that continues its prompts; the lost
+node's slot is held for ``provider.lost_node_hold_s`` (default 1800 s; 0: no hold) while
+any other slot's node is free, so the replacement starts on a spare, not on the lost
+node. A stop the lost node never got runs before the next start there
+(:class:`SshNodeProvider`).
+
 Pool config::
 
     "provider": {"kind": "ssh", "inventory": "~/ascend-nodes.yaml", "nodes": ["node-a"],
@@ -106,6 +114,7 @@ from .pool.provider import ProviderCaps
 from .pool.status import LeaseStatus
 
 KIND = "ssh"
+SSH_UNREACHABLE = 255  # ssh's own failure (no connection, no session): the node was not reached
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MARKER = "yeto-ssh-sampler"  # prefix of a start's marker (start_marker): run, shard, ticket
 MARK_ENV = "YETO_SSH_SAMPLER_MARK"  # the sampler process carries its start's marker in this variable
@@ -113,7 +122,8 @@ RUNTIMES = ("container", "venv")
 ENGINES = ("podman", "docker")
 PULL_POLICIES = ("missing", "always", "never")
 CONFIG_KEYS = frozenset({"kind", "inventory", "nodes", "workdir", "runtime", "container", "venv", "env",
-                         "devices", "store", "preflight", "grace_s", "price_usd_h", "start_timeout_s"})
+                         "devices", "store", "preflight", "grace_s", "price_usd_h", "start_timeout_s",
+                         "lost_node_hold_s"})
 CONTAINER_KEYS = frozenset({"engine", "image", "pull_ref", "pull", "security_opt", "sudo", "args", "python",
                             "shm_size", "mounts"})
 VENV_KEYS = frozenset({"python", "source", "ld_preload", "pythonpath"})
@@ -171,6 +181,10 @@ class SshPoolConf:
     min_cards: int | None
     grace_s: int
     price_usd_h: float | None
+    # a node lost under a sampler (unreachable, its stop not confirmed) is left out this long
+    # while another slot's node is free: its slot moves to a spare node (unified-sampler-pool 3.3);
+    # 0: no hold (the lost node's slot is offered at once)
+    lost_node_hold_s: float = 1800.0
 
 
 def _strs(value: Any, key: str) -> tuple[str, ...]:
@@ -265,13 +279,16 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
     pre = dict(section.get("preflight") or {})
     _unknown("preflight", pre, PREFLIGHT_KEYS)
     price = section.get("price_usd_h")
+    hold = section.get("lost_node_hold_s", 1800)
+    if isinstance(hold, bool) or not isinstance(hold, (int, float)) or hold < 0:
+        raise ValueError(f"ssh provider: lost_node_hold_s must be a number of seconds >= 0, not {hold!r}")
     return SshPoolConf(nodes=tuple(nodes), workdir=workdir.rstrip("/"), runtime=runtime, container=container,
                        venv=venv, env={str(k): str(v) for k, v in env.items()}, devices=devices,
                        store=str(store) if store else None, min_free_gib=float(pre.get("min_free_gib", 20)),
                        require_idle=(bool(pre["require_idle"]) if pre.get("require_idle") is not None else None),
                        min_cards=int(pre["min_cards"]) if pre.get("min_cards") is not None else None,
                        grace_s=int(section.get("grace_s", 120)),
-                       price_usd_h=float(price) if price is not None else None)
+                       price_usd_h=float(price) if price is not None else None, lost_node_hold_s=float(hold))
 
 
 # -- node shell -----------------------------------------------------------------
@@ -675,13 +692,37 @@ def _without_shm(args: Sequence[str]) -> list[str]:
 class SshNodeProvider:
     """Slots are the configured nodes; tickets live in a local record. Never orders,
     never powers anything off: ``release`` only marks the ticket ended (the ops stop
-    the sampler first)."""
+    the sampler first).
+
+    Spare nodes: the pool's slots may be more than its target (every node the inventory
+    offers). A member whose node was lost (the pool judged it unreachable, or its stop
+    did not reach the node) is released with :meth:`mark_lost`: its slot is held for
+    ``lost_node_hold_s``, and while any other slot's node is free :meth:`account_free`
+    reports the held one busy, so the pool's replacement (fenced first, continuing the
+    lost shard's prompts: ``IslandPool._retire``) goes to a spare node, not back to the
+    lost one. Without a free spare the held node is offered as before. A stop the lost
+    node never got is owed (:meth:`owed_stops`): the next start there stops that sampler
+    first, so a node back from a partition never runs two samplers.
+
+    ``lost_node_hold_s: 0`` turns the hold off: a lost node's slot is offered like any
+    free slot at once (the owed stop is still recorded and still runs first). A drain
+    whose stop hit one ssh failure (exit 255 after ``ssh_transport``'s own retries of a
+    dropped connection, or a timeout) counts as a loss too: that costs at most a move
+    to a spare, never a missing sampler (the hold yields when no spare is free).
+
+    Limitation: the hold and the owed stops live in this provider's state file on the
+    control host (like its tickets), not in the run store. A controller that takes the
+    pool over on another host starts without them: a lost node is then offered at once,
+    and a sampler left on it is held off only by its shard's fence (it writes nothing),
+    not stopped, until an operator stops it."""
 
     kind = KIND
     caps = ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=300)
 
-    def __init__(self, run_id: str, conf: SshPoolConf, *, slots: Sequence[int], state_path: Path):
+    def __init__(self, run_id: str, conf: SshPoolConf, *, slots: Sequence[int], state_path: Path,
+                 clock: Callable[[], float] = time.time):
         self.run_id, self.conf, self.slots, self.state_path = run_id, conf, list(slots), state_path
+        self.clock = clock
         self._lock = threading.Lock()
         bad = [s for s in self.slots if not 0 <= s < len(conf.nodes)]
         if bad:
@@ -713,7 +754,7 @@ class SshNodeProvider:
             n = 1 + sum(1 for r in rows.values() if int(r["slot"]) == int(account))
             ticket = f"{self.run_id}-{self.node_of_slot(account).name}-{n}"
             rows[ticket] = {"slot": int(account), "node": self.node_of_slot(account).name, "state": "active",
-                            "ordered_at": time.time()}
+                            "ordered_at": self.clock()}
             self._save(rows)
             return ticket
 
@@ -729,7 +770,7 @@ class SshNodeProvider:
         with self._lock:
             rows = self._rows()
             if ticket in rows:
-                rows[ticket] = dict(rows[ticket], state="released", released_at=time.time())
+                rows[ticket] = dict(rows[ticket], state="released", released_at=self.clock())
                 self._save(rows)
         return {"ticket": ticket, "state": "released"}
 
@@ -743,7 +784,58 @@ class SshNodeProvider:
         return None
 
     def account_free(self, account: int) -> bool:
-        return not any(int(r["slot"]) == int(account) and r["state"] == "active" for r in self._rows().values())
+        rows, now = self._rows(), self.clock()
+        if self._busy(rows, account):
+            return False
+        if self._held(rows, account, now) is None:
+            return True
+        # a lost node: offered again only when no other slot's node is free (no spare left)
+        return not any(not self._busy(rows, s) and self._held(rows, s, now) is None
+                       for s in self.slots if int(s) != int(account))
+
+    @staticmethod
+    def _busy(rows: Mapping[str, Mapping[str, Any]], slot: int) -> bool:
+        return any(int(r["slot"]) == int(slot) and r["state"] == "active" for r in rows.values())
+
+    @staticmethod
+    def _held(rows: Mapping[str, Mapping[str, Any]], slot: int, now: float) -> float | None:
+        """Until when ``slot``'s node is held as lost (None: not held)."""
+        until = max((float(r.get("held_until") or 0.0) for r in rows.values() if int(r["slot"]) == int(slot)),
+                    default=0.0)
+        return until if until > now else None
+
+    def note_shard(self, ticket: str, shard: str) -> None:
+        """The shard ``ticket``'s sampler runs (an owed stop names it)."""
+        with self._lock:
+            rows = self._rows()
+            if ticket in rows and rows[ticket].get("shard") != shard:
+                rows[ticket] = dict(rows[ticket], shard=shard)
+                self._save(rows)
+
+    def mark_lost(self, ticket: str, *, stopped: bool) -> None:
+        """``ticket``'s node was lost under its sampler: hold its slot (class doc); a stop
+        that did not reach the node is owed to the next start there."""
+        with self._lock:
+            rows = self._rows()
+            if ticket not in rows:
+                return
+            row = dict(rows[ticket], lost_at=self.clock(), held_until=self.clock() + self.conf.lost_node_hold_s)
+            if not stopped:
+                row["stop_owed"] = True
+            rows[ticket] = row
+            self._save(rows)
+
+    def owed_stops(self, slot: int) -> list[tuple[str, str]]:
+        """``(ticket, shard)`` of samplers on ``slot``'s node whose stop never reached it."""
+        return sorted((t, str(r["shard"])) for t, r in self._rows().items()
+                      if int(r["slot"]) == int(slot) and r.get("stop_owed") and r.get("shard"))
+
+    def stop_done(self, ticket: str) -> None:
+        with self._lock:
+            rows = self._rows()
+            if ticket in rows and rows[ticket].get("stop_owed"):
+                rows[ticket] = {k: v for k, v in rows[ticket].items() if k != "stop_owed"}
+                self._save(rows)
 
     def run_tickets(self) -> list[tuple[int, str]]:
         return [(int(r["slot"]), t) for t, r in self._rows().items() if r["state"] == "active"]
@@ -762,7 +854,7 @@ class SshSamplerPoolOps:
 
     def __init__(self, cfg: dict[str, Any], *, conf: SshPoolConf | None = None,
                  run: Callable[..., Any] = subprocess.run, state_dir: Path | None = None,
-                 code_ref: str = "HEAD"):
+                 code_ref: str = "HEAD", clock: Callable[[], float] = time.time):
         from .nc import cli  # noqa: PLC0415
 
         self.cfg = cfg
@@ -776,7 +868,7 @@ class SshSamplerPoolOps:
             state_dir = nc_state_dir()
         self.state_dir = Path(state_dir)
         self.provider = SshNodeProvider(self.run_id, self.conf, slots=cli.slot_list(cfg),
-                                        state_path=self.state_dir / f"ssh-pool-{self.run_id}.json")
+                                        state_path=self.state_dir / f"ssh-pool-{self.run_id}.json", clock=clock)
         self._shard_of: dict[str, str] = {}
 
     # -- shell on a node
@@ -884,7 +976,9 @@ class SshSamplerPoolOps:
     def start(self, m, shards: list[str]) -> None:
         node = self.provider.node_of_ticket(m.ticket)
         self._shard_of[m.ticket] = m.shard
+        self.provider.note_shard(m.ticket, m.shard)
         p = node_paths(self.conf.workdir, m.shard)
+        self._owed_stops(node, m)  # a node back from a loss: its old sampler goes before the preflight looks
         # this shard's earlier sampler first (a restarted pool, an in-place restart): never two samplers of
         # one shard, and the idle check must not see this shard's own cards as another's
         self._stop_on(node, m.shard)
@@ -982,14 +1076,29 @@ class SshSamplerPoolOps:
         return text
 
     def _stop_on(self, node: Node, shard: str, grace_s: int | None = None) -> str:
+        return _text(self._stop_result(node, shard, grace_s).stdout)
+
+    def _stop_result(self, node: Node, shard: str, grace_s: int | None = None) -> Any:
         grace = int(self.conf.grace_s if grace_s is None else grace_s)
         p = node_paths(self.conf.workdir, shard)
         if self.conf.runtime == "venv":
             cmd = f"{venv_stop_command(p, grace)}; tail -n 300 {p['log']} > {p['logs']}/{shard}.last.log 2>/dev/null"
         else:
             cmd = container_stop_command(self.conf, p, container_name(shard), grace)
-        out = self.ssh(node, cmd, timeout=grace + 180)
-        return _text(out.stdout)
+        return self.ssh(node, cmd, timeout=grace + 180)
+
+    def _owed_stops(self, node: Node, m) -> None:
+        """Stop the samplers whose stop never reached this node (its slot's lost members)."""
+        slot = int(self.provider._rows()[m.ticket]["slot"])  # noqa: SLF001 - our own provider's record
+        for ticket, shard in self.provider.owed_stops(slot):
+            if ticket == m.ticket:
+                continue
+            out = self._stop_result(node, shard)
+            if out.returncode == SSH_UNREACHABLE or "stopped" not in _text(out.stdout):
+                raise SshSamplerError(f"node {node.name}: the stop of {shard} (lost with {ticket}) owed there did "
+                                      f"not go through (exit {out.returncode}): {_text(out.stderr)[-300:]}")
+            self.provider.stop_done(ticket)
+            _log(f"ssh pool: {node.name}: stopped {shard} of lost {ticket} before {m.shard} starts there")
 
     def stop(self, m, *, grace_s: int | None = None) -> str:
         node = self.provider.node_of_ticket(m.ticket)
@@ -1028,11 +1137,32 @@ class SshSamplerPoolOps:
         return self.data_path().fence_incarnation(m.shard, by=m.ticket)
 
     def drain(self, m) -> None:
+        """Stop the sampler and release the ticket. A node the pool saw unreachable, or that
+        the stop did not reach, is marked lost (:meth:`SshNodeProvider.mark_lost`): its slot
+        is held while a spare is free, and a stop that did not get there is owed."""
+        lost = getattr(m, "unreachable_since", None) is not None
+        stopped = not m.shard
         if m.shard:
+            node = self.provider.node_of_ticket(m.ticket)
             try:
-                _log(f"ssh pool: stop {m.shard}: {self.stop(m).strip()[-300:]}")
+                self.logs(m, tail=2000)
+            except Exception:  # noqa: BLE001 - the log copy is best effort; the stop is not
+                pass
+            try:
+                out = self._stop_result(node, m.shard)
+                text = _text(out.stdout)
+                stopped = out.returncode != SSH_UNREACHABLE and "stopped" in text
+                lost = lost or out.returncode == SSH_UNREACHABLE
+                _log(f"ssh pool: stop {m.shard}: {text.strip()[-300:] or _text(out.stderr).strip()[-300:]}")
             except subprocess.TimeoutExpired:
+                lost = True
                 _log(f"ssh pool: stop {m.shard} timed out; the ticket is ended, check the node")
+        if lost or not stopped:
+            self.provider.mark_lost(m.ticket, stopped=stopped)
+            if lost:
+                _log(f"ssh pool: node {self.provider.node_of_ticket(m.ticket).name} lost with {m.ticket}: held "
+                     f"{self.conf.lost_node_hold_s:.0f} s while a spare node is free"
+                     + ("" if stopped else f"; the stop of {m.shard} is owed to its next start"))
         self.provider.release(m.account, m.ticket)
 
 
