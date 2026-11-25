@@ -729,3 +729,32 @@ def test_removing_a_given_up_island_keeps_its_stop_and_closes_its_bill(tmp_path)
     record = w.load(0)
     assert record["state"] == tw.REMOVED and record.get("billing_open") is None and record["closed_at"] is not None
     assert states.stop_requested(0) is not None  # the launcher that may still hold it keeps its STOP
+
+
+def test_a_launch_whose_worker_was_killed_after_it_registered_is_relaunched_not_a_config_error(
+        tmp_path, monkeypatch):
+    """`yeto launch` registered its run (it may have ordered and trained), then its worker
+    was killed: the CLI exits 1 and the run record still says RUNNING. That is an
+    infrastructure failure, relaunched. A configuration error is exit 10 only (any other
+    exit before the run registered ordered nothing: an infrastructure failure too)."""
+    import types
+
+    from yeto import runs
+    from yeto.config_errors import CONFIG_ERROR_EXIT
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    ops = tw.LocalLaunchOps(python="python", log_dir=tmp_path)
+    ops.procs["r-i0"] = types.SimpleNamespace(poll=lambda: CONFIG_ERROR_EXIT, returncode=CONFIG_ERROR_EXIT, pid=4241)
+    refused = ops.ended("r-i0")  # never registered, its configuration refused (exit 10 only)
+    assert refused["exit_code"] == CONFIG_ERROR_EXIT
+    assert lifecycle.classify(exit_code=refused["exit_code"], log_text=refused["log"]).cause == lifecycle.CONFIG_ERROR
+    ops.procs["r-i0"] = types.SimpleNamespace(poll=lambda: 1, returncode=1, pid=4242)
+    early = ops.ended("r-i0")  # never registered, exit 1: nothing ordered, not a configuration error
+    assert early["exit_code"] == 1
+    assert lifecycle.classify(exit_code=1, log_text=early["log"], detail=early["detail"]).cause == lifecycle.INFRA
+    runs.create_run("r-i0", {"cluster_prefix": "r-i0"})
+    runs.update_run("r-i0", state=runs.RUNNING, pid=4243)
+    killed = ops.ended("r-i0")
+    assert killed["exit_code"] is None and killed["detail"] == "worker exited without a result"
+    decision = lifecycle.classify(exit_code=killed["exit_code"], log_text=killed["log"], detail=killed["detail"])
+    assert decision.cause == lifecycle.INFRA and decision.relaunch

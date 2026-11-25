@@ -190,6 +190,9 @@ class TrainerWorker:
     # the island launches this host's run registry knows under the fleet's island prefixes (no store read)
     local_launches: Callable[[], Any] = lambda: ()
     unknown_alarm_steps: int = 20  # steps in a row a store failure lasts before an ERROR (and every so many after)
+    # an island given up for good (FAILED / ABANDONED): its own sampler pools are released
+    # (``Run.stop_island_pools``); called with its learner id, its member and why
+    on_given_up: Callable[[int, dict[str, Any], str], None] | None = None
     steps: int = 0
     _stop_forwarded: set[str] = field(default_factory=set)
     _stop_written: set[int] = field(default_factory=set)
@@ -411,6 +414,10 @@ class TrainerWorker:
             return
         if state in TERMINAL:
             if record.get("spec") != spec and syncer is not None:  # the operator changed a finished island
+                if record.get("pools_stopped"):
+                    self.log(f"fleet: WARNING: trainer island {k}: started again, but its pools "
+                             f"{record['pools_stopped']} were stopped when it was given up: it gets no samples "
+                             "until they are added back (`yeto fleet island remove`, then `add`)")
                 self._start(k, member, syncer, record, incarnation=int(record.get("incarnation") or 0) + 1,
                             relaunches=0, generation=generation, why="changed after it ended")
             return
@@ -431,8 +438,17 @@ class TrainerWorker:
                         why=f"relaunch {relaunches + 1}/{self.relaunch_budget}: {decision.cause} {decision.detail}"[:200])
             return
         final = decision.state if not decision.relaunch else ABANDONED
-        self.save(k, {**self._closed(record), "state": final, "ended": ended, "decision": decision.to_json()})
+        give_up = final in (FAILED, ABANDONED) and self.on_given_up is not None and stop is None
+        self.save(k, {**self._closed(record), "state": final, "ended": ended, "decision": decision.to_json(),
+                      **({"pools_stopped": list(member.get("pools") or ())} if give_up else {})})
         self._event(k, f"launch ended: {final}", cause=decision.cause, detail=decision.detail[:200] or None)
+        if give_up:  # nobody trains on its samples any more: its pools stop billing now, not at the fleet's end
+            try:
+                self.on_given_up(k, member, f"{final}: {decision.cause} {decision.detail}"[:200])
+            except Exception as error:  # noqa: BLE001 - reported; the other islands go on
+                self.log(f"fleet: CRITICAL: trainer island {k}: given up ({final}) but its pools "
+                         f"{list(member.get('pools') or ())} were not asked to stop ({error!r}); they bill until "
+                         "`yeto run down` (or `yeto fleet island remove` it)"[:500])
 
     def _hand_back(self, k: int, record: dict[str, Any], ended: dict[str, Any]) -> None:
         """The launch handed off (:data:`HANDS_OFF_EXITS`): another launcher holds island
@@ -641,16 +657,23 @@ class LocalLaunchOps:
                     "detail": str(meta.get("stop_reason") or meta.get("state"))}
         proc = self.procs.get(prefix)
         if proc is not None and proc.poll() is not None:
-            # the CLI refused before it registered the run: before anything was ordered (its
-            # checks: a fleet shape that differs, a bad flag): a configuration error, never
-            # relaunched (moving or changing the island again starts it again)
+            # the CLI ended. Only its configuration error exit (CONFIG_ERROR_EXIT) is a
+            # configuration error, never relaunched (moving or changing the island again
+            # starts it again); any other exit before it registered the run ordered nothing
+            # and is an infrastructure failure (relaunched within the budget)
             from yeto.config_errors import CONFIG_ERROR_EXIT  # noqa: PLC0415
 
             code = proc.returncode
             if code in HANDS_OFF_EXITS:  # another launcher holds the island, or its state did not read
                 return {"exit_code": code, "log": tail, "detail": f"yeto launch handed off (exit {code})"}
-            return {"exit_code": CONFIG_ERROR_EXIT if code else 0, "log": tail,
-                    "detail": f"yeto launch refused before ordering anything (exit {code})"}
+            if meta is None and code == CONFIG_ERROR_EXIT:
+                return {"exit_code": code, "log": tail,
+                        "detail": f"yeto launch refused its configuration before ordering anything (exit {code})"}
+            if meta is None:  # never registered: it ordered nothing
+                return {"exit_code": code, "log": tail,
+                        "detail": f"yeto launch ended before it registered its run (exit {code})"}
+            # registered (it may have ordered and trained): its worker died without a result
+            # (killed); an infrastructure failure, relaunched -- never a configuration error
         if meta is not None and meta.get("state") in (runs.PENDING, runs.RUNNING):
             return {"exit_code": None, "log": _tail(runs.log_path(prefix)), "detail": "worker exited without a result"}
         return None

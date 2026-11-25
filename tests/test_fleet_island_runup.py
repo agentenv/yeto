@@ -494,3 +494,76 @@ def test_the_preflight_refuses_a_desired_state_that_does_not_parse_and_warns_whe
     run.preflight()
     assert any(m.startswith("preflight: WARNING: the fleet's desired state was not read") for m in logs)
     assert not any("does not parse" in m for m in logs)
+
+
+def test_an_island_given_up_stops_its_own_pools_and_only_them(tmp_path, monkeypatch):
+    """Bug 18: an island the trainer worker gives up for good (FAILED: a configuration
+    error; ABANDONED: out of relaunches) stops its own sampler pools with ``nc pool-stop``
+    right away; the other island's pools and a relaunched island's are left running."""
+    from yeto.config_errors import CONFIG_ERROR_EXIT
+
+    run, objects = build(tmp_path, monkeypatch)
+    threads = []
+    real = run.stop_island_pools
+    monkeypatch.setattr(run, "stop_island_pools",
+                        lambda k, member, why: threads.append(real(k, member, why, wait=True)))
+    launches = FakeLaunches()
+    worker = run.attach_trainer_worker(FakeController(), objects, ops=launches)
+    doc = dz.DesiredStore(objects).read()
+    own = {m["learner_id"]: m["pools"] for m in dz.trainers(doc).values()}
+    by_name = {ref.name: ref.config for ref in run.pools}
+    il.write_syncer_record(objects, addr="h:1", syncer_epoch=0, learners=2, max_learners=4, run="r")
+    worker.step()
+
+    def stopped() -> list[str]:
+        return [c[c.index("--config") + 1] for c in run.calls if "pool-stop" in c]
+
+    launches.end("r-i1", 1)  # an infrastructure failure: relaunched, its pools keep running
+    worker.step()
+    assert worker.load(1)["state"] == trainer_worker.STARTING and stopped() == []
+    launches.end("r-i0", CONFIG_ERROR_EXIT)  # given up: FAILED
+    worker.step()
+    assert worker.load(0)["state"] == trainer_worker.FAILED
+    assert sorted(stopped()) == sorted(by_name[n] for n in own[0]) and own[0]
+    assert worker.load(0)["pools_stopped"] == own[0]
+    worker.step()  # once
+    assert len(stopped()) == len(own[0])
+    for c in run.calls:
+        if "pool-stop" in c:  # on the store control plane: released from the store's state
+            assert "--control-store" in c and c[c.index("--pool-name") + 1] in own[0]
+
+
+def test_a_given_up_island_out_of_relaunches_stops_its_pools_but_not_under_a_fleet_stop(tmp_path, monkeypatch):
+    from yeto.config_errors import CONFIG_ERROR_EXIT
+
+    run, objects = build(tmp_path, monkeypatch)
+    real = run.stop_island_pools
+    monkeypatch.setattr(run, "stop_island_pools", lambda k, member, why: real(k, member, why, wait=True))
+    launches = FakeLaunches()
+    worker = run.attach_trainer_worker(FakeController(), objects, ops=launches)
+    worker.relaunch_budget = 0
+    own = {m["learner_id"]: m["pools"] for m in dz.trainers(dz.DesiredStore(objects).read()).values()}
+    il.write_syncer_record(objects, addr="h:1", syncer_epoch=0, learners=2, max_learners=4, run="r")
+    worker.step()
+    launches.end("r-i1", 1)
+    worker.step()
+    assert worker.load(1)["state"] == trainer_worker.ABANDONED
+    names = [c[c.index("--pool-name") + 1] for c in run.calls if "pool-stop" in c]
+    assert sorted(names) == sorted(own[1])
+    # a stopped island (a fleet stop forwarded): run down stops the pools, even of one that failed stopping
+    worker.states.request_stop(0, "fleet stop: test", by="test")
+    launches.end("r-i0", CONFIG_ERROR_EXIT)
+    worker.step()
+    assert worker.load(0)["state"] == trainer_worker.FAILED and "pools_stopped" not in worker.load(0)
+    assert [c[c.index("--pool-name") + 1] for c in run.calls if "pool-stop" in c] == names
+
+
+def test_a_failed_pool_stop_of_a_given_up_island_is_critical(tmp_path, monkeypatch, capsys):
+    run, _ = build(tmp_path, monkeypatch)
+    run._cmd = lambda argv, *, log, timeout=None: 1  # pool-stop did not confirm
+    ref = run.pools[0]
+    run.stop_island_pools(3, {"pools": [ref.name]}, "failed: test", wait=True)
+    text = capsys.readouterr().out
+    assert f"pool(s) ['{ref.name}'] not confirmed stopped" in text and f"{ref.name}'] stopped" not in text
+    run.stop_island_pools(3, {"pools": ["i3-gone"]}, "failed: test", wait=True)  # named by no config
+    assert "pool(s) ['i3-gone'] not confirmed stopped" in capsys.readouterr().out

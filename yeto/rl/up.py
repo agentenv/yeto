@@ -1739,11 +1739,50 @@ class Run:
         worker = trainer_worker.TrainerWorker(
             store, objects, ops or trainer_worker.LocalLaunchOps(python=self.py, env=self.env, log_dir=self.dir),
             IslandStateStore(objects, log=_log), fleet_stop=stop, log=_log, syncer_since=syncer_since,
-            fenced=lambda: fleet_fenced(controller), local_launches=self.local_island_launches)
+            fenced=lambda: fleet_fenced(controller), local_launches=self.local_island_launches,
+            on_given_up=self.stop_island_pools)
         controller.add_worker("trainers", worker.step, interval=15.0)
         self.trainer_worker = worker
         _log(f"fleet: trainer worker reconciles {len(members)} island launch(es) from the desired state")
         return worker
+
+    def stop_island_pools(self, k: int, member: dict[str, Any], why: str, *, wait: bool = False) -> threading.Thread:
+        """Island ``k`` given up for good (the trainer worker: FAILED / ABANDONED): its own
+        sampler pools (``member["pools"]``) are released with ``nc pool-stop`` now (the
+        in-process controller drains a pool whose stop is requested and closes its billing),
+        not left billing until the fleet ends. In a thread of its own: a drain takes minutes
+        and the trainer worker's step must not wait for it (``wait``: joined, for tests)."""
+        names = [str(n) for n in member.get("pools") or ()]
+
+        def refs() -> tuple[list[str], list[str]]:
+            by_name = {ref.name: ref.config for ref in self.pools}
+            return [by_name[n] for n in names if n in by_name], [n for n in names if n not in by_name]
+
+        def run() -> None:
+            paths, unknown = refs()
+            if unknown:  # added with `yeto fleet island add`: the desired state names their configs
+                try:
+                    self.adopt_desired()
+                except Exception as error:  # noqa: BLE001 - reported below as not stopped
+                    _log(f"fleet: the desired state was not read ({type(error).__name__}: {error})")
+                paths, unknown = refs()
+            _log(f"fleet: CRITICAL: trainer island {k} given up ({why}): stopping its pool(s) {names} "
+                 "(nobody trains on their samples)")
+            failed = list(unknown)
+            for name, path in zip([n for n in names if n not in unknown], paths, strict=True):
+                if self._cmd(self.pool_stop(path), log="down.log", timeout=1800) != 0:
+                    failed.append(name)
+            if failed:
+                _log(f"fleet: CRITICAL: trainer island {k}: pool(s) {failed} not confirmed stopped: they may bill "
+                     "until `yeto run down` (log down.log)")
+            else:
+                _log(f"fleet: trainer island {k}: its pool(s) {names} stopped")
+
+        thread = threading.Thread(target=run, name=f"island-{k}-pools-stop", daemon=True)
+        thread.start()
+        if wait:
+            thread.join()
+        return thread
 
     def request_detach(self) -> int:
         """``yeto run detach``: the DETACH flag the store control plane's controller watches."""
