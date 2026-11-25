@@ -1037,7 +1037,7 @@ def syncer_store_upload_sidecar(args) -> tuple[str, str, dict]:
     if fleet_role(args) != FLEET_ROLE_SYNCER or not store.startswith("s3://") or interval is None:
         return "", "", {}
     from ..cloud.s3_store import island_envs
-    from .storage import store_client_environ
+    from .store_env import store_client_environ
 
     try:
         envs = island_envs(store, store_client_environ(args))
