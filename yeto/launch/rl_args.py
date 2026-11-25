@@ -432,7 +432,8 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     if async_rounds:
         from ..rl.engine.run_flags import local_training_steps_line
 
-        print(local_training_steps_line(args.total_steps, args.fragments), flush=True)
+        print(local_training_steps_line(args.total_steps, args.fragments,
+                                        local_horizon=args.local_rl_rounds_per_sync), flush=True)
         # The decoupled preset's outer step; the outer-merge options override.
         args.sync_interval_steps = float(args.local_rl_rounds_per_sync)
         args.outer_lr = 0.7

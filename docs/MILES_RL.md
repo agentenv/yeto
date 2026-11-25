@@ -227,6 +227,11 @@ The public parameters are:
 | `N` | `--total-steps` | complete fragment sweeps |
 | `T` | internal | outer fragment steps, exactly `N * P` |
 
+An island pushes at most one fragment round per local step and its first round
+needs `H` local steps, so it trains at least `N * P + H - 1` local steps before
+the run ends (waits for a permit or a late broadcast add to that); the launcher
+and each island print this count.
+
 With `--rl-sync-mode strict` the launcher fixes the rest of the algorithm:
 
 ```text

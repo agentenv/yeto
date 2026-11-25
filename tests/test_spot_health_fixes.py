@@ -331,6 +331,36 @@ def test_d7_the_launcher_prints_the_local_training_steps(monkeypatch, capsys):
     assert "local training steps = global_rounds x fragments = 4 x 4 = 16" in capsys.readouterr().out
 
 
+def test_p5b_the_local_step_count_adds_the_horizon_before_the_first_round():
+    # P5b g4 (fleet, decoupled, --total-steps 1, --fragments 4, --local-rl-rounds-per-sync 4):
+    # the islands pushed their fragment rounds at local steps 4, 5, 6, 7 (one island, 8 with a
+    # late permit), not by step 4 as "R x F = 4" said: each round needs H local steps first
+    from yeto.rl.engine.run_flags import (
+        GLOBAL_ROUNDS_HELP,
+        local_training_steps,
+        local_training_steps_line,
+    )
+
+    assert local_training_steps(1, 4, 4) == 7
+    assert local_training_steps(40, 8, 1) == 320
+    assert local_training_steps(40, 8, 0) == 320  # an unset horizon counts as 1
+    assert local_training_steps(2, 4, 8) == 15
+    line = local_training_steps_line(1, 4, local_horizon=4, who="x")
+    assert "local training steps >= global_rounds x fragments + local_horizon - 1 = 1 x 4 + 4 - 1 = 7" in line
+    assert "H=4" in line
+    # H = 1 keeps the exact line (the count is exact there)
+    assert local_training_steps_line(40, 8, local_horizon=1) == local_training_steps_line(40, 8)
+    assert "R x --fragments + H - 1" in GLOBAL_ROUNDS_HELP
+
+
+def test_p5b_the_launcher_prints_the_horizon_aware_local_steps(monkeypatch, capsys):
+    from tests.test_verl_sample_role import _launch
+
+    _launch(monkeypatch, SPOT + RELAY + GPU3 + ["--local-rl-rounds-per-sync", "4"])  # --total-steps 4
+    assert "local training steps >= global_rounds x fragments + local_horizon - 1 = 4 x 4 + 4 - 1 = 19" \
+        in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------- spot pool default
 def _spot(monkeypatch, extra, *, relay=RELAY):
     from tests.test_verl_sample_role import _launch

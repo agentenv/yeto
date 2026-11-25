@@ -170,19 +170,36 @@ def shared_flag(*options: str, island: Mapping[str, Any] | None = None,
 
 GLOBAL_ROUNDS_HELP = (
     "sync rounds R (the syncer's outer budget). With full-parameter asynchronous rounds "
-    "the syncer merges one fragment per outer step and the island pushes one fragment per "
-    "local training step, so the island trains R x --fragments local steps "
-    "(--total-fragment-steps), not R")
+    "the syncer merges one fragment per outer step and the island pushes at most one "
+    "fragment per local training step, so the island trains at least R x --fragments local "
+    "steps (--total-fragment-steps), not R; with a local horizon H above 1 "
+    "(--local-rl-rounds-per-sync) the first round waits for H local steps, so at least "
+    "R x --fragments + H - 1")
 
 
-def local_training_steps_line(global_rounds: int, fragments: int, *, who: str = "launcher") -> str:
+def local_training_steps(global_rounds: int, fragments: int, local_horizon: int = 1) -> int:
+    """The fewest local training steps an island of full-parameter asynchronous rounds
+    trains before the run ends: ``global_rounds x fragments`` rounds, at most one pushed
+    per local step, and none before the island trained ``local_horizon`` steps (a round
+    must be H-qualified), so the last one is pushed at local step ``R x F + H - 1``.
+    Waits for a permit or a late broadcast only add to it."""
+    return int(global_rounds) * int(fragments) + max(int(local_horizon), 1) - 1
+
+
+def local_training_steps_line(global_rounds: int, fragments: int, *, local_horizon: int = 1,
+                              who: str = "launcher") -> str:
     """The line a launcher / island prints for full-parameter asynchronous
     rounds, where ``--global-rounds`` counts sync rounds and the island trains one
-    local step per fragment round."""
-    rounds, frags = int(global_rounds), int(fragments)
-    return (f"[{who}] local training steps = global_rounds x fragments = {rounds} x {frags} = "
-            f"{rounds * frags} (--global-rounds {rounds} counts sync rounds; each local step "
-            "pushes one fragment)")
+    local step per fragment round, plus ``local_horizon - 1`` before the first round."""
+    rounds, frags, horizon = int(global_rounds), int(fragments), max(int(local_horizon), 1)
+    if horizon == 1:
+        return (f"[{who}] local training steps = global_rounds x fragments = {rounds} x {frags} = "
+                f"{rounds * frags} (--global-rounds {rounds} counts sync rounds; each local step "
+                "pushes one fragment)")
+    return (f"[{who}] local training steps >= global_rounds x fragments + local_horizon - 1 = "
+            f"{rounds} x {frags} + {horizon} - 1 = {local_training_steps(rounds, frags, horizon)} "
+            f"(--global-rounds {rounds} counts sync rounds; each local step pushes at most one "
+            f"fragment and the first round waits for H={horizon} local steps)")
 
 
 def check_verify_every(args) -> None:
