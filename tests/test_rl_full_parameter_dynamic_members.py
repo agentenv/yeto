@@ -240,8 +240,8 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
         versions[2] = [caught[fid][0] for fid in range(P)]
         state.update(joined=newest, catch_up=caught)
 
-    def merged_with_three() -> bool:
-        return any(record["arrived"] == 3 for record in _outer_steps(tape_path.read_text()))
+    def merged_with_three() -> bool:  # three islands online for several rounds
+        return sum(record["arrived"] == 3 for record in _outer_steps(tape_path.read_text())) >= 4
 
     def poll():
         for learner in list(clients):
@@ -310,7 +310,7 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
         assert abs(sum(float(e[2]) for e in record["weights"]) - 1.0) < 1e-9
         assert not record["timed_out"]  # every island of the pool answered every round
     assert all(r["arrived"] == 2 for r in steps[:join_at])  # θ = 1 over the two launched islands
-    assert any(r["arrived"] == 3 for r in steps)  # all three while island 2 and 1 overlap
+    assert sum(r["arrived"] == 3 for r in steps) >= 4  # all three, several rounds in a row
 
     # One global cut, equal to the recomputation of every merged round.
     expected = _nesterov(steps)

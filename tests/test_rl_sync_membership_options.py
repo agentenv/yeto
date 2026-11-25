@@ -101,8 +101,10 @@ def test_quorum_theta_replaces_the_count_quorum(preset):
 
 @PRESETS
 def test_max_learners_reaches_the_syncer(preset):
-    _, baseline = _plan(preset + QUORUM + ("--rl-sync-island-lease-s", "150"))
-    _, plan = _plan(preset + QUORUM + ("--rl-sync-max-learners", "5"))
+    # full-parameter past the launch: the capacity quorum θ = 1.0 by default (below)
+    quorum = ("--rl-sync-quorum-theta", "1.0") if preset == FULL_ASYNC else QUORUM
+    _, baseline = _plan(preset + quorum + ("--rl-sync-island-lease-s", "150"))
+    _, plan = _plan(preset + (() if preset == FULL_ASYNC else QUORUM) + ("--rl-sync-max-learners", "5"))
     assert " --island-lease-s 150.0 --max-learners 5 --syncer-epoch 0" in _syncer(plan)
     assert _syncer(plan).replace(" --max-learners 5", "", 1) == _syncer(baseline)
     # full-parameter islands bind the roster 0..4 into their session contract;
@@ -114,14 +116,25 @@ def test_max_learners_reaches_the_syncer(preset):
         _plan(preset + QUORUM + ("--rl-sync-max-learners", "2"))
 
 
-
-@PRESETS
-def test_max_learners_points_a_count_quorum_at_the_capacity_quorum(preset, capsys):
-    _plan(preset + QUORUM + ("--rl-sync-max-learners", "5"))
-    assert "--rl-sync-quorum-theta F follows the islands in the pool" in capsys.readouterr().err
-    _, plan = _plan(preset + ("--rl-sync-quorum-theta", "1.0", "--rl-sync-max-learners", "5"))
+def test_a_full_parameter_pool_past_the_launch_follows_the_pool(capsys):
+    args, plan = _plan(FULL_ASYNC + ("--rl-sync-max-learners", "5"))
+    assert args.rl_sync_quorum_theta == 1.0 and args.quorum == 1
     assert " --quorum 1 " in _syncer(plan) and " --quorum-theta 1.0 " in _syncer(plan)
-    assert "--rl-sync-quorum-theta F" not in capsys.readouterr().err
+    assert "--rl-sync-quorum-theta 1.0 by default" in capsys.readouterr().err
+    _, plan = _plan(FULL_ASYNC + ("--rl-sync-quorum-theta", "0.5", "--rl-sync-max-learners", "5"))
+    assert " --quorum-theta 0.5 " in _syncer(plan)  # an explicit θ is kept
+    with pytest.raises(ValueError, match="counts islands and stays fixed; give --rl-sync-quorum-theta"):
+        _plan(FULL_ASYNC + QUORUM + ("--rl-sync-max-learners", "5"))
+    # max learners equal to the launched islands: nobody joins past them, the count quorum stays
+    _, plan = _plan(FULL_ASYNC + QUORUM + ("--rl-sync-max-learners", "3"))
+    assert " --quorum 2 " in _syncer(plan) and "--quorum-theta" not in _syncer(plan)
+
+
+@pytest.mark.parametrize("preset", [(), DECOUPLED], ids=["strict-avg", "decoupled"])
+def test_other_presets_keep_their_count_quorum_with_a_note(preset, capsys):
+    _, plan = _plan(preset + QUORUM + ("--rl-sync-max-learners", "5"))
+    assert " --quorum 2 " in _syncer(plan) and "--quorum-theta" not in _syncer(plan)
+    assert "--rl-sync-quorum-theta F follows the islands in the pool" in capsys.readouterr().err
 
 
 @PRESETS

@@ -830,10 +830,7 @@ def _check_island_pool(args, *, num_islands: int) -> None:
         if int(max_learners) < num_islands:
             raise ValueError(f"--rl-sync-max-learners must be at least the {num_islands} islands")
         if getattr(args, "rl_sync_quorum_theta", None) is None:
-            print(f"[launcher] note: --rl-sync-quorum {args.quorum} counts islands and stays fixed while "
-                  "islands join and leave the pool; --rl-sync-quorum-theta F follows the islands in "
-                  "the pool (F of the islands a round expects, at most --rl-sync-max-learners; 1.0: "
-                  "every one of them)", file=sys.stderr)
+            _pool_quorum_follows_the_pool(args, preset, num_islands, int(max_learners))
     if getattr(args, "rl_sync_quorum_theta", None) is not None:
         if getattr(args, "rl_sync_quorum", None) is not None:
             raise ValueError("--rl-sync-quorum-theta replaces --rl-sync-quorum; give one of them")
@@ -845,6 +842,29 @@ def _check_island_pool(args, *, num_islands: int) -> None:
             "membership options need rounds that may merge without some island: set "
             "--rl-sync-quorum-theta, --rl-sync-quorum below the island count, --rl-sync-grace-ms "
             "or --rl-sync-max-base-lag >= 1")
+
+
+def _pool_quorum_follows_the_pool(args, preset: str, num_islands: int, max_learners: int) -> None:
+    """--rl-sync-max-learners without --rl-sync-quorum-theta. A count quorum stays fixed
+    while islands join and leave; the capacity quorum (θ of the islands a round
+    expects) follows the pool. Full-parameter islands that may join past the launch
+    get θ = 1.0 (every island in the pool) by default, and a count quorum is refused
+    there; the other presets keep their count quorum, with a note."""
+    if preset != FULL_PARAMETER_SYNC_PRESET or max_learners <= num_islands:
+        print(f"[launcher] note: --rl-sync-quorum {args.quorum} counts islands and stays fixed while "
+              "islands join and leave the pool; --rl-sync-quorum-theta F follows the islands in "
+              "the pool (F of the islands a round expects; 1.0: every one of them)", file=sys.stderr)
+        return
+    if getattr(args, "rl_sync_quorum", None) is not None:
+        raise ValueError(
+            f"--rl-sync-max-learners {max_learners} lets full-parameter islands join past the "
+            f"{num_islands} launched ones, but --rl-sync-quorum {args.rl_sync_quorum} counts islands "
+            "and stays fixed; give --rl-sync-quorum-theta F instead (F of the islands a round "
+            "expects; the default 1.0 is every island in the pool)")
+    args.rl_sync_quorum_theta = 1.0
+    print("[launcher] full-parameter island pool past the launch (--rl-sync-max-learners "
+          f"{max_learners}): capacity quorum --rl-sync-quorum-theta 1.0 by default, every island "
+          "in the pool answers each round", file=sys.stderr)
 
 
 def _prepare_node_inventory(args) -> None:
