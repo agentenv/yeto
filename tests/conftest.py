@@ -178,6 +178,16 @@ def _no_real_model_preflight(monkeypatch):
 
 
 @_pytest.fixture(autouse=True)
+def _no_remote_model_config(monkeypatch):
+    """A verl launch without the model's config.json in this host's files fetches it
+    (fragment_preflight.remote_hf_config: the Hub, a store, a Modal volume); unit tests
+    never reach them. Tests of the fetch call _fetch_config with fake probes."""
+    from yeto.launch import fragment_preflight
+
+    monkeypatch.setattr(fragment_preflight, "remote_hf_config", lambda args: (None, "unit tests fetch nothing"))
+
+
+@_pytest.fixture(autouse=True)
 def _no_real_image_manifest_check(monkeypatch):
     """A sky verl island's launch asks the registry for its image manifest
     (launch.image_manifest); unit tests never reach a registry. Tests of the check
