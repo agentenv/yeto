@@ -226,6 +226,37 @@ def test_the_sky_island_task_runs_in_the_registry_image(_sky_launch):
     assert args.rl_image == pins.VERL_IMAGE  # the run's own args are untouched
 
 
+def test_a_private_registry_image_logs_in_through_the_sky_task_secrets_only(_sky_launch, monkeypatch):
+    # the Miles route for a private --rl-image (credentials.registry_login_for): SKYPILOT_DOCKER_* in the
+    # launching environment become sky task SECRETS for the island whose image is on that registry; the
+    # scripts unset them first; a Modal island building verl-build gets no login at all
+    import yeto.launcher as launcher
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.launch.rl_island_task import make_miles_island_task
+    from yeto.rl.image_registry import image_registry
+
+    password = "registry-password-SENTINEL-0123456789"
+    monkeypatch.setenv("SKYPILOT_DOCKER_USERNAME", "puller")
+    monkeypatch.setenv("SKYPILOT_DOCKER_PASSWORD", password)
+    monkeypatch.setenv("SKYPILOT_DOCKER_SERVER", image_registry().split("/", 1)[0])
+    args = _sky_launch("aws:1xa100@us-west-2")
+    launcher._prepare_rl_args(args)
+    (spec,) = parse_gpu_spec(args.gpu)
+    task = launcher._island_task(make_miles_island_task, args, spec, 0, 1, "$SYNCER_ADDR", {})
+    assert task.resources.image_id == pins.VERL_REGISTRY_IMAGE
+    assert task.secrets["SKYPILOT_DOCKER_PASSWORD"] == password
+    assert task.secrets["SKYPILOT_DOCKER_USERNAME"] == "puller"
+    texts = "\n".join(str(getattr(task, a, "") or "") for a in ("setup", "run", "envs", "file_mounts"))
+    assert password not in texts
+    assert task.setup.startswith("unset SKYPILOT_DOCKER_USERNAME") and task.run.startswith("unset SKYPILOT_DOCKER")
+
+    from yeto.launch.credentials import registry_login_for
+
+    modal_args = _sky_launch("modal:1xa100")
+    launcher._prepare_rl_args(modal_args)
+    assert modal_args.rl_image == pins.VERL_IMAGE and registry_login_for(modal_args) is None
+
+
 # --- 5.2: cards ---------------------------------------------------------------------------------
 
 def _specs(*gpus):
