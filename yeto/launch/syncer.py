@@ -449,6 +449,9 @@ def syncer_status_reader(*, local_tape: str | None = None, ssh_host: str | None 
 
     if local_tape is not None:
         return lambda: read_syncer_status(os.path.expanduser(local_tape))
+    if not ssh_host:
+        raise ValueError("syncer_status_reader: no syncer to read status.json from (neither a local event "
+                         "tape on a head node nor the syncer cluster to ssh to)")
 
     remote = RL_SYNCER_EVENT_TAPE.rsplit("/", 1)[0] + "/status.json"
 

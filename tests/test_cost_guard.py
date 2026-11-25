@@ -572,6 +572,33 @@ def test_shared_app_is_not_stopped_only_its_calls_cancelled(runs_dir):
     assert ops.calls == [("cancel", "fc-1")]
 
 
+def test_a_sky_cluster_already_gone_is_released_not_a_cleanup_failure(runs_dir, monkeypatch):
+    """`yeto down` of a fleet's syncer launch: the launch's teardown downed the syncer
+    cluster already, so sky answers ClusterDoesNotExist; the ledger row is released (the
+    run down is verified), while any other sky error still fails the release."""
+    import sys
+    import types
+
+    class ClusterDoesNotExist(Exception):
+        pass
+
+    gone = {"r-syncer"}
+
+    def down(cluster):
+        if cluster in gone:
+            raise ClusterDoesNotExist(f"Cluster {cluster!r} does not exist.")
+        raise RuntimeError("sky API server unreachable")
+
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(down=down, stream_and_get=lambda rid: rid))
+    led = ResourceLedger.for_run("r")
+    led.created("sky_cluster", "r-syncer", "r-syncer", role="syncer")
+    assert cleanup_mod.cleanup_run("r", cleanup_mod.ProductionCleanupOps(), log=lambda m: None)
+    assert not ResourceLedger.for_run("r").open_resources()
+    led.created("sky_cluster", "r-l0", "r-l0")
+    assert not cleanup_mod.cleanup_run("r", cleanup_mod.ProductionCleanupOps(), log=lambda m: None)
+    assert [r.key for r in ResourceLedger.for_run("r").open_resources()] == ["sky_cluster:r-l0"]
+
+
 def test_production_ops_refuse_a_non_id_app():
     with pytest.raises(ValueError):
         cleanup_mod.ProductionCleanupOps().modal_stop_app("yeto-*")

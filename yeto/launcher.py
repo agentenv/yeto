@@ -571,6 +571,28 @@ def _claim_island_records(states, *, prefix: str = ISLAND_RECORDS_LOCK, wait_s: 
         sleep(max(1.0, min(10.0, until - now + 1.0, deadline - now)))
 
 
+def _resolve_launch_syncer_epoch(args, *, member_role, no_sync, head_mode, syncer_cluster, adopted,
+                                 timeout_s=None) -> None:
+    """0.17: the islands JOIN with the term the syncer actually runs (an island pool without
+    an explicit ``--rl-syncer-epoch``). A launch of a fleet launched island by island
+    (``--rl-fleet-role``) decides it without waiting for the syncer's status.json
+    (``yeto.launch.fleet_syncer.resolve_epoch``: written only once learners are in, and
+    the island launches wait for this launch's record); otherwise status.json is read."""
+    if no_sync or not island_pool(args) or getattr(args, "rl_syncer_epoch", None) is not None:
+        return
+
+    def reader():
+        return syncer_status_reader(local_tape=syncer_event_tape(args) if head_mode else None,
+                                    ssh_host=None if head_mode else syncer_cluster)
+
+    if member_role is not None:
+        from .launch import fleet_syncer
+
+        fleet_syncer.resolve_epoch(args, member_role, adopted=adopted, reader=reader, timeout_s=timeout_s)
+        return
+    resolve_island_syncer_epoch(args, reader(), **({} if timeout_s is None else {"timeout_s": timeout_s}))
+
+
 def _island_state_store(args):
     """The run store's island records (None: no object API for the store, or none)."""
     from .launch.island_lifecycle import open_state_store
@@ -819,12 +841,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             syncer_addr = syncer_shard_addrs(head_ip, args)
             print(f"[launcher] syncer up at {syncer_addr}")
             probe_syncer_ports(args, head_ip)
-        if not no_sync and island_pool(args) \
-                and getattr(args, "rl_syncer_epoch", None) is None:
-            # 0.17: the islands JOIN with the term the syncer actually runs.
-            resolve_island_syncer_epoch(args, syncer_status_reader(
-                local_tape=syncer_event_tape(args) if head_mode else None,
-                ssh_host=None if head_mode else syncer_cluster))
+        _resolve_launch_syncer_epoch(args, member_role=member_role, no_sync=no_sync, head_mode=head_mode,
+                                     syncer_cluster=syncer_cluster, adopted=kept_syncer is not None)
         if member_role == FLEET_ROLE_SYNCER:
             # the fleet's syncer alone: recorded for the island launches, then supervised
             from .launch import fleet_syncer

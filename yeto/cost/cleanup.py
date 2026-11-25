@@ -88,9 +88,17 @@ class ProductionCleanupOps:
         return nc_cli.down(int(account), str(ticket))
 
     def sky_down(self, cluster: str) -> bool:
+        """Down the sky cluster ``cluster``; True once it is gone. A cluster sky does not
+        know (``ClusterDoesNotExist``: already torn down, e.g. by the launch's own teardown)
+        is released, as the launcher's teardown counts it."""
         import sky
 
-        sky.stream_and_get(sky.down(cluster))
+        try:
+            sky.stream_and_get(sky.down(cluster))
+        except Exception as error:
+            if type(error).__name__ != "ClusterDoesNotExist":
+                raise
+            print(f"[cleanup] sky cluster {cluster}: does not exist (already down): released")
         return True
 
 
