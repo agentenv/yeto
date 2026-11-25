@@ -50,6 +50,7 @@ from typing import Any, Protocol
 
 from yeto.breakers import events as breaker_events
 
+from . import broker_plan as plans
 from . import money
 from . import status as el
 from .migrate import PoolMoves
@@ -331,6 +332,10 @@ class IslandPool(PoolMoves):
     shrink: int = 0  # members a lowered target still has to release
     _retire_req: list[str] = field(default_factory=list)
     scale_mode: str | None = None  # the last scale request's scale-down mode (None: elastic.scale_down)
+    # the capacity broker's offer mix and refill offer from the scale file (None: no broker plan,
+    # the pool orders as always; broker_plan)
+    broker_plan: plans.Plan | None = None
+    _plan_orders: dict[str, int] = field(default_factory=dict)  # orders per offer since broker_plan was read
     _no_account: str | None = None  # the last "no free account" refusal reported
     # the control file's manual entries: tickets a person released (``nc down``) and whether
     # the target was lowered for them already; paused tickets and those holding no tasks
@@ -632,6 +637,7 @@ class IslandPool(PoolMoves):
             self._refused = refused
             return None
         shard = f"{self.config.shard_base}-{self.next_shard}"
+        self._prefer_offer(replaces)
         ticket = None
         while ticket is None:
             try:
@@ -654,6 +660,11 @@ class IslandPool(PoolMoves):
                 self._fail(now, f"order on {self.config.slot_name} {account}")
                 return None
         self._order_failed.pop(account, None)
+        offer_of = self._offer_of()
+        if offer_of is not None:  # counted against the broker plan's added nodes
+            key = offer_of(ticket)
+            if key is not None:
+                self._plan_orders[key] = self._plan_orders.get(key, 0) + 1
         if account in self._slot_halts and getattr(self.ops, "slot_halt", None) is None:
             self._halt_lifted(account)  # ops that cannot tell: an order went through again
         self.next_shard += 1
@@ -1377,6 +1388,7 @@ class IslandPool(PoolMoves):
         persists across restarts); its ``retire`` tickets are applied once (by ``seq``)."""
         if self.scale_path is None or not self.scale_path.exists():
             self._scale_stamp = None
+            self.broker_plan = None
             return
         self._scale_stamp = self._control_stamp()
         try:
@@ -1395,6 +1407,10 @@ class IslandPool(PoolMoves):
             return
         if target < 0:
             return
+        plan = plans.read_plan(doc)
+        if plan != self.broker_plan:
+            self._plan_orders = {}
+        self.broker_plan = plan
         source = str(doc.get("source") or "manual")
         if "scale_vs_config" not in self._warned:  # first read: say which target wins
             self._warned.add("scale_vs_config")
@@ -1501,13 +1517,58 @@ class IslandPool(PoolMoves):
         """Scale-down victims still finishing their trials in flight ("drain" mode)."""
         return [m for m in self.live() if m.retiring_since is not None and m.state != DRAINING]
 
+    def _offer_of(self) -> Callable[[str], str | None] | None:
+        """The provider's ``offer_of(ticket)`` when the pool runs a broker plan and the provider
+        can tell (sky), else None."""
+        if self.broker_plan is None:
+            return None
+        offer_of = getattr(getattr(self.ops, "provider", None), "offer_of", None)
+        if offer_of is None:
+            return None
+
+        def safe(ticket: str) -> str | None:
+            try:
+                return offer_of(ticket)
+            except Exception:  # noqa: BLE001 - unknown offer: counted nowhere
+                return None
+        return safe
+
+    def _prefer_offer(self, replaces: Member | None) -> None:
+        """Tell a provider that can take it (sky: ``prefer_offer``) which offer the broker plan
+        wants for this order: the offer furthest below its count, else the refill offer.
+        Without a plan nothing is called (the pool orders as before)."""
+        provider = getattr(self.ops, "provider", None)
+        prefer = getattr(provider, "prefer_offer", None)
+        if prefer is None:
+            return
+        offer_of = self._offer_of()
+        if offer_of is None:
+            if getattr(provider, "preferred_offer", None) is not None:
+                prefer(None)  # the plan is gone: back to the provider's own cursor
+            return
+        held = [offer_of(m.ticket) for m in self.counted() if m is not replaces]
+        try:
+            cooling = list(getattr(provider, "cooling_offers", lambda: [])())
+        except Exception:  # noqa: BLE001
+            cooling = []
+        known = [getattr(o, "key", None) for o in getattr(provider, "offers", None) or ()] or None
+        key = plans.next_offer(self.broker_plan, held, ordered=self._plan_orders, cooling=cooling, known=known)
+        prefer(key)
+        if key is not None:
+            self._event("broker_offer", offer=key, refill=self.broker_plan.refill,
+                        replaces=replaces.ticket if replaces else None)
+
     def _scale_victims(self, excess: int) -> list[Member]:
         counted = self.counted()
         chosen = [m for t in self._retire_req for m in counted if m.ticket == t][:excess]
         for m in chosen:  # a person named it: the pause ends with it
             m.paused = False
+        offer_of = self._offer_of()  # a broker plan: members on an offer over its count go first
+        held = [offer_of(m.ticket) for m in counted] if offer_of else []
         rest = sorted((m for m in counted if m not in chosen and not m.paused),
-                      key=lambda m: (m.state == READY, -(m.created or 0.0), m.hourly_ucr or self.config.hourly(),
+                      key=lambda m: (plans.victim_rank(self.broker_plan, offer_of(m.ticket) if offer_of else None,
+                                                             held),
+                                     m.state == READY, -(m.created or 0.0), m.hourly_ucr or self.config.hourly(),
                                      m.lease_until if m.lease_until is not None else float("inf")))
         return chosen + rest[:excess - len(chosen)]
 

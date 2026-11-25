@@ -245,12 +245,27 @@ def test_on_demand_only_after_the_spot_gap_lasts():
     assert d.targets == {"s/a": 1, "od/c": 1}
 
 
+def test_a_placed_spot_node_that_never_orders_moves_to_on_demand_after_the_wait():
+    offers = [offer("s", "a", b.SPOT), offer("od", "c", b.ON_DEMAND)]
+    policy = b.Policy(on_demand_after_s=1800)
+    d = b.decide(offers, [b.Demand("0", want=2)], policy=policy, now=0.0)
+    assert d.targets == {"s/a": 2, "od/c": 0}
+    # the offer flaps (available at every tick) but its orders keep failing: nothing runs
+    d = b.decide(offers, [b.Demand("0", want=2)], policy=policy, state=d.state, now=1500.0)
+    assert d.targets == {"s/a": 2, "od/c": 0}
+    d = b.decide(offers, [b.Demand("0", want=2)], policy=policy, state=d.state, running={"s/a": 1}, now=1900.0)
+    assert d.targets == {"s/a": 1, "od/c": 1}, "the one spot node that runs stays; the unordered one moves"
+
+
 def test_a_gap_that_closes_resets_the_clock():
     offers = [offer("s", "a", b.SPOT, available=False), offer("od", "c", b.ON_DEMAND)]
     d = b.decide(offers, [b.Demand("0", want=1)], now=0.0)
     offers[0] = offer("s", "a", b.SPOT)
     d = b.decide(offers, [b.Demand("0", want=1)], state=d.state, now=100.0)
-    assert d.state.spot_gap_since == {}
+    assert d.targets == {"s/a": 1, "od/c": 0} and d.state.spot_gap_since == {"0": 0.0}, \
+        "placed on spot but not ordered yet: the gap goes on"
+    d = b.decide(offers, [b.Demand("0", want=1)], state=d.state, running={"s/a": 1}, now=200.0)
+    assert d.state.spot_gap_since == {}, "the spot node is ordered: the gap closed"
     offers[0] = offer("s", "a", b.SPOT, available=False)
     d = b.decide(offers, [b.Demand("0", want=1)], state=d.state, running={"s/a": 1}, now=5000.0)
     assert d.state.spot_gap_since == {}, "a running node meets the want: no gap"
@@ -315,10 +330,11 @@ def test_the_broker_is_off_unless_enabled():
 
 class Sink:
     def __init__(self, refuse=()):
-        self.calls, self.refuse = [], set(refuse)
+        self.calls, self.refuse, self.running = [], set(refuse), []
 
-    def set_target(self, pool, nodes, *, offers, refill):
+    def set_target(self, pool, nodes, *, offers, refill, running=None):
         self.calls.append((pool, nodes, dict(offers), refill))
+        self.running.append(dict(running or {}))
         return pool not in self.refuse
 
 

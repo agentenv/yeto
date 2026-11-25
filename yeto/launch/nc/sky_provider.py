@@ -515,6 +515,7 @@ class SkyProvider:
         self._sky, self.clock = sky, clock
         self._real_sky = sky is None  # imported on first use (not a test's fake)
         self.record = record or state_dir() / f"sky-clusters-{self.prefix}.json"
+        self.preferred_offer: str | None = None  # the capacity broker's pick for the next order (prefer_offer)
 
     # -- sky
     @property
@@ -713,9 +714,22 @@ class SkyProvider:
     def _cooling(self, doc: dict[str, Any], key: str, now: float) -> bool:
         return self._open_until(doc, key) > now
 
+    def prefer_offer(self, key: str | None) -> None:
+        """The next order uses offer ``key`` when it is not cooling down (the capacity broker's
+        placement, ``yeto.launch.pool.broker_plan``); None: the cursor picks, as always."""
+        self.preferred_offer = key
+
+    def cooling_offers(self) -> list[str]:
+        doc, now = self._doc(), self.clock()
+        return [o.key for o in self.offers if self._cooling(doc, o.key, now)]
+
     def _pick(self, doc: dict[str, Any]) -> Offer:
-        """From the cursor on, the first offer not cooling down; all cooling: the one that reopens first."""
+        """The preferred offer (:meth:`prefer_offer`) when it is open; else from the cursor on,
+        the first offer not cooling down; all cooling: the one that reopens first."""
         now, start = self.clock(), int(doc.get("cursor", 0)) % len(self.offers)
+        preferred = next((o for o in self.offers if o.key == self.preferred_offer), None)
+        if preferred is not None and not self._cooling(doc, preferred.key, now):
+            return preferred
         ring = self.offers[start:] + self.offers[:start]
         for offer in ring:
             if not self._cooling(doc, offer.key, now):
