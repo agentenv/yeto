@@ -120,19 +120,21 @@ class _ManualThread:
 class LeaveFencer(FakeFencer):
     """The work contract over the samplers' member records in the run store (R2DataPath)."""
 
-    def __init__(self, objects, clock):
+    def __init__(self, objects, clock, *, lease=True):
         super().__init__()
         from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
         from yeto.launch.pool.data_path import R2DataPath  # noqa: PLC0415
 
         self.path = R2DataPath(ObjectRecords(objects))
-        self.clock = clock
+        self.clock, self.lease = clock, lease
 
     def fence_shard(self, shard, by):
         from yeto.launch.nc import elastic  # noqa: PLC0415
 
         super().fence_shard(shard, by)
-        return elastic.fence_shard(self.path.records, shard, by=by, clock=self.clock)  # the lease: its time
+        if self.lease:  # the pool fence's lease, with its time (False: the store keeps no fence time)
+            return elastic.fence_shard(self.path.records, shard, by=by, clock=self.clock)
+        return None
 
     def exit_evidence(self, shard):
         return self.path.exit_evidence(shard)
@@ -145,10 +147,11 @@ class Fleet:
     """A controller with a reconciler over pools on fake providers and one local store
     (the run store and the trainer's buffer store alike)."""
 
-    def __init__(self, tmp_path, members, *, slots=3, data_path=False, leave_records=False):
+    def __init__(self, tmp_path, members, *, slots=3, data_path=False, leave_records=False, fence_lease=True):
         self.objects = DirectoryObjectStore(tmp_path / "store")
         self.data_path = data_path  # the pools' data path writes the store (in-shard end records)
         self.leave_records = leave_records  # the fencer reads and writes the samplers' member records
+        self.fence_lease = fence_lease
         self.clock = Clock()
         self.store = dz.DesiredStore(self.objects)
         self.slots_n = slots
@@ -169,7 +172,8 @@ class Fleet:
         control.members = mt.MemberTableWriter(self.objects, name, name)
         self.providers[name] = FakeProvider(name, self.clock)
         self.routes[name] = [FakeRoute()]
-        self.fencers[name] = LeaveFencer(self.objects, self.clock) if self.leave_records else FakeFencer()
+        self.fencers[name] = LeaveFencer(self.objects, self.clock, lease=self.fence_lease) if self.leave_records \
+            else FakeFencer()
         ops = ProviderPoolOps(self.providers[name], self.routes[name][-1], self.fencers[name])
         if self.data_path:
             from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
@@ -758,6 +762,27 @@ def test_a_controller_restarted_while_a_removed_pools_member_waits_still_writes_
     assert f.providers["modal"].released == [m.ticket]
     rec = _record(f, member)
     assert rec["leave_reason"] == POOL_REMOVED_LEAVE and rec["detail"]["left_by"] == "pool"
+
+
+def test_a_restart_without_the_fences_time_waits_the_whole_wait_from_the_restart(tmp_path):
+    """The fence's time not in the store (no pool fence lease): the wait counts from the
+    restart, neither a release at once nor a wait without end."""
+    from yeto.launch.pool.island_pool import POOL_REMOVED_LEAVE  # noqa: PLC0415
+
+    f = Fleet(tmp_path, [_member("nc", 1), _member("modal", 1)], leave_records=True, fence_lease=False)
+    f.ticks()
+    m, member = _joined(f, "modal")
+    f.change(lambda d: d["members"].pop())
+    _until_waiting(f, f.c.slots["modal"].pool, m.ticket)
+    assert "fenced_at" not in f.fencers["modal"].exit_evidence(m.shard)
+    pool = f.restart_pool("modal")
+    restarted = f.clock()
+    while f.clock() < restarted + pool.removal_leave_wait_s:
+        pool.tick()
+        assert f.providers["modal"].released == [] and _record(f, member)["leave_reason"] is None
+        f.clock.t += 30
+    pool.tick()
+    assert f.providers["modal"].released == [m.ticket] and _record(f, member)["leave_reason"] == POOL_REMOVED_LEAVE
 
 
 def test_a_scale_down_outside_a_removal_releases_without_a_leave_wait(tmp_path):
