@@ -84,6 +84,8 @@ DEFAULT_WORKERS = 64
 DEFAULT_HEADROOM = 1.2
 READ_BLOCK = 8 * 1024 * 1024
 REQUEST_ATTEMPTS = 6
+IO_TIMEOUT_S = 120.0  # a socket read of the source
+FAIL_WAIT_S = IO_TIMEOUT_S  # how long a failing sync waits for its running chunks to land (and be journaled)
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 # a decoder layer of the language model: "model.layers.N." (Llama/DeepSeek/Kimi
 # naming, also under "language_model."), "language_model.layers.N."
@@ -93,6 +95,15 @@ HEX40 = re.compile(r"[0-9a-f]{40}")
 
 class SyncError(RuntimeError):
     """The weights cannot be copied or verified as asked."""
+
+
+class _Failed(Exception):
+    """Carries the first SyncError of a sync out of its drive loop, once the chunks that
+    landed are journaled (Sync._drive); ``run`` raises the SyncError itself."""
+
+    def __init__(self, error: SyncError) -> None:
+        super().__init__(str(error))
+        self.error = error
 
 
 def log(message: str) -> None:
@@ -195,7 +206,7 @@ class S3Source:
             if conn is not None:
                 conn.close()
             cls = http.client.HTTPSConnection if self.https else http.client.HTTPConnection
-            conn = cls(self.netloc, timeout=120)
+            conn = cls(self.netloc, timeout=IO_TIMEOUT_S)
             self._local.conn = conn
         return conn
 
@@ -500,11 +511,11 @@ class _Pool:
     def submit(self, fn, *args):
         return self.pool.submit(fn, *args)
 
-    def close(self, cancel: bool = False) -> None:
+    def close(self, cancel: bool = False, wait: bool = True) -> None:
         if sys.version_info >= (3, 9):  # noqa: UP036 - this file runs on the node's python3
-            self.pool.shutdown(wait=True, cancel_futures=cancel)
+            self.pool.shutdown(wait=wait, cancel_futures=cancel)
         else:  # pragma: no cover - python 3.8 hosts
-            self.pool.shutdown(wait=True)
+            self.pool.shutdown(wait=wait)
 
 
 class Sync:
@@ -638,6 +649,9 @@ class Sync:
         pool = _Pool(self.workers, self.procs)
         try:
             self._drive(pool, files, to_hash, to_fetch, need)
+        except _Failed as failed:  # its running chunks were waited for (FAIL_WAIT_S): a slow one does not hold it
+            pool.close(cancel=True, wait=False)
+            raise failed.error from failed.error.__cause__
         except BaseException:
             pool.close(cancel=True)
             raise
@@ -671,25 +685,52 @@ class Sync:
         for rel, (item, done) in to_fetch.items():
             fetch(rel, item, done)
 
+        def journal_chunk(rel: str, index: int) -> None:
+            journal = journals.get(rel)
+            if journal is None:
+                journal = journals[rel] = open(self._journal(rel), "a")  # noqa: SIM115 - closed in verify_part
+            journal.write(f"{index}\n")
+            journal.flush()
+
+        def fail(error: SyncError) -> None:
+            """The first error ends the sync, and every chunk that landed stays in its journal
+            (a resume keeps it): tasks not started are cancelled; the running ones are waited
+            for up to FAIL_WAIT_S, and each of their chunks that landed by then is journaled."""
+            for fut in list(pending):
+                if fut.cancel():
+                    pending.pop(fut)
+            done, _ = futures.wait(list(pending), timeout=FAIL_WAIT_S)
+            for fut in done:
+                kind, rel, index = pending.pop(fut)
+                if kind == "chunk" and fut.exception() is None:
+                    journal_chunk(rel, index)
+            for journal in journals.values():
+                journal.close()
+            journals.clear()
+            raise _Failed(error)
+
         t0 = last_t = time.monotonic()
         fetched = last_fetched = 0
         while pending:
             ready, _ = futures.wait(list(pending), timeout=self.progress_s, return_when=futures.FIRST_COMPLETED)
+            error = None
             for fut in ready:
                 kind, rel, index = pending.pop(fut)
                 item = files[rel]
+                if error is not None:  # ending: journal each chunk that landed, start nothing new
+                    if kind == "chunk" and fut.exception() is None:
+                        journal_chunk(rel, index)
+                    continue
                 try:
                     result = fut.result()
-                except Exception as exc:  # one failed task ends the sync
-                    raise SyncError(f"{rel}: {exc}") from exc
+                except Exception as exc:  # one failed task ends the sync (fail, below)
+                    error = SyncError(f"{rel}: {exc}")
+                    error.__cause__ = exc
+                    continue
                 if kind == "chunk":
                     fetched += result
                     remaining[rel].discard(index)
-                    journal = journals.get(rel)
-                    if journal is None:
-                        journal = journals[rel] = open(self._journal(rel), "a")  # noqa: SIM115 - closed in verify_part
-                    journal.write(f"{index}\n")
-                    journal.flush()
+                    journal_chunk(rel, index)
                     if not remaining[rel]:
                         verify_part(rel)
                 elif kind == "final":
@@ -715,13 +756,16 @@ class Sync:
                             if os.path.exists(path):
                                 os.unlink(path)
                         if attempts[rel] >= self.attempts:
-                            raise SyncError(f"{rel}: sha256 {result} does not match the manifest's {item['sha256']} "
-                                            f"after {attempts[rel]} downloads")
+                            error = SyncError(f"{rel}: sha256 {result} does not match the manifest's {item['sha256']} "
+                                              f"after {attempts[rel]} downloads")
+                            continue
                         log(f"{rel}: downloaded sha256 {result[:12]} != manifest {item['sha256'][:12]}; "
                             "downloading it again")
                         self.stats["redownloaded"] += 1
                         need += int(item["size"])
                         fetch(rel, item, set())
+            if error is not None:
+                fail(error)
             now = time.monotonic()
             if pending and now - last_t >= self.progress_s:
                 rate = (fetched - last_fetched) / max(1e-9, now - last_t)
