@@ -45,7 +45,9 @@ it is missing (a launch that was just starting clears its STOP once when it come
 A launch that reads no STOP yet (still ordering its machines, e.g. a sky launch waiting
 for SSH) is torn down :data:`STOP_UNREAD_S` after its STOP, any other one that still runs
 :data:`STOP_IGNORED_S` after it (``ops.tear_down``: ``yeto down``), so a move or a removal
-never waits for a provisioning timeout.
+never waits for a provisioning timeout. A launch being relaunched on its old machines
+(after an infrastructure failure) orders them again: it is torn down the same way, which
+is what a move or a removal wants.
 
 Only one worker drives the islands: before each step it checks that its controller
 still holds the fleet (``fleet/applied.json`` still names its writer; the
