@@ -548,3 +548,23 @@ def test_run_scale_branches_without_the_store_control_plane_match_main(tmp_path)
     golden = json.loads((Path(__file__).parent / "fixtures" / "run_scale_local_control_plane_branches.json")
                         .read_text())
     assert run_scale_branches(tmp_path) == golden
+
+
+def test_a_controller_taken_over_never_writes_the_applied_state_back(tmp_path):
+    """REV #758: fleet/applied.json has one writer; a controller that started later claims it,
+    and the earlier one (still running) applies and writes nothing more."""
+    f = Fleet(tmp_path, [_member("nc", 1)])
+    f.ticks()
+    old = f.reconciler
+    assert f.store.read_applied()["writer"] == old.writer
+    new = FleetReconciler(f.store, ReconcileHooks(), poll_s=0, log=lambda _m: None)
+    new.start_from(f.store.read(), applied=f.store.read_applied())
+    new._persist()  # noqa: SLF001 - its first pass claims it
+    assert f.store.read_applied()["writer"] == new.writer
+    f.change(lambda d: d["members"][0]["pool"].update(target=3))
+    f.ticks()
+    assert old.fenced and "written by" in old.fenced
+    assert len(f.shards("nc")) == 1  # the fenced controller did not apply generation 2
+    assert f.store.read_applied()["writer"] == new.writer and f.store.read_applied()["generation"] == 1
+    with pytest.raises(dz.AppliedFenced):
+        f.store.write_applied(0, {}, {}, writer=new.writer)  # never an older generation
