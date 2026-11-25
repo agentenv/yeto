@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 import urllib.parse
 from collections import Counter
 from pathlib import Path
@@ -48,7 +49,9 @@ def tiny_model(seed: int = 0) -> dict[str, bytes]:
 class FakeS3:
     """Path-style S3 over HTTP: ListObjectsV2 (paged), HEAD with ``x-amz-meta-sha256``,
     GET with Range. ``fail_after``: range GETs answered before every later one gets
-    403; ``corrupt``: key -> how many range GETs at offset 0 return flipped bytes."""
+    403; ``corrupt``: key -> how many range GETs at offset 0 return flipped bytes;
+    ``deny``: (key, offset) range GETs answered 403; ``stall``: (key, offset) -> seconds
+    a range GET waits before it is answered."""
 
     def __init__(self, objects: dict[str, bytes], *, bucket: str = "bkt", meta_sha: bool = True,
                  page: int = 3) -> None:
@@ -56,6 +59,8 @@ class FakeS3:
         self.fail_after: int | None = None
         self.corrupt: Counter = Counter()
         self.ranges: Counter = Counter()  # key -> range GETs answered
+        self.deny: set = set()
+        self.stall: dict = {}
         self.unsigned = 0
         fake = self
 
@@ -106,6 +111,10 @@ class FakeS3:
                 if not rng:
                     return self._reply(200, data)
                 lo, hi = (int(x) for x in rng.removeprefix("bytes=").split("-"))
+                if (key, lo) in fake.deny:
+                    return self._reply(403, b"<Error>denied</Error>")
+                if (key, lo) in fake.stall:
+                    time.sleep(fake.stall[key, lo])
                 if fake.fail_after is not None and sum(fake.ranges.values()) >= fake.fail_after:
                     return self._reply(403, b"<Error>denied</Error>")
                 fake.ranges[key] += 1
@@ -208,6 +217,60 @@ def test_an_interrupted_copy_resumes_from_its_journal(s3, model, tmp_path):
     assert summary["bytes_resumed"] == 4 * CHUNK + 1000 and summary["skipped"] == 4
     snap = snapshot(tmp_path)
     assert all((snap / k).read_bytes() == v for k, v in model.items())
+
+
+def _one_batch_failures_first(monkeypatch):
+    """The shard run's first wait (its 16 chunk tasks; the metadata run has 4) returns
+    every task at once, the failed ones first: a failure that comes before the chunks
+    that landed with it in one batch."""
+    real, first = ws.futures.wait, []
+
+    def wait(fs, timeout=None, return_when=ws.futures.ALL_COMPLETED):
+        if return_when == ws.futures.FIRST_COMPLETED and not first and len(fs) >= 16:
+            first.append(True)
+            done, rest = real(fs, return_when=ws.futures.ALL_COMPLETED)
+            return sorted(done, key=lambda f: f.exception() is None), rest
+        return real(fs, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr(ws.futures, "wait", wait)
+
+
+def test_chunks_that_landed_with_a_failing_one_stay_in_the_journal(s3, model, tmp_path, monkeypatch):
+    shard = "model-00002-of-00004.safetensors"
+    s3.deny.add((f"models/tiny/{shard}", 0))
+    with monkeypatch.context() as m:
+        _one_batch_failures_first(m)
+        with pytest.raises(ws.SyncError, match=rf"^{shard}: .*HTTP 403") as raised:
+            run_sync(s3, tmp_path)
+    assert type(raised.value) is ws.SyncError and isinstance(raised.value.__cause__, Exception)
+    assert sum(s3.ranges.values()) == 4 + 16 - 1  # the 4 metadata files, then every other shard chunk
+    s3.deny.clear()
+    s3.ranges.clear()
+    summary = run_sync(s3, tmp_path)
+    assert dict(s3.ranges) == {f"models/tiny/{shard}": 1}, "only the chunk that failed is fetched again"
+    shards = sum(len(v) for k, v in model.items() if k.endswith(".safetensors"))
+    assert summary["bytes_resumed"] == shards - CHUNK and summary["skipped"] == 4  # the metadata run had finished
+    snap = snapshot(tmp_path)
+    assert all((snap / k).read_bytes() == v for k, v in model.items())
+
+
+def test_a_failing_sync_waits_for_its_running_chunks_up_to_a_bound(s3, tmp_path, monkeypatch):
+    """Chunks 1 and 2 of file 1 are running when chunk 0 of file 2 fails: chunk 2 lands
+    within FAIL_WAIT_S and is journaled; chunk 1 does not, is not journaled, and the
+    error is raised without waiting for it."""
+    slow = "model-00001-of-00004.safetensors"
+    monkeypatch.setattr(ws, "FAIL_WAIT_S", 1.0)
+    s3.stall[f"models/tiny/{slow}", CHUNK] = 4.0
+    s3.stall[f"models/tiny/{slow}", 2 * CHUNK] = 0.3
+    s3.deny.add(("models/tiny/model-00002-of-00004.safetensors", 0))
+    t0 = time.monotonic()
+    with pytest.raises(ws.SyncError, match="HTTP 403"):
+        run_sync(s3, tmp_path)
+    assert time.monotonic() - t0 < 3.0, "the error is raised without waiting for the slow chunk"
+    journal = tmp_path / "yeto-weights" / f"org--tiny@{REV}" / "parts" / f"{slow}.done"
+    done = journal.read_text().split("\n")[1:]
+    assert "2" in done, "a chunk that landed while the sync was failing is journaled"
+    assert "1" not in done, "a chunk that did not land in time is not journaled"
 
 
 def test_a_sha256_mismatch_downloads_the_file_again_and_fails_when_it_persists(s3, model, tmp_path):
