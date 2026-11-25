@@ -11,6 +11,8 @@ import stat
 import subprocess
 from types import SimpleNamespace
 
+import pytest
+
 from test_nc_elastic import Clock, Cloud, _pool, _ready_member, _ssh_ops
 from test_nc_sky_provider import FakeSky
 from test_rl_hetero_sampler_engines import _config, _Http, _Process, _sglang_generate
@@ -25,6 +27,12 @@ from yeto.launch.pool import money
 from yeto.launch.pool import status as el
 from yeto.launch.pool.island_pool import IslandPool
 from yeto.rl.adapters.sampler_engines.sglang_server import SGLangServerEngine
+
+@pytest.fixture(autouse=True)
+def _own_state_dir(tmp_path, monkeypatch):
+    """The sky provider's record (and the ticket ledger) per test."""
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "nc-state"))
+
 
 NEBIUS_L40S_SPOT = {"infra": "nebius/eu-north1", "accelerators": "L40S:1", "use_spot": True}
 SGLANG_METRICS = """# HELP sglang:generation_tokens_total Number of generation tokens processed.
