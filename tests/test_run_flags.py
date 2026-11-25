@@ -283,6 +283,8 @@ _NON_RL_LITERALS = frozenset({
     "--json", "--learner-weight", "--learners", "--level",
     "--manifest-path", "--mark-final-checkpoint", "--master", "--matrix-merge",
     "--max-base-lag", "--shard-count", "--shard-index", "--weighted-fold", "--name", "--net", "--nnodes",
+    # the tape uploader beside a fleet's syncer on its VM (python -m yeto.rl.engine.tape_upload follow)
+    "--tape", "--shards", "--interval", "--from-end",
     # syncer: spot rollout (subscribers, sample relay)
     "--max-subscribers", "--sample-relay",
     "--no-build-isolation", "--no-checkout", "--no-deps", "--no-follow", "--node",
