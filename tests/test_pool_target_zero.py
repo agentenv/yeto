@@ -10,7 +10,7 @@ import json
 import pytest
 
 from tests.test_fleet_desired_state import _store_run
-from tests.test_nc_pool_run import _cfg, _crashed_pool
+from tests.test_nc_pool_run import Cloud, _cfg, _crashed_pool, _pool, _ready_member
 from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute
 from yeto.launch.nc import cli, pool_run
 from yeto.launch.pool import desired as dz
@@ -40,6 +40,26 @@ def test_a_pool_stop_of_a_pool_scaled_to_zero_releases_its_members(tmp_path):
     assert m.ticket in [e[1] for e in cloud.kinds("drain")]
     doc = json.loads(cli.pool_state_path(cfg).read_text())
     assert doc["stopped"] == "pool-stop" and not pool_run.billed_members(doc)
+
+
+def test_a_pool_retry_of_a_pool_scaled_to_zero_restarts_its_halted_member(tmp_path, capsys):
+    """REV #826: pool-retry (and the loop's retry) check the sampler spec with the config
+    they read, target 0 included; it refused it again (target must be >= 1)."""
+    cfg, path = _cfg(tmp_path, target=0)
+    clock = Clock()
+    cloud = Cloud(clock)
+    pool = _pool(clock, cloud, accounts=(1, 4))
+    m = _ready_member(pool, clock, cloud)
+    cloud.tickets[m.ticket].update(sampler="exited", exit=2)  # spec rejected
+    for _ in range(5):
+        pool.tick()
+        clock.t += 60
+    assert pool.halted and m.config_error
+    pool.save(cli.pool_state_path(cfg))
+    assert pool_run.retry_pool(cfg, path) == 0
+    assert "start it again" in capsys.readouterr().out
+    pool_run._retry_in_loop(pool, path)  # noqa: SLF001
+    assert [e[1] for e in cloud.kinds("restart")] == [m.ticket] and not pool.halted
 
 
 def test_a_pool_config_at_target_zero_still_refuses_a_start(tmp_path):

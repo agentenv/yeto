@@ -951,9 +951,9 @@ def _retry_in_loop(pool: IslandPool, config_path: str) -> None:
     _remove(retry_path(pool_cfg_of(config_path)))
     try:
         cfg = json.loads(Path(config_path).read_text())
-        cli.pool_config(cfg, allowed=None, min_target=0)
+        pc = cli.pool_config(cfg, allowed=None, min_target=0)
         if cfg.get("route", "ssh") == "ssh":
-            check_sampler_spec(cfg)
+            check_sampler_spec(cfg, pc)  # checked with that config (a target 0 included)
     except (OSError, ValueError, TypeError) as error:
         pool.events("retry_refused", error=str(error)[:300])
         return
@@ -976,9 +976,9 @@ def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
     the same node(s) with the fixed config (checked here first)."""
     check_state_file(cfg)
     try:
-        cli.pool_config(cfg, allowed=None, min_target=0)
+        pc = cli.pool_config(cfg, allowed=None, min_target=0)
         if cfg.get("route", "ssh") == "ssh":
-            check_sampler_spec(cfg)
+            check_sampler_spec(cfg, pc)  # checked with that config (a target 0 included)
     except (ValueError, TypeError) as error:
         print(f"pool-retry: the config is still wrong, nothing retried: {error}")
         return 2
