@@ -165,6 +165,36 @@ def _price(value: Any, where: str) -> float | None:
 
 
 def _key(resources: dict[str, Any]) -> str:
+    """An offer's key when its config names none: ``<accelerators>@<where>[/<instance_type>]/<spot|od>``.
+    The instance type is part of it when the resources name one (two offers of one region and
+    GPU on two instance types are two offers: their ledger stats and breakers are their own);
+    without one the key is as before."""
     where = resources.get("infra") or "/".join(str(resources[k]) for k in ("cloud", "region") if resources.get(k))
     spot = "spot" if resources.get("use_spot") else "od"
-    return f"{resources.get('accelerators', '?')}@{where or 'any'}/{spot}"
+    kind = resources.get("instance_type")
+    return f"{resources.get('accelerators', '?')}@{where or 'any'}/{f'{kind}/' if kind else ''}{spot}"
+
+
+def legacy_key(offer: Offer) -> str | None:
+    """The key ``offer`` had before instance types were part of the generated key: an offer
+    whose key is generated and whose resources name an instance type; None otherwise (its
+    key did not change)."""
+    res = offer.resources
+    if not res.get("instance_type") or offer.key != _key(res):
+        return None
+    return _key({k: v for k, v in res.items() if k != "instance_type"})
+
+
+def legacy_aliases(offers: Iterable[Offer]) -> dict[str, str]:
+    """``{key: legacy key}`` of the offers whose history (ledger stats, cooling breakers) may
+    still be under their :func:`legacy_key`: only where that key names this offer alone. Two
+    offers that shared it (the collision the instance type now tells apart), or another
+    offer's current key, mixed their history there: it is read as nobody's."""
+    offers = list(offers)
+    current = {o.key for o in offers}
+    old = {o.key: legacy_key(o) for o in offers}
+    shared: dict[str, int] = {}
+    for v in old.values():
+        if v:
+            shared[v] = shared.get(v, 0) + 1
+    return {k: v for k, v in old.items() if v and shared[v] == 1 and v not in current}

@@ -109,7 +109,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from yeto.launch.rollout.offers import Offer, offers_from_config
+from yeto.launch.rollout.offers import Offer, legacy_aliases, offers_from_config
 
 from ..pool.provider import provider_caps
 from ..pool.status import LeaseStatus
@@ -380,6 +380,10 @@ class SkyProvider:
             raise ValueError("sky provider: no offer")
         self.run_id, self.slots, self.offers = run_id, list(slots), list(offers)
         self.resources = dict(self.offers[0].resources)
+        # {offer key: its key before instance types were part of it} (offers.legacy_aliases): a
+        # record written by an older yeto (a cluster's offer, a cooling breaker) is read as its offer's
+        self._legacy = legacy_aliases(self.offers)
+        self._current_of = {old: key for key, old in self._legacy.items()}
         # exact_prefix: the spot watchdog's own cluster prefix (its names, its own-name guard)
         self.prefix = exact_prefix or run_prefix(cluster_prefix, run_id)
         self.owner = owner_token(run_id)
@@ -588,8 +592,21 @@ class SkyProvider:
     # alone while the others keep ordering (the pool's breaker counts only when none is left)
     OFFER_COOLDOWN_S = 600.0
 
+    def _canonical(self, key: str | None) -> str | None:
+        """An offer key as this provider names it now (a record's older key: its offer's)."""
+        return self._current_of.get(key, key) if key is not None else None
+
+    def _index_of(self, key: str | None) -> int:
+        key = self._canonical(key)
+        return next((i for i, o in enumerate(self.offers) if o.key == key), 0)
+
+    def _open_until(self, doc: dict[str, Any], key: str) -> float:
+        rows = doc.get("offers") or {}
+        keys = [key] + ([self._legacy[key]] if key in self._legacy else [])
+        return max(float((rows.get(k) or {}).get("open_until", 0)) for k in keys)
+
     def _cooling(self, doc: dict[str, Any], key: str, now: float) -> bool:
-        return float((doc.get("offers") or {}).get(key, {}).get("open_until", 0)) > now
+        return self._open_until(doc, key) > now
 
     def _pick(self, doc: dict[str, Any]) -> Offer:
         """From the cursor on, the first offer not cooling down; all cooling: the one that reopens first."""
@@ -598,10 +615,14 @@ class SkyProvider:
         for offer in ring:
             if not self._cooling(doc, offer.key, now):
                 return offer
-        return min(ring, key=lambda o: float(doc["offers"][o.key]["open_until"]))
+        return min(ring, key=lambda o: self._open_until(doc, o.key))
 
     def _offer_failed(self, doc: dict[str, Any], key: str) -> None:
-        row = doc.setdefault("offers", {}).setdefault(key, {"fails": 0})
+        key = self._canonical(key)
+        rows = doc.setdefault("offers", {})
+        if key not in rows and self._legacy.get(key) in rows:  # its breaker under the older key: carried on
+            rows[key] = rows.pop(self._legacy[key])
+        row = rows.setdefault(key, {"fails": 0})
         row["fails"] = int(row.get("fails", 0)) + 1
         row["open_until"] = self.clock() + min(self.OFFER_COOLDOWN_S * 2 ** (row["fails"] - 1),
                                                8 * self.OFFER_COOLDOWN_S)
@@ -612,8 +633,9 @@ class SkyProvider:
         return len(self.offers) > 1 and any(not self._cooling(doc, o.key, now) for o in self.offers)
 
     def offer_of(self, ticket: str) -> str | None:
-        """The offer key cluster ``ticket`` was ordered with (None: not ours)."""
-        return ((self._rows().get(ticket) or {}).get("offer") or {}).get("key")
+        """The offer key cluster ``ticket`` was ordered with (None: not ours); a cluster an
+        older yeto ordered under its offer's older key reads as that offer's current key."""
+        return self._canonical(((self._rows().get(ticket) or {}).get("offer") or {}).get("key"))
 
     def offer_breakers(self) -> dict[str, dict[str, Any]]:
         return dict(self._doc().get("offers") or {})
@@ -717,7 +739,7 @@ class SkyProvider:
                              f"(offers: {[o.resources.get('accelerators') for o in self.offers]}); nothing ordered")
         now = self.clock()
         open_ = [o for o in ring if not self._cooling(doc, o.key, now)]
-        return open_[0] if open_ else min(ring, key=lambda o: float(doc["offers"][o.key]["open_until"]))
+        return open_[0] if open_ else min(ring, key=lambda o: self._open_until(doc, o.key))
 
     def group_failed(self, ticket: str) -> None:
         """A group on cluster ``ticket`` did not come up: its offer cools down (once; a start
@@ -728,7 +750,7 @@ class SkyProvider:
         if key and not row.get("start_timed_out") and not row.get("launch_failed") and not row.get("group_failed"):
             row["group_failed"] = True
             self._offer_failed(doc, key)
-            doc["cursor"] = (next((i for i, o in enumerate(self.offers) if o.key == key), 0) + 1) % len(self.offers)
+            doc["cursor"] = (self._index_of(key) + 1) % len(self.offers)
             self._save_doc(doc)
 
     def _launch_ok(self, name: str) -> None:
@@ -739,7 +761,9 @@ class SkyProvider:
         row["launch_state"] = LAUNCHED
         key = (row.get("offer") or {}).get("key")
         doc["cursor"] = 0  # back to the cheapest offer for the next order
-        (doc.get("offers") or {}).pop(key, None)
+        current = self._canonical(key)
+        for k in (current, self._legacy.get(current)):
+            (doc.get("offers") or {}).pop(k, None)
         self._save_doc(doc)
         offer = row.get("offer") or {}
         extra = {"aws_profile": self.aws_profile} if self.aws_profile else {}  # the cleanup's sky down uses it
@@ -757,8 +781,7 @@ class SkyProvider:
         doc = self._doc()
         row = doc["clusters"][name]
         key = (row.get("offer") or {}).get("key")
-        cursor = next((i for i, o in enumerate(self.offers) if o.key == key), 0)
-        doc["cursor"] = (cursor + 1) % len(self.offers)
+        doc["cursor"] = (self._index_of(key) + 1) % len(self.offers)
         if key:
             self._offer_failed(doc, key)
         row.update(launch_failed=True, launch_state=FAILED, launch_error=_error_text(error), open=left)
