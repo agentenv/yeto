@@ -189,3 +189,25 @@ def test_an_algorithm_spec_the_launches_cannot_read_is_a_preflight_refusal(tmp_p
     monkeypatch.setattr(up, "_log", logs.append)
     assert run.preflight() is False
     assert any("refuses its options" in m for m in logs)
+
+
+@pytest.mark.parametrize("where", ["syncer launch", "island launch"])
+def test_an_os_error_while_a_launch_reads_its_files_is_a_refusal(tmp_path, where):
+    """The launch readers turn their file errors into ValueError today; an OSError that
+    still gets through (a reader that does not, a permission error) is the same refusal."""
+    from yeto.launcher import _prepare_rl_args
+    from yeto.rl import fleet_session
+
+    cfg = _secret_cfg(tmp_path)
+    calls = []
+
+    def prepare(args):
+        calls.append(args)
+        if (where == "syncer launch") == (len(calls) == 1):
+            raise PermissionError(13, "Permission denied", "spec.algorithm.json")
+        _prepare_rl_args(args)
+
+    members = island_launches.trainer_members(cfg, fleet.plan_of(cfg))
+    with pytest.raises(ValueError, match="refuses its options: PermissionError") as raised:
+        fleet_session.check(cfg["trainer"]["argv"], members, prepare=prepare)
+    assert (where == "syncer launch") == ("the syncer launch" in str(raised.value))
