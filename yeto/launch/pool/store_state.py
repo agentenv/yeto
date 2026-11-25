@@ -36,7 +36,7 @@ from .shard_alloc import ShardAllocator
 from .store_lock import DEFAULT_TTL_S, StoreLock
 
 POOLS_DIR = "fleet/pools"
-_RECORD = re.compile(r"(\d{8})\.json")
+_RECORD = re.compile(r"(\d{8,})\.json")  # as StoreLock's token keys; compared as integers
 
 
 class PoolLocked(RuntimeError):

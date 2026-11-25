@@ -484,3 +484,17 @@ def test_an_unreadable_store_record_refuses_the_attach(world, raw):
         w.ops.attach_control(control)
     assert w.ops.provider._store is None  # noqa: SLF001
     control.close()
+
+
+def test_records_are_ordered_by_the_token_as_a_number():
+    """The lock's fencing token is an integer (the highest + 1, created once): the record of
+    token 100000000 (9 digits) is newer than 99999999's although it sorts first as a string."""
+    objects = _store()
+    for token, owed in ((99999999, "old"), (100000000, "new")):
+        doc = {"tickets": {owed: {"slot": 0, "state": "released", "shard": "smp-0", "stop_owed": True}}}
+        objects.write(store_state.provider_record_key("ssh", token), json.dumps(doc).encode())
+    assert sorted(f"{t:08d}" for t in (99999999, 100000000)) == ["100000000", "99999999"]  # as strings
+    assert store_state.provider_tokens(objects, "ssh") == [99999999, 100000000]
+    key, doc = _record(objects)
+    assert key.endswith("/100000000.json") and list(doc["tickets"]) == ["new"]
+    assert list(store_state.read_provider_record(objects, "ssh", upto=99999999)[1]["tickets"]) == ["old"]
