@@ -828,8 +828,11 @@ gathering, so they close on the remaining islands; this includes the slots of
 an earlier generation that dropped without LEAVE and was not rebound yet
 (unless that one is still closing, with a PUSH possibly queued). It does not wait for the
 lease (dynamic membership, every preset). An island that comes back within the
-lease after a LEAVE joins as a new member: its earlier PULLs do not move to the
-new generation. A disconnect without LEAVE may be a short outage: its slots
+lease after a LEAVE (the leaving generation already gone) joins as a new
+member: its earlier PULLs do not move to the new generation. When the newer
+generation is already current as the leaving one disconnects, its unanswered
+slots are rebound to the newer generation after its catch-up, as on any
+reconnect. A disconnect without LEAVE may be a short outage: its slots
 stay until a newer generation rebinds them or, with a lease, the island has had
 no generation connected for one lease after the disconnect; then the syncer
 drops them the same way. Accepted pushes always keep their slot. Each release
