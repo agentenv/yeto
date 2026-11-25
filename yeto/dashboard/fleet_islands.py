@@ -118,7 +118,7 @@ def load_plan(doc: Any) -> dict | None:
     syncer = doc.get("syncer")
     return {"version": doc["version"], "run": _str(doc.get("run")), "store": _str(doc.get("store")),
             "dispense": _str(doc.get("dispense")), "islands": islands,
-            # None: a plan older than the syncer price (unknown); {"usd_per_h": None}: unset ($0, as run up bills it)
+            # None: a plan older than the syncer price; {"usd_per_h": None}: unset (both: the price table's syncer row)
             "syncer": {"usd_per_h": _f(syncer.get("usd_per_h"))} if isinstance(syncer, dict) else None}
 
 

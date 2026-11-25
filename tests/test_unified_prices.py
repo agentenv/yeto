@@ -50,6 +50,30 @@ def test_two_rows_for_the_same_node_are_refused():
         prices.parse({"rows": [row, dict(row, gpu="h100")]})
 
 
+def test_the_syncer_is_priced_by_a_billing_services_row_with_its_source():
+    row = prices.service(prices.SYNCER)
+    assert row is not None and row.usd_h == prices.syncer_usd_h() == 2.4 and row.grade == prices.BILLING
+    assert row.source and dt.date.fromisoformat(row.as_of)
+    assert row.cited().startswith("syncer 2.4 USD/h (source: ")
+    # an illustrative syncer row is no price to what bills; a table without one has none
+    doc = {"services": {"syncer": {"usd_h": 1.0, "source": "s", "as_of": "2026-01-01", "grade": "illustrative"}}}
+    t = prices.parse(doc)
+    assert t.services["syncer"].grade == prices.ILLUSTRATIVE
+    assert prices.parse({"services": {"_doc": "x"}}).services == {}
+
+
+@pytest.mark.parametrize("bad, why", [
+    ({"usd_h": 1.0, "source": "s", **G}, "as_of is required"),
+    ({"usd_h": -1, "source": "s", "as_of": "2026-01-01", **G}, "usd_h"),
+    ({"usd_h": 1.0, "source": "s", "as_of": "soon", **G}, "ISO date"),
+    ({"usd_h": 1.0, "source": "s", "as_of": "2026-01-01", "grade": "guess"}, "grade must be"),
+    ({"usd_h": 1.0, "source": "s", "as_of": "2026-01-01", "cpus": 8, **G}, "unknown keys"),
+])
+def test_a_services_row_without_its_source_date_or_a_sane_price_is_refused(bad, why):
+    with pytest.raises(prices.PriceTableError, match=why):
+        prices.parse({"services": {"syncer": bad}})
+
+
 def test_lookup_prefers_the_region_and_spotness_asked_and_never_quotes_spot_for_unknown():
     assert prices.node_usd_h("nebius", "H100", 8, spot=True, region="eu-north1") == pytest.approx(6.32)
     assert prices.node_usd_h("nebius", "H100", 8, spot=False, region="eu-north1") == pytest.approx(36.0)

@@ -43,6 +43,12 @@
      "native": {"unit": "ucr", "per_gpu_h": 3000000, "usd_per_unit": 1e-6},
      "source": "National Compute rate: 3e6 ucr per GPU-hour, 1 credit (1e6 ucr) ~ 1 USD (K3.1 run quote)", "as_of": "2026-11-11"}
   ],
+  "services": {
+    "_doc": "Machines priced by what they serve, not by their GPUs: one whole-machine USD per hour each, with its source and date. `syncer`: a fleet's syncer (its outer-sync machine), billed when the run config sets no syncer.usd_per_h.",
+    "syncer": {"usd_h": 2.4, "grade": "billing",
+               "source": "Modal billing report of a two-island fleet run: the syncer's machine ~2.4 USD/h", "as_of": "2026-11-24",
+               "note": "measured on the bill; the earlier estimate from CPU and memory list prices (1.32 USD/h) undercounted it"}
+  },
   "host": {
     "modal": {"cpu_core_h": 0.04716, "mem_gib_h": 0.007992,
               "source": "https://modal.com/pricing (0.0000131 USD per core-second, 0.00000222 USD per GiB-second)",

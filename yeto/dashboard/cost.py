@@ -305,7 +305,8 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     the launch bills, over the price table), one row per pool sampler (the plan pool's
     node price, else the price table's for its provider and card; hours: the union of its
     incarnations' first to last event, a lower bound) and one for the syncer (the plan's
-    ``syncer.usd_per_h``; unset: $0 as ``run up`` bills it; a plan without it: unpriced;
+    ``syncer.usd_per_h``; unset, a plan without it or no plan: the unified price table's
+    ``services.syncer`` row, as ``run up`` bills it;
     hours: the trainers' first to last event). None (``rows`` unchanged) off a fleet."""
     from . import fleet_islands  # noqa: PLC0415
 
@@ -372,14 +373,19 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     lasts = [x.get("last_event_ts") for x in tr_recs if x.get("last_event_ts") is not None]
     hours = (max(lasts) - min(firsts)) / 3600.0 if firsts and lasts and max(lasts) >= min(firsts) else None
     syncer = fleet.get("syncer")
-    if syncer is None:
-        rate = None
-        source = ("the fleet plan has no syncer price (written before it)" if fleet.get("source") == "plan"
-                  else "no fleet plan: the syncer's price is unknown")
-    else:
-        rate = syncer.get("usd_per_h")
-        source = "fleet plan syncer.usd_per_h" if rate is not None else "syncer.usd_per_h unset: $0, as run up bills it"
-        rate = 0.0 if rate is None else rate
+    rate = syncer.get("usd_per_h") if syncer is not None else None
+    if rate is not None:
+        source = "fleet plan syncer.usd_per_h"
+    else:  # unset, a plan written before the syncer price, or no plan: the table's syncer row, as run up bills it
+        from yeto.cost import prices  # noqa: PLC0415
+
+        row = prices.service(prices.SYNCER)
+        why = ("syncer.usd_per_h unset" if syncer is not None
+               else "the fleet plan has no syncer price (written before it)" if fleet.get("source") == "plan"
+               else "no fleet plan")
+        rate = None if row is None else row.usd_h
+        source = (f"{why}: price table {row.cited()}" if row is not None
+                  else f"{why}: the price table has no syncer row")
     srow = {"id": "syncer", "kind": "syncer", "island": None, "unit_usd_gpu_h": None, "rate_usd_h": rate,
             "hours": hours, "gpu_rate_usd_h": None, "host_rate_usd_h": None, "gpu_only": False, "cpus": None,
             "memory_gib": None, "cost_usd": rate * hours if rate is not None and hours is not None else None,

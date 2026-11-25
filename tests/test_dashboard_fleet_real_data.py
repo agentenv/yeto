@@ -155,7 +155,7 @@ def _rows(r):
     return cost, {row["id"]: row for row in cost["islands"]}
 
 
-def test_fleet_spend_without_a_plan_counts_pools_trainers_and_an_unpriced_syncer(no_plan):
+def test_fleet_spend_without_a_plan_counts_pools_trainers_and_the_table_syncer(no_plan):
     cost, rows = _rows(no_plan)
     assert [rows[i]["kind"] for i in ("0", "1", "fpv-i0-0", "fps-i1-0", "fps-i1-1", "syncer")] == [
         "trainer", "trainer", "pool sampler", "pool sampler", "pool sampler", "syncer"]
@@ -165,12 +165,15 @@ def test_fleet_spend_without_a_plan_counts_pools_trainers_and_an_unpriced_syncer
         # the pool's provider is not on the tapes without a plan: the trainers' cloud (modal)
         assert row["rate_usd_h"] == l40s and "the trainers' cloud" in row["rate_source"]
         assert row["hours"] == pytest.approx((150 + 30 * rounds) / 3600)  # its first to last event
-    assert rows["syncer"]["priced"] is False and rows["syncer"]["cost_usd"] is None
+    # no plan: the unified price table's syncer row, as run up bills an unset syncer price
+    syn = rows["syncer"]
+    assert syn["priced"] is True and syn["rate_usd_h"] == 2.4 and syn["rate_source"].startswith("no fleet plan: price table syncer 2.4 USD/h")
     f = cost["fleet"]
     assert f["pools_usd"] == pytest.approx(sum(rows[s]["cost_usd"] for s in SHARDS))
     assert f["trainers_usd"] == pytest.approx(rows["0"]["cost_usd"] + rows["1"]["cost_usd"])
-    assert cost["total_usd"] == pytest.approx(f["pools_usd"] + f["trainers_usd"])
-    assert "syncer" in cost["unpriced"]
+    assert f["syncer_usd"] == pytest.approx(2.4 * syn["hours"])
+    assert cost["total_usd"] == pytest.approx(f["pools_usd"] + f["trainers_usd"] + f["syncer_usd"])
+    assert "syncer" not in cost["unpriced"]
 
 
 def test_fleet_spend_with_a_plan_bills_its_prices(tmp_path):
@@ -185,13 +188,19 @@ def test_fleet_spend_with_a_plan_bills_its_prices(tmp_path):
     assert f["syncer_usd"] == pytest.approx(0.26 * syn["hours"]) and cost["unpriced"] == []
 
 
-def test_a_plan_written_before_the_prices_keeps_the_syncer_unpriced(tmp_path):
+def test_a_plan_without_a_syncer_price_bills_the_table_syncer(tmp_path):
     cost, rows = _rows(reduce(write_store(tmp_path / "s", plan_doc(prices=False))))
     assert rows["0"]["rate_usd_h"] == 5.06 and rows["fpv-i0-0"]["rate_source"].startswith("price table modal:L40S")
-    assert rows["syncer"]["cost_usd"] is None and "written before it" in rows["syncer"]["rate_source"]
+    syn = rows["syncer"]
+    assert syn["rate_usd_h"] == 2.4 and syn["cost_usd"] == pytest.approx(2.4 * syn["hours"])
+    assert syn["rate_source"].startswith("the fleet plan has no syncer price (written before it): price table syncer")
     unset = plan_doc(prices=False) | {"syncer": {"usd_per_h": None}}  # run config without syncer.usd_per_h
     _cost, rows = _rows(reduce(write_store(tmp_path / "u", unset)))
-    assert rows["syncer"]["cost_usd"] == 0.0 and "as run up bills it" in rows["syncer"]["rate_source"]
+    syn = rows["syncer"]
+    assert syn["rate_usd_h"] == 2.4 and syn["rate_source"].startswith("syncer.usd_per_h unset: price table syncer")
+    zero = plan_doc(prices=False) | {"syncer": {"usd_per_h": 0.0}}  # set to 0: a syncer that bills nothing
+    _cost, rows = _rows(reduce(write_store(tmp_path / "z", zero)))
+    assert rows["syncer"]["cost_usd"] == 0.0 and rows["syncer"]["rate_source"] == "fleet plan syncer.usd_per_h"
 
 
 def test_compile_writes_the_pool_and_syncer_prices_into_the_plan():

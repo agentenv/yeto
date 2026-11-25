@@ -205,7 +205,10 @@ def test_fleet_spend_counts_pools_every_island_and_the_syncer(tmp_path):
     # nothing priced bills nothing; a negative or unreadable amount counts 0
     assert fleet.fleet_spend(pool_node_hours=[(-1, 24), (5, None)], island_hours=[2.0],
                              island_usd_per_h=[float("nan")]).total_usd == 0.0
-    assert fleet.syncer_price({"syncer": {}}) == 0.0 and fleet.island_prices({"islands": [{}]}) == (0.0,)
+    assert fleet.island_prices({"islands": [{}]}) == (0.0,)
+    # an unset syncer price is the unified price table's syncer row; 0 set explicitly bills nothing
+    assert fleet.syncer_price({"syncer": {}}) == fleet.syncer_price({}) == 2.4
+    assert fleet.syncer_price({"syncer": {"usd_per_h": 0}}) == 0.0
     with pytest.raises(ValueError, match="2 island hours for 1 island prices"):
         fleet.fleet_spend(pool_node_hours=[], island_hours=[1.0, 2.0], island_usd_per_h=[1.0])
 

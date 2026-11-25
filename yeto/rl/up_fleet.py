@@ -393,7 +393,7 @@ def breaker_pool_problems(plan: Any, section: Any) -> list[str]:
 def syncer_lines(plan: Any, trainer_argv: Sequence[str], syncer: dict[str, Any] | None) -> list[str]:
     """The syncer's region as the launch resolves it (it follows islands pinned to one
     area unless ``--syncer-region`` is set) and the launch's warnings for islands placed
-    apart from it, each island named; and its price (``syncer.usd_per_h``)."""
+    apart from it, each island named; and its price (``syncer.usd_per_h``, else the price table's syncer row)."""
     from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
     from yeto.launch import syncer_region as sr  # noqa: PLC0415
     from yeto.rl.up_consistency import trainer_args  # noqa: PLC0415
@@ -417,8 +417,15 @@ def syncer_lines(plan: Any, trainer_argv: Sequence[str], syncer: dict[str, Any] 
             out.append(f"WARNING: syncer: {finding} (launch islands: {names})")
     price = (syncer or {}).get("usd_per_h") if isinstance(syncer, dict) else None
     if price is None:
-        out.append("fleet: syncer.usd_per_h is unset: the fleet spend counts the syncer at $0/h (set it when the "
-                   "syncer runs on a billed VM)")
+        from yeto.cost import prices  # noqa: PLC0415
+
+        row = prices.service(prices.SYNCER)
+        if row is None:
+            out.append("fleet: syncer.usd_per_h is unset: the fleet spend counts the syncer at $0/h (set it when the "
+                       "syncer runs on a billed VM)")
+        else:
+            out.append(f"fleet: syncer.usd_per_h is unset: the fleet spend counts the syncer at the price table's "
+                       f"{row.cited()}; set syncer.usd_per_h to price its own machine (0: it bills nothing)")
     return out
 
 

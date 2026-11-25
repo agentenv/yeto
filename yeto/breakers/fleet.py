@@ -180,9 +180,15 @@ def sandbox_price(run_config: Mapping[str, Any]) -> float:
 
 
 def syncer_price(run_config: Mapping[str, Any]) -> float:
-    """``syncer.usd_per_h`` (0 when unset: a syncer on the control host bills nothing)."""
+    """``syncer.usd_per_h`` when the run config sets it (0: a syncer that bills nothing);
+    unset: the unified price table's ``services.syncer`` row (0 when the table has none)."""
     syncer = run_config.get("syncer")
-    return _price(syncer.get("usd_per_h") if isinstance(syncer, Mapping) else None)
+    value = syncer.get("usd_per_h") if isinstance(syncer, Mapping) else None
+    if value is None:
+        from yeto.cost import prices  # noqa: PLC0415
+
+        return _price(prices.syncer_usd_h())
+    return _price(value)
 
 
 def _price(value: Any) -> float:
