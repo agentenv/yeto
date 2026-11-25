@@ -168,6 +168,11 @@ class TapeCollector:
         # The island's engine driver started (rl_driver_start) and has written no
         # JOINED_EVENTS record since: it is still waiting for the syncer.
         self.awaiting_syncer = False
+        # Why the island's current incarnation stopped, from its own records (since its last
+        # rl_driver_start): its last trainer breaker stop (``rl_breaker`` of layer trainer,
+        # action stop), ``rl_strict_failure`` and ``island_leave`` (``island_stop``). The fleet
+        # controller never relaunches an island a breaker, a strict check or a refusal stopped.
+        self._stop_records: dict[str, dict] = {}
         self.closed = False
         if not fresh and self.path.exists():
             # A tape this run already wrote (a restarted launcher that adopted the island,
@@ -233,8 +238,23 @@ class TapeCollector:
             self.left_pool = True
         if event == "rl_driver_start":
             self.awaiting_syncer = True
+            self._stop_records = {}  # a new incarnation: the last one's stop is history
         elif event in JOINED_EVENTS:
             self.awaiting_syncer = False
+        if (event == "rl_breaker" and record.get("layer") == "trainer" and record.get("action") == "stop"
+                and record.get("state", "trip") == "trip"):
+            self._stop_records["breaker"] = record
+        elif event == "rl_strict_failure":
+            self._stop_records["strict"] = record
+        elif event == "island_leave":
+            self._stop_records["leave"] = record
+
+    @property
+    def island_stop(self) -> dict[str, dict] | None:
+        """The current incarnation's stop records (``breaker``, ``strict``, ``leave``; see
+        ``yeto.launch.island_lifecycle.classify_records``); None before any."""
+        with self._lock:
+            return dict(self._stop_records) or None
 
     def recover_from_file(self, tape_file) -> bool:
         """Complete the tape from the island's own tape file (raw tape lines, the

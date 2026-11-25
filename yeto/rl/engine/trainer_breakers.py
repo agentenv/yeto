@@ -177,3 +177,37 @@ def trip(name: str, emit: Callable[..., Any] | None, *, value: float | None = No
 def strict_breaker(metric: str) -> str:
     """The entry a ``StrictRlInvariantError`` of ``metric`` trips."""
     return STRICT_METRICS.get(str(metric), STRICT_INVARIANT)
+
+
+# The mark a breaker's stop puts on the error it raises (``yeto.launch.island_lifecycle``
+# reads it): the island process ends with its deterministic-stop exit and the fleet
+# controller never relaunches it (a relaunch would stop the same way and bill meanwhile).
+BREAKER_ATTR = "yeto_breaker"
+
+
+def stop_error(error: BaseException, name: str) -> BaseException:
+    """``error``, marked as the stop of breaker ``name`` (the caller raises it). An attribute,
+    not the message: the text the error carried before is unchanged, and the mark survives
+    pickling (an error a Ray actor raised still carries it)."""
+    try:
+        setattr(error, BREAKER_ATTR, str(name))
+    except Exception:  # noqa: BLE001 - an error that takes no attribute is raised unmarked
+        pass
+    return error
+
+
+def breaker_of(error: BaseException | None) -> str | None:
+    """The breaker whose stop ``error`` is (its chain: cause, context and a Ray task error's
+    ``cause``); None when no breaker's stop is in it."""
+    seen, todo = set(), [error]
+    while todo:
+        error = todo.pop()
+        if error is None or id(error) in seen:
+            continue
+        seen.add(id(error))
+        name = getattr(error, BREAKER_ATTR, None)
+        if isinstance(name, str) and name:
+            return name
+        inner = getattr(error, "cause", None)
+        todo += [e for e in (error.__cause__, error.__context__, inner) if isinstance(e, BaseException)]
+    return None

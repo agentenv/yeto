@@ -6,7 +6,7 @@ import contextlib
 import sys
 import time
 
-from ..config_errors import CONFIG_ERROR_MARKER
+from ..config_errors import CONFIG_ERROR_MARKER, ISLAND_STOP_MARKER
 from ..gpu_spec import ClusterSpec
 from .teardown import teardown_island
 
@@ -181,6 +181,7 @@ class SkySDKOps:
                     or "RL strict failure " in text
                     or "StrictRlInvariantError:" in text
                     or CONFIG_ERROR_MARKER in text
+                    or ISLAND_STOP_MARKER in text
                     or any(marker in text for marker in SYNCER_REFUSAL_MARKERS)
                 ):
                     return text

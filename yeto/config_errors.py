@@ -18,6 +18,13 @@ from __future__ import annotations
 CONFIG_ERROR_EXIT = 10
 # Log marker of an island's configuration error (the fleet controller's log probes read it).
 CONFIG_ERROR_MARKER = "[yeto-config-error]"
+# Island process exit code of a deterministic stop: a trainer breaker stopped it (no new group
+# within trainer.sample_wait, a damaged buffer, ...), a strict check failed, or the syncer refused
+# it. A relaunch stops the same way and bills a machine meanwhile, so neither Modal's function
+# retries nor the fleet controller run the island again (``yeto.launch.island_lifecycle``).
+ISLAND_STOP_EXIT = 11
+# Log marker of a deterministic stop: ``[yeto-island-stop] <cause> <Error>: <message>``.
+ISLAND_STOP_MARKER = "[yeto-island-stop]"
 
 
 class ConfigError(ValueError):

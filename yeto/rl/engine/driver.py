@@ -3182,7 +3182,11 @@ class IslandDriver:
 
     def _record_leave(self, reason: LeaveReason, failure: BaseException) -> None:
         try:
+            from . import trainer_breakers  # noqa: PLC0415 - import-light, read on the way out
+
+            breaker = trainer_breakers.breaker_of(failure)
             self.emit("island_leave", reason=int(reason), reason_name=reason.name,
-                      error_type=type(failure).__name__, error=str(failure))
+                      error_type=type(failure).__name__, error=str(failure),
+                      **({"breaker": breaker} if breaker else {}))
         except Exception:  # noqa: BLE001 - the tape must not mask the original error
             pass

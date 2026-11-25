@@ -56,6 +56,12 @@ class _RelaunchAttempt:
 # time spent recovering in the window.
 FIXED_ROSTER_MAX_RELAUNCHES = 2
 RECOVERY_STABLE_S = 300.0
+# Island pool (elastic) RL islands: relaunches of one island within a sliding window
+# (``launch.island_relaunches``). An island that keeps failing after its relaunch is given up
+# (abandoned, a CRITICAL line and an ``island_relaunch_limit`` fleet event) instead of being
+# ordered again and again while the rest of the pool trains: each relaunch bills a machine.
+ISLAND_MAX_RELAUNCHES = 3
+ISLAND_RELAUNCH_WINDOW_S = 3600.0
 # How long one rejected-link relaunch may take to get a new container.
 WAN_RECOVERY_S = 900.0
 # How long a failed-looking island is given for its rl_learner_finalized record
@@ -102,6 +108,17 @@ def effective_stall_timeout(args) -> float:
 
 class FixedRosterIslandAbandoned(RuntimeError):
     """A fixed-roster RL island could not be recovered: the run cannot finish."""
+
+
+class IslandsFailedForGood(RuntimeError):
+    """Every learner was given up and each on a deterministic stop (a trainer breaker, a strict
+    check, a refusal: decision ``fail``): a relaunch of the launch stops the same way.
+    ``reasons``: learner name -> its decision's detail. A ``RuntimeError`` with the message
+    every abandoned run had, so a caller that does not know it sees no change."""
+
+    def __init__(self, message: str, reasons: dict[str, str]) -> None:
+        super().__init__(message)
+        self.reasons = dict(reasons)
 # run() exit code when a fixed-roster island failed for good (distinct from
 # 2 = artifact not fetchable and 3 = incomplete event tape).
 ISLAND_FAILED_EXIT = 4
@@ -208,6 +225,7 @@ class FleetController:
         rollout=None,
         recorder=None,
         incarnations=None,
+        stop_probe=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -267,6 +285,10 @@ class FleetController:
         # (training complete); a non-zero exit after that is a shutdown-phase
         # error, not an island failure.
         self.finalized_probe = finalized_probe
+        # name -> the island's own stop records of its current incarnation (its last trainer
+        # breaker stop, strict failure and LEAVE; ``yeto.rl.event_echo.TapeCollector.island_stop``),
+        # or None: the island process's reason, read from its tape, not from its exit status.
+        self.stop_probe = stop_probe
         # () -> int: events received from the islands so far (log echo). With
         # stall_timeout > 0 a run with no new event for that long, and not every
         # learner finalized, is stalled (e.g. a dead syncer connection).
@@ -467,6 +489,10 @@ class FleetController:
                     "[launcher] ERROR: all learners abandoned",
                     file=sys.stderr,
                 )
+            decisions = {name: rec.get("decision") for name, rec in self.learners.items()}
+            if decisions and all(d is not None and d.action == lifecycle.FAIL for d in decisions.values()):
+                raise IslandsFailedForGood("all learners abandoned; nothing left to train",
+                                           {name: d.detail for name, d in decisions.items()})
             raise RuntimeError("all learners abandoned; nothing left to train")
         return exit_codes
 
@@ -489,8 +515,9 @@ class FleetController:
         state = rec["state"]
         if state == ABANDONED:
             decision = rec.get("decision")
-            return lifecycle.FAILED if decision is not None and decision.action == lifecycle.FAIL \
-                else lifecycle.ABANDONED
+            if decision is not None and decision.action == lifecycle.FAIL:
+                return decision.state if decision.state in lifecycle.TERMINAL else lifecycle.FAILED
+            return lifecycle.ABANDONED
         if state == DONE:
             return lifecycle.DONE
         if state == RECOVERING:
@@ -782,6 +809,10 @@ class FleetController:
                     raise RuntimeError(
                         f"strict RL job {rec['name']} failed: {strict_failure}"
                     )
+                stop = None if is_syncer else self._deterministic_stop(rec)
+                if stop is not None:
+                    self._stop_for_good(rec, stop)
+                    return
                 self._enter_recovering(rec, verdict, is_syncer)
         elif rec["state"] == RECOVERING:
             self._drive_recovery(rec, is_syncer)
@@ -999,7 +1030,77 @@ class FleetController:
             return None
         if text is not None and not self.elastic and any(m in text for m in SYNCER_REFUSAL_MARKERS):
             return None  # legacy unchanged: a refused island takes the fixed-roster path
+        line = lifecycle.island_stop_text(text)
+        if line is not None and lifecycle.classify(log_text=line).cause == lifecycle.BREAKER:
+            return None  # a breaker's stop: given up, not a strict failure (_deterministic_stop)
         return text
+
+    def _deterministic_stop(self, rec):
+        """Why island ``rec`` stopped when no relaunch can help (``island_lifecycle.Decision``
+        of cause breaker, strict or config error), else None: its own tape records of the
+        incarnation (a trainer breaker's stop such as ``trainer.sample_wait``, a strict
+        failure, a LEAVE ``TRAINING_FAILED`` / ``CONFIG_MISMATCH``: :attr:`stop_probe`), its
+        ``[yeto-island-stop]`` log line, or its source's exit code
+        (``config_errors.ISLAND_STOP_EXIT``). Any roster: the island's exit status alone (a
+        rank that exited 1) says nothing of why."""
+        records = None
+        if self.stop_probe is not None:
+            try:
+                records = self.stop_probe(rec["name"])
+            except Exception:  # noqa: BLE001 - a probe that fails reads as no record
+                records = None
+        found = lifecycle.classify_records(records)
+        if found is not None:
+            return found
+        probe = getattr(self.ops, "rl_strict_failure", None)
+        if probe is not None:
+            try:
+                text = probe(rec["name"], rec["job_id"])
+            except Exception:  # noqa: BLE001
+                text = None
+            line = lifecycle.island_stop_text(text)
+            if line is not None:
+                return lifecycle.classify(log_text=line, detail=line)
+        observed = self._source_decision(rec)
+        if observed is not None and observed.cause == lifecycle.BREAKER:
+            return observed
+        return None
+
+    def _stop_for_good(self, rec, stop) -> None:
+        """Island ``rec`` ended on a deterministic stop (:meth:`_deterministic_stop`): it is
+        released and never relaunched (a relaunch stops the same way and bills a machine
+        meanwhile). A fixed roster ends the fleet (exit 4, as an island given up); an island
+        pool and a single island go on without it."""
+        rec["decision"] = stop
+        what = {lifecycle.BREAKER: "trainer breaker stop", lifecycle.STRICT: "strict failure",
+                lifecycle.CONFIG_ERROR: "configuration error"}.get(stop.cause, stop.cause)
+        self._fleet("island_lost", rec["name"], reason=f"{what}: {stop.detail}"[:500])
+        print(f"[launcher] CRITICAL: {rec['name']}: {what}, not relaunched (a relaunch stops the same "
+              f"way and bills a machine meanwhile): {stop.detail}", file=sys.stderr)
+        self._abandon(rec, 0.0, reason=f"{what}, not relaunched")
+
+    def _relaunch_budget_spent(self, rec) -> bool:
+        """An island pool island that failed again: True (and the island is given up) once it
+        was relaunched :data:`ISLAND_MAX_RELAUNCHES` times within the last
+        :data:`ISLAND_RELAUNCH_WINDOW_S`; else this relaunch is counted (False)."""
+        now = self.ops.now()
+        times = [t for t in rec.get("relaunch_times") or () if now - t < ISLAND_RELAUNCH_WINDOW_S]
+        if len(times) >= ISLAND_MAX_RELAUNCHES:
+            rec["relaunch_times"] = times
+            why = (f"{len(times)} relaunches within {ISLAND_RELAUNCH_WINDOW_S:.0f}s "
+                   f"(launch.island_relaunches max_n {ISLAND_MAX_RELAUNCHES})")
+            self._fleet("island_relaunch_limit", rec["name"], reason=why, relaunches=len(times),
+                        window_s=ISLAND_RELAUNCH_WINDOW_S, limit=ISLAND_MAX_RELAUNCHES)
+            print(f"[launcher] CRITICAL: {rec['name']}: failed again after {why}; given up, not "
+                  "relaunched (each relaunch bills a machine; the pool goes on without it)", file=sys.stderr)
+            # given up for good: its record says abandoned, and a launch whose islands all
+            # ended this way is not started again (IslandsFailedForGood)
+            rec["decision"] = lifecycle.Decision(lifecycle.INFRA, lifecycle.FAIL, lifecycle.ABANDONED,
+                                                 f"relaunch limit: {why}")
+            self._abandon(rec, 0.0, reason=f"relaunch limit: {why}")
+            return True
+        rec["relaunch_times"] = [*times, now]
+        return False
 
     def _source_decision(self, rec):
         """The island source's own decision for its ended incarnation (``ops.island_decision``:
@@ -1028,6 +1129,8 @@ class FleetController:
         # relaunched forever while the rest of the fleet waits on the syncer).
         rec["failures"] = rec.get("failures", 0) + 1  # within this recovery window
         rec.pop("recovered_at", None)
+        if not is_syncer and self.elastic and self._relaunch_budget_spent(rec):
+            return
         print(
             f"[launcher] {rec['name']}: {reason}; starting recovery "
             f"(timeout {self.recover_timeout}s)",

@@ -71,7 +71,7 @@ from .launch.fleet import (
     CONFIG_ERROR_EXIT, CONTAINER_CHANGED_EXIT, FAILED_RUN_DRAIN_S,
     ISLAND_FAILED_EXIT, RUN_STALLED_EXIT, RUN_STOPPED_EXIT, TEARDOWN_UNVERIFIED_EXIT,
     TRAINER_GAVE_UP_EXIT, FixedRosterIslandAbandoned, FleetController, IslandConfigError,
-    RunStalled, RunStopRequested, controller_fixed_roster, effective_stall_timeout,
+    IslandsFailedForGood, RunStalled, RunStopRequested, controller_fixed_roster, effective_stall_timeout,
 )
 from .launch import trips
 from .launch.teardown import collect_diagnostics_parallel, teardown_island
@@ -1136,6 +1136,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             recorder=recorder,
             incarnations={name: {"incarnation": a.incarnation, "relaunches": a.relaunches, "adopted": a.adopt}
                           for name, a in adoption.items()},
+            # why an island stopped, from its own tape records (a breaker, a strict check, a
+            # refusal: never relaunched), not from its rank's exit status
+            stop_probe=(
+                (lambda name: event_collectors[name].island_stop if name in event_collectors else None)
+                if echo_names else None
+            ),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -1220,6 +1226,18 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 print(f"[launcher] event tape incomplete for {no_sync_incomplete} "
                       "(expected after an island failure)", file=sys.stderr)
             return CONTAINER_CHANGED_EXIT if container_changed() else ISLAND_FAILED_EXIT
+        except IslandsFailedForGood as error:
+            # Every island ended on a deterministic stop (a trainer breaker, a strict check, a
+            # refusal). A fleet island's launch says so with ISLAND_STOP_EXIT, so the run's
+            # trainer worker does not start it again; any other launch raises as before.
+            if getattr(args, "rl_fleet_role", None) != "island" or container_changed():
+                raise
+            from .config_errors import ISLAND_STOP_EXIT
+
+            print(f"[launcher] ERROR: {error}: {error.reasons}; not relaunched (exit {ISLAND_STOP_EXIT})",
+                  file=sys.stderr)
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return ISLAND_STOP_EXIT
         except Exception as error:
             if not container_changed():
                 raise

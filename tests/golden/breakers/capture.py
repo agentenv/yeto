@@ -183,6 +183,11 @@ def launch_values(argv: list[str]) -> dict[str, Any]:
                                                      else DEFAULT_TIMEOUT_S)
     out["launch.provider_timeout.retries_n"] = int(args.modal_retries if args.modal_retries is not None
                                                    else DEFAULT_RETRIES)
+    # yeto.launch.fleet: an island pool island's relaunches (native constants, no knob)
+    from yeto.launch.fleet import ISLAND_MAX_RELAUNCHES, ISLAND_RELAUNCH_WINDOW_S
+
+    out["launch.island_relaunches.max_n"] = ISLAND_MAX_RELAUNCHES
+    out["launch.island_relaunches.window_s"] = ISLAND_RELAUNCH_WINDOW_S
     out["switch.cost_guard"] = guard
     return out
 

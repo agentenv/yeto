@@ -32,8 +32,8 @@ def _island(tmp_path, **kw):
 
 
 def test_one_marker_list_for_every_source():
-    assert ssh_resident.STRICT_MARKERS[:-1] == lc.STRICT_MARKERS
-    assert ssh_resident.STRICT_MARKERS[-1] == "[yeto-config-error]"
+    assert ssh_resident.STRICT_MARKERS[:-2] == lc.STRICT_MARKERS
+    assert ssh_resident.STRICT_MARKERS[-2:] == ("[yeto-config-error]", "[yeto-island-stop]")
 
 
 def test_a_running_island_has_no_decision(tmp_path):
@@ -69,6 +69,18 @@ def test_a_rank_exit_10_is_a_configuration_error(tmp_path):
     assert str(ops.job_status("isl", 0)) == "FAILED"
     d = ops.island_decision("isl", 0)
     assert (d.cause, d.action, d.state) == ("config_error", "fail", "failed")
+
+
+def test_a_rank_exit_11_is_a_deterministic_stop(tmp_path):
+    """A trainer breaker, a strict check or a refusal stopped the island: never relaunched."""
+    from yeto.config_errors import ISLAND_STOP_EXIT
+
+    cluster, ops = _island(tmp_path)
+    cluster.exit("b300-0", 0, ISLAND_STOP_EXIT)
+    assert wait_for(lambda: ops.islands["isl"].job.procs[0].poll() is not None)
+    assert str(ops.job_status("isl", 0)) == "FAILED"
+    d = ops.island_decision("isl", 0)
+    assert (d.cause, d.action, d.state) == ("breaker", "fail", "failed")
 
 
 def test_node0_markers_decide(tmp_path):

@@ -42,7 +42,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from yeto.config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER
+from yeto.config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER, ISLAND_STOP_EXIT, ISLAND_STOP_MARKER
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODAL_TOKEN_PATH = "~/.modal.toml"
@@ -1142,9 +1142,11 @@ def _which(cmd: str) -> str | None:
 def island_main(cfg_json: str) -> int:
     """Body of the Modal function: runs in the container. Returns the run
     script's exit code (nonzero raises so Modal records the failure, except
-    :data:`~yeto.config_errors.CONFIG_ERROR_EXIT`: returned, so Modal's retries do
-    not run a configuration the island refused again; :meth:`ModalOps.status`
-    reads that return value as FAILED)."""
+    :data:`~yeto.config_errors.CONFIG_ERROR_EXIT` and
+    :data:`~yeto.config_errors.ISLAND_STOP_EXIT`: returned, so Modal's retries do
+    not run a configuration the island refused, or an island a trainer breaker or a
+    strict check stopped, again; :meth:`ModalOps.status` reads that return value as
+    FAILED)."""
     cfg = ModalIslandConfig.from_json(cfg_json)
     if cfg.num_nodes > 1:
         import modal
@@ -1328,6 +1330,12 @@ def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dic
         # A returned value ends the Modal call without a retry (a raise would be retried).
         print(f"[modal-island {cfg.learner_id}] rank {rank} exited with {code}: configuration "
               "error, not retried", flush=True)
+        return code
+    if code == ISLAND_STOP_EXIT:
+        # a trainer breaker, a strict check or the syncer's refusal stopped the island: a retry
+        # stops the same way and bills the container meanwhile. Returned, not raised: no retry.
+        print(f"[modal-island {cfg.learner_id}] rank {rank} exited with {code}: deterministic stop "
+              f"({ISLAND_STOP_MARKER} in its log), not retried", flush=True)
         return code
     if code != 0:
         raise RuntimeError(f"island {cfg.learner_id} rank {rank} exited with {code}")
@@ -1890,6 +1898,17 @@ class ModalOps:
                 print(f"[modal] call {call_id} ended as FAILED: {_exc_text(exc)}", file=sys.stderr)
             return "FAILED"
         errors.pop(call_id, None)
+        if result == ISLAND_STOP_EXIT and not isinstance(result, bool):
+            # island_main returns (does not raise) a deterministic stop: no Modal retry
+            logged = getattr(self, "_failure_logged", None)
+            if logged is None:
+                logged = self._failure_logged = set()
+            if call_id not in logged:
+                logged.add(call_id)
+                print(f"[modal] call {call_id} ended as FAILED: a deterministic stop (exit {ISLAND_STOP_EXIT}, "
+                      f"{ISLAND_STOP_MARKER} in its log: a trainer breaker, a strict check or a refusal)",
+                      file=sys.stderr)
+            return "FAILED"
         if result == CONFIG_ERROR_EXIT and not isinstance(result, bool):
             # island_main returns (does not raise) a configuration error: no Modal retry
             logged = getattr(self, "_failure_logged", None)
@@ -2368,7 +2387,7 @@ class ModalIslandOps:
             for line in self.ops.tail_logs(job_id, entries=400):
                 text = str(line).strip()
                 if "[yeto-rl-strict-failure]" in text or "StrictRlInvariantError:" in text \
-                        or CONFIG_ERROR_MARKER in text \
+                        or CONFIG_ERROR_MARKER in text or ISLAND_STOP_MARKER in text \
                         or any(m in text for m in SYNCER_REFUSAL_MARKERS):
                     return text
         except Exception:  # noqa: BLE001

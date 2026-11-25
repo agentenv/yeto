@@ -166,6 +166,7 @@ later (see [CHANGELOG.md](../CHANGELOG.md)).
 | `launch.nc_lease_overdue` | alert | grace_s=300 | warn | yes | trainer.argv --nc-lease-overdue-minutes | alert only: the NC pool owns its leases; off with the cost guard |
 | `launch.stall` | breaker | timeout_s=900 | stop | yes | trainer.argv --rl-stall-timeout | RunStalled, exit 6; the launcher tears the run down |
 | `launch.trainer_failures` | retry_budget | max_n=3 | stop | no | trainer.argv --rl-trainer-max-failures | the trainer scheduler releases the trainer and stops the run (exit 8) |
+| `launch.island_relaunches` | retry_budget | max_n=3 window_s=3600 | stop | no | - | an island pool (elastic) island that keeps failing is abandoned (a CRITICAL line and an island_relaunch_limit fleet event) instead of being ordered again; the pool goes on. An island a trainer breaker, a strict check or a refusal stopped is never relaunched at all |
 | `launch.provider_timeout` | breaker | timeout_s=86400 retries_n=10 | stop | no | trainer.argv --modal-timeout-s, trainer.argv --modal-retries | enforced by the provider, not by yeto: no rl_breaker event |
 | `launch.teardown_verify` | invariant | - | stop | no | - | after teardown every Modal app row of the run is stopped with 0 tasks (else exit 5) and every sky cluster is confirmed gone (else the head stays up) |
 

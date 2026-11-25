@@ -2929,6 +2929,25 @@ def config_error_exit(error: BaseException, stream=None) -> int | None:
     return CONFIG_ERROR_EXIT
 
 
+def island_stop_exit(error: BaseException, stream=None) -> int | None:
+    """:data:`~yeto.config_errors.ISLAND_STOP_EXIT` when ``error`` is a deterministic stop of
+    the island (a trainer breaker's stop such as ``trainer.sample_wait``, a strict failure, the
+    syncer's refusal: ``yeto.launch.island_lifecycle.island_stop_line``), after its traceback and
+    the ``[yeto-island-stop]`` line the launcher's log probes read. A relaunch would stop the
+    same way and bill a machine meanwhile, so the exit is not retried (Modal's function retries
+    and the fleet controller both see it). None for any other error (raised as before)."""
+    from yeto.config_errors import ISLAND_STOP_EXIT
+    from yeto.launch.island_lifecycle import island_stop_line
+
+    line = island_stop_line(error)
+    if line is None:
+        return None
+    stream = sys.stderr if stream is None else stream
+    traceback.print_exception(error, file=stream)
+    print(line, file=stream, flush=True)
+    return ISLAND_STOP_EXIT
+
+
 def _rejoin_exhausted(error: BaseException | None) -> bool:
     seen = set()
     while error is not None and id(error) not in seen:
@@ -2953,6 +2972,8 @@ if __name__ == "__main__":
             print(f"[yeto-island] elastic re-JOIN exhausted: {error}", file=sys.stderr)
             raise SystemExit(ELASTIC_REJOIN_FAILED_EXIT) from error
         code = config_error_exit(error)
+        if code is None:
+            code = island_stop_exit(error)
         if code is not None:
             raise SystemExit(code) from error
         raise
