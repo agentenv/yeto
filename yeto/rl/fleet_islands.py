@@ -136,11 +136,24 @@ def compile_island(cfg: dict[str, Any], plan: Any, *, k: int, name: str, gpu: st
                                    trainer_usd_per_h=price, sample_wait_s=flags.get("sample_wait_s"))
     trainer_argv = [str(a) for a in cfg["fleet"]["trainer_argv"]]
     argv = il.island_argv(trainer_argv, island, plan, learners=len(plan.islands),
-                          section_argv=fleet_mod._trainer_section_argv(cfg, trainer_argv))  # noqa: SLF001
+                          section_argv=il.island_section_argv(cfg, trainer_argv))
     argv += il.member_table_flags(k)
     member = il.trainer_member(island, plan, argv, prefix=f"{il.fleet_prefix(trainer_argv)}-i{k}",
                                fleet_shape=il.fleet_shape(trainer_argv))
     return member, members
+
+
+def run_budget_usd(cfg: dict[str, Any]) -> float | None:
+    """The run's ``run.budget`` in dollars, wherever the run config sets it (``budget.usd``
+    or the ``breakers`` section), resolved as ``yeto run up`` resolves it; None when off."""
+    from yeto import breakers  # noqa: PLC0415
+
+    resolved = breakers.resolve(breakers.Sources.from_run_config(cfg), strict=False, layers=("run", "launch"))
+    usd = resolved.get("run.budget.usd") if resolved.enabled("run.budget") else None
+    if usd is None:
+        budget = cfg.get("budget") if isinstance(cfg.get("budget"), dict) else {}
+        usd = budget.get("usd")
+    return None if usd is None else float(usd)
 
 
 def add(doc: dict[str, Any], member: dict[str, Any], pools: list[dict[str, Any]]) -> None:
@@ -242,10 +255,9 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
                 m.pop(key, None)
         launch_member = None
         if args.island_command == "add":
-            budget = run.cfg.get("budget") if isinstance(run.cfg.get("budget"), dict) else {}
-            if args.usd_per_h is None and budget.get("usd") is not None:
+            if args.usd_per_h is None and run_budget_usd(run.cfg) is not None:
                 raise IslandChangeError("give the island's trainer price (--usd-per-h): the run has a budget "
-                                        "(budget.usd), and an island without a price would bill nothing")
+                                        "(run.budget), and an island without a price would bill nothing")
             with open(args.samplers) as fh:
                 samplers = json.load(fh)
             objects = run._objects()  # noqa: SLF001

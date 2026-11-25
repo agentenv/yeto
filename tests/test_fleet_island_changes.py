@@ -213,6 +213,14 @@ def test_an_add_without_a_price_is_refused_when_the_run_has_a_budget(fleet_store
     assert "--usd-per-h" in capsys.readouterr().err and objects.read(claim_key(2)) is None
 
 
+
+def test_a_budget_set_in_the_breakers_section_also_needs_a_price():
+    cfg = {"breakers": {"run": {"budget": {"usd": 50}}}}
+    assert fleet_islands.run_budget_usd(cfg) == 50.0
+    assert fleet_islands.run_budget_usd({"budget": {"usd": 20}}) == 20.0
+    assert fleet_islands.run_budget_usd({}) is None
+
+
 def test_a_claim_whose_sub_directory_has_data_is_not_taken_again(fleet_store, monkeypatch):
     cfg, objects, store, run_cli, samplers = fleet_store
     real = store.update
