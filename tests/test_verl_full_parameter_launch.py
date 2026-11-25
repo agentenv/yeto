@@ -38,7 +38,7 @@ MILES_ONLY = {"--reward-sha256", "--source-sha256",
               "--over-sampling-batch-size", "--rl-distributed-timeout-minutes", "--optimizer-steps",
               "--completed-groups-path", "--actor-num-nodes", "--actor-num-gpus-per-node",
               "--tensor-parallel", "--pipeline-parallel", "--rollout-num-gpus-per-engine",
-              "--sglang-mem-fraction-static", "--miles-root", "--rl-expected-algorithm-sha256",
+              "--sglang-mem-fraction-static", "--miles-root",
               "--trust-remote-code"}
 
 
