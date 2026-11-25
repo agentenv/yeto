@@ -523,6 +523,15 @@ def breaker_findings(cfg: dict[str, Any]) -> list[Any]:
     return breakers.preflight(resolved, sources=sources)
 
 
+def _cap_hours(cap_ucr: float, hourly: float, target: int) -> str:
+    """How long a run spend cap lasts at the pool's steady rate; a pool whose nodes cost
+    nothing (own nodes over ssh, an explicit price of 0) never reaches it."""
+    steady = hourly * target
+    if steady <= 0:
+        return "no billed node: the cap never trips"
+    return f"{cap_ucr / steady:.1f} h at the steady rate"
+
+
 def dry_run(cfg: dict[str, Any], config_path: str) -> int:
     """Validate the config and print the orders and the spend the pool would make;
     orders nothing and calls no National Compute API."""
@@ -655,14 +664,12 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
     if ecfg.max_run_spend_ucr is None and ecfg.max_run_spend_usd is None:
         notes.append("elastic.max_run_spend_ucr is unset (and max_run_spend_usd): the run's spend has no cap")
     if ecfg.max_run_spend_ucr is not None:
-        print(f"run spend cap: {ecfg.max_run_spend_ucr} ucr ({ecfg.max_run_spend_ucr / hourly / pc.target:.1f} h "
-              f"at the steady rate)")
+        print(f"run spend cap: {ecfg.max_run_spend_ucr} ucr ({_cap_hours(ecfg.max_run_spend_ucr, hourly, pc.target)})")
     if ecfg.max_run_spend_usd is not None:
         from ..pool.money import to_ucr  # noqa: PLC0415
 
         cap = to_ucr(float(ecfg.max_run_spend_usd), "usd")
-        print(f"run spend cap: ${float(ecfg.max_run_spend_usd):.2f} ({cap / hourly / pc.target:.1f} h at the steady "
-              "rate)")
+        print(f"run spend cap: ${float(ecfg.max_run_spend_usd):.2f} ({_cap_hours(cap, hourly, pc.target)})")
     if not external:
         print(f"stops ordering and drains below a balance of {pc.stop_below_ucr} ucr")
     from yeto.breakers.rules import format_finding  # noqa: PLC0415

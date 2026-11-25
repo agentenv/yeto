@@ -336,6 +336,30 @@ def test_an_ssh_pool_dry_runs_at_zero_usd(tmp_path, monkeypatch, capsys):
 
 
 
+@pytest.mark.parametrize("cap", [{"max_run_spend_usd": 50}, {"max_run_spend_ucr": 1000000}])
+def test_an_ssh_pool_with_a_run_spend_cap_dry_runs_to_the_end(cap, tmp_path, monkeypatch, capsys):
+    """INT2 bug 24: an own-node pool (no billed node) with a spend cap divided the cap by a
+    steady rate of 0 (ZeroDivisionError): the dry-run ended before its problems and its
+    "nothing ordered"."""
+    from yeto.launch.nc import pool_run
+
+    monkeypatch.setattr(sp, "load_profiles", lambda _p: [npu_node()])
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "state"))
+    cfg = pool_cfg(tmp_path, inventory="inv.yaml")
+    cfg["elastic"] = dict(cap)
+    pool_run.dry_run(cfg, "pool.json")
+    out = capsys.readouterr().out
+    caps = [line for line in out.splitlines() if line.startswith("run spend cap")]
+    assert len(caps) == 1 and caps[0].endswith("(no billed node: the cap never trips)")
+    assert "nothing ordered" in out
+
+
+def test_a_priced_pools_run_spend_cap_line_is_unchanged():
+    from yeto.launch.nc import pool_run
+
+    assert pool_run._cap_hours(48_000_000, 24_000_000, 2) == "1.0 h at the steady rate"  # noqa: SLF001
+
+
 # -- the stop on a node, run in bash with a fake process table (kill / ps are shell functions,
 #    /proc/<pid>/environ files under tmp_path): F10 review, a stale log line and a reused PID
 
