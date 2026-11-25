@@ -182,6 +182,20 @@ def _contains_answer(text: str, answer: str) -> bool:
     return answer in text
 
 
+# Average UTF-8 bytes per token, an upper estimate for the built-in GSM8K fixed prompts
+# with the tokenizers the samplers serve. It is not a per-token maximum: long whitespace
+# runs, long words and multi-character CJK tokens exceed it. For those prompts the
+# estimate below is a lower bound, so the static window check does not refuse a probe
+# that fits; a context just above the bound can still fail on the machine.
+PROBE_PROMPT_BYTES_PER_TOKEN = 8
+
+
+def prompt_tokens_lower_bound(text: str) -> int:
+    """An estimate of ``text``'s prompt tokens without a tokenizer (a lower bound for the
+    built-in GSM8K prompts, see ``PROBE_PROMPT_BYTES_PER_TOKEN``)."""
+    return max(1, -(-len(str(text).encode()) // PROBE_PROMPT_BYTES_PER_TOKEN))
+
+
 @dataclass
 class PostLoadChecks:
     """The three post-load checks (module doc). Thresholds that are not known
@@ -203,6 +217,23 @@ class PostLoadChecks:
     reference_probe: Sequence[float] | None = None  # round-0 per-pair mean log-probs
     _last_probe: list[float] | None = field(default=None, init=False, repr=False)
     _pending_probe: list[float] | None = field(default=None, init=False, repr=False)
+
+    def probe_window_problem(self, max_model_len: int | None) -> str | None:
+        """The post-load probe asks the engine for ``fixed_max_tokens`` output tokens after
+        each fixed prompt: that must fit the engine context ``max_model_len``. Checked
+        before anything is ordered (``nc pool --dry-run``, ``yeto run up`` preflight); the
+        prompt counts with a lower bound of its tokens (:func:`prompt_tokens_lower_bound`).
+        None: it fits, or no context length / no fixed prompt is known."""
+        if max_model_len is None or not self.fixed_prompts:
+            return None
+        prompt = max(prompt_tokens_lower_bound(p.prompt) for p in self.fixed_prompts)
+        need = int(self.fixed_max_tokens) + prompt
+        if need < int(max_model_len):
+            return None
+        return (f"the post-load probe asks for checks.fixed_max_tokens {int(self.fixed_max_tokens)} output tokens "
+                f"after a fixed prompt of at least {prompt} tokens ({need} >= the engine's max_model_len "
+                f"{int(max_model_len)}): every sampler would fail its start checks after the machine is up; "
+                f"lower checks.fixed_max_tokens (to at most {int(max_model_len) - prompt - 1}) or raise max_model_len")
 
     def pairs(self) -> list[tuple[str, str]]:
         if self.probe_pairs is not None:

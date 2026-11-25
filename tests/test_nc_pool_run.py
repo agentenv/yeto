@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -365,6 +366,82 @@ def test_an_auto_backlog_cap_is_resolved_for_the_node_and_printed(tmp_path, caps
     spec = pool_run.check_sampler_spec(cfg)
     assert spec["max_backlog_groups"] == 16 and sample_roles.AUTO_BACKLOG_NOTE_KEY not in spec
     assert entry.backlog_cap(spec) == (16, None)
+
+
+def test_a_probe_that_does_not_fit_the_engine_context_is_refused_before_any_order(tmp_path, capsys):
+    """The post-load probe asks for checks.fixed_max_tokens (default 2048) output tokens
+    after a fixed prompt: a 2048-token engine fails every sampler's start checks once
+    the machine is up. ``pool --dry-run`` (which ``yeto run up`` preflight runs for each
+    pool) and the pool loop refuse it before anything is ordered."""
+    from yeto.config_errors import ConfigError
+
+    doc = json.loads(EXAMPLE_SPEC.read_text())
+    doc["reward"], doc["reward_kind"] = "yeto.rl.numeric_answer_reward:score", "miles"
+    doc["engine"]["server"]["max_model_len"] = 2048
+    doc["sampling"]["max_tokens"], doc["max_prompt_tokens"] = 1024, 512
+    cfg, path = _cfg(tmp_path, spec_doc=doc)
+    with pytest.raises(ConfigError, match=r"checks.fixed_max_tokens 2048 .*max_model_len 2048"):
+        pool_run.check_sampler_spec(cfg)
+    assert cli.main(["pool", "--config", path, "--dry-run"]) == 1
+    assert "lower checks.fixed_max_tokens" in capsys.readouterr().out
+    clock = Clock()
+    cloud = Cloud(clock)
+    with pytest.raises(SystemExit, match="CONFIGURATION ERROR.*fixed_max_tokens"):
+        pool_run.run_pool(cfg, path, interval=60, pool=_pool(clock, cloud), signals=Signals("SIGTERM"))
+    assert not cloud.kinds("order")
+    doc["checks"] = {**doc.get("checks", {}), "fixed_max_tokens": 1024}  # what the message asks for
+    cfg, path = _cfg(tmp_path, spec_doc=doc)
+    pool_run.check_sampler_spec(cfg)
+
+
+def test_a_refused_restart_names_the_members_an_earlier_loop_left_billing(tmp_path, capsys):
+    """The spec refusal exits before the pool state is restored: a restart of a pool
+    with live members still prints the billing banner for them."""
+    doc = json.loads(EXAMPLE_SPEC.read_text())
+    doc["reward"], doc["reward_kind"] = "yeto.rl.numeric_answer_reward:score", "miles"
+    doc["engine"]["server"]["max_model_len"] = 2048
+    doc["sampling"]["max_tokens"], doc["max_prompt_tokens"] = 1024, 512
+    cfg, path = _cfg(tmp_path, spec_doc=doc)
+    state = cli.pool_state_path(cfg)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"members": [
+        {"account": 1, "ticket": "t1", "shard": "nc-0", "state": "ready", "lease_until": time.time() + 3600},
+        {"account": 4, "ticket": "t2", "shard": "nc-1", "state": "gone"}]}))
+    clock = Clock()
+    cloud = Cloud(clock)
+    with pytest.raises(SystemExit, match="CONFIGURATION ERROR.*fixed_max_tokens"):
+        pool_run.run_pool(cfg, path, interval=60, pool=_pool(clock, cloud), signals=Signals("SIGTERM"))
+    out = capsys.readouterr().out
+    assert "STILL BILLING: 1 " in out and "ticket t1" in out and "ticket t2" not in out
+    assert "refused restart" in out and "pool-stop --config" in out
+    assert not cloud.kinds("order")
+
+
+def test_the_probe_window_check_counts_the_prompt_and_spares_real_contexts():
+    from yeto.rl.engine.sampler_checks import PostLoadChecks, prompt_tokens_lower_bound
+
+    checks = PostLoadChecks()
+    prompt = max(prompt_tokens_lower_bound(p.prompt) for p in checks.fixed_prompts)
+    assert 1 < prompt < 100  # a lower bound of the GSM8K probe prompts (no tokenizer here)
+    assert checks.probe_window_problem(2048) is not None  # 2048 output tokens leave no room for the prompt
+    assert checks.probe_window_problem(2048 + prompt) is not None  # >=: the prompt must fit too
+    assert checks.probe_window_problem(2048 + prompt + 1) is None
+    assert checks.probe_window_problem(None) is None  # no engine context known: nothing to compare
+    assert PostLoadChecks(fixed_prompts=()).probe_window_problem(16) is None  # no probe
+    assert PostLoadChecks(fixed_max_tokens=1024).probe_window_problem(2048) is None
+    for context in (32_768, 262_144, 1_048_576):  # the customer K3.1 contexts (1M agentic included)
+        assert checks.probe_window_problem(context) is None
+
+
+@pytest.mark.parametrize("name", sorted(p.name for p in EXAMPLE_SPEC.parent.glob("*spec*.json")
+                                        if "algorithm" not in p.name))
+def test_every_example_spec_fits_its_probe(name):
+    from yeto.rl.compaction import spec_max_model_len
+    from yeto.rl.engine.sampler_checks import PostLoadChecks
+
+    doc = json.loads((EXAMPLE_SPEC.parent / name).read_text())
+    assert PostLoadChecks(**dict(doc.get("checks") or {})).probe_window_problem(spec_max_model_len(doc)) is None
+    pool_run.check_probe_window(doc)
 
 
 def test_the_local_build_applies_the_data_path_defaults(tmp_path):
