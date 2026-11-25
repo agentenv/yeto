@@ -385,3 +385,85 @@ def test_a_scale_down_for_the_mix_retires_a_starting_member_before_a_ready_one(t
     fleet.run(60)
     assert starting[0].retiring_since is not None or starting[0].state in (GONE, DRAINING, FENCING)
     assert fleet.offer_counts("spot") == {"a": 1, "b": 1}, "the ready member on a keeps running"
+
+
+# -- each of the pool's own reasons, including after an order breaker refusal (review of #813, round 2)
+
+
+def _after_a_breaker_refusal(tmp_path, accounts=ACCOUNTS):
+    """A spot pool whose last refusal was its order breaker's (the market sold out)."""
+    fleet = Fleet(tmp_path)
+    cloud = OfferCloud(fleet.clock, ["a"])
+    pool = fleet.add("spot", cloud, accounts=accounts)
+    cloud.sold_out = {"a"}
+    assert b.ScaleFileSink(fleet.cfgs).set_target("spot", 2, offers={"spot/a": 2}, refill="spot/a", running={})
+    for _ in range(60):
+        fleet.run(60)
+        if pool._refused_by_breaker:
+            break
+    assert pool._refused.startswith("breaker") and pool.order_block() is None, "the market: no block"
+    return fleet, pool, cloud
+
+
+def test_a_balance_floor_after_a_breaker_refusal_is_the_pools_own(tmp_path):
+    fleet, pool, cloud = _after_a_breaker_refusal(tmp_path)
+    cloud.bal = pool.config.stop_below_ucr + 1
+    fleet.run(60)
+    assert pool.order_block().startswith("balance below the order floor")
+    assert plans.blocked_pools(fleet.pools) == {"spot": pool.order_block()}
+
+
+def test_a_shard_limit_after_a_breaker_refusal_is_the_pools_own(tmp_path):
+    fleet, pool, cloud = _after_a_breaker_refusal(tmp_path)
+    cloud.sold_out = set()
+    pool.config.shard_limit = pool.next_shard  # no shard left for a new node
+    for _ in range(60):
+        fleet.run(60)
+        if pool.order_block():
+            break
+    assert pool.order_block().startswith("shard ") and "past shard_limit" in pool.order_block()
+
+
+def test_a_handoff_waiting_for_its_fence_after_a_breaker_refusal_is_the_pools_own(tmp_path):
+    from yeto.launch.pool.island_pool import Member
+
+    fleet, pool, cloud = _after_a_breaker_refusal(tmp_path)
+    cloud.sold_out = set()
+    fleet.clock.t = max(fleet.clock.t, pool.breaker.open_until) + 1  # the breaker lets an order through
+    pool.members.append(Member(account=ACCOUNTS[-1], ticket="t-origin", shard="spot-9", state=FENCING,
+                               fence_pending="spot-9"))  # its fence still owed, never tried: nothing continues it
+    pool.pending = [{"data_slot": None, "shard": "spot-9", "lost": True, "from": "t-origin"}]
+    assert pool._order() is None
+    assert "handoff" in pool.order_block() and "fence" in pool.order_block()
+
+
+def test_no_free_slot_is_the_pools_own(tmp_path):
+    fleet = Fleet(tmp_path)
+    pool = fleet.add("spot", OfferCloud(fleet.clock, ["a"]), accounts=ACCOUNTS[:2])
+    pool.config.target = 3  # more nodes than slots (no scale file: the pool keeps it)
+    fleet.run(600)
+    assert len(fleet.counted("spot")) == 2
+    assert pool.order_block().startswith("no free slot")
+    assert plans.blocked_pools(fleet.pools) == {"spot": pool.order_block()}
+
+
+def test_a_broker_count_above_the_pools_slots_buys_no_on_demand(tmp_path):
+    fleet = Fleet(tmp_path)
+    fleet.add("spot", OfferCloud(fleet.clock, ["a"]), accounts=ACCOUNTS[:2])  # two slots
+    od_cloud = Cloud(fleet.clock)
+    fleet.add("od", od_cloud)
+    want = {"n": 2}
+
+    def offers():
+        return [spot(fleet, "a", 10.0, "r1"),
+                b.Offer(pool="od", name="x", island="0", tier=b.ON_DEMAND, provider="sky", usd_h=30.0)]
+
+    loop = b.Broker(b.BrokerConfig(interval_s=300, policy=b.Policy(on_demand_after_s=1800)),
+                    snapshot(fleet, offers, want=lambda: want["n"]), b.ScaleFileSink(fleet.cfgs), clock=fleet.clock)
+    fleet.run(1800, loop)
+    assert fleet.offer_counts("spot") == {"a": 2}
+    want["n"] = 4  # pool-scale refuses 4 on two slots: the pool keeps 2
+    fleet.run(5400, loop)
+    assert fleet.offer_counts("spot") == {"a": 2} and od_cloud.kinds("order") == []
+    assert "spot" in loop.refused and loop.state.spot_gap_since == {}
+    assert loop.last.targets == {"spot/a": 4, "od/x": 0}

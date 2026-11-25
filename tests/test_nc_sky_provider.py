@@ -499,6 +499,34 @@ def test_a_plan_naming_an_offer_by_its_older_key_orders_that_offer():
     assert plans.next_offer(plan, [west], known=[o.key for o in p.offers]) == west
 
 
+def test_a_pool_reads_a_plan_naming_an_offer_by_its_older_key_as_that_offer(tmp_path):
+    from yeto.launch.rollout import offers
+
+    two = [{"resources": {"infra": "aws/us-east-1", "accelerators": "L4:1", "use_spot": True}, "price_usd_h": 0.4},
+           {"resources": {"infra": "aws/us-west-2", "accelerators": "L4:1", "instance_type": "g6.xlarge",
+                          "use_spot": True}, "price_usd_h": 0.5}]
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    sky = FakeSky()
+    ops = SkyOps(SkyProvider("run-s", slots=[1, 2], offers=offers.offers_from_config({"offers": two}), sky=sky,
+                             clock=clock), sky, clock)
+    ops.provider = ops.p
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-s")
+    pool = IslandPool(PoolConfig(target=0, accounts=[1, 2], shard_base="s", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=8)),
+                      ops, clock=clock, log=lambda m: None, events=events)
+    pool.scale_path = tmp_path / "scale.json"
+    older, west = "L4:1@aws/us-west-2/spot", ops.p.offers[1].key
+    pool.scale_path.write_text(json.dumps({"target": 2, "seq": 1, "source": "auto",
+                                           "broker": {"offers": {f"s/{older}": 2}, "refill": f"s/{older}",
+                                                      "running": {}}}))
+    for _ in range(4):
+        pool.tick()
+        t[0] += 60
+    assert [ops.p.offer_of(m.ticket) for m in pool.counted()] == [west, west], "the older key is that offer"
+    assert pool._plan_orders == {west: 2}
+
+
 def test_a_pool_with_a_broker_plan_orders_at_its_offer_on_the_real_provider_and_without_one_at_the_cursor(tmp_path):
     t = [0.0]
     clock = lambda: t[0]  # noqa: E731
