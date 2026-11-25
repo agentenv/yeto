@@ -202,6 +202,8 @@ def classify(record: dict) -> str:
 HOST_SAMPLE_EVENT = "modal_host_sample"
 NEUTRAL_POOL_PREFIX = "rl_pool_"  # yeto.launch.pool.status.NEUTRAL_PREFIX (no import: the dashboard stands alone)
 STOP_SLACK_S = 5.0
+# a pool's release time (its host's clock) against a sampler's events (the sampler's host's clock)
+RELEASE_SKEW_S = 60.0
 NODE_SERIES_MAX = 20000
 NODE_SERIES_POINTS = 300
 # rl_timeline_span task -> page phase: R rollout / T training / S post-train sync / P publish
@@ -669,12 +671,13 @@ class Reducer:
         wrote_after = last is not None and out["ts"] is not None and last > out["ts"] + STOP_SLACK_S
         held = member is not None and member != fleet_islands.GONE  # the pool still holds (bills) its machine
         released = member == fleet_islands.GONE
-        # released, yet the sampler writes after the release (or, release time not recorded, still
-        # writes now): a copy runs on, or the release did not take; it may be billed
+        # released, yet the sampler still writes now, after the release: a copy runs on, or the release
+        # did not take; it may be billed. The release time is the pool's clock and the sampler's last
+        # event its own: compared with RELEASE_SKEW_S; and only a sampler writing now counts, so a
+        # skewed last round of a sampler that did stop clears once it is quiet (then: left)
         rel = rec.get("released_at")
-        active = released and wrote_after and (
-            last > rel + STOP_SLACK_S if rel is not None
-            else now is not None and now - last <= self.thresholds["heartbeat_warn_s"])
+        writing_now = now is not None and now - last <= self.thresholds["heartbeat_warn_s"] if last is not None else False
+        active = released and wrote_after and writing_now and (rel is None or last > rel + RELEASE_SKEW_S)
         if not (wrote_after or held) or (released and not active):
             if released:
                 out["detail"] += "; its pool released the machine"

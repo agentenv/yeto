@@ -213,6 +213,30 @@ def test_pool_gone_but_the_sampler_still_writing_is_active_and_alerted_at_once(t
     assert [a["sev"] for a in r.overview(now=later)["alerts"] if a["rule"] == "pool_removed_running"] == [0]
 
 
+@pytest.mark.parametrize("skew", [3.0, 10.0, 30.0, 55.0])
+def test_a_skewed_clock_does_not_turn_a_drain_then_release_into_an_alert(tmp_path, skew):
+    """The sampler's last round 2 s before the pool's release, its host's clock ``skew`` s ahead:
+    left, no alert, now and an hour later."""
+    r = _reducer(rounds_after=2)  # drained: two rounds after its shard retired, the last at RETIRED_AT + 120
+    rel = RETIRED_AT + 120 + 2 - skew  # on the sampler's clock its last round reads skew - 2 s after the release
+    st = _store(tmp_path, member="gone", charged_to=rel)
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(st))))
+    for now in (RETIRED_AT + 180, RETIRED_AT + 3600):
+        assert _card(r, ADD, now)["status"] == "left"
+        assert not [a for a in r.overview(now=now)["alerts"] if a["rule"] == "pool_removed_running"]
+
+
+def test_the_pool_gone_alert_clears_once_the_sampler_is_quiet(tmp_path):
+    r = _reducer(rounds_after=12)
+    st = _store(tmp_path, member="gone", charged_to=RETIRED_AT + 30)
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(st))))
+    writing = RETIRED_AT + 60 * 12 + 10
+    assert [a for a in r.overview(now=writing)["alerts"] if a["rule"] == "pool_removed_running"]
+    quiet = RETIRED_AT + 60 * 12 + 5000  # it stopped: the release took after all
+    assert _card(r, ADD, quiet)["status"] == "left"
+    assert not [a for a in r.overview(now=quiet)["alerts"] if a["rule"] == "pool_removed_running"]
+
+
 def test_pool_gone_without_a_release_time_judges_by_whether_it_still_writes_now(tmp_path):
     r = _reducer(rounds_after=12)
     r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(_store(tmp_path, member="gone")))))
