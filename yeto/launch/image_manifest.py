@@ -144,7 +144,8 @@ def manifest_status(ref: str, login: dict[str, str] | None = None, *, timeout: f
         return MISSING, f"{host}/{repo} has no manifest {digest}"
     if code == 400 and sent_login:
         return DENIED, (f"{host} rejected the registry login given for {repo}@{digest} (HTTP 400): a malformed "
-                        "or wrong password (an ECR password is `aws ecr get-login-password`, valid 12 hours)")
+                        "or wrong password (an ECR password is `aws ecr get-login-password`, valid 12 hours); a registry "
+                        f"that answers 400 for another reason: {CHECK_ENV}=off skips this check")
     if code in (401, 403):
         how = "with the registry login given" if login else "anonymously"
         return DENIED, (f"{host}/{repo}@{digest} is not readable {how} (HTTP {code}): it is not in that "

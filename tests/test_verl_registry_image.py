@@ -549,6 +549,7 @@ def test_a_login_the_registry_rejects_with_400_is_denied_not_unknown():
     login = {"SKYPILOT_DOCKER_USERNAME": "AWS", "SKYPILOT_DOCKER_PASSWORD": "pw-BAD-SENTINEL", "SKYPILOT_DOCKER_SERVER": "reg.example"}
     status, detail = im.manifest_status(REF, login, urlopen=ecr)
     assert status == im.DENIED and "rejected the registry login" in detail and "SENTINEL" not in detail
+    assert f"{im.CHECK_ENV}=off" in detail  # the operator's way out when a registry answers 400 for another reason
     assert im.manifest_status(REF, urlopen=ecr)[0] == im.DENIED  # anonymous: the 401
     plain400 = lambda req, timeout=None: (_ for _ in ()).throw(  # noqa: E731
         urllib.error.HTTPError(req.full_url, 400, "x", {}, None))
