@@ -29,6 +29,11 @@ timeout, the own-name guard and the per-offer price.
   goes at the hard cap after launch, or when the pool releases it. A task with
   a ``run`` command (``task_yaml``: the sampler is the sky job) keeps
   ``down=True`` alone: the cluster goes when that job ends;
+* clouds sky cannot autodown (``NO_AUTODOWN_CLOUDS``: Verda and a few others;
+  sky refuses a launch that asks for it there): the cluster is launched without
+  ``down`` / autostop, and its active status carries ``lease_until`` = order +
+  ``hard_cap_minutes``, so the pool's lease-end rules (a replacement before the
+  end, the drain and release at it) stand in for sky's hard cap;
 * ``status``: ``sky.status`` of that cluster (``refresh=AUTO``, so a reclaimed
   spot VM is seen): ``UP`` -> active, ``INIT`` (or the launch still running) ->
   waiting (ended ``lost`` past ``start_timeout_s`` from the order: the watchdog's
@@ -109,6 +114,9 @@ CONFIG_KEYS = frozenset({"kind", "factory", "resources", "price_usd_h", "offers"
                          "hard_cap_minutes", "aws_profile"})
 # A cluster with no sky job is autodowned this long after its launch (wait_for=none).
 DEFAULT_HARD_CAP_MINUTES = 24 * 60
+# Clouds whose sky provisioner has no autodown (SkyPilot 0.14.3: CloudImplementationFeatures.AUTODOWN
+# unsupported); sky refuses a launch with down=True or an autostop there.
+NO_AUTODOWN_CLOUDS = frozenset({"hyperbolic", "primeintellect", "verda", "yotta"})
 # sky request states (sky.server.requests.requests.RequestStatus) of a request still in flight
 REQUEST_LIVE = frozenset({"PENDING", "WAITING", "RUNNING"})
 # launch_state of a record row: the launch request is in flight / confirmed / failed /
@@ -124,8 +132,32 @@ def _field(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
-def _error_text(error: BaseException) -> str:
-    return f"{type(error).__name__}: {error}"[:300]
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+ERROR_TEXT_LIMIT = 600
+
+
+def _error_text(error: BaseException, limit: int = ERROR_TEXT_LIMIT) -> str:
+    """One line of ``error`` (no terminal colours). A longer one keeps its head and its tail:
+    sky puts the per-zone reasons of a failed launch (a cloud's refusal, an unsupported
+    feature) at the end of its message."""
+    text = f"{type(error).__name__}: {' '.join(_ANSI.sub('', str(error)).split())}"
+    if len(text) <= limit:
+        return text
+    head = limit // 3
+    return f"{text[:head]} ... {text[-(limit - head - 5):]}"
+
+
+def offer_cloud(offer: Offer) -> str:
+    """The cloud an offer names (``cloud``, or the first part of ``infra``), lower case; '' when
+    sky picks it."""
+    res = offer.resources
+    return str(res.get("cloud") or str(res.get("infra") or "").partition("/")[0]).strip().lower()
+
+
+def autodown_supported(offer: Offer) -> bool:
+    """False when sky cannot autodown a cluster of this offer's cloud. An offer without a
+    cloud keeps autodown: sky's optimizer then only picks clouds that have it."""
+    return offer_cloud(offer) not in NO_AUTODOWN_CLOUDS
 
 
 def _interrupted(error: BaseException) -> bool:
@@ -428,11 +460,14 @@ class SkyProvider:
             from sky.skylet.autostop_lib import AutostopWaitFor as modes  # noqa: PLC0415,N813
         return modes.NONE
 
-    def launch_kwargs(self, task) -> dict[str, Any]:
+    def launch_kwargs(self, task, *, autodown: bool = True) -> dict[str, Any]:
         """``sky.launch`` keywords. The sampler is no sky job (SSH + docker): sky's idle
         check would take the cluster down about a minute after the launch, so the idle
         timer waits for nothing and runs to the hard cap. A task with its own ``run``
-        is the sampler as a sky job: down when it ends."""
+        is the sampler as a sky job: down when it ends. ``autodown`` False (a cloud sky
+        cannot autodown): none of them; :meth:`status` gives the hard cap as ``lease_until``."""
+        if not autodown:
+            return {}
         if getattr(task, "run", None):
             return {"down": True}
         return {"down": True, "idle_minutes_to_autostop": self.hard_cap_minutes,
@@ -546,10 +581,12 @@ class SkyProvider:
         if not self._named_ours(name):
             raise PermissionError(f"cluster {name} is not named {self.prefix}-<n>")
         self._install_patches()
+        autodown = autodown_supported(offer)
         doc = self._doc()
         doc["clusters"][name] = {"slot": slot, "n": n, "open": True, "ordered_at": self.clock(),
                                  "offer": offer.record(), "launch_state": SUBMITTED,
-                                 **({"num_nodes": num_nodes} if num_nodes > 1 else {})}
+                                 **({"num_nodes": num_nodes} if num_nodes > 1 else {}),
+                                 **({} if autodown else {"autodown": False})}
         self._save_doc(doc)  # recorded before the launch: a crash mid-launch still leaves it ours to down
         # pool / aws_profile: a crash before "created" leaves a row the cleanup still downs as this pool's
         _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id,
@@ -557,7 +594,7 @@ class SkyProvider:
         self.last_offer_key = offer.key  # the pool's order_failed event names it (offer ledger)
         try:
             task = self._task(name, offer, num_nodes)
-            request = self.sky.launch(task, cluster_name=name, **self.launch_kwargs(task))
+            request = self.sky.launch(task, cluster_name=name, **self.launch_kwargs(task, autodown=autodown))
         except Exception as error:  # the submit itself failed (bad resources, API server down)
             self._launch_failed(name, error)
             raise
@@ -744,7 +781,7 @@ class SkyProvider:
         if state == UP:
             if state_of_launch == LOST:  # it came up before the API server restart: kept
                 self._mark(ticket, launch_state=LAUNCHED, reconciled=True)
-            return LeaseStatus("active")
+            return LeaseStatus("active", lease_until=self._hard_cap_end(row))
         if state == INIT:
             if state_of_launch == LOST:  # sky never resumes an interrupted launch
                 return LeaseStatus("ended", end_reason="lost",
@@ -753,6 +790,13 @@ class SkyProvider:
                 return LeaseStatus("ended", end_reason="lost")  # stuck starting: released, next offer
             return LeaseStatus("waiting")
         return LeaseStatus("ended", end_reason="preempted" if state == STOPPED else state.lower())
+
+    def _hard_cap_end(self, row: dict[str, Any]) -> float | None:
+        """The hard cap of a cluster sky does not autodown (its order + ``hard_cap_minutes``),
+        as a lease end; None when sky autodowns it."""
+        if row.get("autodown", True) or row.get("ordered_at") is None:
+            return None
+        return float(row["ordered_at"]) + 60.0 * self.hard_cap_minutes
 
     def release(self, account: int, ticket: str) -> dict[str, Any]:
         if not self._ours(ticket):
@@ -857,6 +901,7 @@ class SkyProvider:
             lines += [f"  IdentityFile {self.ssh_key}", "  IdentitiesOnly yes"]
         block = "\n".join(lines) + "\n"
         node_pool.edit_ssh_config(ours, lambda blocks: blocks.__setitem__(alias, block))
+        node_pool.include_ours(ours)  # without it ``ssh <alias>`` does not resolve on a fresh pool host
         for command in self.host_setup:
             out = ssh_run(alias, command)
             if out.returncode != 0:

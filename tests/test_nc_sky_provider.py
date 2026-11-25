@@ -1074,3 +1074,101 @@ def test_the_cleanup_refuses_an_unscoped_down_with_another_account(monkeypatch):
     assert not action.ok and "AWS_PROFILE=a sky down c-1" in action.detail and downs == []
     plain = SimpleNamespace(kind="sky_cluster", id="c-2", name="c-2", key="k", attrs={"pool": True})
     assert cleanup._release_one(plain, Ops(), Ledger(), False, {}).ok and downs == ["c-2"]  # nothing to carry
+
+
+def _verda_provider(sky, **kw):
+    return SkyProvider("run-v", resources={"infra": "verda/FIN-03", "accelerators": "RTX-6000-Ada:1",
+                                           "use_spot": True}, slots=[1], sky=sky, **kw)
+
+
+def test_a_cloud_sky_cannot_autodown_is_launched_without_it_and_the_hard_cap_is_a_lease_end():
+    """Found on real Verda (sky 0.14.3): sky refuses any launch that asks for autodown there
+    ("autodown: Auto-down is not supported on Verda"), so every order failed. The cluster is
+    launched without down / autostop, and the hard cap reaches the pool as lease_until."""
+    t = [1_000_000.0]
+    sky = FakeSky()
+    p = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=90)
+    name = p.order(1)
+    assert sky.calls[0][3] == {}  # no down, no idle autostop, no wait_for
+    assert p._rows()[name]["autodown"] is False
+    sky.up(name)
+    s = p.status(1, name)
+    assert s.state == "active" and s.lease_until == 1_000_000.0 + 90 * 60
+    sky.autostop(10_000)  # sky's idle check never touches it: the pool's lease end releases it
+    assert name in sky.clusters
+    assert p.release(1, name)["state"] == "ended" and name not in sky.clusters
+    # a cloud sky autodowns keeps sky's hard cap and no lease end
+    aws = _provider(FakeSky())
+    other = aws.order(1)
+    aws.sky.up(other)
+    assert aws.sky.calls[0][3]["down"] is True and "autodown" not in aws._rows()[other]
+    assert aws.status(1, other).lease_until is None
+
+
+def test_a_task_with_its_own_run_on_a_cloud_without_autodown_gets_no_down(tmp_path):
+    yaml = tmp_path / "sampler.yaml"
+    yaml.write_text("run: python -m sampler\n")
+    sky = FakeSky()
+    p = _verda_provider(sky, task_yaml=str(yaml))
+    p.order(1)
+    assert sky.calls[0][3] == {}
+
+
+def test_the_no_autodown_clouds_are_the_ones_sky_cannot_autodown():
+    """NO_AUTODOWN_CLOUDS is the installed sky's own list (a sky upgrade that changes it fails here)."""
+    from yeto.launch.nc.sky_provider import NO_AUTODOWN_CLOUDS
+
+    registry = pytest.importorskip("sky.utils.registry")
+    features = pytest.importorskip("sky.clouds").CloudImplementationFeatures
+    sky_list = {name for name, cloud in registry.CLOUD_REGISTRY.items()
+                if features.AUTODOWN in getattr(cloud, "_CLOUD_UNSUPPORTED_FEATURES", {})}
+    assert NO_AUTODOWN_CLOUDS == sky_list
+
+
+def test_a_failed_launch_keeps_the_reason_sky_puts_at_the_end():
+    """sky's launch failure names the cause per zone after a long preamble (with terminal
+    colours); the recorded error keeps that tail."""
+    from yeto.launch.nc.sky_provider import ERROR_TEXT_LIMIT
+
+    error = ResourcesUnavailableError(
+        "\x1b[31mFailed to provision all possible launchable resources.\x1b[0m Relax the task's resource "
+        "requirements: 1x Verda([Spot], {'RTX-6000-Ada': 1})\nTo keep retrying until the cluster is up, use the "
+        "`--retry-until-up` flag.\nReasons for provision failures (for details, please check the log above):\n"
+        + "Provision failures (tried 1 infra):\n\n" + "x" * 400 + "\n  The following features are not supported "
+        "by Verda:\n  \tFeature   Reason\n  \tautodown  Auto-down is not supported on Verda.")
+    sky = FakeSky()
+    sky.fail_launch.add("verda/FIN-03")
+    original = sky.launch
+
+    def launch(task, cluster_name, **kw):
+        rid = original(task, cluster_name, **kw)
+        sky.requests[rid]["error"] = error
+        return rid
+
+    sky.launch = launch
+    p = _verda_provider(sky)
+    name = p.order(1)
+    s = p.status(1, name)
+    assert s.state == "ended" and s.end_reason == "lost"
+    assert "\x1b" not in s.detail and "\n" not in s.detail and len(s.detail) <= ERROR_TEXT_LIMIT
+    assert s.detail.startswith("ResourcesUnavailableError: Failed to provision")
+    assert s.detail.endswith("autodown Auto-down is not supported on Verda.")
+
+
+def test_sky_attach_includes_its_alias_file_in_the_users_ssh_config(tmp_path, monkeypatch):
+    """Without the Include, ``ssh <alias>`` does not resolve on a fresh pool host (found on
+    real Nebius: the alias was written, ssh never read it); Daytona's attach already did it."""
+    from yeto.launch.nc import node_pool
+
+    user_config = tmp_path / "home" / ".ssh" / "config"
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text("Host other\n  HostName 192.0.2.1\n")
+    monkeypatch.setattr(node_pool, "SSH_CONFIG", user_config)
+    p = _provider(FakeSky())
+    lease = SimpleNamespace(ticket="yeto-smp-run-s-1", ip="198.51.100.7", user="ubuntu")
+    ok = lambda a, c: SimpleNamespace(returncode=0)  # noqa: E731
+    p.attach(lease, ssh_run=ok)
+    p.attach(lease, ssh_run=ok)
+    lines = user_config.read_text().splitlines()
+    include = f"Include {cli.tunnel.state_dir() / 'ssh_config'}"
+    assert lines[0] == include and lines.count(include) == 1 and "Host other" in lines

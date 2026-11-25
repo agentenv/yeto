@@ -159,6 +159,16 @@ def _no_ssh_connection_reuse(monkeypatch):
 
 
 @_pytest.fixture(autouse=True)
+def _no_real_ssh_config(tmp_path, monkeypatch):
+    """A provider's attach adds an Include of its alias file to ~/.ssh/config
+    (node_pool.include_ours); unit tests never edit the user's own file. Tests of the
+    include set node_pool.SSH_CONFIG themselves."""
+    from yeto.launch.nc import node_pool
+
+    monkeypatch.setattr(node_pool, "SSH_CONFIG", tmp_path / "home-ssh" / "config")
+
+
+@_pytest.fixture(autouse=True)
 def _fixed_thread_reading(monkeypatch):
     """launch-preflight-guards: launch() reads this user's thread count from
     /proc; unit tests must not depend on (or wait for) the host's threads.
