@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ..rl.engine.run_flags import CLI, rl_option_pairs
 from ..rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
-from . import REPO_ROOT
+from . import REPO_ROOT, cargo_toolchain
 from .credentials import split_secret_envs
 from .remote_setup import WAN_TUNING
 
@@ -32,7 +32,11 @@ CRITIC_SYNCER_PORT = 29401
 def build_syncer_binary() -> Path:
     binary = REPO_ROOT / "syncer/target/release/yeto-syncer"
     print("[launcher] building syncer (cargo build --release)...")
-    subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT / "syncer", check=True)
+    # An isolated HOME has no toolchain of its own: the caller's (cargo_toolchain.resolve).
+    # With a toolchain in the environment the call is as before.
+    toolchain = cargo_toolchain.resolve()
+    extra = {"env": {**os.environ, **toolchain.env}} if toolchain.env else {}
+    subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT / "syncer", check=True, **extra)
     return binary
 
 

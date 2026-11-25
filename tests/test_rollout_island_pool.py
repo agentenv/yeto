@@ -747,18 +747,24 @@ def test_pool_stop_retires_every_live_member_before_its_release():
     assert kinds.index("pool_stopped") < kinds.index("shard_fenced") < kinds.index("released")
 
 
-def test_pool_stop_releases_a_sampler_claim_on_the_real_syncer_at_once(tmp_path):
+@pytest.fixture
+def syncer_binary() -> Path:
+    """The debug syncer (tests/syncer_build.py): built once per session; a test that
+    requests it skips with the reason when no Rust toolchain runs cargo."""
+    from syncer_build import build_syncer
+
+    return build_syncer()
+
+
+def test_pool_stop_releases_a_sampler_claim_on_the_real_syncer_at_once(tmp_path, syncer_binary):
     """data_path: syncer. The stopped pool's sampler held positions under a 600 s
     lease; the stop retires it on the syncer, so another island claims them now."""
-    from test_dispense_syncer import FP, KEY, Syncer, _cargo_env  # noqa: F401
-    import subprocess
+    from test_dispense_syncer import FP, KEY, Syncer
 
     from yeto.launch.pool.data_path import SyncerDataPath
     from yeto.rl.engine import task_dispense as td
 
-    root = Path(__file__).resolve().parent.parent
-    subprocess.run(["cargo", "build", "-q"], cwd=root / "syncer", check=True, env=_cargo_env())
-    syncer = Syncer(root / "syncer/target/debug/yeto-syncer", tmp_path, "--dispense-passes", "1", lease_s=600.0)
+    syncer = Syncer(syncer_binary, tmp_path, "--dispense-passes", "1", lease_s=600.0)
     try:
         path = SyncerDataPath(("127.0.0.1", syncer.port), key=KEY)
         clock = Clock()

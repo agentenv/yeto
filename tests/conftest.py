@@ -190,6 +190,11 @@ def pytest_collection_modifyitems(config, items):
             config.hook.pytest_deselected(items=drop)
             items[:] = keep
     _select_shard(config, items)
+    if not _syncer_build.TOOLCHAIN.ok:
+        for item in items:
+            reason = _syncer_build.skip_reason(item)
+            if reason:
+                item.add_marker(_pytest.mark.skip(reason=reason))
 
 
 def _select_shard(config, items):
@@ -233,7 +238,7 @@ def pytest_runtestloop(session):
         return None
     from syncer_build import build_syncer, uses_syncer_build
 
-    if any(uses_syncer_build(item) for item in session.items):
+    if any(uses_syncer_build(item) and not item.get_closest_marker("skip") for item in session.items):
         try:
             build_syncer()
         except Exception as exc:  # noqa: BLE001 - surfaced again by the tests that need it
@@ -340,6 +345,20 @@ def ppu_plan(tmp_path_factory):
             text = text.replace(placeholder, ip)
         (dst / name).write_text(text)
     return dst / "glm53-flash-ppu.yaml"
+
+
+# Under an isolated HOME the syncer builds with the caller's own Rust toolchain: applied
+# before any test module computes its CARGO or runs cargo (tests/syncer_build.py).
+import syncer_build as _syncer_build  # noqa: E402
+
+_os.environ.update(_syncer_build.TOOLCHAIN.env)
+
+
+def pytest_report_header(config):
+    tc = _syncer_build.TOOLCHAIN
+    if tc.env:
+        return f"syncer toolchain: {tc.cargo} with {', '.join(f'{k}={v}' for k, v in sorted(tc.env.items()))}"
+    return None if tc.ok else f"syncer toolchain: none ({tc.reason}); syncer tests skip"
 
 
 # No yeto-syncer subprocess outlives the test that started it (tests/syncer_reaper.py).
