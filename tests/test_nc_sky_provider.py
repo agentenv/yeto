@@ -1282,6 +1282,16 @@ def test_a_failed_launch_records_no_credentials_and_no_terminal_escapes(monkeypa
                    "user:pw", "deadbeef", "envvalue-0123456789", "\x1b"):
         assert secret not in text, secret
     assert text.startswith("RuntimeError: Failed to launch:") and "<redacted>" in text
+    # the other shapes that need no key name, built here (no credential-shaped literal in the source)
+    others = ["ASIA" + "QRSTUVWXYZ012345", "github_pat_" + "d" * 30, "xoxb-" + "1" * 12 + "-e" * 6,
+              "xoxp-" + "2" * 14]
+    text = _error_text(RuntimeError("failed with " + " and ".join(others) + " in the log"))
+    assert not [o for o in others if o in text] and text.count("<redacted>") == len(others)
+    # every terminal escape goes: OSC (BEL / ST ended), ESC 7 / ESC 8, CSI erase line
+    text = _error_text(RuntimeError("\x1b]0;title\x07a\x1b7b\x1b8c\x1b]8;;http://x\x1b\\d\x1b[2Ke"))
+    assert text == "RuntimeError: abcde"
+    # plain text with dashes or key-like words is kept
+    assert _error_text(RuntimeError("task-1 sk-short mask-rcnn ok")) == "RuntimeError: task-1 sk-short mask-rcnn ok"
     # the record and the ended status carry the redacted text only
     sky = FakeSky()
     sky.fail_launch.add("verda/FIN-03")

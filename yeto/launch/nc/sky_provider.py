@@ -141,8 +141,10 @@ def _field(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
-# terminal escapes: CSI sequences (colours, erase line, cursor moves) and two-byte ESC codes
-_ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+# terminal escapes: OSC strings (a window title, a hyperlink; ended by BEL or ST), CSI
+# sequences (colours, erase line, cursor moves), other two-byte ESC codes (ESC 7 / ESC 8 too),
+# and a stray BEL
+_ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -~]|\x07")
 # credentials that need no key name to be recognized (AWS key ids, GitHub / Hugging Face /
 # OpenAI-style / Slack tokens); key=value secrets, bearer tokens, URL signatures and the
 # process's secret variables are redact_text's
