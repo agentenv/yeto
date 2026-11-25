@@ -940,6 +940,26 @@ class IslandPool(PoolMoves):
         except Exception:  # noqa: BLE001 - the dashboard falls back to its price table
             return None
 
+    def _grant_late(self, m: Member, now: float, source: str) -> None:
+        """``m`` runs (``source``) but its provider never read it billing (a Modal call whose
+        call graph reads pending for its whole life): it bills from now, never a ready member
+        at $0. A WARNING line and ``member_granted_late`` say what showed it; the ops' own
+        record learns it too (``note_running``: the Modal call's resource-ledger row)."""
+        m.granted = now
+        self.log(f"pool: WARNING: {m.ticket} runs ({source}) but its provider never read it billing: billed from now")
+        self._event("member_granted_late", ticket=m.ticket, account=m.account, shard=m.shard, source=source,
+                    waited_s=round(now - m.created))
+        if "unscheduled" in m.alerted:
+            self._event("member_scheduled", ticket=m.ticket, account=m.account, shard=m.shard,
+                        unscheduled_s=round(now - m.created), source=source)
+        note = getattr(self.ops, "note_running", None)
+        if callable(note):
+            try:
+                note(m, source=source)
+            except Exception as error:  # noqa: BLE001 - the pool's own charge below holds
+                self.log(f"pool: {m.ticket}: the provider's record of its run not written ({error!r})"[:300])
+        self._charge(m, now)
+
     def _charge(self, m: Member, now: float) -> None:
         if m.granted is None:
             return
@@ -1945,6 +1965,8 @@ class IslandPool(PoolMoves):
             if end is not None:
                 m.lease_until = end
         probe = self._probe(m) if status.state == "active" else None
+        if m.granted is None and probe is not None and probe.joined:
+            self._grant_late(m, now, "its sampler joined (probe)")
         if probe is not None and probe.node != el.PROBE_UNREACHABLE and probe.sampler == "running":
             self._note_progress(m, probe, now)
             m.absent_seen = False
@@ -2117,6 +2139,8 @@ class IslandPool(PoolMoves):
         elif m.state == STARTING:
             ready = (m.joined if getattr(self.ops, "probe", None) is not None else self.ops.ready(m))
             if ready:
+                if m.granted is None:
+                    self._grant_late(m, now, "its sampler is ready")
                 m.state, m.joined = READY, True
                 if not m.ever_ready:  # restarts while the node was still being set up are not a crash loop
                     m.ever_ready, m.restarts = True, 0
