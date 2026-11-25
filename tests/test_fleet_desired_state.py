@@ -120,12 +120,19 @@ class _ManualThread:
 class LeaveFencer(FakeFencer):
     """The work contract over the samplers' member records in the run store (R2DataPath)."""
 
-    def __init__(self, objects):
+    def __init__(self, objects, clock):
         super().__init__()
         from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
         from yeto.launch.pool.data_path import R2DataPath  # noqa: PLC0415
 
         self.path = R2DataPath(ObjectRecords(objects))
+        self.clock = clock
+
+    def fence_shard(self, shard, by):
+        from yeto.launch.nc import elastic  # noqa: PLC0415
+
+        super().fence_shard(shard, by)
+        return elastic.fence_shard(self.path.records, shard, by=by, clock=self.clock)  # the lease: its time
 
     def exit_evidence(self, shard):
         return self.path.exit_evidence(shard)
@@ -162,7 +169,7 @@ class Fleet:
         control.members = mt.MemberTableWriter(self.objects, name, name)
         self.providers[name] = FakeProvider(name, self.clock)
         self.routes[name] = [FakeRoute()]
-        self.fencers[name] = LeaveFencer(self.objects) if self.leave_records else FakeFencer()
+        self.fencers[name] = LeaveFencer(self.objects, self.clock) if self.leave_records else FakeFencer()
         ops = ProviderPoolOps(self.providers[name], self.routes[name][-1], self.fencers[name])
         if self.data_path:
             from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
@@ -182,6 +189,21 @@ class Fleet:
 
         slot.pool.ops = GuardedOps(ProviderPoolOps(self.providers[name], route, self.fencers[name]),
                                    slot.pool._guard_store)  # noqa: SLF001
+
+    def restart_pool(self, name):
+        """Detach the controller, then build the pool again from its store state (a controller
+        restarted, or one that adopts the pool): no tick of the old pool object runs any more."""
+        old = self.c.slots[name].pool
+        self.c.detach("test restart")
+        if not old.control.lock.released:
+            old.control.lock.release()  # as a detach of a pool loop of its own does
+        doc = store_state.read_state(self.objects, name)
+        control = store_state.open_pool_control(self.objects, name, name, clock=self.clock)
+        control.members = mt.MemberTableWriter(self.objects, name, name)
+        ops = ProviderPoolOps(self.providers[name], self.routes[name][-1], self.fencers[name])
+        config = PoolConfig(target=0, accounts=list(range(self.slots_n)), shard_base=name, elastic=quiet_elastic())
+        return IslandPool.from_doc(doc, config, ops, control=control, clock=self.clock, log=lambda _m: None,
+                                   events=EventLog(log=lambda _m: None, clock=self.clock))
 
     def change(self, fn):
         self.store.update(fn)
@@ -567,8 +589,11 @@ def test_a_reconfigured_pool_calls_its_new_provider_in_the_run_env_from_any_thre
 
 
 def test_a_reconfigure_a_sky_start_check_refuses_keeps_the_old_config(tmp_path, monkeypatch):
-    """#786's start check runs for a reconfigured pool too; its refusal (a SystemExit) is a
-    refused reconfigure, never the end of the controller."""
+    """#786's start check runs for a reconfigured pool too, in the run's env overlay as at
+    its start (AWS_PROFILE is set only in run.json); its refusal (a SystemExit) is a refused
+    reconfigure, never the end of the controller."""
+    import os  # noqa: PLC0415
+
     from yeto.launch.nc import pool_run  # noqa: PLC0415
 
     _up, _run, c, store, clock, seen = _env_run(tmp_path, monkeypatch)
@@ -576,8 +601,9 @@ def test_a_reconfigure_a_sky_start_check_refuses_keeps_the_old_config(tmp_path, 
         c.tick()
         old_ops, old_config = c.slots["modal"].pool.ops, c.slots["modal"].pool.config
 
-        def refuse(cfg):  # the pool started before: the check refuses from now on
-            raise SystemExit(f"pool {cfg.get('shard_base')}: refused: run AWS settings sky would use")
+        def refuse(cfg):  # REV #814: refuses only with the run's AWS_PROFILE, set in run.json alone
+            if os.environ.get("AWS_PROFILE") == "run":
+                raise SystemExit(f"pool {cfg.get('shard_base')}: refused: run AWS settings sky would use")
 
         monkeypatch.setattr(pool_run, "refuse_provider_start", refuse)
         store.update(lambda d: _usd(d, 61))
@@ -589,6 +615,26 @@ def test_a_reconfigure_a_sky_start_check_refuses_keeps_the_old_config(tmp_path, 
         assert c.check() is None and set(c.slots) == {"nc", "modal"}
     finally:
         c.stop("test end")
+
+
+def test_a_reconfigure_waits_for_the_background_calls_of_the_old_ops(tmp_path):
+    """REV #814: a background start or release submitted through the old ops (an ssh
+    provider's record under the same lock token) is never still running when the new ops
+    are swapped in: the reconfigure waits for a later pass."""
+    from concurrent.futures import Future  # noqa: PLC0415
+
+    f = Fleet(tmp_path, [_member("nc", 1)])
+    f.ticks()
+    pool = f.c.slots["nc"].pool
+    running = Future()
+    pool._starts["t-bg"] = running  # noqa: SLF001
+    f.change(lambda d: dz.sampler_pools(d)["nc"]["pool"].update(image="new"))
+    f.c.reconciler.step(f.c)
+    assert len(f.routes["nc"]) == 1 and not pool.roll_tickets and "nc" in f.c.reconciler.pending_rolls
+    running.set_result(None)
+    f.c.reconciler.step(f.c)
+    assert len(f.routes["nc"]) == 2 and pool.roll_tickets and "nc" not in f.c.reconciler.pending_rolls
+    pool._starts.pop("t-bg")  # noqa: SLF001
 
 
 def test_a_roll_never_replaces_a_member_that_is_already_going(tmp_path):
@@ -673,6 +719,32 @@ def test_a_removed_pools_sampler_that_leaves_on_its_fence_is_released_at_once(tm
     assert f.providers["modal"].released == [m.ticket]
     assert _record(f, member)["leave_reason"] == "FENCED"
     assert not any(e["event"].endswith("leave_written") for e in pool.events.events)
+
+
+def test_a_controller_restarted_while_a_removed_pools_member_waits_still_writes_its_leave(tmp_path):
+    """Coordinator, INT2's stale member: the wait is not only in memory. A pool rebuilt from
+    the store mid-removal (a restart, an adopt after a detach) still waits for the leave of
+    a member it fenced, until that fence's time (the store's pool fence) plus the wait, and
+    then writes it before the release."""
+    from yeto.launch.pool.island_pool import DRAINING, POOL_REMOVED_LEAVE  # noqa: PLC0415
+
+    f = Fleet(tmp_path, [_member("nc", 1), _member("modal", 1)], leave_records=True)
+    f.ticks()
+    m, member = _joined(f, "modal")
+    f.change(lambda d: d["members"].pop())
+    _until_waiting(f, f.c.slots["modal"].pool, m.ticket)
+    fenced_at = f.fencers["modal"].exit_evidence(m.shard)["fenced_at"]
+    pool = f.restart_pool("modal")
+    assert pool.removing and not pool._leave_wait  # noqa: SLF001 - restored from the store, nothing in memory
+    assert [x.state for x in pool.members if x.ticket == m.ticket] == [DRAINING]
+    while f.clock() < fenced_at + pool.removal_leave_wait_s:
+        pool.tick()
+        assert f.providers["modal"].released == [] and _record(f, member)["leave_reason"] is None
+        f.clock.t += 30
+    pool.tick()  # the wait counted from the fence, not from the restart: over, so written and released
+    assert f.providers["modal"].released == [m.ticket]
+    rec = _record(f, member)
+    assert rec["leave_reason"] == POOL_REMOVED_LEAVE and rec["detail"]["left_by"] == "pool"
 
 
 def test_a_scale_down_outside_a_removal_releases_without_a_leave_wait(tmp_path):

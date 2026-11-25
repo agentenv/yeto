@@ -1684,10 +1684,6 @@ class Run:
             ref = ref_of(name, member)
             cfg = ref.load()
             pool = slot.pool
-            try:
-                pool_run.refuse_provider_start(cfg)  # a sky pool's start checks, as when run up starts it
-            except SystemExit as refusal:  # the pool keeps its old config (the reconcile reports it)
-                raise ValueError(str(refusal)) from None
             if str(cfg.get("shard_base")) != pool.config.shard_base:
                 raise ValueError("shard_base cannot change in place: remove the pool and add a new one")
             old_ref = next((r for r in self.pools if r.name == name), None)
@@ -1701,7 +1697,11 @@ class Run:
                 raise ValueError(f"the {pool.config.slot_name}s cannot change in place ({pool.config.accounts} -> "
                                  f"{pc.accounts}); remove the pool and add a new one")
             pc.target, pc.index_limit = pool.config.target, pool.config.index_limit
-            with scoped_environ(getattr(slot, "environ", None)):  # its provider is built in the run's environment, as at start
+            with scoped_environ(getattr(slot, "environ", None)):  # checked and built in the run's environment, as at start
+                try:
+                    pool_run.refuse_provider_start(cfg)  # a sky pool's start checks, as when run up starts it
+                except SystemExit as refusal:  # the pool keeps its old config (the reconcile reports it)
+                    raise ValueError(str(refusal)) from None
                 new_ops = (ops or {}).get(name) or nc_cli.pool_ops(cfg)
             if getattr(slot, "environ", None):
                 new_ops = EnvScopedOps(new_ops, slot.environ)

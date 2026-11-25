@@ -233,8 +233,12 @@ class FleetReconciler:
         if not slot.tick_lock.acquire(blocking=False):
             self.pending_rolls[name] = (member, gen)
             return
-        self.pending_rolls.pop(name, None)
         try:
+            in_flight = getattr(slot.pool, "calls_in_flight", None)
+            if in_flight is not None and in_flight():  # a background start / release still runs
+                self.pending_rolls[name] = (member, gen)  # through the old ops (their provider's
+                return  # record): swapped at a later pass, once none is left
+            self.pending_rolls.pop(name, None)
             if self.hooks.reconfigure is not None:
                 self.hooks.reconfigure(name, slot, member)
             slot.pool.start_roll(f"desired state generation {gen}")

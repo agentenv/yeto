@@ -92,7 +92,8 @@ class R2DataPath:
         fence; ``incarnation`` / ``leave``: the shard's newest member record (by ``joined_at``)
         and its leave reason (None: no LEAVE written); ``superseded``: the lease lists that
         incarnation as superseded (False: the lease's holder never replaced it, e.g. it
-        never claimed the lease). A store error raises."""
+        never claimed the lease); ``fenced_at`` (only with ``pool_fenced``): when the pool's
+        fence took the lease. A store error raises."""
         from yeto.launch.nc.elastic import FENCE_PREFIX  # noqa: PLC0415
         from yeto.rl.engine import sampler_resume  # noqa: PLC0415
         from yeto.rl.engine.incarnation_lease import lease_key  # noqa: PLC0415
@@ -108,6 +109,8 @@ class R2DataPath:
                "lease": holder, "pool_fenced": bool(holder and holder.startswith(f"{FENCE_PREFIX}:")),
                "incarnation": newest.get("incarnation"), "leave": newest.get("leave_reason"),
                "superseded": str(newest.get("incarnation")) in [str(i) for i in lease.get("superseded") or ()]}
+        if out["pool_fenced"] and lease.get("claimed_at") is not None:
+            out["fenced_at"] = float(lease["claimed_at"])  # when the pool's fence took the lease
         detail = newest.get("detail") if isinstance(newest.get("detail"), dict) else {}
         if detail.get("not_run"):  # it did not run (engine_sampler_entry.NOT_RUN_EVENT): why, and for whom
             out.update(not_run=str(detail["not_run"]), not_run_successor=detail.get("successor"),

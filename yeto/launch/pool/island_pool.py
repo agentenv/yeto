@@ -994,6 +994,9 @@ class IslandPool(PoolMoves):
             self.log(f"pool: draining {member.ticket} ({why})")
             member.state = DRAINING
         now = self.clock()
+        if self.removing and member.ticket not in self._leave_wait and member.end_reason == "scaled down" \
+                and member.shard and getattr(self.ops, "write_leave", None) is not None:
+            self._leave_wait[member.ticket] = self._leave_deadline(member, now)  # after a restart / adopt
         if member.ticket in self._leave_wait and not self._sampler_left(member, now):
             return False  # kept DRAINING: its sampler writes its leave first (a removed pool)
         if member.ticket in self._drain_hold:
@@ -1122,6 +1125,24 @@ class IslandPool(PoolMoves):
             if m.replaces == member.ticket:
                 m.replaces = None
 
+    def calls_in_flight(self) -> list[str]:
+        """Tickets whose background start or release (submitted in an earlier tick, through
+        the ops of then) still runs; a reconfigure swaps the ops only once there is none."""
+        return [t for t, f in [*self._starts.items(), *self._releases.items()] if not f.done()]
+
+    def _leave_deadline(self, m: Member, now: float) -> float:
+        """The end of the leave wait of a member of a removed pool fenced before this pool
+        object (a controller restarted or adopted the pool mid-removal): its fence's time in
+        the run's store (``exit_evidence`` ``fenced_at``) plus ``removal_leave_wait_s``; not
+        known: from now."""
+        read = getattr(self.ops, "exit_evidence", None)
+        try:
+            evidence = read(m) if read is not None else None
+        except Exception:  # noqa: BLE001 - unreadable: the wait starts now
+            evidence = None
+        fenced_at = evidence.get("fenced_at") if isinstance(evidence, dict) else None
+        return (float(fenced_at) if fenced_at else now) + self.removal_leave_wait_s
+
     def _sampler_left(self, m: Member, now: float) -> bool:
         """A fenced member of a removed pool (``removing``): True once its sampler wrote its
         leave in the run's store, or once ``removal_leave_wait_s`` is over or the pool stops
@@ -1139,7 +1160,7 @@ class IslandPool(PoolMoves):
         if now < deadline and not self.stopped:
             return False
         self._leave_wait.pop(m.ticket, None)
-        waited = round(now - (deadline - self.removal_leave_wait_s))
+        waited = max(0, round(now - (deadline - self.removal_leave_wait_s)))
         try:
             written = self.ops.write_leave(m, POOL_REMOVED_LEAVE, waited_s=waited, ticket=m.ticket)
         except Exception as error:  # noqa: BLE001 - the release goes on; the dashboard reads the member table
@@ -2797,6 +2818,7 @@ class IslandPool(PoolMoves):
                 "members": [asdict(m) for m in self.members], "pending": list(self.pending),
                 "breaker": asdict(self.breaker), "budget": asdict(self.budget),
                 **({"retired_shards": list(self.retired_shards)} if self.retired_shards else {}),
+                **({"removing": True} if self.removing else {}),
                 **({"roll_tickets": list(self.roll_tickets)} if self.roll_tickets else {}),
                 **({"owner": dict(self.owner)} if self.owner is not None else {}), **self.moves_doc()}
 
@@ -2839,6 +2861,7 @@ class IslandPool(PoolMoves):
         pool.scale_seq = int(doc.get("scale_seq", 0))
         pool.shrink = int(doc.get("shrink", 0))
         pool.retired_shards = list(doc.get("retired_shards") or [])
+        pool.removing = bool(doc.get("removing"))  # a restart mid-removal still waits for the leaves
         pool.roll_tickets = list(doc.get("roll_tickets") or [])
         if pool.owner is None and isinstance(doc.get("owner"), dict):
             pool.owner = dict(doc["owner"])
