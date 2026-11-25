@@ -6,7 +6,7 @@ and each island with its own sampler pools ([MILES_RL.md](MILES_RL.md), "Island 
 while it trains). Every island of a fleet can train with the verl backend instead of Miles
 (`--rl-backend verl` in `fleet.trainer_argv`). The verl trainer is FSDP2 without
 TransformerEngine, so it also runs on sm80 and sm89 cards (A100, L40S), where the Miles
-trainer cannot.
+trainer's default fused attention is refused.
 
 ## Admission
 
@@ -46,7 +46,7 @@ Put those two flags in `fleet.trainer_argv` together with `--rl-backend verl`.
 | Release cadence | every N local versions; skip-busy and merged-mode cadences | every N local versions (`--rl-release-every`); no skip-busy or merged-mode cadence |
 | Deterministic stop (a trainer breaker, a strict check, a syncer refusal) | exit 11, not relaunched | exit 11, not relaunched |
 | Prompt width of the trainer | from the pool | `--seq-len` minus `--rollout-max-response-len` |
-| Trainer cards | sm90 and newer (TransformerEngine fused attention) | sm80 / sm89 / sm90 |
+| Trainer cards | sm90 and newer with the default fused attention (another training attention backend only warns) | sm80 / sm89 / sm90 |
 | Trainer image off Modal | the pinned Miles registry image | the pinned verl registry image (below) |
 
 ## Images
@@ -73,7 +73,7 @@ export YETO_VERL_IMAGE_REGISTRY=ghcr.io/<owner>
 - The login goes into the sky task's `secrets`, never its `envs` or its scripts. A private
   Miles image takes the same route (`--rl-image-private` reads `~/.docker/config.json`
   instead). A Modal island gets no login.
-- Keep the registry in the islands' region. The image is about 9 GB compressed.
+- Keep the registry in the islands' region. The image is about 8.6 GB compressed (as stored in the registry).
 - Before anything is ordered, the launch asks the registry for the image's manifest (a
   `HEAD`, nothing downloaded) with that login. A missing image, or one the login cannot
   read, is refused in `--dry-run` and in the launch preflight. A registry that cannot be
