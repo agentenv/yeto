@@ -81,7 +81,7 @@ table.c td,table.c th{padding:4px 6px;border-bottom:1px solid var(--line);text-a
 table.c td:first-child,table.c th:first-child{text-align:left}
 .hl{background:color-mix(in srgb,var(--accent) 10%,transparent)}
 /* long tables (tables.js): newest rows only, one line per row, scrolling sideways inside their own box */
-.tw{overflow-x:auto;max-width:100%}
+.tw{overflow-x:auto;max-width:100%}.tw.more{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 40px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 40px),transparent)}
 table.cpt td{white-space:nowrap}table.cpt td.wrap{white-space:normal;min-width:180px}table.cpt th{vertical-align:bottom}
 table.cpt span.note,table.cpt div.note{display:inline}
 .tcap{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;font-size:11.5px;color:var(--ink2);margin:2px 0 4px}

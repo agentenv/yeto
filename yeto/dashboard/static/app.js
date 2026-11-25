@@ -433,7 +433,7 @@ function cost(){
     // a fleet's rows (cost.fleet_rows): each island's trainer, its pools' samplers and the syncer
     var lab=r.kind==="syncer"?"Syncer":r.kind==="pool sampler"?"Island "+esc(r.island)+" pool "+esc(r.pool)+' <span class="note">'+esc(r.id)+'</span>':r.kind==="trainer"?"Island "+esc(r.island)+" trainer":"Island "+esc(r.id);
     var rs=r.rate_source?' title="'+esc(r.rate_source+(r.billed_from?"; hours: "+r.billed_from:""))+'"':"";
-    if(r.kind)return '<tr><td'+rs+'>'+lab+'</td><td class="num">'+(fin(r.gpu_rate_usd_h)?"$"+f(r.gpu_rate_usd_h,2):r.kind==="syncer"?"—":"unpriced")+'</td><td class="num">'+(fin(r.host_rate_usd_h)?"$"+f(r.host_rate_usd_h,2):fin(r.rate_usd_h)&&r.rate_source?"in total":r.kind==="syncer"?"—":"GPU only")+'</td><td class="num">'+(fin(r.rate_usd_h)?"$"+f(r.rate_usd_h,2):"unpriced")+'</td><td class="num">'+f(r.hours,2)+' h</td><td class="num">'+(fin(r.cost_usd)?"$"+f(r.cost_usd,2):"n/a")+'</td></tr>';
+    if(r.kind)return '<tr><td'+rs+'>'+lab+'</td><td class="num">'+(fin(r.gpu_rate_usd_h)?"$"+f(r.gpu_rate_usd_h,2):r.kind==="syncer"?"—":"unpriced")+'</td><td class="num">'+(fin(r.host_rate_usd_h)?"$"+f(r.host_rate_usd_h,2):fin(r.rate_usd_h)&&r.rate_source?"in total":r.kind==="syncer"?"—":"GPU only")+'</td><td class="num">'+(fin(r.rate_usd_h)?"$"+f(r.rate_usd_h,2):"unpriced")+'</td><td class="num">'+f(r.hours,2)+' h</td><td class="num">'+(fin(r.cost_usd)?"$"+f(r.cost_usd,2):fin(r.rate_usd_h)?"no hours yet":"unpriced")+'</td></tr>';
     return '<tr><td>Island '+esc(r.id)+'</td><td class="num">'+(fin(r.gpu_rate_usd_h)?"$"+f(r.gpu_rate_usd_h,2):"unpriced")+'</td><td class="num">'+(fin(r.host_rate_usd_h)?"$"+f(r.host_rate_usd_h,2):"GPU only")+'</td><td class="num">'+(fin(r.rate_usd_h)?"$"+f(r.rate_usd_h,2):"n/a")+'</td><td class="num">'+f(r.hours,2)+' h</td><td class="num">'+(fin(r.cost_usd)?"$"+f(r.cost_usd,1):"n/a")+'</td></tr>'}).join("")+'</table></div>'+
     '<div class="note" style="margin-top:6px">'+(c.fleet?esc("fleet spend = pools $"+f(c.fleet.pools_usd,2)+" + trainers $"+f(c.fleet.trainers_usd,2)+" + syncer "+(fin(c.fleet.syncer_usd)?"$"+f(c.fleet.syncer_usd,2):"unpriced")+" (hover a row for its price and hours source). "):"")+esc(c.note||"")+(function(){var sp=ci.filter(function(r){return !r.kind||r.cpus!=null});return sp.length?'. Specs: '+sp.map(function(r){return "island "+esc(r.id)+" "+(r.cpus==null?"n/a":r.cpus)+" cores, "+(r.memory_gib==null?"n/a":r.memory_gib)+" GiB"}).join("; "):""})()+'. Prices: '+esc(c.prices_source||"")+'</div>';
 }
@@ -448,8 +448,12 @@ function evLevel(t,rec){if(t==="operator_stop")return ["mu","stop"];
   if(t==="rl_publication"||t==="rl_round_trained")return ["ok","done"];if(t==="rl_reconfiguration"||t==="dashboard_source_lost")return ["wn","change"];return ["mu","info"]}
 function evText(e){var r=e.record||{},keys=["phase","rollout_id","policy_version","result","cause","recommendation","marker","reason_name","backlog_groups","buffer_selected","ticket","shard","why","detail"];
   return keys.filter(function(k){return r[k]!=null}).map(function(k){return k+"="+String(r[k]).slice(0,80)}).join(" ")}
+/* newest first by event time; the tapes are read one after another, so arrival (seq) order is not time order.
+   Ties and events without a time keep the arrival order (newest arrival first) */
+function evOrder(evs){return evs.map(function(e,i){return [e,i]}).sort(function(a,b){var ta=a[0].ts,tb=b[0].ts;
+  if(fin(ta)&&fin(tb)&&ta!==tb)return tb-ta;return b[1]-a[1]}).map(function(x){return x[0]})}
 function events(){
-  var ec=YetoTbl.cap("event-stream",EVENTS.filter(function(e){return keepEv(e.type)}).reverse(),{def:15,unit:"events"}),list=ec.rows;
+  var ec=YetoTbl.cap("event-stream",evOrder(EVENTS.filter(function(e){return keepEv(e.type)})),{def:15,unit:"events"}),list=ec.rows;
   $("evs").innerHTML=ec.bar+list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" "+esc(cardOf(e.island)?lbl(e.island):"island "+e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
 }
 function cmds(){
@@ -578,7 +582,8 @@ function spTable(ctx){
   var S=V.async.samplers||{},zv=zeroVarTrainer(),fl=!!ctx.pools;
   var groups=fl?ctx.pools.map(function(p){return {p:p,s:p.samplers.map(String)}}):ctx.sids.map(function(id){return {p:null,s:[id]}});
   if(!ctx.sids.length)return '<div class="nodata">no sampler on the tapes'+(fl?" for this island yet":"")+'</div>';
-  var zvCell=function(x){return fin(x.zero_variance_seen)||fin(x.zero_variance_dropped)?f(x.zero_variance_seen,0)+" / "+f(x.zero_variance_dropped,0):
+  var zvCell=function(x){if(fl&&fin(x.zero_variance_seen)&&!fin(x.zero_variance_dropped))return f(x.zero_variance_seen,0)+' / <span title="the pool keeps zero-variance groups (drop_zero_variance_groups off): they train with zero advantage">0</span>';
+    return fin(x.zero_variance_seen)||fin(x.zero_variance_dropped)?f(x.zero_variance_seen,0)+" / "+f(x.zero_variance_dropped,0):
     zv[1]?'<span class="note" title="the sampler tape has no per-trial rewards; rl_local_round.zero_variance_group_ratio of the trainer">trainer: '+pct(zv[0]/zv[1])+' of '+f(zv[1],0)+'</span>':"n/a"};
   var COLS=[["policy","version the sampler generates with",function(x){return x.policy_version==null?"n/a":"v"+esc(x.policy_version)},function(x){return x.policy_version!=null}],
     ["age p50 / max","policy age of its rounds; hover for the histogram",function(x){return '<span title="'+esc("rounds by policy age: "+hist(x.lag_hist).replace(/&#39;/g,"'"))+'">'+f(x.lag_p50,1)+" / "+f(x.lag_max,0)+'</span>'},function(x){return fin(x.lag_p50)||fin(x.lag_max)}],
@@ -602,12 +607,12 @@ function spTable(ctx){
         (i===0&&fl?'<td class="l"'+rs+'>'+esc(p.name)+(p.source_name&&p.source_name!==p.name&&String(p.name).slice(-String(p.source_name).length-1)!=="-"+p.source_name?' <span class="note">'+esc(p.source_name)+'</span>':"")+srcTag(p.source)+'</td>':"")+
         (i===0?'<td class="l"'+rs+platTitle(p,id)+'>'+esc(p?poolEngine(p):samplerEngine(id))+'</td>':"")+
         '<td class="l" title="'+esc(fin(c.last_event_age_s)?"last event "+f(c.last_event_age_s,0)+" s ago":"")+'">'+(c.status?stBadge(c.status,c):'<span class="note">not on the tapes</span>')+'</td>'+
-        cols.map(function(cl){return '<td class="num">'+cl[2](x)+'</td>'}).join("")+
+        cols.map(function(cl){var v=cl[2](x);return '<td class="num">'+(fl&&v==="n/a"?'<span class="note" title="not on this sampler\'s tape">—</span>':v)+'</td>'}).join("")+
         (mm&&i===0?'<td class="num"'+rs+'>'+mmCell(mmv.logprob_diff)+'</td><td class="num"'+rs+'>'+mmCell(mmv.tis_clip)+'</td>':"")+'</tr>'}).join("")}).join("");
   var notes=[];
   if(gone.length)notes.push("hidden: "+gone.map(function(c){return c[0]}).join(", ")+" (no sampler of this island reports it)");
   if(fl&&!mm)notes.push("logprob |diff| / TIS clipfrac per pool: not reported (the trainer steps carry no per-pool mismatch split)");
-  if(ctx.sids.some(function(id){var x=S[id]||{};return !fin(x.samples)}))notes.push("a sampler without rl_sampler_engine_round (Miles-generating samplers, older yeto versions) has no truncated / reward counts; zero-variance then comes from the trainer");
+  if(ctx.sids.some(function(id){var x=S[id]||{};return !fin(x.samples)}))notes.push(fl?"—: a sampler without rl_sampler_engine_round (a Miles native sampler) reports no zero-variance, truncated, dropped or reward counts":"a sampler without rl_sampler_engine_round (Miles-generating samplers, older yeto versions) has no truncated / reward counts; zero-variance then comes from the trainer");
   return YetoTbl.table(head,body)+(notes.length?'<div class="note">'+esc(notes.join(" · "))+'</div>':"")}
 /* trainer totals as one row of chips: zero and missing counts are named once at the end, not one chip each */
 function trChips(T){
@@ -617,7 +622,7 @@ function trChips(T){
   return '<div class="chips">'+show.map(function(x){return '<span'+(x[2]?' title="'+esc(x[2])+'"':"")+'>'+esc(x[0])+' <b>'+f(x[1],0)+'</b></span>'}).join("")+
     (T.unidentified_starved?'<span class="wn">reader starved <b>'+f(T.unidentified_starved.selections,0)+' selections kept no group</b></span>':"")+
     '<span title="policy ages of the trained groups, whole run (age:groups)">policy ages <b>'+histS(T.age_hist)+'</b></span>'+
-    (zero.length?'<span>0: '+esc(zero.join(", "))+'</span>':"")+(na.length?'<span>n/a: '+esc(na.join(", "))+'</span>':"")+'</div>'}
+    (zero.length?'<span>0: '+esc(zero.join(", "))+'</span>':"")+(na.length?'<span>'+(fleetOn()?"not reported":"n/a")+': '+esc(na.join(", "))+'</span>':"")+'</div>'}
 function asyncPanel(){
   var A=V.async,show=!!A&&!fleetView();$("async").hidden=!show;$("navAsync").style.display=A?"":"none";if(!A)return;
   if(!show){aComp(A,null);return}
@@ -761,15 +766,17 @@ function aRelChart(ctx,tags){
   $("legRel").innerHTML='<span><i class="sw" style="background:var(--P)"></i>release → load done</span>'+(rows.some(function(r){return !fin(r.released_at)})?'<span><i class="sw" style="background:transparent;border:1.5px solid var(--P);border-radius:50%"></i>started on the version</span>':"")+
     (pool.length?'<span><i class="sw" style="background:var(--warn)"></i>NC pool event</span><span><i class="sw" style="background:var(--bad)"></i>NC pool failure (evicted / lost / crash loop)</span>':"");
 }
-/* "Fleet": one row per island of the fleet (the summary each island block opens with) */
+/* "Fleet": one row per island of the fleet (the summary each island block opens with); a setting the island
+   does not override and no tape names is the fleet's shared trainer flag */
+var FLEET_SHARED='<span class="note" title="not set for this island: the shared trainer argv value">shared</span>';
 function fleetBox(){
   var on=fleetView();$("fleetBox").hidden=!on;if(!on)return;
   var I=V.async.islands||[];
   $("fleetTbl").innerHTML=YetoTbl.table('<tr><th class="l">island</th><th class="l">trainer</th><th class="l">pools</th><th>latest release</th><th>backlog</th><th>trained groups</th><th>stale dropped</th><th title="policy age of the trained groups, last round">policy age (last round)</th><th>release every</th><th>max policy age</th></tr>',
     I.map(function(x){var b=x.backlog||{},pts=b.points||[],last=pts.length?pts[pts.length-1]:null,pa=x.policy_age||{},t=x.trainer!=null?String(x.trainer):null,tc=t!=null?cardOf(t):null;
       return '<tr><td class="l"><b>Island '+esc(x.island)+'</b>'+(x.name?' <span class="note">'+esc(x.name)+'</span>':"")+'</td><td class="l">'+(tc?nameCell(t)+" "+stBadge(tc.status,tc):'<span class="note">not on the tapes yet</span>')+'</td><td class="l">'+
-        x.pools.map(function(p){return esc(p.name)+' <span class="note">'+p.samplers.length+'</span>'}).join(", ")+'</td><td class="num">'+(fin(x.latest)?"v"+x.latest:"none")+'</td><td class="num">'+(last&&fin(last[3])?f(last[3],0):"n/a")+'</td><td class="num">'+f(x.trained_groups,0)+
-        '</td><td class="num">'+f(pa.stale_groups,0)+'</td><td class="num">'+(fin(pa.mean_last)?"mean "+f(pa.mean_last,2)+" · max "+f(pa.max_last,0):"n/a")+'</td><td class="num">'+(fin(x.release_every)?x.release_every:"n/a")+'</td><td class="num">'+(fin(x.max_policy_age)?x.max_policy_age:"n/a")+'</td></tr>'}).join(""));
+        x.pools.map(function(p){return esc(p.name)+' <span class="note">'+p.samplers.length+'</span>'}).join(", ")+'</td><td class="num">'+(fin(x.latest)?"v"+x.latest:"none")+'</td><td class="num">'+(last&&fin(last[3])?f(last[3],0):pts.length?'<span class="note" title="its trainer has not read the lane yet">'+f(b.written,0)+' written</span>':'<span class="note">none</span>')+'</td><td class="num">'+f(x.trained_groups,0)+
+        '</td><td class="num">'+f(pa.stale_groups,0)+'</td><td class="num">'+(fin(pa.mean_last)?"mean "+f(pa.mean_last,2)+" · max "+f(pa.max_last,0):'<span class="note">no trained round</span>')+'</td><td class="num">'+(fin(x.release_every)?x.release_every:FLEET_SHARED)+'</td><td class="num">'+(fin(x.max_policy_age)?x.max_policy_age:FLEET_SHARED)+'</td></tr>'}).join(""));
 }
 /* the run-wide ledgers: two to a row, one alone takes the row */
 function runWide(){
@@ -791,6 +798,7 @@ function render(){
   if(typeof YetoExt!=="undefined")YetoExt.render(V,OFFLINE);
   if(typeof YetoTopo!=="undefined")YetoTopo.render(V,OFFLINE);
   if(typeof YetoBrk!=="undefined")YetoBrk.render(V);
+  if(typeof YetoTbl!=="undefined"&&YetoTbl.hint)YetoTbl.hint();
 }
 // the server runs newer page code than this tab (redeployed): reload once per build, else say so
 function stale(b){if(!b||typeof YETO_BUILD!=="string"||b===YETO_BUILD)return;var done=null;
