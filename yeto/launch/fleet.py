@@ -291,6 +291,9 @@ class FleetController:
             self.syncer = self._make_record(syncer_name, syncer_task, syncer_job)
             self.syncer_probe = self.syncer_restart = None
         self.downed_clusters: set = set()
+        # teardowns skipped while the records lock could not be confirmed past its lease: tried
+        # again each poll once it is confirmed (the island would bill until the launcher ends)
+        self.pending_downs: dict = {}  # name -> force
         # Learners whose recovery is disabled regardless of recover_timeout
         # (Verda without the verified sky patch: a same-name relaunch there
         # can delete the running node).
@@ -426,6 +429,7 @@ class FleetController:
             if self._abort_error is not None:
                 raise self._abort_error
             self._raise_if_fenced()
+            self._retry_pending_downs()
             self._fleet("cost_tick")
             self._poll_rollout()
             if self.syncer is not None:
@@ -1174,15 +1178,36 @@ class FleetController:
             file=sys.stderr,
         )
 
-    def _down(self, name: str, force: bool = False) -> None:
-        if self.recorder is not None:  # the lock checked now, not only the cached view
+    def _retry_pending_downs(self) -> None:
+        """One lock check per poll for every pending teardown: not confirmed, the whole round
+        waits (a store that hangs is asked once, not once per island); lost, nothing is torn
+        down (the launcher holding the records owns them)."""
+        if not self.pending_downs:
+            return
+        if self.recorder is not None:
+            try:
+                self.recorder.store.guard_order("pending teardowns")
+            except lifecycle.IslandRecordsUnconfirmed as error:
+                if error.lease_over:
+                    return
+            except lifecycle.IslandRecordsFenced:
+                pass  # _down below sees the fence and tears nothing down
+        pending, self.pending_downs = self.pending_downs, {}
+        for name, force in sorted(pending.items()):
+            self._down(name, force=force, checked=True)
+
+    def _down(self, name: str, force: bool = False, *, checked: bool = False) -> None:
+        if self.recorder is not None and not checked:  # the lock checked now, not only the cached view
             try:
                 self.recorder.store.guard_order(f"teardown of {name}")
             except lifecycle.IslandRecordsFenced:
                 pass  # the cached view below says so too
             except lifecycle.IslandRecordsUnconfirmed as error:
                 if error.lease_over:  # another launcher may hold the records: no teardown now
-                    print(f"[launcher] NOT tearing down {name} now: {error}", file=sys.stderr)
+                    if name not in self.pending_downs:
+                        print(f"[launcher] NOT tearing down {name} now: {error}; tried again once the "
+                              "lock is confirmed", file=sys.stderr)
+                    self.pending_downs[name] = self.pending_downs.get(name, False) or force
                     return
                 # within this holder's lease: still ours (nobody claims the records without the store)
                 print(f"[launcher] {name}: tearing down unconfirmed ({error})", file=sys.stderr)

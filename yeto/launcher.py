@@ -1469,7 +1469,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             cost_guard.stop()  # the teardown below releases everything; no forced stop mid-way
         # a launcher that lost the island records' lock tears nothing down: the holder owns the fleet
         if hands_off_exit is None and _lost_island_records(island_states):
-            hands_off_exit = ISLAND_RECORDS_LOCKED_EXIT
+            # 12: another launcher holds the records; 13: not confirmed past this holder's lease
+            hands_off_exit = (ISLAND_RECORDS_LOCKED_EXIT if island_states.fenced is not None
+                              else ISLAND_RECORDS_UNKNOWN_EXIT)
         hands_off = hands_off_exit is not None
         if hands_off:
             args._hands_off_exit = hands_off_exit  # the worker runs no backstop cleanup either
@@ -1484,6 +1486,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         downed = controller.downed_clusters if controller is not None else set()
         # an ssh: island the controller released is released again: that call verifies it
         remaining = [c for c in clusters if c not in downed or c in ssh_names]
+        # teardowns the controller skipped while its lock was not confirmed (a renamed relaunch
+        # target is not always in clusters): torn down here when the end confirms the lock
+        pending = controller.pending_downs if controller is not None else {}
+        remaining += [c for c in sorted(pending) if c not in remaining]
         if modal_ops is not None and modal_cfgs:
             # Containers commit their tape every 30 s and at exit; pulled
             # here (before the app stop) and again after it below.
