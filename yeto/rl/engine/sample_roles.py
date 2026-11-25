@@ -1615,13 +1615,19 @@ def auto_backlog_groups(*, groups_per_round: int, release_every: int, record_rou
     return -(-need // max(1, int(samplers)))
 
 
-def resolve_auto_backlog(value: Any, environ: Mapping[str, str] | None = None) -> tuple[Any, str | None]:
+def resolve_auto_backlog(value: Any, environ: Mapping[str, str] | None = None, *,
+                         derived: Mapping[str, Any] | None = None) -> tuple[Any, str | None]:
     """``(cap, note)`` of a spec's ``max_backlog_groups``: a number is returned as is
-    (note None); ``"auto"`` takes the value ``yeto run up`` derived
-    (:data:`AUTO_BACKLOG_ENV`), else :data:`AUTO_BACKLOG_FALLBACK_GROUPS`; the note
-    says which, for the start log."""
+    (note None); ``"auto"`` takes the pool's own cap (``derived``, ``{"groups", "why"}``:
+    an island fleet's pool, ``yeto.rl.fleet.island_auto_backlog``), else the value
+    ``yeto run up`` derived for the run (:data:`AUTO_BACKLOG_ENV`), else
+    :data:`AUTO_BACKLOG_FALLBACK_GROUPS`; the note says which, for the start log."""
     if not (isinstance(value, str) and value.strip().lower() == AUTO_BACKLOG):
         return value, None
+    groups = (derived or {}).get("groups")
+    if isinstance(groups, int) and not isinstance(groups, bool) and groups > 0:
+        why = str((derived or {}).get("why") or "").strip()
+        return groups, "auto" + (f": {why}" if why else " (derived by yeto run up for this pool's island)")
     env = os.environ if environ is None else environ
     raw = str(env.get(AUTO_BACKLOG_ENV) or "").strip()
     if raw.isdigit() and int(raw) > 0:

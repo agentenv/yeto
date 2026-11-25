@@ -647,7 +647,7 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
     else:  # "auto": the cap `yeto run up` derived for its pools, else the fallback (the note says which)
         from yeto.rl.engine.sample_roles import AUTO_BACKLOG_NOTE_KEY, resolve_auto_backlog  # noqa: PLC0415
 
-        cap, note = resolve_auto_backlog(spec.get("max_backlog_groups"))
+        cap, note = resolve_auto_backlog(spec.get("max_backlog_groups"), derived=pool_auto_backlog(cfg))
         if note is not None:
             spec["max_backlog_groups"] = cap
             spec[AUTO_BACKLOG_NOTE_KEY] = note
@@ -679,7 +679,23 @@ POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base
                        "engine", "platform",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "comment", "sampler_route", "data_path", "syncer", "protected_accounts",
-                       "prompts_file", "node_runtime", "node_profile"})
+                       "prompts_file", "node_runtime", "node_profile", "auto_backlog"})
+# an island fleet's pool: the "auto" max_backlog_groups of its island ({"groups", "why"}),
+# written by the fleet compile (yeto.rl.fleet.island_auto_backlog)
+AUTO_BACKLOG_KEY = "auto_backlog"
+
+
+def pool_auto_backlog(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """The pool's :data:`AUTO_BACKLOG_KEY` (None without one); ValueError on a bad one."""
+    value = cfg.get(AUTO_BACKLOG_KEY)
+    if value is None:
+        return None
+    groups = value.get("groups") if isinstance(value, dict) else None
+    if not isinstance(groups, int) or isinstance(groups, bool) or groups < 1 \
+            or not isinstance(value.get("why", ""), str) or set(value) - {"groups", "why"}:
+        raise ValueError(f"pool config: {AUTO_BACKLOG_KEY} must be {{\"groups\": <whole number >= 1>, "
+                         f"\"why\": <text>}} (written by the fleet compile; got {value!r})")
+    return dict(value)
 DATA_PATHS = ("r2", "syncer")  # buffer shards + releases in the run store | syncer broadcast + sample relay
 REQUIRED_KEYS = ("target", "shard_base")  # and "accounts" (or "slots" off National Compute)
 # the keys of the removed sky route (a SkyPilot SSH node pool with k3s on the node): refused by name
@@ -963,6 +979,7 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None, min_tar
     unknown = set(cfg) - POOL_KEYS
     if unknown:
         raise ValueError(f"pool config: unknown keys {sorted(unknown)} (known: {sorted(POOL_KEYS)})")
+    pool_auto_backlog(cfg)
     missing = [k for k in REQUIRED_KEYS if k not in cfg]
     if "accounts" not in cfg and "slots" not in cfg:
         missing.insert(1, "accounts")

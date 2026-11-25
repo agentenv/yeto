@@ -2787,10 +2787,16 @@ class Run:
         except (OSError, ValueError):
             return  # the pool dry-run reports an unreadable pool config
         auto = self.auto_backlog
+        own = [(ref.name, cfg["auto_backlog"]) for ref, (cfg, _path) in zip(self.pools, pools)
+               if isinstance(cfg.get("auto_backlog"), dict)]
+        for name, value in own:  # an island fleet's pool: its island's cap (yeto.rl.fleet.island_auto_backlog)
+            _log(f"preflight: max_backlog_groups auto -> {value.get('groups')} per sampler of pool {name} "
+                 f"({value.get('why')}; set a number in the sampler spec to override)")
         if auto is not None:
             _log(f"preflight: max_backlog_groups auto -> {auto['groups']} per sampler ({auto['why']}; "
                  "set a number in the sampler spec to override)")
-        elif any(up_consistency.is_auto_backlog(up_consistency.effective_spec(cfg)) for cfg, _path in pools):
+        elif any(up_consistency.is_auto_backlog(up_consistency.effective_spec(cfg)) and not cfg.get("auto_backlog")
+                 for cfg, _path in pools):
             from yeto.rl.engine import sample_roles  # noqa: PLC0415
 
             _log(f"preflight: max_backlog_groups auto -> fallback {sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS} per "

@@ -1167,6 +1167,34 @@ def compaction_problem(cfg: dict[str, Any], plan: FleetPlan,
 
 # ---------------------------------------------------------------------- compile
 
+AUTO_BACKLOG_KEY = "auto_backlog"  # yeto.launch.nc.cli.AUTO_BACKLOG_KEY
+
+
+def island_auto_backlog(rows: list[FleetIsland], argv: list[str], samplers: list[dict[str, Any]],
+                        docs: dict[str, dict[str, Any]]) -> None:
+    """Give the pools of each island the ``max_backlog_groups: "auto"`` cap of that island
+    (:data:`AUTO_BACKLOG_KEY` on the pool, ``{"groups", "why"}``): each island's trainer is
+    the buffer trainer of its own pools, so the cap is the single trainer's formula with
+    the island's release cadence and its pools' target samplers
+    (:func:`yeto.rl.up_consistency.island_auto_backlog`). Without it a fleet's "auto"
+    samplers took the fallback (256 groups each), wrote hundreds of base-version groups
+    before the trainers started, and the trainers dropped them all as over age. A pool
+    whose spec sets a number, or an island the formula does not cover, gets nothing."""
+    from yeto.rl import up_consistency  # noqa: PLC0415
+
+    by_name = {out["name"]: out for out in samplers}
+    for island in rows:
+        names = [p.name for p in island.pools]
+        auto = up_consistency.island_auto_backlog(argv, [docs[n] for n in names],
+                                                  release_every=island.release_every)
+        if auto is None:
+            continue
+        why = f"island {island.index} ({island.name}): {auto['why']}"
+        for name in names:
+            if up_consistency.is_auto_backlog(up_consistency.effective_spec(docs[name])):
+                by_name[name][AUTO_BACKLOG_KEY] = {"groups": int(auto["groups"]), "why": why}
+
+
 def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple[dict[str, Any], FleetPlan]:
     """The single-trainer run config of an island fleet and its plan (module doc).
     Raises ValueError (``run config: ...``) on a bad ``islands`` / ``fleet`` section.
@@ -1296,6 +1324,7 @@ def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple
             argv += ["--rl-island-sample-wait-s", f"{i.index}:{i.sample_wait_s:g}"]
         if i.buffer_max_prompt_len is not None:
             argv += [PROMPT_LEN_FLAG, f"{i.index}:{i.buffer_max_prompt_len}"]
+    island_auto_backlog(rows, argv, samplers, dict(pool_docs))
     from yeto.breakers.fleet import syncer_placement  # noqa: PLC0415
 
     prices = [i.usd_per_h for i in rows]
