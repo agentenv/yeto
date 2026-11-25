@@ -69,6 +69,8 @@ LATE_ISLAND_GRACE_S = 120.0
 # Bound on waiting for an in-flight relaunch before abandoning (so a late
 # sky.launch cannot re-create a cluster after teardown).
 RELAUNCH_JOIN_S = 120.0
+# An island STOP: how long its trainer may go on (to end on its own) before it is released.
+ISLAND_STOP_GRACE_S = 60.0
 
 
 class RunStalled(RuntimeError):
@@ -538,30 +540,50 @@ class FleetController:
 
     def _island_stop(self, rec) -> bool:
         """Island ``rec``'s own STOP (``fleet/trainers/<k>/STOP``): it ends this island only.
-        The island drains (no relaunch from here on), is released, and is ``done`` with
-        the request as its exit; the fleet goes on. True when the island is stopped now."""
+        The island drains (no relaunch from here on): its trainer gets up to
+        :data:`ISLAND_STOP_GRACE_S` to end on its own (polled, the other islands go on), then
+        it is released and ``done`` with the request as its exit; the fleet goes on. The
+        trainer has no command channel (the Miles island entry reads no STOP), so a trainer
+        that still runs at the end of the grace is torn down and the syncer drops it once its
+        lease runs out. A controller that lost the island records' lock tears nothing down
+        and writes nothing (:class:`IslandRecordsFenced`: the launcher holding them acts).
+        True while the island is draining or stopped now (no :meth:`_poll` of it)."""
         if self.recorder is None or rec["state"] in (DONE, ABANDONED):
             return False
-        try:
-            request = self.recorder.stop_requested(rec["name"])
-        except Exception:  # noqa: BLE001 - asked again next poll
-            return False
+        request = rec.get("stop_request")
         if request is None:
-            return False
+            try:
+                request = self.recorder.stop_requested(rec["name"])
+            except Exception:  # noqa: BLE001 - asked again next poll
+                return False
+            if request is None:
+                return False
+            self._raise_if_fenced()
+            why = str(request.get("reason") or "STOP")
+            by = request.get("by")
+            rec["stop_request"] = dict(request)
+            rec["draining"] = True
+            rec["drain_until"] = self.ops.now() + ISLAND_STOP_GRACE_S
+            self._record(rec, lifecycle.DRAINING, reason=f"island STOP: {why}")
+            print(f"[launcher] {rec['name']}: island STOP ({why}{', by ' + str(by) if by else ''}); stopping "
+                  f"this island only, the fleet goes on (its trainer gets {ISLAND_STOP_GRACE_S:.0f} s to end "
+                  "before it is released)", file=sys.stderr)
+            rec["stopped"] = True  # an in-flight relaunch tears its cluster down when it ends
+            attempt = rec.get("attempt")
+            if attempt is not None and attempt.thread is not None and not attempt.finished:
+                attempt.thread.join(RELAUNCH_JOIN_S)
+            if attempt is not None and attempt.finished and attempt.result is not None \
+                    and attempt.name and attempt.name != rec["name"]:
+                self._raise_if_fenced()
+                self._down(attempt.name)  # relaunched under a new name meanwhile
+            rec["attempt"] = None
+        self._raise_if_fenced()
         why = str(request.get("reason") or "STOP")
-        by = request.get("by")
-        rec["draining"] = True
-        self._record(rec, lifecycle.DRAINING, reason=f"island STOP: {why}")
-        print(f"[launcher] {rec['name']}: island STOP ({why}{', by ' + str(by) if by else ''}); stopping "
-              "this island only, the fleet goes on", file=sys.stderr)
-        rec["stopped"] = True  # an in-flight relaunch tears its cluster down when it ends
-        attempt = rec.get("attempt")
-        if attempt is not None and attempt.thread is not None and not attempt.finished:
-            attempt.thread.join(RELAUNCH_JOIN_S)
-        if attempt is not None and attempt.finished and attempt.result is not None \
-                and attempt.name and attempt.name != rec["name"]:
-            self._down(attempt.name)  # relaunched under a new name meanwhile
-        rec["attempt"] = None
+        if rec["state"] == RUNNING and self.ops.now() < float(rec.get("drain_until") or 0.0):
+            verdict, _status = self._probe(rec)
+            if verdict is None:
+                return True  # still training: the grace goes on
+            print(f"[launcher] {rec['name']}: ended within its island STOP grace ({verdict})", file=sys.stderr)
         rec["state"] = DONE
         rec["exit"] = f"{ISLAND_STOPPED_PREFIX} (island STOP: {why})"
         rec["decision"] = lifecycle.classify(stopped=True, detail=why)

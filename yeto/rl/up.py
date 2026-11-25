@@ -887,6 +887,10 @@ class Run:
         if plan is None:
             return True
         uri = fleet.substore_uri(self.cfg["store"], fleet.PLAN_OBJECT)
+        refusal = self.fleet_roster_refusal(plan, uri)
+        if refusal is not None:
+            _log(f"CRITICAL: {refusal}"[:1200])
+            return False
         try:
             self._objects().write(fleet.PLAN_OBJECT, plan.dumps().encode())
         except Exception as error:  # noqa: BLE001 - reported, nothing is ordered
@@ -894,6 +898,51 @@ class Run:
             return False
         self.mark("fleet_plan", object=uri)
         return True
+
+    def fleet_roster_refusal(self, plan: Any, uri: str) -> str | None:
+        """Why this ``run up`` must not write ``plan`` over the stored one (None: it may): the
+        stored plan ran the other roster (a plan written before ``fleet.fixed_roster`` ran a
+        fixed one) while trainer islands of it still run by their records. The new launch adopts
+        them as they run (``yeto.launch.island_adopt``): a fixed-roster trainer sends no syncer
+        lease heartbeat, so an island pool's syncer would drop it; a pool's trainer under a
+        fixed-roster syncer would wait on islands the syncer no longer counts."""
+        from yeto.launch import island_lifecycle as lifecycle  # noqa: PLC0415
+        from yeto.rl import fleet  # noqa: PLC0415
+
+        objects = self._objects()
+        try:
+            raw = objects.read(fleet.PLAN_OBJECT)
+        except Exception as error:  # noqa: BLE001 - nothing is ordered; the next run up reads it again
+            return (f"the stored fleet plan {uri} did not read ({type(error).__name__}: {error}): its roster "
+                    "(fixed or island pool) is unknown, so nothing is ordered; run `yeto run up` again")
+        if raw is None:
+            return None
+        try:
+            stored = fleet.FleetPlan.from_json(json.loads(raw))
+        except (ValueError, KeyError, TypeError):
+            return None  # not a plan this code reads: written over (no island records refer to its roster)
+        if stored.fixed_roster == plan.fixed_roster:
+            return None
+        try:  # the stored plan's islands, read one by one (no listing that could answer empty)
+            records = lifecycle.IslandStateStore(objects, log=_log).read_all(
+                range(max(len(stored.islands), len(plan.islands))), strict=True)
+        except lifecycle.IslandRecordsUnreadable as error:
+            return (f"the stored fleet plan {uri} ran another roster and the island records did not read "
+                    f"({error}): nothing is ordered; run `yeto run up` again")
+        running = lifecycle.active_islands(records)
+        if not running:
+            return None
+
+        def mode(p: Any) -> str:
+            return (f"a fixed roster ({p.roster_reason or 'fleet.fixed_roster'})" if p.fixed_roster
+                    else "the syncer island pool")
+        return (f"the stored fleet plan {uri} ran {mode(stored)} and trainer island(s) "
+                f"{', '.join(str(k) for k in running)} still run under it by their records, while this run config "
+                f"compiles {mode(plan)}: the new launch would adopt them as they run. Re-up with the stored roster ("
+                + ("fleet.fixed_roster: true" if stored.fixed_roster
+                   else "no fleet.fixed_roster, and a trainer argv the island pool takes")
+                + "), or start a new run name; once the fleet's machines are gone (`yeto run down`), deleting "
+                "the stored plan lets this roster start. Nothing ordered")
 
     def fleet_rt(self) -> Any:
         """The fleet's per-island runtime (:class:`yeto.rl.up_fleet_runtime.FleetRuntime`);
@@ -1994,8 +2043,9 @@ class Run:
             elif done and (done[-1][0] == "FAILED" or done[-1][1] != "0"):
                 why = f"trainer: launcher finished {done[-1][0]} (exit code {done[-1][1]})"
                 tripped = ("run.trainer_exit", float(done[-1][1]), 0.0)
-        if why is None and tr and _alive(tr["pid"]) and self.fleet_plan() is None:
-            # a fleet judges each island's trainer by its own tape (FleetRuntime.trainer_check)
+        if why is None and tr and _alive(tr["pid"]) and (
+                self.fleet_plan() is None or not self.fleet_rt().judges_every_trainer(time.time())):
+            # a fleet whose every running island has a tape judges each by it (FleetRuntime.trainer_check)
             why = self.silence(time.time())
             if why:
                 tripped = ("run.trainer_silence", self._quiet_s, self.silence_limit_s())
@@ -2832,7 +2882,8 @@ class Run:
                 else f"{len(rows) - len(stopped)} island(s) run, fewer than fleet.min_islands {minimum}")
         why = head + " (" + ", ".join(f"island {r['index']} ({r['name']}): {r['stop_reason']}"
                                       for r in stopped) + ")"
-        self.flag_stop(reason.removeprefix(STOP_REASON_PREFIX), "fleet_stop", "fleet_all_islands_stopped", why,
+        event = "fleet_all_islands_stopped" if len(stopped) == len(rows) else "fleet_min_islands_stopped"
+        self.flag_stop(reason.removeprefix(STOP_REASON_PREFIX), "fleet_stop", event, why,
                        grace_s=self.starvation_config.stop_grace_s, poll_s=poll_s,
                        after="`yeto run up --config <run.json>` resumes the trainers from their latest cut")
 
