@@ -197,7 +197,7 @@ def test_the_launcher_hands_a_held_sky_trainer_the_run_ledger_and_its_price(tmp_
 
     held = {}
 
-    def run_with_trainer_loop(args, run, *, island=None, abort=None, factory=None):
+    def run_with_trainer_loop(args, run, *, island=None, **kw):
         held["args"], held["island"] = args, island
         raise _Provisioned
 
