@@ -24,8 +24,11 @@ before anything is ordered.
 | The trainer card is sm80 or newer. | A T4 or V100 island. |
 
 The planner reads the model's config on the meta device (no GPU, no weights). The layout
-hash binds the matrix merge, so pass the run's: a fleet (`--rl-sync-preset decoupled` or
-`full-parameter`) merges with `rda` unless `--rl-sync-matrix-merge` says otherwise.
+hash binds the matrix merge, so plan with the one the run actually uses. A fleet
+(`--rl-sync-preset decoupled` or `full-parameter`) merges with `rda` in the default async
+mode, and with `avg` under `--rl-sync-mode strict` or `--rl-sync-full-parameter-rounds sweep`;
+`--rl-sync-matrix-merge` overrides both. The dry run prints the value it uses in each
+island's command (`--rl-sync-matrix-merge rda`, in the launch log of `run up --dry-run`).
 
 ```bash
 python -m yeto.rl.adapters.verl.full_parameter_plan --model Qwen/Qwen3-0.6B \
