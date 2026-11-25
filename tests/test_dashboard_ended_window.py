@@ -5,7 +5,6 @@ the window that ends at now."""
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -91,23 +90,40 @@ def test_a_live_run_window_still_ends_at_now(tmp_path):
     assert out["fleetH"].startswith("Fleet over the last ") and out["fleetH"].endswith("(whole run)")
 
 
-def test_a_run_whose_islands_are_gone_and_quiet_counts_as_ended(tmp_path):
-    """No run end on the tapes, but every island is gone (lost / stale) and the tapes are quiet for 10 min."""
+def test_a_stale_run_is_not_ended(tmp_path):
+    """No run end on the tapes and no trainer that ended: hours of silence make the islands stale, not ended. The
+    window keeps running to now (the gap shows) and the heartbeat alerts stay."""
     r = _live(0)
     last = r.max_ts
+    for now in (last + 300, last + 3 * 3600):
+        view = r.full_view(now=now)["overview"]
+        assert {c["status"] for c in view["islands"]} == {"stale"}
+        assert {a["rule"] for a in view["alerts"]} == {"heartbeat"}
+        out = _page(tmp_path, r, now=now)
+        assert out["win"]["ended"] is False and out["win"]["t1"] == pytest.approx(now)
+        assert out["fleetH"].startswith("Fleet over the last ") and "of the run" not in out["fleetH"]
+
+
+def _left(reason: str) -> Reducer:
+    r = _live(0)
+    r.feed({"event": "island_leave", "island_id": "0", "reason_name": reason, "time_unix": r.max_ts + 5})
+    return r
+
+
+def test_a_run_whose_trainers_left_on_purpose_is_ended(tmp_path):
+    """No run end on the tapes, but every trainer left with a clean reason (STOPPED): the run ended, its window
+    ends at its last event at once (no quiet time needed)."""
+    r = _left("STOPPED")
+    last = r.max_ts
+    out = _page(tmp_path, r, now=last + 20)
+    assert out["win"]["ended"] is True and out["win"]["t1"] == pytest.approx(last + 20)  # capped at now
     out = _page(tmp_path, r, now=last + 3 * 3600)
     assert out["win"]["ended"] is True and out["win"]["t1"] == pytest.approx(last + 60)
-    # quiet for less than 10 min: still live, the window runs to now
-    out = _page(tmp_path, r, now=last + 300)
-    assert out["win"]["ended"] is False and out["win"]["t1"] == pytest.approx(last + 300)
 
 
-def test_an_open_run_up_keeps_a_quiet_run_live(tmp_path):
-    r = _live(0)
-    last = r.max_ts
-    state = tmp_path / "state.json"
-    # an up with no end whose process is alive (this test's own pid): the launch is still running
-    state.write_text(json.dumps({"ups": [{"start": last - 600, "pid": os.getpid()}]}))
-    r.up_state = str(state)
-    out = _page(tmp_path, r, now=last + 3 * 3600)
-    assert out["win"]["ended"] is False
+def test_a_failed_trainer_is_not_an_end(tmp_path):
+    """A trainer that left on a failure (INFRA_FAILED) is relaunched: the run is not ended."""
+    r = _left("INFRA_FAILED")
+    now = r.max_ts + 3 * 3600
+    out = _page(tmp_path, r, now=now)
+    assert out["win"]["ended"] is False and out["win"]["t1"] == pytest.approx(now)

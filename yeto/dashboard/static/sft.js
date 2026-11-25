@@ -74,13 +74,14 @@ function overLabel(){if(!ENDED)return "the last "+rangeLabel();
 function noPrev(){return ENDED&&RANGE_RUN?"nothing before the run":"no previous "+rangeLabel()}
 function spanTxt(h){var m=h*60;return m<120?Math.round(m)+" min":m<2880?h.toFixed(1)+" h":(h/24).toFixed(1)+" days"}
 /* a run that ended: it says so (overview.run_end: finished or stopped by us), the syncer reached its final cut, or
-   every island is gone (no live status), the tapes are quiet for RUN_QUIET_S and no run up is open */
-var RUN_QUIET_S=600;
-function runEnded(V){var O=V.overview||{},d=(V.topology||{}).diloco,ru=(O.cost||{}).run_up;
+   every trainer has an explicit end (done, stopped by us, or left with a clean reason). A stale / lost / quiet
+   run is not ended: its window keeps running to now and its alerts stay */
+var CLEAN_LEAVE=["STOPPED","DONE","FINISHED","COMPLETED","DRAINED"];
+function runEnded(V){var O=V.overview||{},d=(V.topology||{}).diloco;
   if(O.run_end||(d&&d.done))return true;
-  var cs=(O.islands||[]).filter(function(c){return c.role!=="unrecognized"});
-  return cs.length>0&&cs.every(function(c){return ["ok","waiting","starting","recovery"].indexOf(c.status)<0})&&
-    fin(O.data_ts)&&NOW-O.data_ts>=RUN_QUIET_S&&!(ru&&ru.current_up_open)}
+  var tr=(O.islands||[]).filter(function(c){return c.role==="trainer"});
+  return tr.length>0&&tr.every(function(c){return c.status==="done"||c.status==="stopped"||
+    (c.status==="left"&&c.left&&CLEAN_LEAVE.indexOf(String(c.left.reason||"").toUpperCase())>=0)})}
 function rangeLabel(){if(RANGE_RUN){var m=RANGE_H*60;return (m<120?Math.round(m)+" min":m<2880?(RANGE_H).toFixed(1)+" h":(RANGE_H/24).toFixed(1)+" days")+" (whole run)"}
   return RANGE_H>=48?(RANGE_H/24)+" days":RANGE_H===1?"hour":RANGE_H+" hours"}
 
