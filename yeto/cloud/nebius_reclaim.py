@@ -136,8 +136,11 @@ def _server_credentials(cluster: str) -> dict[str, Any]:
     from sky.client import sdk
     from sky.utils import cluster_utils
 
+    def field(record: Any, key: str) -> Any:  # a StatusResponse model (sky >= 0.14) or a dict
+        return record.get(key) if isinstance(record, dict) else getattr(record, key, None)
+
     records = sdk.stream_and_get(sdk.status([cluster], _include_credentials=True))
-    creds = dict(next((r.get("credentials") for r in records if r.get("name") == cluster), None) or {})
+    creds = dict(next((field(r, "credentials") for r in records or () if field(r, "name") == cluster), None) or {})
     if not creds:
         raise RuntimeError(f"the sky API server returned no SSH credentials for {cluster}")
     cluster_utils.SSHConfigHelper.generate_local_key_file(cluster, creds)
