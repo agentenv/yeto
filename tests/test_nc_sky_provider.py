@@ -117,8 +117,10 @@ class FakeSky:
         self.calls.append(("launch", cluster_name, task, kw))
         failing = task.resources.get("infra") in self.fail_launch
         if not failing:
+            labels = dict((task.resources or {}).get("labels") or {})
             self.clusters[cluster_name] = {"name": cluster_name, "status": "INIT", "kw": kw,
-                                           "handle": SimpleNamespace(head_ip=None, ssh_user="ubuntu")}
+                                           "handle": SimpleNamespace(head_ip=None, ssh_user="ubuntu",
+                                                                     launched_resources=SimpleNamespace(labels=labels))}
 
         def provision():
             if failing:
@@ -144,7 +146,9 @@ class FakeSky:
 
     # -- the cloud / skylet side
     def up(self, name, ip="198.51.100.7"):
-        self.clusters[name].update(status="UP", handle=SimpleNamespace(head_ip=ip, ssh_user="ubuntu"))
+        launched = getattr(self.clusters[name].get("handle"), "launched_resources", None)
+        self.clusters[name].update(status="UP", handle=SimpleNamespace(head_ip=ip, ssh_user="ubuntu",
+                                                                      launched_resources=launched))
         rid = self.cluster_request.get(name)
         if rid in self.requests and self.requests[rid]["status"] == "RUNNING":
             self.requests[rid].update(status="SUCCEEDED", result=(1, self.clusters[name]["handle"]))
@@ -163,6 +167,13 @@ class FakeSky:
                 continue
             if minutes >= idle_limit:
                 del self.clusters[name]
+
+
+def marked(name, run, status="UP"):
+    """A cluster sky lists whose launched resources carry ``run``'s ownership label."""
+    return {"name": name, "status": status,
+            "handle": SimpleNamespace(head_ip="198.51.100.8", ssh_user="ubuntu",
+                                      launched_resources=SimpleNamespace(labels={"yeto-run": run}))}
 
 
 def _provider(sky, slots=(1, 2)):
@@ -482,7 +493,7 @@ def test_after_an_api_server_restart_clusters_are_reconciled_by_prefix_without_a
         assert p.release(slot, ticket)["state"] == "ended"
     assert starting not in sky.clusters and p.run_tickets() == [(1, up)]
     # a cluster the record never got (a crash between the launch and the record) is adopted
-    sky.clusters["yeto-smp-run-s-9"] = {"name": "yeto-smp-run-s-9", "status": "UP"}
+    sky.clusters["yeto-smp-run-s-9"] = marked("yeto-smp-run-s-9", "run-s")
     assert (2, "yeto-smp-run-s-9") in p.run_tickets() and p.status(2, "yeto-smp-run-s-9").state == "active"
 
 
@@ -503,3 +514,131 @@ def test_status_asks_sky_to_refresh_so_a_reclaimed_spot_vm_reads_gone():
     name = p.order(1)
     p.status(1, name)
     assert ("status", (name,), "AUTO") in sky.calls
+
+
+# -- ownership: a positive mark, not a name (REV on #765)
+def test_every_launch_carries_the_runs_ownership_label_and_ledger_intent(tmp_path, monkeypatch):
+    monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(tmp_path / "ledger.jsonl"))
+    sky = FakeSky()
+    p = _provider(sky)
+    name = p.order(1)
+    task = next(c[2] for c in sky.calls if c[0] == "launch")
+    assert task.resources["labels"] == {"yeto-run": "run-s"}
+    from yeto.cost.ledger import current
+
+    intents = [r for r in current().records() if r["op"] == "intent"]
+    assert intents and intents[0]["name"] == name and intents[0]["attrs"]["run"] == "run-s"
+
+
+def test_a_label_unsafe_run_id_gets_a_hashed_owner_and_an_unambiguous_prefix(tmp_path):
+    sky = FakeSky()
+    a = SkyProvider("ABC_2", slots=[1], resources={"infra": "aws"}, sky=sky, record=tmp_path / "a.json")
+    b = SkyProvider("abc-2", slots=[1], resources={"infra": "aws"}, sky=sky, record=tmp_path / "b.json")
+    assert a.prefix != b.prefix and b.prefix == "yeto-smp-abc-2" and a.prefix.startswith("yeto-smp-abc-2-")
+    assert b.owner == "abc-2" and a.owner.startswith("h-") and a.owner != b.owner
+    name = a.order(1)
+    sky.up(name)
+    assert a.run_tickets() == [(1, name)]
+    assert b.run_tickets() == []  # never the other run's, whatever its name looks like
+    with pytest.raises(PermissionError):
+        b.release(1, name)
+    assert name in sky.clusters
+
+
+def test_a_record_of_another_run_is_refused(tmp_path):
+    record = tmp_path / "shared.json"
+    SkyProvider("run-a", slots=[1], resources={"infra": "aws"}, sky=FakeSky(), record=record).order(1)
+    with pytest.raises(PermissionError, match="belongs to run 'run-a'"):
+        SkyProvider("run-b", slots=[1], resources={"infra": "aws"}, sky=FakeSky(), record=record).run_tickets()
+
+
+def test_only_marked_clusters_named_exactly_prefix_n_are_adopted(tmp_path, capsys):
+    sky = FakeSky()
+    p = SkyProvider("abc", slots=[1, 2], resources={"infra": "aws"}, sky=sky, record=tmp_path / "abc.json")
+    sky.clusters["yeto-smp-abc-3"] = marked("yeto-smp-abc-3", "abc")  # ours: a launch the record lost
+    sky.clusters["yeto-smp-abc-2-1"] = marked("yeto-smp-abc-2-1", "abc-2")  # run abc-2's
+    sky.clusters["yeto-smp-abc-2-5"] = marked("yeto-smp-abc-2-5", "abc")  # marked ours, but not <prefix>-<n>
+    sky.clusters["yeto-smp-abc-handmade"] = {"name": "yeto-smp-abc-handmade", "status": "UP"}
+    sky.clusters["yeto-smp-abc-9"] = {"name": "yeto-smp-abc-9", "status": "UP"}  # the name, no mark
+    sky.clusters["yeto-smp-abc-8"] = marked("yeto-smp-abc-8", "abc-2")  # the name, another run's mark
+    assert [t for _, t in p.run_tickets()] == ["yeto-smp-abc-3"]
+    assert p.run_tickets() == [(1, "yeto-smp-abc-3")]
+    out = capsys.readouterr().out
+    assert out.count("yeto-smp-abc-9 has this run's name pattern but no ownership mark") == 1  # once
+    assert "yeto-smp-abc-8" in out and "handmade" not in out and "abc-2-1" not in out
+    for foreign in ("yeto-smp-abc-2-1", "yeto-smp-abc-2-5", "yeto-smp-abc-handmade", "yeto-smp-abc-9",
+                    "yeto-smp-abc-8"):
+        with pytest.raises(PermissionError):
+            p.release(1, foreign)
+    assert p.release(1, "yeto-smp-abc-3")["state"] == "ended"
+    assert not [c for c in sky.calls if c[0] == "down" and c[1] != "yeto-smp-abc-3"]
+    assert len(sky.clusters) == 5
+
+
+def test_a_ledger_intent_of_this_run_is_a_mark_and_one_of_another_run_is_not(tmp_path, monkeypatch):
+    from yeto.cost.ledger import ResourceLedger
+    from yeto.launch.nc.sky_provider import LEDGER_KIND
+
+    monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(tmp_path / "ledger.jsonl"))
+    ledger = ResourceLedger(tmp_path / "ledger.jsonl")
+    ledger.intent(LEDGER_KIND, "yeto-smp-abc-4", run="abc")  # written before a launch that sky never labelled
+    ledger.intent(LEDGER_KIND, "yeto-smp-abc-6", run="abc-other")
+    ledger.intent(LEDGER_KIND, "yeto-smp-abc-7")  # no run: no mark
+    sky = FakeSky()
+    for n in (4, 6, 7):
+        sky.clusters[f"yeto-smp-abc-{n}"] = {"name": f"yeto-smp-abc-{n}", "status": "UP"}
+    p = SkyProvider("abc", slots=[1, 2], resources={"infra": "aws"}, sky=sky, record=tmp_path / "abc.json")
+    assert [t for _, t in p.run_tickets()] == ["yeto-smp-abc-4"]
+
+
+def test_the_watchdogs_exact_prefix_adopts_only_its_own_runs_clusters(tmp_path):
+    """exact_prefix (the spot watchdog: names ``spot-w-<n>``, no run id in them): a cluster an
+    earlier process of this run launched is adopted and released; another run's cluster under
+    the same pattern, or one opened by hand, is never adopted, released or downed."""
+    sky = FakeSky()
+
+    def watchdog(run, where):
+        return SkyProvider(run, slots=[1], resources={"infra": "aws", "use_spot": True}, sky=sky,
+                           exact_prefix="spot-w", record=tmp_path / f"{where}.json")
+
+    earlier = watchdog("runw", "earlier")
+    earlier.launch_cluster("spot-w-1", earlier.offers[0], slot=1)
+    other = watchdog("runx", "other")
+    other.launch_cluster("spot-w-7", other.offers[0], slot=1)
+    sky.clusters["spot-w-debug"] = {"name": "spot-w-debug", "status": "UP"}
+    sky.clusters["spot-w-3"] = {"name": "spot-w-3", "status": "UP"}  # by hand, the pattern's name
+    mine = watchdog("runw", "mine")  # a new process of run runw; the earlier record is lost
+    assert [t for _, t in mine.run_tickets()] == ["spot-w-1"]
+    assert mine.release(1, "spot-w-1")["state"] == "ended" and "spot-w-1" not in sky.clusters
+    for foreign in ("spot-w-7", "spot-w-debug", "spot-w-3"):
+        with pytest.raises(PermissionError):
+            mine.release(1, foreign)
+        assert foreign in sky.clusters
+    assert not [c for c in sky.calls if c[0] == "down" and c[1] != "spot-w-1"]
+
+
+def test_no_ownership_label_without_a_cloud_the_ledger_intent_is_the_mark(tmp_path, monkeypatch):
+    """sky validates labels of cloud-less resources against every enabled cloud (a client-side
+    cloud check), so a cloud-less offer gets no label; its ledger intent still marks it."""
+    monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(tmp_path / "ledger.jsonl"))
+    sky = FakeSky()
+    p = SkyProvider("run-s", slots=[1], resources={"accelerators": "L4:1"}, sky=sky, record=tmp_path / "a.json")
+    name = p.order(1)
+    task = next(c[2] for c in sky.calls if c[0] == "launch")
+    assert "labels" not in task.resources
+    sky.up(name)
+    again = SkyProvider("run-s", slots=[1], resources={"accelerators": "L4:1"}, sky=sky, record=tmp_path / "b.json")
+    assert again.run_tickets() == [(1, name)]
+
+
+@pytest.mark.parametrize("infra", ["aws", "gcp", "nebius", "kubernetes", "runpod", "verda"])
+@pytest.mark.parametrize("run", ["run-s", "ABC_2"])
+def test_sky_accepts_and_keeps_the_ownership_label_on_every_infra(infra, run):
+    """Real sky: the label passes the cloud's label rules and survives the copies the
+    optimizer makes (launched_resources is a copy of the requested resources)."""
+    sky = pytest.importorskip("sky")
+    from yeto.launch.nc.sky_provider import OWNER_LABEL, owner_token
+
+    labels = {OWNER_LABEL: owner_token(run)}
+    resources = sky.Resources(infra=infra, labels=labels)
+    assert resources.labels == labels and resources.copy(region=None).labels == labels

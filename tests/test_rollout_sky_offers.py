@@ -13,7 +13,7 @@ from yeto.launch.nc import cli, provider as prov
 from yeto.launch.nc.sky_provider import SkyProvider, from_config, offline_problems
 from yeto.launch.rollout import offers
 from yeto.rl.spot import watchdog as wd
-from tests.test_nc_sky_provider import FakeSky, ResourcesUnavailableError
+from tests.test_nc_sky_provider import FakeSky, ResourcesUnavailableError, marked
 
 
 @pytest.fixture(autouse=True)
@@ -102,7 +102,7 @@ def test_a_cluster_stuck_starting_reads_lost_past_the_start_timeout():
 def test_a_listed_cluster_of_this_run_is_adopted_and_others_are_not():
     sky = FakeSky()
     p = from_config(_cfg(resources={"cloud": "aws", "accelerators": "H100:8"}), "run-k", sky=sky)
-    sky.clusters["yeto-smp-run-k-7"] = {"name": "yeto-smp-run-k-7", "status": "UP"}  # launch never recorded
+    sky.clusters["yeto-smp-run-k-7"] = marked("yeto-smp-run-k-7", "run-k")  # launch never recorded
     sky.clusters["yeto-smp-other-1"] = {"name": "yeto-smp-other-1", "status": "UP"}
     sky.clusters["prod-trainer"] = {"name": "prod-trainer", "status": "UP"}
     tickets = p.run_tickets()
