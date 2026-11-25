@@ -406,3 +406,35 @@ def test_through_pool_scale_only_the_total_takes_effect_today(tmp_path, monkeypa
     pool.tick()
     assert pool.config.target == 3 and len(cloud.kinds("order")) == orders
     assert len(_ready(pool)) >= 2
+
+
+def test_hours_left_unknown_spreads_the_money_over_the_horizon():
+    offers = [offer("s", "a", b.SPOT, usd=4.0)]
+    budget = b.Budget(usd_total=100.0, spent_usd=80.0)  # 20 USD left, hours unknown
+    d = b.decide(offers, [b.Demand("0", want=10)], budget=budget)
+    assert d.ceiling_usd_h == pytest.approx(20.0) and d.targets == {"s/a": 5}
+    assert "hours left unknown: the money left is spread over 1 h" in d.notes
+    d = b.decide(offers, [b.Demand("0", want=10)], budget=budget, policy=b.Policy(horizon_h=4.0))
+    assert d.ceiling_usd_h == pytest.approx(5.0) and d.targets == {"s/a": 1}
+    d = b.decide(offers, [b.Demand("0", want=10)], budget=b.Budget(usd_total=100.0, spent_usd=80.0, hours_left=2.0),
+                 policy=b.Policy(horizon_h=4.0))
+    assert d.ceiling_usd_h == pytest.approx(10.0), "known hours win over the horizon"
+
+
+def test_allowed_providers_and_regions():
+    offers = [offer("s", "a", b.SPOT, provider="sky", region="r1", usd=1.0),
+              offer("s", "b", b.SPOT, provider="sky", region="r2", usd=2.0),
+              offer("m", "c", b.SPOT, provider="modal", region="", usd=3.0)]
+    d = b.decide(offers, [b.Demand("0", want=3)], policy=b.Policy(allowed_regions=frozenset({"r2"})))
+    assert d.targets == {"s/a": 0, "s/b": 3, "m/c": 0}, "a region-less offer passes a region rule"
+    assert "s/a: provider or region not allowed: no new node" in d.notes and d.refill["s"] == "s/b"
+    d = b.decide(offers, [b.Demand("0", want=3)], policy=b.Policy(allowed_providers=frozenset({"modal"})))
+    assert d.targets == {"s/a": 0, "s/b": 0, "m/c": 3}
+    # a running node outside the rule stays to its boundary
+    d = b.decide(offers, [b.Demand("0", want=3)], running={"s/a": 1},
+                 policy=b.Policy(allowed_providers=frozenset({"modal"})))
+    assert d.targets == {"s/a": 1, "s/b": 0, "m/c": 2}
+    cfg = b.config_from_run({"broker": {"enabled": True, "allowed_providers": ["nc", "sky"], "horizon_h": 3}})
+    assert cfg.policy.allowed_providers == {"nc", "sky"} and cfg.policy.horizon_h == 3.0
+    with pytest.raises(ValueError, match="allowed_regions"):
+        b.config_from_run({"broker": {"enabled": True, "allowed_regions": "r1"}})

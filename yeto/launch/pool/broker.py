@@ -30,8 +30,10 @@ Compute), spot, then on-demand as a fallback. Within a tier, best score first.
   share) leave goes to on-demand at once; nodes already on on-demand stay until
   their boundary.
 
-The broker is off unless a run config's ``broker`` section sets ``enabled: true``
-(:func:`config_from_run`), so a single-pool run (the customer path) is never touched.
+The broker is a library only: nothing in yeto calls it yet (``yeto run up`` refuses a
+``broker`` key in a run config; :func:`config_from_run` reads the section for the caller
+that lands with the fleet control plane, and returns None unless ``enabled: true``).
+So no run, the customer's single-pool path included, is touched.
 
 Phase 2 (:func:`plan_migrations`, off by default: ``migrate: true``): a node an
 island no longer needs moves to an island short of nodes on the same offer
@@ -176,6 +178,18 @@ class Policy:
     hysteresis: float = DEFAULT_HYSTERESIS
     on_demand_after_s: float = DEFAULT_ON_DEMAND_AFTER_S
     usd_per_h: float | None = None  # hourly ceiling of the run's sampler nodes
+    # the money left is spread over the hours left; with the hours left unknown, over this
+    # many hours (1: never more than the whole rest of the budget in one hour)
+    horizon_h: float = 1.0
+    allowed_providers: frozenset[str] | None = None  # None: every provider
+    allowed_regions: frozenset[str] | None = None  # None: every region (an offer without one always passes)
+
+    def allows(self, offer: Offer) -> bool:
+        """Whether a new node may go to ``offer`` (a running node outside stays to its boundary)."""
+        if self.allowed_providers is not None and offer.provider not in self.allowed_providers \
+                and (offer.cloud or offer.provider) not in self.allowed_providers:
+            return False
+        return self.allowed_regions is None or not offer.region or offer.region in self.allowed_regions
 
 
 @dataclass(frozen=True)
@@ -184,11 +198,14 @@ class Budget:
     spent_usd: float = 0.0
     hours_left: float | None = None  # wall clock left; None: unknown
 
-    def hourly_ceiling(self, policy_cap: float | None) -> float | None:
+    def hourly_ceiling(self, policy_cap: float | None, horizon_h: float = 1.0) -> float | None:
+        """The lower of ``policy_cap`` and the money left over the hours left (``horizon_h``
+        when the hours left are unknown). None: neither is set."""
         caps = [c for c in (policy_cap,) if c is not None]
         if self.usd_total is not None:
             left = max(0.0, self.usd_total - self.spent_usd)
-            caps.append(left / self.hours_left if self.hours_left else left)
+            hours = self.hours_left if self.hours_left else max(horizon_h, 1e-9)
+            caps.append(left / hours)
         return min(caps) if caps else None
 
 
@@ -347,8 +364,12 @@ def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mappi
     per_token = all(_throughput_known(o, ledger) for o in offers if o.tier != OWN)
     scored = {o.key: score_offer(o, prices=prices, ledger=ledger, caps=caps, per_token=per_token) for o in offers}
     demand = {d.island: d for d in demands}
-    ceiling = budget.hourly_ceiling(policy.usd_per_h)
+    ceiling = budget.hourly_ceiling(policy.usd_per_h, policy.horizon_h)
     notes: list[str] = [f"{k}: {r}" for k, s in scored.items() for r in s.risks if r.startswith("not in the price")]
+    if budget.usd_total is not None and not budget.hours_left:
+        notes.append(f"hours left unknown: the money left is spread over {policy.horizon_h:g} h")
+    notes += [f"{k}: provider or region not allowed: no new node" for k, s in scored.items()
+              if not policy.allows(s.offer)]
     targets = {k: 0 for k in scored}
     spread: dict[tuple[str, str, str], int] = {}
     usd_h = 0.0
@@ -404,6 +425,7 @@ def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mappi
                 continue
             spot_cap = math.floor(policy.spot_max_frac * max(0, d.want) + 1e-9)
             cands = sorted((s for s in scored.values() if s.offer.island == island and s.offer.available
+                            and policy.allows(s.offer)
                             and (s.score is not None or s.offer.tier == OWN)),
                            key=lambda s: rank_key(s, at_boundary.get(s.offer.key, 0) > 0))
             capped = False  # spot held back by a policy cap (share, spread), not by the market
@@ -470,7 +492,7 @@ def refill_choices(scored: Iterable[Scored], running: Mapping[str, int], policy:
     better tier beats its score by more than ``policy.hysteresis``."""
     by_pool: dict[str, list[Scored]] = {}
     for s in scored:
-        if s.offer.available and (s.score is not None or s.offer.tier == OWN):
+        if s.offer.available and policy.allows(s.offer) and (s.score is not None or s.offer.tier == OWN):
             by_pool.setdefault(s.offer.pool, []).append(s)
     out = {}
     for pool, rows in by_pool.items():
@@ -498,7 +520,8 @@ class BrokerConfig:
 
 
 BROKER_KEYS = frozenset({"enabled", "interval_s", "spread_cap", "spread_tiers", "spot_max_frac", "hysteresis",
-                         "on_demand_after_s", "floors", "migrate", "migrate_min_lease_s"})
+                         "on_demand_after_s", "floors", "migrate", "migrate_min_lease_s", "horizon_h",
+                         "allowed_providers", "allowed_regions"})
 
 
 def config_from_run(cfg: Mapping[str, Any]) -> BrokerConfig | None:
@@ -531,13 +554,22 @@ def config_from_run(cfg: Mapping[str, Any]) -> BrokerConfig | None:
     if not isinstance(floors, Mapping) or any(isinstance(v, bool) or not isinstance(v, int) or v < 0
                                               for v in floors.values()):
         raise ValueError("run config: broker.floors must map an island to a whole number >= 0")
+    def names(key: str) -> frozenset[str] | None:
+        v = section.get(key)
+        if v is None:
+            return None
+        if not isinstance(v, list) or not v or not all(isinstance(x, str) and x for x in v):
+            raise ValueError(f"run config: broker.{key} must be a non-empty list of names or null (got {v!r})")
+        return frozenset(v)
+
     budget = cfg.get("budget") if isinstance(cfg.get("budget"), Mapping) else {}
     hourly = budget.get("usd_per_h")
     policy = Policy(spread_cap=cap, spread_tiers=tiers, spot_max_frac=num("spot_max_frac", 1.0, 0.0, 1.0),
                     hysteresis=num("hysteresis", DEFAULT_HYSTERESIS, 0.0, 0.9),
                     on_demand_after_s=num("on_demand_after_s", DEFAULT_ON_DEMAND_AFTER_S, 0.0),
                     usd_per_h=float(hourly) if isinstance(hourly, (int, float)) and not isinstance(hourly, bool)
-                    else None)
+                    else None, horizon_h=num("horizon_h", 1.0, 0.01),
+                    allowed_providers=names("allowed_providers"), allowed_regions=names("allowed_regions"))
     return BrokerConfig(interval_s=num("interval_s", DEFAULT_INTERVAL_S, 10.0), policy=policy,
                         floors={str(k): int(v) for k, v in floors.items()},
                         migrate=section.get("migrate") is True,
