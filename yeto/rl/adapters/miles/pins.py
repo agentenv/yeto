@@ -787,8 +787,9 @@ OVERLAY_UNSAFE_UNREPACKED: dict[str, tuple[str, str]] = {
         "the same FULL_D files: the overlay-safe repack of 028e505d (MILES_K31_OVERLAYFIX_IMAGE)"),
     "fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325": (
         "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14",
-        "the same FULL_E files: the overlay-safe repack of 2de5d796 (MILES_K31_FULL_OVERLAYFIX_IMAGE; "
-        "/root/miles at 1f29e430)"),
+        "the same FULL_E tree, Miles commit 1f29e430 (the pre-normalization hash of that tree: the island "
+        "and provenance report 1f29e430 instead of the FULL_E commit): the overlay-safe repack of 2de5d796 "
+        "(MILES_K31_FULL_OVERLAYFIX_IMAGE)"),
 }
 
 
