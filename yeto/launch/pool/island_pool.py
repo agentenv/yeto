@@ -52,6 +52,7 @@ from yeto.breakers import events as breaker_events
 
 from . import money
 from . import status as el
+from .migrate import PoolMoves
 
 LEASE_HOURS = 4  # the default lease of a lease-bounded provider (National Compute)
 
@@ -72,7 +73,8 @@ SLOT_RETRY_S = 600.0  # a slot whose guard refused is tried again after this lon
 # the ops calls that change something (a machine, a sampler, the work contract): on the store
 # control plane each runs only after the pool's store lock was confirmed (``GuardedOps``)
 MUTATING_OPS = frozenset({"order", "start", "restart", "drain", "fence", "fence_incarnation", "request_drain",
-                          "cancel_drain", "reassert_drain", "clear_stale_handoff", "pool_ended", "stop"})
+                          "cancel_drain", "reassert_drain", "clear_stale_handoff", "pool_ended", "stop",
+                          "stop_sampler", "load_release"})
 
 
 class GuardedOps:
@@ -269,7 +271,7 @@ CONTROL_POLL_S = 1.0  # the loop's wait between ticks checks the control file th
 
 
 @dataclass
-class IslandPool:
+class IslandPool(PoolMoves):
     config: PoolConfig
     ops: PoolOps
     clock: Callable[[], float] = time.time
@@ -350,6 +352,10 @@ class IslandPool:
     retired_shards: list[str] = field(default_factory=list)  # shards ended for good (a removed pool's)
     # the offer ledger as this pool feeds and reads it (offer_ledger.PoolLedger; None: not kept)
     offer_ledger: Any = None
+    # machines moving to / from another pool (capacity broker phase 2, ``migrate``): saved under
+    # ``moves`` only while there is one; ``move_box`` is the hand-over box a PoolMover sets
+    moves: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    move_box: Any = None
 
     def _control_stamp(self) -> Any:
         if self.scale_path is None:
@@ -465,6 +471,8 @@ class IslandPool:
     def _free_account(self) -> int | None:
         now = self.clock()
         busy = {m.account for m in self.live()}
+        if self.moves:  # a slot held for a machine moving in
+            busy |= {r["account"] for r in self.moves.get("in", {}).values()}
         can_tell = getattr(self.ops, "slot_halt", None) is not None
         failed = self._order_failed
         for account in sorted(self.config.accounts, key=lambda a: failed.get(a, float("-inf"))):
@@ -1181,7 +1189,9 @@ class IslandPool:
                          "the fence is still tried every tick and nothing continues the shard before it")
                 self._once(m, "fence_abandoned", "fence_abandoned_node_released", why=m.fence_pending,
                            failures=m.fence_failures, held_s=round(now - m.fence_since))
-            if m.fence_then == "scale":
+            if m.fence_then == "move":
+                self._move_fence_retried(m, now, over=over)
+            elif m.fence_then == "scale":
                 if self._fence(m, m.fence_pending) or over:
                     m.fence_then = None
                     self._drain(m, "scale down")
@@ -1194,6 +1204,8 @@ class IslandPool:
         ``must_release``: its node is gone or must not stay billed (its ticket ended, its
         lease is over): released even when the fence failed; the fence stays owed and
         whatever continues the shard starts only after it (:meth:`_fence_blocker`)."""
+        if self.moving_out(m):  # lost, evicted, ...: it goes as a scale-down victim, no move
+            self._cancel_move_out(m.ticket, why=why)
         if m.retiring_since is not None:  # a scale-down victim: nothing is handed on
             self._finish_retire(m, self.clock(), outcome=why, must_release=must_release)
             return
@@ -1503,6 +1515,9 @@ class IslandPool:
         draining on their own (``alone``: ``m`` only); event ``scaled_down``. A member whose
         fence failed stays ``fencing`` and is drained once it succeeds (``must_release``: its
         ticket ended or its lease is over; it is drained now and the fence stays owed)."""
+        if self.moving_out(m):  # moving to another pool: fenced and handed over, not released
+            self._finish_move(m, now, outcome=outcome, must_release=must_release)
+            return
         waited = None if m.retiring_since is None else round(now - m.retiring_since)
         group = [m] if alone else [m] + [x for x in self._linked(m)[1:] if x.retiring_since is None]
         if self.config.data_slots is not None and (m.data_slot is not None or m.joined):
@@ -1659,6 +1674,8 @@ class IslandPool:
                 self._drain(m, "lease end")
 
         self._scale_down(now)
+        if self.moves:
+            self._settle_moves(now)
         if self.halted:  # a configuration error: nothing new until pool-retry (lease ends still apply)
             self._patrol(now)
             return
@@ -1688,7 +1705,8 @@ class IslandPool:
         # (a member whose release its halted slot refuses may stay for hours: it fills no place)
         while len([m for m in self.live() if m.retiring_since is None
                    and not (m.replaced_by and m.state == READY)
-                   and not (m.state == DRAINING and m.ticket in self._drain_hold)]) < self.config.target:
+                   and not (m.state == DRAINING and m.ticket in self._drain_hold)]) \
+                + self.moves_expected() < self.config.target:
             if self._order() is None:
                 break
         self._slots_short()
@@ -2455,9 +2473,12 @@ class IslandPool:
         except Exception as error:  # noqa: BLE001
             self.log(f"pool: patrol could not read the ledger: {error!r}")
             return
+        if self.moves:  # a finished move out whose machine is gone is forgotten
+            self.forget_moves(str(t) for _a, t in rows)
+        moving = self.moved_away() | set(self.moves.get("in", {})) if self.moves else set()
         for account, ticket in rows:
             account = _slot(account)
-            if ticket in owned:
+            if ticket in owned or ticket in moving:  # a machine moving to / from another pool is not an orphan
                 continue
             if not self.stopped and not self.config.release_orphans and ticket not in released:
                 self._adopt(account, str(ticket), now)
@@ -2571,6 +2592,8 @@ class IslandPool:
         if self._release_pool is not None:  # a stopping pool releases in line from here on
             self._release_pool.shutdown(wait=False)
             self._release_pool = None
+        if self.moves:
+            self._stop_moves()
         self._pool_ended(why)
 
     def _pool_ended(self, why: str) -> None:
@@ -2638,7 +2661,7 @@ class IslandPool:
                 "members": [asdict(m) for m in self.members], "pending": list(self.pending),
                 "breaker": asdict(self.breaker), "budget": asdict(self.budget),
                 **({"retired_shards": list(self.retired_shards)} if self.retired_shards else {}),
-                **({"owner": dict(self.owner)} if self.owner is not None else {})}
+                **({"owner": dict(self.owner)} if self.owner is not None else {}), **self.moves_doc()}
 
     def save(self, path: Path) -> None:
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -2681,6 +2704,7 @@ class IslandPool:
         pool.retired_shards = list(doc.get("retired_shards") or [])
         if pool.owner is None and isinstance(doc.get("owner"), dict):
             pool.owner = dict(doc["owner"])
+        pool.load_moves(doc)
         for m in pool.members:  # a start cut off by the restart: probed first (``_watch``)
             if m.state == STARTING and not m.joined:
                 if getattr(ops, "probe", None) is not None:

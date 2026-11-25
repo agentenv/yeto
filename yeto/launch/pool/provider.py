@@ -262,6 +262,13 @@ class ProviderPoolOps:
         if route is not None:  # the pool looks these up with getattr: only set with a route
             self.probe = self._probe
             self.restart = self._restart
+            # a machine may move to another pool (capacity broker phase 2): its sampler stops,
+            # the machine stays; ``load_release`` when the route can load one on a running node
+            self.stop_sampler = self._stop_sampler
+            if not isinstance(route, Mapping) and getattr(route, "load_release", None) is not None:
+                self.load_release = self._load_release
+        if getattr(provider, "move_slot", None) is not None:  # a slot that is only a counter (sky)
+            self.move_slot = provider.move_slot
         if fencer is not None:
             self.fence = self._fence
             self.fence_incarnation = self._fence_incarnation
@@ -332,6 +339,12 @@ class ProviderPoolOps:
 
     def _probe(self, member: Any) -> Any:
         return self.route_of(member).probe(member)
+
+    def _stop_sampler(self, member: Any) -> None:
+        self.route_of(member).stop(member)
+
+    def _load_release(self, member: Any) -> None:
+        self.route_of(member).load_release(member, self.provider.node(member.account, member.ticket))
 
     def _fence(self, member: Any) -> Any:
         return self.fencer.fence_shard(member.shard, by=member.ticket)
