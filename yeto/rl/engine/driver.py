@@ -1113,13 +1113,50 @@ class IslandDriver:
         gate = basis() if callable(basis) else None
         return int(version) if gate is None else min(int(version), int(gate))
 
+    def _continue_above_own_releases(self, start: Any) -> Any:
+        """A sync session whose rounds count from 0 in every process (full
+        parameter: ``continue_version_account_at``) over a store that already holds
+        this island's releases (``published_policy_history``: a relaunch, or a peer
+        recovery) continues its version account above them. The island's buffer
+        holds groups its samplers generated with those releases, and a version
+        number the store already names must never be published again with other
+        weights (its groups would be named by the wrong policy, and a release at or
+        below LATEST is never released: the samplers stay on LATEST). The start is
+        ``max(the session's start, newest release + 1)``; the restored table
+        (:meth:`_restore_published_policies`) then names the buffered groups.
+
+        Sessions without the verb (they count their own account: a single
+        trainer's ``LocalOnlySync.resume_at``, the decoupled snapshot) and stores
+        without releases (a first start) are left as they are."""
+        continue_at = getattr(self.sync, "continue_version_account_at", None)
+        history = getattr(self, "published_policy_history", None)
+        if not callable(continue_at) or not callable(history):
+            return start
+        released = sorted({int(version) for version, _ in history()})
+        if not released or int(start.rollout_id) > released[-1]:
+            return start
+        rollout_id = released[-1] + 1
+        continued = continue_at(self, rollout_id)
+        if int(continued.rollout_id) != rollout_id or continued.state.policy_version != rollout_id:
+            raise DriverError(f"{type(self.sync).__name__} continued its version account at "
+                              f"v{continued.state.policy_version} (rollout {continued.rollout_id}), "
+                              f"not above its releases at v{rollout_id}")
+        self.emit("rl_version_account_continued", rollout_id=rollout_id,
+                  session_start=int(start.rollout_id), latest_release_version=released[-1],
+                  released_versions=released[-8:])
+        return continued
+
     def _restore_published_policies(self, start_rollout_id: int) -> None:
         """A restarted island learns the versions published before it
         started, so groups the samplers generated with them pass the policy-age
         check. Only versions below the start version within the policy-age window
-        are restored; the start version and later ones are published again."""
+        are restored; the start version and later ones are published again.
+
+        Any start with a history is restored, rollout 0 included: a session that
+        counts its rounds from 0 continues above its releases first
+        (:meth:`_continue_above_own_releases`), so the start here is above them."""
         history = getattr(self, "published_policy_history", None)
-        if start_rollout_id <= 0 or not callable(history):
+        if not callable(history):
             return
         oldest = start_rollout_id - self._max_policy_age()
         restored = {}
@@ -2946,20 +2983,25 @@ class IslandDriver:
             try:
                 start = None
                 try:
-                    start = self.sync.start(self)
+                    start = session_start = self.sync.start(self)
+                    start = self._continue_above_own_releases(start)
                     self._restore_published_policies(start.rollout_id)
                     self._restore_base_policy(start)
                     self._gate_unidentified_policies(start.rollout_id)
+                    # A continued account (_continue_above_own_releases) only moves the
+                    # version labels: where the data goes on is still the session's own
+                    # start (a full-parameter island: its data position log), so the
+                    # base-restart ledger set-aside and the data cursor see that start.
                     if self.ledger is not None:
-                        self._set_aside_ledger_of_a_base_restart(start.rollout_id)
+                        self._set_aside_ledger_of_a_base_restart(session_start.rollout_id)
                         self.ledger.rebase(start.rollout_id)
-                        self._restore_data_cursor(start.rollout_id)
+                        self._restore_data_cursor(session_start.rollout_id)
                     elif callable(getattr(self.sync, "restart_cursor_fallback", None)):
                         # 0.23: an elastic island without --rl-elastic has no batch
                         # ledger, yet must still not re-draw rounds below base_version
                         # (1b: rollouts 3, 4 re-trained rollouts 0, 1). Same
                         # for a strict island relaunched at v > 0 (verl V2 island 1).
-                        self._restore_data_cursor(start.rollout_id)
+                        self._restore_data_cursor(session_start.rollout_id)
                     self._resume_data_position()
                     state = start.state
                     self.publish(state, rollout_id=start.rollout_id)

@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -341,6 +341,7 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
                  r3_layers: tuple[int, int] | None = None, r3_num_experts: int | None = None,
                  sampling: Mapping[str, Any] | None = None, stats: dict[str, int] | None = None,
                  require_known_versions: bool = False,
+                 published_versions: Collection[int] | None = None,
                  ) -> tuple[list[tuple[int, list[dict[str, Any]]]], list[str]]:
     """The taken groups renumbered (:func:`renumber_group`) and in Miles' sample form
     (``buffer_payload.miles_sample_dict``), and why each group that cannot be converted
@@ -356,8 +357,21 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
     of unknown policy version is left out the same way, before it is trained, and
     counted in ``stats["unknown_version_groups"]``; the evidence would otherwise stop
     the island after the take. Samples served by two versions (named by the oldest,
-    ``buffer_payload.miles_sample_dict``) are counted in ``stats["cross_version_samples"]``."""
-    from yeto.rl.engine.buffer_payload import cross_version, miles_sample_dict, unknown_version_tokens  # noqa: PLC0415
+    ``buffer_payload.miles_sample_dict``) are counted in ``stats["cross_version_samples"]``.
+    ``published_versions`` (the same island, its trajectories named by the driver's
+    published versions, not by external merged cuts): a group with a trajectory whose
+    oldest version (the one the evidence names it by) the driver never published -- a
+    release an earlier process of the island made and the store no longer names -- is
+    left out the same way and counted in ``stats["unpublished_version_groups"]``; the
+    evidence would otherwise stop the island ("policy vN ... was not published")."""
+    from yeto.rl.engine.buffer_payload import (  # noqa: PLC0415
+        cross_version,
+        miles_sample_dict,
+        oldest_response_version,
+        unknown_version_tokens,
+    )
+
+    published = None if published_versions is None else frozenset(int(v) for v in published_versions)
 
     kept, problems = [], []
     unstamped = 0
@@ -377,6 +391,16 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
                     raise SampleBufferRolloutError(
                         f"{unknown} response token(s) of unknown policy version (no weight_versions span "
                         "names them): the full-parameter evidence cannot name their behavior policy")
+            if published is not None:
+                unpublished = sorted({v for v in map(oldest_response_version, converted)
+                                      if v is not None and v not in published})
+                if unpublished:
+                    if stats is not None:
+                        stats["unpublished_version_groups"] = stats.get("unpublished_version_groups", 0) + 1
+                    raise SampleBufferRolloutError(
+                        f"trajectories of policy version(s) {unpublished} this island has not published "
+                        f"(published: {sorted(published)}): the full-parameter evidence cannot name "
+                        "their behavior policy")
             kept.append((position, converted))
             unstamped += not stamped
         except SampleBufferRolloutError as error:

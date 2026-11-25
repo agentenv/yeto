@@ -1362,6 +1362,11 @@ class FullParameterSync(RoundCutHooks):
         # before; the driver then continues at its recorded data position
         # (``data_position`` module doc). Set by ``start``.
         self.joined_running_pool = False
+        # The rollout id this process's first round has (``continue_version_account_at``):
+        # 0, or above the island's own releases after a relaunch or a peer recovery.
+        # The pairing's lead cap and the overlap's terminal round count this
+        # process's local rounds from it, as they did from 0.
+        self.first_rollout_id = 0
 
     @property
     def ends_on_data_end(self) -> bool:
@@ -1408,8 +1413,23 @@ class FullParameterSync(RoundCutHooks):
         self.joined_running_pool = outcome is not None or any(
             int(version) > 0 for version in self.pairing.fragment_versions())
         self._publish_outer_version(driver)
-        # the local round counter starts at 0 in every process (module doc)
+        # the local round counter starts at 0 in every process (module doc); the
+        # driver continues it above the island's releases (continue_version_account_at)
         return SyncStart(state=self.actor.resident_state(0), rollout_id=0)
+
+    def continue_version_account_at(self, driver: IslandDriver, rollout_id: int) -> SyncStart:
+        """The driver's verb after :meth:`start` (``IslandDriver._continue_above_own_releases``):
+        the store already holds this island's releases up to ``rollout_id - 1`` (an
+        earlier process of the island published them: a relaunch, a peer recovery),
+        so the process's first publication is ``rollout_id``, not 0. The restored
+        trainer state is the same; only its version label moves. The local rounds of
+        this process are still counted from its first round (:attr:`first_rollout_id`)."""
+        del driver
+        if int(rollout_id) < 0:
+            raise ValueError(f"the version account cannot start below 0, got {rollout_id!r}")
+        self.first_rollout_id = int(rollout_id)
+        return SyncStart(state=self.actor.resident_state(self.first_rollout_id),
+                         rollout_id=self.first_rollout_id)
 
     def _emit_bound_layouts(self, driver: IslandDriver) -> None:
         """``--rl-parameter-layout-sha256 auto``: the layout each such role
@@ -1433,7 +1453,7 @@ class FullParameterSync(RoundCutHooks):
         self._timing = SyncTiming(None, None)
         self._lead_wait_s = 0.0
         self._phase_seconds = {}
-        self.pairing.local_round = rollout_id + 1
+        self.pairing.local_round = rollout_id + 1 - self.first_rollout_id  # this process's rounds
         self.terminal = self.run(self._boundary(rollout_id))
         versions = self.pairing.fragment_versions()
         state = self.actor.resident_state(rollout_id + 1)
@@ -1666,7 +1686,7 @@ class FullParameterSync(RoundCutHooks):
             await pairing.finish_without_more_training()
             return True
         before = pairing.fragment_versions()
-        if rollout_id + 1 >= pairing.profile.total_rounds:
+        if rollout_id + 1 - self.first_rollout_id >= pairing.profile.total_rounds:
             # Terminal round: nothing trains after it, so wait for the cut.
             pairing.submit_ready()
             submit_ts = unix_now()

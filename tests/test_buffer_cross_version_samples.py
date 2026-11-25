@@ -99,4 +99,5 @@ def test_the_reader_exports_the_new_counts_only_when_there_are_some():
 
     import yeto.rl.adapters.miles as miles_adapter
     source = (Path(miles_adapter.__file__).parent / "buffer_rollout_miles.py").read_text()  # imports Miles
-    assert '("cross_version_samples", "unknown_version_groups")' in source and "if stats.get(key)" in source
+    assert ('("cross_version_samples", "unknown_version_groups", "unpublished_version_groups")' in source
+            and "if stats.get(key)" in source)

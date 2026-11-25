@@ -274,6 +274,13 @@ class _BufferRound:
         damaged: list[dict[str, Any]] = []  # of every take of this round
         duplicates: list[dict[str, Any]] = []
         stats: dict[str, int] = {}
+        evidence = evidence_enabled(self.args)
+        # the evidence names each trajectory by a version the driver published (not an
+        # external merged cut): a group of a version it never published is left out
+        # (an empty map names nothing: the evidence refuses the round as before)
+        published = None
+        if evidence and getattr(self, "relay_pump", None) is None and not merged_release_mode():
+            published = self._published_versions() or None
         for _attempt in range(MAX_UNCONVERTIBLE_TAKES):
             groups, report = self.reader.take(input.rollout_id, self.groups,
                                               current_version=self._basis_version(input))
@@ -286,7 +293,7 @@ class _BufferRound:
             converted, problems = miles_groups(groups, samples_per_group=self.samples_per_group,
                                                r3_layers=r3_layers, r3_num_experts=num_experts,
                                                sampling=getattr(self, "sampling", None), stats=stats,
-                                               require_known_versions=evidence_enabled(self.args))
+                                               require_known_versions=evidence, published_versions=published)
             unconvertible += problems
             if converted:
                 break
@@ -390,9 +397,18 @@ class _BufferRound:
                if stats.get("no_version_fields_groups") else {}),
             # cross-version samples (named by their oldest version) and the groups left out for
             # tokens of unknown version: only once there are some (the metric set stays otherwise)
-            **{f"sample_buffer/{key}": float(stats[key]) for key in ("cross_version_samples", "unknown_version_groups")
+            **{f"sample_buffer/{key}": float(stats[key])
+               for key in ("cross_version_samples", "unknown_version_groups", "unpublished_version_groups")
                if stats.get(key)},
             **flat_metrics(source)})
+
+    @staticmethod
+    def _published_versions() -> list[int]:
+        """The versions the driver published in the policy-age window (the map the
+        evidence names trajectories from, ``rollout_meta_hook.published_policies``)."""
+        from .rollout_meta_hook import published_policies
+
+        return sorted(published_policies().hashes())
 
     @staticmethod
     def _basis_version(input: RolloutFnInput) -> int | None:
