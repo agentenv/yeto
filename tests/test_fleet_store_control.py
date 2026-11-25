@@ -399,3 +399,77 @@ def test_past_its_own_lease_an_unconfirmed_lock_is_waited_out_never_a_detach():
     left = pool.drain_all("run down", wait_s=0, sleep=waits.append)
     assert waits and not pool.detached and left == []  # waited out, then drained
     assert sorted(provider.released) == sorted(provider.machines)
+
+
+class _SpotProvider(FakeProvider):
+    """Orders are accepted (a ticket) and wait in provisioning; ``lose`` ends one before any grant
+    (a spot launch that found no capacity: sky's ResourcesUnavailableError)."""
+
+    def order(self, slot):
+        ticket = super().order(slot)
+        self.machines[ticket]["state"] = "waiting"
+        return ticket
+
+    def lose(self, ticket):
+        self.machines[ticket].update(state="ended", end_reason="lost")
+
+
+def _spot_pool(tmp_path, *, control=True, written=()):
+    from yeto.launch.nc.elastic import ObjectRecords  # noqa: PLC0415
+    from yeto.launch.pool.data_path import R2DataPath  # noqa: PLC0415
+    from yeto.rl.engine.object_store import DirectoryObjectStore  # noqa: PLC0415
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index  # noqa: PLC0415
+
+    objects, clock = DirectoryObjectStore(tmp_path), Clock()
+    for shard in written:
+        FileSampleBuffer(objects, batch_size=1, index=shard_index(shard)).mark_data_end()
+    provider = _SpotProvider("p", clock)
+    ops = ProviderPoolOps(provider, FakeRoute(), FakeFencer())
+    path = R2DataPath(ObjectRecords(objects))
+    ops.data_path = lambda: path
+    ctl = store_state.open_pool_control(objects, "nc", "smp", clock=clock) if control else None
+    config = PoolConfig(target=1, accounts=[0, 1], shard_base="smp", elastic=quiet_elastic())
+    pool = IslandPool.from_doc(None, config, ops, control=ctl, clock=clock, log=lambda _m: None,
+                               events=EventLog(log=lambda _m: None, clock=clock))
+    return pool, provider, clock
+
+
+def test_a_number_whose_ticket_is_lost_before_any_grant_goes_to_the_next_order(tmp_path):
+    """INT round 0: the order went through (a ticket), the spot launch then found no capacity
+    before any grant. No sampler started and its shard holds no record: the next order in this
+    process takes the same number (a spot storm never burns the pool's tunnel-port indices)."""
+    pool, provider, clock = _spot_pool(tmp_path)
+    pool.tick()
+    [first] = pool.live()
+    assert first.shard == "smp-0"
+    provider.lose(first.ticket)
+    clock.t += 30
+    pool.tick()
+    pool.tick()
+    live = [m for m in pool.live() if m.ticket != first.ticket]
+    assert [m.shard for m in live] == ["smp-0"] and len(provider.orders) == 2
+    assert any(e["event"].endswith("shard_given_back") for e in pool.events.events)
+    assert pool.control.allocator.high() == 0  # no new number was issued
+
+
+def test_a_lost_ticket_whose_shard_holds_records_keeps_its_number(tmp_path):
+    pool, provider, clock = _spot_pool(tmp_path, written=["smp-0"])
+    pool.tick()
+    [first] = pool.live()
+    provider.lose(first.ticket)
+    clock.t += 30
+    pool.tick()
+    pool.tick()
+    assert sorted(m.shard for m in pool.live() if m.ticket != first.ticket) == ["smp-1"]
+    assert not any(e["event"].endswith("shard_given_back") for e in pool.events.events)
+
+
+def test_the_local_control_plane_numbers_as_before_after_a_lost_ticket(tmp_path):
+    pool, provider, clock = _spot_pool(tmp_path, control=False)
+    pool.tick()
+    [first] = pool.live()
+    provider.lose(first.ticket)
+    clock.t += 30
+    pool.tick()
+    pool.tick()
+    assert sorted(m.shard for m in pool.live() if m.ticket != first.ticket) == ["smp-1"]

@@ -621,8 +621,14 @@ class IslandPool:
 
     def _store_shard(self) -> int | str:
         """The shard number of the next member from the store allocator (``control``): the
-        number reserved by an earlier order that did not go through, else a fresh one (at
-        least ``next_shard``), skipping numbers whose data already ended in the run's store.
+        number held back in this process, else a fresh one (at least ``next_shard``),
+        skipping numbers whose data already ended in the run's store. A number is held back
+        when the order that took it raised (no ticket), or when its order returned a ticket
+        that was lost before any grant with no sampler started and no record in its shard
+        (:meth:`_shard_never_used`, ``shard_given_back``). A number a member was granted on,
+        started on or wrote to stays that member's: what replaces it gets a fresh number (or
+        continues the shard through a handoff). After a restart or a takeover, numbers no
+        member holds are ended for good instead (:meth:`end_unused_shards`).
         A string: why there is none (the store did not answer, or the number is past
         ``config.index_limit``, the tunnel ports). The allocator never issues a number twice,
         so there is no lifelong ``shard_limit`` here."""
@@ -706,6 +712,31 @@ class IslandPool:
         if out:
             self._event("unused_shards_ended", shards=out)
         return out
+
+    def _shard_never_used(self, m: Member) -> bool:
+        """Store control plane: ``m``'s shard number may go to the next order in this process.
+        ``m`` was ordered but lost before any grant: no sampler started (none was asked to),
+        nothing fenced, and its store shard holds no record (checked; unknown: not reused)."""
+        if self.control is None or m.started is not None or m.joined or m.ticket in self._starts:
+            return False
+        if self._reserved_shard is not None:
+            return False  # one number is held back at a time
+        base, _, tail = m.shard.rpartition("-")
+        if base != self.config.shard_base or not tail.isdigit():
+            return False
+        check = getattr(getattr(self.ops, "data_path", lambda: None)(), "shard_written", None)
+        if check is None:
+            return False
+        try:
+            return not check(m.shard)
+        except Exception:  # noqa: BLE001 - unknown: the number stays the lost member's
+            return False
+
+    def _give_back_shard(self, m: Member) -> None:
+        number = int(m.shard.rpartition("-")[2])
+        self._reserved_shard = number
+        self._event("shard_given_back", ticket=m.ticket, shard=m.shard,
+                    why="lost before a grant; no sampler started, its shard holds no record")
 
     def _shard_has_records(self, shard: str) -> bool:
         check = getattr(getattr(self.ops, "data_path", lambda: None)(), "shard_written", None)
@@ -1781,7 +1812,10 @@ class IslandPool:
                 self._event("offer_failed", ticket=m.ticket, account=m.account)  # that offer cools down
             elif never_granted:
                 self._fail(now, f"ticket {m.ticket} ended before a grant")
+            give_back = never_granted and self._shard_never_used(m)
             self._retire(m, kind, lost=True, must_release=True)  # its ticket ended: nothing to keep
+            if give_back:
+                self._give_back_shard(m)
             if kind == el.BALANCE:
                 self.stop("a ticket ended for the balance")
             return
