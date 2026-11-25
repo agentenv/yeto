@@ -229,6 +229,30 @@ def launch_dry_run(member: dict[str, Any], *, incarnation: int = 0,
     return dry_run_plan(args)
 
 
+def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any]) -> None:
+    """The island ``member`` (added or moved) against the syncer launch of the run
+    (``yeto.rl.fleet_session``) with the term of the fleet's syncer record (the syncer
+    launch's when there is none yet), and the desired state's other trainer islands'
+    learner ids. Raises ValueError naming every disagreement."""
+    from yeto.rl import fleet_session  # noqa: PLC0415
+
+    record = None
+    try:
+        record = il.read_syncer_record(run._objects())  # noqa: SLF001
+    except Exception as error:  # noqa: BLE001 - the syncer launch's own term
+        print(f"fleet island: the fleet's syncer record was not read ({type(error).__name__}: {error}); "
+              "checking with the syncer launch's term", file=sys.stderr)
+    others = [m for m in dz.trainers(doc).values() if m["name"] != member["name"]]
+    clash = [m["name"] for m in others if int(m.get("learner_id", -1)) == int(member["learner_id"])]
+    if clash:
+        raise IslandChangeError(f"learner id {member['learner_id']} of island {member['name']} is island "
+                                f"{clash[0]}'s too")
+    epoch = (record or {}).get("syncer_epoch")
+    fleet_session.check(run.trainer_argv() if hasattr(run, "trainer_argv") else run.cfg["trainer"]["argv"],
+                        [member], syncer_epoch=epoch if isinstance(epoch, int) else None)
+    print(f"fleet island: island {member['name']} agrees with the syncer launch on the syncer session")
+
+
 # -- the command --------------------------------------------------------------------------------
 
 def add_parser(fsub: Any) -> None:
@@ -289,6 +313,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
             print(f"fleet island: {line}")
         if launch_member is not None:
             launch_dry_run(launch_member, prepare=prepare)
+            session_check(run, doc, launch_member)
             print(f"fleet island: launch of {launch_member['name']} (learner {launch_member['learner_id']}, "
                   f"--gpu {launch_member['gpu']}) passes its dry run")
     except (IslandChangeError, ValueError, OSError) as error:

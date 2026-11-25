@@ -12,6 +12,7 @@ import re
 
 import pytest
 
+from test_fleet_island_changes import fleet_store  # noqa: F401 - fixture
 from test_fleet_island_launches import _prepared, example_doc
 from yeto.launch.rl_island_task import _rl_trainable_island_flags
 from yeto.launch.syncer import rl_syncer_profile
@@ -70,3 +71,75 @@ def test_every_island_launch_compiles_the_syncer_launch_s_profile_and_session(tm
         diff = {k: (v, island_profile.get(k)) for k, v in syncer_profile.items() if island_profile.get(k) != v}
         assert not diff, f"island {name}: (syncer, island) {diff}"
         assert island_flags == syncer_flags, name
+
+
+def _secret_cfg(tmp_path):
+    """The two-island example with the fleet's store Secret for its Modal islands (and the
+    fragments its model's layout has: a sky island's launch checks them before ordering)."""
+    doc = example_doc(tmp_path)
+    argv = doc["fleet"]["trainer_argv"]
+    argv[argv.index("--fragments") + 1] = "9"
+    argv += ["--modal-store-secret", "store-secret"]
+    path = tmp_path / "secret.json"
+    path.write_text(json.dumps(doc))
+    return up.load_config(str(path))
+
+
+def test_two_islands_a_third_added_and_one_moved_to_aws_agree_and_carry_only_their_cloud_s_flags(tmp_path):
+    from yeto.rl import fleet_session
+
+    cfg = _secret_cfg(tmp_path)
+    plan = fleet.plan_of(cfg)
+    members = island_launches.trainer_members(cfg, plan)
+    entry = dict(cfg["islands"][-1]["samplers"][0], name="sglang-north")
+    added, _ = fleet_islands.compile_island(cfg, plan, k=2, name="north", gpu="modal:1x2xh100", usd_per_h=8.0,
+                                            samplers=[entry])
+    moved = {**members[0], "gpu": "aws:1xh100@us-west-2"}
+    for case in (members, [*members, added], [moved, *members[1:], added]):
+        fleet_session.check(cfg["trainer"]["argv"], case)  # raises on any disagreement
+    for member in (*members, added):
+        assert "--modal-store-secret" in island_launches.launch_argv(member, syncer=RECORD)
+    aws = island_launches.launch_argv(moved, incarnation=1, syncer=RECORD)
+    assert "--modal-store-secret" not in aws and "store-secret" not in aws
+    _prepared(aws)  # the AWS island's launch takes its options (no Modal Secret to attach)
+
+
+def test_a_disagreeing_island_fails_the_run_up_preflight_and_its_add(tmp_path, monkeypatch):
+    """An island whose launch compiles another profile (here an outer lr of its own) is
+    refused at the preflight (dry run too) with the differing field named, and so is an
+    `yeto fleet island add/move` of it."""
+    from test_fleet_island_runup import FakeController, build
+    from test_fleet_trainer_worker import FakeLaunches
+    from yeto.launch.pool import desired as dz
+
+    run, objects = build(tmp_path, monkeypatch)
+    run.attach_trainer_worker(FakeController(), objects, ops=FakeLaunches())
+    run.adopt_desired()
+    assert run.fleet_session_problem() is None
+    store = dz.DesiredStore(objects)
+    store.update(lambda doc: dz.trainers(doc)["sglang"]["argv"].extend(["--rl-sync-outer-lr", "0.5"]))
+    run.adopt_desired()
+    problem = run.fleet_session_problem()
+    assert problem and "island sglang (learner 1)" in problem and "'outer_lr'" in problem
+    logs = []
+    monkeypatch.setattr(up, "_log", logs.append)
+    assert run.preflight() is False  # `yeto run up` and its dry run: nothing is ordered
+    assert any("do not agree on the syncer session" in m and "'outer_lr'" in m for m in logs)
+    member = dz.trainers(store.read())["sglang"]
+    with pytest.raises(ValueError, match="outer_lr"):
+        fleet_islands.session_check(run, store.read(), member)
+    clash = {**dz.trainers(store.read())["mixed"], "name": "late"}
+    with pytest.raises(fleet_islands.IslandChangeError, match="learner id 0 of island late"):
+        fleet_islands.session_check(run, store.read(), clash)
+
+
+def test_a_move_of_an_island_whose_launch_disagrees_is_refused(fleet_store, capsys):
+    from yeto.launch.pool import desired as dz
+
+    cfg, objects, store, run_cli, _ = fleet_store
+    assert run_cli("move", "--name", "sglang", "--gpu", "modal:1x2xh100", "--usd-per-h", "6", "--dry-run") == 0
+    store.update(lambda doc: dz.trainers(doc)["sglang"]["argv"].extend(["--rl-sync-outer-lr", "0.5"]))
+    capsys.readouterr()
+    assert run_cli("move", "--name", "sglang", "--gpu", "modal:1x2xh100", "--usd-per-h", "6", "--dry-run") == 2
+    err = capsys.readouterr().err
+    assert "do not agree on the syncer session" in err and "'outer_lr'" in err

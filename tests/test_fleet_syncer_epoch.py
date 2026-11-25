@@ -200,6 +200,18 @@ def test_a_record_read_that_fails_is_retried_and_never_lowers_the_term(fleet_run
     assert island_launches.read_syncer_record(DirectoryObjectStore(tmp_path / "flaky"))["syncer_epoch"] == term + 3
 
 
+def test_a_store_that_raises_not_found_has_no_record(fleet_run, monkeypatch):
+    _, _, args, term = fleet_run
+
+    class NotThere:
+        def read(self, key):
+            raise FileNotFoundError(key)
+
+    assert fleet_syncer._recorded_epoch(args, NotThere(), log=lambda m: None) is None
+    monkeypatch.setattr(fleet_syncer, "_store_objects", lambda args: NotThere())
+    assert fleet_syncer.resolve_epoch(args, "syncer", adopted=False, reader=None, log=lambda m: None) == term
+
+
 def test_a_record_that_does_not_parse_is_refused_not_overwritten(fleet_run, monkeypatch):
     _, objects, args, _ = fleet_run
     objects.write(island_launches.SYNCER_RECORD, b"{truncated")

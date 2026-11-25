@@ -1214,7 +1214,7 @@ class Run:
                 _log(f"preflight: WARNING: the fleet's desired state was not read ({type(error).__name__}: {error}); "
                      "checking the run config's pools and trainer islands only (islands added at run time are "
                      "not checked for a price)")
-        problem = self.fleet_problem()
+        problem = self.fleet_problem() or self.fleet_session_problem()
         if problem is not None:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
@@ -2751,6 +2751,29 @@ class Run:
             problem = self.island_price_problem()
             if problem is not None:
                 return problem
+        return None
+
+    def fleet_session_problem(self) -> str | None:
+        """A fleet launched island by island: its syncer launch and every island launch (the
+        trainer islands of the desired state the preflight read, else the run config's)
+        compiled and compared (``yeto.rl.fleet_session``: syncer profile, HELLO flags,
+        learners, syncer_epoch, learner ids). None when they agree (or no per-island fleet)."""
+        plan = self.fleet_plan()
+        if plan is None or not plan.per_island:
+            return None
+        from yeto.launch.pool.desired import trainers  # noqa: PLC0415
+        from yeto.rl import fleet_session, island_launches  # noqa: PLC0415
+
+        members = list(trainers(self.desired_doc).values())
+        if not members:
+            members = [{**m, "argv": [*m["argv"], *island_launches.member_table_flags(m["learner_id"])]}
+                       for m in island_launches.trainer_members(self.cfg, plan)]
+        try:
+            fleet_session.check(self.trainer_argv(), members)
+        except ValueError as error:
+            return f"fleet.launch per_island: {error}"
+        _log(f"preflight: fleet.launch per_island: the syncer launch and {len(members)} island launch(es) agree "
+             "on the syncer session (profile, HELLO flags, learners, syncer_epoch, learner ids)")
         return None
 
     def island_price_problem(self) -> str | None:

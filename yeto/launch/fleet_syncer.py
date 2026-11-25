@@ -70,6 +70,9 @@ def _recorded_epoch(args: Any, objects: Any, log: Callable[[str], None],
             store = objects if objects is not None else _store_objects(args)
             raw = store.read(SYNCER_RECORD) if store is not None else None
             break
+        except FileNotFoundError:  # a store that says "not there" by raising: no record
+            raw = None
+            break
         except Exception as error:  # noqa: BLE001 - retried, then refused
             if attempt == RECORD_READ_ATTEMPTS:
                 raise SyncerRecordUnreadable(

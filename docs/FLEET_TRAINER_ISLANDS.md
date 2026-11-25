@@ -78,7 +78,10 @@ island lease, see [Limits today](#limits-today).
 
 Each island launch is supervised on its own. An infrastructure failure relaunches that
 island only, at most 3 times. The other launches never notice. A configuration error or
-a strict failure marks the island `failed`. A normal end marks it `done`. The worker keeps
+a strict failure marks the island `failed`, and it is never ordered again: this covers a
+syncer that refuses its HELLO (profile, session or layout) and a broken invariant. The
+island launch then exits 11, even when the engine's teardown output has pushed the
+failure out of its log tail. A normal end marks it `done`. The worker keeps
 its record in `fleet/trainers/<k>/launch.json`, next to the island's lifecycle record
 `state.json` and its learner id claim `learner.json`.
 
@@ -87,6 +90,16 @@ that host. **Restart `yeto run up` on the same host.** A worker on another host 
 those processes, so it leaves every island recorded by another host alone and logs an
 error naming that host. It does not adopt, relaunch or start those islands a second time.
 To move the control host, see [Moving the control host](#moving-the-control-host).
+
+The syncer launch and every island launch compile their options from their own argv, so
+`yeto run up` (and its dry run) checks that they agree before anything is ordered. It
+compiles the syncer launch and each trainer island of the desired state (else of the run
+config) and compares the syncer semantic profile (naming the fields that differ), the
+HELLO-bound flags, the learners the syncer waits for, the syncer_epoch, and the learner
+ids (unique, and below `--rl-sync-max-learners`). `add` and `move` check the island they
+write the same way. An island launch off Modal (added there, or moved there) launches
+without the fleet's Modal-only flags (`--modal-store-secret`). It reads the run store with
+the launcher's store credential.
 
 The syncer launch is not adopted by a later one either. A new syncer launch starts the
 syncer again, from its checkpoint. On a new cluster that syncer has a new address. The

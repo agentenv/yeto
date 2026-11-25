@@ -170,13 +170,41 @@ def trainer_members(cfg: dict[str, Any], plan: Any) -> list[dict[str, Any]]:
             for i in plan.islands]
 
 
+# Launch options that only a Modal island takes (a launch without one refuses them):
+# the fleet's trainer argv may carry them for its Modal islands; an island launch whose
+# --gpu is elsewhere (added there, or moved there) launches without them (its store
+# credential is the launcher's, yeto.launch.storage).
+MODAL_ONLY_FLAGS = ("--modal-store-secret",)
+
+
+def own_cloud_argv(argv: list[str], gpu: str) -> list[str]:
+    """``argv`` for an island launch on ``gpu``: without :data:`MODAL_ONLY_FLAGS` (and
+    their values) unless ``gpu`` is a Modal cluster."""
+    from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
+
+    if all(getattr(spec, "cloud", None) == "modal" for spec in parse_gpu_spec(gpu)):
+        return list(argv)
+    out, skip = [], False
+    for arg in argv:
+        if skip:
+            skip = False
+            continue
+        if arg in MODAL_ONLY_FLAGS:
+            skip = True
+            continue
+        if any(arg.startswith(flag + "=") for flag in MODAL_ONLY_FLAGS):
+            continue
+        out.append(arg)
+    return out
+
+
 def launch_argv(member: dict[str, Any], *, incarnation: int = 0, syncer: dict[str, Any] | None = None) -> list[str]:
     """The ``yeto launch`` argv of a trainer member: its argv, its ``--gpu``, its cluster
     prefix for ``incarnation`` and, with the syncer record, ``--rl-fleet-syncer`` /
     ``--rl-syncer-epoch``; a moved or added island also checks its shape against the
     fleet's (``--rl-fleet-trainer-shape``, refused at dry-run when it differs)."""
-    argv = [*[str(a) for a in member.get("argv") or ()], "--gpu", str(member["gpu"]),
-            "--cluster-prefix", island_prefix(str(member["prefix"]), incarnation)]
+    argv = [*own_cloud_argv([str(a) for a in member.get("argv") or ()], str(member["gpu"])),
+            "--gpu", str(member["gpu"]), "--cluster-prefix", island_prefix(str(member["prefix"]), incarnation)]
     if member.get("fleet_shape"):
         argv += ["--rl-fleet-trainer-shape", str(member["fleet_shape"])]
     if syncer is not None:
