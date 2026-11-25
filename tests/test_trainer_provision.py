@@ -161,3 +161,61 @@ def test_only_the_sky_islands_the_launcher_orders_are_checked():
     specs = parse_gpu_spec("modal:1xh100,verda:1xb300,ssh:1xh100,kubernetes:1xh100,aws:1xh100@us-east-1")
     (problem,) = tp.sky_price_problems(args, specs)
     assert problem.startswith("--gpu island 4 (aws")
+
+
+def test_the_record_and_lock_hooks_run_before_each_order(monkeypatch):
+    """Behaviour, not source text: on_order before every sky / Verda / Modal order,
+    guard_order before the Modal deploy and the resident ssh start, on_call wired to the
+    Modal island ops, adopted islands not ordered again."""
+    import yeto.launch.sky_ops as sky_ops
+    import yeto.modal_runner as modal_runner
+
+    log = []
+
+    class Ops:
+        def __init__(self, name):
+            self.app_name, self.ledger = name, None
+
+        def define(self, cfg):
+            log.append(("define", cfg.learner_id))
+
+        def deploy(self):
+            log.append(("deploy", self.app_name))
+
+    class IslandOps:
+        def __init__(self, ops):
+            self.calls, self.on_call = {}, None
+
+        def relaunch(self, cfg, name):
+            log.append(("spawn", name))
+            return f"call-{cfg.learner_id}"
+
+    monkeypatch.setattr(sky_ops, "submit_island_launch", lambda sky, args, spec, task, name: log.append(
+        ("submit", name)) or f"rid-{name}")
+    monkeypatch.setattr(modal_runner, "ModalOps", Ops)
+    monkeypatch.setattr(modal_runner, "ModalIslandOps", IslandOps)
+    monkeypatch.setattr(tp, "start_resident_ssh", lambda args, tasks, names, *rest: log.append(
+        ("ssh start", tuple(sorted(names)))) or "ssh-ops")
+    on_call = lambda name, call_id: None  # noqa: E731
+    specs = [ClusterSpec("aws", "us-east-1", 1, 8, "H100"), ClusterSpec("verda", None, 1, 8, "B300"),
+             ClusterSpec("modal", None, 1, 8, "H100"), ClusterSpec("modal", None, 1, 8, "H100"),
+             ClusterSpec("ssh", None, 1, 8, "H100")]
+    names = ["r-l0", "r-l1", "r-l2", "r-l3", "r-l4"]
+    prov = _prov(specs, names, ssh_names={"r-l4"}, on_order=lambda n: log.append(("on_order", n)),
+                 guard_order=lambda n: log.append(("guard", n)), on_call=on_call,
+                 adopted=lambda n: ("call-kept",) if n == "r-l3" else None)
+    for m, (name, spec) in enumerate(zip(names, specs)):
+        task = types.SimpleNamespace(learner_id=m, envs={})
+        island = tp.Island(name, m, spec, None, task, prov.source(name, spec).kind)
+        prov.add(island)
+        if prov.ordered(island):
+            prov.order(island)
+    ops = prov.modal_app()
+    island_ops = prov.spawn_modal(ops)
+    prov.start_ssh()
+    assert log == [("on_order", "r-l0"), ("submit", "r-l0"), ("on_order", "r-l1"),
+                   ("define", 2), ("define", 3), ("guard", ops.app_name), ("deploy", ops.app_name),
+                   ("on_order", "r-l2"), ("spawn", "r-l2"),  # r-l3 is adopted: kept, never spawned
+                   ("guard", "r-l4"), ("ssh start", ("r-l4",))]
+    assert island_ops.on_call is on_call and island_ops.calls == {"r-l3": "call-kept"}
+    assert prov.results["r-l2"] == ("call-2", None) and prov.results["r-l3"] == ("call-kept", None)
