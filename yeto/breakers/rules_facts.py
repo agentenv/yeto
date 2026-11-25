@@ -379,11 +379,14 @@ def run_view_sources(run_config: Mapping[str, Any], *, pool: str | None = None,
     sources = pool_sources(cfg, run_config=run_config, argv=argv, spec=spec)
     from yeto.rl import up_consistency  # noqa: PLC0415
 
-    if argv is not None and up_consistency.is_auto_backlog(sources.spec):
-        auto = up_consistency.auto_backlog(argv, [(c, path) for _n, c, path in pools]) \
-            or (cfg.get("auto_backlog") if isinstance(cfg.get("auto_backlog"), dict) else None)
-        if auto is not None:  # run up hands this cap to the pool's samplers (sample_roles.AUTO_BACKLOG_ENV;
-            # an island fleet's pool: its island's, yeto.rl.fleet.island_auto_backlog)
+    if up_consistency.is_auto_backlog(sources.spec):
+        # the cap the pool renders (nc.cli.render_spec): an island fleet's pool carries its
+        # island's (yeto.rl.fleet.island_auto_backlog), else run up hands the run's to the
+        # pool's samplers (sample_roles.AUTO_BACKLOG_ENV)
+        auto = cfg.get("auto_backlog") if isinstance(cfg.get("auto_backlog"), dict) else None
+        if auto is None and argv is not None:
+            auto = up_consistency.auto_backlog(argv, [(c, path) for _n, c, path in pools])
+        if auto is not None:
             sources.spec = {**sources.spec, "max_backlog_groups": int(auto["groups"])}
     return RunView(sources, name, names)
 

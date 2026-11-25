@@ -580,7 +580,8 @@ def pool_backlog(pool_cfg: dict[str, Any], *, auto: int | None = None) -> dict[s
     cap = _positive_int(spec.get("max_backlog_groups"))
     if is_auto_backlog(spec):
         own = pool_cfg.get("auto_backlog") if isinstance(pool_cfg.get("auto_backlog"), dict) else {}
-        cap = auto or _positive_int(own.get("groups")) or sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS
+        # as the pool renders it: its own (an island fleet's pool), the run's, the fallback
+        cap = _positive_int(own.get("groups")) or auto or sample_roles.AUTO_BACKLOG_FALLBACK_GROUPS
     backlog = pool_cfg.get("backlog")
     if backlog:
         from yeto.launch.nc import tasks  # noqa: PLC0415

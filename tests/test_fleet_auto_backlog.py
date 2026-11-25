@@ -81,6 +81,17 @@ def test_the_pool_renders_its_islands_cap_and_not_the_runs_or_the_fallback(tmp_p
     assert up_consistency.pool_backlog(doc)["cap"] == 32  # the breaker rules read the same cap
 
 
+def test_the_breaker_view_of_a_fleet_pool_reads_its_islands_cap(tmp_path):
+    from yeto.breakers import rules_facts
+
+    cfg = _cfg(tmp_path)
+    caps = {name: rules_facts.run_view_sources(cfg, pool=name).sources.spec["max_backlog_groups"]
+            for name in ("i0-a", "i1-a", "i0-b")}
+    assert caps == {"i0-a": 16, "i1-a": 32, "i0-b": 16}  # i0-b: the number its spec sets
+    compiled, _plan = fleet.compile_fleet(cfg)  # what run up reads (breakers.resolved.json)
+    assert rules_facts.run_view_sources(compiled, pool="i1-a").sources.spec["max_backlog_groups"] == 32
+
+
 def test_a_bad_pool_cap_is_refused():
     for bad in ({"groups": 0}, {"groups": "8"}, {"groups": 8, "extra": 1}, [8]):
         with pytest.raises(ValueError, match="auto_backlog must be"):
