@@ -951,7 +951,18 @@ class Run:
             return ("fleet.launch per_island: the trainer islands are members of the fleet's desired state, which "
                     "the in-process rollout controller reconciles: set rollout.control_plane \"store\" and controller "
                     "\"in_process\"")
-        return None if plan is None else fleet.form_problem(plan.sync)
+        if plan is None:
+            return None
+
+        def pools():  # read only when the backend cannot train compacted trials
+            for ref in self.pools:
+                try:
+                    yield ref.name, ref.load()
+                except (OSError, ValueError):
+                    continue  # the pool dry-run reports an unreadable pool config
+
+        return (fleet.form_problem(plan.sync, backends=fleet.fleet_backends(self.cfg))
+                or fleet.compaction_problem(self.cfg, plan, pools()))
 
     def write_fleet_plan(self) -> bool:
         """``<store>/fleet/plan.json`` (the island table the dashboard and the monitor read),

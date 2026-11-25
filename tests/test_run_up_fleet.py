@@ -380,8 +380,8 @@ def test_a_lora_fleet_is_refused_in_the_preflight(files, no_subprocess):
     assert "LoRA fleet" in run.fleet_problem()
 
 
-def test_a_verl_or_strict_fleet_is_refused(files):
-    assert "runs on Miles" in _form(files, TRAINER_ARGV + ["--rl-backend", "verl"]).fleet_problem()
+def test_a_strict_fleet_is_refused(files):
+    # a verl fleet is admitted (tests/test_fleet_verl_admission.py)
     i = TRAINER_ARGV.index("decoupled")
     strict = TRAINER_ARGV[:i] + ["full-parameter", "--rl-sync-full-parameter-rounds", "sweep"] + TRAINER_ARGV[i + 1:]
     assert "asynchronous full-parameter rounds" in _form(files, strict).fleet_problem()

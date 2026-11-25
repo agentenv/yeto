@@ -33,6 +33,19 @@ def rl_image_ok(rl_image: str) -> bool:
     return bool(match) and match["commit"] == VERL_COMMIT
 
 
+def image_pin_problem(rl_image: str) -> str | None:
+    """Why ``rl_image`` is not this yeto's verl image (yeto.launch.trainer_image_check):
+    a ``verl-build`` / ``verl-megatron-build`` image of another commit than the pin
+    (``pins.VERL_COMMIT``). None: the pinned image, or not a verl-built image."""
+    match = _IMAGE.fullmatch(rl_image or "")
+    if not match or match["commit"] == VERL_COMMIT:
+        return None
+    pinned = rl_image[:match.start("commit")] + VERL_COMMIT
+    return (f"trainer image {rl_image} is built from verl commit {match['commit'][:12]}, but this yeto pins verl "
+            f"{VERL_COMMIT[:12]} (yeto.rl.adapters.verl.pins.VERL_COMMIT; the island checks its package versions "
+            f"against that pin): use {pinned}")
+
+
 def bundle_map_flag(bundle_map: Mapping[str, Sequence[int]]) -> str:
     """Refuse a role -> card map: verl places its trainer and rollout workers itself.
 
