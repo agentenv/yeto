@@ -235,7 +235,7 @@ def test_a_server_whose_environment_cannot_be_read_is_unreadable(monkeypatch):
 
 
 def test_another_users_server_is_ignored_and_its_port_is_unreadable(monkeypatch):
-    _procs(monkeypatch, [_proc(5, ["/home/eve/venv/bin/python", "-m", "sky.server.server"], uid=os.getuid() + 1,
+    _procs(monkeypatch, [_proc(5, ["/opt/other-user/venv/bin/python", "-m", "sky.server.server"], uid=os.getuid() + 1,
                                listens=[46580])], in_use={46580})
     with pytest.raises(patches.ServerUnreadable, match="not by a sky API server process of this user"):
         patches.local_server_process(46580)
