@@ -30,13 +30,28 @@ KEY_ID = "R2KEYID-SENTINEL-0001"
 SECRET = "r2-secret-SENTINEL-0123456789"
 
 
+# The launch exports the store endpoint into the launcher's own environment
+# (storage.apply_object_store_endpoint, os.environ directly): restored after each test.
+ENDPOINT_NAMES = (s3_store.ENDPOINT_ENV, s3_store.REGION_ENV, s3_store.PROFILE_ENV, "AWS_ENDPOINT_URL",
+                  "AWS_ENDPOINT_URL_S3")
+
+
 @pytest.fixture
 def _r2(monkeypatch):
+    import os
+
+    before = {name: os.environ.get(name) for name in ENDPOINT_NAMES}
     monkeypatch.setenv(s3_store.KEY_ID_ENV, KEY_ID)
     monkeypatch.setenv(s3_store.SECRET_ENV, SECRET)
-    monkeypatch.setenv(s3_store.ENDPOINT_ENV, ENDPOINT)
-    for name in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", s3_store.PROFILE_ENV):
-        monkeypatch.delenv(name, raising=False)
+    for name in ENDPOINT_NAMES:
+        os.environ.pop(name, None)
+    os.environ[s3_store.ENDPOINT_ENV] = ENDPOINT
+    yield
+    for name, value in before.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 def _args(gpu, store=STORE):
@@ -100,7 +115,9 @@ def test_a_sky_trainer_island_reaches_an_r2_store_by_object_api_not_sky_storage(
 
 @pytest.mark.usefixtures("_r2")
 def test_an_aws_s3_store_is_still_mounted(tmp_path, monkeypatch, capsys):
-    monkeypatch.delenv(s3_store.ENDPOINT_ENV)
+    import os
+
+    os.environ.pop(s3_store.ENDPOINT_ENV)  # the fixture restores it
     (task,) = _launched(monkeypatch, tmp_path, "aws:1xh100@us-west-2", store="s3://yeto-aws-test/runs/p9")
     mount = task.storage_mounts[storage.ELASTIC_CHECKPOINT_STORE_MOUNT]
     assert mount.source == "s3://yeto-aws-test" and mount.mode == "mount"
