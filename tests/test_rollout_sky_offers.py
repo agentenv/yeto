@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.launch.nc import cli, provider as prov
-from yeto.launch.nc.sky_provider import SkyProvider, from_config, offline_problems
+from yeto.launch.pool.sky_provider import SkyProvider, from_config, offline_problems
 from yeto.launch.rollout import offers
 from yeto.rl.spot import watchdog as wd
 from tests.test_nc_sky_provider import FakeSky, ResourcesUnavailableError, marked
@@ -139,7 +139,7 @@ def test_the_skeleton_record_format_is_still_read(tmp_path):
 def test_kind_sky_is_built_in_and_the_dry_run_checks_it_offline(tmp_path):
     cfg = _cfg(candidates={"spot_only": True}, ssh_key=str(tmp_path / "missing-key"))
     assert prov.provider_kind(cfg) == "sky" and not prov.is_national_compute(cfg)
-    assert prov.provider_kind({"provider": {"factory": "yeto.launch.nc.sky_provider:from_config"}}) == "sky"
+    assert prov.provider_kind({"provider": {"factory": "yeto.launch.pool.sky_provider:from_config"}}) == "sky"
     ops = cli.pool_ops(cfg)
     assert isinstance(ops.provider, SkyProvider) and len(ops.provider.offers) == 4
     problems = offline_problems(cfg)
@@ -409,7 +409,7 @@ def test_a_sky_order_names_the_offer_it_tried_and_never_a_stale_one():
 
 
 def test_pool_dry_run_refuses_aws_profile_in_the_run_env_without_provider_aws_profile(monkeypatch):
-    from yeto.launch.nc.sky_provider import AWS_FORWARDED_ENVS, AWS_INHERITED_ENVS
+    from yeto.launch.pool.sky_provider import AWS_FORWARDED_ENVS, AWS_INHERITED_ENVS
 
     for name in AWS_FORWARDED_ENVS + AWS_INHERITED_ENVS:
         monkeypatch.delenv(name, raising=False)

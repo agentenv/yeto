@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.launch import agentic_setup as su
-from yeto.launch.nc import modal_provider as mp
+from yeto.launch.pool import modal_provider as mp
 from yeto.launch.rollout import pools
 from yeto.rl import fleet, up, up_consistency
 from yeto.rl import fleet_sandbox as fsb

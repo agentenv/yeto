@@ -12,7 +12,7 @@ def test_a_pool_adopted_after_a_restart_records_its_app_twice_and_folds_to_one_r
     from types import SimpleNamespace  # noqa: PLC0415
 
     from yeto.cost.ledger import LEDGER_ENV, ResourceLedger  # noqa: PLC0415
-    from yeto.launch.nc.modal_provider import ModalSdkClient  # noqa: PLC0415
+    from yeto.launch.pool.modal_provider import ModalSdkClient  # noqa: PLC0415
 
     path = tmp_path / "resources.jsonl"
     monkeypatch.setenv(LEDGER_ENV, str(path))

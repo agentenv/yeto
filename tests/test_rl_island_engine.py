@@ -170,7 +170,7 @@ _NC_FREE = {k: v for k, v in POOL.items() if k != "accounts"}
 
 
 def test_daytona_and_modal_providers_take_the_pool_default_image():
-    from yeto.launch.nc import daytona_provider, modal_provider
+    from yeto.launch.pool import daytona_provider, modal_provider
 
     seen = {}
 

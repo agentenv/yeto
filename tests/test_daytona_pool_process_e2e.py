@@ -30,7 +30,7 @@ import pytest
 
 from yeto.launch import daytona_sampler as ds
 from yeto.launch.nc import cli, node_pool
-from yeto.launch.nc.daytona_provider import SSH_HOST, DaytonaProvider
+from yeto.launch.pool.daytona_provider import SSH_HOST, DaytonaProvider
 from yeto.launch.nc.lease_pool import PoolConfig
 from yeto.launch.pool import status as el
 from yeto.launch.pool.island_pool import GONE, READY, IslandPool

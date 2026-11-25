@@ -503,17 +503,17 @@ register(ProviderKind(
     "nc", "yeto.launch.nc.provider:registry_factory", national=True, ledger_kind="nc_lease",
     release_resource="yeto.launch.nc.provider:cleanup_release", resource_cost="yeto.launch.nc.provider:ledger_cost"))
 register(ProviderKind(
-    "daytona", "yeto.launch.nc.daytona_provider:registry_factory", ledger_kind="daytona_sandbox",
-    release_resource="yeto.launch.nc.daytona_provider:cleanup_release",
-    resource_cost="yeto.launch.nc.daytona_provider:ledger_cost",
+    "daytona", "yeto.launch.pool.daytona_provider:registry_factory", ledger_kind="daytona_sandbox",
+    release_resource="yeto.launch.pool.daytona_provider:cleanup_release",
+    resource_cost="yeto.launch.pool.daytona_provider:ledger_cost",
     offline_problems="yeto.launch.nc.pool_run:daytona_problems"))
 register(ProviderKind(
-    "sky", "yeto.launch.nc.sky_provider:registry_factory",
-    offline_problems="yeto.launch.nc.sky_provider:offline_problems"))
+    "sky", "yeto.launch.pool.sky_provider:registry_factory",
+    offline_problems="yeto.launch.pool.sky_provider:offline_problems"))
 register(ProviderKind(
-    "modal", "yeto.launch.nc.modal_provider:registry_factory",
-    pool_ops="yeto.launch.nc.modal_provider:pool_ops",
-    offline_problems="yeto.launch.nc.modal_provider:offline_problems"))
+    "modal", "yeto.launch.pool.modal_provider:registry_factory",
+    pool_ops="yeto.launch.pool.modal_provider:pool_ops",
+    offline_problems="yeto.launch.pool.modal_provider:offline_problems"))
 register(ProviderKind(
     "ssh", "yeto.launch.ssh_sampler_pool:registry_factory",
     pool_ops="yeto.launch.ssh_sampler_pool:pool_ops",

@@ -453,7 +453,7 @@ def _print_banner(text: str) -> None:
 
 def daytona_problems(cfg: dict[str, Any]) -> list[str]:
     """Offline checks of a ``provider.kind: daytona`` pool (no Daytona call)."""
-    from .daytona_provider import from_config  # noqa: PLC0415
+    from ..pool.daytona_provider import from_config  # noqa: PLC0415
 
     problems = []
     try:
@@ -735,7 +735,7 @@ def refuse_provider_start(cfg: dict[str, Any]) -> None:
     in-process controller alike. Refused order by order instead, an offer would only
     cool down and the pool retry every tick."""
     if provider_kind(cfg) == "sky":
-        from .sky_provider import start_refusal  # noqa: PLC0415
+        from ..pool.sky_provider import start_refusal  # noqa: PLC0415
 
         message = start_refusal(cfg)
         if message:
@@ -815,7 +815,7 @@ def offer_key(cfg: dict[str, Any]) -> str:
     kind = provider_kind(cfg)
     section = cfg.get("provider") or {}
     if kind == "modal":
-        from .modal_provider import DEFAULT_GPU, DEFAULT_GPUS  # noqa: PLC0415
+        from ..pool.modal_provider import DEFAULT_GPU, DEFAULT_GPUS  # noqa: PLC0415
 
         return f"modal:{section.get('gpu', DEFAULT_GPU)}x{section.get('gpus', DEFAULT_GPUS)}"
     if kind == "nc":

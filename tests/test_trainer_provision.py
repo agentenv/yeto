@@ -14,7 +14,7 @@ from yeto.cost import billing, prices
 from yeto.cost.ledger import Resource
 from yeto.gpu_spec import ClusterSpec, parse_gpu_spec
 from yeto.launch import trainer_provision as tp
-from yeto.launch.nc.sky_provider import SkyProvider
+from yeto.launch.pool.sky_provider import SkyProvider
 from yeto.launch.rollout.offers import offers_from_config
 
 

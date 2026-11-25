@@ -1,4 +1,4 @@
-"""Daytona lease provider (yeto.launch.nc.daytona_provider) over a fake Daytona SDK:
+"""Daytona lease provider (yeto.launch.pool.daytona_provider) over a fake Daytona SDK:
 spot MI355X sandboxes under the same pool policy (fence, refill, patrol) as National
 Compute. No Daytona API is called."""
 
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.launch.nc import cli, elastic, pool_run
-from yeto.launch.nc.daytona_provider import LABEL_RUN, LABEL_SLOT, SSH_HOST, DaytonaProvider, from_config
+from yeto.launch.pool.daytona_provider import LABEL_RUN, LABEL_SLOT, SSH_HOST, DaytonaProvider, from_config
 from yeto.launch.nc.lease_pool import PoolConfig
 from yeto.launch.pool import status as el
 from yeto.launch.pool.island_pool import GONE, READY, IslandPool

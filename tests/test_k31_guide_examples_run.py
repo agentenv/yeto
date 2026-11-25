@@ -118,15 +118,15 @@ def _check_provider(cfg: dict[str, Any]) -> None:
     kind = provider_kind(cfg)
     run = str(cfg.get("run") or cfg["shard_base"])
     if kind == "daytona":
-        from yeto.launch.nc import daytona_provider  # noqa: PLC0415
+        from yeto.launch.pool import daytona_provider  # noqa: PLC0415
 
         daytona_provider.from_config(cfg, run, sdk=object(), client=object())
     elif kind == "sky":
-        from yeto.launch.nc import sky_provider  # noqa: PLC0415
+        from yeto.launch.pool import sky_provider  # noqa: PLC0415
 
         sky_provider.from_config(cfg, run, sky=object())
     elif kind == "modal":
-        from yeto.launch.nc import modal_provider  # noqa: PLC0415
+        from yeto.launch.pool import modal_provider  # noqa: PLC0415
 
         modal_provider.from_config(cfg, run, client=object())
 

@@ -31,7 +31,7 @@ from test_rl_object_store import FakeS3
 from tests.test_stage1_gaps import _sampler_spec
 from yeto.cloud import s3_store
 from yeto.launch.nc import elastic
-from yeto.launch.nc.modal_provider import NOT_RUN, RUNNING, ModalPoolOps, ModalSdkClient
+from yeto.launch.pool.modal_provider import NOT_RUN, RUNNING, ModalPoolOps, ModalSdkClient
 from yeto.launch.pool import status as el
 from yeto.launch.pool.data_path import R2DataPath
 from yeto.launch.pool.island_pool import GONE, READY
@@ -348,7 +348,7 @@ def test_a_modal_call_that_did_not_run_is_not_lost_and_probes_as_not_run(tmp_pat
         def status(self, call):
             return states[call]
 
-    from yeto.launch.nc.modal_provider import from_config
+    from yeto.launch.pool.modal_provider import from_config
 
     ops = ModalPoolOps(cfg, provider=from_config(cfg, "run-m", client=Client()),
                        fence_store=SimpleNamespace(objects=Objects()))

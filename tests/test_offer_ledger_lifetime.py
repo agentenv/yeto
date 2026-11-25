@@ -285,7 +285,7 @@ def test_the_pool_reads_its_replacement_lead_from_the_ledger_only_when_asked():
 
 
 def test_the_modal_provider_reports_its_calls_hard_end():
-    from yeto.launch.nc.modal_provider import ModalProvider
+    from yeto.launch.pool.modal_provider import ModalProvider
 
     p = ModalProvider.__new__(ModalProvider)
     p.config, p.min_hard_end_s = {"timeout_h": 3}, 2 * (3600 + 600)
@@ -300,7 +300,7 @@ def test_the_modal_provider_reports_its_calls_hard_end():
 
 
 def test_the_modal_pools_lead_and_margin_set_the_shortest_timeout_taken_as_a_hard_end(tmp_path):
-    from yeto.launch.nc.modal_provider import from_config
+    from yeto.launch.pool.modal_provider import from_config
 
     cfg = {"target": 1, "slots": [1, 2], "shard_base": "m", "run": "r", "run_prefix": "r",
            "replace_lead_s": 900, "end_margin_s": 300,

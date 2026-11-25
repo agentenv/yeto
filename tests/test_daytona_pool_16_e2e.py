@@ -22,7 +22,7 @@ from test_nc_daytona_provider import FakeSdk
 from yeto.launch.nc import cli, node_pool
 from yeto.launch.nc.lease_pool import PoolConfig
 from yeto.launch.pool import status as el
-from yeto.launch.nc.daytona_provider import DaytonaProvider
+from yeto.launch.pool.daytona_provider import DaytonaProvider
 from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 
 pytestmark = pytest.mark.skipif(not Path("/proc/self/environ").exists() or shutil.which("setsid") is None,

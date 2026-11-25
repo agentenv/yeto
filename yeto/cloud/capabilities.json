@@ -83,7 +83,7 @@
       "renewable": {"value": false, "source": "a function timeout cannot be extended for a running call", "as_of": "2026-11-24"},
       "notice_s": {"value": 30, "source": "https://modal.com/docs/guide/lifecycle-functions", "as_of": "2026-10-09", "note": "clouds.modal.notice_s: SIGINT, then 30 s grace"},
       "cold_start_s": {"value": 900, "source": "yeto prior until the offer ledger has measurements (yeto.launch.pool.offer_ledger)", "as_of": "2026-11-24"},
-      "hard_end": {"value": "function_timeout", "source": "yeto.launch.nc.modal_provider: the sampler function is deployed with timeout = provider.timeout_h x 3600 s", "as_of": "2026-11-24"},
+      "hard_end": {"value": "function_timeout", "source": "yeto.launch.pool.modal_provider: the sampler function is deployed with timeout = provider.timeout_h x 3600 s", "as_of": "2026-11-24"},
       "currency": {"value": "usd", "source": "price_usd_h in the pool config, else the unified price table", "as_of": "2026-11-24"},
       "balance": {"value": false, "source": "no balance API used", "as_of": "2026-11-24"}
     },

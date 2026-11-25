@@ -89,6 +89,10 @@ def is_national_compute(cfg: dict[str, Any]) -> bool:
     return registry.is_national(cfg)
 
 
+# the sky factory under its home and under its old name (configs written before 7.3)
+SKY_FACTORY_PREFIXES = ("yeto.launch.pool.sky_provider:", "yeto.launch.nc.sky_provider:")
+
+
 def provider_kind(cfg: dict[str, Any]) -> str:
     """The provider kind of a pool config: a registered kind (``nc`` by default), or
     ``factory`` for a ``provider.factory`` (the sky factory reads as ``sky``)."""
@@ -96,7 +100,7 @@ def provider_kind(cfg: dict[str, Any]) -> str:
     if kind is not None:
         return kind
     factory = str((cfg.get("provider") or {}).get("factory", ""))
-    return "sky" if factory.startswith("yeto.launch.nc.sky_provider:") else "factory"
+    return "sky" if factory.startswith(SKY_FACTORY_PREFIXES) else "factory"
 
 
 def _with_tools(nc_factory):

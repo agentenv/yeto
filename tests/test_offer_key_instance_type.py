@@ -12,7 +12,7 @@ import pytest
 from tests.test_nc_sky_provider import FakeSky
 from tests.test_offer_ledger_lifetime import Store
 from yeto.launch.nc import pool_run
-from yeto.launch.nc.sky_provider import SkyProvider
+from yeto.launch.pool.sky_provider import SkyProvider
 from yeto.launch.pool import offer_ledger as ol
 from yeto.launch.pool import status as el
 from yeto.launch.rollout import offers

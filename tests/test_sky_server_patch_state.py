@@ -271,7 +271,7 @@ def test_an_unpatched_server_refuses_verda_unless_warn(monkeypatch, capsys):
 
 def test_the_sky_provider_checks_the_server_before_a_verda_order(monkeypatch):
     from tests.test_nc_sky_provider import FakeSky
-    from yeto.launch.nc.sky_provider import AWS_FORWARDED_ENVS, AWS_INHERITED_ENVS, SkyProvider
+    from yeto.launch.pool.sky_provider import AWS_FORWARDED_ENVS, AWS_INHERITED_ENVS, SkyProvider
 
     monkeypatch.delenv(patches.SERVER_CHECK_ENV, raising=False)
     monkeypatch.delenv(patches.SERVER_PATCH_ENV, raising=False)
@@ -294,7 +294,7 @@ def test_the_sky_provider_checks_the_server_before_a_verda_order(monkeypatch):
 
 
 def test_a_verda_sky_pool_is_refused_at_its_start_and_dry_run_unless_warn(monkeypatch, capsys):
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
         monkeypatch.delenv(name, raising=False)

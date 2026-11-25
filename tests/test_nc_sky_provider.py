@@ -1,4 +1,4 @@
-"""SkyPilot lease provider skeleton (yeto.launch.nc.sky_provider) over a fake sky
+"""SkyPilot lease provider skeleton (yeto.launch.pool.sky_provider) over a fake sky
 module: the same pool policy (events, budget, breaker, fencing) as National Compute."""
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from yeto.launch.nc import cli, elastic
 from yeto.launch.nc.lease_pool import PoolConfig
 from yeto.launch.pool import status as el
 from yeto.launch.pool.island_pool import GONE, READY, IslandPool
-from yeto.launch.nc.sky_provider import SkyProvider, from_config
+from yeto.launch.pool.sky_provider import SkyProvider, from_config
 
 
 @pytest.fixture(autouse=True)
@@ -271,7 +271,7 @@ def test_sky_attach_writes_a_direct_alias_and_runs_host_setup(tmp_path):
 
 def test_sky_config_is_validated_and_plugs_into_the_pool_route():
     cfg = {"target": 1, "accounts": [1, 2], "shard_base": "s", "run": "run-s",
-           "provider": {"factory": "yeto.launch.nc.sky_provider:from_config",
+           "provider": {"factory": "yeto.launch.pool.sky_provider:from_config",
                         "resources": {"cloud": "gcp"}}}
     ops = cli.pool_ops(cfg)
     assert isinstance(ops.provider, SkyProvider) and ops.provider.slots == [1, 2]
@@ -749,7 +749,7 @@ def test_only_marked_clusters_named_exactly_prefix_n_are_adopted(tmp_path, capsy
 
 def test_a_ledger_intent_of_this_run_is_a_mark_and_one_of_another_run_is_not(tmp_path, monkeypatch):
     from yeto.cost.ledger import ResourceLedger
-    from yeto.launch.nc.sky_provider import LEDGER_KIND
+    from yeto.launch.pool.sky_provider import LEDGER_KIND
 
     monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(tmp_path / "ledger.jsonl"))
     ledger = ResourceLedger(tmp_path / "ledger.jsonl")
@@ -809,7 +809,7 @@ def test_sky_accepts_and_keeps_the_ownership_label_on_every_infra(infra, run):
     """Real sky: the label passes the cloud's label rules and survives the copies the
     optimizer makes (launched_resources is a copy of the requested resources)."""
     sky = pytest.importorskip("sky")
-    from yeto.launch.nc.sky_provider import OWNER_LABEL, owner_token
+    from yeto.launch.pool.sky_provider import OWNER_LABEL, owner_token
 
     labels = {OWNER_LABEL: owner_token(run)}
     resources = sky.Resources(infra=infra, labels=labels)
@@ -861,7 +861,7 @@ def _fake_builder(sp):
 
 
 def test_the_providers_sky_calls_carry_no_run_aws_credentials():
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     original, builder = _fake_builder(sp)
     seen = []
@@ -889,7 +889,7 @@ def test_the_scope_follows_sky_into_threads_with_a_copied_context_and_not_beyond
     import contextvars
     import threading
 
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     original, builder = _fake_builder(sp)
     inside, outside = [], []
@@ -918,7 +918,7 @@ def test_real_sky_request_bodies_of_the_provider_drop_the_run_aws_profile(monkey
     from sky.server import common
     from sky.server.requests import payloads
 
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     monkeypatch.setattr(payloads, "request_body_env_vars", payloads.request_body_env_vars)  # restored after
     monkeypatch.setattr(common, "is_api_server_local", lambda *a, **k: True)
@@ -941,7 +941,7 @@ def test_a_sky_that_does_not_use_the_scoped_builder_refuses(monkeypatch):
     pytest.importorskip("sky")
     from sky.server.requests import payloads
 
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     monkeypatch.setattr(payloads, "request_body_env_vars", payloads.request_body_env_vars)
     real_init = payloads.RequestBody.__init__
@@ -973,7 +973,7 @@ def test_a_sky_that_does_not_use_the_scoped_builder_refuses(monkeypatch):
     ({"AWS_PROFILE": "store-r2"}, "kubernetes", None, []),
 ])
 def test_dry_run_refuses_run_aws_settings_that_would_reach_sky(env, infra, aws_profile, refused):
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     resources = {"accelerators": "L4:1", **({"infra": infra} if infra else {})}
     p = SkyProvider("run-s", slots=[1], resources=resources, sky=FakeSky(), aws_profile=aws_profile)
@@ -1000,7 +1000,7 @@ def test_the_pool_start_refuses_too_not_only_its_dry_run(monkeypatch):
 
 def test_the_cleanups_sky_down_of_a_pool_cluster_uses_the_providers_request_env(monkeypatch):
     from yeto.cost import cleanup
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     seen = []
     monkeypatch.setattr(sp, "install_request_env_scope", lambda: None)
@@ -1025,7 +1025,7 @@ def test_the_cleanups_sky_down_of_a_pool_cluster_uses_the_providers_request_env(
 
 def test_a_failed_scope_self_check_refuses_launches_but_status_and_down_still_run(monkeypatch, capsys):
     from yeto import sky_patches
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
         monkeypatch.delenv(name, raising=False)
@@ -1051,7 +1051,7 @@ def test_a_failed_scope_self_check_refuses_launches_but_status_and_down_still_ru
 
 def test_a_sky_pool_loop_with_run_aws_settings_is_refused_at_its_start(tmp_path, monkeypatch):
     from yeto.launch.nc import pool_run
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
         monkeypatch.delenv(name, raising=False)
@@ -1069,7 +1069,7 @@ def test_a_sky_pool_loop_with_run_aws_settings_is_refused_at_its_start(tmp_path,
 
 
 def test_a_wildcard_infra_may_land_on_aws():
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     p = SkyProvider("run-s", slots=[1], resources={"infra": "*/us-east-1", "accelerators": "L4:1"}, sky=FakeSky())
     assert sp.aws_env_problems(p, {"AWS_PROFILE": "store-r2"})
@@ -1087,7 +1087,7 @@ def test_the_intent_row_marks_the_pool_and_its_aws_profile(tmp_path, monkeypatch
 
 def test_without_the_scope_status_and_down_are_refused_when_they_would_carry_another_account(monkeypatch):
     from yeto import sky_patches
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
         monkeypatch.delenv(name, raising=False)
@@ -1121,7 +1121,7 @@ def test_without_the_scope_status_and_down_are_refused_when_they_would_carry_ano
 
 def test_a_transient_self_check_failure_is_tried_again(monkeypatch):
     from yeto import sky_patches
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
         monkeypatch.delenv(name, raising=False)
@@ -1146,7 +1146,7 @@ def test_a_transient_self_check_failure_is_tried_again(monkeypatch):
 def test_an_in_process_controller_refuses_a_sky_pool_at_its_start(monkeypatch):
     from yeto.launch.nc import pool_run
     from yeto.launch.pool import controller
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
         monkeypatch.delenv(name, raising=False)
@@ -1166,7 +1166,7 @@ def test_an_in_process_controller_refuses_a_sky_pool_at_its_start(monkeypatch):
 
 
 def test_the_dry_run_reports_a_sky_whose_request_env_cannot_be_scoped(monkeypatch):
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     for name in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS:
         monkeypatch.delenv(name, raising=False)
@@ -1183,7 +1183,7 @@ def test_the_dry_run_reports_a_sky_whose_request_env_cannot_be_scoped(monkeypatc
 
 def test_the_cleanup_refuses_an_unscoped_down_with_another_account(monkeypatch):
     from yeto.cost import cleanup
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     for name in sp.AWS_FORWARDED_ENVS:
         monkeypatch.delenv(name, raising=False)
@@ -1221,7 +1221,7 @@ def _verda_provider(sky, **kw):
 def test_an_offer_sky_cannot_autodown_is_refused_unless_allowed():
     """Its cluster has no cloud-side hard cap: refused before any order (pool --dry-run says
     why) unless the config allows it; allowed, every order warns."""
-    from yeto.launch.nc.sky_provider import offline_problems
+    from yeto.launch.pool.sky_provider import offline_problems
 
     cfg = {"target": 1, "slots": [1], "shard_base": "s", "run": "run-v",
            "provider": {"kind": "sky", "resources": {"infra": "verda/FIN-01", "accelerators": "A100:1"}}}
@@ -1249,7 +1249,7 @@ def test_an_order_without_autodown_warns(capsys):
 def test_a_verda_offer_without_an_image_gets_verda_default_image():
     """sky 0.14.3's own Verda default image is gone from Verda: an offer naming no image_id
     orders the provider's default; an offer's own image_id (null too) is kept."""
-    from yeto.launch.nc.sky_provider import DEFAULT_IMAGE_ID, offer_image_lines
+    from yeto.launch.pool.sky_provider import DEFAULT_IMAGE_ID, offer_image_lines
 
     sky = FakeSky()
     p = _verda_provider(sky)
@@ -1386,7 +1386,7 @@ def test_a_task_with_its_own_run_on_a_cloud_without_autodown_gets_no_down(tmp_pa
 
 def test_the_no_autodown_clouds_are_the_ones_sky_cannot_autodown():
     """NO_AUTODOWN_CLOUDS is the installed sky's own list (a sky upgrade that changes it fails here)."""
-    from yeto.launch.nc.sky_provider import NO_AUTODOWN_CLOUDS
+    from yeto.launch.pool.sky_provider import NO_AUTODOWN_CLOUDS
 
     registry = pytest.importorskip("sky.utils.registry")
     features = pytest.importorskip("sky.clouds").CloudImplementationFeatures
@@ -1398,7 +1398,7 @@ def test_the_no_autodown_clouds_are_the_ones_sky_cannot_autodown():
 def test_a_failed_launch_keeps_the_reason_sky_puts_at_the_end():
     """sky's launch failure names the cause per zone after a long preamble (with terminal
     colours); the recorded error keeps that tail."""
-    from yeto.launch.nc.sky_provider import ERROR_TEXT_LIMIT
+    from yeto.launch.pool.sky_provider import ERROR_TEXT_LIMIT
 
     error = ResourcesUnavailableError(
         "\x1b[31mFailed to provision all possible launchable resources.\x1b[0m Relax the task's resource "
@@ -1511,7 +1511,7 @@ def test_a_paused_member_on_a_cloud_without_autodown_is_released_after_its_hard_
 def test_a_failed_launch_records_no_credentials_and_no_terminal_escapes(monkeypatch):
     """REV on #798: the kept tail of a launch error reached the record and the pool's events
     unredacted."""
-    from yeto.launch.nc.sky_provider import _error_text
+    from yeto.launch.pool.sky_provider import _error_text
 
     monkeypatch.setenv("SOME_API_TOKEN", "envvalue-0123456789")
     key_id = "AKIA" + "ABCDEFGHIJKLMNOP"  # built here: no credential-shaped literal in the source
@@ -1604,7 +1604,7 @@ def test_write_ssh_alias_reads_the_ssh_config_path_when_called(tmp_path, monkeyp
 
 
 def test_the_refusal_is_a_provider_request_refused_with_the_manual_action():
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     refused = sp.unscoped_refusal("sky-aws", environ={}, what="sky down c-1", cluster="c-1")
     assert isinstance(refused, sp.ProviderRequestRefused)
@@ -1634,7 +1634,7 @@ def test_the_by_hand_command_works_from_the_shell_that_was_refused(aws_profile):
     """The refused environment carries another account's AWS variables (keys beat any
     profile in botocore): the by-hand command clears every one sky forwards or an
     auto-started server inherits, so sky's request carries only ``aws_profile``."""
-    from yeto.launch.nc import sky_provider as sp
+    from yeto.launch.pool import sky_provider as sp
 
     shell = {"PATH": "/usr/bin", "AWS_PROFILE": "store-r2", "AWS_ACCESS_KEY_ID": "AKIA-store",
              "AWS_SECRET_ACCESS_KEY": "store-secret", "AWS_SESSION_TOKEN": "t", "AWS_DEFAULT_PROFILE": "d",
