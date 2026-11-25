@@ -84,12 +84,13 @@ drops a shard, and a shard listed as `retired` never holds the data end.
 
 The trainer follows only the tables of its own lanes:
 
-- `YETO_RL_MEMBER_LANES` lists them: lane prefixes separated by commas, or `*` for every
-  table in the trainer's store. A table's `shard_base` is in a lane `L` when it is `L` or
-  starts with `L-`.
+- `YETO_RL_MEMBER_LANES` lists them, separated by commas, or `*` for every table in the
+  trainer's store. An island lane `i<k>` matches a `shard_base` that ends with `-i<k>`
+  (a fleet names island k's pools `<base>-i<k>`). Any other lane `L` matches `L` and
+  `L-...`.
 - Without the variable, the lanes are the bases of the initial `--rl-buffer-shards`.
 - A single trainer gets `*` from `run up`: its store prefix is its one lane, and a pool
-  added while it trains has a new `shard_base`.
+  added while it trains has a new `shard_base`. A fleet's island k trainer gets `i<k>`.
 - A table outside the lanes is ignored and reported once (`rl_member_table_ignored`).
 
 At the end of the data, `run up` also ends every member-table shard that did not end (a
