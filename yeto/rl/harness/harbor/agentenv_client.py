@@ -352,7 +352,7 @@ class SdkAgentenvClient:
             hint = cold_start_hint(status, _body_text(exc.response), body) if path == "/sandboxes-cold" else ""
             raise cls(f"agentenv {op} failed: HTTP {status}{hint}") from None
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
-            raise AgentenvError(f"agentenv {op} failed: {type(exc).__name__}") from None
+            raise AgentenvError(f"agentenv {op} failed: {_error_text(exc)}") from None
         sandbox_id = data.get("sandboxID") or data.get("sandbox_id") if isinstance(data, dict) else None
         if not sandbox_id:
             raise AgentenvError(f"agentenv {op} returned no sandbox id")
@@ -386,7 +386,7 @@ class SdkAgentenvClient:
         except httpx.HTTPStatusError as exc:
             raise AgentenvError(f"agentenv list failed: HTTP {exc.response.status_code}") from None
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
-            raise AgentenvError(f"agentenv list failed: {type(exc).__name__}") from None
+            raise AgentenvError(f"agentenv list failed: {_error_text(exc)}") from None
 
     def _kill_quietly(self, sandbox_id: str) -> None:
         try:
@@ -519,7 +519,22 @@ class SdkAgentenvClient:
     def _wrap(self, op: str, exc: Exception) -> AgentenvError:
         name = type(exc).__name__
         cls = AgentenvQuotaError if "RateLimit" in name else AgentenvError
-        return cls(f"agentenv {op} failed: {name}")
+        return cls(f"agentenv {op} failed: {_error_text(exc)}")
+
+
+def _error_text(exc: BaseException) -> str:
+    """The class of a transport / SDK error and its short redacted message (no secret,
+    URL path or query: :func:`yeto.rl.engine.init_from_release.redact_detail`): a fast
+    failure that never reached the gateway (DNS, refused or reset connection, TLS) is
+    told apart only by it. The envd access token is never in it (no request header is)."""
+    name = type(exc).__name__
+    try:
+        from yeto.rl.engine.init_from_release import redact_detail  # noqa: PLC0415
+
+        detail = redact_detail(str(exc), limit=160)
+    except Exception:  # noqa: BLE001 - the class name alone is still a diagnosis
+        detail = ""
+    return f"{name}: {detail}" if detail else name
 
 
 def _now_like(reference):

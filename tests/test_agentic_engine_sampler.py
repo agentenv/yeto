@@ -179,6 +179,7 @@ def test_infra_failed_trial_is_run_again_and_its_group_written_whole(tmp_path, q
     assert len(entries) == 2  # both groups whole
     (retry,) = [f for n, f in events if n == "rl_agentic_trial_retry"]
     assert retry["reason"] == "RuntimeError" and retry["attempt"] == 1 and retry["slot"] == 0
+    assert (retry["error_type"], retry["detail"]) == ("RuntimeError", "sandbox lost")  # why, for the next look
     (round_event,) = [f for n, f in events if n == "rl_sampler_engine_round"]
     agentic = round_event["agentic"]
     assert agentic["lost"] == {} and agentic["groups_below_min"] == 0

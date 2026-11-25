@@ -236,6 +236,9 @@ class AgentTrajectory:
     tokens: TokenSegments | None = None
     # Metrics the outer layer adds, also without a verdict (suspension counters).
     extra_metrics: Mapping[str, Any] = field(default_factory=dict)
+    # The message of a harness exception that aborted the trial without a verdict (raw:
+    # an event redacts and shortens it, agentic_round); never in the sample metadata.
+    error_detail: str = ""
 
     def to_metadata(self) -> dict[str, Any]:
         """Flat, JSON-safe fields a backend sample can carry."""

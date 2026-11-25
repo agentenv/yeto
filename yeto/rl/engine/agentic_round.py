@@ -369,6 +369,27 @@ def missing_dependency(result: Any) -> str | None:
     return f"{exc}: {message}" if message else exc
 
 
+def retry_error(result: Any, name: str) -> tuple[str, str]:
+    """``(exception type, short message)`` of an infrastructure failure for its retry
+    event: the verdict's exception (a Harbor trial), else the harness exception that
+    aborted the trial (``AgentTrajectory.error_detail``). The message is redacted (no
+    secrets, no URL path or query) and cut to one short line
+    (:func:`yeto.rl.engine.init_from_release.redact_detail`); empty when there is none."""
+    trajectory = getattr(result, "trajectory", None)
+    verdict = getattr(trajectory, "verdict", None)
+    error_type = str(getattr(verdict, "exception_type", None) or name)
+    raw = getattr(verdict, "exception_message", "") if verdict is not None else ""
+    raw = raw or getattr(trajectory, "error_detail", "") or ""
+    if not raw:
+        return error_type, ""
+    try:
+        from .init_from_release import redact_detail  # noqa: PLC0415
+
+        return error_type, redact_detail(raw)
+    except Exception:  # noqa: BLE001 - a detail never fails the retry
+        return error_type, ""
+
+
 class _Lost:
     """A trial that ended without a result (cancelled at a drain's timeout or at close)."""
 
@@ -805,9 +826,11 @@ class AgenticRound(EngineRound):
         group.retry_slots.append(j)
         if group not in self._queue:
             self._queue.appendleft(group)  # a started group's trials go first
+        error_type, detail = retry_error(result, name)
         self._retry_events.append(dict(rollout_id=group.rollout_id, prompt_id=group.item.prompt_id, slot=j,
                   attempt=group.retries[j], reason=name, trial_s=group.trial_s[j],
-                  retries_total=sum(self.retries_total.values())))  # emitted by the calling thread
+                  retries_total=sum(self.retries_total.values()),
+                  error_type=error_type, detail=detail))  # emitted by the calling thread
         return True
 
     def _ended(self, group: _Group, trials: int) -> None:
