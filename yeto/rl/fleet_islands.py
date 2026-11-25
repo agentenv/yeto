@@ -233,11 +233,16 @@ def launch_dry_run(member: dict[str, Any], *, incarnation: int = 0,
     return dry_run_plan(args)
 
 
-def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any]) -> None:
+def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
+                  previous: dict[str, Any] | None = None) -> None:
     """The island ``member`` (added or moved) against the syncer launch of the run
     (``yeto.rl.fleet_session``) with the term of the fleet's syncer record (the syncer
     launch's when there is none yet), and the desired state's other trainer islands'
-    learner ids. Raises ValueError naming every disagreement."""
+    learner ids. Its backend identity (the compat group of its ``--gpu`` card) is compared
+    with the islands holding the running session before anything is ordered: the other
+    trainer islands and, once the fleet has a syncer, a moved island's ``previous``
+    member (its old machines joined that session). Raises ValueError naming every
+    disagreement."""
     from yeto.rl import fleet_session  # noqa: PLC0415
 
     record = None
@@ -252,8 +257,11 @@ def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any]) -> None
         raise IslandChangeError(f"learner id {member['learner_id']} of island {member['name']} is island "
                                 f"{clash[0]}'s too")
     epoch = (record or {}).get("syncer_epoch")
+    running = list(others)
+    if previous is not None and record is not None:
+        running.append({**previous, "name": f"{previous['name']} (its machines before the move)"})
     fleet_session.check(run.trainer_argv() if hasattr(run, "trainer_argv") else run.cfg["trainer"]["argv"],
-                        [member], syncer_epoch=epoch if isinstance(epoch, int) else None)
+                        [member], syncer_epoch=epoch if isinstance(epoch, int) else None, running=running)
     print(f"fleet island: island {member['name']} agrees with the syncer launch on the syncer session")
 
 
@@ -295,7 +303,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
         for m in doc.get("members") or ():
             for key in dz.ONE_SHOT:
                 m.pop(key, None)
-        launch_member = None
+        launch_member = previous = None
         if args.island_command == "add":
             unpriced_under_budget(run.cfg, args.gpu, args.usd_per_h)
             with open(args.samplers) as fh:
@@ -311,6 +319,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
             remove(doc, args.name)
         else:
             unpriced_under_budget(run.cfg, args.gpu, args.usd_per_h)
+            previous = copy.deepcopy(trainer_by_name(doc, args.name))
             launch_member = move(doc, run.cfg, args.name, gpu=args.gpu, usd_per_h=args.usd_per_h)
         doc = dz.validate(doc)
         for line in changes(current, doc):
@@ -321,7 +330,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
             # a change that is written (not --dry-run) refuses a pinned verl layout hash it cannot plan
             with refuse_unverified_layout(not args.dry_run):
                 launch_dry_run(launch_member, prepare=prepare)
-                session_check(run, doc, launch_member)
+                session_check(run, doc, launch_member, previous)
             print(f"fleet island: launch of {launch_member['name']} (learner {launch_member['learner_id']}, "
                   f"--gpu {launch_member['gpu']}) passes its dry run")
     except (IslandChangeError, ValueError, OSError) as error:

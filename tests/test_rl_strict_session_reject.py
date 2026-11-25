@@ -4,7 +4,8 @@ whose session contract differs from the running session on that connection only.
 Two verl-identity islands sync; mid-run a Miles-identity island (same layout,
 other backend identity, so another session contract hash) dials in.  It gets
 MSG_ERROR naming both hashes and exits as a strict RL failure
-(``StrictRlInvariantError``, metric ``layout_hash_mismatch``); the syncer and the
+(``StrictRlInvariantError``, metric ``session_contract_mismatch``: the layout is the
+same; ``compat_group_mismatch`` when the syncer names the compat groups); the syncer and the
 two verl islands finish every round and the syncer exits 0.
 """
 
@@ -85,7 +86,11 @@ MILES_ISLAND = textwrap.dedent("""
         client.start()
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            client.check_health()
+            try:
+                client.check_health()
+            except Exception as error:
+                print("METRIC", getattr(error, "metric", None), file=sys.stderr, flush=True)
+                raise
             time.sleep(0.05)
         print("NOT REFUSED", flush=True)
         sys.exit(0)
@@ -137,8 +142,11 @@ def test_mismatched_hello_is_refused_without_stopping_the_session(syncer_binary,
         if group == "nvidia-h100":
             assert "expected session_contract_hash=" + _contract(good).hex() in miles.stderr
             assert "got session_contract_hash=" + _contract(intruder).hex() in miles.stderr
+            # Same layout, another backend identity / island contract: not a layout mismatch.
+            assert "METRIC session_contract_mismatch" in miles.stderr
         else:
             assert "compat_group differs" in miles.stderr and "tolerance not calibrated" in miles.stderr
+            assert "METRIC compat_group_mismatch" in miles.stderr
         assert process.poll() is None, "syncer must keep running"
 
         # The two verl islands finish the remaining rounds unaffected.
@@ -230,3 +238,39 @@ def test_islands_of_different_device_families_share_one_session(syncer_binary, t
             (tmp_path / f"syncer{strict}.log").write_text(out)
         if not strict:
             assert "cross-hardware island admitted" in out and "ascend-910b4-64g" in out
+
+
+_SAME = "8903825ca9706ea4d9ead9f2eb08d9f86029721b51d0e411f1236c16845efdb7"
+
+
+def _generic(layout_expected: str, layout_got: str) -> str:
+    return ("session mismatch (HELLO refused, session keeps running): expected session_contract_hash="
+            f"{'b1' * 32} layout_fingerprint={layout_expected} dtype=71 fragments=2, got session_contract_hash="
+            f"{'9f' * 32} layout_fingerprint={layout_got} dtype=71 fragments=2")
+
+
+@pytest.mark.parametrize("message, metric", [
+    # bug 28: an H200 island in an H100 session, strict identity: same layout, another contract
+    (_generic(_SAME, _SAME), "session_contract_mismatch"),
+    (_generic(_SAME, "ab" * 32), "layout_hash_mismatch"),
+    ("session mismatch (HELLO refused, session keeps running): compat_group differs: nvidia-h100 vs "
+     "nvidia-h200, tolerance not calibrated", "compat_group_mismatch"),
+    ("session mismatch (HELLO refused, session keeps running): the head pins island contract aa, "
+     "expected session_contract_hash=bb, got cc", "session_contract_mismatch"),
+    ("session mismatch (HELLO refused, session keeps running): expected session_contract_hash=aa",
+     "layout_hash_mismatch"),
+    ("HELLO syncer semantic profile does not match the running server", "syncer_profile_mismatch"),
+    ("duplicate connection generation 5 for learner 0", None),
+])
+def test_a_session_refusal_names_what_differs(message, metric):
+    from yeto.protocol import session_reject_metric
+
+    assert session_reject_metric(message) == metric
+
+
+def test_a_same_layout_refusal_reaches_the_strict_failure_as_a_contract_mismatch():
+    client = SyncerClient(("127.0.0.1", 1), 0, _layout(), dtype=DTYPE_F32, num_streams=0)
+    client._dispatch_live(client._gen, 10, _generic(_SAME, _SAME).encode())
+    with pytest.raises(StrictRlInvariantError) as info:
+        client.check_health()
+    assert info.value.metric == "session_contract_mismatch"

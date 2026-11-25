@@ -329,7 +329,9 @@ def test_a_strict_failure_trips_its_entry_before_the_legacy_event(tmp_path, monk
     ("nonfinite_grad_norm", "trainer.nan"), ("xhw_guard_stop", "trainer.xhw_guard"),
     ("policy_hash_mismatch_after_apply", "trainer.policy_hash"),
     ("zero_grad_norm_with_nonzero_advantages", "trainer.gradient_flow"),
-    ("layout_hash_mismatch", "trainer.strict_invariant")])
+    ("layout_hash_mismatch", "trainer.strict_invariant"),
+    ("session_contract_mismatch", "trainer.strict_invariant"),
+    ("compat_group_mismatch", "trainer.strict_invariant")])
 def test_strict_metrics_map_to_entries(metric, name):
     assert trainer_breakers.strict_breaker(metric) == name
 

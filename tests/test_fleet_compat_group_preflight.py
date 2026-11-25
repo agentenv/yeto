@@ -1,0 +1,128 @@
+"""An island moved or added to a card of another compat group, under strict identity, is
+refused before anything is ordered: its session contract binds the compat group (same
+layout, another session_contract_hash), so the running syncer would refuse its HELLO only
+after the machine booted and pulled its image. The refusal names both compat groups and
+the two ways out (a card of the fleet's group, or an explicit --rl-compat-group /
+--rl-identity relaxed). `yeto run up` checks the islands of its desired state the same way."""
+
+from __future__ import annotations
+
+import pytest
+
+from test_fleet_island_changes import fleet_store  # noqa: F401 - fixture
+from test_fleet_session_agreement import RECORD, _secret_cfg
+from yeto.launch.pool import desired as dz
+from yeto.rl import fleet, fleet_session, island_launches
+
+H200 = "modal:1x2xh200"  # a fleet_store island's launch dry-runs on Modal (no sky fragment check)
+
+
+@pytest.fixture(autouse=True)
+def _island_env(monkeypatch):
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "fleet-t5b-test-key")
+    monkeypatch.setenv("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test-key-id")
+    monkeypatch.setenv("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test-secret")
+
+
+def _members(tmp_path):
+    cfg = _secret_cfg(tmp_path)
+    return cfg, island_launches.trainer_members(cfg, fleet.plan_of(cfg))
+
+
+def test_an_island_on_another_compat_group_is_refused_with_both_groups_and_the_fixes(tmp_path):
+    cfg, members = _members(tmp_path)
+    moved = {**members[0], "gpu": "nebius:1xh200@us-central1"}
+    with pytest.raises(ValueError) as raised:
+        fleet_session.check(cfg["trainer"]["argv"], [moved, *members[1:]])
+    text = str(raised.value)
+    assert "compat_group nvidia-h200" in text and "compat_group nvidia-h100" in text
+    assert "session_contract_mismatch" in text
+    assert "--rl-compat-group" in text and "--rl-identity relaxed" in text
+    # Same card group elsewhere (another cloud): agrees.
+    fleet_session.check(cfg["trainer"]["argv"], [{**members[0], "gpu": "aws:1xh100@us-west-2"}, *members[1:]])
+
+
+@pytest.mark.parametrize("relax", [["--rl-compat-group", "nvidia-h100"], ["--rl-identity", "relaxed"]])
+def test_an_explicit_compat_group_or_relaxed_identity_admits_the_other_card(tmp_path, relax):
+    cfg, members = _members(tmp_path)
+    cfg["trainer"]["argv"].extend(relax)
+    members = [{**m, "argv": [*m["argv"], *relax]} for m in members]
+    moved = {**members[0], "gpu": "nebius:1xh200@us-central1"}
+    fleet_session.check(cfg["trainer"]["argv"], [moved, *members[1:]])
+
+
+def test_an_island_whose_identity_mode_differs_is_refused(tmp_path):
+    cfg, members = _members(tmp_path)
+    relaxed = {**members[0], "argv": [*members[0]["argv"], "--rl-identity", "relaxed"]}
+    with pytest.raises(ValueError, match="--rl-identity relaxed, island sglang .* runs --rl-identity strict"):
+        fleet_session.check(cfg["trainer"]["argv"], [members[1], relaxed])
+
+
+def test_the_running_session_is_compared_with_but_not_reported_for(tmp_path):
+    """``running``: the launches holding the fleet's session (a moved island's old machines,
+    the other islands) are compared with the island written, never refused themselves."""
+    cfg, members = _members(tmp_path)
+    old = members[0]
+    moved = {**old, "gpu": "nebius:1xh200@us-central1"}
+    with pytest.raises(ValueError, match="compat_group nvidia-h200, the fleet's session holds compat_group "
+                                         "nvidia-h100 \\(island\\(s\\) mixed-old\\)"):
+        fleet_session.check(cfg["trainer"]["argv"], [moved], running=[{**old, "name": "mixed-old"}])
+    # A running launch that does not compile is left out (with a note), not a refusal.
+    fleet_session.check(cfg["trainer"]["argv"], [old], running=[{**old, "name": "broken", "gpu": "nowhere:9xq"}])
+
+
+def test_a_move_to_h200_is_refused_at_its_dry_run_before_any_order(fleet_store, capsys):  # noqa: F811
+    cfg, objects, store, run_cli, _ = fleet_store
+    before = store.read()["generation"]
+    assert run_cli("move", "--name", "sglang", "--gpu", H200, "--usd-per-h", "4",
+                   "--dry-run") == 2
+    err = capsys.readouterr().err
+    assert "fleet island: refused" in err
+    assert "compat_group nvidia-h200" in err and "compat_group nvidia-h100" in err
+    assert "--rl-compat-group" in err and "--rl-identity relaxed" in err
+    assert run_cli("move", "--name", "sglang", "--gpu", H200, "--usd-per-h", "4") == 2
+    assert store.read()["generation"] == before  # nothing written, nothing ordered
+    assert run_cli("move", "--name", "sglang", "--gpu", "modal:1x2xh100", "--usd-per-h", "4", "--dry-run") == 0
+
+
+def test_an_add_on_another_card_is_refused(fleet_store, capsys):  # noqa: F811
+    cfg, objects, store, run_cli, samplers = fleet_store
+    assert run_cli("add", "--name", "north", "--gpu", H200, "--usd-per-h", "4",
+                   "--samplers", str(samplers), "--dry-run") == 2
+    err = capsys.readouterr().err
+    assert "island north" in err and "compat_group nvidia-h200" in err
+
+
+def test_the_only_island_moved_to_another_card_is_refused_once_the_fleet_has_a_syncer(fleet_store, capsys):  # noqa: F811
+    """One trainer island left: no other island holds the session, but its old machines
+    joined it; with a syncer running the move to another card group is refused too."""
+    cfg, objects, store, run_cli, _ = fleet_store
+    assert run_cli("remove", "--name", "mixed") == 0
+    capsys.readouterr()
+    assert run_cli("move", "--name", "sglang", "--gpu", H200, "--usd-per-h", "4",
+                   "--dry-run") == 0  # no syncer yet: no session to join
+    island_launches.write_syncer_record(objects, addr=RECORD["addr"], syncer_epoch=0, learners=2,
+                                        max_learners=4, run="r")
+    capsys.readouterr()
+    assert run_cli("move", "--name", "sglang", "--gpu", H200, "--usd-per-h", "4",
+                   "--dry-run") == 2
+    err = capsys.readouterr().err
+    assert "sglang (its machines before the move)" in err and "compat_group nvidia-h100" in err
+
+
+def test_run_up_preflight_refuses_islands_on_two_compat_groups(tmp_path, monkeypatch):
+    from test_fleet_island_runup import FakeController, build
+    from test_fleet_trainer_worker import FakeLaunches
+    from yeto.rl import up
+
+    run, objects = build(tmp_path, monkeypatch)
+    run.attach_trainer_worker(FakeController(), objects, ops=FakeLaunches())
+    run.adopt_desired()
+    assert run.fleet_session_problem() is None
+    dz.DesiredStore(objects).update(lambda doc: dz.trainers(doc)["sglang"].update(gpu=H200))
+    run.adopt_desired()
+    problem = run.fleet_session_problem()
+    assert problem and "island sglang (learner 1): compat_group nvidia-h200" in problem
+    logs = []
+    monkeypatch.setattr(up, "_log", logs.append)
+    assert run.preflight() is False

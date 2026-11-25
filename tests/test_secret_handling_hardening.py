@@ -125,7 +125,7 @@ def test_pinned_contract_refuses_a_negative_island_that_connects_first(syncer_bi
         negative = _client(port, 0, key=b"k3y", identity=BAD)
         clients.append(negative)
         error = _refused(negative)
-        assert error.metric == "layout_hash_mismatch" and "the head pins" in str(error)
+        assert error.metric == "session_contract_mismatch" and "the head pins" in str(error)
         good = _client(port, 0, key=b"k3y", identity=GOOD)
         clients.append(good)
         good.send_init(0, pack_tensor(torch.zeros(2), DTYPE_F32))
