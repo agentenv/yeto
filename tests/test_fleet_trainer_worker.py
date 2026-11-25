@@ -379,6 +379,8 @@ def test_a_stop_cleared_by_a_starting_launch_is_written_again(tmp_path):
     store.update(lambda doc: next(m for m in doc["members"] if m["name"] == "isl0").update(gpu="aws:2xh100@us-east-2"))
     w.step()
     assert w.load(0)["state"] == tw.MOVING
+    # by the trainer worker: run up's fleet runtime then stops no pool for it (bug 22)
+    assert w.states.stop_requested(0)["by"] == lifecycle.STOP_BY_TRAINER_WORKER
     w.states.clear_stop(0)
     w.step()
     assert w.states.stop_requested(0) is not None and "run-i0-m1" not in launches.live

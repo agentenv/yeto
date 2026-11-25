@@ -264,6 +264,32 @@ def test_run_up_stops_the_pools_of_an_island_stopped_by_hand(fleet_run):  # noqa
     assert run.fleet_rt().island_stopped(1) == "operator:maintenance" and run.fleet_rt().active() == [0]
 
 
+def test_an_island_stop_the_trainer_worker_wrote_stops_no_pool_and_no_fleet(fleet_run):  # noqa: F811
+    """Bug 22: ``fleet island move`` stops the island's launch on the old machines with an island
+    STOP the trainer worker writes; that launch ends done + stopped. It is no operator's stop:
+    its pools feed the island's next launch on the new machines and it is not a stopped island
+    (with one island running, the fleet stopped). The worker's other STOPs (removed, given up,
+    the fleet's stop forwarded) are the same. A later stop by hand still stops its pools."""
+    run = fleet_run()
+    states = lc.IslandStateStore(run._objects())
+    states.write(0, "running", name="r-l0", source="modal")
+    for k, why in ((1, "moving to aws:1xh100@us-west-2"), (0, "removed from the fleet's desired state")):
+        states.write(k, "done", name=f"r-l{k}", source="modal", exit=f"STOPPED (island STOP: {why})",
+                     stop={"reason": why, "by": lc.STOP_BY_TRAINER_WORKER, "at": 1.0},
+                     decision={"cause": "stopped", "action": "stop", "state": "done", "detail": why})
+    run.fleet_rt().trainer_check(1000.0)
+    assert not [c for c in run.calls if "pool-stop" in c]
+    assert not [e for e in _events(run) if e.get("event") == "fleet_island_operator_stop"]
+    assert sorted(run.fleet_rt().active()) == [0, 1] and run.fleet_all_stopped() is None
+    assert run.fleet_rt().island_stopped(1) is None
+    # the moved island's next launch runs, then an operator stops it: that one stops its pools
+    run.fleet_rt()._records_read = None
+    states.write(1, "done", name="r-l1-m1", source="modal", stop={"reason": "maintenance", "by": "yeto island stop"},
+                 decision={"cause": "stopped", "action": "stop", "state": "done", "detail": "maintenance"})
+    run.fleet_rt().trainer_check(1100.0)
+    assert [c for c in run.calls if "pool-stop" in c] and run.fleet_rt().island_stopped(1) == "operator:maintenance"
+
+
 def test_run_up_writes_no_stop_over_a_start_of_an_island_stopped_by_hand(fleet_run, tmp_path):  # noqa: F811
     """The START kept through a drain is pending when the island turns done. If run up sees done +
     stopped first, its operator stop stops the pools only: an island STOP written then would sit over

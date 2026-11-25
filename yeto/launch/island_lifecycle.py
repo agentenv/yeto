@@ -106,6 +106,10 @@ FAIL = "fail"  # never relaunched
 RELAUNCH = "relaunch"  # relaunched within the relaunch budget
 FINISH = "finish"
 STOP = "stop"  # ended on request: never relaunched
+# who wrote an island STOP: the per-island fleet's trainer worker writes one to move, remove
+# or give up the island, or to forward the fleet's stop; ``yeto run up`` and ``yeto island
+# stop`` write theirs under their own names (``IslandStateStore.request_stop(by=...)``)
+STOP_BY_TRAINER_WORKER = "trainer worker"
 
 # cause -> (action, state)
 DECISIONS: dict[str, tuple[str, str]] = {

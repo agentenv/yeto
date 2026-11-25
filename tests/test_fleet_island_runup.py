@@ -567,3 +567,64 @@ def test_a_failed_pool_stop_of_a_given_up_island_is_critical(tmp_path, monkeypat
     assert f"pool(s) ['{ref.name}'] not confirmed stopped" in text and f"{ref.name}'] stopped" not in text
     run.stop_island_pools(3, {"pools": ["i3-gone"]}, "failed: test", wait=True)  # named by no config
     assert "pool(s) ['i3-gone'] not confirmed stopped" in capsys.readouterr().out
+
+
+def _launch_ended_on_its_stop(states, k: int, name: str) -> None:
+    """What island k's launch records as it ends on its island STOP (island_lifecycle)."""
+    stop = states.stop_requested(k)
+    states.write(k, "done", name=name, source="modal", stop=stop, exit=f"STOPPED (island STOP: {stop['reason']})",
+                 decision={"cause": "stopped", "action": "stop", "state": "done", "detail": stop["reason"]})
+
+
+def _moving_fleet(tmp_path, monkeypatch):
+    run, objects = build(tmp_path, monkeypatch)
+    launches = FakeLaunches()
+    worker = run.attach_trainer_worker(FakeController(), objects, ops=launches)
+    states = lifecycle.IslandStateStore(run._objects())
+    il.write_syncer_record(objects, addr="h:1", syncer_epoch=0, learners=2, max_learners=4, run="r")
+    worker.step()
+    for k in (0, 1):
+        states.write(k, "running", name=f"r-i{k}", source="modal")
+    return run, objects, launches, worker, states
+
+
+def _move(objects, worker, launches, states, run, k: int, gpu: str = "aws:1xh100@us-west-2") -> None:
+    """``fleet island move`` of island k: the desired state changes; the worker stops the old
+    launch with its STOP; the launch ends on it; run up's runtime judges; the next launch starts."""
+    dz.DesiredStore(objects).update(
+        lambda doc: next(m for m in doc["members"] if m.get("learner_id") == k).update(gpu=gpu))
+    worker.step()
+    assert worker.load(k)["state"] == trainer_worker.MOVING
+    assert states.stop_requested(k)["reason"].startswith("moving to")
+    launches.end(f"r-i{k}", 0)
+    _launch_ended_on_its_stop(states, k, f"r-i{k}")
+    run.fleet_rt()._records_read = None
+    run.fleet_rt().trainer_check(1000.0)  # run up's pass sees the old launch done + stopped
+    worker.step()
+    assert f"r-i{k}-m1" in launches.live
+
+
+def test_a_moved_island_keeps_its_pools_and_the_fleet_goes_on(tmp_path, monkeypatch):
+    """Bug 22, two islands: the island STOP a move writes is no operator stop: the moved island's
+    pools are not stopped, it is not a stopped island, and the fleet does not stop."""
+    run, objects, launches, worker, states = _moving_fleet(tmp_path, monkeypatch)
+    _move(objects, worker, launches, states, run, 0)
+    assert not [c for c in run.calls if "pool-stop" in c]
+    assert sorted(run.fleet_rt().active()) == [0, 1] and run.fleet_rt().island_stopped(0) is None
+    assert run.fleet_all_stopped() is None
+
+
+def test_moving_the_only_island_running_does_not_stop_the_fleet(tmp_path, monkeypatch):
+    """Bug 22, one island running: island 1 stopped by hand (its pools stop, as #777 does),
+    then island 0, the only one left, moves: its pools stay and the fleet is not stopped."""
+    run, objects, launches, worker, states = _moving_fleet(tmp_path, monkeypatch)
+    own = {m["learner_id"]: m["pools"] for m in dz.trainers(dz.DesiredStore(objects).read()).values()}
+    states.request_stop(1, "maintenance", by="yeto island stop")
+    launches.end("r-i1", 0)
+    _launch_ended_on_its_stop(states, 1, "r-i1")
+    run.fleet_rt().trainer_check(900.0)
+    stopped = sorted(c[c.index("--pool-name") + 1] for c in run.calls if "pool-stop" in c)
+    assert stopped == sorted(own[1]) and run.fleet_rt().active() == [0]  # a real stop by hand stops its pools
+    _move(objects, worker, launches, states, run, 0)
+    assert sorted(c[c.index("--pool-name") + 1] for c in run.calls if "pool-stop" in c) == stopped
+    assert run.fleet_rt().active() == [0] and run.fleet_all_stopped() is None

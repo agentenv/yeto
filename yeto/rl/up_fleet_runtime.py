@@ -61,6 +61,20 @@ def _log(msg: str) -> None:
     _up()._log(msg)
 
 
+
+def stopped_by_trainer_worker(record: dict[str, Any]) -> bool:
+    """Island ``record`` (its run-store record) was stopped on an island STOP its fleet's
+    trainer worker wrote: to move it (its next launch starts on the new machines), remove it
+    or give it up (the worker releases its pools), or to forward the fleet's stop. None of
+    them is an operator's stop: its pools are not stopped for it and it is not counted as a
+    stopped island (a moved island's pools feed its next launch)."""
+    stop = record.get("stop")
+    if isinstance(stop, dict) and stop.get("by") is not None:
+        from yeto.launch.island_lifecycle import STOP_BY_TRAINER_WORKER  # noqa: PLC0415
+
+        return str(stop.get("by")) == STOP_BY_TRAINER_WORKER
+    return False
+
 class FleetRuntime:
     """The fleet half of one :class:`yeto.rl.up.Run` (its ``fleet_plan()`` is set)."""
 
@@ -376,7 +390,8 @@ class FleetRuntime:
                 self.trip_island(k, "run.trainer_exit", value=None, limit=None, why=why)
                 continue
             decision = record.get("decision") or {}
-            if state == "done" and decision.get("cause") == "stopped" and k not in self._exit_seen:
+            if (state == "done" and decision.get("cause") == "stopped" and k not in self._exit_seen
+                    and not stopped_by_trainer_worker(record)):
                 # stopped on an island STOP this run up did not write (``yeto island stop``): its
                 # trainer is released, so its pools follow; the other islands go on. Not a trip.
                 self._exit_seen.add(k)

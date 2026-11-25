@@ -342,7 +342,7 @@ class TrainerWorker:
         """Island ``k``'s STOP written to the store; False when the write failed (the store
         swallows the error): a warning the first time, an error every
         ``unknown_alarm_steps`` failures in a row, unless ``quiet`` (the caller reports)."""
-        if self.states.request_stop(k, why, by="trainer worker"):
+        if self.states.request_stop(k, why, by=lifecycle.STOP_BY_TRAINER_WORKER):
             self._stop_write_failed.pop(k, None)
             return True
         failed = self._stop_write_failed[k] = self._stop_write_failed.get(k, 0) + 1
