@@ -368,3 +368,16 @@ def test_the_provision_records_what_leaves_modal_and_whose_on_the_modal_app(monk
     ops = prov.modal_app()
     assert ops.ledger_egress == {"egress_events": ["rl_publication", "rl_member_publication", "rl_fragment_push"],
                                  "egress_islands": want, "egress_fallback_bytes": pytest.approx(2e9)}
+
+
+def test_a_held_modal_island_s_records_are_the_app_s_too(monkeypatch):
+    from yeto import modal_runner
+    from yeto.launch import trainer_provision as tp
+
+    monkeypatch.setattr(modal_runner.ModalOps, "define", lambda self, cfg: None)
+    args = SimpleNamespace(cluster_prefix="run", rl_checkpoint_store="s3://bucket/runs/run", rl_buffer_shards=["0:a"],
+                           rl_island_buffer_shards=None, model="x/unknown-model", weights_gb=1.0, rl_fleet_role=None)
+    prov = tp.TrainerProvision(args=args, sky=None, specs=[], names=[])
+    prov.add(tp.Island("i0", 0, None, None, object(), "modal"))
+    prov.held = tp.Island("i3", 3, None, None, object(), "modal")  # the trainer scheduler's island
+    assert prov.modal_app().ledger_egress["egress_islands"] == [0, 3]
