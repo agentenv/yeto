@@ -109,13 +109,107 @@ def test_the_mark_survives_pickling_a_chain_and_a_ray_task_error():
     assert lc.classify_error(RayTaskErrorLike(_sample_wait())).cause == lc.BREAKER
 
 
-@pytest.mark.parametrize("error,cause", [
-    (StrictRlInvariantError("syncer_profile_mismatch", "syncer refused this island: HELLO syncer semantic profile does not match"), lc.STRICT),
-    (PolicyAgeExceeded("groups older than max_policy_age"), lc.STRICT),
+def _training_failed_members():
+    """Every LEAVE TRAINING_FAILED error class (``leave_reason._TABLE``) -> an instance, and
+    whether it is a deterministic stop (exit 11, never relaunched) or keeps its retries."""
+    from yeto.rl.applied_lr import AppliedLrError
+    from yeto.rl.adapters.miles.publish import PublicationError as MilesPublicationError
+    from yeto.rl.critic_state import CriticStateError
+    from yeto.rl.engine.bridges import CrossChannelCommitError
+    from yeto.rl.engine.driver import DriverError, PolicyIdentityError, PublicationError, RoundFailedError
+    from yeto.rl.engine.overlap import OverlapGuardError
+    from yeto.rl.engine.policy_age import PolicyAgeError
+    from yeto.rl.engine.policy_digest import PolicyDigestError
+    from yeto.rl.engine.sample_pool import SampleIndexError
+    from yeto.rl.engine.version_segments import ProvenanceError
+    from yeto.rl.grad_audit import GradAuditError
+    from yeto.rl.tbench_outcome import UntrustedTBenchOutcome
+    from yeto.rl.engine.ports import PublicationCause
+
+    return {
+        # deterministic: the same check fails the same way on every attempt
+        "StrictRlInvariantError": (StrictRlInvariantError("layout_hash", "layout hash differs"), True),
+        "StrictRlInvariantError (HELLO refused)": (StrictRlInvariantError(
+            "syncer_profile_mismatch", "syncer refused this island: HELLO syncer semantic profile does not match"), True),
+        "StrictRlInvariantError (nan)": (StrictRlInvariantError("nonfinite_grad_norm", "grad_norm is nan"), True),
+        "PolicyAgeExceeded": (PolicyAgeExceeded("groups older than max_policy_age"), True),
+        "PolicyAgeError": (PolicyAgeError("max_policy_age must be an int"), True),
+        "AppliedLrError": (AppliedLrError("LR 0 before the final round"), True),
+        # may be an NCCL / CUDA / OOM / storage / network fault underneath: retried as before
+        "RoundFailedError": (RoundFailedError("rollout 7: optimizer step failed"), False),
+        "PublicationError (update failed)": (PublicationError(
+            "engine update_weights raised", cause=PublicationCause.UPDATE_FAILED), False),
+        "PolicyIdentityError": (PolicyIdentityError("groups not sampled from the published policy"), False),
+        "DriverError": (DriverError("rollout 7: the batch generated ahead is rollout 6"), False),
+        "MilesPublicationError": (MilesPublicationError("publication refused"), False),
+        "CrossChannelCommitError": (CrossChannelCommitError("critic channel did not reach v+1"), False),
+        "PolicyDigestError": (PolicyDigestError("weights no longer match the digest"), False),
+        "OverlapGuardError": (OverlapGuardError("an overlapped eval would observe the wrong policy"), False),
+        "ProvenanceError": (ProvenanceError("version segment out of order"), False),
+        "SampleIndexError": (SampleIndexError("sample index out of range"), False),
+        "GradAuditError": (GradAuditError("grad audit failed"), False),
+        "CriticStateError": (CriticStateError("critic state does not load"), False),
+        "UntrustedTBenchOutcome": (UntrustedTBenchOutcome("terminal-bench metadata is absent"), False),
+    }
+
+
+@pytest.mark.parametrize("member", sorted(_training_failed_members()))
+def test_each_training_failed_error_is_a_stop_only_on_the_whitelist(member):
+    from yeto.rl.engine.leave_reason import leave_reason_for
+
+    error, deterministic = _training_failed_members()[member]
+    assert leave_reason_for(error).name == "TRAINING_FAILED"
+    found = lc.island_stop_decision(error)
+    assert (found is not None) == deterministic
+    if deterministic:
+        assert (found.cause, found.action) == (lc.STRICT, lc.FAIL)
+    record = {"leave": {"reason_name": "TRAINING_FAILED", "error_type": type(error).__name__, "error": str(error)}}
+    assert (lc.classify_records(record) is not None) == deterministic
+
+
+def test_every_training_failed_class_is_judged():
+    """A class added to the TRAINING_FAILED row must be judged here (whitelisted or not)."""
+    from yeto.rl.engine import leave_reason
+    from yeto.rl.leave_code import LeaveReason
+
+    (row,) = [names for reason, names in leave_reason._TABLE if reason is LeaveReason.TRAINING_FAILED]
+    judged = {type(e).__name__ for e, _ in _training_failed_members().values()} | {"PublicationError"}
+    assert {name for _module, name in row} <= judged | {"DriverError"}
+
+
+@pytest.mark.parametrize("error", [
+    RuntimeError("[Rank 0] Watchdog caught collective operation timeout: WorkNCCL(SeqNum=88, OpType=ALLREDUCE) "
+                 "ran for 1800000 milliseconds before timing out"),
+    RuntimeError("CUDA error: an illegal memory access was encountered"),
+    RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB"),
+    OSError("[Errno 5] Input/output error: '/store/ckpt/round-7'"),
+    ConnectionResetError("Connection reset by peer"),
+    TimeoutError("distributed init timed out"),
 ])
-def test_a_strict_failure_or_refusal_is_never_relaunched(error, cause):
-    found = lc.classify_error(error)
-    assert (found.cause, found.action) == (cause, lc.FAIL)
+def test_a_transient_fault_keeps_its_modal_retries_and_relaunches(error, monkeypatch):
+    """NCCL / distributed timeouts, CUDA and driver errors, OOM, storage I/O, the network: the
+    island process exits 1 as before (Modal retries it), and the launcher relaunches it."""
+    from yeto.rl.adapters.miles.island_entry import island_stop_exit
+
+    for wrapped in (error, _wrapped(error)):
+        assert island_stop_exit(wrapped, io.StringIO()) is None
+        assert lc.island_stop_decision(wrapped) is None
+        assert lc.classify_error(wrapped).relaunch
+    monkeypatch.setattr(mr.subprocess, "call", lambda cmd, env=None: 1)
+    with pytest.raises(RuntimeError, match="exited with 1"):  # raised: Modal retries the container
+        mr.island_main(_cfg(num_nodes=1, run_script="exit 1").to_json())
+
+
+def _wrapped(error):
+    from yeto.rl.engine.driver import RoundFailedError
+
+    try:
+        try:
+            raise error
+        except BaseException as inner:
+            raise RoundFailedError("rollout 7: optimizer step failed") from inner
+    except RoundFailedError as outer:
+        return outer
 
 
 @pytest.mark.parametrize("error", [
@@ -340,8 +434,15 @@ def test_an_island_without_an_echo_is_given_up_on_its_marker_line():
     assert ops.relaunch_calls == [] and ctl.learners["l1"]["state"] == "abandoned"
 
 
-@pytest.mark.parametrize("records", [None, {"l1": {"leave": {"reason_name": "INFRA_FAILED", "error_type": "RuntimeError",
-                                                            "error": "NCCL error"}}}])
+@pytest.mark.parametrize("records", [
+    None,
+    {"l1": {"leave": {"reason_name": "INFRA_FAILED", "error_type": "RuntimeError", "error": "NCCL error"}}},
+    # a failed optimizer step (LEAVE TRAINING_FAILED, not whitelisted): an NCCL timeout underneath
+    {"l1": {"leave": {"reason_name": "TRAINING_FAILED", "error_type": "RoundFailedError",
+                      "error": "rollout 7: optimizer step failed"}}},
+    {"l1": {"leave": {"reason_name": "TRAINING_FAILED", "error_type": "RayTaskError(RoundFailedError)",
+                      "error": "optimizer step failed"}}},
+])
 def test_an_infrastructure_failure_is_relaunched(records):
     ops = FakeOps()
     ops.status_seq["l1"] = [RUNNING, FAILED]
