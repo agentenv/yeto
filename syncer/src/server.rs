@@ -4454,6 +4454,8 @@ async fn scheduler(
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
     let mut busy_fragments: HashSet<usize> = HashSet::new();
     let mut late_carry = LateCarry::new(cfg.membership.admit_lag(cfg.max_base_lag), fixed_roster);
+    // Island pool: islands absent from a deadline merge and silent since.
+    let mut silent = SilentMembers::default();
     // --async-checkpoint: the committed round whose checkpoint is in flight.
     let mut publishing: Option<PendingPublish> = None;
     // --checkpoint-at-steps: evaluation copies written off the scheduler.
@@ -4679,6 +4681,7 @@ async fn scheduler(
             }
             append_round_open(&cfg, t, p, 1, st.versions[p], &expected_members, launch_quorum);
             let fold = round_fold(&cfg, &st, p, &expected_members, launch_quorum);
+            let excused = silent.excused(&expected_members);
             inflight.push(Round {
                 t,
                 p,
@@ -4700,6 +4703,8 @@ async fn scheduler(
                 carried: Vec::new(),
                 carry_answers: cfg.carry_answers_round,
                 refused_ahead: Vec::new(),
+                deadline_merge: dynamic && !fixed_roster,
+                excused,
             });
             if let Some(carry) = late_carry.as_mut() {
                 let round = inflight.last_mut().expect("round just launched");
@@ -4757,6 +4762,20 @@ async fn scheduler(
             match round_action(&inflight[i], now) {
                 RoundAction::Complete => {
                     let mut round = inflight.remove(i);
+                    if round.merges_at_deadline(now) {
+                        let absent = round.unanswered();
+                        warn!(
+                            step = round.t,
+                            fragment = round.p,
+                            attempt = round.attempt,
+                            arrived = round.pushes.len(),
+                            absent = ?absent.iter().map(|member| member.learner_id).collect::<Vec<_>>(),
+                            "quorum deadline: merging the islands that delivered; the silent ones are \
+                             absent and later rounds do not wait for them until they deliver again"
+                        );
+                        // The merged round keeps its own record (timed_out, absent).
+                        silent.mark(&mut inflight, &absent);
+                    }
                     let prepared = prepare_round_compute(&cfg, &st, &mut round)?;
                     if !budget_cutoff.try_linearize_work() {
                         cutoff_established = true;
@@ -4891,8 +4910,7 @@ async fn scheduler(
                     if timeouts_noted.insert((r.t, r.attempt)) {
                         append_round_timeout(&cfg, r, reason, "new_attempt");
                     }
-                    r.expected_members = groups.iter().map(|group| group.member).collect();
-                    r.expected_members.sort_unstable();
+                    r.recapture(groups.iter().map(|group| group.member).collect(), &silent);
                     r.quorum_size = cfg.quorum as usize;
                     r.base_version = st.versions[r.p];
                     r.attempt += 1;
@@ -5222,8 +5240,11 @@ async fn scheduler(
                         if !open {
                             let current = st.versions[fragment_id as usize];
                             let outcome = carry.carry(&mut inflight, member, push, next_t, current);
-                            if !matches!(outcome, CarryOutcome::Rejected(_)) {
+                            if matches!(outcome, CarryOutcome::Rejected(_)) {
+                                silent.pushed_late(member);
+                            } else {
                                 carry.spend_anchor(member, fragment_id as usize, base_version);
+                                silent.delivered(member);
                             }
                             match outcome {
                                 CarryOutcome::Attached { step, lag } => {
@@ -5263,6 +5284,7 @@ async fn scheduler(
                         );
                     match disposition {
                         PushDisposition::Accepted => {
+                            silent.delivered(member);
                             arrival_gaps.note_accepted(global_step, fragment_id as usize, Instant::now());
                             if let Some(carry) = late_carry.as_mut() {
                                 carry.note_gathered(member, fragment_id as usize, base_version);
@@ -5298,6 +5320,7 @@ async fn scheduler(
                             bail!("RL strict failure {metric}: {message}");
                         }
                         disposition => {
+                            silent.pushed_late(member);
                             warn!(
                                 learner_id,
                                 generation,
@@ -6026,6 +6049,15 @@ struct Round {
     /// round refused by every expected island is relaunched at once rather
     /// than after `--quorum-timeout-s` (see `round_action`).
     refused_ahead: Vec<Member>,
+    /// Island pool: at the quorum deadline the round merges what arrived (at
+    /// least `soft_min` pushes) and records the islands still unanswered as
+    /// absent, instead of a new attempt that captures the same connected but
+    /// silent islands again (see `round_action`, `SilentMembers`).
+    deadline_merge: bool,
+    /// Expected islands absent from an earlier deadline merge that have not
+    /// delivered since: still pulled, and their push counts if it arrives,
+    /// but the quorum does not wait for them (see `Round::required_members`).
+    excused: Vec<Member>,
 }
 
 impl Round {
@@ -6047,10 +6079,60 @@ impl Round {
 
     fn quorum_reached(&self) -> bool {
         let responders = self.responders();
-        match &self.capacity_quorum {
-            Some(quorum) => quorum.reached(&self.expected_members, responders),
-            None => responders.len() >= self.quorum_size,
+        if self.excused.is_empty() {
+            return match &self.capacity_quorum {
+                Some(quorum) => quorum.reached(&self.expected_members, responders),
+                None => responders.len() >= self.quorum_size,
+            };
         }
+        let required = self.required_members();
+        match &self.capacity_quorum {
+            Some(quorum) => quorum.reached(&required, responders),
+            None => responders.len() >= self.quorum_size.min(required.len()).max(1),
+        }
+    }
+
+    /// The expected islands the quorum waits for: all of them but the excused
+    /// ones that have not answered (an excused island that answers counts).
+    fn required_members(&self) -> Vec<Member> {
+        let responders = self.responders();
+        self.expected_members
+            .iter()
+            .filter(|member| !self.excused.contains(member) || responders.contains(member))
+            .copied()
+            .collect()
+    }
+
+    /// Every island the quorum waits for answered (excused islands aside).
+    fn required_answered(&self) -> bool {
+        let responders = self.responders();
+        self.required_members().iter().all(|member| responders.contains(&member))
+    }
+
+    /// The quorum deadline passed below quorum and the island pool merges what
+    /// arrived (`deadline_merge`): the unanswered islands are absent.
+    fn merges_at_deadline(&self, now: Instant) -> bool {
+        self.deadline_merge
+            && now >= self.quorum_deadline
+            && self.pushes.len() >= self.soft_min.max(1)
+            && !self.quorum_reached()
+    }
+
+    /// A new attempt's expected islands (sorted), with the silent ones excused.
+    fn recapture(&mut self, members: Vec<Member>, silent: &SilentMembers) {
+        self.expected_members = members;
+        self.expected_members.sort_unstable();
+        self.excused = silent.excused(&self.expected_members);
+    }
+
+    /// Expected islands that did not answer this round.
+    fn unanswered(&self) -> Vec<Member> {
+        let responders = self.responders();
+        self.expected_members
+            .iter()
+            .filter(|member| !responders.contains(member))
+            .copied()
+            .collect()
     }
 
     /// Every island this attempt expected is gone (its slots released) and
@@ -6150,6 +6232,11 @@ fn round_action(round: &Round, now: Instant) -> RoundAction {
     if responders > 0 && responders >= round.expected_members.len() {
         return RoundAction::Complete;
     }
+    // Every island the round waits for answered; only excused (silent) ones
+    // are missing.
+    if responders > 0 && !round.excused.is_empty() && round.required_answered() {
+        return RoundAction::Complete;
+    }
     // Every expected island pushed against a base the (rewound) syncer does
     // not have and none will push for this attempt again: relaunch it now
     // with a pull at the current base. Waiting the quorum timeout out would
@@ -6173,6 +6260,12 @@ fn round_action(round: &Round, now: Instant) -> RoundAction {
     if round.soft_deadline.is_some_and(|deadline| now >= deadline)
         && round.pushes.len() >= round.soft_min.max(1)
     {
+        return RoundAction::Complete;
+    }
+    // Island pool: a connected island that stops delivering would be captured
+    // by every new attempt and hold the merge of all the others; past the
+    // deadline the round merges what arrived and that island is absent.
+    if round.merges_at_deadline(now) {
         return RoundAction::Complete;
     }
     if now >= round.quorum_deadline {
@@ -6199,6 +6292,62 @@ fn relaunch_deserted_rounds(
         }
     }
     moved
+}
+
+/// Islands of a pool that missed a deadline merge (connected, pulled, but
+/// silent past the round's quorum deadline) and have not delivered since.
+/// Later rounds still pull them and take their push, but excuse them from the
+/// quorum, so one island that stops training cannot hold every other island's
+/// merge for a quorum timeout per round. A push accepted into its round, or
+/// carried into a later one, ends the excuse. A push refused (its base lags
+/// too far, or a closed round without carry) ends it once: an island a little
+/// slower than the others would otherwise always arrive after a round that no
+/// longer waits for it, while an island whose pushes are always refused would
+/// have every round wait for it until the deadline. So after one such second
+/// chance it stays excused until a push of it is merged.
+#[derive(Debug, Default)]
+struct SilentMembers {
+    members: HashSet<Member>,
+    /// Excused islands given their second chance by a refused push, until one of
+    /// their pushes is merged.
+    second_chance: HashSet<Member>,
+}
+
+impl SilentMembers {
+    /// The excused islands among a round's expected ones.
+    fn excused(&self, expected: &[Member]) -> Vec<Member> {
+        expected.iter().filter(|member| self.members.contains(member)).copied().collect()
+    }
+
+    /// `absent` missed a deadline merge: excuse them from this point on, in
+    /// the rounds already open as well (where they have not answered).
+    fn mark(&mut self, inflight: &mut [Round], absent: &[Member]) {
+        for member in absent {
+            self.members.insert(*member);
+            for round in inflight.iter_mut() {
+                if round.expected_members.contains(member)
+                    && !round.excused.contains(member)
+                    && !round.responders().contains(&member)
+                {
+                    round.excused.push(*member);
+                }
+            }
+        }
+    }
+
+    /// `member` delivered a delta (accepted or carried): later rounds wait for it again.
+    fn delivered(&mut self, member: Member) {
+        self.members.remove(&member);
+        self.second_chance.remove(&member);
+    }
+
+    /// A push of `member` was refused (late): later rounds wait for it again,
+    /// once until a push of it is merged.
+    fn pushed_late(&mut self, member: Member) {
+        if self.members.contains(&member) && self.second_chance.insert(member) {
+            self.members.remove(&member);
+        }
+    }
 }
 
 /// Return a ready round only when it is the oldest in-flight global step.
@@ -11069,6 +11218,8 @@ mod tests {
             carried: Vec::new(),
             carry_answers: false,
             refused_ahead: Vec::new(),
+            deadline_merge: false,
+            excused: Vec::new(),
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -11155,6 +11306,8 @@ mod tests {
             carried: Vec::new(),
             carry_answers: false,
             refused_ahead: Vec::new(),
+            deadline_merge: false,
+            excused: Vec::new(),
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -11222,6 +11375,8 @@ mod tests {
             carried: Vec::new(),
             carry_answers: false,
             refused_ahead: Vec::new(),
+            deadline_merge: false,
+            excused: Vec::new(),
             pushes,
         }
     }
@@ -13844,6 +13999,8 @@ mod tests {
             carried: Vec::new(),
             carry_answers: false,
             refused_ahead: Vec::new(),
+            deadline_merge: false,
+            excused: Vec::new(),
             pushes: HashMap::new(),
         }
     }
@@ -15702,6 +15859,115 @@ mod tests {
         round.grace_deadline = Some(Instant::now() + Duration::from_secs(3600));
         assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait, "grace still open");
         round.grace_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn a_pool_round_merges_what_arrived_at_the_quorum_deadline() {
+        // θ = 1.0: island 1 joined and stays connected but never pushes. A
+        // new attempt would capture it again; the pool merges island 0's push
+        // at the deadline and island 1 is absent.
+        let (fast, silent) = (member(0, 1), member(1, 2));
+        let mut round = capacity_round(vec![fast, silent], 1.0, &[]);
+        round.deadline_merge = true;
+        round.pushes.insert(fast, test_push_for(0, 5));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait, "before the deadline");
+        round.quorum_deadline = Instant::now() - Duration::from_millis(1);
+        assert!(round.merges_at_deadline(Instant::now()));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+        assert_eq!(round.unanswered(), vec![silent]);
+
+        // A fixed roster (or no pool) keeps the new attempt.
+        round.deadline_merge = false;
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Restart);
+        // Nothing arrived, or fewer than q_min: a new attempt as before.
+        round.deadline_merge = true;
+        round.soft_min = 2;
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Restart, "q_min binds");
+        round.soft_min = 1;
+        round.pushes.clear();
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Restart, "never merges nothing");
+    }
+
+    #[test]
+    fn later_rounds_do_not_wait_for_a_silent_island_until_it_delivers() {
+        let (fast, silent) = (member(0, 1), member(1, 2));
+        let mut members = SilentMembers::default();
+        // A round already open when the deadline merge marks island 1.
+        let mut open = capacity_round(vec![fast, silent], 1.0, &[]);
+        open.deadline_merge = true;
+        let mut rounds = vec![open];
+        members.mark(&mut rounds, &[silent]);
+        assert_eq!(rounds[0].excused, vec![silent]);
+        assert_eq!(rounds[0].required_members(), vec![fast]);
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait, "island 0 not in yet");
+        rounds[0].pushes.insert(fast, test_push_for(0, 5));
+        assert!(rounds[0].quorum_reached(), "θ over the islands it waits for");
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
+        assert!(!rounds[0].merges_at_deadline(Instant::now()), "not a deadline merge");
+
+        // A round launched later excuses it from the start; its push still counts.
+        assert_eq!(members.excused(&[fast, silent]), vec![silent]);
+        let mut next = capacity_round(vec![fast, silent], 1.0, &[]);
+        next.excused = members.excused(&next.expected_members);
+        next.pushes.insert(silent, test_push_for(1, 5));
+        assert_eq!(next.required_members(), vec![fast, silent], "an excused island that answers counts");
+        assert!(!next.quorum_reached());
+        next.pushes.insert(fast, test_push_for(0, 5));
+        assert_eq!(round_action(&next, Instant::now()), RoundAction::Complete);
+
+        // A new attempt of a round recaptures its islands and excuses the silent ones.
+        let mut retried = test_round(vec![fast]);
+        retried.recapture(vec![silent, fast], &members);
+        assert_eq!(retried.expected_members, vec![fast, silent]);
+        assert_eq!(retried.excused, vec![silent]);
+
+        // A refused (late) push gives it one second chance; refused again after
+        // missing another deadline, it stays excused until a push is merged.
+        members.pushed_late(silent);
+        assert!(members.excused(&[fast, silent]).is_empty(), "second chance");
+        members.mark(&mut [], &[silent]);
+        members.pushed_late(silent);
+        assert_eq!(members.excused(&[fast, silent]), vec![silent], "no second second chance");
+
+        // Once it delivers, the rounds launched after wait for it again.
+        members.delivered(silent);
+        assert!(members.excused(&[fast, silent]).is_empty());
+        members.mark(&mut [], &[silent]);
+        members.pushed_late(silent);
+        assert!(members.excused(&[fast, silent]).is_empty(), "a merged push renews the second chance");
+        // A new connection generation of the island is not excused.
+        members.mark(&mut [], &[silent]);
+        assert!(members.excused(&[fast, member(1, 3)]).is_empty());
+    }
+
+    #[test]
+    fn a_grace_merge_past_the_quorum_deadline_is_not_a_deadline_merge() {
+        // θ = 0.5 reached by island 0 alone, the grace window closes after the
+        // quorum deadline: an ordinary merge, island 1 is not marked silent.
+        let (fast, slow) = (member(0, 1), member(1, 1));
+        let mut round = capacity_round(vec![fast, slow], 0.5, &[]);
+        round.deadline_merge = true;
+        round.pushes.insert(fast, test_push_for(0, 5));
+        round.quorum_deadline = Instant::now() - Duration::from_secs(1);
+        round.grace_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert!(round.quorum_reached());
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+        assert!(!round.merges_at_deadline(Instant::now()));
+    }
+
+    #[test]
+    fn an_excused_island_lowers_a_count_quorum_to_the_islands_waited_for() {
+        let (first, second, silent) = (member(0, 1), member(1, 1), member(2, 1));
+        let mut round = test_round(vec![first, second, silent]);
+        round.quorum_size = 3;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round.pushes.insert(first, test_push_for(0, 5));
+        round.pushes.insert(second, test_push_for(1, 5));
+        assert!(!round.quorum_reached());
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        round.excused = vec![silent];
+        assert!(round.quorum_reached());
         assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
     }
 
