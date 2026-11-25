@@ -9,6 +9,7 @@ final grace window, and the LEAVE reason on the syncer tape.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import secrets
@@ -41,14 +42,15 @@ def _island_key(monkeypatch):
 
 
 class Syncer:
-    def __init__(self, binary: Path, tmp_path: Path, *, learners: int, rounds: int, extra=()):
+    def __init__(self, binary: Path, tmp_path: Path, *, learners: int, rounds: int, extra=(),
+                 quorum_timeout_s: int = 30):
         self.tape = tmp_path / "syncer" / "tape.jsonl"
         self.tape.parent.mkdir()
         argv = [str(binary), "--port", "0", "--learners", str(learners),
                 "--total-steps", str(rounds), "--pipeline", "1", "--grace-ms", "0",
                 "--sync-interval-steps", "0", "--delta-correction", "none",
                 "--learner-weight", "tokens2-over-steps", "--event-tape", str(self.tape),
-                "--quorum-timeout-s", "30", "--final-ack-timeout-s", "30", *extra]
+                "--quorum-timeout-s", str(quorum_timeout_s), "--final-ack-timeout-s", "30", *extra]
         self.log = (tmp_path / "syncer.log").open("w")
         self.proc = subprocess.Popen(argv, stdout=self.log, stderr=subprocess.STDOUT,
                                      env={**os.environ, "YETO_ISLAND_HMAC_KEY": KEY})
@@ -225,6 +227,95 @@ def test_final_grace_ends_the_run_without_an_island_that_left(syncer_binary, tmp
     leaves = [r for r in syncer.records("pool_leave") if r["island_id"] == 1]
     assert leaves and leaves[-1]["reason"] == "preempted", syncer.records("pool_leave")
     assert any(isinstance(e, KeyboardInterrupt) for e in errors)
+
+
+def _goes_silent(sync, *, after_pushes: int, release: threading.Event) -> None:
+    """Island ``sync`` pushes ``after_pushes`` times, then holds every later push
+    until ``release`` is set while its heartbeats go on (their own thread):
+    connected, a member of the pool, and not delivering."""
+    pushes = itertools.count()
+    sync.debug_delay_s = lambda: 0.0 if next(pushes) < after_pushes else 600.0
+    sync._sleep = lambda seconds: release.wait(seconds)
+
+
+def test_an_island_that_joins_and_stops_pushing_does_not_hold_the_others_merges(syncer_binary, tmp_path):
+    """θ = 1.0 (every island answers): island 1 delivers one push, then stays
+    connected (heartbeats) without delivering. The round it misses merges island
+    0's push at the quorum deadline with island 1 absent, instead of a new attempt
+    that captures island 1 again; later rounds do not wait for it."""
+    rounds = 5
+    syncer = Syncer(syncer_binary, tmp_path, learners=2, rounds=rounds, quorum_timeout_s=2,
+                    extra=["--quorum", "1", "--quorum-theta", "1.0", "--max-base-lag", "2",
+                           "--island-lease-s", "30", "--final-grace-s", "3"])
+    release = threading.Event()
+    errors: list[BaseException] = []
+    try:
+        islands = [_island(tmp_path, syncer, i, rounds) for i in range(2)]
+        _goes_silent(islands[1][0], after_pushes=1, release=release)
+        threads = [_run(driver, errors) for _sync, driver in islands]
+        threads[0].join(90)
+        assert not threads[0].is_alive(), "island 0 was held by the silent island"
+        assert syncer.wait() == 0
+    finally:
+        release.set()
+        syncer.kill()
+    assert islands[0][0].base_version == rounds
+    steps = syncer.records("outer_step")
+    assert [s["step"] for s in steps] == list(range(1, rounds + 1))
+    silent_from = next(i for i, s in enumerate(steps) if s["absent"] == [1])
+    assert steps[silent_from]["timed_out"], steps[silent_from]  # merged at the quorum deadline
+    assert all(s["absent"] == [] for s in steps[:silent_from])
+    later = steps[silent_from + 1:]
+    assert later, steps
+    # Excused: θ over the islands the round waits for, no deadline wait.
+    assert all(s["absent"] == [1] and not s["timed_out"] for s in later), later
+    assert all([i for i, _b, _w in s["weights"]] == [0] for s in later)
+    assert not [r for r in syncer.records("round_attempt_timeout") if r["next"] == "new_attempt"]
+    # The dashboard folder and the SFT dashboard read the deadline merge as a timed-out step.
+    from yeto.dashboard.sft import SftState
+    from yeto.rl.engine.merge_metrics import MergeMetricsFolder
+
+    folder = MergeMetricsFolder()
+    metrics = [m for m in map(folder.feed, syncer.records()) if m is not None]
+    assert [m["merge/timed_out"] for m in metrics].count(1) == 1
+    assert all(m["merge/island/0/weight_share"] == 1.0 for m in metrics[silent_from:])
+    state = SftState()
+    for record in syncer.records():
+        state.fold(record, record.get("time_unix"))
+    assert [row[4] for row in state.outer].count(True) == 1
+    assert all(row[3] is not None and row[5] is not None for row in state.outer)
+    assert [e[1] for e in state.events].count("timeout") == 1
+
+
+def test_a_silent_island_that_delivers_again_is_carried_and_waited_for_again(syncer_binary, tmp_path):
+    """Island 1 holds one push past the quorum deadline: that round merges without
+    it, its push arrives as a late push and is carried into a later round, and the
+    rounds after it wait for island 1 again."""
+    rounds = 8
+    syncer = Syncer(syncer_binary, tmp_path, learners=2, rounds=rounds, quorum_timeout_s=2,
+                    extra=["--quorum", "1", "--quorum-theta", "1.0", "--max-base-lag", "4",
+                           "--island-lease-s", "30", "--final-grace-s", "10"])
+    try:
+        islands = [_island(tmp_path, syncer, i, rounds) for i in range(2)]
+        islands[0][0].debug_delay_s = lambda: 0.5  # keeps the run going while island 1 is silent
+        pushes = itertools.count()
+        islands[1][0].debug_delay_s = lambda: 4.0 if next(pushes) == 1 else 0.0  # its 2nd push only
+        assert _run_pool(tmp_path, syncer, islands) == 0
+    finally:
+        syncer.kill()
+    steps = syncer.records("outer_step")
+    missed = [s for s in steps if s["absent"] == [1] and s["timed_out"]]
+    assert len(missed) == 1, steps  # the deadline merge; later rounds excuse island 1
+    # Its held push (from the base of the round it missed) is merged later with a lag.
+    carried = [c for c in syncer.records("delta_carried_over") if c["island_id"] == 1]
+    assert carried, syncer.records("delta_carried_over")
+    late = [s for s in steps if s["step"] > missed[0]["step"]
+            and [1, missed[0]["base_version"]] in [[i, b] for i, b, _w in s["weights"]]]
+    assert late, steps
+    # Delivering again ends the excuse: the rounds after it merge island 1 on time again.
+    after = [s for s in steps if s["step"] > late[0]["step"]]
+    assert after and all(s["absent"] == [] and 1 in [i for i, _b, _w in s["weights"]] for s in after), after
+    assert not [r for r in syncer.records("round_attempt_timeout") if r["next"] == "new_attempt"]
 
 
 def test_pool_islands_take_round_cuts():

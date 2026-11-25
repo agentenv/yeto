@@ -196,7 +196,8 @@ are rejected deterministically; the first valid PUSH per member wins.
 The syncer must reach frozen K before merging. After quorum it applies the
 adaptive grace window. If the quorum deadline expires below K, all partial
 responses are discarded and a new attempt captures the then-current member
-set. `round_attempt` is echoed in PUSH, so a delayed response from a discarded
+set (an island pool merges what arrived instead, see "Island pool" below).
+`round_attempt` is echoed in PUSH, so a delayed response from a discarded
 attempt cannot enter its retry.
 
 Each client redial creates a fresh nonzero connection generation and repeats
@@ -728,6 +729,23 @@ below the island count, `--rl-sync-grace-ms` or `--rl-sync-max-base-lag` >= 1).
 | `--syncer-epoch E` | `--rl-syncer-epoch` | a HELLO with a lower epoch is refused (fencing) |
 | `--final-grace-s S` | `--rl-sync-final-grace-s` | after the last step, wait S seconds for the connected islands to ACK the final cut, then finish without the missing ones |
 | `--max-learners N` | `--rl-sync-max-learners` | admit island ids 0..N-1 (islands may join late); full-parameter islands then bind the roster 0..N-1 into their session contract (`--sync-max-learners`) |
+
+Quorum deadline in a pool: a new attempt captures the connected islands
+again, so an island that stays connected (it heartbeats) but stops delivering
+would be captured by every attempt and hold the merge of all the others; an
+island that joined with a catch-up is expected like any other. So in a pool
+(not a fixed roster) a round whose `--quorum-timeout-s` passes below quorum
+merges the pushes that arrived, as long as there are at least `--q-min` (1
+with a count quorum); the `outer_step` record has `timed_out` true and lists
+the unanswered islands in `absent`. Those islands are then excused: later
+rounds (and the rounds already open) still pull them and take their push, but
+the quorum (θ of the capacity, or K) counts only the islands it waits for, so
+the other islands merge on schedule. A push from an excused island that comes
+after its round closed is a late push (carried into the fragment's next round
+within `--max-base-lag`, as above); a push accepted into its round or carried
+ends the excuse, and rounds launched after it wait for that island again. A new
+connection generation is not excused. With nothing (or fewer than `--q-min`)
+arrived the deadline still starts a new attempt.
 
 Every island in a pool heartbeats every lease/3 (default lease 150 s,
 `yeto.rl.pool_client.LeaseHeartbeat`). A lease expiry gets
