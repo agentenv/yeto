@@ -288,7 +288,7 @@ def check_pulled_images(args: Any, specs: Any, samplers: Any = (), *, out: Any =
     registry not reached: a warning. ``YETO_IMAGE_MANIFEST_CHECK=off`` skips it."""
     import copy
 
-    from ..rl.adapters.verl.pins import VERL_REGISTRY_ENV
+    from ..rl.engine import backends
     from . import image_manifest as im
     from .credentials import registry_login_for
 
@@ -316,7 +316,8 @@ def check_pulled_images(args: Any, specs: Any, samplers: Any = (), *, out: Any =
         if status in (im.MISSING, im.DENIED):
             raise ValueError(
                 f"--gpu island {m} ({spec}): trainer image {image}: {detail}. Push or mirror that digest there "
-                f"(docker/verl-fsdp/build.sh), point {VERL_REGISTRY_ENV} at a registry that has it, or give the "
+                f"(docker/verl-fsdp/build.sh), point {backends.module('pins', 'verl').VERL_REGISTRY_ENV} at a registry "
+                "that has it, or give the "
                 "launch a registry login (SKYPILOT_DOCKER_USERNAME / SKYPILOT_DOCKER_PASSWORD / "
                 "SKYPILOT_DOCKER_SERVER, or --rl-image-private)")
         if status == im.UNKNOWN:
