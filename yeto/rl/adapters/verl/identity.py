@@ -59,4 +59,3 @@ def backend_identity(*, device_family: str | None = None,
     family = device_family if device_family is not None else detect_device_family()
     return BackendIdentity(ENGINE, VERL_COMMIT, family, PARAM_MAP_SHA256_BY_BACKEND[train_backend],
                            island_compat_group(compat_group))
-

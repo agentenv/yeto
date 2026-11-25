@@ -48,6 +48,16 @@ def test_backends_declare_the_round_metrics_they_report():
     assert reported_metrics("no-such-backend") == ROUND_METRICS == reported_metrics(None)
 
 
+def test_a_registered_backend_that_declares_nothing_reports_every_metric(monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.rl.engine import backends
+
+    monkeypatch.setattr(backends, "module", lambda kind, name: SimpleNamespace())  # no REPORTED_METRICS
+    assert reported_metrics("verl") == ROUND_METRICS
+    assert unreported_metrics("verl") == {}
+
+
 def test_the_card_reads_what_the_backend_declares(monkeypatch):
     assert unreported_metrics("verl") == {METRIC_PPO_KL: "not reported by verl",
                                           METRIC_TRAIN_ROLLOUT_KL: "not reported by verl"}

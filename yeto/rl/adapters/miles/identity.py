@@ -36,4 +36,3 @@ def backend_identity(*, device_family: str = DEVICE_FAMILY,
 
     return BackendIdentity(ENGINE, MILES_NEXT_COMMIT, device_family, PARAM_MAP_SHA256,
                            island_compat_group(compat_group))
-

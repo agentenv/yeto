@@ -668,6 +668,8 @@ def test_a_verl_island_kl_reads_not_reported_by_verl(tmp_path, marker):
     assert cards["0"]["backend"] == "verl" and cards["1"]["backend"] == "miles"  # its miles_commit
     out = _smoke(tmp_path, r)
     assert out["nodes"].count("not reported by verl") == 1
+    # each island's trainer card names its backend: verl, and Megatron for the Miles island
+    assert "verl · H100" in out["texts"] and "Megatron · H100" in out["texts"]
 
 
 def _fullparam_fragments(tmp_path, *, wire=None, overwrite=False) -> Reducer:
