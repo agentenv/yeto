@@ -418,6 +418,10 @@ class NcSshOps:
         read = getattr(self.data_path(), "exit_evidence", None)  # the syncer path has no such record
         return None if read is None else read(m.shard)
 
+    def write_leave(self, m: Member, reason: str, **detail: Any) -> Any:
+        write = getattr(self.data_path(), "write_leave", None)  # the syncer path has no member record
+        return None if write is None else write(m.shard, reason, **detail)
+
     def shard_ended(self, shard: str) -> Any:
         """Whether ``shard``'s data already ended in the run's store (the pool skips such a
         shard name for a new member; the syncer path keeps no shard end: None)."""

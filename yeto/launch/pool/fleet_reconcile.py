@@ -62,6 +62,12 @@ class ReconcileHooks:
     removed: Callable[[str], None] | None = None
 
 
+# a reconfigure held back this long by background calls of the old ops (a release that
+# hangs in a provider call) is reported once (WARNING, event reconfigure_waiting); it never
+# swaps the ops while one still runs
+RECONFIGURE_WAIT_ALERT_S = 600.0
+
+
 @dataclass
 class _Removal:
     since: float
@@ -80,6 +86,8 @@ class FleetReconciler:
     applied_pools: dict[str, dict[str, Any]] = field(default_factory=dict)
     removing: dict[str, _Removal] = field(default_factory=dict)
     pending_rolls: dict[str, tuple[dict[str, Any], int]] = field(default_factory=dict)  # tick lock was busy
+    _held_since: dict[str, float] = field(default_factory=dict)  # pool -> reconfigure held by calls in flight
+    _held_reported: set[str] = field(default_factory=set)  # pools whose hold was reported
     _polled_at: float | None = None
     _resume: list[str] = field(default_factory=list)  # restored removals: target 0 asked again
     _dirty: bool = False  # the applied state changed and is not in the store yet
@@ -111,6 +119,8 @@ class FleetReconciler:
         if self.fenced is not None:
             return
         for name in self._resume:  # a removal another controller began: drained to 0 again
+            if name in controller.slots:
+                controller.slots[name].pool.removing = True
             self._set_target(controller, name, 0, (), None, self.removing[name].generation if name in self.removing
                              else self.applied)
         self._resume = []
@@ -231,8 +241,22 @@ class FleetReconciler:
         if not slot.tick_lock.acquire(blocking=False):
             self.pending_rolls[name] = (member, gen)
             return
-        self.pending_rolls.pop(name, None)
         try:
+            in_flight = getattr(slot.pool, "calls_in_flight", None)
+            busy = in_flight() if in_flight is not None else []
+            if busy:  # a background start / release still runs through the old ops (their
+                self.pending_rolls[name] = (member, gen)  # provider's record): a later pass
+                since = self._held_since.setdefault(name, self.clock())
+                if name not in self._held_reported and self.clock() - since >= RECONFIGURE_WAIT_ALERT_S:
+                    self._held_reported.add(name)
+                    self.log(f"fleet: WARNING: pool {name}: its new config (generation {gen}) waits "
+                             f"{RECONFIGURE_WAIT_ALERT_S:.0f}+ s for background call(s) of {busy} to end")
+                    controller.note(name, "reconfigure_waiting", generation=gen, tickets=list(busy),
+                                    waited_s=RECONFIGURE_WAIT_ALERT_S)
+                return
+            self._held_since.pop(name, None)
+            self._held_reported.discard(name)
+            self.pending_rolls.pop(name, None)
             if self.hooks.reconfigure is not None:
                 self.hooks.reconfigure(name, slot, member)
             slot.pool.start_roll(f"desired state generation {gen}")
@@ -249,6 +273,7 @@ class FleetReconciler:
         if slot is None:
             return
         self.removing[name] = _Removal(since=self.clock(), member=member, generation=gen)
+        slot.pool.removing = True  # its members are released once their samplers wrote their leave
         self.log(f"fleet: pool {name} removed in generation {gen}: target 0, draining")
         slot.pool._event("pool_removing", generation=gen)  # noqa: SLF001
         self._set_target(controller, name, 0, (), None, gen)

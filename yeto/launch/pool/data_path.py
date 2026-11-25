@@ -92,7 +92,8 @@ class R2DataPath:
         fence; ``incarnation`` / ``leave``: the shard's newest member record (by ``joined_at``)
         and its leave reason (None: no LEAVE written); ``superseded``: the lease lists that
         incarnation as superseded (False: the lease's holder never replaced it, e.g. it
-        never claimed the lease). A store error raises."""
+        never claimed the lease); ``fenced_at`` (only with ``pool_fenced``): when the pool's
+        fence took the lease. A store error raises."""
         from yeto.launch.nc.elastic import FENCE_PREFIX  # noqa: PLC0415
         from yeto.rl.engine import sampler_resume  # noqa: PLC0415
         from yeto.rl.engine.incarnation_lease import lease_key  # noqa: PLC0415
@@ -108,12 +109,36 @@ class R2DataPath:
                "lease": holder, "pool_fenced": bool(holder and holder.startswith(f"{FENCE_PREFIX}:")),
                "incarnation": newest.get("incarnation"), "leave": newest.get("leave_reason"),
                "superseded": str(newest.get("incarnation")) in [str(i) for i in lease.get("superseded") or ()]}
+        if out["pool_fenced"] and lease.get("claimed_at") is not None:
+            out["fenced_at"] = float(lease["claimed_at"])  # when the pool's fence took the lease
         detail = newest.get("detail") if isinstance(newest.get("detail"), dict) else {}
         if detail.get("not_run"):  # it did not run (engine_sampler_entry.NOT_RUN_EVENT): why, and for whom
             out.update(not_run=str(detail["not_run"]), not_run_successor=detail.get("successor"),
                        not_run_why=detail.get("why") or detail.get("end_why"),
                        not_run_ended_by=detail.get("ended_by"))
         return out
+
+    def write_leave(self, shard: str, reason: str, **detail: Any) -> dict[str, Any] | None:
+        """The leave of ``shard``'s newest sampler incarnation, written by the pool for a
+        sampler that wrote none (its machine was released before it could): ``left_at`` and
+        ``leave_reason`` in its member record, ``left_by: "pool"`` and ``detail`` in its
+        detail. None: no member record, or its leave is written already (kept as it is).
+        A store error raises."""
+        import time  # noqa: PLC0415
+
+        from yeto.rl.engine import sampler_resume  # noqa: PLC0415
+
+        records, read = self.records, sampler_resume._read_record  # noqa: SLF001
+        keys = sampler_resume._list_records(records, f"{sampler_resume.MEMBERS_DIR}/{shard}")  # noqa: SLF001
+        found = [(key, read(records, key)) for key in keys]
+        key, newest = max(((k, m) for k, m in found if m), key=lambda km: float(km[1].get("joined_at") or 0.0),
+                          default=(None, None))
+        if newest is None or newest.get("leave_reason") is not None:
+            return None
+        own = newest.get("detail") if isinstance(newest.get("detail"), dict) else {}
+        newest.update(left_at=time.time(), leave_reason=str(reason), detail={**own, "left_by": "pool", **detail})
+        sampler_resume._put_record(records, key, newest)  # noqa: SLF001
+        return newest
 
     def shard_ended(self, shard: str) -> dict[str, Any] | None:
         """Read only: whether ``shard``'s data already ended in the run's store (an end
