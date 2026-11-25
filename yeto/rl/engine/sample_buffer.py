@@ -179,6 +179,8 @@ OWNER_EVENT = "rl_shard_owner"  # a claim or a fence of a shard: shard, incarnat
 # the merger passed over shard records or found a damaged index: ``reason`` (stale_incarnation,
 # bad_record, duplicate_merged_record, unmerged_shard_gap, missing_shard_position), shard, ...
 MERGE_EVENT = "rl_buffer_merge_skipped"
+MEMBER_EVENT = "rl_member_table_epoch"  # the member table added shards: shards, epoch
+MEMBER_IGNORED_EVENT = "rl_member_table_ignored"  # a table outside the trainer's lanes: pool, shard_base
 FORMAT_MARKER = "shard-ownership"  # the merged index's format marker (module doc)
 _MARKER_NOTE = "written by yeto with shard ownership records: code older than them cannot read this buffer"
 BUFFER_DIR = "sample-buffer"
@@ -890,6 +892,18 @@ class FileSampleBuffer:
                               if merge_shards and isinstance(self.index, ObjectIndex) else None)
         self._expected_shards = (None if expected_shards is None
                                  else frozenset(_shard_name(s) for s in expected_shards))
+        # the member table (``member_table``, YETO_RL_MEMBER_TABLE=1): the expected shards grow
+        # with the shards the store control plane's pools publish; retired shards end
+        self._members: Any = None
+        self._retired_shards: set[str] = set()
+        self.member_epoch: int | None = None
+        if merge_shards and expected_shards is not None:
+            from . import member_table  # noqa: PLC0415
+
+            objects = getattr(self.index, "objects", None)
+            if objects is not None and member_table.enabled(os.environ):
+                self._members = member_table.MemberTableReader(
+                    objects, lanes=member_table.lanes_from(os.environ, expected_shards))
         self._shard_of: list[str | None] = []  # the shard of each position (merged records)
         self._shard_pos_of: list[int | None] = []  # its position in that shard
         self._shard_next: dict[str, int] = {}  # per shard: the highest merged shard position + 1
@@ -1308,10 +1322,45 @@ class FileSampleBuffer:
             return sum(seen.missing for seen in self._shard_seen.values())
 
     # ---------------------------------------------------------------- reading
+    def refresh_members(self, *, force: bool = False) -> list[str]:
+        """Add the shards the member tables published since the last read (module
+        ``member_table``) to the expected shards; the shards added. Called from
+        :meth:`refresh` (at most every ``refresh_s``): a shard can join between two reads of
+        one round; a group is whole in its shard, so a round never gets a partial one. A
+        table outside the trainer's lanes is ignored and reported once."""
+        if self._members is None:
+            return []
+        with self._lock:
+            added, retired = self._members.poll(force=force)
+            for pool, base in sorted(self._members.ignored_new.items()):
+                print(f"[sample-buffer] member table of pool {pool} (shard_base {base}) is outside this "
+                      "trainer's lanes: ignored", flush=True)
+                if self.merge_events is not None:
+                    try:
+                        self.merge_events(MEMBER_IGNORED_EVENT, pool=pool, shard_base=base)
+                    except Exception:  # noqa: BLE001 - observation only
+                        pass
+            names = {_shard_name(s) for s in added}
+            new = sorted(names - set(self._expected_shards or ()))
+            if new:
+                self._expected_shards = frozenset(set(self._expected_shards or ()) | names)
+                self._foreign_shards -= names  # seen before as foreign: merged from the start now
+                print(f"[sample-buffer] member table epoch {self._members.epoch}: consuming new shard(s) "
+                      f"{new}", flush=True)
+                if self.merge_events is not None:
+                    try:
+                        self.merge_events(MEMBER_EVENT, shards=new, epoch=self._members.epoch)
+                    except Exception:  # noqa: BLE001 - observation only
+                        pass
+            self._retired_shards |= {_shard_name(s) for s in retired}
+            self.member_epoch = self._members.epoch
+            return new
+
     def refresh(self) -> int:
         """Read the records other writers added (after merging the shards, when this
         buffer merges); returns the number of samples."""
         with self._lock:
+            self.refresh_members()  # throttled: shards the member tables added since the last read
             self._absorb(self.index.read_new())
             if self._merge:
                 self._merge_shards()
@@ -1387,7 +1436,7 @@ class FileSampleBuffer:
         # would otherwise merge a later record first, then skip the earlier one).
         merged = list(heapq.merge(*new, key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"])))
         expected = set(self._shard_readers) if self._expected_shards is None else self._expected_shards
-        if expected and self._shards_ended >= expected:
+        if expected and (self._shards_ended | self._retired_shards) >= expected:
             merged.append({"schema": SCHEMA, "end": True})
         elif expected and (settled_end := self._dispense_settled_end(expected, merged)) is not None:
             merged.append({"schema": SCHEMA, "end": True, **settled_end})
@@ -1414,7 +1463,7 @@ class FileSampleBuffer:
         if not self._dispense_armed or self._blocked:
             return None
         settled = {str(d["plan"]) for d in self._dispense_ends.values()}
-        rest = sorted(set(expected) - self._shards_ended)
+        rest = sorted(set(expected) - self._shards_ended - self._retired_shards)
         plans = {shard: set(self._shard_plans.get(shard, ())) for shard in rest}
         for record in pending:  # merged in this pass, not absorbed yet
             if record.get("shard") in plans:
@@ -1549,7 +1598,7 @@ class FileSampleBuffer:
                 self._consumer = consumer
             elif consumer != self._consumer:
                 raise SampleBufferError(f"buffer is read by {self._consumer!r}, not {consumer!r}")
-            self.refresh()
+            self.refresh()  # (a round starts: refresh() reads the member tables first)
             out, self._read = self._next_entries(limit)
             return out
 

@@ -1492,6 +1492,15 @@ class Run:
         continue) sets aside the ledger the earlier launch left on the island's volume
         (``ledger.before-<ts>``) instead of failing on it (LedgerError) after the start-up."""
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        if rollout_section(self.cfg).get("control_plane") == "store":
+            from yeto.rl.engine.member_table import MEMBER_LANES_ENV, MEMBER_TABLE_ENV  # noqa: PLC0415
+
+            flags = [f"{MEMBER_TABLE_ENV}=1"]  # the trainer follows the pools' member tables
+            if self.fleet_plan() is None and not any(a.startswith(f"{MEMBER_LANES_ENV}=") for a in argv):
+                flags.append(f"{MEMBER_LANES_ENV}=*")  # one trainer: its store prefix is its one lane
+            for flag in flags:
+                if flag not in argv:
+                    argv += ["--island-env", flag]
         if self.trainer_restart() and not any(a.startswith("--rl-ledger-set-aside-before") for a in argv):
             argv += ["--rl-ledger-set-aside-before", f"{time.time() if now is None else now:.0f}"]
         if self.continue_from_release(argv):
@@ -2513,10 +2522,23 @@ class Run:
             return self.fleet_rt().data_end_shards()
         named = self._trainer_flag("--rl-buffer-shards")
         if named is not None:
-            return [s.strip() for s in named.split(",") if s.strip()]  # as the trainer reads it
-        from yeto.rl.engine.sample_buffer import shard_names  # noqa: PLC0415
+            out = [s.strip() for s in named.split(",") if s.strip()]  # as the trainer reads it
+        else:
+            from yeto.rl.engine.sample_buffer import shard_names  # noqa: PLC0415
 
-        return list(shard_names(self._objects()))
+            out = list(shard_names(self._objects()))
+        if rollout_section(self.cfg).get("control_plane") == "store":
+            out += [s for s in self._member_table_shards() if s not in out]
+        return out
+
+    def _member_table_shards(self) -> list[str]:
+        """Store control plane: every shard the pools' member tables name (the trainer
+        consumes them past its initial list; a fenced or lost one is sealed like the others).
+        A store that does not answer raises: the seal is tried again, never done on a part."""
+        from yeto.rl.engine import member_table  # noqa: PLC0415
+
+        tables = member_table.read_tables(self._objects())
+        return sorted({s for doc in tables for s in member_table.table_shards(doc)})
 
     def seal_data_end(self) -> bool:
         """Once every pool finished, end every shard the trainer reads that did not end.

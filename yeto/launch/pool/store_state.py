@@ -117,6 +117,9 @@ class PoolControl:
     lock: StoreLock
     state: PoolStateStore
     allocator: ShardAllocator
+    # the pool's member table in the trainer's buffer store (``yeto.rl.engine.member_table.
+    # MemberTableWriter``); None: not published
+    members: Any = None
 
     def close(self) -> None:
         self.lock.release()
