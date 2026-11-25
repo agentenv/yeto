@@ -38,7 +38,9 @@ BREAKERS: tuple[Breaker, ...] = (
         aliases=(_elastic("breaker_failures", "failures_n"), _elastic("breaker_cooldown_s", "cooldown_s"),
                  _elastic("breaker_max_cooldown_s", "max_cooldown_s"),
                  _elastic("breaker_max_trips", "max_trips_n")),
-        legacy_events=("nc_elastic_breaker_open", "nc_elastic_breaker_tripped"), gauge="count", owner=_OWNER,
+        legacy_events=("nc_elastic_breaker_open", "rl_pool_breaker_open", "nc_elastic_breaker_tripped",
+                       "rl_pool_breaker_tripped"),
+        gauge="count", owner=_OWNER,
         doc="an order that fails, a ticket lost before it is granted or a node whose sampler never comes up "
             "counts a failure; each trip is a cooldown (warn), the last one halts ordering (trip)"),
     Breaker(
@@ -49,7 +51,9 @@ BREAKERS: tuple[Breaker, ...] = (
                       doc="the same cap in the National Compute cost unit; both may be set")),
         actions=("pause",), default_action="pause", default_enabled=False, enabled_by=("usd", "ucr"),
         aliases=(_elastic("max_run_spend_usd", "usd"), _elastic("max_run_spend_ucr", "ucr")),
-        depends_on=("D11",), legacy_events=("nc_elastic_order_refused",), gauge="level", owner=_OWNER,
+        depends_on=("D11",),
+        legacy_events=("nc_elastic_order_refused", "rl_pool_order_refused"),
+        gauge="level", owner=_OWNER,
         doc="refuses a new order when the spend plus one node hour passes the cap (the nodes up keep running)"),
     Breaker(
         name="pool.node_cap", layer="pool", kind="breaker",
@@ -59,13 +63,13 @@ BREAKERS: tuple[Breaker, ...] = (
                       doc="orders over the run (null: no cap)")),
         actions=("pause",), default_action="pause", can_disable=False,
         aliases=(_elastic("max_nodes", "max_nodes_n"), _elastic("max_orders", "max_orders_n")),
-        legacy_events=("nc_elastic_order_refused",), gauge="count", owner=_OWNER,
+        legacy_events=("nc_elastic_order_refused", "rl_pool_order_refused"), gauge="count", owner=_OWNER,
         doc="refuses a new order past the node or order cap"),
     Breaker(
         name="pool.crash_loop", layer="pool", kind="breaker",
         actions=("replace", "halt"), default_action="replace", can_disable=False,
         aliases=(_elastic("crash_loop_before_ready", "action"),),
-        legacy_events=("nc_elastic_sampler_crash_loop",), gauge="count", owner=_OWNER,
+        legacy_events=("nc_elastic_sampler_crash_loop", "rl_pool_sampler_crash_loop"), gauge="count", owner=_OWNER,
         doc="a sampler that crashed past pool.sampler_restarts on a reachable node; one that never joined: "
             "replace the node, or halt the pool like a configuration error (nothing is ordered until "
             "pool-retry / pool-stop; a node that joined before is always replaced)"),
@@ -78,7 +82,9 @@ BREAKERS: tuple[Breaker, ...] = (
                       doc="healthy time after the join that starts a fresh count (null: never)")),
         actions=("replace",), default_action="replace", can_disable=False,
         aliases=(_elastic("max_sampler_restarts", "max_n"), _elastic("sampler_restart_reset_s", "reset_s")),
-        depends_on=("D10",), legacy_events=("nc_elastic_sampler_restart",), gauge="count", owner=_OWNER),
+        depends_on=("D10",),
+        legacy_events=("nc_elastic_sampler_restart", "rl_pool_sampler_restart"),
+        gauge="count", owner=_OWNER),
     Breaker(
         name="pool.engine_stall", layer="pool", kind="breaker",
         params=(Param("limit_s", float, _E.engine_stall_s, unit="s", lo=0,
@@ -88,7 +94,7 @@ BREAKERS: tuple[Breaker, ...] = (
         actions=("replace",), default_action="replace",
         aliases=(_elastic("engine_stall_s", "limit_s", off_values=(None,)),
                  _elastic("max_stall_restart_failures", "max_restart_failures_n")),
-        legacy_events=("nc_elastic_engine_stalled",), gauge="elapsed", owner=_OWNER,
+        legacy_events=("nc_elastic_engine_stalled", "rl_pool_engine_stalled"), gauge="elapsed", owner=_OWNER,
         doc="fences and restarts a stalled engine in place, then retires the node"),
     Breaker(
         name="pool.sampler_stall", layer="pool", kind="breaker",
@@ -111,7 +117,7 @@ BREAKERS: tuple[Breaker, ...] = (
                       doc="failed node probes in a row before a node counts as lost"),),
         actions=("replace",), default_action="replace", can_disable=False,
         aliases=(_elastic("unreachable_grace_s", "grace_s"),),
-        legacy_events=("nc_elastic_lost",), gauge="elapsed", owner=_OWNER),
+        legacy_events=("nc_elastic_lost", "rl_pool_lost"), gauge="elapsed", owner=_OWNER),
     Breaker(
         name="pool.fence_hold", layer="pool", kind="breaker",
         params=(Param("limit_s", float, _E.fence_max_hold_s, unit="s", lo=0,
@@ -124,7 +130,7 @@ BREAKERS: tuple[Breaker, ...] = (
                       doc="past lease_until before a ticket still active is released (0 is a real value)"),),
         actions=("replace",), default_action="replace", can_disable=False,
         aliases=(_elastic("overdue_grace_s", "grace_s"),),
-        legacy_events=("nc_elastic_lease_overdue",), gauge="elapsed", owner=_OWNER,
+        legacy_events=("nc_elastic_lease_overdue", "rl_pool_lease_overdue"), gauge="elapsed", owner=_OWNER,
         doc="a lease-bounded provider only; deletes this pool's own ticket"),
     Breaker(
         name="pool.control_plane_alert", layer="pool", kind="alert",
@@ -139,7 +145,7 @@ BREAKERS: tuple[Breaker, ...] = (
                 Param("limit_s", float, _E.fence_alert_s, unit="s", lo=0)),
         actions=("warn",), default_action="warn", can_disable=False,
         aliases=(_elastic("fence_alert_failures", "failures_n"), _elastic("fence_alert_s", "limit_s")),
-        legacy_events=("nc_elastic_fence_stuck",), gauge="count", owner=_OWNER,
+        legacy_events=("nc_elastic_fence_stuck", "rl_pool_fence_stuck"), gauge="count", owner=_OWNER,
         doc="a shard fence that keeps failing (it is retried every tick)"),
     Breaker(
         name="pool.lease_end", layer="pool", kind="breaker",
@@ -150,6 +156,8 @@ BREAKERS: tuple[Breaker, ...] = (
         actions=("replace",), default_action="replace", can_disable=False,
         aliases=(Alias("pool_config", "replace_lead_s", "replace_lead_s"),
                  Alias("pool_config", "end_margin_s", "end_margin_s")),
-        legacy_events=("nc_elastic_lease_end_without_ready_replacement",), gauge="elapsed", owner=_OWNER,
+        legacy_events=("nc_elastic_lease_end_without_ready_replacement",
+                       "rl_pool_lease_end_without_ready_replacement"),
+        gauge="elapsed", owner=_OWNER,
         doc="lease-bounded providers only (National Compute); a provider without leases never drains for it"),
 )

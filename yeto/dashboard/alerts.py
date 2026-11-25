@@ -211,6 +211,14 @@ def blocked_pools(reducer) -> list[dict]:
             for name, p in sorted(state.items()) if p]
 
 
+def degraded_pools(cost: dict) -> list[dict]:
+    """Sampler pools the last ``yeto run up`` left out because their preflight failed and they
+    are not ``required`` (``state.json`` ``degraded_pools``): one warning each, with the reason."""
+    degraded = ((cost.get("run_up") or {}).get("degraded_pools") or {}) if isinstance(cost, dict) else {}
+    return [_alert(1, "pool_degraded", f"pool {name} degraded", f"left out of the run at start: {why}")
+            for name, why in sorted(degraded.items())]
+
+
 def budget(cost: dict, th: dict) -> list[dict]:
     pct = cost.get("budget_pct")
     if pct is None:
@@ -521,7 +529,7 @@ def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list
     th = reducer.thresholds
     alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
-              + budget(cost, th) + blocked_pools(reducer) + compaction(reducer, th) + trial_failures(reducer, th)
+              + budget(cost, th) + blocked_pools(reducer) + degraded_pools(cost) + compaction(reducer, th) + trial_failures(reducer, th)
               + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)
               + _with_release(reducer, th, now) + breakers(reducer, now) + guard_drops(reducer, th)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown")

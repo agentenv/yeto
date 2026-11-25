@@ -96,6 +96,9 @@ class PoolSlot:
     # pool is detached (nothing more is ordered, started or fenced), and its state save and
     # store lock release run when that tick returns, so whatever it did is recorded
     close_pending: str | None = None
+    # the end of a removal (the desired state's reconcile): run by the pool's own tick, in
+    # place of a tick, so a provider call that hangs there holds this pool only
+    pending_finish: Callable[[], Any] | None = None
 
 
 class RolloutController:
@@ -105,7 +108,7 @@ class RolloutController:
                  drain_wait_s: float = 10.0, sleep: Callable[[float], None] = time.sleep,
                  stall_s: float = DEFAULT_STALL_S, blocked_s: float = DEFAULT_BLOCKED_S,
                  restart_backoff_s: float = 5.0, detach_flag: str | os.PathLike[str] | None = None,
-                 pool_workers: bool = False):
+                 pool_workers: bool = False, reconciler: Any = None):
         self.slots = {name: p if isinstance(p, PoolSlot) else PoolSlot(p) for name, p in pools.items()}
         self.stop_flag = None if stop_flag is None else Path(stop_flag)
         self.fleet_log, self.budget, self.interval, self.log = fleet_log, budget, float(interval), log
@@ -116,6 +119,9 @@ class RolloutController:
         # True: the supervisor and one worker per pool (module doc); False (the default): one
         # thread ticks every pool in turn, as before
         self.pool_workers = bool(pool_workers)
+        # the fleet's desired state (``fleet_reconcile.FleetReconciler``): pools added, removed,
+        # rescaled and reconfigured while the run trains; None: the pools given here only
+        self.reconciler = reconciler
         self.detached: str | None = None
         self.stopped: str | None = None
         self.error: BaseException | None = None
@@ -124,13 +130,37 @@ class RolloutController:
         self._thread: Any = None
         self._lock = threading.RLock()  # one tick or one stop at a time
         for name, slot in self.slots.items():
-            pool = slot.pool
-            if budget is not None and pool.gate is None:
-                pool.gate = budget
-            if pool.events is not None:
-                pool.events.sinks.append(self._sink(name))
-            if getattr(pool, "control", None) is not None:
-                pool.async_release = True  # the store control plane: a tick only decides
+            self._attach(name, slot)
+
+    def _attach(self, name: str, slot: PoolSlot) -> None:
+        pool = slot.pool
+        if self.budget is not None and pool.gate is None:
+            pool.gate = self.budget
+        if pool.events is not None:
+            pool.events.sinks.append(self._sink(name))
+        if getattr(pool, "control", None) is not None:
+            pool.async_release = True  # the store control plane: a tick only decides
+
+    def add_slot(self, name: str, slot: PoolSlot | IslandPool) -> PoolSlot:
+        """A pool added while the controller runs (the desired state): the supervisor starts its
+        worker at its next pass; :meth:`tick` ticks it from now on."""
+        slot = slot if isinstance(slot, PoolSlot) else PoolSlot(slot)
+        self._attach(name, slot)
+        self.slots = {**self.slots, name: slot}  # a new dict: a pass iterating the old one is not disturbed
+        self.wake()
+        return slot
+
+    def drop_slot(self, name: str) -> None:
+        """A pool removed (stopped, its slot closed): no longer driven or listed."""
+        self.slots = {k: v for k, v in self.slots.items() if k != name}
+
+    def note(self, name: str, event: str, **detail: Any) -> None:
+        """An event about pool ``name`` that the pool itself did not write (the reconcile)."""
+        slot = self.slots.get(name)
+        if slot is not None and slot.pool.events is not None:
+            slot.pool.events(event, **detail)
+        elif self.fleet_log is not None:
+            self.fleet_log.event("rollout_event", name, pool_event=event, **detail)
 
     @property
     def pools(self) -> dict[str, IslandPool]:
@@ -155,7 +185,9 @@ class RolloutController:
                 return
             if self._flags():
                 return
-            for name, slot in self.slots.items():
+            if self.reconciler is not None:
+                self.reconciler.step(self)
+            for name, slot in list(self.slots.items()):
                 self._tick_slot(name, slot)
             self.ticks += 1
 
@@ -176,6 +208,13 @@ class RolloutController:
             if self.stopped or self.detached or pool.stopped or pool.detached:
                 if pool.detached and not slot.closed:
                     self._close_slot(name, slot)  # its store lock went to another controller
+                return
+            finish, slot.pending_finish = slot.pending_finish, None
+            if finish is not None:
+                try:
+                    finish()
+                except Exception as error:  # noqa: BLE001 - the reconcile asks again at its next pass
+                    self.log(f"rollout: pool {name}: the end of its removal failed: {error!r}")
                 return
             slot.tick_began = time.monotonic()
             try:
@@ -249,10 +288,15 @@ class RolloutController:
             self._serial_loop()
             return
         try:
-            while not self.stopped and not self.detached and not self.all_stopped():
+            while not self.stopped and not self.detached and (self.reconciler is not None or not self.all_stopped()):
                 with self._lock:
                     if not self.stopped and not self.detached and self._flags():
                         break
+                    if self.reconciler is not None:
+                        try:
+                            self.reconciler.step(self)
+                        except Exception as error:  # noqa: BLE001 - the pools tick on
+                            self.log(f"rollout: desired state reconcile failed: {error!r}")
                 self.supervise()
                 if self._wake.wait(min(1.0, self.interval)):
                     self._wake.clear()
@@ -289,7 +333,7 @@ class RolloutController:
         """One supervisor pass: start or restart the worker of every driven pool and report
         a pool whose tick has run longer than ``blocked_s``."""
         now = time.monotonic() if now is None else now
-        for name, slot in self.slots.items():
+        for name, slot in list(self.slots.items()):
             pool = slot.pool
             if self.stopped or self.detached or pool.stopped or pool.detached:
                 continue
@@ -729,6 +773,8 @@ def _store_pool(cfg: dict[str, Any], pc: Any, ops: Any, objects: Any, name: str,
             held.close()
         raise
     pool.state_path = state  # the local mirror (status, run up's readers)
+    if pool.events is not None:
+        pool.events.dual_names = True  # the neutral event names (rl_pool_*) next to the legacy ones
     try:
         pool.end_unused_shards()  # numbers issued before a crash / detach that no order took
     except BaseException as error:  # noqa: BLE001 - a lost lock detaches the pool at its first tick anyway

@@ -472,6 +472,26 @@ class Budget:
 
 # -- events -------------------------------------------------------------------
 
+LEGACY_PREFIX = "nc_elastic_"  # the pool events' old name prefix (the default: dashboards and alerts read it)
+NEUTRAL_PREFIX = "rl_pool_"  # the provider-neutral name (``rl_pool_<event>``)
+NEUTRAL_FIELD = "neutral_event"  # dual write: the neutral name next to the legacy ``event``
+
+
+def neutral_name(event: str) -> str:
+    """``nc_elastic_<x>`` or ``rl_pool_<x>`` -> ``rl_pool_<x>`` (any other name as it is)."""
+    if event.startswith(LEGACY_PREFIX):
+        return NEUTRAL_PREFIX + event[len(LEGACY_PREFIX):]
+    return event
+
+
+def legacy_name(event: str) -> str:
+    """``rl_pool_<x>`` or ``nc_elastic_<x>`` -> ``nc_elastic_<x>``: what the readers of the old
+    names match on (dashboards, alerts), whichever name a record carries."""
+    if event.startswith(NEUTRAL_PREFIX):
+        return LEGACY_PREFIX + event[len(NEUTRAL_PREFIX):]
+    return event
+
+
 @dataclass
 class EventLog:
     """``nc_elastic_*`` events: one JSON line each in ``path`` (None: not written),
@@ -483,13 +503,18 @@ class EventLog:
     hook: Callable[[dict[str, Any]], None] | None = None
     clock: Callable[[], float] = time.time
     events: list[dict[str, Any]] = field(default_factory=list)
-    prefix: str = "nc_elastic_"  # event name prefix (kept: dashboards and alerts read these names)
+    prefix: str = LEGACY_PREFIX  # event name prefix (kept: dashboards and alerts read these names)
+    # the compat period of the neutral names: every record also carries ``neutral_event``
+    # (``rl_pool_<event>``). Off (the default): records as before; the store control plane turns it on
+    dual_names: bool = False
     # extra sinks (RolloutController forwards events to the run's fleet.jsonl); never raise into the pool
     sinks: list[Callable[[dict[str, Any]], None]] = field(default_factory=list)
 
     def __call__(self, event: str, **detail: Any) -> dict[str, Any]:
         doc = {"t": self.clock(), "event": f"{self.prefix}{event}", **({"run": self.run} if self.run else {}),
                **detail}
+        if self.dual_names:
+            doc[NEUTRAL_FIELD] = neutral_name(doc["event"])
         return self._write(doc, detail)
 
     def record(self, doc: Mapping[str, Any]) -> dict[str, Any]:
