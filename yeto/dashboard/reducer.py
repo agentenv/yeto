@@ -1623,7 +1623,10 @@ class Reducer:
         trainers_done = role == "sampler" and self._trainers_done() and (
             (self.async_.last_write_ts(isl["id"]) or 0) <= (self._trainers_end_ts() or float("inf"))
             + SAMPLER_AFTER_TRAINERS_S)
-        if (stopped or rec_stopped) and not isl["finalized"] and left is None:
+        # an island we stopped stays "stopped" whatever it wrote on its way out (island_leave
+        # STOPPED, RECOVERY_REQUIRED); only its fleet record (removed / failed / abandoned) is above it
+        rec_left = left is not None and left.get("source") == "trainer island record"
+        if (stopped or rec_stopped) and not isl["finalized"] and not rec_left:
             status = "stopped"
             starting = False
         elif isl["recovery_required"] and not _recovered_after(isl):

@@ -48,6 +48,7 @@ from .topology import DRIVER_PHASES, RATE_S, WINDOW_S, _engine, arch_of
 # tapes/syncer-shard<i>/<incarnation>/ (source "store:syncer-shard<i>/<incarnation>")
 SHARD_TAPE = re.compile(r"\.shard(\d+)\.jsonl$|(?:^|[:/])syncer-shard(\d+)/")
 VECTOR_KEYS = ("rl/fragment_versions", "sync/fragment_versions")
+ROUNDS_STALE_S = 1800.0  # no trainer up and none wrote for this long: its open rounds are stale
 ROUND_OPEN_WARN_S = 120.0  # a round open longer than max(this, 3 x median round wall time): waiting for quorum
 STUCK_MIN_S = 240.0  # a fragment not merged for max(this, 3 x the fragment period): not advancing
 IDLE_MIN_S = 180.0  # no merge for max(this, 4 x the recent merge interval): syncer idle
@@ -466,11 +467,12 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         rounds = [r for r in rounds if r["pushed"]]
     if inferred is not None:  # no syncer tape: a PUSH of a step an island already applied was merged
         rounds = [r for r in rounds if r["frag"] is None or r["frag"] >= len(inferred) or r["step"] > inferred[r["frag"]]]
-    if done or not live:
-        # the run ended (or no trainer is up): a round still open is not in flight; its clock stops
-        # at the trainers' last event
-        ends = [(reducer.islands.get(i) or {}).get("last_event_ts") for i in trainer_ids]
-        end = max((t for t in ends if t is not None), default=now)
+    ends = [(reducer.islands.get(i) or {}).get("last_event_ts") for i in trainer_ids]
+    end = max((t for t in ends if t is not None), default=now)
+    # the run ended, or no trainer has written for ROUNDS_STALE_S (a restart of every island
+    # shorter than that keeps its rounds in flight and their quorum warning): a round still
+    # open is not in flight; its clock stops at the trainers' last event
+    if done or (not live and now - end > max(ROUNDS_STALE_S, sy["open_limit_s"])):
         for r in rounds:
             r.update(ended="run ended" if done else "no trainer up", ended_at=end,
                      age_s=max(0.0, min(end, now) - r["since"]), blocked=False)

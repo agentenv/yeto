@@ -14,6 +14,7 @@ from test_dashboard_diloco import _smoke, diloco, lines, load
 from test_dashboard_fleet_islands import T0, fleet_reducer, plan_doc
 
 from yeto.dashboard import cost, fleet_islands
+from yeto.dashboard.reducer import Reducer
 from yeto.dashboard.topology_diloco import _fleet_part
 from yeto.rl.engine.object_store import DirectoryObjectStore
 
@@ -210,13 +211,16 @@ def test_without_the_syncer_tape_a_push_an_island_applied_is_not_open():
     assert rd["step"] == 25 and rd["ended"] == "run ended"
 
 
-def _cost(tmp_path: Path, *, up: dict | None = None, pools: dict | None = None, spend: dict | None = None):
+def _cost(tmp_path: Path, *, up: dict | None = None, pools: dict | None = None, spend: dict | None = None,
+          later: float = 30.0, extra: tuple = ()):
     root = _store(tmp_path)
     for name, members in (pools or {}).items():
         (root / f"fleet/pools/{name}").mkdir(parents=True, exist_ok=True)
         (root / f"fleet/pools/{name}/state.json").write_text(json.dumps({"members": members}))
     r = fleet_reducer()
-    now = r.max_ts + 30
+    for rec in extra:
+        r.feed(rec)
+    now = r.max_ts + later
     if up is not None:
         (tmp_path / "up.json").write_text(json.dumps(up))
         r.up_state = str(tmp_path / "up.json")
@@ -317,3 +321,112 @@ def test_an_added_islands_lane_tapes_are_read(tmp_path):
 
 def test_plan_doc_is_unchanged_by_the_fixture():
     assert [i["name"] for i in plan_doc()["islands"]]  # the shared fleet fixture still loads
+
+
+# -- REV #838: a single-trainer run we stopped stays "stopped" ------------------------------
+def _stopped_single_trainer(tmp_path: Path, *, recovery: bool):
+    """One trainer, no fleet (test_dashboard_operator_stop's run): we stop it (STOP_ISSUED),
+    it writes RECOVERY_REQUIRED (optionally) and its island_leave STOPPED on the way out."""
+    from test_dashboard_operator_stop import STOP_TS, _run
+
+    from yeto.dashboard.sources import load_all
+
+    run, tape = _run(tmp_path, STOP_TS + 4)
+    rows = [json.loads(x) for x in (tape / "rl-island-0.jsonl").read_text().splitlines()]
+    if not recovery:
+        rows = [x for x in rows if x.get("event") != "rl_reconfiguration"]
+    rows.append({"event": "island_leave", "island_id": 0, "time_unix": STOP_TS + 8, "reason_name": "STOPPED"})
+    (tape / "rl-island-0.jsonl").write_text("".join(json.dumps(x) + "\n" for x in rows))
+    r = Reducer()
+    load_all(r, [str(tape)])
+    return r.overview(now=STOP_TS + 600)
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_a_trainer_we_stopped_that_wrote_its_leave_stays_stopped(tmp_path, recovery):
+    ov = _stopped_single_trainer(tmp_path, recovery=recovery)
+    card = ov["islands"][0]
+    assert card["status"] == "stopped" and card["stopped_by_us"] and card["island_now"] is None
+    assert card["left"] is not None  # its island_leave is read, and does not override our stop
+    assert not [a for a in ov["alerts"] if a["rule"] in ("recovery_required", "heartbeat")]
+    assert ov["global_status"]["text"].startswith("stopped")
+
+
+def test_a_fleet_record_is_above_our_stop(tmp_path):
+    """A per-island fleet's trainer we stopped whose record says abandoned reads lost (the
+    record), one whose record says stopped reads stopped."""
+    r = fleet_reducer()
+    r.load_fleet_state(_state(tmp_path))
+    now = r.max_ts + 30
+    for iid in ("0", "1"):
+        r.islands[iid]["stop_ts"] = r.max_ts
+    r.operator_stop = lambda: {"time_unix": r.max_ts, "cause": "gate"}
+    r.stopped_by_us = lambda isl: True
+    cards = {c["id"]: c for c in r.overview(now=now)["islands"]}
+    assert cards["0"]["status"] == "lost" and cards["0"]["left"]["source"] == "trainer island record"
+    assert cards["1"]["status"] == "stopped"
+
+
+def test_a_given_up_island_whose_bill_closed_says_so():
+    rec = {"launch_state": "abandoned", "life_state": "abandoned", "relaunches": 2, "gpu": AWS}
+    assert "still billed" in fleet_islands.island_state(rec)["detail"]
+    down = fleet_islands.island_state({**rec, "down_at": T0, "closed_at": T0})
+    assert down["state"] == "abandoned" and "still billed" not in down["detail"] and "run went down" in down["detail"]
+    assert "its bill closed" in fleet_islands.island_state({**rec, "closed_at": T0})["detail"]
+    assert fleet_islands.island_state({**rec, "launch_state": "removed"})["state"] == "removed"
+
+
+# -- REV #838: mutations the first round did not catch ----------------------------------------
+def test_a_never_granted_machine_with_a_tape_keeps_its_tape_hours(tmp_path):
+    """The pool state says never granted (run.budget bills 0): the sampler's tape hours stand,
+    the grant rule never lowers them."""
+    base, _, _ = _cost(tmp_path)
+    tape_h = base["qa-a-i1-0"]["hours"]
+    rows, _, _ = _cost(tmp_path / "b", pools={"i1-a": [
+        {"shard": "qa-a-i1-0", "state": "gone", "granted": None, "charged_to": None}]})
+    assert tape_h > 0 and rows["qa-a-i1-0"]["hours"] == pytest.approx(tape_h)
+    assert "sampler tapes" in rows["qa-a-i1-0"]["billed_from"]
+
+
+def test_the_syncer_runs_while_the_up_is_open_after_the_trainers_stopped(tmp_path):
+    rows, _, now = _cost(tmp_path, up={"trainer_t0": T0, "ups": [{"start": T0, "end": None, "pid": 1}]},
+                         later=7200.0, extra=tuple({"event": "island_stop", "island_id": k, "time_unix": T0 + 900,
+                                                    "island": f"fleet-qa-l{k}-modal"} for k in (0, 1)))
+    assert not any(r.get("running") for r in rows.values() if r.get("kind") == "trainer")
+    assert rows["syncer"]["running"]
+
+
+def test_a_relaunching_or_moving_island_reads_starting(tmp_path):
+    r = fleet_reducer()
+    st = _state(tmp_path)
+    st["trainers"][1]["record"] = {**st["trainers"][1]["record"], "launch_state": "running", "life_state": "recovering",
+                                   "relaunches": 1}
+    st["trainers"][1]["now"] = fleet_islands.island_state(st["trainers"][1]["record"], st["trainers"][1])
+    st["trainers"][0]["now"] = {"state": "moving", "reason": f"moving to {AWS}", "detail": None}
+    r.load_fleet_state(st)
+    cards = {c["id"]: c for c in r.overview(now=r.max_ts + 3600)["islands"]}
+    assert cards["1"]["status"] == "starting" and cards["1"]["starting"]
+    assert cards["0"]["status"] == "starting" and cards["0"]["island_now"]["state"] == "moving"
+
+
+def test_a_restart_of_every_island_keeps_its_open_rounds_until_they_go_stale():
+    """No trainer up, but the last trainer event is less than ROUNDS_STALE_S old (every island
+    restarting): the open rounds stay in flight, their clock runs and their quorum warning
+    stands; past it they are stale."""
+    from test_dashboard_diloco import _replayed
+
+    from yeto.dashboard.topology_diloco import ROUNDS_STALE_S
+
+    full = load("run-b")
+    ts = [x for x in full.islands.values() if x.get("first_ts") is not None]
+    mid = (min(x["first_ts"] for x in ts) + max(x["last_event_ts"] for x in ts)) / 2
+    r = _replayed("run-b", mid)
+    end = max(x["last_event_ts"] for x in r.islands.values() if x.get("last_event_ts") is not None)
+    d = diloco(r, now=end + ROUNDS_STALE_S / 2)
+    assert d["roster"] == 0 and not d["done"] and d["rounds"]
+    now = end + ROUNDS_STALE_S / 2
+    assert not any(x.get("ended") for x in d["rounds"]) and d["shards"][0]["state"] != "stale"
+    assert all(x["age_s"] == pytest.approx(now - x["since"]) for x in d["rounds"])  # its clock runs
+    stale = diloco(r, now=end + ROUNDS_STALE_S + 60)
+    assert stale["rounds"] and all(x["ended"] == "no trainer up" for x in stale["rounds"])
+    assert stale["shards"][0]["state"] == "stale"

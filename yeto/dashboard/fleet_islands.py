@@ -334,12 +334,17 @@ def island_state(rec: dict | None, desired: dict | None = None) -> dict | None:
         or "removed from the fleet" in str((rec.get("stop") or {}).get("reason") or "")
     if life == "failed" or ls == "failed":
         return {"state": "failed", "reason": dec.get("cause") or "failed", "detail": rec.get("exit") or why}
-    if life == "abandoned" or ls == "abandoned":
+    if (life == "abandoned" or ls == "abandoned") and ls != "removed":
+        # a given-up island stays given up after `yeto run down` (mark_down closes its bill,
+        # launch.json keeps the state); removed from the fleet, it reads removed
         ex = rec.get("last_exit") or {}
+        billed = ("its bill closed when the run went down" if rec.get("down_at") is not None
+                  else "its bill closed" if rec.get("closed_at") is not None
+                  else "still billed until removed or confirmed down")
         return {"state": "abandoned", "reason": f"given up after {rec.get('relaunches') or 0} relaunch(es)",
                 "detail": " · ".join(x for x in (f"on {rec['gpu']}" if rec.get("gpu") else None,
                                                   f"last exit {ex.get('code')}: {ex.get('detail')}" if ex else None,
-                                                  "still billed until removed or confirmed down") if x)}
+                                                  billed) if x)}
     if removed and life in ("done", "draining", None) or ls == "removed":
         return {"state": "removed", "reason": "removed from the fleet", "detail": rec.get("exit") or why}
     if life == "done" or ls in ("done", "down"):
