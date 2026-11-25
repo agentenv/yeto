@@ -1047,8 +1047,11 @@ def role_stream_config(section: Mapping[str, Any], *, syncer: str, learner_id: i
 
     async_rounds = bool(section["async_rounds"])
     addresses = syncer_addresses(syncer)
-    generations = [0] * int(section["num_learners"])
-    generations[learner_id] = int(section.get("learner_generation", 0))
+    from yeto.rl.engine.full_parameter_stream import roster_generations
+
+    generations = roster_generations(learner_id, int(section["num_learners"]),
+                                     int(section.get("learner_generation", 0)),
+                                     section.get("max_learners"))
     pool = section.get("island_pool") or {}
     return RoleStreamConfig(
         algorithm="grpo", role="actor",
@@ -1426,8 +1429,11 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
     if not _sha256_hex(args.parameter_layout_sha256) or not _sha256_hex(args.syncer_profile_sha256):
         raise ValueError("a synced full-parameter island needs --parameter-layout-sha256 and "
                          "--syncer-profile-sha256 (64 lowercase hex)")
-    if not 0 <= args.learner_id < args.num_learners:
-        raise ValueError("--learner-id must be below --num-learners")
+    max_learners = getattr(args, "sync_max_learners", None)
+    if max_learners is not None and sync != "pool":
+        raise ValueError("--sync-max-learners needs an island pool (--rl-island-pool)")
+    if not 0 <= args.learner_id < (args.num_learners if max_learners is None else max_learners):
+        raise ValueError("--learner-id must be below --num-learners (or --sync-max-learners)")
     refused = [flag for flag, on in (
         ("--sweep-overlap", getattr(args, "sweep_overlap", False)),
         ("--sweep-expert-token-weights", getattr(args, "sweep_expert_token_weights", False)),
@@ -1446,6 +1452,7 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         "async_rounds": async_rounds,
         "num_learners": int(args.num_learners),
         "learner_generation": int(args.learner_generation),
+        **({} if max_learners is None else {"max_learners": int(max_learners)}),
         "fragments": int(args.fragments),
         "total_fragment_steps": int(args.total_fragment_steps),
         "parameter_layout_sha256": args.parameter_layout_sha256,

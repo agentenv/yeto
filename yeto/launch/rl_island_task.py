@@ -231,6 +231,9 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     sweep = (f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
              f" --num-learners {num_learners}"
              f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
+    if getattr(args, "rl_sync_max_learners", None) is not None:  # unset adds nothing
+        # an island pool admitting ids past the launch: the session contract binds 0..N-1
+        sweep += f" --sync-max-learners {int(args.rl_sync_max_learners)}"
     if rl_full_parameter_async(args):
         sweep += " --full-parameter-rounds async"
     if getattr(args, "rl_sync_expert_token_weights", False):

@@ -978,10 +978,15 @@ _SCHEDULING = (
                 help="membership: island lease on the syncer (--island-lease-s); an island "
                 "silent this long is removed and re-JOINs; islands heartbeat every S/3. "
                 "Default 150 in a pool"),
+    cli_flag("--rl-fleet-trainer-shape", default=None, metavar="TP[xPP]",
+             help="full-parameter: the trainer shape of the running fleet's islands, for a "
+             "launch that adds or migrates one island; the launch (dry-run included) computes "
+             "both layouts with the --fragments preflight and refuses an island whose layout "
+             "differs (default: not checked)"),
     cli_flag("--rl-sync-max-learners", type=int, default=None, metavar="N",
              help="membership: the syncer admits island ids 0..N-1, so islands may join "
-             "after the launch (default: the launched islands; not with the "
-             "full-parameter preset, whose session binds the roster)"),
+             "after the launch (default: the launched islands; with the full-parameter "
+             "preset the islands bind the roster 0..N-1 into their session contract)"),
     cli_flag("--rl-sync-inline-resend", action="store_true", default=False,
              help="DEPRECATED (prints a warning when set): the syncer sends a rejoin catch-up "
              "and a recovery replay from its scheduler, waiting on the island's link for each "

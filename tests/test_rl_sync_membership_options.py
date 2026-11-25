@@ -99,12 +99,42 @@ def test_quorum_theta_replaces_the_count_quorum(preset):
         _plan(preset + ("--rl-sync-quorum-theta", "0.75") + QUORUM)
 
 
-@pytest.mark.parametrize("preset", [(), DECOUPLED], ids=["strict-avg", "decoupled"])
+@PRESETS
 def test_max_learners_reaches_the_syncer(preset):
-    _, plan = _plan(preset + QUORUM + ("--rl-sync-max-learners", "5"))
+    # full-parameter past the launch: the capacity quorum θ = 1.0 by default (below)
+    quorum = ("--rl-sync-quorum-theta", "1.0") if preset == FULL_ASYNC else QUORUM
+    _, baseline = _plan(preset + quorum + ("--rl-sync-island-lease-s", "150"))
+    _, plan = _plan(preset + (() if preset == FULL_ASYNC else QUORUM) + ("--rl-sync-max-learners", "5"))
     assert " --island-lease-s 150.0 --max-learners 5 --syncer-epoch 0" in _syncer(plan)
+    assert _syncer(plan).replace(" --max-learners 5", "", 1) == _syncer(baseline)
+    # full-parameter islands bind the roster 0..4 into their session contract;
+    # the other presets' islands carry no roster, so their commands stay the same
+    roster = " --sync-max-learners 5" if preset == FULL_ASYNC else ""
+    for pooled, fixed in zip(_islands(plan), _islands(baseline), strict=True):
+        assert roster in pooled and pooled.replace(roster, "", 1) == fixed
     with pytest.raises(ValueError, match="at least the 3 islands"):
         _plan(preset + QUORUM + ("--rl-sync-max-learners", "2"))
+
+
+def test_a_full_parameter_pool_past_the_launch_follows_the_pool(capsys):
+    args, plan = _plan(FULL_ASYNC + ("--rl-sync-max-learners", "5"))
+    assert args.rl_sync_quorum_theta == 1.0 and args.quorum == 1
+    assert " --quorum 1 " in _syncer(plan) and " --quorum-theta 1.0 " in _syncer(plan)
+    assert "--rl-sync-quorum-theta 1.0 by default" in capsys.readouterr().err
+    _, plan = _plan(FULL_ASYNC + ("--rl-sync-quorum-theta", "0.5", "--rl-sync-max-learners", "5"))
+    assert " --quorum-theta 0.5 " in _syncer(plan)  # an explicit θ is kept
+    with pytest.raises(ValueError, match="counts islands and stays fixed; give --rl-sync-quorum-theta"):
+        _plan(FULL_ASYNC + QUORUM + ("--rl-sync-max-learners", "5"))
+    # max learners equal to the launched islands: nobody joins past them, the count quorum stays
+    _, plan = _plan(FULL_ASYNC + QUORUM + ("--rl-sync-max-learners", "3"))
+    assert " --quorum 2 " in _syncer(plan) and "--quorum-theta" not in _syncer(plan)
+
+
+@pytest.mark.parametrize("preset", [(), DECOUPLED], ids=["strict-avg", "decoupled"])
+def test_other_presets_keep_their_count_quorum_with_a_note(preset, capsys):
+    _, plan = _plan(preset + QUORUM + ("--rl-sync-max-learners", "5"))
+    assert " --quorum 2 " in _syncer(plan) and "--quorum-theta" not in _syncer(plan)
+    assert "--rl-sync-quorum-theta F needs F of the islands the round expects" in capsys.readouterr().err
 
 
 @PRESETS
@@ -132,12 +162,10 @@ def test_pool_island_configs_carry_the_lease_and_epoch():
     [
         (FULL_PARAMETER + ("--rl-sync-island-lease-s", "30"),
          "membership options need --rl-sync-full-parameter-rounds async"),
-        (FULL_ASYNC + QUORUM + ("--rl-sync-max-learners", "4"),
-         "--rl-sync-max-learners does not apply to full-parameter"),
         (("--rl-sync-quorum-theta", "1.5"), r"in \(0, 1\]"),
         (QUORUM + ("--rl-sync-q-min", "0"), "q-min must be >= 1"),
     ],
-    ids=["full-parameter-sweep", "full-parameter-max-learners", "theta-range", "q-min"],
+    ids=["full-parameter-sweep", "theta-range", "q-min"],
 )
 def test_refusals(extra, message):
     from yeto.launcher import _prepare_rl_args, syncer_command
@@ -215,3 +243,24 @@ def test_stale_lag_options_fail_while_the_rl_args_are_prepared():
     args.controller = "local"
     with pytest.raises(ValueError, match="go together"):
         _prepare_rl_args(args)  # before any syncer command is rendered
+
+
+def test_the_async_mode_quorum_gives_way_to_the_pool_theta():
+    """The async sync mode (the default) derives a count quorum of 1; a full-parameter
+    pool past the launch takes θ = 1.0 instead of refusing that derived quorum."""
+    from yeto.launcher import _prepare_rl_args, dry_run_plan
+
+    def plan(extra):
+        args = _provenance_launcher_args("ports", FULL_ASYNC + tuple(extra), gpu=TWO_ISLANDS)
+        args.controller = "local"
+        _prepare_rl_args(args)
+        return args, dry_run_plan(args)
+
+    args, rendered = plan(("--rl-sync-max-learners", "4"))
+    assert args.rl_sync_mode_effective == "async" and args.rl_sync_quorum_theta == 1.0
+    assert " --quorum 1 " in _syncer(rendered) and " --quorum-theta 1.0 " in _syncer(rendered)
+    assert " --max-learners 4 " in _syncer(rendered)
+    with pytest.raises(ValueError, match="counts islands and stays fixed"):
+        plan(("--rl-sync-quorum", "1", "--rl-sync-max-learners", "4"))  # given, not derived
+    args, rendered = plan(())  # no pool past the launch: the async default stays
+    assert args.rl_sync_quorum == 1 and "--quorum-theta" not in _syncer(rendered)

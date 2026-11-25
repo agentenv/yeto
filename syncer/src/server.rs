@@ -5490,6 +5490,14 @@ async fn scheduler(
                         // pool; an expired lease already wrote its pool_leave.
                         let replaced = registry.lock().unwrap().current.contains_key(&member.learner_id);
                         if !replaced {
+                            if leave_reasons.contains_key(&member) {
+                                // It announced its departure (LEAVE): it answers no open
+                                // round, so release its unanswered slots now, as a lease
+                                // expiry would only later; the rounds close on the others.
+                                for round in inflight.iter_mut() {
+                                    round.forget_unanswered(member);
+                                }
+                            }
                             append_pool_record(
                                 cfg.event_tape.as_deref(),
                                 "pool_leave",

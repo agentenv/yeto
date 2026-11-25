@@ -438,6 +438,9 @@ _ISLAND = (
     island_flag("--learner-id", type=int, required=True),
     island_flag("--num-learners", type=int, default=1),
     island_flag("--learner-generation", type=int, default=0),
+    # Island pool with the syncer's --max-learners (launcher --rl-sync-max-learners):
+    # the full-parameter session contract binds the roster 0..N-1, not the launched one.
+    island_flag("--sync-max-learners", type=int, default=None),
     island_flag("--reward-sha256", required=True),
     island_flag("--source-sha256", required=True),
     # The run code pack digest; the island refuses to start

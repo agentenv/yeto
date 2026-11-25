@@ -86,6 +86,7 @@ READ = frozenset({
     "learner_generation", "learner_id", "local_horizon", "local_init_fallback", "lora_r", "lora_targets",
     "model", "model_revision", "num_learners", "parameter_layout_sha256", "parameter_mode", "pipeline",
     "pipeline_parallel", "reward_function", "reward_sha256", "rl_activation_recompute", "rl_agentic_harbor",
+    "sync_max_learners",
     "rl_algorithm_spec", "rl_allow_pipeline_parallel_sync", "rl_ascend_plugin_recipe",
     "rl_ascend_plugin_stack", "rl_buffer_shards", "rl_cut_auto_mtbf_s", "rl_cut_every", "rl_cut_keep",
     "rl_cut_max_interval_s", "rl_data_dispense", "rl_data_position_store", "rl_data_slot", "rl_debug_dump",

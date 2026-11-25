@@ -222,6 +222,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_local_init_fallback", False, "--rl-sync-local-init-fallback"),
     ("rl_sync_wait_timeout_s", 900.0, "--rl-sync-wait-timeout-s"),
     ("rl_sync_max_local_rounds_ahead", None, "--rl-sync-max-local-rounds-ahead"),
+    ("rl_fleet_trainer_shape", None, "--rl-fleet-trainer-shape"),
 )
 
 
@@ -542,6 +543,8 @@ def _apply_rl_sync_mode(args) -> None:
             current = getattr(args, dest, None)
             if current is None or is_sync_mode_default(current):
                 setattr(args, dest, value)
+                if dest == "rl_sync_quorum":  # derived, not given (_pool_quorum_follows_the_pool)
+                    args.rl_sync_quorum_derived = True
         if (args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET
                 and args.rl_sync_full_parameter_rounds == "async"
                 and is_sync_mode_default(getattr(args, "rl_sync_fragment_pipeline", None))):
@@ -791,6 +794,7 @@ def _default_spot_island_pool(args) -> None:
         return
     if fixed:
         args.rl_sync_quorum = num_islands - 1
+        args.rl_sync_quorum_derived = True  # not given (_pool_quorum_follows_the_pool)
     args.rl_sync_island_lease_s = DEFAULT_ISLAND_LEASE_S
     print(f"[launcher] spot rollout: island pool on by default (--rl-sync-island-lease-s "
           f"{DEFAULT_ISLAND_LEASE_S:g}" + (f", --rl-sync-quorum {args.rl_sync_quorum}" if fixed else "")
@@ -824,11 +828,12 @@ def _check_island_pool(args, *, num_islands: int) -> None:
     check_stale_lag(args)
     max_learners = getattr(args, "rl_sync_max_learners", None)
     if max_learners is not None:
-        if preset == FULL_PARAMETER_SYNC_PRESET:
-            raise ValueError(f"--rl-sync-max-learners does not apply to {FULL_PARAMETER_SYNC_PRESET}: "
-                             "its island session binds the launched roster")
+        # full-parameter: the islands bind the roster 0..N-1 into their session
+        # contract (--sync-max-learners), so a later island joins the same session
         if int(max_learners) < num_islands:
             raise ValueError(f"--rl-sync-max-learners must be at least the {num_islands} islands")
+        if getattr(args, "rl_sync_quorum_theta", None) is None:
+            _pool_quorum_follows_the_pool(args, preset, num_islands, int(max_learners))
     if getattr(args, "rl_sync_quorum_theta", None) is not None:
         if getattr(args, "rl_sync_quorum", None) is not None:
             raise ValueError("--rl-sync-quorum-theta replaces --rl-sync-quorum; give one of them")
@@ -840,6 +845,32 @@ def _check_island_pool(args, *, num_islands: int) -> None:
             "membership options need rounds that may merge without some island: set "
             "--rl-sync-quorum-theta, --rl-sync-quorum below the island count, --rl-sync-grace-ms "
             "or --rl-sync-max-base-lag >= 1")
+
+
+def _pool_quorum_follows_the_pool(args, preset: str, num_islands: int, max_learners: int) -> None:
+    """--rl-sync-max-learners without --rl-sync-quorum-theta. A count quorum stays fixed
+    while islands join and leave; the capacity quorum (θ of the islands a round
+    expects) follows the pool. Full-parameter islands that may join past the launch
+    get θ = 1.0 (every island in the pool) by default, and a count quorum is refused
+    there; the other presets keep their count quorum, with a note."""
+    if preset != FULL_PARAMETER_SYNC_PRESET or max_learners <= num_islands:
+        print(f"[launcher] note: the count quorum ({args.quorum}) is a number of islands: a round "
+              "needs that many answers however many islands the pool holds; --rl-sync-quorum-theta F "
+              "needs F of the islands the round expects instead (1.0: every one of them)",
+              file=sys.stderr)
+        return
+    if getattr(args, "rl_sync_quorum", None) is not None and getattr(args, "rl_sync_quorum_derived", False):
+        args.rl_sync_quorum = None  # a quorum the launcher derived (async mode, spot): θ replaces it
+    if getattr(args, "rl_sync_quorum", None) is not None:
+        raise ValueError(
+            f"--rl-sync-max-learners {max_learners} lets full-parameter islands join past the "
+            f"{num_islands} launched ones, but --rl-sync-quorum {args.rl_sync_quorum} counts islands "
+            "and stays fixed; give --rl-sync-quorum-theta F instead (F of the islands a round "
+            "expects; the default 1.0 is every island in the pool)")
+    args.rl_sync_quorum_theta = 1.0
+    print("[launcher] full-parameter island pool past the launch (--rl-sync-max-learners "
+          f"{max_learners}): capacity quorum --rl-sync-quorum-theta 1.0 by default, every island "
+          "in the pool answers each round", file=sys.stderr)
 
 
 def _prepare_node_inventory(args) -> None:
@@ -1516,9 +1547,10 @@ def _prepare_rl_args(
         args.rl_total_fragment_steps = args.total_steps * args.fragments
     elif args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET:
         _prepare_dense_full_sweep(args, num_islands=learners)
-        from .fragment_preflight import check_fragment_layout
+        from .fragment_preflight import check_fleet_shape, check_fragment_layout
 
         check_fragment_layout(args, per_island, specs)  # Miles: the island checks it after boot
+        check_fleet_shape(args)  # a new or migrated fleet island: its layout is the fleet's
     elif args.rl_sync_preset == SAO_STREAMING_SYNC_PRESET:
         _prepare_sao_streaming(args, num_islands=len(specs))
     elif not args.experimental_rl_sync:

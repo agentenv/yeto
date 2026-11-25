@@ -727,7 +727,7 @@ below the island count, `--rl-sync-grace-ms` or `--rl-sync-max-base-lag` >= 1).
 | `--island-lease-s L` | `--rl-sync-island-lease-s` | an island silent for L seconds leaves the pool and must re-JOIN |
 | `--syncer-epoch E` | `--rl-syncer-epoch` | a HELLO with a lower epoch is refused (fencing) |
 | `--final-grace-s S` | `--rl-sync-final-grace-s` | after the last step, wait S seconds for the connected islands to ACK the final cut, then finish without the missing ones |
-| `--max-learners N` | `--rl-sync-max-learners` | admit island ids 0..N-1 (islands may join late); not for full-parameter, whose island session binds the launched roster |
+| `--max-learners N` | `--rl-sync-max-learners` | admit island ids 0..N-1 (islands may join late); full-parameter islands then bind the roster 0..N-1 into their session contract (`--sync-max-learners`) |
 
 Every island in a pool heartbeats every lease/3 (default lease 150 s,
 `yeto.rl.pool_client.LeaseHeartbeat`). A lease expiry gets
@@ -820,6 +820,14 @@ The exception table is `yeto/rl/engine/leave_reason.py`. An island sends at
 most one LEAVE: a reclaim listener's PREEMPTED is not overwritten by the
 driver's close. A SIGTERM that kills the process sends nothing; the syncer
 records `disconnected` (or `lease_expired` after the lease).
+
+Once an island that sent LEAVE has disconnected, and no newer generation of it
+is connected, the syncer drops its unanswered slots from the rounds still
+gathering, so they close on the remaining islands. It does not wait for the
+lease (dynamic membership, every preset). An island that comes back within the
+lease after a LEAVE joins as a new member: its earlier PULLs do not move to the
+new generation. A disconnect without LEAVE keeps its slots until a re-JOIN
+rebinds them or the lease expires.
 
 At the end of the run the launcher waives the missing `rl_learner_finalized`
 record only for islands whose last syncer `pool_leave` reason is `finished`,
