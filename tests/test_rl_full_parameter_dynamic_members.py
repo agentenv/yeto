@@ -392,6 +392,91 @@ def test_an_island_that_is_gone_releases_its_open_round(syncer_binary, tmp_path,
     tape = (tmp_path / "tape.jsonl").read_text()
     assert f'"island_id":1,"generation":{held["generation"]},"reason":"{"stopped" if leave else "disconnected"}"' in tape
     assert '"lease_expired"' not in tape
+    released = [json.loads(line) for line in tape.splitlines() if '"pool_slots_released"' in line]
+    assert [(r["island_id"], r["reason"], r["steps"]) for r in released] == [(1, "left" if leave else "lease",
+                                                                             [held["step"]])]
+
+
+@needs_cargo
+@pytest.mark.usefixtures("_hmac_key")
+def test_an_island_back_within_its_lease_keeps_its_slot(syncer_binary, tmp_path):
+    """Island 1 holds a PULL and its connection drops (no LEAVE); it is back
+    within the lease (4 s) as a new generation, gets the round's PULL again and
+    answers it only after the lease has passed: the round merges both islands,
+    nothing is released."""
+    lease = 4
+    pool = ("--rl-sync-quorum-theta", "1.0", "--rl-sync-max-base-lag", "1",
+            "--rl-sync-island-lease-s", str(lease), "--rl-sync-soft-deadline-s", "60")
+    process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *pool, total_steps=4,
+                                                      log_file=tmp_path / "syncer.log")
+    clients = {learner: _client(learner, port, profile_hash) for learner in range(LAUNCHED)}
+    versions = {learner: [0] * P for learner in range(LAUNCHED)}
+    seen: dict[int, set] = {0: set(), 1: set()}
+    held: dict = {}
+    beat = [0.0]
+
+    def poll():
+        if time.monotonic() - beat[0] > 1:  # both islands renew their (short) leases while they wait
+            beat[0] = time.monotonic()
+            for client in clients.values():
+                client.heartbeat(0)
+        if "dropped" in held and "back" not in held and time.monotonic() - held["dropped"] > 0.5:
+            held["back"] = time.monotonic()  # the same island, a new connection generation
+            clients[1] = _client(1, port, profile_hash)
+            clients[1].start()
+        for learner, client in list(clients.items()):
+            client.check_health()
+            for update in client.drain_updates():
+                versions[learner][update.fragment_id] = max(versions[learner][update.fragment_id], update.version)
+            for permit in client.drain_pulls():
+                key = (permit.global_step, permit.round_attempt)
+                if learner == 1 and permit.global_step == held.get("step"):
+                    if "back" not in held:
+                        continue  # the dropped generation's copy
+                    held["pending"] = permit  # the new generation's: answered after the lease
+                    continue
+                if key in seen[learner]:
+                    continue
+                seen[learner].add(key)
+                if learner == 1 and "step" not in held and permit.global_step >= 3:
+                    held["step"] = permit.global_step
+                    held["dropped"] = time.monotonic()
+                    clients.pop(1).close()  # the connection drops; the island is not gone
+                    break
+                client.push_fragment(permit.fragment_id, permit.global_step, permit.round_attempt,
+                                     versions[learner][permit.fragment_id], permit.global_step, 1, 7,
+                                     _f32(_delta(learner, permit.global_step)))
+        pending = held.get("pending")
+        if pending is not None and time.monotonic() - held["dropped"] > lease + 2:
+            held["pending"] = None
+            held["answered"] = True
+            clients[1].push_fragment(pending.fragment_id, pending.global_step, pending.round_attempt,
+                                     versions[1][pending.fragment_id], pending.global_step, 1, 7,
+                                     _f32(_delta(1, pending.global_step)))
+        return all(c.finalizing.is_set() for c in clients.values()) and held.get("answered", False)
+
+    try:
+        for client in clients.values():
+            client.start()
+        for fid in range(P):
+            clients[0].send_init(fid, _f32(_initial(fid)))
+        _wait(poll, "syncer never finalized", timeout=50)
+        for client in clients.values():
+            manifest, _ = client.wait_for_final_fragments(timeout=30)
+            client.acknowledge_finalization(manifest)
+        assert process.wait(timeout=15) == 0
+    finally:
+        for client in clients.values():
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=10)
+    tape = (tmp_path / "tape.jsonl").read_text()
+    steps = {r["step"]: r for r in _outer_steps(tape)}
+    kept = steps[held["step"]]
+    assert sorted(int(e[0]) for e in kept["raw_weights"]) == [0, 1] and not kept["timed_out"]
+    assert kept["step_seconds"] > lease  # it waited past the lease for the island that came back
+    assert '"pool_slots_released"' not in tape and '"lease_expired"' not in tape
 
 
 @needs_cargo

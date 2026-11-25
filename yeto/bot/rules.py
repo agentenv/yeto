@@ -34,6 +34,7 @@ EVENT_RULES: dict[str, tuple[int, str]] = {
     "not_carried": (P1, "pushes not carried"),
     "error": (P1, "syncer ERROR lines"),
     "pool_leave": (P1, "island left the pool"),
+    "pool_slots_released": (P1, "rounds stopped waiting for a departed island"),
     "checkpoint": (P2, "syncer checkpoint written"),
     "island_checkpoint": (P2, "island checkpoint saved"),
     "joined": (P2, "learner (re)joined"),

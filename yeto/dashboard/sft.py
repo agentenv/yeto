@@ -81,7 +81,7 @@ SFT_FILES = ("logging.jsonl", "yeto_steps.jsonl", "bench_metrics.jsonl", "args.j
              "syncer.log", "cmdline.txt")
 SIBLINGS = ("logging.jsonl", "bench_metrics.jsonl", "yeto_steps.jsonl")
 SYNCER_TAPE_KINDS = frozenset({"outer_step", "delta_accepted", "delta_rejected", "delta_carried_over",
-                               "pool_join", "pool_leave"})
+                               "pool_join", "pool_leave", "pool_slots_released"})
 
 
 def is_syncer_tape(record: dict) -> bool:
@@ -643,7 +643,7 @@ class SftState:
             self.events.append([ts, "rejected", r.get("island_id", r.get("learner_id")), "tape", None])
         elif kind == "delta_carried_over":
             self.events.append([ts, "carried", r.get("island_id", r.get("learner_id")), "tape", None])
-        elif kind in ("pool_join", "pool_leave"):
+        elif kind in ("pool_join", "pool_leave", "pool_slots_released"):
             self.events.append([ts, kind, r.get("island_id"), "tape", None])
 
     # -- view -------------------------------------------------------------------
