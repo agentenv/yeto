@@ -212,8 +212,8 @@ class AgentenvEnvironment(BaseEnvironment):
         :mod:`.agentenv_network` and raises :class:`NetworkError` before any
         trial runs if a required one is unreachable.
 
-        The probe needs ``curl`` in the task image; a image without it reports
-        the endpoint as a ``curl error`` and also fails loud (fix the image).
+        The probe uses ``curl``, else python, else a bash TCP connect, so task
+        images without curl (several TB2 images) are probed too.
         """
         if not breaker_settings.enabled("harness.reach_check"):
             logger.warning("agentenv reachability self-check skipped (harness.reach_check off, %s): a "
