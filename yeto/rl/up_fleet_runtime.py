@@ -18,14 +18,22 @@ island's own resolved breakers (:func:`yeto.breakers.fleet.resolve_islands`):
   for the launch's billed hours, the syncer); ``run.budget`` stops the whole fleet.
 
 A trip of an island-scoped breaker (``run.first_group`` / ``run.starvation`` /
-``run.release_stall`` with a stop action) stops that island only
-(:class:`yeto.breakers.fleet.FleetStops`, kept in ``state["fleet_stops"]``). The
-fleet's one ``yeto launch`` has no way to end one island (its only stop is the run's
-STOP flag, and a trainer island that exits is relaunched under the same learner id),
-so stopping an island means: the trip is recorded and reported, and the island's
-pools are stopped (``nc pool-stop``); its trainer then starves inside the launch
-until its own ``trainer.sample_wait`` ends it and the launcher's recovery gives it
-up. Once no island runs, the whole launch is stopped (the STOP flag).
+``run.release_stall`` / ``run.trainer_exit`` / ``run.trainer_silence`` with a stop
+action) stops that island only (:class:`yeto.breakers.fleet.FleetStops`, kept in
+``state["fleet_stops"]``): the trip is recorded and reported, the island's own STOP is
+written (``fleet/trainers/<k>/STOP``, :mod:`yeto.launch.island_lifecycle`: the
+launch's fleet controller releases that island's trainer and relaunches it no more)
+and its pools are stopped (``nc pool-stop``). The other islands go on. Each island's
+trainer is judged on its own: ``run.trainer_exit`` when its record in the run store
+(``fleet/trainers/<k>/state.json``) shows it given up or failed, ``run.trainer_silence``
+when its event tape stops growing. The run's STOP flag (the whole launch) is kept for
+the fleet-wide stops: ``run.budget``, ``run.wall_clock`` and fewer islands running than
+``fleet.min_islands`` (default 1: every island stopped). An island without an event tape
+(a sky / Verda / fetchable SSH island, a launch without records) keeps the run's own
+silence over the launcher log (:meth:`FleetRuntime.judges_every_trainer`). A fixed roster
+(``plan.fixed_roster``) keeps the path before the island STOP: no island STOP is written
+(its launch would end the whole fleet), its trainer starves inside the launch, and the
+trainers are not judged here.
 
 A restarted ``run up`` (same run) replays only the islands' own trips
 (``state["fleet_island_stops"]``): those islands stay stopped and their pools are not
@@ -39,6 +47,7 @@ Import-light: no torch, ray or miles.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 
@@ -67,6 +76,10 @@ class FleetRuntime:
         self._release: dict[int, Any] = {}
         self._release_read: dict[int, tuple[float, Any, bool]] = {}
         self._stops: Any = None
+        self._states: Any = None
+        self._tape_seen: dict[int, tuple[Any, float]] = {}
+        self._exit_seen: set[int] = set()
+        self._records_read: tuple[float, dict[int, dict[str, Any]]] | None = None
 
     # -- islands
     def label(self, k: int) -> str:
@@ -183,16 +196,41 @@ class FleetRuntime:
             self.run.save()
         return hit
 
+    def island_states(self) -> Any:
+        """The islands' records and STOP channel in the run store
+        (:class:`yeto.launch.island_lifecycle.IslandStateStore`)."""
+        if self._states is None:
+            from yeto.launch.island_lifecycle import IslandStateStore  # noqa: PLC0415
+
+            self._states = IslandStateStore(self.run._objects(), log=_log)  # noqa: SLF001
+        return self._states
+
     def stop_island(self, k: int, name: str, why: str) -> None:
-        """Island k's trip stopped it (module doc): its pools are stopped; the launch
-        cannot drop its trainer, which starves until the launcher gives it up."""
+        """Island k's trip stopped it (module doc): its island STOP is written (the launch's
+        fleet controller releases its trainer) and its pools are stopped. A fixed roster
+        (``plan.fixed_roster``) writes no island STOP (its launch would end the whole fleet,
+        exit 4): its pools are stopped and its trainer starves, as before the island STOP."""
         pools = self.pool_indices(k)
         names = [self.run.pools[i].name for i in pools]
         miles = [m.name for m in self.miles_samplers(k)]
-        _log(f"CRITICAL fleet_island_stop: {self.label(k)}: {name}: {why}; the fleet's one trainer launch cannot "
-             f"end one island, so its pools ({', '.join(names) or 'none'}) are stopped and the other islands go on; "
-             + (f"its Miles sampler island(s) {', '.join(miles)} are part of the launch and keep feeding its trainer"
-                if miles else "its trainer starves until its trainer.sample_wait ends it and the launcher gives it up"))
+        from yeto.breakers.events import stop_reason_for  # noqa: PLC0415
+
+        if self.plan.fixed_roster:
+            _log(f"CRITICAL fleet_island_stop: {self.label(k)}: {name}: {why}; a fixed roster "
+                 f"({self.plan.roster_reason or 'fleet.fixed_roster'}): the fleet's launch does not end one island, "
+                 f"so its pools ({', '.join(names) or 'none'}) are stopped and the other islands go on; "
+                 + (f"its Miles sampler island(s) {', '.join(miles)} are part of the launch and keep feeding its "
+                    "trainer" if miles else
+                    "its trainer starves until its trainer.sample_wait ends it and the launcher gives it up"))
+        else:
+            written = self.island_states().request_stop(k, stop_reason_for(name), by="yeto run up")
+            _log(f"CRITICAL fleet_island_stop: {self.label(k)}: {name}: {why}; "
+                 + (f"its island STOP is written ({self.island_states().objects.__class__.__name__}: "
+                    f"fleet/trainers/{k}/STOP): the launch releases its trainer"
+                    if written else "its island STOP could not be written: its trainer starves until its "
+                                    "trainer.sample_wait ends it and the launcher gives it up")
+                 + f"; its pools ({', '.join(names) or 'none'}) are stopped and the other islands go on"
+                 + (f"; its Miles sampler island(s) {', '.join(miles)} follow its trainer" if miles else ""))
         rc = max((self.run._cmd(self.run.nc("pool-stop", "--config", self.run.pools[i].config),  # noqa: SLF001
                                 log="down.log", timeout=1800) for i in pools), default=0)
         if rc:
@@ -214,11 +252,100 @@ class FleetRuntime:
         return True
 
     def all_stopped(self) -> str | None:
-        """The fleet's stop reason once no island runs (every one stopped by a trip), else None."""
+        """The fleet's stop reason once fewer islands run than ``fleet.min_islands`` (default 1:
+        every island stopped by a trip), else None: the first stopped island's reason (a
+        fleet-scoped trip's when there was one)."""
         stops = self.stops()
-        if stops.running():
+        running = stops.running()
+        if len(running) >= max(1, int(getattr(self.plan, "min_islands", 1) or 1)):
             return None
-        return stops.fleet_stop_reason
+        if stops.fleet_stop_reason is not None:
+            return stops.fleet_stop_reason
+        first = next((i.index for i in self.plan.islands if stops.stop_reason(i.index) is not None), None)
+        return None if first is None else stops.stop_reason(first)
+
+    # -- each island's trainer (run.trainer_exit, run.trainer_silence)
+    def silence_limit_s(self, k: int) -> float:
+        """Island k's ``run.trainer_silence`` limit (as :meth:`Run.silence_limit_s` of one trainer)."""
+        entry = self.resolved(k).entry("run.trainer_silence")
+        if entry.params["limit_s"] is not None:
+            return float(entry.params["limit_s"])
+        return max(entry.params["stall_factor_n"] * self.run.stall_timeout_s(), entry.params["floor_s"])
+
+    RECORDS_TTL_S = 5.0  # one poll reads the islands' records once (the silence check and trainer_check)
+
+    def trainer_records(self, now: float) -> dict[int, dict[str, Any]]:
+        """The running islands' records in the run store (read at most every ``RECORDS_TTL_S``);
+        a record that does not read is missing here (that island is not judged by it)."""
+        cached = self._records_read
+        if cached is not None and 0 <= now - cached[0] < self.RECORDS_TTL_S:
+            return cached[1]
+        active = self.active()
+        records = self.island_states().read_all(active) if active else {}
+        self._records_read = (now, records)
+        return records
+
+    def judges_every_trainer(self, now: float) -> bool:
+        """True when :meth:`trainer_check` judges the silence of every running island (each has a
+        record with an event tape): the run's own silence over the launcher log is then off.
+        False for a fixed roster (the old path: the run's silence and the launcher's exit) and
+        while any running island has no tape (a sky / Verda / fetchable SSH island, a launch
+        without records, a record that did not read): the run's silence covers the fleet."""
+        if self.plan.fixed_roster:
+            return False
+        active = self.active()
+        if not active:
+            return False
+        records = self.trainer_records(now)
+        return all((records.get(k) or {}).get("tape") for k in active)
+
+    def trainer_check(self, now: float) -> None:
+        """Each running island's trainer from its record in the run store: given up or failed
+        (``abandoned`` / ``failed``) trips its ``run.trainer_exit``; its event tape not
+        growing for its ``run.trainer_silence`` limit while it runs trips that. Either stops
+        that island only (:meth:`trip_island`). An island without a record (a launch that
+        keeps none) or without a tape is not judged here (:meth:`judges_every_trainer`: the
+        run's silence covers it); a tape that does not stat is unknown, not quiet: its quiet
+        time starts again once it reads. A fixed roster is not judged here (the old path)."""
+        if self.plan.fixed_roster:
+            return
+        active = self.active()
+        if not active:
+            return
+        records = self.trainer_records(now)
+        for k in active:
+            record = records.get(k)
+            if not record:
+                continue
+            state = record.get("state")
+            if state in ("abandoned", "failed") and k not in self._exit_seen:
+                self._exit_seen.add(k)
+                decision = record.get("decision") or {}
+                why = (f"its trainer is {state}"
+                       + (f" ({decision.get('cause')}: {decision.get('detail')})" if decision.get("cause") else "")
+                       + (f"; exit {record.get('exit')}" if record.get("exit") else ""))[:500]
+                self.trip_island(k, "run.trainer_exit", value=None, limit=None, why=why)
+                continue
+            if state != "running" or not record.get("tape"):
+                self._tape_seen.pop(k, None)
+                continue
+            if not self.resolved(k).enabled("run.trainer_silence"):
+                continue
+            try:
+                st = os.stat(str(record["tape"]))
+            except OSError:  # unknown (not written yet, another machine): not counted as quiet
+                self._tape_seen.pop(k, None)
+                continue
+            sig = (st.st_size, st.st_mtime)
+            seen = self._tape_seen.get(k)
+            if seen is None or seen[0] != sig:
+                self._tape_seen[k] = (sig, now)
+                continue
+            quiet, limit = now - seen[1], self.silence_limit_s(k)
+            if quiet > limit:
+                self._tape_seen.pop(k, None)
+                self.trip_island(k, "run.trainer_silence", value=quiet, limit=limit,
+                                 why=f"its event tape is silent {quiet / 60:.0f} min (limit {limit / 60:.0f} min)")
 
     # -- the first group
     def buffer_keys(self, k: int) -> set[str] | None:
@@ -591,6 +718,17 @@ class FleetRuntime:
         return out
 
     # -- status
+    def _trainer_view(self, k: int) -> dict[str, Any] | None:
+        """Island k's trainer record (state, incarnation, relaunches, machine), or None."""
+        try:
+            record = self.island_states().read(k)
+        except Exception:  # noqa: BLE001 - a view only
+            return None
+        if not record:
+            return None
+        return {key: record.get(key) for key in ("state", "incarnation", "relaunches", "handle", "source", "exit")
+                if record.get(key) is not None}
+
     def status(self) -> dict[str, Any]:
         """Per island: first group, data end, stop reason; the fleet's spend."""
         state = self.run.state
@@ -605,6 +743,7 @@ class FleetRuntime:
                             "first_group": (state.get("fleet_first_group") or {}).get(k),
                             "data_ended": (state.get("fleet_data_ended") or {}).get(k),
                             "stop_reason": stops.stop_reason(island.index),
+                            "trainer": self._trainer_view(island.index),
                             "starvation": (state.get("fleet_starvation") or {}).get(k),
                             "release_stall": (state.get("fleet_release_stall") or {}).get(k)})
         try:

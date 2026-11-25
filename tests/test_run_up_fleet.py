@@ -174,6 +174,7 @@ def test_the_compiled_trainer_argv(files):
     assert cfg["trainer"] == {"usd_per_h": 16.0, "argv": [
         *TRAINER_ARGV, "--gpu", "modal:1x2xh100,modal:1x2xh100@us-east",
         "--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer",
+        "--rl-sync-island-lease-s", "150",  # no fixed roster (default): the async rounds keep quorum 1
         "--rl-island-buffer-shards", "0:vl-i0-0,vl-i0-1,vl-i0-2,sg-i0-0,sg-i0-1",
         "--rl-island-buffer-shards", "1:sg-i1-0,sg-i1-1",
         "--rl-island-release-every", "0:2",
