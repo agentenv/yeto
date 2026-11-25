@@ -184,6 +184,12 @@ class Policy:
     allowed_providers: frozenset[str] | None = None  # None: every provider
     allowed_regions: frozenset[str] | None = None  # None: every region (an offer without one always passes)
 
+    def __post_init__(self) -> None:
+        for name in ("allowed_providers", "allowed_regions"):
+            if getattr(self, name) is not None and not getattr(self, name):
+                raise ValueError(f"broker: Policy.{name} is empty, which would allow nothing; "
+                                 "None allows every one")
+
     def allows(self, offer: Offer) -> bool:
         """Whether a new node may go to ``offer`` (a running node outside stays to its boundary)."""
         if self.allowed_providers is not None and offer.provider not in self.allowed_providers \

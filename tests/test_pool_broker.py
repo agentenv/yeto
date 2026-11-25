@@ -438,3 +438,6 @@ def test_allowed_providers_and_regions():
     assert cfg.policy.allowed_providers == {"nc", "sky"} and cfg.policy.horizon_h == 3.0
     with pytest.raises(ValueError, match="allowed_regions"):
         b.config_from_run({"broker": {"enabled": True, "allowed_regions": "r1"}})
+    for name in ("allowed_providers", "allowed_regions"):
+        with pytest.raises(ValueError, match=f"{name} is empty"):
+            b.Policy(**{name: frozenset()})
