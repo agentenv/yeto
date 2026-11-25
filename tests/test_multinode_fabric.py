@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -167,12 +168,12 @@ def test_islands_on_ib_efa_rdma_or_one_node_get_no_note(gpu):
 
 
 def _inventory(fabric: str):
-    from yeto.launch.node_inventory import parse_inventory
-
-    path = topology.__file__.rsplit("/yeto/", 1)[0] + "/examples/k31/inventory.b300-6x8-baremetal.yaml"
     import yaml
 
-    doc = yaml.safe_load(open(path))
+    from yeto.launch.node_inventory import parse_inventory
+
+    path = Path(__file__).resolve().parents[1] / "examples" / "k31" / "inventory.b300-6x8-baremetal.yaml"
+    doc = yaml.safe_load(path.read_text())
     for node in doc["nodes"]:
         node["fabric"] = fabric
     return parse_inventory(doc)
