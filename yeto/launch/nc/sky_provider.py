@@ -635,7 +635,8 @@ class SkyProvider:
         doc = self._doc()
         rows = doc["clusters"]
         try:
-            listed = [r for r in (self.sky.get(self.sky.status(None)) or ()) if isinstance(r, dict)]
+            # sky >= 0.14 answers pydantic StatusResponse records (dict-like, not dict)
+            listed = [r for r in (self.sky.get(self.sky.status(None)) or ()) if hasattr(r, "get")]
         except Exception:  # noqa: BLE001 - an unanswered listing: the record alone
             listed = []
         changed = False
