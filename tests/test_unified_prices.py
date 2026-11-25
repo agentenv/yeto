@@ -271,3 +271,21 @@ def test_a_capability_row_without_a_source_is_refused(tmp_path):
     path.write_text(json.dumps(table))
     with pytest.raises(capabilities.CapabilityTableError, match="providers.nc.lease_s"):
         capabilities.load_table(str(path))
+
+
+def test_a_sampler_pool_sky_cluster_is_billed_at_its_offer_price_times_its_nodes():
+    from yeto.cost.billing import Rates, resource_costs
+    from yeto.cost.ledger import Resource
+
+    one = Resource("sky_cluster", "yeto-smp-r-1", "yeto-smp-r-1", 0.0,
+                   {"offer": "h100", "price_usd_h": 6.32, "pool": True}, released_at=3600.0)
+    group = Resource("sky_cluster", "yeto-smp-r-2", "yeto-smp-r-2", 0.0,
+                     {"offer": "h100", "price_usd_h": 6.32, "pool": True, "num_nodes": 2}, released_at=1800.0)
+    stated = Resource("sky_cluster", "yeto-smp-r-3", "yeto-smp-r-3", 0.0,
+                      {"price_usd_h": 6.32, "usd_per_hour": 9.0, "num_nodes": 2}, released_at=3600.0)
+    items = {i.name: i for i in resource_costs([one, group, stated], 7200.0, rates=Rates()).items}
+    assert items["yeto-smp-r-1"].priced and items["yeto-smp-r-1"].rate_usd_per_hour == pytest.approx(6.32)
+    assert items["yeto-smp-r-1"].estimated_usd == pytest.approx(6.32)
+    assert items["yeto-smp-r-2"].rate_usd_per_hour == pytest.approx(12.64)
+    assert items["yeto-smp-r-2"].estimated_usd == pytest.approx(6.32)
+    assert items["yeto-smp-r-3"].rate_usd_per_hour == pytest.approx(9.0)  # a stated rate wins
