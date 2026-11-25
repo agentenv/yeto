@@ -399,6 +399,76 @@ def test_an_island_that_is_gone_releases_its_open_round(syncer_binary, tmp_path,
 
 @needs_cargo
 @pytest.mark.usefixtures("_hmac_key")
+def test_a_leave_releases_the_slot_of_a_dropped_generation_it_had_not_rebound(syncer_binary, tmp_path):
+    """Generation A of island 1 holds a PULL and drops without LEAVE; generation B
+    connects and sends LEAVE at once, before its catch-up could rebind A's slot.
+    The round closes on island 0 at once: not at the soft deadline (60 s), nor at
+    the lease (30 s) after A's disconnect. (Whether B's catch-up rebinds A's slot
+    before the LEAVE is up to timing here; both orders release it. The scheduler
+    test in server.rs pins the order without the rebind.)"""
+    pool = ("--rl-sync-quorum-theta", "1.0", "--rl-sync-max-base-lag", "1",
+            "--rl-sync-island-lease-s", "30", "--rl-sync-soft-deadline-s", "60")
+    process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *pool, total_steps=4,
+                                                      log_file=tmp_path / "syncer.log")
+    clients = {learner: _client(learner, port, profile_hash) for learner in range(LAUNCHED)}
+    versions = [0] * P
+    seen: dict[int, set] = {0: set(), 1: set()}
+    held: dict = {}
+
+    def poll():
+        if "dropped" in held and "left" not in held and time.monotonic() - held["dropped"] > 1:
+            again = _client(1, port, profile_hash)  # generation B of the same island
+            again.start()
+            held["left"] = again.send_leave(2)
+            again.close()
+        for learner, client in list(clients.items()):
+            client.check_health()
+            for update in client.drain_updates():
+                if learner == 0:
+                    versions[update.fragment_id] = max(versions[update.fragment_id], update.version)
+            for permit in client.drain_pulls():
+                if (permit.global_step, permit.round_attempt) in seen[learner]:
+                    continue
+                seen[learner].add((permit.global_step, permit.round_attempt))
+                if learner == 1 and permit.global_step >= 3:
+                    held["step"] = permit.global_step
+                    held["dropped"] = time.monotonic()
+                    clients.pop(1).close()  # generation A drops, no LEAVE
+                    break
+                client.push_fragment(permit.fragment_id, permit.global_step, permit.round_attempt,
+                                     versions[permit.fragment_id], permit.global_step, 1, 7,
+                                     _f32(_delta(learner, permit.global_step)))
+        return held.get("left") is not None and clients[0].finalizing.is_set()
+
+    try:
+        for client in clients.values():
+            client.start()
+        for fid in range(P):
+            clients[0].send_init(fid, _f32(_initial(fid)))
+        started = time.monotonic()
+        _wait(poll, "syncer never finalized", timeout=50)
+        assert time.monotonic() - started < 25  # neither the soft deadline nor the lease
+        manifest, _ = clients[0].wait_for_final_fragments(timeout=30)
+        clients[0].acknowledge_finalization(manifest)
+        assert process.wait(timeout=15) == 0
+    finally:
+        for client in clients.values():
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=10)
+    assert held["left"] is True
+    tape = (tmp_path / "tape.jsonl").read_text()
+    left = {r["step"]: r for r in _outer_steps(tape)}[held["step"]]
+    assert [int(e[0]) for e in left["raw_weights"]] == [0] and not left["timed_out"]
+    assert left["step_seconds"] < 10
+    released = [json.loads(line) for line in tape.splitlines() if '"pool_slots_released"' in line]
+    assert [(r["island_id"], r["reason"]) for r in released] == [(1, "left")]
+    assert held["step"] in released[0]["steps"]
+
+
+@needs_cargo
+@pytest.mark.usefixtures("_hmac_key")
 def test_an_island_back_within_its_lease_keeps_its_slot(syncer_binary, tmp_path):
     """Island 1 holds a PULL and its connection drops (no LEAVE); it is back
     within the lease (4 s) as a new generation, gets the round's PULL again and
