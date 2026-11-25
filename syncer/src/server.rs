@@ -4122,6 +4122,10 @@ async fn scheduler(
     // Dynamic membership writes island-pool records next to the merge records.
     let dynamic = !cfg.membership.is_static();
     let mut lease_expired: HashSet<Member> = HashSet::new();
+    // Islands whose last generation disconnected without a LEAVE, since when;
+    // after one lease with nothing connected their unanswered slots go.
+    let absence_lease = if dynamic { cfg.membership.lease } else { None };
+    let mut absent_since: HashMap<u32, Instant> = HashMap::new();
     // LEAVE reasons of islands whose disconnect has not arrived yet.
     let mut leave_reasons: HashMap<Member, u8> = HashMap::new();
     let checkpoint_each_round = checkpoint_before_broadcast(&cfg);
@@ -4525,6 +4529,9 @@ async fn scheduler(
             }
         }
         let expired = expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
+        if let Some(lease) = absence_lease {
+            release_absent_islands(&registry, &mut inflight, &mut absent_since, lease, Instant::now());
+        }
         for member in &expired {
             lease_expired.insert(*member);
             append_pool_record(
@@ -4997,6 +5004,7 @@ async fn scheduler(
                 )
             })
             .chain(registry.lock().unwrap().membership.next_expiry())
+            .chain(absence_lease.and_then(|lease| absent_since.values().min().map(|since| *since + lease)))
             .chain(recovery.next_deadline())
             .min();
         let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
@@ -5497,6 +5505,10 @@ async fn scheduler(
                                 for round in inflight.iter_mut() {
                                     round.forget_unanswered(member);
                                 }
+                            } else if absence_lease.is_some() {
+                                // A bare disconnect may be a short outage: its slots go
+                                // only after one lease without a new generation.
+                                absent_since.insert(member.learner_id, Instant::now());
                             }
                             append_pool_record(
                                 cfg.event_tape.as_deref(),
@@ -7479,6 +7491,46 @@ async fn expire_member_leases(
         }
     }
     members
+}
+
+/// Release the unanswered slots of islands that stayed disconnected (no
+/// LEAVE) for one lease with no generation connected or closing, as their
+/// lease expiry would have: a disconnected generation can no longer renew, so
+/// `expire_member_leases` never sees it. An island that connected again keeps
+/// its slots (its push or a rebind answers them); accepted pushes always stay.
+/// Returns the released island ids in id order.
+fn release_absent_islands(
+    registry: &Registry,
+    inflight: &mut [Round],
+    absent_since: &mut HashMap<u32, Instant>,
+    lease: Duration,
+    now: Instant,
+) -> Vec<u32> {
+    let registry = registry.lock().unwrap();
+    absent_since.retain(|id, _| {
+        !registry.groups.keys().chain(registry.closing.keys()).any(|member| member.learner_id == *id)
+    });
+    let mut released: Vec<u32> = absent_since
+        .iter()
+        .filter(|(_, since)| now.saturating_duration_since(**since) >= lease)
+        .map(|(id, _)| *id)
+        .collect();
+    released.sort_unstable();
+    for id in &released {
+        absent_since.remove(id);
+        let mut rounds = 0;
+        for round in inflight.iter_mut() {
+            let gone: Vec<Member> =
+                round.expected_members.iter().copied().filter(|member| member.learner_id == *id).collect();
+            let mut forgot = false;
+            for member in gone {
+                forgot |= round.forget_unanswered(member);
+            }
+            rounds += usize::from(forgot);
+        }
+        warn!(learner_id = id, rounds, "island stayed disconnected for a lease; released its open slots");
+    }
+    released
 }
 
 /// MSG_ERROR text of a lease expiry; the Python client redials with a new
@@ -15265,6 +15317,46 @@ mod tests {
         let mut round = test_round(vec![answered]);
         round.pushes.insert(answered, test_push(5));
         assert!(!round.forget_unanswered(answered), "an accepted push keeps its slot");
+    }
+
+    #[test]
+    fn an_island_gone_for_a_lease_releases_only_its_unanswered_slots() {
+        let lease = Duration::from_secs(5);
+        let (gone, other) = (member(0, 10), member(1, 20));
+        let registry = Arc::new(Mutex::new(RegistryState::default()));
+        let open = test_round(vec![gone, other]);
+        let mut answered = test_round(vec![gone, other]);
+        answered.pushes.insert(gone, test_push(5));
+        let healthy = test_round(vec![other]);
+        let mut rounds = vec![open, answered, healthy];
+        let start = Instant::now();
+        let mut absent = HashMap::from([(0, start)]);
+        let early = start + Duration::from_secs(4);
+        assert!(release_absent_islands(&registry, &mut rounds, &mut absent, lease, early).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![gone, other], "not before one lease");
+        assert_eq!(release_absent_islands(&registry, &mut rounds, &mut absent, lease, start + lease), vec![0]);
+        assert_eq!(rounds[0].expected_members, vec![other]);
+        assert_eq!(rounds[1].expected_members, vec![gone, other], "an accepted push keeps its slot");
+        assert_eq!(rounds[2].expected_members, vec![other], "a round without it is untouched");
+        assert!(absent.is_empty());
+    }
+
+    #[test]
+    fn an_island_back_before_its_lease_keeps_its_slots() {
+        let lease = Duration::from_secs(5);
+        let (old, other) = (member(0, 10), member(1, 20));
+        let start = Instant::now();
+        // Connected again, or a newer generation closing (its own disconnect re-arms the clock).
+        let connected = registry_with_group(test_group(member(0, 11)));
+        let closing = Arc::new(Mutex::new(RegistryState::default()));
+        closing.lock().unwrap().closing.insert(member(0, 11), 1);
+        for registry in [connected, closing] {
+            let mut rounds = vec![test_round(vec![old, other])];
+            let mut absent = HashMap::from([(0, start)]);
+            assert!(release_absent_islands(&registry, &mut rounds, &mut absent, lease, start + lease).is_empty());
+            assert_eq!(rounds[0].expected_members, vec![old, other]);
+            assert!(absent.is_empty(), "its clock stops while a generation is around");
+        }
     }
 
     fn leased_registry(lease_s: u64) -> Registry {

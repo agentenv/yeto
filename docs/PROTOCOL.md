@@ -826,8 +826,10 @@ is connected, the syncer drops its unanswered slots from the rounds still
 gathering, so they close on the remaining islands. It does not wait for the
 lease (dynamic membership, every preset). An island that comes back within the
 lease after a LEAVE joins as a new member: its earlier PULLs do not move to the
-new generation. A disconnect without LEAVE keeps its slots until a re-JOIN
-rebinds them or the lease expires.
+new generation. A disconnect without LEAVE may be a short outage: its slots
+stay until a newer generation rebinds them or, with a lease, the island has had
+no generation connected for one lease after the disconnect; then the syncer
+drops them the same way. Accepted pushes always keep their slot.
 
 At the end of the run the launcher waives the missing `rl_learner_finalized`
 record only for islands whose last syncer `pool_leave` reason is `finished`,

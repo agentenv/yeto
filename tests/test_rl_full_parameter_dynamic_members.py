@@ -323,20 +323,27 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
 
 @needs_cargo
 @pytest.mark.usefixtures("_hmac_key")
-def test_an_island_that_leaves_releases_its_open_round_at_once(syncer_binary, tmp_path):
-    """Island 1 holds a PULL it will never answer, sends LEAVE and closes: the
-    round closes on island 0 at once, not at the lease expiry (30 s here) or the
-    soft deadline (60 s)."""
+@pytest.mark.parametrize("leave", [True, False], ids=["leave", "gone-without-leave"])
+def test_an_island_that_is_gone_releases_its_open_round(syncer_binary, tmp_path, leave):
+    """Island 1 holds a PULL it will never answer and closes. With a LEAVE the
+    round closes on island 0 at once (the lease is 30 s here); without one (its
+    machines torn down) once island 1 stayed away for one lease (6 s), not at
+    the soft deadline (60 s)."""
+    lease = 30 if leave else 6
     pool = ("--rl-sync-quorum-theta", "1.0", "--rl-sync-max-base-lag", "1",
-            "--rl-sync-island-lease-s", "30", "--rl-sync-soft-deadline-s", "60")
+            "--rl-sync-island-lease-s", str(lease), "--rl-sync-soft-deadline-s", "60")
     process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *pool, total_steps=4,
                                                       log_file=tmp_path / "syncer.log")
     clients = {learner: _client(learner, port, profile_hash) for learner in range(LAUNCHED)}
     versions = [0] * P
     seen: dict[int, set] = {0: set(), 1: set()}
     held: dict = {}
+    beat = [0.0]
 
     def poll():
+        if time.monotonic() - beat[0] > 1:  # island 0 renews its (short) lease while it waits
+            beat[0] = time.monotonic()
+            clients[0].heartbeat(0)
         for learner, client in list(clients.items()):
             client.check_health()
             for update in client.drain_updates():
@@ -347,8 +354,10 @@ def test_an_island_that_leaves_releases_its_open_round_at_once(syncer_binary, tm
                     continue
                 seen[learner].add((permit.global_step, permit.round_attempt))
                 if learner == 1 and permit.global_step >= 3:
-                    held["step"] = permit.global_step  # answered never: island 1 leaves instead
-                    client.send_leave(2)
+                    held["step"] = permit.global_step  # answered never: island 1 goes instead
+                    held["generation"] = client.connection_generation
+                    if leave:
+                        client.send_leave(2)
                     clients.pop(1).close()
                     break
                 client.push_fragment(permit.fragment_id, permit.global_step, permit.round_attempt,
@@ -363,7 +372,7 @@ def test_an_island_that_leaves_releases_its_open_round_at_once(syncer_binary, tm
             clients[0].send_init(fid, _f32(_initial(fid)))
         started = time.monotonic()
         _wait(poll, "syncer never finalized", timeout=50)
-        assert time.monotonic() - started < 25  # no round waited for the lease (30 s)
+        assert time.monotonic() - started < 25  # no round waited for the soft deadline (or the 30 s lease)
         manifest, _ = clients[0].wait_for_final_fragments(timeout=30)
         clients[0].acknowledge_finalization(manifest)
         assert process.wait(timeout=15) == 0
@@ -376,8 +385,13 @@ def test_an_island_that_leaves_releases_its_open_round_at_once(syncer_binary, tm
     steps = {r["step"]: r for r in _outer_steps((tmp_path / "tape.jsonl").read_text())}
     left = steps[held["step"]]
     assert [int(e[0]) for e in left["raw_weights"]] == [0] and not left["timed_out"]
-    assert left["step_seconds"] < 10
-    assert '"reason":"stopped"' in (tmp_path / "tape.jsonl").read_text()
+    if leave:
+        assert left["step_seconds"] < 10
+    else:  # a bare disconnect may be a short outage: its slot goes after one lease
+        assert lease - 1 <= left["step_seconds"] < lease + 10
+    tape = (tmp_path / "tape.jsonl").read_text()
+    assert f'"island_id":1,"generation":{held["generation"]},"reason":"{"stopped" if leave else "disconnected"}"' in tape
+    assert '"lease_expired"' not in tape
 
 
 @needs_cargo
