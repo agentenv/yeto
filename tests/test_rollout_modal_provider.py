@@ -1181,10 +1181,13 @@ class StuckGraphClient(QueuedClient):
     def scheduled(self, call):
         return False
 
+    started_at = None  # the container's own start time in its started marker
+
     def place(self, call):
         key = self.calls[call].get("ready_key")
         if key and self.report_ready is not None:
-            self.report_ready().write(started_key(key), b"{}")
+            body = {} if self.started_at is None else {"started_at": self.started_at}
+            self.report_ready().write(started_key(key), json.dumps(body).encode())
             self.report_ready().write(key, b"{}")
 
 
@@ -1221,11 +1224,14 @@ def test_a_running_call_whose_graph_reads_pending_is_billed_from_its_started_mar
     (row,) = [r for r in ledger.resources() if r.kind == "modal_call"]
     assert row.attrs.get("scheduled_at") is None
     placed_at = t[0]
+    client.started_at = placed_at - 40  # the container started 40 s before the poll read its marker
     client.place(call)  # a worker runs it: the container writes its started marker, the sampler joins
     for _ in range(5):
         pool.tick()
         t[0] += 60
+    placed_at -= 40  # the container started 40 s before the poll read its marker: billed from then
     assert m.state == READY and m.granted == placed_at and pool.budget.spent_ucr > 0
+    assert ops.provider._rows()[m.ticket]["scheduled_at"] == placed_at
     assert ops.provider._rows()[m.ticket]["scheduled_by"] == "its container started (started marker)"
     rows = [r for r in ledger.resources() if r.kind == "modal_call"]
     assert any(r.attrs.get("scheduled_at") == placed_at for r in rows)
@@ -1252,7 +1258,7 @@ def test_a_ready_member_is_never_left_unbilled(tmp_path):
         t[0] += 60
     assert m.state == READY and m.granted is not None and pool.budget.spent_ucr > 0
     late = [e for e in events.events if e["event"].endswith("member_granted_late")]
-    assert len(late) == 1 and late[0]["source"] in ("its sampler joined (probe)", "its sampler is ready")
+    assert len(late) == 1 and late[0]["source"] == "its sampler joined (probe)"  # the probe sees it first
     assert any("WARNING" in line and "billed from now" in line for line in logs)
     assert ops.provider._rows()[m.ticket]["scheduled_at"] is not None  # the resource ledger learns it too
 
@@ -1272,13 +1278,19 @@ def test_the_functions_stats_bill_the_calls_that_run_and_not_the_ones_that_wait(
     p.spawn(b, {"shard": "m-1"})
     assert p.status(1, a).billing is True and p.status(2, b).billing is False  # b waits: one input runs
     stats.update(backlog=0, running_inputs=2, tasks=2)
+    assert p.status(2, b).billing is False  # read once per tick: the cached stats still hold
+    now[0] += 10
     assert p.status(2, b).billing is True
     # nothing runs: still not billed (#784)
     stats.update(backlog=2, running_inputs=0, tasks=0)
+    now[0] += 10
     c = p.order(1)
     p.spawn(c, {"shard": "m-2"})
     assert p.status(1, c).billing is False
+    now[0] += 10
+    assert p.status(1, c).billing is False
     client.function_stats = lambda: (_ for _ in ()).throw(ConnectionError("modal"))
+    now[0] += 10
     assert p.status(1, c).billing is True  # stats that do not read: billed, never free
 
 

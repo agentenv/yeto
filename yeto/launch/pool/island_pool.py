@@ -1954,7 +1954,8 @@ class IslandPool(PoolMoves):
                 self._once(m, "unscheduled", "member_unscheduled", detail=status.detail,
                            waited_s=round(now - m.created))
             if m.granted is None and status.billing:  # nothing runs (or bills) before the provider schedules it
-                m.granted = now
+                since = status.billing_since
+                m.granted = now if since is None else max(min(float(since), now), m.created)
                 if "unscheduled" in m.alerted:
                     self._event("member_scheduled", ticket=m.ticket, account=m.account, shard=m.shard,
                                 unscheduled_s=round(now - m.created))
