@@ -259,4 +259,56 @@ def check_verl_trainer_cards(args: Any, specs: Any, *, out: Any = None) -> list[
             raise ValueError(f"--gpu island {m} ({spec}): {message}")
         warnings.append(f"--gpu island {m} ({spec}): {message}")
         print(f"[launcher] WARNING: {warnings[-1]}", file=out or sys.stderr, flush=True)
+    return warnings + check_pulled_images(args, specs, samplers, out=out)
+
+
+def _pulled_image(args: Any, cloud: str | None) -> str | None:
+    """The registry image a verl trainer island on ``cloud`` pulls: the one that replaces
+    ``verl-build`` there, or an explicit digest-pinned ``--rl-image``; None on Modal / ssh:."""
+    import re
+
+    from .rl_backend import _NO_PULL_CLOUDS, pulled_rl_image
+
+    pulled = pulled_rl_image(args, cloud)
+    if pulled is not None:
+        return pulled["image"]
+    image = str(getattr(args, "rl_image", None) or "")
+    if cloud is not None and cloud not in _NO_PULL_CLOUDS and re.fullmatch(
+            r"docker:[^\s@]+@sha256:[0-9a-fA-F]{64}", image):
+        return image
+    return None
+
+
+def check_pulled_images(args: Any, specs: Any, samplers: Any = (), *, out: Any = None) -> list[str]:
+    """A verl trainer island that pulls a registry image (a sky island): the image's
+    manifest is asked for before anything is ordered (``image_manifest``, a HEAD with the
+    login the island would pull with). Missing or unreadable: refused (ValueError);
+    registry not reached: a warning. ``YETO_IMAGE_MANIFEST_CHECK=off`` skips it."""
+    import copy
+
+    from . import image_manifest as im
+    from .credentials import registry_login_for
+
+    if not im.enabled():
+        return []
+    found: dict[str, tuple[str, str]] = {}
+    warnings = []
+    for m, spec in enumerate(specs):
+        image = None if m in samplers else _pulled_image(args, getattr(spec, "cloud", None))
+        if image is None:
+            continue
+        if image not in found:
+            iargs = copy.copy(args)
+            iargs.rl_image = image
+            found[image] = im.manifest_status(image, registry_login_for(iargs))
+        status, detail = found[image]
+        if status in (im.MISSING, im.DENIED):
+            raise ValueError(
+                f"--gpu island {m} ({spec}): trainer image {image}: {detail}. Push or mirror that digest there "
+                "(docker/verl-fsdp/build.sh), point YETO_IMAGE_REGISTRY at a registry that has it, or give the "
+                "launch a registry login (SKYPILOT_DOCKER_USERNAME / SKYPILOT_DOCKER_PASSWORD / "
+                "SKYPILOT_DOCKER_SERVER, or --rl-image-private)")
+        if status == im.UNKNOWN:
+            warnings.append(f"--gpu island {m} ({spec}): trainer image {image} not checked: {detail}")
+            print(f"[launcher] WARNING: {warnings[-1]}", file=out or sys.stderr, flush=True)
     return warnings

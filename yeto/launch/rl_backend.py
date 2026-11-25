@@ -69,7 +69,7 @@ def pulled_rl_image(args, cloud: str | None) -> dict | None:
     pulls a registry image in place of the backend's Modal-built ``--rl-image`` (verl:
     ``verl-build:<commit>`` -> the registry image of the same pin and recipe); None
     otherwise (the Miles backend, a Modal or ssh: island, any other image)."""
-    if getattr(args, "training_mode", "sft") != "rl" or cloud in _NO_PULL_CLOUDS:
+    if getattr(args, "training_mode", "sft") != "rl" or cloud is None or cloud in _NO_PULL_CLOUDS:
         return None
     pulled = getattr(_rl_backend_module(args, "launch_flags"), "pulled_image", None)
     return pulled(getattr(args, "rl_image", None) or "") if pulled else None

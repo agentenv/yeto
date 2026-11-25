@@ -178,6 +178,14 @@ def _no_real_model_preflight(monkeypatch):
 
 
 @_pytest.fixture(autouse=True)
+def _no_real_image_manifest_check(monkeypatch):
+    """A sky verl island's launch asks the registry for its image manifest
+    (launch.image_manifest); unit tests never reach a registry. Tests of the check
+    clear the variable and pass a fake opener."""
+    monkeypatch.setenv("YETO_IMAGE_MANIFEST_CHECK", "off")
+
+
+@_pytest.fixture(autouse=True)
 def _no_sky_server_version_check(monkeypatch):
     """The launch preflight asks the running sky API server for its version (GET
     /api/health); unit tests never depend on a server of this host. Tests of the

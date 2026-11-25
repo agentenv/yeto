@@ -314,3 +314,139 @@ def test_the_megatron_engine_island_and_miles_are_not_checked_by_the_verl_rule()
     assert check_trainer_images(megatron, _specs("T4"), out=io.StringIO()) == []
     miles = SimpleNamespace(training_mode="rl", rl_backend="miles", rl_image="")
     assert check_trainer_images(miles, _specs("T4"), out=io.StringIO()) == []
+
+
+# --- 5.1: the registry is asked for the image before any order -----------------------------------
+
+class _Resp:
+    def __init__(self, status=200, body=b"{}"):
+        self.status, self.headers, self._body = status, {}, body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _registry(manifests: dict[str, int], *, scheme="Bearer", password=None):
+    """A fake registry opener: ``manifests`` maps an Authorization header kind
+    ("anon" / "token" / "basic") to the manifest HEAD's HTTP status."""
+    import urllib.error
+
+    seen = []
+
+    def urlopen(req, timeout=None):
+        auth = req.headers.get("Authorization", "")
+        seen.append((req.get_method(), req.full_url, auth))
+        if "/token?" in req.full_url:
+            if password is not None and auth != "Basic " + __import__("base64").b64encode(
+                    f"puller:{password}".encode()).decode():
+                raise urllib.error.HTTPError(req.full_url, 401, "no", {}, None)
+            return _Resp(200, b'{"token": "t0k"}')
+        kind = "token" if auth == "Bearer t0k" else "basic" if auth.startswith("Basic ") else "anon"
+        code = manifests.get(kind, 401)
+        if code == 200:
+            return _Resp(200)
+        headers = {}
+        if code == 401 and kind == "anon":
+            headers["WWW-Authenticate"] = (
+                'Bearer realm="https://reg.example/token",service="reg.example",scope="repository:o/r:pull"'
+                if scheme == "Bearer" else 'Basic realm="https://reg.example/",service="ecr.amazonaws.com"')
+        raise urllib.error.HTTPError(req.full_url, code, "x", headers, None)
+
+    return urlopen, seen
+
+
+REF = "docker:reg.example/o/r@sha256:" + "a" * 64
+
+
+def test_the_manifest_head_follows_the_registry_token_flow():
+    from yeto.launch import image_manifest as im
+
+    opener, seen = _registry({"token": 200})
+    assert im.manifest_status(REF, urlopen=opener)[0] == im.PRESENT
+    assert seen[0][0] == "HEAD" and seen[0][1] == "https://reg.example/v2/o/r/manifests/sha256:" + "a" * 64
+    assert "service=reg.example" in seen[1][1] and "scope=repository%3Ao%2Fr%3Apull" in seen[1][1]
+    assert im.manifest_status(REF, urlopen=_registry({"token": 404})[0])[0] == im.MISSING
+    status, detail = im.manifest_status(REF, urlopen=_registry({"token": 403})[0])
+    assert status == im.DENIED and "anonymously" in detail
+    login = {"SKYPILOT_DOCKER_USERNAME": "puller", "SKYPILOT_DOCKER_PASSWORD": "pw-SENTINEL",
+             "SKYPILOT_DOCKER_SERVER": "reg.example"}
+    opener, seen = _registry({"token": 200}, password="pw-SENTINEL")
+    assert im.manifest_status(REF, login, urlopen=opener)[0] == im.PRESENT
+    assert seen[1][2].startswith("Basic ") and "pw-SENTINEL" not in seen[1][1]  # the login goes in a header only
+    ecr, _ = _registry({"basic": 200}, scheme="Basic")
+    assert im.manifest_status(REF, login, urlopen=ecr)[0] == im.PRESENT  # ECR: Basic, no token endpoint
+    assert im.manifest_status(REF, urlopen=ecr)[0] == im.DENIED
+
+
+def test_an_unreachable_registry_is_unknown_and_refs_are_split():
+    import urllib.error
+
+    from yeto.launch import image_manifest as im
+
+    def down(req, timeout=None):
+        raise urllib.error.URLError("no route")
+
+    assert im.manifest_status(REF, urlopen=down)[0] == im.UNKNOWN
+    assert im.split_ref("docker:ghcr.io/o/r@sha256:" + "b" * 64) == ("ghcr.io", "o/r", "sha256:" + "b" * 64)
+    assert im.split_ref("docker:radixark/miles@sha256:" + "b" * 64)[:2] == ("registry-1.docker.io", "radixark/miles")
+    assert im.split_ref("docker:ubuntu@sha256:" + "b" * 64)[:2] == ("registry-1.docker.io", "library/ubuntu")
+    with pytest.raises(ValueError):
+        im.split_ref("verl-build:" + "c" * 40)
+
+
+def _sky_specs(*gpus):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    return [s for g in gpus for s in parse_gpu_spec(g)]
+
+
+def test_a_sky_verl_island_refuses_an_image_its_registry_does_not_have(monkeypatch):
+    from yeto.launch import image_manifest as im
+    from yeto.launch.trainer_image_check import check_trainer_images
+
+    monkeypatch.setenv(im.CHECK_ENV, "on")
+    asked = []
+
+    def status(ref, login=None, **kw):
+        asked.append((ref, login))
+        return answers[ref]
+
+    monkeypatch.setattr(im, "manifest_status", status)
+    answers = {pins.VERL_REGISTRY_IMAGE: (im.MISSING, "reg has no manifest")}
+    with pytest.raises(ValueError, match=r"--gpu island 0 .*trainer image .*no manifest.*YETO_IMAGE_REGISTRY"):
+        check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO())
+    answers[pins.VERL_REGISTRY_IMAGE] = (im.DENIED, "private")
+    with pytest.raises(ValueError, match="SKYPILOT_DOCKER_USERNAME"):
+        check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO())
+    answers[pins.VERL_REGISTRY_IMAGE] = (im.UNKNOWN, "not reached")
+    (warning,) = check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO())
+    assert "not checked: not reached" in warning
+    answers[pins.VERL_REGISTRY_IMAGE] = (im.PRESENT, "ok")
+    assert check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO()) == []
+    asked.clear()
+    assert check_trainer_images(_verl_args(), _sky_specs("modal:1xh100"), out=io.StringIO()) == []
+    assert asked == []  # a Modal island builds verl-build: no registry asked
+    monkeypatch.setenv(im.CHECK_ENV, "off")
+    answers[pins.VERL_REGISTRY_IMAGE] = (im.MISSING, "x")
+    assert check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2"), out=io.StringIO()) == []
+
+
+def test_the_manifest_check_uses_the_login_the_island_pulls_with(monkeypatch):
+    from yeto.launch import image_manifest as im
+    from yeto.launch.trainer_image_check import check_trainer_images
+    from yeto.rl.image_registry import image_registry
+
+    monkeypatch.setenv(im.CHECK_ENV, "on")
+    monkeypatch.setenv("SKYPILOT_DOCKER_USERNAME", "puller")
+    monkeypatch.setenv("SKYPILOT_DOCKER_PASSWORD", "pw")
+    monkeypatch.setenv("SKYPILOT_DOCKER_SERVER", image_registry().split("/", 1)[0])
+    asked = []
+    monkeypatch.setattr(im, "manifest_status", lambda ref, login=None, **kw: asked.append(login) or (im.PRESENT, ""))
+    check_trainer_images(_verl_args(), _sky_specs("aws:1xh100@us-west-2", "nebius:1xh100"), out=io.StringIO())
+    assert len(asked) == 1 and asked[0]["SKYPILOT_DOCKER_USERNAME"] == "puller"  # one ask per image
