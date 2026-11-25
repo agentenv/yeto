@@ -258,7 +258,13 @@ class IslandRecordsFenced(RuntimeError):
 
 class IslandRecordsUnconfirmed(RuntimeError):
     """The store did not confirm the island records' lock before an order (and the lease is
-    nearly over): nothing is ordered now."""
+    nearly over): nothing is ordered now. ``lease_over``: this holder's own lease has run out
+    too, so another launcher may hold the records meanwhile: nothing is torn down either.
+    Never sticky: the next check confirms the lock again (only a higher token is lost)."""
+
+    def __init__(self, message: str, *, lease_over: bool = False) -> None:
+        super().__init__(message)
+        self.lease_over = bool(lease_over)
 
 
 class IslandRecordsUnreadable(RuntimeError):
@@ -484,12 +490,11 @@ class IslandStateStore:
             except BaseException as error:  # noqa: BLE001 - the lock's errors are BaseExceptions
                 if not hasattr(error, "by"):
                     left = getattr(self.fence, "lease_left", None)
-                    if not (callable(left) and left() <= 0):
-                        raise IslandRecordsUnconfirmed(f"{what}: the island records' lock is not confirmed "
-                                                       f"({error}); nothing ordered now"[:400]) from None
-                    # not confirmed AND this holder's own lease ran out: another launcher may have
-                    # claimed the records meanwhile; treated as lost (nothing ordered or torn down)
-                    error = RuntimeError(f"lease ran out unconfirmed ({error})")
+                    over = callable(left) and left() <= 0  # another launcher may hold it meanwhile
+                    raise IslandRecordsUnconfirmed(
+                        f"{what}: the island records' lock is not confirmed ({error})"
+                        + ("; this launcher's lease ran out: nothing ordered or torn down now" if over
+                           else "; nothing ordered now"), lease_over=over) from None
                 self.fenced = error
                 self.log(f"[launcher] island state store: fenced ({error}); this controller writes no "
                          "island record any more"[:400])

@@ -883,27 +883,81 @@ def test_the_worker_returns_the_hands_off_exit_after_a_fenced_launcher_raised(mo
     assert meta["exit_code"] == launcher.ISLAND_RECORDS_LOCKED_EXIT and meta["refused_launch"] is True
 
 
-def test_an_unconfirmed_lock_whose_lease_ran_out_is_lost(tmp_path):
+def test_an_unconfirmed_lock_whose_lease_ran_out_orders_and_tears_down_nothing_until_confirmed(tmp_path):
     """Not confirmed with this holder's own lease over: another machine may hold the records
-    now. Treated as lost (sticky): nothing ordered, nothing torn down."""
+    now, so nothing is ordered or torn down. Not sticky: once the store answers and no other
+    launcher claimed the records, the next check confirms and renews (real StoreLock)."""
+    from yeto.launch.pool.store_lock import StoreLock
+
+    class Flaky(DirectoryObjectStore):
+        down = False
+
+        def _check(self):
+            if Flaky.down:
+                raise OSError("store does not answer")
+
+        def read(self, key):
+            self._check()
+            return super().read(key)
+
+        def list(self, prefix, **kw):
+            self._check()
+            return super().list(prefix, **kw)
+
+        def write(self, key, data):
+            self._check()
+            return super().write(key, data)
+
+    objects = Flaky(tmp_path / "s")
+    t = [1000.0]
+    states = lc.IslandStateStore(objects, log=lambda m: None)
+    lock, why = launcher._claim_island_records(states, wait_s=0, clock=lambda: t[0])
+    assert lock is not None
+    Flaky.down = True
+    t[0] += 60.0  # half the lease left: an outage inside it does not stop anything
+    states.guard_order("island 0")
+    t[0] += 52.0  # 8 s of lease left, within the margin: orders wait, a teardown goes on (still ours)
+    with pytest.raises(lc.IslandRecordsUnconfirmed) as inside:
+        states.guard_order("island 0")
+    assert not inside.value.lease_over and launcher._lost_island_records(states) is False
+    t[0] += 60.0  # past the lease
+    with pytest.raises(lc.IslandRecordsUnconfirmed) as over:
+        states.guard_order("island 0")
+    assert over.value.lease_over and states.fenced is None
+    assert launcher._lost_island_records(states) is True  # no teardown while it cannot tell
+    Flaky.down = False  # the store answers again; nobody claimed the records meanwhile
+    states.guard_order("island 0")  # confirmed (and renewed): orders go on
+    assert states.fenced is None and launcher._lost_island_records(states) is False
+    assert lock.renewed_at == t[0]
+    rival, refusal = launcher._claim_island_records(lc.IslandStateStore(objects, log=lambda m: None), wait_s=0,
+                                                    clock=lambda: t[0])
+    assert rival is None and "another launcher holds" in refusal
+    assert StoreLock.holder_of(objects, launcher.ISLAND_RECORDS_LOCK, now=t[0])["token"] == lock.token
+
+
+def test_down_skips_a_teardown_while_the_lease_ran_out_unconfirmed():
+    from test_controller import FakeOps
+
+    from yeto.launch.fleet import FleetController
+
     class Unconfirmed(BaseException):
         pass
 
     class Fence:
-        token, left = 1, 30.0
+        token = 1
 
         def guard(self):
             raise Unconfirmed("store does not answer")
 
         def lease_left(self):
-            return self.left
+            return 0.0
 
-    fence = Fence()
-    states = lc.IslandStateStore(DirectoryObjectStore(tmp_path / "s"), log=lambda m: None, fence=fence)
-    with pytest.raises(lc.IslandRecordsUnconfirmed):
-        states.guard_order("island 0")
-    assert states.fenced is None and launcher._lost_island_records(states) is False
-    fence.left = 0.0
-    with pytest.raises(lc.IslandRecordsFenced, match="lease ran out unconfirmed"):
-        states.guard_order("island 0")
-    assert states.fenced is not None and launcher._lost_island_records(states) is True
+    ops = FakeOps()
+    store = lc.IslandStateStore(DirectoryObjectStore("/nonexistent-t1"), log=lambda m: None, fence=Fence())
+    ctl = FleetController(learners={"r-l0-modal": ("t", 1)}, syncer=None, sky_ops=ops, poll_interval=30,
+                          recover_timeout=600, recorder=lc.FleetRecorder(store, {"r-l0-modal": lc.IslandRef(0, "modal")}))
+    ctl._down("r-l0-modal")
+    assert ops.down_calls == [] and "r-l0-modal" not in ctl.downed_clusters  # the launcher's end tears it down
+    Fence.lease_left = lambda self: 30.0  # within the lease: still ours
+    ctl._down("r-l0-modal")
+    assert ops.down_calls == ["r-l0-modal"]

@@ -519,8 +519,10 @@ def _lost_island_records(island_states) -> bool:
         island_states.guard_order("teardown")
     except IslandRecordsFenced:
         return True
-    except IslandRecordsUnconfirmed:
-        return False  # not confirmed is not lost: the last known holder tears down
+    except IslandRecordsUnconfirmed as error:
+        # not confirmed within this holder's lease: still ours, it tears down; past it: another
+        # launcher may hold the records, nothing is torn down
+        return error.lease_over
     return False
 
 
@@ -557,7 +559,11 @@ def _claim_island_records(states, *, prefix: str = ISLAND_RECORDS_LOCK, wait_s: 
                   "kept, no island is adopted", file=sys.stderr)
             return None, None
         if lock is not None:
-            busy = [o for o in others if StoreLock.holder_of(states.objects, o, now=clock()) is not None]
+            try:
+                busy = [o for o in others if StoreLock.holder_of(states.objects, o, now=clock()) is not None]
+            except BaseException:
+                lock.release()  # the other kind's locks did not read: this claim is given back
+                raise
             if busy:
                 lock.release()
                 return None, (f"another launcher of this run holds its island records under {busy[0]} (a "
@@ -771,6 +777,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     # Read by the finally block (Modal stop / tape pull) even on an early failure.
     modal_ops = None
     modal_island_ops = None
+    rids: dict = {}  # the islands submitted so far (named by an exit 13 at an order)
     modal_cfgs: dict[str, object] = {}
     # Resident ssh: trainer islands (yeto.launch.ssh_resident): the fleet supervises them
     # over SSH; the finally block releases them and verifies every node.
@@ -1451,7 +1458,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     except IslandRecordsUnconfirmed as error:
         # the store did not confirm the lock at an order: another launcher may hold it now
         hands_off_exit = ISLAND_RECORDS_UNKNOWN_EXIT
-        up = sorted(set(clusters) | set((modal_island_ops.calls if modal_island_ops is not None else None) or {}))
+        up = sorted(set(clusters) | set(rids) | set(
+            (modal_island_ops.calls if modal_island_ops is not None else None) or {}))
         print(f"[launcher] ERROR: {error}; nothing of the run is torn down here "
               f"(exit {ISLAND_RECORDS_UNKNOWN_EXIT}): launch again once the store answers (the next launcher "
               f"adopts or takes down what is up: {up or 'nothing ordered yet'})", file=sys.stderr)

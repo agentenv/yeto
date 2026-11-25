@@ -1162,7 +1162,10 @@ class FleetController:
             except lifecycle.IslandRecordsFenced:
                 pass  # the cached view below says so too
             except lifecycle.IslandRecordsUnconfirmed as error:
-                # not confirmed is not lost: nobody can claim the records without the store either
+                if error.lease_over:  # another launcher may hold the records: no teardown now
+                    print(f"[launcher] NOT tearing down {name} now: {error}", file=sys.stderr)
+                    return
+                # within this holder's lease: still ours (nobody claims the records without the store)
                 print(f"[launcher] {name}: tearing down unconfirmed ({error})", file=sys.stderr)
         fenced = self._records_fenced()
         if fenced is not None:  # the launcher that holds the island records owns this machine now
