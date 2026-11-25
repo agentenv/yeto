@@ -48,6 +48,7 @@ from .topology import DRIVER_PHASES, RATE_S, WINDOW_S, _engine, arch_of
 # tapes/syncer-shard<i>/<incarnation>/ (source "store:syncer-shard<i>/<incarnation>")
 SHARD_TAPE = re.compile(r"\.shard(\d+)\.jsonl$|(?:^|[:/])syncer-shard(\d+)/")
 VECTOR_KEYS = ("rl/fragment_versions", "sync/fragment_versions")
+MOVE_QUIET_S = 1800.0  # an island moving / relaunching quiets the stuck and blocked alerts this long at most
 ROUNDS_STALE_S = 1800.0  # no trainer up and none wrote for this long: its open rounds are stale
 ROUND_OPEN_WARN_S = 120.0  # a round open longer than max(this, 3 x median round wall time): waiting for quorum
 STUCK_MIN_S = 240.0  # a fragment not merged for max(this, 3 x the fragment period): not advancing
@@ -343,6 +344,16 @@ def config_summary(configs: dict[int, dict]) -> dict | None:
             "step0": _int(c.get("global_step")), "ts": c.get("_ts")}
 
 
+def _quiet_move(inow: dict | None, now: float) -> bool:
+    """Whether a trainer island's record says it is moving or relaunching, for no longer than
+    MOVE_QUIET_S (one stuck in ordering or starting longer than that raises the stuck and
+    blocked alerts again); one with no time on its record never quiets them."""
+    if not inow or inow.get("state") not in ("moving", "starting"):
+        return False
+    since = inow.get("state_since")
+    return since is not None and now - float(since) <= MOVE_QUIET_S
+
+
 def stuck_fragments(sy: dict, *, running: bool, behind: bool, any_merge: bool, now: float) -> list[int]:
     """Fragments with no merge for max(STUCK_MIN_S, 3 x the fragment period) while the run runs."""
     return [f for f, ts in enumerate(sy["last_merge_ts"]) if running and any_merge and not behind and ts is not None
@@ -457,9 +468,9 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         if vs:
             inferred = [max((v[f] for v in vs if f < len(v) and v[f] is not None), default=0) for f in range(p)]
     stuck = stuck_fragments(sy, running=running, behind=behind, any_merge=bool(merges), now=now)
-    if any((t.get("island_now") or {}).get("state") in ("moving", "starting") for t in trainers):
-        # an island moving or relaunching: no merge is expected until its new launch joins, so no
-        # fragment is stuck and no round is blocked yet
+    if any(_quiet_move(t.get("island_now"), now) for t in trainers):
+        # an island moving or relaunching (for at most MOVE_QUIET_S): no merge is expected until its
+        # new launch joins, so no fragment is stuck and no round is blocked yet
         stuck = []
         for r in rounds:
             r["blocked"] = False

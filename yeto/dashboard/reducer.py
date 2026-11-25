@@ -642,7 +642,12 @@ class Reducer:
         if not row or not row.get("now"):
             return None
         rec = row.get("record") or {}
-        return {**row["now"], "since": rec.get("since"), "gpu": rec.get("gpu") or row.get("gpu"),
+        stop = rec.get("stop") or {}
+        # since when it has been in this state: its lifecycle state, its launch's start or the STOP
+        # that began a move, whichever is newest
+        marks = [t for t in (rec.get("since"), rec.get("started_at"), stop.get("at")) if t is not None]
+        return {**row["now"], "since": rec.get("since"), "state_since": max(marks) if marks else None,
+                "gpu": rec.get("gpu") or row.get("gpu"),
                 "usd_per_h": rec.get("usd_per_h") or row.get("usd_per_h"), "incarnation": rec.get("incarnation"),
                 "relaunches": rec.get("relaunches"), "moves": row.get("moves") or [], "name": row.get("name"),
                 "prefix": rec.get("prefix") or row.get("prefix")}
