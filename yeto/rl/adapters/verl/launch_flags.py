@@ -20,6 +20,11 @@ from collections.abc import Mapping, Sequence
 from .pins import VERL_COMMIT, VERL_IMAGE
 
 ISLAND_ENTRY_MODULE = "yeto.rl.adapters.verl.island_entry"
+# The island Ray's CPU slots the launcher gives a verl island: max(node vCPUs, this)
+# (``launch.topology.rl_island_ray_cpus``). verl needs more slots than a small node has
+# (TQ storage units, agent / reward workers, the 10-slot trainer actor: ray_resources);
+# Ray CPUs are scheduling tokens, so the slots are raised, not the machine.
+ISLAND_RAY_MIN_CPUS = 32
 NEEDS_MILES_SOURCE = False
 DEFAULT_RL_IMAGE = VERL_IMAGE
 # ``verl-megatron-build`` is the same image plus the Megatron engine layers

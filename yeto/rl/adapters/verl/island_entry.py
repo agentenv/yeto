@@ -467,7 +467,8 @@ def island_data_slot(args: Any) -> Any:
     return DataSlot.parse(args.rl_data_slot)
 
 
-MIN_RAY_CPUS = 32  # logical scheduling slots verl needs on one GPU (TQ storage units, agent/reward workers, ...)
+# logical scheduling slots verl needs on one GPU (TQ storage units, agent/reward workers, ...)
+from .launch_flags import ISLAND_RAY_MIN_CPUS as MIN_RAY_CPUS  # noqa: E402 - one value with the launcher
 
 
 # The Ray probe below runs in a subprocess, so a cluster that is still electing
@@ -607,7 +608,10 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
     scheduling tokens here, so when the cluster reports fewer than ``min_cpus`` the
     island-local Ray (the launcher's, same temp dir, single node) is restarted with
     ``--num-cpus min_cpus``.  Only inside a Modal container (no SkyPilot runtime Ray
-    there); elsewhere it is reported, not changed.
+    there); elsewhere it is reported, not changed. The yeto launcher starts a verl
+    island's Ray with ``max(vCPUs, min_cpus)`` slots on every cloud (``launch_flags.
+    ISLAND_RAY_MIN_CPUS``), so neither applies to its islands; a Ray still short of what
+    the trainer needs stops the island (:func:`stop_on_ray_cpu_shortfall`).
     """
     address = os.environ.get("RAY_ADDRESS")
     if not address:
@@ -636,6 +640,25 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
     info["restart_rc"] = subprocess.run(cmd, shell=True).returncode
     info["after"] = _ray_resources(address)
     return info
+
+
+def stop_on_ray_cpu_shortfall(ray_info: Mapping[str, Any]) -> None:
+    """Stop before verl starts when the island Ray holds fewer CPU slots than the trainer
+    actor and its task runner need (``ray_resources.cpu_shortfall``): Ray would leave the
+    trainer pending with no error. A deterministic stop (exit 11) when the launch's
+    deterministic stop is on, else the error is raised (exit 1)."""
+    from yeto.config_errors import island_stop_exit
+
+    from .ray_resources import RayResourcesUnsatisfiable, cpu_shortfall
+
+    problem = cpu_shortfall(ray_info)
+    if problem is None:
+        return
+    error = RayResourcesUnsatisfiable(problem)
+    code = island_stop_exit(error)
+    if code is not None:
+        raise SystemExit(code) from error
+    raise error
 
 
 def algorithm_spec_dict(args) -> dict | None:
@@ -730,6 +753,7 @@ def main(argv=None) -> int:
     ray_info = ensure_ray_cpus()
     (OUTPUT / f"verl-ray-{lid}.json").write_text(json.dumps(ray_info, indent=1))
     print(f"[yeto-verl] island {lid} ray {json.dumps(ray_info)}", flush=True)
+    stop_on_ray_cpu_shortfall(ray_info)
     check_island_node_span(ray_info, getattr(args, "actor_num_nodes", 1),
                            buffer_trainer=buffer_section is not None)
     from .comm_env import island_plan as comm_env_plan

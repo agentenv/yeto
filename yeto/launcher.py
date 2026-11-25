@@ -51,7 +51,7 @@ from .launch.storage import (
 from .launch.island_tasks import data_split_plan, island_task_plan
 from .launch.args import prepare_launch_args
 from .launch import engine_cluster
-from .launch.rl_island_task import _echoes_events, make_miles_island_task
+from .launch.rl_island_task import _echoes_events, island_ray_record, make_miles_island_task
 from .launch.learner_task import make_learner_task
 from .launch.sky_ops import (
     SkySDKOps, _tail, learner_cluster_names, maybe_install_nebius_reclaim_hook, sky_cluster_name,
@@ -1920,6 +1920,8 @@ def dry_run_plan(args) -> dict:
                 rl_island_args(args, learner_id), spec).gpus_per_node
         if memory is not None:
             entry["memory_estimate"] = memory[learner_id]
+        if rl and (ray := island_ray_record(rl_island_args(args, learner_id), spec)) is not None:
+            entry["island_ray"] = ray  # a verl island only: every other plan is unchanged
         if rl:
             role = _island_role(args, specs, learner_id)
             task = _island_task(make_miles_island_task, args, spec, learner_id,
