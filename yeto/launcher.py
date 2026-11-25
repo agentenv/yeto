@@ -229,18 +229,30 @@ def _island_engine_rows(args, m) -> list[dict]:
 
 
 def _release_sky_storages(ledger, storages: dict[str, str], unverified) -> None:
-    """Release every bucket sky created for an island of this launch whose cluster is gone
-    (``sky_storage_ledger``: exact names, ledger release); a cluster whose teardown is not
-    confirmed keeps its bucket (it may still mount it). Never raises."""
+    """At the teardown: release every bucket sky created for an island of this launch
+    (``sky_storage_ledger``: exact names, sky's own delete rule, never a bucket of data sky
+    would keep). While any cluster's termination is unconfirmed nothing is touched: a
+    relaunch under another name may be the one still mounting a bucket (``yeto cleanup``
+    releases them once the clusters are gone). Never raises."""
     from .launch import sky_storage_ledger
+
+    if unverified and storages:
+        print(f"[launcher] keeping the island buckets {sorted(storages)}: termination of {sorted(unverified)} "
+              "is not confirmed (yeto cleanup releases them once the clusters are gone)", file=sys.stderr)
+        return
 
     attrs_by_name = {}
     try:
         attrs_by_name = {r.id: r.attrs for r in ledger.open_resources() if r.kind == sky_storage_ledger.KIND}
+        mounted = sky_storage_ledger.open_island_clusters(ledger)
     except Exception:  # noqa: BLE001 - a NullLedger, an unreadable ledger: nothing recorded to release
         return
-    for name, cluster in sorted(storages.items()):
-        if cluster in unverified or name not in attrs_by_name:
+    if mounted and storages:  # e.g. a failed launch's cluster: the backstop cleanup downs it first
+        print(f"[launcher] keeping the island buckets {sorted(storages)}: sky cluster(s) {mounted} are not "
+              "confirmed terminated (yeto cleanup releases them once the clusters are gone)", file=sys.stderr)
+        return
+    for name, _cluster in sorted(storages.items()):
+        if name not in attrs_by_name:
             continue
         try:
             sky_storage_ledger.release(ledger, name, attrs_by_name[name], by="teardown")

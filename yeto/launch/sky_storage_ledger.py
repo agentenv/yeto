@@ -13,9 +13,22 @@ Only a bucket whose name is exactly the name yeto derives from the run's cluster
 recorded or deleted (:func:`yeto_owned`); a mount with a source (an existing bucket, the
 checkpoint store) is never recorded: sky did not create it.
 
-Release: ``sky storage delete <name>`` (sky's own record and credentials). When sky has no
-record of it, a non-persistent storage was deleted by ``sky down`` of its cluster; an AWS
-one is checked on S3 by its exact name (and emptied and deleted if it is still there).
+What the bucket holds: the island's completed groups (``--rl-completed-groups-path``),
+mounted with ``sync_on_reconstruction`` so a relaunch of the same cluster (the fleet
+controller's recovery, which reuses the task and the name) re-syncs them. It is a
+non-persistent storage (``persistent=False``): sky deletes it, contents included, when it
+downs the cluster. The release keeps to that rule and never deletes more than sky would:
+
+* only at a real teardown (``yeto down`` / the launcher's end / ``yeto cleanup``), never at a
+  relaunch, never with ``--keep`` or a hands-off launcher; and only once every island
+  cluster of the run is confirmed terminated (a cluster that may still mount it keeps it);
+* a ``persistent`` storage is never deleted (sky down keeps it): ``release_skipped``;
+* ``sky storage delete <name>`` while sky has its record: what sky down does for it;
+* sky has no record: on another cloud than AWS, sky down deleted it with its cluster; on
+  AWS the exact bucket name is looked at on S3 (an explicit regional AWS endpoint, never
+  the run's R2 / MinIO endpoint, and never without a region): absent is released, an
+  empty bucket (a launch that never got an instance) is deleted, a bucket that holds
+  objects is NOT emptied: ``release_skipped`` (``nonempty``), left for a person.
 """
 
 from __future__ import annotations
@@ -63,8 +76,26 @@ def record(ledger: Any, cluster: str, task: Any, *, cluster_prefix: str, cloud: 
     return names
 
 
+def open_island_clusters(ledger: Any) -> list[str]:
+    """The run's island sky clusters still open in ``ledger`` (not a sampler pool's): any
+    of them may still mount an island bucket, so no bucket is touched while one is listed."""
+    from ..cost.cleanup import pool_owned
+
+    return sorted(str(c.id) for c in ledger.open_resources() if c.kind == "sky_cluster" and not pool_owned(c))
+
+
 def _sky_not_found(error: BaseException) -> bool:
     return isinstance(error, ValueError) and "not found" in str(error).lower()
+
+
+RELEASED, SKIPPED, FAILED = "released", "skipped", "failed"
+_AWS_S3_ENDPOINT = re.compile(r"https://s3\.[a-z]{2}(-[a-z]+)+-\d\.amazonaws\.com")
+
+
+def aws_s3_endpoint(region: str | None) -> str | None:
+    """The regional AWS S3 endpoint of ``region``; None without a (well-formed) region."""
+    endpoint = f"https://s3.{region}.amazonaws.com" if region else ""
+    return endpoint if _AWS_S3_ENDPOINT.fullmatch(endpoint) else None
 
 
 def _s3_client(region: str | None) -> Any:
@@ -72,8 +103,10 @@ def _s3_client(region: str | None) -> Any:
     ``AWS_ENDPOINT_URL`` the run exported for its R2 / MinIO store."""
     import boto3
 
-    region = region or "us-east-1"
-    return boto3.client("s3", region_name=region, endpoint_url=f"https://s3.{region}.amazonaws.com")
+    endpoint = aws_s3_endpoint(region)
+    if endpoint is None:
+        raise ValueError(f"no AWS region for the bucket (got {region!r})")
+    return boto3.client("s3", region_name=region, endpoint_url=endpoint)
 
 
 def _error_code(error: BaseException) -> str:
@@ -81,58 +114,76 @@ def _error_code(error: BaseException) -> str:
     return str((response.get("Error") or {}).get("Code") or "")
 
 
-def delete_s3_bucket(name: str, client: Any) -> str:
-    """Empty and delete the S3 bucket ``name``; ``"absent"`` when it does not exist,
-    ``"deleted"`` when it did. Other errors raise."""
+def delete_empty_s3_bucket(name: str, client: Any) -> str:
+    """``"absent"`` when the S3 bucket ``name`` does not exist, ``"deleted"`` when it was
+    empty and is now deleted, ``"nonempty"`` when it holds objects (left as it is: never
+    emptied here). Other errors raise."""
     try:
         client.head_bucket(Bucket=name)
     except Exception as error:  # noqa: BLE001 - botocore ClientError
         if _error_code(error) in ("404", "NoSuchBucket", "NotFound"):
             return "absent"
         raise
-    paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=name):
-        keys = [{"Key": o["Key"]} for o in page.get("Contents") or []]
-        if keys:
-            client.delete_objects(Bucket=name, Delete={"Objects": keys, "Quiet": True})
+    listed = client.list_objects_v2(Bucket=name, MaxKeys=1)
+    if listed.get("KeyCount") or listed.get("Contents"):
+        return "nonempty"
     client.delete_bucket(Bucket=name)
     return "deleted"
 
 
 def delete(name: str, attrs: dict[str, Any], *, sky: Any = None,
-           s3_client: Callable[[str | None], Any] | None = None) -> tuple[bool, str]:
-    """Release the bucket ``name`` recorded with ``attrs``: ``(released, what happened)``."""
+           s3_client: Callable[[str | None], Any] | None = None) -> tuple[str, str]:
+    """Release the bucket ``name`` recorded with ``attrs`` (its clusters are gone):
+    ``(RELEASED | SKIPPED | FAILED, what happened)``."""
     if not yeto_owned(name, attrs.get("cluster_prefix")):
-        return False, f"refused: {name!r} is not the bucket name of run prefix {attrs.get('cluster_prefix')!r}"
+        return FAILED, f"refused: {name!r} is not the bucket name of run prefix {attrs.get('cluster_prefix')!r}"
+    if attrs.get("persistent"):
+        return SKIPPED, f"persistent storage {name}: sky down keeps it, so does yeto; delete it by hand if unused"
     if sky is None:
         import sky
     try:
         sky.stream_and_get(sky.storage_delete(name))
-        return True, f"sky storage delete {name}"
+        return RELEASED, f"sky storage delete {name}"
     except Exception as error:  # noqa: BLE001
         if not _sky_not_found(error):
-            return False, f"sky storage delete {name}: {type(error).__name__}: {str(error)[:200]}"
+            return FAILED, f"sky storage delete {name}: {type(error).__name__}: {str(error)[:200]}"
     cloud = str(attrs.get("cloud") or "").lower()
     if cloud != "aws":  # sky down deleted the non-persistent storage of its cluster
-        return True, f"sky has no storage {name} (deleted with its cluster)"
+        return RELEASED, f"sky has no storage {name} (deleted with its cluster)"
+    region = attrs.get("region")
+    if aws_s3_endpoint(region) is None:
+        return FAILED, f"S3 bucket {name}: no AWS region recorded ({region!r}); not looked up"
     try:
-        done = delete_s3_bucket(name, (s3_client or _s3_client)(attrs.get("region")))
+        client = (s3_client or _s3_client)(region)
+        endpoint = str(getattr(getattr(client, "meta", None), "endpoint_url", "") or "")
+        if endpoint and endpoint.rstrip("/") != aws_s3_endpoint(region):
+            return FAILED, f"S3 bucket {name}: refused, the client talks to {endpoint}, not AWS S3 in {region}"
+        done = delete_empty_s3_bucket(name, client)
     except Exception as error:  # noqa: BLE001
-        return False, (f"S3 bucket {name}: {type(error).__name__}: {str(error)[:200]}; delete it by hand: "
-                       f"aws s3 rb s3://{name} --force")
-    return True, f"S3 bucket {name}: {done}"
+        return FAILED, (f"S3 bucket {name}: {type(error).__name__}: {str(error)[:200]}; check it, then: "
+                        f"aws s3 rb s3://{name} (AWS region {region})")
+    if done == "nonempty":
+        return SKIPPED, (f"S3 bucket {name} holds objects (sky has no record of it): not emptied; check it and "
+                         f"delete it by hand: aws s3 rb s3://{name} --force (AWS region {region})")
+    return RELEASED, f"S3 bucket {name}: {done}"
 
 
 def release(ledger: Any, name: str, attrs: dict[str, Any], *, by: str, sky: Any = None,
-            s3_client: Callable[[str | None], Any] | None = None) -> bool:
-    """:func:`delete`, then the ledger's release (or release_failed) of ``name``."""
-    ok, what = delete(name, attrs, sky=sky, s3_client=s3_client)
-    print(f"[launcher] {'released' if ok else 'NOT released'} sky storage: {what}", flush=True)
+            s3_client: Callable[[str | None], Any] | None = None) -> str:
+    """:func:`delete`, then the ledger's release / release_skipped / release_failed."""
+    status, what = delete(name, attrs, sky=sky, s3_client=s3_client)
+    print(f"[launcher] sky storage {status}: {what}", flush=True)
+    record_outcome(ledger, name, status, what, by=by)
+    return status
+
+
+def record_outcome(ledger: Any, name: str, status: str, what: str, *, by: str) -> None:
     try:
-        if ok:
+        if status == RELEASED:
             ledger.released(KIND, name, name, by=by, result=what)
+        elif status == SKIPPED:
+            ledger.release_skipped(KIND, name, name, what)
         else:
             ledger.release_failed(KIND, name, name, what)
     except Exception:  # noqa: BLE001 - the ledger never blocks a teardown
         pass
-    return ok

@@ -9,7 +9,7 @@ entries listed here - it never looks resources up by name pattern.
 
 Record shape (one JSON object per line)::
 
-    {"op": "intent"|"create"|"release"|"release_failed", "kind": <kind>,
+    {"op": "intent"|"create"|"release"|"release_failed"|"release_skipped", "kind": <kind>,
      "id": <provider id or None>, "name": <display name>, "ts": <unix>, "attrs": {...}}
 
 ``intent`` is written right before a create whose id is only known
@@ -158,6 +158,11 @@ class ResourceLedger:
     def release_failed(self, kind: str, rid: str | None, name: str | None, error: str) -> None:
         self._rec("release_failed", kind, rid, name, {"error": str(error)[:500]})
 
+    def release_skipped(self, kind: str, rid: str | None, name: str | None, reason: str) -> None:
+        """A release deliberately not done (a bucket that holds data yeto must not delete): the
+        resource stays open, its ``release_error`` says why, for a person to decide."""
+        self._rec("release_skipped", kind, rid, name, {"reason": str(reason)[:500]})
+
     # -- reading ---------------------------------------------------------------
 
     def records(self) -> list[dict[str, Any]]:
@@ -198,7 +203,7 @@ class ResourceLedger:
                 log.warning("ledger %s: %s %s %s has no valid ts (%r): taken as %s", self.path, op, kind,
                             rid or name, r.get("ts"), floor)
                 ts = floor if floor is not None else 0.0
-            elif op in ("release", "release_failed") and floor is not None and raw < floor:
+            elif op in ("release", "release_failed", "release_skipped") and floor is not None and raw < floor:
                 log.warning("ledger %s: release of %s %s stamped %.0f s before an earlier record "
                             "(wall clock stepped back): billed to %s", self.path, kind, rid or name,
                             floor - raw, floor)
@@ -220,13 +225,15 @@ class ResourceLedger:
                     continue
                 created = prev.created_at if prev is not None else ts
                 res[k] = Resource(kind, rid, name, created, {**(prev.attrs if prev else {}), **attrs})
-            elif op in ("release", "release_failed"):
+            elif op in ("release", "release_failed", "release_skipped"):
                 k = _key(kind, rid, name)
                 if k not in res:
                     continue
                 if op == "release":
                     res[k].released_at = ts
                     res[k].release_error = None
+                elif op == "release_skipped":
+                    res[k].release_error = f"release_skipped: {attrs.get('reason')}"
                 else:
                     res[k].release_error = attrs.get("error")
         # a stopped app ends every FunctionCall in it
