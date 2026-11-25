@@ -228,6 +228,29 @@ def _island_engine_rows(args, m) -> list[dict]:
     return [r for r in island_engine.records(args, rl_island_count(args)) if r["island"] == m]
 
 
+def _record_sky_storage_regions(ledger, storages: dict[str, str], results) -> None:
+    """Add the region sky placed an island in to its bucket rows (a re-recorded create only
+    adds fields): a row recorded without one (the island named no region) then needs no
+    lookup at its release. Never raises."""
+    from .launch import sky_storage_ledger
+
+    try:
+        open_rows = {r.id: r for r in ledger.open_resources() if r.kind == sky_storage_ledger.KIND}
+    except Exception:  # noqa: BLE001 - a NullLedger
+        return
+    for name, cluster in sorted(storages.items()):
+        row = open_rows.get(name)
+        result = results.get(cluster) if isinstance(results, dict) else None
+        handle = result[1] if isinstance(result, tuple) and len(result) > 1 else None
+        region = getattr(getattr(handle, "launched_resources", None), "region", None)
+        if row is None or row.attrs.get("region") or not isinstance(region, str) or not region:
+            continue
+        try:
+            ledger.created(sky_storage_ledger.KIND, name, name, region=region, region_from="launched cluster")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _release_sky_storages(ledger, storages: dict[str, str], unverified) -> None:
     """At the teardown: release every bucket sky created for an island of this launch
     (``sky_storage_ledger``: exact names, sky's own delete rule, never a bucket of data sky
@@ -1108,6 +1131,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         for name in list(rids) + list(modal_cfgs) + sorted(ssh_names):
             if name not in errors:
                 clusters.append(name)
+        _record_sky_storage_regions(cost_ledger, sky_storages, results)
         for name, (_m, (kind, _handle)) in rids.items():  # sky clusters (a failed launch may still have left one up)
             # an ordered cluster carries what prices it (the unified table's row, as a sky sampler's)
             cost_ledger.created("sky_cluster", name, name,

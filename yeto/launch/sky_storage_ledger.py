@@ -98,15 +98,47 @@ def aws_s3_endpoint(region: str | None) -> str | None:
     return endpoint if _AWS_S3_ENDPOINT.fullmatch(endpoint) else None
 
 
+AWS_S3_GLOBAL_ENDPOINT = "https://s3.amazonaws.com"
+
+
 def _s3_client(region: str | None) -> Any:
-    """An S3 client on AWS itself: the explicit regional endpoint wins over an
-    ``AWS_ENDPOINT_URL`` the run exported for its R2 / MinIO store."""
+    """An S3 client on AWS itself: the explicit endpoint (regional, or the global one for a
+    read-only lookup when ``region`` is None) wins over an ``AWS_ENDPOINT_URL`` the run
+    exported for its R2 / MinIO store."""
     import boto3
 
+    if region is None:  # only ever used to look a bucket up (locate_bucket), never to delete
+        return boto3.client("s3", region_name="us-east-1", endpoint_url=AWS_S3_GLOBAL_ENDPOINT)
     endpoint = aws_s3_endpoint(region)
     if endpoint is None:
         raise ValueError(f"no AWS region for the bucket (got {region!r})")
     return boto3.client("s3", region_name=region, endpoint_url=endpoint)
+
+
+def _endpoint_of(client: Any) -> str:
+    return str(getattr(getattr(client, "meta", None), "endpoint_url", "") or "").rstrip("/")
+
+
+def _bucket_region_header(source: Any) -> str | None:
+    meta = (getattr(source, "response", None) or source or {}).get("ResponseMetadata") or {}
+    headers = {str(k).lower(): v for k, v in (meta.get("HTTPHeaders") or {}).items()}
+    return headers.get("x-amz-bucket-region") or None
+
+
+def locate_bucket(name: str, client: Any) -> str | None:
+    """The AWS region of the S3 bucket ``name`` from one read-only HeadBucket on the global
+    endpoint; None when it does not exist (bucket names are global: any endpoint answers
+    404). Other answers without a region raise."""
+    try:
+        response = client.head_bucket(Bucket=name)
+    except Exception as error:  # noqa: BLE001 - botocore ClientError (301 / 400 carry the region)
+        if _error_code(error) in ("404", "NoSuchBucket", "NotFound"):
+            return None
+        region = _bucket_region_header(error)
+        if region:
+            return str(region)
+        raise
+    return str(_bucket_region_header(response) or "us-east-1")
 
 
 def _error_code(error: BaseException) -> str:
@@ -150,13 +182,25 @@ def delete(name: str, attrs: dict[str, Any], *, sky: Any = None,
     cloud = str(attrs.get("cloud") or "").lower()
     if cloud != "aws":  # sky down deleted the non-persistent storage of its cluster
         return RELEASED, f"sky has no storage {name} (deleted with its cluster)"
-    region = attrs.get("region")
+    region = attrs.get("region") or None
+    make = s3_client or _s3_client
+    if region is None:  # sky chose the region: one read-only lookup on AWS's global endpoint
+        try:
+            lookup = make(None)
+            if _endpoint_of(lookup) and _endpoint_of(lookup) != AWS_S3_GLOBAL_ENDPOINT:
+                return FAILED, f"S3 bucket {name}: refused, the lookup client talks to {_endpoint_of(lookup)}, not AWS S3"
+            region = locate_bucket(name, lookup)
+        except Exception as error:  # noqa: BLE001
+            return FAILED, f"S3 bucket {name}: no region recorded and the lookup failed: {type(error).__name__}: " \
+                           f"{str(error)[:200]}"
+        if region is None:
+            return RELEASED, f"S3 bucket {name}: absent"
     if aws_s3_endpoint(region) is None:
-        return FAILED, f"S3 bucket {name}: no AWS region recorded ({region!r}); not looked up"
+        return FAILED, f"S3 bucket {name}: no AWS region ({region!r}); not looked up"
     try:
-        client = (s3_client or _s3_client)(region)
-        endpoint = str(getattr(getattr(client, "meta", None), "endpoint_url", "") or "")
-        if endpoint and endpoint.rstrip("/") != aws_s3_endpoint(region):
+        client = make(region)
+        endpoint = _endpoint_of(client)
+        if endpoint and endpoint != aws_s3_endpoint(region):
             return FAILED, f"S3 bucket {name}: refused, the client talks to {endpoint}, not AWS S3 in {region}"
         done = delete_empty_s3_bucket(name, client)
     except Exception as error:  # noqa: BLE001

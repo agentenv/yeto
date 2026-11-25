@@ -130,11 +130,13 @@ def test_the_s3_fallback_never_reaches_another_endpoint_or_runs_without_a_region
     pinned to the regional AWS endpoint; no region, or a client on another endpoint, and
     nothing is looked up at all."""
     made = []
-    for region in (None, "", "not a region"):
-        status, what = ssl.delete(NAME, {**_attrs(), "region": region}, sky=FakeSky(),
-                                  s3_client=lambda r: made.append(r))
-        assert status == ssl.FAILED and "no AWS region" in what
-    assert made == []
+    status, what = ssl.delete(NAME, {**_attrs(), "region": "not a region"}, sky=FakeSky(),
+                              s3_client=lambda r: made.append(r))
+    assert status == ssl.FAILED and "no AWS region" in what and made == []
+    # no region recorded: the lookup client must be AWS's global endpoint too
+    r2_lookup = FakeS3({NAME: []}, endpoint="https://0123abcd.r2.cloudflarestorage.com")
+    status, what = ssl.delete(NAME, {**_attrs(), "region": None}, sky=FakeSky(), s3_client=lambda r: r2_lookup)
+    assert status == ssl.FAILED and "not AWS S3" in what and r2_lookup.calls == []
     r2 = FakeS3({NAME: []}, endpoint="https://0123abcd.r2.cloudflarestorage.com")
     status, what = ssl.delete(NAME, _attrs(), sky=FakeSky(), s3_client=lambda r: r2)
     assert status == ssl.FAILED and "not AWS S3" in what and r2.calls == [] and NAME in r2.buckets
@@ -145,8 +147,89 @@ def test_the_s3_fallback_never_reaches_another_endpoint_or_runs_without_a_region
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
     assert ssl._s3_client("us-west-2").meta.endpoint_url == "https://s3.us-west-2.amazonaws.com"
+    assert ssl._s3_client(None).meta.endpoint_url == "https://s3.amazonaws.com"  # the lookup: global AWS
     with pytest.raises(ValueError, match="no AWS region"):
-        ssl._s3_client(None)
+        ssl._s3_client("not a region")
+
+
+class FakeAWS:
+    """S3 as seen from AWS's global endpoint (region None) and the regional ones: a
+    HeadBucket on the global endpoint of a bucket in another region answers 301 with the
+    bucket's region in ``x-amz-bucket-region``."""
+
+    def __init__(self, buckets):
+        self.buckets = buckets  # name -> (region, keys)
+        self.clients = []
+
+    def __call__(self, region):
+        aws = self
+        endpoint = "https://s3.amazonaws.com" if region is None else f"https://s3.{region}.amazonaws.com"
+
+        class Client(FakeS3):
+            def head_bucket(self, Bucket):
+                self.calls.append(("head", Bucket))
+                if Bucket not in aws.buckets:
+                    raise FakeS3Error("404")
+                where = aws.buckets[Bucket][0]
+                header = {"ResponseMetadata": {"HTTPHeaders": {"x-amz-bucket-region": where}}}
+                if (region or "us-east-1") != where:
+                    error = FakeS3Error("301")
+                    error.response.update(header)
+                    raise error
+                return header
+
+            def list_objects_v2(self, Bucket, MaxKeys):
+                assert region is not None, "the global endpoint is only used to look the bucket up"
+                self.calls.append(("list", Bucket))
+                keys = aws.buckets[Bucket][1][:MaxKeys]
+                return {"KeyCount": len(keys)}
+
+            def delete_bucket(self, Bucket):
+                assert region == aws.buckets[Bucket][0], "a delete goes to the bucket's own regional endpoint"
+                self.calls.append(("delete_bucket", Bucket))
+                del aws.buckets[Bucket]
+
+        client = Client(endpoint=endpoint)
+        self.clients.append((region, client))
+        return client
+
+
+def test_a_row_without_a_region_is_located_on_the_global_endpoint_then_handled_by_the_rules():
+    """sky chose the region (the island named none) and the row has no region: one read-only
+    HeadBucket on AWS's global endpoint. Gone (sky down deleted it): released as absent,
+    not a release_failed forever. Still there: its region from the answer, then the regional
+    rules (an empty bucket deleted there; one that holds objects left)."""
+    no_region = {**_attrs(), "region": None}
+    aws = FakeAWS({})
+    status, what = ssl.delete(NAME, no_region, sky=FakeSky(), s3_client=aws)
+    assert status == ssl.RELEASED and "absent" in what and [r for r, _c in aws.clients] == [None]
+    aws = FakeAWS({NAME: ("us-east-2", [])})
+    status, what = ssl.delete(NAME, no_region, sky=FakeSky(), s3_client=aws)
+    assert status == ssl.RELEASED and "deleted" in what and NAME not in aws.buckets
+    assert [r for r, _c in aws.clients] == [None, "us-east-2"]
+    aws = FakeAWS({NAME: ("eu-west-1", ["groups/0.json"])})
+    status, what = ssl.delete(NAME, no_region, sky=FakeSky(), s3_client=aws)
+    assert status == ssl.SKIPPED and "holds objects" in what and NAME in aws.buckets
+    aws = FakeAWS({NAME: ("us-east-1", [])})  # in us-east-1 the global endpoint answers 200
+    status, what = ssl.delete(NAME, no_region, sky=FakeSky(), s3_client=aws)
+    assert status == ssl.RELEASED and [r for r, _c in aws.clients] == [None, "us-east-1"]
+
+
+def test_the_region_sky_chose_is_added_to_the_bucket_row_once_the_cluster_is_up(tmp_path):
+    from yeto import launcher
+
+    led = ResourceLedger(tmp_path / "resources.jsonl")
+    led.created("sky_storage", NAME, NAME, **{**_attrs(), "region": None})
+    handle = types.SimpleNamespace(launched_resources=types.SimpleNamespace(region="us-east-2"))
+    launcher._record_sky_storage_regions(led, {NAME: "c0"}, {"c0": (1, handle)})
+    (row,) = led.open_resources()
+    assert row.attrs["region"] == "us-east-2" and row.attrs["cluster_prefix"] == PREFIX  # fields only added
+    # a recorded region is kept; a failed launch (no result) adds nothing; never raises
+    launcher._record_sky_storage_regions(led, {NAME: "c0"}, {"c0": (1, types.SimpleNamespace(
+        launched_resources=types.SimpleNamespace(region="eu-west-1")))})
+    launcher._record_sky_storage_regions(led, {NAME: "c0"}, {})
+    launcher._record_sky_storage_regions(object(), {NAME: "c0"}, {})
+    assert led.open_resources()[0].attrs["region"] == "us-east-2"
 
 
 def test_record_takes_only_named_storages_sky_creates_for_this_prefix(tmp_path):
@@ -308,3 +391,31 @@ def test_a_kept_launch_never_touches_the_bucket(tmp_path, monkeypatch):
     led, expected, created, deleted = _capacity_failure(tmp_path, monkeypatch, keep=True)
     assert deleted == [] and expected in created
     assert [r.id for r in led.open_resources() if r.kind == "sky_storage"] == [expected]
+
+
+def test_a_launched_island_without_a_region_gets_sky_s_region_on_its_bucket_row(tmp_path, monkeypatch):
+    """End to end: an AWS --spot island that names no region; once sky placed it, its bucket
+    row carries the region sky chose (so the release needs no lookup)."""
+    from test_trainer_launch_render import _Provisioned, _setup
+
+    from yeto import launcher
+
+    monkeypatch.setenv("YETO_PREFLIGHT_MODEL", "off")
+    monkeypatch.setenv("YETO_SKY_SERVER_CHECK", "off")
+    ledger_path = tmp_path / "resources.jsonl"
+    monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(ledger_path))
+    _setup(monkeypatch, tmp_path, [])
+    sky = sys.modules["sky"]
+    handle = types.SimpleNamespace(head_ip="10.0.0.1",
+                                   launched_resources=types.SimpleNamespace(region="us-east-2"))
+    sky.launch = lambda task, **kw: ("launch", kw.get("cluster_name"))
+    sky.stream_and_get = lambda rid: (1, handle)
+    args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync", "--spot"),
+                          gpu="aws:1xh100")
+    args.keep, args.recover_timeout, args.controller_poll = True, 0.0, 30.0
+    try:
+        launcher.run(args)
+    except _Provisioned:
+        pass
+    (row,) = [r for r in ResourceLedger(ledger_path).resources() if r.kind == "sky_storage"]
+    assert row.id == _rl_checkpoint_storage_name(args.cluster_prefix, 0) and row.attrs["region"] == "us-east-2"
