@@ -316,3 +316,44 @@ def test_shadow_the_provider_launches_what_the_removed_cli_launched(tmp_path, mo
         assert set(task.secrets) == old["secrets"] and task.secrets["MODAL_TOKEN_ID"] == "id-x"
         assert old["detached_no_down"] and kw == {"down": True}  # the intended difference (docstring)
         assert ops.down(name) is True
+
+
+def test_the_watchdog_releases_only_clusters_of_its_own_run(tmp_path):
+    """Ownership on the watchdog's exact_prefix path (REV on #765): a cluster an earlier
+    watchdog process of this run launched is adopted and can be released; a cluster of
+    another run under the same name pattern, or one opened by hand, is never adopted,
+    released or downed."""
+    t = [1_000_000.0]
+    clock = lambda: t[0]  # noqa: E731
+    advance = lambda s: t.__setitem__(0, t[0] + s)  # noqa: E731
+    sky = FakeSky()
+    original = sky.launch
+
+    def launch_up(task, cluster_name, **kw):
+        rid = original(task, cluster_name, **kw)
+        sky.up(cluster_name)
+        return rid
+
+    sky.launch = launch_up
+    cands = wd.candidates(spot_only=True)[:1]
+
+    def ops_for(run, where):
+        args = SimpleNamespace(run_id=run, cluster_prefix="spot-w", yaml=None, secret=[], starting_timeout_s=600,
+                               launch_timeout_s=1800, dir=str(tmp_path / where), own_name_re="spot")
+        (tmp_path / where).mkdir(exist_ok=True)
+        return wd.provider_ops(args, cands, [f"RUN_ID={run}"], sky=sky, clock=clock, sleep=advance)
+
+    earlier = ops_for("runw", "earlier")  # an earlier watchdog process of this run (its record is lost)
+    assert earlier.launch("spot-w-1", cands[0], 1800) == (True, "")
+    other = ops_for("runx", "other")  # another run's watchdog with the same cluster prefix
+    assert other.launch("spot-w-7", cands[0], 1800) == (True, "")
+    sky.clusters["spot-w-debug"] = {"name": "spot-w-debug", "status": "UP", "kw": {},
+                                    "handle": SimpleNamespace(head_ip="198.51.100.9", ssh_user="ubuntu")}
+    mine = ops_for("runw", "mine")
+    owned = {name for _, name in mine.provider.run_tickets()}
+    assert "spot-w-1" in owned and not owned & {"spot-w-7", "spot-w-debug"}
+    assert mine.down("spot-w-1") is True and "spot-w-1" not in sky.clusters
+    for foreign in ("spot-w-7", "spot-w-debug"):
+        assert mine.down(foreign) is False  # refused: never this run's
+        assert foreign in sky.clusters
+    assert not [c for c in sky.calls if c[0] == "down" and c[1] in ("spot-w-7", "spot-w-debug")]
