@@ -1184,11 +1184,31 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
         if not os.environ.get(env_name):
             problems.append(f"sky provider: secret variable {env_name} is not set")
     problems += aws_env_problems(provider, dict(os.environ))
+    problems += offer_docker_problems(provider)
     try:
         install_request_env_scope()  # local only: builds a request body, sends nothing
     except RuntimeError as error:
         problems.append(f"sky provider: {error}")
     problems += verda_server_problems(provider)
+    return problems
+
+
+def offer_docker_problems(provider: SkyProvider) -> list[str]:
+    """An offer whose ``image_id`` names a docker image the VM's docker cannot unpack
+    (an overlay-unsafe pin without a repack: trainer_image_check.vm_pull_refusal), with
+    the digest to use instead; refused before any order (every pull would fail)."""
+    from ..trainer_image_check import vm_pull_refusal  # noqa: PLC0415
+
+    problems = []
+    for offer in provider.offers:
+        image = offer.resources.get("image_id")
+        if isinstance(image, dict):  # {region: vm image, "docker": image}
+            image = image.get("docker")
+        if not isinstance(image, str) or not image.startswith("docker:"):
+            continue
+        why = vm_pull_refusal(image, f"docker on the VM of sky offer {offer.key}")
+        if why:
+            problems.append(f"sky provider: {why}")
     return problems
 
 
@@ -1246,7 +1266,8 @@ def start_problems(cfg: dict[str, Any]) -> list[str]:
         provider = from_config(cfg, str(cfg.get("run") or cfg.get("shard_base")), sky=object())
     except (ValueError, TypeError, KeyError) as error:
         return [str(error)]
-    problems = aws_env_problems(provider, dict(os.environ)) + verda_server_problems(provider)
+    problems = (aws_env_problems(provider, dict(os.environ)) + offer_docker_problems(provider)
+                + verda_server_problems(provider))
     try:
         install_request_env_scope()
     except RuntimeError as error:

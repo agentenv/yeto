@@ -625,7 +625,14 @@ def test_inventory_findings_before_any_ssh():
     assert got[("b300-0", "interface")].status == cp.WARN
     assert got[("b300-1", "address")].status == cp.FAIL
     assert got[("b300-1", "env")].status == cp.FAIL
-    assert got[("b300-1", "image")].status == cp.WARN and "make_layer" in got[("b300-1", "image")].fix
+    # the fix names the overlay-safe digest to use (the repack of BAD_IMAGE)
+    assert got[("b300-1", "image")].status == cp.WARN
+    assert "yeto-miles-k31@sha256:2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14" in \
+        got[("b300-1", "image")].fix
+    # an unsafe image without a repack names the image with the same files; an unknown one keeps the hint
+    unrepacked = "ghcr.io/owner/yeto-miles-k31@sha256:fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325"
+    assert "@sha256:2abbbb00" in cp._overlay_fix(unrepacked)
+    assert "make_layer" in cp._overlay_fix("ghcr.io/owner/other@sha256:" + "c" * 64)
 
 
 def test_overlay_unsafe_image_on_overlay_storage_fails_the_docker_check():

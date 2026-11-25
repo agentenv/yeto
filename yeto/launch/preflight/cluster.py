@@ -81,9 +81,24 @@ OVERLAY_UNSAFE_DIGESTS = (
     "63ad0d2a9e70a139221050f51214f073a5bc53f66c0c57090ae926012e439c04",
     "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b",
     "028e505de58552e6ede8926c8bf8ab8451e8e749cfc35afc1eb70e8d362c65b3",
+    "fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325",
 )
 OVERLAY_DRIVERS = ("overlay2", "overlayfs", "overlay")
 TOPO_RANK = {"PIX": 0, "PXB": 1, "PHB": 2, "NODE": 3, "SYS": 4}
+
+
+def _overlay_fix(image: str) -> str:
+    """The fix line of an overlay-unsafe image: the overlay-safe digest to use (miles pins
+    ``overlay_safe_alternative``), else the rebuild hint."""
+    from ...rl.engine import backends
+
+    try:
+        other = backends.module("pins", "miles").overlay_safe_alternative(image)
+    except Exception:  # noqa: BLE001 - a hint only
+        other = None
+    if other:
+        return f"use {other[0]} ({other[1]})"
+    return "use an image rebuilt with docker/miles-ports/make_layer.py (or a repacked layer)"
 
 
 @dataclass(frozen=True)
@@ -753,7 +768,7 @@ def inventory_checks(nodes: Sequence[Node], image: str | None) -> list[Check]:
             out.append(Check(node.name, "image", WARN,
                              f"image {img[:80]} has a same-layer whiteout that overlay2 / containerd "
                              "overlayfs cannot unpack ('not a directory')",
-                             "use an image rebuilt with docker/miles-ports/make_layer.py (or a repacked layer)"))
+                             _overlay_fix(img)))
     return out
 
 
@@ -1070,7 +1085,7 @@ def _docker_checks(state: NodeState, req: Requirements, add: Callable[..., None]
     bad = any(d in img for d in OVERLAY_UNSAFE_DIGESTS)
     if driver in OVERLAY_DRIVERS and bad:
         add("docker", FAIL, detail + f": the image cannot unpack on {driver}",
-            "use the image rebuilt with docker/miles-ports/make_layer.py")
+            _overlay_fix(img))
     elif driver in OVERLAY_DRIVERS:
         add("docker", PASS, detail + ": overlay storage refuses images with a same-layer whiteout "
             "('not a directory' on pull); the pull check below confirms the image")
