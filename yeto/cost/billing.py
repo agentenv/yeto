@@ -416,8 +416,13 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
                                     "" if rate is not None else "SSH nodes without price_per_card_hour"))
         elif r.kind == "sky_cluster":
             rate = r.attrs.get("usd_per_hour")
-            rate = float(rate) if rate is not None else rates.table_rate(r.attrs.get("cloud") or "", r.attrs)
             note = ""
+            if rate is None and r.attrs.get("price_usd_h") is not None:
+                # a sampler pool's cluster records the offer it was launched with: its price
+                # is per node, a group cluster (num_nodes) bills every node
+                rate = float(r.attrs["price_usd_h"]) * max(1, int(r.attrs.get("num_nodes") or 1))
+                note = "the pool offer's price"
+            rate = float(rate) if rate is not None else rates.table_rate(r.attrs.get("cloud") or "", r.attrs)
             if rate is None and r.attrs.get("cloud") and r.attrs.get("gpu"):
                 rate = prices.node_usd_h(str(r.attrs["cloud"]), r.attrs["gpu"], r.attrs.get("gpus"),
                                          spot=r.attrs.get("use_spot"), region=r.attrs.get("region"))
