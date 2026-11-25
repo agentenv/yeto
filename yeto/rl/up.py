@@ -2625,12 +2625,20 @@ class Run:
     def _unmerged_shards_problem(self, argv: list[str], pool: int) -> str | None:
         """A buffer trainer without ``--rl-buffer-shards`` whose store does not merge the
         pool's shards by itself (:meth:`shard_problem`); None for a relay trainer, a
-        trainer that is no buffer reader, and an ``oss://`` store (its trainer merges
+        trainer that is no buffer reader, synced trainers that name their shards per
+        island (``--rl-island-buffer-shards``), shards named in the run's environment
+        (``YETO_SAMPLE_BUFFER_SHARDS``), and an ``oss://`` store (its trainer merges
         every shard it finds)."""
         role = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--rl-sample-role"),
                     next((a.split("=", 1)[1] for a in argv if a.startswith("--rl-sample-role=")), None))
         if role != "trainer" or "--rl-sample-relay" in argv:
             return None
+        if any(a == "--rl-island-buffer-shards" or a.startswith("--rl-island-buffer-shards=") for a in argv):
+            return None  # synced trainers fed by external pools: each names its shards per island
+        from yeto.rl.engine.batch_reader import SHARDS_ENV  # noqa: PLC0415
+
+        if (self.cfg.get("env") or {}).get(SHARDS_ENV):
+            return None  # the shards named in the run's environment
         if str(self.cfg.get("store") or "").strip().startswith("oss://"):
             return None
         pool_cfg = self.pools[pool].load()

@@ -504,6 +504,15 @@ def test_run_up_preflight_refuses_a_buffer_trainer_that_names_no_shard_on_an_s3_
     # a relay trainer reads the relay, and an oss:// store's trainer merges every shard it finds
     run.cfg["trainer"]["argv"] = ["--rl-sample-role", "trainer", "--rl-sample-relay"]
     assert run.shard_problem() is None
+    # synced trainers fed by external pools name their shards per island (no fleet plan)
+    for flag in (["--rl-island-buffer-shards", "0:nc-0,nc-1"], ["--rl-island-buffer-shards=0:nc-0,nc-1"]):
+        run.cfg["trainer"]["argv"] = ["--rl-sample-role", "trainer", "--syncer", "auto", *flag]
+        assert run.shard_problem() is None
+    # the shards named in the run's environment (batch_reader.SHARDS_ENV)
+    run.cfg["trainer"]["argv"] = ["--rl-sample-role", "trainer"]
+    run.cfg["env"]["YETO_SAMPLE_BUFFER_SHARDS"] = "nc-0,nc-1"
+    assert run.shard_problem() is None
+    del run.cfg["env"]["YETO_SAMPLE_BUFFER_SHARDS"]
     run.cfg["trainer"]["argv"] = ["--rl-sample-role", "trainer"]
     run.cfg["store"] = "oss://b/runs/r"
     assert run.shard_problem() is None
