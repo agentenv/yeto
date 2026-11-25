@@ -5240,7 +5240,9 @@ async fn scheduler(
                         if !open {
                             let current = st.versions[fragment_id as usize];
                             let outcome = carry.carry(&mut inflight, member, push, next_t, current);
-                            if !matches!(outcome, CarryOutcome::Rejected(_)) {
+                            if matches!(outcome, CarryOutcome::Rejected(_)) {
+                                silent.pushed_late(member);
+                            } else {
                                 carry.spend_anchor(member, fragment_id as usize, base_version);
                                 silent.delivered(member);
                             }
@@ -5318,6 +5320,7 @@ async fn scheduler(
                             bail!("RL strict failure {metric}: {message}");
                         }
                         disposition => {
+                            silent.pushed_late(member);
                             warn!(
                                 learner_id,
                                 generation,
@@ -6295,11 +6298,19 @@ fn relaunch_deserted_rounds(
 /// silent past the round's quorum deadline) and have not delivered since.
 /// Later rounds still pull them and take their push, but excuse them from the
 /// quorum, so one island that stops training cannot hold every other island's
-/// merge for a quorum timeout per round. A push accepted into its round, or a
-/// late push carried into a later one, ends the excuse.
+/// merge for a quorum timeout per round. A push accepted into its round, or
+/// carried into a later one, ends the excuse. A push refused (its base lags
+/// too far, or a closed round without carry) ends it once: an island a little
+/// slower than the others would otherwise always arrive after a round that no
+/// longer waits for it, while an island whose pushes are always refused would
+/// have every round wait for it until the deadline. So after one such second
+/// chance it stays excused until a push of it is merged.
 #[derive(Debug, Default)]
 struct SilentMembers {
     members: HashSet<Member>,
+    /// Excused islands given their second chance by a refused push, until one of
+    /// their pushes is merged.
+    second_chance: HashSet<Member>,
 }
 
 impl SilentMembers {
@@ -6324,9 +6335,18 @@ impl SilentMembers {
         }
     }
 
-    /// `member` delivered a delta: later rounds wait for it again.
+    /// `member` delivered a delta (accepted or carried): later rounds wait for it again.
     fn delivered(&mut self, member: Member) {
         self.members.remove(&member);
+        self.second_chance.remove(&member);
+    }
+
+    /// A push of `member` was refused (late): later rounds wait for it again,
+    /// once until a push of it is merged.
+    fn pushed_late(&mut self, member: Member) {
+        if self.members.contains(&member) && self.second_chance.insert(member) {
+            self.members.remove(&member);
+        }
     }
 }
 
@@ -15902,12 +15922,38 @@ mod tests {
         assert_eq!(retried.expected_members, vec![fast, silent]);
         assert_eq!(retried.excused, vec![silent]);
 
+        // A refused (late) push gives it one second chance; refused again after
+        // missing another deadline, it stays excused until a push is merged.
+        members.pushed_late(silent);
+        assert!(members.excused(&[fast, silent]).is_empty(), "second chance");
+        members.mark(&mut [], &[silent]);
+        members.pushed_late(silent);
+        assert_eq!(members.excused(&[fast, silent]), vec![silent], "no second second chance");
+
         // Once it delivers, the rounds launched after wait for it again.
         members.delivered(silent);
         assert!(members.excused(&[fast, silent]).is_empty());
+        members.mark(&mut [], &[silent]);
+        members.pushed_late(silent);
+        assert!(members.excused(&[fast, silent]).is_empty(), "a merged push renews the second chance");
         // A new connection generation of the island is not excused.
         members.mark(&mut [], &[silent]);
         assert!(members.excused(&[fast, member(1, 3)]).is_empty());
+    }
+
+    #[test]
+    fn a_grace_merge_past_the_quorum_deadline_is_not_a_deadline_merge() {
+        // θ = 0.5 reached by island 0 alone, the grace window closes after the
+        // quorum deadline: an ordinary merge, island 1 is not marked silent.
+        let (fast, slow) = (member(0, 1), member(1, 1));
+        let mut round = capacity_round(vec![fast, slow], 0.5, &[]);
+        round.deadline_merge = true;
+        round.pushes.insert(fast, test_push_for(0, 5));
+        round.quorum_deadline = Instant::now() - Duration::from_secs(1);
+        round.grace_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert!(round.quorum_reached());
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+        assert!(!round.merges_at_deadline(Instant::now()));
     }
 
     #[test]

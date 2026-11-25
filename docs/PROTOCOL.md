@@ -742,9 +742,13 @@ rounds (and the rounds already open) still pull them and take their push, but
 the quorum (θ of the capacity, or K) counts only the islands it waits for, so
 the other islands merge on schedule. A push from an excused island that comes
 after its round closed is a late push (carried into the fragment's next round
-within `--max-base-lag`, as above); a push accepted into its round or carried
-ends the excuse, and rounds launched after it wait for that island again. A new
-connection generation is not excused. With nothing (or fewer than `--q-min`)
+within `--max-base-lag`, as above); a push accepted into its round (with a lag
+or not) or carried ends the excuse, and rounds launched after it wait for that
+island again. A refused push (its base lags too far) ends the excuse once, so an
+island only a little slower than the others gets back into the rounds; after
+that second chance it stays excused until a push of it is merged, so an island
+whose pushes are always refused cannot make every round wait for the deadline.
+A new connection generation is not excused. With nothing (or fewer than `--q-min`)
 arrived the deadline still starts a new attempt.
 
 Every island in a pool heartbeats every lease/3 (default lease 150 s,

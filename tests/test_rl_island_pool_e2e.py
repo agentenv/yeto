@@ -318,6 +318,63 @@ def test_a_silent_island_that_delivers_again_is_carried_and_waited_for_again(syn
     assert not [r for r in syncer.records("round_attempt_timeout") if r["next"] == "new_attempt"]
 
 
+@pytest.mark.parametrize("max_base_lag", ["0", "2"])
+def test_a_silent_island_that_comes_back_slower_than_the_others_is_waited_for_again(syncer_binary, tmp_path,
+                                                                                     max_base_lag):
+    """Island 1 misses one deadline, then keeps pushing a little later than island 0. The
+    other island's merges keep their pace: no round but the first missed one (and at most
+    one second chance after a refused push) waits for the quorum deadline, and no round
+    is retried. With carry (--max-base-lag 2) island 1's late push is carried, which ends
+    its excuse, and the later rounds wait for it and merge it again."""
+    rounds, timeout_s = 16, 2  # island 0 runs ~6 rounds while island 1 is held
+    syncer = Syncer(syncer_binary, tmp_path, learners=2, rounds=rounds, quorum_timeout_s=timeout_s,
+                    extra=["--quorum", "1", "--quorum-theta", "1.0", "--max-base-lag", max_base_lag,
+                           "--island-lease-s", "30", "--final-grace-s", "10"])
+    try:
+        islands = [_island(tmp_path, syncer, i, rounds) for i in range(2)]
+        islands[0][0].debug_delay_s = lambda: 0.3
+        pushes = itertools.count()
+        islands[1][0].debug_delay_s = lambda: 4.0 if next(pushes) == 1 else 0.8  # slower than island 0
+        assert _run_pool(tmp_path, syncer, islands) == 0
+    finally:
+        syncer.kill()
+    steps = syncer.records("outer_step")
+    assert [s["step"] for s in steps] == list(range(1, rounds + 1))
+    timed_out = [s for s in steps if s["timed_out"]]
+    assert 1 <= len(timed_out) <= 2 and timed_out[0]["absent"] == [1], steps
+    assert all(s["step_seconds"] < timeout_s for s in steps if not s["timed_out"]), steps
+    assert not [r for r in syncer.records("round_attempt_timeout") if r["next"] == "new_attempt"]
+    if max_base_lag != "0":
+        tail = steps[-5:-1]  # the last round may end on the final cut without the slower island
+        assert all(s["absent"] == [] and 1 in [i for i, _b, _w in s["weights"]] for s in tail), tail
+
+
+def test_a_push_merged_with_a_lag_ends_the_excuse_of_an_island_slower_than_the_others(syncer_binary, tmp_path):
+    """--max-base-lag 2: island 1's held push and every later one arrive after island 0's
+    and answer the open round from an older base: they are merged with a lag, never
+    refused, so a merged push is what ends its excuse; the rounds after it wait for
+    island 1 again (absent []), they do not keep merging without it."""
+    rounds = 12
+    syncer = Syncer(syncer_binary, tmp_path, learners=2, rounds=rounds, quorum_timeout_s=2,
+                    extra=["--quorum", "1", "--quorum-theta", "1.0", "--max-base-lag", "2",
+                           "--island-lease-s", "30", "--final-grace-s", "10"])
+    try:
+        islands = [_island(tmp_path, syncer, i, rounds) for i in range(2)]
+        islands[0][0].debug_delay_s = lambda: 1.0
+        pushes = itertools.count()
+        islands[1][0].debug_delay_s = lambda: 3.0 if next(pushes) == 1 else 1.3
+        assert _run_pool(tmp_path, syncer, islands) == 0
+    finally:
+        syncer.kill()
+    steps = syncer.records("outer_step")
+    assert not syncer.records("delta_rejected"), syncer.records("delta_rejected")
+    assert syncer.records("delta_carried_over")
+    timed_out = [s for s in steps if s["timed_out"]]
+    assert len(timed_out) == 1 and timed_out[0]["absent"] == [1], steps
+    tail = steps[-4:-1]
+    assert all(s["absent"] == [] and 1 in [i for i, _b, _w in s["weights"]] for s in tail), tail
+
+
 def test_pool_islands_take_round_cuts():
     """R-2: an island in a pool writes round cuts like a strict synced island."""
     assert issubclass(PoolAvgSync, RoundCutHooks)
