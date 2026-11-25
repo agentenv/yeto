@@ -12,6 +12,7 @@ are excluded from the efficiency ranking.
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 
@@ -278,6 +279,14 @@ def cost_view(reducer, now: float) -> dict:
                    + ("; some islands lack CPU/memory specs, GPU only" if any(r.get("gpu_only") for r in rows) else ""),
            "prices_source": reducer.prices.get("_source")}
     if fleet_note is not None:
+        est = (up_state_doc(reducer) or {}).get("spend_usd_estimate")
+        if isinstance(est, (int, float)) and not isinstance(est, bool) and math.isfinite(est) and est > (total or 0.0):
+            # run.budget's own last count is above the rows (a part they do not see): never show less
+            fleet_note["run_budget_floor_usd"] = float(est)
+            out["total_usd"] = total = float(est)
+            out["budget_pct"] = (total / cap * 100) if cap else None
+            out["hours_to_cap"] = ((cap - total) / burn) if cap and burn else None
+            fleet_note["basis"] += f"; total raised to run.budget's last count ${est:.2f} (above the rows)"
         out["fleet"] = fleet_note
         out["note"] += "; fleet: " + fleet_note["basis"]
     return out
@@ -296,6 +305,88 @@ def _spans_hours(spans) -> float | None:
         else:
             cur[1] = max(cur[1], b)
     return (total + cur[1] - cur[0]) / 3600.0
+
+
+POOL_STATE_BILLED = "pool state: from the machine's grant to its release, or now (as run.budget bills it)"
+
+
+def member_hours(m: dict | None, now: float, t0: float | None) -> float | None:
+    """The hours ``run up`` bills a pool machine (``Run.node_hours``) from its pool-state row
+    (``fleet_islands._billed_members``): never granted, 0; else from its grant (an unreadable
+    one: from ``t0``, the earliest the pool could have one) to its release when gone (an
+    unreadable or missing one: now), else now. Not clamped to the run's start, so never
+    less than ``run up`` bills. None without a row (or an unreadable grant and no ``t0``)."""
+    if m is None:
+        return None
+    def num(v):
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+    if m.get("granted") is None:
+        return 0.0
+    start = num(m["granted"])
+    start = t0 if start is None else start
+    if start is None:
+        return None
+    charged = num(m.get("charged_to"))
+    end = (now if charged is None else charged) if m.get("state") == "gone" else now
+    return max(0.0, end - start) / 3600.0
+
+
+def member_open(m: dict | None) -> bool:
+    """Whether the pool still bills machine ``m`` (granted, not released)."""
+    return bool(m and m.get("granted") is not None and m.get("state") != "gone")
+
+
+def pool_t0(pool: dict, reducer) -> float | None:
+    """The earliest a pool's machine could have been granted: the run's first event (no
+    later than its start), else when the fleet's membership first listed the pool; the
+    ``run up`` state's ``run_t0`` first, as ``run up`` bills it."""
+    up = up_state_doc(reducer) or {}
+    t0 = up.get("run_t0", up.get("t0"))
+    if isinstance(t0, (int, float)) and not isinstance(t0, bool) and math.isfinite(t0):
+        return float(t0)  # run up's own start of the run (its unreadable grant bills from there)
+    firsts = [x.get("first_ts") for x in reducer.islands.values() if x.get("first_ts") is not None]
+    if firsts:
+        return float(min(firsts))
+    return float(pool["first_at"]) if pool.get("first_at") is not None else None
+
+
+def up_state_doc(reducer) -> dict | None:
+    """The ``run up`` state file (``--up-state``) as a dict; None when not given or unreadable."""
+    up = getattr(reducer, "up_state", None)
+    if not up:
+        return None
+    try:
+        state = json.loads(Path(up).expanduser().read_text())
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def up_billed_hours(state: dict | None, now: float) -> float | None:
+    """The hours of every ``run up`` period of the run (``state["ups"]``) from the trainer's
+    first launch (``trainer_t0``), where the syncer and its machine (the controller head VM or
+    the syncer VM) bill: a period ``yeto run down`` closed ends at its ``end``; the last one,
+    still open, bills to now until a down confirms the machine released (``run.budget``
+    stops at the up monitor's last sighting, so this is never less). None without periods."""
+    if not state:
+        return None
+    ups = [u for u in state.get("ups") or () if isinstance(u, dict) and u.get("start") is not None]
+    if not ups:
+        return None
+    t0 = state.get("trainer_t0")
+    t0 = float(t0) if isinstance(t0, (int, float)) and not isinstance(t0, bool) else None
+    total = 0.0
+    for u in ups:
+        try:
+            start = float(u["start"])
+            end = float(u["end"]) if u.get("end") is not None else now
+        except (TypeError, ValueError):
+            return None
+        if t0 is not None:
+            start = max(start, t0)
+        total += max(0.0, end - start)
+    return total / 3600.0
 
 
 def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
@@ -319,6 +410,8 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     by_id = {r["id"]: r for r in rows}
     asy = reducer.async_
     trainer_rows, pool_rows = [], []
+    # each pool machine's pool-state row, by shard (a shard is one pool's), as run up bills it
+    machines = {m["shard"]: m for i in fleet["islands"] for p in i["pools"] for m in p.get("members") or ()}
     launched = (getattr(reducer, "trainer_spend", None) or {}).get("islands") \
         if (getattr(reducer, "fleet_plan", None) or {}).get("launch") == "per_island" else None
     for isl in fleet["islands"]:
@@ -333,6 +426,11 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
                        + ("; hours without a price at the island's declared price" if fallback else ""),
                        billed_from="the island's launch records in the run store")
             row["gpu_rate_usd_h"] = row["rate_usd_h"]
+            rec = ((((getattr(reducer, "fleet_state", None) or {}).get("trainers")) or {}).get(isl["learner"])
+                   or {}).get("record")
+            if rec is not None:  # billed while an incarnation is open (trainer_worker.billed): not by its tape
+                row["running"] = rec.get("started_at") is not None and (
+                    rec.get("closed_at") is None or rec["closed_at"] > now)
             trainer_rows.append(row)
         elif row is not None:
             row.update(kind="trainer", island=isl["learner"])
@@ -343,6 +441,7 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
                     row["cost_usd"] = price * row["hours"]
             trainer_rows.append(row)
         for pool in isl["pools"]:
+            members = {m["shard"]: m for m in pool.get("members") or ()}
             for sid in pool["samplers"]:
                 if sid in by_id:  # already billed (an NC shard with its own lease)
                     pool_rows.append(by_id[sid])
@@ -372,12 +471,37 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
                     hours = _spans_hours([(isl_rec.get("first_ts"), isl_rec.get("last_event_ts"))])
                 last = isl_rec.get("last_event_ts")
                 running = last is not None and now - last < INFERRED_RUNNING_S and not s.get("ended")
+                billed_from = "sampler tapes (first to last event of each incarnation; boot not on the tapes)"
+                held = member_hours(machines.get(sid), now, pool_t0(pool, reducer))
+                if held is not None and (hours is None or held > hours):  # never below what run.budget bills
+                    hours, billed_from = held, POOL_STATE_BILLED + " (more than its sampler tapes show)"
+                    running = running or member_open(machines[sid])
                 row = {"id": sid, "kind": "pool sampler", "island": isl["learner"], "pool": pool["name"],
                        "unit_usd_gpu_h": None if rate is None else rate / gpus, "rate_usd_h": rate, "hours": hours,
                        "gpu_rate_usd_h": rate, "host_rate_usd_h": None, "gpu_only": False, "cpus": None,
                        "memory_gib": None, "cost_usd": rate * hours if rate is not None and hours is not None else None,
                        "running": running, "local": False, "priced": rate is not None, "rate_source": source,
-                       "billed_from": "sampler tapes (first to last event of each incarnation; boot not on the tapes)",
+                       "billed_from": billed_from, "usd_per_1m_tok": None, "reward_per_usd": None, "ranked": False}
+                rows.append(row)
+                pool_rows.append(row)
+            for shard, m in members.items():
+                # a machine of the pool whose sampler wrote no tape here (an island added while the
+                # fleet trains, a sampler that never started): billed as run.budget bills it
+                if shard in pool["samplers"] or shard in by_id or any(r["id"] == shard for r in rows):
+                    continue
+                rate = pool.get("usd_per_h")
+                hours = member_hours(m, now, pool_t0(pool, reducer))
+                never = m.get("granted") is None
+                row = {"id": shard, "kind": "pool sampler", "island": isl["learner"], "pool": pool["name"],
+                       "unit_usd_gpu_h": rate, "rate_usd_h": rate, "hours": hours, "gpu_rate_usd_h": rate,
+                       "host_rate_usd_h": None, "gpu_only": False, "cpus": None, "memory_gib": None,
+                       "cost_usd": (0.0 if never else rate * hours if rate is not None and hours is not None else None),
+                       "running": member_open(m), "local": False, "priced": rate is not None or never,
+                       "rate_source": ("fleet plan pool usd_per_h (one node hour)" if rate is not None
+                                       else "the pool has no node price in the fleet's membership"),
+                       "billed_from": ("pool state: never granted a machine, so the pool bills it nothing "
+                                       "(as run.budget counts it); no sampler tape" if never
+                                       else POOL_STATE_BILLED + "; no sampler tape"),
                        "usd_per_1m_tok": None, "reward_per_usd": None, "ranked": False}
                 rows.append(row)
                 pool_rows.append(row)
@@ -385,6 +509,15 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     firsts = [x.get("first_ts") for x in tr_recs if x.get("first_ts") is not None]
     lasts = [x.get("last_event_ts") for x in tr_recs if x.get("last_event_ts") is not None]
     hours = (max(lasts) - min(firsts)) / 3600.0 if firsts and lasts and max(lasts) >= min(firsts) else None
+    syncer_from, up = "the trainers' first to last event", up_state_doc(reducer)
+    up_hours = up_billed_hours(up, now)
+    ups = [u for u in (up or {}).get("ups") or () if isinstance(u, dict)]
+    up_open = bool(ups and ups[-1].get("start") is not None and ups[-1].get("end") is None)
+    if up_hours is not None and (hours is None or up_hours > hours):
+        hours = up_hours
+        syncer_from = ("run up periods from the trainer's first launch, as run.budget bills the syncer"
+                       + ("; the last is open: its machine bills until yeto run down confirms it released"
+                          if up_open else ""))
     syncer = fleet.get("syncer")
     if syncer is None:  # a plan written before the syncer price, or no plan: where the syncer ran is unknown
         rate = None
@@ -406,8 +539,8 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     srow = {"id": "syncer", "kind": "syncer", "island": None, "unit_usd_gpu_h": None, "rate_usd_h": rate,
             "hours": hours, "gpu_rate_usd_h": None, "host_rate_usd_h": None, "gpu_only": False, "cpus": None,
             "memory_gib": None, "cost_usd": rate * hours if rate is not None and hours is not None else None,
-            "running": any(r.get("running") for r in trainer_rows), "local": False, "priced": rate is not None,
-            "rate_source": source, "billed_from": "the trainers' first to last event",
+            "running": any(r.get("running") for r in trainer_rows) or up_open, "local": False,
+            "priced": rate is not None, "rate_source": source, "billed_from": syncer_from,
             "usd_per_1m_tok": None, "reward_per_usd": None, "ranked": False}
     rows.append(srow)
 

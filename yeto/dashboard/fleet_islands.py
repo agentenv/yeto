@@ -402,7 +402,7 @@ def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
         table = _json(objects, f"{lane}/fleet/members/{name}.json")
         table = table if isinstance(table, dict) else {}
         retired = sorted({str(x) for x in (st.get("retired_shards") or []) + (table.get("retired") or [])})
-        row.update(stopped=_str(st.get("stopped")), retired=retired, lane=lane)
+        row.update(stopped=_str(st.get("stopped")), retired=retired, lane=lane, members=_billed_members(st))
         mine: dict[str, dict] = {}
         for shard in retired:
             key = f"{lane}/{shard}"
@@ -433,8 +433,32 @@ def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
         out_pools[name] = row
         if base.get("removed_at") is not None and st and all(r["member_state"] == GONE for r in mine.values()) \
                 and _member_state_all_gone(st):
-            settled_pools[name] = {"row": {k: row[k] for k in ("stopped", "retired", "lane")}, "shards": mine}
+            settled_pools[name] = {"row": {k: row[k] for k in ("stopped", "retired", "lane", "members")},
+                                   "shards": mine}
     return {"pools": out_pools, "shards": shards, "trainers": trainers}
+
+
+def _billed_members(st: dict) -> list[dict]:
+    """The machines the pool state lists and what ``run up`` bills of each
+    (``Run.node_hours``): ``{shard, state, granted, charged_to}`` (unix times; a member never
+    granted bills nothing, a gone one up to its ``charged_to``, any other up to now). A stamp
+    that is set but unreadable is ``"?"``: ``run up`` bills such a grant from the run's start
+    and such a release to now."""
+    def stamp(v: Any) -> float | str | None:
+        if v is None:
+            return None
+        try:
+            t = float(v) if not isinstance(v, bool) else math.nan
+        except (TypeError, ValueError, OverflowError):
+            t = math.nan
+        return t if math.isfinite(t) else "?"
+
+    out = []
+    for m in st.get("members") or ():
+        if isinstance(m, dict) and m.get("shard") is not None:
+            out.append({"shard": str(m["shard"]), "state": _str(m.get("state")),
+                        "granted": stamp(m.get("granted")), "charged_to": stamp(m.get("charged_to"))})
+    return out
 
 
 def _member_state_all_gone(st: dict) -> bool:
@@ -530,10 +554,23 @@ class PlanFile:
         if not reducer.load_fleet_plan(doc, source):
             return False
         self.substores = [isl["substore"] for isl in reducer.fleet_plan["islands"]]
+        self._add_lanes(reducer)
         return True
 
+    def _add_lanes(self, reducer) -> None:
+        """The store lanes (``trainer<k>``) of the trainer islands the desired state added while
+        the fleet trains (``yeto fleet island add``): their pools' samplers upload their tapes
+        there too, so those are read as well (the plan names the seeded islands only)."""
+        if not self.substores:
+            return  # no plan: no fleet whose lanes to read
+        for k in sorted(((getattr(reducer, "fleet_state", None) or {}).get("trainers")) or {}):
+            lane = f"trainer{k}"
+            if isinstance(k, int) and lane not in self.substores:
+                self.substores.append(lane)
+
     def tapes(self) -> list:
-        """One ``StoreTapes`` per island store lane of the plan (the run store's objects)."""
+        """One ``StoreTapes`` per island store lane of the plan, and of an island added while the
+        fleet trains (the run store's objects)."""
         if self.objects is None:
             return []
         from .store_tapes import PREFIX, StoreTapes  # noqa: PLC0415
@@ -546,6 +583,7 @@ class PlanFile:
 
     def pump_tapes(self, reducer) -> int:
         self.pump_trainer_spend(reducer)
+        self._add_lanes(reducer)
         return sum(t.pump(reducer) for t in self.tapes())
 
     def pump_trainer_spend(self, reducer, now: float | None = None) -> bool:
@@ -567,6 +605,9 @@ class PlanFile:
 
         now = time.time() if now is None else now
         declared = {isl["learner"]: isl.get("trainer_usd_per_h") or 0.0 for isl in plan["islands"]}
+        for k, row in (((getattr(reducer, "fleet_state", None) or {}).get("trainers")) or {}).items():
+            if row.get("usd_per_h") is not None:  # an island added (or moved) while the fleet trains: its desired price
+                declared[k] = max(float(row["usd_per_h"]), float(declared.get(k) or 0.0))
         try:
             rows = trainer_worker.billed(self.objects, now)
         except Exception:  # noqa: BLE001 - the store's own status reports read failures
@@ -786,6 +827,8 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
                 p["removed"] = {"at": row["removed_at"], "why": row.get("stopped") or "removed from the fleet"}
             elif row is not None and row.get("stopped"):
                 p["stopped"] = row["stopped"]  # stopped (pool-stop, its island given up): ended, not running
+            if row is not None and row.get("members") is not None:
+                p["members"] = row["members"]  # its machines, as run up bills them (cost panel)
     if any(p.get("source") == "miles" for isl in islands.values() for p in isl["pools"]):
         # both kinds in the fleet: every row names its source (a fleet of pools alone keeps its rows)
         for isl in islands.values():

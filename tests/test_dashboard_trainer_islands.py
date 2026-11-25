@@ -13,7 +13,7 @@ from test_dashboard_diloco import D as DILOCO
 from test_dashboard_diloco import diloco, lines, load
 from test_dashboard_fleet_islands import T0, fleet_reducer, plan_doc
 
-from yeto.dashboard import fleet_islands
+from yeto.dashboard import cost, fleet_islands
 from yeto.dashboard.topology_diloco import _fleet_part
 from yeto.rl.engine.object_store import DirectoryObjectStore
 
@@ -157,6 +157,111 @@ def test_a_syncer_tape_not_seen_here_reads_the_islands_versions():
         r.feed(rec, source="late/yeto-tape.jsonl", offset=off)
     d = diloco(r)
     assert d["syncer_tape"] is True and d["inferred_versions"] is None and d["versions"] == [21, 22, 23, 24]
+
+
+def _cost(tmp_path: Path, *, up: dict | None = None, pools: dict | None = None, spend: dict | None = None):
+    root = _store(tmp_path)
+    for name, members in (pools or {}).items():
+        (root / f"fleet/pools/{name}").mkdir(parents=True, exist_ok=True)
+        (root / f"fleet/pools/{name}/state.json").write_text(json.dumps({"members": members}))
+    r = fleet_reducer()
+    now = r.max_ts + 30
+    if up is not None:
+        (tmp_path / "up.json").write_text(json.dumps(up))
+        r.up_state = str(tmp_path / "up.json")
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(root))))
+    if spend is not None:
+        r.trainer_spend = spend
+    view = cost.cost_view(r, now)
+    return {row["id"]: row for row in view["islands"]}, view, now
+
+
+def test_an_added_islands_pool_bills_its_machines_from_the_pool_state(tmp_path):
+    """i2's pool wrote no sampler tape here: its machines are rows, billed from their grant to
+    their release as run.budget counts them (never granted: nothing), at the pool's price."""
+    rows, view, _ = _cost(tmp_path, pools={"i2-x": [
+        {"shard": "qa-x-i2-0", "state": "gone", "granted": T0 + 150, "charged_to": T0 + 3750},
+        {"shard": "qa-x-i2-1", "state": "gone", "granted": None, "charged_to": None}]})
+    got = rows["qa-x-i2-0"]
+    assert got["island"] == 2 and got["pool"] == "i2-x" and got["hours"] == pytest.approx(1.0)
+    assert got["cost_usd"] == pytest.approx(1.2) and not got["running"] and "pool state" in got["billed_from"]
+    never = rows["qa-x-i2-1"]
+    assert never["cost_usd"] == 0.0 and "never granted" in never["billed_from"]
+    assert view["fleet"]["pools_usd"] >= 1.2
+
+
+def test_a_pool_machine_billed_longer_than_its_tapes_bills_the_grant(tmp_path):
+    """A sampler whose tape starts after its machine's grant (boot) and a machine still held:
+    billed from the grant to now, never less than run.budget."""
+    base, _, now = _cost(tmp_path)
+    tape_h = base["qa-a-i1-0"]["hours"]
+    rows, _, _ = _cost(tmp_path / "b", pools={"i1-a": [
+        {"shard": "qa-a-i1-0", "state": "ready", "granted": T0 - 7200, "charged_to": None}]})
+    got = rows["qa-a-i1-0"]
+    assert got["hours"] == pytest.approx((now - (T0 - 7200)) / 3600) and got["hours"] > tape_h
+    assert got["running"] and "more than its sampler tapes" in got["billed_from"]
+    assert cost.member_hours({"granted": "bad", "state": "gone", "charged_to": "bad"}, 100.0, 40.0) == pytest.approx(60 / 3600)
+    assert cost.member_hours(None, 1.0, 0.0) is None
+
+
+def test_the_syncer_bills_the_head_vm_until_a_down_confirms_it_released(tmp_path):
+    rows, _, now = _cost(tmp_path, up={"trainer_t0": T0 - 600, "ups": [
+        {"start": T0 - 900, "end": T0 - 300}, {"start": T0 + 60, "end": None, "pid": 1}]})
+    s = rows["syncer"]
+    assert s["hours"] == pytest.approx((300 + now - (T0 + 60)) / 3600)
+    assert s["running"] and "until yeto run down confirms" in s["billed_from"]
+    closed, _, _ = _cost(tmp_path / "b", up={"trainer_t0": T0, "ups": [{"start": T0, "end": T0 + 99999}]})
+    assert closed["syncer"]["hours"] == pytest.approx(99999 / 3600)
+    assert "until yeto run down" not in closed["syncer"]["billed_from"]
+
+
+def test_the_total_is_never_below_run_budgets_own_count(tmp_path):
+    _, view, _ = _cost(tmp_path)
+    assert "run_budget_floor_usd" not in view["fleet"]
+    _, raised, _ = _cost(tmp_path / "b", up={"spend_usd_estimate": (view["total_usd"] or 0) + 50.0})
+    assert raised["total_usd"] == pytest.approx((view["total_usd"] or 0) + 50.0)
+    assert raised["fleet"]["run_budget_floor_usd"] == raised["total_usd"] and "run.budget" in raised["note"]
+
+
+def test_an_added_islands_unpriced_hours_bill_its_desired_price(tmp_path):
+    """The trainer spend reads every island's declared price: an added island's is the
+    desired state's (run.budget bills it nothing; the panel never less)."""
+    from types import SimpleNamespace
+
+    from yeto.rl import trainer_worker
+
+    r = fleet_reducer()
+    r.fleet_plan = dict(r.fleet_plan, launch="per_island")
+    r.load_fleet_state(_state(tmp_path))
+    reader = SimpleNamespace(objects=object(), clock=lambda: 0.0, interval_s=60.0)
+    rows = [(2, 2.0, 0.0, 2.0), (0, 1.0, 6.88, 0.0)]
+    orig = trainer_worker.billed
+    trainer_worker.billed = lambda _objects, _now: rows
+    try:
+        assert fleet_islands.PlanFile.pump_trainer_spend(reader, r, now=T0)
+    finally:
+        trainer_worker.billed = orig
+    assert r.trainer_spend["islands"][2] == (2.0, pytest.approx(23.4), True)
+    assert r.trainer_spend["islands"][0] == (1.0, pytest.approx(6.88), False)
+
+
+def test_an_added_islands_lane_tapes_are_read(tmp_path):
+    """The plan names the seeded islands; the samplers of i2 (added while the fleet trains)
+    upload under trainer2/tapes/, read once the desired state names i2."""
+    from yeto.dashboard.reducer import Reducer
+
+    root = _store(tmp_path)
+    (root / "fleet" / "plan.json").write_text(json.dumps(plan_doc()))
+    tape = root / "trainer2" / "tapes" / "qa-x-i2-0" / "x1" / "000001.jsonl"
+    tape.parent.mkdir(parents=True)
+    tape.write_text(json.dumps({"event": "rl_sampler_start", "sampler_id": "qa-x-i2-0", "time_unix": T0 + 200,
+                                "island": 2, "max_backlog_groups": 8}) + "\n")
+    r = Reducer(run="fleet-qa")
+    pf = fleet_islands.PlanFile([], DirectoryObjectStore(str(root)))
+    pf.pump(r)
+    assert pf.pump_tapes(r) > 0
+    assert "store/trainer2:qa-x-i2-0/x1" in {x for t in pf.tapes() for x in t.sources}
+    assert r.async_.roles.get("qa-x-i2-0") == "sampler"
 
 
 def test_plan_doc_is_unchanged_by_the_fixture():
