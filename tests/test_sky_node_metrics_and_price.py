@@ -158,10 +158,22 @@ def _sky_ops(tmp_path, *, price=None, resources=NEBIUS_L40S_SPOT):
     return cfg, cli.NcSshOps(cfg, run=lambda *a, **k: None, provider=provider)
 
 
+def _ordered(provider, ticket: str, offer) -> None:
+    """``ticket`` in the provider's record, ordered with ``offer`` (what launch_cluster saves)."""
+    doc = provider._doc()  # noqa: SLF001
+    doc["clusters"][ticket] = {"slot": 1, "n": 1, "open": True, "offer": offer.record()}
+    provider._save_doc(doc)  # noqa: SLF001
+
+
 def test_a_sky_member_on_the_node_route_is_priced_by_its_offer(tmp_path):
-    cfg, ops = _sky_ops(tmp_path, price=0.749)
+    cfg, _ = _sky_ops(tmp_path, price=0.749)
+    cfg["provider"]["offers"].append({"key": "L40S:1@nebius/eu-north1/od",
+                                      "resources": dict(NEBIUS_L40S_SPOT, use_spot=False), "price_usd_h": 1.6})
+    provider = from_config(cfg, "run-s", sky=FakeSky())
+    ops = cli.NcSshOps(cfg, run=lambda *a, **k: None, provider=provider)
     m = SimpleNamespace(ticket="sk-run-s-1", account=1)
-    assert ops.hourly_cost(m) == 0.749 and money.currency_of(ops, m) == "usd"
+    _ordered(provider, m.ticket, provider.offers[0])
+    assert ops.hourly_cost(m) == 0.749 and money.currency_of(ops, m) == "usd", "its own offer, not the dearest"
     pool = IslandPool(cli.pool_config(cfg), ops, clock=Clock(), log=lambda _m: None)
     assert pool._usd_per_h(m) == 0.749  # noqa: SLF001 - what member_ready carries
 
@@ -232,6 +244,8 @@ def test_an_unpriced_offer_is_counted_at_the_pool_rate_never_none(tmp_path):
     cfg, ops = _sky_ops(tmp_path, resources={"infra": "nebius/xx-nowhere1", "accelerators": "L40S:1",
                                              "use_spot": True})
     assert cli.unpriced_offers(cfg) == ["L40S:1@nebius/eu-north1/spot"]
+    _ordered(ops.provider, "sk-run-s-1", ops.provider.offers[0])  # its offer is known, and unpriced
+    assert ops.provider.offer_of("sk-run-s-1") == "L40S:1@nebius/eu-north1/spot"
     value = ops.hourly_cost(SimpleNamespace(ticket="sk-run-s-1", account=1))
     assert value is not None and value > 0
     assert value == money.to_usd(ncc.hourly_cost_ucr(), "ucr"), "the MI355X rate, as the pool budget counts it"
