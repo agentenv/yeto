@@ -67,6 +67,17 @@ class LockLost(BaseException):
         self.token, self.by = int(token), int(by)
 
 
+class LockReleased(LockLost):
+    """This holder gave the lock up (:meth:`StoreLock.release`) or its pool stopped being
+    driven (a detach, a stop that gave up on a blocked tick): nothing it guards may change
+    from here, and the lease is never renewed again. A :class:`LockLost`, so every handler
+    of a lost lock (the tick's detach, the stop's) treats it alike."""
+
+    def __init__(self, what: str, token: int, why: str = "the lock was released") -> None:
+        BaseException.__init__(self, f"{what}: lock token {token}: {why}")
+        self.token = self.by = int(token)
+
+
 class LockUnconfirmed(BaseException):
     """The store did not answer the lock check: nothing that changes the pool may run now
     (the tick ends; the next one checks again). A ``BaseException`` like :class:`LockLost`."""
@@ -173,10 +184,15 @@ class StoreLock:
 
     # -- holding
     def check(self, *, force: bool = False) -> None:
-        """Raise :class:`LockLost` once a higher token exists (sticky). Listed at most every
-        ``check_cache_s`` unless ``force``."""
+        """Raise :class:`LockLost` once a higher token exists (sticky), :class:`LockReleased`
+        once this holder released the lock. Listed at most every ``check_cache_s`` unless ``force``."""
         if self.lost is not None:
             raise self.lost
+        if self.released:
+            raise LockReleased(self.prefix, self.token)
+        self._check_tokens(force=force)
+
+    def _check_tokens(self, *, force: bool) -> None:
         now = self.clock()
         if not force and self._checked_at is not None and now - self._checked_at < self.check_cache_s:
             return
@@ -232,11 +248,13 @@ class StoreLock:
         """Give the lock up now (the next claimer does not wait for the lease). Never raises."""
         if self.released or self.lost is not None:
             return
+        self.released = True  # from here on check / guard / renew raise LockReleased
         try:
-            self.check(force=True)
+            self._check_tokens(force=True)
             self.objects.write(self.lease_key(self.prefix, self.token), json.dumps(
                 {"token": self.token, "holder": self.holder, "until": 0.0, "released": True}).encode())
-            self.released = True
+        except LockLost:  # another holder already: its lease is not ours to end
+            pass
         except Exception:  # noqa: BLE001 - the lease then runs out on its own
             pass
 

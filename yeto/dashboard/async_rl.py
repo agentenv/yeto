@@ -77,10 +77,11 @@ POOL_TARGET = "nc_elastic_target_changed"
 # a scale-down victim finishing its trials in flight: still sampling, not left
 POOL_DRAINING = "nc_elastic_scale_draining"
 POOL_STOPPED = "nc_elastic_pool_stopped"
+POOL_BLOCKED, POOL_UNBLOCKED = "nc_elastic_pool_blocked", "nc_elastic_pool_unblocked"  # the alert's blocked view
 POOL_KEYS = ("ticket", "account", "slot", "slot_name", "shard", "why", "reason", "detail", "error", "state", "after_s",
              "waited_s", "restarts", "attempt", "data_slot", "old", "new", "target", "outcome", "source",
              "by", "usd_per_h", "end_reason", "replaces", "continues_shard", "max_frac", "alerts",
-             "retry_in_s", "successor", "level", "action", "expected_ticket", "usable", "halted")
+             "retry_in_s", "successor", "level", "action", "expected_ticket", "usable", "halted", "pool", "tick_s")
 # a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
 POOL_MANUAL_PREFIX = "nc_elastic_manual_"
 
@@ -234,7 +235,7 @@ def pool_state_event(p: dict) -> bool:
     a shard. The rest (retries, refusals, warnings) only fill the event table."""
     ev = str(p.get("event"))
     return (ev in POOL_LEFT or ev in POOL_UP or ev in (POOL_TARGET, POOL_DRAINING, POOL_STOPPED,
-                                                       "nc_elastic_ordered")
+                                                       "nc_elastic_ordered", POOL_BLOCKED, POOL_UNBLOCKED)
             or ev.startswith(POOL_MANUAL_PREFIX) or (p.get("shard") is not None and bool(p.get("ticket"))))
 
 
