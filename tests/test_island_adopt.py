@@ -340,6 +340,44 @@ def test_a_dead_launchers_lease_is_waited_out(tmp_path):
     assert states.fence is lock and 115 <= sum(slept) <= 135
 
 
+def test_a_finished_launcher_hands_the_records_on_at_once(monkeypatch, tmp_path):
+    """The launcher writes its last records, then releases the lock: the next launcher of
+    the run claims it without waiting out the lease, under a higher token."""
+    seeded = {"fc-old-0": 0, "fc-old-1": 1}
+    _run(monkeypatch, tmp_path, seeded=seeded, alive_calls=set(seeded))
+    states = lc.IslandStateStore(DirectoryObjectStore(tmp_path / "store"))
+    lock, why = launcher._claim_island_records(states, wait_s=0)
+    assert lock is not None and why is None and lock.token >= 2
+
+
+def test_a_released_or_lost_fence_stops_every_later_write(tmp_path):
+    """A lock error that names a holder (``LockLost`` and its ``LockReleased``) is sticky:
+    nothing is written after it, also not a record queued before it."""
+
+    class Released(BaseException):
+        def __init__(self):
+            super().__init__("lock token 3: the lock was released")
+            self.token = self.by = 3
+
+    class Fence:
+        token, released = 3, False
+
+        def guard(self):
+            if self.released:
+                raise Released()
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    fence = Fence()
+    states = lc.IslandStateStore(objects, fence=fence, background=True)
+    states.write(0, "running", name="r-l0", source="modal", incarnation=0)
+    assert states.flush(5)
+    fence.released = True
+    states.write(0, "done", name="r-l0", source="modal", incarnation=0)
+    states.close(5)
+    assert lc.IslandStateStore(objects).read_all([0])[0]["state"] == "running"
+    assert states.fenced is not None
+
+
 def test_a_fenced_controller_orders_nothing():
     from test_controller import FAILED, RUNNING, SUCCEEDED, SYNCER, FakeOps, ImmediateThread
 
