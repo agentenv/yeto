@@ -593,6 +593,26 @@ def _samplers(reducer, trainer_ids: list[str], by_id: dict, states: dict) -> dic
     return out
 
 
+def _pool_machines(p: dict) -> dict:
+    """What a fleet pool's machines are, from its pool state (``members``, as run up bills them):
+    ``released`` when the pool ended (stopped or removed) and every machine is gone (billed no
+    more, as the cost panel counts it); a pool still running that lost a machine reads
+    ``replacing`` while none is held yet, ``waiting for capacity`` while its replacement is
+    ordered but not granted. Nothing without members (older stores) or for a pool that never
+    lost one (its samplers' tapes say how it starts)."""
+    members = p.get("members") or []
+    if not members:
+        return {}
+    held = [m for m in members if m.get("state") != fleet_islands.GONE]
+    if p.get("stopped") or p.get("removed"):
+        return {} if held else {"released": True}
+    if len(held) == len(members):
+        return {}
+    if not held:
+        return {"machines": "replacing"}
+    return {"machines": "waiting for capacity"} if all(m.get("granted") is None for m in held) else {}
+
+
 def _fleet_part(fleet: dict, asy) -> dict:
     """The islands and pools the page draws in each island box: the pool's engine and
     rollout precision (plan, else the samplers' ``rl_sampler_start.provenance``), its provider,
@@ -617,9 +637,7 @@ def _fleet_part(fleet: dict, asy) -> dict:
                 row["removed"] = p["removed"]
             if p.get("stopped"):  # stopped (pool-stop, its island given up): drawn as ended
                 row["stopped"] = p["stopped"]
-            members = p.get("members") or []
-            if members and all(m.get("state") == fleet_islands.GONE for m in members):
-                row["released"] = True  # every machine its pool state lists is gone: billed no more (cost panel)
+            row.update(_pool_machines(p))
             if "source" in p:  # a fleet with Miles sampler islands: where each sampler row runs
                 row["source"] = p["source"]
             if p.get("source") == "miles":

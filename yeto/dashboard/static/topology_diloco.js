@@ -112,7 +112,7 @@ function poolCard(p){var ss=(T.samplers||[]).filter(function(s){return p.sampler
   var vs=lv.map(function(s){return s.policy_version}).filter(fin),lg=lv.map(function(s){return s.lag}).filter(fin);
   var st=lv.some(function(s){return s.state==="sampling"})?"sampling":lv.length?(lv[0].state||"starting"):null;
   return{id:p.name,pool:p,ids:p.samplers,source:p.source||null,card:p.card||f0.card||null,precision:p.precision||f0.precision||null,engine:p.engine||f0.engine||null,arch:p.arch||f0.arch||null,
-    gpus:f0.gpus||p.gpus||null,live:lv.length>0,state:st,status:p.removed?"removed":!lv.length&&p.released?"released":p.stopped&&!lv.length?"stopped":ss.length?(f0.status||"ended"):"not started",policy_version:vs.length?Math.max.apply(null,vs):null,
+    gpus:f0.gpus||p.gpus||null,live:lv.length>0,state:st,status:p.removed?"removed":!lv.length&&p.released?"released":p.stopped&&!lv.length?"stopped":!lv.length&&p.machines?p.machines:ss.length?(f0.status||"ended"):"not started",policy_version:vs.length?Math.max.apply(null,vs):null,
     lag:lg.length?Math.max.apply(null,lg):null,rate_gpm:ss.reduce(function(a,x){return a+(x.rate_gpm||0)},0),n:p.samplers.length,nlive:lv.length}}
 // the sampler (or pool) a card shows, from the newest view (a card is built once per layout)
 function fresh(s){if(s.pool){var p=fpool(s.id);return p?poolCard(p):s}return (T.samplers||[]).filter(function(x){return x.id===s.id})[0]||s}

@@ -624,12 +624,13 @@ function spTable(ctx){
 /* a fleet sampler cell: every "n/a" in its text (not inside a tag's attributes) is a dash */
 function naText(h){return String(h).replace(/(<[^>]*>)|\bn\/a\b/g,function(m,tag){return tag||'<span class="note" title="not on this sampler\'s tape">—</span>'})}
 /* trainer totals as one row of chips: zero and missing counts are named once at the end, not one chip each */
-function trChips(T){
+function trChips(T,trained){
   var it=[["trained groups",T.trained_groups,""],["dropped as stale",T.stale_groups,"older than max_policy_age"],["no policy identity",T.unidentified_policy_groups,"dropped after a resume"],
     ["off-policy gate dropped",T.gate_dropped,""],["short groups trained",T.incomplete_groups,""],["too small dropped",T.dropped_small_groups,""],["carried over",T.carried_over_groups,""],["padded samples",T.padded_samples,""]];
   var show=[],zero=[],na=[];it.forEach(function(x,i){if(!fin(x[1]))na.push(x[0]);else if(x[1]===0&&i>0)zero.push(x[0]);else show.push(x)});
-  // a fleet island that never trained: its missing counts and policy ages say so once (a run with one trainer keeps n/a)
-  var noAges=fleetOn()&&!Object.keys(T.age_hist||{}).length,never=noAges&&!(T.trained_groups>0),fold=never&&na.length>0;
+  // a fleet island that never trained (its caller knows: no trainer round, no trained group): its missing counts and
+  // policy ages say so once (a run with one trainer keeps n/a)
+  var noAges=fleetOn()&&!Object.keys(T.age_hist||{}).length,never=noAges&&!trained,fold=never&&na.length>0;
   if(fold)na.splice(1,0,"policy ages");
   return '<div class="chips">'+show.map(function(x){return '<span'+(x[2]?' title="'+esc(x[2])+'"':"")+'>'+esc(x[0])+' <b>'+f(x[1],0)+'</b></span>'}).join("")+
     (T.unidentified_starved?'<span class="wn">reader starved <b>'+f(T.unidentified_starved.selections,0)+' selections kept no group</b></span>':"")+
@@ -661,8 +662,8 @@ function asyncPanel(){
   (((A.trainers||{})[tid]||{}).rounds||[]).forEach(function(q){ar[q.rollout_id]=q});
   var T=(A.trainers||{})[tid]||{};
   $("aTrNote").textContent=tid!=null?lbl(tid):"";
-  $("aTrainer").innerHTML=!rr.length?'<div class="nodata">no trained rounds on '+(tid!=null?esc(lbl(tid)):"this island")+' yet</div>'+(tid!=null?trChips(T):""):
-    trChips(T)+trTable(rr,ar,"trainer-rounds"+ctx.key)+
+  $("aTrainer").innerHTML=!rr.length?'<div class="nodata">no trained rounds on '+(tid!=null?esc(lbl(tid)):"this island")+' yet</div>'+(tid!=null?trChips(T,T.trained_groups>0):""):
+    trChips(T,true)+trTable(rr,ar,"trainer-rounds"+ctx.key)+
     (rr.some(function(r){return r.resp_derived})?'<div class="note">* mean response length = trained response tokens ÷ trained samples (rl_rollout_carry_over), the tape has no batch summary</div>':"");
   // releases of this island
   var nRel=fin(ctx.relTotal)?ctx.relTotal:ctx.rel.length;

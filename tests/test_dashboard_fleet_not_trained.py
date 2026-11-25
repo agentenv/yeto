@@ -11,6 +11,7 @@ import re
 
 import test_dashboard_fleet_na as fleet_na
 from test_dashboard_diloco import _smoke
+from test_dashboard_failed_island_na import never_trained  # noqa: F401 (fixture)
 from test_dashboard_fleet_islands import fleet_records, fleet_reducer, plan_doc
 from test_dashboard_trainer_islands import _store
 
@@ -37,7 +38,7 @@ def _never_trained() -> Reducer:
 
 
 def _text(html: str) -> str:
-    return re.sub(r"<[^>]*>", " ", html)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", html))
 
 
 def _page(tmp_path, r: Reducer, pick: str | None = None) -> dict:
@@ -62,6 +63,15 @@ def test_trainers_that_never_trained_are_drawn_not_trained_yet(tmp_path):
     matrix = _text(out["matrix"])
     assert len(re.findall(r"Trainer [01]\s+H100 · not trained yet", matrix)) == 2 and "step —" not in matrix
     assert "trainer 0 not trained yet · trainer 1 not trained yet" in out["kpis"] and "local —" not in out["kpis"]
+
+
+def test_a_syncer_run_without_a_fleet_keeps_its_dashes(tmp_path, never_trained):
+    """Trainer islands without a fleet (a synced group launched as one run): a trainer that never
+    stepped keeps "step —" on its card, its Fragments row and the local-steps KPI."""
+    out = _smoke(tmp_path, never_trained)
+    assert "step —" in out["texts"] and "not trained yet" not in out["texts"]
+    assert "trainer 1 local —" in out["kpis"] and "not trained yet" not in out["kpis"]
+    assert "not trained yet" not in out["matrix"]
 
 
 def test_an_island_that_never_trained_names_why_its_counts_and_read_position_are_missing(tmp_path):
@@ -101,20 +111,25 @@ def test_a_single_trainer_that_never_trained_keeps_na(tmp_path):
     assert "not trained yet" not in out["aTrainer"] and "n/a: trained groups" in out["aTrainer"]
     assert "read position n/a" in out["legBacklog"] and "not read yet" not in out["legBacklog"]
     assert len([x for x in out["relTexts"] if re.fullmatch(r"\d\d:\d\d:\d\d", x)]) == 3
+    # the run KPIs: a step time no trainer reported is not called "not trained yet" without a fleet
+    assert not re.search(r'step p50</div><div class="kv[^"]*"[^>]*>not trained yet<', out["rKpis"])
 
 
-def _drawn_pools(tmp_path, members: list[dict]) -> dict:
+def _drawn_pools(tmp_path, members: list[dict], *, stopped: bool = True) -> tuple[dict, Reducer]:
     root = _store(tmp_path)
-    (root / "fleet/pools/i1-a/state.json").write_text(
-        json.dumps({"stopped": "pool-stop requested", "members": members}))
+    doc = {"members": members, **({"stopped": "pool-stop requested"} if stopped else {})}
+    (root / "fleet/pools/i1-a/state.json").write_text(json.dumps(doc))
     r = fleet_reducer()
     r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(root))))
     drawn = {i["island"]: i for i in _fleet_part(fleet_islands.resolve(r), r.async_)["islands"]}
     return {p["name"]: p for p in drawn[1]["pools"]}, r
 
 
-def test_a_pool_whose_machines_are_all_released_reads_released(tmp_path):
-    pools, r = _drawn_pools(tmp_path, [{"shard": "qa-a-i1-0", "state": "gone", "granted": 1.0, "charged_to": 2.0}])
+GONE = {"shard": "qa-a-i1-0", "state": "gone", "granted": 1.0, "charged_to": 2.0}
+
+
+def test_a_stopped_pool_whose_machines_are_all_released_reads_released(tmp_path):
+    pools, r = _drawn_pools(tmp_path, [GONE])
     assert pools["i1-a"]["released"] is True and pools["i1-a"]["stopped"] == "pool-stop requested"
     texts = _smoke(tmp_path, r)["texts"]
     assert "released" in texts and "stopped" not in texts  # its card (a pool fleet apply added, no sampler of its own)
@@ -122,12 +137,36 @@ def test_a_pool_whose_machines_are_all_released_reads_released(tmp_path):
 
 def test_a_stopped_pool_still_holding_a_machine_is_not_released(tmp_path):
     pools, r = _drawn_pools(tmp_path, [{"shard": "qa-a-i1-0", "state": "ready", "granted": 1.0, "charged_to": None}])
-    assert "released" not in pools["i1-a"]
+    assert "released" not in pools["i1-a"] and "machines" not in pools["i1-a"]
     texts = _smoke(tmp_path, r)["texts"]
     assert "stopped" in texts and "released" not in texts
     # a pool state without members (older stores): no claim either way
     pools, _ = _drawn_pools(tmp_path / "b", [])
-    assert "released" not in pools["i1-a"]
+    assert "released" not in pools["i1-a"] and "machines" not in pools["i1-a"]
+
+
+def test_a_running_pool_that_lost_its_machine_reads_replacing_not_released(tmp_path):
+    """Its only spot machine preempted (gone), the pool not stopped: the controller orders a new
+    one on its next tick, so the card reads replacing, never released."""
+    pools, r = _drawn_pools(tmp_path, [GONE], stopped=False)
+    assert "released" not in pools["i1-a"] and pools["i1-a"]["machines"] == "replacing"
+    texts = _smoke(tmp_path, r)["texts"]
+    assert "replacing" in texts and "released" not in texts and "stopped" not in texts
+
+
+def test_a_running_pool_whose_replacement_is_not_granted_waits_for_capacity(tmp_path):
+    ordered = {"shard": "qa-a-i1-1", "state": "provisioning", "granted": None, "charged_to": None}
+    pools, r = _drawn_pools(tmp_path, [GONE, ordered], stopped=False)
+    assert "released" not in pools["i1-a"] and pools["i1-a"]["machines"] == "waiting for capacity"
+    texts = _smoke(tmp_path, r)["texts"]
+    assert "waiting for capacity" in texts and "released" not in texts
+    # the replacement granted: its samplers' tapes say how it runs
+    granted = dict(ordered, state="starting", granted=3.0)
+    pools, _ = _drawn_pools(tmp_path / "b", [GONE, granted], stopped=False)
+    assert "machines" not in pools["i1-a"] and "released" not in pools["i1-a"]
+    # a pool that never lost a machine, its first one still ordered: nothing claimed either
+    pools, _ = _drawn_pools(tmp_path / "c", [ordered], stopped=False)
+    assert "machines" not in pools["i1-a"] and "released" not in pools["i1-a"]
 
 
 def test_a_release_timeline_of_one_instant_has_one_time_label(tmp_path):
@@ -145,3 +184,29 @@ def test_a_release_timeline_of_one_instant_has_one_time_label(tmp_path):
             "local_version": 2, "released_at": t + 120, "origin": {"kind": "local"}})
     (tmp_path / "b").mkdir()
     assert len([x for x in _page(tmp_path / "b", r, pick="i0")["relTexts"] if re.fullmatch(r"\d\d:\d\d:\d\d", x)]) == 3
+
+
+def _trained_without(*fields: str) -> Reducer:
+    """The two-island fleet fixture, its trainer rounds without ``fields``."""
+    r = Reducer(run="fleet-qa")
+    for rec in fleet_records():
+        if rec.get("event") == "rl_round_trained":
+            rec = {k: v for k, v in rec.items() if k not in fields}
+        r.feed(rec)
+    assert r.load_fleet_plan(plan_doc(), "test")
+    return r
+
+
+def test_an_island_that_trained_without_policy_ages_says_they_are_not_on_the_tapes(tmp_path):
+    out = _page(tmp_path, _trained_without("policy_age_groups"), pick="i0")
+    chips = _text(out["aTrainer"])
+    assert "policy ages not on the tapes" in chips and "not trained yet" not in chips
+
+
+def test_trainer_rounds_without_a_trained_group_count_are_not_called_not_trained(tmp_path):
+    """Rounds on the table below but no trained_groups or policy ages on them (an older tape):
+    the chips name what is not reported, never "not trained yet" above the trained rounds."""
+    out = _page(tmp_path, _trained_without("policy_age_groups", "trained_groups"), pick="i0")
+    chips = _text(out["aTrainer"])
+    assert "not reported: trained groups" in chips and "policy ages not on the tapes" in chips
+    assert "not trained yet" not in chips
