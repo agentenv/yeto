@@ -424,6 +424,18 @@ def _patch_source(site: str, repo: str, front: tuple[str, ...] = ()) -> str:
 
     portions: list[str] = []
 
+    def patches_of(pkg: str) -> str | None:
+        """``<pkg>/sky_patches`` when it is a regular package, None when absent. A directory
+        without ``__init__.py`` is imported as a namespace package, whose ``install()`` the
+        hook then lacks (not applied): unreadable."""
+        patches = os.path.join(pkg, "sky_patches")
+        if os.path.isfile(os.path.join(patches, "__init__.py")):
+            return patches
+        if os.path.isdir(patches):
+            raise ServerUnreadable(f"{patches} has no __init__.py: the hook would import it as a namespace "
+                                   "package and apply nothing")
+        return None
+
     def yeto_in(root: str) -> str | None:
         """The patch source of a regular yeto package at ``root``, "" when it has none,
         None when there is no regular yeto package there."""
@@ -433,8 +445,7 @@ def _patch_source(site: str, repo: str, front: tuple[str, ...] = ()) -> str:
         if not os.path.isfile(os.path.join(pkg, "__init__.py")):
             portions.append(pkg)  # a namespace portion: a regular package later on the path wins
             return None
-        patches = os.path.join(pkg, "sky_patches")
-        return patches if os.path.isfile(os.path.join(patches, "__init__.py")) else ""
+        return patches_of(pkg) or ""
 
     roots = [*front, site]
     for name in sorted(os.listdir(site)):
@@ -458,8 +469,8 @@ def _patch_source(site: str, repo: str, front: tuple[str, ...] = ()) -> str:
         # only namespace portions: ``import yeto.sky_patches`` finds it in the first portion
         # that has it; else the ImportError sends the hook to its repo (appended to yeto's path)
         for pkg in portions:
-            patches = os.path.join(pkg, "sky_patches")
-            if os.path.isfile(os.path.join(patches, "__init__.py")):
+            patches = patches_of(pkg)
+            if patches:
                 return patches
     found = os.path.join(repo, "yeto", "sky_patches")
     if not os.path.isfile(os.path.join(found, "__init__.py")):
