@@ -46,21 +46,52 @@ def _store_objects(args: Any) -> Any:
 
 
 EPOCH_READ_S = 120.0  # an adopted syncer: how long its status.json is read for its term
+RECORD_READ_ATTEMPTS = 3
+RECORD_READ_RETRY_S = 5.0
 
 
-def _recorded_epoch(args: Any, objects: Any, log: Callable[[str], None]) -> int | None:
+class SyncerRecordUnreadable(RuntimeError):
+    """The fleet's last syncer record exists (or may) but does not read: its term is
+    unknown, so no record is written that could carry a lower one."""
+
+
+def _recorded_epoch(args: Any, objects: Any, log: Callable[[str], None],
+                    sleep: Callable[[float], None] = time.sleep) -> int | None:
     """The syncer_epoch of the fleet's last syncer record (an earlier syncer launch of this
-    run), None when there is none or it does not read."""
-    from ..rl.island_launches import read_syncer_record
+    run); None when there is none, or it carries none (0 then). A store that does not answer
+    is retried; still unreadable, or a record that does not parse:
+    :class:`SyncerRecordUnreadable` (the term must never be written lower than it was)."""
+    import json
 
-    try:
-        objects = objects if objects is not None else _store_objects(args)
-        found = read_syncer_record(objects) if objects is not None else None
-    except Exception as error:  # noqa: BLE001 - the launch's own epoch below
-        log(f"[launcher] the fleet's last syncer record was not read ({type(error).__name__}: {error})")
+    from ..rl.island_launches import SYNCER_RECORD
+
+    for attempt in range(1, RECORD_READ_ATTEMPTS + 1):
+        try:
+            store = objects if objects is not None else _store_objects(args)
+            raw = store.read(SYNCER_RECORD) if store is not None else None
+            break
+        except Exception as error:  # noqa: BLE001 - retried, then refused
+            if attempt == RECORD_READ_ATTEMPTS:
+                raise SyncerRecordUnreadable(
+                    f"the fleet's syncer record ({SYNCER_RECORD} in the run store) did not read after "
+                    f"{attempt} attempts ({type(error).__name__}: {error}): its syncer_epoch is unknown and is "
+                    "never written lower; retry once the run store answers, or give --rl-syncer-epoch") from error
+            log(f"[launcher] the fleet's syncer record did not read ({type(error).__name__}: {error}); "
+                f"retrying ({attempt}/{RECORD_READ_ATTEMPTS})")
+            sleep(RECORD_READ_RETRY_S)
+    if raw is None:
         return None
-    epoch = (found or {}).get("syncer_epoch")
-    return int(epoch) if isinstance(epoch, int) and not isinstance(epoch, bool) and epoch >= 0 else None
+    try:
+        record = json.loads(raw)
+        epoch = record.get("syncer_epoch")
+        if epoch is not None and (not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0):
+            raise ValueError(f"syncer_epoch {epoch!r}")
+    except (ValueError, AttributeError) as error:
+        raise SyncerRecordUnreadable(
+            f"the fleet's syncer record ({SYNCER_RECORD} in the run store) does not parse ({error}): its "
+            "syncer_epoch is unknown and is never written lower; give --rl-syncer-epoch at least the term "
+            "the fleet's syncer ran (its status.json), or delete the record if no island launch runs") from None
+    return epoch
 
 
 def resolve_epoch(args: Any, role: str, *, adopted: bool, reader: Callable[[], Callable[[], Any]],
@@ -71,14 +102,14 @@ def resolve_epoch(args: Any, role: str, *, adopted: bool, reader: Callable[[], C
 
     * an island launch: the term its syncer record gave (``--rl-syncer-epoch``); a record
       without one (an earlier syncer launch) is 0. Nothing is read.
-    * the syncer launch, its syncer just started: the term it was started with
-      (``--syncer-epoch``, :func:`yeto.launch.syncer.island_syncer_epoch`), raised to the
-      fleet's last record when that is higher (a syncer resumed from its checkpoint keeps
-      its term; a HELLO at a higher epoch is admitted, a lower one fenced). status.json is
-      not read: the syncer writes it only once its first learners are in, and the island
-      launches wait for this record.
-    * the syncer launch adopting a running syncer: the term in its status.json
-      (``reader()``, ``timeout_s``); not there (no learner has joined it yet): as above."""
+    * the syncer launch: the term its syncer runs, never lower than the fleet's last
+      record (:func:`_recorded_epoch`; a HELLO at a higher epoch is admitted, a lower one
+      fenced, and a syncer resumed from its checkpoint keeps its term): the higher of the
+      record and its own term. Its own term: an adopted running syncer's status.json
+      (``reader()``, ``timeout_s``) when it reads, else the term it was started with
+      (``--syncer-epoch``, :func:`yeto.launch.syncer.island_syncer_epoch`). A syncer this
+      launch just started is not read: it writes status.json only once its first learners
+      are in, and the island launches wait for this record."""
     from ..rl.engine.sample_roles import FLEET_ROLE_ISLAND
     from .syncer import island_syncer_epoch, resolve_island_syncer_epoch
 
@@ -88,14 +119,12 @@ def resolve_epoch(args: Any, role: str, *, adopted: bool, reader: Callable[[], C
                 "the island JOINs with syncer_epoch 0")
         args.rl_syncer_epoch = island_syncer_epoch(args)
         return args.rl_syncer_epoch
-    given = island_syncer_epoch(args)
-    if adopted:
-        resolve_island_syncer_epoch(args, reader(), timeout_s=EPOCH_READ_S if timeout_s is None else timeout_s)
-        if getattr(args, "rl_syncer_epoch", None) is not None:
-            return int(args.rl_syncer_epoch)
     recorded = _recorded_epoch(args, objects, log)
-    epoch = max(given, recorded or 0)
-    log(f"[launcher] fleet syncer {'adopted' if adopted else 'started'} with --syncer-epoch {given}"
+    own = island_syncer_epoch(args)
+    if adopted and getattr(args, "rl_syncer_epoch", None) is None:
+        own = resolve_island_syncer_epoch(args, reader(), timeout_s=EPOCH_READ_S if timeout_s is None else timeout_s)
+    epoch = max(own, recorded or 0)
+    log(f"[launcher] fleet syncer {'adopted' if adopted else 'started'} at syncer_epoch {own}"
         + (f" (the fleet's last record: {recorded})" if recorded is not None else "")
         + f": the islands JOIN with syncer_epoch {epoch}")
     args.rl_syncer_epoch = epoch

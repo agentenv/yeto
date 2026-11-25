@@ -17,6 +17,8 @@ import types
 import pytest
 
 from test_fleet_island_launches import _prepared, example
+from test_rl_algorithm_provenance import _fake_sky  # noqa: F401 (fixture)
+from test_rl_launcher_island_failure import Clock, _setup
 from yeto import launcher
 from yeto.launch import fleet_syncer
 from yeto.launch import syncer as syncer_mod
@@ -134,6 +136,91 @@ def test_an_island_launch_from_a_record_without_an_epoch_joins_at_0_and_reads_no
     syncer = LateStatusSyncer(0)
     _wire(monkeypatch, syncer)
     assert _islands_join(cfg, objects, syncer) == [0, 0] and syncer.reads == 0
+
+
+def test_the_syncer_launch_of_a_fresh_fleet_records_its_term_without_reading_status_json(tmp_path, monkeypatch):
+    """launcher.run of a fleet's syncer launch (fake sky): its syncer just started (nothing
+    adopted), so the record it serves carries the syncer's start term and status.json is
+    never read (it would not appear before the islands this record starts)."""
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
+    monkeypatch.setattr(launcher, "prepare_run_code_pack", lambda args: None)  # no git here
+    objects = DirectoryObjectStore(tmp_path / "store")
+    monkeypatch.setattr(fleet_syncer, "_store_objects", lambda args: objects)
+    syncer = LateStatusSyncer(0)
+    _wire(monkeypatch, syncer)
+    served = []
+    monkeypatch.setattr(fleet_syncer, "serve", lambda args, addr, n, **kw: served.append(
+        fleet_syncer.record(args, addr, n, objects=objects)) or 0)
+    from yeto.cli import parse_args
+
+    args = parse_args([*example(tmp_path)["trainer"]["argv"], "--controller", "local"])
+    args.model_revision, args.data_revision = "a" * 40, "b" * 40
+    args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
+    args.keep, args.recover_timeout, args.controller_poll = False, 0.0, 30.0
+    began = time.monotonic()
+    assert launcher.run(args) == 0
+    assert time.monotonic() - began < 30 and syncer.reads == 0
+    assert [r["syncer_epoch"] for r in served] == [0]
+
+
+class FlakyStore(DirectoryObjectStore):
+    """A run store whose reads fail ``failures`` times first."""
+
+    def __init__(self, root, failures: int) -> None:
+        super().__init__(root)
+        self.failures = failures
+
+    def read(self, key):
+        if self.failures > 0:
+            self.failures -= 1
+            raise OSError("the run store does not answer")
+        return super().read(key)
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch):
+    monkeypatch.setattr(fleet_syncer, "RECORD_READ_RETRY_S", 0.0)
+
+
+def test_a_record_read_that_fails_is_retried_and_never_lowers_the_term(fleet_run, tmp_path, monkeypatch,
+                                                                       no_retry_wait):
+    cfg, _, args, term = fleet_run
+    flaky = FlakyStore(tmp_path / "flaky", failures=fleet_syncer.RECORD_READ_ATTEMPTS - 1)
+    island_launches.write_syncer_record(DirectoryObjectStore(tmp_path / "flaky"), addr="10.0.0.9:29400",
+                                        syncer_epoch=term + 3, learners=2, max_learners=4, run="r")
+    _wire(monkeypatch, LateStatusSyncer(term + 3))
+    monkeypatch.setattr(fleet_syncer, "_store_objects", lambda args: flaky)
+    assert _syncer_launch(args, flaky, adopted=False)["syncer_epoch"] == term + 3  # answered on the last try
+    down = FlakyStore(tmp_path / "flaky", failures=fleet_syncer.RECORD_READ_ATTEMPTS)
+    monkeypatch.setattr(fleet_syncer, "_store_objects", lambda args: down)
+    args.rl_syncer_epoch = None
+    with pytest.raises(fleet_syncer.SyncerRecordUnreadable, match="never written lower"):
+        _syncer_launch(args, down, adopted=False)
+    assert island_launches.read_syncer_record(DirectoryObjectStore(tmp_path / "flaky"))["syncer_epoch"] == term + 3
+
+
+def test_a_record_that_does_not_parse_is_refused_not_overwritten(fleet_run, monkeypatch):
+    _, objects, args, _ = fleet_run
+    objects.write(island_launches.SYNCER_RECORD, b"{truncated")
+    _wire(monkeypatch, LateStatusSyncer(0))
+    with pytest.raises(fleet_syncer.SyncerRecordUnreadable, match="does not parse"):
+        _syncer_launch(args, objects, adopted=False)
+    assert objects.read(island_launches.SYNCER_RECORD) == b"{truncated"
+
+
+def test_an_explicit_or_adopted_term_below_the_record_is_raised_to_it(fleet_run, monkeypatch):
+    cfg, objects, args, term = fleet_run
+    island_launches.write_syncer_record(objects, addr="10.0.0.9:29400", syncer_epoch=term + 4, learners=2,
+                                        max_learners=4, run="r")
+    syncer = LateStatusSyncer(term + 4)
+    _wire(monkeypatch, syncer)
+    args.rl_syncer_epoch = term + 1  # an explicit --rl-syncer-epoch below the fleet's record
+    assert _syncer_launch(args, objects, adopted=False)["syncer_epoch"] == term + 4
+    args.rl_syncer_epoch = None
+    syncer.joined = True  # an adopted syncer that reports a lower term than the record (record kept)
+    syncer.term = term
+    assert _syncer_launch(args, objects, adopted=True)["syncer_epoch"] == term + 4
 
 
 def test_a_status_reader_without_a_syncer_says_why():

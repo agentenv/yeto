@@ -471,3 +471,26 @@ def test_a_run_budget_refuses_an_unpriced_island_of_the_desired_state(tmp_path, 
     store.update(lambda doc: dz.trainers(doc)["late"].update(usd_per_h=6.0))
     run.adopt_desired()
     assert run.island_price_problem() is None
+
+
+def test_the_preflight_refuses_a_desired_state_that_does_not_parse_and_warns_when_unread(tmp_path, monkeypatch):
+    """Read but broken (the store answers, the newest generation is not a desired state):
+    refused, nothing it drives could be checked. Not read at all (the store does not
+    answer): a WARNING naming what goes unchecked, and the run config is checked."""
+    logs = []
+    monkeypatch.setattr(up, "_log", logs.append)
+    run, objects = build(tmp_path, monkeypatch)
+    run.attach_trainer_worker(FakeController(), objects, ops=FakeLaunches())  # a desired state, generation 1
+    store = dz.DesiredStore(objects)
+    objects.write(store.key(store.generation() + 1), b"{not json")
+    assert run.preflight() is False
+    assert any("does not parse" in m and "yeto fleet apply" in m for m in logs)
+    logs.clear()
+
+    def unreachable(*a, **k):
+        raise OSError("the run store does not answer")
+
+    monkeypatch.setattr(up.Run, "adopt_desired", unreachable)
+    run.preflight()
+    assert any(m.startswith("preflight: WARNING: the fleet's desired state was not read") for m in logs)
+    assert not any("does not parse" in m for m in logs)

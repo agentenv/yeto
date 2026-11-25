@@ -1200,11 +1200,20 @@ class Run:
         from yeto.launch_preflight import modal_sdk_problem  # noqa: PLC0415
 
         if rollout_section(self.cfg).get("control_plane") == "store":
+            from yeto.launch.pool.desired import DesiredError  # noqa: PLC0415
+
             try:
                 self.adopt_desired()  # the desired state's pools are checked (read only: nothing is seeded)
+            except (json.JSONDecodeError, DesiredError) as error:  # read, but it does not parse: refused
+                _log(f"preflight: the fleet's desired state (fleet/desired.json in the run store) does not parse "
+                     f"({type(error).__name__}: {error}); nothing it drives can be checked. Repair it with "
+                     "`yeto fleet apply` (or remove its newest generation) and run up again")
+                self.mark("preflight", ok=False)
+                return False
             except Exception as error:  # noqa: BLE001 - the run config's pools are checked instead
-                _log(f"preflight: the fleet's desired state was not read ({type(error).__name__}: {error}); "
-                     "checking the run config's pools")
+                _log(f"preflight: WARNING: the fleet's desired state was not read ({type(error).__name__}: {error}); "
+                     "checking the run config's pools and trainer islands only (islands added at run time are "
+                     "not checked for a price)")
         problem = self.fleet_problem()
         if problem is not None:
             _log(f"preflight: {problem}")

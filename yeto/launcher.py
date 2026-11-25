@@ -578,8 +578,12 @@ def _resolve_launch_syncer_epoch(args, *, member_role, no_sync, head_mode, synce
     (``--rl-fleet-role``) decides it without waiting for the syncer's status.json
     (``yeto.launch.fleet_syncer.resolve_epoch``: written only once learners are in, and
     the island launches wait for this launch's record); otherwise status.json is read."""
-    if no_sync or not island_pool(args) or getattr(args, "rl_syncer_epoch", None) is not None:
+    from .rl.engine.sample_roles import FLEET_ROLE_SYNCER
+
+    if no_sync or not island_pool(args):
         return
+    if getattr(args, "rl_syncer_epoch", None) is not None and member_role != FLEET_ROLE_SYNCER:
+        return  # an explicit term (a fleet's syncer launch still keeps it no lower than its record)
 
     def reader():
         return syncer_status_reader(local_tape=syncer_event_tape(args) if head_mode else None,
