@@ -60,6 +60,30 @@ def read_plan(doc: Mapping[str, Any] | None) -> Plan | None:
     return Plan(counts(section.get("offers")), _name(section.get("refill")), running)
 
 
+def canonical(plan: Plan | None, of: Any) -> Plan | None:
+    """``plan`` with its offer keys as the provider names them now (``of``: the provider's
+    ``canonical_offer``, e.g. an older sky key -> its offer's current one); None: unchanged."""
+    if plan is None or not callable(of):
+        return plan
+
+    def name(key: str | None) -> str | None:
+        try:
+            out = of(key) if key is not None else None
+        except Exception:  # noqa: BLE001 - a key the provider cannot read stays as it is
+            return key
+        return out if isinstance(out, str) else key
+
+    def counts(raw: Mapping[str, int]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for k, n in raw.items():
+            k = name(k) or k
+            out[k] = out.get(k, 0) + n
+        return out
+
+    return Plan(counts(plan.offers), name(plan.refill),
+                counts(plan.running) if plan.running is not None else None)
+
+
 def next_offer(plan: Plan | None, held: Iterable[str | None], *, ordered: Mapping[str, int] | None = None,
                cooling: Iterable[str] = (), known: Iterable[str] | None = None) -> str | None:
     """The offer key the next order should use (None: no preference, the provider picks).

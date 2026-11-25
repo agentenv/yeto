@@ -716,8 +716,13 @@ class SkyProvider:
 
     def prefer_offer(self, key: str | None) -> None:
         """The next order uses offer ``key`` when it is not cooling down (the capacity broker's
-        placement, ``yeto.launch.pool.broker_plan``); None: the cursor picks, as always."""
-        self.preferred_offer = key
+        placement, ``yeto.launch.pool.broker_plan``); None: the cursor picks, as always. An
+        offer's older key (before instance types were part of it) names that offer."""
+        self.preferred_offer = self._canonical(key)
+
+    def canonical_offer(self, key: str | None) -> str | None:
+        """``key`` as this provider names the offer now (an older key: its offer's current one)."""
+        return self._canonical(key)
 
     def cooling_offers(self) -> list[str]:
         doc, now = self._doc(), self.clock()

@@ -481,6 +481,24 @@ def test_a_preferred_offer_that_is_cooling_falls_back_to_the_cursor_until_it_reo
     assert p.offer_of(p.order(2)) == want, "reopened: the preferred offer again"
 
 
+def test_a_plan_naming_an_offer_by_its_older_key_orders_that_offer():
+    from yeto.launch.pool import broker_plan as plans
+    from yeto.launch.rollout import offers
+
+    two = [{"resources": {"infra": "aws/us-east-1", "accelerators": "L4:1", "use_spot": True}, "price_usd_h": 0.4},
+           {"resources": {"infra": "aws/us-west-2", "accelerators": "L4:1", "instance_type": "g6.xlarge",
+                          "use_spot": True}, "price_usd_h": 0.5}]
+    sky = FakeSky()
+    p = SkyProvider("run-s", slots=[1, 2], offers=offers.offers_from_config({"offers": two}), sky=sky)
+    west, older = p.offers[1].key, "L4:1@aws/us-west-2/spot"
+    assert west == "L4:1@aws/us-west-2/g6.xlarge/spot" and p.canonical_offer(older) == west
+    p.prefer_offer(older)
+    assert p.preferred_offer == west and p.offer_of(p.order(1)) == west
+    plan = plans.canonical(plans.Plan({older: 2, p.offers[0].key: 1}, older, running={older: 1}), p.canonical_offer)
+    assert plan == plans.Plan({west: 2, p.offers[0].key: 1}, west, running={west: 1})
+    assert plans.next_offer(plan, [west], known=[o.key for o in p.offers]) == west
+
+
 def test_a_pool_with_a_broker_plan_orders_at_its_offer_on_the_real_provider_and_without_one_at_the_cursor(tmp_path):
     t = [0.0]
     clock = lambda: t[0]  # noqa: E731

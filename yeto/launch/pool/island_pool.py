@@ -1563,7 +1563,8 @@ class IslandPool(PoolMoves):
         except Exception:  # noqa: BLE001
             cooling = []
         known = [getattr(o, "key", None) for o in getattr(provider, "offers", None) or ()] or None
-        key = plans.next_offer(self.broker_plan, held, ordered=self._plan_orders, cooling=cooling, known=known)
+        plan = plans.canonical(self.broker_plan, getattr(provider, "canonical_offer", None))
+        key = plans.next_offer(plan, held, ordered=self._plan_orders, cooling=cooling, known=known)
         prefer(key)
         if key is not None:
             self._event("broker_offer", offer=key, refill=self.broker_plan.refill,
@@ -1578,9 +1579,10 @@ class IslandPool(PoolMoves):
         # its count go first (a ready member is never retired for the mix before a starting one)
         offer_of = self._offer_of()
         held = [offer_of(m.ticket) for m in counted] if offer_of else []
+        plan = plans.canonical(self.broker_plan, getattr(getattr(self.ops, "provider", None), "canonical_offer", None))
         rest = sorted((m for m in counted if m not in chosen and not m.paused),
                       key=lambda m: (m.state == READY,
-                                     plans.victim_rank(self.broker_plan, offer_of(m.ticket) if offer_of else None,
+                                     plans.victim_rank(plan, offer_of(m.ticket) if offer_of else None,
                                                        held),
                                      -(m.created or 0.0), m.hourly_ucr or self.config.hourly(),
                                      m.lease_until if m.lease_until is not None else float("inf")))
