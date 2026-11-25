@@ -113,6 +113,21 @@ SYNCER_REFUSAL_MARKERS = ("backend identity mismatch, JOIN refused",
                           "session mismatch (HELLO refused")
 
 
+def _refresh_registry_login(task) -> bool:
+    """Put the registry login read now (``image_pull.fresh_registry_login``) into ``task``'s
+    secrets; True when one was found (the next provision's ``docker login`` uses it)."""
+    from .image_pull import fresh_registry_login
+
+    secrets = getattr(task, "secrets", None) or {}
+    server = secrets.get("SKYPILOT_DOCKER_SERVER") if isinstance(secrets, dict) else None
+    value = getattr(server, "get_secret_value", lambda: server)() if server is not None else None
+    login = fresh_registry_login(value)
+    if login is None or not callable(getattr(task, "update_secrets", None)):
+        return False
+    task.update_secrets(login)
+    return True
+
+
 class SkySDKOps:
     """Thin adapter over the sky SDK: the only surface FleetController needs.
 
@@ -202,18 +217,29 @@ class SkySDKOps:
         """
         import sky
 
-        try:
-            job_id, _handle = sky.get(sky.launch(task, cluster_name=cluster))
-            maybe_install_nebius_reclaim_hook(task, (job_id, _handle), cluster)
-            return job_id
-        except Exception as e:
-            print(f"[launcher] relaunch of {cluster} failed: {e}", file=sys.stderr)
-            from .image_pull import ImagePullRefused, deterministic_pull_error, image_error_message
+        from .image_pull import CREDENTIAL, ImagePullRefused, image_error_message, pull_failure
 
-            line = deterministic_pull_error(e)
-            if line is not None:  # the image cannot be pulled anywhere: not retried
-                raise ImagePullRefused(image_error_message(cluster, line)) from e
-            return None
+        for attempt in (1, 2):
+            try:
+                job_id, _handle = sky.get(sky.launch(task, cluster_name=cluster))
+                maybe_install_nebius_reclaim_hook(task, (job_id, _handle), cluster)
+                return job_id
+            except Exception as e:
+                print(f"[launcher] relaunch of {cluster} failed: {e}", file=sys.stderr)
+                found = pull_failure(e)
+                if found is None:
+                    return None
+                if found.kind == CREDENTIAL and attempt == 1:
+                    # the login this launch read at its start may have expired since (an ECR
+                    # password lasts 12 hours): read it again and try once more
+                    refreshed = _refresh_registry_login(task)
+                    print(f"[launcher] relaunch of {cluster}: the registry refused the login ({found.line}); "
+                          f"{'login read again' if refreshed else 'no newer login found'}, trying once more",
+                          file=sys.stderr)
+                    continue
+                # the image (or the login, read again) cannot be pulled anywhere: not retried
+                raise ImagePullRefused(image_error_message(cluster, found)) from e
+        return None
 
     def __init__(self, nodes_by_cluster=None):
         # The controller's failure-path teardown (job FAILED ->

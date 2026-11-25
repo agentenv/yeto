@@ -15,7 +15,8 @@ from test_rl_algorithm_provenance import _fake_sky, _launcher_args  # noqa: F401
 from test_rl_launcher_island_failure import Clock, _no_modal_listing, _setup  # noqa: F401  (fixture)
 from yeto.config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER
 from yeto.launch import island_lifecycle as lifecycle
-from yeto.launch.image_pull import ImagePullRefused, deterministic_pull_error
+from yeto.launch.image_pull import (CREDENTIAL, IMAGE, ImagePullRefused, PullFailure, deterministic_pull_error,
+                                    image_error_message, pull_failure)
 
 DIGEST = "ghcr.io/x/yeto-miles@sha256:" + "0" * 64
 # r8 (Nebius H200): sky's error carries the pull's output after its first line
@@ -33,33 +34,58 @@ def _pull(line: str) -> str:
     return f"Command sudo docker pull {DIGEST} failed with return code 1.\n{DIGEST}: Pulling from x\n{line}\n"
 
 
-@pytest.mark.parametrize("line", [
-    f"Error response from daemon: manifest for {DIGEST} not found: manifest unknown: manifest unknown",
-    "Error response from daemon: Head \"https://ghcr.io/v2/x/manifests/sha256:0\": unauthorized",
-    "Error response from daemon: pull access denied for x/yeto-miles, repository does not exist",
-    "denied: requested access to the resource is denied",
-    "no matching manifest for linux/arm64/v8 in the manifest list entries",
+@pytest.mark.parametrize("line, kind", [
+    (f"Error response from daemon: manifest for {DIGEST} not found: manifest unknown: manifest unknown", IMAGE),
+    ("Error response from daemon: no matching manifest for linux/arm64/v8 in the manifest list entries", IMAGE),
+    ("Error response from daemon: Head \"https://ghcr.io/v2/x/manifests/sha256:0\": unauthorized", CREDENTIAL),
+    ("Error response from daemon: pull access denied for x/yeto-miles, repository does not exist or may require "
+     "'docker login': denied: requested access to the resource is denied", CREDENTIAL),
+    ("Error response from daemon: Head \"https://1.dkr.ecr.us-east-1.amazonaws.com/v2/x/manifests/0\": "
+     "no basic auth credentials", CREDENTIAL),
+    ("Error response from daemon: denied: Your authorization token has expired. Reauthenticate and try again.",
+     CREDENTIAL),
 ])
-def test_an_image_or_reference_failure_is_deterministic(line):
-    assert deterministic_pull_error(_pull(line)) == line
-    assert "failed to register layer" in deterministic_pull_error(R8)
+def test_an_image_or_credential_failure_on_dockers_own_line_is_deterministic(line, kind):
+    assert pull_failure(_pull(line)) == PullFailure(kind, line)
+    assert pull_failure(R8).kind == IMAGE and "failed to register layer" in pull_failure(R8).line
 
 
 @pytest.mark.parametrize("line", [
     "Error response from daemon: Get \"https://ghcr.io/v2/\": net/http: TLS handshake timeout",
-    "toomanyrequests: retry-after: 39.1µs, allowed: 44000/minute",
+    "Error response from daemon: toomanyrequests: retry-after: 39.1us, allowed: 44000/minute",
     "Error response from daemon: received unexpected HTTP status: 503 Service Unavailable",
     "error pulling image configuration: download failed after attempts=6: unexpected EOF",
+    # the machine's own disk, not the image: another machine may pull it
     "failed to register layer: write /var/lib/docker/x: no space left on device",
+    "failed to register layer: openat /var/lib/docker/overlay2/x/diff/opt: input/output error",
+    "failed to register layer: mkdir /var/lib/docker/overlay2/x: read-only file system",
 ])
 def test_a_network_registry_or_host_failure_keeps_its_relaunches(line):
-    assert deterministic_pull_error(_pull(line)) is None
+    assert pull_failure(_pull(line)) is None
+
+
+@pytest.mark.parametrize("other", [
+    "401 Client Error: Unauthorized for url: https://huggingface.co/api/models/x",
+    "fatal: Authentication required for 'https://github.com/x/y.git/'",
+    "remote: denied: requested access to the resource is denied",
+])
+def test_another_tools_line_after_a_pull_failure_keeps_its_relaunches(other):
+    """Only docker's own error lines count: a failed pull (its own error a timeout here, or
+    none) followed by a Hugging Face 401 or a git refusal is not an image problem."""
+    assert pull_failure(_pull("Error response from daemon: Get \"https://ghcr.io/v2/\": i/o timeout") + other) is None
+    assert pull_failure(_pull("2e676d178d2f: Pull complete") + other) is None
 
 
 def test_only_an_image_pull_counts():
     """An "unauthorized" outside a pull (an API, ssh) says nothing about the image."""
-    assert deterministic_pull_error("sky.exceptions.ClusterOwnerIdentityMismatchError: unauthorized") is None
+    assert deterministic_pull_error("Error response from daemon: unauthorized") is None
     assert deterministic_pull_error(None) is None
+
+
+def test_the_credential_error_says_check_the_registry_login():
+    message = image_error_message("r-i0-l0", PullFailure(CREDENTIAL, "Error response from daemon: unauthorized"))
+    assert "credential or image permission problem: check the registry login" in message
+    assert "ECR password lasts 12 hours" in message
 
 
 def test_the_launch_that_cannot_pull_its_image_ends_as_a_configuration_error(monkeypatch, tmp_path, capsys):
@@ -127,6 +153,55 @@ def test_a_relaunch_that_cannot_pull_the_image_ends_the_run_once(monkeypatch, tm
     assert launcher.run(args) == CONFIG_ERROR_EXIT
     assert len([r for r in record if r[0] == "relaunch"]) == 1
     assert "cannot be pulled" in capsys.readouterr().err
+
+
+class _Task:
+    def __init__(self, secrets):
+        self.secrets, self.updated = dict(secrets), []
+
+    def update_secrets(self, secrets):
+        self.updated.append(dict(secrets))
+        self.secrets.update(secrets)
+
+
+def _sky(monkeypatch, errors, launched=None):
+    sky = types.ModuleType("sky")
+
+    def launch(task, cluster_name):
+        error = next(errors)
+        if error is None:
+            if launched is not None:
+                launched.append(dict(task.secrets))
+            return (7, None)
+        raise error
+
+    sky.launch, sky.get = launch, lambda rid: rid
+    monkeypatch.setitem(sys.modules, "sky", sky)
+    monkeypatch.setattr("yeto.launch.sky_ops.maybe_install_nebius_reclaim_hook", lambda *a, **k: None)
+
+
+def test_a_refused_login_on_a_relaunch_is_read_again_and_tried_once_more(monkeypatch):
+    """A relaunch hours into a launch reuses the login the launch read at its start (an ECR
+    password lasts 12 hours): the registry refusing it gets one more try with the login read
+    now; refused again, the island ends as a configuration error naming the login."""
+    from yeto.launch.sky_ops import SkySDKOps
+
+    expired = RuntimeError(_pull("Error response from daemon: denied: Your authorization token has expired."))
+    monkeypatch.setenv("SKYPILOT_DOCKER_USERNAME", "AWS")
+    monkeypatch.setenv("SKYPILOT_DOCKER_PASSWORD", "fresh-token")
+    monkeypatch.setenv("SKYPILOT_DOCKER_SERVER", "1.dkr.ecr.us-east-1.amazonaws.com")
+    old = {"SKYPILOT_DOCKER_USERNAME": "AWS", "SKYPILOT_DOCKER_PASSWORD": "old-token",
+           "SKYPILOT_DOCKER_SERVER": "1.dkr.ecr.us-east-1.amazonaws.com"}
+    launched = []
+    _sky(monkeypatch, iter([expired, None]), launched)
+    ops = SkySDKOps.__new__(SkySDKOps)
+    task = _Task(old)
+    assert ops.relaunch(task, "r-i0-l0") == 7
+    assert launched[0]["SKYPILOT_DOCKER_PASSWORD"] == "fresh-token"
+
+    _sky(monkeypatch, iter([expired, expired]))
+    with pytest.raises(ImagePullRefused, match="check the registry login"):
+        ops.relaunch(_Task(old), "r-i0-l0")
 
 
 def test_sky_ops_relaunch_names_a_deterministic_pull_and_keeps_the_others(monkeypatch):
