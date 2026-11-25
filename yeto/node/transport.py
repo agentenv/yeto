@@ -26,7 +26,7 @@ runs itself, :mod:`yeto.node.relay_proxy`). Code upload, start and stop then all
 through it: the node opens no other inbound port.
 
 Modal is the one route without them: a Modal function is *spawned* with its spec
-(``yeto.launch.nc.modal_provider``); it reports through the store like every other
+(``yeto.launch.pool.modal_provider``); it reports through the store like every other
 node (``yeto.node.records``), and nothing is executed on it from outside.
 """
 

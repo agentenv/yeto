@@ -22,7 +22,7 @@ from yeto.launch.nc import cli, elastic
 from yeto.launch.nc import client as ncc
 from yeto.launch.nc import tunnel
 from yeto.launch.nc.provider import NCProvider
-from yeto.launch.nc.sky_provider import from_config
+from yeto.launch.pool.sky_provider import from_config
 from yeto.launch.pool import money
 from yeto.launch.pool import status as el
 from yeto.launch.pool.island_pool import IslandPool

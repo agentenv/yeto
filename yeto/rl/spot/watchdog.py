@@ -22,7 +22,7 @@ One process owns one island (one sky cluster name at a time). It
   JSONL log; the spend total survives a watchdog restart (``--state``).
 
 The machine calls (launch, state, IP, delete) go through the rollout
-:class:`~yeto.launch.nc.sky_provider.SkyProvider` (:class:`ProviderOps`: the sky SDK,
+:class:`~yeto.launch.pool.sky_provider.SkyProvider` (:class:`ProviderOps`: the sky SDK,
 its cluster record and the run's resource ledger); the watchdog keeps only its loop
 (candidates, budget, stop marker, orphan sweep, ready probe). Tests inject a fake ops
 object. The candidate list is the shared one of :mod:`yeto.launch.rollout.offers`.
@@ -103,7 +103,7 @@ def ssh_ready(cluster: str, cmd: str) -> bool:
 
 
 class ProviderOps:
-    """The watchdog's ops over :class:`yeto.launch.nc.sky_provider.SkyProvider`:
+    """The watchdog's ops over :class:`yeto.launch.pool.sky_provider.SkyProvider`:
     the watchdog keeps its loop (candidates, budget, stop marker, orphan sweep, ready
     probe) and the machine calls go through the rollout provider (sky SDK launch / status /
     down, its record and resource ledger, the own-name guard). The rollout pool
@@ -543,7 +543,7 @@ def provider_ops(a: argparse.Namespace, cands: list[Candidate], envs: list[str],
     """The watchdog's ops: one SkyProvider slot, this watchdog's cluster prefix. The
     provider's start timeout (order to UP) is ``--launch-timeout-s``, the bound of the old
     ``sky launch`` call; ``--starting-timeout-s`` stays the watchdog's own STARTING bound."""
-    from yeto.launch.nc.sky_provider import SkyProvider  # noqa: PLC0415
+    from yeto.launch.pool.sky_provider import SkyProvider  # noqa: PLC0415
 
     provider = SkyProvider(a.run_id, slots=[1], offers=[c.offer() for c in cands], exact_prefix=a.cluster_prefix,
                            task_yaml=a.yaml, envs=dict(e.split("=", 1) for e in envs),

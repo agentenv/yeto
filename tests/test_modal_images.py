@@ -15,7 +15,7 @@ import pytest
 
 from yeto.cloud import modal_engine_sampler as mes
 from yeto.cloud.modal_images import PYTHON_ON_PATH, engine_registry_image
-from yeto.launch.nc.modal_provider import ModalSdkClient
+from yeto.launch.pool.modal_provider import ModalSdkClient
 
 VLLM_IMAGE = "vllm/vllm-openai@sha256:" + "8" * 64
 

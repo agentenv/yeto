@@ -207,7 +207,7 @@ def _pool_sky_scope(r: Any):
 
     if not pool_owned(r):
         return contextlib.nullcontext()
-    from yeto.launch.nc import sky_provider  # noqa: PLC0415
+    from yeto.launch.pool import sky_provider  # noqa: PLC0415
 
     aws_profile = (r.attrs or {}).get("aws_profile")
     try:

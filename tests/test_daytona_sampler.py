@@ -423,7 +423,7 @@ def test_provider_transport_sdk_routes_scripts_and_host_setup_through_the_api(mo
     from types import SimpleNamespace
 
     from yeto.launch.daytona_sampler import SdkExec
-    from yeto.launch.nc import daytona_provider as dp
+    from yeto.launch.pool import daytona_provider as dp
 
     assert dp.DaytonaProvider("r", slots=[1], snapshot="s", sdk=object(), client=object()).sampler_route.remote_scripts \
         is False  # default: ssh, unchanged

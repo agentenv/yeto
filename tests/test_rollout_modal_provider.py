@@ -1,4 +1,4 @@
-"""Modal rollout provider (yeto.launch.nc.modal_provider) over a fake Modal client:
+"""Modal rollout provider (yeto.launch.pool.modal_provider) over a fake Modal client:
 the shared pool policy (start, eviction -> fence -> refill, scale down, release)
 with function calls instead of nodes. No Modal call is made."""
 
@@ -14,8 +14,8 @@ from yeto.launch.nc import cli, pool_run, provider as prov
 from yeto.launch.nc.lease_pool import PoolConfig
 from yeto.launch.pool import status as el
 from yeto.launch.pool.island_pool import GONE, READY, IslandPool
-from yeto.launch.nc.modal_provider import (FAILED, RUNNING, SUCCEEDED, ModalPoolOps, ModalProvider, ModalSdkClient,
-                                           from_config, offline_problems, started_key, store_env)
+from yeto.launch.pool.modal_provider import (FAILED, RUNNING, SUCCEEDED, ModalPoolOps, ModalProvider, ModalSdkClient,
+                                             from_config, offline_problems, started_key, store_env)
 
 
 @pytest.fixture(autouse=True)
@@ -242,7 +242,7 @@ def test_a_reused_container_does_not_report_the_earlier_calls_join(tmp_path, mon
     its rl_sampler_join) was still on disk and the new call reported ready at once,
     while its sampler still waited for the layout. Only a tape this call's sampler
     writes counts."""
-    from yeto.launch.nc.modal_provider import rollout_sampler_body  # noqa: PLC0415
+    from yeto.launch.pool.modal_provider import rollout_sampler_body  # noqa: PLC0415
 
     tape = tmp_path / "tape" / "events.jsonl"
     tape.parent.mkdir()
@@ -295,7 +295,7 @@ def test_a_sampler_that_finished_ends_the_pool_without_a_refill(tmp_path):
 
 
 def test_the_call_body_reports_ready_once_the_tape_has_the_join(tmp_path, monkeypatch):
-    from yeto.launch.nc.modal_provider import rollout_sampler_body  # noqa: PLC0415
+    from yeto.launch.pool.modal_provider import rollout_sampler_body  # noqa: PLC0415
 
     tape = tmp_path / "tape" / "events.jsonl"
     tape.parent.mkdir()
@@ -368,7 +368,7 @@ TRACEBACK = ['  File "/root/yeto/rl/engine/resume.py", line 372, in store_for',
 def test_a_failed_call_tells_the_pool_its_samplers_exit_code_and_stderr_tail(tmp_path):
     """A sampler that exits on a configuration error 15 s in: the pool's evicted event
     carries the call's rc and the last stderr lines, not only ``end_reason=lost``."""
-    from yeto.launch.nc.modal_provider import failure_detail  # noqa: PLC0415
+    from yeto.launch.pool.modal_provider import failure_detail  # noqa: PLC0415
 
     t = [0.0]
     clock = lambda: t[0]  # noqa: E731
@@ -399,7 +399,7 @@ def test_a_failed_call_tells_the_pool_its_samplers_exit_code_and_stderr_tail(tmp
 
 
 def test_failure_detail_reads_a_raised_call_and_bounds_its_length():
-    from yeto.launch.nc.modal_provider import FAILURE_DETAIL_CHARS, failure_detail  # noqa: PLC0415
+    from yeto.launch.pool.modal_provider import FAILURE_DETAIL_CHARS, failure_detail  # noqa: PLC0415
 
     assert failure_detail({"rc": 0, "secs": 3}) is None and failure_detail(None) is None
     assert failure_detail({"rc": 2, "secs": 1.0}) == "sampler exited rc=2 after 1.0 s"
@@ -417,7 +417,7 @@ def test_failure_detail_reads_a_raised_call_and_bounds_its_length():
 def test_the_call_body_returns_the_samplers_stderr_tail(tmp_path, monkeypatch, capsys):
     import io  # noqa: PLC0415
 
-    from yeto.launch.nc.modal_provider import STDERR_TAIL_LINES, rollout_sampler_body  # noqa: PLC0415
+    from yeto.launch.pool.modal_provider import STDERR_TAIL_LINES, rollout_sampler_body  # noqa: PLC0415
 
     lines = [f"log {i}" for i in range(40)] + TRACEBACK
     got = {}
@@ -1319,7 +1319,7 @@ def test_the_sdk_client_reads_the_functions_live_stats():
 
 
 def test_the_call_body_writes_its_started_marker_before_the_sampler_joins(tmp_path, monkeypatch):
-    from yeto.launch.nc.modal_provider import rollout_sampler_body  # noqa: PLC0415
+    from yeto.launch.pool.modal_provider import rollout_sampler_body  # noqa: PLC0415
 
     objects, polls, order = Objects(), [0], []
 

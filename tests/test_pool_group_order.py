@@ -13,8 +13,8 @@ from test_nc_sky_provider import FakeSky
 from test_rollout_modal_provider import FakeClient
 from test_ssh_sampler_pool import npu_node, provider_section
 from yeto.launch import ssh_sampler_pool as sp
-from yeto.launch.nc.modal_provider import ModalProvider
-from yeto.launch.nc.sky_provider import SkyProvider
+from yeto.launch.pool.modal_provider import ModalProvider
+from yeto.launch.pool.sky_provider import SkyProvider
 from yeto.launch.pool import group as g
 from yeto.launch.pool.status import LeaseStatus
 

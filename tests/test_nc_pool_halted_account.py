@@ -452,7 +452,7 @@ def test_every_slot_halted_says_so_where_no_order_is_placed():
 
 
 def _sky_refused(ticket):
-    from yeto.launch.nc.sky_provider import unscoped_refusal
+    from yeto.launch.pool.sky_provider import unscoped_refusal
 
     return unscoped_refusal("sky-aws", environ={}, what="sky down", cluster=ticket)
 
@@ -473,7 +473,7 @@ def test_a_refused_provider_status_is_one_alert_with_the_action_and_the_member_i
 
 
 def test_a_refused_provider_release_is_held_billed_and_alerted_critical_with_the_action():
-    from yeto.launch.nc.sky_provider import manual_sky_cli
+    from yeto.launch.pool.sky_provider import manual_sky_cli
 
     clock = Clock()
     cloud = GuardedCloud(clock, ready_after=300)

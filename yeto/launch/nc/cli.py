@@ -1093,7 +1093,7 @@ def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
         except ValueError:
             price = None
     if price is None and kind == "modal":
-        from .modal_provider import table_price  # noqa: PLC0415
+        from ..pool.modal_provider import table_price  # noqa: PLC0415
 
         price = table_price(section)
     if price is None and kind == "ssh":
@@ -1180,7 +1180,7 @@ def pool_price_rows(cfg: dict[str, Any]) -> list[Any]:
                 if isinstance(d, dict) and d.get("price_usd_h") is None and isinstance(d.get("resources"), dict)]
         return [r for r in rows if r is not None]
     if kind == "modal":
-        from .modal_provider import DEFAULT_GPU  # noqa: PLC0415
+        from ..pool.modal_provider import DEFAULT_GPU  # noqa: PLC0415
 
         row = prices.lookup("modal", section.get("gpu", DEFAULT_GPU))
         return [] if row is None else [row]
@@ -1310,8 +1310,8 @@ def agentic_setup_cmd(args) -> int:
 
 # -- entry -------------------------------------------------------------------
 
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="python -m yeto.launch.nc",
+def main(argv: list[str] | None = None, *, prog: str = "python -m yeto.launch.nc") -> int:
+    p = argparse.ArgumentParser(prog=prog,
                                 description="National Compute nodes for yeto samplers (docs/NC_POOL.md). A lease "
                                 "is NOT ended at lease_until: a node stays billed until it is deleted.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1674,7 +1674,7 @@ def _pool_command(args: Any) -> int:
             return pool_run.stop_pool(cfg, args.config, wait_s=args.wait, control_store=args.control_store,
                                       pool_name=args.pool_name)
         _print_breaker_deprecations(cfg)
-        from .sky_provider import offer_image_lines  # noqa: PLC0415
+        from ..pool.sky_provider import offer_image_lines  # noqa: PLC0415
 
         for line in offer_image_lines(cfg):  # a sky pool's VM images (and in the dry run)
             print(line)

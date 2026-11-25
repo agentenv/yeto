@@ -149,7 +149,8 @@ def test_a_stale_price_is_named_with_its_source_and_date():
 
 @pytest.mark.parametrize("gpu, n", [("L40S", 1), ("H100", 8), ("B300", 8), ("A100-80GB", 2)])
 def test_a_modal_trainer_and_a_modal_sampler_pool_of_the_same_gpus_cost_the_same(gpu, n):
-    from yeto.launch.nc import cli, modal_provider
+    from yeto.launch.nc import cli
+    from yeto.launch.pool import modal_provider
 
     trainer = billing.default_modal_rate(gpu, n)  # the launcher's Modal trainer (modal_runner)
     assert billing.modal_shapes_rate([(gpu, n)]) == pytest.approx(trainer)
@@ -283,7 +284,7 @@ def test_each_kind_reads_its_notice_lease_and_cold_start_from_the_capability_tab
 
 def test_the_registry_and_the_provider_classes_hold_one_copy_of_the_caps():
     from yeto.launch import ssh_sampler_pool
-    from yeto.launch.nc import daytona_provider, modal_provider, sky_provider
+    from yeto.launch.pool import daytona_provider, modal_provider, sky_provider
     from yeto.launch.nc import provider as nc_provider
     from yeto.launch.pool import provider
 
