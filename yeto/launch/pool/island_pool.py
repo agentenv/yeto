@@ -72,6 +72,17 @@ OWNERSHIP_ERRORS = ("NcForeignTicketReleased", "NcDeleteUnconfirmed")  # a delet
 # a provider refused to send a request (it would carry the wrong credentials): nothing is
 # known of the machine, it is kept; the error's ``action`` is what an operator runs instead
 BLOCKED_ERRORS = ("ProviderRequestRefused",)
+# a blocked release keeps a billed machine: its critical alert is repeated this often
+BLOCKED_REALERT_S = 3600.0
+# a blocked member's ``drain_error``: this prefix, then the action (the billing banner prints it)
+RELEASE_BY_HAND = "release refused in this environment; release it by hand: "
+
+
+def release_by_hand(member: Any) -> str | None:
+    """The by-hand release command of a member (or its state dict) whose release the
+    provider refused to send, else None."""
+    error = member.get("drain_error") if isinstance(member, dict) else getattr(member, "drain_error", None)
+    return error[len(RELEASE_BY_HAND):] if isinstance(error, str) and error.startswith(RELEASE_BY_HAND) else None
 SLOT_RETRY_S = 600.0  # a slot whose guard refused is tried again after this long
 # the ops calls that change something (a machine, a sampler, the work contract): on the store
 # control plane each runs only after the pool's store lock was confirmed (``GuardedOps``)
@@ -297,6 +308,7 @@ class IslandPool(PoolMoves):
     _slot_halts: dict[Any, dict[str, Any]] = field(default_factory=dict)  # halted slots already reported
     _drain_hold: dict[str, float] = field(default_factory=dict)  # ticket -> no drain retry before
     _drain_on_halt: set[str] = field(default_factory=set)  # held tickets whose slot is halted: retried on lift
+    _blocked_at: dict[str, tuple[float, float]] = field(default_factory=dict)  # ticket -> (first, last alert)
     _unsaved_fences: set[str] = field(default_factory=set)  # fenced, success not saved: nothing continues them
     _save_failures: int = 0  # consecutive failed saves (state_save_failing once per streak)
     _short: Any = None  # the halted slots of the last ``slots_below_target`` alert
@@ -1059,11 +1071,13 @@ class IslandPool(PoolMoves):
         if error_is(error, DEFERRED_ERRORS):  # it ends on its own shortly: asked again, not a failure
             self._once(member, "release_deferred", "release_deferred", why=why, detail=str(error)[:300])
             return False
-        if error_is(error, BLOCKED_ERRORS):  # the provider would not send the release: held, one alert
+        if error_is(error, BLOCKED_ERRORS):  # the provider would not send the release: held, critical
             self._drain_hold[member.ticket] = now + SLOT_RETRY_S
-            self._once(member, "release_blocked", "release_blocked", level="alert", why=why,
-                       error=str(error)[:300], retry_in_s=SLOT_RETRY_S, action=getattr(error, "action", ""),
-                       detail="the member is kept as it is (still billed) until the release can be sent")
+            action = getattr(error, "action", "")
+            if action:
+                member.drain_error = RELEASE_BY_HAND + action
+            self._release_blocked(member.ticket, member.account, now, why=why, shard=member.shard,
+                                  error=str(error)[:300], action=action)
             return False
         if error_is(error, OWNERSHIP_ERRORS + REFUSED_ERRORS):
             self._drain_hold[member.ticket] = now + SLOT_RETRY_S
@@ -1087,6 +1101,23 @@ class IslandPool(PoolMoves):
                     error=member.drain_error)
         return False
 
+    def _release_blocked(self, ticket: str, account: Any, now: float, **detail: Any) -> None:
+        """A release the provider refused to send: the machine stays billed (it is charged
+        every tick). One critical alert with the by-hand action now and every
+        :data:`BLOCKED_REALERT_S` while it lasts; a pool-stop or run down from the same
+        environment is refused the same way, so the action is what releases it."""
+        first, last = self._blocked_at.get(ticket, (now, None))
+        if last is not None and now - last < BLOCKED_REALERT_S:
+            return
+        self._blocked_at[ticket] = (first, now)
+        self.log(f"pool: CRITICAL: the release of {ticket} is refused here and it is STILL BILLED; "
+                 f"by hand: {detail.get('action') or '(no action)'}"[:500])
+        self._event("release_blocked", level="critical", ticket=ticket, account=account,
+                    blocked_for_s=round(now - first), retry_in_s=SLOT_RETRY_S,
+                    spent_ucr=round(self.budget.spent_ucr),
+                    detail="still billed; a pool-stop or run down from this environment is refused the same "
+                           "way: release it with the action", **detail)
+
     def _ticket_ended(self, member: Member) -> bool:
         """The provider reports the member's ticket ended (a failed read: not known, False)."""
         try:
@@ -1107,6 +1138,7 @@ class IslandPool(PoolMoves):
             start.cancel()  # not begun yet: never runs (a running one finishes on its own)
         self._drain_hold.pop(member.ticket, None)
         self._drain_on_halt.discard(member.ticket)
+        self._blocked_at.pop(member.ticket, None)
         if ended_already:  # no delete was sent and none is: the patrol does not ask for one either
             self._drain_hold[member.ticket] = float("inf")
         for key in ("release_deferred", "release_blocked", "release_ownership"):
@@ -1660,6 +1692,7 @@ class IslandPool(PoolMoves):
             return
 
         for m in [m for m in self.members if m.state == DRAINING]:
+            self._charge(m, now)  # a machine not confirmed released is billed: counted until it is
             self._drain(m, "retry")
         self._retry_fences(now)
         self._reassert_drains()
@@ -2600,8 +2633,14 @@ class IslandPool(PoolMoves):
             try:
                 self.ops.drain(stray)
                 self._drain_hold.pop(str(ticket), None)
+                self._blocked_at.pop(str(ticket), None)
                 self._event("released", ticket=ticket, account=account, why="orphan")
             except Exception as error:  # noqa: BLE001
+                if error_is(error, BLOCKED_ERRORS):  # nothing was sent: held, critical, with the action
+                    self._drain_hold[str(ticket)] = now + SLOT_RETRY_S
+                    self._release_blocked(str(ticket), account, now, why="orphan", error=str(error)[:300],
+                                          action=getattr(error, "action", ""))
+                    continue
                 if error_is(error, DEFERRED_ERRORS + REFUSED_ERRORS + OWNERSHIP_ERRORS):
                     ended = self._ticket_ended(stray)
                     self._drain_hold[str(ticket)] = float("inf") if ended else now + SLOT_RETRY_S

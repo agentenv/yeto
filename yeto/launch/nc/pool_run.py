@@ -45,7 +45,7 @@ from typing import Any
 
 from ...config_errors import ConfigError
 from ..pool import status as island_status
-from ..pool.island_pool import GONE, IslandPool, Member
+from ..pool.island_pool import GONE, IslandPool, Member, release_by_hand
 from . import cli, elastic, ssh_sampler, tunnel
 from .client import LEASE_HOURS, NcTools
 from .provider import is_national_compute, provider_kind
@@ -434,6 +434,9 @@ def billing_banner(config_path: str, members: list[dict[str, Any]], *, why: str 
             ("moving to pool", "moving in from pool")) else None)
         if moving:
             lines.append(f"    {moving}")
+        by_hand = release_by_hand(m)
+        if by_hand:  # the provider refuses its release here: pool-stop from this shell is refused too
+            lines.append(f"    RELEASE REFUSED in this environment; release it by hand: {by_hand}")
     lines += ["Release them with:", f"  {stop_command(config_path)}"]
     if national:  # ``down`` is the National Compute ticket call
         lines.append("or one by one: python -m yeto.launch.nc down --account <account> --ticket <ticket>")

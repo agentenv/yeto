@@ -452,10 +452,9 @@ def test_every_slot_halted_says_so_where_no_order_is_placed():
 
 
 def _sky_refused(ticket):
-    from yeto.launch.nc.sky_provider import ProviderRequestRefused
+    from yeto.launch.nc.sky_provider import unscoped_refusal
 
-    return ProviderRequestRefused("sky provider: sky down refused without the request env scope",
-                                  action=f"AWS_PROFILE=sky-aws sky down {ticket}")
+    return unscoped_refusal("sky-aws", environ={}, what="sky down", cluster=ticket)
 
 
 def test_a_refused_provider_status_is_one_alert_with_the_action_and_the_member_is_kept():
@@ -473,7 +472,9 @@ def test_a_refused_provider_status_is_one_alert_with_the_action_and_the_member_i
     assert not pool.breaker.failures and not pool.stopped
 
 
-def test_a_refused_provider_release_is_held_with_one_alert_carrying_the_action():
+def test_a_refused_provider_release_is_held_billed_and_alerted_critical_with_the_action():
+    from yeto.launch.nc.sky_provider import manual_sky_cli
+
     clock = Clock()
     cloud = GuardedCloud(clock, ready_after=300)
     pool = _pool(clock, cloud, target=1, accounts=(1, 4))
@@ -484,7 +485,39 @@ def test_a_refused_provider_release_is_held_with_one_alert_carrying_the_action()
     pool.config.elastic.max_sampler_restarts = 0  # the crash retires it: its release is refused
     _run(pool, clock, clock.t + 2 * H)
     assert m.state == DRAINING and cloud.tickets[m.ticket]["state"] == "active"  # kept, still billed
-    assert len(cloud.kinds("drain_refused")) <= 2 * H / 600 + 2  # held, not once per tick
-    (blocked,) = _events(pool, "release_blocked")
-    assert blocked["level"] == "alert" and blocked["action"] == f"AWS_PROFILE=sky-aws sky down {m.ticket}"
+    assert m.charged_to >= clock.t - 120  # its hours are counted every tick while it bills
+    assert len(cloud.kinds("drain_refused")) <= 2.2 * H / 600 + 2  # held, not once per tick
+    blocked = _events(pool, "release_blocked")
+    assert 2 <= len(blocked) <= 3  # critical, and again every hour while it bills
+    action = f"{manual_sky_cli('sky-aws')} down -y {m.ticket}"
+    assert all(b["level"] == "critical" and b["action"] == action for b in blocked)
+    assert blocked[-1]["blocked_for_s"] >= H
     assert "drain_failed" not in _names(pool)
+    # the billing banner (pool-stop leaves it billed: refused the same way) prints the action
+    from yeto.launch.pool.island_pool import release_by_hand
+
+    assert release_by_hand(m) == action
+    banner = pool_run.billing_banner("pool.json", [{"account": m.account, "ticket": m.ticket, "state": m.state,
+                                                    "drain_error": m.drain_error}], national=False, kind="sky")
+    assert f"release it by hand: {action}" in banner
+    # released by hand: the next try finds it gone
+    del cloud.drain_errors[m.ticket]
+    _run(pool, clock, clock.t + 700)
+    assert m.state == GONE and m.drain_error is None
+
+
+def test_a_refused_orphan_release_is_held_and_alerted_critical_with_the_action():
+    clock = Clock()
+    cloud = GuardedCloud(clock, ready_after=300)
+    pool = _pool(clock, cloud, target=1, accounts=(1, 4))
+    pool.config.release_orphans = True
+    _run(pool, clock, 1800)
+    (m,) = [x for x in pool.members if x.state == READY]
+    cloud.tickets["tx"] = dict(cloud.tickets[m.ticket], account=4, state="active")
+    cloud.ledger.append(["run-a", 4, "tx", True])
+    cloud.drain_errors["tx"] = _sky_refused("tx")
+    _run(pool, clock, clock.t + 2 * H)
+    assert len(cloud.kinds("drain_refused")) <= 2 * H / 600 + 2  # held, not once per tick
+    blocked = _events(pool, "release_blocked")
+    assert 2 <= len(blocked) <= 3 and all(b["level"] == "critical" and b["ticket"] == "tx" for b in blocked)
+    assert blocked[0]["action"].endswith("sky down -y tx") and "drain_failed" not in _names(pool)

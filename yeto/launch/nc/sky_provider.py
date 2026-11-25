@@ -106,6 +106,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import time
 from pathlib import Path
 from typing import Any
@@ -351,12 +352,28 @@ def request_env_scope(overrides: dict[str, str | None]):
 
 class ProviderRequestRefused(RuntimeError):
     """A sky request the provider refused to send (it would carry another account's AWS
-    credentials). ``action``: what an operator runs instead. The pool tells it by class
-    name (``island_pool.BLOCKED_ERRORS``): an alert with the action, never a lost member."""
+    credentials). ``action``: the command an operator runs instead, in any shell (it
+    clears every AWS variable sky would forward, then sets ``aws_profile`` if any). The
+    pool tells it by class name (``island_pool.BLOCKED_ERRORS``): a critical alert with
+    the action, never a lost member."""
 
-    def __init__(self, message: str, action: str = ""):
+    # sky SDK call -> the CLI verb an operator runs instead (non-interactive)
+    VERBS = {"down": "down -y", "status": "status"}
+
+    def __init__(self, message: str, action: str = "", *, reason: str = "", sky_cli: str = ""):
         super().__init__(message)
-        self.action = action
+        self.action, self.reason, self.sky_cli = action, reason or message, sky_cli
+
+    def for_call(self, name: str, args: tuple, kw: dict) -> "ProviderRequestRefused":
+        """This refusal for sky call ``name``: the action names that call's cluster(s)."""
+        verb = self.VERBS.get(name)
+        target = kw.get("cluster_name", kw.get("cluster_names", args[0] if args else None))
+        names = [target] if isinstance(target, str) else [str(n) for n in (target or ())]
+        if not self.sky_cli or verb is None or not names:
+            return ProviderRequestRefused(str(self), self.action, reason=self.reason, sky_cli=self.sky_cli)
+        action = f"{self.sky_cli} {verb} {' '.join(shlex.quote(n) for n in names)}"
+        return ProviderRequestRefused(f"{self.reason}; by hand: {action}", action, reason=self.reason,
+                                      sky_cli=self.sky_cli)
 
 
 class _ScopedSky:
@@ -376,11 +393,29 @@ class _ScopedSky:
         @functools.wraps(value)
         def call(*args: Any, **kw: Any) -> Any:
             if self._refuse is not None:
-                raise ProviderRequestRefused(str(self._refuse), self._refuse.action)
+                raise self._refuse.for_call(name, args, kw)
             with request_env_scope(self._overrides):
                 return value(*args, **kw)
 
         return call
+
+
+@contextlib.contextmanager
+def _refused_for(call: str, cluster: str):
+    """A refused request inside: its action is the by-hand ``call`` of ``cluster`` (the
+    request refused may be one that names no cluster, e.g. a request status)."""
+    try:
+        yield
+    except ProviderRequestRefused as error:
+        raise error.for_call(call, (cluster,), {}) from None
+
+
+def manual_sky_cli(aws_profile: str | None) -> str:
+    """The ``sky`` CLI prefix an operator runs by hand, from any shell: it unsets every
+    AWS variable sky forwards to its API server (or an auto-started server inherits),
+    then sets ``aws_profile`` (none: the server's own credentials)."""
+    unset = " ".join(f"-u {n}" for n in AWS_FORWARDED_ENVS + AWS_INHERITED_ENVS)
+    return f"env {unset} " + (f"AWS_PROFILE={shlex.quote(aws_profile)} " if aws_profile else "") + "sky"
 
 
 def unscoped_refusal(aws_profile: str | None, environ=None, what: str = "sky requests",
@@ -392,14 +427,12 @@ def unscoped_refusal(aws_profile: str | None, environ=None, what: str = "sky req
     forwarded = [n for n in AWS_FORWARDED_ENVS if environ.get(n)]
     if not aws_profile and not forwarded:
         return None
-    target = cluster or "<cluster>"
-    manual = (f"AWS_PROFILE={aws_profile} sky down {target}" if aws_profile else
-              f"env -u {' -u '.join(forwarded)} sky down {target}")
-    return ProviderRequestRefused(
-        f"sky provider: {what} refused without the request env scope (they would carry "
-        f"{', '.join(forwarded) or 'no AWS_PROFILE'} instead of "
-        f"{'aws_profile ' + aws_profile if aws_profile else 'the server credentials'}); by hand: {manual}",
-        action=manual)
+    cli = manual_sky_cli(aws_profile)
+    manual = f"{cli} down -y {shlex.quote(cluster) if cluster else '<cluster>'}"
+    reason = (f"sky provider: {what} refused without the request env scope (they would carry "
+              f"{', '.join(forwarded) or 'no AWS_PROFILE'} instead of "
+              f"{'aws_profile ' + aws_profile if aws_profile else 'the server credentials'})")
+    return ProviderRequestRefused(f"{reason}; by hand: {manual}", action=manual, reason=reason, sky_cli=cli)
 
 
 def owner_token(run_id: str) -> str:
@@ -917,6 +950,10 @@ class SkyProvider:
         return True
 
     def status(self, account: int, ticket: str) -> LeaseStatus:
+        with _refused_for("status", ticket):
+            return self._lease_status(account, ticket)
+
+    def _lease_status(self, account: int, ticket: str) -> LeaseStatus:
         row = self._settle(ticket)  # raises on a failed call: a control-plane blip to the pool
         if row.get("launch_failed"):
             return LeaseStatus("ended", end_reason="lost", detail=row.get("launch_error"))
@@ -962,6 +999,10 @@ class SkyProvider:
         return float(row["ordered_at"]) + 60.0 * self.hard_cap_minutes
 
     def release(self, account: int, ticket: str) -> dict[str, Any]:
+        with _refused_for("down", ticket):
+            return self._release_cluster(account, ticket)
+
+    def _release_cluster(self, account: int, ticket: str) -> dict[str, Any]:
         if not self._ours(ticket):
             raise PermissionError(f"cluster {ticket} was not launched by this provider for run {self.run_id}")
         row = self._rows()[ticket]
@@ -1172,7 +1213,7 @@ def verda_server_problems(provider: SkyProvider, environ=None) -> list[str]:
     if ok:
         return []
     msg = (f"sky provider Verda offer: yeto's Verda patch is not in effect in the sky API server: {why}. "
-           + sky_patches.server_patch_install_hint())
+           + sky_patches.server_patch_install_hint(sky_patches.server_python()))
     if environ.get(sky_patches.SERVER_PATCH_ENV) == "warn":
         print(f"[sky-provider] WARNING: {msg} ({sky_patches.SERVER_PATCH_ENV}=warn: proceeding unpatched)", flush=True)
         return []
