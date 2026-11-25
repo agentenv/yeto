@@ -1142,6 +1142,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_rollout_parser(sub)
 
+    from .launch.pool.fleet_cli import add_parser as _add_fleet_parser
+
+    _add_fleet_parser(sub)
+
     from .launch.preflight.cluster import add_parser as _add_preflight_parser
 
     _add_preflight_parser(sub)
@@ -2728,6 +2732,10 @@ def main(argv=None) -> int:
         from .launch.rollout.entry import main as rollout_main
 
         return rollout_main(args)
+    if args.command == "fleet":
+        from .launch.pool.fleet_cli import main as fleet_main
+
+        return fleet_main(args)
     if args.command == "preflight":
         from .launch.preflight.cluster import main as preflight_main
 

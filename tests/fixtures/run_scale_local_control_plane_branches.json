@@ -1,0 +1,162 @@
+{
+ "calls": [
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/pool.json",
+   "--target",
+   "2",
+   "--retire",
+   "t2",
+   "--retire",
+   "t3"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/pool.json",
+   "--target",
+   "4",
+   "--force-static"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/rl-up/run-a/pools/modal.json",
+   "--add",
+   "2",
+   "--source",
+   "auto"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/rl-up/run-a/pools/modal.json",
+   "--target",
+   "3"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/pool.json",
+   "--target",
+   "3"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/single/pool.json",
+   "--target",
+   "2"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/single/pool.json",
+   "--add",
+   "1",
+   "--fence"
+  ],
+  [
+   "-m",
+   "yeto.launch.nc",
+   "pool-scale",
+   "--config",
+   "<T>/single/pool.json",
+   "--remove",
+   "t5"
+  ]
+ ],
+ "out": "<T> [rl up] scale: pool nc (nc)\n<T> [rl up] scale: pool nc (nc)\n<T> [rl up] scale: pool modal (modal)\n<T> [rl up] scale: pool modal (modal)\n<T> [rl up] scale: refused, nothing changed: name one pool with --pool (pools: nc (nc), modal (modal))\n<T> [rl up] scale: refused, nothing changed: name one pool with --pool (pools: nc (nc), modal (modal))\n<T> [rl up] scale: refused, nothing changed: name one pool with --pool (pools: nc (nc), modal (modal))\n<T> [rl up] scale: pool nc (nc)\n",
+ "rcs": [
+  0,
+  0,
+  0,
+  0,
+  2,
+  2,
+  2,
+  3,
+  0,
+  0,
+  0
+ ],
+ "scales": [
+  [
+   {
+    "add": null,
+    "at": "<T>",
+    "mode": null,
+    "pool": "nc",
+    "remove": null,
+    "samplers": 2
+   },
+   {
+    "add": null,
+    "at": "<T>",
+    "mode": null,
+    "pool": "nc",
+    "remove": null,
+    "samplers": 4
+   },
+   {
+    "add": 2,
+    "at": "<T>",
+    "mode": null,
+    "pool": "modal",
+    "remove": null,
+    "samplers": null
+   },
+   {
+    "add": null,
+    "at": "<T>",
+    "mode": null,
+    "pool": "modal",
+    "remove": null,
+    "samplers": 3
+   }
+  ],
+  [
+   {
+    "add": null,
+    "at": "<T>",
+    "mode": null,
+    "pool": "pool",
+    "remove": null,
+    "samplers": 2
+   },
+   {
+    "add": 1,
+    "at": "<T>",
+    "mode": "fence",
+    "pool": "pool",
+    "remove": null,
+    "samplers": null
+   },
+   {
+    "add": null,
+    "at": "<T>",
+    "mode": null,
+    "pool": "pool",
+    "remove": [
+     "t5"
+    ],
+    "samplers": null
+   }
+  ]
+ ]
+}
