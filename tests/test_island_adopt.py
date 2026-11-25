@@ -741,18 +741,26 @@ def test_down_checks_the_lock_now_not_only_the_cached_view():
 
 def test_every_order_site_of_the_launcher_checks_the_lock_first():
     """sky, Modal, verda and two-cluster islands go through _record_ordering (the lock checked
-    now); the resident ssh start and the syncer launch guard explicitly."""
+    now): the launcher's two-cluster site, and the source adapters' ``on_order`` hook
+    (yeto.launch.trainer_provision) right before each order; the resident ssh start and the
+    syncer launch guard explicitly."""
     import inspect
 
+    from yeto.launch import trainer_provision as tp
+
     src = inspect.getsource(launcher.run)
-    assert src.count("_record_ordering(recorder, name, adoption)") == 4
-    for site in ("rids[name] = (m, (\"mixed\", mixed[name].submit()))", "rids[name] = (m, (\"verda\", spec))",
-                 "rids[name] = (m, submit_island_launch(sky, args, spec, task, name))",
-                 "call_id = modal_island_ops.relaunch(cfg, name)"):
-        before = src[:src.index(site)].rstrip().splitlines()[-1]
-        assert "_record_ordering(recorder, name, adoption)" in before, site
-    ssh = src.index("ssh_islands = _start_resident_ssh(")
-    assert "guard_order" in src[ssh - 200:ssh]
+    assert src.count("_record_ordering(recorder, name, adoption)") == 2
+    assert "on_order=lambda name: _record_ordering(recorder, name, adoption)" in src
+    site = "rids[name] = (m, (\"mixed\", mixed[name].submit()))"
+    assert "_record_ordering(recorder, name, adoption)" in src[:src.index(site)].rstrip().splitlines()[-1]
+    for adapter, site in ((tp.SkySource.order, "return submit_island_launch("),
+                          (tp.VerdaSource.order, "return island.spec"),
+                          (tp.ModalSource.spawn, "call_id = island_ops.relaunch(cfg, name)")):
+        code = inspect.getsource(adapter)
+        assert "prov.on_order(" in code[:code.index(site)].rstrip().splitlines()[-1], site
+    ssh = inspect.getsource(tp.SshSource.start)
+    assert ssh.index("prov.guard_order(") < ssh.index("start_resident_ssh(")
+    assert "guard_order=None if island_states is None else island_states.guard_order" in src
     sky_launch = src.index("rid = sky.launch(syncer_task, cluster_name=syncer_cluster)")
     assert "guard_order(syncer_cluster)" in src[sky_launch - 300:sky_launch]
 
