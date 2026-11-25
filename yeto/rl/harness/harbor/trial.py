@@ -299,7 +299,9 @@ def verdict_from_result(result: Any, *, trial_dir: str | None = None) -> TrialVe
 # Exceptions that are never retried even before the agent ran: the task or
 # the configuration is wrong, so another sandbox fails the same way.
 NOT_RETRIED_EXCEPTIONS = frozenset({"ValueError", "TypeError", "FileNotFoundError", "HarnessConfigError",
-                                    "TrustViolation", "BoatQuotaError"})
+                                    "TrustViolation", "BoatQuotaError",
+                                    # a provider or harness module missing from the image (boat_sdk, e2b, ...)
+                                    "ImportError", "ModuleNotFoundError"})
 
 
 def retryable_setup_failure(result: Any) -> str | None:

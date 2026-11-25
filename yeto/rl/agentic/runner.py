@@ -33,6 +33,14 @@ class HarnessConfigError(ValueError):
     """The harness cannot run this task as configured (missing task dir, bad settings)."""
 
 
+class SandboxDependencyError(HarnessConfigError):
+    """A trial's sandbox provider or harness could not import a module it needs
+    (``ImportError`` / ``ModuleNotFoundError`` before the agent ran): the image lacks
+    that provider's dependency, so every trial fails the same way on any node. It
+    stops the sampler as a configuration error (exit 2: its pool halts until
+    ``pool-retry``), naming the provider and the module."""
+
+
 class SessionAlreadyOpen(HarnessConfigError):
     """A recorder session id that is still open was opened again: that one trial
     cannot be recorded, the island's configuration is fine (the caller loses the

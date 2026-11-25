@@ -1765,6 +1765,12 @@ def main(argv: Sequence[str] | None = None, *, default_data_path: str | None = N
         print(f"[engine-sampler] spec rejected: {error}", file=sys.stderr)
         return 2
     except Exception as error:
+        from yeto.rl.agentic import SandboxDependencyError  # noqa: PLC0415
+
+        if isinstance(error, SandboxDependencyError):
+            # deterministic on every node: a configuration error (its pool halts until pool-retry)
+            print(f"[engine-sampler] configuration error: {error}", file=sys.stderr, flush=True)
+            return 2
         from .sampler_breakers import stop_reason_of  # noqa: PLC0415
 
         tripped = stop_reason_of(error)
