@@ -510,9 +510,11 @@ def test_groups_that_keep_coming_and_are_never_trainable_stop_the_island_by_samp
     assert getattr(raised.value, "yeto_breaker", None) == "trainer.sample_wait"
     assert island_stop_line(raised.value) is not None  # the whitelist: a deterministic stop
     assert len(written) > 3  # groups kept coming while the round waited
-    [trip] = [json.loads(line.split(" ", 1)[1]) for line in capsys.readouterr().out.splitlines()
-              if line.startswith("YETO_RL_EVENT ") and '"trainer.sample_wait"' in line]
-    assert (trip["state"], trip["action"], trip["limit"]) == ("trip", "stop", 30.0)
+    events = [json.loads(line.split(" ", 1)[1]) for line in capsys.readouterr().out.splitlines()
+              if line.startswith("YETO_RL_EVENT ")]
+    [trip] = [e for e in events if e.get("event") == "rl_breaker" and e.get("name") == "trainer.sample_wait"
+              and e.get("state") == "trip"]
+    assert (trip["action"], trip["limit"]) == ("stop", 30.0)
     assert 30 < trip["value"] <= 40  # within the wait (and a few clock reads)
 
 
