@@ -31,7 +31,7 @@ from yeto.rl.adapters.verl.buffer_ports import (MERGED_RELEASE, PER_LEARNER_RELE
                                                 BufferReleasePublisher, install_buffer_ports)
 from yeto.rl.engine import batch_reader
 from yeto.rl.engine.buffer_payload import GroupWriter, SampleBufferRolloutError
-from yeto.rl.engine.merged_release import OWN_LANE, BufferLane, lane_cursor_log
+from yeto.rl.engine.merged_release import OWN_LANE, BufferLane, ResumedReleases, lane_cursor_log
 from yeto.rl.engine.policy_release import PolicyReleaseStore
 from yeto.rl.engine.resume import STORE_IMPL_ENV, CheckpointStore, store_for
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
@@ -318,6 +318,12 @@ def test_per_learner_releases_need_a_trainer_on_its_own_lane_and_the_cadence_nee
         BufferReleasePublisher(island, PolicyReleaseStore(store), feed, base_dir=tmp_path, release_every=2)
     with pytest.raises(ValueError, match="expected one of"):
         BufferReleasePublisher(island, PolicyReleaseStore(store), feed, base_dir=tmp_path, release_mode="local")
+    own = ResumedReleases(3, 2, ((2, "2" * 64), (3, "3" * 64)))
+    with pytest.raises(ValueError, match="only a per-learner trainer continues"):  # merged mode
+        BufferReleasePublisher(island, PolicyReleaseStore(store), feed, base_dir=tmp_path,
+                               lane=BufferLane(1, 2), own_releases=own)
+    with pytest.raises(ValueError, match="only a per-learner trainer continues"):  # a single trainer
+        BufferReleasePublisher(island, PolicyReleaseStore(store), feed, base_dir=tmp_path, own_releases=own)
 
 
 FLEET_TRAINER = ("--rl-sample-role", "trainer", "--syncer", "h:1", "--rl-max-policy-age", "2",
