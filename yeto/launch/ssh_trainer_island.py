@@ -466,12 +466,22 @@ def _keep_env(names: Sequence[str], activate: str) -> str:
     script (CANN's ``set_env.sh`` sets ``LD_LIBRARY_PATH``, ``PYTHONPATH``, ``ASCEND_*``)
     never overrides what the inventory, ``--island-env`` or the island task set. Only the
     names are in the script, never a value: the script is a ``bash -c`` argument, which
-    any user of the node can read from the process list."""
+    any user of the node can read from the process list.
+
+    One saved definition per name (``declare -p``, restored by ``eval`` at the script's top
+    level, so it stays a global and stays exported). A variable that is readonly after the
+    scripts (``( unset NAME )`` fails) is not restored, since an ``eval`` of it would only
+    print an error: its name is logged to stderr and its value is the one it has. A name
+    unset before the scripts is left as the scripts leave it."""
     keep = sorted(n for n in names if ENV_NAME.fullmatch(n))
     if not activate or not keep:
         return activate
-    return (f"__yeto_keep=$(declare -p {' '.join(keep)} 2>/dev/null || true)\n"
-            + activate + 'eval "$__yeto_keep"; unset __yeto_keep\n')
+    save = "".join(f"__yeto_keep_{n}=$(declare -p {n} 2>/dev/null) || unset __yeto_keep_{n}\n" for n in keep)
+    restore = "".join(
+        f'if [ -n "${{__yeto_keep_{n}+x}}" ]; then if ( unset {n} ) 2>/dev/null; then eval "$__yeto_keep_{n}"; '
+        f"else echo {shlex.quote(f'[yeto-island] {n} is readonly: not restored after the activation scripts')}"
+        f" >&2; fi; unset __yeto_keep_{n}; fi\n" for n in keep)
+    return save + activate + restore
 
 
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

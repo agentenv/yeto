@@ -295,15 +295,59 @@ def test_the_explicit_environment_wins_over_the_activation_scripts(tmp_path):
     island environment's variables before it and restores them after it."""
     spec = _spec(tmp_path)
     body = sti._trainer_body(spec, 0, "/tmp/requant.log", keep=["LD_LIBRARY_PATH", "ASCEND_RT_VISIBLE_DEVICES"])
-    saved = body.index("__yeto_keep=$(declare -p ASCEND_RT_VISIBLE_DEVICES LD_LIBRARY_PATH")
+    saved = [body.index(f"__yeto_keep_{n}=$(declare -p {n} 2>/dev/null)")
+             for n in ("ASCEND_RT_VISIBLE_DEVICES", "LD_LIBRARY_PATH")]
     sourced = body.index("ascend-toolkit/set_env.sh")
-    assert saved < sourced < body.index('eval "$__yeto_keep"')
+    restored = [body.index(f'eval "$__yeto_keep_{n}"') for n in ("ASCEND_RT_VISIBLE_DEVICES", "LD_LIBRARY_PATH")]
+    assert max(saved) < sourced < min(restored)
     assert "__yeto_keep" not in sti._trainer_body(spec, 0, "/tmp/requant.log")  # nothing to keep
     with_env = tmp_path / "run.sh"
     script = sti.start_script(spec, 0, {"LD_LIBRARY_PATH": "/opt/site/lib"}, sti.remote_paths("asc", "asc-l0-ssh", 0))
     with_env.write_text(script)
     proc = subprocess.run(["bash", "-n", str(with_env)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+KEPT_VALUES = {
+    "KEEP_PLAIN": "/opt/site/lib",
+    # what a shell must not expand, split or run when the value comes back
+    "KEEP_SPECIAL": "a  b\t$HOME ${PATH} `touch PWNED-1` $(touch PWNED-2) \"dq\" 'sq' \\back; *glob* \u00fcn\u00ef =x\nline 2",
+    "KEEP_UNSET_BY_SCRIPT": "set by the island",
+    "KEEP_READONLY_AFTER": "before the scripts",
+}
+
+
+def test_the_kept_variables_come_back_after_real_activation_scripts(tmp_path):
+    """The prelude the job runs (``_keep_env`` over the spec's activation lines), in a real
+    bash: values with special characters come back byte for byte and exported, a variable
+    the scripts unset comes back, and a readonly one is not ``eval``-ed (no bash error):
+    its name is logged and it keeps the value it has."""
+    act = tmp_path / "act.sh"
+    act.write_text("export KEEP_PLAIN=/usr/local/Ascend/lib\n"
+                   "export KEEP_SPECIAL=cann\n"
+                   "unset KEEP_UNSET_BY_SCRIPT\n"
+                   "export KEEP_READONLY_AFTER=from-the-script; readonly KEEP_READONLY_AFTER\n"
+                   "export KEEP_UNSET_BEFORE=from-the-script\n"
+                   "export ACT_ONLY=from-the-script\n")
+    spec = _spec(tmp_path, activate=(str(act),))
+    names = [*KEPT_VALUES, "KEEP_RO_BEFORE", "KEEP_UNSET_BEFORE"]
+    prelude = sti._keep_env(names, sti._activate_lines(spec))
+    assert all(v not in prelude for v in KEPT_VALUES.values())  # names only, never a value
+    out = tmp_path / "env.out"
+    script = f"declare -rx KEEP_RO_BEFORE=frozen\n{prelude}env -0 > {out}\n"
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"), **KEPT_VALUES}
+    proc = subprocess.run(["bash", "-c", script], env=env, cwd=tmp_path, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    got = dict(e.split("=", 1) for e in out.read_text().split("\0") if e)
+    assert {k: got.get(k) for k in KEPT_VALUES} == {**KEPT_VALUES, "KEEP_READONLY_AFTER": "from-the-script"}
+    assert got["KEEP_RO_BEFORE"] == "frozen" and got["KEEP_UNSET_BEFORE"] == "from-the-script"
+    assert got["ACT_ONLY"] == "from-the-script"  # not kept: the script's value
+    assert not any(k.startswith("__yeto_keep") for k in got)
+    assert not list(tmp_path.glob("PWNED*"))
+    assert "readonly variable" not in proc.stderr  # no eval of a readonly name
+    logged = sorted(line for line in proc.stderr.splitlines() if line.startswith("[yeto-island]"))
+    assert logged == ["[yeto-island] KEEP_READONLY_AFTER is readonly: not restored after the activation scripts",
+                      "[yeto-island] KEEP_RO_BEFORE is readonly: not restored after the activation scripts"]
 
 
 def test_no_secret_value_reaches_a_command_line(tmp_path):

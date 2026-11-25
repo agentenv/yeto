@@ -225,7 +225,9 @@ yeto launch --training-mode rl --rl-backend verl --gpu ssh:2x8x910b4 \
   `/usr/local/Ascend/nnal/atb/set_env.sh` when they exist. The island's environment (the
   node's `env`, `--island-env`, the island task's) is kept across the scripts (saved
   before, restored after; by name, no value appears on a command line), so a script's
-  `LD_LIBRARY_PATH` / `PYTHONPATH` / `ASCEND_*` never overrides what you set. A `runtime: docker` node needs
+  `LD_LIBRARY_PATH` / `PYTHONPATH` / `ASCEND_*` never overrides what you set. A variable
+  that is readonly after the scripts is not restored: the job log names it
+  (`[yeto-island] NAME is readonly: not restored after the activation scripts`). A `runtime: docker` node needs
   a registry image (`--rl-image docker:<registry>/<image>@sha256:<digest>`): the verl
   default `verl-build:<commit>` is built on Modal and is refused there.
 - **HCCL.** A multi-node island exports `HCCL_CONNECT_TIMEOUT=1800` and, from the

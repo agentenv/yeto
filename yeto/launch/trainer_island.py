@@ -12,7 +12,11 @@ gives the scheduler loop one trainer island per incarnation:
   run's ``modal-volume://`` checkpoint store;
 * sky (:func:`sky_binding`): :class:`SkyTrainerIslands` launches the held-back
   task as a new cluster per incarnation (``<island>-i<n>``), tails the job log, and
-  tears the cluster down at release (verified at the cloud). The head reads and
+  tears the cluster down at release (verified at the cloud). Each incarnation's
+  cluster is a ``sky_cluster`` row of the run's cost ledger with what prices it (the
+  launcher's ``SkySource.ledger_attrs``, the unified price table's row): created once
+  its launch is submitted, released once its teardown is confirmed, so the cost guard
+  (``--budget-usd``) and the dashboard count it like any other island. The head reads and
   writes the run's ``s3://`` checkpoint store through its object API
   (``yeto.cloud.s3_store``); the islands use the same API for the sample buffer,
   the commands and the policy release pointer (not their bucket mount);
@@ -82,6 +86,8 @@ class TrainerIsland:
     spec: Any = None  # gpu_spec.ClusterSpec of the island
     events_dir: Path | None = None  # the run's echoed-tape dir (None: no tape files)
     ssh: Any = None  # ssh_trainer_island.SshTrainerSpec of an SSH island (cloud "ssh")
+    ledger: Any = None  # the run's cost ledger (None: $YETO_RESOURCE_LEDGER)
+    ledger_attrs: Mapping[str, Any] | None = None  # what prices a sky incarnation's cluster
 
 
 @dataclass
@@ -418,7 +424,8 @@ class SkyTrainerIslands:
     def __init__(self, task: Any, ops: SkyIslandOps, *, name: str, jobs_path: Path,
                  poll_s: float | None = None, events_dir: Path | None = None,
                  clock: Callable[[], float] = time.time,
-                 cancel_wait_s: float = PROVISION_CANCEL_WAIT_S) -> None:
+                 cancel_wait_s: float = PROVISION_CANCEL_WAIT_S,
+                 ledger: Any = None, ledger_attrs: Mapping[str, Any] | None = None) -> None:
         self.task = task
         self.ops = ops
         self.name = name
@@ -427,6 +434,8 @@ class SkyTrainerIslands:
         self.events_dir = events_dir
         self.clock = clock
         self.cancel_wait_s = float(cancel_wait_s)
+        self.ledger = ledger
+        self.ledger_attrs = dict(ledger_attrs or {})
         self.jobs: list[_SkyJob] = []
 
     def cluster_name(self, incarnation: int) -> str:
@@ -445,6 +454,8 @@ class SkyTrainerIslands:
         job = _SkyJob(int(incarnation), cluster,
                       IslandEvents(incarnation_tape(self.events_dir, self.name, incarnation)))
         job.request = self.ops.submit(self.task, cluster)
+        # submitted: the cluster may bill from here on (a submit that raised acquired nothing)
+        self._record("created", cluster, island=self.name, incarnation=int(incarnation), **self.ledger_attrs)
         self.jobs.append(job)
         print(f"[launcher] trainer incarnation {incarnation} on sky as {cluster} "
               f"(resume {None if resume_from is None else resume_from.cut_id})", flush=True)
@@ -482,6 +493,8 @@ class SkyTrainerIslands:
                   "its cancel; teardown NOT confirmed (the cluster may still come up: check the "
                   "cloud and rerun `yeto down`)", flush=True)
             return False
+        if down:
+            self._record("released", job.cluster)
         return down
 
     def release_incarnation(self, incarnation: int) -> bool:
@@ -490,7 +503,10 @@ class SkyTrainerIslands:
             print(f"[launcher] trainer incarnation {incarnation}: no sky cluster recorded; "
                   "nothing to release", flush=True)
             return False
-        return self._down(cluster)
+        down = self._down(cluster)
+        if down:  # a dead head's incarnation: its row (same run ledger) closes here
+            self._record("released", cluster)
+        return down
 
     def start_events(self) -> list[Mapping[str, Any]]:
         """Every event of every incarnation (``trainer_start_summary`` gives T_s)."""
@@ -508,6 +524,14 @@ class SkyTrainerIslands:
         with job.lock:
             job.job_id = job_id
         self.ops.tail(job.cluster, job_id, f"{self.name}-i{job.incarnation}", job.events)
+
+    def _record(self, op: str, cluster: str, **attrs: Any) -> None:
+        """``created`` / ``released`` of the incarnation's cluster on the run's cost ledger
+        (an unconfirmed teardown keeps the row open: the guard keeps counting it and
+        ``yeto cleanup`` retries it). A ledger error is printed, never raised."""
+        from yeto.cost.ledger import record_safely
+
+        record_safely(op, "sky_cluster", cluster, cluster, ledger=self.ledger, **attrs)
 
     def _down(self, cluster: str) -> bool:
         try:
@@ -558,7 +582,8 @@ def sky_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
         islands = SkyTrainerIslands(island.sky_task, SkyIslandOps(args, island.spec),
                                     name=island.name, jobs_path=Path(journal_dir) / JOBS_FILE,
                                     poll_s=getattr(args, "rl_trainer_command_poll_seconds", None),
-                                    events_dir=island.events_dir)
+                                    events_dir=island.events_dir,
+                                    ledger=island.ledger, ledger_attrs=island.ledger_attrs)
     return object_store_binding(args, files, islands, journal_dir=journal_dir)
 
 

@@ -430,22 +430,21 @@ def sky_price_problems(args, specs: list[ClusterSpec], names: list[str] | None =
     """The sky islands this launch orders that no price covers: neither
     ``--trainer-usd-per-hour`` nor a unified price table row of their cloud, card, region
     and spotness (the row a sky sampler's offer is priced from). Their spend is invisible to
-    ``--budget-usd``. Modal (its own app billing), Verda (its instance guard), resident
-    ``ssh:`` islands, the trainer scheduler's held island and the operator's own machines
-    (``ssh`` / ``kubernetes`` sky clouds) are not this check's."""
+    ``--budget-usd``. The trainer scheduler's held island is one of them when it is on a
+    sky cloud (each incarnation is a sky cluster priced the same way). Modal (its own app
+    billing), Verda (its instance guard), resident ``ssh:`` islands and the operator's own
+    machines (``ssh`` / ``kubernetes`` sky clouds) are not this check's."""
     if getattr(args, "trainer_usd_per_hour", None) is not None:
         return []
     from ..cost import prices
-    from . import trainer_loop
     from .topology import rl_island_args
 
     rl = getattr(args, "training_mode", "sft") == "rl"
     names = names or [f"island {m}" for m in range(len(specs))]
     ssh = resident_ssh_names(args, names, specs) if rl else set()
-    held = trainer_loop.held_island(args) if rl else None
     out = []
     for m, spec in enumerate(specs):
-        if m == held or names[m] in ssh or spec.cloud in OWN_MACHINE_CLOUDS:
+        if names[m] in ssh or spec.cloud in OWN_MACHINE_CLOUDS:
             continue
         if next(a for a in _SOURCES if a.claims(_Probe(ssh), names[m], spec)).kind != SkySource.kind:
             continue
