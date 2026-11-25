@@ -17,6 +17,14 @@ The handles:
 * :class:`StoreUploadExec`: any handle whose large uploads go through the object
   store (a presigned URL fetched on the node, sha256-checked).
 
+How ``ssh`` gets to a node is its reach (:func:`reach_options`, the profile's
+``reach``): ``direct``; ``jump`` (``ProxyJump`` through ``via``); ``relay``
+(``ProxyCommand`` through the WebSocket relay of :mod:`yeto.launch.nc.tunnel`:
+``via: nc:<account>`` is a National Compute workspace relay, exactly the
+``ProxyCommand`` of a lease's alias; ``via: wss://...`` a ``relay.mjs`` the site
+runs itself, :mod:`yeto.node.relay_proxy`). Code upload, start and stop then all go
+through it: the node opens no other inbound port.
+
 Modal is the one route without them: a Modal function is *spawned* with its spec
 (``yeto.launch.nc.modal_provider``); it reports through the store like every other
 node (``yeto.node.records``), and nothing is executed on it from outside.
@@ -230,6 +238,104 @@ def put(box: SandboxExec, data: bytes | str, remote: str, *, mode: str = "600") 
     out = sh(box, f"chmod {mode} {q}.up && mv -f {q}.up {q}", timeout=120)
     if out.returncode != 0:
         raise RuntimeError(f"{box.name}: placing {remote}: {out.stderr.strip()[-300:]}")
+
+
+# -- reach: the ssh options of a node's route ---------------------------------------
+
+RELAY_URL_SCHEMES = ("ws://", "wss://", "http://", "https://")
+_RELAY_URL_FORBIDDEN = frozenset(" \t\n'\"`$;&|<>\\")
+
+
+class ReachError(ValueError):
+    """A reach ``ssh`` cannot dial (unknown mode, a relay ``via`` that is neither
+    ``nc:<account>`` nor a relay URL, an ``outbound`` / ``function`` node)."""
+
+
+def nc_relay_identity_options() -> list[str]:
+    """What a node behind an NC workspace relay is dialled with besides the relay: the host
+    keys yeto pinned for NC nodes (``<nc state>/known_hosts``, after the user's own file) and
+    yeto's NC key as one more identity, as an NC lease's alias is (``node_pool.ssh_host_block``)."""
+    from yeto.launch.nc.node_pool import key_path  # noqa: PLC0415
+    from yeto.launch.nc.tunnel import state_dir  # noqa: PLC0415
+
+    return ["-o", f"UserKnownHostsFile=~/.ssh/known_hosts {state_dir() / 'known_hosts'}",
+            "-o", f"IdentityFile={key_path()}"]
+
+
+def relay_proxy_command(via: str) -> str:
+    """The ``ProxyCommand`` that dials ``%h:%p`` through the relay ``via``.
+
+    ``nc:<account>`` or ``nc:<account>:<relay port>``: the National Compute workspace
+    relay of that account (:func:`yeto.launch.nc.node_pool.proxy_command`, the very
+    line of a lease's ssh alias). A ``ws(s)://`` / ``http(s)://`` URL: a ``relay.mjs``
+    the site runs behind an authenticating gateway (:mod:`yeto.node.relay_proxy`: its
+    bearer token from the environment, never the argv; plaintext and credentials in
+    the URL refused; checked here so a dry-run reports it before any ssh)."""
+    import sys  # noqa: PLC0415
+
+    text = str(via or "").strip()
+    if text.startswith("nc:"):
+        parts = text[3:].split(":")
+        if not 1 <= len(parts) <= 2 or not all(p.isdigit() for p in parts):
+            raise ReachError(f"relay via {via!r}: a National Compute relay is nc:<account> or nc:<account>:<port>")
+        from yeto.launch.nc.node_pool import proxy_command  # noqa: PLC0415
+        from yeto.launch.nc.tunnel import RELAY_PORT  # noqa: PLC0415
+
+        return proxy_command(int(parts[0]), int(parts[1]) if len(parts) == 2 else RELAY_PORT)
+    if text.startswith(RELAY_URL_SCHEMES) and len(text) > text.index("//") + 2 \
+            and not set(text) & _RELAY_URL_FORBIDDEN:
+        from yeto.launch.nc.tunnel import TunnelError  # noqa: PLC0415
+        from yeto.node import relay_proxy  # noqa: PLC0415
+
+        why = relay_proxy.url_problem(text)
+        if why:
+            raise ReachError(why)
+        try:
+            relay_proxy.token()  # present and readable (its value never enters the ProxyCommand)
+        except TunnelError as error:
+            raise ReachError(str(error)) from None
+        root = str(Path(__file__).resolve().parents[2])  # the tree holding yeto/
+        url = shlex.quote(text).replace("%", "%%")  # ssh expands %-tokens in a ProxyCommand: %% is a literal %
+        return (f"env PYTHONPATH={shlex.quote(root)} {shlex.quote(sys.executable)} -P -m yeto.node.relay_proxy "
+                f"--url {url} %h %p")
+    raise ReachError(f"relay via {via!r} must be nc:<account>[:<port>] (a National Compute workspace relay) or a "
+                     f"relay URL ({', '.join(RELAY_URL_SCHEMES)}) without blanks or shell characters")
+
+
+def reach_options(reach: Any) -> list[str]:
+    """``ssh`` options that dial a node through ``reach`` (a
+    :class:`yeto.launch.node_inventory.Reach`; None: direct)."""
+    mode = getattr(reach, "mode", None) or "direct"
+    via = getattr(reach, "via", None)
+    if mode == "direct":
+        return []
+    if mode == "jump":
+        if not via:
+            raise ReachError("reach jump needs via (the jump host)")
+        return ["-o", f"ProxyJump={via}"]
+    if mode == "relay":
+        # the relay host must not stand in for the node: its key is pinned (known_hosts), never learned here
+        extra = nc_relay_identity_options() if str(via or "").strip().startswith("nc:") else []
+        return ["-o", "StrictHostKeyChecking=yes", *extra, "-o", f"ProxyCommand={relay_proxy_command(via)}"]
+    raise ReachError(f"reach {mode!r}: the control host cannot open an ssh connection to such a node "
+                     "(outbound: it only dials the store; function: the platform's calls)")
+
+
+def node_ssh_options(node: Any) -> list[str]:
+    """The ``ssh`` options of ``node``'s route: its profile's reach when it has one,
+    else the inventory's ``proxy_jump`` (``Node.ssh_options``)."""
+    reach = getattr(node, "reach", None)
+    if reach is not None:
+        if reach.mode == "relay" and getattr(node, "proxy_jump", None):
+            raise ReachError(f"node {node.name}: reach relay and proxy_jump {node.proxy_jump} name two routes; "
+                             "keep one")
+        return reach_options(reach)
+    return list(node.ssh_options())
+
+
+def ssh_exec(node: Any, *, run: Callable[..., Any] = subprocess.run, **kw: Any) -> SshExec:
+    """An :class:`SshExec` of ``node``: its ``host`` through its reach."""
+    return SshExec(name=str(node.name), target=[*node_ssh_options(node), str(node.host)], run=run, **kw)
 
 
 # -- a checked copy (the prompts file of every route) --------------------------------

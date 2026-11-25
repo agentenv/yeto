@@ -642,13 +642,17 @@ def test_rollout_commands_accept_provider_ssh():
     assert args.provider == "ssh"
 
 
-def test_nodes_the_pool_cannot_ssh_to_are_refused():
+def test_nodes_the_pool_cannot_ssh_to_are_refused(monkeypatch):
     from yeto.launch.node_inventory import NodeProfile, Reach
+
+    monkeypatch.setenv("YETO_RELAY_TOKEN", "t")  # a site relay's token (yeto.node.relay_proxy)
 
     outbound = NodeProfile.from_node(cuda_node(), reach=Reach("outbound"))
     with pytest.raises(ValueError, match=r"nodes \['node-a \(outbound\)'\] take no SSH connection"):
         family_conf(outbound)
-    family_conf(NodeProfile.from_node(cuda_node(), reach=Reach("relay", "relay.example:2222")))  # task 3.2's
+    family_conf(NodeProfile.from_node(cuda_node(), reach=Reach("relay", "wss://relay.example:2222")))  # 3.2
+    with pytest.raises(ValueError, match="relay via"):  # a relay is nc:<account> or a relay URL
+        family_conf(NodeProfile.from_node(cuda_node(), reach=Reach("relay", "relay.example:2222")))
     jump = NodeProfile.from_node(cuda_node(), reach=Reach("jump", "ops@bastion"))
     assert family_conf(jump).nodes[0].ssh_options() == ["-o", "ProxyJump=ops@bastion"]
 

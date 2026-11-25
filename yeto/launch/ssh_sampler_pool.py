@@ -74,6 +74,15 @@ any other slot's node is free, so the replacement starts on a spare, not on the 
 node. A stop the lost node never got runs before the next start there
 (:class:`SshNodeProvider`).
 
+Reach: every ``ssh`` to a node (preflight, code upload, start, probe, stop) goes
+through the node's ``reach`` in the inventory (:func:`yeto.node.transport.reach_options`):
+``direct``; ``jump`` (``ProxyJump``; ``proxy_jump:`` is the same); ``relay`` (``via:
+nc:<account>``: a National Compute workspace relay; ``via: wss://...``: a ``relay.mjs``
+the site runs behind an authenticating gateway, its bearer token in
+``$YETO_RELAY_TOKEN_FILE`` / ``$YETO_RELAY_TOKEN``: :mod:`yeto.node.relay_proxy`; a relay
+node's host key is checked strictly). An ``outbound`` / ``function`` node is refused
+(no ssh reaches it).
+
 Pool config::
 
     "provider": {"kind": "ssh", "inventory": "~/ascend-nodes.yaml", "nodes": ["node-a"],
@@ -113,6 +122,7 @@ from .pool import status as island_status
 from .pool.provider import ProviderCaps
 from .pool.status import LeaseStatus
 from yeto.node.store import STORE_URI_SHELL, pool_fence_store, reclaim_marker_env, sampler_route_env
+from yeto.node.transport import ReachError, node_ssh_options
 
 KIND = "ssh"
 SSH_UNREACHABLE = 255  # ssh's own failure (no connection, no session): the node was not reached
@@ -230,6 +240,12 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
     if unreachable:
         raise ValueError(f"ssh provider: nodes {unreachable} take no SSH connection; this pool starts samplers "
                          "over SSH")
+    for node in nodes:  # every other route must be dialable before anything runs (jump / relay: token, TLS)
+        if node.reach is None or node.reach.mode not in ("outbound", "function"):
+            try:
+                node_ssh_options(node)
+            except ReachError as error:
+                raise ValueError(f"ssh provider: node {node.name}: {error}") from None
     workdir = str(section.get("workdir") or "")
     if not workdir.startswith("/") or workdir.rstrip("/") in ("", "/tmp", "/data", "/root", "/home"):
         raise ValueError(f"ssh provider: workdir {workdir!r} must be an absolute directory of this run")
@@ -958,7 +974,7 @@ class SshSamplerPoolOps:
     # -- shell on a node
     def ssh(self, node: Node, command: str, *, timeout: float = 600, input: str | bytes | None = None,
             stdin: Any = None) -> Any:
-        route = [*node.ssh_options(), node.host]
+        route = [*node_ssh_options(node), node.host]  # its reach: ProxyJump (jump), the relay's ProxyCommand
         argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", *ssh_transport.mux_options(route),
                 *route, command]
         if input is None and stdin is None:
