@@ -3441,9 +3441,9 @@ reached over SSH with sky's key, running the Docker sampler route.
 - `python -m yeto.rl.spot.watchdog` still works; its machine calls always go
   through this provider (`--via-provider` is accepted and is the default; its
   former sky / nebius CLI path is removed). For new runs, prefer a sky pool.
-  Verification status: the provider path has been verified on real machines
-  on AWS only. On Nebius it is covered by a comparison test against the removed
-  CLI path and has not yet been verified on real machines.
+  The provider path has run on real machines on AWS and on Nebius (one
+  preemptible L40S node, 2026-11-25): launch, job running, state, adoption by a
+  later watchdog process through the ownership label, release confirmed gone.
 
 **Modal** (`"provider": {"kind": "modal", ...}`): one Modal GPU function call
 per island, no SSH. The pool deploys one app (`app_name`, default
