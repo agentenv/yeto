@@ -202,6 +202,30 @@ def _output_tail(proc: subprocess.CompletedProcess) -> str:
 # yeto preflight --no-bench of an ssh: trainer: a first pull of the trainer image (~24 GB) is in it
 CLUSTER_PREFLIGHT_TIMEOUT_S = 5400.0
 
+
+def fleet_fenced(controller: Any) -> str | None:
+    """Why this run's controller drives the fleet no more, checked now (each trainer
+    worker step): its reconciler found itself fenced, or ``fleet/applied.json`` names
+    another writer than the one this controller claimed it as. The reconciler itself
+    only looks when a new generation comes or it writes; the island launches must stop
+    being driven from here at once. A read that fails: ``"unknown: ..."`` (the worker
+    skips that step only)."""
+    reconciler = getattr(controller, "reconciler", None)
+    if reconciler is None:
+        return None
+    if getattr(reconciler, "fenced", None):
+        return str(reconciler.fenced)
+    if getattr(reconciler, "_claim", True):  # not claimed yet: nothing to be fenced from
+        return None
+    try:
+        current = reconciler.store.read_applied()
+    except Exception as error:  # noqa: BLE001 - not known now
+        return f"unknown: fleet/applied.json not read ({type(error).__name__}: {error})"
+    writer = None if current is None else current.get("writer")
+    if writer not in (None, reconciler.writer):
+        return f"fleet/applied.json is written by {writer} now (not {reconciler.writer})"
+    return None
+
 class RunConfigError(ValueError):
     """The run config (or the run's state directory) cannot be used: one line for the user."""
 
@@ -614,6 +638,7 @@ class Run:
         # why run up refuses this config's breakers section (set by scale: a scale that adds nodes is refused)
         self.breakers_refusal: str | None = None
         self.applied_desired: dict[str, Any] | None = None  # store control plane: the applied state (adopt_desired)
+        self.desired_doc: dict[str, Any] | None = None  # store control plane: the desired state read (adopt_desired)
         self.auto_backlog = self._derive_auto_backlog()
 
     def _derive_auto_backlog(self) -> dict[str, Any] | None:
@@ -890,12 +915,42 @@ class Run:
         plan = self.fleet_plan()
         for line in plan.lines() if plan is not None else ():
             _log(line)
+        note = self.removal_stall_note()
+        if note:
+            _log(note)
+
+    def removal_stall_note(self) -> str | None:
+        """``fleet.launch: per_island``: an island removed or moved is torn down without a
+        LEAVE today; the round it was asked for waits one island lease from the disconnect,
+        then the syncer releases its slot and the round merges without it. None for any
+        other run."""
+        plan = self.fleet_plan()
+        if plan is None or not plan.per_island:
+            return None
+        from yeto.rl import fleet  # noqa: PLC0415
+
+        lease = plan.island_lease_s
+        section = self.cfg.get("fleet") if isinstance(self.cfg.get("fleet"), dict) else {}
+        if section.get("island_lease_s") is not None:
+            source = "fleet.island_lease_s"
+        elif fleet._argv_value([str(a) for a in section.get("trainer_argv") or ()],  # noqa: SLF001
+                               fleet.LEASE_FLAG) is not None:
+            source = f"{fleet.LEASE_FLAG} in fleet.trainer_argv"
+        else:
+            source = "the default; set fleet.island_lease_s"
+        return (f"fleet: note: an island removed or moved leaves without a LEAVE today: the round it was asked for "
+                f"waits one island lease ({lease:g} s, {source}) after it is gone, then merges without it; the "
+                "other islands keep training")
 
     def fleet_problem(self) -> str | None:
         """Why the fleet's training form cannot run (:func:`yeto.rl.fleet.form_problem`)."""
         from yeto.rl import fleet  # noqa: PLC0415
 
         plan = self.fleet_plan()
+        if plan is not None and plan.per_island and rollout_section(self.cfg).get("control_plane") != "store":
+            return ("fleet.launch per_island: the trainer islands are members of the fleet's desired state, which "
+                    "the in-process rollout controller reconciles: set rollout.control_plane \"store\" and controller "
+                    "\"in_process\"")
         return None if plan is None else fleet.form_problem(plan.sync)
 
     def write_fleet_plan(self) -> bool:
@@ -1145,12 +1200,21 @@ class Run:
         from yeto.launch_preflight import modal_sdk_problem  # noqa: PLC0415
 
         if rollout_section(self.cfg).get("control_plane") == "store":
+            from yeto.launch.pool.desired import DesiredError  # noqa: PLC0415
+
             try:
                 self.adopt_desired()  # the desired state's pools are checked (read only: nothing is seeded)
+            except (json.JSONDecodeError, DesiredError) as error:  # read, but it does not parse: refused
+                _log(f"preflight: the fleet's desired state (fleet/desired.json in the run store) does not parse "
+                     f"({type(error).__name__}: {error}); nothing it drives can be checked. Repair it with "
+                     "`yeto fleet apply` (or remove its newest generation) and run up again")
+                self.mark("preflight", ok=False)
+                return False
             except Exception as error:  # noqa: BLE001 - the run config's pools are checked instead
-                _log(f"preflight: the fleet's desired state was not read ({type(error).__name__}: {error}); "
-                     "checking the run config's pools")
-        problem = self.fleet_problem()
+                _log(f"preflight: WARNING: the fleet's desired state was not read ({type(error).__name__}: {error}); "
+                     "checking the run config's pools and trainer islands only (islands added at run time are "
+                     "not checked for a price)")
+        problem = self.fleet_problem() or self.fleet_session_problem()
         if problem is not None:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
@@ -1552,6 +1616,8 @@ class Run:
         kw.setdefault("stall_s", float(self.breaker_param("run.rollout_stall_alert", "limit_s") or 0))
         kw.setdefault("drain_on_exit", bool(section.get("drain_on_exit", True)))
         self.controller = RolloutController(slots, stop_flag=self.dir / "STOP", interval=interval, log=_log, **kw)
+        if store_kw and self.per_island_fleet():
+            self.attach_trainer_worker(self.controller, store_kw["control_objects"])
         self.controller.start()
         if not self.controller.drain_on_exit:
             _log("rollout.drain_on_exit is false: if this process exits, the sampler machines keep running "
@@ -1559,6 +1625,164 @@ class Run:
             atexit.register(self._undriven_banner)
         _log(f"rollout controller: {len(slots)} pool(s) in this process ({', '.join(slots)})")
         return self.controller
+
+    # -- a fleet launched island by island (fleet.launch per_island, yeto.rl.island_launches)
+    def per_island_fleet(self) -> bool:
+        plan = self.fleet_plan()
+        return plan is not None and plan.per_island
+
+    def island_hmac_env(self) -> None:
+        """The island HMAC key the fleet's syncer launch and every island launch share
+        (``yeto.launch.syncer.island_hmac_secret``): kept in this run's state directory
+        (owner-only), so a restarted ``run up`` gives a new island the syncer's key."""
+        from yeto.launch.syncer import ISLAND_HMAC_KEY_ENV  # noqa: PLC0415
+
+        if self.env.get(ISLAND_HMAC_KEY_ENV):
+            return
+        path = self.dir / "island_hmac.key"
+        if not path.exists():
+            import secrets  # noqa: PLC0415
+
+            path.touch(mode=0o600)
+            path.write_text(secrets.token_hex(32))
+        self.env[ISLAND_HMAC_KEY_ENV] = path.read_text().strip()
+
+    def local_island_launches(self) -> list[str]:
+        """The island launches of this fleet in this host's run registry (``yeto.runs``):
+        a run named ``<fleet>-i<k>`` or ``<fleet>-i<k>-m<n>`` (the islands added at run time
+        too) launched as island ``k`` (``--rl-fleet-role island --rl-fleet-learner-id k``);
+        another run that only shares the name pattern is not one. No store read: the
+        trainer worker forwards a fleet STOP to them when the store does not answer."""
+        if not self.per_island_fleet():
+            return []
+        from yeto import runs  # noqa: PLC0415
+        from yeto.rl.island_launches import fleet_prefix  # noqa: PLC0415
+
+        base = fleet_prefix(self.cfg["fleet"]["trainer_argv"])
+        own = re.compile(re.escape(base) + r"-i(\d+)(-m\d+)?")
+        out = []
+        for meta in runs.list_runs():  # by name, and launched as that island of a fleet (not another run's name)
+            match = own.fullmatch(str(meta.get("name") or ""))
+            args = meta.get("args") if isinstance(meta.get("args"), dict) else {}
+            if (match and args.get("rl_fleet_role") == "island"
+                    and str(args.get("rl_fleet_learner_id")) == match.group(1)):
+                out.append(str(meta["name"]))
+        return sorted(out)
+
+    def mark_islands_down(self, names: list[str]) -> None:
+        """The island launches ``names`` were torn down by ``yeto down`` on this host (their
+        runs registered here): their records say ``down``, and the next ``yeto run up`` (any
+        host) starts their next incarnation (``yeto.rl.trainer_worker.mark_down``)."""
+        if not names:
+            return
+        from yeto.rl import trainer_worker  # noqa: PLC0415
+
+        try:
+            trainer_worker.mark_down(self._objects(), names, log=_log)
+        except Exception as error:  # noqa: BLE001 - the records stay; run up on this host adopts them
+            _log(f"fleet: WARNING: the island launch records were not marked down ({type(error).__name__}: "
+                 f"{error}); `yeto run down` again, or `yeto run up` on this host")
+
+    def island_launch_names(self) -> list[str]:
+        """The run names of the fleet's island launches (every incarnation the trainer worker
+        started; ``yeto down`` of each releases its machines)."""
+        if not self.per_island_fleet():
+            return []
+        from yeto.rl import trainer_worker  # noqa: PLC0415
+
+        names: list[str] = []
+        try:
+            objects = self._objects()
+            for key in objects.list("fleet/trainers/"):
+                if str(key).endswith("/" + trainer_worker.LAUNCH_RECORD):
+                    record = json.loads(objects.read(key) or b"{}")
+                    base, n = record.get("prefix"), int(record.get("incarnation") or 0)
+                    if base:
+                        from yeto.rl.island_launches import island_prefix  # noqa: PLC0415
+
+                        names += [island_prefix(base, i) for i in range(n + 1)]
+        except Exception as error:  # noqa: BLE001 - the plan's islands below at least
+            _log(f"fleet: island launch records not read ({type(error).__name__}: {error})")
+        from yeto.rl.island_launches import fleet_prefix  # noqa: PLC0415
+
+        base = fleet_prefix(self.cfg["fleet"]["trainer_argv"])
+        names += [f"{base}-i{i.learner}" for i in self.fleet_plan().islands]
+        return list(dict.fromkeys(names))
+
+    def attach_trainer_worker(self, controller: Any, objects: Any, *, ops: Any = None) -> Any:
+        """The trainer worker of a per-island fleet under the controller's supervisor (its
+        trainer members seeded into the desired state once)."""
+        from yeto import runs  # noqa: PLC0415
+        from yeto.launch.island_lifecycle import IslandStateStore  # noqa: PLC0415
+        from yeto.launch.pool.desired import from_run_config  # noqa: PLC0415
+        from yeto.rl import island_launches, trainer_worker  # noqa: PLC0415
+
+        plan = self.fleet_plan()
+        store = self.desired_store(objects)
+        members = island_launches.trainer_members(self.cfg, plan)
+        for m in members:  # each trainer follows its own pools' member tables (store control plane)
+            m["argv"] = [*m["argv"], *island_launches.member_table_flags(m["learner_id"])]
+        trainer_worker.seed_trainers(store, members, seed=from_run_config(self.cfg))
+        self.island_hmac_env()
+        fleet_stop = runs.stop_flag_path(self.trainer_launch_name())
+
+        def stop() -> str | None:
+            if Path(fleet_stop).exists():
+                return f"STOP flag {fleet_stop}"
+            return "run STOP" if (self.dir / "STOP").exists() else None
+
+        def syncer_since() -> float | None:
+            # a syncer record older than this run up's syncer launch is an earlier run's (5 min of clock skew)
+            started = _utc_seconds(((self.state.get("procs") or {}).get("trainer") or {}).get("started"))
+            return None if started is None else started - 300.0
+
+        worker = trainer_worker.TrainerWorker(
+            store, objects, ops or trainer_worker.LocalLaunchOps(python=self.py, env=self.env, log_dir=self.dir),
+            IslandStateStore(objects, log=_log), fleet_stop=stop, log=_log, syncer_since=syncer_since,
+            fenced=lambda: fleet_fenced(controller), local_launches=self.local_island_launches,
+            on_given_up=self.stop_island_pools)
+        controller.add_worker("trainers", worker.step, interval=15.0)
+        self.trainer_worker = worker
+        _log(f"fleet: trainer worker reconciles {len(members)} island launch(es) from the desired state")
+        return worker
+
+    def stop_island_pools(self, k: int, member: dict[str, Any], why: str, *, wait: bool = False) -> threading.Thread:
+        """Island ``k`` given up for good (the trainer worker: FAILED / ABANDONED): its own
+        sampler pools (``member["pools"]``) are released with ``nc pool-stop`` now (the
+        in-process controller drains a pool whose stop is requested and closes its billing),
+        not left billing until the fleet ends. In a thread of its own: a drain takes minutes
+        and the trainer worker's step must not wait for it (``wait``: joined, for tests)."""
+        names = [str(n) for n in member.get("pools") or ()]
+
+        def refs() -> tuple[list[str], list[str]]:
+            by_name = {ref.name: ref.config for ref in self.pools}
+            return [by_name[n] for n in names if n in by_name], [n for n in names if n not in by_name]
+
+        def run() -> None:
+            paths, unknown = refs()
+            if unknown:  # added with `yeto fleet island add`: the desired state names their configs
+                try:
+                    self.adopt_desired()
+                except Exception as error:  # noqa: BLE001 - reported below as not stopped
+                    _log(f"fleet: the desired state was not read ({type(error).__name__}: {error})")
+                paths, unknown = refs()
+            _log(f"fleet: CRITICAL: trainer island {k} given up ({why}): stopping its pool(s) {names} "
+                 "(nobody trains on their samples)")
+            failed = list(unknown)
+            for name, path in zip([n for n in names if n not in unknown], paths, strict=True):
+                if self._cmd(self.pool_stop(path), log="down.log", timeout=1800) != 0:
+                    failed.append(name)
+            if failed:
+                _log(f"fleet: CRITICAL: trainer island {k}: pool(s) {failed} not confirmed stopped: they may bill "
+                     "until `yeto run down` (log down.log)")
+            else:
+                _log(f"fleet: trainer island {k}: its pool(s) {names} stopped")
+
+        thread = threading.Thread(target=run, name=f"island-{k}-pools-stop", daemon=True)
+        thread.start()
+        if wait:
+            thread.join()
+        return thread
 
     def request_detach(self) -> int:
         """``yeto run detach``: the DETACH flag the store control plane's controller watches."""
@@ -1619,6 +1843,7 @@ class Run:
                 doc = store.read()
         if doc is None:
             return None
+        self.desired_doc = doc
         names = list(sampler_pools(doc))
         if names != [ref.name for ref in self.pools]:
             _log(f"fleet: the desired state (generation {doc['generation']}) drives pool(s) {names}; the run config "
@@ -1854,6 +2079,8 @@ class Run:
         return bool(trained_releases(records))
 
     def trainer(self) -> None:
+        if self.per_island_fleet():
+            self.island_hmac_env()  # the syncer launch and every island launch: one key
         self._spawn("trainer", self.yeto("launch", *self.trainer_argv()))
         for key in ("trainer_exit_seen", "trainer_finished", "trainer_hands_off"):  # of an earlier launcher
             self.state.pop(key, None)
@@ -2560,6 +2787,63 @@ class Run:
                 problem = up_consistency.price_problem(ref.name, ref.usd_per_h, pool_cfg)
                 if problem is not None:
                     return problem
+            problem = self.island_price_problem()
+            if problem is not None:
+                return problem
+        return None
+
+    def fleet_session_problem(self) -> str | None:
+        """A fleet launched island by island: its syncer launch and every island launch (the
+        trainer islands of the desired state the preflight read, else the run config's)
+        compiled and compared (``yeto.rl.fleet_session``: syncer profile, HELLO flags,
+        learners, syncer_epoch, learner ids). None when they agree (or no per-island fleet)."""
+        plan = self.fleet_plan()
+        if plan is None or not plan.per_island:
+            return None
+        from yeto.launch.pool.desired import trainers  # noqa: PLC0415
+        from yeto.rl import fleet_session, island_launches  # noqa: PLC0415
+
+        members = list(trainers(self.desired_doc).values())
+        if not members:
+            members = [{**m, "argv": [*m["argv"], *island_launches.member_table_flags(m["learner_id"])]}
+                       for m in island_launches.trainer_members(self.cfg, plan)]
+        try:
+            fleet_session.check(self.trainer_argv(), members)
+        except ValueError as error:
+            return f"fleet.launch per_island: {error}"
+        _log(f"preflight: fleet.launch per_island: the syncer launch and {len(members)} island launch(es) agree "
+             "on the syncer session (profile, HELLO flags, learners, syncer_epoch, learner ids)")
+        return None
+
+    def island_price_problem(self) -> str | None:
+        """A run budget and a per-island fleet whose trainer island has no price: neither
+        its ``usd_per_h`` (``islands[k].trainer.usd_per_h``, or ``--usd-per-h`` of an island
+        added or moved later) nor a billing row of the unified price table for its ``--gpu``
+        (``yeto.rl.trainer_worker.table_usd_per_h``). The run config's islands and the trainer
+        members of the fleet's desired state (read by the preflight: islands added or moved at
+        run time, the ones running) are checked. Its spend would count $0, so it is refused
+        before anything is ordered. None when every island is priced (or no per-island fleet)."""
+        plan = self.fleet_plan()
+        if plan is None or not plan.per_island:
+            return None
+        from yeto.launch.pool.desired import trainers  # noqa: PLC0415
+        from yeto.rl import trainer_worker  # noqa: PLC0415
+
+        for island in plan.islands:
+            if island.trainer_usd_per_h is None and trainer_worker.table_usd_per_h(island.gpu) is None:
+                return (f"fleet.launch per_island with a run budget: trainer island {island.name} "
+                        f"(learner {island.learner}, --gpu {island.gpu}) has no price: neither "
+                        f"islands[{island.index}].trainer.usd_per_h nor a billing row of the price table "
+                        "(yeto/cost/prices.json) for its machines; its spend would count $0. Give its price: "
+                        f"islands[{island.index}].trainer.usd_per_h (an island added later: --usd-per-h)")
+        for name, member in sorted(trainers(self.desired_doc).items()):
+            gpu = member.get("gpu")
+            if member.get("usd_per_h") is None and trainer_worker.table_usd_per_h(gpu) is None:
+                return (f"fleet.launch per_island with a run budget: trainer island {name} of the fleet's desired "
+                        f"state (learner {member.get('learner_id')}, --gpu {gpu}) has no price: neither its "
+                        "--usd-per-h nor a billing row of the price table (yeto/cost/prices.json) for its "
+                        f"machines; its spend would count $0. Give its price: `yeto fleet island move --config "
+                        f"<run config> --name {name} --gpu {gpu} --usd-per-h <price>`")
         return None
 
     def breakers_problem(self) -> str | None:
@@ -2656,6 +2940,8 @@ class Run:
             self.mark("trainer_down", why=why, hands_off=True)
             return
         self._cmd(self.yeto("down", "--missing-ok", self.trainer_launch_name()), log="down.log", timeout=900)
+        for name in self.island_launch_names():  # a per-island fleet: every island launch
+            self._cmd(self.yeto("down", "--missing-ok", name), log="down.log", timeout=900)
         self.mark("trainer_down", why=why)
         stops = " / ".join(f"python -m yeto.launch.nc pool-stop --config {path}" for path in self.pool_configs)
         _log(f"trainer stopped ({why}); {self.pools_phrase()} and the sandboxes are KEPT and still bill. "
@@ -3349,6 +3635,16 @@ class Run:
             time.sleep(10)
         if self._cmd(self.yeto("down", "--missing-ok", self.trainer_launch_name()), log="down.log", timeout=900) != 0:
             failed.append("trainer (yeto down: cloud/Modal teardown not confirmed)")
+        from yeto import runs  # noqa: PLC0415
+
+        confirmed = []
+        for name in self.island_launch_names():  # a per-island fleet: every island launch
+            registered = runs.load_run(name) is not None  # else this host cannot confirm it down
+            if self._cmd(self.yeto("down", "--missing-ok", name), log="down.log", timeout=900) != 0:
+                failed.append(f"island launch {name} (yeto down: teardown not confirmed)")
+            elif registered:
+                confirmed.append(name)
+        self.mark_islands_down(confirmed)
         if rollout_section(self.cfg).get("control_plane") == "store":
             failed += self._store_pools_for_down()
         for path in self.pool_configs:

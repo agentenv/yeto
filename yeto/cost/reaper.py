@@ -6,6 +6,13 @@ SIGKILL that skipped every ``finally`` - it releases whatever the run's
 resource ledger still lists as open (:func:`.cleanup.cleanup_run`, exact ids
 only). Runs launched with ``--keep`` and head-controller runs (the controller
 lives on the head VM) are left alone. One reaper per run: a second exits.
+
+The island launch of a fleet launched island by island (``--rl-fleet-role island``)
+is supervised by its fleet's trainer worker, which relaunches it under the same run
+name; that launch adopts the island still running (its records in the run store).
+Its reaper waits :data:`ADOPT_GRACE_S` for that worker first and then watches it (the
+new worker's own reaper found this one's lock); only an island no launch took back
+within the grace is released.
 """
 
 from __future__ import annotations
@@ -15,11 +22,19 @@ import time
 from collections.abc import Callable
 
 POLL_S = 15.0
+ADOPT_GRACE_S = 600.0  # a fleet island launch: how long its relaunch has to take the island back
+
+
+def _newer_worker(run: str, worker_pid: int, alive: Callable[[int], bool]) -> int | None:
+    from .. import runs
+
+    pid = (runs.load_run(run) or {}).get("pid")
+    return int(pid) if pid not in (None, worker_pid) and alive(int(pid)) else None
 
 
 def reap(run: str, worker_pid: int, *, alive: Callable[[int], bool] | None = None,
          cleanup: Callable[[str], bool] | None = None, sleep: Callable[[float], None] = time.sleep,
-         poll_s: float = POLL_S, log=print) -> int:
+         poll_s: float = POLL_S, log=print, adopt_grace_s: float = ADOPT_GRACE_S) -> int:
     from .. import runs
     from .cleanup import cleanup_run
     from .ledger import ResourceLedger
@@ -34,17 +49,35 @@ def reap(run: str, worker_pid: int, *, alive: Callable[[int], bool] | None = Non
     except OSError:
         return 0  # another reaper watches this run
     try:
-        while alive(worker_pid):
-            sleep(poll_s)
-        meta = runs.load_run(run) or {}
-        args = meta.get("args") or {}
-        if args.get("keep"):
-            log(f"[reaper] {run}: worker {worker_pid} gone; --keep: resources left up")
-            return 0
-        if meta.get("controller") == "head":
-            return 0
-        if meta.get("pid") not in (None, worker_pid) and alive(int(meta["pid"])):
-            return 0  # the run was relaunched under the same name by a newer worker
+        while True:
+            while alive(worker_pid):
+                sleep(poll_s)
+            meta = runs.load_run(run) or {}
+            args = meta.get("args") or {}
+            if args.get("keep"):
+                log(f"[reaper] {run}: worker {worker_pid} gone; --keep: resources left up")
+                return 0
+            if meta.get("controller") == "head":
+                return 0
+            # a fleet island launch whose worker died without a result (killed): its relaunch adopts it
+            fleet_island = args.get("rl_fleet_role") == "island" and meta.get("state") in (runs.PENDING, runs.RUNNING)
+            newer = _newer_worker(run, worker_pid, alive)
+            if newer is not None and not fleet_island:
+                return 0  # the run was relaunched under the same name by a newer worker
+            if newer is None and fleet_island:
+                log(f"[reaper] {run}: worker {worker_pid} gone; a fleet island launch: its trainer worker "
+                    f"relaunches it and the new launch adopts the running island; waiting {adopt_grace_s:.0f}s "
+                    "before anything is released")
+                for _ in range(max(1, int(-(-adopt_grace_s // poll_s)))):
+                    sleep(poll_s)
+                    newer = _newer_worker(run, worker_pid, alive)
+                    if newer is not None:
+                        break
+            if newer is not None:  # a fleet island launch taken back: watch its new worker
+                log(f"[reaper] {run}: worker {newer} took the island back; watching it")
+                worker_pid = newer
+                continue
+            break
         led = ResourceLedger.for_run(run)
         open_res = [r for r in led.open_resources()
                     if not (r.kind == "modal_app" and r.attrs.get("shared"))]

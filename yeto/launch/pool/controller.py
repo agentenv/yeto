@@ -111,6 +111,26 @@ class PoolSlot:
     pending_finish: Callable[[], Any] | None = None
 
 
+WORKER_BACKOFF_MAX_S = 300.0  # an extra worker whose steps keep failing retries at least this often
+
+
+@dataclass
+class ExtraWorker:
+    """A worker the supervisor runs next to the pool workers (:meth:`RolloutController.add_worker`):
+    ``step()`` every ``interval`` seconds on its own thread; a step that raises is retried
+    with a backoff (:meth:`RolloutController._run_worker`); a worker whose thread dies
+    anyway is restarted, ``on_restart(error)`` first."""
+
+    step: Callable[[], None]
+    interval: float = 10.0
+    on_restart: Callable[[BaseException | None], None] | None = None
+    thread: Any = None
+    error: BaseException | None = None
+    restarts: int = 0
+    failures: int = 0  # steps that raised in a row (its thread backs off and goes on)
+    wake: Any = field(default_factory=threading.Event)
+
+
 class RolloutController:
     def __init__(self, pools: Mapping[str, IslandPool | PoolSlot], *, stop_flag: str | os.PathLike[str] | None = None,
                  fleet_log: Any = None, budget: Callable[[], str | None] | None = None, interval: float = 60.0,
@@ -132,6 +152,8 @@ class RolloutController:
         # the fleet's desired state (``fleet_reconcile.FleetReconciler``): pools added, removed,
         # rescaled and reconfigured while the run trains; None: the pools given here only
         self.reconciler = reconciler
+        # workers that are not pools (the trainer worker of an island fleet): supervised alike
+        self.workers: dict[str, ExtraWorker] = {}
         self.detached: str | None = None
         self.stopped: str | None = None
         self.error: BaseException | None = None
@@ -159,6 +181,15 @@ class RolloutController:
         self.slots = {**self.slots, name: slot}  # a new dict: a pass iterating the old one is not disturbed
         self.wake()
         return slot
+
+    def add_worker(self, name: str, step: Callable[[], None], *, interval: float = 10.0,
+                   on_restart: Callable[[BaseException | None], None] | None = None) -> ExtraWorker:
+        """A worker the supervisor runs and restarts like a pool's (:class:`ExtraWorker`);
+        without ``pool_workers`` :meth:`tick` steps it after the pools."""
+        worker = ExtraWorker(step, float(interval), on_restart)
+        self.workers = {**self.workers, name: worker}
+        self.wake()
+        return worker
 
     def drop_slot(self, name: str) -> None:
         """A pool removed (stopped, its slot closed): no longer driven or listed."""
@@ -199,6 +230,11 @@ class RolloutController:
                 self.reconciler.step(self)
             for name, slot in list(self.slots.items()):
                 self._tick_slot(name, slot)
+            for name, worker in list(self.workers.items()):
+                try:
+                    worker.step()
+                except Exception as error:  # noqa: BLE001 - one bad step never ends the controller
+                    self.log(f"rollout: worker {name} step failed: {error!r}")
             self.ticks += 1
 
     def _flags(self) -> bool:
@@ -357,7 +393,8 @@ class RolloutController:
             self._serial_loop()
             return
         try:
-            while not self.stopped and not self.detached and (self.reconciler is not None or not self.all_stopped()):
+            while not self.stopped and not self.detached and (self.reconciler is not None or self.workers
+                                                              or not self.all_stopped()):
                 with self._lock:
                     if not self.stopped and not self.detached and self._flags():
                         break
@@ -402,6 +439,7 @@ class RolloutController:
         """One supervisor pass: start or restart the worker of every driven pool and report
         a pool whose tick has run longer than ``blocked_s``."""
         now = time.monotonic() if now is None else now
+        self._supervise_workers()
         for name, slot in list(self.slots.items()):
             pool = slot.pool
             if self.stopped or self.detached or pool.stopped or pool.detached:
@@ -424,6 +462,48 @@ class RolloutController:
                          "pools tick on)")
                 if pool.events is not None:
                     pool.events("pool_blocked", pool=name, tick_s=round(now - began), blocked_s=self.blocked_s)
+
+    def _supervise_workers(self) -> None:
+        """Start, or restart after its thread died, every :class:`ExtraWorker`."""
+        for name, worker in list(self.workers.items()):
+            if self.stopped or self.detached:
+                return
+            if worker.thread is not None and _alive(worker.thread):
+                continue
+            if worker.thread is not None:
+                worker.restarts += 1
+                error, worker.error = worker.error, None
+                self.log(f"rollout: worker {name} died ({error!r}); restarting it (restart {worker.restarts})")
+                if worker.on_restart is not None:
+                    try:
+                        worker.on_restart(error)
+                    except Exception as hook_error:  # noqa: BLE001
+                        self.log(f"rollout: worker {name}: restart hook failed ({hook_error!r})")
+            worker.thread = self.thread_cls(target=self._run_worker, args=(worker,), name=f"worker-{name}",
+                                            daemon=True)
+            worker.thread.start()
+
+    def _run_worker(self, worker: ExtraWorker) -> None:
+        """``step()`` every ``interval``; a step that raises is logged and retried after a
+        backoff (the interval doubled per failure in a row, at most ``WORKER_BACKOFF_MAX_S``);
+        only what escapes that (a BaseException) kills the thread for the supervisor."""
+        failures = 0
+        try:
+            while not self.stopped and not self.detached:
+                try:
+                    worker.step()
+                    failures = 0
+                except Exception as error:  # noqa: BLE001 - a store read error: next step tries again
+                    failures += 1
+                    worker.failures = failures
+                    self.log(f"rollout: worker step failed ({type(error).__name__}: {error}); "
+                             f"failure {failures} in a row")
+                wait = worker.interval if failures == 0 else min(worker.interval * 2 ** failures,
+                                                                 max(worker.interval, WORKER_BACKOFF_MAX_S))
+                if worker.wake.wait(wait):
+                    worker.wake.clear()
+        except BaseException as error:  # noqa: BLE001 - the supervisor restarts it
+            worker.error = error
 
     def _worker_died(self, name: str, slot: PoolSlot, now: float) -> None:
         """The worker of ``name`` died: report it, keep or reload the pool's state, and
@@ -518,6 +598,8 @@ class RolloutController:
         self._wake.set()
         for slot in self.slots.values():
             slot.wake.set()
+        for worker in self.workers.values():
+            worker.wake.set()
 
     # -- stop / drain
     def stop(self, why: str, *, join_s: float = 120.0) -> dict[str, list[Member]]:

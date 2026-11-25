@@ -10,6 +10,7 @@ import re
 import shlex
 from pathlib import PurePosixPath
 
+from .store_env import store_client_environ  # noqa: F401 - re-exported: its importers name storage
 from .syncer import island_pool
 
 
@@ -318,27 +319,6 @@ def ssh_nodes_hold_store_credentials(args) -> bool:
     from .ssh_node_storage import nodes_hold_store_credentials
 
     return nodes_hold_store_credentials(island_nodes(list(nodes), "trainer"))
-
-
-def store_client_environ(args, environ=None) -> dict[str, str]:
-    """The environment the S3 store client of the head and the islands reads, with
-    ``--rl-object-store-endpoint`` applied: the endpoint, and ``region=auto`` when an
-    endpoint is set and no region is configured (what Cloudflare R2 expects; AWS S3
-    ignores it). ``environ`` defaults to the process environment."""
-    from ..cloud.s3_store import ENDPOINT_ENV, PROFILE_ENV, REGION_ENV, store_endpoint, store_region
-
-    env = dict(os.environ if environ is None else environ)
-    if getattr(args, "rl_object_store_profile", None):
-        env[PROFILE_ENV] = str(args.rl_object_store_profile)
-    endpoint = getattr(args, "rl_object_store_endpoint", None) or env.get("AWS_ENDPOINT_URL")
-    if not endpoint and not env.get(ENDPOINT_ENV) and env.get(PROFILE_ENV):
-        endpoint = store_endpoint(env)  # the profile's endpoint_url
-        if endpoint and store_region(env):
-            env.setdefault(REGION_ENV, store_region(env))
-    if endpoint and not env.get(ENDPOINT_ENV):
-        env[ENDPOINT_ENV] = str(endpoint)
-        env.setdefault(REGION_ENV, env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "auto")
-    return env
 
 
 def apply_object_store_endpoint(args) -> None:

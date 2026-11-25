@@ -365,3 +365,40 @@ def test_fleet_cost_table_names_trainers_pools_and_the_syncer(tmp_path):
                  "fleet spend = pools $"):
         assert want in cost, want
     assert "Specs: ." not in cost and "undefined" not in cost and "NaN" not in cost
+
+
+def test_a_per_island_fleet_s_trainers_cost_what_run_budget_counts(tmp_path, monkeypatch):
+    """fleet.launch per_island: the cost panel bills each trainer island from its launch
+    records with the function run.budget counts them with (trainer_worker.island_spend of
+    billed): an island moved from $8/h to $100/h, and one that ran 1 h without a price
+    (its declared $5.06/h), not the plan price times the tape hours. Read by the dashboard's
+    own pump (``PlanFile.pump_tapes``, what the server and ``yeto dashboard`` call)."""
+    from yeto.rl import trainer_worker as tw
+
+    plan = dict(plan_doc(prices=True), launch="per_island", max_islands=2)
+    root = write_store(tmp_path / "s", plan)
+    objs = DirectoryObjectStore(str(root))
+    now = T0 + 3 * 3600
+    tw.save_record(objs, 0, {"prefix": "r-i0", "prefix_now": "r-i0-m1", "incarnation": 1, "state": tw.RUNNING,
+                             "gpu": "aws:2xh100@us-east-2", "usd_per_h": 100.0, "billed_s": 3600.0, "billed_usd": 8.0,
+                             "started_at": T0 + 3600, "closed_at": None}, T0)
+    tw.save_record(objs, 1, {"prefix": "r-i1", "prefix_now": "r-i1", "incarnation": 0, "state": tw.RUNNING,
+                             "gpu": "aws:2xh100@us-east-2", "usd_per_h": None, "started_at": T0 + 2 * 3600,
+                             "closed_at": None}, T0)
+    r = reduce(root)
+    pf = fleet_islands.PlanFile([], objs)
+    pf.pump(r)
+    monkeypatch.setattr("time.time", lambda: now)
+    pf.pump_tapes(r)
+    assert r.trainer_spend["at"] == now
+    cost = r.cost(r.max_ts)
+    rows = {row["id"]: row for row in cost["islands"]}
+    expected = tw.island_spend(tw.billed(objs, now), {0: 5.06, 1: 5.06})
+    assert expected[0][1] == pytest.approx(8.0 + 2 * 100.0) and expected[1][1] == pytest.approx(5.06)
+    for k in (0, 1):
+        assert rows[str(k)]["cost_usd"] == pytest.approx(expected[k][1])
+        assert rows[str(k)]["hours"] == pytest.approx(expected[k][0])
+    assert cost["fleet"]["trainers_usd"] == pytest.approx(expected[0][1] + expected[1][1])
+    # a synced group's plan: the plan price times the tape hours, as before
+    assert reduce(write_store(tmp_path / "g", plan_doc(prices=True))).cost(T0)["fleet"]["trainers_usd"] != \
+        pytest.approx(expected[0][1] + expected[1][1])

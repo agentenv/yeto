@@ -449,6 +449,9 @@ def syncer_status_reader(*, local_tape: str | None = None, ssh_host: str | None 
 
     if local_tape is not None:
         return lambda: read_syncer_status(os.path.expanduser(local_tape))
+    if not ssh_host:
+        raise ValueError("syncer_status_reader: no syncer to read status.json from (neither a local event "
+                         "tape on a head node nor the syncer cluster to ssh to)")
 
     remote = RL_SYNCER_EVENT_TAPE.rsplit("/", 1)[0] + "/status.json"
 
@@ -1012,6 +1015,48 @@ def syncer_tape_sidecar(args, num_learners: int, binary: str = "~/yeto-syncer") 
     return setup, run_prefix, envs
 
 
+def syncer_store_upload_sidecar(args) -> tuple[str, str, dict]:
+    """Setup step, run prefix and envs that put the tape uploader beside a fleet's syncer
+    on its own VM (``--rl-fleet-role syncer``): ``python -m yeto.rl.engine.tape_upload
+    follow`` copies the syncer's tape (and each shard's) into the run store under
+    ``tapes/syncer[-shard<i>]/<incarnation>/``, the layout :class:`.LocalSyncer` uploads
+    and the dashboard reads with ``--store`` alone. Only with an ``s3://``
+    ``--rl-checkpoint-store`` and a non-zero ``YETO_RL_TAPE_UPLOAD_S``; empty otherwise,
+    and for every launch that is not a fleet's syncer (its task is unchanged).
+
+    Backgrounded like the W&B forwarder: the syncer stays the job's foreground process
+    and an uploader failure never touches it. ``--from-end``: a restarted job on the same
+    VM keeps the earlier job's tape, which that job uploaded. The store credential goes in
+    the envs (the caller moves its secret part to the task's ``secrets=``); a launcher with
+    none skips the upload with a warning (the dashboard then shows no syncer merges)."""
+    from ..rl.engine.sample_roles import FLEET_ROLE_SYNCER, fleet_role
+    from ..rl.engine.tape_upload import upload_interval_s
+
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    interval = upload_interval_s()
+    if fleet_role(args) != FLEET_ROLE_SYNCER or not store.startswith("s3://") or interval is None:
+        return "", "", {}
+    from ..cloud.s3_store import island_envs
+    from .store_env import store_client_environ
+
+    try:
+        envs = island_envs(store, store_client_environ(args))
+    except ValueError as error:
+        print(f"[launcher] WARN: the syncer tape is not uploaded to the run store ({error}); the dashboard "
+              "shows no syncer merges", flush=True)
+        return "", "", {}
+    follow = (f"python3 -m yeto.rl.engine.tape_upload follow --tape {syncer_event_tape(args)}"
+              f" --store {shlex.quote(store)} --shards {syncer_shard_count(args)}"
+              f" --interval {interval:g} --from-end")
+    setup = ("\npip install -q boto3 || echo '[yeto-setup] boto3 install failed; "
+             "the syncer tape will not reach the run store' >&2")
+    run_prefix = ("(cd ~/sky_workdir && PYTHONPATH=~/sky_workdir nohup "
+                  f"{follow} >/tmp/yeto-tape-upload.log 2>&1 &) || true\n")
+    print(f"[launcher] syncer tape -> {store.rstrip('/')}/tapes/syncer every {interval:g} s "
+          "(an uploader beside the syncer on its VM)", flush=True)
+    return setup, run_prefix, envs
+
+
 # Clouds where sky cannot open ports (sky/clouds/verda.py: no OPEN_PORTS).
 # There the syncer's port is reachable because the platform has no
 # firewall; yeto closes everything but SSH and the syncer with ufw inside
@@ -1135,9 +1180,11 @@ def make_syncer_task(args, num_learners: int):
     import sky
 
     cross = (platform.system(), platform.machine()) != ("Linux", "x86_64")
+    up_setup, up_run, up_envs = syncer_store_upload_sidecar(args)
     if cross:
         tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
-        tape_envs, secrets = _syncer_envs_and_secrets(args, tape_envs)
+        tape_setup, tape_run = tape_setup + up_setup, tape_run + up_run
+        tape_envs, secrets = _syncer_envs_and_secrets(args, {**tape_envs, **up_envs})
         print("[launcher] non-x86-Linux submitter: building the syncer on the syncer VM")
         task = sky.Task(
             name="yeto-syncer",
@@ -1164,17 +1211,18 @@ def make_syncer_task(args, num_learners: int):
 
     binary = build_syncer_binary()
     tape_setup, tape_run, tape_envs = syncer_tape_sidecar(args, num_learners)
-    tape_envs, secrets = _syncer_envs_and_secrets(args, tape_envs)
+    tape_setup, tape_run = tape_setup + up_setup, tape_run + up_run
+    tape_envs, secrets = _syncer_envs_and_secrets(args, {**tape_envs, **up_envs})
     cmd = tape_run + "chmod +x ~/yeto-syncer && " + syncer_command(args, num_learners)
     task = sky.Task(
         name="yeto-syncer",
         setup=WAN_TUNING + tape_setup,
         run=cmd,
         file_mounts={"~/yeto-syncer": str(binary)},
-        # The fast path normally ships only the binary; the forwarder needs
-        # the yeto package, so telemetry pulls in the same workdir the
-        # cross-build path already uses.
-        workdir=str(REPO_ROOT) if getattr(args, "wandb", False) else None,
+        # The fast path normally ships only the binary; the forwarder (and a
+        # fleet syncer's store uploader) needs the yeto package, so they pull
+        # in the same workdir the cross-build path already uses.
+        workdir=str(REPO_ROOT) if getattr(args, "wandb", False) or up_run else None,
         envs=tape_envs,
         secrets=secrets,
     )

@@ -572,6 +572,33 @@ def test_shared_app_is_not_stopped_only_its_calls_cancelled(runs_dir):
     assert ops.calls == [("cancel", "fc-1")]
 
 
+def test_a_sky_cluster_already_gone_is_released_not_a_cleanup_failure(runs_dir, monkeypatch):
+    """`yeto down` of a fleet's syncer launch: the launch's teardown downed the syncer
+    cluster already, so sky answers ClusterDoesNotExist; the ledger row is released (the
+    run down is verified), while any other sky error still fails the release."""
+    import sys
+    import types
+
+    class ClusterDoesNotExist(Exception):
+        pass
+
+    gone = {"r-syncer"}
+
+    def down(cluster):
+        if cluster in gone:
+            raise ClusterDoesNotExist(f"Cluster {cluster!r} does not exist.")
+        raise RuntimeError("sky API server unreachable")
+
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(down=down, stream_and_get=lambda rid: rid))
+    led = ResourceLedger.for_run("r")
+    led.created("sky_cluster", "r-syncer", "r-syncer", role="syncer")
+    assert cleanup_mod.cleanup_run("r", cleanup_mod.ProductionCleanupOps(), log=lambda m: None)
+    assert not ResourceLedger.for_run("r").open_resources()
+    led.created("sky_cluster", "r-l0", "r-l0")
+    assert not cleanup_mod.cleanup_run("r", cleanup_mod.ProductionCleanupOps(), log=lambda m: None)
+    assert [r.key for r in ResourceLedger.for_run("r").open_resources()] == ["sky_cluster:r-l0"]
+
+
 def test_production_ops_refuse_a_non_id_app():
     with pytest.raises(ValueError):
         cleanup_mod.ProductionCleanupOps().modal_stop_app("yeto-*")
@@ -594,6 +621,58 @@ def test_reaper_cleans_up_after_a_killed_launcher(runs_dir):
     assert code == 0
     assert ops.calls == [("cancel", "fc-1"), ("stop_app", "ap-1")]
     assert len(ResourceLedger.for_run("bystander").open_resources()) == 1
+
+
+def _fleet_island_run(name):
+    runs.create_run(name, {"cluster_prefix": name, "rl_fleet_role": "island", "rl_fleet_learner_id": 0})
+    runs.update_run(name, pid=4242, state=runs.RUNNING)  # its worker SIGKILLed: state never updated
+    led = ResourceLedger.for_run(name)
+    led.created("modal_app", "ap-1", f"yeto-{name}")
+    led.created("modal_call", "fc-1", "i", app_id="ap-1")
+
+
+def test_a_killed_fleet_island_launch_is_left_for_its_relaunch_to_adopt(runs_dir):
+    """The trainer worker relaunches a fleet island launch whose worker was killed; the new
+    worker (same run name) adopts the running Modal call. The reaper releases nothing while
+    it waits for that worker, then watches it: when it dies too with nobody taking the
+    island back within the grace, the island is released."""
+    _fleet_island_run("r-i0")
+    lives = {4242: 0, 5000: 3}
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:  # the relaunch registered its worker
+            runs.update_run("r-i0", pid=5000)
+
+    def alive(pid):
+        lives[pid] = lives.get(pid, 0) - 1
+        return lives[pid] >= 0
+
+    released = []
+    code = reaper.reap("r-i0", 4242, alive=alive, sleep=sleep, poll_s=15.0, adopt_grace_s=60.0,
+                       cleanup=lambda run: released.append(len(sleeps)) or True, log=lambda m: None)
+    assert code == 0 and len(released) == 1
+    # not at 4242's death: 2 polls of the grace until 5000 took it back, 2 while 5000 lived,
+    # then 5000's own grace of 4 polls (60 s / 15 s) ran out with nobody taking it back
+    assert released == [2 + 2 + 4]
+
+
+def test_a_killed_fleet_island_launch_nobody_takes_back_is_released_after_the_grace(runs_dir):
+    _fleet_island_run("r-i1")
+    sleeps, released = [], []
+    reaper.reap("r-i1", 4242, alive=lambda pid: False, sleep=sleeps.append, poll_s=15.0, adopt_grace_s=60.0,
+                cleanup=lambda run: released.append(len(sleeps)) or True, log=lambda m: None)
+    assert released == [4]  # 60 s of 15 s polls, then released
+
+
+def test_a_fleet_island_launch_that_ended_with_a_result_is_reaped_at_once(runs_dir):
+    _fleet_island_run("r-i2")
+    runs.update_run("r-i2", state=runs.FAILED, exit_code=1)
+    sleeps, released = [], []
+    reaper.reap("r-i2", 4242, alive=lambda pid: False, sleep=sleeps.append, poll_s=15.0, adopt_grace_s=60.0,
+                cleanup=lambda run: released.append(len(sleeps)) or True, log=lambda m: None)
+    assert released == [0]
 
 
 def test_reaper_leaves_keep_runs_and_clean_runs_alone(runs_dir):

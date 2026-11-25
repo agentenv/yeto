@@ -172,9 +172,8 @@ accept both names.
      "pool": {"provider": {"kind": "modal", "image": "sglang:latest", "secret": "store", "bucket": "b"},
               "target": 1, "slots": [1, 2], "shard_base": "my-run-modal", "spec": "spec.modal.json",
               "run_prefix": "my-run", "r2_env_file": "store.env"}},
-    {"kind": "trainer", "name": "island-1", "learner_id": 1,
-     "source": {"kind": "modal", "gpu": "L40S"}, "shape": {"nodes": 1, "gpus_per_node": 1, "tp": 1, "pp": 1},
-     "mode": {}, "fixed_roster": false}
+    {"kind": "trainer", "name": "island-1", "learner_id": 1, "gpu": "modal:1x2xh100", "usd_per_h": 8.0,
+     "argv": ["..."], "prefix": "my-run-i1", "pools": ["i1-sglang"]}
   ]
 }
 ```
@@ -186,7 +185,7 @@ accept both names.
 | `sampler_pool.pool` | A `samplers` entry of the run config without `name`: `provider`, `config`, `target`, `spec`, `interval_s`, `usd_per_h`, `data_path` and inline pool keys. |
 | `sampler_pool.required` | As in a `samplers` entry. |
 | `sampler_pool.retire`, `mode` | One-shot. They apply only with the generation that carries them (`yeto run scale --remove`). |
-| `trainer` | Reserved for trainer islands (`learner_id`, source, shape, mode, fixed roster). The sampler control plane keeps these members as written and only checks `name` and an integer `learner_id`. The trainer worker reconciles them. |
+| `trainer` | A trainer island of a fleet launched island by island (`fleet.launch: per_island`): `learner_id`, its `--gpu` cluster, its launch `argv`, cluster `prefix` and its `pools`. The sampler control plane keeps these members as written and only checks `name` and an integer `learner_id`. The trainer worker reconciles them; `yeto fleet island add/remove/move` writes them ([FLEET_TRAINER_ISLANDS.md](FLEET_TRAINER_ISLANDS.md)). |
 
 ### What the controller does with a new generation
 

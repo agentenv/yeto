@@ -565,7 +565,13 @@ def test_a_fleet_islands_launch_ends_with_the_island_stop_exit(monkeypatch, tmp_
     args.recover_timeout = 1200.0
     args.controller_poll = 30.0
     args.rl_fleet_role = "island"
+    args.rl_fleet_learner_id, args.rl_fleet_learners = 0, 1
     monkeypatch.setattr(launcher, "controller_fixed_roster", lambda args: False)  # an island pool island
+    # the fleet member checks (a synced full-parameter trainer fed by external pools, its learner id,
+    # the fleet's learners) are not what this test is about: the exit of the launch is
+    from yeto.rl.engine import sample_roles
+
+    monkeypatch.setattr(sample_roles, "check_fleet_member", lambda args: None)
     assert launcher.run(args) == ISLAND_STOP_EXIT
     assert not [r for r in record if r[0] == "relaunch"] and record.count(("spawn", 0)) == 1
 
