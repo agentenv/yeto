@@ -1461,6 +1461,7 @@ class Run:
         slots = {}
         section = rollout_section(self.cfg)
         store_kw: dict[str, Any] = {}
+        environ = self.pool_environ()  # one overlay for every pool of the run, added ones included
         if section.get("control_plane") == "store":
             store_kw = {"control_objects": kw.pop("control_objects", None) or self._objects(),
                         "lock_ttl_s": section.get("lock_ttl_s")}
@@ -1471,8 +1472,7 @@ class Run:
             # the fleet's desired state (fleet/desired.json): seeded from the run config once,
             # then the pools are its pools; `yeto fleet apply` / `yeto run scale` change it
             doc = self.adopt_desired(store_kw["control_objects"], seed=True)
-            kw.setdefault("reconciler", self._reconciler(store_kw, doc, ops))
-        environ = self.pool_environ()
+            kw.setdefault("reconciler", self._reconciler(store_kw, doc, ops, environ))
         try:
             for ref in self.pools:
                 more = dict(store_kw, name=ref.name) if store_kw else {}
@@ -1577,11 +1577,14 @@ class Run:
             self.pools = resolve(self._desired_cfg({"members": members}), self.dir)
         return doc
 
-    def _reconciler(self, store_kw: dict[str, Any], doc: dict[str, Any] | None, ops: Any) -> Any:
+    def _reconciler(self, store_kw: dict[str, Any], doc: dict[str, Any] | None, ops: Any,
+                    environ: dict[str, str | None] | None = None) -> Any:
         """The desired state's reconcile for this run's controller (pools added, removed,
-        rescaled, reconfigured while it trains)."""
+        rescaled, reconfigured while it trains). ``environ``: the run's environment overlay
+        (:meth:`pool_environ`), the same for the pools it adds as for those run up started."""
         from yeto.launch.nc import cli as nc_cli, pool_run  # noqa: PLC0415
         from yeto.launch.pool.controller import nc_pool  # noqa: PLC0415
+        from yeto.launch.pool.env_scope import EnvScopedOps, scoped_environ  # noqa: PLC0415
         from yeto.launch.pool.fleet_reconcile import FleetReconciler, ReconcileHooks  # noqa: PLC0415
         from yeto.launch.pool.island_pool import GuardedOps  # noqa: PLC0415
         from yeto.launch.rollout.pools import resolve  # noqa: PLC0415
@@ -1596,7 +1599,8 @@ class Run:
 
         def add(name: str, member: dict[str, Any]) -> Any:
             ref = ref_of(name, member)
-            slot = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(name), name=name, **store_kw)
+            slot = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(name), environ=environ, name=name,
+                           **store_kw)
             self._restart_stopped_pool(name, slot.pool)
             self.pools = [r for r in self.pools if r.name != name] + [ref]
             return slot
@@ -1629,7 +1633,10 @@ class Run:
                 raise ValueError(f"the {pool.config.slot_name}s cannot change in place ({pool.config.accounts} -> "
                                  f"{pc.accounts}); remove the pool and add a new one")
             pc.target, pc.index_limit = pool.config.target, pool.config.index_limit
-            new_ops = (ops or {}).get(name) or nc_cli.pool_ops(cfg)
+            with scoped_environ(getattr(slot, "environ", None)):  # its provider is built in the run's environment, as at start
+                new_ops = (ops or {}).get(name) or nc_cli.pool_ops(cfg)
+            if getattr(slot, "environ", None):
+                new_ops = EnvScopedOps(new_ops, slot.environ)
             pool.config = pc  # under the pool's tick lock (the reconcile): no tick runs with the old ones
             pool.ops = GuardedOps(new_ops, pool._guard_store) if pool.control is not None else new_ops  # noqa: SLF001
             self.pools = [ref if r.name == name else r for r in self.pools]

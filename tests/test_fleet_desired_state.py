@@ -397,6 +397,89 @@ def test_desired_changes_made_while_detached_are_applied_by_the_next_controller(
         again.stop("test end")
 
 
+def test_pools_added_and_removed_while_the_run_trains_call_their_provider_in_the_run_env(tmp_path, monkeypatch):
+    """#785 with the reconcile: a pool ``yeto fleet apply`` adds orders under the run config's
+    env overlay, and the end of a removal releases under it, like the pools run up started."""
+    import os  # noqa: PLC0415
+
+    from tests.test_rollout_entry import _NoThread  # noqa: PLC0415
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    up, cfg, _ = _store_run(tmp_path, monkeypatch, objects)
+    monkeypatch.setenv("AWS_PROFILE", "shell")
+    cfg = dict(cfg, env={"AWS_PROFILE": "run"})
+    clock = Clock()
+    seen: dict[str, list[tuple[str, str | None]]] = {"nc": [], "modal": []}
+
+    def seeing(name):
+        class Seeing(FakeProvider):
+            def order(self, slot):
+                seen[name].append(("order", os.environ.get("AWS_PROFILE")))
+                return super().order(slot)
+
+            def release(self, slot, ticket):
+                seen[name].append(("release", os.environ.get("AWS_PROFILE")))
+                return super().release(slot, ticket)
+
+        return Seeing(name, clock)
+
+    providers = {name: seeing(name) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(providers[name], FakeRoute(), FakeFencer()) for name in providers}
+    store = dz.DesiredStore(objects)
+    full = dz.from_run_config(cfg)
+    modal = next(m for m in full["members"] if m["name"] == "modal")
+    store.apply({**full, "members": [m for m in full["members"] if m["name"] != "modal"]}, expect=0)
+    run = up.Run(cfg)
+    c = run.start_controller(ops=ops, thread_cls=_NoThread)
+    try:
+        assert set(c.slots) == {"nc"}
+        c.reconciler.poll_s = 0
+        store.update(lambda d: d["members"].append(modal))
+        for _ in range(3):
+            c.tick()
+            clock.t += 30
+        assert set(c.slots) == {"nc", "modal"} and c.slots["modal"].environ == run.pool_environ()
+        assert os.environ.get("AWS_PROFILE") == "shell"  # outside a pool call: the shell's
+        assert [w for w, _ in seen["modal"]] and all(env == "run" for _, env in seen["modal"]), seen
+        store.update(lambda d: d["members"].remove(modal))
+        for _ in range(8):
+            c.tick()
+            clock.t += 30
+        assert set(c.slots) == {"nc"}
+        assert sorted(providers["modal"].released) == sorted(providers["modal"].machines)
+        assert ("release", "run") in seen["modal"] and all(env == "run" for _, env in seen["modal"]), seen
+    finally:
+        c.stop("test end")
+    assert all(env == "run" for env_list in seen.values() for _, env in env_list), seen
+    assert os.environ.get("AWS_PROFILE") == "shell"
+
+
+def test_the_end_of_a_removal_waits_while_another_env_overlay_is_active(tmp_path):
+    """The end of a removal (its releases) never runs under another overlay's values: it
+    is skipped like a tick and asked again once the other overlay leaves."""
+    from yeto.launch.pool.env_scope import scoped_environ  # noqa: PLC0415
+
+    f = Fleet(tmp_path, [_member("nc", 1), _member("modal", 1)])
+    f.ticks()
+    slot = f.c.slots["modal"]
+    slot.environ = {"AWS_PROFILE": "run"}
+    f.change(lambda d: d["members"].pop())  # remove "modal"
+    for _ in range(10):  # the reconcile hands the end of the removal to the pool's worker
+        f.c.reconciler.step(f.c)
+        if slot.pending_finish is not None:
+            break
+        f.ticks(1)
+    assert slot.pending_finish is not None
+    released = list(f.providers["modal"].released)
+    with scoped_environ({"AWS_PROFILE": "other"}):
+        f.c._tick_slot("modal", slot)  # noqa: SLF001 - the worker's tick of this pool
+        assert slot.pending_finish is not None and f.providers["modal"].released == released
+        assert "modal" in f.c.slots
+    f.ticks(6)
+    assert set(f.c.slots) == {"nc"}
+    assert sorted(f.providers["modal"].released) == sorted(f.providers["modal"].machines)
+
+
 def test_run_down_stops_every_pool_the_fleet_drives(tmp_path, monkeypatch, capsys):
     """REV #758: run down on the store control plane stops a pool `yeto fleet apply` added and one
     still being removed, and reports a store pool with live members that no config names."""
