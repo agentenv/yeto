@@ -139,17 +139,30 @@ def sky_pull_problem(image: str, cloud: str) -> tuple[str, bool] | None:
         return (f"docker on the {cloud} VM pulls {pulled}, the overlay-safe repack of {image} (the same files "
                 "and Miles commit; the image's layer that whites out a path and writes it again does not "
                 "unpack on overlay2 / containerd overlayfs)", False)
+    message = vm_pull_refusal(image, f"docker on a {cloud} VM")
+    return (message, True) if message else None
+
+
+def vm_pull_refusal(image: Any, where: str) -> str | None:
+    """Why ``where`` (a VM's docker: a sky island, a sky pool's node) cannot pull ``image``:
+    an image an overlay applier refuses that no swap covers (the miles pins'
+    OVERLAY_UNSAFE_UNREPACKED, or an OVERLAY_SAFE_DIGESTS key named where nothing swaps it),
+    with the overlay-safe digest to pass instead; None for any other image."""
+    if not isinstance(image, str) or "@sha256:" not in image:
+        return None
     try:
-        unsafe = _miles_pins().overlay_unsafe_image(image)
-    except Exception:  # noqa: BLE001
-        unsafe = False
-    if unsafe:
-        return (f"trainer image {image} has a layer that whites out a path and writes it again: docker on a "
-                f"{cloud} VM (overlay2 / containerd overlayfs) refuses it ('failed to register layer ... not a "
-                "directory' on pull) and the image has no overlay-safe repack. Pass an image built by "
-                "docker/miles-k31/build.sh (its layer is overlay-safe), repack that layer with "
-                "docker/miles-ports/make_layer.py repack-whiteouts, or run the island on Modal", True)
-    return None
+        pins = _miles_pins()
+        if not pins.overlay_unsafe_image(image):
+            return None
+        alternative = pins.overlay_safe_alternative(image)
+    except Exception:  # noqa: BLE001 - no pins: nothing known about the image
+        return None
+    use = (f"use {alternative[0]} instead ({alternative[1]})" if alternative else
+           "pass an image built by docker/miles-k31/build.sh (its layer is overlay-safe), or repack that layer "
+           "with docker/miles-ports/make_layer.py repack-whiteouts")
+    return (f"image {image} has a layer that whites out a path and writes it again: {where} (overlay2 / "
+            "containerd overlayfs) refuses it ('failed to register layer ... not a directory' on pull) and "
+            f"the image has no overlay-safe repack: {use}, or run it on Modal")
 
 
 def training_attention(args: Any) -> tuple[str, str]:
@@ -213,6 +226,27 @@ def image_pin_problems(args: Any, num_islands: int | None = None) -> list[str]:
     return found
 
 
+def check_vm_pulls(args: Any, specs: Any, *, out: Any = None) -> None:
+    """Every island on a sky VM, trainer and sampler islands alike, against the image its
+    VM's docker pulls (the island's own image: ``--rl-island-engine N:image=`` or the
+    run's ``--rl-image``): the overlay-safe swap is printed, an overlay-unsafe image with
+    no repack is refused (ValueError) naming the digest to use instead."""
+    from ..rl.engine import island_engine
+
+    count = len(specs)
+    for m, spec in enumerate(specs):
+        try:
+            image = getattr(island_engine.island_args(args, m, count), "rl_image", None)
+        except (ValueError, AttributeError, TypeError):  # island_engine.check names a bad island spec
+            image = getattr(args, "rl_image", None)
+        pull = sky_pull_problem(str(image or ""), str(getattr(spec, "cloud", "") or ""))
+        if pull is None:
+            continue
+        if pull[1]:
+            raise ValueError(f"--gpu island {m} ({spec}): {pull[0]}")
+        print(f"[launcher] --gpu island {m} ({spec}): {pull[0]}", file=out or sys.stderr, flush=True)
+
+
 def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]:
     """Refuse (ValueError) a trainer island whose image cannot run on its cards; returns
     the warnings it printed. Only the Miles backend's trainer islands are checked against
@@ -223,6 +257,7 @@ def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]
     pins = image_pin_problems(args, len(specs))
     if pins:
         raise ValueError("; ".join(pins))
+    check_vm_pulls(args, specs, out=out)
     if (getattr(args, "rl_backend", None) or "miles") == "verl":
         return check_verl_trainer_cards(args, specs, out=out)
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
@@ -238,11 +273,6 @@ def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]
     for m, spec in enumerate(specs):
         if m in samplers:
             continue
-        pull = sky_pull_problem(image, str(getattr(spec, "cloud", "") or ""))
-        if pull is not None:
-            if pull[1]:
-                raise ValueError(f"--gpu island {m} ({spec}): {pull[0]}")
-            print(f"[launcher] --gpu island {m} ({spec}): {pull[0]}", file=out or sys.stderr, flush=True)
         found = image_problem(image, str(spec.gpu), attention_backend=backend)
         if found is None:
             continue

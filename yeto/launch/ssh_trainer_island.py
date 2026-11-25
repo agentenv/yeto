@@ -124,6 +124,17 @@ def _overlay_safe_image(image: str) -> str | None:
         return None
 
 
+def _overlay_safe_alternative(image: str) -> tuple[str, str] | None:
+    """The overlay-safe digest to use for a pinned engine image a node's docker refuses
+    (miles pins: its repack, or a named image with the same files), or None."""
+    from yeto.rl.engine import backends
+
+    try:
+        return backends.module("pins", "miles").overlay_safe_alternative(image)
+    except Exception:  # noqa: BLE001 - a hint only
+        return None
+
+
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30",
                "-o", "ServerAliveCountMax=4")
 # The remote command: the script comes on stdin. stdin moves to fd 3 and the login
@@ -967,8 +978,11 @@ class SshTrainerIslands:
             hint = ""
             if "not a directory" in err:
                 fixed = _overlay_safe_image(image)
+                other = None if fixed else _overlay_safe_alternative(image)
                 hint = (f" (a layer that whites out a path and writes it again; the same image with that "
                         f"layer repacked: {fixed})" if fixed else
+                        f" (a layer that whites out a path and writes it again; use {other[0]}: {other[1]})"
+                        if other else
                         " (a layer that whites out a path and writes it again: rebuild it with "
                         "docker/miles-ports/make_layer.py of this repository)")
             raise SshIslandError(f"node {node.name}: docker pull {image} failed (rc {done.returncode}): {err}{hint}")

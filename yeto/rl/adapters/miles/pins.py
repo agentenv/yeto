@@ -765,18 +765,31 @@ IMAGE_MILES_COMMITS: dict[str, str] = {
 # offending layer repacked (same files, same Miles commit): the legacy pair of the former
 # full image, and MILES_K31_IMAGE (the LoRA / generic default) and its repack
 # MILES_K31_OVERLAYFIX_IMAGE. The full-image default MILES_K31_NEXT9_IMAGE is overlay-safe
-# as built, and the previous full image fa70fe28 has no repack.
+# as built; the previous full image fa70fe28 has no repack (OVERLAY_UNSAFE_UNREPACKED).
 OVERLAY_SAFE_DIGESTS: dict[str, str] = {
     "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b":
         "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14",
     "028e505de58552e6ede8926c8bf8ab8451e8e749cfc35afc1eb70e8d362c65b3":
         "32626906f3fd14ab4d888c874c2ae27a727c4119b94b38aa8b60a6c5da17c084",
 }
-# digests of images an overlay applier rejects that have no repack: FULL_D 63ad0d2a (the
-# image under MILES_K31_IMAGE's .git-only layer)
-OVERLAY_UNSAFE_UNREPACKED: tuple[str, ...] = (
-    "63ad0d2a9e70a139221050f51214f073a5bc53f66c0c57090ae926012e439c04",
-)
+# digests of images an overlay applier rejects that have no repack -> (the overlay-safe
+# digest to pull instead, what it holds). A VM's docker pull of one of these is refused
+# before anything is ordered, naming that digest:
+# * FULL_D 63ad0d2a: MILES_K31_IMAGE 028e505d is 63ad0d2a plus a layer that only swaps
+#   /root/miles/.git for the same tree, so the repack of 028e505d holds the same files;
+# * the previous full image fa70fe28 (MILES_K31_FULL_IMAGE): the FULL_E image 2de5d796
+#   (the same yeto layer ca6b5637) plus the same kind of .git-only layer, so the repack of
+#   2de5d796 holds the same files (its /root/miles checkout at 1f29e430, the commit before
+#   the fork's author-metadata normalization; IMAGE_MILES_COMMITS tells the island).
+OVERLAY_UNSAFE_UNREPACKED: dict[str, tuple[str, str]] = {
+    "63ad0d2a9e70a139221050f51214f073a5bc53f66c0c57090ae926012e439c04": (
+        "32626906f3fd14ab4d888c874c2ae27a727c4119b94b38aa8b60a6c5da17c084",
+        "the same FULL_D files: the overlay-safe repack of 028e505d (MILES_K31_OVERLAYFIX_IMAGE)"),
+    "fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325": (
+        "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14",
+        "the same FULL_E files: the overlay-safe repack of 2de5d796 (MILES_K31_FULL_OVERLAYFIX_IMAGE; "
+        "/root/miles at 1f29e430)"),
+}
 
 
 def overlay_safe_image(image_ref: str | None) -> str | None:
@@ -792,6 +805,22 @@ def overlay_unsafe_image(image_ref: str | None) -> bool:
     or not :data:`OVERLAY_SAFE_DIGESTS` has a repack of it)."""
     head, sep, digest = str(image_ref or "").rpartition("@sha256:")
     return bool(sep) and (digest in OVERLAY_SAFE_DIGESTS or digest in OVERLAY_UNSAFE_UNREPACKED)
+
+
+def overlay_safe_alternative(image_ref: str | None) -> tuple[str, str] | None:
+    """``(image_ref with the overlay-safe digest to use instead, what it holds)`` for an
+    image an overlay applier refuses: its repack (:data:`OVERLAY_SAFE_DIGESTS`), else the
+    named alternative (:data:`OVERLAY_UNSAFE_UNREPACKED`); None for any other image. The
+    registry part of the reference (and a ``docker:`` prefix) is kept."""
+    head, sep, digest = str(image_ref or "").rpartition("@sha256:")
+    if not sep:
+        return None
+    if digest in OVERLAY_SAFE_DIGESTS:
+        return f"{head}@sha256:{OVERLAY_SAFE_DIGESTS[digest]}", "its overlay-safe repack (the same files and Miles commit)"
+    if digest in OVERLAY_UNSAFE_UNREPACKED:
+        fixed, why = OVERLAY_UNSAFE_UNREPACKED[digest]
+        return f"{head}@sha256:{fixed}", why
+    return None
 
 
 def image_miles_commit(image_ref: str | None) -> str | None:

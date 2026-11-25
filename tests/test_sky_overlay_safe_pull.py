@@ -14,7 +14,9 @@ from yeto.launch import trainer_image_check as tic
 from yeto.rl.adapters.miles import pins
 
 REPACK = pins.MILES_K31_OVERLAYFIX_IMAGE
-FULL_D = "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:" + pins.OVERLAY_UNSAFE_UNREPACKED[0]
+FULL_D = "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:63ad0d2a9e70a139221050f51214f073a5bc53f66c0c57090ae926012e439c04"
+FULL_D_SAFE = "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:32626906f3fd14ab4d888c874c2ae27a727c4119b94b38aa8b60a6c5da17c084"
+OLD_FULL = pins.MILES_K31_FULL_IMAGE  # fa70fe28: the FULL_E yeto layer, no repack
 
 
 def test_sky_vm_pulls_the_repack_and_modal_keeps_the_pin():
@@ -30,7 +32,11 @@ def test_sky_vm_pulls_the_repack_and_modal_keeps_the_pin():
         assert tic.sky_pull_problem(FULL_D, cloud) is None
     assert tic.sky_pull_problem(pins.MILES_K31_NEXT9_IMAGE, "nebius") is None  # the customer K3.1 image
     message, refused = tic.sky_pull_problem(FULL_D, "aws")
-    assert refused and "no overlay-safe repack" in message and "repack-whiteouts" in message
+    assert refused and "no overlay-safe repack" in message and f"use {FULL_D_SAFE} instead" in message
+    message, refused = tic.sky_pull_problem(OLD_FULL, "nebius")
+    assert refused and f"use {pins.MILES_K31_FULL_OVERLAYFIX_IMAGE} instead" in message
+    # an unknown image is nobody's business here
+    assert tic.vm_pull_refusal("docker:ghcr.io/o/i@sha256:" + "a" * 64, "docker") is None
 
 
 def _args(image, gpu):
@@ -144,3 +150,56 @@ def test_the_launched_sky_task_pulls_the_repack(monkeypatch, tmp_path):
     (res,) = list(task.resources) if isinstance(task.resources, (set, list, tuple)) else [task.resources]
     image = getattr(res, "image_id", None) or getattr(res, "kwargs", {}).get("image_id")
     assert REPACK.removeprefix("docker:") in str(image) and pins.MILES_K31_IMAGE.rpartition("@")[2] not in str(image)
+
+
+def test_sampler_and_engine_islands_on_a_sky_vm_are_checked_with_their_own_image(no_pin_checks, monkeypatch):
+    """REV follow-up: a sampler island (or an island with its own --rl-island-engine image)
+    on a sky VM pins its own image; an overlay-unsafe one with no repack is refused before
+    anything is ordered, naming the digest to use; a repackable one prints the swap."""
+    from yeto.rl.engine import island_engine, sample_roles
+
+    gpu = "modal:1x1xH100,nebius:1x1xH200@us-central1"
+    images = {0: pins.MILES_K31_NEXT9_IMAGE, 1: FULL_D}
+
+    def island_args(args, m, count):
+        return SimpleNamespace(**{**vars(args), "rl_image": images[m]})
+
+    monkeypatch.setattr(island_engine, "island_args", island_args)
+    monkeypatch.setattr(sample_roles, "sampler_islands", lambda args, n: [1])  # island 1 samples
+    with pytest.raises(ValueError, match=r"--gpu island 1 \(nebius:.*use .*32626906.* instead"):
+        tic.check_trainer_images(_args(pins.MILES_K31_NEXT9_IMAGE, gpu), parse_gpu_spec(gpu), out=io.StringIO())
+    images[1] = pins.MILES_K31_IMAGE
+    out = io.StringIO()
+    tic.check_trainer_images(_args(pins.MILES_K31_NEXT9_IMAGE, gpu), parse_gpu_spec(gpu), out=out)
+    assert "--gpu island 1 (nebius:" in out.getvalue() and REPACK in out.getvalue()
+    # the same unsafe image on the Modal island: Modal's builder unpacks it
+    images[0], images[1] = FULL_D, pins.MILES_K31_NEXT9_IMAGE
+    out = io.StringIO()
+    tic.check_trainer_images(_args(pins.MILES_K31_NEXT9_IMAGE, gpu), parse_gpu_spec(gpu), out=out)
+    assert out.getvalue() == ""
+
+
+def _sky_pool(image_id):
+    return {"shard_base": "p", "run": "r", "slots": [0],
+            "provider": {"kind": "sky", "offers": [{"key": "o1", "price_usd_h": 1.0,
+                                                    "resources": {"infra": "nebius/us-central1",
+                                                                  "accelerators": "L40S:1",
+                                                                  "image_id": image_id}}]}}
+
+
+def test_a_sky_pool_offer_pinning_an_unrepacked_unsafe_image_is_refused_before_any_order(monkeypatch):
+    import sys
+
+    from yeto.launch.pool import sky_provider as sp
+
+    monkeypatch.delitem(sys.modules, "sky", raising=False)  # a stub without __spec__ from another test
+
+    provider = sp.from_config(_sky_pool(FULL_D), "r", sky=object())
+    (problem,) = sp.offer_docker_problems(provider)
+    assert "sky offer o1" in problem and f"use {FULL_D_SAFE} instead" in problem
+    provider = sp.from_config(_sky_pool({"us-central1": "computeimage-x", "docker": OLD_FULL}), "r", sky=object())
+    assert pins.MILES_K31_FULL_OVERLAYFIX_IMAGE in sp.offer_docker_problems(provider)[0]
+    for ok in (pins.MILES_K31_NEXT9_IMAGE, "docker:vllm/vllm-openai@sha256:" + "b" * 64, "ubuntu-2204", None):
+        assert sp.offer_docker_problems(sp.from_config(_sky_pool(ok), "r", sky=object())) == []
+    assert any("32626906" in p for p in sp.start_problems(_sky_pool(FULL_D)))
+    assert any("32626906" in p for p in sp.offline_problems(_sky_pool(FULL_D)))

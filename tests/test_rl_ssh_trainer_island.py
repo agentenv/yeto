@@ -607,3 +607,18 @@ def test_an_unconfirmed_release_is_stopped_again_before_the_next_start(tmp_path,
     kills = [(n, s) for n, s in ops.runs if "kill -TERM" in s and "t-i0/pgid" in s]
     assert [n for n, _ in kills][-2:] == ["ppu0", "ppu1"] and islands.unreleased == set()
     assert [n for n, _ in ops.starts] == ["ppu0", "ppu1"]
+
+
+def test_an_overlay_rejected_image_without_a_repack_names_the_image_to_use(tmp_path, checked_cards):
+    """The previous full image fa70fe28 has no repack; its pull error names the overlay-safe
+    image with the same files (pins.OVERLAY_UNSAFE_UNREPACKED), not only the rebuild hint."""
+    from yeto.rl.adapters.miles import pins
+
+    image = pins.MILES_K31_FULL_IMAGE.removeprefix("docker:")
+    err = "failed to register layer: openat opt/sglang/x.dist-info/INSTALLER: not a directory"
+    islands = SshTrainerIslands(b300_spec([b300(i, image=image) for i in range(6)]), name="t",
+                                jobs_path=tmp_path / "j.json", ops=PullOps(1, err))
+    with pytest.raises(SshIslandError) as raised:
+        islands.preflight()
+    fixed = pins.MILES_K31_FULL_OVERLAYFIX_IMAGE.removeprefix("docker:")
+    assert f"use {fixed}:" in str(raised.value) and "make_layer.py" not in str(raised.value)

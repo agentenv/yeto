@@ -362,9 +362,18 @@ def test_overlay_safe_digests_map_a_rejected_image_to_its_repack_of_the_same_com
     assert pins.overlay_safe_image(pins.MILES_K31_FULL_IMAGE) is None  # no repack
     assert pins.overlay_safe_image(pins.MILES_K31_NEXT9_IMAGE) is None  # nothing to repack
     assert not pins.overlay_unsafe_image(pins.MILES_K31_NEXT9_IMAGE)
-    # FULL_D 63ad0d2a: refused by overlay appliers, no repack
-    full_d = "r/o/yeto-miles-k31@sha256:" + pins.OVERLAY_UNSAFE_UNREPACKED[0]
+    # FULL_D 63ad0d2a and the previous full image fa70fe28: refused by overlay appliers, no
+    # repack; each names an overlay-safe image with the same files (same Miles tree)
+    full_d = "r/o/yeto-miles-k31@sha256:63ad0d2a9e70a139221050f51214f073a5bc53f66c0c57090ae926012e439c04"
     assert pins.overlay_unsafe_image(full_d) and pins.overlay_safe_image(full_d) is None
+    assert pins.overlay_safe_alternative(full_d)[0] == "r/o/yeto-miles-k31@sha256:" + lora_safe
+    assert pins.overlay_unsafe_image(pins.MILES_K31_FULL_IMAGE)
+    assert pins.overlay_safe_alternative(pins.MILES_K31_FULL_IMAGE)[0] == pins.MILES_K31_FULL_OVERLAYFIX_IMAGE
+    assert pins.overlay_safe_alternative(pins.MILES_K31_IMAGE)[0] == pins.MILES_K31_OVERLAYFIX_IMAGE
+    for safe_ref in (pins.MILES_K31_NEXT9_IMAGE, pins.MILES_K31_OVERLAYFIX_IMAGE, "ghcr.io/o/x:tag", None):
+        assert pins.overlay_safe_alternative(safe_ref) is None
+    for unsafe, (fixed, _why) in pins.OVERLAY_UNSAFE_UNREPACKED.items():
+        assert unsafe not in pins.OVERLAY_SAFE_DIGESTS and not pins.overlay_unsafe_image("r/o/x@sha256:" + fixed)
     # the cluster preflight's list is the same set
     from yeto.launch.preflight import cluster as cp
 
