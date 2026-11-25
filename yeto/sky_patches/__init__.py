@@ -279,3 +279,134 @@ def require_matching_api_server(out=None) -> None:
     if refuse:
         raise ValueError(msg)
     print(f"[yeto] WARNING: {msg}", file=out or sys.stderr, flush=True)
+
+
+# -- the patch state of the sky API server (where sky provisions), not of this Python
+SERVER_PATCH_ENV = "YETO_SKY_SERVER_PATCH"  # "warn": proceed (a warning) on an unpatched server
+_PROBE = (
+    "import json, sys\n"
+    "try:\n"
+    "    import {module}\n"
+    "except Exception as e:\n"
+    "    print(json.dumps({{'error': repr(e)[:200]}})); sys.exit(0)\n"
+    "y = sys.modules.get('yeto.sky_patches')\n"
+    "print(json.dumps({{'status': y.status() if y else {{}}, 'version': __import__('sky').__version__}}))\n"
+)
+
+
+def _server_port(endpoint: str) -> int | None:
+    from urllib.parse import urlparse
+
+    try:
+        return urlparse(endpoint).port or 46580
+    except ValueError:
+        return None
+
+
+def _cmdline_port(cmdline: list[str]) -> int:
+    for i, arg in enumerate(cmdline):
+        if arg == "--port" and i + 1 < len(cmdline) and cmdline[i + 1].isdigit():
+            return int(cmdline[i + 1])
+        if arg.startswith("--port=") and arg[7:].isdigit():
+            return int(arg[7:])
+    return 46580
+
+
+def local_server_process(port: int):
+    """(python, start time) of the local sky API server process listening as ``port``,
+    or None (no such process)."""
+    import psutil
+
+    import shlex
+
+    for proc in psutil.process_iter(attrs=["pid", "cmdline", "create_time"]):
+        # some processes report their whole command line as one argument: split it again
+        joined = " ".join(proc.info.get("cmdline") or [])
+        if "-m sky.server.server" not in joined:
+            continue
+        try:
+            argv = shlex.split(joined)
+        except ValueError:
+            continue
+        # the server itself (<python> -m sky.server.server ...), not a shell that mentions it
+        if argv[1:3] == ["-m", "sky.server.server"] and _cmdline_port(argv) == port:
+            return argv[0], float(proc.info["create_time"])
+    return None
+
+
+def server_patch_state(target: str, *, server_common=None, run=None) -> tuple[bool, str]:
+    """(applied, why) of yeto's patch of sky module ``target`` in the process where sky
+    provisions: the sky API server, not this Python (it may run from another
+    environment). Only a local server can be inspected: its Python is run with the same
+    environment (its site-packages hook, no PYTHONPATH) and imports ``target`` as the
+    server would; a hook written after the server started is not in effect. No server
+    running: the one sky would start, from this Python. Anything unreadable: not applied."""
+    import json
+    import os
+    import subprocess
+
+    try:
+        if server_common is None:
+            from sky.server import common as server_common
+        endpoint = server_common.get_server_url()
+        if not server_common.is_api_server_local(endpoint):
+            return False, f"the sky API server at {endpoint} is remote (its patches cannot be read from here)"
+        port = _server_port(endpoint)
+        found = local_server_process(port) if port else None
+    except Exception as exc:  # noqa: BLE001
+        return False, f"the sky API server could not be inspected ({exc!r:.120})"
+    python, started = found if found else (sys.executable, None)
+    if not os.path.isabs(python):
+        return False, f"the sky API server runs {python!r}, not an absolute Python path"
+    run = run or subprocess.run
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")}
+    try:
+        site = run([python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                   capture_output=True, text=True, timeout=60, env=env, cwd="/").stdout.strip()
+        hook = os.path.join(site, PTH_NAME)
+        if not pth_repo(hook):
+            return False, f"no yeto sky patch hook in the sky API server's environment ({hook})"
+        if started is not None and os.path.getmtime(hook) > started:
+            return False, f"the patch hook {hook} was written after the sky API server started (restart it)"
+        out = run([python, "-c", _PROBE.format(module=target)], capture_output=True, text=True, timeout=120,
+                  env=env, cwd="/").stdout.strip().splitlines()
+        probe = json.loads(out[-1]) if out else {}
+    except Exception as exc:  # noqa: BLE001
+        return False, f"the sky API server's environment could not be probed ({exc!r:.120})"
+    state = (probe.get("status") or {}).get(target)
+    if state == "applied":
+        return True, f"applied in the sky API server's environment ({python})"
+    return False, f"not applied in the sky API server's environment ({python}): {state or probe.get('error')}"
+
+
+def server_patch_install_hint(python: str | None = None) -> str:
+    return (f"install the hook into the sky API server's Python, from a yeto checkout that stays on main: "
+            f"cd <yeto checkout> && {python or '<sky API server python>'} -m yeto.sky_patches install, "
+            f"then restart that server (sky api stop; sky api start)")
+
+
+def require_patched_server(target: str, what: str, *, out=None, environ=None) -> bool:
+    """Refuse (ValueError) to order ``what`` (Verda) when the sky API server's patch of
+    ``target`` is not in effect; ``YETO_SKY_SERVER_PATCH=warn`` warns instead. Returns
+    whether the patch is in effect (False: callers turn auto-recovery off)."""
+    import os
+
+    environ = os.environ if environ is None else environ
+    ok, why = server_patch_state(target)
+    if ok:
+        return True
+    python = None
+    try:
+        from sky.server import common as server_common
+
+        found = local_server_process(_server_port(server_common.get_server_url()) or 0)
+        python = found[0] if found else sys.executable
+    except Exception:  # noqa: BLE001 - the hint names a placeholder then
+        pass
+    msg = f"{what}: yeto's patch of {target} is not in effect in the sky API server: {why}. " + \
+          server_patch_install_hint(python)
+    if environ.get(SERVER_PATCH_ENV) == "warn":
+        print(f"[yeto] WARNING: {msg} ({SERVER_PATCH_ENV}=warn: proceeding unpatched, auto-recovery off)",
+              file=out or sys.stderr, flush=True)
+        return False
+    raise ValueError(msg + f" (or set {SERVER_PATCH_ENV}=warn to proceed unpatched, auto-recovery off)")

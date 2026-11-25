@@ -742,16 +742,15 @@ def test_unverified_sky_disables_verda_recovery_only(monkeypatch, capsys):
     monkeypatch.setattr(vp, "verified_for_current_sky", lambda: (True, ""))
     import yeto.sky_patches as patches
 
-    monkeypatch.setattr(patches, "ensure_local_pth", lambda repo: ("/x/yeto_sky_patches.pth", False))
-    monkeypatch.setattr("yeto.launch.verda.remote_sky_api_server", lambda: None)
-    assert launcher.prepare_verda_islands(["l0"])["no_recover"] == set()
-    # Hook only now written: a running server may be unpatched -> no recovery.
-    monkeypatch.setattr(patches, "ensure_local_pth", lambda repo: ("/x/yeto_sky_patches.pth", True))
+    # the sky API server's patch state counts (it provisions), not this Python's hook
+    monkeypatch.setattr(patches, "server_patch_state", lambda target: (True, "applied"))
     prep = launcher.prepare_verda_islands(["l0"])
-    assert prep["no_recover"] == {"l0"} and prep["pth_written"] == "/x/yeto_sky_patches.pth"
-    # Remote API server: cannot be patched from here.
-    monkeypatch.setattr(patches, "ensure_local_pth", lambda repo: ("/x/yeto_sky_patches.pth", False))
-    monkeypatch.setattr("yeto.launch.verda.remote_sky_api_server", lambda: "https://sky.example.com")
+    assert prep["no_recover"] == set() and prep["pth_written"] is None
+    monkeypatch.setattr(patches, "server_patch_state",
+                        lambda target: (False, "the patch hook was written after the sky API server started"))
+    prep = launcher.prepare_verda_islands(["l0"])
+    assert prep["no_recover"] == {"l0"} and "after the sky API server started" in capsys.readouterr().err
+    monkeypatch.setattr(patches, "server_patch_state", lambda target: (False, "the sky API server is remote"))
     prep = launcher.prepare_verda_islands(["l0"])
     assert prep["no_recover"] == {"l0"} and "remote" in capsys.readouterr().err
 
@@ -925,13 +924,13 @@ def test_local_pth_for_the_sky_api_server(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(vp, "verified_for_current_sky", lambda: (True, ""))
     monkeypatch.setattr("yeto.shape.providers.write_verda_sky_catalog", lambda: "/tmp/x.csv")
 
-    def unwritable(repo, site_dir=None):
-        raise PermissionError("read-only site-packages")
+    def unreadable(target):
+        return False, "the sky API server's environment could not be probed (PermissionError)"
 
-    monkeypatch.setattr(patches, "ensure_local_pth", unwritable)
+    monkeypatch.setattr(patches, "server_patch_state", unreadable)
     prep = launcher.prepare_verda_islands(["l0"])
-    assert prep["no_recover"] == {"l0"}  # unpatched server -> no auto-recovery
-    assert "cannot install the patch hook" in capsys.readouterr().err
+    assert prep["no_recover"] == {"l0"}  # unreadable server state -> unpatched -> no auto-recovery
+    assert "could not be probed" in capsys.readouterr().err
 
 
 def test_launch_verda_island_sends_ordered_any_of(monkeypatch):

@@ -596,6 +596,9 @@ class SkyProvider:
                 problems.append(f"sky provider: refusing to launch: {self._scope_error}")
             if problems:
                 raise ValueError(problems[0])
+            if _wants_verda(self) and os.environ.get(sky_patches.SERVER_CHECK_ENV) != "off":
+                # sky provisions Verda in its API server: that server's patch, not this Python's
+                sky_patches.require_patched_server(sky_patches.verda.TARGET_MODULE, "sky provider Verda offer")
         sky_patches.install()
         self._patched = True
         version = getattr(self.sky, "__version__", None)
@@ -1112,6 +1115,7 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
         install_request_env_scope()  # local only: builds a request body, sends nothing
     except RuntimeError as error:
         problems.append(f"sky provider: {error}")
+    problems += verda_server_problems(provider)
     return problems
 
 
@@ -1138,6 +1142,30 @@ def _uses_aws(provider: SkyProvider) -> bool:
     return False
 
 
+def _wants_verda(provider: SkyProvider) -> bool:
+    return any(str(o.resources.get("infra") or o.resources.get("cloud") or "").lower().split("/", 1)[0] == "verda"
+               for o in provider.offers)
+
+
+def verda_server_problems(provider: SkyProvider, environ=None) -> list[str]:
+    """A Verda offer while the sky API server's Verda patch is not in effect (sky
+    provisions there): refused unless ``YETO_SKY_SERVER_PATCH=warn``."""
+    from yeto import sky_patches  # noqa: PLC0415
+
+    environ = os.environ if environ is None else environ
+    if not _wants_verda(provider) or environ.get(sky_patches.SERVER_CHECK_ENV) == "off":
+        return []
+    ok, why = sky_patches.server_patch_state(sky_patches.verda.TARGET_MODULE)
+    if ok:
+        return []
+    msg = (f"sky provider Verda offer: yeto's Verda patch is not in effect in the sky API server: {why}. "
+           + sky_patches.server_patch_install_hint())
+    if environ.get(sky_patches.SERVER_PATCH_ENV) == "warn":
+        print(f"[sky-provider] WARNING: {msg} ({sky_patches.SERVER_PATCH_ENV}=warn: proceeding unpatched)", flush=True)
+        return []
+    return [msg + f" (or set {sky_patches.SERVER_PATCH_ENV}=warn to proceed unpatched)"]
+
+
 def start_problems(cfg: dict[str, Any]) -> list[str]:
     """What refuses a sky pool's loop at its start (``pool --config``), before any order:
     a refusal at the first order would only cool that offer down and retry every tick."""
@@ -1145,7 +1173,7 @@ def start_problems(cfg: dict[str, Any]) -> list[str]:
         provider = from_config(cfg, str(cfg.get("run") or cfg.get("shard_base")), sky=object())
     except (ValueError, TypeError, KeyError) as error:
         return [str(error)]
-    problems = aws_env_problems(provider, dict(os.environ))
+    problems = aws_env_problems(provider, dict(os.environ)) + verda_server_problems(provider)
     try:
         install_request_env_scope()
     except RuntimeError as error:

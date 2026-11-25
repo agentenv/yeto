@@ -562,6 +562,10 @@ def pre_cloud_checks(args, *, counter=None, sleep=None, clock=time.monotonic, ou
         from . import sky_patches
 
         sky_patches.require_matching_api_server(out=out)
+        if any(s.cloud == "verda" for s in specs) and os.environ.get(sky_patches.SERVER_CHECK_ENV) != "off":
+            # sky provisions Verda in its API server: that server's patch, not this Python's
+            preflight["verda_patched"] = sky_patches.require_patched_server(
+                sky_patches.verda.TARGET_MODULE, "Verda island", out=out)
     num_islands = len(specs) + max(0, getattr(args, "external_learners", 0) or 0)
     overrides = io.overrides_of(args, len(specs))
     for island in overrides:
