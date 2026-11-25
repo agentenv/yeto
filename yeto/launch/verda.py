@@ -27,30 +27,17 @@ def prepare_verda_islands(names: list[str], on_instance_ids=None) -> dict:
     except Exception as e:  # noqa: BLE001 - sky's own catalog still works, just thinner
         print(f"[launcher] WARNING: could not write the Verda sky catalog: {e}", file=sys.stderr)
     ok, why = verda_patch.verified_for_current_sky()
-    pth_written = None
-    if ok and remote_sky_api_server():
-        # Provisioning runs in a server we cannot patch from here.
-        ok, why = False, f"sky API server is remote ({remote_sky_api_server()})"
+    pth_written = None  # the hook goes into the sky API server's Python (python -m yeto.sky_patches install)
     if ok:
-        from ..sky_patches import ensure_local_pth
+        # sky provisions in its API server (maybe another environment, or remote): its patch
+        # state counts, not this Python's; unreadable means unpatched
+        from ..sky_patches import server_patch_state
 
-        try:
-            pth, fresh = ensure_local_pth(str(REPO_ROOT))
-            if fresh:
-                # A server already running keeps the unpatched code: treat
-                # the patch as not in effect for this run (2.5).
-                pth_written = pth
-                ok, why = False, (
-                    f"patch hook {pth} was only now installed; a sky API server started "
-                    "before it runs unpatched (install it persistently with "
-                    "`python -m yeto.sky_patches install`, then `sky api stop`)"
-                )
-        except OSError as e:
-            ok, why = False, f"cannot install the patch hook for sky's API server ({e})"
+        ok, why = server_patch_state(verda_patch.TARGET_MODULE)
     no_recover = set() if ok else set(names)
     if not ok:
         print(
-            f"[launcher] WARNING: sky's Verda provisioner is NOT patched ({why}); "
+            f"[launcher] WARNING: sky's Verda provisioner is NOT patched in the sky API server ({why}); "
             f"auto-recovery is disabled for {', '.join(names)} (recover_timeout=0) — "
             "a same-name relaunch there can delete the running node",
             file=sys.stderr,

@@ -973,17 +973,20 @@ def test_without_the_scope_status_and_down_are_refused_when_they_would_carry_ano
     monkeypatch.setattr(sp, "install_request_env_scope", broken)
     p = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=sky, aws_profile="sky-aws", record=up.record)
     p._real_sky = True
-    with pytest.raises(RuntimeError, match=f"AWS_PROFILE=sky-aws sky down {name}|by hand"):
+    with pytest.raises(sp.ProviderRequestRefused) as status:
         p.status(1, name)  # an error, never "ended": the pool keeps the member
-    with pytest.raises(RuntimeError, match="by hand"):
+    assert status.value.action == f"{sp.manual_sky_cli('sky-aws')} status {name}"
+    with pytest.raises(sp.ProviderRequestRefused) as down:
         p.release(1, name)
+    assert down.value.action == f"{sp.manual_sky_cli('sky-aws')} down -y {name}" and "by hand" in str(down.value)
     assert name in sky.clusters
     # no aws_profile, but the store's AWS_PROFILE in the env: refused the same way
     monkeypatch.setenv("AWS_PROFILE", "store-r2")
     q = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=sky, record=up.record)
     q._real_sky = True
-    with pytest.raises(RuntimeError, match="env -u AWS_PROFILE sky down"):
+    with pytest.raises(sp.ProviderRequestRefused) as plain:
         q.status(1, name)
+    assert plain.value.action == f"{sp.manual_sky_cli(None)} status {name}"
 
 
 def test_a_transient_self_check_failure_is_tried_again(monkeypatch):
@@ -1070,9 +1073,12 @@ def test_the_cleanup_refuses_an_unscoped_down_with_another_account(monkeypatch):
         def released(self, *a, **k):
             pass
 
+    failed = []
+    Ledger.release_failed = lambda self, *a: failed.append(a)
     row = SimpleNamespace(kind="sky_cluster", id="c-1", name="c-1", key="k", attrs={"pool": True, "aws_profile": "a"})
     action = cleanup._release_one(row, Ops(), Ledger(), False, {})
-    assert not action.ok and "AWS_PROFILE=a sky down c-1" in action.detail and downs == []
+    assert not action.ok and "AWS_PROFILE=a sky down -y c-1" in action.detail and downs == []
+    assert failed and failed[0][:3] == ("sky_cluster", "c-1", "c-1") and failed[0][3].endswith("AWS_PROFILE=a sky down -y c-1")
     plain = SimpleNamespace(kind="sky_cluster", id="c-2", name="c-2", key="k", attrs={"pool": True})
     assert cleanup._release_one(plain, Ops(), Ledger(), False, {}).ok and downs == ["c-2"]  # nothing to carry
 
@@ -1465,3 +1471,46 @@ def test_write_ssh_alias_reads_the_ssh_config_path_when_called(tmp_path, monkeyp
     monkeypatch.setattr(node_pool, "ssh_host_block", lambda lease, relay_port: "Host yeto-nc-t-1\n")
     node_pool.write_ssh_alias(lease)
     assert target.read_text().startswith("Include ")
+
+
+def test_the_refusal_is_a_provider_request_refused_with_the_manual_action():
+    from yeto.launch.nc import sky_provider as sp
+
+    refused = sp.unscoped_refusal("sky-aws", environ={}, what="sky down c-1", cluster="c-1")
+    assert isinstance(refused, sp.ProviderRequestRefused)
+    assert refused.action == f"{sp.manual_sky_cli('sky-aws')} down -y c-1"
+    assert sp.unscoped_refusal(None, environ={}) is None
+
+
+def _env_command(action, environ):
+    """What ``env -u A ... NAME=value cmd ...`` runs: (environment, argv)."""
+    import shlex
+
+    argv = shlex.split(action)
+    assert argv[0] == "env"
+    env, i = dict(environ), 1
+    while argv[i] == "-u":
+        env.pop(argv[i + 1], None)
+        i += 2
+    while "=" in argv[i]:
+        name, value = argv[i].split("=", 1)
+        env[name] = value
+        i += 1
+    return env, argv[i:]
+
+
+@pytest.mark.parametrize("aws_profile", ["sky-aws", None])
+def test_the_by_hand_command_works_from_the_shell_that_was_refused(aws_profile):
+    """The refused environment carries another account's AWS variables (keys beat any
+    profile in botocore): the by-hand command clears every one sky forwards or an
+    auto-started server inherits, so sky's request carries only ``aws_profile``."""
+    from yeto.launch.nc import sky_provider as sp
+
+    shell = {"PATH": "/usr/bin", "AWS_PROFILE": "store-r2", "AWS_ACCESS_KEY_ID": "AKIA-store",
+             "AWS_SECRET_ACCESS_KEY": "store-secret", "AWS_SESSION_TOKEN": "t", "AWS_DEFAULT_PROFILE": "d",
+             "AWS_ENDPOINT_URL": "https://store.example", "AWS_SHARED_CREDENTIALS_FILE": "/tmp/store-creds"}
+    refused = sp.unscoped_refusal(aws_profile, environ=shell, what="sky down", cluster="yeto-run-k-3")
+    env, argv = _env_command(refused.action, shell)
+    assert argv == ["sky", "down", "-y", "yeto-run-k-3"]
+    forwarded = {n: env[n] for n in sp.AWS_FORWARDED_ENVS + sp.AWS_INHERITED_ENVS if n in env}
+    assert forwarded == ({"AWS_PROFILE": aws_profile} if aws_profile else {}) and env["PATH"] == "/usr/bin"

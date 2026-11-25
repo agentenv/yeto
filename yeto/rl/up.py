@@ -3253,6 +3253,11 @@ class Run:
                  f"release with: "
                  f"yeto run down --config <run.json> (forced at ${usd_cap:.2f}"
                  + (f" or {wall_cap / 3600:.1f} h)" if wall_h is not None else "; no wall-clock cap)"))
+            from ..launch.pool.island_pool import release_by_hand  # noqa: PLC0415
+
+            for action in sorted({a for a in (release_by_hand(m) for m in billed or ()) if a}):
+                # its release is refused in this environment: run down from here is refused too
+                _log(f"STILL BILLING: a release is REFUSED in this environment; release it by hand: {action}")
             if spend > usd_cap or elapsed > wall_cap:
                 cap = f"spend ${spend:.2f} > ${usd_cap:.2f}" if spend > usd_cap else \
                     f"wall {elapsed / 3600:.1f} h > {wall_cap / 3600:.1f} h"
