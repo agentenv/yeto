@@ -660,15 +660,19 @@ def test_a_store_pool_stopped_from_its_local_mirror_never_releases_a_machine_tak
     assert any(e["event"].endswith("move_out_unresolved") for e in pa.events.events)
 
 
-def test_a_move_record_that_does_not_read_is_dropped_not_fatal(tmp_path):
+def test_a_move_record_that_does_not_read_is_kept_alerted_and_listed_not_fatal(tmp_path):
     fleet = Fleet(tmp_path)
     fleet.run(3)
     pa = fleet.pools["pa"]
     doc = pa.snapshot()
-    doc["moves"] = {"out": {"x": {"state": "handed_over"}, "y": "junk"}, "in": "junk"}
+    doc["moves"] = {"out": {"x": {"state": "handed_over", "account": 2}, "y": "junk"}, "in": "junk"}
     again = IslandPool.from_doc(doc, pa.config, pa.ops, clock=fleet.clock, log=lambda _m: None, events=pa.events)
-    assert again.moves == {}
+    assert sorted(again.moves["out"]) == ["x", "y"] and {r["state"] for r in again.moves["out"].values()} == {"unreadable"}
+    assert again.moved_away() == {"x", "y"}, "its patrol neither adopts nor releases these tickets"
+    assert again.moves_expected() == 0
     again.tick()
+    assert any(e["event"].endswith("move_out_unresolved") for e in again.events.events)
+    assert sorted(m.ticket for m in again.moves_left()) == ["x", "y"]
 
 
 def test_a_take_whose_box_is_gone_is_alerted_and_listed(tmp_path):
@@ -681,3 +685,12 @@ def test_a_take_whose_box_is_gone_is_alerted_and_listed(tmp_path):
     assert any(e["event"].endswith("move_in_unresolved") and e["level"] == "critical" for e in pb.events.events)
     assert "pa-t0" in pb.moves["in"], "kept: it may have claimed the machine"
     assert "pa-t0" in [m.ticket for m in pb.moves_left()]
+
+
+def test_two_spellings_of_one_state_dir_share_one_box(tmp_path):
+    fleet = Fleet(tmp_path)
+    pa, pb = fleet.pools["pa"], fleet.pools["pb"]
+    (tmp_path / "x").mkdir()
+    pb.state_path = tmp_path / "x" / ".." / "state" / pb.state_path.name
+    pa.move_box = pb.move_box = None
+    assert migrate.box_of(pa).where == migrate.box_of(pb).where

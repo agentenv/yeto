@@ -79,6 +79,7 @@ DRAINING_OUT, STOPPING, HANDED_OVER, TAKEN, RELEASING, RELEASED = (
 OUT_RANK = {DRAINING_OUT: 0, STOPPING: 1, HANDED_OVER: 2, TAKEN: 3, RELEASING: 3, RELEASED: 4}
 # a move in: waiting (the placeholder) -> taking (saved before the claim) -> a member
 WAITING, TAKING = "waiting", "taking"
+UNREADABLE = "unreadable"  # a saved move record that does not read: kept (patrol skips it), alerted, listed
 
 
 class MoveRefused(RuntimeError):
@@ -144,7 +145,7 @@ def box_of(pool: Any) -> MoveBox | None:
     elif getattr(pool, "state_path", None) is not None:
         from yeto.rl.engine.store_dispense import DirObjects  # noqa: PLC0415
 
-        root = pool.state_path.parent / LOCAL_BOX_DIR
+        root = (pool.state_path.parent / LOCAL_BOX_DIR).resolve()  # one spelling per directory
         pool.move_box = MoveBox(DirObjects(root), prefix="", where=str(root))
     return pool.move_box
 
@@ -274,7 +275,7 @@ class PoolMoves:
 
     def moves_expected(self) -> int:
         """Placeholders the fill step counts as members (a machine on its way in)."""
-        return len(self.moves.get(IN, {}))
+        return len([r for r in self.moves.get(IN, {}).values() if r["state"] in (WAITING, TAKING)])
 
     def _take_moves(self, now: float, *, stopping: bool = False) -> None:
         """Each placeholder: complete a take this pool claimed (also when it no longer runs:
@@ -284,6 +285,9 @@ class PoolMoves:
         for ticket, rec in list(self.moves.get(IN, {}).items()):
             move = rec["move"]
             box = self._rec_box(rec)
+            if rec["state"] == UNREADABLE:
+                self._unresolved(ticket, rec, now, "move_in_unresolved")
+                continue
             if rec["state"] == TAKING and box is None:  # it may have claimed it: neither taken nor dropped blind
                 self._unresolved(ticket, rec, now, "move_in_unresolved")
                 continue
@@ -498,6 +502,9 @@ class PoolMoves:
             state = rec["state"]
             m = by_ticket.get(ticket)
             box = self._rec_box(rec)
+            if state == UNREADABLE:
+                self._unresolved(ticket, rec, now, "move_out_unresolved")
+                continue
             if state == DRAINING_OUT:
                 if m is None or m.state in (GONE, DRAINING) or (m.retiring_since is None and m.state != FENCING):
                     gone = m is None or m.state in (GONE, DRAINING)
@@ -551,23 +558,20 @@ class PoolMoves:
         last = rec.get("alerted_at")
         if last is None or now - float(last) >= UNRESOLVED_ALERT_S:
             rec["alerted_at"] = now
-            self._event(event, level="critical", ticket=ticket, move=rec["move"],  # type: ignore[attr-defined]
-                        other=rec.get("to") or rec.get("source"), box=rec.get("box"),
-                        waited_s=round(now - float(rec.get("at") or rec["since"])),
+            began = rec.get("at") or rec.get("since")
+            self._event(event, level="critical", ticket=ticket, move=rec.get("move"),  # type: ignore[attr-defined]
+                        other=rec.get("to") or rec.get("source"), box=rec.get("box"), state=rec.get("state"),
+                        waited_s=None if began is None else round(now - float(began)),
                         action=f"find which pool holds {ticket}; release it there or by hand")
 
     def moves_left(self) -> list[Any]:
         """Machines of unsettled moves this pool may still be billed for (a hand-over nobody
         confirmed, a release that failed, a take whose box is gone), as members for the
         billing banner of a stop."""
-        from .island_pool import DRAINING, Member  # noqa: PLC0415
+        from .island_pool import Member  # noqa: PLC0415
 
-        out = [(t, r, f"moving to {r['to']}, not settled ({r['state']})") for t, r in self.moves.get(OUT, {}).items()
-               if r["state"] in (HANDED_OVER, RELEASING)]
-        out += [(t, r, f"moving in from {r.get('source')}, not settled") for t, r in self.moves.get(IN, {}).items()
-                if r["state"] == TAKING]
-        return [Member(r["account"], t, str(r.get("shard") or ""), state=DRAINING, end_reason=why)
-                for t, r, why in out]
+        return [Member(d["account"], d["ticket"], d["shard"], state=d["state"], end_reason=d["moving"])
+                for d in unsettled_moves(self.moves_doc())]
 
     def _stop_moves(self) -> None:
         """The pool stops (before its members are drained): a take it claimed becomes a
@@ -601,19 +605,26 @@ class PoolMoves:
         return {"moves": json.loads(json.dumps(self.moves, default=str))} if self.moves else {}
 
     def load_moves(self, doc: Mapping[str, Any]) -> None:
-        """``moves`` of a state document; a record that does not read as a move is dropped
-        (logged), never a reason the pool cannot load."""
+        """``moves`` of a state document. A record that does not read as a move is never a
+        reason the pool cannot load, and is not dropped either (its machine may be moving):
+        it is kept as ``unreadable`` (the patrol neither adopts nor releases its ticket), alerted
+        and listed with what a stop leaves billed."""
         moves = doc.get("moves")
         self.moves = {}
         if not isinstance(moves, Mapping):
             return
         for kind in (OUT, IN):
-            for ticket, rec in (moves.get(kind) or {}).items() if isinstance(moves.get(kind), Mapping) else ():
+            records = moves.get(kind)
+            for ticket, rec in records.items() if isinstance(records, Mapping) else ():
                 if isinstance(rec, Mapping) and isinstance(rec.get("move"), str) and isinstance(rec.get("state"), str) \
                         and "account" in rec and "since" in rec:
                     self.moves.setdefault(kind, {})[str(ticket)] = dict(rec)
-                else:
-                    self.log(f"pool: a {kind} move record of {ticket} does not read: dropped ({rec!r})"[:300])  # type: ignore[attr-defined]
+                    continue
+                self.log(f"pool: the {kind} move record of {ticket} does not read: kept as unreadable"[:300])  # type: ignore[attr-defined]
+                body = dict(rec) if isinstance(rec, Mapping) else {"raw": repr(rec)[:200]}
+                self.moves.setdefault(kind, {})[str(ticket)] = {
+                    **body, "state": UNREADABLE, "move": str(body.get("move") or ticket),
+                    "account": body.get("account"), "since": body.get("since")}
 
     def merge_moves(self, held: Mapping[str, Mapping[str, Mapping[str, Any]]]) -> None:
         """After a reload from the store (a worker restarted): ``held`` is what the memory
@@ -626,6 +637,32 @@ class PoolMoves:
         members = {m.ticket for m in self.members if m.state != "gone"}  # type: ignore[attr-defined]
         moves_in = {t: dict(r) for t, r in held.get(IN, {}).items() if t not in members}
         self.moves = {k: v for k, v in ((OUT, out), (IN, moves_in)) if v}
+
+
+def unsettled_moves(doc: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Machines of a pool state document's moves that its members do not show and the pool
+    may still be billed for: handed over and not confirmed taken, a release not done, a take
+    that may have been claimed, a record that does not read. One dict per machine, shaped
+    like a member row of the billing banner (``moving``: why, and what to do)."""
+    moves = doc.get("moves")
+    if not isinstance(moves, Mapping):
+        return []
+    out = []
+    for kind, states in ((OUT, (HANDED_OVER, RELEASING, UNREADABLE)), (IN, (TAKING, UNREADABLE))):
+        records = moves.get(kind)
+        for ticket, rec in records.items() if isinstance(records, Mapping) else ():
+            state = rec.get("state") if isinstance(rec, Mapping) else UNREADABLE
+            if state not in states:
+                continue
+            rec = rec if isinstance(rec, Mapping) else {}
+            other = rec.get("to") if kind == OUT else rec.get("source")
+            way = f"moving to pool {other}" if kind == OUT else f"moving in from pool {other}"
+            out.append({"account": rec.get("account"), "ticket": str(ticket), "shard": str(rec.get("shard") or ""),
+                        "state": "draining", "lease_until": rec.get("lease_until"),
+                        "moving": f"{way}, not settled ({state}); pool-stop cannot release it: find the pool that "
+                                  f"holds {ticket} (yeto run status, or that pool's pool-status) and release it "
+                                  "there, or at the provider by hand"})
+    return out
 
 
 # -- the broker's mover ---------------------------------------------------------------
