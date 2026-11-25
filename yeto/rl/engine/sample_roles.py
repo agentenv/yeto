@@ -389,9 +389,33 @@ def synced_group_learners(args: Any, num_islands: int) -> dict[int, int]:
     return {m: k for k, m in enumerate(trainers)}
 
 
+FLEET_ROLE_SYNCER, FLEET_ROLE_ISLAND = "syncer", "island"
+FLEET_ROLES = (FLEET_ROLE_SYNCER, FLEET_ROLE_ISLAND)
+
+
+def fleet_role(args: Any) -> str | None:
+    """A launch of one member of a fleet launched island by island (``--rl-fleet-role``):
+    ``syncer`` (the fleet's syncer only, no island) or ``island`` (one trainer island that
+    dials the fleet's syncer); None for every other launch (nothing changes)."""
+    role = getattr(args, "rl_fleet_role", None)
+    return role if role in FLEET_ROLES else None
+
+
+def fleet_learner(args: Any) -> tuple[int, int] | None:
+    """``(learner id, launched learners)`` of a fleet island launch (``--rl-fleet-role
+    island``: ``--rl-fleet-learner-id K``, ``--rl-fleet-learners N``); None otherwise."""
+    if fleet_role(args) != FLEET_ROLE_ISLAND:
+        return None
+    return int(args.rl_fleet_learner_id), int(args.rl_fleet_learners)
+
+
 def syncer_learner_count(args: Any, num_islands: int) -> int:
     """The learners the syncer waits for among the launch's islands: the trainers
-    of a synced group, every island otherwise (a no-sync launch has no syncer)."""
+    of a synced group, every island otherwise (a no-sync launch has no syncer). A fleet
+    member launch (:func:`fleet_role`) counts the fleet's launched learners
+    (``--rl-fleet-learners``): its syncer profile and session contract are the fleet's."""
+    if fleet_role(args) is not None:
+        return int(args.rl_fleet_learners)
     learners = synced_group_learners(args, num_islands)
     return len(learners) if learners else int(num_islands)
 
@@ -571,7 +595,8 @@ def external_pool_island_args(args: Any, island: int, num_islands: int) -> Any:
     contract binds (``--rl-contract-max-policy-age``)."""
     out = copy.copy(args)
     out.rl_synced_trainers = int(num_islands)
-    out.rl_sample_substore = trainer_substore(island)
+    member = fleet_learner(args)  # a fleet island launch: its one island is learner K
+    out.rl_sample_substore = trainer_substore(island if member is None else member[0])
     out.rl_buffer_shards = island_buffer_shards(args, num_islands).get(island)
     _bind_launch_policy_age(out, args)
     for name, value in island_trainer_overrides(args, num_islands).get(island, {}).items():
@@ -689,7 +714,10 @@ def island_substore(args: Any, island: int, num_islands: int) -> str | None:
     follow their trainer: a trainer's own ``trainer<k>``, a sampler island's that of
     the trainer it feeds; None in every other launch."""
     if is_external_pool_group(args):
-        return trainer_substore(island) if 0 <= int(island) < int(num_islands) else None
+        if not 0 <= int(island) < int(num_islands):
+            return None
+        member = fleet_learner(args)
+        return trainer_substore(island if member is None else member[0])
     learners = synced_group_learners(args, num_islands) if follows_trainer(args) else {}
     trainer = sampler_bindings(args, num_islands).get(island, island)
     return trainer_substore(learners[trainer]) if trainer in learners else None
@@ -1071,6 +1099,9 @@ def island_learner(args: Any, island: int, num_learners: int,
     the volumes."""
     if is_store_coupled(args):
         return 0, 1
+    member = fleet_learner(args)
+    if member is not None:  # a fleet island launch: its one trainer is learner K of the fleet's N
+        return member
     learners = synced_group_learners(args, num_learners if num_islands is None else num_islands)
     if learners:
         return (learners[island], len(learners)) if island in learners else (0, 1)
@@ -1175,9 +1206,65 @@ def check_pool(args: Any, num_islands: int) -> None:
         check_launch(island_args(args, m, num_islands))
 
 
+FLEET_MEMBER_DESTS = (("--rl-fleet-learner-id", "rl_fleet_learner_id"), ("--rl-fleet-learners", "rl_fleet_learners"),
+                      ("--rl-fleet-syncer", "rl_fleet_syncer"))
+
+
+def check_fleet_member(args: Any) -> None:
+    """``--rl-fleet-role`` (a fleet launched island by island, ``yeto.rl.island_launches``):
+    synced full-parameter trainers fed by external pools, an island pool
+    (``--rl-sync-max-learners``), the fleet's launched learners; an island launch also
+    its learner id below that limit, one cluster in ``--gpu``, ``--controller local`` and,
+    unless a dry run, the syncer's address. Without the role none of its options."""
+    role = fleet_role(args)
+    grace = getattr(args, "rl_fleet_syncer_grace_s", None)
+    if grace is not None:
+        if role != FLEET_ROLE_SYNCER:
+            raise ValueError("--rl-fleet-syncer-grace-s belongs to the syncer launch (--rl-fleet-role syncer)")
+        if not float(grace) > 0:
+            raise ValueError(f"--rl-fleet-syncer-grace-s must be > 0 seconds (got {grace})")
+    if role is None:
+        named = [flag for flag, dest in FLEET_MEMBER_DESTS if getattr(args, dest, None) is not None]
+        if named:
+            raise ValueError(f"{' / '.join(named)} need --rl-fleet-role")
+        return
+    learners = getattr(args, "rl_fleet_learners", None)
+    limit = getattr(args, "rl_sync_max_learners", None)
+    if learners is None or int(learners) < 1:
+        raise ValueError("--rl-fleet-role needs --rl-fleet-learners N >= 1 (the fleet's launched trainers)")
+    if limit is None or int(limit) < int(learners):
+        raise ValueError("--rl-fleet-role needs --rl-sync-max-learners >= --rl-fleet-learners (the syncer admits "
+                         "the islands added later under ids below it)")
+    if not synced_full_parameter_trainer(args) or not uses_external_pools(args) or not follows_trainer(args):
+        raise ValueError("--rl-fleet-role: the fleet's trainers are synced full-parameter trainers fed by external "
+                         "pools (--rl-sample-role trainer, --rl-sampler-follow trainer, --rl-island-buffer-shards, "
+                         "--tuning full, the full-parameter preset)")
+    if getattr(args, "rl_island_sample_role", None):
+        raise ValueError("--rl-fleet-role: no sampler islands (--rl-island-sample-role) in a fleet launched island "
+                         "by island; its samplers are external pools")
+    if role == FLEET_ROLE_SYNCER:
+        for flag, dest in FLEET_MEMBER_DESTS:
+            if dest != "rl_fleet_learners" and getattr(args, dest, None) is not None:
+                raise ValueError(f"--rl-fleet-role syncer: {flag} belongs to an island launch")
+        return
+    k = getattr(args, "rl_fleet_learner_id", None)
+    if k is None or not 0 <= int(k) < int(limit):
+        raise ValueError(f"--rl-fleet-role island needs --rl-fleet-learner-id K in 0..{int(limit) - 1} "
+                         "(--rl-sync-max-learners)")
+    gpu = str(getattr(args, "gpu", None) or "")
+    if not gpu or "," in gpu:
+        raise ValueError("--rl-fleet-role island launches one trainer island: --gpu names one cluster")
+    if getattr(args, "controller", "local") != "local":
+        raise ValueError("--rl-fleet-role island needs --controller local (the fleet's syncer runs elsewhere)")
+    if not getattr(args, "rl_fleet_syncer", None) and not getattr(args, "dry_run", False):
+        raise ValueError("--rl-fleet-role island needs --rl-fleet-syncer HOST:PORT (the fleet syncer's address, "
+                         "fleet/island_syncer.json in the run store)")
+
+
 def check_launch(args: Any) -> None:
     """Launch-side checks of one island's role, before any cloud work. ``both``
     checks nothing (a pair checks each island with :func:`check_pair`)."""
+    check_fleet_member(args)
     role = sample_role(args)
     if role == BOTH:
         for flag, dest in (("--rl-sampler-max-backlog-rounds", "rl_sampler_max_backlog_rounds"),

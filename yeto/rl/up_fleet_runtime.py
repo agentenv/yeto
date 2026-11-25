@@ -677,10 +677,48 @@ class FleetRuntime:
         run = self.run
         now = _up().time.time() if now is None else now
         hours = run.trainer_hours(now)
+        island_hours = [hours] * len(self.plan.islands)
+        island_prices = list(breakers_fleet.island_prices(run.cfg))
+        if self.plan.per_island:  # its own launch per island: the trainer worker's launch records
+            island_hours, island_prices = self.island_launch_spend(now, island_prices)
         return breakers_fleet.fleet_spend(
             pool_node_hours=[(run.node_hours(i, now), run.node_usd_per_h(i)) for i in range(len(run.pools))],
-            island_hours=[hours] * len(self.plan.islands), island_usd_per_h=breakers_fleet.island_prices(run.cfg),
+            island_hours=island_hours, island_usd_per_h=island_prices,
             syncer_hours=hours, syncer_usd_per_h=breakers_fleet.syncer_price(run.cfg))
+
+    def island_launch_spend(self, now: float, declared: list[float]) -> tuple[list[float], list[float]]:
+        """A fleet launched island by island: each island launch's billed hours and dollars
+        from its record (``yeto.rl.trainer_worker.billed``: every incarnation at the price
+        it ran at): the islands added while it trains count, a removed island bills up to
+        its end. The hours an island ran without a price bill its declared island's price (a
+        warning; an added island without one bills 0); its priced hours keep their dollars. Without a readable store the
+        declared islands bill the trainer's hours, as for one launch. Returned as hours and
+        the hourly price that gives each island's dollars (``fleet_spend``'s form)."""
+        from yeto.rl import trainer_worker  # noqa: PLC0415
+
+        run = self.run
+        worker = getattr(run, "trainer_worker", None)
+        try:
+            objects = worker.objects if worker is not None else run._objects()  # noqa: SLF001
+            rows = trainer_worker.billed(objects, now)
+        except Exception as error:  # noqa: BLE001 - the conservative estimate
+            _log(f"fleet: spend: the island launch records were not read ({type(error).__name__}: {error}); "
+                 "the declared islands bill the trainer's hours")
+            hours = run.trainer_hours(now)
+            return [hours] * len(declared), declared
+        by_id = {i.learner: p for i, p in zip(self.plan.islands, declared)}
+        hours, prices = [], []
+        for k, h, usd, unpriced in rows:
+            if unpriced > 0:  # only the hours of incarnations without a price: at the declared price
+                usd += unpriced * float(by_id.get(k, 0.0))
+                warned = getattr(self, "_unpriced_warned", set())
+                if k not in warned:
+                    self._unpriced_warned = warned | {k}
+                    _log(f"WARNING: fleet: spend: trainer island {k} ran without a price (--usd-per-h); billed "
+                         + (f"at its declared ${by_id[k]:g}/h" if k in by_id else "nothing") + " for that time")
+            hours.append(h)
+            prices.append(usd / h if h > 0 else 0.0)
+        return hours, prices
 
     def budget_event(self, spend_usd: float, usd: float | None, detail: str) -> dict[str, Any]:
         """The fleet's ``run.budget`` trip (:func:`yeto.breakers.fleet.budget_trip`, stop

@@ -983,6 +983,25 @@ _SCHEDULING = (
              "launch that adds or migrates one island; the launch (dry-run included) computes "
              "both layouts with the --fragments preflight and refuses an island whose layout "
              "differs (default: not checked)"),
+    cli_flag("--rl-fleet-role", choices=("syncer", "island"), default=None,
+             help="a fleet launched island by island (yeto run up of an island fleet with "
+             "fleet.launch per_island): 'syncer' launches the fleet's syncer only (no island; "
+             "--gpu names the fleet's trainers for the syncer's profile), 'island' launches one "
+             "trainer island (--rl-fleet-learner-id) that dials the fleet's syncer "
+             "(--rl-fleet-syncer). Default: off (one launch of every island and its syncer)"),
+    cli_flag("--rl-fleet-learner-id", type=int, default=None, metavar="K",
+             help="with --rl-fleet-role island: the island's learner id in the fleet (its "
+             "store sub-directory trainer<K>)"),
+    cli_flag("--rl-fleet-learners", type=int, default=None, metavar="N",
+             help="with --rl-fleet-role: the fleet's launched trainers (the syncer's --learners "
+             "and every island's session roster)"),
+    cli_flag("--rl-fleet-syncer", default=None, metavar="HOST:PORT[,...]",
+             help="with --rl-fleet-role island: the fleet syncer's address(es) the island dials "
+             "(the syncer launch prints them; run up records them in the store)"),
+    cli_flag("--rl-fleet-syncer-grace-s", type=float, default=None, metavar="S",
+             help="with --rl-fleet-role syncer on a cluster: how long the syncer cluster may stay "
+             "unreadable or not UP in a row before the syncer launch fails (and the fleet ends). "
+             "It includes the time the sky API itself does not answer (default 300)"),
     cli_flag("--rl-sync-max-learners", type=int, default=None, metavar="N",
              help="membership: the syncer admits island ids 0..N-1, so islands may join "
              "after the launch (default: the launched islands; with the full-parameter "

@@ -1,0 +1,479 @@
+"""The trainer worker (``yeto.rl.trainer_worker``): the trainer islands of the fleet's
+desired state, one ``yeto launch`` each, reconciled under the rollout controller's
+supervisor (local store, fake launches; no cloud).
+
+* 2.3: the trainer members live in ``fleet/desired.json``; a worker whose thread dies
+  is restarted by the supervisor and adopts the running launches (no second launch);
+  so does a new worker (``yeto run up`` restarted).
+* 5.3: one launch per island; an island whose launch ends with an infrastructure
+  failure is relaunched alone: the other islands' launches are never stopped or started
+  again. A configuration error is never relaunched.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+import pytest
+
+from yeto.launch import island_lifecycle as lifecycle
+from yeto.launch.pool import controller as rc
+from yeto.launch.pool import desired as dz
+from yeto.rl import island_launches as il
+from yeto.rl import trainer_worker as tw
+from yeto.rl.engine.object_store import DirectoryObjectStore
+
+
+class FakeLaunches:
+    """``yeto launch`` processes by prefix: started, alive, ended with an exit code."""
+
+    def __init__(self) -> None:
+        self.live: dict[str, list[str]] = {}
+        self.exits: dict[str, dict] = {}
+        self.starts: list[tuple[str, list[str]]] = []
+        self.stops: list[str] = []
+        self.lock = threading.Lock()
+
+    def alive(self, prefix: str) -> bool:
+        return prefix in self.live
+
+    def start(self, prefix: str, argv: list[str]) -> int:
+        with self.lock:
+            self.starts.append((prefix, list(argv)))
+            self.live[prefix] = list(argv)
+            self.exits.pop(prefix, None)
+            return 1000 + len(self.starts)
+
+    def ended(self, prefix: str):
+        return self.exits.get(prefix)
+
+    def request_stop(self, prefix: str, why: str) -> None:
+        self.stops.append(prefix)
+
+    # test controls
+    def end(self, prefix: str, code: int, log: str = "") -> None:
+        with self.lock:
+            self.live.pop(prefix, None)
+            self.exits[prefix] = {"exit_code": code, "log": log, "detail": f"exit {code}"}
+
+    def started(self, prefix: str) -> int:
+        return sum(1 for p, _ in self.starts if p == prefix)
+
+
+def member(k: int, gpu: str = "modal:1x2xh100", name: str | None = None) -> dict:
+    return {"kind": "trainer", "name": name or f"isl{k}", "learner_id": k, "gpu": gpu, "usd_per_h": 8.0,
+            "argv": ["--training-mode", "rl", "--rl-fleet-role", "island", "--rl-fleet-learner-id", str(k)],
+            "prefix": f"run-i{k}", "pools": [f"i{k}-pool"]}
+
+
+def fleet(tmp_path, members, *, syncer: bool = True):
+    objects = DirectoryObjectStore(tmp_path / "store")
+    store = dz.DesiredStore(objects)
+    store.apply({"members": members}, expect=0)
+    if syncer:
+        il.write_syncer_record(objects, addr="10.0.0.9:29400", syncer_epoch=2, learners=2, max_learners=4, run="run")
+    return objects, store
+
+
+def worker(objects, store, launches, **kw) -> tw.TrainerWorker:
+    return tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                            log=lambda m: None, **kw)
+
+
+def test_trainer_members_are_kinds_of_the_one_desired_state(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    doc = store.read()
+    assert sorted(dz.trainers(doc)) == ["isl0", "isl1"]
+    assert objects.read(dz.DESIRED_KEY) is not None  # the same document the pool reconcile reads
+
+
+def test_islands_start_once_the_syncer_is_recorded(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)], syncer=False)
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    assert launches.starts == []
+    il.write_syncer_record(objects, addr="10.0.0.9:29400", syncer_epoch=2, learners=2, max_learners=4, run="run")
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i1"]
+    argv = launches.live["run-i1"]
+    assert argv[argv.index("--rl-fleet-syncer") + 1] == "10.0.0.9:29400"
+    assert argv[argv.index("--rl-syncer-epoch") + 1] == "2"
+    assert argv[argv.index("--gpu") + 1] == "modal:1x2xh100"
+    assert argv[argv.index("--cluster-prefix") + 1] == "run-i1"
+    w.step()
+    assert len(launches.starts) == 2  # running: nothing again
+    assert w.load(1)["state"] == tw.RUNNING
+
+
+def test_an_earlier_runs_syncer_record_is_not_dialed(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    worker(objects, store, launches, syncer_since=time.time() + 3600).step()
+    assert launches.starts == []
+
+
+def test_one_island_relaunch_never_restarts_the_others(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1), member(2)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    w.step()
+    launches.end("run-i1", 1, log="sky: cluster lost")
+    w.step()
+    assert launches.started("run-i1") == 2
+    assert launches.started("run-i0") == launches.started("run-i2") == 1
+    assert launches.stops == []
+    record = w.load(1)
+    assert record["relaunches"] == 1 and record["prefix_now"] == "run-i1" and record["incarnation"] == 0
+    assert record["last_end"]["exit_code"] == 1 and record["ended"] is None
+    for k in (0, 2):
+        assert w.load(k)["relaunches"] == 0
+
+
+def test_a_config_error_is_never_relaunched(tmp_path):
+    from yeto.config_errors import CONFIG_ERROR_EXIT
+
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.end("run-i1", CONFIG_ERROR_EXIT, log="FullParameterLayoutMismatch")
+    w.step()
+    w.step()
+    assert launches.started("run-i1") == 1
+    assert w.load(1)["state"] == lifecycle.FAILED
+    assert w.load(1)["decision"]["cause"] == lifecycle.CONFIG_ERROR
+    assert launches.alive("run-i0")
+
+
+def test_the_relaunch_budget_ends_an_island_abandoned(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches, relaunch_budget=2)
+    w.step()
+    for _ in range(3):
+        launches.end("run-i0", 1)
+        w.step()
+    assert launches.started("run-i0") == 3
+    assert w.load(0)["state"] == lifecycle.ABANDONED
+
+
+def test_a_normal_end_is_done(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.end("run-i0", 0)
+    w.step()
+    w.step()
+    assert launches.started("run-i0") == 1 and w.load(0)["state"] == lifecycle.DONE
+
+
+def test_a_new_worker_adopts_the_running_launches(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    worker(objects, store, launches).step()
+    again = worker(objects, store, launches)  # yeto run up restarted: a new worker, same store
+    again.step()
+    again.step()
+    assert len(launches.starts) == 2
+    assert again.load(0)["incarnation"] == 0 and again.load(0)["state"] == tw.RUNNING
+
+
+class WorkerCrash(BaseException):
+    """What kills a worker thread (a step's Exception is retried in place)."""
+
+
+def test_a_worker_step_that_raises_backs_off_in_its_thread(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    calls = {"n": 0}
+
+    def step():
+        calls["n"] += 1
+        if calls["n"] in (2, 3):  # a store read error, twice in a row
+            raise OSError("store unreachable")
+        w.step()
+
+    logs, restarts = [], []
+    controller = rc.RolloutController({}, pool_workers=True, interval=0.05, log=logs.append,
+                                      restart_backoff_s=0, drain_on_exit=False)
+    controller.add_worker("trainers", step, interval=0.02, on_restart=restarts.append)
+    controller.start()
+    try:
+        deadline = time.time() + 10
+        while calls["n"] < 5 and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        controller.stop("test")
+    assert calls["n"] >= 5 and restarts == [] and controller.workers["trainers"].restarts == 0
+    assert sum("failure 1 in a row" in m for m in logs) == 1 and sum("failure 2 in a row" in m for m in logs) == 1
+    assert len(launches.starts) == 2 and all(w.load(k)["state"] == tw.RUNNING for k in (0, 1))
+
+
+def test_a_worker_thread_that_dies_is_restarted_by_the_supervisor_and_adopts(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    calls = {"n": 0}
+    crashed = threading.Event()
+
+    def step():
+        calls["n"] += 1
+        if calls["n"] == 2:  # after the first pass started both launches: the thread dies
+            crashed.set()
+            raise WorkerCrash("worker bug")
+        w.step()
+
+    restarts = []
+    controller = rc.RolloutController({}, pool_workers=True, interval=0.05, log=lambda m: None,
+                                      restart_backoff_s=0, drain_on_exit=False)
+    controller.add_worker("trainers", step, interval=0.02, on_restart=restarts.append)
+    controller.start()
+    try:
+        deadline = time.time() + 10
+        while (calls["n"] < 6 or not restarts) and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        controller.stop("test")
+    assert crashed.is_set() and len(restarts) >= 1 and "worker bug" in repr(restarts[0])
+    assert controller.workers["trainers"].restarts >= 1
+    assert len(launches.starts) == 2  # adopted after the restart: no second launch
+    assert all(w.load(k)["state"] == tw.RUNNING for k in (0, 1))
+
+
+def test_a_removed_island_stops_and_ends_removed(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    states = lifecycle.IslandStateStore(objects, log=lambda m: None)
+    w = worker(objects, store, launches)
+    w.step()
+    store.update(lambda doc: doc.__setitem__("members", [m for m in doc["members"] if m["learner_id"] != 1]))
+    w.step()
+    assert states.stop_requested(1)["reason"] == "removed from the fleet's desired state"
+    assert states.stop_requested(0) is None
+    assert w.load(1)["state"] == tw.STOPPING
+    launches.end("run-i1", 0)
+    w.step()
+    assert w.load(1)["state"] == tw.REMOVED and states.stop_requested(1) is None
+    assert launches.started("run-i0") == 1 and launches.alive("run-i0")
+
+
+def test_the_fleet_stop_is_forwarded_to_every_island_launch(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    why = {"v": None}
+    w = worker(objects, store, launches, fleet_stop=lambda: why["v"])
+    w.step()
+    why["v"] = "STOP flag"
+    w.step()
+    w.step()
+    assert sorted(launches.stops) == ["run-i0", "run-i1"]
+    assert len(launches.starts) == 2
+
+
+def test_seed_trainers_adds_the_members_once(tmp_path):
+    objects = DirectoryObjectStore(tmp_path / "store")
+    store = dz.DesiredStore(objects)
+    store.apply({"members": [{"kind": "sampler_pool", "name": "i0-pool", "pool": {"provider": "nc", "target": 1}}]},
+                expect=0)
+    doc = tw.seed_trainers(store, [member(0), member(1)])
+    assert doc["generation"] == 2 and sorted(dz.trainers(doc)) == ["isl0", "isl1"]
+    assert "i0-pool" in dz.sampler_pools(doc)
+    assert tw.seed_trainers(store, [member(5)])["generation"] == 2
+
+
+@pytest.mark.parametrize("bad", [{"learner_id": "1"}, {"learner_id": None}])
+def test_a_trainer_member_without_an_integer_learner_id_is_refused(bad):
+    with pytest.raises(dz.DesiredError, match="learner_id"):
+        dz.validate({"members": [{**member(0), **bad}]})
+
+
+def test_a_fenced_controller_s_worker_touches_no_island(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    fenced = [None]
+    w = worker(objects, store, launches, fenced=lambda: fenced[0])
+    w.step()
+    assert sorted(launches.live) == ["run-i0", "run-i1"]
+    fenced[0] = "fleet/applied.json is written by another controller now"
+    launches.end("run-i0", 1, "NCCL timeout")  # an infrastructure failure: relaunched, if not fenced
+    store.update(lambda doc: doc["members"].remove(next(m for m in doc["members"] if m["name"] == "isl1")))
+    for _ in range(3):
+        w.step()
+    assert launches.started("run-i0") == 1 and launches.alive("run-i1") and launches.stops == []
+    assert w.states.stop_requested(1) is None and w.load(0)["state"] == tw.STARTING
+
+
+def test_a_launch_of_another_host_is_never_started_twice(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    first = FakeLaunches()
+    worker(objects, store, first, host="host-a").step()
+    assert worker(objects, store, FakeLaunches(), host="host-a").load(0)["host"] == "host-a"
+    # run up restarted on another host: its local registry sees no launch at all
+    elsewhere, logs = FakeLaunches(), []
+    other = tw.TrainerWorker(store, objects, elsewhere, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                             log=logs.append, host="host-b", clock=lambda: 10 ** 10)  # past the start grace
+    for _ in range(2):
+        other.step()
+    assert elsewhere.starts == [] and other.load(0)["state"] == tw.STARTING
+    assert sum("started on host host-a" in m for m in logs) == 2  # once per island
+    # the same host again adopts them
+    again = FakeLaunches()
+    again.live = dict(first.live)
+    worker(objects, store, again, host="host-a").step()
+    assert again.starts == [] and worker(objects, store, again).load(1)["state"] == tw.RUNNING
+
+
+def test_a_stop_cleared_by_a_starting_launch_is_written_again(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    # removed while island 1's launch is still starting: the worker writes its STOP ...
+    store.update(lambda doc: doc["members"].remove(next(m for m in doc["members"] if m["name"] == "isl1")))
+    w.step()
+    assert w.load(1)["state"] == tw.STOPPING and w.states.stop_requested(1) is not None
+    w.states.clear_stop(1)  # ... and the launcher, coming up, clears it (clear_stop at its start)
+    w.step()
+    assert w.states.stop_requested(1) is not None  # written again while the launch runs
+    launches.end("run-i1", 0)
+    w.step()
+    assert w.load(1)["state"] == tw.REMOVED and w.states.stop_requested(1) is None
+    # a move the same way: its STOP is written again until the old launch ended
+    store.update(lambda doc: next(m for m in doc["members"] if m["name"] == "isl0").update(gpu="aws:2xh100@us-east-2"))
+    w.step()
+    assert w.load(0)["state"] == tw.MOVING
+    w.states.clear_stop(0)
+    w.step()
+    assert w.states.stop_requested(0) is not None and "run-i0-m1" not in launches.live
+    launches.end("run-i0", 0)
+    w.step()
+    assert "run-i0-m1" in launches.live and w.states.stop_requested(0) is None
+
+
+def test_an_unknown_fence_skips_the_step_only(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    answer = ["unknown: fleet/applied.json not read (OSError)"]
+    w = worker(objects, store, launches, fenced=lambda: answer[0])
+    w.step()
+    assert launches.starts == []
+    answer[0] = None
+    w.step()
+    assert sorted(launches.live) == ["run-i0"]
+
+
+def test_a_fence_unknown_for_long_is_an_error_not_a_silent_idle(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    logs = []
+    w = tw.TrainerWorker(store, objects, FakeLaunches(), lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=logs.append, fenced=lambda: "unknown: fleet/applied.json not read (OSError)",
+                         unknown_alarm_steps=5)
+    for _ in range(10):
+        w.step()
+    assert sum("ERROR" in m for m in logs) == 2 and "10 step(s) in a row" in logs[-1]
+
+
+class BrokenStore(DirectoryObjectStore):
+    """The run store, failing while ``broken`` (an outage)."""
+
+    broken = False
+
+    def _check(self):
+        if self.broken:
+            raise OSError("store unreachable")
+
+    def read(self, key):
+        self._check()
+        return super().read(key)
+
+    def write(self, key, data):
+        self._check()
+        return super().write(key, data)
+
+    def list(self, prefix=""):
+        self._check()
+        return super().list(prefix)
+
+
+def test_the_fleet_stop_is_forwarded_while_the_store_does_not_read(tmp_path):
+    """The fleet STOP (a local flag) is read before the fence and the store: this host's
+    island launches are stopped through the launch ops, and the islands' STOPs in the
+    store are written once it answers again; the failure is a warning, then an error."""
+    objects = BrokenStore(tmp_path / "store")
+    store = dz.DesiredStore(objects)
+    store.apply({"members": [member(0), member(1)]}, expect=0)
+    il.write_syncer_record(objects, addr="10.0.0.9:29400", syncer_epoch=2, learners=2, max_learners=4, run="run")
+    launches, logs, why = FakeLaunches(), [], [None]
+    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=logs.append, fleet_stop=lambda: why[0], unknown_alarm_steps=3,
+                         fenced=lambda: "unknown: fleet/applied.json not read (OSError)" if objects.broken else None)
+    w.step()
+    assert sorted(launches.live) == ["run-i0", "run-i1"]
+    objects.broken, why[0] = True, "STOP flag"
+    for _ in range(3):
+        w.step()
+    assert sorted(launches.stops) == ["run-i0", "run-i1"]  # stopped directly, without the store
+    assert [m.split(":")[1].strip() for m in logs if "not written to the islands' STOPs" in m] == ["WARNING", "ERROR"]
+    objects.broken = False
+    w.step()
+    states = lifecycle.IslandStateStore(objects, log=lambda m: None)
+    assert states.stop_requested(0) is not None and states.stop_requested(1) is not None
+    assert sorted(launches.stops) == ["run-i0", "run-i1"] and len(launches.starts) == 2  # once each, nothing started
+
+
+def test_a_restarted_worker_stops_this_host_s_island_launches_from_the_run_registry(tmp_path):
+    """A worker that restarted knows no launch yet; with the store down it still stops
+    the island launches this host's run registry knows under the fleet's prefixes."""
+    objects = BrokenStore(tmp_path / "store")
+    store = dz.DesiredStore(objects)
+    store.apply({"members": [member(0)]}, expect=0)
+    launches = FakeLaunches()
+    launches.live = {"run-i0-m2": [], "run-i3": [], "run-i9": []}
+    objects.broken = True
+    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=lambda m: None, fleet_stop=lambda: "run STOP",
+                         local_launches=lambda: ["run-i0-m2", "run-i3", "run-i5"])  # run-i5 ended already
+    w.step()
+    w.step()
+    assert sorted(launches.stops) == ["run-i0-m2", "run-i3"]
+    # a registry that does not read either: the launches the worker knows still stop
+    def broken():
+        raise OSError("registry")
+    w2 = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                          log=lambda m: None, fleet_stop=lambda: "run STOP", local_launches=broken)
+    w2._seen.add("run-i9")
+    w2.step()
+    assert "run-i9" in launches.stops
+
+
+def test_an_incarnation_without_a_price_keeps_the_others_dollars(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches, clock = FakeLaunches(), [0.0]
+    w = worker(objects, store, launches, clock=lambda: clock[0])
+    w.step()
+    clock[0] = 3600.0 * 10  # 10 h at $8 = $80
+    store.update(lambda doc: dz.trainers(doc)["isl0"].update(gpu="aws:2xh100@us-east-2", usd_per_h=None))
+    w.step()
+    launches.end("run-i0", 0)
+    w.step()
+    clock[0] = 3600.0 * 12  # then 2 h without a price
+    ((k, hours, usd, unpriced),) = tw.billed(objects, now=clock[0])
+    assert (k, round(hours, 6), round(usd, 6), round(unpriced, 6)) == (0, 12.0, 80.0, 2.0)
+
+
+def test_a_launch_torn_down_by_run_down_starts_again_on_any_host(tmp_path):
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    worker(objects, store, FakeLaunches(), host="host-a").step()
+    assert tw.mark_down(objects, ["run-i0"], log=lambda m: None) == [0]  # island 1 was not confirmed down
+    here = FakeLaunches()
+    w = worker(objects, store, here, host="host-b", clock=lambda: 10 ** 10)
+    w.step()
+    assert sorted(here.live) == ["run-i0-m1"]  # island 1 still host-a's: left alone
+    assert w.load(0)["host"] == "host-b" and w.load(0)["incarnation"] == 1 and w.load(1)["host"] == "host-a"
+    assert w.load(0)["billed_s"] is not None and w.load(0)["closed_at"] is None
+
