@@ -199,16 +199,35 @@ class PoolConfigError(RunConfigError):
     """The rollout layer refused the samplers / pool section (``resolve``); ``open_run`` names the config."""
 
 
-# the commands that order or change a run refuse a breakers section the argv disagrees with;
-# every other command (down, status, pause, resume) only warns: it must never be blocked
-BREAKERS_STRICT_COMMANDS = frozenset({"up", "scale"})
+# only run up (and its dry run) refuses, at load, a breakers section the argv disagrees with.
+# Every other command opens the config with a WARNING: down / status / pause / resume must
+# never be blocked, and scale refuses only a scale that adds nodes (Run.scale_refusal: a
+# scale down saves money and goes on, Run.breakers_refusal).
+BREAKERS_STRICT_COMMANDS = frozenset({"up"})
+
+
+def breakers_strict(args: Any) -> bool:
+    """Whether ``yeto run <command>`` refuses a breakers value the argv disagrees with at load."""
+    return getattr(args, "rl_command", None) in BREAKERS_STRICT_COMMANDS
+
+
+def breakers_refusal(config: str) -> str | None:
+    """Why ``run up`` refuses ``config``'s breakers section (it disagrees with ``trainer.argv``,
+    or a value no knob carries); None when it does not. Call it on a config that already
+    loads without ``strict_breakers``: a strict load that fails then fails on the section."""
+    try:
+        load_config(config)
+    except ValueError as error:
+        return str(error)
+    return None
 
 
 def load_config(path: str, *, strict_breakers: bool = True) -> dict[str, Any]:
     """The run config at ``path``, checked and compiled. ``strict_breakers``: a ``breakers:``
     value that disagrees with ``trainer.argv`` (or that no knob carries) raises; without it
     the value is only warned about and the argv is kept as written (``run down`` / ``status``
-    must open any config ``run up`` once accepted, :data:`BREAKERS_STRICT_COMMANDS`)."""
+    must open any config ``run up`` once accepted; ``scale`` refuses only a scale that adds
+    nodes, :data:`BREAKERS_STRICT_COMMANDS`)."""
     file = Path(path).expanduser()
     try:
         text = file.read_text()
@@ -581,6 +600,8 @@ class Run:
         except ValueError as error:  # a samplers / pool section the rollout layer refuses
             raise PoolConfigError(str(error)) from None
         self.controller: Any = None  # controller: in_process -> the RolloutController of every pool
+        # why run up refuses this config's breakers section (set by scale: a scale that adds nodes is refused)
+        self.breakers_refusal: str | None = None
         self.auto_backlog = self._derive_auto_backlog()
 
     def _derive_auto_backlog(self) -> dict[str, Any] | None:
@@ -3084,7 +3105,11 @@ class Run:
                    and m.get("retiring_since") is None]
         new = max(0, wanted - len(members))
         if not new:
-            return None
+            return None  # a scale down (or a target already met): never refused here
+        refusal = getattr(self, "breakers_refusal", None)  # a bare Run (tests) has none
+        if refusal:  # run up would refuse this config: no node is added on it
+            return (f"{refusal}: no node is added to a run whose breakers disagree with its "
+                    "trainer.argv (a scale down goes on); fix the run config")
         breaker = self.state.get("breaker")
         resumed = ((self.state.get("steps") or {}).get("trainer") or {}).get("at")
         if breaker and not (resumed and str(resumed) > str(breaker.get("at"))):  # a later run up resumed it
@@ -3579,7 +3604,7 @@ def main(args: Any) -> int:
     try:
         run = open_run(args.config, create=args.rl_command != "status",
                        missing="temp" if args.rl_command == "down" else None,
-                       strict_breakers=args.rl_command in BREAKERS_STRICT_COMMANDS)
+                       strict_breakers=breakers_strict(args))
     except RunConfigError as error:
         print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
         return 2
@@ -3589,6 +3614,7 @@ def main(args: Any) -> int:
     if args.rl_command == "down":
         return 0 if run.down() else 1
     if args.rl_command == "scale":
+        run.breakers_refusal = breakers_refusal(args.config)
         return run.scale(args.target, args.retire, add=args.add, remove=args.remove, mode=args.mode,
                          force_static=args.force_static, dry_run=args.dry_run, source=args.source,
                          pool=getattr(args, "pool", None), provider=getattr(args, "provider", None))
