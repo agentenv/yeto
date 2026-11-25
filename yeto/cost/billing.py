@@ -422,11 +422,17 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
                 # is per node, a group cluster (num_nodes) bills every node
                 rate = float(r.attrs["price_usd_h"]) * max(1, int(r.attrs.get("num_nodes") or 1))
                 note = "the pool offer's price"
+            elif rate is not None and r.attrs.get("price_note"):
+                note = str(r.attrs["price_note"])
             rate = float(rate) if rate is not None else rates.table_rate(r.attrs.get("cloud") or "", r.attrs)
             if rate is None and r.attrs.get("cloud") and r.attrs.get("gpu"):
                 rate = prices.node_usd_h(str(r.attrs["cloud"]), r.attrs["gpu"], r.attrs.get("gpus"),
                                          spot=r.attrs.get("use_spot"), region=r.attrs.get("region"))
                 note = "" if rate is None else "unified price table (list price)"
+            if rate is None and r.attrs.get("role") == "syncer":
+                # a syncer VM recorded without a price (a ledger written before it carried one):
+                # its cloud's syncer row, else the dearest one (never 0)
+                rate, note, _conservative = prices.syncer_vm_usd_h(str(r.attrs.get("cloud") or ""))
             items.append(_span_cost(r, r.created_at, now, rate, note))
         else:  # modal_call: its cost is in its app; listed for liveness / utilization
             end = r.released_at if r.released_at is not None else now

@@ -263,3 +263,36 @@ def test_a_syncer_record_that_does_not_read_fails_the_syncer_launch_before_its_s
 def test_a_status_reader_without_a_syncer_says_why():
     with pytest.raises(ValueError, match="no syncer to read status.json from"):
         syncer_mod.syncer_status_reader(ssh_host=None)
+
+
+def test_the_syncer_vm_a_fleet_syncer_launch_orders_is_priced_in_its_ledger(tmp_path, monkeypatch):
+    """The syncer launch's own sky VM (AWS) is recorded in the run's resource ledger with the
+    price table's syncer row of its cloud: run.budget and `yeto cost` bill it from its order
+    to its confirmed release, never as unpriced (0 in the run's spend)."""
+    from yeto import runs
+    from yeto.cost import prices
+    from yeto.cost.billing import Rates, resource_costs
+    from yeto.cost.ledger import ResourceLedger
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
+    monkeypatch.setattr(launcher, "prepare_run_code_pack", lambda args: None)  # no git here
+    objects = DirectoryObjectStore(tmp_path / "store")
+    monkeypatch.setattr(fleet_syncer, "_store_objects", lambda args: objects)
+    _wire(monkeypatch, LateStatusSyncer(0))
+    monkeypatch.setattr(fleet_syncer, "serve", lambda args, addr, n, **kw: 0)
+    from yeto.cli import parse_args
+
+    args = parse_args([*example(tmp_path)["trainer"]["argv"], "--controller", "local"])
+    args.model_revision, args.data_revision = "a" * 40, "b" * 40
+    args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
+    args.keep, args.recover_timeout, args.controller_poll = False, 0.0, 30.0
+    assert launcher.run(args) == 0
+    ledgers = sorted(runs.RUNS_DIR.glob("*/resources.jsonl"))
+    syncers = [r for path in ledgers for r in ResourceLedger(path).resources()
+               if r.kind == "sky_cluster" and r.attrs.get("role") == "syncer"]
+    assert len(syncers) == 1
+    vm = syncers[0]
+    assert vm.attrs["cloud"] == "aws" and vm.attrs["usd_per_hour"] == prices.syncer_usd_h("aws") > 0
+    (item,) = resource_costs([vm], vm.created_at + 3600.0, rates=Rates()).items
+    assert item.priced and item.rate_usd_per_hour == pytest.approx(prices.syncer_usd_h("aws"))
