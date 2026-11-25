@@ -277,13 +277,14 @@ class _BufferRound:
         evidence = evidence_enabled(self.args)
         # the evidence names each trajectory by a version the driver published (not an
         # external merged cut): a group of a version it never published is left out
-        # (an empty map names nothing: the evidence refuses the round as before)
-        published = None
-        if evidence and getattr(self, "relay_pump", None) is None and not merged_release_mode():
-            published = self._published_versions() or None
+        by_published = evidence and getattr(self, "relay_pump", None) is None and not merged_release_mode()
         for _attempt in range(MAX_UNCONVERTIBLE_TAKES):
             groups, report = self.reader.take(input.rollout_id, self.groups,
                                               current_version=self._basis_version(input))
+            # read after the take: it waits for the samplers, and a publication may land
+            # meanwhile (its groups are in this take; the evidence, written later, names
+            # them). An empty map names nothing: the evidence refuses the round as before.
+            published = (self._published_versions() or None) if by_published else None
             damaged += list(getattr(report, "damaged_payloads", None) or ())
             duplicates += list(getattr(report, "duplicate_tasks", None) or ())
             groups = [(position, [complete_prompt_tokens(d, self._tokenize) for d in group])

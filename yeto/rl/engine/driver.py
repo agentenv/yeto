@@ -1152,11 +1152,12 @@ class IslandDriver:
         check. Only versions below the start version within the policy-age window
         are restored; the start version and later ones are published again.
 
-        Any start with a history is restored, rollout 0 included: a session that
-        counts its rounds from 0 continues above its releases first
-        (:meth:`_continue_above_own_releases`), so the start here is above them."""
+        A session that counts its rounds from 0 and has releases continues above
+        them first (:meth:`_continue_above_own_releases`), so its start here is above
+        them and the table is restored. A start at rollout 0 (a first start, or a
+        session without the verb) has nothing below it and reads no store."""
         history = getattr(self, "published_policy_history", None)
-        if not callable(history):
+        if start_rollout_id <= 0 or not callable(history):
             return
         oldest = start_rollout_id - self._max_policy_age()
         restored = {}
@@ -2989,12 +2990,15 @@ class IslandDriver:
                     self._restore_base_policy(start)
                     self._gate_unidentified_policies(start.rollout_id)
                     # A continued account (_continue_above_own_releases) only moves the
-                    # version labels: where the data goes on is still the session's own
-                    # start (a full-parameter island: its data position log), so the
-                    # base-restart ledger set-aside and the data cursor see that start.
+                    # version labels: the trainer state is the session's (a full-parameter
+                    # island: the syncer's fragments), not the earlier process's rounds, and
+                    # its data goes on at its data position log. So the ledger set-aside,
+                    # the rebase (an earlier process's applied round is superseded, never
+                    # recovered into the outer state) and the data cursor see the session's
+                    # own start.
                     if self.ledger is not None:
                         self._set_aside_ledger_of_a_base_restart(session_start.rollout_id)
-                        self.ledger.rebase(start.rollout_id)
+                        self.ledger.rebase(session_start.rollout_id)
                         self._restore_data_cursor(session_start.rollout_id)
                     elif callable(getattr(self.sync, "restart_cursor_fallback", None)):
                         # 0.23: an elastic island without --rl-elastic has no batch

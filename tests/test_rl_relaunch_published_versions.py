@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -42,6 +43,7 @@ from yeto.rl.engine.buffer_payload import group_entry_fields
 from yeto.rl.engine.driver import EventTape, IslandDriver, SyncStart
 from yeto.rl.engine.execution_profile import ExecutionProfile
 from yeto.rl.engine.fake import FakeEngine, FakeRolloutPool, fake_capabilities
+from yeto.rl.engine.ledger import BatchLedger, LedgerError
 from yeto.rl.engine.merged_release import MergedReleaseGuard
 from yeto.rl.engine.policy_release import PolicyReleaseStore
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
@@ -134,7 +136,7 @@ def _earlier_process(store, samplers, *, released=(6, 7, 8), buffered=(6, 7, 7, 
     return releases
 
 
-def _relaunch(tmp_path, *, age, rounds=3, released=(6, 7, 8), buffered=(6, 7, 7, 8, 8)):
+def _relaunch(tmp_path, *, age, rounds=3, released=(6, 7, 8), buffered=(6, 7, 7, 8, 8), ledger=None):
     store = CheckpointStore(tmp_path / "store")
     samplers = _Samplers(store)
     releases = _earlier_process(store, samplers, released=released, buffered=buffered)
@@ -155,7 +157,7 @@ def _relaunch(tmp_path, *, age, rounds=3, released=(6, 7, 8), buffered=(6, 7, 7,
     driver = IslandDriver(
         learner_id=0, rollout=engine.rollout, trainer=engine.trainer, policy_state=engine.policy_state,
         publisher=engine.publisher, placement=engine.placement, algorithm=algorithm, capabilities=caps,
-        sync=session, events=EventTape(tape, 0), profile=profile)
+        sync=session, events=EventTape(tape, 0), profile=profile, ledger=ledger)
     # wire_policy_releases on a buffer lane: the lane cursor holds the data position,
     # the island's own release index is the history of its published versions
     driver.data_position_owner = "buffer_lane"
@@ -251,8 +253,6 @@ def test_a_session_start_at_rollout_zero_restores_the_published_table_from_the_h
 def test_sessions_without_the_verb_and_first_starts_keep_their_start(tmp_path):
     """A single trainer (``LocalOnlySync.resume_at``) counts its own account; a store
     without releases is a first start: neither is moved."""
-    from types import SimpleNamespace
-
     events = []
     start = SyncStart(state=SimpleNamespace(policy_version=4), rollout_id=4)
     plain = SimpleNamespace(sync=LocalOnlySync(1), published_policy_history=lambda: [(7, _hash(7))],
@@ -331,3 +331,119 @@ def test_without_a_published_table_the_groups_are_kept_as_before():
     stats: dict[str, int] = {}
     kept, problems = br.miles_groups(groups, samples_per_group=2, stats=stats, require_known_versions=True)
     assert [position for position, _ in kept] == [11] and problems == [] and stats == {}
+
+
+def test_the_reader_names_groups_by_the_table_after_the_take(monkeypatch):
+    """The take waits for the samplers and a publication may land meanwhile: a group
+    generated with that version is in the take and the evidence (written later) names
+    it, so the published table is read after the take, not before it."""
+    from test_rl_buffer_reader_edits import _group, _reader
+
+    from yeto.rl.adapters.miles.full_parameter import evidence as evidence_module
+
+    fresh = _group(1, (1, 0, 0, 1))
+    for d in fresh:
+        d["weight_versions"] = [[{"version": "5", "abs_start": 2, "abs_end": 5}]]
+    groups = [(0, _group(0, (1, 0, 0, 1))), (1, fresh)]
+    plugin, reader = _reader(monkeypatch, groups)
+    table = [4]  # what the driver had published when the round began
+    take = reader.reader.take
+
+    def take_while_v5_lands(rid, n, current_version):
+        table.append(5)  # published while the take waited for the samplers
+        return take(rid, n, current_version)
+
+    reader.reader.take = take_while_v5_lands
+    monkeypatch.setattr(evidence_module, "evidence_enabled", lambda args: True)
+    monkeypatch.setattr(plugin._BufferRound, "_published_versions", staticmethod(lambda: list(table)))
+    monkeypatch.setattr(plugin, "merged_release_mode", lambda: False)
+    reader._run_round_hooks = lambda samples: None
+    out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=5))
+    real = [g for g in out["samples"] if not br.is_padding(g[0])]
+    assert sorted(g[0]["group_index"] for g in real) == [0, 1]
+    assert "sample_buffer/unpublished_version_groups" not in out["metrics"]
+
+
+def test_a_relaunched_sao_island_never_writes_into_an_earlier_process_evidence(tmp_path):
+    """SAO names its evidence directory in the runtime contract, so a relaunch sees
+    the same path. Its bind refuses a directory that exists, so a continued version
+    account (rounds K, K + 1, ...) never meets an earlier process's round files there
+    ("trajectory rollout evidence already changed"); every process writes a fresh one."""
+    from test_rl_sao_streaming_runtime import ALGORITHM_SHA256, _args, _load
+
+    from yeto.rl.adapters.miles.full_parameter.sao_binding import bind_sao_streaming_runtime
+
+    runtime, evidence = _load(tmp_path)
+    assert bind_sao_streaming_runtime(_args(), runtime, algorithm_spec_sha256=ALGORITHM_SHA256) == evidence
+    (evidence / "round-9.json").write_text("{}")  # what the earlier process left
+    with pytest.raises(ValueError, match="must be fresh"):
+        bind_sao_streaming_runtime(_args(), runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
+
+
+def _earlier_round(ledger, rollout_id, *, recorded):
+    """A round an earlier process of the island left in the ledger on its volume."""
+    batch = RolloutBatchHandle(rollout_id, rollout_id, _hash(rollout_id),
+                               (GroupMetadata(f"old{rollout_id}", ("s0", "s1"), str(rollout_id), 0.5, 0.5, 6),),
+                               1, 0, payload=object())
+    ledger.prepare(batch, policy_token=f"yeto:{rollout_id}:{_hash(rollout_id)}")
+    ledger.optimizer_applied(rollout_id)
+    if recorded:
+        ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
+
+
+def test_an_earlier_process_applied_round_is_superseded_not_recovered(tmp_path):
+    """The continued account starts at v9, yet the trainer state is the session's (the
+    syncer's fragments), not the earlier process's rounds: the ledger is rebased at the
+    session's own start, so its applied round 3 is superseded, as before the account
+    continued, never marked outer_recorded (recovered) because it lies below v9."""
+    ledger = BatchLedger(tmp_path / "ledger-state")
+    _earlier_round(ledger, 3, recorded=False)
+    driver, _session, _releases, _samplers, tape = _relaunch(tmp_path, age=2, ledger=ledger)
+    driver.run()
+    ledger.close()
+    assert BatchLedger(tmp_path / "ledger-state").state(3) == "superseded"
+    assert _trained(tape) == {9: [7, 7], 10: [8, 8], 11: [9, 9]}
+
+
+def test_an_earlier_process_recorded_round_is_still_refused(tmp_path):
+    """An outer-recorded round of an earlier process (a ledger not set aside) is refused
+    at the start, as it was: rebasing at v9 would have taken it silently."""
+    ledger = BatchLedger(tmp_path / "ledger-state")
+    _earlier_round(ledger, 3, recorded=True)
+    driver, _session, _releases, _samplers, _tape = _relaunch(tmp_path, age=2, ledger=ledger)
+    with pytest.raises(LedgerError, match="behind outer-recorded rollouts"):
+        driver.run()
+    ledger.close()
+
+
+class _NoStore:
+    """A release index whose store cannot be read."""
+
+    reads = 0
+
+    def __call__(self):
+        type(self).reads += 1
+        raise OSError("store unreachable")
+
+
+@pytest.mark.parametrize("session", [LocalOnlySync, _RestartingSession], ids=["single-trainer", "continuing"])
+def test_a_start_at_rollout_zero_reads_the_release_index_only_to_continue(tmp_path, session):
+    """At rollout 0 a session without the verb reads no store (an unreachable store
+    used to be harmless there and still is); a session that continues its account
+    needs the index and reads it once."""
+    engine = FakeEngine(tensors={NAME: torch.zeros(1, 2)}, step_delta=1.0)
+    history = _NoStore()
+    _NoStore.reads = 0
+    driver = IslandDriver(
+        learner_id=0, rollout=engine.rollout, trainer=engine.trainer, policy_state=engine.policy_state,
+        publisher=engine.publisher, placement=engine.placement, algorithm=AlgorithmSpec(),
+        capabilities=fake_capabilities("miles-like"), sync=session(1),
+        events=EventTape(tmp_path / "events.jsonl", 0))
+    driver.published_policy_history = history
+    if session is LocalOnlySync:
+        driver.run()
+        assert _NoStore.reads == 0
+    else:
+        with pytest.raises(OSError, match="store unreachable"):
+            driver.run()
+        assert _NoStore.reads == 1
