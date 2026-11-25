@@ -229,6 +229,18 @@ and the pool's `agentic_env_file` as a second `--env-file`:
 store into `dest` (a `/models/...` path, as the spec names it) before the sampler
 starts.
 
+A sky VM is normally autodowned by sky itself at `provider.hard_cap_minutes`
+(default 24 h) after its launch. On a cloud sky cannot autodown (Verda; also
+Hyperbolic, Prime Intellect and Yotta in SkyPilot 0.14.3) the provider refuses the
+offer unless `"allow_no_autodown": true` is set in the `provider` section. With it,
+the VM has no cloud-side hard cap: the pool releases it at its lease end (order +
+`hard_cap_minutes`, with a replacement ordered before; 15 minutes past it the
+ticket reads ended, so a paused member is released too), and every order prints a
+WARNING. If the pool process is gone, `yeto cleanup --run <run> --include-pools`
+releases it by exact name from the run's resource ledger; it refuses while a pool
+loop of the run still holds its lock (stop that loop with `pool-stop` first), and
+`yeto down` leaves pool machines to the pool.
+
 National Compute (the MI355X vLLM pool) and Daytona keep their own sampler starts.
 `yeto.node.shadow` renders the node runtime's launch on the same node and lists
 each difference from the route's own (device flags, mounts, env files,

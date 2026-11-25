@@ -3,6 +3,7 @@ module: the same pool policy (events, budget, breaker, fencing) as National Comp
 
 from __future__ import annotations
 
+import json
 import os
 from types import SimpleNamespace
 
@@ -1074,3 +1075,288 @@ def test_the_cleanup_refuses_an_unscoped_down_with_another_account(monkeypatch):
     assert not action.ok and "AWS_PROFILE=a sky down c-1" in action.detail and downs == []
     plain = SimpleNamespace(kind="sky_cluster", id="c-2", name="c-2", key="k", attrs={"pool": True})
     assert cleanup._release_one(plain, Ops(), Ledger(), False, {}).ok and downs == ["c-2"]  # nothing to carry
+
+
+def _verda_provider(sky, **kw):
+    return SkyProvider("run-v", resources={"infra": "verda/FIN-03", "accelerators": "RTX-6000-Ada:1",
+                                           "use_spot": True}, slots=[1], sky=sky, allow_no_autodown=True, **kw)
+
+
+def test_an_offer_sky_cannot_autodown_is_refused_unless_allowed():
+    """Its cluster has no cloud-side hard cap: refused before any order (pool --dry-run says
+    why) unless the config allows it; allowed, every order warns."""
+    from yeto.launch.nc.sky_provider import offline_problems
+
+    cfg = {"target": 1, "slots": [1], "shard_base": "s", "run": "run-v",
+           "provider": {"kind": "sky", "resources": {"infra": "verda/FIN-01", "accelerators": "A100:1"}}}
+    with pytest.raises(ValueError, match="allow_no_autodown"):
+        from_config(cfg, "run-v", sky=FakeSky())
+    assert any("allow_no_autodown" in p for p in offline_problems(cfg))
+    with pytest.raises(ValueError, match="true or false"):
+        from_config(dict(cfg, provider={**cfg["provider"], "allow_no_autodown": "yes"}), "run-v", sky=FakeSky())
+    allowed = dict(cfg, provider={**cfg["provider"], "allow_no_autodown": True})
+    assert not [p for p in offline_problems(allowed) if "autodown" in p]
+    p = from_config(allowed, "run-v", sky=FakeSky())
+    assert p.allow_no_autodown is True
+    # an offer list with no such cloud needs nothing
+    assert from_config(dict(cfg, provider={"kind": "sky", "resources": {"infra": "aws"}}), "run-v",
+                       sky=FakeSky()).allow_no_autodown is False
+
+
+def test_an_order_without_autodown_warns(capsys):
+    sky = FakeSky()
+    _verda_provider(sky).order(1)
+    out = capsys.readouterr().out
+    assert "WARNING: verda cannot autodown" in out and "yeto cleanup --run run-v --include-pools" in out
+
+
+def test_a_cloud_sky_cannot_autodown_is_launched_without_it_and_the_hard_cap_is_a_lease_end():
+    """Found on real Verda (sky 0.14.3): sky refuses any launch that asks for autodown there
+    ("autodown: Auto-down is not supported on Verda"), so every order failed. The cluster is
+    launched without down / autostop, and the hard cap reaches the pool as lease_until."""
+    t = [1_000_000.0]
+    sky = FakeSky()
+    p = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=90)
+    name = p.order(1)
+    assert sky.calls[0][3] == {}  # no down, no idle autostop, no wait_for
+    assert p._rows()[name]["autodown"] is False
+    sky.up(name)
+    s = p.status(1, name)
+    assert s.state == "active" and s.lease_until == 1_000_000.0 + 90 * 60
+    sky.autostop(10_000)  # sky's idle check never touches it: the pool's lease end releases it
+    assert name in sky.clusters
+    assert p.release(1, name)["state"] == "ended" and name not in sky.clusters
+    # a cloud sky autodowns keeps sky's hard cap and no lease end
+    aws = _provider(FakeSky())
+    other = aws.order(1)
+    aws.sky.up(other)
+    assert aws.sky.calls[0][3]["down"] is True and "autodown" not in aws._rows()[other]
+    assert aws.status(1, other).lease_until is None
+
+
+def test_a_task_with_its_own_run_on_a_cloud_without_autodown_gets_no_down(tmp_path):
+    yaml = tmp_path / "sampler.yaml"
+    yaml.write_text("run: python -m sampler\n")
+    sky = FakeSky()
+    p = _verda_provider(sky, task_yaml=str(yaml))
+    p.order(1)
+    assert sky.calls[0][3] == {}
+
+
+def test_the_no_autodown_clouds_are_the_ones_sky_cannot_autodown():
+    """NO_AUTODOWN_CLOUDS is the installed sky's own list (a sky upgrade that changes it fails here)."""
+    from yeto.launch.nc.sky_provider import NO_AUTODOWN_CLOUDS
+
+    registry = pytest.importorskip("sky.utils.registry")
+    features = pytest.importorskip("sky.clouds").CloudImplementationFeatures
+    sky_list = {name for name, cloud in registry.CLOUD_REGISTRY.items()
+                if features.AUTODOWN in getattr(cloud, "_CLOUD_UNSUPPORTED_FEATURES", {})}
+    assert NO_AUTODOWN_CLOUDS == sky_list
+
+
+def test_a_failed_launch_keeps_the_reason_sky_puts_at_the_end():
+    """sky's launch failure names the cause per zone after a long preamble (with terminal
+    colours); the recorded error keeps that tail."""
+    from yeto.launch.nc.sky_provider import ERROR_TEXT_LIMIT
+
+    error = ResourcesUnavailableError(
+        "\x1b[31mFailed to provision all possible launchable resources.\x1b[0m Relax the task's resource "
+        "requirements: 1x Verda([Spot], {'RTX-6000-Ada': 1})\nTo keep retrying until the cluster is up, use the "
+        "`--retry-until-up` flag.\nReasons for provision failures (for details, please check the log above):\n"
+        + "Provision failures (tried 1 infra):\n\n" + "x" * 400 + "\n  The following features are not supported "
+        "by Verda:\n  \tFeature   Reason\n  \tautodown  Auto-down is not supported on Verda.")
+    sky = FakeSky()
+    sky.fail_launch.add("verda/FIN-03")
+    original = sky.launch
+
+    def launch(task, cluster_name, **kw):
+        rid = original(task, cluster_name, **kw)
+        sky.requests[rid]["error"] = error
+        return rid
+
+    sky.launch = launch
+    p = _verda_provider(sky)
+    name = p.order(1)
+    s = p.status(1, name)
+    assert s.state == "ended" and s.end_reason == "lost"
+    assert "\x1b" not in s.detail and "\n" not in s.detail and len(s.detail) <= ERROR_TEXT_LIMIT
+    assert s.detail.startswith("ResourcesUnavailableError: Failed to provision")
+    assert s.detail.endswith("autodown Auto-down is not supported on Verda.")
+
+
+def test_sky_attach_includes_its_alias_file_in_the_users_ssh_config(tmp_path, monkeypatch):
+    """Without the Include, ``ssh <alias>`` does not resolve on a fresh pool host (found on
+    real Nebius: the alias was written, ssh never read it); Daytona's attach already did it."""
+    from yeto.launch.nc import node_pool
+
+    user_config = tmp_path / "home" / ".ssh" / "config"
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text("Host other\n  HostName 192.0.2.1\n")
+    monkeypatch.setattr(node_pool, "SSH_CONFIG", user_config)
+    p = _provider(FakeSky())
+    lease = SimpleNamespace(ticket="yeto-smp-run-s-1", ip="198.51.100.7", user="ubuntu")
+    ok = lambda a, c: SimpleNamespace(returncode=0)  # noqa: E731
+    p.attach(lease, ssh_run=ok)
+    p.attach(lease, ssh_run=ok)
+    lines = user_config.read_text().splitlines()
+    include = f"Include {cli.tunnel.state_dir() / 'ssh_config'}"
+    assert lines[0] == include and lines.count(include) == 1 and "Host other" in lines
+
+
+def test_an_adopted_cluster_of_a_cloud_without_autodown_keeps_its_hard_cap():
+    """Found on real Verda: a later process adopted the cluster without the record's
+    autodown mark, so its lease end (the hard cap) was lost. The listing's cloud brings it
+    back, counted from sky's launch time."""
+    t = [1_000_000.0]
+    sky = FakeSky()
+    first = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60)
+    name = first.order(1)
+    sky.up(name)
+    sky.clusters[name].update(cloud="Verda", launched_at=1_000_030.0)
+    t[0] += 600
+    later = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60, record=first.record.with_name("b.json"))
+    assert [n for _, n in later.run_tickets()] == [name]
+    assert later._rows()[name]["autodown"] is False
+    assert later.status(1, name).lease_until == 1_000_030.0 + 3600
+
+
+
+def test_past_its_hard_cap_a_cluster_without_autodown_reads_expired():
+    """Nothing in the cloud downs it: HARD_CAP_GRACE_S past lease_until the ticket reads
+    ended (expired, with its lease end), so the pool releases it whatever it does with
+    lease ends (a paused member acts on none)."""
+    t = [1_000_000.0]
+    sky = FakeSky()
+    p = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60)
+    name = p.order(1)
+    sky.up(name)
+    end = 1_000_000.0 + 3600
+    t[0] = end + p.HARD_CAP_GRACE_S - 1
+    assert p.status(1, name).state == "active"
+    t[0] = end + p.HARD_CAP_GRACE_S
+    s = p.status(1, name)
+    assert (s.state, s.end_reason, s.lease_until) == ("ended", "expired", end) and "hard cap" in s.detail
+    assert el.classify(s, None, now=t[0], unreachable_since=None, cfg=el.ElasticConfig(), joined=True).kind \
+        == el.EXPIRED
+
+
+def test_a_paused_member_on_a_cloud_without_autodown_is_released_after_its_hard_cap():
+    """REV on #798: a paused member gets no lease-end drain, and the cloud has no autodown:
+    without the expired reading it stayed up past its hard cap for good."""
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    sky = FakeSky()
+    ops = SkyOps(_verda_provider(sky, clock=clock, hard_cap_minutes=60), sky, clock)
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-v")
+    pool = IslandPool(PoolConfig(target=1, accounts=[1], shard_base="s", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=1)),
+                      ops, clock=clock, log=lambda m: None, events=events)
+    for _ in range(10):
+        pool.tick()
+        t[0] += 60
+    first = pool.members[0]
+    assert first.state == READY and first.lease_until == 3600
+    pool._apply_pause({first.ticket}, set())
+    while t[0] < 3600 + ops.p.HARD_CAP_GRACE_S:
+        t[0] += 60
+        pool.tick()
+        assert first.ticket in sky.clusters or t[0] >= 3600 + ops.p.HARD_CAP_GRACE_S
+    pool.tick()
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert "paused_lease_end" in names or "manual_paused_past_lease_end" in names
+    assert first.state == GONE and first.ticket not in sky.clusters and "expired" in names
+
+
+def test_a_failed_launch_records_no_credentials_and_no_terminal_escapes(monkeypatch):
+    """REV on #798: the kept tail of a launch error reached the record and the pool's events
+    unredacted."""
+    from yeto.launch.nc.sky_provider import _error_text
+
+    monkeypatch.setenv("SOME_API_TOKEN", "envvalue-0123456789")
+    key_id = "AKIA" + "ABCDEFGHIJKLMNOP"  # built here: no credential-shaped literal in the source
+    raw = ("\x1b[31mFailed\x1b[0m\x1b[K to launch: AWS_SECRET_ACCESS_KEY=abcdEFGH1234/xyz key " + key_id + " "
+           "Authorization: Bear" + "er eyJhbGciOiJIUzI1NiJ9.payload.sig token ghp_" + "a" * 36 + " hf_" + "b" * 34
+           + " sk-" + "c" * 40 + " url https://user:pw@host/x?X-Amz-Signature=deadbeef env envvalue-0123456789")
+    text = _error_text(RuntimeError(raw))
+    for secret in ("abcdEFGH1234", key_id, "eyJhbGciOiJIUzI1NiJ9", "ghp_", "hf_bbbb", "sk-cccc",
+                   "user:pw", "deadbeef", "envvalue-0123456789", "\x1b"):
+        assert secret not in text, secret
+    assert text.startswith("RuntimeError: Failed to launch:") and "<redacted>" in text
+    # the other shapes that need no key name, built here (no credential-shaped literal in the source)
+    others = ["ASIA" + "QRSTUVWXYZ012345", "github_pat_" + "d" * 30, "xoxb-" + "1" * 12 + "-e" * 6,
+              "xoxp-" + "2" * 14]
+    text = _error_text(RuntimeError("failed with " + " and ".join(others) + " in the log"))
+    assert not [o for o in others if o in text] and text.count("<redacted>") == len(others)
+    # every terminal escape goes: OSC (BEL / ST ended), ESC 7 / ESC 8, CSI erase line
+    text = _error_text(RuntimeError("\x1b]0;title\x07a\x1b7b\x1b8c\x1b]8;;http://x\x1b\\d\x1b[2Ke"))
+    assert text == "RuntimeError: abcde"
+    # a cut-off OSC loses only its introducer: the reason after it is kept
+    text = _error_text(RuntimeError("ok \x1b]0;unterminated\nsky: quota exceeded"))
+    assert text == "RuntimeError: ok 0;unterminated sky: quota exceeded"
+    # plain text with dashes or key-like words is kept
+    assert _error_text(RuntimeError("task-1 sk-short mask-rcnn ok")) == "RuntimeError: task-1 sk-short mask-rcnn ok"
+    # the record and the ended status carry the redacted text only
+    sky = FakeSky()
+    sky.fail_launch.add("verda/FIN-03")
+    original = sky.launch
+
+    def launch(task, cluster_name, **kw):
+        rid = original(task, cluster_name, **kw)
+        sky.requests[rid]["error"] = ResourcesUnavailableError(raw)
+        return rid
+
+    sky.launch = launch
+    p = _verda_provider(sky)
+    name = p.order(1)
+    detail = p.status(1, name).detail
+    assert key_id not in detail and "abcdEFGH1234" not in detail
+    assert key_id not in json.dumps(p._doc())
+
+
+def test_an_adopted_cluster_of_an_unknown_cloud_keeps_a_hard_cap_when_the_provider_allows_no_autodown():
+    t = [1_000_000.0]
+    sky = FakeSky()
+    first = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60)
+    name = first.order(1)
+    sky.up(name)  # the listing names no cloud and no launch time
+    t[0] += 600
+    later = _verda_provider(sky, clock=lambda: t[0], hard_cap_minutes=60, record=first.record.with_name("c.json"))
+    assert [n for _, n in later.run_tickets()] == [name]
+    assert later._rows()[name]["autodown"] is False
+    assert later.status(1, name).lease_until == t[0] + 3600  # from the adoption: sky gave no launch time
+
+
+def test_the_include_replaces_the_users_ssh_config_atomically_through_its_symlink(tmp_path):
+    """REV on #798: the user's ~/.ssh/config is rewritten whole (atomically), a symlinked one
+    (a dotfiles checkout) through its target, with its mode kept."""
+    import os
+
+    from yeto.launch.nc import node_pool
+
+    real = tmp_path / "dotfiles" / "ssh_config"
+    real.parent.mkdir()
+    real.write_text("Host other\n  HostName 192.0.2.1\n")
+    os.chmod(real, 0o640)
+    link = tmp_path / "home" / ".ssh" / "config"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+    ours = tmp_path / "state" / "ssh_config"
+    node_pool.include_ours(ours, ssh_config=link)
+    assert link.is_symlink() and real.read_text() == f"Include {ours}\nHost other\n  HostName 192.0.2.1\n"
+    assert os.stat(real).st_mode & 0o777 == 0o640
+    assert not [p for p in real.parent.iterdir() if p.name.endswith(".tmp")]
+    node_pool.include_ours(ours, ssh_config=link)  # already there: untouched
+    assert real.read_text().count("Include") == 1
+
+
+def test_write_ssh_alias_reads_the_ssh_config_path_when_called(tmp_path, monkeypatch):
+    """Its default was bound when the module loaded, so a test's SSH_CONFIG redirect (conftest)
+    did not reach the NC route's call."""
+    from yeto.launch.nc import node_pool
+
+    target = tmp_path / "home-ssh" / "config"
+    monkeypatch.setattr(node_pool, "SSH_CONFIG", target)
+    lease = SimpleNamespace(ticket="t-1", ip="198.51.100.9", user="ubuntu", account=1, host_key=None)
+    monkeypatch.setattr(node_pool, "ssh_host_block", lambda lease, relay_port: "Host yeto-nc-t-1\n")
+    node_pool.write_ssh_alias(lease)
+    assert target.read_text().startswith("Include ")

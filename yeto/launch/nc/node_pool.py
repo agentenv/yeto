@@ -86,7 +86,7 @@ def _blocks(text: str) -> dict[str, str]:
     return out
 
 
-def write_ssh_alias(lease: NodeLease, *, ssh_config: Path = SSH_CONFIG, relay_port: int = RELAY_PORT) -> str:
+def write_ssh_alias(lease: NodeLease, *, ssh_config: Path | None = None, relay_port: int = RELAY_PORT) -> str:
     """Add the node's alias and pin its host key; make ``~/.ssh/config`` include our file."""
     ours = state_dir() / "ssh_config"
     block = ssh_host_block(lease, relay_port=relay_port)
@@ -108,8 +108,22 @@ def include_ours(ours: Path, *, ssh_config: Path | None = None) -> None:
     include = f"Include {ours}"
     text = ssh_config.read_text() if ssh_config.exists() else ""
     if include not in text.splitlines():
-        ssh_config.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        ssh_config.write_text(f"{include}\n{text}")  # Include must precede any Host block
+        # the user's own file: replaced atomically (a concurrent ssh never reads half of it),
+        # through a symlink to its target, with its mode kept
+        target = ssh_config.resolve() if ssh_config.is_symlink() else ssh_config
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        mode = target.stat().st_mode & 0o777 if target.exists() else 0o600
+        fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(f"{include}\n{text}")  # Include must precede any Host block
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp, mode)
+            os.replace(tmp, target)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
 
 def remove_ssh_alias(ticket: str) -> None:
