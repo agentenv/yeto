@@ -264,7 +264,8 @@ def test_re_up_with_another_island_lease_while_islands_run_is_refused(fleet_run,
     assert not run.write_fleet_plan()
     out = capsys.readouterr().out
     assert "the syncer island pool (lease 600 s)" in out and "the syncer island pool (lease 150 s)" in out
-    assert "fleet.island_lease_s 600" in out and "Nothing ordered" in out
+    assert "the syncer lease kept at 600 s where it is set" in out and "Nothing ordered" in out
+    assert "--rl-sync-island-lease-s in fleet.trainer_argv; not both" in out  # a lease from the argv: keep it there
     assert json.loads(run._objects().read(fleet.PLAN_OBJECT))["roster"]["lease_s"] == 600  # not written over
 
 

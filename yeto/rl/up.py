@@ -963,8 +963,9 @@ class Run:
                 f"{', '.join(str(k) for k in running)} still run under it by their records, while this run config "
                 f"compiles {mode(plan)}: the new launch would adopt them as they run. Re-up with the stored roster ("
                 + ("fleet.fixed_roster: true" if stored.fixed_roster
-                   else f"no fleet.fixed_roster, fleet.island_lease_s {stored.island_lease_s or 0:g}, "
-                        "and a trainer argv the island pool takes")
+                   else f"no fleet.fixed_roster, the syncer lease kept at {stored.island_lease_s or 0:g} s where "
+                        "it is set (fleet.island_lease_s, or --rl-sync-island-lease-s in fleet.trainer_argv; not "
+                        "both), and a trainer argv the island pool takes")
                 + "), or start a new run name; once the fleet's machines are gone (`yeto run down`), deleting "
                 "the stored plan lets this roster start. Nothing ordered")
 
