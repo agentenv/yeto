@@ -65,6 +65,11 @@ CARD_HBM_GIB: Mapping[str, tuple[int, ...]] = {
     "L40S": (48,), "L4": (24,), "T4": (16,), "A10G": (24,), "V100": (16, 32),
     "RTX-6000-Ada": (48,), "RTX-PRO-6000": (96,),
 }
+# The cards whose sizes above came in on 2026-11-25. Before, their compat group took the
+# declared size rounded; an inventory that declares a size fitting none of the nominal ones
+# keeps that label (it loaded before, and its node preflight still checks the cards) instead
+# of being refused at load.
+ROUNDED_HBM_CARDS = frozenset({"L40S", "L4", "T4", "A10G", "V100", "RTX-6000-Ada", "RTX-PRO-6000"})
 
 # The tables below are derived from yeto.gpu_spec.HW_FAMILIES, the single
 # hardware-family table; the values are the ones this module already had.
@@ -218,7 +223,13 @@ def compat_group(card: str, hbm_gib: float | None = None) -> str:
     group = f"{CARD_VENDOR[name]}-{name.lower()}"
     if hbm_gib is None:
         return group
-    return f"{group}-{nominal_hbm_gib(name, float(hbm_gib))}g"
+    try:
+        size = nominal_hbm_gib(name, float(hbm_gib))
+    except UnknownCardType:
+        if name not in ROUNDED_HBM_CARDS or not hbm_gib or float(hbm_gib) <= 0:
+            raise
+        size = int(round(float(hbm_gib)))  # the label such an inventory had (ROUNDED_HBM_CARDS)
+    return f"{group}-{size}g"
 
 
 def launch_compat_group(card: str, explicit: str | None = None) -> str:

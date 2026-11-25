@@ -1121,6 +1121,12 @@ def test_a_verda_offer_without_an_image_gets_verda_default_image():
     assert DEFAULT_IMAGE_ID["verda"] == "24.04.cuda12.9.docker"
     assert sky.calls[0][2].resources["image_id"] == "24.04.cuda12.9.docker"
     assert p.offers[0].resources["image_id"] == "24.04.cuda12.9.docker"
+    # the default image leaves the offer key (ledger rows, breakers, prices) as it was
+    from yeto.launch.rollout.offers import offers_from_config
+
+    plain = offers_from_config({"resources": {"infra": "verda/FIN-03", "accelerators": "RTX-6000-Ada:1",
+                                              "use_spot": True}})[0]
+    assert p.offers[0].key == plain.key and p.offers[0].price_usd_h == plain.price_usd_h
     own = SkyProvider("run-v", resources={"infra": "verda/FIN-01", "accelerators": "A100:1", "image_id": "mine"},
                       slots=[1], sky=FakeSky(), allow_no_autodown=True)
     assert own.offers[0].resources["image_id"] == "mine"
