@@ -590,10 +590,20 @@ class PoolMoves:
         """Tickets of this pool's moves out: its patrol neither adopts nor releases them."""
         return set(self.moves.get(OUT, {}))
 
-    def moves_unknown(self) -> bool:
-        """The saved moves out did not read as a whole: any unowned ticket may be one of them,
-        so the patrol adopts and releases none until the record is cleared by hand."""
-        return UNKNOWN_TICKETS in self.moves.get(OUT, {})
+    def moves_unknown(self) -> list[str]:
+        """The kinds of saved moves (out / in) that did not read as a whole: any unowned ticket
+        may be one of them, so the patrol adopts and releases none until the record is cleared."""
+        return [kind for kind in (OUT, IN) if UNKNOWN_TICKETS in self.moves.get(kind, {})]
+
+    def patrol_pause_due(self, now: float) -> bool:
+        """A paused patrol alerts on the first tick and then every UNRESOLVED_ALERT_S."""
+        recs = [self.moves[kind][UNKNOWN_TICKETS] for kind in self.moves_unknown()]
+        last = min((r.get("paused_alerted_at") for r in recs), key=lambda v: -1.0 if v is None else float(v))
+        if last is not None and now - float(last) < UNRESOLVED_ALERT_S:
+            return False
+        for r in recs:
+            r["paused_alerted_at"] = now
+        return True
 
     def forget_moves(self, listed: Iterable[str]) -> None:
         """Drop finished moves out whose machine the provider no longer lists (patrol)."""

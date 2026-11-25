@@ -696,18 +696,27 @@ def test_two_spellings_of_one_state_dir_share_one_box(tmp_path):
     assert migrate.box_of(pa).where == migrate.box_of(pb).where
 
 
-def test_moves_out_that_do_not_read_as_a_whole_pause_the_patrol(tmp_path):
+@pytest.mark.parametrize("kind", ["out", "in"])
+def test_moves_that_do_not_read_as_a_whole_pause_the_patrol(tmp_path, kind):
     fleet = Fleet(tmp_path)
     fleet.run(3)
     pa = fleet.pools["pa"]
     doc = pa.snapshot()
-    doc["moves"] = {"out": ["junk"]}
+    doc["moves"] = {kind: ["junk"]}
     again = IslandPool.from_doc(doc, pa.config, pa.ops, clock=fleet.clock, log=lambda _m: None, events=pa.events)
-    assert again.moves_unknown()
+    assert again.moves_unknown() == [kind]
     fleet.cloud.machines["pa-t9"] = {"slot": 2, "state": "active", "since": fleet.clock()}  # an unowned ticket
-    again.tick()
+    for _ in range(5):
+        again.tick()
+        fleet.clock.t += 10
     assert fleet.cloud.machines["pa-t9"]["state"] == "active" and "pa-t9" not in [m.ticket for m in again.members]
-    assert any(e["event"].endswith("patrol_paused") for e in again.events.events)
+    paused = [e for e in again.events.events if e["event"].endswith("patrol_paused")]
+    assert len(paused) == 1 and paused[0]["level"] == "critical", "alerted once, then every UNRESOLVED_ALERT_S"
+    fleet.clock.t += migrate.UNRESOLVED_ALERT_S
+    again.tick()
+    assert len([e for e in again.events.events if e["event"].endswith("patrol_paused")]) == 2
+    if kind == "in":
+        return
     held = {"out": {"t": {"move": "t.1", "state": "unreadable", "account": 1, "since": 1.0}}}
     again.moves = {"out": {"t": {"move": "t.1", "state": "handed_over", "account": 1, "since": 1.0}}}
     again.merge_moves(held)
