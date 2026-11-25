@@ -477,3 +477,69 @@ def test_a_launch_torn_down_by_run_down_starts_again_on_any_host(tmp_path):
     assert w.load(0)["host"] == "host-b" and w.load(0)["incarnation"] == 1 and w.load(1)["host"] == "host-a"
     assert w.load(0)["billed_s"] is not None and w.load(0)["closed_at"] is None
 
+
+
+class StopWritesFail(DirectoryObjectStore):
+    """The run store, reading fine, but refusing every island STOP write while ``failing``."""
+
+    failing = False
+
+    def write(self, key, data):
+        if self.failing and str(key).endswith("/STOP"):
+            raise OSError("STOP write refused")
+        return super().write(key, data)
+
+
+def _stop_writes_fail(tmp_path, members):
+    objects = StopWritesFail(tmp_path / "store")
+    store = dz.DesiredStore(objects)
+    store.apply({"members": members}, expect=0)
+    il.write_syncer_record(objects, addr="10.0.0.9:29400", syncer_epoch=2, learners=2, max_learners=4, run="run")
+    return objects, store
+
+
+def test_a_stop_write_that_fails_alone_is_a_failure_not_written(tmp_path):
+    """The store reads, only the STOP writes fail (the island state store swallows the
+    error and returns False): the fleet stop is not logged written, it escalates and is
+    written once the store takes it; a move or a remove waits for its STOP."""
+    objects, store = _stop_writes_fail(tmp_path, [member(0), member(1)])
+    launches, logs, why = FakeLaunches(), [], [None]
+    states = lifecycle.IslandStateStore(objects, log=lambda m: None)
+    w = tw.TrainerWorker(store, objects, launches, states, log=logs.append, fleet_stop=lambda: why[0],
+                         unknown_alarm_steps=3)
+    w.step()
+    # a move and a remove while STOP writes fail: neither is recorded as under way
+    objects.failing = True
+    store.update(lambda doc: next(m for m in doc["members"] if m["name"] == "isl0").update(gpu="aws:2xh100@us-east-2"))
+    store.update(lambda doc: doc["members"].remove(next(m for m in doc["members"] if m["name"] == "isl1")))
+    w.step()
+    assert w.load(0)["state"] == tw.STARTING and w.load(1)["state"] == tw.STARTING
+    assert any("WARNING: trainer island 0: its STOP" in m for m in logs)
+    assert any("WARNING: trainer island 1: its STOP" in m for m in logs)
+    # the fleet stop: this host's launches stopped directly, the STOP writes escalate
+    why[0] = "STOP flag"
+    for _ in range(3):
+        w.step()
+    assert sorted(launches.stops) == ["run-i0", "run-i1"]
+    assert not any("fleet stop written" in m for m in logs)
+    alarms = [m.split(":")[1].strip() for m in logs if "not written to the islands' STOPs" in m]
+    assert alarms == ["WARNING", "ERROR"]
+    objects.failing = False
+    w.step()
+    assert states.stop_requested(0) is not None and states.stop_requested(1) is not None
+    assert any("fleet stop written" in m for m in logs)
+
+
+def test_a_launch_that_keeps_handing_off_is_given_up(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches, logs = FakeLaunches(), []
+    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=logs.append)
+    w.step()
+    for _ in range(tw.HANDOFF_LIMIT + 2):
+        launches.live.pop("run-i0", None)
+        launches.exits["run-i0"] = {"exit_code": 12, "log": "", "detail": "another launcher holds the records"}
+        w.step()
+    assert launches.started("run-i0") == 1 + tw.HANDOFF_LIMIT  # started again at once, a bounded number of times
+    assert w.load(0)["state"] == tw.ABANDONED
+    assert sum("ERROR" in m and "handed off" in m for m in logs) == 1

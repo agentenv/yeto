@@ -97,6 +97,7 @@ DOWN = "down"  # torn down by `yeto run down`: the next `yeto run up` starts its
 DONE, FAILED, ABANDONED = lifecycle.DONE, lifecycle.FAILED, lifecycle.ABANDONED
 TERMINAL = frozenset({DONE, FAILED, ABANDONED, REMOVED})
 DEFAULT_RELAUNCH_BUDGET = 3
+HANDOFF_LIMIT = 3  # launches in a row that hand off (exit 12/13) before the island is given up
 START_GRACE_S = 600.0  # a launch just started may take this long to register its run
 # yeto.launcher HANDS_OFF_EXITS: another live launcher holds the island's records lock (12),
 # or whether its machine runs did not read (13); the launch ordered nothing and tore nothing down
@@ -170,6 +171,7 @@ class TrainerWorker:
     _fenced_logged: bool = False
     _unknown_steps: int = 0
     _stop_failures: int = 0
+    _stop_write_failed: dict[int, int] = field(default_factory=dict)  # island -> STOP writes failed in a row
     _foreign_logged: set[int] = field(default_factory=set)
 
     # -- records
@@ -277,7 +279,8 @@ class TrainerWorker:
                     self.ops.request_stop(prefix, f"fleet stop: {why}")
                     self._event(k, "fleet stop forwarded to its launch", prefix=prefix)
                 if self.states.stop_requested(k) is None:  # missing, or cleared by a launch that was starting
-                    self.states.request_stop(k, f"fleet stop: {why}", by="trainer worker")
+                    if not self._write_stop(k, f"fleet stop: {why}", quiet=True):
+                        raise OSError(f"island {k}'s STOP was not written")
                     if k not in self._stop_written:
                         self._event(k, "fleet stop written to its island STOP", prefix=record.get("prefix_now"))
                     self._stop_written.add(k)
@@ -291,6 +294,20 @@ class TrainerWorker:
                          "the store is tried again at the next step")
             return
         self._stop_failures = 0
+
+    def _write_stop(self, k: int, why: str, *, quiet: bool = False) -> bool:
+        """Island ``k``'s STOP written to the store; False when the write failed (the store
+        swallows the error): a warning the first time, an error every
+        ``unknown_alarm_steps`` failures in a row, unless ``quiet`` (the caller reports)."""
+        if self.states.request_stop(k, why, by="trainer worker"):
+            self._stop_write_failed.pop(k, None)
+            return True
+        failed = self._stop_write_failed[k] = self._stop_write_failed.get(k, 0) + 1
+        level = None if quiet else self._alarm(failed)
+        if level:
+            self.log(f"fleet: {level}: trainer island {k}: its STOP ({why}) was not written to the store "
+                     f"({failed} time(s) in a row); written again at the next step")
+        return False
 
     def _closed(self, record: dict[str, Any] | None) -> dict[str, Any]:
         return closed(record, self.clock())
@@ -342,12 +359,13 @@ class TrainerWorker:
             return
         if alive:
             if record.get("spec") != spec:
-                self.states.request_stop(k, f"moving to {member.get('gpu')}", by="trainer worker")
+                if not self._write_stop(k, f"moving to {member.get('gpu')}"):
+                    return  # not moving until its STOP is written: asked again at the next step
                 self.save(k, {**record, "state": MOVING, "moving_to": member.get("gpu"), "generation": generation})
                 self._event(k, "moving: its launch stops on the old machines first", to=member.get("gpu"))
                 return
             if state != RUNNING:  # up
-                self.save(k, {**record, "state": RUNNING})
+                self.save(k, {**record, "state": RUNNING, "handoffs": 0})
                 if state != STARTING:
                     self._event(k, "launch adopted (already running)", prefix=prefix)
             return
@@ -378,10 +396,22 @@ class TrainerWorker:
 
     def _hand_back(self, k: int, record: dict[str, Any], ended: dict[str, Any]) -> None:
         """The launch handed off (:data:`HANDS_OFF_EXITS`): another launcher holds island
-        ``k``'s records lock, or its machine's state did not read. It ordered nothing; it
-        is started again (the lock asked again)."""
-        self.save(k, {**record, "state": STARTING, "started_at": round(self.clock(), 3), "ended": ended})
-        self._event(k, f"its launch handed off ({ended.get('detail')}); started again at the next step")
+        ``k``'s records lock, or its machine's state did not read. It ordered nothing. It is
+        started again now (the lock asked again), at most :data:`HANDOFF_LIMIT` times in a
+        row; then the island is given up (``abandoned``) with an error: another launcher
+        drives it."""
+        handoffs = int(record.get("handoffs") or 0) + 1
+        if handoffs > HANDOFF_LIMIT:
+            self.save(k, {**self._closed(record), "state": ABANDONED, "ended": ended, "handoffs": handoffs})
+            self.log(f"fleet: ERROR: trainer island {k}: its launch {record.get('prefix_now')} handed off "
+                     f"{handoffs - 1} times in a row ({ended.get('detail')}): another launcher holds the island's "
+                     "records lock; it is not started again. Stop that launcher (`yeto down "
+                     f"{record.get('prefix_now')}` on its host), then move or add the island again")
+            return
+        self.save(k, {**record, "state": STARTING, "started_at": round(self.clock(), 3), "ended": ended,
+                      "handoffs": handoffs})
+        self.log(f"fleet: WARNING: trainer island {k}: its launch handed off ({ended.get('detail')}); started "
+                 f"again now ({handoffs}/{HANDOFF_LIMIT})")
         self.ops.start(str(record["prefix_now"]), list(record.get("argv") or ()))
 
     def _foreign(self, k: int, record: dict[str, Any]) -> bool:
@@ -401,8 +431,7 @@ class TrainerWorker:
 
     def _assert_stop(self, k: int, why: str) -> None:
         """Island ``k``'s STOP, written again when it is missing (module doc)."""
-        if self.states.stop_requested(k) is None:
-            self.states.request_stop(k, why, by="trainer worker")
+        if self.states.stop_requested(k) is None and self._write_stop(k, why):
             self._event(k, "island STOP written again (its launch cleared it as it started)")
 
     def _retire(self, k: int) -> None:
@@ -418,7 +447,8 @@ class TrainerWorker:
         prefix = str(record["prefix_now"])
         if self.ops.alive(prefix):
             if record.get("state") != STOPPING:
-                self.states.request_stop(k, "removed from the fleet's desired state", by="trainer worker")
+                if not self._write_stop(k, "removed from the fleet's desired state"):
+                    return  # not stopping until its STOP is written: asked again at the next step
                 self.save(k, {**record, "state": STOPPING})
                 self._event(k, "removed: its launch stops", prefix=prefix)
             else:
