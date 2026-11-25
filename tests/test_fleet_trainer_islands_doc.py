@@ -29,6 +29,7 @@ def test_the_doc_names_the_compile_keys():
     assert fleet.LAUNCH_PER_ISLAND in text and fleet.LAUNCH_SYNCED_GROUP in text
     # no take-over of a lost host yet: the doc says so and names no option for it
     assert "not supported yet" in text and "--take-over" not in text
+    assert "A move resumes from the island's latest release; its local\n  training after that release is lost." in text
 
 
 def test_the_doc_commands_run_in_order(fleet_store, capsys):  # noqa: F811

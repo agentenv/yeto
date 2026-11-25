@@ -204,8 +204,9 @@ in a TP 1 fleet) is refused with exit 2 before anything is written or ordered.
   `--rl-sync-max-base-lag`. The soft deadline also becomes the default of
   `--rl-sync-final-grace-s`, how long the syncer waits for the islands to take the final
   cut after the last step. Set `--rl-sync-final-grace-s` too if that should differ.
-- **A move loses progress.** It loses the island's training since its last release (see
-  [Moving an island](#moving-an-island)).
+- **A move loses progress.** A move resumes from the island's latest release; its local
+  training after that release is lost. Resuming from a cut of that learner's own state is
+  not supported (see [Moving an island](#moving-an-island)).
 - **Same host.** `yeto run up` must be restarted on the host that started the island
   launches (see [What runs](#what-runs)). Taking over the islands of a lost host is not
   supported yet (see [Moving the control host](#moving-the-control-host)).
