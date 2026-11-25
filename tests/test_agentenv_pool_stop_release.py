@@ -1,5 +1,5 @@
-"""A stopped Modal pool leaves no AgentENV microVMs (P5b-15), and an infrastructure retry
-says why it failed (P5b-16). Fakes only: no gateway, no Modal, no GPU."""
+"""A stopped Modal pool leaves no AgentENV microVMs, and an infrastructure retry
+says why it failed. Fakes only: no gateway, no Modal, no GPU."""
 
 from __future__ import annotations
 
@@ -235,7 +235,7 @@ def test_the_pool_label_follows_the_operators_run_label():
     assert out["removed"] == 1 and gw.deleted == ["x"]
 
 
-# -- a retry says why the trial failed (P5b-16) -------------------------------------------------
+# -- a retry says why the trial failed -------------------------------------------------
 
 def _finished(*, exc_type=None, message="", error_detail=""):
     from yeto.rl.agentic import Outcome
@@ -250,15 +250,15 @@ def _finished(*, exc_type=None, message="", error_detail=""):
 def test_the_retry_detail_is_short_and_carries_no_secret_or_url_token(monkeypatch):
     from yeto.rl.engine.agentic_round import retry_error
 
-    monkeypatch.setenv("AGENTENV_API_KEY", "sk-live-0123456789abcdef")
+    monkeypatch.setenv("AGENTENV_API_KEY", "fake-gateway-key-0123456789abcdef")
     message = ("agentenv create failed: ConnectError: [Errno -3] Temporary failure in name resolution "
                "https://user:pw@gw.example.dev/sandboxes/abc/t0ken-in-path?sig=s3cr3t "
-               "api_key=sk-live-0123456789abcdef " + "x" * 400)
+               "api_key=fake-gateway-key-0123456789abcdef " + "x" * 400)
     error_type, detail = retry_error(_finished(exc_type="AgentenvError", message=message), "AgentenvError")
     assert error_type == "AgentenvError"
     assert detail.startswith("agentenv create failed: ConnectError: [Errno -3] Temporary failure in name resolution")
     assert "https://gw.example.dev " in detail
-    for secret in ("t0ken-in-path", "s3cr3t", "sk-live", "pw@", "user:"):
+    for secret in ("t0ken-in-path", "s3cr3t", "fake-gateway-key", "pw@", "user:"):
         assert secret not in detail, secret
     assert len(detail) <= 200 and "\n" not in detail
 
