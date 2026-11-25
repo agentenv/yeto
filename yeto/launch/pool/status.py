@@ -51,6 +51,10 @@ class LeaseStatus:
     # island reserved but not spawned, or a call still waiting for a GPU worker). The pool
     # grants (and bills) a member from its first billing tick. Not part of the identity.
     billing: bool = field(default=True, compare=False)
+    # when a billing ticket started to bill, as the provider knows it (a Modal call: the
+    # first evidence it runs, e.g. its container's started marker); the pool grants a
+    # member from then (never later than the tick that reads it). None: from that tick.
+    billing_since: float | None = field(default=None, compare=False)
 
     @classmethod
     def of(cls, value: Any) -> LeaseStatus:

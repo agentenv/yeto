@@ -119,10 +119,17 @@ def ready_key(shard: str, ticket: str, n: int) -> str:
     """The store object a call writes once its sampler joined (one per spawn: a
     restarted call never reads the marker of the call before it)."""
     return f"{READY_PREFIX}/{shard}/{ticket}.{int(n)}.json"
+
+
+def started_key(ready: str) -> str:
+    """The store object a call writes as its container starts (the call runs on a worker:
+    it bills), next to its ready marker."""
+    return ready[:-len(".json")] + ".started.json" if ready.endswith(".json") else ready + ".started"
 CONFIG_KEYS = frozenset({"kind", "factory", "app_name", "image", "gpu", "gpus", "cpu", "memory_gib", "secret",
                          "secrets", "bucket", "model_volume", "model_mount", "log_volume", "timeout_h",
                          "python", "name_prefix", "env", "price_usd_h", "scaledown_window_s", "tasks_dir"})
 DEFAULT_GPU, DEFAULT_GPUS = "B300", 8  # a pool config without gpu / gpus
+STATS_CACHE_S = 5.0  # the function's live stats, read once for all queued calls of a pool tick
 DEFAULT_TIMEOUT_H = 24  # the sampler function's timeout without timeout_h: each call's hard end
 # a call's timeout counts as its hard end only from twice (replace_lead_s + end_margin_s) on (pool defaults)
 DEFAULT_MIN_HARD_END_S = 2 * (3600 + 600)
@@ -423,7 +430,10 @@ class ModalProvider:
                 return LeaseStatus("active", billing=False,
                                    detail=f"Modal call {row['call']} waits to be scheduled on a "
                                           f"{self.config.get('gpu', 'GPU')} worker (no task yet: not billed)")
-            return LeaseStatus("active", hard_end=hard_end)
+            since = row.get("scheduled_at")
+            if since is None:  # recorded by this status call
+                since = (self._rows().get(ticket) or {}).get("scheduled_at")
+            return LeaseStatus("active", hard_end=hard_end, billing_since=since)
         if row.get("cancelled") == row["call"]:
             return LeaseStatus("ended", end_reason="released")
         if state in (SUCCEEDED, NOT_RUN):
@@ -449,15 +459,68 @@ class ModalProvider:
         return float(spawned) + self.timeout_s()
 
     def _scheduled(self, call: str) -> bool:
-        """Modal placed the call on a worker (it has a task). True when the client cannot
-        tell (a test double, a failed lookup): an unknown call is billed, never free."""
+        """Modal placed the call on a worker, by the first evidence that reads so: its call
+        graph (a task id, or past pending), else the function's live stats
+        (:meth:`_stats_scheduled`). True when the client cannot tell (a test double, a
+        failed lookup): an unknown call is billed, never free. A spawned call that runs
+        can read pending in its call graph for its whole life (seen on modal 1.6.4), so
+        the graph alone never keeps a call free."""
         scheduled = getattr(self.client, "scheduled", None)
         if scheduled is None:
             return True
         try:
-            return bool(scheduled(call))
+            if bool(scheduled(call)):
+                return True
         except Exception:  # noqa: BLE001 - not known: billed
             return True
+        return self._stats_scheduled(call)
+
+    def _stats_scheduled(self, call: str) -> bool:
+        """The function's live stats (``ModalSdkClient.function_stats``): no input waits
+        (``backlog`` 0): every call runs; else the oldest open calls, as many as the inputs
+        that run (``running_inputs``, those already known scheduled first), count as
+        scheduled (Modal schedules a function's inputs in order). A client without stats,
+        or stats that do not read: billed."""
+        stats = getattr(self.client, "function_stats", None)
+        if stats is None:
+            return False  # a client that only has the call graph (a test double): as it says
+        try:
+            now = self.clock()
+            cached = getattr(self, "_stats_cache", None)
+            if cached is not None and 0 <= now - cached[0] < STATS_CACHE_S:
+                got = cached[1]
+            else:  # one lookup per pool tick for all its queued calls
+                got = stats()
+                self._stats_cache = (now, got)
+            backlog, running = int(got["backlog"]), int(got["running_inputs"])
+        except Exception:  # noqa: BLE001 - not known: billed
+            return True
+        if backlog <= 0:
+            return True
+        rows = [r for r in self._rows().values() if r.get("open") and r.get("call")]
+        known = sum(1 for r in rows if r.get("scheduled_at") is not None)
+        waiting = sorted((r for r in rows if r.get("scheduled_at") is None),
+                         key=lambda r: float(r.get("spawned_at") or 0.0))
+        place = next((i for i, r in enumerate(waiting) if r.get("call") == call), None)
+        return place is not None and place < running - known
+
+    def note_running(self, ticket: str, *, source: str, at: float | None = None) -> bool:
+        """Evidence outside Modal's call state that the island's current call runs (its
+        container wrote its started marker, its sampler joined): it bills from ``at`` (the
+        marker's own time; never before the spawn, never after now), as a scheduled call
+        does. True when it was recorded now (False: already scheduled, or no call)."""
+        with self._locked():
+            rows = self._rows()
+            row = rows.get(ticket) or {}
+            call = row.get("call")
+            if not call or row.get("scheduled_at") is not None:
+                return False
+            now = self.clock()
+            at = now if at is None else min(now, max(float(at), float(row.get("spawned_at") or at)))
+            row.update(scheduled_at=at, scheduled_by=source)
+            self._save(rows)
+        _record_ledger("created", LEDGER_KIND, call, FUNCTION, scheduled_at=at, scheduled_by=source)
+        return True
 
     def _note_scheduled(self, ticket: str, call: str) -> bool:
         """True once the call is scheduled; the first time, its ``scheduled_at`` goes to the
@@ -556,7 +619,52 @@ class ModalPoolOps:
         return self.provider.order(account)
 
     def poll(self, m) -> LeaseStatus:
+        """The provider's status; a call Modal still reads unscheduled whose container wrote
+        its started marker (or whose sampler joined) runs: it bills from now on
+        (:meth:`ModalProvider.note_running`)."""
+        status = self.provider.status(m.account, m.ticket)
+        if status.state != "active" or status.billing:
+            return status
+        found = self._running_evidence(m)
+        if found is None:
+            return status
+        source, at = found
+        if self.provider.note_running(m.ticket, source=source, at=at):
+            from . import cli  # noqa: PLC0415
+
+            when = "" if at is None else f" ({max(0.0, self.provider.clock() - float(at)):.0f} s ago)"
+            cli._log(f"pool: {m.ticket}: Modal reads its call unscheduled, but {source}: billed from then{when}")  # noqa: SLF001
         return self.provider.status(m.account, m.ticket)
+
+    def note_running(self, m, *, source: str) -> bool:
+        """The pool saw ``m`` run (its sampler joined) while its call read unscheduled."""
+        return self.provider.note_running(m.ticket, source=source)
+
+    def _running_evidence(self, m) -> tuple[str, float | None] | None:
+        """What in the run store shows the call runs, and since when (the marker's own
+        ``started_at`` / ``ready_at``; None: not in it). None: nothing yet, or no store."""
+        key = self.provider.ready_key(m.ticket)
+        if key is None:
+            return None
+        if key in self._ready_seen:
+            return "its sampler joined (ready marker)", None
+        try:
+            objects = self._fence_store().objects
+            for marker, field, source in ((started_key(key), "started_at", "its container started (started marker)"),
+                                          (key, "ready_at", "its sampler joined (ready marker)")):
+                data = objects.read(marker)
+                if data is None:
+                    continue
+                if marker == key:
+                    self._ready_seen.add(key)
+                try:
+                    at = json.loads(data).get(field)
+                    return source, float(at) if at is not None else None
+                except (ValueError, TypeError, AttributeError):
+                    return source, None
+        except Exception:  # noqa: BLE001 - the store did not answer: the next poll reads again
+            return None
+        return None
 
     def balance(self) -> int | None:
         return None
@@ -813,6 +921,13 @@ class ModalSdkClient:
                 return True
         return False
 
+    def function_stats(self) -> dict[str, int]:
+        """The deployed function's live counts (``Function.get_current_stats``): ``backlog``
+        (inputs waiting for a worker), ``running_inputs`` and ``tasks`` (its containers)."""
+        stats = self.modal.Function.from_name(self.app_name, FUNCTION).get_current_stats()
+        return {"backlog": int(stats.backlog), "running_inputs": int(getattr(stats, "num_running_inputs", 0) or 0),
+                "tasks": int(getattr(stats, "num_total_runners", 0) or 0)}
+
     def cancel(self, call_id: str) -> None:
         self.modal.FunctionCall.from_id(call_id).cancel(terminate_containers=True)
 
@@ -1002,7 +1117,18 @@ def _run_sampler(payload: dict[str, Any], env: dict[str, str], out: Path, *, t0:
                                        stderr=subprocess.PIPE, text=True, errors="replace", bufsize=1)
     tail = _StderrTail(getattr(proc, "stderr", None))
     key, reported = payload.get("ready_key"), False
+    started = started_key(key) if key else None  # the container runs: the call bills (ModalPoolOps.poll)
     while proc.poll() is None:
+        if started:
+            try:
+                if objects is None:
+                    from yeto.cloud import s3_store  # noqa: PLC0415
+
+                    objects = s3_store.head_objects(env[s3_store.URI_ENV], environ=env)
+                objects.write(started, json.dumps({"started_at": t0, "shard": payload["shard"]}).encode())
+                started = None
+            except Exception as error:  # noqa: BLE001 - retried next poll; the ready marker or the stats bill it too
+                print(f"rollout_sampler: started marker not written yet: {error}", flush=True)
         if key and not reported and join_seen(payload["spec"], before=before):
             try:
                 if objects is None:

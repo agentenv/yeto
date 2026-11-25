@@ -15,7 +15,7 @@ from yeto.launch.nc.lease_pool import PoolConfig
 from yeto.launch.pool import status as el
 from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 from yeto.launch.nc.modal_provider import (FAILED, RUNNING, SUCCEEDED, ModalPoolOps, ModalProvider, ModalSdkClient,
-                                           from_config, offline_problems, store_env)
+                                           from_config, offline_problems, started_key, store_env)
 
 
 @pytest.fixture(autouse=True)
@@ -263,7 +263,7 @@ def test_a_reused_container_does_not_report_the_earlier_calls_join(tmp_path, mon
                "spec": {"event_tape": str(tape)}}
     monkeypatch.setenv("AWS_ENDPOINT_URL", "https://e")
     real_write = objects.write
-    objects.write = lambda k, v: seen.append(polls[0]) or real_write(k, v)
+    objects.write = lambda k, v: (seen.append(polls[0]) if k == payload["ready_key"] else None) or real_write(k, v)
     out = rollout_sampler_body(payload, popen=lambda *a, **k: Proc(), objects=objects, sleep=lambda s: None,
                                root=str(tmp_path / "rollout"))
     assert out["reported_ready"] and seen == [3]  # not at the first poll (the old tape)
@@ -1171,3 +1171,171 @@ def test_a_call_near_its_function_timeout_gets_a_successor_before_it_is_retired(
     timed_out = el.LeaseStatus("ended", end_reason="lost", hard_end=successor.lease_until)
     assert el.classify(timed_out, None, now=successor.lease_until + 1, unreachable_since=None,
                        cfg=el.ElasticConfig(), joined=True).kind == el.EXPIRED
+
+
+# -- a call whose call graph reads pending for its whole life (modal 1.6.4: INT2 on an L4 pool) ------
+class StuckGraphClient(QueuedClient):
+    """Every call's graph reads PENDING with no task, even while it runs; ``place`` starts
+    its container (the started marker) and its sampler joins (the ready marker)."""
+
+    def scheduled(self, call):
+        return False
+
+    started_at = None  # the container's own start time in its started marker
+
+    def place(self, call):
+        key = self.calls[call].get("ready_key")
+        if key and self.report_ready is not None:
+            body = {} if self.started_at is None else {"started_at": self.started_at}
+            self.report_ready().write(started_key(key), json.dumps(body).encode())
+            self.report_ready().write(key, b"{}")
+
+
+def _modal_pool(tmp_path, client):
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    ops, client, store = _ops(tmp_path, client=client)
+    ops.provider.clock = clock
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 2, 3], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0,
+                                 elastic=el.ElasticConfig(max_orders=5, start_timeout_s=3600)),
+                      ops, clock=clock, log=lambda m: None, events=events)
+    ops.start_in_background = False
+    return pool, ops, client, store, t, events
+
+
+def _names(events):
+    return [e["event"].removeprefix("nc_elastic_") for e in events.events]
+
+
+def test_a_running_call_whose_graph_reads_pending_is_billed_from_its_started_marker(tmp_path, monkeypatch):
+    """INT2: two L4 calls ran and their samplers were ready, yet granted stayed None and the
+    pool's spend $0 (their call graph read PENDING). The container's started marker bills
+    the member, the pool's budget and the resource ledger from then on."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    pool, ops, client, _store, t, events = _modal_pool(tmp_path, StuckGraphClient())
+    for _ in range(3):  # queued: nothing runs, nothing bills (#784)
+        pool.tick()
+        t[0] += 60
+    [m] = pool.members
+    assert m.started is not None and m.granted is None and pool.budget.spent_ucr == 0
+    call = ops.provider.call_id(m.ticket)
+    (row,) = [r for r in ledger.resources() if r.kind == "modal_call"]
+    assert row.attrs.get("scheduled_at") is None
+    placed_at = t[0]
+    client.started_at = placed_at - 40  # the container started 40 s before the poll read its marker
+    client.place(call)  # a worker runs it: the container writes its started marker, the sampler joins
+    for _ in range(5):
+        pool.tick()
+        t[0] += 60
+    placed_at -= 40  # the container started 40 s before the poll read its marker: billed from then
+    assert m.state == READY and m.granted == placed_at and pool.budget.spent_ucr > 0
+    assert ops.provider._rows()[m.ticket]["scheduled_at"] == placed_at
+    assert ops.provider._rows()[m.ticket]["scheduled_by"] == "its container started (started marker)"
+    rows = [r for r in ledger.resources() if r.kind == "modal_call"]
+    assert any(r.attrs.get("scheduled_at") == placed_at for r in rows)
+    assert "member_scheduled" in _names(events)
+
+
+def test_a_ready_member_is_never_left_unbilled(tmp_path):
+    """No started marker and no stats (an older image, a store blip): the sampler's join is the
+    evidence; the member bills from then, with a WARNING and member_granted_late."""
+    client = StuckGraphClient()
+    logs = []
+    pool, ops, client, _store, t, events = _modal_pool(tmp_path, client)
+    pool.log = logs.append
+    for _ in range(3):  # ordered, its call spawned and queued
+        pool.tick()
+        t[0] += 60
+    [m] = pool.members
+    key = ops.provider.ready_key(m.ticket)
+    assert key is not None and m.granted is None
+    ops._running_evidence = lambda _m: None  # the store never shows a marker to the ops
+    client.report_ready().write(key, b"{}")  # the sampler joined
+    for _ in range(3):
+        pool.tick()
+        t[0] += 60
+    assert m.state == READY and m.granted is not None and pool.budget.spent_ucr > 0
+    late = [e for e in events.events if e["event"].endswith("member_granted_late")]
+    assert len(late) == 1 and late[0]["source"] == "its sampler joined (probe)"  # the probe sees it first
+    assert any("WARNING" in line and "billed from now" in line for line in logs)
+    assert ops.provider._rows()[m.ticket]["scheduled_at"] is not None  # the resource ledger learns it too
+
+
+def test_the_functions_stats_bill_the_calls_that_run_and_not_the_ones_that_wait(tmp_path):
+    """The call graph reads pending; the function's live stats decide: no backlog: every call
+    runs; a backlog: the oldest calls, as many as the inputs that run."""
+    now = [0.0]
+    client = StuckGraphClient()
+    stats = {"backlog": 1, "running_inputs": 1, "tasks": 1}
+    client.function_stats = lambda: dict(stats)
+    p = ModalProvider("run-m", slots=[1, 2], client=client, clock=lambda: now[0], price_usd_h=0.8,
+                      config={"gpu": "L4"})
+    a, b = p.order(1), p.order(2)
+    p.spawn(a, {"shard": "m-0"})
+    now[0] = 10.0
+    p.spawn(b, {"shard": "m-1"})
+    assert p.status(1, a).billing is True and p.status(2, b).billing is False  # b waits: one input runs
+    stats.update(backlog=0, running_inputs=2, tasks=2)
+    assert p.status(2, b).billing is False  # read once per tick: the cached stats still hold
+    now[0] += 10
+    assert p.status(2, b).billing is True
+    # nothing runs: still not billed (#784)
+    stats.update(backlog=2, running_inputs=0, tasks=0)
+    now[0] += 10
+    c = p.order(1)
+    p.spawn(c, {"shard": "m-2"})
+    assert p.status(1, c).billing is False
+    now[0] += 10
+    assert p.status(1, c).billing is False
+    client.function_stats = lambda: (_ for _ in ()).throw(ConnectionError("modal"))
+    now[0] += 10
+    assert p.status(1, c).billing is True  # stats that do not read: billed, never free
+
+
+def test_a_queued_call_without_any_evidence_still_bills_nothing(tmp_path):
+    client = StuckGraphClient()
+    client.function_stats = lambda: {"backlog": 1, "running_inputs": 0, "tasks": 0}
+    pool, ops, _client, _store, t, events = _modal_pool(tmp_path, client)
+    for _ in range(10):
+        pool.tick()
+        t[0] += 60
+    [m] = pool.members
+    assert m.granted is None and pool.budget.spent_ucr == 0 and "member_granted_late" not in _names(events)
+    assert ops.provider._rows()[m.ticket].get("scheduled_at") is None
+
+
+def test_the_sdk_client_reads_the_functions_live_stats():
+    class Function:
+        @staticmethod
+        def from_name(app, name):
+            assert (app, name) == ("yeto-rollout-r", "rollout_sampler")
+            return SimpleNamespace(get_current_stats=lambda: SimpleNamespace(
+                backlog=3, num_total_runners=2, num_running_inputs=2, input_headroom=0))
+
+    client = ModalSdkClient({"image": "i", "secret": "s"}, run_id="r", modal=SimpleNamespace(Function=Function))
+    assert client.function_stats() == {"backlog": 3, "running_inputs": 2, "tasks": 2}
+
+
+def test_the_call_body_writes_its_started_marker_before_the_sampler_joins(tmp_path, monkeypatch):
+    from yeto.launch.nc.modal_provider import rollout_sampler_body  # noqa: PLC0415
+
+    objects, polls, order = Objects(), [0], []
+
+    class Proc:
+        returncode = 0
+
+        def poll(self):
+            polls[0] += 1
+            return None if polls[0] < 3 else 0
+
+    real_write = objects.write
+    objects.write = lambda k, v: order.append(k) or real_write(k, v)
+    payload = {"shard": "m-0", "bucket": "b", "run_prefix": "r", "ready_key": "pool-ready/m-0/t.1.json",
+               "spec": {"event_tape": str(tmp_path / "events.jsonl")}}
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://e")
+    rollout_sampler_body(payload, popen=lambda *a, **k: Proc(), objects=objects, sleep=lambda s: None,
+                         root=str(tmp_path / "rollout"))
+    assert order == ["pool-ready/m-0/t.1.started.json"]  # once, first; no join on the tape: no ready marker
+    assert started_key("pool-ready/m-0/t.1.json") == "pool-ready/m-0/t.1.started.json"
