@@ -8,14 +8,18 @@ call itself. So the provider splits like this:
 * :class:`ModalProvider` (the :class:`~yeto.launch.pool.provider.IslandProvider` contract):
   ``order(slot)`` reserves a ticket ``<prefix>-<run>-<n>`` in a local record and
   calls nothing (nothing bills before the call is spawned); ``status``: a ticket
-  without a call reads ``active`` (ready to start), a call that runs reads
-  ``active``, a call that ended reads ended (``released`` when this provider
+  without a call reads ``active`` (ready to start, not billing), a call that runs
+  reads ``active`` (billing once Modal scheduled it on a GPU worker: a call still
+  waiting for one has no task and bills nothing, :meth:`ModalSdkClient.scheduled`),
+  a call that ended reads ended (``released`` when this provider
   cancelled it, ``lost`` when it failed or its sampler exited non-zero: fence,
   release its claims, refill); a call whose sampler exited 0 (the run finished)
   reads ``active`` and the probe's exited sampler ends it as finished, with no
   refill; a failed status call raises (a control-plane blip). ``release``
   cancels the call (``terminate_containers=True``) and confirms it no longer
-  runs; only tickets of this run (name prefix *and* the record) are touched.
+  runs (a call that was never scheduled ended with the cancel: nothing ran); only
+  tickets of this run (name prefix *and* the record) are touched. A call that
+  waits for a worker is a start the pool bounds by its ``start_timeout_s``.
 * :class:`ModalPoolOps` (the pool's ``PoolOps``, replacing the SSH node route):
   ``start`` renders the member's sampler spec exactly as the SSH route does
   (:func:`~.cli.render_spec`, ``start_on_latest`` on) and spawns one call of the
@@ -293,12 +297,13 @@ class ModalProvider:
         self._note_app()
         with self._locked():
             rows = self._rows()
-            rows[ticket].update(call=call, spawned_at=self.clock(), cancelled=None,
+            rows[ticket].update(call=call, spawned_at=self.clock(), cancelled=None, scheduled_at=None,
                                 ready_key=payload.get("ready_key"))
             rows[ticket].setdefault("calls", []).append(call)
             self._save(rows)
+        # pending: billed from its scheduled_at (recorded by status once Modal placed it on a worker)
         _record_ledger("created", LEDGER_KIND, call, FUNCTION, ticket=ticket, run=self.run_id, pool=True,
-                       usd_per_hour=self.price_usd_h)
+                       usd_per_hour=self.price_usd_h, pending=True)
         return call
 
     def _app_doc(self) -> dict[str, Any]:
@@ -373,9 +378,13 @@ class ModalProvider:
         if row is None or not row.get("open"):
             return LeaseStatus("ended", end_reason="released")
         if not row.get("call"):
-            return LeaseStatus("active")  # nothing runs (or bills) until the pool starts it
+            return LeaseStatus("active", billing=False)  # nothing runs (or bills) until the pool starts it
         state = self.client.status(row["call"])  # raises: a blip to the pool, never an end
         if state == RUNNING:
+            if row.get("scheduled_at") is None and not self._note_scheduled(ticket, row["call"]):
+                return LeaseStatus("active", billing=False,
+                                   detail=f"Modal call {row['call']} waits to be scheduled on a "
+                                          f"{self.config.get('gpu', 'GPU')} worker (no task yet: not billed)")
             return LeaseStatus("active")
         if row.get("cancelled") == row["call"]:
             return LeaseStatus("ended", end_reason="released")
@@ -385,6 +394,32 @@ class ModalProvider:
             # the exited sampler and the pool decides (drain, or a new shard)
             return LeaseStatus("active")
         return LeaseStatus("ended", end_reason="lost", detail=self._failure(row["call"]))
+
+    def _scheduled(self, call: str) -> bool:
+        """Modal placed the call on a worker (it has a task). True when the client cannot
+        tell (a test double, a failed lookup): an unknown call is billed, never free."""
+        scheduled = getattr(self.client, "scheduled", None)
+        if scheduled is None:
+            return True
+        try:
+            return bool(scheduled(call))
+        except Exception:  # noqa: BLE001 - not known: billed
+            return True
+
+    def _note_scheduled(self, ticket: str, call: str) -> bool:
+        """True once the call is scheduled; the first time, its ``scheduled_at`` goes to the
+        record and the resource ledger (the call bills from there)."""
+        if not self._scheduled(call):
+            return False
+        at = self.clock()
+        with self._locked():
+            rows = self._rows()
+            row = rows.get(ticket) or {}
+            if row.get("call") == call and row.get("scheduled_at") is None:
+                row["scheduled_at"] = at
+                self._save(rows)
+        _record_ledger("created", LEDGER_KIND, call, FUNCTION, scheduled_at=at)
+        return True
 
     def _failure(self, call: str) -> str | None:
         """Why the call failed, as its client tells it (``ModalSdkClient.failure``: the
@@ -417,9 +452,13 @@ class ModalProvider:
 
     def _ended_after_cancel(self, call: str) -> bool:
         """The call no longer runs, polled for up to ``cancel_wait_s`` (Modal stops the
-        container a few seconds after it took the cancel)."""
+        container a few seconds after it took the cancel). A call that was never scheduled
+        (no task: it waited for a GPU worker) ended with the cancel: nothing ran, and Modal
+        may read it RUNNING for long after."""
         deadline = self.clock() + self.cancel_wait_s
         while self.client.status(call) == RUNNING:
+            if not self._scheduled(call):
+                return True
             if self.clock() >= deadline:
                 return False
             self.sleep(2.0)
@@ -703,6 +742,19 @@ class ModalSdkClient:
         except Exception as exc:  # noqa: BLE001 - the call raised: that is the reason
             return failure_detail(None, exc)
         return failure_detail(result)
+
+    def scheduled(self, call_id: str) -> bool:
+        """Modal placed the call's input on a worker (a task id), or it already ended.
+        False only while its input is pending with no task (no GPU worker of the shape
+        free: "waiting to be scheduled"); any doubt reads True (billed)."""
+        graph = self.modal.FunctionCall.from_id(call_id).get_call_graph()
+        inputs = [i for i in graph if getattr(i, "function_call_id", None) == call_id] or list(graph)
+        if not inputs:
+            return True  # no input info (retention, an old call): not known
+        for i in inputs:  # modal.call_graph.InputStatus: PENDING is 0 (an IntEnum)
+            if getattr(i, "task_id", None) or int(getattr(i, "status", 0) or 0) != 0:
+                return True
+        return False
 
     def cancel(self, call_id: str) -> None:
         self.modal.FunctionCall.from_id(call_id).cancel(terminate_containers=True)

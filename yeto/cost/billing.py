@@ -402,8 +402,15 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
             start = max(r.created_at, covered_until(r))
             if r.key in next_start and (r.released_at is None or r.released_at > next_start[r.key]):
                 r = replace(r, released_at=next_start[r.key])
-            items.append(_span_cost(r, start, now, _pool_call_rate(r),
-                                    "sampler pool call: estimate after its app's newest billed hour"))
+            note = "sampler pool call: estimate after its app's newest billed hour"
+            if r.attrs.get("pending"):  # recorded at its spawn: bills from its scheduled_at only
+                scheduled = r.attrs.get("scheduled_at")
+                if scheduled is None:  # it waited for a GPU worker and never got one: nothing ran
+                    start = r.released_at if r.released_at is not None else now
+                    note = "sampler pool call: pending (not scheduled on a worker), not billed"
+                else:
+                    start = max(start, float(scheduled))
+            items.append(_span_cost(r, start, now, _pool_call_rate(r), note))
         elif _provider_cost(r.kind) is not None:  # an island provider's machine (nc_lease)
             items.append(_provider_cost(r.kind)(r, now, rates))
         elif r.kind == "ssh_trainer":  # the operator's machines: the inventory's declared price
