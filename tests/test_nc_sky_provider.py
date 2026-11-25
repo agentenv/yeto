@@ -1169,6 +1169,8 @@ def test_nc_pool_prints_the_sky_offer_images(tmp_path, monkeypatch, capsys):
     ("nebius", None, "ubuntu", "sky's nebius default"),
     ("verda", None, "root", "sky's verda default"),
     ("gcp", None, "gcpuser", "sky's gcp default"),
+    ("aws", None, "ubuntu", "sky's aws default"),
+    ("aws", "ami-0abc", "ubuntu", "sky's aws default; image_id ami-0abc may log in as another user, a guess"),
     ("oci", "ocid1.image.x:oraclelinux", "opc", "OCI image ocid1.image.x:oraclelinux"),
     ("oci", None, "ubuntu", "OCI image (sky default)"),
     ("somecloud", None, "ubuntu", "no known default for cloud somecloud, a guess"),

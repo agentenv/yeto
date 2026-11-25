@@ -135,7 +135,8 @@ NO_AUTODOWN_CLOUDS = frozenset({"hyperbolic", "primeintellect", "verda", "yotta"
 DEFAULT_IMAGE_ID = {"verda": "24.04.cuda12.9.docker"}
 # The user sky logs in as on a cloud's VMs (SkyPilot 0.14.3: ``auth.ssh_user`` of
 # ``sky/templates/<cloud>-ray.yml.j2``, a fixed user there), for a cluster handle that carries no
-# ssh_user (Nebius answers None). OCI depends on the image (``oci_ssh_user``); a cloud missing here
+# ssh_user (Nebius answers None). OCI depends on the image (``oci_ssh_user``), and so does AWS
+# (``ssh_user: {{ssh_user}}``: ubuntu on sky's images, a guess on an offer's own AMI); a cloud missing here
 # (or a templated user: fluidstack, runpod, primeintellect) falls back to FALLBACK_SSH_USER.
 SSH_USER_BY_CLOUD = {
     "aws": "ubuntu", "azure": "azureuser", "gcp": "gcpuser", "nebius": "ubuntu", "lambda": "ubuntu",
@@ -234,6 +235,8 @@ def default_ssh_user(cloud: str, image: Any = None) -> tuple[str, str]:
     """``(user, source)``: the user sky logs in as on ``cloud`` (with ``image``)."""
     if cloud == "oci":
         return oci_ssh_user(image), f"OCI image {image or '(sky default)'}"
+    if cloud == "aws" and image:  # sky's AWS user follows the AMI: fixed for sky's own images only
+        return SSH_USER_BY_CLOUD["aws"], f"sky's aws default; image_id {image} may log in as another user, a guess"
     if cloud in SSH_USER_BY_CLOUD:
         return SSH_USER_BY_CLOUD[cloud], f"sky's {cloud} default"
     return FALLBACK_SSH_USER, f"no known default for cloud {cloud or '(unknown)'}, a guess"
