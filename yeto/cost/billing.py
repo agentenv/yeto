@@ -434,6 +434,10 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
                 # its cloud's syncer row, else the dearest one (never 0)
                 rate, note, _conservative = prices.syncer_vm_usd_h(str(r.attrs.get("cloud") or ""))
             items.append(_span_cost(r, r.created_at, now, rate, note))
+        elif r.kind == "sky_storage":  # an (empty) bucket of a sky island's volume: storage, not compute
+            end = r.released_at if r.released_at is not None else now
+            items.append(ItemCost(r.key, r.kind, r.name, r.created_at, end, r.open, billed_usd=0.0,
+                                  note="a bucket sky created for an island volume (storage, not compute)"))
         else:  # modal_call: its cost is in its app; listed for liveness / utilization
             end = r.released_at if r.released_at is not None else now
             items.append(ItemCost(r.key, r.kind, r.name, r.created_at, end, r.open, billed_usd=0.0,

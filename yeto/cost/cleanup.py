@@ -15,7 +15,12 @@ Rules:
   (``yeto.launch.nc.cli.down``: refuses tickets it did not create). The ledger
   kinds of island providers (``nc_lease``) are dispatched through the provider
   registry (``yeto.launch.pool.provider``): each registers its release.
-* Order: FunctionCalls, then apps, then NC leases, then sky clusters. Each
+* A ``sky_storage`` (a bucket sky created for a sky island's volume) goes through
+  ``yeto.launch.sky_storage_ledger.delete``: only the exact bucket name yeto derives from
+  the run's cluster prefix, after the sky clusters, and only when no island sky cluster of
+  the run is still open (one that may mount it: never touched); a bucket that holds data
+  sky would not delete is left (``release_skipped``).
+* Order: FunctionCalls, then apps, then NC leases, then sky clusters, then their buckets. Each
   success is recorded as ``release`` in the ledger (a rerun skips it); each
   failure as ``release_failed`` (a rerun retries it).
 """
@@ -32,7 +37,7 @@ from yeto.launch.pool import provider as providers
 
 from .ledger import Resource, ResourceLedger
 
-ORDER = {"modal_call": 0, "modal_app": 1, "ssh_trainer": 2, "sky_cluster": 3,
+ORDER = {"modal_call": 0, "modal_app": 1, "ssh_trainer": 2, "sky_cluster": 3, "sky_storage": 4,
          **{kind: e.cleanup_order for kind, e in providers.ledger_kinds().items()}}
 
 
@@ -42,6 +47,7 @@ class CleanupOps(Protocol):
     def modal_app_ids_named(self, name: str, created_after: float) -> list[str] | None: ...
     def nc_release(self, account: int, ticket: str) -> dict[str, Any]: ...
     def sky_down(self, cluster: str) -> bool: ...
+    def sky_storage_delete(self, name: str, attrs: dict[str, Any]) -> tuple[str, str]: ...
 
 
 class ProductionCleanupOps:
@@ -100,6 +106,13 @@ class ProductionCleanupOps:
                 raise
             print(f"[cleanup] sky cluster {cluster}: does not exist (already down): released")
         return True
+
+    def sky_storage_delete(self, name: str, attrs: dict[str, Any]) -> tuple[str, str]:
+        """The bucket sky created for a sky island's volume (sky_storage_ledger.delete):
+        ``(released | skipped | failed, what happened)``."""
+        from yeto.launch import sky_storage_ledger
+
+        return sky_storage_ledger.delete(name, attrs)
 
 
 @dataclass
@@ -170,6 +183,25 @@ def _release_one(r: Resource, ops: CleanupOps, ledger: ResourceLedger, dry_run: 
         if ok:
             ledger.released("sky_cluster", r.id, r.name, by="cleanup")
         return Action(r.key, f"sky down {r.id}", bool(ok), "" if ok else "not confirmed")
+    if r.kind == "sky_storage":
+        from yeto.launch import sky_storage_ledger
+
+        # an island cluster still open (its down failed, or another name of the same island)
+        # may still mount the bucket: never touched before every one is confirmed gone
+        mounted = sky_storage_ledger.open_island_clusters(ledger)
+        if dry_run:
+            return Action(r.key, f"would delete bucket {r.id}"
+                          + (f" once sky cluster(s) {', '.join(mounted)} are confirmed down" if mounted else ""), True)
+        if mounted:
+            why = f"kept: sky cluster(s) {', '.join(mounted)} not confirmed terminated"
+            ledger.release_skipped("sky_storage", r.id, r.name, why)
+            return Action(r.key, f"delete bucket {r.id}", False, why)
+        delete = getattr(ops, "sky_storage_delete", None)
+        if delete is None:
+            return Action(r.key, f"delete bucket {r.id}", False, "these cleanup ops cannot delete a bucket")
+        status, what = delete(r.id, dict(r.attrs))
+        sky_storage_ledger.record_outcome(ledger, r.id, status, what, by="cleanup")
+        return Action(r.key, f"delete bucket {r.id}", status == sky_storage_ledger.RELEASED, what)
     return Action(r.key, "unknown kind", False)
 
 
