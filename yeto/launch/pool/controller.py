@@ -820,8 +820,8 @@ def _store_pool(cfg: dict[str, Any], pc: Any, ops: Any, objects: Any, name: str,
         raise SystemExit(f"pool {cfg['shard_base']}: refused: {error}") from None
     try:
         attach = getattr(ops, "attach_control", None)
-        if callable(attach):  # the provider's own record (an ssh pool's holds) into the store, before any tick
-            attach(control)
+        # the provider's own record (an ssh pool's holds) into the store, before any tick
+        provider_origin = attach(control) if callable(attach) else None
         doc = control.state.load(legacy=state)
         control.members = _member_table(ops, name, str(cfg["shard_base"]))
         if pc.index_limit is None:
@@ -848,4 +848,9 @@ def _store_pool(cfg: dict[str, Any], pc: Any, ops: Any, objects: Any, name: str,
         pool.log(f"pool {name}: imported the local state {control.state.imported_from} into the store once "
                  f"({control.state.key}); the store holds it from now on")
         pool._event("state_imported", source=control.state.imported_from, key=control.state.key)  # noqa: SLF001
+    if isinstance(provider_origin, dict) and provider_origin.get("source") == "local":
+        key = store_state.provider_record_key(name, control.lock.token)
+        pool.log(f"pool {name}: imported the provider's local record {provider_origin['path']} into the store "
+                 f"once ({key}); the store holds it from now on")
+        pool._event("provider_state_imported", source=provider_origin["path"], key=key)  # noqa: SLF001
     return pool

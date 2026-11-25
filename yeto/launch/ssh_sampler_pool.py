@@ -74,8 +74,8 @@ any other slot's node is free, so the replacement starts on a spare, not on the 
 node. A stop the lost node never got runs before the next start there
 (:class:`SshNodeProvider`). On the store control plane (``rollout.control_plane: store``)
 the tickets, holds and owed stops live in the run store
-(``fleet/pools/<pool>/provider.json``), so a controller that takes the pool over on
-another host keeps them.
+(``fleet/pools/<pool>/provider/<token>.json``, one record per lock holder), so a
+controller that takes the pool over on another host keeps them.
 
 Reach: every ``ssh`` to a node (preflight, code upload, start, probe, stop) goes
 through the node's ``reach`` in the inventory (:func:`yeto.node.transport.reach_options`):
@@ -745,12 +745,18 @@ class SshNodeProvider:
 
     Where the record lives: on the local control plane, this provider's state file on
     the control host (``state_path``). On the store control plane (:meth:`attach_store`,
-    from the pool's ``store_state.PoolControl``) it is ``fleet/pools/<pool>/provider.json``
-    in the run store, written only under the pool's store lock: every save checks the
-    lock's fencing token first, so a fenced controller raises ``LockLost`` instead of
-    writing. A controller that takes the pool over on another host then reads the
-    tickets, the holds and the owed stops from the store. The local file is imported
-    once (when the store has no record yet) and from then on only mirrored."""
+    from the pool's ``store_state.PoolControl``) it is in the run store, one record per
+    holder of the pool's store lock: ``fleet/pools/<pool>/provider/<token>.json``. A holder
+    writes only its own token's record, each save after ``StoreLock.guard`` (a fenced
+    holder raises ``LockLost`` and writes nothing); readers take the record of the highest
+    token. A controller that takes the pool over (on another host) reads the newest earlier
+    record and writes its own at once: the tickets, the holds and the owed stops carry over,
+    and the local file is imported only when the store has no record at all (from then on
+    it is only mirrored). A write of the fenced holder that lands late (its guard passed,
+    then it stalled past its lease while the next holder claimed the pool and read)
+    replaces nothing, but the next holder does not see it: the guard renews the lease at
+    half its ``ttl_s``, so that takes a stall of more than half the lease (less the clock
+    skew between the hosts) between the guard and the write."""
 
     kind = KIND
     caps = provider_caps(KIND)  # yeto/cloud/capabilities.json
@@ -768,24 +774,43 @@ class SshNodeProvider:
         if bad:
             raise ValueError(f"ssh provider: slots {bad} have no node (nodes: {[n.name for n in conf.nodes]})")
 
-    def attach_store(self, objects: Any, key: str, lock: Any) -> None:
-        """Keep the record in the run store at ``key`` under the pool's store ``lock``
-        (class doc). The store's record wins; without one the local file is imported once."""
-        raw = objects.read(key)
-        doc = json.loads(raw) if raw is not None else None  # unreadable: raises (never a fresh, empty record)
-        imported = None
-        if doc is None:
-            rows = self._local_rows()
-            imported = str(self.state_path) if self.state_path.exists() else None
+    def attach_store(self, objects: Any, pool: str, lock: Any) -> dict[str, Any]:
+        """Keep the record in the run store under pool ``pool``'s store ``lock`` (class doc):
+        the newest record of this or an earlier lock holder, else the local file imported once; the
+        record is written under this holder's token at once (a later attach elsewhere finds
+        it, not that host's file). Returns where the record came from (``source``: ``store``,
+        ``local`` or ``new``, and ``key`` / ``path``)."""
+        from .pool import store_state  # noqa: PLC0415
+
+        found = store_state.read_provider_record(objects, pool, upto=lock.token)  # unreadable: raises
+        if found is not None:
+            rows, origin = found[1]["tickets"], {"source": "store", "key": found[0]}
+        elif self.state_path.exists():
+            rows, origin = self._local_rows(), {"source": "local", "path": str(self.state_path)}
         else:
-            rows = doc.get("tickets") if isinstance(doc, dict) else None
-            if not isinstance(rows, dict):
-                raise ValueError(f"ssh provider: the store record {key} holds no tickets")
+            rows, origin = {}, {"source": "new"}
         with self._lock:
-            self._store, self._store_rows = (objects, key, lock), {t: dict(r) for t, r in rows.items()}
-            self.imported_from = imported
-            if doc is None and imported is not None:
-                self._save(self._rows())
+            self._store = (objects, store_state.provider_record_key(pool, lock.token), lock)
+            self._store_rows = {t: dict(r) for t, r in rows.items()}
+            self.imported_from = origin.get("path") or (found[1].get("imported_from") if found else None)
+            self._save(self._rows())
+        self._prune(objects, pool, lock.token)
+        return origin
+
+    @staticmethod
+    def _prune(objects: Any, pool: str, token: int) -> None:
+        """Best effort: drop the records of holders before the previous one, and the first
+        version's single record (this holder's record is in the store now)."""
+        from .pool import store_state  # noqa: PLC0415
+
+        try:
+            older = [t for t in store_state.provider_tokens(objects, pool) if t < token]
+            for t in older[:-1]:
+                objects.delete(store_state.provider_record_key(pool, t))
+            if objects.read(store_state.provider_key(pool)) is not None:
+                objects.delete(store_state.provider_key(pool))
+        except Exception:  # noqa: BLE001 - never read past the newest record: pruned at the next attach
+            pass
 
     def _local_rows(self) -> dict[str, dict[str, Any]]:
         try:
@@ -801,7 +826,7 @@ class SshNodeProvider:
     def _save(self, rows: dict[str, dict[str, Any]]) -> None:
         if self._store is not None:
             objects, key, lock = self._store
-            lock.check(force=True)  # one LIST: no write after another controller took the pool (LockLost)
+            lock.guard()  # LockLost once another controller took the pool; a store blip inside the lease passes
             doc = {"tickets": rows, "control": {"token": lock.token, "holder": lock.holder, "saved_at": self.clock()},
                    **({"imported_from": self.imported_from} if self.imported_from else {})}
             objects.write(key, json.dumps(doc, indent=1, sort_keys=True).encode())
@@ -986,12 +1011,11 @@ class SshSamplerPoolOps:
         self._shard_of: dict[str, str] = {}
         self._node_route: Any = None
 
-    def attach_control(self, control: Any) -> None:
+    def attach_control(self, control: Any) -> dict[str, Any]:
         """The store control plane (``store_state.PoolControl``): the provider's tickets, holds
-        and owed stops move into the run store next to the pool's state, under its lock."""
-        from .pool import store_state  # noqa: PLC0415
-
-        self.provider.attach_store(control.state.objects, store_state.provider_key(control.state.pool), control.lock)
+        and owed stops move into the run store next to the pool's state, under its lock
+        (:meth:`SshNodeProvider.attach_store`; returns where the record came from)."""
+        return self.provider.attach_store(control.state.objects, control.state.pool, control.lock)
 
     def node_route_for(self, node: Node) -> Any:
         """The node runtime's assignments (``yeto.node.route``): in the run's object store, or
