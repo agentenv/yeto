@@ -543,6 +543,58 @@ def test_the_wait_for_a_trainable_group_starts_at_the_first_pull_after_a_kept_on
     assert raised.value.yeto_breaker == "trainer.sample_wait"
 
 
+def test_groups_the_feed_itself_drops_stop_the_island_by_sample_wait_while_more_wait(tmp_path):
+    """A run of groups the feed drops before any round judges them (here: wider than the
+    rows) trips trainer.sample_wait at the drop that passes ``wait_s``, with groups still
+    in the buffer -- not only once the buffer runs dry."""
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    wide = tuple(range(1, SHAPE.prompt_length + 2))
+    for i in range(20):
+        writer.write([_sample(0, prompt=wide, index=0), _sample(0, prompt=wide, index=1)], group_key=f"w{i}")
+    now, events = [0.0], []
+
+    def clock():
+        now[0] += 10.0
+        return now[0]
+
+    vmap = VersionMap()
+    vmap.record(0, 0)
+    reader = _buffer(tmp_path)
+    feed = bf.BufferFeed(reader, vmap=lambda: vmap, shape=SHAPE, add_group=print, record=print, wait_s=50,
+                         clock=clock, sleep=lambda s: None, emit=lambda event, **f: events.append((event, f)))
+    with pytest.raises(bf.BufferFeedError, match="were all dropped") as raised:
+        feed.pull()
+    assert raised.value.yeto_breaker == "trainer.sample_wait"
+    assert feed.dropped[bf.OVER_LENGTH_REASON] < 20 and reader.read_cursor < 20  # groups were left
+    [trip] = [f for event, f in events if event == "rl_breaker" and f.get("state") == "trip"]
+    assert trip["name"] == "trainer.sample_wait" and 50 < trip["value"] <= 70
+
+
+def test_after_dropped_groups_an_empty_buffer_waits_from_the_first_pull_not_kept(tmp_path):
+    """Groups dropped, then nothing: the wait runs from the first pull after the last kept
+    group (t=0), not from the pull that found the buffer empty (t=50)."""
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    writer.write([_sample(7, index=0), _sample(7, index=1)], group_key="never-published")
+    now, events = [0.0], []
+
+    def sleep(seconds):
+        now[0] += 10.0
+
+    vmap = VersionMap()
+    vmap.record(0, 0)
+    feed = bf.BufferFeed(_buffer(tmp_path), vmap=lambda: vmap, shape=SHAPE, add_group=print, record=print,
+                         wait_s=100, clock=lambda: now[0], sleep=sleep,
+                         emit=lambda event, **f: events.append((event, f)))
+    assert feed.pull()["min_steps"] == (None, None)
+    feed.drop()  # the round's collector: a version this trainer never published
+    now[0] = 50.0
+    with pytest.raises(bf.BufferFeedError, match="the 1 groups pulled since were all dropped"):
+        feed.pull()
+    [trip] = [f for event, f in events if event == "rl_breaker" and f.get("state") == "trip"]
+    # stopped at t=110 (100 s after the first pull not kept), after 110 s without a trainable group
+    assert now[0] == 110.0 and trip["name"] == "trainer.sample_wait" and trip["value"] == 110.0
+
+
 def test_a_pause_for_an_unreadable_lease_is_not_a_wait_for_groups(tmp_path):
     """As on the core reader: while the incarnation gate cannot read a lease the group is
     neither trained nor dropped, and that pause does not count toward trainer.sample_wait."""
