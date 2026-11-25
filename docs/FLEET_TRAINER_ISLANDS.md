@@ -42,26 +42,43 @@ The flags in `fleet.trainer_argv` are the same as for `synced_group`. A count qu
 the declared islands, because a count does not follow islands that join and leave. Leave
 both quorum flags out to get `--rl-sync-quorum-theta 1.0`, or give a theta.
 
+A round that was open when an island was removed or moved can stall the merge, see
+[Limits today](#limits-today).
+
 ## What runs
 
 `yeto run up` starts:
 
 - **The syncer launch.** It is what `run up` starts as its trainer. It runs the syncer only
-  and records its address and term in the run store (`fleet/syncer.json`).
+  and records its address and term in the run store (`fleet/syncer.json`). A syncer
+  cluster whose status cannot be read is asked through the cluster's job table first. The
+  syncer launch ends only when the job ended in failure, or when the cluster stayed
+  unreadable or down for 300 s in a row.
 - **One island launch per island.** The trainer worker starts each one as soon as the
   syncer record exists. Island k is learner k, trains from `trainer<k>/` in the store,
   consumes the shards of its own pools (`<shard_base>-i<k>-<n>`) and follows only their
   member tables (`YETO_RL_MEMBER_LANES=i<k>`). Its cluster prefix is `<run>-i<k>`.
 - **The trainer worker.** It runs under the rollout controller's supervisor, next to the
   pool workers. Every 15 s it reads the newest desired state and reconciles each trainer
-  member. If its thread dies the supervisor restarts it, and it adopts the island launches
-  that are still running. It never starts a second launch of an island.
+  member. A step that fails (a store read error) is retried with a backoff of up to
+  300 s. If its thread dies the supervisor restarts it, and it adopts the island launches
+  that are still running. It never starts a second launch of an island. When another
+  controller takes the fleet over (the controller is fenced), this worker stops acting on
+  any island.
 
 Each island launch is supervised on its own. An infrastructure failure relaunches that
 island only, at most 3 times. The other launches never notice. A configuration error or
 a strict failure marks the island `failed`. A normal end marks it `done`. The worker keeps
 its record in `fleet/trainers/<k>/launch.json`, next to the island's lifecycle record
 `state.json` and its learner id claim `learner.json`.
+
+The island launches are processes of the host that runs `yeto run up`. Each record names
+that host. **Restart `yeto run up` on the same host.** A worker on another host cannot see
+those processes, so it leaves every island recorded by another host alone and logs an
+error naming that host. It does not adopt, relaunch or start those islands a second time.
+
+The run's spend (`run.budget`) bills each island launch from its record: an island added
+while the fleet trains counts from its start, and a removed island counts up to its end.
 
 `yeto run stop` stops every island launch. `yeto run down` downs the syncer launch and
 every island launch.
@@ -111,14 +128,11 @@ shards `<shard_base>-i<k>-<n>`, store `trainer<k>/`, and the fleet's one task le
 ### Removing an island
 
 `remove` drops the trainer member and its sampler pools from the desired state. The
-worker writes the island's STOP (`fleet/trainers/<k>/STOP`), and the island's launch
-stops it and releases its machines. The pools drain: their claims go back to the ledger
-and their shards are retired. The other islands keep merging.
-
-The syncer frees the island's place in the rounds in flight at once when the island sent
-LEAVE. When the island was torn down without it, those rounds wait up to its lease
-(`--rl-sync-island-lease-s`) first, and the syncer drops the island when the lease runs
-out.
+worker writes the island's STOP (`fleet/trainers/<k>/STOP`). It writes the STOP again
+while the launch runs, because a launch that was still starting clears it once. The
+island's launch then tears its machines down. The pools drain: their claims go back to
+the ledger and their shards are retired. The other islands keep merging. The merge can
+stall once, see [Limits today](#limits-today).
 
 ### Moving an island
 
@@ -129,6 +143,10 @@ releases. The syncer sees the island away for a short time and back under its id
 catches up to the merged weights before it answers rounds again. Its pools and their
 shards stay as they are.
 
+A move costs the island's training since its last policy release
+(`--rl-release-every`): the new launch starts from the newest release in `trainer<k>/`.
+It also stalls the merge once, like a remove.
+
 ### Shape checks
 
 An added or moved island must have the fleet's trainer shape. The full-parameter merge
@@ -136,6 +154,31 @@ needs the same fragments on every island (`--fragments`, TP and PP). The worker 
 fleet's shape (`--rl-fleet-trainer-shape`) to every launch it starts for an added or moved
 island. The command's dry run checks it, so an island of another shape (for example TP 2
 in a TP 1 fleet) is refused with exit 2 before anything is written or ordered.
+
+## Limits today
+
+- **No LEAVE on remove and move.** Every remove and every move tears the island's
+  machines down without the island telling the syncer it leaves. The syncer sees the
+  connection drop and takes the island out of the pool, so the following rounds no longer
+  expect it. A round that was already open and had asked the island for its delta still
+  waits for it. Until the syncer frees an island's place in open rounds when its lease
+  runs out, that round merges without the island only at its soft deadline
+  (`--rl-sync-soft-deadline-s`). With no soft deadline set, it waits for the quorum
+  timeout, 900 s by default. With the default `--rl-sync-quorum-theta 1.0`, the fleet's
+  outer merge stalls that long once per remove or move. Training on the other islands
+  goes on.
+
+  `yeto run up` and its dry run print a warning about this when `fleet.trainer_argv`
+  sets no soft deadline. If you need a shorter stall, set `--rl-sync-soft-deadline-s` in
+  `fleet.trainer_argv`.
+  Make it longer than the slowest island's local training between two syncs. A round
+  opens before the islands train for it, so a shorter deadline also cuts a slow island
+  out of rounds while every island is healthy. Its late delta is carried into a later
+  round, and it is refused once its base lags more than `--rl-sync-max-base-lag`.
+- **A move loses progress.** It loses the island's training since its last release (see
+  [Moving an island](#moving-an-island)).
+- **Same host.** `yeto run up` must be restarted on the host that started the island
+  launches (see [What runs](#what-runs)).
 
 ## Code
 
