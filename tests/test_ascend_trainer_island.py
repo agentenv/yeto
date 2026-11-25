@@ -313,9 +313,9 @@ def test_no_secret_value_reaches_a_command_line(tmp_path):
     never their values."""
     spec = _spec(tmp_path)
     secret = "s3cr3t-SENTINEL-0123456789"
-    script = sti.start_script(spec, 0, {"YETO_STORE_SECRET_KEY": secret, "YETO_ISLAND_HMAC_KEY": secret + "h"},
+    script = sti.start_script(spec, 0, {"YETO_STORE_SECRET_KEY": secret, "YETO_STORE_TOKEN": secret + "t"},
                               sti.remote_paths("asc", "asc-l0-ssh", 0))
     holders = [line for line in script.splitlines() if secret in line]
-    assert holders == [f"export YETO_ISLAND_HMAC_KEY={secret}h", f"export YETO_STORE_SECRET_KEY={secret}"]
+    assert holders == [f"export YETO_STORE_SECRET_KEY={secret}", f"export YETO_STORE_TOKEN={secret}t"]
     job = script[script.index("( setsid bash -c "):]
     assert secret not in job and "YETO_STORE_SECRET_KEY" in job  # kept by name across the activation
