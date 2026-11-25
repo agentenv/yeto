@@ -417,6 +417,7 @@ class SkyProvider:
         from ..pool.group import release_placed
         from ..topology import multinode_network_tier
 
+        self.last_offer_key = None  # set again once this order picked its offer
         free = [s for s in self.slots if self.account_free(s)]
         if not free:
             raise RuntimeError(f"sky provider: no free slot for a group of {n}")
