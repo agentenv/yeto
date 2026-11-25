@@ -198,6 +198,17 @@ def test_rl_tape_with_pool_events_has_no_sft():
     assert "sft" not in r.page_view()
 
 
+def test_released_slots_are_a_syncer_event():
+    """pool_slots_released: the rounds in flight stopped waiting for an island that left or
+    stayed away for one lease (syncer tape); the syncer events table lists it."""
+    st = sft.SftState()
+    rec = {"kind": "pool_slots_released", "syncer_epoch": 0, "island_id": 1, "reason": "lease", "steps": [4],
+           "time_unix": T0}
+    assert sft.is_syncer_tape(rec)
+    st._tape(rec, T0)
+    assert list(st.events) == [[T0, "pool_slots_released", 1, "tape", None]]
+
+
 def test_rl_view_has_no_sft(tmp_path):
     r = Reducer()
     load_all(r, [str(FX / "kill44")])

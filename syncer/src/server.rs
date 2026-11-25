@@ -4530,7 +4530,9 @@ async fn scheduler(
         }
         let expired = expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
         if let Some(lease) = absence_lease {
-            release_absent_islands(&registry, &mut inflight, &mut absent_since, lease, Instant::now());
+            for (id, steps) in release_absent_islands(&registry, &mut inflight, &mut absent_since, lease, Instant::now()) {
+                append_slots_released(cfg.event_tape.as_deref(), cfg.syncer_epoch, id, "lease", &steps);
+            }
         }
         for member in &expired {
             lease_expired.insert(*member);
@@ -5502,9 +5504,13 @@ async fn scheduler(
                                 // It announced its departure (LEAVE): it answers no open
                                 // round, so release its unanswered slots now, as a lease
                                 // expiry would only later; the rounds close on the others.
-                                for round in inflight.iter_mut() {
-                                    round.forget_unanswered(member);
-                                }
+                                // An earlier generation that is gone (a bare disconnect
+                                // this one had not rebound yet) answers none either.
+                                let steps = {
+                                    let registry = registry.lock().unwrap();
+                                    release_island_slots(&registry, &mut inflight, member.learner_id, Some(member))
+                                };
+                                append_slots_released(cfg.event_tape.as_deref(), cfg.syncer_epoch, member.learner_id, "left", &steps);
                             } else if absence_lease.is_some() {
                                 // A bare disconnect may be a short outage: its slots go
                                 // only after one lease without a new generation.
@@ -7498,14 +7504,15 @@ async fn expire_member_leases(
 /// lease expiry would have: a disconnected generation can no longer renew, so
 /// `expire_member_leases` never sees it. An island that connected again keeps
 /// its slots (its push or a rebind answers them); accepted pushes always stay.
-/// Returns the released island ids in id order.
+/// Returns each released island id (in id order) with the steps of the rounds
+/// it was released from.
 fn release_absent_islands(
     registry: &Registry,
     inflight: &mut [Round],
     absent_since: &mut HashMap<u32, Instant>,
     lease: Duration,
     now: Instant,
-) -> Vec<u32> {
+) -> Vec<(u32, Vec<u64>)> {
     let registry = registry.lock().unwrap();
     absent_since.retain(|id, _| {
         !registry.groups.keys().chain(registry.closing.keys()).any(|member| member.learner_id == *id)
@@ -7516,21 +7523,54 @@ fn release_absent_islands(
         .map(|(id, _)| *id)
         .collect();
     released.sort_unstable();
-    for id in &released {
-        absent_since.remove(id);
-        let mut rounds = 0;
-        for round in inflight.iter_mut() {
-            let gone: Vec<Member> =
-                round.expected_members.iter().copied().filter(|member| member.learner_id == *id).collect();
-            let mut forgot = false;
-            for member in gone {
-                forgot |= round.forget_unanswered(member);
-            }
-            rounds += usize::from(forgot);
-        }
-        warn!(learner_id = id, rounds, "island stayed disconnected for a lease; released its open slots");
-    }
     released
+        .into_iter()
+        .map(|id| {
+            absent_since.remove(&id);
+            (id, release_island_slots(&registry, inflight, id, None))
+        })
+        .collect()
+}
+
+/// Drop the unanswered slots of island `id` from the rounds in flight: those
+/// of `leaving` and of every generation of it that is neither connected nor
+/// closing (a closing one may still have a PUSH queued). Returns the steps of
+/// the rounds that lost a slot.
+fn release_island_slots(registry: &RegistryState, inflight: &mut [Round], id: u32, leaving: Option<Member>) -> Vec<u64> {
+    let gone = |member: &Member| {
+        member.learner_id == id
+            && (Some(*member) == leaving
+                || !(registry.groups.contains_key(member) || registry.closing.contains_key(member)))
+    };
+    let mut steps = Vec::new();
+    for round in inflight.iter_mut() {
+        let members: Vec<Member> = round.expected_members.iter().copied().filter(|m| gone(m)).collect();
+        let mut forgot = false;
+        for member in members {
+            forgot |= round.forget_unanswered(member);
+        }
+        if forgot {
+            steps.push(round.t);
+        }
+    }
+    steps
+}
+
+/// `pool_slots_released` tape record (none when no round lost a slot): the
+/// rounds in flight stopped waiting for island `id`, because it left
+/// (`left`) or stayed away for one lease after a bare disconnect (`lease`).
+fn append_slots_released(path: Option<&std::path::Path>, syncer_epoch: u64, id: u32, reason: &str, steps: &[u64]) {
+    if steps.is_empty() {
+        return;
+    }
+    warn!(learner_id = id, reason, ?steps, "rounds in flight stopped waiting for a departed island");
+    let steps = steps.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+    append_pool_record(
+        path,
+        "pool_slots_released",
+        syncer_epoch,
+        &format!("\"island_id\":{id},\"reason\":\"{reason}\",\"steps\":[{steps}]"),
+    );
 }
 
 /// MSG_ERROR text of a lease expiry; the Python client redials with a new
@@ -14443,6 +14483,95 @@ mod tests {
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
+    /// Generation A of island 1 holds the PULL of step 1 and drops without
+    /// LEAVE; generation B registers, sends LEAVE and closes before its HELLO
+    /// is handled (no catch-up, no rebind). B's departure releases A's slot:
+    /// step 1 commits on island 0 under θ = 1.0 at once (no soft deadline, a
+    /// 30 s lease), with a `pool_slots_released` record (reason `left`).
+    #[tokio::test]
+    async fn a_leave_releases_the_slot_of_a_dropped_generation_in_the_scheduler() {
+        let layout = Layout {
+            fragments: (0..2)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![4],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let directory = unique_test_directory("leave-releases-dropped-generation");
+        let tape = directory.join("tape.jsonl");
+        let mut cfg = round_test_config(4);
+        cfg.learners = 2;
+        cfg.quorum = 1;
+        cfg.max_base_lag = Some(64);
+        cfg.quorum_timeout_s = 3600;
+        cfg.event_tape = Some(tape.clone());
+        cfg.membership.quorum_rule = crate::membership::QuorumRule::Capacity { theta: 1.0, q_min: 1 };
+        cfg.membership.lease = Some(Duration::from_secs(30));
+        let registry: Registry =
+            Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg.membership.clone(), 2))));
+        let budget_cutoff = Arc::new(BudgetCutoff::new(false, Duration::from_secs(cfg.quorum_timeout_s)));
+        let (events, events_rx) = mpsc::channel(64);
+        let (zero, a, b) = (member(0, 1), member(1, 1), member(1, 2));
+        let (zero_control, mut zero_frames) = mpsc::channel(1024);
+        let (a_control, mut a_frames) = mpsc::channel(1024);
+        let (b_control, _b_frames) = mpsc::channel(1024);
+        let zero_group = scheduler_test_group(zero, &layout, zero_control);
+        let a_group = scheduler_test_group(a, &layout, a_control);
+        let b_group = scheduler_test_group(b, &layout, b_control);
+        for group in [zero_group, a_group] {
+            registry.lock().unwrap().register_group(group.clone(), Instant::now()).unwrap();
+            events.send(Event::Hello { group }).await.unwrap();
+        }
+        for fragment_id in 0..2 {
+            let init = Event::Init { member: zero, fragment_id, values: vec![0.0; 4], sha256: [0; 32] };
+            events.send(init).await.unwrap();
+        }
+        let wait_for = |needle: &'static str| {
+            let tape = tape.clone();
+            async move {
+                loop {
+                    let text = std::fs::read_to_string(&tape).unwrap_or_default();
+                    if text.contains(needle) {
+                        return text;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        let driver = async {
+            let pull = next_pull(&mut zero_frames).await;
+            assert_eq!((pull.1, pull.2), (1, 1));
+            assert_eq!(next_pull(&mut a_frames).await, pull);
+            let mut push = test_push_for(0, 0);
+            push.fragment_id = pull.0;
+            push.global_step = 1;
+            push.round_attempt = 1;
+            push.outer_gradient = vec![0.5; 4];
+            events.send(Event::Push { member: zero, push }).await.unwrap();
+            registry.lock().unwrap().unregister(a);
+            events.send(Event::Disconnected { member: a }).await.unwrap();
+            registry.lock().unwrap().register_group(b_group.clone(), Instant::now()).unwrap();
+            registry.lock().unwrap().unregister(b);
+            events.send(Event::Hello { group: b_group }).await.unwrap();
+            events.send(Event::Leave { member: b, reason: 2 }).await.unwrap();
+            events.send(Event::Disconnected { member: b }).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), wait_for("\"sync/responders\""))
+                .await
+                .expect("step 1 still waits for the dropped generation")
+        };
+        let text = tokio::select! {
+            result = scheduler(cfg, events_rx, registry.clone(), budget_cutoff) => panic!("scheduler ended: {result:?}"),
+            text = driver => text,
+        };
+        let record = text.lines().find(|line| line.contains("\"sync/responders\"")).unwrap();
+        assert!(record.contains("\"step\":1,") && record.contains("\"responded\":[0],"), "{record}");
+        let released = text.lines().find(|line| line.contains("\"kind\":\"pool_slots_released\"")).expect("no release record");
+        assert!(released.contains("\"island_id\":1,\"reason\":\"left\",\"steps\":[1]"), "{released}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
     /// The syncer-side tape records the dashboard draws from: the syncer's
     /// config once training starts, each island's connect / disconnect, a
     /// `round_open` per PULLed attempt before its merge, a
@@ -15324,7 +15453,8 @@ mod tests {
         let lease = Duration::from_secs(5);
         let (gone, other) = (member(0, 10), member(1, 20));
         let registry = Arc::new(Mutex::new(RegistryState::default()));
-        let open = test_round(vec![gone, other]);
+        let mut open = test_round(vec![gone, other]);
+        open.t = 3;
         let mut answered = test_round(vec![gone, other]);
         answered.pushes.insert(gone, test_push(5));
         let healthy = test_round(vec![other]);
@@ -15334,7 +15464,8 @@ mod tests {
         let early = start + Duration::from_secs(4);
         assert!(release_absent_islands(&registry, &mut rounds, &mut absent, lease, early).is_empty());
         assert_eq!(rounds[0].expected_members, vec![gone, other], "not before one lease");
-        assert_eq!(release_absent_islands(&registry, &mut rounds, &mut absent, lease, start + lease), vec![0]);
+        let released = release_absent_islands(&registry, &mut rounds, &mut absent, lease, start + lease);
+        assert_eq!(released, vec![(0, vec![3])], "only the round it still owed");
         assert_eq!(rounds[0].expected_members, vec![other]);
         assert_eq!(rounds[1].expected_members, vec![gone, other], "an accepted push keeps its slot");
         assert_eq!(rounds[2].expected_members, vec![other], "a round without it is untouched");
@@ -15357,6 +15488,41 @@ mod tests {
             assert_eq!(rounds[0].expected_members, vec![old, other]);
             assert!(absent.is_empty(), "its clock stops while a generation is around");
         }
+    }
+
+    #[test]
+    fn a_leave_also_releases_an_earlier_generation_it_had_not_rebound() {
+        // Generation 10 disconnected bare holding a slot; generation 11 reconnected and
+        // sent LEAVE before its catch-up rebound that slot.
+        let (old, leaving, other) = (member(0, 10), member(0, 11), member(1, 20));
+        let mut registry = RegistryState::default();
+        let mut rounds = vec![test_round(vec![old, other]), test_round(vec![leaving, other])];
+        rounds[1].t = 8;
+        assert_eq!(release_island_slots(&registry, &mut rounds, 0, Some(leaving)), vec![7, 8]);
+        assert_eq!(rounds[0].expected_members, vec![other]);
+        assert_eq!(rounds[1].expected_members, vec![other]);
+        // A generation still closing may have a PUSH queued: it keeps its slot.
+        registry.closing.insert(old, 1);
+        let mut rounds = vec![test_round(vec![old, other])];
+        assert!(release_island_slots(&registry, &mut rounds, 0, Some(leaving)).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![old, other]);
+    }
+
+    #[test]
+    fn released_slots_are_on_the_tape_only_when_a_round_lost_one() {
+        let dir = std::env::temp_dir().join(format!("yeto-slots-released-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tape = dir.join("tape.jsonl");
+        let _ = std::fs::remove_file(&tape);
+        append_slots_released(Some(&tape), 2, 1, "lease", &[]);
+        assert!(!tape.exists());
+        append_slots_released(Some(&tape), 2, 1, "lease", &[4, 5]);
+        let text = std::fs::read_to_string(&tape).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.starts_with(
+            "{\"kind\":\"pool_slots_released\",\"syncer_epoch\":2,\"island_id\":1,\"reason\":\"lease\",\"steps\":[4,5],\"time_unix\":"
+        ), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn leased_registry(lease_s: u64) -> Registry {

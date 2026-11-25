@@ -149,6 +149,9 @@ def test_event_tracker_syncer_events_and_eval():
     assert evs[("syncer", "rejected")].lines == ["learner 1 x1, learner 2 x1"]
     assert evs[("syncer", "checkpoint")].sev == P2 and "write took 12s" in evs[("syncer", "checkpoint")].lines
     assert evs[("syncer", "joined")].sev == P2 and evs[("syncer", "checkpoint_failed")].sev == P0
+    released = tr.events(view(events=new + [[T0 + 11, "pool_slots_released", 1, "tape", None]],
+                              eval_rows=[eval_row(32)]))
+    assert [(e.key, e.sev) for e in released] == [(("syncer", "pool_slots_released"), P1)]
     assert ("syncer", "late") not in evs
     assert tr.events(view(events=new, eval_rows=[eval_row(32)])) == []  # nothing new
     better = tr.events(view(events=new, eval_rows=[eval_row(32), eval_row(64, loss=0.69)]))

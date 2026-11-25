@@ -765,6 +765,7 @@ With a pool the syncer also writes island-pool records on its event tape
 |---|---|
 | `pool_join` | an island connected (`catch_up` true after the run started) |
 | `pool_leave` | an island left: `reason` from its LEAVE, `lease_expired`, or `disconnected` |
+| `pool_slots_released` | the rounds `steps` stopped waiting for `island_id`: it left (`reason` `left`) or stayed away for one lease after a disconnect without LEAVE (`lease`) |
 | `delta_accepted` / `delta_carried_over` / `delta_rejected` | a push was merged on time, merged with `lag` and `discount`, or refused (`carry_lag_exceeded`, `fenced`, `out_of_round`, ...) |
 | `outer_step` | a round merged: `arrived`, capacities, `timed_out`, normalized `weights` `[island, base_version, weight]`, `absent` |
 | `final_grace_expired` | the final grace window ended with islands missing |
@@ -823,13 +824,19 @@ records `disconnected` (or `lease_expired` after the lease).
 
 Once an island that sent LEAVE has disconnected, and no newer generation of it
 is connected, the syncer drops its unanswered slots from the rounds still
-gathering, so they close on the remaining islands. It does not wait for the
+gathering, so they close on the remaining islands; this includes the slots of
+an earlier generation that dropped without LEAVE and was not rebound yet
+(unless that one is still closing, with a PUSH possibly queued). It does not wait for the
 lease (dynamic membership, every preset). An island that comes back within the
-lease after a LEAVE joins as a new member: its earlier PULLs do not move to the
-new generation. A disconnect without LEAVE may be a short outage: its slots
+lease after a LEAVE (the leaving generation already gone) joins as a new
+member: its earlier PULLs do not move to the new generation. When the newer
+generation is already current as the leaving one disconnects, its unanswered
+slots are rebound to the newer generation after its catch-up, as on any
+reconnect. A disconnect without LEAVE may be a short outage: its slots
 stay until a newer generation rebinds them or, with a lease, the island has had
 no generation connected for one lease after the disconnect; then the syncer
-drops them the same way. Accepted pushes always keep their slot.
+drops them the same way. Accepted pushes always keep their slot. Each release
+that took a slot from an open round writes a `pool_slots_released` record.
 
 At the end of the run the launcher waives the missing `rl_learner_finalized`
 record only for islands whose last syncer `pool_leave` reason is `finished`,
