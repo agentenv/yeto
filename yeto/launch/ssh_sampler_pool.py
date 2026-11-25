@@ -1097,10 +1097,9 @@ class SshSamplerPoolOps:
         # provider.env goes in the assignment's environment (applied last by the runtime, as the
         # route applies it last); PYTHONPATH stays the route's (its start line prepends the tree)
         env = {k: v for k, v in self.conf.env.items() if k != "PYTHONPATH"}
-        # the cards the route limits (sampler_env: Ascend only); elsewhere the sampler sees every card, as before
-        cards = tuple(self.conf.devices) if self.conf.devices is not None and node.device_family == "npu" else None
-        assignment, token = route.assign(m, shards, profile, spec, spec_paths="host", python=python, env=env,
-                                         cards=cards)
+        # no cards in the assignment: the route's own card variables (device_env: numbered as the
+        # container or the venv sees them) reach the sampler through the runtime's environment
+        assignment, token = route.assign(m, shards, profile, spec, spec_paths="host", python=python, env=env)
         token_file, profile_file = f"{p['dir']}/{m.shard}.token", f"{p['dir']}/{m.shard}.profile.json"
         self.put(node, token, token_file, mode="600")
         self.put(node, route.profile_file_text(profile), profile_file, mode="644")

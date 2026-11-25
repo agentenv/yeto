@@ -70,7 +70,7 @@ def test_the_container_runs_the_node_runtime_with_the_routes_own_flags(tmp_path,
     written = next(c for c in new.calls if c[0][0] == "ssh" and f"assignments/{t}.json" in c[0][-1]
                    and c[1].get("input"))
     doc = json.loads(written[1]["input"])
-    assert doc["source"] == "ssh" and doc["spec_paths"] == "host" and doc["cards"] == [0]
+    assert doc["source"] == "ssh" and doc["spec_paths"] == "host" and doc["cards"] is None
     assert doc["spec"]["store"] == "/srv/yeto/run0/store" and doc["token_sha256"] == records.token_digest(token)
     profile = json.loads(next(c for c in new.calls if c[0][0] == "ssh" and "profile.json" in c[0][-1])[1]["input"])
     assert profile["container"] == "process" and profile["paths"]["work"] == "/srv/yeto/run0"
@@ -226,7 +226,7 @@ def _final_env(tmp_path, monkeypatch, *, runtime: str, family: str, node_runtime
 import pytest  # noqa: E402
 
 
-@pytest.mark.parametrize("runtime,family", [("venv", "npu"), ("venv", "cuda"), ("container", "npu")])
+@pytest.mark.parametrize("runtime,family", [("venv", "npu"), ("venv", "cuda"), ("container", "npu"), ("container", "cuda")])
 def test_the_samplers_final_environment_is_the_routes_own(tmp_path, monkeypatch, runtime, family):
     (tmp_path / "old").mkdir()
     (tmp_path / "new").mkdir()
