@@ -628,10 +628,13 @@ function trChips(T){
   var it=[["trained groups",T.trained_groups,""],["dropped as stale",T.stale_groups,"older than max_policy_age"],["no policy identity",T.unidentified_policy_groups,"dropped after a resume"],
     ["off-policy gate dropped",T.gate_dropped,""],["short groups trained",T.incomplete_groups,""],["too small dropped",T.dropped_small_groups,""],["carried over",T.carried_over_groups,""],["padded samples",T.padded_samples,""]];
   var show=[],zero=[],na=[];it.forEach(function(x,i){if(!fin(x[1]))na.push(x[0]);else if(x[1]===0&&i>0)zero.push(x[0]);else show.push(x)});
+  // a fleet island that never trained: its missing counts and policy ages say so once (a run with one trainer keeps n/a)
+  var noAges=fleetOn()&&!Object.keys(T.age_hist||{}).length,never=noAges&&!(T.trained_groups>0),fold=never&&na.length>0;
+  if(fold)na.splice(1,0,"policy ages");
   return '<div class="chips">'+show.map(function(x){return '<span'+(x[2]?' title="'+esc(x[2])+'"':"")+'>'+esc(x[0])+' <b>'+f(x[1],0)+'</b></span>'}).join("")+
     (T.unidentified_starved?'<span class="wn">reader starved <b>'+f(T.unidentified_starved.selections,0)+' selections kept no group</b></span>':"")+
-    '<span title="policy ages of the trained groups, whole run (age:groups)">policy ages <b>'+histS(T.age_hist)+'</b></span>'+
-    (zero.length?'<span>0: '+esc(zero.join(", "))+'</span>':"")+(na.length?'<span>'+(fleetOn()?"not reported":"n/a")+': '+esc(na.join(", "))+'</span>':"")+'</div>'}
+    (fold?"":'<span title="policy ages of the trained groups, whole run (age:groups)">policy ages <b>'+(never?"not trained yet":noAges?"not on the tapes":histS(T.age_hist))+'</b></span>')+
+    (zero.length?'<span>0: '+esc(zero.join(", "))+'</span>':"")+(na.length?'<span>'+(never?"not trained yet":fleetOn()?"not reported":"n/a")+': '+esc(na.join(", "))+'</span>':"")+'</div>'}
 function asyncPanel(){
   var A=V.async,show=!!A&&!fleetView();$("async").hidden=!show;$("navAsync").style.display=A?"":"none";if(!A)return;
   if(!show){aComp(A,null);return}
@@ -698,7 +701,9 @@ function aComp(A,ctx){
       return c.bar+YetoTbl.table('<tr><th>sampler</th><th>round</th><th>time</th>'+COMP_HEAD+'</tr>',c.rows.map(function(x){return '<tr><td>'+esc(x[0])+'</td><td class="num">'+esc(x[1].rollout_id)+'</td><td class="num">'+clock(x[1].ts)+'</td>'+compCells(x[1].compaction,true)+'</tr>'}).join(""))})():"")+
     '<div class="note">alert cards fire on a low summary_ok share and on many compacted trials ending truncated (docs/DASHBOARD.md, compaction_* thresholds); summary tokens n/a = the samples do not report summary_tokens; — = no trial was compacted</div>';
 }
-function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t,i){el("text",{x:sx(t),y:H-6,"text-anchor":["start","middle","end"][i]},s).textContent=clock(t)})}
+function tAxis(s,t0,t1,sx,H){
+  if(fleetOn()&&!(t1-t0>=1)){el("text",{x:sx(t0),y:H-6,"text-anchor":"start"},s).textContent=clock(t0);return}  // one instant (a fleet island's single release): one label, not three on top of each other
+  [t0,(t0+t1)/2,t1].forEach(function(t,i){el("text",{x:sx(t),y:H-6,"text-anchor":["start","middle","end"][i]},s).textContent=clock(t)})}
 function blChart(box,leg,b){
   box.innerHTML="";leg.innerHTML="";
   if(!b||!(b.points||[]).length){box.innerHTML='<div class="nodata">no data (no rl_sampler_round with groups)</div>';return}
@@ -714,7 +719,7 @@ function blChart(box,leg,b){
   var nf=0,na=0;rk.forEach(function(k){rep[k].forEach(function(p){if(p[2])nf++;else na++;
     el("title",{},el("circle",{cx:sx(p[0]),cy:sy(p[1]),r:3.5,fill:p[2]?"var(--bad)":"var(--good)"},s)).textContent=lbl(k)+": "+(p[2]?"backlog_full":"admitted")+" at "+clock(p[0])+" ("+f(p[1],0)+" groups)"})});
   tAxis(s,t0,t1,sx,H);
-  leg.innerHTML='<span><i class="sw" style="background:var(--T)"></i>backlog (written '+f(b.written,0)+' · read position '+f(b.read,0)+')</span>'+(nf?'<span><i class="sw" style="background:var(--bad);border-radius:50%"></i>sampler reported backlog_full ('+nf+')</span>':"")+(na?'<span><i class="sw" style="background:var(--good);border-radius:50%"></i>admitted ('+na+')</span>':"")+
+  leg.innerHTML='<span><i class="sw" style="background:var(--T)"></i>backlog (written '+f(b.written,0)+' · '+(fleetOn()&&!fin(b.read)?"not read yet":'read position '+f(b.read,0))+')</span>'+(nf?'<span><i class="sw" style="background:var(--bad);border-radius:50%"></i>sampler reported backlog_full ('+nf+')</span>':"")+(na?'<span><i class="sw" style="background:var(--good);border-radius:50%"></i>admitted ('+na+')</span>':"")+
     (b.has_reads&&b.read_source&&b.read_source!=="buffer_selected"?'<span>read position = '+esc(b.read_source)+' (no rl_policy_released.buffer_selected yet)</span>':"")+(b.has_reads?"":'<span>no read position on the tapes (no rl_policy_released.buffer_selected): backlog unknown</span>');
 }
 /* the task dispense ledger (rl_dispense_*): slots by state, claims still held and who holds them. A sampler hands

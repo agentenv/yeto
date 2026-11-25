@@ -617,6 +617,9 @@ def _fleet_part(fleet: dict, asy) -> dict:
                 row["removed"] = p["removed"]
             if p.get("stopped"):  # stopped (pool-stop, its island given up): drawn as ended
                 row["stopped"] = p["stopped"]
+            members = p.get("members") or []
+            if members and all(m.get("state") == fleet_islands.GONE for m in members):
+                row["released"] = True  # every machine its pool state lists is gone: billed no more (cost panel)
             if "source" in p:  # a fleet with Miles sampler islands: where each sampler row runs
                 row["source"] = p["source"]
             if p.get("source") == "miles":
