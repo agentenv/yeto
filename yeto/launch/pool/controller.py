@@ -784,7 +784,10 @@ def _nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any, lock: bool, con
     from ..nc import cli, pool_run  # noqa: PLC0415
 
     external = not pool_run.is_national_compute(cfg)
-    pc = cli.pool_config(cfg, allowed=None if external else cli.allowed_accounts())
+    # on the store control plane a target 0 is the fleet's (`yeto run scale --samplers 0`, the
+    # desired state): the pool is adopted and orders nothing; a pool loop of its own keeps >= 1
+    pc = cli.pool_config(cfg, allowed=None if external else cli.allowed_accounts(),
+                         min_target=0 if control_objects is not None else 1)
     if cfg.get("route", "ssh") == "ssh":
         pool_run.check_sampler_spec(cfg, pc)
     pool_run.refuse_provider_start(cfg)  # a sky pool's start checks, as `pool --config` runs them

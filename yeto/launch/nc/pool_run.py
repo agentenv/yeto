@@ -951,7 +951,7 @@ def _retry_in_loop(pool: IslandPool, config_path: str) -> None:
     _remove(retry_path(pool_cfg_of(config_path)))
     try:
         cfg = json.loads(Path(config_path).read_text())
-        cli.pool_config(cfg, allowed=None)
+        cli.pool_config(cfg, allowed=None, min_target=0)
         if cfg.get("route", "ssh") == "ssh":
             check_sampler_spec(cfg)
     except (OSError, ValueError, TypeError) as error:
@@ -976,7 +976,7 @@ def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
     the same node(s) with the fixed config (checked here first)."""
     check_state_file(cfg)
     try:
-        cli.pool_config(cfg, allowed=None)
+        cli.pool_config(cfg, allowed=None, min_target=0)
         if cfg.get("route", "ssh") == "ssh":
             check_sampler_spec(cfg)
     except (ValueError, TypeError) as error:
@@ -1066,7 +1066,7 @@ def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire:
     ``YETO_NC_ACCOUNTS``), data_slots, max_nodes, max_orders, a tripped breaker,
     max_run_spend_ucr (one node hour per new node), shard_limit (the trainer's buffer
     shards / the tunnel ports) and the --retire tickets."""
-    pc = cli.pool_config(cfg, allowed=None)
+    pc = cli.pool_config(cfg, allowed=None, min_target=0)
     ecfg = pc.elastic
     if target < 0:
         return f"target {target} < 0"
@@ -1169,7 +1169,7 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None,
         old = read_scale(cfg) or {}
         before = current_target(cfg, doc)
         wanted = target if target is not None else before + int(add) - len(remove or [])
-        hold = cli.pool_config(cfg, allowed=None).elastic.manual_hold_s
+        hold = cli.pool_config(cfg, allowed=None, min_target=0).elastic.manual_hold_s
         last_manual = old.get("manual_at")
         if source != "manual" and last_manual is not None and time.time() - float(last_manual) < hold:
             print(f"pool-scale: refused, nothing changed: a manual change {time.time() - float(last_manual):.0f} s "
@@ -1200,7 +1200,7 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None,
     actual = len(_live_members(doc))
     proc = pool_process(cfg)
     alive = proc is not None and proc.get("alive")
-    pc = cli.pool_config(cfg, allowed=None)
+    pc = cli.pool_config(cfg, allowed=None, min_target=0)
     how = mode or pc.elastic.scale_down
     print(f"pool-scale: target {before} -> {wanted} ({change}); {actual} node(s) billed now"
           + (f"; retire {', '.join(retire)}" if retire else ""))
@@ -1372,7 +1372,7 @@ def stop_pool(cfg: dict[str, Any], config_path: str, *, wait_s: float = 900.0, p
     under the pool's store lock (:func:`_release_from_store`), not from the local mirror."""
     check_state_file(cfg)
     sleep = sleep or time.sleep
-    cli.pool_config(cfg, allowed=None)  # releasing needs no ordering rights
+    cli.pool_config(cfg, allowed=None, min_target=0)  # releasing needs no ordering rights (target 0: scaled down)
     state = cli.pool_state_path(cfg)
     proc = pool_process(cfg)
     if proc is not None and proc.get("alive"):
@@ -1453,7 +1453,7 @@ def _release_from_store(cfg, config_path, proc, state, *, sleep, ops, objects, n
             attach(control)
         doc = control.state.load(legacy=state)
         events = island_status.EventLog(path=cli.pool_events_path(cfg), run=cli.run_id(cfg), log=cli._log)
-        pool = IslandPool.from_doc(doc, cli.pool_config(cfg, allowed=None), pool_ops, control=control,
+        pool = IslandPool.from_doc(doc, cli.pool_config(cfg, allowed=None, min_target=0), pool_ops, control=control,
                                    where=control.state.key, log=cli._log, events=events)
         pool.state_path = state  # the local mirror
         _say(f"pool-stop: no pool process alive; releasing from the store's state ({control.state.key})")
@@ -1479,7 +1479,7 @@ def _release_from_store(cfg, config_path, proc, state, *, sleep, ops, objects, n
 def _release_from_state(cfg, config_path, proc, state, *, sleep, ops) -> int:
     if proc is not None and not proc.get("alive"):
         _say(f"pool-stop: no pool process alive (stale pid {proc.get('pid')}); releasing from the state file")
-    pool = IslandPool.restore(state, cli.pool_config(cfg, allowed=None), ops or cli.pool_ops(cfg), log=cli._log,
+    pool = IslandPool.restore(state, cli.pool_config(cfg, allowed=None, min_target=0), ops or cli.pool_ops(cfg), log=cli._log,
                               events=island_status.EventLog(path=cli.pool_events_path(cfg), run=cli.run_id(cfg),
                                                             log=cli._log))
     left = _drain_all(pool, "pool-stop", sleep=sleep)
@@ -1642,7 +1642,7 @@ def delete_own_ticket(cfg: dict[str, Any], config_path: str, ticket: str, *, yes
     loop of the config is alive. Without ``--yes`` it only prints what it would delete.
     No pattern, list or ``--all``: one exact ticket id per call."""
     check_state_file(cfg)
-    cli.pool_config(cfg, allowed=None)
+    cli.pool_config(cfg, allowed=None, min_target=0)
 
     def refuse(why: str) -> int:
         print(f"delete-ticket: refused, nothing sent: {why}", file=sys.stderr)

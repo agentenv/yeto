@@ -950,12 +950,15 @@ def _check_backlog(doc: dict[str, Any]) -> None:
             raise ValueError(f"pool config: backlog.{key} must be a whole number >= {low} (got {value!r})")
 
 
-def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> PoolConfig:
+def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None, min_target: int = 1) -> PoolConfig:
     """The :class:`PoolConfig` of a pool config file. Refuses unknown keys (also in
     ``sampler``, ``model_pull``, ``node_hooks``, ``backlog``, ``elastic``), missing
     required keys, accounts outside ``YETO_NC_ACCOUNTS`` (``allowed``), a ``target``
-    above the number of accounts (one node per account) and ``model`` together with
-    ``machine_type``."""
+    below ``min_target`` or above the number of accounts (one node per account) and
+    ``model`` together with ``machine_type``. ``min_target`` 0: the config of a pool
+    that runs or ran (scaled to 0 by ``yeto run scale --samplers 0`` or the fleet's
+    desired state), for its stop, retry, scale, status and adoption; a pool loop's
+    start keeps 1 (a hand-written target 0 orders nothing)."""
     removed_route_problem(cfg)
     unknown = set(cfg) - POOL_KEYS
     if unknown:
@@ -984,8 +987,8 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
     if allowed is not None and not set(accounts) <= allowed:
         raise ValueError(f"pool config: accounts {sorted(set(accounts) - allowed)} are not in YETO_NC_ACCOUNTS")
     target = whole(cfg["target"], "target")
-    if target < 1:
-        raise ValueError("pool config: target must be >= 1")
+    if target < min_target:
+        raise ValueError(f"pool config: target must be >= {min_target}")
     if target > len(accounts):
         if label == "account":
             raise ValueError(f"pool config: target {target} > {len(accounts)} accounts; a National Compute "
