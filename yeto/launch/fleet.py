@@ -1029,7 +1029,9 @@ class FleetController:
         except Exception:
             return None
         if text is not None and not self.elastic and any(m in text for m in SYNCER_REFUSAL_MARKERS):
-            return None  # legacy unchanged: a refused island takes the fixed-roster path
+            # a fixed roster's refused island is not a strict failure that ends the launch here:
+            # _deterministic_stop gives it up from its records (exit 4); a relaunch is refused the same way
+            return None
         line = lifecycle.island_stop_text(text)
         if line is not None and lifecycle.classify(log_text=line).cause == lifecycle.BREAKER:
             return None  # a breaker's stop: given up, not a strict failure (_deterministic_stop)

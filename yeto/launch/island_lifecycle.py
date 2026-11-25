@@ -130,10 +130,11 @@ STRICT_MARKERS: tuple[str, ...] = (
 # pickling, so an error a Ray actor raised still carries it (``RayTaskError.cause``).
 BREAKER_ATTR = "yeto_breaker"
 # The strict failures that end an island the same way on every attempt (module, class): a
-# strict trainer check (``trainer.strict_invariant``, ``trainer.nan``, ``trainer.gradient_flow``,
-# ``trainer.policy_hash``; the syncer's HELLO / session / profile refusal), groups older than
-# ``max_policy_age`` that the rollout cannot drop, a malformed policy-age limit, a learning
-# rate 0 before the final round. A whitelist: the other LEAVE ``TRAINING_FAILED`` errors (a
+# strict trainer check (``trainer.strict_invariant`` -- including a learning rate 0 before the
+# final round --, ``trainer.nan``, ``trainer.gradient_flow``, ``trainer.policy_hash``; the
+# syncer's session refusals: HELLO profile / session / identity mismatch, island auth, epoch
+# fenced, init digest), groups older than ``max_policy_age`` that the rollout cannot drop, a
+# malformed policy-age limit, an optimizer without a readable or finite learning rate. A whitelist: the other LEAVE ``TRAINING_FAILED`` errors (a
 # failed optimizer step, a publication whose engine update raised, a cross-channel commit, a
 # plain ``DriverError``) may be an NCCL, CUDA, OOM, storage or network fault underneath, and
 # keep their retries and relaunches.
