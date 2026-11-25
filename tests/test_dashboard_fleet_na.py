@@ -35,7 +35,7 @@ global.document={documentElement:node("html"),getElementById:(id)=>mk(id),create
 global.navigator={};global.localStorage={getItem(k){return /^yeto-pick/.test(k)?PICK:null},setItem(){}};
 global.setInterval=()=>0;global.setTimeout=()=>0;global.location={hash:"",search:""};
 eval(appM[1]);
-const out={};["rKpis","rCostK","rFleet","aSamplers","aTrainer","fleetTbl","costBox","evs"].forEach(i=>{out[i]=mk(i).innerHTML});
+const out={};["rKpis","rCostK","rFleet","aSamplers","aTrainer","fleetTbl","costBox","evs","rNodes"].forEach(i=>{out[i]=mk(i).innerHTML});
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -198,6 +198,26 @@ def test_single_trainer_kpis_and_sampler_table_keep_their_rendering(tmp_path):
     assert ">Buffer backlog<" in kp and "written 48 · read n/a" in kp and "island 0:" not in kp
     assert ">3 / n/a<" in sp and "the pool keeps zero-variance groups" not in sp and "—" not in sp
     assert "zero-variance then comes from the trainer" in sp
+
+
+def test_fleet_islands_now_table_has_no_bare_na(tmp_path):
+    """The fixture trainers carry no train-rollout KL, tokens/s, step or round time: each is a dash that
+    says so (tags and attributes untouched), and no "round" line without a round time."""
+    nodes = _page(tmp_path, _fleet())["rNodes"]
+    text = re.sub(r"<[^>]*>", " ", nodes)
+    assert ">Island<" in nodes and "n/a" not in text and "round —" not in text
+    assert "not on this island&#39;s tapes" in nodes or "not on this island's tapes" in nodes
+    assert all("n/a" not in tag or 'title="' in tag for tag in re.findall(r"<[^>]*>", nodes))
+
+
+def test_single_trainer_islands_now_table_keeps_its_rendering(tmp_path):
+    """No fleet: a missing trainer value stays "n/a" (and the round line stays) as before."""
+    r = Reducer(run="one")
+    for i in range(3):
+        r.feed({"event": "rl_round_trained", "learner_id": "0", "rollout_id": i, "time_unix": T0 + 60 * i,
+                "trained_groups": 8, "reward_mean": 0.5})
+    nodes = _page(tmp_path, r)["rNodes"]
+    assert ">n/a<" in nodes and "round n/a" in nodes and "not on this island" not in nodes
 
 
 def test_island_samplers_table_dashes_counts_a_sampler_does_not_report(tmp_path):
