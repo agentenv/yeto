@@ -92,7 +92,7 @@ def test_an_added_island_is_compiled_for_its_learner_id(tmp_path, monkeypatch):
 
 def test_add_dry_run_writes_nothing_and_claims_no_id(fleet_store, capsys):
     cfg, objects, store, run_cli, samplers = fleet_store
-    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers),
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers", str(samplers),
                    "--dry-run") == 0
     out = capsys.readouterr().out
     assert "add pool i2-sglang-north (target 2)" in out and "trainer north: added" in out
@@ -102,16 +102,16 @@ def test_add_dry_run_writes_nothing_and_claims_no_id(fleet_store, capsys):
 
 def test_add_then_remove_an_island_moves_its_pools_with_it(fleet_store, capsys):
     cfg, objects, store, run_cli, samplers = fleet_store
-    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers)) == 0
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers", str(samplers)) == 0
     doc = store.read()
     assert doc["generation"] == 2 and objects.read(claim_key(2)) is not None
     assert dz.trainers(doc)["north"]["learner_id"] == 2 and "i2-sglang-north" in dz.sampler_pools(doc)
     # a second island takes id 3; the limit (fleet.max_islands 4) then refuses a third
     other = samplers.parent / "south.samplers.json"
     other.write_text(json.dumps([dict(cfg["islands"][1]["samplers"][0], name="sglang-south")]))
-    assert run_cli("add", "--name", "south", "--gpu", "modal:1x2xh100", "--samplers", str(other)) == 0
+    assert run_cli("add", "--name", "south", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers", str(other)) == 0
     assert dz.trainers(store.read())["south"]["learner_id"] == 3
-    assert run_cli("add", "--name", "east", "--gpu", "modal:1x2xh100", "--samplers", str(other)) == 2
+    assert run_cli("add", "--name", "east", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers", str(other)) == 2
     assert "no learner id left" in capsys.readouterr().err
     assert run_cli("remove", "--name", "sglang") == 0
     doc = store.read()
@@ -119,7 +119,7 @@ def test_add_then_remove_an_island_moves_its_pools_with_it(fleet_store, capsys):
     assert sorted(dz.sampler_pools(doc)) == ["i0-sglang-l40s", "i0-vllm-h100", "i2-sglang-north", "i3-sglang-south"]
     # a removed island's id is never handed out again
     assert run_cli("remove", "--name", "north") == 0
-    assert run_cli("add", "--name", "west", "--gpu", "modal:1x2xh100", "--samplers", str(samplers)) == 2
+    assert run_cli("add", "--name", "west", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers", str(samplers)) == 2
 
 
 def test_a_move_keeps_the_learner_id_and_sub_store(fleet_store):
@@ -191,16 +191,36 @@ def test_an_add_whose_write_failed_takes_its_claimed_id_again(fleet_store, monke
         raise dz.DesiredConflict(1, 2)
 
     monkeypatch.setattr(store, "update", conflict)
-    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers)) == 3
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers", str(samplers)) == 3
     assert objects.read(claim_key(2)) is not None and "north" not in dz.trainers(store.read())
     monkeypatch.setattr(store, "update", real)
-    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers),
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers", str(samplers),
                    "--dry-run") == 0
     assert "launch of north (learner 2," in capsys.readouterr().out
-    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers)) == 0
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers", str(samplers)) == 0
     assert dz.trainers(store.read())["north"]["learner_id"] == 2 and objects.read(claim_key(3)) is None
     # another island's add never takes that claim: id 3
     other = samplers.parent / "south.samplers.json"
     other.write_text(json.dumps([dict(cfg["islands"][1]["samplers"][0], name="sglang-south")]))
-    assert run_cli("add", "--name", "south", "--gpu", "modal:1x2xh100", "--samplers", str(other)) == 0
+    assert run_cli("add", "--name", "south", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers", str(other)) == 0
     assert dz.trainers(store.read())["south"]["learner_id"] == 3
+
+
+def test_an_add_without_a_price_is_refused_when_the_run_has_a_budget(fleet_store, capsys):
+    cfg, objects, store, run_cli, samplers = fleet_store
+    assert cfg["budget"]["usd"] is not None
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--samplers", str(samplers)) == 2
+    assert "--usd-per-h" in capsys.readouterr().err and objects.read(claim_key(2)) is None
+
+
+def test_a_claim_whose_sub_directory_has_data_is_not_taken_again(fleet_store, monkeypatch):
+    cfg, objects, store, run_cli, samplers = fleet_store
+    real = store.update
+    monkeypatch.setattr(store, "update", lambda *a, **k: (_ for _ in ()).throw(dz.DesiredConflict(1, 2)))
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--usd-per-h", "8",
+                   "--samplers", str(samplers)) == 3
+    monkeypatch.setattr(store, "update", real)
+    objects.write("trainer2/groups/r-sglang-north-i2-0/000.json", b"{}")  # its pool sampled meanwhile
+    assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--usd-per-h", "8",
+                   "--samplers", str(samplers)) == 0
+    assert dz.trainers(store.read())["north"]["learner_id"] == 3  # a fresh id: trainer2/ is not reused

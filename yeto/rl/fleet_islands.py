@@ -63,7 +63,9 @@ def trainer_by_name(doc: dict[str, Any], name: str) -> dict[str, Any]:
 def unused_claim(objects: Any, doc: dict[str, Any], name: str) -> int | None:
     """A learner id claimed for island ``name`` by an earlier ``add`` whose desired state
     write then failed: no trainer member has it, no island record exists under it (it
-    never launched). That add's retry takes it again, so a failed write burns no id."""
+    never launched) and nothing was written under its store sub-directory
+    (``trainer<k>/``: an island added and removed before it started may have had pools
+    that sampled into it). That add's retry takes it again, so a failed write burns no id."""
     from yeto.launch.island_lifecycle import STATE_DIR  # noqa: PLC0415
     from yeto.launch.learner_ids import CLAIM_NAME  # noqa: PLC0415
     from yeto.rl.trainer_worker import LAUNCH_RECORD  # noqa: PLC0415
@@ -82,6 +84,8 @@ def unused_claim(objects: Any, doc: dict[str, Any], name: str) -> int | None:
         except ValueError:
             continue
         if isinstance(claim, dict) and claim.get("island") == str(name):
+            if next(iter(objects.list(f"{fleet_mod.substore(k)}/")), None) is not None:
+                continue  # its sub-directory holds data already: a fresh id instead
             return k
     return None
 
@@ -238,6 +242,10 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
                 m.pop(key, None)
         launch_member = None
         if args.island_command == "add":
+            budget = run.cfg.get("budget") if isinstance(run.cfg.get("budget"), dict) else {}
+            if args.usd_per_h is None and budget.get("usd") is not None:
+                raise IslandChangeError("give the island's trainer price (--usd-per-h): the run has a budget "
+                                        "(budget.usd), and an island without a price would bill nothing")
             with open(args.samplers) as fh:
                 samplers = json.load(fh)
             objects = run._objects()  # noqa: SLF001
