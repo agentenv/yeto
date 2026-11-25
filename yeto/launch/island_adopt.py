@@ -62,18 +62,37 @@ class SkyProbe:
     run's clusters (by name prefix), then the job table of the recorded cluster."""
 
     def __init__(self, prefix: str, *, status: Callable[[], Iterable[Any]] | None = None,
-                 job_alive: Callable[[str, Any], bool] | None = None) -> None:
+                 job_alive: Callable[[str, Any], bool] | None = None,
+                 live_job: Callable[[str], Any] | None = None) -> None:
         self.prefix = str(prefix)
         self._status = status or self._sky_status
         self._job_alive = job_alive or self._sky_job_alive
+        self._live_job = live_job or self._sky_live_job
         self._clusters: dict[str, str] | None = None
+        self.found: dict[str, int] = {}  # cluster -> the live job found for a record without one
 
     @staticmethod
     def _sky_status() -> list[Any]:
         import sky
 
-        refresh = getattr(getattr(sky, "StatusRefreshMode", None), "AUTO", True)
+        # FORCE: the cloud's view, not a cached UP of a cluster that is gone
+        mode = getattr(sky, "StatusRefreshMode", None)
+        refresh = getattr(mode, "FORCE", None) or getattr(mode, "AUTO", True)
         return list(sky.get(sky.status(refresh=refresh)))
+
+    @staticmethod
+    def _sky_live_job(cluster: str) -> Any:
+        """The id of a job on ``cluster`` that is queued, setting up or running (None: none;
+        a job table that does not read raises)."""
+        import sky
+
+        live = []
+        for record in sky.get(sky.queue(cluster)):
+            rid = record.get("job_id") if isinstance(record, dict) else getattr(record, "job_id", None)
+            status = record.get("status") if isinstance(record, dict) else getattr(record, "status", None)
+            if rid is not None and status is not None and not status.is_terminal():
+                live.append(int(rid))
+        return max(live) if live else None
 
     @staticmethod
     def _sky_job_alive(cluster: str, job_id: Any) -> bool:
@@ -103,11 +122,23 @@ class SkyProbe:
 
     def __call__(self, handle: Mapping[str, Any]) -> tuple[bool, str]:
         cluster, job_id = handle.get("cluster"), handle.get("job_id")
-        if not cluster or job_id is None:
-            return False, "no cluster or job in the record"
+        if not cluster:
+            return False, "no cluster in the record"
         status = self.clusters().get(str(cluster))
         if status is None:
             return False, f"cluster {cluster} is gone"
+        if job_id is None:
+            # ordered, its job not recorded yet (the launcher died mid-launch): a cluster that is
+            # still being provisioned cannot tell; an UP one tells by its job table
+            if "INIT" in status.upper():
+                raise AdoptionUnknown(f"cluster {cluster} is {status} and its record names no job yet")
+            if "UP" not in status.upper():
+                return False, f"cluster {cluster} is {status}"
+            live = self._live_job(str(cluster))
+            if live is None:
+                return False, f"cluster {cluster} UP with no live job"
+            self.found[str(cluster)] = live
+            return True, f"cluster {cluster} UP, job {live} running (found in its job table)"
         if "UP" not in status.upper():
             return False, f"cluster {cluster} is {status}"
         if not self._job_alive(str(cluster), job_id):
@@ -167,6 +198,8 @@ def plan(records: Mapping[int, Mapping[str, Any]], islands: Mapping[str, lc.Isla
                                       f"({type(error).__name__}: {error})"[:400]) from error
             if running:
                 job_id = handle.get("call_id") if ref.source == "modal" else handle.get("job_id")
+                if job_id is None:  # a sky record ordered without its job: the job the probe found
+                    job_id = getattr(probe, "found", {}).get(str(handle.get("cluster") or name))
                 out[name] = Adoption(name, ref.island, True, incarnation, relaunches, job_id=job_id,
                                      cluster=handle.get("cluster") or name, why=why)
                 say(f"[launcher] {name}: adopting island {ref.island} incarnation {incarnation} ({why}); "

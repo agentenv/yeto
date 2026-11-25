@@ -1998,12 +1998,16 @@ def cmd_worker(name: str) -> int:
         traceback.print_exc()
         runs.update_run(name, state=runs.FAILED, exit_code=1, finished_at=time.time(),
                         **_stop_reason_field())
+        if getattr(args, "_hands_off_exit", None) is not None:  # fenced: the fleet is another launcher's
+            print(f"[yeto] {name}: this launcher lost the run's island records; no backstop cleanup",
+                  file=sys.stderr)
+            return 1
         _backstop_cleanup(name, args)
         return 1
     code = int(code or 0)
     from .launcher import HANDS_OFF_EXITS
 
-    if code in HANDS_OFF_EXITS:
+    if code in HANDS_OFF_EXITS or getattr(args, "_hands_off_exit", None) is not None:
         # nothing was launched: the run's resources belong to the launcher that holds its
         # island records (or may); no backstop cleanup of them
         runs.update_run(name, state=runs.FAILED, exit_code=code, finished_at=time.time(), refused_launch=True)

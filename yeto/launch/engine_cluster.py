@@ -330,6 +330,9 @@ class MixedIsland:
         self.head: str | None = None
         self.engine_relaunches = 0
         self.stop_watch = False
+        # called with the cluster name right before each relaunch order; raises to order nothing
+        # (the launcher's island records lock: yeto.launch.island_lifecycle.IslandStateStore.guard_order)
+        self.before_order: Callable[[str], Any] | None = None
 
     def submit(self) -> tuple[Any, Any]:
         s = self.split
@@ -400,6 +403,8 @@ class MixedIsland:
     def relaunch(self, sky) -> Any:
         """Fleet recovery: both clusters again. Returns the new trainer job id or None."""
         s = self.split
+        if self.before_order is not None:
+            self.before_order(s.name)
         self._cancel(sky, s.engine_name, self.engine_job)
         try:
             job, handle = self.finish(sky, self.submit())
@@ -413,6 +418,8 @@ class MixedIsland:
         running): provision + setup, wait for the setup job, admit the groups again,
         start the engine run toward the same Ray head. Returns the engine job id."""
         s = self.split
+        if self.before_order is not None:
+            self.before_order(s.engine_name)
         if self.head is None:
             raise RuntimeError(f"{s.name}: no trainer head address to rejoin")
         self._cancel(sky, s.engine_name, self.engine_job)

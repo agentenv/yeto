@@ -474,7 +474,7 @@ HANDS_OFF_EXITS = frozenset({ISLAND_RECORDS_LOCKED_EXIT, ISLAND_RECORDS_UNKNOWN_
 
 
 def _plan_island_records(args, specs, names, island_states, island_lock, *, relaunch, ssh_names, events_dir,
-                         echo_names, held_name, syncer_cluster):
+                         echo_names, held_name, syncer_cluster, two_cluster_names=()):
     """Under the island records' lock: the records (read strictly), the fleet recorder and
     the adoption plan of a restart, and the syncer to keep. Returns ``(recorder, adoption,
     kept_syncer)``. Raises ``IslandRecordsUnreadable`` / ``island_adopt.AdoptionUnknown``
@@ -497,6 +497,11 @@ def _plan_island_records(args, specs, names, island_states, island_lock, *, rela
     adoption: dict = {}
     if restart and island_lock is not None:  # adopt only under the lock
         adoption = island_adopt.plan(records, refs, probes=_adopt_probes(args))
+    two_cluster = sorted(n for n, a in adoption.items() if a.adopt and n in two_cluster_names)
+    if two_cluster:
+        raise island_adopt.AdoptionUnknown(
+            f"two-cluster island(s) {two_cluster} still run; a two-cluster island is not adopted (its engine "
+            "cluster has no record): take it down (yeto down) or let it end, then launch again")
     kept = None
     if syncer_cluster is not None:
         kept = _adopt_syncer(island_states, syncer_cluster, adoption)
@@ -595,7 +600,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     relaunch = _relaunch_of_same_run(args)  # before this launch writes its own manifest
     import sky
 
-    from .launch.island_lifecycle import IslandRecordsFenced
+    from .launch.island_lifecycle import IslandRecordsFenced, IslandRecordsUnconfirmed
+
+    hands_off_exit = None  # set once this launcher must not tear the run down (exit 12 / 13)
 
     if getattr(args, "rl_single_island_no_sync", False) and (
         getattr(args, "training_mode", "sft") != "rl"
@@ -676,7 +683,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         try:
             recorder, adoption, kept_syncer = _plan_island_records(
                 args, specs, learner_names, island_states, island_lock, relaunch=relaunch, ssh_names=ssh_names,
-                events_dir=events_dir, echo_names=echo_names, held_name=held_name, syncer_cluster=syncer_cluster)
+                events_dir=events_dir, echo_names=echo_names, held_name=held_name, syncer_cluster=syncer_cluster,
+                two_cluster_names=set(splits))
         except (IslandRecordsUnreadable, AdoptionUnknown) as error:
             island_states.close()
             if island_lock is not None:
@@ -904,7 +912,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 mixed[name] = engine_cluster.MixedIsland(
                     splits[name], split_tasks,
                     submit=lambda s_, t_, n_: submit_island_launch(sky, args, s_, t_, n_))
+                if island_states is not None:  # its engine relaunches are orders too
+                    mixed[name].before_order = island_states.guard_order
                 tasks[name] = split_tasks.trainer  # the fleet's record: the trainer cluster
+                _record_ordering(recorder, name, adoption)
                 rids[name] = (m, ("mixed", mixed[name].submit()))
                 continue
             if name in adoption and adoption[name].adopt:
@@ -914,6 +925,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             if spec.cloud == "verda":
                 # Launched in resolve(): live stock -> ordered any_of, with
                 # refresh + bounded backoff on capacity failures.
+                _record_ordering(recorder, name, adoption)
                 rids[name] = (m, ("verda", spec))
                 continue
             _record_ordering(recorder, name, adoption)
@@ -979,6 +991,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 else:
                     results[name] = (call_id, None)
         if ssh_names:
+            if island_states is not None:  # a start that is no reattach orders the island's processes
+                island_states.guard_order(",".join(sorted(ssh_names)))
             ssh_islands = _start_resident_ssh(args, tasks, ssh_names, results, errors, events_dir,
                                               event_collectors)
             if recorder is not None:  # the journal decided: reattached (adopted) or a new incarnation
@@ -1399,14 +1413,25 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         return NO_SYNC_INCOMPLETE_EXIT if no_sync_incomplete else 0
     except IslandRecordsFenced as error:
         # another launcher took the island records over: it supervises (and tears down) the fleet
+        hands_off_exit = ISLAND_RECORDS_LOCKED_EXIT
         print(f"[launcher] ERROR: {error}; nothing of the run is torn down here "
               f"(exit {ISLAND_RECORDS_LOCKED_EXIT})", file=sys.stderr)
         return ISLAND_RECORDS_LOCKED_EXIT
+    except IslandRecordsUnconfirmed as error:
+        # the store did not confirm the lock at an order: another launcher may hold it now
+        hands_off_exit = ISLAND_RECORDS_UNKNOWN_EXIT
+        print(f"[launcher] ERROR: {error}; nothing of the run is torn down here "
+              f"(exit {ISLAND_RECORDS_UNKNOWN_EXIT}): launch again once the store answers", file=sys.stderr)
+        return ISLAND_RECORDS_UNKNOWN_EXIT
     finally:
         if cost_guard is not None:
             cost_guard.stop()  # the teardown below releases everything; no forced stop mid-way
         # a launcher that lost the island records' lock tears nothing down: the holder owns the fleet
-        hands_off = _lost_island_records(island_states)
+        if hands_off_exit is None and _lost_island_records(island_states):
+            hands_off_exit = ISLAND_RECORDS_LOCKED_EXIT
+        hands_off = hands_off_exit is not None
+        if hands_off:
+            args._hands_off_exit = hands_off_exit  # the worker runs no backstop cleanup either
         if verda is not None and verda.get("pth_written"):
             from .sky_patches import remove_local_pth
 
@@ -1532,6 +1557,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             trips.trip(prefix, "launch.teardown_verify", None, None,
                        detail=f"teardown not confirmed (exit {TEARDOWN_UNVERIFIED_EXIT})")
             return TEARDOWN_UNVERIFIED_EXIT  # noqa: B012
+        if hands_off:
+            # fenced on any way out (a signal, an error, a normal end): the exit says hands off
+            return hands_off_exit  # noqa: B012
 
 
 def _close_fleet_islands(run: str, *, skip=()) -> list[str]:

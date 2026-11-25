@@ -573,3 +573,236 @@ def test_a_restart_on_the_same_machine_keeps_the_adopted_islands_tapes(monkeypat
     moved = list((events / "previous").glob(f"*/{names[1]}.jsonl"))
     assert len(moved) == 1  # launched again: its earlier tape moved aside
     assert not list((events / "previous").glob(f"*/{names[0]}.jsonl"))
+
+
+# -- REV #750 round 3: every way out of a fenced launcher is hands off ---------------------------
+
+def _fenced_controller_run(monkeypatch, outcome):
+    """FleetController.run that loses the records lock mid-run, then ends with ``outcome``."""
+    from yeto.launch.fleet import FleetController
+    from yeto.launch.pool.store_lock import LockLost
+
+    def run(self):
+        store = self.recorder.store
+        store.fenced = LockLost(launcher.ISLAND_RECORDS_LOCK, store.fence.token, store.fence.token + 1)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(FleetController, "run", run)
+
+
+def _fenced_outcomes():
+    from yeto.launch.fleet import FixedRosterIslandAbandoned, RunStalled
+
+    return [SystemExit(143), RuntimeError("all learners abandoned; nothing left to train"),
+            FixedRosterIslandAbandoned("x"), RunStalled("silent", silent_s=10, timeout_s=5),
+            {"yeto-l0-modal": "SUCCEEDED", "yeto-l1-modal": "SUCCEEDED"}]
+
+
+@pytest.mark.parametrize("outcome", _fenced_outcomes(), ids=["sigterm", "all_abandoned", "fixed_roster",
+                                                             "stalled", "normal_end"])
+def test_a_launcher_fenced_mid_run_tears_nothing_down_on_any_way_out(monkeypatch, tmp_path, outcome):
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), succeeding={0, 1}, clock=clock, record=record)
+    _store(monkeypatch, tmp_path)
+    _fenced_controller_run(monkeypatch, outcome)
+    args = _fleet_args(tmp_path)
+    code = launcher.run(args)
+    assert code == launcher.ISLAND_RECORDS_LOCKED_EXIT
+    assert [r for r in record if r[0] in ("cancel", "stop_app", "down", "terminate")] == []
+    assert args._hands_off_exit == launcher.ISLAND_RECORDS_LOCKED_EXIT
+
+
+def test_the_worker_runs_no_backstop_cleanup_after_a_fenced_launcher(monkeypatch, tmp_path):
+    import yeto.cli as cli
+    import yeto.cost.cleanup as cleanup_mod
+    from yeto import runs
+
+    monkeypatch.setenv("YETO_RUNS_DIR", str(tmp_path / "runs"))
+    runs.create_run("w", {"cluster_prefix": "w"})
+
+    def fenced_then_raise(args, **kw):
+        args._hands_off_exit = launcher.ISLAND_RECORDS_LOCKED_EXIT
+        raise RuntimeError("after the fence")
+
+    monkeypatch.setattr(launcher, "run", fenced_then_raise)
+    seen = []
+    monkeypatch.setattr(cleanup_mod, "cleanup_run", lambda run, *a, **k: seen.append(run) or True)
+    monkeypatch.setattr(cli, "_backstop_cleanup", lambda name, args: seen.append(name))
+    assert cli.cmd_worker("w") == 1
+    assert seen == []
+
+
+def test_an_unconfirmed_lock_at_an_order_orders_and_tears_down_nothing(monkeypatch, tmp_path):
+    from yeto.launch.pool.store_lock import LockUnconfirmed
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), succeeding={0, 1}, clock=clock, record=record)
+    _store(monkeypatch, tmp_path)
+    real = launcher._claim_island_records
+
+    def claim_then_unconfirmed(states):
+        lock, why = real(states)
+
+        def guard():
+            raise LockUnconfirmed("store does not answer")
+
+        lock.guard = guard
+        return lock, why
+
+    monkeypatch.setattr(launcher, "_claim_island_records", claim_then_unconfirmed)
+    args = _fleet_args(tmp_path)
+    code = launcher.run(args)
+    assert code == launcher.ISLAND_RECORDS_UNKNOWN_EXIT
+    assert [r for r in record if r[0] in ("spawn", "cancel", "stop_app", "down", "terminate")] == []
+
+
+def test_the_lease_is_renewed_while_a_write_backs_off(tmp_path):
+    """A store that refuses writes backs them off (up to RETRY_MAX_S); the fence is still
+    guarded every stop_poll_s meanwhile, so the lease never lapses."""
+    import time as _time
+
+    class Refusing(DirectoryObjectStore):
+        def write(self, key, data):
+            raise OSError("store refuses")
+
+    class Fence:
+        token, calls = 1, 0
+
+        def guard(self):
+            Fence.calls += 1
+
+    states = lc.IslandStateStore(Refusing(tmp_path / "s"), background=True, stop_poll_s=0.02,
+                                 fence=Fence(), log=lambda m: None)
+    states.write(0, "running", name="r-l0", source="modal", incarnation=0)
+    _time.sleep(1.0)
+    states.close(0.5)
+    assert Fence.calls >= 20  # every pass, not only at the backed-off retries (about 6 in 1 s)
+    assert lc.RETRY_MAX_S < launcher.ISLAND_RECORDS_LOCK_TTL_S
+
+
+def test_a_dead_background_thread_is_started_again(tmp_path):
+    import time as _time
+
+    class Fence:
+        token = 1
+
+        def guard(self):
+            pass
+
+    states = lc.IslandStateStore(DirectoryObjectStore(tmp_path / "s"), background=True, stop_poll_s=0.02,
+                                 fence=Fence(), log=lambda m: None)
+    states.keep_lease()
+    first = states._thread
+    states._closed = True  # the thread ends at its next pass, as a crashed one would
+    states._wake.set()
+    first.join(2)
+    assert not first.is_alive()
+    states._closed = False
+    states.guard_order("island 0")
+    assert states._thread is not first and states._thread.is_alive()
+    states.close(1)
+    _time.sleep(0)
+
+
+def test_down_checks_the_lock_now_not_only_the_cached_view():
+    """A lock lost after the last background guard: the abandon teardown asks the lock first."""
+    from test_controller import FAILED, RUNNING, SYNCER, FakeOps, ImmediateThread
+
+    from yeto.launch.fleet import ABANDONED, FleetController
+
+    class Lost(BaseException):
+        def __init__(self):
+            super().__init__("lock token 1 is fenced by token 2")
+            self.token, self.by = 1, 2
+
+    class Fence:
+        token = 1
+
+        def guard(self):
+            raise Lost()
+
+    ops = FakeOps()
+    ops.status_seq["r-l0-modal"] = [FAILED]
+    ops.status_seq["r-l1-modal"] = [RUNNING] * 50
+    ops.status_seq[SYNCER] = [RUNNING] * 50
+    store = lc.IslandStateStore(DirectoryObjectStore("/nonexistent-t1"), log=lambda m: None, fence=Fence())
+    refs = {"r-l0-modal": lc.IslandRef(0, "modal"), "r-l1-modal": lc.IslandRef(1, "modal")}
+    ctl = FleetController(learners={"r-l0-modal": ("t", 1), "r-l1-modal": ("t", 2)}, syncer=(SYNCER, "t", 1),
+                          sky_ops=ops, poll_interval=30, recover_timeout=0, thread_cls=ImmediateThread,
+                          elastic=True, recorder=lc.FleetRecorder(store, refs))
+    rec = ctl.learners["r-l0-modal"]
+    rec.update(state="recovering", failed_at=ops.now() - 10, attempt=None)
+    assert store.fenced is None  # not seen yet
+    ctl._drive_recovery(rec, is_syncer=False)
+    assert rec["state"] == ABANDONED and ops.down_calls == [] and store.fenced is not None
+
+
+def test_every_order_site_of_the_launcher_checks_the_lock_first():
+    """sky, Modal, verda and two-cluster islands go through _record_ordering (the lock checked
+    now); the resident ssh start and the syncer launch guard explicitly."""
+    import inspect
+
+    src = inspect.getsource(launcher.run)
+    assert src.count("_record_ordering(recorder, name, adoption)") == 4
+    for site in ("rids[name] = (m, (\"mixed\", mixed[name].submit()))", "rids[name] = (m, (\"verda\", spec))",
+                 "rids[name] = (m, submit_island_launch(sky, args, spec, task, name))",
+                 "call_id = modal_island_ops.relaunch(cfg, name)"):
+        before = src[:src.index(site)].rstrip().splitlines()[-1]
+        assert "_record_ordering(recorder, name, adoption)" in before, site
+    ssh = src.index("ssh_islands = _start_resident_ssh(")
+    assert "guard_order" in src[ssh - 200:ssh]
+    sky_launch = src.index("rid = sky.launch(syncer_task, cluster_name=syncer_cluster)")
+    assert "guard_order(syncer_cluster)" in src[sky_launch - 300:sky_launch]
+
+
+def test_record_ordering_writes_nothing_once_the_lock_is_lost(tmp_path):
+    class Lost(BaseException):
+        def __init__(self):
+            super().__init__("lost")
+            self.token, self.by = 1, 2
+
+    class Fence:
+        token = 1
+
+        def guard(self):
+            raise Lost()
+
+    store = lc.IslandStateStore(DirectoryObjectStore(tmp_path / "s"), log=lambda m: None, fence=Fence())
+    recorder = lc.FleetRecorder(store, {"r-l0-modal": lc.IslandRef(0, "modal")})
+    with pytest.raises(lc.IslandRecordsFenced):
+        launcher._record_ordering(recorder, "r-l0-modal", {})
+    assert store.read(0) is None
+
+
+def test_a_sky_record_ordered_without_its_job(monkeypatch):
+    """The launcher died between the order and the job id: an UP cluster tells by its job
+    table (adopted with the live job, never a second job), a provisioning one cannot tell."""
+    def probe(status, live):
+        return island_adopt.SkyProbe("r-", status=lambda: [{"name": "r-l0-aws", "status": status}],
+                                     job_alive=lambda c, j: True, live_job=lambda c: live)
+
+    records = _records()
+    records[0].update(state="ordering", handle={"cluster": "r-l0-aws"})
+    modal = lambda h: (True, "")  # noqa: E731
+    plan = island_adopt.plan(records, REFS, probes={"sky": probe("UP", 7), "modal": modal})
+    assert plan["r-l0-aws"].adopt and plan["r-l0-aws"].job_id == 7
+    plan = island_adopt.plan(records, REFS, probes={"sky": probe("UP", None), "modal": modal})
+    assert not plan["r-l0-aws"].adopt and plan["r-l0-aws"].incarnation == 3
+    with pytest.raises(island_adopt.AdoptionUnknown, match="INIT"):
+        island_adopt.plan(records, REFS, probes={"sky": probe("INIT", None), "modal": modal})
+
+
+def test_a_running_two_cluster_island_is_not_adopted(monkeypatch, tmp_path):
+    states = lc.IslandStateStore(DirectoryObjectStore(tmp_path / "s"), log=lambda m: None)
+    adoption = {"r-l0-aws": island_adopt.Adoption("r-l0-aws", 0, True, 2)}
+    monkeypatch.setattr(island_adopt, "plan", lambda *a, **k: adoption)
+    monkeypatch.setattr(launcher, "_adopt_probes", lambda args: {})
+    monkeypatch.setattr(launcher, "_island_refs", lambda *a, **k: dict(REFS))
+    states.write(0, "running", name="r-l0-aws", source="sky", incarnation=2)
+    with pytest.raises(island_adopt.AdoptionUnknown, match="two-cluster"):
+        launcher._plan_island_records(types.SimpleNamespace(), [types.SimpleNamespace(cloud="aws")], ["r-l0-aws"],
+                                      states, object(),
+                                      relaunch=True, ssh_names=set(), events_dir=None, echo_names=set(),
+                                      held_name=None, syncer_cluster=None, two_cluster_names={"r-l0-aws"})

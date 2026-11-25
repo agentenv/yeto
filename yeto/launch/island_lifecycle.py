@@ -236,7 +236,7 @@ def controller_identity() -> dict[str, Any]:
 
 STOP_POLL_S = 15.0  # a background store re-reads the watched islands' STOP this often
 FLUSH_S = 10.0  # a background store's queued writes get this long at the launcher's end
-RETRY_MAX_S = 120.0  # the longest back-off between two tries of a write the store did not take
+RETRY_MAX_S = 60.0  # the longest back-off between two tries of a write the store did not take
 
 
 class Fence(Protocol):
@@ -473,6 +473,8 @@ class IslandStateStore:
         and the lease is nearly over. Nothing to check without a fence."""
         if self.fence is None:
             return
+        if not self._ended:
+            self.keep_lease()  # a background thread that died is started again (the lease renewal)
         if self.fenced is None and not self._ended:
             try:
                 self.fence.guard()
@@ -491,11 +493,22 @@ class IslandStateStore:
                                   "orders and tears down"[:400])
 
     def _start(self) -> None:  # under self._lock
-        if self._thread is None and not self._closed:
+        if (self._thread is None or not self._thread.is_alive()) and not self._closed:
+            if self._thread is not None:  # it died: the lease renewal and the queued writes need it
+                self.log("[launcher] island state store: the background thread had ended; started again")
             self._thread = threading.Thread(target=self._work, name="island-state-store", daemon=True)
             self._thread.start()
 
     def _work(self) -> None:
+        while True:
+            try:
+                self._work_loop()
+                return
+            except Exception as error:  # noqa: BLE001 - one bad pass never ends the lease renewal
+                self._warn("background pass", error)
+                time.sleep(min(1.0, self.stop_poll_s))
+
+    def _work_loop(self) -> None:
         stops_at = float("-inf")
         retry_at, backoff = float("-inf"), self.stop_poll_s
         while True:
@@ -508,6 +521,7 @@ class IslandStateStore:
                 closing = self._closed
             if pending and time.monotonic() < retry_at and not closing:
                 retry = pending  # backing off: nothing is tried before retry_at
+                self._fence_holds()  # ... but the lease is renewed meanwhile
             else:
                 retry = {key: data for key, data in pending.items() if not self._store(key, data)}
                 if retry:  # the fence not confirmed, or the store did not take it: back off, try again

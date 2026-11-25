@@ -474,9 +474,7 @@ class FleetController:
         launcher that holds it orders, relaunches and tears down (this one touches nothing)."""
         fenced = self._records_fenced()
         if fenced is not None:
-            from .island_lifecycle import IslandRecordsFenced
-
-            raise IslandRecordsFenced(f"the fleet controller lost the island records' lock ({fenced})")
+            raise lifecycle.IslandRecordsFenced(f"the fleet controller lost the island records' lock ({fenced})")
 
     @staticmethod
     def _unified_state(rec) -> str:
@@ -1015,11 +1013,9 @@ class FleetController:
                     self._abandon(rec, elapsed, reason="STOP flag")
                 return
             if self.recorder is not None:  # an island's or the syncer's relaunch is an order
-                from .island_lifecycle import IslandRecordsUnconfirmed
-
                 try:  # the lock still ours, checked now; lost raises IslandRecordsFenced (supervision ends)
                     self.recorder.store.guard_order(rec["name"])
-                except IslandRecordsUnconfirmed as error:
+                except lifecycle.IslandRecordsUnconfirmed as error:
                     print(f"[launcher] {rec['name']}: relaunch deferred: {error}", file=sys.stderr)
                     return
             if not is_syncer and self.replacement_planner is not None and not rec.get("replace_planned"):
@@ -1160,6 +1156,14 @@ class FleetController:
         )
 
     def _down(self, name: str, force: bool = False) -> None:
+        if self.recorder is not None:  # the lock checked now, not only the cached view
+            try:
+                self.recorder.store.guard_order(f"teardown of {name}")
+            except lifecycle.IslandRecordsFenced:
+                pass  # the cached view below says so too
+            except lifecycle.IslandRecordsUnconfirmed as error:
+                # not confirmed is not lost: nobody can claim the records without the store either
+                print(f"[launcher] {name}: tearing down unconfirmed ({error})", file=sys.stderr)
         fenced = self._records_fenced()
         if fenced is not None:  # the launcher that holds the island records owns this machine now
             print(f"[launcher] NOT tearing down {name}: this launcher lost the island records' lock "
