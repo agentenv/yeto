@@ -4,9 +4,9 @@
   and stops its pools; each island's trainer is judged by its own record and tape
   (``run.trainer_exit``, ``run.trainer_silence``); the run's STOP flag is kept for the
   fleet-wide stops (budget, wall clock, fewer islands than ``fleet.min_islands``);
-* the compile: no fixed roster by default (the syncer gets membership options: a lease and
-  quorum 1, so the launch's controller drops a given-up island and the rest go on);
-  ``fleet.fixed_roster: true`` keeps the old fixed roster;
+* the compile: no fixed roster by default (the syncer gets one membership option, the island
+  lease ``--rl-sync-island-lease-s``, so the launch's controller drops a given-up island and the
+  rest go on); ``fleet.fixed_roster: true`` keeps the old fixed roster;
 * the launch's controller: island 1 given up, island 0 goes on (no exit 4) without a fixed
   roster; with one, the fleet ends (exit 4)."""
 
@@ -112,9 +112,29 @@ def _silence_breach(run, monkeypatch):
 def test_the_global_silence_is_off_once_every_island_has_a_tape(fleet_run, monkeypatch, tmp_path):  # noqa: F811
     run = fleet_run()
     for k in (0, 1):
-        _states(run).write(k, "running", name=f"r-l{k}", source="modal", tape=str(tmp_path / f"t{k}.jsonl"))
+        tape = tmp_path / f"t{k}.jsonl"
+        tape.write_text("{}\n")
+        _states(run).write(k, "running", name=f"r-l{k}", source="modal", tape=str(tape))
     assert run.fleet_rt().judges_every_trainer(1000.0)
     assert _silence_breach(run, monkeypatch) is None  # each island is judged by its own tape
+
+
+def test_a_recorded_tape_that_never_stats_keeps_the_global_silence(fleet_run, monkeypatch, tmp_path):  # noqa: F811
+    """A tape path in the record is not enough: while one does not stat (not written yet, on another
+    machine), the island's own silence cannot judge it, so the run's silence still covers the fleet."""
+    run = fleet_run()
+    present = tmp_path / "t0.jsonl"
+    present.write_text("{}\n")
+    _states(run).write(0, "running", name="r-l0", source="modal", tape=str(present))
+    _states(run).write(1, "running", name="r-l1", source="modal", tape=str(tmp_path / "never.jsonl"))
+    assert not run.fleet_rt().judges_every_trainer(1000.0)
+    (tmp_path / "never.jsonl").write_text("{}\n")  # once it stats, the islands judge themselves
+    run.fleet_rt()._records_read = None
+    assert run.fleet_rt().judges_every_trainer(1000.0)
+    (tmp_path / "never.jsonl").unlink()  # gone again: back to the run's silence
+    run.fleet_rt()._records_read = None
+    assert not run.fleet_rt().judges_every_trainer(1000.0)
+    assert _silence_breach(run, monkeypatch).startswith("trainer: log / tape silent")
 
 
 def test_an_island_without_a_tape_keeps_the_global_silence(fleet_run, monkeypatch, tmp_path):  # noqa: F811
@@ -229,6 +249,40 @@ def test_re_up_with_another_roster_once_nothing_runs_goes_on(fleet_run):  # noqa
     assert json.loads(run._objects().read(fleet.PLAN_OBJECT))["roster"]["fixed"] is False
 
 
+def _stored_pool_plan(run, lease_s):
+    doc = run.fleet_plan().to_json()
+    doc["roster"]["lease_s"] = lease_s
+    run._objects().write(fleet.PLAN_OBJECT, json.dumps(doc).encode())
+
+
+def test_re_up_with_another_island_lease_while_islands_run_is_refused(fleet_run, capsys):  # noqa: F811
+    """Adopted trainers still heartbeat at the stored lease's pace: a shorter lease could drop them."""
+    run = fleet_run()
+    assert run.fleet_plan().island_lease_s == 150
+    _stored_pool_plan(run, 600)
+    _states(run).write(0, "running", name="r-l0", source="modal")
+    assert not run.write_fleet_plan()
+    out = capsys.readouterr().out
+    assert "the syncer island pool (lease 600 s)" in out and "the syncer island pool (lease 150 s)" in out
+    assert "fleet.island_lease_s 600" in out and "Nothing ordered" in out
+    assert json.loads(run._objects().read(fleet.PLAN_OBJECT))["roster"]["lease_s"] == 600  # not written over
+
+
+def test_re_up_with_the_stored_island_lease_goes_on(fleet_run):  # noqa: F811
+    run = fleet_run()
+    _stored_pool_plan(run, 150)
+    _states(run).write(0, "running", name="r-l0", source="modal")
+    assert run.write_fleet_plan()
+
+
+def test_re_up_with_another_island_lease_once_nothing_runs_goes_on(fleet_run):  # noqa: F811
+    run = fleet_run()
+    _stored_pool_plan(run, 600)
+    _states(run).write(0, "done", name="r-l0", source="modal")
+    assert run.write_fleet_plan()
+    assert json.loads(run._objects().read(fleet.PLAN_OBJECT))["roster"]["lease_s"] == 150
+
+
 def test_re_up_refuses_when_the_stored_plan_does_not_read(fleet_run, monkeypatch, capsys):  # noqa: F811
     run = fleet_run()
 
@@ -323,6 +377,11 @@ def test_the_island_lease_is_set_in_the_fleet_section(files):  # noqa: F811
 
 @pytest.mark.parametrize("extra, keys, match", [
     ([], {"island_lease_s": 0}, "fleet.island_lease_s must be a number of seconds > 0"),
+    ([], {"island_lease_s": -30}, r"fleet.island_lease_s must be a number of seconds > 0 \(got -30\)"),
+    ([], {"island_lease_s": "200"}, r"fleet.island_lease_s must be a number of seconds > 0 \(got '200'\)"),
+    ([], {"island_lease_s": "soon"}, "fleet.island_lease_s must be a number of seconds > 0"),
+    ([], {"island_lease_s": True}, r"fleet.island_lease_s must be a number of seconds > 0 \(got True\)"),
+    ([], {"island_lease_s": float("nan")}, "fleet.island_lease_s must be a number of seconds > 0"),
     ([], {"island_lease_s": 300, "fixed_roster": True}, "a fixed roster .* has none"),
     (["--rl-sync-island-lease-s", "200"], {"island_lease_s": 300}, "both set the syncer lease"),
 ])

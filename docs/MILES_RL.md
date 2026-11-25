@@ -589,10 +589,10 @@ What `run up` makes of it:
   then a round that waits for it waits up to the lease, and the island's
   training since its last release is lost. Each island's trainer is judged on
   its own: `run.trainer_exit` when its record shows it given up or failed,
-  `run.trainer_silence` when its event tape stops growing. An island without an
-  event tape on the launcher's machine (sky, Verda, an SSH island whose tape is
-  fetched) keeps the run's silence over the launcher log, which stops the whole
-  fleet. Once fewer islands run than `fleet.min_islands`, the launch is stopped.
+  `run.trainer_silence` when its event tape stops growing. While any island has
+  no event tape on the launcher's machine (sky, Verda, an SSH island whose tape
+  is fetched), or its recorded tape does not read, the run's silence over the
+  launcher log stays on, and it stops the whole fleet. Once fewer islands run than `fleet.min_islands`, the launch is stopped.
   With a fixed roster (`fleet.fixed_roster: true`, or a fleet the island pool
   does not fit, below) none of this changes: a trip stops the island's pools,
   its trainer starves until its `trainer.sample_wait` ends it, and the
@@ -614,7 +614,10 @@ What `run up` makes of it:
   (`--rl-sync-quorum-theta`, `--rl-sync-island-lease-s`, ...) is taken as given.
   A plan stored before `fleet.fixed_roster` existed ran a fixed roster: `run up`
   refuses to write another roster over it while its trainer islands still run
-  by their records (set `fleet.fixed_roster: true` to re-up that fleet).
+  by their records (set `fleet.fixed_roster: true` to re-up that fleet). The
+  same holds for an island pool re-upped with another `fleet.island_lease_s`
+  (its running trainers keep the old lease's heartbeat pace): keep the stored
+  lease, or change it once the fleet's islands are gone.
 
 #### Miles sampler islands next to external pools
 
