@@ -297,7 +297,7 @@ function hist(vals,o){
 function qrow(lists){ // [[label, sorted vals, fmt, slowText]]
   var qs=[["p10",0.1],["p25",0.25],["p50",0.5],["p75",0.75],["p90",0.9],["p99",0.99]];
   return '<table class="qt"><tr><th></th>'+lists.map(function(l){return '<th>'+esc(l[0])+'</th>'}).join("")+'</tr>'+
-    qs.map(function(q){return '<tr'+(q[0]==="p50"?' class="b"':"")+'><td>'+q[0]+'</td>'+lists.map(function(l){return '<td>'+(l[1].length?esc(l[2](rank(l[1],q[1]))):"n/a")+'</td>'}).join("")+'</tr>'}).join("")+
+    qs.map(function(q){return '<tr'+(q[0]==="p50"?' class="b"':"")+'><td>'+q[0]+'</td>'+lists.map(function(l){return '<td>'+(l[1].length?esc(l[2](rank(l[1],q[1]))):'<span class="note" title="no samples in the window yet">—</span>')+'</td>'}).join("")+'</tr>'}).join("")+
     '<tr class="m"><td>'+esc(lists[0][4]||"Samples")+'</td>'+lists.map(function(l){return '<td>'+k(l[1].length,0)+'</td>'}).join("")+'</tr>'+
     '<tr class="m"><td>Slow</td>'+lists.map(function(l){return '<td>'+esc(l[3]||"")+'</td>'}).join("")+'</tr></table>'}
 function distCard(color,title,spec,parts){ // parts: [{title, vals, fmt, slow:[thr,text]}]

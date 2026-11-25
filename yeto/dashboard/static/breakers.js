@@ -22,7 +22,7 @@ function fmt(v,unit){if(v===null||v===undefined)return "none";if(typeof v==="boo
 function unitOf(name){return /_s$/.test(name)?"s":/usd$/.test(name)?"usd":/ratio$/.test(name)?"ratio":/_h$|^hours$/.test(name)?"h":"n"}
 function params(r){var ks=Object.keys(r.params||{});if(!ks.length)return "";
   return ks.map(function(k){var u=(r.units||{})[k]||unitOf(k);return '<span class="bp"><span class="bk">'+esc(k)+'</span> '+esc(fmt(r.params[k],u))+'</span>'}).join(" ")}
-function source(s){if(!s)return '<span class="note">source n/a</span>';
+function source(s){if(!s)return '<span class="note">no source recorded</span>';
   var kind=s.kind==="legacy"?"alias":s.kind==="breakers"?"breakers section":s.kind;
   return '<span class="bsrc bs-'+esc(s.kind)+'" title="'+esc(s.location)+'">'+esc(kind)+'</span> <span class="note bl" title="'+esc(s.location)+'">'+esc(s.location)+'</span>'}
 function bar(g,tripped){if(!g||!fin(g.ratio))return "";var r=Math.max(0,g.ratio),w=Math.min(100,r*100);

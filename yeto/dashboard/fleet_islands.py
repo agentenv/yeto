@@ -9,7 +9,15 @@ Read-only, like the rest of the dashboard. Two sources, both optional:
   copy next to a tape or under a local store directory, else the run store's object at most
   every ``PLAN_POLL_S``;
 * ``rl_sampler_start.island`` / ``.store``: the island (learner id) and the store each
-  external sampler runs on.
+  external sampler runs on;
+* the fleet's live membership (:func:`read_fleet_state`, read with the plan): the pools
+  ``yeto fleet apply`` added or removed after the plan (``fleet/applied/<seq>.json``: name,
+  provider, shard base, island, price), each pool's own state (``fleet/pools/<name>/state.json``:
+  stopped, retired shards), its member table (``trainer<k>/fleet/members/<name>.json``:
+  retired shards) and, for a retired shard, its sampler's member record
+  (``trainer<k>/sample-buffer/members/<shard>/<incarnation>.json``: the leave the sampler or
+  its pool wrote). A pool's sampler is named by its pool and provider, and a retired one is
+  shown as left (no heartbeat alert).
 
 Which island a sampler belongs to, strongest evidence first: its own ``island`` field; the
 plan pool whose shard base names its shard; the ``trainer<k>`` its store ends in. ``k`` is
@@ -137,6 +145,181 @@ def plan_candidates(paths: list[str], max_up: int = 3) -> list[str]:
     return out
 
 
+def _json(objects: Any, key: str) -> Any:
+    try:
+        data = objects.read(key)
+    except Exception:  # noqa: BLE001 - the store's own status reports read failures
+        return None
+    if not data:
+        return None
+    try:
+        return json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _keys(objects: Any, prefix: str) -> list[str]:
+    try:
+        return sorted(k for k in objects.list(prefix) if k.endswith(".json"))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+_LANE = re.compile(r"(?:^|/)(trainer\d+)/*$")
+
+
+def _lane(row: dict) -> str:
+    """The store lane (``trainer<k>``) of an applied pool: the last segment of its
+    ``run_prefix`` (``[<team>/]<run>/trainer<k>``), else its island."""
+    m = _LANE.search(str(row.get("run_prefix") or ""))
+    if m:
+        return m.group(1)
+    return f"trainer{row.get('learner') if row.get('learner') is not None else 0}"
+
+
+GONE = "gone"  # a pool member released (``yeto.launch.pool.island_pool.GONE``)
+
+
+def _member_state(st: dict, shard: str) -> str | None:
+    """The pool's word on the machine serving ``shard`` (its state.json members): a member not
+    released (``draining``, ``ready``, ...) wins, else ``gone`` (released); None: not listed."""
+    states = [str(m.get("state") or "") for m in st.get("members") or () if isinstance(m, dict)
+              and str(m.get("shard")) == shard]
+    live = [x for x in states if x and x != GONE]
+    return live[0] if live else (GONE if states else None)
+
+
+def _fold_gens(objects: Any, cache: dict) -> dict[str, dict] | None:
+    """The applied generations folded into ``{pool: row}``, incrementally: a generation is
+    written once, so only the keys after the last one folded are read (``cache["fold"]``)."""
+    keys = _keys(objects, "fleet/applied/")
+    fold = cache.get("fold")
+    if fold is None or not keys:
+        fold = cache["fold"] = {"last": "", "pools": {}, "any": False}
+    gens = []
+    for key in keys:
+        if key <= fold["last"]:
+            continue
+        doc = _json(objects, key)
+        if not isinstance(doc, dict):
+            break  # not readable yet: folded on a later read, in order
+        gens.append(doc)
+        fold["last"] = key
+    if not keys and not fold["any"]:
+        doc = _json(objects, "fleet/applied.json")
+        if not isinstance(doc, dict):
+            return None
+        fold["pools"] = {}
+        gens = [doc]
+    gens.sort(key=lambda g: (_int(g.get("seq")) or 0, _f(g.get("at")) or 0.0))
+    pools = fold["pools"]
+    for g in gens:
+        fold["any"] = fold["any"] or bool(keys)
+        at = _f(g.get("at"))
+        here = set()
+        for m in g.get("members") or ():
+            if not isinstance(m, dict) or m.get("kind") != "sampler_pool" or not _str(m.get("name")):
+                continue
+            pool = m.get("pool") if isinstance(m.get("pool"), dict) else {}
+            row = pools.setdefault(m["name"], {"name": m["name"], "first_at": at})
+            row.update(provider=_str(pool.get("provider")), shard_base=_str(pool.get("shard_base")),
+                       usd_per_h=_f(pool.get("usd_per_h")), run_prefix=_str(pool.get("run_prefix")),
+                       learner=_int((pool.get("sampler") or {}).get("island")
+                                    if isinstance(pool.get("sampler"), dict) else None),
+                       removed_at=None)
+            here.add(m["name"])
+        for name, row in pools.items():
+            if name not in here and row.get("removed_at") is None:
+                row["removed_at"] = at  # dropped from the fleet's applied membership
+        removing = {str(x.get("name") if isinstance(x, dict) else x) for x in g.get("removing") or ()}
+        for name, row in pools.items():
+            row["removing"] = name in removing
+    return pools if pools or fold["any"] or gens else None
+
+
+def _shard_record(objects: Any, lane: str, shard: str) -> dict | None:
+    """The newest incarnation's member record of ``shard`` (by ``joined_at``)."""
+    newest = None
+    for key in _keys(objects, f"{lane}/sample-buffer/members/{shard}/"):
+        m = _json(objects, key)
+        if isinstance(m, dict) and (newest is None or (_f(m.get("joined_at")) or 0) >= (_f(newest.get("joined_at")) or 0)):
+            newest = m
+    return newest
+
+
+def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
+    """The fleet's live membership from the run store (module doc): ``{"pools": {name: {name,
+    provider, shard_base, usd_per_h, learner, first_at, removed_at, removing, stopped,
+    retired}}, "shards": {shard: {pool, retired, retired_at, member_state, left_at,
+    leave_reason, incarnation, left_by}}}``; None when the store has no applied membership.
+
+    ``cache`` bounds the reads across calls: the applied generations are folded once each, a
+    retired shard whose machine the pool released (``member_state`` gone) is not read again,
+    and a removed pool whose every retired shard settled is not read again at all."""
+    cache = {} if cache is None else cache
+    pools = _fold_gens(objects, cache)
+    if pools is None:
+        return None
+    settled_pools = cache.setdefault("settled_pools", {})
+    settled_shards = cache.setdefault("settled_shards", {})
+    out_pools: dict[str, dict] = {}
+    shards: dict[str, dict] = {}
+    for name, base in pools.items():
+        row = {k: v for k, v in base.items() if k != "run_prefix"}
+        lane = _lane(base)
+        done = settled_pools.get(name)
+        if done is not None and base.get("removed_at") is not None:
+            row.update(done["row"])
+            out_pools[name] = row
+            shards.update(done["shards"])
+            continue
+        st = _json(objects, f"fleet/pools/{name}/state.json")
+        st = st if isinstance(st, dict) else {}
+        table = _json(objects, f"{lane}/fleet/members/{name}.json")
+        table = table if isinstance(table, dict) else {}
+        retired = sorted({str(x) for x in (st.get("retired_shards") or []) + (table.get("retired") or [])})
+        row.update(stopped=_str(st.get("stopped")), retired=retired, lane=lane)
+        mine: dict[str, dict] = {}
+        for shard in retired:
+            key = f"{lane}/{shard}"
+            if key in settled_shards:
+                mine[shard] = settled_shards[key]
+                continue
+            rec = {"pool": name, "retired": True, "retired_at": _f(table.get("updated_at")),
+                   "member_state": _member_state(st, shard), "left_at": None, "leave_reason": None,
+                   "incarnation": None, "left_by": None}
+            newest = _shard_record(objects, lane, shard)
+            if newest is not None:
+                rec.update(left_at=_f(newest.get("left_at")), leave_reason=_str(newest.get("leave_reason")),
+                           incarnation=_str(newest.get("incarnation")),
+                           left_by=_str((newest.get("detail") or {}).get("left_by"))
+                           if isinstance(newest.get("detail"), dict) else None)
+            if rec["member_state"] == GONE:
+                settled_shards[key] = rec  # released: a retired shard does not come back
+            mine[shard] = rec
+        shards.update(mine)
+        out_pools[name] = row
+        if base.get("removed_at") is not None and st and all(r["member_state"] == GONE for r in mine.values()) \
+                and _member_state_all_gone(st):
+            settled_pools[name] = {"row": {k: row[k] for k in ("stopped", "retired", "lane")}, "shards": mine}
+    return {"pools": out_pools, "shards": shards}
+
+
+def _member_state_all_gone(st: dict) -> bool:
+    return all(str(m.get("state") or "") == GONE for m in st.get("members") or () if isinstance(m, dict))
+
+
+def state_pool(state: dict | None, sid: str) -> dict | None:
+    """The applied pool whose shard base names sampler ``sid`` (longest base), else None."""
+    best = None
+    for row in ((state or {}).get("pools") or {}).values():
+        base = row.get("shard_base")
+        if base and (sid == base or (sid.startswith(base + "-") and sid[len(base) + 1:].isdigit())):
+            if best is None or len(base) > len(best["shard_base"]):
+                best = row
+    return best
+
+
 class PlanFile:
     """Feeds ``fleet/plan.json`` to a reducer (``Reducer.load_fleet_plan``): the first local
     candidate that exists (read again when its mtime changes), else the run store's copy
@@ -159,8 +342,25 @@ class PlanFile:
         self._store_bytes: bytes | None = None
         self._tapes: dict[str, Any] = {}
         self.substores: list[str] = []
+        self._next_state: float | None = None
+        self._state_cache: dict = {}
+
+    def pump_state(self, reducer) -> bool:
+        """The fleet's live membership (:func:`read_fleet_state`) at most every ``interval_s``."""
+        if self.objects is None or not callable(getattr(reducer, "load_fleet_state", None)):
+            return False
+        now = self.clock()
+        if self._next_state is not None and now < self._next_state:
+            return False
+        self._next_state = now + self.interval_s
+        state = read_fleet_state(self.objects, self._state_cache)
+        return False if state is None else reducer.load_fleet_state(state)
 
     def pump(self, reducer) -> bool:
+        changed = self._pump_plan(reducer)
+        return self.pump_state(reducer) or changed
+
+    def _pump_plan(self, reducer) -> bool:
         for p in self.candidates:
             try:
                 st = p.stat()
@@ -350,6 +550,7 @@ def resolve(reducer, tids: list[str] | None = None) -> dict | None:
 
 def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
     starts = sampler_starts(reducer)
+    state = getattr(reducer, "fleet_state", None)
     if not plan and not any(_int(r.get("island")) is not None for r in starts.values()):
         return None
     asy = reducer.async_
@@ -390,15 +591,24 @@ def _resolve(reducer, tids: list[str], plan: dict | None) -> dict | None:
             pool_of[sid] = name
             continue
         hit = _plan_pool(plan, sid)
-        name = hit[1]["name"] if hit is not None and hit[0] == k else SHARD_N.sub("", sid)
+        applied = state_pool(state, sid) if hit is None or hit[0] != k else None
+        name = (hit[1]["name"] if hit is not None and hit[0] == k else applied["name"] if applied is not None
+                else SHARD_N.sub("", sid))
         pool = next((p for p in isl["pools"] if p["name"] == name), None)
-        if pool is None:  # no plan pool names it: the samplers sharing a shard base are one pool
+        if pool is None:  # no plan pool names it: an applied pool (fleet apply), else its shard base
             prov = (asy.sampler.get(sid) or {}).get("provenance") or {}
-            pool = {"name": name, "source_name": None, "provider": None, "shard_base": name,
-                    "engine": _str(prov.get("engine")), "rollout_quant": None, "usd_per_h": None, "samplers": []}
+            pool = {"name": name, "source_name": None, "provider": (applied or {}).get("provider"),
+                    "shard_base": (applied or {}).get("shard_base") or name,
+                    "engine": _str(prov.get("engine")), "rollout_quant": None,
+                    "usd_per_h": (applied or {}).get("usd_per_h"), "samplers": []}
             isl["pools"].append(pool)
         pool["samplers"].append(sid)
         pool_of[sid] = name
+    for isl in islands.values():  # a pool fleet apply removed: drawn as ended, not as running
+        for p in isl["pools"]:
+            row = ((state or {}).get("pools") or {}).get(p["name"])
+            if row is not None and row.get("removed_at") is not None:
+                p["removed"] = {"at": row["removed_at"], "why": row.get("stopped") or "removed from the fleet"}
     if any(p.get("source") == "miles" for isl in islands.values() for p in isl["pools"]):
         # both kinds in the fleet: every row names its source (a fleet of pools alone keeps its rows)
         for isl in islands.values():
