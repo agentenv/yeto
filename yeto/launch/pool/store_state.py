@@ -25,6 +25,7 @@ allocator.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from .shard_alloc import ShardAllocator
 from .store_lock import DEFAULT_TTL_S, StoreLock
 
 POOLS_DIR = "fleet/pools"
+_RECORD = re.compile(r"(\d{8})\.json")
 
 
 class PoolLocked(RuntimeError):
@@ -59,9 +61,38 @@ def state_key(pool: str) -> str:
 
 
 def provider_key(pool: str) -> str:
-    """The pool provider's own record (an ssh pool's tickets, lost-node holds and owed
-    stops), written under the same lock as the state."""
+    """The single provider record of the first store version (read only: an attach that finds
+    no per-token record reads it; :func:`provider_record_key` replaced it)."""
     return f"{pool_dir(pool)}/provider.json"
+
+
+def provider_record_key(pool: str, token: int) -> str:
+    """The pool provider's own record (an ssh pool's tickets, lost-node holds and owed stops)
+    as written by the holder of lock token ``token``: each holder writes only its own key, so
+    a write of a fenced holder that lands late never replaces the next holder's record."""
+    return f"{pool_dir(pool)}/provider/{int(token):08d}.json"
+
+
+def provider_tokens(objects: Any, pool: str) -> list[int]:
+    """The lock tokens with a provider record, ascending (one LIST)."""
+    base = f"{pool_dir(pool)}/provider/"
+    return sorted(int(m.group(1)) for key in objects.list(base) if (m := _RECORD.fullmatch(key[len(base):])))
+
+
+def read_provider_record(objects: Any, pool: str, *, upto: int | None = None) -> tuple[str, dict[str, Any]] | None:
+    """``(key, document)`` of the newest provider record (of a token up to ``upto``: that
+    holder's own and its predecessors'), else the first version's single record; None: none.
+    An unreadable record raises (never read as an empty one)."""
+    tokens = [t for t in provider_tokens(objects, pool) if upto is None or t <= upto]
+    for key in [provider_record_key(pool, t) for t in reversed(tokens)] + [provider_key(pool)]:
+        data = objects.read(key)
+        if data is None:
+            continue
+        doc = json.loads(data)
+        if not isinstance(doc, dict) or not isinstance(doc.get("tickets"), dict):
+            raise ValueError(f"the provider record {key} holds no tickets")
+        return key, doc
+    return None
 
 
 def lock_prefix(pool: str) -> str:
