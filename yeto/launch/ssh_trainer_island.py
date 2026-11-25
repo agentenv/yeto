@@ -197,6 +197,9 @@ class SshTrainerSpec:
     container_home: str = "/root"
     code_pack: tuple[str, str] | None = None  # (s3:// URI, digest) of the run code pack
     weights: Any = None  # ssh_weights.WeightsPlan: the preflight copies the model onto every node
+    # rootfs nodes: scripts the job sources before the trainer (a venv's bin/activate, CANN's
+    # set_env.sh), in order; empty: the device family's defaults (DEFAULT_ACTIVATE)
+    activate: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.nodes:
@@ -238,6 +241,13 @@ class SshTrainerSpec:
         for target in self.files:
             if not (str(target).startswith(("~/", "/")) and ".." not in Path(str(target)).parts):
                 raise SshIslandError(f"file mount {target!r}: the node path must be absolute or under ~/")
+        if self.activate and self.docker:
+            raise SshIslandError("activation scripts (--rl-ssh-trainer-activate) are for runtime: rootfs nodes; "
+                                 "a docker node's image carries its own environment")
+        for script in self.activate:
+            if not ACTIVATE_PATH.fullmatch(str(script)) or ".." in Path(str(script)).parts:
+                raise SshIslandError(f"activation script {script!r}: an absolute path or one under ~/ "
+                                     "(letters, digits and . _ - + @ = , : / only)")
         if self.env.get(DEVICE_FAMILY_ENV, self.device_family) != self.device_family:
             raise SshIslandError(f"env sets {DEVICE_FAMILY_ENV}={self.env[DEVICE_FAMILY_ENV]}, but the "
                                  f"inventory nodes are {self.device_family}; the inventory decides")
@@ -414,12 +424,67 @@ def _code_link(spec: SshTrainerSpec) -> str:
     return ""
 
 
-def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str, state_dir: str | None = None) -> str:
+# What a rootfs node's job sources by default, per device family, when the run names no
+# activation script: an Ascend host keeps CANN's toolkit (and the ATB library) outside the
+# Python environment, and torch_npu does not load without their set_env.sh. Only the
+# scripts the node has are sourced. Other families source nothing by default.
+# an activation script path: absolute or under ~/, shell-inert characters only (it is
+# sourced unquoted so that $HOME expands)
+ACTIVATE_PATH = re.compile(r"(/|~/)[A-Za-z0-9._+@=,:/-]+")
+DEFAULT_ACTIVATE: dict[str, tuple[str, ...]] = {
+    "npu": ("/usr/local/Ascend/ascend-toolkit/set_env.sh", "/usr/local/Ascend/nnal/atb/set_env.sh"),
+}
+
+
+def activation(spec: SshTrainerSpec) -> tuple[tuple[str, ...], bool]:
+    """``(scripts, required)`` a rootfs job sources before the trainer: the run's own
+    (required: a missing one fails the job) or the family's defaults (sourced when
+    present); nothing on docker nodes."""
+    if spec.docker:
+        return (), False
+    if spec.activate:
+        return tuple(spec.activate), True
+    return DEFAULT_ACTIVATE.get(spec.device_family, ()), False
+
+
+def _activate_lines(spec: SshTrainerSpec) -> str:
+    scripts, required = activation(spec)
+    lines = []
+    for script in scripts:
+        path = _home_path(script, "$HOME", quote=False)
+        if required:
+            why = shlex.quote(f"[yeto-island] could not source {script}")
+            lines.append(f"source {path} || {{ echo {why} >&2; exit 1; }}\n")
+        else:
+            lines.append(f"[ ! -f {path} ] || source {path}\n")
+    return "".join(lines)
+
+
+def _keep_env(names: Sequence[str], activate: str) -> str:
+    """``activate`` with the variables ``names`` kept: their values (already in the job's
+    environment) are saved before the scripts and restored after them, so an activation
+    script (CANN's ``set_env.sh`` sets ``LD_LIBRARY_PATH``, ``PYTHONPATH``, ``ASCEND_*``)
+    never overrides what the inventory, ``--island-env`` or the island task set. Only the
+    names are in the script, never a value: the script is a ``bash -c`` argument, which
+    any user of the node can read from the process list."""
+    keep = sorted(n for n in names if ENV_NAME.fullmatch(n))
+    if not activate or not keep:
+        return activate
+    return (f"__yeto_keep=$(declare -p {' '.join(keep)} 2>/dev/null || true)\n"
+            + activate + 'eval "$__yeto_keep"; unset __yeto_keep\n')
+
+
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str, state_dir: str | None = None,
+                  keep: Sequence[str] = ()) -> str:
     """The node's job as bash; it exits with the trainer's exit code. ``state_dir``:
     the incarnation's state dir as the job sees it (the node-local storage prelude,
-    :func:`ssh_node_storage.job_prelude`)."""
+    :func:`ssh_node_storage.job_prelude`). A rootfs job first sources its activation
+    scripts (:func:`activation`), keeping the variables ``keep`` (:func:`_keep_env`)."""
     node = spec.nodes[rank]
-    prelude = ssh_node_storage.job_prelude(node, spec.run_id, state_dir)
+    prelude = _keep_env(keep, _activate_lines(spec)) + ssh_node_storage.job_prelude(node, spec.run_id, state_dir)
     if spec.run_script:
         # The island run script (rl_island_task) enters ~/sky_workdir, where sky syncs
         # the code; an SSH node has no sync: the run code pack, or the spec's workdir.
@@ -506,7 +571,7 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
         enter = place = ""
     else:
         requant_log = f"\"{paths['requant_log']}\""
-        job = f"bash -c {shlex.quote(_trainer_body(spec, rank, requant_log))}"
+        job = f"bash -c {shlex.quote(_trainer_body(spec, rank, requant_log, keep=sorted(full_env)))}"
         enter = f"cd {shlex.quote(spec.workdir)}\n" if spec.workdir else 'cd "$HOME"\n'
         place = "".join(
             f"__yeto_f={_home_path(target, '$HOME', quote=False)}\n"
@@ -1202,6 +1267,11 @@ def run_image(args: Any, nodes: Sequence[Node]) -> str | None:
     docker = [n for n in nodes if n.runtime == "docker"]
     if not docker:
         return None
+    if ref and _is_build_image(args, ref):
+        raise SshIslandError(
+            f"--rl-image {ref} is an image yeto builds on Modal; an ssh: trainer island's docker nodes pull a "
+            "registry image: pass --rl-image docker:<registry>/<image>@sha256:<digest>, or run the nodes as "
+            "runtime: rootfs (the trainer's Python environment on the node, --rl-ssh-trainer-activate)")
     if not ref:
         images = {n.image for n in docker}
         only = next(iter(images)) if len(images) == 1 else None
@@ -1221,6 +1291,15 @@ def run_image(args: Any, nodes: Sequence[Node]) -> str | None:
               flush=True)
         return safe
     return ref
+
+
+def _is_build_image(args: Any, ref: str) -> bool:
+    """A backend's own image form that is built on Modal, not pulled (verl ``verl-build:<commit>``)."""
+    if "/" in ref or "@sha256:" in ref:
+        return False
+    from .rl_backend import _rl_backend_image_ok
+
+    return _rl_backend_image_ok(args)
 
 
 CODE_PACK_SOURCE, RELEASE_SOURCE, WORKDIR_SOURCE = "code-pack", "release", "workdir"
@@ -1290,6 +1369,7 @@ def island_spec_from_inventory(args: Any, island: Any, task: Any) -> SshTrainerS
         raise SshIslandError(str(exc)) from None
     return SshTrainerSpec(nodes=nodes, run_id=str(args.cluster_prefix), workdir=str(workdir),
                           image=run_image(args, nodes), code_pack=code_pack,
+                          activate=tuple(getattr(args, "rl_ssh_trainer_activate", None) or ()),
                           # sky runs setup and run as two scripts; a failed setup ends the job
                           run_script=f"bash -c {shlex.quote(setup)} || exit $?\n{run}" if setup.strip() else run,
                           env=env, files=files, weights=weights)

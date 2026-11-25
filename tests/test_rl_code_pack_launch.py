@@ -59,10 +59,11 @@ def launch(monkeypatch, tmp_path):
     def run(*extra):
         from yeto import runs
 
+        # an sm90+ card: the Miles image is refused below it (trainer_image_check)
         args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync",
                                         "--rl-checkpoint-store", "modal-volume://vol/run",
                                         "--rl-code-pack", "git-patch", *extra),
-                              gpu="modal:1xa100")
+                              gpu="modal:1xh100")
         args.keep, args.recover_timeout = False, 0.0
         # a no-sync run refuses old tapes; a later start here is about code only
         shutil.rmtree(runs.run_dir(args.cluster_prefix) / "events", ignore_errors=True)

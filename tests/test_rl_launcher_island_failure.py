@@ -291,8 +291,9 @@ def test_run_manifest_records_image_and_pins(monkeypatch, tmp_path, capsys):
 
     record, clock = [], Clock()
     _setup(monkeypatch, tmp_path, failing={0}, clock=clock, record=record)
+    # an sm90 card: the default Miles image is refused on an A100 (trainer_image_check)
     args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync"),
-                          gpu="modal:1xa100")
+                          gpu="modal:1xh100")
     args.keep, args.recover_timeout = False, 0.0
     launcher.run(args)
     manifest = _json.loads((runs.run_dir(args.cluster_prefix) / "run_manifest.json").read_text())

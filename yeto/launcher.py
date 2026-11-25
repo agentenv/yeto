@@ -1754,6 +1754,9 @@ def dry_run_plan(args) -> dict:
     from .launch.model_check import preflight_trainer_model
 
     trainer_model = preflight_trainer_model(args)  # ModelCheckError (a ValueError): rejected
+    from .launch.trainer_image_check import check_trainer_images
+
+    check_trainer_images(args, specs)  # the launch preflight's image / card refusal, found early
     task_plan = island_task_plan(args) if rl else None
     split_plan = data_split_plan(args) if rl else None
     placements = rl_island_placement_records(args) if rl else []
