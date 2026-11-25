@@ -214,7 +214,11 @@ class FleetRuntime:
         """Island k's trip stopped it (module doc): its island STOP is written (the launch's
         fleet controller releases its trainer) and its pools are stopped. A fixed roster
         (``plan.fixed_roster``) writes no island STOP (its launch would end the whole fleet,
-        exit 4): its pools are stopped and its trainer starves, as before the island STOP."""
+        exit 4): its pools are stopped and its trainer starves, as before the island STOP.
+        An operator stop (``operator``: the island is ``done`` on a STOP its controller acted
+        on already) writes none either: only its pools follow. A STOP written then would sit
+        over a START that ``yeto island start`` put in its place, and the controller acts on
+        no START while a STOP stands: the island would stay done."""
         pools = self.pool_indices(k)
         names = [self.run.pools[i].name for i in pools]
         miles = [m.name for m in self.miles_samplers(k)]
@@ -227,6 +231,11 @@ class FleetRuntime:
                  + (f"its Miles sampler island(s) {', '.join(miles)} are part of the launch and keep feeding its "
                     "trainer" if miles else
                     "its trainer starves until its trainer.sample_wait ends it and the launcher gives it up"))
+        elif operator:
+            _log(f"CRITICAL fleet_island_stop: {self.label(k)}: {why}; its trainer is done on its island STOP "
+                 f"already (no island STOP written by run up); its pools ({', '.join(names) or 'none'}) are "
+                 "stopped and the other islands go on"
+                 + (f"; its Miles sampler island(s) {', '.join(miles)} follow its trainer" if miles else ""))
         else:
             states = self.island_states()
             # an island STOP already there (``yeto island stop``) is kept as written

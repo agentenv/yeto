@@ -264,6 +264,32 @@ def test_run_up_stops_the_pools_of_an_island_stopped_by_hand(fleet_run):  # noqa
     assert run.fleet_rt().island_stopped(1) == "operator:maintenance" and run.fleet_rt().active() == [0]
 
 
+def test_run_up_writes_no_stop_over_a_start_of_an_island_stopped_by_hand(fleet_run, tmp_path):  # noqa: F811
+    """The START kept through a drain is pending when the island turns done. If run up sees done +
+    stopped first, its operator stop stops the pools only: an island STOP written then would sit over
+    the START (the controller acts on no START while a STOP stands) and the island would stay done."""
+    run = fleet_run()
+    states = lc.IslandStateStore(run._objects())
+    states.write(0, "running", name="r-l0", source="modal")
+    states.write(1, "done", name="r-l1-modal", source="modal", exit="STOPPED (island STOP: maintenance)",
+                 stop={"reason": "maintenance", "by": "yeto island stop"},
+                 decision={"cause": "stopped", "action": "stop", "state": "done", "detail": "maintenance"})
+    states.request_start(1, "back", by="yeto island start")  # the CLI swapped the STOP for this START
+    run.fleet_rt().trainer_check(1000.0)
+    assert run.fleet_rt().active() == [0] and [c for c in run.calls if "pool-stop" in c]
+    assert len([e for e in _events(run) if e.get("event") == "fleet_island_operator_stop"]) == 1
+    assert states.stop_requested(1) is None  # run up wrote no STOP over the START
+    assert states.start_requested(1)["reason"] == "back"
+    # the controller then acts on the START: ordered again, not left done
+    ctl = _ctl(states, FakeOps())
+    rec = ctl.learners["r-l1-modal"]
+    rec["state"] = "done"
+    states.read_all([0, 1])
+    assert ctl._island_start(rec)
+    assert rec["state"] == "recovering" and states.read(1)["start"]["outcome"] == "ordered"
+    assert states.start_requested(1) is None
+
+
 def _ctl(states, ops, **kw):
     ops.status_seq.setdefault(SYNCER, [RUNNING])
     refs = {"r-l0-modal": lc.IslandRef(0, "modal"), "r-l1-modal": lc.IslandRef(1, "modal")}

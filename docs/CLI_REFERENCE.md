@@ -204,7 +204,8 @@ Each prints the island's name, source, state and the launcher supervising it.
   (`fleet.island_lease_s`, default 150 s): a round that waits for it waits up to that long,
   and its training since its last release is lost. A `yeto run up` of the run then stops
   island K's sampler pools (event `fleet_island_operator_stop`, not a breaker trip) and
-  keeps it stopped when restarted. Once every island ended on its own STOP, `yeto run up`
+  keeps it stopped when restarted. It writes no island STOP for it (the controller acted
+  on the STOP already), so a `start K` written meanwhile stays in place. Once every island ended on its own STOP, `yeto run up`
   stops the run (every island stopped); the launch itself exits 9, which `yeto run up`
   reports as the launcher's exit (`run.trainer_exit`) when it sees that first.
 - On a fixed roster (`fleet.fixed_roster: true`, a fleet the island pool does not fit, a
