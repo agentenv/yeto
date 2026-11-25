@@ -280,9 +280,10 @@ def test_shadow_the_provider_launches_what_the_removed_cli_launched(tmp_path, mo
     """Shadow comparison of 7.2: for every candidate of the default list, the cluster the
     watchdog asks SkyProvider for has the same name, task file, infra, GPUs, spot flag,
     envs (CARD per candidate, RUN_ID, the operator's) and secrets as the `sky launch`
-    argv of the removed CLI path. The one intended difference: the task (it has a run:
+    argv of the removed CLI path. Two intended differences: the task (it has a run:
     the sampler is the sky job) is launched with down=True, so the cluster goes when the
-    job ends; the CLI path left an idle VM billing until the watchdog noticed."""
+    job ends (the CLI path left an idle VM billing until the watchdog noticed); and the
+    resources carry the ownership label yeto-run=<run>, so only this run adopts it."""
     monkeypatch.setenv("MODAL_TOKEN_ID", "id-x")
     yaml = tmp_path / "island.yaml"
     yaml.write_text("run: python -m yeto.rl.spot_rollout.sampler --spec spec.json\n")
@@ -310,8 +311,9 @@ def test_shadow_the_provider_launches_what_the_removed_cli_launched(tmp_path, mo
         old = _parse_legacy(_legacy_cli_launch(name, cand, str(yaml), envs, secrets))
         assert cluster == old["cluster"]
         assert task.name == f"yaml:{old['yaml']}"
-        assert task.resources == {"infra": old["infra"], "accelerators": old["accelerators"],
-                                  "use_spot": old["use_spot"]}
+        resources = dict(task.resources)
+        assert resources.pop("labels") == {"yeto-run": "runs"}  # the ownership mark (intended: new)
+        assert resources == {"infra": old["infra"], "accelerators": old["accelerators"], "use_spot": old["use_spot"]}
         assert task.envs == old["envs"], cand.key
         assert set(task.secrets) == old["secrets"] and task.secrets["MODAL_TOKEN_ID"] == "id-x"
         assert old["detached_no_down"] and kw == {"down": True}  # the intended difference (docstring)
