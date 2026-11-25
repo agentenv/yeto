@@ -754,9 +754,10 @@ class SshNodeProvider:
     and the local file is imported only when the store has no record at all (from then on
     it is only mirrored). A write of the fenced holder that lands late (its guard passed,
     then it stalled past its lease while the next holder claimed the pool and read)
-    replaces nothing, but the next holder does not see it: the guard renews the lease at
-    half its ``ttl_s``, so that takes a stall of more than half the lease (less the clock
-    skew between the hosts) between the guard and the write."""
+    replaces nothing, and is not lost either: every save of the next holder merges the
+    newest earlier record's lost-node holds and owed stops into its own
+    (:meth:`_merge_predecessor`), so a sampler the fenced holder left on a lost node is
+    still stopped before the next start there."""
 
     kind = KIND
     caps = provider_caps(KIND)  # yeto/cloud/capabilities.json
@@ -769,6 +770,9 @@ class SshNodeProvider:
         # the store control plane (attach_store): (objects, key, lock) and the record in memory
         self._store: tuple[Any, str, Any] | None = None
         self._store_rows: dict[str, dict[str, Any]] = {}
+        # tickets whose owed stop went through (stop_done): a predecessor's record that still
+        # owes it never brings it back (kept in the record: a successor reads them too)
+        self._stops_done: set[str] = set()
         self.imported_from: str | None = None
         bad = [s for s in self.slots if not 0 <= s < len(conf.nodes)]
         if bad:
@@ -791,7 +795,9 @@ class SshNodeProvider:
             rows, origin = {}, {"source": "new"}
         with self._lock:
             self._store = (objects, store_state.provider_record_key(pool, lock.token), lock)
+            self._store_pool = pool
             self._store_rows = {t: dict(r) for t, r in rows.items()}
+            self._stops_done = {str(t) for t in (found[1].get("stops_done") or ())} if found else set()
             self.imported_from = origin.get("path") or (found[1].get("imported_from") if found else None)
             self._save(self._rows())
         self._prune(objects, pool, lock.token)
@@ -827,8 +833,10 @@ class SshNodeProvider:
         if self._store is not None:
             objects, key, lock = self._store
             lock.guard()  # LockLost once another controller took the pool; a store blip inside the lease passes
+            rows = self._merge_predecessor(objects, lock.token, rows)
             doc = {"tickets": rows, "control": {"token": lock.token, "holder": lock.holder, "saved_at": self.clock()},
-                   **({"imported_from": self.imported_from} if self.imported_from else {})}
+                   **({"imported_from": self.imported_from} if self.imported_from else {}),
+                   **({"stops_done": sorted(self._stops_done)} if self._stops_done else {})}
             objects.write(key, json.dumps(doc, indent=1, sort_keys=True).encode())
             self._store_rows = {t: dict(r) for t, r in rows.items()}
             try:  # the local mirror (status readers on this host); never read back on this plane
@@ -837,6 +845,44 @@ class SshNodeProvider:
                 pass
             return
         self._write_local(rows)
+
+    def _merge_predecessor(self, objects: Any, token: int, rows: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """``rows`` with the lost-node holds and owed stops of the newest record of an
+        earlier lock holder merged in. A fenced holder's write can land after this holder
+        read the store (class doc): its hold, and above all its owed stop (a sampler left
+        on a node, billing, that nobody would stop), are not lost. Holds: the later
+        ``held_until``; owed stops: the union, less those this holder saw go through
+        (``stops_done``, its predecessors' too). A ticket only the predecessor knows comes
+        in as a released row with its hold / owed stop. Its other fields (state, the
+        tickets it ordered) are this holder's. A predecessor record that does not read
+        is not merged this time (the next save reads it again)."""
+        from .pool import store_state  # noqa: PLC0415
+
+        try:
+            found = store_state.read_provider_record(objects, self._store_pool, upto=int(token) - 1)
+        except Exception:  # noqa: BLE001 - unreadable now: merged at a later save
+            return rows
+        if found is None:
+            return rows
+        done = self._stops_done | {str(t) for t in (found[1].get("stops_done") or ())}
+        out = {t: dict(r) for t, r in rows.items()}
+        for ticket, theirs in (found[1].get("tickets") or {}).items():
+            held = float(theirs.get("held_until") or 0.0)
+            owed = bool(theirs.get("stop_owed")) and ticket not in done and theirs.get("shard")
+            if not held and not owed:
+                continue
+            mine = out.get(ticket)
+            if mine is None:
+                mine = {k: theirs[k] for k in ("slot", "node", "shard", "ordered_at", "lost_at") if k in theirs}
+                mine["state"] = "released"
+            if held > float(mine.get("held_until") or 0.0):
+                mine["held_until"] = held
+                mine.setdefault("lost_at", theirs.get("lost_at"))
+            if owed and not mine.get("stop_owed"):
+                mine["stop_owed"] = True
+                mine.setdefault("shard", theirs.get("shard"))
+            out[ticket] = mine
+        return out
 
     def _write_local(self, rows: dict[str, dict[str, Any]]) -> None:
         tmp = self.state_path.with_suffix(".tmp")
@@ -939,6 +985,8 @@ class SshNodeProvider:
             rows = self._rows()
             if ticket in rows and rows[ticket].get("stop_owed"):
                 rows[ticket] = {k: v for k, v in rows[ticket].items() if k != "stop_owed"}
+                if self._store is not None:
+                    self._stops_done.add(ticket)
                 self._save(rows)
 
     def run_tickets(self) -> list[tuple[int, str]]:

@@ -498,3 +498,127 @@ def test_records_are_ordered_by_the_token_as_a_number():
     key, doc = _record(objects)
     assert key.endswith("/100000000.json") and list(doc["tickets"]) == ["new"]
     assert list(store_state.read_provider_record(objects, "ssh", upto=99999999)[1]["tickets"]) == ["old"]
+
+
+def test_an_owed_stop_the_fenced_holder_writes_late_is_run_by_the_next_holder(world, tmp_path):
+    """A's guard passed, then A stalled past its lease; B claimed the pool and read A's record
+    (smp-0 released, nothing owed); then A's write landed: the stop of smp-0 on n1 never got
+    there (owed). B's next save merges it, and B's next start on n1 stops smp-0 first: no
+    sampler is left on n1 billing with nobody to stop it. Once done it stays done."""
+    w = world
+    objects = _store()
+    a_control = store_state.open_pool_control(objects, "ssh", "smp", clock=w.clock)
+    w.ops.attach_control(a_control)
+    pa = w.ops.provider
+    t = pa.order(1)
+    pa.note_shard(t, "smp-0")
+    pa.release(1, t)
+    w.clock.t += store_state.DEFAULT_TTL_S + 60  # A's lease ran out
+    b_control = store_state.open_pool_control(objects, "ssh", "smp", clock=w.clock)
+    b_ops = _other_host(w, tmp_path, "host-b")
+    b_ops.attach_control(b_control)
+    pb = b_ops.provider
+    assert pb.owed_stops(1) == []  # what B read: nothing owed
+    a_control.lock.guard = lambda: None  # the stall: A's guard had passed before B's claim
+    pa.mark_lost(t, stopped=False)  # A's late write: the stop of smp-0 did not reach n1
+    assert pb.owed_stops(1) == []  # B has not saved since
+
+    other = pb.order(0)  # any save of B merges A's record
+    assert pb.owed_stops(1) == [(t, "smp-0")] and pb._held(pb._rows(), 1, w.clock()) is not None  # noqa: SLF001
+    assert _record(objects)[1]["tickets"][t]["stop_owed"]  # in B's record too
+    m = SimpleNamespace(account=1, ticket=pb.order(1), shard="smp-7", data_slot=None, replaces_shard=None,
+                        predecessor_lost=False)
+    w.nodes.calls.clear()
+    b_ops.start(m, ["smp-7"])
+    calls = [c for h, c in w.nodes.calls if h == "ops@10.0.0.11"]
+    stop_at = next(i for i, c in enumerate(calls) if "yeto-sampler-smp-0" in c and "kill --signal TERM" in c)
+    pre_at = max(i for i, c in enumerate(calls) if "YETO_SSH_CARDS_BEGIN" in c)
+    assert stop_at < pre_at and pb.owed_stops(1) == []
+    pb.release(0, other)  # another save: A's record still owes it, B saw it done
+    assert pb.owed_stops(1) == [] and t in _record(objects)[1]["stops_done"]
+    # the next holder after B does not bring it back either
+    b_control.close()
+    c_control = store_state.open_pool_control(objects, "ssh", "smp", clock=w.clock)
+    c_ops = _other_host(w, tmp_path, "host-c")
+    c_ops.attach_control(c_control)
+    assert c_ops.provider.owed_stops(1) == []
+    c_control.close()
+
+
+def test_the_merge_takes_the_later_hold_and_keeps_this_holders_own_fields(world, tmp_path):
+    w = world
+    objects = _store()
+    old = {"tickets": {"r1-n2-1": {"slot": 2, "node": "n2", "state": "released", "shard": "smp-3",
+                                   "held_until": w.clock() + 900, "lost_at": w.clock()},
+                       "r1-n0-1": {"slot": 0, "node": "n0", "state": "released", "shard": "smp-1"}}}
+    objects.write(store_state.provider_record_key("ssh", 1), json.dumps(old).encode())
+    objects.write(store_state.provider_record_key("ssh", 2), json.dumps(
+        {"tickets": {"r1-n0-1": {"slot": 0, "node": "n0", "state": "active", "shard": "smp-1"}}}).encode())
+    # token 3 claims: it reads record 2 (the newest), its saves merge record 2 (its predecessor)
+    for token in (1, 2):
+        objects.write(f"fleet/pools/ssh/lock/{token:08d}.json", json.dumps({"token": token}).encode())
+        objects.write(f"fleet/pools/ssh/lock/{token:08d}.lease", json.dumps(
+            {"token": token, "until": 0.0, "released": True}).encode())
+    control = store_state.open_pool_control(objects, "ssh", "smp", clock=w.clock)
+    assert control.lock.token == 3
+    w.ops.attach_control(control)
+    rows = w.ops.provider._rows()  # noqa: SLF001
+    assert rows["r1-n0-1"]["state"] == "active"  # record 2's own state
+    assert "r1-n2-1" not in rows  # record 1 is not the predecessor's newest: pruned, never merged
+    control.close()
+
+
+def test_pool_stop_after_the_controller_died_releases_from_the_store(world, tmp_path, monkeypatch):
+    """rollout.control_plane store: the controller died with two samplers running (its lease
+    still runs). `pool-stop` on another host (no pool process, no local state) waits for the
+    lease, claims the pool's store lock, releases every member from the store's state and
+    saves it there: the store's state and the provider's record say released."""
+    from yeto.launch.nc import pool_run  # noqa: PLC0415
+
+    w = world
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "pool-stop-host"))
+    real_open = store_state.open_pool_control
+    monkeypatch.setattr(store_state, "open_pool_control", lambda *a, **k: real_open(*a, clock=w.clock, **k))
+    objects = _store()
+    control = real_open(objects, "ssh", "smp", clock=w.clock)
+    w.ops.attach_control(control)
+    pool = _pool(w, control=control)
+    _run(pool, w, 3)
+    live = [m for m in pool.live() if m.state == READY]
+    assert len(live) == 2
+    doc = store_state.read_state(objects, "ssh")
+    assert sorted(m["ticket"] for m in doc["members"] if m["state"] != GONE) == sorted(m.ticket for m in live)
+    spare = control.allocator.allocate(floor=0, token=control.lock.token, base="smp")  # drawn, never ordered
+    # the controller dies here: no drain, no release of its lock
+
+    b_ops = _other_host(w, tmp_path, "host-b")
+    w.nodes.calls.clear()
+    rc = pool_run.stop_pool(w.cfg, str(tmp_path / "pool.json"), ops=b_ops, objects=objects, pool_name="ssh",
+                            sleep=lambda s: setattr(w.clock, "t", w.clock.t + s), poll_s=30.0)
+    assert rc == 0
+    doc = store_state.read_state(objects, "ssh")
+    assert all(m["state"] == GONE for m in doc["members"]) and doc["control"]["token"] > control.lock.token
+    tickets = _record(objects)[1]["tickets"]
+    assert all(tickets[m.ticket]["state"] == "released" for m in live)
+    for m in live:  # each sampler was stopped on its node
+        host = {"n0": "ops@10.0.0.10", "n1": "ops@10.0.0.11", "n2": "ops@10.0.0.12"}[
+            b_ops.provider.node_of_ticket(m.ticket).name]
+        assert any(f"yeto-sampler-{m.shard}" in c for h, c in w.nodes.calls if h == host)
+    assert store_state.StoreLock.holder_of(objects, store_state.lock_prefix("ssh"), now=w.clock()) is None
+    ended = set(store_state.ShardAllocator(objects, "smp", owner="ssh").ended_shards())
+    assert f"smp-{spare}" in ended  # the number the dead controller drew and no order took: ended
+
+
+def test_run_down_passes_the_store_to_pool_stop_on_the_store_control_plane(tmp_path, monkeypatch):
+    from tests.test_rollout_entry import _two_pools  # noqa: PLC0415
+    from yeto.rl import up  # noqa: PLC0415
+
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
+    run_cfg, _, _ = _two_pools(tmp_path)
+    local = up.Run(run_cfg)
+    assert local.pool_stop(local.pool_configs[0])[-2:] == ["--config", local.pool_configs[0]]  # as before
+    store = up.Run(dict(run_cfg, controller="in_process", rollout={"control_plane": "store"}))
+    argv = store.pool_stop(store.pool_configs[1])
+    assert argv[argv.index("--control-store") + 1] == str(run_cfg["store"])
+    assert argv[argv.index("--pool-name") + 1] == store.pools[1].name

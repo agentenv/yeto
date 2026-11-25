@@ -1356,6 +1356,10 @@ def main(argv: list[str] | None = None) -> int:
                          "Only tickets this tool created for this run are deleted, by id.")
     pst.add_argument("--config", required=True, help="the pool config JSON the pool runs with")
     pst.add_argument("--wait", type=float, default=900, help="seconds to wait for a running pool (default 900)")
+    pst.add_argument("--control-store", default=None,
+                     help="the run store's URI of a pool on the store control plane (yeto run down passes it): "
+                          "release from the store's state under the pool's store lock")
+    pst.add_argument("--pool-name", default=None, help="the pool's name in the run store (with --control-store)")
     prt = sub.add_parser("pool-retry", help="after a configuration error: restart the sampler on the same node(s)",
                          description="Check the fixed pool config and sampler spec, then have the pool loop "
                          "restart the sampler in place on every node halted by a configuration error.")
@@ -1590,7 +1594,8 @@ def _pool_command(args: Any) -> int:
         if args.cmd == "pool-state-downgrade":
             return pool_run.downgrade_state_file(cfg, args.config, drop_owed_fences=args.drop_owed_fences)
         if args.cmd == "pool-stop":
-            return pool_run.stop_pool(cfg, args.config, wait_s=args.wait)
+            return pool_run.stop_pool(cfg, args.config, wait_s=args.wait, control_store=args.control_store,
+                                      pool_name=args.pool_name)
         _print_breaker_deprecations(cfg)
         try:  # the sky route's images, before the pool orders anything (and in the dry run)
             for line in node_image_lines(cfg):
