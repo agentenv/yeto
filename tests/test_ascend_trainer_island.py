@@ -176,6 +176,9 @@ def test_the_miles_k31_images_need_sm90_cards():
     assert image_problem(MILES_K31_IMAGE, "A100", attention_backend="fused")[1]
     assert image_problem("docker:ghcr.io/x/y@sha256:" + "a" * 64, "A100") is None  # not a known image
     assert image_problem(MILES_K31_IMAGE, "910B4") is None  # not a CUDA card: another check's
+    for gpu in ("MI355X", "MI300X"):  # ROCm cards: not sm architectures, never refused here
+        assert image_problem(MILES_K31_IMAGE, gpu) is None
+    assert image_problem(MILES_K31_IMAGE, "GB200") is None  # outside the card catalog: the card checks' job
 
 
 def _miles_args(gpu, *extra):

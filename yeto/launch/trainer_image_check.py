@@ -69,7 +69,10 @@ def image_problem(image: str, gpu: str, *, attention_backend: str | None = "auto
     floor = floor_of(image)
     if floor is None:
         return None
-    arch = card_arch_of(gpu)
+    try:
+        arch = card_arch_of(gpu)
+    except ValueError:  # a card outside the catalog: the card checks report it, not this one
+        return None
     have, need = _sm(arch), _sm(floor.min_arch)
     if have is None or need is None or have >= need:
         return None
