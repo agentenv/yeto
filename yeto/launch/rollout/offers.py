@@ -189,7 +189,10 @@ def legacy_aliases(offers: Iterable[Offer]) -> dict[str, str]:
     """``{key: legacy key}`` of the offers whose history (ledger stats, cooling breakers) may
     still be under their :func:`legacy_key`: only where that key names this offer alone. Two
     offers that shared it (the collision the instance type now tells apart), or another
-    offer's current key, mixed their history there: it is read as nobody's."""
+    offer's current key, mixed their history there: it is read as nobody's. Judged by
+    ``offers`` alone: another instance type of the same GPU and region that an older run
+    ordered (an offer since removed, another pool's) counted under the same older key, and
+    that history is read as this offer's."""
     offers = list(offers)
     current = {o.key for o in offers}
     old = {o.key: legacy_key(o) for o in offers}
