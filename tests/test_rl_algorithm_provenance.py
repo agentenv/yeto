@@ -992,6 +992,7 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
         def __init__(self, **kw):
             self.learners = kw["learners"]
             self.downed_clusters = set()
+            self.pending_downs = {}  # FleetController's teardowns skipped while its lock was unconfirmed
 
         def run(self):
             return {name: "JobStatus.SUCCEEDED" for name in self.learners}
