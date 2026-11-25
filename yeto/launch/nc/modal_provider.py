@@ -96,7 +96,6 @@ from typing import Any
 from ..pool import status as island_status
 from ..pool.provider import ProviderCaps
 from ..pool.status import LeaseStatus
-from . import elastic
 from .client import NodeLease, state_file_lock, write_json_atomic
 from .tunnel import state_dir
 
@@ -525,12 +524,9 @@ class ModalPoolOps:
 
     def _fence_store(self) -> Any:
         if self._store is None:
-            env = elastic.read_env_file(self.cfg["r2_env_file"])
-            bucket = env.get(self.cfg.get("bucket_env", "R2_BUCKET"))
-            if not bucket:
-                raise RuntimeError(f"no {self.cfg.get('bucket_env', 'R2_BUCKET')} in the store env file")
-            uri = f"s3://{bucket}/runs/{self.cfg['run_prefix'].strip('/')}"
-            self._store = elastic.s3_fence_store(uri, self.cfg["r2_env_file"])
+            from yeto.node.store import pool_fence_store  # noqa: PLC0415
+
+            self._store = pool_fence_store(self.cfg, error=RuntimeError)
         return self._store
 
     # the work contract, as on the SSH route (yeto.launch.nc.cli.pool_data_path): fence,

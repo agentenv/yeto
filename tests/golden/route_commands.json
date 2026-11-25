@@ -1,0 +1,467 @@
+{
+ "daytona_commands": [
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; mkdir -p /work/sampler /work/logs /work/yeto /work/cache /work/stage && chmod 700 /work/sampler; if [ -f /etc/daytona/netleash/ca.crt ]; then cat /etc/ssl/certs/ca-certificates.crt /etc/daytona/netleash/ca.crt > /work/ca-bundle.pem.tmp 2>/dev/null && mv -f /work/ca-bundle.pem.tmp /work/ca-bundle.pem; fi",
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; chmod 600 /work/sampler/store.env.up && mv -f /work/sampler/store.env.up /work/sampler/store.env",
+  "set -u\nf() { echo \"YETO_DAYTONA_FACT $1 ${2:-}\"; }\nf user \"$(id -un) $(id -Gn | tr \" \" ,)\"\nif [ -e /dev/kfd ] && [ -r /dev/kfd ] && [ -w /dev/kfd ]; then f kfd rw; elif [ -e /dev/kfd ]; then f kfd noaccess; else f kfd absent; fi\nf dri $(ls /dev/dri 2>/dev/null | grep -c '^renderD')\nf driver \"$(cat /sys/module/amdgpu/version 2>/dev/null || echo -) $(uname -r)\"\nf rocm_image \"$(cat /opt/rocm/.info/version 2>/dev/null || echo -)\"\nf shm_kib $(df -Pk /dev/shm 2>/dev/null | awk 'NR==2{print $2}')\nf mem_kib $(awk '/MemTotal/{print $2}' /proc/meminfo)\nf memlock \"$(ulimit -l)\"\nfor d in /work /models; do f free_kib:$d $(df -Pk $d 2>/dev/null | awk 'NR==2{print $4}'); t=$d/.yeto-write-probe; if (: > $t) 2>/dev/null; then rm -f $t; f write:$d ok; else f write:$d no; fi; done\n[ -x /opt/runtime-venv/bin/python3 ] && f python ok || f python absent\ncommand -v aws >/dev/null && f aws ok || f aws absent\ncommand -v docker >/dev/null && f docker_cli yes || f docker_cli no\nf proxy_ca $([ -f /etc/daytona/netleash/ca.crt ] && echo yes || echo no)\nf vllm \"$(/opt/runtime-venv/bin/python3 -c 'import vllm; print(vllm.__version__)' 2>/dev/null | tail -1)\"\ncd /tmp && /opt/runtime-venv/bin/python3 -c '\nimport importlib.util, json, sys\nmods = sys.argv[1].split(\",\")\nout = {\"missing\": [m for m in mods if importlib.util.find_spec(m) is None]}\ntry:\n    import torch\n    out[\"torch\"] = torch.__version__\n    out[\"hip\"] = getattr(torch.version, \"hip\", None)\n    out[\"available\"] = bool(torch.cuda.is_available())\n    n = torch.cuda.device_count() if out[\"available\"] else 0\n    out[\"count\"] = n\n    out[\"arch\"] = sorted({torch.cuda.get_device_properties(i).gcnArchName.split(\":\")[0] for i in range(n)})\n    out[\"names\"] = sorted({torch.cuda.get_device_name(i) for i in range(n)})\nexcept Exception as exc:\n    out[\"error\"] = repr(exc)[:300]\nprint(\"YETO_DAYTONA_PY \" + json.dumps(out))\n' vllm,aiter,torch,boto3,safetensors,zstandard,httpx,numpy 2>&1 | grep '^YETO_DAYTONA_PY' || echo 'YETO_DAYTONA_PY {\"error\": \"interpreter failed\"}'\n( set -a; . /work/sampler/store.env; set +a; c=$(curl -s --retry 2 --retry-connrefused -o /dev/null -m 15 -w '%{http_code}' ${AWS_CA_BUNDLE:+--cacert $AWS_CA_BUNDLE} \"${AWS_ENDPOINT_URL:-}\" 2>/dev/null); f store \"${c:-000}\" )\n",
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; chmod 644 /work/prompts/p.jsonl.up && mv -f /work/prompts/p.jsonl.up /work/prompts/p.jsonl",
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; echo YETO_PROMPTS $(wc -c < /work/prompts/p.jsonl) $(sha256sum /work/prompts/p.jsonl | cut -d' ' -f1)",
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; test -d /work/yeto/abcdef123456/yeto",
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; rm -rf /work/yeto/abcdef123456.tmp && mkdir -p /work/yeto/abcdef123456.tmp && tar xf /work/yeto/abcdef123456.tar -C /work/yeto/abcdef123456.tmp && mv /work/yeto/abcdef123456.tmp /work/yeto/abcdef123456 && rm -f /work/yeto/abcdef123456.tar",
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; chmod 644 /work/sampler/d-0.json.up && mv -f /work/sampler/d-0.json.up /work/sampler/d-0.json",
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; chmod 700 /work/sampler/d-0.start.sh.up && mv -f /work/sampler/d-0.start.sh.up /work/sampler/d-0.start.sh",
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; if { p=$(cat /work/sampler/d-0.pid 2>/dev/null); [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null && tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null | grep -q yeto-sampler-start; }; then p=$(cat /work/sampler/d-0.pid); kill -TERM -- -$p 2>/dev/null; for i in $(seq 30); do kill -0 -- -$p 2>/dev/null || break; sleep 1; done; kill -KILL -- -$p 2>/dev/null; fi; rm -f /work/sampler/d-0.pid; tail -n 200 /work/logs/d-0.log > /work/logs/d-0.last.log 2>/dev/null; echo stopped d-0",
+  "command -v sudo >/dev/null 2>&1 || sudo() { while [ \"${1#-}\" != \"$1\" ]; do shift; done; \"$@\"; }; mkdir -p /work/logs && rm -f /work/sampler/d-0.exit && { setsid bash -c 'bash /work/sampler/d-0.start.sh >> /work/logs/d-0.log 2>&1; echo $? > /work/sampler/d-0.exit' yeto-sampler-start </dev/null >/dev/null 2>&1 & echo $! > /work/sampler/d-0.pid; }; sleep 1; { p=$(cat /work/sampler/d-0.pid 2>/dev/null); [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null && tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null | grep -q yeto-sampler-start; } && echo YETO_DAYTONA_STARTED $(cat /work/sampler/d-0.pid) || { echo YETO_DAYTONA_START_FAILED; tail -n 40 /work/logs/d-0.log 2>/dev/null; exit 1; }"
+ ],
+ "daytona_pull": "mkdir -p /work/logs /models/kimi-k3.1-pro && { setsid bash -c 'set -a; . /work/sampler/store.env; set +a; [ -f /work/ca-bundle.pem ] && export AWS_CA_BUNDLE=/work/ca-bundle.pem; export YETO_PULL_INCLUDE='\"'\"'*'\"'\"' && aws configure set default.s3.max_concurrent_requests 16 && aws configure set default.s3.max_bandwidth 156MB/s && echo \"YETO_NC_PULL start $(date -u +%FT%TZ) jobs=16\" && { L=$(aws s3 ls --recursive \"s3://$R2_BUCKET/models/k31/\" --endpoint-url \"$AWS_ENDPOINT_URL\") || { echo \"YETO_NC_PULL fail listing s3://$R2_BUCKET/models/k31/\"; exit 3; }; } && { [ -n \"$L\" ] || { echo \"YETO_NC_PULL fail empty listing s3://$R2_BUCKET/models/k31/\"; exit 3; }; } && printf \"%s\\n\" \"$L\" | awk '\"'\"'{print $4, $3}'\"'\"' | sort -k2 -n -r | xargs -r -P 16 -L1 sh -c '\"'\"'rel=${1#models/k31/}; case \"$rel\" in $YETO_PULL_INCLUDE) ;; *) exit 0;; esac; f=/models/kimi-k3.1-pro/$rel; [ -f \"$f\" ] && [ \"$(wc -c < \"$f\" | tr -d \" \")\" = \"$2\" ] && exit 0; mkdir -p \"$(dirname \"$f\")\"; aws s3 cp --only-show-errors \"s3://$R2_BUCKET/$1\" \"$f\" --endpoint-url \"$AWS_ENDPOINT_URL\" || { echo \"YETO_NC_PULL fail $1\"; exit 255; }'\"'\"' pull && echo \"YETO_NC_PULL done $(date -u +%FT%TZ)\"; echo \"YETO_NC_PULL exit $?\"' >> /work/logs/pull.log 2>&1 </dev/null & echo $! > /work/sampler/pull.pid; echo YETO_DAYTONA_PULL_STARTED; }",
+ "daytona_uploads": {
+  "/work/prompts/p.jsonl.up": "{\"q\": \"x\"}\n",
+  "/work/sampler/d-0.json.up": "{\n \"start_on_latest\": true,\n \"sampler_id\": \"d-0\",\n \"engine\": {\n  \"adapter\": \"vllm-server\",\n  \"server\": {\n   \"in_place_reload\": true\n  }\n },\n \"event_tape\": \"/work/sampler/events-d-0.jsonl\",\n \"prompts\": {\n  \"path\": \"/work/prompts/p.jsonl\"\n }\n}",
+  "/work/sampler/d-0.start.sh.up": "#!/bin/bash\nset -eu\nset -a\n. /work/sampler/store.env\nset +a\nexport AITER_JIT_DIR=/work/cache/aiter\nexport HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7\nexport PYTHONPATH=/work/yeto/abcdef123456\nexport PYTHONUNBUFFERED=1\nexport TRITON_CACHE_DIR=/work/cache/triton\nexport VLLM_CACHE_ROOT=/work/cache/vllm\nexport VLLM_USE_BREAKABLE_CUDAGRAPH=1\nexport XDG_CACHE_HOME=/work/cache\nexport YETO_CACHE_DIR=/work/cache/yeto\nexport YETO_NC_RUN_PREFIX=runs1\nexport YETO_RL_RELEASE_SPREAD_KEY=runs1/d-0\nexport YETO_RL_RELEASE_SPREAD_S=30\nexport YETO_RL_STORE_DOWNLOAD_PROCESSES=8\nexport YETO_RL_STORE_FILE_CONCURRENCY=32\nexport YETO_RL_STORE_IMPL=yeto.cloud.s3_store:store_from_env\nexport YETO_RL_STORE_S3_CREDENTIALS=aws-env\nexport YETO_RL_STORE_S3_REGION=auto\nexport YETO_RL_STORE_S3_STAGE=/work/stage\nexport YETO_SPOT_RECLAIM_MARKER=/work/sampler/d-0.reclaim\nif [ -f /work/ca-bundle.pem ]; then export AWS_CA_BUNDLE=/work/ca-bundle.pem REQUESTS_CA_BUNDLE=/work/ca-bundle.pem SSL_CERT_FILE=/work/ca-bundle.pem; fi\nexport YETO_RL_STORE_S3_URI=\"s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}\" YETO_RL_STORE_S3_ENDPOINT_URL=\"$AWS_ENDPOINT_URL\"\nP=\"$(getent passwd \"$(id -u)\" | cut -d: -f6)\"; if [ -d \"$HOME/.ssh\" ] && [ \"$HOME\" != \"$P\" ] && [ ! -e \"$P/.ssh\" ]; then ln -s \"$HOME/.ssh\" \"$P/.ssh\"; fi;\nmkdir -p /work/stage /work/cache\ncd /work\nexec /opt/runtime-venv/bin/python3 -m yeto.rl.engine.engine_sampler --spec /work/sampler/d-0.json\n",
+  "/work/sampler/store.env.up": 39,
+  "/work/yeto/abcdef123456.tar": 3
+ },
+ "nc_agentic_setup_env": "DOCKER_HOST=ssh://yeto-sandbox\nHARBOR_ENV_TYPE=remote-docker\nHARBOR_TASKS_DIR=/work/harbor/tasks\nHARBOR_TRIALS_DIR=/work/harbor/trials\nHOME=/work/harbor/home\nPATH=/work/harbor/bin:/opt/runtime-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nYETO_RECORDS_PROXY_PUBLIC_BASE=http://192.0.2.1:19001\nYETO_RECORDS_PROXY_SECRET_FILE=/work/harbor/<HOME>/records-proxy.secret\n",
+ "nc_agentic_spec_file": "{\n \"start_on_latest\": true,\n \"sampler_id\": \"nc-1\",\n \"agentic\": {\n  \"proxy\": {\n   \"host\": \"127.0.0.1\",\n   \"port\": 18080\n  },\n  \"task_defaults\": {\n   \"provider\": \"remote-docker\"\n  }\n },\n \"prompts\": {\n  \"path\": \"/work/prompts/p.jsonl\"\n },\n \"engine\": {\n  \"adapter\": \"vllm-server\"\n }\n}",
+ "nc_agentic_start": [
+  {
+   "argv": [
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "test -d /mnt/nvme/yeto/abcdef123456/yeto && cat >/dev/null || (mkdir -p /mnt/nvme/yeto/abcdef123456.tmp && tar x -C /mnt/nvme/yeto/abcdef123456.tmp && mv /mnt/nvme/yeto/abcdef123456.tmp /mnt/nvme/yeto/abcdef123456)"
+   ]
+  },
+  {
+   "argv": [
+    "scp",
+    "-q",
+    "-o",
+    "BatchMode=yes",
+    "<TMP>/spec-nc-1.json",
+    "yeto-nc-tk1:/mnt/nvme/work/sampler/nc-1.json"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "chmod 644 /mnt/nvme/work/sampler/nc-1.json"
+   ]
+  },
+  {
+   "argv": [
+    "scp",
+    "-q",
+    "-o",
+    "BatchMode=yes",
+    "<TMP>/r2.env",
+    "yeto-nc-tk1:/home/ubuntu/.yeto-nc-r2.env"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "chmod 600 /home/ubuntu/.yeto-nc-r2.env"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "mkdir -p /mnt/nvme/work/prompts"
+   ]
+  },
+  {
+   "argv": [
+    "scp",
+    "-q",
+    "-o",
+    "BatchMode=yes",
+    "<TMP>/prompts.jsonl",
+    "yeto-nc-tk1:/mnt/nvme/work/prompts/p.jsonl"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "chmod 644 /mnt/nvme/work/prompts/p.jsonl"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "echo YETO_PROMPTS $(wc -c < /mnt/nvme/work/prompts/p.jsonl) $(sha256sum /mnt/nvme/work/prompts/p.jsonl | cut -d' ' -f1)"
+   ]
+  },
+  {
+   "argv": [
+    "scp",
+    "-q",
+    "-o",
+    "BatchMode=yes",
+    "<TMP>/nc-1.agentic-setup.env",
+    "yeto-nc-tk1:/mnt/nvme/work/sampler/nc-1.agentic-setup.env"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "chmod 600 /mnt/nvme/work/sampler/nc-1.agentic-setup.env"
+   ]
+  },
+  {
+   "argv": [
+    "scp",
+    "-q",
+    "-o",
+    "BatchMode=yes",
+    "<TMP>/op.env",
+    "yeto-nc-tk1:/mnt/nvme/work/sampler/nc-1.agentic.env"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "chmod 600 /mnt/nvme/work/sampler/nc-1.agentic.env"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "sudo docker rm -f yeto-sampler-nc-1 >/dev/null 2>&1; sudo docker run -d --name yeto-sampler-nc-1 --restart=no --network host --ipc host --device /dev/kfd --device /dev/dri --group-add video --security-opt seccomp=unconfined --cap-add SYS_PTRACE --ulimit memlock=-1 --shm-size 64g -v /mnt/nvme/cache/vllm:/root/.cache -v /mnt/nvme/models/DeepSeek-V4.1-Flash:/models/deepseek-v4.1-flash:ro -v /mnt/nvme/models/Kimi-K3.1-Pro:/models/kimi-k3.1-pro:ro -v /mnt/nvme/work:/work -v /mnt/nvme/yeto/abcdef123456:/yeto:ro --env-file /home/ubuntu/.yeto-nc-r2.env --env-file /mnt/nvme/work/sampler/nc-1.agentic-setup.env --env-file /mnt/nvme/work/sampler/nc-1.agentic.env -e HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 -e PYTHONPATH=/yeto:/work/harbor/site -e PYTHONUNBUFFERED=1 -e VLLM_USE_BREAKABLE_CUDAGRAPH=1 -e YETO_NC_RUN_PREFIX=runs1 -e YETO_RL_RELEASE_SPREAD_KEY=runs1/nc-1 -e YETO_RL_RELEASE_SPREAD_S=30 -e YETO_RL_STORE_DOWNLOAD_PROCESSES=8 -e YETO_RL_STORE_FILE_CONCURRENCY=32 -e YETO_RL_STORE_IMPL=yeto.cloud.s3_store:store_from_env -e YETO_RL_STORE_S3_CREDENTIALS=aws-env -e YETO_RL_STORE_S3_REGION=auto -e YETO_RL_STORE_S3_STAGE=/work/stage -e YETO_SPOT_RECLAIM_MARKER=/work/sampler/nc-1.reclaim --entrypoint bash docker.io/vllm/vllm-openai-rocm@sha256:5f47cc1004d9a7ac65f8a913725edb20c62c99a07e31cbf4ba21741bd0b4f9b1 -c 'bash -c '\"'\"'P=\"$(getent passwd \"$(id -u)\" | cut -d: -f6)\"; if [ -d \"$HOME/.ssh\" ] && [ \"$HOME\" != \"$P\" ] && [ ! -e \"$P/.ssh\" ]; then ln -s \"$HOME/.ssh\" \"$P/.ssh\"; fi; export YETO_RL_STORE_S3_URI=\"s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}\" YETO_RL_STORE_S3_ENDPOINT_URL=\"$AWS_ENDPOINT_URL\"; exec /opt/runtime-venv/bin/python3 -m yeto.rl.engine.engine_sampler --spec /work/sampler/nc-1.json'\"'\"''"
+   ]
+  }
+ ],
+ "nc_env": {
+  "HIP_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+  "PYTHONPATH": "/yeto",
+  "PYTHONUNBUFFERED": "1",
+  "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
+  "YETO_NC_RUN_PREFIX": "runs1",
+  "YETO_RL_RELEASE_SPREAD_S": "30",
+  "YETO_RL_STORE_DOWNLOAD_PROCESSES": "8",
+  "YETO_RL_STORE_FILE_CONCURRENCY": "32",
+  "YETO_RL_STORE_IMPL": "yeto.cloud.s3_store:store_from_env",
+  "YETO_RL_STORE_S3_CREDENTIALS": "aws-env",
+  "YETO_RL_STORE_S3_REGION": "auto",
+  "YETO_RL_STORE_S3_STAGE": "/work/stage"
+ },
+ "nc_pull": "sudo docker rm -f yeto-nc-pull >/dev/null 2>&1; sudo docker run -d --name yeto-nc-pull --network host --env-file \"$HOME/.yeto-nc-r2.env\" -v /mnt/nvme/models:/models --entrypoint sh amazon/aws-cli:latest -c 'export YETO_PULL_INCLUDE='\"'\"'*'\"'\"' && aws configure set default.s3.max_concurrent_requests 16 && aws configure set default.s3.max_bandwidth 156MB/s && echo \"YETO_NC_PULL start $(date -u +%FT%TZ) jobs=16\" && { L=$(aws s3 ls --recursive \"s3://$R2_BUCKET/models/k31/\" --endpoint-url \"$AWS_ENDPOINT_URL\") || { echo \"YETO_NC_PULL fail listing s3://$R2_BUCKET/models/k31/\"; exit 3; }; } && { [ -n \"$L\" ] || { echo \"YETO_NC_PULL fail empty listing s3://$R2_BUCKET/models/k31/\"; exit 3; }; } && printf \"%s\\n\" \"$L\" | awk '\"'\"'{print $4, $3}'\"'\"' | sort -k2 -n -r | xargs -r -P 16 -L1 sh -c '\"'\"'rel=${1#models/k31/}; case \"$rel\" in $YETO_PULL_INCLUDE) ;; *) exit 0;; esac; f=/models/Kimi-K3.1-Pro/$rel; [ -f \"$f\" ] && [ \"$(wc -c < \"$f\" | tr -d \" \")\" = \"$2\" ] && exit 0; mkdir -p \"$(dirname \"$f\")\"; aws s3 cp --only-show-errors \"s3://$R2_BUCKET/$1\" \"$f\" --endpoint-url \"$AWS_ENDPOINT_URL\" || { echo \"YETO_NC_PULL fail $1\"; exit 255; }'\"'\"' pull && echo \"YETO_NC_PULL done $(date -u +%FT%TZ)\"'",
+ "nc_sampler_command": [
+  "bash",
+  "-c",
+  "P=\"$(getent passwd \"$(id -u)\" | cut -d: -f6)\"; if [ -d \"$HOME/.ssh\" ] && [ \"$HOME\" != \"$P\" ] && [ ! -e \"$P/.ssh\" ]; then ln -s \"$HOME/.ssh\" \"$P/.ssh\"; fi; export YETO_RL_STORE_S3_URI=\"s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}\" YETO_RL_STORE_S3_ENDPOINT_URL=\"$AWS_ENDPOINT_URL\"; exec /opt/runtime-venv/bin/python3 -m yeto.rl.engine.engine_sampler --spec /work/sampler/nc-0.json"
+ ],
+ "nc_spec_file": "{\n \"start_on_latest\": true,\n \"sampler_id\": \"nc-0\",\n \"prompts\": {\n  \"path\": \"/work/prompts/p.jsonl\"\n },\n \"engine\": {\n  \"adapter\": \"vllm-server\"\n }\n}",
+ "nc_start": [
+  {
+   "argv": [
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "test -d /mnt/nvme/yeto/abcdef123456/yeto && cat >/dev/null || (mkdir -p /mnt/nvme/yeto/abcdef123456.tmp && tar x -C /mnt/nvme/yeto/abcdef123456.tmp && mv /mnt/nvme/yeto/abcdef123456.tmp /mnt/nvme/yeto/abcdef123456)"
+   ]
+  },
+  {
+   "argv": [
+    "scp",
+    "-q",
+    "-o",
+    "BatchMode=yes",
+    "<TMP>/spec-nc-0.json",
+    "yeto-nc-tk1:/mnt/nvme/work/sampler/nc-0.json"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "chmod 644 /mnt/nvme/work/sampler/nc-0.json"
+   ]
+  },
+  {
+   "argv": [
+    "scp",
+    "-q",
+    "-o",
+    "BatchMode=yes",
+    "<TMP>/r2.env",
+    "yeto-nc-tk1:/home/ubuntu/.yeto-nc-r2.env"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "chmod 600 /home/ubuntu/.yeto-nc-r2.env"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "mkdir -p /mnt/nvme/work/prompts"
+   ]
+  },
+  {
+   "argv": [
+    "scp",
+    "-q",
+    "-o",
+    "BatchMode=yes",
+    "<TMP>/prompts.jsonl",
+    "yeto-nc-tk1:/mnt/nvme/work/prompts/p.jsonl"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "chmod 644 /mnt/nvme/work/prompts/p.jsonl"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "echo YETO_PROMPTS $(wc -c < /mnt/nvme/work/prompts/p.jsonl) $(sha256sum /mnt/nvme/work/prompts/p.jsonl | cut -d' ' -f1)"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "yeto-nc-tk1",
+    "sudo docker rm -f yeto-sampler-nc-0 >/dev/null 2>&1; sudo docker run -d --name yeto-sampler-nc-0 --restart=no --network host --ipc host --device /dev/kfd --device /dev/dri --group-add video --security-opt seccomp=unconfined --cap-add SYS_PTRACE --ulimit memlock=-1 --shm-size 64g -v /mnt/nvme/cache/vllm:/root/.cache -v /mnt/nvme/models/DeepSeek-V4.1-Flash:/models/deepseek-v4.1-flash:ro -v /mnt/nvme/models/Kimi-K3.1-Pro:/models/kimi-k3.1-pro:ro -v /mnt/nvme/work:/work -v /mnt/nvme/yeto/abcdef123456:/yeto:ro --env-file /home/ubuntu/.yeto-nc-r2.env -e HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 -e PYTHONPATH=/yeto -e PYTHONUNBUFFERED=1 -e VLLM_USE_BREAKABLE_CUDAGRAPH=1 -e YETO_NC_RUN_PREFIX=runs1 -e YETO_RL_RELEASE_SPREAD_KEY=runs1/nc-0 -e YETO_RL_RELEASE_SPREAD_S=30 -e YETO_RL_STORE_DOWNLOAD_PROCESSES=8 -e YETO_RL_STORE_FILE_CONCURRENCY=32 -e YETO_RL_STORE_IMPL=yeto.cloud.s3_store:store_from_env -e YETO_RL_STORE_S3_CREDENTIALS=aws-env -e YETO_RL_STORE_S3_REGION=auto -e YETO_RL_STORE_S3_STAGE=/work/stage -e YETO_SPOT_RECLAIM_MARKER=/work/sampler/nc-0.reclaim --entrypoint bash docker.io/vllm/vllm-openai-rocm@sha256:5f47cc1004d9a7ac65f8a913725edb20c62c99a07e31cbf4ba21741bd0b4f9b1 -c 'bash -c '\"'\"'P=\"$(getent passwd \"$(id -u)\" | cut -d: -f6)\"; if [ -d \"$HOME/.ssh\" ] && [ \"$HOME\" != \"$P\" ] && [ ! -e \"$P/.ssh\" ]; then ln -s \"$HOME/.ssh\" \"$P/.ssh\"; fi; export YETO_RL_STORE_S3_URI=\"s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}\" YETO_RL_STORE_S3_ENDPOINT_URL=\"$AWS_ENDPOINT_URL\"; exec /opt/runtime-venv/bin/python3 -m yeto.rl.engine.engine_sampler --spec /work/sampler/nc-0.json'\"'\"''"
+   ]
+  }
+ ],
+ "ssh_pool_container": [
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "mkdir -p /srv/yeto/run0/logs; if podman inspect --type container yeto-sampler-s-0 >/dev/null 2>&1; then if [ \"$(podman inspect -f '{{.State.Status}}' yeto-sampler-s-0 2>/dev/null)\" = running ]; then n0=$(podman logs yeto-sampler-s-0 2>&1 | grep -c 'reclaimed: waiting up to'); n0=${n0:-0}; echo YETO_SSH_TERM container=yeto-sampler-s-0; podman kill --signal TERM yeto-sampler-s-0 >/dev/null 2>&1; for i in $(seq 120); do [ \"$(podman inspect -f '{{.State.Status}}' yeto-sampler-s-0 2>/dev/null)\" = running ] || break; n=$(podman logs yeto-sampler-s-0 2>&1 | grep -c 'reclaimed: waiting up to'); [ \"${n:-0}\" -gt \"$n0\" ] && { echo YETO_SSH_LEFT after=$i; break; }; sleep 1; done; fi; podman stop -t 10 yeto-sampler-s-0 >/dev/null 2>&1; echo YETO_SSH_EXIT $(podman inspect -f '{{.State.ExitCode}}' yeto-sampler-s-0 2>/dev/null); podman logs yeto-sampler-s-0 > /srv/yeto/run0/logs/yeto-sampler-s-0.last.log 2>&1; podman rm -f yeto-sampler-s-0 >/dev/null 2>&1; fi; echo stopped"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "set -u; mkdir -p /srv/yeto/run0/sampler /srv/yeto/run0/logs || exit 3; echo YETO_SSH_ARCH $(uname -m); for f in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc /usr/local/Ascend/driver /usr/local/dcmi /usr/local/bin/npu-smi /usr/local/sbin/npu-smi /etc/ascend_install.info /etc/vnpu.cfg; do [ -e $f ] && echo YETO_SSH_HOSTPATH $f; done; echo YETO_SSH_FREE_GIB $(df -Pk /srv/yeto/run0 | awk 'NR==2{printf \"%d\", $4/1048576}'); echo YETO_SSH_CARDS_BEGIN; npu-smi info 2>&1; echo YETO_SSH_CARDS_END rc=$?"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "test -d /srv/yeto/run0/yeto/abcdef123456/yeto && cat >/dev/null || (rm -rf /srv/yeto/run0/yeto/abcdef123456.tmp && mkdir -p /srv/yeto/run0/yeto/abcdef123456.tmp && tar xz -C /srv/yeto/run0/yeto/abcdef123456.tmp && mv /srv/yeto/run0/yeto/abcdef123456.tmp /srv/yeto/run0/yeto/abcdef123456)"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "umask 077; cat > /srv/yeto/run0/sampler/s-0.json.tmp && chmod 644 /srv/yeto/run0/sampler/s-0.json.tmp && mv -f /srv/yeto/run0/sampler/s-0.json.tmp /srv/yeto/run0/sampler/s-0.json"
+   ],
+   "input": "{\n \"start_on_latest\": true,\n \"sampler_id\": \"s-0\",\n \"prompts\": {\n  \"groups_per_round\": 2\n },\n \"buffer_shards\": [\n  \"s-0\"\n ],\n \"event_tape\": \"/srv/yeto/run0/sampler/events-s-0.jsonl\"\n}"
+  },
+  {
+   "argv": [
+    "ssh",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "umask 077; cat > /srv/yeto/run0/sampler/.store.env.tmp && chmod 600 /srv/yeto/run0/sampler/.store.env.tmp && mv -f /srv/yeto/run0/sampler/.store.env.tmp /srv/yeto/run0/sampler/.store.env"
+   ],
+   "input": "R2_BUCKET=b\nAWS_ENDPOINT_URL=https://e\n"
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "podman inspect --type image img >/dev/null 2>&1 || { podman pull img >/dev/null && podman inspect --type image img >/dev/null 2>&1; } || { echo YETO_SSH_NO_IMAGE img; exit 4; } && { podman rm -f yeto-sampler-s-0 >/dev/null 2>&1; true; } && podman run -d --name yeto-sampler-s-0 --network host --ipc host --shm-size 16g --device /dev/davinci0 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro -v /usr/local/dcmi:/usr/local/dcmi:ro -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro -v /etc/ascend_install.info:/etc/ascend_install.info:ro -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro -v /srv/yeto/run0:/srv/yeto/run0 --env-file /srv/yeto/run0/sampler/.store.env -e ASCEND_RT_VISIBLE_DEVICES=0 -e PYTHONUNBUFFERED=1 -e YETO_NC_RUN_PREFIX=runs1 -e YETO_RL_RELEASE_SPREAD_KEY=runs1/s-0 -e YETO_RL_STORE_IMPL=yeto.cloud.s3_store:store_from_env -e YETO_RL_STORE_S3_CREDENTIALS=aws-env -e YETO_RL_STORE_S3_REGION=auto -e YETO_RL_STORE_S3_STAGE=/srv/yeto/run0/stage -e YETO_SPOT_RECLAIM_MARKER=/srv/yeto/run0/sampler/s-0.reclaim --entrypoint bash img -c 'export PYTHONPATH=/srv/yeto/run0/yeto/abcdef123456\"${PYTHONPATH:+:$PYTHONPATH}\"; export YETO_RL_STORE_S3_URI=\"s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}\" YETO_RL_STORE_S3_ENDPOINT_URL=\"$AWS_ENDPOINT_URL\"; exec python3 -m yeto.rl.engine.engine_sampler --spec /srv/yeto/run0/sampler/s-0.json' && echo YETO_SSH_STARTED container=yeto-sampler-s-0"
+   ]
+  }
+ ],
+ "ssh_pool_venv": [
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "if { p=$(cat /srv/yeto/run0/sampler/s-0.pid 2>/dev/null); m=$(cat /srv/yeto/run0/sampler/s-0.marker 2>/dev/null); [ -n \"$p\" ] && [ -n \"$m\" ] && kill -0 \"$p\" 2>/dev/null && ps -o args= -p \"$p\" 2>/dev/null | grep -q yeto.rl.engine.engine_sampler && tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null | grep -qxF \"YETO_SSH_SAMPLER_MARK=$m\"; }; then n0=$(grep -c 'reclaimed: waiting up to' /srv/yeto/run0/logs/s-0.log 2>/dev/null); n0=${n0:-0}; echo YETO_SSH_TERM pid=$p; kill -TERM \"$p\"; for i in $(seq 120); do kill -0 \"$p\" 2>/dev/null || break; n=$(grep -c 'reclaimed: waiting up to' /srv/yeto/run0/logs/s-0.log 2>/dev/null); [ \"${n:-0}\" -gt \"$n0\" ] && { echo YETO_SSH_LEFT after=$i; break; }; sleep 1; done; { p=$(cat /srv/yeto/run0/sampler/s-0.pid 2>/dev/null); m=$(cat /srv/yeto/run0/sampler/s-0.marker 2>/dev/null); [ -n \"$p\" ] && [ -n \"$m\" ] && kill -0 \"$p\" 2>/dev/null && ps -o args= -p \"$p\" 2>/dev/null | grep -q yeto.rl.engine.engine_sampler && tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null | grep -qxF \"YETO_SSH_SAMPLER_MARK=$m\"; } && { echo YETO_SSH_KILL pid=$p; kill -KILL \"$p\"; }; fi; if { g=$(cat /srv/yeto/run0/sampler/s-0.pgid 2>/dev/null); m=$(cat /srv/yeto/run0/sampler/s-0.marker 2>/dev/null); [ -n \"$g\" ] && [ -n \"$m\" ] && ps -o args= -p \"$g\" 2>/dev/null | grep -qF -- \"$m\"; } && kill -0 -- -\"$g\" 2>/dev/null; then echo YETO_SSH_GROUP_TERM pgid=$g; kill -TERM -- -\"$g\" 2>/dev/null; for i in $(seq 30); do kill -0 -- -\"$g\" 2>/dev/null || break; sleep 1; done; { g=$(cat /srv/yeto/run0/sampler/s-0.pgid 2>/dev/null); m=$(cat /srv/yeto/run0/sampler/s-0.marker 2>/dev/null); [ -n \"$g\" ] && [ -n \"$m\" ] && ps -o args= -p \"$g\" 2>/dev/null | grep -qF -- \"$m\"; } && kill -KILL -- -\"$g\" 2>/dev/null; fi; rm -f /srv/yeto/run0/sampler/s-0.pid /srv/yeto/run0/sampler/s-0.pgid; echo YETO_SSH_EXIT $(cat /srv/yeto/run0/sampler/s-0.exit 2>/dev/null || echo -); echo stopped; tail -n 300 /srv/yeto/run0/logs/s-0.log > /srv/yeto/run0/logs/s-0.last.log 2>/dev/null"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "set -u; mkdir -p /srv/yeto/run0/sampler /srv/yeto/run0/logs || exit 3; echo YETO_SSH_ARCH $(uname -m); for f in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc /usr/local/Ascend/driver /usr/local/dcmi /usr/local/bin/npu-smi /usr/local/sbin/npu-smi /etc/ascend_install.info /etc/vnpu.cfg; do [ -e $f ] && echo YETO_SSH_HOSTPATH $f; done; echo YETO_SSH_FREE_GIB $(df -Pk /srv/yeto/run0 | awk 'NR==2{printf \"%d\", $4/1048576}'); echo YETO_SSH_CARDS_BEGIN; npu-smi info 2>&1; echo YETO_SSH_CARDS_END rc=$?"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "test -d /srv/yeto/run0/yeto/abcdef123456/yeto && cat >/dev/null || (rm -rf /srv/yeto/run0/yeto/abcdef123456.tmp && mkdir -p /srv/yeto/run0/yeto/abcdef123456.tmp && tar xz -C /srv/yeto/run0/yeto/abcdef123456.tmp && mv /srv/yeto/run0/yeto/abcdef123456.tmp /srv/yeto/run0/yeto/abcdef123456)"
+   ]
+  },
+  {
+   "argv": [
+    "ssh",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "umask 077; cat > /srv/yeto/run0/sampler/s-0.json.tmp && chmod 644 /srv/yeto/run0/sampler/s-0.json.tmp && mv -f /srv/yeto/run0/sampler/s-0.json.tmp /srv/yeto/run0/sampler/s-0.json"
+   ],
+   "input": "{\n \"start_on_latest\": true,\n \"sampler_id\": \"s-0\",\n \"prompts\": {\n  \"groups_per_round\": 2\n },\n \"buffer_shards\": [\n  \"s-0\"\n ],\n \"event_tape\": \"/srv/yeto/run0/sampler/events-s-0.jsonl\"\n}"
+  },
+  {
+   "argv": [
+    "ssh",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "umask 077; cat > /srv/yeto/run0/sampler/.store.env.tmp && chmod 600 /srv/yeto/run0/sampler/.store.env.tmp && mv -f /srv/yeto/run0/sampler/.store.env.tmp /srv/yeto/run0/sampler/.store.env"
+   ],
+   "input": "R2_BUCKET=b\nAWS_ENDPOINT_URL=https://e\n"
+  },
+  {
+   "argv": [
+    "ssh",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "umask 077; cat > /srv/yeto/run0/sampler/s-0.start.sh.tmp && chmod 700 /srv/yeto/run0/sampler/s-0.start.sh.tmp && mv -f /srv/yeto/run0/sampler/s-0.start.sh.tmp /srv/yeto/run0/sampler/s-0.start.sh"
+   ],
+   "input": "#!/bin/bash\nset -e\nset -u\nset -a\n. /srv/yeto/run0/sampler/.store.env\nset +a\nexport ASCEND_RT_VISIBLE_DEVICES=0\nexport PYTHONUNBUFFERED=1\nexport YETO_NC_RUN_PREFIX=runs1\nexport YETO_RL_RELEASE_SPREAD_KEY=runs1/s-0\nexport YETO_RL_STORE_IMPL=yeto.cloud.s3_store:store_from_env\nexport YETO_RL_STORE_S3_CREDENTIALS=aws-env\nexport YETO_RL_STORE_S3_REGION=auto\nexport YETO_RL_STORE_S3_STAGE=/srv/yeto/run0/stage\nexport YETO_SPOT_RECLAIM_MARKER=/srv/yeto/run0/sampler/s-0.reclaim\nexport YETO_SSH_SAMPLER_MARK=yeto-ssh-sampler:r0:s-0:<T>\nexport PYTHONPATH=/srv/yeto/run0/yeto/abcdef123456\"${PYTHONPATH:+:$PYTHONPATH}\"\nexport YETO_RL_STORE_S3_URI=\"s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}\" YETO_RL_STORE_S3_ENDPOINT_URL=\"$AWS_ENDPOINT_URL\"\ncd /srv/yeto/run0\necho $$ > /srv/yeto/run0/sampler/s-0.pid\nexec /opt/v/bin/python -m yeto.rl.engine.engine_sampler --spec /srv/yeto/run0/sampler/s-0.json\n"
+  },
+  {
+   "argv": [
+    "ssh",
+    "-n",
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=20",
+    "u@a0",
+    "rm -f /srv/yeto/run0/sampler/s-0.exit /srv/yeto/run0/sampler/s-0.pid; mkdir -p /srv/yeto/run0/logs; : > /srv/yeto/run0/logs/s-0.log; printf '%s\\n' yeto-ssh-sampler:r0:s-0:<T> > /srv/yeto/run0/sampler/s-0.marker; { setsid bash -c 'bash /srv/yeto/run0/sampler/s-0.start.sh >> /srv/yeto/run0/logs/s-0.log 2>&1; echo $? > /srv/yeto/run0/sampler/s-0.exit' yeto-ssh-sampler:r0:s-0:<T> </dev/null >/dev/null 2>&1 & echo $! > /srv/yeto/run0/sampler/s-0.pgid; }; for i in 1 2 3 4 5 6 7 8 9 10; do { p=$(cat /srv/yeto/run0/sampler/s-0.pid 2>/dev/null); m=$(cat /srv/yeto/run0/sampler/s-0.marker 2>/dev/null); [ -n \"$p\" ] && [ -n \"$m\" ] && kill -0 \"$p\" 2>/dev/null && ps -o args= -p \"$p\" 2>/dev/null | grep -q yeto.rl.engine.engine_sampler && tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null | grep -qxF \"YETO_SSH_SAMPLER_MARK=$m\"; } && break; sleep 1; done; if { p=$(cat /srv/yeto/run0/sampler/s-0.pid 2>/dev/null); m=$(cat /srv/yeto/run0/sampler/s-0.marker 2>/dev/null); [ -n \"$p\" ] && [ -n \"$m\" ] && kill -0 \"$p\" 2>/dev/null && ps -o args= -p \"$p\" 2>/dev/null | grep -q yeto.rl.engine.engine_sampler && tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null | grep -qxF \"YETO_SSH_SAMPLER_MARK=$m\"; }; then echo YETO_SSH_STARTED pid=$(cat /srv/yeto/run0/sampler/s-0.pid) pgid=$(cat /srv/yeto/run0/sampler/s-0.pgid); else echo YETO_SSH_START_FAILED; tail -n 40 /srv/yeto/run0/logs/s-0.log 2>/dev/null; exit 1; fi"
+   ]
+  }
+ ]
+}

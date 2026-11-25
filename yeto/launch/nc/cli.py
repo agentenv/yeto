@@ -373,12 +373,9 @@ class NcSshOps:
                               lambda: self._dispense_ledger() if pool_dispense(self.cfg) is not None else None)
 
     def _fence_store(self) -> Any:
-        env = elastic.read_env_file(self.cfg["r2_env_file"])
-        bucket = env.get(self.cfg.get("bucket_env", "R2_BUCKET"))
-        if not bucket:
-            raise NcError(f"no {self.cfg.get('bucket_env', 'R2_BUCKET')} in the store env file")
-        uri = f"s3://{bucket}/runs/{self.cfg['run_prefix'].strip('/')}"
-        return elastic.s3_fence_store(uri, self.cfg["r2_env_file"])
+        from yeto.node.store import pool_fence_store  # noqa: PLC0415
+
+        return pool_fence_store(self.cfg, error=NcError)
 
     # -- scale down in "drain" mode (the store dispenser's drain request, store_dispense)
     def _dispense_ledger(self) -> tuple[Any, str]:

@@ -8,8 +8,10 @@ One place for what the routes each wrote for themselves:
 * :func:`run_store_uri`: the same URI on the launcher, from the pool's store env file;
 * :func:`open_objects`: the object API of a store URI (``s3://``, ``r2://``) or of a
   store directory, with the env file's credentials;
-* :func:`pool_store_records`: the run store as fence records for a pool config
-  (``r2_env_file``, ``run_prefix``, ``bucket_env``).
+* :func:`pool_fence_store`: the run store as fence records for a pool config
+  (``r2_env_file``, ``run_prefix``, ``bucket_env``);
+* :func:`reclaim_marker_env` / :func:`sampler_route_env`: the reclaim marker and the
+  release download's spread key every route gives its sampler.
 """
 
 from __future__ import annotations
@@ -49,14 +51,18 @@ def run_store_uri(env_file: str | os.PathLike[str], run_prefix: str, *, bucket_e
     return f"s3://{bucket}/runs/{str(run_prefix).strip('/')}"
 
 
+def reclaim_marker_env(shard: str, sampler_dir: str) -> dict[str, str]:
+    """``YETO_SPOT_RECLAIM_MARKER`` of a sampler: SIGTERM writes the marker and the sampler
+    leaves in order (stops the engine, frees its claims, exits) instead of dying in its round."""
+    return {RECLAIM_MARKER_ENV: f"{sampler_dir.rstrip('/')}/{shard}.reclaim"}
+
+
 def sampler_route_env(run_prefix: str, shard: str, sampler_dir: str) -> dict[str, str]:
     """The two per-shard variables every pool route gives its sampler: the reclaim marker
     (SIGTERM is the orderly leave, ``sampler_resume.install_marker_signals``) and the
     release download's spread key (``policy_release.download_delay_s``: a node's host
     name need not be distinct)."""
-    prefix = str(run_prefix).strip("/")
-    return {RECLAIM_MARKER_ENV: f"{sampler_dir.rstrip('/')}/{shard}.reclaim",
-            RELEASE_SPREAD_KEY_ENV: f"{prefix}/{shard}"}
+    return {**reclaim_marker_env(shard, sampler_dir), RELEASE_SPREAD_KEY_ENV: f"{str(run_prefix).strip('/')}/{shard}"}
 
 
 def store_environ(environ: Mapping[str, str] | None = None,
@@ -88,15 +94,15 @@ def open_objects(store: str, *, env_file: str | os.PathLike[str] | None = None,
     return DirectoryObjectStore(Path(store).expanduser())
 
 
-class ObjectRecords:
-    """The record view ``fence_shard`` needs over an object API (``read``/``write``/``list``)."""
-
-    def __init__(self, objects: Any):
-        self.objects = objects
-
-
-def pool_store_records(cfg: Mapping[str, Any]) -> ObjectRecords:
+def pool_fence_store(cfg: Mapping[str, Any], *, error: type[Exception] = StoreConfigError) -> Any:
     """The run store of a pool config as fence records (``r2_env_file``, ``run_prefix``,
-    ``bucket_env``): what each pool route's ``_fence_store`` built."""
-    uri = run_store_uri(cfg["r2_env_file"], cfg["run_prefix"], bucket_env=cfg.get("bucket_env", "R2_BUCKET"))
-    return ObjectRecords(open_objects(uri, env_file=cfg["r2_env_file"]))
+    ``bucket_env``): the one copy of what the NC, ssh and Modal pool routes each built
+    (``elastic.s3_fence_store`` of ``s3://<bucket>/runs/<run prefix>``). ``error``: the
+    route's error type for an env file without the bucket."""
+    from yeto.launch.nc import elastic  # noqa: PLC0415 - looked up per call (tests replace it)
+
+    bucket_env = cfg.get("bucket_env", "R2_BUCKET")
+    bucket = elastic.read_env_file(cfg["r2_env_file"]).get(bucket_env)
+    if not bucket:
+        raise error(f"no {bucket_env} in the store env file")
+    return elastic.s3_fence_store(f"s3://{bucket}/runs/{str(cfg['run_prefix']).strip('/')}", cfg["r2_env_file"])

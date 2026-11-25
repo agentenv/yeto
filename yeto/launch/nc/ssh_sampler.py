@@ -25,6 +25,8 @@ from typing import Any
 
 from .. import agentic_setup
 from yeto.node.model import PULL_JOBS, pull_body  # noqa: F401 - the shared pull body (re-exported)
+from yeto.node.store import STORE_URI_SHELL, sampler_route_env
+from yeto.node.transport import check_copy, size_sha256_command
 from yeto.rl.sampler_pins import VLLM_SAMPLER_IMAGE_ROCM
 
 from ..node_inventory import Node, parse_node
@@ -149,9 +151,7 @@ SSH_HOME_LINK = ('P="$(getent passwd "$(id -u)" | cut -d: -f6)"; '
 def sampler_command(spec_in_container: str, *, python: str = PYTHON) -> list[str]:
     # bucket and endpoint are only known inside (env file); the URI is built there
     return ["bash", "-c",
-            (SSH_HOME_LINK +
-             'export YETO_RL_STORE_S3_URI="s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}" '
-             'YETO_RL_STORE_S3_ENDPOINT_URL="$AWS_ENDPOINT_URL"; '
+            (SSH_HOME_LINK + STORE_URI_SHELL + "; " +
              f"exec {python} -m yeto.rl.engine.engine_sampler --spec {shlex.quote(spec_in_container)}")]
 
 
@@ -268,11 +268,10 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
     extra: list[str] = []
     env = sampler_env(prefix)
     # SIGTERM (docker stop) is the orderly leave (sampler_resume.install_marker_signals): without
-    # it the sampler is PID 1 of its container, ignores SIGTERM and is killed after the grace
-    env["YETO_SPOT_RECLAIM_MARKER"] = f"/work/sampler/{shard}.reclaim"
-    # the release download's start spread is taken from this key (policy_release.download_delay_s):
-    # with --network host the host name is the node's, which NC nodes need not keep distinct
-    env["YETO_RL_RELEASE_SPREAD_KEY"] = f"{prefix}/{shard}"
+    # it the sampler is PID 1 of its container, ignores SIGTERM and is killed after the grace; the
+    # release download's start spread is keyed per shard (with --network host the host name is
+    # the node's, which NC nodes need not keep distinct)
+    env.update(sampler_route_env(prefix, shard, "/work/sampler"))
     if setup is not None:
         target = agentic_setup.SshNode(alias, node.image or IMAGE, NVME, yeto_dir, python_for(image), lease.user,
                                        prelude=SSH_HOME_LINK, run=run)
@@ -300,22 +299,15 @@ def upload_prompts(alias: str, local: str | Path, spec: Mapping[str, Any], *,
                    run: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
     """``local`` to the spec's ``prompts.path`` on the node (``/work/...`` in the container is
     ``<NVMe>/work/...`` on the host), then the size and sha256 there checked against it."""
-    import hashlib  # noqa: PLC0415
-
     remote = str(((spec.get("prompts") or {}) if isinstance(spec.get("prompts"), Mapping) else {}).get("path") or "")
     if not remote.startswith("/work/"):
         raise ValueError(f"prompts.path {remote or '(unset)'!r}: a prompts file needs a container path under /work/")
     data = Path(local).expanduser().read_bytes()
-    digest, host = hashlib.sha256(data).hexdigest(), f"{NVME}{remote}"
+    host = f"{NVME}{remote}"
     ssh(alias, f"mkdir -p {shlex.quote(str(Path(host).parent))}", run=run, timeout=60)
     upload_file(alias, local, host, mode="644", run=run)
-    q = shlex.quote(host)
-    out = ssh(alias, f"echo YETO_PROMPTS $(wc -c < {q}) $(sha256sum {q} | cut -d' ' -f1)", run=run, timeout=120)
-    have = next((ln.split()[1:] for ln in (out.stdout or "").splitlines() if ln.startswith("YETO_PROMPTS ")), [])
-    if have != [str(len(data)), digest]:
-        raise RuntimeError(f"{alias}: prompts file {host} does not match {local} after the copy "
-                           f"(node size/sha256 {' '.join(have) or 'unreadable'}, local {len(data)} {digest[:12]})")
-    return {"path": remote, "bytes": len(data), "sha256": digest}
+    out = ssh(alias, size_sha256_command(host), run=run, timeout=120)
+    return {"path": remote, **check_copy(out.stdout or "", data, node=alias, remote=host, local=local)}
 
 
 def direct_records_warning(setup: agentic_setup.AgenticSetup, spec: Mapping[str, Any],

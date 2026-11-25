@@ -19,6 +19,7 @@ from yeto.launch.node_inventory import NodeProfile
 from .paths import sampler_dirs
 from .profile import CONTAINER_MODELS, container_mounts
 from .records import Assignment
+from .store import reclaim_marker_env, sampler_route_env
 
 SAMPLER_MODULE = "yeto.rl.engine.engine_sampler"
 # the node records a sampler writes (engine_sampler_entry, yeto.node.report)
@@ -65,10 +66,11 @@ def sampler_env(assignment: Assignment, profile: NodeProfile, *, yeto_dir: str, 
     then the profile's and the assignment's own variables (the assignment's win)."""
     p = sampler_paths(profile, assignment.shard)
     devices = profile.devices(assignment.cards, host_paths=host_paths)
-    env = {"PYTHONUNBUFFERED": "1", "PYTHONPATH": yeto_dir, "YETO_SPOT_RECLAIM_MARKER": p["reclaim"],
+    sampler_dir = p["reclaim"].rsplit("/", 1)[0]
+    env = {"PYTHONUNBUFFERED": "1", "PYTHONPATH": yeto_dir, **reclaim_marker_env(assignment.shard, sampler_dir),
            **devices.env, **profile.family_env()}
     if assignment.run:
-        env["YETO_RL_RELEASE_SPREAD_KEY"] = f"{assignment.run.strip('/')}/{assignment.shard}"
+        env.update(sampler_route_env(assignment.run, assignment.shard, sampler_dir))
     env.update(store_env(store_uri, stage=p["stage"], environ=environ))
     summary = {**profile.summary(), "name": profile.name, "source": assignment.source}
     env.update({TICKET_ENV: assignment.ticket, GENERATION_ENV: str(assignment.generation),
