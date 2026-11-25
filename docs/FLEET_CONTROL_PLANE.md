@@ -66,7 +66,10 @@ Shard names stay `<shard_base>-<n>`. `n` now comes from the store allocator:
 - **The tunnel port range** (`agentic.setup.tunnel.listen`) still bounds the index: one
   port per index. When no index is left, the pool writes `pool_shard_budget_exhausted`
   (ended, used, limit) and orders nothing more.
-- **A number reserved for an order that failed** is reused for the next order.
+- **A number reserved for an order that failed** is reused for the next order. So is the
+  number of a ticket lost before any grant (a spot launch with no capacity) when no
+  sampler started and its shard holds no record (`shard_given_back`). A number a member
+  was granted, started or wrote on stays that member's.
 - **Numbers that were issued but never ordered** (a controller that died or detached in
   between) are ended at the next takeover. Each gets an end record in the allocator and a
   data end record in its empty shard, so the trainer never waits for them. They are never
