@@ -1789,7 +1789,9 @@ class IslandPool(PoolMoves):
             return  # a member is still coming up (or a successor of the last step)
         if any(m.replaced_by for m in counted):
             return
-        m = next((live[t] for t in self.roll_tickets if live[t].state == READY and not live[t].paused), None)
+        # a member already going (retiring, or moving to another pool) is not replaced: it leaves anyway
+        m = next((live[t] for t in self.roll_tickets if live[t].state == READY and not live[t].paused
+                  and live[t].retiring_since is None and not (self.moves and self.moving_out(live[t]))), None)
         if m is None:
             return
         if self._free_account() is not None:

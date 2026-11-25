@@ -1684,6 +1684,10 @@ class Run:
             ref = ref_of(name, member)
             cfg = ref.load()
             pool = slot.pool
+            try:
+                pool_run.refuse_provider_start(cfg)  # a sky pool's start checks, as when run up starts it
+            except SystemExit as refusal:  # the pool keeps its old config (the reconcile reports it)
+                raise ValueError(str(refusal)) from None
             if str(cfg.get("shard_base")) != pool.config.shard_base:
                 raise ValueError("shard_base cannot change in place: remove the pool and add a new one")
             old_ref = next((r for r in self.pools if r.name == name), None)
@@ -1701,6 +1705,9 @@ class Run:
                 new_ops = (ops or {}).get(name) or nc_cli.pool_ops(cfg)
             if getattr(slot, "environ", None):
                 new_ops = EnvScopedOps(new_ops, slot.environ)
+            attach = getattr(new_ops, "attach_control", None)
+            if pool.control is not None and callable(attach):  # the provider's own record (an ssh pool's
+                attach(pool.control)  # tickets and holds) from the store, under the pool's lock, as at its start
             pool.config = pc  # under the pool's tick lock (the reconcile): no tick runs with the old ones
             pool.ops = GuardedOps(new_ops, pool._guard_store) if pool.control is not None else new_ops  # noqa: SLF001
             self.pools = [ref if r.name == name else r for r in self.pools]

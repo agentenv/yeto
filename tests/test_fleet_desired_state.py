@@ -488,6 +488,107 @@ def test_the_end_of_a_removal_waits_while_another_env_overlay_is_active(tmp_path
     assert sorted(f.providers["modal"].released) == sorted(f.providers["modal"].machines)
 
 
+def _env_run(tmp_path, monkeypatch, attach=None):
+    """A store-mode run with a run config env over the shell's, and pools on providers
+    that record the environment their calls see."""
+    import os  # noqa: PLC0415
+
+    from tests.test_rollout_entry import _NoThread  # noqa: PLC0415
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    up, cfg, _ = _store_run(tmp_path, monkeypatch, objects)
+    monkeypatch.setenv("AWS_PROFILE", "shell")
+    cfg = dict(cfg, env={"AWS_PROFILE": "run"})
+    clock = Clock()
+    seen: list[str | None] = []
+
+    class Seeing(FakeProvider):
+        def balance(self):
+            seen.append(os.environ.get("AWS_PROFILE"))
+            return super().balance()
+
+    class Ops(ProviderPoolOps):
+        def attach_control(self, control):
+            if attach is not None:
+                attach.append(control)
+
+    ops = {name: Ops(Seeing(name, clock), FakeRoute(), FakeFencer()) for name in ("nc", "modal")}
+    run = up.Run(cfg)
+    c = run.start_controller(ops=ops, thread_cls=_NoThread)
+    c.reconciler.poll_s = 0
+    return up, run, c, dz.DesiredStore(objects), clock, seen
+
+
+def _usd(d, value):
+    next(m for m in d["members"] if m["name"] == "modal")["pool"]["usd_per_h"] = value
+
+
+def test_a_reconfigured_pool_calls_its_new_provider_in_the_run_env_from_any_thread(tmp_path, monkeypatch):
+    """REV #783: the new ops of a pool `yeto fleet apply` reconfigured run every call under the
+    run's env overlay, a background start or release on another thread included."""
+    import os  # noqa: PLC0415
+
+    attached: list = []
+    _up, _run, c, store, clock, seen = _env_run(tmp_path, monkeypatch, attach=attached)
+    try:
+        c.tick()
+        old_ops = c.slots["modal"].pool.ops
+        attached.clear()
+        store.update(lambda d: _usd(d, 60))
+        c.tick()
+        pool = c.slots["modal"].pool
+        assert pool.ops is not old_ops and pool.roll_tickets  # reconfigured: rolling
+        assert attached == [pool.control]  # the provider's own record comes from the store, as at start
+        seen.clear()
+        t = threading.Thread(target=pool.ops.balance)  # outside any pool scope, like a background release
+        t.start()
+        t.join()
+        assert seen == ["run"] and os.environ.get("AWS_PROFILE") == "shell"
+    finally:
+        c.stop("test end")
+
+
+def test_a_reconfigure_a_sky_start_check_refuses_keeps_the_old_config(tmp_path, monkeypatch):
+    """#786's start check runs for a reconfigured pool too; its refusal (a SystemExit) is a
+    refused reconfigure, never the end of the controller."""
+    from yeto.launch.nc import pool_run  # noqa: PLC0415
+
+    _up, _run, c, store, clock, seen = _env_run(tmp_path, monkeypatch)
+    try:
+        c.tick()
+        old_ops, old_config = c.slots["modal"].pool.ops, c.slots["modal"].pool.config
+
+        def refuse(cfg):  # the pool started before: the check refuses from now on
+            raise SystemExit(f"pool {cfg.get('shard_base')}: refused: run AWS settings sky would use")
+
+        monkeypatch.setattr(pool_run, "refuse_provider_start", refuse)
+        store.update(lambda d: _usd(d, 61))
+        c.tick()
+        pool = c.slots["modal"].pool
+        assert pool.ops is old_ops and pool.config is old_config and not pool.roll_tickets
+        assert any(e["event"].endswith("reconfigure_refused") and "sky would use" in e.get("error", "")
+                   for e in pool.events.events)
+        assert c.check() is None and set(c.slots) == {"nc", "modal"}
+    finally:
+        c.stop("test end")
+
+
+def test_a_roll_never_replaces_a_member_that_is_already_going(tmp_path):
+    """#790: a member draining away (a move to another pool lowers the target by one and
+    drains it) is not picked by a rolling replacement; the next old member is."""
+    f = Fleet(tmp_path, [_member("nc", 2)])
+    f.ticks(4)
+    pool = f.c.slots["nc"].pool
+    going, other = sorted(pool.live(), key=lambda m: m.ticket)
+    assert going.state == READY and other.state == READY
+    pool.start_roll("test")
+    going.retiring_since = f.clock()
+    pool.config.target = 1
+    pool._roll()  # noqa: SLF001
+    steps = [e for e in pool.events.events if e["event"].endswith("roll_step")]
+    assert steps and steps[-1]["ticket"] == other.ticket
+
+
 def test_run_down_stops_every_pool_the_fleet_drives(tmp_path, monkeypatch, capsys):
     """REV #758: run down on the store control plane stops a pool `yeto fleet apply` added and one
     still being removed, and reports a store pool with live members that no config names."""
