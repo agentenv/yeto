@@ -143,6 +143,16 @@ def test_a_resumed_syncer_paces_from_the_step_it_resumed_at(tmp_path):
     r2.feed({**_syncer_config(12), "resumed": True, "time_unix": T0 + 400})  # no global_step: no pace
     ck2 = _page(tmp_path, r2)["rCostK"]
     assert "resumed at a step not on its tape" in ck2 and "n/a" not in ck2
+    r3 = fleet_reducer()  # a sharded syncer resumes each shard at its own step: no pace
+    r3.feed({**_syncer_config(12), "resumed": True, "global_step": 6, "shard_count": 2, "time_unix": T0 + 400})
+    assert "a sharded syncer resumed per shard, so no pace" in _page(tmp_path, r3)["rCostK"]
+
+
+def test_a_finish_past_its_pace_says_overdue(tmp_path):
+    r = _fleet(total=12)
+    r.feed({"event": "rl_heartbeat", "island_id": 0, "time_unix": LAST + 5000})  # the page's now, long after
+    ck = _page(tmp_path, r)["rCostK"]
+    assert "overdue by" in ck and "last merge" in ck and "in 0 s" not in ck
 
 
 def test_fleet_finished_by_the_syncer_total(tmp_path):
@@ -197,6 +207,24 @@ def test_island_samplers_table_dashes_counts_a_sampler_does_not_report(tmp_path)
     assert ">10 / <span title=\"the pool keeps zero-variance groups" in sp  # seen 10, dropped 0
     assert "not on this sampler&#39;s tape\">—</span>" in sp or "not on this sampler's tape\">—</span>" in sp
     assert "reports no zero-variance, truncated, dropped or reward counts" in sp
+
+
+def test_a_dash_never_lands_inside_a_cell_attribute(tmp_path):
+    """A sampler without version lags: its age cell's title holds "n/a" text; only the cell text becomes a
+    dash, the title attribute stays whole."""
+    r = Reducer(run="fleet-qa")
+    from test_dashboard_fleet_islands import fleet_records  # noqa: PLC0415
+
+    for rec in fleet_records():
+        if rec.get("event") == "rl_sampler_round" and rec.get("sampler_id") == "qa-s-i0-0":
+            rec = {k: v for k, v in rec.items() if k != "version_lag"}
+        r.feed(rec)
+    assert r.load_fleet_plan(plan_doc(), "test")
+    sp = _page(tmp_path, r, pick="i0")["aSamplers"]
+    assert '—">' not in sp and not re.search(r'title="[^"]*<', sp)
+    assert re.search(r'<span title="rounds by policy age: n/a">', sp)  # the attribute is intact
+    assert '<span class="note" title="not on this sampler&#39;s tape">—</span> / ' in sp or \
+        '<span class="note" title="not on this sampler\'s tape">—</span> / ' in sp
 
 
 def test_fleet_table_names_the_release_cadence_from_the_trainer_tape(tmp_path):
@@ -291,11 +319,12 @@ def test_event_stream_order_is_total_with_events_without_a_time(tmp_path):
 
 HINT = r"""
 eval(require('fs').readFileSync(process.argv[1],'utf8'));
-function box(sw,cw,sl){const c=new Set();return {scrollWidth:sw,clientWidth:cw,scrollLeft:sl,classList:{contains:(k)=>c.has(k),toggle:(k,on)=>{on?c.add(k):c.delete(k)}},c}}
+function box(sw,cw,sl){const c=new Set(),st={};return {scrollWidth:sw,clientWidth:cw,scrollLeft:sl,offsetHeight:215,clientHeight:200,
+  style:{setProperty(k,v){st[k]=v}},classList:{contains:(k)=>c.has(k),toggle:(k,on)=>{on?c.add(k):c.delete(k)}},c,st}}
 const wide=box(900,300,0),end=box(900,300,600),fits=box(300,300,0);
 YetoTbl.hint({querySelectorAll:()=>[wide,end,fits]});
 YetoTbl.hint(null);YetoTbl.hint({});
-process.stdout.write(JSON.stringify([wide.c.has("more"),end.c.has("more"),fits.c.has("more")]));
+process.stdout.write(JSON.stringify([wide.c.has("more"),end.c.has("more"),fits.c.has("more"),wide.st["--sb"]||null,fits.st["--sb"]||null]));
 """
 
 
@@ -303,6 +332,7 @@ def test_a_wide_table_fades_its_right_edge_until_scrolled_to_the_end():
     res = subprocess.run([_node(), "-e", HINT, str(STATIC / "tables.js")], capture_output=True, text=True, timeout=60,
                          check=False)
     assert res.returncode == 0, res.stderr
-    assert json.loads(res.stdout) == [True, False, False]
+    # the scrollbar's own height (offsetHeight - clientHeight) stays unmasked; a box that fits is untouched
+    assert json.loads(res.stdout) == [True, False, False, "15px", None]
     css = (STATIC / "index.html").read_text()
-    assert ".tw.more{" in css and "mask-image:linear-gradient(to right" in css
+    assert ".tw.more{" in css and "mask-image:linear-gradient(to right" in css and "var(--sb,0px)" in css

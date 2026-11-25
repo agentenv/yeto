@@ -665,10 +665,13 @@ function fleetCost(V,ck){
     if(!fin(T))return ["Projected finish","—","the syncer tape has no total step count yet (syncer_config)",""];
     if(d.done||(fin(st)&&st>=T))return ["Finished",lm?day(lm):"step "+T,"syncer reached step "+(fin(st)?st:T)+" of "+T+" (final cut)"+(lm&&t0?" · "+dur(lm-t0)+" after its "+(cf.resumed?"resume":"config"):""),""];
     if(!fin(s0))return ["Projected finish","—","syncer step "+(fin(st)?st:0)+" of "+T+"; resumed at a step not on its tape, so no pace",""];
+    // a sharded syncer resumes each shard at its own step: shard 0's start against the slowest shard is no pace
+    if(cf.resumed&&cf.shards>1)return ["Projected finish","—","syncer step "+(fin(st)?st:0)+" of "+T+"; a sharded syncer resumed per shard, so no pace",""];
     var n=fin(st)?st-s0:0;
     if(n<=0||!lm||!t0||lm<=t0)return ["Projected finish","—","syncer step "+(fin(st)?st:0)+" of "+T+"; needs a merge"+(cf.resumed?" after its resume":"")+" to pace the rest",""];
     var pace=(lm-t0)/n,eta=lm+(T-st)*pace;
-    return ["Projected finish",day(eta),"syncer step "+st+" of "+T+" at its mean merge pace "+dur(pace)+(cf.resumed?" since its resume at step "+s0:"")+" · in "+dur(Math.max(0,eta-NOW)),""]};
+    return ["Projected finish",day(eta),"syncer step "+st+" of "+T+" at its mean merge pace "+dur(pace)+(cf.resumed?" since its resume at step "+s0:"")+
+      (eta>=NOW?" · in "+dur(eta-NOW):" · overdue by "+dur(NOW-eta)+", last merge "+ago(lm)),""]};
   var NA=/\bn\/a\b/g;
   return ck.map(function(x){
     if(x[0]==="Projected finish")return fin2();

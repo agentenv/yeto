@@ -45,6 +45,8 @@ function spark(items){
 /* a table wider than its box scrolls inside it (.tw); while more columns sit to the right, the box's right
    edge fades (class "more") so a narrow screen shows the table goes on. A box that fits is left untouched */
 function edge(w){var more=w.scrollWidth>w.clientWidth+1&&w.scrollLeft+w.clientWidth<w.scrollWidth-1;
+  // the horizontal scrollbar's own height stays unmasked (0 for an overlay scrollbar: no unfaded strip)
+  if(more&&w.style&&w.style.setProperty&&fin(w.offsetHeight))w.style.setProperty("--sb",Math.max(0,w.offsetHeight-w.clientHeight)+"px");
   if(w.classList&&w.classList.contains("more")!==more)w.classList.toggle("more",more)}
 var hooked=false;
 function hint(root){root=root||(typeof document!=="undefined"?document:null);if(!root||typeof root.querySelectorAll!=="function")return;

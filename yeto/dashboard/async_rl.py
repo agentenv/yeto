@@ -826,6 +826,7 @@ class AsyncState:
             mine = [r for r in releases if r.get("island") == k]
             index = isl.get("index") if isl.get("index") is not None else k
             out.append({"island": k, "index": index, "name": isl.get("name"), "trainer": tid, "gpu": isl.get("gpu"),
+                        "plan": fleet.get("source") == "plan",  # the island's settings come from a fleet plan
                         "substore": isl.get("substore"),
                         # the plan's per-island value, else the one the trainer's skipped releases name
                         "release_every": isl.get("release_every") if isl.get("release_every") is not None
