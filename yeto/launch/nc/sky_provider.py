@@ -38,15 +38,21 @@ timeout, the own-name guard and the per-offer price.
   applies);
 * API server restart: a local sky API server starts with an empty request
   table, so every request id the record holds is unknown afterwards. Such a
-  launch is reconciled from the cluster sky lists under this run's prefix: an
+  launch is reconciled from what sky lists under its recorded cluster name: an
   ``UP`` cluster is kept (no new order), one still ``INIT`` (sky never resumes an
   interrupted request) or none at all reads ended ``lost`` and is replaced;
 * ``release``: cancel a launch still running, then ``sky.down`` (only clusters this
   provider launched for this run: the name prefix *and* the local record),
   confirmed gone (``ended`` only once sky no longer lists it);
 * ``node``: the head IP and ssh user from the cluster handle;
-* ``run_tickets``: open records, plus clusters sky lists with this run's prefix
-  (a launch the process did not live to record is adopted, then released);
+* ``run_tickets``: open records, plus clusters sky lists that are positively this
+  run's (a launch the process did not live to record is adopted, then released).
+  Ownership is a mark, not a name: a cluster is adopted only when its name is
+  exactly ``<prefix>-<n>`` *and* it carries the sky label ``yeto-run=<owner>``
+  (set on every launch) or this run's ledger holds an ``intent`` row for it with
+  ``run=<run id>`` (written before the launch). Another run's cluster with a
+  matching name (the spot watchdog's ``exact_prefix`` has no run id in it) or one
+  opened by hand is never adopted, released or downed: it is reported once;
 * ``attach``: an ssh alias to the head (sky's key, no relay), then the
   ``host_setup`` commands of the config;
 * ``hourly_cost(ticket)``: the USD price of the offer the cluster was launched with.
@@ -65,6 +71,7 @@ Requires SkyPilot >= 0.14.3 (``sky.api_status`` / ``sky.api_cancel``). Pool conf
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -116,6 +123,27 @@ def _status_name(value: Any) -> str:
     return str(getattr(value, "name", value)).rsplit(".", 1)[-1].upper()
 
 
+OWNER_LABEL = "yeto-run"
+
+
+def owner_token(run_id: str) -> str:
+    """The ``yeto-run`` label value of ``run_id``: the id itself when every cloud's label
+    rules take it (GCP's are the strictest), else a hash of it."""
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", run_id):
+        return run_id
+    return "h-" + hashlib.sha256(run_id.encode()).hexdigest()[:24]
+
+
+def run_prefix(cluster_prefix: str, run_id: str) -> str:
+    """``<cluster_prefix>-<run>``: a run id that is not already lower-case letters, digits
+    and '-' gets a hash of the original appended, so two ids that normalize alike
+    (``ABC_2`` and ``abc-2``) never share a prefix."""
+    slug = re.sub(r"[^a-z0-9-]", "-", run_id.lower())
+    if slug != run_id:
+        slug += "-" + hashlib.sha256(run_id.encode()).hexdigest()[:8]
+    return f"{cluster_prefix}-{slug}"
+
+
 def _record_ledger(fn: str, *args: Any, **kw: Any) -> None:
     from yeto.cost.ledger import record_safely  # noqa: PLC0415
 
@@ -143,7 +171,9 @@ class SkyProvider:
         self.run_id, self.slots, self.offers = run_id, list(slots), list(offers)
         self.resources = dict(self.offers[0].resources)
         # exact_prefix: the spot watchdog's own cluster prefix (its names, its own-name guard)
-        self.prefix = exact_prefix or f"{cluster_prefix}-{re.sub(r'[^a-z0-9-]', '-', run_id.lower())}"
+        self.prefix = exact_prefix or run_prefix(cluster_prefix, run_id)
+        self.owner = owner_token(run_id)
+        self._name_re = re.compile(re.escape(self.prefix) + r"-(\d+)")
         self.ssh_key = os.path.expanduser(ssh_key) if ssh_key else None
         self.host_setup = list(host_setup or ())
         self.start_timeout_s = float(start_timeout_s)
@@ -170,9 +200,12 @@ class SkyProvider:
         try:
             doc = json.loads(self.record.read_text())
         except (OSError, ValueError):
-            return {"clusters": {}, "cursor": 0}
+            return {"clusters": {}, "cursor": 0, "run": self.run_id}
         if "clusters" not in doc:  # the skeleton's flat {name: row} record
             doc = {"clusters": doc, "cursor": 0}
+        if doc.setdefault("run", self.run_id) != self.run_id:
+            raise PermissionError(f"sky provider: record {self.record} belongs to run {doc['run']!r}, "
+                                  f"not {self.run_id!r}")
         return doc
 
     def _rows(self) -> dict[str, dict[str, Any]]:
@@ -184,8 +217,31 @@ class SkyProvider:
         tmp.write_text(json.dumps(doc, indent=1))
         tmp.replace(self.record)
 
+    def _named_ours(self, name: str) -> bool:
+        return self._name_re.fullmatch(name) is not None
+
     def _ours(self, ticket: str) -> bool:
-        return ticket.startswith(self.prefix + "-") and ticket in self._rows()
+        return self._named_ours(ticket) and ticket in self._rows()
+
+    def _marked_ours(self, record: dict[str, Any]) -> bool:
+        """A positive ownership mark on a cluster sky lists: our ``yeto-run`` label on its
+        launched resources, or an ``intent`` of this run in the run's resource ledger."""
+        labels = record.get("labels") or getattr(getattr(record.get("handle"), "launched_resources", None),
+                                                 "labels", None) or {}
+        if labels.get(OWNER_LABEL) == self.owner:
+            return True
+        from yeto.cost.ledger import current  # noqa: PLC0415
+
+        ledger = current()
+        if ledger is None:
+            return False
+        try:
+            rows = ledger.records()
+        except Exception:  # noqa: BLE001 - an unreadable ledger is no mark
+            return False
+        name = record.get("name")
+        return any(r.get("op") == "intent" and r.get("kind") == LEDGER_KIND and r.get("name") == name
+                   and (r.get("attrs") or {}).get("run") == self.run_id for r in rows)
 
     def _record(self, ticket: str, *, refresh: bool = False) -> dict[str, Any] | None:
         """sky's record of cluster ``ticket`` (None: sky does not list it). ``refresh``:
@@ -250,7 +306,9 @@ class SkyProvider:
             task.update_envs(dict(self.envs))
         if self.secrets:
             task.update_secrets({k: os.environ.get(v, "") for k, v in self.secrets.items()})
-        task.set_resources(sky.Resources(**offer.resources))
+        resources = dict(offer.resources)
+        resources["labels"] = {**dict(resources.get("labels") or {}), OWNER_LABEL: self.owner}
+        task.set_resources(sky.Resources(**resources))
         return task
 
     @property
@@ -303,14 +361,14 @@ class SkyProvider:
         ``wait``: block on the launch request (the spot watchdog); a failure moves
         the cursor past the offer and is raised. ``wait=False`` (the pool's ``order``):
         return once submitted; :meth:`status` confirms the request."""
-        if not name.startswith(self.prefix + "-"):
-            raise PermissionError(f"cluster {name} does not carry this provider's prefix {self.prefix}-")
+        if not self._named_ours(name):
+            raise PermissionError(f"cluster {name} is not named {self.prefix}-<n>")
         self._install_patches()
         doc = self._doc()
         doc["clusters"][name] = {"slot": slot, "n": n, "open": True, "ordered_at": self.clock(),
                                  "offer": offer.record(), "launch_state": SUBMITTED}
         self._save_doc(doc)  # recorded before the launch: a crash mid-launch still leaves it ours to down
-        _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h)
+        _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id)
         try:
             task = self._task(name, offer)
             request = self.sky.launch(task, cluster_name=name, **self.launch_kwargs(task))
@@ -488,24 +546,37 @@ class SkyProvider:
         return not any(r.get("open") and r.get("slot") == account for r in self._rows().values())
 
     def run_tickets(self) -> list[tuple[int, str]]:
-        """Open records, plus clusters sky lists under this run's prefix that the
-        record lacks (recorded now, on a free slot, so the pool can adopt or release them)."""
+        """Open records, plus clusters sky lists that the record lacks and that are
+        positively this run's (named ``<prefix>-<n>`` and marked, see the module notes):
+        recorded now, on a free slot, so the pool can adopt or release them. A cluster
+        with a matching name but no mark is reported once and left alone."""
         doc = self._doc()
         rows = doc["clusters"]
         try:
-            listed = [str(r.get("name")) for r in (self.sky.get(self.sky.status(None)) or ())]
+            listed = [r for r in (self.sky.get(self.sky.status(None)) or ()) if isinstance(r, dict)]
         except Exception:  # noqa: BLE001 - an unanswered listing: the record alone
             listed = []
-        added = False
-        for name in listed:
-            if name.startswith(self.prefix + "-") and name not in rows:
-                busy = {r.get("slot") for r in rows.values() if r.get("open")}
-                slot = next((s for s in self.slots if s not in busy), self.slots[0])
-                tail = name[len(self.prefix) + 1:]
-                rows[name] = {"slot": slot, "n": int(tail) if tail.isdigit() else 0, "open": True,
-                              "ordered_at": self.clock(), "adopted": True}
-                added = True
-        if added:
+        changed = False
+        for rec in listed:
+            name = str(rec.get("name"))
+            match = self._name_re.fullmatch(name)
+            if match is None or name in rows:
+                continue
+            if not self._marked_ours(rec):
+                seen = doc.setdefault("unowned", [])
+                if name not in seen:
+                    seen.append(name)
+                    changed = True
+                    print(f"[sky-provider] cluster {name} has this run's name pattern but no ownership mark "
+                          f"({OWNER_LABEL}={self.owner} label or ledger intent): not adopted, left alone",
+                          flush=True)
+                continue
+            busy = {r.get("slot") for r in rows.values() if r.get("open")}
+            slot = next((s for s in self.slots if s not in busy), self.slots[0])
+            rows[name] = {"slot": slot, "n": int(match.group(1)), "open": True,
+                          "ordered_at": self.clock(), "adopted": True}
+            changed = True
+        if changed:
             self._save_doc(doc)
         return [(int(r["slot"]), name) for name, r in rows.items() if r.get("open")]
 
