@@ -307,11 +307,13 @@ class DesiredStore:
             # this writer read a stale state; its record is withdrawn and it is fenced
             try:
                 self.objects.delete(self.applied_key(seq))
-            except Exception:  # noqa: BLE001 - below the newest record: never read
-                pass
+            except Exception as error:  # noqa: BLE001 - below the newest record: never read, pruned later
+                self.log(f"fleet: withdrawn applied record {seq} not deleted ({error!r}); it is below record "
+                         f"{newer.get('seq')} and never read")
             raise AppliedFenced(f"{newer.get('writer')} wrote applied record {newer.get('seq')} past {seq}")
         copy_seq = int((self._doc(APPLIED_KEY) or {}).get("seq") or 0)
-        if copy_seq < seq:  # the copy only moves forward
+        if copy_seq < seq:  # best effort forward (read, then write: a racing writer may still put it back
+            # one record); readers take the newest record, the copy is only their fallback
             try:
                 self.objects.write(APPLIED_KEY, body)
             except Exception as error:  # noqa: BLE001 - the record is the truth; readers fall back to it
