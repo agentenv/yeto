@@ -56,6 +56,8 @@ from .launch.sky_ops import (
     SkySDKOps, _tail, learner_cluster_names, maybe_install_nebius_reclaim_hook, sky_cluster_name,
     submit_island_launch,
 )
+from .launch.trainer_provision import resident_ssh_names as _resident_ssh_names
+from .launch.trainer_provision import ssh_trainer_spec as _ssh_trainer_spec
 from .launch.tapes import (
     excuse_departed_islands, settle_echo_tapes, syncer_pool_departures, wait_for_tapes,
 )
@@ -292,50 +294,6 @@ def _spot_sampler_cloud_env(iargs, cloud: str | None) -> dict[str, str]:
     from .cloud import nebius_reclaim
 
     return nebius_reclaim.spot_sampler_env()
-
-
-def _resident_ssh_names(args, names: list[str], specs: list[ClusterSpec]) -> set[str]:
-    """The ``--gpu`` islands that are resident ``ssh:`` trainer islands (ssh_resident)."""
-    from .launch.ssh_resident import is_resident
-
-    return {n for m, (n, s) in enumerate(zip(names, specs)) if is_resident(args, s, m, len(specs))}
-
-
-def _start_resident_ssh(args, tasks, names, results, errors, events_dir, collectors):
-    """Start (or reattach to) every resident ``ssh:`` island; returns their ops. Node 0's
-    lines go to the launcher log and the island's echo tape collector."""
-    from . import runs
-    from .launch.ssh_resident import RESIDENT_DIR, SshIslandOps
-
-    def sink_for(name: str):
-        collector = collectors.get(name)
-        if collector is None and events_dir is not None:
-            collector = collectors[name] = EventCollector(Path(events_dir) / f"{name}.jsonl", fresh=False)
-
-        def sink(line: str) -> None:
-            print(f"[{name}] {str(line).rstrip()}", flush=True)
-            if collector is not None:
-                collector.feed(line)
-        return sink
-
-    ops = SshIslandOps(run_id=args.cluster_prefix, journal_dir=runs.run_dir(args.cluster_prefix) / RESIDENT_DIR,
-                       events_dir=events_dir, sink_for=sink_for)
-    for name in sorted(names):
-        ops.add(name, tasks[name])
-        try:
-            results[name] = (ops.start(name), None)
-        except Exception as e:  # noqa: BLE001 - reported with the other launch errors
-            errors[name] = e
-    return ops
-
-
-def _ssh_trainer_spec(args, spec: ClusterSpec, task):
-    """The SSH spec of a held-back ``ssh:`` trainer island (None on other clouds)."""
-    if spec.cloud != "ssh":
-        return None
-    from .launch.ssh_trainer_island import island_spec_from_inventory
-
-    return island_spec_from_inventory(args, spec, task)
 
 
 def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
@@ -893,55 +851,37 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             if getattr(args, "training_mode", "sft") == "rl"
             else make_learner_task
         )
-        modal_addr = None
-        if no_sync:
-            modal_addr = syncer_addr  # nothing to reach
-        elif any(spec.cloud == "modal" for spec in specs):
-            from .modal_runner import resolve_syncer_for_modal
+        # Each island goes to the adapter of its source (yeto.launch.trainer_provision):
+        # sky / Verda clusters are ordered during the walk and waited on in threads, the
+        # Modal islands deploy on one app and the resident ssh: islands start after it.
+        from .launch.trainer_provision import TrainerProvision
 
-            # Fails BEFORE any Modal container starts when the syncer is
-            # not reachable from Modal's network.
-            modal_addr = resolve_syncer_for_modal(
-                syncer_addr, getattr(args, "syncer_public_addr", None)
-            )
+        provision = TrainerProvision(
+            args, sky, specs, learner_names, ssh_names=ssh_names, syncer_addr=syncer_addr, no_sync=no_sync,
+            engine_args=lambda m: _island_engine_args(args, m), verda=verda,
+            on_order=lambda name: _record_ordering(recorder, name, adoption),
+            on_call=None if recorder is None else (
+                lambda name, call_id: _record_call(recorder, name, call_id, adoption)),
+            adopted=lambda name: (adoption[name].job_id,) if name in adoption and adoption[name].adopt else None,
+            guard_order=None if island_states is None else island_states.guard_order,
+            ledger=cost_ledger, events_dir=events_dir, collectors=event_collectors)
         island_overrides = _island_overrides(args, specs)
         for m, spec in enumerate(specs):
             name = learner_names[m]
             role = _island_role(args, specs, m)
             task = _island_task(task_factory, args, spec, m, num_learners, syncer_addr,
                                 island_overrides, role)
-            if spec.cloud == "modal":
-                from .cloud.droppable import role_args
-
-                cfg = build_modal_island_config(role_args(args, role), spec, m, task, modal_addr,
-                                                engine_args=_island_engine_args(args, m))
-                print(f"[launcher] {name} dials {island_syncer_addrs(cfg.envs)}", flush=True)
-                if name == held_name:
-                    held_cfg = cfg  # defined on the app below; the scheduler spawns it
-                    print(f"[launcher] {name} is the trainer island: the trainer scheduler "
-                          "starts and stops it", flush=True)
-                    continue
-                tasks[name] = cfg
-                modal_cfgs[name] = cfg
-                continue
-            if name in ssh_names:
-                tasks[name] = _ssh_trainer_spec(args, spec, task)
-                print(f"[launcher] {name} is a resident ssh: trainer island on {spec.num_nodes} inventory "
-                      "node(s): the launcher starts it over SSH and supervises it for the run", flush=True)
-                continue
+            island = provision.island(name, m, spec, role, task)
             if name == held_name:
-                held_task = task  # the scheduler launches one cluster per incarnation
+                held_cfg, held_task = provision.hold(island)  # the scheduler starts it from these
                 print(f"[launcher] {name} is the trainer island: the trainer scheduler "
                       "starts and stops it", flush=True)
                 continue
-            tasks[name] = task
-            print(f"[launcher] {name} dials {island_syncer_addrs(getattr(task, 'envs', None))}", flush=True)
-            alloc = (rl_island_spec(rl_island_args(args, m), spec)
-                     if getattr(args, "training_mode", "sft") == "rl" else spec)
-            print(f"[launcher] launching learner {m} on {spec} as {name}"
-                  + (f" (physical {spec.gpus_per_node} GPUs/node billed, island allocated "
-                     f"{alloc.gpus_per_node}/node = GPUs 0..{alloc.gpus_per_node - 1})"
-                     if alloc is not spec else ""))
+            tasks[name] = island.task
+            provision.add(island)
+            if not provision.ordered(island):
+                continue  # started with the other islands of its source after the walk
+            provision.announce(island)
             if name in splits:
                 split_tasks = engine_cluster.build_tasks(
                     sky, args, splits[name],
@@ -960,36 +900,21 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 # its record names a cluster and a job that still run: no order, no restart
                 rids[name] = (m, ("adopted", adoption[name].job_id))
                 continue
-            if spec.cloud == "verda":
-                # Launched in resolve(): live stock -> ordered any_of, with
-                # refresh + bounded backoff on capacity failures.
-                _record_ordering(recorder, name, adoption)
-                rids[name] = (m, ("verda", spec))
-                continue
-            _record_ordering(recorder, name, adoption)
-            rids[name] = (m, submit_island_launch(sky, args, spec, task, name))
+            rids[name] = (m, ("order", provision.order(island)))
+        modal_cfgs.update({n: i.task for n, i in provision.batch("modal").items()})
 
-        results = {}
-        errors = {}
+        results = provision.results
+        errors = provision.errors
 
         def resolve(name: str, m: int, rid) -> None:
+            kind, handle = rid
             try:
-                if isinstance(rid, tuple) and rid and rid[0] == "adopted":
-                    results[name] = (rid[1], None)
-                elif isinstance(rid, tuple) and rid and rid[0] == "mixed":
-                    results[name] = mixed[name].finish(sky, rid[1])
-                elif isinstance(rid, tuple) and rid and rid[0] == "verda":
-                    from .cloud.droppable import role_args
-
-                    results[name] = launch_verda_island(
-                        sky, tasks[name], name, rid[1],
-                        role_args(args, _island_role(args, specs, m)))
-                    verda["guard"].record(
-                        name, getattr(results[name][1], "cluster_name_on_cloud", None)
-                    )
+                if kind == "adopted":
+                    results[name] = (handle, None)
+                elif kind == "mixed":
+                    results[name] = mixed[name].finish(sky, handle)
                 else:
-                    results[name] = sky.stream_and_get(rid)
-                    maybe_install_nebius_reclaim_hook(tasks[name], results[name], name)
+                    results[name] = provision.wait(provision.islands[name], handle)
             except Exception as e:
                 errors[name] = e
 
@@ -999,40 +924,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         ]
         for t in threads:
             t.start()
-        if modal_cfgs or held_cfg is not None:
-            from .modal_runner import ModalIslandOps, ModalOps, modal_app_name
-
-            modal_ops = ModalOps(modal_app_name(prefix))
-            modal_ops.ledger = cost_ledger
-            for cfg in [*modal_cfgs.values(), *([] if held_cfg is None else [held_cfg])]:
-                modal_ops.define(cfg)
-            print(f"[launcher] deploying Modal app {modal_ops.app_name} "
-                  f"({len(modal_cfgs) + (held_cfg is not None)} island(s))")
-            if island_states is not None:
-                island_states.guard_order(modal_ops.app_name)  # the lock still ours (raises: nothing deployed)
-            modal_ops.deploy()
-            modal_island_ops = ModalIslandOps(modal_ops)
-            if recorder is not None:  # the call id is in the island's record from its spawn on
-                modal_island_ops.on_call = lambda name, call_id: _record_call(recorder, name, call_id, adoption)
-            for name, cfg in modal_cfgs.items():
-                if name in adoption and adoption[name].adopt:
-                    call_id = str(adoption[name].job_id)
-                    modal_island_ops.calls[name] = call_id
-                    results[name] = (call_id, None)
-                    print(f"[launcher] learner {cfg.learner_id} on Modal as {name}: adopted call {call_id}")
-                    continue
-                print(f"[launcher] launching learner {cfg.learner_id} on Modal as {name}")
-                _record_ordering(recorder, name, adoption)
-                call_id = modal_island_ops.relaunch(cfg, name)
-                if call_id is None:
-                    errors[name] = RuntimeError("Modal refused to start the island")
-                else:
-                    results[name] = (call_id, None)
-        if ssh_names:
-            if island_states is not None:  # a start that is no reattach orders the island's processes
-                island_states.guard_order(",".join(sorted(ssh_names)))
-            ssh_islands = _start_resident_ssh(args, tasks, ssh_names, results, errors, events_dir,
-                                              event_collectors)
+        modal_ops = provision.modal_app()  # bound first: a deploy that fails is still stopped
+        if modal_ops is not None:
+            modal_island_ops = provision.spawn_modal(modal_ops)
+        ssh_islands = provision.start_ssh()
+        if ssh_islands is not None:
             if recorder is not None:  # the journal decided: reattached (adopted) or a new incarnation
                 from .launch.island_adopt import Adoption
 
@@ -1050,8 +946,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         for name in list(rids) + list(modal_cfgs) + sorted(ssh_names):
             if name not in errors:
                 clusters.append(name)
-        for name in rids:  # sky clusters (a failed launch may still have left one up)
-            cost_ledger.created("sky_cluster", name, name)
+        for name, (_m, (kind, _handle)) in rids.items():  # sky clusters (a failed launch may still have left one up)
+            # an ordered cluster carries what prices it (the unified table's row, as a sky sampler's)
+            cost_ledger.created("sky_cluster", name, name,
+                                **(provision.ledger_attrs(provision.islands[name]) if kind == "order" else {}))
         for split in splits.values():  # both clusters may exist even after an error
             for name in (split.name, split.engine_name):
                 if name not in clusters:
@@ -1757,6 +1655,9 @@ def dry_run_plan(args) -> dict:
     from .launch.trainer_image_check import check_trainer_images
 
     check_trainer_images(args, specs)  # the launch preflight's image / card refusal, found early
+    from .launch.trainer_provision import check_sky_prices
+
+    check_sky_prices(args, specs)  # the launch preflight's budget / price refusal, found early
     task_plan = island_task_plan(args) if rl else None
     split_plan = data_split_plan(args) if rl else None
     placements = rl_island_placement_records(args) if rl else []
