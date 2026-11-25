@@ -100,6 +100,7 @@ _REGISTRY: dict[str, BackendEntry] = {
         "binding": f"{_VERL}.binding",
         "identity": f"{_VERL}.identity",
         "image": f"{_VERL}.image",
+        "pins": f"{_VERL}.pins",
         "policy_age": f"{_VERL}.policy_age",
         "offpolicy_correction": f"{_VERL}.offpolicy_correction",
         # the Megatron engine island's roles

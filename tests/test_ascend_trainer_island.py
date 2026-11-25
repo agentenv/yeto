@@ -216,7 +216,8 @@ def test_the_check_reads_the_trainer_islands_only():
     for gpu in ("modal:1xa100", "modal:1xl40s"):  # verl runs its own images: never refused here
         verl = _miles_args(gpu, "--rl-backend", "verl")
         verl.rl_image = MILES_NEXT_IMAGE
-        assert check_trainer_images(verl, parse_gpu_spec(verl.gpu)) == []
+        # the verl FSDP2 card rule (fleet-verl-trainer-islands 5.2): an "unverified" warning at most
+        assert all("UNVERIFIED" in w for w in check_trainer_images(verl, parse_gpu_spec(verl.gpu)))
 
 
 @pytest.mark.parametrize("extra, backend, refused", [

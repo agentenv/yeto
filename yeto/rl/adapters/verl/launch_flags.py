@@ -46,6 +46,17 @@ def image_pin_problem(rl_image: str) -> str | None:
             f"against that pin): use {pinned}")
 
 
+def pulled_image(rl_image: str) -> dict | None:
+    """The registry image an island that pulls its image (a sky island) runs in place
+    of the Modal-built ``verl-build:<pinned commit>``: the same pin and recipe
+    (pins.VERL_REGISTRY_IMAGE). None for any other image (an explicit registry
+    image is used as given; the Megatron variant has no registry image)."""
+    from .pins import VERL_REGISTRY_TAG, registry_image_for
+
+    image = registry_image_for(rl_image)
+    return {"image": image, "tag": VERL_REGISTRY_TAG, "replaces": rl_image} if image else None
+
+
 def bundle_map_flag(bundle_map: Mapping[str, Sequence[int]]) -> str:
     """Refuse a role -> card map: verl places its trainer and rollout workers itself.
 

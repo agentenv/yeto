@@ -38,6 +38,7 @@ from .gpu_spec import ClusterSpec, parse_gpu_spec
 from .models import MODEL_WEIGHT_GB
 from .rl.event_echo import TapeCollector as EventCollector
 from .launch.rl_backend import _rl_backend_module
+from .launch.rl_backend import pulled_rl_image as _pulled_rl_image
 from .launch.topology import rl_island_args, rl_island_count, rl_island_placement_records, rl_island_spec
 from .launch.syncer import (
     SYNCER_PORT, island_pool, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
@@ -248,6 +249,7 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     # the island's sample role; it runs as learner 0 of 1 (no syncer).
     iargs = sample_roles.island_args(iargs, m, rl_island_count(args))
     learner_id, island_learners = sample_roles.island_learner(args, m, num_learners, rl_island_count(args))
+    iargs = _pulled_image_args(iargs, spec)
     task = task_factory(iargs, spec, learner_id, island_learners, syncer_addr)
     from .launch.modal_islands import parse_island_env
 
@@ -258,6 +260,23 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
                             **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None)),
                             **_resume_marker_env(iargs, getattr(spec, "cloud", None))})
     return task
+
+
+def _pulled_image_args(iargs, spec):
+    """``iargs`` with the registry image a sky island pulls in place of the backend's
+    Modal-built ``--rl-image`` (``rl_backend.pulled_rl_image``; verl only), else unchanged."""
+    from .launch.rl_backend import pulled_rl_image
+
+    pulled = pulled_rl_image(iargs, getattr(spec, "cloud", None))
+    if pulled is None:
+        return iargs
+    import copy
+
+    print(f"[launcher] {spec.cloud} trainer island pulls {pulled['image']} (tag {pulled['tag']}): the "
+          f"registry image of {pulled['replaces']}, same pin and recipe", file=sys.stderr, flush=True)
+    out = copy.copy(iargs)
+    out.rl_image = pulled["image"]
+    return out
 
 
 def _wait_heartbeat_env(args, iargs) -> dict[str, str]:
@@ -1793,6 +1812,8 @@ def dry_run_plan(args) -> dict:
                                                 "why": unmountable}
         if rl:
             entry["placement"] = placements[learner_id]
+        if rl and (pulled := _pulled_rl_image(rl_island_args(args, learner_id), spec.cloud)) is not None:
+            entry["trainer_image"] = pulled  # only such an island gets the key: every other plan is unchanged
         if rl and rl_island_spec(rl_island_args(args, learner_id), spec) is not spec:
             entry["allocated_gpus_per_node"] = rl_island_spec(
                 rl_island_args(args, learner_id), spec).gpus_per_node

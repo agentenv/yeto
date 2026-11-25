@@ -58,6 +58,23 @@ def _rl_backend_image_ok(args) -> bool:
     return bool(check and check(getattr(args, "rl_image", None) or ""))
 
 
+# clouds whose trainer island does not pull --rl-image from a registry: Modal builds
+# the backend's own image form, an ssh: island checks its docker nodes' image itself
+# (ssh_trainer_island.run_image)
+_NO_PULL_CLOUDS = ("modal", "ssh")
+
+
+def pulled_rl_image(args, cloud: str | None) -> dict | None:
+    """``{"image", "tag", "replaces"}`` when a trainer island on ``cloud`` (a sky cloud)
+    pulls a registry image in place of the backend's Modal-built ``--rl-image`` (verl:
+    ``verl-build:<commit>`` -> the registry image of the same pin and recipe); None
+    otherwise (the Miles backend, a Modal or ssh: island, any other image)."""
+    if getattr(args, "training_mode", "sft") != "rl" or cloud in _NO_PULL_CLOUDS:
+        return None
+    pulled = getattr(_rl_backend_module(args, "launch_flags"), "pulled_image", None)
+    return pulled(getattr(args, "rl_image", None) or "") if pulled else None
+
+
 def _rl_backend_module(args, role: str):
     """Adapter module for ``role`` of the selected training backend (decoupling 5.4).
 

@@ -169,6 +169,8 @@ def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]
     pins = image_pin_problems(args, len(specs))
     if pins:
         raise ValueError("; ".join(pins))
+    if (getattr(args, "rl_backend", None) or "miles") == "verl":
+        return check_verl_trainer_cards(args, specs, out=out)
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
         return []
     image = str(getattr(args, "rl_image", None) or "")
@@ -191,6 +193,68 @@ def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]
             message += ("; a recipe only the model's config selects (a renamed gated-delta-net or Nemotron-H "
                         "checkpoint) reads as the generic one here: set --rl-training-attention-backend to the "
                         "backend it runs")
+        if refused:
+            raise ValueError(f"--gpu island {m} ({spec}): {message}")
+        warnings.append(f"--gpu island {m} ({spec}): {message}")
+        print(f"[launcher] WARNING: {warnings[-1]}", file=out or sys.stderr, flush=True)
+    return warnings
+
+
+# --- verl FSDP2 trainer cards (fleet-verl-trainer-islands 5.2) ------------------
+#
+# The verl FSDP2 images (``verl-build`` and its registry image) carry no Transformer
+# Engine: the trainer's attention is torch SDPA / flash-attn, built for sm80 and up.
+# The allowed architectures and the cards with evidence live in the verl pins
+# (VERL_FSDP_CARD_ARCHES, VERL_FSDP_VERIFIED_CARDS), next to the image they describe.
+
+def verl_card_problem(gpu: str) -> tuple[str, bool] | None:
+    """``(message, refused)`` for a verl FSDP2 trainer island on ``gpu`` cards: refused
+    below the lowest allowed architecture (no flash-attn / bf16 kernels there); an
+    "unverified" warning for a card no run has trained on (an allowed architecture
+    without evidence, or one outside the list at or above its floor); None for a card
+    with evidence, or one outside the CUDA catalog (Ascend, a card the catalog does not
+    know: the card checks report it)."""
+    from ..rl.engine import backends
+
+    pins = backends.module("pins", "verl")
+    try:
+        arch = card_arch_of(gpu)
+    except ValueError:
+        return None
+    have = _sm(arch)
+    if have is None:
+        return None
+    allowed = tuple(pins.VERL_FSDP_CARD_ARCHES)
+    floor = min(_sm(a) for a in allowed)
+    verified = {str(card).upper(): why for card, why in pins.VERL_FSDP_VERIFIED_CARDS.items()}
+    if have < floor:
+        return (f"the verl FSDP2 trainer needs a card of {'/'.join(allowed)}; {gpu} ({arch}) is below "
+                f"sm{floor} (no flash-attn or bf16 kernels): use one of "
+                f"{', '.join(sorted(verified)) or 'the allowed architectures'}", True)
+    if gpu.upper() in verified:
+        return None
+    where = "an allowed architecture" if arch in allowed else f"outside the verified list {'/'.join(allowed)}"
+    return (f"UNVERIFIED: no verl FSDP2 trainer run on {gpu} ({arch}, {where}) is recorded in the verl pins "
+            f"(verified: {', '.join(sorted(verified))}); it is not refused, but watch the first steps", False)
+
+
+def check_verl_trainer_cards(args: Any, specs: Any, *, out: Any = None) -> list[str]:
+    """The verl backend's trainer islands against their cards: a card below the FSDP2
+    floor is refused (ValueError), an unverified card is warned about (returned and
+    printed). The Megatron engine island and the sampler islands are not checked here."""
+    from ..rl.engine import backends, sample_roles
+
+    if backends.module("run_config_rules", "verl").megatron_run(args):
+        return []
+    samplers = set(sample_roles.sampler_islands(args, len(specs)))
+    warnings = []
+    for m, spec in enumerate(specs):
+        if m in samplers:
+            continue
+        found = verl_card_problem(str(spec.gpu))
+        if found is None:
+            continue
+        message, refused = found
         if refused:
             raise ValueError(f"--gpu island {m} ({spec}): {message}")
         warnings.append(f"--gpu island {m} ({spec}): {message}")

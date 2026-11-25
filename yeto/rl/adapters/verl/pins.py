@@ -9,6 +9,8 @@ from the fork's own ``uv.lock`` (``uv sync --frozen --all-packages --extra vllm
 import os
 from pathlib import Path
 
+from yeto.rl.image_registry import pinned_image
+
 VERL_REPOSITORY = "https://github.com/michaellchung/verl"
 VERL_COMMIT = "acad9875a8bdfc81afbcb0a50d146b2630f44093"
 VERL_BASE_IMAGE = "nvidia/cuda:13.0.2-devel-ubuntu24.04"
@@ -80,6 +82,51 @@ def expected_versions(device_family: str = "nvidia") -> dict:
 # ``--rl-image`` value that selects the Modal-built verl image (no registry
 # digest exists: the image is built on Modal from the pinned commit + lock).
 VERL_IMAGE = f"verl-build:{VERL_COMMIT}"
+
+# --- registry image (fleet-verl-trainer-islands 5.1) ---------------------------
+#
+# The same recipe as VERL_IMAGE (image.recipe_steps, FSDP variant, patched) built
+# with docker and pushed under a fixed tag, for trainer islands that pull an image
+# instead of building on Modal: a sky island (AWS, Nebius, ...) and an ssh: island's
+# docker nodes. docker/verl-fsdp/Dockerfile is the recipe as text and
+# docker/verl-fsdp/build.sh pushes it; the repository prefix follows
+# yeto.rl.image_registry (YETO_IMAGE_REGISTRY), as for the Miles images, and the
+# digest names the bytes. VERL_REGISTRY_RECIPE_SHA256 is image.recipe_sha256() at
+# build time: a test fails when the recipe (or patch_verl.py) changes without a
+# rebuild, so the registry image and the Modal image cannot drift apart.
+# Built 2026-11-25 with docker/verl-fsdp/build.sh --push (linux/amd64, docker 28),
+# tag fsdp-acad9875-a3aa3c94, about 8.6 GB; read back from the pushed image: verl at
+# VERL_COMMIT, torch 2.13.0+cu130, vllm 0.29.0, transformers 5.12.1, peft 0.19.1 (the
+# EXPECTED_VERSIONS above), boto3 1.43.104, the patch_verl hooks in place, and the venv
+# first on PATH in a login shell too. Like the Miles images the default registry
+# (ghcr.io/agentenv) needs a mirror of this digest, and a private package needs a
+# registry login (--rl-image-private, or SKYPILOT_DOCKER_USERNAME/PASSWORD/SERVER).
+VERL_REGISTRY_REPOSITORY = "yeto-verl-fsdp"
+VERL_REGISTRY_RECIPE_SHA256 = "a3aa3c94ebb9301a760e5e215defbf6c52c0d2380bcc895b7d5e7c451c4a7f9b"
+VERL_REGISTRY_TAG = f"fsdp-{VERL_COMMIT[:8]}-{VERL_REGISTRY_RECIPE_SHA256[:8]}"
+VERL_REGISTRY_DIGEST = "df8a125ee9a3e5291f36a2cd06d2410af00814a757d160f6e9ff1e9cb1d25714"
+VERL_REGISTRY_IMAGE = pinned_image(VERL_REGISTRY_REPOSITORY, VERL_REGISTRY_DIGEST)
+
+
+def registry_image_for(rl_image: str | None) -> str | None:
+    """The registry image that carries the same pin and recipe as the Modal-built
+    ``rl_image`` (``verl-build:<VERL_COMMIT>`` -> VERL_REGISTRY_IMAGE); None for any
+    other image (the Megatron variant has no registry image)."""
+    return VERL_REGISTRY_IMAGE if rl_image == VERL_IMAGE else None
+
+
+# --- cards (fleet-verl-trainer-islands 5.2) ------------------------------------
+#
+# The FSDP2 images carry no TransformerEngine (only the Megatron variant below
+# does), so the trainer has no sm90-only attention kernel: its attention is
+# torch SDPA / flash-attn, built for sm80+. Card architectures a verl FSDP2
+# trainer island may use; a card below them is refused before anything is ordered.
+VERL_FSDP_CARD_ARCHES = ("sm80", "sm89", "sm90")
+# Cards a verl FSDP2 trainer island has trained on, with the evidence. A card of an
+# allowed architecture that is not here gets an "unverified" warning, not a refusal.
+VERL_FSDP_VERIFIED_CARDS: dict[str, str] = {
+    "H100": "Modal 1xH100, rl-verl-backend acceptance (fork acad9875)",
+}
 
 # On npu1: where the verl checkout lives inside the island's image.
 # The island has to start verl with this directory as the working directory,
