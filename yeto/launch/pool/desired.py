@@ -51,6 +51,7 @@ from typing import Any
 SCHEMA = "yeto.fleet.desired/v1"
 DESIRED_KEY = "fleet/desired.json"
 APPLIED_KEY = "fleet/applied.json"  # what the controller applied (FleetReconciler): generation, pools, removals
+APPLIED_DIR = "fleet/applied"  # its records, fleet/applied/<seq>.json, each created once (the writer fence)
 APPLIED_SCHEMA = "yeto.fleet.applied/v1"
 GENERATIONS_DIR = "fleet/desired"
 KINDS = ("sampler_pool", "trainer")
@@ -216,10 +217,23 @@ class DesiredStore:
         return new
 
     # -- what the controller applied (one writer: the controller of the run)
+    @staticmethod
+    def applied_key(seq: int) -> str:
+        return f"{APPLIED_DIR}/{int(seq):08d}.json"
+
+    def _applied_seqs(self) -> list[int]:
+        base = APPLIED_DIR + "/"
+        return sorted(int(m.group(1)) for key in self.objects.list(base)
+                      if (m := _GEN.fullmatch(key[len(base):])) is not None)
+
     def read_applied(self) -> dict[str, Any] | None:
-        """The generation the controller last applied, with its sampler pools (``members``)
-        and the pools it was still removing (``removing``); None before the first apply."""
-        data = self.objects.read(APPLIED_KEY)
+        """The generation the controller last applied, with its sampler pools (``members``),
+        the pools it was still removing (``removing``), its ``writer`` and the record's
+        ``seq``; None before the first apply."""
+        seqs = self._applied_seqs()
+        if not seqs:
+            return None
+        data = self.objects.read(self.applied_key(seqs[-1]))
         if data is None:
             return None
         doc = json.loads(data)
@@ -229,21 +243,34 @@ class DesiredStore:
 
     def write_applied(self, generation: int, pools: dict[str, dict[str, Any]],
                       removing: dict[str, dict[str, Any]], *, writer: str | None = None,
-                      claim: bool = False) -> None:
-        """One controller writes it at a time: ``writer`` names it. A controller claims it once
-        when it starts (``claim``); from then on a write finds the stored ``writer`` still its
-        own, or raises :class:`AppliedFenced` (another controller started and took over), and
-        a generation older than the stored one is never written back."""
-        if writer is not None:
-            current = self.read_applied()
-            if current is not None and not claim and current.get("writer") not in (None, writer):
-                raise AppliedFenced(f"fleet/applied.json is written by {current.get('writer')} now (not {writer})")
-            if current is not None and int(current.get("generation") or 0) > int(generation):
-                raise AppliedFenced(f"fleet/applied.json is at generation {current.get('generation')}, "
-                                    f"past {generation}")
-        doc = {"schema": APPLIED_SCHEMA, "generation": int(generation), "members": list(pools.values()),
-               "removing": list(removing.values()), "at": self.clock(), "writer": writer}
-        self.objects.write(APPLIED_KEY, json.dumps(doc, indent=1, sort_keys=True, default=str).encode())
+                      claim: bool = False) -> int:
+        """Write the applied state as the next record ``fleet/applied/<seq>.json``, created
+        once (exclusive create, as a desired generation): of two writers that read the same
+        record, one wins and the other gets :class:`AppliedFenced`. A controller claims it
+        once when it starts (``claim``); from then on a write needs the newest record to be
+        its own (``writer``: unique per controller, so a create whose answer was lost and is
+        sent again still finds its own record), and a generation
+        older than the stored one is never written back. Returns the new record's ``seq``;
+        ``fleet/applied.json`` is a copy of the newest record."""
+        current = self.read_applied()
+        seq = int(current.get("seq") or 0) if current is not None else 0
+        if writer is not None and current is not None and not claim:
+            if current.get("writer") not in (None, writer):
+                raise AppliedFenced(f"fleet/applied.json is written by {current.get('writer')} now "
+                                    f"(record {seq}; not {writer})")
+        if current is not None and int(current.get("generation") or 0) > int(generation):
+            raise AppliedFenced(f"fleet/applied.json is at generation {current.get('generation')}, past {generation}")
+        doc = {"schema": APPLIED_SCHEMA, "seq": seq + 1, "generation": int(generation),
+               "members": list(pools.values()), "removing": list(removing.values()), "at": self.clock(),
+               "writer": writer}
+        body = json.dumps(doc, indent=1, sort_keys=True, default=str).encode()
+        if not self.objects.create(self.applied_key(seq + 1), body):
+            raise AppliedFenced(f"another controller wrote fleet/applied record {seq + 1} first")
+        try:
+            self.objects.write(APPLIED_KEY, body)  # the convenience copy of the newest record
+        except Exception:  # noqa: BLE001 - the record is the truth
+            pass
+        return seq + 1
 
     def update(self, change: Callable[[dict[str, Any]], None], *, seed: dict[str, Any] | None = None,
                note: str | None = None, attempts: int = 1) -> dict[str, Any]:

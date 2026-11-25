@@ -30,7 +30,7 @@ customer path (`examples/k31/`) does not use it.
 | Key | Written by | Content |
 |---|---|---|
 | `fleet/desired.json`, `fleet/desired/<generation>.json` | `yeto fleet apply`, `yeto run scale`, the first `run up` | The fleet's desired state (below). |
-| `fleet/applied.json` | The controller | The generation it applied last, its pools, and the pools it is still removing. |
+| `fleet/applied.json`, `fleet/applied/<seq>.json` | The controller | The generation it applied last, its pools, and the pools it is still removing. Each record is created once: of two controllers that start at once, one claims it and the other stops applying. |
 | `fleet/pools/<pool>/state.json` | The holder of the pool's lock | The pool state: members, orders, shards, budget use, pending handoffs. |
 | `fleet/pools/<pool>/lock/<token>.json`, `.lease` | The controller | The pool's single-writer lock. The token is a fencing token. |
 | `fleet/shards/<shard_base>/<n>.json`, `ended/<shard>.json` | The pool's lock holder | The shard number allocator. Each number is issued once. End records of shards that ended for good. |

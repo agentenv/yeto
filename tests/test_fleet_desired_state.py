@@ -568,3 +568,40 @@ def test_a_controller_taken_over_never_writes_the_applied_state_back(tmp_path):
     assert f.store.read_applied()["writer"] == new.writer and f.store.read_applied()["generation"] == 1
     with pytest.raises(dz.AppliedFenced):
         f.store.write_applied(0, {}, {}, writer=new.writer)  # never an older generation
+
+
+def test_two_controllers_claiming_the_applied_state_at_once_one_wins(tmp_path):
+    """REV follow-up: the writer fence of fleet/applied.json is a conditional write. Two
+    controllers that start at once both read the same applied state before either writes;
+    exactly one claims it, the other is fenced (a read-then-write lets both win)."""
+    import threading  # noqa: PLC0415
+
+    f = Fleet(tmp_path, [_member("nc", 1)])
+    f.ticks()
+    seen = f.store.read_applied()
+    barrier = threading.Barrier(2, timeout=5)
+    real = dz.DesiredStore.read_applied
+
+    def racing_read(store):  # both claimers read before either writes
+        doc = real(store)
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return doc
+
+    claimers = []
+    for _ in range(2):
+        r = FleetReconciler(dz.DesiredStore(f.objects), ReconcileHooks(), poll_s=0, log=lambda _m: None)
+        r.start_from(f.store.read(), applied=seen)
+        r.store.read_applied = racing_read.__get__(r.store)
+        claimers.append(r)
+    threads = [threading.Thread(target=r._persist) for r in claimers]  # noqa: SLF001
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    fenced = [r for r in claimers if r.fenced]
+    winners = [r for r in claimers if not r.fenced]
+    assert len(winners) == 1 and len(fenced) == 1
+    assert real(f.store)["writer"] == winners[0].writer

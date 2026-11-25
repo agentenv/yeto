@@ -84,6 +84,7 @@ class FleetReconciler:
     _resume: list[str] = field(default_factory=list)  # restored removals: target 0 asked again
     _dirty: bool = False  # the applied state changed and is not in the store yet
     _claim: bool = True  # the first write claims fleet/applied.json for this controller
+    _seq: int | None = None  # the applied record this controller wrote last
     writer: str = field(default_factory=lambda: f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}")
     fenced: str | None = None  # another controller took the fleet over: this one applies nothing more
     errors: int = 0
@@ -172,9 +173,9 @@ class FleetReconciler:
         if not self._dirty or self.fenced is not None:
             return
         try:
-            self.store.write_applied(self.applied, self.applied_pools,
-                                     {name: r.member for name, r in self.removing.items() if r.member},
-                                     writer=self.writer, claim=self._claim)
+            self._seq = self.store.write_applied(
+                self.applied, self.applied_pools, {name: r.member for name, r in self.removing.items() if r.member},
+                writer=self.writer, claim=self._claim)
             self._dirty, self._claim = False, False
         except dz.AppliedFenced as error:
             self.fenced = str(error)
