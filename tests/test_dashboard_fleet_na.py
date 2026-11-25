@@ -6,6 +6,7 @@ event stream in time order; a wide table marks that it scrolls."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -92,13 +93,56 @@ def test_fleet_kpis_name_every_island_backlog_and_kept_zero_variance(tmp_path):
     # the rejected counts: stale / zero-var (kept by the pool: 0 dropped) / truncated / infra
     assert "zero-var: 10 of" in kp and "kept by the pools" in kp
     assert "qa-s-i0-0" in kp.split("kept by the pools", 1)[1]  # the pool without a zero-variance count is named
+    assert "—: not on the tapes" in kp  # step times are not on the fixture's tapes: a dash, and why
 
 
-def test_fleet_cost_has_no_mfu_card_and_paces_the_finish_by_the_syncer(tmp_path):
+def test_fleet_kpis_show_kept_zero_variance_beside_a_pool_that_drops(tmp_path):
+    r = _fleet()
+    for i in range(3):
+        r.feed({"event": "rl_sampler_engine_round", "sampler_id": "qa-a-i1-0", "rollout_id": i, "samples": 8,
+                "zero_variance_seen": 2, "zero_variance_groups": 2, "finish": {"length": 0},
+                "time_unix": T0 + 72 + 60 * i})
+    kp = _page(tmp_path, r)["rKpis"]
+    assert "n/a" not in kp and " / 6 / " in kp  # 6 dropped by the island 1 pool
+    assert "zero-var kept (not dropped) by sampler qa-v-i0-0: 10 of" in kp
+
+
+def test_fleet_backlog_wording_without_a_read(tmp_path):
+    """No trainer read yet: the card and the Fleet table say the same thing."""
+    r = Reducer(run="fleet-qa")
+    from test_dashboard_fleet_islands import fleet_records  # noqa: PLC0415
+
+    for rec in fleet_records():
+        if rec.get("event") not in ("rl_policy_released", "rl_sampler_policy_loaded"):
+            r.feed(rec)
+    assert r.load_fleet_plan(plan_doc(), "test")
+    out = _page(tmp_path, r)
+    assert ">not read yet<" in out["rKpis"] and "written, not read yet" in out["rKpis"]
+    tbl = _page(tmp_path, r, pick="fleet")["fleetTbl"]
+    assert "written, not read yet</span>" in tbl and "n/a" not in tbl
+
+
+def test_fleet_cost_names_why_mfu_is_missing_and_paces_the_finish_by_the_syncer(tmp_path):
     out = _page(tmp_path, _fleet(total=12))
     ck = out["rCostK"]
-    assert "n/a" not in ck and ">MFU<" not in ck
+    assert "n/a" not in ck
+    assert ">MFU<" in ck and "not on the tapes (no FLOP counts)" in ck
     assert ">Projected finish<" in ck and "syncer step 10 of 12 at its mean merge pace" in ck
+
+
+def test_a_resumed_syncer_paces_from_the_step_it_resumed_at(tmp_path):
+    """syncer_config of a resume: global_step 6; the pace counts the 4 steps since, not all 10."""
+    r = fleet_reducer()
+    r.feed({**_syncer_config(12), "resumed": True, "global_step": 6, "time_unix": T0 + 400})
+    lm = r.page_view(now=r.max_ts)["topology"]["diloco"]["last_merge_ts_any"]
+    ck = _page(tmp_path, r)["rCostK"]
+    assert "since its resume at step 6" in ck
+    pace = (lm - (T0 + 400)) / 4
+    assert f"mean merge pace {pace:.1f} s since its resume" in ck  # not (lm - t0) / 10
+    r2 = fleet_reducer()
+    r2.feed({**_syncer_config(12), "resumed": True, "time_unix": T0 + 400})  # no global_step: no pace
+    ck2 = _page(tmp_path, r2)["rCostK"]
+    assert "resumed at a step not on its tape" in ck2 and "n/a" not in ck2
 
 
 def test_fleet_finished_by_the_syncer_total(tmp_path):
@@ -124,6 +168,26 @@ def test_single_trainer_cost_cards_are_unchanged(tmp_path):
                 "time_unix": T0 + 30 + 60 * i})
     ck = _page(tmp_path, r)["rCostK"]
     assert ">MFU<" in ck and "the RL tapes carry no FLOP counts" in ck and "the tapes carry no total round count" in ck
+
+
+def test_single_trainer_kpis_and_sampler_table_keep_their_rendering(tmp_path):
+    """No fleet: the KPI cards and the Samplers table keep "n/a" where a count is missing; none of the
+    fleet wording (island backlogs, kept zero-variance groups, dashes) leaks in."""
+    r = Reducer(run="one")
+    for i in range(3):
+        r.feed({"event": "rl_round_trained", "learner_id": "0", "rollout_id": i, "time_unix": T0 + 60 * i,
+                "trained_groups": 8, "reward_mean": 0.5})
+        for sid in ("s0", "s1"):
+            r.feed({"event": "rl_sampler_round", "sampler_id": sid, "rollout_id": i, "groups": 8,
+                    "policy_version": i, "time_unix": T0 + 30 + 60 * i})
+        r.feed({"event": "rl_sampler_engine_round", "sampler_id": "s0", "rollout_id": i, "samples": 8,
+                "zero_variance_seen": 1, "finish": {"length": 2}, "reward_mean": 0.5, "time_unix": T0 + 31 + 60 * i})
+    out = _page(tmp_path, r)
+    kp, sp = out["rKpis"], out["aSamplers"]
+    assert '>n/a / n/a / 6 / n/a<' in kp and "kept by the pools" not in kp and "—: not on the tapes" not in kp
+    assert ">Buffer backlog<" in kp and "written 48 · read n/a" in kp and "island 0:" not in kp
+    assert ">3 / n/a<" in sp and "the pool keeps zero-variance groups" not in sp and "—" not in sp
+    assert "zero-variance then comes from the trainer" in sp
 
 
 def test_island_samplers_table_dashes_counts_a_sampler_does_not_report(tmp_path):
@@ -171,6 +235,22 @@ def test_fleet_table_without_any_cadence_says_shared(tmp_path):
     assert "n/a" not in tbl and ">shared</span>" in tbl
 
 
+def test_fleet_table_without_a_plan_does_not_claim_the_shared_value(tmp_path):
+    r = fleet_reducer(plan=False)
+    view = r.page_view(now=r.max_ts)
+    assert view["async"]["islands"] and all(x["release_every"] is None for x in view["async"]["islands"])
+    tbl = _page(tmp_path, r, pick="fleet")["fleetTbl"]
+    assert "n/a" not in tbl and "shared" not in tbl and "no fleet plan and no tape names it" in tbl
+
+
+def test_release_cadence_takes_the_newest_record_whatever_the_read_order():
+    r = fleet_reducer()
+    for t, every in ((LAST + 50, 4), (LAST + 10, 3)):  # the newer record is read first
+        r.feed({"event": "rl_policy_release_skipped", "island_id": 1, "time_unix": t, "policy_version": 6,
+                "reason": "upload_in_flight", "release_every": every})
+    assert r.async_.trainer["1"]["release_every"] == 4
+
+
 def test_fleet_cost_rows_without_a_price_say_unpriced(tmp_path):
     out = _page(tmp_path, _fleet())  # the fixture plan has no syncer price
     cost = out["costBox"]
@@ -178,16 +258,35 @@ def test_fleet_cost_rows_without_a_price_say_unpriced(tmp_path):
     assert "unpriced" in syncer and "n/a" not in syncer
 
 
+def _stream(tmp_path: Path, times: list) -> list[int]:
+    """The event stream of a single-trainer run whose events arrive with ``times`` (None: no time),
+    as the arrival indexes in display order."""
+    r = Reducer(run="one")
+    for i, t in enumerate(times):
+        rec = {"event": "rl_learner_finalized", "learner_id": "0", "rollout_id": i}
+        if t is not None:
+            rec["time_unix"] = T0 + t
+        r.feed(rec)
+    return [int(x) for x in re.findall(r"rollout_id=(\d+)", _page(tmp_path, r)["evs"])]
+
+
 def test_event_stream_is_newest_first_by_event_time(tmp_path):
     """Tapes are read one after another: the arrival order is not time order."""
-    r = fleet_reducer()
-    for i, t in enumerate((LAST + 300, LAST + 100, LAST + 200)):  # read out of order
-        r.feed({"event": "rl_learner_finalized", "island_id": i % 2, "time_unix": t})
-    evs = _page(tmp_path, r)["evs"]
-    import re  # noqa: PLC0415
+    assert _stream(tmp_path, [300, 100, 200]) == [0, 2, 1]
 
-    times = re.findall(r'<span class="t">([0-9:]+)</span>', evs)
-    assert times == sorted(times, reverse=True) and len(times) >= 3
+
+def test_event_stream_order_is_total_with_events_without_a_time(tmp_path):
+    """An event without a time sorts at the time of the last timed event before it (its arrival position):
+    a total order, so timed events stay in time order around it whatever their arrival order (a comparator
+    that skipped untimed pairs put old events first)."""
+    times = [None, 300, None, 100, 200, None] + [400 + i for i in range(40)] + [None] + [10 + i for i in range(40)]
+    got = _stream(tmp_path, times)
+    timed = [times[i] for i in got if times[i] is not None]
+    assert timed == sorted(timed, reverse=True) and timed[0] == 439 and len(got) == 15
+    shuffled = [200, None, 100, 300]
+    order = _stream(tmp_path, shuffled)
+    assert [shuffled[i] for i in order if shuffled[i] is not None] == [300, 200, 100]
+    assert order.index(1) == order.index(0) - 1  # the untimed event sits just above the event before it
 
 
 HINT = r"""

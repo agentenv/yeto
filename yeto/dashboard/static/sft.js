@@ -471,19 +471,27 @@ function loadParts(l){var p=[["resolve",l.resolve_s],["drain",l.drain_s],["load"
    there), and pools that keep zero-variance groups report them as seen, not dropped */
 function fleetKpis(A,S,sps,kp,ssum,zvTot,caps){
   var I=A.islands,last=function(x){var p=((x.backlog||{}).points||[]);return p.length?p[p.length-1]:null};
-  var ib=I.map(function(x){var p=last(x);return {x:x,b:x.backlog,v:p&&fin(p[3])?p[3]:null}}),have=ib.filter(function(o){return fin(o.v)});
-  var bl=["Buffer backlog",have.length?k(sum(have.map(function(o){return o.v})),0):ib.some(function(o){return o.b})?"no read yet":"empty",
-    have.length||ib.some(function(o){return o.b})?ib.map(function(o){return "island "+o.x.island+": "+(fin(o.v)?k(o.v,0):o.b?"written "+k(o.b.written,0)+", not read yet":"no rounds")}).join(" · ")+
+  var ib=I.map(function(x){var p=last(x);return {x:x,b:x.backlog,v:p&&fin(p[3])?p[3]:null}}),have=ib.filter(function(o){return fin(o.v)}),any=ib.some(function(o){return o.b});
+  var one=function(o){return fin(o.v)?k(o.v,0):o.b?(fin(o.b.written)?k(o.b.written,0)+" written, ":"")+"not read yet":"no rounds"};
+  var bl=["Buffer backlog",have.length?k(sum(have.map(function(o){return o.v})),0):any?"not read yet":"no rounds",
+    any?ib.map(function(o){return "island "+o.x.island+": "+one(o)}).join(" · ")+
       " · written "+k(sum(ib.map(function(o){return (o.b||{}).written})),0)+" · read "+k(sum(ib.map(function(o){return (o.b||{}).read})),0)+(caps.length?" · cap "+caps.join("+"):""):"no island has a sampler round yet"];
-  var seen=sps.filter(function(c){return fin((S[c.id]||{}).zero_variance_seen)}),kept=!fin(ssum("zero_variance_dropped"))&&!fin(zvTot)&&seen.length>0;
+  // zero-variance: a pool with drop_zero_variance_groups off reports the groups as seen and writes no dropped count
+  var keeps=sps.filter(function(c){var x=S[c.id]||{};return fin(x.zero_variance_seen)&&!fin(x.zero_variance_dropped)});
+  var kept=!fin(ssum("zero_variance_dropped"))&&!fin(zvTot)&&keeps.length>0;
   var quiet=sps.filter(function(c){return !fin((S[c.id]||{}).zero_variance_seen)&&!fin((S[c.id]||{}).zero_variance_dropped)});
+  var kz=function(){return k(sum(keeps.map(function(x){return S[x.id].zero_variance_seen})),0)+" of "+k(sum(keeps.map(function(x){return S[x.id].groups})),0)};
+  var NA=/\bn\/a\b/g,dash=function(v){return String(v).replace(NA,"—")},why=" · —: not on the tapes";
   return kp.map(function(c){
     if(c[0]==="Buffer backlog")return bl;
-    if(c[0].indexOf("Rejected")!==0)return [c[0],c[1]==="n/a"?"—":c[1],String(c[2]).replace(/\bn\/a\b/g,"—")]; // a count the tapes lack
-    var v=c[1].split(" / ");if(kept)v[1]="0";var miss=v.indexOf("n/a")>=0;
-    return [c[0],v.map(function(x){return x==="n/a"?"—":x}).join(" / "),c[2]+(kept?" · zero-var: "+k(sum(seen.map(function(x){return S[x.id].zero_variance_seen})),0)+" of "+k(sum(seen.map(function(x){return S[x.id].groups})),0)+
-      " groups all-equal, kept by the pools (drop_zero_variance_groups off)"+(quiet.length?" · "+quiet.map(function(x){return x.label}).join(", ")+": no zero-variance count":""):"")+
-      (miss?" · —: not on the tapes":"")]});
+    var rej=c[0].indexOf("Rejected")===0,v=String(c[1]),sub=String(c[2]);
+    if(rej){var p=v.split(" / ");if(kept)p[1]="0";v=p.join(" / ");
+      if(kept)sub+=" · zero-var: "+kz()+" groups all-equal, kept by the pools (drop_zero_variance_groups off)";
+      else if(fin(ssum("zero_variance_dropped"))&&keeps.length)sub+=" · zero-var kept (not dropped) by "+keeps.map(function(x){return x.label}).join(", ")+": "+kz()+" groups";
+      if(quiet.length)sub+=" · "+quiet.map(function(x){return x.label}).join(", ")+": no zero-variance count"}
+    var miss=/\bn\/a\b/.test(v+" "+sub);
+    // a count the tapes lack is a dash, and the card says so
+    return [c[0],dash(v),dash(sub)+(miss&&sub.indexOf(why)<0?why:"")]});
 }
 function rlm(V){
   var O=V.overview||{},A=V.async||{},S=A.samplers||{},TR=A.trainers||{},X=V.islands||{},cs=rlCards(V);
@@ -648,17 +656,26 @@ function rlm(V){
 }
 /* a fleet of async islands: the syncer's total steps (syncer_config.total_steps on its tape) give the finish;
    the tapes carry no FLOP or parameter counts, so there is no MFU card rather than an "n/a" one */
+/* a fleet of async islands: the syncer's total steps (syncer_config.total_steps on its tape) give the finish,
+   paced from the step the syncer (re)started at (syncer_config.global_step: a resumed syncer starts past 0) */
 function fleetCost(V,ck){
   var d=(V.topology||{}).diloco||null,cf=d&&d.config||{},T=cf.T,steps=d?(d.shards||[]).map(function(s){return s.step}).filter(fin):[],st=steps.length?Math.min.apply(null,steps):null;
-  var lm=d&&fin(d.last_merge_ts_any)?d.last_merge_ts_any:null,t0=fin(cf.ts)?cf.ts:null,fin2=function(){
+  var s0=fin(cf.step0)?cf.step0:cf.resumed?null:0,lm=d&&fin(d.last_merge_ts_any)?d.last_merge_ts_any:null,t0=fin(cf.ts)?cf.ts:null;
+  var fin2=function(){
     if(!fin(T))return ["Projected finish","—","the syncer tape has no total step count yet (syncer_config)",""];
-    if(d.done||(fin(st)&&st>=T))return ["Finished",lm?day(lm):"step "+T,"syncer reached step "+(fin(st)?st:T)+" of "+T+" (final cut)"+(lm&&t0?" · "+dur(lm-t0)+" after its config":""),""];
-    if(!fin(st)||st<=0||!lm||!t0||lm<=t0)return ["Projected finish","—","syncer step "+(fin(st)?st:0)+" of "+T+"; needs a merge to pace the rest",""];
-    var eta=lm+(T-st)*(lm-t0)/st;
-    return ["Projected finish",day(eta),"syncer step "+st+" of "+T+" at its mean merge pace "+dur((lm-t0)/st)+" · in "+dur(Math.max(0,eta-NOW)),""]};
-  // any other count the tapes lack is a dash, not "n/a"
-  return ck.filter(function(x){return x[0]!=="MFU"}).map(function(x){return x[0]==="Projected finish"?fin2():
-    [x[0],x[1]==="n/a"?"—":x[1],String(x[2]).replace(/ · completed rounds only n\/a/,"").replace(/\bn\/a\b/g,"—"),x[3]]})}
+    if(d.done||(fin(st)&&st>=T))return ["Finished",lm?day(lm):"step "+T,"syncer reached step "+(fin(st)?st:T)+" of "+T+" (final cut)"+(lm&&t0?" · "+dur(lm-t0)+" after its "+(cf.resumed?"resume":"config"):""),""];
+    if(!fin(s0))return ["Projected finish","—","syncer step "+(fin(st)?st:0)+" of "+T+"; resumed at a step not on its tape, so no pace",""];
+    var n=fin(st)?st-s0:0;
+    if(n<=0||!lm||!t0||lm<=t0)return ["Projected finish","—","syncer step "+(fin(st)?st:0)+" of "+T+"; needs a merge"+(cf.resumed?" after its resume":"")+" to pace the rest",""];
+    var pace=(lm-t0)/n,eta=lm+(T-st)*pace;
+    return ["Projected finish",day(eta),"syncer step "+st+" of "+T+" at its mean merge pace "+dur(pace)+(cf.resumed?" since its resume at step "+s0:"")+" · in "+dur(Math.max(0,eta-NOW)),""]};
+  var NA=/\bn\/a\b/g;
+  return ck.map(function(x){
+    if(x[0]==="Projected finish")return fin2();
+    if(x[0]==="MFU")return ["MFU","—","not on the tapes (no FLOP counts)",""];
+    var sub=String(x[2]).replace(/ · completed rounds only n\/a/,""),miss=/\bn\/a\b/.test(String(x[1])+" "+sub);
+    // any other count the tapes lack is a dash, and the card says so
+    return [x[0],String(x[1]).replace(NA,"—"),sub.replace(NA,"—")+(miss?" · —: not on the tapes":""),x[3]]})}
 function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
   $("rCostH").textContent="Cost / efficiency over the last "+rangeLabel();
   var X=V.islands||{};

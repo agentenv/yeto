@@ -537,8 +537,9 @@ class AsyncState:
                                          "groups": r.get("unidentified_policy_groups_total")}
             return
         if ev == "rl_policy_release_skipped":
-            if _int(r.get("release_every")) is not None:  # the trainer's own --rl-release-every
-                t["release_every"] = _int(r["release_every"])
+            # the trainer's own --rl-release-every; the newest record wins, whatever order the tapes are read in
+            if _int(r.get("release_every")) is not None and (ts or 0.0) >= t.get("release_every_ts", float("-inf")):
+                t["release_every"], t["release_every_ts"] = _int(r["release_every"]), ts or 0.0
             # a release skipped because the previous one is still uploading (--rl-release-skip-busy)
             if r.get("reason") == "upload_in_flight" and ts is not None:
                 t.setdefault("upload_skips", []).append({"ts": ts, "policy_version": r.get("policy_version")})

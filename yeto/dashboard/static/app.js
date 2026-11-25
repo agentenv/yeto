@@ -449,12 +449,13 @@ function evLevel(t,rec){if(t==="operator_stop")return ["mu","stop"];
 function evText(e){var r=e.record||{},keys=["phase","rollout_id","policy_version","result","cause","recommendation","marker","reason_name","backlog_groups","buffer_selected","ticket","shard","why","detail"];
   return keys.filter(function(k){return r[k]!=null}).map(function(k){return k+"="+String(r[k]).slice(0,80)}).join(" ")}
 /* newest first by event time; the tapes are read one after another, so arrival (seq) order is not time order.
-   Ties and events without a time keep the arrival order (newest arrival first) */
-function evOrder(evs){return evs.map(function(e,i){return [e,i]}).sort(function(a,b){var ta=a[0].ts,tb=b[0].ts;
-  if(fin(ta)&&fin(tb)&&ta!==tb)return tb-ta;return b[1]-a[1]}).map(function(x){return x[0]})}
+   One total-order key per event: its time (an event without one takes the time of the last timed event that
+   arrived before it, -inf before any) and its arrival index; ties keep the arrival order, newest arrival first */
+function evOrder(evs){var t=-Infinity;return evs.map(function(e,i){if(fin(e.ts))t=e.ts;return [e,fin(e.ts)?e.ts:t,i]})
+  .sort(function(a,b){return a[1]!==b[1]?(b[1]>a[1]?1:-1):b[2]-a[2]}).map(function(x){return x[0]})}
 function events(){
   var ec=YetoTbl.cap("event-stream",evOrder(EVENTS.filter(function(e){return keepEv(e.type)})),{def:15,unit:"events"}),list=ec.rows;
-  $("evs").innerHTML=ec.bar+list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" "+esc(cardOf(e.island)?lbl(e.island):"island "+e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
+  $("evs").innerHTML=ec.bar+list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+(fleetOn()&&!fin(e.ts)?'<span title="no time on the record">—</span>':clock(e.ts))+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" "+esc(cardOf(e.island)?lbl(e.island):"island "+e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
 }
 function cmds(){
   var run=O.run||"<run>",cm=O.commands||{};
@@ -607,7 +608,7 @@ function spTable(ctx){
         (i===0&&fl?'<td class="l"'+rs+'>'+esc(p.name)+(p.source_name&&p.source_name!==p.name&&String(p.name).slice(-String(p.source_name).length-1)!=="-"+p.source_name?' <span class="note">'+esc(p.source_name)+'</span>':"")+srcTag(p.source)+'</td>':"")+
         (i===0?'<td class="l"'+rs+platTitle(p,id)+'>'+esc(p?poolEngine(p):samplerEngine(id))+'</td>':"")+
         '<td class="l" title="'+esc(fin(c.last_event_age_s)?"last event "+f(c.last_event_age_s,0)+" s ago":"")+'">'+(c.status?stBadge(c.status,c):'<span class="note">not on the tapes</span>')+'</td>'+
-        cols.map(function(cl){var v=cl[2](x);return '<td class="num">'+(fl&&v==="n/a"?'<span class="note" title="not on this sampler\'s tape">—</span>':v)+'</td>'}).join("")+
+        cols.map(function(cl){var v=cl[2](x);return '<td class="num">'+(fl&&/\bn\/a\b/.test(v)?v.replace(/\bn\/a\b/g,'<span class="note" title="not on this sampler\'s tape">—</span>'):v)+'</td>'}).join("")+
         (mm&&i===0?'<td class="num"'+rs+'>'+mmCell(mmv.logprob_diff)+'</td><td class="num"'+rs+'>'+mmCell(mmv.tis_clip)+'</td>':"")+'</tr>'}).join("")}).join("");
   var notes=[];
   if(gone.length)notes.push("hidden: "+gone.map(function(c){return c[0]}).join(", ")+" (no sampler of this island reports it)");
@@ -768,15 +769,16 @@ function aRelChart(ctx,tags){
 }
 /* "Fleet": one row per island of the fleet (the summary each island block opens with); a setting the island
    does not override and no tape names is the fleet's shared trainer flag */
-var FLEET_SHARED='<span class="note" title="not set for this island: the shared trainer argv value">shared</span>';
+function fleetUnset(){return ((((V.topology||{}).diloco||{}).fleet)||{}).source==="plan"?'<span class="note" title="the fleet plan sets no per-island value: the shared trainer argv value">shared</span>':
+  '<span class="note" title="no fleet plan and no tape names it">—</span>'}
 function fleetBox(){
   var on=fleetView();$("fleetBox").hidden=!on;if(!on)return;
   var I=V.async.islands||[];
   $("fleetTbl").innerHTML=YetoTbl.table('<tr><th class="l">island</th><th class="l">trainer</th><th class="l">pools</th><th>latest release</th><th>backlog</th><th>trained groups</th><th>stale dropped</th><th title="policy age of the trained groups, last round">policy age (last round)</th><th>release every</th><th>max policy age</th></tr>',
     I.map(function(x){var b=x.backlog||{},pts=b.points||[],last=pts.length?pts[pts.length-1]:null,pa=x.policy_age||{},t=x.trainer!=null?String(x.trainer):null,tc=t!=null?cardOf(t):null;
       return '<tr><td class="l"><b>Island '+esc(x.island)+'</b>'+(x.name?' <span class="note">'+esc(x.name)+'</span>':"")+'</td><td class="l">'+(tc?nameCell(t)+" "+stBadge(tc.status,tc):'<span class="note">not on the tapes yet</span>')+'</td><td class="l">'+
-        x.pools.map(function(p){return esc(p.name)+' <span class="note">'+p.samplers.length+'</span>'}).join(", ")+'</td><td class="num">'+(fin(x.latest)?"v"+x.latest:"none")+'</td><td class="num">'+(last&&fin(last[3])?f(last[3],0):pts.length?'<span class="note" title="its trainer has not read the lane yet">'+f(b.written,0)+' written</span>':'<span class="note">none</span>')+'</td><td class="num">'+f(x.trained_groups,0)+
-        '</td><td class="num">'+f(pa.stale_groups,0)+'</td><td class="num">'+(fin(pa.mean_last)?"mean "+f(pa.mean_last,2)+" · max "+f(pa.max_last,0):'<span class="note">no trained round</span>')+'</td><td class="num">'+(fin(x.release_every)?x.release_every:FLEET_SHARED)+'</td><td class="num">'+(fin(x.max_policy_age)?x.max_policy_age:FLEET_SHARED)+'</td></tr>'}).join(""));
+        x.pools.map(function(p){return esc(p.name)+' <span class="note">'+p.samplers.length+'</span>'}).join(", ")+'</td><td class="num">'+(fin(x.latest)?"v"+x.latest:"none")+'</td><td class="num">'+(last&&fin(last[3])?f(last[3],0):pts.length?'<span class="note" title="its trainer has not read the lane yet">'+(fin(b.written)?f(b.written,0)+' written, ':'')+'not read yet</span>':'<span class="note">no rounds</span>')+'</td><td class="num">'+f(x.trained_groups,0)+
+        '</td><td class="num">'+f(pa.stale_groups,0)+'</td><td class="num">'+(fin(pa.mean_last)?"mean "+f(pa.mean_last,2)+" · max "+f(pa.max_last,0):'<span class="note">no trained round</span>')+'</td><td class="num">'+(fin(x.release_every)?x.release_every:fleetUnset())+'</td><td class="num">'+(fin(x.max_policy_age)?x.max_policy_age:fleetUnset())+'</td></tr>'}).join(""));
 }
 /* the run-wide ledgers: two to a row, one alone takes the row */
 function runWide(){

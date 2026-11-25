@@ -334,7 +334,9 @@ def config_summary(configs: dict[int, dict]) -> dict | None:
             "learners": _int(c.get("learners")), "T": _int(c.get("total_steps")), "last_step": _int(c.get("last_step")),
             "lr": _f(c.get("outer_lr")), "momentum": _f(c.get("outer_momentum")),
             "H": _f(c.get("sync_interval_steps")) or None, "quorum_timeout_s": _f(c.get("quorum_timeout_s")),
-            "shards": _int(c.get("shard_count")), "resumed": bool(c.get("resumed")), "ts": c.get("_ts")}
+            "shards": _int(c.get("shard_count")), "resumed": bool(c.get("resumed")),
+            # the step the syncer (re)started at: past 0 after a resume (paces the finish)
+            "step0": _int(c.get("global_step")), "ts": c.get("_ts")}
 
 
 def stuck_fragments(sy: dict, *, running: bool, behind: bool, any_merge: bool, now: float) -> list[int]:
