@@ -512,7 +512,8 @@ class FleetController:
                 handle=lifecycle.handle_of(ref.source, rec["name"], rec["job_id"]),
                 incarnation=int(rec.get("incarnation") or 0), relaunches=int(rec.get("relaunches") or 0),
                 exit=None if rec.get("exit") is None else str(rec["exit"])[:500],
-                decision=None if decision is None else decision.to_json(), **fields)
+                decision=None if decision is None else decision.to_json(),
+                fixed_roster=bool(self.fixed_roster), **fields)
         except Exception as e:  # noqa: BLE001 - the record is a view; supervision goes on
             print(f"[launcher] island record of {rec.get('name')}: {e}", file=sys.stderr)
 
@@ -544,10 +545,19 @@ class FleetController:
             self._record(rec, reason=None if reason is None else str(reason)[:300])
 
     def _island_start(self, rec) -> bool:
-        """Island ``rec``'s START request (``yeto island start``) for an island this controller
-        stopped on its island STOP: it is ordered again (the next incarnation; recovery
-        drives the order). A request is acted on once (by its time). True when restarted."""
-        if self.recorder is None or rec["state"] != DONE or not rec.get("stopped"):
+        """Island ``rec``'s START request (``yeto island start``). Its record decides, not this
+        controller's memory (a restarted or adopting launcher acts on it too): an island the
+        record shows ``done`` on its island STOP (decision ``stopped``) is ordered again (the
+        next incarnation; recovery drives the order, checked against the records' lock). A
+        START is consumed: the record keeps it (``start``, by its time: never acted on twice)
+        and the request is deleted. A START of an island that runs, or that ended otherwise
+        (finished, given up), orders nothing and is consumed too. A controller that lost the
+        island records' lock acts on no request (:class:`IslandRecordsFenced`). True when
+        the island is ordered again."""
+        if self.recorder is None:
+            return False
+        ref = self.recorder.ref(rec["name"])
+        if ref is None or ref.role == "sampler":
             return False
         try:
             request = self.recorder.start_requested(rec["name"])
@@ -555,18 +565,36 @@ class FleetController:
                 return False  # no START, or a STOP still stands (yeto island start clears it first)
         except Exception:  # noqa: BLE001 - asked again next poll
             return False
-        if request.get("at") is not None and request.get("at") == rec.get("start_request_at"):
+        self._raise_if_fenced()
+        record = self.recorder.store.cached(ref.island) or {}
+        if request.get("at") is not None and request.get("at") == (record.get("start") or {}).get("at"):
+            self.recorder.store.clear_start(ref.island)  # acted on already (its delete did not land)
             return False
         why = str(request.get("reason") or "START")
-        rec["start_request_at"] = request.get("at")
+        by = request.get("by")
+        stopped = (rec["state"] == DONE and record.get("state") == lifecycle.DONE
+                   and (record.get("decision") or {}).get("cause") == lifecycle.STOPPED)
+        if not stopped:
+            print(f"[launcher] {rec['name']}: island START ({why}) ignored: the island is "
+                  f"{record.get('state') or rec['state']}, not stopped on its island STOP", file=sys.stderr)
+            self._record(rec, start=dict(request, outcome="ignored"))
+            self.recorder.store.clear_start(ref.island)
+            return False
+        try:  # the lock checked now, not only the cached view (lost raises IslandRecordsFenced)
+            self.recorder.store.guard_order(f"island START of {rec['name']}")
+        except lifecycle.IslandRecordsUnconfirmed as error:
+            print(f"[launcher] {rec['name']}: island START deferred: {error}", file=sys.stderr)
+            return False
         rec.pop("stopped", None)
+        rec.pop("stop_request", None)
         rec.update(state=RECOVERING, failed_at=self.ops.now(), attempt=None, failures=0, recovering_s=0.0,
                    exit=None, decision=None, draining=False)
         self.downed_clusters.discard(rec["name"])  # its next incarnation is torn down at the end again
-        print(f"[launcher] {rec['name']}: island START ({why}{', by ' + str(request.get('by')) if request.get('by') else ''}); "
+        print(f"[launcher] {rec['name']}: island START ({why}{', by ' + str(by) if by else ''}); "
               "ordering it again as its next incarnation", file=sys.stderr)
-        self._fleet("island_ready", rec["name"], restarted=True)
-        self._record(rec, lifecycle.ORDERING, reason=f"island START: {why}", start=dict(request))
+        # island_ready comes once the order runs (the recovery's relaunch), not now
+        self._record(rec, lifecycle.ORDERING, reason=f"island START: {why}", start=dict(request, outcome="ordered"))
+        self.recorder.store.clear_start(ref.island)
         return True
 
     def _island_stop(self, rec) -> bool:

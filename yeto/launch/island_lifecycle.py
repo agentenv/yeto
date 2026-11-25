@@ -356,6 +356,12 @@ class IslandStateStore:
             raise IslandRecordsUnreadable(f"island {island}: its record is not an object")
         return record if isinstance(record, dict) else None
 
+    def cached(self, island: int) -> dict[str, Any] | None:
+        """Island ``island``'s record as this store last read or wrote it (no store call)."""
+        with self._lock:
+            record = self._records.get(int(island))
+        return None if record is None else dict(record)
+
     def read_all(self, islands: Iterable[int] | None = None, *, strict: bool = False) -> dict[int, dict[str, Any]]:
         """Every island's record: those of ``islands``, else every one the store lists.
         ``strict``: a record that does not read raises :class:`IslandRecordsUnreadable`

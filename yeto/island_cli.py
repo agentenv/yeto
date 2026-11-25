@@ -16,8 +16,16 @@ The records (``fleet/trainers/<k>/state.json``) and the per-island requests
   ``yeto run up`` stopped for that island stay stopped in that process: restart
   ``yeto run up`` with the island's ``fleet_island_stops`` entry removed from its state.
 
+Only a trainer island of a fleet controller is stopped or started: ``K`` must have a record
+(role ``trainer``, not the trainer scheduler's ``s1`` island, whose scheduler stops and
+starts it itself). On a fixed roster (the record's ``fixed_roster``, or the stored plan's
+roster) one island stopped ends the whole launch (exit 4): ``stop`` refuses that unless
+``--end-fleet``. ``start`` orders only an island stopped on its STOP (or cancels a STOP
+not acted on yet).
+
 ``--dry-run`` prints what would be written and changes nothing. Exit codes: 0 done, 1 the
-store did not take the request, 2 bad input (no store, no such island).
+store did not take the request (or did not read), 2 bad input (no store, no such island,
+an island this command does not drive, a fixed roster without ``--end-fleet``).
 """
 
 from __future__ import annotations
@@ -48,6 +56,9 @@ def add_parser(sub: Any) -> argparse.ArgumentParser:
         _store_args(q)
         q.add_argument("--reason", default=None, help="recorded with the request")
         q.add_argument("--dry-run", action="store_true", help="print what would be written; change nothing")
+        if verb == "stop":
+            q.add_argument("--end-fleet", action="store_true",
+                           help="on a fixed roster: stop island K although the whole launch then ends (exit 4)")
     return p
 
 
@@ -97,7 +108,10 @@ def cmd_status(args: Any, states: lc.IslandStateStore, store: str) -> int:
         decision = r.get("decision") or {}
         handle = r.get("handle") or {}
         machine = handle.get("call_id") or handle.get("job_id") or handle.get("incarnation")
-        line = (f"  island {k}: {r.get('state')} ({_age(r.get('since'))})  {r.get('name')} on {r.get('source')}"
+        state = r.get("state")
+        if r.get("mode") == "s1" and r.get("idle") and state == lc.DONE:
+            state = "idle (s1: its scheduler starts it again when samples wait)"
+        line = (f"  island {k}: {state} ({_age(r.get('since'))})  {r.get('name')} on {r.get('source')}"
                 + (f" [{machine}]" if machine is not None else "")
                 + f"  incarnation {r.get('incarnation', 0)}, relaunches {r.get('relaunches', 0)}")
         if decision.get("cause"):
@@ -110,18 +124,75 @@ def cmd_status(args: Any, states: lc.IslandStateStore, store: str) -> int:
     return 0
 
 
+def _fixed_roster(states: lc.IslandStateStore, record: dict[str, Any]) -> bool | None:
+    """Whether island records of a fixed roster: the record's ``fixed_roster`` (its fleet
+    controller's), else the stored fleet plan's roster (a plan written before
+    ``fleet.fixed_roster`` ran a fixed one); None when neither says."""
+    if isinstance(record.get("fixed_roster"), bool):
+        return record["fixed_roster"]
+    try:
+        raw = states.objects.read("fleet/plan.json")
+        if raw is None:
+            return None
+        from .rl.fleet import FleetPlan  # noqa: PLC0415
+
+        return FleetPlan.from_json(json.loads(raw)).fixed_roster
+    except Exception:  # noqa: BLE001 - unknown
+        return None
+
+
+def _refusal(verb: str, k: int, record: dict[str, Any] | None, store: str, states: lc.IslandStateStore,
+             args: Any) -> str | None:
+    """Why ``yeto island <verb> K`` must not write its request (None: it may)."""
+    if record is None:
+        listed = states.listed()
+        return (f"island {k}: no record in {store} (islands with a record: {listed or 'none'}); only an island "
+                "of a launch with the island lifecycle on is stopped or started here")
+    if record.get("role", "trainer") != "trainer":
+        return f"island {k} ({record.get('name')}) is a {record.get('role')} island: only a trainer island is driven"
+    if record.get("mode") == "s1":
+        return (f"island {k} ({record.get('name')}) is the trainer scheduler's (s1): its scheduler stops and "
+                "starts it itself; stop the run instead")
+    if verb == "stop" and _fixed_roster(states, record) and not getattr(args, "end_fleet", False):
+        return (f"island {k} ({record.get('name')}) is on a fixed roster: one island stopped ends the whole "
+                "launch (exit 4), the other islands too. Stop the run instead (`yeto run down`), or pass "
+                "--end-fleet to stop it anyway")
+    if verb == "start":
+        stopped = (record.get("state") == lc.DONE
+                   and (record.get("decision") or {}).get("cause") == lc.STOPPED)
+        if not stopped and states.stop_requested(k) is None:
+            return (f"island {k} ({record.get('name')}) is {record.get('state')}: start orders only an island "
+                    "stopped on its island STOP (or cancels a STOP not acted on yet)")
+    return None
+
+
 def cmd_request(args: Any, states: lc.IslandStateStore, store: str) -> int:
     k, verb = int(args.island), args.island_command
-    record = states.read(k)
-    if record is None and states.listed() and k not in states.listed():
-        print(f"[yeto] island {k}: no record in {store} (islands with a record: {states.listed()})", file=sys.stderr)
+    if k < 0:
+        print(f"[yeto] island {k}: a learner id is 0 or more", file=sys.stderr)
         return 2
+    try:
+        record = states.read_all([k], strict=True).get(k)
+    except lc.IslandRecordsUnreadable as error:
+        print(f"[yeto] island {k}: {error}; nothing written", file=sys.stderr)
+        return 1
+    refusal = _refusal(verb, k, record, store, states, args)
+    if refusal is not None:
+        print(f"[yeto] {refusal}; nothing written", file=sys.stderr)
+        return 2
+    controller = record.get("controller") or {}
+    owner = (f"island {k} = {record.get('name')} on {record.get('source')}, {record.get('state')}, supervised by "
+             f"{controller.get('host') or '?'} PID {controller.get('pid') or '?'}")
+    print(f"[yeto] {owner}")
+    if verb == "stop" and _fixed_roster(states, record):
+        print("[yeto] WARNING: a fixed roster (--end-fleet): the whole launch ends once this island is stopped",
+              file=sys.stderr)
     reason = args.reason or f"yeto island {verb}"
     key = (lc.stop_key if verb == "stop" else lc.start_key)(k)
     if args.dry_run:
         print(f"[yeto] dry run: would write {store.rstrip('/')}/{key} {{reason: {reason!r}, by: 'yeto island {verb}'}}"
               + (f" and remove {lc.start_key(k)}" if verb == "stop" else f" after removing {lc.stop_key(k)}")
-              + f"; island {k} is {record.get('state') if record else 'not recorded yet'}")
+              + f"; island {k} is {record.get('state')}")
         print("[yeto] " + ("the launch's fleet controller then drains and releases this island only; a `yeto run up` "
                            "of the run stops its sampler pools" if verb == "stop" else
                            "the launch's fleet controller then orders this island again (its next incarnation)"))

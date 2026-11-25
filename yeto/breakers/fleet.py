@@ -368,6 +368,14 @@ class FleetStops:
             self._reasons.setdefault(k, str(reason))
         return hit
 
+    def stop(self, island: int, reason: str) -> bool:
+        """Island ``island`` stopped by an operator (``yeto island stop``), not by a trip: it
+        stops that island only (True when it ran)."""
+        if island not in {i.index for i in self.islands} or island in self._reasons:
+            return False
+        self._reasons[island] = str(reason)
+        return True
+
     def stop_reason(self, island: int) -> str | None:
         """Why island ``island`` stopped (None: it runs)."""
         return self._reasons.get(island)

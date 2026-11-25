@@ -187,27 +187,49 @@ the store credentials).
 | Command | Purpose | Flags |
 |---|---|---|
 | `yeto island status` | every island's state, source and machine (call id, job id or incarnation), incarnation, relaunches, last decision, pending STOP / START | `--json` |
-| `yeto island stop K` | stop island K only; the other islands go on | `--reason TEXT`, `--dry-run` |
+| `yeto island stop K` | stop island K only; the other islands go on (not on a fixed roster, below) | `--reason TEXT`, `--dry-run`, `--end-fleet` |
 | `yeto island start K` | order island K again after its STOP | `--reason TEXT`, `--dry-run` |
 
 The records exist for launches with the island lifecycle on (`--island-lifecycle`: on by
 default for an RL launch of two or more trainer islands, off for a single trainer island
-unless set to `on`).
+unless set to `on`). `stop` and `start` drive only a trainer island of a fleet controller:
+island K must have a record, with role `trainer`; a sampler island and the trainer
+scheduler's (`s1`) island are refused, as are a negative K and an island without a record.
+Each prints the island's name, source, state and the launcher supervising it.
 
 - `stop K` writes island K's STOP and drops a pending START. At its next poll the launch's
-  fleet controller drains island K, releases its machines and records it `done` (decision
-  `stopped`). It is never relaunched, and it is not a launch failure: the launch exits 9
-  only when every island ended on its own STOP. A `yeto run up` of the run then stops
-  island K's sampler pools (`run.trainer_exit` of that island).
+  fleet controller drains island K: its trainer gets up to 60 s to end on its own (it has
+  no command channel), then its machines are released and it is recorded `done` (decision
+  `stopped`). It is never relaunched. The syncer drops it once its lease runs out
+  (`fleet.island_lease_s`, default 150 s): a round that waits for it waits up to that long,
+  and its training since its last release is lost. A `yeto run up` of the run then stops
+  island K's sampler pools (event `fleet_island_operator_stop`, not a breaker trip) and
+  keeps it stopped when restarted. Once every island ended on its own STOP, `yeto run up`
+  stops the run (every island stopped); the launch itself exits 9, which `yeto run up`
+  reports as the launcher's exit (`run.trainer_exit`) when it sees that first.
+- On a fixed roster (`fleet.fixed_roster: true`, a fleet the island pool does not fit, a
+  fleet plan written before that option, or a synced launch without island pool options)
+  one island stopped ends the whole launch (exit 4) and every island with it. `stop K`
+  refuses that (exit 2) unless `--end-fleet`; stop the run instead (`yeto run down`).
 - `start K` removes island K's STOP and writes its START. The fleet controller orders an
-  island it stopped on its STOP again, as its next incarnation (`ordering`, then
-  `running`). The sampler pools that `yeto run up` stopped for the island stay stopped in
-  that `run up` process. To sample for the island again, restart `yeto run up` after
-  removing the island's entry under `fleet_island_stops` in the run up state file.
+  island whose record shows it stopped on its STOP again, as its next incarnation
+  (`ordering`, then `running`); a launcher restarted meanwhile does the same. The START is
+  consumed: deleted, and kept in the island's record (`start`), so it is acted on once. A
+  START of an island that runs (its STOP not acted on yet) cancels the stop and orders
+  nothing. `start` refuses an island that ended otherwise (finished, given up). A new run
+  of the same name drops a STOP or START an earlier run left. The sampler pools that
+  `yeto run up` stopped for the island stay stopped in that `run up` process. To sample
+  for the island again, restart `yeto run up` after removing the island's entry under
+  `fleet_island_stops` in the run up state file.
+- A launcher that lost the island records' lock (another launcher took the run over) acts
+  on no STOP or START: the launcher that holds them does.
 - `--dry-run` prints the object it would write and what follows, and changes nothing.
+- `yeto island status` shows an idle trainer scheduler island as `idle (s1 ...)`: its
+  scheduler stopped it and starts it again when samples wait.
 
-Exit codes: 0 done; 1 the store did not take the request; 2 bad input (no store, a store
-without an object API here, an island with no record).
+Exit codes: 0 done; 1 the store did not take the request, or the island's record did not
+read; 2 bad input (no store, a store without an object API here, no such island, an
+island this command does not drive, a fixed roster without `--end-fleet`).
 
 ### `yeto merge`
 

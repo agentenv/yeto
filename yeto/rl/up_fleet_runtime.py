@@ -116,7 +116,12 @@ class FleetRuntime:
             known = {i.index for i in self.plan.islands}
             for key, row in sorted((self.run.state.get("fleet_island_stops") or {}).items()):
                 name = str((row or {}).get("breaker") or "")
-                if not name or not str(key).isdigit() or int(key) not in known:
+                if not str(key).isdigit() or int(key) not in known:
+                    continue
+                if (row or {}).get("operator"):  # stopped by hand (yeto island stop), not a trip
+                    self._stops.stop(int(key), str(row["operator"]))
+                    continue
+                if not name:
                     continue
                 self._stops.record({"event": "rl_breaker", "state": "trip", "name": name,
                                     "stop_reason": stop_reason_for(name)}, island=int(key))
@@ -205,7 +210,7 @@ class FleetRuntime:
             self._states = IslandStateStore(self.run._objects(), log=_log)  # noqa: SLF001
         return self._states
 
-    def stop_island(self, k: int, name: str, why: str) -> None:
+    def stop_island(self, k: int, name: str, why: str, *, operator: str | None = None) -> None:
         """Island k's trip stopped it (module doc): its island STOP is written (the launch's
         fleet controller releases its trainer) and its pools are stopped. A fixed roster
         (``plan.fixed_roster``) writes no island STOP (its launch would end the whole fleet,
@@ -240,7 +245,8 @@ class FleetRuntime:
             _log(f"CRITICAL: {self.label(k)}: pool-stop rc={rc}: its machines may still bill; release them with "
                  "`yeto run down --config <run.json>`")
         self.run.state.setdefault("fleet_island_stops", {})[str(k)] = {
-            "at": _up()._now(), "breaker": name, "why": why, "pools": names, "rc": rc}
+            "at": _up()._now(), "breaker": None if operator else name, "why": why, "pools": names, "rc": rc,
+            **({"operator": operator} if operator else {})}
         self.run.state["fleet_stops"] = self.stops().to_json()
         self.run.save()
 
@@ -266,6 +272,26 @@ class FleetRuntime:
             return stops.fleet_stop_reason
         first = next((i.index for i in self.plan.islands if stops.stop_reason(i.index) is not None), None)
         return None if first is None else stops.stop_reason(first)
+
+    OPERATOR_STOP_EVENT = "fleet_island_operator_stop"
+
+    def operator_stop(self, k: int, record: dict[str, Any]) -> None:
+        """Island k's trainer was stopped on an island STOP by hand (``yeto island stop``): its
+        own event (no breaker trip), the island is stopped in :meth:`stops` and its pools are
+        stopped (:meth:`stop_island`); the other islands go on."""
+        stop = record.get("stop") or {}
+        reason = str(stop.get("reason") or (record.get("decision") or {}).get("detail") or "STOP")[:200]
+        by = str(stop.get("by") or "an operator")
+        why = f"its trainer was stopped on its island STOP ({reason}, by {by}): its pools follow"[:500]
+        island = self.plan.islands[k]
+        try:
+            self.run._append_event({"event": self.OPERATOR_STOP_EVENT, "island": island.index,  # noqa: SLF001
+                                    "name": island.name, "reason": reason, "by": by, "run": self.run.run,
+                                    "at": _up()._now()})
+        except Exception as error:  # noqa: BLE001 - reporting never changes the stop
+            _log(f"could not write {self.OPERATOR_STOP_EVENT}: {error}")
+        self.stops().stop(k, f"operator:{reason}")
+        self.stop_island(k, "operator", why, operator=f"operator:{reason}")
 
     # -- each island's trainer (run.trainer_exit, run.trainer_silence)
     def silence_limit_s(self, k: int) -> float:
@@ -341,12 +367,9 @@ class FleetRuntime:
             decision = record.get("decision") or {}
             if state == "done" and decision.get("cause") == "stopped" and k not in self._exit_seen:
                 # stopped on an island STOP this run up did not write (``yeto island stop``): its
-                # trainer is released, so its pools follow; the other islands go on
+                # trainer is released, so its pools follow; the other islands go on. Not a trip.
                 self._exit_seen.add(k)
-                stop = record.get("stop") or {}
-                why = (f"its trainer was stopped on its island STOP ({stop.get('reason') or decision.get('detail')}, "
-                       f"by {stop.get('by') or 'an operator'}): its pools follow")[:500]
-                self.trip_island(k, "run.trainer_exit", value=None, limit=None, why=why)
+                self.operator_stop(k, record)
                 continue
             if state != "running" or not record.get("tape"):
                 self._tape_seen.pop(k, None)
