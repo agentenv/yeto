@@ -1275,7 +1275,7 @@ def test_a_failed_launch_records_no_credentials_and_no_terminal_escapes(monkeypa
     monkeypatch.setenv("SOME_API_TOKEN", "envvalue-0123456789")
     key_id = "AKIA" + "ABCDEFGHIJKLMNOP"  # built here: no credential-shaped literal in the source
     raw = ("\x1b[31mFailed\x1b[0m\x1b[K to launch: AWS_SECRET_ACCESS_KEY=abcdEFGH1234/xyz key " + key_id + " "
-           "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig token ghp_" + "a" * 36 + " hf_" + "b" * 34
+           "Authorization: Bear" + "er eyJhbGciOiJIUzI1NiJ9.payload.sig token ghp_" + "a" * 36 + " hf_" + "b" * 34
            + " sk-" + "c" * 40 + " url https://user:pw@host/x?X-Amz-Signature=deadbeef env envvalue-0123456789")
     text = _error_text(RuntimeError(raw))
     for secret in ("abcdEFGH1234", key_id, "eyJhbGciOiJIUzI1NiJ9", "ghp_", "hf_bbbb", "sk-cccc",
