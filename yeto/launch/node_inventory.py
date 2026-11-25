@@ -734,9 +734,9 @@ class NodeProfile(Node):
         (:func:`yeto.node.transport.reach_options`); otherwise :meth:`Node.ssh_options`
         (``ProxyJump``: a ``jump`` reach sets ``proxy_jump``)."""
         if self.reach is not None and self.reach.mode == "relay":
-            from yeto.node.transport import reach_options  # noqa: PLC0415 - yeto.node imports this module
+            from yeto.node.transport import node_ssh_options  # noqa: PLC0415 - yeto.node imports this module
 
-            return reach_options(self.reach)
+            return node_ssh_options(self)
         return super().ssh_options()
 
     def summary(self) -> dict[str, Any]:

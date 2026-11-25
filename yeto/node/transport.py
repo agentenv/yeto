@@ -257,8 +257,9 @@ def relay_proxy_command(via: str) -> str:
     ``nc:<account>`` or ``nc:<account>:<relay port>``: the National Compute workspace
     relay of that account (:func:`yeto.launch.nc.node_pool.proxy_command`, the very
     line of a lease's ssh alias). A ``ws(s)://`` / ``http(s)://`` URL: a ``relay.mjs``
-    the site runs (:mod:`yeto.node.relay_proxy`; the relay's allow file lists the
-    nodes it may dial)."""
+    the site runs behind an authenticating gateway (:mod:`yeto.node.relay_proxy`: its
+    bearer token from the environment, never the argv; plaintext and credentials in
+    the URL refused; checked here so a dry-run reports it before any ssh)."""
     import sys  # noqa: PLC0415
 
     text = str(via or "").strip()
@@ -272,9 +273,20 @@ def relay_proxy_command(via: str) -> str:
         return proxy_command(int(parts[0]), int(parts[1]) if len(parts) == 2 else RELAY_PORT)
     if text.startswith(RELAY_URL_SCHEMES) and len(text) > text.index("//") + 2 \
             and not set(text) & _RELAY_URL_FORBIDDEN:
+        from yeto.launch.nc.tunnel import TunnelError  # noqa: PLC0415
+        from yeto.node import relay_proxy  # noqa: PLC0415
+
+        why = relay_proxy.url_problem(text)
+        if why:
+            raise ReachError(why)
+        try:
+            relay_proxy.token()  # present and readable (its value never enters the ProxyCommand)
+        except TunnelError as error:
+            raise ReachError(str(error)) from None
         root = str(Path(__file__).resolve().parents[2])  # the tree holding yeto/
+        url = shlex.quote(text).replace("%", "%%")  # ssh expands %-tokens in a ProxyCommand: %% is a literal %
         return (f"env PYTHONPATH={shlex.quote(root)} {shlex.quote(sys.executable)} -P -m yeto.node.relay_proxy "
-                f"--url {shlex.quote(text)} %h %p")
+                f"--url {url} %h %p")
     raise ReachError(f"relay via {via!r} must be nc:<account>[:<port>] (a National Compute workspace relay) or a "
                      f"relay URL ({', '.join(RELAY_URL_SCHEMES)}) without blanks or shell characters")
 
@@ -291,7 +303,8 @@ def reach_options(reach: Any) -> list[str]:
             raise ReachError("reach jump needs via (the jump host)")
         return ["-o", f"ProxyJump={via}"]
     if mode == "relay":
-        return ["-o", f"ProxyCommand={relay_proxy_command(via)}"]
+        # the relay host must not stand in for the node: its key is pinned (known_hosts), never learned here
+        return ["-o", "StrictHostKeyChecking=yes", "-o", f"ProxyCommand={relay_proxy_command(via)}"]
     raise ReachError(f"reach {mode!r}: the control host cannot open an ssh connection to such a node "
                      "(outbound: it only dials the store; function: the platform's calls)")
 
@@ -301,6 +314,9 @@ def node_ssh_options(node: Any) -> list[str]:
     else the inventory's ``proxy_jump`` (``Node.ssh_options``)."""
     reach = getattr(node, "reach", None)
     if reach is not None:
+        if reach.mode == "relay" and getattr(node, "proxy_jump", None):
+            raise ReachError(f"node {node.name}: reach relay and proxy_jump {node.proxy_jump} name two routes; "
+                             "keep one")
         return reach_options(reach)
     return list(node.ssh_options())
 

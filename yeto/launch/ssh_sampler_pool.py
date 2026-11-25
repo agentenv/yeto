@@ -78,7 +78,10 @@ Reach: every ``ssh`` to a node (preflight, code upload, start, probe, stop) goes
 through the node's ``reach`` in the inventory (:func:`yeto.node.transport.reach_options`):
 ``direct``; ``jump`` (``ProxyJump``; ``proxy_jump:`` is the same); ``relay`` (``via:
 nc:<account>``: a National Compute workspace relay; ``via: wss://...``: a ``relay.mjs``
-the site runs). An ``outbound`` / ``function`` node is refused (no ssh reaches it).
+the site runs behind an authenticating gateway, its bearer token in
+``$YETO_RELAY_TOKEN_FILE`` / ``$YETO_RELAY_TOKEN``: :mod:`yeto.node.relay_proxy`; a relay
+node's host key is checked strictly). An ``outbound`` / ``function`` node is refused
+(no ssh reaches it).
 
 Pool config::
 

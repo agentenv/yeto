@@ -23,6 +23,7 @@ from yeto.launch.nc.client import NodeLease
 from yeto.launch.node_inventory import NodeProfile, Reach, load_profiles, parse_node
 from yeto.node import relay_proxy, transport
 
+GOLDEN = Path(__file__).parent / "golden" / "ssh_pool_direct_argv.json"
 NODE = {"host": "ops@10.0.0.5", "device_family": "npu", "cpu_arch": "aarch64", "card": "910B4",
         "cards_per_node": 8, "hbm_gib": 64, "host_memory_gib": 1024, "runtime": "rootfs"}
 
@@ -33,6 +34,17 @@ def _option(argv, key):
         if a == "-o" and b.startswith(key + "="):
             return b[len(key) + 1:]
     return None
+
+
+@pytest.fixture(autouse=True)
+def relay_env(monkeypatch):
+    """A site relay's token is set (the refusals without one are their own tests)."""
+    for name in (relay_proxy.TOKEN_FILE_ENV, relay_proxy.NO_TOKEN_ENV, relay_proxy.PLAINTEXT_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(relay_proxy.TOKEN_ENV, "t0ken")
+
+
+STRICT = ["-o", "StrictHostKeyChecking=yes"]
 
 
 # -- the options ------------------------------------------------------------------
@@ -57,14 +69,14 @@ def test_a_national_compute_relay_is_the_lease_alias_proxy_command(tmp_path, mon
     ``ProxyCommand`` line of ``node_pool.ssh_host_block`` (that block is unchanged)."""
     monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path))
     opts = transport.reach_options(Reach("relay", "nc:4"))
-    assert opts[0] == "-o" and opts[1] == f"ProxyCommand={node_pool.proxy_command(4)}"
+    assert opts == [*STRICT, "-o", f"ProxyCommand={node_pool.proxy_command(4)}"]
     lease = NodeLease(account=4, ticket="t1", ip="10.1.2.3", user="ubuntu", host_key="", granted_at=None,
                       lease_until=None, gpus=None, rate_ucr_per_gpu_hour=None)
     block = node_pool.ssh_host_block(lease)
     assert f"  ProxyCommand {node_pool.proxy_command(4)}" in block.splitlines()
     assert _option(opts, "ProxyCommand").endswith(f"-m yeto.launch.nc proxy --account 4 --relay-port "
                                                   f"{tunnel.RELAY_PORT} %h %p")
-    port = transport.reach_options(Reach("relay", "nc:4:8799"))[1]
+    port = transport.reach_options(Reach("relay", "nc:4:8799"))[3]
     assert port == f"ProxyCommand={node_pool.proxy_command(4, 8799)}"
 
 
@@ -75,7 +87,56 @@ def test_a_site_relay_url_dials_through_relay_proxy():
     assert argv[3:] == ["-P", "-m", "yeto.node.relay_proxy", "--url", "wss://relay.example/yeto", "%h", "%p"]
     assert Path(argv[1].split("=", 1)[1], "yeto", "node", "relay_proxy.py").is_file()
     url = "https://gw.example:8443/r"
-    assert transport.reach_options(Reach("relay", url)) == ["-o", "ProxyCommand=" + transport.relay_proxy_command(url)]
+    assert transport.reach_options(Reach("relay", url)) == \
+        [*STRICT, "-o", "ProxyCommand=" + transport.relay_proxy_command(url)]
+    assert "t0ken" not in cmd  # the token is read by the proxy from its environment, never put in the argv
+
+
+def test_a_percent_in_the_relay_url_reaches_the_proxy_literally():
+    """ssh expands %-tokens in a ProxyCommand: a literal % is written %%."""
+    cmd = transport.relay_proxy_command("wss://r.example/a%2Fb")
+    assert "--url wss://r.example/a%%2Fb %h %p" in cmd
+
+
+@pytest.mark.parametrize("url", ["wss://user:pw@r.example/y", "https://tok@r.example"])
+def test_credentials_in_a_relay_url_are_refused(url):
+    with pytest.raises(transport.ReachError, match="argv"):
+        transport.relay_proxy_command(url)
+
+
+def test_a_plaintext_relay_is_refused_unless_allowed(monkeypatch):
+    for url in ("ws://10.0.0.1:8791/y", "http://10.0.0.1:8791"):
+        with pytest.raises(transport.ReachError, match="plaintext"):
+            transport.relay_proxy_command(url)
+    monkeypatch.setenv(relay_proxy.PLAINTEXT_ENV, "1")
+    assert "--url ws://10.0.0.1:8791/y" in transport.relay_proxy_command("ws://10.0.0.1:8791/y")
+
+
+def test_a_site_relay_without_a_token_is_refused(tmp_path, monkeypatch):
+    monkeypatch.delenv(relay_proxy.TOKEN_ENV)
+    with pytest.raises(transport.ReachError, match="bearer token"):
+        transport.relay_proxy_command("wss://r.example")
+    token = tmp_path / "relay.token"
+    token.write_text("from-file\n")
+    token.chmod(0o644)
+    monkeypatch.setenv(relay_proxy.TOKEN_FILE_ENV, str(token))
+    with pytest.raises(transport.ReachError, match="owner-only"):
+        transport.relay_proxy_command("wss://r.example")
+    token.chmod(0o600)
+    transport.relay_proxy_command("wss://r.example")
+    assert relay_proxy.endpoint("wss://r.example").authorization == "from-file"
+    monkeypatch.delenv(relay_proxy.TOKEN_FILE_ENV)
+    monkeypatch.setenv(relay_proxy.NO_TOKEN_ENV, "1")  # the gateway authenticates otherwise (VPN, mTLS)
+    assert relay_proxy.endpoint("wss://r.example").authorization == ""
+
+
+def test_a_relay_node_with_a_proxy_jump_too_is_refused():
+    node = NodeProfile.from_node(parse_node({**NODE, "name": "a", "proxy_jump": "ops@bastion"}, index=0),
+                                 reach=Reach("relay", "wss://r.example"))
+    with pytest.raises(transport.ReachError, match="two routes"):
+        transport.node_ssh_options(node)
+    with pytest.raises(transport.ReachError, match="two routes"):
+        node.ssh_options()
 
 
 @pytest.mark.parametrize("via", ["nc:", "nc:x", "nc:1:2:3", "relay.example", "wss://", "wss://a b",
@@ -102,8 +163,8 @@ def test_ssh_exec_dials_through_the_reach():
     box = transport.ssh_exec(node, run=run)
     assert box.exec("true").stdout == "ok"
     argv = calls[0]
-    assert argv[argv.index("ops@10.0.0.5") - 2:argv.index("ops@10.0.0.5")] == \
-        ["-o", f"ProxyCommand={transport.relay_proxy_command('wss://r.example')}"]
+    assert argv[argv.index("ops@10.0.0.5") - 4:argv.index("ops@10.0.0.5")] == \
+        [*STRICT, "-o", f"ProxyCommand={transport.relay_proxy_command('wss://r.example')}"]
 
 
 # -- the ssh sampler pool ---------------------------------------------------------
@@ -141,14 +202,17 @@ def _pool(tmp_path, monkeypatch, *, node, **section):
 
 
 @pytest.mark.parametrize("node,want", [
-    ("behind-relay", ("ProxyCommand", transport.relay_proxy_command("wss://relay.example/y"))),
+    ("behind-relay", ("ProxyCommand", "wss://relay.example/y")),
     ("behind-jump", ("ProxyJump", "ops@bastion")),
     ("old-jump", ("ProxyJump", "ops@bastion")),
     ("edge", None),
 ])
 def test_every_ssh_of_a_start_probe_and_stop_goes_through_the_reach(tmp_path, monkeypatch, node, want):
     """Preflight, code upload, spec upload, start, probe, log copy and stop: each ssh dials
-    the node's reach right before its host; a direct node's argv has no proxy option."""
+    the node's reach right before its host (a relay with a strict host key check); a
+    direct node's argv has no proxy option."""
+    if want is not None and want[0] == "ProxyCommand":
+        want = (want[0], transport.relay_proxy_command(want[1]))
     ops, run = _pool(tmp_path, monkeypatch, node=node)
     m = SimpleNamespace(account=0, ticket=ops.order(0), shard="f09-0", data_slot=None, replaces_shard=None,
                         predecessor_lost=False)
@@ -164,16 +228,22 @@ def test_every_ssh_of_a_start_probe_and_stop_goes_through_the_reach(tmp_path, mo
             assert _option(before, "ProxyCommand") is None and _option(before, "ProxyJump") is None
         else:
             assert before[-2:] == ["-o", f"{want[0]}={want[1]}"]
+            assert (_option(before, "StrictHostKeyChecking") == "yes") == (want[0] == "ProxyCommand")
             other = "ProxyJump" if want[0] == "ProxyCommand" else "ProxyCommand"
             assert _option(before, other) is None
 
 
 def test_a_direct_nodes_argv_is_unchanged(tmp_path, monkeypatch):
-    """The argv of a node without reach is what the pool sent before reach existed."""
+    """Every ssh argv of a start / probe / drain of a node without reach, word for word as
+    the pool sent it before reach existed (golden recorded on the code before this change)."""
     ops, run = _pool(tmp_path, monkeypatch, node="edge")
-    ops.ssh(ops.conf.nodes[0], "true")
-    assert run.calls[-1][0] == ["ssh", "-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
-                                "ops@192.0.2.1", "true"]
+    m = SimpleNamespace(account=0, ticket=ops.order(0), shard="f09-0", data_slot=None, replaces_shard=None,
+                        predecessor_lost=False)
+    ops.start(m, ["f09-0"])
+    ops.probe(m)
+    ops.drain(m)
+    got = [[str(a).replace(str(tmp_path), "<TMP>") for a in argv] for argv, _kw in run.calls if argv[0] == "ssh"]
+    assert got == json.loads(GOLDEN.read_text())
 
 
 def test_the_mux_probe_reads_the_route_with_its_reach(tmp_path, monkeypatch):
@@ -204,17 +274,34 @@ def test_inventory_reach_is_read_and_a_node_ssh_cannot_reach_is_refused(tmp_path
 
 # -- the relay proxy --------------------------------------------------------------
 
-def test_relay_proxy_endpoint():
+def test_relay_proxy_endpoint(monkeypatch):
     assert relay_proxy.endpoint("wss://r.example/y").base_url == "https://r.example/y"
-    assert relay_proxy.endpoint("ws://10.0.0.1:8791").base_url == "http://10.0.0.1:8791"
     assert relay_proxy.endpoint("https://r.example").cookie == ""
+    assert relay_proxy.endpoint("https://r.example").authorization == "t0ken"
+    with pytest.raises(tunnel.TunnelError, match="plaintext"):
+        relay_proxy.endpoint("ws://10.0.0.1:8791")
+    monkeypatch.setenv(relay_proxy.PLAINTEXT_ENV, "1")
+    assert relay_proxy.endpoint("ws://10.0.0.1:8791").base_url == "http://10.0.0.1:8791"
     with pytest.raises(tunnel.TunnelError):
         relay_proxy.endpoint("ftp://r.example")
 
 
+def test_the_handshake_carries_the_token_and_the_nc_one_is_unchanged():
+    """The bearer token is one more header; an NC endpoint (cookie, no token) sends the
+    very bytes it sent before the token existed."""
+    _h, _p, nc = tunnel.handshake_request(tunnel.Endpoint("https://gw.example/user/x/port/8791", "gardengate_port=c"),
+                                          "10.0.0.7:22", "KEY")
+    assert nc == (b"GET /user/x/port/8791/?target=10.0.0.7:22 HTTP/1.1\r\nHost: gw.example\r\nUpgrade: websocket\r\n"
+                  b"Connection: Upgrade\r\nSec-WebSocket-Key: KEY\r\nSec-WebSocket-Version: 13\r\n"
+                  b"Cookie: gardengate_port=c\r\n\r\n")
+    _h, _p, site = tunnel.handshake_request(relay_proxy.endpoint("wss://r.example/y"), "10.0.0.7:22", "KEY")
+    assert b"\r\nAuthorization: Bearer t0ken\r\n\r\n" in site and b"Cookie" not in site
+
+
 def test_relay_proxy_pipes_ssh_bytes_through_a_relay(monkeypatch):
     """A loopback relay (101 upgrade, then echo of each binary frame, uppercased): the
-    proxy asks for the node's ``host:port`` and moves the bytes both ways."""
+    proxy asks for the node's ``host:port`` with its token and moves the bytes both ways."""
+    monkeypatch.setenv(relay_proxy.PLAINTEXT_ENV, "1")  # loopback
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     srv.listen(1)
@@ -228,6 +315,7 @@ def test_relay_proxy_pipes_ssh_bytes_through_a_relay(monkeypatch):
             while b"\r\n\r\n" not in head:
                 head += conn.recv(4096)
             asked.append(head.split(b"\r\n", 1)[0].decode())
+            asked.append(b"Authorization: Bearer t0ken\r\n" in head)
             conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
             reader, data = tunnel.FrameReader(), b""
             while True:
@@ -255,5 +343,5 @@ def test_relay_proxy_pipes_ssh_bytes_through_a_relay(monkeypatch):
     finally:
         srv.close()
         t.join(5)
-    assert asked == ["GET /relay/?target=10.0.0.7:22 HTTP/1.1"]
+    assert asked == ["GET /relay/?target=10.0.0.7:22 HTTP/1.1", True]
     assert out.getvalue() == b"SSH-2.0-HELLO"
