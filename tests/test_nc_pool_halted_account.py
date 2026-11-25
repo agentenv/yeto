@@ -449,3 +449,42 @@ def test_every_slot_halted_says_so_where_no_order_is_placed():
     (short,) = _events(pool, "slots_below_target")
     assert short["usable"] == 0 and short["level"] == "critical"
     assert "halted (clear-halt needed): [1, 4]" in _events(pool, "order_refused")[-1]["why"]
+
+
+def _sky_refused(ticket):
+    from yeto.launch.nc.sky_provider import ProviderRequestRefused
+
+    return ProviderRequestRefused("sky provider: sky down refused without the request env scope",
+                                  action=f"AWS_PROFILE=sky-aws sky down {ticket}")
+
+
+def test_a_refused_provider_status_is_one_alert_with_the_action_and_the_member_is_kept():
+    clock = Clock()
+    cloud = GuardedCloud(clock, ready_after=300)
+    pool = _pool(clock, cloud, target=1, accounts=(1, 4))
+    _run(pool, clock, 1800)
+    (m,) = [x for x in pool.members if x.state == READY]
+    real_poll = cloud.poll
+    cloud.poll = lambda member: (_ for _ in ()).throw(_sky_refused(member.ticket)) if member is m else real_poll(member)
+    _run(pool, clock, clock.t + 2 * H)
+    (alert,) = _events(pool, "provider_request_refused")  # once, not every tick
+    assert alert["level"] == "alert" and alert["call"] == "status" and alert["action"].endswith(m.ticket)
+    assert m.state == READY and cloud.tickets[m.ticket]["state"] == "active"  # never read as ended
+    assert not pool.breaker.failures and not pool.stopped
+
+
+def test_a_refused_provider_release_is_held_with_one_alert_carrying_the_action():
+    clock = Clock()
+    cloud = GuardedCloud(clock, ready_after=300)
+    pool = _pool(clock, cloud, target=1, accounts=(1, 4))
+    _run(pool, clock, 1800)
+    (m,) = [x for x in pool.members if x.state == READY]
+    cloud.drain_errors[m.ticket] = _sky_refused(m.ticket)
+    cloud.tickets[m.ticket].update(sampler="exited", exit=1)
+    pool.config.elastic.max_sampler_restarts = 0  # the crash retires it: its release is refused
+    _run(pool, clock, clock.t + 2 * H)
+    assert m.state == DRAINING and cloud.tickets[m.ticket]["state"] == "active"  # kept, still billed
+    assert len(cloud.kinds("drain_refused")) <= 2 * H / 600 + 2  # held, not once per tick
+    (blocked,) = _events(pool, "release_blocked")
+    assert blocked["level"] == "alert" and blocked["action"] == f"AWS_PROFILE=sky-aws sky down {m.ticket}"
+    assert "drain_failed" not in _names(pool)

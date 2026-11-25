@@ -1070,9 +1070,12 @@ def test_the_cleanup_refuses_an_unscoped_down_with_another_account(monkeypatch):
         def released(self, *a, **k):
             pass
 
+    failed = []
+    Ledger.release_failed = lambda self, *a: failed.append(a)
     row = SimpleNamespace(kind="sky_cluster", id="c-1", name="c-1", key="k", attrs={"pool": True, "aws_profile": "a"})
     action = cleanup._release_one(row, Ops(), Ledger(), False, {})
     assert not action.ok and "AWS_PROFILE=a sky down c-1" in action.detail and downs == []
+    assert failed and failed[0][:3] == ("sky_cluster", "c-1", "c-1") and "sky down c-1" in failed[0][3]
     plain = SimpleNamespace(kind="sky_cluster", id="c-2", name="c-2", key="k", attrs={"pool": True})
     assert cleanup._release_one(plain, Ops(), Ledger(), False, {}).ok and downs == ["c-2"]  # nothing to carry
 
@@ -1465,3 +1468,11 @@ def test_write_ssh_alias_reads_the_ssh_config_path_when_called(tmp_path, monkeyp
     monkeypatch.setattr(node_pool, "ssh_host_block", lambda lease, relay_port: "Host yeto-nc-t-1\n")
     node_pool.write_ssh_alias(lease)
     assert target.read_text().startswith("Include ")
+
+
+def test_the_refusal_is_a_provider_request_refused_with_the_manual_action():
+    from yeto.launch.nc import sky_provider as sp
+
+    refused = sp.unscoped_refusal("sky-aws", environ={}, what="sky down c-1", cluster="c-1")
+    assert isinstance(refused, sp.ProviderRequestRefused) and refused.action == "AWS_PROFILE=sky-aws sky down c-1"
+    assert sp.unscoped_refusal(None, environ={}) is None

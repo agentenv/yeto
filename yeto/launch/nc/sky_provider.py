@@ -349,12 +349,23 @@ def request_env_scope(overrides: dict[str, str | None]):
         _REQUEST_ENV.reset(token)
 
 
+class ProviderRequestRefused(RuntimeError):
+    """A sky request the provider refused to send (it would carry another account's AWS
+    credentials). ``action``: what an operator runs instead. The pool tells it by class
+    name (``island_pool.BLOCKED_ERRORS``): an alert with the action, never a lost member."""
+
+    def __init__(self, message: str, action: str = ""):
+        super().__init__(message)
+        self.action = action
+
+
 class _ScopedSky:
     """The sky module, every SDK call made inside the provider's request env scope.
     ``refuse``: every SDK call raises it instead (no scope, and an unscoped request
     would carry the wrong AWS credentials)."""
 
-    def __init__(self, module: Any, overrides: dict[str, str | None], refuse: str | None = None):
+    def __init__(self, module: Any, overrides: dict[str, str | None],
+                 refuse: ProviderRequestRefused | None = None):
         self._module, self._overrides, self._refuse = module, overrides, refuse
 
     def __getattr__(self, name: str) -> Any:
@@ -364,8 +375,8 @@ class _ScopedSky:
 
         @functools.wraps(value)
         def call(*args: Any, **kw: Any) -> Any:
-            if self._refuse:
-                raise RuntimeError(self._refuse)
+            if self._refuse is not None:
+                raise ProviderRequestRefused(str(self._refuse), self._refuse.action)
             with request_env_scope(self._overrides):
                 return value(*args, **kw)
 
@@ -373,10 +384,10 @@ class _ScopedSky:
 
 
 def unscoped_refusal(aws_profile: str | None, environ=None, what: str = "sky requests",
-                     cluster: str | None = None) -> str | None:
+                     cluster: str | None = None) -> ProviderRequestRefused | None:
     """Without the request env scope, a sky request would carry this process's AWS
     variables. Refused when they or ``aws_profile`` say another account than the
-    server's own: the message gives the manual command."""
+    server's own: the error carries the manual command as its ``action``."""
     environ = os.environ if environ is None else environ
     forwarded = [n for n in AWS_FORWARDED_ENVS if environ.get(n)]
     if not aws_profile and not forwarded:
@@ -384,9 +395,11 @@ def unscoped_refusal(aws_profile: str | None, environ=None, what: str = "sky req
     target = cluster or "<cluster>"
     manual = (f"AWS_PROFILE={aws_profile} sky down {target}" if aws_profile else
               f"env -u {' -u '.join(forwarded)} sky down {target}")
-    return (f"sky provider: {what} refused without the request env scope (they would carry "
-            f"{', '.join(forwarded) or 'no AWS_PROFILE'} instead of "
-            f"{'aws_profile ' + aws_profile if aws_profile else 'the server credentials'}); by hand: {manual}")
+    return ProviderRequestRefused(
+        f"sky provider: {what} refused without the request env scope (they would carry "
+        f"{', '.join(forwarded) or 'no AWS_PROFILE'} instead of "
+        f"{'aws_profile ' + aws_profile if aws_profile else 'the server credentials'}); by hand: {manual}",
+        action=manual)
 
 
 def owner_token(run_id: str) -> str:

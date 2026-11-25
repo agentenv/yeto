@@ -153,6 +153,7 @@ def _release_one(r: Resource, ops: CleanupOps, ledger: ResourceLedger, dry_run: 
         try:
             scope = _pool_sky_scope(r)
         except RuntimeError as refused:  # no scope, and an unscoped down would use another account
+            ledger.release_failed("sky_cluster", r.id, r.name, str(refused)[:300])
             return Action(r.key, f"sky down {r.id}", False, str(refused)[:300])
         with scope:
             ok = ops.sky_down(r.id)
@@ -203,7 +204,7 @@ def _pool_sky_scope(r: Any):
         sky_provider.install_request_env_scope()
     except RuntimeError as error:
         refused = sky_provider.unscoped_refusal(aws_profile, what=f"sky down {r.id}", cluster=r.id)
-        if refused:
+        if refused is not None:
             raise RuntimeError(f"{refused} ({error})") from error
         print(f"[cleanup] WARNING: sky down {r.id} without the request env scope: {error}", flush=True)
         return contextlib.nullcontext()

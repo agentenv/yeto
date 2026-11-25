@@ -69,6 +69,9 @@ REFUSED_ERRORS = ("NcRefused",)
 HALTED_ERRORS = ("NcHalted",)
 DEFERRED_ERRORS = ("NcReleaseDeferred",)  # the ticket ends on its own shortly: no delete now
 OWNERSHIP_ERRORS = ("NcForeignTicketReleased", "NcDeleteUnconfirmed")  # a delete hit, or may have hit, a foreign ticket
+# a provider refused to send a request (it would carry the wrong credentials): nothing is
+# known of the machine, it is kept; the error's ``action`` is what an operator runs instead
+BLOCKED_ERRORS = ("ProviderRequestRefused",)
 SLOT_RETRY_S = 600.0  # a slot whose guard refused is tried again after this long
 # the ops calls that change something (a machine, a sampler, the work contract): on the store
 # control plane each runs only after the pool's store lock was confirmed (``GuardedOps``)
@@ -1056,6 +1059,12 @@ class IslandPool(PoolMoves):
         if error_is(error, DEFERRED_ERRORS):  # it ends on its own shortly: asked again, not a failure
             self._once(member, "release_deferred", "release_deferred", why=why, detail=str(error)[:300])
             return False
+        if error_is(error, BLOCKED_ERRORS):  # the provider would not send the release: held, one alert
+            self._drain_hold[member.ticket] = now + SLOT_RETRY_S
+            self._once(member, "release_blocked", "release_blocked", level="alert", why=why,
+                       error=str(error)[:300], retry_in_s=SLOT_RETRY_S, action=getattr(error, "action", ""),
+                       detail="the member is kept as it is (still billed) until the release can be sent")
+            return False
         if error_is(error, OWNERSHIP_ERRORS + REFUSED_ERRORS):
             self._drain_hold[member.ticket] = now + SLOT_RETRY_S
             action = (f"check the {self.config.slot_name}, then: python -m yeto.launch.nc clear-halt "
@@ -1883,6 +1892,13 @@ class IslandPool(PoolMoves):
         except Exception as error:  # noqa: BLE001 - the control plane blinked; nothing is decided on it
             if m.status_fail_since is None:
                 m.status_fail_since = now
+            if error_is(error, BLOCKED_ERRORS):  # once, with the action: retried every tick, never "ended"
+                if "request_refused" not in m.alerted:
+                    self.log(f"pool: status of {m.ticket} refused: {error}"[:400])
+                self._once(m, "request_refused", "provider_request_refused", level="alert", call="status",
+                           error=str(error)[:300], action=getattr(error, "action", ""),
+                           detail="the member is kept as it is (maybe still billed); nothing is decided on it")
+                return el.LeaseStatus("unknown")
             self.log(f"pool: status of {m.ticket} failed: {error!r}"[:300])
             return el.LeaseStatus("unknown")
         if m.status_fail_since is not None:
