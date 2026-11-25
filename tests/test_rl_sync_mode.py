@@ -97,9 +97,10 @@ def base_tree(tmp_path_factory):
 
 
 def _without_data_split(plan: dict) -> dict:
-    """The plan without the data split records (``data_split``), which BASE
+    """The plan without the data split records (``data_split``) and the fleet's
+    ``deterministic_stop`` record (a two-island launch has it on), which BASE
     predates; the island commands keep everything else."""
-    out = {k: v for k, v in plan.items() if k != "data_split"}
+    out = {k: v for k, v in plan.items() if k not in ("data_split", "deterministic_stop")}
     out["island_requests"] = [{k: v for k, v in island.items() if k != "data_split"}
                               for island in plan["island_requests"]]
     return out
