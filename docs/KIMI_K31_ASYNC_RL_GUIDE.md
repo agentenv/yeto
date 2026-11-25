@@ -3445,8 +3445,12 @@ reached over SSH with sky's key, running the Docker sampler route.
 - Orders and releases are written to the run's resource ledger (`sky_cluster`).
 - `slots` (alias `accounts`) are plain indexes `1..N` (one cluster or Modal
   island each), not accounts; logs and status show them as `slot=`.
-- `python -m yeto.rl.spot.watchdog` still works; `--via-provider` sends its
-  machine calls through this provider. For new runs, prefer a sky pool.
+- `python -m yeto.rl.spot.watchdog` still works; its machine calls always go
+  through this provider (`--via-provider` is accepted and is the default; its
+  former sky / nebius CLI path is removed). For new runs, prefer a sky pool.
+  The provider path has run on real machines on AWS and on Nebius (one
+  preemptible L40S node, 2026-11-25): launch, job running, state, adoption by a
+  later watchdog process through the ownership label, release confirmed gone.
 
 **Modal** (`"provider": {"kind": "modal", ...}`): one Modal GPU function call
 per island, no SSH. The pool deploys one app (`app_name`, default

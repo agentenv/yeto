@@ -162,7 +162,7 @@ def test_sky_orders_and_releases_write_the_resource_ledger(tmp_path, monkeypatch
 
 
 def test_the_watchdog_runs_its_loop_over_the_sky_provider(tmp_path):
-    """--via-provider: the watchdog's candidate rotation, preemption and budget, with the
+    """The watchdog's candidate rotation, preemption and budget, with the
     machine calls going through SkyProvider (record, own-name guard)."""
     t = [1_000_000.0]
     clock = lambda: t[0]  # noqa: E731
@@ -171,8 +171,9 @@ def test_the_watchdog_runs_its_loop_over_the_sky_provider(tmp_path):
     args = SimpleNamespace(run_id="runw", cluster_prefix="spot-w", yaml=None, secret=[], starting_timeout_s=600,
                            launch_timeout_s=1800, dir=str(tmp_path), own_name_re="spot")
     cands = wd.candidates(spot_only=True)
-    ops = wd.provider_ops(args, cands, ["RUN_ID=runw"], sky=sky)
-    assert ops.provider.start_timeout_s == 1800  # the launch bound, not the 600 s STARTING one
+    advance = lambda s: t.__setitem__(0, t[0] + s)  # noqa: E731
+    ops = wd.provider_ops(args, cands, ["RUN_ID=runw"], sky=sky, clock=clock, sleep=advance)
+    assert ops.provider.start_timeout_s == 1800  # the old `sky launch` bound, not the STARTING one
     original = sky.launch
 
     def launch_up(task, cluster_name, **kw):
@@ -185,11 +186,12 @@ def test_the_watchdog_runs_its_loop_over_the_sky_provider(tmp_path):
     cfg = wd.Config(cluster_prefix="spot-w", run_id="runw", island="spot-0", budget_usd=1000.0,
                     log=str(tmp_path / "wd.jsonl"), state=str(tmp_path / "wd.state.json"),
                     stop_file=str(tmp_path / "wd.stop"), poll_s=60.0, round_sleep_s=300.0, max_rounds=1)
-    w = wd.Watchdog(cfg, cands, ops, clock=clock, sleep=lambda s: t.__setitem__(0, t[0] + s))
+    w = wd.Watchdog(cfg, cands, ops, clock=clock, sleep=advance)
     assert w.acquire() is None and w.cluster == "spot-w-2"  # the H100 launch failed, H200 eu-west1 is up
     last = [c for c in sky.calls if c[0] == "launch"][-1]
     assert last[2].envs["CARD"] == "H200" and last[2].envs["RUN_ID"] == "runw"
     assert ops.state("spot-w-2", "eu-west1") == "RUNNING"
+    assert sky.calls[-1] == ("status", ("spot-w-2",), "AUTO")  # refreshed: a reclaim is seen at once
     del sky.clusters["spot-w-2"]  # reclaimed
     w.watch_once()
     assert w.cluster is None and any(e["event"] == "preempted" for e in w.history)
@@ -223,3 +225,193 @@ def test_a_failing_offer_cools_down_alone_and_the_pool_breaker_counts_only_witho
     sky.up(c)
     assert p.status(1, c).state == "active"
     assert p.offer_of(c) == p.offers[0].key and p.offers[0].key not in p.offer_breakers()
+
+
+def test_a_watchdog_launch_that_never_finishes_times_out_and_is_cancelled(tmp_path):
+    """The old CLI path bounded `sky launch` with --launch-timeout-s; the provider path polls
+    the confirmed launch the same way, and the delete cancels the request still in flight."""
+    t = [1_000_000.0]
+    clock = lambda: t[0]  # noqa: E731
+    sky = FakeSky()  # a launch request stays RUNNING until sky.up: here it never comes up
+    args = SimpleNamespace(run_id="runt", cluster_prefix="spot-t", yaml=None, secret=[], starting_timeout_s=600,
+                           launch_timeout_s=1800, dir=str(tmp_path), own_name_re="spot")
+    cands = wd.candidates(spot_only=True)[:1]
+    ops = wd.provider_ops(args, cands, ["RUN_ID=runt"], sky=sky, clock=clock,
+                          sleep=lambda s: t.__setitem__(0, t[0] + s))
+    ok, msg = ops.launch("spot-t-1", cands[0], 1800)
+    # the provider's start timeout (= --launch-timeout-s) or the watchdog's own bound, whichever reads first
+    assert not ok and msg in ("lost", "launch timeout after 1800s") and t[0] - 1_000_000.0 <= 1800 + 2 * ops.poll_s
+    assert ops.down("spot-t-1") is True
+    assert any(c[0] == "cancel" for c in sky.calls) and "spot-t-1" not in sky.clusters
+
+
+def _legacy_cli_launch(cluster, cand, yaml, envs, secrets):
+    """The argv of the removed CLI path (``watchdog.Ops.launch`` with ``main``'s CARD
+    override, verbatim up to the binary name), kept here as the shadow reference."""
+    envs = [e for e in envs if not e.startswith("CARD=")] + [f"CARD={cand.gpu}"]
+    cmd = ["sky", "launch", "-c", cluster, yaml, "--infra", f"nebius/{cand.region}",
+           "--gpus", f"{cand.gpu}:{cand.count}", "--use-spot" if cand.spot else "--no-use-spot", "-d", "-y"]
+    for e in envs:
+        cmd += ["--env", e]
+    for s in secrets:
+        cmd += ["--secret", s]
+    return cmd
+
+
+def _parse_legacy(cmd):
+    out = {"cluster": cmd[3], "yaml": cmd[4], "envs": {}, "secrets": set()}
+    rest = cmd[5:]
+    for flag, value in zip(rest[::1], rest[1:] + [None]):
+        if flag == "--infra":
+            out["infra"] = value
+        elif flag == "--gpus":
+            out["accelerators"] = value
+        elif flag == "--env":
+            key, _, val = value.partition("=")
+            out["envs"][key] = val
+        elif flag == "--secret":
+            out["secrets"].add(value)
+    out["use_spot"] = "--use-spot" in rest
+    out["detached_no_down"] = "-d" in rest and "--down" not in rest
+    return out
+
+
+def test_shadow_the_provider_launches_what_the_removed_cli_launched(tmp_path, monkeypatch):
+    """Shadow comparison of 7.2: for every candidate of the default list, the cluster the
+    watchdog asks SkyProvider for has the same name, task file, infra, GPUs, spot flag,
+    envs (CARD per candidate, RUN_ID, the operator's) and secrets as the `sky launch`
+    argv of the removed CLI path. Two intended differences: the task (it has a run:
+    the sampler is the sky job) is launched with down=True, so the cluster goes when the
+    job ends (the CLI path left an idle VM billing until the watchdog noticed); and the
+    resources carry the ownership label yeto-run=<run>, so only this run adopts it."""
+    monkeypatch.setenv("MODAL_TOKEN_ID", "id-x")
+    yaml = tmp_path / "island.yaml"
+    yaml.write_text("run: python -m yeto.rl.spot_rollout.sampler --spec spec.json\n")
+    user_envs = ["TP=8", "BOAT_STARTS_PER_HOUR=60", "CARD=stale", "RUN_ID=runs"]
+    secrets = ["MODAL_TOKEN_ID"]
+    cands = wd.candidates()
+    t = [1_000_000.0]
+    sky = FakeSky()
+    original = sky.launch
+
+    def launch_up(task, cluster_name, **kw):
+        rid = original(task, cluster_name, **kw)
+        sky.up(cluster_name)
+        return rid
+
+    sky.launch = launch_up
+    args = SimpleNamespace(run_id="runs", cluster_prefix="spot-s", yaml=str(yaml), secret=secrets,
+                           starting_timeout_s=600, launch_timeout_s=1800, dir=str(tmp_path), own_name_re="spot")
+    envs = [e for e in user_envs if not e.startswith("RUN_ID=")] + ["RUN_ID=runs"]  # as main() builds them
+    ops = wd.provider_ops(args, cands, envs, sky=sky, clock=lambda: t[0], sleep=lambda s: t.__setitem__(0, t[0] + s))
+    for i, cand in enumerate(cands, 1):
+        name = f"spot-s-{i}"
+        assert ops.launch(name, cand, 1800) == (True, "")
+        _, cluster, task, kw = [c for c in sky.calls if c[0] == "launch"][-1]
+        old = _parse_legacy(_legacy_cli_launch(name, cand, str(yaml), envs, secrets))
+        assert cluster == old["cluster"]
+        assert task.name == f"yaml:{old['yaml']}"
+        resources = dict(task.resources)
+        assert resources.pop("labels") == {"yeto-run": "runs"}  # the ownership mark (intended: new)
+        assert resources == {"infra": old["infra"], "accelerators": old["accelerators"], "use_spot": old["use_spot"]}
+        assert task.envs == old["envs"], cand.key
+        assert set(task.secrets) == old["secrets"] and task.secrets["MODAL_TOKEN_ID"] == "id-x"
+        assert old["detached_no_down"] and kw == {"down": True}  # the intended difference (docstring)
+        assert ops.down(name) is True
+
+
+def test_the_watchdog_releases_only_clusters_of_its_own_run(tmp_path):
+    """Ownership on the watchdog's exact_prefix path (REV on #765): a cluster an earlier
+    watchdog process of this run launched is adopted and can be released; a cluster of
+    another run under the same name pattern, or one opened by hand, is never adopted,
+    released or downed."""
+    t = [1_000_000.0]
+    clock = lambda: t[0]  # noqa: E731
+    advance = lambda s: t.__setitem__(0, t[0] + s)  # noqa: E731
+    sky = FakeSky()
+    original = sky.launch
+
+    def launch_up(task, cluster_name, **kw):
+        rid = original(task, cluster_name, **kw)
+        sky.up(cluster_name)
+        return rid
+
+    sky.launch = launch_up
+    cands = wd.candidates(spot_only=True)[:1]
+
+    def ops_for(run, where):
+        args = SimpleNamespace(run_id=run, cluster_prefix="spot-w", yaml=None, secret=[], starting_timeout_s=600,
+                               launch_timeout_s=1800, dir=str(tmp_path / where), own_name_re="spot")
+        (tmp_path / where).mkdir(exist_ok=True)
+        return wd.provider_ops(args, cands, [f"RUN_ID={run}"], sky=sky, clock=clock, sleep=advance)
+
+    earlier = ops_for("runw", "earlier")  # an earlier watchdog process of this run (its record is lost)
+    assert earlier.launch("spot-w-1", cands[0], 1800) == (True, "")
+    other = ops_for("runx", "other")  # another run's watchdog with the same cluster prefix
+    assert other.launch("spot-w-7", cands[0], 1800) == (True, "")
+    sky.clusters["spot-w-debug"] = {"name": "spot-w-debug", "status": "UP", "kw": {},
+                                    "handle": SimpleNamespace(head_ip="198.51.100.9", ssh_user="ubuntu")}
+    mine = ops_for("runw", "mine")
+    owned = {name for _, name in mine.provider.run_tickets()}
+    assert "spot-w-1" in owned and not owned & {"spot-w-7", "spot-w-debug"}
+    assert mine.down("spot-w-1") is True and "spot-w-1" not in sky.clusters
+    for foreign in ("spot-w-7", "spot-w-debug"):
+        assert mine.down(foreign) is False  # refused: never this run's
+        assert foreign in sky.clusters
+    assert not [c for c in sky.calls if c[0] == "down" and c[1] in ("spot-w-7", "spot-w-debug")]
+
+
+class _StatusResponse:
+    """sky >= 0.14's StatusResponse: a pydantic model that acts like a dict but is none."""
+
+    def __init__(self, row):
+        self._row = dict(row)
+
+    def get(self, key, default=None):
+        return self._row.get(key, default)
+
+    def __getitem__(self, key):
+        return self._row[key]
+
+    def __contains__(self, key):
+        return key in self._row
+
+
+def test_a_listing_of_sky_status_responses_is_adopted_by_its_run(tmp_path):
+    """Found on real Nebius (sky 0.14.3): status answers StatusResponse records, not dicts.
+    The listing must still adopt this run's labelled cluster (and only that one)."""
+    t = [1_000_000.0]
+    clock = lambda: t[0]  # noqa: E731
+    sky = FakeSky()
+    original_launch, original_status = sky.launch, sky.status
+
+    def launch_up(task, cluster_name, **kw):
+        rid = original_launch(task, cluster_name, **kw)
+        sky.up(cluster_name)
+        # sky keeps the launched resources (and their labels) in the handle
+        sky.clusters[cluster_name]["handle"].launched_resources = SimpleNamespace(
+            labels=dict(task.resources.get("labels") or {}))
+        return rid
+
+    def status_responses(names, refresh=None):
+        rid = original_status(names, refresh)
+        rows = sky.requests[rid]["result"]
+        sky.requests[rid]["result"] = [_StatusResponse(r) for r in rows]
+        return rid
+
+    sky.launch, sky.status = launch_up, status_responses
+    cands = wd.candidates(spot_only=True)[:1]
+
+    def ops_for(where):
+        (tmp_path / where).mkdir()
+        args = SimpleNamespace(run_id="runr", cluster_prefix="spot-r", yaml=None, secret=[], starting_timeout_s=600,
+                               launch_timeout_s=1800, dir=str(tmp_path / where), own_name_re="spot")
+        return wd.provider_ops(args, cands, ["RUN_ID=runr"], sky=sky, clock=clock,
+                               sleep=lambda s: t.__setitem__(0, t[0] + s))
+
+    first = ops_for("first")
+    assert first.launch("spot-r-1", cands[0], 1800) == (True, "")
+    assert first.state("spot-r-1", cands[0].region) == "RUNNING"
+    later = ops_for("later")  # its record is empty: the listing is the only way to find the cluster
+    assert [name for _, name in later.provider.run_tickets()] == ["spot-r-1"]
+    assert later.down("spot-r-1") is True and "spot-r-1" not in sky.clusters

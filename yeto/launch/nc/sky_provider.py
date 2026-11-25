@@ -254,6 +254,12 @@ class SkyProvider:
         records = self.sky.get(self.sky.status([ticket], **kw))
         return records[0] if records else None
 
+    def cluster_state(self, ticket: str) -> str | None:
+        """sky's status name of cluster ``ticket`` (``UP``, ``INIT``, ``STOPPED``), refreshed
+        from the cloud; None when sky does not list it. Raises on a failed call."""
+        record = self._record(ticket, refresh=True)
+        return None if record is None else _status_name(record.get("status"))
+
     def _wait_for_none(self):
         modes = getattr(self.sky, "AutostopWaitFor", None)
         if modes is None:
@@ -629,7 +635,8 @@ class SkyProvider:
         doc = self._doc()
         rows = doc["clusters"]
         try:
-            listed = [r for r in (self.sky.get(self.sky.status(None)) or ()) if isinstance(r, dict)]
+            # sky >= 0.14 answers pydantic StatusResponse records (dict-like, not dict)
+            listed = [r for r in (self.sky.get(self.sky.status(None)) or ()) if hasattr(r, "get")]
         except Exception:  # noqa: BLE001 - an unanswered listing: the record alone
             listed = []
         changed = False
