@@ -430,3 +430,43 @@ def test_a_restart_of_every_island_keeps_its_open_rounds_until_they_go_stale():
     stale = diloco(r, now=end + ROUNDS_STALE_S + 60)
     assert stale["rounds"] and all(x["ended"] == "no trainer up" for x in stale["rounds"])
     assert stale["shards"][0]["state"] == "stale"
+
+
+# -- an island moving: its new launch is starting, not lost ----------------------------------
+@pytest.mark.parametrize("rec, state, reason", [
+    ({"launch_state": "moving", "life_state": "running", "moving_to": AWS, "gpu": MODAL}, "moving", f"moving to {AWS}"),
+    ({"launch_state": "starting", "life_state": "ordering", "why": f"moved to {AWS}", "gpu": AWS, "incarnation": 1},
+     "moving", f"moving to {AWS}"),
+    ({"launch_state": "starting", "life_state": "ordering", "why": "relaunch 2/3: infra FAILED", "gpu": AWS,
+      "relaunches": 2}, "starting", "relaunch 2/3: infra FAILED"),
+])
+def test_a_moving_or_relaunching_island_reads_so(rec, state, reason):
+    got = fleet_islands.island_state(rec)
+    assert got["state"] == state and got["reason"] == reason
+    if rec["life_state"] == "ordering":
+        assert "ordering machines" in got["detail"]
+
+
+def test_a_moving_islands_old_leave_does_not_make_it_lost(tmp_path):
+    """The old launch wrote island_leave STOPPED (its STOP: moving); the new launch orders its
+    machines on the target cloud: the card reads starting (moving to <target>), not left / lost."""
+    r = fleet_reducer()
+    r.feed({"event": "island_leave", "island_id": 0, "time_unix": r.max_ts + 5, "reason_name": "STOPPED"})
+    # island 1 pushed the next step; island 0 (moving) never will: without the move, a blocked round
+    r.feed({"event": "rl_fragment_push", "island_id": 1, "time_unix": r.max_ts + 6, "global_step": 11,
+            "fragment_id": 0, "base_version": 10, "payload_bytes": 1, "round_attempt": 1})
+    now = r.max_ts + 900
+    assert any(x["blocked"] for x in diloco(r, now=now)["rounds"])
+    before = {c["id"]: c for c in r.overview(now=now)["islands"]}
+    assert before["0"]["status"] in ("left", "lost")
+    st = _state(tmp_path)
+    st["trainers"][0]["record"] = {**st["trainers"][0]["record"], "launch_state": "starting", "life_state": "ordering",
+                                   "why": f"moved to {AWS}", "relaunches": 0, "incarnation": 1}
+    st["trainers"][0]["now"] = fleet_islands.island_state(st["trainers"][0]["record"], st["trainers"][0])
+    r.load_fleet_state(st)
+    view = r.page_view(now=now)
+    card = next(c for c in view["overview"]["islands"] if c["id"] == "0")
+    assert card["status"] == "starting" and card["left"] is None and card["waiting_reason"] == f"moving to {AWS}"
+    assert not [a for a in view["overview"]["alerts"] if a.get("island") == "0" and a["rule"] in ("island_lost", "heartbeat")]
+    d = view["topology"]["diloco"]
+    assert d["stuck"] == [] and d["rounds"] and not any(x["blocked"] for x in d["rounds"])

@@ -64,7 +64,7 @@ function rich(e,parts){e.textContent=parts.map(function(p){return p[0]}).join(""
 function islandNow(tr){var n=tr.island_now;if(!n)return null;
   return {stopped:["stopped: "+(n.reason||""),"mute"],done:["finished","mute"],down:["down (run down)","mute"],removed:["removed from the fleet","mute"],
     abandoned:["abandoned: "+(n.reason||"given up"),"bad"],failed:["failed: "+(n.reason||"")+(n.detail?" · "+n.detail:""),"bad"],
-    moving:[n.reason||"moving","warn"],starting:[(n.reason||"starting")+(fin(n.incarnation)?" · incarnation "+n.incarnation:""),"warn"]}[n.state]||null}
+    moving:[(n.reason||"moving").replace(/^moving to /,"moving → ")+(n.detail&&/^new launch ordering/.test(n.detail)?" · ordering":""),"warn"],starting:[(n.reason||"starting")+(fin(n.incarnation)?" · incarnation "+n.incarnation:""),"warn"]}[n.state]||null}
 function trainerState(tr,tn,isl){
   var age=fin(tr.phase_since)?tn-tr.phase_since:null,a=age!=null?" · "+dur(age):"",ph=tr.phase_raw,co=isl&&isl.colocated;
   var inow=islandNow(tr);if(inow)return inow;
@@ -348,10 +348,10 @@ function lane(e,k){var c={delta:C.delta,wt:C.wt,warn:C.warn,bad:C.bad}[k];e.styl
 function active(kk,iid,sh,td){return T.live&&D.flows.some(function(f){return f.k===kk&&f.i===iid&&(sh==null||f.sh===sh)&&f.t0<=td&&Math.max(f.t1,f.t0+1.3)>=td})}
 function paint(){
   var tn=now(),td=tn-DELAY_S,red=U.reduced();
-  D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.status==="stopped"||tr.finalized||D.done);  // a finished run: no trainer is lost
+  D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.status==="stopped"||tr.finalized||D.done)&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state));  // a finished run: no trainer is lost
     tc.step.textContent=(fin(tr.step)?"step "+tr.step:"step n/a")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?"outer v"+tr.outer:"";
     fitText(tc.ph,st[0],tc.phw);tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
-    tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done?"link ✕":"";tc.badge.style.fill=C.bad;
+    tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
     [tc.co?o.merged:tc.box].forEach(function(b){if(b){b.style.stroke=dead||tr.failure?C.bad:"";b.style.strokeDasharray=dead?"5 4":""}});
     o.tc.g.setAttribute("opacity",dead?0.6:1);
     var L0=tc.l,lw=tc.lw;

@@ -457,6 +457,12 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         if vs:
             inferred = [max((v[f] for v in vs if f < len(v) and v[f] is not None), default=0) for f in range(p)]
     stuck = stuck_fragments(sy, running=running, behind=behind, any_merge=bool(merges), now=now)
+    if any((t.get("island_now") or {}).get("state") in ("moving", "starting") for t in trainers):
+        # an island moving or relaunching: no merge is expected until its new launch joins, so no
+        # fragment is stuck and no round is blocked yet
+        stuck = []
+        for r in rounds:
+            r["blocked"] = False
     for t in trainers:
         t["outer"] = t["outer"] if t["outer"] is not None else _outer(t["versions"], p)
 

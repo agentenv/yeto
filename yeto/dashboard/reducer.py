@@ -1591,6 +1591,8 @@ class Reducer:
         # what it is (yeto.rl.trainer_worker), over what its tape last said
         inow = self._trainer_island_now(isl) if role != "sampler" else None
         rec_stopped = bool(inow) and inow["state"] in ("stopped", "done", "down")
+        if inow and inow["state"] in ("moving", "starting"):
+            left = None  # the leave on its tape is the superseded launch's: its next launch is starting
         if left is None and inow and inow["state"] in ("removed", "failed", "abandoned"):
             left = {"ts": inow.get("since"), "reason": inow["state"] + (f": {inow['reason']}" if inow.get("reason")
                                                                         and inow["state"] != "removed" else ""),
@@ -1664,8 +1666,10 @@ class Reducer:
             status = "unknown"
         else:
             status = "ok"
-        if inow and inow["state"] in ("starting", "moving") and status in ("stale", "lost", "waiting", "unknown", "ok"):
+        if inow and inow["state"] in ("starting", "moving") and status in ("stale", "lost", "left", "waiting",
+                                                                          "unknown", "ok", "recovery"):
             status, starting = "starting", True  # relaunching / moving: its new incarnation is starting
+            waiting_why = inow.get("reason")
         return {
             "id": isl["id"], "name": isl["name"], "cloud": isl["cloud"], "region": isl["region"],
             "gpu": isl["gpu"], "gpus": isl["gpus"], "status": status, "finalized": bool(isl["finalized"]),

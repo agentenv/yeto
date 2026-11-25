@@ -318,8 +318,15 @@ def _trainer_records(objects: Any, learners: Any = None) -> dict[int, dict]:
                   "prefix": _str(launch.get("prefix_now") or launch.get("prefix")), "why": _str(launch.get("why")),
                   "started_at": _f(launch.get("started_at")), "closed_at": _f(launch.get("closed_at")),
                   "down_at": _f(launch.get("down_at")), "name": _str(launch.get("name")),
+                  "moving_to": _str(launch.get("moving_to")),
                   "last_exit": {"code": _int(ended.get("exit_code")), "detail": _str(ended.get("detail"))} if ended else None}
     return out
+
+
+def _phase(life: str | None) -> str:
+    """A launch's lifecycle state in words (``yeto.rl.island_launches``)."""
+    return {"ordering": "ordering machines (failing over across zones while none is free)",
+            "starting": "starting on its machines", "recovering": "recovering"}.get(str(life), str(life or "starting"))
 
 
 def island_state(rec: dict | None, desired: dict | None = None) -> dict | None:
@@ -351,12 +358,22 @@ def island_state(rec: dict | None, desired: dict | None = None) -> dict | None:
         stopped = dec.get("cause") == "stopped" or rec.get("stop") is not None
         return {"state": "stopped" if stopped else ("down" if ls == "down" else "done"),
                 "reason": (rec.get("stop") or {}).get("reason") or dec.get("detail") or ls, "detail": rec.get("exit")}
-    if ls == "moving" or (life in ("ordering", "starting") and (desired or {}).get("moves")):
+    why_now = str(rec.get("why") or "")
+    if ls == "moving":  # its STOP is ending the launch on the old machines (trainer_worker MOVING)
+        to = rec.get("moving_to") or (desired or {}).get("gpu") or rec.get("gpu")
+        return {"state": "moving", "reason": f"moving to {to}", "detail": "stopping its launch on the old machines"}
+    booting = life in ("ordering", "starting", "recovering") or ls == "starting"
+    if booting and (why_now.startswith("moved to") or (not why_now.startswith("relaunch")
+                                                        and (desired or {}).get("moves")
+                                                        and life in ("ordering", "starting"))):
+        # the launch after a move: ordering its new machines (sky fails over across zones and regions)
         return {"state": "moving", "reason": f"moving to {rec.get('gpu') or (desired or {}).get('gpu')}",
-                "detail": f"incarnation {rec.get('incarnation')} · relaunch {rec.get('relaunches')}"}
-    if life in ("ordering", "starting", "recovering"):
-        return {"state": "starting", "reason": "relaunching" if (rec.get("relaunches") or 0) > 0 else life,
-                "detail": f"incarnation {rec.get('incarnation')} · relaunch {rec.get('relaunches')}"}
+                "detail": f"new launch {_phase(life)} · incarnation {rec.get('incarnation')}"}
+    if booting:
+        relaunch = why_now if why_now.startswith("relaunch") else None
+        return {"state": "starting", "reason": relaunch or ("relaunching" if (rec.get("relaunches") or 0) > 0
+                                                            else _phase(life or ls)),
+                "detail": f"new launch {_phase(life)} · incarnation {rec.get('incarnation')}"}
     return {"state": "running", "reason": None, "detail": None}
 
 
