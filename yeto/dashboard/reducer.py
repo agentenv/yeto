@@ -633,27 +633,49 @@ class Reducer:
         """Sampler ``isl`` ended by the fleet's membership (``fleet_state``): the leave its member
         record names (written by the sampler, or by its pool for a removed pool's sampler that
         wrote none), else its shard retired by its pool's member table (the pool was removed or
-        scaled it down). None when the membership does not end it."""
+        scaled it down). None when the membership does not end it.
+
+        As the tape's pool exits (:meth:`AsyncRL.pool_exit`), a leave is believed only when the
+        sampler wrote nothing after it (``STOP_SLACK_S``) or its pool released its machine
+        (``member_state`` gone): a sampler still writing after its shard retired, or whose
+        machine the pool still holds (draining, or a release that failed: still billed), runs.
+        Such a leave comes back with ``draining`` set (the card shows it; not left)."""
         rec = ((self.fleet_state or {}).get("shards") or {}).get(isl["id"])
         if not rec:
             return None
         cur = (self.async_.sampler.get(isl["id"]) or {}).get("incarnation")
+        out = None
         if rec.get("left_at") is not None and (rec.get("incarnation") is None or cur is None
                                                or rec["incarnation"] == cur):
             reason = rec.get("leave_reason") or "left"
             by = "its pool" if rec.get("left_by") == "pool" else "the sampler"
-            return {"ts": rec["left_at"], "reason": reason, "source": "member record",
-                    "detail": f"leave {reason} written by {by} in its member record (pool {rec.get('pool')})",
-                    "done": reason in async_rl.SAMPLER_DONE_REASONS, "pool": rec.get("pool")}
-        if rec.get("retired"):
+            out = {"ts": rec["left_at"], "reason": reason, "source": "member record",
+                   "detail": f"leave {reason} written by {by} in its member record (pool {rec.get('pool')})",
+                   "done": reason in async_rl.SAMPLER_DONE_REASONS, "pool": rec.get("pool")}
+        elif rec.get("retired"):
             pool = rec.get("pool")
             row = ((self.fleet_state or {}).get("pools") or {}).get(pool) or {}
             removed = row.get("removed_at") is not None
-            return {"ts": rec.get("retired_at"), "reason": "pool removed" if removed else "retired",
-                    "source": "pool member table", "done": False, "pool": pool,
-                    "detail": f"shard retired by pool {pool}'s member table"
-                              + (" (fleet apply removed the pool)" if removed else " (scaled down)")}
-        return None
+            out = {"ts": rec.get("retired_at"), "reason": "pool removed" if removed else "retired",
+                   "source": "pool member table", "done": False, "pool": pool,
+                   "detail": f"shard retired by pool {pool}'s member table"
+                             + (" (fleet apply removed the pool)" if removed else " (scaled down)")}
+        if out is None:
+            return None
+        member = rec.get("member_state")
+        last = isl["last_event_ts"]
+        wrote_after = last is not None and out["ts"] is not None and last > out["ts"] + STOP_SLACK_S
+        held = member is not None and member != fleet_islands.GONE  # the pool still holds (bills) its machine
+        if member == fleet_islands.GONE or not (wrote_after or held):
+            if member == fleet_islands.GONE:
+                out["detail"] += "; its pool released the machine"
+            return out
+        out["draining"] = True
+        out["member_state"] = member
+        out["wrote_after"] = wrote_after
+        out["detail"] += ("; the sampler still writes after it" if wrote_after else "") + (
+            f"; its pool still holds the machine ({member}, billed)" if held else "")
+        return out
 
     def guard_drop_rates(self) -> dict[str, dict]:
         """Data-dropping guards' share of the data dropped over their recent rounds
@@ -1513,14 +1535,20 @@ class Reducer:
             left = {"ts": pool.get("cause_ts") or pool["ts"], "reason": pool["reason"], "event": pool["event"],
                     "ticket": pool.get("ticket"), "replaced_by": pool.get("replaced_by"),
                     "source": "nc pool", "lost": pool["status"] == "lost"}
+        pool_removed = None
         if role == "sampler" and left is None:
             # the sampler's own leave on its tape, else the fleet's membership (its member record,
             # its shard retired): a removed pool's sampler is gone, not stale
             own = (samp or {}).get("left")
+            if own and own.get("ts") is not None and (isl["last_event_ts"] or 0) > own["ts"] + STOP_SLACK_S:
+                own = None  # it wrote after its leave: not ended by it
             gone = ({"ts": own["ts"], "reason": own.get("reason") or "left", "source": "sampler leave",
                      "done": (own.get("reason") or "") in async_rl.SAMPLER_DONE_REASONS}
                     if own else self._membership_left(isl))
-            if gone is not None and gone.pop("done"):
+            if gone is not None and gone.get("draining"):
+                pool_removed = {k: gone.get(k) for k in ("ts", "reason", "pool", "member_state", "wrote_after",
+                                                         "detail")}  # still runs: draining, or not released
+            elif gone is not None and gone.pop("done"):
                 samp = {**(samp or {}), "ended": True}  # left after finishing its work: done
             elif gone is not None:
                 left = {**gone, "lost": False}
@@ -1596,6 +1624,11 @@ class Reducer:
             # a sampler waiting at its backlog cap writes nothing until the trainers read
             "waiting_backlog": waiting, "waiting_reason": waiting_why or ("backlog full" if waiting else None),
             "role": role, "left": left, "stale_after_s": _r(warn_s),
+            # a sampler whose pool removed or retired it but that still runs (draining, or its
+            # machine not released): shown running, alerted past alerts.POOL_REMOVED_GRACE_S
+            "pool_removed": ({**pool_removed, "since_s": _r(now - pool_removed["ts"])
+                              if pool_removed.get("ts") is not None else None}
+                             if pool_removed and left is None else None),
             "startup_slow": bool(starting and age is not None and age > (stage or {}).get(
                 "warn_s", self.thresholds["startup_warn_s"])),
             # the current startup stage (trainer_start_phase / rl_startup_step) and its thresholds

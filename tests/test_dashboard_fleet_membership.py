@@ -37,10 +37,11 @@ def _applied(seq: int, at: float, *, with_add: bool) -> dict:
             "removing": []}
 
 
-def _store(tmp_path: Path, *, leave: dict | None = None) -> Path:
+def _store(tmp_path: Path, *, leave: dict | None = None, member: str | None = "gone") -> Path:
     """The run store after fleet apply added i0-add-l4 (generation 2) and removed it (3): its pool
     state and member table retire its shard; its sampler's member record has ``leave`` (none: the
-    sampler was released before it wrote one)."""
+    sampler was released before it wrote one); ``member``: the pool's state of the machine serving the
+    shard (gone: released; None: not listed)."""
     root = tmp_path / "store"
     w = lambda rel, doc: (root / rel).parent.mkdir(parents=True, exist_ok=True) or (root / rel).write_text(  # noqa: E731
         json.dumps(doc))
@@ -49,7 +50,8 @@ def _store(tmp_path: Path, *, leave: dict | None = None) -> Path:
     w("fleet/applied/00000002.json", _applied(2, ADDED_AT, with_add=True))
     w("fleet/applied/00000003.json", _applied(3, REMOVED_AT, with_add=False))
     w("fleet/pools/i0-add-l4/state.json", {"format": 2, "stopped": "removed from the fleet's desired state",
-                                           "retired_shards": [ADD], "members": [{"shard": ADD, "state": "gone"}]})
+                                           "retired_shards": [ADD],
+                                           "members": [{"shard": ADD, "state": member}] if member else []})
     w("trainer0/fleet/members/i0-add-l4.json", {"schema": "yeto.fleet.member-table/v1", "pool": "i0-add-l4",
                                                 "shard_base": "qa-add-i0", "epoch": 2, "shards": [ADD],
                                                 "retired": [ADD], "updated_at": RETIRED_AT})
@@ -59,7 +61,7 @@ def _store(tmp_path: Path, *, leave: dict | None = None) -> Path:
     return root
 
 
-def _reducer(*, leave_event: str | None = None) -> Reducer:
+def _reducer(*, leave_event: str | None = None, rounds_after: int = 0) -> Reducer:
     """The fleet fixture plus the added pool's sampler: three rounds, then nothing (its machine
     was released when its pool was removed)."""
     r = Reducer(run="fleet-qa")
@@ -72,6 +74,9 @@ def _reducer(*, leave_event: str | None = None) -> Reducer:
     for i in range(3):
         recs.append({"event": "rl_sampler_round", "sampler_id": ADD, "time_unix": ADDED_AT + 60 + 40 * i,
                      "rollout_id": i, "groups": 2, "policy_version": 1, "generate_s": 25.0})
+    for i in range(rounds_after):  # still sampling after its shard retired (a drain, or a failed release)
+        recs.append({"event": "rl_sampler_round", "sampler_id": ADD, "time_unix": RETIRED_AT + 60 * (i + 1),
+                     "rollout_id": 3 + i, "groups": 2, "policy_version": 1, "generate_s": 25.0})
     if leave_event:
         recs.append({"event": "rl_sampler_leave", "sampler_id": ADD, "time_unix": RETIRED_AT - 5, "sampler": ADD,
                      "incarnation": "add-x1", "reason": leave_event})
@@ -149,6 +154,109 @@ def test_a_leave_of_an_older_incarnation_does_not_end_a_restarted_sampler(tmp_pa
     st["shards"][ADD]["retired"] = False  # only the old incarnation's leave: the new one runs on
     r.load_fleet_state(st)
     assert _card(r, ADD, LATE)["status"] == "ok"
+
+
+@pytest.mark.parametrize("member", [None, "draining", "ready"])
+def test_a_retired_sampler_that_still_writes_is_not_left(tmp_path, member):
+    """The pool retires the shard before it drains: a sampler still writing rounds after it (its
+    drain, or a release that failed) runs, shown draining, never left."""
+    r = _reducer(rounds_after=12)
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(_store(tmp_path, member=member)))))
+    now = RETIRED_AT + 60 * 12 + 20
+    card = _card(r, ADD, now)
+    assert card["status"] not in ("left", "done") and card["left"] is None
+    assert card["pool_removed"]["reason"] == "pool removed" and card["pool_removed"]["wrote_after"]
+    alerts = [a for a in r.overview(now=now)["alerts"] if a["rule"] == "pool_removed_running"]
+    assert alerts and alerts[0]["island"] == ADD and "still writes" in alerts[0]["detail"]
+
+
+def test_a_quiet_retired_sampler_whose_machine_the_pool_still_holds_runs_and_alerts(tmp_path):
+    """Quiet since its shard retired, but the pool still holds its machine (release failed):
+    still billed, so not left; within the grace it is draining, past it an alert."""
+    r = _reducer()
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(_store(tmp_path, member="draining")))))
+    soon = RETIRED_AT + 60
+    card = _card(r, ADD, soon)
+    assert card["status"] != "left" and card["pool_removed"]["member_state"] == "draining"
+    assert not [a for a in r.overview(now=soon)["alerts"] if a["rule"] == "pool_removed_running"]
+    late = [a for a in r.overview(now=LATE)["alerts"] if a["rule"] == "pool_removed_running"]
+    assert _card(r, ADD, LATE)["status"] != "left" and late and late[0]["sev"] == 1
+    assert "still holds its machine (draining)" in late[0]["detail"]
+    later = RETIRED_AT + 4 * 300 + 60  # well past the drain: critical
+    assert [a["sev"] for a in r.overview(now=later)["alerts"] if a["rule"] == "pool_removed_running"] == [0]
+
+
+def test_a_released_sampler_is_left_even_with_a_round_after_its_retirement(tmp_path):
+    """The pool released its machine (member gone): nothing of it runs, whatever its clock wrote."""
+    r = _reducer(rounds_after=1)
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(_store(tmp_path, member="gone")))))
+    card = _card(r, ADD, LATE)
+    assert card["status"] == "left" and "released the machine" in card["left"]["detail"]
+
+
+def test_a_member_record_leave_with_rounds_after_it_is_not_believed(tmp_path):
+    r = _reducer(rounds_after=3)
+    leave = {"left_at": RETIRED_AT - 3, "leave_reason": "POOL_REMOVED", "detail": {"left_by": "pool"}}
+    r.load_fleet_state(fleet_islands.read_fleet_state(
+        DirectoryObjectStore(str(_store(tmp_path, leave=leave, member=None)))))
+    card = _card(r, ADD, RETIRED_AT + 200)
+    assert card["status"] != "left" and card["pool_removed"]["reason"] == "POOL_REMOVED"
+
+
+def test_the_samplers_own_leave_with_rounds_after_it_is_not_believed():
+    r = _reducer(leave_event="FENCED", rounds_after=3)
+    assert _card(r, ADD, RETIRED_AT + 200)["status"] != "left"
+
+
+def test_the_lane_is_the_last_trainer_segment_of_the_run_prefix():
+    assert fleet_islands._lane({"run_prefix": "team/run/trainer1"}) == "trainer1"  # noqa: SLF001
+    assert fleet_islands._lane({"run_prefix": "run/trainer12/"}) == "trainer12"  # noqa: SLF001
+    assert fleet_islands._lane({"run_prefix": "run", "learner": 2}) == "trainer2"  # noqa: SLF001
+
+
+class _Counting(DirectoryObjectStore):
+    def __init__(self, root: str) -> None:
+        super().__init__(root)
+        self.reads: list[str] = []
+
+    def read(self, key):  # noqa: ANN001, ANN201
+        self.reads.append(key)
+        return super().read(key)
+
+
+def test_settled_membership_is_not_read_again(tmp_path):
+    """A generation is folded once; a removed pool whose machine was released is not read again."""
+    objects = _Counting(str(_store(tmp_path)))
+    cache: dict = {}
+    first = fleet_islands.read_fleet_state(objects, cache)
+    n_first = len(objects.reads)
+    objects.reads.clear()
+    again = fleet_islands.read_fleet_state(objects, cache)
+    assert again == first
+    assert not [k for k in objects.reads if k.startswith("fleet/applied/")]
+    assert not [k for k in objects.reads if "i0-add-l4" in k or ADD in k]
+    assert len(objects.reads) < n_first
+    # a live pool keeps being read: its state and member table may change
+    assert any(k.startswith("fleet/pools/") for k in objects.reads)
+
+
+def test_a_still_held_shard_is_read_again(tmp_path):
+    objects = _Counting(str(_store(tmp_path, member="draining")))
+    cache: dict = {}
+    fleet_islands.read_fleet_state(objects, cache)
+    objects.reads.clear()
+    fleet_islands.read_fleet_state(objects, cache)
+    assert "fleet/pools/i0-add-l4/state.json" in objects.reads
+
+
+def test_a_new_generation_is_folded_on_the_next_read(tmp_path):
+    root = _store(tmp_path)
+    cache: dict = {}
+    objects = DirectoryObjectStore(str(root))
+    assert fleet_islands.read_fleet_state(objects, cache)["pools"]["i0-add-l4"]["removed_at"] == REMOVED_AT
+    (root / "fleet/applied/00000004.json").write_text(json.dumps(_applied(4, REMOVED_AT + 900, with_add=True)))
+    st = fleet_islands.read_fleet_state(objects, cache)
+    assert st["pools"]["i0-add-l4"]["removed_at"] is None  # added back
 
 
 def test_a_pools_shards_retired_event_ends_its_sampler():

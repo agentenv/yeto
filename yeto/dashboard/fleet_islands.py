@@ -165,38 +165,56 @@ def _keys(objects: Any, prefix: str) -> list[str]:
         return []
 
 
+_LANE = re.compile(r"(?:^|/)(trainer\d+)/*$")
+
+
 def _lane(row: dict) -> str:
-    """The store lane (``trainer<k>``) of an applied pool: its ``run_prefix`` names it
-    (``<run>/trainer<k>``), else its island."""
-    prefix = str(row.get("run_prefix") or "")
-    if "/" in prefix:
-        return prefix.split("/", 1)[1].strip("/")
+    """The store lane (``trainer<k>``) of an applied pool: the last segment of its
+    ``run_prefix`` (``[<team>/]<run>/trainer<k>``), else its island."""
+    m = _LANE.search(str(row.get("run_prefix") or ""))
+    if m:
+        return m.group(1)
     return f"trainer{row.get('learner') if row.get('learner') is not None else 0}"
 
 
-def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
-    """The fleet's live membership from the run store (module doc): ``{"pools": {name: {name,
-    provider, shard_base, usd_per_h, learner, first_at, removed_at, removing, stopped,
-    retired}}, "shards": {shard: {pool, retired, left_at, leave_reason, incarnation,
-    left_by}}}``; None when the store has no applied membership. ``cache`` keeps the applied
-    generations (written once each) between reads."""
-    cache = {} if cache is None else cache
+GONE = "gone"  # a pool member released (``yeto.launch.pool.island_pool.GONE``)
+
+
+def _member_state(st: dict, shard: str) -> str | None:
+    """The pool's word on the machine serving ``shard`` (its state.json members): a member not
+    released (``draining``, ``ready``, ...) wins, else ``gone`` (released); None: not listed."""
+    states = [str(m.get("state") or "") for m in st.get("members") or () if isinstance(m, dict)
+              and str(m.get("shard")) == shard]
+    live = [x for x in states if x and x != GONE]
+    return live[0] if live else (GONE if states else None)
+
+
+def _fold_gens(objects: Any, cache: dict) -> dict[str, dict] | None:
+    """The applied generations folded into ``{pool: row}``, incrementally: a generation is
+    written once, so only the keys after the last one folded are read (``cache["fold"]``)."""
+    keys = _keys(objects, "fleet/applied/")
+    fold = cache.get("fold")
+    if fold is None or not keys:
+        fold = cache["fold"] = {"last": "", "pools": {}, "any": False}
     gens = []
-    for key in _keys(objects, "fleet/applied/"):
-        if key not in cache:
-            doc = _json(objects, key)
-            if not isinstance(doc, dict):
-                continue
-            cache[key] = doc
-        gens.append(cache[key])
-    if not gens:
+    for key in keys:
+        if key <= fold["last"]:
+            continue
+        doc = _json(objects, key)
+        if not isinstance(doc, dict):
+            break  # not readable yet: folded on a later read, in order
+        gens.append(doc)
+        fold["last"] = key
+    if not keys and not fold["any"]:
         doc = _json(objects, "fleet/applied.json")
-        gens = [doc] if isinstance(doc, dict) else []
-    if not gens:
-        return None
+        if not isinstance(doc, dict):
+            return None
+        fold["pools"] = {}
+        gens = [doc]
     gens.sort(key=lambda g: (_int(g.get("seq")) or 0, _f(g.get("at")) or 0.0))
-    pools: dict[str, dict] = {}
+    pools = fold["pools"]
     for g in gens:
+        fold["any"] = fold["any"] or bool(keys)
         at = _f(g.get("at"))
         here = set()
         for m in g.get("members") or ():
@@ -216,30 +234,79 @@ def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
         removing = {str(x.get("name") if isinstance(x, dict) else x) for x in g.get("removing") or ()}
         for name, row in pools.items():
             row["removing"] = name in removing
+    return pools if pools or fold["any"] or gens else None
+
+
+def _shard_record(objects: Any, lane: str, shard: str) -> dict | None:
+    """The newest incarnation's member record of ``shard`` (by ``joined_at``)."""
+    newest = None
+    for key in _keys(objects, f"{lane}/sample-buffer/members/{shard}/"):
+        m = _json(objects, key)
+        if isinstance(m, dict) and (newest is None or (_f(m.get("joined_at")) or 0) >= (_f(newest.get("joined_at")) or 0)):
+            newest = m
+    return newest
+
+
+def read_fleet_state(objects: Any, cache: dict | None = None) -> dict | None:
+    """The fleet's live membership from the run store (module doc): ``{"pools": {name: {name,
+    provider, shard_base, usd_per_h, learner, first_at, removed_at, removing, stopped,
+    retired}}, "shards": {shard: {pool, retired, retired_at, member_state, left_at,
+    leave_reason, incarnation, left_by}}}``; None when the store has no applied membership.
+
+    ``cache`` bounds the reads across calls: the applied generations are folded once each, a
+    retired shard whose machine the pool released (``member_state`` gone) is not read again,
+    and a removed pool whose every retired shard settled is not read again at all."""
+    cache = {} if cache is None else cache
+    pools = _fold_gens(objects, cache)
+    if pools is None:
+        return None
+    settled_pools = cache.setdefault("settled_pools", {})
+    settled_shards = cache.setdefault("settled_shards", {})
+    out_pools: dict[str, dict] = {}
     shards: dict[str, dict] = {}
-    for name, row in pools.items():
+    for name, base in pools.items():
+        row = {k: v for k, v in base.items() if k != "run_prefix"}
+        lane = _lane(base)
+        done = settled_pools.get(name)
+        if done is not None and base.get("removed_at") is not None:
+            row.update(done["row"])
+            out_pools[name] = row
+            shards.update(done["shards"])
+            continue
         st = _json(objects, f"fleet/pools/{name}/state.json")
         st = st if isinstance(st, dict) else {}
-        table = _json(objects, f"{_lane(row)}/fleet/members/{name}.json")
+        table = _json(objects, f"{lane}/fleet/members/{name}.json")
         table = table if isinstance(table, dict) else {}
         retired = sorted({str(x) for x in (st.get("retired_shards") or []) + (table.get("retired") or [])})
-        row.update(stopped=_str(st.get("stopped")), retired=retired, lane=_lane(row))
-        row.pop("run_prefix", None)
+        row.update(stopped=_str(st.get("stopped")), retired=retired, lane=lane)
+        mine: dict[str, dict] = {}
         for shard in retired:
-            rec = {"pool": name, "retired": True, "retired_at": _f(table.get("updated_at")), "left_at": None,
-                   "leave_reason": None, "incarnation": None, "left_by": None}
-            newest = None
-            for key in _keys(objects, f"{row['lane']}/sample-buffer/members/{shard}/"):
-                m = _json(objects, key)
-                if isinstance(m, dict) and (newest is None or (_f(m.get("joined_at")) or 0) >= (_f(newest.get("joined_at")) or 0)):
-                    newest = m
+            key = f"{lane}/{shard}"
+            if key in settled_shards:
+                mine[shard] = settled_shards[key]
+                continue
+            rec = {"pool": name, "retired": True, "retired_at": _f(table.get("updated_at")),
+                   "member_state": _member_state(st, shard), "left_at": None, "leave_reason": None,
+                   "incarnation": None, "left_by": None}
+            newest = _shard_record(objects, lane, shard)
             if newest is not None:
                 rec.update(left_at=_f(newest.get("left_at")), leave_reason=_str(newest.get("leave_reason")),
                            incarnation=_str(newest.get("incarnation")),
                            left_by=_str((newest.get("detail") or {}).get("left_by"))
                            if isinstance(newest.get("detail"), dict) else None)
-            shards[shard] = rec
-    return {"pools": pools, "shards": shards}
+            if rec["member_state"] == GONE:
+                settled_shards[key] = rec  # released: a retired shard does not come back
+            mine[shard] = rec
+        shards.update(mine)
+        out_pools[name] = row
+        if base.get("removed_at") is not None and st and all(r["member_state"] == GONE for r in mine.values()) \
+                and _member_state_all_gone(st):
+            settled_pools[name] = {"row": {k: row[k] for k in ("stopped", "retired", "lane")}, "shards": mine}
+    return {"pools": out_pools, "shards": shards}
+
+
+def _member_state_all_gone(st: dict) -> bool:
+    return all(str(m.get("state") or "") == GONE for m in st.get("members") or () if isinstance(m, dict))
 
 
 def state_pool(state: dict | None, sid: str) -> dict | None:

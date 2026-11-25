@@ -71,8 +71,10 @@ function kind(){return layout==="auto"?O.run_kind:layout}
 function leftText(s,l){return (s==="lost"?"lost":"left")+": "+(l.reason||"?")+(fin(l.ts)?" at "+clock(l.ts).slice(0,5):"")+(l.replaced_by?", replaced by "+l.replaced_by:"")}
 function stBadge(s,c){var m={ok:["ok","healthy"],starting:["wn","starting"],stopped:["mu","stopped"],stale:["bd","stale"],waiting:["wn","waiting"],lost:["bd","lost"],
   left:["mu","left the run"],recovery:["bd","needs recovery"],done:["mu","finished"],unknown:["mu","no data"]}[s]||["mu",s];var t=m[1];
-  if(c){if(s==="starting"&&c.startup_slow)t="starting (slow)";if(s==="waiting"&&c.waiting_reason)t="waiting: "+c.waiting_reason;if((s==="left"||s==="lost")&&c.left)t=leftText(s,c.left)}
-  return '<span class="st '+m[0]+'" title="'+esc(c&&c.left&&c.left.detail&&(s==="left"||s==="lost")?c.left.detail:c&&c.role?c.role:"")+'"><i></i>'+esc(t)+'</span>'}
+  if(c){if(s==="starting"&&c.startup_slow)t="starting (slow)";if(s==="waiting"&&c.waiting_reason)t="waiting: "+c.waiting_reason;if((s==="left"||s==="lost")&&c.left)t=leftText(s,c.left);
+    // its pool removed / retired it but it still runs: draining, or a release that failed (still billed)
+    if(c.pool_removed&&!c.left){var pr=c.pool_removed;if(s==="ok"||s==="waiting"||s==="starting"){m=["wn"];t="draining ("+(pr.reason||"retired")+")"}else t+=" · "+(pr.reason||"retired")+", not released"}}
+  return '<span class="st '+m[0]+'" title="'+esc(c&&c.left&&c.left.detail&&(s==="left"||s==="lost")?c.left.detail:c&&c.pool_removed&&!c.left?c.pool_removed.detail||"":c&&c.role?c.role:"")+'"><i></i>'+esc(t)+'</span>'}
 
 /* theme + layout */
 var THEMES=["auto","light","dark"];

@@ -100,6 +100,28 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
     return out
 
 
+POOL_REMOVED_GRACE_S = 300.0  # a removed pool drains (drain_wait_s x attempts) and releases in far less
+
+
+def pool_removed(cards: list[dict]) -> list[dict]:
+    """A sampler its pool removed or retired that still runs (writes, or the pool still holds its
+    machine) past :data:`POOL_REMOVED_GRACE_S`: its release failed, it is still billed."""
+    out = []
+    for c in cards:
+        pr = c.get("pool_removed")
+        since = (pr or {}).get("since_s")
+        if not pr or c["status"] in QUIET_OK or since is None or since <= POOL_REMOVED_GRACE_S:
+            continue
+        held = pr.get("member_state")
+        out.append(_alert(0 if since > 4 * POOL_REMOVED_GRACE_S else 1, "pool_removed_running",
+                          f"sampler {c['id']} still runs after its pool removed it",
+                          f"pool {pr.get('pool')}: {pr.get('reason') or 'retired'} {since / 60:.0f} min ago, but "
+                          + ("the sampler still writes" if pr.get("wrote_after") else "the sampler is not released")
+                          + (f" and the pool still holds its machine ({held}): still billed" if held else "")
+                          + "; release it (yeto fleet apply again, or the pool's pool-stop)", island=c["id"]))
+    return out
+
+
 def consecutive_missed(rounds: list[dict], th: dict) -> list[dict]:
     run: dict[str, list] = {}
     best: dict[str, list] = {}
@@ -527,7 +549,7 @@ def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list
     from . import alerts_diloco  # a run with a syncer; imports _alert from here
 
     th = reducer.thresholds
-    alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
+    alerts = (store_unreadable(store) + recovery(reducer) + heartbeat(cards, th) + pool_removed(cards) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
               + budget(cost, th) + blocked_pools(reducer) + degraded_pools(cost) + compaction(reducer, th) + trial_failures(reducer, th)
               + trainer_missing(reducer, th, now, cards) + trainer_failed(reducer, th, now)

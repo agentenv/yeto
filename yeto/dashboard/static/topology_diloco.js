@@ -415,7 +415,8 @@ function paintLearner(tr,l,lab,tn,lw){var ln=tr.learner||{},lp=tr.last_push,la=t
   fitText(lab[3],la?"  "+dur(tn-la.ts)+" ago":"",lab.w)}
 function paintSampler(o){var s=o.s;o.ver.textContent=fin(s.policy_version)?"v"+s.policy_version+(s.lag>0?" −"+s.lag:""):s.pool&&!s.live?"":"v?";
   o.ver.style.fill=s.lag>=2?C.bad:s.lag===1?C.warn:C.ink;var c=s.live?(s.state==="sampling"?C.good:s.state==="waiting"?C.warn:C.wt):C.ink2;
-  o.dot.setAttribute("fill",c);o.st.textContent=(s.live?s.state:(s.status||"ended"))+(s.pool&&s.n&&!(s.pool.removed&&!s.live)?" · "+s.nlive+"/"+s.n+" up":"");o.rate.textContent=(s.rate_gpm||0).toFixed(1)+" g/min";
+  var gone=s.pool&&s.pool.removed;if(gone&&s.live)c=C.warn;  // removed, still running: draining (or not released)
+  o.dot.setAttribute("fill",c);o.st.textContent=(s.live?(gone?"draining (removed)":s.state):(s.status||"ended"))+(s.pool&&s.n&&!(gone&&!s.live)?" · "+s.nlive+"/"+s.n+" up":"");o.rate.textContent=(s.rate_gpm||0).toFixed(1)+" g/min";
   if(o.g)o.g.setAttribute("opacity",s.pool&&s.pool.removed&&!s.live?0.55:1)}  // a pool fleet apply removed: dimmed
 function paintRollout(tr,o,tn,td){var r=tr.island,ro=o.ro,st=rolloutState(tr,tn),c=col(st[1]);
   ro.big.textContent=fin(r.round)?"round "+r.round:"round n/a";fitText(ro.st,st[0],ro.lw-14);ro.st.style.fill=st[1]==="good"?C.ink:c;ro.dot.setAttribute("fill",c);
