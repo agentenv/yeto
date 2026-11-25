@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 DATA_PATHS = ("r2", "syncer")
-ENTRY_KEYS = frozenset({"name", "provider", "config", "interval_s", "usd_per_h", "data_path"})
+ENTRY_KEYS = frozenset({"name", "provider", "config", "interval_s", "usd_per_h", "data_path", "required"})
 
 
 def provider_kinds() -> tuple[str, ...]:
@@ -66,6 +66,9 @@ class PoolRef:
     usd_per_h: float | None = None
     data_path: str = "r2"
     spec_carried: tuple[str, ...] = ()  # breakers: settings the pool's spec carries to the sampler (with_breakers)
+    # ``required: false`` (a samplers entry): a pool whose preflight fails is left out (degraded) and
+    # the run starts with the others; true (the default, and the one pool of ``pool``): it refuses the run
+    required: bool = True
 
     def load(self) -> dict[str, Any]:
         return json.loads(Path(self.config).read_text())
@@ -181,7 +184,11 @@ def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) 
         out.write_text(json.dumps(doc, indent=1, sort_keys=True))
         target = str(out)
     interval = _number(entry, f"samplers[{i}]", "interval_s", 30)
-    return PoolRef(name, target, interval, _number(entry, f"samplers[{i}]", "usd_per_h", None), data_path)
+    required = entry.get("required", True)
+    if not isinstance(required, bool):
+        raise ValueError(f"samplers[{i}]: required must be true or false")
+    return PoolRef(name, target, interval, _number(entry, f"samplers[{i}]", "usd_per_h", None), data_path,
+                   required=required)
 
 
 POOL_LAYERS = ("pool", "sampler")  # the layers whose knobs a pool config holds
