@@ -330,7 +330,9 @@ def nc_node_usd_h(*, path: str | None = None) -> float:
 
 def offer_row(resources: Mapping[str, Any], *, path: str | None = None) -> Price | None:
     """The row that prices a sky offer's ``resources`` (``infra`` ``"<cloud>/<region>"`` or
-    ``cloud`` + ``region``, ``accelerators`` ``"GPU:count"``, ``use_spot``); None: not in the table."""
+    ``cloud`` + ``region``, ``accelerators`` ``"GPU:count"``, ``use_spot``); None: not in the table.
+    A spot offer the table has no spot price for is priced at its on-demand row (counted high,
+    never low: :func:`spot_at_on_demand` tells the dry-run)."""
     infra = str(resources.get("infra") or "")
     cloud, _, region = infra.partition("/")
     cloud = (cloud or str(resources.get("cloud") or "")).lower()
@@ -338,7 +340,17 @@ def offer_row(resources: Mapping[str, Any], *, path: str | None = None) -> Price
     acc = resources.get("accelerators")
     if not cloud or not acc or not isinstance(acc, str):
         return None
-    return lookup(cloud, acc, spot=bool(resources.get("use_spot")), region=region or None, path=path)
+    spot = bool(resources.get("use_spot"))
+    row = lookup(cloud, acc, spot=spot, region=region or None, path=path)
+    if row is None and spot:
+        row = lookup(cloud, acc, spot=False, region=region or None, path=path)
+    return row
+
+
+def spot_at_on_demand(resources: Mapping[str, Any], *, path: str | None = None) -> bool:
+    """A spot offer whose table price is its on-demand row (no spot row for it)."""
+    row = offer_row(resources, path=path) if resources.get("use_spot") else None
+    return row is not None and row.spot is False
 
 
 def offer_usd_h(resources: Mapping[str, Any], *, path: str | None = None) -> float | None:

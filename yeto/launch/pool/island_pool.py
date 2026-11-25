@@ -57,6 +57,7 @@ from .migrate import PoolMoves
 LEASE_HOURS = 4  # the default lease of a lease-bounded provider (National Compute)
 
 METRICS_MISS_ALERT = 3  # probes in a row without engine /metrics before an event
+METRICS_OFF_WHY = "metrics disabled: prometheus_client missing"  # the engine said so on its tape (probe tok=off)
 PROGRESS_SLACK_S = 5.0  # tape age jitter (probe latency, whole seconds) that is not growth
 PROVISIONING, STARTING, READY, DRAINING, GONE = "provisioning", "starting", "ready", "draining", "gone"
 # a member the pool is retiring whose shard fence has not succeeded yet: its node is kept
@@ -2416,8 +2417,9 @@ class IslandPool(PoolMoves):
             return
         m.metrics_misses += 1
         if m.metrics_misses == METRICS_MISS_ALERT:
+            why = {"why": METRICS_OFF_WHY} if getattr(probe, "metrics_off", False) else {}
             self._event("engine_metrics_unreadable", ticket=m.ticket, account=m.account, shard=m.shard,
-                        misses=m.metrics_misses, port=getattr(self.ops, "metrics_port", None))
+                        misses=m.metrics_misses, port=getattr(self.ops, "metrics_port", None), **why)
 
     def _note_progress(self, m: Member, probe: el.Probe, now: float) -> None:
         """The sampler's progress for the controller's rollout stall view: its tape grew
