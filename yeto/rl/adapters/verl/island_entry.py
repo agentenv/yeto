@@ -606,9 +606,44 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
     return info
 
 
+def algorithm_spec_dict(args) -> dict | None:
+    """The ``--rl-algorithm-spec`` file's spec, or None (the default spec)."""
+    if not args.rl_algorithm_spec:
+        return None
+    return json.loads(Path(os.path.expanduser(args.rl_algorithm_spec)).read_text())
+
+
+def algorithm_sha256(spec_dict: dict | None) -> str:
+    """The hash of the AlgorithmSpec this island trains (the file's, or the default)."""
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+
+    return (AlgorithmSpec.from_dict(spec_dict) if spec_dict else AlgorithmSpec()).sha256()
+
+
+def verify_algorithm_hash(args, spec_dict: dict | None) -> str:
+    """Refuse (exit 2) an island whose algorithm hash differs from the launcher's
+    ``--rl-expected-algorithm-sha256``, as the Miles island does
+    (``rl_algorithm_mismatch``), before any data or GPU work. Without the flag (an island
+    started by hand) a warning is printed and the island runs. Returns the hash."""
+    actual = algorithm_sha256(spec_dict)
+    expected = args.rl_expected_algorithm_sha256
+    if expected is None:
+        print(f"[yeto-verl] warning: no --rl-expected-algorithm-sha256; algorithm hash {actual}",
+              file=sys.stderr, flush=True)
+    elif expected.lower() != actual:
+        print(f"[yeto-verl] rl_algorithm_mismatch: island {args.learner_id} algorithm hash {actual} differs "
+              f"from the launcher's expected {expected.lower()} (spec: "
+              f"{json.dumps(spec_dict, sort_keys=True) if spec_dict else 'default'}); refusing to start",
+              file=sys.stderr, flush=True)
+        raise SystemExit(2)
+    return actual
+
+
 def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
     run_config_rules.refuse_agentic_argv(ignored)  # never ignore agentic flags
+    spec_dict = algorithm_spec_dict(args)
+    spec_sha256 = verify_algorithm_hash(args, spec_dict)
     recipe_problems = run_config_rules.model_recipe_problems(
         recipe=args.rl_model_recipe, expert_selection=args.rl_expert_selection,
         expert_full_count=args.expert_full_count)
@@ -698,8 +733,6 @@ def main(argv=None) -> int:
                                           block=args.groups_per_round) if dispense else None)
     except DispenseIslandError as error:
         raise SystemExit(str(error)) from None
-    spec_dict = json.loads(Path(os.path.expanduser(args.rl_algorithm_spec)).read_text()) \
-        if args.rl_algorithm_spec else None
     algo = algorithm_options(spec_dict)
     chat = run_flags.chat_template_kwargs(args.apply_chat_template_kwargs)
     # 512 is enough for a single-turn data prompt (one question). On the agentic
@@ -784,15 +817,12 @@ def main(argv=None) -> int:
         # their identity is this section's too (``fully_async_full.full_parameter_hashes``
         # reads ``plan["model_config_sha256"]``); only the synchronous Megatron island
         # takes its identity from ``megatron_ports.config_hash`` instead.
-        from yeto.rl.engine.algorithm import AlgorithmSpec
-
         from .full_parameter_stream import plan_section
 
         try:
             full_plan = plan_section(
                 args, run.to_dict(), model_path=model_path, sync=sync,
-                algorithm_spec_sha256=(AlgorithmSpec.from_dict(spec_dict) if spec_dict
-                                       else AlgorithmSpec()).sha256())
+                algorithm_spec_sha256=spec_sha256)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
     asserted_keys = vconf.ASSERTED_KEYS

@@ -76,6 +76,7 @@ ISLAND_OPTIONAL = frozenset({"completed_groups_path", "source_sha256", "reward_s
 
 # Generated once from the hand-written verl island parser (the dests it defined).
 READ = frozenset({
+    "rl_expected_algorithm_sha256",  # checked at start (island_entry.verify_algorithm_hash)
     "actor_num_gpus_per_node", "actor_num_nodes", "apply_chat_template_kwargs", "bcast_delta",
     "completed_groups_path", "context_parallel", "data", "data_revision", "eval_data", "eval_data_sha256",
     "eval_dataset_name", "eval_interval", "eval_max_context_len", "eval_max_prompt_len",
