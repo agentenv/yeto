@@ -134,7 +134,7 @@ def test_a_full_parameter_pool_past_the_launch_follows_the_pool(capsys):
 def test_other_presets_keep_their_count_quorum_with_a_note(preset, capsys):
     _, plan = _plan(preset + QUORUM + ("--rl-sync-max-learners", "5"))
     assert " --quorum 2 " in _syncer(plan) and "--quorum-theta" not in _syncer(plan)
-    assert "--rl-sync-quorum-theta F follows the islands in the pool" in capsys.readouterr().err
+    assert "--rl-sync-quorum-theta F needs F of the islands the round expects" in capsys.readouterr().err
 
 
 @PRESETS

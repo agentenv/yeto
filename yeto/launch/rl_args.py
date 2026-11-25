@@ -854,9 +854,10 @@ def _pool_quorum_follows_the_pool(args, preset: str, num_islands: int, max_learn
     get θ = 1.0 (every island in the pool) by default, and a count quorum is refused
     there; the other presets keep their count quorum, with a note."""
     if preset != FULL_PARAMETER_SYNC_PRESET or max_learners <= num_islands:
-        print(f"[launcher] note: --rl-sync-quorum {args.quorum} counts islands and stays fixed while "
-              "islands join and leave the pool; --rl-sync-quorum-theta F follows the islands in "
-              "the pool (F of the islands a round expects; 1.0: every one of them)", file=sys.stderr)
+        print(f"[launcher] note: the count quorum ({args.quorum}) is a number of islands: a round "
+              "needs that many answers however many islands the pool holds; --rl-sync-quorum-theta F "
+              "needs F of the islands the round expects instead (1.0: every one of them)",
+              file=sys.stderr)
         return
     if getattr(args, "rl_sync_quorum", None) is not None and getattr(args, "rl_sync_quorum_derived", False):
         args.rl_sync_quorum = None  # a quorum the launcher derived (async mode, spot): θ replaces it

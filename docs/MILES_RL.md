@@ -304,7 +304,7 @@ They differ where the trainable state differs:
 | push dtype | always f32 | `int4` in `async` mode, f32 in `strict` |
 | terminal grace, peer recovery | no | yes (`async` mode) |
 | `--syncer-shards` | no | yes |
-| `--rl-sync-max-learners` (island pool grows past the launch) | yes | no: the session binds the launched roster |
+| `--rl-sync-max-learners` (island pool grows past the launch) | yes | yes: the islands bind the roster 0..N-1 into their session contract; past the launched islands the capacity quorum `--rl-sync-quorum-theta 1.0` is the default |
 | rollout token | `yeto:<rollout_id>:<policy_hash>` over the complete LoRA | the same form; the hash is over the trainer's published policy |
 | island tape | `rl_local_round`, `rl_fragment_push`, `rl_fragment_bcast` | `rl_full_parameter_round` (`sync/fragment_versions`, push and apply timings) |
 | final cut | every island downloads and applies it; `yeto-rl-export` writes the PEFT adapter | manifest only (`ack`) in `async` mode, so the final policy stays in the syncer checkpoint; `--rl-sync-final-cut download` applies it on the islands, `--rl-export-hf-rounds final` then exports it |
