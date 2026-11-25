@@ -250,3 +250,128 @@ def test_hold_zero_offers_the_lost_slot_at_once_and_keeps_the_owed_stop(world):
     w.ops.drain(m)
     assert p.account_free(1)  # spares 0 and 2 are free too: no hold
     assert p.owed_stops(1) == [(m.ticket, "smp-0")]
+
+
+# -- the store control plane: the provider's record in the run store (fleet/pools/<pool>/provider.json)
+
+
+def _other_host(w, tmp_path, name):
+    """The same pool's ops on another control host: its own (empty) state dir, the same nodes."""
+    ops = sp.SshSamplerPoolOps(w.cfg, conf=w.conf, run=w.nodes, state_dir=tmp_path / name, clock=w.clock)
+    ops.start_in_background = False
+    ops.data_path = lambda: w.fencer
+    return ops
+
+
+def test_a_controller_that_takes_the_pool_over_keeps_the_hold_and_the_owed_stop(world, tmp_path, monkeypatch):
+    """Controller A loses n0 under its sampler (the stop does not reach it) and dies without
+    releasing its lock. Controller B on another host takes the pool over once A's lease ran
+    out: it reads A's tickets, the hold on n0 and the owed stop from the store, its next start
+    on n0 stops the lost sampler first, and A (fenced) writes nothing more."""
+    from yeto.launch.pool import controller as rc  # noqa: PLC0415
+    from yeto.launch.pool.store_lock import LockLost  # noqa: PLC0415
+
+    w = world
+    real_open = store_state.open_pool_control
+    monkeypatch.setattr(store_state, "open_pool_control", lambda *a, **k: real_open(*a, clock=w.clock, **k))
+    objects = S3ObjectStore("s3://bkt/runs/r1", client=FakeS3())
+    config = PoolConfig(target=2, accounts=[0, 1, 2], shard_base="smp", index_limit=64,
+                        elastic=quiet_elastic(unreachable_grace_s=300.0))
+    events = EventLog(log=lambda _m: None, clock=w.clock)
+    a = rc._store_pool(w.cfg, config, w.ops, objects, "ssh", tmp_path / "a-state.json", events, None, None)  # noqa: SLF001
+    assert w.ops.provider._store is not None  # noqa: SLF001 - attached before the pool's first tick
+    a.clock = w.clock
+    _run(a, w, 3)
+    by_node = {w.ops.provider.node_of_ticket(m.ticket).name: m for m in a.live()}
+    lost = by_node["n0"]
+    w.nodes.down.add("ops@10.0.0.10")
+    _run(a, w, 8)
+    record = json.loads(objects.read(store_state.provider_key("ssh")))
+    assert record["tickets"][lost.ticket]["stop_owed"] and record["control"]["token"] == a.control.lock.token
+    held_until = record["tickets"][lost.ticket]["held_until"]
+    assert held_until > w.clock()
+
+    # A dies (no release, no detach); its lease runs out; B on another host claims the pool
+    w.clock.t += store_state.DEFAULT_TTL_S + 60
+    b_ops = _other_host(w, tmp_path, "host-b")
+    assert not (tmp_path / "host-b" / "ssh-pool-r1.json").exists()
+    b = rc._store_pool(w.cfg, config, b_ops, objects, "ssh", tmp_path / "host-b" / "state.json", events, None,  # noqa: SLF001
+                       None)
+    b.clock = w.clock
+    assert b.control.lock.token > a.control.lock.token
+    pb = b_ops.provider
+    assert pb._rows() == w.ops.provider._rows()  # noqa: SLF001 - every ticket, hold and owed stop
+    assert pb.owed_stops(0) == [(lost.ticket, lost.shard)]
+    assert pb._held(pb._rows(), 0, w.clock()) == held_until  # noqa: SLF001
+    assert pb.imported_from is None  # the store's record, not this host's (absent) file
+
+    # A is fenced: its provider refuses to write (no hold or ticket of A's lands after B's claim)
+    with pytest.raises(LockLost):
+        w.ops.provider.release(0, by_node["n1"].ticket)
+    assert json.loads(objects.read(store_state.provider_key("ssh")))["tickets"] == pb._rows()  # noqa: SLF001
+
+    # n0 is back: B's next start there stops A's lost sampler before its preflight
+    w.nodes.down.clear()
+    w.nodes.calls.clear()
+    m = SimpleNamespace(account=0, ticket=pb.order(0), shard="smp-9", data_slot=None, replaces_shard=None,
+                        predecessor_lost=False)
+    b_ops.start(m, ["smp-9"])
+    calls = [c for h, c in w.nodes.calls if h == "ops@10.0.0.10"]
+    stop_at = next(i for i, c in enumerate(calls) if f"yeto-sampler-{lost.shard}" in c and "kill --signal TERM" in c)
+    pre_at = max(i for i, c in enumerate(calls) if "YETO_SSH_CARDS_BEGIN" in c)
+    assert stop_at < pre_at and not pb.owed_stops(0)
+    assert not json.loads(objects.read(store_state.provider_key("ssh")))["tickets"][lost.ticket].get("stop_owed")
+    b.control.close()
+
+
+def test_the_local_record_is_imported_once_and_then_only_mirrored(world, tmp_path):
+    w = world
+    p = w.ops.provider
+    t = p.order(0)  # the local plane: the host's file
+    p.note_shard(t, "smp-0")
+    p.mark_lost(t, stopped=False)
+    local = json.loads(p.state_path.read_text())
+    objects = S3ObjectStore("s3://bkt/runs/r1", client=FakeS3())
+    control = store_state.open_pool_control(objects, "ssh", "smp", clock=w.clock)
+    w.ops.attach_control(control)
+    stored = json.loads(objects.read(store_state.provider_key("ssh")))
+    assert stored["tickets"] == local and stored["imported_from"] == str(p.state_path)
+    assert p.owed_stops(0) == [(t, "smp-0")]
+
+    # from now on the store wins: a changed local file is never read again, only overwritten
+    p.state_path.write_text(json.dumps({}))
+    again = _other_host(w, tmp_path, "host-a-again")
+    again.provider.state_path.parent.mkdir(parents=True, exist_ok=True)
+    again.provider.state_path.write_text(json.dumps({"stale": {"slot": 1, "state": "active"}}))
+    again.attach_control(control)
+    assert again.provider._rows() == local and again.provider.imported_from is None  # noqa: SLF001
+    p.stop_done(t)
+    assert json.loads(p.state_path.read_text())[t] == {k: v for k, v in local[t].items() if k != "stop_owed"}
+    control.close()
+
+
+def test_a_released_lock_writes_nothing(world):
+    from yeto.launch.pool.store_lock import LockReleased  # noqa: PLC0415
+
+    w = world
+    objects = S3ObjectStore("s3://bkt/runs/r1", client=FakeS3())
+    control = store_state.open_pool_control(objects, "ssh", "smp", clock=w.clock)
+    w.ops.attach_control(control)
+    p = w.ops.provider
+    t = p.order(1)
+    control.close()  # a detach: the next holder drives the pool
+    with pytest.raises(LockReleased):
+        p.mark_lost(t, stopped=False)
+    assert "stop_owed" not in json.loads(objects.read(store_state.provider_key("ssh")))["tickets"][t]
+    assert "stop_owed" not in p._rows()[t]  # noqa: SLF001 - nor in memory
+
+
+def test_an_unreadable_store_record_refuses_the_attach(world):
+    w = world
+    objects = S3ObjectStore("s3://bkt/runs/r1", client=FakeS3())
+    control = store_state.open_pool_control(objects, "ssh", "smp", clock=w.clock)
+    objects.write(store_state.provider_key("ssh"), b'{"something": "else"}')
+    with pytest.raises(ValueError, match="no tickets"):
+        w.ops.attach_control(control)
+    assert w.ops.provider._store is None  # noqa: SLF001
+    control.close()

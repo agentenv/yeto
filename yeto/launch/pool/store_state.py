@@ -58,6 +58,12 @@ def state_key(pool: str) -> str:
     return f"{pool_dir(pool)}/state.json"
 
 
+def provider_key(pool: str) -> str:
+    """The pool provider's own record (an ssh pool's tickets, lost-node holds and owed
+    stops), written under the same lock as the state."""
+    return f"{pool_dir(pool)}/provider.json"
+
+
 def lock_prefix(pool: str) -> str:
     return f"{pool_dir(pool)}/lock"
 
