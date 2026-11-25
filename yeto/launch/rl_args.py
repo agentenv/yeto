@@ -525,9 +525,16 @@ def _apply_rl_sync_mode(args) -> None:
     if mode == "async" and rl_sync_mode_applies(args) and not explicit_sweep:
         values = dict(_ASYNC_MODE_VALUES)
         # One learner (a synced full-parameter trainer alone behind its syncer):
-        # no outer optimizer, the merge is the identity (lr 1, momentum 0).
+        # no outer optimizer, the merge is the identity (lr 1, momentum 0). A fleet
+        # member launch (its syncer launch, each island launch) counts the fleet's
+        # learners (--rl-fleet-learners), never its own --gpu entries: the syncer and
+        # every island must compile one syncer profile.
+        from ..rl.engine.sample_roles import fleet_role
+
+        fleet_learners = getattr(args, "rl_fleet_learners", None) if fleet_role(args) is not None else None
+        learners = int(fleet_learners) if fleet_learners is not None else rl_island_count(args)
         nesterov = (int(getattr(args, "local_rl_rounds_per_sync", 1)) >= ASYNC_NESTEROV_MIN_H
-                    and rl_island_count(args) >= 2)
+                    and learners >= 2)
         values["rl_sync_outer_lr"] = 0.7 if nesterov else 1.0
         values["rl_sync_outer_momentum"] = 0.9 if nesterov else 0.0
         if args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET:

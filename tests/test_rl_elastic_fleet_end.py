@@ -266,3 +266,43 @@ def test_tape_collector_awaiting_syncer_follows_the_current_incarnation(tmp_path
     c.feed(_rec("rl_driver_start", n=2) + "\n")  # relaunched after the final cut
     c.feed(_rec("island_leave", reason=4) + "\n")
     assert c.awaiting_syncer
+
+
+def test_a_strict_failure_pushed_out_of_the_log_tail_is_still_never_relaunched(tmp_path):
+    """A fleet's island launch (one elastic island): the syncer refused its HELLO for a
+    profile it does not run; the island's strict failure record is in its event tape, but
+    the log lines after it (its engine's teardown) pushed it out of the tail the log probe
+    reads. It is dropped, not relaunched, and the launch ends for good (every island
+    failed deterministically: IslandsFailedForGood, never relaunched by the trainer worker)."""
+    import pytest
+
+    from yeto.launch.fleet import IslandsFailedForGood
+    from yeto.launch import island_lifecycle as lifecycle
+
+    tape = TapeCollector(tmp_path / "l0.jsonl")
+    error = ("StrictRlInvariantError: syncer refused this island: syncer rejected protocol session: "
+             "HELLO syncer semantic profile does not match the running server")
+    tape.feed(PREFIX + json.dumps({"event": "rl_strict_failure", "island_id": 0, "error": error,
+                                        "time_unix": 1.0}) + "\n")
+    tape.feed("".join(f"(RayWorkerManager) teardown line {i}\n" for i in range(2000)))
+    assert tape.strict_failure == error
+    ops = _refusing_ops(None)  # the log tail no longer holds the strict line
+    ops.status_seq["l0"] = [FAILED]
+    ops.status_seq.setdefault(SYNCER, [RUNNING])
+    ops.relaunch_results["l0"] = [None] * 200
+    ctl = FleetController(learners={"l0": ("task-l0", 1)}, syncer=None, sky_ops=ops, poll_interval=30,
+                          recover_timeout=900, thread_cls=ImmediateThread, fixed_roster=False, elastic=True,
+                          strict_failure_probe=lambda name: tape.strict_failure if name == "l0" else None)
+    with pytest.raises(IslandsFailedForGood) as raised:
+        ctl.run()
+    assert ops.relaunch_calls == [] and ctl.learners["l0"]["state"] == "abandoned"
+    assert "semantic profile" in raised.value.reasons["l0"]
+    assert ctl.learners["l0"]["decision"].action == lifecycle.FAIL
+
+
+def test_the_strict_failure_exit_is_never_relaunched():
+    from yeto.launch import island_lifecycle as lifecycle
+
+    decision = lifecycle.classify(exit_code=lifecycle.STRICT_FAILURE_EXIT, log_text="(teardown lines only)")
+    assert decision.cause == lifecycle.STRICT and not decision.relaunch
+    assert lifecycle.classify(exit_code=1, log_text="(teardown lines only)").relaunch

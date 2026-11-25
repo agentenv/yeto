@@ -148,6 +148,38 @@ def test_a_config_error_is_never_relaunched(tmp_path):
     assert launches.alive("run-i0")
 
 
+def test_an_island_launch_that_failed_for_good_is_never_started_again(tmp_path):
+    """The island launch ended with STRICT_FAILURE_EXIT (its island failed on a
+    deterministic error, e.g. the syncer refused its profile), its log tail holding only
+    teardown lines: failed, never started again (no new machines ordered)."""
+    objects, store = fleet(tmp_path, [member(0), member(1)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.end("run-i1", lifecycle.STRICT_FAILURE_EXIT, log="(RayWorkerManager) teardown line")
+    for _ in range(3):
+        w.step()
+    assert launches.started("run-i1") == 1
+    assert w.load(1)["state"] == lifecycle.FAILED
+    assert w.load(1)["decision"]["cause"] == lifecycle.STRICT
+    assert launches.alive("run-i0")
+
+
+def test_a_fleet_island_launch_ends_with_the_strict_failure_exit_when_its_islands_failed_for_good():
+    """launcher.run: a fleet's island launch maps IslandsFailedForGood to the exit the
+    trainer worker never relaunches; any other launch keeps the error."""
+    import inspect
+
+    from yeto import launcher
+
+    src = inspect.getsource(launcher.run)
+    branch = src[src.index("except IslandsFailedForGood as error:"):]
+    branch = branch[:branch.index("except FixedRosterIslandAbandoned")]
+    assert "if member_role != FLEET_ROLE_ISLAND:\n                raise" in branch
+    assert "return CONTAINER_CHANGED_EXIT if container_changed() else STRICT_FAILURE_EXIT" in branch
+    assert "strict_failure_probe=" in src
+
+
 def test_the_relaunch_budget_ends_an_island_abandoned(tmp_path):
     objects, store = fleet(tmp_path, [member(0)])
     launches = FakeLaunches()
