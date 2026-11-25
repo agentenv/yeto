@@ -157,6 +157,9 @@ def _refusal(verb: str, k: int, record: dict[str, Any] | None, store: str, state
         return (f"island {k} ({record.get('name')}) is on a fixed roster: one island stopped ends the whole "
                 "launch (exit 4), the other islands too. Stop the run instead (`yeto run down`), or pass "
                 "--end-fleet to stop it anyway")
+    if verb == "start" and record.get("state") == lc.DRAINING:
+        return (f"island {k} ({record.get('name')}) is draining on its island STOP (its controller acts on it "
+                "already, a START now would be lost): start it once `yeto island status` shows it done")
     if verb == "start":
         stopped = (record.get("state") == lc.DONE
                    and (record.get("decision") or {}).get("cause") == lc.STOPPED)

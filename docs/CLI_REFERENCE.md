@@ -216,7 +216,11 @@ Each prints the island's name, source, state and the launcher supervising it.
   (`ordering`, then `running`); a launcher restarted meanwhile does the same. The START is
   consumed: deleted, and kept in the island's record (`start`), so it is acted on once. A
   START of an island that runs (its STOP not acted on yet) cancels the stop and orders
-  nothing. `start` refuses an island that ended otherwise (finished, given up). A new run
+  nothing. `start` refuses an island that ended otherwise (finished, given up), and an
+  island whose record shows it `draining` (its STOP acted on already): start it once
+  `yeto island status` shows it `done`. A START that reaches the controller while it
+  drains the island (before the record says so) is kept and acted on once the island is
+  done. A new run
   of the same name drops a STOP or START an earlier run left. The sampler pools that
   `yeto run up` stopped for the island stay stopped in that `run up` process. To sample
   for the island again, restart `yeto run up` after removing the island's entry under
@@ -229,7 +233,8 @@ Each prints the island's name, source, state and the launcher supervising it.
 
 Exit codes: 0 done; 1 the store did not take the request, or the island's record did not
 read; 2 bad input (no store, a store without an object API here, no such island, an
-island this command does not drive, a fixed roster without `--end-fleet`).
+island this command does not drive, a fixed roster without `--end-fleet`, a `start` of an
+island that ended otherwise or still drains).
 
 ### `yeto merge`
 

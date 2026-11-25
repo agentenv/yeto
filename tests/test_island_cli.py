@@ -179,6 +179,65 @@ def test_a_stopped_island_is_ordered_again_on_its_start(tmp_path):
     assert record["incarnation"] == 1 and record["start"]["reason"] == "back"
 
 
+def test_a_start_that_reaches_a_draining_island_is_kept_until_it_is_done(tmp_path, capsys):
+    """The race ``yeto island start`` cannot see: the controller acts on the STOP (the island drains)
+    before its record says draining, the CLI then swaps the STOP for a START. The START is kept, not
+    consumed as ignored, and the island is ordered again once its drain is done (it is not left done)."""
+    states = _states(tmp_path)
+    ops = FakeOps()
+    ops.status_seq["r-l0-modal"] = [RUNNING] * 14 + [SUCCEEDED]
+    ops.status_seq["r-l1-modal"] = [RUNNING]  # still training: the drain takes its whole grace
+    ops.status_seq[SYNCER] = [RUNNING]
+    refs = {"r-l0-modal": lc.IslandRef(0, "modal"), "r-l1-modal": lc.IslandRef(1, "modal")}
+    ctl = FleetController(learners={"r-l0-modal": ("t", 1), "r-l1-modal": ("t", 2)}, syncer=(SYNCER, "t", 1),
+                          sky_ops=ops, poll_interval=30, recover_timeout=600, thread_cls=ImmediateThread,
+                          elastic=True, recorder=lc.FleetRecorder(states, refs))
+    ops.relaunch_results["r-l1-modal"] = [7]
+    states.request_stop(1, "maintenance", by="yeto island stop")
+    real_sleep, polls, seen = ops.sleep, [], {}
+
+    def sleep(seconds):
+        polls.append(seconds)
+        if len(polls) == 1:  # the STOP is acted on: island 1 drains
+            seen["state"] = ctl.learners["r-l1-modal"].get("draining")
+            states.clear_stop(1)
+            states.request_start(1, "back", by="yeto island start")
+        if len(polls) == 2:
+            seen["kept"] = states.start_requested(1) is not None
+        if len(polls) == 7:
+            ops.status_seq["r-l1-modal"] = [RUNNING] * 3 + [SUCCEEDED]
+        real_sleep(seconds)
+
+    ops.sleep = sleep
+    exits = ctl.run()
+    assert seen == {"state": True, "kept": True}  # draining when the START came, and it was kept
+    assert ops.down_calls[:1] == ["r-l1-modal"]  # the drain ended: released first
+    assert ops.relaunch_calls == ["r-l1-modal"]  # then ordered again, once
+    assert exits["r-l1-modal"].endswith("SUCCEEDED")
+    record = states.read(1)
+    moves = [h["to"] for h in record["history"]]
+    assert moves[:4] == ["running", "draining", "done", "ordering"] and moves[-1] == "done"
+    assert record["start"]["reason"] == "back" and record["start"]["outcome"] == "ordered"
+    assert states.start_requested(1) is None  # consumed once acted on
+    err = capsys.readouterr().err
+    assert err.count("island START (back) kept: the island drains") == 1 and "ignored" not in err
+
+
+def test_start_is_refused_while_the_record_drains(tmp_path, capsys):
+    """The controller acts on the STOP already: ``yeto island start`` refuses (exit 2) rather than
+    write a START the drain would lose; once the island is done it is started."""
+    states = _seed(tmp_path)
+    states.request_stop(1, "maintenance", by="yeto island stop")
+    states.write(1, "draining", name="r-l1-modal", source="modal")
+    assert yeto_main(["island", "start", "1", "--store", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert "is draining on its island STOP" in err and "nothing written" in err
+    assert states.start_requested(1) is None and states.stop_requested(1) is not None  # untouched
+    _stopped_record(states)
+    assert yeto_main(["island", "start", "1", "--store", str(tmp_path)]) == 0
+    assert states.start_requested(1)["by"] == "yeto island start"
+
+
 # -- yeto run up stops the pools of an island stopped by hand -------------------------------------------
 
 def test_run_up_stops_the_pools_of_an_island_stopped_by_hand(fleet_run):  # noqa: F811

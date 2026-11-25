@@ -550,7 +550,8 @@ class FleetController:
         record shows ``done`` on its island STOP (decision ``stopped``) is ordered again (the
         next incarnation; recovery drives the order, checked against the records' lock). A
         START is consumed: the record keeps it (``start``, by its time: never acted on twice)
-        and the request is deleted. A START of an island that runs, or that ended otherwise
+        and the request is deleted. A START that reaches an island still draining on its STOP
+        is kept, not consumed, and acted on once the island is done. A START of an island that runs, or that ended otherwise
         (finished, given up), orders nothing and is consumed too. A controller that lost the
         island records' lock acts on no request (:class:`IslandRecordsFenced`). True when
         the island is ordered again."""
@@ -572,6 +573,14 @@ class FleetController:
             return False
         why = str(request.get("reason") or "START")
         by = request.get("by")
+        if rec.get("draining") or (rec.get("stop_request") is not None and rec["state"] != DONE):
+            # acted on its STOP already (``yeto island start`` saw no draining record yet): the
+            # START is kept, not consumed, and acted on once the island is done
+            if rec.get("start_kept_at", object()) != request.get("at"):
+                rec["start_kept_at"] = request.get("at")
+                print(f"[launcher] {rec['name']}: island START ({why}) kept: the island drains on its island "
+                      "STOP; it is ordered again once it is done", file=sys.stderr)
+            return False
         stopped = (rec["state"] == DONE and record.get("state") == lifecycle.DONE
                    and (record.get("decision") or {}).get("cause") == lifecycle.STOPPED)
         if not stopped:
@@ -587,6 +596,7 @@ class FleetController:
             return False
         rec.pop("stopped", None)
         rec.pop("stop_request", None)
+        rec.pop("start_kept_at", None)
         rec.update(state=RECOVERING, failed_at=self.ops.now(), attempt=None, failures=0, recovering_s=0.0,
                    exit=None, decision=None, draining=False)
         self.downed_clusters.discard(rec["name"])  # its next incarnation is torn down at the end again
