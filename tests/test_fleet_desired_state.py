@@ -474,9 +474,17 @@ def test_the_end_of_a_removal_waits_while_another_env_overlay_is_active(tmp_path
     with scoped_environ({"AWS_PROFILE": "other"}):
         f.c._tick_slot("modal", slot)  # noqa: SLF001 - the worker's tick of this pool
         assert slot.pending_finish is not None and f.providers["modal"].released == released
-        assert "modal" in f.c.slots
+        assert "modal" in f.c.slots and f.c.check() is None
+        # bounded: skipped N times in a row, the pool is reported (a CRITICAL event, check(),
+        # which the run layer takes as run.controller_exit; run down releases what is left)
+        for _ in range(rc.ENV_CONFLICT_TICKS_N - 1):
+            f.c._tick_slot("modal", slot)  # noqa: SLF001
+        assert f.providers["modal"].released == released
+        assert "modal" in (f.c.check() or "")
+        assert any(e["event"].endswith("env_overlay_conflict") and e.get("critical")
+                   for e in slot.pool.events.events)
     f.ticks(6)
-    assert set(f.c.slots) == {"nc"}
+    assert set(f.c.slots) == {"nc"} and f.c.check() is None
     assert sorted(f.providers["modal"].released) == sorted(f.providers["modal"].machines)
 
 
