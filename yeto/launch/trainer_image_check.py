@@ -169,6 +169,8 @@ def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]
     pins = image_pin_problems(args, len(specs))
     if pins:
         raise ValueError("; ".join(pins))
+    if (getattr(args, "rl_backend", None) or "miles") == "verl":
+        return check_verl_trainer_cards(args, specs, out=out)
     if (getattr(args, "rl_backend", None) or "miles") != "miles":
         return []
     image = str(getattr(args, "rl_image", None) or "")
@@ -195,4 +197,130 @@ def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]
             raise ValueError(f"--gpu island {m} ({spec}): {message}")
         warnings.append(f"--gpu island {m} ({spec}): {message}")
         print(f"[launcher] WARNING: {warnings[-1]}", file=out or sys.stderr, flush=True)
+    return warnings
+
+
+# --- verl FSDP2 trainer cards (fleet-verl-trainer-islands 5.2) ------------------
+#
+# The verl FSDP2 images (``verl-build`` and its registry image) carry no Transformer
+# Engine: the trainer's attention is torch SDPA / flash-attn, built for sm80 and up.
+# The allowed architectures and the cards with evidence live in the verl pins
+# (VERL_FSDP_CARD_ARCHES, VERL_FSDP_VERIFIED_CARDS), next to the image they describe.
+
+def verl_card_problem(gpu: str) -> tuple[str, bool] | None:
+    """``(message, refused)`` for a verl FSDP2 trainer island on ``gpu`` cards: refused
+    below the lowest allowed architecture (no flash-attn / bf16 kernels there); an
+    "unverified" warning for a card no run has trained on (an allowed architecture
+    without evidence, or one outside the list at or above its floor); None for a card
+    with evidence, or one outside the CUDA catalog (Ascend, a card the catalog does not
+    know: the card checks report it)."""
+    from ..rl.engine import backends
+
+    pins = backends.module("pins", "verl")
+    try:
+        arch = card_arch_of(gpu)
+    except ValueError:
+        return None
+    have = _sm(arch)
+    if have is None:
+        return None
+    allowed = tuple(pins.VERL_FSDP_CARD_ARCHES)
+    floor = min(_sm(a) for a in allowed)
+    verified = {str(card).upper(): why for card, why in pins.VERL_FSDP_VERIFIED_CARDS.items()}
+    if have < floor:
+        return (f"the verl FSDP2 trainer needs a card of {'/'.join(allowed)}; {gpu} ({arch}) is below "
+                f"sm{floor} (no flash-attn or bf16 kernels): use one of "
+                f"{', '.join(sorted(verified)) or 'the allowed architectures'}", True)
+    if gpu.upper() in verified:
+        return None
+    where = "an allowed architecture" if arch in allowed else f"outside the verified list {'/'.join(allowed)}"
+    return (f"UNVERIFIED: no verl FSDP2 trainer run on {gpu} ({arch}, {where}) is recorded in the verl pins "
+            f"(verified: {', '.join(sorted(verified))}); it is not refused, but watch the first steps", False)
+
+
+def check_verl_trainer_cards(args: Any, specs: Any, *, out: Any = None) -> list[str]:
+    """The verl backend's trainer islands against their cards: a card below the FSDP2
+    floor is refused (ValueError), an unverified card is warned about (returned and
+    printed). The Megatron engine island and the sampler islands are not checked here."""
+    from ..rl.engine import backends, sample_roles
+
+    if backends.module("run_config_rules", "verl").megatron_run(args):
+        return []
+    samplers = set(sample_roles.sampler_islands(args, len(specs)))
+    warnings = []
+    for m, spec in enumerate(specs):
+        if m in samplers:
+            continue
+        found = verl_card_problem(str(spec.gpu))
+        if found is None:
+            continue
+        message, refused = found
+        if refused:
+            raise ValueError(f"--gpu island {m} ({spec}): {message}")
+        warnings.append(f"--gpu island {m} ({spec}): {message}")
+        print(f"[launcher] WARNING: {warnings[-1]}", file=out or sys.stderr, flush=True)
+    return warnings + check_pulled_images(args, specs, samplers, out=out)
+
+
+def _pulled_image(args: Any, cloud: str | None) -> str | None:
+    """The registry image a verl trainer island on ``cloud`` pulls: the one that replaces
+    ``verl-build`` there, or an explicit digest-pinned ``--rl-image``; None on Modal / ssh:."""
+    import re
+
+    from .rl_backend import _NO_PULL_CLOUDS, pulled_rl_image
+
+    pulled = pulled_rl_image(args, cloud)
+    if pulled is not None and pulled.get("problem"):
+        raise ValueError(pulled["problem"])
+    if pulled is not None:
+        return pulled["image"]
+    image = str(getattr(args, "rl_image", None) or "")
+    if cloud is not None and cloud not in _NO_PULL_CLOUDS and re.fullmatch(
+            r"docker:[^\s@]+@sha256:[0-9a-fA-F]{64}", image):
+        return image
+    return None
+
+
+def check_pulled_images(args: Any, specs: Any, samplers: Any = (), *, out: Any = None) -> list[str]:
+    """A verl trainer island that pulls a registry image (a sky island): the image's
+    manifest is asked for before anything is ordered (``image_manifest``, a HEAD with the
+    login the island would pull with). Missing or unreadable: refused (ValueError);
+    registry not reached: a warning. ``YETO_IMAGE_MANIFEST_CHECK=off`` skips it."""
+    import copy
+
+    from ..rl.engine import backends
+    from . import image_manifest as im
+    from .credentials import registry_login_for
+
+    images = {}
+    for m, spec in enumerate(specs):
+        if m in samplers:
+            continue
+        try:  # a configuration problem (no registry named) is refused with the check on or off
+            images[m] = _pulled_image(args, getattr(spec, "cloud", None))
+        except ValueError as error:
+            raise ValueError(f"--gpu island {m} ({spec}): {error}") from None
+    if not im.enabled():
+        return []
+    found: dict[str, tuple[str, str]] = {}
+    warnings = []
+    for m, spec in enumerate(specs):
+        image = images.get(m)
+        if image is None:
+            continue
+        if image not in found:
+            iargs = copy.copy(args)
+            iargs.rl_image = image
+            found[image] = im.manifest_status(image, registry_login_for(iargs))
+        status, detail = found[image]
+        if status in (im.MISSING, im.DENIED):
+            raise ValueError(
+                f"--gpu island {m} ({spec}): trainer image {image}: {detail}. Push or mirror that digest there "
+                f"(docker/verl-fsdp/build.sh), point {backends.module('pins', 'verl').VERL_REGISTRY_ENV} at a registry "
+                "that has it, or give the "
+                "launch a registry login (SKYPILOT_DOCKER_USERNAME / SKYPILOT_DOCKER_PASSWORD / "
+                "SKYPILOT_DOCKER_SERVER, or --rl-image-private)")
+        if status == im.UNKNOWN:
+            warnings.append(f"--gpu island {m} ({spec}): trainer image {image} not checked: {detail}")
+            print(f"[launcher] WARNING: {warnings[-1]}", file=out or sys.stderr, flush=True)
     return warnings

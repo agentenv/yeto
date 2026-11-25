@@ -5,6 +5,7 @@
 | `miles-ports/` | `yeto-miles-ports` | x86_64 | cuda | trainer + sampler | built and pushed (see the Dockerfile header) |
 | `yeto-release/` | release layer on `yeto-miles-ports` | x86_64 | cuda | — | see [`yeto-release/README.md`](yeto-release/README.md) |
 | `ppu-train/` | `yeto-ppu-train` | x86_64 | ppu | trainer + sampler | written, never built |
+| `verl-fsdp/` | `yeto-verl-fsdp` | x86_64 | cuda | verl FSDP2 trainer (sky, ssh docker nodes) | built and pushed; generated from the Modal `verl-build` recipe (see `build.sh`) |
 
 `yeto/launch/engine_images.py` is the catalog the launcher reads. A node of the
 SSH inventory declares `cpu_arch`; a node with no `image` takes the inventory's

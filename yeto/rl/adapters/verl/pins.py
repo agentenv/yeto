@@ -81,6 +81,95 @@ def expected_versions(device_family: str = "nvidia") -> dict:
 # digest exists: the image is built on Modal from the pinned commit + lock).
 VERL_IMAGE = f"verl-build:{VERL_COMMIT}"
 
+# --- registry image (fleet-verl-trainer-islands 5.1) ---------------------------
+#
+# The same recipe as VERL_IMAGE (image.recipe_steps, FSDP variant, patched) built
+# with docker and pushed under a fixed tag, for trainer islands that pull an image
+# instead of building on Modal: a sky island (AWS, Nebius, ...) and an ssh: island's
+# docker nodes. docker/verl-fsdp/Dockerfile is the recipe as text and
+# docker/verl-fsdp/build.sh pushes it. VERL_REGISTRY_RECIPE_SHA256 is
+# image.recipe_sha256() at build time: a test fails when the recipe (or
+# patch_verl.py) changes without a rebuild, so the registry image and the Modal
+# image cannot drift apart. The digest names the bytes.
+#
+# There is no default registry: no registry yeto ships with carries this digest.
+# The operator names the registry (or registry/organization) that holds it in
+# YETO_VERL_IMAGE_REGISTRY, e.g. an ECR registry
+# (<account>.dkr.ecr.<region>.amazonaws.com) or a GHCR owner (ghcr.io/<owner>);
+# without it a verl island that has to pull its image is refused before anything is
+# ordered (launch.trainer_image_check), and the launch preflight asks that registry
+# for the manifest (launch.image_manifest) with the login the island pulls with.
+# Built 2026-11-25 with docker/verl-fsdp/build.sh --push (linux/amd64, docker 28) into
+# a private ECR registry, tag fsdp-acad9875-a3aa3c94, about 8.6 GB (an earlier build of
+# the same recipe pushed elsewhere has another digest and is not this pin: a registry
+# serves this pin only with these bytes); read back from the pushed image: verl at
+# VERL_COMMIT, torch 2.13.0+cu130, vllm 0.29.0, transformers 5.12.1, peft 0.19.1 (the
+# EXPECTED_VERSIONS above), boto3 1.43.104, the patch_verl hooks in place, and the venv
+# first on PATH in a login shell too.
+VERL_REGISTRY_ENV = "YETO_VERL_IMAGE_REGISTRY"
+VERL_REGISTRY_REPOSITORY = "yeto-verl-fsdp"
+VERL_REGISTRY_RECIPE_SHA256 = "a3aa3c94ebb9301a760e5e215defbf6c52c0d2380bcc895b7d5e7c451c4a7f9b"
+VERL_REGISTRY_TAG = f"fsdp-{VERL_COMMIT[:8]}-{VERL_REGISTRY_RECIPE_SHA256[:8]}"
+VERL_REGISTRY_DIGEST = "5557c80fa3a5df13d5ba80b220db481bd81ccaed6444f9763f32e54b3e95f10c"
+VERL_REGISTRY_EXAMPLES = ("<account>.dkr.ecr.<region>.amazonaws.com", "ghcr.io/<owner>")
+
+
+def verl_registry(environ=None) -> str | None:
+    """The registry (``host[/organization]``) that carries the verl registry image:
+    ``$YETO_VERL_IMAGE_REGISTRY``; None when it is not set (there is no default)."""
+    value = (os.environ if environ is None else environ).get(VERL_REGISTRY_ENV, "").strip().rstrip("/")
+    return value.removeprefix("docker:") or None
+
+
+def verl_registry_image(environ=None) -> str | None:
+    """``docker:<registry>/yeto-verl-fsdp@sha256:<digest>`` on :func:`verl_registry`;
+    None when no registry is configured."""
+    registry = verl_registry(environ)
+    return f"docker:{registry}/{VERL_REGISTRY_REPOSITORY}@sha256:{VERL_REGISTRY_DIGEST}" if registry else None
+
+
+def is_verl_registry_image(rl_image: str | None) -> bool:
+    """``rl_image`` names the pinned verl registry image, on any registry."""
+    name, sep, digest = str(rl_image or "").removeprefix("docker:").partition("@")
+    return bool(sep) and digest == f"sha256:{VERL_REGISTRY_DIGEST}" and (
+        name.rsplit("/", 1)[-1].split(":", 1)[0] == VERL_REGISTRY_REPOSITORY)
+
+
+def registry_image_for(rl_image: str | None, environ=None) -> str | None:
+    """The registry image that carries the same pin and recipe as the Modal-built
+    ``rl_image`` (``verl-build:<VERL_COMMIT>`` -> :func:`verl_registry_image`); None for
+    any other image (the Megatron variant has no registry image) or when no registry
+    is configured."""
+    return verl_registry_image(environ) if rl_image == VERL_IMAGE else None
+
+
+def registry_missing_problem() -> str:
+    """What to set when a verl island has to pull its image and no registry is named."""
+    examples = " or ".join(f"{VERL_REGISTRY_ENV}={e}" for e in VERL_REGISTRY_EXAMPLES)
+    return (f"this verl trainer island pulls the registry image {VERL_REGISTRY_REPOSITORY}@sha256:"
+            f"{VERL_REGISTRY_DIGEST} (tag {VERL_REGISTRY_TAG}, the recipe of {VERL_IMAGE}) and no registry that "
+            f"carries it is configured: set {examples} (docker/verl-fsdp/build.sh builds and pushes it; a "
+            "private registry also needs SKYPILOT_DOCKER_USERNAME / SKYPILOT_DOCKER_PASSWORD / "
+            "SKYPILOT_DOCKER_SERVER), or pass --rl-image docker:<registry>/"
+            f"{VERL_REGISTRY_REPOSITORY}@sha256:{VERL_REGISTRY_DIGEST}")
+
+
+# --- cards (fleet-verl-trainer-islands 5.2) ------------------------------------
+#
+# The FSDP2 images carry no TransformerEngine (only the Megatron variant below
+# does), so the trainer has no sm90-only attention kernel: its attention is
+# torch SDPA / flash-attn, built for sm80+. Card architectures a verl FSDP2
+# trainer island may use; a card below them is refused before anything is ordered.
+VERL_FSDP_CARD_ARCHES = ("sm80", "sm89", "sm90")
+# Cards a verl FSDP2 trainer island has trained on, with the evidence. A card of an
+# allowed architecture that is not here gets an "unverified" warning, not a refusal.
+VERL_FSDP_VERIFIED_CARDS: dict[str, str] = {
+    "H100": "Modal 1xH100, rl-verl-backend acceptance (fork acad9875)",
+    "L40S": ("Modal 1xL40S, fleet-verl-trainer-islands 5.3 (fork acad9875): Qwen3-0.6B full-parameter "
+             "async GRPO buffer trainer, 20 steps with a 1xL4 SGLang pool following every release; peak "
+             "GPU memory 13.4 GB of 46 GB (torch max allocated 11.1 GB), step ~38 s, release ~1.2 GB in ~21 s"),
+}
+
 # On npu1: where the verl checkout lives inside the island's image.
 # The island has to start verl with this directory as the working directory,
 # because verl's fully_async config names its search path relative to it

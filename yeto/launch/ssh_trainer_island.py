@@ -1278,9 +1278,16 @@ def run_image(args: Any, nodes: Sequence[Node]) -> str | None:
     if not docker:
         return None
     if ref and _is_build_image(args, ref):
+        from .rl_backend import _rl_backend_module
+
+        pulled = getattr(_rl_backend_module(args, "launch_flags"), "pulled_image", None)
+        same = pulled(ref) if pulled else None
+        hint = (f"--rl-image {same['image']} (tag {same['tag']}: the same pin and recipe)" if same and same["image"]
+                else f"a registry image ({same['problem']})" if same
+                else "--rl-image docker:<registry>/<image>@sha256:<digest>")
         raise SshIslandError(
             f"--rl-image {ref} is an image yeto builds on Modal; an ssh: trainer island's docker nodes pull a "
-            "registry image: pass --rl-image docker:<registry>/<image>@sha256:<digest>, or run the nodes as "
+            f"registry image: pass {hint}, or run the nodes as "
             "runtime: rootfs (the trainer's Python environment on the node, --rl-ssh-trainer-activate)")
     if not ref:
         images = {n.image for n in docker}
