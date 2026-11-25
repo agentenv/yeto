@@ -157,6 +157,147 @@ def test_a_fleet_trainer_judges_its_pools_groups_by_its_own_local_versions(tmp_p
         assert publisher.feed.pull()["min_steps"] == expected
 
 
+def _counts_from_zero(rounds):
+    """A synced session as the full-parameter one (``FullParameterSync``): its rounds count
+    from 0 in every process, and the driver moves the label above the island's releases
+    (``continue_version_account_at``); the trainer state stays the one it loaded."""
+    from yeto.rl.engine.bridges import LocalOnlySync, _local_state
+    from yeto.rl.engine.driver import SyncStart
+
+    class CountsFromZero(LocalOnlySync):
+        def continue_version_account_at(self, driver, rollout_id):
+            self.resumed_at = int(rollout_id)  # this process still runs ``rounds`` rounds
+            return SyncStart(_local_state(driver, int(rollout_id)), int(rollout_id))
+
+    return CountsFromZero(rounds)
+
+
+def _fleet_process(tmp_path, s3, name, *, rounds, actor, wait_s=30.0, mode=PER_LEARNER_RELEASE):
+    """One process of fleet trainer 0 (its sub-store ``trainer0`` on FakeS3, its own lane),
+    the real driver over the real ports, and its pool: after each publication the pool
+    loads the sub-store's LATEST and writes one group with it (v0 before any release)."""
+    from test_rl_verl_buffer_trainer import TOLERANT, _base
+    from yeto.rl.adapters.verl import fully_async_round as far
+    from yeto.rl.adapters.verl.entry import verl_capabilities
+    from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland, FullyAsyncTrainerGroup
+    from yeto.rl.adapters.verl.ports_impl import VerlPolicyState
+    from yeto.rl.core import CanonicalTensorSpec, canonical_layout_hash
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+
+    store = _substore(tmp_path, s3, 0, stage=f"stage-{name}")  # a migrated process: another disk
+    base = tmp_path / "base"
+    if not base.is_dir():
+        _base(tmp_path, dtype=torch.float32)
+    specs = (CanonicalTensorSpec(NAMES[0], (2, 4), "float32", 8), CanonicalTensorSpec(NAMES[1], (4, 2), "float32", 8))
+    island = FullyAsyncIsland(actor, learner_id=0, limit=1, required=1, out_dir=str(tmp_path / name),
+                              readback_dir=str(tmp_path / f"rb-{name}"), base_model_revision="a" * 40,
+                              lora_config_hash="b" * 64, layout_hash=canonical_layout_hash(specs),
+                              expected_specs=specs)
+    tape = EventTape(tmp_path / f"{name}.jsonl", 0)
+    island.emit = lambda event, **f: tape.append({"event": event, **f})
+    buffer = FileSampleBuffer(store, batch_size=1, lane=OWN_LANE, create_index=False)
+    releases = PolicyReleaseStore(store)
+    rollout, publisher, placement = install_buffer_ports(
+        island, buffer=buffer, releases=releases, shape=bf.RowShape(64, 16, 0), base_dir=base,
+        tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=wait_s, cursor_log=lane_cursor_log(buffer),
+        release_mode=mode)
+    pool = GroupWriter(FileSampleBuffer(store, batch_size=1), f"pool-{name}")
+    publish = publisher.publish
+
+    def publish_then_pool_follows(state):
+        result = publish(state)
+        latest = releases.latest()
+        version = 0 if latest is None else int(latest.version)
+        pool.write([_sample(version, index=0), _sample(version, index=1)],
+                   group_key=f"{name}-{state.policy_version}")
+        return result
+
+    publisher.publish = publish_then_pool_follows
+    profile = far.execution_profile_for(TOLERANT, 1, groups_per_round=1, samples_per_group=2, sync="none")
+    driver = IslandDriver(
+        learner_id=0, rollout=rollout, trainer=FullyAsyncTrainerGroup(island), policy_state=VerlPolicyState(island),
+        publisher=publisher, placement=placement,
+        capabilities=verl_capabilities("sha256:" + "0" * 64, fully_async_limit=1),
+        algorithm=TOLERANT, sync=_counts_from_zero(rounds), events=tape, profile=profile)
+    publisher.bind(driver)
+    return driver, island, releases
+
+
+def test_a_migrated_per_learner_trainer_continues_its_versions_above_its_own_latest(tmp_path):
+    """Fleet trainer 0 released v1..v5 into its sub-store, then moved to another cloud (a new
+    process, same learner id, a fresh account at 0 from its sync session). Its first
+    publication -- the weights it holds after the syncer's catch-up -- is v6, its pool's
+    groups of v5 and v6 are trained, and nothing is skipped as not newer than LATEST."""
+    s3 = FakeS3()
+    first, _island, releases = _fleet_process(tmp_path, s3, "first", rounds=5, actor=FakeBufferActor())
+    assert first.run().policy_version == 5
+    assert [r.version for r in releases.records()] == [4, 5]  # the store keeps the newest two
+
+    caught_up = FakeBufferActor()  # the weights the syncer's catch-up loaded: not the base
+    caught_up.tensors[NAMES[1]] += 0.5
+    loaded = {k: v.clone() for k, v in caught_up.tensors.items()}
+    driver, island, releases = _fleet_process(tmp_path, s3, "second", rounds=2, actor=caught_up)
+    state = driver.run()
+
+    assert state.policy_version == 8 and driver.rounds_completed == 2
+    tape = _lines(tmp_path / "second.jsonl")
+    [own] = [e for e in tape if e["event"] == "rl_buffer_own_lane_versions"]
+    assert (own["latest_version"], own["start_version"], own["known_versions"], own["restored_versions"]) == (
+        5, 6, [4, 5], [5])
+    [continued] = [e for e in tape if e["event"] == "rl_version_account_continued"]
+    assert (continued["rollout_id"], continued["session_start"], continued["latest_release_version"]) == (6, 0, 5)
+    assert [e["versions"] for e in tape if e["event"] == "rl_published_policies_restored"] == [[5]]
+    assert not [e for e in tape if e["event"] == "rl_policy_release_skipped"]
+    released = [e for e in tape if e["event"] == "rl_policy_released"]
+    assert [(e["policy_version"], e["local_version"]) for e in released] == [(6, 6), (7, 7), (8, 8)]
+    # v6 is the caught-up weights under the next number (only the label moved)
+    log = _lines(tmp_path / "second" / RELEASE_LOG.format(learner=0))
+    assert log[0]["policy_version"] == 6 and log[0]["released"] is True
+    assert log[0]["policy_hash"] == released[0]["policy_hash"] == island.hashes[6]
+    from yeto.rl.adapters.verl.merged_release import write_merged_checkpoint
+
+    expected = write_merged_checkpoint(tmp_path / "base", loaded, tmp_path / "expected-v6")
+    assert log[0]["merge"] == expected and expected["max_relative_change"] > 0
+    # the pool kept up: the groups of v5 (loaded before the move) and v6 are trained
+    consumed = _lines(tmp_path / "second" / bf_consumed(0))
+    assert [(r["behavior_versions"], r["kept"]) for r in consumed] == [([5, 5], True), ([6, 6], True)]
+    assert releases.latest().version == 8
+    assert island.consume_map.to_dict() == {str(v): v for v in range(4, 9)}
+
+
+def bf_consumed(learner):
+    from yeto.rl.adapters.verl.buffer_ports import CONSUMED_LOG
+
+    return CONSUMED_LOG.format(learner=learner)
+
+
+def test_a_merged_mode_or_first_start_trainer_does_not_continue_any_account(tmp_path):
+    """Only a per-learner trainer reads its own releases: a synced group's trainer (merged
+    mode) and a per-learner trainer whose sub-store is empty start as before."""
+    store = CheckpointStore(tmp_path / "store")
+    releases = PolicyReleaseStore(store)
+    for version in (1, 2):
+        releases.release(version, f"{version:064d}", lambda d: (d / "w.bin").write_text("w"))
+    for mode, store_dir in ((MERGED_RELEASE, "store"), (PER_LEARNER_RELEASE, "empty")):
+        events = []
+        (tmp_path / mode).mkdir()
+        _, island, publisher, driver = _fleet_trainer(tmp_path / mode, CheckpointStore(tmp_path / store_dir),
+                                                      0, events, mode=mode)
+        assert publisher.own_releases is None
+        assert getattr(driver, "published_policy_history", None) is None
+        assert island.consume_map.to_dict() == {} and island.hashes == {}
+        assert not [e for e, _ in events if e == "rl_buffer_own_lane_versions"]
+    events = []
+    (tmp_path / "own").mkdir()
+    _, island, publisher, driver = _fleet_trainer(tmp_path / "own", store, 0, events)
+    assert driver.published_policy_history() == [(1, f"{1:064d}"), (2, f"{2:064d}")]
+    # max_policy_age 2 below the first publication v3: v1 and v2 name their groups
+    assert island.consume_map.to_dict() == {"1": 1, "2": 2}
+    assert island.hashes == {1: f"{1:064d}", 2: f"{2:064d}"}
+    [(_, own)] = [(e, f) for e, f in events if e == "rl_buffer_own_lane_versions"]
+    assert (own["latest_version"], own["start_version"]) == (2, 3)
+
+
 def test_per_learner_releases_need_a_trainer_on_its_own_lane_and_the_cadence_needs_them(tmp_path):
     from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland
 
