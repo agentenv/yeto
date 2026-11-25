@@ -644,16 +644,19 @@ def test_sky_accepts_and_keeps_the_ownership_label_on_every_infra(infra, run):
     assert resources.labels == labels and resources.copy(region=None).labels == labels
 
 
-# -- the run's AWS credentials never reach sky's requests (INT: AWS_PROFILE of an R2 store)
-def test_the_providers_sky_calls_carry_no_run_aws_credentials(monkeypatch):
-    from yeto.launch.nc import sky_provider as sp
-
-    seen = []
-
-    def original():
+# -- the run's AWS credentials never reach sky's requests (an R2 store's AWS_PROFILE, found on a real machine)
+def _fake_builder(sp):
+    def original(*args, **kw):
         return {"AWS_PROFILE": "store-r2", "AWS_ACCESS_KEY_ID": "AKIAEXAMPLE", "SKYPILOT_X": "1"}
 
-    builder = sp._scoped_request_env(original)
+    return original, sp._scoped_request_env(original)
+
+
+def test_the_providers_sky_calls_carry_no_run_aws_credentials():
+    from yeto.launch.nc import sky_provider as sp
+
+    original, builder = _fake_builder(sp)
+    seen = []
 
     class Module:
         StatusRefreshMode = SimpleNamespace(AUTO="auto")
@@ -670,6 +673,36 @@ def test_the_providers_sky_calls_carry_no_run_aws_credentials(monkeypatch):
     named.sky.status(None)
     assert seen[-1] == {"SKYPILOT_X": "1", "AWS_PROFILE": "sky-aws"}
     assert builder() == original()  # outside a provider call: as sky builds it
+    assert builder("future", kw=1) == original()  # a builder that grows parameters still works
+
+
+def test_the_scope_follows_sky_into_threads_with_a_copied_context_and_not_beyond():
+    import concurrent.futures
+    import contextvars
+    import threading
+
+    from yeto.launch.nc import sky_provider as sp
+
+    original, builder = _fake_builder(sp)
+    inside, outside = [], []
+    started, release = threading.Event(), threading.Event()
+
+    def concurrent_caller():  # another thread, not in any scope, while a scope is active
+        started.wait(5)
+        outside.append(builder())
+        release.set()
+
+    t = threading.Thread(target=concurrent_caller)
+    t.start()
+    with sp.request_env_scope(sp.aws_request_env(None)):
+        started.set()
+        release.wait(5)
+        ctx = contextvars.copy_context()  # what sky's run_in_parallel hands its workers
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            inside += list(pool.map(lambda _: ctx.copy().run(builder), range(2)))
+    t.join(5)
+    assert outside == [original()]
+    assert inside == [{"SKYPILOT_X": "1"}, {"SKYPILOT_X": "1"}]
 
 
 def test_real_sky_request_bodies_of_the_provider_drop_the_run_aws_profile(monkeypatch):
@@ -682,23 +715,101 @@ def test_real_sky_request_bodies_of_the_provider_drop_the_run_aws_profile(monkey
     monkeypatch.setattr(payloads, "request_body_env_vars", payloads.request_body_env_vars)  # restored after
     monkeypatch.setattr(common, "is_api_server_local", lambda *a, **k: True)
     monkeypatch.setenv("AWS_PROFILE", "store-r2")
-    assert sp.install_request_env_scope() and sp.install_request_env_scope()  # idempotent
+    sp.install_request_env_scope()
+    sp.install_request_env_scope()  # idempotent, self-checked
     assert payloads.RequestBody().env_vars.get("AWS_PROFILE") == "store-r2"  # sky's own forwarding
-    with sp._request_env(SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=FakeSky()).request_env):
-        assert "AWS_PROFILE" not in payloads.RequestBody().env_vars
-    with sp._request_env(SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=FakeSky(),
-                                     aws_profile="sky-aws").request_env):
-        assert payloads.RequestBody().env_vars["AWS_PROFILE"] == "sky-aws"
+    p = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=None)  # the real sky, via the proxy
+
+    def body(*a, **k):
+        return payloads.RequestBody().env_vars
+
+    monkeypatch.setattr("sky.status", body)
+    assert "AWS_PROFILE" not in p.sky.status(None)
+    named = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=None, aws_profile="sky-aws")
+    assert named.sky.status(None)["AWS_PROFILE"] == "sky-aws"
 
 
-def test_dry_run_refuses_run_aws_credentials_without_a_sky_profile(monkeypatch):
+def test_a_sky_that_does_not_use_the_scoped_builder_refuses(monkeypatch):
+    pytest.importorskip("sky")
+    from sky.server.requests import payloads
+
     from yeto.launch.nc import sky_provider as sp
 
-    for name in sp.AWS_FORWARDED_ENVS:
-        monkeypatch.delenv(name, raising=False)
-    p = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=FakeSky())
-    assert sp.aws_env_problems(p, {}) == []
-    problems = sp.aws_env_problems(p, {"AWS_PROFILE": "store-r2"})
-    assert len(problems) == 1 and "YETO_RL_STORE_S3_PROFILE" in problems[0] and "provider.aws_profile" in problems[0]
-    named = SkyProvider("run-s", slots=[1], resources={"infra": "aws"}, sky=FakeSky(), aws_profile="sky-aws")
-    assert sp.aws_env_problems(named, {"AWS_PROFILE": "store-r2"}) == []
+    monkeypatch.setattr(payloads, "request_body_env_vars", payloads.request_body_env_vars)
+    real_init = payloads.RequestBody.__init__
+
+    def drifted_init(self, **data):  # a sky that stopped building env_vars through the module function
+        data.setdefault("env_vars", {})
+        real_init(self, **data)
+
+    monkeypatch.setattr(payloads.RequestBody, "__init__", drifted_init)
+    with pytest.raises(RuntimeError, match="without payloads.request_body_env_vars"):
+        sp.install_request_env_scope()
+    monkeypatch.delattr(payloads, "request_body_env_vars")
+    with pytest.raises(RuntimeError, match="no payloads.request_body_env_vars"):
+        sp.install_request_env_scope()
+
+
+@pytest.mark.parametrize("env,infra,aws_profile,refused", [
+    ({}, "aws", None, []),
+    ({"AWS_PROFILE": "store-r2"}, "aws", None, ["AWS_PROFILE"]),
+    ({"AWS_PROFILE": "store-r2"}, "aws", "sky-aws", []),
+    ({"AWS_ACCESS_KEY_ID": "k", "AWS_SECRET_ACCESS_KEY": "s"}, "aws", "sky-aws",
+     ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]),
+    ({"AWS_ENDPOINT_URL": "https://r2.example"}, "aws", "sky-aws", ["AWS_ENDPOINT_URL"]),
+    ({"AWS_CONFIG_FILE": "/c", "AWS_SHARED_CREDENTIALS_FILE": "/s"}, "aws/us-east-2", "sky-aws",
+     ["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"]),
+    ({"AWS_PROFILE": "store-r2", "AWS_ENDPOINT_URL": "https://r2.example"}, None, None,
+     ["AWS_PROFILE", "AWS_ENDPOINT_URL"]),  # not pinned: may land on AWS
+    ({"AWS_PROFILE": "store-r2", "AWS_ACCESS_KEY_ID": "k"}, "nebius/eu-north1", None, []),  # no AWS call
+    ({"AWS_PROFILE": "store-r2"}, "kubernetes", None, []),
+])
+def test_dry_run_refuses_run_aws_settings_that_would_reach_sky(env, infra, aws_profile, refused):
+    from yeto.launch.nc import sky_provider as sp
+
+    resources = {"accelerators": "L4:1", **({"infra": infra} if infra else {})}
+    p = SkyProvider("run-s", slots=[1], resources=resources, sky=FakeSky(), aws_profile=aws_profile)
+    problems = sp.aws_env_problems(p, env)
+    if not refused:
+        assert problems == []
+    else:
+        assert len(problems) == 1 and all(name in problems[0] for name in refused)
+        assert "YETO_RL_STORE_S3_PROFILE" in problems[0] and "provider.aws_profile" in problems[0]
+
+
+def test_the_pool_start_refuses_too_not_only_its_dry_run(monkeypatch):
+    from yeto import sky_patches
+
+    monkeypatch.setattr(sky_patches, "require_matching_api_server", lambda out=None: None)
+    monkeypatch.setenv("AWS_PROFILE", "store-r2")
+    sky = FakeSky()
+    p = SkyProvider("run-s", slots=[1], resources={"infra": "aws", "accelerators": "L4:1"}, sky=sky)
+    p._real_sky = True
+    with pytest.raises(ValueError, match="AWS_PROFILE"):
+        p.order(1)
+    assert not [c for c in sky.calls if c[0] == "launch"]
+
+
+def test_the_cleanups_sky_down_of_a_pool_cluster_uses_the_providers_request_env(monkeypatch):
+    from yeto.cost import cleanup
+    from yeto.launch.nc import sky_provider as sp
+
+    seen = []
+    monkeypatch.setattr(sp, "install_request_env_scope", lambda: None)
+
+    class Ops:
+        def sky_down(self, cluster):
+            seen.append(sp._REQUEST_ENV.get())
+            return True
+
+    class Ledger:
+        def released(self, *a, **k):
+            pass
+
+    def row(**attrs):
+        return SimpleNamespace(kind="sky_cluster", id="c-1", name="c-1", key="k", attrs=attrs)
+
+    assert cleanup._release_one(row(pool=True, aws_profile="sky-aws"), Ops(), Ledger(), False, {}).ok
+    assert cleanup._release_one(row(pool=True), Ops(), Ledger(), False, {}).ok
+    assert cleanup._release_one(row(), Ops(), Ledger(), False, {}).ok  # a launcher cluster: sky's own forwarding
+    assert seen == [sp.aws_request_env("sky-aws"), sp.aws_request_env(None), None]
