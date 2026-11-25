@@ -766,6 +766,10 @@ class SGLangServerEngine(ServerEngine):
             argv += ["--enable-return-indexer-topk"]
         if o.fp32_lm_head:
             argv += ["--enable-fp32-lm-head"]
+        if "--enable-metrics" not in c.extra_args:
+            # /metrics (vLLM serves it by default): the pool's probe reads the token counter
+            # there to tell a stalled engine from a working one (nc.elastic.probe_script)
+            argv += ["--enable-metrics"]
         return argv + list(c.extra_args)
 
     def _resolve_dp_flag(self) -> str:

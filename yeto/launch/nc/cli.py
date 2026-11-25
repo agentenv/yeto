@@ -249,6 +249,27 @@ class NcSshOps:
     def run_tickets(self) -> list[tuple[int, str]]:
         return self.provider.run_tickets()
 
+    def hourly_cost(self, m: Member) -> float | None:
+        """One machine hour of ``m`` in its provider's currency, for a provider that prices each
+        machine by its own offer (sky, ``hourly_cost(ticket)``): that offer's price, else (an
+        unpriced offer) the pool's node hour, the National Compute MI355X rate where the
+        config states none (as the pool budget counts it: high, never None or 0). None for
+        National Compute, whose node hour is the pool's (unchanged)."""
+        from ..pool.money import to_usd  # noqa: PLC0415
+        from ..pool.provider import MultiProvider, _takes_ticket, caps_of  # noqa: PLC0415
+
+        provider = self.provider
+        if isinstance(provider, MultiProvider):
+            provider = provider.provider_of(m.account)
+        rate = getattr(provider, "hourly_cost", None)
+        if isinstance(provider, NCProvider) or rate is None or not _takes_ticket(rate):
+            return None
+        value = rate(m.ticket)
+        if value is not None:
+            return float(value)
+        ucr = pool_hourly_ucr(self.cfg) or hourly_cost_ucr()
+        return to_usd(ucr, "ucr") if caps_of(provider).currency == "usd" else float(ucr)
+
     def has_fallback_offer(self) -> bool:
         """A provider with several offers (sky): a failed order is that offer's while another
         is open, not the pool breaker's. National Compute has none: always False."""
@@ -1066,6 +1087,34 @@ def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
         return float(price), currency
     except (TypeError, ValueError):
         raise ValueError(f"pool config: provider price_usd_h must be a number, not {price!r}") from None
+
+
+def spot_priced_on_demand(cfg: dict[str, Any]) -> list[str]:
+    """The keys of a sky pool's spot offers without ``price_usd_h`` that the unified price
+    table prices at their on-demand row (it has no spot row for them). [] for other kinds."""
+    from yeto.cost import prices  # noqa: PLC0415
+
+    from ..pool import provider as providers  # noqa: PLC0415
+
+    section = cfg.get("provider") or {}
+    if providers.kind_of(cfg) != "sky" or section.get("price_usd_h") is not None \
+            or section.get("candidates") is not None:
+        return []
+    from yeto.launch.rollout.offers import offers_from_config  # noqa: PLC0415
+
+    docs = section.get("offers") if section.get("offers") is not None else [section]
+    try:
+        offers = offers_from_config(section)
+    except ValueError:
+        return []
+    return [o.key for o, d in zip(offers, docs)
+            if isinstance(d, dict) and d.get("price_usd_h") is None and prices.spot_at_on_demand(o.resources)]
+
+
+def spot_on_demand_notes(cfg: dict[str, Any]) -> list[str]:
+    """The dry-run's note for each :func:`spot_priced_on_demand` offer."""
+    return [f"offer {key}: the unified price table has no spot price for it; counted at its on-demand price"
+            for key in spot_priced_on_demand(cfg)]
 
 
 def unpriced_offers(cfg: dict[str, Any]) -> list[str]:
