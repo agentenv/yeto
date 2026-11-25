@@ -43,8 +43,13 @@ def test_gpu_spec_knows_verda_cards():
 
 def test_verda_island_runs_in_vm_docker(monkeypatch):
     args, task = _task_for("verda:1xrtx-6000-ada@FIN-01", monkeypatch, env=LOGIN)
-    image = launcher.in_vm_docker_image(args.rl_image)
+    from yeto.launch.trainer_image_check import sky_pull_image
+
+    # the VM's docker pulls the overlay-safe repack of a pin that has one (bug 26)
+    image = launcher.in_vm_docker_image(sky_pull_image(args.rl_image))
     assert image.startswith("ghcr.io/") and "@sha256:" in image and not image.startswith("docker:")
+    if image != launcher.in_vm_docker_image(args.rl_image):
+        assert launcher.in_vm_docker_image(args.rl_image) not in task.setup + task.run
     # VM task: sky gets no docker image (its Verda adapter raises on one); the login stays a secret
     assert not hasattr(task.resources, "image_id")
     # secret-handling-hardening: HF token and island HMAC key ride as secrets too.

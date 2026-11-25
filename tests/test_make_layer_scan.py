@@ -296,3 +296,83 @@ def test_same_layer_whiteouts_are_resolved_for_overlay_appliers(ml):
     # a layer without such a collision is unchanged
     plain = {k: e for k, e in entries.items() if "sglang" not in k}
     assert ml.resolve_same_layer_whiteouts(plain) == plain
+
+
+def _layer_tar(path, members, *, gz=False):
+    """A layer tar in the order given, like a pushed overlay layer (the 028e505d layer
+    115 has no directory entries for the dist-info it whites out and rewrites)."""
+    import gzip
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for name, data, mode in members:
+            info = tarfile.TarInfo(name)
+            info.mtime, info.mode, info.uname, info.gname = 1794294221, mode, "root", "root"
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    raw = buf.getvalue()
+    path.write_bytes(gzip.compress(raw, mtime=0) if gz else raw)
+
+
+def _scan(path):
+    import hashlib
+    import tarfile
+
+    with tarfile.open(path, "r:*") as tar:
+        return [(m.name, m.type, m.mode, m.uid, m.gid, m.mtime, m.size, m.linkname,
+                 hashlib.sha256(tar.extractfile(m).read()).hexdigest() if m.isreg() else None) for m in tar]
+
+
+@pytest.mark.parametrize("gz", [True, False])
+def test_repack_whiteouts_rewrites_a_pushed_layer_for_overlay_appliers(ml, tmp_path, gz):
+    """bug 26: MILES_K31_IMAGE 028e505d's yeto layer (shared with FULL_D 63ad0d2a) whites
+    out the sglang dist-info, .pth and finder and writes them again in the same layer;
+    a sky VM's `docker pull` fails ("failed to register layer: openat
+    .../sglang-*.dist-info/INSTALLER: not a directory"). ``repack-whiteouts`` drops those
+    whiteouts, puts the directory entry and its opaque marker right before the first
+    file under it, and keeps every other entry (header and data) in the same order."""
+    v = "0.5.24.dev80+g35708f7"
+    members = [
+        (f"{SITE}/.wh.__editable__.sglang-{v}.pth", b"", 0o644),
+        (f"{SITE}/.wh.peft-0.18.1.dist-info", b"", 0o644),
+        (f"{SITE}/.wh.sglang-{v}.dist-info", b"", 0o644),
+        (f"{SITE}/__editable__.sglang-{v}.pth", b"/sgl-workspace/sglang/python\n", 0o644),
+        (f"{SITE}/pyrage/pyrage.abi3.so", b"\x7fELF", 0o755),
+        (f"{SITE}/sglang-{v}.dist-info/INSTALLER", b"pip\n", 0o644),
+        (f"{SITE}/sglang-{v}.dist-info/RECORD", b"r", 0o644),
+        ("root/miles/.git/.wh..wh..opq", b"", 0o644),
+        ("root/miles/scripts/.wh.deleted.py", b"", 0o644),
+        ("root/miles/scripts/kept.py", b"print(1)\n", 0o644),
+    ]
+    src, dst = tmp_path / ("in.tar.gz" if gz else "in.tar"), tmp_path / "out.tar"
+    _layer_tar(src, members, gz=gz)
+    assert _overlay_replay([m[0] for m in members]) == [f"{SITE}/sglang-{v}.dist-info/INSTALLER",
+                                                         f"{SITE}/sglang-{v}.dist-info/RECORD"]
+    done = subprocess.run([sys.executable, str(SCRIPT), "repack-whiteouts", "--in", str(src), "--out", str(dst)],
+                          capture_output=True, text=True, check=True)
+    report = json.loads(done.stdout)
+    assert report["dropped"] == [f"{SITE}/.wh.__editable__.sglang-{v}.pth", f"{SITE}/.wh.sglang-{v}.dist-info"]
+    assert report["opaque"] == [f"{SITE}/sglang-{v}.dist-info"]
+    import hashlib
+
+    assert report["diff_id"] == "sha256:" + hashlib.sha256(dst.read_bytes()).hexdigest()
+    before, after = _scan(src), _scan(dst)
+    names = [e[0] for e in after]
+    assert _overlay_replay(names) == []
+    dist = f"{SITE}/sglang-{v}.dist-info"
+    i = names.index(dist)
+    assert after[i][1] == b"5" and names[i + 1] == f"{dist}/.wh..wh..opq" and names[i + 2] == f"{dist}/INSTALLER"
+    assert after[i][5] == after[i + 1][5] == 1794294221  # the whiteout's stamp
+    # every other entry unchanged, in the same order
+    added = {dist, f"{dist}/.wh..wh..opq"}
+    assert [e for e in after if e[0] not in added] == [e for e in before if e[0] not in report["dropped"]]
+    # a layer that needs no repack: exit 1, nothing to swap
+    _layer_tar(src, [m for m in members if "sglang" not in m[0]], gz=gz)
+    again = subprocess.run([sys.executable, str(SCRIPT), "repack-whiteouts", "--in", str(src), "--out", str(dst)],
+                           capture_output=True, text=True)
+    assert again.returncode == 1 and json.loads(again.stdout)["dropped"] == []

@@ -223,7 +223,9 @@ The repack of the former Modal default `2de5d796...`,
 `yeto-miles-k31@sha256:2abbbb00...`, holds the same files and the same Miles
 commit (`1f29e43043`) as that image; only one layer is packed differently. An
 SSH trainer island given `2de5d796...` (by `--rl-image` or by the inventory)
-runs this repack instead and says so on stderr. The previous full default
+runs this repack instead and says so on stderr. The same holds for the
+LoRA / generic default `028e505d...` and its repack `32626906...` (Miles
+FULL_D `9fa600b9`), on ssh nodes and on sky VMs. The previous full default
 `fa70fe28...` (Miles `aa6b6ff5`) has no overlay-safe repack.
 
 Why: the earlier build of the image

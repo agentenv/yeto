@@ -733,6 +733,19 @@ MILES_K31_FULL_OVERLAYFIX_IMAGE = pinned_image(
 # switches are not injected by yeto: docs/KIMI_K31_ASYNC_RL_GUIDE.md lists them.
 MILES_K31_NEXT9_IMAGE = pinned_image(
     "yeto-miles-k31", "3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225")
+# MILES_K31_IMAGE (028e505d) with only its yeto overlay layer (layer 115, the FULL_D layer
+# a2110bdf it shares with 63ad0d2a) repacked for overlay appliers: that layer whites out the
+# sglang dist-info directory (and the editable .pth / finder) and writes them again, which
+# docker's overlay2 graphdriver and the containerd overlayfs snapshotter reject ("failed to
+# register layer: openat .../sglang-*.dist-info/INSTALLER: not a directory" on a sky VM's
+# `docker pull`; Modal's builder accepts it). Repacked with docker/miles-ports/make_layer.py
+# repack-whiteouts: the three whiteouts dropped, the directory marked opaque; the same files,
+# the same Miles (FULL_D = MILES_NEXT_COMMIT); every other layer, the labels and the
+# entrypoint unchanged. Tag k31-9fa600b-35708f7-full-d-9fa600b-overlayfix. Not a default:
+# a sky trainer island pulls it in place of MILES_K31_IMAGE (OVERLAY_SAFE_DIGESTS), Modal
+# keeps the pin.
+MILES_K31_OVERLAYFIX_IMAGE = pinned_image(
+    "yeto-miles-k31", "32626906f3fd14ab4d888c874c2ae27a727c4119b94b38aa8b60a6c5da17c084")
 MILES_NEXT_IMAGE = MILES_K31_IMAGE
 # image digest -> the Miles commit inside it, when it is not MILES_NEXT_COMMIT: the island
 # checks its checkout against this commit (--miles-commit) instead of the default pin
@@ -749,13 +762,21 @@ IMAGE_MILES_COMMITS: dict[str, str] = {
     "3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225": MILES_K31_NEXT9_COMMIT,
 }
 # digest of an image an overlay applier rejects -> the digest of the same image with the
-# offending layer repacked (same files, same Miles commit). The legacy pair of the former
-# full image; the full-image default MILES_K31_NEXT9_IMAGE is overlay-safe as built, and
-# the previous full image fa70fe28 has no repack.
+# offending layer repacked (same files, same Miles commit): the legacy pair of the former
+# full image, and MILES_K31_IMAGE (the LoRA / generic default) and its repack
+# MILES_K31_OVERLAYFIX_IMAGE. The full-image default MILES_K31_NEXT9_IMAGE is overlay-safe
+# as built, and the previous full image fa70fe28 has no repack.
 OVERLAY_SAFE_DIGESTS: dict[str, str] = {
     "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b":
         "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14",
+    "028e505de58552e6ede8926c8bf8ab8451e8e749cfc35afc1eb70e8d362c65b3":
+        "32626906f3fd14ab4d888c874c2ae27a727c4119b94b38aa8b60a6c5da17c084",
 }
+# digests of images an overlay applier rejects that have no repack: FULL_D 63ad0d2a (the
+# image under MILES_K31_IMAGE's .git-only layer)
+OVERLAY_UNSAFE_UNREPACKED: tuple[str, ...] = (
+    "63ad0d2a9e70a139221050f51214f073a5bc53f66c0c57090ae926012e439c04",
+)
 
 
 def overlay_safe_image(image_ref: str | None) -> str | None:
@@ -764,6 +785,13 @@ def overlay_safe_image(image_ref: str | None) -> str | None:
     head, sep, digest = str(image_ref or "").rpartition("@sha256:")
     fixed = OVERLAY_SAFE_DIGESTS.get(digest) if sep else None
     return f"{head}@sha256:{fixed}" if fixed else None
+
+
+def overlay_unsafe_image(image_ref: str | None) -> bool:
+    """Whether ``image_ref`` pins an image an overlay applier refuses to unpack (whether
+    or not :data:`OVERLAY_SAFE_DIGESTS` has a repack of it)."""
+    head, sep, digest = str(image_ref or "").rpartition("@sha256:")
+    return bool(sep) and (digest in OVERLAY_SAFE_DIGESTS or digest in OVERLAY_UNSAFE_UNREPACKED)
 
 
 def image_miles_commit(image_ref: str | None) -> str | None:

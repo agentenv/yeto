@@ -98,6 +98,60 @@ def image_problem(image: str, gpu: str, *, attention_backend: str | None = "auto
             f"pass --rl-training-attention-backend {' / '.join(floor.lifted_by)} after verifying it on {gpu}", True)
 
 
+# --- overlay-safe pulls on sky VMs ---------------------------------------------------
+#
+# A pinned trainer image can carry a layer that whites out a path and writes it again
+# (the miles pins' OVERLAY_SAFE_DIGESTS / OVERLAY_UNSAFE_UNREPACKED). Modal's builder
+# unpacks it; docker on a VM does not (overlay2 and the containerd overlayfs snapshotter:
+# "failed to register layer ... not a directory" on `docker pull`). A trainer island on a
+# sky VM therefore pulls the image's overlay-safe repack (the same files and Miles
+# commit, so the pins still hold), and an unsafe image without a repack is refused before
+# anything is ordered. An ssh: island picks the repack itself
+# (yeto.launch.ssh_trainer_island.run_image); a Modal island keeps the pin.
+NO_SKY_DOCKER_CLOUDS = frozenset({"modal", "ssh"})
+
+
+def _miles_pins() -> Any:
+    from ..rl.engine import backends
+
+    return backends.module("pins", "miles")
+
+
+def sky_pull_image(image: Any) -> Any:
+    """The image a sky VM's docker pulls for the trainer image ``image``: its overlay-safe
+    repack when the miles pins name one, else ``image`` itself (also any non-string)."""
+    if not isinstance(image, str) or "@sha256:" not in image:
+        return image
+    try:
+        return _miles_pins().overlay_safe_image(image) or image
+    except Exception:  # noqa: BLE001 - no pins, no swap: the image as given
+        return image
+
+
+def sky_pull_problem(image: str, cloud: str) -> tuple[str, bool] | None:
+    """``(message, refused)`` for a trainer image on a sky VM of ``cloud``: the repack it
+    pulls instead (refused False: a note), or an overlay-unsafe image with no repack
+    (refused True); None when the image pulls as it is or the island is not a sky VM."""
+    if str(cloud or "").lower() in NO_SKY_DOCKER_CLOUDS or not image:
+        return None
+    pulled = sky_pull_image(image)
+    if pulled != image:
+        return (f"docker on the {cloud} VM pulls {pulled}, the overlay-safe repack of {image} (the same files "
+                "and Miles commit; the image's layer that whites out a path and writes it again does not "
+                "unpack on overlay2 / containerd overlayfs)", False)
+    try:
+        unsafe = _miles_pins().overlay_unsafe_image(image)
+    except Exception:  # noqa: BLE001
+        unsafe = False
+    if unsafe:
+        return (f"trainer image {image} has a layer that whites out a path and writes it again: docker on a "
+                f"{cloud} VM (overlay2 / containerd overlayfs) refuses it ('failed to register layer ... not a "
+                "directory' on pull) and the image has no overlay-safe repack. Pass an image built by "
+                "docker/miles-k31/build.sh (its layer is overlay-safe), repack that layer with "
+                "docker/miles-ports/make_layer.py repack-whiteouts, or run the island on Modal", True)
+    return None
+
+
 def training_attention(args: Any) -> tuple[str, str]:
     """``(backend, why)``: the Megatron ``--attention-backend`` the Miles trainer resolves
     to from the launch arguments, as :func:`yeto.rl.engine.run_config.resolve_rl_run_config`
@@ -184,6 +238,11 @@ def check_trainer_images(args: Any, specs: Any, *, out: Any = None) -> list[str]
     for m, spec in enumerate(specs):
         if m in samplers:
             continue
+        pull = sky_pull_problem(image, str(getattr(spec, "cloud", "") or ""))
+        if pull is not None:
+            if pull[1]:
+                raise ValueError(f"--gpu island {m} ({spec}): {pull[0]}")
+            print(f"[launcher] --gpu island {m} ({spec}): {pull[0]}", file=out or sys.stderr, flush=True)
         found = image_problem(image, str(spec.gpu), attention_backend=backend)
         if found is None:
             continue

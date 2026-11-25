@@ -191,7 +191,9 @@ def test_sky_ports_task_logs_in_via_task_secrets(monkeypatch, login):
     assert task.setup.startswith(launcher.DOCKER_LOGIN_UNSET)
     assert task.run.startswith(launcher.DOCKER_LOGIN_UNSET)
     assert "not-a-real-token" not in json.dumps(task.envs) + task.setup + task.run
-    assert task.resources.image_id == rl.MILES_NEXT_IMAGE
+    from yeto.launch.trainer_image_check import sky_pull_image
+
+    assert task.resources.image_id == sky_pull_image(rl.MILES_NEXT_IMAGE)  # the overlay-safe repack on a sky VM
 
 
 def test_no_login_means_no_docker_login(monkeypatch, no_login):
