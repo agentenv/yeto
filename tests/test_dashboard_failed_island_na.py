@@ -81,3 +81,17 @@ def test_syncer_run_kpi_cards_say_what_is_missing(tmp_path):
     for key in ("rKpis", "rCostK"):
         assert not re.search(r"\bn/a\b", _text(out[key])), key
     assert '<div class="kt">MFU</div><div class="kv">not on the tapes</div>' in out["rCostK"]
+
+
+def test_a_syncer_run_where_no_island_trained_says_so_in_its_run_kpis(tmp_path):
+    """Both islands' trainer tapes cut after their start: the run KPIs (rKpis) read a sentence
+    for a step time no island reported, never "n/a"."""
+    dst = tmp_path / "run-b"
+    shutil.copytree(D / "run-b", dst)
+    for tape in (dst / "events").glob("*.jsonl"):
+        tape.write_text("".join(json.dumps(x) + "\n" for x in lines(tape)[:4] if x.get("event") != "rl_driver_phase"))
+    r = Reducer(run="run-b")
+    load_all(r, [str(p) for p in sources.discover([str(dst), str(dst / "events")])])
+    kp = _page(tmp_path, r)["rKpis"]
+    assert '<div class="kt">trainer 0 step p50</div>' in kp and ">no steps yet</div>" in kp
+    assert not re.search(r"\bn/a\b", _text(kp))
