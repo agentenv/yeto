@@ -368,6 +368,24 @@ def test_status_summarises_every_pool(tmp_path, capsys):
     assert entry.status(refs, provider="sky") == 2
 
 
+def test_status_counts_the_islands_and_lists_an_unsettled_move_apart(tmp_path, capsys):
+    """A machine handed over to another pool is no island of this one: not counted, not sent
+    to pool-stop (which cannot release it), listed under moving with the reason."""
+    run_cfg, _, nc_path = _two_pools(tmp_path)
+    refs = pools.resolve(run_cfg, tmp_path / "s")
+    state = nc_cli.pool_state_path(json.loads(open(nc_path).read()))
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"target": 0, "stopped": "signal SIGTERM",
+                                 "members": [{"account": 1, "ticket": "t1", "shard": "nc-0", "state": "gone"}],
+                                 "moves": {"out": {"t1": {"move": "t1.1", "state": "handed_over", "to": "other-i1",
+                                                          "account": 1, "since": 1.0, "box": "b"}}}}))
+    assert entry.status(refs) == 1
+    nc = {r["pool"]: r for r in json.loads(capsys.readouterr().out)["pools"]}["nc"]
+    assert nc["islands"] == 0 and nc["billed"] == []
+    assert [m["ticket"] for m in nc["moving"]] == ["t1"] and "other-i1" in nc["moving"][0]["why"]
+    assert "pool-stop" not in nc["warning"] and "unsettled move" in nc["warning"]
+
+
 def test_pool_scale_argv_carries_every_flag():
     args = _parser().parse_args(["rollout", "scale", "--remove", "a", "--remove", "b", "--pool-config", "p",
                                  "--drain", "--force-static", "--dry-run", "--source", "auto"])

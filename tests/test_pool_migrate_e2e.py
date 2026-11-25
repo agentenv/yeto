@@ -672,7 +672,7 @@ def test_a_move_record_that_does_not_read_is_kept_alerted_and_listed_not_fatal(t
     assert again.moves_expected() == 0
     again.tick()
     assert any(e["event"].endswith("move_out_unresolved") for e in again.events.events)
-    assert sorted(m.ticket for m in again.moves_left()) == ["x", "y"]
+    assert sorted(m.ticket for m in again.moves_left()) == ["?", "x", "y"], "the whole unreadable in is listed too"
 
 
 def test_a_take_whose_box_is_gone_is_alerted_and_listed(tmp_path):
@@ -694,3 +694,21 @@ def test_two_spellings_of_one_state_dir_share_one_box(tmp_path):
     pb.state_path = tmp_path / "x" / ".." / "state" / pb.state_path.name
     pa.move_box = pb.move_box = None
     assert migrate.box_of(pa).where == migrate.box_of(pb).where
+
+
+def test_moves_out_that_do_not_read_as_a_whole_pause_the_patrol(tmp_path):
+    fleet = Fleet(tmp_path)
+    fleet.run(3)
+    pa = fleet.pools["pa"]
+    doc = pa.snapshot()
+    doc["moves"] = {"out": ["junk"]}
+    again = IslandPool.from_doc(doc, pa.config, pa.ops, clock=fleet.clock, log=lambda _m: None, events=pa.events)
+    assert again.moves_unknown()
+    fleet.cloud.machines["pa-t9"] = {"slot": 2, "state": "active", "since": fleet.clock()}  # an unowned ticket
+    again.tick()
+    assert fleet.cloud.machines["pa-t9"]["state"] == "active" and "pa-t9" not in [m.ticket for m in again.members]
+    assert any(e["event"].endswith("patrol_paused") for e in again.events.events)
+    held = {"out": {"t": {"move": "t.1", "state": "unreadable", "account": 1, "since": 1.0}}}
+    again.moves = {"out": {"t": {"move": "t.1", "state": "handed_over", "account": 1, "since": 1.0}}}
+    again.merge_moves(held)
+    assert again.moves["out"]["t"]["state"] == "handed_over", "a copy that reads wins over an unreadable one"

@@ -76,10 +76,12 @@ OUT, IN = "out", "in"
 # a move out: draining -> stopping (a stop failed, retried) -> handed_over -> taken | releasing -> released
 DRAINING_OUT, STOPPING, HANDED_OVER, TAKEN, RELEASING, RELEASED = (
     "draining", "stopping", "handed_over", "taken", "releasing", "released")
-OUT_RANK = {DRAINING_OUT: 0, STOPPING: 1, HANDED_OVER: 2, TAKEN: 3, RELEASING: 3, RELEASED: 4}
+OUT_RANK = {DRAINING_OUT: 0, STOPPING: 1, HANDED_OVER: 2, TAKEN: 3, RELEASING: 3, RELEASED: 4}  # UNREADABLE: -1
 # a move in: waiting (the placeholder) -> taking (saved before the claim) -> a member
 WAITING, TAKING = "waiting", "taking"
 UNREADABLE = "unreadable"  # a saved move record that does not read: kept (patrol skips it), alerted, listed
+OUT_RANK[UNREADABLE] = -1  # any copy that reads wins over it in a merge
+UNKNOWN_TICKETS = "?"  # a whole ``out`` that does not read: which tickets move is unknown (patrol pauses)
 
 
 class MoveRefused(RuntimeError):
@@ -588,6 +590,11 @@ class PoolMoves:
         """Tickets of this pool's moves out: its patrol neither adopts nor releases them."""
         return set(self.moves.get(OUT, {}))
 
+    def moves_unknown(self) -> bool:
+        """The saved moves out did not read as a whole: any unowned ticket may be one of them,
+        so the patrol adopts and releases none until the record is cleared by hand."""
+        return UNKNOWN_TICKETS in self.moves.get(OUT, {})
+
     def forget_moves(self, listed: Iterable[str]) -> None:
         """Drop finished moves out whose machine the provider no longer lists (patrol)."""
         listed = set(listed)
@@ -615,6 +622,12 @@ class PoolMoves:
             return
         for kind in (OUT, IN):
             records = moves.get(kind)
+            if records is not None and not isinstance(records, Mapping):  # which tickets move is not known
+                self.log(f"pool: the {kind} moves do not read: kept as unreadable ({records!r})"[:300])  # type: ignore[attr-defined]
+                self.moves.setdefault(kind, {})[UNKNOWN_TICKETS] = {
+                    "state": UNREADABLE, "move": UNKNOWN_TICKETS, "account": None, "since": None,
+                    "raw": repr(records)[:200]}
+                continue
             for ticket, rec in records.items() if isinstance(records, Mapping) else ():
                 if isinstance(rec, Mapping) and isinstance(rec.get("move"), str) and isinstance(rec.get("state"), str) \
                         and "account" in rec and "since" in rec:

@@ -2475,6 +2475,10 @@ class IslandPool(PoolMoves):
             return
         if self.moves:  # a finished move out whose machine is gone is forgotten
             self.forget_moves(str(t) for _a, t in rows)
+            if self.moves_unknown():  # which tickets were moving is not known: none is adopted or released
+                self._event("patrol_paused", level="critical", why="the saved moves out do not read",
+                            unowned=[str(t) for _a, t in rows if str(t) not in {m.ticket for m in self.members}])
+                return
         moving = self.moved_away() | set(self.moves.get("in", {})) if self.moves else set()
         for account, ticket in rows:
             account = _slot(account)

@@ -74,8 +74,9 @@ def test_pool_stop_after_the_loop_exited_does_not_report_a_pool_with_an_unsettle
 def test_another_run_does_not_archive_a_state_with_an_unsettled_move(tmp_path):
     _stopped_with_a_move(tmp_path)
     cfg_b, _ = _run_b(tmp_path)
-    with pytest.raises(pool_run.PoolStateOwnerError, match="billed member"):
+    with pytest.raises(pool_run.PoolStateOwnerError, match="billed member") as raised:
         pool_run.claim_state(cfg_b)
+    assert "nc-t9: moving to pool other-i1" in str(raised.value), "why pool-stop alone does not clear it"
 
 
 def test_pool_status_lists_the_moving_machine_apart_from_the_nodes(tmp_path, capsys):

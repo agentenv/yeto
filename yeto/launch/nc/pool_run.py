@@ -248,7 +248,8 @@ def claim_state(cfg: dict[str, Any], *, now: float | None = None) -> Path | None
             + ("not stopped" if not doc.get("stopped") else f"stopped ({doc.get('stopped')})")
             + (f" with billed member(s) {tickets}" if tickets else "")
             + ": its nodes, leases and spend are not taken over. Stop it with its own pool config (pool-stop), "
-              "or give this pool another shard_base or state dir (YETO_NC_STATE_DIR); nothing changed")
+              "or give this pool another shard_base or state dir (YETO_NC_STATE_DIR); nothing changed"
+            + "".join(f". {m['ticket']}: {m['moving']}" for m in left if m.get("moving")))
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
     run = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(owner.get("run")))
     dest = state.parent / "archive" / f"{state.stem}.{run}.{stamp}.json"
