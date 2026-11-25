@@ -405,8 +405,6 @@ function paint(){
     // the host-wide syncer tape held only an earlier run's syncer: not this run's, not drawn
     if(!last&&D.foreign_tape){lines.push(["no syncer tape for this run",C.warn]);
       lines.push(["host tape: an earlier run's syncer"+(fin(D.foreign_tape.last_ts)?" · last "+dur(tn-D.foreign_tape.last_ts)+" ago":""),C.ink2])}
-    else if(notape){lines.push(["syncer tape not visible on this host",C.warn]);
-      lines.push(["the syncer runs elsewhere; its merges are not drawn",C.ink2])}
     if(last)lines.push(["checkpoint step "+last.step+(fin(last.checkpoint_s)?" · "+last.checkpoint_s.toFixed(2)+"s":"")+" · "+dur(tn-last.ts)+" ago (before BCAST)",C.ink2]);
     if(last&&last.missed.length)lines.push(["last merge without "+(sft()?"island ":"trainer ")+last.missed.join(", ")+" (quorum "+last.quorum+")",C.ink2]);
     if(D.shards.length===1)lines.push(["5 min: ↑ "+D.traffic.push+" PUSH"+(fin(D.traffic.push_bytes)?" "+mb(D.traffic.push_bytes):"")+" · ↓ "+D.traffic.bcast+" applied",C.ink2]);
