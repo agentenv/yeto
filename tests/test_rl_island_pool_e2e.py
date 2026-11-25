@@ -11,30 +11,28 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import threading
-import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
 
-from free_ports import free_port as _free_port
+from free_ports import free_port as _free_port  # noqa: F401 - imported from here by other tests
+from syncer_build import build_syncer
+from syncer_port import bound_port
 from test_rl_engine_driver import _driver, _engine, _strict_config
 from yeto.rl.engine.bridges import PoolAvgSync, RoundCutHooks
 from yeto.rl.pool_client import LeaveReason
 
-ROOT = Path(__file__).resolve().parent.parent
-KEY = "pool-test-key"
+KEY = f"pool-test-key-{secrets.token_hex(6)}"  # per process: another run's syncer refuses it
 
 
 @pytest.fixture(scope="module")
 def syncer_binary() -> Path:
-    subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True)
-    binary = ROOT / "syncer/target/debug/yeto-syncer"
-    assert binary.is_file()
-    return binary
+    return build_syncer()  # this process's copy: another process's cargo build never rewrites it
 
 
 @pytest.fixture(autouse=True)
@@ -44,10 +42,9 @@ def _island_key(monkeypatch):
 
 class Syncer:
     def __init__(self, binary: Path, tmp_path: Path, *, learners: int, rounds: int, extra=()):
-        self.port = _free_port()
         self.tape = tmp_path / "syncer" / "tape.jsonl"
         self.tape.parent.mkdir()
-        argv = [str(binary), "--port", str(self.port), "--learners", str(learners),
+        argv = [str(binary), "--port", "0", "--learners", str(learners),
                 "--total-steps", str(rounds), "--pipeline", "1", "--grace-ms", "0",
                 "--sync-interval-steps", "0", "--delta-correction", "none",
                 "--learner-weight", "tokens2-over-steps", "--event-tape", str(self.tape),
@@ -57,12 +54,9 @@ class Syncer:
                                      env={**os.environ, "YETO_ISLAND_HMAC_KEY": KEY})
         # Islands dial only once the syncer listens: with --quorum 1 an island
         # whose first dial is refused backs off ~2 s, and the other island can
-        # run every round (and the final cut) alone in that window.
-        deadline = time.monotonic() + 30
-        while "syncer listening" not in (tmp_path / "syncer.log").read_text():
-            assert self.proc.poll() is None, "syncer exited before listening"
-            assert time.monotonic() < deadline, "syncer did not start listening"
-            time.sleep(0.05)
+        # run every round (and the final cut) alone in that window. The port is
+        # the one this syncer bound (--port 0), never another test's.
+        self.port = bound_port(self.proc, log_file=tmp_path / "syncer.log")
 
     def wait(self, timeout=60.0) -> int:
         try:

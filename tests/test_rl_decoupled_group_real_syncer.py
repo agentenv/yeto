@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import threading
@@ -42,7 +43,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from test_rl_island_pool_e2e import _free_port
+from syncer_build import build_syncer
+from syncer_port import bound_port
 from yeto.rl.adapters.miles import buffer_rollout as br
 from yeto.rl.adapters.miles.sampler_island import mark_trainer_end, wire_policy_releases
 from yeto.rl.decoupled import DecoupledBridgeConfig
@@ -63,15 +65,13 @@ FRAGMENTS, PIPELINE, HORIZON, SWEEPS = 2, 2, 2, 3
 TOTAL = FRAGMENTS * SWEEPS
 MAX_POLICY_AGE = 2
 _EXECUTOR_LOCK = threading.Lock()
-ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(scope="module")
 def syncer_binary():
     if os.environ.get("YETO_TEST_SYNCER"):
         return os.environ["YETO_TEST_SYNCER"]
-    subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True)
-    return str(ROOT / "syncer/target/debug/yeto-syncer")
+    return str(build_syncer())  # this process's copy: another process's cargo build never rewrites it
 
 
 def _tensors(offset: float) -> dict[str, torch.Tensor]:
@@ -186,7 +186,7 @@ def _events(path: Path, kind: str) -> list[dict]:
 
 def test_decoupled_group_trainers_feed_their_own_samplers_to_the_final_cut(syncer_binary, tmp_path,
                                                                           monkeypatch):
-    port, key = _free_port(), "b1-decoupled-group"
+    key = f"b1-decoupled-group-{secrets.token_hex(6)}"
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", key)
     out = Path(os.environ.get("YETO_TEST_DECOUPLED_GROUP_OUT", tmp_path))
     out.mkdir(parents=True, exist_ok=True)
@@ -198,7 +198,7 @@ def test_decoupled_group_trainers_feed_their_own_samplers_to_the_final_cut(synce
     # the launcher's asynchronous decoupled syncer command (yeto.launch.syncer), with a
     # short grace window
     syncer = subprocess.Popen(
-        [syncer_binary, "--port", str(port), "--learners", "2", "--quorum", "1",
+        [syncer_binary, "--port", "0", "--learners", "2", "--quorum", "1",
          "--grace-ms", "2000", "--grace-gamma", "0.8", "--grace-tau", "2.0",
          "--pipeline", str(PIPELINE), "--sync-interval-steps", str(float(HORIZON)),
          "--delta-correction", "none", "--total-steps", str(TOTAL),
@@ -208,11 +208,11 @@ def test_decoupled_group_trainers_feed_their_own_samplers_to_the_final_cut(synce
          "--event-tape", str(out / "syncer-tape.jsonl")],
         env=dict(os.environ, YETO_ISLAND_HMAC_KEY=key),
         stdout=open(out / "syncer.log", "w"), stderr=subprocess.STDOUT)
+    port = bound_port(syncer, log_file=out / "syncer.log")  # its own syncer, never another test's
     stop = threading.Event()
     loads: list[list] = [[], []]
     written: list[list] = [[], []]
     try:
-        time.sleep(1.0)
         engines = (FakeEngine(tensors=_tensors(0.0), step_delta=0.25),
                    FakeEngine(tensors=_tensors(0.0), step_delta=0.5))
         samplers = [threading.Thread(target=_sampler, daemon=True,
@@ -286,9 +286,11 @@ def test_decoupled_group_trainers_feed_their_own_samplers_to_the_final_cut(synce
         # 2. the sampler loads its own trainer's local versions, in order, with their hashes
         versions = [v for v, *_ in loads[k]]
         assert versions == sorted(versions) and versions[0] == 0
-        # (the final release lands as the trainer ends: its sampler may stop first)
+        # A refresh loads the newest release (PolicyFollower), so a trainer that published two
+        # between two refreshes has one of them skipped: the loads are a subsequence of the
+        # releases, not all of them (the final one may land after the sampler stopped).
         order = [e["policy_version"] for e in released]
-        assert versions == order[:len(versions)] and len(versions) >= len(order) - 1
+        assert len(set(versions)) == len(versions) and set(versions) <= set(order)
         assert all(e["policy_version"] == e["local_version"] for e in released)
         assert all(h == published[v] for v, h, *_ in loads[k])
         assert released[-1]["policy_hash"] == published[max(published)]

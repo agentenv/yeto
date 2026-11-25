@@ -13,13 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
-from test_dispense_syncer import Syncer, crash, syncer_binary  # noqa: F401
+from test_dispense_syncer import KEY, Syncer, crash, syncer_binary  # noqa: F401
 from yeto.launch.checks.dispense_check import check
 from yeto.rl.adapters.verl import task_dispense as vd
 from yeto.rl.engine import task_dispense as td
 from yeto.rl.engine.data_split import DATA_ROW_KEY, DISPENSE, STRIDE
 
-KEY = b"dispense-test-key"
 TWO_ISLANDS = "modal:1xh100,modal:1xh100"
 
 

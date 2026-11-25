@@ -14,6 +14,7 @@ The rig is the launcher-built syncer of ``test_rl_outer_merge_real_syncer``
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -32,7 +33,8 @@ ASYNC_K1 = ("--rl-sync-quorum", "1", "--rl-sync-max-base-lag", "1",
 
 @pytest.fixture(autouse=True)
 def _hmac_key(monkeypatch):
-    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "late-carry-test-key")
+    # its own key: a syncer of another test refuses this test's HELLO, never takes it
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", f"late-carry-test-key-{secrets.token_hex(6)}")
 
 
 def _tape(rig):

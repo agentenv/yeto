@@ -14,18 +14,30 @@ to the environment before any test runs, so every ``cargo build`` of a test
 module inherits it. With no toolchain at all, a binary at least as new as the
 crate's sources is used as built, and a test whose binary cannot be had skips
 with the reason (:func:`skip_reason`); it never fails for want of a toolchain.
+
+The path returned is this process's own copy of the binary, not
+``syncer/target/debug/yeto-syncer``: every ``cargo build``, a fresh one too,
+deletes and rewrites that file, so a syncer another pytest process (a parallel
+session, an xdist worker) starts while a module fixture here rebuilds fails to
+exec or is killed by the OS before it prints anything (exit -9).
 """
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from yeto.launch import cargo_toolchain
 
 ROOT = Path(__file__).resolve().parent.parent
 BINARY = ROOT / "syncer/target/debug/yeto-syncer"
+# Per-process copies, under the checkout so the orphan sweep (syncer_reaper) still sees them.
+COPIES = ROOT / "syncer/target/test-bin"
 # Bounds the build on its own (it runs outside every test's timeout).
 BUILD_TIMEOUT_S = 900
 
@@ -63,15 +75,61 @@ def needs_cargo(item) -> bool:
                                           for m in item.iter_markers("skipif"))
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def remove_copies() -> None:
+    """Remove this process's copies (conftest calls it at session end: the session leaves
+    through ``os._exit``, which skips atexit, tests/hard_exit.py)."""
+    shutil.rmtree(COPIES / str(os.getpid()), ignore_errors=True)
+
+
+def private_copy(binary: Path = BINARY, timeout: float = 60.0) -> Path:
+    """``binary`` copied to a path of this process only (``COPIES/<pid>/<n>/``), written
+    under a temporary name and renamed into place, so no other process's ``cargo build``
+    ever rewrites the file a test executes. Removed by :func:`remove_copies` or at exit; a
+    dead process's copies are removed by the next process that makes one."""
+    own = COPIES / str(os.getpid())
+    if not own.exists():
+        for stale in COPIES.glob("*") if COPIES.exists() else ():
+            if stale.name.isdigit() and not _alive(int(stale.name)):
+                shutil.rmtree(stale, ignore_errors=True)
+        atexit.register(remove_copies)
+    target = own / str(len(list(own.glob("*"))) if own.exists() else 0) / binary.name
+    target.parent.mkdir(parents=True)
+    staging = target.with_name(f".{binary.name}.partial")
+    deadline = time.monotonic() + timeout
+    while True:  # another process's cargo build may have deleted the file a moment ago
+        try:
+            shutil.copy2(binary, staging)
+            break
+        except FileNotFoundError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.1)
+    os.replace(staging, target)
+    return target
+
+
 def build_syncer() -> Path:
-    """Return the debug syncer binary, running ``cargo build -q`` on the first call."""
+    """Return this process's copy of the debug syncer binary, running ``cargo build -q``
+    on the first call."""
     global _built
     with _lock:
+        if _built is not None and not _built.is_file():
+            _built = None  # this process's copy was removed: copy (and build) again
         if _built is None and not TOOLCHAIN.ok:
             if not binary_is_current():
                 raise RuntimeError(f"no syncer binary: {TOOLCHAIN.reason}, and {BINARY} is missing or older "
                                    "than the crate's sources")
-            _built = BINARY  # built before, by a toolchain this environment cannot reach
+            _built = private_copy()  # built before, by a toolchain this environment cannot reach
         if _built is None:
             # Output captured: the pre-build runs outside pytest's capture, and
             # cargo's warnings would fill every shard's log.
@@ -79,8 +137,7 @@ def build_syncer() -> Path:
                                   timeout=BUILD_TIMEOUT_S)
             if proc.returncode != 0:
                 raise RuntimeError(f"cargo build of the syncer failed ({proc.returncode}):\n{proc.stderr[-8000:]}")
-            assert BINARY.is_file(), BINARY
-            _built = BINARY
+            _built = private_copy()
         return _built
 
 

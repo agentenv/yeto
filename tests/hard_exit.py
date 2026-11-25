@@ -45,6 +45,11 @@ def note_configure(config) -> None:
         _ROOT.append(id(config))
 
 
+def is_outermost(config) -> bool:
+    """Whether ``config`` is the process's own session, not a nested in-process run."""
+    return bool(_ROOT) and id(config) == _ROOT[0]
+
+
 def note_exitstatus(session, exitstatus) -> None:
     """Record what pytest will exit with; called from ``pytest_sessionfinish``."""
     _STATUS[id(session.config)] = int(exitstatus)

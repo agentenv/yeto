@@ -411,6 +411,13 @@ from hard_exit import note_exitstatus, pytest_unconfigure  # noqa: E402,F401
 def pytest_sessionfinish(session, exitstatus):
     note_exitstatus(session, exitstatus)
     _reaper_sessionfinish(session, exitstatus)
+    from hard_exit import is_outermost
+    from syncer_build import remove_copies
+
+    # after the reaper: no syncer of this session runs the copy any more; a nested
+    # in-process run (pytester with this conftest) shares the process and its copies
+    if is_outermost(session.config):
+        remove_copies()
 
 
 # Most launch tests build RL argv without --inner-lr; yeto refuses that

@@ -16,6 +16,7 @@ lag, merge weights and Nesterov against a numpy reference).
 
 from __future__ import annotations
 
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -27,8 +28,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from free_ports import free_port
 from process_groups import group_popen, kill_group
+from syncer_build import build_syncer
+from syncer_port import bound_port, on_port_zero
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
 from test_rl_algorithm_provenance import _launcher_args as _provenance_launcher_args
 
@@ -38,6 +40,7 @@ def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
     defaults are covered in test_rl_sync_mode.py."""
     return _provenance_launcher_args(engine, ("--rl-sync-mode", "strict", *extra), gpu=gpu)
 from test_rl_full_parameter_sync import _candidate, _PairedRole, _role_stream_config
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 from yeto.protocol import PullRequest
 from yeto.rl.adapters.miles.full_parameter.role_stream import RoleSubmissionCandidate
 from yeto.rl.engine.full_parameter_sync import FullParameterSyncProfile, RolePairing
@@ -524,13 +527,12 @@ needs_cargo = pytest.mark.skipif(not Path(CARGO).exists(), reason="needs cargo t
 
 @pytest.fixture(scope="module")
 def syncer_binary() -> Path:
-    subprocess.run([CARGO, "build", "-q"], cwd=ROOT / "syncer", check=True)
-    return ROOT / "syncer/target/debug/yeto-syncer"
+    return build_syncer()  # this process's copy: another process's cargo build never rewrites it
 
 
 @pytest.fixture
 def _hmac_key(monkeypatch):
-    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "async-rounds-test-key")
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", f"async-rounds-test-key-{secrets.token_hex(6)}")
 
 
 def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: int,
@@ -544,11 +546,12 @@ def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: 
     args, _ = _plan(FULL[:-1] + (str(P), "--rl-sync-full-parameter-rounds", "async",
                                  "--total-steps", str(total_steps), *final_cut, *extra))
     command = launcher.role_syncer_commands(args, 2, binary=str(binary))["actor"]
-    port = free_port()
-    command = (command
-               .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
+    # its own port (bound by the syncer, read from its log) and its own files: never
+    # another test's syncer, never a log another syncer appends to
+    command = (on_port_zero(command)
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
-               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl"))
+               .replace(DISPENSE_LOG, str(tmp_path / "task-dispense.jsonl")))
     command = " ".join((command, *map(shlex.quote, syncer_args)))
     assert "--policy-sweep-fragments" not in command
     if log_file is None:
@@ -558,6 +561,7 @@ def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: 
         with log_file.open("w") as out:
             process = group_popen(["bash", "-c", command], stdout=out,
                                   stderr=subprocess.STDOUT, text=True)
+    port = bound_port(process, log_file=log_file)
     return process, port, launcher.rl_syncer_profile(args, 2).sha256
 
 

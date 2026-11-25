@@ -2204,13 +2204,17 @@ pub async fn run(cfg: Config) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))
         .await
         .with_context(|| format!("bind port {}", cfg.port))?;
+    // The port actually bound: `--port 0` takes a free one (a test reads it from this line).
+    let port = listener
+        .local_addr()
+        .map_or(cfg.port, |address| address.port());
     tokio::spawn(wire_bytes_logger());
     let semantic_profile_sha256: String = semantic_profile_hash
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
     info!(
-        port = cfg.port,
+        port,
         semantic_profile_sha256,
         require_profile_binding = cfg.require_profile_binding,
         "syncer listening"

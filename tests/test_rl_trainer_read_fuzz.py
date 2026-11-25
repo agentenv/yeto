@@ -512,7 +512,11 @@ def test_trainer_read_chain_fuzz(tmp_path, monkeypatch):
     totals: dict[str, int] = {}
     for seed in range(SEED_BASE, SEED_BASE + SEEDS):
         with monkeypatch.context() as m:
-            stats = _run_seed(seed, tmp_path, m)
+            try:
+                stats = _run_seed(seed, tmp_path, m)
+            except BaseException as error:  # any failure names its seed (a TypeError has no seed in it)
+                error.add_note(f"fuzz seed {seed}: YETO_FUZZ_SEED_BASE={seed} YETO_FUZZ_SEEDS=1 runs it alone")
+                raise
         for k, v in stats.items():
             totals[k] = totals.get(k, 0) + v
         shutil.rmtree(tmp_path / f"s{seed}", ignore_errors=True)
