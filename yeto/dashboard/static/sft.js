@@ -8,6 +8,9 @@ var PAL=["#3b82f6","#f97316","#14b8a6","#8b5cf6","#ec4899","#eab308","#22c55e","
 var GREY="#9ca3af",RANGES=[["run",0],["1h",1],["6h",6],["24h",24],["7d",168],["30d",720]];
 // "run" (the RL default; SFT keeps 24 h): the window is the run itself, first event -> now, so a one-hour run fills the charts
 var RANGE_H=24,RANGE_RUN=null,CH={},V=null,OFF=false,NOW=0,onReload=null,EXPAND={};
+// END: the right edge of every time window. NOW while the run is live; once it ended (runEnded), its last
+// event plus a little room, so a finished run is not squeezed into the left edge of a window that runs to now
+var END=0,ENDED=false,RUN_SPAN=null;
 try{var sr=localStorage.getItem("yeto-range");if(sr&&sr!=="run"&&+sr>0){RANGE_H=+sr;RANGE_RUN=false}}catch(e){}
 try{var hm=/range=(\d+|run)/.exec(location.hash||"");if(hm&&hm[1]!=="run"){RANGE_H=+hm[1];RANGE_RUN=false}else if(hm)RANGE_RUN=true}catch(e){}
 var RANGE_SET=RANGE_RUN!==null;
@@ -65,6 +68,20 @@ function controls(offline,reload){
   Array.prototype.forEach.call(box.querySelectorAll?box.querySelectorAll(".seg button"):[],function(b){b.onclick=function(){var h=+b.dataset.h;RANGE_RUN=h===0;if(h)RANGE_H=h;RANGE_SET=true;try{localStorage.setItem("yeto-range",h?h:"run")}catch(e){}render(V,OFF)}});
   var rb=$("reloadBtn");if(rb)rb.onclick=function(){if(onReload)onReload()};
 }
+/* the window as a phrase after "over" / "in": a live run's last N hours; a finished run's whole span */
+function overLabel(){if(!ENDED)return "the last "+rangeLabel();
+  return RANGE_RUN?"the whole run ("+(fin(RUN_SPAN)?spanTxt(RUN_SPAN/3600):"")+")":"the last "+rangeLabel()+" of the run"}
+function noPrev(){return ENDED&&RANGE_RUN?"nothing before the run":"no previous "+rangeLabel()}
+function spanTxt(h){var m=h*60;return m<120?Math.round(m)+" min":m<2880?h.toFixed(1)+" h":(h/24).toFixed(1)+" days"}
+/* a run that ended: it says so (overview.run_end: finished or stopped by us), the syncer reached its final cut, or
+   every trainer has an explicit end (done, stopped by us, or left with a clean reason). A stale / lost / quiet
+   run is not ended: its window keeps running to now and its alerts stay */
+var CLEAN_LEAVE=["STOPPED","DONE","FINISHED","COMPLETED","DRAINED"];
+function runEnded(V){var O=V.overview||{},d=(V.topology||{}).diloco;
+  if(O.run_end||(d&&d.done))return true;
+  var tr=(O.islands||[]).filter(function(c){return c.role==="trainer"});
+  return tr.length>0&&tr.every(function(c){return c.status==="done"||c.status==="stopped"||
+    (c.status==="left"&&c.left&&CLEAN_LEAVE.indexOf(String(c.left.reason||"").toUpperCase())>=0)})}
 function rangeLabel(){if(RANGE_RUN){var m=RANGE_H*60;return (m<120?Math.round(m)+" min":m<2880?(RANGE_H).toFixed(1)+" h":(RANGE_H/24).toFixed(1)+" days")+" (whole run)"}
   return RANGE_H>=48?(RANGE_H/24)+" days":RANGE_H===1?"hour":RANGE_H+" hours"}
 
@@ -98,7 +115,7 @@ function segments(P,all){var T=all.map(function(p){return p[0]}),g=[];for(var i=
    bucket (bars, s), vmarks [{t,color,label}] (marker strip above the plot) */
 function chart(id,opts){return chartTs(id,opts)}
 function chartTs(id,opts){
-  var box=$(id);if(!box)return;var t1=NOW,t0=NOW-RANGE_H*3600;
+  var box=$(id);if(!box)return;var t1=END,t0=END-RANGE_H*3600;
   // opts.extra: per-island series behind an aggregate, drawn when the legend toggle is open
   var xs0=opts.extra||[],xon=xs0.length&&(EXPAND[id]!=null?EXPAND[id]:!!opts.extraOpen);
   var ser=(opts.series||[]).concat(xon?xs0:[]).map(function(s){var all=(s.pts||[]).filter(function(p){return fin(p[0])&&fin(p[1])}).sort(function(a,b){return a[0]-b[0]});
@@ -111,7 +128,7 @@ function chartTs(id,opts){
   var any=ser.some(function(s){return s.pts.length});
   ser=ser.filter(function(s){return s.pts.length}); // series without data are neither stacked nor drawn
   var bindX=function(){var b=box.querySelector&&box.querySelector(".lgx");if(b)b.onclick=b.onkeydown=function(e){if(e&&e.type==="keydown"&&e.key!=="Enter")return;EXPAND[id]=!xon;chartTs(id,opts)}};
-  if(!any){box.innerHTML='<div class="empty">no data in the last '+rangeLabel()+'</div>'+leg;CH[id]=null;bindX();return}
+  if(!any){box.innerHTML='<div class="empty">no data in '+overLabel()+'</div>'+leg;CH[id]=null;bindX();return}
   var stack=opts.kind==="stack"||opts.kind==="bars",span=t1-t0,bk=opts.bucket||Math.max(60,span/72);
   if(span/bk<4)bk=span<=3600?300:600; // range shorter than a few buckets: 5-10 min buckets
   if(opts.kind==="stack"&&opts.interp){ // interpolate every series on one grid, then stack
@@ -244,7 +261,7 @@ function balanceGrid(id,minW,maxN){var g=$(id);if(!g||!g.style||!g.children)retu
   g.style.gridTemplateColumns=c>1?"repeat("+c+",minmax(0,1fr))":""}
 /* cards whose chart had no data in the range: drop them from the grid, list them in one line */
 function foldEmpty(ids,lineId){var gone=[];ids.forEach(function(x){if(CH[x[0]])return;var b=$(x[0]),cc=b&&b.parentNode;if(cc&&cc.parentNode){cc.parentNode.removeChild(cc);gone.push(x)}});
-  var ln=$(lineId);if(!ln)return;ln.hidden=!gone.length;ln.innerHTML=gone.length?'No data in the last '+esc(rangeLabel())+', card hidden: '+gone.map(function(x){return '<b>'+esc(x[1])+'</b>'+(x[2]?' ('+esc(x[2])+')':"")}).join(" \u00b7 "):""}
+  var ln=$(lineId);if(!ln)return;ln.hidden=!gone.length;ln.innerHTML=gone.length?'No data in '+esc(overLabel())+', card hidden: '+gone.map(function(x){return '<b>'+esc(x[1])+'</b>'+(x[2]?' ('+esc(x[2])+')':"")}).join(" \u00b7 "):""}
 
 /* histogram on a log axis, dashed p10/p90/p99, solid p50, outer 0.2% tails not drawn */
 function rank(sorted,q){if(!sorted.length)return null;return sorted[Math.min(sorted.length-1,Math.max(0,Math.ceil(q*sorted.length)-1))]} // nearest rank: always a sample
@@ -303,7 +320,7 @@ function series(S,isls,c,fn){var ci=col(S,c);return isls.map(function(I,i){retur
 function lossCell(row,c,cur,d,fmt){if(!row)return "n/a";var v=fmt?fmt(row[c]):k(row[c],d);return row[0]!=null&&cur!=null&&row[0]!==cur?v+'<div class="ns">step '+row[0]+'</div>':v}
 function sft(S){
   var isls=S.islands||[],sy=S.syncer||{},refs=S.refs||{},C=function(n){return col(S,n)};
-  var t1=NOW,t0=NOW-RANGE_H*3600,tp=t0-RANGE_H*3600;
+  var t1=END,t0=END-RANGE_H*3600,tp=t0-RANGE_H*3600;
   var active=isls.filter(function(I){return I.status==="ok"});  // a stopped / restarting island shows its last step, not live numbers
   var fast=isls[0]||null,last=function(I){return I&&I.rows.length?I.rows[I.rows.length-1]:null};
   var lastWith=function(I,c){if(!I)return null;for(var j=I.rows.length-1;j>=0;j--){if(fin(I.rows[j][c]))return I.rows[j]}return null};
@@ -338,7 +355,7 @@ function sft(S){
       '<td>'+(I.last_push?dur(I.last_push.export_s)+'<div class="ns">step '+I.last_push.step+' · '+ago(I.last_push.ts)+'</div>':"none yet")+'</td>'+
       '<td>'+(I.last_apply?dur(I.last_apply.apply_s)+'<div class="ns">step '+I.last_apply.step+' · '+ago(I.last_apply.ts)+'</div>':"none yet")+'</td><td>'+esc(I.dataset||"n/a")+'</td></tr>'}).join("")+'</table>';
   // fleet charts
-  $("sFleetH").textContent="Fleet over the last "+rangeLabel();
+  $("sFleetH").textContent="Fleet over "+overLabel();
   var g=[["fEval","Held-out eval loss","per syncer checkpoint, x = outer step (all checkpoints, not the time range); dashed: each vs_<name> reference (loss \u2212 \u0394); bars \u00b11 se vs the first reference other than base"],
     ["fLoss","Loss","per island, ms-swift logging.jsonl"],["fGn","grad_norm","per island, before clipping"],["fLr","Learning rate","per island schedule"],
     ["fStep","Step time","bench wall_s per step"+(fin(ref)?"; dashed: reference "+dur(ref):"")],["fTps","Tokens / s","stacked by island; each island's bench tokens_per_s interpolated onto one time grid, then summed"],
@@ -370,7 +387,7 @@ function sft(S){
   var cats=[["rejected",PAL[8]],["timeout",PAL[1]],["not_carried",PAL[5]],["stale",PAL[3]],["disconnect",GREY]];
   chart("fEv",{kind:"bars",series:cats.map(function(c){return {name:c[0].replace("_"," "),color:c[1],pts:ev.filter(function(e){return e[1]===c[0]}).map(function(e){return [e[0],1]})}}),yfmt:function(v){return +v.toFixed(1)+""}});
   // distribution
-  $("sDistH").textContent="Distribution over the last "+rangeLabel();
+  $("sDistH").textContent="Distribution over "+overLabel();
   var slowT=fin(ref)?ref*(refs.sft_slow_factor||1.1):null,dc=isls.map(function(I,i){var R=rowsIn(I,t0,t1);
     return distCard(islColor(i),I.name,spec(I),[{title:"Step time",short:"Step time",vals:R.map(function(r){return r[C("step_s")]}),fmt:dur,slow:fin(slowT)?[slowT,"over "+dur(slowT)]:null,count:"Steps"},
       {title:"Sync blocking per step (sync_s)",short:"sync_s",vals:R.map(function(r){return r[C("sync_s")]}),fmt:dur,slow:fin(ref)?[ref*0.05,"over 5% of a step"]:null}])});
@@ -380,13 +397,13 @@ function sft(S){
     [{title:"Merge time per round",short:"merge",vals:mg,fmt:dur,slow:fin(mp)?[2*mp,"over 2x p50"]:null,count:"Rounds"},{title:"Wait per round (round \u2212 merge)",short:"wait",vals:os,fmt:dur,slow:null}]));
   $("sDist").innerHTML=dc.join("");
   // cost / efficiency
-  $("sCostH").textContent="Cost / efficiency over the last "+rangeLabel();
+  $("sCostH").textContent="Cost / efficiency over "+overLabel();
   function agg(a,b){var o={tok:0,tgt:0,ch:0,sync:0,wall:0,mfuw:0,mfus:0};isls.forEach(function(I){var cards=fin(I.cards)?I.cards:0;rowsIn(I,a,b).forEach(function(r){var w=r[C("step_s")];
       o.tok+=fin(r[C("tokens")])?r[C("tokens")]:0;o.tgt+=fin(r[C("target_tokens")])?r[C("target_tokens")]:0;
       if(fin(w)){o.wall+=w;o.ch+=w*cards/3600;o.sync+=fin(r[C("sync_s")])?r[C("sync_s")]:0;if(fin(r[C("mfu")])){o.mfuw+=w*r[C("mfu")];o.mfus+=w}}})});
     o.tpc=o.ch?o.tok/(o.ch*3600):null;o.mfu=o.mfus?o.mfuw/o.mfus:null;o.share=o.wall?o.sync/o.wall:null;return o}
   var A=agg(t0,t1),B=agg(tp,t0);
-  function delta(a,b,fmt){if(!fin(a)||!fin(b)||!b)return '<span class="dl">no previous '+rangeLabel()+'</span>';var d=a-b,p=100*d/b;
+  function delta(a,b,fmt){if(!fin(a)||!fin(b)||!b)return '<span class="dl">'+noPrev()+'</span>';var d=a-b,p=100*d/b;
     return '<span class="dl '+(d>=0?"up":"dn")+'">'+(d>=0?"&uarr; +":"&darr; ")+esc(fmt(d))+' · '+(p>=0?"+":"")+p.toFixed(0)+'% vs previous '+rangeLabel()+'</span>'}
   var etas=isls.map(function(I){var r=last(I),R=I.rows.slice(-20).map(function(x){return x[C("step_s")]}).filter(fin).sort(function(a,b){return a-b}),p=pctl(R,0.5);
     return r&&I.steps_total&&fin(p)&&fin(I.last_ts)?I.last_ts+(I.steps_total-r[0])*p:null}).filter(fin),eta=etas.length?Math.max.apply(null,etas):null;
@@ -415,7 +432,7 @@ function bucketFor(isls){var s=[];isls.forEach(function(I){I.rows.forEach(functi
 
 /* ---------- RL: distribution of round phase durations ---------- */
 function rlDist(V){
-  var box=$("rlDist");if(!box)return;var O=V.overview||{},ids=(O.islands||[]).map(function(c){return c.id}),t0=NOW-RANGE_H*3600;
+  var box=$("rlDist");if(!box)return;var O=V.overview||{},ids=(O.islands||[]).map(function(c){return c.id}),t0=END-RANGE_H*3600;
   var cards=ids.map(function(id,i){var c0=(O.islands||[])[i]||{},sp=((V.async||{}).samplers||{})[id];
     if(c0.role==="sampler"&&sp){var sr=(sp.rounds||[]).filter(function(r){return !fin(r.ts)||r.ts>=t0}),G=sr.map(function(r){return r.generate_s}),pg=G.filter(fin).sort(function(a,b){return a-b});
       return distCard(PAL[i%PAL.length],"Island "+id+" (sampler)",[c0.cloud,c0.gpu&&c0.gpus!=null?c0.gpu+" × "+c0.gpus:c0.gpu].filter(Boolean).join(" · "),
@@ -427,7 +444,7 @@ function rlDist(V){
     return distCard(PAL[i%PAL.length],"Island "+id,[c.cloud,c.gpu&&c.gpus!=null?c.gpu+" × "+c.gpus:c.gpu].filter(Boolean).join(" · "),
       [{title:"Rollout time per round",short:"rollout",vals:R,fmt:dur,slow:pr.length?[2*pctl(pr,0.5),"over 2x p50"]:null,count:"Rounds"},
        {title:"Train time per round",short:"train",vals:T,fmt:dur,slow:pt.length?[2*pctl(pt,0.5),"over 2x p50"]:null}])});
-  $("rlDistH").textContent="Distribution over the last "+rangeLabel();
+  $("rlDistH").textContent="Distribution over "+overLabel();
   box.innerHTML=cards.join("")||'<div class="empty">no data</div>';
 }
 
@@ -495,7 +512,7 @@ function fleetKpis(A,S,sps,kp,ssum,zvTot,caps){
 }
 function rlm(V){
   var O=V.overview||{},A=V.async||{},S=A.samplers||{},TR=A.trainers||{},X=V.islands||{},cs=rlCards(V);
-  var t1=NOW,t0=NOW-RANGE_H*3600,tp=t0-RANGE_H*3600;
+  var t1=END,t0=END-RANGE_H*3600,tp=t0-RANGE_H*3600;
   var trs=cs.filter(function(c){return c.role!=="sampler"&&c.role!=="unrecognized"}),sps=cs.filter(function(c){return c.role==="sampler"});
   var unk=cs.filter(function(c){return c.role==="unrecognized"}),act=cs.filter(function(c){return c.role!=="unrecognized"});
   var RR=function(c){return ((X[c.id]||{}).rounds||[]).filter(function(r){return fin(r.ts)})},SR=function(c){return ((S[c.id]||{}).rounds||[]).filter(function(r){return fin(r.ts)})};
@@ -564,7 +581,7 @@ function rlm(V){
     (endC.length?'<details class="ended"'+(liveC.length?"":" open")+'><summary class="ns">'+endC.length+' island(s) that ended (left / lost / finished / stopped): '+esc(endC.map(function(c){return c.label+" "+c.status}).join(", "))+'</summary><table class="nt">'+head+endC.map(rowOf).join("")+'</table></details>':"")+
     (unk.length?'<details class="ended"><summary class="ns">'+unk.length+' unrecognized tape(s)</summary><table class="nt">'+unk.map(unkRow).join("")+'</table></details>':"");
   // fleet charts
-  $("rFleetH").textContent="Fleet over the last "+rangeLabel();
+  $("rFleetH").textContent="Fleet over "+overLabel();
   // a trainer point carries the launch that trained it (the newest launch started before it): a relaunch breaks the line
   var lOf=function(c,t){var ls=(c.launches||[]).filter(function(x){return fin(x.first_ts)&&x.first_ts<=t}).sort(function(a,b){return a.first_ts-b.first_ts});return ls.length?ls[ls.length-1].launch:"-"};
   var ser=function(L,key,f){return L.map(function(c){return {name:c.label,color:c.color,pts:RR(c).map(function(r){return [r.ts,f?f(r):r[key],lOf(c,r.ts)]})}})};
@@ -680,7 +697,7 @@ function fleetCost(V,ck){
     // any other count the tapes lack is a dash, and the card says so
     return [x[0],String(x[1]).replace(NA,"—"),sub.replace(NA,"—")+(miss?" · —: not on the tapes":""),x[3]]})}
 function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
-  $("rCostH").textContent="Cost / efficiency over the last "+rangeLabel();
+  $("rCostH").textContent="Cost / efficiency over "+overLabel();
   var X=V.islands||{};
   var waitS=function(c,a,b){return sum(((X[c.id]||{}).rounds||[]).filter(function(r){return r.phases&&r.phases.R&&inR(r.phases.R[1],a,b)}).map(function(r){return r.dur.R}))};
   var CW={};trs.forEach(function(c){var w=curWait(V,c);if(w)CW[c.id]=w});
@@ -692,7 +709,7 @@ function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
         var w=CW[c.id];if(w)o.cur+=spanOverlap([[w.since,NOW]],a,b)}}); // the round in progress, still waiting
     o.bill=o.billT+o.billS;o.eff=o.effT+o.effS;o.util=o.bill?o.eff/o.bill:null;o.tpc=o.billT?o.tok/o.billT:null;o.wsDone=o.wall?o.wait/o.wall:null;o.ws=o.wall+o.cur?(o.wait+o.cur)/(o.wall+o.cur):null;return o}
   var A=agg(t0,t1),B=agg(tp,t0);
-  function delta(a,b,fmt){if(!fin(a)||!fin(b)||!b)return '<span class="dl">no previous '+rangeLabel()+'</span>';var d=a-b,p=100*d/b;
+  function delta(a,b,fmt){if(!fin(a)||!fin(b)||!b)return '<span class="dl">'+noPrev()+'</span>';var d=a-b,p=100*d/b;
     return '<span class="dl '+(d>=0?"up":"dn")+'">'+(d>=0?"&uarr; +":"&darr; ")+esc(fmt(d))+' · '+(p>=0?"+":"")+p.toFixed(0)+'% vs previous '+rangeLabel()+'</span>'}
   var pc=function(v){return fin(v)?(100*v).toFixed(1)+"%":"n/a"},ch=function(s){return k(s/3600,1)};
   var nc=sps.some(function(c){return rlBilled(V,c).src==="events"});
@@ -727,7 +744,10 @@ function render(view,offline){
   // an export once (its data is fixed), the live page on every render (1h, then 6h ... as the
   // run grows), so a run younger than an hour is not squeezed into the right edge of 24h
   if(RANGE_RUN===null)RANGE_RUN=!S;
-  if(RANGE_RUN){var o0=V.overview||{},end=offline?(o0.data_ts||NOW):NOW,sp=fin(end)&&fin(o0.first_ts)?(end-o0.first_ts)/3600:null;
+  // a run that ended: every window ends at its last event (plus 2% of the run, at least a minute), not at now
+  var oe=V.overview||{};ENDED=runEnded(V);RUN_SPAN=fin(oe.data_ts)&&fin(oe.first_ts)?Math.max(0,oe.data_ts-oe.first_ts):null;
+  END=ENDED&&fin(oe.data_ts)?Math.min(NOW,oe.data_ts+Math.max(60,0.02*(RUN_SPAN||0))):NOW;
+  if(RANGE_RUN){var o0=oe,end=ENDED?END:offline?(o0.data_ts||NOW):NOW,sp=fin(end)&&fin(o0.first_ts)?(end-o0.first_ts)/3600:null;
     if(fin(sp))RANGE_H=Math.max(0.25,sp*1.03+2/60)} // a little room before the first event
   var sroot=$("sftRoot"),rroot=$("rlRoot");
   var RL=!S&&!!$("rlmRoot");
@@ -746,5 +766,6 @@ function render(view,offline){
     var ov=V.overview||{},ended=ov.run_end&&(ov.global_status||{}).text?" · run "+ov.global_status.text:"";
     document.title="yeto metrics · "+(run||"RL");$("sub").textContent="updated "+clock(offline?NOW:Date.now()/1000,true)+" · times in your local zone"+(offline?" · offline export, data as of "+day(NOW):" · live")+ended;rlm(V)}}
 }
-return {markClusters:markClusters,segments:segments,spanUnion:spanUnion,spanOverlap:spanOverlap,bins:bins,evalTip:evalTip,durAxis:durAxis,durTicks:durTicks,numAxis:numAxis,nice:nice,interpStack:interpStack,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
+return {markClusters:markClusters,segments:segments,spanUnion:spanUnion,spanOverlap:spanOverlap,bins:bins,evalTip:evalTip,durAxis:durAxis,durTicks:durTicks,numAxis:numAxis,nice:nice,interpStack:interpStack,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H},
+  window:function(){return {t0:END-RANGE_H*3600,t1:END,ended:ENDED,now:NOW}}};
 })();
