@@ -290,14 +290,23 @@ class FleetRuntime:
         record with an event tape): the run's own silence over the launcher log is then off.
         False for a fixed roster (the old path: the run's silence and the launcher's exit) and
         while any running island has no tape (a sky / Verda / fetchable SSH island, a launch
-        without records, a record that did not read): the run's silence covers the fleet."""
+        without records, a record that did not read) or its recorded tape does not stat (not
+        written yet, on another machine): the run's silence covers the fleet."""
         if self.plan.fixed_roster:
             return False
         active = self.active()
         if not active:
             return False
         records = self.trainer_records(now)
-        return all((records.get(k) or {}).get("tape") for k in active)
+        for k in active:
+            tape = (records.get(k) or {}).get("tape")
+            if not tape:
+                return False
+            try:
+                os.stat(str(tape))
+            except OSError:
+                return False
+        return True
 
     def trainer_check(self, now: float) -> None:
         """Each running island's trainer from its record in the run store: given up or failed

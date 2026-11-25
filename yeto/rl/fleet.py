@@ -505,6 +505,8 @@ def roster_options(cfg: dict[str, Any]) -> tuple[bool, int, float | None]:
         raise _err(f"fleet.min_islands {minimum} > the fleet's {len(islands)} island(s)")
     lease = section.get("island_lease_s")
     if lease is not None:
+        if isinstance(lease, bool) or not isinstance(lease, (int, float)):  # "200" is no number of seconds
+            raise _err(f"fleet.island_lease_s must be a number of seconds > 0 (got {lease!r})")
         lease = _seconds(lease, "fleet.island_lease_s")
         if fixed:
             raise _err("fleet.island_lease_s is the syncer lease of the island pool; a fixed roster "

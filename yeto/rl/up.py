@@ -902,10 +902,12 @@ class Run:
     def fleet_roster_refusal(self, plan: Any, uri: str) -> str | None:
         """Why this ``run up`` must not write ``plan`` over the stored one (None: it may): the
         stored plan ran the other roster (a plan written before ``fleet.fixed_roster`` ran a
-        fixed one) while trainer islands of it still run by their records. The new launch adopts
-        them as they run (``yeto.launch.island_adopt``): a fixed-roster trainer sends no syncer
-        lease heartbeat, so an island pool's syncer would drop it; a pool's trainer under a
-        fixed-roster syncer would wait on islands the syncer no longer counts."""
+        fixed one), or an island pool with another syncer lease, while trainer islands of it
+        still run by their records. The new launch adopts them as they run
+        (``yeto.launch.island_adopt``): a fixed-roster trainer sends no syncer lease heartbeat,
+        so an island pool's syncer would drop it; a pool's trainer under a fixed-roster syncer
+        would wait on islands the syncer no longer counts; a trainer that heartbeats at the old
+        lease's pace can be dropped by a syncer with a shorter lease."""
         from yeto.launch import island_lifecycle as lifecycle  # noqa: PLC0415
         from yeto.rl import fleet  # noqa: PLC0415
 
@@ -921,7 +923,8 @@ class Run:
             stored = fleet.FleetPlan.from_json(json.loads(raw))
         except (ValueError, KeyError, TypeError):
             return None  # not a plan this code reads: written over (no island records refer to its roster)
-        if stored.fixed_roster == plan.fixed_roster:
+        if stored.fixed_roster == plan.fixed_roster and (
+                plan.fixed_roster or stored.island_lease_s == plan.island_lease_s):
             return None
         try:  # the stored plan's islands, read one by one (no listing that could answer empty)
             records = lifecycle.IslandStateStore(objects, log=_log).read_all(
@@ -935,12 +938,13 @@ class Run:
 
         def mode(p: Any) -> str:
             return (f"a fixed roster ({p.roster_reason or 'fleet.fixed_roster'})" if p.fixed_roster
-                    else "the syncer island pool")
+                    else f"the syncer island pool (lease {p.island_lease_s or 0:g} s)")
         return (f"the stored fleet plan {uri} ran {mode(stored)} and trainer island(s) "
                 f"{', '.join(str(k) for k in running)} still run under it by their records, while this run config "
                 f"compiles {mode(plan)}: the new launch would adopt them as they run. Re-up with the stored roster ("
                 + ("fleet.fixed_roster: true" if stored.fixed_roster
-                   else "no fleet.fixed_roster, and a trainer argv the island pool takes")
+                   else f"no fleet.fixed_roster, fleet.island_lease_s {stored.island_lease_s or 0:g}, "
+                        "and a trainer argv the island pool takes")
                 + "), or start a new run name; once the fleet's machines are gone (`yeto run down`), deleting "
                 "the stored plan lets this roster start. Nothing ordered")
 
