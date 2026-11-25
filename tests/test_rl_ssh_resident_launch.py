@@ -56,25 +56,93 @@ def _fleet(args) -> list[tuple[str, str, str | None]]:
     return [(r["event"], r["island"], r.get("reason")) for r in recs if r["event"].startswith("island_")]
 
 
-def _finish_when_started(cluster, k=0):
+class _ImmediateThread:
+    """The fleet's ``thread_cls``: a relaunch runs to its end inside the poll that starts it,
+    so the fake clock never moves while one is in flight (a loaded runner cannot make a
+    relaunch outlast the recovery window in fake time)."""
+
+    def __init__(self, target, daemon=None, **kw):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+    def join(self, timeout=None):
+        pass
+
+    def is_alive(self):
+        return False
+
+
+class DrivenClock(Clock):
+    """Fake time with the test's script on it: before each fake sleep of the launcher, every
+    step whose condition holds runs, in order, on the launcher's own thread. No wall-clock
+    thread races the fake clock."""
+
+    def __init__(self):
+        super().__init__()
+        self.steps: list[tuple] = []
+        self.controller = None
+
+    def then(self, ready, act):
+        self.steps.append((ready, act))
+
+    def sleep(self, seconds):
+        while self.steps and self.steps[0][0]():
+            self.steps.pop(0)[1]()
+        super().sleep(seconds)
+
+    def finalized(self) -> bool:
+        c = self.controller
+        return c is not None and bool(c.learners) and all(c._finalized(r) for r in c.learners.values())  # noqa: SLF001
+
+
+def _drive(monkeypatch) -> DrivenClock:
+    """The launcher's FleetController runs relaunches inline and is known to the clock (its
+    finalized probe tells when the island's end record went through the log stream)."""
+    clock = DrivenClock()
+
+    class Controller(launcher.FleetController):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **{**kw, "thread_cls": _ImmediateThread})
+            clock.controller = self
+
+    monkeypatch.setattr(launcher, "FleetController", Controller)
+    return clock
+
+
+def _started(cluster, k):
+    return lambda: all(k in cluster.runs[n] for n in NAMES)
+
+
+def _finish_when_started(clock, cluster, k=0):
+    """Once incarnation ``k`` runs on every node: node 0 reports the trainer's end, and, once
+    the launcher has read it (event sync, not a sleep), every rank exits 0."""
+
     def finish():
-        for _ in range(500):
-            if all(k in cluster.runs[n] for n in NAMES):
-                break
-            time.sleep(0.01)
         cluster.say("b300-0", k, FINALIZED)
+        deadline = time.monotonic() + 60
+        while not clock.finalized():  # the log pump is a thread: wait for it, fake time stands still
+            if time.monotonic() > deadline:
+                raise AssertionError("the island's rl_learner_finalized record was never read")
+            time.sleep(0.001)
         for name in reversed(NAMES):
             cluster.exit(name, k, 0)
-    import threading
 
-    threading.Thread(target=finish, daemon=True).start()
+    clock.then(_started(cluster, k), finish)
+
+
+def _crash_then_finish(clock, cluster):
+    """Incarnation 0: rank 1 dies once every node runs; incarnation 1 then runs to its end."""
+    clock.then(_started(cluster, 0), lambda: cluster.exit("b300-1", 0, 1))
+    _finish_when_started(clock, cluster, k=1)
 
 
 def test_a_resident_ssh_trainer_runs_to_its_end_and_is_released(monkeypatch, tmp_path, cluster):
-    record, clock = [], Clock()
+    record, clock = [], _drive(monkeypatch)
     _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
     args = _args(tmp_path)
-    _finish_when_started(cluster)
+    _finish_when_started(clock, cluster)
     code = launcher.run(args)
     assert code == 0, code
     assert cluster.count("start", 0) == 3 and cluster.count("kill", 0) == 3  # teardown verified each node
@@ -82,20 +150,10 @@ def test_a_resident_ssh_trainer_runs_to_its_end_and_is_released(monkeypatch, tmp
 
 
 def test_a_failed_rank_is_relaunched_as_the_next_incarnation(monkeypatch, tmp_path, cluster):
-    record, clock = [], Clock()
+    record, clock = [], _drive(monkeypatch)
     _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
     args = _args(tmp_path)
-    import threading
-
-    def crash_then_finish():
-        for _ in range(500):
-            if all(0 in cluster.runs[n] for n in NAMES):
-                break
-            time.sleep(0.01)
-        cluster.exit("b300-1", 0, 1)  # incarnation 0: rank 1 dies
-        _finish_when_started(cluster, k=1)
-
-    threading.Thread(target=crash_then_finish, daemon=True).start()
+    _crash_then_finish(clock, cluster)
     code = launcher.run(args)
     assert code == 0, code
     assert cluster.count("start", 0) == 3 and cluster.count("start", 1) == 3
@@ -103,11 +161,11 @@ def test_a_failed_rank_is_relaunched_as_the_next_incarnation(monkeypatch, tmp_pa
 
 
 def test_an_unconfirmed_release_exits_5_and_keeps_the_head(monkeypatch, tmp_path, cluster):
-    record, clock = [], Clock()
+    record, clock = [], _drive(monkeypatch)
     _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
     args = _args(tmp_path)
     cluster.kill_rc["b300-2"] = 4  # its container survives docker rm -f
-    _finish_when_started(cluster)
+    _finish_when_started(clock, cluster)
     assert launcher.run(args) == launcher.TEARDOWN_UNVERIFIED_EXIT == 5
     assert args._teardown_incomplete is True
     stops = [e for e in _fleet(args) if e[0] == "island_stop"]
@@ -134,7 +192,7 @@ def test_the_stop_flag_stops_the_island_and_exits_9(monkeypatch, tmp_path, clust
 def test_a_second_launch_of_the_run_reattaches_to_the_kept_island(monkeypatch, tmp_path, cluster):
     from yeto import runs
 
-    record, clock = [], Clock()
+    record, clock = [], _drive(monkeypatch)
     _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
     args = _args(tmp_path)
     args.keep = True
@@ -143,7 +201,7 @@ def test_a_second_launch_of_the_run_reattaches_to_the_kept_island(monkeypatch, t
     assert not [e for e in _fleet(args) if e[0] == "island_stop"]  # kept: still running and billed
     runs.stop_flag_path(args.cluster_prefix).unlink()
     again = _args(tmp_path)
-    _finish_when_started(cluster)
+    _finish_when_started(clock, cluster)
     assert launcher.run(again) == 0
     assert cluster.count("start") == 3 and cluster.count("follow", 0) == 3  # reattached, no second start
     assert cluster.count("kill", 0) == 3
@@ -169,7 +227,7 @@ def test_a_resident_island_copies_the_weights_onto_every_node_before_its_first_s
     once, before any node starts; a relaunch does not copy again."""
     import yeto.launch.ssh_weights as ssh_weights
 
-    record, clock = [], Clock()
+    record, clock = [], _drive(monkeypatch)
     _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
     for key in ("ACCESS_KEY_ID", "SECRET_ACCESS_KEY"):
         monkeypatch.setenv("YETO_WEIGHTS_S3_" + key, "test")
@@ -184,17 +242,7 @@ def test_a_resident_island_copies_the_weights_onto_every_node_before_its_first_s
                  "--model-store-source", "s3://weights/models/k31")
     inv = tmp_path / "inventory.yaml"
     inv.write_text(inv.read_text().replace("docker_args:", "mounts: {/mnt/nvme/models: /data/models}, docker_args:"))
-    import threading
-
-    def crash_then_finish():
-        for _ in range(500):
-            if all(0 in cluster.runs[n] for n in NAMES):
-                break
-            time.sleep(0.01)
-        cluster.exit("b300-1", 0, 1)  # incarnation 0: rank 1 dies
-        _finish_when_started(cluster, k=1)
-
-    threading.Thread(target=crash_then_finish, daemon=True).start()
+    _crash_then_finish(clock, cluster)
     assert launcher.run(args) == 0
     image = "ghcr.io/x/y@sha256:" + "a" * 64
     assert synced == [("/data/models", "s3://weights/models/k31", NAMES, [image] * 3, 0)]
