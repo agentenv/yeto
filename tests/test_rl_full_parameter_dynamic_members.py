@@ -551,6 +551,90 @@ def test_an_island_back_within_its_lease_keeps_its_slot(syncer_binary, tmp_path)
 
 @needs_cargo
 @pytest.mark.usefixtures("_hmac_key")
+def test_a_round_whose_islands_all_left_reopens_for_a_new_island_at_once(syncer_binary, tmp_path):
+    """Islands 0 and 1 both hold the PULL of a round and leave (0 with LEAVE, 1
+    torn down without one, released after its 4 s lease); island 2 joins later.
+    Under θ = 1.0 the round is relaunched for island 2 once it caught up, not at
+    the quorum timeout (900 s), and the run ends on island 2 alone."""
+    lease, quorum_timeout = 4, 900  # the syncer's default quorum timeout
+    pool = ("--rl-sync-quorum-theta", "1.0", "--rl-sync-max-base-lag", "1",
+            "--rl-sync-island-lease-s", str(lease), "--rl-sync-max-learners", str(MAX_LEARNERS))
+    tape_path = tmp_path / "tape.jsonl"
+    process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *pool, total_steps=4,
+                                                      log_file=tmp_path / "syncer.log")
+    clients = {learner: _client(learner, port, profile_hash) for learner in range(LAUNCHED)}
+    versions = {learner: [0] * P for learner in range(MAX_LEARNERS)}
+    seen: dict[int, set] = {learner: set() for learner in range(MAX_LEARNERS)}
+    held: dict[int, list] = {}
+    state: dict = {"step": None, "gone": set(), "left_at": None, "joined": False, "beat": 0.0}
+
+    def poll():
+        if time.monotonic() - state["beat"] > 1:  # the islands still here renew their leases
+            state["beat"] = time.monotonic()
+            for client in clients.values():
+                client.heartbeat(0)
+        for learner, client in list(clients.items()):
+            client.check_health()
+            for update in client.drain_updates():
+                fid = update.fragment_id
+                versions[learner][fid] = max(versions[learner][fid], update.version)
+            if learner == 2 and not state["joined"]:  # a joiner answers only after its catch-up
+                held.setdefault(2, []).extend(client.drain_pulls())
+                if min(versions[2]) == 0 and any(versions[0]):
+                    continue
+                state["joined"] = True
+            for permit in held.pop(learner, []) + client.drain_pulls():
+                key = (permit.global_step, permit.round_attempt)
+                if key in seen[learner]:
+                    continue
+                seen[learner].add(key)
+                if learner < LAUNCHED and permit.global_step >= 3:
+                    state["step"] = permit.global_step  # never answered: the island goes
+                    if learner == 0:
+                        client.send_leave(2)
+                    clients.pop(learner).close()
+                    state["gone"].add(learner)
+                    if state["gone"] == {0, 1}:
+                        state["left_at"] = time.monotonic()
+                    break
+                client.push_fragment(permit.fragment_id, permit.global_step, permit.round_attempt,
+                                     versions[learner][permit.fragment_id], permit.global_step, 1, 7,
+                                     _f32(_delta(learner, permit.global_step)))
+        if state["left_at"] is not None and 2 not in clients:
+            versions[2] = [0] * P
+            clients[2] = _client(2, port, profile_hash)
+            clients[2].start()
+        return 2 in clients and clients[2].finalizing.is_set()
+
+    try:
+        for client in clients.values():
+            client.start()
+        for fid in range(P):
+            clients[0].send_init(fid, _f32(_initial(fid)))
+        _wait(poll, "syncer never finalized", timeout=60)
+        manifest, _ = clients[2].wait_for_final_fragments(timeout=30)
+        clients[2].acknowledge_finalization(manifest)
+        assert process.wait(timeout=15) == 0
+    finally:
+        for client in clients.values():
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=10)
+    tape = tape_path.read_text()
+    records = [json.loads(line) for line in tape.splitlines() if line.startswith("{")]
+    deserted = [r for r in records if r.get("kind") == "round_attempt_timeout" and r.get("global_step") == state["step"]]
+    assert deserted and {r["reason"] for r in deserted} == {"members_left"}, deserted
+    assert deserted[-1]["next"] == "new_attempt"
+    merged = {r["step"]: r for r in _outer_steps(tape)}[state["step"]]
+    assert [int(e[0]) for e in merged["raw_weights"]] == [2] and not merged["timed_out"]
+    # the round waited for island 1's lease and island 2's arrival, never for the quorum timeout
+    assert merged["step_seconds"] < 30 < quorum_timeout, merged["step_seconds"]
+    assert not [r for r in records if r.get("kind") == "round_attempt_timeout" and r.get("reason") == "quorum_timeout"]
+
+
+@needs_cargo
+@pytest.mark.usefixtures("_hmac_key")
 def test_an_id_past_max_learners_is_still_refused(syncer_binary, tmp_path):
     from yeto.protocol import DTYPE_F32, SyncerClient
 
