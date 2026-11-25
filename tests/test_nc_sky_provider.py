@@ -1078,7 +1078,35 @@ def test_the_cleanup_refuses_an_unscoped_down_with_another_account(monkeypatch):
 
 def _verda_provider(sky, **kw):
     return SkyProvider("run-v", resources={"infra": "verda/FIN-03", "accelerators": "RTX-6000-Ada:1",
-                                           "use_spot": True}, slots=[1], sky=sky, **kw)
+                                           "use_spot": True}, slots=[1], sky=sky, allow_no_autodown=True, **kw)
+
+
+def test_an_offer_sky_cannot_autodown_is_refused_unless_allowed():
+    """Its cluster has no cloud-side hard cap: refused before any order (pool --dry-run says
+    why) unless the config allows it; allowed, every order warns."""
+    from yeto.launch.nc.sky_provider import offline_problems
+
+    cfg = {"target": 1, "slots": [1], "shard_base": "s", "run": "run-v",
+           "provider": {"kind": "sky", "resources": {"infra": "verda/FIN-01", "accelerators": "A100:1"}}}
+    with pytest.raises(ValueError, match="allow_no_autodown"):
+        from_config(cfg, "run-v", sky=FakeSky())
+    assert any("allow_no_autodown" in p for p in offline_problems(cfg))
+    with pytest.raises(ValueError, match="true or false"):
+        from_config(dict(cfg, provider={**cfg["provider"], "allow_no_autodown": "yes"}), "run-v", sky=FakeSky())
+    allowed = dict(cfg, provider={**cfg["provider"], "allow_no_autodown": True})
+    assert not [p for p in offline_problems(allowed) if "autodown" in p]
+    p = from_config(allowed, "run-v", sky=FakeSky())
+    assert p.allow_no_autodown is True
+    # an offer list with no such cloud needs nothing
+    assert from_config(dict(cfg, provider={"kind": "sky", "resources": {"infra": "aws"}}), "run-v",
+                       sky=FakeSky()).allow_no_autodown is False
+
+
+def test_an_order_without_autodown_warns(capsys):
+    sky = FakeSky()
+    _verda_provider(sky).order(1)
+    out = capsys.readouterr().out
+    assert "WARNING: verda cannot autodown" in out and "yeto cleanup --run run-v --include-pools" in out
 
 
 def test_a_cloud_sky_cannot_autodown_is_launched_without_it_and_the_hard_cap_is_a_lease_end():

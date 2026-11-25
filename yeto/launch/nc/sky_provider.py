@@ -30,10 +30,15 @@ timeout, the own-name guard and the per-offer price.
   a ``run`` command (``task_yaml``: the sampler is the sky job) keeps
   ``down=True`` alone: the cluster goes when that job ends;
 * clouds sky cannot autodown (``NO_AUTODOWN_CLOUDS``: Verda and a few others;
-  sky refuses a launch that asks for it there): the cluster is launched without
-  ``down`` / autostop, and its active status carries ``lease_until`` = order +
-  ``hard_cap_minutes``, so the pool's lease-end rules (a replacement before the
-  end, the drain and release at it) stand in for sky's hard cap;
+  sky refuses a launch that asks for it there): such an offer is refused unless
+  the provider config sets ``allow_no_autodown: true``, because its cluster has
+  no cloud-side hard cap. With it, the cluster is launched without ``down`` /
+  autostop (a WARNING at each order), and its active status carries
+  ``lease_until`` = order + ``hard_cap_minutes``, so the pool's lease-end rules
+  (a replacement before the end, the drain and release at it) stand in for sky's
+  hard cap. If the pool process is gone, nothing downs it at the cap: ``yeto
+  cleanup --run <run> --include-pools`` (or ``yeto down``) releases it by exact
+  name from the run's resource ledger;
 * ``status``: ``sky.status`` of that cluster (``refresh=AUTO``, so a reclaimed
   spot VM is seen): ``UP`` -> active, ``INIT`` (or the launch still running) ->
   waiting (ended ``lost`` past ``start_timeout_s`` from the order: the watchdog's
@@ -58,7 +63,8 @@ timeout, the own-name guard and the per-offer price.
   ``run=<run id>`` (written before the launch). Another run's cluster with a
   matching name (the spot watchdog's ``exact_prefix`` has no run id in it) or one
   opened by hand is never adopted, released or downed: it is reported once;
-* ``attach``: an ssh alias to the head (sky's key, no relay), then the
+* ``attach``: an ssh alias to the head (sky's key, no relay; its file included in
+  ``~/.ssh/config``), then the
   ``host_setup`` commands of the config;
 * ``hourly_cost(ticket)``: the USD price of the offer the cluster was launched with.
 
@@ -111,7 +117,7 @@ UP, INIT, STOPPED = "UP", "INIT", "STOPPED"
 KIND, LEDGER_KIND = "sky", "sky_cluster"
 CONFIG_KEYS = frozenset({"kind", "factory", "resources", "price_usd_h", "offers", "candidates", "cluster_prefix",
                          "ssh_key", "host_setup", "start_timeout_s", "task_yaml", "envs", "secrets",
-                         "hard_cap_minutes", "aws_profile"})
+                         "hard_cap_minutes", "aws_profile", "allow_no_autodown"})
 # A cluster with no sky job is autodowned this long after its launch (wait_for=none).
 DEFAULT_HARD_CAP_MINUTES = 24 * 60
 # Clouds whose sky provisioner has no autodown (SkyPilot 0.14.3: CloudImplementationFeatures.AUTODOWN
@@ -156,7 +162,8 @@ def offer_cloud(offer: Offer) -> str:
 
 def _listed_cloud(record: Any) -> str:
     """The cloud of a cluster sky lists (its ``cloud`` field, or the handle's launched resources)."""
-    cloud = record.get("cloud") or getattr(getattr(record.get("handle"), "launched_resources", None), "cloud", None)
+    cloud = _field(record, "cloud") or getattr(getattr(_field(record, "handle"), "launched_resources", None),
+                                                "cloud", None)
     return str(cloud or "").strip().lower()
 
 
@@ -342,7 +349,8 @@ class SkyProvider:
                  task_yaml: str | None = None, envs: dict[str, str] | None = None,
                  secrets: dict[str, str] | None = None, sky: Any = None, record: Path | None = None,
                  clock=time.time, exact_prefix: str | None = None,
-                 hard_cap_minutes: float = DEFAULT_HARD_CAP_MINUTES, aws_profile: str | None = None):
+                 hard_cap_minutes: float = DEFAULT_HARD_CAP_MINUTES, aws_profile: str | None = None,
+                 allow_no_autodown: bool = False):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", cluster_prefix):
             raise ValueError("cluster_prefix: lower-case letters, digits and '-'")
         if offers is None:
@@ -361,6 +369,17 @@ class SkyProvider:
         if not float(hard_cap_minutes) >= 1:
             raise ValueError("sky provider: hard_cap_minutes must be >= 1")
         self.hard_cap_minutes = int(hard_cap_minutes)
+        if not isinstance(allow_no_autodown, bool):
+            raise ValueError("sky provider: allow_no_autodown must be true or false")
+        self.allow_no_autodown = allow_no_autodown
+        refused = [o for o in self.offers if not autodown_supported(o)]
+        if refused and not allow_no_autodown:
+            raise ValueError(
+                f"sky provider: offer(s) {[o.key for o in refused]} are on a cloud sky cannot autodown "
+                f"({sorted({offer_cloud(o) for o in refused})}): such a cluster has no cloud-side hard cap. "
+                "Set provider.allow_no_autodown true to launch it anyway: the pool releases it at its lease end "
+                "(order + hard_cap_minutes); if the pool process is gone, `yeto cleanup --run <run> "
+                "--include-pools` releases it from the run's resource ledger")
         self._patched = False
         self.aws_profile = aws_profile or None
         self.request_env = aws_request_env(self.aws_profile)
@@ -594,6 +613,10 @@ class SkyProvider:
                                  **({"num_nodes": num_nodes} if num_nodes > 1 else {}),
                                  **({} if autodown else {"autodown": False})}
         self._save_doc(doc)  # recorded before the launch: a crash mid-launch still leaves it ours to down
+        if not autodown:
+            print(f"[sky-provider] WARNING: {offer_cloud(offer)} cannot autodown: cluster {name} has no cloud-side "
+                  f"hard cap; the pool releases it at its lease end (in {self.hard_cap_minutes} min); if this "
+                  f"process is gone, `yeto cleanup --run {self.run_id} --include-pools` releases it", flush=True)
         # pool / aws_profile: a crash before "created" leaves a row the cleanup still downs as this pool's
         _record_ledger("intent", LEDGER_KIND, name, offer=offer.key, price_usd_h=offer.price_usd_h, run=self.run_id,
                        pool=True, **({"aws_profile": self.aws_profile} if self.aws_profile else {}))
@@ -883,7 +906,7 @@ class SkyProvider:
             rows[name] = {"slot": slot, "n": int(match.group(1)), "open": True,
                           "ordered_at": self.clock(), "adopted": True}
             if _listed_cloud(rec) in NO_AUTODOWN_CLOUDS:  # its hard cap counts from its launch
-                launched = rec.get("launched_at")
+                launched = _field(rec, "launched_at")
                 rows[name].update(autodown=False, **({"ordered_at": float(launched)} if launched else {}))
             changed = True
         if changed:
