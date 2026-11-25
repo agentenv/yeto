@@ -139,10 +139,25 @@ def _start_decoupled_syncer(binary, workdir, islands, total_steps, *options):
     return process, port, layout, command
 
 
+def work_pulls(spec) -> int:
+    """How many PULLs of later rounds reach an island while it trains one: an island
+    ``1 / speed`` times slower than the fastest takes that many of the fastest island's
+    rounds for one of its own, so ``round(1 / speed) - 1`` further rounds start meanwhile
+    (0 for the fastest island)."""
+    return max(int(round(1.0 / spec.speed)) - 1, 0)
+
+
 class _IslandThread(threading.Thread):
-    """One fake island on the real wire: answers the newest PULL it has, after
-    ``spec.round_wall_s`` of "training" from the fragment version it held when it
-    started; the delta carries the island's numeric noise."""
+    """One fake island on the real wire: answers the newest PULL it has, from the
+    fragment version it held when it started, once :func:`work_pulls` more PULLs have
+    arrived (its "training" lasts that many of the syncer's rounds); the delta carries
+    the island's numeric noise.
+
+    The speed is counted in the syncer's rounds, not in seconds: a round of the real
+    syncer takes far longer than either island's ``work_s`` and grows with the load of
+    the machine (about 0.6 s here, more on a busy CI runner), so a slowness in seconds
+    said nothing about how many rounds the slow island fell behind -- the 10x island kept
+    up as well as the 3x one on a loaded runner and the test failed at random."""
 
     def __init__(self, spec, learner_id, client, stop):
         super().__init__(daemon=True, name=spec.island_id)
@@ -156,22 +171,30 @@ class _IslandThread(threading.Thread):
         for update in self.client.drain_updates():
             self.versions[update.fragment_id] = max(self.versions[update.fragment_id], update.version)
 
+    def _training(self) -> bool:
+        return not self.stop.is_set() and not self.client.finalizing.is_set()
+
     def run(self):
         try:
             done = 0
-            while not self.stop.is_set() and not self.client.finalizing.is_set():
+            pending = []  # PULLs that arrived while it trained: it answers only the newest
+            while self._training():
                 self.client.check_health()
                 self._drain()
-                pulls = sorted(self.client.drain_pulls(), key=lambda p: p.global_step)
-                if not pulls:
+                pending += self.client.drain_pulls()
+                if not pending:
                     time.sleep(0.005)
                     continue
+                pulls, pending = sorted(pending, key=lambda p: p.global_step), []
                 self.skipped_pulls += len(pulls) - 1  # a busy island answers only the newest
                 pull = pulls[-1]
                 base = self.versions[pull.fragment_id]  # what this island trains from
-                deadline = time.monotonic() + self.spec.round_wall_s
-                while time.monotonic() < deadline and not self.stop.is_set():
-                    time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+                while len(pending) < work_pulls(self.spec) and self._training():
+                    self.client.check_health()
+                    pending += self.client.drain_pulls()
+                    time.sleep(0.005)
+                if not self._training():
+                    break
                 self._drain()
                 delta = np.full(NUMEL, 0.01, dtype=np.float32) + np.asarray(
                     self.spec.noise(done, NUMEL), dtype=np.float32)
@@ -256,17 +279,18 @@ def _run_speed_gap(binary, workdir, slow_factor, *, total_steps, max_base_lag):
 
 @needs_cargo
 def test_speed_gap_islands_against_the_real_syncer(syncer_binary, tmp_path, monkeypatch):
-    """A B300-like island and a 910B-like island 3x and 10x slower, quorum 1, base
-    lag of one fragment round. The syncer keeps stepping with the fast island in
-    every round; the slow island's deltas arrive late (carried over with a lag
-    discount) or from a base the lag no longer admits (StaleBase, refused, not
-    fatal); its contribution rate falls as the speed gap grows."""
+    """A B300-like island and a 910B-like island 3x and 10x slower (in the syncer's
+    rounds: :func:`work_pulls`), quorum 1, a base lag of six fragment rounds (12 versions,
+    above the 10x island's lag of about nine). The syncer keeps stepping with the fast
+    island in every round; the slow island's deltas arrive late and are carried over
+    into a later round with a lag discount; its contribution rate falls as the speed gap
+    grows. Nothing here depends on how long a round takes."""
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "hetero-sim-test-key")
     stats = {}
     for factor in (3, 10):
         workdir = tmp_path / f"x{factor}"
         workdir.mkdir()
-        stats[factor] = _run_speed_gap(syncer_binary, workdir, factor, total_steps=12, max_base_lag=1)
+        stats[factor] = _run_speed_gap(syncer_binary, workdir, factor, total_steps=12, max_base_lag=6)
         print(f"\nslow_factor={factor}: "
               f"{json.dumps({k: v for k, v in stats[factor].items() if k != 'command'})}")
     for factor, st in stats.items():
