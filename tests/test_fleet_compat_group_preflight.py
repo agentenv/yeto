@@ -110,6 +110,44 @@ def test_the_only_island_moved_to_another_card_is_refused_once_the_fleet_has_a_s
     assert "sglang (its machines before the move)" in err and "compat_group nvidia-h100" in err
 
 
+def test_an_unreadable_syncer_record_is_never_taken_for_no_syncer(fleet_store, capsys, monkeypatch):  # noqa: F811
+    """A store error while reading the syncer record: the real move is refused with the
+    reason (nothing written); the dry run warns and compares with the previous machines
+    as if a syncer ran, so the move of the only island to another card group is refused
+    there too, while a move within the group passes its dry run."""
+    cfg, objects, store, run_cli, _ = fleet_store
+    assert run_cli("remove", "--name", "mixed") == 0
+
+    def unreadable(_objects):
+        raise OSError("store unavailable")
+
+    monkeypatch.setattr(island_launches, "read_syncer_record", unreadable)
+    generation = store.read()["generation"]
+    capsys.readouterr()
+    assert run_cli("move", "--name", "sglang", "--gpu", "modal:1x2xh100", "--usd-per-h", "4") == 2
+    err = capsys.readouterr().err
+    assert "syncer record could not be read (OSError: store unavailable)" in err and "retry" in err
+    assert store.read()["generation"] == generation
+    assert run_cli("move", "--name", "sglang", "--gpu", "modal:1x2xh100", "--usd-per-h", "4", "--dry-run") == 0
+    assert "WARNING: the fleet's syncer record could not be read" in capsys.readouterr().err
+    assert run_cli("move", "--name", "sglang", "--gpu", H200, "--usd-per-h", "4", "--dry-run") == 2
+    err = capsys.readouterr().err
+    assert "sglang (its machines before the move)" in err and "compat_group nvidia-h200" in err
+
+
+def test_a_strict_syncer_refuses_relaxed_islands_on_two_compat_groups(tmp_path):
+    """The syncer compares compat groups unless it runs --rl-identity relaxed itself: two
+    relaxed islands on different cards are refused by a strict syncer launch."""
+    cfg, members = _members(tmp_path)
+    relaxed = [{**m, "argv": [*m["argv"], "--rl-identity", "relaxed"]} for m in members]
+    moved = {**relaxed[0], "gpu": "nebius:1xh200@us-central1"}
+    with pytest.raises(ValueError) as raised:
+        fleet_session.check(cfg["trainer"]["argv"], [moved, *relaxed[1:]])
+    text = str(raised.value)
+    assert "compat_group nvidia-h200" in text and "compat_group nvidia-h100" in text
+    assert "session_contract_mismatch" in text and "runs --rl-identity" not in text  # not the mode check
+
+
 def test_run_up_preflight_refuses_islands_on_two_compat_groups(tmp_path, monkeypatch):
     from test_fleet_island_runup import FakeController, build
     from test_fleet_trainer_worker import FakeLaunches

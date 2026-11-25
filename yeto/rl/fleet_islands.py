@@ -234,23 +234,32 @@ def launch_dry_run(member: dict[str, Any], *, incarnation: int = 0,
 
 
 def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
-                  previous: dict[str, Any] | None = None) -> None:
+                  previous: dict[str, Any] | None = None, *, dry_run: bool = True) -> None:
     """The island ``member`` (added or moved) against the syncer launch of the run
     (``yeto.rl.fleet_session``) with the term of the fleet's syncer record (the syncer
     launch's when there is none yet), and the desired state's other trainer islands'
     learner ids. Its backend identity (the compat group of its ``--gpu`` card) is compared
     with the islands holding the running session before anything is ordered: the other
     trainer islands and, once the fleet has a syncer, a moved island's ``previous``
-    member (its old machines joined that session). Raises ValueError naming every
-    disagreement."""
+    member (its old machines joined that session). Only a missing syncer record means
+    "no syncer yet": a record that cannot be read (a store error) refuses a change that is
+    written (not ``dry_run``), and a dry run warns and compares with the previous
+    machines as if a syncer ran. Raises ValueError naming every disagreement."""
     from yeto.rl import fleet_session  # noqa: PLC0415
 
-    record = None
+    record, unread = None, None
     try:
         record = il.read_syncer_record(run._objects())  # noqa: SLF001
-    except Exception as error:  # noqa: BLE001 - the syncer launch's own term
-        print(f"fleet island: the fleet's syncer record was not read ({type(error).__name__}: {error}); "
-              "checking with the syncer launch's term", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - never taken for "no syncer yet"
+        unread = f"{type(error).__name__}: {error}"
+        if not dry_run:
+            raise IslandChangeError(
+                f"the fleet's syncer record could not be read ({unread}): whether a syncer holds a running "
+                f"session is unknown, so island {member['name']} cannot be checked against it; nothing was "
+                "written, retry once the run store reads") from None
+        print(f"fleet island: WARNING: the fleet's syncer record could not be read ({unread}); the dry run "
+              "checks with the syncer launch's term and takes the island's previous machines to hold a "
+              "running session; the change itself is refused until the record reads", file=sys.stderr)
     others = [m for m in dz.trainers(doc).values() if m["name"] != member["name"]]
     clash = [m["name"] for m in others if int(m.get("learner_id", -1)) == int(member["learner_id"])]
     if clash:
@@ -258,10 +267,17 @@ def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
                                 f"{clash[0]}'s too")
     epoch = (record or {}).get("syncer_epoch")
     running = list(others)
-    if previous is not None and record is not None:
+    if previous is not None and (record is not None or unread is not None):
         running.append({**previous, "name": f"{previous['name']} (its machines before the move)"})
-    fleet_session.check(run.trainer_argv() if hasattr(run, "trainer_argv") else run.cfg["trainer"]["argv"],
-                        [member], syncer_epoch=epoch if isinstance(epoch, int) else None, running=running)
+    try:
+        fleet_session.check(run.trainer_argv() if hasattr(run, "trainer_argv") else run.cfg["trainer"]["argv"],
+                            [member], syncer_epoch=epoch if isinstance(epoch, int) else None, running=running)
+    except ValueError as error:
+        if unread is None:
+            raise
+        raise ValueError(f"{error} (the fleet's syncer record could not be read ({unread}), so the island's "
+                         "machines before the move were taken to hold a running session; retry once the "
+                         "record reads)") from None
     print(f"fleet island: island {member['name']} agrees with the syncer launch on the syncer session")
 
 
@@ -330,7 +346,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
             # a change that is written (not --dry-run) refuses a pinned verl layout hash it cannot plan
             with refuse_unverified_layout(not args.dry_run):
                 launch_dry_run(launch_member, prepare=prepare)
-                session_check(run, doc, launch_member, previous)
+                session_check(run, doc, launch_member, previous, dry_run=args.dry_run)
             print(f"fleet island: launch of {launch_member['name']} (learner {launch_member['learner_id']}, "
                   f"--gpu {launch_member['gpu']}) passes its dry run")
     except (IslandChangeError, ValueError, OSError) as error:
