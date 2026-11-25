@@ -42,7 +42,8 @@ asynchronous rounds only) the publisher releases full weights at the merged
 version of the fragments (``full_parameter_sync.merged_version``), and the
 samplers run ``--tuning full``.
 
-Samplers that follow their own trainer (``--rl-sampler-follow trainer``, Miles):
+Samplers that follow their own trainer (``--rl-sampler-follow trainer``, on a backend
+that releases per learner: ``per_learner_release``, :func:`releases_per_learner`):
 in a synced group, sampler j (in island order) feeds trainer j % K only. Each
 trainer and its samplers form one pair inside the group: they share the store
 sub-directory ``trainer<k>`` (:func:`trainer_substore`; the buffer and the
@@ -85,13 +86,13 @@ claim from (an island fleet's ``<store>/fleet/dispense``), under its shard name
 ``island<M>``, so no prompt goes to a pool and a sampler island in the same pass
 (:func:`check_store_dispense`; ``adapters.miles.task_dispense``).
 
-Decoupled groups (``--rl-sync-preset decoupled``, Miles): a decoupled trainer
+Decoupled groups (``--rl-sync-preset decoupled``, ``per_learner_release``): a decoupled trainer
 has one version per fragment, merged at different times, so its group needs
 ``--rl-sampler-follow trainer`` (:func:`check_decoupled_group`); its samplers
 run as LoRA no-sync samplers (:func:`_as_lora_sampler`) and, like those of a
 full-parameter group, generate until their trainer ended.
 
-How long a full-parameter synced group's samplers run (Miles): its trainers
+How long a full-parameter synced group's samplers run (``per_learner_release``): its trainers
 run asynchronous rounds until the syncer stops them, so their round count is
 not known before the launch (``run_config.resolve_lr_schedule``). Its samplers
 therefore have no fixed round count: each generates until every trainer that
@@ -284,8 +285,8 @@ def check_decoupled_group(args: Any) -> None:
                          "M:sampler) needs --rl-sampler-follow trainer: a decoupled trainer has "
                          "no single merged version to release (each fragment has its own), so "
                          "each sampler serves its own trainer's local versions")
-    if (getattr(args, "rl_backend", None) or "miles") != "miles":
-        raise ValueError("a decoupled synced group is wired for --rl-backend miles only")
+    if not releases_per_learner(args):
+        raise ValueError(f"a decoupled synced group needs {per_learner_requirement(args)}")
     if getattr(args, "rl_initial_adapter", None) is not None:
         raise ValueError("a decoupled synced group does not take --rl-initial-adapter: its "
                          "samplers serve the base checkpoint until the first release, so the "
@@ -723,6 +724,70 @@ def island_substore(args: Any, island: int, num_islands: int) -> str | None:
     return trainer_substore(learners[trainer]) if trainer in learners else None
 
 
+def _capabilities(args: Any) -> frozenset[str]:
+    from . import backends  # noqa: PLC0415
+
+    try:
+        return backends.capabilities(getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND)
+    except backends.UnknownBackend:  # the launch's backend check names it
+        return frozenset()
+
+
+def releases_per_learner(args: Any) -> bool:
+    """Whether the trainers' backend releases each trainer's own local versions to its
+    ``trainer<k>/`` (``per_learner_release``: ``yeto.rl.engine.backends.capabilities``),
+    which the samplers that follow it load (``--rl-sampler-follow trainer``, decoupled
+    groups, the sampler stop count, per-trainer ``--rl-release-every``)."""
+    from .backend_identity import PER_LEARNER_RELEASE  # noqa: PLC0415
+
+    return PER_LEARNER_RELEASE in _capabilities(args)
+
+
+def _able(capability: str) -> str:
+    from . import backends  # noqa: PLC0415
+
+    able = []
+    for name in backends.registered():
+        try:
+            if capability in backends.capabilities(name):
+                able.append(name)
+        except backends.UnknownBackend:
+            continue
+    return " / ".join(able) or "none"
+
+
+def per_learner_requirement(args: Any, *, short: bool = False) -> str:
+    """What :func:`releases_per_learner` asks, for a refusal."""
+    from .backend_identity import PER_LEARNER_RELEASE  # noqa: PLC0415
+
+    able = f"--rl-backend {_able(PER_LEARNER_RELEASE)}"
+    if short:
+        return able
+    return (f"a backend whose trainers release their own local versions ({PER_LEARNER_RELEASE}: {able} only); "
+            f"--rl-backend {getattr(args, 'rl_backend', None) or 'miles'} does not")
+
+
+def release_cadence_ok(args: Any, *, busy: bool = False) -> bool:
+    """Whether the backend honours ``--rl-release-every N`` (and ``--rl-release-skip-busy``)
+    for this trainer: in every role (``release_cadence``), or, without skip-busy, where
+    it releases per learner and its samplers follow it (``per_learner_release``)."""
+    from .backend_identity import RELEASE_CADENCE  # noqa: PLC0415
+
+    if RELEASE_CADENCE in _capabilities(args):
+        return True
+    return not busy and releases_per_learner(args) and follows_trainer(args)
+
+
+def release_cadence_requirement(args: Any) -> str:
+    from .backend_identity import PER_LEARNER_RELEASE, RELEASE_CADENCE  # noqa: PLC0415
+
+    backend = getattr(args, "rl_backend", None) or "miles"
+    return (f"--rl-backend {_able(RELEASE_CADENCE)} ({RELEASE_CADENCE}), or a backend that releases per learner "
+            f"({PER_LEARNER_RELEASE}: {_able(PER_LEARNER_RELEASE)}) with samplers that follow their trainer "
+            f"(--rl-sampler-follow trainer) and no --rl-release-skip-busy; --rl-backend {backend} releases "
+            "every version here")
+
+
 def substore_uri(store: str, name: str) -> str:
     """``--rl-checkpoint-store`` (a path or a ``scheme://`` URI) with one more path
     segment."""
@@ -731,12 +796,13 @@ def substore_uri(store: str, name: str) -> str:
 
 def sampler_stop_trainers(args: Any, num_islands: int) -> dict[int, int]:
     """Sampler island -> how many trainers' ends stop it, for the samplers of a
-    full-parameter or decoupled synced group on Miles (module doc); empty for every
+    full-parameter or decoupled synced group on a backend that releases per learner
+    (module doc); empty for every
     other launch."""
     if (not is_synced_group(args)
             or getattr(args, "rl_sync_preset", None) not in (FULL_PARAMETER_SYNC_PRESET,
                                                              DECOUPLED_SYNC_PRESET)
-            or (getattr(args, "rl_backend", None) or "miles") != "miles"):
+            or not releases_per_learner(args)):
         return {}
     trainers = 1 if sampler_bindings(args, num_islands) else len(synced_group_learners(args, num_islands))
     return {island: trainers for island in sampler_islands(args, num_islands)}
@@ -754,8 +820,8 @@ def describe_sampler_stop(args: Any, num_islands: int) -> str | None:
 
 
 def check_sampler_follow(args: Any, num_islands: int) -> None:
-    """Launch checks of ``--rl-sampler-follow trainer``: a synced group on Miles
-    whose samplers split evenly over its trainers, synced trainers on Miles fed
+    """Launch checks of ``--rl-sampler-follow trainer``: a synced group on a backend that
+    releases per learner whose samplers split evenly over its trainers, synced trainers fed
     by external pools (:func:`check_external_pools`), or both together (a mixed
     group, :func:`check_mixed_group`); the external-pool flags belong to the
     latter two (:func:`check_external_pool_flags`)."""
@@ -767,8 +833,8 @@ def check_sampler_follow(args: Any, num_islands: int) -> None:
                          "trainer --rl-island-sample-role M:sampler, a syncer), or synced "
                          "trainers fed by external sampler pools (--rl-sample-role trainer, a "
                          "syncer, --rl-island-buffer-shards K:SHARDS for every trainer island)")
-    if (getattr(args, "rl_backend", None) or "miles") != "miles":
-        raise ValueError("--rl-sampler-follow trainer is wired for --rl-backend miles only")
+    if not releases_per_learner(args):
+        raise ValueError(f"--rl-sampler-follow trainer needs {per_learner_requirement(args)}")
     if is_external_pool_group(args):
         check_external_pools(args, num_islands)
         return
@@ -813,7 +879,7 @@ def check_mixed_group(args: Any, num_islands: int) -> None:
     no global ``--rl-buffer-shards``, the external shards named per learner id, the
     sampler bindings, no shard named twice (a sampler island writes ``island<M>``),
     at least one source per trainer, and sampler islands that generate until their
-    own trainer ended (the full-parameter or decoupled preset on Miles, as the
+    own trainer ended (the full-parameter or decoupled preset, per-learner releases, as the
     pools do)."""
     if getattr(args, "rl_buffer_shards", None):
         raise ValueError("--rl-buffer-shards: a synced group with external sampler pools takes each "
@@ -837,8 +903,8 @@ def check_mixed_group(args: Any, num_islands: int) -> None:
     if not sampler_stop_trainers(args, num_islands):
         raise ValueError("a synced group with sampler islands and external sampler pools needs "
                          f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} or {DECOUPLED_SYNC_PRESET} on "
-                         "--rl-backend miles: its sampler islands generate until their own trainer "
-                         "ended, as the pools do")
+                         f"{per_learner_requirement(args, short=True)}: its sampler islands generate until "
+                         "their own trainer ended, as the pools do")
 
 
 def check_external_pools(args: Any, num_islands: int) -> None:
@@ -1358,8 +1424,8 @@ def _check_release_cadence(args: Any, role: str) -> None:
         problems.append("--rl-release-every >= 1")
     if role != TRAINER:
         problems.append("--rl-sample-role trainer")
-    if (getattr(args, "rl_backend", None) or "miles") != "miles":
-        problems.append("--rl-backend miles (the verl buffer trainer releases every version)")
+    if not release_cadence_ok(args, busy=busy):
+        problems.append(release_cadence_requirement(args))
     if every > 1 and age < every:
         problems.append(f"--rl-max-policy-age >= {every} (a sampler may trail by up to "
                         f"{every} versions; got {age})")

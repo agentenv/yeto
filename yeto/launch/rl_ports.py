@@ -795,6 +795,9 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         own = substore or getattr(args, "rl_sample_relay", False)
         lanes = 1 if own else getattr(args, "rl_synced_trainers", None) or rl_island_count(args)
         flags += f" --rl-sample-store {shlex.quote(sample_store)} --rl-sample-lanes {lanes}"
+        if substore is not None:  # its samplers follow it: a backend that needs to be told releases per learner
+            per_learner = getattr(_rl_backend_module(args, "launch_flags"), "per_learner_release_flags", None)
+            flags += per_learner() if per_learner is not None else ""
         resume_store = None
     if resume_store is not None and not getattr(args, "rl_single_island_no_sync", False):
         resume_store = None  # a synced launch: island cuts only (above)

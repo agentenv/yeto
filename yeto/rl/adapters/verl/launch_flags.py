@@ -33,6 +33,13 @@ def rl_image_ok(rl_image: str) -> bool:
     return bool(match) and match["commit"] == VERL_COMMIT
 
 
+def per_learner_release_flags() -> str:
+    """The island flag of a synced trainer whose samplers follow it (the launcher gives it
+    its own sub-store ``trainer<k>`` and lane): it releases its own local versions there
+    (``buffer_ports`` per-learner mode) instead of learner 0's merged versions."""
+    return " --rl-release-mode per_learner"
+
+
 def image_pin_problem(rl_image: str) -> str | None:
     """Why ``rl_image`` is not this yeto's verl image (yeto.launch.trainer_image_check):
     a ``verl-build`` / ``verl-megatron-build`` image of another commit than the pin
