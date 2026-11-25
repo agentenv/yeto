@@ -156,6 +156,7 @@ DP_FLAG_LEGACY = "enable-dp-attention"  # the 0.5.x pin: --dp N --enable-dp-atte
 DP_FLAGS = (DP_FLAG_AUTO, DP_FLAG_ATTN_DP_SIZE, DP_FLAG_LEGACY)
 HELP_PROBE_TIMEOUT_S = 600.0  # importing sglang for --help takes a while on a cold image
 METRICS_FLAG = "--enable-metrics"
+METRICS_PROBE_TIMEOUT_S = 30.0  # importing one package; longer (a hung import) counts as missing
 # SGLang's /metrics needs prometheus_client in the server's python: without it the server
 # fails at start, so the flag is only passed where it imports (the pool's probe then reads
 # no counters and reports engine_metrics_unreadable with this reason)
@@ -182,8 +183,9 @@ def dp_flag_from_help(help_text: str) -> str:
     raise SamplerEngineError("sglang launch_server --help names neither --attn-dp-size nor --enable-dp-attention")
 
 
-def run_import_probe(argv: Sequence[str], timeout_s: float = HELP_PROBE_TIMEOUT_S) -> bool:
-    """True when ``argv`` (``python -c "import ..."``) exits 0."""
+def run_import_probe(argv: Sequence[str], timeout_s: float = METRICS_PROBE_TIMEOUT_S) -> bool:
+    """True when ``argv`` (``python -c "import ..."``) exits 0 within ``timeout_s`` (else
+    ``subprocess.TimeoutExpired``: the caller counts it as missing)."""
     import subprocess
 
     return subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout_s,  # noqa: S603

@@ -84,6 +84,24 @@ def test_without_prometheus_client_the_server_starts_without_metrics_and_says_wh
     assert "metrics_off" not in served.after_ready()
 
 
+def test_an_import_probe_that_hangs_counts_as_missing_within_30_s(tmp_path, capsys):
+    import inspect
+    import sys
+
+    from yeto.rl.adapters.sampler_engines import sglang_server
+
+    assert inspect.signature(sglang_server.run_import_probe).parameters["timeout_s"].default == 30.0
+    hung = [sys.executable, "-c", "import time; time.sleep(30)"]
+    with pytest.raises(subprocess.TimeoutExpired):
+        sglang_server.run_import_probe(hung, timeout_s=0.2)
+    engine = SGLangServerEngine(_config(tmp_path),
+                                metrics_probe=lambda argv: sglang_server.run_import_probe(hung, timeout_s=0.2))
+    assert "--enable-metrics" not in engine.argv(tmp_path / "base")
+    assert engine.metrics_off == "metrics disabled: prometheus_client missing"
+    assert "WARN: metrics disabled" in capsys.readouterr().out
+    assert sglang_server.run_import_probe([sys.executable, "-c", "import json"]) is True
+
+
 def test_a_probe_that_cannot_run_counts_as_missing(tmp_path):
     def broken(argv):
         raise OSError("no such python")
