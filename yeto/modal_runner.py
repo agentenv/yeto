@@ -1845,6 +1845,8 @@ class ModalOps:
         egress = getattr(self, "ledger_egress", None) or {}
         if gpu and egress.get("egress_events"):  # tape records that leave Modal (yeto.cost.egress)
             extra["egress_events"] = list(egress["egress_events"])
+            if egress.get("egress_islands") is not None:
+                extra["egress_islands"] = sorted(int(i) for i in egress["egress_islands"])
             if egress.get("egress_fallback_bytes"):
                 extra["egress_fallback_bytes"] = egress["egress_fallback_bytes"]
         if rate is not None:

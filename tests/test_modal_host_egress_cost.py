@@ -171,6 +171,44 @@ def test_a_sample_counts_in_one_app_and_only_inside_its_span():
     assert sum(i.usd for i in items) == pytest.approx(2 * L40S_8C_64G + egress.WIRE_OVERHEAD * EGRESS_GIB)
 
 
+def test_in_a_mixed_fleet_only_the_modal_island_s_bytes_are_the_modal_app_s_egress():
+    # island 0 trains on Modal; islands 1-5 run elsewhere (NC / sky / SSH) and push the same
+    # syncer, and their records are on the run's tapes too: 30 pushes of 15 GB an hour each
+    meter = EgressMeter()
+    for island in range(6):
+        for i in range(30):
+            t = T0 + 60 + i * 110 + island
+            meter.observe(pub(t, 15e9, "rl_fragment_push", island_id=island, fragment_id=i), t)
+    r = app(T0, egress_islands=[0])
+    (item,) = resource_costs([r], T0 + H, egress=meter.samples).items
+    own = L40S_8C_64G + 30 * 15e9 / GIB * egress.WIRE_OVERHEAD * EGRESS_GIB  # about 20.4 USD
+    assert item.usd == pytest.approx(own)
+    # a record that names no island counts (high, never low); a ledger entry written before
+    # egress_islands counts every island
+    meter.observe(pub(T0 + 30, 15e9, "rl_fragment_push"), T0 + 30)
+    (item,) = resource_costs([r], T0 + H, egress=meter.samples).items
+    assert item.usd == pytest.approx(own + 15e9 / GIB * egress.WIRE_OVERHEAD * EGRESS_GIB)
+    (item,) = resource_costs([app(T0)], T0 + H, egress=meter.samples).items
+    assert item.usd == pytest.approx(L40S_8C_64G + 181 * 15e9 / GIB * egress.WIRE_OVERHEAD * EGRESS_GIB)
+
+
+def test_two_modal_apps_each_count_their_own_island():
+    meter = EgressMeter()
+    for island in (0, 1):
+        meter.observe(pub(T0 + 60, GIB * (island + 1), island_id=island), T0 + 60)
+    a = app(T0, T0 + H, app_id="ap-a", egress_islands=[0])
+    b = app(T0, T0 + H, app_id="ap-b", egress_islands=[1])
+    ia, ib = resource_costs([a, b], T0 + H, egress=meter.samples).items
+    assert ia.usd == pytest.approx(L40S_8C_64G + 1 * egress.WIRE_OVERHEAD * EGRESS_GIB)
+    assert ib.usd == pytest.approx(L40S_8C_64G + 2 * egress.WIRE_OVERHEAD * EGRESS_GIB)
+
+
+def test_the_tape_island_of_a_launch_is_its_fleet_learner_id_else_its_index():
+    fleet = SimpleNamespace(rl_fleet_role="island", rl_fleet_learner_id=2, rl_fleet_learners=3)
+    assert egress.tape_island_ids(fleet, [0]) == [2]
+    assert egress.tape_island_ids(SimpleNamespace(rl_fleet_role=None), [1, 0, 1]) == [0, 1]
+
+
 def test_a_record_without_a_size_counts_the_largest_seen_else_the_fallback():
     samples = [Sample(T0 + 10, "rl_publication", 2 * GIB), Sample(T0 + 20, "rl_publication", None)]
     sized, unsized = egress.bytes_in(samples, ["rl_publication"], T0, T0 + H, None)
@@ -313,3 +351,20 @@ def test_a_fleet_island_on_modal_is_priced_with_the_host_its_argv_requests():
                                                                                  + 256 * MEM_H))
     record = {"usd_per_h": None, "gpu": "modal:1x1xl40s", "argv": argv}
     assert trainer_worker.incarnation_price(record) == pytest.approx(L40S_8C_64G)
+
+
+@pytest.mark.parametrize("fleet, want", [(True, [2]), (False, [0, 1])])
+def test_the_provision_records_what_leaves_modal_and_whose_on_the_modal_app(monkeypatch, fleet, want):
+    from yeto import modal_runner
+    from yeto.launch import trainer_provision as tp
+
+    monkeypatch.setattr(modal_runner.ModalOps, "define", lambda self, cfg: None)
+    args = SimpleNamespace(cluster_prefix="run", rl_checkpoint_store="s3://bucket/runs/run", rl_buffer_shards=["0:a"],
+                           rl_island_buffer_shards=None, model="x/unknown-model", weights_gb=1.0,
+                           rl_fleet_role="island" if fleet else None, rl_fleet_learner_id=2, rl_fleet_learners=3)
+    prov = tp.TrainerProvision(args=args, sky=None, specs=[], names=[])
+    for m in ([0] if fleet else [1, 0]):
+        prov.add(tp.Island(f"i{m}", m, None, None, object(), "modal"))
+    ops = prov.modal_app()
+    assert ops.ledger_egress == {"egress_events": ["rl_publication", "rl_member_publication", "rl_fragment_push"],
+                                 "egress_islands": want, "egress_fallback_bytes": pytest.approx(2e9)}

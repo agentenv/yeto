@@ -853,7 +853,8 @@ def test_modal_deploy_intent_carries_the_gpu_shape_and_rate(tmp_path, monkeypatc
     ops._app = App()
     ops._functions = {"island-0": object(), "island-1": object()}
     ops._ledger_gpus = {"island-0": ("H100", 1, 4, 32.0, None), "island-1": ("L40S", 2, 16, 128.0, 3000)}
-    ops.ledger_egress = {"egress_events": ["rl_publication"], "egress_fallback_bytes": 2.4e9}
+    ops.ledger_egress = {"egress_events": ["rl_publication"], "egress_islands": [1, 0],
+                         "egress_fallback_bytes": 2.4e9}
     monkeypatch.setattr(ops, "_modal", lambda: FakeModal)
     ops.deploy()
     (intent,) = seen[0]
@@ -864,6 +865,7 @@ def test_modal_deploy_intent_carries_the_gpu_shape_and_rate(tmp_path, monkeypatc
     assert app.key == "modal_app:ap-8" and app.attrs["usd_per_hour"] == pytest.approx(want)
     assert (app.attrs["cpu"], app.attrs["memory_gib"], app.attrs["disk_gib"]) == (20, 160.0, 3000)
     assert app.attrs["egress_events"] == ["rl_publication"] and app.attrs["egress_fallback_bytes"] == 2.4e9
+    assert app.attrs["egress_islands"] == [0, 1]
 
 
 def test_engine_sampler_launch_records_its_ephemeral_app_and_call(tmp_path, monkeypatch):

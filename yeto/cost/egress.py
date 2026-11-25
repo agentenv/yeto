@@ -9,8 +9,9 @@ or pushes fragments to a syncer sends a lot: on 1xL40S verl trainer apps publish
 The trainer's tape names those bytes: ``rl_publication`` / ``rl_member_publication``
 (``sync/publication_payload_bytes``: the release it published) and ``rl_fragment_push``
 (``wire_bytes``: the fragment on the wire to the syncer). The launcher records on the
-trainer's Modal app (ledger attr ``egress_events``) which of them leave Modal for its
-launch (:func:`egress_events`): a publication only when the run's store is outside
+trainer's Modal app (ledger attrs ``egress_events``, and ``egress_islands``: the island ids
+its own records carry, :func:`tape_island_ids`) which of them leave Modal for its launch
+(:func:`egress_events`): a publication only when the run's store is outside
 Modal and the trainer publishes releases to it, a fragment push always (its syncer is
 never in the trainer's container). :mod:`.billing` counts those bytes after the app's newest billed hour (the billed
 hours carry the egress Modal billed).
@@ -41,6 +42,7 @@ class Sample:
     t: float
     event: str
     bytes: float | None  # None: the record named no size (the fallback prices it)
+    island: int | None = None  # the record's island_id (None: it named none)
 
 
 def store_outside_modal(store: Any) -> bool:
@@ -63,6 +65,17 @@ def egress_events(args: Any) -> list[str]:
     # that syncer is a Modal container: high, never low)
     out += FRAGMENT_EVENTS
     return out
+
+
+def tape_island_ids(args: Any, launch_islands: Iterable[int]) -> list[int]:
+    """The ``island_id`` the tape records of a launch's Modal islands carry: a fleet island
+    launch's ``--rl-fleet-learner-id`` (its one island), else each island's index in the
+    launch (its ``--rl-learner-id``). The launch's other islands (on other clouds) write
+    other ids: their bytes are not this app's egress."""
+    from yeto.rl.engine.sample_roles import fleet_learner  # noqa: PLC0415
+
+    fleet = fleet_learner(args)
+    return [fleet[0]] if fleet is not None else sorted({int(m) for m in launch_islands})
 
 
 def fallback_bytes(args: Any) -> float | None:
@@ -102,7 +115,9 @@ class EgressMeter:
         if key in self._seen:
             return
         self._seen.add(key)
-        self.samples.append(Sample(float(t), str(event), size))
+        island = rec.get("island_id")
+        island = int(island) if isinstance(island, int) and not isinstance(island, bool) else None
+        self.samples.append(Sample(float(t), str(event), size, island))
 
     def feed(self, records: Iterable[tuple[str, dict[str, Any]]]) -> "EgressMeter":
         from .guard import record_time  # noqa: PLC0415
@@ -113,16 +128,18 @@ class EgressMeter:
 
 
 def bytes_in(samples: Sequence[Sample], events: Iterable[str], start: float, end: float,
-             fallback: float | None) -> tuple[dict[float, float], int]:
-    """``({time: bytes on the wire}, unsized)`` of the ``events`` samples in ``[start, end)``
-    (each size x :data:`WIRE_OVERHEAD`); a sample without a size counts the largest size
-    seen of its event, else ``fallback``; ``unsized``: samples neither prices."""
+             fallback: float | None, islands: Iterable[int] | None = None) -> tuple[dict[Sample, float], int]:
+    """``({sample: bytes on the wire}, unsized)`` of the ``events`` samples in ``[start, end)``
+    of ``islands`` (None: any; a record naming no island counts: high, never low), each size x
+    :data:`WIRE_OVERHEAD`; a sample without a size counts the largest size seen of its event,
+    else ``fallback``; ``unsized``: samples neither prices."""
     wanted = set(events)
+    mine = None if islands is None else {int(i) for i in islands}
     largest: dict[str, float] = {}
-    out: dict[float, float] = {}
+    out: dict[Sample, float] = {}
     unsized = 0
     for s in sorted(samples, key=lambda s: s.t):
-        if s.event not in wanted:
+        if s.event not in wanted or (mine is not None and s.island is not None and s.island not in mine):
             continue
         if s.bytes is not None:
             largest[s.event] = max(largest.get(s.event, 0.0), s.bytes)
@@ -132,5 +149,5 @@ def bytes_in(samples: Sequence[Sample], events: Iterable[str], start: float, end
         if size is None:
             unsized += 1
             continue
-        out[s.t] = out.get(s.t, 0.0) + size * WIRE_OVERHEAD
+        out[s] = out.get(s, 0.0) + size * WIRE_OVERHEAD
     return out, unsized

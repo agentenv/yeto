@@ -344,7 +344,7 @@ def _pool_call_rate(r: Resource) -> float | None:
 
 def _modal_app_cost(r: Resource, rows: Iterable[BillingRow], now: float, rates: Rates, *,
                     tail_by_calls: bool = False, egress: Sequence[Any] | None = None,
-                    egress_taken: set[float] | None = None) -> ItemCost:
+                    egress_taken: set[Any] | None = None) -> ItemCost:
     end = r.released_at if r.released_at is not None else now
     item = ItemCost(r.key, r.kind, r.name, r.created_at, end, r.open)
     lo, hi = floor_hour(r.created_at), end
@@ -395,28 +395,30 @@ def _modal_app_cost(r: Resource, rows: Iterable[BillingRow], now: float, rates: 
 
 
 def _add_egress(item: ItemCost, r: Resource, samples: Sequence[Any], events: list[str], start: float,
-                end: float, taken: set[float] | None) -> None:
-    """The bytes app ``r``'s tape says it sent out of Modal in its unbilled tail
-    ``[start, end)`` (:mod:`.egress`) at the price table's ``host.modal.egress_gib``. A
-    sample counts in one app only (``taken``: the times already counted)."""
+                end: float, taken: set[Any] | None) -> None:
+    """The bytes app ``r``'s islands (``egress_islands``; none recorded: any) sent out of
+    Modal in its unbilled tail ``[start, end)`` by their tape (:mod:`.egress`) at the price
+    table's ``host.modal.egress_gib``. A sample counts in one app only (``taken``)."""
     from . import egress as eg  # noqa: PLC0415
 
     host = prices.host("modal")
     price = None if host is None else host.egress_gib
     fallback = r.attrs.get("egress_fallback_bytes")
-    sized, unsized = eg.bytes_in(samples, events, start, end, None if fallback is None else float(fallback))
+    islands = r.attrs.get("egress_islands")
+    sized, unsized = eg.bytes_in(samples, events, start, end, None if fallback is None else float(fallback),
+                                 None if islands is None else [int(i) for i in islands])
     if taken is not None:
-        sized = {t: b for t, b in sized.items() if t not in taken}
+        sized = {s: b for s, b in sized.items() if s not in taken}
         taken.update(sized)
     if price is None:
         if sized or unsized:
             item.note = (item.note + "; " if item.note else "") + "egress not priced (no host.modal.egress_gib)"
         return
     usd_total = 0.0
-    for t, size in sized.items():
+    for sample, size in sized.items():
         usd = size / eg.GIB * price
         usd_total += usd
-        lbl = hour_label(t)
+        lbl = hour_label(sample.t)
         item.hours[lbl] = item.hours.get(lbl, 0.0) + usd
     item.estimated_usd += usd_total
     gib = sum(sized.values()) / eg.GIB
@@ -482,7 +484,7 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
     (:class:`yeto.cost.egress.EgressMeter`), counted on the Modal apps whose ledger entry
     names them (``egress_events``) after their newest billed hour; None: not counted."""
     rates = rates or Rates()
-    egress_taken: set[float] = set()
+    egress_taken: set[Any] = set()
     resources = [r for r in resources if not r.intent_only or r.open]
     apps = [r for r in resources if r.kind == "modal_app" and r.id]
     rows: list[BillingRow] = []
