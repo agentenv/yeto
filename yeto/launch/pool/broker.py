@@ -360,11 +360,17 @@ def _throughput_known(offer: Offer, ledger: OfferLedger | None) -> bool:
 def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mapping[str, int] | None = None,
            at_boundary: Mapping[str, int] | None = None, policy: Policy = Policy(), budget: Budget = Budget(),
            state: State | None = None, now: float = 0.0, prices: PriceTable | None = None,
-           ledger: OfferLedger | None = None, caps: CapsOf | None = None) -> Decision:
+           ledger: OfferLedger | None = None, caps: CapsOf | None = None,
+           blocked: Mapping[str, str] | None = None) -> Decision:
     """The node count of every offer. ``running``: nodes each offer holds now (ordered
     and alive); ``at_boundary``: how many of those are at a natural boundary and may be
     placed anew. ``state``: the previous tick's (spot gap clocks); the decision carries
-    the next one."""
+    the next one. ``blocked``: pool -> why it cannot order for a reason of its own, not
+    the market's (its scale write refused by a manual hold, its budget breaker, its
+    balance under the order floor, no free slot): its placed spot nodes that are not
+    ordered are no spot gap, so they never move to on-demand (only the market's sold out,
+    cooling, failing or preempted offers do)."""
+    blocked = dict(blocked or {})
     running = {k: max(0, int(v)) for k, v in (running or {}).items()}
     at_boundary = {k: max(0, min(int(v), running.get(k, 0))) for k, v in (at_boundary or {}).items()}
     state = State(dict(state.spot_gap_since)) if state is not None else State()
@@ -465,9 +471,21 @@ def decide(offers: Iterable[Offer], demands: Iterable[Demand], *, running: Mappi
                 continue
             # 3. the spot gap: spot nodes the broker placed that are not ordered yet (sold out,
             # cooling, failing) plus a shortfall the market (not a policy cap) leaves. It waits
-            # on_demand_after_s; then the unordered spot nodes move to on-demand too.
+            # on_demand_after_s; then the unordered spot nodes move to on-demand too. A pool
+            # that cannot order for a reason of its own (``blocked``) is no gap: it keeps its
+            # spot placement and orders it once it can again.
             spot_keys = [k for k, s in scored.items() if s.offer.island == island and s.offer.tier == SPOT]
-            unordered = {k: targets[k] - running.get(k, 0) for k in spot_keys if targets[k] > running.get(k, 0)}
+            unordered = {}
+            for k in spot_keys:
+                n = targets[k] - running.get(k, 0)
+                if n <= 0:
+                    continue
+                why = blocked.get(scored[k].offer.pool)
+                if why:
+                    notes.append(f"{k}: {n} placed spot node(s) not ordered: pool {scored[k].offer.pool} "
+                                 f"cannot order ({why}): no spot gap")
+                    continue
+                unordered[k] = n
             waiting = sum(unordered.values()) + (0 if capped else need)
             if not spot_keys or waiting <= 0:
                 state.spot_gap_since.pop(island, None)
@@ -611,6 +629,17 @@ class TargetSink(Protocol):
 
 @dataclass
 class Snapshot:
+    """What the broker reads each tick (its builder's contract):
+
+    * ``offers``: every offer of every pool it drives, ``available`` False while the pool
+      cannot order it for the market's reason (the provider cools it down, sold out);
+    * ``running``: per offer key, the nodes its pool counts now, provisioning ones
+      included (ordered and alive: a node ordered and not ready yet is no gap);
+    * ``at_boundary``: how many of those may be placed anew (a natural boundary);
+    * ``blocked``: per pool, why it cannot order for a reason of its own
+      (``broker_plan.blocked_pools`` over the live pools);
+    * the rest: the run budget, phase 2's movable nodes and ended islands, the ledger."""
+
     offers: list[Offer]
     demands: list[Demand]
     running: dict[str, int] = field(default_factory=dict)
@@ -619,13 +648,18 @@ class Snapshot:
     nodes: list[Node] = field(default_factory=list)  # phase 2: the nodes a move may take
     ended: tuple[str, ...] = ()  # islands whose trainer ended (their nodes may move)
     ledger: OfferLedger | None = None  # the offer ledger as read now (None: the broker's own)
+    # pool -> why it cannot order for a reason of its own (``broker_plan.blocked_pools``):
+    # its placed, unordered spot nodes are no spot gap (see :func:`decide`)
+    blocked: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class Broker:
     """The slow loop: every ``config.interval_s`` read a :class:`Snapshot`, decide, and
     write a pool's count, its offers' counts and its refill offer to the sink when any of
-    them changed (a sink refusal, e.g. a manual hold, is retried at the next tick).
+    them changed (a sink refusal, e.g. a manual hold, is retried at the next tick, and
+    until a write is accepted the pool counts as blocked: its placed spot nodes that are
+    not ordered are no spot gap, so a person's lower count never buys on-demand).
 
     Phase 2 (``config.migrate`` and a ``mover``): the moves of :func:`plan_migrations`
     run before any count is sent, so neither pool orders or releases for a moved node:
@@ -646,6 +680,8 @@ class Broker:
     state: State = field(default_factory=State)
     # pool -> (nodes, its offers' counts, refill offer, what ran on them) last accepted by the sink
     sent: dict[str, tuple[Any, ...]] = field(default_factory=dict)
+    # pool -> why the sink refused its last write (a manual hold): blocked at the next decision
+    refused: dict[str, str] = field(default_factory=dict)
     last: Decision | None = None
     _next_at: float = 0.0
 
@@ -659,10 +695,11 @@ class Broker:
         self._next_at = now + self.config.interval_s
         snap = self.snapshot()
         demands = [replace(d, floor=max(d.floor, int(self.config.floors.get(d.island, 0)))) for d in snap.demands]
+        blocked = {**self.refused, **dict(snap.blocked or {})}
         dec = decide(snap.offers, demands, running=snap.running, at_boundary=snap.at_boundary,
                      policy=self.config.policy, budget=snap.budget, state=self.state, now=now,
                      prices=self.prices, ledger=snap.ledger if snap.ledger is not None else self.ledger,
-                     caps=self.caps)
+                     caps=self.caps, blocked=blocked)
         self.state = dec.state
         self.last = dec
         if self.config.migrate and self.mover is not None:
@@ -679,11 +716,15 @@ class Broker:
             if holds is not None:  # the sink can read back what the pool holds: send when it differs
                 if holds(pool, nodes, offers=offers, refill=dec.refill.get(pool), running=running):
                     self.sent[pool] = wanted
+                    self.refused.pop(pool, None)
                     continue
             elif self.sent.get(pool) == wanted:
                 continue  # a change of the total, the offer mix, the refill offer or what runs is sent
             if self.sink.set_target(pool, nodes, offers=offers, refill=dec.refill.get(pool), running=running):
                 self.sent[pool] = wanted
+                self.refused.pop(pool, None)
+            else:  # a manual hold: the pool keeps the person's count, which is no spot gap
+                self.refused[pool] = "its scale write was refused (a manual change holds)"
         self.emit(EVENT, **dec.record())
         return dec
 
@@ -696,7 +737,13 @@ class ScaleFileSink:
     The pool applies ``target``; under ``broker`` it reads the offer mix, the refill offer
     and what ran on each offer when the broker decided (``broker_plan``): a node the broker
     added goes to its offer, a lost node's replacement to the refill offer, and a smaller
-    target retires members on an offer over its count first."""
+    target retires members on an offer over its count first.
+
+    A person's ``pool-scale`` (and a pause, which rewrites the file) replaces the file
+    without the ``broker`` part: the pool then orders at its provider's cursor, as without
+    the broker, and the broker's writes are refused (the pool is ``blocked``, no spot gap)
+    until ``manual_hold_s`` passes; then :meth:`holds` sees the file no longer holds its
+    plan and the broker writes its count again, which replaces the person's."""
 
     def __init__(self, pools: Mapping[str, tuple[dict[str, Any], str]], *,
                  scale: Callable[..., int] | None = None,

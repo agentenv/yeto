@@ -568,6 +568,17 @@ class IslandPool(PoolMoves):
                 refused = f"run budget unreadable: {error!r}"[:300]
         return refused
 
+    def order_block(self) -> str | None:
+        """Why the pool's last order attempt was refused for a reason of its own, not the
+        market's: the balance under the order floor, a budget or run budget refusal, no free
+        slot, a shard or handoff wait (the capacity broker counts no spot gap for such a pool,
+        ``broker_plan.blocked_pools``). None: the last attempt ordered, or only the order
+        breaker (failed orders: the market) held it back."""
+        why = self._refused or self._no_account
+        if not why or why.startswith("breaker"):
+            return None
+        return why
+
     def _order(self, replaces: Member | None = None) -> Member | None:
         now = self.clock()
         balance = self.ops.balance()
@@ -1563,12 +1574,15 @@ class IslandPool(PoolMoves):
         chosen = [m for t in self._retire_req for m in counted if m.ticket == t][:excess]
         for m in chosen:  # a person named it: the pause ends with it
             m.paused = False
-        offer_of = self._offer_of()  # a broker plan: members on an offer over its count go first
+        # a broker plan: among the not ready, then among the ready, members on an offer over
+        # its count go first (a ready member is never retired for the mix before a starting one)
+        offer_of = self._offer_of()
         held = [offer_of(m.ticket) for m in counted] if offer_of else []
         rest = sorted((m for m in counted if m not in chosen and not m.paused),
-                      key=lambda m: (plans.victim_rank(self.broker_plan, offer_of(m.ticket) if offer_of else None,
-                                                             held),
-                                     m.state == READY, -(m.created or 0.0), m.hourly_ucr or self.config.hourly(),
+                      key=lambda m: (m.state == READY,
+                                     plans.victim_rank(self.broker_plan, offer_of(m.ticket) if offer_of else None,
+                                                       held),
+                                     -(m.created or 0.0), m.hourly_ucr or self.config.hourly(),
                                      m.lease_until if m.lease_until is not None else float("inf")))
         return chosen + rest[:excess - len(chosen)]
 

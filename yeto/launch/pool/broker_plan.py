@@ -95,3 +95,18 @@ def victim_rank(plan: Plan | None, offer: str | None, held: Iterable[str | None]
     if plan is None or offer is None:
         return 1
     return 0 if Counter(o for o in held if o)[offer] > plan.offers.get(offer, 0) else 1
+
+
+def blocked_pools(pools: Mapping[str, Any]) -> dict[str, str]:
+    """pool name -> why it cannot order for a reason of its own (``IslandPool.order_block``:
+    its balance under the order floor, its budget breaker, no free slot); a pool held back
+    only by the market (offer failures, the order breaker) is not in it. The capacity
+    broker's ``Snapshot.blocked``: such a pool's placed, unordered spot nodes are no spot
+    gap and never move to on-demand."""
+    out = {}
+    for name, pool in pools.items():
+        block = getattr(pool, "order_block", None)
+        why = block() if callable(block) else None
+        if isinstance(why, str) and why:
+            out[name] = why
+    return out

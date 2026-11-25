@@ -16,7 +16,7 @@ from tests.test_nc_pool_run import _cfg
 from yeto.launch.nc import cli, pool_run
 from yeto.launch.pool import broker as b
 from yeto.launch.pool import broker_plan as plans
-from yeto.launch.pool.island_pool import DRAINING, FENCING, GONE
+from yeto.launch.pool.island_pool import DRAINING, FENCING, GONE, READY
 
 DISPENSE = {"backend": "store", "namespace": "run-a/dispense"}
 ACCOUNTS = [1, 4, 5, 6]
@@ -136,7 +136,9 @@ def snapshot(fleet, offers, want):
                 full = f"{name}/{key}" if hasattr(fleet.clouds[name], "ticket_offer") else \
                     next(o.key for o in offers() if o.pool == name)
                 running[full] = running.get(full, 0) + n
-        return b.Snapshot(offers=offers(), demands=[b.Demand("0", want=want)], running=running)
+        wanted = want() if callable(want) else want
+        return b.Snapshot(offers=offers(), demands=[b.Demand("0", want=wanted)], running=running,
+                          blocked=plans.blocked_pools(fleet.pools))
     return snap
 
 
@@ -245,6 +247,11 @@ def test_read_plan_and_next_offer():
     assert plans.next_offer(None, []) is None
     assert plans.victim_rank(plan, "b", ["b", "b"]) == 0 and plans.victim_rank(plan, "b", ["b"]) == 1
     assert plans.victim_rank(None, "b", ["b", "b"]) == 1
+    # a tie of added nodes goes to the refill offer, then by name
+    tie = plans.Plan({"a": 1, "b": 1, "c": 1}, "b", running={})
+    assert plans.next_offer(tie, []) == "b"
+    assert plans.next_offer(plans.Plan({"c": 1, "a": 1}, None, running={}), []) == "a"
+    assert plans.next_offer(tie, [], cooling=["b"]) == "a", "a cooling refill offer: the next by name"
 
 
 def test_a_scale_file_another_writer_replaced_is_written_again(tmp_path):
@@ -268,3 +275,109 @@ def test_a_scale_file_another_writer_replaced_is_written_again(tmp_path):
     fleet.run(600, loop)
     doc = json.loads(pool_run.scale_path(fleet.cfgs["spot"][0]).read_text())
     assert doc["broker"]["offers"] == {"spot/a": 2, "spot/b": 0} and pool.broker_plan is not None
+
+
+# -- a spot pool that cannot order for a reason of its own is no spot gap (review of #813)
+
+
+def _held_spot_fleet(tmp_path, **spot_kw):
+    """Spot $10/h (always has capacity) and on-demand $30/h; the broker asks 2 nodes, both
+    on spot, then 4 while the spot pool cannot order more for a reason of its own."""
+    fleet = Fleet(tmp_path)
+    spot_cloud = OfferCloud(fleet.clock, ["a"], **spot_kw)
+    fleet.add("spot", spot_cloud)
+    od_cloud = Cloud(fleet.clock)
+    fleet.add("od", od_cloud)
+    want = {"n": 2}
+
+    def offers():
+        return [spot(fleet, "a", 10.0, "r1"),
+                b.Offer(pool="od", name="x", island="0", tier=b.ON_DEMAND, provider="sky", usd_h=30.0)]
+
+    loop = b.Broker(b.BrokerConfig(interval_s=300, policy=b.Policy(on_demand_after_s=1800)),
+                    snapshot(fleet, offers, want=lambda: want["n"]), b.ScaleFileSink(fleet.cfgs), clock=fleet.clock)
+    fleet.run(1800, loop)
+    assert fleet.offer_counts("spot") == {"a": 2} and od_cloud.kinds("order") == []
+    want["n"] = 4
+    return fleet, loop, spot_cloud, od_cloud
+
+
+def _no_on_demand_for(fleet, loop, od_cloud, why):
+    fleet.run(3600, loop)  # twice on_demand_after_s
+    assert od_cloud.kinds("order") == [], f"{why}: no on-demand node is bought"
+    assert loop.last.targets == {"spot/a": 4, "od/x": 0} and loop.state.spot_gap_since == {}
+    assert fleet.offer_counts("spot") == {"a": 2}
+
+
+def test_a_manual_hold_on_the_spot_pool_buys_no_on_demand(tmp_path):
+    fleet, loop, spot_cloud, od_cloud = _held_spot_fleet(tmp_path)
+    assert pool_run.scale_pool(*fleet.cfgs["spot"], 2) == 0  # a person holds the spot pool at 2
+    _no_on_demand_for(fleet, loop, od_cloud, "manual hold")
+    assert "manual change" in loop.refused["spot"] and fleet.pools["spot"].config.target == 2
+
+
+def test_an_open_budget_breaker_on_the_spot_pool_buys_no_on_demand(tmp_path):
+    fleet, loop, spot_cloud, od_cloud = _held_spot_fleet(tmp_path)
+    breaker = {"open": "run budget breaker open: spend $50.00 of $50.00"}
+    fleet.pools["spot"].gate = lambda: breaker["open"]  # the controller's run budget gate
+    _no_on_demand_for(fleet, loop, od_cloud, "budget breaker")
+    assert fleet.pools["spot"].order_block() == breaker["open"]
+    breaker["open"] = None  # the breaker closes: spot orders its two, still no on-demand
+    fleet.run(1800, loop)
+    assert fleet.offer_counts("spot") == {"a": 4} and od_cloud.kinds("order") == []
+
+
+def test_a_balance_under_the_order_floor_buys_no_on_demand(tmp_path):
+    fleet, loop, spot_cloud, od_cloud = _held_spot_fleet(tmp_path)
+    cfg = fleet.pools["spot"].config
+    spot_cloud.bal = cfg.stop_below_ucr + 1  # under the order floor, over the stop line: it runs, orders nothing
+    assert spot_cloud.bal < cfg.order_floor()
+    _no_on_demand_for(fleet, loop, od_cloud, "balance floor")
+    assert fleet.pools["spot"].order_block().startswith("balance below the order floor")
+
+
+def test_a_spot_pool_whose_orders_fail_on_the_market_still_moves_to_on_demand(tmp_path):
+    fleet, loop, spot_cloud, od_cloud = _held_spot_fleet(tmp_path)
+    spot_cloud.sold_out = {"a"}  # no capacity: a market gap
+    fleet.run(3600, loop)
+    assert len(od_cloud.kinds("order")) == 2 and fleet.pools["spot"].order_block() is None
+
+
+def test_the_pool_counts_its_orders_against_the_plan_and_a_new_plan_starts_the_count_again(tmp_path):
+    fleet = Fleet(tmp_path)
+    cloud = OfferCloud(fleet.clock, ["b", "a"])
+    pool = fleet.add("spot", cloud)
+    sink = b.ScaleFileSink(fleet.cfgs)
+    assert sink.set_target("spot", 2, offers={"spot/a": 2}, refill="spot/b", running={})
+    fleet.run(600)
+    assert pool._plan_orders == {"a": 2} and fleet.offer_counts("spot") == {"a": 2}
+    lost = fleet.counted("spot")[0]
+    cloud.tickets[lost.ticket].update(state="ended", reason="evicted")
+    fleet.run(600)
+    assert fleet.offer_counts("spot") == {"a": 1, "b": 1}, "the two added were ordered: the loss refills at b"
+    assert pool._plan_orders == {"a": 2, "b": 1}
+    assert sink.set_target("spot", 3, offers={"spot/a": 2, "spot/b": 1}, refill="spot/b",
+                           running={"spot/a": 1, "spot/b": 1})
+    fleet.run(60)
+    assert pool._plan_orders == {"a": 1}, "a new plan: counted from zero; its added node went to a"
+
+
+def test_a_scale_down_for_the_mix_retires_a_starting_member_before_a_ready_one(tmp_path):
+    fleet = Fleet(tmp_path)
+    cloud = OfferCloud(fleet.clock, ["a", "b"])
+    pool = fleet.add("spot", cloud)
+    sink = b.ScaleFileSink(fleet.cfgs)
+    assert sink.set_target("spot", 2, offers={"spot/a": 1, "spot/b": 1}, refill="spot/a", running={})
+    fleet.run(2400)
+    assert all(m.state == READY for m in fleet.counted("spot")) and fleet.offer_counts("spot") == {"a": 1, "b": 1}
+    assert sink.set_target("spot", 3, offers={"spot/a": 1, "spot/b": 2}, refill="spot/a",
+                           running={"spot/a": 1, "spot/b": 1})
+    fleet.run(120)
+    starting = [m for m in fleet.counted("spot") if m.state != READY]
+    assert [cloud.offer_of(m.ticket) for m in starting] == ["b"]
+    # the mix now wants b only: a (ready) is over its count, but the starting b goes first
+    assert sink.set_target("spot", 2, offers={"spot/b": 2}, refill="spot/b",
+                           running={"spot/a": 1, "spot/b": 2})
+    fleet.run(60)
+    assert starting[0].retiring_since is not None or starting[0].state in (GONE, DRAINING, FENCING)
+    assert fleet.offer_counts("spot") == {"a": 1, "b": 1}, "the ready member on a keeps running"

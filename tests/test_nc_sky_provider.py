@@ -426,6 +426,90 @@ def test_the_pool_counts_a_failed_launch_against_the_offer_not_its_breaker():
     assert ("down", pool.members[0].ticket) not in sky.calls  # the failed launch left no cluster
 
 
+# -- the capacity broker's offer (prefer_offer / _pick / cooling_offers) over the real provider
+
+
+def _infra(sky):
+    return sky.calls[-1][2].resources["infra"]
+
+
+def test_a_preferred_open_offer_is_ordered_over_the_cursor():
+    sky = FakeSky()
+    p = _two_offers(sky)
+    p.prefer_offer(p.offers[1].key)
+    ticket = p.order(1)
+    assert _infra(sky) == "aws/us-west-2" and p.offer_of(ticket) == p.offers[1].key
+    assert p.cursor == 0, "the cursor is not moved by a preference"
+    sky.up(ticket)
+    assert p.status(1, ticket).state == "active"
+    second = p.order(2)
+    assert _infra(sky) == "aws/us-west-2" and p.offer_of(second) == p.offers[1].key, "it holds until changed"
+
+
+def test_no_preferred_offer_or_one_the_provider_lacks_orders_at_the_cursor():
+    sky = FakeSky()
+    p = _two_offers(sky)
+    assert p.preferred_offer is None
+    first = p.order(1)
+    assert _infra(sky) == "aws/us-east-1" and p.offer_of(first) == p.offers[0].key
+    p.prefer_offer("L4:1@gcp/us-central1/spot")  # a plan naming an offer this provider no longer has
+    assert p.offer_of(p.order(2)) == p.offers[0].key
+    p.prefer_offer(p.offers[1].key)
+    p.prefer_offer(None)  # the plan is gone
+    assert p.preferred_offer is None and p._pick(p._doc()).key == p.offers[0].key
+
+
+def test_a_preferred_offer_that_is_cooling_falls_back_to_the_cursor_until_it_reopens():
+    t = [1000.0]
+    sky = FakeSky()
+    sky.fail_launch.add("aws/us-west-2")
+    p = _two_offers(sky, clock=lambda: t[0])
+    want = p.offers[1].key
+    p.prefer_offer(want)
+    failed = p.order(1)
+    assert _infra(sky) == "aws/us-west-2"
+    assert p.status(1, failed).state == "ended"  # no capacity: the preferred offer cools down
+    assert p.cooling_offers() == [want] and p.has_fallback_offer()
+    p.release(1, failed)
+    fallback = p.order(1)
+    assert _infra(sky) == "aws/us-east-1" and p.offer_of(fallback) == p.offers[0].key, \
+        "a cooling preferred offer is skipped: the cursor's open one is ordered"
+    assert p.preferred_offer == want, "the preference stays for when it reopens"
+    sky.fail_launch.discard("aws/us-west-2")
+    t[0] += SkyProvider.OFFER_COOLDOWN_S + 1
+    assert p.cooling_offers() == []
+    assert p.offer_of(p.order(2)) == want, "reopened: the preferred offer again"
+
+
+def test_a_pool_with_a_broker_plan_orders_at_its_offer_on_the_real_provider_and_without_one_at_the_cursor(tmp_path):
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    sky = FakeSky()
+    ops = SkyOps(_two_offers(sky, clock=clock), sky, clock)
+    ops.provider = ops.p  # as NcSshOps carries it
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-s")
+    pool = IslandPool(PoolConfig(target=0, accounts=[1, 2], shard_base="s", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=8)),
+                      ops, clock=clock, log=lambda m: None, events=events)
+    pool.scale_path = tmp_path / "scale.json"
+    west = ops.p.offers[1].key
+    pool.scale_path.write_text(json.dumps({"target": 1, "seq": 1, "source": "auto",
+                                           "broker": {"offers": {f"s/{west}": 1}, "refill": f"s/{west}",
+                                                      "running": {}}}))
+    for _ in range(3):
+        pool.tick()
+        t[0] += 60
+    assert [ops.p.offer_of(m.ticket) for m in pool.counted()] == [west], "the broker's offer, not the cursor's"
+    assert ops.p.preferred_offer == west
+    assert any(e["event"].endswith("broker_offer") and e["offer"] == west for e in events.events)
+    pool.scale_path.write_text(json.dumps({"target": 2, "seq": 2, "source": "manual"}))  # a person's scale
+    for _ in range(3):
+        pool.tick()
+        t[0] += 60
+    assert pool.broker_plan is None and ops.p.preferred_offer is None, "no plan: the preference is cleared"
+    assert sorted(ops.p.offer_of(m.ticket) for m in pool.counted()) == sorted([ops.p.offers[0].key, west])
+
+
 def test_the_watchdog_launch_blocks_on_the_request_and_raises_its_failure():
     sky = FakeSky()
     sky.fail_launch.add("aws/us-east-1")
