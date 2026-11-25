@@ -293,6 +293,7 @@ class IslandPool:
     _save_failures: int = 0  # consecutive failed saves (state_save_failing once per streak)
     _short: Any = None  # the halted slots of the last ``slots_below_target`` alert
     _starts: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background start
+    _give_back: set[str] = field(default_factory=set)  # lost before a grant: its number goes on once released
     _skipped_shards: list[str] = field(default_factory=list)  # shards passed over: their data had ended
     _shard_check_failed: bool = False  # a shard check failed (reported once)
     _executor: Any = None
@@ -733,6 +734,10 @@ class IslandPool:
             return False
 
     def _give_back_shard(self, m: Member) -> None:
+        """After ``m``'s release is confirmed (a provider whose machine could start a sampler on
+        its own has none left that could write the shard)."""
+        if self._reserved_shard is not None:
+            return
         number = int(m.shard.rpartition("-")[2])
         self._reserved_shard = number
         self._event("shard_given_back", ticket=m.ticket, shard=m.shard,
@@ -963,6 +968,9 @@ class IslandPool:
     def _released(self, member: Member, why: str, *, ended_already: bool = False) -> None:
         self._charge(member, self.clock())
         member.state = GONE
+        if member.ticket in self._give_back:  # its machine is confirmed ended: the number may go on
+            self._give_back.discard(member.ticket)
+            self._give_back_shard(member)
         member.drain_error = None
         # a gone member is never watched again: nothing reads its background start
         start = self._starts.pop(member.ticket, None)
@@ -1812,10 +1820,9 @@ class IslandPool:
                 self._event("offer_failed", ticket=m.ticket, account=m.account)  # that offer cools down
             elif never_granted:
                 self._fail(now, f"ticket {m.ticket} ended before a grant")
-            give_back = never_granted and self._shard_never_used(m)
+            if never_granted and self._shard_never_used(m):
+                self._give_back.add(m.ticket)  # once its release is confirmed (_released)
             self._retire(m, kind, lost=True, must_release=True)  # its ticket ended: nothing to keep
-            if give_back:
-                self._give_back_shard(m)
             if kind == el.BALANCE:
                 self.stop("a ticket ended for the balance")
             return

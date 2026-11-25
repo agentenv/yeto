@@ -473,3 +473,29 @@ def test_the_local_control_plane_numbers_as_before_after_a_lost_ticket(tmp_path)
     pool.tick()
     pool.tick()
     assert sorted(m.shard for m in pool.live() if m.ticket != first.ticket) == ["smp-1"]
+
+
+def test_a_lost_tickets_number_goes_on_only_once_its_release_is_confirmed(tmp_path):
+    """REV #779: a provider whose machine could start a sampler on its own: the number is given
+    back only after the lost member's release is confirmed (it is GONE)."""
+    pool, provider, clock = _spot_pool(tmp_path)
+    real, failures = provider.release, {"n": 1}
+
+    def release(slot, ticket):
+        if failures["n"]:
+            failures["n"] -= 1
+            raise RuntimeError("release not confirmed")
+        return real(slot, ticket)
+
+    provider.release = release
+    pool.tick()
+    [first] = pool.live()
+    provider.lose(first.ticket)
+    clock.t += 30
+    pool.tick()
+    assert first.state != GONE and pool._reserved_shard is None  # noqa: SLF001 - not yet
+    for _ in range(4):
+        clock.t += 120
+        pool.tick()
+    assert first.state == GONE
+    assert sorted(m.shard for m in pool.live()) == ["smp-0"]
