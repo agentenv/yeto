@@ -48,8 +48,17 @@ local versions and the feed judges them without the merged -> local pairing.
 released, the others are logged as ``rl_policy_release_skipped`` (reason
 ``release_every``), and the last one skipped is released when the run drains
 (:meth:`BufferReleasePublisher.drain_releases`), so the trained policy always
-reaches the store. The release guard keeps the versions increasing. The default
-mode (``merged``) is the synced group's rule above, unchanged.
+reaches the store. The release guard keeps the versions increasing. A trainer
+that finds releases in its sub-store (migrated to another cloud, restarted,
+relaunched) continues its local account above them, as a Miles trainer on its
+own lane does: its full-parameter sync counts rounds from 0 in every process,
+so the driver moves the label (``IslandDriver._continue_above_own_releases``) and
+the first publication -- the weights the syncer's catch-up loaded -- is LATEST + 1,
+the versions in the policy-age window below it are restored, and the feed knows
+every release version of the sub-store. Before, the new process published v0,
+v1, ... below LATEST: every release was skipped (``not_newer_than_latest``) and
+the groups its pools wrote with LATEST were of a version it never published.
+The default mode (``merged``) is the synced group's rule above, unchanged.
 
 Delta releases (``--rl-release-delta-full-every N`` on a
 full-parameter trainer): the release is written into a staging directory on the
@@ -252,7 +261,8 @@ class BufferReleasePublisher:
                  staging: str | Path | None = None, delta: Any = None,
                  resumed: ResumedReleases | None = None, no_release: bool = False,
                  release_only: Iterable[int] | None = None, background: bool = False,
-                 release_mode: str = MERGED_RELEASE, release_every: int = 1) -> None:
+                 release_mode: str = MERGED_RELEASE, release_every: int = 1,
+                 own_releases: ResumedReleases | None = None) -> None:
         """``no_release`` (``--rl-measure-no-release``): a measurement run
         (memory, MFU) writes no policy release at all. One release of the 120B is about
         225 GB written and a dozen minutes per round, which answers nothing such a run
@@ -284,7 +294,10 @@ class BufferReleasePublisher:
         ``release_mode`` (``--rl-release-mode``): :data:`MERGED_RELEASE`, or
         :data:`PER_LEARNER_RELEASE` on a trainer reading its own lane, which
         releases its local versions every ``release_every`` of them
-        (``--rl-release-every``; module doc, per-learner releases)."""
+        (``--rl-release-every``; module doc, per-learner releases).
+        ``own_releases``: the releases its own sub-store already holds (a migrated,
+        restarted or relaunched per-learner trainer): the driver continues its local
+        version account above them (module doc, per-learner releases)."""
         if release_mode not in RELEASE_MODES:
             raise ValueError(f"--rl-release-mode {release_mode!r}: expected one of {RELEASE_MODES}")
         if release_mode == PER_LEARNER_RELEASE and (lane is None or not lane.is_own):
@@ -297,6 +310,9 @@ class BufferReleasePublisher:
                              "per_learner (otherwise it releases every version, or every merge)")
         self.release_mode = release_mode
         self.per_learner = release_mode == PER_LEARNER_RELEASE
+        if own_releases is not None and not self.per_learner:
+            raise ValueError("only a per-learner trainer continues its version account above its own releases")
+        self.own_releases = own_releases
         self.release_every = int(release_every)
         # the last publication a cadence skip left unreleased (released by drain_releases)
         self._cadence_pending: Any = None
@@ -347,6 +363,14 @@ class BufferReleasePublisher:
                     f"that takes a start version; {type(driver.sync).__name__} does not")
             resume_at(self.resumed.start_version)
             driver.published_policy_history = self.resumed.history
+        if self.own_releases is not None:
+            # A per-learner trainer's local versions are its release versions, and its
+            # pools generate with the newest one. Its sync session counts its rounds from
+            # 0 in every process (full parameter: continue_version_account_at), so the
+            # driver continues the account above these releases, as on a Miles trainer on
+            # its own lane (sampler_island): the first publication is LATEST + 1, and the
+            # versions in the policy-age window below it are restored.
+            driver.published_policy_history = self.own_releases.history
         if self.lane is not None:
             self.island.emit("rl_policy_release_role", learner_id=self.lane.index,
                              num_learners=self.lane.count, publisher=self.releasing,
@@ -731,6 +755,21 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     # version), not a verl param version, so the round judges it with its own map.
     island.consume_map = VersionMap()
     resumed = resumed_releases(releases, island.limit) if resume_versions else None
+    # A per-learner trainer (an island fleet's) migrated, restarted or relaunched
+    # finds its own releases in its sub-store; the driver continues above them
+    # (BufferReleasePublisher.bind), and the groups its pools wrote with them are judged
+    # by the release versions (module doc, per-learner releases).
+    own = (resumed_releases(releases, island.limit)
+           if lane is not None and release_mode == PER_LEARNER_RELEASE else None)
+    if own is not None:
+        start = own.base_version + 1
+        restored = {v: h for v, h in own.releases if start - island.limit <= v < start}
+        for version in own.known_versions():
+            island.consume_map.record(version, version)
+        island.hashes.update(restored)
+        island.emit("rl_buffer_own_lane_versions", latest_version=own.base_version, start_version=start,
+                    max_policy_age=own.limit, known_versions=list(own.known_versions()),
+                    restored_versions=sorted(restored))
     if resumed is not None:
         for version in resumed.known_versions():
             island.consume_map.record(version, version)
@@ -761,7 +800,8 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                                        staging=staging if int(delta_full_every) > 0 else None,
                                        delta=delta, resumed=resumed, no_release=no_release,
                                        release_only=release_only, background=release_background,
-                                       release_mode=release_mode, release_every=release_every)
+                                       release_mode=release_mode, release_every=release_every,
+                                       own_releases=own)
     # No cap on discarded pulls, as on a Miles buffer trainer (batch_reader.BatchReader.take)
     # and the relay pool: a group past the policy-age limit is dropped and counted (the
     # round's trainer.policy_age record), and the round waits for newer ones. Only a wait

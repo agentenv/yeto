@@ -467,6 +467,80 @@ def test_only_a_wait_with_no_group_stops_the_island_as_trainer_sample_wait(tmp_p
     assert island_stop_line(raised.value) is not None  # the whitelist: a deterministic stop
 
 
+class _Ticks:
+    """A clock one second further at every read; a feed that never stops runs out of it."""
+
+    def __init__(self, limit=20000):
+        self.now, self.limit = 0.0, limit
+
+    def __call__(self):
+        self.now += 1.0
+        assert self.now < self.limit, "the island never stopped"
+        return self.now
+
+
+@pytest.mark.parametrize("version", [1, 9], ids=["over_age", "never_published"])
+def test_groups_that_keep_coming_and_are_never_trainable_stop_the_island_by_sample_wait(tmp_path, capsys,
+                                                                                         version):
+    """The samplers keep writing groups this trainer drops (over the policy-age limit, or of
+    a version it never published: a migrated fleet trainer whose pools load a release above
+    its account). Every pull used to start the wait again, so the island waited for good
+    (rollout 0 for 24 min, no round, no stop). The wait for a trainable group now runs from
+    the first pull of the round and the island stops by trainer.sample_wait within it
+    (the deterministic stop, exit 11 in a fleet)."""
+    from yeto.launch.island_lifecycle import island_stop_line
+    from yeto.rl.adapters.verl.buffer_feed import BufferFeedError
+
+    store_dir, store, releases = _stale_backlog(tmp_path, stale=3, fresh=0)
+    pool = GroupWriter(FileSampleBuffer(store, batch_size=1), "pool")
+    written = []
+
+    def pool_writes_while_the_trainer_waits(_seconds):
+        written.append(len(written))
+        pool.write([_sample(version, index=0), _sample(version, index=1)], group_key=f"late{len(written)}")
+
+    clock = _Ticks()
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    driver, _island, _publisher = _trainer(tmp_path, store_dir, FakeBufferActor(), rounds=1, required=2,
+                                           base=base, releases=releases, resume_versions=True, wait_s=30,
+                                           buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+                                           clock=clock, sleep=pool_writes_while_the_trainer_waits)
+    with pytest.raises(BufferFeedError, match="no trainable buffer group within 30 s") as raised:
+        driver.run()
+    assert getattr(raised.value, "yeto_breaker", None) == "trainer.sample_wait"
+    assert island_stop_line(raised.value) is not None  # the whitelist: a deterministic stop
+    assert len(written) > 3  # groups kept coming while the round waited
+    [trip] = [json.loads(line.split(" ", 1)[1]) for line in capsys.readouterr().out.splitlines()
+              if line.startswith("YETO_RL_EVENT ") and '"trainer.sample_wait"' in line]
+    assert (trip["state"], trip["action"], trip["limit"]) == ("trip", "stop", 30.0)
+    assert 30 < trip["value"] <= 40  # within the wait (and a few clock reads)
+
+
+def test_the_wait_for_a_trainable_group_starts_at_the_first_pull_after_a_kept_one(tmp_path):
+    """The time a round trains is not counted, a kept group starts the wait again, and a
+    dropped one does not."""
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="kept")
+    now = [0.0]
+    vmap = VersionMap()
+    vmap.record(0, 0)
+    feed = bf.BufferFeed(_buffer(tmp_path), vmap=lambda: vmap, shape=SHAPE, add_group=print, record=print,
+                         wait_s=100, clock=lambda: now[0], sleep=lambda s: None, emit=lambda *a, **f: None)
+    feed.pull()
+    feed.keep()
+    now[0] += 10_000  # the round trains
+    for i in range(3):
+        writer.write([_sample(7, index=0), _sample(7, index=1)], group_key=f"unknown{i}")
+    feed.pull()  # the wait starts here
+    now[0] += 60
+    feed.drop()
+    feed.pull()
+    now[0] += 60  # 120 s since the first pull after the kept group, with groups all along
+    with pytest.raises(bf.BufferFeedError, match="the 2 groups pulled since were all dropped") as raised:
+        feed.drop()
+    assert raised.value.yeto_breaker == "trainer.sample_wait"
+
+
 def test_a_buffer_trainer_whose_store_holds_no_release_counts_from_zero(tmp_path):
     """A run that starts here is unchanged (the account begins at v0)."""
     from yeto.rl.engine.merged_release import resumed_releases

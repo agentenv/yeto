@@ -390,8 +390,9 @@ class BufferFeed:
         as ``xhw_quarantine`` until ``round_of()`` reaches its ``until_round``.
 
         The trainer breakers are the core reader's (``yeto.rl.engine.batch_reader``), with
-        the same names and events as on a Miles trainer: ``trainer.sample_wait`` (no group
-        within ``wait_s``), ``trainer.buffer_damaged`` (``max_damaged_run`` damaged payloads
+        the same names and events as on a Miles trainer: ``trainer.sample_wait`` (no trainable
+        group within ``wait_s``: none at all, or only groups it dropped; :meth:`_check_wait`),
+        ``trainer.buffer_damaged`` (``max_damaged_run`` damaged payloads
         in a row, or that many and more than half of a round's; None: from the
         environment, ``YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN``; 0: no bound),
         ``trainer.group_integrity`` and ``trainer.sample_alignment`` (one record per round
@@ -437,6 +438,11 @@ class BufferFeed:
         self.clock = clock
         self.sleep = sleep
         self._last: _Pulled | None = None
+        # The start of the wait for a trainable group: set by the first pull after a
+        # kept group (None until then), so the time a round trains is never counted.
+        # Groups that are pulled and dropped do not set it again (:meth:`_check_wait`).
+        self._wait_since: float | None = None
+        self._wait_pulled = 0  # groups pulled since, none of them kept
         self.pulled_positions: list[int] = []
         self.lease_waits = 0  # pauses for a lease the gate could not read
         self.cursor_log = cursor_log
@@ -466,20 +472,46 @@ class BufferFeed:
 
     def _next(self) -> Any | None:
         """The next selected entry; None after the sampler's data end."""
-        started = self.clock()
+        if self._wait_since is None:
+            self._wait_since = self.clock()
+        started = self._wait_since
         while True:
             selected = self.buffer.select(self.consumer, 1)
             self._count_merge_dropped()
             if selected:
+                self._wait_pulled += 1
                 return selected[0]
             if self.buffer.data_ended:
                 return None
             if self.clock() - started > self.wait_s:
-                error = BufferFeedError(f"no buffer group within {self.wait_s:g} s "
-                                        f"(read position {self.buffer.read_cursor})")
+                error = BufferFeedError(self._wait_message())
                 trip_sample_wait(self.emit, waited_s=self.clock() - started, limit_s=self.wait_s, error=error)
                 raise error
             self.sleep(self.poll_s)
+
+    def _wait_message(self) -> str:
+        if not self._wait_pulled:
+            return f"no buffer group within {self.wait_s:g} s (read position {self.buffer.read_cursor})"
+        # the feed's own drops (the round's collector discards: policy age, unknown version)
+        own = f"dropped by the feed so far {dict(self.dropped)}; " if self.dropped else ""
+        return (f"no trainable buffer group within {self.wait_s:g} s: the {self._wait_pulled} groups "
+                f"pulled since were all dropped ({own}read position {self.buffer.read_cursor})")
+
+    def _check_wait(self) -> None:
+        """``trainer.sample_wait`` for a round that keeps pulling groups and drops every
+        one (over the policy-age limit, of a version this trainer never published,
+        unfit for the rows): the wait for a trainable group started at the first pull
+        after the last kept group and does not start again with each dropped one.
+        Called after a group is dropped, never before a group is judged, so a
+        trainable group is never refused by it. Before, every pulled group restarted
+        the wait: an island whose samplers wrote groups it could never train waited
+        for good (24 min at rollout 0, no round trained, no stop)."""
+        since = self._wait_since
+        if since is None or self.clock() - since <= self.wait_s:
+            return
+        error = BufferFeedError(self._wait_message())
+        trip_sample_wait(self.emit, waited_s=self.clock() - since, limit_s=self.wait_s, error=error)
+        raise error
 
     def _gate_verdict(self, item: Any) -> str | None:
         """The incarnation gate's verdict on ``item``. While its lease cannot be read
@@ -685,6 +717,7 @@ class BufferFeed:
                   f"until a group fits the trainer's rows and group size", flush=True)
             self.emit("rl_buffer_feed_starved", idle_s=idle, streak=self._streak, reason=reason,
                       dropped=dict(self.dropped), accepted_total=self.accepted)
+        self._check_wait()
 
     def keep(self) -> None:
         last = self._take_last()
@@ -699,6 +732,7 @@ class BufferFeed:
                                   tokenize=self.tokenize))
         self._kept_pending.append((last.position, last.entry, {**last.record, "kept": True}))
         self._round_kept.append(last.position)
+        self._wait_since, self._wait_pulled = None, 0  # a trainable group: the next pull waits anew
 
     def recheck_kept(self) -> list[str]:
         """Judge the kept groups not yet handed to the trainer again, their leases
@@ -755,6 +789,7 @@ class BufferFeed:
 
     def drop(self) -> None:
         self.record({**self._take_last().record, "kept": False})
+        self._check_wait()  # the round's collector discarded it (policy age, unknown version)
 
     def _take_last(self) -> _Pulled:
         if self._last is None:
