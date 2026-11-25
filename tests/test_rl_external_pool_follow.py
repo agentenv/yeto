@@ -185,10 +185,14 @@ def test_the_external_pool_flags_belong_to_synced_trainers_that_follow(over, mat
         sample_roles.check_sampler_follow(_args(**over), 2)
 
 
-def test_follow_trainer_without_sampler_islands_or_pools_is_still_refused():
+def test_follow_trainer_without_sampler_islands_or_pools_is_still_refused(monkeypatch):
     with pytest.raises(ValueError, match="needs a synced group"):
         sample_roles.check_sampler_follow(_args(rl_island_buffer_shards=None), 2)
-    with pytest.raises(ValueError, match="--rl-backend miles only"):
+    # a backend whose trainers do not release their own versions (per_learner_release)
+    from yeto.rl.engine import backends
+
+    monkeypatch.setattr(backends, "capabilities", lambda name=None: frozenset())
+    with pytest.raises(ValueError, match="needs a backend whose trainers release their own local versions"):
         sample_roles.check_sampler_follow(_args(rl_backend="verl"), 2)
 
 

@@ -433,3 +433,44 @@ def test_the_pool_opens_a_shared_ledger_by_s3_or_r2_uri_or_path(tmp_path, monkey
                                      "sampler": {"dispense_store": str(tmp_path / "ledger")}})
     objects, _ns = nc_cli.NcSshOps._dispense_ledger(ops)
     assert isinstance(objects, sd.DirObjects)
+
+
+def test_a_local_ledger_create_is_never_seen_half_written(tmp_path, monkeypatch):
+    """Two samplers opening a fresh local ledger at once: the loser reads the winner's
+    plan.json, so the body is in place before the key exists (staged, then linked),
+    never an empty file it would take for another plan."""
+    import os
+
+    objects = sd.DirObjects(tmp_path)
+    seen = []
+    real_link = os.link
+
+    def link(src, dst):
+        seen.append((Path(dst).exists(), Path(src).read_bytes()))  # what a reader could see before the key exists
+        return real_link(src, dst)
+
+    monkeypatch.setattr(sd.os, "link", link)
+    assert objects.create("ns/plan.json", b'{"version": 3}') is True
+    assert seen == [(False, b'{"version": 3}')]
+    assert objects.create("ns/plan.json", b'{"version": 4}') is False
+    assert objects.read("ns/plan.json") == b'{"version": 3}'
+    assert sorted(p.name for p in (tmp_path / "ns").iterdir()) == ["plan.json"]  # no staged file left
+
+
+@pytest.mark.parametrize("code", ["EPERM", "ENOTSUP", "EXDEV"])
+def test_a_local_ledger_without_hard_links_falls_back_to_an_exclusive_create(tmp_path, monkeypatch, code):
+    """A file system without hard links (some FUSE and network mounts) refuses os.link
+    with a plain OSError: the create falls back to O_EXCL and still fails on a key that
+    exists, so exactly one sampler writes the plan."""
+    import errno
+    import os
+
+    def no_links(src, dst):
+        raise OSError(getattr(errno, code), os.strerror(getattr(errno, code)))
+
+    monkeypatch.setattr(sd.os, "link", no_links)
+    objects = sd.DirObjects(tmp_path)
+    assert objects.create("ns/plan.json", b'{"version": 3}') is True
+    assert objects.create("ns/plan.json", b'{"version": 4}') is False
+    assert objects.read("ns/plan.json") == b'{"version": 3}'
+    assert sorted(p.name for p in (tmp_path / "ns").iterdir()) == ["plan.json"]  # no staged file left
