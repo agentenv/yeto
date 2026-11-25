@@ -588,6 +588,7 @@ def test_pool_stop_after_the_controller_died_releases_from_the_store(world, tmp_
     assert len(live) == 2
     doc = store_state.read_state(objects, "ssh")
     assert sorted(m["ticket"] for m in doc["members"] if m["state"] != GONE) == sorted(m.ticket for m in live)
+    spare = control.allocator.allocate(floor=0, token=control.lock.token, base="smp")  # drawn, never ordered
     # the controller dies here: no drain, no release of its lock
 
     b_ops = _other_host(w, tmp_path, "host-b")
@@ -604,6 +605,8 @@ def test_pool_stop_after_the_controller_died_releases_from_the_store(world, tmp_
             b_ops.provider.node_of_ticket(m.ticket).name]
         assert any(f"yeto-sampler-{m.shard}" in c for h, c in w.nodes.calls if h == host)
     assert store_state.StoreLock.holder_of(objects, store_state.lock_prefix("ssh"), now=w.clock()) is None
+    ended = set(store_state.ShardAllocator(objects, "smp", owner="ssh").ended_shards())
+    assert f"smp-{spare}" in ended  # the number the dead controller drew and no order took: ended
 
 
 def test_run_down_passes_the_store_to_pool_stop_on_the_store_control_plane(tmp_path, monkeypatch):

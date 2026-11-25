@@ -1448,6 +1448,10 @@ def _release_from_store(cfg, config_path, proc, state, *, sleep, ops, objects, n
                                    where=control.state.key, log=cli._log, events=events)
         pool.state_path = state  # the local mirror
         _say(f"pool-stop: no pool process alive; releasing from the store's state ({control.state.key})")
+        try:  # shard numbers the dead controller drew that no order took: ended, the allocator is clean
+            pool.end_unused_shards()
+        except Exception as error:  # noqa: BLE001 - the next controller ends them at its start
+            _say(f"pool-stop: unused shards not ended ({error!r})"[:300])
         left = _drain_all(pool, "pool-stop", sleep=sleep)
         pool._save_now()  # noqa: SLF001 - the store's state (fenced) and the local mirror
     finally:
