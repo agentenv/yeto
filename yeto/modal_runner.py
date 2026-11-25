@@ -2410,6 +2410,12 @@ class RoutingOps:
         probe = getattr(self._for(name), "rl_strict_failure", None)
         return probe(name, job_id) if probe else None
 
+    def island_decision(self, name, job_id):
+        """The source's own reading of why the island ended (``island_lifecycle.Decision``),
+        when it has one (resident ``ssh:`` islands); None otherwise."""
+        probe = getattr(self._for(name), "island_decision", None)
+        return probe(name, job_id) if probe else None
+
     def now(self):
         return self.sky_ops.now()
 

@@ -662,7 +662,7 @@ class FleetController:
             else:
                 config_error = None if is_syncer else self._config_error(rec)
                 if config_error is not None:
-                    rec["decision"] = lifecycle.classify(log_text=config_error)
+                    rec["decision"] = lifecycle.decision(lifecycle.CONFIG_ERROR, config_error.strip())
                     # the island refused its launch options: a relaunch fails the same way
                     self._fleet("island_lost", rec["name"], reason=f"configuration error: {config_error}"[:500])
                     if self.elastic:
@@ -882,13 +882,19 @@ class FleetController:
         options), read with the strict-failure log probe; None without one. Any roster:
         a configuration error is never worth a relaunch."""
         probe = getattr(self.ops, "rl_strict_failure", None)
-        if probe is None:
-            return None
-        try:
-            text = probe(rec["name"], rec["job_id"])
-        except Exception:
-            return None
-        return text if text is not None and CONFIG_ERROR_MARKER in text else None
+        text = None
+        if probe is not None:
+            try:
+                text = probe(rec["name"], rec["job_id"])
+            except Exception:
+                text = None
+        if text is not None and CONFIG_ERROR_MARKER in text:
+            return text
+        if self.recorder is not None:  # island lifecycle: the source's exit code counts too (exit 10)
+            observed = self._source_decision(rec)
+            if observed is not None and observed.cause == lifecycle.CONFIG_ERROR:
+                return observed.detail or f"exit {CONFIG_ERROR_EXIT}"
+        return None
 
     def _strict_failure(self, rec) -> str | None:
         if not (self.fixed_roster or self.elastic):
@@ -904,13 +910,26 @@ class FleetController:
             return None  # legacy unchanged: a refused island takes the fixed-roster path
         return text
 
+    def _source_decision(self, rec):
+        """The island source's own decision for its ended incarnation (``ops.island_decision``:
+        resident ``ssh:`` islands read their ranks' exit codes, markers and reachability);
+        None when the source has none. Recorded only: the relaunch policy is unchanged."""
+        probe = getattr(self.ops, "island_decision", None)
+        if probe is None:
+            return None
+        try:
+            return probe(rec["name"], rec.get("job_id"))
+        except Exception:  # noqa: BLE001 - the record falls back to the generic reading
+            return None
+
     def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
         rec["state"] = RECOVERING
         rec["failed_at"] = self.ops.now()
         if not is_syncer:
             self._fleet("island_lost", rec["name"], reason=str(reason))
             text = str(reason)
-            rec["decision"] = lifecycle.classify(
+            observed = self._source_decision(rec)
+            rec["decision"] = observed if observed is not None and observed.relaunch else lifecycle.classify(
                 detail=text, preempted="preempt" in text.lower(),
                 lost=any(w in text for w in ("not UP", "unavailable", "left the elastic pool")))
         # Fixed-roster RL: the recovery budget is cumulative over relaunches

@@ -59,7 +59,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..config_errors import CONFIG_ERROR_MARKER
+from ..config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER
+from . import island_lifecycle
 from .ssh_trainer_island import (
     KILL_GRACE_S,
     NodeState,
@@ -80,9 +81,8 @@ MAX_REFOLLOWS = 5
 WORKER_EXIT_GRACE_S = 120.0
 HEALTH_EVERY_S = 60.0
 LOG_TAIL_LINES = 400
-STRICT_MARKERS = ("[yeto-rl-strict-failure]", "StrictRlInvariantError:",
-                  "backend identity mismatch, JOIN refused", "session mismatch (HELLO refused",
-                  CONFIG_ERROR_MARKER)
+# the unified table's strict-failure markers, and a configuration error's (never relaunched)
+STRICT_MARKERS = (*island_lifecycle.STRICT_MARKERS, CONFIG_ERROR_MARKER)
 
 
 class _Status:
@@ -337,6 +337,23 @@ class SshIslandOps:
             if rec.lock is not None:
                 rec.lock.close()
                 rec.lock = None
+
+    def island_decision(self, name: str, job_id: Any) -> island_lifecycle.Decision | None:
+        """Why the island's incarnation ended, by the unified decision table
+        (``yeto.launch.island_lifecycle.classify``) from what this source observed: a rank's
+        exit code (``CONFIG_ERROR_EXIT`` is a configuration error), the strict / config
+        marker lines of node 0's log, a node that stopped answering (lost) or a trainer
+        process gone without an exit code (killed, OOM, reboot: infrastructure). None while
+        the incarnation runs, or for an incarnation this launcher no longer runs."""
+        rec = self.islands.get(name)
+        if rec is None or rec.verdict is None or rec.incarnation is None or str(job_id) != str(rec.incarnation):
+            return None
+        codes = [st.rc for st in rec.ended.values() if st.state == "exited" and st.rc not in (None, 0)]
+        exit_code = CONFIG_ERROR_EXIT if CONFIG_ERROR_EXIT in codes else (codes[0] if codes else None)
+        return island_lifecycle.classify(
+            exit_code=0 if rec.verdict == "SUCCEEDED" else exit_code,
+            log_text="\n".join(str(line) for line in rec.lines), succeeded=rec.verdict == "SUCCEEDED",
+            lost="does not answer over SSH" in rec.reason, detail=rec.reason)
 
     def rl_strict_failure(self, name: str, job_id: Any) -> str | None:
         for line in reversed(list(self.islands[name].lines)):
