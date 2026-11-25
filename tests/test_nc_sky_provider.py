@@ -1290,6 +1290,9 @@ def test_a_failed_launch_records_no_credentials_and_no_terminal_escapes(monkeypa
     # every terminal escape goes: OSC (BEL / ST ended), ESC 7 / ESC 8, CSI erase line
     text = _error_text(RuntimeError("\x1b]0;title\x07a\x1b7b\x1b8c\x1b]8;;http://x\x1b\\d\x1b[2Ke"))
     assert text == "RuntimeError: abcde"
+    # a cut-off OSC loses only its introducer: the reason after it is kept
+    text = _error_text(RuntimeError("ok \x1b]0;unterminated\nsky: quota exceeded"))
+    assert text == "RuntimeError: ok 0;unterminated sky: quota exceeded"
     # plain text with dashes or key-like words is kept
     assert _error_text(RuntimeError("task-1 sk-short mask-rcnn ok")) == "RuntimeError: task-1 sk-short mask-rcnn ok"
     # the record and the ended status carry the redacted text only

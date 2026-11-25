@@ -144,7 +144,9 @@ def _field(obj: Any, key: str) -> Any:
 # terminal escapes: OSC strings (a window title, a hyperlink; ended by BEL or ST), CSI
 # sequences (colours, erase line, cursor moves), other two-byte ESC codes (ESC 7 / ESC 8 too),
 # and a stray BEL
-_ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -~]|\x07")
+# an OSC string goes whole only with its terminator (BEL / ST) on its line: a cut-off one
+# loses just its introducer, so the text after it (a launch's failure reason) stays
+_ESCAPES = re.compile(r"\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -~]|\x07")
 # credentials that need no key name to be recognized (AWS key ids, GitHub / Hugging Face /
 # OpenAI-style / Slack tokens); key=value secrets, bearer tokens, URL signatures and the
 # process's secret variables are redact_text's
