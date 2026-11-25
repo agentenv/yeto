@@ -991,12 +991,12 @@ def test_a_teardown_skipped_past_the_lease_is_done_once_the_lock_is_confirmed():
     ctl = FleetController(learners={"r-l0-modal": ("t", 1)}, syncer=None, sky_ops=ops, poll_interval=30,
                           recover_timeout=600, recorder=lc.FleetRecorder(store, {"r-l0-modal": lc.IslandRef(0, "modal")}))
     ctl._down("r-l0-modal")
-    assert ops.down_calls == [] and ctl.pending_downs == {"r-l0-modal"}
+    assert ops.down_calls == [] and ctl.pending_downs == {"r-l0-modal": False}
     ctl._retry_pending_downs()  # still not confirmed: kept pending
-    assert ops.down_calls == [] and ctl.pending_downs == {"r-l0-modal"}
+    assert ops.down_calls == [] and ctl.pending_downs == {"r-l0-modal": False}
     Fence.down = False
     ctl._retry_pending_downs()
-    assert ops.down_calls == ["r-l0-modal"] and ctl.pending_downs == set()
+    assert ops.down_calls == ["r-l0-modal"] and ctl.pending_downs == {}
 
 
 def test_the_end_says_13_when_the_lock_is_not_confirmed_past_the_lease(monkeypatch, tmp_path):
@@ -1023,3 +1023,64 @@ def test_the_end_says_13_when_the_lock_is_not_confirmed_past_the_lease(monkeypat
     args = _fleet_args(tmp_path)
     assert launcher.run(args) == launcher.ISLAND_RECORDS_UNKNOWN_EXIT
     assert [r for r in record if r[0] in ("cancel", "stop_app", "down", "terminate")] == []
+
+
+def test_pending_teardowns_ask_the_lock_once_per_poll_log_once_and_keep_force(capsys):
+    """Three pending teardowns over ten unconfirmed polls: one lock check per poll (a hung
+    store is asked once, not once per island), one line per island; a forced teardown (a
+    relaunched cluster of the same name) is still forced when it is done."""
+    from test_controller import FakeOps
+
+    from yeto.launch.fleet import FleetController
+
+    class Unconfirmed(BaseException):
+        pass
+
+    class Fence:
+        token, down, guards = 1, True, 0
+
+        def guard(self):
+            Fence.guards += 1
+            if Fence.down:
+                raise Unconfirmed("store does not answer")
+
+        def lease_left(self):
+            return 0.0
+
+    ops = FakeOps()
+    store = lc.IslandStateStore(DirectoryObjectStore("/nonexistent-t1"), log=lambda m: None, fence=Fence())
+    names = ["r-l0-modal", "r-l1-modal", "r-l2-modal"]
+    ctl = FleetController(learners={n: ("t", k) for k, n in enumerate(names)}, syncer=None, sky_ops=ops,
+                          poll_interval=30, recover_timeout=600,
+                          recorder=lc.FleetRecorder(store, {n: lc.IslandRef(k, "modal") for k, n in enumerate(names)}))
+    ctl.downed_clusters.add("r-l2-modal")  # torn down once; its relaunch needs a forced teardown
+    ctl._down("r-l0-modal")
+    ctl._down("r-l1-modal")
+    ctl._down("r-l2-modal", force=True)
+    capsys.readouterr()
+    Fence.guards = 0
+    for _ in range(10):
+        ctl._retry_pending_downs()
+    assert Fence.guards == 10 and ops.down_calls == []
+    assert "NOT tearing down" not in capsys.readouterr().err  # logged once each, when first skipped
+    Fence.down = False
+    ctl._retry_pending_downs()
+    assert sorted(ops.down_calls) == names and ctl.pending_downs == {}
+
+
+def test_the_launchers_end_tears_down_what_the_controller_left_pending(monkeypatch, tmp_path):
+    """Teardowns still pending when supervision ends are in the end's teardown list (a renamed
+    relaunch target is not always in the launcher's cluster list)."""
+    from yeto.launch.fleet import FleetController
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), succeeding={0, 1}, clock=clock, record=record)
+    _store(monkeypatch, tmp_path)
+
+    def run(self):
+        self.pending_downs["yeto-l1-modal-r1"] = True  # skipped, then the run ended
+        return {"yeto-l0-modal": "SUCCEEDED", "yeto-l1-modal": "SUCCEEDED"}
+
+    monkeypatch.setattr(FleetController, "run", run)
+    launcher.run(_fleet_args(tmp_path))
+    assert ("terminate", "yeto-l1-modal-r1") in record

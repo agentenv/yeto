@@ -1486,6 +1486,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         downed = controller.downed_clusters if controller is not None else set()
         # an ssh: island the controller released is released again: that call verifies it
         remaining = [c for c in clusters if c not in downed or c in ssh_names]
+        # teardowns the controller skipped while its lock was not confirmed (a renamed relaunch
+        # target is not always in clusters): torn down here when the end confirms the lock
+        pending = controller.pending_downs if controller is not None else {}
+        remaining += [c for c in sorted(pending) if c not in remaining]
         if modal_ops is not None and modal_cfgs:
             # Containers commit their tape every 30 s and at exit; pulled
             # here (before the app stop) and again after it below.
