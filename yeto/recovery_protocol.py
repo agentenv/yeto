@@ -25,6 +25,10 @@ MSG_RECOVERY_DONE = 46
 NO_DONOR = 0xFFFF_FFFF
 SOURCE_PEER = 1
 SOURCE_DEGRADED = 2
+# The reason of the degraded RECOVERY_SOURCE a syncer sends a recovering island while it is
+# still in initialization (syncer/src/server.rs admit_recovering_outside_training: "syncer is
+# in {phase}, not training"): no initial cut yet, so it holds no fragment to resend.
+INITIALIZATION_REASON = "syncer is in initialization, not training"
 MAX_RECOVERY_FRAME = 1 << 20
 MAX_TEXT = 4096
 

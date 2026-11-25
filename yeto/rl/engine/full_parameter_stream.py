@@ -898,37 +898,13 @@ class FullParameterRoleStream:
 
         maybe_publish(self.config.syncer_addr, self.config.learner_id, adapter.layout.fragments,
                       {"role": self.config.role, "algorithm": self.config.algorithm})
-        client = self._new_client(
-            adapter.layout.fragments,
-            dtype=self.config.session_dtype,
-            push_i8_block=self.config.push_int8_block,
-            push_i4_block=self.config.push_int4_block,
-            push_i4_stochastic_seed=self.config.learner_id if self.config.push_int4_stochastic else None,
-            num_streams=self.config.wan_streams,
-            stream_schedule=self.config.wan_stream_schedule,
-            stream_stall_timeout=self.config.wan_stall_timeout or None,
-            max_reconnects=None,
-            session_contract_hash=self._session_contract_hash(adapter.layout.layout_hash),
-            syncer_profile_hash=bytes.fromhex(self.config.syncer_profile_hash),
-            syncer_epoch=self.config.syncer_epoch,
-            recover=self._recovering,
-            expert_tokens=self.config.expert_token_weights,
-        )
-        heartbeat = (
-            LeaseHeartbeat(client, self.config.island_lease_s,
-                           progress=lambda: self.local_rounds,
-                           name=f"{self.config.role}-heartbeat")
-            if self.config.island_lease_s is not None else None
-        )
-        sink = adapter.fragment_sink(initial, ray_module=self.ray_module)
-        if self.config.verify_ahead:
-            self._verifier = self._stored_fragment_verifier(group)
-            if self._verifier is not None:
-                sink.verifier = self._verifier
-        client.install_inbound_chunk_sink(self._inbound_chunk_sink(sink))
+        client, heartbeat, sink = self._connect_role(group, adapter, initial, recover=self._recovering)
         if self._recovering:
-            await self._initialize_recovering(group, adapter, initial, client, sink, heartbeat)
-            return
+            if await self._initialize_recovering(group, adapter, initial, client, sink, heartbeat):
+                return
+            # The syncer has no initial cut yet (it is in initialization): nothing to
+            # recover, so this island joins as on a first launch (bug 25).
+            client, heartbeat, sink = self._connect_role(group, adapter, initial, recover=False)
         local: tuple[Any, ...] | None = None
         digests: list[bytes] = []
         try:
@@ -1091,6 +1067,39 @@ class FullParameterRoleStream:
                 list(self.config.syncer_shards), self.config.learner_id, layout, **kwargs)
         return SyncerClient(self.config.syncer_addr, self.config.learner_id, layout, **kwargs)
 
+    def _connect_role(self, group, adapter, initial, *, recover: bool):
+        """The syncer client (not started), its lease heartbeat and the fragment sink of
+        this role; ``recover``: the HELLO asks for peer recovery."""
+        client = self._new_client(
+            adapter.layout.fragments,
+            dtype=self.config.session_dtype,
+            push_i8_block=self.config.push_int8_block,
+            push_i4_block=self.config.push_int4_block,
+            push_i4_stochastic_seed=self.config.learner_id if self.config.push_int4_stochastic else None,
+            num_streams=self.config.wan_streams,
+            stream_schedule=self.config.wan_stream_schedule,
+            stream_stall_timeout=self.config.wan_stall_timeout or None,
+            max_reconnects=None,
+            session_contract_hash=self._session_contract_hash(adapter.layout.layout_hash),
+            syncer_profile_hash=bytes.fromhex(self.config.syncer_profile_hash),
+            syncer_epoch=self.config.syncer_epoch,
+            recover=recover,
+            expert_tokens=self.config.expert_token_weights,
+        )
+        heartbeat = (
+            LeaseHeartbeat(client, self.config.island_lease_s,
+                           progress=lambda: self.local_rounds,
+                           name=f"{self.config.role}-heartbeat")
+            if self.config.island_lease_s is not None else None
+        )
+        sink = adapter.fragment_sink(initial, ray_module=self.ray_module)
+        if self.config.verify_ahead:
+            self._verifier = self._stored_fragment_verifier(group)
+            if self._verifier is not None:
+                sink.verifier = self._verifier
+        client.install_inbound_chunk_sink(self._inbound_chunk_sink(sink))
+        return client, heartbeat, sink
+
     @property
     def _recovering(self) -> bool:
         options = self.config.peer_recovery
@@ -1104,14 +1113,21 @@ class FullParameterRoleStream:
         return snapshot_store_for(options.store, staging=options.staging,
                                   **({} if wait is None else {"manifest_wait_s": float(wait)}))
 
-    async def _initialize_recovering(self, group, adapter, initial, client, sink, heartbeat) -> None:
+    async def _initialize_recovering(self, group, adapter, initial, client, sink, heartbeat) -> bool:
         """Peer recovery: this trainer is fresh after the island lost its state.
 
         No INIT is sent (the syncer holds the run's fragments). A donor's
         snapshot restores the inner optimizer state on every rank, then the
         syncer resends every fragment and they become this island's anchors
-        in one apply (``peer_recovery`` module doc)."""
-        from yeto.rl.peer_recovery import recover
+        in one apply (``peer_recovery`` module doc).
+
+        False when the syncer answered from initialization (no initial cut yet: it
+        holds no fragment, the earlier process of this island never got past the
+        start): ``client``, ``heartbeat`` and ``sink`` are closed, the trainer is
+        untouched (still fresh), and the caller starts the island as on a first
+        launch. A recovery that ends without every fragment resent otherwise raises
+        :class:`~yeto.rl.peer_recovery.RecoveryIncomplete` (a deterministic stop)."""
+        from yeto.rl.peer_recovery import RecoveryIncomplete, recover
 
         options = self.config.peer_recovery
         island = self._recovery_island(group, adapter, recovering=True)
@@ -1122,9 +1138,22 @@ class FullParameterRoleStream:
                 heartbeat.start()  # a peer restore may take longer than the lease
             outcome = await asyncio.to_thread(
                 recover, client, island, self._snapshot_store(), timeout=options.timeout_s)
+            if outcome.syncer_initializing and not island.resent:
+                if heartbeat is not None:
+                    heartbeat.stop()
+                island.release()
+                client.close()
+                sink.release_all()
+                print(f"[yeto-peer-recovery] {self.config.role} learner {self.config.learner_id}: the syncer "
+                      "is still in initialization (no initial cut, no fragment to recover); joining as on a "
+                      "first launch", file=sys.stderr, flush=True)
+                return False
             client.mark_initial_cut_received()
             if sorted(island.resent) != list(range(count)):
-                raise RuntimeError(f"{self.config.role} recovery did not receive every fragment")
+                raise RecoveryIncomplete(
+                    f"{self.config.role} recovery did not receive every fragment (resent "
+                    f"{sorted(island.resent)} of {count}; the syncer's source: {outcome.path}"
+                    + (f", {outcome.reason}" if outcome.reason else "") + ")")
             self.group = group
             self.adapter = adapter
             self.client = client
@@ -1156,6 +1185,7 @@ class FullParameterRoleStream:
               f"{outcome.path} recovery (donor {outcome.donor}) in {outcome.steps} syncer step(s), "
               f"{outcome.seconds:.1f}s; fragment versions {list(self.fragment_versions)}",
               file=sys.stderr, flush=True)
+        return True
 
     async def serve_peer_snapshots(self) -> int:
         """Donor side, at a safe point (no optimizer step running): answer the

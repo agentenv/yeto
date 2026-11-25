@@ -167,6 +167,12 @@ class SnapshotIntegrityError(RuntimeError):
     """A snapshot is missing, corrupt, or from another layout."""
 
 
+class RecoveryIncomplete(RuntimeError):
+    """A recovery that ended without every fragment resent (the syncer was not training:
+    finalization, the budget cutoff). A relaunch meets the same syncer state, so the island
+    stops for good (``yeto.launch.island_lifecycle.DETERMINISTIC_ERRORS``)."""
+
+
 class SnapshotRefused(RuntimeError):
     """The donor cannot write a snapshot now (e.g. a rank refused its shard).
     The request is dropped: the syncer times out and asks the next donor."""
@@ -896,6 +902,14 @@ class RecoveryOutcome:
     restored_versions: tuple[int, ...] | None
     #: Versions held on return (the syncer versions at RECOVERY_DONE).
     versions: tuple[int, ...]
+    #: The syncer's reason for a degraded source ("" for a peer).
+    reason: str = ""
+
+    @property
+    def syncer_initializing(self) -> bool:
+        """The syncer answered from initialization (no initial cut yet): it resent nothing
+        and holds nothing to recover, so the island starts as on a first launch."""
+        return self.path == "degraded" and self.replayed == 0 and self.reason == rp.INITIALIZATION_REASON
 
 
 def recover(
@@ -958,6 +972,7 @@ def recover(
                 seconds=time.monotonic() - t0,
                 restored_versions=None if held is None else tuple(held),
                 versions=tuple(island.fragment_versions()),
+                reason="" if source is None or peer else source.text,
             )
 
 

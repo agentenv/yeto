@@ -228,6 +228,7 @@ def serve_sky(tmp_path, monkeypatch, ops, *, polls):
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(fleet_syncer, "record", lambda *a, **k: {})
+    monkeypatch.setattr(fleet_syncer, "syncer_listening", lambda *a, **k: True)  # the syncer process listens
 
     clock = [0.0]
     monkeypatch.setattr(fleet_syncer.time, "monotonic", lambda: clock[0])
@@ -415,6 +416,7 @@ def test_the_syncer_grace_is_the_syncer_launch_s_own_setting(tmp_path, monkeypat
 
         monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr(fleet_syncer, "record", lambda *a, **k: {})
+        monkeypatch.setattr(fleet_syncer, "syncer_listening", lambda *a, **k: True)  # the syncer process listens
         clock = [0.0]
         monkeypatch.setattr(fleet_syncer.time, "monotonic", lambda: clock[0])
         return fleet_syncer.serve(args, "h:1", 2, clusters=[], head_mode=False, syncer_cluster="r-syncer",

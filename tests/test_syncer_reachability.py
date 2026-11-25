@@ -93,7 +93,9 @@ def test_island_probe_names_the_unreachable_critic_syncer(capsys):
         return _C()
 
     args = SimpleNamespace(syncer="203.0.113.4:29400", critic_syncer="203.0.113.4:29401")
+    clock = [0.0]  # a refusal is waited for (the syncer starting); a fake clock runs it out
     with pytest.raises(ConnectionError, match="203.0.113.4:29401 unreachable"):
-        probe_syncers(args, connect=connect, attempts=3, sleep=lambda s: None)
+        probe_syncers(args, connect=connect, attempts=3, sleep=lambda s: clock.__setitem__(0, clock[0] + s),
+                      clock=lambda: clock[0])
     assert "203.0.113.4:29400 reachable" in capsys.readouterr().out
     assert probe_syncers(SimpleNamespace(syncer=None, critic_syncer=None)) == []

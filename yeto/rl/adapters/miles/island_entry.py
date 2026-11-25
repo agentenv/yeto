@@ -1871,12 +1871,20 @@ def _syncer_addresses(value: str) -> list[tuple[str, int]]:
     return [_syncer_address(item.strip()) for item in value.split(",")]
 
 
+# A refused connection: the syncer's host answers, its process does not listen (yet): a
+# syncer starting or restarting. The island waits for it this long before it fails.
+SYNCER_REFUSED_WAIT_S = 300.0
+
+
 def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
-                  timeout: float = 5.0, sleep=time.sleep) -> list[tuple[str, int]]:
+                  timeout: float = 5.0, sleep=time.sleep, refused_wait_s: float = SYNCER_REFUSED_WAIT_S,
+                  clock=time.monotonic) -> list[tuple[str, int]]:
     """Island-side TCP probe of every syncer this learner will dial (actor
     --syncer, critic --critic-syncer), printed with the addresses, before any
     model/Miles work. Without it an unreachable syncer leaves the island
-    silently redialing for minutes; this fails in ~30 s and names the address."""
+    silently redialing for minutes; this fails in ~30 s (``attempts``) and names
+    the address. A refused connection (the host answers, nothing listens: the
+    syncer process starting or restarting) is waited for up to ``refused_wait_s``."""
     import socket
 
     connect = connect or socket.create_connection
@@ -1884,18 +1892,30 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
              if v for addr in _syncer_addresses(v)]
     for host, port in addrs:
         last = "not tried"
-        for i in range(max(1, attempts)):
+        started = clock()
+        tries = 0
+        while True:
+            tries += 1
+            refused = False
             try:
                 connect((host, port), timeout=timeout).close()
-                print(f"[rl] syncer probe: {host}:{port} reachable (attempt {i + 1})", flush=True)
+                print(f"[rl] syncer probe: {host}:{port} reachable (attempt {tries})", flush=True)
                 break
+            except ConnectionRefusedError as error:
+                refused, last = True, f"{type(error).__name__}: {error}"
             except OSError as error:
                 last = f"{type(error).__name__}: {error}"
-            if i + 1 < attempts:
-                sleep(delay)
-        else:
-            raise ConnectionError(
-                f"syncer {host}:{port} unreachable from this island after {attempts} attempt(s): {last}")
+            waited = clock() - started
+            if refused and waited < refused_wait_s:
+                if tries == 1:
+                    print(f"[rl] syncer probe: {host}:{port} refused (the syncer process is not listening yet); "
+                          f"waiting up to {refused_wait_s:.0f}s", flush=True)
+            elif tries >= max(1, attempts):
+                why = (f" (refused for {waited:.0f}s: the syncer host answers but its process does not listen)"
+                       if refused else "")
+                raise ConnectionError(
+                    f"syncer {host}:{port} unreachable from this island after {tries} attempt(s): {last}{why}")
+            sleep(delay)
     return addrs
 
 
