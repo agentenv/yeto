@@ -117,7 +117,8 @@ SUBMITTED, LAUNCHED, FAILED, LOST, CANCELLED = "submitted", "launched", "failed"
 
 
 def _field(obj: Any, key: str) -> Any:
-    """``obj[key]`` of a sky response (a dict, or a pydantic payload)."""
+    """``obj[key]`` of a sky response: a dict, or a pydantic model (``StatusResponse``,
+    ``RequestPayload``) read by attribute, not through sky's dict-compat layer."""
     if isinstance(obj, dict):
         return obj.get(key)
     return getattr(obj, key, None)
@@ -384,11 +385,11 @@ class SkyProvider:
     def _ours(self, ticket: str) -> bool:
         return self._named_ours(ticket) and ticket in self._rows()
 
-    def _marked_ours(self, record: dict[str, Any]) -> bool:
+    def _marked_ours(self, record: Any) -> bool:
         """A positive ownership mark on a cluster sky lists: our ``yeto-run`` label on its
         launched resources, or an ``intent`` of this run in the run's resource ledger."""
-        labels = record.get("labels") or getattr(getattr(record.get("handle"), "launched_resources", None),
-                                                 "labels", None) or {}
+        labels = _field(record, "labels") or getattr(getattr(_field(record, "handle"), "launched_resources", None),
+                                                     "labels", None) or {}
         if labels.get(OWNER_LABEL) == self.owner:
             return True
         from yeto.cost.ledger import current  # noqa: PLC0415
@@ -400,11 +401,11 @@ class SkyProvider:
             rows = ledger.records()
         except Exception:  # noqa: BLE001 - an unreadable ledger is no mark
             return False
-        name = record.get("name")
+        name = _field(record, "name")
         return any(r.get("op") == "intent" and r.get("kind") == LEDGER_KIND and r.get("name") == name
                    and (r.get("attrs") or {}).get("run") == self.run_id for r in rows)
 
-    def _record(self, ticket: str, *, refresh: bool = False) -> dict[str, Any] | None:
+    def _record(self, ticket: str, *, refresh: bool = False) -> Any:
         """sky's record of cluster ``ticket`` (None: sky does not list it). ``refresh``:
         sky asks the cloud for clusters with spot instances or autostop (a reclaimed
         spot VM reads gone, not a stale UP)."""
@@ -419,7 +420,7 @@ class SkyProvider:
         """sky's status name of cluster ``ticket`` (``UP``, ``INIT``, ``STOPPED``), refreshed
         from the cloud; None when sky does not list it. Raises on a failed call."""
         record = self._record(ticket, refresh=True)
-        return None if record is None else _status_name(record.get("status"))
+        return None if record is None else _status_name(_field(record, "status"))
 
     def _wait_for_none(self):
         modes = getattr(self.sky, "AutostopWaitFor", None)
@@ -739,7 +740,7 @@ class SkyProvider:
                 return LeaseStatus("ended", end_reason="lost",
                                    detail="launch request lost by the sky API server before the cluster existed")
             return LeaseStatus("ended", end_reason="preempted")
-        state = _status_name(record.get("status"))
+        state = _status_name(_field(record, "status"))
         if state == UP:
             if state_of_launch == LOST:  # it came up before the API server restart: kept
                 self._mark(ticket, launch_state=LAUNCHED, reconciled=True)
@@ -787,7 +788,7 @@ class SkyProvider:
 
     def node(self, account: int, ticket: str) -> NodeLease:
         record = self._record(ticket)
-        handle = (record or {}).get("handle")
+        handle = None if record is None else _field(record, "handle")
         ip = getattr(handle, "head_ip", None)
         if not ip:
             raise RuntimeError(f"cluster {ticket} has no head IP yet")
@@ -808,13 +809,13 @@ class SkyProvider:
         doc = self._doc()
         rows = doc["clusters"]
         try:
-            # sky >= 0.14 answers pydantic StatusResponse records (dict-like, not dict)
-            listed = [r for r in (self.sky.get(self.sky.status(None)) or ()) if hasattr(r, "get")]
+            # sky >= 0.14 answers pydantic StatusResponse records (not dicts): fields by _field
+            listed = [r for r in (self.sky.get(self.sky.status(None)) or ()) if _field(r, "name")]
         except Exception:  # noqa: BLE001 - an unanswered listing: the record alone
             listed = []
         changed = False
         for rec in listed:
-            name = str(rec.get("name"))
+            name = str(_field(rec, "name"))
             match = self._name_re.fullmatch(name)
             if match is None or name in rows:
                 continue
