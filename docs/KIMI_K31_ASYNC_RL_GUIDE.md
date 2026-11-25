@@ -3509,8 +3509,10 @@ outlives two holders that died with it and is settled `exhausted` at the third.
 `python -m yeto.launch.nc pool` process per pool. With `"controller":
 "in_process"` in the run config, all pools run in one rollout controller
 inside the `yeto run up` process (state files, scale files, locks and
-`pool-stop` work the same way). That process must stay up, so `--no-monitor`
-is refused in this mode. `yeto launch --rollout-pool <pool.json>` (repeatable)
+`pool-stop` work the same way). The pools' provider calls see the run
+config's `env` (for example `AWS_PROFILE`), as a pool process would; outside
+those calls the process keeps the environment it was started with. That
+process must stay up, so `--no-monitor` is refused in this mode. `yeto launch --rollout-pool <pool.json>` (repeatable)
 does the same inside the launcher's fleet controller. `yeto rollout status`
 reports each pool's controller view (target, members, pending handoffs,
 breaker) read from its saved state, without touching any machine.

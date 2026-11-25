@@ -51,17 +51,21 @@ import atexit
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .env_scope import EnvOverlayConflict, EnvScopedOps, scoped_environ
 from .island_pool import READY, IslandPool, Member
 
 DEFAULT_STALL_S = 1800.0  # every ready sampler silent this long: the rollout stall alert
 DEFAULT_BLOCKED_S = 300.0  # a pool tick running this long: the pool is reported blocked
 _STATE_RANK = {"draining": 1, "gone": 2}  # member states a stale store copy may not undo
 RESTART_RESET_S = 600.0  # a worker that ran this long before it died: its restart backoff starts over
+# ticks in a row a pool skipped because another environment overlay is active: check() reports it
+ENV_CONFLICT_TICKS_N = 3
 
 _ACTIVE: list[RolloutController] = []
 _ACTIVE_LOCK = threading.Lock()
@@ -72,8 +76,11 @@ class PoolSlot:
     """One pool the controller drives: its state file (saved after every tick; None:
     not saved), the lock it holds while driven (closed at the end), what to run after
     each of its ticks (``after_tick(pool)`` -> a reason to stop this pool, or None: the
-    subprocess loop's ``pool-stop`` / ``pool-retry`` request files) and what to call
-    once it is drained (``on_close(left_members)``, e.g. a billing banner)."""
+    subprocess loop's ``pool-stop`` / ``pool-retry`` request files), what to call
+    once it is drained (``on_close(left_members)``, e.g. a billing banner) and the
+    environment overlay its ticks, drains, saves and detach run in (``environ``: the
+    run's ``env``, which a pool loop of its own gets as its process environment; None:
+    the process environment as it is; see :mod:`.env_scope` and :meth:`RolloutController._pool_env`)."""
 
     pool: IslandPool
     state_path: Path | None = None
@@ -96,6 +103,8 @@ class PoolSlot:
     # pool is detached (nothing more is ordered, started or fenced), and its state save and
     # store lock release run when that tick returns, so whatever it did is recorded
     close_pending: str | None = None
+    environ: dict[str, str | None] | None = None
+    env_conflicts: int = 0  # ticks in a row skipped on an EnvOverlayConflict
 
 
 class RolloutController:
@@ -179,21 +188,26 @@ class RolloutController:
                 return
             slot.tick_began = time.monotonic()
             try:
-                try:
-                    pool.tick()
-                except Exception as error:  # noqa: BLE001 - one bad tick never ends a pool with billed nodes
-                    if pool.events is not None:
-                        pool.events("tick_failed", error=repr(error)[:300])
-                why = None
-                if slot.after_tick is not None:
+                with self._pool_env(name, slot, "tick") as env_ok:
+                    if not env_ok:  # this pool's tick is skipped (tick_failed); the other pools tick on
+                        self._env_conflict_tick(name, slot)
+                        return
+                    slot.env_conflicts = 0
                     try:
-                        why = slot.after_tick(pool)
-                    except Exception as error:  # noqa: BLE001
-                        self.log(f"rollout: after_tick failed: {error!r}")
-                if why:
-                    self.log(f"rollout: {why}: draining the pool")
-                    slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
-                self._save(slot)
+                        pool.tick()
+                    except Exception as error:  # noqa: BLE001 - one bad tick never ends a pool with billed nodes
+                        if pool.events is not None:
+                            pool.events("tick_failed", error=repr(error)[:300])
+                    why = None
+                    if slot.after_tick is not None:
+                        try:
+                            why = slot.after_tick(pool)
+                        except Exception as error:  # noqa: BLE001
+                            self.log(f"rollout: after_tick failed: {error!r}")
+                    if why:
+                        self.log(f"rollout: {why}: draining the pool")
+                        slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
+                    self._save(slot)
                 if why:
                     # Like the exit of a pool loop: drop the pid file and the lock, so a
                     # waiting ``pool-stop`` sees the pool gone (it would otherwise wait for
@@ -207,15 +221,63 @@ class RolloutController:
                 if slot.close_pending is not None and not slot.closed:
                     self._close_after_tick(name, slot)
 
+    @contextmanager
+    def _pool_env(self, name: str, slot: PoolSlot, during: str, *, wait_s: float = 0.0,
+                  critical: bool = False) -> Iterator[bool]:
+        """The pool's environment overlay (``slot.environ``) around its calls; yields True
+        once it is in place (or the pool has none). While another overlay is active in this
+        process (:class:`~.env_scope.EnvOverlayConflict`; ``yeto run up`` builds one for all
+        its pools, so only another caller can hold one) it waits up to ``wait_s``, then
+        yields False after an event, never putting the pool's calls under the other
+        overlay's values (credentials): the caller does not call the provider then.
+
+        * a tick skips the pool (``tick_failed``; the other pools and the worker go on);
+          :data:`ENV_CONFLICT_TICKS_N` in a row are reported by :meth:`check`;
+        * the stop's drain waits what is left of the stop's wait, then leaves the members
+          as they are, reported as left (a CRITICAL log, ``env_overlay_conflict`` with
+          ``critical``, the billing banner): ``yeto run down`` (a child process with the
+          run's environment) releases them;
+        * a detach, a state save or a state reload (the store only, whose client holds
+          the run's environment) runs under the pool's overlay when it can be put in place
+          at once, else without it (no wait).
+
+        Calls made on other threads (a background start or release submitted in an
+        earlier tick) go through :class:`~.env_scope.EnvScopedOps`: they wait for their
+        own overlay (:data:`~.env_scope.OPS_WAIT_S`) and fail as a start or release
+        failure, never run under another one."""
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(scoped_environ(slot.environ, wait_s=wait_s))
+                entered = True
+            except EnvOverlayConflict as error:
+                entered = False
+                level = "CRITICAL: " if critical else ""
+                self.log(f"rollout: {level}pool {name}: {during} not run under its environment overlay: {error}")
+                if slot.pool.events is not None:
+                    fields = {"critical": True} if critical else {}
+                    slot.pool.events("tick_failed" if during == "tick" else "env_overlay_conflict",
+                                     during=during, error=repr(error)[:300], **fields)
+            yield entered
+
+    def _env_conflict_tick(self, name: str, slot: PoolSlot) -> None:
+        slot.env_conflicts += 1
+        if slot.env_conflicts == ENV_CONFLICT_TICKS_N:
+            self.log(f"rollout: CRITICAL: pool {name}: {slot.env_conflicts} ticks in a row skipped: another "
+                     "environment overlay is active in this process; the pool orders, renews and releases nothing")
+            if slot.pool.events is not None:
+                slot.pool.events("env_overlay_conflict", during="tick", critical=True, ticks=slot.env_conflicts)
+
     def _close_after_tick(self, name: str, slot: PoolSlot) -> None:
         """The tick the stop / detach gave up on returned: save what it did, then close."""
         how, slot.close_pending = slot.close_pending, None
         pool = slot.pool
         if how == "detach":
-            self._save_detached(slot)
+            with self._pool_env(name, slot, "detach save"):
+                self._save_detached(slot)
             slot.left = []
         else:
-            self._save_detached(slot)
+            with self._pool_env(name, slot, "stop save"):
+                self._save_detached(slot)
             slot.left = pool.live()
             self.log(f"rollout: pool {name}: its blocked tick returned; {len(slot.left)} member(s) left billed")
         self._close_slot(name, slot)
@@ -327,7 +389,8 @@ class RolloutController:
             pool.events("worker_restarted", error=repr(error)[:300], restarts=slot.restarts)
         control = getattr(pool, "control", None)
         if control is not None:
-            self._restore_after_death(name, pool, control)
+            with self._pool_env(name, slot, "state reload"):
+                self._restore_after_death(name, pool, control)
         if self.restart_backoff_s > 0:
             slot.restart_at = now + min(self.restart_backoff_s * slot.restarts, 60.0)
 
@@ -385,9 +448,16 @@ class RolloutController:
         return all(s.pool.stopped or s.pool.detached for s in self.slots.values())
 
     def check(self) -> str | None:
-        """Why the controller needs attention (its thread died), None when healthy."""
+        """Why the controller needs attention (its thread died, or a pool skipped
+        :data:`ENV_CONFLICT_TICKS_N` ticks in a row on another environment overlay), None
+        when healthy."""
         if self.error is not None:
             return f"rollout controller thread died: {self.error!r}"
+        stuck = [name for name, slot in self.slots.items()
+                 if slot.env_conflicts >= ENV_CONFLICT_TICKS_N and not slot.pool.stopped and not slot.closed]
+        if stuck:
+            return (f"rollout pool(s) {', '.join(stuck)} not driven: {ENV_CONFLICT_TICKS_N}+ ticks in a row skipped, "
+                    "another environment overlay is active in this process")
         return None
 
     def wake(self) -> None:
@@ -434,9 +504,16 @@ class RolloutController:
                     out[name] = list(slot.left)
                     continue
                 try:
-                    if pool.live() or not pool.stopped:
-                        slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
-                    self._save(slot)
+                    with self._pool_env(name, slot, "drain", critical=True,
+                                        wait_s=max(0.0, deadline - time.monotonic())) as env_ok:
+                        if env_ok:
+                            if pool.live() or not pool.stopped:
+                                slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
+                        else:  # never released with another overlay's credentials
+                            slot.left = pool.live()
+                            self.log(f"rollout: CRITICAL: pool {name}: not drained; {len(slot.left)} member(s) "
+                                     "may still bill (`yeto run down` releases them)")
+                        self._save(slot)
                 finally:
                     slot.tick_lock.release()
                 out[name] = list(slot.left)
@@ -489,10 +566,11 @@ class RolloutController:
                 self._give_up_on_tick(name, slot, "detach", why)
             try:
                 if not pool.stopped:
-                    if getattr(pool, "detach", None) is not None:
-                        pool.detach(why)
-                    if got:
-                        self._save_detached(slot)
+                    with self._pool_env(name, slot, "detach"):
+                        if getattr(pool, "detach", None) is not None:
+                            pool.detach(why)
+                        if got:
+                            self._save_detached(slot)
                 out[name] = [m.ticket for m in pool.live()]
             finally:
                 if got:
@@ -623,7 +701,8 @@ atexit.register(lambda: drain_active("process exit"))
 # -- the National Compute / Daytona pool of a pool.json --------------------------
 
 def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: bool = True,
-            control_objects: Any = None, name: str | None = None, lock_ttl_s: float | None = None) -> PoolSlot:
+            control_objects: Any = None, name: str | None = None, lock_ttl_s: float | None = None,
+            environ: dict[str, str | None] | None = None) -> PoolSlot:
     """The pool ``python -m yeto.launch.nc pool --config <pool.json>`` runs, built the
     same way (state file restored, event log, scale control file, the pool lock) for a
     :class:`RolloutController`. Raises ``SystemExit`` when another loop holds the lock.
@@ -632,7 +711,22 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
     control plane (:mod:`.store_state`). The pool's state is ``fleet/pools/<name>/state.json``
     (the local state file imported once when the store has none, then written as a mirror
     only), guarded by the pool's store lock, and its shard numbers come from the store's
-    allocator. Another controller holding the store lock raises ``SystemExit`` too."""
+    allocator. Another controller holding the store lock raises ``SystemExit`` too.
+
+    ``environ`` (None: off, as before): the run's environment overlay (what a pool loop
+    of its own gets as its process environment). The pool and its provider are built
+    in it, every call of its ops runs in it (:class:`~.env_scope.EnvScopedOps`, a
+    background sampler start or release included) and so does every controller tick,
+    drain and detach of it."""
+    with scoped_environ(environ):
+        slot = _nc_pool(cfg, config_path, ops=ops, lock=lock, control_objects=control_objects, name=name,
+                        lock_ttl_s=lock_ttl_s, environ=environ)
+    slot.environ = dict(environ) if environ else None
+    return slot
+
+
+def _nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any, lock: bool, control_objects: Any,
+             name: str | None, lock_ttl_s: float | None, environ: dict[str, str | None] | None) -> PoolSlot:
     from ..nc import cli, pool_run  # noqa: PLC0415
 
     external = not pool_run.is_national_compute(cfg)
@@ -654,6 +748,8 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
             held.close()
         raise SystemExit(f"pool {cfg['shard_base']}: refused: {error}") from None
     pool_ops = ops if ops is not None else cli.pool_ops(cfg)
+    if environ:
+        pool_ops = EnvScopedOps(pool_ops, environ)
     if control_objects is None:
         pool = IslandPool.restore(state, pc, pool_ops, log=cli._log, events=events)  # noqa: SLF001
     else:
@@ -676,9 +772,13 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
         pool_run._remove(pool_run.pid_path(cfg))  # noqa: SLF001
         pool_run._remove(pool_run.stop_path(cfg))  # noqa: SLF001
         if left:
-            pool_run._print_banner(pool_run.billing_banner(  # noqa: SLF001
+            text = pool_run.billing_banner(
                 config_path, [m.__dict__ for m in left], why="the rollout controller stopped with members left",
-                national=not external, kind=pool_run.provider_kind(cfg)))
+                national=not external, kind=pool_run.provider_kind(cfg))
+            if environ:  # a pool-stop from a shell runs with that shell's environment, not the run's
+                text += ("\nThis pool ran with the run config's env: release them with `yeto run down --config "
+                         "<run.json>` (its pool-stop gets that env), not a pool-stop from a shell.")
+            pool_run._print_banner(text)  # noqa: SLF001
 
     return PoolSlot(pool, state_path=state, lock=held, on_close=close, after_tick=after_tick)
 

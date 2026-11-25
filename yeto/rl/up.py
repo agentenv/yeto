@@ -1406,10 +1406,12 @@ class Run:
             # the samplers running for the next run up to adopt
             kw.setdefault("pool_workers", True)
             kw.setdefault("detach_flag", self.dir / "DETACH")
+        environ = self.pool_environ()
         try:
             for ref in self.pools:
                 more = dict(store_kw, name=ref.name) if store_kw else {}
-                slots[ref.name] = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(ref.name), **more)
+                slots[ref.name] = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(ref.name), environ=environ,
+                                          **more)
                 self._restart_stopped_pool(ref.name, slots[ref.name].pool)
         except BaseException:
             for slot in slots.values():
@@ -1439,6 +1441,18 @@ class Run:
         _log(f"detach: requested ({flag}); the controller stops driving the pools without a drain within a "
              "second; the samplers keep running. `yeto run up --config <run.json>` adopts them under their shards")
         return 0
+
+    def pool_environ(self) -> dict[str, str | None]:
+        """What the environment of a pool loop of its own (``self.env``: the run config's
+        ``env`` over this process's, and what run up adds) differs from this process's
+        in: the overlay the pools of an in-process controller run their provider calls
+        in (:mod:`yeto.launch.pool.env_scope`). A value None: unset in the pool's. One
+        overlay for every pool of the run: their scopes never conflict. While a
+        pool call runs, this process's other threads see it too; they read the same
+        values from ``self.env`` anyway (children and store clients get it explicitly)."""
+        overlay: dict[str, str | None] = {k: v for k, v in self.env.items() if os.environ.get(k) != v}
+        overlay.update({k: None for k in os.environ if k not in self.env})
+        return overlay
 
     def _undriven_banner(self) -> None:
         """At exit with ``rollout.drain_on_exit`` false: what is left running, undriven."""
@@ -1959,10 +1973,10 @@ class Run:
         why = None
         tripped: tuple[str, float | None, float | None] | None = None  # breaker, value, limit
         controller = getattr(self, "controller", None)
-        if controller is not None and controller.check():  # the in-process pools stopped being driven
-            why = controller.check()
-            self.breaker_event("run.controller_exit", value=None, limit=None, detail=why)
-            return why
+        stuck = controller.check() if controller is not None else None  # read once: it can change
+        if stuck:  # the in-process pools stopped being driven
+            self.breaker_event("run.controller_exit", value=None, limit=None, detail=stuck)
+            return stuck
         wall_h = self.breaker_param("run.wall_clock", "hours")
         usd = self.breaker_param("run.budget", "usd")
         if wall_h is not None and "t0" in self.state and self.wall_elapsed_s() > wall_h * 3600:
