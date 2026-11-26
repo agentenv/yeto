@@ -22,9 +22,12 @@ def image_registry() -> str:
     return value or DEFAULT_REGISTRY
 
 
-def pinned_image(name: str, digest: str, *, docker_prefix: bool = True) -> str:
-    """``docker:<registry>/<name>@sha256:<digest>`` (without ``docker:`` on request)."""
-    ref = f"{image_registry()}/{name}@sha256:{digest}"
+def pinned_image(name: str, digest: str, *, docker_prefix: bool = True, registry: str | None = None) -> str:
+    """``docker:<registry>/<name>@sha256:<digest>`` (without ``docker:`` on request).
+    ``registry``: the one to build on (a module that builds several pins reads
+    :func:`image_registry` once and passes it to each, so they all land on one registry);
+    default :func:`image_registry` now."""
+    ref = f"{registry if registry is not None else image_registry()}/{name}@sha256:{digest}"
     return f"docker:{ref}" if docker_prefix else ref
 
 

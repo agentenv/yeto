@@ -82,7 +82,13 @@ def launch_environ(environ: Mapping[str, str] | None) -> Iterator[None]:
     (the one mechanism of the process: it nests, raises ``EnvOverlayConflict`` when
     another overlay is active, and keeps a value something else wrote meanwhile). Inside
     a pool call of the same run (``Run.pool_environ`` applied: this process's env is
-    ``Run.env``) the overlay is empty and nothing changes."""
+    ``Run.env``) the overlay is empty and nothing changes.
+
+    Holds only single-threaded: an empty overlay takes no count in ``env_scope``, so a
+    pool scope that ends on another thread during the resolution takes its values with
+    it (run up resolves on its main thread, before it starts any pool); and the overlay
+    is taken from ``os.environ`` as it is, so one left applied (a test that leaks a
+    scope) is the base the next resolution compares with."""
     from ..pool.env_scope import scoped_environ
 
     overlay = {k: str(v) for k, v in (environ or {}).items() if os.environ.get(k) != str(v)}

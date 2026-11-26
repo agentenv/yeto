@@ -1464,7 +1464,20 @@ class Run:
         TCP ports), then the egress check of the run's own nodes (:meth:`own_nodes_reach`;
         ``egress`` False: ``--skip-egress-check``): False on a FAIL. A dry run only logs the
         preflight command and contacts no node; with ``check_nodes`` (``--check-nodes``) it
-        runs the egress check too. True without either."""
+        runs the egress check too. True without either. The trainer image is resolved
+        under the run's environment (``gate.launch_environ``): another environment overlay
+        active in this process (``EnvOverlayConflict``) is a FAIL with its reason, not a
+        traceback."""
+        from yeto.launch.pool.env_scope import EnvOverlayConflict  # noqa: PLC0415
+
+        try:
+            return self._cluster_preflight(dry_run=dry_run, check_nodes=check_nodes, egress=egress)
+        except EnvOverlayConflict as error:
+            _log(f"{'dry run: ' if dry_run else ''}cluster preflight: the trainer image is not resolved under the "
+                 f"run's environment: {error}")
+            return False
+
+    def _cluster_preflight(self, *, dry_run: bool, check_nodes: bool, egress: bool) -> bool:
         from yeto.launch.preflight.gate import commands_for_launch_argv  # noqa: PLC0415
 
         # the image the trainer's launch resolves, under the environment it starts with

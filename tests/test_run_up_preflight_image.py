@@ -301,6 +301,98 @@ def test_launch_environ_inside_a_pool_scope_of_the_run_changes_nothing(monkeypat
     assert os.environ["OC_Y_B"] == "shell" and "OC_Y_C" not in os.environ
 
 
+def test_a_conflicting_overlay_fails_the_cluster_preflight_with_its_reason(kit, capsys, monkeypatch):  # noqa: F811
+    """Another environment overlay active in run up's process while it resolves the trainer
+    image under Run.env: the cluster preflight FAILs naming why, nothing is ordered, and
+    no traceback is printed."""
+    from yeto.launch.pool.env_scope import scoped_environ
+
+    monkeypatch.setenv("OC_Y_RUN", "shell")
+    path = kit.files[TEMPLATE]
+    cfg = json.loads(path.read_text())
+    cfg["env"] = {**cfg.get("env", {}), "OC_Y_RUN": "run"}
+    path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(kit.up.Run, "write_fleet_plan", lambda self: pytest.fail("ordered after a failed preflight"))
+    with scoped_environ({"OC_Y_RUN": "zz-other-value"}):
+        rc, out = _dry_run(kit, TEMPLATE, capsys, dry_run=False)
+    assert rc == 2 and "cluster preflight failed: nothing ordered" in out, out.why
+    line = next(line for line in out.splitlines() if "cluster preflight: the trainer image is not resolved" in line)
+    assert "under the run's environment: another environment overlay is active in this process" in line
+    differ = line.split("variables that differ: ")[1].split(")")[0].split(", ")
+    assert "OC_Y_RUN" in differ and "zz-other-value" not in out and "run" not in differ  # names, never values
+    assert "Traceback" not in out and kit.ordered == []
+
+
+def test_a_conflict_is_raised_at_once(monkeypatch):
+    """wait_s 0: the resolution does not wait for the other overlay to leave."""
+    import time
+
+    from yeto.launch.pool.env_scope import EnvOverlayConflict, scoped_environ
+
+    monkeypatch.setenv("OC_Y_E", "shell")
+    with scoped_environ({"OC_Y_E": "pool"}):
+        t0 = time.monotonic()
+        with pytest.raises(EnvOverlayConflict):
+            with gate.launch_environ({"OC_Y_E": "run"}):
+                pass
+        assert time.monotonic() - t0 < 0.5
+
+
+def test_a_reference_without_a_digest_is_returned_as_is(monkeypatch):
+    from yeto.rl.image_registry import REGISTRY_ENV, current_registry
+
+    monkeypatch.setenv(REGISTRY_ENV, MIRROR)
+    for ref in ("docker:ghcr.io/agentenv/yeto-miles-k31:latest", "ghcr.io/agentenv/yeto-miles-k31:v1",
+                "verl-build:abc123"):
+        assert current_registry(ref, "ghcr.io/agentenv") == ref
+    digest = "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:" + "0" * 64
+    assert current_registry(digest, "ghcr.io/agentenv") == digest.replace("ghcr.io/agentenv", MIRROR)
+
+
+def test_the_no_image_fix_names_what_stands_in_for_the_image():
+    assert cp.NO_IMAGE == "no trainer image resolved"
+    assert cp.NO_IMAGE_FIX == ("pass --image with the trainer image (yeto run up passes the image the trainer's "
+                               "launch resolves); an inventory image: / images: stands in for it only when it names "
+                               "that same image")
+
+
+def test_pinned_image_takes_the_registry_it_is_given(monkeypatch):
+    from yeto.rl.image_registry import REGISTRY_ENV, pinned_image
+
+    monkeypatch.setenv(REGISTRY_ENV, MIRROR)
+    assert pinned_image("n", "0" * 64) == f"docker:{MIRROR}/n@sha256:" + "0" * 64
+    assert pinned_image("n", "0" * 64, registry="r.example/o", docker_prefix=False) == "r.example/o/n@sha256:" + "0" * 64
+
+
+def test_every_pin_of_one_import_is_on_one_registry(tmp_path):
+    """The registry read changes while pins.py builds its constants (a fresh interpreter
+    whose image_registry() answers differently on each call): every pinned image is still
+    on PINS_REGISTRY, the one read first."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = """
+import itertools
+import yeto.rl.image_registry as ir
+counter = itertools.count()
+ir.image_registry = lambda: f"r{next(counter)}.example/o"
+from yeto.rl.adapters.miles import pins
+images = {k: v for k, v in vars(pins).items() if k.endswith("_IMAGE") and isinstance(v, str) and "/yeto-" in v}
+assert images, "no pinned images"
+bad = {k: v for k, v in images.items() if not v.startswith(f"docker:{pins.PINS_REGISTRY}/")}
+print(pins.PINS_REGISTRY, len(images), sorted(bad))
+"""
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root), "HOME": str(tmp_path)}
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=str(root),
+                          timeout=300)
+    assert done.returncode == 0, done.stderr[-2000:]
+    registry, count, bad = done.stdout.split(" ", 2)
+    assert registry == "r0.example/o" and int(count) >= 6 and bad.strip() == "[]"
+
+
 def test_launch_environ_refuses_another_overlay_that_is_active(monkeypatch):
     """Another overlay active (a pool of other values, or a second resolution on another
     thread): EnvOverlayConflict, never a resolution with mixed values."""
