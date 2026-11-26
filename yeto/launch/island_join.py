@@ -7,16 +7,18 @@ option of ``yeto fleet island add``: its launch's ``--rl-node-inventory``). Befo
 
 * be as many as the island's ``--gpu`` says, with no node another ``ssh:`` island of the
   fleet already trains on (same name or SSH target);
-* be healthy: the node health checker of their device family (``yeto.hw.node_health``),
-  one SSH call per node; a multi-node island also needs its ``NCCL_IB_HCA`` ports up at
-  rate. A device family without a checker is noted, not refused; a node that does not
-  answer is refused;
+* be healthy: the node health checker of their device family (``yeto.hw.node_health``,
+  built as the island's launch builds it), one SSH call per node; a multi-node island also
+  needs its ``NCCL_IB_HCA`` ports up at rate, a single-node one only its GPUs. A device
+  family without a checker, or a node with ``node_health: off``, is noted, not refused; a
+  node that does not answer is refused;
 * fit one fabric group (``yeto.launch.fabric_groups.check_placement``): an inventory that
   declares groups refuses a multi-node island across groups; one without any group only
   notes it;
 * be free in the inventory's ``lease_store`` (``yeto.launch.node_lease.NodeLeases``): a node
-  another run holds is refused, naming that run. Without a ``lease_store`` nothing is
-  checked (noted once).
+  another run holds (another island of the fleet included) is refused, naming that run; a
+  lease of the island's own launch (its member prefix, ``-m<n>`` after a move) is its own.
+  Without a ``lease_store`` nothing is checked (noted once).
 
 :func:`check` returns what was refused and noted; ``yeto fleet island add`` prints the notes
 and refuses the change (exit 2, nothing written) on any refusal, naming each.
@@ -27,7 +29,6 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 INVENTORY_FLAG = "--rl-node-inventory"
@@ -55,16 +56,7 @@ def inventory_of(argv: Sequence[str]) -> str | None:
     return found
 
 
-def lease_store_of(path: str | Path) -> str | None:
-    """The inventory's top-level ``lease_store`` (None when it declares none)."""
-    import yaml  # noqa: PLC0415 - as node_inventory
-
-    doc = yaml.safe_load(Path(path).expanduser().read_text())
-    value = doc.get("lease_store") if isinstance(doc, dict) else None
-    return str(value) if value else None
-
-
-def island_nodes(argv: Sequence[str], gpu: str) -> tuple[list[Any], int, str | None]:
+def island_nodes(argv: Sequence[str], gpu: str) -> tuple[Any, int, str | None]:
     """``(trainer nodes, nodes the island needs, inventory path)`` of an ``ssh:`` island's
     launch argv; raises ValueError naming what is wrong."""
     from ..gpu_spec import parse_gpu_spec  # noqa: PLC0415
@@ -83,10 +75,15 @@ def island_nodes(argv: Sequence[str], gpu: str) -> tuple[list[Any], int, str | N
 
 # -- the three checks (their modules: yeto.hw.node_health, fabric_groups, node_lease) ------------
 
-def _checker_for(family: str) -> Any:
+def _checker_for(node: Any) -> Any:
+    """The node's health checker, built as the island's own launch builds it (ssh_resident)."""
     from yeto.hw.node_health import checker_for  # noqa: PLC0415
 
-    return checker_for(family)
+    from .ssh_resident import RDMA_FABRICS  # noqa: PLC0415
+
+    fabric = getattr(node, "fabric", None)
+    return checker_for(node.device_family, expect_gpus=getattr(node, "cards_per_node", None),
+                       fabric=fabric if fabric in RDMA_FABRICS else None)
 
 
 def _check_placement(nodes: Sequence[Any], need: int) -> tuple[bool, str, bool]:
@@ -98,18 +95,31 @@ def _check_placement(nodes: Sequence[Any], need: int) -> tuple[bool, str, bool]:
 def _node_leases(store_uri: str, run_id: str) -> Any:
     from .node_lease import NodeLeases  # noqa: PLC0415
 
-    return NodeLeases(store_uri, run_id)
+    return NodeLeases(store_uri, f"{run_id}/trainer")  # read only: who holds each node
 
 
 def _hcas(node: Any) -> list[str]:
-    spec = str((getattr(node, "env", None) or {}).get("NCCL_IB_HCA") or "")
-    return [part for part in spec.split(",") if part]
+    from yeto.hw.node_health import hcas_of  # noqa: PLC0415
+
+    return list(hcas_of((getattr(node, "env", None) or {}).get("NCCL_IB_HCA")))
+
+
+def _lease_run(holder: str) -> str:
+    from .node_lease import run_of  # noqa: PLC0415
+
+    return run_of(holder) or str(holder)
 
 
 def check_health(nodes: Sequence[Any], *, multi: bool, ssh: Any, out: JoinCheck) -> None:
     for node in nodes:
+        if getattr(node, "node_health", None) == "off":
+            out.notes.append(f"node {node.name}: node_health off in the inventory: its health is not checked")
+            continue
         try:
-            checker = _checker_for(node.device_family)
+            checker = _checker_for(node)
+            if not getattr(checker, "enabled", True):
+                out.notes.append(f"node {node.name}: no health check for device family {node.device_family}")
+                continue
             hcas = _hcas(node) if multi else []
             done = ssh.run(node, checker.script(hcas), timeout=HEALTH_TIMEOUT_S)
         except Exception as error:  # noqa: BLE001 - named in the refusal
@@ -125,9 +135,9 @@ def check_health(nodes: Sequence[Any], *, multi: bool, ssh: Any, out: JoinCheck)
         if not result.checked:
             out.notes.append(f"node {node.name}: no health check for device family {node.device_family}")
             continue
-        ok = result.ok_multi if multi else result.ok_single
+        ok, reasons = result.ok(multi), result.job_reasons(multi)  # a single-node island: its GPU reasons
         if ok is False:
-            out.refusals.append(f"node {node.name} is not healthy: {'; '.join(result.reasons) or 'no reason given'}")
+            out.refusals.append(f"node {node.name} is not healthy: {'; '.join(reasons) or 'no reason given'}")
         elif ok is None:
             out.notes.append(f"node {node.name}: its health could not be judged ({'; '.join(result.reasons)})")
 
@@ -155,8 +165,10 @@ def check_leases(nodes: Sequence[Any], *, lease_store: str | None, run_id: str, 
         except Exception as error:  # noqa: BLE001 - unknown is not free
             out.refusals.append(f"node {node.name}: its lease does not read ({type(error).__name__}: {error})"[:300])
             continue
-        if holder is not None and holder != run_id:
-            out.refusals.append(f"node {node.name} is leased to run {holder}")
+        run = None if holder is None else _lease_run(holder)
+        # the island's own launch leases as <prefix>[-m<n>]/trainer: a lease of it is its own
+        if run is not None and run != run_id and not run.startswith(f"{run_id}-m"):
+            out.refusals.append(f"node {node.name} is leased to run {run}")
 
 
 def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | None = None,
@@ -215,8 +227,10 @@ def check_member(member: Mapping[str, Any], doc: Mapping[str, Any], *, fleet_arg
     """:func:`check` of an added island's trainer member (``yeto fleet island add``)."""
     say = log or (lambda m: print(m, file=sys.stderr))
     argv = [*fleet_argv, *(member.get("argv") or ())]
+    from .node_inventory import lease_store_of, load_inventory  # noqa: PLC0415
+
     nodes, need, path = island_nodes(argv, str(member["gpu"]))
-    result = check(nodes, need=need, run_id=run_id, lease_store=lease_store_of(path),
+    result = check(nodes, need=need, run_id=run_id, lease_store=lease_store_of(load_inventory(path)),
                    taken=taken_nodes(doc, other_than=str(member["name"]), fleet_argv=fleet_argv), ssh=ssh)
     for note in result.notes:
         say(f"fleet island: note: island {member['name']}: {note}")

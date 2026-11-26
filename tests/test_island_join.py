@@ -3,40 +3,37 @@
 fabric group (fabric_groups.check_placement) and not leased to another run (NodeLeases);
 any one of them failing refuses ``yeto fleet island add`` with its reason, writing nothing.
 
-The node health checker, the placement check and the leases are stand-ins with the
-signatures of the own-cluster contract (``checker_for(family).script(hcas) / .parse(text,
-hcas, prev) -> HealthResult``, ``check_placement(nodes, need) -> (ok, message, hint_only)``,
-``NodeLeases(store_uri, run_id).holder(node)``)."""
+Node health and leases are the real modules (``yeto.hw.node_health``, ``yeto.launch.node_lease``):
+most tests answer through a stand-in checker (a real :class:`~yeto.hw.node_health.Checker` whose
+script prints the node's name) and stand-in holders in the real holder format, and some use the
+real checker of a family without one and real :class:`~yeto.launch.node_lease.NodeLeases` on a
+directory store. The fabric placement check (``fabric_groups.check_placement(nodes, need) ->
+(ok, message, hint_only)``) is a stand-in until its module is merged."""
 
 from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass, field
 
 import pytest
-
 from test_fleet_island_changes import fleet_store  # noqa: F401 - fixture
+
+from yeto.hw import node_health
+from yeto.hw.node_health import HealthResult
 from yeto.launch import island_join as ij
 from yeto.launch.learner_ids import claim_key
 from yeto.launch.node_inventory import load_inventory
+from yeto.launch.node_lease import NodeLeases
 from yeto.rl import fleet_islands
 
 GPU = "ssh:2x8xb300@bm"
 
 
-@dataclass
-class HealthResult:  # the contract's yeto.hw.node_health.HealthResult
-    checked: bool
-    ok_single: bool | None
-    ok_multi: bool | None
-    reasons: list[str] = field(default_factory=list)
-    facts: dict = field(default_factory=dict)
-
-
-class Checker:
+class Checker(node_health.Checker):
     """Answers per node (the script prints the node's name here): ``bad`` nodes fail with
-    their reason; ``ib_down`` nodes are healthy alone but not for a multi-node island."""
+    their (GPU) reason; ``ib_down`` nodes are healthy alone but not for a multi-node island."""
+
+    family = "cuda"
 
     def __init__(self, bad=None, ib_down=(), checked=True):
         self.bad, self.ib_down, self.checked = dict(bad or {}), set(ib_down), checked
@@ -51,10 +48,10 @@ class Checker:
         if not self.checked:
             return HealthResult(False, None, None, ["not checked"])
         if name in self.bad:
-            return HealthResult(True, False, False, [self.bad[name]])
+            return HealthResult(True, False, False, [self.bad[name]], {"gpu_reasons": [self.bad[name]]})
         if name in self.ib_down:
-            return HealthResult(True, True, False, ["mlx5_3 DOWN"])
-        return HealthResult(True, True, True)
+            return HealthResult(True, True, False, ["mlx5_3 DOWN"], {"gpu_reasons": [], "ib_reasons": ["mlx5_3 DOWN"]})
+        return HealthResult(True, True, True, [], {"gpu_reasons": []})
 
 
 class Ssh:
@@ -70,6 +67,8 @@ class Ssh:
 
 
 class Leases:
+    """Who holds each node, as NodeLeases.holder answers: a holder id ``<run>/trainer@<identity>``."""
+
     made: list[tuple[str, str]] = []
 
     def __init__(self, store_uri, run_id, holders=None):
@@ -77,14 +76,15 @@ class Leases:
         self.holders = dict(holders or {})
 
     def holder(self, node):
-        return self.holders.get(getattr(node, "name", node))
+        run = self.holders.get(getattr(node, "name", node))
+        return None if run is None else f"{run}/trainer@host-{run}"
 
 
 @pytest.fixture
 def stand_ins(monkeypatch):
     """The three checks' modules, as the contract has them; returns their knobs."""
     knobs = {"checker": Checker(), "placement": (True, "", False), "holders": {}, "placed": []}
-    monkeypatch.setattr(ij, "_checker_for", lambda family: knobs["checker"])
+    monkeypatch.setattr(ij, "_checker_for", lambda node: knobs["checker"])
 
     def placement(nodes, need):
         knobs["placed"].append(([n.name for n in nodes], need))
@@ -131,10 +131,34 @@ def test_a_port_down_refuses_a_multi_node_island_only(tmp_path, stand_ins):
     assert stand_ins["checker"].scripts[-1] == []  # alone: the GPU checks only
 
 
+def test_a_single_node_island_is_refused_for_its_gpus_only(tmp_path, stand_ins):
+    class Both(Checker):
+        def parse(self, text, hcas, prev):
+            return HealthResult(True, False, False, ["GPU count 7, expected 8", "mlx5_3 DOWN"],
+                                {"gpu_reasons": ["GPU count 7, expected 8"], "ib_reasons": ["mlx5_3 DOWN"]})
+
+    stand_ins["checker"] = Both()
+    one = _nodes(tmp_path, names=("b300-4",))
+    assert ij.check(one, need=1, run_id="r", ssh=Ssh()).refusals == [
+        "node b300-4 is not healthy: GPU count 7, expected 8"]
+    assert ij.check(_nodes(tmp_path), need=2, run_id="r", ssh=Ssh()).refusals[0] == (
+        "node b300-4 is not healthy: GPU count 7, expected 8; mlx5_3 DOWN")
+
+
+def test_a_node_with_its_health_check_off_is_noted_and_not_called(tmp_path, stand_ins):
+    import dataclasses
+
+    stand_ins["checker"] = Checker(bad={"b300-4": "Xid 79"})
+    first, second = _nodes(tmp_path)
+    ssh = Ssh()
+    out = ij.check([dataclasses.replace(first, node_health="off"), second], need=2, run_id="r", ssh=ssh)
+    assert out.ok and ssh.calls == ["b300-5"]
+    assert "node b300-4: node_health off in the inventory: its health is not checked" in out.notes
+
 def test_a_node_that_does_not_answer_is_refused(tmp_path, stand_ins):
     out = ij.check(_nodes(tmp_path), need=2, run_id="r", ssh=Ssh(unreachable={"b300-4"}))
-    assert out.refusals == ["node b300-4: its health check did not answer (ssh exit 255: ssh: connect to host: "
-                            "timed out)"]
+    assert out.refusals == [("node b300-4: its health check did not answer (ssh exit 255: ssh: connect to host: "
+                            "timed out)")]
 
 
 def test_a_family_without_a_checker_is_noted_not_refused(tmp_path, stand_ins):
@@ -144,11 +168,11 @@ def test_a_family_without_a_checker_is_noted_not_refused(tmp_path, stand_ins):
 
 
 def test_nodes_across_fabric_groups_refuse_the_island(tmp_path, stand_ins):
-    stand_ins["placement"] = (False, "the island needs 2 healthy nodes of one fabric group; group a has only 1, "
-                                     "group b has only 1", False)
+    stand_ins["placement"] = (False, ("the island needs 2 healthy nodes of one fabric group; group a has only 1, "
+                                     "group b has only 1"), False)
     out = ij.check(_nodes(tmp_path), need=2, run_id="r", ssh=Ssh())
-    assert out.refusals == ["fabric: the island needs 2 healthy nodes of one fabric group; group a has only 1, "
-                            "group b has only 1"]
+    assert out.refusals == [("fabric: the island needs 2 healthy nodes of one fabric group; group a has only 1, "
+                            "group b has only 1")]
 
 
 def test_an_inventory_without_groups_is_only_a_note(tmp_path, stand_ins):
@@ -157,13 +181,39 @@ def test_an_inventory_without_groups_is_only_a_note(tmp_path, stand_ins):
     assert out.ok and out.notes[0].startswith("fabric: no fabric_group")
 
 
-def test_a_node_leased_to_another_run_is_refused_and_this_run_s_own_is_free(tmp_path, stand_ins):
+def test_a_node_leased_to_another_run_is_refused_and_this_island_s_own_is_free(tmp_path, stand_ins):
     stand_ins["holders"] = {"b300-4": "other-run", "b300-5": "r"}
     out = ij.check(_nodes(tmp_path), need=2, run_id="r", lease_store="s3://b/leases", ssh=Ssh())
     assert out.refusals == ["node b300-4 is leased to run other-run"]
+    stand_ins["holders"] = {"b300-4": "r-m1", "b300-5": "r-i0"}  # its own moved launch; another island
+    out = ij.check(_nodes(tmp_path), need=2, run_id="r", lease_store="s3://b/leases", ssh=Ssh())
+    assert out.refusals == ["node b300-5 is leased to run r-i0"]
     out = ij.check(_nodes(tmp_path), need=2, run_id="r", ssh=Ssh())  # no lease_store: noted
     assert out.ok and any("no lease_store" in n for n in out.notes)
 
+
+def test_the_real_leases_refuse_a_node_another_run_holds(tmp_path):
+    """NodeLeases itself on a directory lease store: another run's live lease refuses the node,
+    the island's own launch's lease does not."""
+    store = str(tmp_path / "leases")
+    nodes = _nodes(tmp_path)
+    assert NodeLeases(store, "other-run/trainer", identity="a").acquire(nodes[0]).ok
+    assert NodeLeases(store, "r-i2/trainer", identity="b").acquire(nodes[1]).ok
+    out = ij.JoinCheck()
+    ij.check_leases(nodes, lease_store=store, run_id="r-i2", out=out)
+    assert out.refusals == ["node b300-4 is leased to run other-run"]
+
+
+def test_the_real_checker_of_a_family_without_one_runs_nothing(tmp_path):
+    import dataclasses
+
+    (node,) = _nodes(tmp_path, names=("b300-4",))
+    checker = ij._checker_for(node)  # cuda: the real checker, built with the node's card count
+    assert checker.enabled and checker.expect_gpus == 8
+    other = dataclasses.replace(node, device_family="no-such-family")
+    ssh, out = Ssh(), ij.JoinCheck()
+    ij.check_health([other], multi=False, ssh=ssh, out=out)
+    assert ssh.calls == [] and out.ok and out.notes == ["node b300-4: no health check for device family no-such-family"]
 
 def test_a_node_of_another_island_or_the_wrong_count_is_refused(tmp_path, stand_ins):
     nodes = _nodes(tmp_path)
@@ -193,7 +243,7 @@ def _add(run_cli, samplers, inventory, *extra):
 @pytest.mark.parametrize("problem", ["health", "fabric", "lease"])
 def test_add_refuses_an_ssh_island_failing_one_check_and_writes_nothing(fleet_store, stand_ins, tmp_path,  # noqa: F811
                                                                          monkeypatch, capsys, problem):
-    cfg, objects, store, run_cli, samplers = fleet_store
+    _cfg, objects, store, run_cli, samplers = fleet_store
     inventory = _inventory(tmp_path / "north.yaml", ["b300-4", "b300-5"])
     monkeypatch.setattr("yeto.launch.ssh_trainer_island.SshOps", Ssh)
     if problem == "health":
@@ -203,7 +253,7 @@ def test_add_refuses_an_ssh_island_failing_one_check_and_writes_nothing(fleet_st
         stand_ins["placement"] = (False, "group a has only 1, group b has only 1", False)
         why = "fabric: group a has only 1, group b has only 1"
     else:
-        monkeypatch.setattr(ij, "lease_store_of", lambda path: "s3://b/leases")
+        inventory.write_text("lease_store: s3://b/leases\n" + inventory.read_text())
         stand_ins["holders"] = {"b300-5": "another-run"}
         why = "node b300-5 is leased to run another-run"
     monkeypatch.setattr(fleet_islands, "launch_dry_run", lambda *a, **kw: pytest.fail("checked before the dry run"))
@@ -215,7 +265,7 @@ def test_add_refuses_an_ssh_island_failing_one_check_and_writes_nothing(fleet_st
 
 
 def test_add_takes_an_ssh_island_whose_nodes_pass(fleet_store, stand_ins, tmp_path, monkeypatch, capsys):  # noqa: F811
-    cfg, objects, store, run_cli, samplers = fleet_store
+    _cfg, objects, store, run_cli, samplers = fleet_store
     inventory = _inventory(tmp_path / "north.yaml", ["b300-4", "b300-5"])
     monkeypatch.setattr("yeto.launch.ssh_trainer_island.SshOps", Ssh)
     dry_runs = []
@@ -232,7 +282,7 @@ def test_add_takes_an_ssh_island_whose_nodes_pass(fleet_store, stand_ins, tmp_pa
 
 def test_a_second_ssh_island_on_the_nodes_of_the_first_is_refused(fleet_store, stand_ins, tmp_path,  # noqa: F811
                                                                     monkeypatch, capsys):
-    cfg, objects, store, run_cli, samplers = fleet_store
+    cfg, _objects, _store, run_cli, samplers = fleet_store
     monkeypatch.setattr("yeto.launch.ssh_trainer_island.SshOps", Ssh)
     monkeypatch.setattr(fleet_islands, "launch_dry_run", lambda member, **kw: None)
     monkeypatch.setattr(fleet_islands, "session_check", lambda *a, **kw: None)
@@ -246,7 +296,7 @@ def test_a_second_ssh_island_on_the_nodes_of_the_first_is_refused(fleet_store, s
 
 
 def test_an_inventory_is_for_an_ssh_island_only(fleet_store, tmp_path, capsys):  # noqa: F811
-    cfg, objects, store, run_cli, samplers = fleet_store
+    _cfg, _objects, _store, run_cli, samplers = fleet_store
     inventory = _inventory(tmp_path / "north.yaml", ["b300-4", "b300-5"])
     assert run_cli("add", "--name", "north", "--gpu", "modal:1x2xh100", "--usd-per-h", "8", "--samplers",
                    str(samplers), "--inventory", str(inventory)) == 2
