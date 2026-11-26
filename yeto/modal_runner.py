@@ -2459,6 +2459,16 @@ class RoutingOps:
         probe = getattr(self._for(name), "island_decision", None)
         return probe(name, job_id) if probe else None
 
+    def island_health(self, name):
+        """The source's newest node health checks of ``name`` (resident ``ssh:`` islands of a
+        family with a checker, ``yeto.hw.node_health``); None otherwise."""
+        probe = getattr(self._for(name), "island_health", None)
+        return probe(name) if probe else None
+
+    def take_health_events(self, name):
+        take = getattr(self._for(name), "take_health_events", None)
+        return take(name) if take else []
+
     def now(self):
         return self.sky_ops.now()
 

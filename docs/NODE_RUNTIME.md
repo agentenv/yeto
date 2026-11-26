@@ -256,3 +256,134 @@ that list is empty. On a National Compute node it is down to the node's whole mo
 directory at `/models` (the route mounts each model on its own), the code tree (the
 route mounts it at `/yeto` with `-e PYTHONPATH=/yeto`) and the store URI (the route
 builds it on the node from the env file's bucket).
+
+## Node health
+
+`yeto preflight` checks a node before a run. While the run goes on, the node is
+checked again every 60 s (`yeto.hw.node_health`), so that a node whose GPU or
+fabric broke is taken out before NCCL times out. The check reuses the preflight's
+own parsers (`yeto.hw.host_probe`).
+
+Checkers are registered by device family. Only `cuda` has one so far. On any other
+family nothing extra runs: heartbeats, probes and island records stay as before.
+
+### What is checked
+
+One shell call reads, in this order:
+
+| item | source | bad when |
+|---|---|---|
+| XID | `NVRM: Xid` lines of `dmesg` (else `journalctl -k`; the last 1 MiB), with the boot id | a hardware XID since the previous check: 48, 61, 62, 64, 74, 79, 95, 119, 120, 140. Application XIDs (13, 31, 43, ...) are only recorded |
+| GPUs | `nvidia-smi --query-gpu=index,pci.bus_id,name,memory.total,ecc.errors.uncorrected.volatile.total` | no GPU at all, fewer GPUs answer than the inventory's `cards_per_node` (a sampler: than the first check saw), a GPU nvidia-smi cannot open, a GPU's memory shrank, or nvidia-smi cannot talk to the driver |
+| ECC | the same query | the volatile uncorrectable ECC count grew since the previous check (a count that went down is the new baseline) |
+| NVLink fabric | the `Fabric` blocks of `nvidia-smi -q` | a GPU that has a fabric state is not `Completed/Success` (a PCIe card's `N/A` passes) |
+| fabric manager | `systemctl is-active nvidia-fabricmanager` | it was active and is now `inactive` or `failed` (a node without NVSwitch, never active, passes) |
+| IB / RoCE ports | `ibstat` (`ibv_devinfo -v` only when ibstat fails) | a port named by `NCCL_IB_HCA` is missing, not `Active`, or slower than at the first check |
+
+The XIDs and the ECC count only count from the second check on. What the kernel log
+holds at the first check is history: the preflight judged the node then. Memory and
+ECC baselines follow each GPU's PCI address, so a GPU that changes index keeps its
+baseline.
+
+A single-node job (a sampler) is judged on the GPU items only. Its ports are
+recorded as `notes`. A multi-node trainer island is also judged on the ports of its
+`NCCL_IB_HCA`. The island's `env` overrides the inventory node's `env`, as for the
+job itself. Without `NCCL_IB_HCA` on an `ib` / `roce` fabric, the island is judged
+on the ports NCCL picks by the fabric's link layer. This is the preflight's own rule;
+the island is bad only when none of these ports is active. Set `NCCL_IB_HCA` to the
+compute HCAs as `yeto preflight` recommends, so that each of them counts.
+
+### Time bound
+
+- Every section of the check runs under `timeout -k 5 10`: TERM at 10 s, KILL 5 s
+  later.
+- The whole check runs in the background on the node and is killed (its process
+  group) past 45 s. That is less than the 60 s period.
+- A normal check takes about 1-5 s, mostly `nvidia-smi -q`.
+- A killed check is a read failure, except that a completed XID section still counts.
+- On a trainer island, the check rides on the status SSH call. That call waits at
+  most 75 s per node; the fleet loop asks the nodes one after another.
+- If the SSH call times out after the node printed its trainer state, the island
+  reads that state and the check is a read failure. If nothing came back, the node
+  counts as not answering.
+
+### Verdict and events
+
+- `ok`: the check passed. One good check clears a bad streak.
+- `bad_once`: one bad check. Nothing is done yet.
+- `lost`: two bad checks in a row. The node is treated as a lost node.
+- `read_failed`: the check did not read. Causes:
+  - nvidia-smi did not answer (a timeout, not installed) and no new hardware XID
+    showed;
+  - the check was killed;
+  - the IB tools did not read for a multi-node job whose GPUs pass;
+  - the newest check is older than three periods (the check stopped).
+
+  A read failure counts neither way: a bad streak goes on after it.
+
+Three events are written:
+
+- `node_health`, once when a bad streak first reaches two checks, with its reasons
+  (e.g. `GPU 5 XID 79`, `mlx5_3 port DOWN`). A read failure inside the streak does
+  not start it again.
+- `node_health_read_failed`, once when checks stop reading, and again only after a
+  check read in between.
+- `node_health_degraded`, once per node, for what the check cannot judge: the kernel
+  log is not readable, the IB tools did not read, or a multi-node job has no
+  `NCCL_IB_HCA` and no RDMA fabric. It is also written once per streak of five read
+  failures in a row. It never makes a node lost; a node that stops answering is
+  judged by the SSH reply.
+
+### Where it runs
+
+- **Samplers on the node runtime.** While the sampler runs, `python -m yeto.node
+  run` checks the node every `--health-every-s` seconds (default 60; `0` turns it
+  off). It writes the newest check to `<work>/sampler/<shard>.health.json`, and the
+  sampler adds it to each heartbeat as `health`. A pool that reads the store sees it
+  in its probe. The ssh pool (`provider.kind: ssh` on the node runtime, its default)
+  removes an earlier check at each start and reads the file in its own probe call;
+  it ignores a check of another ticket or assignment. A `lost` node is handled as a node that stopped
+  answering: `node_health`, then `node_lost`, the shard is fenced, a replacement
+  starts, and the node's slot is held for `provider.lost_node_hold_s` while a spare
+  is free.
+- **Resident `ssh:` trainer islands.** The check rides on the SSH call that asks
+  each node for its trainer state every 60 s.
+  - When a node turns `lost`, `SshIslandOps._node_health_lost(rec, rank, reasons,
+    reading)` is called. It is called once per turn, after the poll released the
+    ops' lock. `reading` carries the check's facts; the node's whole record, notes
+    included, is `rec.health[rank].record()`.
+  - By default it fails the island as a lost node: every node is released, and the
+    fleet's recovery takes over.
+  - A relaunch on the same nodes starts a new bad streak. The baselines stay, and so
+    does the record until the next check.
+  - Each node's newest check is in the island's record
+    (`fleet/trainers/<k>/state.json`, field `health`), and the events go to the
+    fleet log.
+
+### Turning it off
+
+The check is on wherever the device family has a checker. `node_health: off` turns
+it off:
+
+- in the inventory, at the top (every node) or on one node (`node_health: auto`
+  turns it back on for that node);
+- in the ssh pool's provider section (`provider.node_health`). That value wins over
+  the inventory's for the pool's nodes, and the node runtime starts with
+  `--health-every-s 0`.
+
+When neither the inventory nor the provider says `node_health`, the dry runs print
+nothing about it (a DEBUG log line says whether it is on). When one of them says it,
+the island dry run has a `node_health` field (`on (cuda)`, `off`, or
+`on (cuda), off on [...]`), and `pool --dry-run` prints `ssh pool: node health: ...`.
+
+To run one check by hand on a node (`--dry-run` prints the script and runs
+nothing):
+
+<!-- doc-test: node-health -->
+```bash
+python -m yeto.hw.node_health --hca "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" --multi --dry-run
+python -m yeto.hw.node_health --family npu --dry-run
+```
+
+Without `--dry-run`, the command prints the check's record (verdict, reasons,
+facts) and exits 0 when the verdict is `ok`.

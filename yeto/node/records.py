@@ -403,7 +403,9 @@ def probe_of(status: NodeStatus) -> Any:
     progress = status.progress_age_s
     if status.state == "stuck" and progress is None:
         progress = status.heartbeat_age_s
+    health = (status.heartbeat or {}).get("health")  # the node runtime's health check (yeto.hw.node_health)
     return Probe(node="ok", sampler="running", joined=status.ready is not None,
                  progress_age_s=progress, gen_tokens=num("gen_tokens"),
                  running=None if running is None else int(running), queued=None if queued is None else int(queued),
-                 trainer_wait=bool((status.heartbeat or {}).get("trainer_wait")))
+                 trainer_wait=bool((status.heartbeat or {}).get("trainer_wait")),
+                 health=health if isinstance(health, dict) else None)

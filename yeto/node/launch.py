@@ -28,6 +28,8 @@ GENERATION_ENV = "YETO_NODE_GENERATION"
 PROFILE_ENV = "YETO_NODE_PROFILE"
 SUPERVISED_ENV = "YETO_NODE_SUPERVISED"  # the node runtime writes the exit record
 HEARTBEAT_ENV = "YETO_NODE_HEARTBEAT_S"
+# the node runtime's latest health check (yeto.hw.node_health), read into each heartbeat
+HEALTH_ENV = "YETO_NODE_HEALTH_FILE"
 
 
 def container_name(shard: str) -> str:
@@ -38,7 +40,8 @@ def sampler_paths(profile: NodeProfile, shard: str) -> dict[str, str]:
     """The sampler's files as the sampler sees them (container or process paths)."""
     work = sampler_dirs(profile)["work"]
     return {"spec": f"{work}/sampler/{shard}.json", "reclaim": f"{work}/sampler/{shard}.reclaim",
-            "stage": f"{work}/stage", "log": f"{work}/logs/{shard}.log"}
+            "stage": f"{work}/stage", "log": f"{work}/logs/{shard}.log",
+            "health": f"{work}/sampler/{shard}.health.json"}
 
 
 def store_env(store_uri: str | None, *, stage: str, environ: Mapping[str, str]) -> dict[str, str]:
@@ -65,12 +68,13 @@ def prepend_path(first: str, rest: str | None) -> str:
 
 def sampler_env(assignment: Assignment, profile: NodeProfile, *, yeto_dir: str, store_uri: str | None,
                 environ: Mapping[str, str], heartbeat_s: float | None = None,
-                host_paths: Sequence[str] | None = None) -> dict[str, str]:
+                host_paths: Sequence[str] | None = None, health: bool = False) -> dict[str, str]:
     """The sampler's non-secret environment: the yeto tree in front of the inherited
     ``PYTHONPATH`` (a venv's or an image's own entries, e.g. CANN's ``acl``, stay), the
     reclaim marker (SIGTERM is its orderly leave), the release download's spread key, the
     family's visible cards and ``YETO_DEVICE_FAMILY``, the store settings, the node record
-    identity, then the profile's and the assignment's own variables (the assignment's win).
+    identity (``health``: the file of the runtime's health check), then the profile's and the
+    assignment's own variables (the assignment's win).
     A container launch takes ``PYTHONPATH`` out and prepends the tree inside the container
     (:func:`container_argv`): the image's value is only known there."""
     p = sampler_paths(profile, assignment.shard)
@@ -90,6 +94,8 @@ def sampler_env(assignment: Assignment, profile: NodeProfile, *, yeto_dir: str, 
                 SUPERVISED_ENV: "1"})
     if heartbeat_s is not None:
         env[HEARTBEAT_ENV] = f"{float(heartbeat_s):g}"
+    if health:
+        env[HEALTH_ENV] = p["health"]
     env.update({k: v for k, v in profile.env.items() if k != "PYTHONPATH"})
     env.update({str(k): str(v) for k, v in dict(assignment.env).items() if k != "PYTHONPATH"})
     return env

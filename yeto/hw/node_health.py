@@ -84,6 +84,7 @@ from typing import Any
 from .host_probe import (
     IbPort,
     hca_filter,
+    link_layer_ports,
     natural_order,
     parse_fabric,
     parse_sections,
@@ -252,13 +253,17 @@ def _read_error(sec: Any) -> str:
 class CudaChecker(Checker):
     """The ``cuda`` family (module doc). ``expect_gpus``: the GPUs the node has (the
     inventory's ``cards_per_node``; None: as many as the first check saw); ``min_ib_gbps``:
-    the least rate of a job port (None: its rate at the first check)."""
+    the least rate of a job port (None: its rate at the first check); ``fabric``: the
+    node's inventory fabric: a job without ``NCCL_IB_HCA`` is judged on the ports NCCL
+    picks then (the preflight's rule, :func:`~yeto.hw.host_probe.link_layer_ports`)."""
 
     family = "cuda"
 
-    def __init__(self, *, expect_gpus: int | None = None, min_ib_gbps: float | None = None, **_: Any) -> None:
+    def __init__(self, *, expect_gpus: int | None = None, min_ib_gbps: float | None = None,
+                 fabric: str | None = None, **_: Any) -> None:
         self.expect_gpus = None if expect_gpus is None else int(expect_gpus)
         self.min_ib_gbps = None if min_ib_gbps is None else float(min_ib_gbps)
+        self.fabric = fabric or None
 
     def script(self, hcas: Sequence[str]) -> str:  # noqa: ARG002 - every port is read; hcas judge them
         return bounded(TOOL_WRAPPER + probe_script(CUDA_SECTIONS))
@@ -327,7 +332,7 @@ class CudaChecker(Checker):
         ok_single = not gpu_reasons
         if not ok_single:
             ok_multi: bool | None = False
-        elif not hcas:
+        elif not hcas and (self.fabric is None or not ib_read):  # no port to judge: none named, none read
             ok_multi = True
         elif not ib_read:  # the GPUs pass, the ports the job needs did not read
             ok_multi = None
@@ -461,6 +466,13 @@ class CudaChecker(Checker):
         if hcas:
             selected, missing = hca_filter(",".join(hcas), ports)
             out += [f"{name} missing" for name in missing]
+        elif self.fabric is not None:  # NCCL's own pick without NCCL_IB_HCA: by the fabric's link layer
+            # as the preflight: bad when none of them is active (one port down: NCCL uses the others)
+            picked = link_layer_ports(ports, self.fabric)
+            if not any(p.active for p in picked):
+                down = ", ".join(f"{_port_label(p)} {(p.state or 'unknown').upper()}" for p in picked) or "none found"
+                out.append(f"no active {self.fabric} port ({down})")
+            selected = []
         else:
             selected = []
         for p in natural_order(selected):
@@ -542,9 +554,10 @@ class Reading:
         return self.verdict == "lost"
 
 
-def degraded_of(result: HealthResult, *, multi: bool, hcas: Sequence[str]) -> list[str]:
+def degraded_of(result: HealthResult, *, multi: bool, hcas: Sequence[str], fabric: str | None = None) -> list[str]:
     """What a read check could not judge for the job: XIDs (no kernel log access), the
-    ports (the IB tools did not read; a multi-node job without ``NCCL_IB_HCA``)."""
+    ports (the IB tools did not read; a multi-node job without ``NCCL_IB_HCA`` nor a
+    fabric to pick its ports by)."""
     if not result.checked:
         return []
     out = []
@@ -552,8 +565,10 @@ def degraded_of(result: HealthResult, *, multi: bool, hcas: Sequence[str]) -> li
         out.append("XID unread (no dmesg / journalctl -k access)")
     if multi and hcas and result.facts.get("ib") == "unread":
         out.append(IB_UNREAD)
-    if multi and not hcas:
+    if multi and not hcas and fabric is None:
         out.append("no NCCL_IB_HCA: the ports are not judged")
+    elif multi and not hcas and result.facts.get("ib") == "unread":
+        out.append(IB_UNREAD)
     return out
 
 
@@ -565,8 +580,11 @@ class HealthWatch:
     def __init__(self, family: str, *, hcas: Sequence[str] = (), multi: bool = False,
                  expect_gpus: int | None = None, min_ib_gbps: float | None = None,
                  bad_checks: int = BAD_CHECKS, checker: Checker | None = None,
-                 clock: Callable[[], float] = time.time, every_s: float = HEALTH_EVERY_S) -> None:
-        self.checker = checker or checker_for(family, expect_gpus=expect_gpus, min_ib_gbps=min_ib_gbps)
+                 clock: Callable[[], float] = time.time, every_s: float = HEALTH_EVERY_S,
+                 fabric: str | None = None) -> None:
+        self.fabric = fabric or None
+        self.checker = checker or checker_for(family, expect_gpus=expect_gpus, min_ib_gbps=min_ib_gbps,
+                                              fabric=self.fabric)
         self.tracker = HealthTracker(multi=multi, bad_checks=bad_checks)
         self.hcas = list(hcas)
         self.multi = bool(multi)
@@ -577,6 +595,7 @@ class HealthWatch:
         self.at: float | None = None
         self.degraded: list[str] | None = None  # set once (the node_health_degraded event)
         self.read_failed_in_row = 0
+        self.kept: dict[str, Any] | None = None  # the record before a reset, until the next check
 
     @property
     def enabled(self) -> bool:
@@ -587,7 +606,10 @@ class HealthWatch:
 
     def reset(self) -> None:
         """A new job on the same node (a relaunch): the bad streak and the last verdict go;
-        the baselines and the XID cursor of the previous checks stay."""
+        the baselines and the XID cursor of the previous checks stay, and so does the record
+        (``reset: true``) until the next check replaces it."""
+        kept = self.record()
+        self.kept = None if kept is None else {**kept, "reset": True}
         self.tracker.bad_in_row = 0
         self.last = None
 
@@ -602,7 +624,7 @@ class HealthWatch:
             event = EVENT_READ_FAILED
         degraded: list[str] | None = None
         if self.degraded is None:
-            found = degraded_of(result, multi=self.multi, hcas=self.hcas)
+            found = degraded_of(result, multi=self.multi, hcas=self.hcas, fabric=self.fabric)
             if found:
                 self.degraded = degraded = found
         self.read_failed_in_row = self.read_failed_in_row + 1 if verdict == "read_failed" else 0
@@ -610,14 +632,14 @@ class HealthWatch:
             why = "; ".join(result.job_reasons(self.multi)) or "unread"
             degraded = (degraded or []) + [f"read failed {READ_FAILED_DEGRADE} checks in a row: {why}"]
         self.prev = dict(result.facts)
-        self.last = Reading(verdict, result, event, degraded)
+        self.last, self.kept = Reading(verdict, result, event, degraded), None
         self.at = float(self.clock())
         return self.last
 
     def record(self) -> dict[str, Any] | None:
         """The ``health`` field of a heartbeat / an island state (None before the first check)."""
         if self.last is None:
-            return None
+            return None if self.kept is None else dict(self.kept)
         r = self.last.result
         reasons = r.job_reasons(self.multi)
         doc: dict[str, Any] = {"verdict": self.last.verdict, "ok": r.ok(self.multi) if r.checked else None,

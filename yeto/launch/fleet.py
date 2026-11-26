@@ -604,6 +604,10 @@ class FleetController:
             if ref is None:
                 return
             decision = rec.get("decision")
+            health = self._island_health(rec)
+            if health is not None:  # the source's node health checks (yeto.hw.node_health)
+                fields.setdefault("health", health)
+                rec["health_recorded"] = self._health_key(health)
             self.recorder.record(
                 rec["name"], state or self._unified_state(rec),
                 handle=lifecycle.handle_of(ref.source, rec["name"], rec["job_id"]),
@@ -614,6 +618,42 @@ class FleetController:
                 new_machine_retries=dict(rec.get("new_machine_retries") or {}), **fields)
         except Exception as e:  # noqa: BLE001 - the record is a view; supervision goes on
             print(f"[launcher] island record of {rec.get('name')}: {e}", file=sys.stderr)
+
+    def _island_health(self, rec):
+        """The island source's newest node health checks (``ops.island_health``: resident
+        ``ssh:`` islands of a family with a checker), else None (nothing is recorded)."""
+        probe = getattr(self.ops, "island_health", None)
+        if probe is None:
+            return None
+        try:
+            health = probe(rec["name"])
+        except Exception:  # noqa: BLE001 - a view; supervision goes on
+            return None
+        return health if isinstance(health, dict) else None
+
+    @staticmethod
+    def _health_key(health):
+        """What a change of the health record is judged by (verdicts and reasons, not times)."""
+        nodes = (health or {}).get("nodes") or {}
+        return tuple(sorted((name, doc.get("verdict"), tuple(doc.get("reasons") or ()))
+                            for name, doc in nodes.items()))
+
+    def _health_events(self, rec) -> None:
+        """The island source's node health events into the fleet log (``node_health`` /
+        ``node_health_read_failed``), and its record again when a node's verdict changed."""
+        take = getattr(self.ops, "take_health_events", None)
+        if take is None:
+            return
+        try:
+            events = take(rec["name"])
+        except Exception:  # noqa: BLE001
+            events = []
+        for event in events if isinstance(events, list) else []:
+            fields = dict(event)
+            self._fleet(fields.pop("event"), rec["name"], **fields)
+        health = self._island_health(rec)
+        if health is not None and self._health_key(health) != rec.get("health_recorded"):
+            self._record(rec)
 
     def _poll_recorded(self, rec) -> None:
         """:meth:`_poll` one learner, with its island STOP first; a state, machine or
@@ -641,6 +681,7 @@ class FleetController:
             reason = rec.get("exit") if rec.get("exit") is not None else (
                 decision.detail if decision is not None else None)
             self._record(rec, reason=None if reason is None else str(reason)[:300])
+        self._health_events(rec)
 
     def _island_start(self, rec) -> bool:
         """Island ``rec``'s START request (``yeto island start``). Its record decides, not this

@@ -30,7 +30,16 @@ Lifecycle of one island:
   ending cleanly while rank 0 still runs for ``worker_exit_grace_s`` fails the
   island at once and releases every node (one rank's failure is the island's). A
   stream that dropped while its node still runs is followed again. Every
-  ``health_every_s`` the nodes are asked even while their streams flow;
+  ``health_every_s`` the nodes are asked even while their streams flow; on a device
+  family with a health checker (cuda, :mod:`yeto.hw.node_health`) the same SSH call
+  also checks the node's GPUs, NVLink fabric and the ports of its ``NCCL_IB_HCA``
+  (a multi-node island). The check is bounded on the node (a hung tool is a read
+  failure, never an unreachable node). Two bad checks in a row of one node are a
+  node lost (:meth:`SshIslandOps._node_health_lost`, called once when it turns lost,
+  outside the ops' lock); each check is in the island's record
+  (:meth:`SshIslandOps.island_health`) and its events go to the fleet's
+  (:meth:`SshIslandOps.take_health_events`). An inventory ``node_health: off`` (the
+  file's or a node's) turns the check off;
 * **relaunch** (the fleet's recovery): release the failed incarnation (verified;
   unverified: no new start this poll) and start the next one; the trainer
   continues from the store (``--rl-init-from-release`` / its resume store);
@@ -60,9 +69,11 @@ from pathlib import Path
 from typing import Any
 
 from ..config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER, ISLAND_STOP_EXIT, ISLAND_STOP_MARKER
+from ..hw import node_health
 from . import island_lifecycle
 from .ssh_trainer_island import (
     KILL_GRACE_S,
+    RDMA_FABRICS,
     NodeState,
     SshIslandError,
     SshOps,
@@ -153,6 +164,11 @@ class _Island:
     health_at: float = 0.0
     lines: deque = field(default_factory=lambda: deque(maxlen=LOG_TAIL_LINES))
     released: set[int] = field(default_factory=set)  # incarnations confirmed stopped
+    # node health (yeto.hw.node_health): one watch per rank (empty: the family has no checker)
+    health: dict[int, Any] = field(default_factory=dict)
+    health_lost: dict[int, list[str]] = field(default_factory=dict)  # rank -> reasons (this incarnation)
+    health_events: list[dict[str, Any]] = field(default_factory=list)  # for the fleet's event log
+    health_pending: list[tuple[int, list[str], Any]] = field(default_factory=list)  # lost nodes, hook not run yet
 
 
 class SshIslandOps:
@@ -209,7 +225,24 @@ class SshIslandOps:
         rec.islands = SshTrainerIslands(spec, name=name, jobs_path=self.jobs_path(name), ops=self.ops,
                                         events_dir=self.events_dir, kill_grace_s=self.kill_grace_s,
                                         scheduled=False, tape=False, on_line=on_line, node_wait_s=0.0)
+        rec.health = self._health_watches(spec)
         self.islands[name] = rec
+
+    def _health_watches(self, spec: SshTrainerSpec) -> dict[int, Any]:
+        """One :class:`~yeto.hw.node_health.HealthWatch` per rank (a family without a checker,
+        or ``health_every_s`` 0: none). A multi-node island's job ports are its ``NCCL_IB_HCA``."""
+        if self.health_every_s <= 0 or not node_health.checker_for(spec.device_family).enabled:
+            return {}
+        out = {}
+        for rank, node in enumerate(spec.nodes):
+            if getattr(node, "node_health", None) == "off":
+                continue
+            env = {**dict(node.env), **dict(spec.env)}  # the job's own order (node_env): the island's wins
+            out[rank] = node_health.HealthWatch(node.device_family, hcas=node_health.hcas_of(env.get("NCCL_IB_HCA")),
+                                                multi=len(spec.nodes) > 1, expect_gpus=node.cards_per_node,
+                                                clock=time.time, every_s=self.health_every_s,
+                                                fabric=node.fabric if node.fabric in RDMA_FABRICS else None)
+        return out
 
     def threads(self, name: str) -> list[threading.Thread]:
         """The stream threads of the island's current incarnation (the launcher's tape drain)."""
@@ -271,6 +304,9 @@ class SshIslandOps:
         rec.job, rec.incarnation = job, int(incarnation)
         rec.verdict, rec.reason = None, ""
         rec.ended, rec.unreachable, rec.refollows = {}, {}, {}
+        rec.health_lost, rec.health_pending = {}, []
+        for watch in rec.health.values():  # a new job on the same nodes: a fresh streak, the same baselines
+            watch.reset()
         rec.workers_done_at = None
         rec.health_at = self.clock()
         return int(incarnation)
@@ -291,7 +327,10 @@ class SshIslandOps:
             if rec.incarnation is None or int(job_id) != rec.incarnation:
                 return _Status("FAILED")  # an incarnation this launcher no longer runs
             self._watch(rec)
-            return _Status(rec.verdict or "RUNNING")
+            pending, rec.health_pending = rec.health_pending, []
+        for rank, reasons, reading in pending:  # outside the lock: the hook may stop and replace the island
+            self._node_health_lost(rec, rank, reasons, reading)
+        return _Status(rec.verdict or "RUNNING")
 
     def cluster_up(self, name: str) -> bool:
         rec = self.islands[name]
@@ -353,7 +392,7 @@ class SshIslandOps:
         return island_lifecycle.classify(
             exit_code=0 if rec.verdict == "SUCCEEDED" else exit_code,
             log_text="\n".join(str(line) for line in rec.lines), succeeded=rec.verdict == "SUCCEEDED",
-            lost="does not answer over SSH" in rec.reason, detail=rec.reason)
+            lost="does not answer over SSH" in rec.reason or bool(rec.health_lost), detail=rec.reason)
 
     def replaces_machine(self, name: str) -> bool:
         """A relaunch runs on the inventory's same nodes (no other machine to order)."""
@@ -383,7 +422,14 @@ class SshIslandOps:
             for rank in range(len(procs)):
                 if rank in rec.ended:
                     continue
-                self._node_event(rec, rank, rec.islands.node_state(rec.incarnation, rank), stream_ended=False)
+                watch = rec.health.get(rank)
+                if watch is None:
+                    self._node_event(rec, rank, rec.islands.node_state(rec.incarnation, rank), stream_ended=False)
+                else:  # the node's health check rides on the same SSH call
+                    state, text = rec.islands.node_check(rec.incarnation, rank, watch.script())
+                    self._node_event(rec, rank, state, stream_ended=False)
+                    if rec.verdict is None and state is not None:
+                        self._health_reading(rec, rank, watch.observe(text))
                 if rec.verdict is not None:
                     return
         workers = [r for r in rec.ended if r > 0]
@@ -421,6 +467,60 @@ class SshIslandOps:
             self.log(f"[launcher] {rec.name}: rank 0 exited 0; the island finished")
         elif state.rc != 0:
             self._fail(rec, f"rank {rank} ({node}) exited with code {state.rc}")
+
+    # -- node health ------------------------------------------------------------------
+    def _health_reading(self, rec: _Island, rank: int, reading: Any) -> None:
+        """One node's health check: its event (``node_health`` when it turns lost,
+        ``node_health_read_failed`` when reads start failing), and a lost node's handling."""
+        node = rec.spec.nodes[rank].name
+        base = {"node": node, "rank": rank, "incarnation": rec.incarnation}
+        if reading.degraded:  # once per node: what its check cannot judge
+            rec.health_events.append({"event": node_health.EVENT_DEGRADED, **base, "reasons": list(reading.degraded)})
+            self.log(f"[launcher] {rec.name}: {node_health.EVENT_DEGRADED}: rank {rank} ({node}): "
+                     f"{'; '.join(reading.degraded)}")
+        if reading.event is not None:
+            rec.health_events.append({"event": reading.event, **base, **node_health.event_fields(reading)})
+            self.log(f"[launcher] {rec.name}: {reading.event}: rank {rank} ({node}) {reading.verdict}: "
+                     f"{'; '.join(reading.result.reasons) or '-'}")
+        if reading.event == node_health.EVENT_LOST:  # it just turned lost: the hook runs once, after the lock
+            rec.health_pending.append((rank, reading.result.job_reasons(len(rec.spec.nodes) > 1), reading))
+
+    def _node_health_lost(self, rec: _Island, rank: int, reasons: list[str], reading: Any) -> None:
+        """Node ``rank``'s health turned lost (two bad checks in a row): called once per turn, by
+        :meth:`job_status` after it released the ops' lock. ``reading``: the
+        :class:`~yeto.hw.node_health.Reading` (its result's facts, the node's record with its
+        notes: ``rec.health[rank].record()``). The default: as for a node that stops
+        answering, the island fails at once and every node is released; the fleet's recovery
+        relaunches it (the unified table reads it as a lost node)."""
+        node = rec.spec.nodes[rank].name
+        with self._lock:
+            if rec.verdict is not None:  # it ended meanwhile
+                return
+            rec.health_lost[rank] = list(reasons)
+            self._fail(rec, f"rank {rank} ({node}) node health bad in {node_health.BAD_CHECKS} checks in a row: "
+                            f"{'; '.join(reasons) or 'lost'}")
+
+    def island_health(self, name: str) -> dict[str, Any] | None:
+        """The newest health check of every node of island ``name`` (its record's ``health``);
+        None when its family has no checker or nothing was checked yet."""
+        rec = self.islands.get(name)
+        if rec is None or not rec.health:
+            return None
+        nodes = {rec.spec.nodes[rank].name: watch.record() for rank, watch in sorted(rec.health.items())
+                 if watch.record() is not None}
+        if not nodes:
+            return None
+        worst = max((doc["verdict"] for doc in nodes.values()), key=node_health.VERDICTS.index)
+        return {"verdict": worst, "nodes": nodes}
+
+    def take_health_events(self, name: str) -> list[dict[str, Any]]:
+        """The node health events of island ``name`` since the last call."""
+        rec = self.islands.get(name)
+        if rec is None:
+            return []
+        with self._lock:
+            out, rec.health_events = rec.health_events, []
+        return out
 
     def _fail(self, rec: _Island, reason: str) -> None:
         rec.verdict, rec.reason = "FAILED", reason
@@ -537,6 +637,23 @@ def rank_layout(spec: SshTrainerSpec, *, tensor_parallel: int, pipeline_parallel
             "warnings": warnings}
 
 
+def node_health_summary(spec: SshTrainerSpec) -> str | None:
+    """``on (cuda)`` / ``off`` (``off on [nodes]`` for some) when the inventory declares
+    ``node_health``; None when it does not (the dry run prints nothing then, a DEBUG log
+    says it)."""
+    import logging
+
+    family = spec.device_family
+    checker = node_health.checker_for(family).enabled
+    off = [n.name for n in spec.nodes if getattr(n, "node_health", None) == "off"]
+    state = "off" if not checker or len(off) == len(spec.nodes) else (
+        f"on ({family})" + (f", off on {off}" if off else ""))
+    if all(getattr(n, "node_health", None) is None for n in spec.nodes):
+        logging.getLogger(__name__).debug("node health: %s (not declared in the inventory)", state)
+        return None
+    return state
+
+
 def dry_run_record(args: Any, spec: SshTrainerSpec, name: str, *, mode: str = "resident") -> dict[str, Any]:
     """What a launch would run on every node of ``ssh:`` island ``name``: the
     ``docker run`` command line of incarnation 0 (environment by name; the island
@@ -585,8 +702,10 @@ def dry_run_record(args: Any, spec: SshTrainerSpec, name: str, *, mode: str = "r
                 warnings.append(f"node {node.name}: workdir {spec.workdir} is under no inventory mount, so the "
                                 "image itself must hold the yeto checkout there")
                 break
+    health = node_health_summary(spec)
     return {
         "mode": mode,
+        **({"node_health": health} if health is not None else {}),
         "warnings": warnings,
         "code": code,
         "journal": str(runs.run_dir(spec.run_id) / RESIDENT_DIR / f"{name}-jobs.json") if mode == "resident" else None,

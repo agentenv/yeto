@@ -1,0 +1,327 @@
+{
+ "dry_run_cuda": {
+  "code": {
+   "source": null,
+   "workdir": "/opt/yeto"
+  },
+  "env_order": "fabric defaults < inventory node env < --island-env and the island task env",
+  "files": [],
+  "image": "ghcr.io/o/yeto-miles-k31@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "journal": "<T>/run1/ssh-islands/isl-jobs.json",
+  "mode": "resident",
+  "nodes": [
+   {
+    "container": "yeto-run1-isl-i0-n0",
+    "docker_run": "docker run --rm --name yeto-run1-isl-i0-n0 --network host --ipc host --gpus all --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add IPC_LOCK --ulimit nofile=1048576:1048576 -v /mnt/nvme/yeto:/root/.cache -e GLOO_SOCKET_IFNAME -e NCCL_DEBUG -e NCCL_IB_DISABLE -e NCCL_IB_HCA -e NCCL_SOCKET_IFNAME -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e YETO_DEVICE_FAMILY -w /opt/yeto -v \"$HOME/.yeto/trainer-islands/run1/isl-i0:/yeto-island-state\" ghcr.io/o/yeto-miles-k31@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bash -c <island script: 7 bytes, sha256 56a79f3b11544807>",
+    "env": [
+     "GLOO_SOCKET_IFNAME",
+     "NCCL_DEBUG",
+     "NCCL_IB_DISABLE",
+     "NCCL_IB_HCA",
+     "NCCL_SOCKET_IFNAME",
+     "SKYPILOT_NODE_IPS",
+     "SKYPILOT_NODE_RANK",
+     "SKYPILOT_NUM_GPUS_PER_NODE",
+     "SKYPILOT_NUM_NODES",
+     "YETO_DEVICE_FAMILY"
+    ],
+    "host": "ops@192.0.2.10",
+    "name": "b300-0",
+    "node_rank": 0,
+    "runtime": "docker",
+    "state_dir": "$HOME/.yeto/trainer-islands/run1/isl-i0"
+   },
+   {
+    "container": "yeto-run1-isl-i0-n1",
+    "docker_run": "docker run --rm --name yeto-run1-isl-i0-n1 --network host --ipc host --gpus all --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add IPC_LOCK --ulimit nofile=1048576:1048576 -v /mnt/nvme/yeto:/root/.cache -e GLOO_SOCKET_IFNAME -e NCCL_DEBUG -e NCCL_IB_DISABLE -e NCCL_IB_HCA -e NCCL_SOCKET_IFNAME -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e YETO_DEVICE_FAMILY -w /opt/yeto -v \"$HOME/.yeto/trainer-islands/run1/isl-i0:/yeto-island-state\" ghcr.io/o/yeto-miles-k31@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bash -c <island script: 7 bytes, sha256 56a79f3b11544807>",
+    "env": [
+     "GLOO_SOCKET_IFNAME",
+     "NCCL_DEBUG",
+     "NCCL_IB_DISABLE",
+     "NCCL_IB_HCA",
+     "NCCL_SOCKET_IFNAME",
+     "SKYPILOT_NODE_IPS",
+     "SKYPILOT_NODE_RANK",
+     "SKYPILOT_NUM_GPUS_PER_NODE",
+     "SKYPILOT_NUM_NODES",
+     "YETO_DEVICE_FAMILY"
+    ],
+    "host": "ops@192.0.2.11",
+    "name": "b300-1",
+    "node_rank": 1,
+    "runtime": "docker",
+    "state_dir": "$HOME/.yeto/trainer-islands/run1/isl-i0"
+   }
+  ],
+  "rank_layout": {
+   "context_parallel": 1,
+   "nodes": [
+    {
+     "address": "198.51.100.10",
+     "global_ranks": "0-7",
+     "name": "b300-0",
+     "node_rank": 0,
+     "pp_stages": [
+      0
+     ],
+     "trainer_position": 0
+    },
+    {
+     "address": "198.51.100.11",
+     "global_ranks": "8-15",
+     "name": "b300-1",
+     "node_rank": 1,
+     "pp_stages": [
+      1
+     ],
+     "trainer_position": 1
+    }
+   ],
+   "pipeline_parallel": 2,
+   "pp_stage_nodes": {
+    "0": [
+     "b300-0"
+    ],
+    "1": [
+     "b300-1"
+    ]
+   },
+   "rank_order": "node IP, then GPU id (Miles placement group)",
+   "tensor_parallel": 8,
+   "warnings": [],
+   "world": 16
+  },
+  "warnings": [
+   "node b300-0: workdir /opt/yeto is under no inventory mount, so the image itself must hold the yeto checkout there"
+  ]
+ },
+ "dry_run_npu": {
+  "code": {
+   "source": null,
+   "workdir": "/opt/yeto"
+  },
+  "env_order": "fabric defaults < inventory node env < --island-env and the island task env",
+  "files": [],
+  "image": "ghcr.io/o/yeto-miles-k31@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "journal": "<T>/run1/ssh-islands/isl-jobs.json",
+  "mode": "resident",
+  "nodes": [
+   {
+    "container": "yeto-run1-isl-i0-n0",
+    "docker_run": "docker run --rm --name yeto-run1-isl-i0-n0 --network host --ipc host --device=/dev/davinci0 --ulimit nofile=1048576:1048576 -v /mnt/nvme/yeto:/root/.cache -e GLOO_SOCKET_IFNAME -e HCCL_CONNECT_TIMEOUT -e HCCL_SOCKET_IFNAME -e NCCL_IB_HCA -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e YETO_DEVICE_FAMILY -w /opt/yeto -v \"$HOME/.yeto/trainer-islands/run1/isl-i0:/yeto-island-state\" ghcr.io/o/yeto-miles-k31@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bash -c <island script: 7 bytes, sha256 56a79f3b11544807>",
+    "env": [
+     "GLOO_SOCKET_IFNAME",
+     "HCCL_CONNECT_TIMEOUT",
+     "HCCL_SOCKET_IFNAME",
+     "NCCL_IB_HCA",
+     "SKYPILOT_NODE_IPS",
+     "SKYPILOT_NODE_RANK",
+     "SKYPILOT_NUM_GPUS_PER_NODE",
+     "SKYPILOT_NUM_NODES",
+     "YETO_DEVICE_FAMILY"
+    ],
+    "host": "ops@192.0.2.10",
+    "name": "b300-0",
+    "node_rank": 0,
+    "runtime": "docker",
+    "state_dir": "$HOME/.yeto/trainer-islands/run1/isl-i0"
+   },
+   {
+    "container": "yeto-run1-isl-i0-n1",
+    "docker_run": "docker run --rm --name yeto-run1-isl-i0-n1 --network host --ipc host --device=/dev/davinci0 --ulimit nofile=1048576:1048576 -v /mnt/nvme/yeto:/root/.cache -e GLOO_SOCKET_IFNAME -e HCCL_CONNECT_TIMEOUT -e HCCL_SOCKET_IFNAME -e NCCL_IB_HCA -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e YETO_DEVICE_FAMILY -w /opt/yeto -v \"$HOME/.yeto/trainer-islands/run1/isl-i0:/yeto-island-state\" ghcr.io/o/yeto-miles-k31@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bash -c <island script: 7 bytes, sha256 56a79f3b11544807>",
+    "env": [
+     "GLOO_SOCKET_IFNAME",
+     "HCCL_CONNECT_TIMEOUT",
+     "HCCL_SOCKET_IFNAME",
+     "NCCL_IB_HCA",
+     "SKYPILOT_NODE_IPS",
+     "SKYPILOT_NODE_RANK",
+     "SKYPILOT_NUM_GPUS_PER_NODE",
+     "SKYPILOT_NUM_NODES",
+     "YETO_DEVICE_FAMILY"
+    ],
+    "host": "ops@192.0.2.11",
+    "name": "b300-1",
+    "node_rank": 1,
+    "runtime": "docker",
+    "state_dir": "$HOME/.yeto/trainer-islands/run1/isl-i0"
+   }
+  ],
+  "rank_layout": {
+   "context_parallel": 1,
+   "nodes": [
+    {
+     "address": "198.51.100.10",
+     "global_ranks": "0-7",
+     "name": "b300-0",
+     "node_rank": 0,
+     "pp_stages": [
+      0
+     ],
+     "trainer_position": 0
+    },
+    {
+     "address": "198.51.100.11",
+     "global_ranks": "8-15",
+     "name": "b300-1",
+     "node_rank": 1,
+     "pp_stages": [
+      1
+     ],
+     "trainer_position": 1
+    }
+   ],
+   "pipeline_parallel": 2,
+   "pp_stage_nodes": {
+    "0": [
+     "b300-0"
+    ],
+    "1": [
+     "b300-1"
+    ]
+   },
+   "rank_order": "node IP, then GPU id (Miles placement group)",
+   "tensor_parallel": 8,
+   "warnings": [],
+   "world": 16
+  },
+  "warnings": [
+   "node b300-0: workdir /opt/yeto is under no inventory mount, so the image itself must hold the yeto checkout there"
+  ]
+ },
+ "pool_cuda_off_probe": [
+  "s=$(podman inspect -f '{{.State.Status}} {{.State.ExitCode}}' yeto-sampler-f09-0 2>/dev/null || case \"$(podman inspect -f '{{.State.Status}} {{.State.ExitCode}}' yeto-sampler-f09-0 2>&1 >/dev/null)\" in (*'o such'*|*'unable to find'*|*'no container'*) echo 'absent -';; (*) echo 'unknown -';; esac); set -- $s; j=0; ls /srv/yeto/run0/sampler/events-f09-0*.jsonl >/dev/null 2>&1 && grep -qs rl_sampler_join /srv/yeto/run0/sampler/events-f09-0*.jsonl && j=1; [ $j = 1 ] || { podman logs --tail 2000 yeto-sampler-f09-0 2>&1 | grep -qs rl_sampler_join && j=1; }; n=$(ls -t /srv/yeto/run0/sampler/events-f09-0*.jsonl 2>/dev/null | head -1); a=-; [ -n \"$n\" ] && a=$(( $(date +%s) - $(stat -c %Y \"$n\") )); tw=0; [ -n \"$n\" ] && tail -n 1 \"$n\" | grep -qs rl_sampler_waiting && tw=1; vh=0 vm=-; [ -n \"$n\" ] && vh=$(grep -cs rl_sampler_vram_high \"$n\") && vm=$(grep -s rl_sampler_vram_high \"$n\" | tail -n 1 | grep -o '\"max_frac\": *[0-9.]*' | grep -o '[0-9.]*$'); vh=${vh:-0} vm=${vm:--}; st=$1 ex=$2; t=- r=- w=-; echo \"YETO_NC_PROBE status=$st exit=$ex joined=$j age=$a tw=$tw tok=$t run=$r wq=$w vh=$vh vm=$vm\""
+ ],
+ "pool_cuda_runtime_false": {
+  "probe": [
+   "s=$(podman inspect -f '{{.State.Status}} {{.State.ExitCode}}' yeto-sampler-f09-0 2>/dev/null || case \"$(podman inspect -f '{{.State.Status}} {{.State.ExitCode}}' yeto-sampler-f09-0 2>&1 >/dev/null)\" in (*'o such'*|*'unable to find'*|*'no container'*) echo 'absent -';; (*) echo 'unknown -';; esac); set -- $s; j=0; ls /srv/yeto/run0/sampler/events-f09-0*.jsonl >/dev/null 2>&1 && grep -qs rl_sampler_join /srv/yeto/run0/sampler/events-f09-0*.jsonl && j=1; [ $j = 1 ] || { podman logs --tail 2000 yeto-sampler-f09-0 2>&1 | grep -qs rl_sampler_join && j=1; }; n=$(ls -t /srv/yeto/run0/sampler/events-f09-0*.jsonl 2>/dev/null | head -1); a=-; [ -n \"$n\" ] && a=$(( $(date +%s) - $(stat -c %Y \"$n\") )); tw=0; [ -n \"$n\" ] && tail -n 1 \"$n\" | grep -qs rl_sampler_waiting && tw=1; vh=0 vm=-; [ -n \"$n\" ] && vh=$(grep -cs rl_sampler_vram_high \"$n\") && vm=$(grep -s rl_sampler_vram_high \"$n\" | tail -n 1 | grep -o '\"max_frac\": *[0-9.]*' | grep -o '[0-9.]*$'); vh=${vh:-0} vm=${vm:--}; st=$1 ex=$2; t=- r=- w=-; echo \"YETO_NC_PROBE status=$st exit=$ex joined=$j age=$a tw=$tw tok=$t run=$r wq=$w vh=$vh vm=$vm\""
+  ],
+  "start": []
+ },
+ "pool_npu": {
+  "probe": [
+   "s=$(podman inspect -f '{{.State.Status}} {{.State.ExitCode}}' yeto-sampler-f09-0 2>/dev/null || case \"$(podman inspect -f '{{.State.Status}} {{.State.ExitCode}}' yeto-sampler-f09-0 2>&1 >/dev/null)\" in (*'o such'*|*'unable to find'*|*'no container'*) echo 'absent -';; (*) echo 'unknown -';; esac); set -- $s; j=0; ls /srv/yeto/run0/sampler/events-f09-0*.jsonl >/dev/null 2>&1 && grep -qs rl_sampler_join /srv/yeto/run0/sampler/events-f09-0*.jsonl && j=1; [ $j = 1 ] || { podman logs --tail 2000 yeto-sampler-f09-0 2>&1 | grep -qs rl_sampler_join && j=1; }; n=$(ls -t /srv/yeto/run0/sampler/events-f09-0*.jsonl 2>/dev/null | head -1); a=-; [ -n \"$n\" ] && a=$(( $(date +%s) - $(stat -c %Y \"$n\") )); tw=0; [ -n \"$n\" ] && tail -n 1 \"$n\" | grep -qs rl_sampler_waiting && tw=1; vh=0 vm=-; [ -n \"$n\" ] && vh=$(grep -cs rl_sampler_vram_high \"$n\") && vm=$(grep -s rl_sampler_vram_high \"$n\" | tail -n 1 | grep -o '\"max_frac\": *[0-9.]*' | grep -o '[0-9.]*$'); vh=${vh:-0} vm=${vm:--}; st=$1 ex=$2; t=- r=- w=-; echo \"YETO_NC_PROBE status=$st exit=$ex joined=$j age=$a tw=$tw tok=$t run=$r wq=$w vh=$vh vm=$vm\""
+  ],
+  "start": [
+   "mkdir -p /srv/yeto/run0/logs; if podman inspect --type container yeto-sampler-f09-0 >/dev/null 2>&1; then if [ \"$(podman inspect -f '{{.State.Status}}' yeto-sampler-f09-0 2>/dev/null)\" = running ]; then n0=$(podman logs yeto-sampler-f09-0 2>&1 | grep -c 'reclaimed: waiting up to'); n0=${n0:-0}; echo YETO_SSH_TERM container=yeto-sampler-f09-0; podman kill --signal TERM yeto-sampler-f09-0 >/dev/null 2>&1; for i in $(seq 120); do [ \"$(podman inspect -f '{{.State.Status}}' yeto-sampler-f09-0 2>/dev/null)\" = running ] || break; n=$(podman logs yeto-sampler-f09-0 2>&1 | grep -c 'reclaimed: waiting up to'); [ \"${n:-0}\" -gt \"$n0\" ] && { echo YETO_SSH_LEFT after=$i; break; }; sleep 1; done; fi; podman stop -t 10 yeto-sampler-f09-0 >/dev/null 2>&1; echo YETO_SSH_EXIT $(podman inspect -f '{{.State.ExitCode}}' yeto-sampler-f09-0 2>/dev/null); podman logs yeto-sampler-f09-0 > /srv/yeto/run0/logs/yeto-sampler-f09-0.last.log 2>&1; podman rm -f yeto-sampler-f09-0 >/dev/null 2>&1; fi; echo stopped",
+   "set -u; mkdir -p /srv/yeto/run0/sampler /srv/yeto/run0/logs || exit 3; echo YETO_SSH_ARCH $(uname -m); for f in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc /usr/local/Ascend/driver /usr/local/dcmi /usr/local/bin/npu-smi /usr/local/sbin/npu-smi /etc/ascend_install.info /etc/vnpu.cfg; do [ -e $f ] && echo YETO_SSH_HOSTPATH $f; done; echo YETO_SSH_FREE_GIB $(df -Pk /srv/yeto/run0 | awk 'NR==2{printf \"%d\", $4/1048576}'); echo YETO_SSH_CARDS_BEGIN; npu-smi info 2>&1; echo YETO_SSH_CARDS_END rc=$?",
+   "test -d /srv/yeto/run0/yeto/abc123/yeto && cat >/dev/null || (rm -rf /srv/yeto/run0/yeto/abc123.tmp && mkdir -p /srv/yeto/run0/yeto/abc123.tmp && tar xz -C /srv/yeto/run0/yeto/abc123.tmp && mv /srv/yeto/run0/yeto/abc123.tmp /srv/yeto/run0/yeto/abc123)",
+   "cat /srv/yeto/run0/store/assignments/<TICKET>.json 2>/dev/null || echo YETO_NODE_ABSENT_$?",
+   "mkdir -p \"$(dirname /srv/yeto/run0/store/assignments/<TICKET>.json)\" && cat > /srv/yeto/run0/store/assignments/<TICKET>.json.tmp && mv -f /srv/yeto/run0/store/assignments/<TICKET>.json.tmp /srv/yeto/run0/store/assignments/<TICKET>.json",
+   "umask 077; cat > /srv/yeto/run0/sampler/f09-0.token.tmp && chmod 600 /srv/yeto/run0/sampler/f09-0.token.tmp && mv -f /srv/yeto/run0/sampler/f09-0.token.tmp /srv/yeto/run0/sampler/f09-0.token",
+   "umask 077; cat > /srv/yeto/run0/sampler/f09-0.profile.json.tmp && chmod 644 /srv/yeto/run0/sampler/f09-0.profile.json.tmp && mv -f /srv/yeto/run0/sampler/f09-0.profile.json.tmp /srv/yeto/run0/sampler/f09-0.profile.json",
+   "podman inspect --type image 3a7d901460ab >/dev/null 2>&1 || { podman pull quay.nju.edu.cn/ascend/vllm-ascend@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee >/dev/null && podman inspect --type image 3a7d901460ab >/dev/null 2>&1; } || { echo YETO_SSH_NO_IMAGE 3a7d901460ab; exit 4; } && { podman rm -f yeto-sampler-f09-0 >/dev/null 2>&1; true; } && podman run -d --name yeto-sampler-f09-0 --network host --ipc host --shm-size 16g --security-opt seccomp=unconfined --device /dev/davinci0 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro -v /usr/local/dcmi:/usr/local/dcmi:ro -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro -v /etc/ascend_install.info:/etc/ascend_install.info:ro -v /etc/vnpu.cfg:/etc/vnpu.cfg:ro -v /srv/yeto/run0:/srv/yeto/run0 -e ASCEND_RT_VISIBLE_DEVICES=0 -e PYTHONUNBUFFERED=1 -e YETO_SPOT_RECLAIM_MARKER=/srv/yeto/run0/sampler/f09-0.reclaim --entrypoint bash 3a7d901460ab -c 'export PYTHONPATH=/srv/yeto/run0/yeto/abc123\"${PYTHONPATH:+:$PYTHONPATH}\"; exec python3 -m yeto.node run --assignment <TICKET> --store /srv/yeto/run0/store --token-file /srv/yeto/run0/sampler/f09-0.token --profile /srv/yeto/run0/sampler/f09-0.profile.json --log - --skip-preflight' && echo YETO_SSH_STARTED container=yeto-sampler-f09-0"
+  ]
+ },
+ "runtime_npu": {
+  "heartbeat": {
+   "generation": 1,
+   "host": "<host>",
+   "pid": 0,
+   "sampler": "s0",
+   "stage": "engine",
+   "ticket": "t-h",
+   "time": "<t>",
+   "trainer_wait": false
+  },
+  "plan_env": {
+   "NCCL_IB_HCA": "mlx5_0",
+   "PYTHONPATH": "<T>/work/yeto/abc",
+   "PYTHONUNBUFFERED": "1",
+   "YETO_DEVICE_FAMILY": "npu",
+   "YETO_NODE_GENERATION": "1",
+   "YETO_NODE_PROFILE": "{\"card\": \"910B4\", \"card_arch\": \"ascend910b\", \"cards\": 8, \"container\": \"process\", \"cpu_arch\": \"x86_64\", \"family\": \"ascend\", \"hbm_gib\": 64.0, \"name\": \"box0\", \"reach\": \"direct\"}",
+   "YETO_NODE_SUPERVISED": "1",
+   "YETO_NODE_TICKET": "t-h",
+   "YETO_SPOT_RECLAIM_MARKER": "<T>/work/sampler/s0.reclaim"
+  },
+  "work": [
+   "work/logs",
+   "work/logs/s0.log"
+  ]
+ },
+ "trainer_cuda_off": {
+  "record": {
+   "controller": {
+    "host": "test"
+   },
+   "decision": null,
+   "exit": null,
+   "fixed_roster": true,
+   "handle": {
+    "cluster": "isl",
+    "incarnation": 0
+   },
+   "history": [
+    {
+     "at": "<t>",
+     "from": null,
+     "reason": "launched",
+     "to": "running"
+    }
+   ],
+   "incarnation": 0,
+   "island": 0,
+   "name": "isl",
+   "new_machine_retries": {},
+   "reason": "launched",
+   "relaunches": 0,
+   "role": "trainer",
+   "schema": 1,
+   "since": "<t>",
+   "source": "ssh",
+   "state": "running",
+   "updated": "<t>"
+  },
+  "status_scripts": [
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n0 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n1 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n2 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n0 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n1 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n2 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n"
+  ]
+ },
+ "trainer_npu": {
+  "record": {
+   "controller": {
+    "host": "test"
+   },
+   "decision": null,
+   "exit": null,
+   "fixed_roster": true,
+   "handle": {
+    "cluster": "isl",
+    "incarnation": 0
+   },
+   "history": [
+    {
+     "at": "<t>",
+     "from": null,
+     "reason": "launched",
+     "to": "running"
+    }
+   ],
+   "incarnation": 0,
+   "island": 0,
+   "name": "isl",
+   "new_machine_retries": {},
+   "reason": "launched",
+   "relaunches": 0,
+   "role": "trainer",
+   "schema": 1,
+   "since": "<t>",
+   "source": "ssh",
+   "state": "running",
+   "updated": "<t>"
+  },
+  "status_scripts": [
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n0 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n1 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n2 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n0 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n1 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n",
+   "__yeto_state_home=\"$HOME\"\nrc=\nif [ -f \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/rc\" 2>/dev/null)\nelif pid=$(cat \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0/pgid\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; then s=running\nelif [ -d \"$__yeto_state_home/.yeto/trainer-islands/run1/isl-i0\" ]; then s=lost\nelse s=absent\nfi\nc=$(docker inspect -f '{{.State.Status}}' yeto-run1-isl-i0-n2 2>/dev/null) || c=none\necho \"yeto-node-state state=$s rc=$rc container=${c:-none}\"\n"
+  ]
+ }
+}

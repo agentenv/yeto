@@ -17,7 +17,13 @@ own SSH node, a machine opened by hand), in order:
 
 Each step heartbeats ``nodes/<ticket>/g<generation>/heartbeat.json`` with its stage; the
 sampler then writes ``ready`` at its JOIN and its own heartbeats; this process
-writes ``exit.json`` with the exit code and the reason. A refused step writes
+writes ``exit.json`` with the exit code and the reason.
+
+While the sampler runs, this process checks the node's health every ``health_every_s``
+(:mod:`yeto.hw.node_health`; a device family without a checker: none) and writes the
+newest check to ``<work>/sampler/<shard>.health.json``; the sampler adds it to each
+heartbeat as its ``health`` field. Two bad checks in a row read ``verdict: lost``: the
+control plane takes the node for lost (it does not stop the sampler itself). A refused step writes
 the exit record too (reason ``preflight`` / ``code`` / ``model`` / ``image``),
 so a control plane that only reads the store knows why the node stopped.
 
@@ -32,11 +38,13 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from yeto.hw import node_health
 from yeto.launch.node_inventory import NodeProfile
 
 from . import code as node_code
@@ -83,6 +91,7 @@ class Plan:
     image: str | None = None
     facts: dict[str, Any] = field(default_factory=dict)
     model: dict[str, Any] = field(default_factory=dict)
+    health_host_path: str | None = None  # where the health check is written (None: no check)
 
     def record(self) -> dict[str, Any]:
         return {"argv": self.argv, "env": sorted(self.env), "spec": self.spec_host_path, "log": self.log_host_path,
@@ -95,7 +104,8 @@ class NodeRuntime:
                  heartbeat_s: float | None = None, run: Callable[..., Any] = subprocess.run,
                  popen: Callable[..., Any] = subprocess.Popen, log: Callable[[str], None] | None = None,
                  skip_preflight: bool = False, sampler_log: str | None = None,
-                 child_pid_file: str | None = None) -> None:
+                 child_pid_file: str | None = None, health_every_s: float | None = None,
+                 health_run: Callable[[str], str] | None = None) -> None:
         self.objects, self.assignment, self.profile = objects, assignment, profile
         self.store_uri, self.env_file, self.heartbeat_s = store_uri, env_file, heartbeat_s
         self.environ = dict(os.environ if environ is None else environ)
@@ -108,6 +118,23 @@ class NodeRuntime:
                                      base={"sampler": assignment.shard, "source": assignment.source})
         self.child: Any = None
         self._stopping = False
+        # the node's health while the sampler runs (yeto.hw.node_health): a sampler is a
+        # single-node job (its GPUs count; the ports of NCCL_IB_HCA are noted only)
+        env = {**dict(profile.env), **dict(assignment.env)}
+        self.health_every_s = node_health.HEALTH_EVERY_S if health_every_s is None else float(health_every_s)
+        if getattr(profile, "node_health", None) == "off":  # the inventory turned it off for this node
+            self.health_every_s = 0.0
+        self.health = node_health.HealthWatch(profile.device_family, hcas=node_health.hcas_of(env.get("NCCL_IB_HCA")),
+                                              every_s=self.health_every_s or node_health.HEALTH_EVERY_S)
+        self.health_run = health_run or node_health.run_local
+        self._health_stop = threading.Event()
+        self._health_thread: threading.Thread | None = None
+
+    @property
+    def health_on(self) -> bool:
+        """The device family has a health checker and the check is not turned off (``--health-every-s 0``,
+        or the profile's ``node_health: off``)."""
+        return self.health.enabled and self.health_every_s > 0
 
     # -- steps
     def _stage(self, stage: str, **fields: Any) -> None:
@@ -170,7 +197,7 @@ class NodeRuntime:
         host_paths = (facts or {}).get("host_paths")
         env = node_launch.sampler_env(a, p, yeto_dir=sampler_yeto, store_uri=self.store_uri or a.store_uri,
                                       environ={**self.environ, **self.secrets}, heartbeat_s=self.heartbeat_s,
-                                      host_paths=host_paths)
+                                      host_paths=host_paths, health=self.health_on)
         if is_container(p):
             assert image is not None
             argv = node_launch.container_argv(p, name=node_launch.container_name(a.shard), image=image, env=env,
@@ -181,7 +208,8 @@ class NodeRuntime:
             argv = node_launch.process_argv(python or sys.executable, paths["spec"])
         return Plan(argv=argv, env=env, spec_host_path=node_paths.host_path(paths["spec"], p),
                     log_host_path=node_paths.host_path(paths["log"], p), yeto_dir=yeto_dir, spec=spec, image=image,
-                    facts=dict(facts or {}))
+                    facts=dict(facts or {}),
+                    health_host_path=node_paths.host_path(paths["health"], p) if self.health_on else None)
 
     def write_spec(self, plan: Plan) -> None:
         p, spec = self.profile, plan.spec
@@ -208,6 +236,54 @@ class NodeRuntime:
         plan.model = model
         self.write_spec(plan)
         return plan
+
+    # -- the node's health
+    def check_health(self, path: str) -> node_health.Reading:
+        """One health check: its reading, written to ``path`` (atomically) for the sampler's heartbeat."""
+        try:
+            text = self.health_run(self.health.script())
+        except Exception:  # noqa: BLE001 - a check that could not run is a read failure
+            text = ""
+        reading = self.health.observe(text)
+        doc = {"ticket": self.assignment.ticket, "generation": self.assignment.generation, **(self.health.record() or {})}
+        try:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(target.name + ".tmp")
+            tmp.write_text(json.dumps(doc, sort_keys=True) + "\n")
+            tmp.replace(target)
+        except OSError as error:  # observation only: the sampler runs on
+            self.log(f"{self.assignment.ticket}: health record not written: {error}")
+        if reading.degraded:
+            self.log(f"{self.assignment.ticket}: {node_health.EVENT_DEGRADED}: {'; '.join(reading.degraded)}")
+        if reading.event is not None:
+            self.log(f"{self.assignment.ticket}: {reading.event}: {reading.verdict} "
+                     f"{'; '.join(reading.result.reasons) or '-'}")
+        return reading
+
+    def _health_loop(self, path: str) -> None:
+        while True:
+            self.check_health(path)
+            if self._health_stop.wait(self.health_every_s):
+                return
+
+    def _start_health(self, plan: Plan) -> None:
+        if plan.health_host_path is None:
+            return
+        try:  # a check of an earlier start of this shard must not pass for this one's
+            Path(plan.health_host_path).unlink()
+        except OSError:
+            pass
+        self._health_stop.clear()
+        self._health_thread = threading.Thread(target=self._health_loop, args=(plan.health_host_path,),
+                                               name="yeto-node-health", daemon=True)
+        self._health_thread.start()
+
+    def _stop_health(self) -> None:
+        self._health_stop.set()
+        if self._health_thread is not None:
+            self._health_thread.join(timeout=5.0)
+            self._health_thread = None
 
     # -- the sampler
     def _forward(self, signum: int, _frame: Any) -> None:
@@ -239,6 +315,7 @@ class NodeRuntime:
             except ValueError:  # not the main thread (tests): no forwarding
                 pass
         out = None
+        self._start_health(plan)
         try:
             if log is not None:
                 out = log.open("ab")
@@ -249,6 +326,7 @@ class NodeRuntime:
                 Path(self.child_pid_file).write_text(f"{self.child.pid}\n")
             code = self.child.wait()
         finally:
+            self._stop_health()
             if out is not None:
                 out.close()
             for sig, old in handlers.items():
@@ -347,7 +425,8 @@ def run_cli(args: Any, *, environ: Mapping[str, str] | None = None, run: Callabl
     profile = profile_from_doc({**dict(assignment.profile or {}), **override})
     runtime = NodeRuntime(objects, assignment, profile, store_uri=store if "://" in store else None, environ=env,
                           env_file=args.env_file, heartbeat_s=args.heartbeat_s, run=run, popen=popen,
-                          skip_preflight=args.skip_preflight, sampler_log=args.log, child_pid_file=args.child_pid_file)
+                          skip_preflight=args.skip_preflight, sampler_log=args.log, child_pid_file=args.child_pid_file,
+                          health_every_s=getattr(args, "health_every_s", None))
     return runtime.main(dry_run=args.dry_run)
 
 
@@ -366,5 +445,8 @@ def add_run_args(parser: Any) -> None:
     parser.add_argument("--log", help="the sampler's log file ('-': this process's stdout; default "
                                       "<work>/logs/<shard>.log)")
     parser.add_argument("--child-pid-file", help="write the sampler process's PID here")
+    parser.add_argument("--health-every-s", type=float, default=None,
+                        help=f"the node health check's period while the sampler runs (default "
+                             f"{node_health.HEALTH_EVERY_S:g}; 0: no check; a device family without a checker: none)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan; run nothing")
 
