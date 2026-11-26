@@ -6,6 +6,7 @@ events leave the island's lifecycle state alone."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -80,7 +81,9 @@ def test_the_trainer_card_draws_a_straggler_badge_until_cleared(tmp_path):
     assert "straggler" in flagged["texts"]  # the topology's trainer card
     # Islands now: trainer 1's row says straggler in warn colour in place of "ok", once
     assert flagged["nodes"].count('<span class="wn">straggler</span>') == 1
-    assert "ok · straggler" not in flagged["nodes"] and "straggler" not in flagged["matrix"]  # not in Fragments
+    shown = re.sub(r"<[^>]+>", "", flagged["nodes"])  # the row's visible text
+    assert "H100 × 2 · straggler" in shown and "ok · straggler" not in shown
+    assert "straggler" not in flagged["matrix"]  # not in the Fragments rows
     for r in (_reducer(), _reducer(_flagged(), _cleared())):
         out = _smoke(tmp_path / str(len(r.fleet_records)), r)
         assert "straggler" not in out["texts"] and "straggler" not in out["nodes"]
