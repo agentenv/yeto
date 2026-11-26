@@ -78,6 +78,10 @@ def test_without_devices_the_tensor_parallel_size_is_held_to_the_node_cards():
 
 
 def test_the_adapter_default_tensor_parallel_size_is_checked():
+    from yeto.rl.adapters.sampler_engines.sglang_server import SGLangOptions
+    from yeto.rl.adapters.sampler_engines.vllm_server import VllmOptions
+
+    assert sp.ADAPTER_DEFAULT_TP == {"vllm-server": VllmOptions().tp, "sglang-server": SGLangOptions().tp}
     assert sp.spec_tp({"engine": {"adapter": "vllm-server"}}) == 4
     assert sp.spec_tp({"engine": {"adapter": "sglang-server"}}) == 8
     assert sp.spec_tp({"engine": {"adapter": "fake"}}) is None

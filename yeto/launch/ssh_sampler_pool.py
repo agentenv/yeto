@@ -1891,6 +1891,11 @@ def spec_node_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
     return out
 
 
+# the adapters' own ``tp`` defaults (VllmOptions, SGLangOptions; the launch layer imports no
+# adapter: tests/test_ssh_pool_checks.py holds the two equal)
+ADAPTER_DEFAULT_TP = {"vllm-server": 4, "sglang-server": 8}
+
+
 def spec_tp(spec: Mapping[str, Any]) -> int | None:
     """The cards one sampler server spans: ``engine.options.tp``, else the adapter's
     default (vllm-server, sglang-server); None for another adapter or a value that is
@@ -1899,14 +1904,9 @@ def spec_tp(spec: Mapping[str, Any]) -> int | None:
     options = engine.get("options") if isinstance(engine.get("options"), Mapping) else {}
     tp = options.get("tp")
     if tp is None:
-        adapter = engine.get("adapter")
-        if adapter == "vllm-server":
-            from yeto.rl.adapters.sampler_engines.vllm_server import VllmOptions as defaults  # noqa: PLC0415
-        elif adapter == "sglang-server":
-            from yeto.rl.adapters.sampler_engines.sglang_server import SGLangOptions as defaults  # noqa: PLC0415
-        else:
+        tp = ADAPTER_DEFAULT_TP.get(str(engine.get("adapter")))
+        if tp is None:
             return None
-        tp = defaults.tp
     if isinstance(tp, bool) or not isinstance(tp, int) or tp < 1:
         return None
     return tp
