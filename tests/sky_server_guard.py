@@ -18,9 +18,17 @@ imported:
 * :func:`install`: in this process, sky's auto-start functions raise
   :class:`SkyServerStartRefused`, and sky's endpoint resolves to the refusing one when a
   test removed the variable (instead of the local server's default port);
-* every child process (``subprocess.Popen``, so also ``subprocess.run`` and asyncio's
-  subprocesses) gets the two variables, also when the test or the code under test
-  removed them from ``os.environ`` or passed an ``env`` without them.
+* every child process started through ``subprocess.Popen`` (so also ``subprocess.run``,
+  ``check_output`` and asyncio's subprocesses, which use it) gets the two variables, also
+  when the test or the code under test removed them from ``os.environ`` or passed an
+  ``env`` without them. A child whose environment names another endpoint is refused
+  (:class:`SkyServerEndpointConflict`) unless the test carries
+  ``@pytest.mark.allow_sky_endpoint``: then that endpoint is kept (local starts stay off).
+
+Only ``subprocess.Popen`` is intercepted. ``os.system``, ``os.exec*``, ``os.spawn*``,
+``os.posix_spawn`` and ``multiprocessing`` children inherit ``os.environ`` (the conftest
+fixture sets both variables for every test) but are not checked: a test that removes the
+variables and starts sky that way is not caught.
 
 Tests of code that talks to sky use a fake ``sky`` module or a fake ``server_common``.
 """
@@ -40,6 +48,8 @@ ENV = {
     "SKYPILOT_API_SERVER_ENDPOINT": ENDPOINT,
     "SKYPILOT_DISABLE_LOCAL_API_SERVER": "1",
 }
+ENDPOINT_ENV = "SKYPILOT_API_SERVER_ENDPOINT"
+MARKER = "allow_sky_endpoint"
 COMMON = "sky.server.common"
 GUARDED = ("check_server_healthy_or_start_fn", "_start_api_server")
 HINT = ("a test tried to reach or start a sky API server (sky.server.common.{name}); unit tests "
@@ -51,6 +61,18 @@ class SkyServerStartRefused(RuntimeError):
     """A test reached sky's API server auto-start."""
 
 
+class SkyServerEndpointConflict(RuntimeError):
+    """A child process would get another sky endpoint than the guard's."""
+
+
+# Set per test by conftest's _no_sky_api_server: the test carries the allow_sky_endpoint marker.
+_allow = {"endpoint": False}
+
+
+def allow_endpoint(allowed: bool) -> None:
+    _allow["endpoint"] = bool(allowed)
+
+
 def isolate() -> None:
     """Point this process (and every child that inherits its environment) away from
     any sky API server of this machine."""
@@ -59,11 +81,22 @@ def isolate() -> None:
 
 def child_env(env):
     """``env`` for a child process with the guard variables in it (None: this process's
-    environment)."""
+    environment). An endpoint other than the guard's (given in ``env``, or set in
+    ``os.environ`` by the test) raises :class:`SkyServerEndpointConflict`, unless the test
+    allowed it (``@pytest.mark.allow_sky_endpoint``): then it is kept."""
     base = os.environ if env is None else env
-    if all(base.get(name) == value for name, value in ENV.items()):
+    want = dict(ENV)
+    endpoint = base.get(ENDPOINT_ENV)
+    if endpoint and endpoint != ENDPOINT:
+        if not _allow["endpoint"]:
+            raise SkyServerEndpointConflict(
+                f"a child process was given {ENDPOINT_ENV}={endpoint!r}, not the test guard's "
+                f"{ENDPOINT!r}: unit tests reach no sky API server. Mark the test "
+                f"@pytest.mark.{MARKER} to pass it through (tests/sky_server_guard.py)")
+        want[ENDPOINT_ENV] = endpoint
+    if all(base.get(name) == value for name, value in want.items()):
         return env
-    return {**base, **ENV}
+    return {**base, **want}
 
 
 def _refusing(name: str):
@@ -96,7 +129,7 @@ def patch_common(module) -> None:
 
 
 def is_patched(module) -> bool:
-    return all(getattr(getattr(module, name, None), "yeto_sky_server_guard", True)
+    return all(getattr(getattr(module, name, None), "yeto_sky_server_guard", False)
                for name in (*GUARDED, "get_server_url"))
 
 

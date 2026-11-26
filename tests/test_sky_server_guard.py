@@ -31,11 +31,38 @@ def test_every_test_runs_against_the_refusing_endpoint():
         assert os.environ[name] == value
 
 
+# A pair, in this order: the first removes the variables from os.environ directly (as code
+# under test does, past monkeypatch); the second sees conftest's autouse fixture set them again.
+def test_a_test_that_deletes_the_variables_directly_1_deletes():
+    for name in guard.ENV:
+        del os.environ[name]
+    assert not any(name in os.environ for name in guard.ENV)
+
+
+def test_a_test_that_deletes_the_variables_directly_2_the_next_test_has_them_again():
+    for name, value in guard.ENV.items():
+        assert os.environ.get(name) == value
+
+
+def test_an_unpatched_module_does_not_read_as_patched():
+    import types
+
+    plain = types.SimpleNamespace(**{name: (lambda: None) for name in (*guard.GUARDED, "get_server_url")})
+    assert not guard.is_patched(plain)
+    assert not guard.is_patched(types.SimpleNamespace())  # sky without these functions: not patched either
+    guard.patch_common(plain)
+    assert guard.is_patched(plain) and plain.get_server_url is guard._server_url
+
+
 def test_an_auto_start_in_this_process_raises_a_clear_error(monkeypatch):
     pytest.importorskip("sky")
     from sky.server import common
 
-    assert guard.is_patched(common), "the guard did not patch sky.server.common; nothing below may run"
+    # every function is the guard's before any is called: an unpatched one would dial a server
+    for name in guard.GUARDED:
+        assert getattr(getattr(common, name), "yeto_sky_server_guard", False), f"sky.server.common.{name} unpatched"
+    assert common.get_server_url is guard._server_url, "sky.server.common.get_server_url unpatched"
+    assert guard.is_patched(common)
     _drop_guard_env(monkeypatch)
     for call in (common.check_server_healthy_or_start_fn, common._start_api_server):
         with pytest.raises(guard.SkyServerStartRefused, match="unit tests never start one"):
@@ -48,6 +75,35 @@ def test_an_auto_start_in_this_process_raises_a_clear_error(monkeypatch):
     # without the variable sky's endpoint is still the refusing one, never the local default
     assert common.get_server_url() == guard.ENDPOINT
     assert not common.is_api_server_local(common.get_server_url())
+
+
+def _child_endpoint(env=None):
+    code = f"import os; print(os.environ.get({guard.ENDPOINT_ENV!r}), os.environ.get('SKYPILOT_DISABLE_LOCAL_API_SERVER'))"
+    return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
+                          timeout=60).stdout.split()
+
+
+def test_a_child_given_another_endpoint_is_refused(monkeypatch):
+    env = dict(os.environ, **{guard.ENDPOINT_ENV: "https://sky.example.com"})
+    with pytest.raises(guard.SkyServerEndpointConflict, match="allow_sky_endpoint"):
+        _child_endpoint(env)
+    monkeypatch.setenv(guard.ENDPOINT_ENV, "https://sky.example.com")  # set in this process: the same
+    with pytest.raises(guard.SkyServerEndpointConflict, match="https://sky.example.com"):
+        _child_endpoint()
+    monkeypatch.setenv(guard.ENDPOINT_ENV, "")  # empty: unset, the guard's endpoint is filled in
+    assert _child_endpoint() == [guard.ENDPOINT, "1"]
+
+
+@pytest.mark.allow_sky_endpoint
+def test_a_marked_test_passes_its_own_endpoint_to_a_child():
+    env = {k: v for k, v in os.environ.items() if k != "SKYPILOT_DISABLE_LOCAL_API_SERVER"}
+    env[guard.ENDPOINT_ENV] = "https://sky.example.com"
+    assert _child_endpoint(env) == ["https://sky.example.com", "1"]  # local starts stay off
+
+
+def test_the_marker_does_not_outlive_its_test():
+    with pytest.raises(guard.SkyServerEndpointConflict):
+        _child_endpoint(dict(os.environ, **{guard.ENDPOINT_ENV: "https://sky.example.com"}))
 
 
 def test_a_child_without_the_variables_still_gets_them_and_starts_no_server(monkeypatch, tmp_path):

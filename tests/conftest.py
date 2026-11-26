@@ -49,6 +49,11 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
+        f"{_sky_server_guard.MARKER}: a child process of the test may get its own SKYPILOT_API_SERVER_ENDPOINT "
+        "(tests/sky_server_guard.py; local sky API server starts stay refused)",
+    )
+    config.addinivalue_line(
+        "markers",
         "ray_local: test starts Ray on this machine (gcs_server/raylet/ray.init); "
         "not collected unless --run-ray-local is given",
     )
@@ -267,16 +272,20 @@ def _no_sky_server_version_check(monkeypatch):
 
 
 @_pytest.fixture(autouse=True)
-def _no_sky_api_server(monkeypatch):
+def _no_sky_api_server(request, monkeypatch):
     """A sky client that finds no server at a local endpoint starts one, which outlives
     the session on this machine's sky port. Every test starts with the refusing endpoint
     and sky's own local-start switch off (also after a test that wrote os.environ
     directly), sky's auto-start raising in this process, and every child process given
     both variables (tests/sky_server_guard.py). Tests of code that talks to sky use a
-    fake sky or server_common."""
+    fake sky or server_common; a test whose child must get another endpoint carries
+    @pytest.mark.allow_sky_endpoint."""
     for name, value in _sky_server_guard.ENV.items():
         monkeypatch.setenv(name, value)
     _sky_server_guard.install()
+    _sky_server_guard.allow_endpoint(request.node.get_closest_marker(_sky_server_guard.MARKER) is not None)
+    yield
+    _sky_server_guard.allow_endpoint(False)
 
 
 @_pytest.fixture(autouse=True)
