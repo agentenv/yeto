@@ -197,7 +197,10 @@ def test_an_own_sampler_pool_bills_nothing_and_runs_on_the_node_runtime(kit, cap
     cfg = _cfg(kit, "run.own-sampler-pool.json")
     (pool,) = cfg["samplers"]
     assert pool["provider"]["kind"] == "ssh" and len(pool["provider"]["nodes"]) == pool["target"] + 1  # one spare
-    assert pool["provider"]["node_runtime"] is True
+    from yeto.launch import ssh_sampler_pool
+
+    assert "node_runtime" not in pool["provider"] and "node_runtime" not in pool  # the ssh pool's default:
+    assert ssh_sampler_pool.parse_config(pool).node_runtime is True
     rc, out = _dry_run(kit, "run.own-sampler-pool.json", capsys)
     assert rc == 0, out[-3000:]
     assert ("dry run: spend estimate $8.00/h = pools $0.00/h (own-h100 (ssh) 2 x $0) + trainer $8/h; "

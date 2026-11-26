@@ -119,10 +119,11 @@ sampler per node, and orders nothing.
 yeto run up --config run.own-sampler-pool.json --dry-run
 ```
 
-- **Node runtime.** With `"node_runtime": true` the node runs
-  `python -m yeto.node run` (docs/NODE_RUNTIME.md), which starts the sampler:
-  its ready record, heartbeats and exit go to the run store, as on every other
-  source. `"node_runtime": false` keeps the pool's own sampler start.
+- **Node runtime.** An ssh pool runs on the node runtime by default: the
+  node runs `python -m yeto.node run` (docs/NODE_RUNTIME.md), which starts the
+  sampler; its ready record, heartbeats and exit go to the run store, as on
+  every other source. `"node_runtime": false` in the pool's `provider` keeps
+  the pool's own sampler start.
 - **Spares.** List more nodes than `target`: the template has three nodes for
   two samplers. When a node is lost under its sampler, the pool fences its
   shard and continues it on the spare; the lost node's slot is held for
