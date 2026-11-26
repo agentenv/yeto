@@ -277,24 +277,45 @@ One shell call reads, in this order:
 | GPUs | `nvidia-smi --query-gpu=index,pci.bus_id,name,memory.total,ecc.errors.uncorrected.volatile.total` | no GPU at all, fewer GPUs answer than the inventory's `cards_per_node` (a sampler: than the first check saw), a GPU nvidia-smi cannot open, a GPU's memory shrank, or nvidia-smi cannot talk to the driver |
 | ECC | the same query | the volatile uncorrectable ECC count grew since the previous check (a count that went down is the new baseline) |
 | NVLink fabric | the `Fabric` blocks of `nvidia-smi -q` | a GPU that has a fabric state is not `Completed/Success` (a PCIe card's `N/A` passes) |
-| fabric manager | `systemctl is-active nvidia-fabricmanager`, with the boot id | it was active in this boot and is now anything else (`inactive`, `failed`, `activating`, `deactivating`), at every check until it is active again; see below |
+| fabric manager | `systemctl is-active nvidia-fabricmanager` and its `NRestarts`, the node's NVSwitch devices, the boot id | it must run (it was active in this boot, or the node has NVSwitch at the first check) and is not `active`, or it restarted since the previous check; see below |
 | IB / RoCE ports | `ibstat` (`ibv_devinfo -v` only when ibstat fails) | a port named by `NCCL_IB_HCA` is missing, not `Active`, or slower than at the first check |
 
 The XIDs and the ECC count only count from the second check on. What the kernel log
 holds at the first check is history: the preflight judged the node then.
 
-The fabric manager is remembered per boot. Once it was active in a boot, every later
-check of that boot that does not read `active` is bad, so a fabric manager that stays
-down makes the node `lost` after two checks, even while the fabric still reads
-`Completed`. A new boot id forgets it: a fabric manager never active since the reboot
-is judged as before (one bad check when it was active before the reboot, then the
-fabric state judges the node). The memory lives in the checker, not on disk. The first
-check of a new launcher, which has no memory, judges a node with an NVLink fabric on
-its own: `failed`, `activating` or `deactivating` is bad at once. `inactive` there is
-left to the fabric state, because it is also what a node without the unit prints (a
-compute tray whose fabric is managed elsewhere). A node without NVSwitch (no fabric,
-or `N/A`) is never judged on a fabric manager that was never active. A systemctl that
-timed out says nothing. Without a boot id, a stop is bad once, as before.
+The fabric manager is judged by whether the node must run it, and that is remembered
+per boot (the boot id of the XID section):
+
+- Once it was active in a boot, every later check of that boot that does not read
+  `active` (`inactive`, `failed`, `activating`, `deactivating`) is bad, until it is
+  active again. A fabric manager that stays down makes the node `lost` after two
+  checks, even while the fabric still reads `Completed`.
+- The first check of a new launcher has no memory (it lives in the checker, not on
+  disk). It judges the node by its NVSwitch devices: a device file
+  `/dev/nvidia-nvswitch<N>`, or else an NVIDIA PCI bridge (class `0680`) in `lspci`.
+  With NVSwitch, any state but `active` is bad at once, and that boot is remembered.
+  A check where the state or the NVSwitch probe did not read (no device file and no
+  `lspci`, a section that timed out, nvidia-smi not answering) judges nothing and is
+  not counted as the first one. The same rule, on one check alone, is
+  `yeto.hw.node_health.fabric_manager_absolute`.
+- A node without NVSwitch is not judged on a fabric manager that was never active in
+  the boot: a PCIe node, or an NVL72-class compute tray, whose fabric reads `Completed`
+  while its NVSwitches sit in the switch trays. Such a tray may still have the unit
+  installed and `failed`. A fabric that is not `Completed` makes the node bad by its
+  own reason.
+- On a node that must run it, an `NRestarts` that grew since the previous check of the
+  same boot is bad for that check. A unit in a restart loop can read `active` at every
+  check; a loop that goes on makes the node `lost`. Restarts by hand do not count
+  (systemd counts only its own automatic restarts).
+- A new boot id forgets all of it. A fabric manager never active since the reboot is
+  judged as before: one bad check when it was active before the reboot (on a node with
+  NVSwitch), then the fabric state judges the node. A fabric manager that does not
+  start leaves the NVSwitch fabric unfinished on an HGX node.
+- A systemctl that timed out says nothing. Without a boot id, a stop is bad once.
+
+Not yet confirmed on hardware: that an HGX B300 node shows its NVSwitches as device
+files or PCI bridges, and that a GB300 compute tray shows none. If an HGX node shows
+neither, its fabric manager is judged only after it was active in the boot.
 
 A kernel log without timestamps (dmesg's default has them) is followed by its last
 line, how often that line ends the log, and the line before it, so lines that rotate
