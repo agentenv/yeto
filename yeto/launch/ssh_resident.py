@@ -326,6 +326,7 @@ class SshIslandOps:
         lost = self._quarantined_ranks(rec)  # spare nodes: a node lost earlier (empty without spares)
         self._claim_nodes(rec, skip=lost)
         self._keep_quarantined_leases(rec)
+        self._release_stale_leases(rec)
         jobs = read_jobs(self.jobs_path(name))
         if not jobs and not lost:
             return self._launch(rec, 0)
@@ -427,14 +428,19 @@ class SshIslandOps:
 
     def _hold_current_leases(self, rec: _Island) -> None:
         """A reattach with node leases: the island's current nodes (a spare among them) are
-        this run's (``_hold_leases``: another run's lease refuses it), and a node the run's
-        lease record still named for the island but that it no longer runs on (a lost node,
-        released) is given back, unless it is quarantined (its lease stays kept until
-        release-node) or another island of the run holds it."""
+        this run's (``_hold_leases``: another run's lease refuses it)."""
+        if rec.spec.leases is not None:
+            rec.islands._hold_leases()  # noqa: SLF001 - the island's own lease step
+
+    def _release_stale_leases(self, rec: _Island) -> None:
+        """Every start (a first launch, a start without a quarantined node, a reattach): a
+        node the leases picked for the island but that it no longer runs on (a lost node,
+        released, named by an older lease record) is given back, unless it is quarantined
+        (its lease stays kept until release-node) or another island of the run holds it
+        (its claim, or its own pick); the record then names the island's nodes."""
         leases = rec.spec.leases
         if leases is None:
             return
-        rec.islands._hold_leases()  # noqa: SLF001 - the island's own lease step
         sp = rec.spares
         picks = getattr(leases, "picks", None)
         if sp is None or not isinstance(picks, dict):
@@ -463,10 +469,11 @@ class SshIslandOps:
         picks = getattr(leases, "picks", None)
         if isinstance(picks, dict):
             old = set(picks.get(rec.name, ()))
+            others = {n for k, v in picks.items() if k != rec.name for n in v}
             picks[rec.name] = names
             assigned = getattr(leases, "assigned", None)
-            if isinstance(assigned, set):
-                assigned -= old - set(names)
+            if isinstance(assigned, set):  # this island's old nodes only; another island's stay assigned
+                assigned -= old - set(names) - others
                 assigned |= set(names)
         from .ssh_trainer_island import record_island_nodes  # noqa: PLC0415
 
@@ -570,6 +577,7 @@ class SshIslandOps:
         if rec.incarnation is None:  # never started: nothing runs on its nodes
             rec.islands.release_leases()
             return True
+        self._join_owed_retries(rec)
         with self._lock:
             # a lost node is not waited for: it owes its stop (its own ledger row, release-node)
             ok = self._release(rec, rec.incarnation, skip=self._lost_names(rec))
@@ -587,6 +595,7 @@ class SshIslandOps:
         """The launcher stops supervising (its end, ``--keep`` included): end its
         streams and give up the locks; the nodes are not touched."""
         for rec in self.islands.values():
+            self._join_owed_retries(rec)
             if rec.job is not None:
                 for proc in rec.job.procs:
                     if proc.poll() is None:
@@ -840,29 +849,52 @@ class SshIslandOps:
     def _stop_lost(self, rec: _Island, rank: int, node: Any, inc: int) -> None:
         """The background stop of a lost node that still answers (no ops lock): confirmed,
         it owes nothing (its quarantine record and ledger row say so); else it stays owed."""
+        container = container_name(rec.spec.run_id, rec.name, inc, rank) if rec.spec.docker else None
+        self._run_owed_stop(rec, node, inc, container, what="lost node")
+
+    def _still_owed(self, rec: _Island, node: Any, inc: int) -> bool:
+        """The node's quarantine record (read now) still lists its stop of ``inc`` (a
+        release-node may have run it, and removed the record, since)."""
+        doc = rec.spares.records.own_quarantine(node.name)
+        return any(str(o.get("island")) == rec.name and int(o.get("incarnation", -1)) == int(inc)
+                   for o in (doc or {}).get("owed") or ())
+
+    def _run_owed_stop(self, rec: _Island, node: Any, inc: int, container: str | None, *, what: str) -> bool:
+        """One owed stop of ``node`` (no ops lock); True once it went through. The record is
+        read again before the stop (nothing to do once it is gone); a confirmed stop is
+        settled (:meth:`~.island_spares.NodeRecords.settle`, a marker, never the record
+        itself) and its owed ledger row closed, even when the marker cannot be written."""
+        from . import island_spares as isp  # noqa: PLC0415
         from . import ssh_trainer_ledger  # noqa: PLC0415
-        from .ssh_trainer_island import kill_script  # noqa: PLC0415
 
         sp = rec.spares
-        script = kill_script(remote_paths(rec.spec.run_id, rec.name, inc), self.kill_grace_s,
-                             container=container_name(rec.spec.run_id, rec.name, inc, rank) if rec.spec.docker else None)
+        try:
+            if not self._still_owed(rec, node, inc):
+                return False
+        except Exception as error:  # noqa: BLE001 - not read: tried at the next check
+            self.log(f"[launcher] {rec.name}: the quarantine record of {node.name} not read ({error})")
+            return False
+        script = isp.owed_kill_script(rec.spec.run_id, rec.name, inc, self.kill_grace_s, container)
         try:
             done = self.ops.run(node, script, timeout=self.kill_grace_s + 60.0)
         except Exception as error:  # noqa: BLE001 - owed in its quarantine record
-            self.log(f"[launcher] {rec.name}: stop of lost node {node.name} failed ({error}); it stays owed")
-            return
+            self.log(f"[launcher] {rec.name}: stop of {what} {node.name} failed ({error}); it stays owed")
+            return False
         if done.returncode != 0:
-            self.log(f"[launcher] {rec.name}: stop of lost node {node.name} ended rc {done.returncode}; it stays owed")
-            return
+            self.log(f"[launcher] {rec.name}: stop of {what} {node.name} ended rc {done.returncode}; it stays owed")
+            return False
         with sp.owed_lock:  # the release that records owed stops reads this under the same lock
-            sp.stopped.add((node.name, int(inc)))  # the release owes it no row, even if the record below fails
+            sp.stopped.add((node.name, int(inc)))  # the release owes it no row, even if the marker below fails
             try:
                 sp.records.settle(node.name, run_id=self.run_id, island=rec.name, incarnation=inc)
             except Exception as error:  # noqa: BLE001 - its record still lists the stop (release-node runs it again)
-                self.log(f"[launcher] WARN: {rec.name}: the quarantine record of {node.name} not updated ({error})")
-            ssh_trainer_ledger.release_owed(run_id=rec.spec.run_id, island=rec.name, incarnation=inc, node=node.name)
-        self.log(f"[launcher] {rec.name}: lost node {node.name} confirmed its stop of incarnation {inc}; it owes "
-                 "nothing (it stays quarantined)")
+                self.log(f"[launcher] WARN: {rec.name}: the stop of {node.name} is not marked settled ({error})")
+            finally:
+                ssh_trainer_ledger.release_owed(run_id=rec.spec.run_id, island=rec.name, incarnation=inc,
+                                                node=node.name)
+        self.log(f"[launcher] {rec.name}: {what} {node.name} confirmed its stop of incarnation {inc}; it owes "
+                 "nothing for it (it stays quarantined)")
+        return True
 
     def _retry_owed_stops(self, rec: _Island) -> None:
         """At each check of a waiting island: every node this island quarantined that still
@@ -883,29 +915,25 @@ class SshIslandOps:
             thread.start()
 
     def _stop_owed(self, rec: _Island, node: Any, rows: list[dict[str, Any]]) -> None:
-        """The owed stops of ``rows`` on ``node`` (:meth:`_retry_owed_stops`). A release-node
-        running at the same moment may see its record written back (owing nothing): the node
-        then stays quarantined, and a second release-node gives it back."""
-        from . import ssh_trainer_ledger  # noqa: PLC0415
-        from .ssh_trainer_island import kill_script  # noqa: PLC0415
-
-        sp = rec.spares
+        """The owed stops of ``rows`` on ``node`` (:meth:`_retry_owed_stops`), each only while
+        the node's record still lists it."""
         for row in rows:
-            inc = int(row["incarnation"])
-            script = kill_script(remote_paths(self.run_id, rec.name, inc), self.kill_grace_s,
-                                 container=row.get("container") or None)
-            try:
-                done = self.ops.run(node, script, timeout=self.kill_grace_s + 60.0)
-            except Exception:  # noqa: BLE001 - still owed; tried again at the next check
+            if not self._run_owed_stop(rec, node, int(row["incarnation"]), row.get("container") or None,
+                                       what="quarantined node"):
                 return
-            if done.returncode != 0:
-                return
-            with sp.owed_lock:
-                sp.stopped.add((node.name, inc))
-                sp.records.settle(node.name, run_id=self.run_id, island=rec.name, incarnation=inc)
-                ssh_trainer_ledger.release_owed(run_id=self.run_id, island=rec.name, incarnation=inc, node=node.name)
-            self.log(f"[launcher] {rec.name}: node {node.name} answers again; its owed stop of incarnation {inc} "
-                     "went through (it stays quarantined)")
+
+    def _join_owed_retries(self, rec: _Island, timeout: float = 5.0) -> None:
+        """The island goes down or the launcher closes: its owed-stop retries get a short
+        while to finish; finished threads are dropped."""
+        sp = rec.spares
+        if sp is None:
+            return
+        end = time.monotonic() + timeout
+        for name, thread in list(rec.owed_retries.items()):
+            thread.join(max(0.0, end - time.monotonic()))
+            if not thread.is_alive():
+                rec.owed_retries.pop(name, None)
+        sp.stop_threads[:] = [t for t in sp.stop_threads if t.is_alive()]
 
     def _probe_silent(self, rec: _Island) -> list[int]:
         """Ranks whose stop the release did not confirm, or whose stream ended when the island
@@ -1079,6 +1107,7 @@ class SshIslandOps:
             rec.rank_gen[rank] = rec.rank_gen.get(rank, 0) + 1
         rec.spec, rec.islands = new_spec, self._islands_for(rec, new_spec)
         rec.health = self._health_watches(new_spec)  # one watch per rank of the new node set
+        self._record_nodes(rec)  # before any start: a launcher gone meanwhile leases the spare, not the lost node
         try:
             job_id = self._launch(rec, nxt)  # every node's preflight first: the spare's image, cards, scratch
         except Exception as error:  # noqa: BLE001 - back to the old nodes; checked again after the backoff
@@ -1091,11 +1120,11 @@ class SshIslandOps:
                 if node.name in str(error):
                     sp.records.quarantine(node.name, island=rec.name, reason=f"its start as a spare failed: {error}")
             rec.spec, rec.islands, rec.health = old_spec, old_islands, old_health
+            self._record_nodes(rec)  # back to the nodes it runs on
             sp.nodes.pop(str(nxt), None)
             sp.save()
             sp.wait(now, f"the start on the spare node(s) failed: {error}", wall=wall)
             return None
-        self._record_nodes(rec)  # a restarted launcher leases the spare, not the lost node
         resume = sp.resume_probe() if sp.resume_probe is not None else None
         step = None if resume is None else resume.get("step")
         for rank, node in sorted(picks.items()):

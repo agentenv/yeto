@@ -745,6 +745,10 @@ def _write_files(files: Sequence[tuple[int, str, str]], paths: Mapping[str, str]
     return out
 
 
+# In an incarnation's state dir: its owed stop went through and removed the pid file.
+STOPPED_MARKER = "stopped"
+
+
 def kill_script(paths: Mapping[str, str], grace_s: int = KILL_GRACE_S, *, container: str | None = None) -> str:
     """TERM the island's process group, KILL it after ``grace_s``; exit 0 when it
     is gone. ``container``: stop and remove that docker container first (a killed
@@ -754,7 +758,8 @@ def kill_script(paths: Mapping[str, str], grace_s: int = KILL_GRACE_S, *, contai
     The pid file is read from the login HOME, where :func:`start_script` pins the
     state dir. No pid file: a warning, and exit 0 only when the state dir does not
     exist either (this incarnation never started on the node); a state dir with no
-    pid file exits 3, so a release cannot report ok while the island may still run."""
+    pid file exits 3, so a release cannot report ok while the island may still run,
+    unless an owed stop already went through there (its ``stopped`` marker)."""
     remove = ""
     if container:
         c = shlex.quote(container)
@@ -777,6 +782,8 @@ def kill_script(paths: Mapping[str, str], grace_s: int = KILL_GRACE_S, *, contai
         remove
         + f"{STATE_HOME_VAR}=\"$HOME\"\n"
         + f"if ! pid=$(cat \"{paths['pid']}\" 2>/dev/null) || [ -z \"$pid\" ]; then\n"
+        # an owed stop went through already (``island_spares.owed_kill_script``)
+        + f"  [ -e \"{paths['dir']}/{STOPPED_MARKER}\" ] && exit 0\n"
         + f"  if [ -d \"{paths['dir']}\" ]; then\n"
         + f"    echo \"[yeto] kill: no pid in {paths['pid']} but the state dir exists; the island may "
           "still run\" >&2; exit 3\n"
@@ -1547,8 +1554,7 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
     from yeto import runs
 
     from .node_lease import NodeLeased, pick_nodes
-
-    from .node_quarantine import SPARE_ROLE
+    from .node_quarantine import JOURNAL_SUFFIX, SPARE_ROLE, latest_spare_nodes
 
     key = name or f"island-{len(leases.picks)}"
     by_name = {n.name: n for n in trainers}
@@ -1557,7 +1563,10 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
                 if SPARE_ROLE in (getattr(n, "roles", None) or ())}, **by_name}
     if key in leases.picks:
         return tuple(known[n] for n in leases.picks[key])
-    recorded = [n for n in (_lease_record(args).get("islands") or {}).get(key, ()) if n in known]
+    # the nodes it runs on: its spares journal's newest incarnation (written before any start),
+    # else the lease record
+    journal = latest_spare_nodes(runs.run_dir(args.cluster_prefix) / "ssh-islands" / f"{key}{JOURNAL_SUFFIX}")
+    recorded = [n for n in (journal or (_lease_record(args).get("islands") or {}).get(key, ())) if n in known]
     if recorded and len(recorded) == need and _journal_incarnation(args, key):
         held = {}
         for node in recorded:

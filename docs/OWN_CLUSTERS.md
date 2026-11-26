@@ -557,9 +557,12 @@ node still owes, and the run's lease holder. With a `lease_store`:
 - the run keeps its lease on the node (`kept: true`, no longer renewed) while it is
   quarantined, also across a restarted launcher;
 - once a spare took a node's place, the run dir's lease record (`node-leases.json`)
-  names the spare. A restarted launcher leases the island's current nodes, the spare
-  among them, and gives back a lease of a released old node it no longer runs on.
-  An old node another run holds by then does not stop the island from reattaching.
+  names the spare. It is written before the island starts on the spare, and put back
+  if that start fails. A restarted launcher leases the island's current nodes, taken
+  from the island's spares journal (`ssh-islands/<island>-spares.json` in the run
+  dir), so it follows a replacement the old launcher stopped in the middle of. Every
+  start, reattach included, gives back the leases of old nodes the island no longer
+  runs on; an old node another run holds by then does not stop the island.
 
 A stop the node still owes stays in the run's ledger as a row of its own, priced as
 that node only, so `yeto cleanup --run <run>` still tries to stop it there. A lost
@@ -645,8 +648,9 @@ yeto cluster release-node b300-1 --inventory inventory.yaml --store s3://RUN-STO
    a health checker needs it;
 2. runs the stops the node still owes and closes each owed ledger row. The ledger is
    the run's (`runs/<run>/resources.jsonl` on the machine that ran the launcher); run
-   elsewhere, the command says where the row is, and the launcher closes it
-   (`released elsewhere`) when it picks the node again, so the node is billed once.
+   elsewhere, the command says where the row is. When the launcher picks the node
+   again, it runs the row's stop and closes the row (`released elsewhere`) only once
+   that stop succeeded, so the node is billed once and the old container is gone.
    A quarantine record that cannot be read needs `--force`: the stops it owes are not
    known, so check the node for the run's containers by hand first;
 3. gives up the run's lease on the node (with a `lease_store`). A kept lease ends at
@@ -661,6 +665,16 @@ yeto cluster release-node b300-1 --inventory inventory.yaml --store s3://RUN-STO
 From then on any island may take the node again, including one waiting for a spare.
 If the check, a stop, the probe or the lease release fails, the node stays
 quarantined (exit 1). The launcher never releases a quarantined node on its own.
+
+The run's launcher may still be running during the release. It never writes a
+quarantine record back: a stop it confirmed is recorded as a marker of its own
+(`fleet/nodes/<name>/settled/`), and the release first writes `released.json`, with
+its time, next to the record in both stores. A stop the launcher confirms after the
+release therefore records nothing. The launcher reads the record again before each
+stop it retries, and skips a stop the record no longer owes. A confirmed stop removes
+its incarnation's pid file and leaves a `stopped` marker in its state dir, so a later
+stop of that incarnation (release-node, `yeto cleanup`) succeeds without signalling a
+process that reused the pid. A ledger row is closed only after its stop was confirmed.
 
 ### Known limits
 

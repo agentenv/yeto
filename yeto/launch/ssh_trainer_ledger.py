@@ -113,11 +113,12 @@ def release_owed(*, run_id: str, island: str, incarnation: int, node: str) -> tu
     return OWED_RELEASED, str(ledger.path)
 
 
-def release_owed_elsewhere(*, run_id: str, node: str) -> list[str]:
+def release_owed_elsewhere(*, run_id: str, node: str, stop: Any = None) -> list[str]:
     """``node`` is picked again and has no quarantine record: its owed stops were run
     elsewhere (``yeto cluster release-node`` on a machine without this run's ledger), so
     the run's open owed rows of that node close (``reason: released elsewhere``) and it is
-    not billed twice. Returns the rows closed."""
+    not billed twice. ``stop(row)``: run the row's stop first, the row closes only when it
+    returns True. Returns the rows closed."""
     from yeto.cost.ledger import record_safely
 
     try:
@@ -126,9 +127,13 @@ def release_owed_elsewhere(*, run_id: str, node: str) -> list[str]:
                 if r.kind == KIND and str(r.id).startswith(f"{run_id}/") and str(r.id).endswith(f"-owed-{node}")]
     except Exception:  # noqa: BLE001 - no ledger: nothing billed here
         return []
+    closed = []
     for row in rows:
+        if stop is not None and not stop(row):
+            continue
         record_safely("released", KIND, row.id, getattr(row, "name", None), ledger=ledger, reason="released elsewhere")
-    return [str(r.id) for r in rows]
+        closed.append(str(row.id))
+    return closed
 
 
 class _LedgerNode:

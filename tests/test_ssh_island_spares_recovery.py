@@ -322,7 +322,8 @@ def test_a_lost_node_whose_own_stop_is_confirmed_owes_nothing(tmp_path):
     ops.start("isl")
     ops._node_health_lost(ops.islands["isl"], 2, ["XID 79 on GPU 3"], READING)
     join_stops(spares)
-    assert json.loads(store.read("fleet/nodes/b300-2/quarantine.json"))["owed"] == []  # stopped: owes nothing
+    assert spares.records.own_quarantine("b300-2")["owed"] == []  # stopped: owes nothing (a settle marker)
+    assert json.loads(store.read("fleet/nodes/b300-2/quarantine.json"))["owed"]  # the record itself is not rewritten
     assert str(ops.job_status("isl", 0)) == "FAILED"
     assert ops.relaunch(None, "isl") == 1
     assert open_rows(tmp_path) == ["run1/isl-i1"]  # no owed row for b300-2
@@ -1216,8 +1217,7 @@ def test_a_lost_node_back_from_a_partition_gets_its_owed_stop_at_the_next_check(
     join_stops(spares)
     assert ("kill", "b300-1", 0) in cluster.calls
     assert open_rows(tmp_path) == []  # stopped: no more billing
-    doc = json.loads(store.read("fleet/nodes/b300-1/quarantine.json"))
-    assert doc["owed"] == []  # it stays quarantined until release-node
+    assert spares.records.own_quarantine("b300-1")["owed"] == []  # it stays quarantined until release-node
 
 
 
@@ -1258,3 +1258,534 @@ def test_a_health_reading_of_a_node_back_in_its_rank_after_two_replacements_is_s
     assert ops.relaunch(None, "isl") == 2 and rec.spec.nodes[1].name == "b300-1"  # back in rank 1
     ops._node_health_lost(rec, 1, ["XID 79 on GPU 3"], old)
     assert spares.lost == {} and str(ops.job_status("isl", 2)) == "RUNNING"
+
+
+# ------------------------------------------------------------------ REV-885d M1: a settle racing release-node
+def test_a_settle_racing_release_node_never_writes_the_quarantine_back(tmp_path):
+    """REV-885d's order: the settle has read the record; release-node removes it and run9
+    leases the node; then the settle goes on. Nothing of run1's quarantine comes back, in
+    the run store or in the lease store, so run9 never sees its node as quarantined."""
+    from tests.test_rl_object_store import FakeS3
+    from yeto.cloud.s3_store import S3ObjectStore
+    from yeto.launch.node_lease import NodeLeases
+
+    store, shared = DirectoryObjectStore(tmp_path / "store"), DirectoryObjectStore(tmp_path / "leases")
+    clock = Clock()
+    lease_objects = S3ObjectStore("s3://leases/site", client=FakeS3())
+    records = NodeRecords(store, run_id="run1", log=lambda m: None, shared=shared)
+    records.quarantine("b300-1", island="isl", reason="lost",
+                       owed=[{"run_id": "run1", "island": "isl", "incarnation": 0, "rank": 1, "container": None}])
+    cli = NodeRecords(store, run_id="", log=lambda m: None, shared=shared)
+    run9 = NodeLeases("s3://leases/site", "run9/trainer", objects=lease_objects, clock=clock, monotonic=clock)
+    real_read, armed = records._read, [True]
+
+    def racing(key):
+        doc = real_read(key)
+        if key == "fleet/nodes/b300-1/quarantine.json" and armed and armed.pop():
+            cli.release("b300-1")  # release-node, between the settle's read and its write
+            assert run9.acquire("b300-1").ok
+        return doc
+
+    records._read = racing
+    records.settle("b300-1", run_id="run1", island="isl", incarnation=0)
+    assert store.read("fleet/nodes/b300-1/quarantine.json") is None
+    assert not store.list("fleet/nodes/b300-1/settled/")  # the tombstone is newer: no marker either
+    assert shared.read("nodes/b300-1/quarantine.json") is None
+    run9_records = NodeRecords(DirectoryObjectStore(tmp_path / "store9"), run_id="run9", log=lambda m: None,
+                               shared=shared)
+    assert run9_records.quarantined("b300-1") is None  # run9's own node is not "quarantined by run1"
+    assert run9.held() == ["b300-1"]
+
+
+def test_an_owed_stop_retry_that_races_release_node_leaves_the_node_released(tmp_path):
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[])  # no spare: the island waits
+    shared = DirectoryObjectStore(tmp_path / "leases")
+    spares.records.shared = shared
+    assert ops.relaunch(None, "isl") is None and ops.waiting_spare("isl")
+    cluster.unreachable.discard("b300-1")
+    cli = NodeRecords(store, run_id="", log=lambda m: None, shared=shared)
+    real = cluster.run
+
+    def run(node, script, *, timeout=300.0):
+        if node.name == "b300-1" and "kill -TERM" in script:  # release-node runs while the retry kills
+            cli.release("b300-1")
+        return real(node, script, timeout=timeout)
+
+    cluster.run = run
+    clock.t += 61
+    ops.relaunch(None, "isl")  # the retry runs in the background: b300-1 may be picked again at once
+    join_stops(spares)
+    assert store.read("fleet/nodes/b300-1/quarantine.json") is None
+    assert shared.read("nodes/b300-1/quarantine.json") is None
+    assert not store.list("fleet/nodes/b300-1/settled/")
+
+
+def test_a_settle_after_the_release_tombstone_writes_nothing(tmp_path):
+    store = DirectoryObjectStore(tmp_path / "store")
+    clock = Clock()
+    records = NodeRecords(store, run_id="run1", log=lambda m: None)
+    records.wall = clock
+    records.quarantine("b300-1", island="isl", reason="lost",
+                       owed=[{"run_id": "run1", "island": "isl", "incarnation": 0}])
+    clock.t += 5  # a release-node whose delete did not reach the store: its tombstone is newer
+    store.write("fleet/nodes/b300-1/released.json", json.dumps({"at": clock.t}).encode())
+    records.settle("b300-1", run_id="run1", island="isl", incarnation=0)
+    assert not store.list("fleet/nodes/b300-1/settled/")
+    records.settle("b300-2", run_id="run1", island="isl", incarnation=0)  # no record: nothing either
+    assert not store.list("fleet/nodes/b300-2/")
+
+
+# ------------------------------------------------------------------ REV-885d M2: a launcher gone mid-replacement
+def _died_mid_replacement(tmp_path, monkeypatch):
+    """b300-1 loses power; the launcher goes while it starts the spare (its preflight), after
+    the spares journal named the new nodes; b300-1 is then repaired and released by hand."""
+    import dataclasses
+
+    from tests.test_rl_object_store import FakeS3
+    from yeto.cloud.s3_store import S3ObjectStore
+    from yeto.launch import ssh_trainer_island as sti
+    from yeto.launch.node_lease import NodeLeases
+
+    objects, clock = S3ObjectStore(LEASE_STORE, client=FakeS3()), Clock()
+    args = SimpleNamespace(cluster_prefix="run1", rl_node_inventory_nodes=[*islands_spec().nodes, spare(3)])
+
+    def leases_of(run="run1/trainer", identity="aaaa"):
+        return NodeLeases(LEASE_STORE, run, identity=identity, objects=objects, clock=clock, monotonic=clock)
+
+    def island(leases):
+        nodes = sti.lease_trainer_nodes(args, islands_spec().nodes, 3, leases, name="isl", wait_s=0)
+        return dataclasses.replace(islands_spec(), nodes=tuple(nodes), leases=leases)
+
+    cluster = Cluster([*NAMES, "b300-3"])
+    ops = make_ops(tmp_path, cluster, clock=clock, health_every_s=0, unreachable_polls=2)
+    spares, store = make_spares(tmp_path, islands_spec(), [spare(3)])
+    ops.add("isl", island(leases_of()), spares=spares)
+    ops.start("isl")
+    rec = ops.islands["isl"]
+    cluster.lose("b300-1")
+    assert wait_for(lambda: rec.job.procs[1].poll() is not None)
+    for _ in range(2):
+        ops.job_status("isl", 0)
+    real_launch = sti.SshTrainerIslands.launch
+
+    def died(self, incarnation, *a, **kw):
+        raise SystemExit("the launcher went during the spare's preflight")
+
+    monkeypatch.setattr(sti.SshTrainerIslands, "launch", died)
+    with pytest.raises(SystemExit):
+        ops.relaunch(None, "isl")
+    monkeypatch.setattr(sti.SshTrainerIslands, "launch", real_launch)
+    rec.lock.close()
+    for proc in rec.job.procs:
+        proc.terminate()
+    cluster.unreachable.discard("b300-1")
+    inv = _inventory(tmp_path, [*islands_spec().nodes, spare(3)])
+    cli = NodeLeases(LEASE_STORE, isp.RELEASE_NODE_RUN, objects=objects, clock=clock, monotonic=clock)
+    assert isp.release_node_main(inventory=inv, name="b300-1", store=str(tmp_path / "store"), ssh=cluster,
+                                 objects=store, kill_grace_s=1, say=lambda m: None, leases=cli) == 0
+
+    def restart():
+        leases = leases_of()
+        again = make_ops(tmp_path, cluster, clock=clock, health_every_s=0, unreachable_polls=2)
+        fresh, _ = make_spares(tmp_path, islands_spec(), [spare(3)])
+        again.add("isl", island(leases), spares=fresh)
+        again.start("isl")
+        return again, leases
+
+    return SimpleNamespace(args=args, leases_of=leases_of, restart=restart, cluster=cluster)
+
+
+def test_a_restart_after_a_launcher_gone_mid_replacement_does_not_hold_the_released_old_node(tmp_path, monkeypatch):
+    from yeto.launch import ssh_trainer_island as sti
+
+    run = _died_mid_replacement(tmp_path, monkeypatch)
+    assert sti._lease_record(run.args)["islands"]["isl"] == ["b300-0", "b300-3", "b300-2"]  # written before the start
+    again, leases = run.restart()
+    assert "b300-1" not in leases.held() and sorted(leases.held()) == ["b300-0", "b300-2", "b300-3"]
+    assert run.leases_of("run9/trainer").acquire("b300-1").ok  # free for another run
+
+
+def test_a_restart_after_a_launcher_gone_mid_replacement_is_not_refused_by_another_runs_old_node(
+        tmp_path, monkeypatch):
+    from yeto.launch import ssh_trainer_island as sti
+
+    run = _died_mid_replacement(tmp_path, monkeypatch)
+    sti._record_island_nodes(run.args, "isl", islands_spec().nodes)  # an older record, as before this fix
+    assert run.leases_of("run9/trainer").acquire("b300-1").ok
+    again, leases = run.restart()  # the spares journal names the island's nodes: not "not moving the island"
+    assert sorted(leases.held()) == ["b300-0", "b300-2", "b300-3"]
+    assert [n.name for n in again.islands["isl"].spec.nodes] == ["b300-0", "b300-3", "b300-2"]
+
+
+# ------------------------------------------------------------------ REV-885d L4: a row closes after its stop
+def _picked_again_after(tmp_path, release):
+    """b300-1 lost (owed row open), b300-3 replaces it; ``release(...)`` frees b300-1 without
+    its owed stop; then b300-3 is lost and b300-1 picked again."""
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3)])
+    assert ops.relaunch(None, "isl") == 1
+    cluster.unreachable.discard("b300-1")
+    release(cluster, spares, store)
+    assert open_rows(tmp_path) == ["run1/isl-i0-owed-b300-1", "run1/isl-i1"]
+    kills_before = cluster.count("kill", 0)
+    rec = ops.islands["isl"]
+    cluster.lose("b300-3")
+    assert wait_for(lambda: rec.job.procs[1].poll() is not None)
+    for _ in range(2):
+        ops.job_status("isl", 1)
+    return cluster, ops, kills_before
+
+
+def _force_a_broken_record(tmp_path):
+    def release(cluster, spares, store):
+        store.write("fleet/nodes/b300-1/quarantine.json", b"{broken")
+        inv = _inventory(tmp_path, [*spec(3).nodes, spare(3)])
+        assert isp.release_node_main(inventory=inv, name="b300-1", store=str(tmp_path / "store"), ssh=cluster,
+                                     objects=store, kill_grace_s=1, say=lambda m: None, force=True) == 0
+    return release
+
+
+def test_after_force_over_a_broken_record_the_launcher_stops_the_old_incarnation_before_it_closes_the_row(tmp_path):
+    cluster, ops, kills_before = _picked_again_after(tmp_path, _force_a_broken_record(tmp_path))
+    assert ops.relaunch(None, "isl") == 2 and started(cluster, 2) == ["b300-0", "b300-1", "b300-2"]
+    assert cluster.count("kill", 0) > kills_before  # i0's owed stop ran on b300-1 first
+    assert open_rows(tmp_path) == ["run1/isl-i1-owed-b300-3", "run1/isl-i2"]
+
+
+def test_a_row_whose_stop_fails_stays_open(tmp_path):
+    def release(cluster, spares, store):
+        _force_a_broken_record(tmp_path)(cluster, spares, store)
+        cluster.kill_rc["b300-1"] = 1  # its old container cannot be removed
+
+    cluster, ops, kills_before = _picked_again_after(tmp_path, release)
+    ops.relaunch(None, "isl")
+    assert "run1/isl-i0-owed-b300-1" in open_rows(tmp_path)  # still billed: cleanup tries it again
+
+
+def test_records_kept_in_memory_a_restart_stops_the_old_incarnation_before_it_closes_the_row(tmp_path):
+    def release(cluster, spares, store):
+        spares.records = NodeRecords(None, run_id="run1", log=lambda m: None)  # a restart without a run store
+
+    cluster, ops, kills_before = _picked_again_after(tmp_path, release)
+    assert ops.relaunch(None, "isl") == 2
+    assert cluster.count("kill", 0) > kills_before
+    assert "run1/isl-i0-owed-b300-1" not in open_rows(tmp_path)
+
+
+# ------------------------------------------------------------------ REV-885d: the guards of the surviving mutants
+def test_a_stale_lease_is_given_back_but_not_one_another_island_picked_or_claims(tmp_path):
+    """M4/M5/M17: two islands of the run in one launcher share its NodeLeases. Island isa's
+    stale pick names b300-3 (gone), b300-4 (island isb's pick) and b300-5 (claimed by isb):
+    only b300-3 is given back, and only it leaves ``assigned``."""
+    import dataclasses
+
+    from tests.test_rl_object_store import FakeS3
+    from yeto.cloud.s3_store import S3ObjectStore
+    from yeto.launch.node_lease import NodeLeases
+
+    objects, clock = S3ObjectStore(LEASE_STORE, client=FakeS3()), Clock()
+    leases = NodeLeases(LEASE_STORE, "run1/trainer", identity="aaaa", objects=objects, clock=clock, monotonic=clock)
+    for n in ("b300-3", "b300-4", "b300-5"):
+        assert leases.acquire(n).ok
+    cluster = Cluster([*NAMES, "b300-3", "b300-4", "b300-5"])
+    ops = make_ops(tmp_path, cluster, clock=clock, health_every_s=0)
+    s = dataclasses.replace(islands_spec(), leases=leases)
+    spares, _ = make_spares(tmp_path, s, [spare(3), spare(4), spare(5)])
+    ops.add("isa", s, spares=spares)
+    leases.picks.update({"isa": [*NAMES, "b300-3", "b300-4", "b300-5"], "isb": ["b300-4"]})
+    leases.assigned |= {*NAMES, "b300-3", "b300-4", "b300-5"}
+    spares.records.claim("b300-5", "isb")
+    ops._release_stale_leases(ops.islands["isa"])
+    assert sorted(leases.held()) == ["b300-4", "b300-5"]  # b300-3 given back; isb's pick and claim kept
+    assert "b300-3" not in leases.assigned and {"b300-4", *NAMES} <= leases.assigned
+    assert leases.picks["isa"] == NAMES
+
+
+def test_an_owed_stop_is_retried_only_while_the_island_waits(tmp_path):
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3)])
+    assert ops.relaunch(None, "isl") == 1  # replaced at the first check: no wait, no retry
+    join_stops(spares)
+    assert ("unanswered", "b300-1", "kill") not in cluster.calls  # the dead node is not asked to stop
+    assert not ops.islands["isl"].owed_retries
+
+
+def test_an_islands_retry_runs_only_its_own_owed_stops(tmp_path):
+    """M10: islands isa and isb of one run; b300-1 owes isa's stop. isb waits for a spare
+    with b300-1 in its pool: its retries never run isa's stop."""
+    import dataclasses
+
+    cluster = Cluster([*NAMES, "b300-3", "b300-4", "b300-5", "b300-6"])
+    clock = Clock()
+    ops = make_ops(tmp_path, cluster, clock=clock, health_every_s=0, unreachable_polls=2)
+    sa = islands_spec()
+    spa, _ = make_spares(tmp_path, sa, [spare(3)])
+    ops.add("isa", sa, spares=spa)
+    sb = dataclasses.replace(islands_spec(), nodes=(b300(4), b300(5), b300(6)))
+    spb, _ = make_spares(tmp_path, sb, [b300(1)])  # its only spare is isa's lost node
+    ops.add("isb", sb, spares=spb)
+    ops.start("isa")
+    ops.start("isb")
+    cluster.lose("b300-1")
+    assert wait_for(lambda: ops.islands["isa"].job.procs[1].poll() is not None)
+    for _ in range(2):
+        ops.job_status("isa", 0)
+    assert ops.relaunch(None, "isa") == 1  # isa: b300-3 in b300-1's place
+    cluster.lose("b300-5")
+    assert wait_for(lambda: ops.islands["isb"].job.procs[1].poll() is not None)
+    for _ in range(2):
+        ops.job_status("isb", 0)
+    assert ops.relaunch(None, "isb") is None and ops.waiting_spare("isb")  # b300-1 is quarantined
+    cluster.unreachable.discard("b300-1")
+    before = len(cluster.calls)
+    clock.t += 61
+    assert ops.relaunch(None, "isb") is None  # isb's backoff check
+    join_stops(spb)
+    assert "b300-1" not in ops.islands["isb"].owed_retries  # not isb's to stop
+    assert not [c for c in cluster.calls[before:] if c[0] == "kill" and c[1] == "b300-1"]
+    assert "run1/isa-i0-owed-b300-1" in open_rows(tmp_path)  # isa's to stop (release-node, its own retry)
+
+
+def test_a_settled_stop_is_not_owed_again_after_a_restart(tmp_path):
+    """M22: b300-2's own stop went through (settled); a restarted launcher, with no memory
+    of that, releases incarnation 0 again and records no owed row for it."""
+    cluster = Cluster([*NAMES, "b300-3"])
+    ops = make_ops(tmp_path, cluster, health_every_s=0)
+    s = islands_spec()
+    spares, store = make_spares(tmp_path, s, [spare(3)])
+    ops.add("isl", s, spares=spares)
+    ops.start("isl")
+    rec = ops.islands["isl"]
+    cluster.kill_rc["b300-0"] = 1  # the release at the loss is not confirmed: the restart releases again
+    ops._node_health_lost(rec, 2, ["XID 79 on GPU 3"], READING)
+    join_stops(spares)
+    assert ("b300-2", 0) in spares.stopped and spares.records.own_quarantine("b300-2")["owed"] == []
+    rec.lock.close()
+    for proc in rec.job.procs:
+        proc.terminate()
+    cluster.kill_rc.clear()
+    again = make_ops(tmp_path, cluster, health_every_s=0)
+    fresh, _ = make_spares(tmp_path, islands_spec(), [spare(3)])
+    again.add("isl", islands_spec(), spares=fresh)
+    again.start("isl")
+    assert not [r for r in open_rows(tmp_path) if r.endswith("-owed-b300-2")]
+
+
+def test_a_settle_clears_only_that_nodes_stop_of_that_incarnation(tmp_path):
+    records = NodeRecords(DirectoryObjectStore(tmp_path / "store"), run_id="run1", log=lambda m: None)
+    rows = [{"run_id": "run1", "island": "isl", "incarnation": k} for k in (0, 1)]
+    records.quarantine("b300-1", island="isl", reason="lost", owed=rows)
+    records.quarantine("b300-2", island="isl", reason="lost", owed=rows[:1])
+    records.settle("b300-1", run_id="run1", island="isl", incarnation=0)
+    assert [o["incarnation"] for o in records.own_quarantine("b300-1")["owed"]] == [1]
+    assert [o["incarnation"] for o in records.own_quarantine("b300-2")["owed"]] == [0]
+    records.settle("b300-1", run_id="run1", island="other", incarnation=1)  # another island's: nothing
+    assert [o["incarnation"] for o in records.own_quarantine("b300-1")["owed"]] == [1]
+    records.release("b300-1")  # the record and its markers go; the tombstone stays
+    assert [k.rsplit("/", 1)[-1] for k in records.objects.list("fleet/nodes/b300-1/")] == ["released.json"]
+
+
+def test_a_confirmed_owed_stop_removes_the_pid_file_and_a_second_try_signals_nothing(tmp_path):
+    """The owed stop, run by bash: it stops the incarnation's process group, removes its
+    pid file and leaves a marker; a second try, and the ledger's plain kill script (the
+    pid file gone, the state dir there), exit 0 without a pid. Without the marker the
+    plain kill script exits 3 (the island may still run)."""
+    import os
+    import signal
+    import subprocess
+    import time as _time
+
+    from yeto.launch.ssh_trainer_island import STATE_DIR, kill_script, remote_paths
+
+    home = tmp_path / "home"
+    sdir = home / STATE_DIR / "run1" / "isl-i0"
+    sdir.mkdir(parents=True)
+    # the island's process group, not a child of this test (a dead child stays a zombie
+    # that ``kill -0`` still finds on Linux): its leader exits, the sleep is orphaned
+    out = subprocess.run(["bash", "-c", "sleep 60 >/dev/null 2>&1 & echo $!"], start_new_session=True,
+                         capture_output=True, text=True, timeout=30)
+    pid = int(out.stdout)
+    try:
+        (sdir / "pgid").write_text(f"{os.getpgid(pid)}\n")
+        env = {**os.environ, "HOME": str(home)}
+        script = isp.owed_kill_script("run1", "isl", 0, 5, None)
+        assert subprocess.run(["bash", "-c", script], env=env, timeout=30).returncode == 0
+        assert not (sdir / "pgid").exists() and (sdir / "stopped").exists()
+        assert subprocess.run(["bash", "-c", script], env=env, timeout=30).returncode == 0
+        plain = kill_script(remote_paths("run1", "isl", 0), 2)
+        assert subprocess.run(["bash", "-c", plain], env=env, timeout=30, capture_output=True).returncode == 0
+        (sdir / "stopped").unlink()
+        assert subprocess.run(["bash", "-c", plain], env=env, timeout=30, capture_output=True).returncode == 3
+    finally:
+        deadline = _time.monotonic() + 10
+        while _time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            _time.sleep(0.05)
+        else:  # still there: this test's own sleep
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_a_failed_owed_stop_keeps_the_pid_file(tmp_path):
+    import os
+    import subprocess
+
+    from yeto.launch.ssh_trainer_island import STATE_DIR
+
+    home = tmp_path / "home"
+    sdir = home / STATE_DIR / "run1" / "isl-i0"
+    sdir.mkdir(parents=True)
+    (sdir / "pgid").write_text("")  # no pid in it: the stop is not confirmed (exit 3)
+    script = isp.owed_kill_script("run1", "isl", 0, 1, None)
+    done = subprocess.run(["bash", "-c", script], env={**os.environ, "HOME": str(home)}, timeout=30,
+                          capture_output=True)
+    assert done.returncode == 3
+    assert (sdir / "pgid").exists() and not (sdir / "stopped").exists()
+
+
+def test_an_owed_stop_reads_the_record_again_and_skips_a_node_released_meanwhile(tmp_path):
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[])  # no spare: the island waits
+    assert ops.relaunch(None, "isl") is None and ops.waiting_spare("isl")
+    rec, node = ops.islands["isl"], spares.pool[1]
+    rows = spares.records.own_quarantine("b300-1")["owed"]  # read by the retry
+    cluster.unreachable.discard("b300-1")
+    NodeRecords(store, run_id="", log=lambda m: None).release("b300-1")  # release-node, before its kill
+    ops._stop_owed(rec, node, rows)
+    assert ("kill", "b300-1", 0) not in cluster.calls
+
+
+def test_an_owed_stop_of_another_island_is_not_run(tmp_path):
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[])
+    assert ops.relaunch(None, "isl") is None
+    cluster.unreachable.discard("b300-1")
+    doc = json.loads(store.read("fleet/nodes/b300-1/quarantine.json"))
+    doc["owed"] = [{**o, "island": "isb"} for o in doc["owed"]]  # incarnation 0 of island isb
+    store.write("fleet/nodes/b300-1/quarantine.json", json.dumps(doc).encode())
+    assert not ops._run_owed_stop(ops.islands["isl"], spares.pool[1], 0, None, what="quarantined node")
+    assert ("kill", "b300-1", 0) not in cluster.calls
+
+
+def test_an_owed_stop_closes_its_row_even_when_its_settle_fails(tmp_path, monkeypatch):
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[])
+    assert ops.relaunch(None, "isl") is None and open_rows(tmp_path) == ["run1/isl-i0-owed-b300-1"]
+
+    def settle(*a, **kw):
+        raise OSError("store unavailable")
+
+    monkeypatch.setattr(spares.records, "settle", settle)
+    cluster.unreachable.discard("b300-1")
+    clock.t += 61
+    ops.relaunch(None, "isl")
+    join_stops(spares)
+    assert ("kill", "b300-1", 0) in cluster.calls
+    assert open_rows(tmp_path) == []  # stopped: the row closes
+    assert spares.records.own_quarantine("b300-1")["owed"]  # the record still lists it: release-node runs it again
+
+
+@pytest.mark.parametrize("how", ["down", "close"])
+def test_the_owed_stop_retries_are_joined_when_the_island_goes(tmp_path, how):
+    import threading
+    import time as _time
+
+    cluster = Cluster([*NAMES, "b300-3"])
+    ops = make_ops(tmp_path, cluster, health_every_s=0)
+    s = islands_spec()
+    spares, _ = make_spares(tmp_path, s, [spare(3)])
+    ops.add("isl", s, spares=spares)
+    ops.start("isl")
+    rec = ops.islands["isl"]
+    retry = threading.Thread(target=_time.sleep, args=(0.5,), daemon=True)
+    retry.start()
+    rec.owed_retries["b300-1"] = retry
+    ops.down("isl") if how == "down" else ops.close()
+    assert not retry.is_alive() and rec.owed_retries == {}
+
+
+def test_a_start_gives_back_a_stale_lease_of_a_node_the_island_no_longer_runs_on(tmp_path):
+    """A first start whose leases picked an old node for the island (a lease record older
+    than its spares journal): the start gives it back and records the island's nodes."""
+    import dataclasses
+
+    from tests.test_rl_object_store import FakeS3
+    from yeto.cloud.s3_store import S3ObjectStore
+    from yeto.launch.node_lease import NodeLeases
+
+    objects, clock = S3ObjectStore(LEASE_STORE, client=FakeS3()), Clock()
+    leases = NodeLeases(LEASE_STORE, "run1/trainer", identity="aaaa", objects=objects, clock=clock, monotonic=clock)
+    for n in (*NAMES, "b300-3"):
+        assert leases.acquire(n).ok
+    leases.picks["isl"] = [*NAMES, "b300-3"]
+    leases.assigned |= {*NAMES, "b300-3"}
+    cluster = Cluster([*NAMES, "b300-3"])
+    ops = make_ops(tmp_path, cluster, clock=clock, health_every_s=0)
+    s = dataclasses.replace(islands_spec(), leases=leases)
+    spares, _ = make_spares(tmp_path, s, [spare(3)])
+    ops.add("isl", s, spares=spares)
+    ops.start("isl")
+    assert "b300-3" not in leases.held() and leases.picks["isl"] == NAMES
+
+
+def test_a_stopped_node_owes_no_row_at_a_later_release_even_while_its_record_lists_it(tmp_path):
+    """The stop of b300-2 went through but its settle marker was not written (the record
+    still lists the stop): a release of that incarnation afterwards records no owed row."""
+    cluster = Cluster([*NAMES, "b300-3"])
+    ops = make_ops(tmp_path, cluster, health_every_s=0)
+    s = islands_spec()
+    spares, _ = make_spares(tmp_path, s, [spare(3)])
+    ops.add("isl", s, spares=spares)
+    ops.start("isl")
+    rec = ops.islands["isl"]
+    spares.lost[2] = "XID 79 on GPU 3"
+    spares.records.quarantine("b300-2", island="isl", reason="lost",
+                              owed=[isp.owed_stop("run1", "isl", 0, 2, False)])
+    spares.stopped.add(("b300-2", 0))
+    assert ops._release(rec, 0, skip=frozenset({"b300-2"}))
+    assert not [r for r in open_rows(tmp_path) if "-owed-" in r]
+
+
+def test_a_reattach_holds_its_nodes_leases_when_its_pick_did_not(tmp_path):
+    """A restarted launcher whose leases hold the island's old nodes but not the spare that
+    runs at rank 1 (an older pick): the reattach takes the spare's lease too."""
+    import dataclasses
+
+    run = _lease_run(tmp_path)
+    leases = run.leases_of()
+    for n in ("b300-0", "b300-2"):
+        assert leases.acquire(n).ok
+    again = make_ops(tmp_path, run.cluster, clock=run.clock, health_every_s=0, unreachable_polls=2)
+    fresh, _ = make_spares(tmp_path, islands_spec(), [spare(3)])
+    again.add("isl", dataclasses.replace(islands_spec(), leases=leases), spares=fresh)
+    assert again.start("isl") == 1  # reattached
+    assert sorted(leases.held()) == ["b300-0", "b300-2", "b300-3"]
+
+
+def test_a_failed_start_on_a_spare_puts_the_lease_record_back(tmp_path, monkeypatch):
+    import dataclasses
+
+    from tests.test_rl_object_store import FakeS3
+    from yeto.cloud.s3_store import S3ObjectStore
+    from yeto.launch import ssh_trainer_island as sti
+    from yeto.launch.node_lease import NodeLeases
+
+    objects, clock = S3ObjectStore(LEASE_STORE, client=FakeS3()), Clock()
+    args = SimpleNamespace(cluster_prefix="run1", rl_node_inventory_nodes=[*islands_spec().nodes, spare(3)])
+    leases = NodeLeases(LEASE_STORE, "run1/trainer", identity="aaaa", objects=objects, clock=clock, monotonic=clock)
+    nodes = sti.lease_trainer_nodes(args, islands_spec().nodes, 3, leases, name="isl", wait_s=0)
+    cluster = Cluster([*NAMES, "b300-3"])
+    ops = make_ops(tmp_path, cluster, clock=clock, health_every_s=0, unreachable_polls=2)
+    spares, _ = make_spares(tmp_path, islands_spec(), [spare(3)])
+    ops.add("isl", dataclasses.replace(islands_spec(), nodes=tuple(nodes), leases=leases), spares=spares)
+    ops.start("isl")
+    rec = ops.islands["isl"]
+    cluster.lose("b300-1")
+    assert wait_for(lambda: rec.job.procs[1].poll() is not None)
+    for _ in range(2):
+        ops.job_status("isl", 0)
+
+    def failed(self, incarnation, *a, **kw):
+        raise RuntimeError("preflight on the spare failed")
+
+    monkeypatch.setattr(sti.SshTrainerIslands, "launch", failed)
+    assert ops.relaunch(None, "isl") is None and ops.waiting_spare("isl")
+    assert sti._lease_record(args)["islands"]["isl"] == NAMES  # back to the nodes it runs on
+    assert leases.picks["isl"] == NAMES and [n.name for n in rec.spec.nodes] == NAMES

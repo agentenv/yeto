@@ -11,12 +11,26 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 SPARE_ROLE = "trainer-spare"  # an inventory node that may take a lost trainer node's place
+JOURNAL_SUFFIX = "-spares.json"  # next to a resident island's jobs journal: the nodes of each incarnation
 QUARANTINE_NAME = "quarantine.json"
 SHARED_NODES_DIR = "nodes"  # under the inventory's lease_store
 RELEASE_NODE_HINT = "run `yeto cluster release-node <name>`"
+
+
+def latest_spare_nodes(path: Any) -> list[str] | None:
+    """The nodes the newest incarnation of a resident island with spare nodes runs on, by
+    its spares journal (``<island>-spares.json``, written before any start of that
+    incarnation); None without one."""
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        nodes = dict(doc.get("nodes") or {})
+        return [str(n) for n in nodes[max(nodes, key=int)]] if nodes else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def shared_key(name: str) -> str:
