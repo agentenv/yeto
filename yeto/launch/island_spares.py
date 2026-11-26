@@ -51,6 +51,7 @@ loss stops the island (its relaunch is refused) and names every node it replaced
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import threading
@@ -62,20 +63,22 @@ from typing import Any
 
 from .node_inventory import Node
 from .node_quarantine import (  # noqa: F401 - the shared names here too
+    JOURNAL_SUFFIX,
     QUARANTINE_NAME,
     RELEASE_NODE_HINT,
+    RUN_NODES_DIR,
     SHARED_NODES_DIR,
+    SPARE_ROLE,
     describe,
     release_how,
-    JOURNAL_SUFFIX,
-    SPARE_ROLE,
     shared_quarantined_names,
+    unreadable,
 )
 
-NODES_DIR = "fleet/nodes"  # under the run store
+NODES_DIR = RUN_NODES_DIR  # under the run store
 CLAIM_NAME = "claim.json"
-RELEASED_NAME = "released.json"  # release-node's tombstone (fleet/nodes/<name>/, and in the lease store)
-SETTLED_DIR = "settled"  # fleet/nodes/<name>/settled/<run>-<island>-i<k>.json: a stop owed no more
+RELEASED_NAME = "released.json"  # release-node's record of the release (fleet/nodes/<name>/; nothing reads it)
+SETTLED_DIR = "settled"  # fleet/nodes/<name>/settled/<marker>.json (settled_key): a stop owed no more
 CLAIM_SCHEMA = "yeto.fleet.node-claim/v1"
 QUARANTINE_SCHEMA = "yeto.fleet.node-quarantine/v1"
 WAIT_FIRST_S = 60.0
@@ -437,10 +440,17 @@ class NodeRecords:
     def own_quarantine(self, name: str) -> dict[str, Any] | None:
         """The node's quarantine record in this run store (None: not quarantined here); its
         ``owed`` leaves out every stop a :meth:`settle` marker says went through."""
-        doc = self._read(self.key(name, QUARANTINE_NAME))
+        try:
+            doc = self._read(self.key(name, QUARANTINE_NAME))
+        except Exception as error:  # noqa: BLE001 - unknown is not free
+            return unreadable(error)
         if doc is None or not doc.get("owed"):
             return doc
-        done = self._settled(name)
+        try:
+            done = self._settled(name)
+        except Exception as error:  # noqa: BLE001 - the stops it owes are not known
+            return {**unreadable(f"its settled stops not listed: {type(error).__name__}: {error}"),
+                    **{k: doc[k] for k in ("run", "island", "lease_holder") if k in doc}}
         if not done:
             return doc
         return {**doc, "owed": [o for o in doc["owed"] if _owed_key(o) not in done]}
@@ -489,32 +499,42 @@ class NodeRecords:
     def settle(self, name: str, *, run_id: str, island: str, incarnation: int) -> None:
         """The stop ``name`` owed for that incarnation is confirmed: it owes it no more (the
         node stays quarantined). Written as a marker of its own (``settled/``, an exclusive
-        create), never into the quarantine record: a release-node that removes the record
-        meanwhile is never undone, here or in the lease store. A node released since the
-        record was written (its ``released.json``) gets no marker."""
-        doc = self._read(self.key(name, QUARANTINE_NAME))
-        if doc is None or doc.get("unreadable"):
-            return
-        released = self._read(self.key(name, RELEASED_NAME))
-        if released is not None and float(released.get("at") or 0.0) >= float(doc.get("at") or 0.0):
-            return
-        self._create(self.settled_key(name, run_id, island, incarnation),
-                     {"run_id": str(run_id), "island": str(island), "incarnation": int(incarnation), "at": self.wall()})
+        create), never into the quarantine record, so a release-node that removes the record
+        meanwhile is never undone, here or in the lease store. The record is read again after
+        the marker is created: once it no longer lists that stop (released meanwhile, maybe
+        quarantined anew), the marker is removed, so none is left behind. No clock is
+        compared: a launcher and a release-node whose clocks disagree settle alike. A node whose
+        record never listed that stop gets no marker either."""
+        mine = (str(run_id), str(island), int(incarnation))
+
+        def lists() -> bool:
+            doc = self._read(self.key(name, QUARANTINE_NAME))
+            return (doc is not None and not doc.get("unreadable")
+                    and any(_owed_key(o) == mine for o in doc.get("owed") or ()))
+
+        marker = self.settled_key(name, run_id, island, incarnation)
+        if not self._create(marker, {"run_id": mine[0], "island": mine[1], "incarnation": mine[2],
+                                     "at": self.wall()}):
+            return  # settled already
+        if not lists():
+            self._delete(marker)
 
     @staticmethod
     def settled_key(name: str, run_id: str, island: str, incarnation: int) -> str:
-        return f"{NODES_DIR}/{name}/{SETTLED_DIR}/{run_id}-{island}-i{int(incarnation)}.json"
+        """``fleet/nodes/<name>/settled/<run>.<island>.<k>.json``, each field urlsafe base64
+        (no ``.`` in it): two stops never share a marker, whatever their names hold."""
+        parts = (str(run_id), str(island), str(int(incarnation)))
+        enc = ".".join(base64.urlsafe_b64encode(p.encode()).decode().rstrip("=") for p in parts)
+        return f"{NODES_DIR}/{name}/{SETTLED_DIR}/{enc}.json"
 
     def release(self, name: str) -> None:
-        """Remove the node's quarantine (run store and lease store) and its settle markers;
-        a ``released.json`` tombstone (with the time) stays in both."""
-        stone = {"node": name, "run": self.run_id, "at": self.wall()}
-        self._write(self.key(name, RELEASED_NAME), stone)
+        """Remove the node's quarantine (run store and lease store) and its settle markers; a
+        ``released.json`` (who, when) stays in the run store. Raises when the store fails."""
+        self._write(self.key(name, RELEASED_NAME), {"node": name, "run": self.run_id, "at": self.wall()})
         for key in self._list(f"{NODES_DIR}/{name}/{SETTLED_DIR}/"):
             self._delete(key)
         self._delete(self.key(name, QUARANTINE_NAME))
         if self.shared is not None:
-            self.shared.write(f"{SHARED_NODES_DIR}/{name}/{RELEASED_NAME}", json.dumps(stone, sort_keys=True).encode())
             self.shared.delete(self.shared_key(name))
 
 
@@ -540,9 +560,11 @@ def owed_kill_script(run_id: str, island: str, incarnation: int, grace_s: int, c
     paths = remote_paths(run_id, island, int(incarnation))
     pinned = _pin_state_home(paths)
     pid, sdir = pinned["pid"], pinned["dir"]
+    body = (f"rc=$?; if [ $rc -eq 0 ] && [ -d \"{sdir}\" ]; then rm -f \"{pid}\"; "
+            f": > \"{sdir}/{STOPPED_MARKER}\"; fi; exit $rc")
+    quoted = "'" + body.replace("'", "'\\''") + "'"  # one shell word, whatever the run and island names hold
     return (f"{STATE_HOME_VAR}=\"$HOME\"\n"
-            f"trap 'rc=$?; if [ $rc -eq 0 ] && [ -d \"{sdir}\" ]; then rm -f \"{pid}\"; "
-            f": > \"{sdir}/{STOPPED_MARKER}\"; fi; exit $rc' EXIT\n"
+            f"trap {quoted} EXIT\n"
             + kill_script(paths, int(grace_s), container=container or None))
 
 
@@ -604,7 +626,11 @@ def release_node(records: NodeRecords, node: Node, ssh: Any, *, kill_grace_s: in
         except Exception as error:  # noqa: BLE001 - reported, the record stays
             return False, (f"node {node.name}: its lease could not be released ({type(error).__name__}: "
                            f"{error}); it stays quarantined")
-    records.release(node.name)
+    try:
+        records.release(node.name)
+    except Exception as error:  # noqa: BLE001 - reported (exit 1): its record may stay, run it again
+        return False, (f"node {node.name}: its owed stops ran and its lease is given up, but its quarantine record "
+                       f"could not be removed ({type(error).__name__}: {error}); run release-node again")
     return True, (f"node {node.name} released ({len(doc.get('owed') or ())} owed stop(s) run){lease_note}"
                   + "".join(f"; {n}" for n in ledger_notes))
 
@@ -694,7 +720,7 @@ def release_node_main(*, inventory: str, name: str, store: str, ssh: Any = None,
     if shared is None and leases is not None:
         shared = getattr(leases, "objects", None)
     records = NodeRecords(objects, run_id="", log=say, shared=shared)
-    doc = records.quarantined(name)
+    doc = records.quarantined(name)  # a store that fails to read: unreadable (needs --force)
     if doc is None:
         say(f"[yeto] node {name} is not quarantined in {store}")
         return 0
@@ -740,7 +766,10 @@ def release_node_main(*, inventory: str, name: str, store: str, ssh: Any = None,
         from .node_lease import ssh_probe  # noqa: PLC0415
 
         probe = ssh_probe(lambda n, script: ssh.run(n, script, timeout=120.0))
-    ok, message = release_node(records, node, ssh, kill_grace_s=kill_grace_s, leases=leases, probe=probe)
+    try:
+        ok, message = release_node(records, node, ssh, kill_grace_s=kill_grace_s, leases=leases, probe=probe)
+    except Exception as error:  # noqa: BLE001 - a store or ledger failure: reported, no traceback
+        ok, message = False, f"node {name}: release failed ({type(error).__name__}: {error})"
     say(f"[yeto] {message}" if ok else f"[yeto] node {name} stays quarantined: {message}")
     return 0 if ok else 1
 
@@ -1038,7 +1067,9 @@ def pick_spare(spares: IslandSpares, island: str, current: Sequence[Node], lost:
     passed over this time; None: checked here over ``ops``), claim or lease fails is
     excluded and the pick runs again. A lost node itself is a candidate again once released
     from its quarantine. The pick is claimed (and its lease taken) before it is returned;
-    :func:`unpick` gives it back."""
+    :func:`unpick` gives it back. A claim whose lease step fails (refused, or the lease store
+    raised) is given back before the next candidate is tried. The stops a picked node still
+    owes elsewhere are the caller's (:func:`close_owed_elsewhere`, outside the ops lock)."""
     candidates, group, skipped, multi, keep = spare_candidates(spares, island, current, lost, chosen=chosen)
     unchecked: list[str] = []
     while True:
@@ -1064,7 +1095,12 @@ def pick_spare(spares: IslandSpares, island: str, current: Sequence[Node], lost:
             skipped[node.name] = f"held by island {held}"
             continue
         if spares.leases is not None:
-            lease = spares.leases.acquire(node)
+            try:
+                lease = spares.leases.acquire(node)
+            except Exception as error:  # noqa: BLE001 - its claim given back, the next candidate tried
+                spares.records.unclaim(node.name, island)
+                skipped[node.name] = f"lease not taken ({type(error).__name__}: {error})"[:300]
+                continue
             if not getattr(lease, "ok", False) or getattr(lease, "blocked", False):
                 spares.records.unclaim(node.name, island)
                 skipped[node.name] = (f"lease of run {getattr(lease, 'previous', None) or 'unknown'} not taken over "
@@ -1074,11 +1110,10 @@ def pick_spare(spares: IslandSpares, island: str, current: Sequence[Node], lost:
         skipped.pop(node.name, None)
         with spares.owed_lock:  # picked again: a loss of its new incarnation owes its stop again
             spares.stopped -= {k for k in spares.stopped if k[0] == node.name}
-        _close_owed_elsewhere(spares, node, ops)
         return Pick(node, group, skipped)
 
 
-def _close_owed_elsewhere(spares: IslandSpares, node: Node, ops: Any) -> None:
+def close_owed_elsewhere(spares: IslandSpares, node: Node, ops: Any) -> None:
     """A picked node has no quarantine record (a release-node elsewhere, a ``--force`` over
     a broken record, or a run store kept in memory): the stops its open owed ledger rows
     name are run on it now, and each row closes (``released elsewhere``) only once its stop

@@ -18,6 +18,7 @@ SPARE_ROLE = "trainer-spare"  # an inventory node that may take a lost trainer n
 JOURNAL_SUFFIX = "-spares.json"  # next to a resident island's jobs journal: the nodes of each incarnation
 QUARANTINE_NAME = "quarantine.json"
 SHARED_NODES_DIR = "nodes"  # under the inventory's lease_store
+RUN_NODES_DIR = "fleet/nodes"  # under a run store: fleet/nodes/<name>/quarantine.json (island_spares)
 RELEASE_NODE_HINT = "run `yeto cluster release-node <name>`"
 
 
@@ -37,13 +38,19 @@ def shared_key(name: str) -> str:
     return f"{SHARED_NODES_DIR}/{name}/{QUARANTINE_NAME}"
 
 
-def _listed(shared: Any) -> set[str]:
-    """The nodes with a quarantine record in the lease store (raises when it does not list)."""
+def run_key(name: str) -> str:
+    return f"{RUN_NODES_DIR}/{name}/{QUARANTINE_NAME}"
+
+
+def _listed(shared: Any, base: str = SHARED_NODES_DIR) -> set[str]:
+    """The nodes with a quarantine record under ``base`` (``nodes`` in a lease store,
+    ``fleet/nodes`` in a run store); raises when the store does not list."""
     out = set()
-    for key in shared.list(f"{SHARED_NODES_DIR}/"):  # nodes/<name>/quarantine.json only
+    depth = base.count("/") + 1
+    for key in shared.list(f"{base}/"):  # <base>/<name>/quarantine.json only
         parts = str(key).split("/")
-        if len(parts) == 3 and parts[0] == SHARED_NODES_DIR and parts[2] == QUARANTINE_NAME:
-            out.add(parts[1])
+        if len(parts) == depth + 2 and "/".join(parts[:depth]) == base and parts[-1] == QUARANTINE_NAME:
+            out.add(parts[depth])
     return out
 
 
@@ -58,15 +65,22 @@ def shared_quarantined_names(shared: Any) -> set[str]:
         return set()
 
 
-def read_record(shared: Any, name: str) -> dict[str, Any] | None:
-    """Node ``name``'s quarantine record in the lease store (None: none). A record that
-    cannot be read (the store failed: ``read_error``) or parsed counts as a quarantine:
+def unreadable(error: BaseException | str) -> dict[str, Any]:
+    """The record of a node whose quarantine could not be read (the store failed): it counts
+    as quarantined."""
+    what = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
+    return {"unreadable": True, "read_error": True, "reason": f"quarantine record unreadable: {what}"[:300]}
+
+
+def read_record(shared: Any, name: str, *, key: str | None = None) -> dict[str, Any] | None:
+    """Node ``name``'s quarantine record in the lease store (``key``: another place, e.g.
+    :func:`run_key` in a run store; None: none). A record that cannot be read (the store
+    failed: ``read_error``) or parsed counts as a quarantine:
     ``{"unreadable": True, "reason": "quarantine record unreadable: ..."}``."""
     try:
-        raw = shared.read(shared_key(name))
+        raw = shared.read(key or shared_key(name))
     except Exception as error:  # noqa: BLE001 - unknown is not free
-        return {"unreadable": True, "read_error": True,
-                "reason": f"quarantine record unreadable: {type(error).__name__}: {error}"[:300]}
+        return unreadable(error)
     if raw is None:
         return None
     try:
@@ -98,6 +112,50 @@ def shared_quarantines(shared: Any, names: Iterable[str], *,
         if doc is not None:
             out[name] = doc
     return out
+
+
+def run_store_quarantines(objects: Any, names: Iterable[str], *,
+                          log: Callable[[str], None] | None = None) -> dict[str, dict[str, Any]]:
+    """The quarantine records of ``names`` in a run store (``fleet/nodes/<name>/quarantine.json``,
+    this run's islands): name -> record, as :func:`shared_quarantines` reads a lease store.
+    A record that cannot be read counts as one (:func:`read_record`); when the store does
+    not list, each node's record is read (a line says so)."""
+    names = set(names)
+    if objects is None or not names:
+        return {}
+    try:
+        listed = _listed(objects, RUN_NODES_DIR) & names
+    except Exception as error:  # noqa: BLE001 - each node read below
+        (log or (lambda m: None))(f"[launcher] WARN: the run store's quarantine list failed "
+                                  f"({type(error).__name__}: {error}); each node's record is read instead")
+        listed = names
+    out = {}
+    for name in sorted(listed):
+        doc = read_record(objects, name, key=run_key(name))
+        if doc is not None:
+            out[name] = doc
+    return out
+
+
+def trainer_pick_excluded(names: Iterable[str], *, lease_objects: Any = None, run_objects: Any = None,
+                          assigned: Iterable[str] = (), log: Callable[[str], None] | None = None,
+                          ) -> tuple[set[str], dict[str, dict[str, Any]], str | None]:
+    """What a trainer pick among ``names`` leaves out: ``(excluded, quarantines, note)``.
+
+    ``excluded``: ``assigned`` (nodes this process gave other islands already) and every
+    node quarantined in the lease store (``lease_objects``: any run's, :func:`shared_quarantines`)
+    or in the run store (``run_objects``: this run's, :func:`run_store_quarantines`); an
+    unreadable record counts. ``quarantines``: name -> record; ``note``:
+    :func:`quarantine_note` (None: none). The launch's trainer pick
+    (``ssh_trainer_island.lease_trainer_nodes``) calls it with the run's ``NodeLeases``
+    (``lease_objects=leases.objects``, ``assigned=leases.assigned``, no ``run_objects``: with a
+    lease store every quarantine is there too); a prediction of that pick calls it with the
+    same arguments."""
+    names = set(names)
+    docs = dict(shared_quarantines(lease_objects, names, log=log))
+    for name, doc in run_store_quarantines(run_objects, names, log=log).items():
+        docs.setdefault(name, doc)
+    return set(assigned) | set(docs), docs, quarantine_note(docs)
 
 
 def describe(name: str, doc: Mapping[str, Any]) -> str:

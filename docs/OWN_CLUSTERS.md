@@ -701,13 +701,24 @@ quarantined (exit 1). The launcher never releases a quarantined node on its own.
 
 The run's launcher may still be running during the release. It never writes a
 quarantine record back: a stop it confirmed is recorded as a marker of its own
-(`fleet/nodes/<name>/settled/`), and the release first writes `released.json`, with
-its time, next to the record in both stores. A stop the launcher confirms after the
-release therefore records nothing. The launcher reads the record again before each
+(`fleet/nodes/<name>/settled/`), and once the marker is written the launcher reads the
+record again; if the record no longer lists that stop (the node was released, or
+quarantined anew), it removes the marker. A stop the launcher confirms during or after
+the release therefore leaves nothing behind. No clocks are compared, so a launcher
+and a release-node whose clocks disagree behave the same. The release also leaves
+`fleet/nodes/<name>/released.json` (who released the node, and when) in the run store.
+The launcher reads the record again before each
 stop it retries, and skips a stop the record no longer owes. A confirmed stop removes
 its incarnation's pid file and leaves a `stopped` marker in its state dir, so a later
 stop of that incarnation (release-node, `yeto cleanup`) succeeds without signalling a
 process that reused the pid. A ledger row is closed only after its stop was confirmed.
+A node picked again with open owed rows (it was released elsewhere) has their stops run
+in the background, outside the launcher's lock.
+
+A spare whose start failed is given back to the pool only once its stop of that start is
+confirmed. If that stop is not confirmed, the spare is treated as a lost node: it is
+quarantined with the stop it owes, the island keeps its claim and its lease, and no
+island of this or another run picks it until `yeto cluster release-node`.
 
 ### Known limits
 

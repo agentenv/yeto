@@ -896,6 +896,50 @@ class SshIslandOps:
                  "nothing for it (it stays quarantined)")
         return True
 
+    @staticmethod
+    def _lease_holder(sp: Any) -> str | None:
+        """Who holds the spares' cross-run leases (a quarantine names it, so release-node ends it)."""
+        from .island_spares import lease_holder_id  # noqa: PLC0415
+
+        return lease_holder_id(sp.leases) if sp.leases is not None else None
+
+    def _quarantine_unstopped(self, rec: _Island, node: Any, rank: int, incarnation: int, error: Any) -> None:
+        """A spare whose start failed and whose stop of that incarnation is not confirmed: it
+        is lost, as a lost node is (quarantined with the stop it owes, its claim and its kept
+        lease held), so no island of this run or another picks it while it may still run."""
+        from .island_spares import owed_stop  # noqa: PLC0415
+
+        sp = rec.spares
+        sp.records.quarantine(node.name, island=rec.name,
+                              reason=f"its start as a spare failed ({error}) and its stop is not confirmed",
+                              owed=[owed_stop(self.run_id, rec.name, incarnation, rank, rec.spec.docker)],
+                              lease_holder=self._lease_holder(sp))
+        keep = getattr(sp.leases, "keep_all", None)
+        if keep is not None:
+            try:
+                keep(nodes=[node])
+            except Exception as warn:  # noqa: BLE001 - the quarantine still keeps the islands off it
+                self.log(f"[launcher] WARN: {rec.name}: the lease of {node.name} not kept ({warn})")
+        self.log(f"[launcher] CRITICAL: {rec.name}: spare {node.name} may still run incarnation {incarnation} (its stop "
+                 "is not confirmed): it is quarantined and owes that stop")
+
+    def _close_owed_elsewhere_later(self, rec: _Island, node: Any) -> None:
+        """A picked node's open owed ledger rows (:func:`~.island_spares.close_owed_elsewhere`),
+        stopped and closed in the background (SSH, no ops lock)."""
+        from . import island_spares as isp  # noqa: PLC0415
+
+        sp = rec.spares
+
+        def run() -> None:
+            try:
+                isp.close_owed_elsewhere(sp, node, self.ops)
+            except Exception as error:  # noqa: BLE001 - its rows stay open (yeto cleanup, the next pick)
+                self.log(f"[launcher] {rec.name}: the owed rows of {node.name} not closed ({error})")
+
+        thread = threading.Thread(target=run, daemon=True, name=f"{rec.name}-owed-elsewhere-{node.name}")
+        sp.stop_threads.append(thread)
+        thread.start()
+
     def _retry_owed_stops(self, rec: _Island) -> None:
         """At each check of a waiting island: every node this island quarantined that still
         owes a stop of this run gets it tried again, in the background (no ops lock); a stop
@@ -1076,8 +1120,13 @@ class SshIslandOps:
         current = list(rec.spec.nodes)
         picks: dict[int, Any] = {}
         for rank in sorted(sp.lost):
-            pick = isp.pick_spare(sp, rec.name, current, sp.lost, ops=self.ops, chosen=list(picks.values()),
-                                  health=health)
+            try:
+                pick = isp.pick_spare(sp, rec.name, current, sp.lost, ops=self.ops, chosen=list(picks.values()),
+                                      health=health)
+            except BaseException:  # the picks so far are not taken: their claims and leases go back
+                for node in picks.values():
+                    isp.unpick(sp, rec.name, node)
+                raise
             if pick.node is None:
                 for node in picks.values():
                     isp.unpick(sp, rec.name, node)
@@ -1091,6 +1140,8 @@ class SshIslandOps:
                          f"{sp.wait_s:.0f} s")
                 return None
             picks[rank] = pick.node
+        for node in picks.values():  # stops it owes from a release elsewhere: run without the ops lock
+            self._close_owed_elsewhere_later(rec, node)
         nxt = 0 if rec.incarnation is None else rec.incarnation + 1
         old_spec, old_islands = rec.spec, rec.islands
         try:
@@ -1098,7 +1149,8 @@ class SshIslandOps:
         except SshIslandError as error:  # e.g. a spare without a rendezvous address
             for node in picks.values():
                 isp.unpick(sp, rec.name, node)
-                sp.records.quarantine(node.name, island=rec.name, reason=f"cannot take a node's place: {error}")
+                sp.records.quarantine(node.name, island=rec.name, reason=f"cannot take a node's place: {error}",
+                                      lease_holder=self._lease_holder(sp))
             sp.wait(now, f"spare refused: {error}", wall=wall)
             self.log(f"[launcher] {rec.name}: spare(s) {[n.name for n in picks.values()]} refused: {error}")
             return None
@@ -1113,12 +1165,17 @@ class SshIslandOps:
         except Exception as error:  # noqa: BLE001 - back to the old nodes; checked again after the backoff
             self.log(f"[launcher] {rec.name}: start of incarnation {nxt} on spare(s) "
                      f"{[n.name for n in picks.values()]} failed: {error}")
-            if str(nxt) in read_jobs(self.jobs_path(rec.name)):
-                rec.islands.release_incarnation(nxt)
-            for node in picks.values():
+            unstopped: frozenset[str] = frozenset()
+            if str(nxt) in read_jobs(self.jobs_path(rec.name)) and not rec.islands.release_incarnation(nxt):
+                unstopped = rec.islands.unconfirmed.get(int(nxt), frozenset())
+            for rank, node in sorted(picks.items()):
+                if node.name in unstopped:  # it may still run incarnation nxt: lost, owing that stop
+                    self._quarantine_unstopped(rec, node, rank, nxt, error)
+                    continue
                 isp.unpick(sp, rec.name, node)
                 if node.name in str(error):
-                    sp.records.quarantine(node.name, island=rec.name, reason=f"its start as a spare failed: {error}")
+                    sp.records.quarantine(node.name, island=rec.name, reason=f"its start as a spare failed: {error}",
+                                          lease_holder=self._lease_holder(sp))
             rec.spec, rec.islands, rec.health = old_spec, old_islands, old_health
             self._record_nodes(rec)  # back to the nodes it runs on
             sp.nodes.pop(str(nxt), None)
