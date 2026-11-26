@@ -963,6 +963,39 @@ class _FakeManager:
             lambda name, expected_generation: f"handle:{name}@{expected_generation}")
 
 
+def _watchdog_fired_by_the_test(monkeypatch):
+    """The transaction watchdog without a wall-clock race: the controller's timer is captured
+    and never runs by itself; the returned ``fire()`` runs it on the caller's thread (a test
+    fires it inside the step it wants it to interrupt). Under a loaded runner a real 0.2 s
+    timer could expire before the transaction reached that step, and nothing was killed."""
+    from types import SimpleNamespace
+
+    from yeto.rl.engine import controller as controller_mod
+
+    armed = []
+
+    class Timer:
+        daemon = True
+
+        def __init__(self, interval, function):
+            self.function = function
+            armed.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.function = None
+
+    monkeypatch.setattr(controller_mod, "threading", SimpleNamespace(**{**vars(threading), "Timer": Timer}))
+
+    def fire():
+        assert armed and armed[-1].function is not None, "no armed watchdog"
+        armed[-1].function()
+
+    return fire
+
+
 def test_default_watchdog_kills_the_target_generation_and_unblocks(tmp_path):
     from yeto.rl.adapters.miles.elastic_wiring import kill_target_generation
 
@@ -1040,7 +1073,7 @@ def test_watchdog_unmappable_target_enters_recovery_required_not_silent_wait(tmp
     assert not ctl.admission_open
 
 
-def test_watchdog_target_without_live_workers_is_journaled_not_fatal(tmp_path):
+def test_watchdog_target_without_live_workers_is_journaled_not_fatal(tmp_path, monkeypatch):
     """A cell the fork knows but with no live worker actors (its engine died during
     start_cells, GPU d123 chain 3) is journaled as ``skipped`` kind ``no_workers``; it is
     not an unresolved target, so the transaction still ends REBUILT_OLD (not
@@ -1055,11 +1088,11 @@ def test_watchdog_target_without_live_workers_is_journaled_not_fatal(tmp_path):
     infos["c3"] = []  # exists, no actors
     fake_ray = _FakeRay(lambda handle: None)
     ctl.set_on_watchdog(kill_target_generation(ctl, manager=manager, ray_module=fake_ray))
-    gate = threading.Event()
+    fire = _watchdog_fired_by_the_test(monkeypatch)
     slow = publisher.publish_members
 
     def publish_members(*a, **k):
-        gate.wait(1.5)
+        fire()  # the deadline passes while the new engines are being published (VERIFYING)
         return slow(*a, **k)
 
     publisher.publish_members = publish_members
@@ -1068,7 +1101,7 @@ def test_watchdog_target_without_live_workers_is_journaled_not_fatal(tmp_path):
 
     def safe_point(rollout_id):
         if rollout_id == 1:
-            ctl.request("r", "T4R4S0", 0, 0.2)
+            ctl.request("r", "T4R4S0", 0, 600.0)  # the test fires the watchdog
         return orig(rollout_id)
 
     driver.safe_point = safe_point
@@ -1083,7 +1116,7 @@ def test_watchdog_target_without_live_workers_is_journaled_not_fatal(tmp_path):
     assert ctl.status("r")["phase"] == REBUILT_OLD
 
 
-def test_watchdog_target_whose_workers_died_is_journaled_as_workers_lost(tmp_path):
+def test_watchdog_target_whose_workers_died_is_journaled_as_workers_lost(tmp_path, monkeypatch):
     """A27 (GPU 6r1/6r2 d2): a target engine SIGKILLed during VERIFYING. The fork's liveness
     scan tore its cell down and ``describe_cells`` reports it ``workers_lost``; the watchdog
     journals that cell as ``skipped`` kind ``workers_lost`` (naming the dead workers) instead
@@ -1103,11 +1136,11 @@ def test_watchdog_target_whose_workers_died_is_journaled_as_workers_lost(tmp_pat
     })
     fake_ray = _FakeRay(lambda handle: None)
     ctl.set_on_watchdog(kill_target_generation(ctl, manager=manager, ray_module=fake_ray))
-    gate = threading.Event()
+    fire = _watchdog_fired_by_the_test(monkeypatch)
     slow = publisher.publish_members
 
     def publish_members(*a, **k):
-        gate.wait(1.5)
+        fire()  # the deadline passes while the new engines are being published (VERIFYING)
         return slow(*a, **k)
 
     publisher.publish_members = publish_members
@@ -1116,7 +1149,7 @@ def test_watchdog_target_whose_workers_died_is_journaled_as_workers_lost(tmp_pat
 
     def safe_point(rollout_id):
         if rollout_id == 1:
-            ctl.request("r", "T4R4S0", 0, 0.2)
+            ctl.request("r", "T4R4S0", 0, 600.0)  # the test fires the watchdog
         return orig(rollout_id)
 
     driver.safe_point = safe_point
