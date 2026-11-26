@@ -23,6 +23,10 @@ sampler pools (``yeto.launch.pool.fleet_reconcile``).
   cluster); same learner id, same store sub-directory: the next launch continues from
   ``trainer<k>/``. The syncer sees the island leave and come back (no RETIRE).
 
+An ``ssh:`` island added, or moved onto ``ssh:`` nodes (``--inventory``: its node
+inventory), passes the join checks of :mod:`yeto.launch.island_join` first (count, this
+fleet, node health, fabric group, leases), and again on the desired state its write reads.
+
 ``--dry-run`` writes nothing: it prints the change and runs the island launch's
 ``yeto launch --dry-run`` (an island whose layout differs from the fleet's is refused
 there, before anything is ordered).
@@ -147,10 +151,18 @@ def compile_island(cfg: dict[str, Any], plan: Any, *, k: int, name: str, gpu: st
     if inventory is not None:
         if not str(gpu).startswith("ssh:"):
             raise IslandChangeError(f"{where}: --inventory is the node inventory of an ssh: island (--gpu {gpu})")
-        argv += ["--rl-node-inventory", str(inventory)]
+        argv += ["--rl-node-inventory", inventory_path(inventory)]
     member = il.trainer_member(island, plan, argv, prefix=f"{il.fleet_prefix(trainer_argv)}-i{k}",
                                fleet_shape=il.fleet_shape(trainer_argv))
     return member, members
+
+
+def inventory_path(inventory: str) -> str:
+    """An island's node inventory as its launch reads it: an absolute path (the trainer
+    worker and a later ``yeto fleet island`` run in other directories)."""
+    from pathlib import Path  # noqa: PLC0415
+
+    return str(Path(str(inventory)).expanduser().resolve())
 
 
 def run_budget_usd(cfg: dict[str, Any]) -> float | None:
@@ -201,32 +213,58 @@ def remove(doc: dict[str, Any], name: str) -> list[str]:
     return gone
 
 
-def move(doc: dict[str, Any], cfg: dict[str, Any], name: str, *, gpu: str, usd_per_h: float | None = None) -> dict:
+def move(doc: dict[str, Any], cfg: dict[str, Any], name: str, *, gpu: str, usd_per_h: float | None = None,
+         inventory: str | None = None) -> dict:
     """Move island ``name`` to other machines (in place); returns its member. Its price is
     ``usd_per_h`` when given, else none of its own: the new machines are billed at the
     unified price table's price for their ``--gpu`` (``trainer_worker.table_usd_per_h``),
-    never at the old machines' price."""
+    never at the old machines' price. ``inventory``: the node inventory of an ``ssh:``
+    ``gpu`` (its launch's ``--rl-node-inventory``, in place of the island's own)."""
     member = trainer_by_name(doc, name)
     member["gpu"] = fleet_mod._gpu(gpu, f"island {name} --gpu")  # noqa: SLF001
     member["usd_per_h"] = (None if usd_per_h is None
                            else fleet_mod._price(usd_per_h, f"island {name} --usd-per-h"))  # noqa: SLF001
+    if inventory is not None:
+        from yeto.launch import island_join  # noqa: PLC0415
+
+        if not str(member["gpu"]).startswith("ssh:"):
+            raise IslandChangeError(f"island {name}: --inventory is the node inventory of an ssh: island "
+                                    f"(--gpu {member['gpu']})")
+        member["argv"] = [*island_join.without_inventory([str(a) for a in member.get("argv") or ()]),
+                          "--rl-node-inventory", inventory_path(inventory)]
     shape = il.fleet_shape([str(a) for a in cfg["fleet"]["trainer_argv"]])
     if shape:
         member["fleet_shape"] = shape  # the moved island's layout is checked against the fleet's
     return member
 
 
-def join_check(cfg: dict[str, Any], doc: dict[str, Any], member: dict[str, Any], *, ssh: Any = None) -> None:
-    """An added ``ssh:`` island's nodes (``yeto.launch.island_join``): free in this fleet,
-    healthy, in one fabric group and not leased to another run; refused naming each problem."""
+def join_check(cfg: dict[str, Any], doc: dict[str, Any], member: dict[str, Any], *, ssh: Any = None,
+               force: bool = False, first: Any = None) -> Any:
+    """An ``ssh:`` island's nodes (added, or moved onto; ``yeto.launch.island_join``):
+    as many as it needs, free in this fleet, healthy, in one fabric group and not leased to
+    another run; refused naming each problem. Returns the check (its nodes, its health).
+
+    ``first``: the check before the desired state was read again (the write's retry,
+    another ``add`` that claimed this island's learner id meanwhile): its node health is
+    kept, the rest (the other islands' nodes, the leases under the member's prefix now) is
+    checked again on ``doc``."""
     from yeto.launch import island_join  # noqa: PLC0415
 
     fleet_argv = [str(a) for a in cfg["fleet"]["trainer_argv"]]
-    # a node leased by the island's own launch (its member prefix) is its own
-    result = island_join.check_member(member, doc, fleet_argv=fleet_argv, run_id=str(member["prefix"]), ssh=ssh)
+    # a node leased by the island's own launch (its member prefix, -m<n> after a move) is its own
+    result = island_join.check_member(member, doc, fleet_argv=fleet_argv, run_id=str(member["prefix"]), ssh=ssh,
+                                      force=force, health=None if first is None else first.health,
+                                      log=None if first is None else (lambda m: None))
     if not result.ok:
-        raise IslandChangeError(f"island {member['name']}'s nodes cannot join: " + "; ".join(result.refusals))
-    print(f"fleet island: island {member['name']}'s nodes pass the join checks (health, fabric group, lease)")
+        again = "" if first is None else " (checked again on the desired state now)"
+        raise IslandChangeError(f"island {member['name']}'s nodes cannot join{again}: " + "; ".join(result.refusals))
+    if first is None:
+        print(f"fleet island: island {member['name']} takes nodes {island_join.names(result.nodes)}; its nodes pass "
+              "the join checks (health, fabric group, lease)")
+    elif result.nodes != first.nodes:
+        print(f"fleet island: island {member['name']} takes nodes {island_join.names(result.nodes)} now (the "
+              "desired state changed since its check)")
+    return result
 
 
 # -- the launch's own dry run -------------------------------------------------------------------
@@ -326,6 +364,13 @@ def add_parser(fsub: Any) -> None:
     m.add_argument("--name", required=True)
     m.add_argument("--gpu", required=True)
     m.add_argument("--usd-per-h", type=float, default=None)
+    m.add_argument("--inventory", default=None, metavar="PATH",
+                   help="an ssh: --gpu's node inventory (its trainer nodes), in place of the island's own; they are "
+                   "checked first as for add")
+    for q in (a, m):
+        q.add_argument("--force", action="store_true",
+                       help="an ssh: island whose node health check does not read joins anyway (a WARNING); "
+                       "a node found unhealthy is still refused")
     for q in (a, r, m):
         q.add_argument("--config", required=True, help="the run config")
         q.add_argument("--dry-run", action="store_true", help="show the change and dry-run the launch; write nothing")
@@ -344,7 +389,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
         for m in doc.get("members") or ():
             for key in dz.ONE_SHOT:
                 m.pop(key, None)
-        launch_member = previous = None
+        launch_member = previous = joined = None
         if args.island_command == "add":
             unpriced_under_budget(run.cfg, args.gpu, args.usd_per_h)
             with open(args.samplers) as fh:
@@ -357,13 +402,16 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
             add(doc, member, pools)
             launch_member = member
             if str(member["gpu"]).startswith("ssh:"):
-                join_check(run.cfg, current, member)
+                joined = join_check(run.cfg, current, member, force=args.force)
         elif args.island_command == "remove":
             remove(doc, args.name)
         else:
             unpriced_under_budget(run.cfg, args.gpu, args.usd_per_h)
             previous = copy.deepcopy(trainer_by_name(doc, args.name))
-            launch_member = move(doc, run.cfg, args.name, gpu=args.gpu, usd_per_h=args.usd_per_h)
+            launch_member = move(doc, run.cfg, args.name, gpu=args.gpu, usd_per_h=args.usd_per_h,
+                                 inventory=args.inventory)
+            if str(launch_member["gpu"]).startswith("ssh:"):  # the machines it moves onto: as for add
+                joined = join_check(run.cfg, current, launch_member, force=args.force)
         doc = dz.validate(doc)
         for line in changes(current, doc):
             print(f"fleet island: {line}")
@@ -397,11 +445,17 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
 
     def change(fresh: dict[str, Any]) -> None:
         if args.island_command == "add":
+            before = copy.deepcopy(fresh)
             add(fresh, member_now, pools)
+            moved = member_now
         elif args.island_command == "remove":
             remove(fresh, args.name)
+            return
         else:
-            move(fresh, run.cfg, args.name, gpu=args.gpu, usd_per_h=args.usd_per_h)
+            before = copy.deepcopy(fresh)
+            moved = move(fresh, run.cfg, args.name, gpu=args.gpu, usd_per_h=args.usd_per_h, inventory=args.inventory)
+        if joined is not None:  # the other islands and the leases as they are now (an add may have run meanwhile)
+            join_check(run.cfg, before, moved, force=args.force, first=joined)
 
     try:
         written = store.update(change, note=f"fleet island {args.island_command} {args.name}", attempts=3)

@@ -79,6 +79,10 @@ file has the key (``null`` included), the nodes of a multi-node trainer island m
 share one group; a file without any ``fabric_group`` key places islands as before.
 ``fabric_group: unavailable`` (reserved) marks a node the probe found without RDMA
 to the others: it never joins a multi-node island, a single-node one takes it.
+``min_ib_gbps`` is the least rate (Gb/s) of each port the job's ``NCCL_IB_HCA`` names
+on the node: the node health check of a multi-node trainer island (``yeto.hw.node_health``)
+and the join check of an island added at run time (:mod:`.island_join`) hold the
+ports to it.
 
 An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300
 (with ``--model-store local:///data/models --model-store-source s3://...`` the
@@ -144,7 +148,7 @@ _REQUIRED = ("name", "host", "device_family", "cpu_arch", "card", "cards_per_nod
              "host_memory_gib")
 _KNOWN = _REQUIRED + ("proxy_jump", "fabric", "interface", "address", "mounts", "image", "runtime",
                       "docker_args", "env", "price_per_card_hour", "roles", "scratch", "scratch_min_free_gib",
-                      "store_env_file", "node_health", "fabric_group")
+                      "store_env_file", "node_health", "fabric_group", "min_ib_gbps")
 NODE_HEALTH_MODES = ("auto", "off")
 # node profile keys (unified-sampler-pool): parse_profile reads them, parse_node accepts and ignores them
 _PROFILE_KEYS = ("card_arch", "container", "paths", "model_source", "reach")
@@ -240,6 +244,9 @@ class Node:
     # :mod:`.fabric_groups`); None: no fabric_group key; FABRIC_UNGROUPED (""): the key is
     # null; FABRIC_UNAVAILABLE: reserved, the node has no RDMA to the others
     fabric_group: str | None = None
+    # the least rate (Gb/s) of each port of the job's NCCL_IB_HCA on the node (the node health
+    # check of a multi-node trainer island, the join check); None: not declared
+    min_ib_gbps: float | None = None
 
     @property
     def hbm_gib_per_node(self) -> float:
@@ -492,6 +499,8 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None,
         store_env_file=store_env_file,
         node_health=parse_node_health(raw["node_health"], f"node {name}") if "node_health" in raw else node_health,
         fabric_group=fabric_group,
+        min_ib_gbps=(_require_positive(raw["min_ib_gbps"], name, "min_ib_gbps")
+                     if raw.get("min_ib_gbps") is not None else None),
     )
     try:
         node.compat_group  # noqa: B018 - an unknown HBM variant fails here, not at launch

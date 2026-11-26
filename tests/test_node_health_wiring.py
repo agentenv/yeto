@@ -825,3 +825,14 @@ def test_a_failed_removal_of_the_old_check_does_not_stop_the_start(tmp_path, mon
     monkeypatch.setattr(sp.SshSamplerPoolOps, "ssh", ssh)
     _, _, cmds, _, probe = _cuda_start(tmp_path, monkeypatch)
     assert any("-m yeto.node run" in c for c in cmds) and sp.HEALTH_MARK in probe
+
+
+def test_a_node_s_min_ib_gbps_holds_its_trainer_island_s_ports(tmp_path):
+    """The inventory's ``min_ib_gbps`` is the least rate of the job's ports (a running island's
+    check, as the join check of an added island)."""
+    nodes = tuple(replace(b300(i, env={"NCCL_IB_HCA": HCA}), min_ib_gbps=400.0 if i == 1 else None)
+                  for i in range(3))
+    ops = make_ops(tmp_path, HealthCluster(NAMES), clock=IslandClock(), health_every_s=60.0)
+    ops.add("isl", SshTrainerSpec(nodes=nodes, run_id="run1", workdir="/opt/yeto", run_script="echo island"))
+    watches = ops.islands["isl"].health
+    assert watches[1].checker.min_ib_gbps == 400.0 and watches[0].checker.min_ib_gbps is None
