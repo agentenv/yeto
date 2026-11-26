@@ -702,12 +702,21 @@ def _island_straggler_watch(args, island_states, local_syncer):
     from .rl.engine.sample_roles import FLEET_ROLE_ISLAND, fleet_role
     from .rl.engine.tape_upload import upload_interval_s
 
-    uploaded = (fleet_role(args) == FLEET_ROLE_ISLAND and upload_interval_s() is not None
-                and is_object_store_uri(str(getattr(args, "rl_checkpoint_store", None) or "")))
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    if fleet_role(args) != FLEET_ROLE_ISLAND:
+        why = ("the fleet's syncer runs on a VM of its own and a launch of every island does not copy its tape "
+               "to the run store; run the syncer on this host (--controller head) or launch the fleet island by "
+               "island (fleet.launch per_island)")
+    elif upload_interval_s() is None:
+        why = "the syncer launch's tape upload is off (YETO_RL_TAPE_UPLOAD_S=0)"
+    elif not is_object_store_uri(store):
+        why = f"the run store {store or '(none)'} is not an object store: the syncer launch uploads no tape to it"
+    else:
+        why = None
     try:
         return watch_for(args, local_tape=getattr(local_syncer, "event_tape", None),
                          local_offset=int(getattr(local_syncer, "_event_offset", 0) or 0),
-                         objects=getattr(island_states, "objects", None) if uploaded else None)
+                         objects=getattr(island_states, "objects", None) if why is None else None, no_source=why)
     except ValueError as error:
         raise SystemExit(str(error)) from None
 

@@ -1063,30 +1063,56 @@ class FleetController:
     def _poll_stragglers(self) -> None:
         """The straggler watch's signals for the islands running now (not draining): each one
         is written once (``island_straggler`` / ``island_straggler_cleared`` in fleet.jsonl,
-        ``straggler`` in the island's record) and its policy is asked what to do. Never
-        raises: a watch that fails is a missing view, not the end of supervision."""
+        ``straggler`` in the island's record) and its policy is asked what to do; a flagged
+        island that stops running (recovering, draining, ended) is cleared, naming why. The
+        watch's notices (nothing can be watched here, or its tape stays silent) are written
+        once each as ``island_straggler_unavailable``. Never raises: a watch that fails is a
+        missing view, not the end of supervision."""
         if self.straggler is None or self.recorder is None:
             return
+        from . import island_straggler as st
+
         try:
             running, names = {}, {}
             for rec in self.learners.values():
                 ref = self.recorder.ref(rec["name"])
-                if ref is None or ref.role == "sampler" or rec["state"] != RUNNING or rec.get("draining"):
+                if ref is None or ref.role == "sampler":
                     continue
-                running[ref.island] = (rec.get("incarnation"), rec.get("job_id"))
                 names[ref.island] = rec
+                if rec["state"] == RUNNING and not rec.get("draining"):
+                    running[ref.island] = (rec.get("incarnation"), rec.get("job_id"))
             for signal in self.straggler.poll(running):
                 rec = names.get(signal.island)
                 if rec is not None:
                     self._island_straggler(rec, signal)
+            # each trainer island of this launch names it (a nameless fleet.jsonl event would be
+            # priced as an island of its own); kept until the launch knows its islands
+            if names:
+                for why in self.straggler.notices():
+                    print(f"[launcher] island straggler watch: {why}", file=sys.stderr)
+                    for rec in names.values():
+                        self._fleet(st.UNAVAILABLE_EVENT, rec["name"], reason=str(why)[:500])
         except Exception as error:  # noqa: BLE001 - a watch, never the end of supervision
             print(f"[launcher] island straggler watch: {type(error).__name__}: {error}"[:400], file=sys.stderr)
 
+    @staticmethod
+    def _not_running(rec) -> str:
+        """Why a flagged island's stretch ends without a merged push: its controller state."""
+        if rec.get("draining") or rec.get("stop_request") is not None:
+            return "stopped or removed (island STOP)"
+        if rec["state"] == RECOVERING:
+            return "relaunched"
+        return f"not running ({rec['state']})"
+
     def _island_straggler(self, rec, signal) -> None:
+        from dataclasses import replace
+
         from . import island_straggler as st
 
         name = rec["name"]
         if signal.cleared:
+            if signal.reason == "not running":
+                signal = replace(signal, reason=self._not_running(rec))
             print(f"[launcher] {name}: no longer a straggler ({signal.reason})", file=sys.stderr)
             self._fleet(st.CLEARED_EVENT, name, **st.signal_fields(signal, None))
             self._record(rec, straggler=None)
