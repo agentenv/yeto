@@ -1,8 +1,8 @@
 # Your own bare-metal cluster as yeto sees it: an SSH node inventory
 # (yeto/launch/node_inventory.py). docs/OWN_CLUSTERS.md explains each use.
 #
-# Two 8 x B300 trainer nodes (roles: [trainer]) and three 8 x H100 sampler
-# nodes (roles: [sampler]). The trainer templates use the trainer nodes; the
+# One 8 x B300 trainer node (roles: [trainer]) and three 8 x H100 sampler
+# nodes (roles: [sampler]). The trainer templates use the trainer node; the
 # own-sampler-pool template uses the sampler nodes (two run a sampler, the
 # third is the spare a lost node's slot moves to).
 #
@@ -14,11 +14,12 @@
 # Check the file without touching a node:
 #   python -c "from yeto.launch.node_inventory import load_inventory; \
 #     print(len(load_inventory('inventory.own-nodes.yaml')))"
-# `yeto run up --config run.<template>.json --dry-run` then checks over SSH
-# that every node of the run reaches the run store and the image registry.
+# `yeto run up --config run.<template>.json --dry-run --check-nodes` then checks
+# over SSH that every node of the run reaches the run store and the image
+# registry (the real `yeto run up` checks it before it orders anything).
 
 nodes:
-  - &trainer
+  - &trainer                         # add nodes like it (another name, host, address) for a larger trainer
     name: own-b300-0
     host: ops@192.0.2.30              # SSH target from the control host
     address: 198.51.100.30            # this node's IP on the cluster network
@@ -38,7 +39,6 @@ nodes:
     roles: [trainer]
     env:
       NCCL_IB_HCA: "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
-  - {<<: *trainer, name: own-b300-1, host: ops@192.0.2.31, address: 198.51.100.31}
   - &sampler
     name: own-smp-0
     host: ops@192.0.2.40

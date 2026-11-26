@@ -1542,11 +1542,13 @@ def image_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
 def egress_targets(cfg: Mapping[str, Any]) -> list[tuple[Node, tuple[Any, ...]]]:
     """``(node, endpoints)`` of each node of the pool: what its sampler reaches from the
     node's network (``yeto run up --dry-run`` checks it there over SSH): the run store's
-    object API (the r2 data path: the ``r2_env_file``'s endpoint; nothing for a node-local
-    store or the syncer path) and the registry of the node's image (container runtime).
+    object API (the r2 data path; nothing for a node-local store or the syncer path) and
+    the registry of the node's image (container runtime). The store endpoint is what the
+    node's sampler takes (``yeto.node.store.STORE_URI_SHELL``): the ``r2_env_file``'s
+    ``AWS_ENDPOINT_URL`` and nothing else, AWS S3 (in the file's region) when it is empty.
     Raises ValueError on a config the pool itself refuses."""
     from .nc.elastic import read_env_file  # noqa: PLC0415
-    from .preflight.gate import registry_endpoint, store_endpoint  # noqa: PLC0415
+    from .preflight.gate import registry_endpoint, s3_endpoint  # noqa: PLC0415
 
     conf = parse_config(dict(cfg))
     store = None
@@ -1554,7 +1556,9 @@ def egress_targets(cfg: Mapping[str, Any]) -> list[tuple[Node, tuple[Any, ...]]]
         env = read_env_file(os.path.expanduser(str(cfg["r2_env_file"])))
         bucket = env.get(str(cfg.get("bucket_env") or "R2_BUCKET"))
         if bucket:
-            store = store_endpoint(f"s3://{bucket}/runs/{str(cfg.get('run_prefix') or '').strip('/')}", env)
+            region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION")
+            store = s3_endpoint(env.get("AWS_ENDPOINT_URL"), region,
+                                f"s3://{bucket}/runs/{str(cfg.get('run_prefix') or '').strip('/')}")
     spec = spec_of(cfg)
     out = []
     for node in conf.nodes:

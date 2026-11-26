@@ -485,6 +485,17 @@ def _node_runtime_sky(cfg: dict[str, Any]) -> bool:
             and cfg.get("data_path", "r2") == "r2" and cli.node_runtime_on(cfg))
 
 
+def _spec_base_dir(cfg: dict[str, Any]) -> str | None:
+    """The model directory the pool's sampler spec names (``engine.server.base_dir``);
+    None when the spec does not read (its own check reports it) or names none."""
+    try:
+        spec = json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text())
+        base_dir = ((spec.get("engine") or {}).get("server") or {}).get("base_dir")
+    except (KeyError, OSError, ValueError, AttributeError):
+        return None
+    return str(base_dir).rstrip("/") if base_dir and "<" not in str(base_dir) else None
+
+
 def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str], bucket: str) -> list[str]:
     """Store-layout checks of ``pool --dry-run``: ``run_prefix`` does not repeat
     ``runs/``, the model is in the bucket (a missing upload otherwise surfaces only
@@ -503,9 +514,15 @@ def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str],
         from yeto.node import ssh_docker  # noqa: PLC0415
 
         try:
-            ssh_docker.container_dest(dest)
+            container = ssh_docker.container_dest(dest)
         except ssh_docker.SshDockerError as error:
             problems.append(str(error))
+        else:
+            base_dir = _spec_base_dir(cfg)
+            if base_dir and base_dir != container and not base_dir.startswith(container + "/"):
+                problems.append(f"model_pull.dest {dest!r} is {container} in the sampler container, but the "
+                                f"spec's engine.server.base_dir is {base_dir!r}: the engine would not find the "
+                                "pulled model; name one directory in both")
     elif dest != ssh_sampler.MODEL_HOST:
         problems.append(f"model_pull.dest {dest!r}: the sampler container mounts only {ssh_sampler.MODEL_HOST} "
                         f"(at {ssh_sampler.MOUNTS[ssh_sampler.MODEL_HOST]}); leave dest unset")

@@ -11,7 +11,7 @@ The templates are in `examples/own-cluster/`:
 
 | file | what it is |
 |---|---|
-| `inventory.own-nodes.yaml` | two 8 x B300 trainer nodes (`roles: [trainer]`) and three 8 x H100 sampler nodes (`roles: [sampler]`) |
+| `inventory.own-nodes.yaml` | one 8 x B300 trainer node (`roles: [trainer]`; add nodes like it for a larger trainer) and three 8 x H100 sampler nodes (`roles: [sampler]`) |
 | `run.own-trainer-sky-sampler.json` | own trainer, sky spot L40S samplers |
 | `run.own-trainer-modal-sampler.json` | own trainer, Modal L40S samplers |
 | `run.own-sampler-pool.json` | own sampler pool, Modal trainer |
@@ -38,7 +38,7 @@ yeto run up --config run.own-trainer-sky-sampler.json --dry-run
 yeto run up --config run.own-trainer-sky-sampler.json
 ```
 
-The dry run orders nothing. It runs:
+The dry run orders nothing and contacts no node. It runs:
 
 - each pool's own dry run (`python -m yeto.launch.nc pool --dry-run`): the
   offers it would order with their prices, the sampler spec checks, the
@@ -48,36 +48,59 @@ The dry run orders nothing. It runs:
 - the checks between the pools and the trainer: the rollout fields the
   samplers record against the ones the trainer trains on (`top_logprobs_num`,
   routed experts), and, in a fleet, the release form each pool's engine loads
-  (weight format, reload mode);
-- the egress check of your nodes: over SSH, on every own node of the run,
-  whether it reaches the run store's object API and the trainer image's
-  registry from its own network. The probe is an HTTPS request with `curl`:
-  any HTTP answer counts (401, 403 and 404 included: the network path works),
-  and the certificate is not verified, so a proxy that intercepts TLS passes.
-  The request goes through the node's proxy: the inventory env's
-  `HTTPS_PROXY`/`https_proxy` (and the other proxy variables), else, for the
-  registry, the docker daemon's proxy (`docker info`, what `docker pull`
-  uses). A node without `curl` gets a TCP connect, or, when a proxy is set, a
-  `[WARN]` that the path is not checked. One line per node and endpoint, in
-  the preflight's format; a node that does not reach one refuses the run up
-  before anything is ordered, naming the node and the endpoint:
+  (weight format, reload mode) and the trainer shape of every island.
 
-  ```
-  dry run: own nodes own-b300-0, own-b300-1: checking over ssh that they reach store https://<endpoint>, registry https://<registry>/
-  dry run:   [PASS] own-b300-0 reach_store: the store endpoint https://<endpoint> (s3://<bucket>/runs/<run>): http 403
-  dry run:   [PASS] own-b300-0 reach_registry: the registry endpoint https://<registry>/ (<image>): http 401
-  dry run:   [FAIL] own-b300-1 reach_store: own-b300-1 cannot reach the store endpoint https://<endpoint> (s3://<bucket>/runs/<run>) (rc 6): curl: (6) Could not resolve host ... -> open the node's egress to it (firewall, proxy: https_proxy in the node's environment, DNS)
-  dry run:   [PASS] own-b300-1 reach_registry: the registry endpoint https://<registry>/ (<image>): http 401
-  dry run:   3 pass, 0 warn, 1 fail, 0 skip
-  cluster preflight failed: nothing ordered
-  ```
+The real `yeto run up` then runs the trainer's cluster preflight and the
+**egress check of your nodes** before it orders anything (any pool: National
+Compute, sky, Modal). `--dry-run --check-nodes` runs the same egress check in
+a dry run. Over SSH, on every own node of the run, it checks whether the node
+reaches the run store's object API and the trainer image's registry from its
+own network:
 
-  The store endpoint is `--rl-object-store-endpoint`, else the store's
-  endpoint variables (`YETO_RL_STORE_S3_ENDPOINT_URL`, `AWS_ENDPOINT_URL`, the
-  store profile's `endpoint_url`), else AWS S3 in the store's region. The
-  registry is the one of `--rl-image` (else the inventory's image, else the
-  pinned default). A node that takes no SSH fails its `ssh` check the same way.
-  `--skip-preflight` skips every preflight, this one included.
+- The probe is an HTTPS request with `curl` (bounded by `-m`, retried twice on
+  a DNS or connect blip): any HTTP answer counts (401, 403 and 404 included:
+  the network path works), and the certificate is not verified, so a proxy
+  that intercepts TLS passes.
+- It runs with the inventory env exported, so it goes through the node's
+  proxy (`HTTPS_PROXY`/`https_proxy` and the other proxy variables there);
+  for the registry, when the env sets no proxy, through the docker daemon's
+  (`docker info`, what `docker pull` uses). A registry the daemon lists in
+  `insecure-registries` (`/etc/docker/daemon.json`), or a loopback one, is
+  requested over `http`; a `daemon.json` that does not read means `https`.
+- A node without `curl` gets a TCP connect, or, when a proxy is set, a
+  `[WARN]` that the path is not checked.
+- A store not reached is a `[FAIL]`: the run up orders nothing and names the
+  node and the endpoint. A registry not reached is a `[WARN]` (dockerd may pull
+  through a proxy of its own, a systemd drop-in, that the probe does not
+  see): the image pull reports it if the pull fails. A node that takes no SSH
+  fails its `ssh` check. Each FAIL names its own fix (egress, the CA bundle
+  for a TLS failure, the clock, the SSH login).
+- A registry is checked only for nodes with `runtime: docker` (a `rootfs`
+  node pulls no image).
+
+```
+cluster preflight: own nodes own-b300-0: checking over ssh that they reach store https://<endpoint>, registry https://<registry>/
+cluster preflight:   [FAIL] own-b300-0 reach_store: own-b300-0 cannot reach the store endpoint https://<endpoint> (s3://<bucket>/runs/<run>) (rc 6): http 000 curl: (6) Could not resolve host ... -> open the node's egress to it (firewall, proxy: https_proxy in the node's environment, DNS)
+cluster preflight:   [PASS] own-b300-0 reach_registry: the registry endpoint https://<registry>/ (<image>): http 401
+cluster preflight:   1 pass, 0 warn, 1 fail, 0 skip
+cluster preflight: an own node fails the egress check (the lines above name each node and endpoint): open the node's egress to it (...); nothing is ordered (--skip-egress-check skips this check only)
+cluster preflight failed: nothing ordered
+```
+
+The store endpoint is the one the launch's store client takes
+(`store_client_environ`): the environment's `YETO_RL_STORE_S3_ENDPOINT_URL`,
+else `--rl-object-store-endpoint` / `AWS_ENDPOINT_URL`, else the endpoint of
+the store profile (`--rl-object-store-profile`), else AWS S3 in the store's
+region. The registry is the one of `--rl-image` (else the inventory's image,
+else the pinned default; Docker Hub is `registry-1.docker.io`).
+`--skip-egress-check` skips this check only; `--skip-preflight` skips every
+preflight, this one included.
+
+The check is reachability only: it does not check the store credentials, the
+bucket, or the registry login, and it does not reach a registry's blob CDN
+(for example the host ghcr.io serves layers from, or Docker Hub's auth and
+CDN hosts), so a firewall that allows only the registry host passes it and
+fails at the image pull.
 
 The spend line counts the cloud parts only: `trainer.usd_per_h` is 0 for a
 trainer on own nodes, and each pool is counted at its node price. It is
@@ -85,7 +108,7 @@ logged for a run with own nodes (an own trainer or an own sampler pool) whose
 pools are not National Compute ones; a run with an NC pool logs no spend line:
 
 ```
-dry run: spend estimate $1.50/h = pools $1.50/h (sky-l40s (sky) 2 x $0.7492) + trainer $0/h (own nodes: ssh:2x8xb300); over the 6 h wall clock $8.99 (budget.usd $30)
+dry run: spend estimate $1.50/h = pools $1.50/h (sky-l40s (sky) 2 x $0.7492) + trainer $0/h (own nodes: ssh:1x8xb300); over the 6 h wall clock $8.99 (budget.usd $30)
 ```
 
 A fleet logs its own estimate instead (`fleet: budget estimate ...`), with
@@ -105,8 +128,12 @@ A fleet of an own island and a cloud island (`run.fleet-own-and-cloud.json`)
 is an island fleet as in [MILES_RL.md](MILES_RL.md) ("Island fleet"): island 0
 trains on the own nodes, island 1 on Modal, each with its own pools, and one
 syncer merges them. The syncer merges islands of one card type (its compat
-group); put the cloud island on the same card as your nodes, or declare one
-group with `--rl-compat-group`.
+group) and one trainer shape: the same TP/PP/EP/CP/DP, since the shape-bound
+full-parameter layout names every tensor by its rank's parallel position.
+Put the cloud island on the same card and the same nodes x GPUs as the own
+island (the template: 1 x 8 x B300 on both), or declare one group with
+`--rl-compat-group` and set `--rl-sync-layout shape-free` for the whole fleet.
+The dry run refuses islands of two shapes, naming both.
 
 ## Own sampler pools
 
@@ -139,6 +166,8 @@ yeto run up --config run.own-sampler-pool.json --dry-run
 - **Spend.** The pool bills nothing (`price_usd_h` 0 unless you state one), so
   a spend cap (`budget.usd`) counts the other parts only: in the template, the
   Modal trainer.
-- **Egress.** The dry run checks over SSH that every pool node reaches the run
-  store (the endpoint of `r2_env_file`) and the registry of its image, as for
-  an own trainer.
+- **Egress.** `yeto run up` (and a dry run with `--check-nodes`) checks over
+  SSH that every pool node reaches the run store and the registry of its
+  image, as for an own trainer. The store endpoint is the one the node's
+  sampler takes: the `AWS_ENDPOINT_URL` of `r2_env_file` (AWS S3 in the file's
+  region when it is empty).

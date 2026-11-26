@@ -2,14 +2,16 @@
 trainer with sky spot or Modal samplers, an own sampler pool, and a fleet of one own and
 one cloud island. Each passes ``yeto run up --dry-run`` with its pool dry runs and the
 trainer's launch dry run run in this process (no cloud, no sky API server, no Modal
-call), its own nodes reach the store and the registry over a fake ssh, and the spend
-counts only the cloud parts. A node that cannot reach its store refuses the run up,
-naming the node and the endpoint, and nothing is ordered."""
+call) and contacts no node; with ``--check-nodes`` its own nodes reach the store and the
+registry over a fake ssh. The spend counts only the cloud parts. The real ``run up`` runs
+the same egress check before it orders anything: a node that cannot reach its store
+refuses it, naming the node and the endpoint, and nothing is ordered."""
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -26,6 +28,11 @@ ENDPOINT = "https://acct.r2.example"
 SAMPLER_IMAGE = "ghcr.io/example/vllm-qwen3@sha256:" + "0" * 64
 
 
+def _probe_url(body: str) -> str:
+    """The URL one reach section of the probe requests first (``u=<url>``)."""
+    return re.search(r"\bu='?(https?://[^'\s;]+)", body).group(1)
+
+
 class FakeSsh:
     """The ssh of the preflight (``SshOps``): the clock read and the egress probe, which
     reaches every endpoint except the ``(node, url)`` pairs in ``unreachable``."""
@@ -39,9 +46,9 @@ class FakeSsh:
             return subprocess.CompletedProcess([], 0, f"{time.time():.3f}\n", "")
         out = []
         for name, body in re.findall(r"echo '@@yeto-section (\S+)'\n(.*?)\necho \"@@yeto-rc", script, re.S):
-            url = re.search(r"(https?://[^'\s;]+)", body).group(1)
+            url = _probe_url(body)
             if (node.name, url) in FakeSsh.unreachable:
-                out += [f"@@yeto-section {name}", "curl: (6) Could not resolve host", "@@yeto-rc 6"]
+                out += [f"@@yeto-section {name}", "http 000", "curl: (6) Could not resolve host", "@@yeto-rc 6"]
             else:
                 out += [f"@@yeto-section {name}", "http 403", "@@yeto-rc 0"]
         return subprocess.CompletedProcess([], 0, "\n".join(out) + "\n", "")
@@ -109,8 +116,10 @@ def kit(tmp_path, monkeypatch):
     def in_process(self, argv, *, log, timeout=None):  # noqa: ARG001
         argv = [str(a) for a in argv]
         commands.append(argv)
-        assert "--dry-run" in argv, f"a dry run ran a command that is not a dry run: {argv}"
         module, rest = argv[2], argv[3:]
+        if rest[:1] == ["preflight"]:  # the trainer's cluster preflight (a real run up): passes
+            return 0
+        assert "--dry-run" in argv, f"run up ran a command that is not a dry run: {argv}"
         main = nc_cli.main if module == "yeto.launch.nc" else cli.main
         try:
             return int(main(rest) or 0)
@@ -122,9 +131,11 @@ def kit(tmp_path, monkeypatch):
     return types.SimpleNamespace(files=files, commands=commands, ordered=ordered, up=up)
 
 
-def _dry_run(kit, name: str, capsys) -> tuple[int, str]:
-    args = types.SimpleNamespace(config=str(kit.files[name]), rl_command="up", skip_preflight=False, dry_run=True,
-                                 no_monitor=True, trainer_now=True, allow_after_forced_stop=False)
+def _dry_run(kit, name: str, capsys, *, check_nodes: bool = True, dry_run: bool = True,
+             skip_egress_check: bool = False) -> tuple[int, str]:
+    args = types.SimpleNamespace(config=str(kit.files[name]), rl_command="up", skip_preflight=False, dry_run=dry_run,
+                                 check_nodes=check_nodes, skip_egress_check=skip_egress_check, no_monitor=True,
+                                 trainer_now=True, allow_after_forced_stop=False)
     rc = kit.up.main(args)
     captured = capsys.readouterr()
     return rc, captured.out + captured.err
@@ -149,11 +160,13 @@ def _reach_calls() -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for node, script in FakeSsh.calls:
         if "@@yeto-section reach" in script:
-            out.setdefault(node, []).extend(re.findall(r"(https?://[^'\s;]+)", script))
+            out.setdefault(node, []).extend(
+                _probe_url(body) for body in re.findall(r"echo '@@yeto-section reach\d+'\n(.*?)\necho \"@@yeto-rc",
+                                                        script, re.S))
     return {node: sorted(set(urls)) for node, urls in out.items()}
 
 
-TRAINER_NODES = ["own-b300-0", "own-b300-1"]
+TRAINER_NODES = ["own-b300-0"]
 SAMPLER_NODES = ["own-smp-0", "own-smp-1", "own-smp-2"]
 REGISTRY = "https://ghcr.io/"  # the registry of the trainer image and of the sampler image
 REACHED = sorted([ENDPOINT, REGISTRY])
@@ -170,18 +183,52 @@ def test_the_dry_run_checks_every_own_node_reaches_the_store_and_the_registry(ki
     assert rc == 0, out[-3000:]
     assert _reach_calls() == {node: REACHED for node in nodes}
     assert f"dry run: own nodes {', '.join(nodes)}: checking over ssh that they reach store {ENDPOINT}" in out
+    for node in nodes:
+        assert f"dry run:   [PASS] {node} reach_store: the store endpoint {ENDPOINT}" in out
+
+
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_a_dry_run_without_check_nodes_contacts_no_node(kit, name, capsys):
+    rc, out = _dry_run(kit, name, capsys, check_nodes=False)
+    assert rc == 0, out[-3000:]
+    assert FakeSsh.calls == [] and "dry run: own nodes" not in out and "reach_" not in out
+
+
+def test_the_real_run_up_checks_the_egress_before_it_orders_anything(kit, monkeypatch, capsys):
+    """Not a dry run: the cluster preflight passes (faked), the egress check runs on the
+    trainer node; reached, run up goes on to write the fleet plan (stopped there); not
+    reached, nothing at all is ordered."""
+    monkeypatch.setattr(kit.up.Run, "write_fleet_plan", lambda self: False)  # stop before the first order
+    rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys, dry_run=False)
+    assert rc == 2 and "fleet plan not written: nothing ordered" in out, out[-3000:]
+    assert "cluster preflight: own nodes own-b300-0: checking over ssh that they reach store" in out
+    assert f"cluster preflight:   [PASS] own-b300-0 reach_store: the store endpoint {ENDPOINT}" in out
+    assert _reach_calls() == {"own-b300-0": REACHED}
+    FakeSsh.unreachable, FakeSsh.calls = {("own-b300-0", ENDPOINT)}, []
+    kit.commands.clear()
+    monkeypatch.setattr(kit.up.Run, "write_fleet_plan", lambda self: pytest.fail("ordered after a failed check"))
+    rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys, dry_run=False)
+    assert rc == 2, out[-3000:]
+    assert f"cluster preflight:   [FAIL] own-b300-0 reach_store: own-b300-0 cannot reach the store endpoint {ENDPOINT}" in out
+    assert "--skip-egress-check skips this check only" in out and "cluster preflight failed: nothing ordered" in out
+    assert kit.ordered == [] and all("--dry-run" in c or c[3] == "preflight" for c in kit.commands)
+    # --skip-egress-check: no probe, the run up goes on (to the stop above)
+    FakeSsh.calls = []
+    monkeypatch.setattr(kit.up.Run, "write_fleet_plan", lambda self: False)
+    rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys, dry_run=False, skip_egress_check=True)
+    assert rc == 2 and "fleet plan not written" in out and _reach_calls() == {}
 
 
 def test_own_trainer_with_sky_spot_samplers_spends_only_on_the_pool(kit, capsys):
     cfg = _cfg(kit, "run.own-trainer-sky-sampler.json")
-    assert cfg["trainer"]["usd_per_h"] == 0 and "ssh:2x8xb300" in cfg["trainer"]["argv"]
+    assert cfg["trainer"]["usd_per_h"] == 0 and "ssh:1x8xb300" in cfg["trainer"]["argv"]
     (pool,) = cfg["samplers"]
     offer = pool["provider"]["offers"][0]["resources"]
     assert pool["provider"]["kind"] == "sky" and offer["use_spot"] is True and offer["accelerators"] == "L40S:1"
     rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys)
     assert rc == 0, out[-3000:]
     assert ("dry run: spend estimate $1.50/h = pools $1.50/h (sky-l40s (sky) 2 x $0.7492) + trainer $0/h "
-            "(own nodes: ssh:2x8xb300); over the 6 h wall clock $8.99 (budget.usd $30)") in out
+            "(own nodes: ssh:1x8xb300); over the 6 h wall clock $8.99 (budget.usd $30)") in out
     assert "sky offer L40S:1@nebius/eu-north1/spot" in out and "estimated spend: $0.75 per node hour" in out
 
 
@@ -189,7 +236,7 @@ def test_own_trainer_with_modal_samplers_spends_only_on_the_pool(kit, capsys):
     rc, out = _dry_run(kit, "run.own-trainer-modal-sampler.json", capsys)
     assert rc == 0, out[-3000:]
     line = next(line for line in out.splitlines() if "dry run: spend estimate" in line)
-    assert "pools $5.68/h (modal-l40s (modal) 2 x $2.83877) + trainer $0/h (own nodes: ssh:2x8xb300)" in line
+    assert "pools $5.68/h (modal-l40s (modal) 2 x $2.83877) + trainer $0/h (own nodes: ssh:1x8xb300)" in line
     assert line.split("dry run: spend estimate ")[1].startswith("$5.68/h")
 
 
@@ -211,30 +258,52 @@ def test_an_own_sampler_pool_bills_nothing_and_runs_on_the_node_runtime(kit, cap
 def test_a_fleet_of_an_own_and_a_cloud_island_counts_the_own_trainer_at_zero(kit, capsys):
     rc, out = _dry_run(kit, "run.fleet-own-and-cloud.json", capsys)
     assert rc == 0, out[-3000:]
-    assert "fleet: island 0 own: learner 0, store trainer0/" in out and "trainer ssh:2x8xb300 at $0/h" in out
-    assert "fleet: island 1 cloud: learner 1" in out and "trainer modal:1x2xb300 at $17/h" in out
-    assert ("fleet: budget estimate $21.72/h = pools $4.34/h (i0-sky-l40s 2 x $0.7492, i1-modal-l40s 1 x $2.83877) "
-            "+ trainers $17.00/h (own $0, cloud $17) + syncer $0.38/h") in out
+    assert "fleet: island 0 own: learner 0, store trainer0/" in out and "trainer ssh:1x8xb300 at $0/h" in out
+    assert "fleet: island 1 cloud: learner 1" in out and "trainer modal:1x8xb300 at $68/h" in out
+    assert ("fleet: budget estimate $72.72/h = pools $4.34/h (i0-sky-l40s 2 x $0.7492, i1-modal-l40s 1 x $2.83877) "
+            "+ trainers $68.00/h (own $0, cloud $68) + syncer $0.38/h") in out
     assert "dry run: spend estimate" not in out  # the fleet's own estimate, not a second one
     launches = [c for c in kit.commands if "launch" in c]
-    assert launches and all(c[c.index("--gpu") + 1] == "ssh:2x8xb300,modal:1x2xb300" for c in launches)
+    assert launches and all(c[c.index("--gpu") + 1] == "ssh:1x8xb300,modal:1x8xb300" for c in launches)
 
 
-@pytest.mark.parametrize("name, node, url", [
-    ("run.own-trainer-sky-sampler.json", "own-b300-1", ENDPOINT),
-    ("run.fleet-own-and-cloud.json", "own-b300-0", REGISTRY),
-    ("run.own-sampler-pool.json", "own-smp-2", ENDPOINT),
+def test_a_fleet_of_two_island_shapes_is_refused_by_the_dry_run(kit, capsys):
+    """The shape-bound full-parameter layout names each tensor by its rank's TP/PP/EP/CP/DP:
+    an island of another shape would be refused by the syncer at HELLO."""
+    path = kit.files["run.fleet-own-and-cloud.json"]
+    cfg = json.loads(path.read_text())
+    cfg["islands"][1]["trainer"].update(gpu="modal:1x2xb300", usd_per_h=17.0)
+    path.write_text(json.dumps(cfg))
+    rc, out = _dry_run(kit, "run.fleet-own-and-cloud.json", capsys, check_nodes=False)
+    assert rc == 2
+    assert ("island cloud (learner 1): trainer shape TP1 PP1 EP1 CP1 DP2, island own (learner 0) trains on "
+            "TP1 PP1 EP1 CP1 DP8") in out
+    assert "--rl-sync-layout shape-free" in out and kit.ordered == []
+
+
+@pytest.mark.parametrize("name, node", [
+    ("run.own-trainer-sky-sampler.json", "own-b300-0"),
+    ("run.fleet-own-and-cloud.json", "own-b300-0"),
+    ("run.own-sampler-pool.json", "own-smp-2"),
 ])
-def test_a_node_that_cannot_reach_an_endpoint_refuses_the_run_up_and_names_both(kit, name, node, url, capsys):
-    FakeSsh.unreachable = {(node, url)}
+def test_a_node_that_cannot_reach_the_store_refuses_the_run_up_and_names_both(kit, name, node, capsys):
+    FakeSsh.unreachable = {(node, ENDPOINT)}
     rc, out = _dry_run(kit, name, capsys)
     assert rc == 2, out[-3000:]
-    role = "store" if url == ENDPOINT else "registry"
     (line,) = [line for line in out.splitlines() if "[FAIL]" in line]
-    assert f"[FAIL] {node} reach_{role}: {node} cannot reach the {role} endpoint {url}" in line
+    assert f"[FAIL] {node} reach_store: {node} cannot reach the store endpoint {ENDPOINT}" in line
     assert "Could not resolve host" in line
     assert "cluster preflight failed: nothing ordered" in out and "dry run: preflight ok" not in out
     assert kit.ordered == [] and all("--dry-run" in c for c in kit.commands)
+
+
+def test_a_node_that_does_not_reach_the_registry_warns_and_names_the_dockerd_proxy(kit, capsys):
+    FakeSsh.unreachable = {("own-b300-0", REGISTRY)}
+    rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys)
+    assert rc == 0, out[-3000:]
+    (line,) = [line for line in out.splitlines() if "[WARN]" in line]
+    assert f"[WARN] own-b300-0 reach_registry: own-b300-0 cannot reach the registry endpoint {REGISTRY}" in line
+    assert "systemctl show docker -p Environment" in line and "dry run: preflight ok, nothing ordered" in out
 
 
 def test_a_node_that_takes_no_ssh_refuses_the_run_up(kit, monkeypatch, capsys):
@@ -249,7 +318,8 @@ def test_a_node_that_takes_no_ssh_refuses_the_run_up(kit, monkeypatch, capsys):
     rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys)
     assert rc == 2
     assert "[FAIL] own-b300-0 ssh: ssh ops@192.0.2.30 failed (rc 255)" in out
-    assert "own-b300-1" in _reach_calls() and "own-b300-0" not in _reach_calls()
+    assert _reach_calls() == {}  # nothing else runs on a node that takes no ssh
+    assert "key login with BatchMode" in out.split("an own node fails the egress check")[1]  # the cause's fix
 
 
 def test_a_cloud_only_trainer_contacts_no_node(kit, capsys):
@@ -286,6 +356,8 @@ def test_the_templates_run_on_the_shipped_inventory_and_the_docs_name_them():
     ("registry.example:5000/team/img:tag", "https://registry.example:5000/"),
     ("vllm/vllm-openai:latest", "https://registry-1.docker.io/"),
     ("ubuntu", "https://registry-1.docker.io/"),
+    ("docker.io/library/ubuntu:24.04", "https://registry-1.docker.io/"),
+    ("index.docker.io/vllm/vllm-openai", "https://registry-1.docker.io/"),
     ("localhost/img", "https://localhost/"),
 ])
 def test_the_registry_of_an_image(image, url):
@@ -337,20 +409,110 @@ def test_the_launch_endpoints_take_the_argv_endpoint_and_the_default_image():
     assert registry.url == "https://quay.io/"
 
 
+def _aws_profile(tmp_path, monkeypatch, endpoint="https://acct.r2.cloudflarestorage.com"):
+    config = tmp_path / "aws-config"
+    config.write_text(f"[profile r2store]\nendpoint_url = {endpoint}\nregion = auto\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    for key in ("AWS_PROFILE", "YETO_RL_STORE_S3_PROFILE", "AWS_ENDPOINT_URL", "YETO_RL_STORE_S3_ENDPOINT_URL"):
+        monkeypatch.delenv(key, raising=False)
+    return {"AWS_CONFIG_FILE": str(config)}
+
+
+def test_the_store_endpoint_is_the_one_the_launch_s_store_client_takes(tmp_path, monkeypatch):
+    """store_client_environ decides: --rl-object-store-profile's endpoint_url; the
+    environment's endpoint over --rl-object-store-endpoint."""
+    from yeto.launch.preflight.gate import launch_endpoints
+    from yeto.launch.store_env import store_client_environ
+
+    env = _aws_profile(tmp_path, monkeypatch)
+    argv = ["--rl-checkpoint-store", "s3://b/runs/r", "--rl-object-store-profile", "r2store"]
+    store = launch_endpoints(argv, env)[0]
+    used = store_client_environ(types.SimpleNamespace(rl_object_store_endpoint=None,
+                                                      rl_object_store_profile="r2store"), env)
+    assert store.url == "https://acct.r2.cloudflarestorage.com" == used["YETO_RL_STORE_S3_ENDPOINT_URL"]
+    argv = ["--rl-checkpoint-store", "s3://b/runs/r", "--rl-object-store-endpoint", "https://argv.example"]
+    assert launch_endpoints(argv, {"YETO_RL_STORE_S3_ENDPOINT_URL": "https://env.example"})[0].url == \
+        "https://env.example"
+
+
+def test_a_rootfs_node_is_not_checked_for_a_registry():
+    from yeto.launch.node_inventory import Node
+    from yeto.launch.preflight.gate import launch_endpoints, node_endpoints
+
+    def node(name, runtime):
+        return Node(name=name, host=f"ops@{name}", device_family="npu", cpu_arch="aarch64", card="910B4",
+                    cards_per_node=8, hbm_gib=32, host_memory_gib=512, runtime=runtime)
+
+    argv = ["--rl-checkpoint-store", "s3://b/runs/r", "--rl-object-store-endpoint", "https://e.example"]
+    rootfs = [node("a", "rootfs"), node("b", "rootfs")]
+    assert [e.role for e in launch_endpoints(argv, {}, rootfs)] == ["store"]  # no image pulled anywhere
+    mixed = [node("a", "rootfs"), node("c", "docker")]
+    endpoints = launch_endpoints(argv, {}, mixed)
+    assert [e.role for e in endpoints] == ["store", "registry"]
+    assert [e.role for e in node_endpoints(endpoints, mixed[0])] == ["store"]
+    assert [e.role for e in node_endpoints(endpoints, mixed[1])] == ["store", "registry"]
+
+
+def test_an_ssh_pool_checks_the_endpoint_its_node_takes_from_the_env_file(kit, tmp_path):
+    """The node's sampler takes AWS_ENDPOINT_URL of the r2_env_file and nothing else
+    (yeto.node.store.STORE_URI_SHELL); empty: AWS S3."""
+    from yeto.launch import ssh_sampler_pool
+
+    (pool,) = _cfg(kit, "run.own-sampler-pool.json")["samplers"]
+    env_file = tmp_path / "pool.env"
+    env_file.write_text("R2_BUCKET=ocbucket\nAWS_ENDPOINT_URL=https://node.example\n"
+                        "AWS_ENDPOINT_URL_S3=https://other.example\nYETO_RL_STORE_S3_ENDPOINT_URL=https://yeto.example\n")
+    pool["r2_env_file"] = str(env_file)
+    stores = {eps[0].url for _node, eps in ssh_sampler_pool.egress_targets(pool)}
+    assert stores == {"https://node.example"}
+    env_file.write_text("R2_BUCKET=ocbucket\nAWS_REGION=eu-west-1\nAWS_PROFILE=elsewhere\n")
+    stores = {eps[0].url for _node, eps in ssh_sampler_pool.egress_targets(pool)}
+    assert stores == {"https://s3.eu-west-1.amazonaws.com"}
+
+
 def test_the_probe_marks_any_http_answer_reached_and_a_failed_connect_not():
     from yeto.launch.preflight import cluster
 
     endpoints = [cluster.Endpoint("store", ENDPOINT, "s3://b/r"),
                  cluster.Endpoint("registry", "https://registry.example:5000/")]
     script = cluster.probe_script(cluster.reach_sections(endpoints))
-    assert "/dev/tcp/registry.example/5000" in script
+    assert "'exec 3<>\"/dev/tcp/$1/$2\"' _ registry.example 5000" in script  # host and port as arguments
+    assert script.count(" -m 20 ") == 2 and script.count("--retry 2 --retry-connrefused") == 2  # bounded, retried
     text = "\n".join(["@@yeto-section reach0", "http 403", "@@yeto-rc 0",
                       "@@yeto-section reach1", "curl: (28) Connection timed out", "@@yeto-rc 28"])
     store, registry = cluster.reach_checks("n0", endpoints, cluster.parse_sections(text))
-    assert store.status == cluster.PASS and registry.status == cluster.FAIL
+    assert store.status == cluster.PASS and registry.status == cluster.WARN  # a registry not reached: WARN
     assert "n0 cannot reach the registry endpoint https://registry.example:5000/ (rc 28)" in registry.detail
     (missing,) = cluster.reach_checks("n0", endpoints[:1], {})
     assert missing.status == cluster.FAIL and "printed nothing" in missing.detail
+    tls = "\n".join(["@@yeto-section reach0", "curl: (60) SSL certificate problem", "@@yeto-rc 60"])
+    (store,) = cluster.reach_checks("n0", endpoints[:1], cluster.parse_sections(tls))
+    assert store.status == cluster.FAIL and "install the CA" in store.fix and "egress" not in store.fix
+
+
+@pytest.mark.parametrize("url", ["https://x;touch${IFS}f;y/", "https://a$(id).example/", "https://u:p@host/",
+                                 "https://ho st/", "ftp://host/", "https:///"])
+def test_an_endpoint_that_is_no_host_name_is_refused_without_a_probe(url, tmp_path):
+    from yeto.launch.preflight import cluster
+
+    endpoint = cluster.Endpoint("store", url, "s3://b/r")
+    assert endpoint.problem()
+    with pytest.raises(ValueError):
+        cluster.reach_command(endpoint)
+    ops = LocalShell(tmp_path)
+    checks, report = _egress(ops, endpoints=[endpoint])
+    assert not report.ok and checks["reach_store"].scope == "egress" and "is not" in checks["reach_store"].detail
+    assert not any(c.startswith("curl ") for c in ops.calls())  # refused before anything ran on the node
+
+
+def test_the_inventory_env_is_exported_before_the_probe():
+    from yeto.launch.node_inventory import Node
+    from yeto.launch.preflight import cluster
+
+    node = Node(name="n0", host="h", device_family="cuda", cpu_arch="x86_64", card="B300", cards_per_node=8,
+                hbm_gib=288, host_memory_gib=2048, env={"HTTPS_PROXY": PROXY, "NCCL_IB_HCA": "=mlx5_0",
+                                                       "bad key": "x"})
+    assert cluster.env_exports(node) == f"export HTTPS_PROXY={PROXY}\nexport NCCL_IB_HCA==mlx5_0\n"
 
 
 # -- the probe itself, in bash, behind proxies -----------------------------------------------
@@ -394,6 +556,8 @@ class LocalShell:
         for name, body in (("curl", FAKE_CURL), ("docker", FAKE_DOCKER))[0 if curl else 1:]:
             (self.bin / name).write_text(body)
             (self.bin / name).chmod(0o755)
+        for tool in ("tr", "sed", "grep"):  # the daemon.json read
+            (self.bin / tool).symlink_to(shutil.which(tool))
         self.env = {"PATH": str(self.bin), "FAKE_LOG": str(self.log), **fake}
 
     def run(self, node, script, *, timeout=300.0):  # noqa: ARG002
@@ -406,14 +570,15 @@ class LocalShell:
         return self.log.read_text().splitlines() if self.log.exists() else []
 
 
-def _egress(ops, env=None):
+def _egress(ops, env=None, endpoints=None):
     from yeto.launch.node_inventory import Node
     from yeto.launch.preflight import cluster
 
     node = Node(name="n0", host="ops@192.0.2.9", device_family="cuda", cpu_arch="x86_64", card="B300",
                 cards_per_node=8, hbm_gib=288, host_memory_gib=2048, env=env or {})
-    endpoints = [cluster.Endpoint("store", "https://store.example/", "s3://b/r"),
-                 cluster.Endpoint("registry", "https://registry.example:5000/", "registry.example:5000/img:1")]
+    endpoints = endpoints or [
+        cluster.Endpoint("store", "https://store.example/", "s3://b/r"),
+        cluster.Endpoint("registry", "https://registry.example:5000/", "registry.example:5000/img:1")]
     report = cluster.egress_preflight([node], endpoints, ops=ops, log=lambda _m: None)
     return {c.name: c for c in report.checks if c.name.startswith("reach_")}, report
 
@@ -451,11 +616,40 @@ def test_the_inventory_env_proxy_reaches_both_endpoints(tmp_path):
     from yeto.launch.preflight import cluster
 
     blocked, _ = _egress(LocalShell(tmp_path, FAKE_DIRECT_BLOCKED="1"))
-    assert {c.status for c in blocked.values()} == {cluster.FAIL}
+    assert blocked["reach_store"].status == cluster.FAIL and blocked["reach_registry"].status == cluster.WARN
     ops = LocalShell(tmp_path, FAKE_DIRECT_BLOCKED="1")
     checks, report = _egress(ops, env={"HTTPS_PROXY": PROXY, "NCCL_IB_HCA": "mlx5"})
     assert {c.status for c in checks.values()} == {cluster.PASS} and report.ok
     assert not any(c.startswith("docker ") for c in ops.calls())  # the shell's proxy is the registry's too
+
+
+@pytest.mark.parametrize("daemon, scheme", [
+    ('{"insecure-registries" : [ "other:1", "registry.example:5000" ],\n "debug": true}', "http"),
+    ('{"insecure-registries": ["http://registry.example:5000/"]}', "http"),
+    ('{"insecure-registries": ["registry.example"]}', "https"),  # another port: another registry
+    ('{"registry-mirrors": ["https://mirror.example"]}', "https"),
+    (None, "https"),  # no daemon.json (or not readable)
+])
+def test_an_insecure_registry_is_probed_over_http(tmp_path, monkeypatch, daemon, scheme):
+    from yeto.launch.preflight import cluster
+
+    path = tmp_path / "daemon.json"
+    if daemon is not None:
+        path.write_text(daemon)
+    monkeypatch.setattr(cluster, "DOCKER_DAEMON_JSON", str(path))
+    ops = LocalShell(tmp_path)
+    checks, report = _egress(ops)
+    assert report.ok
+    (registry,) = [c for c in ops.calls() if c.startswith("curl ") and "registry.example" in c]
+    assert f" {scheme}://registry.example:5000/" in registry
+
+
+def test_a_loopback_registry_is_probed_over_http(tmp_path):
+    from yeto.launch.preflight import cluster
+
+    ops = LocalShell(tmp_path)
+    _egress(ops, endpoints=[cluster.Endpoint("registry", "https://localhost:5000/", "localhost:5000/img")])
+    assert any(c.startswith("curl ") and " http://localhost:5000/" in c for c in ops.calls())
 
 
 def test_no_curl_behind_a_proxy_warns_and_does_not_fail(tmp_path):
@@ -483,6 +677,14 @@ def test_a_sky_pool_on_the_node_runtime_may_pull_the_model_to_any_models_path(tm
     assert "mounts only" in pool_run.store_layout_problems(old_route, tmp_path / "env", "b")[0]
     nc = {"accounts": [1], "run_prefix": "r", "model_pull": {"src_key": "m", "dest": "/models/Qwen3-4B"}}
     assert "mounts only" in pool_run.store_layout_problems(nc, tmp_path / "env", "b")[0]
+    # the spec's engine.server.base_dir must name the pulled model's directory
+    spec = tmp_path / "spec.json"
+    for base_dir, ok in (("/models/Qwen3-4B", True), ("/models/Qwen3-4B/", True), ("/models/Qwen3-8B", False),
+                         ("/models/Qwen3-4B-Instruct", False)):
+        spec.write_text(json.dumps({"engine": {"server": {"base_dir": base_dir}}}))
+        found = pool_run.store_layout_problems(dict(sky, spec=str(spec)), tmp_path / "env", "b")
+        assert (found == []) is ok, (base_dir, found)
+    assert "engine.server.base_dir is '/models/Qwen3-8B'" in found[0] or "Qwen3-4B-Instruct" in found[0]
 
 
 def test_an_own_ssh_pool_needs_no_price_under_a_spend_cap():

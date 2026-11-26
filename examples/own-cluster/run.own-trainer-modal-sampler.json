@@ -1,5 +1,5 @@
 {
-  "comment": "Own cluster as the trainer, Modal samplers: async GRPO of Qwen3-4B (full parameters) on 2 own 8 x B300 nodes (SSH + Docker, inventory.own-nodes.yaml, roles: [trainer]) fed by a Modal pool of 1 x L40S function calls (the model and prompts on a Modal volume). Own nodes bill nothing (trainer.usd_per_h 0): the spend is the Modal pool's. docs/OWN_CLUSTERS.md, 'Trainer with cloud samplers'. yeto run up --config THIS.json --dry-run (it checks over SSH that the trainer nodes reach the store and the registry), then without --dry-run.",
+  "comment": "Own cluster as the trainer, Modal samplers: async GRPO of Qwen3-4B (full parameters) on 1 own 8 x B300 node (SSH + Docker, inventory.own-nodes.yaml, roles: [trainer]) fed by a Modal pool of 1 x L40S function calls (the model and prompts on a Modal volume). Own nodes bill nothing (trainer.usd_per_h 0): the spend is the Modal pool's. docs/OWN_CLUSTERS.md, 'Trainer with cloud samplers'. yeto run up --config THIS.json --dry-run (add --check-nodes to check over SSH that the trainer nodes reach the store and the registry), then without --dry-run (it runs that check before it orders anything).",
   "run": "<run>",
   "store": "s3://<bucket>/runs/<run>",
   "samplers": [
@@ -40,7 +40,7 @@
       "--training-mode",
       "rl",
       "--gpu",
-      "ssh:2x8xb300",
+      "ssh:1x8xb300",
       "--rl-node-inventory",
       "<inventory.own-nodes.yaml>",
       "--cluster-prefix",
@@ -94,7 +94,6 @@
   },
   "budget": {
     "usd": 40,
-    "wall_h": 6,
-    "nc_usd_per_h": 0
+    "wall_h": 6
   }
 }

@@ -1,11 +1,10 @@
 {
-  "comment": "Two-island fleet of one own island and one cloud island: async GRPO of Qwen3-4B (full parameters, decoupled), island 0 trains on 2 own 8 x B300 nodes (SSH + Docker, inventory.own-nodes.yaml) with sky spot L40S samplers, island 1 on Modal (1 x 2 x B300: the syncer merges islands of one card type) with Modal L40S samplers; one syncer merges them. Own nodes bill nothing (island 0 trainer usd_per_h 0): the spend is the pools', the Modal trainer's and the syncer's. docs/OWN_CLUSTERS.md, 'Trainer with cloud samplers'. yeto run up --config THIS.json --dry-run (it checks over SSH that the own nodes reach the store and the registry), then without --dry-run.",
+  "comment": "Two-island fleet of one own island and one cloud island: async GRPO of Qwen3-4B (full parameters, decoupled), island 0 trains on 1 own 8 x B300 node (SSH + Docker, inventory.own-nodes.yaml) with sky spot L40S samplers, island 1 on Modal (1 x 8 x B300: the syncer merges islands of one card type and one parallel shape, the same TP/PP/EP/CP/DP) with Modal L40S samplers; one syncer merges them. Own nodes bill nothing (island 0 trainer usd_per_h 0): the spend is the pools', the Modal trainer's and the syncer's. docs/OWN_CLUSTERS.md, 'Trainer with cloud samplers'. yeto run up --config THIS.json --dry-run (add --check-nodes to check over SSH that the own nodes reach the store and the registry), then without --dry-run (it runs that check before it orders anything).",
   "run": "<run>",
   "store": "s3://<bucket>/runs/<run>",
   "budget": {
-    "usd": 120,
-    "wall_h": 4,
-    "nc_usd_per_h": 0
+    "usd": 320,
+    "wall_h": 4
   },
   "first_group": {
     "timeout_s": 4800,
@@ -67,7 +66,7 @@
     {
       "name": "own",
       "trainer": {
-        "gpu": "ssh:2x8xb300",
+        "gpu": "ssh:1x8xb300",
         "usd_per_h": 0,
         "argv": [
           "--rl-release-every",
@@ -121,8 +120,8 @@
     {
       "name": "cloud",
       "trainer": {
-        "gpu": "modal:1x2xb300",
-        "usd_per_h": 17.0,
+        "gpu": "modal:1x8xb300",
+        "usd_per_h": 68.0,
         "argv": [
           "--rl-release-every",
           "2"

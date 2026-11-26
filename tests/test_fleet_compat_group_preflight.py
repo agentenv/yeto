@@ -31,7 +31,7 @@ def _members(tmp_path):
 
 def test_an_island_on_another_compat_group_is_refused_with_both_groups_and_the_fixes(tmp_path):
     cfg, members = _members(tmp_path)
-    moved = {**members[0], "gpu": "nebius:1xh200@us-central1"}
+    moved = {**members[0], "gpu": "nebius:2xh200@us-central1"}
     with pytest.raises(ValueError) as raised:
         fleet_session.check(cfg["trainer"]["argv"], [moved, *members[1:]])
     text = str(raised.value)
@@ -39,7 +39,7 @@ def test_an_island_on_another_compat_group_is_refused_with_both_groups_and_the_f
     assert "session_contract_mismatch" in text
     assert "--rl-compat-group" in text and "--rl-identity relaxed" in text
     # Same card group elsewhere (another cloud): agrees.
-    fleet_session.check(cfg["trainer"]["argv"], [{**members[0], "gpu": "aws:1xh100@us-west-2"}, *members[1:]])
+    fleet_session.check(cfg["trainer"]["argv"], [{**members[0], "gpu": "aws:2xh100@us-west-2"}, *members[1:]])
 
 
 @pytest.mark.parametrize("relax", [["--rl-compat-group", "nvidia-h100"], ["--rl-identity", "relaxed"]])
@@ -47,7 +47,7 @@ def test_an_explicit_compat_group_or_relaxed_identity_admits_the_other_card(tmp_
     cfg, members = _members(tmp_path)
     cfg["trainer"]["argv"].extend(relax)
     members = [{**m, "argv": [*m["argv"], *relax]} for m in members]
-    moved = {**members[0], "gpu": "nebius:1xh200@us-central1"}
+    moved = {**members[0], "gpu": "nebius:2xh200@us-central1"}
     fleet_session.check(cfg["trainer"]["argv"], [moved, *members[1:]])
 
 
@@ -63,7 +63,7 @@ def test_the_running_session_is_compared_with_but_not_reported_for(tmp_path):
     the other islands) are compared with the island written, never refused themselves."""
     cfg, members = _members(tmp_path)
     old = members[0]
-    moved = {**old, "gpu": "nebius:1xh200@us-central1"}
+    moved = {**old, "gpu": "nebius:2xh200@us-central1"}
     with pytest.raises(ValueError, match="compat_group nvidia-h200, the fleet's session holds compat_group "
                                          "nvidia-h100 \\(island\\(s\\) mixed-old\\)"):
         fleet_session.check(cfg["trainer"]["argv"], [moved], running=[{**old, "name": "mixed-old"}])
@@ -151,7 +151,7 @@ def test_a_strict_syncer_refuses_relaxed_islands_on_two_compat_groups(tmp_path):
     relaxed islands on different cards are refused by a strict syncer launch."""
     cfg, members = _members(tmp_path)
     relaxed = [{**m, "argv": [*m["argv"], "--rl-identity", "relaxed"]} for m in members]
-    moved = {**relaxed[0], "gpu": "nebius:1xh200@us-central1"}
+    moved = {**relaxed[0], "gpu": "nebius:2xh200@us-central1"}
     with pytest.raises(ValueError) as raised:
         fleet_session.check(cfg["trainer"]["argv"], [moved, *relaxed[1:]])
     text = str(raised.value)
@@ -175,3 +175,16 @@ def test_run_up_preflight_refuses_islands_on_two_compat_groups(tmp_path, monkeyp
     logs = []
     monkeypatch.setattr(up, "_log", logs.append)
     assert run.preflight() is False
+
+
+def test_an_island_of_another_trainer_shape_is_refused_naming_both_shapes(tmp_path):
+    """The shape-bound full-parameter layout names each tensor by its rank's
+    TP/PP/EP/CP/DP position: an island on more GPUs of the same card binds another layout."""
+    cfg, members = _members(tmp_path)
+    wider = {**members[0], "gpu": "modal:1x4xh100"}
+    with pytest.raises(ValueError) as raised:
+        fleet_session.check(cfg["trainer"]["argv"], [*members[1:], wider])
+    text = str(raised.value)
+    assert "trainer shape TP1 PP1 EP1 CP1 DP4" in text and "trains on TP1 PP1 EP1 CP1 DP2" in text
+    assert "--rl-sync-layout shape-free" in text
+    fleet_session.check(cfg["trainer"]["argv"], [*members[1:], {**members[0], "gpu": "aws:2xh100@us-west-2"}])

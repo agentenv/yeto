@@ -1309,7 +1309,8 @@ class Run:
                 _log(f"preflight: WARNING: the fleet's desired state was not read ({type(error).__name__}: {error}); "
                      "checking the run config's pools and trainer islands only (islands added at run time are "
                      "not checked for a price)")
-        problem = self.fleet_problem() or self.fleet_session_problem(dry_run=dry_run)
+        problem = (self.fleet_problem() or self.fleet_session_problem(dry_run=dry_run)
+                   or self.fleet_shape_problem())
         if problem is not None:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
@@ -1458,9 +1459,12 @@ class Run:
     # ordered; once it passed (or --skip-preflight skipped it) the trainer's own launch skips it.
     cluster_preflight_passed = False
 
-    def cluster_preflight(self, *, dry_run: bool = False) -> bool:
+    def cluster_preflight(self, *, dry_run: bool = False, check_nodes: bool = False, egress: bool = True) -> bool:
         """``yeto preflight --no-bench`` of the trainer's ``ssh:`` islands (node checks and
-        TCP ports): False on a FAIL; a dry run only logs the command. True without one."""
+        TCP ports), then the egress check of the run's own nodes (:meth:`own_nodes_reach`;
+        ``egress`` False: ``--skip-egress-check``): False on a FAIL. A dry run only logs the
+        preflight command and contacts no node; with ``check_nodes`` (``--check-nodes``) it
+        runs the egress check too. True without either."""
         from yeto.launch.preflight.gate import commands_for_launch_argv  # noqa: PLC0415
 
         commands = commands_for_launch_argv([str(a) for a in self.cfg["trainer"]["argv"]])
@@ -1468,20 +1472,22 @@ class Run:
         if dry_run:
             if commands:
                 _log(f"dry run: before ordering, run up would run the trainer's cluster preflight: {shown}")
-            ok = self.own_nodes_reach()
+            ok = self.own_nodes_reach(prefix="dry run: ") if check_nodes and egress else True
             if ok:
                 self.log_own_nodes_spend()
             return ok
-        if not commands:
-            return True
-        ok = all(self._cmd(self.yeto(*c), log="preflight.log", timeout=CLUSTER_PREFLIGHT_TIMEOUT_S) == 0
-                 for c in commands)
-        self.mark("cluster_preflight", ok=ok)
-        if ok:
+        ok = True
+        if commands:
+            ok = all(self._cmd(self.yeto(*c), log="preflight.log", timeout=CLUSTER_PREFLIGHT_TIMEOUT_S) == 0
+                     for c in commands)
+            self.mark("cluster_preflight", ok=ok)
+            if not ok:
+                _log(f"cluster preflight failed: {shown} (see {self.dir / 'preflight.log'} and the report in the "
+                     "trainer's run dir; --skip-preflight skips it)")
+        if ok and egress:
+            ok = self.own_nodes_reach(prefix="cluster preflight: ")
+        if ok and commands:
             self.cluster_preflight_passed = True
-        else:
-            _log(f"cluster preflight failed: {shown} (see {self.dir / 'preflight.log'} and the report in the "
-                 "trainer's run dir; --skip-preflight skips it)")
         return ok
 
     def own_node_targets(self) -> list[tuple[Any, tuple[Any, ...]]]:
@@ -1489,15 +1495,20 @@ class Run:
         the trainer's ``ssh:`` islands (the run store and the trainer image's registry) and
         of each ``provider.kind: ssh`` pool (its store and image registry)."""
         from yeto.launch.preflight.cluster import resolve_nodes  # noqa: PLC0415
-        from yeto.launch.preflight.gate import argv_value, launch_endpoints, ssh_entries  # noqa: PLC0415
+        from yeto.launch.preflight.gate import (  # noqa: PLC0415
+            argv_value,
+            launch_endpoints,
+            node_endpoints,
+            ssh_entries,
+        )
 
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
         inventory = argv_value(argv, "--rl-node-inventory")
         out = []
         for entry in ssh_entries(argv_value(argv, "--gpu")):
             nodes = resolve_nodes(entry, inventory)
-            endpoints = tuple(launch_endpoints(argv, self.env, nodes))
-            out += [(node, endpoints) for node in nodes]
+            endpoints = launch_endpoints(argv, self.env, nodes)
+            out += [(node, node_endpoints(endpoints, node)) for node in nodes]
         for ref in self.pools:
             cfg = ref.load()
             if str((cfg.get("provider") or {}).get("kind") or "") != "ssh":
@@ -1507,38 +1518,41 @@ class Run:
             out += ssh_sampler_pool.egress_targets(cfg)
         return out
 
-    def own_nodes_reach(self, *, ops: Any = None) -> bool:
-        """``yeto run up --dry-run`` on own nodes: every node of :meth:`own_node_targets`
-        reaches its endpoints from its own network (checked there over SSH,
-        ``yeto.launch.preflight.cluster.egress_preflight``). False (each node and endpoint
-        logged) when one does not: the run up orders nothing. True without own nodes."""
+    def own_nodes_reach(self, *, ops: Any = None, prefix: str = "cluster preflight: ") -> bool:
+        """The egress check of own nodes (``yeto run up`` before it orders anything, a dry
+        run with ``--check-nodes``): every node of :meth:`own_node_targets` reaches its
+        endpoints from its own network (checked there over SSH,
+        ``yeto.launch.preflight.cluster.egress_preflight``), each line logged after
+        ``prefix``. False when one does not (a FAIL; a registry not reached is a WARN):
+        the run up orders nothing. True without own nodes."""
         from yeto.launch.node_inventory import InventoryError  # noqa: PLC0415
-        from yeto.launch.preflight.cluster import egress_preflight  # noqa: PLC0415
+        from yeto.launch.preflight.cluster import FAIL, egress_preflight  # noqa: PLC0415
         from yeto.launch.preflight.gate import egress_lines  # noqa: PLC0415
 
         try:
             targets = self.own_node_targets()
         except (InventoryError, OSError, ValueError) as error:
-            _log(f"dry run: own nodes: {error}")
+            _log(f"{prefix}own nodes: {error}")
             return False
         if not targets:
             return True
         groups: dict[tuple[Any, ...], dict[str, Any]] = {}  # endpoints -> the nodes (once each) that reach them
         for node, endpoints in targets:
             groups.setdefault(endpoints, {}).setdefault(node.name, node)
-        ok = True
+        failed = []
         for endpoints, by_name in groups.items():
             nodes = list(by_name.values())
             shown = ", ".join(f"{e.role} {e.url}" for e in endpoints) or "no endpoint (ssh only)"
-            _log(f"dry run: own nodes {', '.join(n.name for n in nodes)}: checking over ssh that they reach {shown}")
+            _log(f"{prefix}own nodes {', '.join(n.name for n in nodes)}: checking over ssh that they reach {shown}")
             report = egress_preflight(nodes, list(endpoints), ops=ops, log=lambda m: None)
             for line in egress_lines(report):
-                _log(f"dry run: {line}")
-            ok &= report.ok
-        if not ok:
-            _log("dry run: an own node cannot reach what the run needs: fix its network (the lines above name "
-                 "each node and endpoint); nothing is ordered")
-        return ok
+                _log(f"{prefix}{line}")
+            failed += [c for c in report.checks if c.status == FAIL]
+        if failed:
+            fixes = list(dict.fromkeys(c.fix for c in failed if c.fix))  # each cause's own fix, once
+            _log(f"{prefix}an own node fails the egress check (the lines above name each node and endpoint): "
+                 + "; ".join(fixes) + "; nothing is ordered (--skip-egress-check skips this check only)")
+        return not failed
 
     def log_own_nodes_spend(self) -> None:
         """The hourly spend a dry run of a single-trainer run on own nodes estimates: the
@@ -3224,6 +3238,20 @@ class Run:
              "on the syncer session (profile, HELLO flags, learners, syncer_epoch, learner ids)")
         return None
 
+    def fleet_shape_problem(self) -> str | None:
+        """A synced-group fleet (one trainer launch of every island) whose trainer islands
+        differ in shape under the shape-bound full-parameter layout (TP/PP/EP/CP/DP:
+        ``yeto.rl.fleet_session.shape_problems``): the syncer would refuse the later
+        island at HELLO. A per-island fleet is checked by :meth:`fleet_session_problem`."""
+        plan = self.fleet_plan()
+        if plan is None or plan.per_island:
+            return None
+        from yeto.rl import fleet_session  # noqa: PLC0415
+
+        found = fleet_session.synced_shape_problems(self.trainer_argv(), [str(i.name) for i in plan.islands])
+        return ("fleet: the trainer islands differ in shape (the syncer would refuse them at HELLO): "
+                + "; ".join(found)) if found else None
+
     def island_price_problem(self) -> str | None:
         """A run budget and a per-island fleet whose trainer island has no price: neither
         its ``usd_per_h`` (``islands[k].trainer.usd_per_h``, or ``--usd-per-h`` of an island
@@ -4558,6 +4586,12 @@ def add_parser(sub: Any) -> None:
     up.add_argument("--dry-run", action="store_true", help="preflight only; nothing is ordered")
     up.add_argument("--skip-preflight", action="store_true",
                     help="resume: preflight already passed (also skips the cluster preflight of an ssh: trainer)")
+    up.add_argument("--check-nodes", action="store_true",
+                    help="with --dry-run: also run the egress check of the run's own nodes over SSH (each reaches "
+                    "the run store and the image registry), as run up does before it orders anything")
+    up.add_argument("--skip-egress-check", action="store_true",
+                    help="skip only the egress check of own nodes (store and registry reachability over SSH); the "
+                    "rest of the preflight runs")
     up.add_argument("--no-monitor", action="store_true", help="return after the dashboard starts")
     up.add_argument("--allow-after-forced-stop", action="store_true",
                     help="run up again after a budget breaker forced the sampler pool down (nc_forced_stop)")
@@ -4829,7 +4863,8 @@ def main(args: Any) -> int:
         return 2
     if args.skip_preflight:
         run.cluster_preflight_passed = True  # the escape hatch also reaches the trainer's own launch
-    elif not run.cluster_preflight(dry_run=args.dry_run):
+    elif not run.cluster_preflight(dry_run=args.dry_run, check_nodes=bool(getattr(args, "check_nodes", False)),
+                                   egress=not getattr(args, "skip_egress_check", False)):
         _log("cluster preflight failed: nothing ordered")
         return 2
     if args.dry_run:
