@@ -364,8 +364,8 @@ def test_a_failed_pull_names_the_node(tmp_path, catalog_before):
             as error:
         adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
     assert error.value.holding == ("b300-0", "b300-1")  # the probe node, then the nodes whose pull passed
-    assert f"the image stays pulled on b300-0, b300-1 (a retry reuses it; `docker rmi {PINNED}` there frees the " \
-        "room)" in error.value.reason
+    assert f"the image stays pulled on b300-0, b300-1 (a retry reuses it; `docker rmi {PINNED}` on b300-0, b300-1 " \
+        "frees the room)" in error.value.reason
     assert ops.kinds().count("docker pull") == 3  # every node was pulled in parallel
     assert catalog_before.read_text() == "version: 1\nimages: []\n"
 
@@ -688,3 +688,53 @@ def test_the_docker_host_probe_is_byte_for_byte_main_s():
                        (b300(1, mounts={"/mnt/nvme/x": "/x"}),
                         "958b24e9b3fed68eeb27d8221ae0357653a5009b8e016a3a9ba270211cfce5de")):
         assert hashlib.sha256(cp.probe_script(cp.host_sections(node)).encode()).hexdigest() == want
+
+
+@pytest.mark.parametrize("sudo", [False, True])
+def test_the_removal_hint_names_each_holding_node_s_engine(tmp_path, sudo):
+    nodes = [_podman(0), b300(1), _podman(2)]
+    ops = FakeNodes(nodes, **{"b300-0": _graphroot(), "b300-2": _graphroot()})
+    a = adopter(request(nodes, tmp_path, container_sudo=sudo), ops, smoke=passing_smoke())
+    a.holding = ["b300-0", "b300-1", "b300-2"]
+    a.report.pinned = PINNED
+    reason = a._held(ia.AdoptError("smoke", "failed")).reason
+    pre = "sudo -n " if sudo else ""
+    assert (f"(a retry reuses it; `{pre}docker rmi {PINNED}` on b300-1; `{pre}podman rmi {PINNED}` on b300-0, "
+            "b300-2 frees the room)") in reason
+    assert ("sudo -n" in reason) is sudo
+
+
+def test_a_rootfs_node_with_docker_is_pulled_and_a_rootfs_node_without_an_engine_is_listed(tmp_path):
+    """The adoption picks nodes by their profile's container, not by runtime: a
+    ``runtime: rootfs`` node whose inventory says ``container: docker`` is pulled and its
+    docker image root checked; one of no container engine is named as not pulled."""
+    from yeto.launch.node_inventory import NodeProfile
+
+    docker_rootfs = NodeProfile.from_node(b300(1, runtime="rootfs"), container="docker")
+    nodes = [b300(0), docker_rootfs, b300(2, runtime="rootfs")]
+    ops = FakeNodes(nodes)
+    report = adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
+    pull = next(s for s in report.steps if s.name == "pull")
+    assert sorted(n for n, s in ops.scripts if s.startswith("docker pull -q ")) == ["b300-0", "b300-1"]
+    assert "not pulled (no container engine): ['b300-2']" in pull.detail
+    from yeto.launch.preflight import cluster as cp
+
+    pf = cp.ClusterPreflight([docker_rootfs], image=PINNED, ops=FakeNodes([docker_rootfs]), log=lambda m: None,
+                             clock=lambda: FakeCluster.NOW, by_engine=True)
+    roots = [c for c in pf.hosts() if c.name == "disk_images"]
+    assert roots and roots[0].scope == "b300-1"  # its docker image root is checked
+    plain = cp.ClusterPreflight([docker_rootfs], image=PINNED, ops=FakeNodes([docker_rootfs]), log=lambda m: None,
+                                clock=lambda: FakeCluster.NOW)
+    assert not [c for c in plain.hosts() if c.name == "disk_images"]  # the preflight's own rule: runtime docker
+
+
+def test_a_rootfs_probe_node_with_docker_has_its_image_root_checked_before_the_probe(tmp_path):
+    from yeto.launch.node_inventory import NodeProfile
+
+    probe = NodeProfile.from_node(b300(0, runtime="rootfs"), container="docker")
+    low = Behavior(host={"disk": (0, "\n".join([disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
+                                                disk_line("/var/lib/containerd", 40, mount="/")]))})
+    ops = FakeNodes([probe, b300(1)], **{"b300-0": low})
+    with pytest.raises(ia.AdoptError, match=r"step probe failed: node b300-0: disk_images: /var/lib/containerd"):
+        adopter(request([probe, b300(1)], tmp_path), ops, smoke=passing_smoke()).run()
+    assert ops.kinds() == ["date", "host"]  # no probe ran

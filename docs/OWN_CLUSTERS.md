@@ -766,14 +766,22 @@ to adopt the image. The steps, in order:
    engine's error line.
 
    Each node's container engine is its inventory `container:` (`docker` or
-   `podman`; default: `docker` for `runtime: docker`). An ssh sampler pool node
-   with `container: podman` is adopted with podman also when its `runtime:` is
-   `rootfs` (the pool starts its containers whatever the trainer runtime says).
-   A pool whose `container.sudo: true` runs `sudo -n podman` uses podman's
-   rootful store: pass the pool's config with `--pool-config` (its
-   `provider.container.sudo` is read), or `--container-sudo`, and the host
+   `podman`; default: `docker` for `runtime: docker`), whatever its `runtime:`:
+   a `runtime: rootfs` node with `container: docker` or `podman` is pulled with
+   that engine, and one with no container engine is named as not pulled.
+
+   For a sampler image, pass the ssh sampler pool's config with `--pool-config`:
+   it is read the way the pool reads it, so the nodes are the pool's `nodes:`
+   (one not in the inventory is an error), their engine is the pool's
+   `container.engine` (default podman, whatever the inventory says), and its
+   `container.sudo: true` (`sudo -n podman`, the rootful store) makes the host
    checks, the pull, the probe and the smoke all run the engine through
-   `sudo -n`, so the image lands in the store the pool starts from.
+   `sudo -n`, so the image lands in the store the pool starts from. A
+   `runtime: venv` pool runs no image and is refused. With `container.pull:
+   never` the pool starts only images already on its nodes: the adoption's pull
+   is what puts the image there. Without a pool config, `--container-sudo` asks
+   for `sudo -n`; against a pool config whose `container.sudo` is off it is an
+   error.
 5. **smoke**, on the probe node, after its cards are checked idle again:
    - **trainer**: the model is cut to its first N layers (all their experts, the
      embeddings and the head, `scripts/prune_layers.py`; MTP layers are dropped,
@@ -803,8 +811,9 @@ to adopt the image. The steps, in order:
      `--smoke-arg=--rl-expert-selection=/path/selection.json`; any other
      `yeto launch` flag the run needs goes the same way. Only the Miles backend
      has a trainer smoke so far, and only on `runtime: docker` nodes (the `ssh:`
-     trainer island starts docker containers as the SSH user: a podman or
-     `rootfs` node, or `--container-sudo`, is refused for `--role trainer`).
+     trainer island starts docker containers as the SSH user: for `--role
+     trainer`, any podman or `rootfs` node of the role, spares included, or
+     `--container-sudo` / `--pool-config`, is refused).
    - **sampler**: the engine of `--sampler-spec` (the pool's sampler spec) starts
      in the image the way the node runtime starts a sampler (the node's device
      flags and directories), generates once, reloads (the weights of `--release`,

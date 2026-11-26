@@ -585,15 +585,19 @@ class Adopter:
         stays there, a retry reuses it, ``<engine> rmi`` frees the room."""
         if not self.holding or error.holding:
             return error
-        from .node_inventory import profile_of  # noqa: PLC0415
+        from .preflight.cluster import engine_command  # noqa: PLC0415
 
         ref = self.report.pinned or self.request.ref
+        by_name = {n.name: n for n in self.request.nodes}
+        per: dict[str, list[str]] = {}  # each holding node's own engine (and sudo)
+        for name in self.holding:
+            node = by_name.get(name)
+            engine = (engine_of(node) if node is not None else None) or "docker"
+            per.setdefault(engine_command(engine, self.request.container_sudo), []).append(name)
         nodes = ", ".join(self.holding)
-        engine = profile_of(self.request.probe_node).container
-        engine = ("sudo -n " if self.request.container_sudo else "") + (engine if engine in ("docker", "podman")
-                                                                         else "docker")
+        remove = "; ".join(f"`{command} rmi {ref}` on {', '.join(names)}" for command, names in sorted(per.items()))
         return AdoptError(error.step, f"{error.reason}; the image stays pulled on {nodes} (a retry reuses it; "
-                                      f"`{engine} rmi {ref}` there frees the room)", holding=self.holding)
+                                      f"{remove} frees the room)", holding=self.holding)
 
     def _hold(self, *names: str) -> None:
         self.holding += [n for n in names if n not in self.holding]
@@ -672,7 +676,8 @@ class Adopter:
 
         req = Requirements(min_image_root_free_gib=float(self.request.min_image_free_gib))
         checks = ClusterPreflight([node], image=ref, ops=self.ops, req=req, log=self.log, clock=self.clock,
-                                  engine=container_engine(node), sudo=self.request.container_sudo).hosts()
+                                  engine=container_engine(node), sudo=self.request.container_sudo,
+                                  by_engine=True).hosts()
         failed = [c for c in checks if c.status == FAIL and c.name in ("ssh", "host_probe", "disk_images")]
         if failed:
             raise AdoptError("probe", "; ".join(f"node {c.scope}: {c.name}: {c.detail}" + (f" ({c.fix})" if c.fix
@@ -758,7 +763,7 @@ class Adopter:
         checks, pulled = [], True
         for engine, nodes in sorted(groups.items()):
             pf = ClusterPreflight(nodes, image=ref, ops=self.ops, req=req, log=self.log, clock=self.clock,
-                                  engine=engine, sudo=self.request.container_sudo)
+                                  engine=engine, sudo=self.request.container_sudo, by_engine=True)
             found, ok = pf.pull()
             checks += found
             pulled = pulled and ok
@@ -873,12 +878,19 @@ def _plan(args: Any, request: AdoptRequest, run_id: str) -> Any:
     """The smoke plan, with the image as :data:`.image_smoke.REF` (the trainer's backend:
     the registry's, which has a smoke only for the default backend)."""
     from . import image_smoke  # noqa: PLC0415
+    from .node_inventory import profile_of  # noqa: PLC0415
 
     workdir = Path(site_images.default_path()).parent / "image-adopt" / run_id
     if request.role == "trainer":
         if request.container_sudo:
             raise image_smoke.SmokeError("--container-sudo / a pool config's container.sudo is for sampler pool "
                                          "nodes: the ssh: trainer island runs docker as the ssh user")
+        off = [f"{n.name} ({n.runtime}, container {engine_of(n) or profile_of(n).container})" for n in request.nodes
+               if n.runtime != "docker" or engine_of(n) != "docker"]
+        if off:  # every node of the role runs the island's image, not only the smoke node
+            raise image_smoke.SmokeError(f"trainer nodes {off}: an ssh: trainer island starts docker containers "
+                                         "only (inventory runtime: docker); podman and rootfs nodes take sampler "
+                                         "images (--role sampler)")
         plan = image_smoke.trainer_plan(
             request.probe_node, model=request.model, config=_model_config(args), engine=request.engine,
             store=args.smoke_store, run_id=run_id, workdir=workdir, model_revision=args.model_revision,
@@ -890,21 +902,62 @@ def _plan(args: Any, request: AdoptRequest, run_id: str) -> Any:
                                     keep=args.keep_smoke_artifacts, sudo=request.container_sudo)
 
 
-def container_sudo(args: Any) -> bool:
-    """``--container-sudo``, else the pool config's ``provider.container.sudo`` (the
-    inventory has no such key), else off."""
-    if getattr(args, "container_sudo", False):
-        return True
-    path = getattr(args, "pool_config", None)
-    if not path:
-        return False
+@dataclass(frozen=True)
+class PoolView:
+    """The ssh sampler pool a sampler image is adopted for (``--pool-config``): its nodes
+    as the pool starts them (:func:`.ssh_sampler_pool.pool_profile`: the pool's
+    ``container.engine``, whatever the inventory says), its ``container.sudo`` and
+    ``container.pull``."""
+
+    path: str
+    nodes: tuple[Node, ...]
+    sudo: bool
+    pull: str
+
+
+def pool_view(path: str, profiles: Sequence[Node]) -> PoolView:
+    """The pool config at ``path`` read the way the pool reads it
+    (:func:`.ssh_sampler_pool.parse_config` over the adoption's inventory ``profiles``:
+    its ``nodes:``, its container section). Raises ValueError for a file that is not a
+    pool config, a pool the pool itself refuses, and a ``runtime: venv`` pool (it runs
+    no image)."""
     import yaml  # noqa: PLC0415
 
-    cfg = yaml.safe_load(Path(path).expanduser().read_text()) or {}
-    container = ((cfg.get("provider") or {}) if isinstance(cfg, Mapping) else {}).get("container") or {}
-    if not isinstance(container, Mapping):
+    from . import ssh_sampler_pool  # noqa: PLC0415
+
+    try:
+        cfg = yaml.safe_load(Path(path).expanduser().read_text())
+    except (OSError, yaml.YAMLError) as error:
+        raise ValueError(f"--pool-config {path}: cannot be read ({type(error).__name__}: {error})"[:600]) from None
+    if not isinstance(cfg, Mapping):
+        raise ValueError(f"--pool-config {path}: not a pool config (a mapping with a provider section)")
+    provider = cfg.get("provider")
+    if not isinstance(provider, Mapping):
+        raise ValueError(f"--pool-config {path}: provider is not a mapping")
+    if provider.get("container") is not None and not isinstance(provider.get("container"), Mapping):
         raise ValueError(f"--pool-config {path}: provider.container is not a mapping")
-    return bool(container.get("sudo", False))
+    try:
+        conf = ssh_sampler_pool.parse_config(dict(cfg), inventory=list(profiles))
+    except (ValueError, TypeError, KeyError) as error:
+        raise ValueError(f"--pool-config {path}: {error}") from None
+    if conf.runtime != "container" or conf.container is None:
+        raise ValueError(f"--pool-config {path}: a runtime: {conf.runtime} pool runs its samplers from a venv on "
+                         "the host, not from an image: there is no image to adopt for it")
+    return PoolView(str(path), tuple(ssh_sampler_pool.pool_profile(n, conf) for n in conf.nodes),
+                    bool(conf.container.sudo), str(conf.container.pull))
+
+
+def container_sudo(args: Any, pool: PoolView | None = None) -> bool:
+    """``--container-sudo``, else the pool config's ``container.sudo`` (the inventory has
+    no such key), else off. The flag against a pool that runs its engine without sudo is
+    a ValueError: the adoption would fill another store than the one the pool starts from."""
+    flag = bool(getattr(args, "container_sudo", False))
+    if pool is None:
+        return flag
+    if flag and not pool.sudo:
+        raise ValueError(f"--container-sudo contradicts --pool-config {pool.path}: its container.sudo is off (the "
+                         "pool runs the engine as the ssh user); drop the flag or fix the pool config")
+    return pool.sudo
 
 
 def _by_engine(nodes: Sequence[Node]) -> dict[str, list[str]]:
@@ -927,6 +980,8 @@ def _sampler_spec(args: Any) -> dict[str, Any]:
 
 def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
     """``yeto image adopt``: 0 recorded (or a dry run), 1 a step failed, 2 a bad request."""
+    import yaml  # noqa: PLC0415
+
     from . import image_smoke  # noqa: PLC0415
     from .node_inventory import InventoryError, load_profiles  # noqa: PLC0415
     from .preflight.cluster import engine_command  # noqa: PLC0415
@@ -934,8 +989,14 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
     out = out or sys.stdout
     try:
         # profiles: an inventory's container (podman) and the other node profile keys count here
-        nodes = role_nodes(load_profiles(args.inventory), args.role)
-        sudo = container_sudo(args)
+        profiles = load_profiles(args.inventory)
+        pool = None
+        if getattr(args, "pool_config", None):
+            if args.role != "sampler":
+                raise ValueError("--pool-config is an ssh sampler pool's config: it is for --role sampler")
+            pool = pool_view(args.pool_config, profiles)  # the pool's nodes, engine, sudo and pull
+        nodes = list(pool.nodes) if pool else role_nodes(profiles, args.role)
+        sudo = container_sudo(args, pool)
         catalog = args.catalog or str(site_images.inventory_catalog_path(args.inventory))
         spec_engine = engine_images.spec_needs(_sampler_spec(args))["engine_pref"] if args.role == "sampler" \
             and args.sampler_spec else None
@@ -951,7 +1012,7 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
         if args.role == "trainer" and not request.engine:  # the record names the backend the smoke ran
             request = dataclasses.replace(request, engine=str(plan.data["engine"]))
     except (InventoryError, site_images.SiteImagesError, image_smoke.SmokeError, FileNotFoundError, OSError,
-            ValueError) as error:
+            ValueError, TypeError, yaml.YAMLError) as error:
         print(f"yeto image adopt: {error}", file=sys.stderr)
         return 2
     if args.dry_run:
@@ -966,7 +1027,10 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
                  f"4. pull: ssh + host probe (image root >= {args.min_image_free_gib:g} GiB free), then "
                  + "; ".join(f"{engine_command(engine, sudo)} pull {image_smoke.REF} on {names}"
                              for engine, names in _by_engine(request.nodes).items())
-                 + " in parallel",
+                 + " in parallel"
+                 + "".join(f"; not pulled (no container engine): {n.name}" for n in request.nodes if not engine_of(n))
+                 + (f"; the pool's container.pull is never (it starts only images already on its nodes): this "
+                    "pull is what puts the image there" if pool and pool.pull == "never" else ""),
                  "5. " + "\n".join(plan.lines()),
                  f"then: a verified-smoke record in {catalog}"]
         print("\n".join(lines), file=out)

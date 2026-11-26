@@ -906,8 +906,7 @@ def test_the_cli_probes_and_pulls_a_podman_inventory_with_podman(tmp_path, monke
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps(FAKE_SPEC))
     pool = tmp_path / "pool.yaml"
-    pool.write_text(yaml.safe_dump({"provider": {"kind": "ssh", "runtime": "container",
-                                                 "container": {"engine": "podman", "sudo": sudo}}}))
+    _pool_config(pool, inv, sudo=sudo)
     nodes = list(load_profiles(inv))
 
     class Raw(FakeNodes):
@@ -943,6 +942,9 @@ def test_the_dry_run_names_each_node_s_engine_and_the_sudo(tmp_path, capsys):
     inv = _podman_inventory(tmp_path, n=1)
     doc = yaml.safe_load(inv.read_text())
     doc["nodes"].append({**doc["nodes"][0], "name": "b300-1", "host": "ops@b300-1", "container": "docker"})
+    rootfs = {**doc["nodes"][0], "name": "b300-2", "host": "ops@b300-2", "runtime": "rootfs"}
+    rootfs.pop("container")
+    doc["nodes"].append(rootfs)  # no container engine: named, not pulled
     inv.write_text(yaml.safe_dump(doc))
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps(FAKE_SPEC))
@@ -951,7 +953,8 @@ def test_the_dry_run_names_each_node_s_engine_and_the_sudo(tmp_path, capsys):
     assert ia.main(_cli(*base)) == 0
     out = capsys.readouterr().out
     assert f"2. probe on b300-0: podman run --rm" in out
-    assert f"then docker pull {sm.REF} on ['b300-1']; podman pull {sm.REF} on ['b300-0'] in parallel" in out
+    assert f"then docker pull {sm.REF} on ['b300-1']; podman pull {sm.REF} on ['b300-0'] in parallel; not pulled " \
+        "(no container engine): b300-2" in out
     assert ia.main(_cli(*base, "--container-sudo")) == 0
     out = capsys.readouterr().out
     assert "2. probe on b300-0: sudo -n podman run --rm" in out
@@ -973,35 +976,122 @@ def test_a_trainer_smoke_off_the_docker_island_path_is_refused_with_why(tmp_path
     if sudo:
         assert "--container-sudo / a pool config's container.sudo is for sampler pool nodes" in err
     else:
-        assert (f"node b300-0 runs {runtime} (container {container}): the trainer smoke runs the image as an ssh: "
-                "trainer island, which starts docker containers only") in err
+        assert (f"trainer nodes ['b300-0 ({runtime}, container {container})']: an ssh: trainer island starts "
+                "docker containers only") in err
 
 
-def test_the_pool_config_decides_the_sudo_unless_the_flag_says_so(tmp_path):
-    pool = tmp_path / "pool.yaml"
+def test_every_trainer_node_is_held_to_the_docker_island_not_only_the_smoke_node(tmp_path, capsys):
+    inv = _podman_inventory(tmp_path, n=3)
+    doc = yaml.safe_load(inv.read_text())
+    doc["nodes"][0]["container"] = doc["nodes"][2]["container"] = "docker"  # the smoke node and a spare: docker
+    doc["nodes"][2]["roles"] = ["trainer-spare"]
+    inv.write_text(yaml.safe_dump(doc))
+    args = _cli(TAGGED, "--model", "Qwen/Qwen3-30B-A3B", "--role", "trainer", "--inventory", inv,
+                "--model-config", REGISTRY_CONFIGS / "qwen3_30b_a3b.json", "--smoke-store", "s3://b/s", "--dry-run")
+    assert ia.main(args) == 2
+    assert "trainer nodes ['b300-1 (docker, container podman)']" in capsys.readouterr().err
+    doc["nodes"][1]["container"] = "docker"
+    inv.write_text(yaml.safe_dump(doc))
+    assert ia.main(args) == 0
+
+
+def _pool_config(path, inventory, **container):
+    """A pool config the ssh sampler pool takes (``parse_config``), over ``inventory``."""
+    extra = container.pop("provider", {})
+    provider = {"kind": "ssh", "inventory": str(inventory), "workdir": "/srv/yeto/run1", "runtime": "container",
+                "container": {"engine": "podman", "image": "auto", **container}, **extra}
+    path.write_text(yaml.safe_dump({"provider": provider}))
+    return path
+
+
+def test_the_pool_config_decides_the_sudo_and_the_flag_must_agree(tmp_path):
+    inv = _podman_inventory(tmp_path)
+    profiles = list(__import__("yeto.launch.node_inventory", fromlist=["x"]).load_profiles(inv))
     ns = argparse.Namespace
-    assert ia.container_sudo(ns(container_sudo=False, pool_config=None)) is False
-    pool.write_text(yaml.safe_dump({"provider": {"container": {"sudo": True}}}))
-    assert ia.container_sudo(ns(container_sudo=False, pool_config=str(pool))) is True
-    pool.write_text(yaml.safe_dump({"provider": {"runtime": "venv"}}))
-    assert ia.container_sudo(ns(container_sudo=False, pool_config=str(pool))) is False
-    assert ia.container_sudo(ns(container_sudo=True, pool_config=str(pool))) is True
-    pool.write_text(yaml.safe_dump({"provider": {"container": "podman"}}))
-    with pytest.raises(ValueError, match="provider.container is not a mapping"):
-        ia.container_sudo(ns(container_sudo=False, pool_config=str(pool)))
+    assert ia.container_sudo(ns(container_sudo=False)) is False and ia.container_sudo(ns(container_sudo=True))
+    on = ia.pool_view(str(_pool_config(tmp_path / "on.yaml", inv, sudo=True)), profiles)
+    off = ia.pool_view(str(_pool_config(tmp_path / "off.yaml", inv)), profiles)
+    assert ia.container_sudo(ns(container_sudo=False), on) is True
+    assert ia.container_sudo(ns(container_sudo=True), on) is True
+    assert ia.container_sudo(ns(container_sudo=False), off) is False
+    with pytest.raises(ValueError, match="--container-sudo contradicts --pool-config .*container.sudo is off"):
+        ia.container_sudo(ns(container_sudo=True), off)
 
 
-@pytest.mark.parametrize("returned", [None, "loaded", {"reload_mode": "in_place"}])
-def test_a_reload_without_a_load_report_fails(returned, capsys):
-    class NoReport(FakeEngine):
-        def load(self, release_dir, version):
-            super().load(release_dir, version)
-            return returned
+@pytest.mark.parametrize("text, message", [
+    ("provider: [a, b]\n", "provider is not a mapping"),
+    ("- a\n", "not a pool config"),
+    ("provider: {container: podman}\n", "provider.container is not a mapping"),
+    ("provider: {kind: ssh\n", "cannot be read (ParserError"),
+])
+def test_a_pool_config_that_is_not_one_is_refused_without_a_traceback(tmp_path, capsys, text, message):
+    inv = _podman_inventory(tmp_path)
+    pool = tmp_path / "pool.yaml"
+    pool.write_text(text)
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(FAKE_SPEC))
+    args = _cli(TAGGED, "--model", "org/m", "--role", "sampler", "--inventory", inv, "--sampler-spec", spec,
+                "--release", RELEASE, "--pool-config", pool, "--dry-run")
+    assert ia.main(args) == 2
+    err = capsys.readouterr().err
+    assert message in err and "Traceback" not in err
 
-    engine = NoReport()
-    record = node_smoke.run_smoke(engine, release=None)
-    assert (record["ok"], record["step"]) == (False, "reload") and engine.stopped
-    assert f"the engine's load returned {type(returned).__name__}, not a LoadReport with a reload_mode" \
-        in record["error"]
-    last = json.loads(capsys.readouterr().out.splitlines()[-1].split(" ", 1)[1])
-    assert (last["step"], last["ok"]) == ("reload", False)
+
+def test_a_venv_pool_a_trainer_and_a_contradicting_flag_exit_2(tmp_path, capsys):
+    inv = _podman_inventory(tmp_path)
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(FAKE_SPEC))
+    venv = tmp_path / "venv.yaml"
+    venv.write_text(yaml.safe_dump({"provider": {"kind": "ssh", "inventory": str(inv), "workdir": "/srv/yeto/run1",
+                                                 "runtime": "venv", "venv": {"python": "/opt/venv/bin/python"}}}))
+    base = (TAGGED, "--model", "org/m", "--inventory", inv, "--dry-run")
+    assert ia.main(_cli(*base, "--role", "sampler", "--sampler-spec", spec, "--release", RELEASE,
+                        "--pool-config", venv)) == 2
+    assert "a runtime: venv pool runs its samplers from a venv on the host, not from an image" in \
+        capsys.readouterr().err
+    pool = _pool_config(tmp_path / "pool.yaml", inv)
+    assert ia.main(_cli(*base, "--role", "trainer", "--pool-config", pool)) == 2
+    assert "--pool-config is an ssh sampler pool's config: it is for --role sampler" in capsys.readouterr().err
+    assert ia.main(_cli(*base, "--role", "sampler", "--sampler-spec", spec, "--release", RELEASE,
+                        "--pool-config", pool, "--container-sudo")) == 2
+    assert "--container-sudo contradicts --pool-config" in capsys.readouterr().err
+
+
+def test_the_pool_s_engine_and_nodes_win_over_the_inventory(tmp_path, capsys):
+    """An inventory that names no container (docker by default) and a pool config whose
+    engine is podman: the pool starts podman containers, so the adoption is podman
+    throughout; only the pool's ``nodes:`` take part, and one not in the inventory is an
+    error."""
+    inv = _podman_inventory(tmp_path, n=3)
+    doc = yaml.safe_load(inv.read_text())
+    for entry in doc["nodes"]:
+        entry.pop("container")
+    inv.write_text(yaml.safe_dump(doc))
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(FAKE_SPEC))
+    base = (TAGGED, "--model", "org/m", "--role", "sampler", "--inventory", inv, "--sampler-spec", spec,
+            "--release", RELEASE, "--dry-run")
+    assert ia.main(_cli(*base)) == 0  # no pool config: the inventory's docker, as before
+    assert "docker pull" in capsys.readouterr().out
+    pool = _pool_config(tmp_path / "pool.yaml", inv, provider={"nodes": ["b300-0", "b300-2"]})
+    assert ia.main(_cli(*base, "--pool-config", pool)) == 0
+    out = capsys.readouterr().out
+    assert "on 2 node(s) ['b300-0', 'b300-2']" in out and "b300-1" not in out
+    assert "2. probe on b300-0: podman run --rm" in out
+    assert f"then podman pull {sm.REF} on ['b300-0', 'b300-2'] in parallel" in out and "docker" not in out
+    assert "container.pull is never" not in out
+    bad = _pool_config(tmp_path / "bad.yaml", inv, provider={"nodes": ["b300-0", "b300-9"]})
+    assert ia.main(_cli(*base, "--pool-config", bad)) == 2
+    assert "nodes ['b300-9'] are not in the inventory" in capsys.readouterr().err
+
+
+def test_a_pool_that_never_pulls_still_gets_the_image_pulled_by_the_adoption(tmp_path, capsys):
+    inv = _podman_inventory(tmp_path)
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(FAKE_SPEC))
+    pool = _pool_config(tmp_path / "pool.yaml", inv, pull="never")
+    assert ia.main(_cli(TAGGED, "--model", "org/m", "--role", "sampler", "--inventory", inv, "--sampler-spec", spec,
+                        "--release", RELEASE, "--pool-config", pool, "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert f"podman pull {sm.REF} on ['b300-0', 'b300-1'] in parallel; the pool's container.pull is never (it " \
+        "starts only images already on its nodes): this pull is what puts the image there" in out
