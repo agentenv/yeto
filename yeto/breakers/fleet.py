@@ -472,10 +472,17 @@ def fleet_spend(*, pool_node_hours: Iterable[tuple[float, float]], island_hours:
     Raises ValueError when the two island lists differ in length."""
     if len(island_hours) != len(island_usd_per_h):
         raise ValueError(f"fleet spend: {len(island_hours)} island hours for {len(island_usd_per_h)} island prices")
-    pools = sum(_amount(hours) * _amount(price) for hours, price in pool_node_hours)
+    pools = pools_usd(pool_node_hours)
     trainers = tuple(_amount(h) * _amount(p) for h, p in zip(island_hours, island_usd_per_h))
     return FleetSpend(pools, trainers, _amount(syncer_hours) * _amount(syncer_usd_per_h),
                       _amount(sandbox_hours) * _amount(sandbox_usd_per_h))
+
+
+def pools_usd(pool_node_hours: Iterable[tuple[float, float]]) -> float:
+    """Σ billed node hours × USD per node hour of each ``(hours, price)``: the pools' part of
+    :func:`fleet_spend` (a negative or non-finite hour or price counts 0), also the clamp
+    ``run up``'s single-trainer spend puts on the pools the desired state removed."""
+    return sum(_amount(hours) * _amount(price) for hours, price in pool_node_hours)
 
 
 def _amount(value: Any) -> float:

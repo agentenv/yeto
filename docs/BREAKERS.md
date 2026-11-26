@@ -41,7 +41,9 @@ trip stops that island only, and its findings start with
 Two entries span the whole fleet:
 
 - `run.budget`: one cap over every pool's node hours, each island's trainer
-  `usd_per_h` times its hours, and `syncer.usd_per_h` times the syncer's hours;
+  `usd_per_h` times its hours, and `syncer.usd_per_h` times the syncer's hours.
+  The spend includes pools the fleet desired state removed, until their members
+  are released;
 - `run.wall_clock`: one clock.
 
 Either one stops every island with `stop_reason=breaker:run.budget` (or
