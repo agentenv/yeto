@@ -526,6 +526,9 @@ def test_a_new_boot_forgets_the_fabric_manager_as_before():
     _, rs = watch_through(fm_text("active"), fm_text("failed"), fm_text("failed", boot="boot-2"),
                           fm_text("failed", boot="boot-2"))
     assert [r.verdict for r in rs] == ["ok", "bad_once", "ok", "ok"]
+    # a node without NVSwitch: not even the stop across the reboot
+    _, rs = watch_through(fm_text("active", **TRAY), fm_text("failed", boot="boot-2", **TRAY))
+    assert [r.verdict for r in rs] == ["ok", "ok"]
     # active again in the new boot: that boot's memory
     _, rs = watch_through(fm_text("active"), fm_text("active", boot="boot-2"), fm_text("failed", boot="boot-2"),
                           fm_text("failed", boot="boot-2"))
@@ -567,6 +570,10 @@ def test_a_first_read_whose_probe_or_state_did_not_read_is_not_the_first_judged_
     # a whole read failure first: the same
     _, rs = watch_through(node_text(gpus=(124, "")), fm_text("failed"), fm_text("failed"))
     assert [r.verdict for r in rs] == ["read_failed", "bad_once", "lost"]
+    # an unjudged read, then a read failure (it carries "not judged yet"), then a judged one
+    _, rs = watch_through(fm_text("failed", **NO_PROBE), node_text(gpus=(124, "")), fm_text("failed"))
+    assert [r.verdict for r in rs] == ["ok", "read_failed", "bad_once"]
+    assert rs[1].result.facts["fm_judged"] is False
     # a probe that never reads: never judged bad on a fabric manager never active
     _, rs = watch_through(*[fm_text("failed", **NO_PROBE)] * 3)
     assert [r.verdict for r in rs] == ["ok"] * 3
@@ -600,6 +607,8 @@ def test_a_fabric_manager_that_restarts_between_checks_is_bad_at_each_restart():
     _, rs = watch_through(fm_text("active", restarts=5), fm_text("active", boot="boot-2", restarts=0),
                           fm_text("active", boot="boot-2", restarts=None), fm_text("active", boot="boot-2", restarts=1))
     assert [r.verdict for r in rs] == ["ok", "ok", "ok", "bad_once"]
+    _, rs = watch_through(fm_text("active", restarts=1), fm_text("active", boot="boot-2", restarts=3))
+    assert [r.verdict for r in rs] == ["ok", "ok"]  # more than the old boot's count: still a new baseline
     # restarts of a unit on a node without NVSwitch, never active: nothing
     _, rs = watch_through(*[fm_text("activating", restarts=n, **TRAY) for n in range(3)])
     assert [r.verdict for r in rs] == ["ok"] * 3
@@ -620,6 +629,7 @@ def test_the_fabric_manager_absolute_rule_judges_one_check_alone():
     # its own read, never carried: an unread check after a bad one is unread
     bad = check(fm_text("failed"))
     assert absolute(check(fm_text(None), bad.facts).facts)[0] == "unread"
+    assert absolute(check(node_text(gpus=(124, "")), bad.facts).facts)[0] == "unread"
 
 
 def test_the_fabric_manager_section_reads_systemctl_and_the_nvswitch_probe(tmp_path):
@@ -629,6 +639,7 @@ def test_the_fabric_manager_section_reads_systemctl_and_the_nvswitch_probe(tmp_p
     assert read(host_probe.Section(3, fm_out("unknown", dev=0, pci=0))) == ("", 0, 0)  # not a state
     assert read(host_probe.Section(127, "nrestarts=\nnvswitch_dev=0")) == ("", None, None)
     assert read(host_probe.Section(0, "active")) == ("active", None, None)  # an older script's output
+    assert read(host_probe.Section(127, "active")) == ("", None, None)  # systemctl not found: no state
     assert read(None) == ("", None, None)
 
     def run(path):  # the section as the check runs it (its stderr merged), on a host of fakes
