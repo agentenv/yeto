@@ -4,7 +4,9 @@ to a free spare node whose sampler continues the lost shard's prompts. The lost 
 not started again while a spare is free; a stop it never got is owed to its next start.
 
 The pool is the real ``IslandPool`` over the real ``SshSamplerPoolOps`` (ssh faked), on
-the local state and on the store control plane (lock, allocator, ``GuardedOps``)."""
+the local state and on the store control plane (lock, allocator, ``GuardedOps``), with the
+node runtime starting each sampler (the default) and with ``node_runtime: false`` (the
+sampler start of before)."""
 
 from __future__ import annotations
 
@@ -42,8 +44,8 @@ class Nodes:
         self.specs: dict[str, dict] = {}  # host -> the last sampler spec uploaded there
 
     def __call__(self, argv, **kw):
-        if argv[0] == "git":
-            return SimpleNamespace(returncode=0, stdout="abc123\n", stderr="")
+        if argv[0] == "git":  # rev-parse, and the archive the node runtime publishes as its code
+            return SimpleNamespace(returncode=0, stdout=b"tar" if "archive" in argv else "abc123\n", stderr="")
         host, cmd = argv[-2], argv[-1]
         self.calls.append((host, cmd))
         if "/sampler/" in cmd and ".json.tmp" in cmd and kw.get("input"):
@@ -67,8 +69,8 @@ class Nodes:
         return [c for h, c in self.calls if h == host and f"yeto-sampler-{shard}" in c and "kill --signal TERM" in c]
 
 
-@pytest.fixture
-def world(tmp_path, monkeypatch):
+@pytest.fixture(params=["node-runtime", "sampler-start"])
+def world(request, tmp_path, monkeypatch):
     class Pop:
         stdout = None
 
@@ -87,17 +89,32 @@ def world(tmp_path, monkeypatch):
     spec.write_text(json.dumps({"sampler_id": "x", "store": "/s", "prompts": {"groups_per_round": 2},
                                 "engine": {"factory": "f:g"}}))
     env = tmp_path / "store.env"
-    env.write_text("AWS_ACCESS_KEY_ID=x\n")
+    env.write_text("AWS_ACCESS_KEY_ID=x\nR2_BUCKET=bkt\n")
     cfg = {"target": 2, "slots": [0, 1, 2], "shard_base": "smp", "spec": str(spec), "run_prefix": "runs/r1",
            "r2_env_file": str(env),
            "provider": {"kind": "ssh", "nodes": list(NAMES[:3]), "workdir": "/srv/yeto/r1", "runtime": "container",
                         "container": {"engine": "podman", "image": "img"}}}
+    if request.param == "sampler-start":
+        cfg["provider"]["node_runtime"] = False
+    run_store = SimpleNamespace(objects=S3ObjectStore("s3://bkt/runs/runs/r1", client=FakeS3()))
+    monkeypatch.setattr(sp, "pool_fence_store", lambda cfg, **kw: run_store)  # the node runtime's assignments
     conf = sp.parse_config(cfg, inventory=[_node(i) for i in range(4)])
     nodes, clock, fencer = Nodes(), Clock(), FakeFencer()
     ops = sp.SshSamplerPoolOps(cfg, conf=conf, run=nodes, state_dir=tmp_path, clock=clock)
     ops.start_in_background = False  # the start runs inside the tick: the test reads it right after
     ops.data_path = lambda: fencer  # the work contract's fence (store): what the pool calls through ops.fence
-    return SimpleNamespace(ops=ops, nodes=nodes, clock=clock, fencer=fencer, conf=conf, cfg=cfg)
+    assert conf.node_runtime == (request.param == "node-runtime")
+    return SimpleNamespace(ops=ops, nodes=nodes, clock=clock, fencer=fencer, conf=conf, cfg=cfg, store=run_store)
+
+
+def _started_spec(w, host: str, ticket: str) -> dict:
+    """The spec the sampler of ``ticket`` on ``host`` started with: its node runtime
+    assignment in the run store, or the spec file the pool uploaded (``node_runtime: false``)."""
+    if w.conf.node_runtime:
+        from yeto.node import records
+
+        return json.loads(w.store.objects.read(records.assignment_key(ticket)))["spec"]
+    return w.nodes.specs[host]
 
 
 def _pool(w, *, control=None, grace_s=300.0):
@@ -150,10 +167,12 @@ def test_a_lost_node_moves_its_slot_to_the_spare(world, plane):
     assert w.ops.provider.node_of_ticket(successor.ticket).name == "n2"
     assert successor.replaces_shard == lost_shard and successor.predecessor_lost
     assert successor.shard != lost_shard  # a new shard (new incarnation), never the lost one reused
-    spec = w.nodes.specs["ops@10.0.0.12"]  # what the spare's sampler was started with
+    spec = _started_spec(w, "ops@10.0.0.12", successor.ticket)  # what the spare's sampler was started with
     assert spec["sampler_id"] == successor.shard and spec["continues_shard"] == lost_shard
     assert spec["handoff_wait_s"] == 60.0  # its predecessor is lost: it does not wait for a handoff
-    assert len(w.nodes.started_on("ops@10.0.0.12")) == 1
+    (start,) = w.nodes.started_on("ops@10.0.0.12")
+    assert ("-m yeto.node run --assignment" in start) == w.conf.node_runtime
+    assert ("yeto.rl.engine.engine_sampler --spec" in start) != w.conf.node_runtime
 
     # never started again on the lost node: only the first start went there
     assert len(w.nodes.started_on("ops@10.0.0.10")) == 1

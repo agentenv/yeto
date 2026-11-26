@@ -1,6 +1,6 @@
-"""The ssh pool on the node runtime (yeto.node.route): the node runs ``python -m yeto.node
-run``, which starts the sampler; the route keeps its own preflight, code upload, env file
-and container flags. ``node_runtime: false`` keeps the sampler start of before."""
+"""The ssh pool on the node runtime (yeto.node.route), its default: the node runs ``python -m
+yeto.node run``, which starts the sampler; the route keeps its own preflight, code upload, env
+file and container flags. ``node_runtime: false`` keeps the sampler start of before."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def _start(tmp_path, monkeypatch, **section):
 
 
 def test_the_container_runs_the_node_runtime_with_the_routes_own_flags(tmp_path, monkeypatch):
-    new, t = _start(tmp_path, monkeypatch, node_runtime=True)
+    new, t = _start(tmp_path, monkeypatch)  # the default
     (tmp_path / "old").mkdir()
     old, _ = _start(tmp_path / "old", monkeypatch, node_runtime=False)
     run_new = next(c[0][-1] for c in new.calls if c[0][0] == "ssh" and "run -d" in c[0][-1])
@@ -76,9 +76,17 @@ def test_the_container_runs_the_node_runtime_with_the_routes_own_flags(tmp_path,
     assert profile["container"] == "process" and profile["paths"]["work"] == "/srv/yeto/run0"
 
 
-def test_node_runtime_is_opt_in_and_false_keeps_the_sampler_start(tmp_path, monkeypatch):
+def test_node_runtime_is_the_default_and_false_keeps_the_sampler_start(tmp_path, monkeypatch):
+    assert conf().node_runtime is True and conf(node_runtime=True).node_runtime is True
+    assert conf(node_runtime=False).node_runtime is False
+    from tests.test_ssh_sampler_pool import npu_node, provider_section
+
+    top = {"provider": provider_section(), "node_runtime": False}  # the pool config's own key
+    assert sp.parse_config(top, inventory=[npu_node()]).node_runtime is False
     default, _ = _start(tmp_path, monkeypatch)
-    assert not any("yeto.node" in c[0][-1] for c in default.calls if c[0][0] == "ssh")
+    cmds = [c[0][-1] for c in default.calls if c[0][0] == "ssh"]
+    assert any("-m yeto.node run --assignment" in c for c in cmds)
+    assert not any("yeto.rl.engine.engine_sampler --spec" in c for c in cmds)
     (tmp_path / "off").mkdir()
     old, _ = _start(tmp_path / "off", monkeypatch, node_runtime=False)
     cmds = [c[0][-1] for c in old.calls if c[0][0] == "ssh"]
@@ -129,7 +137,7 @@ def test_a_venv_node_runs_the_node_runtime_and_the_sampler_end_to_end(tmp_path, 
     (tmp_path / "spec.json").write_text(json.dumps(spec))
     cfg = {"target": 1, "slots": [0], "shard_base": "e2e", "spec": str(tmp_path / "spec.json"), "run_prefix": "e2e",
            "provider": {"kind": "ssh", "workdir": str(work), "runtime": "venv", "venv": {"python": sys.executable},
-                        "store": str(store), "node_runtime": True}}
+                        "store": str(store)}}  # the node runtime: the default
     node = parse_node({"name": "local", "host": "localhost", "device_family": "cuda", "cpu_arch": "x86_64",
                        "card": "L4", "cards_per_node": 1, "hbm_gib": 24, "host_memory_gib": 64,
                        "runtime": "rootfs"}, index=0)

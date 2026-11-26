@@ -192,7 +192,7 @@ own (a JSON or YAML map, e.g. `{"paths": {"work": "/data/work"}}`); `--work`,
 | route | sampler start | rollback |
 |---|---|---|
 | SSH + docker pool on `provider.kind: sky` | node runtime (default) | `"node_runtime": false` at the top level of the pool config |
-| SSH inventory pool (`provider.kind: ssh`) | its own start; node runtime opt-in | `"node_runtime": true` in the `provider` section (or the pool config) turns it on |
+| SSH inventory pool (`provider.kind: ssh`) | node runtime (default) | `"node_runtime": false` in the `provider` section (or the pool config) |
 | National Compute | its own docker route | (shadow only; `node_runtime: true` is refused) |
 | Daytona | its own process route | (shadow only; `node_runtime: true` is refused) |
 
