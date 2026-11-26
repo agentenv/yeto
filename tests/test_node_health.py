@@ -447,6 +447,138 @@ def test_a_node_without_nvswitch_passes_with_its_fabric_manager_inactive_and_no_
     assert hung.ok_single and hung.reasons == []
 
 
+# -- the fabric manager over a boot (a fabric manager that stays down reaches lost) ----------
+
+PCIE = dict(fabric=(1, ""))  # no Fabric block in nvidia-smi -q: a node without NVSwitch
+PCIE_NA = dict(fabric=(0, "    Fabric\n        State : N/A\n        Status : N/A\n" * 8))
+
+
+def fm_text(state: str | None, boot=BOOT, **over) -> str:
+    """A healthy node whose fabric manager reads ``state`` (None: systemctl timed out) in ``boot``."""
+    fm = (124, "") if state is None else (0 if state == "active" else 3, state)
+    return node_text(fabricmanager=fm, xid=(0, xid_text(boot=boot)), **over)
+
+
+def watch_through(*texts, multi=False):
+    w = HealthWatch("cuda", hcas=hcas_of(HCA), multi=multi)
+    return w, [w.observe(t) for t in texts]
+
+
+def test_a_fabric_manager_that_stays_failed_after_it_was_active_is_lost():
+    w, rs = watch_through(fm_text("active"), fm_text("failed"), fm_text("failed"), fm_text("failed"))
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "lost", "lost"]
+    assert [r.event for r in rs] == [None, None, "node_health", None]  # the loss is said once
+    assert all(r.result.reasons == ["nvidia-fabricmanager failed (was active)"] for r in rs[1:])
+    assert all(r.result.facts["fabric"] == "8/8 completed" for r in rs)  # the fabric still reads Completed
+    assert rs[-1].result.facts["fm_boot"] == BOOT and "fm_why" not in rs[-1].result.facts
+    assert w.record()["reasons"] == ["nvidia-fabricmanager failed (was active)"]
+
+
+@pytest.mark.parametrize("state", ["inactive", "activating", "deactivating"])
+def test_any_state_but_active_after_active_in_the_boot_stays_a_reason(state):
+    _, rs = watch_through(fm_text("active"), fm_text(state), fm_text(state))
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "lost"]
+    assert rs[2].result.reasons == [f"nvidia-fabricmanager {state} (was active)"]
+
+
+def test_an_active_fabric_manager_clears_the_streak_and_an_unread_one_judges_nothing():
+    _, rs = watch_through(fm_text("active"), fm_text("failed"), fm_text("active"), fm_text("failed"),
+                          fm_text(None), fm_text("failed"))
+    # systemctl that timed out: that check passes (the streak goes), the memory stays
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "ok", "bad_once", "ok", "bad_once"]
+    assert rs[4].result.reasons == [] and rs[4].result.facts["fm_boot"] == BOOT
+    assert rs[5].result.reasons == ["nvidia-fabricmanager failed (was active)"]
+
+
+def test_a_read_failure_keeps_the_fabric_manager_memory():
+    _, rs = watch_through(fm_text("active"), fm_text("failed"), node_text(gpus=(124, "")), fm_text("failed"))
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "read_failed", "lost"]
+    assert rs[2].result.facts["fm_boot"] == BOOT
+
+
+@pytest.mark.parametrize("pcie", [PCIE, PCIE_NA])
+@pytest.mark.parametrize("state", ["inactive", "failed"])
+def test_a_node_without_nvswitch_is_never_judged_on_its_fabric_manager(pcie, state):
+    _, rs = watch_through(*[fm_text(state, **pcie)] * 4)
+    assert [r.verdict for r in rs] == ["ok"] * 4 and all(r.result.reasons == [] for r in rs)
+    assert all("fm_boot" not in r.result.facts and r.result.facts["fabric"] == "none" for r in rs)
+
+
+def test_a_new_boot_forgets_the_fabric_manager_as_before():
+    # active in the old boot, never in the new one: one reason when it stops (as before), then none
+    _, rs = watch_through(fm_text("active"), fm_text("failed", boot="boot-2"), fm_text("failed", boot="boot-2"),
+                          fm_text("failed", boot="boot-2"))
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "ok", "ok"]
+    assert "fm_boot" not in rs[1].result.facts and "fm_boot" not in rs[3].result.facts
+    # failed before the reboot and after it, never active since: nothing, as before
+    _, rs = watch_through(fm_text("active"), fm_text("failed"), fm_text("failed", boot="boot-2"),
+                          fm_text("failed", boot="boot-2"))
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "ok", "ok"]
+    # active again in the new boot: that boot's memory
+    _, rs = watch_through(fm_text("active"), fm_text("active", boot="boot-2"), fm_text("failed", boot="boot-2"),
+                          fm_text("failed", boot="boot-2"))
+    assert [r.verdict for r in rs] == ["ok", "ok", "bad_once", "lost"]
+    assert rs[3].result.facts["fm_boot"] == "boot-2"
+
+
+@pytest.mark.parametrize("state", ["failed", "activating", "deactivating"])
+def test_a_new_launcher_reports_a_down_fabric_manager_on_an_nvlink_fabric_node_at_once(state):
+    w, rs = watch_through(fm_text(state), fm_text(state), fm_text(state))
+    assert [r.verdict for r in rs] == ["bad_once", "lost", "lost"]
+    assert all(r.result.reasons == [f"nvidia-fabricmanager {state} (NVLink fabric present)"] for r in rs)
+    assert rs[0].result.facts["fm_boot"] == BOOT and rs[0].result.facts["fm_why"] == "nvswitch"
+    # it comes back: the reason goes; down again in the boot: the usual reason
+    back = check(fm_text("active"), rs[-1].result.facts)
+    assert back.ok_single and "fm_why" not in back.facts
+    assert check(fm_text("failed"), back.facts).reasons == ["nvidia-fabricmanager failed (was active)"]
+    # a new boot forgets it too
+    assert check(fm_text(state, boot="boot-2"), rs[-1].result.facts).ok_single
+
+
+def test_a_new_launcher_after_a_read_failure_still_judges_its_first_fabric_manager_read():
+    _, rs = watch_through(node_text(gpus=(124, "")), fm_text("failed"), fm_text("failed"))
+    assert [r.verdict for r in rs] == ["read_failed", "bad_once", "lost"]
+
+
+def test_a_first_inactive_fabric_manager_with_a_completed_fabric_is_left_to_the_fabric():
+    # what a node without the unit prints (a compute tray whose fabric is managed elsewhere)
+    _, rs = watch_through(fm_text("inactive"), fm_text("inactive"), fm_text("inactive"))
+    assert [r.verdict for r in rs] == ["ok"] * 3 and "fm_boot" not in rs[-1].result.facts
+    stuck = check(fm_text("inactive", fabric=(0, FABRIC_IN_PROGRESS)))
+    assert stuck.reasons == ["NVLink fabric In Progress/N/A on 8/8 GPUs (fabric manager: inactive)"]
+
+
+def test_without_a_boot_id_the_fabric_manager_is_judged_as_before():
+    no_boot = lambda state: node_text(fabricmanager=(0 if state == "active" else 3, state),  # noqa: E731
+                                      xid=(0, "source=dmesg"))
+    _, rs = watch_through(no_boot("active"), no_boot("failed"), no_boot("failed"))
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "ok"]
+    # remembered in a boot, then the boot id stops reading: the memory stays and judges nothing
+    _, rs = watch_through(fm_text("active"), no_boot("failed"), no_boot("failed"), fm_text("failed"))
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "ok", "bad_once"]
+    assert rs[2].result.facts["fm_boot"] == BOOT
+    first = check(no_boot("failed"))  # a new launcher: the reason, no memory
+    assert first.reasons == ["nvidia-fabricmanager failed (NVLink fabric present)"] and "fm_boot" not in first.facts
+
+
+def test_an_older_prev_without_the_fabric_manager_memory_is_read():
+    old = {k: v for k, v in check(fm_text("active")).facts.items() if k not in ("fm_boot", "fm_why")}
+    assert old["fm"] == "active" and old["xid"]["boot"] == BOOT
+    a = check(fm_text("failed"), old)
+    b = check(fm_text("failed"), a.facts)
+    assert a.reasons == b.reasons == ["nvidia-fabricmanager failed (was active)"] and b.facts["fm_boot"] == BOOT
+    # its XID cursor names another boot: a reboot since (one reason, as before, then none)
+    rebooted = check(fm_text("failed", boot="boot-2"), old)
+    assert rebooted.reasons == ["nvidia-fabricmanager failed (was active)"]
+    assert check(fm_text("failed", boot="boot-2"), rebooted.facts).ok_single
+    # no XID cursor at all (no kernel log access): this boot
+    bare = {k: v for k, v in old.items() if k != "xid"}
+    c = check(fm_text("failed"), bare)
+    assert c.reasons == check(fm_text("failed"), c.facts).reasons == ["nvidia-fabricmanager failed (was active)"]
+    # an older prev whose fabric manager was not active: nothing remembered, as before
+    assert check(fm_text("failed"), {**old, "fm": "failed"}).ok_single
+
+
 def _plain_xid(gpu: int, code: int) -> str:  # a kernel log without timestamps (dmesg -t, a syslog copy)
     return f"NVRM: Xid (PCI:0000:{BUSES[gpu]}:00): {code}, pid=4242, name=python3, GPU has fallen off the bus."
 

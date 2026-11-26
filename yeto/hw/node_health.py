@@ -41,7 +41,9 @@ XID cursor). It judges two jobs at once (:class:`HealthResult`):
 * ``ok_single``: a single-node job: every GPU answers (as many as expected, or as the
   first check saw), none lost memory, no uncorrectable ECC error and no hardware XID
   (:data:`HARDWARE_XIDS`) since the previous check, the NVLink fabric is
-  ``Completed/Success`` on every GPU that has one, the fabric manager did not stop;
+  ``Completed/Success`` on every GPU that has one, the fabric manager is active in a boot
+  in which it was active (or, at the first read, on a node with an NVLink fabric:
+  :meth:`CudaChecker._fabric_manager`);
 * ``ok_multi``: also every port the job's ``NCCL_IB_HCA`` names exists, is ``Active``
   and runs at no less than its rate at the first check (or ``min_ib_gbps``). False
   whenever ``ok_single`` is; None when the GPUs pass but the job names HCAs and the IB
@@ -209,7 +211,10 @@ def bounded(script: str, limit_s: int = HEALTH_LIMIT_S, *, pid_file: str | None 
         'cat "$__yeto_hf" 2>/dev/null; rm -f "$__yeto_hf"\n'
     )
 # the facts a check hands to the next one (baselines and the XID cursor); kept over a read failure
-CARRIED = ("gpu_count", "bus", "mem", "ecc", "xid", "fm", "ib_rate")
+CARRIED = ("gpu_count", "bus", "mem", "ecc", "xid", "fm", "fm_boot", "fm_why", "ib_rate")
+# the states of ``systemctl is-active nvidia-fabricmanager`` that are judged (anything else,
+# an empty or timed-out answer, says nothing)
+FM_STATES = ("active", "inactive", "failed", "activating", "deactivating")
 
 
 @dataclass
@@ -287,6 +292,22 @@ def _num(value: str) -> int | None:
 
 def _port_label(port: IbPort) -> str:
     return port.ca if port.port == 1 else f"{port.ca}:{port.port}"
+
+
+def _boot_of(sec: Any) -> str:
+    """The boot id the XID section printed first ('' when it did not)."""
+    if sec is None:
+        return ""
+    for line in sec.text.splitlines():
+        if line.startswith("boot="):
+            return line[len("boot="):].strip()
+    return ""
+
+
+def _prev_boot(prev: Mapping[str, Any]) -> str:
+    """The boot id of the previous check's XID cursor ('' when it has none)."""
+    cursor = prev.get("xid")
+    return str(cursor.get("boot") or "") if isinstance(cursor, Mapping) else ""
 
 
 def _read_error(sec: Any) -> str:
@@ -438,23 +459,69 @@ class CudaChecker(Checker):
 
     @staticmethod
     def _fabric(sections: Mapping[str, Any], prev: Mapping[str, Any], facts: dict[str, Any]) -> list[str]:
-        out = []
         fm_sec = sections.get("fabricmanager")
         fm = (fm_sec.text.strip().split() or [""])[0] if fm_sec is not None and fm_sec.rc != 127 else ""
-        if fm in ("active", "inactive", "failed", "activating", "deactivating"):
-            facts["fm"] = fm
-            if prev.get("fm") == "active" and fm in ("inactive", "failed"):
-                out.append(f"nvidia-fabricmanager {fm} (was active)")
         sec = sections.get("fabric")
-        if sec is None or sec.rc in (124, 137):
-            return out
-        real = [(s, st) for s, st in parse_fabric(sec.text) if s.upper() != "N/A"]
-        bad = [(s, st) for s, st in real if s.lower() != "completed" or (st and st.lower() != "success")]
-        facts["fabric"] = f"{len(real) - len(bad)}/{len(real)} completed" if real else "none"
-        if bad:
-            state = "/".join(x for x in bad[0] if x)
-            out.append(f"NVLink fabric {state} on {len(bad)}/{len(real)} GPUs (fabric manager: {fm or '?'})")
-        return out
+        out: list[str] = []
+        real: list[tuple[str, str]] = []  # the GPUs with an NVLink fabric (none: PCIe, or unread)
+        if sec is not None and sec.rc not in (124, 137):
+            real = [(s, st) for s, st in parse_fabric(sec.text) if s.upper() != "N/A"]
+            bad = [(s, st) for s, st in real if s.lower() != "completed" or (st and st.lower() != "success")]
+            facts["fabric"] = f"{len(real) - len(bad)}/{len(real)} completed" if real else "none"
+            if bad:
+                state = "/".join(x for x in bad[0] if x)
+                out.append(f"NVLink fabric {state} on {len(bad)}/{len(real)} GPUs (fabric manager: {fm or '?'})")
+        return CudaChecker._fabric_manager(fm, _boot_of(sections.get("xid")), bool(real), prev, facts) + out
+
+    @staticmethod
+    def _fabric_manager(fm: str, boot: str, nvswitch: bool, prev: Mapping[str, Any],
+                        facts: dict[str, Any]) -> list[str]:
+        """The fabric manager's reason ('' state: unread, judged nothing).
+
+        ``fm_boot`` (carried) is the boot in which the fabric manager must be active: it was
+        active in it, or (``fm_why`` ``nvswitch``) the first fabric manager read of this watch
+        found it down on a node with an NVLink fabric. In that boot anything but ``active`` is
+        a reason at every check, so a fabric manager that stays down reaches ``lost``; a new
+        boot forgets it (a fabric manager not active since the reboot: as before, the fabric
+        state judges the node). An older ``prev`` without ``fm_boot`` whose fabric manager was
+        active: the boot of its XID cursor (else this one). The first read (a new launcher: no
+        ``fm`` in ``prev``) on an NVLink fabric node reports ``failed`` / ``activating`` /
+        ``deactivating``; ``inactive`` there is also what a node without the unit prints (a
+        compute tray whose fabric is managed elsewhere), and is left to the fabric state. A
+        node without an NVLink fabric (PCIe) is never judged on a fabric manager that was
+        never active."""
+        if "fm_boot" in prev:
+            need, why = prev.get("fm_boot") or None, prev.get("fm_why") or None
+        elif prev.get("fm") == "active":
+            need, why = _prev_boot(prev) or boot or None, None
+        else:
+            need = why = None
+        if need and boot and need != boot:  # a new boot: forgotten
+            need = why = None
+        first = "fm" not in prev
+        down = fm in FM_STATES and fm != "active"
+        absolute = first and nvswitch and down and fm != "inactive"
+        if fm == "active" and boot:
+            need, why = boot, None
+        elif absolute and boot and not need:
+            need, why = boot, "nvswitch"
+        for key, value in (("fm_boot", need), ("fm_why", why)):
+            if value:
+                facts[key] = value
+            else:
+                facts.pop(key, None)
+        if fm not in FM_STATES:
+            return []
+        facts["fm"] = fm
+        if not down:
+            return []
+        if need and need == boot:  # it must be active in this boot
+            return [f"nvidia-fabricmanager {fm} ({'NVLink fabric present' if why == 'nvswitch' else 'was active'})"]
+        if prev.get("fm") == "active" and fm in ("inactive", "failed"):  # it stopped (across a reboot, or boot unknown)
+            return [f"nvidia-fabricmanager {fm} (was active)"]
+        if absolute:  # the first read, the boot unknown
+            return [f"nvidia-fabricmanager {fm} (NVLink fabric present)"]
+        return []
 
     @staticmethod
     def _xids(sec: Any, prev: Mapping[str, Any], facts: dict[str, Any],

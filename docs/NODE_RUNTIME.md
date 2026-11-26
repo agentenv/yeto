@@ -277,11 +277,24 @@ One shell call reads, in this order:
 | GPUs | `nvidia-smi --query-gpu=index,pci.bus_id,name,memory.total,ecc.errors.uncorrected.volatile.total` | no GPU at all, fewer GPUs answer than the inventory's `cards_per_node` (a sampler: than the first check saw), a GPU nvidia-smi cannot open, a GPU's memory shrank, or nvidia-smi cannot talk to the driver |
 | ECC | the same query | the volatile uncorrectable ECC count grew since the previous check (a count that went down is the new baseline) |
 | NVLink fabric | the `Fabric` blocks of `nvidia-smi -q` | a GPU that has a fabric state is not `Completed/Success` (a PCIe card's `N/A` passes) |
-| fabric manager | `systemctl is-active nvidia-fabricmanager` | it was active and is now `inactive` or `failed` (a node without NVSwitch, never active, passes) |
+| fabric manager | `systemctl is-active nvidia-fabricmanager`, with the boot id | it was active in this boot and is now anything else (`inactive`, `failed`, `activating`, `deactivating`), at every check until it is active again; see below |
 | IB / RoCE ports | `ibstat` (`ibv_devinfo -v` only when ibstat fails) | a port named by `NCCL_IB_HCA` is missing, not `Active`, or slower than at the first check |
 
 The XIDs and the ECC count only count from the second check on. What the kernel log
 holds at the first check is history: the preflight judged the node then.
+
+The fabric manager is remembered per boot. Once it was active in a boot, every later
+check of that boot that does not read `active` is bad, so a fabric manager that stays
+down makes the node `lost` after two checks, even while the fabric still reads
+`Completed`. A new boot id forgets it: a fabric manager never active since the reboot
+is judged as before (one bad check when it was active before the reboot, then the
+fabric state judges the node). The memory lives in the checker, not on disk. The first
+check of a new launcher, which has no memory, judges a node with an NVLink fabric on
+its own: `failed`, `activating` or `deactivating` is bad at once. `inactive` there is
+left to the fabric state, because it is also what a node without the unit prints (a
+compute tray whose fabric is managed elsewhere). A node without NVSwitch (no fabric,
+or `N/A`) is never judged on a fabric manager that was never active. A systemctl that
+timed out says nothing. Without a boot id, a stop is bad once, as before.
 
 A kernel log without timestamps (dmesg's default has them) is followed by its last
 line, how often that line ends the log, and the line before it, so lines that rotate
