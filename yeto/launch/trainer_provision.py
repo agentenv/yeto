@@ -369,7 +369,8 @@ class SshSource(Source):
         if prov.guard_order is not None:  # a start that is no reattach orders the island's processes
             prov.guard_order(",".join(sorted(names)))
         return start_resident_ssh(prov.args, tasks, names, prov.results, prov.errors, prov.events_dir,
-                                  prov.collectors)
+                                  prov.collectors, island_index={n: prov.islands[n].m for n in names},
+                                  num_islands=len(prov.specs))
 
 
 _SOURCES: list[Source] = [SshSource(), ModalSource(), VerdaSource(), SkySource()]
@@ -418,9 +419,11 @@ def resident_ssh_names(args, names: list[str], specs: list[ClusterSpec]) -> set[
     return {n for m, (n, s) in enumerate(zip(names, specs)) if is_resident(args, s, m, len(specs))}
 
 
-def start_resident_ssh(args, tasks, names, results, errors, events_dir, collectors):
+def start_resident_ssh(args, tasks, names, results, errors, events_dir, collectors, *, island_index=None,
+                       num_islands=None):
     """Start (or reattach to) every resident ``ssh:`` island; returns their ops. Node 0's
-    lines go to the launcher log and the island's echo tape collector."""
+    lines go to the launcher log and the island's echo tape collector. ``island_index``: each
+    island's index among the launch's islands (its own checkpoint keys when it has spares)."""
     from .. import runs
     from ..rl.event_echo import TapeCollector as EventCollector
     from .ssh_resident import RESIDENT_DIR, SshIslandOps
@@ -436,10 +439,15 @@ def start_resident_ssh(args, tasks, names, results, errors, events_dir, collecto
                 collector.feed(line)
         return sink
 
+    from .island_spares import spares_from_args
+
     ops = SshIslandOps(run_id=args.cluster_prefix, journal_dir=runs.run_dir(args.cluster_prefix) / RESIDENT_DIR,
                        events_dir=events_dir, sink_for=sink_for)
     for name in sorted(names):
-        ops.add(name, tasks[name])
+        # an inventory with trainer-spare nodes: a lost node is replaced (island_spares); else None
+        spares = spares_from_args(args, tasks[name], island_index=(island_index or {}).get(name),
+                                  num_islands=num_islands)
+        ops.add(name, tasks[name], spares=spares)
         try:
             results[name] = (ops.start(name), None)
         except Exception as e:  # noqa: BLE001 - reported with the other launch errors

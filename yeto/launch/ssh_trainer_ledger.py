@@ -12,7 +12,11 @@ container, per node: ``ssh_trainer_island``) is recorded the same way:
   run id, the island name, the incarnation, each node's SSH target and jump host,
   whether the nodes run docker, the kill grace;
 * ``released`` once every node confirmed the stop (``SshTrainerIslands.release``
-  / ``release_incarnation``); an unconfirmed stop stays open for the cleanup;
+  / ``release_incarnation``); an unconfirmed stop stays open for the cleanup. A lost node
+  that is not waited for (an island with spare nodes, ``island_spares``) gets its own row
+  (:func:`record_owed`: that node and its rank only) once the other nodes confirmed;
+  the incarnation's row closes. A lost node whose own stop was confirmed owes nothing; a
+  confirmed owed stop later (:func:`release_owed`) closes that row;
 * :func:`cleanup_release` (``yeto cleanup``, the reaper) runs the same kill
   script on every node, then ends the run's node leases there (inventory
   ``lease_store``: the row records the lease store and holder);
@@ -59,6 +63,43 @@ def record(op: str, *, run_id: str, island: str, incarnation: int, attrs: dict[s
     record_safely(op, KIND, rid, f"{island}-i{int(incarnation)}", **dict(attrs or {}))
 
 
+def record_owed(*, run_id: str, island: str, incarnation: int, node: Node, rank: int, docker: bool,
+                kill_grace_s: int) -> None:
+    """The row of the stop a lost node still owes for an incarnation (``cleanup_release``
+    stops it there, at its own rank); priced as that node only."""
+    from yeto.cost.ledger import record_safely
+
+    rid = owed_id(run_id, island, incarnation, node.name)
+    attrs = created_attrs(run_id=run_id, island=island, incarnation=incarnation, nodes=[node], docker=docker,
+                          kill_grace_s=kill_grace_s)
+    record_safely("created", KIND, rid, f"{island}-i{int(incarnation)}-owed-{node.name}", ranks=[int(rank)],
+                  **attrs)
+
+
+def owed_id(run_id: str, island: str, incarnation: int, node: str) -> str:
+    return f"{resource_id(run_id, island, incarnation)}-owed-{node}"
+
+
+def release_owed(*, run_id: str, island: str, incarnation: int, node: str) -> None:
+    """The owed stop of ``node`` for that incarnation is confirmed (its own stop in the
+    background, or ``yeto cluster release-node``): its row closes. The run's ledger is
+    ``$YETO_RESOURCE_LEDGER``, else the run's own (a ``release-node`` outside the run)."""
+    from yeto.cost.ledger import ResourceLedger, current, record_safely
+
+    ledger = current()
+    if ledger is None:
+        try:
+            ledger = ResourceLedger.for_run(str(run_id))
+        except Exception as error:  # noqa: BLE001 - printed, the row stays for yeto cleanup
+            print(f"[cost] WARNING: no resource ledger for run {run_id} ({error}); the owed row of {node} stays "
+                  "open for `yeto cleanup`", flush=True)
+            return
+    rid = owed_id(run_id, island, incarnation, node)
+    if not any(r.id == rid for r in ledger.open_resources()):
+        return  # never recorded (the stop came first) or closed already
+    record_safely("released", KIND, rid, f"{island}-i{int(incarnation)}-owed-{node}", ledger=ledger)
+
+
 class _LedgerNode:
     """The SSH reach of a node as the ledger row keeps it (``SshOps`` needs only this)."""
 
@@ -97,7 +138,8 @@ def cleanup_release(resource: Any, ops: Any = None, dry_run: bool = False,
     paths = remote_paths(run_id, island, incarnation)
     ssh = ssh or getattr(ops, "ssh_ops", None) or SshOps()
     failed: list[str] = []
-    for rank, node in enumerate(nodes):
+    ranks = [int(r) for r in attrs.get("ranks") or range(len(nodes))]  # an owed row: the lost node's rank
+    for rank, node in zip(ranks, nodes):
         container = container_name(run_id, island, incarnation, rank) if attrs.get("docker") else None
         try:
             done = ssh.run(node, kill_script(paths, grace, container=container), timeout=grace + 60.0)

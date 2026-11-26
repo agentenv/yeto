@@ -910,6 +910,7 @@ class SshTrainerIslands:
         self.checked = False
         self.unreleased: set[int] = set()  # incarnations not confirmed stopped on every node
         self.started: set[int] = set()  # incarnations started and not (yet) confirmed stopped
+        self.unconfirmed: dict[int, frozenset[str]] = {}  # incarnation -> nodes whose last stop is not confirmed
 
     # -- preflight ----------------------------------------------------------------
     def preflight(self) -> None:
@@ -1178,19 +1179,27 @@ class SshTrainerIslands:
         if not leases.held():  # no other island of the process holds a lease: the keeper is done
             leases.stop_keeper()
 
-    def release(self, job: _SshJob) -> bool:
-        ok = self._kill(job.incarnation)
-        for proc in job.procs:
-            if proc.poll() is None:
+    def release(self, job: _SshJob, *, skip: frozenset[str] = frozenset(), owed: frozenset[str] | None = None,
+                keep_unconfirmed: bool = False) -> bool:
+        """Stop ``job`` on every node. ``skip``: lost nodes (names) not waited for: the
+        others must confirm; the stop such a node owes gets a ledger row of its own
+        (``owed``: the skipped nodes that owe it, default all; a lost node whose stop was
+        confirmed owes nothing). ``keep_unconfirmed``: the streams of the nodes whose stop
+        is not confirmed (:attr:`unconfirmed`) stay open (their heartbeat)."""
+        ok = self._kill(job.incarnation, skip=skip, owed=owed)
+        keep = self.unconfirmed.get(int(job.incarnation), frozenset()) if keep_unconfirmed else frozenset()
+        for rank, proc in enumerate(job.procs):
+            if proc.poll() is None and self.spec.nodes[rank].name not in keep:
                 proc.terminate()
         return ok
 
-    def release_incarnation(self, incarnation: int) -> bool:
+    def release_incarnation(self, incarnation: int, *, skip: frozenset[str] = frozenset(),
+                            owed: frozenset[str] | None = None) -> bool:
         if str(int(incarnation)) not in read_jobs(self.jobs_path):
             print(f"[launcher] trainer incarnation {incarnation}: no SSH start recorded; nothing to release",
                   flush=True)
             return False
-        return self._kill(incarnation)
+        return self._kill(incarnation, skip=skip, owed=owed)
 
     def start_events(self) -> list[Mapping[str, Any]]:
         return [e for job in self.jobs for e in job.events.all]
@@ -1259,15 +1268,22 @@ class SshTrainerIslands:
                                      "stopped on every node; not starting another over it")
             print(f"[launcher] trainer incarnation {earlier}: stopped on every node now", flush=True)
 
-    def _kill(self, incarnation: int) -> bool:
-        ok = self._kill_nodes(incarnation)
+    def _kill(self, incarnation: int, *, skip: frozenset[str] = frozenset(),
+              owed: frozenset[str] | None = None) -> bool:
+        ok = self._kill_nodes(incarnation, skip=skip)
+        owed = skip if owed is None else owed & skip
+        if ok and owed:  # the lost nodes not waited for: each owes its stop in a row of its own
+            for rank, node in enumerate(self.spec.nodes):
+                if node.name in owed:
+                    ssh_trainer_ledger.record_owed(**self._ledger_key(incarnation), node=node, rank=rank,
+                                                   docker=self.spec.docker, kill_grace_s=self.kill_grace_s)
         if ok:  # every node confirmed: the ledger row closes (else a cleanup retries it)
             ssh_trainer_ledger.record("released", **self._ledger_key(incarnation))
             self.started.discard(int(incarnation))
-        self._fetch_outputs(incarnation)
+        self._fetch_outputs(incarnation, skip=skip)
         return ok
 
-    def _fetch_outputs(self, incarnation: int) -> None:
+    def _fetch_outputs(self, incarnation: int, *, skip: frozenset[str] = frozenset()) -> None:
         """Copy each node's ``~/yeto-output`` of this incarnation into
         ``<events dir>/<island>-i<N>-output/node<rank>/`` (ssh_node_storage); a failure
         is a warning, never a failed release. Nothing without an events dir."""
@@ -1276,6 +1292,8 @@ class SshTrainerIslands:
         paths = _pin_state_home(remote_paths(self.spec.run_id, self.name, incarnation))
         base = Path(self.events_dir) / f"{self.name}-i{int(incarnation)}-output"
         for rank, node in enumerate(self.spec.nodes):
+            if node.name in skip:
+                continue
             remote = ssh_node_storage.output_dir(node, paths["dir"])
             script = f"{STATE_HOME_VAR}=\"$HOME\"\n" + ssh_node_storage.output_fetch_script(remote)
             try:
@@ -1289,14 +1307,19 @@ class SshTrainerIslands:
                       f"from {node.name} ({type(error).__name__}: {error}); it stays on the node",
                       flush=True)
 
-    def _kill_nodes(self, incarnation: int) -> bool:
+    def _kill_nodes(self, incarnation: int, *, skip: frozenset[str] = frozenset()) -> bool:
         paths = remote_paths(self.spec.run_id, self.name, incarnation)
         ok = True
+        failed: set[str] = set()
         for rank, node in enumerate(self.spec.nodes):
+            if node.name in skip:  # a lost node: not waited for (its stop is owed, island_spares)
+                continue
             script = kill_script(paths, self.kill_grace_s, container=self._container(incarnation, rank))
             try:
                 done = self.ops.run(node, script, timeout=self.kill_grace_s + 60.0)
                 ok &= done.returncode == 0
+                if done.returncode != 0:
+                    failed.add(node.name)
                 err = (getattr(done, "stderr", "") or "").strip()
                 if done.returncode != 0:  # rc 0 + stderr is ssh banner noise
                     print(f"[launcher] stop of trainer incarnation {incarnation} on {node.name}: "
@@ -1305,6 +1328,8 @@ class SshTrainerIslands:
                 print(f"[launcher] stop of trainer incarnation {incarnation} on {node.name} failed: {error}",
                       flush=True)
                 ok = False
+                failed.add(node.name)
+        self.unconfirmed[int(incarnation)] = frozenset(failed)
         if ok:
             self.unreleased.discard(int(incarnation))
         else:
@@ -1504,7 +1529,8 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
       ran on: those nodes, every one leased again; one another run holds refuses the
       launch (:class:`SshIslandError`: the island is not moved to other nodes).
     * Otherwise: the recorded nodes and the nodes this run holds first, then free ones;
-      held nodes are skipped; too few free nodes: wait (a line every 5 minutes, a
+      held nodes and nodes quarantined in the lease store (``island_spares``) are
+      skipped; too few free nodes: wait (a line every 5 minutes, a
       ``node_lease_waiting`` event, the run's STOP flag ends it) up to ``wait_s`` (default
       ``--rl-node-lease-wait-s``, 3600 s), then :class:`SshIslandError`.
 
@@ -1543,11 +1569,24 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
         def stop() -> str | None:
             return f"the run's STOP flag {stop_flag}" if stop_flag.exists() else None
 
+        # a node quarantined by any run of the inventory (a lost node, island_spares: its record
+        # in the lease store, nodes/<name>/quarantine.json) is no candidate until release-node
+        from .node_quarantine import shared_quarantine_note, shared_quarantined_names
+
+        shared = getattr(leases, "objects", None)
+        quarantined = shared_quarantined_names(shared) & set(by_name)
+        note = shared_quarantine_note(shared, quarantined) if quarantined else None
+        if note:  # said once, and on every waiting line: not just "no free node"
+            print(f"[launcher] node leases: island {key}: {note}", file=sys.stderr, flush=True)
+
+        def log(line: str) -> None:
+            print(line + (f"; {note}" if note else ""), file=sys.stderr, flush=True)
+
         try:
             picked = pick_nodes(list(trainers), need, leases, wait_s=limit, prefer=recorded, stop=stop,
-                                excluded=leases.assigned, place=place)
+                                excluded=set(leases.assigned) | quarantined, place=place, log=log)
         except NodeLeased as error:
-            raise SshIslandError(f"ssh: island {key}: {error}") from None
+            raise SshIslandError(f"ssh: island {key}: {error}" + (f"; {note}" if note else "")) from None
     leases.picks[key] = [n.name for n in picked]
     leases.assigned |= {n.name for n in picked}
     try:
