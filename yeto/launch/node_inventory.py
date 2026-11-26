@@ -328,10 +328,14 @@ def parse_images(raw: Any) -> dict[str, str]:
 
 
 def parse_node_health(value: Any, where: str) -> str | None:
+    """``auto`` / ``off`` (None: not given). YAML reads a bare ``off`` as false and a bare
+    ``on`` as true; ``on`` means ``auto`` (on where the family has a checker)."""
     if value is None:
         return None
-    if value is False:  # YAML reads a bare `off` as false
+    if value is False:
         return "off"
+    if value is True or value == "on":
+        return "auto"
     if value not in NODE_HEALTH_MODES:
         raise InventoryError(f"{where}: node_health must be one of {list(NODE_HEALTH_MODES)}, got {value!r}")
     return str(value)

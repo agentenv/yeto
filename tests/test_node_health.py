@@ -71,7 +71,8 @@ def test_a_healthy_node_passes_for_both_jobs_and_sets_its_baselines():
     assert r.checked and r.ok_single is True and r.ok_multi is True and r.reasons == []
     assert r.facts["gpu_count"] == 8 and r.facts["fabric"] == "8/8 completed" and r.facts["fm"] == "active"
     assert r.facts["ib_rate"]["mlx5_0"] == 400 and r.facts["ports"]["mlx5_3"] == "Active 400"
-    assert r.facts["xid"] == {"boot": BOOT, "ts": None, "count": 0, "last": None, "last_n": 0}
+    assert r.facts["xid"] == {"boot": BOOT, "ts": None, "count": 0, "last": None, "last_n": 0, "run": 0,
+                              "before": None}
     assert r.facts["xid_source"] == "dmesg"
 
 
@@ -187,6 +188,9 @@ def test_nvidia_smi_that_times_out_is_a_read_failure_that_keeps_the_baselines():
     r = check(node_text(gpus=(124, ""), xid=(0, xid_text(xid_line(1.0, 0, 13)))), first.facts)
     assert not r.checked and r.ok_single is None and r.ok_multi is None
     assert r.reasons == [f"nvidia-smi: timed out after {node_health.SECTION_TIMEOUT_S}s"]
+    # killed by its section's timeout after it printed some GPUs: those rows are not the answer
+    partial = check(node_text(gpus=(124, gpus_text(n=4))), first.facts)
+    assert partial.checked is False and partial.ok_single is None and partial.facts["gpu_count"] == 8
     assert all(r.facts[k] == first.facts[k] for k in ("gpu_count", "bus", "ecc", "xid", "ib_rate"))
     assert not check("").checked and check("").reasons == ["nvidia-smi: no output (the check did not run)"]
 
@@ -533,3 +537,92 @@ def test_an_empty_or_cut_off_output_is_a_read_failure_never_healthy():
     sick = node_text(xid=(0, xid_text(xid_line(9000.0, 5, 79))))
     r = check(sick[:sick.index(f"{host_probe.SECTION} fabric")], first.facts)
     assert r.checked and r.ok_single is False and r.reasons == ["GPU 5 XID 79"]
+
+
+def test_without_timestamps_a_repeat_is_seen_while_the_log_head_rotates_out():
+    """The cursor's anchor (the line before its last run) keeps its place when one old copy
+    of the repeated line leaves the head of the log."""
+    a, b, c = _plain_xid(5, 79), _plain_xid(3, 13), _plain_xid(4, 79)
+    first = check(node_text(xid=(0, xid_text(a, b, a, a))))
+    assert first.facts["xid"]["run"] == 2 and first.facts["xid"]["before"] == b
+    # the oldest a rotated out, a new a came: as many copies of a as before, one is new
+    rotated = check(node_text(xid=(0, xid_text(b, a, a, a))), first.facts)
+    assert rotated.reasons == ["GPU 5 XID 79"]
+    assert check(node_text(xid=(0, xid_text(b, a, a, a))), rotated.facts).ok_single  # nothing new
+    later = check(node_text(xid=(0, xid_text(a, a, a, c))), rotated.facts)  # the anchor rotated out too
+    assert later.reasons == ["GPU 4 XID 79"]
+    # the limit (documented): a log of one repeated line that rotates one copy out
+    only = check(node_text(xid=(0, xid_text(a, a))))
+    assert check(node_text(xid=(0, xid_text(a, a))), only.facts).ok_single
+
+
+OLD = 1_000_000_000  # an old pid file: its check ran past the limit and was not killed
+
+
+def _start_time(pid: int, env: dict | None = None) -> str:
+    """The start time the check records for ``pid`` (node_health.START_TIME_FN)."""
+    return subprocess.run(["bash", "-c", node_health.START_TIME_FN + f"__yeto_st {pid}"], capture_output=True,
+                          text=True, env=env, timeout=20).stdout.strip()
+
+
+def _bounded(pid_file) -> str:
+    return subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
+                          capture_output=True, text=True, timeout=20).stdout
+
+
+def _pid_file(path, text: str, *, old: bool = True):
+    import os  # noqa: PLC0415
+
+    path.write_text(text)
+    if old:
+        os.utime(path, (OLD, OLD))
+
+
+def test_a_check_still_stuck_on_the_node_makes_the_next_one_skip(tmp_path):
+    pid_file = tmp_path / "health.pid"
+    stuck = subprocess.Popen(["sleep", "30"])
+    try:
+        started = _start_time(stuck.pid)
+        assert started
+        _pid_file(pid_file, f"{stuck.pid} {started}\n")  # the same process, still there: busy
+        out = _bounded(pid_file)
+        assert out == f"{node_health.BUSY_MARK} {stuck.pid}\n"
+        r = check(out, check(node_text()).facts)
+        assert not r.checked and r.reasons == ["node health check skipped: the previous one still runs "
+                                               "(a tool stuck on the node)"]
+        _pid_file(pid_file, f"{stuck.pid} {started}\n", old=False)  # another caller's check, running now
+        assert _bounded(pid_file) == "ran\n"
+        # the pid now names another process (reused, or the node rebooted): stale, the check runs
+        _pid_file(pid_file, f"{stuck.pid} 12345\n")
+        assert _bounded(pid_file) == "ran\n" and not pid_file.exists()
+        _pid_file(pid_file, f"{stuck.pid}\n")  # no start time recorded: not proof of the same process
+        assert _bounded(pid_file) == "ran\n"
+    finally:
+        stuck.kill()
+        stuck.wait()
+    # a running check records its pid and its start time (read here from inside the check)
+    seen = subprocess.run(["bash", "-c", node_health.bounded(
+        f"cat {pid_file}; " + node_health.START_TIME_FN.replace("\n", "; ") + "__yeto_st $$", 5,
+        pid_file=str(pid_file))], capture_output=True, text=True, timeout=20).stdout.split()
+    assert len(seen) == 3 and seen[1] == seen[2] and seen[1]
+    # a check that ended removes its pid; one that is gone leaves nothing to skip for
+    assert _bounded(pid_file) == "ran\n" and not pid_file.exists()
+    _pid_file(pid_file, f"{stuck.pid} {started}\n")
+    assert _bounded(pid_file) == "ran\n" and not pid_file.exists()
+
+
+def test_the_start_time_is_field_22_of_proc_stat_and_ps_without_proc(tmp_path):
+    import os  # noqa: PLC0415
+
+    proc = tmp_path / "proc" / "4242"
+    proc.mkdir(parents=True)
+    # a command name with spaces and a parenthesis: the fields count from after its last ")"
+    fields = ["S", "1", "4242", "4242", "0", "-1", "4194560", "0", "0", "0", "0", "0", "0", "0", "0", "20", "0",
+              "1", "0", "987654", "1000", "100"]
+    (proc / "stat").write_text("4242 (my (odd) tool) " + " ".join(fields) + "\n")
+    env = {**os.environ, "__YETO_PROC": str(tmp_path / "proc")}
+    assert _start_time(4242, env) == "987654"
+    # without /proc (another OS): ps's start time, the same for the same process
+    env = {**os.environ, "__YETO_PROC": str(tmp_path / "none")}
+    me = _start_time(os.getpid(), env)
+    assert me and me == _start_time(os.getpid(), env) and " " not in me

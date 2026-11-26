@@ -764,8 +764,11 @@ def test_inventory_node_health_parses_at_the_top_and_per_node():
     assert parse_inventory({"nodes": [entry("a", node_health=False)]})[0].node_health == "off"  # YAML's bare off
     with pytest.raises(InventoryError, match="node_health must be one of"):
         parse_inventory({"nodes": [entry("a", node_health="later")]})
+    # YAML's bare on is true; on means auto
+    assert parse_inventory({"node_health": True, "nodes": [entry("a")]})[0].node_health == "auto"
+    assert parse_inventory({"nodes": [entry("a", node_health="on")]})[0].node_health == "auto"
     with pytest.raises(InventoryError, match="inventory: node_health"):
-        parse_inventory({"node_health": True, "nodes": [entry("a")]})
+        parse_inventory({"node_health": "yes please", "nodes": [entry("a")]})
 
 
 def test_the_pool_dry_run_says_node_health_only_when_declared(tmp_path, capsys):
@@ -792,3 +795,33 @@ def test_a_node_runtime_whose_profile_says_off_checks_nothing(tmp_path):
     line = runtime_command("python3", "t", "/s", env_file=None, token_file="/t", health_every_s=0)
     assert line.endswith("--skip-preflight --health-every-s 0")
     assert "--health-every-s" not in runtime_command("python3", "t", "/s", env_file=None, token_file="/t")
+
+
+def test_the_default_hook_leaves_an_island_that_ended_meanwhile_as_it_ended(tmp_path):
+    cluster = HealthCluster(NAMES)
+    ops, clock, _ = _island(tmp_path, cluster)
+    cluster.health["b300-1"] = [node_text(), PORT_DOWN, PORT_DOWN]
+    for _ in range(2):
+        assert _tick(ops, clock) == "RUNNING"
+    rec = ops.islands["isl"]
+    real = ops._node_health_lost
+    queued = []
+    ops._node_health_lost = lambda *args: queued.append(args)  # hold the call: the island ends first
+    assert _tick(ops, clock) == "RUNNING" and len(queued) == 1
+    ops._fail(rec, "rank 2 (b300-2) exited 1")  # it ended another way between the poll and the hook
+    real(*queued[0])
+    assert rec.reason == "rank 2 (b300-2) exited 1" and rec.health_lost == {}  # the hook does not rewrite it
+    assert ops.island_decision("isl", 0).cause != "lost"
+
+
+def test_a_failed_removal_of_the_old_check_does_not_stop_the_start(tmp_path, monkeypatch):
+    real = sp.SshSamplerPoolOps.ssh
+
+    def ssh(self, node, command, **kw):
+        if command.startswith("rm -f ") and command.endswith(".health.json"):
+            raise subprocess.TimeoutExpired(["ssh"], 60)
+        return real(self, node, command, **kw)
+
+    monkeypatch.setattr(sp.SshSamplerPoolOps, "ssh", ssh)
+    _, _, cmds, _, probe = _cuda_start(tmp_path, monkeypatch)
+    assert any("-m yeto.node run" in c for c in cmds) and sp.HEALTH_MARK in probe

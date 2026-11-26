@@ -1491,7 +1491,10 @@ class SshSamplerPoolOps:
         assignment, token = route.assign(m, shards, profile, spec, spec_paths="host", python=python, env=env)
         self._health_generation[m.ticket] = int(assignment.generation)
         if self.health_checked(node):  # no check of an earlier sampler on this node is read as this one's
-            self.ssh(node, "rm -f " + shlex.quote(health_path(self.conf.workdir, m.shard)), timeout=60)
+            try:  # the start goes on: the probe ignores a check of another ticket or assignment anyway
+                self.ssh(node, "rm -f " + shlex.quote(health_path(self.conf.workdir, m.shard)), timeout=60)
+            except Exception as error:  # noqa: BLE001 - observation only: the start does not depend on it
+                _log(f"ssh pool: {m.shard} on {node.name}: old health check not removed: {error}")
         token_file, profile_file = f"{p['dir']}/{m.shard}.token", f"{p['dir']}/{m.shard}.profile.json"
         self.put(node, token, token_file, mode="600")
         # provider.node_health wins over the node's inventory value (the runtime reads the profile's)
