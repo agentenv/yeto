@@ -1148,6 +1148,19 @@ class ClusterPreflight:
             (self.out_dir / "preflight.txt").write_text(report.table())
         return report
 
+    def pull(self, *, blocking: Sequence[str] = ("ssh", "host_probe", "disk_images")) -> tuple[list[Check], bool]:
+        """``(checks, pulled)``: ssh and the host probes on every node, then, when no node
+        failed a ``blocking`` check (an unreachable node, an image root without room for
+        the image), the image pull on every docker node (``yeto image adopt``'s pre-pull).
+        ``pulled`` is False when the pull was not run or a node's pull failed."""
+        checks = self._reach()
+        live = [s for s in self.states if s.reachable]
+        checks += self._host(live)
+        if any(c.status == FAIL and c.name in blocking for c in checks):
+            return checks, False
+        checks += self._pull(live)
+        return checks, all(c.status != FAIL for c in checks if c.name == "image_pull")
+
     def _reach(self) -> list[Check]:
         self.log(f"[preflight] ssh + clock on {len(self.states)} node(s)")
 

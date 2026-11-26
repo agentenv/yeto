@@ -95,16 +95,66 @@ def _basic(login: dict[str, str] | None) -> str | None:
     return base64.b64encode(raw).decode()
 
 
+def _without_tag(name: str) -> str:
+    """``host/repo:tag`` -> ``host/repo`` (a ``host:port`` stays)."""
+    head, slash, last = name.rpartition("/")
+    return f"{head}{slash}{last.split(':', 1)[0]}"
+
+
+def split_tagged_ref(ref: str) -> tuple[str, str, str]:
+    """``[docker:]<host>/<repo>[:tag][@sha256:<hex>]`` -> (host, repo, tag or digest): the
+    digest when there is one, else the tag (``latest`` when none is given)."""
+    name = ref.removeprefix("docker:")
+    if "@" in name:
+        return split_ref(name)
+    last = name.rsplit("/", 1)[-1]
+    tag = last.split(":", 1)[1] if ":" in last else "latest"
+    path = _without_tag(name)
+    if not path or not re.fullmatch(r"[\w][\w.-]{0,127}", tag):
+        raise ValueError(f"{ref!r} is not an image reference")
+    host, repo, _ = split_ref(f"{path}@sha256:{'0' * 64}")
+    return host, repo, tag
+
+
 def manifest_status(ref: str, login: dict[str, str] | None = None, *, timeout: float = 10.0,
                     urlopen=None) -> tuple[str, str]:
     """``(status, detail)``: ``present`` (HTTP 200), ``missing`` (404), ``denied`` (401/403:
     absent, or private and no / a wrong login: a registry does not tell which; and a 400 to
     a request that carried the login: ECR answers a malformed or wrong login so) or
     ``unknown`` (the registry was not reached, or answered something else)."""
-    host, repo, digest = split_ref(ref)
-    url = f"https://{host}/v2/{repo}/manifests/{digest}"
+    status, detail, _ = _manifest_head(*split_ref(ref), login, timeout=timeout, urlopen=urlopen)
+    return status, detail
+
+
+def pin_digest(ref: str, login: dict[str, str] | None = None, *, timeout: float = 10.0,
+               urlopen=None) -> tuple[str, str]:
+    """``(status, detail)`` of ``ref``'s manifest, by tag or by digest; ``present`` gives the
+    digest-pinned reference as the detail (``<host>/<repo>@sha256:<hex>``, Docker Hub's
+    host kept as written). A tag's digest is the registry's ``Docker-Content-Digest``; a
+    registry that names none is ``unknown``."""
+    host, repo, reference = split_tagged_ref(ref)
+    status, detail, headers = _manifest_head(host, repo, reference, login, timeout=timeout, urlopen=urlopen)
+    if status != PRESENT:
+        return status, detail
+    path = _without_tag(ref.removeprefix("docker:").split("@", 1)[0])
+    if reference.startswith("sha256:"):
+        return PRESENT, f"{path}@{reference}"
+    digest = next((v for k, v in headers.items() if k.lower() == "docker-content-digest"), "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(digest)):
+        return UNKNOWN, f"{host}/{repo}:{reference}: the registry named no sha256 digest for the tag"
+    return PRESENT, f"{path}@{digest}"
+
+
+def _manifest_head(host: str, repo: str, reference: str, login: dict[str, str] | None, *, timeout: float,
+                   urlopen) -> tuple[str, str, dict]:
+    """:func:`manifest_status` of ``reference`` (a digest or a tag), and the headers of the
+    answer that decided it."""
+    url = f"https://{host}/v2/{repo}/manifests/{reference}"
     basic = _basic(login)
     urlopen = urlopen or _OPENER.open
+    digest = reference
+    at = "@" if reference.startswith("sha256:") else ":"  # a digest or a tag
+    final: dict = {}
 
     def head(auth: str | None) -> tuple[int, dict]:
         headers = {"Accept": ACCEPT, **({"Authorization": auth} if auth else {})}
@@ -117,12 +167,13 @@ def manifest_status(ref: str, login: dict[str, str] | None = None, *, timeout: f
     sent_login = False  # the code below answers a request (or token request) that carried the login
     try:
         code, headers = head(None)
+        final = headers
         if code == 401:
             challenge = next((v for k, v in headers.items() if k.lower() == "www-authenticate"), "")
             if challenge.lower().startswith("bearer"):
                 params = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
                 if "realm" not in params:
-                    return UNKNOWN, f"{host}: a Bearer challenge without a realm"
+                    return UNKNOWN, f"{host}: a Bearer challenge without a realm", final
                 query = urllib.parse.urlencode({k: params[k] for k in ("service", "scope") if k in params})
                 try:
                     with _open(f"{params['realm']}?{query}", method="GET", timeout=timeout, urlopen=urlopen,
@@ -133,21 +184,24 @@ def manifest_status(ref: str, login: dict[str, str] | None = None, *, timeout: f
                     code, sent_login = int(error.code), bool(basic and params["realm"].startswith("https://"))
                 else:
                     token = body.get("token") or body.get("access_token")
-                    code = head(f"Bearer {token}")[0] if token else 401
+                    if token:
+                        code, final = head(f"Bearer {token}")
+                    else:
+                        code = 401
             elif basic:
-                code, sent_login = head(f"Basic {basic}")[0], True
+                (code, final), sent_login = head(f"Basic {basic}"), True
     except (urllib.error.URLError, OSError, ValueError) as error:
-        return UNKNOWN, f"{host} not reached ({type(error).__name__}: {error})"[:300]
+        return UNKNOWN, f"{host} not reached ({type(error).__name__}: {error})"[:300], {}
     if code == 200:
-        return PRESENT, f"{host}/{repo}@{digest}"
+        return PRESENT, f"{host}/{repo}{at}{digest}", final
     if code == 404:
-        return MISSING, f"{host}/{repo} has no manifest {digest}"
+        return MISSING, f"{host}/{repo} has no manifest {digest}", final
     if code == 400 and sent_login:
-        return DENIED, (f"{host} rejected the registry login given for {repo}@{digest} (HTTP 400): a malformed "
+        return DENIED, (f"{host} rejected the registry login given for {repo}{at}{digest} (HTTP 400): a malformed "
                         "or wrong password (an ECR password is `aws ecr get-login-password`, valid 12 hours); a registry "
-                        f"that answers 400 for another reason: {CHECK_ENV}=off skips this check")
+                        f"that answers 400 for another reason: {CHECK_ENV}=off skips this check"), final
     if code in (401, 403):
         how = "with the registry login given" if login else "anonymously"
-        return DENIED, (f"{host}/{repo}@{digest} is not readable {how} (HTTP {code}): it is not in that "
-                        "registry, or it is private and needs a registry login")
-    return UNKNOWN, f"{host} answered HTTP {code} for {repo}@{digest}"
+        return DENIED, (f"{host}/{repo}{at}{digest} is not readable {how} (HTTP {code}): it is not in that "
+                        "registry, or it is private and needs a registry login"), final
+    return UNKNOWN, f"{host} answered HTTP {code} for {repo}{at}{digest}", final
