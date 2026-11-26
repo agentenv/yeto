@@ -1021,16 +1021,35 @@ def main(argv=None) -> int:
     entry = "main_buffer_trainer" if buffer_section else "main_fully_async" if limit else "main"
     cmd = [sys.executable, "-c", f"from yeto.rl.adapters.verl.verl_main import {entry}; {entry}()", *overrides]
     print("[yeto-verl] " + " ".join(shlex.quote(c) for c in cmd), flush=True)
-    log = OUTPUT / f"verl-train-{lid}.log"
-    with log.open("a") as handle:
-        proc = subprocess.Popen(cmd, env=env, cwd=verl_root(),
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        for line in proc.stdout:
-            sys.stdout.write(line)
-            handle.write(line)
-        code = proc.wait()
+    code = run_trainer(cmd, env, OUTPUT / f"verl-train-{lid}.log", event_tape=args.event_tape, learner_id=lid)
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def run_trainer(cmd: list[str], env: dict[str, str], log: Path, *, event_tape: Any, learner_id: Any) -> int:
+    """Run the verl trainer ``cmd`` (its output to stdout and ``log``) and its exit code.
+    While it runs, the island's event tape is uploaded to the run store
+    (``tapes/trainer/<incarnation>/``, as a Miles island does): the dashboard reads a trainer
+    on a host without an inbound address (Modal, a sky VM) from the store. Observation
+    only: an uploader that cannot start leaves the training as it is."""
+    from yeto.rl.engine.tape_upload import trainer_uploader
+
+    try:
+        tape_uploader = trainer_uploader(event_tape, learner_id=learner_id)
+    except Exception as error:  # noqa: BLE001
+        print(f"[yeto-verl] tape upload off: {type(error).__name__}: {error}", flush=True)
+        tape_uploader = None
+    try:
+        with log.open("a") as handle:
+            proc = subprocess.Popen(cmd, env=env, cwd=verl_root(),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                handle.write(line)
+            return proc.wait()
+    finally:
+        if tape_uploader is not None:
+            tape_uploader.stop()  # its last batch: the tape's end
 
 
 def onpolicy_old_logprob_static_check(args, overrides) -> None:
