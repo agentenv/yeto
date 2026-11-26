@@ -346,6 +346,94 @@ def test_an_own_trainer_island_with_an_own_sampler_pool_spends_nothing(kit, caps
     assert [n["name"] for n in island["ssh_island"]["nodes"]] == ["own-b300-0", "own-b300-1"]
 
 
+def _own_sampler_variant(kit, *, inventory_edit, pools_edit) -> None:
+    """run.own-trainer-own-sampler.json with its inventory and its pools edited in place."""
+    import yaml
+
+    inv = kit.files["inventory.own-b300-nodes.yaml"]
+    doc = yaml.safe_load(inv.read_text())
+    inventory_edit(doc)
+    inv.write_text(yaml.safe_dump(doc))
+    cfg = _cfg(kit, "run.own-trainer-own-sampler.json")
+    pools_edit(cfg)
+    kit.files["run.own-trainer-own-sampler.json"].write_text(json.dumps(cfg))
+
+
+def _two_pools_on_one_node(cfg: dict) -> None:
+    (pool,) = cfg["samplers"]
+    pool["provider"]["devices"] = [0, 1, 2, 3]
+    second = json.loads(json.dumps(pool))
+    second.update(name="own-b300-b", shard_base=pool["shard_base"] + "b")
+    second["provider"]["devices"] = [4, 5, 6, 7]
+    cfg["samplers"].append(second)
+    argv = cfg["trainer"]["argv"]
+    i = argv.index("--rl-buffer-shards") + 1
+    argv[i] += "," + ",".join(f"{second['shard_base']}-{k}" for k in range(int(second["shard_limit"])))
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_two_pools_on_one_leased_node_refuse_the_run_up(kit, monkeypatch, capsys, tmp_path, dry_run):
+    """The second pool would wait for the node lease the first holds as long as it runs:
+    the run up (a dry run and the real one) refuses, naming the pools, the node and the
+    two ways out; nothing starts."""
+    monkeypatch.setattr(kit.up.Run, "write_fleet_plan", lambda self: pytest.fail("ordered after a refusal"))
+    store = tmp_path / "leases"
+    _own_sampler_variant(kit, inventory_edit=lambda doc: doc.update(lease_store=str(store)),
+                         pools_edit=_two_pools_on_one_node)
+    rc, out = _dry_run(kit, "run.own-trainer-own-sampler.json", capsys, dry_run=dry_run)
+    assert rc == 2, out.why
+    assert (f"preflight: pools own-b300 and own-b300-b both start samplers on node own-b300-2, whose inventory keeps "
+            f"node leases (lease_store {store})") in out
+    assert "give the pools an inventory without lease_store and split the node's cards with provider.devices" in out
+    assert "or put the pools on different nodes; nothing is started" in out
+    assert kit.ordered == [] and not [c for c in kit.commands if "pool" in c]  # refused before any pool dry run
+
+
+def test_two_pools_split_one_node_without_lease_store(kit, capsys):
+    spec_file = kit.files["sampler-spec.qwen3-4b-vllm-own-b300.json"]
+    spec = json.loads(spec_file.read_text())
+    spec["engine"]["options"]["tp"], spec["engine"]["server"]["topology"] = 4, "tp4"  # 4 cards per pool
+    spec_file.write_text(json.dumps(spec))
+    _own_sampler_variant(kit, inventory_edit=lambda doc: None, pools_edit=_two_pools_on_one_node)
+    rc, out = _dry_run(kit, "run.own-trainer-own-sampler.json", capsys)
+    assert "both start samplers on node" not in out
+    assert rc == 0 and "dry run: preflight ok, nothing ordered" in out, out.why
+
+
+def test_a_pool_on_a_trainer_node_refuses_the_run_up(kit, monkeypatch, capsys):
+    monkeypatch.setattr(kit.up.Run, "write_fleet_plan", lambda self: pytest.fail("ordered after a refusal"))
+
+    def both_roles(doc):
+        doc["nodes"][0]["roles"] = ["trainer", "sampler"]
+
+    def on_it(cfg):
+        cfg["samplers"][0]["provider"]["nodes"] = ["own-b300-0"]
+
+    _own_sampler_variant(kit, inventory_edit=both_roles, pools_edit=on_it)
+    rc, out = _dry_run(kit, "run.own-trainer-own-sampler.json", capsys)
+    assert rc == 2, out.why
+    assert ("preflight: pool own-b300 starts samplers on node own-b300-0, which is a node of this run's trainer "
+            "island ssh:2x8xb300 (own-b300-0): the trainer takes every card of its nodes") in out
+
+
+def test_a_pool_naming_a_trainer_only_node_fails_its_pool_dry_run(kit, capsys):
+    _own_sampler_variant(kit, inventory_edit=lambda doc: None,
+                         pools_edit=lambda cfg: cfg["samplers"][0]["provider"].update(nodes=["own-b300-1"]))
+    rc, out = _dry_run(kit, "run.own-trainer-own-sampler.json", capsys)
+    assert rc == 2
+    assert ("ssh provider: nodes own-b300-1 (roles: trainer) have no sampler role in the inventory; add sampler to "
+            "their roles, or name sampler nodes in provider.nodes") in out
+
+
+def test_the_own_sampler_template_uploads_its_prompts_and_bills_nothing(kit, capsys):
+    rc, out = _dry_run(kit, "run.own-trainer-own-sampler.json", capsys)
+    assert rc == 0, out.why
+    assert "prompts_file: uploaded to /data/models/prompts/gsm8k.jsonl on every node of the pool" in out
+    assert "bill until they are released" not in out
+    assert "WARNING: Own SSH nodes (ssh, price_usd_h 0) are not billed by this pool" in out
+    assert "each sampler start fails unless the file is already on the node" not in out
+
+
 def test_a_fleet_of_an_own_and_a_cloud_island_counts_the_own_trainer_at_zero(kit, capsys):
     rc, out = _dry_run(kit, "run.fleet-own-and-cloud.json", capsys)
     assert rc == 0, out.why

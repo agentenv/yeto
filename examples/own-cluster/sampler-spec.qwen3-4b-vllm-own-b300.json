@@ -2,8 +2,9 @@
   "_comment": [
     "Engine sampler spec of one Qwen3-4B vLLM sampler on an own 8 x B300 node (TP8, bf16, in-place",
     "reload) of the SSH inventory pool in run.own-trainer-own-sampler.json: the container sees the",
-    "pool's workdir and the inventory's mounts at their host paths; the weights and the prompts are",
-    "on the node (/data/models). The pool renders the store, shard and sampler id at start.",
+    "pool's workdir and the inventory's mounts at their host paths; the weights are on the node",
+    "(/data/models), the pool uploads its prompts_file to prompts.path at every start. The pool",
+    "renders the store, shard and sampler id at start.",
     "docs/OWN_CLUSTERS.md."
   ],
   "sampler_id": "qwen3-4b-0",

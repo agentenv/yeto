@@ -71,11 +71,24 @@ SHARED_BASE_WARNING = ("only one pool may run shard_base {base!r}: the pool lock
                        "both would order nodes, fence and continue the same shards of the same store")
 
 
+OWN_NODES_WARNING = ("Own SSH nodes (ssh, price_usd_h 0) are not billed by this pool, but its samplers hold their "
+                     "cards until the pool stops: keep this pool running, or stop it with "
+                     "`python -m yeto.launch.nc pool-stop --config <file>`.")
+
+
 def lease_warning(cfg: dict[str, Any], config_path: str) -> str:
-    """The billing warning of the pool's provider (a National Compute lease, a sandbox, a cloud island)."""
+    """The billing warning of the pool's provider (a National Compute lease, a sandbox, a cloud island;
+    own SSH nodes at no price hold their cards, they bill nothing)."""
     kind = provider_kind(cfg)
-    text = LEASE_WARNING if is_national_compute(cfg) else SANDBOX_WARNING if kind == "daytona" else \
-        CLOUD_WARNING.format(kind=kind)
+    try:
+        free = kind == "ssh" and not cli.pool_price(cfg)[0]
+    except ValueError:  # a price that is not a number: the pool config check refuses it
+        free = False
+    if free:
+        text = OWN_NODES_WARNING
+    else:
+        text = LEASE_WARNING if is_national_compute(cfg) else SANDBOX_WARNING if kind == "daytona" else \
+            CLOUD_WARNING.format(kind=kind)
     return text.replace("<file>", config_path)
 STOP_SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP")
 

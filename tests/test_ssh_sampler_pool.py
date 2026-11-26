@@ -810,5 +810,5 @@ def test_a_spec_for_another_platform_or_card_is_refused_per_node():
     problems = sp.spec_node_problems(family_conf(b300), spec)
     assert any("cuda node, the spec's platform is rocm" in p for p in problems)
     assert any("B300 cards, the spec's engine.server.card_model is MI355X" in p for p in problems)
-    assert sp.spec_node_problems(family_conf(rocm_node()), spec) == []
+    assert sp.spec_node_problems(family_conf(rocm_node(), devices=None), spec) == []  # TP8 on the node's 8 cards
     assert sp.spec_node_problems(family_conf(b300), {"engine": {"server": {"card_model": "<card>"}}}) == []

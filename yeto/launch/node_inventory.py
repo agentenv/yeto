@@ -536,10 +536,12 @@ def parse_inventory(document: Any) -> NodeList:
         raise InventoryError("the inventory must contain at least one node under nodes:")
     nodes = [parse_node(entry, index=index, images=images, node_health=health)
              for index, entry in enumerate(entries)]
-    for key, label in (("name", "name"), ("host", "SSH target")):
+    for key, label in (("name", "name"), ("host", "SSH target"), ("address", "address")):
         seen: dict[str, str] = {}
         for node in nodes:
             value = getattr(node, key)
+            if value is None or (key == "address" and ipaddress.ip_address(value).is_loopback):
+                continue  # no address, or a loopback one (each node's own: a container's rendezvous)
             if value in seen:
                 raise InventoryError(f"the inventory lists {label} {value!r} twice "
                                      f"(nodes {seen[value]} and {node.name})")

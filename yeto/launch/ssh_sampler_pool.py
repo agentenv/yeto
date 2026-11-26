@@ -274,6 +274,10 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
         if missing:
             raise ValueError(f"ssh provider: nodes {missing} are not in the inventory ({sorted(by_name)})")
         nodes = [by_name[n] for n in names]
+        other = [f"{n.name} (roles: {', '.join(n.roles)})" for n in nodes if n.roles and "sampler" not in n.roles]
+        if other:  # a node with roles serves those roles only (no roles: any)
+            raise ValueError(f"ssh provider: nodes {'; '.join(other)} have no sampler role in the inventory; add "
+                             "sampler to their roles, or name sampler nodes in provider.nodes")
     if not nodes:
         raise ValueError("ssh provider: no sampler node (nodes, or inventory nodes with role sampler)")
     unreachable = [f"{n.name} ({n.reach.mode})" for n in nodes if n.reach is not None and n.reach.mode in
@@ -1336,6 +1340,38 @@ class SshSamplerPoolOps:
         if out.returncode != 0:
             raise SshSamplerError(f"upload {remote} to {node.name}: {_text(out.stderr)[-300:]}")
 
+    def upload_prompts(self, node: Node, spec: Mapping[str, Any]) -> dict[str, Any]:
+        """The pool's ``prompts_file`` to the host path behind the spec's ``prompts.path``
+        on ``node`` (:func:`prompts_host_path`), then its size and sha256 there checked
+        against the local file; SshSamplerError when the sampler would not see it or the
+        copy does not match."""
+        from yeto.node.transport import check_copy, size_sha256_command  # noqa: PLC0415
+
+        local = Path(os.path.expanduser(str(self.cfg["prompts_file"])))
+        prompts = spec.get("prompts") if isinstance(spec.get("prompts"), Mapping) else {}
+        remote = str(prompts.get("path") or "")
+        host, _where = prompts_host_path(self.conf, node, remote)
+        if host is None:
+            raise SshSamplerError(f"prompts_file {local}: the sampler spec's prompts.path {remote or '(unset)'!r} "
+                                  f"is under no mount or workdir of {node.name}: the sampler would not see it")
+        data = local.read_bytes()
+        out = self.ssh(node, f"mkdir -p {shlex.quote(str(Path(host).parent))}", timeout=60)
+        if out.returncode != 0:
+            raise SshSamplerError(f"prompts upload to {node.name}: {_text(out.stderr)[-300:]}")
+        q = shlex.quote(host)
+        out = self.ssh(node, f"umask 077; cat > {q}.tmp && chmod 644 {q}.tmp && mv -f {q}.tmp {q}", input=data,
+                       timeout=600)
+        if out.returncode != 0:
+            raise SshSamplerError(f"prompts upload {host} to {node.name}: {_text(out.stderr)[-300:]}")
+        out = self.ssh(node, size_sha256_command(host), timeout=120)
+        try:
+            copy = check_copy(_text(out.stdout), data, node=node.name, remote=host, local=local, after="the upload")
+        except RuntimeError as error:
+            raise SshSamplerError(str(error)) from None
+        _log(f"ssh pool: {node.name}: prompts_file {local} -> {host} ({copy['bytes']} bytes, sha256 "
+             f"{copy['sha256'][:12]}) checked")
+        return {"path": remote, "host": host, **copy}
+
     def upload_code(self, node: Node) -> str:
         """``git archive`` (gzip: a slow launcher link) of ``yeto/`` at ``code_ref`` into
         ``<workdir>/yeto/<sha>`` (idempotent: a tree already there is kept)."""
@@ -1428,6 +1464,8 @@ class SshSamplerPoolOps:
             self.event("ssh_pool_idle_unchecked", node=node.name, shard=m.shard, detail=facts["idle"])
         yeto_dir = self.upload_code(node)
         spec = self.spec_for(m, shards)
+        if self.cfg.get("prompts_file"):  # at every start, as the rented-node route: copied, then checked there
+            self.upload_prompts(node, spec)
         route = self.node_route_for(node)
         if route is None:
             self.put(node, json.dumps(spec, indent=1), p["spec"])
@@ -1843,7 +1881,104 @@ def spec_node_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
                                f"engine.server.card_model is {card}")
             except UnknownCard:
                 pass
+        tp = spec_tp(spec)
+        cards = len(conf.devices) if conf.devices else int(node.cards_per_node)
+        if tp is not None and tp > cards:
+            where = (f"provider.devices {list(conf.devices)} give it {cards}" if conf.devices
+                     else f"it has {cards}")
+            out.append(f"ssh provider: node {node.name}: the spec's engine tensor parallel size is {tp} cards, "
+                       f"{where}; lower engine.options.tp or give the pool more cards of the node")
     return out
+
+
+def spec_tp(spec: Mapping[str, Any]) -> int | None:
+    """The cards one sampler server spans: ``engine.options.tp``, else the adapter's
+    default (vllm-server, sglang-server); None for another adapter or a value that is
+    not a number (the sampler's own checks report it)."""
+    engine = spec.get("engine") if isinstance(spec.get("engine"), Mapping) else {}
+    options = engine.get("options") if isinstance(engine.get("options"), Mapping) else {}
+    tp = options.get("tp")
+    if tp is None:
+        adapter = engine.get("adapter")
+        if adapter == "vllm-server":
+            from yeto.rl.adapters.sampler_engines.vllm_server import VllmOptions as defaults  # noqa: PLC0415
+        elif adapter == "sglang-server":
+            from yeto.rl.adapters.sampler_engines.sglang_server import SGLangOptions as defaults  # noqa: PLC0415
+        else:
+            return None
+        tp = defaults.tp
+    if isinstance(tp, bool) or not isinstance(tp, int) or tp < 1:
+        return None
+    return tp
+
+
+PROMPTS_WORKDIR, PROMPTS_MOUNT, PROMPTS_HOST = "workdir", "mount", "host"
+
+
+def prompts_host_path(conf: SshPoolConf, node: Node, path: str) -> tuple[str | None, str | None]:
+    """``(host path, where)`` of the sampler's ``prompts.path`` on ``node``: under the
+    pool's workdir (``workdir``), under a mount (``mount``: the inventory's or the pool's
+    ``container.mounts``, the path on the host behind it), or (runtime venv, which reads
+    the host itself) elsewhere on the host (``host``). ``(None, None)``: the container
+    sees no such path (no mount or workdir holds it), or the path is not absolute."""
+    if not str(path).startswith("/"):
+        return None, None
+    path = str(path).rstrip("/")
+
+    def under(path: str, base: str) -> bool:
+        base = base.rstrip("/")
+        return path == base or path.startswith(base + "/")
+
+    if under(path, conf.workdir):
+        return path, PROMPTS_WORKDIR
+    if conf.runtime == "venv":  # the sampler reads the host's own paths
+        if any(under(path, host) for host in node.mounts):
+            return path, PROMPTS_MOUNT
+        return path, PROMPTS_HOST
+    seen = {**dict(node.mounts), **dict(conf.container.mounts if conf.container else {})}
+    if conf.store:
+        seen.setdefault(conf.store, conf.store)
+    inside = sorted(((str(i).rstrip("/"), str(h).rstrip("/")) for h, i in seen.items() if under(path, str(i))),
+                    key=lambda pair: -len(pair[0]))
+    if not inside:
+        return None, None
+    mount, host = inside[0]
+    return host + path[len(mount):], PROMPTS_MOUNT
+
+
+def prompts_report(cfg: Mapping[str, Any], remote: str) -> tuple[list[str], list[str], list[str]]:
+    """``pool --dry-run`` (:func:`yeto.launch.nc.cli.prompts_file_report`) of an ssh pool
+    whose spec reads ``prompts.path`` ``remote``: ``(lines, problems, notes)``. With
+    ``prompts_file`` the file goes to the host path behind ``remote`` on every node at each
+    start (checked there by size and sha256): a path no node's sampler sees is a problem.
+    Without it the sampler reads the file the node has: a note says where, a ``WARNING``
+    line when the container sees no such path (no mount or workdir holds it)."""
+    try:
+        conf = parse_config(dict(cfg))
+    except (ValueError, TypeError, KeyError, OSError):
+        return [], [], []  # offline_problems reports it
+    rows = [(node, *prompts_host_path(conf, node, remote)) for node in conf.nodes]
+    unseen = [node.name for node, host, _where in rows if host is None]
+    hosts = sorted({str(host) for _node, host, _where in rows if host is not None})
+    seen_text = f"workdir {conf.workdir}, the inventory mounts or provider.container.mounts"
+    if cfg.get("prompts_file"):
+        if unseen:
+            return [], [f"prompts_file: the sampler spec's prompts.path {remote} is under no mount or workdir of "
+                        f"nodes {unseen} ({seen_text}): an upload there is not seen by the sampler; point "
+                        "prompts.path under the pool's workdir or a mount"], []
+        return [f"prompts_file: uploaded to {', '.join(hosts)} on every node of the pool"], [], []
+    if unseen:
+        return [f"WARNING: the sampler spec reads prompts.path {remote}, which the sampler container on nodes "
+                f"{unseen} cannot read (no mount or workdir holds it: {seen_text}); set prompts_file to upload "
+                "it (checked by size and sha256 at every start), or point prompts.path under the workdir or a "
+                "mount"], [], []
+    wheres = sorted({where for _node, _host, where in rows})
+    place = {PROMPTS_WORKDIR: f"the pool's workdir {conf.workdir}", PROMPTS_MOUNT: "an inventory or pool mount",
+             PROMPTS_HOST: "the node's own filesystem"}
+    where = " / ".join(place[w] for w in wheres)
+    return [], [], [f"the sampler spec reads prompts.path {remote} from the node ({where}; on the host "
+                    f"{', '.join(hosts)}): put the file there before the run, or set prompts_file "
+                    "(uploaded and checked by size and sha256 at every start)"]
 
 
 def spec_of(cfg: Mapping[str, Any]) -> dict[str, Any]:
