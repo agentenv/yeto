@@ -254,7 +254,7 @@ def join_check(cfg: dict[str, Any], doc: dict[str, Any], member: dict[str, Any],
     # a node leased by the island's own launch (its member prefix, -m<n> after a move) is its own
     result = island_join.check_member(member, doc, fleet_argv=fleet_argv, run_id=str(member["prefix"]), ssh=ssh,
                                       force=force, health=None if first is None else first.health,
-                                      log=None if first is None else (lambda m: None))
+                                      seen=() if first is None else [*first.notes, *first.warnings])
     if not result.ok:
         again = "" if first is None else " (checked again on the desired state now)"
         raise IslandChangeError(f"island {member['name']}'s nodes cannot join{again}: " + "; ".join(result.refusals))
