@@ -1126,19 +1126,25 @@ nodes and prints the nodes the island takes:
 | Check | Refused when |
 |---|---|
 | Count | Without `lease_store`: the inventory does not list as many trainer nodes as `--gpu` says. With `lease_store` it may list more, as for a launch: the island takes as many as it needs of the free, healthy ones (below). |
-| In this fleet | A node is a trainer node of another `ssh:` island whose inventory has no `lease_store`, or another one: the same name, or the same machine (its SSH target without `user@`, or its `address`, in any case). For an island on the same `lease_store`, its launch's lease says which nodes it holds. |
+| In this fleet | A node is a trainer node of another `ssh:` island whose inventory has no `lease_store`, or another one: the same name, or the same machine (its SSH target without `user@`, or its `address`, in any case). For an island on the same `lease_store` (`file:///x` and `/x` are one store), its launch's lease says which nodes it holds; a lease is taken by node name, so the same machine under another name in its inventory counts as its node. |
 | Health | One SSH call per node runs the node health check of its device family, the check the island's launch runs while it trains. A node joining has no earlier check to compare with, so it is judged on absolute rules: a hardware Xid in the kernel log of this boot, a volatile uncorrectable ECC count above 0, NVSwitch GPUs whose `nvidia-fabricmanager` is not `active`, fewer GPUs than `cards_per_node`, an NVLink fabric not `Completed`. A multi-node island also needs its ports `Active`: those of `NCCL_IB_HCA` (the island's own `--island-env` value wins over the node's `env`), else the fabric's ports that NCCL takes. Each port runs at no less than the node's `min_ib_gbps` when the inventory sets it; else at no less than half the fastest of these ports on the island's nodes of the same fabric group. A check that does not read is refused: no answer, `nvidia-smi` or the fabric state timed out, a check still stuck on the node, an output cut off, the IB tools unread, or a kernel log the SSH user cannot read (`dmesg` restricted: add the user to the `adm` or `systemd-journal` group). With `--force` such a check is a WARNING and the node joins. A node found unhealthy is refused with `--force` too. A device family without a health check, or a node with `node_health: off`, is a note. |
 | Fabric group | The inventory declares `fabric_group` and no one group holds the island's nodes. An inventory without any `fabric_group` only gets a note. |
 | Lease | The inventory's `lease_store` shows a node leased to another run, or to another island of this fleet. A lease of the island's own launch (`<prefix>/trainer`, or `<prefix>-m<n>/trainer` after a move) is not a refusal. A lease that does not read is refused. Without `lease_store` this is not checked, and a note says so. |
 
-With `lease_store`, the nodes held by another run or island and the unhealthy ones are
-left out, and the island's nodes are placed in the rest as its launch places them (one
-fabric group in a grouped inventory, else in the inventory's order). When too few are
-left, the refusal names each node left out and why. The launch picks by leases only, under
-a holder of its own: after a move, the nodes the island's earlier incarnation holds are not
-its own. It takes the free nodes first, and waits for the earlier incarnation's nodes only
-when there are too few. A pick of the launch, either way, that would take a node found
-unhealthy is refused: take that node out of the trainer nodes (`roles`) or clear its fault.
+With `lease_store`, the nodes held by another run or island are left out, and the island
+must fit on the healthy rest (one fabric group in a grouped inventory, else any). When it
+does not, the refusal names each node left out and why. The launch picks by leases only,
+under a holder of its own (after a move, the nodes the island's earlier incarnation holds
+are not its own): it takes the free nodes in the inventory's order (the free and the
+earlier incarnation's ones when too few are free), and the rest when those are taken
+meanwhile. So:
+
+- any unhealthy candidate refuses, as a pick may come to it: take that node out of the
+  trainer nodes (`roles`) or clear its fault;
+- a node of an island on no or another `lease_store`, or the same machine under another
+  name, looks free to the launch: a pick that would take it refuses (`launch would take
+  ...`): give both islands the same `lease_store` and one name per machine, or use
+  inventories without shared nodes.
 
 Limits:
 

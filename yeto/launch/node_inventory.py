@@ -79,10 +79,11 @@ file has the key (``null`` included), the nodes of a multi-node trainer island m
 share one group; a file without any ``fabric_group`` key places islands as before.
 ``fabric_group: unavailable`` (reserved) marks a node the probe found without RDMA
 to the others: it never joins a multi-node island, a single-node one takes it.
-``min_ib_gbps`` is the least rate (Gb/s) of each port the job's ``NCCL_IB_HCA`` names
-on the node: the node health check of a multi-node trainer island (``yeto.hw.node_health``)
-and the join check of an island added at run time (:mod:`.island_join`) hold the
-ports to it.
+``min_ib_gbps`` is the least rate (Gb/s) of each port a multi-node job uses on the node:
+the ports its ``NCCL_IB_HCA`` names, else every active port of the node's fabric that NCCL
+takes. The node health check of a running trainer island (``yeto.hw.node_health``) holds
+them to it and to their rate at its first check, whichever is higher; the join check of an
+island added at run time (:mod:`.island_join`), which has no earlier check, to it alone.
 
 An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300
 (with ``--model-store local:///data/models --model-store-source s3://...`` the
@@ -244,8 +245,9 @@ class Node:
     # :mod:`.fabric_groups`); None: no fabric_group key; FABRIC_UNGROUPED (""): the key is
     # null; FABRIC_UNAVAILABLE: reserved, the node has no RDMA to the others
     fabric_group: str | None = None
-    # the least rate (Gb/s) of each port of the job's NCCL_IB_HCA on the node (the node health
-    # check of a multi-node trainer island, the join check); None: not declared
+    # the least rate (Gb/s) of each port a multi-node job uses on the node (NCCL_IB_HCA's, else the
+    # fabric's active ports): the running health check also keeps its first-check rate, the join
+    # check has only this; None: not declared
     min_ib_gbps: float | None = None
 
     @property
