@@ -41,6 +41,15 @@ EGRESS_LINES = [  # with --check-nodes
 ]
 
 
+def why(out: str, err: str) -> str:
+    """The failure message: every refusal or error line and the head of stderr (not the
+    tail of the output, which is the trainer's plan JSON)."""
+    marks = re.compile(r"INVALID|refus|rejected|not installed|\[FAIL\]|failed|ERROR|error:|problem|cannot|Traceback",
+                       re.I)
+    lines = [line for line in out.splitlines() if marks.search(line)]
+    return "\n".join(["-- error lines --", *lines[:60], "-- stderr head --", err[:2000]])
+
+
 class ReachableNodes:
     """The ssh of the preflight: every node answers, every endpoint gives an HTTP answer
     (except the store from the nodes in ``no_store``)."""
@@ -179,7 +188,7 @@ def _run_up(tmp_path, monkeypatch, capsys, *, dry_run: bool = True, check_nodes:
     finally:
         os.chdir(cwd)
     captured = capsys.readouterr()
-    assert rc == rc_expected, (captured.out + captured.err)[-4000:]
+    assert rc == rc_expected, why(captured.out + captured.err, captured.err)
     assert all("--dry-run" in c or "status" in c or c[3] == "preflight" for c in commands)
     return _normalize(captured.out + captured.err, tmp_path)
 

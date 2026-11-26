@@ -91,6 +91,7 @@ def kit(tmp_path, monkeypatch):
     from yeto.cloud import s3_store
     from yeto.launch.nc import cli as nc_cli
     from yeto.launch.nc import pool_run
+    from yeto.launch.pool import modal_provider
     from yeto.launch.preflight import cluster
     from yeto.rl import up
 
@@ -105,6 +106,7 @@ def kit(tmp_path, monkeypatch):
         monkeypatch.delenv(key)
     monkeypatch.setattr(modal_runner, "modal_available", lambda: True)
     monkeypatch.setattr(launch_preflight, "modal_sdk_problem", lambda *a, **k: None)
+    monkeypatch.setattr(modal_provider, "sdk_installed", lambda: True)  # CI installs no `modal` extra
     monkeypatch.setattr(pool_run, "model_problems", lambda uri, env_file: [])  # no bucket LIST
     monkeypatch.setattr(cluster, "SshOps", FakeSsh)
     FakeSsh.unreachable, FakeSsh.calls = set(), []
@@ -131,20 +133,43 @@ def kit(tmp_path, monkeypatch):
     return types.SimpleNamespace(files=files, commands=commands, ordered=ordered, up=up)
 
 
+class Output(str):
+    """A run up's stdout + stderr; ``why`` is what an assertion shows on failure: every
+    refusal or error line (the reason a preflight failed) and the head of stderr, not the
+    tail of the output (the plan JSON)."""
+
+    err = ""
+
+    @property
+    def why(self) -> str:
+        return why(self, self.err)
+
+
+WHY = re.compile(r"INVALID|refus|rejected|not installed|\[FAIL\]|\[WARN\]|failed|ERROR|Error|error:|problem|"
+                 r"cannot|must |unsupported|Traceback", re.I)
+
+
+def why(out: str, err: str = "") -> str:
+    lines = [line for line in out.splitlines() if WHY.search(line)]
+    return "\n".join(["-- error lines --", *lines[:60], "-- stderr head --", err[:2000]])
+
+
 def _dry_run(kit, name: str, capsys, *, check_nodes: bool = True, dry_run: bool = True,
-             skip_egress_check: bool = False) -> tuple[int, str]:
+             skip_egress_check: bool = False) -> tuple[int, Output]:
     args = types.SimpleNamespace(config=str(kit.files[name]), rl_command="up", skip_preflight=False, dry_run=dry_run,
                                  check_nodes=check_nodes, skip_egress_check=skip_egress_check, no_monitor=True,
                                  trainer_now=True, allow_after_forced_stop=False)
     rc = kit.up.main(args)
     captured = capsys.readouterr()
-    return rc, captured.out + captured.err
+    out = Output(captured.out + captured.err)
+    out.err = captured.err
+    return rc, out
 
 
 @pytest.mark.parametrize("name", TEMPLATES)
 def test_every_template_passes_the_run_up_dry_run(kit, name, capsys):
     rc, out = _dry_run(kit, name, capsys)
-    assert rc == 0, out[-4000:]
+    assert rc == 0, out.why
     assert "dry run: preflight ok, nothing ordered" in out
     assert kit.ordered == []
     assert all("--dry-run" in c for c in kit.commands) and kit.commands
@@ -180,7 +205,7 @@ REACHED = sorted([ENDPOINT, REGISTRY])
 ])
 def test_the_dry_run_checks_every_own_node_reaches_the_store_and_the_registry(kit, name, nodes, capsys):
     rc, out = _dry_run(kit, name, capsys)
-    assert rc == 0, out[-3000:]
+    assert rc == 0, out.why
     assert _reach_calls() == {node: REACHED for node in nodes}
     assert f"dry run: own nodes {', '.join(nodes)}: checking over ssh that they reach store {ENDPOINT}" in out
     for node in nodes:
@@ -190,7 +215,7 @@ def test_the_dry_run_checks_every_own_node_reaches_the_store_and_the_registry(ki
 @pytest.mark.parametrize("name", TEMPLATES)
 def test_a_dry_run_without_check_nodes_contacts_no_node(kit, name, capsys):
     rc, out = _dry_run(kit, name, capsys, check_nodes=False)
-    assert rc == 0, out[-3000:]
+    assert rc == 0, out.why
     assert FakeSsh.calls == [] and "dry run: own nodes" not in out and "reach_" not in out
 
 
@@ -200,7 +225,7 @@ def test_the_real_run_up_checks_the_egress_before_it_orders_anything(kit, monkey
     reached, nothing at all is ordered."""
     monkeypatch.setattr(kit.up.Run, "write_fleet_plan", lambda self: False)  # stop before the first order
     rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys, dry_run=False)
-    assert rc == 2 and "fleet plan not written: nothing ordered" in out, out[-3000:]
+    assert rc == 2 and "fleet plan not written: nothing ordered" in out, out.why
     assert "cluster preflight: own nodes own-b300-0: checking over ssh that they reach store" in out
     assert f"cluster preflight:   [PASS] own-b300-0 reach_store: the store endpoint {ENDPOINT}" in out
     assert _reach_calls() == {"own-b300-0": REACHED}
@@ -208,7 +233,7 @@ def test_the_real_run_up_checks_the_egress_before_it_orders_anything(kit, monkey
     kit.commands.clear()
     monkeypatch.setattr(kit.up.Run, "write_fleet_plan", lambda self: pytest.fail("ordered after a failed check"))
     rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys, dry_run=False)
-    assert rc == 2, out[-3000:]
+    assert rc == 2, out.why
     assert f"cluster preflight:   [FAIL] own-b300-0 reach_store: own-b300-0 cannot reach the store endpoint {ENDPOINT}" in out
     assert "--skip-egress-check skips this check only" in out and "cluster preflight failed: nothing ordered" in out
     assert kit.ordered == [] and all("--dry-run" in c or c[3] == "preflight" for c in kit.commands)
@@ -226,7 +251,7 @@ def test_own_trainer_with_sky_spot_samplers_spends_only_on_the_pool(kit, capsys)
     offer = pool["provider"]["offers"][0]["resources"]
     assert pool["provider"]["kind"] == "sky" and offer["use_spot"] is True and offer["accelerators"] == "L40S:1"
     rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys)
-    assert rc == 0, out[-3000:]
+    assert rc == 0, out.why
     assert ("dry run: spend estimate $1.50/h = pools $1.50/h (sky-l40s (sky) 2 x $0.7492) + trainer $0/h "
             "(own nodes: ssh:1x8xb300); over the 6 h wall clock $8.99 (budget.usd $30)") in out
     assert "sky offer L40S:1@nebius/eu-north1/spot" in out and "estimated spend: $0.75 per node hour" in out
@@ -234,7 +259,7 @@ def test_own_trainer_with_sky_spot_samplers_spends_only_on_the_pool(kit, capsys)
 
 def test_own_trainer_with_modal_samplers_spends_only_on_the_pool(kit, capsys):
     rc, out = _dry_run(kit, "run.own-trainer-modal-sampler.json", capsys)
-    assert rc == 0, out[-3000:]
+    assert rc == 0, out.why
     line = next(line for line in out.splitlines() if "dry run: spend estimate" in line)
     assert "pools $5.68/h (modal-l40s (modal) 2 x $2.83877) + trainer $0/h (own nodes: ssh:1x8xb300)" in line
     assert line.split("dry run: spend estimate ")[1].startswith("$5.68/h")
@@ -249,7 +274,7 @@ def test_an_own_sampler_pool_bills_nothing_and_runs_on_the_node_runtime(kit, cap
     assert "node_runtime" not in pool["provider"] and "node_runtime" not in pool  # the ssh pool's default:
     assert ssh_sampler_pool.parse_config(pool).node_runtime is True
     rc, out = _dry_run(kit, "run.own-sampler-pool.json", capsys)
-    assert rc == 0, out[-3000:]
+    assert rc == 0, out.why
     assert ("dry run: spend estimate $8.00/h = pools $0.00/h (own-h100 (ssh) 2 x $0) + trainer $8/h; "
             "over the 6 h wall clock $48.00 (budget.usd $60)") in out
     assert "estimated spend: $0.00 per node hour" in out
@@ -257,7 +282,7 @@ def test_an_own_sampler_pool_bills_nothing_and_runs_on_the_node_runtime(kit, cap
 
 def test_a_fleet_of_an_own_and_a_cloud_island_counts_the_own_trainer_at_zero(kit, capsys):
     rc, out = _dry_run(kit, "run.fleet-own-and-cloud.json", capsys)
-    assert rc == 0, out[-3000:]
+    assert rc == 0, out.why
     assert "fleet: island 0 own: learner 0, store trainer0/" in out and "trainer ssh:1x8xb300 at $0/h" in out
     assert "fleet: island 1 cloud: learner 1" in out and "trainer modal:1x8xb300 at $68/h" in out
     assert ("fleet: budget estimate $72.72/h = pools $4.34/h (i0-sky-l40s 2 x $0.7492, i1-modal-l40s 1 x $2.83877) "
@@ -319,8 +344,10 @@ def test_the_fleet_shape_check_reads_each_island_and_only_a_shape_bound_full_lay
 def test_a_node_that_cannot_reach_the_store_refuses_the_run_up_and_names_both(kit, name, node, capsys):
     FakeSsh.unreachable = {(node, ENDPOINT)}
     rc, out = _dry_run(kit, name, capsys)
-    assert rc == 2, out[-3000:]
-    (line,) = [line for line in out.splitlines() if "[FAIL]" in line]
+    assert rc == 2, out.why
+    marked = [line for line in out.splitlines() if "[FAIL]" in line]
+    assert len(marked) == 1, out.why  # the one FAIL line, not a preflight that failed before the check
+    (line,) = marked
     assert f"[FAIL] {node} reach_store: {node} cannot reach the store endpoint {ENDPOINT}" in line
     assert "Could not resolve host" in line
     assert "cluster preflight failed: nothing ordered" in out and "dry run: preflight ok" not in out
@@ -330,8 +357,10 @@ def test_a_node_that_cannot_reach_the_store_refuses_the_run_up_and_names_both(ki
 def test_a_node_that_does_not_reach_the_registry_warns_and_names_the_dockerd_proxy(kit, capsys):
     FakeSsh.unreachable = {("own-b300-0", REGISTRY)}
     rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys)
-    assert rc == 0, out[-3000:]
-    (line,) = [line for line in out.splitlines() if "[WARN]" in line]
+    assert rc == 0, out.why
+    marked = [line for line in out.splitlines() if "[WARN]" in line]
+    assert len(marked) == 1, out.why  # the one WARN line, not a preflight that failed before the check
+    (line,) = marked
     assert f"[WARN] own-b300-0 reach_registry: own-b300-0 cannot reach the registry endpoint {REGISTRY}" in line
     assert "systemctl show docker -p Environment" in line and "dry run: preflight ok, nothing ordered" in out
 
@@ -362,7 +391,7 @@ def test_a_cloud_only_trainer_contacts_no_node(kit, capsys):
     cfg["trainer"]["usd_per_h"] = 8.0
     path.write_text(json.dumps(cfg))
     rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys)
-    assert rc == 0, out[-3000:]
+    assert rc == 0, out.why
     assert FakeSsh.calls == [] and "own nodes" not in out and "dry run: spend estimate" not in out
 
 
@@ -731,6 +760,22 @@ def test_a_sky_pool_on_the_node_runtime_may_pull_the_model_to_any_models_path(tm
         found = pool_run.store_layout_problems(dict(sky, spec=str(spec)), tmp_path / "env", "b")
         assert (found == []) is ok, (base_dir, found)
     assert "engine.server.base_dir is '/models/Qwen3-8B'" in found[0] or "Qwen3-4B-Instruct" in found[0]
+
+
+def test_a_modal_pool_dry_run_refuses_without_the_modal_sdk(monkeypatch):
+    """The templates' kit fakes the SDK (CI installs no `modal` extra); the check itself
+    is real: no SDK, no Modal island can be ordered."""
+    import importlib.util
+
+    from yeto.launch.pool import modal_provider
+
+    real = importlib.util.find_spec
+    assert modal_provider.sdk_installed() is (real("modal") is not None)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "modal" else real(name, *a))
+    assert modal_provider.sdk_installed() is False
+    cfg = {"provider": {"kind": "modal", "image": "i", "secret": "s", "bucket": "b", "gpu": "L40S", "gpus": 1},
+           "run": "r", "shard_base": "r", "target": 1, "slots": [1]}
+    assert "the 'modal' Python package is not installed" in modal_provider.offline_problems(cfg)
 
 
 def test_an_own_ssh_pool_needs_no_price_under_a_spend_cap():
