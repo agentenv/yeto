@@ -869,11 +869,14 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool 
 
     if cut_id in _PENDING_SHARDS:
         return {REFUSED: f"cut {cut_id} is already being written", REFUSAL_KIND: "refused"}
+    # Read before the hand-off: the writer owns ``captured`` from submit on, and the
+    # host writer empties it (_release_capture) once written, possibly before submit returns
+    started = {"pending": cut_id, "coord": dict(captured["coord"]), "capture": dict(captured["capture"])}
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"yeto-cut-{cut_id}")
     write = _write_host_background if host else _write_background
     _PENDING_SHARDS[cut_id] = (pool, pool.submit(write, captured, directory=directory, cut_id=cut_id))
     pool.shutdown(wait=False)
-    return {"pending": cut_id, "coord": dict(captured["coord"]), "capture": dict(captured["capture"])}
+    return started
 
 
 def poll_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:

@@ -603,8 +603,6 @@ def test_host_background_writes_the_inline_shard_from_one_host_copy(tmp_path):
     """Peer snapshots (``background="host"``): the state is copied to the
     host at the step boundary and a thread of the rank writes it; the shard, its
     summary and its bytes equal the inline save's. ``poll_cut_shard`` never waits."""
-    import time
-
     from tests.rl_cut_fakes import make_rank, train_step
 
     rank = make_rank(0)
@@ -614,12 +612,38 @@ def test_host_background_writes_the_inline_shard_from_one_host_copy(tmp_path):
     started = cp.save_cut_shard(rank, directory=str(tmp_path / "host"), cut_id="c1", background=cp.HOST_BACKGROUND)
     assert started["pending"] == "c1"
     assert started["capture"] == {"mode": "host", "reason": "host_background"}
-    deadline = time.monotonic() + 30
-    while not cp.poll_cut_shard(rank, cut_id="c1")["done"]:
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
+    cp._PENDING_SHARDS["c1"][1].result(timeout=30)  # the writer thread finished (no polling)
+    assert cp.poll_cut_shard(rank, cut_id="c1") == {"done": True}
     summary = cp.finish_cut_shard(rank, cut_id="c1")
     assert summary.pop("writer") == {"mode": "host_thread"}
     assert summary == inline
     for name in sorted(p.name for p in (tmp_path / "inline").iterdir()):
         assert (tmp_path / "host" / name).read_bytes() == (tmp_path / "inline" / name).read_bytes()
+
+
+def test_host_background_start_survives_a_writer_that_finishes_before_submit_returns(tmp_path, monkeypatch):
+    """The host writer empties the capture once written (``_release_capture``); a
+    writer thread that runs to completion before ``submit`` returns to the training
+    thread must not make ``save_cut_shard`` fail reading the capture (it raised
+    ``KeyError: 'coord'``). The schedule is forced: ``submit`` returns only after the
+    write is done."""
+    import concurrent.futures
+
+    from tests.rl_cut_fakes import make_rank, train_step
+
+    class WriterFirst(concurrent.futures.ThreadPoolExecutor):
+        def submit(self, fn, /, *args, **kwargs):
+            future = super().submit(fn, *args, **kwargs)
+            future.result(timeout=30)  # the writer (and its _release_capture) ran first
+            return future
+
+    rank = make_rank(0)
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(7)))
+    inline = cp.save_cut_shard(rank, directory=str(tmp_path / "inline"), cut_id="c1")
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", WriterFirst)
+    started = cp.save_cut_shard(rank, directory=str(tmp_path / "host"), cut_id="c1", background=cp.HOST_BACKGROUND)
+    assert started == {"pending": "c1", "coord": inline["coord"],
+                       "capture": {"mode": "host", "reason": "host_background"}}
+    summary = cp.finish_cut_shard(rank, cut_id="c1")
+    assert summary.pop("writer") == {"mode": "host_thread"}
+    assert summary == inline
