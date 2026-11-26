@@ -21,7 +21,7 @@ from yeto.launch import storage
 URI = "s3://b/runs/r"
 KEY_ID, SECRET = "AKIDSTOREFAKE", "store-secret-value-not-to-be-seen"
 SECRET_NAME = "r2-store"
-MIXED_GPU = "modal:1x2xh100,aws:1x8xh100@us-east-1"
+MIXED_GPU = "modal:1x8xh100,aws:1x8xh100@us-east-1"  # one trainer shape: the shape-bound layout binds it
 
 
 @pytest.fixture
@@ -36,6 +36,7 @@ def launcher_key(monkeypatch):
 
 def _mixed_fleet(files):
     cfg = _cfg(files)
+    cfg["islands"][0]["trainer"]["gpu"] = "modal:1x8xh100"
     cfg["islands"][1]["trainer"]["gpu"] = "aws:1x8xh100@us-east-1"
     cfg["fleet"]["trainer_argv"] = [*TRAINER_ARGV, "--reward-function", "pkg.reward:score", "--trust-remote-code",
                                     "--rl-max-policy-age", "2", "--rl-parameter-layout-sha256", "e" * 64,
