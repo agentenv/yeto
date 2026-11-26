@@ -959,7 +959,9 @@ class S3ObjectStore:
         applied; a write that goes through (the endpoint ignored it) or an "unsupported"
         answer (501, ``NotImplemented``, ``InvalidArgument``, ``InvalidRequest``) marks it
         unusable, and :meth:`replace_if` then answers None (the caller's fallback). The
-        probe object is deleted afterwards. Another error is raised and nothing is cached."""
+        probe object (``.yeto/replace-if-probe/<uuid>`` at the bucket's root, outside any run's
+        prefix) is deleted afterwards; a delete that fails leaves it behind (a few bytes, safe
+        to remove). Another error is raised and nothing is cached."""
         cache_key = self._replace_if_key()
         with _REPLACE_IF_LOCK:
             known = _REPLACE_IF_USABLE.get(cache_key)
@@ -967,7 +969,8 @@ class S3ObjectStore:
             return known
         import uuid  # noqa: PLC0415
 
-        probe = self._key(f"{REPLACE_IF_PROBE_PREFIX}/{uuid.uuid4().hex}")
+        # at the bucket's root, never under a run's prefix; a delete that fails leaves it there
+        probe = check_key(f"{REPLACE_IF_PROBE_PREFIX}/{uuid.uuid4().hex}")
         try:
             self.client.put_object(Bucket=self.bucket, Key=probe, Body=b"probe")
             try:

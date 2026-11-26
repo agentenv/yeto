@@ -370,8 +370,10 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
           local_syncer: Any = None, syncer_cluster: str | None = None, syncer_job: Any = None,
           ops: Any = None, sleep: Callable[[float], None] = time.sleep,
           record_extra: dict[str, Any] | None = None, on_record: Callable[[dict[str, Any]], None] | None = None,
-          stopped: Callable[[], str | None] | None = None, early_finish: bool = False) -> int:
-    """Record the syncer once it listens, then supervise it alone (module doc).
+          stopped: Callable[[], str | None] | None = None, early_finish: bool = False,
+          objects: Any = None) -> int:
+    """Record the syncer once it listens, then supervise it alone (module doc). ``objects``:
+    the run store the records go to (default: a client from this process's environment).
     An on-site syncer service: ``record_extra``, the fields it adds to each record it
     writes; ``on_record(record)``, called after each record; ``stopped``, the fleet's STOP
     in the run store (:func:`supervise`); ``early_finish``, a head syncer that finished its
@@ -398,7 +400,7 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
     if never is not None:
         print(f"[launcher] ERROR: fleet syncer: {never}", file=sys.stderr, flush=True)
         return 1
-    recorded = record(args, syncer_addr, num_learners, extra=record_extra)
+    recorded = record(args, syncer_addr, num_learners, objects=objects, extra=record_extra)
     if on_record is not None:
         on_record(recorded)
     stop_flag = runs.stop_flag_path(args.cluster_prefix)
@@ -422,7 +424,7 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
                 print(f"[launcher] fleet syncer restart failed: {error}", file=sys.stderr)
                 return True
             try:  # the islands started from now on read it (same address and term)
-                recorded = record(args, syncer_addr, num_learners, extra=record_extra)
+                recorded = record(args, syncer_addr, num_learners, objects=objects, extra=record_extra)
                 if on_record is not None:
                     on_record(recorded)
             except Exception as error:  # noqa: BLE001 - the earlier record still names it
@@ -635,7 +637,11 @@ def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], No
         beats.see(status if ours else None)
         if not left_over:
             left_over.append(status.get("generation") if ours and status.get("state") in SERVICE_FINAL else _NOT_FINAL)
-        if ours and status.get("state") in SERVICE_FINAL and not _newer_final(status, left_over[0]):
+        if (ours and status.get("state") in SERVICE_FINAL and not _newer_final(status, left_over[0])
+                and _ended_with(objects, status, rec)):
+            log(f"[launcher] fleet syncer: the syncer service on {host} ended this run (its ended marker "
+                f"{ONSITE_SYNCER_ENDED}, generation {status.get('generation')}, the syncer record's): taken as is")
+        elif ours and status.get("state") in SERVICE_FINAL and not _newer_final(status, left_over[0]):
             if not said:
                 log(f"[launcher] fleet syncer: the syncer service heartbeat on {host} is an earlier service's final "
                     f"one ({status.get('state')}, generation {status.get('generation')}): not this run's, waiting "
@@ -728,6 +734,20 @@ def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], No
 
 
 _NOT_FINAL = object()  # the heartbeat was not final when the wait began
+ONSITE_SYNCER_ENDED = "fleet/onsite/syncer.ended"  # the syncer service's ended marker (fleet_service.Onsite)
+
+
+def _ended_with(objects: Any, status: dict[str, Any], rec: dict[str, Any] | None) -> bool:
+    """A final heartbeat left when the wait began is this run's end after all: the syncer
+    service's ended marker is in the run store, and the syncer record is of that heartbeat's
+    generation (a control unit restarted after the syncer ended the run)."""
+    generation = status.get("generation")
+    if generation is None or rec is None or rec.get("service_generation") != generation:
+        return False
+    try:
+        return objects.read(ONSITE_SYNCER_ENDED) is not None
+    except Exception:  # noqa: BLE001 - read again at the next poll
+        return False
 
 
 def _newer_final(status: dict[str, Any], left_over: Any) -> bool:

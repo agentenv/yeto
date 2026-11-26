@@ -13,9 +13,12 @@ def store_client_environ(args, environ=None) -> dict[str, str]:
     """The environment the S3 store client of the head and the islands reads, with
     ``--rl-object-store-endpoint`` applied: the endpoint, and ``region=auto`` when an
     endpoint is set and no region is configured (what Cloudflare R2 expects; AWS S3
-    ignores it). ``environ`` defaults to the process environment."""
+    ignores it). ``environ`` defaults to the environment the launch was parsed for
+    (``args._store_environ``: the on-site syncer service's, run up's), else the process's."""
     from ..cloud.s3_store import ENDPOINT_ENV, PROFILE_ENV, REGION_ENV, store_endpoint, store_region
 
+    if environ is None:
+        environ = getattr(args, "_store_environ", None)
     env = dict(os.environ if environ is None else environ)
     if getattr(args, "rl_object_store_profile", None):
         env[PROFILE_ENV] = str(args.rl_object_store_profile)

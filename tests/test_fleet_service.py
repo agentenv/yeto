@@ -606,7 +606,8 @@ def fake_serve(objects, seen, code, *, until=None):
     fields), ``on_record``, then ``code`` (or 9 once ``stopped()`` says so, with ``until``)."""
     import time
 
-    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish):
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
         seen.update(addr=addr, n=n, head_mode=head_mode, extra=record_extra, epoch=args.rl_syncer_epoch,
                     service=getattr(args, "rl_fleet_syncer_service", None),
                     before=fleet_syncer.read_service_status(objects))
@@ -707,7 +708,7 @@ def test_a_service_whose_lock_another_took_ends_without_a_final_state(tmp_path, 
                                                   beat_s=0.05)
     assert rc == 2 and "no longer this service's" in seen["stopped"]
     assert fleet_syncer.read_service_status(objects)["state"] == "running"  # never final: not this service's now
-    assert syncer.events == ["start", "stop"]
+    assert syncer.events[:2] == ["start", "stop"] and set(syncer.events[1:]) == {"stop"}
 
 
 def test_the_term_goes_on_here_and_moves_up_on_another_host(tmp_path, monkeypatch):
@@ -1245,11 +1246,14 @@ class HangingStore:
 SCALE = 0.01
 
 
-@pytest.mark.parametrize("block_s", [0, 45, 91, 181])
-def test_a_store_that_hangs_never_keeps_the_syncer_running_past_the_lease(tmp_path, monkeypatch, block_s):
-    """H1: each heartbeat store call blocks ``block_s`` (production seconds, scaled) and then
-    fails. The heartbeat's own cut-off and the fence budget stop the syncer, its stop taking the
-    whole grace, more than the lock's margin before the lease ends, every time."""
+@pytest.mark.parametrize("block_s, main_hangs", [(0, False), (45, False), (91, False), (181, False),
+                                                 (15, True), (60, True), (181, True), (585, True)])
+def test_a_store_that_hangs_never_keeps_the_syncer_running_past_the_lease(tmp_path, monkeypatch, block_s, main_hangs):
+    """H1: each heartbeat store call (and with ``main_hangs`` each call of the service's main
+    client too) blocks ``block_s`` (production seconds, scaled) and then fails. The beat thread
+    stops the syncer at the fence itself, its stop taking the whole grace, more than the lock's
+    margin before the lease ends, every time; the main thread's store calls (the STOP read, a
+    record) are cut off, so it ends soon after."""
     import time
 
     from yeto.launch.pool.store_lock import StoreLock
@@ -1257,42 +1261,115 @@ def test_a_store_that_hangs_never_keeps_the_syncer_running_past_the_lease(tmp_pa
     monkeypatch.setattr(fleet_syncer, "SERVICE_LOCK_TTL_S", 0.0)  # the scaled lease, not the floor
     beat_s, poll_s = fleet_syncer.SERVICE_BEAT_S * SCALE, fleet_syncer.POLL_S * SCALE
     call_s, grace = fleet_syncer.HEARTBEAT_CALL_S * SCALE, fs.SYNCER_STOP_GRACE_S * SCALE
-    objects = DirectoryObjectStore(tmp_path / "store")
-    hanging = HangingStore(objects, block_s * SCALE)
+    directory = DirectoryObjectStore(tmp_path / "store")
+    hanging = HangingStore(directory, block_s * SCALE)
+    main = HangingStore(directory, block_s * SCALE) if main_hangs else directory
     times: dict = {}
 
     class SlowStop(FakeSyncer):
         def stop(self):
             time.sleep(grace)  # the syncer's checkpoint takes the whole grace
-            times["stopped"] = time.time()
+            times.setdefault("stopped", time.time())  # the first stop: the fence's
             super().stop()
 
     syncer = SlowStop()
 
-    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish):
-        record = island_launches.write_syncer_record(objects, addr=addr, syncer_epoch=args.rl_syncer_epoch,
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        record = island_launches.write_syncer_record(kw["objects"], addr=addr, syncer_epoch=args.rl_syncer_epoch,
                                                      learners=n, max_learners=4, run="r", extra=record_extra)
         on_record(record)
-        lock = StoreLock(objects, fleet_syncer.SERVICE_LOCK, record_extra["service_generation"], "x")
-        times["lease"] = lambda: float(json.loads(objects.read(lock.lease_key(lock.prefix, lock.token)))["until"])
-        hanging.down = True  # from now on the store hangs
+        lock = StoreLock(directory, fleet_syncer.SERVICE_LOCK, record_extra["service_generation"], "x")
+        times["lease"] = lambda: float(json.loads(directory.read(lock.lease_key(lock.prefix, lock.token)))["until"])
+        hanging.down = main.down = True  # from now on the store hangs
         deadline = time.monotonic() + 60
-        while not stopped():
+        while True:
+            polled = time.monotonic()
+            why = stopped()
+            try:  # a record of a restart on the main path
+                island_launches.read_syncer_record(kw["objects"])
+            except Exception:  # noqa: BLE001 - cut off
+                pass
+            assert time.monotonic() - polled <= 2 * call_s + 0.2  # never held by the store
+            if why:
+                times["seen"] = time.time()
+                return 9
             assert time.monotonic() < deadline
             time.sleep(poll_s)  # supervise's poll
-        return 9
 
     path = onsite_config(tmp_path)
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
     logs: list[str] = []
-    rc = fs.run_syncer(str(path), objects=objects, heartbeat_store=hanging, make_syncer=lambda args, n: syncer,
+    rc = fs.run_syncer(str(path), objects=main, heartbeat_store=hanging, make_syncer=lambda args, n: syncer,
                        serve=serve, parse=_prepared, node="site-s", beat_s=beat_s, poll_s=poll_s, call_s=call_s,
                        stop_grace_s=grace, workdir=str(tmp_path / "work"), log=logs.append)
-    assert rc == fs.SELF_FENCED_EXIT and syncer.events == ["start", "stop"], logs
+    times["returned"] = time.time()
+    assert rc == fs.SELF_FENCED_EXIT and syncer.events[:2] == ["start", "stop"], logs
     ttl = fs.service_lock_ttl_s(grace, beat_s, poll_s=poll_s, call_s=call_s)
     margin = min(60.0, ttl * 0.1)
     assert times["stopped"] < times["lease"]() - margin / 2, (times, logs)  # stopped before the lease ends
+    assert times["returned"] - times["seen"] < 2 * grace + 2 * call_s + 1.0, times  # the main thread ends too
     assert any("fenced by itself" in m for m in logs)
+    assert any("stopping the syncer now" in m for m in logs)
+
+
+class GateStore:
+    """A store whose writes of keys containing ``match`` block until ``gate`` is set once
+    ``armed``; ``writes``: (key, data) in the order they landed."""
+
+    def __init__(self, inner, match):
+        import threading
+
+        self.inner, self.match, self.armed = inner, match, False
+        self.gate, self.writes = threading.Event(), []
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def write(self, key, data):
+        if self.armed and self.match in key:
+            self.gate.wait(10)
+        self.inner.write(key, data)
+        self.writes.append((key, json.loads(data)))
+
+
+@pytest.mark.parametrize("slow", ["heartbeat", "lease"])
+@pytest.mark.parametrize("late_s", [0.05, 0.6])  # within 2 x call_s, and after it (inside 4 x call_s)
+def test_the_end_waits_for_a_call_in_flight_before_its_final_heartbeat_and_release(tmp_path, slow, late_s):
+    """M-a: a heartbeat (E) or a lease renewal (D) still in flight at the end lands before the
+    final heartbeat, never over it; a renewal in flight is never followed by a release it would
+    undo (late: the lock is left to its lease). Within call_s: waited for, then final, then
+    release; later: no release, the final heartbeat after the late call."""
+    import threading
+    import time
+
+    from yeto.launch.pool.store_lock import StoreLock
+
+    directory = DirectoryObjectStore(tmp_path / "store")
+    gated = GateStore(directory, "island_syncer_service" if slow == "heartbeat" else ".lease")
+    lock = StoreLock.acquire(gated, fleet_syncer.SERVICE_LOCK, holder="h", ttl_s=60)
+    logs: list[str] = []
+    beat_ = fs.Heartbeat(gated, "h", "kid", lock=lock, generation=lock.token, every_s=0.05, call_s=0.2,
+                         log=logs.append)
+    beat_.set(fleet_syncer.SERVICE_RUNNING)
+    gated.armed = True
+    beat_._thread.start()
+    time.sleep(0.12)  # the beat thread is in its call now, held at the gate
+    beat_.stop()
+    threading.Timer(late_s, gated.gate.set).start()  # the call lands after late_s
+    beat_.finish(fleet_syncer.SERVICE_FINISHED, None, release=True)
+    for thread in threading.enumerate():
+        if thread.name == "syncer-service-final":
+            thread.join(5)
+    beat_.channel.drain(5)
+    status = [d for k, d in gated.writes if "island_syncer_service" in k]
+    leases = [d for k, d in gated.writes if k.endswith(".lease")]
+    assert status[-1]["state"] == "finished"  # never a late "running" over it
+    if late_s < 2 * 0.2:  # waited for: then the release
+        assert leases[-1]["released"] is True
+    else:  # still in flight after 2 x call_s: no release a late renewal could undo
+        assert all(not d["released"] for d in leases) and any("not released" in m for m in logs)
+    assert StoreLock.holder_of(directory, fleet_syncer.SERVICE_LOCK) is None or late_s >= 0.4
 
 
 def test_a_self_fenced_service_exits_1_and_stops_its_syncer_before_its_lease_ends(tmp_path, monkeypatch):
@@ -1314,7 +1391,7 @@ def test_a_self_fenced_service_exits_1_and_stops_its_syncer_before_its_lease_end
     monkeypatch.setattr(fs, "service_lock_ttl_s", lambda grace, beat=None, **kw: 0.6)  # a short lease for the test
     rc, seen, syncer, objects, logs = run_service(tmp_path, monkeypatch, 0, objects=objects, until=cut, beat_s=0.05)
     assert rc == fs.SELF_FENCED_EXIT and "fenced by itself" in seen["stopped"]
-    assert syncer.events == ["start", "stop"]
+    assert syncer.events[:2] == ["start", "stop"] and set(syncer.events[1:]) == {"stop"}
 
 
 def test_two_runs_on_one_host_never_share_a_syncer_state(tmp_path, monkeypatch):
@@ -1942,3 +2019,295 @@ def test_a_heartbeat_call_still_running_fails_the_next_one_at_once():
     release.set()
     beat_._pending.join(5)
     assert beat_._bounded("heartbeat", lambda: calls.append(3) or "ok") == "ok" and calls == [1, 3]
+
+
+@pytest.fixture
+def no_store_credentials(monkeypatch, tmp_path):
+    """No credential of any kind for a real S3 client: none in the environment, empty AWS
+    files, no instance metadata (botocore never sends a request without a credential)."""
+    import os
+
+    for name in list(os.environ):
+        if name.startswith(("AWS_", "YETO_RL_STORE_S3_")):
+            monkeypatch.delenv(name)
+    (tmp_path / "aws-config").write_text("")
+    (tmp_path / "aws-credentials").write_text("")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "aws-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "aws-credentials"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+
+
+@pytest.mark.usefixtures("no_sigterm_handler", "no_store_credentials")
+@pytest.mark.parametrize("role", ["syncer", "control"])
+@pytest.mark.parametrize("profile", [None, "not-configured-here"])
+def test_a_unit_without_store_credentials_is_a_configuration_error(tmp_path, monkeypatch, role, profile):
+    """M-b: the real S3 client of the run store (s3://), no credential (or a profile this host
+    does not have): exit 10 at once, before the ended marker read, never an endless retry."""
+    from yeto.cloud import s3_store
+
+    s3_store._profile_config_cached.cache_clear()
+    if profile:
+        monkeypatch.setenv("YETO_RL_STORE_S3_PROFILE", profile)
+    path = onsite_config(tmp_path)
+    assert up.load_config(str(path))["store"].startswith("s3://")
+    monkeypatch.setattr(fs, "run_syncer", lambda *a, **kw: pytest.fail("started without credentials"))
+    monkeypatch.setattr(fs, "run_control", lambda *a, **kw: pytest.fail("started without credentials"))
+    logs: list[str] = []
+    assert fs.service_run(service_args(path, role), log=logs.append) == fs.CONFIG_EXIT
+    assert fs.CONFIG_EXIT in (fs.SYNCER_PREVENT if role == "syncer" else fs.CONTROL_PREVENT)
+    assert ("not configured on this host" if profile else "no store credentials") in logs[-1]
+    assert not any("does not answer" in m for m in logs)  # not taken for a store that is down
+
+
+@pytest.mark.usefixtures("no_store_credentials")
+def test_a_credential_error_inside_the_marker_read_is_a_configuration_error(tmp_path):
+    """M-b: the default credential chain finds nothing (botocore's NoCredentialsError at the
+    first read): the marker read ends with a configuration error, not a retry."""
+    onsite = fs.Onsite(up.load_config(str(onsite_config(tmp_path))), "syncer")
+    def sleep(s):
+        pytest.fail("a credential error was retried as a store that does not answer")
+
+    with pytest.raises(fs.ServiceError, match="NoCredentialsError"):
+        onsite.read_ended(sleep=sleep, log=lambda m: None)
+
+
+@pytest.mark.usefixtures("no_store_credentials")
+def test_the_syncer_service_checks_its_launch_s_store_credentials_too(tmp_path, monkeypatch):
+    logs: list[str] = []
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), make_syncer=lambda args, n: pytest.fail("started"),
+                       parse=_prepared, node="site-s", workdir=str(tmp_path / "work"), log=logs.append)
+    assert rc == fs.CONFIG_EXIT and "store credentials" in logs[-1]
+
+    def parse(argv):  # a launch that parses (its islands' credential checked elsewhere)
+        with monkeypatch.context() as m:
+            m.setenv("YETO_RL_STORE_S3_ACCESS_KEY_ID", "parse-only")
+            m.setenv("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "parse-only")
+            return _prepared(argv)
+
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), make_syncer=lambda args, n: pytest.fail("started"),
+                       parse=parse, node="site-s", workdir=str(tmp_path / "work"), log=logs.append)
+    assert rc == fs.CONFIG_EXIT and "no store credentials" in logs[-1]  # checked before any store call
+
+
+@pytest.mark.usefixtures("no_store_credentials")
+def test_the_credential_check_needs_no_request(tmp_path, monkeypatch):
+    """M-b: the check reads the environment and the local AWS files only: a profile this host
+    does not have is named before any client is built."""
+    from yeto.cloud import s3_store
+
+    s3_store._profile_config_cached.cache_clear()
+    monkeypatch.setattr(s3_store, "_client", lambda *a, **kw: pytest.fail("a client was built"))
+    env = {"YETO_RL_STORE_S3_PROFILE": "not-here", "AWS_CONFIG_FILE": str(tmp_path / "aws-config")}
+    assert "AWS profile 'not-here' is not configured on this host" in fs.store_credential_problem("s3://b/r", env)
+    assert "no store credentials" in fs.store_credential_problem("r2://b/r", {})
+    assert fs.store_credential_problem("s3://b/r", {"YETO_RL_STORE_S3_ACCESS_KEY_ID": "k",
+                                                    "YETO_RL_STORE_S3_SECRET_ACCESS_KEY": "s"}) is None
+    assert fs.store_credential_problem(str(tmp_path / "dir-store"), {}) is None
+    assert "needs" in fs.store_credential_problem("oss://b/r", {})
+    path = onsite_config(tmp_path)
+    monkeypatch.setenv("YETO_RL_STORE_S3_PROFILE", "not-here")
+    logs: list[str] = []
+    monkeypatch.setattr(fs.signal, "signal", lambda *a: None)
+    assert fs.service_run(service_args(path, "syncer"), log=logs.append) == fs.CONFIG_EXIT
+    assert "not configured on this host" in logs[-1] and "refuses this host's credentials" not in logs[-1]
+
+
+def test_launch_args_reads_the_store_environment_it_is_given(tmp_path, monkeypatch):
+    from yeto import launcher
+    from yeto.launch.store_env import store_client_environ
+
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
+    monkeypatch.setattr("yeto.launch.data_mix.materialize_data_mix", lambda args: None)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    argv, _host = fs.syncer_launch_argv(up.open_run(str(onsite_config(tmp_path))))
+    args = fs.launch_args(argv, {"YETO_RL_STORE_S3_PROFILE": "p"})
+    assert store_client_environ(args)["YETO_RL_STORE_S3_PROFILE"] == "p"
+    assert "YETO_RL_STORE_S3_PROFILE" not in __import__("os").environ
+
+
+def test_a_control_unit_restarted_after_the_syncer_ended_the_run_ends_with_it(tmp_path):
+    """L1: the final heartbeat left when the wait began is this run's end when the syncer
+    service's ended marker is in the run store and the syncer record is of its generation."""
+    objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
+    service_up(objects, clock, generation=7, state=fleet_syncer.SERVICE_FINISHED)
+    onsite = fs.Onsite(up.load_config(str(onsite_config(tmp_path))), "syncer", objects=objects)
+    assert onsite.ended_key == fleet_syncer.ONSITE_SYNCER_ENDED
+    onsite.write_ended(0, "the run is finished", log=logs.append)
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=clock.sleep, clock=clock,
+                                      log=logs.append) == 0
+    assert clock.sleeps == 0 and any("ended this run (its ended marker" in m for m in logs)
+    # a record of another generation (a newer service started since): not taken
+    service_up(objects, clock, generation=7, record_generation=8, state=fleet_syncer.SERVICE_FINISHED)
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=clock.sleep, clock=clock,
+                                      wait_s=60, log=logs.append) == 1
+    assert clock.sleeps > 0
+
+
+@pytest.mark.usefixtures("replace_probe")
+def test_the_probe_object_is_at_the_bucket_s_root_not_under_the_run(tmp_path):
+    """L2: the probe object goes to ``.yeto/replace-if-probe/<uuid>`` at the bucket's root."""
+    from yeto.cloud import s3_store
+
+    fake = etag_s3()
+    store = s3_store.S3ObjectStore("s3://bkt/runs/r", client=fake)
+    keys: list[str] = []
+    fake.before("put-if", lambda key: True, keys.append, times=5)
+    store.write("k", b"a")
+    assert store.replace_if("k", b"b", b"a") is True
+    assert keys[0].startswith(s3_store.REPLACE_IF_PROBE_PREFIX + "/") and not keys[0].startswith("runs/")
+    assert keys[1] == "runs/r/k" and not any(k.startswith(".yeto") for k in fake.objects)
+
+
+def test_the_heartbeat_client_s_retry_mode_is_always_standard(monkeypatch):
+    """L3: AWS_RETRY_MODE / YETO_RL_STORE_RETRY_MODE never change the heartbeat client's backoff."""
+    from yeto.cloud import s3_store
+
+    env = {s3_store.KEY_ID_ENV: "k", s3_store.SECRET_ENV: "s", "AWS_RETRY_MODE": "adaptive",
+           s3_store.RETRY_MODE_ENV: "legacy"}
+    cfg = fs.heartbeat_objects("s3://bkt/run", env).client.meta.config
+    assert cfg.retries == {"mode": "standard", "total_max_attempts": fleet_syncer.HEARTBEAT_MAX_ATTEMPTS}
+    assert s3_store.head_objects("s3://bkt/run", environ=env).client.meta.config.retries["mode"] == "legacy"
+
+
+def test_the_service_s_records_go_to_its_store_client_from_run_up_s_environment(tmp_path, monkeypatch):
+    """The syncer record of the service (the real serve) is written with the run store client
+    built from run up's environment: credentials only in the run config's env, none in this
+    process's, and no client from os.environ."""
+    import os
+
+    from store_fault_fakes import FaultS3
+
+    from yeto.cloud import s3_store
+
+    for name in list(os.environ):
+        if name.startswith(("AWS_", "YETO_RL_STORE_S3_")):
+            monkeypatch.delenv(name)
+    doc = onsite_doc(tmp_path)
+    doc["env"].update({"YETO_RL_STORE_S3_ACCESS_KEY_ID": "run-config-key-id",
+                       "YETO_RL_STORE_S3_SECRET_ACCESS_KEY": "run-config-secret"})
+    path = tmp_path / "creds.json"
+    path.write_text(json.dumps(doc))
+    fake, environs = FaultS3(), []
+
+    def client(environ, *, require_credentials):
+        environs.append(dict(environ))
+        return fake
+
+    monkeypatch.setattr(s3_store, "_client", client)
+    monkeypatch.setattr(fleet_syncer, "_store_objects", lambda args: pytest.fail("a client from os.environ"))
+    monkeypatch.setattr(fleet_syncer, "syncer_listening", lambda args, **kw: True)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+
+    class Done(FakeSyncer):
+        def exited_ok(self):
+            return "start" in self.events
+
+    def parse(argv):  # _prepared, for the environment run_syncer's own launch_args gives
+        from yeto.cli import parse_args
+        from yeto.launcher import _prepare_rl_args
+
+        args = parse_args(argv)
+        args._store_environ = up.open_run(str(path)).env
+        args.model_revision, args.data_revision = "a" * 40, "b" * 40
+        args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
+        _prepare_rl_args(args)
+        return args
+
+    seen = {}
+
+    def launch_args(argv, environ=None):
+        seen["environ"] = environ
+        return parse(argv)
+
+    monkeypatch.setattr(fs, "launch_args", launch_args)
+    logs: list[str] = []
+    rc = fs.run_syncer(str(path), make_syncer=lambda args, n: Done(), node="site-s",
+                       workdir=str(tmp_path / "work"), log=logs.append)
+    assert seen["environ"]["YETO_RL_STORE_S3_ACCESS_KEY_ID"] == "run-config-key-id"  # run up's environment
+    assert rc == 0, logs
+    store = s3_store.S3ObjectStore("s3://b/runs/r", client=fake)
+    record = island_launches.read_syncer_record(store)
+    assert record is not None and record["service_node"] == "site-s"
+    assert environs and all(e.get("YETO_RL_STORE_S3_ACCESS_KEY_ID") == "run-config-key-id" for e in environs)
+    assert "YETO_RL_STORE_S3_ACCESS_KEY_ID" not in os.environ
+
+
+def test_a_state_change_waits_for_the_beat_thread_s_call_in_flight(tmp_path):
+    """`running` (on_record) is never dropped because the beat thread's call is in flight: it is
+    written once that call ends (within call_s)."""
+    import threading
+
+    directory = DirectoryObjectStore(tmp_path / "store")
+    gated = GateStore(directory, "island_syncer_service")
+    beat_ = fs.Heartbeat(gated, "h", "kid", generation=1, call_s=1.0, log=lambda m: None)
+    gated.armed = True
+    in_flight = threading.Thread(target=beat_.beat)  # the beat thread's heartbeat, held at the gate
+    in_flight.start()
+    threading.Timer(0.2, gated.gate.set).start()
+    import time
+
+    time.sleep(0.05)
+    beat_.set(fleet_syncer.SERVICE_RUNNING)
+    in_flight.join(5)
+    assert fleet_syncer.read_service_status(directory)["state"] == "running"
+    assert [d["state"] for k, d in gated.writes] == ["starting", "running"]
+
+
+@pytest.mark.parametrize("cause", ["taken", "fenced"])
+def test_the_beat_thread_stops_the_syncer_itself_when_the_lock_is_lost(tmp_path, monkeypatch, cause):
+    """H1(a): another service took the lock (LockLost) or the service fenced itself: the syncer
+    is stopped in the beat thread, before the main thread ever looks, and never started again."""
+    import threading
+    import time
+
+    from yeto.launch.pool import store_lock
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    stops, restarts = [], []
+
+    class Watched(FakeSyncer):
+        def stop(self):
+            stops.append(threading.current_thread().name)
+            super().stop()
+
+        def restart(self):
+            restarts.append(1)
+
+    syncer = Watched()
+    if cause == "fenced":
+        real = store_lock.StoreLock.renew
+        down = {"on": False}
+
+        def renew(self):
+            if down["on"]:
+                raise OSError("store down")
+            return real(self)
+
+        monkeypatch.setattr(store_lock.StoreLock, "renew", renew)
+        monkeypatch.setattr(fs, "service_lock_ttl_s", lambda grace, beat=None, **kw: 0.6)
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        on_record(island_launches.write_syncer_record(objects, addr=addr, syncer_epoch=args.rl_syncer_epoch,
+                                                      learners=n, max_learners=4, run="r", extra=record_extra))
+        if cause == "taken":
+            StoreLock.acquire(objects, fleet_syncer.SERVICE_LOCK, holder="site-s/yeto-r-syncer.service", ttl_s=120,
+                              reclaim=True)
+        else:
+            down["on"] = True
+        deadline = time.monotonic() + 20
+        while not stops:  # the main thread never asks stopped(): the beat thread acts alone
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        with pytest.raises(RuntimeError, match="fenced"):
+            local_syncer.restart()  # serve's restart after the fence: refused
+        return 1
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=objects, make_syncer=lambda args, n: syncer,
+                       serve=serve, parse=_prepared, node="site-s", beat_s=0.05, workdir=str(tmp_path / "work"),
+                       log=lambda m: None)
+    assert rc == (fs.LOCK_LOST_EXIT if cause == "taken" else fs.SELF_FENCED_EXIT)
+    assert stops[0] == "syncer-service-beat" and restarts == []

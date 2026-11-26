@@ -158,6 +158,11 @@ class LocalSyncer:
             up.stop()
         self.store_uploaders = ()
 
+    def terminate(self) -> None:
+        """The syncer's process group only: SIGTERM, SIGKILL after the grace (from any thread;
+        :meth:`stop` also ends the forwarders and uploads)."""
+        self._stop_tree()
+
     def _stop_tree(self) -> None:
         """Terminate the syncer's process group, even when its leader (the
         shell) already exited: members it backgrounded may still run."""

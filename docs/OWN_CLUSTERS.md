@@ -521,7 +521,11 @@ syncer listens on its own ports, 29400 and up). With it:
   generation) and a heartbeat every 30 s (`fleet/island_syncer_service.json`). The heartbeat says
   `starting` until the record is written, then `running`, and at the end `finished`, `failed` or
   `stopped`. On a directory run store the record is written under the lock of the store's
-  conditional write, so the syncer launch's rewrite of it never overwrites a newer one.
+  conditional write, so the syncer launch's rewrite of it never overwrites a newer one. On S3 the
+  rewrite uses `If-Match`; the first one probes once whether the endpoint applies it, with a
+  probe object at the bucket's root (`.yeto/replace-if-probe/<uuid>`, outside every run's
+  prefix). The probe deletes it; a delete that fails leaves it behind, a few bytes that are safe
+  to remove.
 - **Its term** (`syncer_epoch`): the fleet's last record's when that record is this host's
   service's (a restart goes on at the same term), one more when another host wrote it (a syncer
   that starts over elsewhere fences the islands of the old one).
@@ -529,7 +533,10 @@ syncer listens on its own ports, 29400 and up). With it:
   20 minutes) and takes it only when the heartbeat is `running`, names the record's generation,
   and has moved at least once while it watched (a heartbeat left by a service that is gone does
   not move). A final heartbeat (`finished`, `failed`, `stopped`) that was already there when it
-  began to wait is an earlier service's: only one of a newer generation ends the wait. It checks that it reads the same island HMAC key, records the syncer for its
+  began to wait is an earlier service's: only one of a newer generation ends the wait, unless
+  the syncer service's ended marker is in the run store and the syncer record is of that
+  heartbeat's generation (a control unit restarted after the syncer ended the run: it ends with
+  it at once). It checks that it reads the same island HMAC key, records the syncer for its
   islands, then watches the heartbeat. Whether a heartbeat is fresh is timed on the control
   host's own clock: the two hosts' clocks are never compared. The launch ends with the service:
   0 when the run is finished, 9 when it stopped, 1 when it failed, or when its heartbeat did not
@@ -622,7 +629,7 @@ unit is started at most 5 times an hour (`StartLimitBurst`).
 |---|---|---|---|
 | control | 0 | `run up` ended the run | no; ended marker |
 | control | 75 | `run up` exited 1: it ended the run after a breaker trip or a failure it handled | no (`RestartPreventExitStatus=10 75`); ended marker |
-| control | 10 | a configuration error (the run config does not load, `rollout.drain_on_exit: true`, not an on-site control plane, no `YETO_ISLAND_HMAC_KEY` in the environment file) | no: fix the run config or the environment file, then `systemctl start` |
+| control | 10 | a configuration error (the run config does not load, `rollout.drain_on_exit: true`, not an on-site control plane, no `YETO_ISLAND_HMAC_KEY` or no run store credentials in the environment file) | no: fix the run config or the environment file, then `systemctl start` |
 | control | 2 | `run up` refused before ordering anything (a preflight that failed, another `run up` of the run) | yes, every 30 s, without limit: a refusal orders nothing |
 | control | 70, a signal | a crash | yes |
 | syncer | 0 | the run is finished | no; ended marker |
@@ -640,8 +647,17 @@ call), and each of its calls is cut off after 34 s whatever the store does. A se
 renewal fails fences itself (exit 1) when its lease had at most 374 s left before that
 renewal: the lock's margin (57 s), a beat, a poll of the service (15 s), the syncer's stop
 (its checkpoint written, up to 170 s) and three heartbeat calls that hang until they are cut
-off. A store that hangs therefore never keeps a syncer running past the lease. Before the
-fence the lease leaves room for two heartbeat rounds that fail as slowly as they can.
+off. At the fence the heartbeat thread stops the syncer itself (SIGTERM, SIGKILL after the
+grace), whatever the service's main thread waits for, and the syncer is never started again
+by that service. From the syncer's start on, the main thread's store calls (its records, its
+reads of the fleet's STOP) go through the heartbeat's client and are cut off after 34 s too. A
+store that hangs therefore never keeps a syncer running past the lease. Before the fence the
+lease leaves room for two heartbeat rounds that fail as slowly as they can.
+
+At its end the service waits for the heartbeat's call in flight (up to 34 s, twice). With none
+left it writes its final heartbeat, then releases the lease. With one still in flight it does
+not release the lease (a late renewal would undo the release; the lease runs out on its own),
+and writes the final heartbeat only after that call, so a late `running` never covers it.
 
 ### The ended marker
 
@@ -654,7 +670,11 @@ starts nothing. A reboot of the host, or the unit started on another host, never
 run again after a breaker trip or a strict failure. A run store that does not answer (it may
 come up after the host at a boot) is asked again in the process for as long as it does not,
 backing off from 5 s to 60 s, with one log line per try; nothing is started meanwhile, and the
-service does not exit for it. A refusal, a crash and a stop of the unit leave no marker.
+service does not exit for it. A host without the run store's credentials is not a store that
+does not answer: missing store keys, or an AWS profile that is not configured on the host, are
+checked before the read (from the environment and the local AWS files, no request), and a
+client that finds no credential at the read is refused too. Both are a configuration error
+(exit 10). A refusal, a crash and a stop of the unit leave no marker.
 
 To start the run again, remove the marker:
 
