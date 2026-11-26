@@ -250,11 +250,18 @@ def write_syncer_record(objects: Any, *, addr: str, syncer_epoch: int | None, le
                         extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """The fleet syncer's address and term in the run store (the island launches dial it).
     ``extra``: fields an on-site syncer service adds (``service``, ``key_id``); none otherwise."""
-    record = {"schema": SYNCER_SCHEMA, "addr": str(addr), "syncer_epoch": syncer_epoch, "learners": int(learners),
-              "max_learners": None if max_learners is None else int(max_learners), "run": str(run),
-              "at": round(clock(), 3), **dict(extra or {})}
+    record = syncer_record_doc(addr=addr, syncer_epoch=syncer_epoch, learners=learners, max_learners=max_learners,
+                               run=run, clock=clock, extra=extra)
     objects.write(SYNCER_RECORD, json.dumps(record, sort_keys=True).encode())
     return record
+
+
+def syncer_record_doc(*, addr: str, syncer_epoch: int | None, learners: int, max_learners: int | None, run: str,
+                      clock: Any = time.time, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The record :func:`write_syncer_record` writes."""
+    return {"schema": SYNCER_SCHEMA, "addr": str(addr), "syncer_epoch": syncer_epoch, "learners": int(learners),
+            "max_learners": None if max_learners is None else int(max_learners), "run": str(run),
+            "at": round(clock(), 3), **dict(extra or {})}
 
 
 def read_syncer_record(objects: Any) -> dict[str, Any] | None:

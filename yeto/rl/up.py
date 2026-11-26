@@ -2302,8 +2302,10 @@ class Run:
         """The exit drain of the in-process controller (``rollout.drain_on_exit``), run
         while ``main`` still runs. ``decided``: run up ended the run itself (its drive returned:
         the run finished, a stop, a breaker); the on-site control unit (``onsite_service``,
-        :mod:`yeto.rl.fleet_service`) then drains although ``drain_on_exit`` is false there,
-        which only keeps the pools across a SIGTERM or a crash of the unit. Left to the ``atexit`` hook it ran during interpreter
+        :mod:`yeto.rl.fleet_service`) then stops the controller itself (``controller.stop``, every
+        pool drained) although ``drain_on_exit`` is false there, which only keeps the pools across
+        a SIGTERM or a crash of the unit (``drain_active`` would only detach such a controller).
+        Left to the ``atexit`` hook it ran during interpreter
         shutdown, after the Modal client had closed: a tick in flight failed with
         ``ClientClosed``, the drain waited on it forever, and the process hung holding
         the pool with its sampler still billing.
@@ -2326,7 +2328,11 @@ class Run:
         if threading.current_thread() is threading.main_thread():
             restore = signal.signal(signal.SIGTERM, _log_sigterm_during_drain)
         try:
-            ctl.drain_active("process exit")
+            if not controller.drain_on_exit:  # the on-site unit's run up ended the run (``decided``)
+                # stopped itself: drain_active would only detach a controller with drain_on_exit false
+                controller.stop("run up ended the run")
+            else:
+                ctl.drain_active("process exit")
             return True
         except Exception as error:  # noqa: BLE001 - reported with the billing banner, never re-raised
             _log(f"CRITICAL: the exit drain of the sampler pools FAILED ({error!r})"[:600])
@@ -4844,6 +4850,7 @@ def main(args: Any) -> int:
                        strict_breakers=breakers_strict(args), adjust=getattr(args, "config_adjust", None))
     except RunConfigError as error:
         print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
+        args.config_refused = str(error)  # the on-site control unit tells it from the other refusals
         return 2
     if args.rl_command == "status":
         print(json.dumps(run.status(), indent=1, default=str))

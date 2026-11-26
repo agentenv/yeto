@@ -233,13 +233,13 @@ class LocalSyncer:
         from .syncer import syncer_shard_count
 
         store = str(getattr(args, "rl_checkpoint_store", None) or "")
-        interval = upload_interval_s()
+        interval = upload_interval_s(environ=self.env)  # None: this process's environment
         if not is_object_store_uri(store) or interval is None:
             return
         if objects is None:
             from .trainer_island import head_store_objects
 
-            objects = head_store_objects(store, store_client_environ(args))
+            objects = head_store_objects(store, store_client_environ(args, self.env))
         self.store_uploaders = tuple(syncer_uploaders(objects, self.event_tape, shards=syncer_shard_count(args),
                                                       incarnation=syncer_incarnation(), interval_s=interval))
         print(f"[launcher] syncer tape -> {store.rstrip('/')}/tapes/syncer every {interval:.0f} s", flush=True)

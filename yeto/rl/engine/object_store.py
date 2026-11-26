@@ -30,6 +30,7 @@ when the backend has them and fall back to whole-object reads and writes.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import shutil
 import uuid
@@ -195,6 +196,20 @@ class DirectoryObjectStore:
 
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
+
+    def replace_if(self, key: str, data: bytes, expected: bytes) -> bool:
+        """Write ``data`` as ``key`` only while it still holds ``expected`` (its bytes): True when
+        written, False when it changed or is gone. Atomic against the other ``replace_if`` of
+        this directory (one lock file), not against a plain ``write``."""
+        path = self._path(key)
+        self.root.mkdir(parents=True, exist_ok=True)
+        with open(self.root / f".replace-if{TMP_SUFFIX}", "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            current = path.read_bytes() if path.is_file() else None
+            if current != expected:
+                return False
+            os.replace(self._staged(path, data), path)
+            return True
 
     def size(self, key: str) -> int | None:
         path = self._path(key)
