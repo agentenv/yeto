@@ -22,7 +22,10 @@ the newest generation and, island by island (keyed by learner id):
   another source): the island's STOP (``fleet/trainers/<k>/STOP``) ends its launch
   (no RETIRE: the syncer sees the island leave and come back under its learner id,
   a short absence); once it ended, the next incarnation starts on the new machines
-  under prefix ``<prefix>-m<n>``, same learner id, from the store's ``trainer<k>/``;
+  under prefix ``<prefix>-m<n>``, same learner id, from the store's ``trainer<k>/``.
+  A change applied while the launch was already ending (an infrastructure failure
+  ordering the old machines) is a move too: the next incarnation, its relaunch count
+  reset; only a launch whose spec is unchanged is relaunched within the budget;
 * **member removed**: its STOP ends its launch; once ended the island is ``removed``.
   Its sampler pools leave with it (the pool reconcile drains them and retires their
   shards, ``yeto.launch.pool.fleet_reconcile``).
@@ -469,6 +472,26 @@ class TrainerWorker:
         ended = ended or {"exit_code": None, "log": "", "detail": "launch gone without a run record"}
         if ended.get("exit_code") in HANDS_OFF_EXITS:
             self._hand_back(k, record, ended)
+            return
+        if record.get("spec") != spec and syncer is not None:
+            # The island was changed (another target or argv) while this launch was ending
+            # (e.g. failing to order its old machines): a move, never a relaunch of the new
+            # spec under the old incarnation's prefix and cluster names, and never counted
+            # against the infrastructure relaunch budget. (A hand-off above is started again
+            # as it was and moves once it runs.)
+            self._event(k, "moving: its launch had ended, the next incarnation starts on the new machines",
+                        to=member.get("gpu"), ended=ended.get("detail"))
+            if ended.get("exit_code") is None:  # gone without a run record: its teardown is not known
+                self.log(f"fleet: WARNING: trainer island {k}: its launch {prefix} ended without a run record; "
+                         f"torn down (`yeto down {prefix}`) before the next incarnation starts")
+                try:
+                    self.ops.tear_down(prefix, f"moving to {member.get('gpu')}: ended without a run record")
+                except Exception as error:  # noqa: BLE001 - reported; the move goes on
+                    self.log(f"fleet: ERROR: trainer island {k}: tearing {prefix} down failed ({error!r}); "
+                             f"run `yeto down {prefix}` on this host")
+            self._start(k, member, syncer, {**record, "ended": ended},
+                        incarnation=int(record.get("incarnation") or 0) + 1, relaunches=0, generation=generation,
+                        why=f"moved to {member.get('gpu')} (changed while its launch ended)")
             return
         stop = self.states.stop_requested(k)
         decision = lifecycle.classify(exit_code=ended.get("exit_code"), log_text=ended.get("log"),

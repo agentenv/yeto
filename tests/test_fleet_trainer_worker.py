@@ -135,6 +135,86 @@ def test_one_island_relaunch_never_restarts_the_others(tmp_path):
         assert w.load(k)["relaunches"] == 0
 
 
+def _set_gpu(store, name, gpu):
+    store.update(lambda doc: next(m for m in doc["members"] if m["name"] == name).update(gpu=gpu))
+
+
+@pytest.mark.parametrize("exit_code, log", [(1, "sky: no capacity in any zone"), (10, "[yeto-config-error] x")])
+def test_a_target_applied_while_the_launch_fails_is_a_move_not_a_relaunch(tmp_path, exit_code, log):
+    """Bug 30: the island's launch fails ordering its old target (or refuses it) and a new
+    target is applied before the worker sees the end. The new target starts as the next
+    incarnation (new prefix, so new cluster names and resource ledger ids), with a moving
+    event and its relaunch count at 0; it is not relaunch 1/N of the old incarnation."""
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    logs: list[str] = []
+    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=logs.append)
+    w.step()
+    launches.end("run-i0", 1, log="sky: no capacity in any zone")
+    w.step()
+    assert w.load(0)["relaunches"] == 1  # relaunch 1/N on the unchanged target
+    launches.end("run-i0", exit_code, log=log)
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert launches.started("run-i0") == 2  # the old prefix is never ordered again
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0", "run-i0-m1"]
+    argv = launches.live["run-i0-m1"]
+    assert argv[argv.index("--gpu") + 1] == "aws:1xa10g@us-east-1"
+    assert argv[argv.index("--cluster-prefix") + 1] == "run-i0-m1"
+    record = w.load(0)
+    assert record["incarnation"] == 1 and record["relaunches"] == 0 and record["prefix_now"] == "run-i0-m1"
+    assert record["gpu"] == "aws:1xa10g@us-east-1" and record["last_end"]["exit_code"] == exit_code
+    assert "relaunch" not in record["why"] and record["why"].startswith("moved to aws:1xa10g")
+    assert any("moving: its launch had ended" in m for m in logs)
+    assert not any("relaunch 2/" in m for m in logs)
+    # its own infrastructure failure later is relaunch 1/N of the new incarnation, with the full budget
+    launches.end("run-i0-m1", 1, log="sky: cluster lost")
+    w.step()
+    record = w.load(0)
+    assert record["prefix_now"] == "run-i0-m1" and record["relaunches"] == 1 and record["incarnation"] == 1
+
+
+def test_a_launch_gone_without_a_run_record_is_torn_down_before_the_move(tmp_path):
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.live.pop("run-i0")
+    launches.exits["run-i0"] = {"exit_code": None, "log": "", "detail": "launch gone without a run record"}
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert launches.torn_down == ["run-i0"]
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+
+
+def test_a_hand_off_while_the_target_changes_is_started_again_as_it_was(tmp_path):
+    """Exit 12/13: the launch ordered nothing but its machine may still run under another
+    launcher: started again under its own prefix and argv (it moves once it runs)."""
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.end("run-i0", 13)
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0"]
+    assert launches.starts[1][1] == launches.starts[0][1]  # its old argv
+    w.step()  # alive, spec differs: moving through its STOP
+    assert w.load(0)["state"] == tw.MOVING
+
+
+def test_an_unchanged_spec_is_still_relaunched_under_its_prefix(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.end("run-i0", 1, log="sky: no capacity")
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0"]
+    assert w.load(0)["relaunches"] == 1 and w.load(0)["incarnation"] == 0
+
+
 def test_a_config_error_is_never_relaunched(tmp_path):
     from yeto.config_errors import CONFIG_ERROR_EXIT
 
