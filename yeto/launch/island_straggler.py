@@ -44,12 +44,13 @@ default, or a replacement the island's provider offers).
 
 Sources (:func:`tape_source`): the syncer's tape file on this host (a head-mode syncer), or
 its copy in the run store (``tapes/syncer/<incarnation>/<seq>.jsonl``, uploaded every 30 s
-by ``yeto.rl.engine.tape_upload``). A store read costs one listing of each known incarnation's
-prefix after its last chunk read and at most :data:`STORE_GETS_PER_POLL` chunk reads, and
-starts no new request after :data:`STORE_POLL_BUDGET_S`. Finding the syncer's incarnations
-costs one listing page per incarnation, at the first read, every :data:`STORE_DISCOVER_POLLS`
-reads and while none is known; the first read also lists each incarnation once, for its
-tail. A source that does not read is skipped
+by ``yeto.rl.engine.tape_upload``). A store read costs at most one listing of each known
+incarnation's prefix after its last chunk read (within half its budget) and at most
+:data:`STORE_GETS_PER_POLL` chunk reads, and starts no new request after
+:data:`STORE_POLL_BUDGET_S`. Finding the syncer's incarnations costs one listing page per
+incarnation, at the first read, every :data:`STORE_DISCOVER_POLLS` reads and while none is
+known; the first read also lists each incarnation once, for its tail. A listing not done
+within the budget goes on at the next read. A source that does not read is skipped
 for that poll; nothing here ever stops or slows the fleet. When nothing can be watched (no tape
 to read, the watch turned off), or the tape goes silent for :func:`quiet_window_s` after its
 first record about this launch's islands, the controller is given one notice
@@ -80,6 +81,9 @@ STORE_POLL_BUDGET_S = 5.0  # no new store request after this long in one poll
 MAX_READ_BYTES = 8 << 20  # one poll reads at most this much of a local tape
 QUIET_MIN_S = 300.0  # the shortest silence of the syncer's tape, after its first record about this launch, that is said
 CLOCK_SKEW_S = 600.0  # the launcher's and the syncer host's clocks may differ by this much
+# a new launch's catch-up grace when its controller has no recover timeout (relaunch off:
+# --no-island-relaunch or --modal-retries 0); else the recover timeout is the grace
+DEFAULT_GRACE_S = 1200.0
 
 WAIT = "wait"  # the syncer merges without it; it is caught up once it delivers again
 REPLACE = "replace"  # the island's provider replaces it (its own policy decides)
@@ -175,7 +179,9 @@ class StragglerTracker:
             # in the pool; a reconnect (a new connection generation) or a new syncer term keeps
             # its count and its mark: only its controller's relaunch or stop restarts them
             state = self._island(island)
-            state.joined, state.join_read = True, True
+            # a join of an island already in the pool (adopted, or listed absent) is a reconnect
+            state.join_read = state.join_read or not state.joined
+            state.joined = True
             state.joined_away = state.joined_away or state.away
             return
         step, fragment = _int(record.get("step")), _int(record.get("fragment"))
@@ -226,6 +232,10 @@ class StragglerTracker:
                 # is in it once it joined, which may come before its controller holds it running
                 state.joined = state.joined_away or (state.token == token and state.was_joined)
                 state.misses, state.absent = 0, False
+                if relaunched:  # a push merged while it was away was its earlier launch's last one
+                    state.pushed, state.graced, state.grace_until = False, False, None
+                else:  # the same launch: a join read meanwhile was a reconnect, not a new island
+                    state.join_read = False
             elif state.token is not None and state.token != token:
                 # relaunched between two checks: its count starts at its next join
                 if state.flagged:
@@ -323,14 +333,17 @@ class StoreTape:
     No incarnation is picked as "the" syncer: a restarted syncer may resume an earlier step,
     keep its term, or write only its own records (round opens, connections) at first. The
     first read lists every syncer incarnation and keeps each one's tail (its last chunk): what
-    the syncers wrote before this watch is not read. Until that worked (a listing failed)
-    every read tries it again and reads nothing else. From then on each read lists every known
-    incarnation after its last chunk read (``start_after``; the one that grew most recently
-    first, then the one listed longest ago) and reads the new chunks of those that grew, at most
+    the syncers wrote before this watch is not read. It takes as many reads as its budget
+    needs (a failed listing is tried again), and nothing else is read before every tail is
+    kept. From then on each read lists the known incarnations after their last chunk read
+    (``start_after``) within half of :data:`STORE_POLL_BUDGET_S`: those that grew at their last
+    listing first, then the one listed longest ago. It then reads the new chunks of those that
+    grew, one of each (the one read longest ago first) before a second of any, at most
     :data:`STORE_GETS_PER_POLL` (the rest at the next read). An incarnation found later (by a
-    full listing every :data:`STORE_DISCOVER_POLLS` reads) did not exist at the first read: it
-    is read from its start, without its records stamped more than :data:`CLOCK_SKEW_S` before
-    ``since`` (a listing that missed it at the first read). A chunk read moves the cursor past
+    full listing every :data:`STORE_DISCOVER_POLLS` reads, which also goes on across reads
+    within the budget) did not exist at the first read: it is read from its start, without
+    its records stamped more than :data:`CLOCK_SKEW_S` before ``since`` (a listing that missed
+    it at the first read). A chunk read moves the cursor past
     it, so a request that fails keeps what was read before it and is tried again at the next
     read (``error`` says why); no chunk is read twice or skipped."""
 
@@ -347,6 +360,9 @@ class StoreTape:
         self.fresh: set[str] = set()  # incarnations read from their start (found after the first read)
         self.grew: dict[str, int] = {}  # incarnation -> the read that last found a new chunk of it
         self.listed: dict[str, int] = {}  # incarnation -> the read that last listed it
+        self.served: dict[str, int] = {}  # incarnation -> the read that last read a chunk of it
+        self._root: tuple[str, set[str]] | None = None  # a listing of tapes/syncer/ under way
+        self._todo: list[str] | None = None  # the first read's incarnations whose tail is not kept yet
         self.label = f"{getattr(objects, 'uri', 'store')}/{SYNCER_TAPES}"
         self.error: str | None = None
         self.polled = False  # whether the last read() asked the store (False within the interval)
@@ -359,22 +375,26 @@ class StoreTape:
     def known(self) -> set[str]:
         return set(self.cursors)
 
-    def _incarnations(self) -> set[str]:
+    def _incarnations(self, deadline: float) -> set[str] | None:
         """The syncer incarnations under ``tapes/syncer/``: one listing page per incarnation
-        (a page that ends inside one jumps past the rest of its chunks)."""
+        (a page that ends inside one jumps past the rest of its chunks). None while the listing
+        is not done by ``deadline``: the next call goes on from its last page."""
         page = getattr(self.objects, "list_page", None)
         if not callable(page):
             self.requests += 1
             return {str(k)[len(SYNCER_TAPES):].split("/")[0] for k in self.objects.list(SYNCER_TAPES)
                     if len(str(k)[len(SYNCER_TAPES):].split("/")) == 2}
-        found: set[str] = set()
-        cursor = ""
+        cursor, found = self._root or ("", set())
         while True:
+            if self.clock() >= deadline:
+                self._root = (cursor, found)
+                return None
             self.requests += 1
             keys, last = page(SYNCER_TAPES, start_after=cursor, limit=1000)
             found |= {str(k)[len(SYNCER_TAPES):].split("/")[0] for k in keys
                       if len(str(k)[len(SYNCER_TAPES):].split("/")) == 2}
             if last is None or not keys:
+                self._root = None
                 return found
             cursor = f"{SYNCER_TAPES}{str(last)[len(SYNCER_TAPES):].split('/')[0]}/~"  # past its chunks
 
@@ -383,18 +403,21 @@ class StoreTape:
         return sorted(str(k) for k in self.objects.list(f"{SYNCER_TAPES}{inc}/", start_after=after)
                       if str(k).endswith(".jsonl") and str(k) > after)
 
-    def _tail(self) -> None:
-        """The first read: every incarnation's tail. Committed only when every listing worked
-        (else tried again at the next read)."""
-        cursors = {}
-        for inc in sorted(self._incarnations()):
-            chunks = self._chunks(inc)
-            cursors[inc] = chunks[-1] if chunks else ""
-        self.cursors.update(cursors)
-        self.tailed = True
+    def _tail(self, deadline: float) -> None:
+        """The first read: every incarnation's tail, within the poll's budget (the rest at the
+        next read; a failed listing is tried again). Nothing is read before every tail is kept."""
+        if self._todo is None:
+            found = self._incarnations(deadline)
+            if found is None:
+                return
+            self._todo = sorted(found)
+        while self._todo and self.clock() < deadline:
+            chunks = self._chunks(self._todo[0])
+            self.cursors[self._todo.pop(0)] = chunks[-1] if chunks else ""
+        self.tailed = not self._todo
 
-    def _discover(self) -> None:
-        for inc in sorted(self._incarnations() - set(self.cursors)):  # a known one keeps its cursor
+    def _discover(self, deadline: float) -> None:
+        for inc in sorted((self._incarnations(deadline) or set()) - set(self.cursors)):  # a known one keeps its cursor
             self.cursors[inc] = ""  # not there at the first read: read from its start
             self.fresh.add(inc)
 
@@ -415,28 +438,36 @@ class StoreTape:
         started, out, gets = self.clock(), [], 0
         self.reads += 1
         try:
+            deadline = started + self.budget_s
             if not self.tailed:
-                self._tail()
+                self._tail(deadline)
                 return []
-            if not self.cursors or self.reads % self.discover_polls == 0:
-                self._discover()
-            order = sorted(self.cursors, key=lambda i: (-self.grew.get(i, -1), self.listed.get(i, -1), i))
-            for inc in order:
-                if gets >= self.gets_per_poll or self.clock() - started >= self.budget_s:
+            if not self.cursors or self._root is not None or self.reads % self.discover_polls == 0:
+                self._discover(deadline)
+            grown: dict[str, list[str]] = {}
+            listing_until = started + self.budget_s / 2  # the other half is the chunk reads'
+            # one that grew at its last listing first, then the one listed longest ago
+            active = {i for i in self.cursors if i in self.grew and self.grew[i] == self.listed.get(i)}
+            for inc in sorted(self.cursors, key=lambda i: (i not in active, self.listed.get(i, -1), i)):
+                if self.clock() >= listing_until:
                     break
                 self.listed[inc] = self.reads
                 keys = self._chunks(inc, self.cursors[inc])
                 if keys:
-                    self.grew[inc] = self.reads
-                for key in keys:
-                    if gets >= self.gets_per_poll or self.clock() - started >= self.budget_s:
-                        break
-                    gets += 1
-                    self.requests += 1
-                    data = self.objects.read(key)
-                    self.cursors[inc] = key
-                    if data:
-                        out += self._records_of(inc, data)
+                    self.grew[inc], grown[inc] = self.reads, keys
+            # one chunk of each that grew (the one read longest ago first) before a second of any
+            queue = sorted(grown, key=lambda i: (self.served.get(i, -1), i))
+            while queue and gets < self.gets_per_poll and self.clock() < deadline:
+                inc = queue.pop(0)
+                key = grown[inc].pop(0)
+                gets += 1
+                self.requests += 1
+                data = self.objects.read(key)
+                self.cursors[inc], self.served[inc] = key, self.reads
+                if data:
+                    out += self._records_of(inc, data)
+                if grown[inc]:
+                    queue.append(inc)
         except Exception as error:  # noqa: BLE001 - what was read is kept; the rest at the next read
             self.error = f"{type(error).__name__}: {error}"[:300]
         return out
@@ -556,13 +587,14 @@ def tape_source(*, local_tape: str | os.PathLike[str] | None = None, local_offse
 
 def quiet_window_s(args: Any, *, upload_s: float = 0.0) -> float:
     """How long the syncer's tape may be silent before that is said: two of its longest rounds
-    (a round ends at its soft deadline, else at its quorum timeout: ``--rl-elastic-quorum-timeout-s``
-    or the syncer's default) and two upload intervals of its store copy (``upload_s``; 0 for a
-    tape on this host), at least :data:`QUIET_MIN_S`."""
+    and two upload intervals of its store copy (``upload_s``; 0 for a tape on this host), at
+    least :data:`QUIET_MIN_S`. A round with fewer pushes than the soft deadline needs runs on
+    to its quorum timeout (``--rl-elastic-quorum-timeout-s``, else the syncer's default), so the
+    longest round is the larger of the two."""
     from .syncer import SYNCER_DEFAULT_QUORUM_TIMEOUT_S, _rl_quorum_timeout_s
 
     soft = getattr(args, "rl_sync_soft_deadline_s", None)
-    round_s = float(soft) if soft else float(_rl_quorum_timeout_s(args) or SYNCER_DEFAULT_QUORUM_TIMEOUT_S)
+    round_s = max(float(soft or 0.0), float(_rl_quorum_timeout_s(args) or SYNCER_DEFAULT_QUORUM_TIMEOUT_S))
     return max(QUIET_MIN_S, 2.0 * round_s + 2.0 * max(0.0, float(upload_s or 0.0)))
 
 

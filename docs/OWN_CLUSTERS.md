@@ -977,7 +977,8 @@ merged. Counting starts when the island joins the syncer:
   cycles. A new launch is an island relaunched by its controller (on new machines, on a spare
   node, after a move) or a new island whose join the controller read. It is not counted until
   its first push is merged, for at most the controller's recover timeout
-  (`--recover-timeout`, counted from when the controller holds the new launch running). Once
+  (`--recover-timeout`, counted from when the controller holds the new launch running; 20
+  minutes when relaunch is off: `--no-island-relaunch` or `--modal-retries 0`). Once
   a push of it is merged, it is counted as usual. If none is merged by the end of the recover
   timeout, it is counted from then on and reported `N` merge cycles later; its report's
   `reason` says that the catch-up grace ran out. An island that a restarted launcher adopted
@@ -1021,8 +1022,9 @@ The controller reads the syncer's tape in one of two places:
   uploads it every 30 s (`YETO_RL_TAPE_UPLOAD_S`) when `--rl-checkpoint-store` is an
   `s3://` store. Each island launch reads it every 30 s. Its first read keeps the end of
   every syncer incarnation there. No incarnation is picked as the current one: each read
-  lists every known incarnation after the last chunk it read, and reads the new chunks of
-  those that grew. A restarted syncer is read whatever its step or term.
+  lists the known incarnations after the last chunk it read (those that grew last time
+  first, the others in turn), and reads the new chunks of those that grew, one chunk of each
+  before a second of any. A restarted syncer is read whatever its step or term.
 
 How late the report can be, with the store copy:
 
@@ -1033,9 +1035,22 @@ How late the report can be, with the store copy:
   up in about 4 minutes.
 - A restarted syncer writes to a new incarnation. The launch finds it at its next full
   listing, which comes every 10 reads (about 5 minutes), and reads it from its start. Each
-  read lists every incarnation it knows once.
-- If the first read fails, every later read tries it again. Until one works nothing is
-  read, and the syncer's earlier records are never read.
+  read lists the incarnations it knows within half of its 5 s budget; with many stopped
+  syncers, they take turns.
+- If the first read fails, or does not finish within its budget, the next reads go on with
+  it. Until it is done nothing is read, and the syncer's earlier records are never read.
+
+Known limits of the store copy:
+
+- A join written before the first read finished is not read. A new island that joined then
+  is counted like an adopted one: from the first merge that lists it absent, with no
+  catch-up grace.
+- An uploader that rewrites a chunk it already uploaded (a retry under the same key) adds
+  lines the launch does not read when it already read that chunk.
+- Only a syncer incarnation found after the first read is filtered by its clock (records
+  stamped more than 10 minutes before the launch started are skipped). If that syncer's
+  clock runs more than 10 minutes behind, its records are skipped, and the launch reports
+  the tape silent (`island_straggler_unavailable`) instead of the stragglers.
 
 When the report cannot work, the launch prints `island straggler watch off` and writes
 `island_straggler_unavailable` once, with the `reason`, in `fleet.jsonl`. Nothing is
@@ -1051,8 +1066,10 @@ reported then, and training is not affected. This happens:
   by island to get the report.
 - when the launch reads no syncer record for two of the syncer's longest rounds plus two
   upload intervals, and at least 5 minutes (the store copy is missing or stale). A round
-  lasts at most `--rl-sync-soft-deadline-s`, else the syncer's default quorum timeout of
-  900 s: with the defaults, 31 minutes. This is counted only after the first record about
+  ends at `--rl-sync-soft-deadline-s` only once enough pushes arrived; otherwise it runs to
+  its quorum timeout (`--rl-elastic-quorum-timeout-s`, else the syncer's default quorum
+  timeout of 900 s). The longest round is the larger of the two: with the defaults, the
+  window is 31 minutes. This is counted only after the first record about
   the launch's islands, so a fleet whose trainers are still starting is not reported. Once
   records are read again, the launch writes `island_straggler_available`.
 

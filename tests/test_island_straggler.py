@@ -357,6 +357,72 @@ def test_the_same_incarnation_back_from_recovering_has_no_grace():
     assert signal.island == 1
 
 
+def _graced_after(m, run):
+    """Island 1's new launch never pushes: not counted for its grace, then reported N cycles on."""
+    start = m.now
+    while m.now + 30 < start + GRACE:
+        m.merge()
+        assert m.check(run) == [], m.now - start
+    m.merge()
+    assert m.check(run) == []  # its grace runs out here
+    signals = []
+    for _ in range(m.tracker.cycles * m.fragments):
+        m.merge()
+        signals += m.check(run)
+    assert [s.island for s in signals] == [1] and "catch-up grace" in signals[0].reason
+
+
+@pytest.mark.parametrize("case", ["last push merged after it was recovering", "pushes merged while it drained",
+                                  "removed, then added again"])
+def test_a_push_merged_while_away_is_its_earlier_launch_s_and_the_new_one_has_its_grace(case):
+    m = _Merges(cycles=1)
+    m.tracker.feed(_join(0))
+    m.tracker.feed(_join(1))
+    m.merge(pushes=True)
+    assert m.check() == []
+    if case == "pushes merged while it drained":  # draining: its controller holds it away
+        m.merge(pushes=True)
+    assert m.check({0: (0, 1)}) == []  # away: recovering, draining, or removed
+    m.merge(pushes=True)  # its last push, merged once it was away
+    if case == "removed, then added again":
+        for _ in range(20):  # long gone; the others merge on
+            m.merge(absent=False)
+            assert m.check({0: (0, 1)}) == []
+    m.tracker.feed(_join(1))  # the new launch (relaunched, started again, added again) joins
+    run = {0: (0, 1), 1: (1, 2)}
+    assert m.check(run) == []
+    _graced_after(m, run)
+
+
+def test_the_same_launch_back_with_a_reconnect_read_while_away_has_no_grace():
+    m = _Merges(cycles=1)
+    m.tracker.feed(_join(0))
+    m.tracker.feed(_join(1))
+    m.merge(pushes=True)
+    m.check()
+    assert m.check({0: (0, 1)}) == []  # recovering
+    m.tracker.feed({**_join(1), "generation": 1})  # its link reconnects meanwhile
+    assert m.check() == []  # back as the same launch
+    m.merge()
+    (signal,) = m.check()
+    assert signal.island == 1 and "catch-up grace" not in signal.reason
+
+
+def test_an_adopted_straggler_that_reconnects_keeps_its_report_and_has_no_grace():
+    """Adopted (only listed absent), reported, then its link reconnects (or the syncer takes
+    over): a join of an island already in the pool is no new island, so no grace and no
+    false clear."""
+    m = _Merges(cycles=1)
+    m.merge()  # adopted: listed absent
+    (signal,) = m.check()
+    assert signal.island == 1 and not signal.cleared
+    for generation in (1, 2):
+        m.tracker.feed({**_join(1), "generation": generation, "syncer_epoch": generation})
+        m.merge()
+        assert m.check() == []  # no cleared, no new report
+    assert m.tracker.islands[1].flagged and m.tracker.islands[1].grace_until is None
+
+
 def test_records_of_the_earlier_incarnation_read_late_do_not_count():
     """Relaunched (it left running, then runs as a new token): merges of its earlier
     incarnation read late, even ones that list it absent, start nothing; it is counted
@@ -613,6 +679,126 @@ def test_a_full_listing_never_reads_a_known_incarnation_again(tmp_path):
     assert source.fresh == set()
 
 
+class _Ticking:
+    """A store whose every listing takes 1 s of the poll's clock (chunk reads take none)."""
+
+    def __init__(self, inner):
+        self.inner, self.t = inner, 0.0
+
+    def list(self, prefix, *, start_after=""):
+        self.t += 1.0
+        return self.inner.list(prefix, start_after=start_after)
+
+    def read(self, key):
+        return self.inner.read(key)
+
+
+def test_twenty_incarnations_growing_at_once_each_get_a_chunk_before_any_gets_a_second(tmp_path):
+    objects = DirectoryObjectStore(tmp_path / "store")
+    names = [f"h{i:02d}-20261126T130000Z" for i in range(20)]
+    for inc in names:
+        _chunk(objects, inc, 0, _step(0, [0]))
+    clock = [0.0]
+    source = st.StoreTape(objects, interval_s=30, clock=lambda: clock[0])
+    assert source.read() == []
+    for i, inc in enumerate(names):
+        _chunk(objects, inc, 1, {"kind": "x", "inc": i, "seq": 1})
+        _chunk(objects, inc, 2, {"kind": "x", "inc": i, "seq": 2})
+    polls = []
+    for _ in range(3):
+        clock[0] += 31.0
+        polls.append([(r["inc"], r["seq"]) for r in source.read()])
+    assert len(polls[0]) == st.STORE_GETS_PER_POLL and len({i for i, _ in polls[0]}) == 16  # one each
+    assert {i for i, _ in polls[1][:4]} == set(range(20)) - {i for i, _ in polls[0]}  # the unread ones first
+    got = [x for poll in polls for x in poll]
+    assert sorted(got) == [(i, q) for i in range(20) for q in (1, 2)]
+    for i in range(20):  # each incarnation's chunks in order
+        assert [q for j, q in got if j == i] == [1, 2]
+
+
+def test_a_live_syncer_is_listed_however_many_stopped_ones_sort_before_it(tmp_path):
+    """The listing budget covers 3 incarnations a poll: the stopped ones take turns (the one
+    listed longest ago first) and one that grew is listed first."""
+    inner = DirectoryObjectStore(tmp_path / "store")
+    dead = [f"a{i}-20261126T120000Z" for i in range(10)]
+    live = "z-20261126T130000Z"
+    for inc in [*dead, live]:
+        _chunk(inner, inc, 0, _step(0, [0]))
+    objects = _Ticking(inner)
+    source = st.StoreTape(objects, interval_s=0, clock=lambda: objects.t, budget_s=3.5)
+    while not source.tailed:
+        source.read()
+    got = []
+    for seq in range(1, 9):
+        _chunk(inner, live, seq, _step(seq, [0]))
+        got.append([r["step"] for r in source.read()])
+    assert sorted(x for poll in got for x in poll) == list(range(1, 9))  # all of it, once
+    assert all(poll and poll[-1] == n for n, poll in enumerate(got, 1) if n >= 6)  # then each in its poll
+
+
+def test_the_first_read_keeps_every_tail_across_polls_within_its_budget(tmp_path):
+    inner = DirectoryObjectStore(tmp_path / "store")
+    names = [f"h{i:02d}-20261126T130000Z" for i in range(7)]
+    for inc in names:
+        _chunk(inner, inc, 0, _step(1, [0]))  # the history
+    objects = _Ticking(inner)
+    source = st.StoreTape(objects, interval_s=0, clock=lambda: objects.t, budget_s=2.5)
+    reads = 0
+    while not source.tailed:
+        reads += 1
+        assert source.read() == []  # never the history
+        assert objects.t <= reads * 4  # no listing past its budget
+    assert reads >= 3 and source.known == set(names)
+    for inc in names:
+        _chunk(inner, inc, 1, _step(2, [0]))
+    got = []
+    for _ in range(10):
+        got += source.read()
+    assert got == [_step(2, [0])] * 7
+
+
+class _Paged(_Ticking):
+    """A paged store (as S3): one listing page holds 2 keys and takes 1 s."""
+
+    def list_page(self, prefix, *, start_after="", limit=1000):
+        self.t += 1.0
+        return self.inner.list_page(prefix, start_after=start_after, limit=2)
+
+
+def test_the_listing_of_every_syncer_goes_on_across_reads_within_the_budget(tmp_path):
+    inner = DirectoryObjectStore(tmp_path / "store")
+    names = [f"h{i:02d}-20261126T130000Z" for i in range(9)]
+    for inc in names:
+        _chunk(inner, inc, 0, _step(1, [0]))
+        _chunk(inner, inc, 1, _step(1, [0]))
+    objects = _Paged(inner)
+    source = st.StoreTape(objects, interval_s=0, clock=lambda: objects.t, budget_s=2.5)
+    reads, before = 0, 0.0
+    while not source.tailed:
+        reads += 1
+        before = objects.t
+        assert source.read() == []
+        assert objects.t - before <= 3  # never past its budget (one request may start just inside it)
+    assert reads >= 4 and source.known == set(names)
+
+
+def test_a_relaunch_between_two_checks_is_cleared_and_has_its_grace():
+    """Relaunched by its controller between two polls (never seen away): its report is
+    cleared as relaunched and its new launch catches up with its grace."""
+    m = _Merges(cycles=1)
+    m.tracker.feed(_join(0))
+    m.tracker.feed(_join(1))
+    m.merge(pushes=True)
+    assert m.check() == []
+    m.merge()
+    (flagged,) = m.check()
+    assert flagged.island == 1 and not flagged.cleared
+    run = {0: (0, 1), 1: (1, 2)}  # a new token at once
+    (cleared,) = m.check(run)
+    assert cleared.cleared and cleared.reason == "relaunched"
+    _graced_after(m, run)
+
+
 def test_a_store_poll_starts_no_request_past_its_budget(tmp_path):
     objects = DirectoryObjectStore(tmp_path / "store")
     inc = "hosta-20261126T130000Z"
@@ -666,7 +852,10 @@ def test_the_launcher_watches_an_island_pool_only(tmp_path):
     assert isinstance(watch.source, st.StoreTape) and watch.source.since > 0
     assert watch.quiet_s == 2 * 900 + 2 * 30  # and two upload intervals of the store copy
     soft = types.SimpleNamespace(**vars(pool), rl_sync_soft_deadline_s=60)
-    assert st.watch_for(soft, objects=DirectoryObjectStore(tmp_path / "s"), log=lines.append).quiet_s == 300
+    # a round short of the soft deadline's pushes runs to the quorum timeout: the longer one counts
+    assert st.watch_for(soft, objects=DirectoryObjectStore(tmp_path / "s"), log=lines.append).quiet_s == 2 * 900 + 60
+    both = types.SimpleNamespace(**vars(soft), rl_elastic=True, rl_elastic_quorum_timeout_s=1800)
+    assert st.watch_for(both, objects=DirectoryObjectStore(tmp_path / "s"), log=lines.append).quiet_s == 2 * 1800 + 60
     elastic = types.SimpleNamespace(**vars(pool), rl_elastic=True, rl_elastic_quorum_timeout_s=200)
     assert st.watch_for(elastic, objects=DirectoryObjectStore(tmp_path / "s"), log=lines.append).quiet_s == 460
 
@@ -701,14 +890,14 @@ class Recorder:
         pass
 
 
-def _controller(tmp_path, *, policy=None, cycles=1):
+def _controller(tmp_path, *, policy=None, cycles=1, recover_timeout=600):
     ops = FakeOps()
     ops.status_seq.update({SYNCER: [RUNNING], "r-l0": [RUNNING], "r-l1": [RUNNING]})
     store = lc.IslandStateStore(DirectoryObjectStore(tmp_path / "store"))
     refs = {f"r-l{k}": lc.IslandRef(k, "ssh") for k in (0, 1)}
     tape, log = ScriptedTape(), Recorder()
     ctl = FleetController(learners={n: (f"task-{n}", 1) for n in refs}, syncer=(SYNCER, "task-syncer", 1),
-                          sky_ops=ops, poll_interval=30, recover_timeout=600, thread_cls=ImmediateThread,
+                          sky_ops=ops, poll_interval=30, recover_timeout=recover_timeout, thread_cls=ImmediateThread,
                           recorder=lc.FleetRecorder(store, refs), elastic=True, fleet_log=log,
                           straggler=st.StragglerWatch(tape, cycles=cycles, log=lambda m: None),
                           straggler_policy=policy)
@@ -830,6 +1019,25 @@ def test_a_fleet_of_900_s_rounds_read_every_30_s_is_never_said_unavailable():
     assert lines == [] and watch.notices() == []
 
 
+def test_a_soft_deadline_short_of_its_pushes_waits_for_the_quorum_and_is_not_said_unavailable():
+    """soft 60 s, quorum timeout 1800 s, a round every 10 min (too few pushes for the soft
+    deadline): the window follows the quorum timeout, so no unavailable notice."""
+    args = types.SimpleNamespace(training_mode="rl", rl_sync_island_lease_s=30.0, rl_sync_soft_deadline_s=60,
+                                 rl_elastic=True, rl_elastic_quorum_timeout_s=1800)
+    lines, tape, now = [], ScriptedTape(), [0.0]
+    watch = st.StragglerWatch(tape, cycles=3, log=lines.append, clock=lambda: now[0],
+                              quiet_s=st.quiet_window_s(args, upload_s=30.0))
+    tape.pending.append(_join(0))
+    step = 0
+    for _ in range(4 * 3600 // 30):
+        now[0] += 30
+        if now[0] % 600 == 0:
+            step += 1
+            tape.pending.append(_step(step, [0, 1], fragments=1))
+        watch.poll(RUN2)
+    assert lines == [] and watch.notices() == []
+
+
 def test_the_launcher_reads_the_store_copy_for_an_island_launch_only(tmp_path, monkeypatch):
     from yeto import launcher
 
@@ -923,6 +1131,43 @@ def test_a_mark_this_watch_wrote_while_the_record_did_not_read_is_kept(tmp_path)
     left[0] = 0
     ctl._poll_stragglers()
     assert not log.kinds(st.CLEARED_EVENT) and store.read(1)["straggler"]["action"] == st.WAIT
+
+
+def test_without_a_recover_timeout_a_new_island_has_the_default_grace(tmp_path):
+    """Relaunch off (--no-island-relaunch, --modal-retries 0): no recover timeout, so a new
+    island's catch-up has DEFAULT_GRACE_S."""
+    ctl, ops, _store, tape, log = _controller(tmp_path, recover_timeout=0)
+    tape.pending += [_join(0), _step(1, [0], fragments=1)]
+    ctl._poll_stragglers()
+    tape.pending.append(_join(1))  # added: it catches up
+    ctl._poll_stragglers()
+    step, start = 1, ops.t
+    while ops.t + 30 < start + st.DEFAULT_GRACE_S:
+        ops.t += 30
+        step += 1
+        tape.pending.append(_step(step, [0], fragments=1, absent=[1]))
+        ctl._poll_stragglers()
+    assert not log.kinds(st.EVENT)
+    for _ in range(2):  # its grace runs out, then N = 1 cycle on
+        ops.t += 30
+        step += 1
+        tape.pending.append(_step(step, [0], fragments=1, absent=[1]))
+        ctl._poll_stragglers()
+    (event,) = log.kinds(st.EVENT)
+    assert event[1] == "r-l1" and "catch-up grace" in event[2]["reason"]
+
+
+def test_the_mark_is_stamped_with_wall_time_as_the_record(tmp_path):
+    import time
+
+    ctl, ops, store, tape, _log = _controller(tmp_path)
+    ops.t = 5.0  # the controller's own clock is not wall time
+    tape.pending += [_join(0), _join(1), _step(1, [0, 1], fragments=1), _step(2, [0], fragments=1)]
+    before = time.time()
+    ctl._poll_stragglers()
+    record = store.read(1)
+    assert before - 1 <= record["straggler"]["at"] <= time.time() + 1
+    assert abs(record["straggler"]["at"] - record["updated"]) < 1
 
 
 def test_a_mark_an_earlier_launcher_left_is_cleared_once_and_judged_again(tmp_path):

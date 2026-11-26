@@ -45,10 +45,12 @@ def test_the_section_names_the_code_s_flags_and_events():
 
     defaults = st.quiet_window_s(types.SimpleNamespace(), upload_s=st.STORE_POLL_S)
     flat = " ".join(text.split())
-    assert f"quorum timeout of {SYNCER_DEFAULT_QUORUM_TIMEOUT_S} s: with the defaults, {defaults / 60:g} minutes" in flat
+    assert f"quorum timeout of {SYNCER_DEFAULT_QUORUM_TIMEOUT_S} s). The longest round is the larger of the two: " \
+        f"with the defaults, the window is {defaults / 60:g} minutes" in flat
     assert f"at most {st.STORE_GETS_PER_POLL} chunks" in text and f"every {st.STORE_DISCOVER_POLLS} reads" in text
     assert f"up to {st.CLOCK_SKEW_S / 60:g} minutes before" in text
     assert "(`--recover-timeout`" in text and "catch-up grace ran out" in text  # a new launch's grace
+    assert f"{st.DEFAULT_GRACE_S / 60:g}\n  minutes when relaunch is off" in text
     for field in st.Straggler.__dataclass_fields__:
         if field not in ("island", "cleared", "cycles", "reason"):
             assert f"`{field}`" in text, field

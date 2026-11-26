@@ -1140,8 +1140,10 @@ class FleetController:
             if pending:  # until each record read: one that does not read is tried at the next poll
                 self._clear_left_marks({k: names[k] for k in pending if k in names}, pending)
             # a new launch (a relaunch, a spare node, a new island) catches up before it pushes:
-            # not counted until its first merged push, at most for its recover timeout
-            grace = max(0.0, float(self.recover_timeout or 0.0))
+            # not counted until its first merged push, at most for its recover timeout (relaunch
+            # off: no recover timeout, the default grace)
+            grace = float(self.recover_timeout or 0.0)
+            grace = grace if grace > 0 else st.DEFAULT_GRACE_S
             for signal in self.straggler.poll(running, now=self.ops.now(), grace_s=grace):
                 rec = names.get(signal.island)
                 if rec is not None:
@@ -1224,7 +1226,10 @@ class FleetController:
               + ("waiting (the syncer merges the other islands at each quorum deadline, and catches it up "
                  "once it delivers again)" if action == st.WAIT else "its provider replaces it"), file=sys.stderr)
         self._fleet(st.EVENT, name, **fields)
-        self._record(rec, straggler=dict(fields, at=self.ops.now()))
+        import time
+
+        clock = getattr(getattr(self.recorder, "store", None), "clock", None) or time.time
+        self._record(rec, straggler=dict(fields, at=round(clock(), 3)))  # wall time, as the record's updated
         ref = self.recorder.ref(name) if self.recorder is not None else None
         if ref is not None:  # this watch's own mark: never taken for one an earlier launcher left
             (getattr(self, "_straggler_marks_pending", None) or set()).discard(ref.island)
