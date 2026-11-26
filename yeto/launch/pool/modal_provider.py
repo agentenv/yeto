@@ -1413,6 +1413,14 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
     if cfg.get("model_pull") or cfg.get("node_hooks"):
         problems.append("modal provider: model_pull / node_hooks need a node; use a Modal volume (model_volume)")
     problems += agentic_problems(cfg, section)
-    if importlib.util.find_spec("modal") is None:
+    if not sdk_installed():
         problems.append("the 'modal' Python package is not installed")
     return problems
+
+
+def sdk_installed() -> bool:
+    """Whether the ``modal`` SDK this pool orders with is importable here (the ``modal``
+    extra): without it no Modal island can be ordered, so the dry run refuses."""
+    import importlib.util  # noqa: PLC0415
+
+    return importlib.util.find_spec("modal") is not None

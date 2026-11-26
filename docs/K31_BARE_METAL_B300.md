@@ -490,9 +490,10 @@ Between two nodes that will hold one pipeline stage (`b300-0` and `b300-1`):
    Read `preflight.log` (guide section 4.1). It must end with
    `dry run: preflight ok, nothing ordered`; the trainer part reports
    `"total_gpus": 48` and one island `"cloud": "ssh"`, `"num_nodes": 6`.
-   A dry run does not run the cluster preflight; it logs
+   A dry run does not run the cluster preflight and contacts no node; it logs
    `would run the trainer's cluster preflight: yeto preflight ...`. The real
-   `yeto run up` runs it before anything is ordered.
+   `yeto run up` runs it before anything is ordered. Add `--check-nodes` to
+   the dry run to also run the egress check of section 10.3 on the six nodes.
 
 ### 9.4 Rehearsal, then the formal run
 
@@ -551,6 +552,21 @@ the trainer's `--rl-image`; on a FAIL it logs
 `yeto launch` with an `ssh:` island runs the same check and refuses to start
 on a FAIL (warnings are printed and the launch goes on). `--skip-preflight`
 on either command skips it.
+
+After the cluster preflight passes, `yeto run up` runs the egress check, still
+before anything is ordered: over SSH, every trainer node is checked for
+reaching the run store's endpoint (`--rl-object-store-endpoint`) and the
+image's registry (`ghcr.io`), with the inventory env (its proxy) exported.
+Any HTTP answer counts, through a proxy or a TLS-intercepting proxy too. The
+run up log gets one line per node and endpoint and the counts, for example
+`cluster preflight:   [PASS] b300-0 reach_store: the store endpoint ... http 403`
+and `cluster preflight:   18 pass, 0 warn, 0 fail, 0 skip`. A store not reached
+is a `[FAIL]`: run up logs `cluster preflight failed: nothing ordered` and
+exits 2. A registry not reached is a `[WARN]` (dockerd may pull through a proxy
+of its own). The check is reachability only: not the credentials, the bucket
+or the registry's blob CDN. `--skip-egress-check` skips this check only;
+`--skip-preflight` skips it with the rest of the preflight. A dry run runs it
+only with `--check-nodes`.
 
 The trainer is a resident SSH island: `yeto launch` starts one container per
 node, follows every node, and treats any rank that exits non-zero, a process

@@ -1454,6 +1454,170 @@ def _size(nbytes: int) -> str:
     return str(nbytes)
 
 
+# ------------------------------------------------------------ egress checks
+REACH_CONNECT_S = 10
+REACH_TOTAL_S = 20  # curl -m: one attempt's whole time
+REACH_RETRIES = 2  # curl --retry (with --retry-connrefused): a timeout, a 5xx or a refused connect is retried
+DOCKER_INFO_S = 5  # docker info (the daemon's proxy): a hung dockerd costs this, not the whole probe
+DOCKER_DAEMON_JSON = "/etc/docker/daemon.json"  # insecure-registries: the registry is reached over http
+_HOST = re.compile(r"[a-z0-9.:-]+")
+_NETLOC = re.compile(r"[a-z0-9.:\[\]-]+")  # host[:port], an IPv6 host in brackets; no user part
+# curl exit codes of a TLS failure (handshake, certificate, CA file)
+TLS_RCS = frozenset({35, 51, 53, 54, 58, 59, 60, 64, 66, 77, 80, 82, 83, 90, 91})
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """One address the nodes reach from their own network: the run store's object API
+    (``role`` ``store``) or the image registry (``registry``). ``source``: what it serves
+    (the store URI, the image), for the finding."""
+    role: str
+    url: str
+    source: str = ""
+
+    @property
+    def host_port(self) -> tuple[str, int]:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.url)
+        return parsed.hostname or "", parsed.port or (80 if parsed.scheme == "http" else 443)
+
+    @property
+    def netloc(self) -> str:
+        from urllib.parse import urlparse
+
+        return urlparse(self.url).netloc.lower()
+
+    def problem(self) -> str | None:
+        """Why the URL is no endpoint to probe (None: it is one): an ``http(s)`` URL whose
+        host has only ``a-z 0-9 . : -`` (what goes into the node's shell)."""
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(self.url)
+            host, _port = self.host_port
+        except ValueError as error:
+            return f"not a URL ({error})"
+        if parsed.scheme not in ("http", "https"):
+            return f"scheme {parsed.scheme!r} is not http or https"
+        if not host or not _HOST.fullmatch(host) or not _NETLOC.fullmatch(self.netloc):
+            return f"host {host!r} is not a host name (only a-z 0-9 . : -)"
+        return None
+
+
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+UNCHECKED = "YETO_REACH_UNCHECKED"
+
+
+def reach_command(endpoint: Endpoint) -> str:
+    """Bash that reaches ``endpoint`` from the node, exit 0 when it did (``endpoint`` passes
+    :meth:`Endpoint.problem`). With ``curl``: a request (``-m`` bounds each attempt;
+    ``--retry`` retries a timeout, a 5xx and a refused connect, not a DNS failure, rc 6);
+    any HTTP answer (401, 403, 404 included) means the
+    network path works, and the certificate is not verified (``-k``: a proxy that
+    intercepts TLS is a path that works). The proxy is the shell's (``https_proxy``, the
+    inventory env exported before), else for the registry the docker daemon's own
+    (``docker info`` under ``timeout``: what ``docker pull`` uses). A registry the daemon lists in
+    ``insecure-registries`` (``/etc/docker/daemon.json``), or a loopback one, is reached
+    over ``http``; an unreadable file means https. Without ``curl``: a TCP connect by
+    bash's ``/dev/tcp``, or, with a proxy set, no check (:data:`UNCHECKED`: a direct
+    connect says nothing about the proxied path)."""
+    if endpoint.problem():
+        raise ValueError(f"{endpoint.url!r}: {endpoint.problem()}")
+    host, port = endpoint.host_port
+    proxied = '"${HTTPS_PROXY:-${https_proxy:-${ALL_PROXY:-${all_proxy:-}}}}"'
+    url = f"u={shlex.quote(endpoint.url)}; p=; "
+    if endpoint.role == "registry":
+        netloc = shlex.quote(endpoint.netloc)
+        plain = shlex.quote(f"http://{endpoint.netloc}/")
+        daemon = shlex.quote(DOCKER_DAEMON_JSON)
+        url += (f"case {shlex.quote(host)} in localhost|127.*) u={plain};; *) "
+                f"if [ -r {daemon} ] && tr -d ' \\t\\r\\n' < {daemon} "
+                "| sed -n 's/.*\"insecure-registries\":\\[\\([^]]*\\)\\].*/\\1/p' | tr ',' '\\n' | tr -d '\"' "
+                f"| sed -e 's#^https*://##' -e 's#/*$##' | grep -qxF {netloc}; then u={plain}; fi;; esac; "
+                f"[ -z {proxied} ] && command -v timeout >/dev/null 2>&1 "
+                f"&& p=$(timeout {DOCKER_INFO_S} docker info --format '{{{{.HTTPSProxy}}}}' 2>/dev/null); ")
+    return (f"if command -v curl >/dev/null 2>&1; then {url}curl -sS -k -o /dev/null "
+            f"--connect-timeout {REACH_CONNECT_S} -m {REACH_TOTAL_S} --retry {REACH_RETRIES} --retry-connrefused "
+            f"-w 'http %{{http_code}}\\n' ${{p:+--proxy \"$p\"}} \"$u\"; "
+            f"elif [ -n {proxied} ]; then echo '{UNCHECKED}: no curl on the node and a proxy is set'; "
+            f"else timeout {REACH_CONNECT_S} bash -c 'exec 3<>\"/dev/tcp/$1/$2\"' _ {shlex.quote(host)} {port} "
+            "&& echo 'tcp open (no curl on the node)'; fi")
+
+
+def env_exports(node: Node) -> str:
+    """``export`` of the inventory env (what the node's containers get: the proxy too)."""
+    return "".join(f"export {k}={shlex.quote(str(v))}\n" for k, v in sorted(node.env.items())
+                   if ENV_NAME.fullmatch(str(k)))
+
+
+def reach_sections(endpoints: Sequence[Endpoint]) -> list[tuple[str, str]]:
+    return [(f"reach{i}", reach_command(e)) for i, e in enumerate(endpoints)]
+
+
+def _reach_fix(e: Endpoint, rc: int | None) -> str:
+    if rc in TLS_RCS:
+        return ("TLS to it fails on the node: install the CA the endpoint (or the proxy that re-signs TLS) "
+                "uses in the node's CA bundle, and check the node's clock")
+    if e.role == "store":
+        return "open the node's egress to it (firewall, proxy: https_proxy in the node's environment, DNS)"
+    return ("open the node's egress to the registry, or mirror the image to a registry the node reaches; dockerd "
+            "may pull through a proxy of its own (a systemd drop-in: systemctl show docker -p Environment) that "
+            "this probe did not see, so docker pull may still work")
+
+
+def reach_checks(name: str, endpoints: Sequence[Endpoint], sections: Mapping[str, Section]) -> list[Check]:
+    """One check per endpoint of node ``name`` from its probe (:func:`reach_sections`): a
+    store not reached is a FAIL, a registry not reached a WARN (the probe cannot see every
+    proxy dockerd uses; the image pull says it then)."""
+    out = []
+    for i, e in enumerate(endpoints):
+        sec = sections.get(f"reach{i}")
+        what = f"the {e.role} endpoint {e.url}" + (f" ({e.source})" if e.source else "")
+        missed = FAIL if e.role == "store" else WARN
+        if sec is None or sec.rc is None:
+            out.append(Check(name, f"reach_{e.role}", missed, f"{what}: the probe printed nothing",
+                             _reach_fix(e, None), {"url": e.url}))
+        elif sec.rc != 0:
+            out.append(Check(name, f"reach_{e.role}", missed,
+                             f"{name} cannot reach {what} (rc {sec.rc}): {_tail(sec.text, 200)}",
+                             _reach_fix(e, sec.rc), {"url": e.url}))
+        elif UNCHECKED in sec.text:
+            out.append(Check(name, f"reach_{e.role}", WARN, f"{what}: not checked ({_tail(sec.text, 80)})",
+                             "install curl on the node to check it", {"url": e.url}))
+        else:
+            out.append(Check(name, f"reach_{e.role}", PASS, f"{what}: {_tail(sec.text, 60)}", data={"url": e.url}))
+    return out
+
+
+def egress_preflight(nodes: Sequence[Node], endpoints: Sequence[Endpoint], *, ops: SshOps | None = None,
+                     log: Callable[[str], None] = lambda m: print(m, file=sys.stderr, flush=True),
+                     clock: Callable[[], float] = time.time) -> Report:
+    """Whether every node of ``nodes`` reaches ``endpoints`` from its own network: the
+    ssh check of :class:`ClusterPreflight`, then one probe per reachable node (the
+    inventory env exported first). A node that takes no ssh fails its ssh check (nothing
+    else runs there); an endpoint that is no URL to probe fails without a probe. Writes
+    no report file."""
+    bad = [(e, e.problem()) for e in endpoints if e.problem()]
+    endpoints = [e for e in endpoints if not e.problem()]
+    run = ClusterPreflight(nodes, ops=ops, log=log, clock=clock)
+    checks = [Check("egress", f"reach_{e.role}", FAIL, f"the {e.role} endpoint {e.url!r}: {problem}",
+                    "give the endpoint as https://<host>[:<port>]/ in the run config") for e, problem in bad]
+    checks += run._reach()
+    live = [s for s in run.states if s.reachable]
+    if endpoints and live:
+        log(f"[preflight] egress to {len(endpoints)} endpoint(s) from {len(live)} node(s)")
+        script = probe_script(reach_sections(endpoints))
+        timeout = (REACH_TOTAL_S * (REACH_RETRIES + 1) + 15.0) * len(endpoints) + 60.0
+
+        def one(state: NodeState) -> list[Check]:
+            _, text = run._run(state.node, env_exports(state.node) + script, timeout, "reach")
+            return reach_checks(state.name, endpoints, parse_sections(text))
+
+        checks += [c for cs in run._parallel(one, live) for c in cs]
+    return Report(checks)
+
+
 # --------------------------------------------------------------------- CLI
 def resolve_nodes(gpu: str, inventory: str | None) -> list[Node]:
     """The trainer nodes of ``--gpu ssh:<NxMxCARD>`` with ``--rl-node-inventory``, or of

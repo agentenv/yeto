@@ -101,7 +101,7 @@ def test_two_islands_a_third_added_and_one_moved_to_aws_agree_and_carry_only_the
     entry = dict(cfg["islands"][-1]["samplers"][0], name="sglang-north")
     added, _ = fleet_islands.compile_island(cfg, plan, k=2, name="north", gpu="modal:1x2xh100", usd_per_h=8.0,
                                             samplers=[entry])
-    moved = {**members[0], "gpu": "aws:1xh100@us-west-2"}
+    moved = {**members[0], "gpu": "aws:2xh100@us-west-2"}
     for case in (members, [*members, added], [moved, *members[1:], added]):
         fleet_session.check(cfg["trainer"]["argv"], case)  # raises on any disagreement
     for member in (*members, added):
