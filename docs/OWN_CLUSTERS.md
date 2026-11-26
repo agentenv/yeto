@@ -203,10 +203,14 @@ yeto run up --config run.own-sampler-pool.json --dry-run
   path.
 - **Nodes.** A node named in `provider.nodes` needs the `sampler` role (or no
   roles), the spec's tensor parallel size must fit its cards
-  (`provider.devices` when set), and `yeto run up` refuses a pool on a node
-  of the run's `ssh:` trainer islands or their spares, and two pools on one
-  node of an inventory with `lease_store` (split a node's cards between
-  pools with `provider.devices` on an inventory without `lease_store`).
+  (`provider.devices` when set, each an index of the node's cards). `yeto run
+  up` refuses a pool on a node of the run's `ssh:` trainer islands or their
+  spares, unless both lease the node in one `lease_store` and the islands
+  still find the nodes they need (then a warning). Two pools of one run on
+  the nodes of one `lease_store` skip each other's nodes; they are refused
+  when both name one node in `provider.nodes` or their targets exceed the
+  nodes they can take (split a node's cards between pools with
+  `provider.devices` on an inventory without `lease_store`).
 - **Spend.** The pool bills nothing (`price_usd_h` 0 unless you state one), so
   a spend cap (`budget.usd`) counts the other parts only: in the template, the
   Modal trainer.

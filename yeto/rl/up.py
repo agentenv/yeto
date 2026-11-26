@@ -1505,11 +1505,12 @@ class Run:
         return ok
 
     def own_nodes_problem(self) -> str | None:
-        """Two ``kind: ssh`` pools of the run on one node of a leased inventory, or an ssh
+        """Two ``kind: ssh`` pools of the run short of nodes of one lease store, or an ssh
         pool on a node of the run's ``ssh:`` trainer islands (:mod:`yeto.launch.own_node_checks`):
-        the run is refused before anything starts (its dry run too). None otherwise."""
+        the run is refused before anything starts (its dry run too); a warning or a note
+        is a preflight line. None otherwise."""
         from yeto.launch import own_node_checks  # noqa: PLC0415
-        from yeto.launch.preflight.gate import argv_value, ssh_entries  # noqa: PLC0415
+        from yeto.launch.preflight.gate import argv_value  # noqa: PLC0415
 
         pools = []
         for ref in self.pools:
@@ -1523,11 +1524,16 @@ class Run:
             return None
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
         plan = self.fleet_plan()
-        entries = ssh_entries(argv_value(argv, "--gpu"))
-        entries += [e for island in (plan.islands if plan is not None else ()) for e in ssh_entries(island.gpu)]
-        trainers = own_node_checks.trainer_nodes(entries, argv_value(argv, "--rl-node-inventory"))
-        problems = own_node_checks.pool_problems(pools, trainers)
-        return "; ".join(problems) + "; nothing is started" if problems else None
+        entries = own_node_checks.island_entries(argv_value(argv, "--gpu"),
+                                                 [island.gpu for island in (plan.islands if plan is not None else ())])
+        sides = own_node_checks.trainer_sides(entries, argv_value(argv, "--rl-node-inventory"))
+        errors = []
+        for found in own_node_checks.findings(pools, sides):
+            if found.level == own_node_checks.ERROR:
+                errors.append(found.text)
+            else:
+                _log(f"preflight: {'WARNING' if found.level == own_node_checks.WARN else 'note'}: {found.text}")
+        return "; ".join(errors) + "; nothing is started" if errors else None
 
     def own_node_targets(self) -> list[tuple[Any, tuple[Any, ...]]]:
         """``(node, endpoints)`` of every own (SSH inventory) node of the run: the nodes of

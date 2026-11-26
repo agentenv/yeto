@@ -177,6 +177,10 @@ class SshSamplerError(RuntimeError):
     """A start that cannot go on (preflight refused, the launch did not come up)."""
 
 
+class PromptsConfigError(SshSamplerError):
+    config_error = True  # the pool config's prompts_file / prompts.path: no retry fixes it
+
+
 class PreflightError(SshSamplerError):
     config_error = False  # a busy card or a full disk is this node's, not the config's
 
@@ -1341,36 +1345,54 @@ class SshSamplerPoolOps:
             raise SshSamplerError(f"upload {remote} to {node.name}: {_text(out.stderr)[-300:]}")
 
     def upload_prompts(self, node: Node, spec: Mapping[str, Any]) -> dict[str, Any]:
-        """The pool's ``prompts_file`` to the host path behind the spec's ``prompts.path``
-        on ``node`` (:func:`prompts_host_path`), then its size and sha256 there checked
-        against the local file; SshSamplerError when the sampler would not see it or the
-        copy does not match."""
-        from yeto.node.transport import check_copy, size_sha256_command  # noqa: PLC0415
+        """The pool's ``prompts_file`` at the host path behind the spec's ``prompts.path``
+        on ``node`` (:func:`prompts_host_path`), checked there by size and sha256 against
+        the local file: a copy that matches already is kept (``uploaded`` False), else the
+        file is streamed there (a temp name of this shell, then renamed) and checked again.
+        :class:`PromptsConfigError` (not retried) when the sampler would not see the path
+        or the local file is missing; SshSamplerError when the copy fails or does not match."""
+        from yeto.node.transport import size_sha256_command  # noqa: PLC0415
 
         local = Path(os.path.expanduser(str(self.cfg["prompts_file"])))
         prompts = spec.get("prompts") if isinstance(spec.get("prompts"), Mapping) else {}
         remote = str(prompts.get("path") or "")
         host, _where = prompts_host_path(self.conf, node, remote)
         if host is None:
-            raise SshSamplerError(f"prompts_file {local}: the sampler spec's prompts.path {remote or '(unset)'!r} "
-                                  f"is under no mount or workdir of {node.name}: the sampler would not see it")
-        data = local.read_bytes()
+            raise PromptsConfigError(f"prompts_file {local}: the sampler spec's prompts.path "
+                                     f"{remote or '(unset)'!r} is under no mount or workdir of {node.name}: the "
+                                     "sampler would not see it")
+        try:
+            size, digest = file_size_sha256(local)
+        except OSError as error:
+            raise PromptsConfigError(f"prompts_file {local}: {error.strerror or error}") from None
+        copy = {"bytes": size, "sha256": digest}
+
+        def matches() -> tuple[bool, str]:
+            out = self.ssh(node, size_sha256_command(host), timeout=120)
+            have = next((ln.split()[1:] for ln in _text(out.stdout).splitlines() if ln.startswith("YETO_PROMPTS ")), [])
+            return have == [str(size), digest], " ".join(have) or "unreadable"
+
+        same, _have = matches()
+        if same:
+            _log(f"ssh pool: {node.name}: prompts_file {local} is at {host} already ({size} bytes, sha256 "
+                 f"{digest[:12]}): kept")
+            return {"path": remote, "host": host, "uploaded": False, **copy}
         out = self.ssh(node, f"mkdir -p {shlex.quote(str(Path(host).parent))}", timeout=60)
         if out.returncode != 0:
             raise SshSamplerError(f"prompts upload to {node.name}: {_text(out.stderr)[-300:]}")
         q = shlex.quote(host)
-        out = self.ssh(node, f"umask 077; cat > {q}.tmp && chmod 644 {q}.tmp && mv -f {q}.tmp {q}", input=data,
-                       timeout=600)
+        with local.open("rb") as stream:  # streamed: a large file is not held in memory
+            out = self.ssh(node, f"umask 077; t={q}.tmp.$$; cat > \"$t\" && chmod 644 \"$t\" && mv -f \"$t\" {q} "
+                                 "|| { rm -f \"$t\"; exit 1; }", stdin=stream, timeout=upload_timeout_s(size))
         if out.returncode != 0:
-            raise SshSamplerError(f"prompts upload {host} to {node.name}: {_text(out.stderr)[-300:]}")
-        out = self.ssh(node, size_sha256_command(host), timeout=120)
-        try:
-            copy = check_copy(_text(out.stdout), data, node=node.name, remote=host, local=local, after="the upload")
-        except RuntimeError as error:
-            raise SshSamplerError(str(error)) from None
-        _log(f"ssh pool: {node.name}: prompts_file {local} -> {host} ({copy['bytes']} bytes, sha256 "
-             f"{copy['sha256'][:12]}) checked")
-        return {"path": remote, "host": host, **copy}
+            raise SshSamplerError(f"prompts upload {host} to {node.name} (exit {out.returncode}): "
+                                  f"{_text(out.stderr)[-300:]}")
+        same, have = matches()
+        if not same:
+            raise SshSamplerError(f"{node.name}: prompts file {host} does not match {local} after the upload "
+                                  f"(node size/sha256 {have}, local {size} {digest[:12]})")
+        _log(f"ssh pool: {node.name}: prompts_file {local} -> {host} ({size} bytes, sha256 {digest[:12]}) checked")
+        return {"path": remote, "host": host, "uploaded": True, **copy}
 
     def upload_code(self, node: Node) -> str:
         """``git archive`` (gzip: a slow launcher link) of ``yeto/`` at ``code_ref`` into
@@ -1881,8 +1903,17 @@ def spec_node_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
                                f"engine.server.card_model is {card}")
             except UnknownCard:
                 pass
-        tp = spec_tp(spec)
-        cards = len(conf.devices) if conf.devices else int(node.cards_per_node)
+        have = int(node.cards_per_node)
+        beyond = [d for d in conf.devices or () if d >= have]
+        if beyond:
+            out.append(f"ssh provider: node {node.name} has {have} cards (indexes 0-{have - 1}); provider.devices "
+                       f"{beyond} are not on it")
+        try:
+            tp = spec_tp(spec)
+        except ValueError as error:
+            out.append(f"ssh provider: {error}")
+            continue
+        cards = min(len(conf.devices), have) if conf.devices else have
         if tp is not None and tp > cards:
             where = (f"provider.devices {list(conf.devices)} give it {cards}" if conf.devices
                      else f"it has {cards}")
@@ -1897,9 +1928,9 @@ ADAPTER_DEFAULT_TP = {"vllm-server": 4, "sglang-server": 8}
 
 
 def spec_tp(spec: Mapping[str, Any]) -> int | None:
-    """The cards one sampler server spans: ``engine.options.tp``, else the adapter's
-    default (vllm-server, sglang-server); None for another adapter or a value that is
-    not a number (the sampler's own checks report it)."""
+    """The cards one sampler server spans: ``engine.options.tp`` (a whole number, or its
+    decimal string), else the adapter's default (vllm-server, sglang-server); None for
+    another adapter. ValueError when ``tp`` is no whole number >= 1."""
     engine = spec.get("engine") if isinstance(spec.get("engine"), Mapping) else {}
     options = engine.get("options") if isinstance(engine.get("options"), Mapping) else {}
     tp = options.get("tp")
@@ -1907,12 +1938,33 @@ def spec_tp(spec: Mapping[str, Any]) -> int | None:
         tp = ADAPTER_DEFAULT_TP.get(str(engine.get("adapter")))
         if tp is None:
             return None
+    if isinstance(tp, str) and tp.strip().isdigit():
+        tp = int(tp.strip())
     if isinstance(tp, bool) or not isinstance(tp, int) or tp < 1:
-        return None
+        raise ValueError(f"engine.options.tp must be a whole number of cards >= 1, not {tp!r}")
     return tp
 
 
 PROMPTS_WORKDIR, PROMPTS_MOUNT, PROMPTS_HOST = "workdir", "mount", "host"
+UPLOAD_BYTES_PER_S = 10 * 1024 * 1024  # the slowest link a prompts upload is given time for
+UPLOAD_TIMEOUT_MAX_S = 1800
+
+
+def upload_timeout_s(size: int) -> float:
+    """The time a ``size``-byte upload is given: 60 s plus the bytes at 10 MiB/s, at most 30 min."""
+    return min(float(UPLOAD_TIMEOUT_MAX_S), 60.0 + size / UPLOAD_BYTES_PER_S)
+
+
+def file_size_sha256(path: Path) -> tuple[int, str]:
+    """``(bytes, sha256 hex)`` of a local file, read in chunks."""
+    import hashlib  # noqa: PLC0415
+
+    digest, size = hashlib.sha256(), 0
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return size, digest.hexdigest()
 
 
 def prompts_host_path(conf: SshPoolConf, node: Node, path: str) -> tuple[str | None, str | None]:
