@@ -1382,7 +1382,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 island=None if held_name is None else trainer_loop.TrainerIsland(
                     held_name, specs[held].cloud, held_cfg, modal_ops, sky_task=held_task,
                     spec=specs[held], events_dir=events_dir,
-                    ssh=_ssh_trainer_spec(args, specs[held], held_task),
+                    ssh=_ssh_trainer_spec(args, specs[held], held_task, name=held_name),
                     # a sky incarnation's cluster is priced like an ordered one (SkySource.ledger_attrs)
                     ledger=cost_ledger, ledger_attrs=provision.ledger_attrs(provision.held)),
                 abort=controller.abort, states=island_states)  # s1: this launcher's fenced records
@@ -1820,13 +1820,19 @@ def _dry_run_ssh_island(args, spec: ClusterSpec, m: int, num_islands: int, task)
 
     if not is_resident(args, spec, m, num_islands) and trainer_loop.held_island(args) != m:
         return {"mode": "sky-ssh-node-pool"}  # a sampler island: SkyPilot's SSH node pool
+    name = learner_cluster_names(args.cluster_prefix, parse_gpu_spec(args.gpu))[m]
     try:
-        ssh_spec = _ssh_trainer_spec(args, spec, task)
+        ssh_spec = _ssh_trainer_spec(args, spec, task, name=name)
     except SshIslandError as error:
         raise ValueError(f"ssh: island {m}: {error}") from None
-    name = learner_cluster_names(args.cluster_prefix, parse_gpu_spec(args.gpu))[m]
-    return dry_run_record(args, ssh_spec, name,
-                          mode="resident" if is_resident(args, spec, m, num_islands) else "trainer-scheduler")
+    record = dry_run_record(args, ssh_spec, name,
+                            mode="resident" if is_resident(args, spec, m, num_islands) else "trainer-scheduler")
+    from .launch.ssh_trainer_island import trainer_lease_note
+
+    note = trainer_lease_note(args, spec.num_nodes)
+    if note is not None:  # inventory lease_store only: the plan is as before without it
+        record["node_leases"] = note
+    return record
 
 
 def dry_run_plan(args) -> dict:

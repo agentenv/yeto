@@ -356,7 +356,7 @@ class SshSource(Source):
         return name in prov.ssh_names
 
     def render(self, prov, island):
-        spec = ssh_trainer_spec(prov.args, island.spec, island.task)
+        spec = ssh_trainer_spec(prov.args, island.spec, island.task, name=island.name)
         print(f"[launcher] {island.name} is a resident ssh: trainer island on {island.spec.num_nodes} inventory "
               "node(s): the launcher starts it over SSH and supervises it for the run", flush=True)
         return spec
@@ -447,13 +447,14 @@ def start_resident_ssh(args, tasks, names, results, errors, events_dir, collecto
     return ops
 
 
-def ssh_trainer_spec(args, spec: ClusterSpec, task):
-    """The SSH spec of an ``ssh:`` trainer island (None on other clouds)."""
+def ssh_trainer_spec(args, spec: ClusterSpec, task, *, name: str | None = None):
+    """The SSH spec of an ``ssh:`` trainer island (None on other clouds); ``name``: its
+    cluster name (the key of its leased nodes, inventory ``lease_store``)."""
     if spec.cloud != "ssh":
         return None
     from .ssh_trainer_island import island_spec_from_inventory
 
-    return island_spec_from_inventory(args, spec, task)
+    return island_spec_from_inventory(args, spec, task, name=name)
 
 
 # -- a budget needs a price ---------------------------------------------------------

@@ -840,6 +840,10 @@ class SshNodeProvider:
         self._lease_seen: dict[str, tuple[str | None, float]] = {}  # node -> (holder, read at)
         self._lease_reported: dict[str, str | None] = {}  # node -> the other run last reported
         self.on_event: Callable[..., None] | None = None  # the ops' event tape (SshSamplerPoolOps.event)
+        # before an expired lease of another run is taken over: is that run still on the node
+        # (node_lease.ssh_probe over the ops' ssh; None: no probe)
+        self.lease_probe: Callable[[Any, str], str | None] | None = None
+        self._lease_identity: str | None = None  # the pool's launch identity (attach_store: the run store's)
         bad = [s for s in self.slots if not 0 <= s < len(conf.nodes)]
         if bad:
             raise ValueError(f"ssh provider: slots {bad} have no node (nodes: {[n.name for n in conf.nodes]})")
@@ -864,6 +868,10 @@ class SshNodeProvider:
             self._store_pool = pool
             self._store_rows = {t: dict(r) for t, r in rows.items()}
             self._stops_done = {str(t) for t in (found[1].get("stops_done") or ())} if found else set()
+            if self.conf.lease_store is not None and self._leases is None:  # one identity on every host
+                from .node_lease import store_identity  # noqa: PLC0415
+
+                self._lease_identity = store_identity(objects, f"fleet/pools/{pool}/node-lease-identity.json")
             self.imported_from = origin.get("path") or (found[1].get("imported_from") if found else None)
             self._save(self._rows())
         self._prune(objects, pool, lock.token)
@@ -1026,10 +1034,12 @@ class SshNodeProvider:
         if self.conf.lease_store is None:
             return None
         if self._leases is None:
-            from .node_lease import NodeLeases  # noqa: PLC0415
+            from .node_lease import NodeLeases, local_identity  # noqa: PLC0415
 
-            self._leases = NodeLeases(self.conf.lease_store, f"{self.run_id}/pool", clock=self.clock,
-                                      on_event=self._lease_event)
+            identity = self._lease_identity or local_identity(
+                self.state_path.with_name(self.state_path.stem + ".lease-identity.json"))
+            self._leases = NodeLeases(self.conf.lease_store, f"{self.run_id}/pool", identity=identity,
+                                      clock=self.clock, on_event=self._lease_event, probe=self.lease_probe)
         return self._leases
 
     def _lease_event(self, name: str, **detail: Any) -> None:
@@ -1054,7 +1064,7 @@ class SshNodeProvider:
                 _log(f"ssh pool: lease of {node.name} not readable ({error!r}): the node is not offered")
                 return True
             self._lease_seen[node.name] = (holder, now)
-        other = holder if holder not in (None, self.leases.run_id) else None
+        other = holder if holder not in (None, self.leases.holder_id) else None
         if self._lease_reported.get(node.name) != other:
             self._lease_reported[node.name] = other
             if other is not None:
@@ -1071,9 +1081,15 @@ class SshNodeProvider:
 
         node = self.node_of_slot(slot)
         self._lease_seen.pop(node.name, None)
-        got = leases.acquire(node)
+        try:
+            got = leases.acquire(node)
+        except Exception as error:  # noqa: BLE001 - the store: no lease confirmed, a refusal (no failure)
+            self._lease_event("node_lease_store_error", node=node.name, error=repr(error)[:200])
+            raise NodeLeased(f"ssh inventory: the lease of node {node.name} is not confirmed ({error!r})"[:300],
+                             {node.name: None}) from error
         if not got.ok:
-            raise NodeLeased(f"ssh inventory: node {node.name} is held by run {got.holder}", {node.name: got.holder})
+            why = got.blocked or f"node {node.name} is held by run {got.holder}"
+            raise NodeLeased(f"ssh inventory: {why}", {node.name: got.holder})
         return True
 
     def _lease_tick(self, slot: int) -> str | None:
@@ -1224,6 +1240,10 @@ class SshSamplerPoolOps:
         self.provider = SshNodeProvider(self.run_id, self.conf, slots=cli.slot_list(cfg),
                                         state_path=self.state_dir / f"ssh-pool-{self.run_id}.json", clock=clock)
         self.provider.on_event = self.event  # node lease reports (lease_store) on the pool's tape
+        if self.conf.lease_store is not None:  # a takeover first asks the node whether the old run still runs
+            from .node_lease import ssh_probe  # noqa: PLC0415
+
+            self.provider.lease_probe = ssh_probe(lambda node, script: self.ssh(node, script, timeout=120))
         self._shard_of: dict[str, str] = {}
         self._node_route: Any = None
         self._health_generation: dict[str, int] = {}  # ticket -> the assignment its health check is of

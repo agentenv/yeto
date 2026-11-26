@@ -14,7 +14,8 @@ container, per node: ``ssh_trainer_island``) is recorded the same way:
 * ``released`` once every node confirmed the stop (``SshTrainerIslands.release``
   / ``release_incarnation``); an unconfirmed stop stays open for the cleanup;
 * :func:`cleanup_release` (``yeto cleanup``, the reaper) runs the same kill
-  script on every node;
+  script on every node, then ends the run's node leases there (inventory
+  ``lease_store``: the row records the lease store and holder);
 * the cost is the inventory's declared ``price_per_card_hour`` times the cards
   (:func:`usd_per_hour`); a node without a price leaves the row unpriced (the
   customer's own machines).
@@ -106,4 +107,23 @@ def cleanup_release(resource: Any, ops: Any = None, dry_run: bool = False,
             failed.append(f"{node.name}: {type(error).__name__}")
     if failed:
         return False, f"stop of trainer incarnation {where} not confirmed ({'; '.join(failed)})", {}
-    return True, f"stopped trainer incarnation {where}", {"nodes": len(nodes)}
+    released = release_node_leases(attrs, nodes)
+    return True, f"stopped trainer incarnation {where}" + released, {"nodes": len(nodes)}
+
+
+def release_node_leases(attrs: dict[str, Any], nodes: Sequence[Any]) -> str:
+    """After a confirmed stop: end the node leases the row's run holds (inventory
+    ``lease_store``: a launcher that ended with ``--keep`` kept them for good). Only a
+    lease of the recorded holder is ended. Returns a note for the cleanup's action; never
+    raises (a lease not ended runs out, or ``yeto cluster release-node`` ends it)."""
+    store, holder = attrs.get("lease_store"), attrs.get("lease_holder")
+    if not store or not holder:
+        return ""
+    from .node_lease import NodeLeases  # noqa: PLC0415
+
+    try:
+        leases = NodeLeases(str(store), "cleanup")
+        ended = [n.name for n in nodes if leases.force_release(n.name, holder=str(holder))]
+    except Exception as error:  # noqa: BLE001 - the stop is confirmed; the lease is secondary
+        return f"; node leases not released ({type(error).__name__})"
+    return f"; node leases released on {ended}" if ended else ""

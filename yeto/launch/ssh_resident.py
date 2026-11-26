@@ -136,14 +136,18 @@ def is_resident(args: Any, spec: Any, island: int, num_islands: int) -> bool:
 def check(args: Any, specs: Any) -> None:
     """Refuse, before any cloud or SSH work, a resident ``ssh:`` island the launch could
     not start: the inventory's trainer nodes must match it (count, card, cards), its
-    code must reach the nodes and its image must be the run's (SystemExit)."""
-    from .ssh_trainer_island import code_source, inventory_trainer_nodes, run_image
+    code must reach the nodes and its image must be the run's (SystemExit). With an
+    inventory ``lease_store`` the nodes checked are the ones the island's leases pick."""
+    from .sky_ops import learner_cluster_names
+    from .ssh_trainer_island import code_source, inventory_trainer_nodes, run_image, trainer_leases
 
+    leases = trainer_leases(args)  # None without lease_store (and in a dry run): the check as before
+    names = learner_cluster_names(args.cluster_prefix, list(specs)) if leases is not None else None
     for m, spec in enumerate(specs):
         if not is_resident(args, spec, m, len(specs)):
             continue
         try:
-            nodes = inventory_trainer_nodes(args, spec)
+            nodes = inventory_trainer_nodes(args, spec, leases=leases, name=names[m] if names else None)
             run_image(args, nodes)
         except SshIslandError as error:
             raise SystemExit(f"--gpu island {m} ({spec}): {error}") from None
@@ -384,6 +388,7 @@ class SshIslandOps:
                 for proc in rec.job.procs:
                     if proc.poll() is None:
                         proc.terminate()
+            rec.islands.keep_leases()  # not released (kept, or not confirmed): held until cleanup
             if rec.lock is not None:
                 rec.lock.close()
                 rec.lock = None

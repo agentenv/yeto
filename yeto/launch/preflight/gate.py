@@ -184,6 +184,32 @@ def summary_lines(report: Report) -> list[str]:
     return lines
 
 
+def gate_nodes(args: Any, entry: str, inventory: str | None) -> list[Any]:
+    """The nodes the gate checks for ``--gpu`` entry ``entry``: the inventory's (as
+    ``yeto preflight`` resolves them); with an inventory ``lease_store`` the nodes the
+    island's leases pick (``ssh_trainer_island.lease_trainer_nodes``: the launch then
+    starts on the very nodes checked). Without ``lease_store`` exactly as before."""
+    from ..node_inventory import lease_store_of
+
+    nodes = getattr(args, "rl_node_inventory_nodes", None)
+    if lease_store_of(nodes) is None or Path(entry[4:]).expanduser().is_file():
+        return resolve_nodes(entry, inventory)
+    from ...gpu_spec import parse_gpu_spec
+    from ..sky_ops import learner_cluster_names
+    from ..node_inventory import InventoryError
+    from ..ssh_trainer_island import inventory_trainer_nodes, trainer_leases
+
+    specs = parse_gpu_spec(args.gpu)
+    entries = [e.strip() for e in str(args.gpu).split(",") if e.strip()]
+    m = entries.index(entry) if len(entries) == len(specs) else next(
+        i for i, spec in enumerate(specs) if spec.cloud == "ssh")
+    try:
+        return list(inventory_trainer_nodes(args, specs[m], leases=trainer_leases(args),
+                                            name=learner_cluster_names(args.cluster_prefix, specs)[m]))
+    except SshIslandError as exc:
+        raise InventoryError(str(exc)) from None
+
+
 def launch_gate(args: Any, *, ops: Any = None, out: IO[str] | None = None,
                 clock: Any = time.time) -> dict[str, Any] | None:
     """Run the cluster preflight of ``args`` (a ``yeto launch`` namespace) before the
@@ -207,7 +233,7 @@ def launch_gate(args: Any, *, ops: Any = None, out: IO[str] | None = None,
 
     reports = []
     for entry in ssh_entries(gpu):
-        nodes = resolve_nodes(entry, inventory)  # InventoryError is a ValueError: the launch is refused
+        nodes = gate_nodes(args, entry, inventory)  # InventoryError is a ValueError: the launch is refused
         try:  # the image the trainer runs: --rl-image, an overlay-unsafe pin as its overlay-safe repack
             image = trainer_image(rl_image, nodes)
         except SshIslandError as exc:

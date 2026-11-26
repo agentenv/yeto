@@ -88,6 +88,7 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import json
 import re
 import shlex
 import subprocess
@@ -1014,9 +1015,11 @@ class SshTrainerIslands:
         env = {**control, SUBMITTED_ENV: f"{self.clock():.3f}"}
         save_job(self.jobs_path, incarnation, f"ssh:{self.name}-i{int(incarnation)}")  # before any start
         # in the run's resource ledger: a cleanup (or the reaper) stops it without this head
-        ssh_trainer_ledger.record("created", **self._ledger_key(incarnation), attrs=ssh_trainer_ledger.created_attrs(
-            **self._ledger_key(incarnation), nodes=self.spec.nodes, docker=self.spec.docker,
-            kill_grace_s=self.kill_grace_s))
+        attrs = ssh_trainer_ledger.created_attrs(**self._ledger_key(incarnation), nodes=self.spec.nodes,
+                                                 docker=self.spec.docker, kill_grace_s=self.kill_grace_s)
+        if self.spec.leases is not None:  # yeto cleanup ends the leases a launcher kept (inventory lease_store)
+            attrs.update(lease_store=self.spec.leases.store_uri, lease_holder=self.spec.leases.holder_id)
+        ssh_trainer_ledger.record("created", **self._ledger_key(incarnation), attrs=attrs)
         job = self._job(incarnation, paths)
         try:
             for rank, node in enumerate(self.spec.nodes):
@@ -1139,6 +1142,18 @@ class SshTrainerIslands:
             return None
         return "node lease lost: " + ", ".join(f"{n} is held by run {lost[n]}" for n in mine)
 
+    def keep_leases(self) -> list[str]:
+        """The launcher ends while the island may still run (``--keep``, a release not
+        confirmed): its node leases are held for good (``NodeLeases.keep_all``) until ``yeto
+        cleanup`` or a restarted launcher of the run."""
+        leases = self.spec.leases
+        if leases is None:
+            return []
+        mine = {n.name for n in self.spec.nodes}
+        if not (mine & set(leases.held())):
+            return []
+        return leases.keep_all()
+
     def release_leases(self) -> None:
         """Give the island's node leases up (its release was confirmed on every node)."""
         if self.spec.leases is not None:
@@ -1149,6 +1164,8 @@ class SshTrainerIslands:
         for proc in job.procs:
             if proc.poll() is None:
                 proc.terminate()
+        if ok and self.scheduled:  # the scheduler's island: its nodes are free until its next start
+            self.release_leases()
         return ok
 
     def release_incarnation(self, incarnation: int) -> bool:
@@ -1156,7 +1173,10 @@ class SshTrainerIslands:
             print(f"[launcher] trainer incarnation {incarnation}: no SSH start recorded; nothing to release",
                   flush=True)
             return False
-        return self._kill(incarnation)
+        ok = self._kill(incarnation)
+        if ok and self.scheduled:
+            self.release_leases()
+        return ok
 
     def start_events(self) -> list[Mapping[str, Any]]:
         return [e for job in self.jobs for e in job.events.all]
@@ -1335,16 +1355,18 @@ def requant_argv(store: str, template: str, *, recipe: str | None = None, awq_sc
     return tuple(argv)
 
 
-def inventory_trainer_nodes(args: Any, island: Any, *, leases: Any = None,
+def inventory_trainer_nodes(args: Any, island: Any, *, leases: Any = None, name: str | None = None,
                             wait_s: float | None = None) -> tuple[Node, ...]:
     """The inventory nodes of an ``ssh:`` trainer island (``island``: its
     ``gpu_spec.ClusterSpec``): the nodes with role ``trainer`` (or no roles),
     as many as the island has, with its card and card count. Raises before any SSH.
 
     An inventory with ``lease_store`` may list more trainer nodes than the island has:
-    ``leases`` (a :class:`~.node_lease.NodeLeases`) then picks the island's nodes by their
-    leases (module doc; waits up to ``wait_s``, None: no limit); without ``leases`` (a dry
-    run, a check) the first ones are returned and no store is read."""
+    ``leases`` (a :class:`~.node_lease.NodeLeases`, :func:`trainer_leases`) then picks the
+    island's nodes by their leases (:func:`lease_trainer_nodes`; ``name``: the island's
+    cluster name, ``wait_s``: the wait for free nodes, default ``--rl-node-lease-wait-s``).
+    Without ``leases`` (a dry run, a check of a dry run) the first ones are returned and
+    no store is read."""
     nodes = getattr(args, "rl_node_inventory_nodes", None)
     if not nodes:
         raise SshIslandError("an ssh: trainer island needs --rl-node-inventory (the nodes to start it on)")
@@ -1362,44 +1384,180 @@ def inventory_trainer_nodes(args: Any, island: Any, *, leases: Any = None,
                              "as the ssh: island says")
     if not leased or leases is None:
         return tuple(trainers[:island.num_nodes])
+    return lease_trainer_nodes(args, trainers, island.num_nodes, leases, name=name, wait_s=wait_s)
+
+
+NODE_LEASE_FILE = "node-leases.json"  # in the run dir: the launch identity and each island's leased nodes
+DEFAULT_NODE_LEASE_WAIT_S = 3600.0
+
+
+def _lease_record_path(args: Any) -> Path:
+    from yeto import runs
+
+    return runs.run_dir(args.cluster_prefix) / NODE_LEASE_FILE
+
+
+def _lease_record(args: Any) -> dict[str, Any]:
+    try:
+        doc = json.loads(_lease_record_path(args).read_text())
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _record_island_nodes(args: Any, name: str, nodes: Sequence[Node]) -> None:
+    path = _lease_record_path(args)
+    doc = _lease_record(args)
+    islands = dict(doc.get("islands") or {})
+    islands[name] = [n.name for n in nodes]
+    doc["islands"] = islands
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=1, sort_keys=True))
+    tmp.replace(path)
+
+
+def _journal_incarnation(args: Any, name: str) -> bool:
+    """Whether island ``name`` has an incarnation in its jobs journal (resident:
+    ``ssh-islands/<name>-jobs.json``; the trainer scheduler's held island: its
+    ``trainer-loop/trainer-islands.json``)."""
+    from yeto import runs
+
+    from .trainer_island import JOBS_FILE, read_jobs
+
+    if read_jobs(runs.run_dir(args.cluster_prefix) / "ssh-islands" / f"{name}-jobs.json"):
+        return True
+    try:
+        from . import trainer_loop
+        from .sky_ops import learner_cluster_names
+        from ..gpu_spec import parse_gpu_spec
+
+        held = trainer_loop.held_island(args)
+        if held is None or learner_cluster_names(args.cluster_prefix, parse_gpu_spec(args.gpu))[held] != name:
+            return False
+        return bool(read_jobs(trainer_loop.journal_dir(args) / JOBS_FILE))
+    except Exception:  # noqa: BLE001 - no scheduler journal readable: none
+        return False
+
+
+def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: Any, *, name: str | None = None,
+                        wait_s: float | None = None) -> tuple[Node, ...]:
+    """The ``need`` nodes of island ``name`` among ``trainers``, by their leases.
+
+    * Picked already in this process (the launch gate's preflight, the checks, the
+      render): the same nodes.
+    * The island's jobs journal holds an incarnation and the run dir records the nodes it
+      ran on: those nodes, every one leased again; one another run holds refuses the
+      launch (:class:`SshIslandError`: the island is not moved to other nodes).
+    * Otherwise: the recorded nodes and the nodes this run holds first, then free ones;
+      held nodes are skipped; too few free nodes: wait (a line every 5 minutes, a
+      ``node_lease_waiting`` event, the run's STOP flag ends it) up to ``wait_s`` (default
+      ``--rl-node-lease-wait-s``, 3600 s), then :class:`SshIslandError`.
+
+    The pick is recorded in the run dir (:data:`NODE_LEASE_FILE`)."""
+    from yeto import runs
+
     from .node_lease import NodeLeased, pick_nodes
 
-    taken = set(getattr(leases, "assigned", ()))  # nodes another island of this launch was given
+    key = name or f"island-{len(leases.picks)}"
+    by_name = {n.name: n for n in trainers}
+    if key in leases.picks:
+        return tuple(by_name[n] for n in leases.picks[key])
+    recorded = [n for n in (_lease_record(args).get("islands") or {}).get(key, ()) if n in by_name]
+    if recorded and len(recorded) == need and _journal_incarnation(args, key):
+        held = {}
+        for node in recorded:
+            got = leases.acquire(by_name[node])
+            if not got.ok:
+                held[node] = got.blocked or f"run {got.holder}"
+        if held:
+            for node in recorded:
+                if node not in held:
+                    leases.release(node)
+            raise SshIslandError(
+                f"ssh: island {key}: its last incarnation ran on {recorded} (the jobs journal); "
+                + ", ".join(f"{n} is held by {h}" for n, h in sorted(held.items()))
+                + ": not moving the island to other nodes (free them, or start a new run)")
+        picked = [by_name[n] for n in recorded]
+    else:
+        flag = getattr(args, "rl_node_lease_wait_s", None)
+        limit = wait_s if wait_s is not None else float(DEFAULT_NODE_LEASE_WAIT_S if flag is None else flag)
+        stop_flag = runs.stop_flag_path(args.cluster_prefix)
+
+        def stop() -> str | None:
+            return f"the run's STOP flag {stop_flag}" if stop_flag.exists() else None
+
+        try:
+            picked = pick_nodes([n for n in trainers if n.name not in leases.assigned], need, leases,
+                                wait_s=limit, prefer=recorded, stop=stop)
+        except NodeLeased as error:
+            raise SshIslandError(f"ssh: island {key}: {error}") from None
+    leases.picks[key] = [n.name for n in picked]
+    leases.assigned |= {n.name for n in picked}
     try:
-        picked = pick_nodes([n for n in trainers if n.name not in taken], island.num_nodes, leases, wait_s=wait_s)
-    except NodeLeased as error:
-        raise SshIslandError(f"the ssh: trainer island: {error}") from None
-    leases.assigned = taken | {n.name for n in picked}
+        _record_island_nodes(args, key, picked)
+    except OSError as error:
+        print(f"[launcher] node leases: the pick of {key} is not recorded ({error})", file=sys.stderr, flush=True)
     return tuple(picked)
+
+
+_TRAINER_LEASES: dict[tuple[str, str], Any] = {}  # (lease store, holder): one per process and run
 
 
 def trainer_leases(args: Any) -> Any:
     """The run's :class:`~.node_lease.NodeLeases` for its ``ssh:`` trainer islands (one per
-    launch, kept on ``args``; its keeper thread renews them while the launcher runs). None:
-    the inventory has no ``lease_store``, or a dry run (nothing is leased)."""
+    process and run; its keeper thread renews them while the launcher runs). The holder is
+    ``<run>/trainer@<identity>``, the identity kept in the run dir (:data:`NODE_LEASE_FILE`).
+    None: the inventory has no ``lease_store``, or a dry run (nothing is leased)."""
     from .node_inventory import lease_store_of
 
     nodes = getattr(args, "rl_node_inventory_nodes", None)
     store = lease_store_of(nodes)
     if store is None or getattr(args, "dry_run", False):
         return None
-    leases = getattr(args, "_trainer_node_leases", None)
-    if leases is None:
-        from .node_lease import NodeLeases
+    from .node_lease import NodeLeases, local_identity, ssh_probe
 
-        leases = NodeLeases(store, f"{args.cluster_prefix}/trainer")
+    identity = local_identity(_lease_record_path(args))
+    key = (store, f"{args.cluster_prefix}/trainer@{identity}")
+    leases = _TRAINER_LEASES.get(key)
+    if leases is None:
+        ops = SshOps()
+        leases = NodeLeases(store, f"{args.cluster_prefix}/trainer", identity=identity,
+                            probe=ssh_probe(lambda node, script: ops.run(node, script, timeout=120.0)))
         leases.start_keeper()
-        args._trainer_node_leases = leases
+        _TRAINER_LEASES[key] = leases
     return leases
 
 
-def trainer_lease_hint(args: Any) -> None:
-    """A dry run of an inventory without ``lease_store``: the shared hint, to the log only
-    (the dry-run's output is the customer's plan, kept byte for byte)."""
-    from .node_inventory import lease_store_of
-    from .node_lease import no_lease_hint
+def trainer_lease_note(args: Any, need: int) -> dict[str, Any] | None:
+    """The dry run's ``node_leases`` entry of an ``ssh:`` island (None: no ``lease_store``,
+    the plan is as before)."""
+    from .node_inventory import island_nodes, lease_store_of
 
-    if getattr(args, "rl_node_inventory_nodes", None) and lease_store_of(args.rl_node_inventory_nodes) is None:
+    nodes = getattr(args, "rl_node_inventory_nodes", None)
+    store = lease_store_of(nodes)
+    if store is None:
+        return None
+    candidates = len(island_nodes(list(nodes), "trainer"))
+    return {"lease_store": store,
+            "note": f"dry run: no lease taken; checked first {int(need)} of {candidates} candidate trainer node(s); "
+                    "a launch picks the island's nodes by their leases"}
+
+
+def trainer_lease_hint(args: Any) -> None:
+    """A dry run of an inventory without ``lease_store``: the shared hint. On stderr when
+    the inventory declares a field of own-cluster-fleet-stability (a node's
+    ``fabric_group``); otherwise (the customer's inventory) a DEBUG log record only, so the
+    dry run's output stays byte for byte."""
+    from .node_inventory import lease_store_of
+    from .node_lease import declares_new_fields, no_lease_hint
+
+    nodes = getattr(args, "rl_node_inventory_nodes", None)
+    if not nodes or lease_store_of(nodes) is not None:
+        return
+    if declares_new_fields(nodes):
+        no_lease_hint(emit=lambda hint: print(f"[launcher] note: {hint}", file=sys.stderr, flush=True))
+    else:
         no_lease_hint()
 
 
@@ -1488,7 +1646,7 @@ def island_code_pack(args: Any) -> tuple[str, str] | None:
     return f"{store}/code_packs/<digest>.tar", "<digest>"
 
 
-def island_spec_from_inventory(args: Any, island: Any, task: Any) -> SshTrainerSpec:
+def island_spec_from_inventory(args: Any, island: Any, task: Any, *, name: str | None = None) -> SshTrainerSpec:
     """The :class:`SshTrainerSpec` of the held-back ``ssh:`` trainer island: the
     inventory's trainer nodes run the island's sky task (setup, then run) as
     ``run_script`` with the task's environment. The code: the run code pack (every node
@@ -1519,7 +1677,7 @@ def island_spec_from_inventory(args: Any, island: Any, task: Any) -> SshTrainerS
     leases = trainer_leases(args)
     if leases is None and getattr(args, "dry_run", False):
         trainer_lease_hint(args)
-    nodes = inventory_trainer_nodes(args, island, leases=leases)
+    nodes = inventory_trainer_nodes(args, island, leases=leases, name=name)
     from .ssh_weights import WeightsSyncError, weights_plan_from_args
 
     try:

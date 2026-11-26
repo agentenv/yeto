@@ -143,9 +143,12 @@ class StoreLock:
     def holder_of(cls, objects: Any, prefix: str, *, now: float | None = None) -> dict[str, Any] | None:
         """The current holder (``token``, ``holder``, ``until``) while its lease runs, else None."""
         tokens = cls.tokens(objects, prefix)
-        if not tokens:
-            return None
-        top = tokens[-1]
+        return cls.holder_at(objects, prefix, tokens[-1], now=now) if tokens else None
+
+    @classmethod
+    def holder_at(cls, objects: Any, prefix: str, top: int, *, now: float | None = None) -> dict[str, Any] | None:
+        """:meth:`holder_of` for token ``top``, the highest of a listing already made (two
+        reads, no LIST)."""
         lease = cls._doc(objects, cls.lease_key(prefix, top))
         record = cls._doc(objects, cls.record_key(prefix, top)) or {}
         if lease is None:  # claimed, the first lease write not (yet) done: the record's time counts
@@ -164,24 +167,43 @@ class StoreLock:
         """Claim the lock: a new :class:`StoreLock` with the next token, or None when a
         running lease holds it or another claimer won the create. ``reclaim``: a running
         lease of this very ``holder`` name does not block the claim (the same owner
-        restarted elsewhere: its new token fences the old one)."""
+        restarted elsewhere: its new token fences the old one).
+
+        One LIST: the running lease is judged on the highest token of that listing and only
+        the token after it is created. A claimer that listed before another one claimed
+        therefore races it for the same token (the create decides), never past it."""
         require_atomic_create(objects)
         holder = holder or holder_id()
         now = clock()
-        current = cls.holder_of(objects, prefix, now=now)
+        tokens = cls.tokens(objects, prefix)
+        top = tokens[-1] if tokens else 0
+        current = cls.holder_at(objects, prefix, top, now=now) if top else None
         if current is not None and not (reclaim and current.get("holder") == holder):
             return None
-        tokens = cls.tokens(objects, prefix)
-        token = (tokens[-1] if tokens else 0) + 1
+        return cls.claim(objects, prefix, top + 1, holder=holder, ttl_s=ttl_s, clock=clock)
+
+    @classmethod
+    def claim(cls, objects: Any, prefix: str, token: int, *, holder: str, ttl_s: float = DEFAULT_TTL_S,
+              clock: Callable[[], float] = time.time) -> StoreLock | None:
+        """Create token ``token`` (one past the highest the caller listed) and hold it: the
+        :class:`StoreLock`, or None when another claimer created it first. A store found
+        to have no atomic create by this very create (an endpoint refusing If-None-Match:
+        the create fell back to check-then-write) is refused (:class:`StoreLockError`)."""
+        from yeto.rl.engine.object_store import atomic_create  # noqa: PLC0415
+
+        require_atomic_create(objects)
         nonce = uuid.uuid4().hex
-        record = {"schema": SCHEMA, "token": token, "holder": holder, "nonce": nonce, "claimed_at": now,
+        record = {"schema": SCHEMA, "token": int(token), "holder": holder, "nonce": nonce, "claimed_at": clock(),
                   "ttl_s": float(ttl_s)}
         created = objects.create(cls.record_key(prefix, token), json.dumps(record).encode())
+        if not atomic_create(objects):  # this create learnt the endpoint has no If-None-Match
+            raise StoreLockError("the object store has no atomic exclusive create (it refused If-None-Match on "
+                                 "the lock's create): the claim is not exclusive there")
         if not created:
             mine = cls._doc(objects, cls.record_key(prefix, token)) or {}
             if mine.get("nonce") != nonce:  # a lost race (a lost answer of our own create reads back our nonce)
                 return None
-        lock = cls(objects, prefix, token, holder, ttl_s=ttl_s, clock=clock)
+        lock = cls(objects, prefix, int(token), holder, ttl_s=ttl_s, clock=clock)
         lock.renew()
         return lock
 

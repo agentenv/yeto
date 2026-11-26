@@ -1,4 +1,4 @@
-"""Node leases across runs (yeto.launch.node_lease; own-cluster-fleet-stability 3.1-3.2):
+"""Node leases across runs (yeto.launch.node_lease; own-cluster-fleet-stability 3.1-3.3):
 the inventory's top-level ``lease_store``, the lease (claim, renew, release, takeover after
 it ran out) on a FakeS3 store, and both node pickers that check it: the ssh sampler pool
 and the ssh trainer island (spec render, start, watch, release). An inventory without
@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -56,6 +57,11 @@ def _fresh_hint(monkeypatch, tmp_path):
 
     monkeypatch.setattr(card_tools, "check_cards", lambda family, text, **kw: [])  # the fake cluster's cards
     monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(tmp_path / "ledger.jsonl"))
+    from yeto import runs
+    from yeto.launch import ssh_trainer_island
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")  # the run dirs (lease identity, picks)
+    monkeypatch.setattr(ssh_trainer_island, "_TRAINER_LEASES", {})
 
 
 # -- 3.1 the inventory field -----------------------------------------------------------
@@ -263,7 +269,7 @@ def test_pick_reports_the_holders_and_waits_until_a_node_is_free():
     assert pick_nodes(["b300-0", "b300-1"], 1, b, sleep=sleep, log=lines.append) == ["b300-1"]
     assert len(sleeps) == 3
     assert lines == ["[node-lease] 1 node(s) needed, 0 free; held: b300-0 by run run-a, b300-1 by run run-a; "
-                     "waiting (the leases are read every 30s)"]  # once: the holders did not change
+                     "waiting 0s so far (the leases are read every 30s)"]  # once: the holders did not change
     assert "b300-0" not in b.held()
 
 
@@ -289,7 +295,7 @@ def test_pick_waits_after_a_lost_race_instead_of_spinning():
 
     assert pick_nodes(["b300-0"], 1, b, sleep=sleep, log=lines.append) == ["b300-0"]
     assert sleeps == [30.0] and lines == ["[node-lease] 1 node(s) needed, 0 free; held: b300-0 by run run-a; "
-                                          "waiting (the leases are read every 30s)"]
+                                          "waiting 0s so far (the leases are read every 30s)"]
 
 
 def test_pick_gives_up_after_wait_s_naming_the_holders():
@@ -537,3 +543,616 @@ def test_an_island_without_leases_watches_as_before(tmp_path):
     ops.start("isl")
     assert ops.islands["isl"].islands.lease_lost() is None
     assert str(ops.job_status("isl", 0)) == "RUNNING" and ops.down("isl")
+
+
+# -- review: H1 one LIST per claim ------------------------------------------------------
+
+class _Interleaved:
+    """An object store whose first LIST under ``prefix`` runs ``between()`` right after it
+    answered: another claimer acts between this claimer's LIST and its create."""
+
+    def __init__(self, objects, prefix, between):
+        self._objects, self._prefix, self._between, self.lists = objects, prefix, between, 0
+
+    def __getattr__(self, name):
+        return getattr(self._objects, name)
+
+    def _listed(self, prefix):
+        if prefix.startswith(self._prefix):
+            self.lists += 1
+            if self.lists == 1:
+                self._between()
+
+    def list(self, prefix, **kw):
+        out = self._objects.list(prefix, **kw)
+        self._listed(prefix)
+        return out
+
+    def list_meta(self, prefix, **kw):  # the S3 listing with object times (node leases read it)
+        out = self._objects.list_meta(prefix, **kw)
+        self._listed(prefix)
+        return out
+
+
+def test_storelock_acquire_judges_and_creates_on_one_listing():
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects, clock, won = _objects(), Clock(), {}
+    seen = _Interleaved(objects, "L", lambda: won.setdefault("b", StoreLock.acquire(objects, "L", holder="b",
+                                                                                     clock=clock)))
+    a = StoreLock.acquire(seen, "L", holder="a", clock=clock)
+    assert won["b"] is not None and won["b"].token == 1
+    assert a is None  # A listed before B claimed: it raced B for token 1 and lost, never took token 2
+    assert StoreLock.tokens(objects, "L") == [1]
+    assert seen.lists == 1  # the claim itself listed once (the renew of a won claim lists again)
+
+
+def test_node_lease_claim_interleaved_after_its_list_leaves_one_holder():
+    objects, clock, won = _objects(), Clock(), {}
+    b = _leases("run-b", objects, clock)
+    seen = _Interleaved(objects, "nodes/b300-0/lease", lambda: won.setdefault("b", b.acquire("b300-0")))
+    a = _leases("run-a", seen, clock)
+    got = a.acquire("b300-0")
+    assert won["b"].ok and not got.ok and got.holder == "run-b"
+    assert StoreLockTokens(objects, "b300-0") == [1]
+
+
+def test_storelock_reclaim_is_off_by_default():
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects, clock = _objects(), Clock()
+    assert StoreLock.acquire(objects, "L", holder="same", clock=clock) is not None
+    assert StoreLock.acquire(objects, "L", holder="same", clock=clock) is None  # the fleet pool lock: as before
+    assert StoreLock.acquire(objects, "L", holder="same", clock=clock, reclaim=True).token == 2
+
+
+# -- review: H2 the launch identity ----------------------------------------------------
+
+def test_two_runs_of_one_name_with_different_identities_do_not_share_a_node():
+    objects, clock = _objects(), Clock()
+    first = NodeLeases(STORE, "yeto/trainer", identity="aaaa", objects=objects, clock=clock)
+    other = NodeLeases(STORE, "yeto/trainer", identity="bbbb", objects=objects, clock=clock)
+    assert first.acquire("b300-0").ok and first.holder_id == "yeto/trainer@aaaa"
+    got = other.acquire("b300-0")
+    assert not got.ok and got.holder == "yeto/trainer@aaaa"
+    again = NodeLeases(STORE, "yeto/trainer", identity="aaaa", objects=objects, clock=clock)  # its restart
+    assert again.acquire("b300-0").ok
+
+
+def test_the_identity_is_made_once_and_read_back(tmp_path):
+    path = tmp_path / "run" / "node-leases.json"
+    one = node_lease.local_identity(path)
+    assert node_lease.local_identity(path) == one and json.loads(path.read_text())["identity"] == one
+    assert node_lease.local_identity(tmp_path / "other.json") != one
+    objects = _objects()
+    assert node_lease.store_identity(objects, "fleet/pools/p/id.json") == node_lease.store_identity(
+        objects, "fleet/pools/p/id.json")
+
+
+def test_trainer_leases_hold_as_run_and_identity_and_a_restart_keeps_it(tmp_path, monkeypatch):
+    from yeto.launch import ssh_trainer_island as sti
+
+    nodes = NodeList([b300(0)], lease_store=str(tmp_path / "leases"))
+    args = _args(nodes)
+    first = sti.trainer_leases(args)
+    try:
+        assert first.holder_id.startswith("run-b/trainer@") and sti.trainer_leases(args) is first
+        monkeypatch.setattr(sti, "_TRAINER_LEASES", {})  # a new launcher process of the run
+        again = sti.trainer_leases(args)
+        assert again is not first and again.holder_id == first.holder_id
+    finally:
+        first.stop_keeper()
+        sti._TRAINER_LEASES.get((str(tmp_path / "leases"), first.holder_id), first).stop_keeper()
+
+
+def test_the_pool_identity_lives_with_its_state_or_in_the_run_store(tmp_path):
+    prov, _ = _provider(tmp_path, None, Clock())
+    prov._leases = None  # noqa: SLF001 - the real one
+    local = prov.leases.holder_id
+    assert local.startswith("pool-b/pool@") and (tmp_path / "pool-b.lease-identity.json").is_file()
+    stored, _ = _provider(tmp_path / "x", None, Clock())
+    stored._leases = None  # noqa: SLF001
+    objects = _objects()
+    stored._lease_identity = node_lease.store_identity(objects, "fleet/pools/p/node-lease-identity.json")  # noqa: SLF001
+    assert stored.leases.identity == node_lease.store_identity(objects, "fleet/pools/p/node-lease-identity.json")
+
+
+# -- review: H3a the probe before a takeover ---------------------------------------------
+
+def _expired(objects, clock, holder="run-a"):
+    _leases(holder, objects, clock).acquire("b300-0")
+    clock.t += 601
+
+
+def test_a_takeover_is_refused_while_the_previous_run_still_runs_there():
+    objects, clock, events = _objects(), Clock(), []
+    _expired(objects, clock)
+    asked = []
+
+    def probe(node, previous):
+        asked.append((node, previous))
+        return f"node {node} still runs run {previous} (container:yeto-run-a-isl-i0-n0)"
+
+    b = _leases("run-b", objects, clock, events=events, probe=probe)
+    got = b.acquire("b300-0")
+    assert not got.ok and got.holder == "run-a" and got.blocked.startswith("node b300-0 still runs run run-a")
+    assert asked == [("b300-0", "run-a")] and b.held() == []
+    assert [e[0] for e in events] == [node_lease.BLOCKED_EVENT]
+    doc = json.loads(objects.read("nodes/b300-0/events/00000002-blocked.json"))
+    assert doc["event"] == node_lease.BLOCKED_EVENT and doc["previous"] == "run-a"
+    assert StoreLockTokens(objects, "b300-0") == [1]  # nothing claimed
+
+
+def test_a_takeover_goes_ahead_once_the_probe_finds_nothing():
+    objects, clock = _objects(), Clock()
+    _expired(objects, clock)
+    b = _leases("run-b", objects, clock, probe=lambda node, previous: None)
+    assert b.acquire("b300-0").took_over
+
+
+def test_no_probe_on_a_free_or_own_lease():
+    objects, clock = _objects(), Clock()
+    asked = []
+    a = _leases("run-a", objects, clock, probe=lambda n, p: asked.append(n) or "busy")
+    assert a.acquire("b300-0").ok  # no lease yet
+    clock.t += 601
+    again = _leases("run-a", objects, clock, probe=lambda n, p: asked.append(n) or "busy")
+    assert again.acquire("b300-0").ok  # its own lease that ran out: no probe
+    again.release("b300-0")  # a released lease: free, no probe either
+    assert _leases("run-c", objects, clock, probe=lambda n, p: asked.append(n) or "busy").acquire("b300-0").ok
+    assert asked == []
+
+
+@pytest.mark.parametrize("out, rc, want", [
+    ("yeto-lease-probe found=container:yeto-run-a-isl-i0-n0\nyeto-lease-probe done\n", 0, "still runs run run-a"),
+    ("yeto-lease-probe done\n", 0, None),
+    ("", 255, "not confirmed free of run run-a"),
+    ("yeto-lease-probe found=sampler:4242\n", 1, "still runs run run-a"),
+])
+def test_ssh_probe_reads_the_script_output(out, rc, want):
+    probe = node_lease.ssh_probe(lambda node, script: SimpleNamespace(stdout=out, returncode=rc))
+    why = probe(b300(0), "run-a/trainer@abc")
+    assert (why is None) if want is None else (want in why)
+
+
+def test_the_probe_script_finds_containers_process_groups_and_samplers(tmp_path):
+    import os
+    import subprocess
+
+    from yeto.launch.ssh_trainer_island import STATE_DIR
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in ps) printf 'yeto-run-a-isl-i0-n0\\nyeto-run-ab-x\\nyeto-sampler-s1\\nyeto-sampler-s2\\n';;\n"
+        "inspect) [ \"$4\" = yeto-sampler-s1 ] && echo YETO_SSH_SAMPLER_MARK=yeto-ssh-sampler:run-a:s1:t1 "
+        "|| echo YETO_SSH_SAMPLER_MARK=yeto-ssh-sampler:run-b:s2:t2;;\nesac\n")
+    (bin_dir / "docker").chmod(0o755)
+    home = tmp_path / "home"
+    gone = subprocess.Popen(["true"], start_new_session=True)
+    gone.wait()  # a process group that ended
+    group = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    sampler = subprocess.Popen(["bash", "-c", "exec -a yeto-ssh-sampler:run-a:s3:t3 sleep 30"])
+    try:
+        for island, pgid, rc in (("isl-i0", group.pid, False), ("isl-i1", group.pid, True), ("isl-i2", gone.pid, False), ("isl-i3", 1, False)):
+            d = home / STATE_DIR / "run-a" / island
+            d.mkdir(parents=True)
+            (d / "pgid").write_text(str(pgid))
+            if rc:
+                (d / "rc").write_text("0")
+        for _ in range(50):  # the exec -a has happened
+            if "yeto-ssh-sampler:run-a:s3" in subprocess.run(["ps", "-o", "args=", "-p", str(sampler.pid)],
+                                                             capture_output=True, text=True).stdout:
+                break
+            import time
+
+            time.sleep(0.05)
+        done = subprocess.run(["bash", "-c", node_lease.still_runs_script("run-a")], capture_output=True, text=True,
+                              env={**os.environ, "HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    finally:
+        group.kill()
+        sampler.kill()
+        group.wait()
+        sampler.wait()
+    confirmed, found = node_lease.parse_probe(done.stdout)
+    assert confirmed, done.stderr
+    assert sorted(found) == sorted(["container:yeto-run-a-isl-i0-n0", "container:yeto-sampler-s1", "process:isl-i0",
+                                    f"sampler:{sampler.pid}"])
+    confirmed, found = node_lease.parse_probe(subprocess.run(
+        ["bash", "-c", node_lease.still_runs_script("run-z")], capture_output=True, text=True,
+        env={**os.environ, "HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}"}).stdout)
+    assert confirmed and found == []  # nothing of another run; the probe does not find itself
+
+
+def test_a_node_with_an_owed_stop_is_not_taken_over_by_another_run(tmp_path):
+    """L4: the pool keeps the lease of a node whose sampler stop is owed; when that lease
+    runs out (the pool controller is gone), another run's probe finds the sampler there."""
+    objects, clock = _objects(), Clock()
+    prov, _ = _provider(tmp_path, objects, clock)
+    t = prov.order(0)
+    prov.note_shard(t, "s-0")
+    prov.mark_lost(t, stopped=False)
+    prov.release(0, t)
+    assert prov.leases.held() == ["node-a"]
+    clock.t += 601  # the pool controller died; nobody renewed
+    node_says = "yeto-lease-probe found=sampler:4242\nyeto-lease-probe done\n"
+    other = _leases("trainer-a", objects, clock,
+                    probe=node_lease.ssh_probe(lambda node, script: SimpleNamespace(stdout=node_says, returncode=0)))
+    got = other.acquire("node-a")
+    assert not got.ok and "node node-a still runs run pool-b" in got.blocked
+
+
+# -- review: H3b kept leases ----------------------------------------------------------
+
+def test_kept_leases_never_run_out_until_cleanup_releases_them():
+    objects, clock = _objects(), Clock()
+    a = _leases("run-a", objects, clock)
+    a.acquire("b300-0")
+    assert a.keep_all() == ["b300-0"]
+    clock.t += 10 ** 6
+    b = _leases("run-b", objects, clock, probe=lambda n, p: None)
+    assert b.holder("b300-0") == "run-a" and not b.acquire("b300-0").ok
+    lease = json.loads(objects.read("nodes/b300-0/lease/00000001.lease"))
+    assert lease["kept"] is True and lease["until"] == float("inf")
+    assert not b.force_release("b300-0", holder="run-x")  # not that holder: untouched
+    assert b.force_release("b300-0", holder="run-a")
+    got = b.acquire("b300-0")
+    assert got.ok and not got.took_over  # a released lease: no takeover
+
+
+def test_a_closing_launcher_keeps_the_leases_of_islands_it_did_not_release(tmp_path):
+    objects, clock = _objects(), Clock()
+    mine = _leases("run1/trainer", objects, clock)
+    ops = make_ops(tmp_path, FakeCluster(NAMES))
+    ops.add("isl", spec(leases=mine))
+    ops.start("isl")
+    ops.close()  # --keep: the island runs on
+    clock.t += 10 ** 6
+    assert all(_leases("x", objects, clock).holder(n) == "run1/trainer" for n in NAMES)
+
+
+def test_a_closing_launcher_has_nothing_to_keep_after_a_confirmed_down(tmp_path):
+    objects, clock = _objects(), Clock()
+    mine = _leases("run1/trainer", objects, clock)
+    ops = make_ops(tmp_path, FakeCluster(NAMES))
+    ops.add("isl", spec(leases=mine))
+    ops.start("isl")
+    assert ops.down("isl")
+    ops.close()
+    assert all(_leases("x", objects, clock).holder(n) is None for n in NAMES)
+
+
+def test_the_ledger_row_carries_the_lease_and_cleanup_releases_it(tmp_path):
+    from yeto.cost.ledger import ResourceLedger
+    from yeto.launch import ssh_trainer_ledger
+
+    store = str(tmp_path / "leases")
+    mine = NodeLeases(store, "run1/trainer", identity="abc")
+    ops = make_ops(tmp_path, FakeCluster(NAMES))
+    ops.add("isl", spec(leases=mine))
+    ops.start("isl")
+    mine.keep_all()
+    (row,) = ResourceLedger(tmp_path / "ledger.jsonl").open_resources()
+    assert row.attrs["lease_store"] == store and row.attrs["lease_holder"] == "run1/trainer@abc"
+    ok, action, _ = ssh_trainer_ledger.cleanup_release(row, ssh=SimpleNamespace(
+        run=lambda node, script, timeout: SimpleNamespace(returncode=0)))
+    assert ok and action.endswith(f"node leases released on {NAMES}")
+    assert all(NodeLeases(store, "x").holder(n) is None for n in NAMES)
+
+
+def test_a_ledger_row_without_a_lease_is_cleaned_as_before():
+    from yeto.launch import ssh_trainer_ledger
+
+    assert ssh_trainer_ledger.release_node_leases({"run_id": "r"}, []) == ""
+
+
+# -- review: M1 a create that learns the store is not atomic -----------------------------
+
+def test_a_store_found_non_atomic_by_the_claim_itself_is_refused():
+    objects = _objects(FakeS3(conditional=False))  # no probe before: the claim's create learns it
+    with pytest.raises(NodeLeaseError, match="atomic"):
+        _leases("run-a", objects, Clock()).acquire("b300-0")
+
+
+# -- review: M2 the trainer's wait -----------------------------------------------------
+
+def test_pick_reports_every_five_minutes_with_the_time_waited_and_an_event():
+    objects, clock, events, lines = _objects(), Clock(), [], []
+    _leases("run-a", objects, clock).acquire("b300-0")
+    b = _leases("run-b", objects, clock, events=events)
+    t = [0.0]
+
+    def sleep(s):
+        t[0] += s
+
+    with pytest.raises(NodeLeased, match="after 900s"):
+        pick_nodes(["b300-0"], 1, b, wait_s=900, sleep=sleep, monotonic=lambda: t[0], log=lines.append)
+    assert [line.split("waiting ")[1].split("s so far")[0] for line in lines] == ["0", "300", "600"]
+    assert [d["waited_s"] for name, d in events if name == node_lease.WAITING_EVENT] == [0, 300, 600]
+
+
+def test_pick_stops_waiting_at_the_stop_flag():
+    objects, clock = _objects(), Clock()
+    _leases("run-a", objects, clock).acquire("b300-0")
+    calls = []
+    with pytest.raises(NodeLeased, match="stopped waiting: STOP"):
+        pick_nodes(["b300-0"], 1, _leases("run-b", objects, clock), sleep=calls.append, log=lambda m: None,
+                   stop=lambda: "STOP" if calls else None)
+    assert calls == [30.0]
+
+
+def _held_elsewhere(objects, clock, *names):
+    other = _leases("run-a", objects, clock)
+    for n in names:
+        other.acquire(n)
+    return other
+
+
+def test_the_trainer_wait_has_a_limit_and_honours_the_runs_stop_flag():
+    from yeto import runs
+
+    objects, clock = _objects(), Clock()
+    _held_elsewhere(objects, clock, "b300-0")
+    nodes = NodeList([b300(0)], lease_store=STORE)
+    with pytest.raises(SshIslandError, match="after 0s"):
+        inventory_trainer_nodes(_args(nodes, rl_node_lease_wait_s=0.0), _island(1),
+                                leases=_leases("run-b/trainer", objects, clock), name="isl")
+    runs.request_stop("run-b")
+    with pytest.raises(SshIslandError, match="STOP flag"):
+        inventory_trainer_nodes(_args(nodes), _island(1), leases=_leases("run-b/trainer", objects, clock),
+                                name="isl")
+
+
+def test_the_launch_flag_has_the_documented_default():
+    from yeto.launch.ssh_trainer_island import DEFAULT_NODE_LEASE_WAIT_S
+    from yeto.rl.engine import run_flags
+
+    flag = next(f for f in run_flags.rl_flags() if "--rl-node-lease-wait-s" in f.options)
+    assert flag.kwargs["default"] == DEFAULT_NODE_LEASE_WAIT_S == 3600.0
+
+
+# -- review: M3 a restarted island stays on its journal's nodes --------------------------
+
+def _journal(name, incarnations=("0",)):
+    from yeto import runs
+
+    path = runs.run_dir("run-b") / "ssh-islands" / f"{name}-jobs.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({k: f"ssh:{name}-i{k}" for k in incarnations}))
+
+
+def test_a_restart_with_a_journal_takes_the_recorded_nodes_or_refuses():
+    from yeto.launch import ssh_trainer_island as sti
+
+    objects, clock = _objects(), Clock()
+    nodes = NodeList([b300(i) for i in range(4)], lease_store=STORE)
+    first = _leases("run-b/trainer@one", objects, clock)
+    assert [n.name for n in inventory_trainer_nodes(_args(nodes), _island(2), leases=first, name="isl")] == NAMES[:2]
+    assert json.loads(sti._lease_record_path(_args(nodes)).read_text())["islands"] == {"isl": NAMES[:2]}
+    _journal("isl")
+    first.release_all()  # the launcher died long ago: its leases are gone
+    _held_elsewhere(objects, clock, "b300-1")
+    restarted = _leases("run-b/trainer@one", objects, clock)
+    with pytest.raises(SshIslandError, match="not moving the island to other nodes"):
+        inventory_trainer_nodes(_args(nodes), _island(2), leases=restarted, name="isl")
+    assert restarted.held() == []  # nothing kept from the refused round
+
+
+def test_a_restart_with_a_journal_gets_the_same_nodes_even_when_others_are_free_first():
+    objects, clock = _objects(), Clock()
+    nodes = NodeList([b300(i) for i in range(4)], lease_store=STORE)
+    _held_elsewhere(objects, clock, "b300-0")
+    first = _leases("run-b/trainer@one", objects, clock)
+    assert [n.name for n in inventory_trainer_nodes(_args(nodes), _island(2), leases=first,
+                                                    name="isl")] == ["b300-1", "b300-2"]
+    _journal("isl")
+    first.release_all()
+    for n in ("b300-0",):
+        _leases("x", objects, clock).force_release(n)  # b300-0 is free now: the island still stays put
+    again = _leases("run-b/trainer@one", objects, clock)
+    assert [n.name for n in inventory_trainer_nodes(_args(nodes), _island(2), leases=again,
+                                                    name="isl")] == ["b300-1", "b300-2"]
+
+
+def test_one_pick_per_island_and_process():
+    objects, clock = _objects(), Clock()
+    nodes = NodeList([b300(i) for i in range(4)], lease_store=STORE)
+    mine = _leases("run-b/trainer@one", objects, clock)
+    a = inventory_trainer_nodes(_args(nodes), _island(2), leases=mine, name="isl-a")
+    assert inventory_trainer_nodes(_args(nodes), _island(2), leases=mine, name="isl-a") == a  # the gate, the render
+    b = inventory_trainer_nodes(_args(nodes), _island(2), leases=mine, name="isl-b")
+    assert {n.name for n in a}.isdisjoint(n.name for n in b)
+
+
+# -- review: M4 release, gate, dry run --------------------------------------------------
+
+def test_the_schedulers_island_frees_its_nodes_once_a_release_is_confirmed(tmp_path):
+    from yeto.launch.ssh_trainer_island import SshTrainerIslands
+
+    objects, clock = _objects(), Clock()
+    mine = _leases("run1/trainer", objects, clock)
+    islands = SshTrainerIslands(spec(leases=mine), name="isl", jobs_path=tmp_path / "jobs.json",
+                                ops=FakeCluster(NAMES), scheduled=True, tape=False)
+    job = islands.launch(0, None)
+    assert mine.held() == NAMES
+    assert islands.release(job) and mine.held() == []
+    islands.launch(1, None)  # the next start takes them again
+    assert mine.held() == NAMES and islands.release_incarnation(1) and mine.held() == []
+
+
+def test_a_resident_relaunch_keeps_its_nodes_leased(tmp_path):
+    objects, clock = _objects(), Clock()
+    mine = _leases("run1/trainer", objects, clock)
+    cluster = FakeCluster(NAMES)
+    ops = make_ops(tmp_path, cluster)
+    ops.add("isl", spec(leases=mine))
+    ops.start("isl")
+    cluster.exit("b300-1", 0, 3)
+    assert str(ops.job_status("isl", 0)) == "FAILED"
+    assert mine.held() == NAMES  # released incarnation, nodes still the run's
+    assert ops.relaunch(None, "isl") == 1 and mine.held() == NAMES
+
+
+def test_the_gate_checks_the_leased_nodes_only_with_lease_store(monkeypatch):
+    from yeto.launch.preflight import gate
+
+    monkeypatch.setattr(gate, "resolve_nodes", lambda entry, inventory: ["as-before"])
+    plain = _args(NodeList([b300(i) for i in range(2)]), gpu="ssh:2x8xB300", dry_run=False)
+    assert gate.gate_nodes(plain, "ssh:2x8xB300", "inv.yaml") == ["as-before"]
+    objects, clock = _objects(), Clock()
+    _held_elsewhere(objects, clock, "b300-0")
+    leased = _args(NodeList([b300(i) for i in range(3)], lease_store=STORE), gpu="ssh:2x8xB300", dry_run=False)
+    mine = _leases("run-b/trainer@one", objects, clock)
+    from yeto.launch import ssh_trainer_island as sti
+
+    monkeypatch.setattr(sti, "trainer_leases", lambda args: mine)
+    assert [n.name for n in gate.gate_nodes(leased, "ssh:2x8xB300", "inv.yaml")] == ["b300-1", "b300-2"]
+    assert mine.held() == ["b300-1", "b300-2"]
+
+
+def test_the_dry_run_names_what_it_checked_only_with_lease_store():
+    from yeto.launch.ssh_trainer_island import trainer_lease_note
+
+    assert trainer_lease_note(_args(NodeList([b300(0), b300(1)])), 2) is None
+    note = trainer_lease_note(_args(NodeList([b300(i) for i in range(3)], lease_store=STORE)), 2)
+    assert note == {"lease_store": STORE, "note": "dry run: no lease taken; checked first 2 of 3 candidate trainer "
+                                                  "node(s); a launch picks the island's nodes by their leases"}
+
+
+# -- review: M5 the trainer dry run's hint ---------------------------------------------
+
+def test_the_trainer_dry_run_says_the_hint_only_for_an_inventory_with_new_fields(caplog, capsys):
+    from yeto.launch.ssh_trainer_island import trainer_lease_hint
+
+    grouped = [SimpleNamespace(name="b300-0", fabric_group="A")]
+    with caplog.at_level(logging.INFO, logger="yeto.launch.node_lease"):
+        trainer_lease_hint(_args(grouped))
+    assert capsys.readouterr().err == f"[launcher] note: {NO_LEASE_HINT}\n" and caplog.messages == []
+
+
+def test_the_customer_inventory_declares_no_new_field():
+    import yaml
+
+    from yeto.launch.node_lease import declares_new_fields
+
+    raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "examples" / "k31"
+                          / "inventory.b300-6x8-baremetal.yaml").read_text())
+    assert "lease_store" not in raw and not any("fabric_group" in n for n in raw["nodes"])
+    assert not declares_new_fields([SimpleNamespace(name=n["name"]) for n in raw["nodes"]])
+
+
+# -- review: L1 expiry by the store's clock --------------------------------------------
+
+class _StoreTimes:
+    """An object store whose listing gives each object's write time and the store's time
+    (``list_meta``, as S3's LastModified and Date): ``store_t`` is the store's clock."""
+
+    def __init__(self, objects):
+        self._objects, self.store_t, self.written = objects, 5_000.0, {}
+
+    def __getattr__(self, name):
+        return getattr(self._objects, name)
+
+    def write(self, key, data):
+        self.written[key] = self.store_t
+        return self._objects.write(key, data)
+
+    def create(self, key, data):
+        made = self._objects.create(key, data)
+        if made:
+            self.written[key] = self.store_t
+        return made
+
+    def list_meta(self, prefix):
+        return [(k, self.written.get(k, 0.0)) for k in self._objects.list(prefix)], self.store_t
+
+
+def test_expiry_follows_the_store_clock_not_the_hosts():
+    objects = _StoreTimes(_objects())
+    behind, reader = Clock(), Clock()
+    behind.t, reader.t = 1.0, 10.0 ** 9
+    a = _leases("run-a", objects, behind)  # the holder's clock is far behind
+    a.acquire("b300-0")
+    # the reader's clock is far ahead: by the hosts' clocks the lease ran out long ago
+    b = _leases("run-b", objects, reader)
+    assert b.holder("b300-0") == "run-a"
+    objects.store_t += 599
+    assert not b.acquire("b300-0").ok
+    objects.store_t += 2  # 601 s of the store's time without a renewal
+    assert b.holder("b300-0") is None and b.acquire("b300-0").took_over
+
+
+def test_without_store_times_the_local_clock_decides():
+    objects, clock = _objects(), Clock()
+    _leases("run-a", objects, clock).acquire("b300-0")
+    clock.t += 601
+    assert _leases("run-b", objects, clock).holder("b300-0") is None
+
+
+# -- review: L3 a store outage past the lease -------------------------------------------
+
+def test_a_store_outage_past_the_lease_marks_the_node_unconfirmed_with_one_alert():
+    objects, clock, events = _objects(), Clock(), []
+    a = _leases("run-a", objects, clock, events=events)
+    a.acquire("b300-0")
+    lock = a._locks["b300-0"]  # noqa: SLF001
+    real = lock.renew
+    lock.renew = lambda: (_ for _ in ()).throw(OSError("store down"))
+    clock.t += 300
+    assert a.renew_due() == [] and a.unconfirmed() == {}  # inside the lease: nothing yet
+    clock.t += 301
+    assert a.renew_due() == ["b300-0"] and a.renew_due() == ["b300-0"]
+    assert list(a.unconfirmed()) == ["b300-0"] and a.held() == ["b300-0"]
+    assert [(n, d.get("level")) for n, d in events] == [(node_lease.UNCONFIRMED_EVENT, "alert")]  # once
+    lock.renew = real
+    assert a.renew_due() == [] and a.unconfirmed() == {}
+    assert events[-1][0] == "node_lease_confirmed"
+
+
+def test_an_unconfirmed_island_lease_is_reported_not_treated_as_lost(tmp_path):
+    from yeto.launch.ssh_trainer_island import SshTrainerIslands
+
+    objects, clock = _objects(), Clock()
+    mine = _leases("run1/trainer", objects, clock)
+    islands = SshTrainerIslands(spec(leases=mine), name="isl", jobs_path=tmp_path / "j.json", ops=FakeCluster(NAMES),
+                                scheduled=False, tape=False)
+    islands.launch(0, None)
+    for lock in mine._locks.values():  # noqa: SLF001
+        lock.renew = lambda: (_ for _ in ()).throw(OSError("store down"))
+    clock.t += 700
+    assert islands.lease_lost() is None and sorted(mine.unconfirmed()) == NAMES
+
+
+# -- review: L4 a store error on an order -----------------------------------------------
+
+def test_a_store_error_on_an_order_is_a_refusal_with_an_event(tmp_path):
+    objects, clock = _objects(), Clock()
+    prov, events = _provider(tmp_path, objects, clock)
+
+    def broken(node):
+        raise OSError("store down")
+
+    prov.leases.acquire = broken
+    with pytest.raises(NodeLeased, match="not confirmed") as caught:
+        prov.order(0)
+    assert error_is(caught.value, REFUSED_ERRORS)  # no provisioning failure for the pool's breaker
+    assert events[-1][0] == "node_lease_store_error" and events[-1][1]["node"] == "node-a"
+    assert prov._rows() == {}  # noqa: SLF001
+
+
+def test_storelock_reclaim_takes_back_only_the_same_holders_lease():
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects, clock = _objects(), Clock()
+    assert StoreLock.acquire(objects, "L", holder="a", clock=clock) is not None
+    assert StoreLock.acquire(objects, "L", holder="b", clock=clock, reclaim=True) is None
+
+
+def test_a_kept_lease_holds_on_the_store_clock_too():
+    objects = _StoreTimes(_objects())
+    a = _leases("run-a", objects, Clock())
+    a.acquire("b300-0")
+    a.keep_all()
+    objects.store_t += 10 ** 6  # by the store's clock the lease file was written long ago
+    assert _leases("run-b", objects, Clock()).holder("b300-0") == "run-a"

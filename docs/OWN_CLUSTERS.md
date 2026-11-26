@@ -172,3 +172,66 @@ yeto run up --config run.own-sampler-pool.json --dry-run
   image, as for an own trainer. The store endpoint is the one the node's
   sampler takes: the `AWS_ENDPOINT_URL` of `r2_env_file` (AWS S3 in the file's
   region when it is empty).
+
+## Node leases
+
+Several runs can share one inventory. Add a `lease_store` at the top of the
+inventory, and each node is leased to one run at a time:
+
+```yaml
+lease_store: s3://BUCKET/yeto-node-leases/site-a   # or oss://..., or a shared directory
+nodes:
+  - name: b300-0
+    ...
+```
+
+- Before an `ssh:` trainer island or an ssh sampler pool starts on a node, it takes
+  the node's lease in the store (`nodes/<node>/lease/`). A node another run holds is
+  skipped.
+- When the inventory has `lease_store`, it may list more trainer nodes than the
+  island needs. The launch picks nodes in this order: the nodes this run already
+  holds first, then free nodes in inventory order. If too few nodes are free, it
+  waits. Every 5 minutes it prints a line with how long it has waited and writes a
+  `node_lease_waiting` event. Waiting ends at the run's STOP flag (`yeto stop-run`) or
+  after `--rl-node-lease-wait-s` (default 3600 s).
+- If the island's jobs journal holds an earlier incarnation, a restarted launch uses
+  that incarnation's nodes again. If another run holds one of those nodes, the launch
+  is refused; the island never moves to other nodes this way.
+- The launch gate's preflight checks the nodes the leases picked. A dry run takes no
+  lease: its `ssh_island.node_leases` entry says it checked the first candidates.
+- A lease runs for 10 minutes past its last renewal. The launcher renews it from a
+  keeper thread and on every supervision tick (the island watch, the pool's ticket
+  reads). If the store does not answer past a lease's end, the node is marked
+  `unconfirmed` (an alert event) and is never treated as free.
+- A lease that ran out, for example because its launcher died, may be taken over by
+  another run. Before the takeover, the claimer checks over SSH whether anything of
+  the previous run still runs on the node: its trainer containers or process groups,
+  or its samplers (by their start marker). If something does, or if the node does not
+  answer, the takeover is refused and a `node_lease_blocked` event is written.
+  A successful takeover writes `node_lease_taken_over` under `nodes/<node>/events/`.
+- Holders are named `<run>/trainer@<identity>` and `<run>/pool@<identity>`. The
+  identity is a nonce made at the run's first launch and kept in the run directory
+  (`node-leases.json`; a pool on the store control plane keeps it in the run store).
+  Only the same identity takes a running lease back, so two runs with the same name
+  on different machines never share a node.
+- When a resident island's release is confirmed, its leases are released. A launcher
+  that ends with `--keep`, or whose release was not confirmed, keeps the leases
+  without expiry. They are then released by `yeto cleanup` (after it stopped the
+  island), by `yeto cluster release-node`, or by a restarted launcher of the same run.
+
+Clocks: on an `s3://` lease store, expiry is computed from the store's own times (the
+lease object's `LastModified` and the listing's `Date`). On a store that gives no
+such times (a directory, `oss://`), the holder's clock writes the lease end and the
+reader's clock judges it. All hosts must then run NTP, with clock skew well below
+the 10-minute lease.
+
+The store must create objects atomically (`If-None-Match: *`); a store found
+without it is refused.
+
+Without `lease_store`, nothing is leased and behaviour is as before. An ssh pool's
+`--dry-run` notes this once. A trainer dry run notes it only when the inventory
+uses another own-cluster field (`fabric_group`).
+
+Known follow-up: the nodes do not renew their own leases. When the launcher is gone,
+a node stays out of other runs only while its lease is kept, or while the takeover
+check finds the old run's processes on it.
