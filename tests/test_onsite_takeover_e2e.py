@@ -52,6 +52,8 @@ from yeto.rl.engine.object_store import DirectoryObjectStore
 
 KEY_VALUE = "onsite-takeover-e2e-key"
 LOCK_TTL_S = 3.0  # the island launches' records lock lease (120 s in a launch; short here)
+START_GRACE_S = 2.0  # a launch's start grace before it may be taken over (600 s in a run; short here)
+MARGIN_S = 0.5  # fleet.takeover_margin_s (60 s by default; short here)
 
 
 class Supervised(SyncerTrainers):
@@ -106,6 +108,9 @@ def test_the_control_plane_moves_host_and_no_island_restarts(syncer_binary, tmp_
     path.write_text(json.dumps(doc))
     objects = DirectoryObjectStore(tmp_path / "store")
     monkeypatch.setattr(up.Run, "_objects", lambda self: objects)
+    from yeto.rl import trainer_worker
+
+    monkeypatch.setattr(trainer_worker, "START_GRACE_S", START_GRACE_S)
 
     total_steps, move_at = 10, 3
     process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *POOL, total_steps=total_steps,
@@ -117,7 +122,7 @@ def test_the_control_plane_moves_host_and_no_island_restarts(syncer_binary, tmp_
 
     # host A: run up with its state, its trainer worker starts the island launches
     a = up.Run(up.load_config(str(path)), state_root=tmp_path / "host-a")
-    a.start_state_mirror(objects)
+    a.start_state_mirror(objects, host="host-a")
     a.state.update({"run_t0": time.time(), "trainer_t0": time.time(), "steps": {"first_group": "t"}})
     a.begin_up()
     a.mirror_state(force=True)  # its periodic mirror
@@ -160,11 +165,11 @@ def test_the_control_plane_moves_host_and_no_island_restarts(syncer_binary, tmp_
         state["hellos"] = {k: id(c) for k, c in islands.clients.items()}
         shutil.rmtree(tmp_path / "host-a")  # its local run directory is gone with it
         b = up.Run(up.load_config(str(path)), state_root=tmp_path / "host-b")
-        b.start_state_mirror(objects)  # restored from the run store
+        b.start_state_mirror(objects, host="host-b")  # restored from the run store
         assert b.state["steps"]["first_group"] == "t" and "procs" not in b.state
         launches = Adopting(islands)
         w = b.attach_trainer_worker(FakeController(), objects, ops=launches)
-        w.host = "host-b"
+        w.host, w.takeover_margin_s = "host-b", MARGIN_S
         state["b"], state["moved"] = (w, launches), True
 
     def poll():

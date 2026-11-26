@@ -128,7 +128,7 @@ PLAN_OBJECT = f"{FLEET_DIR}/plan.json"  # the plan in the run store
 DISPENSE_DIR = f"{FLEET_DIR}/dispense"  # the fleet's task ledger root (store_dispense.FLEET_DISPENSE_DIR)
 DISPENSE_MODES = ("fleet", "island")
 FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h", "fixed_roster", "min_islands",
-                        "island_lease_s", "launch", "max_islands", "syncer_service"})
+                        "island_lease_s", "launch", "max_islands", "syncer_service", "takeover_margin_s"})
 # fleet.syncer_service: the host of an on-site syncer run as a service (``yeto fleet service``):
 # a host name or IPv4 / IPv6 address the islands dial, no port (the syncer's ports are its own)
 SYNCER_SERVICE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*|\[?[0-9A-Fa-f:]+\]?")
@@ -535,6 +535,7 @@ def _fleet_section(cfg: dict[str, Any]) -> tuple[list[str], str]:
     if "max_islands" in section and launch != LAUNCH_PER_ISLAND:
         raise _err("fleet.max_islands applies to fleet.launch per_island (islands added while the fleet trains)")
     syncer_service(section)
+    takeover_margin_s(section)
     return argv, str(dispense)
 
 
@@ -552,6 +553,24 @@ def syncer_service(section: dict[str, Any]) -> str | None:
         raise _err(f"fleet.syncer_service must be the syncer host's name or address the islands dial, without a "
                    f"port (got {host!r})")
     return host
+
+
+DEFAULT_TAKEOVER_MARGIN_S = 60.0
+
+
+def takeover_margin_s(section: dict[str, Any]) -> float:
+    """``fleet.takeover_margin_s`` (validated; default :data:`DEFAULT_TAKEOVER_MARGIN_S`): an
+    on-site control plane (``fleet.syncer_service``) takes a lost host's island launch over
+    only this long after its records lock's lease ran out (the two hosts' clocks may differ
+    by up to this much)."""
+    value = section.get("takeover_margin_s")
+    if value is None:
+        return DEFAULT_TAKEOVER_MARGIN_S
+    if section.get("syncer_service") is None:
+        raise _err("fleet.takeover_margin_s applies to a fleet with fleet.syncer_service (an on-site control plane)")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise _err(f"fleet.takeover_margin_s must be a number of seconds >= 0 (got {value!r})")
+    return float(value)
 
 
 def roster_options(cfg: dict[str, Any]) -> tuple[bool, int, float | None]:

@@ -160,7 +160,7 @@ WorkingDirectory=-/var/tmp/yeto/r-control
 ExecStart=/opt/yeto-venv/bin/python -m yeto.cli fleet service-run --role control --config /srv/yeto/run.json
 Restart=on-failure
 RestartSec=30
-RestartPreventExitStatus=10 75
+RestartPreventExitStatus=10 75 76
 SuccessExitStatus=143
 KillMode=process
 TimeoutStopSec=300
@@ -173,7 +173,7 @@ WantedBy=multi-user.target
 def test_the_control_unit_snapshot():
     assert fs.unit_text(spec("control")) == CONTROL_UNIT
     # a configuration error and run up's exit 1, mapped; a refusal before ordering (2) restarts, without a limit
-    assert fs.CONTROL_PREVENT == (fs.CONFIG_EXIT, fs.CONTROL_DECIDED_EXIT) == (10, 75)
+    assert fs.CONTROL_PREVENT == (fs.CONFIG_EXIT, fs.CONTROL_DECIDED_EXIT, fs.CONTROL_FENCED_EXIT) == (10, 75, 76)
     assert "StartLimitIntervalSec=0\n" in CONTROL_UNIT and "StartLimitBurst" not in CONTROL_UNIT
 
 
@@ -1050,6 +1050,7 @@ def test_the_control_service_drains_when_run_up_ends_the_run_and_keeps_the_pools
     path = onsite_config(tmp_path)
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
     objects, made = DirectoryObjectStore(tmp_path / "store"), []
+    monkeypatch.setattr(up.Run, "_objects", lambda self, *a, **kw: objects)  # the run store (its state mirror)
 
     def pool(self):
         self.controller = recording_controller(bool(up.rollout_section(self.cfg).get("drain_on_exit", True)))

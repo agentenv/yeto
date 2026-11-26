@@ -633,8 +633,9 @@ unit is started at most 5 times an hour (`StartLimitBurst`).
 | Unit | Exit | What it means | Restarted |
 |---|---|---|---|
 | control | 0 | `run up` ended the run | no; ended marker |
-| control | 75 | `run up` exited 1: it ended the run after a breaker trip or a failure it handled | no (`RestartPreventExitStatus=10 75`); ended marker |
-| control | 10 | a configuration error (the run config does not load, `rollout.drain_on_exit: true`, not an on-site control plane, no `YETO_ISLAND_HMAC_KEY` or no run store credentials in the environment file) | no: fix the run config or the environment file, then `systemctl start` |
+| control | 75 | `run up` exited 1: it ended the run after a breaker trip or a failure it handled | no (`RestartPreventExitStatus=10 75 76`); ended marker |
+| control | 76 | another control host drives the run now: it wrote run up's state in the run store after this one, or this one was cut off from the run store (see "Taking over from a lost control host") | no (`RestartPreventExitStatus=10 75 76`); no ended marker: the run goes on there |
+| control | 10 | a configuration error (the run config does not load, `rollout.drain_on_exit: true`, not an on-site control plane, no `YETO_ISLAND_HMAC_KEY` or no run store credentials in the environment file, a sky pool without `fleet.sky_api_server` or a National Compute pool under an on-site control plane) | no: fix the run config or the environment file, then `systemctl start` |
 | control | 2 | `run up` refused before ordering anything (a preflight that failed, another `run up` of the run) | yes, every 30 s, without limit: a refusal orders nothing |
 | control | 70, a signal | a crash | yes |
 | syncer | 0 | the run is finished | no; ended marker |
@@ -743,27 +744,58 @@ When the control host is lost (the machine is gone, or its disk with `yeto run u
 start the control unit on another host. `yeto run up` there takes the run over:
 
 1. **The run's state comes from the run store.** With an on-site control plane, `run up`
-   mirrors part of its state to `fleet/control/up-state.json` in the run store whenever it
-   saves that state, at most every 30 s. The mirror is a fixed list of fields: the run's
-   start times, the steps it finished, its stops, breaker trips and its spend estimate. It holds no PID, no log path,
-   no credential and no island HMAC key. A `run up` with no state directory for the run
-   starts from this mirror. The old host's processes are dropped (a PID means nothing on
-   another host), and its open run-up period ends at the last time it was seen. The spend
-   and the run's deadlines go on from there: never from zero, never counted twice.
-2. **Each island launch is taken over once its lease ran out.** An island launch holds its
+   mirrors part of its state to `fleet/control/up-state.json` in the run store when it
+   saves that state, at most every 30 s, and at once after a stop, a breaker trip and the
+   end of the run. The mirror is written from a background thread: a store that does not
+   answer never holds the monitor (a forced write waits for it at most 20 s).
+   - It is a fixed list of fields: the run's start times, the steps it finished, its stops,
+     breaker trips and its spend estimate. It holds no PID, no log path, no credential and
+     no island HMAC key. A removed pool keeps only its billing fields there (name, config
+     path, price, shard base, removal time), never its pool config.
+   - A `run up` with no state directory for the run starts from the mirror. So does a
+     `run up` whose local state is older than the mirror another host wrote (the local file
+     is kept as `state.json.stale`).
+   - The old host's processes are dropped (a PID means nothing on another host). Its open
+     run-up period ends at the mirror's time plus 30 s, never later than now. The spend and
+     the run's deadlines go on from there: never from zero, never counted twice. The syncer
+     service's hours come from its own heartbeat, whichever host `run up` runs on.
+2. **One control host at a time.** Each mirror write carries its writer (host and a nonce of
+   that `run up`) and a sequence number, claimed by an exclusive create. A starting `run up`
+   takes the number after the mirror's. A `run up` that finds the mirror written by another
+   writer with a higher number writes nothing more. It records a `control_fenced` event,
+   stops its monitor, its breakers and the trainer worker (no fleet STOP is forwarded),
+   detaches the pools without draining them, and exits 76. The control unit never restarts
+   after 76 and writes no ended marker: the run goes on on the other host. The same happens
+   when another controller writes the fleet (`fleet/applied.json`).
+3. **Each island launch is taken over once its lease ran out.** An island launch holds its
    records lock (`fleet/trainers/<k>/lock`, a 120 s lease it renews) while its supervisor
-   lives. The trainer worker of the new host takes an island over only when that lease has
-   ended, and only through an exclusive create of a claim on it
-   (`fleet/trainers/<k>/takeover/<token>.json`). Of two control hosts that try at once, one
-   takes the island over and the other leaves it alone. While the lease still runs, the
-   worker logs an error naming the old host and changes nothing.
-3. **The same launch is started again, and it adopts the running island.** The new host
+   lives. The trainer worker of the new host takes an island over only:
+   - once the fleet's syncer is known;
+   - once that lease ended at least `fleet.takeover_margin_s` ago (default 60 s; the two
+     hosts' clocks may differ by that much);
+   - once the island's launch (or its last takeover) started at least 10 minutes ago, so a
+     launch that has not claimed its lock yet is waited for;
+   - by claiming the lock itself. The new token fences the old launch: its next renewal
+     fails. A lease that came back meanwhile, or another host's claim, makes the takeover
+     fail, and the worker logs an error and changes nothing. The claim is released at once,
+     and the launch started next claims the token after it. A note is written to
+     `fleet/trainers/<k>/takeover/<token>.json`.
+4. **The same launch is started again, and it adopts the running island.** The new host
    starts the same launch (the same prefix and incarnation, no relaunch counted). A Modal
    island is adopted by the function call id in its store record. For an SSH island, the
-   launch first writes the island's job journal from its store record, then asks every
-   node over SSH whether that incarnation still runs. It reattaches when every node runs
-   it. It refuses to start another copy while a node does not answer or runs something
-   else. No island process restarts, and the syncer sees no island leave.
+   launch first writes the island's job journal from its store record (only once it holds
+   the records lock), then asks every node over SSH whether that incarnation still runs. It
+   reattaches when every node runs it. It refuses to start another copy while a node does
+   not answer or runs something else. No island process restarts, and the syncer sees no
+   island leave. The island keeps its node lease identity (kept in the run store), so its
+   nodes' leases stay its own.
+5. **A moving or stopping island finishes its move or removal.** Its launch is started again
+   with its STOP kept. It may only reattach: it reads the STOP and releases the island, and
+   the move or the removal goes on once it ended. If it cannot reattach (the incarnation does
+   not run on every node, or a node does not answer), it neither releases nor starts
+   anything. The island is then blocked: an `island_takeover_blocked` event, its records
+   kept, no new incarnation. Check its nodes, release it by hand, then remove and add the
+   island again.
 
 The island HMAC key is read from the environment file on the new host. A key that is
 missing there stops `run up` before anything starts. A key that is not the one the islands

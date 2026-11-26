@@ -93,6 +93,8 @@ from .ssh_trainer_island import (
 from .trainer_island import read_jobs
 
 RESIDENT_DIR = "ssh-islands"  # under the run dir
+# an island launch that may only reattach and cannot (yeto.rl.trainer_worker.TAKEOVER_BLOCKED_MARKER)
+TAKEOVER_BLOCKED_MARKER = "[yeto-takeover-blocked]"
 UNREACHABLE_POLLS = 3
 MAX_REFOLLOWS = 5
 WORKER_EXIT_GRACE_S = 120.0
@@ -194,8 +196,12 @@ class SshIslandOps:
                  kill_grace_s: int = KILL_GRACE_S, clock: Callable[[], float] = time.monotonic,
                  health_every_s: float = HEALTH_EVERY_S, worker_exit_grace_s: float = WORKER_EXIT_GRACE_S,
                  unreachable_polls: int = UNREACHABLE_POLLS, max_refollows: int = MAX_REFOLLOWS,
-                 log: Callable[[str], None] | None = None) -> None:
+                 log: Callable[[str], None] | None = None, reattach_only: frozenset[str] | set[str] = frozenset()) -> None:
         self.run_id = str(run_id)
+        # islands this launch may only reattach to (an on-site control plane took a moving or
+        # stopping island over: its journal came from the store, its STOP is set): a start
+        # that would release or launch an incarnation is refused (TAKEOVER_BLOCKED_MARKER)
+        self.reattach_only = frozenset(reattach_only)
         self.journal_dir = Path(journal_dir)
         self.events_dir = None if events_dir is None else Path(events_dir)
         self.ops = ops or SshOps()
@@ -265,11 +271,23 @@ class SshIslandOps:
         rec = self.islands[name]
         self._take_lock(rec)
         jobs = read_jobs(self.jobs_path(name))
+        if not jobs and name in self.reattach_only:
+            raise SshIslandError(f"{TAKEOVER_BLOCKED_MARKER} ssh: island {name}: taken over while moving or stopping, "
+                                 "but no incarnation is journaled here: nothing to reattach to, nothing started")
         if not jobs:
             return self._launch(rec, 0)
         last = max(int(k) for k in jobs)
         states = [rec.islands.node_state(last, rank) for rank in range(len(rec.spec.nodes))]
         silent = [rec.spec.nodes[r].name for r, st in enumerate(states) if st is None]
+        if name in self.reattach_only and (silent or not (all(st.running for st in states) or (
+                states[0].state == "exited" and states[0].rc == 0))):
+            detail = ", ".join(f"{rec.spec.nodes[r].name}={'silent' if st is None else st.state}"
+                               for r, st in enumerate(states))
+            why = (f"{TAKEOVER_BLOCKED_MARKER} ssh: island {name}: taken over while moving or stopping, its incarnation "
+                   f"{last} is not running on every node ({detail}); this launch may only reattach to it, so it "
+                   "neither releases nor starts anything")
+            self.log(f"[launcher] {why}")
+            raise SshIslandError(why)
         if silent:
             raise SshIslandError(
                 f"ssh: island {name}: incarnation {last} is recorded in {self.jobs_path(name)}, and nodes "

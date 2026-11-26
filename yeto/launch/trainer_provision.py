@@ -437,7 +437,8 @@ def start_resident_ssh(args, tasks, names, results, errors, events_dir, collecto
         return sink
 
     ops = SshIslandOps(run_id=args.cluster_prefix, journal_dir=runs.run_dir(args.cluster_prefix) / RESIDENT_DIR,
-                       events_dir=events_dir, sink_for=sink_for)
+                       events_dir=events_dir, sink_for=sink_for,
+                       reattach_only=frozenset(getattr(args, "_reattach_only", ()) or ()))
     for name in sorted(names):
         ops.add(name, tasks[name])
         try:

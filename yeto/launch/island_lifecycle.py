@@ -467,8 +467,8 @@ def lock_prefix(island: int) -> str:
 
 
 def takeover_key(island: int, token: int) -> str:
-    """The claim of the control host that takes island ``island``'s launch over once the
-    lease of lock token ``token`` ran out (created once: one claimer wins)."""
+    """The note of the control host that took island ``island``'s launch over with records
+    lock token ``token`` (information only: the lock's token is the fence)."""
     return f"{STATE_DIR}/{int(island)}/takeover/{int(token):08d}.json"
 
 
