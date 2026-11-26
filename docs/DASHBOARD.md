@@ -225,7 +225,22 @@ store and the offset the copy starts at. A restarted launcher of the run goes on
 from that offset; a later run of the name starts at the file's end, and a launch
 that does not copy the file voids the record (no store from the file's end on).
 `yeto down` copies the `island_stop` lines it appends for islands a killed
-launcher left open, only into the store the record of this run names. The copy is observation only: a failed upload is a
+launcher left open, only into the store the record of this run names; the run is
+named by its directory name and its registry start, so a copy of a run directory
+under another name never copies into the original's store. A record that does not
+parse (not JSON, a field missing, a start that is not a byte offset) is a `WARN`
+line and counts as none: the next copy starts at this run's first line (the first
+with a `time_unix` at or after the run's registry start), or at the file's end
+when that start is unknown, so an earlier run's lines never reach this store, and
+`yeto down` copies nothing for it; it never fails a
+launch. An island launch of a per-island fleet that its trainer worker starts
+again is a new run (the new incarnation's cluster prefix and registry entry), so
+its copy starts afresh. A launcher killed outright (`kill -9`) may leave the lines
+of its last upload interval (under 30 s) only in the local file: they are
+observation data, and nothing else depends on them. A run that was already
+running when yeto was upgraded to this rule has a record without its directory
+name: after its launcher restarts, the lines of the last interval before it (under
+30 s) and the `island_stop` lines of its `yeto down` stay in the local file only. The copy is observation only: a failed upload is a
 `WARN` line, retried with the next chunk, and the launcher's end (and `yeto down`)
 waits at most 15 s for the last one. A launch of one trainer island uploads
 nothing, as before. `--store` reads every folder next to the island tapes, and a

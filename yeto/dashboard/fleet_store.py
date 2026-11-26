@@ -14,9 +14,11 @@ the complete lines added since the last upload become one new object
 id ``k``) and ``fleet`` for a launch of the whole fleet; each launcher process adds its
 own folder (a random nonce: two launchers of one host never share one, even with the same
 pid in the same second), so no two write the same key. The copy covers this run's part of
-the local file (:func:`copy_start`: a run directory reused by another run starts at the
-file's end); a launcher restarted for the same run uploads its earlier lines again, and the
-readers fold each record once. ``yeto down`` copies the ``island_stop`` lines it appends
+the local file only, as ``fleet.store.json`` records it (:func:`copy_start`, see "which part
+of the local file belongs to this store" below): a run directory reused by another run, or
+copied under another name, starts at the file's end; a launcher restarted for the same run
+uploads its earlier lines again, and the readers fold each record once. ``yeto down`` copies
+the ``island_stop`` lines it appends into the store the record of its run names
 (:func:`upload_appended`).
 
 Observation only: a failed upload is a WARN on stderr and is retried with the next
@@ -78,7 +80,13 @@ def incarnation(*, host: str | None = None, pid: int | None = None, now: float |
 # record (written before this copy existed), starts at the file's end, so an earlier run's
 # lines never reach this run's store (the rule of ``tape_upload.syncer_uploaders(from_end=True)``).
 # A launch that does not copy the file voids the record (:func:`copy_off`): no store, the file's
-# end. ``yeto down`` copies its lines only for the run the record names.
+# end. ``yeto down`` copies its lines only for the run the record names. The run is named by
+# its directory name and registry start (``<name>@<started_at>``), so a copied run directory
+# is another run. A record that does not parse is a WARN and counts as none, but the copy
+# then starts at this run's first line (the first with ``time_unix`` at or after the run's
+# registry start), or at the file's end when that start is unknown: fewer lines rather than
+# another run's; ``yeto down`` copies nothing for it. The record is written whole (a temporary
+# file renamed over it), so a crash mid-write leaves the previous record or the new one.
 
 COPY_RECORD = "fleet.store.json"
 COPY_SCHEMA = "yeto.fleet.log-copy/v1"
@@ -88,22 +96,56 @@ def copy_record_path(path: str | os.PathLike) -> Path:
     return Path(path).with_name(COPY_RECORD)
 
 
-def read_copy_record(path: str | os.PathLike) -> dict | None:
+def _load_copy_record(path: str | os.PathLike) -> tuple[dict | None, str | None]:
+    """(the copy record, None), (None, None) without one, or (None, why) for a record that is
+    not one this module writes (not JSON, a field missing, a start that is no byte offset)."""
     try:
-        doc = json.loads(copy_record_path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return doc if isinstance(doc, dict) and doc.get("schema") == COPY_SCHEMA and doc.get("store") else None
+        text = copy_record_path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, f"not readable ({type(exc).__name__})"
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None, "not JSON"
+    if not isinstance(doc, dict):
+        return None, "not a JSON object"
+    missing = [key for key in ("schema", "store", "start", "run") if key not in doc]
+    if missing:
+        return None, f"no {', '.join(missing)}"
+    if doc["schema"] != COPY_SCHEMA:
+        return None, f"schema {str(doc['schema'])[:40]!r}"
+    if type(doc["start"]) is not int or doc["start"] < 0:
+        return None, f"start {str(doc['start'])[:40]!r} is not a byte offset"
+    if doc["store"] is not None and not isinstance(doc["store"], str):
+        return None, "store is not a string"
+    return doc, None
 
 
-def run_identity(name: str) -> float | None:
-    """The run of ``name`` the copy record names: its run registry ``started_at`` (set anew by
-    every run of the name, kept by its launcher restarts and its ``yeto down``), or None."""
+def _corrupt(why: str, then: str, log: Callable[[str], None]) -> None:
+    log(f"WARN: fleet.jsonl store copy: {COPY_RECORD} is corrupt ({why}): taken as no record; {then}")
+
+
+def read_copy_record(path: str | os.PathLike, *, log: Callable[[str], None] | None = None) -> dict | None:
+    """The copy record of ``path`` when it names a store; None without one, for a voided one
+    (:func:`copy_off`) and for a corrupt one (a WARN line)."""
+    doc, why = _load_copy_record(path)
+    if why is not None:
+        _corrupt(why, "nothing is copied for it", log or _stderr)
+    return doc if doc is not None and doc.get("store") else None
+
+
+def run_identity(name: str) -> str | None:
+    """The run of ``name`` the copy record names: ``<name>@<started_at>``, the run registry's
+    ``started_at`` (set anew by every run of the name, kept by its launcher restarts and its
+    ``yeto down``) with the name, so a run directory copied under another name is not its
+    original; None without a registry entry."""
     try:
         from yeto import runs  # noqa: PLC0415
 
         started = (runs.load_run(name) or {}).get("started_at")
-        return float(started) if started is not None else None
+        return f"{name}@{float(started)!r}" if started is not None else None
     except Exception:  # noqa: BLE001 - telemetry never stops a launch or a down
         return None
 
@@ -116,29 +158,85 @@ def _size(p: Path) -> int:
 
 
 def _write_record(p: Path, doc: dict) -> None:
+    """The record, written whole: a temporary file next to it renamed over it."""
+    record = copy_record_path(p)
+    tmp = record.with_name(f".{record.name}.{os.getpid()}.{secrets.token_hex(3)}.tmp")
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        copy_record_path(p).write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, record)
     except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         _stderr(f"[launcher] WARN: fleet.jsonl store copy: {COPY_RECORD} not written ({type(exc).__name__})")
 
 
-def copy_start(path: str | os.PathLike, store: str, *, learner_id: Any = None, run: float | None = None) -> int:
+def _started_of(run: str | None) -> float | None:
+    """The registry start in a :func:`run_identity` (None: no identity, or not one)."""
+    try:
+        return float(str(run).rsplit("@", 1)[1]) if run else None
+    except (IndexError, ValueError):
+        return None
+
+
+def _first_line_at(p: Path, started: float, size: int) -> int:
+    """The byte offset of the first complete line of ``p`` whose ``time_unix`` is at or after
+    ``started`` (this run's first line: an earlier run's lines precede it), else ``size``."""
+    offset = 0
+    with p.open("rb") as fh:
+        for line in fh:
+            if offset + len(line) > size or not line.endswith(b"\n"):
+                break
+            try:
+                t = json.loads(line).get("time_unix")
+            except (ValueError, AttributeError):
+                t = None
+            if isinstance(t, (int, float)) and not isinstance(t, bool) and t >= started:
+                return offset
+            offset += len(line)
+    return size
+
+
+def copy_start(path: str | os.PathLike, store: str, *, learner_id: Any = None, run: str | None = None,
+               log: Callable[[str], None] | None = None) -> int:
     """The byte offset of ``path`` this launch's copy into ``store`` starts at (see above),
     recorded for the next launch and for ``yeto down``. ``run``: :func:`run_identity` (None:
-    the file's end). Never raises (a record that cannot be written: the offset still holds for
-    this launch)."""
+    the file's end). A corrupt record (a WARN) is taken as none: the copy starts at this run's
+    first line (:func:`_corrupt_start`). Never raises (a record that cannot be written: the
+    offset still holds for this launch)."""
     p = Path(path)
     size = _size(p)
-    known = read_copy_record(p)
-    same = known is not None and known.get("store") == str(store) and run is not None and known.get("run") == run
-    start = min(int(known.get("start") or 0), size) if same else size
+    try:
+        known, why = _load_copy_record(p)
+        if why is not None:
+            start = _corrupt_start(p, why, run, size, log or _stderr)
+        else:
+            same = (known is not None and known.get("store") == str(store) and run is not None
+                    and known.get("run") == run)
+            start = min(known["start"], size) if same else size
+    except Exception as exc:  # noqa: BLE001 - telemetry never stops a launch
+        _corrupt(type(exc).__name__, "the copy starts at the file's end", log or _stderr)
+        start = size
     _write_record(p, {"schema": COPY_SCHEMA, "store": str(store), "start": start, "run": run,
                       "learner_id": learner_id if lane(learner_id) != FLEET_LANE else None})
     return start
 
 
-def copy_off(path: str | os.PathLike, *, run: float | None = None) -> None:
+def _corrupt_start(p: Path, why: str, run: str | None, size: int, log: Callable[[str], None]) -> int:
+    """Where the copy of a run whose record is corrupt starts: this run's first line (by its
+    registry start), else (no start known) the file's end. Never another run's lines."""
+    started = _started_of(run)
+    if started is None:
+        _corrupt(why, "this run's start is unknown, so the copy starts at the file's end", log)
+        return size
+    start = _first_line_at(p, started, size)
+    _corrupt(why, f"the copy starts at this run's first line (byte {start}: time_unix at or after its start)", log)
+    return start
+
+
+def copy_off(path: str | os.PathLike, *, run: str | None = None) -> None:
     """A launch that does not copy ``path`` (no store, no island records, the copy turned
     off): its record, if any, names no store from the file's end on, so neither ``yeto down``
     nor a later launch of another run copies this launch's lines into an earlier run's
@@ -190,7 +288,7 @@ def start_uploader(objects: Any, path: str | os.PathLike, *, learner_id: Any = N
         return None
 
 
-def upload_appended(path: str | os.PathLike, offset: int, *, run: float | None = None, objects: Any = None,
+def upload_appended(path: str | os.PathLike, offset: int, *, run: str | None = None, objects: Any = None,
                     timeout_s: float | None = None, log: Callable[[str], None] = _stderr) -> bool:
     """``yeto down``: the lines appended to ``path`` from ``offset`` on (the ``island_stop``
     of the islands a killed launcher left open) into the store its copy record names, in the
@@ -199,7 +297,7 @@ def upload_appended(path: str | os.PathLike, offset: int, *, run: float | None =
     or without new lines. A failure is a WARN; never raises. Returns True when the store has
     every new line (or there is nothing to copy)."""
     try:
-        record = read_copy_record(path)
+        record = read_copy_record(path, log=log)
         if record is None or run is None or record.get("run") != run:
             return True
         size = Path(path).stat().st_size

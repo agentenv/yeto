@@ -38,6 +38,7 @@ from __future__ import annotations
 import contextlib
 import io
 import re
+import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -293,11 +294,18 @@ def shape_problems(islands: list[LaunchSession], running: Iterable[LaunchSession
             continue
         peer = next((p for p in peers if p.shape != island.shape), None)
         if peer is not None:
+            # a shape-free layout takes the parallel shape out of the contract, not the placement
+            # a Miles full-parameter island binds: on other machines it would not help
+            placed = island.placement is not None and peer.placement is not None and island.placement != peer.placement
+            way_out = ("Give every island the same nodes x GPUs per node and parallel flags (these full-parameter "
+                       "islands also bind their placement, so --rl-sync-layout shape-free does not help here)"
+                       if placed else
+                       "Give every island the same shape (the same nodes x GPUs and parallel flags), or set "
+                       "--rl-sync-layout shape-free for the whole fleet")
             out.append(f"{_where(island)}: trainer shape {_shape(island.shape)}, {_where(peer)} trains on "
                        f"{_shape(peer.shape)}: the shape-bound full-parameter layout names every tensor by its "
-                       "rank's TP/PP/EP/CP/DP position, so the syncer refuses this island's HELLO (layout "
-                       "mismatch). Give every island the same shape (the same nodes x GPUs and parallel flags), "
-                       "or set --rl-sync-layout shape-free for the whole fleet")
+                       f"rank's TP/PP/EP/CP/DP position, so the syncer refuses this island's HELLO (layout "
+                       f"mismatch). {way_out}")
         else:
             peers.append(island)
     return out
@@ -416,15 +424,23 @@ def problems(syncer: LaunchSession, islands: Iterable[LaunchSession]) -> list[st
     return out
 
 
+ALLOW_UNPARSABLE_RUNNING = "--allow-unparsable-running"
+
+
 def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_epoch: int | None = None,
-          prepare: Callable[[Any], None] | None = None, running: Iterable[dict[str, Any]] = ()) -> None:
+          prepare: Callable[[Any], None] | None = None, running: Iterable[dict[str, Any]] = (),
+          allow_unparsable_running: bool = False) -> list[str]:
     """Raise ValueError naming every disagreement between the syncer launch (``syncer_argv``)
     and the island launches of ``members`` (trainer members of the desired state), each
     compiled with the syncer record's term (``syncer_epoch``; None: the syncer launch's),
     and between the backend identities of ``members`` and ``running`` (the trainer
     members whose launches hold the fleet's running session, each with the argv it was
-    started with as ``launch_argv`` when known; compared with only: one whose launch does
-    not compile refuses the check, it cannot be compared)."""
+    started with as ``launch_argv`` when known; compared with only). A running launch that
+    does not compile cannot be compared with and refuses the check; for a recorded
+    ``launch_argv`` (written when that incarnation started, so a changed config does not
+    change it) ``allow_unparsable_running`` (:data:`ALLOW_UNPARSABLE_RUNNING`) makes that a
+    WARN and leaves the island out of the comparison. Returns the names of the running
+    islands left out that way (empty: every one was compared)."""
     from yeto.rl import island_launches as il  # noqa: PLC0415
 
     try:
@@ -440,18 +456,29 @@ def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_e
         except (OSError, ValueError) as error:  # json.JSONDecodeError is a ValueError
             raise ValueError(f"island {member.get('name')} (learner {member.get('learner_id')}): its launch "
                              f"refuses its options: {type(error).__name__}: {error}") from None
-    held = []
+    held, skipped = [], []
     for member in running:  # ``launch_argv``: the argv the island was started with (as recorded)
         try:
             argv = member.get("launch_argv") or il.launch_argv(member, syncer=record)
             held.append(launch_session([str(a) for a in argv], str(member.get("name")), prepare=prepare))
         except (OSError, ValueError) as error:
-            raise ValueError(f"island {member.get('name')} (learner {member.get('learner_id')}), which holds the "
-                             f"running session: its launch{' as started' if member.get('launch_argv') else ''} "
-                             f"does not compile ({type(error).__name__}: {error}), so the island cannot be "
-                             "compared with it; fix that island's configuration (or remove it) first") from None
+            where = f"island {member.get('name')} (learner {member.get('learner_id')}), which holds the running session"
+            why = f"{type(error).__name__}: {error}"
+            if not member.get("launch_argv"):
+                raise ValueError(f"{where}: its launch does not compile ({why}), so the island cannot be compared "
+                                 "with it; fix that island's configuration (or remove it) first") from None
+            name = member.get("island_name") or member.get("name")
+            text = (f"{where}: its launch as started does not compile ({why}). That launch is its trainer worker "
+                    "record, written when the incarnation started: a changed config does not change it")
+            if not allow_unparsable_running:
+                raise ValueError(f"{text}. Pass {ALLOW_UNPARSABLE_RUNNING} to check without it (a WARN), or stop or "
+                                 f"remove that island first (yeto fleet island remove --name {name})") from None
+            print(f"fleet session: WARN: {text}; {ALLOW_UNPARSABLE_RUNNING}: the island is left out of the "
+                  "comparison", file=sys.stderr)
+            skipped.append(str(name))
     found = (problems(syncer, islands) + identity_problems(syncer, islands, held) + shape_problems(islands, held)
              + placement_problems(islands, held))
     if found:
         raise ValueError("the fleet's launches do not agree on the syncer session (the syncer would refuse "
                          "these islands at HELLO): " + "; ".join(found))
+    return skipped

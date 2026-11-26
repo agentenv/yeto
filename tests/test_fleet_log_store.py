@@ -694,3 +694,146 @@ def test_the_store_status_is_ok_since_the_oldest_clean_poll():
     status = failed.status()
     assert (status["last_error"], status["last_error_at"], status["errors"], status["failing"]) == ("new", 5.0, 3, 1)
     assert fleet_store.StoreReaders(_Status(), _Status(polled=False)).status()["polled"] is False
+
+
+# -- a corrupt copy record -------------------------------------------------------------------------
+
+CORRUPT = {
+    "start-not-int": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "start": "12", "run": None}),
+    "start-bool": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "start": True, "run": None}),
+    "start-negative": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "start": -1, "run": None}),
+    "not-json": "{not json",
+    "not-an-object": "[1, 2]",
+    "no-start": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "run": None}),
+    "no-run": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "start": 0}),
+    "other-schema": json.dumps({"schema": "x/v9", "store": "s3://x", "start": 0, "run": None}),
+}
+
+
+@pytest.mark.parametrize("text", CORRUPT.values(), ids=CORRUPT.keys())
+def test_a_corrupt_record_is_no_record_and_the_copy_starts_at_this_run_s_first_line(tmp_path, text, capsys):
+    """A_ROWS (time 100-160) are an earlier run's, B_ROWS (400-401) this run's (start 300)."""
+    path = tmp_path / "r" / "fleet.jsonl"
+    path.parent.mkdir()
+    path.write_bytes(_text(A_ROWS + B_ROWS))
+    fleet_store.copy_record_path(path).write_text(text)
+    assert fleet_store.read_copy_record(path) is None
+    assert "fleet.store.json is corrupt" in capsys.readouterr().err
+    first = len(_text(A_ROWS))
+    assert fleet_store.copy_start(path, "s3://x", run="r@300.0") == first
+    err = capsys.readouterr().err
+    assert err.count("WARN") == 1 and f"the copy starts at this run's first line (byte {first}" in err
+    assert fleet_store.read_copy_record(path)["start"] == first  # a sound record from here on
+
+
+@pytest.mark.parametrize("run", [None, "r", "r@not-a-time"])
+def test_a_corrupt_record_of_a_run_without_a_known_start_copies_from_the_end(tmp_path, run, capsys):
+    path = tmp_path / "r" / "fleet.jsonl"
+    path.parent.mkdir()
+    path.write_bytes(_text(A_ROWS + B_ROWS))
+    fleet_store.copy_record_path(path).write_text(CORRUPT["not-json"])
+    assert fleet_store.copy_start(path, "s3://x", run=run) == path.stat().st_size
+    assert "this run's start is unknown, so the copy starts at the file's end" in capsys.readouterr().err
+
+
+def test_a_corrupt_record_with_no_line_of_this_run_yet_copies_from_the_end(tmp_path):
+    path = tmp_path / "r" / "fleet.jsonl"
+    path.parent.mkdir()
+    path.write_bytes(_text(A_ROWS) + b'{"event": "island_ready", "time_unix": 999}')  # its newline not written yet
+    fleet_store.copy_record_path(path).write_text(CORRUPT["not-json"])
+    assert fleet_store.copy_start(path, "s3://x", run="r@300.0") == path.stat().st_size
+
+
+def test_this_run_s_first_line_may_be_at_its_start_exactly(tmp_path):
+    path = tmp_path / "r" / "fleet.jsonl"
+    path.parent.mkdir()
+    path.write_bytes(_text(A_ROWS + B_ROWS))
+    fleet_store.copy_record_path(path).write_text(CORRUPT["not-json"])
+    assert fleet_store.copy_start(path, "s3://x", run="r@160.0") == len(_text(A_ROWS[:2]))  # time_unix 160.0
+
+
+def test_the_record_is_written_whole(tmp_path, monkeypatch, capsys):
+    """A rename that fails leaves the previous record and no temporary file."""
+    path = tmp_path / "r" / "fleet.jsonl"
+    path.parent.mkdir()
+    path.write_bytes(_text(A_ROWS))
+    fleet_store.copy_start(path, "s3://a", run="r@1.0")
+    before = fleet_store.copy_record_path(path).read_text()
+
+    def no_rename(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fleet_store.os, "replace", no_rename)
+    fleet_store.copy_start(path, "s3://b", run="r@2.0")
+    assert fleet_store.copy_record_path(path).read_text() == before
+    assert sorted(p.name for p in path.parent.iterdir()) == ["fleet.jsonl", fleet_store.COPY_RECORD]
+    assert "not written (OSError)" in capsys.readouterr().err
+
+
+def test_a_launch_with_a_corrupt_record_copies_only_this_run_s_lines(tmp_path, monkeypatch, capsys):
+    """An earlier run of the name left lines and a corrupt record: the store gets every line
+    of this run and none of the earlier run's."""
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    store = tmp_path / "s"
+    path = tmp_path / "run-i1" / "fleet.jsonl"
+    path.parent.mkdir()
+    old = _text(A_ROWS)  # the earlier run's lines (time 100-160)
+    path.write_bytes(old)
+    fleet_store.copy_record_path(path).write_text(CORRUPT["start-not-int"])
+    _new_run()
+    log = _launch(tmp_path, store)
+    log.event("island_stop", ISLAND)
+    assert log.uploader is not None and log.close() is True
+    uploaded = _uploaded(store)
+    assert uploaded == log.path.read_bytes()[len(old):]  # every line of this run
+    assert b'"time_unix": 100.0' not in uploaded and b'"time_unix": 160.0' not in uploaded
+    assert "is corrupt" in capsys.readouterr().err
+
+
+def test_a_failing_record_read_never_fails_the_launch(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+
+    def broken(path):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(fleet_store, "_load_copy_record", broken)
+    other = tmp_path / "x" / "fleet.jsonl"
+    other.parent.mkdir()
+    other.write_bytes(_text(A_ROWS))
+    assert fleet_store.copy_start(other, "s3://x", run="r@1.0") == other.stat().st_size  # fewer lines, not others'
+    monkeypatch.setattr(fleet_store, "copy_start", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    _new_run()
+    log = _launch(tmp_path, tmp_path / "s")  # the launch goes on, its fleet.jsonl local
+    assert log is not None and log.uploader is None and _records(log.path)[-1]["event"] == "island_ready"
+    assert "store copy disabled: RuntimeError: boom" in capsys.readouterr().err
+
+
+def test_yeto_down_with_a_corrupt_record_copies_nothing(tmp_path, monkeypatch, capsys):
+    cli, path, store = _down_run(tmp_path, monkeypatch)
+    fleet_store.copy_record_path(path).write_text(CORRUPT["not-json"])
+    assert cli._close_fleet_islands("r") == [ISLAND]  # noqa: SLF001
+    assert not store.exists() and "is corrupt" in capsys.readouterr().err
+
+
+# -- a copied run directory ------------------------------------------------------------------------
+
+def test_yeto_down_of_a_copied_run_directory_leaves_the_original_s_store_alone(tmp_path, monkeypatch):
+    """The run directory copied under another name (meta.json, fleet.jsonl and its copy record
+    with it): the copy's yeto down copies nothing into the original run's store; the
+    original's does."""
+    import shutil
+
+    from yeto import cli
+
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    s1 = tmp_path / "s1"
+    _new_run()
+    log = _launch(tmp_path, s1)  # the island stays open: its launcher is gone
+    assert log.close() is True
+    shutil.copytree(tmp_path / "run-i1", tmp_path / "run-copy")
+    assert fleet_store.run_identity("run-copy") != fleet_store.run_identity("run-i1")
+    before = _folders(s1)
+    assert cli._close_fleet_islands("run-copy") == [ISLAND]  # noqa: SLF001
+    assert _folders(s1) == before
+    assert cli._close_fleet_islands("run-i1") == [ISLAND]  # noqa: SLF001
+    assert len(_folders(s1)) == len(before) + 1  # the original's island_stop line

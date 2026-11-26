@@ -238,7 +238,10 @@ def _as_launched(objects: Any, member: dict[str, Any]) -> dict[str, Any]:
     names the launch argv and ``--gpu`` it was started with (``trainer_worker._start``), which
     ``fleet_session.check`` compiles (``launch_argv``) instead of the desired state's member
     (a move written while the old incarnation runs, an inventory or code changed since);
-    the member itself without such a record."""
+    the member itself without such a record. In every other state, MOVING and STOPPING
+    included, the desired state's member is compared: for a MOVING island that is the new
+    target its move wrote, not the incarnation still on its old machines; for a STOPPING one
+    the member it is being stopped from."""
     if objects is None:
         return member
     from yeto.rl import trainer_worker  # noqa: PLC0415
@@ -256,7 +259,8 @@ def _as_launched(objects: Any, member: dict[str, Any]) -> dict[str, Any]:
 
 
 def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
-                  previous: dict[str, Any] | None = None, *, dry_run: bool = True) -> None:
+                  previous: dict[str, Any] | None = None, *, dry_run: bool = True,
+                  allow_unparsable_running: bool = False) -> None:
     """The island ``member`` (added or moved) against the syncer launch of the run
     (``yeto.rl.fleet_session``) with the term of the fleet's syncer record (the syncer
     launch's when there is none yet), and the desired state's other trainer islands'
@@ -293,17 +297,24 @@ def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
     epoch = (record or {}).get("syncer_epoch")
     running = [_as_launched(objects, m) for m in others]
     if previous is not None and (record is not None or unread is not None):
-        running.append(_as_launched(objects, {**previous, "name": f"{previous['name']} (its machines before the move)"}))
+        running.append(_as_launched(objects, {**previous, "name": f"{previous['name']} (its machines before the move)",
+                                              "island_name": previous["name"]}))
     try:
-        fleet_session.check(run.trainer_argv() if hasattr(run, "trainer_argv") else run.cfg["trainer"]["argv"],
-                            [member], syncer_epoch=epoch if isinstance(epoch, int) else None, running=running)
+        skipped = fleet_session.check(
+            run.trainer_argv() if hasattr(run, "trainer_argv") else run.cfg["trainer"]["argv"],
+            [member], syncer_epoch=epoch if isinstance(epoch, int) else None, running=running,
+            allow_unparsable_running=allow_unparsable_running)
     except ValueError as error:
         if unread is None:
             raise
         raise ValueError(f"{error} (the fleet's syncer record could not be read ({unread}), so the island's "
                          "machines before the move were taken to hold a running session; retry once the "
                          "record reads)") from None
-    print(f"fleet island: island {member['name']} agrees with the syncer launch on the syncer session")
+    if skipped:  # --allow-unparsable-running: not every running island was compared
+        print(f"fleet island: island {member['name']}: checked {len(running) - len(skipped)} of {len(running)} "
+              f"islands; skipped {', '.join(skipped)} (unparsable record)")
+    else:
+        print(f"fleet island: island {member['name']} agrees with the syncer launch on the syncer session")
 
 
 # -- the command --------------------------------------------------------------------------------
@@ -326,6 +337,10 @@ def add_parser(fsub: Any) -> None:
     m.add_argument("--name", required=True)
     m.add_argument("--gpu", required=True)
     m.add_argument("--usd-per-h", type=float, default=None)
+    for q in (a, m):
+        q.add_argument("--allow-unparsable-running", action="store_true",
+                       help="a running island whose recorded launch (written when it started) does not compile: "
+                       "check without it, with a WARN (default: refused)")
     for q in (a, r, m):
         q.add_argument("--config", required=True, help="the run config")
         q.add_argument("--dry-run", action="store_true", help="show the change and dry-run the launch; write nothing")
@@ -371,7 +386,8 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
             # a change that is written (not --dry-run) refuses a pinned verl layout hash it cannot plan
             with refuse_unverified_layout(not args.dry_run):
                 launch_dry_run(launch_member, prepare=prepare)
-                session_check(run, doc, launch_member, previous, dry_run=args.dry_run)
+                session_check(run, doc, launch_member, previous, dry_run=args.dry_run,
+                              allow_unparsable_running=bool(getattr(args, "allow_unparsable_running", False)))
             print(f"fleet island: launch of {launch_member['name']} (learner {launch_member['learner_id']}, "
                   f"--gpu {launch_member['gpu']}) passes its dry run")
     except (IslandChangeError, ValueError, OSError) as error:
