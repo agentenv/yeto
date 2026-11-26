@@ -52,6 +52,13 @@ never waits for a provisioning timeout. A launch being relaunched on its old mac
 (after an infrastructure failure) orders them again: it is torn down the same way, which
 is what a move or a removal wants.
 
+A launch recorded by another control host is left alone (an error naming that host), except
+under an on-site control plane (``takeover``, ``fleet.syncer_service``): there a launch of a
+lost host is taken over (:meth:`TrainerWorker._take_over`) once its records lock's lease ran
+out and this host's exclusive claim of it is the one created, and only an SSH or Modal island
+(:data:`TAKEOVER_SOURCES`; a sky cluster lives in the other host's sky state). The same
+launch is started again (same prefix and incarnation), which adopts the running island.
+
 Only one worker drives the islands: before each step it checks that its controller
 still holds the fleet (``fleet/applied.json`` still names its writer; the
 reconciler itself only looks when it applies or writes), and one whose controller was
@@ -272,6 +279,9 @@ class TrainerWorker:
     _stop_failures: int = 0
     _stop_write_failed: dict[int, int] = field(default_factory=dict)  # island -> STOP writes failed in a row
     _foreign_logged: set[int] = field(default_factory=set)
+    # an on-site control plane (``fleet.syncer_service``): the launches of a lost control host are
+    # taken over (:meth:`_take_over`); off: a launch of another host is left alone, as before
+    takeover: bool = False
 
     # -- records
     def load(self, learner_id: int) -> dict[str, Any] | None:
@@ -425,9 +435,11 @@ class TrainerWorker:
         return closed(record, self.clock())
 
     def _start(self, k: int, member: dict[str, Any], syncer: dict[str, Any], record: dict[str, Any] | None, *,
-               incarnation: int, relaunches: int, generation: int | None, why: str) -> dict[str, Any]:
+               incarnation: int, relaunches: int, generation: int | None, why: str,
+               clear_stop: bool = True) -> dict[str, Any]:
         prefix = il.island_prefix(str(member["prefix"]), incarnation)
-        self.states.clear_stop(k)  # a STOP of the incarnation before (a move) is void for this one
+        if clear_stop:
+            self.states.clear_stop(k)  # a STOP of the incarnation before (a move) is void for this one
         argv = il.launch_argv(member, incarnation=incarnation, syncer=syncer)
         pid = self.ops.start(prefix, argv)
         self._seen.add(prefix)
@@ -455,6 +467,17 @@ class TrainerWorker:
             return
         prefix = str(record["prefix_now"])
         state = record.get("state")
+        if self.takeover and self._lost_host(k, record):
+            taken = self._take_over(k, record)
+            if taken is None:
+                return  # not taken over this step (another host claimed it, or its lease runs)
+            record = taken
+            if state in (STARTING, RUNNING) and syncer is not None:
+                # the same launch again on this host: it adopts the running island (no new incarnation)
+                self._start(k, member, syncer, record, incarnation=int(record.get("incarnation") or 0),
+                            relaunches=int(record.get("relaunches") or 0), generation=generation,
+                            why=f"taken over from host {record['taken_over']['from']}", clear_stop=False)
+                return
         if self._foreign(k, record):
             return
         alive = self.ops.alive(prefix)
@@ -673,6 +696,84 @@ class TrainerWorker:
                      "none of the run's launches runs, `yeto run up` here starts them again")
         return True
 
+    def _lost_host(self, k: int, record: dict[str, Any]) -> bool:
+        """Island ``k``'s launch was started by another control host and is not over."""
+        host = record.get("host")
+        return bool(host) and host != self.host and record.get("state") not in TERMINAL \
+            and record.get("state") != DOWN
+
+    def _take_over(self, k: int, record: dict[str, Any]) -> dict[str, Any] | None:
+        """Take island ``k``'s launch over from the control host that started it, once that
+        host is gone (an on-site control plane, ``takeover``). Only:
+
+        * an island on a source another host can adopt: ``ssh`` (the island launch reattaches
+          by the incarnation its store record names, :data:`TAKEOVER_SOURCES`) or Modal (the
+          function call id). A sky cluster is in the starting host's own sky state: never;
+        * once the lease of its island launch's records lock (``fleet/trainers/<k>/lock``) ran
+          out, the launch's supervisor gone; a launch that just started and has not claimed
+          its lock yet is waited for (:data:`START_GRACE_S`);
+        * when this host's claim of that lapsed lease is the one created
+          (``fleet/trainers/<k>/takeover/<token>.json``, an exclusive create): of two control
+          hosts that try at once, one takes it over and the other leaves it alone.
+
+        The record then names this host (``taken_over``); None: not taken over (yet)."""
+        from yeto.launch.pool.store_lock import (  # noqa: PLC0415
+            StoreLock,
+            StoreLockError,
+            require_atomic_create,
+        )
+
+        host = str(record.get("host"))
+        source = _source(record.get("gpu"))
+        if source not in TAKEOVER_SOURCES:
+            self._foreign_once(k, f"its launch {record.get('prefix_now')} was started on host {host}; a {source} "
+                                  "island is never taken over from another host (its cluster is in that host's own "
+                                  f"sky state). Run `yeto run up` on {host} again, or `yeto run down`")
+            return None
+        lock = lifecycle.lock_prefix(k)
+        now = self.clock()
+        holder = StoreLock.holder_of(self.objects, lock, now=now)
+        if holder is not None:
+            self._foreign_once(k, f"its launch {record.get('prefix_now')} on host {host} still holds its records "
+                                  f"lock (lease until {float(holder.get('until') or 0):.0f}): not taken over")
+            return None
+        tokens = StoreLock.tokens(self.objects, lock)
+        token = tokens[-1] if tokens else 0
+        if not tokens and now - float(record.get("started_at") or 0) < START_GRACE_S:
+            return None  # just started there: its lock is not claimed yet
+        try:
+            require_atomic_create(self.objects)
+        except StoreLockError as error:
+            self._foreign_once(k, f"its launch was started on host {host}; this store has no exclusive create "
+                                  f"({error}), so no launch is taken over from another host")
+            return None
+        claim = {"host": self.host, "from": host, "lease_token": token, "at": round(now, 3),
+                 "prefix": record.get("prefix_now"), "incarnation": record.get("incarnation")}
+        if not self.objects.create(lifecycle.takeover_key(k, token), json.dumps(claim, sort_keys=True).encode()):
+            theirs = self._read_json(lifecycle.takeover_key(k, token)) or {}
+            if theirs.get("host") != self.host:
+                self._foreign_once(k, f"its launch was taken over by host {theirs.get('host')} (the lapsed lease "
+                                      f"{token} is claimed there): left alone")
+                return None
+        self._foreign_logged.discard(k)
+        taken = self.save(k, {**record, "host": self.host, "taken_over": claim})
+        self._event(k, f"taken over from host {host}: its launch's lease ran out (token {token})",
+                    prefix=record.get("prefix_now"), incarnation=record.get("incarnation"))
+        return taken
+
+    def _read_json(self, key: str) -> dict[str, Any] | None:
+        raw = self.objects.read(key)
+        try:
+            doc = json.loads(raw) if raw is not None else None
+        except ValueError:
+            return None
+        return doc if isinstance(doc, dict) else None
+
+    def _foreign_once(self, k: int, why: str) -> None:
+        if k not in self._foreign_logged:
+            self._foreign_logged.add(k)
+            self.log(f"fleet: ERROR: trainer island {k}: {why}")
+
     def _stuck(self, k: int, record: dict[str, Any], prefix: str, why: str) -> None:
         """Island ``k``'s launch still runs after its STOP (moving or removed): torn down
         (``ops.tear_down``: ``yeto down``, the launcher's own teardown) once it still orders
@@ -715,6 +816,11 @@ class TrainerWorker:
             self.save(k, {**record, "state": REMOVED, "removed_at": round(self.clock(), 3)})
             self._event(k, "removed (it was down)")
             return
+        if self.takeover and self._lost_host(k, record):
+            taken = self._take_over(k, record)
+            if taken is None:
+                return
+            record = taken
         if self._foreign(k, record):
             return
         prefix = str(record["prefix_now"])
@@ -733,6 +839,22 @@ class TrainerWorker:
         self.save(k, {**self._closed(record), "state": REMOVED, "removed_at": round(self.clock(), 3),
                       "billing_open": None})
         self._event(k, "removed: its launch ended", prefix=prefix)
+
+
+# the sources whose running island another control host can adopt (yeto.launch.island_adopt):
+# ssh (the incarnation in the island's store record; the launch reattaches when every node runs
+# it) and Modal (the function call id). A sky cluster lives in the starting host's sky state.
+TAKEOVER_SOURCES = frozenset({"ssh", "modal"})
+
+
+def _source(gpu: Any) -> str:
+    """The source (cloud) of an island's ``--gpu`` cluster; ``?`` when it does not parse."""
+    try:
+        from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
+
+        return str(parse_gpu_spec(str(gpu))[0].cloud)
+    except Exception:  # noqa: BLE001 - an unknown source is never taken over
+        return "?"
 
 
 def billed(objects: Any, now: float | None = None) -> list[tuple[int, float, float, float]]:

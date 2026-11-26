@@ -460,6 +460,18 @@ def start_key(island: int) -> str:
     return f"{STATE_DIR}/{int(island)}/START"
 
 
+def lock_prefix(island: int) -> str:
+    """The single-writer lock of island ``island``'s records, held by its island launch
+    (``yeto.launcher._island_records_lock``)."""
+    return f"{STATE_DIR}/{int(island)}/lock"
+
+
+def takeover_key(island: int, token: int) -> str:
+    """The claim of the control host that takes island ``island``'s launch over once the
+    lease of lock token ``token`` ran out (created once: one claimer wins)."""
+    return f"{STATE_DIR}/{int(island)}/takeover/{int(token):08d}.json"
+
+
 def controller_identity() -> dict[str, Any]:
     """Who supervises: host, PID and a fencing token unique to this process."""
     return {"host": socket.gethostname(), "pid": os.getpid(), "token": uuid.uuid4().hex[:16],

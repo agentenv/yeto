@@ -737,6 +737,50 @@ removes the fleet's STOP from the run store. Then start the unit (`systemctl sta
   570 s after the last renewal. A restart on the same host takes it back at once; another
   host's service waits for it.
 
+### Taking over from a lost control host
+
+When the control host is lost (the machine is gone, or its disk with `yeto run up`'s state),
+start the control unit on another host. `yeto run up` there takes the run over:
+
+1. **The run's state comes from the run store.** With an on-site control plane, `run up`
+   mirrors part of its state to `fleet/control/up-state.json` in the run store whenever it
+   saves that state, at most every 30 s. The mirror is a fixed list of fields: the run's
+   start times, the steps it finished, its stops, breaker trips and its spend estimate. It holds no PID, no log path,
+   no credential and no island HMAC key. A `run up` with no state directory for the run
+   starts from this mirror. The old host's processes are dropped (a PID means nothing on
+   another host), and its open run-up period ends at the last time it was seen. The spend
+   and the run's deadlines go on from there: never from zero, never counted twice.
+2. **Each island launch is taken over once its lease ran out.** An island launch holds its
+   records lock (`fleet/trainers/<k>/lock`, a 120 s lease it renews) while its supervisor
+   lives. The trainer worker of the new host takes an island over only when that lease has
+   ended, and only through an exclusive create of a claim on it
+   (`fleet/trainers/<k>/takeover/<token>.json`). Of two control hosts that try at once, one
+   takes the island over and the other leaves it alone. While the lease still runs, the
+   worker logs an error naming the old host and changes nothing.
+3. **The same launch is started again, and it adopts the running island.** The new host
+   starts the same launch (the same prefix and incarnation, no relaunch counted). A Modal
+   island is adopted by the function call id in its store record. For an SSH island, the
+   launch first writes the island's job journal from its store record, then asks every
+   node over SSH whether that incarnation still runs. It reattaches when every node runs
+   it. It refuses to start another copy while a node does not answer or runs something
+   else. No island process restarts, and the syncer sees no island leave.
+
+The island HMAC key is read from the environment file on the new host. A key that is
+missing there stops `run up` before anything starts. A key that is not the one the islands
+and the syncer use is refused by the syncer launch (exit 10). No host generates a new key.
+
+What is never taken over:
+
+- **A sky island** (an `aws:`, `gcp:`, `nebius:` ... cluster). Its cluster lives in the sky
+  state of the host that launched it, and no other host can read that state, see the
+  cluster, or tear it down. The new host leaves such an island alone and logs an error
+  naming the old host: release its machines in its cloud.
+- **A fleet without an on-site control plane.** Without `fleet.syncer_service`, nothing is
+  mirrored and nothing is taken over, as before.
+
+The new host writes no ledger row for the old host's machines. They stay in the old host's
+resource ledger.
+
 ### Limits
 
 - If the syncer's host is lost, so is its checkpoint. Start the service on another host only for

@@ -573,6 +573,8 @@ def _plan_island_records(args, specs, names, island_states, island_lock, *, rela
                         modal_names={n for n, sp in zip(names, specs) if sp.cloud == "modal"},
                         ssh_names=ssh_names, events_dir=events_dir, echo_names=echo_names)
     refs.pop(held_name, None)  # the trainer scheduler's island has its own journal
+    if restart:
+        _seed_ssh_journals(args, records, refs, ssh_names)
     recorder = FleetRecorder(island_states, refs)
     adoption: dict = {}
     if restart and island_lock is not None:  # adopt only under the lock
@@ -586,6 +588,45 @@ def _plan_island_records(args, specs, names, island_states, island_lock, *, rela
     if syncer_cluster is not None:
         kept = _adopt_syncer(island_states, syncer_cluster, adoption)
     return recorder, adoption, kept
+
+
+JOURNAL_FROM_STORE_ENV = "YETO_ISLAND_JOURNAL_FROM_STORE"  # yeto.rl.up.JOURNAL_FROM_STORE_ENV
+
+
+def _seed_ssh_journals(args, records, refs, ssh_names, environ=None) -> list[str]:
+    """An island launch an on-site control plane started on another host than the one that
+    started its island (``JOURNAL_FROM_STORE_ENV``, set by ``yeto run up`` of a fleet with
+    ``fleet.syncer_service``): a resident ``ssh:`` island whose local journal
+    (``<run dir>/ssh-islands/<island>-jobs.json``) is missing gets it back from its store
+    record, the incarnation that record names. The usual start then asks every node about
+    that incarnation: all running, it reattaches (nothing started); partly running or ended,
+    it is released first; a node that does not answer refuses the start. Without the variable,
+    or with a journal, nothing changes. Returns the islands seeded."""
+    from . import runs
+    from .launch.island_adopt import ADOPTABLE
+    from .launch.ssh_resident import RESIDENT_DIR
+    from .launch.trainer_island import read_jobs, save_job
+
+    if (environ if environ is not None else os.environ).get(JOURNAL_FROM_STORE_ENV) != "1":
+        return []
+    seeded = []
+    for name in sorted(ssh_names):
+        ref = refs.get(name)
+        record = records.get(ref.island) if ref is not None else None
+        if not record or record.get("state") not in ADOPTABLE:
+            continue
+        incarnation = (record.get("handle") or {}).get("incarnation", record.get("incarnation"))
+        if not isinstance(incarnation, int) or isinstance(incarnation, bool) or incarnation < 0:
+            continue
+        path = runs.run_dir(args.cluster_prefix) / RESIDENT_DIR / f"{name}-jobs.json"
+        if read_jobs(path):
+            continue
+        save_job(path, incarnation, f"ssh:{name}-i{incarnation}")
+        seeded.append(name)
+        print(f"[launcher] {name}: no local SSH journal on this host; incarnation {incarnation} restored from "
+              "its island record in the run store (its nodes decide: running on every node -> reattach)",
+              flush=True)
+    return seeded
 
 
 def _lost_island_records(island_states) -> bool:

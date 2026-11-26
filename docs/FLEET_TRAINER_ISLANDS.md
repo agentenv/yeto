@@ -99,7 +99,9 @@ The island launches are processes of the host that runs `yeto run up`. Each reco
 that host. **Restart `yeto run up` on the same host.** A worker on another host cannot see
 those processes, so it leaves every island recorded by another host alone and logs an
 error naming that host. It does not adopt, relaunch or start those islands a second time.
-To move the control host, see [Moving the control host](#moving-the-control-host).
+The one exception is an on-site control plane (`fleet.syncer_service`), whose worker takes
+over the SSH and Modal islands of a lost control host. To move the control host, see
+[Moving the control host](#moving-the-control-host).
 
 The syncer launch and every island launch compile their options from their own argv, so
 `yeto run up` (and its dry run) checks that they agree before anything is ordered. It
@@ -243,16 +245,19 @@ in a TP 1 fleet) is refused with exit 2 before anything is written or ordered.
   training after that release is lost. Resuming from a cut of that learner's own state is
   not supported (see [Moving an island](#moving-an-island)).
 - **Same host.** `yeto run up` must be restarted on the host that started the island
-  launches (see [What runs](#what-runs)). Taking over the islands of a lost host is not
-  supported yet (see [Moving the control host](#moving-the-control-host)).
+  launches (see [What runs](#what-runs)). Only an on-site control plane takes over the
+  islands of a lost host, and only SSH and Modal islands (see
+  [Moving the control host](#moving-the-control-host)).
 - **The syncer is not adopted.** A new syncer launch restarts the syncer, and the island
   launches relaunch for it (see [What runs](#what-runs)).
 
 ## Moving the control host
 
-Taking over the islands of a lost control host is not supported yet. A host that ran
-`yeto run up` owns the island launches it started. A run up on another host leaves those
-islands alone.
+A host that ran `yeto run up` owns the island launches it started. A run up on another
+host leaves those islands alone, with one exception: a fleet with an on-site control plane
+(`fleet.syncer_service`) takes over the SSH and Modal islands of a lost control host. It
+never takes over a sky island. See
+[OWN_CLUSTERS.md](OWN_CLUSTERS.md#taking-over-from-a-lost-control-host).
 
 To move the control host while the old one still works:
 
@@ -267,9 +272,12 @@ To move the control host while the old one still works:
 An island launch that `run down` could not confirm down keeps its old host. The new host
 leaves it alone and logs an error naming that host.
 
-If the old host is lost, its launches cannot be stopped or confirmed down from another
-host. Release their machines in each island's cloud. The islands that host started cannot
-be started again on another host under this run yet.
+If the old host is lost and the fleet has no on-site control plane, its launches cannot be
+stopped or confirmed down from another host. Release their machines in each island's cloud.
+The islands that host started cannot be started again on another host under this run. With
+an on-site control plane, the SSH and Modal islands are taken over. A sky island (any
+`aws:`, `gcp:`, `nebius:` ... cluster) still needs its machines released by hand, because
+its cluster lives in the old host's own sky state, which no other host can read.
 
 ## Code
 
