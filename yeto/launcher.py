@@ -690,6 +690,28 @@ def _resolve_launch_syncer_epoch(args, *, member_role, no_sync, head_mode, synce
     resolve_island_syncer_epoch(args, reader(), **({} if timeout_s is None else {"timeout_s": timeout_s}))
 
 
+def _island_straggler_watch(args, island_states, local_syncer):
+    """``yeto.launch.island_straggler``'s watch of an island pool's merges: the syncer's tape
+    of a syncer on this host, else, for an island launch of a fleet launched island by island,
+    the copy its syncer launch uploads to an object run store (``tapes/syncer/``); None
+    without an island fleet's records (nothing is written then)."""
+    if island_states is None:
+        return None
+    from .launch.island_straggler import watch_for
+    from .launch.storage import is_object_store_uri
+    from .rl.engine.sample_roles import FLEET_ROLE_ISLAND, fleet_role
+    from .rl.engine.tape_upload import upload_interval_s
+
+    uploaded = (fleet_role(args) == FLEET_ROLE_ISLAND and upload_interval_s() is not None
+                and is_object_store_uri(str(getattr(args, "rl_checkpoint_store", None) or "")))
+    try:
+        return watch_for(args, local_tape=getattr(local_syncer, "event_tape", None),
+                         local_offset=int(getattr(local_syncer, "_event_offset", 0) or 0),
+                         objects=getattr(island_states, "objects", None) if uploaded else None)
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+
+
 def _island_state_store(args):
     """The run store's island records (None: no object API for the store, or none)."""
     from .launch.island_lifecycle import open_state_store
@@ -1340,6 +1362,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                                  "new_machine_retries": _recorded_new_machine_retries(recorder, name)}
                           for name, a in adoption.items()},
             deterministic_stop=deterministic_stop(args)[0],
+            straggler=_island_straggler_watch(args, island_states, local_syncer if head_mode else None),
             # why an island stopped, from its own tape records (a breaker, a strict check, a
             # refusal: never relaunched), not from its rank's exit status
             stop_probe=(

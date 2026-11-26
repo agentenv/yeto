@@ -1039,6 +1039,11 @@ _SCHEDULING = (
              help="with --rl-fleet-role syncer on a cluster: how long the syncer cluster may stay "
              "unreadable or not UP in a row before the syncer launch fails (and the fleet ends). "
              "It includes the time the sky API itself does not answer (default 300)"),
+    cli_flag("--rl-island-straggler-cycles", type=int, default=None, metavar="N",
+             help="island pool: the fleet controller reports a running island none of whose pushes "
+             "the syncer merged in N merge cycles (one outer step of every fragment) as "
+             "island_straggler, and again once it is merged again; the syncer keeps merging the "
+             "other islands at each quorum deadline. 0 turns the report off (default 3)"),
     cli_flag("--rl-sync-max-learners", type=int, default=None, metavar="N",
              help="membership: the syncer admits island ids 0..N-1, so islands may join "
              "after the launch (default: the launched islands; with the full-parameter "

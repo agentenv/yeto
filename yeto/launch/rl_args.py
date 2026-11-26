@@ -842,6 +842,9 @@ def _check_island_pool(args, *, num_islands: int) -> None:
     if int(getattr(args, "syncer_shards", None) or 1) > 1:
         raise ValueError("membership options need one syncer (no --syncer-shards > 1)")
     check_stale_lag(args)
+    from .island_straggler import straggler_cycles
+
+    straggler_cycles(args)  # --rl-island-straggler-cycles: a whole number >= 0
     max_learners = getattr(args, "rl_sync_max_learners", None)
     if max_learners is not None:
         # full-parameter: the islands bind the roster 0..N-1 into their session
