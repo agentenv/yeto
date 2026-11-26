@@ -7,6 +7,7 @@ one, and the syncer service itself (fake syncer; the real one in
 from __future__ import annotations
 
 import json
+import pathlib
 import types
 
 import pytest
@@ -143,8 +144,7 @@ CONTROL_UNIT = """\
 Description=yeto fleet control plane (yeto run up) of run r
 Wants=network-online.target
 After=network-online.target
-StartLimitIntervalSec=3600
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -160,7 +160,7 @@ WorkingDirectory=-/var/tmp/yeto/r-control
 ExecStart=/opt/yeto-venv/bin/python -m yeto.cli fleet service-run --role control --config /srv/yeto/run.json
 Restart=on-failure
 RestartSec=30
-RestartPreventExitStatus=75
+RestartPreventExitStatus=10 75
 SuccessExitStatus=143
 KillMode=process
 TimeoutStopSec=300
@@ -172,7 +172,9 @@ WantedBy=multi-user.target
 
 def test_the_control_unit_snapshot():
     assert fs.unit_text(spec("control")) == CONTROL_UNIT
-    assert fs.CONTROL_PREVENT == (fs.CONTROL_DECIDED_EXIT,) == (75,)  # run up's exit 1, mapped; nothing else
+    # a configuration error and run up's exit 1, mapped; a refusal before ordering (2) restarts, without a limit
+    assert fs.CONTROL_PREVENT == (fs.CONFIG_EXIT, fs.CONTROL_DECIDED_EXIT) == (10, 75)
+    assert "StartLimitIntervalSec=0\n" in CONTROL_UNIT and "StartLimitBurst" not in CONTROL_UNIT
 
 
 def test_the_syncer_unit_restarts_on_a_crash_only_and_stops_its_whole_group():
@@ -633,9 +635,17 @@ def run_service(tmp_path, monkeypatch, code: int, *, strict: bool = False, objec
     seen: dict = {}
     syncer = FakeSyncer(strict)
     logs: list[str] = []
-    rc = fs.run_syncer(str(path), objects=objects, make_syncer=lambda args, n: syncer,
+    workdir = str(workdir or tmp_path / "work")
+
+    def make_syncer(args, n):  # the syncer it starts writes its checkpoint (under the service's home)
+        for c in fs._checkpoints(args, str(pathlib.Path(workdir) / "home")):
+            pathlib.Path(c).parent.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(c).write_text("{}")
+        return syncer
+
+    rc = fs.run_syncer(str(path), objects=objects, make_syncer=make_syncer,
                        serve=fake_serve(objects, seen, code, until=until), parse=_prepared, node=node,
-                       beat_s=beat_s, workdir=str(workdir or tmp_path / "work"), log=logs.append)
+                       beat_s=beat_s, workdir=workdir, log=logs.append)
     return rc, seen, syncer, objects, logs
 
 
@@ -701,6 +711,9 @@ def test_a_service_whose_lock_another_took_ends_without_a_final_state(tmp_path, 
 
 
 def test_the_term_goes_on_here_and_moves_up_on_another_host(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "_checkpoints", lambda args, home: [home + "/ckpt.json"])
+    (tmp_path / "work" / "home").mkdir(parents=True)
+    (tmp_path / "work" / "home" / "ckpt.json").write_text("{}")  # this host's syncer ran it before
     objects = DirectoryObjectStore(tmp_path / "store")
     island_launches.write_syncer_record(objects, addr="10.0.0.5:29400", syncer_epoch=4, learners=2, max_learners=4,
                                         run="r", extra={"service": "10.0.0.5", "service_node": "site-s"})
@@ -724,7 +737,8 @@ def test_the_fleet_s_stop_in_the_store_ends_the_service(tmp_path, monkeypatch):
     status = fleet_syncer.read_service_status(objects)
     assert status["state"] == "stopped" and "by site-c" in status["reason"]
     (tmp_path / "again").mkdir()  # started again (a reboot) while the STOP stands: the syncer never starts
-    rc, seen, syncer, objects, logs = run_service(tmp_path / "again", monkeypatch, 0, objects=objects)
+    rc, seen, syncer, objects, logs = run_service(tmp_path / "again", monkeypatch, 0, objects=objects,
+                                                  workdir=tmp_path / "work")
     assert rc == 9 and syncer.events == [] and seen == {}
 
 
@@ -798,9 +812,9 @@ def test_the_syncer_s_stop_waits_its_grace_then_kills(tmp_path):
 
 # -- what the units run: the ended marker ------------------------------------------------------------
 
-def service_args(path, role, *, clear_ended=False):
+def service_args(path, role, *, clear_ended=False, fresh=False):
     return types.SimpleNamespace(role=role, config=str(path), syncer_binary=None, stop_grace_s=170,
-                                 clear_ended=clear_ended)
+                                 clear_ended=clear_ended, fresh=fresh)
 
 
 @pytest.fixture
@@ -871,20 +885,28 @@ def test_a_refusal_or_a_crash_leaves_no_ended_marker(tmp_path, monkeypatch, code
 
 
 @pytest.mark.usefixtures("no_sigterm_handler")
-def test_a_marker_that_does_not_read_is_a_crash_not_a_start(tmp_path, monkeypatch):
-    class Broken(DirectoryObjectStore):
+def test_a_marker_that_does_not_read_is_waited_for_never_a_crash(tmp_path, monkeypatch):
+    """A run store that does not answer for two hours: the service keeps asking in the process
+    (5 s, backing off to 60 s, a line per try), never exits for it (a unit restarted for it would
+    spend its start limit), and starts once it answers."""
+    clock = Clock(0.0, max_sleeps=500)
+
+    class Down(DirectoryObjectStore):
         def read(self, key):
-            raise OSError("store down")
+            if clock.t < 7200:
+                raise OSError("store down")
+            return super().read(key)
 
     path = onsite_config(tmp_path)
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
-    clock = Clock(0.0)
     monkeypatch.setattr(fs, "_sleep", clock.sleep)
-    monkeypatch.setattr(fs, "_monotonic", clock)
-    monkeypatch.setattr(fs, "run_control", lambda *a, **kw: pytest.fail("not started without knowing"))
-    assert fs.service_run(service_args(path, "control"), objects=Broken(tmp_path / "store"),
-                          log=lambda m: None) == fs.CRASH_EXIT
-    assert clock.t >= fs.ENDED_READ_WAIT_S  # asked again in the process for ten minutes first
+    started, logs = [], []
+    monkeypatch.setattr(fs, "run_control", lambda *a, **kw: started.append(clock.t) or 0)
+    assert fs.service_run(service_args(path, "control"), objects=Down(tmp_path / "store"), log=logs.append) == 0
+    assert started and 7200 <= started[0] < 7300
+    tries = [m for m in logs if "does not answer" in m]
+    assert len(tries) == clock.sleeps > 100 and "try 1)" in tries[0]
+    assert "in 5s" in tries[0] and "in 10s" in tries[1] and all("in 60s" in m for m in tries[5:])
 
 
 @pytest.mark.usefixtures("no_sigterm_handler")
@@ -900,7 +922,6 @@ def test_a_store_that_answers_three_minutes_late_is_waited_for_in_the_process(tm
     path = onsite_config(tmp_path)
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
     monkeypatch.setattr(fs, "_sleep", clock.sleep)
-    monkeypatch.setattr(fs, "_monotonic", clock)
     started, logs = [], []
     monkeypatch.setattr(fs, "run_control", lambda *a, **kw: started.append(clock.t) or 2)
     assert fs.service_run(service_args(path, "control"), objects=Late(tmp_path / "store"), log=logs.append) == 2
@@ -917,13 +938,18 @@ def test_the_control_service_maps_run_up_s_exits(tmp_path, monkeypatch):
         cfg = up.load_config(args.config)
         args.config_adjust(cfg)
         seen.append(cfg["rollout"]["drain_on_exit"])
-        return codes.pop(0)
+        code = codes.pop(0)
+        if code == "config":  # run up refused its configuration (RunConfigError)
+            args.config_refused = "bad config"
+            return 2
+        return code
 
-    codes = [1, 2, 0, 143]
+    codes = [1, 2, 0, 143, "config"]
     monkeypatch.setattr(up, "main", run_up)
     logs: list[str] = []
-    assert [fs.run_control(str(path), log=logs.append) for _ in range(4)] == [75, 2, 0, 143]
-    assert seen == [False] * 4  # never drains the pools on exit
+    assert [fs.run_control(str(path), log=logs.append) for _ in range(5)] == [75, 2, 0, 143, fs.CONFIG_EXIT]
+    assert 2 not in fs.CONTROL_PREVENT  # a refusal before ordering: restarted (it costs nothing)
+    assert seen == [False] * 5  # never drains the pools on exit
     assert any("rollout.drain_on_exit is not set" in m for m in logs)
 
 
@@ -941,8 +967,11 @@ def test_the_control_unit_runs_run_up_without_the_exit_drain(tmp_path, monkeypat
         up.open_run(str(explicit), adjust=lambda cfg: fs.no_exit_drain(cfg, logs.append))
     monkeypatch.setattr(fs.signal, "signal", lambda *a: None)
     assert fs.service_run(service_args(explicit, "control"), objects=DirectoryObjectStore(tmp_path / "s"),
-                          log=logs.append) == 2
-    assert "rollout.drain_on_exit is true" in logs[-1]
+                          log=logs.append) == fs.CONFIG_EXIT  # a configuration error: never restarted
+    assert "rollout.drain_on_exit is true" in logs[-1] and fs.CONFIG_EXIT in fs.CONTROL_PREVENT
+    # the real run up refuses it too (its open_run): a configuration error, never restarted
+    assert fs.run_control(str(explicit), log=logs.append) == fs.CONFIG_EXIT
+    assert "refused its configuration" in logs[-1]
 
 
 def test_the_documented_commands_run(tmp_path, monkeypatch, capsys):
@@ -967,33 +996,62 @@ def test_the_documented_commands_run(tmp_path, monkeypatch, capsys):
     assert [c[0][3] for c in ssh.calls] == ["site-s", "site-c", "site-s", "site-c"]
 
 
-@pytest.mark.usefixtures("no_sigterm_handler")
-@pytest.mark.parametrize("end, code", [("stop-run", 0), ("fleet stop", 0), ("trainer exit", 0), ("breaker", 1),
-                                       ("sigterm", None), ("crash", "crash")])
+def recording_controller(drain_on_exit):
+    """A real RolloutController (its drain decisions are drain_active's and drain_controller's
+    own) with one pool on the store control plane; its stop and detach are only recorded."""
+    from yeto.launch.pool import controller as ctl
+
+    class Recording(ctl.RolloutController):
+        def __init__(self):
+            super().__init__({}, drain_on_exit=drain_on_exit, log=lambda m: None)
+            self.slots = {"i0-sglang": types.SimpleNamespace(pool=types.SimpleNamespace(control=object()))}
+            self.calls = []
+
+        def stop(self, why, **kw):
+            self.calls.append(("stop", why))
+            self.stopped = why
+            return {}
+
+        def detach(self, why, **kw):
+            self.calls.append(("detach", why))
+            self.detached = why
+            return {}
+
+    controller = Recording()
+    with ctl._ACTIVE_LOCK:
+        ctl._ACTIVE.append(controller)  # as RolloutController.start registers it
+    return controller
+
+
+@pytest.fixture
+def active_controllers():
+    from yeto.launch.pool import controller as ctl
+
+    before = list(ctl._ACTIVE)
+    yield
+    with ctl._ACTIVE_LOCK:
+        ctl._ACTIVE[:] = before
+
+
+@pytest.mark.usefixtures("no_sigterm_handler", "active_controllers")
+@pytest.mark.parametrize("end, code", [("stop-run", 0), ("fleet stop", 0), ("trainer exit", 0),
+                                       ("budget breaker", 1), ("other breaker", 1), ("syncer exit 9", 0),
+                                       ("syncer exit 11", 1), ("sigterm", None), ("crash", "crash")])
 def test_the_control_service_drains_when_run_up_ends_the_run_and_keeps_the_pools_on_a_sigterm(
         tmp_path, monkeypatch, end, code):
     """The on-site control unit runs run up with rollout.drain_on_exit false, but only a SIGTERM
     (a stop or restart of the unit) or a crash leaves the pools running: an end run up decides
-    itself (a stop-run, the fleet's STOP, the trainer's exit, a breaker) drains them."""
+    itself (a stop-run, the fleet's STOP, the trainer's exit, a breaker, the syncer's end) stops
+    the controller, every pool drained. drain_active is the real one (it only detaches a
+    controller with drain_on_exit false), and so is the interpreter-exit drain after it."""
     from yeto.launch.pool import controller as ctl
 
     path = onsite_config(tmp_path)
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
-    objects, drains, made = DirectoryObjectStore(tmp_path / "store"), [], []
-    monkeypatch.setattr(ctl, "drain_active", lambda why: drains.append(why))
-
-    class Controller:
-        stopped, detached = False, None
-        pools = {"i0-sglang": types.SimpleNamespace(control=object())}  # a pool on the store control plane
-
-        def __init__(self, drain_on_exit):
-            self.drain_on_exit = drain_on_exit
-
-        def detach(self, why):
-            self.detached = why
+    objects, made = DirectoryObjectStore(tmp_path / "store"), []
 
     def pool(self):
-        self.controller = Controller(bool(up.rollout_section(self.cfg).get("drain_on_exit", True)))
+        self.controller = recording_controller(bool(up.rollout_section(self.cfg).get("drain_on_exit", True)))
         made.append(self.controller)
 
     for name in ("preflight", "cluster_preflight", "write_fleet_plan", "sandbox_prepare"):
@@ -1018,36 +1076,32 @@ def test_the_control_service_drains_when_run_up_ends_the_run_and_keeps_the_pools
         rc = fs.service_run(args, objects=objects, log=lambda m: None)
         assert rc == {0: 0, 1: fs.CONTROL_DECIDED_EXIT, "crash": fs.CRASH_EXIT}[code]
     (controller,) = made
-    assert controller.drain_on_exit is False  # the unit's run up never drains on its own
+    assert controller.drain_on_exit is False  # the unit's run up never drains on a SIGTERM or a crash
+    ctl.drain_active("process exit")  # the interpreter exit after it
     if code in (0, 1):
-        assert drains == ["process exit"] and marker.exists()  # drained, and the run is over
+        assert controller.calls == [("stop", "run up ended the run")] and marker.exists()  # drained, run over
+        assert controller not in ctl._ACTIVE
     else:
-        assert drains == [] and not marker.exists() and controller.detached == "process exit"  # the pools stay
+        assert not marker.exists()
+        assert [c for c in controller.calls if c[0] == "stop"] == []  # the pools stay, detached
+        assert controller.calls[0] == ("detach", "process exit")
 
 
+@pytest.mark.usefixtures("active_controllers")
 def test_a_plain_run_up_drains_as_before(tmp_path):
-    """Without the service mode drain_controller is what it was: drain_on_exit decides."""
-    from yeto.launch.pool import controller as ctl
-
+    """Without the service mode drain_controller is what it was: drain_on_exit decides (the real
+    drain_active)."""
     run = up.Run(up.load_config(str(onsite_config(tmp_path))), state_root=tmp_path / "state")
-
-    class Controller:
-        stopped, detached, pools = False, None, {}
-        drain_on_exit = False
-
-        def detach(self, why):
-            self.detached = why
-
-    run.controller = Controller()
-    calls = []
-    real, ctl.drain_active = ctl.drain_active, lambda why: calls.append(why)
-    try:
-        assert run.drain_controller(decided=True) is True and calls == []  # not the service: no drain
-        run.onsite_service = True
-        assert run.drain_controller(decided=False) is True and calls == []  # a SIGTERM of the unit: kept
-        assert run.drain_controller(decided=True) is True and calls == ["process exit"]
-    finally:
-        ctl.drain_active = real
+    run.controller = kept = recording_controller(False)
+    assert run.drain_controller(decided=True) is True and kept.calls == [("detach", "process exit")]  # not the service
+    run.controller = kept = recording_controller(False)
+    run.onsite_service = True
+    assert run.drain_controller(decided=False) is True and kept.calls == [("detach", "process exit")]  # a SIGTERM
+    run.controller = ended = recording_controller(False)
+    assert run.drain_controller(decided=True) is True and ended.calls == [("stop", "run up ended the run")]
+    run.onsite_service = False
+    run.controller = drained = recording_controller(True)
+    assert run.drain_controller(decided=False) is True and drained.calls == [("stop", "process exit")]
 
 
 @pytest.mark.usefixtures("no_sigterm_handler")
@@ -1116,8 +1170,11 @@ def test_the_watcher_never_overwrites_a_record_the_service_rewrote_meanwhile(tmp
     assert writes[-1] == 8
 
 
-def test_a_lease_that_could_not_be_renewed_near_its_end_fences_the_service(tmp_path):
-    from yeto.launch.pool.store_lock import LockUnconfirmed
+def test_a_lease_that_could_not_be_renewed_fences_the_service_in_time_and_restartably(tmp_path):
+    """A renewal that fails fences the service once the lease left no longer covers a beat, a
+    poll, the syncer's stop and the lock's margin (exit 1: restarted); another holder's token is
+    exit 2 (not restarted). The lease is long enough for two failed renewals first."""
+    from yeto.launch.pool.store_lock import LockLost
 
     class Lock:
         margin_s = 12.0
@@ -1132,11 +1189,42 @@ def test_a_lease_that_could_not_be_renewed_near_its_end_fences_the_service(tmp_p
             return self.left
 
     objects = DirectoryObjectStore(tmp_path / "store")
-    for left, error, lost in [(100.0, OSError("store blip"), False), (12.0, OSError("store down"), True),
-                              (90.0, LockUnconfirmed("not confirmed"), True)]:
-        beat_ = fs.Heartbeat(objects, "10.0.0.5", "kid", lock=Lock(left, error), generation=1, log=lambda m: None)
+    grace = fs.SYNCER_STOP_GRACE_S
+    fence = 12.0 + fleet_syncer.SERVICE_BEAT_S + fleet_syncer.POLL_S + grace
+    for left, error, code in [(fence + 1, OSError("store blip"), None), (fence, OSError("store down"), fs.SELF_FENCED_EXIT),
+                              (300.0, LockLost("fleet/syncer_service/lock", 1, 2), fs.LOCK_LOST_EXIT)]:
+        beat_ = fs.Heartbeat(objects, "10.0.0.5", "kid", lock=Lock(left, error), generation=1, log=lambda m: None,
+                             stop_grace_s=grace)
         beat_.renew()
-        assert (beat_.lost is not None) is lost
+        assert beat_.lost_code == code and (beat_.lost is not None) is (code is not None)
+    assert fs.SELF_FENCED_EXIT not in fs.SYNCER_PREVENT and fs.LOCK_LOST_EXIT in fs.SYNCER_PREVENT
+    ttl = fs.service_lock_ttl_s(grace)
+    margin = min(60.0, ttl * 0.1)  # StoreLock.margin_s
+    fence_s = margin + fleet_syncer.SERVICE_BEAT_S + fleet_syncer.POLL_S + grace
+    assert ttl - fence_s >= 2 * fleet_syncer.SERVICE_BEAT_S  # two renewals may fail before it fences
+    assert fence_s - margin - fleet_syncer.SERVICE_BEAT_S - fleet_syncer.POLL_S >= grace  # its stop fits the lease
+
+
+def test_a_self_fenced_service_exits_1_and_stops_its_syncer_before_its_lease_ends(tmp_path, monkeypatch):
+    from yeto.launch.pool import store_lock
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    real = store_lock.StoreLock.renew
+    state = {"down": False}
+
+    def renew(self):
+        if state["down"]:
+            raise OSError("store down")
+        return real(self)
+
+    monkeypatch.setattr(store_lock.StoreLock, "renew", renew)
+    def cut():
+        state["down"] = True  # the store stops answering the renewals
+
+    monkeypatch.setattr(fs, "service_lock_ttl_s", lambda grace, beat=None: 0.6)  # a short lease for the test
+    rc, seen, syncer, objects, logs = run_service(tmp_path, monkeypatch, 0, objects=objects, until=cut, beat_s=0.05)
+    assert rc == fs.SELF_FENCED_EXIT and "fenced by itself" in seen["stopped"]
+    assert syncer.events == ["start", "stop"]
 
 
 def test_two_runs_on_one_host_never_share_a_syncer_state(tmp_path, monkeypatch):
@@ -1212,9 +1300,12 @@ def test_an_old_finished_status_never_ends_the_head_wait_early(tmp_path, monkeyp
     args = types.SimpleNamespace(cluster_prefix="r", rl_syncer_epoch=4, rl_sync_max_learners=4,
                                  rl_checkpoint_store=str(tmp_path / "store"))
     clock = Clock()
-    assert fleet_syncer.serve(args, "10.0.0.5:29400", 1, clusters=[], head_mode=True, local_syncer=Syncer(),
+    first = Syncer()
+    first.exited_ok = lambda: clock.sleeps >= 8  # the syncer process itself ends later
+    assert fleet_syncer.serve(args, "10.0.0.5:29400", 1, clusters=[], head_mode=True, local_syncer=first,
                               sleep=clock.sleep, early_finish=True) == 0
     assert polls["n"] == 3 and island_launches.read_syncer_record(objects) is not None  # waited, then recorded
+    assert clock.sleeps == 8  # supervised on: the old finished status.json never ended it either
     done, polls["n"] = Syncer(), -100
     done.exited = True  # the resumed syncer itself ran to its end before it was seen listening
     objects2 = DirectoryObjectStore(tmp_path / "store2")
@@ -1222,3 +1313,171 @@ def test_an_old_finished_status_never_ends_the_head_wait_early(tmp_path, monkeyp
     assert fleet_syncer.serve(args, "10.0.0.5:29400", 1, clusters=[], head_mode=True, local_syncer=done,
                               sleep=clock.sleep, early_finish=True) == 0
     assert island_launches.read_syncer_record(objects2) is None
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+def test_a_checkpoint_gone_while_the_record_says_it_is_here_is_refused_until_fresh(tmp_path, monkeypatch):
+    """The run store's record says this host's service ran this run's syncer, but its checkpoint is
+    gone (the workdir was cleared): refused (exit 2), naming the recovery. `fresh` lets the next
+    start begin a fresh syncer at the next term (consumed by it)."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    island_launches.write_syncer_record(objects, addr="10.0.0.5:29400", syncer_epoch=4, learners=2, max_learners=4,
+                                        run="r", extra={"service": "10.0.0.5", "service_node": "site-s"})
+    rc, seen, syncer, _objects, logs = run_service(tmp_path, monkeypatch, 0, objects=objects)
+    assert rc == 2 and rc in fs.SYNCER_PREVENT and syncer.events == [] and seen == {}
+    assert "its checkpoint is not here" in logs[-1] and "yeto fleet service fresh" in logs[-1]
+    path = onsite_config(tmp_path)
+    assert fs.service_run(service_args(path, "syncer", fresh=True), objects=objects, log=logs.append) == 0
+    fresh = tmp_path / "state" / "r" / "onsite-syncer.fresh"
+    assert fresh.exists() and "fresh syncer at the next term" in logs[-1]
+    real = fs.run_syncer
+    monkeypatch.setattr(fs, "run_syncer", lambda config, **kw: real(
+        config, objects=objects, make_syncer=lambda args, n: FakeSyncer(False), serve=fake_serve(objects, seen, 0),
+        parse=_prepared, node="site-s", workdir=str(tmp_path / "work"), log=logs.append,
+        fresh_path=kw["fresh_path"]))
+    assert fs.service_run(service_args(path, "syncer"), objects=objects, log=logs.append) == 0
+    assert seen["epoch"] == 5 and not fresh.exists()  # a new term, the islands rejoin it; the marker used up
+    assert any("its checkpoint is gone (--fresh)" in m for m in logs)
+
+
+def test_fresh_runs_on_the_syncer_host_as_the_unit_runs(tmp_path, monkeypatch, capsys):
+    ssh = FakeSsh()
+    monkeypatch.setattr(fs.subprocess, "run", ssh)
+    config = onsite_config(tmp_path)
+    argv = ["fresh", "site-s", "--config", str(config), "--role", "syncer", "--env-file", "/etc/yeto/r.env"]
+    assert fleet_cli.main(fleet_cli_args(["fleet", "service", *argv])) == 0
+    script = ssh.calls[0][1]
+    assert "fleet service-run --role syncer --config" in script and script.rstrip().endswith("--fresh")
+    argv[5] = "control"
+    assert fleet_cli.main(fleet_cli_args(["fleet", "service", *argv])) == 2
+    assert "fresh: --role syncer" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["-r", ".", ".."])
+def test_a_run_name_that_is_an_option_or_a_dot_path_is_refused(tmp_path, monkeypatch, name):
+    doc = onsite_doc(tmp_path)
+    doc["run"] = name
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(fs.ServiceError, match="letters, digits"):
+        fs.Onsite.open(str(path), "syncer", objects=DirectoryObjectStore(tmp_path / "s"))
+    assert not fs._SAFE_RUN.fullmatch("-r") and fs._SAFE_RUN.fullmatch("r-1.a_b")
+
+
+@pytest.mark.parametrize("conditional", [True, False])
+def test_the_watcher_rewrites_the_record_only_over_the_service_s_own(tmp_path, conditional):
+    """The watcher's rewrite is the store's conditional write (replace_if): a record the service
+    rewrote between the watcher's read and its write is never overwritten. A store without it
+    reads again right before a plain write (the window left is that one write)."""
+    objects, clock = DirectoryObjectStore(tmp_path / "store"), Clock()
+    service_up(objects, clock)
+    status = fleet_syncer.read_service_status(objects)
+    args = watch_args(tmp_path)
+    if not conditional:
+        class Plain:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def read(self, key):
+                return self.inner.read(key)
+
+            def write(self, key, data):
+                self.inner.write(key, data)
+
+        store = Plain(objects)
+    else:
+        store = objects
+        plain = []
+        real_write = objects.write
+        objects.write = lambda key, data: (plain.append(key), real_write(key, data))
+    written = fleet_syncer._rerecord(store, status, args)
+    if conditional:
+        assert "fleet/island_syncer.json" not in plain  # the conditional write, never a plain one
+    assert written is not None and island_launches.read_syncer_record(objects)["at"] == written["at"]
+    # the service restarts between the watcher's read and its write: its generation-8 record stands
+    real_read = store.read
+
+    def read(key):
+        data = real_read(key)
+        if key == "fleet/island_syncer.json" and not reads:
+            reads.append(1)
+            service_up(objects, clock, generation=8)
+        return data
+
+    reads: list = []
+    store.read = read
+    assert fleet_syncer._rerecord(store, status, args) is None
+    assert island_launches.read_syncer_record(objects)["service_generation"] == 8
+
+
+def test_replace_if_writes_only_over_the_bytes_read(tmp_path):
+    objects = DirectoryObjectStore(tmp_path / "s")
+    objects.write("k", b"a")
+    assert objects.replace_if("k", b"b", b"a") is True and objects.read("k") == b"b"
+    assert objects.replace_if("k", b"c", b"a") is False and objects.read("k") == b"b"
+    assert objects.replace_if("gone", b"c", b"a") is False and objects.read("gone") is None
+    assert objects.list("") == ["k"]  # the lock file is never listed
+
+
+def test_the_service_s_tape_upload_uses_its_store_client_and_run_up_s_environment(tmp_path, monkeypatch):
+    from yeto.launch import local_syncer
+
+    seen = {}
+
+    class Uploads(FakeSyncer):
+        def start_store_upload(self, args, objects=None):
+            seen["objects"] = objects
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    syncer = Uploads(False)
+    path = onsite_config(tmp_path)
+    fs.run_syncer(str(path), objects=objects, make_syncer=lambda args, n: syncer, serve=fake_serve(objects, {}, 0),
+                  parse=_prepared, node="site-s", workdir=str(tmp_path / "work"), log=lambda m: None)
+    assert seen["objects"] is objects  # never a client built from os.environ
+    ls = local_syncer.LocalSyncer.__new__(local_syncer.LocalSyncer)
+    ls.env = {"YETO_RL_TAPE_UPLOAD_S": "0"}
+    calls = []
+    monkeypatch.setattr("yeto.rl.engine.tape_upload.upload_interval_s",
+                        lambda spec_value=None, environ=None: calls.append(environ))
+    ls.start_store_upload(types.SimpleNamespace(rl_checkpoint_store="s3://b/p"), objects)
+    assert calls == [ls.env]
+
+
+def test_the_s3_store_s_replace_if_is_an_if_match_put(tmp_path):
+    import hashlib
+
+    from store_fault_fakes import FaultS3, client_error
+
+    def tag(data):
+        return '"' + hashlib.md5(data).hexdigest() + '"'
+
+    class ETagS3(FaultS3):
+        refuse = False
+
+        def get_object(self, Bucket, Key, Range=None, IfMatch=None):  # noqa: N803
+            out = super().get_object(Bucket, Key, Range, IfMatch)
+            out["ETag"] = tag(self.objects[Key][0])
+            return out
+
+        def put_object(self, Bucket, Key, Body, IfNoneMatch=None, IfMatch=None, **kw):  # noqa: N803
+            if IfMatch is None:
+                return super().put_object(Bucket, Key, Body, IfNoneMatch, **kw)
+            self._enter("put-if", Key)
+            if self.refuse:
+                raise client_error("NotImplemented", "PutObject")
+            current = self.objects.get(Key)
+            if current is None or tag(current[0]) != IfMatch:
+                raise client_error("PreconditionFailed", "PutObject")
+            self.objects[Key] = (bytes(Body), self.now)
+
+    fake = ETagS3()
+    store = fake.store()
+    store.write("k", b"a")
+    assert store.replace_if("k", b"b", b"a") is True and store.read("k") == b"b"
+    assert store.replace_if("k", b"c", b"a") is False and store.read("k") == b"b"  # not what was read
+    fake.before("put-if", "k", lambda key: store.write("k", b"other"))  # rewritten between its GET and its PUT
+    assert store.replace_if("k", b"c", b"b") is False and store.read("k") == b"other"
+    assert store.replace_if("gone", b"c", b"a") is False
+    fake.refuse = True
+    assert store.replace_if("k", b"c", b"other") is None and store.read("k") == b"other"  # the caller falls back

@@ -12,12 +12,16 @@ host as the unit runs it (its user, env file and directories, ``systemd-run``).
 The units (:func:`unit_text`):
 
 * ``Restart=on-failure``, but never after an exit yeto chose itself
-  (``RestartPreventExitStatus``): the control service exits :data:`CONTROL_DECIDED_EXIT`
-  when ``run up`` ended the run after a breaker trip or a failure it handled (its exit 1);
-  the syncer service exits 2 / 10 on a refusal, 9 on the fleet's STOP and 11 on a strict
-  failure. A crash (an uncaught exception: :data:`CRASH_EXIT`, a signal) is restarted;
-  the restarts are capped (``StartLimitBurst`` within ``StartLimitIntervalSec``). A stop
-  of the unit (SIGTERM, exit 143) is a success (``SuccessExitStatus``).
+  (``RestartPreventExitStatus``): both services exit :data:`CONFIG_EXIT` on a configuration
+  error; the control service exits :data:`CONTROL_DECIDED_EXIT` when ``run up`` ended the run
+  after a breaker trip or a failure it handled (its exit 1); the syncer service exits 2 on a
+  refusal (another service holds the lock, a checkpoint that is not this run's, or none where
+  the record says there is one), 9 on the fleet's STOP and 11 on a strict failure. A crash
+  (an uncaught exception: :data:`CRASH_EXIT`, a signal) is restarted. The control unit has
+  no start limit (``StartLimitIntervalSec=0``): its other refusals (exit 2) come before
+  anything is ordered and are retried every :data:`RESTART_SEC`. The syncer unit's restarts
+  are capped (``StartLimitBurst`` within ``StartLimitIntervalSec``). A stop of the unit
+  (SIGTERM, exit 143) is a success (``SuccessExitStatus``).
 * An **ended marker**: a service that ended its run (:data:`ENDED`) writes one to its local
   state directory and to the run store (``fleet/onsite/<role>.ended``: exit code, reason,
   time). A later start (a reboot of the host, the unit started on another host) reads it
@@ -63,9 +67,13 @@ UNIT_DIR = "/etc/systemd/system"
 DEFAULT_WORKDIR = "/var/tmp/yeto"  # <workdir>/<run>-<role>
 CRASH_EXIT = 70  # an uncaught exception in the service process (EX_SOFTWARE): restarted
 CONTROL_DECIDED_EXIT = 75  # run up's exit 1: it ended the run (a breaker trip, a failure it handled)
+# a configuration error (yeto.config_errors.CONFIG_ERROR_EXIT): never restarted, a start cannot fix it.
+# The control unit's other refusals (exit 2: a preflight, another run up of the run) come before
+# anything is ordered and cost nothing: restarted every RESTART_SEC without a start limit
 SIGTERM_EXIT = 128 + int(signal.SIGTERM)  # a stop of the unit: a success, not restarted
 # exits a unit is never restarted after: yeto decided them
-CONTROL_PREVENT = (CONTROL_DECIDED_EXIT,)
+CONFIG_EXIT = 10
+CONTROL_PREVENT = (CONFIG_EXIT, CONTROL_DECIDED_EXIT)
 SYNCER_PREVENT = (2, 9, 10, 11)  # a refusal, the fleet's STOP, a configuration error, a strict failure
 RESTART_SEC = 30
 START_LIMIT_INTERVAL_S = 3600
@@ -79,10 +87,10 @@ ENDED = {
     "syncer": {0: "the run is finished", 9: "stopped by the fleet's STOP", 11: "a strict failure of the syncer"},
 }
 ENDED_SCHEMA = "yeto.fleet.onsite-ended/v1"
-ENDED_READ_WAIT_S = 600.0  # a store that does not answer at the start: asked again in-process this long
-_sleep, _monotonic = time.sleep, time.monotonic  # the ended marker's read retries (tests use fakes)
+ENDED_READ_FIRST_S, ENDED_READ_MAX_S = 5.0, 60.0  # a store that does not answer at the start: asked again
+_sleep = time.sleep  # the ended marker's read retries (tests use a fake)
 # what a unit file line may hold: no spaces, quotes, newlines, specifiers (%) or variables ($)
-_SAFE_RUN = re.compile(r"[A-Za-z0-9_.-]+")
+_SAFE_RUN = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]*")  # never an option ("-..."), see also "." / ".."
 _SAFE_PATH = re.compile(r"/[A-Za-z0-9._/+-]*")
 _SAFE_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 _SAFE_HOST = re.compile(r"[A-Za-z0-9_.@-]+|\[[0-9A-Fa-f:]+\]")
@@ -151,8 +159,10 @@ def unit_text(spec: ServiceSpec) -> str:
         f"Description=yeto fleet {what} of run {spec.run}",
         "Wants=network-online.target",
         "After=network-online.target",
-        f"StartLimitIntervalSec={START_LIMIT_INTERVAL_S}",
-        f"StartLimitBurst={START_LIMIT_BURST}",
+        # control: no start limit (its refusals order nothing; a unit the limit failed for good
+        # would leave the pools undriven); syncer: a crash loop stops after START_LIMIT_BURST
+        *(["StartLimitIntervalSec=0"] if spec.role == "control" else
+          [f"StartLimitIntervalSec={START_LIMIT_INTERVAL_S}", f"StartLimitBurst={START_LIMIT_BURST}"]),
         "",
         "[Service]",
         "Type=simple",
@@ -273,17 +283,20 @@ def remote(spec: ServiceSpec, host: str, argv: list[str], *, what: str, runner: 
 
 # -- the CLI ------------------------------------------------------------------------------------
 
-ACTIONS = ("stop", "clear-ended")
+ACTIONS = ("stop", "clear-ended", "fresh")
 
 
 def add_parser(fsub: Any) -> None:
     p = fsub.add_parser("service", help="the fleet's control plane or syncer as a systemd unit on site",
                         description="--print / --install HOST: the unit. stop HOST (--role control): `yeto "
                         "stop-run` of the fleet on HOST, as the unit runs. clear-ended HOST: remove the ended "
-                        "marker of the role's service, so that its unit starts the run again.")
+                        "marker of the role's service, so that its unit starts the run again. fresh HOST (--role "
+                        "syncer): let the next start of the syncer service begin a fresh syncer at the next term "
+                        "when its checkpoint is gone.")
     p.add_argument("action", nargs="?", choices=ACTIONS, default=None,
-                   help="stop: the fleet's STOP flag on the control host; clear-ended: the service's ended marker")
-    p.add_argument("host", nargs="?", default=None, help="stop / clear-ended: the service's host (SSH)")
+                   help="stop: the fleet's STOP flag on the control host; clear-ended: the service's ended marker; "
+                   "fresh: a fresh syncer at the next term on the syncer service's next start")
+    p.add_argument("host", nargs="?", default=None, help="stop / clear-ended / fresh: the service's host (SSH)")
     p.add_argument("--config", required=True, help="the run config (fleet.launch per_island, store control plane)")
     p.add_argument("--role", required=True, choices=ROLES,
                    help="control: yeto run up of the fleet; syncer: the fleet's syncer (fleet.syncer_service)")
@@ -311,6 +324,9 @@ def add_parser(fsub: Any) -> None:
                    f"TimeoutStopSec; default {SYNCER_STOP_GRACE_S})")
     r.add_argument("--clear-ended", action="store_true",
                    help="remove this role's ended marker (local and in the run store) and exit")
+    r.add_argument("--fresh", action="store_true",
+                   help="syncer: let the next start begin a fresh syncer at the next term although the run store's "
+                   "record says this host's checkpoint should be here (it is gone), and exit")
 
 
 def load_onsite(args: Any) -> tuple[dict[str, Any], ServiceSpec]:
@@ -365,9 +381,9 @@ def main(args: Any) -> int:
         cfg, spec = load_onsite(args)
         if args.action is None:
             if not args.print and not args.install:
-                raise ServiceError("give --print or --install HOST (or the action stop / clear-ended HOST)")
+                raise ServiceError("give --print or --install HOST (or the action stop / clear-ended / fresh HOST)")
             if args.host is not None:
-                raise ServiceError(f"{args.host!r}: a host goes with stop / clear-ended, or with --install")
+                raise ServiceError(f"{args.host!r}: a host goes with stop / clear-ended / fresh, or with --install")
             if args.print:
                 sys.stdout.write(unit_text(spec))
                 return 0
@@ -385,6 +401,11 @@ def main(args: Any) -> int:
                 raise ServiceError(f"stop: the fleet's run name {name!r} (its --cluster-prefix) is not letters, digits "
                                    "and _.- only")
             return remote(spec, args.host, ["stop-run", name], what=f"stop-run {name}")
+        if args.action == "fresh":
+            if spec.role != "syncer":
+                raise ServiceError("fresh: --role syncer (a fresh syncer at the next term)")
+            return remote(spec, args.host, ["fleet", "service-run", "--role", "syncer", "--config", spec.config,
+                                            "--fresh"], what=f"fresh syncer of {spec.unit}")
         return remote(spec, args.host, ["fleet", "service-run", "--role", spec.role, "--config", spec.config,
                                         "--clear-ended"], what=f"clear-ended of {spec.unit}")
     except (ServiceError, ValueError, OSError) as error:
@@ -421,8 +442,9 @@ class Onsite:
         problem = onsite_problem(cfg, role)
         if problem:
             raise ServiceError(problem)
-        if not _SAFE_RUN.fullmatch(str(cfg["run"])):
-            raise ServiceError(f"run {cfg['run']!r}: letters, digits and _.- only")
+        if not _SAFE_RUN.fullmatch(str(cfg["run"])) or str(cfg["run"]) in (".", ".."):
+            raise ServiceError(f"run {cfg['run']!r}: letters, digits and _.- only, not starting with '-', "
+                               "and not . or ..")
         return cls(cfg, role, objects=objects)
 
     @property
@@ -443,33 +465,37 @@ class Onsite:
     def ended_key(self) -> str:
         return f"fleet/onsite/{self.role}.ended"
 
-    def read_ended(self, *, wait_s: float | None = None, sleep: Callable[[float], None] | None = None,
-                   clock: Callable[[], float] | None = None, log: Callable[[str], None] = print
+    @property
+    def fresh_path(self) -> Path:
+        """``service-run --fresh``: the next start of the syncer begins a fresh syncer at the next
+        term although this host's checkpoint is gone (:func:`run_syncer`; consumed by it)."""
+        return self.ended_path.with_name("onsite-syncer.fresh")
+
+    def read_ended(self, *, sleep: Callable[[float], None] | None = None, log: Callable[[str], None] = print
                    ) -> dict[str, Any] | None:
         """The ended marker: this host's, else the run store's. A store that does not answer
-        is asked again in this process, backing off, for up to ``wait_s`` (the store may come
-        up after the host, at a boot); then the read raises (exit :data:`CRASH_EXIT`: the unit
-        restarts the service, which looks again)."""
+        is asked again in this process for as long as it does not (the store may come up
+        after the host, at a boot), backing off from :data:`ENDED_READ_FIRST_S` to
+        :data:`ENDED_READ_MAX_S`, one log line per try: nothing is started meanwhile, and the
+        service never exits for it (a unit restarted for it would spend its start limit)."""
         if self.ended_path.exists():
             try:
                 doc = json.loads(self.ended_path.read_text())
             except (OSError, ValueError):
                 doc = None
             return doc if isinstance(doc, dict) else {"reason": f"marker {self.ended_path} (unreadable)"}
-        wait_s = ENDED_READ_WAIT_S if wait_s is None else float(wait_s)
-        sleep, clock = sleep or _sleep, clock or _monotonic
-        started, delay = clock(), 5.0
+        sleep = sleep or _sleep
+        delay, tries = ENDED_READ_FIRST_S, 0
         while True:
             try:
                 raw = self.objects.read(self.ended_key)
                 break
-            except Exception as error:  # noqa: BLE001 - asked again, then raised
-                if clock() - started >= wait_s:
-                    raise
+            except Exception as error:  # noqa: BLE001 - asked again until it answers
+                tries += 1
                 log(f"[{self.role} service] the run store does not answer ({type(error).__name__}: {error}); its ended "
-                    f"marker is read again in {delay:.0f}s (up to {wait_s:.0f}s), nothing is started meanwhile")
+                    f"marker is read again in {delay:.0f}s (try {tries}), nothing is started meanwhile")
                 sleep(delay)
-                delay = min(delay * 2, 60.0)
+                delay = min(delay * 2, ENDED_READ_MAX_S)
         if raw is None:
             return None
         try:
@@ -519,10 +545,19 @@ def service_run(args: Any, *, objects: Any = None, log: Callable[[str], None] = 
         try:
             onsite = Onsite.open(args.config, args.role, objects=objects)
         except (ServiceError, ValueError) as error:
-            log(f"[{args.role} service] refused: {error}")
-            return 2
+            log(f"[{args.role} service] refused: {error} (a configuration error: exit {CONFIG_EXIT}, not restarted)")
+            return CONFIG_EXIT
         if getattr(args, "clear_ended", False):
             return onsite.clear_ended(log)
+        if getattr(args, "fresh", False):
+            if args.role != "syncer":
+                log(f"[{args.role} service] --fresh: the syncer role only")
+                return CONFIG_EXIT
+            onsite.fresh_path.parent.mkdir(parents=True, exist_ok=True)
+            onsite.fresh_path.write_text(json.dumps({"at": round(time.time(), 3)}) + "\n")
+            log(f"[syncer service] run {onsite.run}: its next start begins a fresh syncer at the next term (the "
+                f"islands rejoin it) if its checkpoint is gone ({onsite.fresh_path}); start the unit")
+            return 0
         ended = onsite.read_ended(log=log)
         if ended is not None:
             at = ended.get("at")
@@ -537,7 +572,8 @@ def service_run(args: Any, *, objects: Any = None, log: Callable[[str], None] = 
             code = run_control(args.config, log=log)
         else:
             code = run_syncer(args.config, binary=args.syncer_binary, log=log,
-                              stop_grace_s=getattr(args, "stop_grace_s", SYNCER_STOP_GRACE_S))
+                              stop_grace_s=getattr(args, "stop_grace_s", SYNCER_STOP_GRACE_S),
+                              fresh_path=onsite.fresh_path)
         reason = ENDED[args.role].get(code)
         if reason is not None:
             onsite.write_ended(code, reason, log)
@@ -581,6 +617,9 @@ def run_control(config: str, *, log: Callable[[str], None] = print) -> int:
     args.config_adjust = lambda cfg: no_exit_drain(cfg, log)
     args.onsite_service = True  # run up drains when it ends the run itself; not on a SIGTERM or a crash
     code = int(up.main(args) or 0)
+    if code == 2 and getattr(args, "config_refused", None):
+        log(f"[control service] run up refused its configuration: exit {CONFIG_EXIT}, not restarted")
+        return CONFIG_EXIT
     if code == 1:
         log(f"[control service] run up exited 1 (it ended the run): exit {CONTROL_DECIDED_EXIT}, not restarted")
         return CONTROL_DECIDED_EXIT
@@ -632,19 +671,39 @@ def _checkpoints(args: Any, home: str) -> list[str]:
     return [home + p[1:] if p.startswith("~/") else p for p in paths]
 
 
+LOCK_LOST_EXIT = 2  # another service took the lock: not restarted (a restart would be refused anyway)
+SELF_FENCED_EXIT = 1  # this service could not renew its own lease: restarted (acquire refuses a lock held by another)
+
+
+def service_lock_ttl_s(stop_grace_s: float | None, beat_s: float | None = None) -> float:
+    """The service lock's lease: long enough that a service whose renewals fail fences itself
+    (:meth:`Heartbeat.renew`) and still has its syncer stopped (its checkpoint written within
+    ``stop_grace_s``) before the lease ends, after at least two renewals that failed."""
+    from yeto.launch import fleet_syncer  # noqa: PLC0415
+
+    beat = fleet_syncer.SERVICE_BEAT_S if beat_s is None else float(beat_s)
+    return max(fleet_syncer.SERVICE_LOCK_TTL_S, float(stop_grace_s or 0.0) + fleet_syncer.POLL_S + 3 * beat + 60.0)
+
+
 class Heartbeat:
     """The service's heartbeat in the run store every :data:`SERVICE_BEAT_S` (a thread),
     which also renews the service lock. ``starting`` until :meth:`set` says otherwise;
-    ``lost``: why the lock is no longer this service's (the beats stop)."""
+    ``lost``: why the lock is no longer this service's (the beats stop), ``lost_code`` the
+    service's exit for it."""
 
     def __init__(self, objects: Any, host: str, key: str | None, *, lock: Any = None, generation: int | None = None,
-                 node: str | None = None, every_s: float | None = None, log: Callable[[str], None] = print) -> None:
-        from yeto.launch.fleet_syncer import SERVICE_BEAT_S, SERVICE_STARTING  # noqa: PLC0415
+                 node: str | None = None, every_s: float | None = None, log: Callable[[str], None] = print,
+                 stop_grace_s: float | None = None) -> None:
+        from yeto.launch.fleet_syncer import POLL_S, SERVICE_BEAT_S, SERVICE_STARTING  # noqa: PLC0415
 
         self.objects, self.host, self.key, self.lock, self.log = objects, host, key, lock, log
         self.generation, self.node = generation, node
         self.state = SERVICE_STARTING
         self.lost: str | None = None
+        self.lost_code: int | None = None
+        # the lease this service must still hold when it fences itself: a beat until the next
+        # renewal, a poll until serve sees it, the syncer's stop, and the lock's margin
+        self.poll_s, self.stop_grace_s = POLL_S, float(stop_grace_s or 0.0)
         self.every_s = SERVICE_BEAT_S if every_s is None else float(every_s)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="syncer-service-beat", daemon=True)
@@ -665,8 +724,18 @@ class Heartbeat:
             self.state = state
             self.beat()
 
+    @property
+    def fence_s(self) -> float:
+        """Lease left at or below which a service whose renewal failed fences itself."""
+        return float(self.lock.margin_s) + self.every_s + self.poll_s + self.stop_grace_s
+
     def renew(self) -> None:
-        from yeto.launch.pool.store_lock import LockLost, LockUnconfirmed  # noqa: PLC0415
+        """Renew the service lock. Another holder's token (``LockLost``): lost, exit
+        :data:`LOCK_LOST_EXIT`. A renewal that fails (the store does not answer): tried again
+        at the next beat, unless the lease left is within :attr:`fence_s`; then the service
+        fences itself (exit :data:`SELF_FENCED_EXIT`, restarted) while its syncer can still be
+        stopped before the lease ends."""
+        from yeto.launch.pool.store_lock import LockLost  # noqa: PLC0415
 
         if self.lock is None or self.lost is not None:
             return
@@ -674,19 +743,17 @@ class Heartbeat:
             self.lock.renew()
             return
         except LockLost as error:
-            self.lost = f"the syncer service lock is no longer this service's ({error})"
-            self.log(f"[syncer service] ERROR: {self.lost}: ending this syncer")
-            return
-        except LockUnconfirmed as error:
-            self.lost = f"the syncer service lock could not be confirmed near its lease end ({error}): fenced by itself"
+            self.lost, self.lost_code = f"the syncer service lock is no longer this service's ({error})", LOCK_LOST_EXIT
             self.log(f"[syncer service] ERROR: {self.lost}: ending this syncer")
             return
         except Exception as error:  # noqa: BLE001 - a store blip: renewed at the next beat
             self.log(f"[syncer service] WARNING: lock not renewed ({type(error).__name__}: {error})")
-        if self.lock.lease_left() <= self.lock.margin_s:  # another service may take it any moment now
-            self.lost = (f"the syncer service lock was not renewed and its lease ends in {self.lock.lease_left():.0f}s "
-                         f"(margin {self.lock.margin_s:.0f}s): fenced by itself")
-            self.log(f"[syncer service] ERROR: {self.lost}: ending this syncer")
+        left = self.lock.lease_left()
+        if left <= self.fence_s:  # stopped now, the syncer is down before another service may take the lock
+            self.lost = (f"the syncer service lock was not renewed and its lease ends in {left:.0f}s (the syncer's "
+                         f"stop needs up to {self.fence_s:.0f}s of it): fenced by itself")
+            self.lost_code = SELF_FENCED_EXIT
+            self.log(f"[syncer service] ERROR: {self.lost}: ending this syncer (exit {SELF_FENCED_EXIT}: restarted)")
 
     def start(self) -> None:
         self.beat()
@@ -705,7 +772,8 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
                make_syncer: Callable[..., Any] | None = None, serve: Callable[..., int] | None = None,
                parse: Callable[[list[str]], Any] | None = None, node: str | None = None,
                stop_grace_s: float | None = SYNCER_STOP_GRACE_S, beat_s: float | None = None,
-               workdir: str | None = None, log: Callable[[str], None] = print) -> int:
+               workdir: str | None = None, log: Callable[[str], None] = print,
+               fresh_path: Path | None = None) -> int:
     """The fleet's syncer on this host (``fleet.syncer_service``): the syncer launch's syncer,
     run as the head runs it (``LocalSyncer``: a process that dies is restarted from its
     checkpoint, and its record written again), under the service lock, plus the service's
@@ -717,7 +785,13 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
     config's ``env`` over it, passed to the store client and the syncer (never written to
     this process's environment). The term (``syncer_epoch``): the fleet's last record's
     when that record is this host's service's (a restart resumes it), one more when it is
-    another host's (a syncer that starts over elsewhere fences the old one's islands)."""
+    another host's (a syncer that starts over elsewhere fences the old one's islands).
+
+    The checkpoint must match the record: one here while the record is missing or another
+    run's is refused (exit 2), and so is none here while the record says this host's service
+    ran this run's syncer (its workdir was cleared: a syncer from step 0 under the islands'
+    term), unless ``fresh_path`` exists (``service-run --fresh``): then a fresh syncer starts
+    at the next term, which the islands rejoin."""
     from yeto.config_errors import CONFIG_ERROR_EXIT, ISLAND_STOP_EXIT  # noqa: PLC0415
     from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
     from yeto.launch import fleet_syncer  # noqa: PLC0415
@@ -734,11 +808,11 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         run = up.open_run(config)
     except up.RunConfigError as error:
         log(f"[syncer service] refused: {error}")
-        return 2
+        return CONFIG_EXIT
     problem = onsite_problem(run.cfg, "syncer")
     if problem:
         log(f"[syncer service] refused: {problem}")
-        return 2
+        return CONFIG_EXIT
     env = dict(run.env)  # run up's: this process's environment, the run config's env over it
     key = env.get(ISLAND_HMAC_KEY_ENV)
     kid = fleet_syncer.key_id(key)
@@ -767,10 +841,23 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             f", not run {args.cluster_prefix!r} on {host}: it is another run's state (or this store is new). Move it "
             "away, or give this run its own --workdir")
         return 2
+    mine = (last is not None and last.get("run") == args.cluster_prefix and last.get("service") == host
+            and last.get("service_node") == node)
+    fresh = fresh_path is not None and Path(fresh_path).exists()
+    if mine and not checkpoints and not fresh:
+        paths = ", ".join(_checkpoints(args, home))
+        log(f"[syncer service] refused: the run store's syncer record says this host's service ran run "
+            f"{args.cluster_prefix!r}'s syncer (epoch {last.get('syncer_epoch')}), but its checkpoint is not here "
+            f"({paths}): the workdir was cleared? A syncer started now would begin from step 0 under the islands' "
+            "term. To start a fresh syncer at the next term (the islands rejoin it): `yeto fleet service fresh "
+            f"<this host> --role syncer --config <run.json> --env-file <env file>` (or here, as the unit runs: `yeto "
+            "fleet service-run --role syncer --config <run.json> --fresh`), then start the unit. Or put the "
+            "checkpoint back")
+        return 2
     holder = f"{node}/{unit_name(run.run, 'syncer')}"
     try:
         lock = StoreLock.acquire(objects, fleet_syncer.SERVICE_LOCK, holder=holder,
-                                 ttl_s=fleet_syncer.SERVICE_LOCK_TTL_S, reclaim=True)
+                                 ttl_s=service_lock_ttl_s(stop_grace_s, beat_s), reclaim=True)
     except StoreLockError as error:
         log(f"[syncer service] refused: the run store cannot hold the service lock ({error})")
         return 2
@@ -780,7 +867,8 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             f"lease {fleet_syncer.SERVICE_LOCK} runs out at {float(other.get('until') or 0):.0f}); one syncer at a "
             "time. Stop that unit first (or wait for its lease to run out if its host is gone)")
         return 2
-    beat = Heartbeat(objects, host, kid, lock=lock, generation=lock.token, node=node, every_s=beat_s, log=log)
+    beat = Heartbeat(objects, host, kid, lock=lock, generation=lock.token, node=node, every_s=beat_s, log=log,
+                     stop_grace_s=stop_grace_s)
     syncer, code, reason, final = None, 1, None, None
     try:
         stop = fleet_syncer.read_onsite_stop(objects)
@@ -792,10 +880,14 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         num_learners = (sample_roles.syncer_learner_count(args, len(parse_gpu_spec(args.gpu)))
                         + (getattr(args, "external_learners", 0) or 0))
         here = last is not None and last.get("service") == host and last.get("service_node") == node
+        if fresh and mine and not checkpoints:  # service-run --fresh: a new term, the islands rejoin it
+            here = False
+            Path(fresh_path).unlink(missing_ok=True)
         if last is not None and not here and last.get("syncer_epoch") is not None:
             args.rl_syncer_epoch = int(last["syncer_epoch"]) + 1
-            log(f"[syncer service] the fleet's last syncer record (epoch {last['syncer_epoch']}) is not this host's "
-                f"service's: this syncer starts at epoch {args.rl_syncer_epoch}")
+            log(f"[syncer service] the fleet's last syncer record (epoch {last['syncer_epoch']}) is "
+                + ("this host's, but its checkpoint is gone (--fresh)" if mine else "not this host's service's")
+                + f": this syncer starts at epoch {args.rl_syncer_epoch}")
         fleet_syncer.resolve_epoch(args, sample_roles.FLEET_ROLE_SYNCER, adopted=False, reader=lambda: None,
                                    objects=objects, log=log)
         addr = syncer_shard_addrs(host, args)
@@ -812,8 +904,8 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         syncer.start()
         for hook in ("start_log_forwarder", "start_store_upload"):
             method = getattr(syncer, hook, None)
-            if method is not None:
-                method(args) if hook == "start_store_upload" else method()
+            if method is not None:  # the tape upload: this service's store client, run up's environment
+                method(args, objects) if hook == "start_store_upload" else method()
         log(f"[syncer service] the fleet syncer of run {run.run} runs on this host at {addr} (epoch "
             f"{args.rl_syncer_epoch}, generation {lock.token}, {num_learners} launched learner(s))")
 
@@ -835,7 +927,7 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             record_extra={"service": host, "service_node": node, "service_generation": lock.token, "key_id": kid},
             on_record=recorded, stopped=stopped, early_finish=True)
         if beat.lost is not None:
-            code, reason = 2, beat.lost
+            code, reason = beat.lost_code or LOCK_LOST_EXIT, beat.lost
         elif code == RUN_STOPPED_EXIT:
             final, reason = fleet_syncer.SERVICE_STOPPED, stopped() or "STOP flag"
         elif code == 0:
@@ -851,7 +943,7 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             beat.beat(final, reason)
         if syncer is not None:
             syncer.stop()
-        if beat.lost is None:
+        if beat.lost_code != LOCK_LOST_EXIT:  # another holder's lease is not ours to end
             lock.release()  # the next service (a restart, another host) need not wait for the lease
     log(f"[syncer service] ended: exit {code}" + (f" ({reason})" if reason else ""))
     return code

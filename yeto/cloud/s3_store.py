@@ -893,6 +893,35 @@ class S3ObjectStore:
         self.write(key, data)
         return True
 
+    def replace_if(self, key: str, data: bytes, expected: bytes) -> bool | None:
+        """Write ``data`` as ``key`` only while the object still holds ``expected`` (its bytes):
+        a GET for its ETag, then a PutObject with ``If-Match`` on it (the conditional write the
+        lock's ``If-None-Match`` create comes with). True: written; False: the object changed
+        or is gone; None: this endpoint takes no conditional write, or the object is too large
+        for one PutObject (the caller falls back)."""
+        if not self.conditional_writes or len(data) > self.transfer.multipart_bytes:
+            return None
+        full = self._key(key)
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=full)
+        except self.client.exceptions.NoSuchKey:
+            return False
+        body, etag = response["Body"].read(), response.get("ETag")
+        if body != expected:
+            return False
+        if not etag:
+            return None
+        try:
+            self.client.put_object(Bucket=self.bucket, Key=full, Body=data, IfMatch=etag)
+            return True
+        except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+            code = self._code(error)
+            if code in ("PreconditionFailed", "ConditionalRequestConflict"):
+                return False
+            if code == "NotImplemented":
+                return None
+            raise
+
     def _absent_condition(self) -> dict[str, Any]:
         """The CompleteMultipartUpload argument of a create-if-absent."""
         return {"IfNoneMatch": "*"}

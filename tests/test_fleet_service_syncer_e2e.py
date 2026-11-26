@@ -62,7 +62,7 @@ class ServiceSyncer(LocalSyncer):
         self._log_offset = self._event_offset = 0
         self.store_uploaders = ()
 
-    def start_store_upload(self, args) -> None:  # no run store tape upload here (a local store)
+    def start_store_upload(self, args, objects=None) -> None:  # no run store tape upload here (a local store)
         return None
 
     def start_log_forwarder(self) -> None:
@@ -186,6 +186,8 @@ def test_the_whole_service_process_stopped_and_started_again_goes_on_at_the_same
     objects = DirectoryObjectStore(tmp_path / "store")
     monkeypatch.setattr(syncer_mod, "_head_ports", lambda args: [port])
     monkeypatch.setattr(fleet_syncer, "_store_objects", lambda args: objects)
+    # this syncer's checkpoint (ServiceSyncer keeps it in tmp_path): the restart finds it there
+    monkeypatch.setattr(fs, "_checkpoints", lambda args, home: [str(tmp_path / "state.ckpt")])
     # the fleet's last record is another host's syncer's (term 3): this service starts at 4
     island_launches.write_syncer_record(objects, addr="10.0.0.9:29400", syncer_epoch=3, learners=1, max_learners=4,
                                         run="r", extra={"service": "10.0.0.9", "service_node": "site-x"})

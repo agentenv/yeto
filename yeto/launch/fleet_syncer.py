@@ -429,8 +429,10 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
                 print(f"[launcher] fleet syncer: record not rewritten ({error})", file=sys.stderr)
             return True
 
-        return supervise(finished=local_syncer.finished, failed=failed, restart=restart, stop_flag=stop_flag,
-                         sleep=sleep, stopped=stopped)
+        # the on-site service (early_finish): only the syncer process's own exit 0 is its end, never a
+        # status.json an earlier run of it left (a run cleared and resumed with more steps)
+        return supervise(finished=local_syncer.exited_ok if early_finish else local_syncer.finished, failed=failed,
+                         restart=restart, stop_flag=stop_flag, sleep=sleep, stopped=stopped)
     last: dict[str, Any] = {}
 
     def finished() -> bool:
@@ -591,7 +593,7 @@ def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], No
     key is missing here or is not the service's. ``clock``: this host's monotonic clock."""
     from .. import runs
     from ..config_errors import CONFIG_ERROR_EXIT
-    from ..rl.island_launches import read_syncer_record, write_syncer_record
+    from ..rl.island_launches import read_syncer_record
     from .fleet import RUN_STOPPED_EXIT
 
     host = str(args.rl_fleet_syncer_service)
@@ -639,13 +641,10 @@ def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], No
                 log(f"[launcher] fleet syncer service on {host} stopped: {status.get('reason')}")
                 return RUN_STOPPED_EXIT
             if (state == SERVICE_RUNNING and beats.moved and rec is not None and rec.get("service") == host
-                    and status.get("generation") is not None
-                    and rec.get("service_generation") == status.get("generation")):
-                # read again right before it is written for this run up: a service that restarted
-                # meanwhile (a new generation) wrote its own record, which is never overwritten
-                again = read_syncer_record(objects)
-                if again is not None and again.get("service_generation") == status.get("generation"):
-                    rec = again
+                    and status.get("generation") is not None):
+                written = _rerecord(objects, status, args)  # only over the record of the heartbeat's generation
+                if written is not None:
+                    rec = written
                     break
         if os.path.exists(stop_flag):
             log(f"[launcher] fleet syncer: STOP flag {stop_flag} before the syncer service on {host} was up")
@@ -662,11 +661,6 @@ def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], No
         sleep(poll_s)
     epoch = rec.get("syncer_epoch")
     args.rl_syncer_epoch = epoch
-    # recorded again for this run up (wall clock: the trainer worker dials a record newer than its syncer launch)
-    write_syncer_record(objects, addr=str(rec["addr"]), syncer_epoch=epoch, learners=int(rec.get("learners") or 0),
-                        max_learners=rec.get("max_learners"), run=str(rec.get("run") or args.cluster_prefix),
-                        extra={k: rec[k] for k in ("service", "service_node", "service_generation", "key_id")
-                               if k in rec})
     log(f"[launcher] fleet syncer service on {host} at {rec['addr']} (epoch {epoch}, generation "
         f"{status.get('generation')}) recorded for the islands; watching its heartbeat")
 
@@ -715,6 +709,47 @@ def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], No
     if code == RUN_STOPPED_EXIT and os.path.exists(stop_flag):
         return stop_fleet()
     return code
+
+
+def _rerecord(objects: Any, status: dict[str, Any], args: Any) -> dict[str, Any] | None:
+    """The syncer record written again for this run up (a fresh ``at``, this host's wall clock:
+    the trainer worker dials a record newer than its syncer launch), only over the service's
+    own record of ``status``'s generation: a service that restarted meanwhile (a new
+    generation) wrote its own, which is never overwritten. The write is the store's
+    conditional one (``replace_if``: only while the object still holds the bytes read). A
+    store without it is read again right before a plain write; the window left there is that
+    one write: a service generation that records itself between that read and the write is
+    overwritten, and the islands dial its address (the same host) under the older generation
+    until its syncer next restarts and records itself again. None: not written (read again at
+    the next poll)."""
+    import json
+
+    from ..rl.island_launches import SYNCER_RECORD, syncer_record_doc
+
+    try:
+        raw = objects.read(SYNCER_RECORD)
+        rec = json.loads(raw) if raw is not None else None
+        if not isinstance(rec, dict) or not rec.get("addr") or rec.get("service_generation") != status.get("generation"):
+            return None
+        doc = syncer_record_doc(addr=str(rec["addr"]), syncer_epoch=rec.get("syncer_epoch"),
+                                learners=int(rec.get("learners") or 0), max_learners=rec.get("max_learners"),
+                                run=str(rec.get("run") or args.cluster_prefix),
+                                extra={k: rec[k] for k in ("service", "service_node", "service_generation", "key_id")
+                                       if k in rec})
+        data = json.dumps(doc, sort_keys=True).encode()
+        replace = getattr(objects, "replace_if", None)
+        done = replace(SYNCER_RECORD, data, raw) if replace is not None else None
+        if done is None:  # no conditional write on this store: read again right before the write
+            if objects.read(SYNCER_RECORD) != raw:
+                return None
+            objects.write(SYNCER_RECORD, data)
+        elif not done:
+            return None
+        return doc
+    except Exception as error:  # noqa: BLE001 - a store error: tried again at the next poll
+        print(f"[launcher] fleet syncer: the syncer record was not written again ({type(error).__name__}: {error}); "
+              "tried again at the next poll", file=sys.stderr, flush=True)
+        return None
 
 
 def _node() -> str:
