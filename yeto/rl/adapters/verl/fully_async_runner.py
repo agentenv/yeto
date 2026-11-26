@@ -34,6 +34,7 @@ from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncT
 
 from . import advantage  # noqa: F401 - registers the yeto_grpo estimator in the trainer process
 from .fully_async_round import RESUME_CALLS_KEY
+from .ray_resources import TRAINER_ACTOR_CPUS
 
 _TrainerBase = getattr(FullyAsyncTrainer, "__ray_actor_class__", FullyAsyncTrainer)
 
@@ -227,7 +228,7 @@ class _YetoTrainerMixin:
         return next(r for r in await self.yeto_call_workers(remote_export_digest, kwargs) if r is not None)
 
 
-YetoFullyAsyncTrainer = ray.remote(num_cpus=10)(type("YetoFullyAsyncTrainer", (_YetoTrainerMixin, _TrainerBase), {}))
+YetoFullyAsyncTrainer = ray.remote(num_cpus=TRAINER_ACTOR_CPUS)(type("YetoFullyAsyncTrainer", (_YetoTrainerMixin, _TrainerBase), {}))
 
 
 # verl decorates its task runner with @ray.remote too; Ray refuses subclasses of
@@ -311,6 +312,11 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
             device_name=config.trainer.device,
         )
         trainer.yeto_configure  # noqa: B018 - fail fast (AttributeError) if this is not our class
-        ray.get(trainer.init_workers.remote())
+        # A trainer actor or worker group Ray cannot place is a stop within the schedule
+        # timeout, not a silent hang (ray_resources: the 8-vCPU sky VM, Pending {'CPU': 10.0})
+        from .ray_resources import await_actor, get_watching_placements
+
+        await_actor(trainer, demand={"CPU": float(TRAINER_ACTOR_CPUS)})
+        get_watching_placements(trainer.init_workers.remote())
         self.components["trainer"] = trainer
         print("[ASYNC MAIN] yeto trainer actor created and initialized successfully")

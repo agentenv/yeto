@@ -723,6 +723,7 @@ def make_miles_island_task(
             # compute_ray_pin_head_options).
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
+            + rl_island_ray_cpus(args)
             + rl_island_ray_storage(args, head=True, cloud=spec.cloud)
             + _agent_ports_flags(spec.cloud)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
@@ -753,7 +754,8 @@ def make_miles_island_task(
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
             f"{_worker_node_ip_flag(spec.cloud)}"
-            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False, cloud=spec.cloud)}"
+            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_cpus(args)}"
+            f"{rl_island_ray_storage(args, head=False, cloud=spec.cloud)}"
             f"{_agent_ports_flags(spec.cloud)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
@@ -877,6 +879,45 @@ def _island_compat_group(args, spec, learner_id: int) -> str:
 
 # Clouds whose Ray workers pin their node IP to their SKYPILOT_NODE_IPS line.
 PINNED_WORKER_IP_CLOUDS = frozenset({"modal", "ssh"})
+
+
+def island_ray_min_cpus(args) -> int | None:
+    """The island Ray CPU slots the backend needs at least (its ``launch_flags.
+    ISLAND_RAY_MIN_CPUS``: verl 32); None for a backend that declares none (Miles)."""
+    floor = getattr(_rl_backend_module(args, "launch_flags"), "ISLAND_RAY_MIN_CPUS", None)
+    return int(floor) if floor else None
+
+
+def rl_island_ray_cpus(args) -> str:
+    """``ray start`` flag giving the island Ray ``max(node vCPUs, floor)`` CPU slots on every
+    node, for a backend with a floor (:func:`island_ray_min_cpus`); "" otherwise (the Miles
+    island's ``ray start`` is unchanged). Ray CPUs are scheduling tokens: a verl island on an
+    8-vCPU VM (AWS g5/g6/g6e.2xlarge) had 8, its trainer actor asked for 10 and Ray left it
+    pending with no error. Only a Modal container used to get more (``island_entry.
+    ensure_ray_cpus`` restarts its Ray); every cloud gets them at start now."""
+    floor = island_ray_min_cpus(args)
+    if floor is None:
+        return ""
+    return f' --num-cpus="$(n=$(nproc); [ "$n" -gt {floor} ] && echo "$n" || echo {floor})"'
+
+
+def island_ray_record(args, spec) -> dict | None:
+    """The dry-run's record of a backend with a Ray CPU floor (verl): the vCPUs the launch
+    asks the cloud for, the island Ray's CPU slots and what the trainer asks of them; None
+    for a backend without a floor (the Miles plan is unchanged)."""
+    floor = island_ray_min_cpus(args)
+    if floor is None:
+        return None
+    flags = _rl_backend_module(args, "launch_flags")
+    if spec.cloud == "modal":
+        vcpus = "the Modal container's"
+    elif getattr(args, "learner_instance_type", None):
+        vcpus = f"those of {args.learner_instance_type}"
+    else:
+        vcpus = rl_island_cpus(args, spec.cloud) or f"the {spec.cloud} node's"
+    need = getattr(flags, "ISLAND_TRAINER_RAY_CPUS", None)
+    return {"node_vcpus": vcpus, "ray_cpu_slots": f"max(node vCPUs, {floor})",
+            "trainer_ray_cpus": need, "fits": need is None or need <= floor}
 
 
 def _worker_node_ip_flag(cloud: str) -> str:

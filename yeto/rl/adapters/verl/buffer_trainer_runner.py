@@ -31,6 +31,7 @@ import numpy as np
 import ray
 
 from .fully_async_runner import YetoFullyAsyncTaskRunner, _TrainerBase, _YetoTrainerMixin
+from .ray_resources import TRAINER_ACTOR_CPUS
 
 FLOAT_ROWS = ("rollout_log_probs", "rm_scores")
 INT32_FIELDS = ("__num_turns__",)
@@ -100,7 +101,7 @@ class _YetoBufferTrainerMixin(_YetoTrainerMixin):
         return None  # no MessageQueue: the buffer backlog is the samplers' report
 
 
-YetoBufferTrainer = ray.remote(num_cpus=10)(
+YetoBufferTrainer = ray.remote(num_cpus=TRAINER_ACTOR_CPUS)(
     type("YetoBufferTrainer", (_YetoBufferTrainerMixin, _TrainerBase), {}))
 
 
