@@ -2326,10 +2326,24 @@ class Run:
         if self.fleet_plan() is not None:  # pools + each island's trainer + the syncer
             return self.fleet_rt().spend().total_usd
         now = time.time()
-        nc = sum(self.node_spend_usd(i, now) for i in range(len(self.pools)))
+        # each pool clamped as the fleet's spend clamps it (its prices were checked: node_usd_per_h)
+        nc = breakers_fleet.pools_usd((self._checked_node_spend_usd(i, now), 1.0) for i in range(len(self.pools)))
         nc += breakers_fleet.pools_usd(self.retired_pool_spend(now))  # pools the desired state removed (clamped)
         rate = up_consistency.number_or_default(self.cfg.get("trainer"), "usd_per_h", 0)
         return nc + self.trainer_hours(now) * rate
+
+    def _checked_node_spend_usd(self, i: int, now: float) -> float:
+        """:meth:`node_spend_usd` of pool ``i``; one that is still not a finite amount >= 0 (its
+        prices are checked, so only a bug gets here) counts its billed hours at the MI355X rate
+        (one WARNING per up) rather than NaN (run.budget never trips) or 0 (spend dropped)."""
+        usd = self.node_spend_usd(i, now)
+        if _price_or_none(usd) is not None:
+            return usd
+        fallback = self.node_hours(i, now) * _nc_node_usd_h()
+        name = _pool_of(self, i).name
+        self._warn_once(f"spend:{name}", f"pool {name}: its spend {usd!r} is not an amount: counted as its billed "
+                        f"node hours at the MI355X rate ({fallback!r} USD)")
+        return fallback
 
     def trainer_hours(self, now: float | None = None) -> float:
         """Billed trainer hours: from ``trainer_t0`` (its first launch) to now, counted only
@@ -2377,14 +2391,14 @@ class Run:
         if not rows:  # nothing removed (every run without a desired state)
             return []
         if not isinstance(rows, list):
-            self._retired_warn("retired_pools", f"the state's retired_pools is a {type(rows).__name__}, not a "
+            self._warn_once("retired_pools", f"the state's retired_pools is a {type(rows).__name__}, not a "
                                "list: ignored (the pools the desired state removed are not in the spend)")
             return []
         latest: dict[tuple[str, ...], tuple[_RetiredPool, float | None]] = {}
         for row in rows:
             if not isinstance(row, dict) or not row.get("name") or not (
                     isinstance(row.get("pool"), dict) or row.get("config")):
-                self._retired_warn("retired_pools.row", "a retired_pools row of the state is not a removed pool "
+                self._warn_once("retired_pools.row", "a retired_pools row of the state is not a removed pool "
                                    f"({str(row)[:80]}): skipped")
                 continue
             ref = _RetiredPool.of(row)
@@ -2440,53 +2454,99 @@ class Run:
                     try:
                         ref.load()
                     except Exception as error:  # noqa: BLE001 - no state, no price, no config: nothing to bill by
-                        self._retired_warn(f"price:{ref.name}", f"removed pool {ref.name}: usd_per_h "
+                        self._warn_once(f"price:{ref.name}", f"removed pool {ref.name}: usd_per_h "
                                            f"{ref.raw_price!r} is not a price and its config is unreadable "
                                            f"({type(error).__name__}): not in the spend")
                         continue
                 end = now if removed_at is None or has_state else min(now, removed_at)
                 out.append(self.pool_spend_rate(ref, end))
             except Exception as error:  # noqa: BLE001 - the budget breaker goes on
-                self._retired_warn(f"spend:{ref.name}", f"removed pool {ref.name}: spend not read "
+                self._warn_once(f"spend:{ref.name}", f"removed pool {ref.name}: spend not read "
                                    f"({type(error).__name__}: {error}): not in the spend")
         return out
 
-    def _retired_warn(self, key: str, message: str) -> None:
+    def _warn_once(self, key: str, message: str) -> None:
         """One WARNING per ``key`` for this process (one ``run up``): the monitor reads the
         spend every tick."""
-        seen = self.__dict__.setdefault("_retired_warned", set())
+        seen = self.__dict__.setdefault("_warned_once", set())
         if key not in seen:
             seen.add(key)
             _log(f"WARNING: {message}")
 
+    def _usd_per_h_override(self, i: Any) -> float | None:
+        """Pool ``i``'s ``usd_per_h`` when it is a price (finite, not negative); None when
+        unset, or when it is not one (NaN, inf, negative, not a number: one WARNING per up,
+        and the pool is priced as one without it, so the spend never turns NaN or drops)."""
+        ref = _pool_of(self, i)
+        price = ref.usd_per_h
+        if price is not None and _price_or_none(price) is None:
+            self._warn_once(f"usd_per_h:{ref.name}", f"pool {ref.name}: usd_per_h {price!r} is not a price "
+                            "(a finite USD amount, not negative): priced from its provider config instead")
+            return None
+        return price
+
     def node_usd_per_h(self, i: int = 0) -> float:
         """One node hour of pool ``i``: its ``usd_per_h``, else the price its provider config
         states (``price_usd_h`` of a Modal / Daytona / Sky pool, the one the pool's own budget
-        charges), else ``budget.nc_usd_per_h``."""
-        price = _pool_of(self, i).usd_per_h
+        charges), else ``budget.nc_usd_per_h``. A value at a step that is not a price (NaN,
+        inf, negative, not a number) is skipped with one WARNING per up; when none is one,
+        the unified price table's MI355X node rate (the rate of an unpriced node): never NaN,
+        never 0 for a price that could not be read."""
+        ref = _pool_of(self, i)
+        price = self._usd_per_h_override(i)
         if price is None:
             try:
                 from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
 
-                price, currency = pool_price(_pool_of(self, i).load())
+                price, currency = pool_price(ref.load())
                 if currency == "ucr":  # National Compute: its rate stays budget.nc_usd_per_h
                     price = None
             except Exception:  # noqa: BLE001 - an unreadable pool config: the NC rate
                 price = None
+            if price is not None and _price_or_none(price) is None:
+                stated, price = price, self._unstated_price(ref)
+                self._warn_once(f"price_usd_h:{ref.name}", f"pool {ref.name}: its provider config's price "
+                                f"{stated!r} is not a price: priced as a pool that states none "
+                                f"({'the unified price table' if price is not None else 'budget.nc_usd_per_h'})")
         if price is None:
-            return up_consistency.number_or_default(self.cfg.get("budget"), "nc_usd_per_h", _nc_node_usd_h())
+            try:
+                rate = up_consistency.number_or_default(self.cfg.get("budget"), "nc_usd_per_h", _nc_node_usd_h())
+            except (TypeError, ValueError):
+                rate = None
+            if rate is None or _price_or_none(rate) is None:
+                fallback = _nc_node_usd_h()
+                self._warn_once("nc_usd_per_h", f"budget.nc_usd_per_h {(self.cfg.get('budget') or {}).get('nc_usd_per_h')!r} "
+                                f"is not a price: a node without another price counts at the MI355X rate {fallback:g} USD/h")
+                return fallback
+            return rate
         return price
+
+    @staticmethod
+    def _unstated_price(ref: Any) -> float | None:
+        """The USD price of pool ``ref`` as if its provider stated no ``price_usd_h`` (the unified
+        price table's, e.g. a Modal pool's gpu x gpus); None when that is not a price either."""
+        try:
+            from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
+
+            cfg = copy.deepcopy(ref.load())
+            (cfg.get("provider") or {}).pop("price_usd_h", None)
+            price, currency = pool_price(cfg)
+        except Exception:  # noqa: BLE001 - nothing to price it by
+            return None
+        return _price_or_none(price) if currency == "usd" else None
 
     def node_spend_usd(self, i: int = 0, now: float | None = None) -> float:
         """Spend of pool ``i``: each member's billed hours (:meth:`node_hours`) at the rate of the
         offer it was ordered with (the ``hourly_ucr`` its pool charged it, in USD) for a pool of
         a USD provider without a ``usd_per_h`` override; :meth:`node_usd_per_h` otherwise (a
-        member the pool did not price yet, National Compute, a pool without a readable state)."""
+        member the pool did not price yet, National Compute, a pool without a readable state).
+        A member's ``hourly_ucr`` that is not a rate (NaN, inf, negative, not a number) counts
+        at :meth:`node_usd_per_h` (one WARNING per up)."""
         from yeto.launch.pool.money import to_usd  # noqa: PLC0415
 
         base = self.node_usd_per_h(i)
         per_member = False
-        if _pool_of(self, i).usd_per_h is None:
+        if self._usd_per_h_override(i) is None:
             try:
                 from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
 
@@ -2498,7 +2558,18 @@ class Run:
 
         def rate(m: dict[str, Any] | None) -> float:
             own = None if m is None else m.get("hourly_ucr")
-            return base if own is None else to_usd(float(own), "ucr")
+            if own is None:
+                return base
+            try:
+                usd = to_usd(float(own), "ucr")
+            except (TypeError, ValueError):
+                usd = None
+            if usd is None or _price_or_none(usd) is None or isinstance(own, bool):
+                name = _pool_of(self, i).name
+                self._warn_once(f"hourly_ucr:{name}", f"pool {name}: a member's hourly_ucr {own!r} is not a rate: "
+                                "it counts at the pool's price")
+                return base
+            return usd
 
         return self.node_hours(i, now, rate=rate)
 
