@@ -189,6 +189,8 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
     # learner 0's broadcast values by (fragment, version): the newest outer weights
     observed: dict[tuple[int, int], np.ndarray] = {}
     held: dict[int, list] = {}  # PULLs of island 2 that arrived during its catch-up
+    # every (fragment, version) island 2 received, from its catch-up on: the weights it held
+    joiner_held: dict[tuple[int, int], np.ndarray] = {}
     state = {"joined": None, "catch_up": {}, "first_base": None, "left": False}
 
     def drain(learner):
@@ -199,6 +201,8 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
             versions[learner][fid] = max(versions[learner][fid], update.version)
             if learner == 0:
                 observed[(fid, update.version)] = _values(update.data)
+            if learner == 2:
+                joiner_held[(fid, update.version)] = _values(update.data)
         for permit in held.pop(learner, []) + client.drain_pulls():
             key = (permit.global_step, permit.round_attempt)
             if key in seen[learner]:
@@ -206,7 +210,7 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
             seen[learner].add(key)
             base = versions[learner][permit.fragment_id]
             if learner == 2 and state["first_base"] is None:
-                state["first_base"] = (permit.fragment_id, base)
+                state["first_base"] = (permit.fragment_id, base, permit.global_step)
             client.push_fragment(permit.fragment_id, permit.global_step, permit.round_attempt,
                                  base, permit.global_step, 1, 7, _f32(_delta(learner, permit.global_step)))
 
@@ -222,13 +226,19 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
         fresh = _client(2, port, profile_hash)
         fresh.start()
         caught: dict[int, tuple[int, np.ndarray]] = {}
+        latest: dict[int, int] = {}
 
         def catch_up():
             fresh.check_health()
             for update in fresh.drain_updates():
-                if update.fragment_id not in caught:
-                    assert update.catch_up or update.version >= newest[update.fragment_id]
-                    caught[update.fragment_id] = (update.version, _values(update.data))
+                fid = update.fragment_id
+                if fid not in caught:
+                    assert update.catch_up or update.version >= newest[fid]
+                    caught[fid] = (update.version, _values(update.data))
+                # a round merged meanwhile broadcasts to the joiner too: it applies
+                # every broadcast, not only the first of each fragment
+                joiner_held[(fid, update.version)] = _values(update.data)
+                latest[fid] = max(latest.get(fid, 0), update.version)
             # A PULL travels on the control link and may overtake the catch-up
             # bytes; the island applies its broadcasts before it answers (the
             # role stream's boundary), so it holds the PULL until then.
@@ -237,7 +247,7 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
 
         _wait(catch_up, "the joining island got no catch-up", timeout=30)
         clients[2] = fresh
-        versions[2] = [caught[fid][0] for fid in range(P)]
+        versions[2] = [latest[fid] for fid in range(P)]
         state.update(joined=newest, catch_up=caught)
 
     def merged_with_three() -> bool:  # three islands online for several rounds
@@ -285,8 +295,21 @@ def test_an_island_joins_after_catching_up_and_another_leaves_mid_run(syncer_bin
         if (fid, version) in observed:
             assert np.array_equal(values, observed[(fid, version)])
         np.testing.assert_allclose(values, _nesterov(steps, upto=version)[fid], rtol=0, atol=1e-6)
-    fid, base = state["first_base"]
-    assert base == state["catch_up"][fid][0] > 0  # its first push builds on the catch-up
+    # Its first push builds on the catch-up: on the newest weights of the fragment
+    # it held when it answered. That is the catch-up version itself, or a newer
+    # broadcast that reached it after the catch-up: a round launched before the
+    # catch-up under the capacity quorum never takes the joiner and keeps
+    # merging over the launched islands (the syncer's join_gathering_rounds),
+    # and a PULL travels on the control link, apart from the broadcasts. Either
+    # way: a version it received, equal to the recomputation, never older than
+    # the catch-up, never the INIT weights, and never ahead of its round's base.
+    fid, base, first_step = state["first_base"]
+    assert base >= state["catch_up"][fid][0] > 0
+    assert (fid, base) in joiner_held
+    np.testing.assert_allclose(joiner_held[(fid, base)], _nesterov(steps, upto=base)[fid], rtol=0, atol=1e-6)
+    first_round = next(record for record in steps if record["step"] == first_step)
+    assert base <= first_round["base_version"]
+    assert all(int(e[1]) == base for e in first_round["raw_weights"] if int(e[0]) == 2)
     # island 2 merged nothing older than its catch-up
     for record in steps:
         for learner, base, _ in record["raw_weights"]:

@@ -40,11 +40,10 @@ from yeto.rl.peer_recovery import (
 ROOT = Path(__file__).resolve().parent.parent
 NUMEL = 64
 FRAGMENTS = 4
-# Rounds commit every ~40 ms (--min-round-interval-ms): a 0.3 s snapshot
-# transfer lands at ~7 steps (9 on a loaded CI runner, which missed a bound of
-# 8), a 1.0 s one at ~24. The bound only labels the outcome (missed or not);
-# 12 sits between the two with room on both sides. The fast transfer stays
-# longer than FRAGMENTS rounds so every fragment has a newer version to replay.
+# The recovery bound H in syncer steps. The bound test's snapshot transfer lasts
+# a number of syncer steps (SteppedStore), not seconds: rounds commit every
+# >= 40 ms (--min-round-interval-ms) on an idle host and far slower on a loaded
+# one, so a transfer timed in seconds landed on either side of any bound.
 BOUND_H = 12
 
 
@@ -262,6 +261,29 @@ class SlowStore(RecordingStore):
         return super().fetch(locator, sha256, into)
 
 
+class SteppedStore(RecordingStore):
+    """A snapshot read lasts until the syncer committed ``steps`` rounds past
+    the snapshot: a transfer measured in syncer steps, whatever the host's load.
+
+    ``clock`` returns the newest fragment version a live island holds. A commit
+    of step t sets its fragment's version to t, so the clock never runs ahead of
+    the syncer's step, and the snapshot's newest version is at least the
+    recovery's start t_s (the donor snapshots at or after the syncer clock): the
+    recovery then spans at least ``steps`` syncer steps."""
+
+    def __init__(self, root, steps: int, clock, puts=None) -> None:
+        super().__init__(root, puts)
+        self.steps = steps
+        self.clock = clock
+        self.waited_until: int | None = None
+
+    def fetch(self, locator, sha256, into):
+        manifest, directory = super().fetch(locator, sha256, into)
+        self.waited_until = max(manifest.versions) + self.steps
+        wait_until(lambda: self.clock() >= self.waited_until, 60, "rounds stopped during the snapshot transfer")
+        return manifest, directory
+
+
 class SlowCommitStore(RecordingStore):
     """A snapshot commit takes ``delay`` seconds (a Modal Volume commit of a
     large snapshot); records the donor's steps when each slow commit began."""
@@ -281,8 +303,10 @@ class SlowCommitStore(RecordingStore):
 
 
 @pytest.mark.timeout(240)
-@pytest.mark.parametrize("transfer_s, expect_missed", [(0.3, False), (1.0, True)])
-def test_killed_island_recovers_from_a_peer_within_bound(tmp_path, transfer_s, expect_missed):
+# A transfer of FRAGMENTS steps gives every fragment a newer version to replay
+# and stays within the bound; one of BOUND_H + 1 steps misses it.
+@pytest.mark.parametrize("transfer_steps, expect_missed", [(FRAGMENTS, False), (BOUND_H + 1, True)])
+def test_killed_island_recovers_from_a_peer_within_bound(tmp_path, transfer_steps, expect_missed):
     binary = build_syncer()
     port = free_port()
     tape = tmp_path / "tape.jsonl"
@@ -300,7 +324,11 @@ def test_killed_island_recovers_from_a_peer_within_bound(tmp_path, transfer_s, e
         islands[2].join(timeout=10)
         kill_versions = list(islands[0].versions)
         wait_until(lambda: sum(islands[0].versions) > sum(kill_versions) + 8, 60, "rounds stopped without island 2")
-        back = FakeIsland(2, port, targets[2], SlowStore(store.root, transfer_s, store.puts), recover_on_start=True)
+        def clock():
+            return max(max(island.versions) for island in islands[:2])
+
+        stepped = SteppedStore(store.root, transfer_steps, clock, store.puts)
+        back = FakeIsland(2, port, targets[2], stepped, recover_on_start=True)
         back.start()
         wait_until(lambda: back.outcome is not None or back.exc is not None, 60, "recovery did not finish")
         if back.exc:
@@ -315,7 +343,7 @@ def test_killed_island_recovers_from_a_peer_within_bound(tmp_path, transfer_s, e
     outcome = back.outcome
     print(f"recovery outcome: {outcome}")
     assert outcome.path == "peer" and outcome.donor in (0, 1), outcome
-    assert outcome.steps > 0, "rounds kept committing while the snapshot was in transfer"
+    assert outcome.steps >= transfer_steps > 0, "rounds kept committing while the snapshot was in transfer"
     assert (outcome.steps > BOUND_H) == expect_missed, outcome
     donor = islands[outcome.donor]
     (request, locator), = donor.donor.served
