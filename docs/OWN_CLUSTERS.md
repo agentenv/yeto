@@ -57,14 +57,15 @@ a dry run. Over SSH, on every own node of the run, it checks whether the node
 reaches the run store's object API and the trainer image's registry from its
 own network:
 
-- The probe is an HTTPS request with `curl` (bounded by `-m`, retried twice on
-  a DNS or connect blip): any HTTP answer counts (401, 403 and 404 included:
+- The probe is an HTTPS request with `curl` (each attempt bounded by `-m`;
+  retried twice on a timeout, a 5xx or a refused connect, not on a DNS
+  failure): any HTTP answer counts (401, 403 and 404 included:
   the network path works), and the certificate is not verified, so a proxy
   that intercepts TLS passes.
 - It runs with the inventory env exported, so it goes through the node's
   proxy (`HTTPS_PROXY`/`https_proxy` and the other proxy variables there);
   for the registry, when the env sets no proxy, through the docker daemon's
-  (`docker info`, what `docker pull` uses). A registry the daemon lists in
+  (`docker info`, bounded by `timeout 5`; what `docker pull` uses). A registry the daemon lists in
   `insecure-registries` (`/etc/docker/daemon.json`), or a loopback one, is
   requested over `http`; a `daemon.json` that does not read means `https`.
 - A node without `curl` gets a TCP connect, or, when a proxy is set, a

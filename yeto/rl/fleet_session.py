@@ -103,21 +103,25 @@ def launch_shapes_of(args: Any) -> list[tuple[int, int, int, int, int]] | None:
     depend on the shape or the launch does not parse."""
     from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
     from yeto.launch.fragment_preflight import _card_free  # noqa: PLC0415
-    from yeto.launch.topology import rl_trainer_shape  # noqa: PLC0415
+    from yeto.launch.topology import rl_island_args, rl_island_spec, rl_trainer_shape  # noqa: PLC0415
 
     if (getattr(args, "rl_sync_layout", "shape-bound") != "shape-bound"
             or getattr(args, "tuning", "lora") != "full"):
         return None
-    tp, pp, ep, cp = (max(1, int(getattr(args, name, 1) or 1)) for name in
-                      ("tensor_parallel", "pipeline_parallel", "expert_parallel", "context_parallel"))
+    out = []
     try:
         specs = parse_gpu_spec(str(getattr(args, "gpu", None) or ""))
         if not specs or _card_free(args):
             return None
-        sizes = [rl_trainer_shape(args, spec) for spec in specs]
+        for m, spec in enumerate(specs):  # each island as it sees itself (placement, GPUs used, parallel)
+            iargs = rl_island_args(args, m)
+            nodes, gpus = rl_trainer_shape(iargs, rl_island_spec(iargs, spec))
+            tp, pp, ep, cp = (max(1, int(getattr(iargs, name, 1) or 1)) for name in
+                              ("tensor_parallel", "pipeline_parallel", "expert_parallel", "context_parallel"))
+            out.append((tp, pp, ep, cp, max(1, nodes * gpus // (tp * pp * cp))))
     except (ValueError, KeyError, AttributeError, ImportError):
-        return None
-    return [(tp, pp, ep, cp, max(1, nodes * gpus // (tp * pp * cp))) for nodes, gpus in sizes]
+        return None  # a shape the launch refuses: its own dry run says why
+    return out
 
 
 def _shape(shape: tuple[int, int, int, int, int]) -> str:

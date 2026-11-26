@@ -281,6 +281,36 @@ def test_a_fleet_of_two_island_shapes_is_refused_by_the_dry_run(kit, capsys):
     assert "--rl-sync-layout shape-free" in out and kit.ordered == []
 
 
+SHAPE_ARGV = ["--training-mode", "rl", "--model", "Qwen/Qwen3-4B", "--data", "d.jsonl", "--tuning", "full"]
+
+
+@pytest.mark.parametrize("extra, refused", [
+    (["--gpu", "modal:1x8xh100,modal:1x2xh100"], "DP2, island a (learner 0) trains on TP1 PP1 EP1 CP1 DP8"),
+    # each island as it sees itself: 2 of its 8 GPUs used is the other island's 2 GPUs
+    (["--gpu", "aws:1x8xh100@us-east-1,modal:1x2xh100", "--rl-island-placement", "0:use-gpus-per-node=2"], None),
+    (["--gpu", "aws:1x8xh100@us-east-1,modal:1x2xh100"], "DP2, island a (learner 0) trains on TP1 PP1 EP1 CP1 DP8"),
+    # run-wide fixed partition: 6 trainer GPUs on both (the rollout GPUs are the launch's --rl-rollout-gpus)
+    (["--gpu", "modal:1x8xh100,modal:1x8xh100", "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "2"], None),
+    (["--gpu", "modal:1x8xh100,modal:1x8xh100", "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "2",
+      "--rl-island-placement", "1:standby-gpus=2"], "DP4, island a (learner 0) trains on TP1 PP1 EP1 CP1 DP6"),
+    (["--gpu", "modal:1x8xh100,modal:1x8xh100", "--rl-island-placement", "1:tensor-parallel=2"],
+     "trainer shape TP2 PP1 EP1 CP1 DP4, island a (learner 0) trains on TP1 PP1 EP1 CP1 DP8"),
+    # layouts that do not depend on the shape: two shapes merge
+    (["--gpu", "modal:1x8xh100,modal:1x2xh100", "--tuning", "lora"], None),
+    (["--gpu", "modal:1x8xh100,modal:1x2xh100", "--rl-sync-layout", "shape-free"], None),
+    (["--gpu", "modal:1x8xh100,modal:1x2xh100", "--rl-backend", "verl"], None),
+])
+def test_the_fleet_shape_check_reads_each_island_and_only_a_shape_bound_full_layout(extra, refused):
+    from yeto.rl import fleet_session
+
+    found = fleet_session.synced_shape_problems([*SHAPE_ARGV, *extra], ["a", "b"])
+    if refused is None:
+        assert found == []
+    else:
+        (problem,) = found
+        assert problem.startswith("island b (learner 1): trainer shape") and refused in problem
+
+
 @pytest.mark.parametrize("name, node", [
     ("run.own-trainer-sky-sampler.json", "own-b300-0"),
     ("run.fleet-own-and-cloud.json", "own-b300-0"),
@@ -542,18 +572,24 @@ FAKE_DOCKER = r"""#!/bin/sh
 printf '%s ' docker "$@" >> "$FAKE_LOG"; printf '\n' >> "$FAKE_LOG"
 [ "$1" = info ] && printf '%s\n' "$FAKE_DOCKER_PROXY"
 """
+FAKE_TIMEOUT = r"""#!/bin/sh
+printf '%s ' timeout "$@" >> "$FAKE_LOG"; printf '\n' >> "$FAKE_LOG"
+shift
+exec "$@"
+"""
 PROXY = "http://proxy.example:3128"
 
 
 class LocalShell:
     """``SshOps`` that runs the node's script in a local bash with only the fake tools."""
 
-    def __init__(self, tmp: Path, *, curl: bool = True, **fake: str):
+    def __init__(self, tmp: Path, *, curl: bool = True, timeout: bool = True, **fake: str):
         tmp = Path(tempfile.mkdtemp(dir=tmp))
         self.bin = tmp / "bin"
         self.bin.mkdir()
         self.log = tmp / "calls.log"
-        for name, body in (("curl", FAKE_CURL), ("docker", FAKE_DOCKER))[0 if curl else 1:]:
+        tools = [("curl", FAKE_CURL)] * curl + [("docker", FAKE_DOCKER)] + [("timeout", FAKE_TIMEOUT)] * timeout
+        for name, body in tools:
             (self.bin / name).write_text(body)
             (self.bin / name).chmod(0o755)
         for tool in ("tr", "sed", "grep"):  # the daemon.json read
@@ -607,9 +643,19 @@ def test_the_registry_goes_by_the_docker_daemon_proxy_and_the_store_by_the_shell
     checks, report = _egress(ops)
     assert checks["reach_registry"].status == cluster.PASS  # what docker pull would use
     assert any(c.startswith("curl ") and f"--proxy {PROXY} https://registry.example:5000/" in c for c in ops.calls())
+    assert "timeout 5 docker info --format {{.HTTPSProxy}} " in ops.calls()  # a hung dockerd costs 5 s
     assert checks["reach_store"].status == cluster.FAIL  # the node's shell has no proxy: the store is not reached
     assert "cannot reach the store endpoint https://store.example/ (s3://b/r) (rc 7)" in checks["reach_store"].detail
     assert not report.ok
+
+
+def test_without_timeout_on_the_node_the_daemon_is_not_asked(tmp_path):
+    from yeto.launch.preflight import cluster
+
+    ops = LocalShell(tmp_path, timeout=False, FAKE_DIRECT_BLOCKED="1", FAKE_DOCKER_PROXY=PROXY)
+    checks, _ = _egress(ops)
+    assert not any(c.startswith("docker ") for c in ops.calls())  # no unbounded docker info
+    assert checks["reach_registry"].status == cluster.WARN
 
 
 def test_the_inventory_env_proxy_reaches_both_endpoints(tmp_path):

@@ -1646,7 +1646,8 @@ def _size(nbytes: int) -> str:
 # ------------------------------------------------------------ egress checks
 REACH_CONNECT_S = 10
 REACH_TOTAL_S = 20  # curl -m: one attempt's whole time
-REACH_RETRIES = 2  # curl --retry (with --retry-connrefused): a DNS or connect blip is not a refusal
+REACH_RETRIES = 2  # curl --retry (with --retry-connrefused): a timeout, a 5xx or a refused connect is retried
+DOCKER_INFO_S = 5  # docker info (the daemon's proxy): a hung dockerd costs this, not the whole probe
 DOCKER_DAEMON_JSON = "/etc/docker/daemon.json"  # insecure-registries: the registry is reached over http
 _HOST = re.compile(r"[a-z0-9.:-]+")
 _NETLOC = re.compile(r"[a-z0-9.:\[\]-]+")  # host[:port], an IPv6 host in brackets; no user part
@@ -1699,12 +1700,13 @@ UNCHECKED = "YETO_REACH_UNCHECKED"
 
 def reach_command(endpoint: Endpoint) -> str:
     """Bash that reaches ``endpoint`` from the node, exit 0 when it did (``endpoint`` passes
-    :meth:`Endpoint.problem`). With ``curl``: a request (``-m`` bounds each attempt,
-    ``--retry`` rides out a blip); any HTTP answer (401, 403, 404 included) means the
+    :meth:`Endpoint.problem`). With ``curl``: a request (``-m`` bounds each attempt;
+    ``--retry`` retries a timeout, a 5xx and a refused connect, not a DNS failure, rc 6);
+    any HTTP answer (401, 403, 404 included) means the
     network path works, and the certificate is not verified (``-k``: a proxy that
     intercepts TLS is a path that works). The proxy is the shell's (``https_proxy``, the
     inventory env exported before), else for the registry the docker daemon's own
-    (``docker info``: what ``docker pull`` uses). A registry the daemon lists in
+    (``docker info`` under ``timeout``: what ``docker pull`` uses). A registry the daemon lists in
     ``insecure-registries`` (``/etc/docker/daemon.json``), or a loopback one, is reached
     over ``http``; an unreadable file means https. Without ``curl``: a TCP connect by
     bash's ``/dev/tcp``, or, with a proxy set, no check (:data:`UNCHECKED`: a direct
@@ -1722,7 +1724,8 @@ def reach_command(endpoint: Endpoint) -> str:
                 f"if [ -r {daemon} ] && tr -d ' \\t\\r\\n' < {daemon} "
                 "| sed -n 's/.*\"insecure-registries\":\\[\\([^]]*\\)\\].*/\\1/p' | tr ',' '\\n' | tr -d '\"' "
                 f"| sed -e 's#^https*://##' -e 's#/*$##' | grep -qxF {netloc}; then u={plain}; fi;; esac; "
-                f"[ -z {proxied} ] && p=$(docker info --format '{{{{.HTTPSProxy}}}}' 2>/dev/null); ")
+                f"[ -z {proxied} ] && command -v timeout >/dev/null 2>&1 "
+                f"&& p=$(timeout {DOCKER_INFO_S} docker info --format '{{{{.HTTPSProxy}}}}' 2>/dev/null); ")
     return (f"if command -v curl >/dev/null 2>&1; then {url}curl -sS -k -o /dev/null "
             f"--connect-timeout {REACH_CONNECT_S} -m {REACH_TOTAL_S} --retry {REACH_RETRIES} --retry-connrefused "
             f"-w 'http %{{http_code}}\\n' ${{p:+--proxy \"$p\"}} \"$u\"; "
