@@ -3253,15 +3253,17 @@ class Run:
     def fleet_shape_problem(self) -> str | None:
         """A synced-group fleet (one trainer launch of every island) whose trainer islands
         differ in shape under the shape-bound full-parameter layout (TP/PP/EP/CP/DP:
-        ``yeto.rl.fleet_session.shape_problems``): the syncer would refuse the later
-        island at HELLO. A per-island fleet is checked by :meth:`fleet_session_problem`."""
+        ``yeto.rl.fleet_session.shape_problems``), or, as Miles full-parameter islands of
+        one shape, in placement (``fleet_session.placement_problems``): the syncer would
+        refuse the later island at HELLO. A per-island fleet is checked by
+        :meth:`fleet_session_problem`."""
         plan = self.fleet_plan()
         if plan is None or plan.per_island:
             return None
         from yeto.rl import fleet_session  # noqa: PLC0415
 
         found = fleet_session.synced_shape_problems(self.trainer_argv(), [str(i.name) for i in plan.islands])
-        return ("fleet: the trainer islands differ in shape (the syncer would refuse them at HELLO): "
+        return ("fleet: the trainer islands differ in shape or placement (the syncer would refuse them at HELLO): "
                 + "; ".join(found)) if found else None
 
     def budget_priced(self, b: dict[str, Any]) -> bool:

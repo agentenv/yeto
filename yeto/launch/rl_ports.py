@@ -882,6 +882,13 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     return prelude, flags
 
 
+def forwards_per_island_placement(args) -> bool:
+    """Whether the launch gives its islands ``--rl-per-island-placement`` (any
+    ``--rl-island-placement`` override): each island's Miles training contract then
+    leaves its placement flags out (``island_entry._DENSE_PLACEMENT_MILES_FLAGS``)."""
+    return bool(getattr(args, "rl_island_placement", None))
+
+
 def _ports_algorithm_flags(args) -> tuple[str, str]:
     """(run prelude, learner flags) carrying the algorithm to a ports island."""
 
@@ -904,7 +911,7 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
         flags += f" --rl-standby-gpus {int(args.rl_standby_gpus)}"
     if getattr(args, "rl_placement", "colocated") == "fixed-partition":
         flags += f" --rollout-num-gpus {int(args.rollout_num_gpus)}"
-    if getattr(args, "rl_island_placement", None):
+    if forwards_per_island_placement(args):
         flags += " --rl-per-island-placement"
     allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
     for name in allowed:
