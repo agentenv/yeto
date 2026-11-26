@@ -2897,6 +2897,15 @@ def main(argv=None) -> None:
         )
     if getattr(args, "rl_critic_baseline_rounds", 0):
         run_critic_baseline(args, learner_argv)
+    _run_with_trainer_tape(
+        args,
+        lambda: _run_miles_island(args, model_path, rollout_model_path, prompt_path, eval_prompt_path, island_tasks),
+    )
+
+
+def _run_with_trainer_tape(args, run) -> None:
+    """``run()`` (the training) with the trainer's tape uploaded beside it. The upload is
+    observation only: an uploader that cannot start or stop leaves the training's outcome."""
     from yeto.rl.engine.tape_upload import trainer_uploader
 
     try:  # observation only: the trainer's tape into the run store (tapes/trainer/<incarnation>/)
@@ -2906,10 +2915,13 @@ def main(argv=None) -> None:
         print(f"[yeto-island] tape upload off: {type(error).__name__}: {error}", flush=True)
         tape_uploader = None
     try:
-        _run_miles_island(args, model_path, rollout_model_path, prompt_path, eval_prompt_path, island_tasks)
+        run()
     finally:
         if tape_uploader is not None:
-            tape_uploader.stop()
+            try:
+                tape_uploader.stop()
+            except Exception as error:  # noqa: BLE001 - observation only: the training's exit code stands
+                print(f"[yeto-island] tape upload stop failed: {type(error).__name__}: {error}", flush=True)
 
 
 def init_release_argv(args) -> list[str]:
