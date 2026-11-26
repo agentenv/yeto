@@ -258,6 +258,10 @@ def _record(case, tmp_path, monkeypatch):
     monkeypatch.setenv("YETO_PREFLIGHT_MODEL", "off")
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("YETO_SKY_SERVER_CHECK", "off")  # no local sky API server is asked
+    # and no pre-teardown diagnostics: the launcher's teardown after _Provisioned ran the
+    # real `sky logs <cluster>` per island, and that sky CLI started a sky API server
+    monkeypatch.setenv("YETO_TEARDOWN_DIAG", "0")
+    monkeypatch.setattr("yeto.launch.teardown.collect_teardown_diagnostics", lambda cluster, **kw: {})
     _setup(monkeypatch, tmp_path, record)
     cluster = _ssh(monkeypatch, tmp_path, SSH_NODES[case]) if case in SSH_NODES else None
     args = CASES[case](tmp_path, monkeypatch)
