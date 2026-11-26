@@ -31,6 +31,7 @@ class LocalSyncer:
     # how long a stop waits for the syncer to end after SIGTERM (it writes its checkpoint)
     # before SIGKILL; None: 10 s for the shell, then 10 s for its process group
     stop_grace_s: float | None = None
+    home: str | None = None  # where ``~`` of its paths is (its env's HOME); None: this process's
 
     def __init__(
         self,
@@ -41,13 +42,15 @@ class LocalSyncer:
         *,
         env: dict[str, str] | None = None,
         stop_grace_s: float | None = None,
+        home: str | None = None,
     ):
         self.env = None if env is None else dict(env)
         self.stop_grace_s = None if stop_grace_s is None else float(stop_grace_s)
+        self.home = home
         self.command = syncer_command(args, num_learners, binary=binary)
-        self.binary = os.path.expanduser(binary)
-        self.log_file = os.path.expanduser(log_file)
-        self.event_tape = os.path.expanduser(syncer_event_tape(args))
+        self.binary = self._expand(binary)
+        self.log_file = self._expand(log_file)
+        self.event_tape = self._expand(syncer_event_tape(args))
         self.proc: subprocess.Popen | None = None
         # True once this proc's whole process group is confirmed gone; its
         # PGID may then be reused, so it must never be signalled again.
@@ -60,6 +63,15 @@ class LocalSyncer:
         self._event_offset = (
             os.path.getsize(self.event_tape) if os.path.exists(self.event_tape) else 0
         )
+
+    def _expand(self, path: str) -> str:
+        if self.home and (path == "~" or path.startswith("~/")):
+            return self.home + path[1:]
+        return os.path.expanduser(path)
+
+    def exited_ok(self) -> bool:
+        """The syncer process itself ended with exit 0 (its run is done), not an old status file."""
+        return self.proc is not None and self.proc.poll() == 0
 
     def start(self) -> None:
         if os.path.exists(self.binary):

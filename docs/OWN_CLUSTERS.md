@@ -1155,7 +1155,13 @@ syncer listens on its own ports, 29400 and up). With it:
 - **One service at a time.** The service holds a lease in the run store
   (`fleet/syncer_service/lock`, 120 s, renewed with each heartbeat). A second service, on this
   host or another, refuses to start (exit 2) while that lease runs. A service restarted on the
-  same host takes its own lease back at once. The lease's token is the service's generation.
+  same host takes its own lease back at once. The lease's token is the service's generation. A
+  service that cannot renew its lease and is within 12 s of its end stops its syncer and exits 2
+  (another host's service may take the lease from then on).
+- **Its state.** The syncer's checkpoint and tape (`~/yeto-output/`) are under the unit's working
+  directory (`HOME=<workdir>/home` for the syncer), and every run has its own working directory.
+  A checkpoint there while the run store's syncer record is missing or names another run is
+  refused (exit 2): it is another run's state.
 - **Its records.** The service writes the syncer's record (`fleet/island_syncer.json`, with its
   generation) and a heartbeat every 30 s (`fleet/island_syncer_service.json`). The heartbeat says
   `starting` until the record is written, then `running`, and at the end `finished`, `failed` or
@@ -1218,7 +1224,9 @@ yeto fleet service --config run.json --role control --env-file /etc/yeto/<run>.e
 
 `--print` writes the unit to stdout. `--install HOST` writes it to
 `/etc/systemd/system/yeto-<run>-<role>.service` on HOST over SSH (`sudo -n`), then runs
-`systemctl daemon-reload` and `systemctl enable --now` there. It does nothing else.
+`systemctl daemon-reload` and `systemctl enable --now` there. It does nothing else. It first runs
+`sudo -n true` alone: when sudo asks for a password there, it says so and stops (exit 4), before
+anything else.
 
 The unit runs on its host what you give it:
 
@@ -1233,14 +1241,16 @@ The unit runs on its host what you give it:
 Paths must be absolute and hold only letters, digits and `._/+-`; the run name only letters,
 digits and `_.-`. A value that a unit line cannot hold as is is refused, never escaped.
 
-### The control unit never drains on exit
+### When the control unit drains the pools
 
-The control unit runs `yeto run up` with `rollout.drain_on_exit` false: a stop or restart of
-the unit leaves the sampler pools (and the island launches) running, and the next `run up`
-adopts them. When the run config leaves `rollout.drain_on_exit` out, the unit sets it false
-and says so in its log. A run config with `rollout.drain_on_exit: true` is refused for the
-control unit (`--print`, `--install` and the unit itself, exit 2): draining would release the
-pools at every restart of the unit.
+The control unit runs `yeto run up` with `rollout.drain_on_exit` false, so that a stop or
+restart of the unit (SIGTERM) or a crash of `run up` leaves the sampler pools (and the island
+launches) running: the next `run up` adopts them. When `run up` ends the run itself (the run
+finished, `yeto stop-run`, the fleet's STOP, the trainer's end, a breaker), it drains and
+releases the pools as ever. When the run config leaves `rollout.drain_on_exit` out, the unit sets
+it false and says so in its log. A run config with `rollout.drain_on_exit: true` is refused for
+the control unit (`--print`, `--install` and the unit itself, exit 2): draining at every restart
+of the unit would release the pools.
 
 ### How the units restart
 
@@ -1251,7 +1261,7 @@ Both units have `Restart=on-failure` (30 s apart, at most 5 starts an hour) and
 |---|---|---|---|
 | control | 0 | `run up` ended the run | no; ended marker |
 | control | 75 | `run up` exited 1: it ended the run after a breaker trip or a failure it handled | no (`RestartPreventExitStatus=75`); ended marker |
-| control | 2 | `run up` refused (a preflight that failed, another `run up` of the run) | yes |
+| control | 2 | `run up` refused (a preflight that failed, another `run up` of the run) | yes, at most 5 times an hour (`StartLimitBurst`); harmless: a refusal orders nothing |
 | control | 70, a signal | a crash | yes |
 | syncer | 0 | the run is finished | no; ended marker |
 | syncer | 9 | stopped by the fleet's STOP | no; ended marker |
@@ -1267,9 +1277,10 @@ state directory (`<workdir>/rl-up/<run>/onsite-<role>.ended`) and to the run sto
 (`fleet/onsite/<role>.ended`): the exit code, the reason and the time. Each start reads it
 first, on this host and in the run store. While it exists, the service exits 0 at once and
 starts nothing. A reboot of the host, or the unit started on another host, never orders the
-run again after a breaker trip or a strict failure. A marker that cannot be read (the run store
-is down) is a crash: the unit tries again later. A refusal, a crash and a stop of the unit leave
-no marker.
+run again after a breaker trip or a strict failure. A run store that does not answer (it may
+come up after the host at a boot) is asked again in the process, backing off, for up to 10
+minutes; then the start is a crash (exit 70) and the unit tries again later. A refusal, a crash
+and a stop of the unit leave no marker.
 
 To start the run again, remove the marker:
 
@@ -1313,8 +1324,6 @@ removes the fleet's STOP from the run store. Then start the unit (`systemctl sta
 
 ### Limits
 
-- One syncer service per user and host: the syncer keeps its checkpoint and tape under the
-  service user's home (`~/yeto-output/`).
 - If the syncer's host is lost, so is its checkpoint. Start the service on another host only for
   a new run.
 - `stop` and `clear-ended` need `sudo -n systemd-run` on the host (systemd 240 or later).

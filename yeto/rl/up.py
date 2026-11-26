@@ -2344,9 +2344,12 @@ class Run:
         self.state.setdefault("trainer_t0", time.time())
         self.mark("trainer")
 
-    def drain_controller(self) -> bool:
+    def drain_controller(self, *, decided: bool = False) -> bool:
         """The exit drain of the in-process controller (``rollout.drain_on_exit``), run
-        while ``main`` still runs. Left to the ``atexit`` hook it ran during interpreter
+        while ``main`` still runs. ``decided``: run up ended the run itself (its drive returned:
+        the run finished, a stop, a breaker); the on-site control unit (``onsite_service``,
+        :mod:`yeto.rl.fleet_service`) then drains although ``drain_on_exit`` is false there,
+        which only keeps the pools across a SIGTERM or a crash of the unit. Left to the ``atexit`` hook it ran during interpreter
         shutdown, after the Modal client had closed: a tick in flight failed with
         ``ClientClosed``, the drain waited on it forever, and the process hung holding
         the pool with its sampler still billing.
@@ -2355,11 +2358,13 @@ class Run:
         A drain that fails prints the billing banner and is not retried at exit (the
         controller leaves the active list either way). False: the drain failed."""
         controller = getattr(self, "controller", None)
-        if controller is not None and not controller.stopped and not controller.drain_on_exit \
+        drain = controller is not None and (controller.drain_on_exit
+                                            or (decided and bool(getattr(self, "onsite_service", False))))
+        if controller is not None and not controller.stopped and not drain \
                 and getattr(controller, "detached", None) is None \
                 and any(getattr(p, "control", None) is not None for p in controller.pools.values()):
             controller.detach("process exit")  # the store locks: released for the next run up
-        if controller is None or controller.stopped or not controller.drain_on_exit:
+        if controller is None or controller.stopped or not drain:
             return True
         from yeto.launch.pool import controller as ctl  # noqa: PLC0415
 
@@ -4925,6 +4930,7 @@ def main(args: Any) -> int:
         _log("controller in_process: the pools run in this process, so it must stay up; drop --no-monitor "
              "(or set controller: subprocess)")
         return 2
+    run.onsite_service = bool(getattr(args, "onsite_service", False))  # the on-site control unit only
     holder = run.lock_up()
     if holder is not None:
         role = (getattr(run, "lock_holder", None) or {}).get("role", "up")
@@ -4969,15 +4975,17 @@ def main(args: Any) -> int:
     ctrl_c = CtrlC(run)
     ctrl_c.install()
     rc = 1
+    decided = False  # run up ended the run itself (not a SIGTERM, a crash or a refusal)
     try:
         # in the try: a SIGTERM while the pools start still drains what they ordered
         run.pool()
         rc = _drive(run, args)
+        decided = True
     except RunUpRefused as error:
         _log(f"CRITICAL: run up refused: {error}")
         rc = 2
     finally:
-        if run.in_process and not run.drain_controller():
+        if run.in_process and not run.drain_controller(decided=decided):
             rc = rc or 1
         ctrl_c.restore()
     return rc
