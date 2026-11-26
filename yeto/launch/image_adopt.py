@@ -35,6 +35,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+import os
 import re
 import shlex
 import sys
@@ -103,6 +104,9 @@ class AdoptRequest:
     catalog: str | None = None
     min_image_free_gib: float = 120.0
     attention_backend: str = "auto"
+    # where the trainer's backend comes from (the flag, the recipe) and whether its recipe runs flash only
+    attention_source: str = ""
+    flash_only: bool = False
     strict_arch: bool = False
     allow_busy: bool = False
     container_sudo: bool = False
@@ -433,19 +437,27 @@ def node_card_arch(node: Node) -> str | None:
 FLASH_TRAINER_MIN_ARCH = "sm90"
 
 
-def flash_trainer_problem(node: Node, attention_backend: str | None) -> str | None:
+def flash_trainer_problem(node: Node, attention_backend: str | None, *, source: str = "",
+                          flash_only: bool = False) -> str | None:
     """The problem of a trainer on ``node`` with the ``flash`` attention backend below
     :data:`FLASH_TRAINER_MIN_ARCH` (None: another backend, a card at or above it, or a
-    card of no CUDA architecture known here)."""
+    card of no CUDA architecture known here). ``source``: where the backend comes from
+    (the flag, the recipe); ``flash_only``: the recipe has no other attention path, so
+    the way out is other cards, not ``unfused``."""
     if (attention_backend or "auto") != "flash":
         return None
     arch = node_card_arch(node)
     have, need = _cc(arch or ""), _cc(FLASH_TRAINER_MIN_ARCH)
     if have is None or need is None or have[1] >= need[1]:
         return None
-    return (f"node {node.name}: the trainer's flash attention needs {FLASH_TRAINER_MIN_ARCH}+ cards; on {node.card} "
-            f"({arch}) its backward pass fails (\"Unsupported compute capability\"): pass --attention-backend "
-            "unfused (the smoke trains with it; it holds the full score matrix, short sequences only)")
+    head = (f"node {node.name}: the trainer's flash attention{f' ({source})' if source else ''} needs "
+            f"{FLASH_TRAINER_MIN_ARCH}+ cards; on {node.card} ({arch}) its backward pass fails (\"Unsupported "
+            "compute capability\")")
+    if flash_only:
+        return head + (": the recipe trains with flash only (its kernels have no unfused or fused path): adopt the "
+                       f"image on {FLASH_TRAINER_MIN_ARCH}+ cards")
+    return head + (": pass --attention-backend unfused (the smoke trains with it; it holds the full score matrix, "
+                   "short sequences only)")
 
 
 def card_arch_fit(facts: ImageFacts, node: Node, *, strict: bool = False) -> tuple[str | None, str | None]:
@@ -545,7 +557,8 @@ def fit_problems(request: AdoptRequest, ref: str, facts: ImageFacts,
             if note:
                 notes.append(note)
         if request.role == "trainer":
-            flash = flash_trainer_problem(node, request.attention_backend)
+            flash = flash_trainer_problem(node, request.attention_backend, source=request.attention_source,
+                                          flash_only=request.flash_only)
             if flash:  # the backend's own floor, before the image's (which flash would lift)
                 problems.append(flash)
                 continue
@@ -841,13 +854,17 @@ def add_parser(sub: Any) -> Any:
     a.add_argument("ref", help="the image: REGISTRY/IMAGE:TAG or REGISTRY/IMAGE@sha256:<digest>")
     a.add_argument("--model", required=True, help="the model the image is built for (an HF id)")
     a.add_argument("--role", required=True, choices=site_images.ROLES)
-    a.add_argument("--inventory", required=True, help="the SSH node inventory (YAML / JSON)")
+    a.add_argument("--inventory", default=None,
+                   help="the SSH node inventory (YAML / JSON); required unless --pool-config names one (its "
+                        "provider.inventory, which it must then match)")
     a.add_argument("--engine", default=None,
                    help="trainer: the --rl-backend (default: the model registry's recommendation; the smoke runs "
                         "miles); sampler: vllm | sglang | vllm-ascend (default: the sampler spec's engine.adapter, "
                         "else the engine found in the image); a spec that runs another engine is refused")
     a.add_argument("--node", default=None, help="the node that probes and smokes (default: the first of the role)")
-    a.add_argument("--catalog", default=None, help="the site image catalog (default: the inventory's site_images:)")
+    a.add_argument("--catalog", default=None,
+                   help="the site image catalog (default: the pool's with --pool-config, else the inventory's "
+                        "site_images:; with --pool-config it must be the pool's)")
     a.add_argument("--min-image-free-gib", type=float, default=120.0,
                    help="free GiB the image root (docker data root / containerd store) of every node needs")
     a.add_argument("--attention-backend", default="auto", choices=["auto", "flash", "fused", "unfused"],
@@ -861,7 +878,9 @@ def add_parser(sub: Any) -> Any:
                    help="run the container engine as sudo -n <engine> (an ssh sampler pool's container.sudo: its "
                         "rootful store); default: --pool-config's container.sudo, else off")
     a.add_argument("--pool-config", default=None,
-                   help="the ssh sampler pool's config: its provider.container.sudo decides --container-sudo")
+                   help="the ssh sampler pool's config (--role sampler): its nodes:, container engine and sudo "
+                        "decide the nodes, the engine and --container-sudo; its provider.inventory and that "
+                        "inventory's site_images: are the inventory and the catalog")
     a.add_argument("--allow-busy", action="store_true",
                    help="probe and smoke a node whose cards run processes or that runs yeto containers (a warning)")
     a.add_argument("--keep-smoke-artifacts", action="store_true",
@@ -930,28 +949,51 @@ def _plan(args: Any, request: AdoptRequest, run_id: str) -> Any:
                                     keep=args.keep_smoke_artifacts, sudo=request.container_sudo)
 
 
+def smoke_training_attention(plan: Any, attention: str, *, from_flag: bool) -> tuple[str, str, bool]:
+    """``(backend, source, flash_only)`` of the trainer smoke's launch: its train argv
+    through the ``yeto launch`` parser and :func:`.trainer_image_check.training_attention`
+    (under ``auto``, the recipe's own backend: flash for ``deepseek-v4-flash``), where it
+    comes from, and whether the recipe runs flash only
+    (:data:`yeto.rl.engine.run_config.FLASH_ONLY_RECIPES`, Qwen3.8-Flash-Next). An argv
+    the parser does not take keeps ``attention`` (the launch reports it); ``from_flag``:
+    an explicit backend came from ``--attention-backend`` (else from a ``--smoke-arg``)."""
+    from ..rl.engine import run_config as rc  # noqa: PLC0415
+    from ..rl.up_consistency import trainer_args  # noqa: PLC0415
+
+    train = next(s for s in plan.steps if s.name == "train")
+    argv = [str(a) for a in train.argv]
+    args = trainer_args(argv[argv.index("launch") + 1:]) if "launch" in argv else None
+    if args is None:
+        return attention, "--attention-backend" if from_flag else "the smoke's launch", False
+    backend, why = trainer_image_check.training_attention(args)
+    if why == "--rl-training-attention-backend":
+        why = "--attention-backend" if from_flag else f"--smoke-arg {why}"
+    flash_only = (getattr(args, "rl_model_recipe", None) in rc.FLASH_ONLY_RECIPES
+                  or rc.qwen3_8_next_variant(args, None) is not None)
+    return backend, why, flash_only
+
+
 @dataclass(frozen=True)
 class PoolView:
     """The ssh sampler pool a sampler image is adopted for (``--pool-config``): its nodes
     as the pool starts them (:func:`.ssh_sampler_pool.pool_profile`: the pool's
     ``container.engine``, whatever the inventory says), its ``container.sudo`` and
-    ``container.pull``."""
+    ``container.pull``, the inventory it names (``provider.inventory``) and its site
+    image catalog (that inventory's ``site_images:``, the catalog the pool resolves
+    ``image: auto`` from)."""
 
     path: str
     nodes: tuple[Node, ...]
     sudo: bool
     pull: str
+    inventory: str | None = None
+    site_images: str | None = None
 
 
-def pool_view(path: str, profiles: Sequence[Node]) -> PoolView:
-    """The pool config at ``path`` read the way the pool reads it
-    (:func:`.ssh_sampler_pool.parse_config` over the adoption's inventory ``profiles``:
-    its ``nodes:``, its container section). Raises ValueError for a file that is not a
-    pool config, a pool the pool itself refuses, and a ``runtime: venv`` pool (it runs
-    no image)."""
+def pool_document(path: str) -> Mapping[str, Any]:
+    """The pool config at ``path`` as a mapping with a ``provider`` mapping; ValueError
+    (prefixed ``--pool-config <path>:``) for a file that cannot be read or is not one."""
     import yaml  # noqa: PLC0415
-
-    from . import ssh_sampler_pool  # noqa: PLC0415
 
     try:
         cfg = yaml.safe_load(Path(path).expanduser().read_text())
@@ -964,6 +1006,25 @@ def pool_view(path: str, profiles: Sequence[Node]) -> PoolView:
         raise ValueError(f"--pool-config {path}: provider is not a mapping")
     if provider.get("container") is not None and not isinstance(provider.get("container"), Mapping):
         raise ValueError(f"--pool-config {path}: provider.container is not a mapping")
+    return cfg
+
+
+def pool_inventory(path: str) -> str | None:
+    """The inventory file the pool config at ``path`` names (``provider.inventory``,
+    ``~`` expanded as the pool expands it), else None (the pool refuses that)."""
+    named = pool_document(path)["provider"].get("inventory")
+    return os.path.expanduser(str(named)) if named else None
+
+
+def pool_view(path: str, profiles: Sequence[Node]) -> PoolView:
+    """The pool config at ``path`` read the way the pool reads it
+    (:func:`.ssh_sampler_pool.parse_config` over the inventory ``profiles``: its
+    ``nodes:``, its container section, its catalog). Raises ValueError for a file that is
+    not a pool config, a pool the pool itself refuses, and a ``runtime: venv`` pool (it
+    runs no image)."""
+    from . import ssh_sampler_pool  # noqa: PLC0415
+
+    cfg = pool_document(path)
     try:
         conf = ssh_sampler_pool.parse_config(dict(cfg), inventory=list(profiles))
     except (ValueError, TypeError, KeyError) as error:
@@ -972,7 +1033,8 @@ def pool_view(path: str, profiles: Sequence[Node]) -> PoolView:
         raise ValueError(f"--pool-config {path}: a runtime: {conf.runtime} pool runs its samplers from a venv on "
                          "the host, not from an image: there is no image to adopt for it")
     return PoolView(str(path), tuple(ssh_sampler_pool.pool_profile(n, conf) for n in conf.nodes),
-                    bool(conf.container.sudo), str(conf.container.pull))
+                    bool(conf.container.sudo), str(conf.container.pull), inventory=pool_inventory(path),
+                    site_images=conf.site_images)
 
 
 def container_sudo(args: Any, pool: PoolView | None = None) -> bool:
@@ -986,6 +1048,38 @@ def container_sudo(args: Any, pool: PoolView | None = None) -> bool:
         raise ValueError(f"--container-sudo contradicts --pool-config {pool.path}: its container.sudo is off (the "
                          "pool runs the engine as the ssh user); drop the flag or fix the pool config")
     return pool.sudo
+
+
+def _same_file(a: str, b: str) -> bool:
+    return os.path.realpath(os.path.expanduser(str(a))) == os.path.realpath(os.path.expanduser(str(b)))
+
+
+def _pool_inventory_choice(pool_config: str, inventory: str | None) -> str:
+    """The inventory a sampler adopted for the pool at ``pool_config`` is read from: the
+    pool's own ``provider.inventory`` (its nodes are the ones the pool starts; the pool
+    requires one). None of it, or an ``--inventory`` naming another file, is a ValueError."""
+    named = pool_inventory(pool_config)
+    if not named:
+        raise ValueError(f"--pool-config {pool_config}: provider.inventory is required (the pool reads its nodes "
+                         "from it; ssh provider: inventory (an SSH node inventory file) is required)")
+    if inventory and not _same_file(inventory, named):
+        raise ValueError(f"--inventory {inventory} is not the inventory of --pool-config {pool_config} "
+                         f"(provider.inventory {named}): the pool's nodes come from its inventory; drop --inventory "
+                         "or pass the same file")
+    return named
+
+
+def _catalog_choice(catalog: str | None, pool: PoolView | None, inventory: str) -> str:
+    """``--catalog``, else the pool's site image catalog (``--pool-config``: the one it
+    resolves ``image: auto`` from), else the inventory's. A ``--catalog`` that is not the
+    pool's is a ValueError: the record would land where the pool never looks."""
+    if pool is not None and pool.site_images:
+        if catalog and not _same_file(catalog, pool.site_images):
+            raise ValueError(f"--catalog {catalog} is not the site image catalog of --pool-config {pool.path} "
+                             f"({pool.site_images}, its inventory's site_images:): the pool would not find the "
+                             "record; drop --catalog or pass that file")
+        return str(pool.site_images)
+    return catalog or str(site_images.inventory_catalog_path(inventory))
 
 
 def _by_engine(nodes: Sequence[Node]) -> dict[str, list[str]]:
@@ -1003,7 +1097,19 @@ def _sampler_spec(args: Any) -> dict[str, Any]:
 
     if not args.sampler_spec:
         raise image_smoke.SmokeError("the sampler smoke runs the pool's sampler spec: pass --sampler-spec")
-    return json.loads(Path(args.sampler_spec).expanduser().read_text())
+    spec = json.loads(Path(args.sampler_spec).expanduser().read_text())
+    if not isinstance(spec, Mapping):
+        raise image_smoke.SmokeError(f"--sampler-spec {args.sampler_spec}: not a sampler spec (a JSON object), "
+                                     f"got {type(spec).__name__}")
+    engine = spec.get("engine")
+    sections = {"engine": engine, "rollout_fields": spec.get("rollout_fields")}
+    if isinstance(engine, Mapping):
+        sections.update({"engine.server": engine.get("server"), "engine.options": engine.get("options")})
+    for name, value in sections.items():
+        if value is not None and not isinstance(value, Mapping):
+            raise image_smoke.SmokeError(f"--sampler-spec {args.sampler_spec}: {name} is not an object "
+                                         f"(got {type(value).__name__})")
+    return dict(spec)
 
 
 def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
@@ -1016,16 +1122,24 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
 
     out = out or sys.stdout
     try:
-        # profiles: an inventory's container (podman) and the other node profile keys count here
-        profiles = load_profiles(args.inventory)
-        pool = None
-        if getattr(args, "pool_config", None):
+        inventory = args.inventory
+        pool_config = getattr(args, "pool_config", None)
+        if pool_config:
             if args.role != "sampler":
                 raise ValueError("--pool-config is an ssh sampler pool's config: it is for --role sampler")
-            pool = pool_view(args.pool_config, profiles)  # the pool's nodes, engine, sudo and pull
+            inventory = _pool_inventory_choice(pool_config, inventory)
+        if not inventory:
+            raise ValueError("--inventory is required (or a --pool-config whose provider.inventory names one)")
+        # profiles: an inventory's container (podman) and the other node profile keys count here
+        profiles = load_profiles(inventory)
+        pool = pool_view(pool_config, profiles) if pool_config else None  # the pool's nodes, engine, sudo, pull
         nodes = list(pool.nodes) if pool else role_nodes(profiles, args.role)
         sudo = container_sudo(args, pool)
-        catalog = args.catalog or str(site_images.inventory_catalog_path(args.inventory))
+        catalog = _catalog_choice(args.catalog, pool, inventory)
+        if args.role == "sampler" and not pool:
+            engines = ", ".join(_by_engine(nodes)) or "none"
+            print(f"yeto image adopt: NOTE: engine from inventory ({engines}); pass --pool-config to adopt with the "
+                  "pool's container engine", file=sys.stderr)
         spec_engine = engine_images.spec_needs(_sampler_spec(args))["engine_pref"] if args.role == "sampler" \
             and args.sampler_spec else None
         # trainer: the backend the fit checks is the one the smoke trains with (--attention-backend or a --smoke-arg)
@@ -1040,6 +1154,14 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
         slug = re.sub(r"[^a-z0-9]+", "-", args.model.rsplit("/", 1)[-1].lower()).strip("-")[:24] or "model"
         run_id = f"adopt-{slug}-{args.role}-{stamp}"
         plan = _plan(args, request, run_id)
+        if args.role == "trainer":  # the fit checks the backend the smoke's launch resolves (auto: the recipe's)
+            backend, source, flash_only = smoke_training_attention(plan, attention,
+                                                                   from_flag=args.attention_backend != "auto")
+            if flash_only and backend != "flash":
+                raise image_smoke.SmokeError(f"{source} {backend}: the smoke's recipe trains with flash attention only "
+                                             "(its kernels have no unfused or fused path); drop it")
+            request = dataclasses.replace(request, attention_backend=backend, attention_source=source,
+                                          flash_only=flash_only)
         if args.role == "trainer" and not request.engine:  # the record names the backend the smoke ran
             request = dataclasses.replace(request, engine=str(plan.data["engine"]))
     except (InventoryError, site_images.SiteImagesError, image_smoke.SmokeError, FileNotFoundError, OSError,
@@ -1055,7 +1177,8 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
                  f"(below: {image_smoke.REF})",
                  f"2. probe on {node.name}: {probe_script(image_smoke.REF, node, sudo=sudo)[:200]} ...",
                  f"3. fit: CPU, device runtime, built card architectures and the {args.role} engine on {role}"
-                 + (f"; the trainer's {request.attention_backend} attention (flash: {FLASH_TRAINER_MIN_ARCH}+ cards)"
+                 + (f"; trainer attention {request.attention_backend} ({request.attention_source})"
+                    + (f", held to {FLASH_TRAINER_MIN_ARCH}+ cards" if request.attention_backend == "flash" else "")
                     if args.role == "trainer" else ""),
                  f"4. pull: ssh + host probe (image root >= {args.min_image_free_gib:g} GiB free), then "
                  + "; ".join(f"{engine_command(engine, sudo)} pull {image_smoke.REF} on {names}"

@@ -1082,7 +1082,9 @@ def test_the_pool_s_engine_and_nodes_win_over_the_inventory(tmp_path, capsys):
     assert "container.pull is never" not in out
     bad = _pool_config(tmp_path / "bad.yaml", inv, provider={"nodes": ["b300-0", "b300-9"]})
     assert ia.main(_cli(*base, "--pool-config", bad)) == 2
-    assert "nodes ['b300-9'] are not in the inventory" in capsys.readouterr().err
+    err = capsys.readouterr().err  # the pool's own refusal, named as the pool config's
+    assert err.startswith(f"yeto image adopt: --pool-config {bad}: ")
+    assert "nodes ['b300-9'] are not in the inventory" in err
 
 
 def test_a_pool_that_never_pulls_still_gets_the_image_pulled_by_the_adoption(tmp_path, capsys):
@@ -1138,7 +1140,7 @@ def test_the_cli_holds_the_fit_to_the_smoke_s_attention_backend(tmp_path, capsys
             "--model-config", REGISTRY_CONFIGS / "qwen3_30b_a3b.json", "--smoke-store", "s3://b/s")
     assert ia.main(_cli(*base, "--attention-backend", "unfused", "--dry-run"), ops=SimpleNamespace(run=None)) == 0
     out = capsys.readouterr().out
-    assert "3. fit: " in out and "; the trainer's unfused attention (flash: sm90+ cards)" in out
+    assert "3. fit: " in out and "; trainer attention unfused (--attention-backend)\n" in out
     assert f"{sm.ATTENTION} unfused" in out
     monkeypatch.setattr(ia, "Adopter", Captured)
     assert ia.main(_cli(*base, f"--smoke-arg={sm.ATTENTION}=flash")) == 1
@@ -1150,3 +1152,202 @@ def test_the_cli_holds_the_fit_to_the_smoke_s_attention_backend(tmp_path, capsys
     assert "the fit would check another backend than the smoke trains with" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         _cli(*base, "--attention-backend", "flashy")
+
+
+
+DSV4 = REGISTRY_CONFIGS / "configs" / "deepseek_v4_flash.json"
+
+
+class _CaptureAdopter:
+    seen: dict = {}
+
+    def __init__(self, request, **kw):
+        _CaptureAdopter.seen["request"] = request
+        self.report = ia.AdoptReport(request)
+
+    def run(self):
+        raise ia.AdoptError("manifest", "stopped by the test")
+
+
+@pytest.mark.parametrize("card, refused", [("A100-80GB", True), ("L40S", True), ("H100", False), ("B300", False)])
+def test_a_recipe_that_trains_with_flash_is_held_to_the_flash_floor_under_auto(tmp_path, capsys, monkeypatch, card,
+                                                                                refused):
+    """deepseek-v4-flash trains with flash whatever --attention-backend auto says: the fit
+    checks the backend the smoke's launch resolves, so an A100 / L40S is refused before
+    any cut or training, an H100 / B300 passes."""
+    from tests.test_image_adopt import A10G_FACTS
+
+    inv = _inventory(tmp_path, card=card, hbm_gib=80 if card != "B300" else 288)
+    base = (TAGGED, "--model", "deepseek-ai/DeepSeek-V4-Flash", "--role", "trainer", "--inventory", inv,
+            "--model-config", DSV4, "--smoke-store", "s3://b/s")
+    assert ia.main(_cli(*base, "--dry-run"), ops=SimpleNamespace(run=None)) == 0
+    out = capsys.readouterr().out
+    assert "--rl-model-recipe deepseek-v4-flash" in out and sm.ATTENTION not in out  # the launch is unchanged
+    assert "; trainer attention flash (the deepseek-v4-flash recipe), held to sm90+ cards\n" in out
+    monkeypatch.setattr(ia, "Adopter", _CaptureAdopter)
+    assert ia.main(_cli(*base)) == 1
+    req = _CaptureAdopter.seen["request"]
+    assert (req.attention_backend, req.attention_source, req.flash_only) == ("flash", "the deepseek-v4-flash recipe",
+                                                                             True)
+    problems, _, _ = ia.fit_problems(req, PINNED, ia.parse_probe(A10G_FACTS), "miles")
+    flash = [p for p in problems if "flash attention" in p]
+    if refused:
+        assert flash == [f"node b300-0: the trainer's flash attention (the deepseek-v4-flash recipe) needs sm90+ "
+                         f"cards; on {card} ({ia.node_card_arch(req.probe_node)}) its backward pass fails "
+                         "(\"Unsupported compute capability\"): the recipe trains with flash only (its kernels have "
+                         "no unfused or fused path): adopt the image on sm90+ cards"]
+    else:
+        assert flash == []
+
+
+def test_a_flash_only_recipe_refuses_another_backend_and_the_generic_recipe_is_not_held(tmp_path, capsys, monkeypatch):
+    inv = _inventory(tmp_path, card="A100-80GB", hbm_gib=80)
+    dsv4 = (TAGGED, "--model", "deepseek-ai/DeepSeek-V4-Flash", "--role", "trainer", "--inventory", inv,
+            "--model-config", DSV4, "--smoke-store", "s3://b/s", "--dry-run")
+    assert ia.main(_cli(*dsv4, "--attention-backend", "unfused")) == 2
+    assert "--attention-backend unfused: the smoke's recipe trains with flash attention only" in capsys.readouterr().err
+    assert ia.main(_cli(*dsv4, f"--smoke-arg={sm.ATTENTION}=fused")) == 2
+    assert f"--smoke-arg {sm.ATTENTION} fused: the smoke's recipe" in capsys.readouterr().err
+    monkeypatch.setattr(ia, "Adopter", _CaptureAdopter)
+    qwen = (TAGGED, "--model", "Qwen/Qwen3-30B-A3B", "--role", "trainer", "--inventory",
+            _inventory(tmp_path, card="A10G", hbm_gib=24, cards_per_node=1),
+            "--model-config", REGISTRY_CONFIGS / "qwen3_30b_a3b.json", "--smoke-store", "s3://b/s")
+    assert ia.main(_cli(*qwen)) == 1
+    req = _CaptureAdopter.seen["request"]
+    assert (req.attention_backend, req.attention_source, req.flash_only) == ("fused", "the generic recipe", False)
+    assert ia.flash_trainer_problem(req.probe_node, req.attention_backend) is None
+    assert ia.main(_cli(*qwen, f"--smoke-arg={sm.ATTENTION}=flash")) == 1
+    req = _CaptureAdopter.seen["request"]
+    assert (req.attention_backend, req.attention_source) == ("flash", f"--smoke-arg {sm.ATTENTION}")
+    assert "pass --attention-backend unfused" in ia.flash_trainer_problem(req.probe_node, "flash")
+
+
+def test_an_unparsable_smoke_launch_keeps_the_asked_backend(tmp_path):
+    plan = _trainer_plan(tmp_path, attention_backend="unfused")
+    argv = ("py", "-m", "yeto.cli", "launch", "--no-such")
+    broken = SimpleNamespace(steps=[SimpleNamespace(name="train", argv=argv)])
+    assert ia.smoke_training_attention(broken, "unfused", from_flag=True) == ("unfused", "--attention-backend", False)
+    assert ia.smoke_training_attention(broken, "auto", from_flag=False) == ("auto", "the smoke's launch", False)
+    assert ia.smoke_training_attention(plan, "unfused", from_flag=True) == ("unfused", "--attention-backend", False)
+
+
+def _pool_with_inventory(tmp_path, inventory, name="pool.yaml", **provider):
+    return _pool_config(tmp_path / name, inventory, provider=provider)
+
+
+def test_the_pool_s_inventory_and_catalog_win_and_the_command_line_must_agree(tmp_path, capsys):
+    inv = _podman_inventory(tmp_path)
+    doc = yaml.safe_load(inv.read_text())
+    doc["site_images"] = "pool-site-images.yaml"
+    inv.write_text(yaml.safe_dump(doc))
+    pool_catalog = tmp_path / "pool-site-images.yaml"
+    other = tmp_path / "other"
+    other.mkdir()
+    copy = other / "cluster.yaml"
+    copy.write_text(inv.read_text())  # the same nodes, another file
+    link = tmp_path / "link.yaml"
+    link.symlink_to(inv)
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(FAKE_SPEC))
+    pool = _pool_config(tmp_path / "pool.yaml", inv)
+    base = (TAGGED, "--model", "org/m", "--role", "sampler", "--sampler-spec", spec, "--release", RELEASE,
+            "--pool-config", pool, "--dry-run")
+    # no --inventory: the pool's; the catalog is its inventory's site_images:
+    assert ia.main(_cli(*base)) == 0
+    out = capsys.readouterr().out
+    assert f"then: a verified-smoke record in {pool_catalog}" in out and "['b300-0', 'b300-1']" in out
+    # the same file under another name (a symlink) agrees
+    assert ia.main(_cli(*base, "--inventory", link, "--catalog", pool_catalog)) == 0
+    capsys.readouterr()
+    # another inventory file
+    assert ia.main(_cli(*base, "--inventory", copy)) == 2
+    err = capsys.readouterr().err
+    assert f"--inventory {copy} is not the inventory of --pool-config {pool} (provider.inventory {inv})" in err
+    assert "Traceback" not in err
+    # another catalog
+    elsewhere = tmp_path / "elsewhere.yaml"
+    assert ia.main(_cli(*base, "--catalog", elsewhere)) == 2
+    err = capsys.readouterr().err
+    assert f"--catalog {elsewhere} is not the site image catalog of --pool-config {pool} ({pool_catalog}," in err
+    # neither an inventory nor a pool that names one
+    assert ia.main(_cli(TAGGED, "--model", "org/m", "--role", "sampler", "--sampler-spec", spec, "--release",
+                        RELEASE, "--dry-run")) == 2
+    assert "--inventory is required (or a --pool-config whose provider.inventory names one)" in capsys.readouterr().err
+
+
+def test_a_pool_without_an_inventory_of_its_own_is_refused_as_the_pool_refuses_it(tmp_path, capsys):
+    inv = _podman_inventory(tmp_path)
+    pool = _pool_config(tmp_path / "pool.yaml", inv)
+    doc = yaml.safe_load(pool.read_text())
+    doc["provider"].pop("inventory")
+    pool.write_text(yaml.safe_dump(doc))
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(FAKE_SPEC))
+    args = (TAGGED, "--model", "org/m", "--role", "sampler", "--sampler-spec", spec, "--release", RELEASE,
+            "--pool-config", pool, "--inventory", inv, "--dry-run")
+    assert ia.main(_cli(*args)) == 2
+    err = capsys.readouterr().err
+    assert f"yeto image adopt: --pool-config {pool}: provider.inventory is required" in err and "Traceback" not in err
+    assert ia.pool_inventory(str(pool)) is None
+
+
+@pytest.mark.parametrize("text, message", [
+    ("[1, 2]", "not a sampler spec (a JSON object), got list"),
+    ('"x"', "not a sampler spec (a JSON object), got str"),
+    ("null", "not a sampler spec (a JSON object), got NoneType"),
+    ('{"engine": 5}', "engine is not an object (got int)"),
+    ('{"engine": {"server": [1]}}', "engine.server is not an object (got list)"),
+    ('{"engine": {"adapter": "vllm-server"}, "rollout_fields": "x"}', "rollout_fields is not an object (got str)"),
+])
+def test_a_sampler_spec_that_is_not_one_exits_2_without_a_traceback(tmp_path, capsys, text, message):
+    spec = tmp_path / "spec.json"
+    spec.write_text(text)
+    args = _cli(TAGGED, "--model", "org/m", "--role", "sampler", "--inventory", _inventory(tmp_path),
+                "--sampler-spec", spec, "--release", RELEASE, "--dry-run")
+    assert ia.main(args) == 2
+    err = capsys.readouterr().err
+    assert f"yeto image adopt: --sampler-spec {spec}: {message}" in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("asked, extra, message", [
+    ("flashy", (), "--attention-backend 'flashy' is not an attention backend"),
+    ("auto", (f"{sm.ATTENTION}=sdpa",), f"--smoke-arg {sm.ATTENTION} 'sdpa' is not an attention backend"),
+    ("auto", ("--rl-training-attention=flash",), "--smoke-arg --rl-training-attention: an abbreviation of "
+                                                  f"{sm.ATTENTION}; yeto launch takes long options by their full name "
+                                                  f"only: write {sm.ATTENTION}"),
+    ("auto", ("--rl-training-attention-b", "flash"), "--smoke-arg --rl-training-attention-b: an abbreviation"),
+])
+def test_the_smoke_s_attention_backend_is_a_known_value_by_its_full_flag(asked, extra, message):
+    with pytest.raises(sm.SmokeError, match=re.escape(message)):
+        sm.smoke_attention(asked, extra)
+
+
+def test_an_abbreviated_attention_flag_exits_2_and_other_flags_pass(tmp_path, capsys):
+    base = (TAGGED, "--model", "Qwen/Qwen3-30B-A3B", "--role", "trainer", "--inventory", _inventory(tmp_path),
+            "--model-config", REGISTRY_CONFIGS / "qwen3_30b_a3b.json", "--smoke-store", "s3://b/s", "--dry-run")
+    assert ia.main(_cli(*base, "--smoke-arg=--rl-training-attention=unfused")) == 2
+    assert "an abbreviation of --rl-training-attention-backend" in capsys.readouterr().err
+    # not abbreviations of the flag: other options start with them too (argparse called them ambiguous)
+    assert sm.smoke_attention("auto", ("--tuning=full", "--rl", "--", "--rl-train", "--rl-tr")) == "auto"
+    assert sm._abbreviates("--rl-traini", sm.ATTENTION) and not sm._abbreviates(sm.ATTENTION, sm.ATTENTION)
+    assert sm.smoke_attention("auto", (f"{sm.ATTENTION}=unfused",)) == "unfused"
+
+
+def test_a_sampler_without_a_pool_config_notes_where_its_engine_comes_from(tmp_path, capsys):
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(FAKE_SPEC))
+    base = (TAGGED, "--model", "org/m", "--role", "sampler", "--sampler-spec", spec, "--release", RELEASE,
+            "--dry-run")
+    note = "yeto image adopt: NOTE: engine from inventory ({}); pass --pool-config to adopt with the pool's " \
+        "container engine"
+    assert ia.main(_cli(*base, "--inventory", _inventory(tmp_path))) == 0
+    assert note.format("docker") in capsys.readouterr().err
+    inv = _podman_inventory(tmp_path)
+    assert ia.main(_cli(*base, "--inventory", inv)) == 0
+    assert note.format("podman") in capsys.readouterr().err
+    assert ia.main(_cli(*base, "--inventory", inv, "--pool-config", _pool_config(tmp_path / "pool.yaml", inv))) == 0
+    assert "NOTE: engine from inventory" not in capsys.readouterr().err
+    assert ia.main(_cli(TAGGED, "--model", "Qwen/Qwen3-30B-A3B", "--role", "trainer", "--inventory",
+                        _inventory(tmp_path), "--model-config", REGISTRY_CONFIGS / "qwen3_30b_a3b.json",
+                        "--smoke-store", "s3://b/s", "--dry-run"), ops=SimpleNamespace(run=None)) == 0
+    assert "NOTE: engine from inventory" not in capsys.readouterr().err

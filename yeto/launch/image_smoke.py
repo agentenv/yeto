@@ -48,9 +48,11 @@ elements of ``shlex.join``, or ``shlex.quote``-d where they sit inside a shell s
 
 from __future__ import annotations
 
+import argparse
 import base64
 import copy
 import dataclasses
+import functools
 import json
 import os
 import re
@@ -80,6 +82,7 @@ PROMPTS = [{"prompt": "What is 2 + 2? Put the answer in \\boxed{}.", "label": "4
 # preflight from the launcher (the cut exists only on the node: the prune step made and checked it)
 LAUNCH_DEFAULTS = (("--inner-lr", "1e-6"), ("--preflight-model", "off"))
 ATTENTION = "--rl-training-attention-backend"  # the trainer's attention backend (yeto image adopt --attention-backend)
+ATTENTION_BACKENDS = ("auto", "flash", "fused", "unfused")  # the launch flag's choices
 BYTES_PER_PARAM = {"bf16": 2.0, "fp16": 2.0, "fp32": 4.0, "fp8": 1.0, "int8": 1.0, "mxfp4": 0.53, "int4": 0.53,
                    "nvfp4": 0.56}
 MAX_LAYERS = 16  # the MFU 16L cut
@@ -303,11 +306,40 @@ def _flag_value(args: Sequence[str], flag: str) -> str | None:
     return found
 
 
+@functools.lru_cache(maxsize=1)
+def _launch_options() -> frozenset[str]:
+    """The long options of ``yeto launch``."""
+    from ..cli import build_parser  # noqa: PLC0415
+
+    parser = build_parser()
+    action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))  # noqa: SLF001
+    return frozenset(o for a in action.choices["launch"]._actions for o in a.option_strings  # noqa: SLF001
+                     if o.startswith("--"))
+
+
+def _abbreviates(name: str, flag: str) -> bool:
+    """``name`` is an abbreviation of ``flag`` as argparse took one: a proper prefix that
+    no other ``yeto launch`` option starts with (a prefix that other options share is
+    ambiguous, not an abbreviation)."""
+    if not name.startswith("--") or len(name) <= 2 or name == flag or not flag.startswith(name):
+        return False
+    return not any(o.startswith(name) for o in _launch_options() if o != flag)
+
+
 def smoke_attention(attention_backend: str | None, extra_args: Sequence[str]) -> str:
     """The trainer's attention backend the fit checks and the smoke trains with:
     ``--attention-backend``, else a ``--smoke-arg`` of :data:`ATTENTION`, else ``auto``
-    (the recipe's). The two naming different backends is a :class:`SmokeError`."""
+    (the recipe's). The two naming different backends, a value outside
+    :data:`ATTENTION_BACKENDS` and an abbreviation of the flag are a :class:`SmokeError`."""
+    for arg in extra_args:  # yeto launch takes long options by their full name only (no abbreviations)
+        name = str(arg).split("=", 1)[0]
+        if name != ATTENTION and _abbreviates(name, ATTENTION):
+            raise SmokeError(f"--smoke-arg {name}: an abbreviation of {ATTENTION}; yeto launch takes long options "
+                             f"by their full name only: write {ATTENTION}")
     asked, given = attention_backend or "auto", _flag_value(extra_args, ATTENTION)
+    for where, value in (("--attention-backend", asked), (f"--smoke-arg {ATTENTION}", given)):
+        if value is not None and value not in ATTENTION_BACKENDS:
+            raise SmokeError(f"{where} {value!r} is not an attention backend (one of {list(ATTENTION_BACKENDS)})")
     if given is not None and asked != "auto" and given != asked:
         raise SmokeError(f"--attention-backend {asked} but --smoke-arg {ATTENTION} {given}: the fit would check "
                          "another backend than the smoke trains with; give one")

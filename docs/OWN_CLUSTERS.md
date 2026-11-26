@@ -757,9 +757,13 @@ to adopt the image. The steps, in order:
    rule and the node's card. A trainer's `--attention-backend flash` needs sm90+
    cards on every node of the role: below that (an A10G, `sm86`) its backward pass
    fails, so the fit refuses it and names `--attention-backend unfused` instead. The
-   smoke trains with the backend the fit checked (`--rl-training-attention-backend`,
-   also taken from a `--smoke-arg`; the two must agree). A sampler is not held to
-   this floor.
+   backend the fit checks is the one the smoke's launch resolves: with the default
+   `auto` that is the recipe's own (`deepseek-v4-flash` and Qwen3.8-Flash-Next train
+   with flash, so they are held to sm90+ too; those recipes have no other path, so
+   the fit names other cards, and another backend for them exits 2). The dry run's
+   fit line names the backend and where it comes from. The smoke trains with that
+   backend (`--rl-training-attention-backend`, also taken from a `--smoke-arg`,
+   written in full; the two must agree). A sampler is not held to this floor.
 4. **pull**: every node of the role (spares included, `roles: [trainer-spare]`)
    is checked over SSH, and its image root (the docker data root, or
    `/var/lib/containerd` with the containerd image store, or podman's storage
@@ -776,17 +780,21 @@ to adopt the image. The steps, in order:
    that engine, and one with no container engine is named as not pulled.
 
    For a sampler image, pass the ssh sampler pool's config with `--pool-config`:
-   it is read the way the pool reads it, so the nodes are the pool's `nodes:`
-   (one not in the inventory is an error), their engine is the pool's
+   it is read the way the pool reads it, so the inventory is the pool's
+   `provider.inventory` (`--inventory` may be left out; one naming another file is
+   an error), the catalog is that inventory's `site_images:`, the one the pool
+   resolves `image: auto` from (a `--catalog` naming another file is an error), the
+   nodes are the pool's `nodes:` (one not in the inventory is an error), their
+   engine is the pool's
    `container.engine` (default podman, whatever the inventory says), and its
    `container.sudo: true` (`sudo -n podman`, the rootful store) makes the host
    checks, the pull, the probe and the smoke all run the engine through
    `sudo -n`, so the image lands in the store the pool starts from. A
    `runtime: venv` pool runs no image and is refused. With `container.pull:
    never` the pool starts only images already on its nodes: the adoption's pull
-   is what puts the image there. Without a pool config, `--container-sudo` asks
-   for `sudo -n`; against a pool config whose `container.sudo` is off it is an
-   error.
+   is what puts the image there. Without a pool config, each node's engine is
+   the inventory's (a NOTE says so) and `--container-sudo` asks for `sudo -n`;
+   against a pool config whose `container.sudo` is off it is an error.
 5. **smoke**, on the probe node, after its cards are checked idle again:
    - **trainer**: the model is cut to its first N layers (all their experts, the
      embeddings and the head, `scripts/prune_layers.py`; MTP layers are dropped,
