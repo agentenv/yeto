@@ -415,6 +415,7 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     launched = (getattr(reducer, "trainer_spend", None) or {}).get("islands") \
         if (getattr(reducer, "fleet_plan", None) or {}).get("launch") == "per_island" else None
     unbilled = []  # islands whose trainer neither a tape nor a launch record bills here
+    taped = []  # islands whose trainer tape is here but gives no hours (no row) and no launch record
     from_records = set()  # trainer rows only their launch records make (no tape row): not the syncer's clock
     for isl in fleet["islands"]:
         tid, price = isl.get("trainer"), isl.get("trainer_usd_per_h")
@@ -450,6 +451,9 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
                 if row["hours"] is not None:
                     row["cost_usd"] = price * row["hours"]
             trainer_rows.append(row)
+        elif any((reducer.islands.get(tid if tid is not None else str(isl["learner"])) or {}).get(k) is not None
+                 for k in ("first_ts", "last_event_ts", "ready_ts", "cloud")):  # its tape is here, no hours
+            taped.append(isl["learner"])
         else:
             unbilled.append(isl["learner"])
         for pool in isl["pools"]:
@@ -562,14 +566,26 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
 
     out = {"pools_usd": part(pool_rows), "trainers_usd": part(trainer_rows), "syncer_usd": srow["cost_usd"],
            "basis": "pools (node hours on the sampler tapes) + each island's trainer + the syncer"}
-    if out["trainers_usd"] is None:  # said, never a bare n/a
-        unpriced = [r["island"] for r in trainer_rows if r.get("cost_usd") is None]
-        why = []
-        if unpriced:
-            why.append("island " + ", ".join(map(str, unpriced)) + ": no price (fleet plan trainer_usd_per_h unset)")
-        if unbilled:
-            why.append("island " + ", ".join(map(str, unbilled)) + ": no trainer tape or launch record here")
+    # each trainer island the sum leaves out, and why: said, never a bare n/a
+    unpriced = [r for r in trainer_rows if r.get("cost_usd") is None]
+    no_price = [r["island"] for r in unpriced if r.get("rate_usd_h") is None]
+    no_hours = [r["island"] for r in unpriced if r.get("rate_usd_h") is not None] + taped  # no hours yet
+
+    def islands(ks: list) -> str:
+        return "island " + ", ".join(map(str, ks))
+
+    why = []
+    if no_price:
+        why.append(islands(no_price) + ": no price (fleet plan trainer_usd_per_h unset)")
+    if no_hours:
+        why.append(islands(no_hours) + ": no hours yet (its trainer tape has no billed hours here)")
+    if unbilled:
+        why.append(islands(unbilled) + ": no trainer tape or launch record here")
+    if out["trainers_usd"] is None:
         out["trainers_note"] = "; ".join(why) or "no trainer island"
+    elif why:  # some trainers billed: the sum (and the total) is low by the others
+        out["trainers_uncounted"] = len(no_price) + len(no_hours) + len(unbilled)
+        out["trainers_note"] = "; ".join(why)
     return out
 
 
