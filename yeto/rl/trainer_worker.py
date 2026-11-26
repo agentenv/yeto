@@ -117,28 +117,21 @@ STOP_IGNORED_S = 1800.0
 # (`yeto down` of the old prefix) before the next incarnation orders anything: a leftover
 # machine would hold the target's quota and fail the new order as an infrastructure failure.
 CLEAR_TIMEOUT_S = 600.0
-# The resource ledger kinds a move waits for: compute that holds a target's quota or bills
-# (yeto.cost.ledger kinds, plus every island provider's lease kind). A bucket (sky_storage)
-# never blocks it: one left open on purpose (``release_skipped``: it holds data, a person
-# decides) or one cleanup could not confirm (``release_failed``) is reported, not waited for.
-COMPUTE_LEDGER_KINDS = frozenset({"sky_cluster", "nc_lease", "ssh_trainer", "modal_app", "modal_call"})
-
-
-def compute_ledger_kinds() -> frozenset[str]:
-    try:
-        from yeto.launch.pool import provider as providers  # noqa: PLC0415
-
-        return COMPUTE_LEDGER_KINDS | frozenset(providers.ledger_kinds())
-    except Exception:  # noqa: BLE001 - the built-in kinds
-        return COMPUTE_LEDGER_KINDS
+# The resource ledger kinds that never hold a move: they hold no quota and bill nothing
+# (yeto.cost.ledger: ``sky_storage`` is "Not compute: billed 0"). A bucket left open on purpose
+# (``release_skipped``: it holds data, a person decides) or one cleanup could not confirm
+# (``release_failed``) is reported, not waited for. Every other kind, known or not (a provider's
+# lease kind, one added later), holds a move while it is open: an unknown kind is taken as
+# compute rather than ordering new machines next to a live one.
+NON_BLOCKING_LEDGER_KINDS = frozenset({"sky_storage"})
 
 
 def split_open_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """(rows a move waits for, rows it only reports) of an old launch's open ledger rows: a
-    compute row waits unless it was left open on purpose (``release_skipped``); everything
-    else (buckets, unconfirmed releases of non-compute) is reported only."""
-    kinds = compute_ledger_kinds()
-    waits = [r for r in rows if r.get("kind") in kinds
+    """(rows a move waits for, rows it only reports) of an old launch's open ledger rows. A
+    row is only reported when it was left open on purpose (``release_skipped``: `yeto down`
+    never releases it, waiting would only time out) or its kind is non-billing
+    (:data:`NON_BLOCKING_LEDGER_KINDS`); every other row waits, unknown kinds included."""
+    waits = [r for r in rows if r.get("kind") not in NON_BLOCKING_LEDGER_KINDS
              and not str(r.get("release_error") or "").startswith("release_skipped")]
     return waits, [r for r in rows if r not in waits]
 
@@ -586,7 +579,7 @@ class TrainerWorker:
         reader = getattr(self.ops, "open_resources", None)
         try:
             waits, _reported = split_open_rows([] if reader is None else reader(prefix))
-            left = None if not waits else f"{len(waits)} compute ledger row(s) still open ({_row_names(waits)})"
+            left = None if not waits else f"{len(waits)} ledger row(s) still open that may hold quota or bill ({_row_names(waits)})"
         except Exception as error:  # noqa: BLE001 - not known: not cleared
             left = f"its resource ledger unread ({type(error).__name__}: {error})"
         if left is None:
@@ -628,12 +621,12 @@ class TrainerWorker:
         if reported:
             skipped = [r for r in reported if str(r.get("release_error") or "").startswith("release_skipped")]
             note = ("the old prefix has bucket(s) left for a person to decide (release_skipped)" if skipped
-                    else "the old prefix has rows cleanup could not confirm released")
-            self.log(f"fleet: WARNING: trainer island {k}: {note}: {_row_names(reported)}; they hold no quota "
-                     "and do not block the move (see `yeto cleanup` / the run's resource ledger)")
+                    else "the old prefix has bucket(s) cleanup could not confirm released")
+            self.log(f"fleet: WARNING: trainer island {k}: {note}: {_row_names(reported)}; they do not block "
+                     "the move (see `yeto cleanup` / the run's resource ledger)")
         if not waits:
             return None
-        return f"{len(waits)} compute ledger row(s) still open ({_row_names(waits)})"
+        return f"{len(waits)} ledger row(s) still open that may hold quota or bill ({_row_names(waits)})"
 
     def _hand_back(self, k: int, record: dict[str, Any], ended: dict[str, Any]) -> None:
         """The launch handed off (:data:`HANDS_OFF_EXITS`): another launcher holds island

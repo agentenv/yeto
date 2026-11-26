@@ -323,15 +323,47 @@ def test_a_move_through_its_stop_with_a_released_ledger_starts_at_once(tmp_path)
     assert getattr(launches, "torn_down", []) == [] and "run-i0-m1" in launches.live
 
 
-def test_only_compute_rows_a_teardown_can_still_release_hold_a_move():
+def test_only_buckets_and_rows_left_on_purpose_do_not_hold_a_move():
     rows = [{"kind": "sky_cluster", "id": "c0", "release_error": None},
             {"kind": "modal_app", "id": "ap-1", "release_error": "release_failed: timeout"},
+            {"kind": "daytona_sandbox", "id": "sb-1", "release_error": None},
+            {"kind": "some_kind_added_later", "id": "x-1", "release_error": None},
+            {"id": "no-kind", "release_error": None},
             {"kind": "modal_app", "id": "ap-2", "release_error": "release_skipped: kept by its owner"},
             {"kind": "sky_storage", "id": "b0", "release_error": "release_failed: 403"}]
     waits, reported = tw.split_open_rows(rows)
-    # a skipped row is left on purpose: `yeto down` never releases it, waiting would only time out
-    assert [r["id"] for r in waits] == ["c0", "ap-1"]
+    # an unknown kind is taken as compute (fail closed); a skipped row is left on purpose:
+    # `yeto down` never releases it, waiting would only time out
+    assert [r["id"] for r in waits] == ["c0", "ap-1", "sb-1", "x-1", "no-kind"]
     assert [r["id"] for r in reported] == ["ap-2", "b0"]
+
+
+def test_an_open_row_of_an_unknown_kind_holds_the_move(tmp_path):
+    rows = [{"kind": "sky_storage", "id": "b0", "name": "b0", "release_error": "release_skipped: holds objects"},
+            {"kind": "some_kind_added_later", "id": "x-1", "name": "x-1", "release_error": None}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
+    w.step()
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    assert w.load(0)["state"] == tw.MOVING and "some_kind_added_later x-1" in w.load(0)["clearing"]["left"]
+    rows.pop()
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+
+
+def test_a_move_through_its_stop_whose_launch_left_no_run_record_is_torn_down_first(tmp_path):
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert w.load(0)["state"] == tw.MOVING
+    launches.live.pop("run-i0")  # gone, and ended() reads nothing
+    w.step()
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    assert w.load(0)["clearing"]["left"] == "no run record"
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
 
 
 def test_teardown_failures_while_clearing_carry_into_the_next_incarnation(tmp_path):
