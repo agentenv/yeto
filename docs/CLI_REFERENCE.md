@@ -676,6 +676,7 @@ injection and are omitted here.
 | `--rl-sync-push-dtype` | `f32` | full-parameter push dtype: `f32`, `bf16`, `int8`, `int4`, `int4-log` |
 | `--rl-sync-quorum` | — | islands whose pushes close a round |
 | `--rl-sync-max-base-lag` | `0` | rounds a push's base may lag |
+| `--rl-sync-max-local-rounds-ahead` | off | full-parameter async rounds: lead cap K. K=1 pushes one window of `--rl-sync-fragment-pipeline` global steps per local round and starts the next round once the window merged. With a fixed roster a fast island then stays at most one local round ahead of the slowest. With a quorum below the island count, a soft deadline or islands leaving, the lead is not bounded. Cost: one window of steps in flight per local round, also with several `--syncer-shards`. The wait gives up after half of `--rl-sync-wait-timeout-s` (from the last push of the oldest pair in flight, or with none in flight from the first retain of the island's last retaining round); after a give-up the lead is no longer bounded |
 | `--rl-sync-learner-weight` | `equal` | `equal` or `tokens2-over-steps` |
 | `--rl-sync-outer-lr`, `--rl-sync-outer-momentum` | — | outer Nesterov parameters (default from the preset) |
 

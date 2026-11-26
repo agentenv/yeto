@@ -2,16 +2,22 @@
 
 ``--rl-sync-max-local-rounds-ahead K`` (island ``--sweep-max-local-rounds-ahead``)
 makes an island wait at a boundary instead of training a K-th local round on
-top of an unmerged push of its own.  With a fixed roster (quorum 2 of 2) every
-merge needs every island, so with K = 1 a fast island stays at most one local
-round ahead of a slow one instead of training rounds whose progress the next
-broadcast overwrites and whose c_steps inflate its tokens^2/steps merge weight.
+top of an unmerged push of its own.  K = 1 cuts the global steps into windows
+of P (the pipeline depth) steps: each local round pushes one window from its
+cut and the next round starts once the window merged.  With a fixed roster
+(quorum 2 of 2) every step needs every island, so a fast island stays at most
+one local round ahead of a slow one instead of training rounds whose progress
+the next broadcast overwrites and whose c_steps inflate its tokens^2/steps
+merge weight.
 
-Covered here: the pairing rule on fakes (who blocks, the half-timeout escape,
-the terminal phase, peer snapshots during the wait), the profile and the
-launcher/island wiring (default off, hashes unchanged), and two islands of
-the real pairing and session (:class:`FullParameterSync`) against the real
-Rust syncer: a fast island and a slow island, with and without the cap.
+Covered here: the pairing rule on fakes (who blocks, the step window: late and
+crossed PULLs of the window, the next window held, steps closed without the
+island, a caught-up island, the last window, replays, deferred capture; the
+half-timeout escape, the terminal phase, peer snapshots during the wait), the
+profile and the launcher/island wiring (default off, hashes unchanged), and
+two islands of the real pairing and session (:class:`FullParameterSync`)
+against the real Rust syncer: a fast island and a slow island, with and
+without the cap.
 """
 
 from __future__ import annotations
@@ -37,7 +43,9 @@ from test_rl_full_parameter_sync import _PairedRole
 
 from yeto.protocol import PullRequest
 from yeto.rl.adapters.miles.full_parameter.role_stream import RoleSubmissionCandidate
+from yeto.rl.engine import full_parameter_sync as pairing_module
 from yeto.rl.engine.full_parameter_sync import (
+    LEAD_WAIT_POLL_S,
     FullParameterSync,
     FullParameterSyncProfile,
     RolePairing,
@@ -58,6 +66,39 @@ def _candidate(global_step: int, local_step: int) -> RoleSubmissionCandidate:
         role="actor", permit=PullRequest((global_step - 1) % 2, global_step, 1),
         base_version=max(0, global_step - 2), local_step=local_step, c_steps=1, c_tokens=11,
         payload_bytes=8, submission_cut=object(), anchor=object())
+
+
+class _ModuleShim:
+    """``module`` with some attributes replaced."""
+
+    def __init__(self, module, **replaced):
+        self._module = module
+        self.__dict__.update(replaced)
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+
+@pytest.fixture
+def lead_clock(monkeypatch):
+    """The pairing module's clock, advanced only by the module's own sleeps (the
+    lead wait's polls): give-up and timeout arithmetic without a wall-clock bound,
+    which a loaded host breaks by stretching real sleeps. Returns the clock."""
+    now = [1024.0]
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay, result=None):
+        now[0] += delay
+        await real_sleep(0)
+        return result
+
+    monkeypatch.setattr(pairing_module, "time", _ModuleShim(time, monotonic=lambda: now[0]))
+    monkeypatch.setattr(pairing_module, "asyncio", _ModuleShim(asyncio, sleep=sleep))
+    return lambda: now[0]
+
+
+# One poll of float error on either side of a computed give-up time.
+_EPS = 1e-9
 
 
 def _pairing(role, **profile):
@@ -115,61 +156,455 @@ async def test_the_wait_ends_when_the_blocking_round_merges_and_serves_peers_mea
 
 
 @pytest.mark.asyncio
-async def test_the_wait_gives_up_at_half_the_wait_timeout_and_never_times_out_itself():
+async def test_the_wait_gives_up_at_half_the_wait_timeout_and_never_times_out_itself(lead_clock):
     role = _PairedRole("actor", [_candidate(1, 1)], [], release_broadcasts=False)
     pairing = _pairing(role, max_local_rounds_ahead=1, wait_timeout=0.4)
     pairing.local_round = 1
     pairing.submit_ready()
-    started = time.monotonic()
-    await pairing.wait_for_lead()
-    assert 0.15 <= time.monotonic() - started < 0.4  # half of 0.4 s, before the pair's timeout
+    started = lead_clock()
+    waited = await pairing.wait_for_lead()
+    # The first poll at or past half of 0.4 s gives up, long before the pair's 0.4 s timeout.
+    assert 0.2 - _EPS <= lead_clock() - started < 0.2 + LEAD_WAIT_POLL_S + _EPS
+    assert waited == pytest.approx(lead_clock() - started)
     assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 1)
     assert len(pairing.inflight) == 1 and pairing.failure is None
 
 
 @pytest.mark.asyncio
-async def test_the_wait_also_covers_rounds_trained_before_the_next_pull_arrives():
-    """After a merge and before the syncer's next PULL nothing is in flight,
+async def test_the_wait_also_covers_rounds_trained_before_the_next_pull_arrives(lead_clock):
+    """After a merge and before the syncer's next PULLs nothing is in flight,
     but a round trained then lands in the next push all the same: with K = 1
-    the island waits until it pushed from its current cut and that merged."""
-    role = _PairedRole("actor", [_candidate(1, 1)], [])
+    the island waits until the next window, pushed from its current cut, merged."""
+    role = _PairedRole("actor", [_candidate(1, 1), _candidate(2, 1)], [])
     pairing = _pairing(role, max_local_rounds_ahead=1)
     pairing.local_round = 1
     pairing.submit_ready()
     await pairing.commit_staged_broadcasts()
-    assert pairing.inflight == {} and role.fragment_versions == (1, 0)
-    assert await pairing.wait_for_lead() == 0.0  # pushed from this round's cut
-    pairing.local_round = 2  # trained one more round; the next PULL is late
-    assert pairing.lead_blockers() == [] and pairing.lead_unpushed()
+    assert pairing.inflight == {} and role.fragment_versions == (1, 2)
+    assert await pairing.wait_for_lead() == 0.0  # window 1..2 pushed from this round's cut and merged
+    pairing.local_round = 2  # trained one more round; the PULLs of window 3..4 are late
+    assert pairing.lead_window() == (3, 4) and pairing.lead_window_open()
     served = []
 
     async def serve():
-        served.append(time.monotonic())
+        served.append(lead_clock())
         if len(served) == 3:
-            role.candidates.append(_candidate(3, 2))  # the next PULL arrives
+            role.candidates.extend([_candidate(3, 2), _candidate(4, 2)])  # the next PULLs arrive
         return 0
 
     assert await pairing.wait_for_lead(serve) > 0
-    assert len(served) >= 4 and ("actor", 3, True) in role.events
-    assert pairing.inflight == {} and role.fragment_versions == (3, 0)
+    assert len(served) >= 4 and ("actor", 3, True) in role.events and ("actor", 4, True) in role.events
+    assert pairing.inflight == {} and role.fragment_versions == (3, 4)
     assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 0)
 
 
 @pytest.mark.asyncio
-async def test_the_wait_for_a_late_pull_gives_up_at_half_the_wait_timeout():
+async def test_the_wait_for_a_late_pull_gives_up_at_half_the_wait_timeout(lead_clock):
     role = _PairedRole("actor", [_candidate(1, 1)], [])
     pairing = _pairing(role, max_local_rounds_ahead=1, wait_timeout=0.4)
     pairing.local_round = 1
     pairing.submit_ready()
     await pairing.commit_staged_broadcasts()
     pairing.local_round = 2
-    started = time.monotonic()
+    started = lead_clock()  # the push of round 1 was retained at this time
     await pairing.wait_for_lead()
-    assert 0.1 <= time.monotonic() - started < 0.4
+    assert 0.2 - _EPS <= lead_clock() - started < 0.2 + LEAD_WAIT_POLL_S + _EPS
     assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 1)
     pairing.local_round = 3
-    assert await pairing.wait_for_lead() > 0  # past the give-up time: one poll, then trains on
+    # Past the give-up time: one poll, then trains on.
+    assert await pairing.wait_for_lead() == pytest.approx(LEAD_WAIT_POLL_S)
     assert pairing.lead_wait_escapes == 2
+
+
+class _PeerPacedRole(_PairedRole):
+    """A role whose broadcast of a step arrives only once the peer island
+    pushed that step too (``peer_pushed``): a fixed roster's merge.
+    ``close_without_me`` stages a step this island never pushed (a quorum
+    below the island count, a soft deadline)."""
+
+    def __init__(self, candidates, *, roster=None, learner=0):
+        super().__init__("actor", candidates, [], release_broadcasts=False)
+        self.peer_pushed: set[int] = set()
+        self.roster = roster  # a shared _Roster: a step merges once every island pushed it
+        self.learner = learner
+
+    def push_candidate(self, candidate):
+        submission = super().push_candidate(candidate)
+        if self.roster is not None and submission is not None:
+            self.roster.pushed.setdefault(candidate.permit.global_step, set()).add(self.learner)
+        return submission
+
+    def close_without_me(self, step):
+        self._staged_steps.append(step)
+
+    async def stage_available_broadcasts(self):
+        def merged(step):
+            if self.roster is not None:
+                return self.roster.pushed.get(step, set()) >= self.roster.islands
+            return step in self.peer_pushed
+
+        for step in [step for step in self._queued_steps if merged(step)]:
+            self._queued_steps.remove(step)
+            self._staged_steps.append(step)
+        return await super().stage_available_broadcasts()
+
+
+class _Roster:
+    """A fixed roster on fakes: every island must push a step before it merges."""
+
+    def __init__(self, islands):
+        self.islands = set(islands)
+        self.pushed: dict[int, set[int]] = {}
+
+
+def _pushed(role):
+    return [step for _, step, _ in role.events]
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_the_wait_answers_its_window_late_and_holds_the_next_window(lead_clock):
+    """The window of round 1 is steps 1..2 (P = 2). Step 2's PULL arrives during
+    the wait: it is still pushed from cut 1 (a fast island absorbs a late PULL of
+    its window instead of pushing it from its next cut, where it would merge at
+    once with the slow island's push from an older cut). Step 3's PULL (the next
+    window) is held: pushing it from cut 1 would hold the wait one more merge, and
+    a slow island would sit at its boundary while a fast island trained a round
+    per merge. The held PULL goes out at the next boundary, from cut 2."""
+    role = _PeerPacedRole([_candidate(1, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    assert pairing.lead_window() == (1, 2)
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 1:
+            role.candidates.extend([_candidate(2, 1), _candidate(3, 1)])  # late, and the next window
+        if len(served) == 3:
+            role.peer_pushed.update({1, 2})  # the peer pushed window 1..2: it merges
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 0)
+    assert pairing.inflight == {} and role.fragment_versions == (1, 2)
+    assert _pushed(role) == [1, 2]  # step 3 was not pushed from cut 1
+    pairing.local_round = 2
+    pairing.submit_ready()
+    assert pairing.lead_window() == (3, 4)
+    assert [(key[0], pair.local_round) for key, pair in pairing.inflight.items()] == [(3, 2)]
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_the_next_round_waits_until_every_step_of_its_window_merged(lead_clock):
+    """Step 1 merged and nothing is in flight, but step 2 of the window has no
+    PULL yet: the island trains on only once step 2, pushed from this cut, merged.
+    The K >= 2 rule (no blocker, no unpushed round) would train on here and push
+    step 2 from the next cut, one round late: the lead then grows with the run."""
+    role = _PeerPacedRole([_candidate(1, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    role.peer_pushed.add(1)  # step 1 merges first
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 4:  # step 2's PULL arrives late; the peer pushes it too
+            role.candidates.append(_candidate(2, 1))
+            role.peer_pushed.add(2)
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert len(served) >= 4 and _pushed(role) == [1, 2] and role.fragment_versions == (1, 2)
+    assert pairing.lead_wait_escapes == 0
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_a_wait_entered_before_any_pull_answers_each_pull_of_its_window(lead_clock):
+    """The window is decided once per round: a wait entered with nothing pushed
+    pushes the first PULL of its window, keeps answering the window's PULLs as
+    they come, and still holds the next window's."""
+    role = _PeerPacedRole([])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 1:
+            role.candidates.append(_candidate(1, 1))
+        if len(served) == 2:
+            role.candidates.append(_candidate(3, 1))  # next window: held
+        if len(served) == 3:
+            role.candidates.append(_candidate(2, 1))  # still this window: pushed
+        if len(served) == 4:
+            cuts.extend(sorted((key[0], pair.local_round) for key, pair in pairing.inflight.items()))
+            role.peer_pushed.update({1, 2})
+        return 0
+
+    cuts: list[tuple[int, int]] = []
+    assert await pairing.wait_for_lead(serve) > 0
+    assert _pushed(role) == [1, 2] and pairing.lead_wait_escapes == 0
+    assert cuts == [(1, 1), (2, 1)]  # both from cut 1
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_crossed_pull_orders_do_not_lock_two_islands(lead_clock):
+    """Island A sees only step 2 at its boundary, island B only step 1; each one's
+    missing PULL arrives during its wait. Both are of the window, so each island
+    pushes it and both windows merge: no island waits for a step the other holds
+    (a sharded head merges PULLs of several shards in no fixed order)."""
+    roster = _Roster({0, 1})
+    a = _PeerPacedRole([_candidate(2, 1)], roster=roster, learner=0)
+    b = _PeerPacedRole([_candidate(1, 1)], roster=roster, learner=1)
+    pa, pb = _pairing(a, max_local_rounds_ahead=1), _pairing(b, max_local_rounds_ahead=1)
+    for pairing in (pa, pb):
+        pairing.local_round = 1
+        pairing.submit_ready()
+    assert (_pushed(a), _pushed(b)) == ([2], [1])
+
+    def late(role, step):
+        served = []
+
+        async def serve():
+            served.append(len(served))
+            if len(served) == 1:
+                role.candidates.append(_candidate(step, 1))
+            return 0
+        return serve
+
+    await asyncio.gather(pa.wait_for_lead(late(a, 1)), pb.wait_for_lead(late(b, 2)))
+    assert (pa.lead_wait_escapes, pb.lead_wait_escapes) == (0, 0)
+    assert sorted(_pushed(a)) == sorted(_pushed(b)) == [1, 2]
+    assert a.fragment_versions == b.fragment_versions == (1, 2)
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_a_step_closed_without_the_island_closes_its_window(lead_clock):
+    """A quorum below the island count or a soft deadline closes a step without
+    this island: the window closes all the same (no wait, no escape), and the
+    next round takes the window of the smallest open step."""
+    role = _PeerPacedRole([_candidate(1, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 2:
+            role.peer_pushed.add(1)
+            role.close_without_me(2)  # step 2 closed before its PULL reached this island
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert pairing.lead_wait_escapes == 0 and _pushed(role) == [1]
+    assert role.fragment_versions == (1, 2)
+    pairing.local_round = 2
+    assert pairing.lead_window() == (3, 4)
+
+
+def test_with_k_1_a_caught_up_island_takes_the_window_of_its_first_open_step():
+    """A joining or relaunched process starts from the syncer's fragments: its
+    first window is the one of the smallest step they leave open."""
+    role = _PeerPacedRole([_candidate(7, 1), _candidate(9, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    role.fragment_versions = (5, 8)  # steps 5 and 8 merged last: step 7 (fragment 0) is open
+    pairing.local_round = 1
+    assert pairing.lead_window() == (7, 8)
+    pairing.submit_ready()
+    assert _pushed(role) == [7]  # step 9 belongs to the next window
+    role.fragment_versions = (7, 8)
+    pairing.local_round = 2
+    assert pairing.lead_window() == (9, 10)
+
+
+def test_with_k_1_windows_stay_aligned_to_multiples_of_the_pipeline_depth():
+    """Versions (7, 6): step 7 merged, step 8 is the first open step. The window
+    is the fixed window 7..8 that holds it, not 8..9: every island cuts the same
+    windows, whichever of its steps closed first."""
+    role = _PeerPacedRole([_candidate(8, 1), _candidate(9, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    role.fragment_versions = (7, 6)
+    pairing.local_round = 1
+    assert pairing.lead_window() == (7, 8)
+    pairing.submit_ready()
+    assert _pushed(role) == [8]  # step 9 belongs to window 9..10
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_the_last_window_ends_at_the_last_step_and_the_terminal_phase_ends_a_wait(lead_clock):
+    role = _PeerPacedRole([_candidate(1, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1, total_fragment_steps=5)
+    role.fragment_versions = (3, 4)
+    pairing.local_round = 1
+    assert pairing.lead_window() == (5, 5)  # 5 steps, P = 2: the last window has one step
+    role.candidates[:] = [_candidate(5, 1)]
+    pairing.submit_ready()
+    assert pairing.lead_window_open()
+    pairing.terminal_seen = True  # the data ended or the last rounds are ready mid-window
+    assert await pairing.wait_for_lead() == 0.0
+    pairing.terminal_seen = False
+
+    async def serve():
+        pairing.terminal_seen = True  # the terminal phase starts during the wait
+        return 0
+
+    assert await pairing.wait_for_lead(serve) == pytest.approx(LEAD_WAIT_POLL_S)
+    assert pairing.lead_wait_escapes == 0
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_the_terminal_phase_lifts_the_window_so_the_final_cut_answers_every_pull(lead_clock):
+    """The last rounds' PULLs (steps 5 and 6 of 6) arrive while a wait holds
+    window 3..4. They start the terminal phase, so no round trains after this
+    cut: the wait ends and the final cut answers them although they are past its
+    window (a window filter kept here leaves both islands waiting on each other)."""
+    role = _PeerPacedRole([_candidate(3, 2), _candidate(4, 2)])
+    pairing = _pairing(role, max_local_rounds_ahead=1, total_fragment_steps=6)
+    role.fragment_versions = (1, 2)
+    pairing.local_round = 2
+    pairing.submit_ready()
+    assert pairing.lead_window() == (3, 4) and _pushed(role) == [3, 4]
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 1:
+            role.peer_pushed.update({3, 4})
+            role.candidates.extend([_candidate(5, 2), _candidate(6, 2)])
+        return 0
+
+    await pairing.wait_for_lead(serve)
+    assert pairing.any_finalizing and pairing.lead_wait_escapes == 0
+    assert pairing.lead_window() == (3, 4)  # still this round's window ...
+    pairing.submit_ready()
+    assert _pushed(role) == [3, 4, 5, 6]  # ... but the final cut answers every PULL
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_a_replayed_pull_of_a_pair_in_flight_is_answered_during_the_wait(lead_clock):
+    """After a redial (or a restarted syncer) the syncer re-sends the PULL of a
+    round the island already pushed: the retained pair replays its bytes at
+    once, the window does not hold it."""
+    role = _PeerPacedRole([_candidate(1, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 1:
+            again = _candidate(1, 1)
+            role.candidates.append(replace(again, permit=PullRequest(0, 1, 2)))  # attempt 2
+            role.candidates.append(_candidate(2, 1))
+        if len(served) == 3:
+            role.peer_pushed.update({1, 2})
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert _pushed(role) == [1, 1, 2] and pairing.lead_wait_escapes == 0
+    assert role.fragment_versions == (1, 2)
+
+
+class _DeferredRole(_PeerPacedRole):
+    """Deferred capture: a fragment is materialized only when planned for a push."""
+
+    def __init__(self, candidates, pairing_round):
+        super().__init__(candidates)
+        self.materialized: list[tuple[int, tuple[int, ...]]] = []
+        self._round = pairing_round
+
+    def ready_submission_candidates(self, include_deferred=False):
+        return super().ready_submission_candidates()
+
+    async def materialize_submission(self, fragment_ids):
+        self.materialized.append((self._round(), tuple(fragment_ids)))
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_a_held_pull_is_not_materialized_ahead(lead_clock):
+    holder = {}
+    role = _DeferredRole([_candidate(1, 1)], lambda: holder["pairing"].local_round)
+    pairing = holder["pairing"] = _pairing(role, max_local_rounds_ahead=1)
+    pairing.local_round = 1
+    await pairing.prepare_submissions()
+    pairing.submit_ready()
+    role.peer_pushed.add(1)  # step 1 merges at the first poll: two pipeline slots are free
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 1:
+            assert pairing.inflight == {}
+            role.candidates.extend([_candidate(3, 1), _candidate(2, 1)])  # next window, this window
+        if len(served) == 3:
+            role.peer_pushed.add(2)
+        return 0
+
+    await pairing.wait_for_lead(serve)
+    # Cut 1 materialized fragment 0 (step 1) and fragment 1 (step 2), never step 3's,
+    # although a slot was free for it.
+    assert role.materialized == [(1, (0,)), (1, (1,))]
+    pairing.local_round = 2
+    await pairing.prepare_submissions()
+    assert role.materialized[-1] == (2, (0,))
+
+
+def test_a_pair_reads_the_injected_clock_when_it_is_retained(lead_clock):
+    from yeto.rl.engine.full_parameter_sync import PairedSubmission
+
+    before = lead_clock()
+    pair = PairedSubmission({"actor": _candidate(1, 1)})
+    assert pair.retained_at == before  # read at construction, before any push
+
+
+@pytest.mark.asyncio
+async def test_with_k_2_rounds_trained_after_the_last_retained_push_still_count():
+    """K >= 2 keeps the blocker rule: after a merge and before the next PULL
+    nothing is in flight, yet the rounds trained since the island last retained
+    a pair land in its next push, so K of them stop the next round."""
+    role = _PairedRole("actor", [_candidate(1, 1)], [])
+    pairing = _pairing(role, max_local_rounds_ahead=2)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    await pairing.commit_staged_broadcasts()
+    assert pairing.inflight == {} and role.fragment_versions == (1, 0)
+    pairing.local_round = 2  # one round on top of the push: allowed
+    assert pairing.lead_blockers() == [] and not pairing.lead_unpushed()
+    assert await pairing.wait_for_lead() == 0.0
+    pairing.local_round = 3  # a second one: the next round waits for a push
+    assert pairing.lead_blockers() == [] and pairing.lead_unpushed()
+    assert pairing.lead_window() is None
+
+
+@pytest.mark.asyncio
+async def test_with_k_2_the_wait_still_pushes_a_pull_that_cannot_hold_it(lead_clock):
+    """With K = 2 a pair from the current cut does not block this wait (one
+    round may train on top of it), so the wait keeps answering PULLs."""
+    role = _PeerPacedRole([_candidate(1, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=2, wait_timeout=2.0)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    pairing.local_round = 2  # a round on top of the unmerged step 1: the next one waits
+    assert len(pairing.lead_blockers()) == 1
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 1:
+            role.candidates.append(_candidate(2, 2))
+        if len(served) == 3:
+            role.peer_pushed.add(1)
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 0)
+    assert [step for _, step, _ in role.events] == [1, 2]
+    assert [(key[0], pair.local_round) for key, pair in pairing.inflight.items()] == [(2, 2)]
 
 
 @pytest.mark.asyncio
@@ -585,10 +1020,11 @@ def test_real_syncer_fast_island_stays_within_the_cap_and_both_islands_join_ever
             assert not unmerged, (value, unmerged)
             # ... and only after it pushed from its newest cut (round r).
             assert value == 1 or value - 1 in fast_pushes.values(), (value, fast_pushes)
-    # So it stays close to the slow island: one round ahead, or two when
-    # the slow island itself waited under the cap at a boundary while its
-    # push from an older cut completed the fast island's merge.
-    assert _max_lead(capped.log) <= 2
+    # So it never starts a round before the slow island completed as many:
+    # every island pushes window b of P steps from a cut of round b or later
+    # (RolePairing.lead_window), and the fast island starts round b + 1 only
+    # once window b merged.
+    assert _max_lead(capped.log) <= 0
     waits = [fields for _, kind, who, (name, fields) in
              ((t, k, w, v) for t, k, w, v in capped.log if k == "event")
              if who == 0 and name == "rl_full_parameter_round"]
@@ -597,13 +1033,11 @@ def test_real_syncer_fast_island_stays_within_the_cap_and_both_islands_join_ever
     # Not checked: that a second run with the same inputs gives the same bits.
     # Which local round a push carries depends on wall-clock order.  One slow
     # boundary closes two rounds a few ms apart (the syncer writes a checkpoint
-    # before each broadcast).  The fast island's lead wait polls every
-    # LEAD_WAIT_POLL_S and pushes before it applies broadcasts, and a pair
-    # holds a pipeline slot until its broadcast is applied.  If one poll sees
-    # both broadcasts, the wait ends and the next push carries one more local
-    # round (c_steps 2).  If a poll falls between them, the freed slot takes
-    # the next PULL from the current cut (c_steps 1) and the island waits a
-    # slow round longer.  Both schedules keep the cap.  The syncer orders a
+    # before each broadcast), and the syncer paces the PULLs of new rounds, so
+    # whether a PULL of the next window is visible at the fast island's
+    # boundary or arrives during its lead wait (then it is pushed at the next
+    # boundary, from the newer cut: a K = 1 wait pushes only its own window)
+    # depends on wall-clock order.  Both schedules keep the cap.  The syncer orders a
     # round's pushes by learner id (server.rs), so arrival order inside a
     # round does not change the merge.  _check_merges instead checks that the
     # result equals, up to float32 rounding, the merge of this run's pushes.
