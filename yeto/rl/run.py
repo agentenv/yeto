@@ -1,11 +1,12 @@
 """Experimental single-process reinforcement-learning runner for ``yeto rl``."""
 
-import argparse
 import os
 
 import torch
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from yeto.exact_argparse import ExactArgumentParser
 
 
 class MockCyberGymEnv:
@@ -194,7 +195,7 @@ def run_rl(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser()
+    parser = ExactArgumentParser()
     parser.add_argument("--env", default="cybergym", choices=["cybergym", "mock"])
     parser.add_argument("--task", default="vulnerability_analysis")
     parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B")

@@ -11,6 +11,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
+from yeto.exact_argparse import ExactArgumentParser
+
 MIN_DATA_FREE_BYTES = 2 * 1024**4
 _NAMED_DIGEST = re.compile(r".+@sha256:[0-9a-f]{64}\Z")
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -152,7 +154,7 @@ def preflight_task_images(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ExactArgumentParser(description=__doc__)
     parser.add_argument("--task-pack", type=Path, required=True)
     parser.add_argument("--expected-task-pack-sha256", required=True)
     parser.add_argument("--data-root", type=Path, default=Path("/data"))

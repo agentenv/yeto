@@ -42,6 +42,8 @@ from typing import BinaryIO, Sequence
 
 import torch
 
+from yeto.exact_argparse import ExactArgumentParser
+
 
 PROTOCOL_VERSION = 1
 FRAME_MAGIC = b"YETOISO1"
@@ -501,7 +503,7 @@ def serve(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Persistent full-matrix Torch Iso worker")
+    parser = ExactArgumentParser(description="Persistent full-matrix Torch Iso worker")
     parser.add_argument(
         "--device",
         default="cuda:0",

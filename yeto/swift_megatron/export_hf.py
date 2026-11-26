@@ -93,6 +93,8 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Sequence
 
+from yeto.exact_argparse import ExactArgumentParser
+
 log = logging.getLogger("yeto-export-hf")
 
 # ``state.rs``: CKPT_MAGIC_V3, then iso_backend u8, layout fingerprint 32 B,
@@ -683,7 +685,7 @@ def cmd_strip_vision(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="yeto.swift_megatron.export_hf", description=__doc__,
+    ap = ExactArgumentParser(prog="yeto.swift_megatron.export_hf", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
 

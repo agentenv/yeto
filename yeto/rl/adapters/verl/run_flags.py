@@ -26,6 +26,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.engine.run_flags import ISLAND, add_rl_flags, island_flag
 
 # --rl-release-mode (buffer_ports module doc): a synced group's publisher releases the
@@ -138,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     out, or it is refused."""
     from yeto.wandb_logger import add_arguments as add_wandb_arguments
 
-    parser = argparse.ArgumentParser(prog="yeto.rl.adapters.verl.island_entry", allow_abbrev=False)
+    parser = ExactArgumentParser(prog="yeto.rl.adapters.verl.island_entry")
     add_rl_flags(parser, ISLAND)  # yeto/rl/engine/run_flags.py
     for flag in ISLAND_FLAGS:
         options, kwargs = flag.argparse_call(ISLAND)

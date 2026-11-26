@@ -26,7 +26,6 @@ variance with and without the warm-up can be compared.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -38,6 +37,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .engine.algorithm import AlgorithmSpec, AlgorithmSpecError
 from .engine.run_config import CriticRunConfig
 
@@ -494,7 +494,7 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     _flags = backends.module("algorithm_flags", backends.DEFAULT_BACKEND)
     absorb_extra_argv, algorithm_argv = _flags.absorb_extra_argv, _flags.algorithm_argv
 
-    parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.critic_warmup")
+    parser = ExactArgumentParser(prog="python3 -m yeto.rl.critic_warmup")
     parser.add_argument("--dry-run", action="store_true", required=True)
     parser.add_argument("--rl-algorithm-spec", default=None)
     parser.add_argument("--extra", default="")

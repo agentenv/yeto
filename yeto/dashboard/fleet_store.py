@@ -439,9 +439,9 @@ def read_store(objects: Any) -> list[list[dict]]:
 
 def main(argv: Any = None) -> int:
     """``merge --store URI [--fleet-log PATH]... [--out PATH]``: one ``fleet.jsonl``."""
-    import argparse  # noqa: PLC0415
+    from ..exact_argparse import ExactArgumentParser  # noqa: PLC0415
 
-    parser = argparse.ArgumentParser(prog="python -m yeto.dashboard.fleet_store")
+    parser = ExactArgumentParser(prog="python -m yeto.dashboard.fleet_store")
     sub = parser.add_subparsers(dest="cmd", required=True)
     mg = sub.add_parser("merge", help="the run's fleet.jsonl from the store (and local copies), merged")
     mg.add_argument("--store", default=None, help="the run store (s3://, oss:// or a directory)")

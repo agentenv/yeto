@@ -50,6 +50,7 @@ from pathlib import Path
 
 import torch
 
+from yeto.exact_argparse import ExactArgumentParser
 from .fragments import FragmentLayout, build_layout
 from .protocol import layout_fingerprint
 from .tensor_io import apply_fragment
@@ -255,7 +256,7 @@ def validate_against_layout(ckpt: Checkpoint, layout: FragmentLayout) -> None:
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(
+    p = ExactArgumentParser(
         prog="python3 -m yeto.export",
         description="Export a syncer checkpoint into a Hugging Face "
         "model/adapter directory.",

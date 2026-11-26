@@ -144,7 +144,6 @@ status`` prints the per-task table (``--json`` / ``--log`` for the dashboard).
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import logging
@@ -157,6 +156,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .object_store import is_fatal_store_error
 from .task_dispense import (
     DISPENSE_POSITION_KEY,
@@ -2119,7 +2119,7 @@ def _objects_for(store: str) -> Any:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m yeto.rl.engine.store_dispense")
+    parser = ExactArgumentParser(prog="python -m yeto.rl.engine.store_dispense")
     sub = parser.add_subparsers(dest="command", required=True)
     st = sub.add_parser("status", help="per-task table of a store dispenser")
     st.add_argument("--store", required=True, help="store directory or s3:// URI (the samplers' store)")

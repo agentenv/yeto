@@ -20,6 +20,9 @@ import sys
 from collections.abc import Sequence
 
 MAX_SUGGESTIONS = 4
+# difflib similarity a spelling needs to be offered: 0.8 keeps typos (--modle ->
+# --model, 0.86) and drops look-alikes (--rl-max -> --rl-image, 0.78)
+CLOSE_CUTOFF = 0.8
 
 
 class ExactArgumentParser(argparse.ArgumentParser):
@@ -75,7 +78,7 @@ def suggestions(token: str, parsers: Sequence[argparse.ArgumentParser]) -> list[
     dest = name.lstrip("-").replace("-", "_")
     same_dest = sorted({o for o in long_options if options[o].dest == dest})
     extends = sorted(o for o in long_options if o.startswith(name) and o != name)
-    close = difflib.get_close_matches(name, long_options, n=MAX_SUGGESTIONS, cutoff=0.6)
+    close = difflib.get_close_matches(name, long_options, n=MAX_SUGGESTIONS, cutoff=CLOSE_CUTOFF)
     out: list[str] = []
     for option in (*same_dest, *extends, *close):
         if option not in out:

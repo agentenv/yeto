@@ -79,13 +79,14 @@ CLI::
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import MISSING, asdict, dataclass, field, replace
 from typing import Any
+
+from yeto.exact_argparse import ExactArgumentParser
 
 GIB = 1024**3
 OFFLOAD_MODES = ("none", "optimizer", "full")
@@ -516,7 +517,7 @@ def sweep(shape: ModelShape, base: TrainPlan, seq_lens: Iterable[int],
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = ExactArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--config", required=True, help="HF config.json")
     ap.add_argument("--include-vision", action="store_true")
     ap.add_argument("--seq-lens", default="", help="comma list: print a sweep over every offload mode")

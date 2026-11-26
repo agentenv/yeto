@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 import time
 
+from yeto.exact_argparse import ExactArgumentParser
 from .app import Bot, build_channels
 from .channels import Command, log
 from .config import Config
@@ -14,7 +14,7 @@ from .http import DashboardClient, request_json
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m yeto.bot", description=__doc__)
+    ap = ExactArgumentParser(prog="python -m yeto.bot", description=__doc__)
     one = ap.add_mutually_exclusive_group()
     one.add_argument("--once", action="store_true",
                      help="run one monitor pass (sends the progress card) and exit")

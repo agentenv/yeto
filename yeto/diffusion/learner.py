@@ -26,6 +26,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, IterableDataset
 
+from yeto.exact_argparse import ExactArgumentParser
 from .. import accel
 from ..autobatch import int_or_auto, rebalance_grad_accum
 from ..data import _learner_rows, load_rows
@@ -284,7 +285,7 @@ def validate_diffusion_cache_metadata(meta: dict, args) -> None:
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Yeto diffusion learner")
+    p = ExactArgumentParser(description="Yeto diffusion learner")
     p.add_argument("--model", required=True, help="diffusers repo id or alias from yeto.models")
     p.add_argument("--data", required=True, help="HF dataset id or local latent/media manifest")
     p.add_argument("--model-revision", default=None)

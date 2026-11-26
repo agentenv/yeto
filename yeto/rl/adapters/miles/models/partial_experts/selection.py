@@ -72,6 +72,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .attest import canonical_sha256, require_sha256
 
 
@@ -868,7 +869,7 @@ def _validate_digests(doc: Mapping[str, Any], layers: Mapping[str, Any], actual:
 
 
 def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="python -m yeto.rl.adapters.miles.models.partial_experts.selection")
+    p = ExactArgumentParser(prog="python -m yeto.rl.adapters.miles.models.partial_experts.selection")
     p.add_argument("--model", default="kimi_k31", help="selection 'model' field")
     p.add_argument("--num-experts", type=int, default=896)
     p.add_argument("--num-trainable", type=int, default=128)

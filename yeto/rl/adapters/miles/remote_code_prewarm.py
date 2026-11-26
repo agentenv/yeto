@@ -39,7 +39,6 @@ load remote code as they did without this step.
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import json
 import os
@@ -51,6 +50,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.adapters.miles.ext_args import ext_attr
 
 MODULE = "yeto.rl.adapters.miles.remote_code_prewarm"
@@ -209,7 +209,7 @@ def exclusive_lock(directory: str | os.PathLike) -> Iterator[None]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Child entry: warm every ``--model-path`` under the lock; print one JSON report line."""
-    parser = argparse.ArgumentParser(prog=MODULE)
+    parser = ExactArgumentParser(prog=MODULE)
     parser.add_argument("--model-path", action="append", required=True)
     parser.add_argument("--trust-remote-code", action="store_true")
     args = parser.parse_args(argv)

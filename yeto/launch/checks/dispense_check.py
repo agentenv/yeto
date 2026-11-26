@@ -59,6 +59,8 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
+
 
 def read_records(paths: Iterable[str | Path]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
@@ -395,7 +397,7 @@ def prompt_table(path: str, *, mix: str | None, by_label: bool) -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = ExactArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("log", nargs="+", help="task-dispense.jsonl (every syncer incarnation)")
     parser.add_argument("--tapes", nargs="*", default=(), help="island tapes (optional)")
     parser.add_argument("--seed", type=int, default=None, help="the run seed (needed with --tapes)")

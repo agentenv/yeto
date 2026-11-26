@@ -127,3 +127,82 @@ def test_the_miles_island_refuses_a_prefix_and_keeps_miles_flags(tmp_path, monke
     for flag in ("--rollout-num-gpus-per-engine", "--rollout-batch-size", "--n-samples-per-prompt",
                  "--custom-generate-function-path"):
         assert flag in miles
+
+
+def _toy() -> ExactArgumentParser:
+    parser = ExactArgumentParser(prog="t")
+    parser.add_argument("--rl-max-policy-age", type=int)
+    parser.add_argument("--rl-image")
+    parser.add_argument("--model")
+    parser.add_argument("--needs-value")
+    return parser
+
+
+def test_only_the_unrecognized_arguments_message_gains_hints(capsys):
+    parser = _toy()
+    # argparse's own message for the extras of this parse: hints added, first line kept
+    err = _error(capsys, parser.parse_args, ["--rl-max", "3"])
+    lines = err.strip().splitlines()
+    assert lines[-2] == "t: error: unrecognized arguments: --rl-max 3"
+    assert lines[-1] == "  --rl-max: options are taken by their full name; did you mean --rl-max-policy-age?"
+    # any other error of the same parser is left as argparse wrote it
+    err = _error(capsys, parser.parse_args, ["--needs-value"])
+    assert err.strip().splitlines()[-1] == "t: error: argument --needs-value: expected one argument"
+    # a caller's own message that only looks like it (other tokens than the parse left) too
+    parser.parse_known_args(["--rl-max", "3"])
+    err = _error(capsys, parser.error, "unrecognized arguments: --something-else")
+    assert err.strip().splitlines()[-1] == "t: error: unrecognized arguments: --something-else"
+    # parse_known_args reports extras and never errors (stage1's island check uses it)
+    args, extras = _toy().parse_known_args(["--model", "m", "--mod", "x"])
+    assert (args.model, extras) == ("m", ["--mod", "x"])
+
+
+def test_look_alike_options_are_not_offered():
+    parser = _toy()
+    assert suggestions("--rl-max", [parser]) == ["--rl-max-policy-age"]  # not --rl-image
+    assert suggestions("--modle", [parser]) == ["--model"]
+    assert suggestions("--rl-imgae", [parser]) == ["--rl-image"]
+
+
+def test_every_entry_point_under_yeto_parses_full_names_only():
+    """Every parser under ``yeto/`` is an ``ExactArgumentParser``. Three modules run
+    without the rest of yeto and keep stdlib argparse with ``allow_abbrev=False``, on
+    the parser and every subcommand: the two tools shipped alone to a node, and the
+    code pack unpacker a node imports from a partly unpacked pack."""
+    import re
+
+    standalone = {"yeto/launch/weights_sync.py", "yeto/launch/preflight/bench.py", "yeto/codepack.py"}
+    call = re.compile(r"(\w*)ArgumentParser\((?:[^()]|\([^()]*\))*\)")
+    offenders = []
+    for path in sorted((REPO / "yeto").rglob("*.py")):
+        rel = path.relative_to(REPO).as_posix()
+        if rel == "yeto/exact_argparse.py":
+            continue
+        src = path.read_text()
+        for found in call.finditer(src):
+            if found.group(1) == "Exact":
+                continue
+            if rel in standalone and "allow_abbrev=False" in found.group(0):
+                continue
+            offenders.append(f"{rel}: {found.group(0)[:60]}")
+        if rel in standalone:
+            top_level = re.findall(r"(?m)^(?:from|import) ([\w.]+)", src)
+            assert not [m for m in top_level if m == "yeto" or m.startswith(("yeto.", "."))], rel
+            assert "parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False)" in src, rel
+    assert offenders == []
+
+
+@pytest.mark.parametrize("module", ["yeto.launch.weights_sync", "yeto.launch.preflight.bench", "yeto.codepack"])
+def test_the_standalone_node_tools_refuse_a_prefix(module, capsys):
+    import importlib
+
+    mod = importlib.import_module(module)
+    argv, prefix = {
+        "yeto.launch.weights_sync": (["sync", "--source", "s3://b/m", "--root", "/r", "--model", "m",
+                                      "--revision", "a" * 40, "--work", "2"], "--work 2"),  # --workers
+        "yeto.launch.preflight.bench": (["ports", "--ports", "1", "--peer", "h"], "--peer h"),  # --peers
+        "yeto.codepack": (["verify", "--digest", "0" * 64, "--di", "."], "--di ."),  # --dir
+    }[module]
+    with pytest.raises(SystemExit) as exc:
+        mod.main(argv)
+    assert exc.value.code == 2 and f"unrecognized arguments: {prefix}" in capsys.readouterr().err

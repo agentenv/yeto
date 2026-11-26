@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import functools
 import hashlib
 import io
 import json
@@ -722,8 +723,11 @@ def _resolve_release_pack(old_record, previous, release_image: str, *,
 # CLI (island setup / operators)
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m yeto.codepack")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    # full option names only, the subcommands too; stdlib argparse: a node imports this module
+    # alone from a partly unpacked pack (ssh_trainer_island.PACK_FETCH_PY), before the rest of yeto
+    parser = argparse.ArgumentParser(prog="python -m yeto.codepack", allow_abbrev=False)
+    sub = parser.add_subparsers(dest="cmd", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     verify = sub.add_parser("verify", help="check an unpacked tree against a digest")
     verify.add_argument("--dir", default=".")
     verify.add_argument("--digest", required=True)

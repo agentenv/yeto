@@ -35,7 +35,6 @@ reaches port 22 of every node it allows. So:
 
 from __future__ import annotations
 
-import argparse
 import os
 import stat
 import sys
@@ -43,6 +42,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.launch.nc import tunnel
 
 TOKEN_ENV = "YETO_RELAY_TOKEN"
@@ -127,7 +127,7 @@ def proxy(url: str, host: str, port: int) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m yeto.node.relay_proxy",
+    parser = ExactArgumentParser(prog="python -m yeto.node.relay_proxy",
                                      description="ssh ProxyCommand through a relay.mjs WebSocket relay "
                                                  f"(token: ${TOKEN_FILE_ENV} or ${TOKEN_ENV})")
     parser.add_argument("--url", required=True, help="the relay's URL (wss:// or https://)")

@@ -36,6 +36,8 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
+
 logger = logging.getLogger(__name__)
 
 RUN_ID_ENV = "YETO_BOAT_RUN_ID"
@@ -261,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     coming back (no relay trainer watches it, no new incarnation sweeps)."""
     import argparse
 
-    p = argparse.ArgumentParser(prog="boat_labels")
+    p = ExactArgumentParser(prog="boat_labels")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("sweep")
     s.add_argument("--run", required=True)

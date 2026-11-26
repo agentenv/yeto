@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.gpu_spec import DEVICE_FAMILY_ENV
 from yeto.launch.node_inventory import InventoryError, Node, load_inventory
 from yeto.rl.adapters.miles.models import glm5_next
@@ -1051,7 +1052,7 @@ def run_steps(out: Expanded, *, ssh: Sequence[str] = ("ssh", "-o", "BatchMode=ye
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="yeto-stage1", description=__doc__.splitlines()[0])
+    parser = ExactArgumentParser(prog="yeto-stage1", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     for name, text in (("plan", "expand and check the plan; no SSH"),
                        ("run", "run the steps over SSH (refused while errors or gaps remain)")):

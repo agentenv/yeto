@@ -46,6 +46,8 @@ import re
 import statistics
 import sys
 
+from yeto.exact_argparse import ExactArgumentParser
+
 ANSI = re.compile(r"\x1b\[[0-9;]*m|\[(?:3[0-9]|0)m")
 ISL = re.compile(r"\[[\w.-]+-l(\d+)-modal\]")
 MILES = re.compile(r"(metrics|log_utils|model|train_metric_utils)\.py:\d+ - (perf|rollout|step) (\d+): (\{.*\})")
@@ -620,7 +622,7 @@ def print_checks(p, checks):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = ExactArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir")
     ap.add_argument("--json", help="write result JSON here (refused inside the run dir)")
     ap.add_argument("--no-table", action="store_true", help="skip the per-step table")

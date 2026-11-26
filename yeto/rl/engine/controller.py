@@ -46,6 +46,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .execution_profile import ExecutionProfile, ReadinessSnapshot, quiescent_cut_blockers
 from .driver import RebuildNotStarted
 from .journal import EpochState, Journal, read_epochs, read_journal, replay_pool
@@ -2262,7 +2263,7 @@ def main(argv: list[str] | None = None) -> int:
     """``python -m yeto.rl.engine.controller {request,cancel,status} ...`` (read-only on the journal)."""
     import argparse
 
-    parser = argparse.ArgumentParser(prog="yeto.rl.engine.controller")
+    parser = ExactArgumentParser(prog="yeto.rl.engine.controller")
     parser.add_argument("--state-dir", required=True)
     sub = parser.add_subparsers(dest="verb", required=True)
     req = sub.add_parser("request")

@@ -9,11 +9,12 @@ Lightning datamodule configured by the training YAML, stores complete batches as
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
 from pathlib import Path
+
+from yeto.exact_argparse import ExactArgumentParser
 
 
 def _expand(value: str | os.PathLike | None) -> Path | None:
@@ -38,7 +39,7 @@ def _setup_hunyuan_paths(root: Path | None) -> None:
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(
+    p = ExactArgumentParser(
         description="Export pre-collated Hunyuan3D batches for Yeto training"
     )
     p.add_argument("--config", required=True, type=Path, help="Hunyuan3D hy3dshape training YAML")

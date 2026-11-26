@@ -39,6 +39,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from yeto.exact_argparse import ExactArgumentParser
+
 READERS = {
     "miles": "yeto.rl.health.miles",
     "verl": "yeto.rl.health.verl",
@@ -127,7 +129,7 @@ def _miles(run: Path, args) -> dict:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = ExactArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir")
     ap.add_argument("--backend", choices=("auto", "miles", "verl"), default="auto")
     ap.add_argument("--json", help="write the summary JSON here (refused inside the run dir)")

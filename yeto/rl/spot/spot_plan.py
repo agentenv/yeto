@@ -20,10 +20,11 @@ The VM itself (GPU kind x Nebius region x on-demand/spot) is chosen and kept ali
 """
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from typing import Any
+
+from yeto.exact_argparse import ExactArgumentParser
 
 PROXY_PORT = 31600  # default records proxy port (--proxy-port)
 DEFAULT_NAME_PREFIX = "spot"  # sampler id / boat island label: <prefix>-<island>
@@ -121,7 +122,7 @@ def env(*, data: str, public_ip: str, max_in_flight: int = 4, starts_per_hour: i
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser()
+    p = ExactArgumentParser()
     p.add_argument("--island", type=int, required=True)
     p.add_argument("--islands", type=int, default=2)
     p.add_argument("--public-ip", required=True)

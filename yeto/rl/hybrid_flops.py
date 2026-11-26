@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .hybrid_params import hybrid_pattern, language_model_config
 
 # Dense BF16 peak, no sparsity (NVIDIA H100/H200 SXM datasheets: 989.4 TFLOPS).
@@ -146,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     import json
     from pathlib import Path
 
-    p = argparse.ArgumentParser(description=main.__doc__)
+    p = ExactArgumentParser(description=main.__doc__)
     p.add_argument("tape")
     p.add_argument("--config", required=True, help="the model's HF config.json")
     p.add_argument("--gpus", type=int, required=True)

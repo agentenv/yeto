@@ -274,3 +274,23 @@ def test_gate_checks_the_image_the_trainer_runs(tmp_path, runs_dir):
     assert all(IMAGE in s for _, s in ops.scripts if s.startswith("docker pull"))
     argv = [*SSH_ARGV, "--rl-image", "docker:" + IMAGE]
     assert gate.commands_for_launch_argv(argv)[0][5:7] == ["--image", "docker:" + IMAGE]
+
+
+def test_run_up_dry_run_prints_the_preflight_command_quoted(make_up, capsys, tmp_path, monkeypatch):
+    import shlex
+
+    from tests.test_own_cluster_templates import FakeSsh
+
+    monkeypatch.setattr(cp, "SshOps", FakeSsh)
+    FakeSsh.unreachable, FakeSsh.calls = set(), []
+    folder = tmp_path / "my nodes"  # a path with a space: printed as one shell word
+    folder.mkdir()
+    inventory = _inventory(folder)
+    run = make_up(["--gpu", "ssh:2x8xb300", "--rl-node-inventory", str(inventory), "--cluster-prefix", "k31-bm"])
+    assert run.cluster_preflight(dry_run=True) and not run.calls
+    out = "".join(capsys.readouterr())
+    shown = out.split("would run the trainer's cluster preflight: ", 1)[1].splitlines()[0]
+    assert shlex.quote(str(inventory)) in shown
+    words = shlex.split(shown)
+    assert words[:4] == ["yeto", "preflight", "--gpu", "ssh:2x8xb300"]
+    assert words[words.index("--rl-node-inventory") + 1] == str(inventory)

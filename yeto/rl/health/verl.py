@@ -25,7 +25,6 @@ The quantity checks and thresholds are those of ``yeto.rl.health.verl_modal`` (f
 """
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import re
@@ -33,6 +32,7 @@ import statistics
 import sys
 from pathlib import Path
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.health.verl_modal import ANSI, _finite, _grade, _jsonl
 
 REJECTED = re.compile(r"push rejected|duplicate push rejected")
@@ -176,7 +176,7 @@ def check(run_dir: Path, learners: int = 2, total_steps: int = 32) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser()
+    parser = ExactArgumentParser()
     parser.add_argument("run_dir")
     parser.add_argument("--json", default=None)
     parser.add_argument("--learners", type=int, default=2)

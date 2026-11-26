@@ -72,7 +72,6 @@ on this host (``--dry-run``: prints the script only).
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import shlex
@@ -83,6 +82,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .host_probe import (
     IbPort,
     hca_filter,
@@ -770,7 +770,7 @@ def run_local(script: str, *, timeout: float = HEALTH_LIMIT_S + 30.0,
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m yeto.hw.node_health",
+    parser = ExactArgumentParser(prog="python -m yeto.hw.node_health",
                                      description="one node health check on this host (yeto.hw.node_health)")
     parser.add_argument("--family", default="cuda", help="the device family (default cuda)")
     parser.add_argument("--hca", default="", help="the job's NCCL_IB_HCA (its ports are judged)")

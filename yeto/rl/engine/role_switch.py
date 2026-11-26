@@ -38,7 +38,6 @@ probe come from the adapter layer through the spec (``module:callable``).
 
 from __future__ import annotations
 
-import argparse
 import json
 import subprocess
 import sys
@@ -48,6 +47,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .convertible_remote import CONVERTIBLE_DIR, write_retrying
 from .release_overlay import is_partial_release, overlay_release
 from .trainer_remote import StoreCutLog, StoreFiles
@@ -552,7 +552,7 @@ def build_island(spec: Mapping[str, Any], *, environ: MutableMapping[str, str] |
 def main(argv: Sequence[str] | None = None) -> int:
     from . import engine_sampler_entry as entry
 
-    parser = argparse.ArgumentParser(prog="python -m yeto.rl.engine.role_switch",
+    parser = ExactArgumentParser(prog="python -m yeto.rl.engine.role_switch",
                                      description="run an island as engine sampler, then as trainer (module doc)")
     parser.add_argument("--spec", required=True, help="the engine sampler spec with a role_switch section")
     args = parser.parse_args(argv)

@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
+
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -185,7 +187,7 @@ def derive_task_pack(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ExactArgumentParser(description=__doc__)
     parser.add_argument("--parent", type=Path, required=True)
     parser.add_argument("--ordered-task-ids", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)

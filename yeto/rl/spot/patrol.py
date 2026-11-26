@@ -46,6 +46,8 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
+
 EVENT_PREFIX = "YETO_RL_EVENT "
 GIB_MIB = 1024.0
 STARTING_STATES = frozenset({"STARTING", "CREATING", "PROVISIONING"})
@@ -480,7 +482,7 @@ def exit_code(report: dict[str, Any]) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p = ExactArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--tape", help="trainer event tape / log")
     p.add_argument("--consumed", help="verl-buffer-consumed-<learner>.jsonl")
     p.add_argument("--sampler-tape", action="append", help="a sampler island tape (repeatable)")

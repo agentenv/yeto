@@ -27,6 +27,8 @@ import os
 import shutil
 import time
 
+from yeto.exact_argparse import ExactArgumentParser
+
 log = logging.getLogger("megatron-learner")
 MEGATRON_ADAPTER_METADATA_FILE = "yeto_megatron_adapter.json"
 MEGATRON_ADAPTER_WEIGHTS_BASENAME = "megatron_adapter_model"
@@ -50,7 +52,7 @@ _MLP_TARGETS = ["linear_fc1", "linear_fc2"]
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser("yeto.megatron.learner")
+    p = ExactArgumentParser("yeto.megatron.learner")
     p.add_argument("--model", required=True)
     p.add_argument("--data", required=True)
     p.add_argument(
