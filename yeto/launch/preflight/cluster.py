@@ -1665,16 +1665,35 @@ class Endpoint:
         return parsed.hostname or "", parsed.port or (80 if parsed.scheme == "http" else 443)
 
 
+PROXY_ENVS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY",
+              "no_proxy")
+UNCHECKED = "YETO_REACH_UNCHECKED"
+
+
 def reach_command(endpoint: Endpoint) -> str:
-    """Bash that reaches ``endpoint`` from the node: an HTTPS request with ``curl`` (any
-    HTTP answer, 403 included, means the network path and TLS work), else a TCP connect
-    by bash's ``/dev/tcp``. Exit 0 when it reached it."""
+    """Bash that reaches ``endpoint`` from the node, exit 0 when it did. With ``curl``: one
+    request; any HTTP answer (401, 403, 404 included) means the network path works, and the
+    certificate is not verified (``-k``: a proxy that intercepts TLS is a path that works).
+    The proxy is the shell's (``https_proxy``, the inventory env exported before), else for
+    the registry the docker daemon's own (``docker info``: what ``docker pull`` uses).
+    Without ``curl``: a TCP connect by bash's ``/dev/tcp``, or, with a proxy set, no check
+    (:data:`UNCHECKED`: a direct connect says nothing about the proxied path)."""
     host, port = endpoint.host_port
     url = shlex.quote(endpoint.url)
     tcp = shlex.quote(f"exec 3<>/dev/tcp/{host}/{port}")
-    return (f"if command -v curl >/dev/null 2>&1; then curl -sS -o /dev/null --connect-timeout {REACH_CONNECT_S} "
-            f"-m {REACH_TOTAL_S} -w 'http %{{http_code}}\\n' {url}; "
+    proxied = '"${HTTPS_PROXY:-${https_proxy:-${ALL_PROXY:-${all_proxy:-}}}}"'
+    daemon = ("p=; " + (f"[ -z {proxied} ] && p=$(docker info --format '{{{{.HTTPSProxy}}}}' 2>/dev/null); "
+                        if endpoint.role == "registry" else ""))
+    return (f"if command -v curl >/dev/null 2>&1; then {daemon}curl -sS -k -o /dev/null "
+            f"--connect-timeout {REACH_CONNECT_S} -m {REACH_TOTAL_S} -w 'http %{{http_code}}\\n' "
+            f'${{p:+--proxy "$p"}} {url}; '
+            f"elif [ -n {proxied} ]; then echo '{UNCHECKED}: no curl on the node and a proxy is set'; "
             f"else timeout {REACH_CONNECT_S} bash -c {tcp} && echo 'tcp open (no curl on the node)'; fi")
+
+
+def proxy_exports(node: Node) -> str:
+    """``export`` of the inventory env's proxy variables (what the node's containers get)."""
+    return "".join(f"export {k}={shlex.quote(str(node.env[k]))}\n" for k in PROXY_ENVS if node.env.get(k))
 
 
 def reach_sections(endpoints: Sequence[Endpoint]) -> list[tuple[str, str]]:
@@ -1697,6 +1716,9 @@ def reach_checks(name: str, endpoints: Sequence[Endpoint], sections: Mapping[str
             out.append(Check(name, f"reach_{e.role}", FAIL,
                              f"{name} cannot reach {what} (rc {sec.rc}): {_tail(sec.text, 200)}", fix,
                              {"url": e.url}))
+        elif UNCHECKED in sec.text:
+            out.append(Check(name, f"reach_{e.role}", WARN, f"{what}: not checked ({_tail(sec.text, 80)})",
+                             "install curl on the node to check it", {"url": e.url}))
         else:
             out.append(Check(name, f"reach_{e.role}", PASS, f"{what}: {_tail(sec.text, 60)}", data={"url": e.url}))
     return out
@@ -1716,7 +1738,8 @@ def egress_preflight(nodes: Sequence[Node], endpoints: Sequence[Endpoint], *, op
         script = probe_script(reach_sections(endpoints))
 
         def one(state: NodeState) -> list[Check]:
-            _, text = run._run(state.node, script, 2.0 * REACH_TOTAL_S * len(endpoints) + 60.0, "reach")
+            _, text = run._run(state.node, proxy_exports(state.node) + script,
+                               2.0 * REACH_TOTAL_S * len(endpoints) + 60.0, "reach")
             return reach_checks(state.name, endpoints, parse_sections(text))
 
         checks += [c for cs in run._parallel(one, live) for c in cs]

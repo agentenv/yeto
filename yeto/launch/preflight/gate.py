@@ -134,10 +134,17 @@ def launch_endpoints(argv: Sequence[str], environ: Mapping[str, str], nodes: Seq
 
 
 def egress_lines(report: Report) -> list[str]:
-    """One line per finding of an egress report that is not a PASS (the node, the check,
-    the endpoint and the fix)."""
-    return [f"[{c.status}] node {c.scope} {c.name}: {c.detail}" + (f" -> {c.fix}" if c.fix else "")
-            for c in report.checks if c.status != PASS]
+    """The egress report in the preflight's line format (:func:`summary_lines`): one line per
+    endpoint check of each node (PASS, WARN or FAIL, with its fix when not a PASS), the ssh
+    check of a node only when it is not a PASS, then the counts."""
+    lines = []
+    for c in report.checks:
+        if c.name.startswith("reach_") or c.status != PASS:
+            lines.append(f"  [{c.status}] {c.scope} {c.name}: {c.detail}"
+                         + (f" -> {c.fix}" if c.fix and c.status != PASS else ""))
+    n = report.counts
+    lines.append(f"  {n[PASS]} pass, {n[WARN]} warn, {n[FAIL]} fail, {n[SKIP]} skip")
+    return lines
 
 
 def _say(out: IO[str], line: str) -> None:

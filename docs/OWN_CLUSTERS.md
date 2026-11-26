@@ -51,15 +51,24 @@ The dry run orders nothing. It runs:
   (weight format, reload mode);
 - the egress check of your nodes: over SSH, on every own node of the run,
   whether it reaches the run store's object API and the trainer image's
-  registry from its own network. The probe is an HTTPS request with `curl`
-  (any HTTP answer counts, 403 included: the network path and TLS work), or a
-  TCP connect when the node has no `curl`. A node that does not reach one
-  refuses the run up before anything is ordered, naming the node and the
-  endpoint:
+  registry from its own network. The probe is an HTTPS request with `curl`:
+  any HTTP answer counts (401, 403 and 404 included: the network path works),
+  and the certificate is not verified, so a proxy that intercepts TLS passes.
+  The request goes through the node's proxy: the inventory env's
+  `HTTPS_PROXY`/`https_proxy` (and the other proxy variables), else, for the
+  registry, the docker daemon's proxy (`docker info`, what `docker pull`
+  uses). A node without `curl` gets a TCP connect, or, when a proxy is set, a
+  `[WARN]` that the path is not checked. One line per node and endpoint, in
+  the preflight's format; a node that does not reach one refuses the run up
+  before anything is ordered, naming the node and the endpoint:
 
   ```
   dry run: own nodes own-b300-0, own-b300-1: checking over ssh that they reach store https://<endpoint>, registry https://<registry>/
-  dry run: [FAIL] node own-b300-1 reach_store: own-b300-1 cannot reach the store endpoint https://<endpoint> (s3://<bucket>/runs/<run>) (rc 6): curl: (6) Could not resolve host ... -> open the node's egress to it (firewall, proxy: https_proxy in the node's environment, DNS)
+  dry run:   [PASS] own-b300-0 reach_store: the store endpoint https://<endpoint> (s3://<bucket>/runs/<run>): http 403
+  dry run:   [PASS] own-b300-0 reach_registry: the registry endpoint https://<registry>/ (<image>): http 401
+  dry run:   [FAIL] own-b300-1 reach_store: own-b300-1 cannot reach the store endpoint https://<endpoint> (s3://<bucket>/runs/<run>) (rc 6): curl: (6) Could not resolve host ... -> open the node's egress to it (firewall, proxy: https_proxy in the node's environment, DNS)
+  dry run:   [PASS] own-b300-1 reach_registry: the registry endpoint https://<registry>/ (<image>): http 401
+  dry run:   3 pass, 0 warn, 1 fail, 0 skip
   cluster preflight failed: nothing ordered
   ```
 
@@ -71,7 +80,9 @@ The dry run orders nothing. It runs:
   `--skip-preflight` skips every preflight, this one included.
 
 The spend line counts the cloud parts only: `trainer.usd_per_h` is 0 for a
-trainer on own nodes, and each pool is counted at its node price:
+trainer on own nodes, and each pool is counted at its node price. It is
+logged for a run with own nodes (an own trainer or an own sampler pool) whose
+pools are not National Compute ones; a run with an NC pool logs no spend line:
 
 ```
 dry run: spend estimate $1.50/h = pools $1.50/h (sky-l40s (sky) 2 x $0.7492) + trainer $0/h (own nodes: ssh:2x8xb300); over the 6 h wall clock $8.99 (budget.usd $30)

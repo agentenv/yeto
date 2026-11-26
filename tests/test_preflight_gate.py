@@ -193,7 +193,7 @@ def test_run_up_cluster_preflight_failure_and_dry_run(make_up, capsys, tmp_path,
     assert {node for node, _ in FakeSsh.calls} == {"b300-0", "b300-1"}
     FakeSsh.unreachable = {("b300-1", "https://store.example")}
     assert not make_up(argv).cluster_preflight(dry_run=True)
-    assert "[FAIL] node b300-1 reach_store: b300-1 cannot reach the store endpoint https://store.example" in "".join(
+    assert "[FAIL] b300-1 reach_store: b300-1 cannot reach the store endpoint https://store.example" in "".join(
         capsys.readouterr())
 
 

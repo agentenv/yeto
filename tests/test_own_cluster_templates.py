@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tempfile
 import time
 import types
 from pathlib import Path
@@ -227,7 +228,7 @@ def test_a_node_that_cannot_reach_an_endpoint_refuses_the_run_up_and_names_both(
     assert rc == 2, out[-3000:]
     role = "store" if url == ENDPOINT else "registry"
     (line,) = [line for line in out.splitlines() if "[FAIL]" in line]
-    assert f"[FAIL] node {node} reach_{role}: {node} cannot reach the {role} endpoint {url}" in line
+    assert f"[FAIL] {node} reach_{role}: {node} cannot reach the {role} endpoint {url}" in line
     assert "Could not resolve host" in line
     assert "cluster preflight failed: nothing ordered" in out and "dry run: preflight ok" not in out
     assert kit.ordered == [] and all("--dry-run" in c for c in kit.commands)
@@ -244,7 +245,7 @@ def test_a_node_that_takes_no_ssh_refuses_the_run_up(kit, monkeypatch, capsys):
     monkeypatch.setattr(FakeSsh, "run", no_ssh)
     rc, out = _dry_run(kit, "run.own-trainer-sky-sampler.json", capsys)
     assert rc == 2
-    assert "[FAIL] node own-b300-0 ssh: ssh ops@192.0.2.30 failed (rc 255)" in out
+    assert "[FAIL] own-b300-0 ssh: ssh ops@192.0.2.30 failed (rc 255)" in out
     assert "own-b300-1" in _reach_calls() and "own-b300-0" not in _reach_calls()
 
 
@@ -339,7 +340,7 @@ def test_the_probe_marks_any_http_answer_reached_and_a_failed_connect_not():
     endpoints = [cluster.Endpoint("store", ENDPOINT, "s3://b/r"),
                  cluster.Endpoint("registry", "https://registry.example:5000/")]
     script = cluster.probe_script(cluster.reach_sections(endpoints))
-    assert "curl -sS -o /dev/null" in script and "/dev/tcp/registry.example/5000" in script
+    assert "/dev/tcp/registry.example/5000" in script
     text = "\n".join(["@@yeto-section reach0", "http 403", "@@yeto-rc 0",
                       "@@yeto-section reach1", "curl: (28) Connection timed out", "@@yeto-rc 28"])
     store, registry = cluster.reach_checks("n0", endpoints, cluster.parse_sections(text))
@@ -347,6 +348,120 @@ def test_the_probe_marks_any_http_answer_reached_and_a_failed_connect_not():
     assert "n0 cannot reach the registry endpoint https://registry.example:5000/ (rc 28)" in registry.detail
     (missing,) = cluster.reach_checks("n0", endpoints[:1], {})
     assert missing.status == cluster.FAIL and "printed nothing" in missing.detail
+
+
+# -- the probe itself, in bash, behind proxies -----------------------------------------------
+# A fake curl stands for the node's network: FAKE_DIRECT_BLOCKED lets only a proxied
+# request out, FAKE_TLS_INTERCEPT fails certificate checks (a proxy that re-signs TLS),
+# FAKE_CODE is the HTTP status that comes back. A fake docker answers ``docker info`` with
+# the daemon's proxy. PATH holds these and nothing else.
+FAKE_CURL = r"""#!/bin/sh
+printf '%s ' curl "$@" >> "$FAKE_LOG"; printf '\n' >> "$FAKE_LOG"
+k=; f=; proxy=${HTTPS_PROXY:-$https_proxy}
+while [ $# -gt 0 ]; do
+  case "$1" in -k) k=1;; -f|--fail) f=1;; --proxy) shift; proxy=$1;; -w|-o|-m|--connect-timeout) shift;; esac; shift
+done
+code=${FAKE_CODE:-200}
+if [ -z "$proxy" ] && [ -n "$FAKE_DIRECT_BLOCKED" ]; then
+  echo "http 000"; echo "curl: (7) Failed to connect" >&2; exit 7
+fi
+if [ -n "$FAKE_TLS_INTERCEPT" ] && [ -z "$k" ]; then
+  echo "http 000"; echo "curl: (60) SSL certificate problem: self-signed certificate in certificate chain" >&2; exit 60
+fi
+if [ -n "$f" ] && [ "$code" -ge 400 ]; then
+  echo "http $code"; echo "curl: (22) The requested URL returned error: $code" >&2; exit 22
+fi
+echo "http $code"
+"""
+FAKE_DOCKER = r"""#!/bin/sh
+printf '%s ' docker "$@" >> "$FAKE_LOG"; printf '\n' >> "$FAKE_LOG"
+[ "$1" = info ] && printf '%s\n' "$FAKE_DOCKER_PROXY"
+"""
+PROXY = "http://proxy.example:3128"
+
+
+class LocalShell:
+    """``SshOps`` that runs the node's script in a local bash with only the fake tools."""
+
+    def __init__(self, tmp: Path, *, curl: bool = True, **fake: str):
+        tmp = Path(tempfile.mkdtemp(dir=tmp))
+        self.bin = tmp / "bin"
+        self.bin.mkdir()
+        self.log = tmp / "calls.log"
+        for name, body in (("curl", FAKE_CURL), ("docker", FAKE_DOCKER))[0 if curl else 1:]:
+            (self.bin / name).write_text(body)
+            (self.bin / name).chmod(0o755)
+        self.env = {"PATH": str(self.bin), "FAKE_LOG": str(self.log), **fake}
+
+    def run(self, node, script, *, timeout=300.0):  # noqa: ARG002
+        if script.startswith("date"):
+            return subprocess.CompletedProcess([], 0, f"{time.time():.3f}\n", "")
+        done = subprocess.run(["/bin/bash", "-c", script], env=self.env, capture_output=True, text=True, timeout=60)
+        return subprocess.CompletedProcess([], done.returncode, done.stdout + done.stderr, "")
+
+    def calls(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+
+def _egress(ops, env=None):
+    from yeto.launch.node_inventory import Node
+    from yeto.launch.preflight import cluster
+
+    node = Node(name="n0", host="ops@192.0.2.9", device_family="cuda", cpu_arch="x86_64", card="B300",
+                cards_per_node=8, hbm_gib=288, host_memory_gib=2048, env=env or {})
+    endpoints = [cluster.Endpoint("store", "https://store.example/", "s3://b/r"),
+                 cluster.Endpoint("registry", "https://registry.example:5000/", "registry.example:5000/img:1")]
+    report = cluster.egress_preflight([node], endpoints, ops=ops, log=lambda _m: None)
+    return {c.name: c for c in report.checks if c.name.startswith("reach_")}, report
+
+
+@pytest.mark.parametrize("code", ["200", "401", "403", "404"])
+def test_behind_a_tls_intercepting_proxy_any_http_answer_is_reached(tmp_path, code):
+    from yeto.launch.preflight import cluster, gate
+
+    ops = LocalShell(tmp_path, FAKE_TLS_INTERCEPT="1", FAKE_CODE=code)
+    checks, report = _egress(ops)
+    assert {c.status for c in checks.values()} == {cluster.PASS}
+    assert all(c.detail.endswith(f"http {code}") for c in checks.values())
+    curls = [c for c in ops.calls() if c.startswith("curl ")]
+    assert len(curls) == 2 and all(" -k " in c for c in curls)  # the certificate is not what is checked
+    assert gate.egress_lines(report) == [
+        f"  [PASS] n0 reach_store: the store endpoint https://store.example/ (s3://b/r): http {code}",
+        "  [PASS] n0 reach_registry: the registry endpoint https://registry.example:5000/ "
+        f"(registry.example:5000/img:1): http {code}",
+        "  3 pass, 0 warn, 0 fail, 0 skip"]  # with the ssh check, printed only when it does not pass
+
+
+def test_the_registry_goes_by_the_docker_daemon_proxy_and_the_store_by_the_shell_one(tmp_path):
+    from yeto.launch.preflight import cluster
+
+    ops = LocalShell(tmp_path, FAKE_DIRECT_BLOCKED="1", FAKE_DOCKER_PROXY=PROXY)
+    checks, report = _egress(ops)
+    assert checks["reach_registry"].status == cluster.PASS  # what docker pull would use
+    assert any(c.startswith("curl ") and f"--proxy {PROXY} https://registry.example:5000/" in c for c in ops.calls())
+    assert checks["reach_store"].status == cluster.FAIL  # the node's shell has no proxy: the store is not reached
+    assert "cannot reach the store endpoint https://store.example/ (s3://b/r) (rc 7)" in checks["reach_store"].detail
+    assert not report.ok
+
+
+def test_the_inventory_env_proxy_reaches_both_endpoints(tmp_path):
+    from yeto.launch.preflight import cluster
+
+    blocked, _ = _egress(LocalShell(tmp_path, FAKE_DIRECT_BLOCKED="1"))
+    assert {c.status for c in blocked.values()} == {cluster.FAIL}
+    ops = LocalShell(tmp_path, FAKE_DIRECT_BLOCKED="1")
+    checks, report = _egress(ops, env={"HTTPS_PROXY": PROXY, "NCCL_IB_HCA": "mlx5"})
+    assert {c.status for c in checks.values()} == {cluster.PASS} and report.ok
+    assert not any(c.startswith("docker ") for c in ops.calls())  # the shell's proxy is the registry's too
+
+
+def test_no_curl_behind_a_proxy_warns_and_does_not_fail(tmp_path):
+    from yeto.launch.preflight import cluster, gate
+
+    checks, report = _egress(LocalShell(tmp_path, curl=False), env={"https_proxy": PROXY})
+    assert {c.status for c in checks.values()} == {cluster.WARN} and report.ok
+    assert "no curl on the node and a proxy is set" in checks["reach_store"].detail
+    assert gate.egress_lines(report)[-1] == "  1 pass, 2 warn, 0 fail, 0 skip"
 
 
 # -- what the templates needed of the pools -------------------------------------------------

@@ -1,0 +1,564 @@
+preflight: run.release_stall is on: after the first policy release, no new release for max(60 min, 2x the wait for the trainer's first release) until 3 releases, then max(30 min, 5x the median release interval logs trainer_release_stall_alert (no stop). Set breakers.run.release_stall {"limit_s": N}, {"action": "stop"} to stop the trainer, or {"enabled": false} to turn it off
+preflight: max_backlog_groups auto -> 44 per sampler (ceil(((release_every 6 + m 3 + 1) x 8 + 8) / samplers 2) = 44; set a number in the sampler spec to override)
+preflight: note: D1 info sampler.drain: the effective drain cut is 1800 s (30 min) (min of drain_timeout_s 1800, reload_max_defer_s 1800): trials running longer after a release are lost
+preflight: note: D7 info with no group arriving, the starvation stop (STOP flag: the run ends cleanly, pools down) fires first: run.starvation.stop_s 7200 s (2 h), trainer.sample_wait 10800 s (3 h)
+preflight: note: D9 info one dispense slot rides out about 3 min of sandbox gateway outage (dispense_redo 2, infra_retries 2, setup_retries 0) before it is exhausted; declare breakers.deps.outage_tolerance_s to check it against a target
+preflight: WARNING: one buffer group can reach 10.4 GiB (8 trials x 262144 tokens, codec json), over the 5 GiB single-object PUT limit of S3 / R2 / OSS: such a group needs a multipart write; set YETO_SAMPLE_BUFFER_PAYLOAD_CODEC=zstd on the samplers (about 4.6 GiB) or lower the rows
+(fake) yeto.launch.nc pool: ok
+(fake) yeto.cli sandbox: ok
+{
+  "algorithm_spec": "{\"advantage\":{\"estimator\":\"grpo\",\"reward_binary\":false,\"reward_postprocess\":null,\"rewards_normalization\":true,\"std_normalization\":false,\"whiten\":false},\"correction\":{\"batch_normalize\":false,\"function\":null,\"level\":\"token\",\"lower\":null,\"method\":\"none\",\"mismatch_metrics\":false,\"opsm_delta\":null,\"ratio_mask\":\"none\",\"upper\":null,\"use_rollout_logprobs\":true,\"veto\":null},\"entropy_coef\":0.0,\"execution\":{\"group_required\":true,\"max_policy_staleness\":12,\"needs_critic\":false,\"needs_rollout_logprobs\":false},\"kl\":{\"coef\":null,\"estimator\":null,\"placement\":\"none\",\"unbiased\":false},\"loss\":{\"aggregation\":\"token\",\"custom_loss\":null,\"eps_clip\":null,\"eps_clip_c\":null,\"eps_clip_high\":null,\"reducer\":null,\"rollout_top_logprobs_num\":128,\"score_centering_is\":\"tis\",\"score_centering_mis_high\":5.0,\"score_centering_mis_low\":0.5,\"score_centering_tis_clip\":2.0,\"variant\":\"score_centering\"},\"plugins\":[],\"sampling\":{\"filter\":null,\"max_replacements\":null,\"over_sampling_batch_size\":null,\"overlong_filter\":false},\"schema\":\"yeto-rl-algorithm-spec-v2\"}",
+  "algorithm_spec_sha256": "<SHA256>",
+  "clusters": [
+    "bmkit-l0-ssh"
+  ],
+  "controller": "local",
+  "data_split": {
+    "islands": [],
+    "mode": "roles",
+    "requested": "auto",
+    "rule": "sampler islands read disjoint row slots (sampler k of S: rows i with i % S == k); buffer trainers read buffer lanes, not --data",
+    "warning": null
+  },
+  "dry_run": true,
+  "external_learners": 0,
+  "island_requests": [
+    {
+      "cloud": "ssh",
+      "gpu": "B300",
+      "gpus_per_node": 8,
+      "learner_command": "RAY_ADDRESS=\"$MASTER_ADDR:6379\" PYTHONPATH=$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir:/root/Megatron-LM${PYTHONPATH:+:$PYTHONPATH} python3 -m yeto.rl.adapters.miles.island_entry --model moonshotai/Kimi-K3.1-Pro --rl-model-recipe kimi_k31 --rl-expert-selection '~/yeto-rl-expert-selection.json' --rl-loss score_centering --rl-score-centering-is tis --rl-score-centering-tis-clip 2.0 --rl-rollout-top-logprobs-num 128 --rl-routed-expert-qat mxfp4 --data org/prompts --rl-single-island-no-sync --rl-echo-events --learner-id $LEARNER_ID --reward-function yeto.rl.numeric_answer_reward:score --reward-sha256 <SHA256> --source-sha256 <SHA256> --global-rounds 100 --sync-preset strict-avg --fragments 1 --pipeline 1 --local-horizon 1 --total-fragment-steps 100 --groups-per-round 8 --samples-per-group 8 --over-sampling-batch-size 8 --rl-distributed-timeout-minutes 60 --optimizer-steps 1 --rollout-max-response-len 262144 --completed-groups-path '~/yeto-rl/island-checkpoint.pt' --event-tape ~/yeto-output/rl-island-0.jsonl --actor-num-nodes 6 --actor-num-gpus-per-node 8 --rl-island-gpus-per-node 8 --rl-allow-cross-node-tp --tensor-parallel 8 --pipeline-parallel 3 --rollout-num-gpus-per-engine 1 --sglang-mem-fraction-static 0.4 --parameter-mode full --inner-lr 0.0001 --seq-len 262144 --rl-activation-recompute --rl-max-tokens-per-gpu 131072 --rl-optimizer-offload-fraction 1.0 --seed 0 --wan-streams 4 --miles-root ~/miles --miles-commit <SHA1> --rl-expected-algorithm-sha256 <SHA256> --rl-algorithm-spec ~/yeto-rl/algorithm_spec.json --rl-allow-unverified-mechanism features:no_grpo_std_normalization --rl-allow-unverified-mechanism features:rollout_logprobs_as_old --rl-allow-unverified-mechanism loss_aggregations:token --rl-allow-unverified-mechanism losses:score_centering --rl-max-policy-age 12 --rl-sample-role trainer --rl-sample-wait-s 10800.0 --rl-release-every 6 --rl-release-skip-busy --rl-buffer-shards bmkit-0,bmkit-1,bmkit-2,bmkit-3,bmkit-4,bmkit-5,bmkit-6,bmkit-7,bmkit-8,bmkit-9,bmkit-10,bmkit-11,bmkit-12,bmkit-13,bmkit-14,bmkit-15 --rl-lr-schedule constant --rl-resume-store '~/yeto-checkpoint-store/runs/bmkit' --rl-round-cuts off --expert-parallel 16 --context-parallel 2 --rl-prompt-column prompt --rl-label-column metadata --model-revision <SHA1> --data-revision <SHA1> --trust-remote-code --rl-init-from-release-dir ~/yeto-init-release",
+      "learner_id": 0,
+      "memory_estimate": {
+        "estimated": false,
+        "gpu": "B300",
+        "learner_id": 0,
+        "margin": 0.9,
+        "model": "moonshotai/Kimi-K3.1-Pro",
+        "reason": "model structure of 'moonshotai/Kimi-K3.1-Pro' unknown (no local or cached config.json)"
+      },
+      "num_nodes": 6,
+      "placement": {
+        "algorithm_sha256": "<SHA256>",
+        "island": 0,
+        "placement": "colocated",
+        "standby_gpus": 0,
+        "use_gpus_per_node": null
+      },
+      "region": null,
+      "ssh_island": {
+        "code": {
+          "pack": {
+            "digest": "<digest>",
+            "node_tree": "~/.cache/yeto/codepacks/<digest> (linked as ~/sky_workdir)",
+            "uri": "s3://bmbucket/runs/bmkit/code_packs/<digest>.tar"
+          },
+          "source": "code-pack",
+          "workdir": null
+        },
+        "env_order": "fabric defaults < inventory node env < --island-env and the island task env",
+        "files": [
+          "~/yeto-rl-expert-selection.json"
+        ],
+        "image": "ghcr.io/agentenv/yeto-miles-k31@sha256:<SHA256>",
+        "journal": "<HOME>/.yeto/runs/bmkit/ssh-islands/bmkit-l0-ssh-jobs.json",
+        "mode": "resident",
+        "nodes": [
+          {
+            "container": "yeto-bmkit-bmkit-l0-ssh-i0-n0",
+            "docker_run": "docker run --rm --name yeto-bmkit-bmkit-l0-ssh-i0-n0 --network host --ipc host --gpus all --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add IPC_LOCK --ulimit nofile=1048576:1048576 -v /mnt/nvme/models:/data/models -v /mnt/nvme/yeto/bmkit:/yeto-scratch -e CUDA_DEVICE_MAX_CONNECTIONS -e CYBERGYM_AGENT_ID -e CYBERGYM_TIMEOUT -e CYBERGYM_URL -e GLOO_SOCKET_IFNAME -e HF_HUB_ENABLE_HF_TRANSFER -e LEARNER_ID -e MILES_K31_INDEXER_QUERY_CHUNK -e MILES_K3_ATTN_RES_TOKEN_CHUNK -e MILES_MXFP4_QAT_TRITON -e NCCL_DEBUG -e NCCL_IB_DISABLE -e NCCL_IB_HCA -e NCCL_RAS_ENABLE -e NCCL_SOCKET_IFNAME -e OMP_NUM_THREADS -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e SYNCER_ADDR -e TMPDIR -e YETO_DEVICE_FAMILY -e YETO_ISLAND_HMAC_KEY -e YETO_MILES_TRAIN_EXTRA_ARGV -e YETO_RL_COMPAT_GROUP -e YETO_RL_NAN_SKIP -e YETO_RL_RELEASE_STAGING -e YETO_RL_STORE_IMPL -e YETO_RL_STORE_LAZY_CUT_SHARDS -e YETO_RL_STORE_S3_ACCESS_KEY_ID -e YETO_RL_STORE_S3_ENDPOINT_URL -e YETO_RL_STORE_S3_REGION -e YETO_RL_STORE_S3_SECRET_ACCESS_KEY -e YETO_RL_STORE_S3_STAGE -e YETO_RL_STORE_S3_URI -e YETO_RL_STORE_UPLOAD_PROCESSES -e YETO_SAMPLE_BUFFER_HEARTBEAT_S -e YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES -e YETO_START_SUBMITTED_UNIX -w /root -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0:/yeto-island-state\" -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0/files/0:/root/yeto-rl-expert-selection.json:ro\" ghcr.io/agentenv/yeto-miles-k31@sha256:<SHA256> bash -c <island script: 15649 bytes, sha256 <ISH>>",
+            "env": [
+              "CUDA_DEVICE_MAX_CONNECTIONS",
+              "CYBERGYM_AGENT_ID",
+              "CYBERGYM_TIMEOUT",
+              "CYBERGYM_URL",
+              "GLOO_SOCKET_IFNAME",
+              "HF_HUB_ENABLE_HF_TRANSFER",
+              "LEARNER_ID",
+              "MILES_K31_INDEXER_QUERY_CHUNK",
+              "MILES_K3_ATTN_RES_TOKEN_CHUNK",
+              "MILES_MXFP4_QAT_TRITON",
+              "NCCL_DEBUG",
+              "NCCL_IB_DISABLE",
+              "NCCL_IB_HCA",
+              "NCCL_RAS_ENABLE",
+              "NCCL_SOCKET_IFNAME",
+              "OMP_NUM_THREADS",
+              "SKYPILOT_NODE_IPS",
+              "SKYPILOT_NODE_RANK",
+              "SKYPILOT_NUM_GPUS_PER_NODE",
+              "SKYPILOT_NUM_NODES",
+              "SYNCER_ADDR",
+              "TMPDIR",
+              "YETO_DEVICE_FAMILY",
+              "YETO_ISLAND_HMAC_KEY",
+              "YETO_MILES_TRAIN_EXTRA_ARGV",
+              "YETO_RL_COMPAT_GROUP",
+              "YETO_RL_NAN_SKIP",
+              "YETO_RL_RELEASE_STAGING",
+              "YETO_RL_STORE_IMPL",
+              "YETO_RL_STORE_LAZY_CUT_SHARDS",
+              "YETO_RL_STORE_S3_ACCESS_KEY_ID",
+              "YETO_RL_STORE_S3_ENDPOINT_URL",
+              "YETO_RL_STORE_S3_REGION",
+              "YETO_RL_STORE_S3_SECRET_ACCESS_KEY",
+              "YETO_RL_STORE_S3_STAGE",
+              "YETO_RL_STORE_S3_URI",
+              "YETO_RL_STORE_UPLOAD_PROCESSES",
+              "YETO_SAMPLE_BUFFER_HEARTBEAT_S",
+              "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES",
+              "YETO_START_SUBMITTED_UNIX"
+            ],
+            "host": "ops@192.0.2.20",
+            "name": "b300-0",
+            "node_rank": 0,
+            "runtime": "docker",
+            "state_dir": "$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0"
+          },
+          {
+            "container": "yeto-bmkit-bmkit-l0-ssh-i0-n1",
+            "docker_run": "docker run --rm --name yeto-bmkit-bmkit-l0-ssh-i0-n1 --network host --ipc host --gpus all --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add IPC_LOCK --ulimit nofile=1048576:1048576 -v /mnt/nvme/models:/data/models -v /mnt/nvme/yeto/bmkit:/yeto-scratch -e CUDA_DEVICE_MAX_CONNECTIONS -e CYBERGYM_AGENT_ID -e CYBERGYM_TIMEOUT -e CYBERGYM_URL -e GLOO_SOCKET_IFNAME -e HF_HUB_ENABLE_HF_TRANSFER -e LEARNER_ID -e MILES_K31_INDEXER_QUERY_CHUNK -e MILES_K3_ATTN_RES_TOKEN_CHUNK -e MILES_MXFP4_QAT_TRITON -e NCCL_DEBUG -e NCCL_IB_DISABLE -e NCCL_IB_HCA -e NCCL_RAS_ENABLE -e NCCL_SOCKET_IFNAME -e OMP_NUM_THREADS -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e SYNCER_ADDR -e TMPDIR -e YETO_DEVICE_FAMILY -e YETO_ISLAND_HMAC_KEY -e YETO_MILES_TRAIN_EXTRA_ARGV -e YETO_RL_COMPAT_GROUP -e YETO_RL_NAN_SKIP -e YETO_RL_RELEASE_STAGING -e YETO_RL_STORE_IMPL -e YETO_RL_STORE_LAZY_CUT_SHARDS -e YETO_RL_STORE_S3_ACCESS_KEY_ID -e YETO_RL_STORE_S3_ENDPOINT_URL -e YETO_RL_STORE_S3_REGION -e YETO_RL_STORE_S3_SECRET_ACCESS_KEY -e YETO_RL_STORE_S3_STAGE -e YETO_RL_STORE_S3_URI -e YETO_RL_STORE_UPLOAD_PROCESSES -e YETO_SAMPLE_BUFFER_HEARTBEAT_S -e YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES -e YETO_START_SUBMITTED_UNIX -w /root -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0:/yeto-island-state\" -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0/files/0:/root/yeto-rl-expert-selection.json:ro\" ghcr.io/agentenv/yeto-miles-k31@sha256:<SHA256> bash -c <island script: 15649 bytes, sha256 <ISH>>",
+            "env": [
+              "CUDA_DEVICE_MAX_CONNECTIONS",
+              "CYBERGYM_AGENT_ID",
+              "CYBERGYM_TIMEOUT",
+              "CYBERGYM_URL",
+              "GLOO_SOCKET_IFNAME",
+              "HF_HUB_ENABLE_HF_TRANSFER",
+              "LEARNER_ID",
+              "MILES_K31_INDEXER_QUERY_CHUNK",
+              "MILES_K3_ATTN_RES_TOKEN_CHUNK",
+              "MILES_MXFP4_QAT_TRITON",
+              "NCCL_DEBUG",
+              "NCCL_IB_DISABLE",
+              "NCCL_IB_HCA",
+              "NCCL_RAS_ENABLE",
+              "NCCL_SOCKET_IFNAME",
+              "OMP_NUM_THREADS",
+              "SKYPILOT_NODE_IPS",
+              "SKYPILOT_NODE_RANK",
+              "SKYPILOT_NUM_GPUS_PER_NODE",
+              "SKYPILOT_NUM_NODES",
+              "SYNCER_ADDR",
+              "TMPDIR",
+              "YETO_DEVICE_FAMILY",
+              "YETO_ISLAND_HMAC_KEY",
+              "YETO_MILES_TRAIN_EXTRA_ARGV",
+              "YETO_RL_COMPAT_GROUP",
+              "YETO_RL_NAN_SKIP",
+              "YETO_RL_RELEASE_STAGING",
+              "YETO_RL_STORE_IMPL",
+              "YETO_RL_STORE_LAZY_CUT_SHARDS",
+              "YETO_RL_STORE_S3_ACCESS_KEY_ID",
+              "YETO_RL_STORE_S3_ENDPOINT_URL",
+              "YETO_RL_STORE_S3_REGION",
+              "YETO_RL_STORE_S3_SECRET_ACCESS_KEY",
+              "YETO_RL_STORE_S3_STAGE",
+              "YETO_RL_STORE_S3_URI",
+              "YETO_RL_STORE_UPLOAD_PROCESSES",
+              "YETO_SAMPLE_BUFFER_HEARTBEAT_S",
+              "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES",
+              "YETO_START_SUBMITTED_UNIX"
+            ],
+            "host": "ops@192.0.2.21",
+            "name": "b300-1",
+            "node_rank": 1,
+            "runtime": "docker",
+            "state_dir": "$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0"
+          },
+          {
+            "container": "yeto-bmkit-bmkit-l0-ssh-i0-n2",
+            "docker_run": "docker run --rm --name yeto-bmkit-bmkit-l0-ssh-i0-n2 --network host --ipc host --gpus all --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add IPC_LOCK --ulimit nofile=1048576:1048576 -v /mnt/nvme/models:/data/models -v /mnt/nvme/yeto/bmkit:/yeto-scratch -e CUDA_DEVICE_MAX_CONNECTIONS -e CYBERGYM_AGENT_ID -e CYBERGYM_TIMEOUT -e CYBERGYM_URL -e GLOO_SOCKET_IFNAME -e HF_HUB_ENABLE_HF_TRANSFER -e LEARNER_ID -e MILES_K31_INDEXER_QUERY_CHUNK -e MILES_K3_ATTN_RES_TOKEN_CHUNK -e MILES_MXFP4_QAT_TRITON -e NCCL_DEBUG -e NCCL_IB_DISABLE -e NCCL_IB_HCA -e NCCL_RAS_ENABLE -e NCCL_SOCKET_IFNAME -e OMP_NUM_THREADS -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e SYNCER_ADDR -e TMPDIR -e YETO_DEVICE_FAMILY -e YETO_ISLAND_HMAC_KEY -e YETO_MILES_TRAIN_EXTRA_ARGV -e YETO_RL_COMPAT_GROUP -e YETO_RL_NAN_SKIP -e YETO_RL_RELEASE_STAGING -e YETO_RL_STORE_IMPL -e YETO_RL_STORE_LAZY_CUT_SHARDS -e YETO_RL_STORE_S3_ACCESS_KEY_ID -e YETO_RL_STORE_S3_ENDPOINT_URL -e YETO_RL_STORE_S3_REGION -e YETO_RL_STORE_S3_SECRET_ACCESS_KEY -e YETO_RL_STORE_S3_STAGE -e YETO_RL_STORE_S3_URI -e YETO_RL_STORE_UPLOAD_PROCESSES -e YETO_SAMPLE_BUFFER_HEARTBEAT_S -e YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES -e YETO_START_SUBMITTED_UNIX -w /root -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0:/yeto-island-state\" -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0/files/0:/root/yeto-rl-expert-selection.json:ro\" ghcr.io/agentenv/yeto-miles-k31@sha256:<SHA256> bash -c <island script: 15649 bytes, sha256 <ISH>>",
+            "env": [
+              "CUDA_DEVICE_MAX_CONNECTIONS",
+              "CYBERGYM_AGENT_ID",
+              "CYBERGYM_TIMEOUT",
+              "CYBERGYM_URL",
+              "GLOO_SOCKET_IFNAME",
+              "HF_HUB_ENABLE_HF_TRANSFER",
+              "LEARNER_ID",
+              "MILES_K31_INDEXER_QUERY_CHUNK",
+              "MILES_K3_ATTN_RES_TOKEN_CHUNK",
+              "MILES_MXFP4_QAT_TRITON",
+              "NCCL_DEBUG",
+              "NCCL_IB_DISABLE",
+              "NCCL_IB_HCA",
+              "NCCL_RAS_ENABLE",
+              "NCCL_SOCKET_IFNAME",
+              "OMP_NUM_THREADS",
+              "SKYPILOT_NODE_IPS",
+              "SKYPILOT_NODE_RANK",
+              "SKYPILOT_NUM_GPUS_PER_NODE",
+              "SKYPILOT_NUM_NODES",
+              "SYNCER_ADDR",
+              "TMPDIR",
+              "YETO_DEVICE_FAMILY",
+              "YETO_ISLAND_HMAC_KEY",
+              "YETO_MILES_TRAIN_EXTRA_ARGV",
+              "YETO_RL_COMPAT_GROUP",
+              "YETO_RL_NAN_SKIP",
+              "YETO_RL_RELEASE_STAGING",
+              "YETO_RL_STORE_IMPL",
+              "YETO_RL_STORE_LAZY_CUT_SHARDS",
+              "YETO_RL_STORE_S3_ACCESS_KEY_ID",
+              "YETO_RL_STORE_S3_ENDPOINT_URL",
+              "YETO_RL_STORE_S3_REGION",
+              "YETO_RL_STORE_S3_SECRET_ACCESS_KEY",
+              "YETO_RL_STORE_S3_STAGE",
+              "YETO_RL_STORE_S3_URI",
+              "YETO_RL_STORE_UPLOAD_PROCESSES",
+              "YETO_SAMPLE_BUFFER_HEARTBEAT_S",
+              "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES",
+              "YETO_START_SUBMITTED_UNIX"
+            ],
+            "host": "ops@192.0.2.22",
+            "name": "b300-2",
+            "node_rank": 2,
+            "runtime": "docker",
+            "state_dir": "$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0"
+          },
+          {
+            "container": "yeto-bmkit-bmkit-l0-ssh-i0-n3",
+            "docker_run": "docker run --rm --name yeto-bmkit-bmkit-l0-ssh-i0-n3 --network host --ipc host --gpus all --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add IPC_LOCK --ulimit nofile=1048576:1048576 -v /mnt/nvme/models:/data/models -v /mnt/nvme/yeto/bmkit:/yeto-scratch -e CUDA_DEVICE_MAX_CONNECTIONS -e CYBERGYM_AGENT_ID -e CYBERGYM_TIMEOUT -e CYBERGYM_URL -e GLOO_SOCKET_IFNAME -e HF_HUB_ENABLE_HF_TRANSFER -e LEARNER_ID -e MILES_K31_INDEXER_QUERY_CHUNK -e MILES_K3_ATTN_RES_TOKEN_CHUNK -e MILES_MXFP4_QAT_TRITON -e NCCL_DEBUG -e NCCL_IB_DISABLE -e NCCL_IB_HCA -e NCCL_RAS_ENABLE -e NCCL_SOCKET_IFNAME -e OMP_NUM_THREADS -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e SYNCER_ADDR -e TMPDIR -e YETO_DEVICE_FAMILY -e YETO_ISLAND_HMAC_KEY -e YETO_MILES_TRAIN_EXTRA_ARGV -e YETO_RL_COMPAT_GROUP -e YETO_RL_NAN_SKIP -e YETO_RL_RELEASE_STAGING -e YETO_RL_STORE_IMPL -e YETO_RL_STORE_LAZY_CUT_SHARDS -e YETO_RL_STORE_S3_ACCESS_KEY_ID -e YETO_RL_STORE_S3_ENDPOINT_URL -e YETO_RL_STORE_S3_REGION -e YETO_RL_STORE_S3_SECRET_ACCESS_KEY -e YETO_RL_STORE_S3_STAGE -e YETO_RL_STORE_S3_URI -e YETO_RL_STORE_UPLOAD_PROCESSES -e YETO_SAMPLE_BUFFER_HEARTBEAT_S -e YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES -e YETO_START_SUBMITTED_UNIX -w /root -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0:/yeto-island-state\" -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0/files/0:/root/yeto-rl-expert-selection.json:ro\" ghcr.io/agentenv/yeto-miles-k31@sha256:<SHA256> bash -c <island script: 15649 bytes, sha256 <ISH>>",
+            "env": [
+              "CUDA_DEVICE_MAX_CONNECTIONS",
+              "CYBERGYM_AGENT_ID",
+              "CYBERGYM_TIMEOUT",
+              "CYBERGYM_URL",
+              "GLOO_SOCKET_IFNAME",
+              "HF_HUB_ENABLE_HF_TRANSFER",
+              "LEARNER_ID",
+              "MILES_K31_INDEXER_QUERY_CHUNK",
+              "MILES_K3_ATTN_RES_TOKEN_CHUNK",
+              "MILES_MXFP4_QAT_TRITON",
+              "NCCL_DEBUG",
+              "NCCL_IB_DISABLE",
+              "NCCL_IB_HCA",
+              "NCCL_RAS_ENABLE",
+              "NCCL_SOCKET_IFNAME",
+              "OMP_NUM_THREADS",
+              "SKYPILOT_NODE_IPS",
+              "SKYPILOT_NODE_RANK",
+              "SKYPILOT_NUM_GPUS_PER_NODE",
+              "SKYPILOT_NUM_NODES",
+              "SYNCER_ADDR",
+              "TMPDIR",
+              "YETO_DEVICE_FAMILY",
+              "YETO_ISLAND_HMAC_KEY",
+              "YETO_MILES_TRAIN_EXTRA_ARGV",
+              "YETO_RL_COMPAT_GROUP",
+              "YETO_RL_NAN_SKIP",
+              "YETO_RL_RELEASE_STAGING",
+              "YETO_RL_STORE_IMPL",
+              "YETO_RL_STORE_LAZY_CUT_SHARDS",
+              "YETO_RL_STORE_S3_ACCESS_KEY_ID",
+              "YETO_RL_STORE_S3_ENDPOINT_URL",
+              "YETO_RL_STORE_S3_REGION",
+              "YETO_RL_STORE_S3_SECRET_ACCESS_KEY",
+              "YETO_RL_STORE_S3_STAGE",
+              "YETO_RL_STORE_S3_URI",
+              "YETO_RL_STORE_UPLOAD_PROCESSES",
+              "YETO_SAMPLE_BUFFER_HEARTBEAT_S",
+              "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES",
+              "YETO_START_SUBMITTED_UNIX"
+            ],
+            "host": "ops@192.0.2.23",
+            "name": "b300-3",
+            "node_rank": 3,
+            "runtime": "docker",
+            "state_dir": "$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0"
+          },
+          {
+            "container": "yeto-bmkit-bmkit-l0-ssh-i0-n4",
+            "docker_run": "docker run --rm --name yeto-bmkit-bmkit-l0-ssh-i0-n4 --network host --ipc host --gpus all --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add IPC_LOCK --ulimit nofile=1048576:1048576 -v /mnt/nvme/models:/data/models -v /mnt/nvme/yeto/bmkit:/yeto-scratch -e CUDA_DEVICE_MAX_CONNECTIONS -e CYBERGYM_AGENT_ID -e CYBERGYM_TIMEOUT -e CYBERGYM_URL -e GLOO_SOCKET_IFNAME -e HF_HUB_ENABLE_HF_TRANSFER -e LEARNER_ID -e MILES_K31_INDEXER_QUERY_CHUNK -e MILES_K3_ATTN_RES_TOKEN_CHUNK -e MILES_MXFP4_QAT_TRITON -e NCCL_DEBUG -e NCCL_IB_DISABLE -e NCCL_IB_HCA -e NCCL_RAS_ENABLE -e NCCL_SOCKET_IFNAME -e OMP_NUM_THREADS -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e SYNCER_ADDR -e TMPDIR -e YETO_DEVICE_FAMILY -e YETO_ISLAND_HMAC_KEY -e YETO_MILES_TRAIN_EXTRA_ARGV -e YETO_RL_COMPAT_GROUP -e YETO_RL_NAN_SKIP -e YETO_RL_RELEASE_STAGING -e YETO_RL_STORE_IMPL -e YETO_RL_STORE_LAZY_CUT_SHARDS -e YETO_RL_STORE_S3_ACCESS_KEY_ID -e YETO_RL_STORE_S3_ENDPOINT_URL -e YETO_RL_STORE_S3_REGION -e YETO_RL_STORE_S3_SECRET_ACCESS_KEY -e YETO_RL_STORE_S3_STAGE -e YETO_RL_STORE_S3_URI -e YETO_RL_STORE_UPLOAD_PROCESSES -e YETO_SAMPLE_BUFFER_HEARTBEAT_S -e YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES -e YETO_START_SUBMITTED_UNIX -w /root -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0:/yeto-island-state\" -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0/files/0:/root/yeto-rl-expert-selection.json:ro\" ghcr.io/agentenv/yeto-miles-k31@sha256:<SHA256> bash -c <island script: 15649 bytes, sha256 <ISH>>",
+            "env": [
+              "CUDA_DEVICE_MAX_CONNECTIONS",
+              "CYBERGYM_AGENT_ID",
+              "CYBERGYM_TIMEOUT",
+              "CYBERGYM_URL",
+              "GLOO_SOCKET_IFNAME",
+              "HF_HUB_ENABLE_HF_TRANSFER",
+              "LEARNER_ID",
+              "MILES_K31_INDEXER_QUERY_CHUNK",
+              "MILES_K3_ATTN_RES_TOKEN_CHUNK",
+              "MILES_MXFP4_QAT_TRITON",
+              "NCCL_DEBUG",
+              "NCCL_IB_DISABLE",
+              "NCCL_IB_HCA",
+              "NCCL_RAS_ENABLE",
+              "NCCL_SOCKET_IFNAME",
+              "OMP_NUM_THREADS",
+              "SKYPILOT_NODE_IPS",
+              "SKYPILOT_NODE_RANK",
+              "SKYPILOT_NUM_GPUS_PER_NODE",
+              "SKYPILOT_NUM_NODES",
+              "SYNCER_ADDR",
+              "TMPDIR",
+              "YETO_DEVICE_FAMILY",
+              "YETO_ISLAND_HMAC_KEY",
+              "YETO_MILES_TRAIN_EXTRA_ARGV",
+              "YETO_RL_COMPAT_GROUP",
+              "YETO_RL_NAN_SKIP",
+              "YETO_RL_RELEASE_STAGING",
+              "YETO_RL_STORE_IMPL",
+              "YETO_RL_STORE_LAZY_CUT_SHARDS",
+              "YETO_RL_STORE_S3_ACCESS_KEY_ID",
+              "YETO_RL_STORE_S3_ENDPOINT_URL",
+              "YETO_RL_STORE_S3_REGION",
+              "YETO_RL_STORE_S3_SECRET_ACCESS_KEY",
+              "YETO_RL_STORE_S3_STAGE",
+              "YETO_RL_STORE_S3_URI",
+              "YETO_RL_STORE_UPLOAD_PROCESSES",
+              "YETO_SAMPLE_BUFFER_HEARTBEAT_S",
+              "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES",
+              "YETO_START_SUBMITTED_UNIX"
+            ],
+            "host": "ops@192.0.2.24",
+            "name": "b300-4",
+            "node_rank": 4,
+            "runtime": "docker",
+            "state_dir": "$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0"
+          },
+          {
+            "container": "yeto-bmkit-bmkit-l0-ssh-i0-n5",
+            "docker_run": "docker run --rm --name yeto-bmkit-bmkit-l0-ssh-i0-n5 --network host --ipc host --gpus all --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add IPC_LOCK --ulimit nofile=1048576:1048576 -v /mnt/nvme/models:/data/models -v /mnt/nvme/yeto/bmkit:/yeto-scratch -e CUDA_DEVICE_MAX_CONNECTIONS -e CYBERGYM_AGENT_ID -e CYBERGYM_TIMEOUT -e CYBERGYM_URL -e GLOO_SOCKET_IFNAME -e HF_HUB_ENABLE_HF_TRANSFER -e LEARNER_ID -e MILES_K31_INDEXER_QUERY_CHUNK -e MILES_K3_ATTN_RES_TOKEN_CHUNK -e MILES_MXFP4_QAT_TRITON -e NCCL_DEBUG -e NCCL_IB_DISABLE -e NCCL_IB_HCA -e NCCL_RAS_ENABLE -e NCCL_SOCKET_IFNAME -e OMP_NUM_THREADS -e SKYPILOT_NODE_IPS -e SKYPILOT_NODE_RANK -e SKYPILOT_NUM_GPUS_PER_NODE -e SKYPILOT_NUM_NODES -e SYNCER_ADDR -e TMPDIR -e YETO_DEVICE_FAMILY -e YETO_ISLAND_HMAC_KEY -e YETO_MILES_TRAIN_EXTRA_ARGV -e YETO_RL_COMPAT_GROUP -e YETO_RL_NAN_SKIP -e YETO_RL_RELEASE_STAGING -e YETO_RL_STORE_IMPL -e YETO_RL_STORE_LAZY_CUT_SHARDS -e YETO_RL_STORE_S3_ACCESS_KEY_ID -e YETO_RL_STORE_S3_ENDPOINT_URL -e YETO_RL_STORE_S3_REGION -e YETO_RL_STORE_S3_SECRET_ACCESS_KEY -e YETO_RL_STORE_S3_STAGE -e YETO_RL_STORE_S3_URI -e YETO_RL_STORE_UPLOAD_PROCESSES -e YETO_SAMPLE_BUFFER_HEARTBEAT_S -e YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES -e YETO_START_SUBMITTED_UNIX -w /root -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0:/yeto-island-state\" -v \"$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0/files/0:/root/yeto-rl-expert-selection.json:ro\" ghcr.io/agentenv/yeto-miles-k31@sha256:<SHA256> bash -c <island script: 15649 bytes, sha256 <ISH>>",
+            "env": [
+              "CUDA_DEVICE_MAX_CONNECTIONS",
+              "CYBERGYM_AGENT_ID",
+              "CYBERGYM_TIMEOUT",
+              "CYBERGYM_URL",
+              "GLOO_SOCKET_IFNAME",
+              "HF_HUB_ENABLE_HF_TRANSFER",
+              "LEARNER_ID",
+              "MILES_K31_INDEXER_QUERY_CHUNK",
+              "MILES_K3_ATTN_RES_TOKEN_CHUNK",
+              "MILES_MXFP4_QAT_TRITON",
+              "NCCL_DEBUG",
+              "NCCL_IB_DISABLE",
+              "NCCL_IB_HCA",
+              "NCCL_RAS_ENABLE",
+              "NCCL_SOCKET_IFNAME",
+              "OMP_NUM_THREADS",
+              "SKYPILOT_NODE_IPS",
+              "SKYPILOT_NODE_RANK",
+              "SKYPILOT_NUM_GPUS_PER_NODE",
+              "SKYPILOT_NUM_NODES",
+              "SYNCER_ADDR",
+              "TMPDIR",
+              "YETO_DEVICE_FAMILY",
+              "YETO_ISLAND_HMAC_KEY",
+              "YETO_MILES_TRAIN_EXTRA_ARGV",
+              "YETO_RL_COMPAT_GROUP",
+              "YETO_RL_NAN_SKIP",
+              "YETO_RL_RELEASE_STAGING",
+              "YETO_RL_STORE_IMPL",
+              "YETO_RL_STORE_LAZY_CUT_SHARDS",
+              "YETO_RL_STORE_S3_ACCESS_KEY_ID",
+              "YETO_RL_STORE_S3_ENDPOINT_URL",
+              "YETO_RL_STORE_S3_REGION",
+              "YETO_RL_STORE_S3_SECRET_ACCESS_KEY",
+              "YETO_RL_STORE_S3_STAGE",
+              "YETO_RL_STORE_S3_URI",
+              "YETO_RL_STORE_UPLOAD_PROCESSES",
+              "YETO_SAMPLE_BUFFER_HEARTBEAT_S",
+              "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES",
+              "YETO_START_SUBMITTED_UNIX"
+            ],
+            "host": "ops@192.0.2.25",
+            "name": "b300-5",
+            "node_rank": 5,
+            "runtime": "docker",
+            "state_dir": "$HOME/.yeto/trainer-islands/bmkit/bmkit-l0-ssh-i0"
+          }
+        ],
+        "rank_layout": {
+          "context_parallel": 2,
+          "nodes": [
+            {
+              "address": "198.51.100.20",
+              "global_ranks": "0-7",
+              "name": "b300-0",
+              "node_rank": 0,
+              "pp_stages": [
+                0
+              ],
+              "trainer_position": 0
+            },
+            {
+              "address": "198.51.100.21",
+              "global_ranks": "8-15",
+              "name": "b300-1",
+              "node_rank": 1,
+              "pp_stages": [
+                0
+              ],
+              "trainer_position": 1
+            },
+            {
+              "address": "198.51.100.22",
+              "global_ranks": "16-23",
+              "name": "b300-2",
+              "node_rank": 2,
+              "pp_stages": [
+                1
+              ],
+              "trainer_position": 2
+            },
+            {
+              "address": "198.51.100.23",
+              "global_ranks": "24-31",
+              "name": "b300-3",
+              "node_rank": 3,
+              "pp_stages": [
+                1
+              ],
+              "trainer_position": 3
+            },
+            {
+              "address": "198.51.100.24",
+              "global_ranks": "32-39",
+              "name": "b300-4",
+              "node_rank": 4,
+              "pp_stages": [
+                2
+              ],
+              "trainer_position": 4
+            },
+            {
+              "address": "198.51.100.25",
+              "global_ranks": "40-47",
+              "name": "b300-5",
+              "node_rank": 5,
+              "pp_stages": [
+                2
+              ],
+              "trainer_position": 5
+            }
+          ],
+          "pipeline_parallel": 3,
+          "pp_stage_nodes": {
+            "0": [
+              "b300-0",
+              "b300-1"
+            ],
+            "1": [
+              "b300-2",
+              "b300-3"
+            ],
+            "2": [
+              "b300-4",
+              "b300-5"
+            ]
+          },
+          "rank_order": "node IP, then GPU id (Miles placement group)",
+          "tensor_parallel": 8,
+          "warnings": [],
+          "world": 48
+        },
+        "warnings": []
+      },
+      "total_gpus": 48
+    }
+  ],
+  "islands": 1,
+  "kimi_k31_full": {
+    "cost_guard": {
+      "load_grace_minutes": 90.0,
+      "warnings": []
+    },
+    "expert_selection": {
+      "ep_size": 16,
+      "moe_layers": 92,
+      "num_experts": 896,
+      "num_trainable": 128,
+      "sha256": "<SHA256>",
+      "warnings": []
+    },
+    "memory": {
+      "assumptions": [
+        "per_gpu_gib is the torch allocated peak of the busiest pipeline stage (not nvidia-smi: add the allocator's reserve and about 22 GiB of CUDA/NCCL)",
+        "1F1B: stage s holds PP - s microbatches of checkpoints",
+        "the working set is linear in tokens per GPU (calibrated at TP4/TP8, 16384-32768 tokens)",
+        "layer kinds follow the full K3.1 layout by index (a cut model's attention layers may differ)",
+        "no activation offload, no CUDA graphs"
+      ],
+      "budget_gib": {
+        "expandable_segments": 213.4,
+        "no_expandable_segments": 166.3
+      },
+      "busiest_stage": 1,
+      "calibrated": true,
+      "capacity_gib": 267.7,
+      "estimated": true,
+      "expandable_segments": false,
+      "host_optimizer_gib_per_gpu": 91.5,
+      "parts_gib": {
+        "checkpoints": 23.2,
+        "residual": 19.5,
+        "transient": 38.0,
+        "weights": 77.5
+      },
+      "per_gpu_gib": 158.2,
+      "pipeline_split": [
+        31,
+        31,
+        31
+      ],
+      "rough": false,
+      "stages_gib": [
+        {
+          "checkpoints": 24.3,
+          "in_flight": 3,
+          "layers": 31,
+          "peak_alloc": 157.3,
+          "residual": 19.5,
+          "transient": 38.0,
+          "weights": 75.6
+        },
+        {
+          "checkpoints": 23.2,
+          "in_flight": 2,
+          "layers": 31,
+          "peak_alloc": 158.2,
+          "residual": 19.5,
+          "transient": 38.0,
+          "weights": 77.5
+        },
+        {
+          "checkpoints": 12.9,
+          "in_flight": 1,
+          "layers": 31,
+          "peak_alloc": 148.2,
+          "residual": 19.5,
+          "transient": 38.0,
+          "weights": 77.8
+        }
+      ],
+      "tokens_per_gpu": 16384,
+      "warnings": [
+        "Kimi-K3.1 full form (128 trainable experts/layer, 16384 tokens per GPU, TP8 PP3 (31/31/31) EP16 CP2): stage 1 peaks at about 158 GiB allocated per GPU, +8 GiB from the 166 GiB budget (without expandable segments; the model is within about 6 %); watch nvidia-smi on that stage and stop before it runs out"
+      ]
+    }
+  },
+  "outer_sync": false,
+  "rl_engine": "ports",
+  "role_syncers": [],
+  "syncer": null,
+  "total_gpus": 48,
+  "trainer_scheduler": null,
+  "training_mode": "rl",
+  "unverified_mechanisms": [
+    "features:no_grpo_std_normalization",
+    "features:rollout_logprobs_as_old",
+    "loss_aggregations:token",
+    "losses:score_centering"
+  ]
+}
+dry run: before ordering, run up would run the trainer's cluster preflight: yeto preflight --gpu ssh:6x8xb300 --rl-node-inventory <TMP>/inventory.b300-6x8-baremetal.yaml --image docker:ghcr.io/agentenv/yeto-miles-k31@sha256:<SHA256> --no-bench --cluster-prefix bmkit
+dry run: preflight ok, nothing ordered
+[launcher] data split (roles): sampler islands read disjoint row slots (sampler k of S: rows i with i % S == k); buffer trainers read buffer lanes, not --data
+[launcher] WARNING: --rl-allow-cross-node-tp: the trainer TP*CP group (16) spans nodes: every TP group (tp=8) stays inside a node; only the CP groups (cp=2) span nodes (Megatron rank order tp-cp-ep-dp-pp); journaled as topology.layout.cross_node_tp=1
+[launcher] warning: Kimi-K3.1 full form (128 trainable experts/layer, 16384 tokens per GPU, TP8 PP3 (31/31/31) EP16 CP2): stage 1 peaks at about 158 GiB allocated per GPU, +8 GiB from the 166 GiB budget (without expandable segments; the model is within about 6 %); watch nvidia-smi on that stage and stop before it runs out
+[yeto] dry run: the launch would first run the cluster preflight: yeto preflight --gpu ssh:6x8xb300 --rl-node-inventory <TMP>/inventory.b300-6x8-baremetal.yaml --image docker:ghcr.io/agentenv/yeto-miles-k31@sha256:<SHA256> --no-bench --cluster-prefix bmkit
+[preflight] WARNING: GPU memory not estimated for island 0: model structure of 'moonshotai/Kimi-K3.1-Pro' unknown (no local or cached config.json)
+[launch] --rl-round-cuts off: every trainer node continues from the store's newest policy release when it holds one (--rl-init-from-release latest, added on the node before Ray starts); a first launch starts from the base

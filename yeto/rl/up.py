@@ -1543,12 +1543,16 @@ class Run:
     def log_own_nodes_spend(self) -> None:
         """The hourly spend a dry run of a single-trainer run on own nodes estimates: the
         pools at their node price (own ``kind: ssh`` nodes at 0) plus ``trainer.usd_per_h``
-        (0 on own nodes). A fleet logs its own estimate (:meth:`fleet_budget_lines`)."""
+        (0 on own nodes). Not logged for a fleet (:meth:`fleet_budget_lines` logs its own
+        estimate) nor for a run with a National Compute pool (its node rate is
+        ``budget.nc_usd_per_h``, which the run's monitor reports)."""
         from yeto.launch.preflight.gate import argv_value, ssh_entries  # noqa: PLC0415
 
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
         own = ssh_entries(argv_value(argv, "--gpu"))
-        if self.fleet_plan() is not None or not (own or any(ref.kind() == "ssh" for ref in self.pools)):
+        kinds = [ref.kind() for ref in self.pools]
+        # a fleet logs its own estimate; a run with National Compute pools keeps the output it had
+        if self.fleet_plan() is not None or "nc" in kinds or not (own or "ssh" in kinds):
             return
         rows = []
         for i, ref in enumerate(self.pools):

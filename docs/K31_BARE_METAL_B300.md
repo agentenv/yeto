@@ -490,9 +490,14 @@ Between two nodes that will hold one pipeline stage (`b300-0` and `b300-1`):
    Read `preflight.log` (guide section 4.1). It must end with
    `dry run: preflight ok, nothing ordered`; the trainer part reports
    `"total_gpus": 48` and one island `"cloud": "ssh"`, `"num_nodes": 6`.
-   A dry run does not run the cluster preflight; it logs
+   A dry run does not run the full cluster preflight; it logs
    `would run the trainer's cluster preflight: yeto preflight ...`. The real
-   `yeto run up` runs it before anything is ordered.
+   `yeto run up` runs it before anything is ordered. The dry run does check,
+   over SSH, that every trainer node reaches the run store's endpoint and the
+   trainer image's registry: one `[PASS]` or `[FAIL]` line per node and
+   endpoint (any HTTP answer counts, through the node's proxy too); on a
+   `[FAIL]` it logs `cluster preflight failed: nothing ordered` and exits 2.
+   `--skip-preflight` skips this check with the rest of the preflight.
 
 ### 9.4 Rehearsal, then the formal run
 
@@ -550,7 +555,10 @@ the trainer's `--rl-image`; on a FAIL it logs
 `yeto launch` then gets `--skip-preflight`, so the check runs once. A direct
 `yeto launch` with an `ssh:` island runs the same check and refuses to start
 on a FAIL (warnings are printed and the launch goes on). `--skip-preflight`
-on either command skips it.
+on either command skips it. `yeto run up` (the dry run too) also checks over
+SSH that every trainer node reaches the run store's endpoint and the image's
+registry, one `[PASS]` or `[FAIL]` line per node and endpoint, and refuses the
+same way on a `[FAIL]`; `--skip-preflight` skips that check as well.
 
 The trainer is a resident SSH island: `yeto launch` starts one container per
 node, follows every node, and treats any rank that exits non-zero, a process
