@@ -464,16 +464,16 @@ def test_page_draws_the_island_layout(tmp_path):
     joined = " | ".join(out["texts"])
     assert out["hidden"] is False and out["label"].startswith("islands (trainer + in-island rollout)")
     assert out["viewBox"].startswith("0 0 1480 ") and "layout: island" in out["note"]
-    for want in ("Island 0", "Island 1", "Rollout · 1 engine", "round 28", "step 29", "outer v6", "Syncer", "step 24",
+    for want in ("Island 0", "Island 1", "Rollout · 1 engine", "round 28", "step 29", "outer sweep 6", "Syncer", "global step 24",
                  "serving yeto:29:e5fd32df", "frag [21 22 23 24]", "n0 · l0-modal", "H100 ×2", "T*", "R*"):
         assert want in joined, want
     assert 'class="fm"' in out["matrix"] and ">f3<" in out["matrix"].replace("f3<span", "f3<") and "v24" in out["matrix"]
     assert "Fragment delta PUSH" in out["legend"]
-    for want in ("Syncer step / local steps", "Groups trained / rolled out", "in-island rollout engines 2 (fixed-partition)",
+    for want in ("Syncer global step / local steps", "Groups trained / rolled out", "in-island rollout engines 2 (fixed-partition)",
                  "Fragment rounds in flight / BCAST pending"):
         assert want in out["kpis"], want
     assert "Syncer RSS" not in out["kpis"] and "samplers 0/0" not in out["kpis"]
-    assert "Local step / outer v" in out["nodes"] and "Last PUSH / BCAST applied" in out["nodes"] and "HBM peak" not in out["nodes"]
+    assert "Local step / outer sweep" in out["nodes"] and "Last PUSH / BCAST applied" in out["nodes"] and "HBM peak" not in out["nodes"]
 
 
 def test_page_draws_colocated_islands_narrow(tmp_path):

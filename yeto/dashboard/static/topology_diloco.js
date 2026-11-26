@@ -55,6 +55,9 @@ function fitText(e,s,maxW){s=String(s==null?"":s);if(e._full===s&&e._fitW===maxW
     try{if(typeof e.getComputedTextLength==="function")l2=e.getComputedTextLength()}catch(_){l2=null}
     if(!fin(l2)||l2<=0||l2<=maxW)break;n--}
   if(typeof document!=="undefined"&&document.createElementNS&&e.namespaceURI){var t=document.createElementNS(e.namespaceURI,"title");t.textContent=s;e.appendChild(t)}}
+// laid-out width of an svg <text> (the monospace advance cw where nothing lays it out)
+function textW(e,cw){var n=null;try{if(typeof e.getComputedTextLength==="function")n=e.getComputedTextLength()}catch(_){n=null}
+  return fin(n)&&n>0?n:String(e.textContent||"").length*cw}
 // rich text in an svg <text>: tspans in a browser, the plain text where innerHTML does nothing
 function rich(e,parts){e.textContent=parts.map(function(p){return p[0]}).join("");
   if(typeof document.createElementNS==="function"&&e.namespaceURI)e.innerHTML=parts.map(function(p){return p[1]?'<tspan style="'+p[1]+'">'+esc(p[0])+'</tspan>':esc(p[0])}).join("")}
@@ -313,7 +316,7 @@ function syncerCard(nd,B,sh){
   var box=el("rect",{width:w,height:h,rx:10,"class":"tpbox"},g);accent(g,h,"var(--ink2)");
   el("text",{x:14,y:20,"class":"tpt"},g,N>1?"Syncer shard "+sh.index+" · fragments "+sh.lo+"–"+(sh.hi-1):"Syncer");
   fitText(el("text",{x:14,y:36,"class":"tpm"},g,""),(N>1?"steps t ≡ "+(sh.index+1)+" (mod "+N+") · ":"")+["P "+(fin(D.P)?D.P:"—"),D.quorum!=null?"quorum "+D.quorum+"/"+D.M:"M "+D.M,D.H?(D.H_exact?"H ":"H ≤ ")+D.H:null].concat(cfgBits(D.config)).filter(Boolean).join(" · "),w-26);
-  var o={g:g,box:box,sh:sh,lw:w-26};
+  var o={g:g,box:box,sh:sh,lw:w-26,w:w};
   o.roster=el("text",{x:w-12,y:20,"text-anchor":"end","class":"tpv"},g,"");
   o.step=el("text",{x:14,y:66,"class":"tpbig2"},g,"");o.of=el("text",{x:w-12,y:66,"text-anchor":"end","class":"tpm"},g,"");
   el("rect",{x:14,y:74,width:w-28,height:4,rx:2,fill:"var(--line)"},g);o.barf=el("rect",{x:14,y:74,width:0,height:4,rx:2,fill:"var(--wt)"},g);o.barW=w-28;
@@ -349,7 +352,7 @@ function active(kk,iid,sh,td){return T.live&&D.flows.some(function(f){return f.k
 function paint(){
   var tn=now(),td=tn-DELAY_S,red=U.reduced();
   D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.status==="stopped"||tr.finalized||D.done)&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state));  // a finished run: no trainer is lost
-    tc.step.textContent=(fin(tr.step)?"step "+tr.step:fleet()?"not trained yet":"step —")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?"outer v"+tr.outer:"";
+    tc.step.textContent=(fin(tr.step)?"step "+tr.step:fleet()?"not trained yet":"step —")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?(L.W<640?"sweep ":"outer sweep ")+tr.outer:"";  // complete sweeps it applied (hover: the card's tip)
     fitText(tc.ph,st[0],tc.phw);tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
     tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
     [tc.co?o.merged:tc.box].forEach(function(b){if(b){b.style.stroke=dead||tr.failure?C.bad:"";b.style.strokeDasharray=dead?"5 4":""}});
@@ -391,7 +394,16 @@ function paint(){
   // no syncer record on this host (its tape on the syncer's VM): versions at least what the islands applied
   var notape=D.syncer_tape===false,inf=D.inferred_versions,infMax=inf&&inf.length?Math.max.apply(null,inf):null;
   L.syn.forEach(function(o,s){var sh=D.shards[s],mine=D.rounds.filter(function(r){return r.shard===s}),st=sh.state,last=sh.last;
-    o.step.textContent=notape?(fin(infMax)?"step ≥ "+infMax:"step —"):"step "+sh.step;o.of.textContent=notape?(fin(D.total_steps)?"of "+D.total_steps+" · ":"")+"merges not visible":(fin(D.total_steps)?"of "+D.total_steps+" · ":"")+sh.merges+" merges"+(D.P?" · sweep "+(Math.floor(Math.max(0,sh.step-1)/D.P)+1):"");
+    // a global step is one fragment merge; "in sweep K" the sweep its last merge is in. The long
+    // forms where they fit beside each other, else the short ones (400 px, a crowded card)
+    var num=notape?(fin(infMax)?"≥ "+infMax:"—"):sh.step,sw=D.P&&!notape?Math.floor(Math.max(0,sh.step-1)/D.P)+1:null,
+      ofs=(fin(D.total_steps)?"of "+D.total_steps+" · ":"")+(notape?"merges not visible":sh.merges+" merges"),key=num+"|"+ofs+"|"+sw+"|"+L.W;
+    if(o._k!==key){o._k=key;var forms=L.W<640?[["","sweep "]]:[["global ","in sweep "],["","in sweep "],["","sweep "]];
+      for(var fi=0;fi<forms.length;fi++){var pre=forms[fi][0],big="step "+num;
+        rich(o.step,pre?[[pre,"font-size:11px;font-weight:400;fill:var(--ink2)"],[big,""]]:[[big,""]]);o.of.textContent=ofs+(sw?" · "+forms[fi][1]+sw:"");
+        var sw0=null;try{if(typeof o.step.getComputedTextLength==="function")sw0=o.step.getComputedTextLength()}catch(_){sw0=null}
+        if(!fin(sw0)||sw0<=0)sw0=pre.length*6.3+big.length*12.2;  // no layout: the small and big fonts' advances
+        if(fi===forms.length-1||14+sw0+16+textW(o.of,5.9)<=o.w-12)break}}
     o.barf.setAttribute("width",D.P?(o.barW*(((sh.step-1)%D.P+1)/D.P)).toFixed(1):0);
     o.roster.textContent=D.done?"run done · roster "+D.M:"roster "+D.roster+"/"+D.M;o.roster.style.fill=D.done?C.ink2:D.roster<D.M?C.bad:C.good;
     var c=st==="done"?C.ink2:st==="waiting for quorum"?(sh.attempt_max>1?C.bad:C.warn):st==="merging"?C.wt:st==="gathering"?C.good:C.ink2;
@@ -527,7 +539,7 @@ function tipHtml(key){var a=key.split(":"),tn=now(),tr=null;D.trainers.forEach(f
     row("loss",fin(ln.loss)?ln.loss.toFixed(4):null)+row("learning rate",lr(tr.lr))+row("tokens / s",kn(ln.tps))+row("step time",fin(ln.step_s)?dur(ln.step_s):null)+row("parallel layout",ln.layout)+row("data",ln.dataset)+
     row("last PUSH",lp?"f"+lp.frag+" into t"+lp.step+" · base v"+lp.base+" · "+kn(lp.tokens)+" tok":null)+row("last apply",la?"step "+la.step+(fin(la.apply_s)?" · "+la.apply_s.toFixed(1)+"s":""):null)+row("merges since its last apply",tr.pending_n)+
     row("source","logging.jsonl · yeto_steps.jsonl · bench_metrics.jsonl · syncer tape responders")+'<div class="ns">an SFT learner writes no fragment-version vector and does not name the fragments it applied</div>'}
-  if(a[0]==="trn"&&tr)return '<div class="h">Trainer '+esc(tr.id)+"</div>"+row("island status",tr.status)+row("local step",tr.step)+row("outer version",tr.outer)+row("policy hash",tr.hash)+
+  if(a[0]==="trn"&&tr)return '<div class="h">Trainer '+esc(tr.id)+"</div>"+row("island status",tr.status)+row("local step",tr.step)+row("outer sweep",fin(tr.outer)?tr.outer+": every fragment merged at least "+tr.outer+" time"+(tr.outer===1?"":"s")+" (complete sweeps applied)":null)+row("policy hash",tr.hash)+
     row("fragment versions",tr.versions?"["+tr.versions.join(", ")+"]":null)+row("merged, not applied",tr.pending_n)+row("applied lr",lr(tr.lr))+
     row("last PUSH",tr.last_push?"f"+tr.last_push.frag+" t"+tr.last_push.step+" · "+mb(tr.last_push.bytes)+(tr.last_push.wire?" on the wire ("+mb(tr.last_push.payload_bytes)+" f32)":""):null)+
     row("BCAST overwrite / catch-up",tr.bcast_overwrites||tr.bcast_catch_ups?(tr.bcast_overwrites||0)+" / "+(tr.bcast_catch_ups||0):null)+row("last event",fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":null)+
@@ -554,7 +566,7 @@ function tipHtml(key){var a=key.split(":"),tn=now(),tr=null;D.trainers.forEach(f
     row("roles",(n.roles||[]).join(" ")||"not on the tape")+(n.inferred?'<div class="ns">* inferred: a fixed-partition machine with 2 cards runs one trainer and one rollout card</div>':"")+row("incarnation",n.incarnation)+
     (n.previous?row("replaced",(n.reason||"")+" "+dur(tn-n.lost_ts)+" ago"):"")}
   if(a[0]==="snode")return '<div class="h">Syncer process</div>'+row("shards",D.shards.length)+'<div class="ns">the syncer\'s machine is not on the tapes yet</div>';
-  if(a[0]==="syn"){var sh=D.shards[+a[1]],l=sh.last||{};return '<div class="h">'+(D.shards.length>1?"Syncer shard "+sh.index:"Syncer")+"</div>"+row("committed step",sh.step)+row("fragments",sh.lo+"–"+(sh.hi-1))+row("merges",sh.merges)+
+  if(a[0]==="syn"){var sh=D.shards[+a[1]],l=sh.last||{};return '<div class="h">'+(D.shards.length>1?"Syncer shard "+sh.index:"Syncer")+"</div>"+row("committed global step",fin(sh.step)?sh.step+" (one fragment merge per step; "+(D.P||"P")+" steps make a sweep)":null)+row("fragments",sh.lo+"–"+(sh.hi-1))+row("merges",sh.merges)+
     row("last merge","t"+l.step+" f"+l.frag+" base v"+l.base)+row("responded / expected",(l.responded||[]).join(",")+" / "+(l.expected||[]).join(","))+row("quorum wait",fin(l.quorum_s)?dur(l.quorum_s):null)+row("merge / checkpoint",(fin(l.merge_s)?l.merge_s.toFixed(2)+"s":"n/a")+" / "+(fin(l.checkpoint_s)?l.checkpoint_s.toFixed(2)+"s":"n/a"))+
     row("quorum wait p50 (recent)",fin(D.quorum_p50_s)?dur(D.quorum_p50_s):null)+row("source",D.config?"syncer tape merge records and syncer_config / round_open":"syncer tape merge records")+(D.config?row("config",cfgBits(D.config).join(" · ")):'<div class="ns">rounds whose PULL got no PUSH yet, T and τ are not on the tapes yet</div>')}
   if(a[0]==="pair"&&tr){var ps=D.flows.filter(function(f){return f.i===tr.id&&f.k==="p"}).slice(-4).reverse(),bs=D.flows.filter(function(f){return f.i===tr.id&&f.k==="b"}).slice(-4).reverse();
@@ -620,7 +632,7 @@ function kpis(view,kp){
       out.push(["Groups trained / rolled out",gt+" / "+(nr?"—":gr),nr?"in-island rollout does not report its groups (full parameter): every trained group came from it · "+trs.map(function(x){return "island "+x.id+" trained "+(x.trained_groups||0)}).join(" · "):
         trs.map(function(x){return "island "+x.id+" "+(x.trained_groups||0)+"/"+(x.island?x.island.groups_total:0)}).join(" · ")+" · in-island rollout, whole run"])}else out.push(c)}
     else if(k==="Policy version / releases"){var steps=trs.map(function(x){return fin(x.step)?x.step:"—"}).join(" · "),outs={};trs.forEach(function(x){if(fin(x.outer))outs[x.outer]=1});
-      out.push(["Syncer step / local steps",d.shards.map(function(s){return s.step}).join("+")+" / "+steps,"outer "+(Object.keys(outs).length?"v"+Object.keys(outs).join(", v"):"—")+" · "+trs.map(function(x){return "trainer "+x.id+(fin(x.step)?" local "+x.step:d.kind==="synced_group"&&d.follow&&d.fleet?" not trained yet":" local —")}).join(" · ")+" (local steps are per island, not comparable)"])}
+      out.push(["Syncer global step / local steps",d.shards.map(function(s){return s.step}).join("+")+" / "+steps,"outer sweep "+(Object.keys(outs).length?Object.keys(outs).join(", "):"—")+" · "+trs.map(function(x){return "trainer "+x.id+(fin(x.step)?" local "+x.step:d.kind==="synced_group"&&d.follow&&d.fleet?" not trained yet":" local —")}).join(" · ")+" (local steps are per island, not comparable)"])}
     else if(k.indexOf("Rejected")===0){if(isl){var zv=rolls.map(function(x){return x.island.zero_var_recent}).filter(fin),tr=trs.map(function(x){return x.truncated}).filter(fin);
       out.push(["In-island rollout: zero-var / truncated",pct(zv.length?zv.reduce(function(a,b){return a+b},0)/zv.length:null)+" / "+(tr.length?pct(Math.max.apply(null,tr)):"—"),
         rolls.map(function(x){return "island "+x.id+" zero-var "+pct(x.island.zero_var_recent)}).join(" · ")+" (median of the last rounds)"+(tr.length?"":" · truncation not reported by the trainers")])}else out.push(c)}
@@ -632,7 +644,7 @@ function kpis(view,kp){
   return out}
 function table(view){var d=view&&view.topology&&view.topology.diloco;if(!d)return null;U=YetoTopo.util;var by={};d.trainers.forEach(function(t){by[t.id]=t});
   return{trainers:by,P:d.P,
-    step:function(c){var t=by[c.id];return t?(fin(t.step)?t.step:"—")+" / "+(fin(t.outer)?"outer v"+t.outer:"outer —"):null},
+    step:function(c){var t=by[c.id];return t?(fin(t.step)?t.step:"—")+" / "+(fin(t.outer)?"sweep "+t.outer:"sweep —"):null},
     push:function(c,tn){var t=by[c.id];if(!t)return null;var p=t.last_push,b=t.last_bcast;
       return (p?"↑ f"+p.frag+" t"+p.step+" · "+dur(tn-p.ts)+" ago":t.full_push?"↑ "+(t.full_push.count||0)+" PUSH last round, "+(t.full_push.total||0)+" in the run"+(t.full_push.overwritten?" · overwritten "+t.full_push.overwritten:""):"↑ none")+'<div class="ns">'+(b?"↓ f"+b.frag+" v"+b.v+" applied"+(fin(t.apply_s)?" · apply "+t.apply_s.toFixed(2)+"s":""):t.full_push?"↓ applied in the round (no per-fragment record yet)":"↓ no BCAST applied yet")+"</div>"+
         '<div class="ns">frag ['+(t.versions||[]).join(" ")+"]</div>"}}}

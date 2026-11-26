@@ -115,3 +115,26 @@ def test_one_launch_per_island_reads_exactly_as_before():
     mixed = keys + _keys(f"trainer/{OLD}/00000001")  # another island's order is untouched by the reorder
     out = _launch_ordered(mixed, "tapes/")
     assert [k for k in out if "/trainer/" not in k] == [k for k in sorted(mixed) if "/trainer/" not in k]
+
+
+def test_the_trainers_outer_sweep_and_the_syncers_global_step_are_told_apart(tmp_path):
+    """The trainer card counts complete sweeps it applied (every fragment merged at least N
+    times); the syncer card counts global steps (one fragment merge each) and names the sweep
+    its last merge is in. At 400 px, or where the long forms would not fit beside each other
+    (a long run's "of 1510 · 120 merges"), both keep a short form."""
+    from test_dashboard_diloco import _smoke, load
+
+    wide = _smoke(tmp_path, load("run-b"))
+    texts = wide["texts"]
+    assert "outer sweep 6" in texts and "global step 24" in texts and not any(t.startswith("outer v") for t in texts)
+    assert "24 merges · in sweep 6" in texts  # P 4: global step 24 closes sweep 6
+    assert "Local step / outer sweep" in wide["nodes"]
+    assert "outer sweep: every fragment merged at least that many times" in wide["nodes"]
+    assert "Syncer global step / local steps" in wide["kpis"] and "outer sweep 6" in wide["kpis"]
+    (tmp_path / "n").mkdir()
+    narrow = _smoke(tmp_path / "n", load("run-b"), width=400)["texts"]
+    assert "sweep 6" in narrow and "step 24" in narrow and "24 merges · sweep 6" in narrow
+    assert "outer sweep 6" not in narrow and "global step 24" not in narrow
+    (tmp_path / "s").mkdir()
+    crowded = _smoke(tmp_path / "s", load("sft-nemotron"))["texts"]
+    assert "step 210" in crowded and "global step 210" not in crowded  # the long run's card keeps "step"
