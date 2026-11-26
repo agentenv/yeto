@@ -5,6 +5,7 @@ Every island's ``trainer<k>/`` is a local directory store."""
 
 from __future__ import annotations
 
+import copy
 import json
 import types
 
@@ -12,6 +13,7 @@ import pytest
 
 from tests.test_run_up_fleet import _cfg, _write, files  # noqa: F401
 from yeto.breakers.events import clear_stop_reason, current_stop_reason
+from yeto.launch.rollout.pools import PoolRef
 from yeto.rl import up
 from yeto.rl.engine.object_store import DirectoryObjectStore
 
@@ -422,6 +424,217 @@ def test_the_fleet_spend_counts_pools_each_islands_trainer_and_the_syncer(fleet_
     assert run.spend_usd() == pytest.approx(27.5)
     assert run.status()["fleet"]["spend"] == {"usd": 27.5, "pools_usd": 11.0, "islands_usd": [8.0, 8.0],
                                               "syncer_usd": 0.5}
+
+
+def test_a_pool_the_desired_state_removed_still_counts_in_the_fleet_spend(fleet_run):
+    """The reconciler's removal hook drops the pool from the ones run up drives, but the hours
+    its machines billed (and a member left billed: to now) stay in run.budget, across ups;
+    a pool scaled to 0 keeps its released members' hours too."""
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    now = run.clock.t
+    run.state.update({"run_t0": now - 7200, "trainer_t0": now - 3600,
+                      "ups": [{"pid": 1, "start": now - 7200, "seen": now, "end": None}]})
+    _pool_state(run, "vl-i0", members=[{"state": "gone", "granted": now - 7200, "charged_to": now - 3600}])  # scaled to 0: 1 h x $4
+    _pool_state(run, "sg-i0", members=[{"state": "ready", "granted": now - 3600}])   # 1 h x $2
+    _pool_state(run, "sg-i1", members=[{"state": "gone", "granted": now - 7200, "charged_to": now - 5400},
+                                       {"state": "ready", "granted": now - 1800}])  # 0.5 h + 0.5 h left billed, x $2
+    before = run.fleet_rt().spend().pools_usd
+    assert before == pytest.approx(4 + 2 + 2)
+    run.retire_pool("i1-sglang")
+    assert [r.name for r in run.pools] == ["i0-vllm", "i0-sglang"]
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(before)
+    run.clock.t += 1800  # its member left billed keeps billing; the scaled-to-0 pool does not
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(before + 0.5 * 2 + 0.5 * 2)
+    again = up.Run(copy.deepcopy(run.cfg))  # the next up: from the state file, its pools from the desired state
+    again.pools = [r for r in again.pools if r.name != "i1-sglang"]
+    assert [r.name for r, _at in again.retired_pools()] == ["i1-sglang"]
+    assert again.retired_pool_spend(run.clock.t) == [pytest.approx((1.5, 2.0))]
+
+
+def test_a_removed_pool_added_again_or_sharing_a_state_file_is_counted_once(fleet_run):
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    now = run.clock.t
+    run.state.update({"run_t0": now - 3600, "ups": [{"pid": 1, "start": now - 3600, "seen": now, "end": None}]})
+    for base in ("vl-i0", "sg-i0", "sg-i1"):
+        _pool_state(run, base, members=[{"state": "ready", "granted": now - 3600}])
+    pools = list(run.pools)
+    run.retire_pool("i1-sglang")
+    run.retire_pool("i1-sglang")  # a second removal of a pool already gone: no second row
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+    run.pools = pools  # added again under its name: the current pool counts it
+    assert run.retired_pools() == [] and run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+    run.retire_pool("i1-sglang")
+    renamed = PoolRef("i1-sglang-b", pools[2].config, usd_per_h=pools[2].usd_per_h)
+    run.pools = [*run.pools, renamed]  # a new name on the removed pool's state file (shard base)
+    assert run.retired_pools() == [] and run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+
+
+def test_a_removed_pool_without_a_readable_state_bills_its_estimate_to_its_removal(fleet_run):
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    now = run.clock.t
+    run.state.update({"run_t0": now - 3600, "ups": [{"pid": 1, "start": now - 3600, "seen": now, "end": None}]})
+    run.retire_pool("i1-sglang")  # no pool state: its target (1) for the up time until its removal
+    run.clock.t += 3600
+    run.state["ups"][0]["seen"] = run.clock.t
+    ((hours, usd),) = run.retired_pool_spend()
+    assert hours == pytest.approx(1.0) and usd == pytest.approx(2.0)
+
+
+def _one_hour_each(run):
+    """Every pool of the fixture with one member ready for 1 h: pools 4 + 2 + 2 = 8 USD."""
+    now = run.clock.t
+    run.state.update({"run_t0": now - 3600, "ups": [{"pid": 1, "start": now - 3600, "seen": now, "end": None}]})
+    for base in ("vl-i0", "sg-i0", "sg-i1"):
+        _pool_state(run, base, members=[{"state": "ready", "granted": now - 3600}])
+
+
+def test_a_pool_removed_re_added_under_a_new_name_and_removed_again_is_counted_once(fleet_run):
+    """REV2 M1: both removals read the same state file (one shard base): one row counts it."""
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    _one_hour_each(run)
+    sg1 = run.pools[2]
+    run.retire_pool("i1-sglang")
+    run.pools = [*run.pools, PoolRef("i1-sglang-b", sg1.config, usd_per_h=sg1.usd_per_h)]
+    run.retire_pool("i1-sglang-b")
+    assert [r.name for r, _at in run.retired_pools()] == ["i1-sglang-b"]  # the last removal of shard base sg-i1
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+    again = up.Run(copy.deepcopy(run.cfg))  # the next up reads the same rows from the state file
+    again.pools = list(run.pools)
+    assert again.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+
+
+def test_a_pool_re_added_under_its_name_on_a_new_shard_base_keeps_the_old_pools_hours(fleet_run):
+    """REV2 M2: the reconfigure refusal tells the operator to remove the pool and add it again
+    for a new shard base; resolve then rewrites ``pools/<name>.json`` with the new one. The
+    removed pool is its frozen shard base: its billed hours still count, the new pool's too."""
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    _one_hour_each(run)
+    sg1 = run.pools[2]
+    run.retire_pool("i1-sglang")
+    assert run.state["retired_pools"][-1]["shard_base"] == "sg-i1"
+    cfg = sg1.load()
+    with open(sg1.config, "w") as fh:  # what resolve writes for the pool added again under its name
+        json.dump(dict(cfg, shard_base="sg-i1b"), fh)
+    run.pools = [*run.pools, PoolRef("i1-sglang", sg1.config, usd_per_h=sg1.usd_per_h)]
+    _pool_state(run, "sg-i1b", members=[{"state": "ready", "granted": run.clock.t - 1800}])  # 0.5 h x $2
+    assert [(r.name, r.shard_base) for r, _at in run.retired_pools()] == [("i1-sglang", "sg-i1")]
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2 + 1)
+    run.retire_pool("i1-sglang")  # the new one removed too: both shard bases count
+    assert sorted(r.shard_base for r, _at in run.retired_pools()) == ["sg-i1", "sg-i1b"]
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2 + 1)
+
+
+def test_a_removed_pool_without_a_readable_config_is_skipped_while_the_same_pool_runs(fleet_run):
+    """A row whose config was unreadable at its removal has no shard base: it is the current
+    pool of the same name and config file (counted there), else it counts on its own."""
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    _one_hour_each(run)
+    pools = list(run.pools)
+    run.state["retired_pools"] = [{"name": "i1-sglang", "config": pools[2].config, "usd_per_h": 2.0,
+                                   "removed_at": "2026-01-01T00:00:00Z"}]  # a row of the first version
+    assert run.retired_pools() == []  # its config file still reads: shard base sg-i1, a current pool's
+    import os  # noqa: PLC0415
+
+    os.replace(pools[2].config, pools[2].config + ".moved")  # unreadable now, for the row and the pool
+    assert run.retired_pools() == []  # no shard base: the current pool of that name and file is it
+    run.state["retired_pools"][0]["config"] = str(run.dir / "gone.json")
+    assert [r.name for r, _at in run.retired_pools()] == ["i1-sglang"]  # another file: counted on its own
+
+
+def test_the_single_trainer_spend_counts_a_removed_pool(fleet_run):
+    """The spend_usd of a run without a fleet plan (a control-plane store, one trainer) has
+    the removed pools in it too, clamped as the fleet's spend clamps them."""
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    _one_hour_each(run)
+    run.fleet_plan = lambda: None
+    before = run.spend_usd()
+    assert before == pytest.approx(4 + 2 + 2)
+    run.retire_pool("i1-sglang")
+    assert [r.name for r in run.pools] == ["i0-vllm", "i0-sglang"] and run.spend_usd() == pytest.approx(before)
+    run.retired_pool_spend = lambda now=None: [(1.0, float("nan")), (1.0, -1000.0), (float("inf"), 2.0), (1.0, 2.0)]
+    assert run.spend_usd() == pytest.approx(4 + 2 + 2)  # fleet_spend's clamp: no NaN, nothing negative
+
+
+@pytest.mark.parametrize("value", [5, 3.5, True, "x", {"name": "i1-sglang"}])
+def test_a_corrupt_retired_pools_value_never_raises_out_of_the_breaker(fleet_run, capsys, value):
+    """REV2 M3: a retired_pools that is not a list is skipped (one WARNING per up); the
+    breaker and the heartbeat run; retire_pool keeps the old value aside and starts a list."""
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    _one_hour_each(run)
+    run.state["retired_pools"] = value
+    assert run.retired_pools() == [] and run.retired_pools() == []
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+    assert run.breach(trainer=False) is None
+    run.up_heartbeat()
+    run.fleet_plan = lambda: None
+    assert run.spend_usd() == pytest.approx(4 + 2 + 2)
+    assert sum("WARNING: the state's retired_pools is a" in line for line in _out(capsys)) == 1
+    run.fleet_plan = up.Run.fleet_plan.__get__(run)
+    run.retire_pool("i1-sglang")
+    assert run.state["retired_pools_unreadable"] == value
+    assert [r["name"] for r in run.state["retired_pools"]] == ["i1-sglang"]
+    assert [r.name for r in run.pools] == ["i0-vllm", "i0-sglang"]
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+    on_disk = json.loads(run.state_path.read_text())
+    assert on_disk["retired_pools_unreadable"] == value and len(on_disk["retired_pools"]) == 1
+
+
+def test_a_retired_pools_row_that_is_not_a_pool_is_skipped_with_one_warning(fleet_run, capsys):
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    _one_hour_each(run)
+    run.retire_pool("i1-sglang")
+    run.state["retired_pools"] = [7, None, "x", {"name": ""}, {"config": "c"}, *run.state["retired_pools"]]
+    assert [r.name for r, _at in run.retired_pools()] == ["i1-sglang"]
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+    assert run.breach(trainer=False) is None
+    assert sum("retired_pools row of the state is not a removed pool" in line for line in _out(capsys)) == 1
+
+
+@pytest.mark.parametrize("price", ["abc", [2.0], float("nan"), float("inf"), -1000.0, True])
+def test_a_removed_pools_bad_price_neither_poisons_nor_lowers_the_spend(fleet_run, price):
+    """REV2 M3: a row's usd_per_h that is not a finite, non-negative number is not used: with
+    a pool state the pool is billed from it at its config's price (no NaN, nothing negative),
+    in the fleet spend and the single-trainer one alike; the breaker still trips."""
+    import math  # noqa: PLC0415
+
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    _one_hour_each(run)
+    sg1 = run.pools[2]
+    config_rate = run.node_usd_per_h(PoolRef(sg1.name, sg1.config))  # its price without the override
+    assert math.isfinite(config_rate) and config_rate > 0
+    run.retire_pool("i1-sglang")
+    run.state["retired_pools"][-1]["usd_per_h"] = price
+    fleet = run.fleet_rt().spend().pools_usd
+    assert math.isfinite(fleet) and fleet == pytest.approx(4 + 2 + config_rate)
+    run.fleet_plan = lambda: None
+    single = run.spend_usd()
+    assert math.isfinite(single) and single == pytest.approx(4 + 2 + config_rate)
+    run.cfg.setdefault("budget", {})["usd"] = 5  # the breaker still sees the spend
+    assert run.breach(trainer=False) is not None
+
+
+@pytest.mark.parametrize("price", [float("nan"), -1000.0, "abc"])
+def test_a_removed_pool_without_a_state_or_a_price_is_priced_from_its_config_or_skipped(fleet_run, capsys, price):
+    """No pool state: a bad usd_per_h is priced from the frozen config as a pool without
+    one; with neither a config nor a price the row is skipped with one WARNING (no NaN)."""
+    import math  # noqa: PLC0415
+
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    now = run.clock.t
+    run.state.update({"run_t0": now - 3600, "ups": [{"pid": 1, "start": now - 3600, "seen": now, "end": None}]})
+    sg1 = run.pools[2]
+    config_rate = run.node_usd_per_h(PoolRef(sg1.name, sg1.config))
+    run.retire_pool("i1-sglang")
+    run.state["retired_pools"][-1]["usd_per_h"] = price
+    ((hours, usd),) = run.retired_pool_spend()
+    assert hours == pytest.approx(1.0) and usd == pytest.approx(config_rate)
+    row = run.state["retired_pools"][-1]
+    row["pool"], row["config"] = None, str(run.dir / "missing.json")  # nothing to price it by
+    run.fleet_plan = lambda: None
+    for _ in range(2):
+        assert run.retired_pool_spend() == []
+        assert math.isfinite(run.spend_usd())
+    assert sum("is not a price and its config is unreadable" in line for line in _out(capsys)) == 1
 
 
 def test_the_budget_stops_the_whole_fleet(fleet_run):

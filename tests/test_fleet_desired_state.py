@@ -400,6 +400,36 @@ def test_run_up_store_mode_drives_the_desired_pools(tmp_path, monkeypatch):
         c.stop("test end")
 
 
+def test_a_pool_the_reconcile_removes_is_retired_into_the_run_spend(tmp_path, monkeypatch):
+    """The reconciler's removal hook (the end of a removal) retires the pool through run up:
+    it leaves the pools run up drives and is written to the state's retired_pools, so its
+    billed hours stay in run.budget (Run.retired_pool_spend), here and in the next up."""
+    from tests.test_rollout_entry import _NoThread  # noqa: PLC0415
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    up, cfg, _ = _store_run(tmp_path, monkeypatch, objects)
+    clock = Clock()
+    ops = {name: ProviderPoolOps(FakeProvider(name, clock), FakeRoute(), FakeFencer()) for name in ("nc", "modal")}
+    run = up.Run(cfg)
+    c = run.start_controller(ops=ops, thread_cls=_NoThread)
+    try:
+        c.tick()
+        modal = next(r for r in run.pools if r.name == "modal")
+        dz.DesiredStore(objects).update(lambda d: d["members"].pop())  # remove "modal"
+        c.reconciler.poll_s = 0
+        for _ in range(4):
+            c.tick()
+            clock.t += 30
+        assert set(c.slots) == {"nc"} and [r.name for r in run.pools] == ["nc"]
+        (row,) = run.state["retired_pools"]
+        assert row["name"] == "modal" and row["shard_base"] == str(modal.load()["shard_base"])
+        assert [r.name for r, _at in run.retired_pools()] == ["modal"] and len(run.retired_pool_spend()) == 1
+    finally:
+        c.stop("test end")
+    again = up.Run(cfg)  # the next up: the row is read from the state file
+    assert [r["name"] for r in again.state["retired_pools"]] == ["modal"]
+
+
 def test_desired_changes_made_while_detached_are_applied_by_the_next_controller(tmp_path, monkeypatch):
     """REV #758: the applied generation is kept in the store; a controller started after a detach
     applies what changed meanwhile: a removed pool is drained and retired, a target is applied."""
