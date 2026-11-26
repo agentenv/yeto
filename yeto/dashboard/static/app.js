@@ -446,16 +446,17 @@ function cost(){
 var EV_KEEP={rl_engine_selected:1,rl_driver_start:1,rl_driver_phase:1,rl_publication:1,rl_round_trained:1,rl_reconfiguration:1,rl_learner_finalized:1,
   island_ready:1,island_lost:1,island_stop:1,island_done:1,island_leave:1,operator_stop:1,dashboard_source_lost:1,rl_elastic_recommendation:1,
   rl_policy_released:1,rl_sampler_start:1,rl_sampler_join:1,rl_sampler_policy_loaded:1,rl_sampler_backlog_full:1,rl_sampler_admitted:1,rl_sampler_stopped:1,
-  island_straggler:1,island_straggler_cleared:1,island_straggler_unavailable:1};
+  island_straggler:1,island_straggler_cleared:1,island_straggler_unavailable:1,island_straggler_available:1};
 var POOL_BAD=/evicted|node_lost|crash_loop|failed|breaker|timeout|overdue|orphan|refused|manual_release/;
 function keepEv(t){return EV_KEEP[t]||/^nc_elastic_/.test(t)}
 var EVENTS=[],EV_CURSOR=0;
 function evLevel(t,rec){if(t==="operator_stop")return ["mu","stop"];
-  if(t==="island_straggler")return ["wn","lag"];if(t==="island_straggler_cleared")return ["ok","back"];if(t==="island_straggler_unavailable")return ["mu","info"];
+  if(t==="island_straggler")return ["wn","lag"];if(t==="island_straggler_cleared")return ["ok","back"];if(t==="island_straggler_unavailable"||t==="island_straggler_available")return ["mu","info"];
   if(/^nc_elastic_/.test(t))return POOL_BAD.test(t)?["bd","pool"]:["wn","pool"];if(t==="island_leave")return ["wn","left"];if(t==="island_lost"||(t==="rl_reconfiguration"&&rec.result==="RECOVERY_REQUIRED"))return ["bd","failure"];
   if(t==="rl_publication"||t==="rl_round_trained")return ["ok","done"];if(t==="rl_reconfiguration"||t==="dashboard_source_lost")return ["wn","change"];return ["mu","info"]}
-var EV_STRAGGLER_KEYS=["action","missed_cycles","newest_step","last_merged_step","reason"];
-function evText(e){var r=e.record||{},keys=/^island_straggler/.test(e.type)?EV_STRAGGLER_KEYS:["phase","rollout_id","policy_version","result","cause","recommendation","marker","reason_name","backlog_groups","buffer_selected","ticket","shard","why","detail"];
+// a straggler report: its count; its end and the watch's notices: their reason only
+var EV_STRAGGLER_KEYS={island_straggler:["action","missed_cycles","newest_step","last_merged_step"]};
+function evText(e){var r=e.record||{},keys=/^island_straggler/.test(e.type)?EV_STRAGGLER_KEYS[e.type]||["reason"]:["phase","rollout_id","policy_version","result","cause","recommendation","marker","reason_name","backlog_groups","buffer_selected","ticket","shard","why","detail"];
   return keys.filter(function(k){return r[k]!=null}).map(function(k){return k+"="+String(r[k]).slice(0,80)}).join(" ")}
 /* newest first by event time; the tapes are read one after another, so arrival (seq) order is not time order.
    One total-order key per event: its time (an event without one takes the time of the last timed event that

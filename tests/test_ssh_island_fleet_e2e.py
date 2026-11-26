@@ -472,7 +472,9 @@ def test_a_stuck_island_relaunched_mid_run_is_watched_over_the_run_store(syncer_
 
     def watch(argv, island_states):
         w = launcher._island_straggler_watch(_launch_args(argv), island_states, None)
-        w.source.interval_s = 0.2  # a store read every 0.2 s, not every 30 s
+        # a store read every 0.5 s, not every 30 s: QUIET_POLLS reads (5 s) stay longer than the
+        # 2 s quorum deadline between merges, as 10 x 30 s does against a real run's merges
+        w.source.interval_s = 0.5
         watches[int(argv[argv.index("--rl-fleet-learner-id") + 1])] = w
         return w
 
