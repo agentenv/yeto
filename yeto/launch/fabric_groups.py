@@ -84,7 +84,7 @@ def placeable(node: Node) -> bool:
 
 
 def _reasons(excluded: Iterable[str] | Mapping[str, str]) -> dict[str, str]:
-    if isinstance(excluded, str):
+    if isinstance(excluded, (str, bytes, bytearray)):
         raise TypeError("excluded: give node names (a list, set or name -> reason map), not one string")
     if isinstance(excluded, Mapping):
         return {str(k): str(v) for k, v in excluded.items()}
@@ -92,7 +92,7 @@ def _reasons(excluded: Iterable[str] | Mapping[str, str]) -> dict[str, str]:
 
 
 def _required(required: Iterable[Any]) -> list[str]:
-    if isinstance(required, str):
+    if isinstance(required, (str, bytes, bytearray)):
         raise TypeError("required: give node names (a list), not one string")
     return list(dict.fromkeys(getattr(n, "name", n) for n in required))
 

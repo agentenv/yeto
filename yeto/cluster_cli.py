@@ -34,6 +34,7 @@ import math
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from .launch import fabric_groups as fg
@@ -49,18 +50,23 @@ def containers_command(engine: str) -> str:
     """The ``yeto-`` containers of ``engine`` (``docker`` / ``podman``), listed as the node
     lease probe lists them (:func:`yeto.launch.node_lease.still_runs_script`): as the user
     and, when ``sudo -n`` works, through it. docker has one daemon: either view listing is
-    enough, and a daemon that is not running (not "permission denied") has no containers;
-    podman's rootless containers are the user's own: that view must list, the rootful
-    one only adds. Exit 0 when the listing is complete; an engine not installed lists
-    none."""
+    enough, and a daemon that is not running (not "permission denied") has no containers,
+    unless a ``containerd-shim`` still runs (live-restore keeps containers up without the
+    daemon, and a rootless daemon whose socket DOCKER_HOST does not point to looks down
+    too): then the listing is not complete. podman's rootless containers are the user's own: that
+    view must list, the rootful one only adds. Exit 0 when the listing is complete; an
+    engine not installed lists none."""
     fmt = "--format '{{.Names}} {{.Image}} {{.Status}}'"
     need = '[ $rc = 0 ] || [ $src = 0 ]' if engine == "docker" else '[ $rc = 0 ]'
+    down = ("if [ $rc != 0 ] && ! grep -qi 'permission denied' \"$err\" "
+            "&& grep -q 'Cannot connect to the Docker daemon' \"$err\" "
+            "&& ! ps -eo comm= 2>/dev/null | sed 's#.*/##' | grep -q '^containerd-shim'; then rc=0; out=; fi\n"
+            if engine == "docker" else "")
     return (
         f"command -v {engine} >/dev/null 2>&1 || exit 0\n"
         "err=$(mktemp 2>/dev/null || echo \"/tmp/yeto-idle.$$\")\n"
         f"out=$({engine} ps --filter name=yeto- {fmt} 2>\"$err\"); rc=$?\n"
-        "if [ $rc != 0 ] && ! grep -qi 'permission denied' \"$err\" "
-        "&& grep -q 'Cannot connect to the Docker daemon' \"$err\"; then rc=0; out=; fi\n"
+        f"{down}"
         "sout=; src=1\n"
         "if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then\n"
         f"  sout=$(sudo -n {engine} ps --filter name=yeto- {fmt} 2>/dev/null); src=$?\n"
@@ -216,15 +222,7 @@ def busy_nodes(nodes: list, ops: Any, *, max_parallel: int = 16,
     from .launch.preflight.cluster import parse_sections, probe_script
 
     def one(node: Any) -> tuple[Any, list[tuple[str, str]]]:
-        found: list[tuple[str, str]] = []
-        if leases is not None:
-            try:
-                holder = leases.holder(node)
-            except Exception as exc:  # noqa: BLE001 - the store did not answer: not confirmed
-                found.append(("unconfirmed", f"cannot read its lease ({type(exc).__name__}: {exc})"))
-            else:
-                if holder:
-                    found.append(("lease", f"leased by {holder}"))
+        found = lease_findings(node, leases)
         sections = idle_sections(node)
         try:
             done = ops.run(node, probe_script(sections), timeout=60.0)
@@ -245,7 +243,8 @@ def busy_nodes(nodes: list, ops: Any, *, max_parallel: int = 16,
             boxes = got.get("yeto_containers")
             if boxes is None or boxes.rc != 0:
                 found.append(("unconfirmed", "cannot confirm it is idle: containers not listed (ps failed as the "
-                                             "user and through sudo)"))
+                                             "user and through sudo, or the docker daemon is down while a "
+                                             "containerd-shim runs)"))
             else:
                 found += [("container", f"container {line.strip()}") for line in boxes.text.splitlines()
                           if line.strip()]
@@ -256,7 +255,31 @@ def busy_nodes(nodes: list, ops: Any, *, max_parallel: int = 16,
     return {node.name: found for node, found in results if found}
 
 
-def idle_gate(busy: dict[str, list[tuple[str, str]]], *, force: bool, force_busy_gpu: bool) -> bool:
+def lease_findings(node: Any, leases: Any) -> list[tuple[str, str]]:
+    """``lease`` when another run holds ``node``'s lease, ``unconfirmed`` when the lease
+    store does not answer; nothing without a lease store."""
+    if leases is None:
+        return []
+    try:
+        holder = leases.holder(node)
+    except Exception as exc:  # noqa: BLE001 - the store did not answer: not confirmed
+        return [("unconfirmed", f"cannot read its lease ({type(exc).__name__}: {exc})")]
+    return [("lease", f"leased by {holder}")] if holder else []
+
+
+def leased_during(nodes: list, leases: Any, *, max_parallel: int = 16) -> dict[str, list[tuple[str, str]]]:
+    """The lease check again, after the benchmarks: a node another run took meanwhile."""
+    with ThreadPoolExecutor(max_workers=max(1, min(max_parallel, len(nodes)))) as pool:
+        found = list(pool.map(lambda node: (node.name, lease_findings(node, leases)), nodes))
+    return {name: f for name, f in found if f}
+
+
+IDLE_REFUSED = ("not idle or not confirmed idle: refused (the probe runs on idle nodes; --nodes picks the idle "
+                "ones)")
+
+
+def idle_gate(busy: dict[str, list[tuple[str, str]]], *, force: bool, force_busy_gpu: bool,
+              refused: str = IDLE_REFUSED, anyway: str = "probing anyway") -> bool:
     """Print what keeps nodes from the probe; True when the probe may go on."""
     if not busy:
         return True
@@ -265,8 +288,7 @@ def idle_gate(busy: dict[str, list[tuple[str, str]]], *, force: bool, force_busy
                 for n, found in busy.items()}
     blocking = {n: f for n, f in blocking.items() if f}
     if blocking:
-        _say(f"[yeto] cluster probe: {len(blocking)} node(s) not idle or not confirmed idle: refused (the probe "
-             "runs on idle nodes; --nodes picks the idle ones)")
+        _say(f"[yeto] cluster probe: {len(blocking)} node(s) {refused}")
         for name, found in blocking.items():
             flags = sorted({OVERRIDE[k] or "nothing overrides a lease" for k, _ in found})
             _say(f"  {name}: {'; '.join(w for _, w in found[:6])}{'; ...' if len(found) > 6 else ''} "
@@ -274,7 +296,7 @@ def idle_gate(busy: dict[str, list[tuple[str, str]]], *, force: bool, force_busy
         return False
     for name, found in busy.items():
         for kind, what in found:
-            _say(f"[yeto] cluster probe: [WARN] {name}: {what}: probing anyway ({OVERRIDE[kind]})")
+            _say(f"[yeto] cluster probe: [WARN] {name}: {what}: {anyway} ({OVERRIDE[kind]})")
     return True
 
 
@@ -294,6 +316,31 @@ def estimate_s(n: int, *, nccl_pairs: str, ib_seconds: int, max_parallel: int) -
             + rounds_time(nccl_rounds, 120))  # container start, torch + NCCL init, collectives
 
 
+def _load_profiles(path: str) -> list:
+    """The inventory at ``path``, read once, every node as a NodeProfile (:func:`load_inventory`'s
+    checks and messages, plus the profile keys: a bad ``container`` or ``paths`` is an
+    InventoryError too)."""
+    import yaml  # noqa: PLC0415
+
+    from .launch.node_inventory import parse_profiles
+
+    file = Path(path)
+    try:
+        text = file.read_text()
+    except OSError as exc:
+        raise InventoryError(f"cannot read the node inventory {file}: {exc}") from None
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise InventoryError(f"the node inventory {file} is not valid YAML: {exc}") from None
+    if document is None:
+        raise InventoryError(f"the node inventory {file} is empty")
+    try:
+        return parse_profiles(document)
+    except InventoryError as exc:
+        raise InventoryError(f"{file}: {exc}") from None
+
+
 def probe_main(args: argparse.Namespace, *, ops: Any = None, log: Any = None, clock: Any = time.monotonic,
                leases: Any = None) -> int:
     from .launch.preflight.cluster import (
@@ -302,7 +349,7 @@ def probe_main(args: argparse.Namespace, *, ops: Any = None, log: Any = None, cl
 
     started = clock()
     try:
-        inventory = load_inventory(args.inventory)
+        inventory = _load_profiles(args.inventory)  # one read; every node with its container engine
         nodes = _select(inventory, args.nodes)
         if len(nodes) < 2:
             raise InventoryError("the probe needs two nodes or more")
@@ -345,11 +392,7 @@ def probe_main(args: argparse.Namespace, *, ops: Any = None, log: Any = None, cl
         from .launch.node_lease import NodeLeases
 
         leases = NodeLeases(str(lease_store_of(inventory)), "yeto-cluster-probe")  # read only: holder()
-    from .launch.node_inventory import load_profiles
-
-    profiles = {pr.name: pr for pr in load_profiles(args.inventory)}  # the container engine of each node
-    busy = busy_nodes([profiles.get(n.name, n) for n in nodes], timed, max_parallel=args.max_parallel,
-                      leases=leases)
+    busy = busy_nodes(nodes, timed, max_parallel=args.max_parallel, leases=leases)
     if not idle_gate(busy, force=args.force, force_busy_gpu=args.force_busy_gpu):
         return EXIT_BUSY
     steps = Steps(pull=not args.no_pull, container=True, ports=True, ib=True, nccl=True, ib_pairs="all",
@@ -377,6 +420,11 @@ def probe_main(args: argparse.Namespace, *, ops: Any = None, log: Any = None, cl
         _say(f"[yeto] cluster probe: the --deadline of {args.deadline:g} s cut the probe short: the result is "
              "incomplete, nothing written")
         return 1
+    late = leased_during(nodes, leases, max_parallel=args.max_parallel) if leases is not None else {}
+    if not idle_gate(late, force=args.force, force_busy_gpu=args.force_busy_gpu,
+                     refused="leased by another run during the probe (or its lease unreadable): the measurements "
+                             "may be disturbed, nothing written", anyway="keeping the result"):
+        return EXIT_BUSY
     if args.write:
         try:
             changed = fg.write_groups(args.inventory, result.assignment())

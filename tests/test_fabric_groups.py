@@ -685,6 +685,88 @@ def test_a_node_another_run_leases_refuses_the_probe_whatever_the_flags(tmp_path
     assert cluster_cli.main(_args(path, "--nodes", "b300-0,b300-1"), ops=_ops_for(path), log=lambda m: None) == 0
 
 
+class _Leases:
+    """A lease store: ``holders`` per node, ``after`` reads before they show; ``broken``
+    nodes' reads raise."""
+
+    def __init__(self, holders=None, *, after=0, broken=()):
+        self.holders, self.after, self.broken, self.reads = holders or {}, after, set(broken), {}
+
+    def holder(self, node):
+        self.reads[node.name] = self.reads.get(node.name, 0) + 1
+        if node.name in self.broken:
+            raise OSError("the store did not answer")
+        return self.holders.get(node.name) if self.reads[node.name] > self.after else None
+
+
+def test_an_unreadable_lease_needs_force(tmp_path, capsys):
+    path = _inventory_file(tmp_path)
+    ops = _ops_for(path)
+    rc = cluster_cli.main(_args(path, "--nodes", "b300-0,b300-1"), ops=ops, log=lambda m: None,
+                          leases=_Leases(broken={"b300-1"}))
+    assert rc == cluster_cli.EXIT_BUSY and not _probed(ops)
+    assert "b300-1: cannot read its lease (OSError: the store did not answer) (--force)" in capsys.readouterr().err
+    ops = _ops_for(path)
+    rc = cluster_cli.main(_args(path, "--force", "--nodes", "b300-0,b300-1"), ops=ops, log=lambda m: None,
+                          leases=_Leases(broken={"b300-1"}))
+    assert rc == 0 and _probed(ops)
+    err = capsys.readouterr().err
+    assert "[WARN] b300-1: cannot read its lease (OSError: the store did not answer): probing anyway (--force)" in err
+
+
+def test_a_node_leased_during_the_probe_refuses_the_write(tmp_path, capsys):
+    path = _inventory_file(tmp_path)
+    before = path.read_text()
+    leases = _Leases({"b300-1": "other-run"}, after=1)  # free at the start, taken before the write
+    rc = cluster_cli.main(_args(path, "--write", "--force", "--force-busy-gpu", "--nodes", "b300-0,b300-1"),
+                          ops=_ops_for(path), log=lambda m: None, leases=leases)
+    assert rc == cluster_cli.EXIT_BUSY and path.read_text() == before and leases.reads == {"b300-0": 2, "b300-1": 2}
+    err = capsys.readouterr().err
+    assert "1 node(s) leased by another run during the probe" in err and "nothing written" in err
+    assert "b300-1: leased by other-run (nothing overrides a lease)" in err
+    leases = _Leases(after=1, broken=())  # nobody took them: written
+    assert cluster_cli.main(_args(path, "--write", "--nodes", "b300-0,b300-1"), ops=_ops_for(path),
+                            log=lambda m: None, leases=leases) == 0
+    assert "fabric_group" in path.read_text()
+
+
+def test_a_lease_store_that_stops_answering_during_the_probe_needs_force_to_write(tmp_path, capsys):
+    class Breaks(_Leases):
+        def holder(self, node):
+            self.broken = {"b300-1"} if self.reads.get(node.name) else set()
+            return super().holder(node)
+
+    path = _inventory_file(tmp_path)
+    before = path.read_text()
+    assert cluster_cli.main(_args(path, "--write", "--nodes", "b300-0,b300-1"), ops=_ops_for(path),
+                            log=lambda m: None, leases=Breaks()) == cluster_cli.EXIT_BUSY
+    assert path.read_text() == before and "b300-1: cannot read its lease" in capsys.readouterr().err
+    assert cluster_cli.main(_args(path, "--write", "--force", "--nodes", "b300-0,b300-1"), ops=_ops_for(path),
+                            log=lambda m: None, leases=Breaks()) == 0
+    assert "cannot read its lease (OSError: the store did not answer): keeping the result (--force)" in \
+        capsys.readouterr().err
+    assert "fabric_group" in path.read_text()
+
+
+@pytest.mark.parametrize("bad", [{"container": "lxc"}, {"paths": {"bogus": "/x"}}])
+def test_a_bad_profile_key_is_an_inventory_error(tmp_path, capsys, bad):
+    path = tmp_path / "nodes.yaml"
+    path.write_text(yaml.safe_dump({"nodes": [_entry(0, **bad), _entry(1)]}))
+    ops = IdleCluster(parse_inventory({"nodes": [_entry(0), _entry(1)]}))
+    assert cluster_cli.main(_args(path), ops=ops, log=lambda m: None) == 2
+    err = capsys.readouterr().err
+    assert f"[yeto] cluster probe: {path}: node b300-0: {next(iter(bad))}" in err and "Traceback" not in err
+    assert ops.scripts == []
+
+
+def test_the_probe_reads_the_inventory_once(tmp_path, monkeypatch):
+    path = _inventory_file(tmp_path)
+    ops, reads, real = _ops_for(path), [], Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: (reads.append(self), real(self, *a, **k))[1])
+    assert cluster_cli.main(_args(path, "--nodes", "b300-0,b300-1"), ops=ops, log=lambda m: None) == 0
+    assert [r for r in reads if r.resolve() == path.resolve()] == [path]
+
+
 def test_an_idle_check_that_raises_is_not_confirmed_idle(tmp_path, capsys):
     class Raising(IdleCluster):
         def run(self, node, script, *, timeout=300.0):
@@ -707,8 +789,7 @@ def test_the_probe_lists_containers_with_the_engine_the_inventory_declares(tmp_p
     path.write_text(yaml.safe_dump({"nodes": [_entry(i, container="podman") for i in range(2)]}))
     with pytest.warns(UserWarning, match="node profile keys"):
         ops = IdleCluster(load_inventory(path))
-    with pytest.warns(UserWarning, match="node profile keys"):
-        cluster_cli.main(_args(path), ops=ops, log=lambda m: None)
+    cluster_cli.main(_args(path), ops=ops, log=lambda m: None)  # the probe reads the profile keys: no warning
     idle = [s for _, s in ops.scripts if f"{cp.SECTION} compute_apps" in s]
     assert len(idle) == 2 and all("podman ps --filter name=yeto-" in s and "docker ps" not in s for s in idle)
 
@@ -725,16 +806,19 @@ def test_the_idle_check_lists_the_containers_of_the_nodes_engine():
     assert [n for n, _ in cluster_cli.idle_sections(process)] == ["compute_apps"]
 
 
-@pytest.mark.parametrize("engine, plain, sudo, rc, listed", [
-    ("docker", "ok:yeto-a", "none", 0, ["yeto-a"]),
-    ("docker", "denied", "fail", 1, []),  # neither view lists: not confirmed
-    ("docker", "denied", "ok:yeto-b", 0, ["yeto-b"]),  # the sudo view is enough for docker's one daemon
-    ("docker", "down", "fail", 0, []),  # no daemon running: no containers
-    ("docker", "absent", "none", 0, []),
-    ("podman", "denied", "ok:yeto-c", 1, ["yeto-c"]),  # podman: the user's own view must list
-    ("podman", "ok:", "ok:yeto-d", 0, ["yeto-d"]),
+@pytest.mark.parametrize("engine, plain, sudo, rc, listed, procs", [
+    ("docker", "ok:yeto-a", "none", 0, ["yeto-a"], "sshd"),
+    ("docker", "denied", "fail", 1, [], "sshd"),  # neither view lists: not confirmed
+    ("docker", "denied", "ok:yeto-b", 0, ["yeto-b"], "sshd"),  # the sudo view is enough for docker's one daemon
+    ("docker", "down", "fail", 0, [], "sshd"),  # no daemon running, no shim: no containers
+    ("docker", "down", "fail", 1, [], "containerd-shim"),  # live-restore: containers without the daemon
+    ("docker", "down", "fail", 1, [], "/usr/bin/containerd-shim-runc-v2"),
+    ("docker", "absent", "none", 0, [], "sshd"),
+    ("podman", "denied", "ok:yeto-c", 1, ["yeto-c"], "sshd"),  # podman: the user's own view must list
+    ("podman", "ok:", "ok:yeto-d", 0, ["yeto-d"], "sshd"),
+    ("podman", "down", "fail", 1, [], "sshd"),  # the "daemon down" rule is docker's only
 ])
-def test_the_container_listing_runs_under_bash(tmp_path, engine, plain, sudo, rc, listed):
+def test_the_container_listing_runs_under_bash(tmp_path, engine, plain, sudo, rc, listed, procs):
     shims = tmp_path / "bin"
     shims.mkdir()
 
@@ -757,6 +841,7 @@ def test_the_container_listing_runs_under_bash(tmp_path, engine, plain, sudo, rc
         tool("sudo", "exit 1")
     else:
         tool("sudo", f'[ "$1" = -n ] && shift; [ "$1" = true ] && exit 0; {answer(sudo)}')
+    tool("ps", f'[ "$*" = "-eo comm=" ] || exit 2; printf "%s\\n" init {procs}')
     env = {"PATH": f"{shims}:/usr/bin:/bin", "HOME": str(tmp_path)}
     script = cluster_cli.containers_command(engine)
     if plain == "absent":
@@ -1033,10 +1118,20 @@ def test_pick_placement_keeps_the_required_nodes_and_fills_from_their_group():
 
 def test_excluded_or_required_as_one_string_is_a_type_error():
     nodes = _grouped("A", "A")
-    with pytest.raises(TypeError, match="excluded"):
-        fg.pick_placement(nodes, 1, excluded="b300-0")
-    with pytest.raises(TypeError, match="required"):
-        fg.pick_placement(nodes, 1, required="b300-0")
+    for one in ("b300-0", b"b300-0", bytearray(b"b300-0")):
+        with pytest.raises(TypeError, match="excluded"):
+            fg.pick_placement(nodes, 1, excluded=one)
+        with pytest.raises(TypeError, match="required"):
+            fg.pick_placement(nodes, 1, required=one)
+
+
+def test_required_nodes_come_first_in_the_order_given():
+    nodes = _grouped("B", "B", "B", "A", "A", "A")
+    p = fg.pick_placement(nodes, 3, required=["b300-5", "b300-3"])
+    assert p.group == "A" and [n.name for n in p.nodes] == ["b300-5", "b300-3", "b300-4"]
+    plain = _grouped(None, None, None, None)
+    assert [n.name for n in fg.pick_placement(plain, 3, required=["b300-3", "b300-1"]).nodes] == [
+        "b300-3", "b300-1", "b300-0"]
 
 
 def test_the_reserved_value_is_read_in_any_case():
