@@ -11,10 +11,13 @@ only prints the command it would run. The report goes to the run directory, as
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shlex
 import sys
+import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import IO, Any
 
@@ -70,35 +73,66 @@ def preflight_commands(gpu: str | None, inventory: str | None, prefix: str | Non
     return out
 
 
-def launch_rl_image(argv: Sequence[str]) -> str | None:
+_ENVIRON_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def launch_environ(environ: Mapping[str, str] | None) -> Iterator[None]:
+    """``os.environ`` with ``environ`` laid over it (keys added or changed, none removed;
+    nothing for None), restored on exit, also on an error: the environment a launch child
+    of ``yeto run up`` starts with (``Run.env``: run up's own plus the run config's
+    ``env``), for resolving what that launch would. One resolution at a time (a lock);
+    run up resolves on its own thread before it starts anything."""
+    if not environ:
+        yield
+        return
+    with _ENVIRON_LOCK:
+        saved = {k: os.environ.get(k) for k, v in environ.items() if os.environ.get(k) != str(v)}
+        try:
+            for key in saved:
+                os.environ[key] = str(environ[key])
+            yield
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
+def launch_rl_image(argv: Sequence[str], environ: Mapping[str, str] | None = None) -> str | None:
     """The ``--rl-image`` a ``yeto launch`` of ``argv`` runs with: the argv's own, else
     the image the launch fills in (``rl_backend.rl_image_choice``, the function the launch
     itself calls: the site image catalog for an ssh: trainer whose inventory names no
-    image, else the engine's pinned default). The argv's own ``--rl-image`` (None without
-    one) when the argv is not an RL launch the parser takes; raises ``ValueError`` where
-    the launch refuses to fill one in (an unknown backend, a broken catalog)."""
+    image, else the engine's pinned default), resolved under the launch's environment
+    (``environ`` over this process's, :func:`launch_environ`: ``YETO_IMAGE_REGISTRY``,
+    ``YETO_SITE_IMAGES_PATH``, ``HOME`` decide). The argv's own ``--rl-image`` (None
+    without one) when the argv is not an RL launch the parser takes; raises
+    ``ValueError`` where the launch refuses to fill one in (an unknown backend, a broken
+    catalog)."""
     given = argv_value(argv, "--rl-image")
     if given:
         return given
     from ...rl.up_consistency import trainer_args
     from ..rl_backend import rl_image_choice
 
-    args = trainer_args(list(argv))
-    if args is None:
-        return given
-    return rl_image_choice(args)[0]
+    with launch_environ(environ):
+        args = trainer_args(list(argv))
+        if args is None:
+            return given
+        return rl_image_choice(args)[0]
 
 
-def commands_for_launch_argv(argv: Sequence[str]) -> list[list[str]]:
-    """The preflight commands of a ``yeto launch`` argv (``yeto run up``'s trainer), with
-    ``--image`` the image the launch runs (:func:`launch_rl_image`). A launch that refuses
-    to fill in an image gets none: the preflight FAILs (no trainer image resolved), and the
-    launch names why."""
+def commands_for_launch_argv(argv: Sequence[str], environ: Mapping[str, str] | None = None) -> list[list[str]]:
+    """The preflight commands of a ``yeto launch`` argv (``yeto run up``'s trainer, whose
+    launch starts with ``environ``), with ``--image`` the image the launch runs
+    (:func:`launch_rl_image`). A launch that refuses to fill in an image gets none: the
+    preflight FAILs (no trainer image resolved), and the launch names why."""
     gpu = argv_value(argv, "--gpu")
     if not ssh_entries(gpu):
         return []
     try:
-        image = launch_rl_image(argv)
+        image = launch_rl_image(argv, environ)
     except ValueError:
         image = argv_value(argv, "--rl-image")
     return preflight_commands(gpu, argv_value(argv, "--rl-node-inventory"), argv_value(argv, "--cluster-prefix"),
@@ -169,17 +203,20 @@ def launch_endpoints(argv: Sequence[str], environ: Mapping[str, str], nodes: Seq
     docker = [n for n in nodes if getattr(n, "runtime", "docker") == "docker"]
     if docker or not nodes:  # a rootfs node pulls no image
         image = argv_value(argv, "--rl-image") or next((n.image for n in docker if getattr(n, "image", None)), None)
+        refused = False
         if not image:
             try:  # the image the launch fills in (the site image catalog's, else the pinned default)
-                image = launch_rl_image(argv)
-            except ValueError:  # the launch refuses it and names why
-                image = None
-        if not image:
+                image = launch_rl_image(argv, environ)
+            except ValueError:  # the launch refuses it and names why: no registry to check
+                refused = True
+        if not image and not refused:  # not an argv the launch parser takes
             from ...rl import default_rl_image
 
-            image = default_rl_image(recipe=argv_value(argv, "--rl-model-recipe"),
-                                     tuning=argv_value(argv, "--tuning"))
-        found.append(registry_endpoint(image))
+            with launch_environ(environ):
+                image = default_rl_image(recipe=argv_value(argv, "--rl-model-recipe"),
+                                         tuning=argv_value(argv, "--tuning"))
+        if not refused:
+            found.append(registry_endpoint(image))
     return [e for e in found if e is not None]
 
 

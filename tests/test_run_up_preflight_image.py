@@ -61,14 +61,15 @@ def real_up(kit, monkeypatch, tmp_path):  # noqa: F811 - the kit fixture
 
     def cmd(self, argv, *, log, timeout=None):
         argv = [str(a) for a in argv]
-        if argv[3:4] == ["preflight"]:
-            kit.commands.append(argv)
-            preflights.append(argv[3:])
-            try:
-                return int(cli.main(argv[3:]) or 0)
-            except SystemExit as stop:
-                return int(stop.code or 0)
-        return dry(self, argv, log=log, timeout=timeout)
+        with gate.launch_environ(self.env):  # the environment a child of run up starts with
+            if argv[3:4] == ["preflight"]:
+                kit.commands.append(argv)
+                preflights.append(argv[3:])
+                try:
+                    return int(cli.main(argv[3:]) or 0)
+                except SystemExit as stop:
+                    return int(stop.code or 0)
+            return dry(self, argv, log=log, timeout=timeout)
 
     monkeypatch.setattr(kit.up.Run, "_cmd", cmd)
     monkeypatch.setattr(kit.up.Run, "write_fleet_plan", lambda self: False)  # stop before the first order
@@ -173,6 +174,68 @@ def test_an_inventory_image_is_checked_against_the_run_image_as_the_launch_does(
     assert _pulls() == []  # refused before any node pulls (the launch's dry run, or the preflight itself)
 
 
+MIRROR = "mirror.example/yeto"
+
+
+@pytest.mark.parametrize("source", ["registry", "site"])
+def test_the_run_config_env_decides_the_image_as_in_the_launch(real_up, capsys, tmp_path, monkeypatch, source):
+    """The run config's ``env`` (which the trainer's launch starts with, Run.env) names the
+    image registry or the site image catalog: run up's preflight --image, the egress
+    check's registry and the launch's own resolution agree; this process's env is unchanged."""
+    from yeto.rl.adapters.miles import pins
+    from yeto.rl.image_registry import REGISTRY_ENV
+
+    monkeypatch.delenv(REGISTRY_ENV, raising=False)
+    monkeypatch.delenv("YETO_SITE_IMAGES_PATH", raising=False)
+    if source == "registry":
+        env = {REGISTRY_ENV: MIRROR}
+        name_digest = pins.MILES_NEXT_IMAGE.removeprefix("docker:").split("/", 2)[-1]
+        want, host = f"docker:{MIRROR}/{name_digest}", "https://mirror.example/"
+    else:
+        catalog = write_catalog(tmp_path / "elsewhere.yaml", record(model="Qwen/Qwen3-4B", ref=SITE_REF))
+        env = {"YETO_SITE_IMAGES_PATH": str(catalog)}
+        want, host = "docker:" + SITE_REF, "https://registry.example/"
+    path = real_up.files[TEMPLATE]
+    cfg = json.loads(path.read_text())
+    cfg["env"] = {**cfg.get("env", {}), **env}
+    path.write_text(json.dumps(cfg))
+    rc, out, image = _run(real_up, capsys)
+    _passed(rc, out)
+    assert image == want
+    launch = next(line for line in out.splitlines() if "the launch would first run the cluster preflight" in line)
+    assert f"--image {want} " in launch  # the trainer's launch dry run resolved the same image
+    assert f"registry {host}" in out and f"[PASS] own-b300-0 reach_registry: the registry endpoint {host}" in out
+    ran = want.removeprefix("docker:")
+    assert _pulls() == [f"docker pull -q {pins.overlay_safe_image(ran) or ran}"]
+    import os
+
+    assert REGISTRY_ENV not in os.environ and "YETO_SITE_IMAGES_PATH" not in os.environ
+
+
+def test_the_launch_environ_is_restored_also_on_an_error(monkeypatch):
+    import os
+
+    monkeypatch.setenv("OC_Y_KEPT", "before")
+    monkeypatch.delenv("OC_Y_ADDED", raising=False)
+    with pytest.raises(RuntimeError):
+        with gate.launch_environ({"OC_Y_KEPT": "during", "OC_Y_ADDED": "x"}):
+            assert os.environ["OC_Y_KEPT"] == "during" and os.environ["OC_Y_ADDED"] == "x"
+            raise RuntimeError("boom")
+    assert os.environ["OC_Y_KEPT"] == "before" and "OC_Y_ADDED" not in os.environ
+
+
+def test_a_pinned_default_follows_the_registry_named_when_it_is_taken(monkeypatch):
+    from yeto.rl.adapters.miles import pins
+    from yeto.rl.image_registry import IMPORT_REGISTRY, REGISTRY_ENV, current_registry
+
+    monkeypatch.delenv(REGISTRY_ENV, raising=False)
+    assert pins.default_rl_image() == pins.MILES_NEXT_IMAGE  # unchanged since import: the very string
+    monkeypatch.setenv(REGISTRY_ENV, MIRROR + "/")
+    moved = pins.default_rl_image(recipe="kimi_k31", tuning="full")
+    assert moved == pins.MILES_K31_NEXT9_IMAGE.replace(f"docker:{IMPORT_REGISTRY}/", f"docker:{MIRROR}/")
+    assert current_registry("docker:quay.io/x/y@sha256:" + "0" * 64) == "docker:quay.io/x/y@sha256:" + "0" * 64
+
+
 def test_the_dry_run_prints_the_resolved_image(kit, capsys, tmp_path):  # noqa: F811
     catalog = write_catalog(tmp_path / "site-images.yaml", record(model="Qwen/Qwen3-4B", ref=SITE_REF))
     _edit_inventory(kit, site_images=str(catalog))
@@ -229,6 +292,7 @@ def test_the_pull_fails_per_node_without_an_image_and_the_report_is_written(tmp_
     assert _pulls() == [f"docker pull -q {IMAGE}"]
     runs_on = [n for n, s in OwnNodes.scripts if "docker run" in s]
     assert runs_on and set(runs_on) == {"b300-1"}  # the node without an image is not probed
+    assert not [c for c in report.checks if c.scope == "b300-0" and c.name == "container"]
     assert not any("None" in s for _, s in OwnNodes.scripts)
     saved = json.loads((tmp_path / "pf" / "preflight.json").read_text())
     assert any(c["name"] == "image_pull" and c["detail"] == cp.NO_IMAGE for c in saved["checks"])
@@ -298,6 +362,10 @@ def test_a_catalog_the_launch_refuses_gives_no_image(tmp_path, monkeypatch):
     assert "--image" not in cmd
     with pytest.raises(ValueError, match="not valid YAML"):
         gate.launch_rl_image([*SSH_ARGV, "--rl-node-inventory", str(inv)])
+    # the egress check names no registry for an image the launch refuses (no guess)
+    argv = [*SSH_ARGV, "--rl-node-inventory", str(inv), "--rl-checkpoint-store", "s3://b/runs/r",
+            "--rl-object-store-endpoint", "https://e.example"]
+    assert [e.role for e in gate.launch_endpoints(argv, {})] == ["store"]
 
 
 def test_only_a_refusal_is_turned_into_no_image(monkeypatch):

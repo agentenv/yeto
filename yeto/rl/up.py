@@ -1467,7 +1467,8 @@ class Run:
         runs the egress check too. True without either."""
         from yeto.launch.preflight.gate import commands_for_launch_argv  # noqa: PLC0415
 
-        commands = commands_for_launch_argv([str(a) for a in self.cfg["trainer"]["argv"]])
+        # the image the trainer's launch resolves, under the environment it starts with
+        commands = commands_for_launch_argv([str(a) for a in self.cfg["trainer"]["argv"]], self.env)
         shown = "; ".join("yeto " + " ".join(c) for c in commands)
         if dry_run:
             if commands:
@@ -2216,9 +2217,9 @@ class Run:
         if self.continue_from_release(argv):
             argv += ["--rl-init-from-release", "latest"]
         if self.cluster_preflight_passed and "--skip-preflight" not in argv:
-            from yeto.launch.preflight.gate import commands_for_launch_argv  # noqa: PLC0415
+            from yeto.launch.preflight.gate import argv_value, ssh_entries  # noqa: PLC0415
 
-            if commands_for_launch_argv(argv):  # an ssh: trainer: run up ran it before ordering anything
+            if ssh_entries(argv_value(argv, "--gpu")):  # an ssh: trainer: run up ran it before ordering anything
                 argv.append("--skip-preflight")
         return argv
 
