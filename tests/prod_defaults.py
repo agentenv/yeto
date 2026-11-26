@@ -114,7 +114,7 @@ def refusal(text: str, limit: int = 40) -> str:
     import re
 
     marks = re.compile(r"INVALID|refus|rejected|required|the following arguments|error|Error|cannot|must |"
-                       r"Traceback|SystemExit|inner-lr|preflight", re.I)
+                       r"Traceback|SystemExit|inner-lr|preflight|problem", re.I)
     lines = [line for line in text.splitlines() if marks.search(line)]
     return "\n".join(lines[:limit]) or text[-3000:]
 

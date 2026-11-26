@@ -235,10 +235,23 @@ def test_the_customer_pool_dry_run_and_the_node_spec_pass_with_production_defaul
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("YETO_NC_ACCOUNTS", "101,102,103,104")
     monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "nc-state"))
+    # The dry run checks that the NC tools are on this host (shutil.which) and runs neither:
+    # stubs of its own, not whatever this host has on PATH (a CI runner has none). A stub
+    # that runs records it.
+    called = tmp_path / "nc-tool-called"
+    for tool, env in (("nc-manage", "NC_MANAGE"), ("nc-query", "NC_QUERY")):
+        stub = tmp_path / "bin" / tool
+        stub.parent.mkdir(exist_ok=True)
+        stub.write_text(f"#!/bin/sh\necho {tool} \"$@\" >> {shlex.quote(str(called))}\nexit 1\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv(env, str(stub))
+    for env in ("NC_TOOL_DIR", "NC_NODE_BIN"):
+        monkeypatch.delenv(env, raising=False)
     asked = prod_defaults.apply(monkeypatch)
     rc = nc_cli.main(["pool", "--config", str(config), "--dry-run"])
     out = capsys.readouterr()
     assert rc in (0, None), prod_defaults.refusal(out.out + out.err)
+    assert not called.exists(), f"the pool dry run ran an NC tool: {called.read_text()}"
     assert asked["store"], "the pool's model check did not run"
     from yeto.launch.pool.island_pool import Member
 
