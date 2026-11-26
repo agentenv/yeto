@@ -174,6 +174,11 @@ def _epoch(value: Any) -> float | None:
     return t if math.isfinite(t) else None
 
 
+def _pool_of(run: Any, i: Any) -> Any:
+    """Pool ``i`` of ``run.pools`` (an index), or ``i`` itself (a retired pool's ref)."""
+    return run.pools[i] if isinstance(i, int) else i
+
+
 def _argv_value(argv: list[str], flag: str) -> str | None:
     """The last value of ``flag`` in ``argv`` (``--flag V`` or ``--flag=V``; None: absent)."""
     value = None
@@ -1972,7 +1977,7 @@ class Run:
             self.pools = [ref if r.name == name else r for r in self.pools]
 
         def removed(name: str) -> None:
-            self.pools = [r for r in self.pools if r.name != name]
+            self.retire_pool(name)  # its billed hours still count in the run's spend
 
         reconciler = FleetReconciler(store, ReconcileHooks(add=add, set_target=set_target, reconfigure=reconfigure,
                                                            removed=removed), log=_log)
@@ -2266,6 +2271,7 @@ class Run:
             return self.fleet_rt().spend().total_usd
         now = time.time()
         nc = sum(self.node_spend_usd(i, now) for i in range(len(self.pools)))
+        nc += sum(hours * usd for hours, usd in self.retired_pool_spend(now))  # pools the desired state removed
         rate = up_consistency.number_or_default(self.cfg.get("trainer"), "usd_per_h", 0)
         return nc + self.trainer_hours(now) * rate
 
@@ -2302,16 +2308,74 @@ class Run:
 
         return sum(max(0.0, end(i, p) - max(float(p["start"]), t0)) for i, p in enumerate(ups)) / 3600
 
+    def retired_pools(self) -> list[tuple[Any, float | None]]:
+        """``(ref, removed at)`` of each pool the fleet's desired state removed while the run
+        trained (:meth:`retire_pool`, kept in the state across ups): its machines billed until
+        released, so the run's spend keeps counting them from their pool state. A pool added
+        again under its name, or one sharing a current pool's state file (its shard base), is
+        the current one's and counted there."""
+        if not self.state.get("retired_pools"):  # nothing removed (every run without a desired state)
+            return []
+        from yeto.launch.rollout.pools import PoolRef  # noqa: PLC0415
+
+        def base(ref: Any) -> str | None:
+            try:
+                return str(ref.load()["shard_base"])
+            except Exception:  # noqa: BLE001 - an unreadable config
+                return None
+
+        names = {r.name for r in self.pools}
+        bases = {base(r) for r in self.pools} - {None}
+        rows: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in self.state.get("retired_pools") or ():
+            if isinstance(row, dict) and row.get("name") and row.get("config"):
+                rows[(str(row["name"]), str(row["config"]))] = row  # the last removal of a pool
+        out = []
+        for (name, config), row in rows.items():
+            if name in names:
+                continue
+            ref = PoolRef(name, config, usd_per_h=row.get("usd_per_h"))
+            if base(ref) in bases:
+                continue
+            out.append((ref, _utc_seconds(row.get("removed_at"))))
+        return out
+
+    def retire_pool(self, name: str) -> None:
+        """The desired state removed pool ``name``: it leaves :attr:`pools` (nothing drives it
+        any more) and is appended to the state's ``retired_pools``, whose spend still counts."""
+        ref = next((r for r in self.pools if r.name == name), None)
+        self.pools = [r for r in self.pools if r.name != name]
+        if ref is None:
+            return
+        row = {"name": ref.name, "config": str(ref.config), "usd_per_h": ref.usd_per_h,
+               "removed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()))}
+        self.state["retired_pools"] = [*(self.state.get("retired_pools") or ()), row]
+        try:
+            self.save()
+        except OSError as error:  # kept in memory: the next save writes it
+            _log(f"pool {name}: removal not saved yet ({error})")
+
+    def retired_pool_spend(self, now: float | None = None) -> list[tuple[float, float]]:
+        """``(billed node hours, USD per node hour)`` of every retired pool (:meth:`pool_spend_rate`
+        from its pool state: a member left billed counts to now). Without a readable state, the
+        conservative estimate up to its removal."""
+        now = time.time() if now is None else now
+        out = []
+        for ref, removed_at in self.retired_pools():
+            end = now if removed_at is None or self.pool_doc(ref) is not None else min(now, removed_at)
+            out.append(self.pool_spend_rate(ref, end))
+        return out
+
     def node_usd_per_h(self, i: int = 0) -> float:
         """One node hour of pool ``i``: its ``usd_per_h``, else the price its provider config
         states (``price_usd_h`` of a Modal / Daytona / Sky pool, the one the pool's own budget
         charges), else ``budget.nc_usd_per_h``."""
-        price = self.pools[i].usd_per_h
+        price = _pool_of(self, i).usd_per_h
         if price is None:
             try:
                 from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
 
-                price, currency = pool_price(self.pools[i].load())
+                price, currency = pool_price(_pool_of(self, i).load())
                 if currency == "ucr":  # National Compute: its rate stays budget.nc_usd_per_h
                     price = None
             except Exception:  # noqa: BLE001 - an unreadable pool config: the NC rate
@@ -2329,11 +2393,11 @@ class Run:
 
         base = self.node_usd_per_h(i)
         per_member = False
-        if self.pools[i].usd_per_h is None:
+        if _pool_of(self, i).usd_per_h is None:
             try:
                 from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
 
-                per_member = pool_price(self.pools[i].load())[1] == "usd"
+                per_member = pool_price(_pool_of(self, i).load())[1] == "usd"
             except Exception:  # noqa: BLE001 - an unreadable pool config: node_usd_per_h
                 per_member = False
         if not per_member:
@@ -2373,8 +2437,11 @@ class Run:
                 nodes = max(1, self.pool_target({}, i))
             except Exception:  # noqa: BLE001
                 nodes = 1
-            if self.state.get("ups"):
-                return up_segments.uptime_summary(self.state, now)["cumulative_runtime_h"] * nodes * weight(None)
+            if self.state.get("ups"):  # the up periods up to ``now`` (a removed pool's: its removal)
+                ups = [p if not isinstance(p, dict) or p.get("start") is None
+                       or up_segments.period_end(p, now) <= now else dict(p, end=max(float(p["start"]), now))
+                       for p in self.state["ups"]]
+                return up_segments.uptime_summary({"ups": ups}, now)["cumulative_runtime_h"] * nodes * weight(None)
             return max(0.0, now - t0) / 3600 * nodes * weight(None)
         hours = 0.0
         for m in members:
@@ -2396,7 +2463,7 @@ class Run:
     def pool_doc(self, i: int = 0) -> dict[str, Any] | None:
         """The state file of pool ``i`` (None: no readable state)."""
         try:
-            pool_cfg = self.pools[i].load()
+            pool_cfg = _pool_of(self, i).load()
             path = self._nc_dir() / f"pool-{pool_cfg['shard_base']}.json"
             doc = json.loads(path.read_text())
             from yeto.launch.nc.pool_run import foreign_owner  # noqa: PLC0415
@@ -2441,7 +2508,7 @@ class Run:
 
     def pool_target(self, doc: dict[str, Any] | None, i: int = 0) -> int:
         """Pool ``i``'s wanted sampler count: its scale file (this run's), else the state, else the config."""
-        pool_cfg = self.pools[i].load()
+        pool_cfg = _pool_of(self, i).load()
         try:
             scale = json.loads((self._nc_dir() / f"pool-{pool_cfg['shard_base']}.scale.json").read_text())
             if isinstance(scale, dict) and scale.get("run") == pool_cfg.get("run") and "target" in scale:

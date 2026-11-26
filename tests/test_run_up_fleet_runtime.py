@@ -5,6 +5,7 @@ Every island's ``trainer<k>/`` is a local directory store."""
 
 from __future__ import annotations
 
+import copy
 import json
 import types
 
@@ -12,6 +13,7 @@ import pytest
 
 from tests.test_run_up_fleet import _cfg, _write, files  # noqa: F401
 from yeto.breakers.events import clear_stop_reason, current_stop_reason
+from yeto.launch.rollout.pools import PoolRef
 from yeto.rl import up
 from yeto.rl.engine.object_store import DirectoryObjectStore
 
@@ -422,6 +424,60 @@ def test_the_fleet_spend_counts_pools_each_islands_trainer_and_the_syncer(fleet_
     assert run.spend_usd() == pytest.approx(27.5)
     assert run.status()["fleet"]["spend"] == {"usd": 27.5, "pools_usd": 11.0, "islands_usd": [8.0, 8.0],
                                               "syncer_usd": 0.5}
+
+
+def test_a_pool_the_desired_state_removed_still_counts_in_the_fleet_spend(fleet_run):
+    """The reconciler's removal hook drops the pool from the ones run up drives, but the hours
+    its machines billed (and a member left billed: to now) stay in run.budget, across ups;
+    a pool scaled to 0 keeps its released members' hours too."""
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    now = run.clock.t
+    run.state.update({"run_t0": now - 7200, "trainer_t0": now - 3600,
+                      "ups": [{"pid": 1, "start": now - 7200, "seen": now, "end": None}]})
+    _pool_state(run, "vl-i0", members=[{"state": "gone", "granted": now - 7200, "charged_to": now - 3600}])  # scaled to 0: 1 h x $4
+    _pool_state(run, "sg-i0", members=[{"state": "ready", "granted": now - 3600}])   # 1 h x $2
+    _pool_state(run, "sg-i1", members=[{"state": "gone", "granted": now - 7200, "charged_to": now - 5400},
+                                       {"state": "ready", "granted": now - 1800}])  # 0.5 h + 0.5 h left billed, x $2
+    before = run.fleet_rt().spend().pools_usd
+    assert before == pytest.approx(4 + 2 + 2)
+    run.retire_pool("i1-sglang")
+    assert [r.name for r in run.pools] == ["i0-vllm", "i0-sglang"]
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(before)
+    run.clock.t += 1800  # its member left billed keeps billing; the scaled-to-0 pool does not
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(before + 0.5 * 2 + 0.5 * 2)
+    again = up.Run(copy.deepcopy(run.cfg))  # the next up: from the state file, its pools from the desired state
+    again.pools = [r for r in again.pools if r.name != "i1-sglang"]
+    assert [r.name for r, _at in again.retired_pools()] == ["i1-sglang"]
+    assert again.retired_pool_spend(run.clock.t) == [pytest.approx((1.5, 2.0))]
+
+
+def test_a_removed_pool_added_again_or_sharing_a_state_file_is_counted_once(fleet_run):
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    now = run.clock.t
+    run.state.update({"run_t0": now - 3600, "ups": [{"pid": 1, "start": now - 3600, "seen": now, "end": None}]})
+    for base in ("vl-i0", "sg-i0", "sg-i1"):
+        _pool_state(run, base, members=[{"state": "ready", "granted": now - 3600}])
+    pools = list(run.pools)
+    run.retire_pool("i1-sglang")
+    run.retire_pool("i1-sglang")  # a second removal of a pool already gone: no second row
+    assert run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+    run.pools = pools  # added again under its name: the current pool counts it
+    assert run.retired_pools() == [] and run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+    run.retire_pool("i1-sglang")
+    renamed = PoolRef("i1-sglang-b", pools[2].config, usd_per_h=pools[2].usd_per_h)
+    run.pools = [*run.pools, renamed]  # a new name on the removed pool's state file (shard base)
+    assert run.retired_pools() == [] and run.fleet_rt().spend().pools_usd == pytest.approx(4 + 2 + 2)
+
+
+def test_a_removed_pool_without_a_readable_state_bills_its_estimate_to_its_removal(fleet_run):
+    run = fleet_run(syncer={"usd_per_h": 0.5}, budget={"usd": 1000, "wall_h": 100, "nc_usd_per_h": 0})
+    now = run.clock.t
+    run.state.update({"run_t0": now - 3600, "ups": [{"pid": 1, "start": now - 3600, "seen": now, "end": None}]})
+    run.retire_pool("i1-sglang")  # no pool state: its target (1) for the up time until its removal
+    run.clock.t += 3600
+    run.state["ups"][0]["seen"] = run.clock.t
+    ((hours, usd),) = run.retired_pool_spend()
+    assert hours == pytest.approx(1.0) and usd == pytest.approx(2.0)
 
 
 def test_the_budget_stops_the_whole_fleet(fleet_run):

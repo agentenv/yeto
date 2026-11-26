@@ -740,7 +740,8 @@ class FleetRuntime:
 
     # -- spend
     def spend(self, now: float | None = None) -> Any:
-        """:func:`yeto.breakers.fleet.fleet_spend`: every pool's billed node hours, each
+        """:func:`yeto.breakers.fleet.fleet_spend`: every pool's billed node hours (the pools
+        the desired state removed included: :meth:`Run.retired_pool_spend`), each
         island's trainer price for the launch's billed hours (one launch runs every
         island's trainer), and the syncer (``syncer.usd_per_h``) for the same hours."""
         from yeto.breakers import fleet as breakers_fleet  # noqa: PLC0415
@@ -753,7 +754,8 @@ class FleetRuntime:
         if self.plan.per_island:  # its own launch per island: the trainer worker's launch records
             island_hours, island_prices = self.island_launch_spend(now, island_prices)
         return breakers_fleet.fleet_spend(
-            pool_node_hours=[run.pool_spend_rate(i, now) for i in range(len(run.pools))],
+            pool_node_hours=[*(run.pool_spend_rate(i, now) for i in range(len(run.pools))),
+                             *run.retired_pool_spend(now)],  # and the pools the desired state removed
             island_hours=island_hours, island_usd_per_h=island_prices,
             syncer_hours=hours, syncer_usd_per_h=breakers_fleet.syncer_price(run.cfg))
 
