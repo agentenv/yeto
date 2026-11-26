@@ -78,7 +78,9 @@ def test_an_unavailable_watch_is_no_mark():
 def test_the_trainer_card_draws_a_straggler_badge_until_cleared(tmp_path):
     flagged = _smoke(tmp_path / "a", _reducer(_flagged()))
     assert "straggler" in flagged["texts"]  # the topology's trainer card
-    assert flagged["nodes"].count("straggler") == 1  # Islands now: trainer 1's row only
+    # Islands now: trainer 1's row says straggler in warn colour in place of "ok", once
+    assert flagged["nodes"].count('<span class="wn">straggler</span>') == 1
+    assert "ok · straggler" not in flagged["nodes"] and "straggler" not in flagged["matrix"]  # not in Fragments
     for r in (_reducer(), _reducer(_flagged(), _cleared())):
         out = _smoke(tmp_path / str(len(r.fleet_records)), r)
         assert "straggler" not in out["texts"] and "straggler" not in out["nodes"]
@@ -106,4 +108,7 @@ def test_the_event_stream_shows_the_straggler_events(tmp_path):
     events = _smoke(tmp_path, _reducer(_flagged(at=end + 10), _cleared(at=end + 20)))["events"]
     assert "<b>island_straggler</b>" in events and "missed_cycles=3" in events and "action=wait" in events
     assert "<b>island_straggler_cleared</b>" in events and "reason=a push of it is merged again" in events
+    cleared = events.split("<b>island_straggler_cleared</b>", 1)[1].split("</div>", 1)[0]
+    assert "missed_cycles" not in cleared  # its reason only
     assert 'title="lag"' in events and 'title="back"' in events
+    assert "<b>island_straggler</b> trainer 1 action=wait missed_cycles=3" in events

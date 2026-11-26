@@ -43,7 +43,8 @@ from .sources import COST_EVENTS_FILE, up_state_stops
 
 # a trainer island the syncer has merged no push of for N merge cycles, and its end (or why
 # that cannot be watched): fleet.jsonl events that are not lifecycle states
-STRAGGLER_EVENTS = frozenset({"island_straggler", "island_straggler_cleared", "island_straggler_unavailable"})
+STRAGGLER_EVENTS = frozenset({"island_straggler", "island_straggler_cleared", "island_straggler_unavailable",
+                              "island_straggler_available"})
 STRAGGLER_TS = "straggler"  # fleet_shape_ts key: the time of the island's newest straggler mark event
 FLEET_EVENTS = frozenset({"island_launch", "island_ready", "island_lost", "island_stop", "island_done",
                           "cost_tick"}) | STRAGGLER_EVENTS

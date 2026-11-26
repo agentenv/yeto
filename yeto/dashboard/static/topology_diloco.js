@@ -479,7 +479,7 @@ function matrix(tn){
   h+="</tr>";
   var finalOnSyncer=false;
   if(sft())h+=learnerRows(tn);else D.trainers.forEach(function(tr){var off=!tr.live&&!(tr.status==="done"||tr.finalized);
-    h+='<tr><th class="rh">Trainer '+esc(tr.id)+'<span class="ns">'+esc((tr.gpu||"")+(fin(tr.step)?" · step "+tr.step:fleet()?" · not trained yet":" · step —")+(tr.island_now?" · "+tr.island_now.state:off?" · "+(tr.status||"lost"):tr.failure?" · failed":"")+(straggler(tr)&&!D.done?" · straggler":""))+"</span></th>";
+    h+='<tr><th class="rh">Trainer '+esc(tr.id)+'<span class="ns">'+esc((tr.gpu||"")+(fin(tr.step)?" · step "+tr.step:fleet()?" · not trained yet":" · step —")+(tr.island_now?" · "+tr.island_now.state:off?" · "+(tr.status||"lost"):tr.failure?" · failed":""))+"</span></th>";
     for(var f=0;f<P;f++){var v=tr.versions?tr.versions[f]:null,lg=D.done?0:lag(tr,f),s=tr.since?tr.since[f]:null,pushed=(tr.pushed||{})[String(f)]!=null;
       var cls=off||tr.failure?"off":lg>=2?"lag2":lg===1?"lag1":"",ready=fin(s)&&H&&s>=H;
       var mk=pushed?'<span class="mk dl">↑</span>':lg&&tr.live?'<span class="mk wt">↓'+lg+"</span>":"";

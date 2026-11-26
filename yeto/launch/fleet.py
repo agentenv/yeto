@@ -1115,8 +1115,10 @@ class FleetController:
         is written once (``island_straggler`` / ``island_straggler_cleared`` in fleet.jsonl,
         ``straggler`` in the island's record) and its policy is asked what to do; a flagged
         island that stops running (recovering, draining, ended) is cleared, naming why. The
-        watch's notices (nothing can be watched here, or its tape stays silent) are written
-        once each as ``island_straggler_unavailable``. Never raises: a watch that fails is a
+        watch's notices (nothing can be watched here, its tape went silent, it is read again)
+        are written once each (``island_straggler_unavailable`` / ``_available``). At its first
+        poll, a mark an earlier launcher left in an island's record is cleared (``controller
+        restarted``): this watch judges the island again. Never raises: a watch that fails is a
         missing view, not the end of supervision."""
         if self.straggler is None or self.recorder is None:
             return
@@ -1131,6 +1133,9 @@ class FleetController:
                 names[ref.island] = rec
                 if rec["state"] == RUNNING and not rec.get("draining"):
                     running[ref.island] = (rec.get("incarnation"), rec.get("job_id"))
+            if not getattr(self, "_straggler_marks_checked", False):
+                self._straggler_marks_checked = True
+                self._clear_left_marks(names)
             for signal in self.straggler.poll(running):
                 rec = names.get(signal.island)
                 if rec is not None:
@@ -1138,12 +1143,35 @@ class FleetController:
             # each trainer island of this launch names it (a nameless fleet.jsonl event would be
             # priced as an island of its own); kept until the launch knows its islands
             if names:
-                for why in self.straggler.notices():
+                for kind, why in self.straggler.notices():
                     print(f"[launcher] island straggler watch: {why}", file=sys.stderr)
                     for rec in names.values():
-                        self._fleet(st.UNAVAILABLE_EVENT, rec["name"], reason=str(why)[:500])
+                        self._fleet(kind, rec["name"], reason=str(why)[:500])
         except Exception as error:  # noqa: BLE001 - a watch, never the end of supervision
             print(f"[launcher] island straggler watch: {type(error).__name__}: {error}"[:400], file=sys.stderr)
+
+    def _clear_left_marks(self, names) -> None:
+        """Close the stretch an earlier launcher of this run left open in a record (it was
+        restarted, or this one adopted the island): written once, then judged again."""
+        from . import island_straggler as st
+
+        store = getattr(self.recorder, "store", None)
+        if store is None:
+            return
+        for island, rec in names.items():
+            try:
+                left = (store.read(island) or {}).get("straggler")
+            except Exception as error:  # noqa: BLE001 - its record does not read: nothing to close
+                print(f"[launcher] {rec['name']}: island record: {type(error).__name__}: {error}"[:300],
+                      file=sys.stderr)
+                continue
+            if not left:
+                continue
+            fields = {k: left.get(k) for k in ("missed_cycles", "merges", "fragments", "newest_step",
+                                               "last_merged_step") if isinstance(left, dict) and k in left}
+            print(f"[launcher] {rec['name']}: no longer a straggler (controller restarted)", file=sys.stderr)
+            self._fleet(st.CLEARED_EVENT, rec["name"], **fields, reason="controller restarted")
+            self._record(rec, straggler=None)
 
     @staticmethod
     def _not_running(rec) -> str:
