@@ -748,7 +748,10 @@ island again. A refused push (its base lags too far) ends the excuse once, so an
 island only a little slower than the others gets back into the rounds; after
 that second chance it stays excused until a push of it is merged, so an island
 whose pushes are always refused cannot make every round wait for the deadline.
-A new connection generation is not excused. With nothing (or fewer than `--q-min`)
+A new connection generation is not excused. With `--max-base-lag 0` (no carry)
+an island that fell behind once is not taken back: each of its pushes answers
+from a base one round behind and is refused, and it shows only as
+`island_low_contribution` on the syncer tape. With nothing (or fewer than `--q-min`)
 arrived the deadline still starts a new attempt.
 
 Every island in a pool heartbeats every lease/3 (default lease 150 s,

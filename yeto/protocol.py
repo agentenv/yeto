@@ -30,6 +30,7 @@ import hashlib
 import itertools
 import os
 import queue
+import re
 import secrets
 import socket
 import struct
@@ -937,6 +938,8 @@ class ProtocolError(RuntimeError):
 # differs from the running session (server.rs admit_session / profile check).
 # The syncer and the admitted islands keep running; only this island stops.
 SESSION_REJECT_PREFIXES = (
+    # Narrowed by session_reject_metric: the same layout with another backend identity
+    # (a compat group) is session_contract_mismatch / compat_group_mismatch.
     ("session mismatch", "layout_hash_mismatch"),
     ("HELLO syncer semantic profile", "syncer_profile_mismatch"),
     ("HELLO is missing the required syncer semantic profile", "syncer_profile_mismatch"),
@@ -947,6 +950,31 @@ SESSION_REJECT_PREFIXES = (
     # Local init: the islands did not load the same base weights.
     ("init digest mismatch", "init_digest_mismatch"),
 )
+
+
+# The fields of the syncer's generic "session mismatch" refusal (server.rs admit_session).
+_SESSION_FIELDS = re.compile(r"(expected|got) session_contract_hash=(\S+) layout_fingerprint=(\S+)")
+
+
+def session_reject_metric(message: str) -> str | None:
+    """The strict metric of a syncer refusal ``message`` (None: not a session refusal).
+
+    A "session mismatch" names what differs: ``compat_group_mismatch`` when the syncer
+    says the compat groups differ, ``session_contract_mismatch`` when both sides have the
+    same layout fingerprint (the backend identity, e.g. the compat group of another card
+    type, or the island contract the head pins differs), ``layout_hash_mismatch`` when the
+    layouts differ (or the message does not say)."""
+    metric = next((m for prefix, m in SESSION_REJECT_PREFIXES if message.startswith(prefix)), None)
+    if metric != "layout_hash_mismatch":
+        return metric
+    if "compat_group differs" in message:
+        return "compat_group_mismatch"
+    if "the head pins" in message:
+        return "session_contract_mismatch"
+    fields = {side: (contract, layout) for side, contract, layout in _SESSION_FIELDS.findall(message)}
+    if {"expected", "got"} <= set(fields) and fields["expected"][1] == fields["got"][1]:
+        return "session_contract_mismatch"
+    return metric
 
 
 class LeaseExpiredError(ConnectionError):
@@ -3160,10 +3188,7 @@ class SyncerClient:
                 self._socket_failed(gen, LeaseExpiredError(message))
                 return
             text = f"syncer rejected protocol session: {message}"
-            metric = next(
-                (m for prefix, m in SESSION_REJECT_PREFIXES if message.startswith(prefix)),
-                None,
-            )
+            metric = session_reject_metric(message)
             self._protocol_failed(
                 gen,
                 SessionRejectedError(metric, text) if metric else ProtocolError(text),

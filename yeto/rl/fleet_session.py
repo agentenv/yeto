@@ -10,7 +10,14 @@ prepares it (nothing is ordered or read remotely) and compared with the syncer l
 * the HELLO-bound island flags (``--num-learners``, layout, profile, rounds; the
   island's own learner id masked),
 * the learners the syncer waits for and the syncer_epoch the island JOINs with,
-* each island's learner id: unique, and below the syncer's ``--rl-sync-max-learners``.
+* each island's learner id: unique, and below the syncer's ``--rl-sync-max-learners``,
+* the backend identity bound into each island's session contract: the compat group
+  its ``--gpu`` card declares (``--rl-compat-group`` replaces it) and the identity
+  mode (``--rl-identity``). Under strict identity two islands on cards of different
+  compat groups offer different session contract hashes (same layout), and the
+  syncer refuses the later one's HELLO ("session mismatch"); ``yeto fleet island
+  move/add`` also compares the island with the ones that hold the fleet's running
+  session (the other trainer islands, and a moved island's previous machines).
 
 ``yeto run up`` (dry run too) checks the trainer islands of the desired state (else the
 run config's) at its preflight; ``yeto fleet island add/move`` checks the island it
@@ -22,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import io
 import re
+import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -39,6 +47,10 @@ class LaunchSession:
     hello: str
     syncer_epoch: int
     max_learners: int | None
+    # The backend identity's hardware slot this launch binds (None: not one island's
+    # launch, or a card the catalog cannot place; the launch reports that itself).
+    compat_group: str | None = None
+    strict_identity: bool = True
 
 
 def _prepare(args: Any) -> None:
@@ -67,7 +79,67 @@ def launch_session(argv: list[str], name: str, *, prepare: Callable[[Any], None]
     return LaunchSession(name=name, learner_id=None if learner is None else int(learner),
                          profile=dict(profile.__dict__), profile_sha256=profile.sha256, learners=learners,
                          hello=" ".join(hello.split()), syncer_epoch=island_syncer_epoch(args),
-                         max_learners=None if max_learners is None else int(max_learners))
+                         max_learners=None if max_learners is None else int(max_learners),
+                         compat_group=launch_compat_group_of(args),
+                         strict_identity=getattr(args, "rl_identity", "strict") != "relaxed")
+
+
+def launch_compat_group_of(args: Any) -> str | None:
+    """The compat group a one-cluster launch exports to its island (the launcher's
+    ``rl_island_task._island_compat_group``: the ``--gpu`` card's catalog group, or
+    ``--rl-compat-group``). None for a launch of several clusters (the syncer launch)
+    or a card the catalog does not know (the island task refuses it with its own message)."""
+    from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
+    from yeto.hw.catalog import UnknownCardType, launch_compat_group  # noqa: PLC0415
+
+    try:
+        specs = parse_gpu_spec(str(getattr(args, "gpu", None) or ""))
+        if len(specs) != 1:
+            return None
+        return launch_compat_group(specs[0].gpu, getattr(args, "rl_compat_group", None))
+    except (UnknownCardType, ValueError, KeyError):
+        return None
+
+
+def _where(island: LaunchSession) -> str:
+    return f"island {island.name} (learner {island.learner_id})"
+
+
+def identity_problems(syncer: LaunchSession, islands: list[LaunchSession],
+                      running: Iterable[LaunchSession] = ()) -> list[str]:
+    """The islands whose session contract would differ from the others' only by the
+    backend identity: a compat group or an identity mode of their own. ``running``: the
+    launches holding the fleet's running session, compared with but not reported for.
+    The syncer admits a different compat group only when it and the island run
+    ``--rl-identity relaxed`` (the island then binds the semantic identity)."""
+    from yeto.hw.catalog import compat_refusal  # noqa: PLC0415
+
+    out: list[str] = []
+    held = [r for r in running if r.compat_group is not None]
+    for index, island in enumerate(islands):
+        if island.compat_group is None:
+            continue
+        peers = held + [i for i in islands[:index] if i.compat_group is not None]
+        for peer in peers:
+            if peer.strict_identity != island.strict_identity:
+                mode = lambda s: "strict" if s.strict_identity else "relaxed"  # noqa: E731
+                out.append(f"{_where(island)}: --rl-identity {mode(island)}, {_where(peer)} runs "
+                           f"--rl-identity {mode(peer)}: their session contracts bind different backend "
+                           "identities and the syncer refuses the later HELLO (session_contract_mismatch)")
+                break
+            strict = island.strict_identity or syncer.strict_identity
+            if compat_refusal(peer.compat_group, island.compat_group, strict=strict) is not None:
+                others = sorted({p.name for p in peers if p.compat_group == peer.compat_group})
+                out.append(
+                    f"{_where(island)}: compat_group {island.compat_group}, the fleet's session holds "
+                    f"compat_group {peer.compat_group} (island(s) {', '.join(others)}): under strict identity "
+                    "the compat group is part of the session contract, so the syncer refuses this island's "
+                    "HELLO (session_contract_mismatch; same layout, different session_contract_hash). Put it on "
+                    f"a card of compat_group {peer.compat_group}, or relax it explicitly for the whole fleet: "
+                    "--rl-compat-group <vendor>-<card> (one declared group for every island) or --rl-identity "
+                    "relaxed (compat_group is provenance only); numeric tolerance across cards is not calibrated")
+                break
+    return out
 
 
 def problems(syncer: LaunchSession, islands: Iterable[LaunchSession]) -> list[str]:
@@ -75,7 +147,7 @@ def problems(syncer: LaunchSession, islands: Iterable[LaunchSession]) -> list[st
     out: list[str] = []
     seen: dict[int, str] = {}
     for island in islands:
-        where = f"island {island.name} (learner {island.learner_id})"
+        where = _where(island)
         if island.profile_sha256 != syncer.profile_sha256:
             fields = {k: (syncer.profile.get(k), island.profile.get(k))
                       for k in sorted(set(syncer.profile) | set(island.profile))
@@ -102,10 +174,13 @@ def problems(syncer: LaunchSession, islands: Iterable[LaunchSession]) -> list[st
 
 
 def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_epoch: int | None = None,
-          prepare: Callable[[Any], None] | None = None) -> None:
+          prepare: Callable[[Any], None] | None = None, running: Iterable[dict[str, Any]] = ()) -> None:
     """Raise ValueError naming every disagreement between the syncer launch (``syncer_argv``)
     and the island launches of ``members`` (trainer members of the desired state), each
-    compiled with the syncer record's term (``syncer_epoch``; None: the syncer launch's)."""
+    compiled with the syncer record's term (``syncer_epoch``; None: the syncer launch's),
+    and between the backend identities of ``members`` and ``running`` (the trainer
+    members whose launches hold the fleet's running session; compared with only: one
+    whose launch does not compile is left out with a note)."""
     from yeto.rl import island_launches as il  # noqa: PLC0415
 
     try:
@@ -121,7 +196,15 @@ def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_e
         except (OSError, ValueError) as error:  # json.JSONDecodeError is a ValueError
             raise ValueError(f"island {member.get('name')} (learner {member.get('learner_id')}): its launch "
                              f"refuses its options: {type(error).__name__}: {error}") from None
-    found = problems(syncer, islands)
+    held = []
+    for member in running:
+        try:
+            held.append(launch_session(il.launch_argv(member, syncer=record), str(member.get("name")),
+                                       prepare=prepare))
+        except (OSError, ValueError) as error:
+            print(f"fleet session: island {member.get('name')}'s launch was not compiled for the identity "
+                  f"check ({type(error).__name__}: {error})", file=sys.stderr)
+    found = problems(syncer, islands) + identity_problems(syncer, islands, held)
     if found:
         raise ValueError("the fleet's launches do not agree on the syncer session (the syncer would refuse "
                          "these islands at HELLO): " + "; ".join(found))

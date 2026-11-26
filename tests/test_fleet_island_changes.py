@@ -223,11 +223,11 @@ def test_a_move_without_a_price_takes_the_table_s_never_the_old_one(fleet_store,
 
     before = dz.trainers(store.read())["sglang"]["usd_per_h"]
     assert before is not None
-    assert run_cli("move", "--name", "sglang", "--gpu", "modal:2x8xb200") == 0
+    assert run_cli("move", "--name", "sglang", "--gpu", "modal:2x8xh100") == 0  # its compat group (H100)
     member = dz.trainers(store.read())["sglang"]
     assert member["usd_per_h"] is None
     record = {"usd_per_h": member["usd_per_h"], "gpu": member["gpu"]}
-    assert trainer_worker.incarnation_price(record) == trainer_worker.table_usd_per_h("modal:2x8xb200") != before
+    assert trainer_worker.incarnation_price(record) == trainer_worker.table_usd_per_h("modal:2x8xh100") != before
     # machines the table does not price: refused under the budget, nothing written
     generation = store.read()["generation"]
     assert run_cli("move", "--name", "sglang", "--gpu", "aws:2xh100@us-east-2") == 2
