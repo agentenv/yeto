@@ -559,6 +559,10 @@ _PLACEMENT = (
              "HBM GiB, host memory GiB, fabric, mounts, image). The launcher validates the "
              "file before any cloud or SSH work and refuses an unknown card or a missing "
              "device family; the SSH harness consumes it"),
+    cli_flag("--rl-node-lease-wait-s", type=float, default=3600.0, metavar="SECONDS",
+             help="ssh: trainer island on an inventory with lease_store (yeto.launch.node_lease): how long "
+             "the launch waits for free trainer nodes while other runs hold them (a line every 5 minutes; "
+             "the run's STOP flag ends the wait); past it the launch is refused. Without lease_store unused"),
     cli_flag("--model-store", default=None, metavar="URI",
              help="RL island: cloud-local pinned HF snapshots (COLDSTART-PLAN #4). "
              "nebius-fs://<computefilesystem-id> attaches that Nebius shared filesystem "

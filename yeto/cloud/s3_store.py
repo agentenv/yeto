@@ -1559,10 +1559,12 @@ class S3ObjectStore:
         return keys, (contents[-1]["Key"][strip:] if page.get("IsTruncated") and contents else None)
 
     def list_meta(self, prefix: str, *, start_after: str = "",
-                  end: str = "") -> tuple[list[tuple[str, float]], float]:
+                  end: str = "", require_date: bool = False) -> tuple[list[tuple[str, float]], float | None]:
         """``([(key, LastModified epoch s)], server time)`` under ``prefix``: the
         object times and the clock they compare to both come from the server
         (the ``Date`` header of the listing), never from this host's clock.
+        ``require_date``: a listing without a ``Date`` header gives None as the server
+        time (the caller falls back to its own clock) instead of the newest object time.
 
         ``start_after`` / ``end``: only the keys ``start_after < key < end`` (byte
         order). The listing starts there (``StartAfter``) and stops at the first
@@ -1588,7 +1590,7 @@ class S3ObjectStore:
                     if not item["Key"].endswith("/") and (stop is None or item["Key"] < stop)]
             if stop is not None and contents and contents[-1]["Key"] >= stop:
                 break
-        if now is None:  # no Date header: the newest object time is a lower bound of the server clock
+        if now is None and not require_date:  # no Date header: the newest object time is a lower bound
             now = max((t for _, t in out), default=0.0)
         return out, now
 

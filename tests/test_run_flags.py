@@ -277,6 +277,8 @@ _NON_RL_LITERALS = frozenset({
     "--entrypoint", "--expected-island-contract", "--expert-selection", "--out", "--expert-token-weights", "--final-ack-timeout-s", "--final-cut-payload", "--final-grace-s", "--follow", "--force",
     "--grace-arrival-quantile", "--grace-min-ms", "--terminal-grace-ms",
     "--format", "--get", "--global", "--gpus", "--head",
+    # docker / podman ps of the node lease takeover probe (node_lease.still_runs_script)
+    "--filter",
     # nvidia-smi compute apps of an ssh sampler pool's preflight.require_idle (ssh_sampler_pool)
     "--query-compute-apps",
     "--include-dashboard", "--index-url", "--ipc", "--island-lease-s",

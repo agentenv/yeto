@@ -248,10 +248,13 @@ def _check_trainer_island(args) -> None:
         raise SystemExit(f"--rl-trainer-island {m}: --gpu has {len(specs)} island(s)")
     cloud = specs[m].cloud
     if cloud == "ssh":
-        from .ssh_trainer_island import SshIslandError, inventory_trainer_nodes
+        from .sky_ops import learner_cluster_names
+        from .ssh_trainer_island import SshIslandError, inventory_trainer_nodes, trainer_leases
 
-        try:
-            inventory_trainer_nodes(args, specs[m])
+        try:  # inventory lease_store: the nodes the island's leases pick (None: the check as before)
+            leases = trainer_leases(args)
+            inventory_trainer_nodes(args, specs[m], leases=leases, name=None if leases is None else
+                                    learner_cluster_names(args.cluster_prefix, specs)[m])
         except SshIslandError as error:
             raise SystemExit(f"--rl-trainer-island {m}: {error}") from None
         from .ssh_trainer_island import code_source
