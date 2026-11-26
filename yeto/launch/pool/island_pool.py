@@ -2608,8 +2608,10 @@ class IslandPool(PoolMoves):
         """A node health check that could not read (``yeto.hw.node_health``; a check older
         than three periods is one): one ``node_health_read_failed`` event until a check
         reads again. What the check cannot judge on the node (``degraded``): one
-        ``node_health_degraded`` event. A check that reads ``lost`` makes the verdict
-        ``LOST`` (:func:`yeto.launch.pool.status.classify`)."""
+        ``node_health_degraded`` event. A check whose fabric manager restarted
+        (``fm_restarted``): one ``node_health_fm_restarted`` event per check (by its ``at``;
+        a check between two probes is seen in the next one's streak). A check that reads
+        ``lost`` makes the verdict ``LOST`` (:func:`yeto.launch.pool.status.classify`)."""
         from ...hw import node_health  # noqa: PLC0415
 
         health = node_health.fresh(getattr(probe, "health", None), now)
@@ -2617,6 +2619,12 @@ class IslandPool(PoolMoves):
             return
         if health.get("degraded"):
             self._once(m, "health_degraded", node_health.EVENT_DEGRADED, reasons=list(health["degraded"])[:5])
+        restarted = health.get("fm_restarted")
+        if isinstance(restarted, Mapping) and not health.get("stale"):
+            key = f"health_fm_restarted@{health.get('at')}"
+            if key not in m.alerted:
+                m.alerted[:] = [k for k in m.alerted if not str(k).startswith("health_fm_restarted@")]
+                self._once(m, key, node_health.EVENT_FM_RESTARTED, **dict(restarted))
         if health.get("verdict") == "read_failed":
             self._once(m, "health_read", "node_health_read_failed", reasons=list(health.get("reasons") or [])[:5])
         elif "health_read" in m.alerted:

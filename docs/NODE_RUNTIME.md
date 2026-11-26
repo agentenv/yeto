@@ -290,11 +290,12 @@ Whether the node has NVSwitch of its own, in this order:
 
 | finding | NVSwitch |
 |---|---|
-| the driver lists NVSwitch devices in `/proc/driver/nvidia-nvswitch/devices`, or `/dev/nvidia-nvswitch<N>` exist, or `lspci` shows an NVIDIA PCI bridge (class `0680`) | yes (Hopper HGX) |
-| a GPU name starts with `GB` | no (an NVL72-class compute tray: its NVSwitches sit in the switch trays) |
+| a GPU name starts with `GB` | no (an NVL72-class compute tray: its NVSwitches sit in the switch trays), whatever else it shows |
+| the driver lists NVSwitch devices in `/proc/driver/nvidia-nvswitch/devices`, or `/dev/nvidia-nvswitch<N>` exist, or `lspci` shows an NVSwitch (class `0680`, `10de:1af1` A100 HGX or `10de:22a3` H100 / H200 HGX, from pci.ids) | yes (A100 / Hopper HGX) |
 | no GPU has a real NVLink fabric state (`N/A`, or no `Fabric` block) | no (PCIe) |
 | the VPD of a Mellanox (`15b3`) PCI function, any function, names the NVLink switch management port (`SMDL=SW_MNG`) | yes (HGX B200 / B300) |
 | every GPU is a B200 / B300 (not GB, not PCIe) and has a real fabric state | yes (HGX B200 / B300, without root; a VPD without the port does not overrule it) |
+| `lspci` shows another NVIDIA class `0680` bridge | yes (soft evidence) |
 | the VPD of every Mellanox function read and none names it | no |
 | anything else, or the fabric state did not read | not determined |
 
@@ -306,8 +307,13 @@ the GPU-name rule for a user that cannot read the VPD (it reads as root only). E
 read is bounded to 1 s (`timeout 1`), all of them to 3 s; the rest are not read, and
 without a `timeout` command none is. A node whose NVSwitch is not determined is never
 taken for one without. A section cut off after the state line says `FM section timed
-out after reading state`. Only a device, a PCI bridge or the VPD port is hard evidence
-of NVSwitch on the node; the GPU names are not.
+out after reading state`. Only a device, an NVSwitch PCI id or the VPD port is hard
+evidence of NVSwitch on the node; the GPU names and another NVIDIA `0680` bridge are
+not. A fabric manager that is not running on a node with soft evidence only is at most
+unread at the first check, never bad.
+
+On a GB compute tray the fabric manager is not judged at all: the switch trays run it,
+and the tray's own fabric state (`Completed`, or the fabric reason) judges the topology.
 
 The state of the fabric manager, its process first:
 
@@ -317,12 +323,27 @@ The state of the fabric manager, its process first:
 | anything else | runs | `active` (a GPU Operator driver container runs it, maybe next to a stale host unit that is disabled, inactive or failed) |
 | unit `loaded`, `inactive` / `failed` | none | `inactive` / `failed` (it stopped) |
 | no unit (`not-found`), or `inactive` / `failed` of a unit that is not loaded (`masked`) | none | not running |
-| any but `loaded` | not seen (`/proc/1/comm` not readable: `hidepid`) | not read |
+| unit `loaded`, `failed`, active earlier in this boot (`ActiveEnterTimestampMonotonic` > 0) | not seen | `failed` (it ran here and failed) |
+| any other `inactive` / `failed`, or no unit | not seen | not read (a `node_health_degraded` event says so) |
+
+The processes are not seen when `/proc/1/comm` cannot be read (`hidepid`), or when the
+check runs in a container (the output of `systemd-detect-virt -c`, where `none` means not
+a container; without the tool, a non-empty `/run/systemd/container`, `/.dockerenv`,
+`/run/.containerenv`, or `container=` in pid 1's environment; none of them readable means
+not a container). A container run with `--pid=host` may read as one: its fabric manager
+then reads unread, never bad. A system
+container with its own pid 1 sees the host's NVSwitch devices but not the host's fabric
+manager. A stale host unit that stopped, next to a fabric manager that runs in a driver
+container, looks the same as one that is down when the processes are hidden, so it is not
+judged: the event `processes hidden (hidepid): fabric manager not judged` (or `in a
+container: ...`) says so, once per node. A fabric that is not `Completed` still makes the
+node bad by its own reason.
 
 `systemctl is-active` prints `inactive` for a unit that does not exist, hence the
-LoadState. The check reads `systemctl show -p LoadState` and cuts the prefix itself
-(`--value` needs systemd 230). It counts the processes by `/proc/<pid>/comm`, which the
-kernel cuts to 15 characters (`nv-fabricmanage`).
+LoadState. The check reads `systemctl show -p LoadState` (and
+`ActiveEnterTimestampMonotonic`) and cuts the prefix itself (`--value` needs systemd
+230). It counts the processes by `/proc/<pid>/comm`, which the kernel cuts to 15
+characters (`nv-fabricmanage`).
 
 A fabric manager that is not running, at the first check:
 
@@ -331,6 +352,17 @@ A fabric manager that is not running, at the first check:
   fabric is managed off-host (a shared NVSwitch guest VM, whose fabric manager runs on
   the service VM; a guest whose NVSwitch cannot be determined);
 - unread otherwise (the fabric state judges the node).
+
+A loaded unit that is `inactive` or `failed`, with no process, at the first check, on a
+node with soft evidence of NVSwitch only (HGX B300 as a user without root) and every
+fabric `Completed/Success`:
+
+- ok when the unit was never active in this boot (`ActiveEnterTimestampMonotonic` 0): the
+  fabric is managed off-host, and the guest image ships the unit;
+- bad when it was (> 0): it ran here and stopped;
+- unread when that time did not read.
+
+With hard evidence, or a fabric that is not `Completed`, any state but `active` is bad.
 
 The rules over the checks:
 
@@ -350,13 +382,19 @@ The rules over the checks:
   judges nothing and is not counted as the first one. The same rule, on one check
   alone, is `yeto.hw.node_health.fabric_manager_absolute`: `ok`, `bad` or `unread`.
 - On a node that must run it, an `NRestarts` that grew since the previous check of the
-  same boot is bad for that check. A unit in a restart loop can read `active` at every
-  check; a loop that goes on makes the node `lost`. `NRestarts` counts only the
-  restarts systemd makes itself, so this needs a `Restart=` setting on the unit (a
-  drop-in such as `Restart=on-failure`); restarts by hand do not count. A fabric
-  manager without its unit has no `NRestarts`: its process's pid and start time (field
-  22 of `/proc/<pid>/stat`) stand in. Another process in the same boot is one restart,
-  bad for that check.
+  same boot is a restart. Every check that saw one writes a `node_health_fm_restarted`
+  event (its streak, `NRestarts` or the process ids). A restart is a reason only when
+  the fabric manager restarted at 3 checks in a row (`FM_RESTART_STREAK`): a unit in a
+  restart loop can read `active` at every check, and a loop that goes on makes the node
+  `lost` at the 4th (about 4 minutes, on purpose: one or two restarts that come back
+  lose no node). A check without a restart zeroes the streak; a read failure keeps it.
+  A fabric manager that is down after a restart is bad by its state, at once.
+  `NRestarts` counts only the restarts systemd makes itself, so this needs a `Restart=`
+  setting on the unit (a drop-in such as `Restart=on-failure`); restarts by hand do not
+  count. A fabric manager without its unit has no `NRestarts`: its process's pid and
+  start time (field 22 of `/proc/<pid>/stat`) stand in. A restart is every process of
+  the previous check gone (one more process that comes and goes is none), counted in
+  the same streak.
 - A new boot id forgets all of it. A fabric manager never active since the reboot is
   judged as before: one bad check when it was active before the reboot (on a node with
   NVSwitch), then the fabric state judges the node. A fabric manager that does not
@@ -366,12 +404,13 @@ The rules over the checks:
 Not yet seen on our own hardware: the VPD keyword on an HGX B300 node, and that a
 GB300 tray's GPU names start with `GB`. The rules above follow the public sources.
 
-Known limit: on an HGX B300 node checked as a user that cannot read the VPD, there is no
-hard evidence of NVSwitch, only the GPU names. If a GPU Operator driver container runs
-the fabric manager and it dies after the fabric reads `Completed`, a check that never
-saw its process takes the fabric for one managed off-host. New CUDA launches fail once
-the fabric manager is gone, so the trainer reports the error itself. A check that saw
-the process earlier in the boot does catch it (the per-boot memory).
+Known limit: on an HGX B300 bare-metal node checked as a user that cannot read the VPD,
+there is no hard evidence of NVSwitch, only the GPU names. If its fabric manager has no
+loaded unit (a GPU Operator driver container runs it) and dies after the fabric reads
+`Completed`, a check that never saw its process takes the fabric for one managed
+off-host. New CUDA launches then fail with `cudaErrorSystemNotReady`, so the trainer
+reports the error itself. A check that saw the process earlier in the boot does catch
+it (the per-boot memory), and so does a loaded unit that was active in this boot.
 
 A kernel log without timestamps (dmesg's default has them) is followed by its last
 line, how often that line ends the log, and the line before it, so lines that rotate

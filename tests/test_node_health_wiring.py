@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from test_cluster_preflight import ibstat_text  # tests/ is on sys.path
 from test_nc_elastic import Clock as PoolClock
 from test_nc_elastic import Cloud, _names, _pool, _ready_member, _run
-from test_node_health import HCA, node_text, xid_line, xid_text
+from test_node_health import HCA, fm_text, node_text, xid_line, xid_text
 from test_rl_ssh_resident import NAMES, FakeCluster, _controller, b300, make_ops
 from test_rl_ssh_resident import _cards  # noqa: F401 - autouse: no card tool, a resource ledger in tmp
 from test_rl_ssh_resident import Clock as IslandClock
@@ -643,6 +643,26 @@ def test_a_multi_node_island_says_once_what_its_check_cannot_judge(tmp_path):
                                 "no NCCL_IB_HCA: the ports are not judged"]
 
 
+def test_an_island_logs_every_check_of_a_fabric_manager_restart_streak(tmp_path):
+    # REV-905e: node_health_fm_restarted at each check that saw a restart (never degraded)
+    cluster = HealthCluster(NAMES)
+    clock = IslandClock()
+    ops = make_ops(tmp_path, cluster, clock=clock, health_every_s=60.0)
+    ops.add("isl", SshTrainerSpec(nodes=tuple(b300(i) for i in range(3)), run_id="run1", workdir="/opt/yeto",
+                                  run_script="echo island", env={"NCCL_IB_HCA": HCA}))
+    ops.start("isl")
+    cluster.health["b300-1"] = [fm_text("active", restarts=n) for n in (0, 1, 2, 2, 3)]
+    for _ in range(5):
+        assert _tick(ops, clock) == "RUNNING"
+    events = ops.take_health_events("isl")
+    fm = [e for e in events if e["event"] == node_health.EVENT_FM_RESTARTED]
+    assert [(e["node"], e["streak"], e["nrestarts"]) for e in fm] == [("b300-1", 1, 1), ("b300-1", 2, 2),
+                                                                     ("b300-1", 1, 3)]
+    assert fm[0]["reasons"] == ["nvidia-fabricmanager restarted 1x since the previous check"]
+    assert fm[0]["rank"] == 1 and "incarnation" in fm[0]
+    assert not any(e["event"] == node_health.EVENT_DEGRADED for e in events)
+
+
 def test_without_nccl_ib_hca_the_island_judges_the_ports_of_its_fabric_as_the_preflight(tmp_path):
     from test_cluster_preflight import ibstat_text as ib  # noqa: PLC0415
 
@@ -747,6 +767,29 @@ def test_the_pool_logs_a_stale_check_and_what_a_node_cannot_judge_once():
     assert _names(pool).count("node_health_read_failed") == 1
     stale = next(e for e in pool.events.events if e["event"].endswith("node_health_read_failed"))
     assert stale["reasons"][0].startswith("health check stale: the last one ")
+
+
+def test_the_pool_logs_each_check_of_a_fabric_manager_restart_streak_once():
+    clock = PoolClock()
+    cloud = Cloud(clock)
+    pool = _pool(clock, cloud, accounts=(1, 4))
+    m = _ready_member(pool, clock, cloud)
+    probe = cloud.probe
+    restarted = {"streak": 1, "nrestarts": 4, "reasons": ["nvidia-fabricmanager restarted 1x since the previous check"]}
+    health = {"verdict": "ok", "reasons": [], "at": clock.t, "every_s": 60, "fm_restarted": dict(restarted)}
+    cloud.probe = lambda member: replace(probe(member), health=dict(health)) if member.ticket == m.ticket \
+        else probe(member)
+    _run(pool, clock, clock.t + 180)  # the same check read at every probe: one event
+    health.update(at=clock.t, fm_restarted=dict(restarted, streak=2, nrestarts=5))
+    _run(pool, clock, clock.t + 30)
+    del health["fm_restarted"]
+    health["at"] = clock.t
+    _run(pool, clock, clock.t + 30)
+    events = [e for e in pool.events.events if e["event"].endswith("node_health_fm_restarted")]
+    assert [(e["streak"], e["nrestarts"]) for e in events] == [(1, 4), (2, 5)]
+    assert events[0]["ticket"] == m.ticket and events[0]["reasons"] == restarted["reasons"]
+    assert sum(str(k).startswith("health_fm_restarted@") for k in m.alerted) == 1
+    assert "node_health_degraded" not in _names(pool)
 
 
 def test_inventory_node_health_parses_at_the_top_and_per_node():
