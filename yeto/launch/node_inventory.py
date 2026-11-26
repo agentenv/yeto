@@ -126,7 +126,8 @@ _REQUIRED = ("name", "host", "device_family", "cpu_arch", "card", "cards_per_nod
              "host_memory_gib")
 _KNOWN = _REQUIRED + ("proxy_jump", "fabric", "interface", "address", "mounts", "image", "runtime",
                       "docker_args", "env", "price_per_card_hour", "roles", "scratch", "scratch_min_free_gib",
-                      "store_env_file")
+                      "store_env_file", "node_health")
+NODE_HEALTH_MODES = ("auto", "off")
 # node profile keys (unified-sampler-pool): parse_profile reads them, parse_node accepts and ignores them
 _PROFILE_KEYS = ("card_arch", "container", "paths", "model_source", "reach")
 # characters a host path field (scratch, store_env_file) may not hold: it is spliced
@@ -169,6 +170,9 @@ class Node:
     # an owner-only (0600) env file on the node holding the object store credential: the
     # trainer reads it there (docker --env-file), the launcher ships none (ssh_node_storage)
     store_env_file: str | None = None
+    # the running node's health check (yeto.hw.node_health): "auto" (on where the family has a
+    # checker) or "off"; None: not declared (auto, and nothing about it is printed)
+    node_health: str | None = None
 
     @property
     def hbm_gib_per_node(self) -> float:
@@ -274,11 +278,23 @@ def parse_images(raw: Any) -> dict[str, str]:
     return out
 
 
-def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None) -> Node:
+def parse_node_health(value: Any, where: str) -> str | None:
+    if value is None:
+        return None
+    if value is False:  # YAML reads a bare `off` as false
+        return "off"
+    if value not in NODE_HEALTH_MODES:
+        raise InventoryError(f"{where}: node_health must be one of {list(NODE_HEALTH_MODES)}, got {value!r}")
+    return str(value)
+
+
+def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None,
+               node_health: str | None = None) -> Node:
     """One inventory entry as a :class:`Node`; any gap refuses the launch.
 
     ``images`` is the inventory's ``images:`` map; a node without ``image``
-    takes the entry for its ``cpu_arch``."""
+    takes the entry for its ``cpu_arch``. ``node_health``: the inventory's top-level
+    value, for a node that declares none."""
     if not isinstance(raw, dict):
         raise InventoryError(f"inventory entry {index} must be a mapping, got {type(raw).__name__}")
     name = raw.get("name")
@@ -394,6 +410,7 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
         scratch=scratch,
         scratch_min_free_gib=min_free,
         store_env_file=store_env_file,
+        node_health=parse_node_health(raw["node_health"], f"node {name}") if "node_health" in raw else node_health,
     )
     try:
         node.compat_group  # noqa: B018 - an unknown HBM variant fails here, not at launch
@@ -405,21 +422,24 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
 def parse_inventory(document: Any) -> list[Node]:
     """The ``nodes:`` list of a loaded inventory document."""
     images: dict[str, str] = {}
+    health = None
     if isinstance(document, list):
         entries = document
     elif isinstance(document, dict):
-        unknown = sorted(set(document) - {"nodes", "images"})
+        unknown = sorted(set(document) - {"nodes", "images", "node_health"})
         if unknown:
             raise InventoryError(f"unknown top-level inventory field(s) {unknown} "
-                                 f"(known: ['images', 'nodes'])")
+                                 f"(known: ['images', 'node_health', 'nodes'])")
         entries = document.get("nodes")
         images = parse_images(document.get("images"))
+        health = parse_node_health(document.get("node_health"), "inventory")
     else:
         raise InventoryError(f"the inventory must be a mapping with a nodes list, got "
                              f"{type(document).__name__}")
     if not isinstance(entries, list) or not entries:
         raise InventoryError("the inventory must contain at least one node under nodes:")
-    nodes = [parse_node(entry, index=index, images=images) for index, entry in enumerate(entries)]
+    nodes = [parse_node(entry, index=index, images=images, node_health=health)
+             for index, entry in enumerate(entries)]
     for key, label in (("name", "name"), ("host", "SSH target")):
         seen: dict[str, str] = {}
         for node in nodes:

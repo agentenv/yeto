@@ -220,5 +220,12 @@ def ports_of(sections: Mapping[str, Section]) -> list[IbPort]:
     return ibstat
 
 
+def link_layer_ports(ports: Sequence[IbPort], fabric: str | None) -> list[IbPort]:
+    """The ports NCCL uses on a node without ``NCCL_IB_HCA``: the InfiniBand ones of an
+    ``ib`` fabric, the Ethernet (RoCE) ones otherwise (the preflight's ``compute_ports``)."""
+    layer = "infiniband" if fabric == "ib" else "ethernet"
+    return natural_order([p for p in ports if p.link_layer.lower() == layer])
+
+
 def section_ok(sec: Section | None) -> bool:
     return sec is not None and sec.rc == 0

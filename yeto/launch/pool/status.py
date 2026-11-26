@@ -79,7 +79,9 @@ class Probe:
     way); ``progress_age_s``: seconds since its event tape last grew (None: unknown).
     From the engine's ``/metrics`` (None: not answered): ``gen_tokens`` (the
     generation-token counter), ``running`` / ``queued`` (requests in the engine);
-    ``trainer_wait``: the newest tape line is an ``rl_sampler_waiting`` heartbeat."""
+    ``trainer_wait``: the newest tape line is an ``rl_sampler_waiting`` heartbeat.
+    ``health``: the node runtime's newest health check (``yeto.hw.node_health``: its
+    ``verdict``, ``reasons``; None: not checked, e.g. a family without a checker)."""
 
     node: str
     sampler: str = "absent"
@@ -93,6 +95,7 @@ class Probe:
     vram_alerts: int | None = None  # rl_sampler_vram_high lines on the newest tape (vram_guard)
     vram_max_frac: float | None = None  # the last alert's fullest card
     metrics_off: bool = False  # no /metrics, and the engine's tape says it serves none (``tok=off``)
+    health: Any = None  # the node's health check (a mapping), or None
 
     @classmethod
     def parse(cls, text: str, returncode: int) -> Probe:
@@ -378,6 +381,20 @@ def ended_at_hard_end(status: LeaseStatus, now: float) -> bool:
             and status.end_reason in (None, "lost", "ended"))
 
 
+def health_lost(probe: Probe | None, *, now: float | None = None) -> list[str] | None:
+    """The reasons of a node whose health check reads ``lost`` (two bad checks in a row,
+    ``yeto.hw.node_health``); None when it does not (or was not checked). ``now``: a check
+    older than three periods reads as a read failure (``node_health.fresh``), not lost."""
+    health = getattr(probe, "health", None)
+    if now is not None:
+        from ...hw.node_health import fresh  # noqa: PLC0415
+
+        health = fresh(health, now)
+    if not isinstance(health, Mapping) or health.get("verdict") != "lost":
+        return None
+    return [str(r) for r in (health.get("reasons") or [])]
+
+
 def classify(status: LeaseStatus, probe: Probe | None, *, now: float, unreachable_since: float | None,
              cfg: ElasticConfig, joined: bool) -> Verdict:
     """The member's verdict this tick. ``probe`` None: not probed (not started yet);
@@ -407,6 +424,9 @@ def classify(status: LeaseStatus, probe: Probe | None, *, now: float, unreachabl
         if now - since >= cfg.unreachable_grace_s:
             return Verdict(LOST, f"unreachable for {now - since:.0f}s")
         return Verdict(NETWORK_BLIP, f"unreachable for {now - since:.0f}s")
+    sick = health_lost(probe, now=now)
+    if sick is not None:  # the node answers, its GPUs or fabric do not: lost as a node that is gone
+        return Verdict(LOST, "node health: " + ("; ".join(sick) or "lost"))
     if status.preempt_at is not None:
         return Verdict(PREEMPT_NOTICE, f"preempt_at in {status.preempt_at - now:.0f}s")
     if probe is not None and probe.sampler == "exited" and probe.exit_code == 0:

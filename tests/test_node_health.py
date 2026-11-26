@@ -324,10 +324,13 @@ def test_a_reset_keeps_the_baselines_and_clears_the_streak():
     for text in (node_text(), PORT_DOWN_TEXT(), PORT_DOWN_TEXT()):
         reading = w.observe(text)
     assert reading.lost and w.prev["xid"]["boot"] == BOOT
-    prev = dict(w.prev)
+    prev, before = dict(w.prev), w.record()
     w.reset()
-    assert w.last is None and w.record() is None and w.tracker.bad_in_row == 0 and w.prev == prev
+    assert w.last is None and w.tracker.bad_in_row == 0 and w.prev == prev
+    assert w.record() == {**before, "reset": True}  # the record stays until the next check
     assert w.observe(PORT_DOWN_TEXT()).verdict == "bad_once"  # a new job: one bad check is not lost
+    assert "reset" not in w.record() and w.record()["bad_in_row"] == 1
+    assert HealthWatch("cuda").record() is None and (HealthWatch("cuda").reset() or True)
 
 
 def test_what_a_check_cannot_judge_is_said_once_per_node():

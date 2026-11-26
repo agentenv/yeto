@@ -120,7 +120,8 @@ class FakeCluster(SshOps):
             return done(0, "x86_64\n")
         if script == "true":  # the reachability probe before a later start
             return done(0)
-        if "nvidia-smi" in script or script.startswith("docker pull"):
+        # the preflight's card check (a status call carries the node health check's nvidia-smi too)
+        if ("nvidia-smi" in script and NODE_STATE_MARK not in script) or script.startswith("docker pull"):
             return done(0, "ok\n")
         k, runs = self._k(script), self.runs[node.name]
         run = runs.get(k)

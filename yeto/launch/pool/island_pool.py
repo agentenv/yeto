@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -2184,6 +2184,7 @@ class IslandPool(PoolMoves):
                 m.joined = True
             self._metrics_seen(m, probe)
             self._vram_seen(m, probe)
+            self._health_seen(m, probe, now)
         elif m.unreachable_since is not None and m.unreachable_seen is not None:
             # not probed this tick (the status call failed, a start runs): the time since the
             # last look says nothing about the node, so the grace does not run through it.
@@ -2233,6 +2234,10 @@ class IslandPool(PoolMoves):
             self._retire(m, "overdue", lost=False, must_release=True)  # billed past its lease
             return
         if kind == el.LOST:
+            sick = el.health_lost(probe, now=now)
+            if sick is not None:  # its health check read lost (yeto.hw.node_health): the cause first
+                self._event("node_health", ticket=m.ticket, account=m.account, shard=m.shard, verdict="lost",
+                            reasons=sick)
             self._event("node_lost", ticket=m.ticket, account=m.account, shard=m.shard, detail=verdict.detail)
             if not m.joined:
                 self._fail(now, f"node of {m.ticket} lost before its sampler joined")
@@ -2598,6 +2603,24 @@ class IslandPool(PoolMoves):
             m.vram_alerts_seen = alerts
             self._event("sampler_vram_high", ticket=m.ticket, account=m.account, shard=m.shard,
                         max_frac=getattr(probe, "vram_max_frac", None), alerts=alerts)
+
+    def _health_seen(self, m: Member, probe: el.Probe, now: float) -> None:
+        """A node health check that could not read (``yeto.hw.node_health``; a check older
+        than three periods is one): one ``node_health_read_failed`` event until a check
+        reads again. What the check cannot judge on the node (``degraded``): one
+        ``node_health_degraded`` event. A check that reads ``lost`` makes the verdict
+        ``LOST`` (:func:`yeto.launch.pool.status.classify`)."""
+        from ...hw import node_health  # noqa: PLC0415
+
+        health = node_health.fresh(getattr(probe, "health", None), now)
+        if not isinstance(health, Mapping):
+            return
+        if health.get("degraded"):
+            self._once(m, "health_degraded", node_health.EVENT_DEGRADED, reasons=list(health["degraded"])[:5])
+        if health.get("verdict") == "read_failed":
+            self._once(m, "health_read", "node_health_read_failed", reasons=list(health.get("reasons") or [])[:5])
+        elif "health_read" in m.alerted:
+            m.alerted.remove("health_read")
 
     def _metrics_seen(self, m: Member, probe: el.Probe) -> None:
         """Count probes in a row of a running sampler with no engine ``/metrics`` (wrong port,

@@ -112,6 +112,7 @@ from .trainer_island import (
 KILL_GRACE_S = 30
 NODE_WAIT_S = 600.0  # a later start waits this long for an unreachable node (a reboot)
 NODE_POLL_S = 15.0
+NODE_CHECK_MARGIN_S = 15.0  # a status call that carries the node health check (bounded on the node) waits this longer
 
 
 def _overlay_safe_image(image: str) -> str | None:
@@ -1058,6 +1059,27 @@ class SshTrainerIslands:
         except Exception:  # noqa: BLE001 - timeout / ssh missing: no answer
             return None
         return parse_node_state(getattr(done, "stdout", "") or "")
+
+    def node_check(self, incarnation: int, rank: int, extra: str, *,
+                   timeout: float = 60.0 + NODE_CHECK_MARGIN_S) -> tuple[NodeState | None, str]:
+        """:meth:`node_state` and ``extra`` (a node health check script, ``yeto.hw.node_health``,
+        bounded on the node) in the same SSH call: ``(state, the call's output)``; ``(None, "")``
+        when it does not answer. A call that runs past ``timeout`` keeps what it printed: the
+        state line comes first, and a health part cut off reads as a timed-out check."""
+        from yeto.hw.node_health import TIMEOUT_MARK  # noqa: PLC0415
+
+        script = status_script(remote_paths(self.spec.run_id, self.name, incarnation),
+                               container=self._container(incarnation, rank)) + extra
+        try:
+            done = self.ops.run(self.spec.nodes[rank], script, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            raw = error.stdout or b""
+            text = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+            return parse_node_state(text), text + f"\n{TIMEOUT_MARK} ssh\n"
+        except Exception:  # noqa: BLE001 - ssh missing: no answer
+            return None, ""
+        text = getattr(done, "stdout", "") or ""
+        return parse_node_state(text), text
 
     def events(self, job: _SshJob) -> list[Mapping[str, Any]]:
         return job.events.take()

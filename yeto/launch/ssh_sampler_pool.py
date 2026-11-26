@@ -80,6 +80,12 @@ the tickets, holds and owed stops live in the run store
 (``fleet/pools/<pool>/provider/<token>.json``, one record per lock holder), so a
 controller that takes the pool over on another host keeps them.
 
+Node health: on the node runtime, a node of a family with a health checker (cuda,
+:mod:`yeto.hw.node_health`) is checked every minute while its sampler runs; the probe
+reads the newest check (``<workdir>/sampler/<shard>.health.json``) in its own ssh call.
+Two bad checks in a row read ``lost``: the pool takes the node for lost (fence, then a
+replacement), and the node's slot is held as for a node that stopped answering.
+
 Reach: every ``ssh`` to a node (preflight, code upload, start, probe, stop) goes
 through the node's ``reach`` in the inventory (:func:`yeto.node.transport.reach_options`):
 ``direct``; ``jump`` (``ProxyJump``; ``proxy_jump:`` is the same); ``relay`` (``via:
@@ -104,13 +110,14 @@ Pool config::
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -118,10 +125,12 @@ from . import engine_images, ssh_transport
 from .node_inventory import (
     NPU_HOST_DEVICES,  # noqa: F401 - re-exported (they lived here)
     NPU_HOST_MOUNTS,  # noqa: F401
+    InventoryError,
     Node,
     NodeProfile,
     load_profiles,
     nodes_by_name,
+    parse_node_health,
     profile_of,
 )
 from .pool import status as island_status
@@ -140,7 +149,7 @@ ENGINES = ("podman", "docker")
 PULL_POLICIES = ("missing", "always", "never")
 CONFIG_KEYS = frozenset({"kind", "inventory", "nodes", "workdir", "runtime", "container", "venv", "env",
                          "devices", "store", "preflight", "grace_s", "price_usd_h", "start_timeout_s",
-                         "lost_node_hold_s", "node_runtime"})
+                         "lost_node_hold_s", "node_runtime", "node_health"})
 CONTAINER_KEYS = frozenset({"engine", "image", "pull_ref", "pull", "security_opt", "sudo", "args", "python",
                             "shm_size", "mounts"})
 VENV_KEYS = frozenset({"python", "source", "ld_preload", "pythonpath"})
@@ -208,6 +217,9 @@ class SshPoolConf:
     # the node starts ``python -m yeto.node run`` (yeto.node.route), which starts the sampler
     # (the default); false: the sampler directly, as before (kept for one release)
     node_runtime: bool = True
+    # the node runtime's health check (yeto.hw.node_health): "auto" / "off" for every node of
+    # the pool; None: each node's inventory node_health (not declared: auto)
+    node_health: str | None = None
 
 
 def _strs(value: Any, key: str) -> tuple[str, ...]:
@@ -317,6 +329,10 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
         node_runtime = node_runtime_enabled(cfg, default=NODE_RUNTIME_DEFAULT, section=section)
     except ValueError as error:
         raise ValueError(f"ssh provider: {error}") from None
+    try:  # provider.node_health: auto | off for the pool's nodes (absent: each node's inventory value)
+        health = parse_node_health(section.get("node_health"), "ssh provider")
+    except InventoryError as error:
+        raise ValueError(str(error)) from None
     return SshPoolConf(nodes=tuple(nodes), workdir=workdir.rstrip("/"), runtime=runtime, container=container,
                        venv=venv, env={str(k): str(v) for k, v in env.items()}, devices=devices,
                        store=str(store) if store else None, min_free_gib=float(pre.get("min_free_gib", 20)),
@@ -324,7 +340,7 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
                        min_cards=int(pre["min_cards"]) if pre.get("min_cards") is not None else None,
                        grace_s=int(section.get("grace_s", 120)),
                        price_usd_h=float(price) if price is not None else None, lost_node_hold_s=float(hold),
-                       node_runtime=node_runtime)
+                       node_runtime=node_runtime, node_health=health)
 
 
 # -- node shell -----------------------------------------------------------------
@@ -335,6 +351,32 @@ def node_paths(workdir: str, shard: str) -> dict[str, str]:
     return {"dir": s, "spec": f"{s}/{shard}.json", "script": f"{s}/{shard}.start.sh", "pid": f"{s}/{shard}.pid",
             "pgid": f"{s}/{shard}.pgid", "exit": f"{s}/{shard}.exit", "log": f"{workdir}/logs/{shard}.log",
             "tape": f"{s}/events-{shard}.jsonl", "logs": f"{workdir}/logs", "marker": f"{s}/{shard}.marker"}
+
+
+HEALTH_MARK = "YETO_NODE_HEALTH"
+
+
+def health_path(workdir: str, shard: str) -> str:
+    """Where the node runtime writes the sampler's node health check (``yeto.node.runtime``:
+    ``<work>/sampler/<shard>.health.json``; the runtime's work is the pool's workdir)."""
+    return f"{node_paths(workdir, shard)['dir']}/{shard}.health.json"
+
+
+def health_probe_command(path: str) -> str:
+    """One line ``YETO_NODE_HEALTH <json>`` (empty when the runtime wrote no check yet)."""
+    return f"printf '{HEALTH_MARK} %s\\n' \"$(tr -d '\\n' < {shlex.quote(path)} 2>/dev/null)\""
+
+
+def parse_health_line(text: str) -> dict[str, Any] | None:
+    """The health check a probe read (:func:`health_probe_command`); None without one."""
+    for line in str(text or "").splitlines():
+        if line.startswith(HEALTH_MARK + " "):
+            try:
+                doc = json.loads(line[len(HEALTH_MARK) + 1:])
+            except ValueError:
+                return None
+            return doc if isinstance(doc, dict) else None
+    return None
 
 
 def start_marker(run_id: str, shard: str, ticket: str) -> str:
@@ -1064,6 +1106,8 @@ class SshSamplerPoolOps:
                                         state_path=self.state_dir / f"ssh-pool-{self.run_id}.json", clock=clock)
         self._shard_of: dict[str, str] = {}
         self._node_route: Any = None
+        self._health_generation: dict[str, int] = {}  # ticket -> the assignment its health check is of
+        self._health_lost: set[str] = set()  # tickets whose node's health read lost (drain holds its slot)
 
     def attach_control(self, control: Any) -> dict[str, Any]:
         """The store control plane (``store_state.PoolControl``): the provider's tickets, holds
@@ -1285,14 +1329,20 @@ class SshSamplerPoolOps:
         # no cards in the assignment: the route's own card variables (device_env: numbered as the
         # container or the venv sees them) reach the sampler through the runtime's environment
         assignment, token = route.assign(m, shards, profile, spec, spec_paths="host", python=python, env=env)
+        self._health_generation[m.ticket] = int(assignment.generation)
+        if self.health_checked(node):  # no check of an earlier sampler on this node is read as this one's
+            self.ssh(node, "rm -f " + shlex.quote(health_path(self.conf.workdir, m.shard)), timeout=60)
         token_file, profile_file = f"{p['dir']}/{m.shard}.token", f"{p['dir']}/{m.shard}.profile.json"
         self.put(node, token, token_file, mode="600")
-        self.put(node, route.profile_file_text(profile), profile_file, mode="644")
+        # provider.node_health wins over the node's inventory value (the runtime reads the profile's)
+        health = {"node_health": self.conf.node_health} if self.conf.node_health is not None else {}
+        self.put(node, route.profile_file_text(profile, **health), profile_file, mode="644")
         _log(f"ssh pool: {m.shard} on {node.name}: node runtime, assignment {assignment.ticket} "
              f"generation {assignment.generation}")
         return runtime_command(python, assignment.ticket, route.store, env_file=env_file, token_file=token_file,
                                profile_file=profile_file, log="-",
-                               child_pid_file=p["pid"] if self.conf.runtime == "venv" else None)
+                               child_pid_file=p["pid"] if self.conf.runtime == "venv" else None,
+                               health_every_s=0 if self.health_mode(node) == "off" else None)
 
     def restart(self, m, shards: list[str]) -> None:
         self.start(m, shards)
@@ -1323,11 +1373,37 @@ class SshSamplerPoolOps:
         script = elastic.probe_script(container_name(m.shard), tape[:-len(".jsonl")] + "*.jsonl",
                                       state_script=self.state_command(m.shard),
                                       logs_script=self.logs_command(m.shard))
+        health = self.health_checked(node)
+        if health:
+            script += "; " + health_probe_command(health_path(self.conf.workdir, m.shard))
         try:
             out = self.ssh(node, script, timeout=90)
         except subprocess.TimeoutExpired:
             return island_status.Probe(node=island_status.PROBE_UNREACHABLE)
-        return island_status.Probe.parse(_text(out.stdout), out.returncode)
+        probe = island_status.Probe.parse(_text(out.stdout), out.returncode)
+        if health and probe.node == island_status.PROBE_OK:
+            from yeto.hw.node_health import fresh  # noqa: PLC0415
+
+            doc = parse_health_line(_text(out.stdout))
+            want = self._health_generation.get(m.ticket)
+            if doc is not None and doc.get("ticket") in (None, m.ticket) \
+                    and (want is None or doc.get("generation") in (None, want)):
+                probe = replace(probe, health=fresh(doc, time.time()))  # stale: a read failure, not lost
+                if island_status.health_lost(probe) is not None:
+                    self._health_lost.add(m.ticket)
+        return probe
+
+    def health_checked(self, node: Node) -> bool:
+        """The node runtime checks ``node``'s health (it starts the sampler, and its family has
+        a checker: :mod:`yeto.hw.node_health`)."""
+        from yeto.hw.node_health import checker_for  # noqa: PLC0415
+
+        return bool(self.conf.node_runtime and (self.conf.store or self._uses_r2())
+                    and checker_for(node.device_family).enabled and self.health_mode(node) != "off")
+
+    def health_mode(self, node: Node) -> str | None:
+        """``provider.node_health``, else the node's inventory ``node_health`` (None: neither)."""
+        return health_mode(self.conf, node)
 
     def logs(self, m, *, tail: int = 200, save: bool = True) -> str:
         """The sampler's log tail, copied to ``<state dir>/ssh-pool-logs/<shard>.log``."""
@@ -1399,7 +1475,9 @@ class SshSamplerPoolOps:
         """Stop the sampler and release the ticket. A node the pool saw unreachable, or that
         the stop did not reach, is marked lost (:meth:`SshNodeProvider.mark_lost`): its slot
         is held while a spare is free, and a stop that did not get there is owed."""
-        lost = getattr(m, "unreachable_since", None) is not None
+        # a node that stopped answering, or whose health read lost: its slot is held (mark_lost)
+        lost = getattr(m, "unreachable_since", None) is not None or m.ticket in self._health_lost
+        self._health_lost.discard(m.ticket)
         stopped = not m.shard
         if m.shard:
             node = self.provider.node_of_ticket(m.ticket)
@@ -1464,7 +1542,31 @@ def offline_problems(cfg: dict[str, Any]) -> list[str]:
         problems.append("ssh provider: data_path r2 needs r2_env_file (or set provider.store, or data_path syncer)")
     problems += spec_node_problems(conf, spec_of(cfg))
     problems += image_problems(conf, spec_of(cfg))
+    health = health_summary(conf)
+    if health is not None:
+        _log(f"ssh pool: node health: {health}")
     return problems
+
+
+def health_mode(conf: SshPoolConf, node: Node) -> str | None:
+    """``provider.node_health``, else the node's inventory ``node_health`` (None: neither)."""
+    return conf.node_health if conf.node_health is not None else getattr(node, "node_health", None)
+
+
+def health_summary(conf: SshPoolConf) -> str | None:
+    """``on (<family>)`` / ``off`` when the config or the inventory declares node_health
+    (None otherwise: a DEBUG log says it, the dry run prints nothing). The check runs on
+    the node runtime (``provider.node_runtime``)."""
+    from yeto.hw.node_health import checker_for  # noqa: PLC0415
+
+    modes = [health_mode(conf, n) for n in conf.nodes]
+    on = sorted({n.device_family for n, mode in zip(conf.nodes, modes)
+                 if mode != "off" and checker_for(n.device_family).enabled and conf.node_runtime})
+    state = f"on ({', '.join(on)})" if on else "off"
+    if all(mode is None for mode in modes):
+        logging.getLogger(__name__).debug("ssh pool: node health: %s (not declared)", state)
+        return None
+    return state
 
 
 def spec_node_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:

@@ -12,7 +12,10 @@ new. When on, the sampler
   source and the profile summary: :meth:`SamplerNodeReport.member_fields`);
 * writes a last heartbeat (stage ``left``, the leave reason) at its LEAVE, and
   the exit record at the process end unless the node runtime supervises it
-  (``YETO_NODE_SUPERVISED``: the runtime knows the real exit code).
+  (``YETO_NODE_SUPERVISED``: the runtime knows the real exit code);
+* adds the node runtime's newest health check (``YETO_NODE_HEALTH_FILE``, written by
+  the runtime: :mod:`yeto.hw.node_health`) to each heartbeat as its ``health`` field
+  (no such variable, or no file yet: no field).
 
 Every write is best effort: a store outage never stops a sampler.
 """
@@ -24,9 +27,10 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
-from .launch import GENERATION_ENV, HEARTBEAT_ENV, PROFILE_ENV, SUPERVISED_ENV, TICKET_ENV
+from .launch import GENERATION_ENV, HEALTH_ENV, HEARTBEAT_ENV, PROFILE_ENV, SUPERVISED_ENV, TICKET_ENV
 from .records import NodeReporter
 
 WAIT_EVENT = "rl_sampler_waiting"  # yeto.rl.engine.sampler_loop: the sampler waits for the trainer
@@ -86,10 +90,11 @@ class SamplerNodeReport:
     def __init__(self, reporter: NodeReporter, *, profile: Mapping[str, Any] | None = None,
                  heartbeat_s: float = DEFAULT_HEARTBEAT_S, metrics_port: int | None = None,
                  supervised: bool = False, metrics: Callable[[int | None], Mapping[str, float]] = engine_metrics,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, health_file: str | None = None) -> None:
         self.reporter, self.profile = reporter, dict(profile or {})
         self.heartbeat_s, self.metrics_port, self.supervised = float(heartbeat_s), metrics_port, bool(supervised)
         self.metrics, self.clock = metrics, clock
+        self.health_file = health_file or None
         self.stage = "engine"
         self.progress: Callable[[], Mapping[str, Any]] | None = None
         # when the sampler last made progress (joined, then each new round): the pool's
@@ -117,7 +122,8 @@ class SamplerNodeReport:
                                 base={"sampler": spec.get("sampler_id")})
         return cls(reporter, profile=profile if isinstance(profile, dict) else {},
                    heartbeat_s=float(env.get(HEARTBEAT_ENV) or DEFAULT_HEARTBEAT_S), metrics_port=metrics_port_of(spec),
-                   supervised=str(env.get(SUPERVISED_ENV) or "") == "1")
+                   supervised=str(env.get(SUPERVISED_ENV) or "") == "1",
+                   health_file=str(env.get(HEALTH_ENV) or "").strip() or None)
 
     @property
     def ticket(self) -> str:
@@ -149,8 +155,21 @@ class SamplerNodeReport:
             fields["engine"] = engine
         if self.leave_reason is not None:
             fields["leave_reason"] = self.leave_reason
+        health = self.health()
+        if health is not None:
+            fields["health"] = health
         with self._lock:
             self.reporter.heartbeat(self.stage, **{**fields, **extra})
+
+    def health(self) -> dict[str, Any] | None:
+        """The runtime's newest health check (None: no health file named, or none readable yet)."""
+        if self.health_file is None:
+            return None
+        try:
+            doc = json.loads(Path(self.health_file).read_text())
+        except (OSError, ValueError):
+            return None
+        return doc if isinstance(doc, dict) else None
 
     def _loop(self) -> None:
         while not self._stop.wait(self.heartbeat_s):

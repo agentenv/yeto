@@ -167,7 +167,7 @@ IMAGE_ENV = {"PYTHONPATH": "/usr/local/Ascend/cann/python/site-packages", "ASCEN
 # coercion; macOS) - the sampler, a Python process too, adds the same at its own start
 SHELL_VARS = {"PWD", "OLDPWD", "SHLVL", "_", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
 NODE_ONLY = {"YETO_NODE_TICKET", "YETO_NODE_GENERATION", "YETO_NODE_PROFILE", "YETO_NODE_SUPERVISED",
-             "YETO_DEVICE_FAMILY", "YETO_RL_RELEASE_SPREAD_KEY"}
+             "YETO_DEVICE_FAMILY", "YETO_RL_RELEASE_SPREAD_KEY", "YETO_NODE_HEALTH_FILE"}
 
 
 class EmulatedNode(LocalNode):
@@ -244,6 +244,8 @@ def test_the_samplers_final_environment_is_the_routes_own(tmp_path, monkeypatch,
     old, new = rel(old, "old"), rel(new, "new")
     assert {k: v for k, v in new.items() if k not in NODE_ONLY or k in old} == old
     assert new["YETO_NODE_TICKET"] and new["PYTHONUNBUFFERED"] == "0" and new["OPERATOR_KNOB"] == "7"
+    # the node runtime's health check (yeto.hw.node_health): a family with a checker only
+    assert ("YETO_NODE_HEALTH_FILE" in new) == (family == "cuda")
     if family == "npu":
         assert new["ASCEND_RT_VISIBLE_DEVICES"] == "0"
     if runtime == "container":  # the image's own PYTHONPATH (CANN) stays behind the yeto tree

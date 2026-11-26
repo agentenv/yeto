@@ -44,9 +44,10 @@ def enabled(cfg: Mapping[str, Any], *, default: bool, section: Mapping[str, Any]
 
 def runtime_command(python: str, ticket: str, store: str, *, env_file: str | None, token_file: str,
                     profile_file: str | None = None, child_pid_file: str | None = None, log: str | None = None,
-                    skip_preflight: bool = True) -> str:
+                    skip_preflight: bool = True, health_every_s: float | None = None) -> str:
     """``exec <python> -m yeto.node run ...``: the node's start line (the token in a file, never
-    in this line). ``skip_preflight``: the route ran its own preflight already."""
+    in this line). ``skip_preflight``: the route ran its own preflight already.
+    ``health_every_s``: the node health check's period (None: the runtime's default; 0: off)."""
     argv = [python, "-m", "yeto.node", "run", "--assignment", ticket, "--store", store, "--token-file", token_file]
     if env_file:
         argv += ["--env-file", env_file]
@@ -58,6 +59,8 @@ def runtime_command(python: str, ticket: str, store: str, *, env_file: str | Non
         argv += ["--log", log]
     if skip_preflight:
         argv.append("--skip-preflight")
+    if health_every_s is not None:
+        argv += ["--health-every-s", f"{float(health_every_s):g}"]
     return "exec " + shlex.join(argv)
 
 

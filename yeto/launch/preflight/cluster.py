@@ -58,6 +58,7 @@ from ...hw.host_probe import (  # noqa: F401 - re-exported: the preflight's pars
     IbPort,
     Section,
     hca_filter,
+    link_layer_ports,
     parse_fabric,
     parse_ibstat,
     parse_ibv_devinfo,
@@ -425,7 +426,7 @@ def compute_ports(node: Node, ports: Sequence[IbPort]) -> tuple[list[IbPort], li
         selected, missing = hca_filter(spec, ports)
         return _natural(selected), missing, f"NCCL_IB_HCA={spec}"
     layer = "infiniband" if node.fabric == "ib" else "ethernet"
-    return _natural([p for p in ports if p.link_layer.lower() == layer]), [], f"link layer {layer}"
+    return link_layer_ports(ports, node.fabric), [], f"link layer {layer}"
 
 
 def round_robin(n: int) -> list[list[tuple[int, int]]]:

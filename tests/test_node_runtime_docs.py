@@ -56,3 +56,12 @@ def test_the_sky_pool_example_is_a_valid_pool_config():
     cfg = json.loads(block("sky-pool"))
     cli.pool_config(cfg)
     assert cfg["node_runtime"] is True
+
+
+def test_the_node_health_commands_run_as_dry_runs():
+    env = {**os.environ, "PYTHONPATH": str(REPO), "PATH": f"{Path(sys.executable).parent}:" + os.environ.get("PATH", "")}
+    script = block("node-health").replace("python -m", f"{sys.executable} -m")
+    out = subprocess.run(["bash", "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert "nvidia-smi --query-gpu" in out.stdout and "ibstat" in out.stdout and "NVRM: Xid" in out.stdout
+    assert "device family npu: no health checker" in out.stdout
