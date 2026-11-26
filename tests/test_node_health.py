@@ -56,6 +56,10 @@ def node_text(**over) -> str:
     return _sections_out(script, sections)
 
 
+def PORT_DOWN_TEXT():  # noqa: N802 - a sample, like the constants above
+    return node_text(ibstat=(0, ibstat_text(down=(3,))))
+
+
 def check(text, prev=None, hcas=None, **kw):
     return checker_for("cuda", **kw).parse(text, hcas_of(HCA) if hcas is None else hcas, prev)
 
@@ -146,6 +150,10 @@ def test_a_slower_port_a_missing_hca_and_unread_ib_tools():
     unread = check(node_text(ibstat=(127, "bash: ibstat: command not found"),
                              ibv_devinfo=(127, "bash: ibv_devinfo: command not found")))
     assert unread.checked and unread.ok_single is True and unread.ok_multi is None
+    assert unread.job_reasons(multi=True) == [node_health.IB_UNREAD] and unread.job_reasons(multi=False) == []
+    sick_unread = check(node_text(fabric=(0, FABRIC_IN_PROGRESS), ibstat=(127, ""), ibv_devinfo=(127, "")))
+    assert sick_unread.ok_single is False and sick_unread.ok_multi is False  # the GPUs decide first
+    assert check(node_text(fabric=(0, FABRIC_IN_PROGRESS))).ok_multi is False
 
 
 def test_ibv_devinfo_is_read_when_ibstat_is_missing():
@@ -172,9 +180,46 @@ def test_nvidia_smi_that_times_out_is_a_read_failure_that_keeps_the_baselines():
     first = check(node_text(xid=(0, xid_text(xid_line(1.0, 0, 13)))))
     r = check(node_text(gpus=(124, "")), first.facts)
     assert not r.checked and r.ok_single is None and r.ok_multi is None
-    assert r.reasons == ["nvidia-smi: timed out after 30s"]
+    assert r.reasons == ["nvidia-smi: timed out after 15s"]
     assert all(r.facts[k] == first.facts[k] for k in ("gpu_count", "bus", "ecc", "xid", "ib_rate"))
     assert not check("").checked and check("").reasons == ["nvidia-smi: no output (the check did not run)"]
+
+
+def test_a_check_killed_past_its_limit_is_a_read_failure_that_keeps_the_baselines():
+    first = check(node_text())
+    killed = check(node_text(xid=(0, xid_text(xid_line(9000.0, 5, 79)))) + f"{node_health.TIMEOUT_MARK} 30\n",
+                   first.facts)
+    assert not killed.checked and killed.reasons == ["node health check timed out after 30s (killed)"]
+    assert killed.facts["xid"] == first.facts["xid"]  # the XID it read before the kill counts next time
+    again = check(node_text(xid=(0, xid_text(xid_line(9000.0, 5, 79)))), killed.facts)
+    assert again.reasons == ["GPU 5 XID 79"]
+
+
+def test_the_check_is_bounded_on_the_node_and_prints_what_it_read(tmp_path):
+    import time  # noqa: PLC0415
+
+    t0 = time.time()
+    out = subprocess.run(["bash", "-c", node_health.bounded("echo partial; sleep 30; echo never", 1)],
+                         capture_output=True, text=True, timeout=20).stdout
+    assert time.time() - t0 < 10
+    assert out.startswith(f"{node_health.TIMEOUT_MARK} 1\n") and "partial" in out and "never" not in out
+    pid_file = tmp_path / "pid"
+    subprocess.run(["bash", "-c", node_health.bounded(f"echo $$ > {pid_file}; sleep 30", 1)],
+                   capture_output=True, text=True, timeout=20)
+    gone = subprocess.run(["bash", "-c", f"kill -0 {pid_file.read_text().strip()}"], capture_output=True)
+    assert gone.returncode != 0  # the check's shell was killed, not left behind
+    out = subprocess.run(["bash", "-c", "echo state-line; " + node_health.bounded("echo fast", 5)],
+                         capture_output=True, text=True, timeout=20).stdout
+    assert out == "state-line\nfast\n"
+    script = node_health.CudaChecker().script([])
+    assert script.startswith("__yeto_hs=") and node_health.TIMEOUT_MARK in script  # the cuda check is bounded
+    assert script.index("@@yeto-section xid") < script.index("@@yeto-section gpus")  # XIDs before nvidia-smi
+    for tool in ("dmesg", "journalctl -k -b -n", "nvidia-smi --query-gpu", "nvidia-smi -q", "systemctl",
+                 "ibstat", "ibv_devinfo -v"):
+        assert f"__yeto_t {node_health.TOOL_TIMEOUT_S} {tool}" in script, tool
+    with_tool = subprocess.run(["bash", "-c", node_health.TOOL_WRAPPER + "__yeto_t 1 sleep 5; echo rc=$?"],
+                               capture_output=True, text=True, timeout=20).stdout
+    assert with_tool.strip() in ("rc=124", "rc=0")  # rc=0: a host without timeout(1) runs the tool as is
 
 
 def test_two_bad_checks_in_a_row_make_a_node_lost_and_a_read_failure_counts_neither_way():
@@ -209,6 +254,48 @@ def test_a_watch_asks_for_one_event_per_change_and_records_the_heartbeat_field()
     single.observe(node_text(ibstat=(0, ibstat_text(down=(3,)))))
     doc = single.record()
     assert doc["verdict"] == "ok" and doc["reasons"] == [] and doc["notes"] == ["mlx5_3 port DOWN"]
+
+
+def test_a_reset_keeps_the_baselines_and_clears_the_streak():
+    w = HealthWatch("cuda", hcas=hcas_of(HCA), multi=True)
+    for text in (node_text(), PORT_DOWN_TEXT(), PORT_DOWN_TEXT()):
+        reading = w.observe(text)
+    assert reading.lost and w.prev["xid"]["boot"] == BOOT
+    prev = dict(w.prev)
+    w.reset()
+    assert w.last is None and w.record() is None and w.tracker.bad_in_row == 0 and w.prev == prev
+    assert w.observe(PORT_DOWN_TEXT()).verdict == "bad_once"  # a new job: one bad check is not lost
+
+
+def test_what_a_check_cannot_judge_is_said_once_per_node():
+    w = HealthWatch("cuda", hcas=hcas_of(HCA), multi=True)
+    blind = node_text(xid=(0, xid_text(source="none")), ibstat=(127, ""), ibv_devinfo=(127, ""))
+    first, second = w.observe(blind), w.observe(blind)
+    assert first.degraded == ["XID unread (no dmesg / journalctl -k access)", node_health.IB_UNREAD]
+    assert second.degraded is None and w.record()["degraded"] == first.degraded
+    assert first.verdict == "read_failed" and w.record()["reasons"] == [node_health.IB_UNREAD]
+    no_hca = HealthWatch("cuda", multi=True).observe(node_text())
+    assert no_hca.degraded == ["no NCCL_IB_HCA: the ports are not judged"]
+    assert HealthWatch("cuda", hcas=hcas_of(HCA)).observe(node_text()).degraded is None  # single, all read
+    assert HealthWatch("cuda").observe(node_text()).degraded is None  # a single-node job needs no HCA
+    assert HealthWatch("cuda").observe(node_text(gpus=(124, ""))).degraded is None  # nothing read
+
+
+def test_a_record_keeps_twenty_reasons_and_thirty_two_ports_and_ages_out():
+    w = HealthWatch("cuda", hcas=hcas_of(",".join(f"mlx5_{i}" for i in range(40))), multi=True,
+                    clock=lambda: 1000.0, every_s=60)
+    w.observe(node_text(ibstat=(0, ibstat_text(n=40, down=range(40), storage=False))))
+    doc = w.record()
+    assert len(w.last.result.reasons) == 40 and len(doc["reasons"]) == 20 and len(doc["facts"]["ports"]) == 32
+    assert doc["at"] == 1000.0 and doc["every_s"] == 60
+    assert node_health.fresh(doc, 1000.0 + 180) is doc
+    stale = node_health.fresh(doc, 1000.0 + 181)
+    assert stale["verdict"] == "read_failed" and stale["stale"] and stale["reasons"] == [
+        "health check stale: the last one 181s ago"]
+    assert node_health.fresh(None, 0) is None and node_health.fresh({"verdict": "lost"}, 1e12)["verdict"] == "lost"
+    single = HealthWatch("cuda", hcas=hcas_of(",".join(f"mlx5_{i}" for i in range(40))))
+    single.observe(node_text(ibstat=(0, ibstat_text(n=40, down=range(40), storage=False))))
+    assert single.record()["reasons"] == [] and len(single.record()["notes"]) == 20
 
 
 @pytest.mark.parametrize("family", ["rocm", "npu", "ppu", "ascend", "", "metal"])

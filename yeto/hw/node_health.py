@@ -5,16 +5,24 @@ goes on, with the same parsers (:mod:`yeto.hw.host_probe`), so that a node whose
 fabric broke is taken out before NCCL times out.
 
 Checkers are registered by device family (:func:`register`, :func:`checker_for`). The
-``cuda`` checker (:class:`CudaChecker`) reads in one shell call (:meth:`Checker.script`):
+``cuda`` checker (:class:`CudaChecker`) reads in one shell call (:meth:`Checker.script`),
+in this order:
 
+* the ``NVRM: Xid`` lines of the kernel log (``dmesg``, else ``journalctl -k``) and the
+  boot id, so that only the XIDs since the previous check count (first: a hung
+  ``nvidia-smi`` does not hide them);
 * ``nvidia-smi --query-gpu``: the GPUs that answer, their memory and their volatile
   uncorrectable ECC count; a GPU ``nvidia-smi`` names but cannot open (``Unable to
   determine the device handle``) is a GPU gone;
 * the NVSwitch ``Fabric`` state of ``nvidia-smi -q`` and ``systemctl is-active
   nvidia-fabricmanager``;
-* the ``NVRM: Xid`` lines of the kernel log (``dmesg``, else ``journalctl -k``) and the
-  boot id, so that only the XIDs since the previous check count;
 * ``ibstat`` (else ``ibv_devinfo -v``): the state and rate of the IB / RoCE ports.
+
+The script is bounded on the node (:func:`bounded`): every tool runs under ``timeout``
+(:data:`TOOL_TIMEOUT_S`), and the whole check runs in the background and is killed
+(``kill -9`` of its process group) past :data:`HEALTH_LIMIT_S`; its output is printed
+either way, and a check that was killed is a read failure. A caller that adds the check
+to another command (a status query) waits at most that much longer.
 
 Every family without a checker gets :class:`NullChecker` (``enabled`` False, nothing
 checked): its callers run nothing and write nothing.
@@ -28,17 +36,21 @@ XID cursor). It judges two jobs at once (:class:`HealthResult`):
   (:data:`HARDWARE_XIDS`) since the previous check, the NVLink fabric is
   ``Completed/Success`` on every GPU that has one, the fabric manager did not stop;
 * ``ok_multi``: also every port the job's ``NCCL_IB_HCA`` names exists, is ``Active``
-  and runs at no less than its rate at the first check (or ``min_ib_gbps``). None when
-  the job names HCAs but the IB tools did not read.
+  and runs at no less than its rate at the first check (or ``min_ib_gbps``). False
+  whenever ``ok_single`` is; None when the GPUs pass but the job names HCAs and the IB
+  tools did not read (a read failure of the multi-node job: ``IB tools unread``).
 
 ``checked`` False (``ok_*`` None): ``nvidia-smi`` did not answer (a timeout, missing, an
-ssh that failed): a read failure, which says nothing about the node.
+ssh that failed, the check killed past its limit): a read failure, which says nothing
+about the node.
 
 :class:`HealthTracker` turns the checks into a verdict: ``ok``, ``read_failed`` (counts
 neither way: a bad streak goes on after it), ``bad_once`` (one bad check), ``lost`` (two
 bad checks in a row, or more). :class:`HealthWatch` keeps a checker, a tracker and the
 previous facts for one node and says which event a reading asks for: ``node_health``
-when the node turns ``lost``, ``node_health_read_failed`` when a read starts failing.
+when the node turns ``lost``, ``node_health_read_failed`` when a read starts failing, and
+once per node ``node_health_degraded`` when part of the check cannot judge (the kernel
+log is not readable, the IB tools did not read, a multi-node job names no HCA).
 
 ``python -m yeto.hw.node_health [--hca mlx5_0,...] [--multi] [--dry-run]`` runs one check
 on this host (``--dry-run``: prints the script only).
@@ -49,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -69,7 +82,13 @@ from .host_probe import (
 
 HEALTH_EVERY_S = 60.0  # the period of the check on a node runtime and a resident ssh island
 BAD_CHECKS = 2  # bad checks in a row that make a node lost
-TOOL_TIMEOUT_S = 30  # each nvidia-smi call of the script
+TOOL_TIMEOUT_S = 15  # each tool of the check (timeout(1) on the node)
+HEALTH_LIMIT_S = 30  # the whole check on the node: killed past this (a read failure)
+STALE_PERIODS = 3  # a check older than this many periods reads as a read failure
+MAX_REASONS = 20  # reasons / notes kept in a record or an event
+MAX_PORTS = 32  # ports kept in a record's facts
+TIMEOUT_MARK = "@@yeto-health-timeout"
+IB_UNREAD = "IB tools unread (ibstat / ibv_devinfo)"
 # XIDs that mean the GPU (or its NVLink) needs a reset or the node a reboot (NVIDIA's XID
 # catalog): double-bit ECC (48), internal micro-controller (61, 62), ECC page retirement
 # failure (64), NVLink (74), fallen off the bus (79), uncontained ECC (95), GSP (119, 120),
@@ -78,23 +97,45 @@ HARDWARE_XIDS = frozenset({48, 61, 62, 64, 74, 79, 95, 119, 120, 140})
 VERDICTS = ("ok", "read_failed", "bad_once", "lost")
 EVENT_LOST = "node_health"
 EVENT_READ_FAILED = "node_health_read_failed"
+EVENT_DEGRADED = "node_health_degraded"
 
 GPU_QUERY = "index,pci.bus_id,name,memory.total,ecc.errors.uncorrected.volatile.total"
+_T = "__yeto_t"  # the script's tool wrapper: timeout(1) when the node has it
+TOOL_WRAPPER = f'{_T}() {{ if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }}\n'
+_TT = f"{_T} {TOOL_TIMEOUT_S}"
 XID_SCRIPT = (
     "cat /proc/sys/kernel/random/boot_id 2>/dev/null | sed 's/^/boot=/'; "
-    "if dmesg >/dev/null 2>&1; then echo source=dmesg; dmesg | grep -E 'NVRM: Xid' | tail -n 200; "
-    "elif journalctl -k -b -n 1 --no-pager >/dev/null 2>&1; then echo source=journal; "
-    "journalctl -k -b -o short-monotonic --no-pager | grep -E 'NVRM: Xid' | tail -n 200; "
+    f"if {_TT} dmesg >/dev/null 2>&1; then echo source=dmesg; {_TT} dmesg | grep -E 'NVRM: Xid' | tail -n 200; "
+    f"elif {_TT} journalctl -k -b -n 1 --no-pager >/dev/null 2>&1; then echo source=journal; "
+    f"{_TT} journalctl -k -b -o short-monotonic --no-pager | grep -E 'NVRM: Xid' | tail -n 200; "
     "else echo source=none; fi; true"
 )
 CUDA_SECTIONS = (
-    ("gpus", f"timeout {TOOL_TIMEOUT_S} nvidia-smi --query-gpu={GPU_QUERY} --format=csv,noheader,nounits"),
-    ("fabric", f"timeout {TOOL_TIMEOUT_S} nvidia-smi -q | grep -A3 -E '^ *Fabric *$'"),
-    ("fabricmanager", "systemctl is-active nvidia-fabricmanager"),
     ("xid", XID_SCRIPT),
-    ("ibstat", "ibstat"),
-    ("ibv_devinfo", "command -v ibstat >/dev/null 2>&1 && exit 3; ibv_devinfo -v"),
+    ("gpus", f"{_TT} nvidia-smi --query-gpu={GPU_QUERY} --format=csv,noheader,nounits"),
+    ("fabric", f"{_TT} nvidia-smi -q | grep -A3 -E '^ *Fabric *$'"),
+    ("fabricmanager", f"{_TT} systemctl is-active nvidia-fabricmanager"),
+    ("ibstat", f"{_TT} ibstat"),
+    ("ibv_devinfo", f"command -v ibstat >/dev/null 2>&1 && exit 3; {_TT} ibv_devinfo -v"),
 )
+
+
+def bounded(script: str, limit_s: int = HEALTH_LIMIT_S) -> str:
+    """``script`` run in the background on the node, killed (``kill -9`` of its process
+    group: ``setsid`` when the node has it) past ``limit_s``; its output is printed either
+    way, after :data:`TIMEOUT_MARK` when it was killed."""
+    return (
+        f"__yeto_hs={shlex.quote(script)}\n"
+        "__yeto_hf=$(mktemp /tmp/yeto-health.XXXXXX 2>/dev/null) || __yeto_hf=/tmp/yeto-health.$$\n"
+        'if command -v setsid >/dev/null 2>&1; then setsid bash -c "$__yeto_hs" > "$__yeto_hf" 2>&1 < /dev/null & '
+        'else bash -c "$__yeto_hs" > "$__yeto_hf" 2>&1 < /dev/null & fi\n'
+        "__yeto_hp=$!; __yeto_hn=0\n"
+        f'while kill -0 "$__yeto_hp" 2>/dev/null && [ "$__yeto_hn" -lt {int(limit_s) * 10} ]; do sleep 0.1; '
+        "__yeto_hn=$((__yeto_hn + 1)); done\n"
+        'if kill -0 "$__yeto_hp" 2>/dev/null; then kill -9 -- "-$__yeto_hp" 2>/dev/null; '
+        f'kill -9 "$__yeto_hp" 2>/dev/null; echo "{TIMEOUT_MARK} {int(limit_s)}"; fi\n'
+        'cat "$__yeto_hf" 2>/dev/null; rm -f "$__yeto_hf"\n'
+    )
 # the facts a check hands to the next one (baselines and the XID cursor); kept over a read failure
 CARRIED = ("gpu_count", "bus", "mem", "ecc", "xid", "fm", "ib_rate")
 
@@ -199,11 +240,14 @@ class CudaChecker(Checker):
         self.min_ib_gbps = None if min_ib_gbps is None else float(min_ib_gbps)
 
     def script(self, hcas: Sequence[str]) -> str:  # noqa: ARG002 - every port is read; hcas judge them
-        return probe_script(CUDA_SECTIONS)
+        return bounded(TOOL_WRAPPER + probe_script(CUDA_SECTIONS))
 
     def parse(self, text: str, hcas: Sequence[str], prev: Mapping[str, Any] | None) -> HealthResult:
         prev = dict(prev or {})
         carried = {k: prev[k] for k in CARRIED if k in prev}
+        if TIMEOUT_MARK in str(text or ""):  # killed past its limit: nothing it read counts
+            error = f"node health check timed out after {HEALTH_LIMIT_S}s (killed)"
+            return HealthResult(checked=False, reasons=[error], facts={**carried, "read_error": error})
         sections = parse_sections(text)
         gpus = sections.get("gpus")
         rows, gone = self._gpu_rows(gpus)
@@ -250,12 +294,15 @@ class CudaChecker(Checker):
         ib_reasons, ib_read = self._ports(sections, hcas, prev, facts)
         facts["gpu_reasons"], facts["ib_reasons"] = gpu_reasons, ib_reasons
         ok_single = not gpu_reasons
-        if not hcas:
-            ok_multi: bool | None = ok_single
-        elif not ib_read:
+        if not ok_single:
+            ok_multi: bool | None = False
+        elif not hcas:
+            ok_multi = True
+        elif not ib_read:  # the GPUs pass, the ports the job needs did not read
             ok_multi = None
+            ib_reasons = facts["ib_reasons"] = [IB_UNREAD]
         else:
-            ok_multi = ok_single and not ib_reasons
+            ok_multi = not ib_reasons
         return HealthResult(checked=True, ok_single=ok_single, ok_multi=ok_multi,
                             reasons=gpu_reasons + ib_reasons, facts=facts)
 
@@ -425,34 +472,54 @@ class HealthTracker:
 
 @dataclass
 class Reading:
-    """One check through a :class:`HealthWatch`: the verdict, the result, and the event it
-    asks for (``node_health`` / ``node_health_read_failed``; None: no event)."""
+    """One check through a :class:`HealthWatch`: the verdict, the result, the event it asks
+    for (``node_health`` / ``node_health_read_failed``; None: no event) and, once per node,
+    what the check cannot judge (``degraded``: the ``node_health_degraded`` event; None: nothing new)."""
 
     verdict: str
     result: HealthResult
     event: str | None = None
+    degraded: list[str] | None = None
 
     @property
     def lost(self) -> bool:
         return self.verdict == "lost"
 
 
+def degraded_of(result: HealthResult, *, multi: bool, hcas: Sequence[str]) -> list[str]:
+    """What a read check could not judge for the job: XIDs (no kernel log access), the
+    ports (the IB tools did not read; a multi-node job without ``NCCL_IB_HCA``)."""
+    if not result.checked:
+        return []
+    out = []
+    if result.facts.get("xid_source") == "none":
+        out.append("XID unread (no dmesg / journalctl -k access)")
+    if multi and hcas and result.facts.get("ib") == "unread":
+        out.append(IB_UNREAD)
+    if multi and not hcas:
+        out.append("no NCCL_IB_HCA: the ports are not judged")
+    return out
+
+
 class HealthWatch:
     """One node's health over time: its checker, its tracker and the previous facts.
-    ``hcas``: the job's ``NCCL_IB_HCA`` items; ``multi``: the job spans nodes."""
+    ``hcas``: the job's ``NCCL_IB_HCA`` items; ``multi``: the job spans nodes; ``every_s``:
+    the period of its checks (in its record: a reader takes an older one for a read failure)."""
 
     def __init__(self, family: str, *, hcas: Sequence[str] = (), multi: bool = False,
                  expect_gpus: int | None = None, min_ib_gbps: float | None = None,
                  bad_checks: int = BAD_CHECKS, checker: Checker | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, every_s: float = HEALTH_EVERY_S) -> None:
         self.checker = checker or checker_for(family, expect_gpus=expect_gpus, min_ib_gbps=min_ib_gbps)
         self.tracker = HealthTracker(multi=multi, bad_checks=bad_checks)
         self.hcas = list(hcas)
         self.multi = bool(multi)
         self.clock = clock
+        self.every_s = float(every_s)
         self.prev: dict[str, Any] | None = None
         self.last: Reading | None = None
         self.at: float | None = None
+        self.degraded: list[str] | None = None  # set once (the node_health_degraded event)
 
     @property
     def enabled(self) -> bool:
@@ -460,6 +527,12 @@ class HealthWatch:
 
     def script(self) -> str:
         return self.checker.script(self.hcas)
+
+    def reset(self) -> None:
+        """A new job on the same node (a relaunch): the bad streak and the last verdict go;
+        the baselines and the XID cursor of the previous checks stay."""
+        self.tracker.bad_in_row = 0
+        self.last = None
 
     def observe(self, text: str) -> Reading:
         result = self.checker.parse(text, self.hcas, self.prev)
@@ -470,8 +543,13 @@ class HealthWatch:
             event = EVENT_LOST
         elif verdict == "read_failed" and before != "read_failed":
             event = EVENT_READ_FAILED
+        degraded = None
+        if self.degraded is None:
+            found = degraded_of(result, multi=self.multi, hcas=self.hcas)
+            if found:
+                self.degraded = degraded = found
         self.prev = dict(result.facts)
-        self.last = Reading(verdict, result, event)
+        self.last = Reading(verdict, result, event, degraded)
         self.at = float(self.clock())
         return self.last
 
@@ -480,14 +558,19 @@ class HealthWatch:
         if self.last is None:
             return None
         r = self.last.result
+        reasons = r.job_reasons(self.multi)
         doc: dict[str, Any] = {"verdict": self.last.verdict, "ok": r.ok(self.multi) if r.checked else None,
-                               "reasons": r.job_reasons(self.multi), "bad_in_row": self.tracker.bad_in_row,
-                               "at": round(float(self.at or 0.0), 3), "multi": self.multi}
-        notes = [x for x in r.reasons if x not in doc["reasons"]]
+                               "reasons": reasons[:MAX_REASONS], "bad_in_row": self.tracker.bad_in_row,
+                               "at": round(float(self.at or 0.0), 3), "every_s": self.every_s, "multi": self.multi}
+        notes = [x for x in r.reasons if x not in reasons]
         if notes:  # problems that do not count for this job (a single-node job's ports)
-            doc["notes"] = notes
+            doc["notes"] = notes[:MAX_REASONS]
+        if self.degraded:
+            doc["degraded"] = list(self.degraded)
         facts = {k: r.facts[k] for k in ("gpus", "gpu_count", "fabric", "fm", "ports", "xid_source", "xid_other")
                  if k in r.facts}
+        if "ports" in facts:
+            facts["ports"] = dict(list(dict(facts["ports"]).items())[:MAX_PORTS])
         if facts:
             doc["facts"] = facts
         return doc
@@ -496,12 +579,30 @@ class HealthWatch:
 def event_fields(reading: Reading) -> dict[str, Any]:
     """The fields of the event a reading asks for."""
     r = reading.result
-    return {"verdict": reading.verdict, "reasons": list(r.reasons)[:20]}
+    return {"verdict": reading.verdict, "reasons": list(r.reasons)[:MAX_REASONS]}
+
+
+def fresh(doc: Mapping[str, Any] | None, now: float) -> Mapping[str, Any] | None:
+    """A health record as a reader takes it at ``now``: one older than
+    :data:`STALE_PERIODS` periods (``at``, ``every_s``) reads as a read failure (the check
+    stopped: a hung node runtime); None stays None."""
+    if not isinstance(doc, Mapping):
+        return None
+    try:
+        at, every = float(doc["at"]), float(doc.get("every_s") or HEALTH_EVERY_S)
+    except (KeyError, TypeError, ValueError):
+        return doc
+    age = float(now) - at
+    if age <= STALE_PERIODS * every:
+        return doc
+    return {**dict(doc), "verdict": "read_failed", "stale": True,
+            "reasons": [f"health check stale: the last one {age:.0f}s ago"]}
 
 
 # -- run it here -----------------------------------------------------------------------------
 
-def run_local(script: str, *, timeout: float = 120.0, run: Callable[..., Any] = subprocess.run) -> str:
+def run_local(script: str, *, timeout: float = HEALTH_LIMIT_S + 30.0,
+              run: Callable[..., Any] = subprocess.run) -> str:
     """The script's output on this host ('' when it could not run: a read failure)."""
     try:
         done = run(["bash", "-c", script], capture_output=True, text=True, timeout=timeout, check=False)
