@@ -328,7 +328,7 @@ compute HCAs as `yeto preflight` recommends, so that each of them counts.
   | `node health output incomplete (no <sections>)` | the output was cut off: a section is missing or has no exit code |
   | `node health check timed out after 45s (killed)` | the check ran past its limit on the node and was killed |
   | `node health check cut off: its SSH call ran past its timeout` | the SSH call timed out after the node printed its trainer state |
-  | `node health check skipped: the previous one still runs (a tool stuck on the node)` | an earlier check could not be killed (a tool stuck in the kernel); no new one is started while it lives |
+  | `node health check skipped: the previous one still runs (a tool stuck on the node)` | an earlier check could not be killed (a tool stuck in the kernel); no new one is started while that same process lives (its pid and its start time both match: a reused pid or a reboot does not count) |
   | `IB tools unread (ibstat / ibv_devinfo)` | a multi-node job whose GPUs pass, but its ports could not be read |
   | `health check stale: the last one <N>s ago` | the newest check is older than three periods (the check stopped) |
 

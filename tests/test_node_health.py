@@ -556,34 +556,73 @@ def test_without_timestamps_a_repeat_is_seen_while_the_log_head_rotates_out():
     assert check(node_text(xid=(0, xid_text(a, a))), only.facts).ok_single
 
 
+OLD = 1_000_000_000  # an old pid file: its check ran past the limit and was not killed
+
+
+def _start_time(pid: int, env: dict | None = None) -> str:
+    """The start time the check records for ``pid`` (node_health.START_TIME_FN)."""
+    return subprocess.run(["bash", "-c", node_health.START_TIME_FN + f"__yeto_st {pid}"], capture_output=True,
+                          text=True, env=env, timeout=20).stdout.strip()
+
+
+def _bounded(pid_file) -> str:
+    return subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
+                          capture_output=True, text=True, timeout=20).stdout
+
+
+def _pid_file(path, text: str, *, old: bool = True):
+    import os  # noqa: PLC0415
+
+    path.write_text(text)
+    if old:
+        os.utime(path, (OLD, OLD))
+
+
 def test_a_check_still_stuck_on_the_node_makes_the_next_one_skip(tmp_path):
     pid_file = tmp_path / "health.pid"
     stuck = subprocess.Popen(["sleep", "30"])
     try:
-        pid_file.write_text(f"{stuck.pid}\n")
-        old = 1_000_000_000  # an old pid file: its check ran past the limit and was not killed
-        import os  # noqa: PLC0415
-
-        os.utime(pid_file, (old, old))
-        out = subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
-                             capture_output=True, text=True, timeout=20).stdout
+        started = _start_time(stuck.pid)
+        assert started
+        _pid_file(pid_file, f"{stuck.pid} {started}\n")  # the same process, still there: busy
+        out = _bounded(pid_file)
         assert out == f"{node_health.BUSY_MARK} {stuck.pid}\n"
         r = check(out, check(node_text()).facts)
         assert not r.checked and r.reasons == ["node health check skipped: the previous one still runs "
                                                "(a tool stuck on the node)"]
-        os.utime(pid_file, None)  # a check of another caller that runs right now: not skipped
-        out = subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
-                             capture_output=True, text=True, timeout=20).stdout
-        assert out == "ran\n"
+        _pid_file(pid_file, f"{stuck.pid} {started}\n", old=False)  # another caller's check, running now
+        assert _bounded(pid_file) == "ran\n"
+        # the pid now names another process (reused, or the node rebooted): stale, the check runs
+        _pid_file(pid_file, f"{stuck.pid} 12345\n")
+        assert _bounded(pid_file) == "ran\n" and not pid_file.exists()
+        _pid_file(pid_file, f"{stuck.pid}\n")  # no start time recorded: not proof of the same process
+        assert _bounded(pid_file) == "ran\n"
     finally:
         stuck.kill()
         stuck.wait()
+    # a running check records its pid and its start time (read here from inside the check)
+    seen = subprocess.run(["bash", "-c", node_health.bounded(
+        f"cat {pid_file}; " + node_health.START_TIME_FN.replace("\n", "; ") + "__yeto_st $$", 5,
+        pid_file=str(pid_file))], capture_output=True, text=True, timeout=20).stdout.split()
+    assert len(seen) == 3 and seen[1] == seen[2] and seen[1]
     # a check that ended removes its pid; one that is gone leaves nothing to skip for
-    out = subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
-                         capture_output=True, text=True, timeout=20).stdout
-    assert out == "ran\n" and not pid_file.exists()
-    pid_file.write_text("999999\n")  # an old pid file of a check that is gone
-    os.utime(pid_file, (old, old))
-    out = subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
-                         capture_output=True, text=True, timeout=20).stdout
-    assert out == "ran\n"
+    assert _bounded(pid_file) == "ran\n" and not pid_file.exists()
+    _pid_file(pid_file, f"{stuck.pid} {started}\n")
+    assert _bounded(pid_file) == "ran\n" and not pid_file.exists()
+
+
+def test_the_start_time_is_field_22_of_proc_stat_and_ps_without_proc(tmp_path):
+    import os  # noqa: PLC0415
+
+    proc = tmp_path / "proc" / "4242"
+    proc.mkdir(parents=True)
+    # a command name with spaces and a parenthesis: the fields count from after its last ")"
+    fields = ["S", "1", "4242", "4242", "0", "-1", "4194560", "0", "0", "0", "0", "0", "0", "0", "0", "20", "0",
+              "1", "0", "987654", "1000", "100"]
+    (proc / "stat").write_text("4242 (my (odd) tool) " + " ".join(fields) + "\n")
+    env = {**os.environ, "__YETO_PROC": str(tmp_path / "proc")}
+    assert _start_time(4242, env) == "987654"
+    # without /proc (another OS): ps's start time, the same for the same process
+    env = {**os.environ, "__YETO_PROC": str(tmp_path / "none")}
+    me = _start_time(os.getpid(), env)
+    assert me and me == _start_time(os.getpid(), env) and " " not in me

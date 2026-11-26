@@ -26,7 +26,8 @@ whole check runs in the background and is killed (``kill -9`` of its process gro
 :data:`HEALTH_LIMIT_S` (:func:`bounded`); its output is printed either way. A check that
 was killed is a read failure, but for the sections that completed: their hardware XIDs
 still count. A check whose kill did not take (a tool stuck in the kernel) makes the next
-ones skip (a read failure) while it lives, so hung checks do not pile up. At worst a check takes :data:`HEALTH_LIMIT_S` on the node, less than its
+ones skip (a read failure) while that same process lives (pid and start time), so hung
+checks do not pile up. At worst a check takes :data:`HEALTH_LIMIT_S` on the node, less than its
 period (:data:`HEALTH_EVERY_S`); a caller that adds the check to another command (a
 status query) waits at most that much longer.
 
@@ -105,6 +106,13 @@ MAX_REASONS = 20  # reasons / notes kept in a record or an event
 MAX_PORTS = 32  # ports kept in a record's facts
 TIMEOUT_MARK = "@@yeto-health-timeout"
 BUSY_MARK = "@@yeto-health-busy"  # the previous check on the node still runs (killed, not gone)
+# a process's start time (field 22 of /proc/<pid>/stat; else ps lstart): with its pid, it names
+# the process, so a pid reused by another process is not taken for the stuck check
+START_TIME_FN = (
+    '__yeto_st() { __yeto_sf="${__YETO_PROC:-/proc}/$1/stat"; if [ -r "$__yeto_sf" ]; then '
+    "sed -E 's/^.*\\) //' \"$__yeto_sf\" 2>/dev/null | awk '{print $20}'; "
+    "else ps -o lstart= -p \"$1\" 2>/dev/null | tr -s ' ' '_'; fi; }\n"
+)
 IB_UNREAD = "IB tools unread (ibstat / ibv_devinfo)"
 # XIDs that mean the GPU (or its NVLink) needs a reset or the node a reboot (NVIDIA's XID
 # catalog): double-bit ECC (48), internal micro-controller (61, 62), ECC page retirement
@@ -150,29 +158,35 @@ def bounded(script: str, limit_s: int = HEALTH_LIMIT_S, *, pid_file: str | None 
     way, after :data:`TIMEOUT_MARK` when it was killed.
 
     A check whose kill did not take (a tool stuck in the kernel, ``D`` state) leaves its
-    pid in ``pid_file`` (default: ``/tmp/yeto-health-<uid>.pid``); while that process
-    lives, a later check runs nothing and prints :data:`BUSY_MARK` (a read failure), so
-    hung checks do not pile up on a sick node. A check of another caller that runs at the
-    same time (younger than ``limit_s``) does not count."""
+    pid and the process's start time in ``pid_file`` (default:
+    ``/tmp/yeto-health-<uid>.pid``); while that same process lives, a later check runs
+    nothing and prints :data:`BUSY_MARK` (a read failure), so hung checks do not pile up on
+    a sick node. A pid that is gone, or now names another process (another start time: the
+    pid was reused, the node rebooted), is stale: the file goes and the check runs. A
+    check of another caller that runs at the same time (younger than ``limit_s``) does not
+    count; nor does a pid whose start time cannot be read."""
     pf = shlex.quote(pid_file) if pid_file else '"/tmp/yeto-health-$(id -u 2>/dev/null || echo 0).pid"'
     return (
         f"__yeto_hs={shlex.quote(script)}\n"
         f"__yeto_pf={pf}\n"
-        '__yeto_op=$(cat "$__yeto_pf" 2>/dev/null)\n'
-        'if [ -n "$__yeto_op" ] && kill -0 "$__yeto_op" 2>/dev/null; then '
+        + START_TIME_FN +
+        '__yeto_op=; __yeto_os=; read -r __yeto_op __yeto_os < "$__yeto_pf" 2>/dev/null\n'
+        'if [ -n "$__yeto_op" ] && { ! kill -0 "$__yeto_op" 2>/dev/null || [ -z "$__yeto_os" ] '
+        '|| [ "$(__yeto_st "$__yeto_op")" != "$__yeto_os" ]; }; then rm -f "$__yeto_pf"; __yeto_op=; fi\n'
+        'if [ -n "$__yeto_op" ]; then '
         '__yeto_age=$(( $(date +%s) - $(stat -c %Y "$__yeto_pf" 2>/dev/null || stat -f %m "$__yeto_pf" 2>/dev/null '
         '|| date +%s) )); '
         f'if [ "$__yeto_age" -gt {int(limit_s) + 5} ]; then echo "{BUSY_MARK} $__yeto_op"; exit 0; fi; fi\n'
         "__yeto_hf=$(mktemp /tmp/yeto-health.XXXXXX 2>/dev/null) || __yeto_hf=/tmp/yeto-health.$$\n"
         'if command -v setsid >/dev/null 2>&1; then setsid bash -c "$__yeto_hs" > "$__yeto_hf" 2>&1 < /dev/null & '
         'else bash -c "$__yeto_hs" > "$__yeto_hf" 2>&1 < /dev/null & fi\n'
-        '__yeto_hp=$!; __yeto_hn=0; echo "$__yeto_hp" > "$__yeto_pf" 2>/dev/null\n'
+        '__yeto_hp=$!; __yeto_hn=0; echo "$__yeto_hp $(__yeto_st "$__yeto_hp")" > "$__yeto_pf" 2>/dev/null\n'
         f'while kill -0 "$__yeto_hp" 2>/dev/null && [ "$__yeto_hn" -lt {int(limit_s) * 10} ]; do sleep 0.1; '
         "__yeto_hn=$((__yeto_hn + 1)); done\n"
         'if kill -0 "$__yeto_hp" 2>/dev/null; then kill -9 -- "-$__yeto_hp" 2>/dev/null; '
         f'kill -9 "$__yeto_hp" 2>/dev/null; echo "{TIMEOUT_MARK} {int(limit_s)}"; sleep 0.2; fi\n'
         # gone: the next check may run; still there (stuck in the kernel): its pid stays
-        'if ! kill -0 "$__yeto_hp" 2>/dev/null && [ "$(cat "$__yeto_pf" 2>/dev/null)" = "$__yeto_hp" ]; then '
+        'if ! kill -0 "$__yeto_hp" 2>/dev/null && [ "$(cut -d" " -f1 "$__yeto_pf" 2>/dev/null)" = "$__yeto_hp" ]; then '
         'rm -f "$__yeto_pf"; fi\n'
         'cat "$__yeto_hf" 2>/dev/null; rm -f "$__yeto_hf"\n'
     )
