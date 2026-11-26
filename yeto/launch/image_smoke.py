@@ -17,7 +17,8 @@ one step, saves a checkpoint, reads it back and trains on:
    island of that node, no syncer (``--rl-single-island-no-sync``), with the image,
    the registry's flags for the cut model (recipe, tuning, TP / PP / EP), a small
    local prompt file and the built-in numeric reward (the launch's own checks need
-   them) and a train-only replay of synthetic rollouts (Miles' debug-rollout replay,
+   them), ``--trust-remote-code`` as :func:`remote_code` decides, and a train-only
+   replay of synthetic rollouts (Miles' debug-rollout replay,
    ``YETO_TEST_SYNTH_ROLLOUT``: no sampler); ``--rl-stop-after-rounds 1`` ends the
    round with a cut (the checkpoint) in ``--smoke-store``. The step passes when the
    trainer's ``rl_round_cut`` event names a cut whose manifest is in the store;
@@ -33,7 +34,8 @@ node runtime starts a sampler (:func:`yeto.node.launch.container_argv`) running
 :mod:`yeto.node.smoke`: start the engine, one generation, one reload (the reload of a
 trainer release: the release ``--release`` names, else the engine's base weights;
 the reload exercises the engine's hot-reload endpoint, not the format of a trainer
-release), one more generation.
+release), one more generation. The reload must be in place: one that falls back to a restart
+fails the smoke (its ``reload_mode`` named).
 
 :func:`trainer_plan` / :func:`sampler_plan` build the steps (what ``--dry-run``
 prints); :func:`run_plan` runs them (an ``SshOps`` for the node steps, ``subprocess``
@@ -67,8 +69,10 @@ from .node_inventory import Node, card_arch_of, profile_of
 REF, PYTHON, REVISION = "@REF@", "@PYTHON@", "@REVISION@"
 PYTHON_SH = "@PYTHON_SH@"  # the interpreter inside a shell string (rendered shlex.quote-d)
 PYTHON_PATH = re.compile(r"/[\w./+-]+")  # an image interpreter the smoke runs
-SECRET_ENV = ("HF_TOKEN",)  # passed to the node's prune from the launcher's environment, never printed
+# passed to the node's prune from the launcher's environment: exported by the script (ssh stdin), never in argv
 PASS_ENV = ("HF_TOKEN", "HF_ENDPOINT")
+TRUST = "--trust-remote-code"
+NO_TRUST = "--no-trust-remote-code"  # a --smoke-arg the smoke reads (yeto launch has no such flag)
 REWARD = "yeto.rl.numeric_answer_reward:score"  # a built-in reward (the replay never scores)
 PROMPTS = [{"prompt": "What is 2 + 2? Put the answer in \\boxed{}.", "label": "4"},
            {"prompt": "What is 3 + 5? Put the answer in \\boxed{}.", "label": "8"}]
@@ -83,6 +87,8 @@ SMOKE_MODEL_ORG = "yeto-local"
 REVISION_MARK = "YETO_SMOKE_REVISION"
 SPACE_MARK = "YETO_SMOKE_SPACE"
 TRAINER_BACKENDS = ("miles",)  # backends with a train-only replay (Miles' debug-rollout replay)
+# backends whose launch refuses to start without --trust-remote-code, whatever the model (yeto.launch.rl_args)
+TRUST_REQUIRED = {"miles": "pinned Miles' Megatron and SGLang loaders always allow remote model code"}
 TRAIN_TIMEOUT_S = 3 * 3600.0
 PRUNE_TIMEOUT_S = 2 * 3600.0
 SAMPLER_TIMEOUT_S = 2 * 3600.0
@@ -329,6 +335,8 @@ def trainer_plan(node: Node, *, model: str, config: Mapping[str, Any], engine: s
     if engine not in TRAINER_BACKENDS:
         raise SmokeError(f"no trainer smoke for backend {engine} yet (smoke recipes: {list(TRAINER_BACKENDS)}): "
                          "its train-only replay is not wired")
+    trust, trust_notes = remote_code(config, layout["recommendation"].family, engine, extra_args)
+    extra_args = [a for a in extra_args if a not in (TRUST, NO_TRUST)]
     n = layout["layers"]
     slug = f"{_slug(model)}-{n}layer"
     repo = f"{SMOKE_MODEL_ORG}/{slug}"
@@ -388,14 +396,14 @@ def trainer_plan(node: Node, *, model: str, config: Mapping[str, Any], engine: s
             "--gpu", f"ssh:1x{node.cards_per_node}x{node.card}", "--rl-node-inventory", str(inventory),
             "--rl-image", f"docker:{REF}", "--model-store", f"local://{HUB_IN_CONTAINER}",
             "--rl-checkpoint-store", run_store, "--cluster-prefix", run_id,
-            "--controller", "local", "--rl-single-island-no-sync", "--trust-remote-code",
+            "--controller", "local", "--rl-single-island-no-sync", *((TRUST,) if trust else ()),
             "--data", str(prompts), "--rl-allow-local-data", "--reward-function", REWARD,
             *(a for flag, value in LAUNCH_DEFAULTS if _flag_value(extra_args, flag) is None for a in (flag, value)),
             "--island-env", f"{SYNTH_ENV}={json.dumps(synth, separators=(',', ':'))}",
             "--island-env", f"{REPLAY_ENV}={REPLAY_PATH}", *extra_args]
     steps = (
         SmokeStep("prune", "node", node_argv=node_argv, prefix=prefix, suffix="\n", timeout_s=PRUNE_TIMEOUT_S,
-                  expect=REVISION_MARK, show=prune_show, env=SECRET_ENV),
+                  expect=REVISION_MARK, show=prune_show, env=PASS_ENV),
         SmokeStep("train", "launcher", argv=(*base, "--rl-stop-after-rounds", "1"), timeout_s=TRAIN_TIMEOUT_S,
                   check="round_cut"),
         SmokeStep("resume", "launcher", argv=(*base, "--rl-stop-after-rounds", "2"), timeout_s=TRAIN_TIMEOUT_S,
@@ -410,7 +418,7 @@ def trainer_plan(node: Node, *, model: str, config: Mapping[str, Any], engine: s
              f"TP{plan['tensor_parallel']} PP{plan['pipeline_parallel']} EP{plan['expert_parallel']}, "
              f"{plan['state_gib_per_card']} GiB state per card",
              "train-only: synthetic rollouts replayed by the trainer (no sampler); the cut of round 1 is the "
-             "checkpoint, round 2 resumes from it"]
+             "checkpoint, round 2 resumes from it", *trust_notes]
     mtp = _mtp_layers(config)
     if mtp:
         notes.append(f"the cut drops the model's {mtp} MTP layer(s) (num_nextn_predict_layers): the smoke does not "
@@ -435,8 +443,49 @@ def trainer_plan(node: Node, *, model: str, config: Mapping[str, Any], engine: s
                          "tensor_parallel", "pipeline_parallel", "expert_parallel", "data_parallel")},
                          "recipe": layout["recipe"].rl_model_recipe, "tuning": layout["tuning"], "run": run_id,
                          "engine": engine, "store": run_store, "workdir": str(workdir), "keep": bool(keep),
-                         "cut_gib": size, "notes": list(notes)},
+                         "cut_gib": size, "trust_remote_code": trust, "notes": list(notes)},
                      cleanup=tuple(cleanup), artifacts=artifacts)
+
+
+def remote_code(config: Mapping[str, Any], family: str | None, engine: str,
+                extra_args: Sequence[str] = ()) -> tuple[bool, list[str]]:
+    """``(on, notes)``: whether the smoke's launch passes ``--trust-remote-code``.
+
+    The model: the registry has no such field; its equivalent is the model's
+    ``config.json`` ``auto_map`` (the classes transformers loads from the repository,
+    what :func:`yeto.rl.adapters.miles.remote_code_prewarm.auto_map` reads). A config
+    (or its ``text_config``) with one needs remote code, a registry family without one
+    does not, and a model the registry does not know (its generic fallback) is taken
+    to need it: the smoke cannot tell. ``--smoke-arg=--trust-remote-code`` /
+    ``--smoke-arg=--no-trust-remote-code`` decide instead (the last one given wins).
+
+    The backend: a backend of :data:`TRUST_REQUIRED` refuses a launch without the
+    flag whatever the model (pinned Miles' loaders always allow remote code:
+    :func:`yeto.launch.rl_args` states it), so it is on there, and
+    ``--no-trust-remote-code`` is a :class:`SmokeError`."""
+    from ..rl.model_registry.families import FAMILIES  # noqa: PLC0415
+
+    given = [a for a in extra_args if a in (TRUST, NO_TRUST)]
+    text = config.get("text_config") if isinstance(config.get("text_config"), Mapping) else {}
+    if given:
+        model = given[-1] == TRUST
+        why = f"the model: {TRUST} {'on' if model else 'off'} (--smoke-arg={given[-1]})"
+    elif config.get("auto_map") or text.get("auto_map"):
+        model, why = True, f"the model: {TRUST} on (its config.json auto_map names remote code)"
+    elif family not in {f.family for f in FAMILIES}:
+        model, why = True, (f"the model: {TRUST} on by default (the model registry does not know this model, "
+                            f"family {family or '?'}: the smoke cannot tell whether it needs remote code)")
+    else:
+        model, why = False, (f"the model: {TRUST} off (the registry's family {family} has no auto_map in "
+                             "config.json)")
+    if engine in TRUST_REQUIRED:
+        if given and not model:
+            raise SmokeError(f"--smoke-arg={NO_TRUST}: the {engine} launch refuses to start without {TRUST} "
+                             f"({TRUST_REQUIRED[engine]})")
+        if not model:
+            why += f"; the launch passes it anyway: {TRUST_REQUIRED[engine]}"
+        return True, [why]
+    return model, [why]
 
 
 def _mtp_layers(config: Mapping[str, Any]) -> int:

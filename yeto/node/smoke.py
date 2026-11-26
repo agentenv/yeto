@@ -10,8 +10,9 @@ sampler's own factory) it
 1. ``start``: starts the engine on its base weights (policy version 0);
 2. ``generate``: one completion;
 3. ``reload``: loads the release ``--release`` (default: the engine's base weights)
-   as policy version 1, the reload the engine does for every trainer release (in
-   place, or a restart for an engine that cannot);
+   as policy version 1, the reload the engine does for every trainer release; it
+   must be in place (``reload_mode`` ``in_place``): a reload that falls back to a
+   restart fails the step, and the error names the ``reload_mode``;
 4. ``generate_after_reload``: one completion at version 1;
 
 then stops the engine. Every step prints a ``YETO_SMOKE`` line and the run ends with
@@ -32,6 +33,7 @@ from typing import Any
 STEP_MARK = "YETO_SMOKE"
 RESULT_MARK = "YETO_SMOKE_RESULT"
 STEPS = ("start", "generate", "reload", "generate_after_reload")
+IN_PLACE = "in_place"  # yeto.rl.engine.sampler_engine.RELOAD_IN_PLACE (a test keeps them equal)
 
 
 def _emit(mark: str, record: Mapping[str, Any], out: Any) -> None:
@@ -88,6 +90,13 @@ def run_smoke(engine: Any, *, release: str | None, prompt: str = "Say hello.", m
             elif value is not None and hasattr(value, "reload_mode"):
                 detail["reload_mode"] = value.reload_mode
                 record[f"{name}_mode"] = value.reload_mode
+                if name == "reload" and value.reload_mode != IN_PLACE:
+                    record.update(step=name, error=(
+                        f"the engine reloaded with reload_mode {value.reload_mode}, not {IN_PLACE}: every trainer "
+                        "release would restart the sampler (the reload fell back to a restart)"))
+                    _emit(STEP_MARK, {"step": name, "ok": False, "seconds": times[name], **detail,
+                                      "error": record["error"]}, out)
+                    return record
             _emit(STEP_MARK, {"step": name, "ok": True, "seconds": times[name], **detail}, out)
         served = getattr(engine, "served_version", lambda: None)()
         if served is not None and int(served) != 1:

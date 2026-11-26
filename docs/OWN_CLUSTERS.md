@@ -776,8 +776,14 @@ to adopt the image. The steps, in order:
      checked), and a second launch resumes from that cut (its `rl_resume` event
      must name the same cut) and trains another round. `--model-path` takes the
      checkpoint from a directory on the node instead of the Hub. A gated model
-     needs `HF_TOKEN` in the environment of `yeto image adopt`: it is passed to
-     the node's cut, never printed. When the registry's flags for the model need
+     needs `HF_TOKEN` in the environment of `yeto image adopt`, and a Hub mirror
+     `HF_ENDPOINT`: both are passed to the node's cut through the script it
+     reads, never on a command line and never printed. The model needs
+     `--trust-remote-code` when its `config.json` has an `auto_map`, or when the
+     model registry does not know it; `--smoke-arg=--trust-remote-code` or
+     `--smoke-arg=--no-trust-remote-code` decides it instead. The Miles launch
+     requires the flag for every model (its loaders always allow remote code),
+     so the Miles smoke always passes it; the evidence notes say both. When the registry's flags for the model need
      a file (for example `--rl-expert-selection` for Kimi K3.1), pass it with
      `--smoke-arg=--rl-expert-selection=/path/selection.json`; any other
      `yeto launch` flag the run needs goes the same way. Only the Miles backend
@@ -787,8 +793,10 @@ to adopt the image. The steps, in order:
      flags and directories), generates once, reloads (the weights of `--release`,
      else the spec's `engine.server.base_dir`, as policy version 1; one of the two
      is required) and generates again. The reload checks the engine's hot-reload
-     endpoint only, not the format of a trainer release. A failing step is named,
-     for example `smoke failed: engine: reload failed: ...`.
+     endpoint only, not the format of a trainer release, and it must reload in
+     place: an engine whose reload falls back to a restart fails the smoke, and
+     the error names its `reload_mode`. A failing step is named, for example
+     `smoke failed: engine: reload failed: ...`.
 
    Whatever the smoke's outcome, a failure or a timeout, its containers are
    removed and its run stopped (`yeto down`), and its artifacts are deleted: the

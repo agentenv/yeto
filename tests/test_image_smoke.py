@@ -24,6 +24,7 @@ from tests.test_image_adopt import PINNED, TAGGED, FakeNodes, probe_out, registr
 from yeto.cli import build_parser
 from yeto.launch import image_adopt as ia
 from yeto.launch import image_smoke as sm
+from yeto.launch import model_check
 from yeto.launch import site_images as si
 from yeto.node import smoke as node_smoke
 from yeto.rl.adapters.sampler_engines.fake import FakeEngine
@@ -228,8 +229,9 @@ def test_the_trainer_plan_cuts_trains_and_resumes_on_one_node(tmp_path):
                         ("--rl-checkpoint-store", "s3://bucket/smoke/adopt-t"), ("--rl-stop-after-rounds", "1")):
         assert argv[argv.index(flag) + 1] == value
     assert argv.count("--model") == 1
-    for flag in ("--rl-single-island-no-sync", "--trust-remote-code", "--rl-allow-local-data"):
+    for flag in ("--rl-single-island-no-sync", "--rl-allow-local-data"):
         assert flag in argv
+    assert sm.TRUST in argv and plan.data["trust_remote_code"] is True  # qwen3-moe: no auto_map, but Miles needs it
     assert argv[argv.index("--controller") + 1] == "local"
     assert argv[argv.index("--reward-function") + 1] == sm.REWARD
     prompts = Path(argv[argv.index("--data") + 1])
@@ -613,7 +615,15 @@ def test_the_trainer_smoke_launch_passes_the_real_launch_checks_in_a_dry_run(tmp
     from yeto import cli
 
     monkeypatch.setattr(cli, "DEFAULT_INNER_LR", cli._DefaultLR(3e-4))  # the production default (conftest unmarks it)
+    monkeypatch.delenv(model_check.MODE_ENV, raising=False)  # conftest turns the model preflight off for every test
 
+    class RepositoryNotFoundError(Exception):
+        pass
+
+    def no_hub(*_args, **_kw):  # the cut exists only on the node: the Hub does not know yeto-local/...
+        raise RepositoryNotFoundError("404 yeto-local/Qwen3-30B-A3B-16layer")
+
+    monkeypatch.setattr(model_check, "hub_files", no_hub)
     plan = _trainer_plan(tmp_path)
     for path, text in plan.files.items():
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -764,3 +774,102 @@ def test_a_tuning_override_and_a_dropped_mtp_are_in_the_notes(tmp_path):
     assert not any("MTP" in n for n in plan.notes)
     lr = _trainer_plan(tmp_path, extra_args=("--inner-lr=3e-6",))
     assert "--inner-lr=3e-6" in lr.steps[1].argv and "1e-6" not in lr.steps[1].argv
+
+
+STUB_PYTHON = r"""#!/bin/bash
+# the image's interpreter on the prune: records what reached it, writes the cut's config.json
+out={record}
+{{ printf '%s\0' "$@"; printf 'HF_TOKEN=%s\0' "${{HF_TOKEN-}}"; printf 'HF_ENDPOINT=%s\0' "${{HF_ENDPOINT-}}"; }} > "$out"
+mkdir -p "$3" && printf '{{}}' > "$3/config.json"
+"""
+
+
+def test_shell_words_in_the_model_revision_and_hub_env_reach_the_node_verbatim_and_run_nothing(tmp_path):
+    """The rendered prune script in a real bash (``docker`` a shim running the container's
+    bash here, the image's interpreter a stub recording its argv and environment): a
+    ``$()``, backticks or quotes in ``--model``, ``--model-revision``, ``HF_TOKEN`` or
+    ``HF_ENDPOINT`` arrive as the same bytes and run nothing."""
+    pwn = tmp_path / "pwn"
+
+    def payload(tag):
+        return f"x'\"$(touch {pwn}-{tag}-a)`touch {pwn}-{tag}-b`;touch {pwn}-{tag}-c;\"'y"
+
+    model, revision = "org/m" + payload("model"), payload("rev")
+    env = {"HF_TOKEN": payload("token"), "HF_ENDPOINT": "https://hub.example/" + payload("endpoint")}
+    shim = tmp_path / "bin" / "docker"
+    shim.parent.mkdir()
+    shim.write_text(DOCKER_SHIM)
+    shim.chmod(0o755)
+    record = tmp_path / "record"
+    stub = tmp_path / "stub-python"
+    stub.write_text(STUB_PYTHON.format(record=shlex.quote(str(record))))
+    stub.chmod(0o755)
+    n = node(0, scratch=str(tmp_path / "scratch"))
+    plan = _trainer_plan(tmp_path, node=n, model=model, model_revision=revision, layers=4)
+    prune = plan.steps[0].render({sm.REF: PINNED, sm.PYTHON: str(stub)}, env)
+    assert env["HF_TOKEN"] not in prune.text()
+    done = subprocess.run(["bash", "-c", prune.script], capture_output=True, text=True, timeout=60,
+                          env={"PATH": f"{shim.parent}{os.pathsep}{os.environ['PATH']}", "HOME": str(tmp_path)},
+                          cwd=tmp_path)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("pwn")) == []
+    seen = record.read_text().split("\0")[:-1]
+    argv, got = seen[:-2], dict(item.split("=", 1) for item in seen[-2:])
+    assert argv[1] == f"hf://{model}" and argv[argv.index("--revision") + 1] == revision
+    assert got == env
+    assert re.search(rf"{sm.REVISION_MARK} [0-9a-f]{{40}}", done.stdout)
+
+
+def test_a_sampler_reload_that_falls_back_to_a_restart_fails_and_names_the_reload_mode(capsys):
+    from yeto.rl.engine.sampler_engine import RELOAD_IN_PLACE, RELOAD_RESTART
+
+    assert node_smoke.IN_PLACE == RELOAD_IN_PLACE
+    engine = FakeEngine(in_place=False)
+    record = node_smoke.run_smoke(engine, release=None)
+    assert (record["ok"], record["step"], record["reload_mode"]) == (False, "reload", RELOAD_RESTART)
+    assert f"reload_mode {RELOAD_RESTART}" in record["error"] and engine.stopped
+    lines = [json.loads(line.split(" ", 1)[1]) for line in capsys.readouterr().out.splitlines()]
+    assert lines[-1]["step"] == "reload" and not lines[-1]["ok"] and lines[-1]["reload_mode"] == RELOAD_RESTART
+    assert "generate_after_reload" not in record["seconds"]
+
+
+def _with(config, **over):
+    return {**json.loads(json.dumps(config)), **over}
+
+
+@pytest.mark.parametrize("config, family, model, why", [
+    (QWEN, "qwen3-moe", False, "has no auto_map"),
+    (_with(QWEN, auto_map={"AutoModelForCausalLM": "modeling_x.X"}), "qwen3-moe", True, "auto_map names remote code"),
+    (_with(QWEN, text_config={"auto_map": {"AutoConfig": "c.C"}}), "qwen3-moe", True, "auto_map names remote code"),
+    (QWEN, "generic-moe", True, "does not know this model"),
+    (QWEN, None, True, "does not know this model"),
+])
+def test_the_smoke_trusts_remote_code_as_the_model_needs(config, family, model, why):
+    on, notes = sm.remote_code(config, family, "verl")  # a backend that leaves it to the model
+    assert on is model and why in notes[0]
+    on, notes = sm.remote_code(config, family, "miles")  # pinned Miles refuses a launch without it
+    assert on is True and why in notes[0] and ("launch passes it anyway" in notes[0]) is (not model)
+
+
+def test_the_smoke_arg_decides_the_remote_code_and_miles_refuses_it_off(tmp_path):
+    assert sm.remote_code(QWEN, "qwen3-moe", "verl", [sm.TRUST]) == (True, [
+        f"the model: {sm.TRUST} on (--smoke-arg={sm.TRUST})"])
+    assert sm.remote_code(_with(QWEN, auto_map={"A": "b.C"}), "generic-moe", "verl", [sm.TRUST, sm.NO_TRUST])[0] is False
+    with pytest.raises(sm.SmokeError, match="launch refuses to start without --trust-remote-code"):
+        _trainer_plan(tmp_path, extra_args=[sm.NO_TRUST])
+    plan = _trainer_plan(tmp_path, config=_with(QWEN, architectures=["SomethingNewForCausalLM"],
+                                                model_type="something_new"))
+    argv = list(plan.steps[1].argv)
+    assert argv.count(sm.TRUST) == 1 and sm.NO_TRUST not in argv
+    assert any("does not know this model" in n for n in plan.data["notes"])
+    plan = _trainer_plan(tmp_path, extra_args=[sm.TRUST])
+    assert list(plan.steps[1].argv).count(sm.TRUST) == 1
+
+
+def test_the_remote_code_note_reaches_the_evidence(tmp_path):
+    nodes = [node(0)]
+    assert _adopt(nodes, tmp_path, _trainer_plan(tmp_path), TrainerNodes(nodes, Launches(tmp_path / "store")),
+                  "trainer").run().ok
+    (rec,) = si.load(tmp_path / "site-images.yaml")
+    assert any(n.startswith(f"the model: {sm.TRUST} off") and "launch passes it anyway" in n
+               for n in rec.evidence["notes"])
