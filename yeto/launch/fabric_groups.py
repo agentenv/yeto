@@ -72,15 +72,29 @@ def grouped(nodes: Iterable[Node]) -> bool:
     return any(n.fabric_group is not None for n in nodes)
 
 
+def _group_of(node: Node) -> str | None:
+    """The node's group, the reserved ``unavailable`` in any case read as itself."""
+    g = node.fabric_group
+    return FABRIC_UNAVAILABLE if isinstance(g, str) and g.lower() == FABRIC_UNAVAILABLE else g
+
+
 def placeable(node: Node) -> bool:
     """The node is in a group a multi-node island may take."""
-    return node.fabric_group not in (None, FABRIC_UNGROUPED, FABRIC_UNAVAILABLE)
+    return _group_of(node) not in (None, FABRIC_UNGROUPED, FABRIC_UNAVAILABLE)
 
 
 def _reasons(excluded: Iterable[str] | Mapping[str, str]) -> dict[str, str]:
+    if isinstance(excluded, str):
+        raise TypeError("excluded: give node names (a list, set or name -> reason map), not one string")
     if isinstance(excluded, Mapping):
         return {str(k): str(v) for k, v in excluded.items()}
     return {str(n): "excluded" for n in excluded}
+
+
+def _required(required: Iterable[Any]) -> list[str]:
+    if isinstance(required, str):
+        raise TypeError("required: give node names (a list), not one string")
+    return list(dict.fromkeys(getattr(n, "name", n) for n in required))
 
 
 def _names(nodes: Sequence[Node], limit: int = 6) -> str:
@@ -88,43 +102,67 @@ def _names(nodes: Sequence[Node], limit: int = 6) -> str:
 
 
 def pick_placement(candidates: Sequence[Node], need: int, *,
-                   excluded: Iterable[str] | Mapping[str, str] = (),
+                   excluded: Iterable[str] | Mapping[str, str] = (), required: Iterable[Any] = (),
                    inventory: Sequence[Node] | None = None) -> Placement:
     """The ``need`` nodes of ``candidates`` an island takes; raises :class:`PlacementError`.
 
     1. ``excluded`` nodes leave (names, or name -> reason: not healthy, quarantined,
-       leased by another run);
+       leased by another run; one string is a :class:`TypeError`);
     2. an inventory without groups (``inventory``, default ``candidates``) or a
        single-node island is one bucket in the candidates' order (as before);
     3. otherwise the free nodes of each group form a bucket (``unavailable`` and
        ungrouped nodes in none), and the bucket with the most free nodes that holds
        ``need`` wins (ties: the group name); its nodes go by name.
 
+    ``required`` (names or nodes: an island's surviving nodes when one is replaced) stay
+    in the result: only their group is considered, and the result is the required nodes
+    (in the order given) and then the group's other free nodes by name. A required node
+    that is excluded, not a candidate, or not in the others' group: :class:`PlacementError`.
+
     A caller whose node could not be taken (a lease lost) adds it to ``excluded``
     and asks again."""
     why = _reasons(excluded)
+    keep = _required(required)
+    by_name = {n.name: n for n in candidates}
+    if len(keep) > max(need, 0):
+        raise PlacementError(f"{len(keep)} required node(s) {keep} for an island of {need}")
+    if missing := [k for k in keep if k not in by_name]:
+        raise PlacementError(f"required node(s) {missing} are not candidates")
+    if gone := [k for k in keep if k in why]:
+        raise PlacementError(f"required node(s) excluded: {', '.join(f'{k}: {why[k]}' for k in gone)}")
     free = [n for n in candidates if n.name not in why]
     if need <= 1 or not grouped(candidates if inventory is None else inventory):
-        if len(free) < need:
+        rest = [by_name[k] for k in keep] + [n for n in free if n.name not in keep]
+        if len(rest) < need:
             raise PlacementError(f"the island needs {need} node(s); {len(free)} of {len(candidates)} candidate(s) "
                                  "are free" + _excluded_note(candidates, why))
-        return Placement(None, tuple(free[:need]))
+        return Placement(None, tuple(rest[:need]))
     buckets: dict[str, list[Node]] = {}
     for n in candidates:
         if placeable(n):
             buckets.setdefault(str(n.fabric_group), [])
             if n.name not in why:
                 buckets[str(n.fabric_group)].append(n)
+    if keep:
+        groups = {k: (str(by_name[k].fabric_group) if placeable(by_name[k]) else None) for k in keep}
+        if None in groups.values() or len(set(groups.values())) > 1:
+            raise PlacementError("the required nodes are not one fabric group: "
+                                 + ", ".join(f"{k}: {_group_of(by_name[k]) or 'no fabric_group'}" for k in keep))
+        (only,) = set(groups.values())
+        buckets = {only: buckets[only]}
     fits = sorted(((g, m) for g, m in buckets.items() if len(m) >= need), key=lambda gm: (-len(gm[1]), gm[0]))
     if fits:
         group, members = fits[0]
-        return Placement(group, tuple(sorted(members, key=lambda n: n.name)[:need]))
+        rest = [by_name[k] for k in keep] + sorted((n for n in members if n.name not in keep), key=lambda n: n.name)
+        return Placement(group, tuple(rest[:need]))
     counts = ", ".join(f"group {g} has only {len(m)}" for g, m in sorted(buckets.items())) or "no group has a node"
     parts = [f"the island needs {need} healthy nodes of one fabric group; {counts}"]
-    ungrouped = [n for n in candidates if n.fabric_group in (None, FABRIC_UNGROUPED)]
+    if keep:
+        parts[0] += f" (the required nodes {', '.join(keep)} are in it)"
+    ungrouped = [n for n in candidates if _group_of(n) in (None, FABRIC_UNGROUPED)]
     if ungrouped:
         parts.append(f"{len(ungrouped)} node(s) without fabric_group ({_names(ungrouped)})")
-    unavailable = [n for n in candidates if n.fabric_group == FABRIC_UNAVAILABLE]
+    unavailable = [n for n in candidates if _group_of(n) == FABRIC_UNAVAILABLE]
     if unavailable:
         parts.append(f"{len(unavailable)} node(s) fabric unavailable ({_names(unavailable)})")
     message = "; ".join(parts) + _excluded_note([n for n in candidates if placeable(n)], why)
@@ -230,9 +268,11 @@ def _pair_key(a: str, b: str) -> str:
 
 
 def node_blocks(names: Sequence[str], checks: Sequence[Any], states: Sequence[Any] = ()) -> dict[str, str]:
-    """The nodes that may have no edge, with the reason: a FAIL of an HCA check of the
-    preflight, or fewer active rails than the HCAs the node declares (``NCCL_IB_HCA``,
-    else the ports of its fabric's link layer)."""
+    """The nodes that may have no edge, with the reason, on the preflight's terms: a FAIL
+    of an HCA check, or too few active rails. With ``NCCL_IB_HCA`` every port it names
+    must be active (the preflight fails a down one); without it NCCL takes every port of
+    the fabric's link layer and a spare one down is a WARN there, so only fewer active
+    ports than ``min(ports, cards_per_node)`` block the node."""
     from .preflight.cluster import compute_ports  # noqa: PLC0415 - preflight imports the launch layer
 
     out: dict[str, str] = {}
@@ -247,8 +287,12 @@ def node_blocks(names: Sequence[str], checks: Sequence[Any], states: Sequence[An
         selected, missing, _ = compute_ports(s.node, s.ports)
         declared = len(selected) + len(missing)
         active = sum(1 for p in selected if p.active)
-        if declared and active < declared:
-            out[name] = f"{active} of {declared} declared HCA rails active"
+        if s.node.env.get("NCCL_IB_HCA"):
+            if declared and active < declared:
+                out[name] = f"{active} of {declared} declared HCA rails active"
+        elif declared and active < min(declared, int(s.node.cards_per_node)):
+            out[name] = (f"{active} of {declared} HCA ports active, fewer than "
+                         f"{min(declared, int(s.node.cards_per_node))} rails")
     return out
 
 
@@ -340,11 +384,39 @@ def components(names: Sequence[str], edges: Iterable[tuple[str, str]]) -> list[l
     return sorted((sorted(c) for c in out.values()), key=lambda c: (-len(c), c[0]))
 
 
-def cliques(nodes: Sequence[str], edges: Iterable[tuple[str, str]]) -> list[list[str]]:
-    """``nodes`` (one connected component) cut into cliques: the node with the most
-    missing edges leaves (ties: the last by name) until the rest is a clique; the
-    nodes that left are cut the same way among themselves. Largest first."""
-    edge = {frozenset(e) for e in edges}
+EXACT_CLIQUES_MAX = 16  # up to this many nodes a component is cut exactly (Bron-Kerbosch)
+
+
+def _best_clique(nodes: Sequence[str], adj: Mapping[str, set[str]]) -> list[str]:
+    """The largest clique among ``nodes`` (ties: the first sorted member list), over every
+    maximal clique (Bron-Kerbosch with a pivot)."""
+    best: list[str] = []
+
+    def better(c: list[str]) -> bool:
+        return len(c) > len(best) or (len(c) == len(best) and c < best)
+
+    def expand(r: list[str], p: set[str], x: set[str]) -> None:
+        nonlocal best
+        if not p and not x:
+            c = sorted(r)
+            if better(c):
+                best = c
+            return
+        if len(r) + len(p) < len(best):
+            return
+        pivot = max(p | x, key=lambda u: (len(adj[u] & p), u))
+        for v in sorted(p - adj[pivot]):
+            expand(r + [v], p & adj[v], x & adj[v])
+            p = p - {v}
+            x = x | {v}
+
+    expand([], set(nodes), set())
+    return best
+
+
+def _greedy_cliques(nodes: Sequence[str], edge: set[frozenset[str]]) -> list[list[str]]:
+    """The cut of a large component: the node with the most missing edges leaves (ties:
+    the last by name) until the rest is a clique; the nodes that left are cut again."""
     rest, left = sorted(nodes), []
     while True:
         bad = {n: sum(1 for m in rest if m != n and frozenset((n, m)) not in edge) for n in rest}
@@ -358,8 +430,36 @@ def cliques(nodes: Sequence[str], edges: Iterable[tuple[str, str]]) -> list[list
     if left:
         sub = [tuple(e) for e in edge if e <= set(left)]
         for comp in components(sorted(left), sub):
-            out += cliques(comp, sub)
-    return sorted(out, key=lambda c: (-len(c), c[0]))
+            out += _greedy_cliques(comp, {frozenset(e) for e in sub})
+    return out
+
+
+def cliques(nodes: Sequence[str], edges: Iterable[tuple[str, str]]) -> list[list[str]]:
+    """``nodes`` (one connected component) cut into cliques, largest first.
+
+    Up to :data:`EXACT_CLIQUES_MAX` nodes, exactly: the largest clique is taken (ties: the
+    first sorted member list), then the largest of the rest, until no node is left.
+    Larger components are cut greedily (:func:`_greedy_cliques`), and a node left alone
+    then joins the largest clique it has an edge to every member of."""
+    edge = {frozenset(e) for e in edges if len(set(e)) == 2}
+    names = sorted(set(nodes))
+    adj = {n: {m for m in names if m != n and frozenset((n, m)) in edge} for n in names}
+    if len(names) <= EXACT_CLIQUES_MAX:
+        out, rest = [], list(names)
+        while rest:
+            best = _best_clique(rest, {n: adj[n] & set(rest) for n in rest})
+            out.append(best)
+            rest = [n for n in rest if n not in best]
+    else:
+        out = _greedy_cliques(names, edge)
+        for single in sorted(c[0] for c in out if len(c) == 1):
+            hosts = [c for c in out if len(c) > 1 and all(m in adj[single] for m in c)]
+            if hosts:
+                host = sorted(hosts, key=lambda c: (-len(c), c))[0]
+                host.append(single)
+                host.sort()
+                out = [c for c in out if c != [single]]
+    return sorted(out, key=lambda c: (-len(c), c))
 
 
 def _digest(text: str) -> str:
@@ -382,8 +482,9 @@ def assign_ids(comps: Sequence[Sequence[str]], *, keys: Mapping[str, Iterable[st
        networks), when no other group has the same keys;
     3. ``fg-`` + a hash of its sorted node names.
 
-    ``reserved``: names held by inventory nodes outside the probe; only a group whose
-    nodes carry one may keep it."""
+    ``reserved``: names held by inventory nodes outside the probe. Such a name goes only
+    to a group whose every node carries it already: a node that was not in the group
+    never inherits its name (and with it the unprobed members' trust)."""
     previous, keys = previous or {}, keys or {}
     overlap: dict[tuple[str, int], int] = {}
     for i, comp in enumerate(comps):
@@ -393,11 +494,14 @@ def assign_ids(comps: Sequence[Sequence[str]], *, keys: Mapping[str, Iterable[st
                 overlap[k] = overlap.get(k, 0) + 1
     taken: set[str] = set()
     out: list[str | None] = [None] * len(comps)
+    held_outside = {r for r in reserved if _old_name(r)}
     for (name, i), _ in sorted(overlap.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1])):
+        if name in held_outside and any(previous.get(n) != name for n in comps[i]):
+            continue
         if out[i] is None and name not in taken:
             out[i] = name
             taken.add(name)
-    blocked = {r for r in reserved if _old_name(r)} | taken | {FABRIC_UNAVAILABLE}
+    blocked = held_outside | taken | {FABRIC_UNAVAILABLE}
     fabric = {i: "|".join(sorted({k for n in comp for k in keys.get(n, ())})) for i, comp in enumerate(comps)}
     shared: dict[str, int] = {}
     for v in fabric.values():
@@ -521,6 +625,7 @@ def _yaml_edits(text: str, todo: Mapping[str, str | None]) -> str:
     if not isinstance(seq, yaml.SequenceNode):
         raise InventoryError("the inventory has no nodes: list to write fabric_group into")
     current = _effective(yaml.safe_load(text))
+    eol = "\r\n" if "\r\n" in text else "\n"  # the file's newline, kept in the added lines
     items: list[tuple[str, Any]] = []
     for index, item in enumerate(seq.value):
         if isinstance(item, yaml.MappingNode):
@@ -545,13 +650,13 @@ def _yaml_edits(text: str, todo: Mapping[str, str | None]) -> str:
             if text[end] != "}":
                 raise InventoryError(f"node {name}: cannot find the end of its flow mapping")
             at = end
-            while at > 0 and text[at - 1] in " \t\n":
+            while at > 0 and text[at - 1] in " \t\r\n":
                 at -= 1
             return at, at, f"{', ' if item.value else ''}fabric_group: {text_value}"
         k, v = own.get("name") or item.value[0]
         nl = text.find("\n", v.end_mark.index)
         at = len(text) if nl < 0 else nl + 1
-        return at, at, ("" if nl >= 0 else "\n") + " " * k.start_mark.column + f"fabric_group: {text_value}\n"
+        return at, at, ("" if nl >= 0 else eol) + " " * k.start_mark.column + f"fabric_group: {text_value}{eol}"
 
     sources = [(n, it) for n, it in items if n in todo and id(it) in mergers]
     if sources:
@@ -578,6 +683,16 @@ def updated_text(text: str, groups: Mapping[str, str | None], *, json_file: bool
     the same inventory except those fields, and every other node keeps its value."""
     import yaml  # noqa: PLC0415
 
+    try:
+        return _updated_text(text, groups, json_file=json_file)
+    except (yaml.YAMLError, json.JSONDecodeError) as exc:
+        raise InventoryError(f"the inventory cannot be edited in place ({type(exc).__name__}: "
+                             f"{str(exc).splitlines()[0] if str(exc) else ''}); set fabric_group by hand") from None
+
+
+def _updated_text(text: str, groups: Mapping[str, str | None], *, json_file: bool) -> str:
+    import yaml  # noqa: PLC0415
+
     original = yaml.safe_load(text)
     unknown = sorted(set(groups) - set(_effective(original)))
     if unknown:
@@ -589,6 +704,8 @@ def updated_text(text: str, groups: Mapping[str, str | None], *, json_file: bool
             if name in groups and (groups[name] is not None or "fabric_group" in e):
                 e["fabric_group"] = groups[name]
         new = json.dumps(doc, indent=2) + "\n"
+        if "\r\n" in text:
+            new = new.replace("\n", "\r\n")
     else:
         new = text
         for _ in range(4):  # an edit of a merged anchor reaches the entries that merge it
@@ -613,14 +730,15 @@ def write_groups(path: str | Path, groups: Mapping[str, str | None]) -> bool:
     is written, synced to disk and renamed over it, with the file's mode and, where
     allowed, its owner; the directory is synced after the rename."""
     file = Path(os.path.realpath(path))
-    text = file.read_text()
+    with open(file, newline="") as fh:  # the newlines as they are (CRLF kept)
+        text = fh.read()
     new = updated_text(text, groups, json_file=file.suffix == ".json")
     if new == text:
         return False
     st = file.stat()
     fd, tmp = tempfile.mkstemp(dir=file.parent, prefix=f".{file.name}.")
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", newline="") as fh:
             fh.write(new)
             fh.flush()
             os.fsync(fh.fileno())

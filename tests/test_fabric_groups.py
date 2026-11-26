@@ -61,19 +61,21 @@ def _grouped(*groups) -> list:
 class IdleCluster(FakeCluster):
     """The preflight's fake B300 cluster, answering the probe's busy check too."""
 
-    def __init__(self, nodes, *, gpu_apps=None, containers=None, smi_rc=None, **per_node):
+    def __init__(self, nodes, *, gpu_apps=None, containers=None, smi_rc=None, ps_rc=None, silent=(), **per_node):
         super().__init__(nodes, **per_node)
         self.gpu_apps, self.containers, self.smi_rc = gpu_apps or {}, containers or {}, smi_rc or {}
+        self.ps_rc, self.silent = ps_rc or {}, set(silent)  # silent: the idle check gets no answer
 
     def run(self, node, script, *, timeout=300.0):
         if f"{cp.SECTION} compute_apps" not in script:
             return super().run(node, script, timeout=timeout)
         self.scripts.append((node.name, script))
-        if self.b[node.name].ssh_rc:
-            return self.done(self.b[node.name].ssh_rc, "ssh: connect to host port 22: Connection timed out")
+        if self.b[node.name].ssh_rc or node.name in self.silent:
+            return self.done(255, "ssh: connect to host port 22: Connection timed out")
         out = [f"{cp.SECTION} compute_apps", self.gpu_apps.get(node.name, ""), f"{cp.RC} {self.smi_rc.get(node.name, 0)}"]
         if f"{cp.SECTION} yeto_containers" in script:
-            out += [f"{cp.SECTION} yeto_containers", self.containers.get(node.name, ""), f"{cp.RC} 0"]
+            out += [f"{cp.SECTION} yeto_containers", self.containers.get(node.name, ""),
+                    f"{cp.RC} {self.ps_rc.get(node.name, 0)}"]
         return self.done(0, "\n".join(out) + "\n")
 
 
@@ -277,13 +279,29 @@ def test_the_runbook_preflight_commands_print_what_main_prints(tmp_path, monkeyp
     assert [r.getMessage() for r in caplog.records] == [fg.HINT]
 
 
-def test_preflight_of_an_inventory_file_checks_the_groups(tmp_path, capsys):
+def _preflight_args(gpu, tmp_path, *extra):
+    from yeto.cli import build_parser
+
+    return build_parser().parse_args(["preflight", "--gpu", gpu, "--run-dir", str(tmp_path / "pf"), "--json", *extra])
+
+
+def test_split_groups_are_a_preflight_fail_and_every_node_is_still_checked(tmp_path, capsys):
     path = tmp_path / "nodes.yaml"
-    path.write_text(yaml.safe_dump({"nodes": [_entry(0, fabric_group="A"), _entry(1, fabric_group="B")]}))
-    with pytest.raises(InventoryError, match="not one fabric group: .*group A has only 1"):
-        cp.resolve_nodes(f"ssh:{path}", None)
+    entries = [_entry(0, fabric_group="A"), _entry(1, fabric_group="B")]
+    path.write_text(yaml.safe_dump({"nodes": [{**e, "docker_args": list(b300(0).docker_args), "image": IMAGE,
+                                               "env": dict(b300(0).env)} for e in entries]}))
+    for gpu, extra in ((f"ssh:{path}", ()), ("ssh:2x8xb300", ("--rl-node-inventory", str(path)))):
+        nodes = load_inventory(path)
+        ops = FakeCluster(nodes)
+        assert cp.main(_preflight_args(gpu, tmp_path, *extra), ops=ops) == 1
+        report = json.loads(capsys.readouterr().out)
+        (row,) = [c for c in report["checks"] if c["name"] == "fabric_group"]
+        assert row["status"] == "FAIL" and row["scope"] == "inventory" and "group A has only 1" in row["detail"]
+        assert {c["scope"] for c in report["checks"] if c["name"] == "ssh"} == {"b300-0", "b300-1"}  # diagnosed
+    path.write_text(yaml.safe_dump({"nodes": [_entry(0, fabric_group="A"), _entry(1, fabric_group="A")]}))
+    assert cp.fabric_check(load_inventory(path))[0].status == "PASS"
     path.write_text(yaml.safe_dump({"nodes": [_entry(0), _entry(1)]}))
-    assert len(cp.resolve_nodes(f"ssh:{path}", None)) == 2
+    assert len(cp.resolve_nodes(f"ssh:{path}", None)) == 2 and cp.fabric_check(load_inventory(path)) == []
     assert capsys.readouterr().err == ""
 
 
@@ -607,20 +625,145 @@ def test_probe_dry_run_runs_no_ssh_and_says_how_long(tmp_path, capsys):
     assert re.search(r"about \d+ min \(not counting the image pull\), deadline 3600 s", err)
 
 
-def test_probe_refuses_busy_nodes_unless_forced(tmp_path, capsys):
+GPU_APP = "4242, python3, 81920 MiB"
+
+
+def _probed(ops):
+    return any("ib_write_bw" in s or "docker pull" in s for _, s in ops.scripts)
+
+
+def test_probe_refuses_nodes_not_idle_or_not_confirmed_idle(tmp_path, capsys):
     path = _inventory_file(tmp_path)
-    ops = _ops_for(path, gpu_apps={"b300-2": "4242, python3, 81920 MiB"},
-                   containers={"b300-4": "yeto-trainer-0 ghcr.io/x Up 2 hours"}, smi_rc={"b300-5": 9})
+    ops = _ops_for(path, gpu_apps={"b300-2": GPU_APP}, containers={"b300-4": "yeto-trainer-0 ghcr.io/x Up 2 hours"},
+                   smi_rc={"b300-5": 9}, ps_rc={"b300-3": 1}, silent={"b300-1"})
     assert cluster_cli.main(_args(path, "--write"), ops=ops, log=lambda m: None) == cluster_cli.EXIT_BUSY
     err = capsys.readouterr().err
-    assert "3 node(s) busy: refused" in err
-    assert "b300-2: GPU process 4242, python3, 81920 MiB" in err and "b300-4: container yeto-trainer-0" in err
-    assert "b300-5: cannot list GPU processes" in err
-    assert not any("ib_write_bw" in s or "docker pull" in s for _, s in ops.scripts)
-    assert "fabric_group" not in path.read_text()
-    ops = _ops_for(path, gpu_apps={"b300-2": "4242, python3, 81920 MiB"})
-    assert cluster_cli.main(_args(path, "--force"), ops=ops, log=lambda m: None) == 0
-    assert "probing anyway (--force)" in capsys.readouterr().err
+    assert "5 node(s) not idle or not confirmed idle: refused" in err
+    assert f"b300-2: GPU process {GPU_APP} (--force-busy-gpu)" in err
+    assert "b300-4: container yeto-trainer-0 ghcr.io/x Up 2 hours (--force)" in err
+    assert "b300-5: cannot confirm it is idle: GPU processes not listed" in err
+    assert "b300-3: cannot confirm it is idle: containers not listed" in err
+    assert "b300-1: cannot confirm it is idle: no answer" in err  # an ssh hiccup never waves a node through
+    assert not _probed(ops) and "fabric_group" not in path.read_text()
+
+
+def test_force_lets_unconfirmed_and_container_nodes_through_but_not_a_gpu_process(tmp_path, capsys):
+    path = _inventory_file(tmp_path)
+    ops = _ops_for(path, containers={"b300-4": "yeto-trainer-0 x Up"}, silent={"b300-1"})
+    assert cluster_cli.main(_args(path, "--force", "--nodes", "b300-0,b300-4"), ops=ops, log=lambda m: None) == 0
+    assert "[WARN] b300-4: container yeto-trainer-0 x Up: probing anyway (--force)" in capsys.readouterr().err
+    ops = _ops_for(path, gpu_apps={"b300-1": GPU_APP})
+    assert cluster_cli.main(_args(path, "--force", "--nodes", "b300-0,b300-1"), ops=ops,
+                            log=lambda m: None) == cluster_cli.EXIT_BUSY
+    assert "b300-1: GPU process" in capsys.readouterr().err and not _probed(ops)
+    ops = _ops_for(path, gpu_apps={"b300-1": GPU_APP}, containers={"b300-1": "yeto-x i Up"})
+    assert cluster_cli.main(_args(path, "--force-busy-gpu", "--nodes", "b300-0,b300-1"), ops=ops,
+                            log=lambda m: None) == cluster_cli.EXIT_BUSY  # the container still needs --force
+    capsys.readouterr()
+    ops = _ops_for(path, gpu_apps={"b300-1": GPU_APP})
+    assert cluster_cli.main(_args(path, "--force-busy-gpu", "--nodes", "b300-0,b300-1"), ops=ops,
+                            log=lambda m: None) == 0
+    assert f"[WARN] b300-1: GPU process {GPU_APP}: probing anyway (--force-busy-gpu)" in capsys.readouterr().err
+    assert _probed(ops)
+
+
+def test_a_node_another_run_leases_refuses_the_probe_whatever_the_flags(tmp_path, capsys):
+    from yeto.launch.node_lease import NodeLeases
+
+    store = f"file://{tmp_path / 'leases'}"
+    path = tmp_path / "nodes.yaml"
+    path.write_text(f"lease_store: {store}\n" + CUSTOMER_INVENTORY.read_text())
+    other = NodeLeases(store, "other-run")
+    assert other.acquire(load_inventory(path)[1]).ok
+    ops = _ops_for(path)
+    rc = cluster_cli.main(_args(path, "--force", "--force-busy-gpu", "--nodes", "b300-0,b300-1"), ops=ops,
+                          log=lambda m: None)
+    assert rc == cluster_cli.EXIT_BUSY and not _probed(ops)
+    err = capsys.readouterr().err
+    assert "b300-1: leased by other-run" in err and "nothing overrides a lease" in err
+    other.release_all()
+    assert cluster_cli.main(_args(path, "--nodes", "b300-0,b300-1"), ops=_ops_for(path), log=lambda m: None) == 0
+
+
+def test_an_idle_check_that_raises_is_not_confirmed_idle(tmp_path, capsys):
+    class Raising(IdleCluster):
+        def run(self, node, script, *, timeout=300.0):
+            if f"{cp.SECTION} compute_apps" in script and node.name == "b300-1":
+                raise subprocess.TimeoutExpired(["ssh", node.host], timeout)
+            return super().run(node, script, timeout=timeout)
+
+    path = _inventory_file(tmp_path)
+    ops = Raising(load_inventory(path))
+    assert cluster_cli.main(_args(path, "--nodes", "b300-0,b300-1"), ops=ops, log=lambda m: None) == cluster_cli.EXIT_BUSY
+    assert "b300-1: cannot confirm it is idle: no answer (TimeoutExpired" in capsys.readouterr().err
+    assert not _probed(ops)
+    ops = Raising(load_inventory(path))
+    assert cluster_cli.main(_args(path, "--force", "--nodes", "b300-0,b300-1"), ops=ops, log=lambda m: None) == 0
+    assert "[WARN] b300-1: cannot confirm it is idle: no answer (TimeoutExpired" in capsys.readouterr().err
+
+
+def test_the_probe_lists_containers_with_the_engine_the_inventory_declares(tmp_path):
+    path = tmp_path / "nodes.yaml"
+    path.write_text(yaml.safe_dump({"nodes": [_entry(i, container="podman") for i in range(2)]}))
+    with pytest.warns(UserWarning, match="node profile keys"):
+        ops = IdleCluster(load_inventory(path))
+    with pytest.warns(UserWarning, match="node profile keys"):
+        cluster_cli.main(_args(path), ops=ops, log=lambda m: None)
+    idle = [s for _, s in ops.scripts if f"{cp.SECTION} compute_apps" in s]
+    assert len(idle) == 2 and all("podman ps --filter name=yeto-" in s and "docker ps" not in s for s in idle)
+
+
+def test_the_idle_check_lists_the_containers_of_the_nodes_engine():
+    from yeto.launch.node_inventory import NodeProfile
+
+    docker, = _grouped(None)
+    sections = dict(cluster_cli.idle_sections(docker))
+    assert "docker ps --filter name=yeto-" in sections["yeto_containers"]
+    podman = NodeProfile.from_node(docker, container="podman")
+    assert "podman ps --filter name=yeto-" in dict(cluster_cli.idle_sections(podman))["yeto_containers"]
+    process = parse_inventory({"nodes": [_entry(0, runtime="rootfs")]})[0]
+    assert [n for n, _ in cluster_cli.idle_sections(process)] == ["compute_apps"]
+
+
+@pytest.mark.parametrize("engine, plain, sudo, rc, listed", [
+    ("docker", "ok:yeto-a", "none", 0, ["yeto-a"]),
+    ("docker", "denied", "fail", 1, []),  # neither view lists: not confirmed
+    ("docker", "denied", "ok:yeto-b", 0, ["yeto-b"]),  # the sudo view is enough for docker's one daemon
+    ("docker", "down", "fail", 0, []),  # no daemon running: no containers
+    ("docker", "absent", "none", 0, []),
+    ("podman", "denied", "ok:yeto-c", 1, ["yeto-c"]),  # podman: the user's own view must list
+    ("podman", "ok:", "ok:yeto-d", 0, ["yeto-d"]),
+])
+def test_the_container_listing_runs_under_bash(tmp_path, engine, plain, sudo, rc, listed):
+    shims = tmp_path / "bin"
+    shims.mkdir()
+
+    def tool(name, body):
+        (shims / name).write_text("#!/bin/sh\n" + body + "\n")
+        (shims / name).chmod(0o755)
+
+    def answer(what):
+        if what.startswith("ok:"):
+            return f"echo '{what[3:]}'" if what[3:] else "exit 0"
+        if what == "denied":
+            return "echo 'permission denied while trying to connect' >&2; exit 1"
+        if what == "down":
+            return "echo 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock' >&2; exit 1"
+        return "exit 1"
+
+    if plain != "absent":
+        tool(engine, answer(plain))
+    if sudo == "none":
+        tool("sudo", "exit 1")
+    else:
+        tool("sudo", f'[ "$1" = -n ] && shift; [ "$1" = true ] && exit 0; {answer(sudo)}')
+    env = {"PATH": f"{shims}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    script = cluster_cli.containers_command(engine)
+    if plain == "absent":
+        env["PATH"] = f"{shims}:/bin"  # no engine on the PATH at all
+    out = subprocess.run(["/bin/bash", "-c", script], env=env, capture_output=True, text=True, timeout=30)
+    assert out.returncode == rc, out.stderr
+    assert [ln.split()[0] for ln in out.stdout.splitlines() if ln.strip()] == listed
 
 
 def test_probe_reports_busy_ports_as_the_preflight_does(tmp_path, capsys):
@@ -641,11 +784,31 @@ def test_probe_exits_1_on_a_missing_edge(tmp_path, monkeypatch, capsys):
 
 def test_probe_deadline_cuts_it_short_and_writes_nothing(tmp_path, capsys):
     path = _inventory_file(tmp_path)
-    ticks = iter(range(0, 10 ** 6, 100))
-    rc = cluster_cli.main(_args(path, "--write", "--deadline", "250", "--nodes", "b300-0,b300-1"),
+    ticks = iter(range(0, 10 ** 6, 100))  # the idle check takes 4 ticks, the preflight starts past 450
+    rc = cluster_cli.main(_args(path, "--write", "--deadline", "450", "--nodes", "b300-0,b300-1"),
                           ops=_ops_for(path), log=lambda m: None, clock=lambda: next(ticks))
     assert rc == 1
     assert "cut the probe short" in capsys.readouterr().err and "fabric_group" not in path.read_text()
+
+
+def test_the_deadline_shortens_each_call_and_counts_a_late_return():
+    seen = []
+    now = [0.0]
+
+    class Slow:
+        def run(self, node, script, *, timeout=300.0):
+            seen.append(timeout)
+            now[0] += 50.0  # the call returns, but after the deadline
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    timed = cluster_cli._DeadlineOps(Slow(), 40.0, lambda: now[0])
+    timed.run(None, "x", timeout=300.0)
+    assert seen == [40.0] and timed.hit
+    with pytest.raises(TimeoutError):
+        timed.run(None, "x")
+    fresh = cluster_cli._DeadlineOps(Slow(), 1000.0, lambda: now[0])
+    fresh.run(None, "x", timeout=30.0)
+    assert seen[-1] == 30.0 and not fresh.hit
 
 
 def test_probe_refuses_bad_limits_unknown_nodes_and_too_few(tmp_path, capsys):
@@ -735,3 +898,206 @@ def test_the_doc_probe_dry_run_runs_as_written(tmp_path):
         assert out.returncode == 0, out.stderr
     assert _files(tmp_path) == before
     assert "## Fabric groups" in DOC.read_text()
+
+
+# ------------------------------------------------------------------ review 892b
+def test_a_partial_probe_never_lends_a_name_to_an_unprobed_node(tmp_path):
+    """b300-0/1/2 are group A, b300-3 is new: probing b300-0 with b300-3 must not make
+    b300-3 an A (b300-3 was never measured against b300-1 / b300-2)."""
+    path = tmp_path / "nodes.yaml"
+    entries = [_entry(i, fabric_group="A") for i in range(3)] + [_entry(3)]
+    path.write_text(yaml.safe_dump({"nodes": [{**e, "image": IMAGE, "docker_args": list(b300(0).docker_args),
+                                               "env": dict(b300(0).env)} for e in entries]}, sort_keys=False))
+    assert cluster_cli.main(_args(path, "--write", "--nodes", "b300-0,b300-3"), ops=_ops_for(path),
+                            log=lambda m: None) == 0
+    groups = {n.name: n.fabric_group for n in load_inventory(path)}
+    assert groups["b300-1"] == groups["b300-2"] == "A"
+    assert groups["b300-3"] != "A" and groups["b300-0"] == groups["b300-3"]
+    with pytest.raises(fg.PlacementError):
+        fg.pick_placement(load_inventory(path), 4)
+    # every member of the new group carried A, and others still hold it: the name stays
+    assert fg.assign_ids([["b300-0", "b300-1"]], previous={"b300-0": "A", "b300-1": "A"}, reserved={"A"}) == ["A"]
+    assert fg.assign_ids([["b300-0", "b300-3"]], previous={"b300-0": "A"}, reserved={"A"}) != ["A"]
+    assert fg.assign_ids([["b300-0", "b300-3"]], previous={"b300-0": "A"}) == ["A"]  # nothing outside holds A
+
+
+def _no_hca_env(i, **kw):
+    return b300(i, env={}, **kw)
+
+
+def test_a_spare_port_down_without_nccl_ib_hca_keeps_the_edges():
+    ports = [cp.IbPort(f"mlx5_{j}", 1, "Active", rate_gbps=400, link_layer="InfiniBand") for j in range(8)]
+    ports.append(cp.IbPort("mlx5_8", 1, "Down", rate_gbps=200, link_layer="InfiniBand"))  # an unused (storage) port
+    state = SimpleNamespace(node=_no_hca_env(0), ports=ports, compute=ports, gids=[], host={})
+    assert fg.node_blocks(["b300-0"], [], [state]) == {}
+    ports[0] = cp.IbPort("mlx5_0", 1, "Down", rate_gbps=400, link_layer="InfiniBand")
+    assert fg.node_blocks(["b300-0"], [], [state]) == {
+        "b300-0": "7 of 9 HCA ports active, fewer than 8 rails"}
+    names = ["b300-0", "b300-1"]
+    assert fg.group_nodes(names, _pair_checks(names), states=[
+        SimpleNamespace(node=_no_hca_env(0), ports=ports[1:] + [ports[0]], compute=[], gids=[], host={})]).groups == {}
+
+
+def test_eight_active_and_one_down_on_the_fake_cluster_has_edges():
+    down = Behavior(host={"ibstat": (0, ibstat_text(n=9, down=(8,), storage=False))})
+    nodes = [_no_hca_env(0), _no_hca_env(1)]
+    ops = IdleCluster(nodes, **{"b300-1": down})
+    result = _probe(nodes, ops)
+    assert list(result.groups.values()) == [["b300-0", "b300-1"]]
+
+
+def _brute_cliques(names, edges):
+    import itertools
+
+    edge = {frozenset(e) for e in edges}
+    rest, out = sorted(names), []
+    while rest:
+        for k in range(len(rest), 0, -1):
+            found = [list(c) for c in itertools.combinations(rest, k)
+                     if all(frozenset(p) in edge for p in itertools.combinations(c, 2))]
+            if found:
+                best = min(found)
+                break
+        out.append(best)
+        rest = [n for n in rest if n not in best]
+    return sorted(out, key=lambda c: (-len(c), c))
+
+
+def test_cliques_are_optimal_on_every_graph_of_five_nodes():
+    import itertools
+
+    names = [f"b{i}" for i in range(5)]
+    pairs = list(itertools.combinations(names, 2))
+    for mask in range(1 << len(pairs)):
+        edges = [p for i, p in enumerate(pairs) if mask >> i & 1]
+        assert fg.cliques(names, edges) == _brute_cliques(names, edges), edges
+
+
+def test_the_greedy_cut_misses_a_three_clique_the_exact_one_finds():
+    names = [f"b{i}" for i in range(5)]
+    missing = {("b0", "b1"), ("b0", "b4"), ("b2", "b3"), ("b3", "b4")}
+    edges = [(a, b) for i, a in enumerate(names) for b in names[i + 1:] if (a, b) not in missing]
+    assert fg.cliques(names, edges) == [["b1", "b2", "b4"], ["b0", "b3"]]
+    assert any(len(c) == 1 for c in fg._greedy_cliques(names, {frozenset(e) for e in edges}))
+
+
+def test_a_large_component_is_cut_greedily_and_a_lone_node_joins_a_clique_it_fits():
+    names = [f"n{i:02d}" for i in range(18)]
+    full = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
+    outsider = [e for e in full if "n17" not in e or e == ("n00", "n17")]  # n17 reaches only n00
+    assert fg.cliques(names, outsider) == [names[:17], ["n17"]]  # the most missing edges leave first
+    # n16 misses one edge (to n17): it leaves alone, and joins the 16 others it reaches all of
+    joined = [e for e in full if e != ("n16", "n17")]
+    out = fg.cliques(names, joined)
+    assert len(out) == 2 and sorted(map(len, out)) == [1, 17] and "n16" in out[0]
+
+
+def test_an_unparseable_inventory_is_an_inventory_error():
+    with pytest.raises(InventoryError, match="cannot be edited in place"):
+        fg.updated_text("nodes: [\n  - {name: a\n", {"a": "A"})
+    with pytest.raises(InventoryError, match="cannot be edited in place"):
+        fg.updated_text("{not json", {"a": "A"}, json_file=True)
+
+
+def test_crlf_inventories_keep_their_newlines(tmp_path):
+    path = _inventory_file(tmp_path)
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    assert cluster_cli.main(_args(path, "--write", "--nodes", "b300-0,b300-1"), ops=_ops_for(path),
+                            log=lambda m: None) == 0
+    data = path.read_bytes()
+    assert b"fabric_group" in data and data.count(b"\n") == data.count(b"\r\n")
+    js = tmp_path / "nodes.json"
+    js.write_bytes(json.dumps({"nodes": [_entry(0), _entry(1)]}, indent=2).replace("\n", "\r\n").encode())
+    assert fg.write_groups(js, {"b300-0": "A", "b300-1": "A"})
+    data = js.read_bytes()
+    assert data.count(b"\n") == data.count(b"\r\n") > 0
+
+
+def test_pick_placement_keeps_the_required_nodes_and_fills_from_their_group():
+    nodes = _grouped("A", "A", "A", "A", "B", "B", "B", "B", "B")
+    p = fg.pick_placement(nodes, 3, required=["b300-2"], excluded={"b300-0": "lost"})
+    assert p.group == "A" and [n.name for n in p.nodes] == ["b300-2", "b300-1", "b300-3"]  # B is bigger: not taken
+    p = fg.pick_placement(nodes, 2, required=[nodes[3]])
+    assert [n.name for n in p.nodes] == ["b300-3", "b300-0"]
+    with pytest.raises(fg.PlacementError, match="not one fabric group"):
+        fg.pick_placement(nodes, 3, required=["b300-0", "b300-4"])
+    with pytest.raises(fg.PlacementError, match="required node\\(s\\) excluded: b300-1: XID 79"):
+        fg.pick_placement(nodes, 3, required=["b300-1"], excluded={"b300-1": "XID 79"})
+    with pytest.raises(fg.PlacementError, match="group A has only 3"):
+        fg.pick_placement(nodes, 4, required=["b300-1"], excluded=["b300-0"])
+    with pytest.raises(fg.PlacementError, match="not candidates"):
+        fg.pick_placement(nodes[:2], 2, required=["b300-7"])
+    plain = _grouped(None, None, None)
+    assert [n.name for n in fg.pick_placement(plain, 2, required=["b300-2"]).nodes] == ["b300-2", "b300-0"]
+
+
+def test_excluded_or_required_as_one_string_is_a_type_error():
+    nodes = _grouped("A", "A")
+    with pytest.raises(TypeError, match="excluded"):
+        fg.pick_placement(nodes, 1, excluded="b300-0")
+    with pytest.raises(TypeError, match="required"):
+        fg.pick_placement(nodes, 1, required="b300-0")
+
+
+def test_the_reserved_value_is_read_in_any_case():
+    (node,) = parse_inventory({"nodes": [_entry(0, fabric_group="UnAvailable")]})
+    assert node.fabric_group == FABRIC_UNAVAILABLE
+    loose = b300(0, fabric_group="UNAVAILABLE")  # a node built by hand
+    assert not fg.placeable(loose)
+    with pytest.raises(fg.PlacementError, match="fabric unavailable"):
+        fg.pick_placement([loose, b300(1, fabric_group="UNAVAILABLE")], 2)
+
+
+def test_a_warn_ib_write_bw_or_a_pair_without_its_own_nccl_run_gives_no_edge():
+    names = ["b300-0", "b300-1", "b300-2"]
+    checks = _pair_checks(names, ib_status={("b300-0", "b300-1"): ("WARN", "8 rails; worst rail 62% of link")})
+    result = fg.group_nodes(names, checks)
+    assert ("b300-0", "b300-1") not in result.edges and "ib_write_bw WARN" in result.pair_problems["b300-0<->b300-1"]
+    checks = [c for c in _pair_checks(names) if c.scope != "b300-0+b300-2"]  # all mode: that pair has no run
+    edges, problems, _ = fg.evaluate_pairs(names, checks, nccl_pairs="all")
+    assert ("b300-0", "b300-2") not in edges and problems["b300-0<->b300-2"] == "no NCCL result"
+    edges, _, _ = fg.evaluate_pairs(names, checks, nccl_pairs="disjoint")
+    assert ("b300-0", "b300-2") in edges  # disjoint mode infers it
+
+
+def test_net_ib_without_gpudirect_is_a_warn_transport_and_an_edge():
+    nodes, ops = _cluster(2, **{"b300-0": Behavior(nccl="ib-nogdr"), "b300-1": Behavior(nccl="ib-nogdr")})
+    pf = cp.ClusterPreflight(nodes, ops=ops, log=lambda m: None, clock=lambda: FakeCluster.NOW,
+                             steps=cp.Steps(ports=False, nccl_all=False, nccl_pairs="all"))
+    report = pf.run()
+    (transport,) = [c for c in report.checks if c.name == "nccl_transport"]
+    assert transport.status == "WARN" and transport.detail.startswith("NET/IB without GPUDirect")
+    assert fg.group_nodes([n.name for n in nodes], report.checks, states=pf.states).edges == [("b300-0", "b300-1")]
+
+
+def test_the_preflight_runs_both_ends_of_a_pair_together():
+    nodes, ops = _cluster(2)
+    assert cp.ClusterPreflight(nodes, ops=ops, max_parallel=1).max_parallel == 2
+    assert cp.ClusterPreflight(nodes, ops=ops).max_parallel == 32
+
+
+def test_a_leased_inventory_picks_the_island_in_one_fabric_group(tmp_path, monkeypatch):
+    from yeto.launch.node_lease import NodeLeases
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    store = f"file://{tmp_path / 'leases'}"
+    doc = {"lease_store": store, "nodes": [_entry(i, fabric_group=g) for i, g in enumerate("AABB")]}
+    nodes = parse_inventory(doc)
+    other = NodeLeases(store, "other-run")
+    assert other.acquire(nodes[0]).ok  # group A keeps one free node, B two
+    leases = NodeLeases(store, "this-run")
+    args = argparse.Namespace(rl_node_inventory_nodes=nodes, cluster_prefix="fgl", rl_node_lease_wait_s=0.0,
+                              gpu="ssh:2x8xb300", dry_run=False)
+    picked = inventory_trainer_nodes(args, _island(2), leases=leases, name="fgl-0")
+    assert [n.name for n in picked] == ["b300-2", "b300-3"]
+    leases.release_all()
+    other.release_all()
+
+
+def test_a_lone_node_of_the_greedy_cut_joins_the_clique_it_reaches_whole():
+    names = [f"n{i:02d}" for i in range(17)]
+    missing = {("n00", "n02"), ("n02", "n12"), ("n03", "n04"), ("n04", "n10"), ("n08", "n09"), ("n09", "n10")}
+    edges = [(a, b) for i, a in enumerate(names) for b in names[i + 1:] if (a, b) not in missing]
+    assert ["n10"] in fg._greedy_cliques(names, {frozenset(e) for e in edges})
+    big = [n for n in names if n not in ("n02", "n04", "n09")]
+    assert fg.cliques(names, edges) == [big, ["n02", "n04", "n09"]]
