@@ -1442,6 +1442,8 @@ def inventory_trainer_nodes(args: Any, island: Any, *, leases: Any = None, name:
 
 
 NODE_LEASE_FILE = "node-leases.json"  # in the run dir: the launch identity and each island's leased nodes
+# a takeover launch that cannot take its island over (yeto.rl.trainer_worker.TAKEOVER_BLOCKED_MARKER)
+TAKEOVER_BLOCKED_MARKER = "[yeto-takeover-blocked]"
 DEFAULT_NODE_LEASE_WAIT_S = 3600.0
 
 
@@ -1519,8 +1521,19 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
     by_name = {n.name: n for n in trainers}
     if key in leases.picks:
         return tuple(by_name[n] for n in leases.picks[key])
-    recorded = [n for n in (_lease_record(args).get("islands") or {}).get(key, ()) if n in by_name]
-    if recorded and len(recorded) == need and _journal_incarnation(args, key):
+    named = [str(n) for n in (_lease_record(args).get("islands") or {}).get(key, ())]
+    recorded = [n for n in named if n in by_name]
+    # an on-site control plane's launch on another host: the island's placement came from the
+    # run store (launcher._restore_lease_identity): those nodes or none, never others
+    pinned = key in (getattr(args, "_lease_pinned", None) or ())
+    if pinned and (len(named) != need or len(recorded) != len(named)):
+        missing = [n for n in named if n not in by_name]
+        raise SshIslandError(
+            f"{TAKEOVER_BLOCKED_MARKER} ssh: island {key}: its placement in the run store is {named}, but "
+            + (f"the inventory's trainer nodes do not list {missing}" if missing else
+               f"the island has {need} node(s)")
+            + ": its nodes are not those of the record; the island is not moved to other nodes")
+    if recorded and len(recorded) == need and (pinned or _journal_incarnation(args, key)):
         held = {}
         for node in recorded:
             got = leases.acquire(by_name[node])
@@ -1531,7 +1544,9 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
                 if node not in held:
                     leases.release(node)
             raise SshIslandError(
-                f"ssh: island {key}: its last incarnation ran on {recorded} (the jobs journal); "
+                (f"{TAKEOVER_BLOCKED_MARKER} " if pinned else "")
+                + f"ssh: island {key}: its last incarnation ran on {recorded} "
+                + ("(its placement in the run store); " if pinned else "(the jobs journal); ")
                 + ", ".join(f"{n} is held by {h}" for n, h in sorted(held.items()))
                 + ": not moving the island to other nodes (free them, or start a new run)")
         picked = [by_name[n] for n in recorded]

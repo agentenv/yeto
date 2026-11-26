@@ -336,6 +336,15 @@ class ModalSource(Source):
                 island_ops.calls[name] = call_id
                 prov.results[name] = (call_id, None)
                 print(f"[launcher] learner {cfg.learner_id} on Modal as {name}: adopted call {call_id}")
+                if getattr(prov.args, "rl_fleet_takeover", False):
+                    # taken over from a lost control host: its call is in that host's ledger only;
+                    # recorded here too, so `yeto cleanup` on this host can still release it
+                    from yeto.cost.ledger import record_safely
+
+                    record_safely("created", "modal_call", call_id, cfg.function_name, app_name=modal_ops.app_name,
+                                  app_id=getattr(getattr(modal_ops, "_app", None), "app_id", None),
+                                  learner_id=getattr(cfg, "learner_id", None), adopted="takeover",
+                                  ledger=getattr(modal_ops, "ledger", None))
                 continue
             print(f"[launcher] launching learner {cfg.learner_id} on Modal as {name}")
             prov.on_order(name)

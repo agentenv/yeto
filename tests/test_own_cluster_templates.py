@@ -786,3 +786,90 @@ def test_an_own_ssh_pool_needs_no_price_under_a_spend_cap():
     assert up_consistency.price_problem("own", 0.0, ssh) is None
     modal = {"provider": {"kind": "modal", "gpu": "L40S", "price_usd_h": 0}}
     assert "priced in USD" in up_consistency.price_problem("m", None, modal)
+
+
+# -- an on-site control plane (fleet.syncer_service): pools another control host can take over --------
+
+def _onsite_run_up(kit, capsys, *, dry_run: bool = True) -> tuple[int, Output]:
+    """run up of the on-site fleet config (its controller in process: monitored)."""
+    args = types.SimpleNamespace(config=str(kit.files["run.fleet-own-and-cloud.json"]), rl_command="up",
+                                 skip_preflight=False, dry_run=dry_run, check_nodes=False, skip_egress_check=False,
+                                 no_monitor=False, trainer_now=True, allow_after_forced_stop=False)
+    rc = kit.up.main(args)
+    captured = capsys.readouterr()
+    out = Output(captured.out + captured.err)
+    out.err = captured.err
+    return rc, out
+
+
+def _onsite(kit, name: str = "run.fleet-own-and-cloud.json", **fleet_keys) -> None:
+    doc = _cfg(kit, name)
+    doc["fleet"].update({"launch": "per_island", "syncer_service": "10.0.0.5", **fleet_keys})
+    doc["controller"] = "in_process"
+    doc.setdefault("rollout", {})["control_plane"] = "store"
+    kit.files[name].write_text(json.dumps(doc))
+
+
+def test_an_on_site_control_plane_refuses_a_sky_pool_without_a_shared_sky_api_server(kit, capsys, monkeypatch):
+    monkeypatch.delenv("SKYPILOT_API_SERVER_ENDPOINT", raising=False)
+    _onsite(kit)
+    monkeypatch.setattr(kit.up.Run, "start_state_mirror", lambda self, *a, **k: pytest.fail("not refused first"))
+    for dry_run in (True, False):
+        rc, out = _onsite_run_up(kit, capsys, dry_run=dry_run)
+        assert rc == 10, out.why
+        assert "is a sky pool" in out and "fleet.sky_api_server" in out
+        assert kit.ordered == [] and kit.commands == []  # before any pool, launch or preflight
+
+
+def test_a_shared_sky_api_server_lets_the_on_site_dry_run_pass(kit, capsys, monkeypatch):
+    import os
+
+    monkeypatch.delenv("SKYPILOT_API_SERVER_ENDPOINT", raising=False)
+    _onsite(kit, sky_api_server="http://sky-api.example:46580")
+    for name in ("preflight", "cluster_preflight"):  # past the refusal: the rest is the dry run's own (no store)
+        monkeypatch.setattr(kit.up.Run, name, lambda self, *a, **k: True)
+    monkeypatch.setattr(kit.up.Run, "log_fleet_plan", lambda self: None)
+    rc, out = _onsite_run_up(kit, capsys)
+    assert rc == 0, out.why
+    assert os.environ["SKYPILOT_API_SERVER_ENDPOINT"] == "http://sky-api.example:46580"  # what sky's client uses
+    # another server on this host: refused, every control host must use the shared one
+    monkeypatch.setenv("SKYPILOT_API_SERVER_ENDPOINT", "http://127.0.0.1:46580")
+    rc, out = _onsite_run_up(kit, capsys)
+    assert rc == 10 and "every control host must use the one shared sky API server" in out, out.why
+
+
+@pytest.mark.parametrize("value, ok", [
+    ("http://sky-api.example:46580", True), ("https://10.0.0.7", True), ("http://127.0.0.1:46580", False),
+    ("http://localhost:46580", False), ("sky-api.example:46580", False), ("http://u:p@sky-api.example", False),
+    (5, False)])
+def test_fleet_sky_api_server_is_checked(value, ok):
+    from yeto.rl import fleet
+
+    if ok:
+        assert fleet.sky_api_server({"syncer_service": "h", "sky_api_server": value}) == value
+    else:
+        with pytest.raises(ValueError, match="fleet.sky_api_server must be"):
+            fleet.sky_api_server({"syncer_service": "h", "sky_api_server": value})
+    with pytest.raises(ValueError, match="applies to a fleet with fleet.syncer_service"):
+        fleet.sky_api_server({"sky_api_server": "http://sky-api.example"})
+
+
+def test_only_an_on_site_control_plane_s_pools_are_checked():
+    from yeto.rl import fleet
+
+    def plan(provider, *, service="10.0.0.5", per_island=True):
+        pool = types.SimpleNamespace(provider=provider, name=f"i0-{provider}")
+        return {fleet.PLAN_KEY: fleet.FleetPlan.__new__(fleet.FleetPlan)} if False else types.SimpleNamespace(
+            per_island=per_island, syncer_service=service, islands=(types.SimpleNamespace(name="own", pools=(pool,)),))
+
+    import unittest.mock as mock
+
+    for provider, refused in (("sky", True), ("nc", True), ("modal", False), ("ssh", False)):
+        with mock.patch.object(fleet, "plan_of", lambda cfg, p=plan(provider): p):
+            problem = fleet.onsite_pool_problem({"fleet": {"syncer_service": "10.0.0.5"}})
+        assert bool(problem) is refused, (provider, problem)
+    with mock.patch.object(fleet, "plan_of", lambda cfg: plan("sky", service=None)):
+        assert fleet.onsite_pool_problem({"fleet": {}}) is None  # no on-site control plane: as before
+    with mock.patch.object(fleet, "plan_of", lambda cfg: plan("sky")):
+        assert fleet.onsite_pool_problem({"fleet": {"syncer_service": "10.0.0.5",
+                                                    "sky_api_server": "http://sky-api.example"}}) is None

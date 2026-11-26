@@ -65,12 +65,14 @@ def test_a_lost_host_s_launch_is_taken_over_as_the_same_launch(tmp_path):
     b, launches = worker_on(objects, store, "host-b", LATER, logs)
     b.step()
     assert sorted(p for p, _ in launches.starts) == ["run-i0", "run-i1"]  # the same prefixes: no -m1, no new island
+    assert all(argv[-1] == tw.TAKEOVER_FLAG for _, argv in launches.starts)  # a takeover launch
     for k in (0, 1):
         record = b.load(k)
         assert record["host"] == "host-b" and record["incarnation"] == before[k]["incarnation"] == 0
-        assert record["relaunches"] == before[k]["relaunches"]  # not an infrastructure relaunch
+        assert record["relaunches"] == before[k]["relaunches"] + 1  # counted against the relaunch budget
         assert record["taken_over"]["from"] == "host-a" and record["taken_over"]["token"] == 2
-        assert record["why"] == "taken over from host host-a"
+        assert record["why"] == "taken over from host host-a (relaunch 1/3)" and record["takeover_launch"]
+        assert tw.TAKEOVER_FLAG not in record["argv"]  # on its command line only
         assert record["state"] == tw.STARTING  # nothing more for it in the step that took it over
         assert json.loads(objects.read(lifecycle.takeover_key(k, 2)))["host"] == "host-b"  # a note
         # the takeover's claim is released at once: the launch started here claims the next token

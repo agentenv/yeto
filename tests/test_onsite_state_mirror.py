@@ -411,3 +411,216 @@ def test_a_stop_a_breaker_and_the_end_reach_the_store_at_once(tmp_path, monkeypa
     assert run.breach() == "wall clock"
     assert {"end_up", "flag_stop", "breach", "record"} <= set(forced)
     assert mirror(objects)["state"]["breaker"]["why"] == "wall clock"  # not left to the 30 s interval
+
+
+# -- second review: conditional writes, a writer cut off from the store, the last state at exit -------
+
+def _mirror(objects, tmp_path, **kw):
+    kw.setdefault("background", False)
+    kw.setdefault("log", lambda m: None)
+    return up_state_mirror.StateMirror(objects, run="r", host=kw.pop("host", "host-a"), seq=kw.pop("seq", 0),
+                                       local_path=tmp_path / "l.json", **kw)
+
+
+def test_the_mirror_is_replaced_only_over_what_was_read(tmp_path):
+    """Another write between the read and this one (L1): read again and written over it when
+    it is not newer, fenced when it is another writer's higher number."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    m = _mirror(objects, tmp_path)
+    assert m.submit({"t0": 1.0}) is True and mirror(objects)["seq"] == 1
+    real = objects.replace_if
+    calls = []
+
+    def replace_if(key, data, expected):
+        calls.append(key)
+        if len(calls) == 1:  # a stale writer's late write lands right before this one
+            objects.write(key, json.dumps({**mirror(objects), "state": {"late": 1}}).encode())
+        return real(key, data, expected)
+
+    objects.replace_if = replace_if
+    assert m.submit({"t0": 2.0}, force=True) is True and m.fenced is None
+    assert len(calls) == 2 and mirror(objects)["state"] == {"t0": 2.0} and mirror(objects)["seq"] == 2
+    calls.clear()
+
+    def newer(key, data, expected):  # another writer with a higher number wrote meanwhile
+        calls.append(key)
+        objects.write(key, json.dumps({"schema": up_state_mirror.SCHEMA, "run": "r", "host": "host-b", "seq": 9,
+                                       "at": 1.0, "state": {}, "writer": {"host": "host-b", "nonce": "b"}}).encode())
+        return False
+
+    objects.replace_if = newer
+    assert m.submit({"t0": 3.0}, force=True) is True and "host host-b" in m.fenced
+    assert mirror(objects)["seq"] == 9 and len(calls) == 1  # never written over
+
+
+def test_the_first_mirror_is_an_exclusive_create(tmp_path):
+    objects = DirectoryObjectStore(tmp_path / "store")
+    real = objects.create
+    seen = []
+
+    def create(key, data):
+        if key == up.STATE_MIRROR and not seen:
+            seen.append(1)
+            real(key, json.dumps({"schema": up_state_mirror.SCHEMA, "run": "r", "host": "host-b", "seq": 4, "at": 1.0,
+                                  "state": {}, "writer": {"host": "host-b", "nonce": "b"}}).encode())
+            return False
+        return real(key, data)
+
+    objects.create = create
+    m = _mirror(objects, tmp_path)
+    m.submit({"t0": 1.0})
+    assert "host host-b" in m.fenced and mirror(objects)["writer"]["host"] == "host-b"
+
+
+def test_a_claim_whose_answer_was_lost_is_this_writer_s(tmp_path):
+    """The exclusive create of the next number went through but its answer was lost (M2):
+    the claim reads back as this writer's, the write goes on, no fence."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    real = objects.create
+
+    def create(key, data):
+        made = real(key, data)
+        return False if key.startswith(up_state_mirror.STATE_MIRROR_SEQ) else made
+
+    objects.create = create
+    m = _mirror(objects, tmp_path)
+    assert m.submit({"t0": 1.0}) is True and m.fenced is None and mirror(objects)["seq"] == 1
+    assert m.submit({"t0": 2.0}, force=True) is True and m.fenced is None and mirror(objects)["seq"] == 2
+
+
+def test_a_writer_cut_off_from_the_store_is_fenced_after_the_lease_and_margin(tmp_path):
+    """No write confirmed for the records lock's lease plus the takeover margin while it tries
+    (M3): fenced, as by another host; a writer that only had nothing to write is not."""
+    class Down(DirectoryObjectStore):
+        down = False
+
+        def read(self, key):
+            if self.down:
+                raise OSError("partitioned")
+            return super().read(key)
+
+    objects = Down(tmp_path / "store")
+    clock = {"t": 1000.0}
+    fenced = []
+    m = _mirror(objects, tmp_path, monotonic=lambda: clock["t"], stale_after_s=180.0, on_fenced=fenced.append)
+    assert m.submit({"t0": 1.0}) is True and m.writes == 1
+    clock["t"] += 3600  # nothing to write for an hour: not stale
+    assert m.stale() is None
+    objects.down = True
+    assert m.submit({"t0": 2.0}, force=True) is True and m.writes == 1  # tried, not confirmed
+    clock["t"] += 179
+    assert m.stale() is None
+    clock["t"] += 2
+    assert "no write of run up's state" in m.stale() and m.fenced == m.stale() and len(fenced) == 1
+    assert m.submit({"t0": 3.0}, force=True) is False
+    objects = Down(tmp_path / "store2")
+    m2 = _mirror(objects, tmp_path, monotonic=lambda: clock["t"], stale_after_s=180.0)
+    m2.submit({"t0": 1.0})
+    objects.down = True
+    m2.submit({"t0": 2.0}, force=True)
+    objects.down = False
+    clock["t"] += 100
+    m2.submit({"t0": 3.0}, force=True)  # confirmed again in time
+    clock["t"] += 100
+    assert m2.stale() is None and m2.fenced is None
+
+
+def test_run_up_s_stale_limit_is_the_records_lease_plus_the_takeover_margin(tmp_path):
+    from yeto import launcher
+
+    assert up_state_mirror.RECORDS_LOCK_TTL_S == launcher.ISLAND_RECORDS_LOCK_TTL_S
+    objects = DirectoryObjectStore(tmp_path / "store")
+    run = make_run(tmp_path, "host-a", objects)
+    run.start_state_mirror(objects, host="host-a")
+    assert run._state_mirror.stale_after_s == launcher.ISLAND_RECORDS_LOCK_TTL_S + 60.0  # noqa: SLF001
+    run._state_mirror.fenced = None  # noqa: SLF001
+    run._state_mirror._tried_at, run._state_mirror._ok_at = 1.0, 0.0  # noqa: SLF001 - tried, never confirmed
+    run._state_mirror.monotonic = lambda: 1.0 + 181.0  # noqa: SLF001
+    with pytest.raises(up.ControlFenced, match="no write of run up's state"):
+        run.raise_if_control_fenced()
+
+
+def test_the_nc_watch_after_a_breach_stops_once_another_host_drives(tmp_path, monkeypatch):
+    objects = DirectoryObjectStore(tmp_path / "store")
+    run = make_run(tmp_path, "host-a", objects)
+    run.start_state_mirror(objects, host="host-a")
+    rounds = []
+    monkeypatch.setattr(run, "pool_members", lambda: rounds.append(1) or [{"state": "running"}])
+    monkeypatch.setattr(run, "spend_usd", lambda: 1.0)
+    monkeypatch.setattr(run, "breaker_param", lambda name, key: None)
+
+    def sleep(s):
+        if len(rounds) == 2:  # another host takes the run over after the second round
+            make_run(tmp_path, "host-b", objects).start_state_mirror(objects, host="host-b")
+            run.mirror_state(force=True)
+
+    monkeypatch.setattr(up.time, "sleep", sleep)
+    with pytest.raises(up.ControlFenced):
+        run.watch_nc_after_breach("budget", poll_s=0.0)
+    assert len(rounds) == 2  # checked at the top of every round
+
+
+def test_the_last_throttled_state_reaches_the_store_at_exit(tmp_path):
+    objects = DirectoryObjectStore(tmp_path / "store")
+    clock = {"t": 100.0}
+    m = _mirror(objects, tmp_path, monotonic=lambda: clock["t"])
+    m.submit({"t0": 1.0})
+    m.submit({"t0": 2.0})  # throttled
+    assert mirror(objects)["state"] == {"t0": 1.0}
+    assert m.flush() is True and mirror(objects)["state"] == {"t0": 2.0}
+    assert m.flush() is False  # nothing kept back any more
+    run = make_run(tmp_path, "host-a", objects)
+    assert run.flush_state_mirror() is False  # no mirror: nothing
+
+
+def test_a_mirror_of_this_very_host_is_never_restored_over_its_state(tmp_path):
+    """The mirror is newer than this host's sequence file but this host wrote it (Me): its own
+    state stays."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    a = make_run(tmp_path, "host-a", objects)
+    a.state.update({"run_t0": 1.0, "steps": {"first_group": "local"}})
+    a.save()
+    doc = {"schema": up_state_mirror.SCHEMA, "run": a.run, "host": "host-a", "seq": 7, "at": time.time(),
+           "writer": {"host": "host-a", "nonce": "old"}, "state": {"steps": {"first_group": "mirror"}}}
+    assert a.restore_state(doc, host="host-a", local={"run": a.run, "seq": 2}) is False
+    assert a.state["steps"] == {"first_group": "local"}
+    assert a.restore_state({**doc, "writer": {"host": "host-b", "nonce": "b"}, "host": "host-b"}, host="host-a",
+                           local={"run": a.run, "seq": 2}) is True
+
+
+def test_an_old_mirror_ends_the_lost_host_s_period_at_its_time_not_now(tmp_path):
+    """The lost host's open period ends at the mirror's time plus the write interval (Mx),
+    however long ago that was: the hours since are no one's."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    b = make_run(tmp_path, "host-b", objects)
+    at = time.time() - 5000
+    doc = {"schema": up_state_mirror.SCHEMA, "run": b.run, "host": "host-a", "seq": 3, "at": at,
+           "writer": {"host": "host-a", "nonce": "a"},
+           "state": {"ups": [{"start": at - 1000, "end": None}], "run_t0": at - 1000}}
+    assert b.restore_state(doc, host="host-b", local={}) is True
+    assert b.state["ups"][0]["end"] == pytest.approx(at + up.STATE_MIRROR_EVERY_S)
+
+
+def test_the_syncer_service_s_earlier_generations_are_carried_over(tmp_path, monkeypatch):
+    """Each generation's heartbeat carries the seconds of the generations before it (Mw)."""
+    from yeto.rl import fleet_service
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    fleet_syncer.write_service_status(objects, host="h1", state="running", key=None, generation=1,
+                                      since=1000.0, billed_s=500.0, clock=lambda: 1600.0)
+    assert fleet_syncer.service_seconds(fleet_syncer.read_service_status(objects)) == 1100.0
+    beat = fleet_service.Heartbeat(objects, "h2", None, generation=2,
+                                   billed_s=fleet_syncer.service_seconds(fleet_syncer.read_service_status(objects)))
+    beat.beat()
+    doc = fleet_syncer.read_service_status(objects)
+    assert doc["billed_s"] == 1100.0 and doc["since"] == pytest.approx(time.time(), abs=60)
+
+
+def test_a_restarted_syncer_service_carries_the_earlier_generations_seconds(tmp_path, monkeypatch):
+    from test_fleet_service import run_service
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    fleet_syncer.write_service_status(objects, host="10.0.0.5", state="running", key=None, generation=1,
+                                      since=1000.0, billed_s=500.0, clock=lambda: 1600.0)  # its last beat
+    rc, seen, _syncer, objects, _logs = run_service(tmp_path, monkeypatch, 0, objects=objects)
+    assert rc == 0 and seen["before"]["billed_s"] == 1100.0  # 500 s before, then 600 s of generation 1

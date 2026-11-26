@@ -207,7 +207,8 @@ def test_the_control_plane_moves_host_and_no_island_restarts(syncer_binary, tmp_
     assert sorted(launches.adopted) == ["r-i0", "r-i1"]
     for k in (0, 1):
         record = w.load(k)
-        assert record["host"] == "host-b" and record["incarnation"] == 0 and record["relaunches"] == 0
+        # the takeover launch counts against the relaunch budget (one of its 3), no new incarnation
+        assert record["host"] == "host-b" and record["incarnation"] == 0 and record["relaunches"] == 1
         assert record["taken_over"]["from"] == "host-a"
     # no island process restarted: one launch each on host A, the same clients to the end
     assert islands.started("r-i0") == 1 and islands.started("r-i1") == 1

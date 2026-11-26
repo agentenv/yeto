@@ -564,7 +564,10 @@ def _plan_island_records(args, specs, names, island_states, island_lock, *, rela
     # launcher restarted on another machine finds the islands there too).
     ids = [_record_id(args, m) for m in range(len(specs))]  # a fleet island launch: its learner id
     records = island_states.read_all(ids, strict=True)  # also what the writes merge into
-    restart = relaunch or any(r.get("state") in island_adopt.ADOPTABLE for r in records.values())
+    # a takeover launch (an on-site control plane took a lost host's launch over) is a restart:
+    # it never clears the island's STOP / START and never starts an island that ended afresh
+    takeover = bool(getattr(args, "rl_fleet_takeover", False))
+    restart = relaunch or takeover or any(r.get("state") in island_adopt.ADOPTABLE for r in records.values())
     if not restart:
         for k in ids:  # a new run: an island STOP / START an earlier run of this name left is void
             island_states.clear_stop(k)
@@ -573,6 +576,8 @@ def _plan_island_records(args, specs, names, island_states, island_lock, *, rela
                         modal_names={n for n, sp in zip(names, specs) if sp.cloud == "modal"},
                         ssh_names=ssh_names, events_dir=events_dir, echo_names=echo_names)
     refs.pop(held_name, None)  # the trainer scheduler's island has its own journal
+    if takeover:
+        _refuse_ended_takeover(records, refs)
     if restart and island_lock is not None:  # only under the records lock (the lost launch is fenced)
         _seed_ssh_journals(args, records, refs, ssh_names, states=island_states)
     recorder = FleetRecorder(island_states, refs)
@@ -591,6 +596,26 @@ def _plan_island_records(args, specs, names, island_states, island_lock, *, rela
 
 
 JOURNAL_FROM_STORE_ENV = "YETO_ISLAND_JOURNAL_FROM_STORE"  # yeto.rl.up.JOURNAL_FROM_STORE_ENV
+# a takeover launch that cannot take its island over (yeto.rl.trainer_worker.TAKEOVER_BLOCKED_MARKER)
+TAKEOVER_BLOCKED_MARKER = "[yeto-takeover-blocked]"
+
+
+def _refuse_ended_takeover(records, refs) -> None:
+    """A takeover launch (``--rl-fleet-takeover``) whose island record says its island ended
+    (``done`` / ``failed`` / ``abandoned``, the record of this very island name): it starts
+    nothing (``island_adopt.AdoptionUnknown``: exit 13, nothing torn down) and says so with
+    :data:`TAKEOVER_BLOCKED_MARKER`; the trainer worker blocks the island on it."""
+    from .launch import island_adopt
+    from .launch.island_lifecycle import TERMINAL
+
+    for name, ref in sorted(refs.items()):
+        record = records.get(ref.island) or {}
+        if record.get("state") in TERMINAL and record.get("name") == name:
+            raise island_adopt.AdoptionUnknown(
+                f"{TAKEOVER_BLOCKED_MARKER} island {name} (learner {ref.island}): taken over from a lost control "
+                f"host, but its island record says it ended ({record.get('state')}"
+                + (f": {str(record.get('reason'))[:200]}" if record.get("reason") else "")
+                + "); a takeover launch never starts an island afresh")
 
 
 def node_lease_identity_key(island: int) -> str:
@@ -598,16 +623,11 @@ def node_lease_identity_key(island: int) -> str:
     return f"fleet/trainers/{int(island)}/node-lease-identity.json"
 
 
-def _restore_lease_identity(args, environ=None, objects=None) -> str | None:
-    """An island launch of an on-site control plane (``JOURNAL_FROM_STORE_ENV``) whose
-    inventory has a ``lease_store``: its node lease identity (the holder of its nodes'
-    leases, kept in ``node-leases.json`` of the run dir) is the one in the run store
-    (:func:`node_lease_identity_key`; the first launch puts this host's there). A launch the
-    control plane started on another host then holds its island's leases as the same holder,
-    not as a second one of the same run. Returns the identity; None when it does not apply."""
+def _lease_identity_objects(args, environ=None, objects=None):
+    """The run store's object API for an island launch of an on-site control plane
+    (``JOURNAL_FROM_STORE_ENV``) whose inventory has a ``lease_store``; None when that does
+    not apply (raises when the store has no object API)."""
     from .launch.node_inventory import lease_store_of
-    from .launch.node_lease import local_identity, store_identity
-    from .launch.ssh_trainer_island import _lease_record_path
 
     if (environ if environ is not None else os.environ).get(JOURNAL_FROM_STORE_ENV) != "1":
         return None
@@ -622,26 +642,108 @@ def _restore_lease_identity(args, environ=None, objects=None) -> str | None:
         objects = store_objects(getattr(args, "rl_checkpoint_store", None), store_client_environ(args))
         if objects is None:
             raise RuntimeError("the run store has no object API here: the node lease identity cannot be shared")
+    return objects
+
+
+def _lease_doc(objects, key: str) -> tuple[bytes | None, dict]:
+    raw = objects.read(key)
+    try:
+        doc = json.loads(raw) if raw is not None else {}
+    except ValueError:
+        doc = {}
+    return raw, (doc if isinstance(doc, dict) else {})
+
+
+def _placements(doc: dict) -> dict[str, list[str]]:
+    """``islands`` of a node lease record: island name -> its nodes in rank order."""
+    islands = doc.get("islands") if isinstance(doc.get("islands"), dict) else {}
+    return {str(k): [str(n) for n in v] for k, v in islands.items()
+            if isinstance(v, list) and v and all(isinstance(n, str) for n in v)}
+
+
+def _restore_lease_identity(args, environ=None, objects=None) -> str | None:
+    """An island launch of an on-site control plane (``JOURNAL_FROM_STORE_ENV``) whose
+    inventory has a ``lease_store``: its node lease identity (the holder of its nodes'
+    leases, kept in ``node-leases.json`` of the run dir) is the one in the run store
+    (:func:`node_lease_identity_key`; the first launch puts this host's there). A launch the
+    control plane started on another host then holds its island's leases as the same holder,
+    not as a second one of the same run.
+
+    Each island's placement (its nodes in rank order, ``islands`` of the record, kept there by
+    :func:`_share_lease_placement`) comes back with it, over this host's own for the same
+    island: the island's leases are taken on those nodes again and only on them, even once
+    their leases ran out (``args._lease_pinned``: ``ssh_trainer_island.lease_trainer_nodes``
+    refuses other nodes). Returns the identity; None when it does not apply."""
+    from .launch.node_lease import local_identity, store_identity
+    from .launch.ssh_trainer_island import _lease_record_path
+
+    objects = _lease_identity_objects(args, environ, objects)
+    if objects is None:
+        return None
     key = node_lease_identity_key(int(args.rl_fleet_learner_id))
     path = _lease_record_path(args)
     if objects.read(key) is None:  # the island's first launch: this host's identity (created once)
         objects.create(key, json.dumps({"identity": local_identity(path)}).encode())
     identity = store_identity(objects, key)
+    placed = _placements(_lease_doc(objects, key)[1])
     try:
         doc = json.loads(path.read_text())
     except (OSError, ValueError):
         doc = {}
     doc = doc if isinstance(doc, dict) else {}
-    if doc.get("identity") != identity:
-        print(f"[launcher] node leases: this island's lease identity is the run store's ({key}), the one its "
-              "earlier launches held its nodes with" + (" (this host had another one)" if doc.get("identity") else ""),
-              flush=True)
+    local = _placements(doc)
+    changed = [name for name, nodes in sorted(placed.items()) if local.get(name) != nodes]
+    if doc.get("identity") != identity or changed:
+        if doc.get("identity") != identity:
+            print(f"[launcher] node leases: this island's lease identity is the run store's ({key}), the one its "
+                  "earlier launches held its nodes with" + (" (this host had another one)" if doc.get("identity")
+                                                            else ""), flush=True)
+        for name in changed:
+            print(f"[launcher] node leases: island {name} runs on {placed[name]} (the run store's {key}); its "
+                  "leases are taken on those nodes only", flush=True)
         doc["identity"] = identity
+        if placed:
+            doc["islands"] = {**dict(doc.get("islands") or {}), **placed}
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(doc, indent=1, sort_keys=True))
         tmp.replace(path)
+    args._lease_pinned = {*(getattr(args, "_lease_pinned", None) or ()), *placed}
     return identity
+
+
+def _share_lease_placement(args, environ=None, objects=None, tries: int = 5) -> dict[str, list[str]]:
+    """After the island's nodes were picked (``ssh_resident.check``): the placements of this
+    run dir's ``node-leases.json`` (``islands``) that the run store's record
+    (:func:`node_lease_identity_key`) does not hold yet are written there, by a conditional
+    write (``replace_if``) read again on a conflict, so the launch another host starts for the
+    island leases the same nodes. A placement the store already holds is never changed here
+    (:func:`_restore_lease_identity` made it this host's). Returns what was added."""
+    from .launch.ssh_trainer_island import _lease_record
+
+    objects = _lease_identity_objects(args, environ, objects)
+    if objects is None:
+        return {}
+    local = _placements(_lease_record(args))
+    key = node_lease_identity_key(int(args.rl_fleet_learner_id))
+    for _ in range(max(1, int(tries))):
+        raw, doc = _lease_doc(objects, key)
+        placed = _placements(doc)
+        added = {name: nodes for name, nodes in local.items() if name not in placed}
+        if not added:
+            return {}
+        data = json.dumps({**doc, "islands": {**dict(doc.get("islands") or {}), **added}}, sort_keys=True).encode()
+        replace = getattr(objects, "replace_if", None)
+        if raw is None:
+            done = objects.create(key, data)
+        else:
+            done = replace(key, data, raw) if callable(replace) else None
+            if done is None:  # no conditional write here: a plain one (one island launch writes this record)
+                objects.write(key, data)
+                done = True
+        if done:
+            return added
+    raise RuntimeError(f"the island's node placement was not written to the run store ({key}): it kept changing")
 
 
 def _seed_ssh_journals(args, records, refs, ssh_names, environ=None, states=None) -> list[str]:
@@ -654,8 +756,13 @@ def _seed_ssh_journals(args, records, refs, ssh_names, environ=None, states=None
     it is released first; a node that does not answer refuses the start. An island whose
     STOP is set (``states``: it was moving or stopping when its control host was lost) may
     only reattach (``args._reattach_only``, :class:`~.launch.ssh_resident.SshIslandOps`):
-    its launch reads the STOP and releases it, or, not running whole, starts nothing. Without
-    the variable, or with a journal, nothing changes. Returns the islands seeded."""
+    its launch reads the STOP and releases it, or, not running whole, starts nothing.
+
+    A local journal that is older than the store record (its newest incarnation below the
+    one the record names: this host ran the island before, another host took it over and
+    started a later incarnation since) is seeded again with the record's incarnation: the
+    store is newer. A journal at or past it is kept. Without the variable nothing changes.
+    Returns the islands seeded."""
     from . import runs
     from .launch.island_adopt import ADOPTABLE
     from .launch.ssh_resident import RESIDENT_DIR
@@ -673,15 +780,18 @@ def _seed_ssh_journals(args, records, refs, ssh_names, environ=None, states=None
         if not isinstance(incarnation, int) or isinstance(incarnation, bool) or incarnation < 0:
             continue
         path = runs.run_dir(args.cluster_prefix) / RESIDENT_DIR / f"{name}-jobs.json"
-        if read_jobs(path):
-            continue
+        jobs = read_jobs(path)
+        newest = max((int(k) for k in jobs if str(k).lstrip("-").isdigit()), default=None)
+        if jobs and (newest is None or newest >= incarnation):
+            continue  # this host's journal is as new as the store's record (or newer): it decides
         save_job(path, incarnation, f"ssh:{name}-i{incarnation}")
         seeded.append(name)
         if states is not None and states.stop_requested(ref.island) is not None:
             args._reattach_only = {*(getattr(args, "_reattach_only", None) or ()), name}
-        print(f"[launcher] {name}: no local SSH journal on this host; incarnation {incarnation} restored from "
-              "its island record in the run store (its nodes decide: running on every node -> reattach)",
-              flush=True)
+        print(f"[launcher] {name}: " + ("no local SSH journal on this host" if not jobs else
+                                        f"this host's SSH journal (incarnation {newest}) is older than the run store's")
+              + f"; incarnation {incarnation} restored from its island record in the run store (its nodes decide: "
+              "running on every node -> reattach)", flush=True)
     return seeded
 
 
@@ -853,6 +963,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
 
     _restore_lease_identity(args)  # an on-site control plane: the island's lease holder across hosts
     ssh_resident.check(args, parse_gpu_spec(args.gpu))  # resident ssh: islands, before any cloud work
+    _share_lease_placement(args)  # an on-site control plane: the nodes picked, for a launch on another host
     _write_run_manifest(args)
     if getattr(args, "rl_fleet_syncer_service", None) and local_syncer is None:
         # the syncer launch of a fleet whose syncer is an on-site service (fleet.syncer_service):

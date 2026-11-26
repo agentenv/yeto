@@ -16,9 +16,19 @@ nothing more and is fenced (:attr:`StateMirror.fenced`): another control host dr
 run now (run up ends with :data:`CONTROL_FENCED_EXIT`). A run up that starts takes the next
 number after the mirror's, so the newest control host wins.
 
+The mirror itself is replaced by a conditional write (``replace_if`` on the bytes read; the
+first one an exclusive create): a write that loses to another one reads the mirror again,
+and is fenced when a higher number of another writer is there now.
+
+A writer that has not had a write confirmed for ``stale_after_s`` (the island records
+lock's lease plus the takeover margin: by then another host may have taken the islands
+over) while it tried is fenced too (:meth:`StateMirror.stale`): a control host cut off from
+the store stops driving the run rather than driving it next to its successor.
+
 The writes run on a background thread (:class:`StateMirror`): a store that does not answer
 never holds the monitor. A forced write (a stop, a breaker, the end of the run) waits for
-it at most :data:`WRITE_TIMEOUT_S`."""
+it at most :data:`WRITE_TIMEOUT_S`. A save throttled away is kept and written by
+:meth:`StateMirror.flush` (run up's exit)."""
 
 from __future__ import annotations
 
@@ -39,6 +49,11 @@ WRITE_TIMEOUT_S = 20.0  # a forced write waits this long for the store, then the
 KEEP_MARKERS = 16  # the sequence claims kept behind the newest (older ones are deleted)
 LOCAL_FILE = "state-mirror.json"  # in the run's state dir: the last sequence number this host wrote
 START_CLAIM_TRIES = 8  # a run up that starts skips this many numbers another writer claimed
+WRITE_TRIES = 4  # conditional writes of the mirror lost to another write before this one gives up
+# a writer with no confirmed write this long (while it tried) is fenced: the island records lock's
+# lease plus the takeover margin (run up passes fleet.takeover_margin_s; default 60 s)
+RECORDS_LOCK_TTL_S = 120.0  # yeto.launcher.ISLAND_RECORDS_LOCK_TTL_S
+STALE_AFTER_S = RECORDS_LOCK_TTL_S + 60.0  # yeto.rl.fleet.DEFAULT_TAKEOVER_MARGIN_S
 # run up's exit when another control host drives the run (yeto.rl.fleet_service CONTROL_PREVENT)
 CONTROL_FENCED_EXIT = 76
 
@@ -106,7 +121,8 @@ class StateMirror:
     def __init__(self, objects: Any, *, run: str, host: str, seq: int, local_path: Path,
                  log: Callable[[str], None] = print, on_fenced: Callable[[str], None] | None = None,
                  clock: Callable[[], float] = time.time, monotonic: Callable[[], float] = time.monotonic,
-                 every_s: float = EVERY_S, timeout_s: float = WRITE_TIMEOUT_S, background: bool = True) -> None:
+                 every_s: float = EVERY_S, timeout_s: float = WRITE_TIMEOUT_S, background: bool = True,
+                 stale_after_s: float | None = STALE_AFTER_S) -> None:
         self.objects, self.run, self.host = objects, run, host
         self.nonce = uuid.uuid4().hex
         self.seq = int(seq)  # the last number written (by anyone, when this run up starts)
@@ -124,6 +140,12 @@ class StateMirror:
         self._submitted = 0
         self._done = 0
         self._thread: threading.Thread | None = None
+        # the fence of a writer cut off from the store (stale): no write confirmed since
+        # ``_ok_at`` while ``_tried_at`` says it tried (monotonic)
+        self.stale_after_s = None if stale_after_s is None else float(stale_after_s)
+        self._ok_at = self.monotonic()
+        self._tried_at: float | None = None
+        self._throttled: dict[str, Any] | None = None  # the newest save not written (flush)
 
     @property
     def writer(self) -> dict[str, str]:
@@ -137,8 +159,10 @@ class StateMirror:
             return False
         now = self.monotonic()
         if not force and self._at is not None and now - self._at < self.every_s:
+            self._throttled = state
             return False
         self._at = now
+        self._throttled = None
         snapshot = mirrored_state(state)
         if not self.background:
             self.write_now(snapshot)
@@ -162,6 +186,29 @@ class StateMirror:
                     self._cond.wait(min(left, 1.0))
         return True
 
+    def flush(self) -> bool:
+        """The newest save that the throttle kept back, written now (forced: waited for at
+        most the write timeout). False: none, or fenced."""
+        state, self._throttled = self._throttled, None
+        return False if state is None or self.fenced is not None else self.submit(state, force=True)
+
+    def stale(self) -> str | None:
+        """Why this writer may drive the run no more because it is cut off from the store
+        (module doc): no write was confirmed for ``stale_after_s`` since its first try after
+        the last confirmed one.
+        Fenced then, as by another writer (:attr:`fenced`, the event). None: it may."""
+        if self.fenced is not None:
+            return self.fenced
+        if self.stale_after_s is None or self._tried_at is None or self._tried_at <= self._ok_at:
+            return None
+        silent = self.monotonic() - self._tried_at  # since its first try after the last confirmed write
+        if silent < self.stale_after_s:
+            return None
+        self._fence({}, None, why=(f"no write of run up's state to the run store was confirmed for {silent:.0f}s "
+                                   f"(limit {self.stale_after_s:.0f}s: the island records lock's lease plus the "
+                                   "takeover margin): another control host may drive this run now"))
+        return self.fenced
+
     def _loop(self) -> None:
         while True:
             with self._cond:
@@ -181,18 +228,47 @@ class StateMirror:
     # -- the write
     def write_now(self, snapshot: dict[str, Any]) -> bool:
         """One conditional write (module doc); never raises. False: not written."""
+        if self._tried_at is None or self._tried_at <= self._ok_at:
+            self._tried_at = self.monotonic()
         try:
-            return self._write(snapshot)
+            done = self._write(snapshot)
         except Exception as error:  # noqa: BLE001 - kept local; tried again at the next save
             self._warn(f"{type(error).__name__}: {error}")
             return False
+        if done:
+            self._ok_at = self.monotonic()
+        return done
+
+    def _read_raw(self) -> tuple[bytes | None, dict[str, Any] | None]:
+        raw = self.objects.read(STATE_MIRROR)
+        if raw is None:
+            return None, None
+        doc = json.loads(raw)
+        return raw, (doc if isinstance(doc, dict) and doc.get("schema") == SCHEMA else None)
+
+    def _theirs_newer(self, current: dict[str, Any] | None, than: int) -> dict[str, Any] | None:
+        """The writer of ``current`` when it is another writer's with a number past ``than``."""
+        if current is None:
+            return None
+        theirs = current.get("writer") if isinstance(current.get("writer"), dict) else {}
+        return theirs if theirs.get("nonce") != self.nonce and seq_of(current) > than else None
+
+    def _replace(self, raw: bytes | None, data: bytes) -> bool:
+        """The mirror replaced by ``data`` only while it still holds ``raw`` (None: absent)."""
+        if raw is None:
+            return bool(self.objects.create(STATE_MIRROR, data))
+        replace = getattr(self.objects, "replace_if", None)
+        done = replace(STATE_MIRROR, data, raw) if callable(replace) else None
+        if done is None:  # this store takes no conditional write: the sequence claim alone orders the writers
+            self.objects.write(STATE_MIRROR, data)
+            return True
+        return bool(done)
 
     def _write(self, snapshot: dict[str, Any]) -> bool:
-        current = read_mirror(self.objects)
-        if current is not None:
-            theirs = current.get("writer") if isinstance(current.get("writer"), dict) else {}
-            if theirs.get("nonce") != self.nonce and seq_of(current) > self.seq:
-                return self._fence(theirs, seq_of(current))
+        raw, current = self._read_raw()
+        theirs = self._theirs_newer(current, self.seq)
+        if theirs is not None:
+            return self._fence(theirs, seq_of(current))
         tries = START_CLAIM_TRIES if not self._started else 1
         nxt = self.seq + 1
         while True:
@@ -207,7 +283,19 @@ class StateMirror:
             nxt += 1  # a run up that starts: a number claimed by a writer that never wrote it
         doc = {"schema": SCHEMA, "run": self.run, "host": self.host, "writer": self.writer, "seq": nxt,
                "at": round(self.clock(), 3), "state": snapshot}
-        self.objects.write(STATE_MIRROR, json.dumps(doc, sort_keys=True).encode())
+        data = json.dumps(doc, sort_keys=True).encode()
+        for _attempt in range(WRITE_TRIES):
+            if self._replace(raw, data):
+                break
+            raw, current = self._read_raw()  # another write landed between the read and this one
+            if current is not None and (current.get("writer") or {}).get("nonce") == self.nonce \
+                    and seq_of(current) == nxt:
+                break  # this write itself, its answer lost
+            theirs = self._theirs_newer(current, nxt - 1)  # another writer at this number or past it
+            if theirs is not None:
+                return self._fence(theirs, seq_of(current))
+        else:
+            raise RuntimeError(f"{STATE_MIRROR} changed under {WRITE_TRIES} conditional writes in a row")
         self.seq, self._started = nxt, True
         self.writes += 1
         self._save_local()
@@ -231,9 +319,9 @@ class StateMirror:
         except OSError:
             pass  # the next write tries again; a missing file only makes a restore more likely
 
-    def _fence(self, theirs: dict[str, Any], seq: int) -> bool:
-        why = (f"run up's state in the run store is written by host {theirs.get('host') or '?'} now (sequence {seq}, "
-               f"this run up wrote {self.seq}): another control host drives this run")
+    def _fence(self, theirs: dict[str, Any], seq: int | None, *, why: str | None = None) -> bool:
+        why = why or (f"run up's state in the run store is written by host {theirs.get('host') or '?'} now (sequence "
+                      f"{seq}, this run up wrote {self.seq}): another control host drives this run")
         self.fenced = why
         self.log(f"CRITICAL: on-site control plane: {why}; this run up writes, stops and orders nothing more and "
                  f"exits {CONTROL_FENCED_EXIT} (its unit is not restarted)")

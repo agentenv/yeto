@@ -767,39 +767,113 @@ start the control unit on another host. `yeto run up` there takes the run over:
    detaches the pools without draining them, and exits 76. The control unit never restarts
    after 76 and writes no ended marker: the run goes on on the other host. The same happens
    when another controller writes the fleet (`fleet/applied.json`).
+   - The mirror is replaced by a conditional write over what was read (the first one by an
+     exclusive create). A write that loses to another one reads the mirror again; another
+     writer's number at or past its own fences it.
+   - A `run up` cut off from the run store fences itself the same way (exit 76): once no write
+     of the mirror was confirmed for the island records lock's lease plus
+     `fleet.takeover_margin_s` (120 s + 60 s by default) since its first try, by when another
+     host may take its islands over. It writes the mirror at least every 30 s while it runs,
+     so it notices. A `run up` that only had nothing to write is not fenced.
+   - A `run up` that starts while the run store does not answer (the mirror does not read,
+     for example an old control host that comes back during a store outage) refuses before
+     anything starts: exit 2, nothing launched, nothing written. The unit tries again every
+     30 s; once the store reads, the sequence numbers decide which host drives.
+   - At its exit, `run up` writes the last state the 30 s interval had kept back.
 3. **Each island launch is taken over once its lease ran out.** An island launch holds its
    records lock (`fleet/trainers/<k>/lock`, a 120 s lease it renews) while its supervisor
    lives. The trainer worker of the new host takes an island over only:
    - once the fleet's syncer is known;
    - once that lease ended at least `fleet.takeover_margin_s` ago (default 60 s; the two
      hosts' clocks may differ by that much);
-   - once the island's launch (or its last takeover) started at least 10 minutes ago, so a
-     launch that has not claimed its lock yet is waited for;
+   - once the island's launch (or its last takeover) started at least 10 minutes ago
+     (`START_GRACE_S`, 600 s), so a launch that has not claimed its lock yet is waited for.
+     A control host that dies within 10 minutes of starting or taking over an island launch
+     leaves that island without a controller for the rest of those 10 minutes. The island
+     itself does not stop: it trains and merges with the syncer directly all along;
    - by claiming the lock itself. The new token fences the old launch: its next renewal
      fails. A lease that came back meanwhile, or another host's claim, makes the takeover
      fail, and the worker logs an error and changes nothing. The claim is released at once,
      and the launch started next claims the token after it. A note is written to
      `fleet/trainers/<k>/takeover/<token>.json`.
-4. **The same launch is started again, and it adopts the running island.** The new host
-   starts the same launch (the same prefix and incarnation, no relaunch counted). A Modal
-   island is adopted by the function call id in its store record. For an SSH island, the
-   launch first writes the island's job journal from its store record (only once it holds
-   the records lock), then asks every node over SSH whether that incarnation still runs. It
-   reattaches when every node runs it. It refuses to start another copy while a node does
-   not answer or runs something else. No island process restarts, and the syncer sees no
-   island leave. The island keeps its node lease identity (kept in the run store), so its
-   nodes' leases stay its own.
-5. **A moving or stopping island finishes its move or removal.** Its launch is started again
-   with its STOP kept. It may only reattach: it reads the STOP and releases the island, and
-   the move or the removal goes on once it ended. If it cannot reattach (the incarnation does
-   not run on every node, or a node does not answer), it neither releases nor starts
-   anything. The island is then blocked: an `island_takeover_blocked` event, its records
-   kept, no new incarnation. Check its nodes, release it by hand, then remove and add the
-   island again.
+
+   The time the old host's launch ran is billed up to the takeover; the launch started on
+   the new host bills from there.
+4. **An island whose launch ended on the lost host is not started again.** The island
+   launch keeps its own record in the run store (`fleet/trainers/<k>/state.json`). When that
+   record says the island ended (`done`, `failed` or `abandoned`, for that launch's island),
+   the new host closes the island as the old host would have: the same final state, its
+   sampler pools released when it failed or was given up without a STOP, its time billed up
+   to its end. Nothing is started. A moving or stopping island whose launch ended goes on
+   with its move or its removal.
+5. **Otherwise the same launch is started again, as a takeover launch, and it adopts the
+   running island.** The new host starts the same launch (the same prefix and incarnation)
+   with `--rl-fleet-takeover`:
+   - It never starts its island afresh: it never clears the island's STOP or START, and an
+     island record that says the island ended refuses it (`[yeto-takeover-blocked]`; the
+     island is blocked, see below).
+   - It counts against the island's relaunch budget (3). With the budget spent the island is
+     not started again: it is given up (`abandoned`), its STOP is written, and it is still
+     billed (what the old launch left may run) until it is removed or `yeto run down`.
+   - A Modal island is adopted by the function call id in its store record. The new host
+     writes that call to its own resource ledger, so `yeto cleanup` on the new host can still
+     release it.
+   - For an SSH island, the launch first writes the island's job journal from its store
+     record (only once it holds the records lock; a local journal older than that record is
+     written again), then asks every node over SSH whether that incarnation still runs. It
+     reattaches when every node runs it. It refuses to start another copy while a node does
+     not answer or runs something else.
+   - An SSH island keeps its nodes. Each island's placement (its nodes in rank order) is kept
+     in the run store with its node lease identity
+     (`fleet/trainers/<k>/node-lease-identity.json`). The launch on the new host leases
+     those nodes and only those, even once their leases ran out while no host renewed them.
+     If one of them is held by another run, or is not in the inventory any more, the island
+     is blocked: it is never released and started on other nodes.
+
+   No island process restarts, and the syncer sees no island leave.
+6. **A moving or stopping island finishes its move or removal.** Its launch is started again
+   as a takeover launch with its STOP kept, and its wait for the STOP starts again on the new
+   host (a launch still running long after it is torn down, as on the old host). It may only
+   reattach: it reads the STOP and releases the island, and the move or the removal goes on
+   once it ended. If it cannot reattach (the incarnation does not run on every node, or a
+   node does not answer), it neither releases nor starts anything.
+
+**A blocked island** (`island_takeover_blocked` event): a takeover launch that could not take
+its island over (a launch that may only reattach and cannot, a node of its placement held by
+another run, an island record that ended, or a reattached launch that ended without a run
+record). Its records are kept and no new incarnation starts. Check its nodes, release it by
+hand, then remove and add the island again.
 
 The island HMAC key is read from the environment file on the new host. A key that is
 missing there stops `run up` before anything starts. A key that is not the one the islands
 and the syncer use is refused by the syncer launch (exit 10). No host generates a new key.
+
+**Sampler pools on another host.** The new host must see what the old one ordered:
+
+- **SSH pools** keep their tickets, holds and owed stops in the run store: taken over.
+- **Modal pools** keep their calls (and the deployed app's id) in the run store too, under
+  the pool's lock (`fleet/pools/<pool>/provider/<token>.json`), with the store control plane.
+  The new host follows and releases the calls the old host spawned, and orders none again.
+- **Sky pools** need one sky API server for every control host. A sky pool's clusters are
+  in the state of the sky API server that ordered them; with a server of its own on each
+  host, the new host would read the old host's clusters as preempted and order them again,
+  while they bill until their hard cap. Run one sky API server that every control host
+  reaches (a remote SkyPilot API server, not each host's local one), and name it in the run
+  config:
+
+  ```json
+  "fleet": {"syncer_service": "10.0.0.5", "sky_api_server": "http://10.0.0.6:46580"}
+  ```
+
+  `fleet.sky_api_server` is `http(s)://HOST[:PORT]`, never a loopback address (that would
+  name another server on each host) and without credentials. `run up` uses it as
+  `SKYPILOT_API_SERVER_ENDPOINT`; a host whose environment names another server is refused.
+  Without the key, `yeto run up` (`--dry-run` too) refuses a fleet with an on-site control
+  plane and a sky pool, with exit 10 (a configuration error; the control unit does not
+  restart).
+- **National Compute pools** are refused the same way (exit 10): their leases are in the
+  client ledger of the host that ordered them, which another host can neither follow nor
+  release.
 
 What is never taken over:
 
@@ -810,8 +884,8 @@ What is never taken over:
 - **A fleet without an on-site control plane.** Without `fleet.syncer_service`, nothing is
   mirrored and nothing is taken over, as before.
 
-The new host writes no ledger row for the old host's machines. They stay in the old host's
-resource ledger.
+Apart from the Modal calls it adopts, the new host writes no ledger row for the old host's
+machines. They stay in the old host's resource ledger.
 
 ### Limits
 

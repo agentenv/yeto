@@ -1353,6 +1353,8 @@ def check_fleet_member(args: Any) -> None:
         if getattr(args, "controller", "local") == "head":
             raise ValueError("--rl-fleet-syncer-service: the syncer runs as an on-site service; the syncer "
                              "launch needs --controller local (no head VM)")
+    if getattr(args, "rl_fleet_takeover", False) and role != FLEET_ROLE_ISLAND:
+        raise ValueError("--rl-fleet-takeover belongs to an island launch (--rl-fleet-role island)")
     if role is None:
         named = [flag for flag, dest in FLEET_MEMBER_DESTS if getattr(args, dest, None) is not None]
         if named:

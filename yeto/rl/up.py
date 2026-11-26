@@ -1885,9 +1885,19 @@ class Run:
 
     def mirror_fenced(self) -> str | None:
         """Why this run up may drive the run no more because another control host writes its
-        state now (None: it may, or no on-site control plane)."""
+        state now, or because no write of it was confirmed for longer than another host waits
+        before it takes the islands over (``StateMirror.stale``). None: it may, or no on-site
+        control plane."""
         mirror = getattr(self, "_state_mirror", None)
-        return None if mirror is None else mirror.fenced
+        return None if mirror is None else (mirror.fenced or mirror.stale())
+
+    def flush_state_mirror(self) -> bool:
+        """The newest state the mirror's throttle kept back, written now (run up's exit)."""
+        mirror = getattr(self, "_state_mirror", None)
+        try:
+            return False if mirror is None else mirror.flush()
+        except Exception:  # noqa: BLE001 - the exit goes on
+            return False
 
     def control_fenced(self) -> str | None:
         """An on-site control plane only: why this run up drives the run no more, checked now:
@@ -1895,6 +1905,7 @@ class Run:
         the fleet (:func:`fleet_fenced`; a read that failed does not count)."""
         if getattr(self, "_state_mirror", None) is None:
             return None
+        self.mirror_state()  # a keepalive (throttled): a host cut off from the store finds out (stale)
         why = self.mirror_fenced()
         if why:
             return why
@@ -2004,9 +2015,14 @@ class Run:
             raise RunUpRefused(f"on-site control plane: run up's state in the run store did not read "
                                f"({type(error).__name__}: {error}); nothing started") from None
         seq = max(up_state_mirror.seq_of(doc), up_state_mirror.seq_of(local if local.get("run") == self.run else {}))
+        from yeto.rl import fleet  # noqa: PLC0415
+
+        # cut off from the store this long, another host may have taken the islands over
+        stale_after_s = up_state_mirror.RECORDS_LOCK_TTL_S + fleet.takeover_margin_s(self.cfg.get("fleet") or {})
         self._state_mirror = up_state_mirror.StateMirror(objects, run=self.run, host=host, seq=seq,
                                                          local_path=local_path, log=_log,
-                                                         on_fenced=self._control_fenced_event)
+                                                         on_fenced=self._control_fenced_event,
+                                                         stale_after_s=stale_after_s)
         self.env[JOURNAL_FROM_STORE_ENV] = "1"  # the island launches reattach by their store records
         self.mirror_state(force=True)
 
@@ -4150,6 +4166,7 @@ class Run:
         forced: set[str] = set()
         failed = 0
         while True:
+            self.raise_if_control_fenced()  # an on-site control plane another host drives now: no forced stop here
             members = self.pool_members()
             billed = None if members is None else [m for m in members if m.get("state") != "gone"]
             if billed is not None and not billed:
@@ -4936,6 +4953,34 @@ class ControlFenced(BaseException):
     breaker or a wait may swallow it."""
 
 
+def onsite_pool_refusal(run: Run, environ: dict[str, str] | None = None) -> str | None:
+    """An on-site control plane (``fleet.syncer_service``) whose pools another control host
+    could not take over (:func:`yeto.rl.fleet.onsite_pool_problem`), or whose shared sky API
+    server (``fleet.sky_api_server``) is not the one this host's sky client uses
+    (``SKYPILOT_API_SERVER_ENDPOINT``; unset, it is set to it). None: nothing to refuse.
+    ``yeto run up`` (dry run too) exits with the configuration error code then."""
+    from yeto.rl import fleet  # noqa: PLC0415
+
+    if not run.onsite_control():
+        return None
+    try:
+        problem = fleet.onsite_pool_problem(run.cfg)
+        shared = fleet.sky_api_server(run.cfg.get("fleet") or {})
+    except ValueError as error:
+        return str(error)
+    if problem:
+        return problem
+    if shared is not None:
+        env = os.environ if environ is None else environ
+        have = (run.env.get(fleet.SKY_API_SERVER_ENV) or env.get(fleet.SKY_API_SERVER_ENV) or "").rstrip("/")
+        if have and have != shared:
+            return (f"fleet.sky_api_server is {shared}, but this host's sky client uses {fleet.SKY_API_SERVER_ENV}="
+                    f"{have}: every control host must use the one shared sky API server (docs/OWN_CLUSTERS.md)")
+        env[fleet.SKY_API_SERVER_ENV] = shared  # this process and what it starts use the shared server
+        run.env[fleet.SKY_API_SERVER_ENV] = shared
+    return None
+
+
 def forced_stop_refusal(run: Run, allow: bool, *, record: bool = True) -> str | None:
     """A breaker of an earlier ``run up`` forced the NC pool down (``nc_forced_stop``,
     spend or wall time past ``FORCE_FACTOR`` x the budget): a new ``run up`` would order
@@ -5046,6 +5091,13 @@ def main(args: Any) -> int:
              "(or set controller: subprocess)")
         return 2
     run.onsite_service = bool(getattr(args, "onsite_service", False))  # the on-site control unit only
+    refused = onsite_pool_refusal(run)  # an on-site control plane only: pools another host can take over
+    if refused:
+        _log(f"run config refused: {refused}")
+        args.config_refused = refused
+        from yeto.config_errors import CONFIG_ERROR_EXIT  # noqa: PLC0415
+
+        return CONFIG_ERROR_EXIT
     holder = run.lock_up()
     if holder is not None:
         role = (getattr(run, "lock_holder", None) or {}).get("role", "up")
@@ -5115,6 +5167,8 @@ def main(args: Any) -> int:
              f"(exit {CONTROL_FENCED_EXIT})")
         rc, fenced = CONTROL_FENCED_EXIT, True
     finally:
+        if not fenced:
+            run.flush_state_mirror()  # an on-site control plane: the last throttled state reaches the run store
         if run.in_process and not run.drain_controller(decided=decided, fenced=fenced):
             rc = rc or 1
         ctrl_c.restore()
