@@ -8,6 +8,7 @@ import time
 
 from ..config_errors import CONFIG_ERROR_MARKER, ISLAND_STOP_MARKER
 from ..gpu_spec import ClusterSpec
+from .sky_identity import launch_identity
 from .teardown import teardown_island
 
 
@@ -56,7 +57,7 @@ def submit_island_launch(sky, args, spec: ClusterSpec, task, name: str):
             model_store_sky_config(store_fs, spec.region))
     else:
         store_cfg = contextlib.nullcontext()
-    with store_cfg:
+    with store_cfg, launch_identity(task, name):
         return sky.launch(task, cluster_name=name,
                           retry_until_up=bool(getattr(args, "retry_until_up", False)))
 
@@ -226,7 +227,9 @@ class SkySDKOps:
 
         for attempt in (1, 2):
             try:
-                job_id, _handle = sky.get(sky.launch(task, cluster_name=cluster))
+                with launch_identity(task, cluster):
+                    request = sky.launch(task, cluster_name=cluster)
+                job_id, _handle = sky.get(request)
                 maybe_install_nebius_reclaim_hook(task, (job_id, _handle), cluster)
                 return job_id
             except Exception as e:

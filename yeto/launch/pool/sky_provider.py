@@ -799,7 +799,10 @@ class SkyProvider:
         self.last_offer_key = offer.key  # the pool's order_failed event names it (offer ledger)
         try:
             task = self._task(name, offer, num_nodes)
-            request = self.sky.launch(task, cluster_name=name, **self.launch_kwargs(task, autodown=autodown))
+            from ..sky_identity import launch_identity  # noqa: PLC0415
+
+            with launch_identity(task, name):
+                request = self.sky.launch(task, cluster_name=name, **self.launch_kwargs(task, autodown=autodown))
         except Exception as error:  # the submit itself failed (bad resources, API server down)
             self._launch_failed(name, error)
             raise

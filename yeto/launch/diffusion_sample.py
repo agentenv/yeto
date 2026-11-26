@@ -253,9 +253,11 @@ def run_diffusion_sample(args) -> int:
     )
     try:
         print(f"[launcher] launching diffusion sampler on {spec} as {cluster}")
-        job_id, _handle = sky.stream_and_get(
-            sky.launch(task, cluster_name=cluster, retry_until_up=args.retry_until_up)
-        )
+        from .sky_identity import launch_identity
+
+        with launch_identity(task, cluster):
+            request = sky.launch(task, cluster_name=cluster, retry_until_up=args.retry_until_up)
+        job_id, _handle = sky.stream_and_get(request)
         threading.Thread(target=_tail, args=(cluster, job_id, "sample"), daemon=True).start()
         status = _wait_for_terminal_job(
             cluster, job_id, getattr(args, "controller_poll", 30)

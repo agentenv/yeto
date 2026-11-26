@@ -34,6 +34,54 @@ touches needs `nebius.region_configs.<region>.project_id` in
 without one, before any VM is created. The same project ids let the
 planner ask Nebius for live preemptible prices.
 
+### What sky copies onto a node
+
+By default sky copies the submitting machine's credential file of every
+cloud it knows onto every node it provisions, on any cloud: `~/.aws/credentials`
+with every profile in it, `~/.kube/config`, the Nebius token files. Anyone who
+can run code on the node can use them. A yeto node does not need them:
+
+| On the node | Credential it uses |
+|---|---|
+| Run store (`s3://` on AWS S3, R2 or MinIO) by object API | The store's own key, `YETO_RL_STORE_S3_*`, in the task's `secrets` (a key limited to the store's bucket) |
+| Run store mounted with sky Storage (AWS S3 bucket) | An AWS node: its IAM instance profile. A non-AWS node: `~/.aws/credentials` (see below) |
+| Private image (ECR, GHCR) | The registry login in the task's `secrets`. For ECR that is the 12-hour password from `aws ecr get-login-password` |
+| Syncer VM tape upload | The store's own key, like an island |
+| sky autostop / autodown | The node's own cloud: the instance profile on AWS, the cloud's file elsewhere |
+| Head VM | The clouds the fleet touches, as explicit file mounts (it launches the islands) |
+
+So every `sky.launch` yeto submits (trainer islands, sampler pools, the spot
+watchdog, the syncer VM, the head, the diffusion sampler) sets
+`remote_identity: NO_UPLOAD` for each cloud sky's config accepts it for, except:
+
+- the node's own cloud when that is not AWS (sky's autodown there reads it);
+- AWS on a non-AWS node that mounts an AWS S3 bucket with sky Storage: the launch
+  keeps the upload and prints a warning naming the mounts. To avoid it, run the
+  island on AWS, or use a store on an S3-compatible endpoint with a bucket-scoped key;
+- a cloud whose `remote_identity` `~/.sky/config.yaml` already sets.
+
+`YETO_SKY_UPLOAD_CLOUD_CREDENTIALS=1` restores sky's default (printed as a
+warning). The override is held only while the request is submitted; the API
+server's own config is not changed. sky also copies Cloudflare R2's
+`~/.cloudflare/` files when its R2 storage is enabled; `remote_identity` does not
+cover them, so keep sky's R2 storage disabled on the submitting machine and give
+an R2 store its own key (`YETO_RL_STORE_S3_*`).
+
+**AWS instance profile.** An AWS node gets sky's `skypilot-v1` instance profile
+(EC2 and S3 full access) unless `YETO_SKY_AWS_INSTANCE_PROFILE` names another one;
+it applies to nodes that can only land on AWS. A starting point for a minimal island profile (not yet run on a real machine):
+`s3:ListBucket` on the mounted bucket, `s3:GetObject`/`PutObject`/`DeleteObject` on
+its objects, and, for sky autodown, `ec2:DescribeInstances` plus
+`ec2:TerminateInstances` and `ec2:StopInstances` limited to instances carrying
+the cluster's `skypilot-cluster-name` tag. Add the managed `AmazonEC2ContainerRegistryReadOnly`
+policy only if nodes should log in to ECR themselves. The launching identity also needs
+`iam:PassRole` on that role.
+
+When an island starts, it warns `cloud credential files present on this island:
+...` if a credential file is there anyway (a launch that kept the upload, a launch
+from before this change, or an image that ships one). The island never reads the
+file. Rotate the keys if the island ran untrusted code.
+
 ## What each cloud means by "region"
 
 | Cloud | `--regions` entry | Meaning | Notes |

@@ -945,7 +945,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     island_states.guard_order(syncer_cluster)  # the lock still ours (raises: nothing ordered)
                 print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
                 cost_ledger.created("sky_cluster", syncer_cluster, syncer_cluster, **syncer_vm)
-                rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
+                from .launch.sky_identity import launch_identity
+
+                with launch_identity(syncer_task, syncer_cluster):
+                    rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
                 syncer_job, syncer_handle = sky.stream_and_get(rid)
                 head_ip = str(syncer_handle.head_ip)
                 if island_states is not None:

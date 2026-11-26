@@ -105,7 +105,11 @@ def launch_verda_island(sky, task, name: str, spec, args, *, sleep=None):
     def launch(cands):
         task.set_resources([base.copy(**_verda_copy_override(sky, c)) for c in cands])
         print(f"[launcher] {name}: Verda candidates {[c['instance_type'] + '@' + c['infra'] for c in cands]}")
-        return sky.stream_and_get(sky.launch(task, cluster_name=name, retry_until_up=False))
+        from .sky_identity import launch_identity
+
+        with launch_identity(task, name):
+            request = sky.launch(task, cluster_name=name, retry_until_up=False)
+        return sky.stream_and_get(request)
 
     return launch_with_verda_candidates(
         launch,
