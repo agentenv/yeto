@@ -9,6 +9,7 @@ import json
 import shlex
 import subprocess
 import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -74,6 +75,9 @@ class FakeNodes(FakeCluster):
         if ia.BUSY_MARK in script:
             self.scripts.append((node.name, "busy"))
             return self.done(0, self.busy)
+        if script.startswith("podman pull"):
+            self.scripts.append((node.name, script))
+            return self.done(*self.b[node.name].pull)
         if ia.FACT in script:
             cards = "--gpus" in shlex.split(script)
             self.scripts.append((node.name, "probe+cards" if cards else "probe"))
@@ -240,6 +244,9 @@ def test_an_image_built_above_the_nodes_card_stops_at_fit(tmp_path, catalog_befo
     (["compute_103a"], "B300", True, ia.PTX_RULE_NOTE),
     (["sm_90", "compute_120"], "B300", False, None),             # PTX of a newer card: no backward JIT
     (["sm_100f"], "B300", True, ia.MINOR_RULE_NOTE),             # a family cubin of 10.x
+    (["sm_90", "compute_100f"], "B300", True, ia.PTX_RULE_NOTE),  # family PTX within 10.x
+    (["sm_90", "compute_100f"], "RTX-PRO-6000", False, None),    # not across majors (sm120)
+    (["sm_90", "compute_103f"], "B200", False, None),            # not to a lower minor
     (["sm_80", "sm_90"], "H100", True, None),
     (["sm_90", "sm_100", "sm_103"], "B300", True, None),
     (["gfx942"], "MI355X", False, None),
@@ -535,13 +542,55 @@ def test_the_probe_falls_back_to_the_cards_when_the_build_flags_are_empty(tmp_pa
     assert "probe+cards" not in flags.kinds()  # the build flags were enough
 
 
-def test_the_pull_needs_a_docker_node(tmp_path):
+def _podman(i, **kw):
     from yeto.launch.node_inventory import NodeProfile
 
-    nodes = [NodeProfile.from_node(b300(i, runtime="rootfs"), container="podman") for i in range(2)]
+    return NodeProfile.from_node(b300(i, docker_args=(), **kw), container="podman")
+
+
+def test_podman_nodes_are_probed_checked_and_pulled_with_podman(tmp_path):
+    nodes = [_podman(0, runtime="rootfs"), b300(1)]  # podman on a node of no docker runtime
+    ops = FakeNodes(nodes, **{"b300-0": Behavior(host={"podman_root": (0, "/mnt/nvme/podman")})})
+    report = adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
+    assert report.ok
+    pulls = sorted(s.split(" pull")[0] + "@" + n for n, s in ops.scripts if " pull -q " in s)
+    assert pulls == ["docker@b300-1", "podman@b300-0"]  # each node with its own engine
+    host = [s for n, s in ops.scripts if n == "b300-0" and "@@yeto-section" in s]
+    assert host and all("podman info --format" in s for s in host)
+    assert not any("podman" in s for n, s in ops.scripts if n == "b300-1" and "@@yeto-section" in s)
+    (rec,) = si.load(tmp_path / "site-images.yaml")
+    assert rec.evidence["pulled"] == ["b300-0", "b300-1"]
+
+
+def test_a_podman_graphroot_short_of_room_stops_the_pull(tmp_path):
+    nodes = [_podman(0), _podman(1)]
+    low = Behavior(host={"podman_root": (0, "/var/lib/containers/storage"),
+                         "disk": (0, "\n".join([disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
+                                                disk_line("/var/lib/containers/storage", 30, mount="/")]))})
+    ops = FakeNodes(nodes, **{"b300-1": low})
+    with pytest.raises(ia.AdoptError) as error:
+        adopter(request(nodes, tmp_path, node="b300-0"), ops, smoke=passing_smoke()).run()
+    assert error.value.step == "pull"
+    assert ("node b300-1: disk_images: /var/lib/containers/storage (podman graphroot) on /: 30 GiB free "
+            "(move it to NVMe (graphroot in /etc/containers/storage.conf))") in error.value.reason
+    assert not any(" pull -q " in s for _, s in ops.scripts)
+
+
+def test_the_pull_needs_a_container_engine(tmp_path):
+    nodes = [b300(i, runtime="rootfs") for i in range(2)]
     a = adopter(request(nodes, tmp_path), FakeNodes(nodes))
-    with pytest.raises(ia.AdoptError, match=r"step pull failed: no trainer node runs docker \(runtimes \['rootfs'\]\)"):
+    with pytest.raises(ia.AdoptError, match=r"step pull failed: no trainer node runs a container engine "
+                                            r"\(docker or podman\): \['b300-0', 'b300-1'\]"):
         a._pull(PINNED)
+
+
+def test_the_preflight_host_probe_of_a_docker_node_is_unchanged():
+    from yeto.launch.preflight import cluster as cp
+
+    node = b300(0)
+    assert cp.host_sections(node) == cp.host_sections(node, engine="docker")
+    assert "podman" not in str(cp.host_sections(node)) and "podman" in str(cp.host_sections(node, engine="podman"))
+    assert [n for n, _ in cp.host_sections(node, engine="podman")][-2:] == ["podman_root", "disk"]
 
 
 def test_a_fit_failure_names_the_probe_node_that_holds_the_image(tmp_path):
@@ -550,3 +599,23 @@ def test_a_fit_failure_names_the_probe_node_that_holds_the_image(tmp_path):
     with pytest.raises(ia.AdoptError, match="step fit failed") as error:
         adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
     assert error.value.holding == ("b300-0",)
+
+
+def test_a_tag_next_to_a_digest_is_left_out_of_the_repository_and_the_token_scope():
+    assert im.split_tagged_ref(f"reg.example/org/img:v1@{DIGEST}") == ("reg.example", "org/img", DIGEST)
+    assert im.split_tagged_ref(f"reg.example:5000/org/img:v1@{DIGEST}") == ("reg.example:5000", "org/img", DIGEST)
+    seen = []
+
+    def urlopen(req, timeout=None):  # a registry: the challenge's scope is the repository the URL names
+        seen.append(req.full_url)
+        if "/token?" in req.full_url:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)
+            ok = query.get("scope") == ["repository:org/img:pull"]
+            return _Resp(200, body=b'{"token": "t0k"}' if ok else b'{"token": "wrong-scope"}')
+        if req.headers.get("Authorization") == "Bearer t0k":
+            return _Resp(200, {"Docker-Content-Digest": DIGEST})
+        repo = req.full_url.split("/v2/", 1)[1].rsplit("/manifests/", 1)[0]
+        raise urllib.error.HTTPError(req.full_url, 401, "x", {"WWW-Authenticate": (
+            f'Bearer realm="https://reg.example/token",service="reg.example",scope="repository:{repo}:pull"')}, None)
+    assert ia.pin(f"reg.example/org/img:v1@{DIGEST}", urlopen=urlopen) == f"reg.example/org/img@{DIGEST}"
+    assert seen[0] == f"https://reg.example/v2/org/img/manifests/{DIGEST}"

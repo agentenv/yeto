@@ -105,8 +105,9 @@ def split_tagged_ref(ref: str) -> tuple[str, str, str]:
     """``[docker:]<host>/<repo>[:tag][@sha256:<hex>]`` -> (host, repo, tag or digest): the
     digest when there is one, else the tag (``latest`` when none is given)."""
     name = ref.removeprefix("docker:")
-    if "@" in name:
-        return split_ref(name)
+    if "@" in name:  # a digest wins over a tag written next to it (``name:tag@sha256:...``)
+        path, _, digest = name.partition("@")
+        return split_ref(f"{_without_tag(path)}@{digest}")
     last = name.rsplit("/", 1)[-1]
     tag = last.split(":", 1)[1] if ":" in last else "latest"
     path = _without_tag(name)

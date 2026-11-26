@@ -253,6 +253,14 @@ except Exception as error:
 """.replace("PACKAGES", repr(PACKAGES))
 
 
+def engine_of(node: Node) -> str | None:
+    """The container engine of ``node``'s images (docker / podman; None: it runs none)."""
+    from .node_inventory import profile_of  # noqa: PLC0415
+
+    engine = profile_of(node).container
+    return engine if engine in ("docker", "podman") else None
+
+
 def container_engine(node: Node) -> str:
     """The container engine the node runs images with (its profile's ``container``:
     ``docker`` / ``podman``); a node that runs no container is refused (step ``probe``)."""
@@ -649,7 +657,8 @@ class Adopter:
         from .preflight.cluster import FAIL, ClusterPreflight, Requirements  # noqa: PLC0415
 
         req = Requirements(min_image_root_free_gib=float(self.request.min_image_free_gib))
-        checks = ClusterPreflight([node], image=ref, ops=self.ops, req=req, log=self.log, clock=self.clock).hosts()
+        checks = ClusterPreflight([node], image=ref, ops=self.ops, req=req, log=self.log, clock=self.clock,
+                                  engine=container_engine(node)).hosts()
         failed = [c for c in checks if c.status == FAIL and c.name in ("ssh", "host_probe", "disk_images")]
         if failed:
             raise AdoptError("probe", "; ".join(f"node {c.scope}: {c.name}: {c.detail}" + (f" ({c.fix})" if c.fix
@@ -716,17 +725,28 @@ class Adopter:
         return detail + "".join(f"; {n}" for n in notes), {"warnings": warnings, "notes": notes}
 
     def _pull(self, ref: str) -> tuple[str, dict[str, Any]]:
+        """Every node of the role pulls the image with its own container engine (its
+        profile's ``container``: docker or podman), the image root of that engine checked
+        first (docker's data root / containerd store, podman's graphroot)."""
         from .preflight.cluster import FAIL, PASS, ClusterPreflight, Requirements  # noqa: PLC0415
 
-        docker = [n for n in self.request.nodes if n.runtime == "docker"]
-        if not docker:
-            raise AdoptError("pull", f"no {self.request.role} node runs docker (runtimes "
-                                     f"{sorted({n.runtime for n in self.request.nodes})}): the pre-pull pulls on "
-                                     "docker nodes")
+        groups: dict[str, list[Node]] = {}
+        for n in self.request.nodes:
+            engine = engine_of(n)
+            if engine:
+                groups.setdefault(engine, []).append(n)
+        skipped = [n.name for n in self.request.nodes if not engine_of(n)]
+        if not groups:
+            raise AdoptError("pull", f"no {self.request.role} node runs a container engine (docker or podman): "
+                                     f"{skipped}")
         req = Requirements(min_image_root_free_gib=float(self.request.min_image_free_gib))
-        pf = ClusterPreflight(list(self.request.nodes), image=ref, ops=self.ops, req=req, log=self.log,
-                              clock=self.clock)
-        checks, pulled = pf.pull()
+        checks, pulled = [], True
+        for engine, nodes in sorted(groups.items()):
+            pf = ClusterPreflight(nodes, image=ref, ops=self.ops, req=req, log=self.log, clock=self.clock,
+                                  engine=engine)
+            found, ok = pf.pull()
+            checks += found
+            pulled = pulled and ok
         self._hold(*(c.scope for c in checks if c.name == "image_pull" and c.status == PASS))
         failed = [c for c in checks if c.status == FAIL and c.name in ("ssh", "host_probe", "disk_images",
                                                                        "image_pull")]
@@ -735,8 +755,8 @@ class Adopter:
                                                                                           else "")
                                                for c in failed) or "the pull did not run")
         took = {c.scope: c.detail for c in checks if c.name == "image_pull"}
-        skipped = [n.name for n in self.request.nodes if n.runtime != "docker"]
-        return (f"pulled on {len(took)} node(s)" + (f"; not pulled (no docker): {skipped}" if skipped else ""),
+        return (f"pulled on {len(took)} node(s)" + (f"; not pulled (no container engine): {skipped}" if skipped
+                                                     else ""),
                 {"pulled": sorted(took)})
 
     def _record(self, ref: str, facts: ImageFacts, engine: str, smoke: StepResult) -> site_images.SiteImage:
