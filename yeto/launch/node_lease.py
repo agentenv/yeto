@@ -233,9 +233,13 @@ def still_runs_script(run: str, *, sudo: bool = False) -> str:
     * ``unconfirmed:container:<name>``: a sampler container (``yeto-sampler-...``) with no
       ``yeto.run`` label (started before labels, or without lease_store): perhaps this
       run's, not confirmed;
-    * ``unconfirmed:<engine>``: an engine's ``ps`` failed (``sudo -n <engine> ps`` too:
-      rootful containers of a pool with ``container.sudo``; tried whenever ``sudo -n``
-      works, required when ``sudo``);
+    * ``unconfirmed:<view>``: an engine's containers could not be listed. Each engine is
+      listed as the user and, when ``sudo -n`` works, through it. docker has one daemon:
+      either view listing is enough (``unconfirmed:docker`` when neither does). podman's
+      rootless and rootful containers are two sets: the user's view must list
+      (``unconfirmed:podman``), and with ``sudo`` (a pool with ``container.sudo``) the
+      rootful one too (``unconfirmed:sudo-podman``). A daemon that is not running ("Cannot
+      connect to the Docker daemon", not "permission denied") lists no containers;
     * ``process:<island>``: a trainer process group (``~/.yeto/trainer-islands/<run>/*/pgid``
       without an ``rc``);
     * ``sampler:<pid>``: a venv sampler (the start marker ``yeto-ssh-sampler:<run>:`` in its
@@ -250,27 +254,40 @@ def still_runs_script(run: str, *, sudo: bool = False) -> str:
     prefix = re.sub(r"[^A-Za-z0-9_.-]", "-", f"yeto-{run}-")
     head, tail = MARKER[:5], MARKER[5:]
     found = f"echo \"{PROBE_MARK} found="
+    names = "--format '{{.Names}}'"
     return (
         f"m={head}; m=\"${{m}}{tail}:{run}:\"\n"
-        "probe_engine() {  # $1: the label of the engine in findings; the rest: the engine command\n"
-        "  tag=$1; shift\n"
-        f"  mine=$(\"$@\" ps --filter label={RUN_LABEL}={run} --format '{{{{.Names}}}}' 2>/dev/null) || "
-        f"{{ {found}unconfirmed:$tag\"; return; }}\n"
-        f"  labelled=$(\"$@\" ps --filter label={RUN_LABEL} --format '{{{{.Names}}}}' 2>/dev/null) || "
-        f"{{ {found}unconfirmed:$tag\"; return; }}\n"
-        f"  all=$(\"$@\" ps --format '{{{{.Names}}}}' 2>/dev/null) || {{ {found}unconfirmed:$tag\"; return; }}\n"
+        "err=$(mktemp 2>/dev/null || echo \"/tmp/yeto-lease-probe.$$\")\n"
+        "listed() {  # after a failed ps: a daemon that is not running lists nothing; any other failure: unknown\n"
+        "  grep -qi 'permission denied' \"$err\" 2>/dev/null && return 1\n"
+        "  grep -q 'Cannot connect to the Docker daemon' \"$err\" 2>/dev/null || return 1\n"
+        "  mine=; labelled=; all=; ok=1\n"
+        "}\n"
+        "view() {  # the engine command: ok=1 and its listings, or ok=0\n"
+        "  ok=0; mine=; labelled=; all=\n"
+        f"  mine=$(\"$@\" ps --filter label={RUN_LABEL}={run} {names} 2>\"$err\") || {{ listed; return; }}\n"
+        f"  labelled=$(\"$@\" ps --filter label={RUN_LABEL} {names} 2>\"$err\") || {{ listed; return; }}\n"
+        f"  all=$(\"$@\" ps {names} 2>\"$err\") || {{ listed; return; }}\n"
+        "  ok=1\n"
+        "}\n"
+        "report() {\n"
         f"  for n in $mine; do {found}container:$n\"; done\n"
         "  for n in $all; do\n"
         f"    case \"$n\" in {prefix}*) {found}container:$n\";;\n"
         "      yeto-sampler-*) case \" $(echo $labelled) \" in *\" $n \"*) ;; "
         f"*) {found}unconfirmed:container:$n\";; esac;;\n"
         "    esac\n  done\n}\n"
+        "sudo_ok=0; command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null && sudo_ok=1\n"
         "for e in docker podman; do command -v $e >/dev/null 2>&1 || continue\n"
-        "  probe_engine $e $e\n"
-        + (f"  if sudo -n true 2>/dev/null; then probe_engine sudo-$e sudo -n $e; else {found}unconfirmed:sudo-$e\"; fi\n"
-           if sudo else
-           "  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then probe_engine sudo-$e sudo -n $e; fi\n")
-        + "done\n"
+        "  view $e; plain=$ok; [ $ok = 1 ] && report\n"
+        "  root=0; if [ $sudo_ok = 1 ]; then view sudo -n $e; root=$ok; [ $ok = 1 ] && report; fi\n"
+        "  case $e in\n"
+        f"    docker) [ $plain = 1 ] || [ $root = 1 ] || {found}unconfirmed:docker\";;\n"
+        f"    *) [ $plain = 1 ] || {found}unconfirmed:$e\"\n"
+        + (f"       [ $root = 1 ] || {found}unconfirmed:sudo-$e\";;\n" if sudo else "       ;;\n")
+        + "  esac\n"
+        "done\n"
+        "rm -f \"$err\"\n"
         f"for f in \"$HOME/{STATE_DIR}/{run}\"/*/pgid; do [ -f \"$f\" ] || continue; d=${{f%/pgid}}\n"
         "  [ -f \"$d/rc\" ] && continue; pid=$(cat \"$f\" 2>/dev/null)\n"
         f"  [ \"$pid\" -gt 1 ] 2>/dev/null && kill -0 -- -$pid 2>/dev/null && {found}process:${{d##*/}}\"\n"
@@ -596,16 +613,24 @@ class NodeLeases:
         for name in (self.held() if nodes is None else [node_name(n) for n in nodes]):
             self.release(name)
 
-    def keep_all(self) -> list[str]:
+    def keep_all(self, nodes: Iterable[Any] | None = None) -> list[str]:
         """Hold every lease of this object for good (``kept``, ``until`` null: it never runs
         out): the launcher ends while the nodes may still run (``--keep``, a release not
         confirmed). ``yeto cleanup --run <run>`` (:meth:`force_release`) or a restarted
         launcher of this run ends it; a node that stays unreachable: docs/OWN_CLUSTERS.md,
-        Node leases. Returns the nodes kept; never raises."""
-        self.stop_keeper()
+        Node leases. ``nodes``: only those (one island of several; the keeper goes on
+        renewing the others); None: all, and the keeper stops. A kept lease is no longer
+        renewed (a renewal would end ``kept``). Returns the nodes kept; never raises."""
+        only = None if nodes is None else {node_name(n) for n in nodes}
+        if only is None:
+            self.stop_keeper()
         kept = []
         with self._mutex:
             for name, lock in sorted(self._locks.items()):
+                if only is not None and name not in only:
+                    continue
+                self._locks.pop(name, None)
+                self._unconfirmed.pop(name, None)
                 try:
                     lock.check(force=True)
                     self.objects.write(StoreLock.lease_key(lock.prefix, lock.token), json.dumps(
@@ -725,15 +750,22 @@ def pick_nodes(candidates: Sequence[Any], need: int, leases: NodeLeases, *, wait
                   + [n for n in free if n not in first])
         refusals: dict[str, str | None] = {}
         refused: set[str] = set()  # this round's failed claims: left out, the placement computed again
-        while True:
+        for _attempt in range(len(usable) + 1):  # each attempt refuses one node more: then wait
             out = left_out | refused
+            offered = [n for n in usable if node_name(n) not in out]
             try:
-                chosen = place([n for n in usable if node_name(n) not in out], need, excluded=sorted(out))
+                chosen = place(offered, need, excluded=sorted(out))
             except Exception as error:  # noqa: BLE001 - only "no fit" waits; anything else is the caller's
                 if not _placement_failed(error):
                     raise
                 break
             chosen = list(getattr(chosen, "nodes", chosen))
+            names = [node_name(n) for n in chosen]
+            bad = sorted(set(names) - {node_name(n) for n in offered})
+            if len(chosen) != need or len(set(names)) != need or bad:
+                raise ValueError(f"placement {getattr(place, '__name__', place)!r} returned {names} for {need} "
+                                 f"node(s) of {[node_name(n) for n in offered]}"
+                                 + (f": {bad} not offered (excluded, held or unknown)" if bad else ""))
             taken: list[Any] = []
             for node in chosen:
                 result = leases.acquire(node)

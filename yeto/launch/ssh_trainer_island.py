@@ -1154,7 +1154,7 @@ class SshTrainerIslands:
         mine = {n.name for n in self.spec.nodes}
         if not (mine & set(leases.held())):
             return []
-        return leases.keep_all()
+        return leases.keep_all(nodes=sorted(mine))  # this island's only: another island renews on
 
     def release_leases(self) -> None:
         """Give the island's node leases up (its release was confirmed on every node)."""
@@ -1173,7 +1173,8 @@ class SshTrainerIslands:
             self.keep_leases()
         else:
             self.release_leases()
-        leases.stop_keeper()
+        if not leases.held():  # no other island of the process holds a lease: the keeper is done
+            leases.stop_keeper()
 
     def release(self, job: _SshJob) -> bool:
         ok = self._kill(job.incarnation)

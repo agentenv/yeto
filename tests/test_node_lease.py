@@ -744,9 +744,19 @@ if args[:1] == ["run"]:
     json.dump(rows, open(state, "w"))
     print("c0ffee")
 elif args[:1] == ["ps"]:
-    if os.environ.get("FAKE_ENGINE_FAIL") == engine:
-        sys.exit(125)
+    view = engine + ("-root" if os.environ.get("FAKE_AS_ROOT") else "")
+    modes = dict(f.split(":", 1) for f in os.environ.get("FAKE_FAIL", "").split(",") if f)
+    mode = modes.get(view)
     want = [args[i + 1].split("=", 1)[1] for i, a in enumerate(args) if a == "--filter"]
+    messages = dict(
+        down="Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+        denied="permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+        mixed="Cannot connect to the Docker daemon at unix:///var/run/docker.sock: connect: permission denied",
+    )
+    if (mode in messages or (mode == "unfiltered" and "--filter" not in args)
+            or (mode == "runfilter" and any(w.count("=") == 1 for w in want))):
+        print(messages.get(mode, "Error: listing failed"), file=sys.stderr)
+        sys.exit(1 if mode in messages else 125)
     for r in rows:
         ok = True
         for w in want:
@@ -851,8 +861,8 @@ def test_the_probe_finds_a_rootful_container_through_sudo(tmp_path, monkeypatch)
     assert _probe(run, env, sudo=True) == (True, ["container:yeto-sampler-f09-0"])
     assert _probe(run, env) == (True, ["container:yeto-sampler-f09-0"])  # sudo -n works: tried anyway
     denied = {**env, "FAKE_SUDO_DENY": "1"}
-    # needed and not usable: no engine is confirmed free of rootful containers
-    assert _probe(run, denied, sudo=True) == (True, ["unconfirmed:sudo-docker", "unconfirmed:sudo-podman"])
+    # needed and not usable: podman's rootful containers are not confirmed (docker's one daemon is)
+    assert _probe(run, denied, sudo=True) == (True, ["unconfirmed:sudo-podman"])
     probe = node_lease.ssh_probe(lambda node, script: __import__("subprocess").run(
         ["bash", "-c", script], capture_output=True, text=True, env=denied), sudo=True)
     assert "not confirmed free" in probe("node-a", f"{run}/pool@id")
@@ -861,7 +871,7 @@ def test_the_probe_finds_a_rootful_container_through_sudo(tmp_path, monkeypatch)
 def test_a_failed_engine_ps_refuses_the_takeover(tmp_path, monkeypatch):
     env = _node_bin(tmp_path, sudo=False)
     run = _started_container(tmp_path, monkeypatch, env)
-    failing = {**env, "FAKE_ENGINE_FAIL": "podman"}
+    failing = {**env, "FAKE_FAIL": "podman:denied"}
     assert _probe(run, failing) == (True, ["unconfirmed:podman"])
     import subprocess
 
@@ -1590,3 +1600,131 @@ def test_the_renewal_cadence_follows_the_monotonic_clock():
     assert mine.renew_due() == [] and renewed == [mono.t]  # due by the monotonic clock
     wall.t += 7200  # a step forward: nothing is due yet
     assert mine.renew_due() == [] and len(renewed) == 1
+
+
+# -- review 3: H-B the engines' views, L-a a partial ps failure ---------------------------
+
+def _docker_row(tmp_path, root, rows):
+    (tmp_path / f"docker{'-root' if root else ''}.json").write_text(json.dumps(rows))
+
+
+def test_docker_reachable_only_through_sudo_and_idle_is_free(tmp_path):
+    env = {**_node_bin(tmp_path), "FAKE_FAIL": "docker:denied"}
+    assert _probe("run-a", env) == (True, [])  # one daemon: the sudo view listed it
+    _docker_row(tmp_path, True, [{"name": "yeto-run-a-isl-i0-n0", "labels": {}}])
+    assert _probe("run-a", env) == (True, ["container:yeto-run-a-isl-i0-n0"])
+
+
+def test_docker_denied_as_the_user_and_through_sudo_is_unconfirmed(tmp_path):
+    env = {**_node_bin(tmp_path, sudo=False), "FAKE_FAIL": "docker:denied"}  # sudo -n refused
+    assert _probe("run-a", env) == (True, ["unconfirmed:docker"])
+    env = {**_node_bin(tmp_path), "FAKE_FAIL": "docker:denied,docker-root:denied"}
+    assert _probe("run-a", env) == (True, ["unconfirmed:docker"])
+    probe = node_lease.ssh_probe(lambda node, script: __import__("subprocess").run(
+        ["bash", "-c", script], capture_output=True, text=True, env=env))
+    assert "not confirmed free of run run-a (unconfirmed:docker)" in probe("node-a", "run-a/pool@id")
+
+
+def test_a_docker_daemon_that_is_not_running_lists_no_containers(tmp_path):
+    env = {**_node_bin(tmp_path, sudo=False), "FAKE_FAIL": "docker:down"}
+    assert _probe("run-a", env) == (True, [])
+    mixed = {**_node_bin(tmp_path, sudo=False), "FAKE_FAIL": "docker:mixed"}  # a socket refused: not "down"
+    assert _probe("run-a", mixed) == (True, ["unconfirmed:docker"])
+    env = {**_node_bin(tmp_path), "FAKE_FAIL": "docker:down,docker-root:down"}
+    assert _probe("run-a", env, sudo=True) == (True, [])
+
+
+def test_podman_needs_the_users_view_and_with_sudo_the_rootful_one(tmp_path):
+    env = {**_node_bin(tmp_path), "FAKE_FAIL": "podman:denied"}
+    assert _probe("run-a", env) == (True, ["unconfirmed:podman"])  # the rootful view does not stand in
+    env = {**_node_bin(tmp_path), "FAKE_FAIL": "podman-root:denied"}
+    assert _probe("run-a", env) == (True, [])  # no container.sudo: the rootful view is extra
+    assert _probe("run-a", env, sudo=True) == (True, ["unconfirmed:sudo-podman"])
+
+
+def test_a_ps_that_fails_only_without_a_filter_is_unconfirmed(tmp_path, monkeypatch):
+    """L-a: the label listings answer, the full listing (unlabelled containers) does not."""
+    env = _node_bin(tmp_path, sudo=False)
+    run = _started_container(tmp_path, monkeypatch, env)
+    failing = {**env, "FAKE_FAIL": "podman:unfiltered"}
+    assert _probe(run, failing) == (True, ["unconfirmed:podman"])
+    assert _probe("run-z", failing) == (True, ["unconfirmed:podman"])
+    own = {**env, "FAKE_FAIL": "podman:runfilter"}  # only the run's own label listing fails
+    assert _probe("run-z", own) == (True, ["unconfirmed:podman"])
+
+
+# -- review 3: M-C the placement's answer is checked -----------------------------------
+
+def test_a_placement_returning_too_few_nodes_is_a_bug():
+    objects, clock = _objects(), Clock()
+    mine = _leases("run-a", objects, clock)
+    with pytest.raises(ValueError, match="returned \\['b300-0'\\] for 2"):
+        node_lease.pick_nodes(NAMES, 2, mine, place=lambda c, need, excluded=(): c[:1], wait_s=0,
+                              sleep=pytest.fail, log=lambda line: None)
+    assert mine.held() == []
+
+
+def test_a_placement_returning_an_excluded_node_is_a_bug():
+    objects, clock = _objects(), Clock()
+    mine = _leases("run-a", objects, clock)
+    other = _leases("run-b", objects, clock)
+    assert other.acquire("b300-1").ok
+    with pytest.raises(ValueError, match="b300-0.*not offered"):
+        node_lease.pick_nodes(NAMES, 2, mine, excluded=["b300-0"], wait_s=0, sleep=pytest.fail,
+                              place=lambda c, need, excluded=(): ["b300-0", c[0]], log=lambda line: None)
+    with pytest.raises(ValueError, match="b300-1.*not offered"):  # held by another run: not offered either
+        node_lease.pick_nodes(NAMES, 1, mine, wait_s=0, sleep=pytest.fail,
+                              place=lambda c, need, excluded=(): ["b300-1"], log=lambda line: None)
+    assert mine.held() == []
+
+
+def test_a_placement_that_keeps_choosing_refused_nodes_ends_in_the_wait():
+    """M-C: the inner loop is bounded; the outer wait (its limit, its STOP) decides."""
+    objects, clock = _objects(), Clock()
+    mine = _leases("run-a", objects, clock, probe=lambda n, p: "busy")
+    calls = []
+
+    def place(candidates, need, excluded=()):
+        calls.append(list(candidates))
+        if len(candidates) < need:
+            raise PlacementError("no fit")
+        return list(candidates)[:need]
+
+    for name in NAMES:  # every node's last lease is another run's: each claim is probed and refused
+        other = _leases("run-b", objects, clock)
+        other.acquire(name)
+        other.release(name)
+    with pytest.raises(NodeLeased, match="after 0s"):
+        node_lease.pick_nodes(NAMES, 1, mine, place=place, wait_s=0, sleep=pytest.fail, log=lambda line: None)
+    assert len(calls) <= len(NAMES) + 1
+
+
+# -- review 3: L-b one island's finish leaves the others' leases ---------------------------
+
+def test_a_finished_scheduler_island_leaves_a_resident_islands_leases(tmp_path):
+    from yeto.launch.ssh_trainer_island import SshTrainerIslands
+
+    objects, clock = _objects(), Clock()
+    mine = _leases("run1/trainer", objects, clock)
+    from dataclasses import replace
+
+    nodes = spec().nodes
+    sched = SshTrainerIslands(replace(spec(leases=mine), nodes=nodes[:1]), name="isl-s",
+                              jobs_path=tmp_path / "s.json", ops=FakeCluster(NAMES), scheduled=True, tape=False)
+    resident = SshTrainerIslands(replace(spec(leases=mine), nodes=nodes[1:]), name="isl-r",
+                                 jobs_path=tmp_path / "r.json", ops=FakeCluster(NAMES), scheduled=False, tape=False)
+    sched.launch(0, None)  # not confirmed stopped: its node is kept
+    resident.launch(0, None)
+    stopped = []
+    mine.stop_keeper = lambda: stopped.append(True)
+    sched.finish_leases()
+    assert json.loads(objects.read(f"nodes/{nodes[0].name}/lease/00000001.lease"))["kept"] is True
+    assert mine.held() == [n.name for n in nodes[1:]] and stopped == []  # the resident's renew on
+    for n in nodes[1:]:
+        assert not json.loads(objects.read(f"nodes/{n.name}/lease/00000001.lease")).get("kept")
+    clock.t += mine.renew_every_s
+    assert mine.renew_due() == []
+    assert json.loads(objects.read(f"nodes/{nodes[0].name}/lease/00000001.lease"))["kept"] is True  # not renewed
+    resident.release_leases()
+    sched.finish_leases()
+    assert stopped == [True]  # the last holder of the process: the keeper stops

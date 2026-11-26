@@ -212,10 +212,15 @@ nodes:
 - A released lease does not prove the node is empty: the next run of another holder
   runs the same check before it claims the node.
 - Sampler containers of a pool whose inventory has `lease_store` carry the label
-  `yeto.run=<run>`; the check finds them by it (`ps --filter label=yeto.run=<run>`, with
-  `sudo -n` too for a pool with `container.sudo`). A `yeto-sampler-*` container with
-  no label (started before labels, or by a pool without `lease_store`) may be the old
-  run's, and a failed `ps` proves nothing: both refuse the takeover.
+  `yeto.run=<run>`; the check finds them by it (`ps --filter label=yeto.run=<run>`). A
+  `yeto-sampler-*` container with no label (started before labels, or by a pool
+  without `lease_store`) may be the old run's, and refuses the takeover.
+- Each engine is listed as the SSH user and, where `sudo -n` works, through sudo.
+  docker has one daemon, so either listing is enough; if neither works the takeover is
+  refused. A docker daemon that is not running ("Cannot connect to the Docker daemon")
+  counts as no containers; "permission denied" does not. podman's rootless and rootful
+  containers are separate: the user's listing must work, and for a pool with
+  `container.sudo` the `sudo -n` listing must work too.
 - Holders are named `<run>/trainer@<identity>` and `<run>/pool@<identity>`. The
   identity is a nonce made at the run's first launch and kept in the run directory
   (`node-leases.json`; a pool on the store control plane keeps it in the run store).
