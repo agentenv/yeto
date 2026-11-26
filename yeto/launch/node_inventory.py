@@ -14,7 +14,10 @@ family is refused (``yeto.launch.engine_images``). A ``runtime: docker`` node
 of a file without ``images:`` may have no image: an ``ssh:`` trainer island runs
 the run's ``--rl-image`` (an inventory image must then name the same one), an SSH
 sampler pool its ``container.image``. The trainer preflight also compares ``uname -m`` with
-``cpu_arch``.
+``cpu_arch``. The top-level ``site_images:`` names the site image catalog
+(:mod:`yeto.launch.site_images`, default ``~/.yeto/site-images.yaml``; a relative path
+is taken from the inventory's directory): an island or pool of these nodes that names
+no image takes the catalog's verified image for its model there.
 
 Example::
 
@@ -481,14 +484,17 @@ def parse_inventory(document: Any) -> NodeList:
     if isinstance(document, list):
         entries = document
     elif isinstance(document, dict):
-        unknown = sorted(set(document) - {"nodes", "images", "node_health", "lease_store"})
+        unknown = sorted(set(document) - {"nodes", "images", "node_health", "lease_store", "site_images"})
         if unknown:
             raise InventoryError(f"unknown top-level inventory field(s) {unknown} "
-                                 f"(known: ['images', 'lease_store', 'node_health', 'nodes'])")
+                                 f"(known: ['images', 'lease_store', 'node_health', 'nodes', 'site_images'])")
         entries = document.get("nodes")
         images = parse_images(document.get("images"))
         health = parse_node_health(document.get("node_health"), "inventory")
         lease_store = parse_lease_store(document.get("lease_store"))
+        catalog = document.get("site_images")  # the site image catalog's path (yeto.launch.site_images)
+        if catalog is not None and (not isinstance(catalog, str) or not catalog.strip()):
+            raise InventoryError(f"inventory site_images: must be a file path, not {catalog!r}")
     else:
         raise InventoryError(f"the inventory must be a mapping with a nodes list, got "
                              f"{type(document).__name__}")

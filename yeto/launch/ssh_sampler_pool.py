@@ -233,6 +233,9 @@ class SshPoolConf:
     node_health: str | None = None
     # the inventory's top-level lease_store (yeto.launch.node_lease); None: nodes not leased
     lease_store: str | None = None
+    # the site image catalog a ``container.image: auto`` node without an inventory image reads
+    # (the inventory's top-level site_images:, else ~/.yeto/site-images.yaml; yeto.launch.site_images)
+    site_images: str | None = None
 
 
 def _strs(value: Any, key: str) -> tuple[str, ...]:
@@ -258,6 +261,9 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
             raise ValueError("ssh provider: inventory (an SSH node inventory file) is required")
         inventory = load_profiles(os.path.expanduser(str(section["inventory"])))
     lease_store = lease_store_of(inventory)
+    from .site_images import inventory_catalog_path  # noqa: PLC0415
+
+    site_catalog = str(inventory_catalog_path(section.get("inventory")))
     inventory = [profile_of(n) for n in inventory]
     by_name = nodes_by_name(list(inventory))
     names = section.get("nodes")
@@ -354,7 +360,8 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
                        min_cards=int(pre["min_cards"]) if pre.get("min_cards") is not None else None,
                        grace_s=int(section.get("grace_s", 120)),
                        price_usd_h=float(price) if price is not None else None, lost_node_hold_s=float(hold),
-                       node_runtime=node_runtime, node_health=health, lease_store=lease_store)
+                       node_runtime=node_runtime, node_health=health, lease_store=lease_store,
+                       site_images=site_catalog)
 
 
 # -- node shell -----------------------------------------------------------------
@@ -1791,16 +1798,29 @@ def spec_of(cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 def node_image(conf: SshPoolConf, node: Node, spec: Mapping[str, Any]) -> str:
     """The image ``node`` runs (container runtime): ``container.image`` unless it is
-    ``auto``; then the node's inventory image, else the engine image catalog's choice
-    for what ``spec`` asks (raises ``ImageIncompatible`` when none serves it)."""
+    ``auto``; then the node's inventory image, else the site image catalog's verified
+    image for the spec's model on this node, else the engine image catalog's choice for
+    what ``spec`` asks (raises ``ImageIncompatible`` when none serves it)."""
+    return str(node_image_choice(conf, node, spec).ref)
+
+
+def node_image_choice(conf: SshPoolConf, node: Node, spec: Mapping[str, Any]):  # -> site_images.Choice
+    """:func:`node_image` with where it came from (``site_images.Choice``): the pool's or
+    the inventory's image (explicit), the site image catalog, or the engine image catalog
+    (the built-in default). A broken site catalog raises ``SiteImagesError``."""
+    from . import site_images  # noqa: PLC0415
+
     assert conf.container is not None
     if conf.container.image and conf.container.image != AUTO_IMAGE:
-        return conf.container.image
+        return site_images.Choice(conf.container.image, site_images.SOURCE_EXPLICIT)
     if node.image:
-        return node.image
+        return site_images.Choice(node.image, site_images.SOURCE_EXPLICIT)
     needs = engine_images.spec_needs(spec)
-    return engine_images.resolve(profile_of(node), needs.pop("model"), needs.pop("engine_pref"),
-                                 **needs).image.pull_ref  # type: ignore[union-attr]
+    model, pref = needs.pop("model"), needs.pop("engine_pref")
+    return site_images.select(
+        None, model, "sampler", profile_of(node), engine=pref, path=conf.site_images,
+        default=lambda: engine_images.resolve(profile_of(node), model, pref,
+                                              **needs).image.pull_ref)  # type: ignore[union-attr]
 
 
 def image_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
@@ -1812,11 +1832,15 @@ def image_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
     needs = engine_images.spec_needs(spec)
     model, pref = needs.pop("model"), needs.pop("engine_pref")
     out = []
+    from .site_images import SOURCE_EXPLICIT, SiteImagesError  # noqa: PLC0415
+
     for node in conf.nodes:
         try:
-            image = node_image(conf, node, spec)
-            engine_images.resolve(profile_of(node), model, pref, image=image, **needs)
-        except engine_images.ImageIncompatible as error:
+            choice = node_image_choice(conf, node, spec)
+            if choice.source != SOURCE_EXPLICIT:  # the dry-run names an image the pool chose itself
+                print(f"ssh provider: node {node.name}: {choice.line('sampler')}")
+            engine_images.resolve(profile_of(node), model, pref, image=str(choice.ref), **needs)
+        except (engine_images.ImageIncompatible, SiteImagesError) as error:
             out.append(f"ssh provider: node {node.name}: {error}")
     return out
 

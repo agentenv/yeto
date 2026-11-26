@@ -19,14 +19,56 @@ def resolve_default_rl_image(args) -> None:
     except backends.UnknownBackend as exc:
         raise ValueError(str(exc)) from None
     if getattr(args, "rl_image", None) is None:
-        flags = _rl_backend_module(args, "launch_flags")
-        if getattr(flags, "DEFAULT_RL_IMAGE", None):  # rl-verl-backend: Modal-built engine image
-            args.rl_image = flags.DEFAULT_RL_IMAGE
-            return
-        from ..rl import default_rl_image
+        nodes = _site_catalog_trainer_nodes(args)
+        if nodes is not None:  # an ssh: trainer island whose inventory names no image
+            import sys
 
-        args.rl_image = default_rl_image(recipe=getattr(args, "rl_model_recipe", None),
-                                         tuning=getattr(args, "tuning", None))
+            from . import site_images
+
+            try:
+                choice = site_images.select(
+                    None, getattr(args, "model", None), "trainer", nodes,
+                    engine=getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND,
+                    path=site_images.inventory_catalog_path(getattr(args, "rl_node_inventory", None)),
+                    default=lambda: _builtin_rl_image(args))
+            except site_images.SiteImagesError as exc:
+                raise ValueError(str(exc)) from None
+            args.rl_image = f"docker:{choice.ref}" if choice.source == site_images.SOURCE_SITE else choice.ref
+            print(f"[launcher] {choice.line('ssh trainer')}", file=sys.stderr, flush=True)
+            return
+        args.rl_image = _builtin_rl_image(args)
+
+
+def _builtin_rl_image(args) -> str:
+    """The engine's pinned default ``--rl-image``."""
+    flags = _rl_backend_module(args, "launch_flags")
+    if getattr(flags, "DEFAULT_RL_IMAGE", None):  # rl-verl-backend: Modal-built engine image
+        return flags.DEFAULT_RL_IMAGE
+    from ..rl import default_rl_image
+
+    return default_rl_image(recipe=getattr(args, "rl_model_recipe", None), tuning=getattr(args, "tuning", None))
+
+
+def _site_catalog_trainer_nodes(args) -> list | None:
+    """The trainer nodes of an ``ssh:`` island of ``--gpu`` whose ``--rl-node-inventory``
+    names no image for them (the site image catalog may then give one,
+    :mod:`yeto.launch.site_images`); None for any other launch (no ssh: island, no
+    inventory, an inventory image: the configuration names its image)."""
+    path = getattr(args, "rl_node_inventory", None)
+    if not path or not getattr(args, "gpu", None):
+        return None
+    from ..gpu_spec import parse_gpu_spec
+    from .node_inventory import InventoryError, island_nodes, load_inventory
+
+    try:
+        if not any(spec.cloud == "ssh" for spec in parse_gpu_spec(args.gpu)):
+            return None
+        nodes = island_nodes(load_inventory(path), "trainer")
+    except (ValueError, InventoryError):  # the launch's own checks name a bad --gpu or inventory
+        return None
+    if not nodes or any(n.image for n in nodes):
+        return None
+    return nodes
 
 
 def _rl_callable(value: str | None, flag: str, *, required: bool) -> None:
