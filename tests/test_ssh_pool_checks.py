@@ -587,3 +587,20 @@ def test_a_fleet_counts_each_island_once_from_the_trainer_gpu_and_the_islands():
         ["ssh:1x8xb300"]
     assert checks.island_entries("ssh:1x8xb300,ssh:1x8xb300", []) == ["ssh:1x8xb300"] * 2
     assert checks.island_entries(None, ["ssh:2x8xb300", "ssh:1x8xb300"]) == ["ssh:2x8xb300", "ssh:1x8xb300"]
+
+
+def test_one_node_more_than_the_two_pools_can_take_is_refused(tmp_path):
+    inv = _shared_inventory(tmp_path, 3)
+    a = _pool(tmp_path, "a", inventory=inv, slots=[0, 1, 2], target=2)
+    b = _pool(tmp_path, "b", inventory=inv, slots=[0, 1, 2], target=2)
+    assert _levels(checks.findings([a, b])) == [checks.ERROR]
+    b = _pool(tmp_path, "b", inventory=inv, slots=[0, 1, 2], target=1)
+    assert _levels(checks.findings([a, b])) == [checks.NOTE]  # 2 + 1 fit the 3 nodes
+
+
+def test_a_node_one_pool_names_and_the_other_may_take_is_counted(tmp_path):
+    inv = _shared_inventory(tmp_path, 3)
+    a = _pool(tmp_path, "a", ["own-0"], inventory=inv)
+    b = _pool(tmp_path, "b", inventory=inv, slots=[0, 1, 2])
+    (found,) = checks.findings([a, b])
+    assert found.level == checks.NOTE and found.text.startswith("pools a and b may both take node(s) own-0")
