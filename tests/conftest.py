@@ -6,6 +6,13 @@ import yeto_home_guard as _home_guard
 _home_guard.isolate()
 _home_guard.install_guard()
 
+# Also before any yeto or sky import: no test reaches or starts a sky API server of this
+# machine, in this process or a child (tests/sky_server_guard.py).
+import sky_server_guard as _sky_server_guard
+
+_sky_server_guard.isolate()
+_sky_server_guard.install()
+
 RAY_LOCAL_HINT = (
     "this test starts Ray on this machine (ray.init). "
     "Add the ray_local marker to the test, and run it only with --run-ray-local."
@@ -39,6 +46,11 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "real_nebius_sg_cleanup: keep cli._nebius_sg_cleanup unpatched (the test fakes the cloud itself)",
+    )
+    config.addinivalue_line(
+        "markers",
+        f"{_sky_server_guard.MARKER}: a child process of the test may get its own SKYPILOT_API_SERVER_ENDPOINT "
+        "(tests/sky_server_guard.py; local sky API server starts stay refused)",
     )
     config.addinivalue_line(
         "markers",
@@ -257,6 +269,23 @@ def _no_sky_server_version_check(monkeypatch):
     /api/health); unit tests never depend on a server of this host. Tests of the
     check clear the variable and pass a fake server_common."""
     monkeypatch.setenv("YETO_SKY_SERVER_CHECK", "off")
+
+
+@_pytest.fixture(autouse=True)
+def _no_sky_api_server(request, monkeypatch):
+    """A sky client that finds no server at a local endpoint starts one, which outlives
+    the session on this machine's sky port. Every test starts with the refusing endpoint
+    and sky's own local-start switch off (also after a test that wrote os.environ
+    directly), sky's auto-start raising in this process, and every child process given
+    both variables (tests/sky_server_guard.py). Tests of code that talks to sky use a
+    fake sky or server_common; a test whose child must get another endpoint carries
+    @pytest.mark.allow_sky_endpoint."""
+    for name, value in _sky_server_guard.ENV.items():
+        monkeypatch.setenv(name, value)
+    _sky_server_guard.install()
+    _sky_server_guard.allow_endpoint(request.node.get_closest_marker(_sky_server_guard.MARKER) is not None)
+    yield
+    _sky_server_guard.allow_endpoint(False)
 
 
 @_pytest.fixture(autouse=True)
