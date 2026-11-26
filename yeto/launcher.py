@@ -57,6 +57,7 @@ from .launch.sky_ops import (
     SkySDKOps, _tail, learner_cluster_names, maybe_install_nebius_reclaim_hook, sky_cluster_name,
     submit_island_launch,
 )
+from .launch.sky_identity import launch_identity
 from .launch.trainer_provision import resident_ssh_names as _resident_ssh_names
 from .launch.trainer_provision import ssh_trainer_spec as _ssh_trainer_spec
 from .launch.tapes import (
@@ -945,7 +946,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     island_states.guard_order(syncer_cluster)  # the lock still ours (raises: nothing ordered)
                 print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
                 cost_ledger.created("sky_cluster", syncer_cluster, syncer_cluster, **syncer_vm)
-                rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
+                with launch_identity(syncer_task, syncer_cluster):
+                    rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
                 syncer_job, syncer_handle = sky.stream_and_get(rid)
                 head_ip = str(syncer_handle.head_ip)
                 if island_states is not None:

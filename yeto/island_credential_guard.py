@@ -7,8 +7,10 @@ them). This module checks that promise inside the island process at start-up:
 * a cloud credential in the process environment (``MODAL_TOKEN_ID`` and the
   other names in :data:`CLOUD_CREDENTIAL_ENV_NAMES`) is an error;
 * a cloud credential file under ``$HOME`` (``~/.modal.toml``, ``~/.aws/...``)
-  is a warning, because some images may ship such a file that the island
-  never reads.
+  is a warning that names the risk (:data:`FILES_RISK`): the island never reads
+  it, but code on the island could. sky puts it there when the launch uploads
+  the launcher's credential files (``yeto.launch.sky_identity``), or the image
+  ships it.
 
 ``YETO_ALLOW_ISLAND_CLOUD_CREDENTIALS=1`` turns the error into a warning (for
 a developer running an island by hand). Messages name the variable or file,
@@ -43,6 +45,19 @@ STORE_CREDENTIALS_AWS = "aws-env"
 AWS_STORE_PAIR = frozenset({"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"})
 
 
+# What a credential file on an island means. sky copies the launching machine's cloud
+# credential files onto every node it provisions unless the cloud's remote_identity is
+# NO_UPLOAD; every yeto sky launch sets that (yeto.launch.sky_identity), except for the
+# node's own non-AWS cloud and where the launch printed why it kept the upload (an AWS S3
+# bucket mounted on a non-AWS node, or YETO_SKY_UPLOAD_CLOUD_CREDENTIALS=1). The island never reads the file; it is left in
+# place (a sky Storage mount may read it) and reported.
+FILES_RISK = ("Anyone who can run code on this island can use them (every profile in ~/.aws/credentials). "
+              "Usually sky copied them from the launching machine (sky remote_identity LOCAL_CREDENTIALS); "
+              "yeto launches set NO_UPLOAD for every cloud but the node's own non-AWS cloud (sky's autodown "
+              "there needs it) and print a warning where they keep the upload; otherwise the image ships "
+              "them. Rotate the keys if the island ran untrusted code")
+
+
 class IslandCloudCredentialError(RuntimeError):
     """A learner island process holds a cloud credential in its environment."""
 
@@ -70,7 +85,7 @@ def check_island_credentials(environ: Mapping[str, str] | None = None,
     names, files = find_cloud_credentials(environ, home)
     if files:
         print(f"[yeto-island] WARNING: cloud credential files present on this island: "
-              f"{', '.join(files)} (the island must not use them)", file=stream, flush=True)
+              f"{', '.join(files)} (the island must not use them). {FILES_RISK}", file=stream, flush=True)
     if not names:
         return
     message = (f"cloud credentials in the learner island environment: {', '.join(names)}; "

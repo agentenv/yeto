@@ -1732,7 +1732,12 @@ def _sky_launch_head(task, cluster: str):
     """Provision the head cluster; returns the launch handle."""
     import sky
 
-    _job_id, handle = sky.stream_and_get(sky.launch(task, cluster_name=cluster))
+    from .launch.sky_identity import launch_identity
+
+    # the head's own cloud credentials are explicit file mounts (head_cloud_credentials)
+    with launch_identity(task, cluster):
+        request = sky.launch(task, cluster_name=cluster)
+    _job_id, handle = sky.stream_and_get(request)
     return handle
 
 
