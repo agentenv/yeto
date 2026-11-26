@@ -23,7 +23,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 KIT = ROOT / "examples" / "own-cluster"
 TEMPLATES = ("run.own-trainer-sky-sampler.json", "run.own-trainer-modal-sampler.json", "run.own-sampler-pool.json",
-             "run.fleet-own-and-cloud.json")
+             "run.fleet-own-and-cloud.json", "run.own-trainer-own-sampler.json")
 ENDPOINT = "https://acct.r2.example"
 SAMPLER_IMAGE = "ghcr.io/example/vllm-qwen3@sha256:" + "0" * 64
 
@@ -280,6 +280,37 @@ def test_an_own_sampler_pool_bills_nothing_and_runs_on_the_node_runtime(kit, cap
     assert "estimated spend: $0.00 per node hour" in out
 
 
+def test_an_own_trainer_island_with_an_own_sampler_pool_spends_nothing(kit, capsys):
+    """Every node is the site's own: a 2-node ssh trainer island and a 1-node ssh pool on
+    one B300 inventory; the spend is $0 and budget.wall_h (the run.wall_clock breaker,
+    restarted by every run up) is written out, not left to the 3 h default."""
+    from yeto.launch import ssh_sampler_pool
+    from yeto.launch.node_inventory import island_nodes, load_inventory
+
+    cfg = _cfg(kit, "run.own-trainer-own-sampler.json")
+    argv = cfg["trainer"]["argv"]
+    assert cfg["trainer"]["usd_per_h"] == 0 and argv[argv.index("--gpu") + 1] == "ssh:2x8xb300"
+    assert cfg["budget"]["wall_h"] == 6
+    (pool,) = cfg["samplers"]
+    assert pool["provider"]["kind"] == "ssh" and pool["provider"]["nodes"] == ["own-b300-2"] and pool["target"] == 1
+    assert pool["provider"]["inventory"] == argv[argv.index("--rl-node-inventory") + 1]
+    assert ssh_sampler_pool.parse_config(pool).node_runtime is True
+    nodes = load_inventory(KIT / "inventory.own-b300-nodes.yaml")
+    assert [n.name for n in island_nodes(nodes, "trainer")] == ["own-b300-0", "own-b300-1"]
+    assert [n.name for n in nodes if "sampler" in n.roles] == ["own-b300-2"]
+    rc, out = _dry_run(kit, "run.own-trainer-own-sampler.json", capsys)
+    assert rc == 0, out.why
+    assert ("dry run: spend estimate $0.00/h = pools $0.00/h (own-b300 (ssh) 1 x $0) + trainer $0/h "
+            "(own nodes: ssh:2x8xb300); over the 6 h wall clock $0.00 (budget.usd $5)") in out
+    assert "estimated spend: $0.00 per node hour" in out
+    # the trainer's two nodes and the pool's node each reach the store and the registry
+    assert _reach_calls() == {node: REACHED for node in ("own-b300-0", "own-b300-1", "own-b300-2")}
+    assert f"dry run: own nodes own-b300-0, own-b300-1: checking over ssh that they reach store {ENDPOINT}" in out
+    assert f"dry run: own nodes own-b300-2: checking over ssh that they reach store {ENDPOINT}" in out
+    launches = [c for c in kit.commands if "launch" in c]
+    assert launches and all(c[c.index("--gpu") + 1] == "ssh:2x8xb300" for c in launches)
+
+
 def test_a_fleet_of_an_own_and_a_cloud_island_counts_the_own_trainer_at_zero(kit, capsys):
     rc, out = _dry_run(kit, "run.fleet-own-and-cloud.json", capsys)
     assert rc == 0, out.why
@@ -340,6 +371,8 @@ def test_the_fleet_shape_check_reads_each_island_and_only_a_shape_bound_full_lay
     ("run.own-trainer-sky-sampler.json", "own-b300-0"),
     ("run.fleet-own-and-cloud.json", "own-b300-0"),
     ("run.own-sampler-pool.json", "own-smp-2"),
+    ("run.own-trainer-own-sampler.json", "own-b300-1"),
+    ("run.own-trainer-own-sampler.json", "own-b300-2"),
 ])
 def test_a_node_that_cannot_reach_the_store_refuses_the_run_up_and_names_both(kit, name, node, capsys):
     FakeSsh.unreachable = {(node, ENDPOINT)}
@@ -402,7 +435,7 @@ def test_the_templates_run_on_the_shipped_inventory_and_the_docs_name_them():
     assert [n.name for n in island_nodes(nodes, "trainer")] == TRAINER_NODES
     assert [n.name for n in nodes if "sampler" in n.roles] == SAMPLER_NODES
     docs = (ROOT / "docs" / "OWN_CLUSTERS.md").read_text()
-    for name in (*TEMPLATES, "inventory.own-nodes.yaml"):
+    for name in (*TEMPLATES, "inventory.own-nodes.yaml", "inventory.own-b300-nodes.yaml"):
         assert name in docs, name
     for heading in ("## Trainer with cloud samplers", "## Own sampler pools"):
         assert heading in docs

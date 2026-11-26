@@ -1,0 +1,49 @@
+# Three of your own 8 x B300 nodes as one SSH node inventory
+# (yeto/launch/node_inventory.py) for run.own-trainer-own-sampler.json: two
+# trainer nodes (roles: [trainer]) for a 2-node trainer island and one sampler
+# node (roles: [sampler]) for the own sampler pool. docs/OWN_CLUSTERS.md.
+#
+# Replace the documentation addresses (192.0.2.x management, 198.51.100.x
+# cluster network), the SSH user, the interface, the HCA list and the paths
+# with your site's values. Own nodes bill nothing: the run spends nothing.
+#
+# Check the file without touching a node:
+#   python -c "from yeto.launch.node_inventory import load_inventory; \
+#     print(len(load_inventory('inventory.own-b300-nodes.yaml')))"
+
+nodes:
+  - &trainer
+    name: own-b300-0
+    host: ops@192.0.2.30              # SSH target from the control host
+    address: 198.51.100.30            # this node's IP on the cluster network
+    interface: bond0                  # NIC of the cluster IP (Ray, NCCL bootstrap)
+    device_family: cuda
+    cpu_arch: x86_64
+    card: B300
+    cards_per_node: 8
+    hbm_gib: 288
+    host_memory_gib: 2048
+    fabric: ib                        # ib or roce
+    runtime: docker
+    docker_args: [--gpus, all, --device, /dev/infiniband, --ulimit, "memlock=-1:-1",
+                  --ulimit, stack=67108864, --cap-add, IPC_LOCK]
+    scratch: /mnt/nvme/yeto           # run data under <scratch>/<run>
+    scratch_min_free_gib: 500
+    roles: [trainer]
+    env:
+      NCCL_IB_HCA: "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+  - {<<: *trainer, name: own-b300-1, host: ops@192.0.2.31, address: 198.51.100.31}
+  - name: own-b300-2
+    host: ops@192.0.2.32
+    address: 198.51.100.32
+    device_family: cuda
+    cpu_arch: x86_64
+    card: B300
+    cards_per_node: 8
+    hbm_gib: 288
+    host_memory_gib: 2048
+    fabric: tcp                       # a sampler node needs no RDMA
+    runtime: docker
+    mounts:
+      /data/models: /data/models      # Qwen3-4B weights and the prompts, put there once
+    roles: [sampler]

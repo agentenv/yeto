@@ -1,0 +1,104 @@
+{
+  "comment": "Own cluster as both the trainer and the sampler pool: async GRPO of Qwen3-4B (full parameters) on a 2-node trainer island of own 8 x B300 nodes (SSH + Docker, inventory.own-b300-nodes.yaml, roles: [trainer]) fed by an own SSH sampler pool of one 8 x B300 node (roles: [sampler]; Qwen3-4B vLLM, TP8) that starts its sampler through the unified node runtime. Every node is your own: the run spends nothing (trainer.usd_per_h 0, the ssh pool bills nothing; budget.usd is only a guard cap that a priced part would trip); budget.wall_h is the run.wall_clock breaker, which every run up restarts. docs/OWN_CLUSTERS.md. yeto run up --config THIS.json --dry-run (add --check-nodes to check over SSH that the three nodes reach the store and the registry), then without --dry-run (it runs that check before it orders anything).",
+  "run": "<run>",
+  "store": "s3://<bucket>/runs/<run>",
+  "samplers": [
+    {
+      "name": "own-b300",
+      "provider": {
+        "kind": "ssh",
+        "inventory": "<inventory.own-b300-nodes.yaml>",
+        "nodes": [
+          "own-b300-2"
+        ],
+        "workdir": "/srv/yeto/<run>",
+        "runtime": "container",
+        "container": {
+          "engine": "docker",
+          "image": "<sampler-image>",
+          "pull": "missing"
+        },
+        "preflight": {
+          "min_free_gib": 50,
+          "require_idle": true
+        }
+      },
+      "target": 1,
+      "slots": [
+        0
+      ],
+      "shard_base": "<run>",
+      "shard_limit": 8,
+      "spec": "<sampler-spec.qwen3-4b-vllm-own-b300.json>",
+      "run_prefix": "<run>",
+      "r2_env_file": "<store.env>",
+      "sampler": {
+        "dispense": {
+          "backend": "store",
+          "namespace": "task-dispense"
+        }
+      }
+    }
+  ],
+  "trainer": {
+    "argv": [
+      "--training-mode",
+      "rl",
+      "--gpu",
+      "ssh:2x8xb300",
+      "--rl-node-inventory",
+      "<inventory.own-b300-nodes.yaml>",
+      "--cluster-prefix",
+      "<run>",
+      "--model",
+      "Qwen/Qwen3-4B",
+      "--model-revision",
+      "<model-revision>",
+      "--data",
+      "<prompts.jsonl>",
+      "--reward-function",
+      "yeto.rl.gsm8k_reward:score",
+      "--trust-remote-code",
+      "--tuning",
+      "full",
+      "--rl-sample-role",
+      "trainer",
+      "--rl-single-island-no-sync",
+      "--controller",
+      "local",
+      "--rl-buffer-shards",
+      "<run>-0,<run>-1,<run>-2,<run>-3,<run>-4,<run>-5,<run>-6,<run>-7",
+      "--rl-checkpoint-store",
+      "s3://<bucket>/runs/<run>",
+      "--rl-object-store-endpoint",
+      "<store-endpoint>",
+      "--rl-algorithm-spec",
+      "<algorithm-spec.async-age2-tis.json>",
+      "--rl-max-policy-age",
+      "2",
+      "--rl-release-every",
+      "2",
+      "--rollout-batch-size",
+      "16",
+      "--n-samples-per-prompt",
+      "8",
+      "--rollout-max-response-len",
+      "2048",
+      "--seq-len",
+      "4096",
+      "--inner-lr",
+      "1e-6",
+      "--total-steps",
+      "40"
+    ],
+    "usd_per_h": 0
+  },
+  "first_group": {
+    "timeout_s": 4800,
+    "poll_s": 60
+  },
+  "budget": {
+    "usd": 5,
+    "wall_h": 6
+  }
+}
