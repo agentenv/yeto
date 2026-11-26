@@ -878,7 +878,7 @@ and the syncer use is refused by the syncer launch (exit 10). No host generates 
   config:
 
   ```json
-  "fleet": {"syncer_service": "10.0.0.5", "sky_api_server": "http://10.0.0.6:46580"}
+  "fleet": {"syncer_service": "192.0.2.5", "sky_api_server": "http://192.0.2.6:46580"}
   ```
 
   `fleet.sky_api_server` is `http(s)://HOST[:PORT]`, never a loopback address (that would
