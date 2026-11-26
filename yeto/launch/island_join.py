@@ -86,10 +86,10 @@ def _checker_for(node: Any) -> Any:
                        fabric=fabric if fabric in RDMA_FABRICS else None)
 
 
-def _check_placement(nodes: Sequence[Any], need: int) -> tuple[bool, str, bool]:
+def _check_placement(nodes: Sequence[Any], need: int, inventory: Sequence[Any] | None) -> tuple[bool, str, bool]:
     from .fabric_groups import check_placement  # noqa: PLC0415
 
-    return check_placement(nodes, need)
+    return check_placement(nodes, need, inventory=inventory)
 
 
 def _node_leases(store_uri: str, run_id: str) -> Any:
@@ -142,8 +142,9 @@ def check_health(nodes: Sequence[Any], *, multi: bool, ssh: Any, out: JoinCheck)
             out.notes.append(f"node {node.name}: its health could not be judged ({'; '.join(result.reasons)})")
 
 
-def check_fabric(nodes: Sequence[Any], need: int, out: JoinCheck) -> None:
-    ok, message, hint_only = _check_placement(nodes, need)
+def check_fabric(nodes: Sequence[Any], need: int, out: JoinCheck, *, inventory: Sequence[Any] | None = None) -> None:
+    """``inventory``: the whole inventory (whether it declares fabric groups at all)."""
+    ok, message, hint_only = _check_placement(nodes, need, inventory)
     if not ok and not hint_only:
         out.refusals.append(f"fabric: {message}")
     elif message and (hint_only or not ok):
@@ -172,9 +173,11 @@ def check_leases(nodes: Sequence[Any], *, lease_store: str | None, run_id: str, 
 
 
 def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | None = None,
-          taken: Mapping[str, str] | None = None, ssh: Any = None) -> JoinCheck:
+          taken: Mapping[str, str] | None = None, ssh: Any = None,
+          inventory: Sequence[Any] | None = None) -> JoinCheck:
     """The checks of a new island's trainer ``nodes`` (module doc). ``taken``: node name or SSH
-    target -> the fleet island that trains on it."""
+    target -> the fleet island that trains on it; ``inventory``: the whole inventory (default
+    ``nodes``)."""
     out = JoinCheck()
     if len(nodes) != need:
         out.refusals.append(f"the island needs {need} trainer node(s); its inventory lists {len(nodes)} "
@@ -190,7 +193,7 @@ def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | No
         ssh = SshOps()
     check_health(nodes, multi=need > 1, ssh=ssh, out=out)
     try:
-        check_fabric(nodes, need, out)
+        check_fabric(nodes, need, out, inventory=inventory)
     except Exception as error:  # noqa: BLE001 - the check that cannot run refuses
         out.refusals.append(f"fabric: the placement check could not run ({type(error).__name__}: {error})"[:300])
     check_leases(nodes, lease_store=lease_store, run_id=run_id, out=out)
@@ -230,8 +233,10 @@ def check_member(member: Mapping[str, Any], doc: Mapping[str, Any], *, fleet_arg
     from .node_inventory import lease_store_of, load_inventory  # noqa: PLC0415
 
     nodes, need, path = island_nodes(argv, str(member["gpu"]))
-    result = check(nodes, need=need, run_id=run_id, lease_store=lease_store_of(load_inventory(path)),
-                   taken=taken_nodes(doc, other_than=str(member["name"]), fleet_argv=fleet_argv), ssh=ssh)
+    inventory = load_inventory(path)
+    result = check(nodes, need=need, run_id=run_id, lease_store=lease_store_of(inventory),
+                   taken=taken_nodes(doc, other_than=str(member["name"]), fleet_argv=fleet_argv), ssh=ssh,
+                   inventory=inventory)
     for note in result.notes:
         say(f"fleet island: note: island {member['name']}: {note}")
     return result
