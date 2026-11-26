@@ -303,17 +303,34 @@ ConnectX bridge that the fabric manager reaches through NVLSM (NVIDIA Fabric Man
 User Guide). The host shows no procfs entry, no device file and no class `0680`
 bridge; amazon-eks-ami PR 2840 reports the same on p6-b200. Hence the VPD rule, and
 the GPU-name rule for a user that cannot read the VPD (it reads as root only). Each VPD
-read is bounded to 1 s (`timeout 1`); without a `timeout` command the VPD is not read. A
-node whose NVSwitch is not determined is never taken for one without. A section cut
-off after the state line says `FM section timed out after reading state`.
+read is bounded to 1 s (`timeout 1`), all of them to 3 s; the rest are not read, and
+without a `timeout` command none is. A node whose NVSwitch is not determined is never
+taken for one without. A section cut off after the state line says `FM section timed
+out after reading state`. Only a device, a PCI bridge or the VPD port is hard evidence
+of NVSwitch on the node; the GPU names are not.
 
-The state comes from systemd only for a unit that is `loaded`. `systemctl is-active`
-prints `inactive` for a unit that does not exist, so for a `not-found` unit the check
-looks for an `nv-fabricmanager` process instead (`/proc/<pid>/comm`). That is the case
-when a GPU Operator driver container runs the fabric manager, or on a shared NVSwitch VM
-whose fabric manager runs on the service VM. A process found reads `active`; none is not
-judged at a first check (the fabric state judges the node). `inactive` / `failed` of a
-unit in another LoadState (`masked`, unknown) is not judged either.
+The state of the fabric manager, its process first:
+
+| systemd | `nv-fabricmanager` process | state |
+|---|---|---|
+| unit `active` | not looked for | `active` |
+| anything else | runs | `active` (a GPU Operator driver container runs it, maybe next to a stale host unit that is disabled, inactive or failed) |
+| unit `loaded`, `inactive` / `failed` | none | `inactive` / `failed` (it stopped) |
+| no unit (`not-found`), or `inactive` / `failed` of a unit that is not loaded (`masked`) | none | not running |
+| any but `loaded` | not seen (`/proc/1/comm` not readable: `hidepid`) | not read |
+
+`systemctl is-active` prints `inactive` for a unit that does not exist, hence the
+LoadState. The check reads `systemctl show -p LoadState` and cuts the prefix itself
+(`--value` needs systemd 230). It counts the processes by `/proc/<pid>/comm`, which the
+kernel cuts to 15 characters (`nv-fabricmanage`).
+
+A fabric manager that is not running, at the first check:
+
+- bad when the node has hard evidence of NVSwitch (the processes were seen: it is gone);
+- ok when there is no such evidence and every GPU's fabric is `Completed/Success`: the
+  fabric is managed off-host (a shared NVSwitch guest VM, whose fabric manager runs on
+  the service VM; a guest whose NVSwitch cannot be determined);
+- unread otherwise (the fabric state judges the node).
 
 The rules over the checks:
 
@@ -321,9 +338,9 @@ The rules over the checks:
   manager is never judged, even when it was active earlier in the boot. A tray may
   have the unit installed, and it fails there. A fabric that is not `Completed` makes
   the node bad by its own reason.
-- Once the fabric manager was active in a boot (its unit, or its process when there is
-  no unit), every later check of that boot that does not read `active` (`inactive`,
-  `failed`, `activating`, `deactivating`, or no process when there is no unit) is bad,
+- Once the fabric manager was active in a boot (its unit, or its process), every later
+  check of that boot that does not read `active` (`inactive`, `failed`, `activating`,
+  `deactivating`, not running) is bad,
   until it is active again. This also holds when NVSwitch was not determined: a fabric
   manager that ran has a fabric to manage. One that stays down makes the node `lost`
   after two checks, even while the fabric still reads `Completed`.
@@ -336,7 +353,10 @@ The rules over the checks:
   same boot is bad for that check. A unit in a restart loop can read `active` at every
   check; a loop that goes on makes the node `lost`. `NRestarts` counts only the
   restarts systemd makes itself, so this needs a `Restart=` setting on the unit (a
-  drop-in such as `Restart=on-failure`); restarts by hand do not count.
+  drop-in such as `Restart=on-failure`); restarts by hand do not count. A fabric
+  manager without its unit has no `NRestarts`: its process's pid and start time (field
+  22 of `/proc/<pid>/stat`) stand in. Another process in the same boot is one restart,
+  bad for that check.
 - A new boot id forgets all of it. A fabric manager never active since the reboot is
   judged as before: one bad check when it was active before the reboot (on a node with
   NVSwitch), then the fabric state judges the node. A fabric manager that does not
@@ -345,6 +365,13 @@ The rules over the checks:
 
 Not yet seen on our own hardware: the VPD keyword on an HGX B300 node, and that a
 GB300 tray's GPU names start with `GB`. The rules above follow the public sources.
+
+Known limit: on an HGX B300 node checked as a user that cannot read the VPD, there is no
+hard evidence of NVSwitch, only the GPU names. If a GPU Operator driver container runs
+the fabric manager and it dies after the fabric reads `Completed`, a check that never
+saw its process takes the fabric for one managed off-host. New CUDA launches fail once
+the fabric manager is gone, so the trainer reports the error itself. A check that saw
+the process earlier in the boot does catch it (the per-boot memory).
 
 A kernel log without timestamps (dmesg's default has them) is followed by its last
 line, how often that line ends the log, and the line before it, so lines that rotate
