@@ -128,15 +128,17 @@ def test_run_up_never_generates_a_key_for_an_on_site_syncer(tmp_path, monkeypatc
 
 # -- the units -----------------------------------------------------------------------------------
 
-def spec(role: str = "control") -> fs.ServiceSpec:
-    return fs.ServiceSpec(run="r", role=role, config="/srv/yeto/run.json", env_file="/etc/yeto/r.env",
-                          workdir=f"/var/tmp/yeto/r-{role}", user="yeto", python="/opt/yeto-venv/bin/python",
-                          yeto_dir="/opt/yeto")
+def spec(role: str = "control", **kw) -> fs.ServiceSpec:
+    fields = dict(run="r", role=role, config="/srv/yeto/run.json", env_file="/etc/yeto/r.env",
+                  workdir=f"/var/tmp/yeto/r-{role}", user="yeto", python="/opt/yeto-venv/bin/python",
+                  yeto_dir="/opt/yeto")
+    fields.update(kw)
+    return fs.ServiceSpec(**fields)
 
 
 CONTROL_UNIT = """\
 # The fleet control plane (yeto run up) of run r, written by `yeto fleet service --role control`.
-# Credentials come from EnvironmentFile only (mode 0600); this file holds none.
+# Credentials come from EnvironmentFile only (no access for group and others); this file holds none.
 [Unit]
 Description=yeto fleet control plane (yeto run up) of run r
 Wants=network-online.target
@@ -152,13 +154,14 @@ Environment=PYTHONPATH=/opt/yeto
 Environment=PYTHONUNBUFFERED=1
 Environment=YETO_STATE_DIR=/var/tmp/yeto/r-control/rl-up
 Environment=YETO_RUNS_DIR=/var/tmp/yeto/r-control/runs
-ExecStartPre=/bin/sh -c 'test "$$(stat -c %%a /etc/yeto/r.env)" = 600 || { echo "/etc/yeto/r.env must have mode 0600" >&2; exit 1; }'
+ExecStartPre=/bin/sh -c 'case "$$(stat -c %%a /etc/yeto/r.env)" in *00) ;; *) echo "/etc/yeto/r.env must give group and others no access (chmod 600)" >&2; exit 1;; esac'
 ExecStartPre=/bin/mkdir -p /var/tmp/yeto/r-control
 WorkingDirectory=-/var/tmp/yeto/r-control
 ExecStart=/opt/yeto-venv/bin/python -m yeto.cli fleet service-run --role control --config /srv/yeto/run.json
 Restart=on-failure
 RestartSec=30
-RestartPreventExitStatus=1 2
+RestartPreventExitStatus=75
+SuccessExitStatus=143
 KillMode=process
 TimeoutStopSec=300
 
@@ -169,15 +172,18 @@ WantedBy=multi-user.target
 
 def test_the_control_unit_snapshot():
     assert fs.unit_text(spec("control")) == CONTROL_UNIT
+    assert fs.CONTROL_PREVENT == (fs.CONTROL_DECIDED_EXIT,) == (75,)  # run up's exit 1, mapped; nothing else
 
 
 def test_the_syncer_unit_restarts_on_a_crash_only_and_stops_its_whole_group():
     text = fs.unit_text(spec("syncer"))
-    assert "ExecStart=/opt/yeto-venv/bin/python -m yeto.cli fleet service-run --role syncer --config " \
-           "/srv/yeto/run.json" in text
+    assert ("ExecStart=/opt/yeto-venv/bin/python -m yeto.cli fleet service-run --role syncer --config "
+            "/srv/yeto/run.json --stop-grace-s 170\n") in text
     assert "Restart=on-failure\n" in text
-    assert "RestartPreventExitStatus=2 10 11\n" in text  # a refusal, a config error, a strict failure
+    assert "RestartPreventExitStatus=2 9 10 11\n" in text  # a refusal, the fleet's STOP, a config error, strict
+    assert "SuccessExitStatus=143\n" in text  # a stop of the unit: not a failure
     assert "KillMode=control-group\n" in text  # the syncer gets SIGTERM and checkpoints
+    assert "TimeoutStopSec=180\n" in text and fs.SYNCER_STOP_GRACE_S == 170  # SIGKILL inside the stop timeout
     assert fs.unit_name("r", "syncer") == "yeto-r-syncer.service"
     assert 1 not in fs.SYNCER_PREVENT and fs.CRASH_EXIT not in fs.SYNCER_PREVENT + fs.CONTROL_PREVENT
 
@@ -204,12 +210,31 @@ def fleet_cli_args(argv: list[str]):
     return cli.build_parser().parse_args(argv)
 
 
-@pytest.mark.parametrize("field, value", [("env_file", "/etc/yeto/r env"), ("config", "run.json"),
-                                          ("workdir", "/var/tmp/$HOME"), ("python", "/opt/%h/python"),
-                                          ("user", "Root User"), ("role", "head")])
+@pytest.mark.parametrize("field, value", [
+    ("env_file", "/etc/yeto/r env"), ("config", "run.json"), ("workdir", "/var/tmp/$HOME"),
+    ("python", "/opt/%h/python"), ("user", "Root User"), ("role", "head"),
+    # injection through the run name (the Description and comment lines) or a path
+    ("run", "r\nExecStartPre=/bin/sh -c id"), ("run", "r%h"), ("run", "r$USER"), ("run", "r x"), ("run", ".."),
+    ("run", "r;id"), ("config", "/srv/run.json\nUser=root"), ("env_file", "/etc/yeto/%i.env"),
+    ("yeto_dir", "/opt/$(id)"), ("workdir", "/var/tmp/yeto/../../etc"),
+])
 def test_a_unit_line_that_would_not_hold_the_value_is_refused(field, value):
     with pytest.raises(fs.ServiceError):
         fs.unit_text(types.SimpleNamespace(**{**spec().__dict__, field: value}))
+    with pytest.raises(fs.ServiceError):
+        fs.as_unit_script(types.SimpleNamespace(**{**spec().__dict__, field: value}), ["stop-run", "r"])
+
+
+def test_a_run_name_from_the_config_that_a_unit_cannot_hold_is_refused(tmp_path, capsys):
+    doc = onsite_doc(tmp_path)
+    doc["run"] = "r%n"
+    path = tmp_path / "bad-run.json"
+    path.write_text(json.dumps(doc))
+    args = fleet_cli_args(["fleet", "service", "--config", str(path), "--role", "control", "--env-file",
+                           "/etc/yeto/r.env", "--print"])
+    code = fleet_cli.main(args)
+    out = capsys.readouterr()
+    assert code == 2 and "[Service]" not in out.out
 
 
 def test_the_unit_is_for_an_on_site_fleet_only(tmp_path, capsys):
@@ -241,16 +266,56 @@ def test_install_writes_the_unit_and_enables_it_and_does_nothing_else():
     assert fs.install(spec("syncer"), "ops@site-a", runner=ssh, log=logs.append) == 0
     ((argv, script),) = ssh.calls
     assert argv == ["ssh", "-o", "BatchMode=yes", "ops@site-a", "bash", "-s"]
-    commands = [line for line in script.splitlines() if line and not line.startswith(("[", "mode=", "echo"))]
     body = script.split("<<'YETO_UNIT_EOF'\n", 1)[1].split("\nYETO_UNIT_EOF\n", 1)[0]
     assert body + "\n" == fs.unit_text(spec("syncer"))  # the unit, verbatim
-    outside = [c for c in commands if c not in body.splitlines() and c != "YETO_UNIT_EOF"]
-    assert outside == ["set -eu", "sudo -n tee /etc/systemd/system/yeto-r-syncer.service >/dev/null <<'YETO_UNIT_EOF'",
-                       "sudo -n systemctl daemon-reload", "sudo -n systemctl enable --now yeto-r-syncer.service"]
-    # the env file: its mode is checked, its content never read
-    assert "stat -c %a /etc/yeto/r.env" in script
+    commands = [line for line in script.replace(body, "").splitlines()
+                if line and not line.startswith(("mode=", "case ", "echo", "YETO_UNIT_EOF"))]
+    assert commands == ["set -eu", "sudo -n tee /etc/systemd/system/yeto-r-syncer.service >/dev/null <<'YETO_UNIT_EOF'",
+                        "sudo -n systemctl daemon-reload", "sudo -n systemctl enable --now yeto-r-syncer.service"]
+    # the env file: its mode is checked (as root: the file is the service user's), its content never read
+    assert "sudo -n stat -c %a /etc/yeto/r.env" in script
     for verb in ("cat ", "source ", ". /etc", "grep ", "head ", "less "):
         assert verb not in script.replace(body, "")
+
+
+_REAL_RUN = __import__("subprocess").run  # tests that fake ssh patch subprocess.run
+
+FAKE_TOOLS = {
+    "sudo": '[ "$1" = -n ] && shift\necho "sudo $*" >> "$LOG"\nexec "$@"',
+    "stat": 'echo "stat $*" >> "$LOG"\necho "$FAKE_MODE"',
+    "tee": 'echo "tee $*" >> "$LOG"\nwhile IFS= read -r _line; do :; done',
+    "systemctl": 'echo "systemctl $*" >> "$LOG"',
+    "systemd-run": 'echo "systemd-run $*" >> "$LOG"',
+}
+
+
+def run_script(tmp_path, script: str, mode: str) -> tuple[int, list[str], str]:
+    """``script`` run by bash with only fake sudo / stat / tee / systemctl / systemd-run on PATH."""
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name, body in FAKE_TOOLS.items():
+        tool = bin_dir / name
+        tool.write_text(f"#!/bin/bash\n{body}\n")
+        tool.chmod(0o755)
+    log = tmp_path / f"calls-{mode}.log"
+    done = _REAL_RUN(["/bin/bash", "-s"], input=script, text=True, capture_output=True, timeout=30,
+                          env={"PATH": str(bin_dir), "LOG": str(log), "FAKE_MODE": mode})
+    calls = log.read_text().splitlines() if log.exists() else []
+    return done.returncode, calls, done.stderr
+
+
+@pytest.mark.parametrize("mode, ok", [("600", True), ("400", True), ("644", False), ("640", False),
+                                      ("604", False), ("660", False)])
+def test_the_install_script_refuses_an_env_file_others_can_read_before_it_writes_anything(tmp_path, mode, ok):
+    code, calls, err = run_script(tmp_path, fs.install_script(spec("syncer"), fs.unit_text(spec("syncer"))), mode)
+    assert calls[:2] == ["sudo stat -c %a /etc/yeto/r.env", "stat -c %a /etc/yeto/r.env"]  # stat runs under sudo
+    if ok:
+        assert code == 0, err
+        assert [c.split()[0] for c in calls[2:]] == ["sudo", "tee", "sudo", "systemctl", "sudo", "systemctl"]
+        assert calls[-1] == "systemctl enable --now yeto-r-syncer.service"
+    else:
+        assert code == 3 and f"has mode {mode}" in err
+        assert not any(c.startswith(("tee", "systemctl", "sudo tee")) for c in calls)  # nothing written
 
 
 def test_an_install_that_fails_on_the_host_says_so():
@@ -274,17 +339,82 @@ def test_the_cli_install_goes_through_ssh(tmp_path, monkeypatch, capsys):
     assert argv[-3:] == ["site-a", "bash", "-s"] and CONTROL_UNIT.rstrip("\n") in script
 
 
+UNIT_FLAGS = ["--user", "yeto", "--python", "/opt/yeto-venv/bin/python", "--yeto-dir", "/opt/yeto",
+              "--remote-config", "/srv/yeto/run.json"]
+
+
+def test_stop_runs_stop_run_on_the_control_host_as_the_unit_runs(tmp_path, monkeypatch):
+    ssh = FakeSsh()
+    monkeypatch.setattr(fs.subprocess, "run", ssh)
+    path = onsite_config(tmp_path)
+    args = fleet_cli_args(["fleet", "service", "stop", "site-c", "--config", str(path), "--role", "control",
+                           "--env-file", "/etc/yeto/r.env", *UNIT_FLAGS])
+    assert fleet_cli.main(args) == 0
+    ((argv, script),) = ssh.calls
+    assert argv == ["ssh", "-o", "BatchMode=yes", "site-c", "bash", "-s"]
+    code, calls, err = run_script(tmp_path, script, "600")
+    assert code == 0, err
+    (run_line,) = [c for c in calls if c.startswith("systemd-run")]
+    assert run_line == ("systemd-run --quiet --wait --pipe --collect --uid=yeto "
+                        "--working-directory=/var/tmp/yeto/r-control --property=EnvironmentFile=/etc/yeto/r.env "
+                        "--setenv=PYTHONPATH=/opt/yeto --setenv=PYTHONUNBUFFERED=1 "
+                        "--setenv=YETO_STATE_DIR=/var/tmp/yeto/r-control/rl-up "
+                        "--setenv=YETO_RUNS_DIR=/var/tmp/yeto/r-control/runs "
+                        "/opt/yeto-venv/bin/python -m yeto.cli stop-run r")
+    assert run_script(tmp_path, script, "644")[0] == 3  # the same env file check as the install
+    args.role = "syncer"
+    assert fleet_cli.main(args) == 2  # the syncer service ends on the fleet's STOP; no stop-run there
+    args.role, args.host = "control", None
+    assert fleet_cli.main(args) == 2 and len(ssh.calls) == 1
+
+
+def test_clear_ended_runs_on_the_service_host_as_the_unit_runs(tmp_path, monkeypatch):
+    ssh = FakeSsh()
+    monkeypatch.setattr(fs.subprocess, "run", ssh)
+    path = onsite_config(tmp_path)
+    args = fleet_cli_args(["fleet", "service", "clear-ended", "site-s", "--config", str(path), "--role", "syncer",
+                           "--env-file", "/etc/yeto/r.env", *UNIT_FLAGS])
+    assert fleet_cli.main(args) == 0
+    ((_argv, script),) = ssh.calls
+    assert script.splitlines()[-1].endswith("--setenv=YETO_RUNS_DIR=/var/tmp/yeto/r-syncer/runs "
+                                            "/opt/yeto-venv/bin/python -m yeto.cli fleet service-run --role syncer "
+                                            "--config /srv/yeto/run.json --clear-ended")
+    args.print = True
+    assert fleet_cli.main(args) == 2  # an action takes no --print
+
+
+def test_the_control_unit_refuses_a_config_that_drains_on_exit(tmp_path, capsys):
+    doc = onsite_doc(tmp_path)
+    doc["rollout"]["drain_on_exit"] = True
+    path = tmp_path / "drain.json"
+    path.write_text(json.dumps(doc))
+    args = fleet_cli_args(["fleet", "service", "--config", str(path), "--role", "control", "--env-file",
+                           "/etc/yeto/r.env", "--print"])
+    assert fleet_cli.main(args) == 2
+    assert "rollout.drain_on_exit is true" in capsys.readouterr().err
+    args.role = "syncer"
+    assert fleet_cli.main(args) == 0  # the syncer service drives no pool
+
+
 # -- the syncer launch watches the service ---------------------------------------------------------
 
 class Clock:
-    def __init__(self, t: float = 1_000_000.0) -> None:
-        self.t = t
+    """This host's monotonic clock; ``sleep`` advances it (a cap on the calls: a loop that
+    never ends fails the test instead of hanging it)."""
+
+    def __init__(self, t: float = 1_000_000.0, max_sleeps: int = 2000) -> None:
+        self.t, self.sleeps, self.max_sleeps = t, 0, max_sleeps
 
     def __call__(self) -> float:
         return self.t
 
     def sleep(self, s: float) -> None:
+        self.sleeps += 1
+        assert self.sleeps <= self.max_sleeps, "the loop under test never ended"
         self.t += s
+
+
+SKEW = -3 * 3600.0  # the service host's clock: three hours behind this host's (only its moves are read)
 
 
 def watch_args(tmp_path):
@@ -293,36 +423,67 @@ def watch_args(tmp_path):
                                  rl_syncer_epoch=None)
 
 
-def service_up(objects, clock, *, key=KEY, epoch=3, state=fleet_syncer.SERVICE_RUNNING):
-    island_launches.write_syncer_record(objects, addr="10.0.0.5:29400", syncer_epoch=epoch, learners=2,
-                                        max_learners=4, run="r", clock=lambda: clock() - 7200,
-                                        extra={"service": "10.0.0.5", "key_id": fleet_syncer.key_id(key)})
-    fleet_syncer.write_service_status(objects, host="10.0.0.5", state=state, key=fleet_syncer.key_id(key),
-                                      clock=clock)
+def beat(objects, clock, *, key=KEY, state=fleet_syncer.SERVICE_RUNNING, generation=7, host="10.0.0.5", **kw):
+    fleet_syncer.write_service_status(objects, host=host, state=state, key=fleet_syncer.key_id(key),
+                                      generation=generation, node="site-s", clock=lambda: clock() + SKEW, **kw)
 
 
-def test_the_syncer_launch_waits_for_the_service_records_it_again_and_ends_with_it(tmp_path, monkeypatch):
+def service_up(objects, clock, *, key=KEY, epoch=3, generation=7, record_generation=None, **kw):
+    island_launches.write_syncer_record(
+        objects, addr="10.0.0.5:29400", syncer_epoch=epoch, learners=2, max_learners=4, run="r",
+        clock=lambda: clock() + SKEW,
+        extra={"service": "10.0.0.5", "service_node": "site-s", "key_id": fleet_syncer.key_id(key),
+               "service_generation": generation if record_generation is None else record_generation})
+    beat(objects, clock, key=key, generation=generation, **kw)
+
+
+def test_the_syncer_launch_waits_for_the_service_records_it_again_and_ends_with_it(tmp_path):
+    import time
+
     objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
     args = watch_args(tmp_path)
-    ticks = {"n": 0}
 
     def sleep(s):
         clock.sleep(s)
-        ticks["n"] += 1
-        if ticks["n"] == 3:
+        n = clock.sleeps
+        if n == 3:
             service_up(objects, clock)  # the service comes up while the launch waits
-        elif ticks["n"] > 3:
-            fleet_syncer.write_service_status(objects, host="10.0.0.5", key=fleet_syncer.key_id(KEY), clock=clock,
-                                              state=fleet_syncer.SERVICE_RUNNING if ticks["n"] < 8
-                                              else fleet_syncer.SERVICE_FINISHED)
-            if ticks["n"] == 4:
+        elif n > 3:
+            beat(objects, clock, state=fleet_syncer.SERVICE_RUNNING if n < 8 else fleet_syncer.SERVICE_FINISHED)
+            if n == 4:
                 record = island_launches.read_syncer_record(objects)
-                assert record["at"] >= clock() - 60  # announced again for this run up's trainer worker
+                assert record["at"] > time.time() - 60  # announced again for this run up (this host's wall clock)
                 assert record["syncer_epoch"] == 3 and record["service"] == "10.0.0.5"
+                assert record["service_generation"] == 7 and record["service_node"] == "site-s"
 
     assert fleet_syncer.watch_service(args, objects=objects, sleep=sleep, clock=clock, log=logs.append) == 0
-    assert args.rl_syncer_epoch == 3 and ticks["n"] == 8
+    assert args.rl_syncer_epoch == 3 and clock.sleeps == 8
     assert any("starts no syncer" in m for m in logs)
+
+
+def test_a_heartbeat_that_never_moves_is_not_a_running_service(tmp_path):
+    objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
+    service_up(objects, clock)  # left by a service that is gone: "running", but never written again
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=clock.sleep, clock=clock,
+                                      wait_s=300, log=logs.append) == 1
+    assert "no running syncer service" in logs[-1]
+    assert island_launches.read_syncer_record(objects)["at"] < 1e7  # not announced again
+
+
+@pytest.mark.parametrize("state", [fleet_syncer.SERVICE_STARTING, "running-generation-mismatch"])
+def test_only_a_running_service_with_its_own_record_is_taken(tmp_path, state):
+    objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
+
+    def sleep(s):
+        clock.sleep(s)
+        if state == fleet_syncer.SERVICE_STARTING:
+            service_up(objects, clock, state=fleet_syncer.SERVICE_STARTING)
+        else:
+            service_up(objects, clock, generation=8, record_generation=7)  # the record of the service before
+
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=sleep, clock=clock,
+                                      wait_s=120, log=logs.append) == 1
+    assert "no running syncer service" in logs[-1]
 
 
 @pytest.mark.parametrize("theirs, mine", [("another-key", KEY), (KEY, None)])
@@ -341,21 +502,71 @@ def test_a_key_that_is_not_the_service_s_is_refused_not_replaced(tmp_path, monke
 def test_a_service_silent_past_the_grace_fails_the_launch_a_failed_one_at_once(tmp_path):
     objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
     service_up(objects, clock)
-    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=clock.sleep, clock=clock,
-                                      log=logs.append) == 1  # no heartbeat after the first: down, then the grace
-    assert any("no heartbeat from the syncer service" in m and "for " in m for m in logs)
+
+    def sleep(s):
+        clock.sleep(s)
+        if clock.sleeps == 1:
+            beat(objects, clock)  # it beat once while the launch looked, then went silent
+
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=sleep, clock=clock,
+                                      log=logs.append) == 1
+    assert any("no new heartbeat from the syncer service" in m for m in logs)
     clock2, logs2 = Clock(), []
     objects2 = DirectoryObjectStore(tmp_path / "store2")
     service_up(objects2, clock2)
 
-    def sleep(s):
+    def sleep2(s):
         clock2.sleep(s)
-        fleet_syncer.write_service_status(objects2, host="10.0.0.5", state=fleet_syncer.SERVICE_FAILED,
-                                          key=fleet_syncer.key_id(KEY), reason="strict: merge mismatch", clock=clock2)
+        beat(objects2, clock2, state=fleet_syncer.SERVICE_FAILED if clock2.sleeps > 2 else fleet_syncer.SERVICE_RUNNING,
+             reason="strict: merge mismatch")
 
-    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects2, sleep=sleep, clock=clock2,
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects2, sleep=sleep2, clock=clock2,
                                       log=logs2.append) == 1
     assert "strict: merge mismatch" in logs2[-1]
+    assert clock2.sleeps < 10  # final at once, no grace
+
+
+def test_a_heartbeat_of_another_host_is_down_not_up(tmp_path):
+    objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
+    service_up(objects, clock)
+
+    def sleep(s):
+        clock.sleep(s)
+        beat(objects, clock, host="10.0.0.5" if clock.sleeps < 3 else "10.0.0.9")  # moving, but not this fleet's
+
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=sleep, clock=clock,
+                                      log=logs.append) == 1
+    assert any("names host '10.0.0.9', not 10.0.0.5" in m for m in logs)
+
+
+def test_the_run_s_stop_flag_is_the_fleet_s_stop_in_the_store_and_a_stopped_service_ends_the_launch(tmp_path):
+    from yeto import runs
+    from yeto.launch.fleet import RUN_STOPPED_EXIT
+
+    objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
+    service_up(objects, clock)
+
+    def sleep(s):
+        clock.sleep(s)
+        beat(objects, clock)
+        if clock.sleeps == 4:
+            runs.request_stop("r")  # `yeto stop-run r` on the control host
+
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=sleep, clock=clock,
+                                      log=logs.append) == RUN_STOPPED_EXIT
+    stop = fleet_syncer.read_onsite_stop(objects)
+    assert stop is not None and "STOP flag of run r" in stop["why"]
+    objects2, clock2 = DirectoryObjectStore(tmp_path / "store2"), Clock()
+    service_up(objects2, clock2)
+
+    def sleep2(s):
+        clock2.sleep(s)
+        beat(objects2, clock2, state=fleet_syncer.SERVICE_STOPPED if clock2.sleeps > 3 else fleet_syncer.SERVICE_RUNNING,
+             reason="the fleet's STOP")
+
+    (tmp_path / "runs" / "r" / "STOP").unlink()
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects2, sleep=sleep2, clock=clock2,
+                                      log=logs.append) == RUN_STOPPED_EXIT
 
 
 def test_no_service_within_the_wait_starts_no_island(tmp_path):
@@ -384,36 +595,61 @@ class FakeSyncer:
         return _RlStrictFailure("merge_invariant: broken") if self.strict else None
 
 
-def run_service(tmp_path, monkeypatch, code: int, *, strict: bool = False):
-    path = onsite_config(tmp_path)
-    objects = DirectoryObjectStore(tmp_path / "store")
-    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
-    seen = {}
+def fake_serve(objects, seen, code, *, until=None):
+    """``fleet_syncer.serve`` as far as the service sees it: the record (with the service's
+    fields), ``on_record``, then ``code`` (or 9 once ``stopped()`` says so, with ``until``)."""
+    import time
 
-    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra):
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish):
         seen.update(addr=addr, n=n, head_mode=head_mode, extra=record_extra, epoch=args.rl_syncer_epoch,
-                    service=getattr(args, "rl_fleet_syncer_service", None))
-        status = fleet_syncer.read_service_status(objects)
-        seen["beat"] = status
+                    service=getattr(args, "rl_fleet_syncer_service", None),
+                    before=fleet_syncer.read_service_status(objects))
+        record = island_launches.write_syncer_record(objects, addr=addr, syncer_epoch=args.rl_syncer_epoch, learners=n,
+                                                     max_learners=4, run="r", extra=record_extra)
+        on_record(record)
+        seen["after"] = fleet_syncer.read_service_status(objects)
+        if until is not None:
+            deadline = time.monotonic() + 20
+            while not stopped():
+                until()
+                assert time.monotonic() < deadline
+                time.sleep(0.02)
+            seen["stopped"] = stopped()
+            return 9
         return code
 
+    return serve
+
+
+def run_service(tmp_path, monkeypatch, code: int, *, strict: bool = False, objects=None, node="site-s",
+                until=None, beat_s=None):
+    path = onsite_config(tmp_path)
+    objects = objects or DirectoryObjectStore(tmp_path / "store")
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    seen: dict = {}
     syncer = FakeSyncer(strict)
     logs: list[str] = []
-    rc = fs.run_syncer(str(path), objects=objects, make_syncer=lambda args, n: syncer, serve=serve,
-                       parse=_prepared, log=logs.append)
+    rc = fs.run_syncer(str(path), objects=objects, make_syncer=lambda args, n: syncer,
+                       serve=fake_serve(objects, seen, code, until=until), parse=_prepared, node=node,
+                       beat_s=beat_s, log=logs.append)
     return rc, seen, syncer, objects, logs
 
 
 def test_the_service_runs_the_syncer_launch_s_syncer_here_and_says_when_it_finished(tmp_path, monkeypatch):
+    from yeto.launch.pool.store_lock import StoreLock
+
     rc, seen, syncer, objects, logs = run_service(tmp_path, monkeypatch, 0)
     assert rc == 0 and syncer.events == ["start", "stop"]
     assert seen["addr"] == "10.0.0.5:29400" and seen["n"] == 2 and seen["head_mode"] is True
     assert seen["service"] is None  # the syncer runs here: the launch's own args, not a watcher's
-    assert seen["extra"] == {"service": "10.0.0.5", "key_id": fleet_syncer.key_id(KEY)}
-    assert seen["beat"]["state"] == "running" and seen["beat"]["key_id"] == fleet_syncer.key_id(KEY)
+    assert seen["extra"] == {"service": "10.0.0.5", "service_node": "site-s", "service_generation": 1,
+                             "key_id": fleet_syncer.key_id(KEY)}
+    # starting until its record is written, then running (the generation is the lock's token)
+    assert seen["before"]["state"] == "starting" and seen["after"]["state"] == "running"
+    assert seen["after"]["generation"] == 1 and seen["after"]["key_id"] == fleet_syncer.key_id(KEY)
     assert fleet_syncer.read_service_status(objects)["state"] == "finished"
-    raw = (tmp_path / "store" / fleet_syncer.SERVICE_RECORD).read_text()
-    assert KEY not in raw
+    assert KEY not in (tmp_path / "store" / fleet_syncer.SERVICE_RECORD).read_text()
+    assert StoreLock.holder_of(objects, fleet_syncer.SERVICE_LOCK) is None  # released at the end
 
 
 def test_a_strict_failure_of_the_service_is_final_anything_else_restarts(tmp_path, monkeypatch):
@@ -425,6 +661,67 @@ def test_a_strict_failure_of_the_service_is_final_anything_else_restarts(tmp_pat
     rc, _seen, _syncer, objects, _logs = run_service(tmp_path / "again", monkeypatch, 1)
     assert rc == 1 and rc not in fs.SYNCER_PREVENT  # the unit restarts it; it resumes from its checkpoint
     assert fleet_syncer.read_service_status(objects)["state"] == "running"
+
+
+def test_one_syncer_service_at_a_time(tmp_path, monkeypatch):
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    other = StoreLock.acquire(objects, fleet_syncer.SERVICE_LOCK, holder="site-t/yeto-r-syncer.service", ttl_s=120)
+    rc, seen, syncer, _objects, logs = run_service(tmp_path, monkeypatch, 0, objects=objects)
+    assert rc == 2 and rc in fs.SYNCER_PREVENT and syncer.events == [] and seen == {}
+    assert "another syncer service of run r runs (site-t/yeto-r-syncer.service" in logs[-1]
+    other.release()
+    # this host's own lease (a service that crashed: the unit restarts it at once) is taken back
+    StoreLock.acquire(objects, fleet_syncer.SERVICE_LOCK, holder="site-s/yeto-r-syncer.service", ttl_s=120)
+    rc, seen, syncer, _objects, logs = run_service(tmp_path, monkeypatch, 0, objects=objects)
+    assert rc == 0 and seen["extra"]["service_generation"] == 3  # a new token: the crashed one is fenced
+
+
+def test_a_service_whose_lock_another_took_ends_without_a_final_state(tmp_path, monkeypatch):
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    taken = []
+
+    def take_over():
+        if not taken:  # its host was cut off past its lease: another service took the lock
+            taken.append(StoreLock.acquire(objects, fleet_syncer.SERVICE_LOCK, holder="site-s/yeto-r-syncer.service",
+                                           ttl_s=120, reclaim=True))
+
+    rc, seen, syncer, objects, logs = run_service(tmp_path, monkeypatch, 0, objects=objects, until=take_over,
+                                                  beat_s=0.05)
+    assert rc == 2 and "no longer this service's" in seen["stopped"]
+    assert fleet_syncer.read_service_status(objects)["state"] == "running"  # never final: not this service's now
+    assert syncer.events == ["start", "stop"]
+
+
+def test_the_term_goes_on_here_and_moves_up_on_another_host(tmp_path, monkeypatch):
+    objects = DirectoryObjectStore(tmp_path / "store")
+    island_launches.write_syncer_record(objects, addr="10.0.0.5:29400", syncer_epoch=4, learners=2, max_learners=4,
+                                        run="r", extra={"service": "10.0.0.5", "service_node": "site-s"})
+    rc, seen, *_ = run_service(tmp_path, monkeypatch, 0, objects=objects)
+    assert rc == 0 and seen["epoch"] == 4  # this host's service, restarted: the same term
+    (tmp_path / "b").mkdir()
+    rc, seen, _syncer, _objects, logs = run_service(tmp_path / "b", monkeypatch, 0, objects=objects, node="site-u")
+    assert rc == 0 and seen["epoch"] == 5  # another host: one more, fencing the old syncer's islands
+    assert any("not this host's service's" in m for m in logs)
+
+
+def test_the_fleet_s_stop_in_the_store_ends_the_service(tmp_path, monkeypatch):
+    objects = DirectoryObjectStore(tmp_path / "store")
+
+    def stop():
+        if fleet_syncer.read_onsite_stop(objects) is None:
+            fleet_syncer.write_onsite_stop(objects, why="STOP flag of run r", by="site-c")
+
+    rc, seen, syncer, objects, logs = run_service(tmp_path, monkeypatch, 0, objects=objects, until=stop)
+    assert rc == 9 and rc in fs.SYNCER_PREVENT and "STOP flag of run r" in seen["stopped"]
+    status = fleet_syncer.read_service_status(objects)
+    assert status["state"] == "stopped" and "by site-c" in status["reason"]
+    (tmp_path / "again").mkdir()  # started again (a reboot) while the STOP stands: the syncer never starts
+    rc, seen, syncer, objects, logs = run_service(tmp_path / "again", monkeypatch, 0, objects=objects)
+    assert rc == 9 and syncer.events == [] and seen == {}
 
 
 def test_the_service_refuses_without_the_key_and_never_generates_one(tmp_path, monkeypatch):
@@ -441,31 +738,201 @@ def test_the_service_refuses_without_the_key_and_never_generates_one(tmp_path, m
     assert "YETO_ISLAND_HMAC_KEY" not in os.environ
 
 
-def test_a_crash_of_the_service_process_is_the_restartable_exit(monkeypatch):
+def test_the_service_s_environment_is_run_up_s_and_never_written_to_this_process(tmp_path, monkeypatch):
+    import os
+
+    from yeto.launch import local_syncer
+
+    doc = onsite_doc(tmp_path)
+    doc["env"].update({"YETO_ONSITE_PROBE": "from-the-run-config", "YETO_ONSITE_CONFIG_ONLY": "config-only"})
+    path = tmp_path / "env.json"
+    path.write_text(json.dumps(doc))
+    monkeypatch.setenv("YETO_ONSITE_PROBE", "from-the-env-file")
+    monkeypatch.setenv("YETO_ONSITE_FILE_ONLY", "file-only")
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    made = {}
+
+    class Captured(FakeSyncer):
+        def __init__(self, args, n, *, binary, log_file, env, stop_grace_s):
+            super().__init__()
+            made.update(env=env, stop_grace_s=stop_grace_s)
+
+    monkeypatch.setattr(local_syncer, "LocalSyncer", Captured)
+    objects = DirectoryObjectStore(tmp_path / "store")
+    before = dict(os.environ)
+    assert fs.run_syncer(str(path), binary="/opt/yeto-syncer", objects=objects, parse=_prepared, node="site-s",
+                         serve=fake_serve(objects, {}, 0), stop_grace_s=170, log=lambda m: None) == 0
+    env = made["env"]
+    # the run config's env over the env file's (run up's order), both in the syncer's environment
+    assert env["YETO_ONSITE_PROBE"] == "from-the-run-config" and env["YETO_ONSITE_FILE_ONLY"] == "file-only"
+    assert env["YETO_ONSITE_CONFIG_ONLY"] == "config-only" and env["YETO_ISLAND_HMAC_KEY"] == KEY
+    assert made["stop_grace_s"] == 170
+    assert dict(os.environ) == before  # nothing written to this process's environment
+    run = up.Run(up.load_config(str(path)), state_root=tmp_path / "run-up")  # the control unit: the same order
+    assert run.env["YETO_ONSITE_PROBE"] == env["YETO_ONSITE_PROBE"]
+    assert fs.Onsite.open(str(path), "control").env["YETO_ONSITE_PROBE"] == "from-the-run-config"
+
+
+def test_the_syncer_s_stop_waits_its_grace_then_kills(tmp_path):
+    import subprocess
+    import time
+
+    from yeto.launch.local_syncer import LocalSyncer
+
+    syncer = LocalSyncer.__new__(LocalSyncer)
+    syncer.command = "trap '' TERM; sleep 30"  # a syncer that does not end on SIGTERM
+    syncer.binary, syncer.log_file = str(tmp_path / "none"), str(tmp_path / "syncer.log")
+    syncer.proc, syncer._reaped, syncer.stop_grace_s, syncer.env = None, False, 1.5, None
+    syncer.start()
+    time.sleep(0.3)
+    started = time.monotonic()
+    syncer._stop_tree()
+    took = time.monotonic() - started
+    assert syncer.proc.poll() is not None and 1.4 <= took < 8
+    assert isinstance(syncer.proc, subprocess.Popen)
+
+
+# -- what the units run: the ended marker ------------------------------------------------------------
+
+def service_args(path, role, *, clear_ended=False):
+    return types.SimpleNamespace(role=role, config=str(path), syncer_binary=None, stop_grace_s=170,
+                                 clear_ended=clear_ended)
+
+
+@pytest.fixture
+def no_sigterm_handler(monkeypatch):
     monkeypatch.setattr(fs.signal, "signal", lambda *a: None)  # not this test process's SIGTERM
-    monkeypatch.setattr(fs, "run_control", lambda config: 1 / 0)
-    args = types.SimpleNamespace(role="control", config="/srv/run.json", syncer_binary=None)
-    assert fs.service_run(args) == fs.CRASH_EXIT
-    monkeypatch.setattr(fs, "run_control", lambda config: 1)  # a breaker trip: run up's own exit
-    assert fs.service_run(args) == 1 and 1 in fs.CONTROL_PREVENT
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+def test_a_control_service_whose_run_up_ended_the_run_never_orders_again(tmp_path, monkeypatch):
+    path = onsite_config(tmp_path)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    objects, ups, logs = DirectoryObjectStore(tmp_path / "store"), [], []
+
+    def run_up(args):  # run up: a budget breaker tripped, it tore the run down and exits 1
+        ups.append(args.config)
+        return 1
+
+    monkeypatch.setattr(up, "main", run_up)
+    args = service_args(path, "control")
+    assert fs.service_run(args, objects=objects, log=logs.append) == fs.CONTROL_DECIDED_EXIT
+    marker = json.loads((tmp_path / "state" / "r" / "onsite-control.ended").read_text())
+    assert marker["exit_code"] == 75 and "breaker" in marker["reason"] and marker["at"] > 0
+    assert json.loads(objects.read("fleet/onsite/control.ended"))["exit_code"] == 75
+    # the host reboots: systemd starts the unit again, and nothing is ordered
+    assert fs.service_run(args, objects=objects, log=logs.append) == 0 and len(ups) == 1
+    assert "already ended" in logs[-1] and "clear-ended" in logs[-1]
+    # the unit started on another host (no local marker): the run store's marker holds
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "other-host")
+    assert fs.service_run(args, objects=objects, log=logs.append) == 0 and len(ups) == 1
+    assert fs.service_run(service_args(path, "control", clear_ended=True), objects=objects, log=logs.append) == 0
+    assert objects.read("fleet/onsite/control.ended") is None
+    assert fs.service_run(args, objects=objects, log=logs.append) == 75 and len(ups) == 2  # starts again
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+def test_a_syncer_service_after_a_strict_failure_never_resumes(tmp_path, monkeypatch):
+    path = onsite_config(tmp_path)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    objects, logs = DirectoryObjectStore(tmp_path / "store"), []
+    real = fs.run_syncer
+
+    def strict(config, **kw):
+        return real(config, objects=objects, make_syncer=lambda args, n: FakeSyncer(strict=True),
+                    serve=fake_serve(objects, {}, 1), parse=_prepared, node="site-s", log=logs.append)
+
+    monkeypatch.setattr(fs, "run_syncer", strict)
+    args = service_args(path, "syncer")
+    assert fs.service_run(args, objects=objects, log=logs.append) == ISLAND_STOP_EXIT
+    assert json.loads((tmp_path / "state" / "r" / "onsite-syncer.ended").read_text())["exit_code"] == 11
+    monkeypatch.setattr(fs, "run_syncer", lambda *a, **kw: pytest.fail("a syncer that failed strict is not resumed"))
+    assert fs.service_run(args, objects=objects, log=logs.append) == 0
+    fleet_syncer.write_onsite_stop(objects, why="x", by="site-c")
+    assert fs.service_run(service_args(path, "syncer", clear_ended=True), objects=objects, log=logs.append) == 0
+    assert fleet_syncer.read_onsite_stop(objects) is None  # the syncer's clear also lifts the fleet's STOP
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+@pytest.mark.parametrize("code", [2, 10, 1, fs.CRASH_EXIT])
+def test_a_refusal_or_a_crash_leaves_no_ended_marker(tmp_path, monkeypatch, code):
+    path = onsite_config(tmp_path)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    objects = DirectoryObjectStore(tmp_path / "store")
+    monkeypatch.setattr(fs, "run_syncer", (lambda *a, **kw: 1 / 0) if code == fs.CRASH_EXIT else
+                        (lambda *a, **kw: code))
+    assert fs.service_run(service_args(path, "syncer"), objects=objects, log=lambda m: None) == code
+    assert not (tmp_path / "state" / "r" / "onsite-syncer.ended").exists()
+    assert objects.read("fleet/onsite/syncer.ended") is None
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+def test_a_marker_that_does_not_read_is_a_crash_not_a_start(tmp_path, monkeypatch):
+    class Broken(DirectoryObjectStore):
+        def read(self, key):
+            raise OSError("store down")
+
+    path = onsite_config(tmp_path)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(fs, "run_control", lambda *a, **kw: pytest.fail("not started without knowing"))
+    assert fs.service_run(service_args(path, "control"), objects=Broken(tmp_path / "store"),
+                          log=lambda m: None) == fs.CRASH_EXIT
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+def test_the_control_service_maps_run_up_s_exits(tmp_path, monkeypatch):
+    path = onsite_config(tmp_path)
+    seen = []
+
+    def run_up(args):
+        cfg = up.load_config(args.config)
+        args.config_adjust(cfg)
+        seen.append(cfg["rollout"]["drain_on_exit"])
+        return codes.pop(0)
+
+    codes = [1, 2, 0, 143]
+    monkeypatch.setattr(up, "main", run_up)
+    logs: list[str] = []
+    assert [fs.run_control(str(path), log=logs.append) for _ in range(4)] == [75, 2, 0, 143]
+    assert seen == [False] * 4  # never drains the pools on exit
+    assert any("rollout.drain_on_exit is not set" in m for m in logs)
+
+
+def test_the_control_unit_runs_run_up_without_the_exit_drain(tmp_path, monkeypatch):
+    path = onsite_config(tmp_path)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    logs: list[str] = []
+    run = up.open_run(str(path), adjust=lambda cfg: fs.no_exit_drain(cfg, logs.append))
+    assert up.rollout_section(run.cfg)["drain_on_exit"] is False and len(logs) == 1
+    doc = onsite_doc(tmp_path)
+    doc["rollout"]["drain_on_exit"] = True
+    explicit = tmp_path / "drain.json"
+    explicit.write_text(json.dumps(doc))
+    with pytest.raises(up.RunConfigError, match="drain_on_exit is true"):
+        up.open_run(str(explicit), adjust=lambda cfg: fs.no_exit_drain(cfg, logs.append))
+    monkeypatch.setattr(fs.signal, "signal", lambda *a: None)
+    assert fs.service_run(service_args(explicit, "control"), objects=DirectoryObjectStore(tmp_path / "s"),
+                          log=logs.append) == 2
+    assert "rollout.drain_on_exit is true" in logs[-1]
 
 
 def test_the_documented_commands_run(tmp_path, monkeypatch, capsys):
     """docs/OWN_CLUSTERS.md, "On-site control plane": every `yeto fleet service` command parses,
-    the --print ones write a unit, the --install ones go through (a fake) ssh only."""
+    the --print ones write a unit, the others go through (a fake) ssh only."""
     import re
     from pathlib import Path
 
     doc = (Path(__file__).resolve().parents[1] / "docs" / "OWN_CLUSTERS.md").read_text()
     section = doc.split("## On-site control plane", 1)[1].split("\n## ", 1)[0]
-    commands = re.findall(r"^yeto (fleet service .+)$", section, flags=re.M)
-    assert len(commands) == 4
+    commands = re.findall(r"^\s*yeto (fleet service .+)$", section, flags=re.M)
+    assert len(commands) == 6
     config = onsite_config(tmp_path)
     ssh = FakeSsh()
     monkeypatch.setattr(fs.subprocess, "run", ssh)
     for line in commands:
-        argv = (line.replace("run.json", str(config)).replace("<run>", "r")
+        argv = (line.split("#", 1)[0].replace("run.json", str(config)).replace("<run>", "r")
                 .replace("<syncer-host>", "site-s").replace("<control-host>", "site-c").split())
         assert fleet_cli.main(fleet_cli_args(argv)) == 0, line
     out = capsys.readouterr().out
-    assert out.count("[Service]") == 2 and [c[0][3] for c in ssh.calls] == ["site-s", "site-c"]
+    assert out.count("[Service]") == 2
+    assert [c[0][3] for c in ssh.calls] == ["site-s", "site-c", "site-s", "site-c"]

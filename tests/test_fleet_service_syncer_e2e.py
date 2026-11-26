@@ -18,6 +18,7 @@ import types
 import pytest
 import torch
 
+from test_fleet_service import _env  # noqa: F401 - autouse: fake secrets, env restored
 from test_integration import DIM, ToyLearner
 from test_rl_full_parameter_async import needs_cargo
 from test_rl_full_parameter_async import syncer_binary  # noqa: F401 - fixture
@@ -60,6 +61,12 @@ class ServiceSyncer(LocalSyncer):
         self.tape_forwarder = self.tape_run = None
         self._log_offset = self._event_offset = 0
         self.store_uploaders = ()
+
+    def start_store_upload(self, args) -> None:  # no run store tape upload here (a local store)
+        return None
+
+    def start_log_forwarder(self) -> None:
+        return None
 
 
 def _steps(tape) -> list[int]:
@@ -153,3 +160,99 @@ def test_a_killed_syncer_is_restarted_from_its_checkpoint_and_the_merge_goes_on(
         syncer.stop()
         for learner in learners:
             learner.join(timeout=5)
+
+
+@needs_cargo
+def test_the_whole_service_process_stopped_and_started_again_goes_on_at_the_same_term(  # noqa: PLR0915
+        syncer_binary, tmp_path, monkeypatch):  # noqa: F811
+    """``yeto fleet service-run --role syncer`` as the unit runs it, twice on one host: the
+    first service process ends on SIGTERM (a stop or restart of the unit), the second
+    resumes the syncer from its checkpoint, at the same term, and the merge goes on to the
+    run's last step: every outer step once, in order, none merged twice."""
+    import os
+
+    from test_fleet_island_launches import _prepared
+    from test_fleet_service import onsite_config
+    from yeto.rl import fleet_service as fs
+    from yeto.rl import up
+
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "service-restart-e2e-key")
+    monkeypatch.setenv("YETO_RESOURCE_LEDGER", str(tmp_path / "ledger.jsonl"))
+    port, total = _port(), 14
+    objects = DirectoryObjectStore(tmp_path / "store")
+    monkeypatch.setattr(syncer_mod, "_head_ports", lambda args: [port])
+    monkeypatch.setattr(fleet_syncer, "_store_objects", lambda args: objects)
+    # the fleet's last record is another host's syncer's (term 3): this service starts at 4
+    island_launches.write_syncer_record(objects, addr="10.0.0.9:29400", syncer_epoch=3, learners=1, max_learners=4,
+                                        run="r", extra={"service": "10.0.0.9", "service_node": "site-x"})
+    config = str(onsite_config(tmp_path, host="127.0.0.1"))
+    layout = build_layout([("model.embed.weight", DIM // 4), ("model.body.weight", DIM)], 2)
+    target = torch.ones(DIM + DIM // 4)
+    learners: list = []
+    records: list[dict] = []
+    logs: list[str] = []
+    done = threading.Event()
+
+    def service(**kw):
+        return fs.run_syncer(config, objects=objects, parse=_prepared, node="site-s", log=logs.append,
+                             make_syncer=lambda args, n: ServiceSyncer(syncer_binary, tmp_path, port, total), **kw)
+
+    def keep_learning():
+        """The island: it dials the syncer once it is recorded, redials it across the restart,
+        and one whose redials ran out starts again (as its launch would relaunch it)."""
+        while island_launches.read_syncer_record(objects) is None or \
+                island_launches.read_syncer_record(objects).get("service") != "127.0.0.1":
+            if done.wait(0.1):
+                return
+        while not done.is_set():
+            if not learners or (not learners[-1].is_alive() and learners[-1].final_manifest is None):
+                learners.append(ToyLearner(0, port, target, layout, dtype=DTYPE_F32))
+                learners[-1].start()
+            if learners[-1].final_manifest is not None:
+                return
+            done.wait(0.2)
+
+    def stop_service_at(steps: int):
+        deadline = time.monotonic() + 90
+        while len(_steps(tmp_path / "tape.jsonl")) < steps and time.monotonic() < deadline:
+            time.sleep(0.05)
+        records.append(island_launches.read_syncer_record(objects))
+        os.kill(os.getpid(), signal.SIGTERM)  # this process: the service, as systemd stops the unit
+
+    island = threading.Thread(target=keep_learning, daemon=True)
+    island.start()
+    previous = signal.signal(signal.SIGTERM, fs._exit_on_sigterm)
+    try:
+        threading.Thread(target=stop_service_at, args=(4,), daemon=True).start()
+        with pytest.raises(SystemExit) as stopped:
+            service()
+        assert stopped.value.code == 128 + signal.SIGTERM
+        signal.signal(signal.SIGTERM, previous)
+        before = _steps(tmp_path / "tape.jsonl")
+        resumed_from = read_checkpoint_global_step(tmp_path / "state.ckpt")
+        assert resumed_from >= 4 and before == list(range(1, len(before) + 1))
+        assert fleet_syncer.read_service_status(objects)["state"] == "running"  # a stop of the unit: no end
+        assert service() == 0  # started again: resumes, merges to the end, the run is finished
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        done.set()
+        island.join(timeout=30)
+        for learner in learners:
+            learner.join(timeout=5)
+    (first,) = records
+    assert first["syncer_epoch"] == 4 and first["service_generation"] == 1
+    # the second service: the same host, so the same term; a new lease token (its generation) fences the first
+    runs_at = [m for m in logs if "runs on this host at" in m]
+    assert len(runs_at) == 2 and "(epoch 4, generation 1," in runs_at[0] and "(epoch 4, generation 2," in runs_at[1]
+    assert "resumed from checkpoint" in (tmp_path / "syncer.log").read_text()
+    steps = _steps(tmp_path / "tape.jsonl")
+    assert steps == list(range(1, total + 1))  # every outer step once, in order: none skipped, none merged twice
+    assert steps[len(before)] == resumed_from + 1
+    assert read_checkpoint_global_step(tmp_path / "state.ckpt") == total
+    assert fleet_syncer.read_service_status(objects)["state"] == "finished"
+    finals = [learner for learner in learners if learner.final_manifest is not None]
+    assert len(finals) == 1 and finals[0].final_manifest.global_step == total

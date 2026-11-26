@@ -27,6 +27,10 @@ class LocalSyncer:
     """
 
     store_uploaders: tuple = ()  # start_store_upload: the syncer tape's run-store uploaders
+    env: dict[str, str] | None = None  # the syncer process's environment (None: this process's)
+    # how long a stop waits for the syncer to end after SIGTERM (it writes its checkpoint)
+    # before SIGKILL; None: 10 s for the shell, then 10 s for its process group
+    stop_grace_s: float | None = None
 
     def __init__(
         self,
@@ -34,7 +38,12 @@ class LocalSyncer:
         num_learners: int,
         binary: str = "~/yeto-syncer",
         log_file: str = "~/yeto-syncer.log",
+        *,
+        env: dict[str, str] | None = None,
+        stop_grace_s: float | None = None,
     ):
+        self.env = None if env is None else dict(env)
+        self.stop_grace_s = None if stop_grace_s is None else float(stop_grace_s)
         self.command = syncer_command(args, num_learners, binary=binary)
         self.binary = os.path.expanduser(binary)
         self.log_file = os.path.expanduser(log_file)
@@ -70,6 +79,7 @@ class LocalSyncer:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
+                env=self.env,
             )
         finally:
             log_f.close()  # Popen holds its own duplicate of the fd
@@ -142,11 +152,13 @@ class LocalSyncer:
         if self.proc is None or self._reaped:
             return
         self._signal_tree(signal.SIGTERM)
+        grace = self.stop_grace_s
+        started = time.monotonic()
         try:
-            self.proc.wait(timeout=10)
+            self.proc.wait(timeout=10 if grace is None else grace)
         except subprocess.TimeoutExpired:
             pass
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 10 if grace is None else started + grace
         while self._group_alive() and time.monotonic() < deadline:
             time.sleep(0.1)
         if self._group_alive() or self.proc.poll() is None:
