@@ -429,7 +429,7 @@ ALLOW_UNPARSABLE_RUNNING = "--allow-unparsable-running"
 
 def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_epoch: int | None = None,
           prepare: Callable[[Any], None] | None = None, running: Iterable[dict[str, Any]] = (),
-          allow_unparsable_running: bool = False) -> None:
+          allow_unparsable_running: bool = False) -> list[str]:
     """Raise ValueError naming every disagreement between the syncer launch (``syncer_argv``)
     and the island launches of ``members`` (trainer members of the desired state), each
     compiled with the syncer record's term (``syncer_epoch``; None: the syncer launch's),
@@ -439,7 +439,8 @@ def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_e
     does not compile cannot be compared with and refuses the check; for a recorded
     ``launch_argv`` (written when that incarnation started, so a changed config does not
     change it) ``allow_unparsable_running`` (:data:`ALLOW_UNPARSABLE_RUNNING`) makes that a
-    WARN and leaves the island out of the comparison."""
+    WARN and leaves the island out of the comparison. Returns the names of the running
+    islands left out that way (empty: every one was compared)."""
     from yeto.rl import island_launches as il  # noqa: PLC0415
 
     try:
@@ -455,7 +456,7 @@ def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_e
         except (OSError, ValueError) as error:  # json.JSONDecodeError is a ValueError
             raise ValueError(f"island {member.get('name')} (learner {member.get('learner_id')}): its launch "
                              f"refuses its options: {type(error).__name__}: {error}") from None
-    held = []
+    held, skipped = [], []
     for member in running:  # ``launch_argv``: the argv the island was started with (as recorded)
         try:
             argv = member.get("launch_argv") or il.launch_argv(member, syncer=record)
@@ -474,8 +475,10 @@ def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_e
                                  f"remove that island first (yeto fleet island remove --name {name})") from None
             print(f"fleet session: WARN: {text}; {ALLOW_UNPARSABLE_RUNNING}: the island is left out of the "
                   "comparison", file=sys.stderr)
+            skipped.append(str(name))
     found = (problems(syncer, islands) + identity_problems(syncer, islands, held) + shape_problems(islands, held)
              + placement_problems(islands, held))
     if found:
         raise ValueError("the fleet's launches do not agree on the syncer session (the syncer would refuse "
                          "these islands at HELLO): " + "; ".join(found))
+    return skipped

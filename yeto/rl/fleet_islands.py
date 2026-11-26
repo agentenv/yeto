@@ -300,16 +300,21 @@ def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
         running.append(_as_launched(objects, {**previous, "name": f"{previous['name']} (its machines before the move)",
                                               "island_name": previous["name"]}))
     try:
-        fleet_session.check(run.trainer_argv() if hasattr(run, "trainer_argv") else run.cfg["trainer"]["argv"],
-                            [member], syncer_epoch=epoch if isinstance(epoch, int) else None, running=running,
-                            allow_unparsable_running=allow_unparsable_running)
+        skipped = fleet_session.check(
+            run.trainer_argv() if hasattr(run, "trainer_argv") else run.cfg["trainer"]["argv"],
+            [member], syncer_epoch=epoch if isinstance(epoch, int) else None, running=running,
+            allow_unparsable_running=allow_unparsable_running)
     except ValueError as error:
         if unread is None:
             raise
         raise ValueError(f"{error} (the fleet's syncer record could not be read ({unread}), so the island's "
                          "machines before the move were taken to hold a running session; retry once the "
                          "record reads)") from None
-    print(f"fleet island: island {member['name']} agrees with the syncer launch on the syncer session")
+    if skipped:  # --allow-unparsable-running: not every running island was compared
+        print(f"fleet island: island {member['name']}: checked {len(running) - len(skipped)} of {len(running)} "
+              f"islands; skipped {', '.join(skipped)} (unparsable record)")
+    else:
+        print(f"fleet island: island {member['name']} agrees with the syncer launch on the syncer session")
 
 
 # -- the command --------------------------------------------------------------------------------

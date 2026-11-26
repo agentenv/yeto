@@ -14,9 +14,11 @@ the complete lines added since the last upload become one new object
 id ``k``) and ``fleet`` for a launch of the whole fleet; each launcher process adds its
 own folder (a random nonce: two launchers of one host never share one, even with the same
 pid in the same second), so no two write the same key. The copy covers this run's part of
-the local file (:func:`copy_start`: a run directory reused by another run starts at the
-file's end); a launcher restarted for the same run uploads its earlier lines again, and the
-readers fold each record once. ``yeto down`` copies the ``island_stop`` lines it appends
+the local file only, as ``fleet.store.json`` records it (:func:`copy_start`, see "which part
+of the local file belongs to this store" below): a run directory reused by another run, or
+copied under another name, starts at the file's end; a launcher restarted for the same run
+uploads its earlier lines again, and the readers fold each record once. ``yeto down`` copies
+the ``island_stop`` lines it appends into the store the record of its run names
 (:func:`upload_appended`).
 
 Observation only: a failed upload is a WARN on stderr and is retried with the next
@@ -78,7 +80,13 @@ def incarnation(*, host: str | None = None, pid: int | None = None, now: float |
 # record (written before this copy existed), starts at the file's end, so an earlier run's
 # lines never reach this run's store (the rule of ``tape_upload.syncer_uploaders(from_end=True)``).
 # A launch that does not copy the file voids the record (:func:`copy_off`): no store, the file's
-# end. ``yeto down`` copies its lines only for the run the record names.
+# end. ``yeto down`` copies its lines only for the run the record names. The run is named by
+# its directory name and registry start (``<name>@<started_at>``), so a copied run directory
+# is another run. A record that does not parse is a WARN and counts as none, but the copy
+# then starts at this run's first line (the first with ``time_unix`` at or after the run's
+# registry start), or at the file's end when that start is unknown: fewer lines rather than
+# another run's; ``yeto down`` copies nothing for it. The record is written whole (a temporary
+# file renamed over it), so a crash mid-write leaves the previous record or the new one.
 
 COPY_RECORD = "fleet.store.json"
 COPY_SCHEMA = "yeto.fleet.log-copy/v1"
@@ -150,36 +158,81 @@ def _size(p: Path) -> int:
 
 
 def _write_record(p: Path, doc: dict) -> None:
+    """The record, written whole: a temporary file next to it renamed over it."""
+    record = copy_record_path(p)
+    tmp = record.with_name(f".{record.name}.{os.getpid()}.{secrets.token_hex(3)}.tmp")
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        copy_record_path(p).write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, record)
     except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         _stderr(f"[launcher] WARN: fleet.jsonl store copy: {COPY_RECORD} not written ({type(exc).__name__})")
+
+
+def _started_of(run: str | None) -> float | None:
+    """The registry start in a :func:`run_identity` (None: no identity, or not one)."""
+    try:
+        return float(str(run).rsplit("@", 1)[1]) if run else None
+    except (IndexError, ValueError):
+        return None
+
+
+def _first_line_at(p: Path, started: float, size: int) -> int:
+    """The byte offset of the first complete line of ``p`` whose ``time_unix`` is at or after
+    ``started`` (this run's first line: an earlier run's lines precede it), else ``size``."""
+    offset = 0
+    with p.open("rb") as fh:
+        for line in fh:
+            if offset + len(line) > size or not line.endswith(b"\n"):
+                break
+            try:
+                t = json.loads(line).get("time_unix")
+            except (ValueError, AttributeError):
+                t = None
+            if isinstance(t, (int, float)) and not isinstance(t, bool) and t >= started:
+                return offset
+            offset += len(line)
+    return size
 
 
 def copy_start(path: str | os.PathLike, store: str, *, learner_id: Any = None, run: str | None = None,
                log: Callable[[str], None] | None = None) -> int:
     """The byte offset of ``path`` this launch's copy into ``store`` starts at (see above),
     recorded for the next launch and for ``yeto down``. ``run``: :func:`run_identity` (None:
-    the file's end). A corrupt record (a WARN) is taken as none, but the copy starts at the
-    file's start: where this run's lines begin is unknown, and the readers fold each record
-    once. Never raises (a record that cannot be written: the offset still holds for this launch)."""
+    the file's end). A corrupt record (a WARN) is taken as none: the copy starts at this run's
+    first line (:func:`_corrupt_start`). Never raises (a record that cannot be written: the
+    offset still holds for this launch)."""
     p = Path(path)
     size = _size(p)
     try:
         known, why = _load_copy_record(p)
         if why is not None:
-            _corrupt(why, "the copy starts at the file's start", log or _stderr)
-            start = 0
+            start = _corrupt_start(p, why, run, size, log or _stderr)
         else:
             same = (known is not None and known.get("store") == str(store) and run is not None
                     and known.get("run") == run)
             start = min(known["start"], size) if same else size
     except Exception as exc:  # noqa: BLE001 - telemetry never stops a launch
-        _corrupt(type(exc).__name__, "the copy starts at the file's start", log or _stderr)
-        start = 0
+        _corrupt(type(exc).__name__, "the copy starts at the file's end", log or _stderr)
+        start = size
     _write_record(p, {"schema": COPY_SCHEMA, "store": str(store), "start": start, "run": run,
                       "learner_id": learner_id if lane(learner_id) != FLEET_LANE else None})
+    return start
+
+
+def _corrupt_start(p: Path, why: str, run: str | None, size: int, log: Callable[[str], None]) -> int:
+    """Where the copy of a run whose record is corrupt starts: this run's first line (by its
+    registry start), else (no start known) the file's end. Never another run's lines."""
+    started = _started_of(run)
+    if started is None:
+        _corrupt(why, "this run's start is unknown, so the copy starts at the file's end", log)
+        return size
+    start = _first_line_at(p, started, size)
+    _corrupt(why, f"the copy starts at this run's first line (byte {start}: time_unix at or after its start)", log)
     return start
 
 

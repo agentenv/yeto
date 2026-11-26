@@ -102,6 +102,22 @@ def test_islands_of_two_shapes_keep_the_shape_message_alone():
     assert "the same nodes x GPUs per node and parallel flags" in problems[0] and "does not help here" in problems[0]
 
 
+def test_shape_free_is_offered_when_one_island_binds_no_placement():
+    """Two shapes, one island binds its placement and the other none: the placements are not
+    two different ones, so the shape-free way out stays in the message."""
+    from yeto.rl.fleet_session import LaunchSession, Placement, shape_problems
+
+    bound = Placement(placement="colocated", nodes=1, gpus_per_node=8, trainer_nodes=1, trainer_gpus_per_node=8,
+                      rollout_gpus=0, standby_gpus=0, bundle_map="")
+    sessions = [LaunchSession(name=n, learner_id=i, profile={}, profile_sha256="", learners=0, hello="",
+                              syncer_epoch=0, max_learners=None, shape=shape, placement=placement)
+                for i, (n, shape, placement) in enumerate([("a", (1, 1, 1, 1, 8), bound),
+                                                           ("b", (1, 1, 1, 1, 4), None)])]
+    for order in (sessions, sessions[::-1]):
+        (found,) = shape_problems(list(order))
+        assert "or set --rl-sync-layout shape-free for the whole fleet" in found and "does not help" not in found
+
+
 @pytest.mark.parametrize("extra", [
     # one placement (per-island placement: TP2 on the same machines): shape-free takes the shape out
     [*FLEET, "--rl-island-placement", "1:tensor-parallel=2", "--gpu", f"{ONE_BY_EIGHT},{ONE_BY_EIGHT}"],
@@ -416,8 +432,11 @@ def test_an_unparsable_running_record_is_refused_unless_allowed(fleet_store, cap
     assert "Pass --allow-unparsable-running" in err and "yeto fleet island remove --name mixed)" in err
     assert store.read()["generation"] == before
     assert run_cli(*move, "--allow-unparsable-running", "--dry-run") == 0
-    err = capsys.readouterr().err
-    assert "fleet session: WARN:" in err and "the island is left out of the comparison" in err
+    captured = capsys.readouterr()
+    assert "fleet session: WARN:" in captured.err and "the island is left out of the comparison" in captured.err
+    # not reported as agreeing: one of the two running launches was not compared
+    assert "agrees with the syncer launch" not in captured.out
+    assert "checked 1 of 2 islands; skipped mixed (unparsable record)" in captured.out
 
 
 def test_the_narrow_way_out_does_not_cover_an_island_whose_desired_launch_does_not_compile(tmp_path):
