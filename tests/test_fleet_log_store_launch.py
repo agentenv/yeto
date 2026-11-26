@@ -3,6 +3,9 @@ there (``dashboard.fleet_store``); see test_fleet_log_store.py for the unit case
 
 from __future__ import annotations
 
+import pytest
+
+import test_k31_customer_plan_golden as golden
 import yeto.launcher as launcher
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401  (autouse fixtures)
 from test_rl_launcher_island_failure import _setup
@@ -47,3 +50,46 @@ def test_a_launch_without_island_records_uploads_nothing(monkeypatch, tmp_path):
     assert launcher.run(args) == 0
     assert (runs.run_dir(args.cluster_prefix) / "fleet.jsonl").is_file()
     assert not [k for k in _store_keys(store) if k.startswith("fleet/")] if store.exists() else True
+
+
+# -- the customer path ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("case", sorted(golden.CASES))
+def test_the_customer_runs_keep_no_island_records_so_no_fleet_log_upload(case, tmp_path, monkeypatch):
+    """Every customer K3.1 run (one buffer trainer, async GRPO, no fleet): the launch keeps
+    no island records in the store (``island_lifecycle_enabled`` False, as on main), so the
+    launcher builds its fleet log with ``objects=None`` and nothing is uploaded."""
+    import yeto.cli as cli
+    from yeto.gpu_spec import parse_gpu_spec
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    args = cli.parse_args(golden._argv(golden.CASES[case], tmp_path))  # noqa: SLF001
+    assert not getattr(args, "dry_run", False) and getattr(args, "island_lifecycle", None) in (None, "auto")
+    assert launcher.island_lifecycle_enabled(args, parse_gpu_spec(args.gpu)) is False
+
+
+class Recording:
+    def __init__(self):
+        self.keys = []
+
+    def write(self, key, data):
+        self.keys.append(key)
+
+
+def test_the_tape_uploader_default_keys_are_main_s(tmp_path):
+    """Without ``prefix`` the uploader writes main's keys (``tapes/<island>/<incarnation>/<seq>``),
+    and the trainer / syncer uploaders pass none."""
+    import inspect
+
+    from yeto.rl.engine import tape_upload
+
+    assert tape_upload.chunk_key("trainer", "l0-h-20261127T000000Z", 3) == "tapes/trainer/l0-h-20261127T000000Z/00000003.jsonl"
+    assert tape_upload.chunk_key("a/b", "", 0) == "tapes/a_b/_/00000000.jsonl"
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text('{"a": 1}\n{"b": 2}\n')
+    objects = Recording()
+    up = tape_upload.TapeUploader(objects, tape, island="syncer", incarnation="h-1", interval_s=30.0)
+    assert up.prefix == "tapes" and up.interval_s == 30.0 and up.flush() > 0
+    assert objects.keys == ["tapes/syncer/h-1/00000000.jsonl"]
+    for fn in (tape_upload.trainer_uploader, tape_upload.syncer_uploaders):
+        assert "prefix" not in inspect.getsource(fn)
