@@ -22,13 +22,14 @@ only when every step passed.
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+
+from yeto.exact_argparse import ExactArgumentParser
 
 STEP_MARK = "YETO_SMOKE"
 RESULT_MARK = "YETO_SMOKE_RESULT"
@@ -118,7 +119,7 @@ def run_smoke(engine: Any, *, release: str | None, prompt: str = "Say hello.", m
 
 
 def main(argv: list[str] | None = None, *, out: Any = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m yeto.node.smoke", description=__doc__.split("\n\n")[0])
+    parser = ExactArgumentParser(prog="python -m yeto.node.smoke", description=__doc__.split("\n\n")[0])
     parser.add_argument("--spec", required=True, help="the sampler spec (JSON) whose engine is smoked")
     parser.add_argument("--release", default=None,
                         help="the release directory the reload loads (default: engine.server.base_dir)")
