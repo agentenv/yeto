@@ -150,6 +150,21 @@ island (the template: 1 x 8 x B300 on both), or declare one group with
 `--rl-compat-group` and set `--rl-sync-layout shape-free` for the whole fleet.
 The dry run refuses islands of two shapes, naming both.
 
+A Miles full-parameter island (`--rl-sync-preset full-parameter`, or
+`decoupled` with `--tuning full`, which routes to it) also binds its placement
+into the session contract it offers the syncer: nodes x GPUs per node, the
+trainer's nodes x GPUs and the trainer/rollout split (`--actor-num-nodes`,
+`--actor-num-gpus-per-node`, `--num-gpus-per-node`, `--rollout-num-gpus`).
+Two such islands of one shape on other machines (2 x 4 and 1 x 8 GPUs, DP 8 on
+both) build one layout but two contracts, and the syncer refuses the later
+island at HELLO (`session mismatch`). The fleet preflight (`yeto run up`, its
+dry run, and `yeto fleet island add/move`) compares the TP/PP/EP/CP/DP of the
+islands and, for these islands, their placement, and refuses the fleet before
+anything is ordered, naming both. Run every island of such a fleet on the same
+nodes x GPUs per node; `--rl-sync-layout shape-free` drops the parallel shape
+from the contract, not the placement. LoRA, the `strict-avg` default and verl
+islands do not bind their placement and are not compared.
+
 ## Own sampler pools
 
 Your nodes serve as a sampler pool with `provider.kind: ssh`

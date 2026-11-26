@@ -19,6 +19,13 @@ prepares it (nothing is ordered or read remotely) and compared with the syncer l
   move/add`` also compares the island with the ones that hold the fleet's running
   session (the other trainer islands, and a moved island's previous machines).
 
+* each island's trainer placement (:func:`placement_problem`): a Miles full-parameter
+  island (the routed ``--sync-preset full-parameter``) binds its placement (nodes, GPUs
+  per node, the trainer / rollout / standby split) into its training contract, so two
+  islands of one shape (same TP/PP/EP/CP/DP) on ``2x4`` and ``1x8`` GPUs offer two
+  session contracts and the syncer refuses the later one ("session mismatch"). Islands
+  of different shapes are reported by the shape check alone.
+
 ``yeto run up`` (dry run too) checks the trainer islands of the desired state (else the
 run config's) at its preflight; ``yeto fleet island add/move`` checks the island it
 writes.
@@ -38,6 +45,31 @@ PLACEHOLDER_ADDR = "SYNCER:29400"
 
 
 @dataclass(frozen=True)
+class Placement:
+    """What a Miles full-parameter island binds into its training contract of its placement
+    (``island_entry._DENSE_PLACEMENT_MILES_FLAGS``: ``--actor-num-nodes``,
+    ``--actor-num-gpus-per-node``, ``--num-gpus-per-node``, ``--rollout-num-gpus``,
+    ``--colocate``, ``--yeto-placement-map``), read from the launch as the island task
+    renders them (``rl_island_task``)."""
+
+    placement: str  # colocated | fixed-partition
+    nodes: int  # the island's nodes
+    gpus_per_node: int  # GPUs the island uses on each node (visible to Miles)
+    trainer_nodes: int  # --actor-num-nodes
+    trainer_gpus_per_node: int  # --actor-num-gpus-per-node
+    rollout_gpus: int  # fixed partition: --rollout-num-gpus (0 colocated)
+    standby_gpus: int
+    bundle_map: str  # --rl-island-bundle-map when it differs from the leading bundles, else ""
+
+    def describe(self) -> str:
+        out = (f"{self.nodes}x{self.gpus_per_node} GPUs ({self.placement}, trainer "
+               f"{self.trainer_nodes}x{self.trainer_gpus_per_node}")
+        if self.placement != "colocated":
+            out += f", rollout {self.rollout_gpus}, standby {self.standby_gpus}"
+        return out + (", own bundle map" if self.bundle_map else "") + ")"
+
+
+@dataclass(frozen=True)
 class LaunchSession:
     name: str
     learner_id: int | None
@@ -54,6 +86,9 @@ class LaunchSession:
     # (TP, PP, EP, CP, DP) of the trainer under a shape-bound full-parameter layout (None:
     # not one island's launch, or a layout that does not depend on the shape)
     shape: tuple[int, int, int, int, int] | None = None
+    # the trainer placement a Miles full-parameter island binds into its contract
+    # (:func:`launch_placement_of`; None: not one island's launch, or a contract without it)
+    placement: Placement | None = None
 
 
 def _prepare(args: Any) -> None:
@@ -85,7 +120,7 @@ def launch_session(argv: list[str], name: str, *, prepare: Callable[[Any], None]
                          max_learners=None if max_learners is None else int(max_learners),
                          compat_group=launch_compat_group_of(args),
                          strict_identity=getattr(args, "rl_identity", "strict") != "relaxed",
-                         shape=launch_shape_of(args))
+                         shape=launch_shape_of(args), placement=launch_placement_of(args))
 
 
 def launch_shape_of(args: Any) -> tuple[int, int, int, int, int] | None:
@@ -121,6 +156,112 @@ def launch_shapes_of(args: Any) -> list[tuple[int, int, int, int, int]] | None:
             out.append((tp, pp, ep, cp, max(1, nodes * gpus // (tp * pp * cp))))
     except (ValueError, KeyError, AttributeError, ImportError):
         return None  # a shape the launch refuses: its own dry run says why
+    return out
+
+
+def routed_preset(args: Any) -> str | None:
+    """The sync preset the launch routes its islands to (``sync_route.apply_sync_route``:
+    ``decoupled`` with ``--tuning full`` becomes ``full-parameter``); a prepared launch
+    keeps its route, a parsed one is routed on a copy. None for a non-RL launch."""
+    import copy  # noqa: PLC0415
+
+    route = getattr(args, "rl_sync_route", None)
+    if route is None:
+        from yeto.rl.engine.sync_route import SyncRouteError, apply_sync_route  # noqa: PLC0415
+
+        try:
+            route = apply_sync_route(copy.copy(args))
+        except SyncRouteError:
+            return None
+    return None if route is None else str(route.preset)
+
+
+def _binds_placement(args: Any) -> bool:
+    """Whether the launch's islands bind their placement into their session contract: Miles
+    islands of the routed ``full-parameter`` preset (``island_entry``'s dense full-parameter
+    training contract keeps the placement flags; a uniform fleet launch never gives the
+    islands placements of their own)."""
+    from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESET  # noqa: PLC0415
+
+    return ((getattr(args, "rl_backend", None) or "miles") == "miles"
+            and routed_preset(args) == FULL_PARAMETER_SYNC_PRESET)
+
+
+def launch_placements_of(args: Any) -> list[Placement] | None:
+    """The :class:`Placement` of each ``--gpu`` cluster of a launch (in ``--gpu`` order),
+    or None: the islands bind no placement (:func:`_binds_placement`) or the launch does
+    not parse (its own dry run says why)."""
+    from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
+    from yeto.launch.topology import (rl_island_args, rl_island_bundle_map_flag,  # noqa: PLC0415
+                                      rl_island_spec, rl_trainer_shape)
+
+    try:
+        if not _binds_placement(args):
+            return None
+        specs = parse_gpu_spec(str(getattr(args, "gpu", None) or ""))
+        out = []
+        for m, spec in enumerate(specs):  # each island as it sees itself
+            iargs = rl_island_args(args, m)
+            island = rl_island_spec(iargs, spec)
+            nodes, gpus = rl_trainer_shape(iargs, island)
+            placement = str(getattr(iargs, "rl_placement", "colocated") or "colocated")
+            fixed = placement == "fixed-partition"
+            out.append(Placement(
+                placement=placement, nodes=int(island.num_nodes), gpus_per_node=int(island.gpus_per_node),
+                trainer_nodes=int(nodes), trainer_gpus_per_node=int(gpus),
+                rollout_gpus=int(getattr(iargs, "rollout_num_gpus", 0) or 0) if fixed else 0,
+                standby_gpus=int(getattr(iargs, "rl_standby_gpus", 0) or 0) if fixed else 0,
+                bundle_map=rl_island_bundle_map_flag(iargs, island).strip()))
+    except (ValueError, KeyError, AttributeError, ImportError, TypeError):
+        return None
+    return out or None
+
+
+def launch_placement_of(args: Any) -> Placement | None:
+    """:func:`launch_placements_of` of a one-cluster launch (one island's)."""
+    placements = launch_placements_of(args)
+    return placements[0] if placements is not None and len(placements) == 1 else None
+
+
+def placement_problem(island: tuple[str, Any], peer: tuple[str, Any]) -> str | None:
+    """Why the syncer would refuse ``island`` next to ``peer``: each ``(name, args)``, the
+    args of one island's launch (one ``--gpu`` cluster, parsed or prepared). Both bind their
+    placement into their contract and are of one trainer shape, but their placements
+    differ; None otherwise (islands of two shapes: :func:`shape_problems` names them).
+    For ``yeto fleet island add/move``: the new island against a running one."""
+    (name, args), (peer_name, peer_args) = island, peer
+    mine, theirs = launch_placement_of(args), launch_placement_of(peer_args)
+    shape, peer_shape = launch_shape_of(args), launch_shape_of(peer_args)
+    return _placement_text(name, mine, shape, peer_name, theirs, peer_shape)
+
+
+def _placement_text(where: str, mine: Placement | None, shape: Any, peer_where: str, theirs: Placement | None,
+                    peer_shape: Any) -> str | None:
+    if mine is None or theirs is None or mine == theirs:
+        return None
+    if shape is not None and peer_shape is not None and shape != peer_shape:
+        return None  # another shape: the shape check's own message
+    return (f"{where}: trainer placement {mine.describe()}, {peer_where} trains on {theirs.describe()}: a "
+            "full-parameter island binds its placement (nodes, GPUs per node, trainer and rollout split) into its "
+            "training contract, so the syncer refuses this island's HELLO (session mismatch). Give every island "
+            "the same nodes x GPUs per node and the same placement flags")
+
+
+def placement_problems(islands: list[LaunchSession], running: Iterable[LaunchSession] = ()) -> list[str]:
+    """:func:`placement_problem` over launches: each island against the first one before it
+    (``running`` first: the launches holding the fleet's running session) of its shape."""
+    out: list[str] = []
+    peers = [r for r in running if r.placement is not None]
+    for island in islands:
+        if island.placement is None:
+            continue
+        peer = next((p for p in peers if p.shape is None or island.shape is None or p.shape == island.shape), None)
+        found = None if peer is None else _placement_text(_where(island), island.placement, island.shape,
+                                                          _where(peer), peer.placement, peer.shape)
+        if found is not None:
+            out.append(found)
+        elif peer is None:
+            peers.append(island)
     return out
 
 
@@ -209,19 +350,27 @@ def identity_problems(syncer: LaunchSession, islands: list[LaunchSession],
 
 
 def synced_shape_problems(trainer_argv: list[str], names: list[str]) -> list[str]:
-    """:func:`shape_problems` of a synced-group fleet (one trainer launch of every island,
-    ``yeto run up``; :func:`check` compiles per-island fleets only): the shape of each
-    ``--gpu`` cluster of ``trainer_argv`` (island ``names[i]``, learner ``i``) under the
-    launch parser's reading (a launch that does not parse is left to its own dry run)."""
+    """:func:`shape_problems` and :func:`placement_problems` of a synced-group fleet (one
+    trainer launch of every island, ``yeto run up``; :func:`check` compiles per-island fleets
+    only): the shape and the placement of each ``--gpu`` cluster of ``trainer_argv`` (island
+    ``names[i]``, learner ``i``) under the launch parser's reading (a launch that does not
+    parse is left to its own dry run)."""
     from yeto.rl.up_consistency import trainer_args  # noqa: PLC0415
 
     args = trainer_args([str(a) for a in trainer_argv])
     shapes = None if args is None else launch_shapes_of(args)
-    if not shapes or len(shapes) != len(names):
+    placements = None if args is None else launch_placements_of(args)
+    if shapes is not None and len(shapes) != len(names):
+        shapes = None
+    if placements is not None and len(placements) != len(names):
+        placements = None
+    if not shapes and not placements:
         return []
-    return shape_problems([LaunchSession(name=name, learner_id=i, profile={}, profile_sha256="", learners=0, hello="",
-                                         syncer_epoch=0, max_learners=None, shape=shape)
-                           for i, (name, shape) in enumerate(zip(names, shapes))])
+    sessions = [LaunchSession(name=name, learner_id=i, profile={}, profile_sha256="", learners=0, hello="",
+                              syncer_epoch=0, max_learners=None, shape=shapes[i] if shapes else None,
+                              placement=placements[i] if placements else None)
+                for i, name in enumerate(names)]
+    return shape_problems(sessions) + placement_problems(sessions)
 
 
 def problems(syncer: LaunchSession, islands: Iterable[LaunchSession]) -> list[str]:
@@ -286,7 +435,8 @@ def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_e
         except (OSError, ValueError) as error:
             print(f"fleet session: island {member.get('name')}'s launch was not compiled for the identity "
                   f"check ({type(error).__name__}: {error})", file=sys.stderr)
-    found = problems(syncer, islands) + identity_problems(syncer, islands, held) + shape_problems(islands, held)
+    found = (problems(syncer, islands) + identity_problems(syncer, islands, held) + shape_problems(islands, held)
+             + placement_problems(islands, held))
     if found:
         raise ValueError("the fleet's launches do not agree on the syncer session (the syncer would refuse "
                          "these islands at HELLO): " + "; ".join(found))
