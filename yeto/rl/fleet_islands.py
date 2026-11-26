@@ -233,6 +233,28 @@ def launch_dry_run(member: dict[str, Any], *, incarnation: int = 0,
     return dry_run_plan(args)
 
 
+def _as_launched(objects: Any, member: dict[str, Any]) -> dict[str, Any]:
+    """``member`` as its island runs: a STARTING / RUNNING island's trainer worker record
+    names the launch argv and ``--gpu`` it was started with (``trainer_worker._start``), which
+    ``fleet_session.check`` compiles (``launch_argv``) instead of the desired state's member
+    (a move written while the old incarnation runs, an inventory or code changed since);
+    the member itself without such a record."""
+    if objects is None:
+        return member
+    from yeto.rl import trainer_worker  # noqa: PLC0415
+
+    try:
+        raw = objects.read(trainer_worker.launch_key(int(member["learner_id"])))
+        launched = json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001 - no readable record: the desired member, as before
+        return member
+    if (isinstance(launched, dict) and launched.get("state") in (trainer_worker.STARTING, trainer_worker.RUNNING)
+            and launched.get("argv")):
+        return {**member, "gpu": launched.get("gpu") or member.get("gpu"),
+                "launch_argv": [str(a) for a in launched["argv"]]}
+    return member
+
+
 def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
                   previous: dict[str, Any] | None = None, *, dry_run: bool = True) -> None:
     """The island ``member`` (added or moved) against the syncer launch of the run
@@ -247,7 +269,7 @@ def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
     machines as if a syncer ran. Raises ValueError naming every disagreement."""
     from yeto.rl import fleet_session  # noqa: PLC0415
 
-    record, unread = None, None
+    record, unread, objects = None, None, None
     try:
         objects = run._objects()  # noqa: SLF001
         record = il.read_syncer_record(objects)
@@ -269,9 +291,9 @@ def session_check(run: Any, doc: dict[str, Any], member: dict[str, Any],
         raise IslandChangeError(f"learner id {member['learner_id']} of island {member['name']} is island "
                                 f"{clash[0]}'s too")
     epoch = (record or {}).get("syncer_epoch")
-    running = list(others)
+    running = [_as_launched(objects, m) for m in others]
     if previous is not None and (record is not None or unread is not None):
-        running.append({**previous, "name": f"{previous['name']} (its machines before the move)"})
+        running.append(_as_launched(objects, {**previous, "name": f"{previous['name']} (its machines before the move)"}))
     try:
         fleet_session.check(run.trainer_argv() if hasattr(run, "trainer_argv") else run.cfg["trainer"]["argv"],
                             [member], syncer_epoch=epoch if isinstance(epoch, int) else None, running=running)

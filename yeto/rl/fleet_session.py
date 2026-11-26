@@ -24,7 +24,9 @@ prepares it (nothing is ordered or read remotely) and compared with the syncer l
   per node, the trainer / rollout / standby split) into its training contract, so two
   islands of one shape (same TP/PP/EP/CP/DP) on ``2x4`` and ``1x8`` GPUs offer two
   session contracts and the syncer refuses the later one ("session mismatch"). Islands
-  of different shapes are reported by the shape check alone.
+  of different shapes are reported by the shape check alone. A launch with its own island
+  placements (``--rl-island-placement``) leaves the placement out of the contract and is
+  not compared.
 
 ``yeto run up`` (dry run too) checks the trainer islands of the desired state (else the
 run config's) at its preflight; ``yeto fleet island add/move`` checks the island it
@@ -36,7 +38,6 @@ from __future__ import annotations
 import contextlib
 import io
 import re
-import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -105,7 +106,12 @@ def launch_session(argv: list[str], name: str, *, prepare: Callable[[Any], None]
     from yeto.launch.topology import rl_island_count  # noqa: PLC0415
     from yeto.rl.engine.sample_roles import syncer_learner_count  # noqa: PLC0415
 
-    args = parse_args(list(argv))
+    with contextlib.redirect_stderr(io.StringIO()) as err:  # argparse's message goes into the error
+        try:
+            args = parse_args(list(argv))
+        except SystemExit:
+            lines = err.getvalue().strip().splitlines()
+            raise ValueError(f"the launch does not parse ({lines[-1] if lines else 'argparse refused it'})") from None
     args.dry_run = True
     with contextlib.redirect_stdout(io.StringIO()):  # the launch's own notes: not this check's
         (prepare or _prepare)(args)
@@ -179,18 +185,21 @@ def routed_preset(args: Any) -> str | None:
 def _binds_placement(args: Any) -> bool:
     """Whether the launch's islands bind their placement into their session contract: Miles
     islands of the routed ``full-parameter`` preset (``island_entry``'s dense full-parameter
-    training contract keeps the placement flags; a uniform fleet launch never gives the
-    islands placements of their own)."""
+    training contract keeps the placement flags), unless the launch gives its islands their
+    own placement (``rl_ports.forwards_per_island_placement``: ``--rl-island-placement``,
+    which forwards ``--rl-per-island-placement`` and leaves the placement flags out)."""
+    from yeto.launch.rl_ports import forwards_per_island_placement  # noqa: PLC0415
     from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESET  # noqa: PLC0415
 
     return ((getattr(args, "rl_backend", None) or "miles") == "miles"
-            and routed_preset(args) == FULL_PARAMETER_SYNC_PRESET)
+            and routed_preset(args) == FULL_PARAMETER_SYNC_PRESET and not forwards_per_island_placement(args))
 
 
-def launch_placements_of(args: Any) -> list[Placement] | None:
-    """The :class:`Placement` of each ``--gpu`` cluster of a launch (in ``--gpu`` order),
-    or None: the islands bind no placement (:func:`_binds_placement`) or the launch does
-    not parse (its own dry run says why)."""
+def launch_placements_of(args: Any) -> list[Placement | None] | None:
+    """The :class:`Placement` of each ``--gpu`` cluster of a launch (in ``--gpu`` order; None
+    for an island whose own view binds none, e.g. a verl island of ``--rl-island-engine``), or
+    None: no island binds its placement (:func:`_binds_placement`) or the launch does not
+    parse (its own dry run says why)."""
     from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
     from yeto.launch.topology import (rl_island_args, rl_island_bundle_map_flag,  # noqa: PLC0415
                                       rl_island_spec, rl_trainer_shape)
@@ -202,6 +211,9 @@ def launch_placements_of(args: Any) -> list[Placement] | None:
         out = []
         for m, spec in enumerate(specs):  # each island as it sees itself
             iargs = rl_island_args(args, m)
+            if not _binds_placement(iargs):
+                out.append(None)
+                continue
             island = rl_island_spec(iargs, spec)
             nodes, gpus = rl_trainer_shape(iargs, island)
             placement = str(getattr(iargs, "rl_placement", "colocated") or "colocated")
@@ -214,7 +226,7 @@ def launch_placements_of(args: Any) -> list[Placement] | None:
                 bundle_map=rl_island_bundle_map_flag(iargs, island).strip()))
     except (ValueError, KeyError, AttributeError, ImportError, TypeError):
         return None
-    return out or None
+    return out if any(p is not None for p in out) else None
 
 
 def launch_placement_of(args: Any) -> Placement | None:
@@ -410,8 +422,9 @@ def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_e
     and the island launches of ``members`` (trainer members of the desired state), each
     compiled with the syncer record's term (``syncer_epoch``; None: the syncer launch's),
     and between the backend identities of ``members`` and ``running`` (the trainer
-    members whose launches hold the fleet's running session; compared with only: one
-    whose launch does not compile is left out with a note)."""
+    members whose launches hold the fleet's running session, each with the argv it was
+    started with as ``launch_argv`` when known; compared with only: one whose launch does
+    not compile refuses the check, it cannot be compared)."""
     from yeto.rl import island_launches as il  # noqa: PLC0415
 
     try:
@@ -428,13 +441,15 @@ def check(syncer_argv: list[str], members: Iterable[dict[str, Any]], *, syncer_e
             raise ValueError(f"island {member.get('name')} (learner {member.get('learner_id')}): its launch "
                              f"refuses its options: {type(error).__name__}: {error}") from None
     held = []
-    for member in running:
+    for member in running:  # ``launch_argv``: the argv the island was started with (as recorded)
         try:
-            held.append(launch_session(il.launch_argv(member, syncer=record), str(member.get("name")),
-                                       prepare=prepare))
+            argv = member.get("launch_argv") or il.launch_argv(member, syncer=record)
+            held.append(launch_session([str(a) for a in argv], str(member.get("name")), prepare=prepare))
         except (OSError, ValueError) as error:
-            print(f"fleet session: island {member.get('name')}'s launch was not compiled for the identity "
-                  f"check ({type(error).__name__}: {error})", file=sys.stderr)
+            raise ValueError(f"island {member.get('name')} (learner {member.get('learner_id')}), which holds the "
+                             f"running session: its launch{' as started' if member.get('launch_argv') else ''} "
+                             f"does not compile ({type(error).__name__}: {error}), so the island cannot be "
+                             "compared with it; fix that island's configuration (or remove it) first") from None
     found = (problems(syncer, islands) + identity_problems(syncer, islands, held) + shape_problems(islands, held)
              + placement_problems(islands, held))
     if found:

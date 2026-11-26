@@ -163,7 +163,10 @@ islands and, for these islands, their placement, and refuses the fleet before
 anything is ordered, naming both. Run every island of such a fleet on the same
 nodes x GPUs per node; `--rl-sync-layout shape-free` drops the parallel shape
 from the contract, not the placement. LoRA, the `strict-avg` default and verl
-islands do not bind their placement and are not compared.
+islands do not bind their placement and are not compared, nor is a launch that
+gives its islands their own placement (`--rl-island-placement`: the islands get
+`--rl-per-island-placement`, which leaves the placement flags out of the
+contract).
 
 ## Own sampler pools
 

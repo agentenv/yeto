@@ -67,8 +67,10 @@ def test_the_running_session_is_compared_with_but_not_reported_for(tmp_path):
     with pytest.raises(ValueError, match="compat_group nvidia-h200, the fleet's session holds compat_group "
                                          "nvidia-h100 \\(island\\(s\\) mixed-old\\)"):
         fleet_session.check(cfg["trainer"]["argv"], [moved], running=[{**old, "name": "mixed-old"}])
-    # A running launch that does not compile is left out (with a note), not a refusal.
-    fleet_session.check(cfg["trainer"]["argv"], [old], running=[{**old, "name": "broken", "gpu": "nowhere:9xq"}])
+    # A running launch that does not compile cannot be compared with: the check refuses.
+    with pytest.raises(ValueError, match=r"island broken \(learner 0\), which holds the running session: its "
+                                         r"launch does not compile .*fix that island's configuration"):
+        fleet_session.check(cfg["trainer"]["argv"], [old], running=[{**old, "name": "broken", "gpu": "nowhere:9xq"}])
 
 
 def test_a_move_to_h200_is_refused_at_its_dry_run_before_any_order(fleet_store, capsys):  # noqa: F811
