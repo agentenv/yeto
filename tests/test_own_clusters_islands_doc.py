@@ -42,6 +42,7 @@ def test_the_section_names_the_code_s_flags_and_events():
     assert f"{st.QUIET_POLLS} reads in a row" in text and f"every {st.STORE_POLL_S:g} s" in text
     assert f"at most {st.STORE_GETS_PER_POLL} chunks" in text and f"every {st.STORE_DISCOVER_POLLS} reads" in text
     assert f"up to {st.CLOCK_SKEW_S / 60:g} minutes before" in text
+    assert "(`--recover-timeout`" in text and "catch-up grace ran out" in text  # a new launch's grace
     for field in st.Straggler.__dataclass_fields__:
         if field not in ("island", "cleared", "cycles", "reason"):
             assert f"`{field}`" in text, field

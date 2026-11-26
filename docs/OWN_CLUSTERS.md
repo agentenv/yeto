@@ -969,7 +969,18 @@ merged. Counting starts when the island joins the syncer:
   counted this way.
 - Only the island's controller restarts the count. When the island stops running (its
   controller relaunches it, or it is stopped), its count starts again once it runs again: at
-  its next join after a relaunch, so the time it takes to start is not counted.
+  its next join after a relaunch, so the time it takes to start is not counted. The same
+  launch back from recovering is counted again at once.
+- A new launch catches up before it pushes: a large model's catch-up can take many merge
+  cycles. A new launch is an island relaunched by its controller (on new machines, on a spare
+  node, after a move) or a new island whose join the controller read. It is not counted until
+  its first push is merged, for at most the controller's recover timeout
+  (`--recover-timeout`, counted from when the controller holds the new launch running). Once
+  a push of it is merged, it is counted as usual. If none is merged by the end of the recover
+  timeout, it is counted from then on and reported `N` merge cycles later; its report's
+  `reason` says that the catch-up grace ran out. An island that a restarted launcher adopted
+  is not a new launch and has no grace. Each launch gets the grace once; a reconnect's join
+  neither starts it nor extends it.
 - A reconnect of the same trainer, or a syncer that takes over, writes a new join to the
   syncer's tape. That join keeps the count and the report: an island whose link keeps
   dropping and that never delivers is still reported.

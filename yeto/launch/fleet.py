@@ -1136,7 +1136,10 @@ class FleetController:
             if not getattr(self, "_straggler_marks_checked", False):
                 self._straggler_marks_checked = True
                 self._clear_left_marks(names)
-            for signal in self.straggler.poll(running):
+            # a new launch (a relaunch, a spare node, a new island) catches up before it pushes:
+            # not counted until its first merged push, at most for its recover timeout
+            grace = max(0.0, float(self.recover_timeout or 0.0))
+            for signal in self.straggler.poll(running, now=self.ops.now(), grace_s=grace):
                 rec = names.get(signal.island)
                 if rec is not None:
                     self._island_straggler(rec, signal)

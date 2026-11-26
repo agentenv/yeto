@@ -203,6 +203,131 @@ def test_an_island_the_syncer_lists_absent_is_counted_without_a_join():
     assert signal.island == 1 and signal.merges == 2 and signal.absent
 
 
+GRACE = 600.0  # the controller's recover timeout
+
+
+class _Merges:
+    """A tracker judged as its controller does (its clock, its recover timeout as the grace),
+    island 0 merged at every step, island 1 merged only when it pushes."""
+
+    def __init__(self, cycles=1, fragments=1):
+        self.tracker, self.fragments = st.StragglerTracker(cycles=cycles), fragments
+        self.step, self.now = 0, 0.0
+
+    def merge(self, *, pushes=False, absent=True, dt=30.0):
+        self.step += 1
+        self.now += dt
+        self.tracker.feed(_step(self.step, [0, 1] if pushes else [0], fragments=self.fragments,
+                                absent=[1] if absent and not pushes else []))
+
+    def check(self, running=None, **kw):
+        return self.tracker.check(RUN2 if running is None else running, now=self.now, grace_s=GRACE, **kw)
+
+
+def _relaunched(m):
+    """Island 1 pushed, then was relaunched (a new token: a spare node, a move, a relaunch)."""
+    m.tracker.feed(_join(0))
+    m.tracker.feed(_join(1))
+    m.merge(pushes=True)
+    assert m.check() == []
+    assert m.check({0: (0, 1)}) == []  # recovering
+    m.tracker.feed(_join(1))  # its new launch joins, then catches up
+    assert m.check({0: (0, 1), 1: (1, 2)}) == []
+
+
+def test_a_relaunch_catching_up_past_n_cycles_within_its_recover_timeout_is_not_reported():
+    m = _Merges(cycles=1)
+    _relaunched(m)
+    for _ in range(19):  # 19 merge cycles (570 s) without a push: inside the 600 s grace
+        m.merge()
+        assert m.check({0: (0, 1), 1: (1, 2)}) == []
+
+
+def test_past_its_recover_timeout_a_silent_relaunch_is_counted_from_then_and_reported_after_n_cycles():
+    m = _Merges(cycles=3, fragments=2)
+    _relaunched(m)
+    run, start = {0: (0, 1), 1: (1, 2)}, m.now  # its grace starts when its controller holds it running
+    while m.now + 30 < start + GRACE:
+        m.merge()
+        assert m.check(run) == []
+    m.merge()
+    assert m.check(run) == []  # its grace runs out at this check: counted from here on
+    for _ in range(3 * 2 - 1):  # one merge short of 3 cycles
+        m.merge()
+        assert m.check(run) == []
+    m.merge()
+    (signal,) = m.check(run)
+    assert signal.island == 1 and signal.merges == 6 and signal.missed_cycles == 3
+    assert "catch-up grace" in signal.reason
+    m.merge(pushes=True)
+    (back,) = m.check(run)
+    assert back.cleared and back.reason == "a push of it is merged again"
+
+
+def test_after_its_first_merged_push_a_relaunch_is_counted_as_usual():
+    m = _Merges(cycles=2)
+    _relaunched(m)
+    run = {0: (0, 1), 1: (1, 2)}
+    for _ in range(5):
+        m.merge()
+        assert m.check(run) == []
+    m.merge(pushes=True)  # caught up: its grace is over
+    assert m.check(run) == []
+    m.merge()
+    assert m.check(run) == []
+    m.merge()
+    (signal,) = m.check(run)
+    assert signal.merges == 2 and "catch-up grace" not in signal.reason
+
+
+def test_a_new_island_s_first_join_has_the_grace_an_adopted_one_none():
+    m = _Merges(cycles=1)
+    m.tracker.feed(_join(0))
+    assert m.check({0: (0, 1)}) == []
+    m.tracker.feed(_join(1))  # added to the fleet: it catches up first
+    for _ in range(10):
+        m.merge()
+        assert m.check() == []
+    adopted = _Merges(cycles=1)  # a restarted launcher: island 1 joined before its watch
+    adopted.merge()
+    (signal,) = adopted.check()
+    assert signal.island == 1 and signal.absent
+
+
+def test_a_reconnect_neither_starts_nor_extends_the_grace():
+    m = _Merges(cycles=1)
+    _relaunched(m)
+    run, start = {0: (0, 1), 1: (1, 2)}, m.now
+    while m.now < start + GRACE:
+        m.merge()
+        m.tracker.feed({**_join(1), "generation": 1})  # its link reconnects on and on
+        assert m.check(run) == []
+    m.merge()
+    m.tracker.feed({**_join(1), "generation": 2})
+    (signal,) = m.check(run)
+    assert signal.island == 1 and "catch-up grace" in signal.reason
+    pushed = _Merges(cycles=1)  # one that pushed: a reconnect gives it no grace
+    pushed.tracker.feed(_join(1))
+    pushed.merge(pushes=True)
+    pushed.check()
+    pushed.tracker.feed({**_join(1), "generation": 1})
+    pushed.merge()
+    (signal,) = pushed.check()
+    assert signal.island == 1
+
+
+def test_the_same_incarnation_back_from_recovering_has_no_grace():
+    m = _Merges(cycles=1)
+    m.tracker.feed(_join(1))
+    m.merge(pushes=True)
+    m.check()
+    assert m.check({0: (0, 1)}) == []  # recovering, then back as the same incarnation
+    assert m.check() == []
+    m.merge()
+    (signal,) = m.check()
+    assert signal.island == 1
+
+
 def test_records_of_the_earlier_incarnation_read_late_do_not_count():
     """Relaunched (it left running, then runs as a new token): merges of its earlier
     incarnation read late, even ones that list it absent, start nothing; it is counted
@@ -556,7 +681,7 @@ def test_the_policy_decides_and_a_replace_is_handed_to_it(tmp_path):
             replaced.append(name)
 
     ctl, _ops, store, tape, _log = _controller(tmp_path, policy=Policy())
-    tape.pending += [_join(0), _join(1), _step(1, [0], fragments=1)]
+    tape.pending += [_join(0), _join(1), _step(1, [0, 1], fragments=1), _step(2, [0], fragments=1)]
     ctl._poll_stragglers()
     assert asked == [("r-l1", 1)] and replaced == ["r-l1"]
     assert store.read(1)["straggler"]["action"] == "replace"
@@ -567,11 +692,11 @@ def test_a_policy_that_fails_or_answers_nonsense_waits(tmp_path):
         raise RuntimeError("no spare")
 
     ctl, _ops, store, tape, _log = _controller(tmp_path, policy=broken)
-    tape.pending += [_join(0), _join(1), _step(1, [0], fragments=1)]
+    tape.pending += [_join(0), _join(1), _step(1, [0, 1], fragments=1), _step(2, [0], fragments=1)]
     ctl._poll_stragglers()
     assert store.read(1)["straggler"]["action"] == "wait"
     ctl, _ops, store, tape, _log = _controller(tmp_path / "b", policy=lambda name, signal: "reboot")
-    tape.pending += [_join(0), _join(1), _step(1, [0], fragments=1)]
+    tape.pending += [_join(0), _join(1), _step(1, [0, 1], fragments=1), _step(2, [0], fragments=1)]
     ctl._poll_stragglers()
     assert store.read(1)["straggler"]["action"] == "wait"
 
@@ -641,7 +766,7 @@ def test_a_flagged_island_that_stops_running_is_cleared_naming_why(tmp_path):
                        (lambda rec: rec.update(state=lf.RECOVERING), "relaunched"),
                        (lambda rec: rec.update(state=lf.DONE), "not running (done)")):
         ctl, _ops, store, tape, log = _controller(tmp_path / why.split()[0])
-        tape.pending += [_join(0), _join(1), _step(1, [0], fragments=1)]
+        tape.pending += [_join(0), _join(1), _step(1, [0, 1], fragments=1), _step(2, [0], fragments=1)]
         ctl._poll_stragglers()
         assert store.read(1)["straggler"]["action"] == "wait"
         setup(ctl.learners["r-l1"])
@@ -676,7 +801,7 @@ def test_a_mark_an_earlier_launcher_left_is_cleared_once_and_judged_again(tmp_pa
     assert cleared[1] == "r-l1" and cleared[2]["reason"] == "controller restarted"
     assert cleared[2]["missed_cycles"] == 3 and store.read(1)["straggler"] is None
     assert (store.read(0) or {}).get("straggler") is None and not log.kinds(st.EVENT)
-    tape.pending += [_join(1), _step(1, [0], fragments=1)]
+    tape.pending += [_step(10, [0], fragments=1, absent=[1])]  # adopted: it joined before this watch
     ctl._poll_stragglers()
-    assert [e[1] for e in log.kinds(st.EVENT)] == ["r-l1"]  # judged again by this watch
+    assert [e[1] for e in log.kinds(st.EVENT)] == ["r-l1"]  # judged again by this watch, at once
     assert len(log.kinds(st.CLEARED_EVENT)) == 1

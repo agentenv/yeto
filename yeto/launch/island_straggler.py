@@ -27,6 +27,11 @@ default, or a replacement the island's provider offers).
   before the controller holds it running counts) or at once for the same one. A ``pool_join``
   of a reconnect (each connection is a new generation) or of a syncer that took over (a new
   term) keeps the count and the mark. A merged push of the island resets the count.
+* **A new launch catches up first.** A launch its controller relaunched (a spare node, a
+  move) or a new island whose ``pool_join`` this watch read is not counted until its first
+  merged push, for at most ``grace_s`` (the controller's recover timeout) on the controller's
+  clock; past that it is counted from then on. An adopted island (no join read) has no grace,
+  and a reconnect's join neither starts nor extends one.
 * **Who is watched.** The islands the controller holds running (not draining, not
   recovering): it passes their learner ids with a token of the incarnation.
 * **Signals.** One :class:`Straggler` when an island crosses the threshold, and one
@@ -123,6 +128,10 @@ class _Island:
     away: bool = False  # not running now (recovering, draining, ended): its count restarts
     was_joined: bool = False  # whether it was in the pool when it left running
     joined_away: bool = False  # a pool_join read while it was away (its next incarnation's, or a reconnect)
+    pushed: bool = False  # a push of this launch was merged
+    join_read: bool = False  # a pool_join of this launch was read (a new island; an adopted one has none)
+    grace_until: float | None = None  # a new launch catching up: not counted until then (controller clock)
+    graced: bool = False  # its grace ran out before its first merged push
 
 
 def _time(record: Mapping[str, Any]) -> float | None:
@@ -170,7 +179,7 @@ class StragglerTracker:
             # in the pool; a reconnect (a new connection generation) or a new syncer term keeps
             # its count and its mark: only its controller's relaunch or stop restarts them
             state = self._island(island)
-            state.joined = True
+            state.joined, state.join_read = True, True
             state.joined_away = state.joined_away or state.away
             return
         step, fragment = _int(record.get("step")), _int(record.get("fragment"))
@@ -187,16 +196,21 @@ class StragglerTracker:
                 state.misses, state.absent = 0, False
                 state.last_merged_step = step if step is not None else state.last_merged_step
                 state.joined = True  # a merged push: it is in the pool
+                state.pushed, state.grace_until, state.graced = True, None, False  # its catch-up is over
             elif state.joined or k in absent:
                 # listed absent: the syncer expects it, so it is in the pool even when its join
                 # came before this watch (an island adopted by a restarted launcher)
                 state.joined = True
-                state.misses += 1
                 state.absent = k in absent
+                if state.grace_until is None:  # a new launch still catching up is not counted
+                    state.misses += 1
 
-    def check(self, running: Mapping[int, Any]) -> list[Straggler]:
+    def check(self, running: Mapping[int, Any], *, now: float | None = None,
+              grace_s: float = 0.0) -> list[Straggler]:
         """The signals for the islands held running (learner id -> incarnation token), and
-        the end of the stretch of a flagged island that is not running any more."""
+        the end of the stretch of a flagged island that is not running any more. ``now``:
+        the controller's clock; ``grace_s``: how long a new launch may catch up before its
+        first merged push without being counted (its controller's recover timeout; 0: none)."""
         out: list[Straggler] = []
         threshold = self.cycles * self.per_cycle
         for k, state in self.islands.items():
@@ -210,6 +224,7 @@ class StragglerTracker:
             state.away, state.was_joined, state.joined_away = True, was_joined, False
         for k, token in running.items():
             state = self._island(int(k))
+            relaunched = state.token is not None and state.token != token
             if state.away:
                 # back: the same incarnation keeps its place in the pool; a new one (relaunched)
                 # is in it once it joined, which may come before its controller holds it running
@@ -221,13 +236,26 @@ class StragglerTracker:
                     out.append(self._signal(int(k), state, cleared=True, reason="relaunched"))
                 self._restart(state)
             state.token, state.away, state.joined_away = token, False, False
+            # a new launch catches up before its first push: a relaunch (a spare node too), or a
+            # new island whose join this watch read (an adopted island joined before the watch).
+            # One grace per launch: a reconnect's join neither starts nor extends it
+            if ((relaunched or state.join_read) and not state.pushed and not state.graced
+                    and state.grace_until is None and now is not None and grace_s > 0):
+                state.grace_until, state.misses = now + grace_s, 0
+            if state.grace_until is not None:
+                if now is None or now < state.grace_until:
+                    continue  # still catching up: not counted
+                # no push merged within its recover timeout: counted from now on
+                state.grace_until, state.graced, state.misses = None, True, 0
             if self.cycles <= 0 or not state.joined:
                 continue
             if not state.flagged and state.misses >= threshold:
                 state.flagged = True
                 out.append(self._signal(int(k), state, cleared=False,
                                         reason=f"no push merged in {state.misses // self.per_cycle} merge cycle(s) "
-                                        f"({state.misses} merges over {self.per_cycle} fragment(s))"))
+                                        f"({state.misses} merges over {self.per_cycle} fragment(s))"
+                                        + (" after its catch-up grace (the recover timeout) ran out with no push "
+                                           "of its launch merged" if state.graced else "")))
             elif state.flagged and state.misses < threshold:
                 state.flagged = False
                 out.append(self._signal(int(k), state, cleared=True, reason="a push of it is merged again"))
@@ -240,6 +268,7 @@ class StragglerTracker:
     @staticmethod
     def _restart(state: _Island) -> None:
         state.joined, state.misses, state.absent, state.flagged = False, 0, False, False
+        state.pushed, state.join_read, state.grace_until, state.graced = False, False, None, False
 
     def _signal(self, k: int, state: _Island, *, cleared: bool, reason: str) -> Straggler:
         return Straggler(island=k, cleared=cleared, missed_cycles=state.misses // self.per_cycle,
@@ -467,7 +496,9 @@ class StragglerWatch:
             return bool(named & set(islands))
         return False
 
-    def poll(self, running: Mapping[int, Any]) -> list[Straggler]:
+    def poll(self, running: Mapping[int, Any], *, now: float | None = None,
+             grace_s: float = 0.0) -> list[Straggler]:
+        """Read the tape and judge the islands held running (:meth:`StragglerTracker.check`)."""
         try:
             records = self.source.read()
             error = getattr(self.source, "error", None)
@@ -497,7 +528,7 @@ class StragglerWatch:
                        "reported until the syncer's tape is read again")
                 self.log(f"[launcher] WARNING: island straggler watch: {why}")
                 self._notices.append((UNAVAILABLE_EVENT, why))
-        return self.tracker.check(running)
+        return self.tracker.check(running, now=now, grace_s=grace_s)
 
     def notices(self) -> list[tuple[str, str]]:
         out, self._notices = self._notices, []
@@ -512,7 +543,7 @@ class UnavailableWatch:
         self.reason = reason
         self._notices = [(UNAVAILABLE_EVENT, reason)]
 
-    def poll(self, running: Mapping[int, Any]) -> list[Straggler]:
+    def poll(self, running: Mapping[int, Any], **_judge: Any) -> list[Straggler]:
         return []
 
     def notices(self) -> list[tuple[str, str]]:

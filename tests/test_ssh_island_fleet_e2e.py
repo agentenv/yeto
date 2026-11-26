@@ -439,8 +439,9 @@ def test_a_stuck_island_relaunched_mid_run_is_watched_over_the_run_store(syncer_
     store also holds an earlier syncer's history in which island 1 missed 40 merges: it is
     never counted. Island 1 stops pushing and is reported once; then one of its ranks fails,
     its controller relaunches it (cleared: relaunched); the new incarnation joins again
-    (catch-up) and stays silent: it is reported again only after N merge cycles counted from
-    that join; then it pushes and the mark is cleared. Island 0 is never touched."""
+    (catch-up) and stays silent: a new launch is not counted before its first merged push for
+    up to its recover timeout, so it is reported again only after that grace and N merge cycles
+    more; then it pushes and the mark is cleared. Island 0 is never touched."""
     from yeto import launcher
     from yeto.rl.engine.tape_upload import syncer_incarnation, syncer_uploaders
 
@@ -602,6 +603,9 @@ def test_a_stuck_island_relaunched_mid_run_is_watched_over_the_run_store(syncer_
     rejoin = max(r["base_version"] for r in joins)  # the relaunched incarnation's join
     assert rejoin >= first[2]["newest_step"]  # after the first report (the relaunch may beat the next merge)
     assert second[2]["newest_step"] - rejoin >= CYCLES * P  # counted from that join, not before
+    # its new launch caught up without a push for longer than its recover timeout: not counted
+    # until that grace ran out (the first launch had pushed: no grace in its report)
+    assert "catch-up grace" in str(second[2]["reason"]) and "catch-up grace" not in str(first[2]["reason"])
     assert states.read(1)["straggler"] is None
     ctl = launches.controllers[1]
     assert ctl.learners["r-i1-trainer"]["relaunches"] == 1 and launches.started("r-i1") == 1
