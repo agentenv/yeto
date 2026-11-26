@@ -220,10 +220,12 @@ the island launch of learner `k` and `fleet` for a launch of the whole fleet. Ev
 launcher process writes its own folder (the random nonce keeps two launchers of one
 host apart), so the events of a control plane that moved to another host, or of a
 host that was lost, stay in the store. Only this run's part of the local file is
-copied: `fleet.store.json` next to it records the store and the offset the copy
-starts at, and a run directory reused by a run with another store starts at the
-file's end. `yeto down` copies the `island_stop` lines it appends for islands a
-killed launcher left open. The copy is observation only: a failed upload is a
+copied: `fleet.store.json` next to it records the run (its registry start), the
+store and the offset the copy starts at. A restarted launcher of the run goes on
+from that offset; a later run of the name starts at the file's end, and a launch
+that does not copy the file voids the record (no store from the file's end on).
+`yeto down` copies the `island_stop` lines it appends for islands a killed
+launcher left open, only into the store the record of this run names. The copy is observation only: a failed upload is a
 `WARN` line, retried with the next chunk, and the launcher's end (and `yeto down`)
 waits at most 15 s for the last one. A launch of one trainer island uploads
 nothing, as before. `--store` reads every folder next to the island tapes, and a
@@ -231,8 +233,11 @@ record that is also in a local `fleet.jsonl` given with `--tapes` counts once. T
 page folds an island's lifecycle records by their own time, whatever the order it
 reads them in: a host's older records that arrive after the newer host's (its run
 directory has only its own lines) add their closed ready -> lost intervals and do
-not change the island's current state. A host clock that is off by more than the
-gap between two hosts' records still orders those records by that clock.
+not change the island's current state. Records of one source (one local file, one
+launcher folder in the store) fold in the order they were written, so a host clock
+stepped back (NTP) folds as before. A host clock that is off by more than the gap
+between two hosts' records still orders those records by that clock, and records of
+two hosts with the same `time_unix` fold in the order they are read (a known limit).
 For tools that read the file itself:
 
 ```

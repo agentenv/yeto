@@ -20,7 +20,7 @@ import pytest
 from yeto.dashboard import fleet as fleet_mod
 from yeto.dashboard import fleet_store
 from yeto.dashboard.fleet import FleetLog, close_open_islands, from_env
-from yeto.dashboard.reducer import Reducer
+from yeto.dashboard.reducer import _FLEET_LIFE, Reducer, _new_island
 from yeto.dashboard.sources import load_all
 from yeto.dashboard.store_tapes import StoreTapes
 from yeto.launch import manifest
@@ -270,22 +270,78 @@ def test_a_folder_stamp_two_hours_off_does_not_change_the_state(tmp_path):
     assert _lifecycle(reducer.islands["1"]) == RUNNING_AGAIN
 
 
-@pytest.mark.parametrize("order", ["in-order", "reversed", "lost-first"])
+LIFE = [{"event": "island_ready", "time_unix": 10.0, "island": ISLAND, "island_id": 1, "gpu": "B300"},
+        {"event": "island_lost", "time_unix": 20.0, "island": ISLAND, "island_id": 1},
+        {"event": "island_ready", "time_unix": 30.0, "island": ISLAND, "island_id": 1, "gpu": "H100"},
+        {"event": "island_stop", "time_unix": 50.0, "island": ISLAND, "island_id": 1, "reason": "teardown"}]
+HOST = ["host-a", "host-a", "host-b", "host-b"]  # the lost host wrote the first two, the new one the rest
+
+
+@pytest.mark.parametrize("order", [[0, 1, 2, 3], [2, 3, 0, 1], [2, 0, 3, 1], [2, 0, 1, 3], [0, 2, 3, 1]])
 def test_the_lifecycle_does_not_depend_on_the_read_order(order):
-    rows = [{"event": "island_ready", "time_unix": 10.0, "island": ISLAND, "island_id": 1, "gpu": "B300"},
-            {"event": "island_lost", "time_unix": 20.0, "island": ISLAND, "island_id": 1},
-            {"event": "island_ready", "time_unix": 30.0, "island": ISLAND, "island_id": 1, "gpu": "H100"},
-            {"event": "island_stop", "time_unix": 50.0, "island": ISLAND, "island_id": 1, "reason": "teardown"}]
+    """Two sources (hosts) read in any interleaving, each in its own order."""
     want = Reducer()
-    for r in rows:
+    for r in LIFE:
         want.feed(dict(r))
     got = Reducer()
-    feed = {"in-order": rows, "reversed": rows[::-1], "lost-first": [rows[1], rows[3], rows[0], rows[2]]}[order]
-    for r in feed:
-        got.feed(dict(r))
+    for k in order:
+        got.feed(dict(LIFE[k]), source=HOST[k])
     assert _lifecycle(got.islands["1"]) == _lifecycle(want.islands["1"])
     assert _lifecycle(want.islands["1"])["closed_s"] == pytest.approx(30.0)
     assert got.islands["1"]["gpu"] == "H100"  # the newest record's shape
+
+
+def _main_fold(rows):
+    """origin/main's fold of one source: every record in write order."""
+    isl = {k: _new_island("1")[k] for k in _FLEET_LIFE}
+    for r in rows:
+        Reducer._fold_fleet_lifecycle(isl, r["event"], r.get("time_unix"))  # noqa: SLF001
+    return isl
+
+
+@pytest.mark.parametrize("source", [None, "fleet.jsonl"])
+def test_a_clock_stepped_back_in_one_file_folds_in_write_order(source):
+    """NTP steps the launcher host's clock back between ready and lost: one file, written in
+    order. The island is lost, as on main (not ready and billed on)."""
+    rows = [{"event": "island_ready", "time_unix": 100.0, "island": ISLAND, "island_id": 1, "gpu": "B300"},
+            {"event": "island_lost", "time_unix": 90.0, "island": ISLAND, "island_id": 1},
+            {"event": "island_ready", "time_unix": 95.0, "island": ISLAND, "island_id": 1, "gpu": "H100"},
+            {"event": "island_stop", "time_unix": 99.0, "island": ISLAND, "island_id": 1}]
+    for n in range(1, len(rows) + 1):
+        reducer = Reducer()
+        for r in rows[:n]:
+            reducer.feed(dict(r), **({} if source is None else {"source": source}))
+        assert _lifecycle(reducer.islands["1"]) == _lifecycle(_main_fold(rows[:n])), n
+    assert reducer.islands["1"]["fleet_state"] == "stop" and reducer.islands["1"]["gpu"] == "H100"
+    lost = Reducer()
+    for r in rows[:2]:
+        lost.feed(dict(r), source="fleet.jsonl")
+    assert lost.islands["1"]["fleet_state"] == "lost" and lost.islands["1"]["open_ts"] is None
+    # another host's older interval read after it: replayed, each record at its own time
+    for r in ({"event": "island_ready", "time_unix": 50.0, "island": ISLAND, "island_id": 1},
+              {"event": "island_lost", "time_unix": 60.0, "island": ISLAND, "island_id": 1}):
+        lost.feed(dict(r), source="old-host")
+    assert lost.islands["1"]["fleet_state"] == "lost" and lost.islands["1"]["lost_ts"] == 90.0
+    assert lost.islands["1"]["closed_s"] == pytest.approx(10.0) and lost.islands["1"]["ready_ts"] == 50.0
+
+
+def test_a_late_copy_is_folded_in_at_its_place_and_the_rest_replayed():
+    """A record of another source before several folded ones: the state from there on is the
+    time-ordered fold (the replay starts at the record, not at the island's first one)."""
+    rows = [{"event": e, "time_unix": t, "island": ISLAND, "island_id": 1}
+            for e, t in (("island_ready", 10.0), ("island_lost", 20.0), ("island_ready", 30.0),
+                         ("island_lost", 40.0), ("island_ready", 60.0))]
+    want = Reducer()
+    for r in rows:
+        want.feed(dict(r))
+    for late in range(len(rows)):
+        got = Reducer()
+        for k, r in enumerate(rows):
+            if k != late:
+                got.feed(dict(r), source="new-host")
+        got.feed(dict(rows[late]), source="old-host")
+        assert _lifecycle(got.islands["1"]) == _lifecycle(want.islands["1"]), late
+    assert want.islands["1"]["closed_s"] == pytest.approx(20.0) and want.islands["1"]["open_ts"] == 60.0
 
 
 def test_the_store_readers_report_both_readers(tmp_path):
@@ -403,18 +459,150 @@ def test_a_quick_restart_s_chunks_are_read_after_the_first_launcher_s(tmp_path):
 
 def test_the_copy_starts_where_this_run_s_lines_start(tmp_path):
     path = tmp_path / "runs" / "r" / "fleet.jsonl"
-    assert fleet_store.copy_start(path, "s3://store/a") == 0  # a new run directory
+    assert fleet_store.copy_start(path, "s3://store/a", run=1.0) == 0  # a new run directory
     path.write_bytes(_text(A_ROWS))
     size = path.stat().st_size
-    assert fleet_store.copy_start(path, "s3://store/a", learner_id=1) == 0  # the same run again
+    assert fleet_store.copy_start(path, "s3://store/a", learner_id=1, run=1.0) == 0  # the run restarted
     assert fleet_store.read_copy_record(path)["learner_id"] == 1
-    assert fleet_store.copy_start(path, "s3://store/b") == size  # another run's store: from the end
+    assert fleet_store.copy_start(path, "s3://store/a", run=2.0) == size  # another run, same store: from the end
+    assert fleet_store.copy_start(path, "s3://store/b", run=2.0) == size  # another store: from the end
     path.write_bytes(_text(A_ROWS + B_ROWS))
-    assert fleet_store.copy_start(path, "s3://store/b") == size  # that run's start is kept
+    assert fleet_store.copy_start(path, "s3://store/b", run=2.0) == size  # that run's start is kept
+    assert fleet_store.copy_start(path, "s3://store/b") == path.stat().st_size  # no run identity: the end
     other = tmp_path / "old" / "fleet.jsonl"
     other.parent.mkdir()
     other.write_bytes(_text(A_ROWS))  # written before the copy record existed
-    assert fleet_store.copy_start(other, "s3://store/a") == other.stat().st_size
+    assert fleet_store.copy_start(other, "s3://store/a", run=1.0) == other.stat().st_size
+
+
+def _new_run(name="run-i1"):
+    """A run of ``name`` in the (test's) run registry: its identity, new each time."""
+    from yeto import runs
+
+    runs.create_run(name, {})
+    started = fleet_store.run_identity(name)
+    assert started is not None
+    return started
+
+
+def _launch(tmp_path, store=None, *, environ=None, monkeypatch=None):
+    """One island launch of learner 1 (``store``: it copies its fleet.jsonl there), one record."""
+    args = _launch_args(tmp_path, role="island", learner=1)
+    args.rl_checkpoint_store = None if store is None else str(store)
+    log = manifest._dashboard_fleet_log(args, {ISLAND: SimpleNamespace()}, {ISLAND: ("job", None)},  # noqa: SLF001
+                                        objects=None if store is None else DirectoryObjectStore(str(store)))
+    log.event("island_ready", ISLAND)
+    return log
+
+
+def _uploaded(store) -> bytes:
+    return b"".join((store / k).read_bytes() for k in _store_keys(store)) if store.exists() else b""
+
+
+def _folders(store) -> list[bytes]:
+    """Each launcher folder's bytes, in a fixed order (folder names carry a random nonce)."""
+    out: dict[str, bytes] = {}
+    for k in _store_keys(store) if store.exists() else ():
+        folder = k.rsplit("/", 1)[0]
+        out[folder] = out.get(folder, b"") + (store / k).read_bytes()
+    return sorted(out.values())
+
+
+def test_yeto_down_after_a_launch_without_a_copy_leaves_the_earlier_store_alone(tmp_path, monkeypatch):
+    """run 1 copies into S1; run 2 of the name keeps its fleet.jsonl local and its launcher is
+    killed; yeto down closes run 2's island: its island_stop stays out of S1."""
+    from yeto import cli
+
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    s1 = tmp_path / "s1"
+    _new_run()
+    assert _launch(tmp_path, s1).close() is True
+    before = _uploaded(s1)
+    _new_run()
+    log = _launch(tmp_path)  # killed: never closed
+    assert fleet_store.read_copy_record(log.path) is None  # the record names no store any more
+    assert cli._close_fleet_islands("run-i1") == [ISLAND]  # noqa: SLF001
+    assert _records(log.path)[-1]["event"] == "island_stop" and _uploaded(s1) == before
+
+
+def test_yeto_down_does_not_use_another_run_s_record(tmp_path, monkeypatch):
+    """A record left by an earlier run of the name (its launch never voided it): yeto down of
+    this run copies nothing into that run's store."""
+    from yeto import cli
+
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    s1 = tmp_path / "s1"
+    path = tmp_path / "run-i1" / "fleet.jsonl"
+    path.parent.mkdir()
+    fleet_store.copy_start(path, str(s1), learner_id=1, run=_new_run())
+    _new_run()
+    path.write_bytes(_text(B_ROWS[:1]))  # this run's open island
+    monkeypatch.setattr("yeto.launch.island_lifecycle.store_objects", lambda uri: DirectoryObjectStore(uri))
+    assert cli._close_fleet_islands("run-i1") == [ISLAND]  # noqa: SLF001
+    assert not s1.exists()
+
+
+def test_a_launch_without_a_copy_between_two_copies_into_one_store_stays_local(tmp_path, monkeypatch):
+    """S2, a launch that keeps its lines local, S2 again: the middle run's lines never reach S2."""
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    s2 = tmp_path / "s2"
+    _new_run()
+    assert _launch(tmp_path, s2).close() is True
+    first = _folders(s2)
+    _new_run()
+    middle = _launch(tmp_path)
+    middle.event("island_stop", ISLAND)
+    assert middle.close() is True
+    size = middle.path.stat().st_size
+    _new_run()
+    third = _launch(tmp_path, s2)
+    assert third.close() is True
+    assert _folders(s2) == sorted([*first, third.path.read_bytes()[size:]])
+
+
+def test_another_run_s_record_for_the_same_store_starts_at_the_end(tmp_path, monkeypatch):
+    """The record of an earlier run for this store, not voided (that run's launch was older
+    or died first): a new run starts at the file's end all the same."""
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    s2 = tmp_path / "s2"
+    path = tmp_path / "run-i1" / "fleet.jsonl"
+    path.parent.mkdir()
+    fleet_store.copy_start(path, str(s2), learner_id=1, run=_new_run())
+    path.write_bytes(_text(A_ROWS))  # lines of runs that are not the next one
+    _new_run()
+    log = _launch(tmp_path, s2)
+    assert log.close() is True
+    assert _uploaded(s2) == log.path.read_bytes()[len(_text(A_ROWS)):]
+
+
+def test_a_restarted_launcher_of_the_run_goes_on_from_the_run_s_start(tmp_path, monkeypatch):
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    store = tmp_path / "s"
+    _new_run()
+    assert _launch(tmp_path, store).close() is True
+    again = _launch(tmp_path, store)  # the same run (no new registry entry)
+    assert fleet_store.read_copy_record(again.path)["start"] == 0 and again.close() is True
+
+
+def test_a_launch_with_the_copy_turned_off_voids_the_record(tmp_path, monkeypatch):
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    store = tmp_path / "s"
+    _new_run()
+    assert _launch(tmp_path, store).close() is True
+    monkeypatch.setenv("YETO_RL_TAPE_UPLOAD_S", "0")
+    log = _launch(tmp_path, store)
+    assert log.uploader is None and fleet_store.read_copy_record(log.path) is None
+    assert json.loads(fleet_store.copy_record_path(log.path).read_text())["start"] == log.path.stat().st_size \
+        - len(_text([_records(log.path)[-1]]))
+
+
+def test_a_launch_without_a_record_writes_none(tmp_path, monkeypatch):
+    """A local-only launch of a run directory that never had a copy (one trainer island, the
+    customer path): no fleet.store.json appears."""
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    _new_run()
+    log = _launch(tmp_path)
+    assert log.close() is True and not fleet_store.copy_record_path(log.path).exists()
 
 
 def test_a_reused_run_directory_uploads_only_this_run_s_lines(tmp_path, monkeypatch):
@@ -443,8 +631,9 @@ def _down_run(tmp_path, monkeypatch, *, record=True, store_objects=None):
     path.parent.mkdir()
     path.write_bytes(_text(B_ROWS[:1]))  # the launcher was killed: the island is still open
     store = tmp_path / "store"
+    cli.runs.create_run("r", {})
     if record:
-        fleet_store.copy_start(path, str(store), learner_id=1)
+        fleet_store.copy_start(path, str(store), learner_id=1, run=fleet_store.run_identity("r"))
     if store_objects is not None:
         monkeypatch.setattr("yeto.launch.island_lifecycle.store_objects", lambda uri: store_objects)
     return cli, path, store

@@ -70,12 +70,15 @@ def incarnation(*, host: str | None = None, pid: int | None = None, now: float |
 # -- which part of the local file belongs to this store ---------------------------------------
 #
 # A run directory (``~/.yeto/runs/<name>/``) outlives its run: a new run of the same name
-# appends to the same ``fleet.jsonl``. ``fleet.store.json`` next to it records the store the
-# file is copied to and the byte offset the copy starts at. A launch for the same store goes
-# on from that offset (a restarted launcher of the run uploads its earlier lines again: the
-# readers fold each record once); a launch for another store, or a file without the record
-# (written before this copy existed), starts at the file's end, so an earlier run's lines
-# never reach this run's store (the rule of ``tape_upload.syncer_uploaders(from_end=True)``).
+# appends to the same ``fleet.jsonl``. ``fleet.store.json`` next to it records the run (the
+# run registry's ``started_at``, new for each run of the name: :func:`run_identity`), the store
+# the file is copied to and the byte offset the copy starts at. A launch of the same run for
+# the same store goes on from that offset (a restarted launcher of the run uploads its earlier
+# lines again: the readers fold each record once); any other launch, or a file without the
+# record (written before this copy existed), starts at the file's end, so an earlier run's
+# lines never reach this run's store (the rule of ``tape_upload.syncer_uploaders(from_end=True)``).
+# A launch that does not copy the file voids the record (:func:`copy_off`): no store, the file's
+# end. ``yeto down`` copies its lines only for the run the record names.
 
 COPY_RECORD = "fleet.store.json"
 COPY_SCHEMA = "yeto.fleet.log-copy/v1"
@@ -93,25 +96,56 @@ def read_copy_record(path: str | os.PathLike) -> dict | None:
     return doc if isinstance(doc, dict) and doc.get("schema") == COPY_SCHEMA and doc.get("store") else None
 
 
-def copy_start(path: str | os.PathLike, store: str, *, learner_id: Any = None) -> int:
-    """The byte offset of ``path`` this launch's copy into ``store`` starts at (see above),
-    recorded for the next launch and for ``yeto down``. Never raises (a record that cannot be
-    written: the offset still holds for this launch)."""
-    p = Path(path)
+def run_identity(name: str) -> float | None:
+    """The run of ``name`` the copy record names: its run registry ``started_at`` (set anew by
+    every run of the name, kept by its launcher restarts and its ``yeto down``), or None."""
     try:
-        size = p.stat().st_size
+        from yeto import runs  # noqa: PLC0415
+
+        started = (runs.load_run(name) or {}).get("started_at")
+        return float(started) if started is not None else None
+    except Exception:  # noqa: BLE001 - telemetry never stops a launch or a down
+        return None
+
+
+def _size(p: Path) -> int:
+    try:
+        return p.stat().st_size
     except OSError:
-        size = 0
-    known = read_copy_record(p)
-    start = min(int(known.get("start") or 0), size) if known and known.get("store") == str(store) else size
-    doc = {"schema": COPY_SCHEMA, "store": str(store), "start": start,
-           "learner_id": learner_id if lane(learner_id) != FLEET_LANE else None}
+        return 0
+
+
+def _write_record(p: Path, doc: dict) -> None:
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         copy_record_path(p).write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
     except OSError as exc:
         _stderr(f"[launcher] WARN: fleet.jsonl store copy: {COPY_RECORD} not written ({type(exc).__name__})")
+
+
+def copy_start(path: str | os.PathLike, store: str, *, learner_id: Any = None, run: float | None = None) -> int:
+    """The byte offset of ``path`` this launch's copy into ``store`` starts at (see above),
+    recorded for the next launch and for ``yeto down``. ``run``: :func:`run_identity` (None:
+    the file's end). Never raises (a record that cannot be written: the offset still holds for
+    this launch)."""
+    p = Path(path)
+    size = _size(p)
+    known = read_copy_record(p)
+    same = known is not None and known.get("store") == str(store) and run is not None and known.get("run") == run
+    start = min(int(known.get("start") or 0), size) if same else size
+    _write_record(p, {"schema": COPY_SCHEMA, "store": str(store), "start": start, "run": run,
+                      "learner_id": learner_id if lane(learner_id) != FLEET_LANE else None})
     return start
+
+
+def copy_off(path: str | os.PathLike, *, run: float | None = None) -> None:
+    """A launch that does not copy ``path`` (no store, no island records, the copy turned
+    off): its record, if any, names no store from the file's end on, so neither ``yeto down``
+    nor a later launch of another run copies this launch's lines into an earlier run's
+    store. A file without a record keeps none (one-island launches write nothing). Never raises."""
+    p = Path(path)
+    if copy_record_path(p).exists():
+        _write_record(p, {"schema": COPY_SCHEMA, "store": None, "start": _size(p), "run": run, "learner_id": None})
 
 
 class _Warn:
@@ -156,16 +190,17 @@ def start_uploader(objects: Any, path: str | os.PathLike, *, learner_id: Any = N
         return None
 
 
-def upload_appended(path: str | os.PathLike, offset: int, *, objects: Any = None,
+def upload_appended(path: str | os.PathLike, offset: int, *, run: float | None = None, objects: Any = None,
                     timeout_s: float | None = None, log: Callable[[str], None] = _stderr) -> bool:
     """``yeto down``: the lines appended to ``path`` from ``offset`` on (the ``island_stop``
     of the islands a killed launcher left open) into the store its copy record names, in the
-    record's lane, as one more folder; bounded. Nothing without a copy record (a run whose
-    fleet.jsonl stays local) or without new lines. A failure is a WARN; never raises.
-    Returns True when the store has every new line (or there is nothing to copy)."""
+    record's lane, as one more folder; bounded. Nothing without a copy record of this ``run``
+    (:func:`run_identity`; a run whose fleet.jsonl stays local, or a record another run left)
+    or without new lines. A failure is a WARN; never raises. Returns True when the store has
+    every new line (or there is nothing to copy)."""
     try:
         record = read_copy_record(path)
-        if record is None:
+        if record is None or run is None or record.get("run") != run:
             return True
         size = Path(path).stat().st_size
         if size <= offset:
