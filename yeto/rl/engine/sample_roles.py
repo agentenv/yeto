@@ -1347,6 +1347,12 @@ def check_fleet_member(args: Any) -> None:
             raise ValueError("--rl-fleet-syncer-grace-s belongs to the syncer launch (--rl-fleet-role syncer)")
         if not float(grace) > 0:
             raise ValueError(f"--rl-fleet-syncer-grace-s must be > 0 seconds (got {grace})")
+    if getattr(args, "rl_fleet_syncer_service", None) is not None:
+        if role != FLEET_ROLE_SYNCER:
+            raise ValueError("--rl-fleet-syncer-service belongs to the syncer launch (--rl-fleet-role syncer)")
+        if getattr(args, "controller", "local") == "head":
+            raise ValueError("--rl-fleet-syncer-service: the syncer runs as an on-site service; the syncer "
+                             "launch needs --controller local (no head VM)")
     if role is None:
         named = [flag for flag, dest in FLEET_MEMBER_DESTS if getattr(args, dest, None) is not None]
         if named:

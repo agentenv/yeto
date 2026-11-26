@@ -477,3 +477,125 @@ constraint.
   it was. `yeto cluster probe` and `yeto cluster check` always print the note.
 
 To drop the rule, delete the `fabric_group` lines.
+
+## On-site control plane
+
+A fleet launched island by island (`fleet.launch: per_island`, `rollout.control_plane: "store"`,
+see [FLEET_TRAINER_ISLANDS.md](FLEET_TRAINER_ISLANDS.md)) has two long-running processes besides
+its islands:
+
+- the **control plane**: `yeto run up` of the run config. It drives the sampler pools and the
+  trainer worker, which starts and supervises one `yeto launch` per trainer island;
+- the **syncer**: the fleet's outer optimizer, which every island dials.
+
+On your own machines you can run both on site, as systemd services of a machine of the
+cluster (or a small VM in the same room), instead of on a laptop or a cloud VM. `yeto` writes
+the units.
+
+### The syncer as a service
+
+Name the syncer's host in the run config:
+
+```json
+"fleet": {"launch": "per_island", "syncer_service": "<syncer-host>", "trainer_argv": ["..."]}
+```
+
+`fleet.syncer_service` is the host name or address the islands dial, without a port (the
+syncer listens on its own ports, 29400 and up). With it:
+
+- the **syncer service** (`yeto fleet service-run --role syncer`, what the unit runs) runs the
+  fleet's syncer on that host. A syncer process that dies is started again at once and resumes
+  from its checkpoint, on the same address and at the same term. The service writes the
+  syncer's record (`fleet/island_syncer.json`) and a heartbeat
+  (`fleet/island_syncer_service.json`) to the run store;
+- the **syncer launch** of `yeto run up` orders no syncer machine. It waits for the service's
+  record (up to 20 minutes), checks that it reads the same island HMAC key, records the syncer
+  for its islands, then watches the heartbeat. It ends with the service: 0 when the run is
+  finished, 1 when the service failed or sent no heartbeat for `--rl-fleet-syncer-grace-s`
+  (default 300 s) in a row;
+- the syncer is billed at $0/h (your own machine). Set `syncer.usd_per_h` to count it.
+
+The service runs on after the control plane is lost, so the islands keep merging while the
+control plane is down.
+
+### The island HMAC key
+
+The syncer refuses an island whose HELLO is not signed with the run's island HMAC key
+(`YETO_ISLAND_HMAC_KEY`). Without a syncer service, `yeto run up` makes one and keeps it in its
+state directory. With one, the key must come from the environment of both units, and nothing
+generates it:
+
+- `yeto run up` (its preflight and its start), the syncer service and the syncer launch refuse
+  to start without `YETO_ISLAND_HMAC_KEY`;
+- the syncer launch refuses a key that is not the service's (exit 10). The run store holds only
+  a key id (a SHA-256 prefix of the key), never the key.
+
+### The environment file
+
+Each unit reads its credentials from one environment file on its host, mode 0600: the run
+store's keys, the clouds' keys if any, `HF_TOKEN`, and `YETO_ISLAND_HMAC_KEY` (the same value on
+every host):
+
+```bash
+sudo install -d -m 0755 /etc/yeto
+sudo install -m 0600 -o <service-user> /dev/null /etc/yeto/<run>.env
+printf 'YETO_ISLAND_HMAC_KEY=%s\n' "$(openssl rand -hex 32)" | sudo tee -a /etc/yeto/<run>.env >/dev/null
+sudoedit /etc/yeto/<run>.env   # add the run's other credentials
+```
+
+The unit names the file and holds no value. It refuses to start while the file's mode is not
+0600, and `--install` checks the mode on the host (`stat`) without reading the file.
+
+### Writing and installing the units
+
+```bash
+yeto fleet service --config run.json --role syncer --env-file /etc/yeto/<run>.env --print
+yeto fleet service --config run.json --role control --env-file /etc/yeto/<run>.env --print
+yeto fleet service --config run.json --role syncer --env-file /etc/yeto/<run>.env --install <syncer-host>
+yeto fleet service --config run.json --role control --env-file /etc/yeto/<run>.env --install <control-host>
+```
+
+`--print` writes the unit to stdout. `--install HOST` writes it to
+`/etc/systemd/system/yeto-<run>-<role>.service` on HOST over SSH (`sudo -n`), then runs
+`systemctl daemon-reload` and `systemctl enable --now` there. It does nothing else.
+
+The unit runs on its host what you give it:
+
+| Option | Default |
+|---|---|
+| `--remote-config` | `--config`, as an absolute path: the run config must be at the same path on the host, with the files it names |
+| `--python` | this Python: give the host's Python that has yeto's dependencies |
+| `--yeto-dir` | this yeto checkout (the unit's `PYTHONPATH`) |
+| `--user` | this user |
+| `--workdir` | `/var/tmp/yeto/<run>-<role>`: the working directory, `yeto run up`'s state (`YETO_STATE_DIR`) and the launch registry (`YETO_RUNS_DIR`) |
+
+Paths must be absolute and hold only letters, digits and `._/+-`.
+
+### How the units restart
+
+Both units have `Restart=on-failure` (30 s apart, at most 5 starts an hour), but never restart
+after an exit yeto chose:
+
+| Unit | Restarted after | Never restarted after |
+|---|---|---|
+| control | a crash (exit 70, an uncaught exception) or a signal | 0 (the run ended), 1 (a breaker trip or failure that `run up` handled), 2 (a refusal) |
+| syncer | a crash, a signal, exit 1 (it resumes from its checkpoint) | 0 (the run is finished), 2 / 10 (a refusal, a configuration error), 11 (a strict failure) |
+
+A deterministic stop is never retried by the unit, as for an island (exit 11).
+
+Stopping the units:
+
+- **control** (`KillMode=process`): `systemctl stop` or a restart signals `yeto run up` only.
+  The island launches it started keep supervising their islands, and the next `run up`
+  adopts them. To stop the run, use `yeto run stop` or `yeto run down`, then stop the unit.
+- **syncer** (`KillMode=control-group`): the syncer gets SIGTERM and writes its checkpoint. Stop
+  it once the fleet is down; `run down` does not stop it.
+
+### Limits
+
+- One syncer service per user and host: the syncer keeps its checkpoint and tape under the
+  service user's home (`~/yeto-output/`).
+- If the syncer's host is lost, so is its checkpoint. Start the service on another host only for
+  a new run.
+- Logs: `journalctl -u yeto-<run>-<role>`; the syncer's own log is `yeto-syncer.log` in the
+  syncer unit's working directory.

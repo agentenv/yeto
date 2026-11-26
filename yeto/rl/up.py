@@ -1843,6 +1843,11 @@ class Run:
 
         if self.env.get(ISLAND_HMAC_KEY_ENV):
             return
+        plan = self.fleet_plan()
+        if plan is not None and plan.syncer_service:  # never generated: the syncer service has its own
+            from yeto.launch.fleet_syncer import key_mismatch  # noqa: PLC0415
+
+            raise RunUpRefused(f"fleet.syncer_service: {key_mismatch(None, None)}")
         path = self.dir / "island_hmac.key"
         if not path.exists():
             import secrets  # noqa: PLC0415
@@ -3225,6 +3230,12 @@ class Run:
         from yeto.launch.pool.desired import trainers  # noqa: PLC0415
         from yeto.rl import fleet_session, island_launches  # noqa: PLC0415
 
+        if plan.syncer_service:
+            from yeto.launch.fleet_syncer import environ_key_id, key_mismatch  # noqa: PLC0415
+
+            refused = key_mismatch(environ_key_id(self.env), None)
+            if refused:
+                return f"fleet.syncer_service: {refused}"
         members = list(trainers(self.desired_doc).values())
         if not members:
             members = [{**m, "argv": [*m["argv"], *island_launches.member_table_flags(m["learner_id"])]}

@@ -128,7 +128,10 @@ PLAN_OBJECT = f"{FLEET_DIR}/plan.json"  # the plan in the run store
 DISPENSE_DIR = f"{FLEET_DIR}/dispense"  # the fleet's task ledger root (store_dispense.FLEET_DISPENSE_DIR)
 DISPENSE_MODES = ("fleet", "island")
 FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h", "fixed_roster", "min_islands",
-                        "island_lease_s", "launch", "max_islands"})
+                        "island_lease_s", "launch", "max_islands", "syncer_service"})
+# fleet.syncer_service: the host of an on-site syncer run as a service (``yeto fleet service``):
+# a host name or IPv4 / IPv6 address the islands dial, no port (the syncer's ports are its own)
+SYNCER_SERVICE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*|\[?[0-9A-Fa-f:]+\]?")
 DEFAULT_MIN_ISLANDS = 1
 LEGACY_PLAN = "a plan written before fleet.fixed_roster"  # its launch had the fixed roster
 # fleet.launch: how the trainers start. synced_group (default): one yeto launch of every
@@ -285,6 +288,8 @@ class FleetPlan:
     roster_reason: str | None = None  # why the roster is fixed (fleet.fixed_roster, or the pool's precondition)
     launch: str = LAUNCH_SYNCED_GROUP  # fleet.launch
     max_islands: int | None = None  # per_island: the syncer's learner id limit (fleet.max_islands)
+    # per_island: the host of the on-site syncer service (fleet.syncer_service; None: the launch's own syncer)
+    syncer_service: str | None = None
 
     @property
     def per_island(self) -> bool:
@@ -300,6 +305,8 @@ class FleetPlan:
                "islands": [i.to_json() for i in self.islands]}
         if self.per_island:  # a synced-group plan stays byte for byte what it was
             out.update(launch=self.launch, max_islands=self.max_islands)
+        if self.syncer_service:  # only a fleet with an on-site syncer service gets the key
+            out["syncer"]["service"] = self.syncer_service
         return out
 
     def dumps(self) -> str:
@@ -385,7 +392,8 @@ class FleetPlan:
                    fixed_roster=bool(roster.get("fixed", False)),
                    min_islands=int(roster.get("min_islands") or DEFAULT_MIN_ISLANDS),
                    island_lease_s=roster.get("lease_s"), roster_reason=roster.get("reason"),
-                   launch=str(doc.get("launch") or LAUNCH_SYNCED_GROUP), max_islands=doc.get("max_islands"))
+                   launch=str(doc.get("launch") or LAUNCH_SYNCED_GROUP), max_islands=doc.get("max_islands"),
+                   syncer_service=syncer.get("service"))
 
 
 def plan_of(cfg: dict[str, Any]) -> FleetPlan | None:
@@ -526,7 +534,24 @@ def _fleet_section(cfg: dict[str, Any]) -> tuple[list[str], str]:
         raise _err(f"fleet.launch must be one of {list(LAUNCH_MODES)} (got {launch!r})")
     if "max_islands" in section and launch != LAUNCH_PER_ISLAND:
         raise _err("fleet.max_islands applies to fleet.launch per_island (islands added while the fleet trains)")
+    syncer_service(section)
     return argv, str(dispense)
+
+
+def syncer_service(section: dict[str, Any]) -> str | None:
+    """``fleet.syncer_service`` (validated; None: unset): the host of the fleet's on-site syncer,
+    which runs as a service of its own (``yeto fleet service``) instead of in the syncer launch.
+    Only a fleet launched island by island has a syncer launch to hand the syncer to."""
+    host = section.get("syncer_service")
+    if host is None:
+        return None
+    if section.get("launch", LAUNCH_SYNCED_GROUP) != LAUNCH_PER_ISLAND:
+        raise _err("fleet.syncer_service applies to fleet.launch per_island (the syncer launch hands the syncer "
+                   "to the on-site service)")
+    if not isinstance(host, str) or not SYNCER_SERVICE_HOST.fullmatch(host):
+        raise _err(f"fleet.syncer_service must be the syncer host's name or address the islands dial, without a "
+                   f"port (got {host!r})")
+    return host
 
 
 def roster_options(cfg: dict[str, Any]) -> tuple[bool, int, float | None]:
@@ -1329,13 +1354,14 @@ def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple
 
     prices = [i.usd_per_h for i in rows]
     syncer = cfg.get("syncer") if isinstance(cfg.get("syncer"), dict) else {}
+    service = syncer_service(cfg["fleet"])
     plan = FleetPlan(run=str(cfg["run"]), store=store, dispense=dispense, islands=tuple(rows),
                      dispense_store=dispense_store, sync=training_form(trainer_argv),
                      syncer_usd_per_h=_price(syncer.get("usd_per_h"), "syncer.usd_per_h"),
-                     syncer_placement=syncer_placement(argv).to_json(),
+                     syncer_placement=syncer_placement(argv, service=service).to_json(),
                      fixed_roster=roster.fixed, min_islands=roster.min_islands,
                      island_lease_s=roster.lease_s, roster_reason=roster.reason,
-                     launch=launch, max_islands=max_islands)
+                     launch=launch, max_islands=max_islands, syncer_service=service)
     out = copy.deepcopy({k: v for k, v in cfg.items() if k != PLAN_KEY})
     out["trainer"] = {"argv": argv, "usd_per_h": None if all(p is None for p in prices)
                       else float(sum(p or 0.0 for p in prices))}

@@ -99,10 +99,17 @@ def fleet_flags(plan: Any) -> list[str]:
     return ["--rl-sync-max-learners", str(int(plan.max_islands))]
 
 
+SYNCER_SERVICE_FLAG = "--rl-fleet-syncer-service"  # the syncer launch of a fleet with an on-site syncer service
+
+
 def syncer_argv(group_argv: list[str], plan: Any) -> list[str]:
-    """The syncer launch (module doc): the synced-group argv, syncer role only."""
+    """The syncer launch (module doc): the synced-group argv, syncer role only. With an
+    on-site syncer service (``fleet.syncer_service``) the launch watches that service
+    instead of starting a syncer (:func:`yeto.launch.fleet_syncer.watch_service`), on
+    this host (``--controller local``: no head VM)."""
+    service = getattr(plan, "syncer_service", None)
     return [*group_argv, "--rl-fleet-role", "syncer", "--rl-fleet-learners", str(len(plan.islands)),
-            *fleet_flags(plan)]
+            *fleet_flags(plan), *((SYNCER_SERVICE_FLAG, str(service), "--controller", "local") if service else ())]
 
 
 def island_argv(trainer_argv: list[str], island: Any, plan: Any, *, learners: int,
@@ -239,11 +246,13 @@ def fleet_shape(trainer_argv: list[str]) -> str | None:
 # -- the syncer record --------------------------------------------------------------------------
 
 def write_syncer_record(objects: Any, *, addr: str, syncer_epoch: int | None, learners: int,
-                        max_learners: int | None, run: str, clock: Any = time.time) -> dict[str, Any]:
-    """The fleet syncer's address and term in the run store (the island launches dial it)."""
+                        max_learners: int | None, run: str, clock: Any = time.time,
+                        extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The fleet syncer's address and term in the run store (the island launches dial it).
+    ``extra``: fields an on-site syncer service adds (``service``, ``key_id``); none otherwise."""
     record = {"schema": SYNCER_SCHEMA, "addr": str(addr), "syncer_epoch": syncer_epoch, "learners": int(learners),
               "max_learners": None if max_learners is None else int(max_learners), "run": str(run),
-              "at": round(clock(), 3)}
+              "at": round(clock(), 3), **dict(extra or {})}
     objects.write(SYNCER_RECORD, json.dumps(record, sort_keys=True).encode())
     return record
 

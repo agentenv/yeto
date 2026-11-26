@@ -756,6 +756,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
 
     ssh_resident.check(args, parse_gpu_spec(args.gpu))  # resident ssh: islands, before any cloud work
     _write_run_manifest(args)
+    if getattr(args, "rl_fleet_syncer_service", None) and local_syncer is None:
+        # the syncer launch of a fleet whose syncer is an on-site service (fleet.syncer_service):
+        # nothing is ordered, the launch waits for the service and watches it
+        from .launch import fleet_syncer
+
+        return fleet_syncer.watch_service(args)
     head_mode = local_syncer is not None
     # --rl-single-island-no-sync: one ports island, no syncer at all
     # (validated in _prepare_ports_algorithm before any cloud work).
@@ -2002,7 +2008,9 @@ def dry_run_plan(args) -> dict:
         **({"deterministic_stop": {"on": True, "why": _ds[1]}}
            if rl and (_ds := deterministic_stop(args))[0] else {}),
         "total_gpus": sum(s.total_gpus for s in specs),
-        "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
+        "syncer": None if no_sync else (
+            f"on-site service on {args.rl_fleet_syncer_service}" if getattr(args, "rl_fleet_syncer_service", None)
+            else "head VM" if head else f"{args.cluster_prefix}-syncer"),
         # one syncer per trainable role (actor first); none without outer sync
         "role_syncers": [] if not rl or no_sync else _dry_run_role_syncers(
             args, sample_roles.syncer_learner_count(args, len(specs)) + external),

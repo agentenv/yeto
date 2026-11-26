@@ -1039,6 +1039,11 @@ _SCHEDULING = (
              help="with --rl-fleet-role syncer on a cluster: how long the syncer cluster may stay "
              "unreadable or not UP in a row before the syncer launch fails (and the fleet ends). "
              "It includes the time the sky API itself does not answer (default 300)"),
+    cli_flag("--rl-fleet-syncer-service", default=None, metavar="HOST",
+             help="with --rl-fleet-role syncer: the fleet's syncer runs as an on-site service on HOST "
+             "(yeto fleet service --role syncer; run config fleet.syncer_service). The launch starts no "
+             "syncer: it waits for the service's record in the run store, then watches it "
+             "(default: the launch runs the syncer itself)"),
     cli_flag("--rl-sync-max-learners", type=int, default=None, metavar="N",
              help="membership: the syncer admits island ids 0..N-1, so islands may join "
              "after the launch (default: the launched islands; with the full-parameter "

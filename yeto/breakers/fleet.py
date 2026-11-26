@@ -214,7 +214,7 @@ class SyncerPlacement:
     syncer). Either machine is one on-demand sky VM on ``provider`` (the --syncer-region cloud) with
     cpus 8+ and ``memory_gib`` (--syncer-memory)."""
 
-    where: Literal["head", "vm", "none"]
+    where: Literal["head", "vm", "none", "onsite"]
     provider: str | None = None
     memory_gib: float | None = field(default=None, compare=False)
 
@@ -232,12 +232,20 @@ def _last_value(argv: Sequence[str], flag: str) -> str | None:
     return value
 
 
-def syncer_placement(argv: Sequence[str]) -> SyncerPlacement:
+ONSITE = "onsite"
+SERVICE_FLAG = "--rl-fleet-syncer-service"  # yeto.rl.island_launches.SYNCER_SERVICE_FLAG
+
+
+def syncer_placement(argv: Sequence[str], *, service: str | None = None) -> SyncerPlacement:
     """Where the trainer launch ``argv`` runs its syncer (``--controller``, ``--syncer-region``
-    as ``region`` (AWS) or ``cloud/region``, ``--rl-single-island-no-sync``)."""
+    as ``region`` (AWS) or ``cloud/region``, ``--rl-single-island-no-sync``). ``service`` (or
+    the syncer launch's ``--rl-fleet-syncer-service``): an on-site syncer service on the
+    operator's own machine (``fleet.syncer_service``), no cloud VM."""
     argv = [str(a) for a in argv]
     if _sets(argv, "--rl-single-island-no-sync"):
         return SyncerPlacement("none")
+    if service or _last_value(argv, SERVICE_FLAG):
+        return SyncerPlacement(ONSITE)
     where = "head" if (_last_value(argv, "--controller") or DEFAULT_CONTROLLER) == "head" else "vm"
     region = _last_value(argv, "--syncer-region") or ""
     try:
@@ -267,6 +275,8 @@ def syncer_rate(usd_per_h: Any, placement: SyncerPlacement | None) -> tuple[floa
         return None, "the syncer's placement is unknown"
     if placement.where == "none":
         return 0.0, "no syncer (--rl-single-island-no-sync)"
+    if placement.where == ONSITE:
+        return 0.0, "an on-site syncer service on the operator's own machine (fleet.syncer_service)"
     from yeto.cost import prices  # noqa: PLC0415
 
     machine = (f"the {HEAD_VM} on {placement.provider} (it hosts the syncer and the fleet controller)"
