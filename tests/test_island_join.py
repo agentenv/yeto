@@ -7,8 +7,8 @@ Node health and leases are the real modules (``yeto.hw.node_health``, ``yeto.lau
 most tests answer through a stand-in checker (a real :class:`~yeto.hw.node_health.Checker` whose
 script prints the node's name) and stand-in holders in the real holder format, and some use the
 real checker of a family without one and real :class:`~yeto.launch.node_lease.NodeLeases` on a
-directory store. The fabric placement check (``fabric_groups.check_placement(nodes, need) ->
-(ok, message, hint_only)``) is a stand-in until its module is merged."""
+directory store. The fabric placement check is a stand-in knob in most tests and the real
+``fabric_groups.check_placement`` in one."""
 
 from __future__ import annotations
 
@@ -83,11 +83,12 @@ class Leases:
 @pytest.fixture
 def stand_ins(monkeypatch):
     """The three checks' modules, as the contract has them; returns their knobs."""
-    knobs = {"checker": Checker(), "placement": (True, "", False), "holders": {}, "placed": []}
+    knobs = {"checker": Checker(), "placement": (True, "", False), "holders": {}, "placed": [], "inventories": []}
     monkeypatch.setattr(ij, "_checker_for", lambda node: knobs["checker"])
 
-    def placement(nodes, need):
+    def placement(nodes, need, inventory):
         knobs["placed"].append(([n.name for n in nodes], need))
+        knobs["inventories"].append(None if inventory is None else [n.name for n in inventory])
         return knobs["placement"]
 
     monkeypatch.setattr(ij, "_check_placement", placement)
@@ -95,12 +96,14 @@ def stand_ins(monkeypatch):
     return knobs
 
 
-def _inventory(path, names, *, env=None):
+def _inventory(path, names, *, env=None, groups=None):
     path.write_text("nodes:\n" + "".join(
         f"  - {{name: {name}, host: ops@{name}.example, address: 198.51.100.{10 + i}, interface: bond0, "
         "device_family: cuda, cpu_arch: x86_64, card: B300, cards_per_node: 8, hbm_gib: 288, "
         "host_memory_gib: 2048, fabric: ib, runtime: docker, docker_args: [--gpus, all]"
-        + (f", env: {{NCCL_IB_HCA: '{env}'}}" if env else "") + "}\n" for i, name in enumerate(names)))
+        + (f", env: {{NCCL_IB_HCA: '{env}'}}" if env else "")
+        + (f", fabric_group: {groups[name]}" if groups and name in groups else "") + "}\n"
+        for i, name in enumerate(names)))
     return path
 
 
@@ -174,6 +177,23 @@ def test_nodes_across_fabric_groups_refuse_the_island(tmp_path, stand_ins):
     assert out.refusals == [("fabric: the island needs 2 healthy nodes of one fabric group; group a has only 1, "
                             "group b has only 1")]
 
+
+def test_the_real_placement_check_refuses_nodes_of_two_fabric_groups(tmp_path, monkeypatch):
+    """fabric_groups.check_placement itself, on the island's nodes and its whole inventory."""
+    monkeypatch.setattr(ij, "_checker_for", lambda node: Checker())
+
+    def run(groups, names=("b300-4", "b300-5")):
+        inventory = load_inventory(_inventory(tmp_path / "g.yaml", ["b300-3", *names], groups=groups))
+        nodes = [n for n in inventory if n.name in names]
+        return ij.check(nodes, need=2, run_id="r", ssh=Ssh(), inventory=inventory)
+
+    split = run({"b300-3": "a", "b300-4": "a", "b300-5": "b"})
+    assert len(split.refusals) == 1 and split.refusals[0].startswith("fabric: ")
+    assert run({"b300-3": "a", "b300-4": "b", "b300-5": "b"}).ok
+    plain = run(None)  # no group anywhere: placed as before, with the hint as a note
+    assert plain.ok and any(n.startswith("fabric: ") and "fabric_group" in n for n in plain.notes)
+    other = run({"b300-3": "a"})  # groups in the inventory, none on the island's nodes
+    assert not other.ok and other.refusals[0].startswith("fabric: ")
 
 def test_an_inventory_without_groups_is_only_a_note(tmp_path, stand_ins):
     stand_ins["placement"] = (True, "no fabric_group in the inventory: run yeto cluster probe --write", True)
@@ -274,6 +294,7 @@ def test_add_takes_an_ssh_island_whose_nodes_pass(fleet_store, stand_ins, tmp_pa
     assert _add(run_cli, samplers, inventory) == 0
     out = capsys.readouterr()
     assert "island north's nodes pass the join checks" in out.out
+    assert stand_ins["inventories"] == [["b300-4", "b300-5"]]  # placed against its whole inventory
     assert "note: island north: no lease_store" in out.err
     (member,) = dry_runs
     assert member["argv"][-2:] == ["--rl-node-inventory", str(inventory)] and member["gpu"] == GPU
