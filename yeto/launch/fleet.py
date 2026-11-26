@@ -290,6 +290,8 @@ class FleetController:
         incarnations=None,
         stop_probe=None,
         deterministic_stop: bool = False,
+        straggler=None,
+        straggler_policy=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -409,6 +411,13 @@ class FleetController:
         # STOP there ends that island only. None (a single-trainer launch by default):
         # nothing is written or read.
         self.recorder = recorder
+        # yeto.launch.island_straggler.StragglerWatch or None: the syncer's merges, read each
+        # poll; a running island none of whose pushes was merged in N merge cycles is written
+        # as island_straggler (fleet.jsonl and its record). ``straggler_policy(name, signal)``
+        # says what to do (island_straggler.WAIT, the default, or REPLACE with a ``replace``
+        # callable of its own); None: wait (the syncer merges without it meanwhile).
+        self.straggler = straggler
+        self.straggler_policy = straggler_policy
         # name -> {"incarnation", "relaunches", "adopted"} from the island's record of an
         # earlier launcher of this run (yeto.launch.island_adopt): an adopted island keeps
         # its incarnation; a relaunched one continues the count.
@@ -535,6 +544,7 @@ class FleetController:
                 self._poll_local_syncer()
             for rec in self.learners.values():
                 self._poll_recorded(rec)
+            self._poll_stragglers()
             self._end_followers()
             if all(r["state"] in (DONE, ABANDONED) for r in self.learners.values()):
                 break
@@ -1098,6 +1108,60 @@ class FleetController:
                        f"(stall timeout {self.stall_timeout:.0f}s, {progress} events so far)")
             print(f"[launcher] ERROR: run stalled: {message}", file=sys.stderr)
             raise RunStalled(message, silent_s=silent, timeout_s=self.stall_timeout)
+
+    # -- island stragglers (yeto.launch.island_straggler) -------------------------------------
+    def _poll_stragglers(self) -> None:
+        """The straggler watch's signals for the islands running now (not draining): each one
+        is written once (``island_straggler`` / ``island_straggler_cleared`` in fleet.jsonl,
+        ``straggler`` in the island's record) and its policy is asked what to do. Never
+        raises: a watch that fails is a missing view, not the end of supervision."""
+        if self.straggler is None or self.recorder is None:
+            return
+        try:
+            running, names = {}, {}
+            for rec in self.learners.values():
+                ref = self.recorder.ref(rec["name"])
+                if ref is None or ref.role == "sampler" or rec["state"] != RUNNING or rec.get("draining"):
+                    continue
+                running[ref.island] = (rec.get("incarnation"), rec.get("job_id"))
+                names[ref.island] = rec
+            for signal in self.straggler.poll(running):
+                rec = names.get(signal.island)
+                if rec is not None:
+                    self._island_straggler(rec, signal)
+        except Exception as error:  # noqa: BLE001 - a watch, never the end of supervision
+            print(f"[launcher] island straggler watch: {type(error).__name__}: {error}"[:400], file=sys.stderr)
+
+    def _island_straggler(self, rec, signal) -> None:
+        from . import island_straggler as st
+
+        name = rec["name"]
+        if signal.cleared:
+            print(f"[launcher] {name}: no longer a straggler ({signal.reason})", file=sys.stderr)
+            self._fleet(st.CLEARED_EVENT, name, **st.signal_fields(signal, None))
+            self._record(rec, straggler=None)
+            return
+        action = st.WAIT
+        if self.straggler_policy is not None:
+            try:
+                action = self.straggler_policy(name, signal) or st.WAIT
+            except Exception as error:  # noqa: BLE001 - the default is to wait
+                print(f"[launcher] {name}: straggler policy failed ({type(error).__name__}: {error}); "
+                      "waiting", file=sys.stderr)
+                action = st.WAIT
+        if action not in st.ACTIONS:
+            print(f"[launcher] {name}: straggler policy answered {action!r}; waiting", file=sys.stderr)
+            action = st.WAIT
+        fields = st.signal_fields(signal, action)
+        print(f"[launcher] WARNING: {name}: island straggler: {signal.reason}; "
+              + ("waiting (the syncer merges the other islands at each quorum deadline, and catches it up "
+                 "once it delivers again)" if action == st.WAIT else "its provider replaces it"), file=sys.stderr)
+        self._fleet(st.EVENT, name, **fields)
+        self._record(rec, straggler=dict(fields, at=self.ops.now()))
+        if action == st.REPLACE:
+            replace = getattr(self.straggler_policy, "replace", None)
+            if callable(replace):
+                replace(name, signal)
 
     def _all_learners_finalized(self) -> bool:
         return self.finalized_probe is not None and all(

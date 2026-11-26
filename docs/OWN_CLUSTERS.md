@@ -930,3 +930,77 @@ example:
 When it falls back to the default, the line names the closest records and why
 they do not fit. A configuration that names its image prints nothing new and runs
 exactly as before.
+
+## Islands that lag, join or leave
+
+A fleet of `ssh:` trainer islands on your own machines uses the same fleet mechanisms as any
+other island fleet ([FLEET_TRAINER_ISLANDS.md](FLEET_TRAINER_ISLANDS.md)). This section
+covers what is specific to `ssh:` islands: how a slow or stuck island is reported, and what
+happens when one leaves.
+
+### An island that lags
+
+An island can fall behind or stop pushing while its process and its connection stay up: a
+slow node, a hung collective, a trainer that waits on something. The syncer does not wait
+for it. When a round's quorum deadline passes, the syncer merges the pushes that arrived and
+records the silent island as absent. Later rounds do not wait for it either. Once the island
+delivers again, its late push is carried into a later round with a discount, or refused when
+it lags past `--rl-sync-max-base-lag`. The island then catches up to the newest merged
+weights and answers rounds again. The other islands keep merging the whole time.
+
+The island's fleet controller reports such an island. It reads the syncer's merges, and
+when none of the island's pushes was merged in `N` merge cycles it writes:
+
+- `island_straggler` in the launch's `fleet.jsonl`, with `missed_cycles`, `merges`,
+  `fragments`, `last_merged_step`, `newest_step`, `absent` and `action`;
+- the same fields under `straggler` in the island's record (`fleet/trainers/<k>/state.json`,
+  shown by `yeto island status`).
+
+A merge cycle is one outer step of every fragment, so with 4 fragments and `N = 3` the
+island is reported after 12 merges without it. Counting starts when the island joins the
+syncer after a launch or relaunch, so the time an island takes to start is not counted. A
+push the syncer refused does not count as merged. The report is written once per stretch.
+`island_straggler_cleared` follows once a push of the island is merged again, and its record's
+`straggler` is set back to `null`.
+
+`action` is what the controller does about it. The default is `wait`: nothing is stopped or
+relaunched, because the syncer already merges without the island. A lost or unhealthy node
+is handled by the island's own launch, not by this report.
+
+Set `N` in `fleet.trainer_argv`, so every island launch gets the same value:
+
+```json
+"trainer_argv": ["...", "--rl-island-straggler-cycles", "3"]
+```
+
+`3` is the default. `0` turns the report off. The value must be a whole number of 0 or more;
+`yeto launch --dry-run` refuses anything else.
+
+The controller reads the syncer's tape in one of two places:
+
+- from the syncer's own file, when the syncer runs on the same host as the controller
+  (`--controller head`);
+- otherwise from its copy in the run store, `tapes/syncer/<incarnation>/<seq>.jsonl`. The
+  syncer launch uploads it every 30 s (`YETO_RL_TAPE_UPLOAD_S`) when `--rl-checkpoint-store`
+  is an `s3://` store. With another store, or with the upload off (`YETO_RL_TAPE_UPLOAD_S=0`),
+  the launch prints `island straggler watch off` and nothing is reported. Training is not
+  affected either way.
+
+The report comes at most one upload interval after the merges it counts.
+
+### Removing an island
+
+```bash
+yeto fleet island remove --config run.json --name north --dry-run
+yeto fleet island remove --config run.json --name north
+```
+
+The trainer worker writes the island's STOP. The island's controller drains it, stops the
+trainer on every node (and checks that each container is gone), and records the island
+`done`. Its incarnation is closed in the run's resource ledger. The syncer sees the island's
+connection drop. The round it was asked for waits one island lease and then merges over the
+islands left. The island's nodes are free for another island afterwards.
+
+In a fleet launched as one launch (`fleet.launch: synced_group`), islands cannot be added
+while it trains. One island can be stopped and started again by its learner id, for example
+island 1 with `yeto island stop 1 --config run.json` and `yeto island start 1 --config run.json`.
