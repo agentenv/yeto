@@ -757,6 +757,7 @@ def _trainer(iid: str, x: _Island, card: dict, st: dict, merges: list[dict], ver
         "arch": arch_of(card.get("gpu")), "status": st.get("status"), "live": bool(st.get("alive")),
         "reason": (card.get("left") or {}).get("reason"), "finalized": bool(card.get("finalized")),
         "island_now": card.get("island_now"),  # its trainer island record (a fleet launched island by island)
+        "straggler": card.get("straggler"),  # its last island_straggler event, None once cleared
         "last_event_ts": st.get("last_event_ts"), "step": step,
         "outer": _int(full.get("sync/outer_version")) if full else None,
         "versions": vec, "since": since, "pushed": {str(k): v for k, v in pushed.items()},
