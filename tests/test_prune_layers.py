@@ -220,3 +220,80 @@ def test_hub_source_downloads_only_the_needed_shards(pl, tmp_path, monkeypatch):
     assert pl.open_source("hf://org/model").repo == "org/model"
     with pytest.raises(pl.PruneError, match="not a directory"):
         pl.open_source(str(tmp_path / "missing"))
+
+
+# -- hybrid (Mamba) configs: Nemotron-H ---------------------------------------------
+
+NEMOTRON_H = REPO / "tests" / "data" / "prune_layers" / "nemotron_h_nano_4b.json"  # its config.json, as published
+
+
+def _nemotron_h() -> dict:
+    return json.loads(NEMOTRON_H.read_text())
+
+
+def test_the_hybrid_pattern_is_cut_with_the_layers(pl):
+    """Megatron builds a hybrid model's layers from hybrid_override_pattern, one per
+    character: the cut keeps exactly the first N characters (also under
+    --keep-layer-tables, which leaves only the index tables as they are)."""
+    cfg = _nemotron_h()
+    pattern = cfg["hybrid_override_pattern"]
+    assert cfg["num_hidden_layers"] == len(pattern) == 42 and pattern.index("*") == 12
+    for layers in (13, 16, 42):
+        out = pl.prune_config(cfg, layers)
+        assert out["num_hidden_layers"] == layers and out["hybrid_override_pattern"] == pattern[:layers]
+        assert pl.prune_config(cfg, layers, keep_tables=True)["hybrid_override_pattern"] == pattern[:layers]
+    assert cfg["hybrid_override_pattern"] == pattern  # the input is not changed
+    kinds = pl.kept_layer_kinds(cfg, 14)
+    assert kinds[0] == "mamba" and kinds[1] == "mlp" and kinds[12] == "attention" and len(kinds) == 14
+
+
+def test_a_hybrid_cut_without_an_attention_layer_is_refused(pl, tmp_path):
+    with pytest.raises(pl.PruneError, match=r"the first 12 layers of hybrid_override_pattern have no attention "
+                                            r"layer \(the first is layer 12, 0-based\).*--layers 13"):
+        pl.prune_config(_nemotron_h(), 12)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "config.json").write_text(NEMOTRON_H.read_text())
+    _safetensors(tmp_path / "src" / "model.safetensors",
+                 {f"backbone.layers.{i}.mixer.in_proj.weight": _tensor("w", i) for i in range(42)})
+    bad = subprocess.run([sys.executable, "-I", str(SCRIPT), str(tmp_path / "src"), str(tmp_path / "d"),
+                          "--layers", "8", "--dry-run"], capture_output=True, text=True)
+    assert bad.returncode == 1 and "keep at least --layers 13" in bad.stderr and not (tmp_path / "d").exists()
+    # a hybrid model without attention layers (all Mamba / MLP) has nothing to keep
+    assert pl.prune_config({"num_hidden_layers": 4, "hybrid_override_pattern": "M-M-"}, 2)[
+        "hybrid_override_pattern"] == "M-"
+
+
+def test_the_layers_block_type_list_is_cut_like_the_pattern(pl):
+    """The newer Nemotron-H configs (Nemotron 3.5) list the layer kinds instead."""
+    blocks = ["mamba", "moe", "mamba", "moe", "mamba", "attention", "mamba", "moe"]
+    cfg = {"num_hidden_layers": 8, "layers_block_type": blocks, "num_nextn_predict_layers": 2,
+           "mtp_layers_block_type": ["attention", "moe"]}
+    out = pl.prune_config(cfg, 6)
+    assert out["layers_block_type"] == blocks[:6] and out["num_nextn_predict_layers"] == 0
+    assert pl.kept_layer_kinds(cfg, 6) == dict(enumerate(blocks[:6]))
+    with pytest.raises(pl.PruneError, match="first is layer 5.*--layers 6"):
+        pl.prune_config(cfg, 5)
+    with pytest.raises(pl.PruneError, match="has 3 entries, fewer than the 4 layers"):
+        pl.prune_config({"num_hidden_layers": 8, "hybrid_override_pattern": "M*M"}, 4)
+
+
+def test_a_nemotron_h_checkpoint_is_cut_end_to_end(pl, tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "config.json").write_text(NEMOTRON_H.read_text())
+    tensors = {"backbone.embeddings.weight": _tensor("emb", 200), "backbone.norm_f.weight": _tensor("nf", 201),
+               "lm_head.weight": _tensor("head", 202)}
+    for i, kind in enumerate(_nemotron_h()["hybrid_override_pattern"]):
+        tensors[f"backbone.layers.{i}.norm.weight"] = _tensor("n", i)
+        name = {"M": "mixer.in_proj", "*": "mixer.q_proj", "-": "mixer.up_proj"}[kind]
+        tensors[f"backbone.layers.{i}.{name}.weight"] = _tensor("w", i)
+    _safetensors(src / "model.safetensors", tensors)
+    result = pl.prune(pl.LocalSource(src), tmp_path / "dest", 16, log=lambda *_: None)
+    cfg = json.loads((tmp_path / "dest" / "config.json").read_text())
+    assert cfg["num_hidden_layers"] == 16 and cfg["hybrid_override_pattern"] == "M-M-M-MM-M-M*-M-"
+    assert cfg["auto_map"] == _nemotron_h()["auto_map"]  # the remote-code config the model needs stays
+    kept = set(json.loads((tmp_path / "dest" / "model.safetensors.index.json").read_text())["weight_map"])
+    assert {pl.layer_of(n) for n in kept} - {None} == set(range(16)) and "lm_head.weight" in kept
+    report = json.loads((tmp_path / "dest" / "PRUNE.json").read_text())
+    assert report["layer_kinds"]["12"] == "attention" and len(report["layer_kinds"]) == 16
+    assert result["layer_kinds"][13] == "mlp"
