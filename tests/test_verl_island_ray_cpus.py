@@ -100,7 +100,7 @@ def test_the_launcher_and_the_island_entry_share_one_floor():
     from yeto.rl.adapters.verl import island_entry, launch_flags
 
     assert island_entry.MIN_RAY_CPUS == launch_flags.ISLAND_RAY_MIN_CPUS == 32
-    assert rr.trainer_cpus() == 11 <= launch_flags.ISLAND_RAY_MIN_CPUS
+    assert rr.trainer_cpus() == launch_flags.ISLAND_TRAINER_RAY_CPUS == 11 <= launch_flags.ISLAND_RAY_MIN_CPUS
 
 
 def test_the_trainer_actors_ask_for_the_slots_the_checks_count():
@@ -117,7 +117,7 @@ def test_the_dry_run_shows_the_vcpus_and_the_trainer_slots_of_a_verl_island(tmp_
     plan = _dry_run(tmp_path, monkeypatch, capsys, _argv())
     (island,) = plan["island_requests"]
     assert island["island_ray"] == {"node_vcpus": "8+", "ray_cpu_slots": "max(node vCPUs, 32)",
-                                    "trainer_ray_cpus": 11.0, "fits": True}
+                                    "trainer_ray_cpus": 11, "fits": True}
     typed = _dry_run(tmp_path, monkeypatch, capsys, _argv("--learner-instance-type", "g5.2xlarge"))
     assert typed["island_requests"][0]["island_ray"]["node_vcpus"] == "those of g5.2xlarge"
     miles = _dry_run(tmp_path, monkeypatch, capsys, _argv(backend="miles"))

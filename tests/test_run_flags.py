@@ -288,7 +288,7 @@ _NON_RL_LITERALS = frozenset({
     # syncer: spot rollout (subscribers, sample relay)
     "--max-subscribers", "--sample-relay",
     "--no-build-isolation", "--no-checkout", "--no-deps", "--no-follow", "--node",
-    "--node-ip-address", "--nproc", "--num-gpus", "--num-inference-steps", "--object-store-memory",
+    "--node-ip-address", "--nproc", "--num-cpus", "--num-gpus", "--num-inference-steps", "--object-store-memory",
     "--output-dir",
     "--password-stdin", "--policy-sweep-fragments", "--porcelain", "--port", "--profile",
     "--prompt", "--q-min",

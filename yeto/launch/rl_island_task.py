@@ -908,17 +908,16 @@ def island_ray_record(args, spec) -> dict | None:
     floor = island_ray_min_cpus(args)
     if floor is None:
         return None
-    from ..rl.adapters.verl.ray_resources import trainer_cpus  # noqa: PLC0415 - no Ray import
-
+    flags = _rl_backend_module(args, "launch_flags")
     if spec.cloud == "modal":
         vcpus = "the Modal container's"
     elif getattr(args, "learner_instance_type", None):
         vcpus = f"those of {args.learner_instance_type}"
     else:
         vcpus = rl_island_cpus(args, spec.cloud) or f"the {spec.cloud} node's"
-    need = trainer_cpus()
+    need = getattr(flags, "ISLAND_TRAINER_RAY_CPUS", None)
     return {"node_vcpus": vcpus, "ray_cpu_slots": f"max(node vCPUs, {floor})",
-            "trainer_ray_cpus": need, "fits": need <= floor}
+            "trainer_ray_cpus": need, "fits": need is None or need <= floor}
 
 
 def _worker_node_ip_flag(cloud: str) -> str:
