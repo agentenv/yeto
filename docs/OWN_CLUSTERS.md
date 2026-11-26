@@ -957,11 +957,23 @@ when none of the island's pushes was merged in `N` merge cycles it writes:
   shown by `yeto island status`).
 
 A merge cycle is one outer step of every fragment, so with 4 fragments and `N = 3` the
-island is reported after 12 merges without it. Counting starts when the island joins the
-syncer after a launch or relaunch, so the time an island takes to start is not counted. A
-push the syncer refused does not count as merged. The report is written once per stretch.
-`island_straggler_cleared` follows once a push of the island is merged again, and its record's
-`straggler` is set back to `null`.
+island is reported after 12 merges without it. A push the syncer refused does not count as
+merged. Counting starts when the island joins the syncer:
+
+- A launch counts only what the syncer records after the launch started. A relaunched or
+  moved island's new launch never counts the merges an earlier launch of it missed.
+- When the island stops running (its controller relaunches it, or it is stopped), its count
+  starts again at its next join. The time an island takes to start is not counted.
+- An island adopted by a restarted launcher joined before the launcher started. It is
+  counted from its first merged push.
+
+The report is written once per stretch. `island_straggler_cleared` closes the stretch, and its
+`reason` says why: a push of the island is merged again, it was `relaunched`, it was stopped
+or removed (island STOP), or it is no longer running. The record's `straggler` is set back to
+`null` at the same time.
+
+The dashboard shows both events in its event stream. While the island is reported, its
+trainer card carries a `straggler` badge and its row in "Islands now" says `straggler`.
 
 `action` is what the controller does about it. The default is `wait`: nothing is stopped or
 relaunched, because the syncer already merges without the island. A lost or unhealthy node
@@ -980,13 +992,29 @@ The controller reads the syncer's tape in one of two places:
 
 - from the syncer's own file, when the syncer runs on the same host as the controller
   (`--controller head`);
-- otherwise from its copy in the run store, `tapes/syncer/<incarnation>/<seq>.jsonl`. The
-  syncer launch uploads it every 30 s (`YETO_RL_TAPE_UPLOAD_S`) when `--rl-checkpoint-store`
-  is an `s3://` store. With another store, or with the upload off (`YETO_RL_TAPE_UPLOAD_S=0`),
-  the launch prints `island straggler watch off` and nothing is reported. Training is not
-  affected either way.
+- otherwise, in a fleet launched island by island (`fleet.launch: per_island`), from its
+  copy in the run store, `tapes/syncer/<incarnation>/<seq>.jsonl`. The syncer launch
+  uploads it every 30 s (`YETO_RL_TAPE_UPLOAD_S`) when `--rl-checkpoint-store` is an
+  `s3://` store. Each island launch reads it every 30 s, starting at the end of the newest
+  syncer incarnation it finds.
 
-The report comes at most one upload interval after the merges it counts.
+The report comes at most one upload interval and one read interval after the merges it
+counts.
+
+When the report cannot work, the launch prints `island straggler watch off` and writes
+`island_straggler_unavailable` once, with the `reason`, in `fleet.jsonl`. Nothing is
+reported then, and training is not affected. This happens:
+
+- with `--rl-island-straggler-cycles 0`;
+- in a per-island fleet whose run store is not an object store, or with the upload off
+  (`YETO_RL_TAPE_UPLOAD_S=0`);
+- in a fleet launched as one launch (`fleet.launch: synced_group`) whose syncer runs on a VM
+  of its own (any `--controller` other than `head`). That syncer's tape stays on its VM:
+  the launch does not upload it to the run store, so the controller has nothing to read.
+  Run the syncer on the controller's host (`--controller head`) or launch the fleet island
+  by island to get the report.
+- when the launch reads no syncer record for 10 reads in a row (the store copy is missing
+  or stale).
 
 ### Removing an island
 

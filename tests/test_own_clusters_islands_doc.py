@@ -10,6 +10,7 @@ import shlex
 from pathlib import Path
 
 from test_fleet_island_changes import fleet_store  # noqa: F401 - fixture
+
 from yeto.launch import island_straggler as st
 from yeto.rl import fleet, fleet_islands
 
@@ -26,7 +27,7 @@ def section() -> str:
 
 def commands() -> list[list[str]]:
     out = []
-    for block in re.findall(r"```bash\n(.*?)```", section(), flags=re.S):
+    for block in re.findall(r"```bash\n(.*?)```", section(), flags=re.DOTALL):
         out += [shlex.split(line) for line in block.replace("\\\n", " ").splitlines() if line.strip()]
     inline = re.findall(r"`(yeto island (?:stop|start) [^`]+)`", section())
     return out + [shlex.split(c) for c in inline]
@@ -35,8 +36,9 @@ def commands() -> list[list[str]]:
 def test_the_section_names_the_code_s_flags_and_events():
     text = section()
     assert "--rl-island-straggler-cycles" in text and f"`{st.DEFAULT_CYCLES}` is the default" in text
-    for name in (st.EVENT, st.CLEARED_EVENT, st.WAIT, st.SYNCER_TAPES.rstrip("/")):
+    for name in (st.EVENT, st.CLEARED_EVENT, st.UNAVAILABLE_EVENT, st.WAIT, st.SYNCER_TAPES.rstrip("/")):
         assert name in text
+    assert f"{st.QUIET_POLLS} reads in a row" in text and f"every {st.STORE_POLL_S:g} s" in text
     for field in st.Straggler.__dataclass_fields__:
         if field not in ("island", "cleared", "cycles", "reason"):
             assert f"`{field}`" in text, field
@@ -45,7 +47,7 @@ def test_the_section_names_the_code_s_flags_and_events():
 def test_the_section_commands_run_in_order(fleet_store, capsys):  # noqa: F811
     from yeto.cli import build_parser
 
-    cfg, objects, store, run_cli, samplers = fleet_store
+    cfg, _objects, store, run_cli, _samplers = fleet_store
     argvs = commands()
     assert {a[1] for a in argvs} == {"fleet", "island"}
     for argv in argvs:

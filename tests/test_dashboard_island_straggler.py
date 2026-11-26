@@ -18,7 +18,8 @@ from yeto.dashboard.export import export_html
 from yeto.launch import island_straggler as st
 
 # the topology page's smoke, also printing the event stream
-EV_SMOKE = SMOKE.replace('legend: mk("topoLg").innerHTML', 'legend: mk("topoLg").innerHTML, events: mk("evs").innerHTML')
+LEGEND = 'legend: mk("topoLg").innerHTML'
+EV_SMOKE = SMOKE.replace(LEGEND, LEGEND + ', events: mk("evs").innerHTML')
 assert EV_SMOKE != SMOKE
 
 
