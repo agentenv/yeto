@@ -152,6 +152,16 @@ CUDA_SECTIONS = tuple((name, f"{_T} {SECTION_TIMEOUT_S} bash -c {shlex.quote(cmd
 DRIVER_DOWN = "couldn't communicate with the NVIDIA driver"
 
 
+# the first commands of the background check: its pid file (pid and start time, written whole
+# then renamed), then the check itself in the same process (exec keeps the pid and start time)
+PID_PRELUDE = (
+    START_TIME_FN
+    + '{ echo "$$ $(__yeto_st $$)" > "$__yeto_pf.$$" && mv -f "$__yeto_pf.$$" "$__yeto_pf"; } 2>/dev/null '
+    '|| rm -f "$__yeto_pf.$$" 2>/dev/null\n'
+    'exec bash -c "$__yeto_hs"\n'
+)
+
+
 def bounded(script: str, limit_s: int = HEALTH_LIMIT_S, *, pid_file: str | None = None) -> str:
     """``script`` run in the background on the node, killed (``kill -9`` of its process
     group: ``setsid`` when the node has it) past ``limit_s``; its output is printed either
@@ -164,7 +174,12 @@ def bounded(script: str, limit_s: int = HEALTH_LIMIT_S, *, pid_file: str | None 
     a sick node. A pid that is gone, or now names another process (another start time: the
     pid was reused, the node rebooted), is stale: the file goes and the check runs. A
     check of another caller that runs at the same time (younger than ``limit_s``) does not
-    count; nor does a pid whose start time cannot be read."""
+    count; nor does a pid whose start time cannot be read.
+
+    The background process writes its own pid file (:data:`PID_PRELUDE`) before it runs
+    the check (``exec``: the same pid and start time), whole and then renamed: the file
+    names the check from its first command on, and a check reading it at the same time
+    never sees half of it."""
     pf = shlex.quote(pid_file) if pid_file else '"/tmp/yeto-health-$(id -u 2>/dev/null || echo 0).pid"'
     return (
         f"__yeto_hs={shlex.quote(script)}\n"
@@ -178,9 +193,10 @@ def bounded(script: str, limit_s: int = HEALTH_LIMIT_S, *, pid_file: str | None 
         '|| date +%s) )); '
         f'if [ "$__yeto_age" -gt {int(limit_s) + 5} ]; then echo "{BUSY_MARK} $__yeto_op"; exit 0; fi; fi\n'
         "__yeto_hf=$(mktemp /tmp/yeto-health.XXXXXX 2>/dev/null) || __yeto_hf=/tmp/yeto-health.$$\n"
-        'if command -v setsid >/dev/null 2>&1; then setsid bash -c "$__yeto_hs" > "$__yeto_hf" 2>&1 < /dev/null & '
-        'else bash -c "$__yeto_hs" > "$__yeto_hf" 2>&1 < /dev/null & fi\n'
-        '__yeto_hp=$!; __yeto_hn=0; echo "$__yeto_hp $(__yeto_st "$__yeto_hp")" > "$__yeto_pf" 2>/dev/null\n'
+        f"__yeto_hc={shlex.quote(PID_PRELUDE)}; export __yeto_hs __yeto_pf\n"
+        'if command -v setsid >/dev/null 2>&1; then setsid bash -c "$__yeto_hc" > "$__yeto_hf" 2>&1 < /dev/null & '
+        'else bash -c "$__yeto_hc" > "$__yeto_hf" 2>&1 < /dev/null & fi\n'
+        "__yeto_hp=$!; __yeto_hn=0\n"
         f'while kill -0 "$__yeto_hp" 2>/dev/null && [ "$__yeto_hn" -lt {int(limit_s) * 10} ]; do sleep 0.1; '
         "__yeto_hn=$((__yeto_hn + 1)); done\n"
         'if kill -0 "$__yeto_hp" 2>/dev/null; then kill -9 -- "-$__yeto_hp" 2>/dev/null; '

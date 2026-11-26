@@ -600,11 +600,13 @@ def test_a_check_still_stuck_on_the_node_makes_the_next_one_skip(tmp_path):
     finally:
         stuck.kill()
         stuck.wait()
-    # a running check records its pid and its start time (read here from inside the check)
+    # a running check has its pid and its start time recorded before its first command (read
+    # here as that first command)
     seen = subprocess.run(["bash", "-c", node_health.bounded(
-        f"cat {pid_file}; " + node_health.START_TIME_FN.replace("\n", "; ") + "__yeto_st $$", 5,
+        f"cat {pid_file}; " + node_health.START_TIME_FN.replace("\n", "; ") + "echo $$ $(__yeto_st $$)", 5,
         pid_file=str(pid_file))], capture_output=True, text=True, timeout=20).stdout.split()
-    assert len(seen) == 3 and seen[1] == seen[2] and seen[1]
+    assert len(seen) == 4 and seen[:2] == seen[2:] and seen[1], seen  # the check's own pid and start time
+    assert not list(tmp_path.glob("health.pid.*"))  # no temporary file left
     # a check that ended removes its pid; one that is gone leaves nothing to skip for
     assert _bounded(pid_file) == "ran\n" and not pid_file.exists()
     _pid_file(pid_file, f"{stuck.pid} {started}\n")
