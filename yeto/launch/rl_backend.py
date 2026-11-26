@@ -19,10 +19,10 @@ def resolve_default_rl_image(args) -> None:
     except backends.UnknownBackend as exc:
         raise ValueError(str(exc)) from None
     if getattr(args, "rl_image", None) is None:
-        nodes = _site_catalog_trainer_nodes(args)
-        if nodes is not None:  # an ssh: trainer island whose inventory names no image
-            import sys
+        import sys
 
+        nodes, why = _site_catalog_trainer_nodes(args)
+        if nodes is not None:  # an all-ssh: trainer fleet whose inventory names no image
             from . import site_images
 
             try:
@@ -37,6 +37,9 @@ def resolve_default_rl_image(args) -> None:
             print(f"[launcher] {choice.line('ssh trainer')}", file=sys.stderr, flush=True)
             return
         args.rl_image = _builtin_rl_image(args)
+        if why:
+            print(f"[launcher] trainer image {args.rl_image} (source: built-in default; {why})", file=sys.stderr,
+                  flush=True)
 
 
 def _builtin_rl_image(args) -> str:
@@ -49,26 +52,35 @@ def _builtin_rl_image(args) -> str:
     return default_rl_image(recipe=getattr(args, "rl_model_recipe", None), tuning=getattr(args, "tuning", None))
 
 
-def _site_catalog_trainer_nodes(args) -> list | None:
-    """The trainer nodes of an ``ssh:`` island of ``--gpu`` whose ``--rl-node-inventory``
-    names no image for them (the site image catalog may then give one,
-    :mod:`yeto.launch.site_images`); None for any other launch (no ssh: island, no
-    inventory, an inventory image: the configuration names its image)."""
+MIXED_FLEET = ("the --gpu fleet mixes ssh: and cloud islands: the site image catalog is read only when every "
+               "--gpu entry is ssh:")
+
+
+def _site_catalog_trainer_nodes(args) -> tuple[list | None, str]:
+    """``(nodes, why)``: the trainer nodes of a ``--gpu`` whose every entry is an ``ssh:``
+    island and whose ``--rl-node-inventory`` names no image for them (the site image
+    catalog may then give one, :mod:`yeto.launch.site_images`); None for any other launch
+    (no ssh: island, no inventory, an inventory image: the configuration names its image).
+    ``why``: the line a mixed fleet (ssh: and cloud islands) prints for its built-in
+    default (a cloud island's cards do not take part in a site match)."""
     path = getattr(args, "rl_node_inventory", None)
     if not path or not getattr(args, "gpu", None):
-        return None
+        return None, ""
     from ..gpu_spec import parse_gpu_spec
     from .node_inventory import InventoryError, island_nodes, load_inventory
 
     try:
-        if not any(spec.cloud == "ssh" for spec in parse_gpu_spec(args.gpu)):
-            return None
+        clouds = [spec.cloud for spec in parse_gpu_spec(args.gpu)]
+        if "ssh" not in clouds:
+            return None, ""
         nodes = island_nodes(load_inventory(path), "trainer")
     except (ValueError, InventoryError):  # the launch's own checks name a bad --gpu or inventory
-        return None
+        return None, ""
     if not nodes or any(n.image for n in nodes):
-        return None
-    return nodes
+        return None, ""
+    if not all(cloud == "ssh" for cloud in clouds):
+        return None, MIXED_FLEET
+    return nodes, ""
 
 
 def _rl_callable(value: str | None, flag: str, *, required: bool) -> None:

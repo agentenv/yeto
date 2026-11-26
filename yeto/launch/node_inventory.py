@@ -475,6 +475,17 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None,
     return node
 
 
+def site_images_value(document: Any) -> str | None:
+    """The inventory document's top-level ``site_images:``, the site image catalog's path
+    (:mod:`yeto.launch.site_images`; None: not given). Refuses a value that is not a path."""
+    if not isinstance(document, Mapping) or document.get("site_images") is None:
+        return None
+    value = document["site_images"]
+    if not isinstance(value, str) or not value.strip():
+        raise InventoryError(f"inventory site_images: must be a file path, not {value!r}")
+    return value
+
+
 def parse_inventory(document: Any) -> NodeList:
     """The ``nodes:`` list of a loaded inventory document (a :class:`NodeList`: with
     the top-level ``lease_store``)."""
@@ -492,9 +503,7 @@ def parse_inventory(document: Any) -> NodeList:
         images = parse_images(document.get("images"))
         health = parse_node_health(document.get("node_health"), "inventory")
         lease_store = parse_lease_store(document.get("lease_store"))
-        catalog = document.get("site_images")  # the site image catalog's path (yeto.launch.site_images)
-        if catalog is not None and (not isinstance(catalog, str) or not catalog.strip()):
-            raise InventoryError(f"inventory site_images: must be a file path, not {catalog!r}")
+        site_images_value(document)
     else:
         raise InventoryError(f"the inventory must be a mapping with a nodes list, got "
                              f"{type(document).__name__}")

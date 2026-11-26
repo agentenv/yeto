@@ -42,6 +42,7 @@ STATE_ENV = {
     "YETO_ISLANDS_LOG_DIR": "islands",  # yeto.rl.trainer_worker.LocalLaunchOps launch logs
     "YETO_SSH_RUNS_DIR": "ssh-runs",  # yeto.rl.ssh_harness.prepare plans
     "YETO_VERDA_IDS_PATH": "verda-instance-ids.json",  # yeto.sky_patches.verda
+    "YETO_SITE_IMAGES_PATH": "site-images.yaml",  # yeto.launch.site_images.default_path
 }
 # Points into one real run's ledger when inherited from an operator shell.
 CLEARED_ENV = ("YETO_RESOURCE_LEDGER",)
