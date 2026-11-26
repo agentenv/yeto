@@ -29,12 +29,19 @@ class ExactArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args, allow_abbrev: bool = False, **kwargs):
         super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
 
-    def parse_args(self, args=None, namespace=None):
+    # argparse's own parse_args stays the entry point (it calls parse_known_args, then
+    # error() with "unrecognized arguments: ..."): only that message gains the hints.
+    def parse_known_args(self, args=None, namespace=None):
         argv = list(sys.argv[1:] if args is None else args)
-        parsed, extras = self.parse_known_args(argv, namespace)
-        if extras:
-            self.error(unrecognized_message(self, argv, extras))
-        return parsed
+        parsed, extras = super().parse_known_args(argv, namespace)
+        self._exact_last_parse = (argv, list(extras))
+        return parsed, extras
+
+    def error(self, message):
+        argv, extras = getattr(self, "_exact_last_parse", ((), ()))
+        if extras and message == argparse._("unrecognized arguments: %s") % " ".join(extras):
+            message = unrecognized_message(self, argv, extras)
+        super().error(message)
 
 
 def _sub_parsers(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
