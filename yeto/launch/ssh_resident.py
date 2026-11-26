@@ -46,7 +46,13 @@ Lifecycle of one island:
 * **release** (the run ends, ``yeto stop-run``, abandon, teardown): TERM to the
   container's processes (Modal's stop signal), ``docker rm -f`` after the grace,
   the process group TERM -> KILL; each node must then show neither process nor
-  container, else the teardown is unverified (exit 5, the head stays up).
+  container, else the teardown is unverified (exit 5, the head stays up). Once it is
+  verified the island's node leases (inventory ``lease_store``, :mod:`.node_lease`)
+  are given up; a launcher that ends without a release (``--keep``) leaves them to
+  run out, and a restarted launcher of the run takes them back.
+
+Each watch also renews the island's node leases that are due; a node whose lease
+another run took fails the island at once (that run may start there).
 
 The echo tape comes from node 0's stream (``on_line``); when it lacks the
 finalized record, :meth:`SshIslandOps.recover_tape` re-reads node 0's log.
@@ -356,10 +362,15 @@ class SshIslandOps:
     def down(self, name: str) -> bool:
         """Release the island's current incarnation; True once every node confirmed it."""
         rec = self.islands.get(name)
-        if rec is None or rec.incarnation is None:
+        if rec is None:
+            return True
+        if rec.incarnation is None:  # never started: nothing runs on its nodes
+            rec.islands.release_leases()
             return True
         with self._lock:
             ok = self._release(rec, rec.incarnation)
+        if ok:
+            rec.islands.release_leases()
         if ok and rec.lock is not None:
             rec.lock.close()
             rec.lock = None
@@ -408,6 +419,10 @@ class SshIslandOps:
     # -- the watch --------------------------------------------------------------------
     def _watch(self, rec: _Island) -> None:
         if rec.verdict is not None:
+            return
+        lost = rec.islands.lease_lost()
+        if lost is not None:
+            self._fail(rec, lost)
             return
         procs = rec.job.procs
         for rank, proc in enumerate(procs):

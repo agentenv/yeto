@@ -656,6 +656,10 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
                 notes.append("NC_TOOL_DIR / provider.tool_dir is unset (the workspace relay needs it)")
         except ValueError as error:
             problems.append(str(error))
+    if provider_kind(cfg) == "ssh":  # own SSH nodes: leased across runs or not (node_lease)
+        from yeto.launch.ssh_sampler_pool import lease_notes  # noqa: PLC0415
+
+        notes += lease_notes(cfg)
     ecfg = pc.elastic
     hourly = pc.hourly()
     w = wording(cfg)

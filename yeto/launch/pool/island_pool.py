@@ -67,7 +67,7 @@ FENCING = "fencing"
 # What a provider's guard raises, told by class name (the pool imports no provider):
 # a refusal sent nothing to the provider and is no provisioning failure; a halted slot
 # (National Compute: the account, until an operator's ``clear-halt``) is skipped
-REFUSED_ERRORS = ("NcRefused",)
+REFUSED_ERRORS = ("NcRefused", "NodeLeased")  # NodeLeased: a node another run holds (node_lease)
 HALTED_ERRORS = ("NcHalted",)
 DEFERRED_ERRORS = ("NcReleaseDeferred",)  # the ticket ends on its own shortly: no delete now
 OWNERSHIP_ERRORS = ("NcForeignTicketReleased", "NcDeleteUnconfirmed")  # a delete hit, or may have hit, a foreign ticket

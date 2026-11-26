@@ -160,13 +160,16 @@ class StoreLock:
     # -- claim
     @classmethod
     def acquire(cls, objects: Any, prefix: str, *, holder: str | None = None, ttl_s: float = DEFAULT_TTL_S,
-                clock: Callable[[], float] = time.time) -> StoreLock | None:
+                clock: Callable[[], float] = time.time, reclaim: bool = False) -> StoreLock | None:
         """Claim the lock: a new :class:`StoreLock` with the next token, or None when a
-        running lease holds it or another claimer won the create."""
+        running lease holds it or another claimer won the create. ``reclaim``: a running
+        lease of this very ``holder`` name does not block the claim (the same owner
+        restarted elsewhere: its new token fences the old one)."""
         require_atomic_create(objects)
         holder = holder or holder_id()
         now = clock()
-        if cls.holder_of(objects, prefix, now=now) is not None:
+        current = cls.holder_of(objects, prefix, now=now)
+        if current is not None and not (reclaim and current.get("holder") == holder):
             return None
         tokens = cls.tokens(objects, prefix)
         token = (tokens[-1] if tokens else 0) + 1

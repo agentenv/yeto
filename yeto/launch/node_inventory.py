@@ -40,6 +40,14 @@ Example::
         env: {HCCL_IF_IP: 192.0.2.10}
         price_per_card_hour: 0.0
 
+``lease_store`` (top level, optional) is a store URI (``s3://`` / ``oss://``, or an
+absolute directory / ``file://`` path every launcher of the site shares) where the
+nodes of this file are leased across runs (:mod:`yeto.launch.node_lease`): a node
+another run holds is skipped. Without it nodes are not leased (as before)::
+
+    lease_store: s3://BUCKET/yeto-node-leases/site-a
+    nodes: [...]
+
 ``address`` is the node's IP on the cluster network (the ``interface``), which
 the other nodes dial for rendezvous; ``host`` may be an SSH alias that only the
 head resolves. ``docker_args`` are the device flags of ``docker run`` for the
@@ -138,6 +146,47 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 class InventoryError(ValueError):
     """The node inventory is not usable; the launch is refused before any SSH."""
+
+
+class NodeList(list):
+    """The nodes of an inventory file (a plain ``list`` of :class:`Node`) and the file's
+    top-level ``lease_store`` (None: not declared). A list, so every reader of the nodes
+    is unchanged; :func:`lease_store_of` reads the store."""
+
+    lease_store: str | None = None
+
+    def __init__(self, nodes: Any = (), *, lease_store: str | None = None) -> None:
+        super().__init__(nodes)
+        self.lease_store = lease_store
+
+
+def lease_store_of(nodes: Any) -> str | None:
+    """The ``lease_store`` of an inventory's node list (None: not declared, or a list
+    that did not come from :func:`parse_inventory` / :func:`load_inventory`)."""
+    return getattr(nodes, "lease_store", None)
+
+
+_LEASE_SCHEMES = ("s3://", "oss://", "file://")
+
+
+def parse_lease_store(value: Any) -> str | None:
+    """The top-level ``lease_store``: an ``s3://`` / ``oss://`` / ``file://`` URI or an
+    absolute directory (None: not declared)."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise InventoryError(f"lease_store must be a store URI (s3://, oss://, file://) or an absolute "
+                             f"directory, got {value!r}")
+    uri = value.strip().rstrip("/")
+    if uri.startswith(_LEASE_SCHEMES):
+        rest = uri.split("://", 1)[1]
+        if not rest or (uri.startswith("file://") and not rest.startswith("/")):
+            raise InventoryError(f"lease_store {value!r} names no bucket or directory")
+        return uri
+    if uri.startswith("/") and ".." not in uri.split("/"):
+        return uri
+    raise InventoryError(f"lease_store must be a store URI (s3://, oss://, file://) or an absolute "
+                         f"directory, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -419,20 +468,23 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None,
     return node
 
 
-def parse_inventory(document: Any) -> list[Node]:
-    """The ``nodes:`` list of a loaded inventory document."""
+def parse_inventory(document: Any) -> NodeList:
+    """The ``nodes:`` list of a loaded inventory document (a :class:`NodeList`: with
+    the top-level ``lease_store``)."""
     images: dict[str, str] = {}
     health = None
+    lease_store = None
     if isinstance(document, list):
         entries = document
     elif isinstance(document, dict):
-        unknown = sorted(set(document) - {"nodes", "images", "node_health"})
+        unknown = sorted(set(document) - {"nodes", "images", "node_health", "lease_store"})
         if unknown:
             raise InventoryError(f"unknown top-level inventory field(s) {unknown} "
-                                 f"(known: ['images', 'node_health', 'nodes'])")
+                                 f"(known: ['images', 'lease_store', 'node_health', 'nodes'])")
         entries = document.get("nodes")
         images = parse_images(document.get("images"))
         health = parse_node_health(document.get("node_health"), "inventory")
+        lease_store = parse_lease_store(document.get("lease_store"))
     else:
         raise InventoryError(f"the inventory must be a mapping with a nodes list, got "
                              f"{type(document).__name__}")
@@ -448,10 +500,10 @@ def parse_inventory(document: Any) -> list[Node]:
                 raise InventoryError(f"the inventory lists {label} {value!r} twice "
                                      f"(nodes {seen[value]} and {node.name})")
             seen[value] = node.name
-    return nodes
+    return NodeList(nodes, lease_store=lease_store)
 
 
-def load_inventory(path: str | Path) -> list[Node]:
+def load_inventory(path: str | Path) -> NodeList:
     """Read ``--rl-node-inventory`` (YAML or JSON) and validate every node."""
     import yaml  # noqa: PLC0415 - optional at import time, like yeto.shape.providers
 
@@ -818,15 +870,16 @@ def parse_profile(raw: Any, *, index: int, images: Mapping[str, str] | None = No
     return NodeProfile.from_node(node, **_profile_fields(raw, node))
 
 
-def parse_profiles(document: Any) -> list[NodeProfile]:
+def parse_profiles(document: Any) -> NodeList:
     """:func:`parse_inventory` with every node as a :class:`NodeProfile`."""
     with _profile_reader():
         nodes = parse_inventory(document)  # every check of the inventory, the duplicate names included
     entries = document if isinstance(document, list) else document.get("nodes")
-    return [NodeProfile.from_node(node, **_profile_fields(raw, node)) for node, raw in zip(nodes, entries)]
+    return NodeList([NodeProfile.from_node(node, **_profile_fields(raw, node)) for node, raw in zip(nodes, entries)],
+                    lease_store=nodes.lease_store)
 
 
-def load_profiles(path: str | Path) -> list[NodeProfile]:
+def load_profiles(path: str | Path) -> NodeList:
     """:func:`load_inventory` with every node as a :class:`NodeProfile`."""
     import yaml  # noqa: PLC0415
 
@@ -835,7 +888,8 @@ def load_profiles(path: str | Path) -> list[NodeProfile]:
     document = yaml.safe_load(Path(path).read_text())
     entries = document if isinstance(document, list) else document.get("nodes")
     try:
-        return [NodeProfile.from_node(node, **_profile_fields(raw, node)) for node, raw in zip(nodes, entries)]
+        return NodeList([NodeProfile.from_node(node, **_profile_fields(raw, node))
+                         for node, raw in zip(nodes, entries)], lease_store=nodes.lease_store)
     except InventoryError as exc:
         raise InventoryError(f"{path}: {exc}") from None
 

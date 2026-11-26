@@ -86,6 +86,14 @@ reads the newest check (``<workdir>/sampler/<shard>.health.json``) in its own ss
 Two bad checks in a row read ``lost``: the pool takes the node for lost (fence, then a
 replacement), and the node's slot is held as for a node that stopped answering.
 
+Leases across runs: an inventory with a top-level ``lease_store`` (:mod:`.node_lease`)
+leases its nodes to one run at a time. A slot whose node another run holds is not free
+(the holder is reported once per change, event ``node_leased_elsewhere``); an order
+takes the node's lease first (refused: ``NodeLeased``, the pool tries the next slot);
+each ticket read renews the pool's leases; a released ticket gives its node's lease up
+unless a stop is still owed there. A lease lost to another run ends the member (lost).
+Without ``lease_store`` none of this runs.
+
 Reach: every ``ssh`` to a node (preflight, code upload, start, probe, stop) goes
 through the node's ``reach`` in the inventory (:func:`yeto.node.transport.reach_options`):
 ``direct``; ``jump`` (``ProxyJump``; ``proxy_jump:`` is the same); ``relay`` (``via:
@@ -128,6 +136,7 @@ from .node_inventory import (
     InventoryError,
     Node,
     NodeProfile,
+    lease_store_of,
     load_profiles,
     nodes_by_name,
     parse_node_health,
@@ -141,6 +150,7 @@ from yeto.node.transport import ReachError, node_ssh_options
 
 KIND = "ssh"
 SSH_UNREACHABLE = 255  # ssh's own failure (no connection, no session): the node was not reached
+LEASE_READ_CACHE_S = 15.0  # a node's lease holder read for a free-slot check is reused this long
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MARKER = "yeto-ssh-sampler"  # prefix of a start's marker (start_marker): run, shard, ticket
 MARK_ENV = "YETO_SSH_SAMPLER_MARK"  # the sampler process carries its start's marker in this variable
@@ -220,6 +230,8 @@ class SshPoolConf:
     # the node runtime's health check (yeto.hw.node_health): "auto" / "off" for every node of
     # the pool; None: each node's inventory node_health (not declared: auto)
     node_health: str | None = None
+    # the inventory's top-level lease_store (yeto.launch.node_lease); None: nodes not leased
+    lease_store: str | None = None
 
 
 def _strs(value: Any, key: str) -> tuple[str, ...]:
@@ -244,6 +256,7 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
         if not section.get("inventory"):
             raise ValueError("ssh provider: inventory (an SSH node inventory file) is required")
         inventory = load_profiles(os.path.expanduser(str(section["inventory"])))
+    lease_store = lease_store_of(inventory)
     inventory = [profile_of(n) for n in inventory]
     by_name = nodes_by_name(list(inventory))
     names = section.get("nodes")
@@ -340,7 +353,7 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
                        min_cards=int(pre["min_cards"]) if pre.get("min_cards") is not None else None,
                        grace_s=int(section.get("grace_s", 120)),
                        price_usd_h=float(price) if price is not None else None, lost_node_hold_s=float(hold),
-                       node_runtime=node_runtime, node_health=health)
+                       node_runtime=node_runtime, node_health=health, lease_store=lease_store)
 
 
 # -- node shell -----------------------------------------------------------------
@@ -822,6 +835,11 @@ class SshNodeProvider:
         # owes it never brings it back (kept in the record: a successor reads them too)
         self._stops_done: set[str] = set()
         self.imported_from: str | None = None
+        # node leases across runs (conf.lease_store; node_lease): opened on first use
+        self._leases: Any = None
+        self._lease_seen: dict[str, tuple[str | None, float]] = {}  # node -> (holder, read at)
+        self._lease_reported: dict[str, str | None] = {}  # node -> the other run last reported
+        self.on_event: Callable[..., None] | None = None  # the ops' event tape (SshSamplerPoolOps.event)
         bad = [s for s in self.slots if not 0 <= s < len(conf.nodes)]
         if bad:
             raise ValueError(f"ssh provider: slots {bad} have no node (nodes: {[n.name for n in conf.nodes]})")
@@ -947,14 +965,20 @@ class SshNodeProvider:
         return self.node_of_slot(int(row["slot"]))
 
     def order(self, account: int) -> str:
-        with self._lock:
-            rows = self._rows()
-            n = 1 + sum(1 for r in rows.values() if int(r["slot"]) == int(account))
-            ticket = f"{self.run_id}-{self.node_of_slot(account).name}-{n}"
-            rows[ticket] = {"slot": int(account), "node": self.node_of_slot(account).name, "state": "active",
-                            "ordered_at": self.clock()}
-            self._save(rows)
-            return ticket
+        taken = self._take_lease(account)
+        try:
+            with self._lock:
+                rows = self._rows()
+                n = 1 + sum(1 for r in rows.values() if int(r["slot"]) == int(account))
+                ticket = f"{self.run_id}-{self.node_of_slot(account).name}-{n}"
+                rows[ticket] = {"slot": int(account), "node": self.node_of_slot(account).name, "state": "active",
+                                "ordered_at": self.clock()}
+                self._save(rows)
+                return ticket
+        except BaseException:
+            if taken:
+                self._leases.release(self.node_of_slot(account))
+            raise
 
     def status(self, account: int, ticket: str) -> LeaseStatus:  # noqa: ARG002
         row = self._rows().get(ticket)
@@ -962,6 +986,9 @@ class SshNodeProvider:
             return LeaseStatus("ended", end_reason="lost")
         if row["state"] == "released":
             return LeaseStatus("ended", end_reason="released")
+        lost = self._lease_tick(int(row["slot"]))
+        if lost is not None:
+            return LeaseStatus("ended", end_reason="lost", detail=lost)
         return LeaseStatus("active")
 
     def release(self, account: int, ticket: str) -> dict[str, Any]:  # noqa: ARG002
@@ -970,6 +997,7 @@ class SshNodeProvider:
             if ticket in rows:
                 rows[ticket] = dict(rows[ticket], state="released", released_at=self.clock())
                 self._save(rows)
+                self._give_lease_back(int(rows[ticket]["slot"]), rows)
         return {"ticket": ticket, "state": "released"}
 
     def released_by_us(self, ticket: str) -> bool:
@@ -983,13 +1011,103 @@ class SshNodeProvider:
 
     def account_free(self, account: int) -> bool:
         rows, now = self._rows(), self.clock()
-        if self._busy(rows, account):
+        if self._busy(rows, account) or self._leased_elsewhere(account):
             return False
         if self._held(rows, account, now) is None:
             return True
         # a lost node: offered again only when no other slot's node is free (no spare left)
         return not any(not self._busy(rows, s) and self._held(rows, s, now) is None
-                       for s in self.slots if int(s) != int(account))
+                       and not self._leased_elsewhere(s) for s in self.slots if int(s) != int(account))
+
+    # -- node leases across runs (conf.lease_store, yeto.launch.node_lease) ---------------
+    @property
+    def leases(self) -> Any:
+        """The run's :class:`~.node_lease.NodeLeases` (None: the inventory has no lease_store)."""
+        if self.conf.lease_store is None:
+            return None
+        if self._leases is None:
+            from .node_lease import NodeLeases  # noqa: PLC0415
+
+            self._leases = NodeLeases(self.conf.lease_store, f"{self.run_id}/pool", clock=self.clock,
+                                      on_event=self._lease_event)
+        return self._leases
+
+    def _lease_event(self, name: str, **detail: Any) -> None:
+        if self.on_event is not None:  # the pool's event log (it prints the line too)
+            self.on_event(name, **detail)
+        else:
+            _log(f"ssh pool: {name}: " + " ".join(f"{k}={v}" for k, v in detail.items()))
+
+    def _leased_elsewhere(self, slot: int) -> bool:
+        """``slot``'s node is held by another run (read at most every LEASE_READ_CACHE_S);
+        a store that does not answer counts as held (never start on a node not confirmed)."""
+        if self.conf.lease_store is None:
+            return False
+        node, now = self.node_of_slot(slot), self.clock()
+        seen = self._lease_seen.get(node.name)
+        if seen is not None and now - seen[1] < LEASE_READ_CACHE_S:
+            holder = seen[0]
+        else:
+            try:
+                holder = self.leases.holder(node)
+            except Exception as error:  # noqa: BLE001 - not confirmed free: not offered this time
+                _log(f"ssh pool: lease of {node.name} not readable ({error!r}): the node is not offered")
+                return True
+            self._lease_seen[node.name] = (holder, now)
+        other = holder if holder not in (None, self.leases.run_id) else None
+        if self._lease_reported.get(node.name) != other:
+            self._lease_reported[node.name] = other
+            if other is not None:
+                self._lease_event("node_leased_elsewhere", node=node.name, holder=other)
+        return other is not None
+
+    def _take_lease(self, slot: int) -> bool:
+        """Before an order on ``slot``: take its node's lease (no lease_store: nothing).
+        Raises ``NodeLeased`` when another run holds the node."""
+        leases = self.leases
+        if leases is None:
+            return False
+        from .node_lease import NodeLeased  # noqa: PLC0415
+
+        node = self.node_of_slot(slot)
+        self._lease_seen.pop(node.name, None)
+        got = leases.acquire(node)
+        if not got.ok:
+            raise NodeLeased(f"ssh inventory: node {node.name} is held by run {got.holder}", {node.name: got.holder})
+        return True
+
+    def _lease_tick(self, slot: int) -> str | None:
+        """On a ticket read: renew the pool's leases that are due; why the member on
+        ``slot`` lost its node to another run (None: it did not, or no lease_store). A
+        store that does not answer ends nothing."""
+        leases = self.leases
+        if leases is None:
+            return None
+        node = self.node_of_slot(slot)
+        try:
+            if node.name not in leases.held() and node.name not in leases.lost() and not leases.renew(node):
+                # an adopted ticket (a restarted controller): its node is another run's now
+                return f"node {node.name}: its lease is held by run {leases.holder(node)}"
+            leases.renew_due()
+        except Exception as error:  # noqa: BLE001 - renewed at a later read; the lease still runs
+            _log(f"ssh pool: node leases not renewed ({error!r})")
+            return None
+        lost = leases.lost()
+        if node.name in lost:
+            return f"node {node.name}: its lease is held by run {lost[node.name]} now"
+        return None
+
+    def _give_lease_back(self, slot: int, rows: Mapping[str, Mapping[str, Any]]) -> None:
+        """Release ``slot``'s node lease once no ticket of this pool is active there and no
+        stop is owed there (a sampler that may still run keeps the node this run's)."""
+        if self._leases is None:
+            return
+        if any(int(r["slot"]) == int(slot) and (r["state"] == "active" or r.get("stop_owed"))
+               for r in rows.values()):
+            return
+        node = self.node_of_slot(slot)
+        self._leases.release(node)
+        self._lease_seen.pop(node.name, None)
 
     @staticmethod
     def _busy(rows: Mapping[str, Mapping[str, Any]], slot: int) -> bool:
@@ -1036,6 +1154,7 @@ class SshNodeProvider:
                 if self._store is not None:
                     self._stops_done.add(ticket)
                 self._save(rows)
+                self._give_lease_back(int(rows[ticket]["slot"]), rows)
 
     def run_tickets(self) -> list[tuple[int, str]]:
         return [(int(r["slot"]), t) for t, r in self._rows().items() if r["state"] == "active"]
@@ -1104,6 +1223,7 @@ class SshSamplerPoolOps:
         self.state_dir = Path(state_dir)
         self.provider = SshNodeProvider(self.run_id, self.conf, slots=cli.slot_list(cfg),
                                         state_path=self.state_dir / f"ssh-pool-{self.run_id}.json", clock=clock)
+        self.provider.on_event = self.event  # node lease reports (lease_store) on the pool's tape
         self._shard_of: dict[str, str] = {}
         self._node_route: Any = None
         self._health_generation: dict[str, int] = {}  # ticket -> the assignment its health check is of
@@ -1567,6 +1687,23 @@ def health_summary(conf: SshPoolConf) -> str | None:
         logging.getLogger(__name__).debug("ssh pool: node health: %s (not declared)", state)
         return None
     return state
+
+
+def lease_notes(cfg: dict[str, Any]) -> list[str]:
+    """``pool --dry-run``: how the pool's nodes are leased across runs: the inventory's
+    ``lease_store``, or the shared hint that they are not (once per process)."""
+    try:
+        conf = parse_config(cfg)
+    except (ValueError, TypeError, KeyError, OSError):
+        return []  # offline_problems reports it
+    if conf.lease_store is None:
+        from .node_lease import no_lease_hint  # noqa: PLC0415
+
+        out: list[str] = []
+        no_lease_hint(emit=out.append)
+        return out
+    return [f"node leases: lease_store {conf.lease_store}: a node another run holds is skipped; an order takes "
+            "the node's lease first (no SSH or store call in a dry run)"]
 
 
 def spec_node_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
