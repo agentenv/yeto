@@ -1,8 +1,10 @@
 """Breakers panel (design 9): resolved settings, status snapshots, trips, alerts, run status."""
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -530,6 +532,35 @@ def test_large_stale_drops_go_red():
     row = rows(v)["trainer.policy_age"]
     assert row["tripped"] and row["acted"]["rate"]["ratio"] == 0.4 and row["acted"]["rate"]["scope"] == "island 0"
     assert guard_alerts(r, T0 + 3600) == [(0, "breaker trainer.policy_age dropped 40% of the groups")]
+
+
+TIED_ISLANDS = """
+import sys
+from yeto.dashboard.reducer import Reducer
+
+r = Reducer()
+for island in (1, 0):
+    for i in range(12):
+        t = 1_790_000_000.0 + 60 * i
+        r.feed({"event": "rl_buffer_stale_skipped", "island_id": island, "time_unix": t, "rollout_id": i,
+                "stale_groups": 4, "max_policy_age": 2})
+        r.feed({"event": "rl_round_trained", "island_id": island, "time_unix": t + 30, "rollout_id": i,
+                "trained_groups": 6})
+print(r.guard_drop_rates()["trainer.policy_age"]["scope"])
+"""
+
+
+def test_two_islands_with_the_same_drop_rate_name_the_same_island_under_any_hash_seed():
+    """The rate shown is the worst scope's; of two scopes with the same ratio the panel
+    names the same one in every process (string hashes, and so a set's order, change with
+    PYTHONHASHSEED)."""
+    root = Path(__file__).resolve().parent.parent
+    scopes = set()
+    for seed in range(8):
+        out = subprocess.run([sys.executable, "-c", TIED_ISLANDS], cwd=root, check=True, capture_output=True,
+                             text=True, env={**os.environ, "PYTHONHASHSEED": str(seed), "PYTHONPATH": str(root)})
+        scopes.add(out.stdout.strip())
+    assert scopes == {"island 0"}
 
 
 def test_drop_rate_warning_and_window():
