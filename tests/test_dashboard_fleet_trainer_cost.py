@@ -85,19 +85,30 @@ def test_a_record_row_over_a_tape_without_island_ready_leaves_the_syncers_clock(
 
 
 def _ready_only(rec):
-    """Island 1's tape with its ``island_ready`` only: a trainer here with no hours to bill."""
+    """Island 1's tape with its ``island_ready`` only (no event names it a trainer yet)."""
     return rec if rec.get("island_id") != 1 or rec["event"] == "island_ready" else None
 
 
+def _no_ready(rec):
+    """Island 1's tape without its ``island_ready``: its events, nothing to bill its hours from."""
+    return None if rec.get("island_id") == 1 and rec["event"] == "island_ready" else rec
+
+
+def test_a_trainer_island_known_by_its_ready_stamp_only_is_billed_as_a_trainer(tmp_path):
+    rows, view = _rows(_fleet(tmp_path, spend=None, per_island=False, edit=_ready_only))
+    assert rows["1"]["kind"] == "trainer" and "fleet plan trainer_usd_per_h" in rows["1"]["rate_source"]
+    assert view["fleet"]["trainers_usd"] == pytest.approx(rows["0"]["cost_usd"] + rows["1"]["cost_usd"])
+
+
 def test_a_trainer_tape_without_hours_says_no_hours_and_the_total_says_it_is_low(tmp_path):
-    r = _fleet(tmp_path, spend=None, per_island=False, edit=_ready_only)
+    r = _fleet(tmp_path, spend=None, per_island=False, edit=_no_ready)
     rows, view = _rows(r)
     fl = view["fleet"]
-    assert fl["trainers_usd"] == pytest.approx(rows["0"]["cost_usd"]) and fl["trainers_uncounted"] == 2
-    assert fl["trainers_note"] == ("island 1: no hours yet (its trainer tape has no billed hours here); "
-                                   "island 2: no trainer tape or launch record here")
-    out = fleet_na._page(tmp_path, r)
-    text = re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", out["costBox"]))
+    assert "1" not in rows and fl["trainers_usd"] == pytest.approx(rows["0"]["cost_usd"])
+    assert fl["trainers_uncounted"] == 2
+    assert fl["trainers_note"] == ("island 1: no hours yet (its trainer tape has no ready stamp or launch record to "
+                                   "bill from); island 2: no trainer tape or launch record here")
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", fleet_na._page(tmp_path, r)["costBox"]))
     assert re.search(r"\+ trainers \$\d+\.\d\d \(2 trainer islands not counted: island 1: no hours yet", text)
     assert "no trainer tape or launch record here; the total is low)" in text
 

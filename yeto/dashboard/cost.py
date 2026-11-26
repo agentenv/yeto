@@ -419,7 +419,8 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     from_records = set()  # trainer rows only their launch records make (no tape row): not the syncer's clock
     for isl in fleet["islands"]:
         tid, price = isl.get("trainer"), isl.get("trainer_usd_per_h")
-        row = by_id.get(tid) if tid is not None else None
+        # its tape's island (one the tape does not name a trainer yet, e.g. island_ready only: its learner id)
+        row = by_id.get(tid if tid is not None else str(isl["learner"]))
         if row is None and launched is not None and isl["learner"] in launched:
             # no trainer tape here (an island whose trainer does not upload its tape, or one
             # that never started): its launch records still bill it, as run.budget does
@@ -452,7 +453,7 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
                     row["cost_usd"] = price * row["hours"]
             trainer_rows.append(row)
         elif any((reducer.islands.get(tid if tid is not None else str(isl["learner"])) or {}).get(k) is not None
-                 for k in ("first_ts", "last_event_ts", "ready_ts", "cloud")):  # its tape is here, no hours
+                 for k in ("first_ts", "last_event_ts")):  # its tape is here, with nothing to bill its hours from
             taped.append(isl["learner"])
         else:
             unbilled.append(isl["learner"])
@@ -578,7 +579,7 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     if no_price:
         why.append(islands(no_price) + ": no price (fleet plan trainer_usd_per_h unset)")
     if no_hours:
-        why.append(islands(no_hours) + ": no hours yet (its trainer tape has no billed hours here)")
+        why.append(islands(no_hours) + ": no hours yet (its trainer tape has no ready stamp or launch record to bill from)")
     if unbilled:
         why.append(islands(unbilled) + ": no trainer tape or launch record here")
     if out["trainers_usd"] is None:
