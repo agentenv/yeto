@@ -71,7 +71,8 @@ def test_a_healthy_node_passes_for_both_jobs_and_sets_its_baselines():
     assert r.checked and r.ok_single is True and r.ok_multi is True and r.reasons == []
     assert r.facts["gpu_count"] == 8 and r.facts["fabric"] == "8/8 completed" and r.facts["fm"] == "active"
     assert r.facts["ib_rate"]["mlx5_0"] == 400 and r.facts["ports"]["mlx5_3"] == "Active 400"
-    assert r.facts["xid"] == {"boot": BOOT, "ts": None, "count": 0, "last": None, "last_n": 0}
+    assert r.facts["xid"] == {"boot": BOOT, "ts": None, "count": 0, "last": None, "last_n": 0, "run": 0,
+                              "before": None}
     assert r.facts["xid_source"] == "dmesg"
 
 
@@ -187,6 +188,9 @@ def test_nvidia_smi_that_times_out_is_a_read_failure_that_keeps_the_baselines():
     r = check(node_text(gpus=(124, ""), xid=(0, xid_text(xid_line(1.0, 0, 13)))), first.facts)
     assert not r.checked and r.ok_single is None and r.ok_multi is None
     assert r.reasons == [f"nvidia-smi: timed out after {node_health.SECTION_TIMEOUT_S}s"]
+    # killed by its section's timeout after it printed some GPUs: those rows are not the answer
+    partial = check(node_text(gpus=(124, gpus_text(n=4))), first.facts)
+    assert partial.checked is False and partial.ok_single is None and partial.facts["gpu_count"] == 8
     assert all(r.facts[k] == first.facts[k] for k in ("gpu_count", "bus", "ecc", "xid", "ib_rate"))
     assert not check("").checked and check("").reasons == ["nvidia-smi: no output (the check did not run)"]
 
@@ -533,3 +537,53 @@ def test_an_empty_or_cut_off_output_is_a_read_failure_never_healthy():
     sick = node_text(xid=(0, xid_text(xid_line(9000.0, 5, 79))))
     r = check(sick[:sick.index(f"{host_probe.SECTION} fabric")], first.facts)
     assert r.checked and r.ok_single is False and r.reasons == ["GPU 5 XID 79"]
+
+
+def test_without_timestamps_a_repeat_is_seen_while_the_log_head_rotates_out():
+    """The cursor's anchor (the line before its last run) keeps its place when one old copy
+    of the repeated line leaves the head of the log."""
+    a, b, c = _plain_xid(5, 79), _plain_xid(3, 13), _plain_xid(4, 79)
+    first = check(node_text(xid=(0, xid_text(a, b, a, a))))
+    assert first.facts["xid"]["run"] == 2 and first.facts["xid"]["before"] == b
+    # the oldest a rotated out, a new a came: as many copies of a as before, one is new
+    rotated = check(node_text(xid=(0, xid_text(b, a, a, a))), first.facts)
+    assert rotated.reasons == ["GPU 5 XID 79"]
+    assert check(node_text(xid=(0, xid_text(b, a, a, a))), rotated.facts).ok_single  # nothing new
+    later = check(node_text(xid=(0, xid_text(a, a, a, c))), rotated.facts)  # the anchor rotated out too
+    assert later.reasons == ["GPU 4 XID 79"]
+    # the limit (documented): a log of one repeated line that rotates one copy out
+    only = check(node_text(xid=(0, xid_text(a, a))))
+    assert check(node_text(xid=(0, xid_text(a, a))), only.facts).ok_single
+
+
+def test_a_check_still_stuck_on_the_node_makes_the_next_one_skip(tmp_path):
+    pid_file = tmp_path / "health.pid"
+    stuck = subprocess.Popen(["sleep", "30"])
+    try:
+        pid_file.write_text(f"{stuck.pid}\n")
+        old = 1_000_000_000  # an old pid file: its check ran past the limit and was not killed
+        import os  # noqa: PLC0415
+
+        os.utime(pid_file, (old, old))
+        out = subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
+                             capture_output=True, text=True, timeout=20).stdout
+        assert out == f"{node_health.BUSY_MARK} {stuck.pid}\n"
+        r = check(out, check(node_text()).facts)
+        assert not r.checked and r.reasons == ["node health check skipped: the previous one still runs "
+                                               "(a tool stuck on the node)"]
+        os.utime(pid_file, None)  # a check of another caller that runs right now: not skipped
+        out = subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
+                             capture_output=True, text=True, timeout=20).stdout
+        assert out == "ran\n"
+    finally:
+        stuck.kill()
+        stuck.wait()
+    # a check that ended removes its pid; one that is gone leaves nothing to skip for
+    out = subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
+                         capture_output=True, text=True, timeout=20).stdout
+    assert out == "ran\n" and not pid_file.exists()
+    pid_file.write_text("999999\n")  # an old pid file of a check that is gone
+    os.utime(pid_file, (old, old))
+    out = subprocess.run(["bash", "-c", node_health.bounded("echo ran", 5, pid_file=str(pid_file))],
+                         capture_output=True, text=True, timeout=20).stdout
+    assert out == "ran\n"

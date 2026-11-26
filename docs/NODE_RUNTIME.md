@@ -281,7 +281,13 @@ One shell call reads, in this order:
 | IB / RoCE ports | `ibstat` (`ibv_devinfo -v` only when ibstat fails) | a port named by `NCCL_IB_HCA` is missing, not `Active`, or slower than at the first check |
 
 The XIDs and the ECC count only count from the second check on. What the kernel log
-holds at the first check is history: the preflight judged the node then. Memory and
+holds at the first check is history: the preflight judged the node then.
+
+A kernel log without timestamps (dmesg's default has them) is followed by its last
+line, how often that line ends the log, and the line before it, so lines that rotate
+out of the log's head do not move the cursor. One limit is left: when the log holds
+only one repeated XID line and a copy rotates out while the same XID repeats, that
+repeat is missed. Memory and
 ECC baselines follow each GPU's PCI address, so a GPU that changes index keeps its
 baseline.
 
@@ -312,14 +318,19 @@ compute HCAs as `yeto preflight` recommends, so that each of them counts.
 - `ok`: the check passed. One good check clears a bad streak.
 - `bad_once`: one bad check. Nothing is done yet.
 - `lost`: two bad checks in a row. The node is treated as a lost node.
-- `read_failed`: the check did not read. Causes:
-  - nvidia-smi did not answer (a timeout, not installed) and no new hardware XID
-    showed;
-  - the check was killed;
-  - the IB tools did not read for a multi-node job whose GPUs pass;
-  - the newest check is older than three periods (the check stopped).
+- `read_failed`: the check did not read. It counts neither way: a bad streak goes
+  on after it. Its reason says which kind it is:
 
-  A read failure counts neither way: a bad streak goes on after it.
+  | reason | what happened |
+  |---|---|
+  | `nvidia-smi: timed out after 10s`, `nvidia-smi: not found`, `nvidia-smi: exit <rc>: ...` | nvidia-smi did not answer, and the XID section shows no new hardware XID |
+  | `nvidia-smi: no output (the check did not run)` | nothing came back (an SSH call that failed) |
+  | `node health output incomplete (no <sections>)` | the output was cut off: a section is missing or has no exit code |
+  | `node health check timed out after 45s (killed)` | the check ran past its limit on the node and was killed |
+  | `node health check cut off: its SSH call ran past its timeout` | the SSH call timed out after the node printed its trainer state |
+  | `node health check skipped: the previous one still runs (a tool stuck on the node)` | an earlier check could not be killed (a tool stuck in the kernel); no new one is started while it lives |
+  | `IB tools unread (ibstat / ibv_devinfo)` | a multi-node job whose GPUs pass, but its ports could not be read |
+  | `health check stale: the last one <N>s ago` | the newest check is older than three periods (the check stopped) |
 
 Three events are written:
 
@@ -365,8 +376,8 @@ Three events are written:
 The check is on wherever the device family has a checker. `node_health: off` turns
 it off:
 
-- in the inventory, at the top (every node) or on one node (`node_health: auto`
-  turns it back on for that node);
+- in the inventory, at the top (every node) or on one node (`node_health: auto`, or
+  `on`, turns it back on for that node);
 - in the ssh pool's provider section (`provider.node_health`). That value wins over
   the inventory's for the pool's nodes, and the node runtime starts with
   `--health-every-s 0`.

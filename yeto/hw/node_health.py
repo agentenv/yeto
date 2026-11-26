@@ -25,7 +25,8 @@ The script is bounded on the node: every section runs under ``timeout -k 5``
 whole check runs in the background and is killed (``kill -9`` of its process group) past
 :data:`HEALTH_LIMIT_S` (:func:`bounded`); its output is printed either way. A check that
 was killed is a read failure, but for the sections that completed: their hardware XIDs
-still count. At worst a check takes :data:`HEALTH_LIMIT_S` on the node, less than its
+still count. A check whose kill did not take (a tool stuck in the kernel) makes the next
+ones skip (a read failure) while it lives, so hung checks do not pile up. At worst a check takes :data:`HEALTH_LIMIT_S` on the node, less than its
 period (:data:`HEALTH_EVERY_S`); a caller that adds the check to another command (a
 status query) waits at most that much longer.
 
@@ -103,6 +104,7 @@ STALE_PERIODS = 3  # a check older than this many periods reads as a read failur
 MAX_REASONS = 20  # reasons / notes kept in a record or an event
 MAX_PORTS = 32  # ports kept in a record's facts
 TIMEOUT_MARK = "@@yeto-health-timeout"
+BUSY_MARK = "@@yeto-health-busy"  # the previous check on the node still runs (killed, not gone)
 IB_UNREAD = "IB tools unread (ibstat / ibv_devinfo)"
 # XIDs that mean the GPU (or its NVLink) needs a reset or the node a reboot (NVIDIA's XID
 # catalog): double-bit ECC (48), internal micro-controller (61, 62), ECC page retirement
@@ -142,20 +144,36 @@ CUDA_SECTIONS = tuple((name, f"{_T} {SECTION_TIMEOUT_S} bash -c {shlex.quote(cmd
 DRIVER_DOWN = "couldn't communicate with the NVIDIA driver"
 
 
-def bounded(script: str, limit_s: int = HEALTH_LIMIT_S) -> str:
+def bounded(script: str, limit_s: int = HEALTH_LIMIT_S, *, pid_file: str | None = None) -> str:
     """``script`` run in the background on the node, killed (``kill -9`` of its process
     group: ``setsid`` when the node has it) past ``limit_s``; its output is printed either
-    way, after :data:`TIMEOUT_MARK` when it was killed."""
+    way, after :data:`TIMEOUT_MARK` when it was killed.
+
+    A check whose kill did not take (a tool stuck in the kernel, ``D`` state) leaves its
+    pid in ``pid_file`` (default: ``/tmp/yeto-health-<uid>.pid``); while that process
+    lives, a later check runs nothing and prints :data:`BUSY_MARK` (a read failure), so
+    hung checks do not pile up on a sick node. A check of another caller that runs at the
+    same time (younger than ``limit_s``) does not count."""
+    pf = shlex.quote(pid_file) if pid_file else '"/tmp/yeto-health-$(id -u 2>/dev/null || echo 0).pid"'
     return (
         f"__yeto_hs={shlex.quote(script)}\n"
+        f"__yeto_pf={pf}\n"
+        '__yeto_op=$(cat "$__yeto_pf" 2>/dev/null)\n'
+        'if [ -n "$__yeto_op" ] && kill -0 "$__yeto_op" 2>/dev/null; then '
+        '__yeto_age=$(( $(date +%s) - $(stat -c %Y "$__yeto_pf" 2>/dev/null || stat -f %m "$__yeto_pf" 2>/dev/null '
+        '|| date +%s) )); '
+        f'if [ "$__yeto_age" -gt {int(limit_s) + 5} ]; then echo "{BUSY_MARK} $__yeto_op"; exit 0; fi; fi\n'
         "__yeto_hf=$(mktemp /tmp/yeto-health.XXXXXX 2>/dev/null) || __yeto_hf=/tmp/yeto-health.$$\n"
         'if command -v setsid >/dev/null 2>&1; then setsid bash -c "$__yeto_hs" > "$__yeto_hf" 2>&1 < /dev/null & '
         'else bash -c "$__yeto_hs" > "$__yeto_hf" 2>&1 < /dev/null & fi\n'
-        "__yeto_hp=$!; __yeto_hn=0\n"
+        '__yeto_hp=$!; __yeto_hn=0; echo "$__yeto_hp" > "$__yeto_pf" 2>/dev/null\n'
         f'while kill -0 "$__yeto_hp" 2>/dev/null && [ "$__yeto_hn" -lt {int(limit_s) * 10} ]; do sleep 0.1; '
         "__yeto_hn=$((__yeto_hn + 1)); done\n"
         'if kill -0 "$__yeto_hp" 2>/dev/null; then kill -9 -- "-$__yeto_hp" 2>/dev/null; '
-        f'kill -9 "$__yeto_hp" 2>/dev/null; echo "{TIMEOUT_MARK} {int(limit_s)}"; fi\n'
+        f'kill -9 "$__yeto_hp" 2>/dev/null; echo "{TIMEOUT_MARK} {int(limit_s)}"; sleep 0.2; fi\n'
+        # gone: the next check may run; still there (stuck in the kernel): its pid stays
+        'if ! kill -0 "$__yeto_hp" 2>/dev/null && [ "$(cat "$__yeto_pf" 2>/dev/null)" = "$__yeto_hp" ]; then '
+        'rm -f "$__yeto_pf"; fi\n'
         'cat "$__yeto_hf" 2>/dev/null; rm -f "$__yeto_hf"\n'
     )
 # the facts a check hands to the next one (baselines and the XID cursor); kept over a read failure
@@ -272,6 +290,9 @@ class CudaChecker(Checker):
         prev = dict(prev or {})
         carried = {k: prev[k] for k in CARRIED if k in prev}
         sections = parse_sections(text)
+        if BUSY_MARK in str(text or ""):  # the previous check still runs: this one ran nothing
+            error = "node health check skipped: the previous one still runs (a tool stuck on the node)"
+            return HealthResult(checked=False, reasons=[error], facts={**carried, "read_error": error})
         if TIMEOUT_MARK in str(text or ""):  # killed past its limit: only its completed XID section counts
             error = ("node health check cut off: its SSH call ran past its timeout"
                      if f"{TIMEOUT_MARK} ssh" in str(text) else
@@ -430,15 +451,14 @@ class CudaChecker(Checker):
         elif all(ts is not None for ts, _, _ in found):
             last = float(cursor.get("ts") or 0.0)
             new = [x for x in found if x[0] > last]
-        else:  # no timestamps: after the cursor's line (its n-th time; the log's head may have gone)
-            at = [i for i, t in enumerate(texts) if t == cursor.get("last")]
-            n = int(cursor.get("last_n") or 0)
-            start = at[n - 1] + 1 if n and len(at) >= n else (at[-1] + 1 if at else 0)
-            new = found[start:]
+        else:  # no timestamps: after the cursor's place in the log (its head may have rotated out)
+            new = found[CudaChecker._no_ts_start(texts, cursor):]
         stamps = [ts for ts, _, _ in found if ts is not None]
+        run = next((i for i, t in enumerate(reversed(texts)) if t != texts[-1]), len(texts)) if texts else 0
         facts["xid"] = {"boot": boot, "ts": max(stamps) if stamps else cursor.get("ts"), "count": len(found),
                         "last": texts[-1] if texts else None,
-                        "last_n": texts.count(texts[-1]) if texts else 0}
+                        "last_n": texts.count(texts[-1]) if texts else 0,
+                        "run": run, "before": texts[-run - 1] if len(texts) > run else None}
         out, seen = [], set()
         other = []
         for _, key, code in new:
@@ -452,6 +472,27 @@ class CudaChecker(Checker):
         if other:
             facts["xid_other"] = other[-10:]
         return out
+
+    @staticmethod
+    def _no_ts_start(texts: list[str], cursor: Mapping[str, Any]) -> int:
+        """Where the XID lines after the cursor start, in a log without timestamps.
+
+        The cursor's anchor is its last line, how many times it ends the log (``run``) and the
+        line before that run (``before``): the newest place of ``before`` and the run is the
+        cursor (a head of the log that rotated out does not move it). Without an anchor (the
+        log held one repeated line, or its anchor rotated out): after the ``last_n``-th time
+        of the last line, else after its last time. Limit: a log that holds a single repeated
+        XID line and rotates one copy out while the same XID repeats misses that repeat; a
+        kernel log with timestamps (dmesg's default) has none of this."""
+        last, before, run = cursor.get("last"), cursor.get("before"), int(cursor.get("run") or 0)
+        if last is not None and before is not None and run:
+            want = [before] + [last] * run
+            for i in range(len(texts) - len(want), -1, -1):
+                if texts[i:i + len(want)] == want:
+                    return i + len(want)
+        at = [i for i, t in enumerate(texts) if t == last]
+        n = int(cursor.get("last_n") or 0)
+        return at[n - 1] + 1 if n and len(at) >= n else (at[-1] + 1 if at else 0)
 
     def _ports(self, sections: Mapping[str, Any], hcas: Sequence[str], prev: Mapping[str, Any],
                facts: dict[str, Any]) -> tuple[list[str], bool]:
