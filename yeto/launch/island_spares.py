@@ -252,77 +252,28 @@ def _unavailable(node: Node) -> bool:
     return str(fabric_group(node) or "").lower() == UNAVAILABLE_GROUP
 
 
-def _stub_placement(candidates: Sequence[Node], need: int, *, excluded: set[str], required: Sequence[Node],
-                    inventory: Sequence[Node]) -> list[Node] | None:
-    """``fabric_groups.pick_placement``'s contract with ``required`` (CONTRACT, REV-892b),
-    while that version is not in: the required nodes plus the group's free nodes by name
-    (an inventory without groups, or one node: the free candidates in their order). None
-    when it cannot (a required node excluded, required nodes of several groups)."""
-    names = {n.name for n in required}
-    if names & excluded:
-        return None
-    free = [n for n in candidates if n.name not in excluded and n.name not in names]
-    grouped = any(fabric_group(n) for n in inventory)
-    if need <= 1 or not grouped:
-        fill = free
-    else:
-        groups = {str(fabric_group(n) or "") for n in required}
-        if len(groups) > 1 or "" in groups or any(_unavailable(n) for n in required):
-            return None
-        if groups:
-            group = groups.pop()
-            fill = sorted((n for n in free if str(fabric_group(n) or "") == group), key=lambda n: n.name)
-        else:  # no required node: the largest group that holds need, then by name
-            buckets: dict[str, list[Node]] = {}
-            for n in free:
-                if fabric_group(n) and not _unavailable(n):
-                    buckets.setdefault(str(fabric_group(n)), []).append(n)
-            fits = sorted((g for g, m in buckets.items() if len(m) >= need), key=lambda g: (-len(buckets[g]), g))
-            fill = sorted(buckets[fits[0]], key=lambda n: n.name) if fits else []
-    out = [*required, *fill[:max(0, need - len(required))]]
-    return out if len(out) == need else None
+def _pick_placement(candidates: Sequence[Node], need: int, *, excluded: Mapping[str, str] | None = None,
+                    required: Sequence[Node] = (), inventory: Sequence[Node] | None = None) -> tuple[Node | None, str]:
+    """``(node, why)``: the node ``fabric_groups.pick_placement`` adds to the ``required``
+    ones (the island's nodes that stay: the island is never moved to other nodes);
+    ``excluded``: node name -> why it is out. No node: ``why`` is the
+    :class:`~.fabric_groups.PlacementError`'s text (it goes into the wait reason); any other
+    error (a ``TypeError``) is raised. A placement that drops a required node is refused."""
+    from .fabric_groups import PlacementError, pick_placement  # noqa: PLC0415
 
-
-def _pick_placement(candidates: Sequence[Node], need: int, *, excluded: Iterable[str] = (),
-                    required: Sequence[Node] = (), inventory: Sequence[Node] | None = None) -> Node | None:
-    """The node ``fabric_groups.pick_placement(candidates, need, excluded=..., required=...,
-    inventory=...)`` adds to the ``required`` ones (the island's nodes that stay: the island
-    is never moved to other nodes); None when it cannot place them. A version of that
-    function without ``required`` (or none at all): :func:`_stub_placement`, its contract."""
-    excluded = set(excluded)
     required = list(required)
-    inventory = list(candidates) if inventory is None else list(inventory)
-    pool = [*required, *(n for n in candidates if n.name not in {r.name for r in required})]
+    names = {r.name for r in required}
+    pool = [*required, *(n for n in candidates if n.name not in names)]
     try:
-        from .fabric_groups import PlacementError, pick_placement  # noqa: PLC0415
-    except ImportError:
-        pick_placement = None
-    if pick_placement is not None and not _takes(pick_placement, "required"):
-        pick_placement = None  # a version without required=: the contract below
-    if pick_placement is not None:
-        try:
-            placement = pick_placement(pool, need, excluded=sorted(excluded), required=required, inventory=inventory)
-        except PlacementError:
-            return None
-        nodes = list(getattr(placement, "nodes", ()) or ())
-    else:
-        nodes = _stub_placement(pool, need, excluded=excluded, required=required, inventory=inventory)
-    names = {n.name for n in nodes or ()}
-    if not nodes or any(r.name not in names for r in required):
-        return None  # the nodes that stay are never moved
-    added = [n for n in nodes if n.name not in {r.name for r in required}]
-    return added[0] if added else None
-
-
-def _takes(fn: Callable[..., Any], keyword: str) -> bool:
-    """Whether ``fn`` accepts the keyword argument ``keyword``."""
-    import inspect  # noqa: PLC0415
-
-    try:
-        params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
-    return keyword in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        placement = pick_placement(pool, need, excluded=dict(excluded or {}), required=required,
+                                   inventory=list(candidates) if inventory is None else list(inventory))
+    except PlacementError as error:
+        return None, str(error)
+    nodes = list(placement.nodes)
+    if any(r.name not in {n.name for n in nodes} for r in required):  # the nodes that stay never move
+        return None, f"the placement {[n.name for n in nodes]} drops a node that stays ({sorted(names)})"
+    added = [n for n in nodes if n.name not in names]
+    return (added[0], "") if added else (None, f"the placement {[n.name for n in nodes]} adds no node")
 
 
 def hcas_of(node: Node) -> list[str]:
@@ -876,21 +827,25 @@ class Pick:
     group: str | None
     skipped: dict[str, str]
     unchecked: tuple[str, ...] = ()  # candidates left that were not health checked (check them, pick again)
+    placement: str = ""  # why fabric_groups.pick_placement placed no spare (its PlacementError)
 
     def why_none(self) -> str:
         where = f"fabric group {self.group}" if self.group else "the inventory"
         detail = "; ".join(f"{name}: {why}" for name, why in sorted(self.skipped.items()))
-        return f"{where} has no free healthy spare node" + (f" ({detail})" if detail else "")
+        return (f"{where} has no free healthy spare node" + (f" ({detail})" if detail else "")
+                + (f"; placement: {self.placement}" if self.placement else ""))
 
 
 def spare_candidates(spares: IslandSpares, island: str, current: Sequence[Node], lost: Iterable[int], *,
-                     chosen: Sequence[Node] = ()) -> tuple[list[Node], str | None, dict[str, str], bool]:
+                     chosen: Sequence[Node] = ()) -> tuple[list[Node], str | None, dict[str, str], bool, list[Node]]:
     """``(candidates, group, skipped, multi, keep)`` of a pick for the ``lost`` ranks of ``current``:
     the pool's nodes that are neither the island's other nodes nor ``chosen`` (spares picked
     for other lost ranks), in the island's fabric group (a multi-node island never takes a
-    node of the reserved group ``unavailable``), not quarantined (in this run or, with a
-    ``lease_store``, any run), not held by another island of the run, not leased by another
-    run. ``skipped``: why each other node is out. No SSH."""
+    node of the reserved group ``unavailable``). ``skipped``: node name -> why it is out:
+    another fabric group (not a candidate), or quarantined (in this run or, with a
+    ``lease_store``, any run), held by another island of the run, leased by another run (a
+    candidate, in ``pick_placement``'s ``excluded`` with that reason). ``keep``: the
+    island's nodes that stay (``required``). No SSH."""
     lost = sorted(set(lost))
     keep = [n for r, n in enumerate(current) if r not in lost] + list(chosen)
     group = (next((fabric_group(n) for n in keep if fabric_group(n)), None)
@@ -907,22 +862,26 @@ def spare_candidates(spares: IslandSpares, island: str, current: Sequence[Node],
             skipped[node.name] = f"fabric group {UNAVAILABLE_GROUP} (never in a multi-node island)"
         elif multi and grouped and fabric_group(node) != group:
             skipped[node.name] = f"fabric group {fabric_group(node) or 'none'} (the island's is {group or 'none'})"
-        elif (record := spares.records.quarantined(node.name)) is not None:
-            skipped[node.name] = f"quarantined ({str(record.get('reason') or '')[:120]})"
-        elif (held := spares.records.holder(node.name)) is not None and held != island:
-            skipped[node.name] = f"held by island {held}"
-        elif spares.leases is not None and (holder := spares.leases.holder(node)) is not None \
-                and holder != lease_holder_id(spares.leases):
-            skipped[node.name] = f"leased by run {holder}"
         else:
             candidates.append(node)
+            if (record := spares.records.quarantined(node.name)) is not None:
+                skipped[node.name] = f"quarantined ({str(record.get('reason') or '')[:120]})"
+            elif (held := spares.records.holder(node.name)) is not None and held != island:
+                skipped[node.name] = f"held by island {held}"
+            elif spares.leases is not None and (holder := spares.leases.holder(node)) is not None \
+                    and holder != lease_holder_id(spares.leases):
+                skipped[node.name] = f"leased by run {holder}"
     return candidates, group, skipped, multi, keep
 
 
-def _place(spares: IslandSpares, candidates: Sequence[Node], keep: Sequence[Node], excluded: Iterable[str]) -> Node | None:
+def _place(spares: IslandSpares, candidates: Sequence[Node], keep: Sequence[Node],
+           excluded: Mapping[str, str]) -> tuple[Node | None, str]:
     """The spare ``fabric_groups.pick_placement`` adds to the island's nodes that stay
-    (``required``: the island is never moved to other nodes)."""
-    return _pick_placement(candidates, len(keep) + 1, excluded=excluded, required=keep, inventory=spares.pool)
+    (``required``: the island is never moved to other nodes); ``excluded``: name -> why
+    (quarantined, held, leased, unhealthy, checked before)."""
+    names = {n.name for n in candidates}
+    return _pick_placement(candidates, len(keep) + 1, required=keep, inventory=spares.pool,
+                           excluded={k: v for k, v in excluded.items() if k in names})
 
 
 def check_candidates(spares: IslandSpares, island: str, current: Sequence[Node], lost: Iterable[int], *,
@@ -930,12 +889,12 @@ def check_candidates(spares: IslandSpares, island: str, current: Sequence[Node],
     """The health checks of a pick, run before it (outside ``SshIslandOps``' lock: each is
     an SSH call): the candidates in ``fabric_groups.pick_placement`` order, but ``known``
     (checked before), until ``need`` pass. Node name -> ``(ok, why)`` (:func:`node_check`)."""
-    candidates, _group, _skipped, multi, keep = spare_candidates(spares, island, current, lost)
+    candidates, _group, skipped, multi, keep = spare_candidates(spares, island, current, lost)
     checked: dict[str, tuple[bool, str]] = {}
-    known = set(known)
+    out = {**skipped, **{k: "health checked before" for k in known}}
     passed = 0
     while passed < need:
-        node = _place(spares, candidates, keep, known | set(checked))
+        node, _why = _place(spares, candidates, keep, {**out, **{k: why for k, (_ok, why) in checked.items()}})
         if node is None:
             break
         checked[node.name] = node_check(node, ops, multi=multi)
@@ -955,13 +914,12 @@ def pick_spare(spares: IslandSpares, island: str, current: Sequence[Node], lost:
     from its quarantine. The pick is claimed (and its lease taken) before it is returned;
     :func:`unpick` gives it back."""
     candidates, group, skipped, multi, keep = spare_candidates(spares, island, current, lost, chosen=chosen)
-    excluded: set[str] = set()
     unchecked: list[str] = []
     while True:
-        node = _place(spares, candidates, keep, excluded)
+        node, why = _place(spares, candidates, keep, skipped)  # every node tried below is in skipped, with why
         if node is None:
-            return Pick(None, group, skipped, tuple(unchecked))
-        excluded.add(node.name)
+            return Pick(None, group, skipped, tuple(unchecked), placement=why)
+        skipped[node.name] = "tried"
         verdict = node_check(node, ops, multi=multi) if health is None else health.get(node.name)
         if verdict is None:
             unchecked.append(node.name)
@@ -987,6 +945,7 @@ def pick_spare(spares: IslandSpares, island: str, current: Sequence[Node], lost:
                                       "(its run may still run there)" if getattr(lease, "blocked", False)
                                       else f"leased by run {getattr(lease, 'holder', None) or 'unknown'}")
                 continue
+        skipped.pop(node.name, None)
         return Pick(node, group, skipped)
 
 

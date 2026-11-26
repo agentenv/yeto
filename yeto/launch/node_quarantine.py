@@ -15,8 +15,7 @@ from typing import Any
 
 QUARANTINE_NAME = "quarantine.json"
 SHARED_NODES_DIR = "nodes"  # under the inventory's lease_store
-RELEASE_NODE_HINT = ("run `yeto cluster release-node <name>` (available once the `yeto cluster` "
-                     "commands are in this version)")
+RELEASE_NODE_HINT = "run `yeto cluster release-node <name>`"
 
 
 def shared_quarantined_names(shared: Any) -> set[str]:

@@ -708,7 +708,7 @@ def test_the_lost_node_log_names_release_node(tmp_path):
     ops.start("isl")
     ops._node_health_lost(ops.islands["isl"], 2, ["XID 79 on GPU 3"], READING)
     critical = [ln for ln in lines if "CRITICAL" in ln and "is lost" in ln]
-    assert critical and "run `yeto cluster release-node b300-2` (available once" in critical[0]
+    assert critical and "run `yeto cluster release-node b300-2`" in critical[0]
     assert "until released by hand: run `yeto cluster release-node <name>`" in isp.spare_view(
         SimpleNamespace(rl_node_inventory_nodes=[*s.nodes, spare(3)]), s)["quarantine"]
 
@@ -735,7 +735,7 @@ def test_the_trainer_pick_leaves_out_a_node_quarantined_in_the_lease_store(tmp_p
     assert isp.shared_quarantined_names(objects) == {"b300-0"}
     err = capsys.readouterr().err
     note = "quarantined, left out: b300-0 by run run7 island isl0 (rank 1 (b300-0): no answer)"
-    assert f"island isl: {note}" in err and "yeto cluster release-node <name>` (" in err
+    assert f"island isl: {note}" in err and "run `yeto cluster release-node <name>` with this inventory" in err
     with pytest.raises(sti.SshIslandError) as caught:  # only the quarantined node is left: no candidate
         sti.lease_trainer_nodes(args, trainers, 1, leases, name="isl2", wait_s=0)
     assert note in str(caught.value) and "release-node" in str(caught.value)  # not just "no free node"
@@ -767,8 +767,7 @@ def test_the_lease_wait_line_names_who_quarantined_the_node(tmp_path, monkeypatc
         sti.lease_trainer_nodes(SimpleNamespace(cluster_prefix=f"oc-f-{tmp_path.name}"), [b300(0), b300(1)], 2,
                                 leases, name="isl", wait_s=0)
     assert ("waiting 300s so far; quarantined, left out: b300-0 by run run7 island isl0. Once a node is fixed, run "
-            "`yeto cluster release-node <name>` (available once the `yeto cluster` commands are in this version) "
-            "with this inventory and the run store of the run that quarantined it") in capsys.readouterr().err
+            "`yeto cluster release-node <name>` with this inventory and the run store of the run that quarantined it") in capsys.readouterr().err
 
 
 def test_a_start_on_nodes_another_run_holds_is_refused(tmp_path):

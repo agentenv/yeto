@@ -516,7 +516,8 @@ def test_without_a_free_spare_the_island_waits_with_a_backoff(tmp_path):
     events = ops.island_events("isl")
     assert [e["kind"] for e in events] == [isp.NODE_LOST, isp.WAITING_SPARE]
     assert events[1]["reason"].startswith("the inventory has no free healthy spare node (b300-1: quarantined")
-    assert events[1]["reason"].endswith("; b300-3: held by island isl-other)")
+    assert "; b300-3: held by island isl-other); placement: the island needs 3 node(s); 2 of 4 candidate(s) are free" \
+        in events[1]["reason"], events[1]["reason"]
     assert events[1]["next_check_s"] == 60.0
     waits = []
     for _ in range(6):  # each check after the backoff moves the next one further out
@@ -816,40 +817,32 @@ def test_a_spare_whose_claim_is_lost_to_another_island_is_excluded_and_the_next_
 
 
 def test_the_pick_asks_pick_placement_and_excludes_a_failed_candidate(tmp_path, monkeypatch):
-    """With group 2's fabric_groups.pick_placement (faked here by its agreed signature) the
-    pick passes the island's nodes that stay as ``required`` with the free candidates of its
-    group (need: the island's size), and adds a spare whose health check fails to
-    ``excluded`` before it asks again."""
-    import sys
-    import types
+    """The real fabric_groups.pick_placement: the island's nodes that stay are ``required``
+    (need: the island's size), every node that is out is in ``excluded`` with its reason
+    (the lost node quarantined), and a spare whose health check fails is added to it, with
+    the check's reason, before the pick asks again."""
+    from yeto.launch import fabric_groups
 
     asked = []
-
-    class PlacementError(Exception):
-        pass
+    real = fabric_groups.pick_placement
 
     def pick_placement(candidates, need, *, excluded=(), required=(), inventory=None):
-        asked.append(([n.name for n in candidates], need, sorted(excluded), [n.name for n in required]))
-        names = {n.name for n in required}
-        free = sorted((n for n in candidates if n.name not in set(excluded) and n.name not in names),
-                      key=lambda n: n.name)
-        if len(required) + len(free) < need:
-            raise PlacementError("no group has a free node")
-        return SimpleNamespace(group="A", nodes=(*required, *free[:need - len(required)]))
+        asked.append(([n.name for n in candidates], need, dict(excluded), [n.name for n in required]))
+        return real(candidates, need, excluded=excluded, required=required, inventory=inventory)
 
-    fake = types.ModuleType("yeto.launch.fabric_groups")
-    fake.pick_placement, fake.PlacementError = pick_placement, PlacementError
-    monkeypatch.setitem(sys.modules, "yeto.launch.fabric_groups", fake)
+    monkeypatch.setattr(fabric_groups, "pick_placement", pick_placement)
     cluster, ops, spares, store, clock = lost_island(
         tmp_path, extra=[spare(3, "A"), spare(4, "A"), spare(5, "B")], groups=["A", "A", "A"])
     cluster.sick.add("b300-3")
     assert ops.relaunch(None, "isl") == 1
     assert ("start", "b300-4", 1) in cluster.calls
-    # b300-1 (the lost node) is quarantined and b300-5 of group B is no candidate
-    # the health checks first (outside the ops lock), then the pick under it: the same order
     stay = ["b300-0", "b300-2"]
-    pool = [*stay, "b300-3", "b300-4"]
-    assert asked == [(pool, 3, [], stay), (pool, 3, ["b300-3"], stay)] * 2
+    pool = [*stay, "b300-1", "b300-3", "b300-4"]  # b300-5 of group B is no candidate
+    assert all(a[0] == pool and a[1] == 3 and a[3] == stay for a in asked)
+    first, second = asked[0][2], asked[1][2]
+    assert list(first) == ["b300-1"] and first["b300-1"].startswith("quarantined (rank 1 (b300-1)")
+    assert sorted(second) == ["b300-1", "b300-3"] and second["b300-3"] == "unhealthy: XID 79 on GPU 3"
+    assert len(asked) == 4  # the checks first (outside the ops lock), then the pick under it: the same order
     assert started(cluster, 1) == ["b300-0", "b300-4", "b300-2"]  # the nodes that stay, unchanged
 
 
@@ -864,55 +857,36 @@ def test_a_replacement_keeps_the_nodes_that_stay_when_another_group_has_more_fre
     assert started(cluster, 1) == ["b300-0", "b300-3", "b300-2"]  # not moved to group B's four free nodes
 
 
-def test_a_pick_placement_without_required_falls_back_to_its_contract(tmp_path, monkeypatch):
-    import sys
-    import types
+def test_a_placement_error_is_the_wait_reason_and_other_errors_are_raised(tmp_path, monkeypatch):
+    from yeto.launch import fabric_groups
 
-    calls = []
-
-    def old_pick_placement(candidates, need, *, excluded=(), inventory=None):  # the version before required=
-        calls.append(need)
-        return SimpleNamespace(group="B", nodes=tuple(candidates[:need]))
-
-    fake = types.ModuleType("yeto.launch.fabric_groups")
-    fake.pick_placement, fake.PlacementError = old_pick_placement, type("PlacementError", (Exception,), {})
-    monkeypatch.setitem(sys.modules, "yeto.launch.fabric_groups", fake)
-    extra = [spare(3, "A"), *(spare(i, "B") for i in range(4, 8))]
-    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=extra, groups=["A", "A", "A"])
-    assert ops.relaunch(None, "isl") == 1
-    assert calls == [] and started(cluster, 1) == ["b300-0", "b300-3", "b300-2"]
-
-
-def test_the_placement_stub_refuses_what_the_contract_refuses():
-    a0, a1, a2, b4 = grouped(b300(0), "A"), grouped(b300(1), "A"), spare(2, "A"), spare(4, "B")
-    off = spare(5, "Unavailable")
-    inv = [a0, a1, a2, b4, off]
-    assert [n.name for n in isp._stub_placement([a0, a1, a2, b4], 3, excluded=set(), required=[a0, a1],
-                                                inventory=inv)] == ["b300-0", "b300-1", "b300-2"]
-    assert isp._stub_placement([a0, a1, a2], 3, excluded={"b300-1"}, required=[a0, a1], inventory=inv) is None
-    assert isp._stub_placement([a0, b4, a2], 3, excluded=set(), required=[a0, b4], inventory=inv) is None
-    assert isp._stub_placement([a0, off, a2], 3, excluded=set(), required=[a0, off], inventory=inv) is None
-    assert isp._pick_placement([a2, b4], 3, required=[a0, a1], inventory=inv).name == "b300-2"
-
-
-def test_a_placement_that_moves_a_node_that_stays_is_no_placement(monkeypatch):
-    import sys
-    import types
-
-    a0, a1, a2, a3 = grouped(b300(0), "A"), grouped(b300(1), "A"), spare(2, "A"), spare(3, "A")
-    fake = types.ModuleType("yeto.launch.fabric_groups")
-    fake.PlacementError = type("PlacementError", (Exception,), {})
-    fake.pick_placement = lambda candidates, need, *, excluded=(), required=(), inventory=None: SimpleNamespace(
-        group="A", nodes=(a0, a2, a3))  # drops the required b300-1
-    monkeypatch.setitem(sys.modules, "yeto.launch.fabric_groups", fake)
-    assert isp._pick_placement([a2, a3], 3, required=[a0, a1]) is None
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3, "B")], groups=["A", "A", "A"])
+    assert ops.relaunch(None, "isl") is None and ops.waiting_spare("isl")
+    reason = spares.wait_reason
+    assert "placement: the island needs 3 healthy nodes of one fabric group" in reason, reason
+    a0, a1, a2 = grouped(b300(0), "A"), grouped(b300(1), "A"), spare(2, "A")
+    with pytest.raises(TypeError):  # one string as excluded: the real function's TypeError is raised
+        fabric_groups.pick_placement([a0, a1, a2], 3, excluded="b300-1")
 
     def broken(candidates, need, *, excluded=(), required=(), inventory=None):
         raise TypeError("a bug inside pick_placement")
 
-    fake.pick_placement = broken
-    with pytest.raises(TypeError, match="a bug inside"):  # not taken for a version without required=
-        isp._pick_placement([a2, a3], 3, required=[a0, a1])
+    monkeypatch.setattr(fabric_groups, "pick_placement", broken)
+    with pytest.raises(TypeError, match="a bug inside"):
+        isp._pick_placement([a2], 3, required=[a0, a1])
+
+
+def test_a_placement_that_moves_a_node_that_stays_is_no_placement(monkeypatch):
+    from yeto.launch import fabric_groups
+
+    a0, a1, a2, a3 = grouped(b300(0), "A"), grouped(b300(1), "A"), spare(2, "A"), spare(3, "A")
+    assert isp._pick_placement([a2, a3], 3, required=[a0, a1])[0].name == "b300-2"
+    node, why = isp._pick_placement([a2, a3], 3, required=[a0, a1], excluded={"b300-1": "quarantined"})
+    assert node is None and "required node(s) excluded: b300-1: quarantined" in why
+    monkeypatch.setattr(fabric_groups, "pick_placement", lambda candidates, need, *, excluded=(), required=(),
+                        inventory=None: SimpleNamespace(group="A", nodes=(a0, a2, a3)))  # drops b300-1
+    node, why = isp._pick_placement([a2, a3], 3, required=[a0, a1])
+    assert node is None and "drops a node that stays" in why
 
 
 def test_the_release_node_command_parses_its_flags_and_runs_release_node_main(tmp_path):
@@ -934,3 +908,26 @@ def test_the_release_node_command_parses_its_flags_and_runs_release_node_main(tm
     assert store.read("fleet/nodes/b300-1/quarantine.json") is not None
     args = parser.parse_args(["release-node", "b300-9", "--inventory", inv, "--store", str(tmp_path / "store")])
     assert crn.main(args, ssh=cluster, objects=store, say=lines.append) == 2  # not in the inventory
+
+
+def test_yeto_cluster_release_node_runs_from_the_cluster_command(tmp_path, capsys):
+    import argparse
+
+    from yeto import cluster_cli
+
+    cluster, ops, spares, store, _ = lost_island(tmp_path, extra=[spare(3)])
+    inv = _inventory(tmp_path, [*spec(3).nodes, spare(3)])
+    parser = argparse.ArgumentParser(prog="yeto")
+    cluster_cli.add_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["cluster", "release-node", "b300-1", "--inventory", inv, "--store",
+                              str(tmp_path / "store"), "--dry-run"])
+    assert cluster_cli.main(args) == 0  # the documented dry run: no SSH, nothing removed
+    out = capsys.readouterr().out
+    assert "node b300-1: quarantined by island isl of run run1" in out
+    assert "dry run: would check b300-1, run 1 stop(s) and remove fleet/nodes/b300-1/quarantine.json" in out
+    assert store.read("fleet/nodes/b300-1/quarantine.json") is not None
+    usage = argparse.ArgumentParser(prog="yeto")
+    cluster_cli.add_parser(usage.add_subparsers(dest="command"))
+    with pytest.raises(SystemExit):
+        usage.parse_args(["cluster", "--help"])
+    assert "{probe,check,release-node}" in capsys.readouterr().out
