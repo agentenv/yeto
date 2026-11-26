@@ -455,6 +455,19 @@ def _nc_rate(r: Resource, rates: Rates) -> float | None:
 OWN_SSH_NODES_NOTE = "own SSH nodes (no price_per_card_hour): $0"
 
 
+def _ssh_nodes_without_price(attrs: Mapping[str, Any]) -> tuple[float | None, str]:
+    """``(rate, note)`` of an ssh_trainer row without ``usd_per_hour``: $0 when none of its
+    nodes declares ``price_per_card_hour`` (the operator's own machines, as an ``ssh:``
+    sampler pool), unpriced when only some do (a forgotten price is not $0) or when the
+    row does not count its nodes (a ledger written before it did)."""
+    priced, unpriced = attrs.get("priced_nodes"), attrs.get("unpriced_nodes")
+    if priced == 0 and isinstance(unpriced, int) and unpriced > 0:
+        return 0.0, OWN_SSH_NODES_NOTE
+    if isinstance(priced, int) and isinstance(unpriced, int) and priced > 0:
+        return None, f"{unpriced} of {priced + unpriced} SSH nodes without price_per_card_hour"
+    return None, "SSH nodes without price_per_card_hour"
+
+
 def _span_cost(r: Resource, start: float, now: float, rate: float | None, note: str = "") -> ItemCost:
     end = r.released_at if r.released_at is not None else now
     if end < start and r.key not in _SKEW_WARNED:
@@ -550,11 +563,10 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
         elif _provider_cost(r.kind) is not None:  # an island provider's machine (nc_lease)
             items.append(_provider_cost(r.kind)(r, now, rates))
         elif r.kind == "ssh_trainer":  # the operator's machines: the inventory's declared price
-            # a node without price_per_card_hour is the operator's own machine: $0 (the inventory's
-            # default, as for an ssh: sampler pool), not unpriced
-            rate = r.attrs.get("usd_per_hour")
-            items.append(_span_cost(r, r.created_at, now, 0.0 if rate is None else float(rate),
-                                    "" if rate is not None else OWN_SSH_NODES_NOTE))
+            rate, note = r.attrs.get("usd_per_hour"), ""
+            if rate is None:
+                rate, note = _ssh_nodes_without_price(r.attrs)
+            items.append(_span_cost(r, r.created_at, now, None if rate is None else float(rate), note))
         elif r.kind == "sky_cluster":
             rate = r.attrs.get("usd_per_hour")
             note = ""

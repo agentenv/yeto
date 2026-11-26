@@ -46,9 +46,10 @@ How cost is computed:
   wire overhead. The ledger entry's `egress_events` lists which of these events count.
 - **National Compute**: lease duration × rate. A lease past its `lease_until` keeps billing until it is
   deleted, and it is counted that way. Set `YETO_NC_USD_PER_GPU_HOUR` (or `YETO_NC_USD_PER_UCR`) to price it.
-- **SSH trainer nodes** (a node inventory): the inventory's `price_per_card_hour` times the cards. A
-  node without `price_per_card_hour` is the operator's own machine and counts as $0 (not unpriced, no
-  `cost_unpriced` warning), as for an `ssh:` sampler pool.
+- **SSH trainer nodes** (a node inventory): the inventory's `price_per_card_hour` times the cards. When
+  no node of an incarnation declares `price_per_card_hour`, the nodes are the operator's own machines and
+  count as $0 (not unpriced, no `cost_unpriced` warning), as for an `ssh:` sampler pool. When only some
+  of its nodes declare a price, the incarnation is unpriced (a forgotten price is never read as $0).
 - A resource without a known rate is reported as **unpriced** (`cost_unpriced` event), never as $0, and
   is not counted toward the budget. Configure a rate for it.
 

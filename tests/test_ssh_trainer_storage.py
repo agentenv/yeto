@@ -264,6 +264,33 @@ def test_cost_prices_an_incarnation_by_the_declared_price_or_at_zero_on_own_node
     assert summary.unpriced == []
 
 
+def test_a_partly_priced_incarnation_stays_unpriced_and_the_guard_warns(tmp_path):
+    """REV-904b M1: 5 nodes at $3 per card hour and one without a price is not $0."""
+    from yeto.cost.guard import CostGuard, GuardConfig
+
+    ledger = ResourceLedger(tmp_path / "resources.jsonl", clock=lambda: 1000.0)
+    nodes = [b300(i, price_per_card_hour=3.0) for i in range(5)] + [b300(5)]
+    attrs = ssh_trainer_ledger.created_attrs(run_id="k31", island="t", incarnation=0, nodes=nodes, docker=True,
+                                             kill_grace_s=30)
+    assert (attrs["usd_per_hour"], attrs["priced_nodes"], attrs["unpriced_nodes"]) == (None, 5, 1)
+    ledger.created("ssh_trainer", "k31/t-i0", "t-i0", **attrs)
+    (item,) = billing.resource_costs(ledger.resources(), now=1000.0 + 1800).items
+    assert not item.priced and item.rate_usd_per_hour is None and "1 of 6 SSH nodes" in item.note
+    guard = CostGuard("k31", GuardConfig(), ledger=ledger, events_path=tmp_path / "events.jsonl",
+                      clock=lambda: 1000.0 + 600, log=lambda *_: None)
+    guard.tick()
+    events = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert [e["resource"] for e in events if e.get("event") == "cost_unpriced"] == ["ssh_trainer:k31/t-i0"]
+
+
+def test_a_row_without_node_counts_stays_unpriced(tmp_path):
+    """A ledger written before the rows counted their nodes: no price is not read as $0."""
+    ledger = ResourceLedger(tmp_path / "resources.jsonl", clock=lambda: 1000.0)
+    ledger.created("ssh_trainer", "k31/t-i0", "t-i0", run_id="k31", gpus=8, usd_per_hour=None)
+    (item,) = billing.resource_costs(ledger.resources(), now=1000.0 + 1800).items
+    assert not item.priced and "price_per_card_hour" in item.note
+
+
 def test_the_cost_guard_does_not_warn_about_own_ssh_nodes(tmp_path):
     """Rehearsal: every incarnation of a resident ssh trainer on own nodes (no
     price_per_card_hour) raised a cost_unpriced warning."""
