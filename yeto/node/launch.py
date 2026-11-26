@@ -111,12 +111,16 @@ def engine_prefix(profile: NodeProfile, sudo: bool) -> list[str]:
 
 def container_argv(profile: NodeProfile, *, name: str, image: str, env: Mapping[str, str], python: str,
                    spec_path: str, env_files: Sequence[str] = (), cards: Sequence[int] | None = None,
-                   host_paths: Sequence[str] | None = None, sudo: bool = False) -> list[str]:
+                   host_paths: Sequence[str] | None = None, sudo: bool = False,
+                   labels: Mapping[str, str] | None = None) -> list[str]:
     """``<engine> run --rm`` of the sampler in the foreground (the runtime is its parent).
     The yeto tree goes in front of the image's own ``PYTHONPATH`` inside the container
-    (``-e PYTHONPATH=`` would drop it: the CANN ``acl`` module of an Ascend image)."""
-    argv = [*engine_prefix(profile, sudo), "run", "--rm", "--name", name, "--network", "host", "--ipc", "host",
-            *profile.devices(cards, host_paths=host_paths).args]
+    (``-e PYTHONPATH=`` would drop it: the CANN ``acl`` module of an Ascend image).
+    ``labels``: ``--label`` flags (a leased node's run label; none: the argv as before)."""
+    argv = [*engine_prefix(profile, sudo), "run", "--rm", "--name", name, "--network", "host", "--ipc", "host"]
+    for key, value in sorted((labels or {}).items()):
+        argv += ["--label", f"{key}={value}"]
+    argv += [*profile.devices(cards, host_paths=host_paths).args]
     for host, inside in container_mount_list(profile):
         ro = inside == CONTAINER_MODELS or inside.startswith(CONTAINER_MODELS + "/")
         argv += ["-v", f"{host}:{inside}{':ro' if ro else ''}"]

@@ -907,6 +907,7 @@ class SshTrainerIslands:
         self.jobs: list[_SshJob] = []
         self.checked = False
         self.unreleased: set[int] = set()  # incarnations not confirmed stopped on every node
+        self.started: set[int] = set()  # incarnations started and not (yet) confirmed stopped
 
     # -- preflight ----------------------------------------------------------------
     def preflight(self) -> None:
@@ -1014,6 +1015,7 @@ class SshTrainerIslands:
         control = island_env(incarnation, resume_from, poll_s=self.poll_s) if self.scheduled else {}
         env = {**control, SUBMITTED_ENV: f"{self.clock():.3f}"}
         save_job(self.jobs_path, incarnation, f"ssh:{self.name}-i{int(incarnation)}")  # before any start
+        self.started.add(int(incarnation))
         # in the run's resource ledger: a cleanup (or the reaper) stops it without this head
         attrs = ssh_trainer_ledger.created_attrs(**self._ledger_key(incarnation), nodes=self.spec.nodes,
                                                  docker=self.spec.docker, kill_grace_s=self.kill_grace_s)
@@ -1159,13 +1161,25 @@ class SshTrainerIslands:
         if self.spec.leases is not None:
             self.spec.leases.release_all(self.spec.nodes)
 
+    def finish_leases(self) -> None:
+        """The run's trainer loop finished (the binding's ``on_finished``): the scheduler's
+        island holds its node leases for the whole run, across incarnations (the keeper
+        renews them), and gives them up only here: released when every incarnation it
+        started was confirmed stopped, else kept (:meth:`keep_leases`) for ``yeto cleanup``."""
+        leases = self.spec.leases
+        if leases is None:
+            return
+        if self.started or self.unreleased:
+            self.keep_leases()
+        else:
+            self.release_leases()
+        leases.stop_keeper()
+
     def release(self, job: _SshJob) -> bool:
         ok = self._kill(job.incarnation)
         for proc in job.procs:
             if proc.poll() is None:
                 proc.terminate()
-        if ok and self.scheduled:  # the scheduler's island: its nodes are free until its next start
-            self.release_leases()
         return ok
 
     def release_incarnation(self, incarnation: int) -> bool:
@@ -1173,10 +1187,7 @@ class SshTrainerIslands:
             print(f"[launcher] trainer incarnation {incarnation}: no SSH start recorded; nothing to release",
                   flush=True)
             return False
-        ok = self._kill(incarnation)
-        if ok and self.scheduled:
-            self.release_leases()
-        return ok
+        return self._kill(incarnation)
 
     def start_events(self) -> list[Mapping[str, Any]]:
         return [e for job in self.jobs for e in job.events.all]
@@ -1249,6 +1260,7 @@ class SshTrainerIslands:
         ok = self._kill_nodes(incarnation)
         if ok:  # every node confirmed: the ledger row closes (else a cleanup retries it)
             ssh_trainer_ledger.record("released", **self._ledger_key(incarnation))
+            self.started.discard(int(incarnation))
         self._fetch_outputs(incarnation)
         return ok
 
@@ -1332,7 +1344,23 @@ def ssh_binding(args: Any, island: TrainerIsland, *, journal_dir: Path, files: A
         islands = SshTrainerIslands(spec, name=island.name, jobs_path=Path(journal_dir) / JOBS_FILE,
                                     poll_s=getattr(args, "rl_trainer_command_poll_seconds", None),
                                     events_dir=island.events_dir)
-    return object_store_binding(args, files, islands, journal_dir=journal_dir)
+    binding = object_store_binding(args, files, islands, journal_dir=journal_dir)
+    finish = getattr(islands, "finish_leases", None)
+    if finish is not None and getattr(getattr(islands, "spec", None), "leases", None) is not None:
+        binding.on_finished = _chain(binding.on_finished, finish)  # the leases end with the run, not per incarnation
+    return binding
+
+
+def _chain(first: Callable[[], None] | None, then: Callable[[], None]) -> Callable[[], None]:
+    if first is None:
+        return then
+
+    def both() -> None:
+        try:
+            first()
+        finally:
+            then()
+    return both
 
 
 def requant_argv(store: str, template: str, *, recipe: str | None = None, awq_scales: str | None = None,
@@ -1469,7 +1497,7 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
         for node in recorded:
             got = leases.acquire(by_name[node])
             if not got.ok:
-                held[node] = got.blocked or f"run {got.holder}"
+                held[node] = leases.same_run_conflict(got.holder) or got.blocked or f"run {got.holder}"
         if held:
             for node in recorded:
                 if node not in held:
@@ -1488,8 +1516,8 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
             return f"the run's STOP flag {stop_flag}" if stop_flag.exists() else None
 
         try:
-            picked = pick_nodes([n for n in trainers if n.name not in leases.assigned], need, leases,
-                                wait_s=limit, prefer=recorded, stop=stop)
+            picked = pick_nodes(list(trainers), need, leases, wait_s=limit, prefer=recorded, stop=stop,
+                                excluded=leases.assigned)
         except NodeLeased as error:
             raise SshIslandError(f"ssh: island {key}: {error}") from None
     leases.picks[key] = [n.name for n in picked]
@@ -1517,12 +1545,13 @@ def trainer_leases(args: Any) -> Any:
         return None
     from .node_lease import NodeLeases, local_identity, ssh_probe
 
-    identity = local_identity(_lease_record_path(args))
+    path = _lease_record_path(args)
+    identity = local_identity(path)
     key = (store, f"{args.cluster_prefix}/trainer@{identity}")
     leases = _TRAINER_LEASES.get(key)
     if leases is None:
         ops = SshOps()
-        leases = NodeLeases(store, f"{args.cluster_prefix}/trainer", identity=identity,
+        leases = NodeLeases(store, f"{args.cluster_prefix}/trainer", identity=identity, identity_path=str(path),
                             probe=ssh_probe(lambda node, script: ops.run(node, script, timeout=120.0)))
         leases.start_keeper()
         _TRAINER_LEASES[key] = leases

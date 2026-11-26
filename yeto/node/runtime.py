@@ -169,6 +169,14 @@ class NodeRuntime:
         except (node_model.ModelError, OSError, subprocess.TimeoutExpired) as error:
             raise BootError("model", EXIT_MODEL, str(error)) from None
 
+    def run_labels(self) -> dict[str, str] | None:
+        """The run label of a leased node's containers (``YETO_RUN_LABEL``, set by a pool
+        whose inventory has ``lease_store``; the takeover probe finds them by it)."""
+        from yeto.launch.node_lease import RUN_LABEL_ENV, run_labels  # noqa: PLC0415
+
+        run = str(self.environ.get(RUN_LABEL_ENV) or "").strip()
+        return run_labels(run) if run else None
+
     def image(self, spec: Mapping[str, Any]) -> tuple[str | None, str | None]:
         """``(image, python)`` of a container launch (the catalog's choice when the
         assignment and the profile name none); ``(None, None)`` for a process."""
@@ -203,7 +211,7 @@ class NodeRuntime:
             argv = node_launch.container_argv(p, name=node_launch.container_name(a.shard), image=image, env=env,
                                               python=str(python), spec_path=paths["spec"],
                                               env_files=[self.env_file] if self.env_file else [], cards=a.cards,
-                                              host_paths=host_paths, sudo=a.sudo)
+                                              host_paths=host_paths, sudo=a.sudo, labels=self.run_labels())
         else:
             argv = node_launch.process_argv(python or sys.executable, paths["spec"])
         return Plan(argv=argv, env=env, spec_host_path=node_paths.host_path(paths["spec"], p),

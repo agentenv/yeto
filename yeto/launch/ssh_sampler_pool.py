@@ -713,15 +713,19 @@ def container_pull_command(conf: SshPoolConf, image: str) -> str:
 
 def container_run_argv(conf: SshPoolConf, node: Node, *, name: str, image: str, yeto_dir: str, spec_path: str,
                        env: Mapping[str, str], env_file: str | None, cards: Sequence[int],
-                       host_paths: Sequence[str] | None = None, command: str | None = None) -> list[str]:
+                       host_paths: Sequence[str] | None = None, command: str | None = None,
+                       labels: Mapping[str, str] | None = None) -> list[str]:
     """``<engine> run -d``: the node's device flags (the inventory's ``docker_args``,
     else the defaults of its family for ``cards``: :meth:`NodeProfile.devices`),
     ``security_opt``, the workdir and mounts at the same paths as on the host, then
-    ``exec`` of the engine sampler as PID 1."""
+    ``exec`` of the engine sampler as PID 1. ``labels``: ``--label`` flags (a leased
+    node's run label, :func:`~.node_lease.run_labels`; none: the argv as before)."""
     c = conf.container
     assert c is not None
     argv = [*(["sudo", "-n"] if c.sudo else []), c.engine, "run", "-d", "--name", name,
             "--network", "host", "--ipc", "host", "--shm-size", c.shm_size]
+    for key, value in sorted((labels or {}).items()):
+        argv += ["--label", f"{key}={value}"]
     for opt in c.security_opt:
         argv += ["--security-opt", opt]
     # what the preflight found on the host is passed (a missing -v source fails the run); the pool's
@@ -1038,8 +1042,12 @@ class SshNodeProvider:
 
             identity = self._lease_identity or local_identity(
                 self.state_path.with_name(self.state_path.stem + ".lease-identity.json"))
+            pool = getattr(self, "_store_pool", self.run_id)
+            where = (f"the run store's fleet/pools/{pool}/node-lease-identity.json" if self._lease_identity
+                     else str(self.state_path.with_name(self.state_path.stem + ".lease-identity.json")))
             self._leases = NodeLeases(self.conf.lease_store, f"{self.run_id}/pool", identity=identity,
-                                      clock=self.clock, on_event=self._lease_event, probe=self.lease_probe)
+                                      clock=self.clock, on_event=self._lease_event, probe=self.lease_probe,
+                                      identity_path=where)
         return self._leases
 
     def _lease_event(self, name: str, **detail: Any) -> None:
@@ -1088,6 +1096,10 @@ class SshNodeProvider:
             raise NodeLeased(f"ssh inventory: the lease of node {node.name} is not confirmed ({error!r})"[:300],
                              {node.name: None}) from error
         if not got.ok:
+            same = leases.same_run_conflict(got.holder)
+            if same:  # this pool under another identity: never free by waiting
+                self._lease_event("node_lease_same_run", node=node.name, holder=got.holder, why=same[:300])
+                raise SshSamplerError(f"ssh inventory: node {node.name} is {same}")
             why = got.blocked or f"node {node.name} is held by run {got.holder}"
             raise NodeLeased(f"ssh inventory: {why}", {node.name: got.holder})
         return True
@@ -1243,7 +1255,8 @@ class SshSamplerPoolOps:
         if self.conf.lease_store is not None:  # a takeover first asks the node whether the old run still runs
             from .node_lease import ssh_probe  # noqa: PLC0415
 
-            self.provider.lease_probe = ssh_probe(lambda node, script: self.ssh(node, script, timeout=120))
+            sudo = bool(self.conf.container is not None and self.conf.container.sudo)
+            self.provider.lease_probe = ssh_probe(lambda node, script: self.ssh(node, script, timeout=120), sudo=sudo)
         self._shard_of: dict[str, str] = {}
         self._node_route: Any = None
         self._health_generation: dict[str, int] = {}  # ticket -> the assignment its health check is of
@@ -1413,6 +1426,12 @@ class SshSamplerPoolOps:
             env_file = f"{self.conf.workdir}/sampler/.store.env"
             self.put(node, Path(os.path.expanduser(str(self.cfg["r2_env_file"]))).read_text(), env_file, mode="600")
         env = self.sampler_env(node, m)
+        labels = None
+        if self.conf.lease_store is not None:  # the takeover probe finds this run's containers by label
+            from .node_lease import RUN_LABEL_ENV, run_labels  # noqa: PLC0415
+
+            labels = run_labels(self.run_id)
+            env[RUN_LABEL_ENV] = self.run_id
         exec_line = None
         if route is not None:  # the node runtime starts the sampler (its records go to the store)
             python = self.conf.venv.python if self.conf.venv else self.conf.container.python  # type: ignore[union-attr]
@@ -1429,7 +1448,7 @@ class SshSamplerPoolOps:
             name = container_name(m.shard)
             argv = container_run_argv(self.conf, node, name=name, image=str(image), yeto_dir=yeto_dir,
                                       spec_path=p["spec"], env=env, env_file=env_file, cards=self.cards(node),
-                                      host_paths=facts.get("host_paths"), command=exec_line)
+                                      host_paths=facts.get("host_paths"), command=exec_line, labels=labels)
             out = self.ssh(node, f"{container_pull_command(self.conf, str(image))} && "
                                  f"{{ {_ce(self.conf)} rm -f {name} >/dev/null 2>&1; true; }} && "
                                  f"{shlex.join(argv)} && echo YETO_SSH_STARTED container={name}", timeout=3600)

@@ -36,9 +36,12 @@ Holders: ``<run>/<part>@<identity>``: the run (its ``--cluster-prefix`` or pool 
 the part (``trainer`` / ``pool``) and the run's launch identity, a nonce made at the first
 launch and kept in the run directory (the pool's: in its state, or in the run store on the
 store control plane). Only the same identity takes a running lease back (a restarted
-launcher); a second run of the same name elsewhere does not. ``keep_all`` (a launcher
-that ends with ``--keep`` or with a release not confirmed) leaves the leases held for good
-(``kept``) until ``yeto cleanup`` (or ``yeto cluster release-node``) releases them.
+launcher); a second run of the same name elsewhere does not, and a node held by the same
+run and part under another identity (a run dir restored without ``node-leases.json``) is
+an error at once, not a wait. ``keep_all`` (a launcher that ends with ``--keep`` or with a
+release not confirmed) leaves the leases held for good (``kept``: ``until`` null) until
+``yeto cleanup --run <run>`` releases them; a node that stays unreachable keeps its lease
+kept (docs/OWN_CLUSTERS.md, Node leases: the manual step).
 
 Known follow-up: the nodes do not renew their own leases; a run whose launcher is gone
 keeps its nodes only while ``kept`` or while the probe finds its processes.
@@ -212,32 +215,65 @@ def declares_new_fields(nodes: Any) -> bool:
 
 # -- the node probe before a takeover ----------------------------------------------------
 
-def still_runs_script(run: str) -> str:
+RUN_LABEL = "yeto.run"  # a sampler container of a leased pool carries ``--label yeto.run=<run>``
+RUN_LABEL_ENV = "YETO_RUN_LABEL"  # set on a leased pool's sampler: the node runtime labels its containers
+
+
+def run_labels(run: str) -> dict[str, str]:
+    """The labels of a sampler container whose node is leased (inventory ``lease_store``)."""
+    return {RUN_LABEL: str(run)}
+
+
+def still_runs_script(run: str, *, sudo: bool = False) -> str:
     """A shell script that prints ``yeto-lease-probe found=<what>`` for everything of
-    run ``run`` still running on the node, then ``yeto-lease-probe done``: its trainer
-    containers (``yeto-<run>-...``), its trainer process groups (``~/.yeto/trainer-islands/<run>/*/pgid``
-    without an ``rc``), its samplers (the start marker ``yeto-ssh-sampler:<run>:`` in a
-    process's arguments or a sampler container's environment). The marker is assembled
-    at run time, so the probe never finds itself."""
-    from .ssh_sampler_pool import MARK_ENV, MARKER  # noqa: PLC0415
+    run ``run`` that may still run on the node, then ``yeto-lease-probe done``:
+
+    * ``container:<name>``: a container labelled ``yeto.run=<run>`` (a leased pool's
+      sampler) or named ``yeto-<run>-...`` (a trainer incarnation);
+    * ``unconfirmed:container:<name>``: a sampler container (``yeto-sampler-...``) with no
+      ``yeto.run`` label (started before labels, or without lease_store): perhaps this
+      run's, not confirmed;
+    * ``unconfirmed:<engine>``: an engine's ``ps`` failed (``sudo -n <engine> ps`` too:
+      rootful containers of a pool with ``container.sudo``; tried whenever ``sudo -n``
+      works, required when ``sudo``);
+    * ``process:<island>``: a trainer process group (``~/.yeto/trainer-islands/<run>/*/pgid``
+      without an ``rc``);
+    * ``sampler:<pid>``: a venv sampler (the start marker ``yeto-ssh-sampler:<run>:`` in its
+      arguments; assembled at run time, so the probe never finds itself).
+
+    Every finding refuses a takeover; the caller treats a missing ``done`` line the same."""
+    from .ssh_sampler_pool import MARKER  # noqa: PLC0415
     from .ssh_trainer_island import STATE_DIR  # noqa: PLC0415
 
     if not re.fullmatch(r"[A-Za-z0-9_.:+-]+", str(run)):
         raise NodeLeaseError(f"run {run!r}: not a plain word")
     prefix = re.sub(r"[^A-Za-z0-9_.-]", "-", f"yeto-{run}-")
     head, tail = MARKER[:5], MARKER[5:]
+    found = f"echo \"{PROBE_MARK} found="
     return (
         f"m={head}; m=\"${{m}}{tail}:{run}:\"\n"
-        f"for e in docker podman; do command -v $e >/dev/null 2>&1 || continue\n"
-        f"  for n in $($e ps --format '{{{{.Names}}}}' 2>/dev/null); do\n"
-        f"    case \"$n\" in {prefix}*) echo \"{PROBE_MARK} found=container:$n\";;\n"
-        f"      yeto-sampler-*) $e inspect -f '{{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}}' \"$n\" "
-        f"2>/dev/null | M=\"{MARK_ENV}=$m\" awk 'index($0, ENVIRON[\"M\"]) == 1 {{f=1}} END {{exit !f}}' "
-        f"&& echo \"{PROBE_MARK} found=container:$n\";;\n"
-        "    esac\n  done\ndone\n"
+        "probe_engine() {  # $1: the label of the engine in findings; the rest: the engine command\n"
+        "  tag=$1; shift\n"
+        f"  mine=$(\"$@\" ps --filter label={RUN_LABEL}={run} --format '{{{{.Names}}}}' 2>/dev/null) || "
+        f"{{ {found}unconfirmed:$tag\"; return; }}\n"
+        f"  labelled=$(\"$@\" ps --filter label={RUN_LABEL} --format '{{{{.Names}}}}' 2>/dev/null) || "
+        f"{{ {found}unconfirmed:$tag\"; return; }}\n"
+        f"  all=$(\"$@\" ps --format '{{{{.Names}}}}' 2>/dev/null) || {{ {found}unconfirmed:$tag\"; return; }}\n"
+        f"  for n in $mine; do {found}container:$n\"; done\n"
+        "  for n in $all; do\n"
+        f"    case \"$n\" in {prefix}*) {found}container:$n\";;\n"
+        "      yeto-sampler-*) case \" $(echo $labelled) \" in *\" $n \"*) ;; "
+        f"*) {found}unconfirmed:container:$n\";; esac;;\n"
+        "    esac\n  done\n}\n"
+        "for e in docker podman; do command -v $e >/dev/null 2>&1 || continue\n"
+        "  probe_engine $e $e\n"
+        + (f"  if sudo -n true 2>/dev/null; then probe_engine sudo-$e sudo -n $e; else {found}unconfirmed:sudo-$e\"; fi\n"
+           if sudo else
+           "  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then probe_engine sudo-$e sudo -n $e; fi\n")
+        + "done\n"
         f"for f in \"$HOME/{STATE_DIR}/{run}\"/*/pgid; do [ -f \"$f\" ] || continue; d=${{f%/pgid}}\n"
         "  [ -f \"$d/rc\" ] && continue; pid=$(cat \"$f\" 2>/dev/null)\n"
-        f"  [ \"$pid\" -gt 1 ] 2>/dev/null && kill -0 -- -$pid 2>/dev/null && echo \"{PROBE_MARK} found=process:${{d##*/}}\"\n"
+        f"  [ \"$pid\" -gt 1 ] 2>/dev/null && kill -0 -- -$pid 2>/dev/null && {found}process:${{d##*/}}\"\n"
         "done\n"
         f"ps -eo pid=,args= 2>/dev/null | M=\"$m\" awk -v me=$$ '$1 != me && index($0, ENVIRON[\"M\"]) "
         f"{{print \"{PROBE_MARK} found=sampler:\" $1}}'\n"
@@ -257,7 +293,7 @@ def parse_probe(text: str) -> tuple[bool, list[str]]:
     return done, sorted(set(found))
 
 
-def ssh_probe(run: Callable[[Any, str], Any]) -> Callable[[Any, str], str | None]:
+def ssh_probe(run: Callable[[Any, str], Any], *, sudo: bool = False) -> Callable[[Any, str], str | None]:
     """A takeover probe over ``run(node, script) -> CompletedProcess`` (the caller's SSH):
     None when nothing of the previous holder's run runs on the node, else why the node is
     not free (it still runs that run, or it did not answer)."""
@@ -265,12 +301,15 @@ def ssh_probe(run: Callable[[Any, str], Any]) -> Callable[[Any, str], str | None
     def probe(node: Any, previous: str) -> str | None:
         name, previous_run = node_name(node), run_of(previous) or str(previous)
         try:
-            done = run(node, still_runs_script(previous_run))
+            done = run(node, still_runs_script(previous_run, sudo=sudo))
         except Exception as error:  # noqa: BLE001 - not confirmed: not free
             return f"node {name}: not confirmed free of run {previous_run} ({type(error).__name__})"
         confirmed, found = parse_probe(getattr(done, "stdout", "") or "")
-        if found:
+        sure = [f for f in found if not f.startswith("unconfirmed:")]
+        if sure:
             return f"node {name} still runs run {previous_run} ({', '.join(found)})"
+        if found:
+            return f"node {name}: not confirmed free of run {previous_run} ({', '.join(found)})"
         if not confirmed or getattr(done, "returncode", 0) not in (0, None):
             return (f"node {name}: not confirmed free of run {previous_run} "
                     f"(probe rc {getattr(done, 'returncode', None)})")
@@ -295,8 +334,10 @@ class NodeLeases:
 
     def __init__(self, store_uri: str, run_id: str, ttl_s: float = DEFAULT_TTL_S, *, identity: str | None = None,
                  objects: Any = None, clock: Callable[[], float] = time.time,
+                 monotonic: Callable[[], float] = time.monotonic,
                  on_event: Callable[..., None] | None = None,
-                 probe: Callable[[Any, str], str | None] | None = None) -> None:
+                 probe: Callable[[Any, str], str | None] | None = None,
+                 identity_path: str | None = None) -> None:
         if not run_id or not str(run_id).strip():
             raise NodeLeaseError("node leases need a run id (the holder)")
         if float(ttl_s) <= 0:
@@ -304,11 +345,13 @@ class NodeLeases:
         self.store_uri, self.run_id, self.ttl_s = str(store_uri), str(run_id), float(ttl_s)
         self.identity = identity
         self.holder_id = holder_id(self.run_id, identity)
-        self.clock = clock
+        self.clock, self.monotonic = clock, monotonic
         self.on_event = on_event
         self.probe = probe
+        self.identity_path = identity_path  # where the identity is kept (named in a same-run conflict)
         self._objects = objects
         self._locks: dict[str, StoreLock] = {}
+        self._renewed: dict[str, float] = {}  # node -> monotonic time of its last renewal (the cadence)
         self._lost: dict[str, str | None] = {}  # node -> the holder that has it now
         self._unconfirmed: dict[str, float] = {}  # node -> since when its lease is not confirmed
         self.assigned: set[str] = set()  # nodes given to an island of this launch
@@ -356,7 +399,7 @@ class NodeLeases:
         rows = None
         if callable(meta):
             try:
-                rows, now = meta(base)
+                rows, now = meta(base, require_date=True)
             except (AttributeError, KeyError, NotImplementedError, TypeError):  # no store times: the clocks
                 rows = None
         if rows is None:
@@ -442,9 +485,9 @@ class NodeLeases:
             state = self._state(name)  # the one LIST of this claim
             if state.running and state.holder != self.holder_id:
                 return LeaseResult(False, state.holder)
-            previous = (state.holder if state.top and not state.running and not state.released
+            previous = (state.holder if state.top and not state.running
                         and state.holder not in (None, self.holder_id) else None)
-            if previous is not None and self.probe is not None:
+            if previous is not None and self.probe is not None:  # a released lease too: its run may linger
                 why = self.probe(node, previous)
                 if why:
                     self._record(name, state.top + 1, "blocked", {"event": BLOCKED_EVENT, "holder": self.holder_id,
@@ -461,14 +504,30 @@ class NodeLeases:
             if lock is None:
                 return LeaseResult(False, self.holder(name))
             self._locks[name] = lock
+            self._renewed[name] = self.monotonic()
             self._lost.pop(name, None)
             self._unconfirmed.pop(name, None)
-            if previous is not None:
+            took = previous is not None and not state.released
+            if took:
                 recorded = self._record(name, lock.token, "takeover", {
                     "event": TAKEOVER_EVENT, "holder": self.holder_id, "previous": previous, "token": lock.token})
                 self._event(TAKEOVER_EVENT, node=name, holder=self.holder_id, previous=previous,
                             token=int(lock.token), recorded=recorded)
-            return LeaseResult(True, self.holder_id, previous is not None, previous)
+            return LeaseResult(True, self.holder_id, took, previous if took else None)
+
+    def same_run_conflict(self, holder: str | None) -> str | None:
+        """Why ``holder`` (another holder of a node) is a problem of this very run: the same
+        run and part under another launch identity (its run dir moved, or was restored
+        without the identity file). None: another run."""
+        if not holder or holder == self.holder_id:
+            return None
+        if str(holder).split("@", 1)[0] != self.run_id:
+            return None
+        where = self.identity_path or "the run's node lease identity file"
+        run = run_of(self.holder_id)
+        return (f"held by {holder}: this run ({run}) under another launch identity (this launch is "
+                f"{self.holder_id}; the identity is kept in {where}). Restore that file from the earlier "
+                f"launch, or end the earlier launch's leases with `yeto cleanup --run {run}`")
 
     def _renew_lock(self, name: str, lock: StoreLock) -> bool:
         """Renew one held lease; False once another holder has the node (recorded in
@@ -495,6 +554,7 @@ class NodeLeases:
                 self._event(UNCONFIRMED_EVENT, level="alert", node=name, holder=self.holder_id,
                             error=repr(error)[:200])
             return False
+        self._renewed[name] = self.monotonic()
         if self._unconfirmed.pop(name, None) is not None:
             self._event("node_lease_confirmed", node=name, holder=self.holder_id)
         return True
@@ -514,10 +574,10 @@ class NodeLeases:
         unconfirmed one; returns the nodes not renewed (lost or unconfirmed)."""
         out = []
         with self._mutex:
-            now = self.clock()
+            now = self.monotonic()  # the cadence: never moved by a wall clock step
             for name, lock in sorted(self._locks.items()):
-                if (force or name in self._unconfirmed or lock.renewed_at is None
-                        or now - lock.renewed_at >= self.renew_every_s):
+                last = self._renewed.get(name)
+                if force or name in self._unconfirmed or last is None or now - last >= self.renew_every_s:
                     if not self._renew_lock(name, lock):
                         out.append(name)
         return out
@@ -537,10 +597,11 @@ class NodeLeases:
             self.release(name)
 
     def keep_all(self) -> list[str]:
-        """Hold every lease of this object for good (``kept``: it never runs out): the
-        launcher ends while the nodes may still run (``--keep``, a release not confirmed).
-        ``yeto cleanup`` / ``release-node`` (:meth:`force_release`) or a restarted launcher of
-        this run ends it. Returns the nodes kept; never raises."""
+        """Hold every lease of this object for good (``kept``, ``until`` null: it never runs
+        out): the launcher ends while the nodes may still run (``--keep``, a release not
+        confirmed). ``yeto cleanup --run <run>`` (:meth:`force_release`) or a restarted
+        launcher of this run ends it; a node that stays unreachable: docs/OWN_CLUSTERS.md,
+        Node leases. Returns the nodes kept; never raises."""
         self.stop_keeper()
         kept = []
         with self._mutex:
@@ -548,22 +609,27 @@ class NodeLeases:
                 try:
                     lock.check(force=True)
                     self.objects.write(StoreLock.lease_key(lock.prefix, lock.token), json.dumps(
-                        {"token": lock.token, "holder": lock.holder, "until": float("inf"), "released": False,
+                        {"token": lock.token, "holder": lock.holder, "until": None, "released": False,
                          "kept": True, "kept_at": self.clock()}).encode())
                     kept.append(name)
                 except BaseException as error:  # noqa: BLE001 - lost already, or the store: the lease runs out
                     _LOG.warning("node lease of %s not kept: %r", name, error)
         if kept:
-            self._event("node_lease_kept", nodes=",".join(kept), holder=self.holder_id)
+            self._event("node_lease_kept", nodes=",".join(kept), holder=self.holder_id,
+                        release=f"yeto cleanup --run {run_of(self.holder_id)} (after the nodes stopped); "
+                                "an unreachable node: docs/OWN_CLUSTERS.md, Node leases")
         return kept
 
-    def force_release(self, node: Any, *, holder: str | None = None) -> bool:
-        """End ``node``'s current lease whoever holds it (``holder``: only when that one
-        does): ``yeto cleanup`` of a run whose launcher kept its leases, ``yeto cluster
-        release-node``. True when a lease was ended."""
+    def force_release(self, node: Any, *, holder: str | None = None, force: bool = False) -> bool:
+        """End ``node``'s current lease when it is kept or ran out (``force``: a live one
+        too; ``holder``: only when that one holds it): ``yeto cleanup --run`` of a run whose
+        launcher kept its leases, ``yeto cluster release-node`` (with its own probe first).
+        The next claim still probes the node. True when a lease was ended."""
         name = node_name(node)
         state = self._state(name)
         if not state.top or state.released or (holder is not None and state.holder != holder):
+            return False
+        if state.running and not state.kept and not force:
             return False
         self.objects.write(StoreLock.lease_key(self.prefix(name), state.top), json.dumps(
             {"token": state.top, "holder": state.holder, "until": 0.0, "released": True,
@@ -596,52 +662,94 @@ class NodeLeases:
         self._stop.set()
 
 
+class _NoPlacement(RuntimeError):
+    """The default placement found fewer than ``need`` usable candidates."""
+
+
+def in_order_placement(candidates: Sequence[Any], need: int, *, excluded: Iterable[str] = ()) -> list[Any]:
+    """The placement of an inventory without groups: the first ``need`` candidates not in
+    ``excluded``, in the order given (as on main). Raises when there are fewer."""
+    out = [n for n in candidates if node_name(n) not in set(excluded)]
+    if len(out) < int(need):
+        raise _NoPlacement(f"{len(out)} usable node(s), {need} needed")
+    return out[:int(need)]
+
+
+def _placement_failed(error: BaseException) -> bool:
+    """A placement that found no fit: the default's, or a ``PlacementError`` of a group
+    placement (``fabric_groups.pick_placement``; told by class name, not imported)."""
+    return isinstance(error, _NoPlacement) or any(c.__name__ == "PlacementError" for c in type(error).__mro__)
+
+
 def pick_nodes(candidates: Sequence[Any], need: int, leases: NodeLeases, *, wait_s: float | None = None,
                poll_s: float = WAIT_POLL_S, report_s: float = WAIT_REPORT_S, prefer: Sequence[str] = (),
+               excluded: Iterable[str] = (), place: Callable[..., Any] | None = None,
                stop: Callable[[], str | None] | None = None,
                sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
                log: Callable[[str], None] = _stderr) -> list[Any]:
     """``need`` of ``candidates`` whose leases this run takes, in ``candidates`` order.
 
-    The nodes named in ``prefer`` (an island's recorded nodes) and the nodes this run
-    holds already come first, then free ones; a node another run holds is skipped. Fewer
-    free nodes than ``need``: the holders are reported (whenever they change, and every
-    ``report_s`` with the time waited; a ``node_lease_waiting`` event each time) and the
-    leases read every ``poll_s`` until enough are free; :class:`NodeLeased` after ``wait_s``
-    (None: no limit) or once ``stop()`` names a reason."""
+    Each round: leave out ``excluded`` (the caller's: unhealthy, quarantined, given to
+    another island of this launch) and the nodes another run's lease holds; ``place(usable,
+    need, excluded=...)`` then chooses the nodes (a group placement such as
+    ``fabric_groups.pick_placement``, whose result may carry ``.nodes``; default
+    :func:`in_order_placement`: one group, as on main); the chosen nodes' leases are
+    taken one by one, and a node whose claim fails (taken since the read, or a takeover
+    the probe refused) is left out and the placement computed again. The ``prefer`` nodes
+    (an island's recorded ones) and the nodes this run holds come first in the order
+    given to ``place``, then free ones. No placement fits: the holders are reported
+    (whenever they change, and every ``report_s`` with the time waited; a
+    ``node_lease_waiting`` event each time) and the leases read every ``poll_s`` until
+    one fits; :class:`NodeLeased` after ``wait_s`` (None: no limit) or once ``stop()``
+    names a reason."""
     need = int(need)
     if need <= 0:
         return []
     if len(candidates) < need:
         raise NodeLeased(f"{need} node(s) needed, the inventory offers {len(candidates)}")
+    place = place or in_order_placement
+    left_out = {str(n) for n in excluded}
     order = {node_name(n): i for i, n in enumerate(candidates)}
     first = [n for n in candidates if node_name(n) in set(prefer)]
     ranked = first + [n for n in candidates if n not in first]
     began, reported, reported_at = monotonic(), None, None
     while True:
         holders = {node_name(n): leases.holder(n) for n in ranked}
+        for name, h in sorted(holders.items()):  # this run under another identity: waiting never ends
+            conflict = None if name in left_out else leases.same_run_conflict(h)
+            if conflict:
+                raise NodeLeased(f"node {name} is {conflict}", {name: h})
         ours = [n for n in ranked if holders[node_name(n)] == leases.holder_id]
         free = [n for n in ranked if holders[node_name(n)] is None]
-        usable = ours + free
-        want = ([n for n in first if n in usable] + [n for n in ours if n not in first]
-                + [n for n in free if n not in first])[:need]
+        usable = ([n for n in first if n in ours or n in free] + [n for n in ours if n not in first]
+                  + [n for n in free if n not in first])
         refusals: dict[str, str | None] = {}
-        if len(want) == need:
+        refused: set[str] = set()  # this round's failed claims: left out, the placement computed again
+        while True:
+            out = left_out | refused
+            try:
+                chosen = place([n for n in usable if node_name(n) not in out], need, excluded=sorted(out))
+            except Exception as error:  # noqa: BLE001 - only "no fit" waits; anything else is the caller's
+                if not _placement_failed(error):
+                    raise
+                break
+            chosen = list(getattr(chosen, "nodes", chosen))
             taken: list[Any] = []
-            for node in want:
+            for node in chosen:
                 result = leases.acquire(node)
-                if not result.ok:  # held since the read, or a takeover the probe refused
+                if not result.ok:
                     holders[node_name(node)] = result.holder or "(another run)"
                     if result.blocked:
                         refusals[node_name(node)] = result.blocked
+                    refused.add(node_name(node))
                     break
                 taken.append(node)
             if len(taken) == need:
                 return sorted(taken, key=lambda n: order[node_name(n)])
-            for node in taken:  # give back what this round took; wait like any short round
+            for node in taken:  # give back what this placement took; place again without the refused node
                 if node not in ours:
                     leases.release(node)
-        free_now = sum(1 for h in holders.values() if h in (None, leases.holder_id))
+        free_now = sum(1 for n, h in holders.items() if h in (None, leases.holder_id) and n not in left_out)
         busy = {name: h for name, h in holders.items() if h not in (None, leases.holder_id)}
         text = ", ".join(f"{name} by {refusals.get(name) or 'run ' + str(h)}" for name, h in sorted(busy.items()))
         waited = monotonic() - began

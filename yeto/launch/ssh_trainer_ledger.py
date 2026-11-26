@@ -114,8 +114,9 @@ def cleanup_release(resource: Any, ops: Any = None, dry_run: bool = False,
 def release_node_leases(attrs: dict[str, Any], nodes: Sequence[Any]) -> str:
     """After a confirmed stop: end the node leases the row's run holds (inventory
     ``lease_store``: a launcher that ended with ``--keep`` kept them for good). Only a
-    lease of the recorded holder is ended. Returns a note for the cleanup's action; never
-    raises (a lease not ended runs out, or ``yeto cluster release-node`` ends it)."""
+    lease of the recorded holder that is kept or ran out is ended (a live one runs out by
+    itself). Returns a note for the cleanup's action; never raises (an unreachable node
+    keeps its lease kept: docs/OWN_CLUSTERS.md, Node leases)."""
     store, holder = attrs.get("lease_store"), attrs.get("lease_holder")
     if not store or not holder:
         return ""

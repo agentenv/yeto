@@ -155,10 +155,13 @@ class StoreLock:
             until = float(record.get("claimed_at") or 0.0) + float(record.get("ttl_s") or DEFAULT_TTL_S)
             lease = {"token": top, "holder": record.get("holder"), "until": until, "released": False}
         now = time.time() if now is None else now
-        if lease.get("released") or float(lease.get("until") or 0.0) <= now:
+        if lease.get("released"):
             return None
-        return {"token": top, "holder": lease.get("holder") or record.get("holder"),
-                "until": float(lease.get("until") or 0.0)}
+        kept = bool(lease.get("kept"))  # kept (``until`` null; older: Infinity): held until released
+        until = float("inf") if kept else float(lease.get("until") or 0.0)
+        if until <= now:
+            return None
+        return {"token": top, "holder": lease.get("holder") or record.get("holder"), "until": until}
 
     # -- claim
     @classmethod

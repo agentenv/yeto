@@ -209,21 +209,49 @@ nodes:
   or its samplers (by their start marker). If something does, or if the node does not
   answer, the takeover is refused and a `node_lease_blocked` event is written.
   A successful takeover writes `node_lease_taken_over` under `nodes/<node>/events/`.
+- A released lease does not prove the node is empty: the next run of another holder
+  runs the same check before it claims the node.
+- Sampler containers of a pool whose inventory has `lease_store` carry the label
+  `yeto.run=<run>`; the check finds them by it (`ps --filter label=yeto.run=<run>`, with
+  `sudo -n` too for a pool with `container.sudo`). A `yeto-sampler-*` container with
+  no label (started before labels, or by a pool without `lease_store`) may be the old
+  run's, and a failed `ps` proves nothing: both refuse the takeover.
 - Holders are named `<run>/trainer@<identity>` and `<run>/pool@<identity>`. The
   identity is a nonce made at the run's first launch and kept in the run directory
   (`node-leases.json`; a pool on the store control plane keeps it in the run store).
   Only the same identity takes a running lease back, so two runs with the same name
-  on different machines never share a node.
-- When a resident island's release is confirmed, its leases are released. A launcher
-  that ends with `--keep`, or whose release was not confirmed, keeps the leases
-  without expiry. They are then released by `yeto cleanup` (after it stopped the
-  island), by `yeto cluster release-node`, or by a restarted launcher of the same run.
+  on different machines never share a node. A node held by the same run under another
+  identity (a run directory restored without `node-leases.json`) is an error at once,
+  naming that file: restore it, or end the earlier launch's leases with
+  `yeto cleanup --run <run>`.
+- A trainer scheduler's island holds its leases for the whole run, across
+  incarnations; they are released when the run's loop ends and every incarnation was
+  confirmed stopped. When a resident island's release is confirmed, its leases are
+  released. A launcher that ends with `--keep`, or whose release was not confirmed,
+  keeps the leases without expiry (`kept: true`, `until: null`).
 
-Clocks: on an `s3://` lease store, expiry is computed from the store's own times (the
-lease object's `LastModified` and the listing's `Date`). On a store that gives no
-such times (a directory, `oss://`), the holder's clock writes the lease end and the
-reader's clock judges it. All hosts must then run NTP, with clock skew well below
-the 10-minute lease.
+Releasing kept leases: run `yeto cleanup --run <run>`. After it confirmed the stop of
+the run's islands on their nodes, it releases the leases those islands kept (only the
+ones of that run, and only when kept or run out). A node that stays unreachable keeps
+its lease kept; see "Spare nodes" (`yeto cluster release-node`) once that section is
+in this guide. Until then, release such a node by hand:
+
+1. Make sure nothing of the run is left on the node: no `yeto-<run>-*` or
+   `yeto-sampler-*` containers (`docker ps`, `podman ps`, with `sudo -n` too where
+   used), no live process group under `~/.yeto/trainer-islands/<run>/`, no process with
+   `yeto-ssh-sampler:<run>:` in its arguments. If the node cannot be reached, make sure
+   it is powered off or out of the network.
+2. In the lease store, list `nodes/<node>/lease/` and delete the `.lease` object of the
+   highest token (`<token>.lease`, eight digits). Keep the `<token>.json` record: the
+   next claim takes token + 1.
+
+Clocks: on an `s3://` store, or an `oss://` store the launcher reaches directly,
+expiry is computed from the store's own times (the lease object's `LastModified` and
+the listing's `Date` header). A directory store, an `oss://` store reached through the
+OSS relay, and a listing without a `Date` header give no such times: then the
+holder's clock writes the lease end and the reader's clock judges it, so all hosts
+must run NTP with clock skew well below the 10-minute lease. The renewal cadence
+uses each host's monotonic clock, so a wall clock step does not delay a renewal.
 
 The store must create objects atomically (`If-None-Match: *`); a store found
 without it is refused.
