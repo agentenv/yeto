@@ -135,6 +135,293 @@ def test_one_island_relaunch_never_restarts_the_others(tmp_path):
         assert w.load(k)["relaunches"] == 0
 
 
+def _set_gpu(store, name, gpu):
+    store.update(lambda doc: next(m for m in doc["members"] if m["name"] == name).update(gpu=gpu))
+
+
+@pytest.mark.parametrize("exit_code, log", [(1, "sky: no capacity in any zone"), (10, "[yeto-config-error] x")])
+def test_a_target_applied_while_the_launch_fails_is_a_move_not_a_relaunch(tmp_path, exit_code, log):
+    """Bug 30: the island's launch fails ordering its old target (or refuses it) and a new
+    target is applied before the worker sees the end. The new target starts as the next
+    incarnation (new prefix, so new cluster names and resource ledger ids), with a moving
+    event and its relaunch count at 0; it is not relaunch 1/N of the old incarnation."""
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    logs: list[str] = []
+    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=logs.append)
+    w.step()
+    launches.end("run-i0", 1, log="sky: no capacity in any zone")
+    w.step()
+    assert w.load(0)["relaunches"] == 1  # relaunch 1/N on the unchanged target
+    launches.end("run-i0", exit_code, log=log)
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert launches.started("run-i0") == 2  # the old prefix is never ordered again
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0", "run-i0-m1"]
+    argv = launches.live["run-i0-m1"]
+    assert argv[argv.index("--gpu") + 1] == "aws:1xa10g@us-east-1"
+    assert argv[argv.index("--cluster-prefix") + 1] == "run-i0-m1"
+    record = w.load(0)
+    assert record["incarnation"] == 1 and record["relaunches"] == 0 and record["prefix_now"] == "run-i0-m1"
+    assert record["gpu"] == "aws:1xa10g@us-east-1" and record["last_end"]["exit_code"] == exit_code
+    assert "relaunch" not in record["why"] and record["why"].startswith("moved to aws:1xa10g")
+    assert any("moving: its launch had ended" in m for m in logs)
+    assert not any("relaunch 2/" in m for m in logs)
+    # its own infrastructure failure later is relaunch 1/N of the new incarnation, with the full budget
+    launches.end("run-i0-m1", 1, log="sky: cluster lost")
+    w.step()
+    record = w.load(0)
+    assert record["prefix_now"] == "run-i0-m1" and record["relaunches"] == 1 and record["incarnation"] == 1
+
+
+def test_a_launch_gone_without_a_run_record_is_torn_down_before_the_move(tmp_path):
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.live.pop("run-i0")
+    launches.exits["run-i0"] = {"exit_code": None, "log": "", "detail": "launch gone without a run record"}
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert launches.torn_down == ["run-i0"]
+    assert [p for p, _ in launches.starts] == ["run-i0"]  # nothing ordered in the step that tears it down
+    w.step()  # no ledger left open: the move goes on
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.t = 1_000_000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _ledger_fleet(tmp_path, rows, *, budget=3):
+    """An island whose launch fails while a new target is applied; its old launch's ledger
+    has ``rows`` open (a list, mutated by the test; an exception: unread)."""
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+
+    def open_resources(prefix):
+        if isinstance(rows, Exception):
+            raise rows
+        return rows
+
+    launches.open_resources = open_resources
+    clock, logs = Clock(), []
+    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=logs.append, clock=clock, relaunch_budget=budget)
+    w.step()
+    launches.end("run-i0", 1, log="sky: no capacity in any zone")
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    return w, launches, clock, logs
+
+
+def test_a_move_waits_for_the_old_prefix_s_teardown_before_ordering(tmp_path):
+    """Bug 30: the old launch left an INIT cluster open in its ledger. Its prefix is torn
+    down and the next incarnation orders nothing until the ledger has no open row (a leftover
+    machine would hold the target's quota and fail the new order)."""
+    rows = [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0"}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
+    w.step()
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    assert w.load(0)["state"] == tw.MOVING and w.load(0)["clearing"]["prefix"] == "run-i0"
+    clock.t += tw.CLEAR_TIMEOUT_S / 2
+    w.step()  # down not done yet: still nothing ordered
+    assert [p for p, _ in launches.starts] == ["run-i0"]
+    rows.clear()  # `yeto down` released it
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+    record = w.load(0)
+    assert record["incarnation"] == 1 and record["relaunches"] == 0 and record["clearing"] is None
+    assert any("old prefix torn down" in m for m in logs)
+
+
+def test_a_teardown_that_does_not_finish_in_time_orders_nothing_and_counts(tmp_path):
+    w, launches, clock, logs = _ledger_fleet(tmp_path, OSError("ledger unread"), budget=2)
+    w.step()
+    assert launches.torn_down == ["run-i0"]
+    clock.t += tw.CLEAR_TIMEOUT_S + 1
+    w.step()  # timed out: an infrastructure failure, torn down again, still nothing ordered
+    assert [p for p, _ in launches.starts] == ["run-i0"] and launches.torn_down == ["run-i0", "run-i0"]
+    assert w.load(0)["relaunches"] == 1 and w.load(0)["state"] == tw.MOVING
+    assert any("still not torn down" in m and "run-i0" in m for m in logs)
+    clock.t += tw.CLEAR_TIMEOUT_S + 1
+    w.step()  # the budget spent: given up with its bill open, nothing ordered
+    record = w.load(0)
+    assert record["state"] == lifecycle.ABANDONED and record["billing_open"]
+    assert [p for p, _ in launches.starts] == ["run-i0"]
+
+
+def test_a_failed_launch_whose_ledger_is_all_released_moves_at_once(tmp_path):
+    w, launches, clock, logs = _ledger_fleet(tmp_path, [])
+    w.step()
+    assert getattr(launches, "torn_down", []) == []
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+
+
+def test_a_bucket_left_for_a_person_does_not_hold_the_move(tmp_path):
+    """#864 leaves some sky_storage rows open on purpose (release_skipped: the bucket holds
+    data) and some unconfirmed (release_failed): they hold no quota, so the move goes on at
+    once and they are reported."""
+    rows = [{"kind": "sky_storage", "id": "b0", "name": "b0", "release_error": "release_skipped: holds objects"},
+            {"kind": "sky_storage", "id": "b1", "name": "b1", "release_error": "release_failed: 403"}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
+    w.step()
+    assert getattr(launches, "torn_down", []) == []
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+    assert any("left for a person to decide" in m and "b0" in m and "do not block the move" in m for m in logs)
+
+
+def test_an_open_cluster_row_still_holds_the_move_next_to_a_skipped_bucket(tmp_path):
+    rows = [{"kind": "sky_storage", "id": "b0", "name": "b0", "release_error": "release_skipped: holds objects"},
+            {"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0", "release_error": None}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
+    w.step()
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    rows.pop()  # the cluster released; the bucket stays for a person
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+
+
+def test_a_move_through_its_stop_waits_for_what_the_old_launch_left_open(tmp_path):
+    """A running launch moved through its STOP: if its ledger still has a compute row open
+    once it ended, the old prefix is torn down before the next incarnation orders anything."""
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    rows = [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0", "release_error": None}]
+    launches.open_resources = lambda prefix: rows
+    clock = Clock()
+    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=lambda m: None, clock=clock)
+    w.step()
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert w.load(0)["state"] == tw.MOVING and getattr(launches, "torn_down", []) == []
+    launches.end("run-i0", 0)
+    w.step()
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    rows.clear()
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+    assert w.load(0)["relaunches"] == 0
+
+
+def test_a_move_through_its_stop_with_a_released_ledger_starts_at_once(tmp_path):
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    launches.open_resources = lambda prefix: [
+        {"kind": "sky_storage", "id": "b0", "name": "b0", "release_error": "release_skipped: holds objects"}]
+    w = worker(objects, store, launches)
+    w.step()
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    launches.end("run-i0", 0)
+    w.step()
+    assert getattr(launches, "torn_down", []) == [] and "run-i0-m1" in launches.live
+
+
+def test_only_buckets_and_rows_left_on_purpose_do_not_hold_a_move():
+    rows = [{"kind": "sky_cluster", "id": "c0", "release_error": None},
+            {"kind": "modal_app", "id": "ap-1", "release_error": "release_failed: timeout"},
+            {"kind": "daytona_sandbox", "id": "sb-1", "release_error": None},
+            {"kind": "some_kind_added_later", "id": "x-1", "release_error": None},
+            {"id": "no-kind", "release_error": None},
+            {"kind": "modal_app", "id": "ap-2", "release_error": "release_skipped: kept by its owner"},
+            {"kind": "sky_storage", "id": "b0", "release_error": "release_failed: 403"}]
+    waits, reported = tw.split_open_rows(rows)
+    # an unknown kind is taken as compute (fail closed); a skipped row is left on purpose:
+    # `yeto down` never releases it, waiting would only time out
+    assert [r["id"] for r in waits] == ["c0", "ap-1", "sb-1", "x-1", "no-kind"]
+    assert [r["id"] for r in reported] == ["ap-2", "b0"]
+
+
+def test_an_open_row_of_an_unknown_kind_holds_the_move(tmp_path):
+    rows = [{"kind": "sky_storage", "id": "b0", "name": "b0", "release_error": "release_skipped: holds objects"},
+            {"kind": "some_kind_added_later", "id": "x-1", "name": "x-1", "release_error": None}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
+    w.step()
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    assert w.load(0)["state"] == tw.MOVING and "some_kind_added_later x-1" in w.load(0)["clearing"]["left"]
+    rows.pop()
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+
+
+def test_a_move_through_its_stop_whose_launch_left_no_run_record_is_torn_down_first(tmp_path):
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert w.load(0)["state"] == tw.MOVING
+    launches.live.pop("run-i0")  # gone, and ended() reads nothing
+    w.step()
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    assert w.load(0)["clearing"]["left"] == "no run record"
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+
+
+def test_teardown_failures_while_clearing_carry_into_the_next_incarnation(tmp_path):
+    rows = [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0"}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
+    w.step()
+    clock.t += tw.CLEAR_TIMEOUT_S + 1
+    w.step()  # 1/N: torn down again
+    assert w.load(0)["relaunches"] == 1
+    rows.clear()
+    w.step()
+    record = w.load(0)
+    assert record["prefix_now"] == "run-i0-m1" and record["relaunches"] == 1
+
+
+def test_local_launch_ops_read_the_open_rows_of_a_launch_ledger(tmp_path, monkeypatch):
+    from yeto import runs
+    from yeto.cost.ledger import ResourceLedger
+
+    monkeypatch.setattr(runs, "run_dir", lambda name: tmp_path / name)
+    ops = tw.LocalLaunchOps()
+    assert ops.open_resources("run-i0") == []  # no ledger
+    (tmp_path / "run-i0").mkdir()
+    ledger = ResourceLedger.for_run("run-i0")
+    ledger.created("sky_cluster", "run-i0-0", "run-i0-0")
+    ledger.created("sky_storage", "bucket-a", "bucket-a")
+    ledger.released("sky_storage", "bucket-a", "bucket-a")
+    assert ops.open_resources("run-i0") == [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0",
+                                             "release_error": None}]
+
+
+def test_a_hand_off_while_the_target_changes_is_started_again_as_it_was(tmp_path):
+    """Exit 12/13: the launch ordered nothing but its machine may still run under another
+    launcher: started again under its own prefix and argv (it moves once it runs)."""
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.end("run-i0", 13)
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0"]
+    assert launches.starts[1][1] == launches.starts[0][1]  # its old argv
+    w.step()  # alive, spec differs: moving through its STOP
+    assert w.load(0)["state"] == tw.MOVING
+
+
+def test_an_unchanged_spec_is_still_relaunched_under_its_prefix(tmp_path):
+    objects, store = fleet(tmp_path, [member(0)])
+    launches = FakeLaunches()
+    w = worker(objects, store, launches)
+    w.step()
+    launches.end("run-i0", 1, log="sky: no capacity")
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0"]
+    assert w.load(0)["relaunches"] == 1 and w.load(0)["incarnation"] == 0
+
+
 def test_a_config_error_is_never_relaunched(tmp_path):
     from yeto.config_errors import CONFIG_ERROR_EXIT
 

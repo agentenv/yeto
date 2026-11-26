@@ -22,7 +22,10 @@ the newest generation and, island by island (keyed by learner id):
   another source): the island's STOP (``fleet/trainers/<k>/STOP``) ends its launch
   (no RETIRE: the syncer sees the island leave and come back under its learner id,
   a short absence); once it ended, the next incarnation starts on the new machines
-  under prefix ``<prefix>-m<n>``, same learner id, from the store's ``trainer<k>/``;
+  under prefix ``<prefix>-m<n>``, same learner id, from the store's ``trainer<k>/``.
+  A change applied while the launch was already ending (an infrastructure failure
+  ordering the old machines) is a move too: the next incarnation, its relaunch count
+  reset; only a launch whose spec is unchanged is relaunched within the budget;
 * **member removed**: its STOP ends its launch; once ended the island is ``removed``.
   Its sampler pools leave with it (the pool reconcile drains them and retires their
   shards, ``yeto.launch.pool.fleet_reconcile``).
@@ -110,6 +113,32 @@ START_GRACE_S = 600.0  # a launch just started may take this long to register it
 STOP_UNREAD_S = 90.0
 # Any launch still running this long after its island STOP was written is torn down
 STOP_IGNORED_S = 1800.0
+# A move whose old launch ended leaving resources open waits this long for their teardown
+# (`yeto down` of the old prefix) before the next incarnation orders anything: a leftover
+# machine would hold the target's quota and fail the new order as an infrastructure failure.
+CLEAR_TIMEOUT_S = 600.0
+# The resource ledger kinds that never hold a move: they hold no quota and bill nothing
+# (yeto.cost.ledger: ``sky_storage`` is "Not compute: billed 0"). A bucket left open on purpose
+# (``release_skipped``: it holds data, a person decides) or one cleanup could not confirm
+# (``release_failed``) is reported, not waited for. Every other kind, known or not (a provider's
+# lease kind, one added later), holds a move while it is open: an unknown kind is taken as
+# compute rather than ordering new machines next to a live one.
+NON_BLOCKING_LEDGER_KINDS = frozenset({"sky_storage"})
+
+
+def split_open_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(rows a move waits for, rows it only reports) of an old launch's open ledger rows. A
+    row is only reported when it was left open on purpose (``release_skipped``: `yeto down`
+    never releases it, waiting would only time out) or its kind is non-billing
+    (:data:`NON_BLOCKING_LEDGER_KINDS`); every other row waits, unknown kinds included."""
+    waits = [r for r in rows if r.get("kind") not in NON_BLOCKING_LEDGER_KINDS
+             and not str(r.get("release_error") or "").startswith("release_skipped")]
+    return waits, [r for r in rows if r not in waits]
+
+
+def _row_names(rows: list[dict[str, Any]]) -> str:
+    return ", ".join(sorted({f"{r.get('kind')} {r.get('id') or r.get('name')}"
+                             + (f" ({r['release_error']})" if r.get("release_error") else "") for r in rows})[:5])
 # yeto.launcher HANDS_OFF_EXITS: another live launcher holds the island's records lock (12),
 # or whether its machine runs did not read (13); the launch ordered nothing and tore nothing down
 HANDS_OFF_EXITS = frozenset({12, 13})
@@ -438,8 +467,24 @@ class TrainerWorker:
                 return
             if syncer is None:
                 return
-            self._start(k, member, syncer, record, incarnation=int(record.get("incarnation") or 0) + 1,
-                        relaunches=0, generation=generation, why=f"moved to {member.get('gpu')}")
+            if not record.get("clearing"):
+                # its launch ended through its STOP: what it ordered must be released before
+                # the new machines are ordered (a leftover would hold the target's quota)
+                left = self._left_open(prefix, self.ops.ended(prefix) or {"exit_code": None}, k)
+                if left:
+                    self._event(k, "moving: its launch ended leaving resources; its old prefix is torn down "
+                                "before the next incarnation orders anything", to=member.get("gpu"), left=left)
+                    self.save(k, {**record, "relaunches": 0, "clearing": {
+                        "prefix": prefix, "since": round(self.clock(), 3), "left": left, "attempts": 1}})
+                    self._tear_down_old(k, prefix, member, left)
+                    return
+            elif not self._cleared(k, record, member):
+                return  # the old prefix is still being torn down: nothing is ordered yet
+            # a move starts its relaunch count again; failures to tear its old prefix down count
+            relaunches = int(record.get("relaunches") or 0) if record.get("clearing") else 0
+            self._start(k, member, syncer, {**record, "clearing": None},
+                        incarnation=int(record.get("incarnation") or 0) + 1,
+                        relaunches=relaunches, generation=generation, why=f"moved to {member.get('gpu')}")
             return
         if alive:
             if record.get("spec") != spec:
@@ -470,6 +515,27 @@ class TrainerWorker:
         if ended.get("exit_code") in HANDS_OFF_EXITS:
             self._hand_back(k, record, ended)
             return
+        if record.get("spec") != spec and syncer is not None:
+            # The island was changed (another target or argv) while this launch was ending
+            # (e.g. failing to order its old machines): a move, never a relaunch of the new
+            # spec under the old incarnation's prefix and cluster names, and never counted
+            # against the infrastructure relaunch budget. (A hand-off above is started again
+            # as it was and moves once it runs.)
+            left = self._left_open(prefix, ended, k)
+            if left:  # what the old incarnation ordered is not all released: torn down first, then the move
+                self._event(k, "moving: its launch had ended leaving resources; its old prefix is torn down "
+                            "before the next incarnation orders anything", to=member.get("gpu"), left=left)
+                self.save(k, {**record, "state": MOVING, "moving_to": member.get("gpu"), "generation": generation,
+                              "ended": ended, "relaunches": 0, "clearing": {"prefix": prefix, "since": round(self.clock(), 3),
+                                                           "left": left, "attempts": 1}})
+                self._tear_down_old(k, prefix, member, left)
+                return
+            self._event(k, "moving: its launch had ended, the next incarnation starts on the new machines",
+                        to=member.get("gpu"), ended=ended.get("detail"))
+            self._start(k, member, syncer, {**record, "ended": ended},
+                        incarnation=int(record.get("incarnation") or 0) + 1, relaunches=0, generation=generation,
+                        why=f"moved to {member.get('gpu')} (changed while its launch ended)")
+            return
         stop = self.states.stop_requested(k)
         decision = lifecycle.classify(exit_code=ended.get("exit_code"), log_text=ended.get("log"),
                                       stopped=stop is not None, detail=str(ended.get("detail") or ""))
@@ -491,6 +557,76 @@ class TrainerWorker:
                 self.log(f"fleet: CRITICAL: trainer island {k}: given up ({final}) but its pools "
                          f"{list(member.get('pools') or ())} were not asked to stop ({error!r}); they bill until "
                          "`yeto run down` (or `yeto fleet island remove` it)"[:500])
+
+    def _tear_down_old(self, k: int, prefix: str, member: dict[str, Any], left: str) -> bool:
+        """``yeto down`` of a moved island's old prefix (:meth:`_cleared` waits for it)."""
+        try:
+            self.ops.tear_down(prefix, f"moving to {member.get('gpu')}: {left}")
+            return True
+        except Exception as error:  # noqa: BLE001 - reported; asked again at the next step
+            self.log(f"fleet: ERROR: trainer island {k}: tearing its old launch {prefix} down failed ({error!r}); "
+                     "asked again at the next step")
+            return False
+
+    def _cleared(self, k: int, record: dict[str, Any], member: dict[str, Any]) -> bool:
+        """Whether a moved island's old prefix is torn down (its resource ledger has no open
+        row), so the next incarnation may order. Not yet within :data:`CLEAR_TIMEOUT_S`:
+        False, nothing ordered. Past it: an infrastructure failure of the move (counted
+        against the relaunch budget), the leftovers reported and torn down again; the
+        budget spent, the island is given up with its bill open (the leftovers may run)."""
+        clearing = dict(record["clearing"])
+        prefix = str(clearing["prefix"])
+        reader = getattr(self.ops, "open_resources", None)
+        try:
+            waits, _reported = split_open_rows([] if reader is None else reader(prefix))
+            left = None if not waits else f"{len(waits)} ledger row(s) still open that may hold quota or bill ({_row_names(waits)})"
+        except Exception as error:  # noqa: BLE001 - not known: not cleared
+            left = f"its resource ledger unread ({type(error).__name__}: {error})"
+        if left is None:
+            self._event(k, "old prefix torn down; the move goes on", prefix=prefix)
+            return True
+        waited = self.clock() - float(clearing.get("since") or 0)
+        if waited < CLEAR_TIMEOUT_S:
+            return False
+        relaunches = int(record.get("relaunches") or 0) + 1
+        self.log(f"fleet: ERROR: trainer island {k}: its old launch {prefix} is still not torn down "
+                 f"{waited:.0f}s after `yeto down` ({left}); the move to {member.get('gpu')} orders nothing "
+                 f"while it may hold the quota (infrastructure failure {relaunches}/{self.relaunch_budget}). "
+                 f"Check `yeto down {prefix}` on this host")
+        if relaunches >= self.relaunch_budget:
+            self.save(k, {**self._closed(record), "state": ABANDONED, "relaunches": relaunches, "clearing": None,
+                          "billing_open": f"its old launch {prefix} was not torn down: billed until removed or run down"})
+            self._event(k, "launch ended: abandoned", cause="old prefix not torn down", detail=left)
+            return False
+        self.save(k, {**record, "relaunches": relaunches,
+                      "clearing": {**clearing, "since": round(self.clock(), 3), "left": left,
+                                   "attempts": int(clearing.get("attempts") or 1) + 1}})
+        self._tear_down_old(k, prefix, member, left)
+        return False
+
+    def _left_open(self, prefix: str, ended: dict[str, Any], k: int | None = None) -> str | None:
+        """What an ended launch ``prefix`` may have left ordered (None: nothing): no run
+        record (its teardown is not known), resource ledger rows still open (an INIT sky
+        cluster, a sky storage bucket, a Modal app...), or a ledger that does not read."""
+        if ended.get("exit_code") is None:
+            return "no run record"
+        reader = getattr(self.ops, "open_resources", None)
+        if reader is None:
+            return None  # launch ops without a ledger (tests, remote ops): its own teardown is trusted
+        try:
+            rows = reader(prefix)
+        except Exception as error:  # noqa: BLE001 - not known: torn down
+            return f"its resource ledger unread ({type(error).__name__}: {error})"
+        waits, reported = split_open_rows(list(rows or ()))
+        if reported:
+            skipped = [r for r in reported if str(r.get("release_error") or "").startswith("release_skipped")]
+            note = ("the old prefix has bucket(s) left for a person to decide (release_skipped)" if skipped
+                    else "the old prefix has bucket(s) cleanup could not confirm released")
+            self.log(f"fleet: WARNING: trainer island {k}: {note}: {_row_names(reported)}; they do not block "
+                     "the move (see `yeto cleanup` / the run's resource ledger)")
+        if not waits:
+            return None
+        return f"{len(waits)} ledger row(s) still open that may hold quota or bill ({_row_names(waits)})"
 
     def _hand_back(self, k: int, record: dict[str, Any], ended: dict[str, Any]) -> None:
         """The launch handed off (:data:`HANDS_OFF_EXITS`): another launcher holds island
@@ -754,6 +890,17 @@ class LocalLaunchOps:
         from yeto import runs  # noqa: PLC0415
 
         runs.request_stop(prefix)
+
+    def open_resources(self, prefix: str) -> list[dict[str, Any]]:
+        """The rows of launch ``prefix``'s resource ledger that are not released (none
+        when it has no ledger: it ordered nothing it recorded)."""
+        from yeto.cost.ledger import ResourceLedger  # noqa: PLC0415
+
+        ledger = ResourceLedger.for_run(prefix)
+        if not ledger.path.exists():
+            return []
+        return [{"kind": r.kind, "id": r.id, "name": r.name, "release_error": r.release_error}
+                for r in ledger.open_resources()]
 
     def tear_down(self, prefix: str, why: str) -> None:
         """The launch torn down now, without waiting for it to read a STOP: ``yeto down
