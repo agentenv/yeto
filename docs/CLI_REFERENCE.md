@@ -237,6 +237,22 @@ read; 2 bad input (no store, a store without an object API here, no such island,
 island this command does not drive, a fixed roster without `--end-fleet`, a `start` of an
 island that ended otherwise or still drains).
 
+### `yeto fleet service`
+
+The systemd unit of a fleet's control plane (`--role control`: `yeto run up`) or of its
+on-site syncer (`--role syncer`, `fleet.syncer_service`). See
+[OWN_CLUSTERS.md](OWN_CLUSTERS.md), "On-site control plane".
+
+| Command | Does |
+|---|---|
+| `yeto fleet service --config F --role R --env-file E --print` | write the unit to stdout |
+| `yeto fleet service --config F --role R --env-file E --install HOST` | write the unit on HOST over SSH and run `systemctl enable --now` there |
+| `yeto fleet service-run --role R --config F` | what the unit runs, in the foreground |
+
+Options: `--remote-config`, `--python`, `--yeto-dir`, `--user`, `--workdir` (the paths on the
+service host). Exit 2: refused (a fleet that is not per-island on the store control plane, a
+syncer role without `fleet.syncer_service`, a path the unit cannot hold).
+
 ### `yeto merge`
 
 Merge a PEFT adapter into its base model and write SafeTensors shards.

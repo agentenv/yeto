@@ -21,7 +21,7 @@ from . import desired as dz
 
 def add_parser(sub: Any) -> None:
     p = sub.add_parser("fleet", help="the fleet's desired state (rollout.control_plane store): show, apply")
-    fsub = p.add_subparsers(dest="fleet_command", metavar="{show,apply,island}")
+    fsub = p.add_subparsers(dest="fleet_command", metavar="{show,apply,island,service}")
     fsub.required = True
     show = fsub.add_parser("show", help="print the newest generation of fleet/desired.json")
     show.add_argument("--config", required=True, help="the run config")
@@ -36,6 +36,9 @@ def add_parser(sub: Any) -> None:
     from yeto.rl import fleet_islands  # noqa: PLC0415 - trainer islands of a per-island fleet
 
     fleet_islands.add_parser(fsub)
+    from yeto.rl import fleet_service  # noqa: PLC0415 - the on-site control plane's systemd units
+
+    fleet_service.add_parser(fsub)
 
 
 def _store(config: str) -> Any:
@@ -100,6 +103,10 @@ def main(args: Any) -> int:
         from yeto.rl import fleet_islands  # noqa: PLC0415
 
         return fleet_islands.main(args)
+    if args.fleet_command in ("service", "service-run"):
+        from yeto.rl import fleet_service  # noqa: PLC0415
+
+        return fleet_service.main(args)
     run, store = _store(args.config)
     if args.fleet_command == "show":
         doc = store.read(args.generation)

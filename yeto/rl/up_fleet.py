@@ -400,7 +400,11 @@ def syncer_lines(plan: Any, trainer_argv: Sequence[str], syncer: dict[str, Any] 
     from yeto.rl.up_consistency import trainer_args  # noqa: PLC0415
 
     out = []
-    args = trainer_args([str(a) for a in trainer_argv])
+    service = getattr(plan, "syncer_service", None)
+    if service:  # no syncer VM: the on-site service's own machine, wherever the islands run
+        out.append(f"fleet: syncer: an on-site service on {service} (fleet.syncer_service; start it with "
+                   "`yeto fleet service --role syncer`), no syncer VM; the syncer launch only watches it")
+    args = None if service else trainer_args([str(a) for a in trainer_argv])
     try:
         specs = parse_gpu_spec(args.gpu) if args is not None and getattr(args, "gpu", None) else []
     except (ValueError, TypeError):
@@ -420,7 +424,7 @@ def syncer_lines(plan: Any, trainer_argv: Sequence[str], syncer: dict[str, Any] 
 
     price = (syncer or {}).get("usd_per_h") if isinstance(syncer, dict) else None
     if price is None:
-        placement = breakers_fleet.syncer_placement(trainer_argv)
+        placement = breakers_fleet.syncer_placement(trainer_argv, service=service)
         rate, source = breakers_fleet.syncer_rate(None, placement)
         if rate is None:
             out.append(f"fleet: syncer.usd_per_h is unset and {source}: the fleet spend counts the syncer at $0/h "
