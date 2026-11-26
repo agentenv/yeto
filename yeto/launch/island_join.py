@@ -55,6 +55,11 @@ HEALTH_TIMEOUT_S = 120.0  # the SSH call of one check (the check bounds itself a
 # XID of this boot is new (``CudaChecker`` counts the XIDs after a reboot the same way)
 JOIN_PREV: Mapping[str, Any] = {"xid": {"boot": None}}
 RATE_FRACTION = 0.5  # a job port below this fraction of the island's fastest one is refused
+XID_UNREAD = ("the kernel log does not read (dmesg restricted, no journalctl -k): add the SSH user to the adm or "
+              "systemd-journal group, or let it run dmesg with sudo")
+XID_HINT = (" (a hardware Xid in the kernel log of this boot: fix the GPU and reboot the node, a new boot starts a "
+            "new log, then add the island again)")
+_HARDWARE_XID = re.compile(r"\bXID (\d+)\b")
 
 
 @dataclass
@@ -219,7 +224,7 @@ def _hcas(node: Any, env: Mapping[str, str] | None = None) -> list[str]:
 
 # -- health ---------------------------------------------------------------------------------------
 
-def _absolute(result: Any) -> list[str]:
+def _absolute(result: Any, *, fm_read: bool = True) -> list[str]:
     """What a first check cannot see as a change but a node joining must not have: a
     volatile uncorrectable ECC count above 0, an NVSwitch node whose fabric manager is not
     active (the checker's facts)."""
@@ -228,8 +233,26 @@ def _absolute(result: Any) -> list[str]:
     out = [f"GPU {bus.get(key, key)} uncorrectable ECC {count} (volatile)"
            for key, count in sorted((facts.get("ecc") or {}).items(), key=lambda kv: str(bus.get(kv[0], kv[0])))
            if count is not None and int(count) > 0]
-    if facts.get("fabric") not in (None, "none") and facts.get("fm") != "active":  # NVSwitch GPUs: the FM runs
+    if fm_read and facts.get("fabric") not in (None, "none") and facts.get("fm") != "active":  # NVSwitch: the FM runs
         out.append(f"nvidia-fabricmanager {facts.get('fm') or 'not running'} on an NVSwitch node")
+    return out
+
+
+def _unread_parts(text: str, result: Any) -> list[str]:
+    """The parts of a whole check that the join's absolute rules need and that did not read:
+    the kernel log (no XID source: ``dmesg`` restricted and no ``journalctl -k``), the NVLink
+    fabric or the fabric manager timed out."""
+    from yeto.hw.host_probe import parse_sections  # noqa: PLC0415
+
+    out = []
+    if (result.facts or {}).get("xid_source") == "none":
+        out.append(XID_UNREAD)
+    sections = parse_sections(text)
+    for name in ("fabric", "fabricmanager"):
+        sec = sections.get(name)
+        if sec is not None and sec.rc in (124, 137):
+            tool = "nvidia-smi -q (NVLink fabric)" if name == "fabric" else "systemctl is-active nvidia-fabricmanager"
+            out.append(f"{tool} timed out")
     return out
 
 
@@ -281,37 +304,53 @@ def read_health(node: Any, *, multi: bool, ssh: Any, env: Mapping[str, str] | No
         return NodeHealth("unread", "its health check did not read ("
                           + ("; ".join(result.reasons) or "no reason given") + ")")
     ok = result.ok(multi)
-    reasons = (list(result.job_reasons(multi)) if ok is False else []) + _absolute(result)
+    unread = _unread_parts(text, result)
+    reasons = (list(result.job_reasons(multi)) if ok is False else []) + _absolute(
+        result, fm_read=not any("nvidia-fabricmanager" in part for part in unread))
     if reasons:
-        return NodeHealth("bad", "is not healthy: " + "; ".join(dict.fromkeys(reasons)))
+        hint = XID_HINT if any(_HARDWARE_XID.search(r) for r in reasons) else ""
+        return NodeHealth("bad", "is not healthy: " + "; ".join(dict.fromkeys(reasons)) + hint)
     if ok is None:  # the GPUs pass, the job's ports did not read (multi-node)
         return NodeHealth("unread", "its health check did not read (" + ("; ".join(result.reasons) or "unknown")
                           + ")")
+    if unread:  # a part the absolute rules need did not read
+        return NodeHealth("unread", f"its health check did not read ({'; '.join(unread)})")
     rates = _job_rates(text, hcas, getattr(checker, "fabric", None)) if multi else {}
     return NodeHealth("ok", rates=rates)
 
 
-def judge_rates(nodes: Sequence[Any], health: dict[str, NodeHealth]) -> None:
+def judge_rates(nodes: Sequence[Any], health: dict[str, NodeHealth], *, inventory: Sequence[Any] | None = None,
+                candidates: bool = False) -> None:
     """A multi-node island's job port rates (in place): on a node without ``min_ib_gbps``
     (its checker holds the ports to that one), a port below half the fastest job port of
-    ``nodes`` makes the node bad."""
-    fastest = max((r for n in nodes for r in (health.get(n.name) or NodeHealth("")).rates.values()), default=None)
+    the nodes of its fabric group (one group: an inventory without ``fabric_group``) makes
+    the node bad. ``candidates``: ``nodes`` are the island's candidates (a shared inventory)."""
+    by_group: dict[str, list[Any]] = {}
+    grouped = _grouped(list(nodes if inventory is None else inventory))
     for node in nodes:
-        h = health.get(node.name)
-        # a node with min_ib_gbps: its checker held its ports to it already (CudaChecker)
-        if h is None or h.state != "ok" or not h.rates or getattr(node, "min_ib_gbps", None) is not None:
-            continue
+        by_group.setdefault(str(node.fabric_group or "") if grouped else "", []).append(node)
+    whose = "candidate nodes" if candidates else "nodes"
+    for group, members in by_group.items():
+        fastest = max((r for n in members for r in (health.get(n.name) or NodeHealth("")).rates.values()),
+                      default=None)
         if fastest is None:
             continue
+        where = f" in fabric group {group}" if grouped and group else " without a fabric group" if grouped else ""
         base = float(fastest) * RATE_FRACTION
-        slow = [f"{label} rate {rate:g} < {base:g} Gb/s (half the fastest job port of the island's nodes, "
-                f"{fastest:g} Gb/s)" for label, rate in h.rates.items() if rate < base * 0.999]
-        if slow:
-            health[node.name] = NodeHealth("bad", "is not healthy: " + "; ".join(slow), h.rates)
+        for node in members:
+            h = health.get(node.name)
+            # a node with min_ib_gbps: its checker held its ports to it already (CudaChecker)
+            if h is None or h.state != "ok" or not h.rates or getattr(node, "min_ib_gbps", None) is not None:
+                continue
+            slow = [f"{label} rate {rate:g} < {base:g} Gb/s (half the fastest job port of the island's {whose}{where}, "
+                    f"{fastest:g} Gb/s)" for label, rate in h.rates.items() if rate < base * 0.999]
+            if slow:
+                health[node.name] = NodeHealth("bad", "is not healthy: " + "; ".join(slow), h.rates)
 
 
 def check_health(nodes: Sequence[Any], *, multi: bool, ssh: Any, out: JoinCheck,
-                 env: Mapping[str, str] | None = None, cache: Mapping[str, NodeHealth] | None = None) -> None:
+                 env: Mapping[str, str] | None = None, cache: Mapping[str, NodeHealth] | None = None,
+                 inventory: Sequence[Any] | None = None, candidates: bool = False) -> None:
     """The health of ``nodes`` into ``out.health`` (a node in ``cache`` is not checked again)."""
     for node in nodes:
         if node.name in out.health:
@@ -319,7 +358,7 @@ def check_health(nodes: Sequence[Any], *, multi: bool, ssh: Any, out: JoinCheck,
         cached = (cache or {}).get(node.name)
         out.health[node.name] = cached if cached is not None else read_health(node, multi=multi, ssh=ssh, env=env)
     if multi:
-        judge_rates(nodes, out.health)
+        judge_rates(nodes, out.health, inventory=inventory, candidates=candidates)
 
 
 def _health_problem(name: str, h: NodeHealth, *, force: bool, out: JoinCheck) -> str | None:
@@ -397,7 +436,9 @@ def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | No
     ``lease_store``); ``islands``: the fleet's other islands' launch prefix -> island (whose
     leases are theirs); ``inventory``: the whole inventory (default ``nodes``); ``env``: the
     island's own environment; ``force``: a check that does not read is a warning;
-    ``health``: node health already read (a recheck)."""
+    ``health``: node health already read (a recheck). With ``lease_store``, ``taken`` holds the
+    nodes of the islands whose inventory has no ``lease_store`` or another one (their leases
+    are not in this store)."""
     out = JoinCheck()
     if ssh is None:
         from .ssh_trainer_island import SshOps  # noqa: PLC0415
@@ -409,7 +450,7 @@ def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | No
                       inventory=every)
     else:
         _check_leased(nodes, need=need, run_id=run_id, lease_store=lease_store, islands=islands or {}, ssh=ssh,
-                      env=env, force=force, health=health, out=out, inventory=every)
+                      env=env, force=force, health=health, out=out, inventory=every, taken=taken or {})
     if out.refusals:
         out.nodes = []
     return out
@@ -426,7 +467,7 @@ def _check_listed(nodes: Sequence[Any], *, need: int, taken: Mapping[str, str], 
         owner = next((taken[k] for k in sorted(node_keys(node)) if k in taken), None)
         if owner:
             out.refusals.append(f"node {node.name} is island {owner}'s")
-    check_health(nodes, multi=need > 1, ssh=ssh, out=out, env=env, cache=health)
+    check_health(nodes, multi=need > 1, ssh=ssh, out=out, env=env, cache=health, inventory=inventory)
     for node in nodes:
         problem = _health_problem(node.name, out.health[node.name], force=force, out=out)
         if problem:
@@ -439,9 +480,20 @@ def _check_listed(nodes: Sequence[Any], *, need: int, taken: Mapping[str, str], 
     out.nodes = [n.name for n in nodes]
 
 
+def _owner(node: Any, taken: Mapping[str, str]) -> str | None:
+    return next((taken[k] for k in sorted(node_keys(node)) if k in taken), None)
+
+
 def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str, islands: Mapping[str, str],
-                  ssh: Any, env: Any, force: bool, health: Any, out: JoinCheck, inventory: Sequence[Any]) -> None:
-    """An inventory with ``lease_store``: ``need`` of its trainer nodes, as the launch picks them."""
+                  ssh: Any, env: Any, force: bool, health: Any, out: JoinCheck, inventory: Sequence[Any],
+                  taken: Mapping[str, str]) -> None:
+    """An inventory with ``lease_store``: ``need`` of its trainer nodes, as the launch picks them.
+
+    The launch (``lease_trainer_nodes`` / ``pick_nodes``) runs under a new holder (a new
+    run dir: a new identity, ``<prefix>-m<n>`` after a move), so no node is its own yet: it
+    places the island on the free nodes, in the inventory's order; with too few it waits,
+    and once the island's earlier incarnation has let its nodes go it places on the free
+    nodes and those. Each of these picks that fits must take healthy nodes only."""
     if len(nodes) < need:
         out.refusals.append(f"the island needs {need} trainer node(s); its inventory lists {len(nodes)} "
                             f"{[n.name for n in nodes]}")
@@ -449,11 +501,16 @@ def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: 
     holders = lease_holders(nodes, lease_store=lease_store, run_id=run_id, out=out)
     if holders is None:
         return
-    held = {n.name: why for n in nodes if (why := lease_problem(holders[n.name], run_id=run_id, islands=islands))}
-    # the launch's order: the nodes its own launch holds, then the free ones (lease_trainer_nodes)
-    ours = [n for n in nodes if n.name not in held and holders[n.name] is not None]
-    usable = ours + [n for n in nodes if n.name not in held and n not in ours]
-    check_health(usable, multi=need > 1, ssh=ssh, out=out, env=env, cache=health)
+    held: dict[str, str] = {}
+    for node in nodes:
+        owner = _owner(node, taken)
+        why = f"is island {owner}'s" if owner else lease_problem(holders[node.name], run_id=run_id, islands=islands)
+        if why:
+            held[node.name] = why
+    usable = [n for n in nodes if n.name not in held]  # free, or held by the island's earlier incarnation
+    free = [n for n in usable if holders[n.name] is None]
+    check_health(usable, multi=need > 1, ssh=ssh, out=out, env=env, cache=health, inventory=inventory,
+                 candidates=True)
     sick = {}
     for node in usable:
         problem = _health_problem(node.name, out.health[node.name], force=force, out=out)
@@ -467,7 +524,7 @@ def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: 
 
         out.notes.append(f"fabric: {HINT}")
     try:
-        chosen = _pick_placement([n for n in usable if n.name not in sick], need, inventory)
+        _pick_placement([n for n in usable if n.name not in sick], need, inventory)
     except Exception as error:  # noqa: BLE001 - no fit (PlacementError), or the check that cannot run
         fit = type(error).__name__ == "PlacementError"
         out.refusals += left_out + [(f"fabric: {error}" if grouped else
@@ -475,22 +532,32 @@ def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: 
                                      f"healthy, {need} needed") if fit else
                                     f"fabric: the placement check could not run ({type(error).__name__}: {error})"]
         return
-    try:  # the launch's own pick (leases only): must not take a node found unhealthy
-        launch = _pick_placement(usable, need, inventory)
-    except Exception:  # noqa: BLE001 - it fits without the sick nodes, so it fits with them
-        launch = chosen
-    if bad := [n.name for n in launch if n.name in sick]:
+    picks: list[list[Any]] = []  # the launch's picks: the free nodes; then with its earlier incarnation's
+    for offered in ([free, usable] if len(free) < len(usable) else [free]):
+        try:
+            picks.append(_pick_placement(offered, need, inventory))
+        except Exception:  # noqa: BLE001 - too few of them: the launch waits for the next ones
+            continue
+    bad = list(dict.fromkeys(n.name for pick in picks for n in pick if n.name in sick))
+    if bad:
         out.refusals += [sick[name] for name in bad] + [
             f"the island's launch picks its nodes by their leases and would take {', '.join(bad)}; take "
             "such a node out of the inventory's trainer nodes (roles) or clear its fault"]
         return
     out.notes += [f"left out: {why}" for why in left_out]
-    out.nodes = [n.name for n in launch]
+    out.nodes = [n.name for n in picks[0]]
+    if len(picks) > 1 and [n.name for n in picks[1]] != out.nodes:
+        out.notes.append(f"the island takes {names(out.nodes)} (free now); were they taken meanwhile, its launch "
+                         f"waits for its earlier incarnation's nodes and takes {names(n.name for n in picks[1])} "
+                         "(checked too)")
 
 
-def taken_nodes(doc: Mapping[str, Any], *, other_than: str, fleet_argv: Sequence[str]) -> dict[str, str]:
+def taken_nodes(doc: Mapping[str, Any], *, other_than: str, fleet_argv: Sequence[str],
+                lease_store: str | None = None) -> dict[str, str]:
     """Node key (:func:`node_keys`) -> island, for the ``ssh:`` trainer islands of the desired
-    state other than ``other_than`` (their inventories' trainer nodes)."""
+    state other than ``other_than`` (their inventories' trainer nodes). ``lease_store``: the
+    new island's; an island whose inventory has the same one is left out (its leases say
+    which nodes it holds)."""
     from yeto.launch.pool import desired as dz  # noqa: PLC0415
 
     from .node_inventory import island_nodes as role_nodes  # noqa: PLC0415
@@ -504,10 +571,12 @@ def taken_nodes(doc: Mapping[str, Any], *, other_than: str, fleet_argv: Sequence
         if path is None:
             continue
         try:
-            nodes = role_nodes(load_inventory(path), "trainer")
+            listed = load_inventory(path)
         except Exception as error:  # noqa: BLE001 - its nodes unknown: said, not taken as free
             raise ValueError(f"island {name}'s inventory {path} does not read ({error})") from None
-        for node in nodes:
+        if lease_store is not None and getattr(listed, "lease_store", None) == lease_store:
+            continue
+        for node in role_nodes(listed, "trainer"):
             for key in node_keys(node):
                 out.setdefault(key, name)
     return out
@@ -523,9 +592,10 @@ def fleet_prefixes(doc: Mapping[str, Any], *, other_than: str) -> dict[str, str]
 
 def check_member(member: Mapping[str, Any], doc: Mapping[str, Any], *, fleet_argv: Sequence[str], run_id: str,
                  ssh: Any = None, log: Callable[[str], None] | None = None, force: bool = False,
-                 health: Mapping[str, NodeHealth] | None = None) -> JoinCheck:
+                 health: Mapping[str, NodeHealth] | None = None, seen: Iterable[str] = ()) -> JoinCheck:
     """:func:`check` of an island's trainer member (added, or moved) against the desired
-    state ``doc`` (its other islands)."""
+    state ``doc`` (its other islands). ``seen``: notes and warnings printed already (a
+    recheck prints only the new ones)."""
     say = log or (lambda m: print(m, file=sys.stderr))
     argv = [*fleet_argv, *(member.get("argv") or ())]
     from .node_inventory import lease_store_of, load_inventory  # noqa: PLC0415
@@ -535,13 +605,16 @@ def check_member(member: Mapping[str, Any], doc: Mapping[str, Any], *, fleet_arg
     store = lease_store_of(inventory)
     name = str(member["name"])
     result = check(nodes, need=need, run_id=run_id, lease_store=store,
-                   taken=None if store else taken_nodes(doc, other_than=name, fleet_argv=fleet_argv),
+                   taken=taken_nodes(doc, other_than=name, fleet_argv=fleet_argv, lease_store=store),
                    islands=fleet_prefixes(doc, other_than=name), ssh=ssh, inventory=inventory,
                    env=island_env_of(argv), force=force, health=health)
+    shown = set(seen)
     for note in result.notes:
-        say(f"fleet island: note: island {name}: {note}")
+        if note not in shown:
+            say(f"fleet island: note: island {name}: {note}")
     for warning in result.warnings:
-        say(f"fleet island: WARNING: island {name}: {warning}")
+        if warning not in shown:
+            say(f"fleet island: WARNING: island {name}: {warning}")
     return result
 
 

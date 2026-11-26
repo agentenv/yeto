@@ -102,6 +102,10 @@ def test_the_refusal_the_section_shows_is_the_command_s(tmp_path):
 def test_the_section_states_the_join_rules_of_the_code():
     text = section()
     assert "half the fastest" in text and ij.RATE_FRACTION == 0.5
+    from yeto.launch.ssh_trainer_island import DEFAULT_NODE_LEASE_WAIT_S
+
+    assert f"({DEFAULT_NODE_LEASE_WAIT_S:.0f} s by default)" in text
     for word in ("`min_ib_gbps`", "`--force`", "`--island-env`", "`<prefix>-m<n>/trainer`", "exit 3",
-                 "yeto fleet island move --gpu ssh:"):
+                 "yeto fleet island move --gpu ssh:", "`adm` or `systemd-journal`", "NVL72", "same fabric group",
+                 "`--rl-node-lease-wait-s`"):
         assert word in text, word

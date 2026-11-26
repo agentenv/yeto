@@ -96,7 +96,7 @@ def test_healthy_nodes_join_with_one_bounded_check_each(tmp_path):
 
 
 @pytest.mark.parametrize(("text", "why"), [
-    (XID_79, "GPU 5 XID 79"),
+    (XID_79, "GPU 5 XID 79" + ij.XID_HINT),
     (ECC_5, "GPU 2 uncorrectable ECC 5 (volatile)"),
     (FM_DOWN, "nvidia-fabricmanager inactive on an NVSwitch node"),
     (node_text(gpus=(0, gpus_text(n=7))), "7 of 8 GPUs visible"),
@@ -158,7 +158,7 @@ def test_ib_tools_unread_refuse_a_multi_node_island_unless_forced(tmp_path):
 
 def test_force_never_lets_an_unhealthy_node_join(tmp_path):
     assert _check(_nodes(tmp_path), Ssh({"b300-5": XID_79}), force=True).refusals == [
-        "node b300-5 is not healthy: GPU 5 XID 79"]
+        "node b300-5 is not healthy: GPU 5 XID 79" + ij.XID_HINT]
 
 
 def test_a_node_that_does_not_answer_is_refused(tmp_path):
@@ -311,7 +311,7 @@ def test_a_shared_inventory_with_one_node_leased_and_one_unhealthy_is_refused(tm
     assert out.refusals == ["node b300-0 is island north's (its launch holds the lease)",
                             "node b300-1 is island north's (its launch holds the lease)",
                             "node b300-2 is leased to run other-run",
-                            "node b300-3 is not healthy: GPU 5 XID 79",
+                            "node b300-3 is not healthy: GPU 5 XID 79" + ij.XID_HINT,
                             "0 of 4 trainer node(s) are free and healthy, 2 needed"]
 
 
@@ -331,8 +331,137 @@ def test_an_unhealthy_node_the_launch_would_pick_by_its_leases_is_refused(tmp_pa
     store, nodes = _shared(tmp_path)
     _hold(store, nodes[0], "other-run/trainer")
     out = _check(nodes, Ssh({"b300-1": XID_79}), lease_store=store)
-    assert out.refusals[0] == "node b300-1 is not healthy: GPU 5 XID 79"
+    assert out.refusals[0] == "node b300-1 is not healthy: GPU 5 XID 79" + ij.XID_HINT
     assert out.refusals[1].startswith("the island's launch picks its nodes by their leases and would take b300-1")
+
+
+def test_the_launch_s_pick_after_a_move_takes_no_node_as_its_own(tmp_path):
+    """After a move the launch runs as ``r-i2-m1/trainer@<new identity>``: the nodes the island's
+    earlier incarnation (``r-i2``) holds are not its own, so it takes the free ones in the
+    inventory's order, as the real ``pick_nodes`` does, and the check judges that pick."""
+    from yeto.launch.node_lease import pick_nodes
+
+    store = str(tmp_path / "leases")
+    names = ["c-1", "d-2", "a-3", "b-4"]
+    nodes = load_inventory(_inventory(tmp_path / "inv.yaml", names, lease_store=store))
+    for node in nodes[2:]:
+        _hold(store, node, "r-i2/trainer")
+    launch = NodeLeases(store, "r-i2-m1/trainer", identity="new")
+    picked = pick_nodes(list(nodes), 2, launch, wait_s=0, sleep=lambda s: None)
+    assert [n.name for n in picked] == ["c-1", "d-2"]
+    for node in picked:
+        launch.release(node)
+    out = _check(nodes, Ssh({"c-1": XID_79}), lease_store=store)
+    assert out.refusals[0] == "node c-1 is not healthy: GPU 5 XID 79" + ij.XID_HINT
+    assert "would take c-1" in out.refusals[-1]
+    ok = _check(nodes, Ssh({"a-3": XID_79}), lease_store=store)  # neither pick takes a-3
+    assert ok.ok and ok.nodes == ["c-1", "d-2"]
+    _hold(store, nodes[1], "other-run/trainer")  # one free node: the launch waits for the earlier incarnation's
+    late = _check(nodes, Ssh({"a-3": XID_79}), lease_store=store)
+    assert late.refusals[0].startswith("node a-3 is not healthy") and "would take a-3" in late.refusals[-1]
+    fine = _check(nodes, Ssh(), lease_store=store)
+    assert fine.ok and fine.nodes == ["c-1", "a-3"]
+
+
+def test_the_free_nodes_are_judged_even_when_the_earlier_incarnation_s_come_first(tmp_path):
+    """Inventory order [a-1, b-2 (the earlier incarnation's), c-3, d-4 (free)]: the launch takes
+    c-3 and d-4 while they are free; an unhealthy c-3 refuses although a-1 and b-2 are fine."""
+    store = str(tmp_path / "leases")
+    nodes = load_inventory(_inventory(tmp_path / "inv.yaml", ["a-1", "b-2", "c-3", "d-4"], lease_store=store))
+    for node in nodes[:2]:
+        _hold(store, node, "r-i2/trainer")
+    out = _check(nodes, Ssh({"c-3": XID_79}), lease_store=store)
+    assert not out.ok and "would take c-3" in out.refusals[-1]
+    ok = _check(nodes, Ssh(), lease_store=store)
+    assert ok.nodes == ["c-3", "d-4"]
+    assert ("the island takes c-3, d-4 (free now); were they taken meanwhile, its launch waits for its earlier "
+            "incarnation's nodes and takes a-1, b-2 (checked too)") in ok.notes
+
+
+def test_a_shared_inventory_also_leaves_out_the_nodes_of_islands_on_other_lease_stores(tmp_path):
+    store, nodes = _shared(tmp_path)
+    taken = {k: "north" for n in nodes[:2] for k in ij.node_keys(n)}  # an island whose inventory has no store
+    out = _check(nodes, Ssh(), lease_store=store, taken=taken)
+    assert out.ok and out.nodes == ["b300-2", "b300-3"]
+    assert "left out: node b300-0 is island north's" in out.notes
+    out = _check(nodes, Ssh({"b300-3": XID_79}), lease_store=store, taken=taken)
+    assert out.refusals[:3] == ["node b300-0 is island north's", "node b300-1 is island north's",
+                                "node b300-3 is not healthy: GPU 5 XID 79" + ij.XID_HINT]
+
+
+def test_min_ib_gbps_without_nccl_ib_hca_holds_the_fabric_s_ports(tmp_path):
+    """No NCCL_IB_HCA on an ib fabric: NCCL takes the InfiniBand ports; min_ib_gbps holds each
+    active one (the checker's rule, the same on a running island)."""
+    nodes = _nodes(tmp_path, env=None, min_ib=400)
+    out = _check(nodes, Ssh({"b300-4": SLOW, "b300-5": SLOW}))
+    assert [r.split(": ", 1)[0] for r in out.refusals] == ["node b300-4 is not healthy", "node b300-5 is not healthy"]
+    assert "mlx5_0 rate 100 < 400 Gb/s" in out.refusals[0]
+    assert _check(nodes, Ssh()).ok
+    checker = node_health.checker_for("cuda", expect_gpus=8, min_ib_gbps=400, fabric="ib")
+    assert "mlx5_7 rate 100 < 400 Gb/s" in checker.parse(SLOW, [], None).reasons
+    assert checker.parse(SLOW, [], None).ok_single is True  # a single-node job: its GPUs only
+
+
+def test_a_rate_of_exactly_half_the_fastest_passes(tmp_path):
+    half = node_text(ibstat=(0, ibstat_text(rate=200)))
+    assert _check(_nodes(tmp_path), Ssh({"b300-5": half})).ok
+    below = node_text(ibstat=(0, ibstat_text(rate=199)))
+    assert not _check(_nodes(tmp_path), Ssh({"b300-5": below})).ok
+
+
+def test_the_relative_rate_compares_nodes_of_one_fabric_group_only(tmp_path):
+    store, nodes = _shared(tmp_path, groups={"b300-0": "a", "b300-1": "a", "b300-2": "b", "b300-3": "b"})
+    slow_b = {"b300-2": SLOW, "b300-3": SLOW}  # group b runs at 100 Gb/s, group a at 400: not compared
+    out = _check(nodes, Ssh(slow_b), lease_store=store)
+    assert out.ok and out.nodes == ["b300-0", "b300-1"]
+    out = _check(nodes, Ssh({"b300-3": SLOW}), lease_store=store)
+    assert "left out: node b300-3 is not healthy: mlx5_0 rate 100 < 200 Gb/s (half the fastest job port of the " \
+        "island's candidate nodes in fabric group b, 400 Gb/s)" in "; ".join(out.notes)
+
+
+def test_one_uncorrectable_ecc_error_refuses(tmp_path):
+    out = _check(_nodes(tmp_path), Ssh({"b300-4": node_text(gpus=(0, gpus_text(ecc={0: 1})))}))
+    assert out.refusals == ["node b300-4 is not healthy: GPU 0 uncorrectable ECC 1 (volatile)"]
+
+
+@pytest.mark.parametrize(("over", "why"), [
+    ({"xid": (0, xid_text(source="none"))}, ij.XID_UNREAD),
+    ({"fabric": (124, "")}, "nvidia-smi -q (NVLink fabric) timed out"),
+    ({"fabricmanager": (124, "")}, "systemctl is-active nvidia-fabricmanager timed out"),
+])
+def test_a_kernel_log_or_fabric_that_does_not_read_refuses_unless_forced(tmp_path, over, why):
+    nodes = _nodes(tmp_path)
+    out = _check(nodes, Ssh({"b300-4": node_text(**over)}))
+    assert out.refusals == [f"node b300-4: its health check did not read ({why})"]
+    assert _check(nodes, Ssh({"b300-4": node_text(**over)}), force=True).ok
+
+
+def test_the_island_s_inventory_wins_over_the_fleet_s(tmp_path):
+    fleet_inv = _inventory(tmp_path / "fleet.yaml", ["b300-0", "b300-1"])
+    island_inv = _inventory(tmp_path / "island.yaml", ["b300-4", "b300-5"])
+    member = {"name": "north", "gpu": GPU, "argv": ["--rl-node-inventory", str(island_inv)]}
+    ssh = Ssh()
+    out = ij.check_member(member, {"members": []}, fleet_argv=["--rl-node-inventory", str(fleet_inv)],
+                          run_id="r-i2", ssh=ssh, log=lambda m: None)
+    assert out.ok and out.nodes == ["b300-4", "b300-5"] and ssh.calls == ["b300-4", "b300-5"]
+
+
+def test_a_recheck_prints_only_what_the_first_check_did_not(tmp_path):
+    inventory = _inventory(tmp_path / "island.yaml", ["b300-4", "b300-5"])
+    member = {"name": "north", "gpu": GPU, "argv": ["--rl-node-inventory", str(inventory)]}
+    lines: list[str] = []
+    first = ij.check_member(member, {"members": []}, fleet_argv=[], run_id="r-i2", ssh=Ssh({"b300-4": BUSY}),
+                            force=True, log=lines.append)
+    assert any("WARNING" in line for line in lines) and any("note:" in line for line in lines)
+    lines.clear()
+    ij.check_member(member, {"members": []}, fleet_argv=[], run_id="r-i2", ssh=Ssh(), force=True,
+                    log=lines.append, health=first.health, seen=[*first.notes, *first.warnings])
+    assert lines == []
+    ij.check_member(member, {"members": []}, fleet_argv=[], run_id="r-i2", ssh=Ssh({"b300-5": BUSY}), force=True,
+                    log=lines.append, seen=[*first.notes, *first.warnings])
+    assert lines == ["fleet island: WARNING: island north: node b300-5: its health check did not read (node health "
+                     "check skipped: the previous one still runs (a tool stuck on the node)); --force: it joins "
+                     "unchecked"]
 
 
 # -- yeto fleet island add / move -----------------------------------------------------------------
@@ -497,6 +626,35 @@ def test_an_id_claimed_meanwhile_checks_the_leases_again_under_the_new_prefix(fl
     assert ("island south's nodes cannot join (checked again on the desired state now): node b300-7 is island "
             "north's (its launch holds the lease)") in err
     assert "south" not in {m["name"] for m in store.read()["members"]}
+
+
+@pytest.mark.parametrize("north_store", [None, "l1"])
+def test_an_island_on_another_lease_store_or_none_keeps_its_nodes(fleet_store, wired, tmp_path, capsys,  # noqa: F811
+                                                                   north_store):
+    """North's inventory has no lease_store (or another one): its nodes are not in south's
+    lease store, so south's shared inventory leaves them out by the inventory, not by leases."""
+    cfg, _objects, _store, run_cli, samplers = fleet_store
+    south_samplers = samplers.parent / "south.samplers.json"
+    south_samplers.write_text(json.dumps([dict(cfg["islands"][1]["samplers"][0], name="sglang-south")]))
+    north = _inventory(tmp_path / "north.yaml", ["b300-4", "b300-5"],
+                       lease_store=north_store and str(tmp_path / north_store))
+    assert _add(run_cli, samplers, north) == 0
+    south = _inventory(tmp_path / "south.yaml", ["b300-4", "b300-5", "b300-6"], lease_store=str(tmp_path / "l2"))
+    capsys.readouterr()
+    assert _add(run_cli, south_samplers, south, name="south") == 2
+    assert "node b300-4 is island north's; node b300-5 is island north's" in capsys.readouterr().err
+
+
+def test_islands_on_one_lease_store_are_judged_by_their_leases(fleet_store, wired, tmp_path):  # noqa: F811
+    """North (not launched yet) holds no lease: south may list its nodes; the launches then
+    wait for each other's leases (docs/OWN_CLUSTERS.md: the window of two adds)."""
+    cfg, _objects, _store, run_cli, samplers = fleet_store
+    south_samplers = samplers.parent / "south.samplers.json"
+    south_samplers.write_text(json.dumps([dict(cfg["islands"][1]["samplers"][0], name="sglang-south")]))
+    store = str(tmp_path / "l2")
+    assert _add(run_cli, samplers, _inventory(tmp_path / "north.yaml", ["b300-4", "b300-5"], lease_store=store)) == 0
+    south = _inventory(tmp_path / "south.yaml", ["b300-4", "b300-5", "b300-6"], lease_store=store)
+    assert _add(run_cli, south_samplers, south, name="south") == 0
 
 
 def test_move_to_ssh_runs_the_same_join_checks(fleet_store, wired, tmp_path, capsys):  # noqa: F811
