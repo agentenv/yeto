@@ -1573,3 +1573,20 @@ def test_the_pool_under_another_identity_fails_the_order(tmp_path):
     with pytest.raises(sp.SshSamplerError, match="lease-identity.json.*yeto cleanup --run pool-b"):
         again.order(0)
     assert [n for n, _ in events] == ["node_lease_same_run"]
+
+
+def test_the_renewal_cadence_follows_the_monotonic_clock():
+    """L2: a wall clock step neither delays a renewal nor triggers one; the monotonic
+    clock alone says when a lease is due."""
+    objects, wall, mono = _objects(), Clock(), Clock()
+    mine = NodeLeases(STORE, "run1/trainer", objects=objects, clock=wall, monotonic=mono)
+    assert mine.acquire("b300-0").ok
+    renewed = []
+    lock = mine._locks["b300-0"]  # noqa: SLF001
+    real = lock.renew
+    lock.renew = lambda: renewed.append(mono.t) or real()
+    wall.t -= 3600  # the wall clock steps back an hour
+    mono.t += mine.renew_every_s
+    assert mine.renew_due() == [] and renewed == [mono.t]  # due by the monotonic clock
+    wall.t += 7200  # a step forward: nothing is due yet
+    assert mine.renew_due() == [] and len(renewed) == 1
