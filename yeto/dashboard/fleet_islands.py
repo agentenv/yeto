@@ -148,6 +148,10 @@ def plan_candidates(paths: list[str], max_up: int = 3) -> list[str]:
     return out
 
 
+# a lane's newest release (yeto.rl.engine.policy_release: ``policy-releases/`` + ``LATEST``)
+LANE_LATEST = "policy-releases/LATEST.json"
+
+
 def _json(objects: Any, key: str) -> Any:
     try:
         data = objects.read(key)
@@ -606,7 +610,30 @@ class PlanFile:
     def pump_tapes(self, reducer) -> int:
         self.pump_trainer_spend(reducer)
         self._add_lanes(reducer)
+        self.pump_lane_releases(reducer)
         return sum(t.pump(reducer) for t in self.tapes())
+
+    def pump_lane_releases(self, reducer) -> bool:
+        """Each island store lane's newest policy release (``<lane>/policy-releases/LATEST.json``,
+        what its samplers follow) into ``reducer.lane_releases`` (``{lane: {"version",
+        "released_at"}}``): a fleet's releases live on its lanes, not at the store's root, and
+        a trainer whose tape is not here still released there. Read at most every
+        ``PLAN_POLL_S``; False when not read."""
+        if self.objects is None or not self.substores:
+            return False
+        tick = self.clock()
+        if getattr(self, "_next_lanes", None) is not None and tick < self._next_lanes:
+            return False
+        self._next_lanes = tick + self.interval_s
+        out = {}
+        for sub in self.substores:
+            doc = _json(self.objects, f"{sub}/{LANE_LATEST}")
+            if isinstance(doc, dict) and isinstance(doc.get("version"), int) and not isinstance(doc["version"], bool):
+                at = doc.get("released_at")
+                out[sub] = {"version": doc["version"],
+                            "released_at": float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None}
+        reducer.lane_releases = out
+        return True
 
     def pump_trainer_spend(self, reducer, now: float | None = None) -> bool:
         """A fleet launched island by island: each trainer island's spend from its launch

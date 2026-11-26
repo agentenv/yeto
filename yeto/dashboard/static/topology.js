@@ -185,10 +185,12 @@ function paint(){
     if(red){var g5=t.flows.filter(function(f){return f.k==="g"&&L.idx[f.s]===k&&f.t>t.now-300}).reduce(function(a,f){return a+(f.m||1)},0);cn.textContent=g5+" groups / 5 min"}});
   var b=t.buffer||{},rl=t.last_release,f=fin(b.backlog)?Math.min(1,b.backlog/Math.max(24,b.backlog)):0;
   L.r2.ring.style.stroke=C.traj;L.r2.ring.setAttribute("stroke-dasharray",(L.r2.C2*f).toFixed(1)+" "+L.r2.C2.toFixed(1));
-  L.r2.lat.textContent=fin(t.latest)?"LATEST v"+t.latest:"no release";
+  // a fleet whose releases live on its island lanes (trainer<k>/policy-releases/): each lane's newest
+  var ln=t.lanes||{},lk=Object.keys(ln),lv=lk.map(function(k){return ln[k]}),lanes=!fin(t.latest)&&lk.length>0;
+  L.r2.lat.textContent=fin(t.latest)?"LATEST v"+t.latest:lanes?(Math.min.apply(null,lv)===Math.max.apply(null,lv)?"LATEST v"+lv[0]:"v"+Math.min.apply(null,lv)+"–v"+Math.max.apply(null,lv)):"no release";
   L.r2.info[0].textContent=fin(b.backlog)?"buffer "+Math.round(b.backlog)+" groups":"buffer n/a";
   L.r2.info[1].textContent=fin(b.written)?"written "+Math.round(b.written)+(fin(b.read)?" − read "+Math.round(b.read):""):"";
-  L.r2.info[2].textContent=rl?(L.r2.narrow?"":"last release ")+(rl.kind||"")+" "+bytes(rl.bytes)+" · "+dur(tn-rl.ts)+" ago":"no release yet";
+  L.r2.info[2].textContent=rl?(L.r2.narrow?"":"last release ")+(rl.kind||"")+" "+bytes(rl.bytes)+" · "+dur(tn-rl.ts)+" ago":lanes?(L.r2.narrow?"lanes "+lv.map(function(v){return "v"+v}).join(" "):lk.map(function(k){return k+"/ v"+ln[k]}).join(" · ")):"no release yet";
   L.trc.forEach(function(o,k){var tr=L.trs[k];
     // the round the "Islands now" table shows: the trainer's last round record
     var rr=(((V||{}).islands||{})[tr.id]||{}).rounds||[],lr=null;for(var i=rr.length-1;i>=0;i--)if(fin(rr[i].ts)&&rr[i].round!=null){lr=rr[i].round;break}

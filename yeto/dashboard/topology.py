@@ -247,6 +247,9 @@ def view(reducer, cards: list[dict], now: float) -> dict | None:
         "store": (reducer.store_status() or {}).get("uri") if callable(reducer.store_status) else None,
         "flows": flows,
     }
+    lanes = getattr(reducer, "lane_releases", None)
+    if lanes:  # a fleet: each island lane's newest release (fleet_islands.PlanFile.pump_lane_releases)
+        out["lanes"] = {k: v["version"] for k, v in sorted(lanes.items())}
     if diloco is not None:
         out["kind"] = diloco["kind"]
         out["diloco"] = diloco
