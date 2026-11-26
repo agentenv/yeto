@@ -106,6 +106,38 @@ def test_the_island_record_s_mark_wins_over_the_events(tmp_path):
     assert "straggler" not in out["texts"] and "straggler" not in out["nodes"]
 
 
+def test_the_controller_s_mark_reaches_the_card_through_the_island_records(tmp_path):
+    """The production path: the controller writes the mark to the island's record in the run
+    store, ``read_fleet_state`` reads it back (``_trainer_records``) and the card shows it."""
+    from test_island_straggler import _controller, _join, _step
+
+    from yeto.dashboard import fleet_islands
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    ctl, _ops, _store, tape, _log = _controller(tmp_path)
+    tape.pending += [_join(0), _join(1), _step(1, [0, 1], fragments=1), _step(2, [0], fragments=1, absent=[1])]
+    ctl._poll_stragglers()  # island 1 missed one cycle: reported, its record carries the mark
+
+    def card_of():  # a fresh read of the run store, as the dashboard's poll does
+        r = _reducer()  # no island_straggler event: only the record can tell
+        assert r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(tmp_path / "store"))))
+        return r, _cards(r)["1"]
+
+    r, card = card_of()
+    mark = card["island_now"]["straggler"]
+    assert mark["action"] == st.WAIT and mark["missed_cycles"] == 1 and mark["last_merged_step"] == 1
+    assert mark["newest_step"] == 2 and mark["absent"] is True and isinstance(mark["at"], float)
+    assert (_cards(r)["0"]["island_now"] or {}).get("straggler") is None  # island 0: no mark
+    out = _smoke(tmp_path / "flagged", r)
+    assert out["nodes"].count('<span class="wn">straggler</span>') == 1
+    tape.pending.append(_step(3, [0, 1], fragments=1))
+    ctl._poll_stragglers()  # a push of it is merged again: cleared in its record
+    r, card = card_of()
+    assert card["island_now"]["straggler"] is None
+    out = _smoke(tmp_path / "cleared", r)
+    assert "straggler" not in out["texts"] and "straggler" not in out["nodes"]
+
+
 def test_the_event_stream_shows_the_straggler_events(tmp_path):
     end = fleet_reducer().max_ts  # the newest events: the stream shows the latest 15
     events = _smoke(tmp_path, _reducer(_flagged(at=end + 10), _cleared(at=end + 20)))["events"]

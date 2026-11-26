@@ -323,8 +323,20 @@ def _trainer_records(objects: Any, learners: Any = None) -> dict[int, dict]:
                   "started_at": _f(launch.get("started_at")), "closed_at": _f(launch.get("closed_at")),
                   "down_at": _f(launch.get("down_at")), "name": _str(launch.get("name")),
                   "moving_to": _str(launch.get("moving_to")),
-                  "last_exit": {"code": _int(ended.get("exit_code")), "detail": _str(ended.get("detail"))} if ended else None}
+                  "last_exit": {"code": _int(ended.get("exit_code")), "detail": _str(ended.get("detail"))} if ended else None,
+                  "straggler": _straggler(life.get("straggler"))}
     return out
+
+
+def _straggler(mark: Any) -> dict | None:
+    """The controller's straggler mark in an island's record (``yeto.launch.island_straggler``,
+    written by ``FleetController._island_straggler``; None once cleared)."""
+    if not isinstance(mark, dict):
+        return None
+    return {**{k: _int(mark.get(k)) for k in ("missed_cycles", "merges", "fragments", "cycles", "newest_step",
+                                              "last_merged_step")},
+            "action": _str(mark.get("action")), "reason": _str(mark.get("reason")),
+            "absent": mark.get("absent") is True, "at": _f(mark.get("at"))}
 
 
 def _phase(life: str | None) -> str:
