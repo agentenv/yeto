@@ -538,6 +538,9 @@ class NodeState:
     pulled: bool = True
     engine: str = "docker"  # the container engine whose image root and pull are checked
     sudo: bool = False  # the engine runs as sudo -n <engine> (a pool's container.sudo: its rootful store)
+    # the node takes part by its profile's container engine, whatever its runtime (yeto image adopt);
+    # False: the preflight's own rule, the nodes of runtime docker
+    by_engine: bool = False
 
     @property
     def name(self) -> str:
@@ -722,7 +725,7 @@ def host_checks(state: NodeState, req: Requirements, *, multi: bool, image: str 
                 add("disk", PASS, f"{free:.0f} GiB free: {where}", free_gib=free)
         info = parse_docker_info(h["docker"].text) if _ok(h.get("docker")) else None
         image_roots = {}
-        if info is not None and node.runtime == "docker":
+        if info is not None and (state.engine == "docker" if state.by_engine else node.runtime == "docker"):
             # the containerd image store (Docker 29 default) keeps images and container layers
             # under /var/lib/containerd, which does not follow docker's data-root
             snap = docker_snapshotter(info)
@@ -1117,14 +1120,19 @@ class ClusterPreflight:
                  req: Requirements | None = None, steps: Steps | None = None, out_dir: Path | None = None,
                  log: Callable[[str], None] = lambda m: print(m, file=sys.stderr, flush=True),
                  clock: Callable[[], float] = time.time, max_parallel: int = 32,
-                 inventory: Sequence[Node] | None = None, engine: str = "docker", sudo: bool = False) -> None:
+                 inventory: Sequence[Node] | None = None, engine: str = "docker", sudo: bool = False,
+                 by_engine: bool = False) -> None:
         """``engine``: the container engine whose image root the host probe checks and
         that :meth:`pull` pulls with (``docker``, the trainer's; ``podman`` for
         ``yeto image adopt`` on podman nodes); ``sudo``: it runs as ``sudo -n <engine>``
-        (an ssh sampler pool's ``container.sudo``: the rootful store)."""
+        (an ssh sampler pool's ``container.sudo``: the rootful store); ``by_engine``: the
+        nodes were chosen by their container engine (``yeto image adopt``): every one is
+        pulled and has its engine's image root checked, whatever its ``runtime`` (default:
+        the preflight's rule, the nodes of ``runtime: docker``)."""
         self.nodes = list(nodes)
         self.engine = engine
         self.sudo = bool(sudo)
+        self.by_engine = bool(by_engine)
         self.inventory = list(inventory) if inventory is not None else None  # decides "grouped"
         # nodes, or node pairs, at once. At least 2: the two ends of a pair (ib_write_bw
         # server and client, the two NCCL ranks) must run together, or the server waits
@@ -1140,7 +1148,7 @@ class ClusterPreflight:
         self.log = log
         self.clock = clock
         self.multi = len(self.nodes) > 1
-        self.states = [NodeState(n, engine=engine, sudo=self.sudo) for n in self.nodes]
+        self.states = [NodeState(n, engine=engine, sudo=self.sudo, by_engine=self.by_engine) for n in self.nodes]
 
     # -- helpers
     def _raw(self, step: str, name: str, text: str) -> None:
@@ -1272,7 +1280,8 @@ class ClusterPreflight:
     def _pull(self, live: Sequence[NodeState]) -> list[Check]:
         engine, command = self.engine, engine_command(self.engine, self.sudo)
         # docker: the nodes that run docker (the trainer's); another engine: every node it was asked for
-        docker = [s for s in live if s.node.runtime == "docker"] if engine == "docker" else list(live)
+        docker = ([s for s in live if s.node.runtime == "docker"] if engine == "docker" and not self.by_engine
+                  else list(live))
         self.log(f"[preflight] {command} pull on {len(docker)} node(s)")
 
         def one(state: NodeState) -> Check:

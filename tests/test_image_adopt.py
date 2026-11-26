@@ -320,9 +320,62 @@ def test_the_trainer_floor_still_applies_to_a_known_trainer_image(tmp_path):
     facts = ia.parse_probe(probe_out(arch_list=["sm_80", "sm_90"]))
     problems, _, _ = ia.fit_problems(request([a100], tmp_path), ref, facts, "miles")
     assert len(problems) == 1 and "node b300-0: trainer image" in problems[0] and "sm90+" in problems[0]
-    lifted = dataclasses.replace(request([a100], tmp_path), attention_backend="flash")
+    lifted = dataclasses.replace(request([a100], tmp_path), attention_backend="unfused")
     problems, warnings, _ = ia.fit_problems(lifted, ref, facts, "miles")
-    assert problems == [] and "the flash attention backend takes another path" in warnings[0]
+    assert problems == [] and "the unfused attention backend takes another path" in warnings[0]
+    flash = dataclasses.replace(request([a100], tmp_path), attention_backend="flash")
+    problems, warnings, _ = ia.fit_problems(flash, ref, facts, "miles")  # flash's own floor, not the lift
+    assert len(problems) == 1 and "flash attention needs sm90+ cards; on A100-80GB (sm80)" in problems[0]
+    assert warnings == []
+
+
+A10G_FACTS = probe_out(arch_list=["sm_80", "sm_86", "sm_90", "sm_100", "sm_103"],
+                       packages={**MILES_FACTS["packages"], "vllm": "0.11.0"})
+
+
+@pytest.mark.parametrize("card, backend, role, refused", [
+    ("A10G", "flash", "trainer", True),      # sm86: flash's backward fails (the rehearsal)
+    ("L40S", "flash", "trainer", True),      # sm89: still below sm90
+    ("H100", "flash", "trainer", False),     # sm90: the floor itself
+    ("B300", "flash", "trainer", False),     # sm103
+    ("A10G", "unfused", "trainer", False),   # unfused trains on sm86
+    ("A10G", "fused", "trainer", False),     # the floor is flash's only
+    ("A10G", "auto", "trainer", False),
+    ("A10G", "flash", "sampler", False),     # inference attention: no such floor
+])
+def test_the_trainer_s_flash_attention_needs_sm90(tmp_path, card, backend, role, refused):
+    node = b300(0, card=card, hbm_gib=24.0 if card == "A10G" else 80.0)
+    req = request([node], tmp_path, role=role, attention_backend=backend)
+    problems, _, _ = ia.fit_problems(req, PINNED, ia.parse_probe(A10G_FACTS), "miles" if role == "trainer" else "vllm")
+    if refused:
+        assert problems == [f"node b300-0: the trainer's flash attention needs sm90+ cards; on {card} "
+                            f"({ia.node_card_arch(node)}) its backward pass fails (\"Unsupported compute "
+                            "capability\"): pass --attention-backend unfused (the smoke trains with it; it holds "
+                            "the full score matrix, short sequences only)"]
+    else:
+        assert problems == []
+
+
+def test_flash_on_sm86_stops_the_adoption_at_fit_on_any_node_of_the_role(tmp_path):
+    nodes = [b300(0, card="H100", hbm_gib=80.0), b300(1, card="A10G", hbm_gib=24.0)]
+    req = request(nodes, tmp_path, attention_backend="flash")
+    with pytest.raises(ia.AdoptError, match=r"step fit failed: node b300-1: the trainer's flash attention needs "
+                                            r"sm90\+ cards; on A10G \(sm86\)") as raised:
+        adopter(req, FakeNodes(nodes, probe=A10G_FACTS), smoke=passing_smoke()).run()
+    assert "node b300-0:" not in str(raised.value)  # the H100 node passes the floor
+    assert not (tmp_path / "site-images.yaml").exists()
+    ok = request(nodes, tmp_path, attention_backend="unfused")
+    adopter(ok, FakeNodes(nodes, probe=A10G_FACTS), smoke=passing_smoke()).run()
+    assert [r.ref for r in si.load(tmp_path / "site-images.yaml")] == [PINNED]
+
+
+@pytest.mark.parametrize("arch, refused", [("sm86", True), ("sm90", False), ("sm100", False), ("gfx950", False),
+                                           (None, False)])
+def test_the_flash_floor_reads_the_node_s_architecture(arch, refused, monkeypatch):
+    node = b300(0)
+    monkeypatch.setattr(ia, "node_card_arch", lambda n: arch)
+    assert (ia.flash_trainer_problem(node, "flash") is not None) is refused
+    assert ia.flash_trainer_problem(node, "unfused") is None and ia.flash_trainer_problem(node, None) is None
 
 
 def test_a_catalog_sampler_image_is_held_to_its_record(tmp_path):
@@ -364,8 +417,8 @@ def test_a_failed_pull_names_the_node(tmp_path, catalog_before):
             as error:
         adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
     assert error.value.holding == ("b300-0", "b300-1")  # the probe node, then the nodes whose pull passed
-    assert f"the image stays pulled on b300-0, b300-1 (a retry reuses it; `docker rmi {PINNED}` there frees the " \
-        "room)" in error.value.reason
+    assert f"the image stays pulled on b300-0, b300-1 (a retry reuses it; `docker rmi {PINNED}` on b300-0, b300-1 " \
+        "frees the room)" in error.value.reason
     assert ops.kinds().count("docker pull") == 3  # every node was pulled in parallel
     assert catalog_before.read_text() == "version: 1\nimages: []\n"
 
@@ -688,3 +741,53 @@ def test_the_docker_host_probe_is_byte_for_byte_main_s():
                        (b300(1, mounts={"/mnt/nvme/x": "/x"}),
                         "958b24e9b3fed68eeb27d8221ae0357653a5009b8e016a3a9ba270211cfce5de")):
         assert hashlib.sha256(cp.probe_script(cp.host_sections(node)).encode()).hexdigest() == want
+
+
+@pytest.mark.parametrize("sudo", [False, True])
+def test_the_removal_hint_names_each_holding_node_s_engine(tmp_path, sudo):
+    nodes = [_podman(0), b300(1), _podman(2)]
+    ops = FakeNodes(nodes, **{"b300-0": _graphroot(), "b300-2": _graphroot()})
+    a = adopter(request(nodes, tmp_path, container_sudo=sudo), ops, smoke=passing_smoke())
+    a.holding = ["b300-0", "b300-1", "b300-2"]
+    a.report.pinned = PINNED
+    reason = a._held(ia.AdoptError("smoke", "failed")).reason
+    pre = "sudo -n " if sudo else ""
+    assert (f"(a retry reuses it; `{pre}docker rmi {PINNED}` on b300-1; `{pre}podman rmi {PINNED}` on b300-0, "
+            "b300-2 frees the room)") in reason
+    assert ("sudo -n" in reason) is sudo
+
+
+def test_a_rootfs_node_with_docker_is_pulled_and_a_rootfs_node_without_an_engine_is_listed(tmp_path):
+    """The adoption picks nodes by their profile's container, not by runtime: a
+    ``runtime: rootfs`` node whose inventory says ``container: docker`` is pulled and its
+    docker image root checked; one of no container engine is named as not pulled."""
+    from yeto.launch.node_inventory import NodeProfile
+
+    docker_rootfs = NodeProfile.from_node(b300(1, runtime="rootfs"), container="docker")
+    nodes = [b300(0), docker_rootfs, b300(2, runtime="rootfs")]
+    ops = FakeNodes(nodes)
+    report = adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
+    pull = next(s for s in report.steps if s.name == "pull")
+    assert sorted(n for n, s in ops.scripts if s.startswith("docker pull -q ")) == ["b300-0", "b300-1"]
+    assert "not pulled (no container engine): ['b300-2']" in pull.detail
+    from yeto.launch.preflight import cluster as cp
+
+    pf = cp.ClusterPreflight([docker_rootfs], image=PINNED, ops=FakeNodes([docker_rootfs]), log=lambda m: None,
+                             clock=lambda: FakeCluster.NOW, by_engine=True)
+    roots = [c for c in pf.hosts() if c.name == "disk_images"]
+    assert roots and roots[0].scope == "b300-1"  # its docker image root is checked
+    plain = cp.ClusterPreflight([docker_rootfs], image=PINNED, ops=FakeNodes([docker_rootfs]), log=lambda m: None,
+                                clock=lambda: FakeCluster.NOW)
+    assert not [c for c in plain.hosts() if c.name == "disk_images"]  # the preflight's own rule: runtime docker
+
+
+def test_a_rootfs_probe_node_with_docker_has_its_image_root_checked_before_the_probe(tmp_path):
+    from yeto.launch.node_inventory import NodeProfile
+
+    probe = NodeProfile.from_node(b300(0, runtime="rootfs"), container="docker")
+    low = Behavior(host={"disk": (0, "\n".join([disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
+                                                disk_line("/var/lib/containerd", 40, mount="/")]))})
+    ops = FakeNodes([probe, b300(1)], **{"b300-0": low})
+    with pytest.raises(ia.AdoptError, match=r"step probe failed: node b300-0: disk_images: /var/lib/containerd"):
+        adopter(request([probe, b300(1)], tmp_path), ops, smoke=passing_smoke()).run()
+    assert ops.kinds() == ["date", "host"]  # no probe ran

@@ -704,3 +704,214 @@ process that reused the pid. A ledger row is closed only after its stop was conf
   minutes is lost and stays quarantined until `yeto cluster release-node`.
 - The layout is never shrunk: without a spare the island waits; it does not change
   TP/PP/EP.
+
+## Onboarding a model image
+
+A new model often comes with an image built for it: a trainer image with the
+kernels and Miles / Megatron versions the model needs, or a sampler image with the
+vLLM or SGLang build that serves it. `yeto image adopt` takes such an image into
+your site, checked and smoked on your own nodes, and records it in the **site image
+catalog**. From then on a trainer island or a sampler pool of those nodes that
+names no image runs it for that model.
+
+```
+yeto image adopt REGISTRY/IMAGE:TAG --model ORG/MODEL --role trainer \
+    --inventory cluster.yaml --model-config config.json \
+    --smoke-store s3://BUCKET/image-smoke --dry-run
+
+yeto image adopt REGISTRY/IMAGE:TAG --model ORG/MODEL --role sampler \
+    --inventory cluster.yaml --sampler-spec sampler-spec.json --dry-run
+```
+
+`--dry-run` prints every step with its commands and reaches no registry and no
+node (`--model-config` gives it the model's `config.json`; without it the real run
+reads the local HF cache or fetches `config.json` from the Hub). Drop `--dry-run`
+to adopt the image. The steps, in order:
+
+1. **manifest**: yeto checks that the reference is a docker reference, asks the
+   registry for the image's manifest (with the registry login a pull would use:
+   `SKYPILOT_DOCKER_USERNAME` / `SKYPILOT_DOCKER_PASSWORD` /
+   `SKYPILOT_DOCKER_SERVER`, else `~/.docker/config.json`) and pins a tag to its
+   digest. A missing manifest stops here, before any node is contacted.
+2. **probe**: one node (`--node`, default the first of the role) is checked first:
+   SSH, the host probe and room in its image root, and that its cards are idle (no
+   process in `nvidia-smi`, `amd-smi` / `rocm-smi` or `npu-smi`, no running `yeto-`
+   container; `--allow-busy` goes on with a warning). It then runs the image once,
+   with its container engine and without cards, and reads the CPU architecture,
+   Python, torch, CUDA or HIP, the card architectures the image's kernels were
+   built for (torch's build flags; only when they are empty does it run again with
+   the node's cards), the engine packages and the yeto image lock
+   (`/opt/yeto/image`).
+3. **fit**: the image against every node of the role: CPU architecture, device
+   runtime, card architecture, the trainer image floors yeto knows, and the role's
+   engine package (a sampler: the engine of the sampler spec, which `--engine`
+   must not contradict). Card architectures follow the CUDA binary compatibility
+   rules: a cubin `sm_XY` runs on the same major version with an equal or higher
+   minor (an `sm_100` image runs on B300, `sm103`), `sm_XYa` only on exactly X.Y,
+   PTX `compute_XY` is compiled on any X.Y or newer card (`compute_XYa` only on
+   X.Y). A pass by the minor-version rule or PTX is noted in the result and the
+   evidence (`compatible by CUDA minor-version rule; the smoke test is the final
+   check`): the smoke runs real kernels on the card. `--strict-arch` asks for a
+   cubin of exactly the node's architecture. A ROCm node's `gfx` target must be
+   built (feature suffixes such as `:xnack-` are ignored). A mismatch names the
+   rule and the node's card. A trainer's `--attention-backend flash` needs sm90+
+   cards on every node of the role: below that (an A10G, `sm86`) its backward pass
+   fails, so the fit refuses it and names `--attention-backend unfused` instead. The
+   backend the fit checks is the one the smoke's launch resolves: with the default
+   `auto` that is the recipe's own (`deepseek-v4-flash` and Qwen3.8-Flash-Next train
+   with flash, so they are held to sm90+ too; those recipes have no other path, so
+   the fit names other cards, and another backend for them exits 2). The dry run's
+   fit line names the backend and where it comes from. The smoke trains with that
+   backend (`--rl-training-attention-backend`, also taken from a `--smoke-arg`,
+   written in full; the two must agree). A sampler is not held to this floor.
+4. **pull**: every node of the role (spares included, `roles: [trainer-spare]`)
+   is checked over SSH, and its image root (the docker data root, or
+   `/var/lib/containerd` with the containerd image store, or podman's storage
+   graphroot) must have `--min-image-free-gib` free (default 120). A podman node
+   whose graphroot `podman info` does not print, or that the disk probe does not
+   find, fails: the image store's disk cannot be confirmed. Only when every node
+   passes does the pull run, on every node in parallel with its own container
+   engine. A node that fails is named with the preflight's finding or the
+   engine's error line.
+
+   Each node's container engine is its inventory `container:` (`docker` or
+   `podman`; default: `docker` for `runtime: docker`), whatever its `runtime:`:
+   a `runtime: rootfs` node with `container: docker` or `podman` is pulled with
+   that engine, and one with no container engine is named as not pulled.
+
+   For a sampler image, pass the ssh sampler pool's config with `--pool-config`:
+   it is read the way the pool reads it, so the inventory is the pool's
+   `provider.inventory` (`--inventory` may be left out; one naming another file is
+   an error), the catalog is that inventory's `site_images:`, the one the pool
+   resolves `image: auto` from (a `--catalog` naming another file is an error), the
+   nodes are the pool's `nodes:` (one not in the inventory is an error), their
+   engine is the pool's
+   `container.engine` (default podman, whatever the inventory says), and its
+   `container.sudo: true` (`sudo -n podman`, the rootful store) makes the host
+   checks, the pull, the probe and the smoke all run the engine through
+   `sudo -n`, so the image lands in the store the pool starts from. A
+   `runtime: venv` pool runs no image and is refused. With `container.pull:
+   never` the pool starts only images already on its nodes: the adoption's pull
+   is what puts the image there. Without a pool config, each node's engine is
+   the inventory's (a NOTE says so) and `--container-sudo` asks for `sudo -n`;
+   against a pool config whose `container.sudo` is off it is an error.
+5. **smoke**, on the probe node, after its cards are checked idle again:
+   - **trainer**: the model is cut to its first N layers (all their experts, the
+     embeddings and the head, `scripts/prune_layers.py`; MTP layers are dropped,
+     and the result says so), N being the largest, at most 16, whose trainer
+     state fits one node in the model registry's sizing (`yeto adapt`'s backend,
+     recipe and tuning for the full model; `--smoke-arg=--tuning=full` picks
+     another tuning). The node's `scratch:` (required in the inventory) must have
+     room for the cut and the shards it downloads, about twice the cut's size;
+     the download cache is removed after the cut. A one-node `ssh:` island then
+     trains one round on synthetic rollouts (no sampler, no syncer, a small local
+     prompt file and a built-in reward), ends it with a cut in `--smoke-store`
+     (the trainer's `rl_round_cut` event and the cut's manifest in the store are
+     checked), and a second launch resumes from that cut (its `rl_resume` event
+     must name the same cut) and trains another round. `--model-path` takes the
+     checkpoint from a directory on the node instead of the Hub. A gated model
+     needs `HF_TOKEN` in the environment of `yeto image adopt`, and a Hub mirror
+     `HF_ENDPOINT`: both are passed to the node's cut through the script it
+     reads, never on a command line and never printed. The model needs
+     `--trust-remote-code` when its `config.json` has an `auto_map`, or when the
+     model registry does not know it; `--smoke-arg=--trust-remote-code` or
+     `--smoke-arg=--no-trust-remote-code` decides it instead. Every RL launch
+     requires the flag, whatever the model and backend (the pinned trainer's
+     loaders always allow remote code), so the smoke always passes it and refuses
+     `--no-trust-remote-code`; the evidence notes say what the model alone needs.
+     When the registry's flags for the model need
+     a file (for example `--rl-expert-selection` for Kimi K3.1), pass it with
+     `--smoke-arg=--rl-expert-selection=/path/selection.json`; any other
+     `yeto launch` flag the run needs goes the same way. Only the Miles backend
+     has a trainer smoke so far, and only on `runtime: docker` nodes (the `ssh:`
+     trainer island starts docker containers as the SSH user: for `--role
+     trainer`, any podman or `rootfs` node of the role, spares included, or
+     `--container-sudo` / `--pool-config`, is refused).
+   - **sampler**: the engine of `--sampler-spec` (the pool's sampler spec) starts
+     in the image the way the node runtime starts a sampler (the node's device
+     flags and directories), generates once, reloads (the weights of `--release`,
+     else the spec's `engine.server.base_dir`, as policy version 1; one of the two
+     is required) and generates again. The reload checks the engine's hot-reload
+     endpoint only, not the format of a trainer release, and it must reload in
+     place: an engine whose reload falls back to a restart fails the smoke, and
+     the error names its `reload_mode`; so does a load that returns no report of
+     its reload mode. A failing step is named, for example
+     `smoke failed: engine: reload failed: ...`.
+
+   Whatever the smoke's outcome, a failure or a timeout, its containers are
+   removed and its run stopped (`yeto down`), and its artifacts are deleted: the
+   cut on the node, the checkpoint under `--smoke-store`, the launcher's files.
+   `--keep-smoke-artifacts` keeps them and prints where they are and their size.
+
+Any failed step stops the adoption and leaves the catalog unchanged. The image
+stays pulled on the nodes that already have it (the error names them): a retry
+reuses it, and `docker rmi` on those nodes frees the room. After a passing smoke
+the catalog gets a `verified-smoke` record with the digest, the versions the probe
+read and the evidence of the run (time, node, seconds per step, the nodes that
+pulled the image, the smoke's layout and tuning, and any compatibility notes). Two
+adoptions that write one catalog at the same time take turns on a lock next to it.
+
+### The site image catalog
+
+The catalog is `~/.yeto/site-images.yaml` (`YETO_SITE_IMAGES_PATH` moves it), or
+the file the inventory names with its top-level `site_images:` (a relative path is
+taken from the inventory's directory):
+
+```yaml
+site_images: images/site-images.yaml
+nodes:
+  - name: b300-0
+    ...
+```
+
+Each record:
+
+```yaml
+version: 1
+images:
+  - model: ORG/MODEL
+    role: trainer                  # trainer | sampler
+    engine: miles                  # trainer: the --rl-backend; sampler: vllm | sglang | vllm-ascend
+    ref: REGISTRY/IMAGE@sha256:<64 hex>
+    device_family: cuda
+    cpu_arch: x86_64
+    card_archs: [sm103]            # the card architecture the smoke ran on
+    versions: {python: 3.12.3, torch: 2.9.1+cu130, cuda: "13.0", megatron-core: 0.15.0}
+    evidence: {at: "2026-11-26T10:00:00Z", node: b300-0, seconds: 1834.2, result: pass}
+    status: verified-smoke         # verified-smoke | retired
+```
+
+One image adopted on two kinds of nodes keeps one record per CPU and card
+architecture. `evidence.at` is an ISO-8601 time with its time zone. To stop using a
+record, set its `status: retired`. A broken record (bad YAML, a tag instead of a
+digest, an unknown card architecture, a time without a zone) is refused with the
+file and the record named, but only by a run that reads it; a key the reader does
+not know, or a newer catalog `version`, is a warning.
+
+### Which image a run uses
+
+For an `ssh:` trainer island (when every `--gpu` entry is `ssh:`) and an ssh
+sampler pool node:
+
+1. the image the configuration names: `--rl-image`, an inventory `image:` or
+   `images:`, a pool's `container.image`. The catalog is not read;
+2. else the newest `verified-smoke` record of the catalog for the run's model (an
+   alias such as `qwen3-8b` is resolved first) and role whose CPU architecture,
+   card architecture and device family match every node of the island (for a
+   pool: every node of the pool, so a spare starts the same image);
+3. else the built-in default (the pinned `--rl-image`, or the engine image catalog's
+   choice for a pool's `container.image: auto`).
+
+A fleet that mixes `ssh:` and cloud islands takes the built-in default and says
+so. A pool chooses its images once, at its first start, and keeps them in its
+state: a replacement node and a restarted pool controller start the same image.
+The launcher and `pool --dry-run` print the image and where it came from, for
+example:
+
+```
+[launcher] ssh trainer image REGISTRY/IMAGE@sha256:... (adopted 2026-11-26T10:00:00Z on b300-0) (source: site image catalog ...)
+```
+
+When it falls back to the default, the line names the closest records and why
+they do not fit. A configuration that names its image prints nothing new and runs
+exactly as before.

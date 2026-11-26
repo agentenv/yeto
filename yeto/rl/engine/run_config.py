@@ -48,6 +48,8 @@ RECIPE_GLM5_NEXT = "glm5_next"
 # bridge). The recipe is driven by the provider's layer pattern and router
 # fields, not by one checkpoint (adapters/miles/models/nemotron_h.py).
 RECIPE_NEMOTRON_H = "nemotron_h"
+# recipes whose kernels hard-require flash attention (no unfused / fused path)
+FLASH_ONLY_RECIPES = frozenset({RECIPE_DEEPSEEK_V4_FLASH, RECIPE_QWEN3_8_NEXT})
 # Kimi-K3.1-Pro (kimi_k31): KDA + DSA MLA + 896-expert latent MoE through the
 # Miles plugin spec; 128 experts per MoE layer trained in place from an
 # expert_selection.json (adapters/miles/models/kimi_k31), raw bridge mode.
@@ -1140,7 +1142,7 @@ def resolve_rl_run_config(
     # attention refuse any other backend.
     backend_override = getattr(args, "rl_training_attention_backend", "auto") or "auto"
     if backend_override != "auto":
-        if recipe_name in {RECIPE_DEEPSEEK_V4_FLASH, RECIPE_QWEN3_8_NEXT} and backend_override != "flash":
+        if recipe_name in FLASH_ONLY_RECIPES and backend_override != "flash":
             raise ValueError(
                 f"the {recipe_name} recipe requires --rl-training-attention-backend flash "
                 "(its kernels have no unfused/fused path)"

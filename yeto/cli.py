@@ -1177,6 +1177,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_cluster_parser(sub)
 
+    from .launch.image_adopt import add_parser as _add_image_parser
+
+    _add_image_parser(sub)
+
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
     logs.add_argument(
@@ -2794,6 +2798,10 @@ def main(argv=None) -> int:
         from .cluster_cli import main as cluster_main
 
         return cluster_main(args)
+    if args.command == "image":
+        from .launch.image_adopt import main as image_main
+
+        return image_main(args)
     if args.command == "sandbox":
         from .sandbox.cli import main as sandbox_main
 

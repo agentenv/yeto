@@ -112,11 +112,14 @@ def engine_prefix(profile: NodeProfile, sudo: bool) -> list[str]:
 def container_argv(profile: NodeProfile, *, name: str, image: str, env: Mapping[str, str], python: str,
                    spec_path: str, env_files: Sequence[str] = (), cards: Sequence[int] | None = None,
                    host_paths: Sequence[str] | None = None, sudo: bool = False,
-                   labels: Mapping[str, str] | None = None) -> list[str]:
+                   labels: Mapping[str, str] | None = None, module: str = SAMPLER_MODULE,
+                   module_args: Sequence[str] | None = None) -> list[str]:
     """``<engine> run --rm`` of the sampler in the foreground (the runtime is its parent).
     The yeto tree goes in front of the image's own ``PYTHONPATH`` inside the container
     (``-e PYTHONPATH=`` would drop it: the CANN ``acl`` module of an Ascend image).
-    ``labels``: ``--label`` flags (a leased node's run label; none: the argv as before)."""
+    ``labels``: ``--label`` flags (a leased node's run label; none: the argv as before).
+    ``module`` / ``module_args``: another yeto module started the same way (the image
+    smoke, :mod:`yeto.node.smoke`; default: the sampler with ``--spec``)."""
     argv = [*engine_prefix(profile, sudo), "run", "--rm", "--name", name, "--network", "host", "--ipc", "host"]
     for key, value in sorted((labels or {}).items()):
         argv += ["--label", f"{key}={value}"]
@@ -131,8 +134,9 @@ def container_argv(profile: NodeProfile, *, name: str, image: str, env: Mapping[
         if key != "PYTHONPATH":
             argv += ["-e", f"{key}={value}"]
     prelude = f'export PYTHONPATH={shlex.quote(tree)}"${{PYTHONPATH:+:$PYTHONPATH}}"; ' if tree else ""
+    rest = ["--spec", spec_path] if module_args is None else list(module_args)
     return [*argv, "--entrypoint", "bash", image, "-c",
-            f"{prelude}exec {shlex.quote(python)} -m {SAMPLER_MODULE} --spec {shlex.quote(spec_path)}"]
+            f"{prelude}exec {shlex.quote(python)} -m {module} {shlex.join(rest)}"]
 
 
 def stop_argv(profile: NodeProfile, name: str, *, sudo: bool = False) -> list[str]:
