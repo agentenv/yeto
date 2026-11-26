@@ -202,8 +202,11 @@ class SkySource(Source):
     def ledger_attrs(self, prov, island):
         """What prices the cluster: ``--trainer-usd-per-hour`` x its nodes when stated
         (``usd_per_hour``, billing's first choice), else the unified price table's row of
-        its cloud, card, region and spotness (:func:`yeto.cost.prices.node_usd_h`), as for
-        a sky sampler."""
+        its cloud, card, region and spotness (:func:`yeto.cost.prices.node_usd_h`, read by
+        billing), as for a sky sampler. A machine without a table row records the sky
+        catalog's on-demand price of its ``--learner-instance-type`` (else of the dearest
+        instance for its cards) x its nodes (:func:`yeto.cost.prices.catalog_node_usd_h`),
+        so the cost guard and ``run.budget`` count it instead of reporting it unpriced."""
         spec = island.spec
         attrs: dict[str, Any] = {"role": "trainer", "cloud": spec.cloud, "gpu": spec.gpu,
                                  "gpus": int(spec.gpus_per_node) * int(spec.num_nodes),
@@ -220,6 +223,18 @@ class SkySource(Source):
         stated = getattr(prov.args, "trainer_usd_per_hour", None)
         if stated is not None:
             attrs["usd_per_hour"] = float(stated) * int(spec.num_nodes)
+        elif _table_unpriced(attrs):
+            from yeto.cost import prices  # noqa: PLC0415
+
+            rate, note = prices.catalog_node_usd_h(spec.cloud, spec.gpu, spec.gpus_per_node, region=attrs.get("region"),
+                                                   instance_type=getattr(prov.args, "learner_instance_type", None))
+            if rate is not None:
+                attrs["usd_per_hour"] = rate * int(spec.num_nodes)
+                attrs["price_note"] = note + " (no price table row" + ("; spot billed at on-demand)"
+                                                                        if attrs.get("use_spot") else ")")
+            else:
+                print(f"[launcher] WARNING: trainer cluster {island.name}: no price table row and {note}: "
+                      "the cost guard reports it unpriced", flush=True)
         return attrs
 
 
@@ -366,6 +381,15 @@ def register(adapter: Source) -> None:
 
 def _adapter(kind: str) -> Source:
     return next(a for a in _SOURCES if a.kind == kind)
+
+
+def _table_unpriced(attrs: dict[str, Any]) -> bool:
+    """Whether billing finds no unified price table row for a sky trainer cluster of ``attrs``
+    (the lookup billing makes for a ``sky_cluster`` without ``usd_per_hour``)."""
+    from yeto.cost import prices  # noqa: PLC0415
+
+    return prices.node_usd_h(attrs["cloud"], attrs["gpu"], attrs["gpus"], spot=attrs.get("use_spot"),
+                             region=attrs.get("region")) is None
 
 
 def _task_spot(task: Any) -> bool | None:

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -239,6 +240,41 @@ def node_usd_h(provider: str, gpu: Any, gpus: Any, *, spot: bool | None = None, 
         return None
     row = lookup(provider, gpu, spot=spot, region=region, path=path)
     return None if row is None else row.node_usd_h(float(gpus))
+
+
+def catalog_node_usd_h(cloud: str, gpu: Any, gpus_per_node: Any, *, region: str | None = None,
+                       instance_type: str | None = None) -> tuple[float | None, str]:
+    """USD per hour of one node from the local sky catalog, at its ON-DEMAND list price (a spot
+    node bills no more than that): ``instance_type``'s when named, else the dearest instance
+    the catalog has for ``gpus_per_node`` x ``gpu`` (sky picks among them by the task's CPU and
+    memory, which a price recorded before the launch does not know: never under). For a
+    machine without a billing row in the price table. ``(None, why)`` when the catalog is not
+    installed or has nothing for it; never raises."""
+    try:
+        from sky import catalog  # noqa: PLC0415 - optional; read only where sky launches
+        from sky.catalog import common  # noqa: PLC0415
+
+        local = os.path.exists(common.get_catalog_path(f"{str(cloud).lower()}/vms.csv"))
+    except Exception as error:  # noqa: BLE001
+        return None, f"no sky catalog ({type(error).__name__})"
+    if not local:  # never fetched here (sky check / sky launch fetch it): not downloaded for a price
+        return None, f"no local sky catalog for {cloud}"
+    where = f" in {region}" if region else ""
+    try:
+        if instance_type:
+            usd = catalog.get_hourly_cost(instance_type, use_spot=False, region=region, zone=None, clouds=cloud)
+            return float(usd), f"sky catalog on-demand price of {instance_type}{where}"
+        names, _fuzzy = catalog.get_instance_type_for_accelerator(str(gpu), int(gpus_per_node), use_spot=False,
+                                                                 region=region, zone=None, clouds=cloud)
+        costs = [(float(catalog.get_hourly_cost(n, use_spot=False, region=region, zone=None, clouds=cloud)), n)
+                 for n in names or ()]
+    except Exception as error:  # noqa: BLE001 - an unknown type or region: unpriced, said
+        return None, f"sky catalog has no on-demand price for {instance_type or f'{gpus_per_node}x{gpu}'}{where} " \
+                     f"({type(error).__name__})"
+    if not costs:
+        return None, f"sky catalog has no {gpus_per_node}x{gpu} instance on {cloud}{where}"
+    usd, name = max(costs)
+    return usd, f"sky catalog on-demand price of the dearest {gpus_per_node}x{gpu} instance ({name}){where}"
 
 
 def host(provider: str, *, path: str | None = None) -> HostPrice | None:
