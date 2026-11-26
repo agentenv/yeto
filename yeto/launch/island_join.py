@@ -57,6 +57,7 @@ JOIN_PREV: Mapping[str, Any] = {"xid": {"boot": None}}
 RATE_FRACTION = 0.5  # a job port below this fraction of the island's fastest one is refused
 XID_UNREAD = ("the kernel log does not read (dmesg restricted, no journalctl -k): add the SSH user to the adm or "
               "systemd-journal group, or let it run dmesg with sudo")
+XID_TIMED_OUT = "reading the kernel log (dmesg / journalctl -k) timed out"
 XID_HINT = (" (a hardware Xid in the kernel log of this boot: fix the GPU and reboot the node, a new boot starts a "
             "new log, then add the island again)")
 _HARDWARE_XID = re.compile(r"\bXID (\d+)\b")
@@ -240,14 +241,17 @@ def _absolute(result: Any, *, fm_read: bool = True) -> list[str]:
 
 def _unread_parts(text: str, result: Any) -> list[str]:
     """The parts of a whole check that the join's absolute rules need and that did not read:
-    the kernel log (no XID source: ``dmesg`` restricted and no ``journalctl -k``), the NVLink
-    fabric or the fabric manager timed out."""
+    the kernel log (timed out, or no XID source: ``dmesg`` restricted and no ``journalctl
+    -k``), the NVLink fabric or the fabric manager timed out (a kill, 137, too)."""
     from yeto.hw.host_probe import parse_sections  # noqa: PLC0415
 
     out = []
-    if (result.facts or {}).get("xid_source") == "none":
-        out.append(XID_UNREAD)
     sections = parse_sections(text)
+    xid = sections.get("xid")
+    if xid is not None and xid.rc in (124, 137):
+        out.append(XID_TIMED_OUT)
+    elif (result.facts or {}).get("xid_source") == "none":
+        out.append(XID_UNREAD)
     for name in ("fabric", "fabricmanager"):
         sec = sections.get(name)
         if sec is not None and sec.rc in (124, 137):
@@ -430,7 +434,8 @@ def check_leases(nodes: Sequence[Any], *, lease_store: str | None, run_id: str, 
 def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | None = None,
           taken: Mapping[str, str] | None = None, islands: Mapping[str, str] | None = None, ssh: Any = None,
           inventory: Sequence[Any] | None = None, env: Mapping[str, str] | None = None, force: bool = False,
-          health: Mapping[str, NodeHealth] | None = None) -> JoinCheck:
+          health: Mapping[str, NodeHealth] | None = None,
+          aliases: Mapping[str, tuple[str, str]] | None = None) -> JoinCheck:
     """The checks of a new island's trainer ``nodes`` (module doc). ``taken``: a node key
     (:func:`node_keys`) -> the fleet island whose inventory lists it (an inventory without
     ``lease_store``); ``islands``: the fleet's other islands' launch prefix -> island (whose
@@ -438,7 +443,9 @@ def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | No
     island's own environment; ``force``: a check that does not read is a warning;
     ``health``: node health already read (a recheck). With ``lease_store``, ``taken`` holds the
     nodes of the islands whose inventory has no ``lease_store`` or another one (their leases
-    are not in this store)."""
+    are not in this store); ``aliases``: a machine key (SSH target / address) -> (island, its
+    node name) of the islands on the same ``lease_store`` (a lease is taken by node name: the
+    same machine under another name is not exclusive)."""
     out = JoinCheck()
     if ssh is None:
         from .ssh_trainer_island import SshOps  # noqa: PLC0415
@@ -450,7 +457,8 @@ def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | No
                       inventory=every)
     else:
         _check_leased(nodes, need=need, run_id=run_id, lease_store=lease_store, islands=islands or {}, ssh=ssh,
-                      env=env, force=force, health=health, out=out, inventory=every, taken=taken or {})
+                      env=env, force=force, health=health, out=out, inventory=every, taken=taken or {},
+                      aliases=aliases or {})
     if out.refusals:
         out.nodes = []
     return out
@@ -484,16 +492,37 @@ def _owner(node: Any, taken: Mapping[str, str]) -> str | None:
     return next((taken[k] for k in sorted(node_keys(node)) if k in taken), None)
 
 
+SHARED_STORE_FIX = "give both islands the same lease_store, or use inventories without shared nodes"
+ALIAS_FIX = "give the machine one name in both inventories, or use inventories without shared nodes"
+
+
+def _foreign(node: Any, taken: Mapping[str, str],
+             aliases: Mapping[str, tuple[str, str]]) -> tuple[str, str, str] | None:
+    """``(island, detail, fix)`` when ``node`` is another island's machine that this lease
+    store does not keep from the launch: an island on no or another lease store, or one on
+    this store that names the machine otherwise."""
+    owner = _owner(node, taken)
+    if owner:
+        return owner, "", SHARED_STORE_FIX
+    for key in sorted(node_keys(node)):
+        island, other = aliases.get(key, (None, None))
+        if island is not None and other != node.name:
+            return island, f" (its node {other}, the same machine)", ALIAS_FIX
+    return None
+
+
 def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str, islands: Mapping[str, str],
                   ssh: Any, env: Any, force: bool, health: Any, out: JoinCheck, inventory: Sequence[Any],
-                  taken: Mapping[str, str]) -> None:
+                  taken: Mapping[str, str], aliases: Mapping[str, tuple[str, str]]) -> None:
     """An inventory with ``lease_store``: ``need`` of its trainer nodes, as the launch picks them.
 
     The launch (``lease_trainer_nodes`` / ``pick_nodes``) runs under a new holder (a new
     run dir: a new identity, ``<prefix>-m<n>`` after a move), so no node is its own yet: it
-    places the island on the free nodes, in the inventory's order; with too few it waits,
-    and once the island's earlier incarnation has let its nodes go it places on the free
-    nodes and those. Each of these picks that fits must take healthy nodes only."""
+    skips the nodes another holder leases and places the island in the inventory's order on
+    the free ones (the free and the earlier incarnation's ones when too few are free); were
+    those taken meanwhile, on the rest. It sees another island's nodes that this store does
+    not lease (:func:`_foreign`) as free: a pick that takes one refuses. Every candidate node
+    must be healthy (a pick may come to any of them)."""
     if len(nodes) < need:
         out.refusals.append(f"the island needs {need} trainer node(s); its inventory lists {len(nodes)} "
                             f"{[n.name for n in nodes]}")
@@ -501,14 +530,10 @@ def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: 
     holders = lease_holders(nodes, lease_store=lease_store, run_id=run_id, out=out)
     if holders is None:
         return
-    held: dict[str, str] = {}
-    for node in nodes:
-        owner = _owner(node, taken)
-        why = f"is island {owner}'s" if owner else lease_problem(holders[node.name], run_id=run_id, islands=islands)
-        if why:
-            held[node.name] = why
-    usable = [n for n in nodes if n.name not in held]  # free, or held by the island's earlier incarnation
-    free = [n for n in usable if holders[n.name] is None]
+    held = {n.name: why for n in nodes if (why := lease_problem(holders[n.name], run_id=run_id, islands=islands))}
+    foreign = {n.name: f for n in nodes if n.name not in held and (f := _foreign(n, taken, aliases))}
+    launch = [n for n in nodes if n.name not in held]  # what the launch may take: free or the earlier incarnation's
+    usable = [n for n in launch if n.name not in foreign]
     check_health(usable, multi=need > 1, ssh=ssh, out=out, env=env, cache=health, inventory=inventory,
                  candidates=True)
     sick = {}
@@ -516,8 +541,9 @@ def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: 
         problem = _health_problem(node.name, out.health[node.name], force=force, out=out)
         if problem:
             sick[node.name] = problem
-    left_out = [f"node {n.name} {held[n.name]}" if n.name in held else sick[n.name]
-                for n in nodes if n.name in held or n.name in sick]
+    why = {**held, **{name: f"is island {island}'s{detail}" for name, (island, detail, _) in foreign.items()}}
+    left_out = [f"node {n.name} {why[n.name]}" if n.name in why else sick[n.name]
+                for n in nodes if n.name in why or n.name in sick]
     grouped = need > 1 and _grouped(inventory)
     if need > 1 and not grouped:
         from .fabric_groups import HINT  # noqa: PLC0415
@@ -532,24 +558,31 @@ def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: 
                                      f"healthy, {need} needed") if fit else
                                     f"fabric: the placement check could not run ({type(error).__name__}: {error})"]
         return
-    picks: list[list[Any]] = []  # the launch's picks: the free nodes; then with its earlier incarnation's
-    for offered in ([free, usable] if len(free) < len(usable) else [free]):
+    free = [n for n in launch if holders[n.name] is None]
+    picks: list[list[Any]] = []
+    for offered in (free, launch):  # the first pick: the free nodes, else with the earlier incarnation's
         try:
             picks.append(_pick_placement(offered, need, inventory))
-        except Exception:  # noqa: BLE001 - too few of them: the launch waits for the next ones
+            break
+        except Exception:  # noqa: BLE001 - too few: the launch waits for the next ones
             continue
-    bad = list(dict.fromkeys(n.name for pick in picks for n in pick if n.name in sick))
-    if bad:
-        out.refusals += [sick[name] for name in bad] + [
-            f"the island's launch picks its nodes by their leases and would take {', '.join(bad)}; take "
+    try:  # were those taken meanwhile: the rest
+        picks.append(_pick_placement([n for n in launch if n not in picks[0]], need, inventory))
+    except Exception:  # noqa: BLE001 - too few left: the launch waits
+        pass
+    if sick:
+        out.refusals += list(sick.values()) + [
+            f"the island's launch picks its nodes by their leases and may take {', '.join(sick)}; take "
             "such a node out of the inventory's trainer nodes (roles) or clear its fault"]
+    hit: dict[tuple[str, str, str], list[str]] = {}
+    for name in dict.fromkeys(n.name for pick in picks for n in pick if n.name in foreign):
+        hit.setdefault(foreign[name], []).append(name)
+    for (island, detail, fix), taken_names in hit.items():
+        out.refusals.append(f"launch would take {', '.join(taken_names)}, island {island}'s{detail}: {fix}")
+    if out.refusals:
         return
-    out.notes += [f"left out: {why}" for why in left_out]
+    out.notes += [f"left out: {w}" for w in left_out]
     out.nodes = [n.name for n in picks[0]]
-    if len(picks) > 1 and [n.name for n in picks[1]] != out.nodes:
-        out.notes.append(f"the island takes {names(out.nodes)} (free now); were they taken meanwhile, its launch "
-                         f"waits for its earlier incarnation's nodes and takes {names(n.name for n in picks[1])} "
-                         "(checked too)")
 
 
 def taken_nodes(doc: Mapping[str, Any], *, other_than: str, fleet_argv: Sequence[str],
@@ -574,11 +607,51 @@ def taken_nodes(doc: Mapping[str, Any], *, other_than: str, fleet_argv: Sequence
             listed = load_inventory(path)
         except Exception as error:  # noqa: BLE001 - its nodes unknown: said, not taken as free
             raise ValueError(f"island {name}'s inventory {path} does not read ({error})") from None
-        if lease_store is not None and getattr(listed, "lease_store", None) == lease_store:
+        if lease_store is not None and store_key(getattr(listed, "lease_store", None)) == store_key(lease_store):
             continue
         for node in role_nodes(listed, "trainer"):
             for key in node_keys(node):
                 out.setdefault(key, name)
+    return out
+
+
+def store_key(uri: str | None) -> str | None:
+    """A lease store URI in one spelling (``file:///x`` and ``/x`` are one store; no trailing ``/``)."""
+    if uri is None:
+        return None
+    text = str(uri).strip()
+    if text.startswith("file://"):
+        text = text[len("file://"):]
+    return text.rstrip("/") or text
+
+
+def aliases_of(doc: Mapping[str, Any], *, other_than: str, fleet_argv: Sequence[str],
+               lease_store: str | None) -> dict[str, tuple[str, str]]:
+    """Machine key (SSH target / address of :func:`node_keys`) -> (island, node name), for
+    the ``ssh:`` islands whose inventory has the lease store ``lease_store``."""
+    from yeto.launch.pool import desired as dz  # noqa: PLC0415
+
+    from .node_inventory import island_nodes as role_nodes  # noqa: PLC0415
+    from .node_inventory import load_inventory  # noqa: PLC0415
+
+    out: dict[str, tuple[str, str]] = {}
+    if lease_store is None:
+        return out
+    for name, member in dz.trainers(dict(doc)).items():
+        if name == other_than or not str(member.get("gpu") or "").startswith("ssh:"):
+            continue
+        path = inventory_of([*fleet_argv, *(member.get("argv") or ())])
+        if path is None:
+            continue
+        try:
+            listed = load_inventory(path)
+        except Exception as error:  # noqa: BLE001
+            raise ValueError(f"island {name}'s inventory {path} does not read ({error})") from None
+        if store_key(getattr(listed, "lease_store", None)) != store_key(lease_store):
+            continue
+        for node in role_nodes(listed, "trainer"):
+            for key in node_keys(node) - {f"name:{node.name}"}:
+                out.setdefault(key, (name, node.name))
     return out
 
 
@@ -606,6 +679,7 @@ def check_member(member: Mapping[str, Any], doc: Mapping[str, Any], *, fleet_arg
     name = str(member["name"])
     result = check(nodes, need=need, run_id=run_id, lease_store=store,
                    taken=taken_nodes(doc, other_than=name, fleet_argv=fleet_argv, lease_store=store),
+                   aliases=aliases_of(doc, other_than=name, fleet_argv=fleet_argv, lease_store=store),
                    islands=fleet_prefixes(doc, other_than=name), ssh=ssh, inventory=inventory,
                    env=island_env_of(argv), force=force, health=health)
     shown = set(seen)

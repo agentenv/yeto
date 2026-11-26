@@ -278,7 +278,7 @@ One shell call reads, in this order:
 | ECC | the same query | the volatile uncorrectable ECC count grew since the previous check (a count that went down is the new baseline) |
 | NVLink fabric | the `Fabric` blocks of `nvidia-smi -q` | a GPU that has a fabric state is not `Completed/Success` (a PCIe card's `N/A` passes) |
 | fabric manager | `systemctl is-active nvidia-fabricmanager` | it was active and is now `inactive` or `failed` (a node without NVSwitch, never active, passes) |
-| IB / RoCE ports | `ibstat` (`ibv_devinfo -v` only when ibstat fails) | a port named by `NCCL_IB_HCA` is missing, not `Active`, or slower than the node's `min_ib_gbps` in the inventory (without it: than at the first check); without `NCCL_IB_HCA`, no port of the fabric is active, or, with `min_ib_gbps`, an active one is slower |
+| IB / RoCE ports | `ibstat` (`ibv_devinfo -v` only when ibstat fails) | a port named by `NCCL_IB_HCA` is missing, not `Active`, or slower than at the first check or than the node's `min_ib_gbps` in the inventory, whichever is higher; without `NCCL_IB_HCA`, no port of the fabric is active, or, with `min_ib_gbps`, an active one is slower |
 
 The XIDs and the ECC count only count from the second check on. What the kernel log
 holds at the first check is history: the preflight judged the node then. The nodes of

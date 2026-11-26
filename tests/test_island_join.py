@@ -325,25 +325,27 @@ def test_the_group_placement_picks_from_the_free_healthy_nodes(tmp_path):
     assert "node b300-3 is not healthy: GPU 2 uncorrectable ECC 5 (volatile)" in out.refusals
 
 
+MAY_TAKE = "the island's launch picks its nodes by their leases and may take {}; take such a node out of the " \
+    "inventory's trainer nodes (roles) or clear its fault"
+
+
 def test_an_unhealthy_node_the_launch_would_pick_by_its_leases_is_refused(tmp_path):
-    """The island's launch picks by leases only (in order): the check refuses a pick it
-    would make onto a node found unhealthy, rather than pass nodes the launch does not take."""
+    """The island's launch picks by leases only (in order): any unhealthy candidate refuses,
+    rather than pass nodes the launch does not take."""
     store, nodes = _shared(tmp_path)
     _hold(store, nodes[0], "other-run/trainer")
     out = _check(nodes, Ssh({"b300-1": XID_79}), lease_store=store)
-    assert out.refusals[0] == "node b300-1 is not healthy: GPU 5 XID 79" + ij.XID_HINT
-    assert out.refusals[1].startswith("the island's launch picks its nodes by their leases and would take b300-1")
+    assert out.refusals == ["node b300-1 is not healthy: GPU 5 XID 79" + ij.XID_HINT, MAY_TAKE.format("b300-1")]
 
 
 def test_the_launch_s_pick_after_a_move_takes_no_node_as_its_own(tmp_path):
-    """After a move the launch runs as ``r-i2-m1/trainer@<new identity>``: the nodes the island's
-    earlier incarnation (``r-i2``) holds are not its own, so it takes the free ones in the
-    inventory's order, as the real ``pick_nodes`` does, and the check judges that pick."""
+    """Scenario A. After a move the launch runs as ``r-i2-m1/trainer@<new identity>``: the
+    nodes the earlier incarnation (``r-i2``) holds are not its own, so it takes the free ones
+    in the inventory's order, as the real ``pick_nodes`` does."""
     from yeto.launch.node_lease import pick_nodes
 
     store = str(tmp_path / "leases")
-    names = ["c-1", "d-2", "a-3", "b-4"]
-    nodes = load_inventory(_inventory(tmp_path / "inv.yaml", names, lease_store=store))
+    nodes = load_inventory(_inventory(tmp_path / "inv.yaml", ["c-1", "d-2", "a-3", "b-4"], lease_store=store))
     for node in nodes[2:]:
         _hold(store, node, "r-i2/trainer")
     launch = NodeLeases(store, "r-i2-m1/trainer", identity="new")
@@ -352,41 +354,70 @@ def test_the_launch_s_pick_after_a_move_takes_no_node_as_its_own(tmp_path):
     for node in picked:
         launch.release(node)
     out = _check(nodes, Ssh({"c-1": XID_79}), lease_store=store)
-    assert out.refusals[0] == "node c-1 is not healthy: GPU 5 XID 79" + ij.XID_HINT
-    assert "would take c-1" in out.refusals[-1]
-    ok = _check(nodes, Ssh({"a-3": XID_79}), lease_store=store)  # neither pick takes a-3
-    assert ok.ok and ok.nodes == ["c-1", "d-2"]
-    _hold(store, nodes[1], "other-run/trainer")  # one free node: the launch waits for the earlier incarnation's
-    late = _check(nodes, Ssh({"a-3": XID_79}), lease_store=store)
-    assert late.refusals[0].startswith("node a-3 is not healthy") and "would take a-3" in late.refusals[-1]
+    assert out.refusals == ["node c-1 is not healthy: GPU 5 XID 79" + ij.XID_HINT, MAY_TAKE.format("c-1")]
     fine = _check(nodes, Ssh(), lease_store=store)
-    assert fine.ok and fine.nodes == ["c-1", "a-3"]
+    assert fine.ok and fine.nodes == ["c-1", "d-2"]
+    _hold(store, nodes[1], "other-run/trainer")  # one free node: the free and the earlier incarnation's
+    assert _check(nodes, Ssh(), lease_store=store).nodes == ["c-1", "a-3"]
 
 
-def test_the_free_nodes_are_judged_even_when_the_earlier_incarnation_s_come_first(tmp_path):
-    """Inventory order [a-1, b-2 (the earlier incarnation's), c-3, d-4 (free)]: the launch takes
-    c-3 and d-4 while they are free; an unhealthy c-3 refuses although a-1 and b-2 are fine."""
+def test_scenario_b_the_free_nodes_after_the_earlier_incarnation_s(tmp_path):
+    """[a-1, b-2 (the earlier incarnation's), c-3, d-4 (free)]: the launch takes c-3, d-4; an
+    unhealthy c-3 refuses although a-1 and b-2 are fine."""
     store = str(tmp_path / "leases")
     nodes = load_inventory(_inventory(tmp_path / "inv.yaml", ["a-1", "b-2", "c-3", "d-4"], lease_store=store))
     for node in nodes[:2]:
         _hold(store, node, "r-i2/trainer")
-    out = _check(nodes, Ssh({"c-3": XID_79}), lease_store=store)
-    assert not out.ok and "would take c-3" in out.refusals[-1]
+    assert _check(nodes, Ssh({"c-3": XID_79}), lease_store=store).refusals[-1] == MAY_TAKE.format("c-3")
     ok = _check(nodes, Ssh(), lease_store=store)
-    assert ok.nodes == ["c-3", "d-4"]
-    assert ("the island takes c-3, d-4 (free now); were they taken meanwhile, its launch waits for its earlier "
-            "incarnation's nodes and takes a-1, b-2 (checked too)") in ok.notes
+    assert ok.nodes == ["c-3", "d-4"] and not any("meanwhile" in n for n in ok.notes)
 
 
-def test_a_shared_inventory_also_leaves_out_the_nodes_of_islands_on_other_lease_stores(tmp_path):
+def test_scenario_d_an_unhealthy_candidate_no_predicted_pick_takes_still_refuses(tmp_path):
+    """[c-1, d-2 free; a-3, b-4 the earlier incarnation's; e-5 free and unhealthy]: the picks
+    take c-1, d-2, then a-3, b-4; e-5 still refuses (a pick may come to any candidate)."""
+    store = str(tmp_path / "leases")
+    nodes = load_inventory(_inventory(tmp_path / "inv.yaml", ["c-1", "d-2", "a-3", "b-4", "e-5"], lease_store=store))
+    for node in nodes[2:4]:
+        _hold(store, node, "r-i2/trainer")
+    assert _check(nodes, Ssh({"e-5": XID_79}), lease_store=store).refusals[-1] == MAY_TAKE.format("e-5")
+    assert _check(nodes, Ssh(), lease_store=store).nodes == ["c-1", "d-2"]
+
+
+def test_a_launch_that_would_take_another_island_s_nodes_is_refused(tmp_path):
+    """North (no lease_store) runs on b300-0 and b300-1 of south's shared inventory: south's
+    launch sees them free in its store and takes them first: refused."""
     store, nodes = _shared(tmp_path)
-    taken = {k: "north" for n in nodes[:2] for k in ij.node_keys(n)}  # an island whose inventory has no store
+    taken = {k: "north" for n in nodes[:2] for k in ij.node_keys(n)}
     out = _check(nodes, Ssh(), lease_store=store, taken=taken)
-    assert out.ok and out.nodes == ["b300-2", "b300-3"]
-    assert "left out: node b300-0 is island north's" in out.notes
-    out = _check(nodes, Ssh({"b300-3": XID_79}), lease_store=store, taken=taken)
-    assert out.refusals[:3] == ["node b300-0 is island north's", "node b300-1 is island north's",
-                                "node b300-3 is not healthy: GPU 5 XID 79" + ij.XID_HINT]
+    assert out.refusals == ["launch would take b300-0, b300-1, island north's: give both islands the same "
+                            "lease_store, or use inventories without shared nodes"]
+    late = {k: "north" for n in nodes[2:] for k in ij.node_keys(n)}  # after the free nodes: the second pick
+    assert _check(nodes, Ssh(), lease_store=store, taken=late).refusals == [
+        "launch would take b300-2, b300-3, island north's: give both islands the same lease_store, or use "
+        "inventories without shared nodes"]
+    three = load_inventory(_inventory(tmp_path / "three.yaml", FOUR[:3], lease_store=store))
+    one = {k: "north" for k in ij.node_keys(three[2])}  # no pick comes to b300-2: it may join
+    out = _check(three, Ssh(), lease_store=store, taken=one)
+    assert out.ok and out.nodes == ["b300-0", "b300-1"] and "left out: node b300-2 is island north's" in out.notes
+
+
+def test_the_same_machine_under_another_name_on_one_lease_store_is_another_island_s(tmp_path):
+    store, nodes = _shared(tmp_path)
+    (theirs,) = load_inventory(_inventory(tmp_path / "theirs.yaml", ["north-a"], lease_store=store,
+                                          hosts={"north-a": "root@B300-0.example"},
+                                          addresses={"north-a": "203.0.113.50"}))
+    aliases = {k: ("north", "north-a") for k in ij.node_keys(theirs) - {"name:north-a"}}
+    out = _check(nodes, Ssh(), lease_store=store, aliases=aliases)
+    assert out.refusals == ["launch would take b300-0, island north's (its node north-a, the same machine): give "
+                            "the machine one name in both inventories, or use inventories without shared nodes"]
+    same = {k: ("north", "b300-0") for k in ij.node_keys(nodes[0]) - {"name:b300-0"}}  # one name: the lease decides
+    assert _check(nodes, Ssh(), lease_store=store, aliases=same).ok
+
+
+def test_lease_stores_compare_in_one_spelling():
+    assert ij.store_key("file:///srv/leases/") == ij.store_key("/srv/leases") == "/srv/leases"
+    assert ij.store_key("s3://b/l/") == "s3://b/l" and ij.store_key(None) is None
 
 
 def test_min_ib_gbps_without_nccl_ib_hca_holds_the_fabric_s_ports(tmp_path):
@@ -415,8 +446,10 @@ def test_the_relative_rate_compares_nodes_of_one_fabric_group_only(tmp_path):
     out = _check(nodes, Ssh(slow_b), lease_store=store)
     assert out.ok and out.nodes == ["b300-0", "b300-1"]
     out = _check(nodes, Ssh({"b300-3": SLOW}), lease_store=store)
-    assert "left out: node b300-3 is not healthy: mlx5_0 rate 100 < 200 Gb/s (half the fastest job port of the " \
-        "island's candidate nodes in fabric group b, 400 Gb/s)" in "; ".join(out.notes)
+    assert out.refusals[0] == ("node b300-3 is not healthy: mlx5_0 rate 100 < 200 Gb/s (half the fastest job port of "
+                               "the island's candidate nodes in fabric group b, 400 Gb/s)"
+                               + "".join(f"; mlx5_{i} rate 100 < 200 Gb/s (half the fastest job port of the island's "
+                                         "candidate nodes in fabric group b, 400 Gb/s)" for i in range(1, 8)))
 
 
 def test_one_uncorrectable_ecc_error_refuses(tmp_path):
@@ -427,6 +460,8 @@ def test_one_uncorrectable_ecc_error_refuses(tmp_path):
 @pytest.mark.parametrize(("over", "why"), [
     ({"xid": (0, xid_text(source="none"))}, ij.XID_UNREAD),
     ({"fabric": (124, "")}, "nvidia-smi -q (NVLink fabric) timed out"),
+    ({"fabric": (137, "")}, "nvidia-smi -q (NVLink fabric) timed out"),  # killed after its timeout
+    ({"xid": (124, "boot=" + "0" * 8)}, ij.XID_TIMED_OUT),  # timed out: not "restricted"
     ({"fabricmanager": (124, "")}, "systemctl is-active nvidia-fabricmanager timed out"),
 ])
 def test_a_kernel_log_or_fabric_that_does_not_read_refuses_unless_forced(tmp_path, over, why):
@@ -534,6 +569,16 @@ def test_add_takes_an_ssh_island_whose_nodes_pass(fleet_store, wired, tmp_path, 
     (member,) = dry_runs
     assert member["argv"][-2:] == ["--rl-node-inventory", str(inventory.resolve())] and member["gpu"] == GPU
     assert store.read()["generation"] == 2 and objects.read(claim_key(2)) is not None
+
+
+def test_the_write_s_recheck_does_not_print_the_first_check_s_notes_again(fleet_store, wired, tmp_path,  # noqa: F811
+                                                                          capsys):
+    _cfg, _objects, _store, run_cli, samplers = fleet_store
+    wired.out["b300-5"] = BUSY
+    assert _add(run_cli, samplers, _inventory(tmp_path / "north.yaml", ["b300-4", "b300-5"]), "--force") == 0
+    err = capsys.readouterr().err
+    assert err.count("note: island north: no lease_store") == 1
+    assert err.count("WARNING: island north: node b300-5") == 1
 
 
 def test_the_dry_run_of_a_shared_inventory_prints_the_nodes_the_island_takes(fleet_store, wired, tmp_path,  # noqa: F811
@@ -655,6 +700,25 @@ def test_islands_on_one_lease_store_are_judged_by_their_leases(fleet_store, wire
     assert _add(run_cli, samplers, _inventory(tmp_path / "north.yaml", ["b300-4", "b300-5"], lease_store=store)) == 0
     south = _inventory(tmp_path / "south.yaml", ["b300-4", "b300-5", "b300-6"], lease_store=store)
     assert _add(run_cli, south_samplers, south, name="south") == 0
+
+
+def test_an_island_on_one_lease_store_naming_the_machines_otherwise_is_refused(fleet_store, wired, tmp_path,  # noqa: F811
+                                                                                capsys):
+    """North and south share one lease store (written ``/x`` and ``file:///x``); north's
+    inventory names b300-4 and b300-5 ``n-a`` and ``n-b``: their leases do not keep south off."""
+    cfg, _objects, _store, run_cli, samplers = fleet_store
+    south_samplers = samplers.parent / "south.samplers.json"
+    south_samplers.write_text(json.dumps([dict(cfg["islands"][1]["samplers"][0], name="sglang-south")]))
+    store = str(tmp_path / "l")
+    north = _inventory(tmp_path / "north.yaml", ["n-a", "n-b"], lease_store=store,
+                       hosts={"n-a": "root@b300-4.example", "n-b": "root@b300-5.example"},
+                       addresses={"n-a": "198.51.100.14", "n-b": "198.51.100.15"})
+    assert _add(run_cli, samplers, north) == 0
+    south = _inventory(tmp_path / "south.yaml", ["b300-6", "b300-7", "b300-4", "b300-5"], lease_store="file://" + store)
+    capsys.readouterr()
+    assert _add(run_cli, south_samplers, south, name="south") == 2
+    err = capsys.readouterr().err
+    assert "launch would take b300-4, island north's (its node n-a, the same machine): give the machine one name" in err
 
 
 def test_move_to_ssh_runs_the_same_join_checks(fleet_store, wired, tmp_path, capsys):  # noqa: F811
