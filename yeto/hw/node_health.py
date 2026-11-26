@@ -8,10 +8,10 @@ Checkers are registered by device family (:func:`register`, :func:`checker_for`)
 ``cuda`` checker (:class:`CudaChecker`) reads in one shell call (:meth:`Checker.script`),
 in this order:
 
-* the ``NVRM: Xid`` lines of the kernel log (``dmesg``, else ``journalctl -k``; its last
-  :data:`XID_TAIL_BYTES`) and the boot id, so that only the XIDs since the previous check
-  count (first: a hung ``nvidia-smi`` does not hide them, and they are judged when
-  ``nvidia-smi`` does not answer);
+* the ``NVRM: Xid`` lines of the kernel log (``dmesg``, else ``journalctl -k`` when it
+  holds a kernel line of this boot; its last :data:`XID_TAIL_BYTES`) and the boot id, so
+  that only the XIDs since the previous check count (first: a hung ``nvidia-smi`` does
+  not hide them, and they are judged when ``nvidia-smi`` does not answer);
 * ``nvidia-smi --query-gpu``: the GPUs that answer, their memory and their volatile
   uncorrectable ECC count; a GPU ``nvidia-smi`` names but cannot open (``Unable to
   determine the device handle``) is a GPU gone;
@@ -135,7 +135,9 @@ TOOL_WRAPPER = (
 XID_SCRIPT = (
     "cat /proc/sys/kernel/random/boot_id 2>/dev/null | sed 's/^/boot=/'; "
     f"if dmesg >/dev/null 2>&1; then echo source=dmesg; dmesg | grep -E 'NVRM: Xid' | tail -c {XID_TAIL_BYTES}; "
-    "elif journalctl -k -b -n 1 --no-pager >/dev/null 2>&1; then echo source=journal; "
+    # the journal counts only when it holds a kernel line of this boot: in a container
+    # without the host's journal, journalctl -k exits 0 with no entry and reads no XID
+    "elif [ -n \"$(journalctl -k -b -n 1 -q --no-pager 2>/dev/null)\" ]; then echo source=journal; "
     f"journalctl -k -b -o short-monotonic --no-pager | grep -E 'NVRM: Xid' | tail -c {XID_TAIL_BYTES}; "
     "else echo source=none; fi; true"
 )

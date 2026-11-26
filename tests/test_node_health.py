@@ -469,6 +469,26 @@ def test_without_timestamps_the_xid_cursor_is_the_last_line_and_its_count():
     assert node_health.XID_TAIL_BYTES == 1 << 20
 
 
+def test_a_journal_without_a_kernel_line_of_this_boot_is_no_xid_source(tmp_path):
+    """Inside a container without the host's journal (an ssh pool's sampler on the node
+    runtime), dmesg is refused and journalctl -k exits 0 with no entry: no XID is read, so
+    the source is none (the degraded event says so), not an empty journal."""
+    refused = "echo 'dmesg: read kernel buffer failed: Operation not permitted' >&2\nexit 1"
+    (tmp_path / "dmesg").write_text(f"#!/bin/sh\n{refused}\n")
+    # no journal: -q drops the "-- No entries --" line, the exit code stays 0
+    empty = ("echo 'No journal files were found.' >&2\n"
+             "case \" $* \" in *' -q '*) ;; *) echo '-- No entries --';; esac\nexit 0")
+    (tmp_path / "journalctl").write_text(f"#!/bin/sh\n{empty}\n")
+    for name in ("dmesg", "journalctl"):
+        (tmp_path / name).chmod(0o755)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin"}
+    out = subprocess.run(["bash", "-c", node_health.XID_SCRIPT], capture_output=True, text=True, env=env, timeout=20)
+    assert "source=none" in out.stdout and "source=journal" not in out.stdout
+    (tmp_path / "journalctl").write_text("#!/bin/sh\necho '[ 1.0] kernel: Linux version 6.8.0'\nexit 0\n")
+    out = subprocess.run(["bash", "-c", node_health.XID_SCRIPT], capture_output=True, text=True, env=env, timeout=20)
+    assert "source=journal" in out.stdout
+
+
 def test_ibv_devinfo_runs_only_when_ibstat_fails(tmp_path):
     cmd = dict(node_health._SECTIONS)["ibv_devinfo"]
     for name, rc in (("ibstat", 1), ("ibv_devinfo", 0)):
