@@ -59,7 +59,7 @@ def _objects(store: str) -> Any:
 def main(args: argparse.Namespace) -> int:
     from pathlib import Path  # noqa: PLC0415
 
-    from . import ops  # noqa: PLC0415
+    from . import ops, state_root  # noqa: PLC0415
     from .envs import EnvsError, load_envs  # noqa: PLC0415
 
     try:
@@ -82,7 +82,7 @@ def main(args: argparse.Namespace) -> int:
     objects = _objects(args.store)
     try:
         if cmd == "prepare":
-            stage = args.stage_dir or str(Path("~/.yeto/sandbox").expanduser() / cfg.run / "stage")
+            stage = args.stage_dir or str(state_root() / cfg.run / "stage")
             report = ops.prepare(cfg, objects, hosts=args.host, ids=args.task, stage_dir=stage)
             code = 0 if report["ok"] else 1
         elif cmd == "status":

@@ -678,7 +678,9 @@ class Run:
         self._legacy_stamp = self._legacy_last_stamp()
         self.env = dict(os.environ)
         self.env.update({k: os.path.expanduser(str(v)) for k, v in (cfg.get("env") or {}).items()})
-        self.env.setdefault("YETO_RESOURCE_LEDGER", str(Path(f"~/.yeto/runs/{self.run}/resources.jsonl").expanduser()))
+        from yeto import runs  # noqa: PLC0415
+
+        self.env.setdefault("YETO_RESOURCE_LEDGER", str(runs.run_dir(self.run) / "resources.jsonl"))  # $YETO_RUNS_DIR
         # Every child is ``python -m ...`` (and spawns more, e.g. ``python -m modal``):
         # without this the directory ``up`` was started from is sys.path[0] of each,
         # and a stray ``h2.py`` / ``json.py`` there replaces a real module.

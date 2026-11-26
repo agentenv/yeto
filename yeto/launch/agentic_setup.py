@@ -1046,8 +1046,11 @@ def agentenv_key_of(text: str) -> str | None:
 
 def staged_by_sandbox_prepare(path: Path) -> bool:
     """``path`` lies under ``yeto sandbox prepare``'s default stage dir
-    (``~/.yeto/sandbox/<run>/stage``): a first dry run of a new run comes before it exists."""
-    root = Path("~/.yeto/sandbox").expanduser().resolve()
+    (``~/.yeto/sandbox/<run>/stage``, moved by ``$YETO_SANDBOX_DIR``): a first dry run of a
+    new run comes before it exists."""
+    from yeto.sandbox import state_root  # noqa: PLC0415
+
+    root = state_root().resolve()
     try:
         rel = Path(path).expanduser().resolve().relative_to(root)
     except ValueError:

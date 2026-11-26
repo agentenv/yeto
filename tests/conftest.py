@@ -1,3 +1,11 @@
+# Before any yeto module is imported (several resolve their state path at import): every
+# ~/.yeto state path goes to a temporary root, and writes to the real ~/.yeto are refused
+# and fail the session (tests/yeto_home_guard.py).
+import yeto_home_guard as _home_guard
+
+_home_guard.isolate()
+_home_guard.install_guard()
+
 RAY_LOCAL_HINT = (
     "this test starts Ray on this machine (ray.init). "
     "Add the ray_local marker to the test, and run it only with --run-ray-local."
@@ -26,6 +34,8 @@ def pytest_configure(config):
     note_configure(config)
     if not config.pluginmanager.has_plugin("yeto-store-env-guard"):
         config.pluginmanager.register(_StoreEnvGuard(), "yeto-store-env-guard")
+    if not config.pluginmanager.has_plugin("yeto-home-guard"):
+        config.pluginmanager.register(_YetoHomeGuard(), "yeto-home-guard")
     config.addinivalue_line(
         "markers",
         "real_nebius_sg_cleanup: keep cli._nebius_sg_cleanup unpatched (the test fakes the cloud itself)",
@@ -119,7 +129,8 @@ class _StoreEnvGuard:
 
     @_pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_setup(self, item):
-        item._yeto_store_env = {name: _os.environ.get(name) for name in _STORE_ENV_NAMES}
+        item._yeto_store_env = {name: _os.environ.get(name)
+                                for name in (*_STORE_ENV_NAMES, *_home_guard.RESTORED_ENV)}
         yield
 
     @_pytest.hookimpl(hookwrapper=True)
@@ -130,6 +141,42 @@ class _StoreEnvGuard:
                 _os.environ.pop(name, None)
             else:
                 _os.environ[name] = value
+
+
+class _YetoHomeGuard:
+    """Names the running test in what the real-~/.yeto guard records."""
+
+    @_pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_protocol(self, item, nextitem):
+        _home_guard.set_current_test(item.nodeid)
+        yield
+        _home_guard.set_current_test("<between tests>")
+
+
+def _report_yeto_home(session) -> None:
+    """End of the outermost session: a refused write to the real ~/.yeto fails it; an entry
+    there that is new or changed since the start (a child process, or another process on
+    this machine) is a warning."""
+    errors, warnings = _home_guard.session_report()
+    tr = session.config.pluginmanager.get_plugin("terminalreporter")
+    write = (lambda line: tr.write_line(line)) if tr is not None else print
+    if tr is not None and (errors or warnings):
+        tr.ensure_newline()
+    if warnings:
+        write(f"WARNING real ~/.yeto changed during the session ({len(warnings)} entries; not from this "
+              "process: a child process, or another run / test session on this machine):")
+        for line in warnings[:_home_guard.WARN_LIST_MAX]:
+            write(f"  {line}")
+        if len(warnings) > _home_guard.WARN_LIST_MAX:
+            write(f"  ... {len(warnings) - _home_guard.WARN_LIST_MAX} more")
+    if errors:
+        write(f"ERROR tests tried to write the real ~/.yeto ({len(errors)} refused; tests/yeto_home_guard.py):")
+        for line in errors[:_home_guard.WARN_LIST_MAX]:
+            write(f"  {line}")
+        if len(errors) > _home_guard.WARN_LIST_MAX:
+            write(f"  ... {len(errors) - _home_guard.WARN_LIST_MAX} more")
+        if session.exitstatus == 0:
+            session.exitstatus = 1
 
 
 @_pytest.fixture(autouse=True)
@@ -436,6 +483,9 @@ def pytest_sessionfinish(session, exitstatus):
     # in-process run (pytester with this conftest) shares the process and its copies
     if is_outermost(session.config):
         remove_copies()
+        _report_yeto_home(session)  # after the reaper: no child of this session writes any more
+        note_exitstatus(session, session.exitstatus)
+        _home_guard.remove_root()
 
 
 # Most launch tests build RL argv without --inner-lr; yeto refuses that

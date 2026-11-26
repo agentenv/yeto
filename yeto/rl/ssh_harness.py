@@ -997,7 +997,7 @@ def prepare(namespace) -> Path:
     local_run = (
         Path(namespace.output_dir).expanduser()
         if namespace.output_dir
-        else Path.home() / ".yeto" / "ssh-runs" / run_id
+        else Path(os.environ.get("YETO_SSH_RUNS_DIR") or "~/.yeto/ssh-runs").expanduser() / run_id
     ).resolve()
     plan_path = local_run / "plan.json"
     if plan_path.exists():
